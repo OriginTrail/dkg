@@ -17,7 +17,7 @@ const { Type, Field } = protobuf;
 export const DiscoverRequestSchema = new Type('DiscoverRequest')
   .add(new Field('type', 1, 'string'))
   .add(new Field('query', 2, 'string'))
-  .add(new Field('paranetId', 3, 'string'))
+  .add(new Field('contextGraphId', 3, 'string'))
   .add(new Field('limit', 4, 'uint32'));
 
 export const DiscoverResponseSchema = new Type('DiscoverResponse')
@@ -28,7 +28,7 @@ export const DiscoverResponseSchema = new Type('DiscoverResponse')
 export interface DiscoverRequestMsg {
   type: string;
   query: string;
-  paranetId: string;
+  contextGraphId: string;
   limit: number;
 }
 

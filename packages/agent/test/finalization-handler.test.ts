@@ -3,12 +3,12 @@ import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { encodeFinalizationMessage, type FinalizationMessageMsg, encodePublishRequest, createOperationContext } from '@origintrail-official/dkg-core';
 import { FinalizationHandler } from '../src/finalization-handler.js';
 
-const PARANET = 'test-paranet';
+const CONTEXT_GRAPH = 'test-contextGraph';
 
 function makeFinalizationMsg(overrides?: Partial<FinalizationMessageMsg>): FinalizationMessageMsg {
   return {
     ual: 'did:dkg:evm:31337/0xABC/1',
-    contextGraphId: PARANET,
+    contextGraphId: CONTEXT_GRAPH,
     kcMerkleRoot: new Uint8Array(32),
     txHash: '0x' + 'ab'.repeat(32),
     blockNumber: 100,
@@ -41,9 +41,9 @@ describe('FinalizationHandler', () => {
     const origInsert = store.insert.bind(store);
     store.insert = async (...args: any[]) => { insertCallCount++; return (origInsert as any)(...args); };
 
-    await handler.handleFinalizationMessage(data, PARANET);
+    await handler.handleFinalizationMessage(data, CONTEXT_GRAPH);
     const callsAfterFirst = insertCallCount;
-    await handler.handleFinalizationMessage(data, PARANET);
+    await handler.handleFinalizationMessage(data, CONTEXT_GRAPH);
     expect(insertCallCount).toBe(callsAfterFirst);
   });
 
@@ -51,8 +51,8 @@ describe('FinalizationHandler', () => {
     const msg1 = makeFinalizationMsg({ ual: 'did:dkg:evm:31337/0xABC/1' });
     const msg2 = makeFinalizationMsg({ ual: 'did:dkg:evm:31337/0xABC/2', txHash: '0x' + 'cd'.repeat(32) });
 
-    await handler.handleFinalizationMessage(encodeFinalizationMessage(msg1), PARANET);
-    await handler.handleFinalizationMessage(encodeFinalizationMessage(msg2), PARANET);
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(msg1), CONTEXT_GRAPH);
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(msg2), CONTEXT_GRAPH);
 
     // Now send msg1 again — it should be deduped (no extra processing)
     // But msg2 should not have been blocked by msg1's dedup entry
@@ -62,7 +62,7 @@ describe('FinalizationHandler', () => {
     const origInsert = store.insert.bind(store);
     store.insert = async (...args: any[]) => { insertCalled = true; return (origInsert as any)(...args); };
 
-    await handler.handleFinalizationMessage(encodeFinalizationMessage(dedupMsg1), PARANET);
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(dedupMsg1), CONTEXT_GRAPH);
     // msg1 is deduped so no insert should happen
     expect(insertCalled).toBe(false);
   });
@@ -71,7 +71,7 @@ describe('FinalizationHandler', () => {
     const wrongTypeData = encodePublishRequest({
       ual: 'did:dkg:test/1',
       nquads: new TextEncoder().encode('<urn:s> <urn:p> <urn:o> .'),
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       kas: [{ tokenId: 1, rootEntity: 'urn:s', privateTripleCount: 0, privateMerkleRoot: new Uint8Array(0) }],
       txHash: '',
       blockNumber: 0,
@@ -81,7 +81,7 @@ describe('FinalizationHandler', () => {
     const origInsert = store.insert.bind(store);
     store.insert = async (...args: any[]) => { insertCalled = true; return (origInsert as any)(...args); };
 
-    await handler.handleFinalizationMessage(wrongTypeData, PARANET);
+    await handler.handleFinalizationMessage(wrongTypeData, CONTEXT_GRAPH);
     expect(insertCalled).toBe(false);
   });
 
@@ -92,19 +92,19 @@ describe('FinalizationHandler', () => {
     const origInsert = store.insert.bind(store);
     store.insert = async (...args: any[]) => { insertCalled = true; return (origInsert as any)(...args); };
 
-    await handler.handleFinalizationMessage(garbage, PARANET);
+    await handler.handleFinalizationMessage(garbage, CONTEXT_GRAPH);
     expect(insertCalled).toBe(false);
   });
 
   it('ignores messages with mismatched contextGraphId', async () => {
-    const msg = makeFinalizationMsg({ contextGraphId: 'wrong-paranet' });
+    const msg = makeFinalizationMsg({ contextGraphId: 'wrong-contextGraph' });
     const data = encodeFinalizationMessage(msg);
 
     let insertCalled = false;
     const origInsert = store.insert.bind(store);
     store.insert = async (...args: any[]) => { insertCalled = true; return (origInsert as any)(...args); };
 
-    await handler.handleFinalizationMessage(data, PARANET);
+    await handler.handleFinalizationMessage(data, CONTEXT_GRAPH);
     expect(insertCalled).toBe(false);
   });
 
@@ -116,7 +116,7 @@ describe('FinalizationHandler', () => {
     const origInsert = store.insert.bind(store);
     store.insert = async (...args: any[]) => { insertCalled = true; return (origInsert as any)(...args); };
 
-    await handler.handleFinalizationMessage(data, PARANET);
+    await handler.handleFinalizationMessage(data, CONTEXT_GRAPH);
     expect(insertCalled).toBe(false);
   });
 
@@ -134,8 +134,8 @@ describe('FinalizationHandler', () => {
     // the e2e-publish-protocol round-trip, both of which wire in a real
     // EVMChainAdapter against the shared Hardhat node.
     const entity = 'urn:test:entity';
-    const wsGraph = `did:dkg:context-graph:${PARANET}/_shared_memory`;
-    const dataGraph = `did:dkg:context-graph:${PARANET}`;
+    const wsGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory`;
+    const dataGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
 
     await store.insert([
       { subject: entity, predicate: 'http://schema.org/name', object: '"Alice"', graph: wsGraph },
@@ -152,7 +152,7 @@ describe('FinalizationHandler', () => {
       rootEntities: [entity],
     });
 
-    await handler.handleFinalizationMessage(encodeFinalizationMessage(msg), PARANET);
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(msg), CONTEXT_GRAPH);
 
     const result = await store.query(
       `ASK { GRAPH <${dataGraph}> { <${entity}> <http://schema.org/name> ?o } }`,
@@ -163,8 +163,8 @@ describe('FinalizationHandler', () => {
 
   it('does not promote when merkle root mismatches workspace data', async () => {
     const entity = 'urn:test:entity';
-    const wsGraph = `did:dkg:context-graph:${PARANET}/_shared_memory`;
-    const dataGraph = `did:dkg:context-graph:${PARANET}`;
+    const wsGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory`;
+    const dataGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
 
     await store.insert([
       { subject: entity, predicate: 'http://schema.org/name', object: '"Alice"', graph: wsGraph },
@@ -175,7 +175,7 @@ describe('FinalizationHandler', () => {
       rootEntities: [entity],
     });
 
-    await handler.handleFinalizationMessage(encodeFinalizationMessage(msg), PARANET);
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(msg), CONTEXT_GRAPH);
 
     const result = await store.query(
       `ASK { GRAPH <${dataGraph}> { <${entity}> <http://schema.org/name> ?o } }`,
@@ -188,11 +188,11 @@ describe('FinalizationHandler', () => {
     const entity = 'urn:test:entity';
     const subGraphName = 'code';
     const publisherAddress = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266';
-    const metaGraph = `did:dkg:context-graph:${PARANET}/_meta`;
-    const subGraphUri = `did:dkg:context-graph:${PARANET}/${subGraphName}`;
+    const metaGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
+    const subGraphUri = `did:dkg:context-graph:${CONTEXT_GRAPH}/${subGraphName}`;
 
     await (handler as any).promoteSharedMemoryToCanonical(
-      PARANET,
+      CONTEXT_GRAPH,
       [{ subject: entity, predicate: 'http://schema.org/name', object: '"Alice"', graph: '' }],
       'did:dkg:evm:31337/0xABC/1',
       [entity],

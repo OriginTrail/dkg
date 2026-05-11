@@ -2,7 +2,7 @@
 
 **Status**: Phase 1 Implemented · Phases 2–3 Pending  
 **Date**: 2026-03-13  
-**Context**: Swarm status regression originally observed in the `origin-trail-game` app (retired in V10) under mixed gossip + graph-sync state sources. The underlying protocol concern — monotonic app-state writes across nodes — still applies to any app paranet and is captured here for reuse.
+**Context**: Swarm status regression originally observed in the `origin-trail-game` app (retired in V10) under mixed gossip + graph-sync state sources. The underlying protocol concern — monotonic app-state writes across nodes — still applies to any app contextGraph and is captured here for reuse.
 
 ---
 
@@ -201,7 +201,7 @@ vs app-level logic.
 
 ### A) Workspace write API (first target)
 
-**Important clarification**: `writeToWorkspace(paranetId, quads)` is a generic RDF
+**Important clarification**: `writeToWorkspace(contextGraphId, quads)` is a generic RDF
 quad writer. It does not understand app semantics. It does not know what a "status
 transition" is, what values are legal, or which predicates are monotonic. That is
 entirely the app's responsibility today, and the plan does not change that boundary.
@@ -243,7 +243,7 @@ app-declared transition rules. Example:
 ```typescript
 const statusField = monotonicEnum('ot:status', ['recruiting', 'traveling', 'finished']);
 
-await statusField.advance(agent, paranetId, swarmSubject, 'traveling');
+await statusField.advance(agent, contextGraphId, swarmSubject, 'traveling');
 // Internally: writeConditional(swarmSubject, 'ot:status', 'traveling',
 //   { ifCurrentRank: < rank('traveling') })
 ```
@@ -320,8 +320,8 @@ Concrete effect:
 
 Rollout model:
 
-- Opt-in by paranet/app via `legacy | guarded | strict`
-- Pilot first (a single app paranet), then broader reuse
+- Opt-in by contextGraph/app via `legacy | guarded | strict`
+- Pilot first (a single app contextGraph), then broader reuse
 
 Concrete effect:
 
@@ -357,7 +357,7 @@ Recommendation:
 
 - ✅ Add conditional write API for workspace mutations (`writeConditionalToWorkspace` in `@dkg/publisher` + `@dkg/agent`).
 - ✅ Add `stateVersion` helper support in SDK/agent (`monotonicTransition`, `versionedWrite` in `workspace-consistency.ts`).
-- ✅ Piloted CAS in the legacy `origin-trail-game` app (retired in V10): `launchExpedition` used a CAS condition on swarm status (`recruiting` → `traveling`). The CAS primitive (`writeConditionalToWorkspace`) survives in the publisher API for any future app paranet.
+- ✅ Piloted CAS in the legacy `origin-trail-game` app (retired in V10): `launchExpedition` used a CAS condition on swarm status (`recruiting` → `traveling`). The CAS primitive (`writeConditionalToWorkspace`) survives in the publisher API for any future app contextGraph.
 - Add docs and examples for monotonic transitions.
 
 Success criteria:
@@ -391,8 +391,8 @@ Success criteria:
 ## 7. Backward compatibility and migration
 
 - All new semantics should be opt-in first.
-- Existing writes remain valid unless a paranet/app enables strict mode.
-- Provide migration toggles per paranet:
+- Existing writes remain valid unless a contextGraph/app enables strict mode.
+- Provide migration toggles per contextGraph:
   - `consistencyMode: legacy | guarded | strict`
 
 Migration approach:
@@ -439,7 +439,7 @@ Mitigations:
    - conditional writes
    - protocol freshness metadata
    - monotonic field semantics
-4. Ship one reference implementation in a pilot app paranet as the blueprint for broader app adoption.
+4. Ship one reference implementation in a pilot app contextGraph as the blueprint for broader app adoption.
 
 ---
 
@@ -460,7 +460,7 @@ implementers can quickly see what each point brings.
 
 - **What it brings**: Reframes the issue as a distributed consistency concern across nodes.
 - **Node/graph example**: Node `A` writes `status=traveling` into
-  `did:dkg:paranet:example-paranet/_workspace`, gossips launch event to `B` and `C`.
+  `did:dkg:context-graph:example-contextGraph/_workspace`, gossips launch event to `B` and `C`.
   Node `B` later queries an older workspace snapshot and sees `status=recruiting`.
   Without consistency semantics, `B` can regress local state from the graph read.
 
@@ -476,7 +476,7 @@ implementers can quickly see what each point brings.
 
 - **What it brings**: Clarifies constraints: no global lock, keep eventual consistency.
 - **Node/graph example**: Node `C` should still accept delayed replication from
-  `did:dkg:paranet:example-paranet/_workspace`, but never allow that delayed value to
+  `did:dkg:context-graph:example-contextGraph/_workspace`, but never allow that delayed value to
   move a monotonic field backward.
 
 ### 12.4 Proposed improvements (what each adds in practice)
@@ -519,7 +519,7 @@ implementers can quickly see what each point brings.
 ### 12.5 What remains app-level
 
 - **What it brings**: Keeps domain policy in apps while moving generic consistency to protocol.
-- **Node/graph example**: Protocol guarantees monotonic `status` merge in paranet graph; app still decides
+- **Node/graph example**: Protocol guarantees monotonic `status` merge in contextGraph graph; app still decides
   whether node `A` (leader) is allowed to force-resolve turn in swarm graph.
 
 ### 12.6 Roadmap intent by phase
@@ -533,8 +533,8 @@ implementers can quickly see what each point brings.
 
 ### 12.7 Backward compatibility
 
-- **What it brings**: Safe migration without breaking existing paranets/apps.
-- **Node/graph example**: Paranet runs `legacy` mode first (accepts old behavior), then `guarded`
+- **What it brings**: Safe migration without breaking existing contextGraphs/apps.
+- **Node/graph example**: ContextGraph runs `legacy` mode first (accepts old behavior), then `guarded`
   (logs/rejects risky writes selectively), then `strict` once metrics show near-zero false positives.
 
 ### 12.8 Observability
@@ -552,7 +552,7 @@ implementers can quickly see what each point brings.
 ### 12.10 Immediate next steps
 
 - **What it brings**: Practical implementation order with lowest risk first.
-- **Node/graph example**: Keep the existing app-level guard in place now, then pilot CAS + version writes in a single pilot paranet workspace graph before rolling the same semantics to all app paranets.
+- **Node/graph example**: Keep the existing app-level guard in place now, then pilot CAS + version writes in a single pilot contextGraph workspace graph before rolling the same semantics to all app contextGraphs.
 
 ### 12.11 Decision summary (practical reading)
 

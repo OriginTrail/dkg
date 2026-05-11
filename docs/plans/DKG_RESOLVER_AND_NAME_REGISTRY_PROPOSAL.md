@@ -8,8 +8,8 @@ Scope: Design/spec proposal (no protocol-breaking rollout in this document)
 
 Today, the system has strong identifiers (peer IDs, DIDs, UALs), but human-friendly resolution is fragmented:
 
-- Agent identity is mostly discoverable via the agents system paranet, but not normalized into a resolver facade.
-- Paranet discovery exists, but there is no first-class naming layer similar to ENS.
+- Agent identity is mostly discoverable via the agents system contextGraph, but not normalized into a resolver facade.
+- ContextGraph discovery exists, but there is no first-class naming layer similar to ENS.
 - Metadata provenance is not consistently query-friendly for "who authored this knowledge" across all write paths.
 
 This proposal introduces:
@@ -17,7 +17,7 @@ This proposal introduces:
 1. A canonical resolver facade (`dkg://...`) that maps names/resources to canonical DIDs/UALs.
 2. Three system registries:
    - Agent Registry
-   - Paranet Registry
+   - ContextGraph Registry
    - Unique Name Registry
 3. A strict provenance requirement to store both network identity and chain identity when available.
 
@@ -42,7 +42,7 @@ This proposal introduces:
 
 Relevant code and current capabilities:
 
-- System paranets: `agents`, `ontology` in [packages/core/src/genesis.ts](../../packages/core/src/genesis.ts)
+- System contextGraphs: `agents`, `ontology` in [packages/core/src/genesis.ts](../../packages/core/src/genesis.ts)
 - Agent profiles and agent graph schema in [packages/agent/src/profile.ts](../../packages/agent/src/profile.ts)
 - Metadata generation in [packages/publisher/src/metadata.ts](../../packages/publisher/src/metadata.ts)
 - Publish/update call paths:
@@ -75,8 +75,8 @@ Supported forms:
 
 - `dkg://agent/<name-or-id>`
 - `dkg://agent/<name-or-id>/memory`
-- `dkg://paranet/<name-or-id>`
-- `dkg://paranet/<name-or-id>/<path>`
+- `dkg://contextGraph/<name-or-id>`
+- `dkg://contextGraph/<name-or-id>/<path>`
 - `dkg://name/<label>` (explicit unique-name lookup)
 - `dkg://did/<did-value>` (direct canonical pass-through)
 - `dkg://ual/<ual-value>` (direct canonical pass-through)
@@ -85,14 +85,14 @@ Examples:
 
 - `dkg://agent/alice`
 - `dkg://agent/alice/memory`
-- `dkg://paranet/agents`
-- `dkg://paranet/ontology`
+- `dkg://contextGraph/agents`
+- `dkg://contextGraph/ontology`
 
 ### ABNF-like grammar (normative)
 
 ```text
 dkg-uri          = "dkg://" target-kind "/" primary [ "/" subpath ]
-target-kind      = "agent" / "paranet" / "name" / "did" / "ual"
+target-kind      = "agent" / "contextGraph" / "name" / "did" / "ual"
 primary          = 1*( unreserved / pct-encoded / ":" / "@" )
 subpath          = segment *( "/" segment )
 segment          = 1*( unreserved / pct-encoded / ":" / "@" )
@@ -116,14 +116,14 @@ flowchart LR
   inputUri[InputUri] --> parseUri[ParseUri]
   parseUri --> resolveType[ResolveTargetType]
   resolveType -->|agent| agentRegistry[AgentRegistryLookup]
-  resolveType -->|paranet| paranetRegistry[ParanetRegistryLookup]
+  resolveType -->|contextGraph| contextGraphRegistry[ContextGraphRegistryLookup]
   resolveType -->|name| nameRegistry[UniqueNameRegistryLookup]
   resolveType -->|didOrUal| canonicalPass[CanonicalPassThrough]
   nameRegistry --> typedRedirect[TypedRedirect]
   typedRedirect --> agentRegistry
-  typedRedirect --> paranetRegistry
+  typedRedirect --> contextGraphRegistry
   agentRegistry --> canonicalTarget[CanonicalDidOrUal]
-  paranetRegistry --> canonicalTarget
+  contextGraphRegistry --> canonicalTarget
   canonicalPass --> canonicalTarget
   canonicalTarget --> routeHints[RouteHintsMemoryGraphEtc]
 ```
@@ -162,20 +162,20 @@ resolve(uri):
       hit = lookupAgentById(claim.targetId)
     return buildResolution(hit, parsed.subpath)
 
-  if parsed.kind == "paranet":
-    hit = lookupParanetById(parsed.primary) or lookupParanetByName(parsed.primary)
+  if parsed.kind == "contextGraph":
+    hit = lookupContextGraphById(parsed.primary) or lookupContextGraphByName(parsed.primary)
     if not hit:
-      claim = lookupActiveName(parsed.primary, targetType="paranet")
-      if not claim: error PARANET_NOT_FOUND
-      hit = lookupParanetById(claim.targetId)
+      claim = lookupActiveName(parsed.primary, targetType="contextGraph")
+      if not claim: error CONTEXT_GRAPH_NOT_FOUND
+      hit = lookupContextGraphById(claim.targetId)
     return buildResolution(hit, parsed.subpath)
 
   error UNSUPPORTED_TARGET_KIND
 ```
 
-## 7) Registry design (three system paranets)
+## 7) Registry design (three system contextGraphs)
 
-## 7.1 Agent Registry (system paranet: `agents`)
+## 7.1 Agent Registry (system contextGraph: `agents`)
 
 Purpose: canonical agent identity + profile + capabilities + optional memory pointer.
 
@@ -187,30 +187,30 @@ Minimum fields:
 - optional:
   - framework
   - relay address
-  - memory root/default memory paranet pointer
+  - memory root/default memory contextGraph pointer
 
-## 7.2 Paranet Registry (new dedicated system paranet)
+## 7.2 ContextGraph Registry (new dedicated system contextGraph)
 
-Purpose: canonical paranet catalog and ownership metadata, separate from ontology lifecycle noise.
+Purpose: canonical contextGraph catalog and ownership metadata, separate from ontology lifecycle noise.
 
 Minimum fields:
 
-- paranet DID/UAL
+- contextGraph DID/UAL
 - display name + description
 - creator/owner
 - status (active, deprecated)
 - topic/config pointers
 
-Note: existing ontology paranet can continue to define vocabularies. Registry content should be query-optimized for resolution.
+Note: existing ontology contextGraph can continue to define vocabularies. Registry content should be query-optimized for resolution.
 
-## 7.3 Unique Name Registry (new ENS-like system paranet)
+## 7.3 Unique Name Registry (new ENS-like system contextGraph)
 
 Purpose: map human names -> canonical targets with ownership and lifecycle.
 
 Minimum fields:
 
 - `name` (normalized label)
-- `targetType` (`agent` | `paranet`)
+- `targetType` (`agent` | `contextGraph`)
 - `targetId` (canonical DID/UAL)
 - `owner` (agent DID and/or publisher address)
 - `status` (`active` | `revoked` | `expired`)
@@ -231,14 +231,14 @@ The following templates define minimum triples for resolver correctness. Predica
   dkg:peerId "12D3..." ;
   schema:name "alice" ;
   dkg:publisherAddress "0xabc..." ;
-  dkg:defaultMemoryParanet <did:dkg:paranet:agents> ;
+  dkg:defaultMemoryContextGraph <did:dkg:context-graph:agents> ;
   dkg:updatedAt "2026-03-11T00:00:00Z"^^xsd:dateTime .
 ```
 
-### Paranet Registry entry
+### ContextGraph Registry entry
 
 ```turtle
-<did:dkg:paranet:agents> a dkg:Paranet ;
+<did:dkg:context-graph:agents> a dkg:ContextGraph ;
   schema:name "agents" ;
   schema:description "Agent registry and profiles" ;
   dkg:ownerAddress "0xabc..." ;
@@ -251,8 +251,8 @@ The following templates define minimum triples for resolver correctness. Predica
 ```turtle
 <urn:dkg:name:agents> a dkg:NameClaim ;
   dkg:resolverName "agents" ;
-  dkg:targetType "paranet" ;
-  dkg:targetId <did:dkg:paranet:agents> ;
+  dkg:targetType "contextGraph" ;
+  dkg:targetId <did:dkg:context-graph:agents> ;
   dkg:ownerAddress "0xabc..." ;
   dkg:registryStatus "active" ;
   dkg:createdAt "2026-03-11T00:00:00Z"^^xsd:dateTime .
@@ -264,8 +264,8 @@ The following templates define minimum triples for resolver correctness. Predica
   - unique active key on normalized `dkg:resolverName`
 - Agent Registry:
   - unique key on `dkg:peerId`
-- Paranet Registry:
-  - unique key on canonical paranet DID/UAL
+- ContextGraph Registry:
+  - unique key on canonical contextGraph DID/UAL
 - All registries:
   - append-only activity history with current-state projection for fast lookup
 
@@ -280,7 +280,7 @@ Use existing namespace conventions from core genesis (`https://dkg.network/ontol
 - `dkg:ownerAddress`
 - `dkg:expiresAt`
 - `dkg:registryStatus`
-- `dkg:defaultMemoryParanet`
+- `dkg:defaultMemoryContextGraph`
 - `dkg:defaultMemoryRoot`
 
 And standardize provenance expectations:
@@ -296,12 +296,12 @@ Potential resolver API (CLI/daemon):
 - `GET /api/resolve?uri=dkg://agent/alice`
 - `GET /api/resolve/name/<label>`
 - `GET /api/resolve/agent/<nameOrId>`
-- `GET /api/resolve/paranet/<nameOrId>`
+- `GET /api/resolve/contextGraph/<nameOrId>`
 
 Potential CLI:
 
 - `dkg resolve dkg://agent/alice`
-- `dkg resolve dkg://paranet/ontology`
+- `dkg resolve dkg://contextGraph/ontology`
 
 Node UI:
 
@@ -370,7 +370,7 @@ Phase 3: Resolver service
 - Read from system registries and return canonical target + route hints.
 
 Phase 4: Unique Name Registry
-- Introduce new system paranet and claim/update/revoke flows.
+- Introduce new system contextGraph and claim/update/revoke flows.
 - Enforce uniqueness semantics.
 
 Phase 5: Migration + adoption
@@ -399,7 +399,7 @@ Release gating checklist:
 - Backward compatibility tests for direct DID/UAL queries.
 - End-to-end tests:
   - `dkg://agent/<name>/memory` resolution
-  - `dkg://paranet/<name>` resolution
+  - `dkg://contextGraph/<name>` resolution
   - dual provenance presence on new writes.
 
 ## 14) Implementation backlog mapping

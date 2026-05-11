@@ -22,6 +22,24 @@ import type { FileStore } from '../../file-store.js';
 import type { VectorStore, EmbeddingProvider } from '../../vector-store.js';
 import type { CatchupTracker } from '../types.js';
 
+export type MemoryGraphLayer = 'wm' | 'swm' | 'vm';
+
+export interface MemoryGraphChangedEvent {
+  contextGraphId: string;
+  layers: MemoryGraphLayer[];
+  subGraphName?: string;
+  operation: string;
+  source?: string;
+  counts?: {
+    triples?: number;
+    roots?: number;
+  };
+  clearSharedMemoryAfter?: boolean;
+  dataSynced?: unknown;
+  sharedMemorySynced?: unknown;
+  status?: string;
+}
+
 export interface RequestContext {
   req: IncomingMessage;
   res: ServerResponse;
@@ -57,4 +75,5 @@ export interface RequestContext {
   path: string;
   requestToken: string | undefined;
   requestAgentAddress: string;
+  emitMemoryGraphChanged?: (event: MemoryGraphChangedEvent) => void;
 }

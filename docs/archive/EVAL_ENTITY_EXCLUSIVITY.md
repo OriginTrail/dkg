@@ -2,7 +2,7 @@
 
 ## Context
 
-DKG V9 enforces **Rule 4 (entity exclusivity)**: within a paranet, a `rootEntity` URI can only be "owned" by one Knowledge Collection (KC) at a time. If Agent B tries to publish a KC whose manifest contains a `rootEntity` that Agent A already published, the request is rejected.
+DKG V9 enforces **Rule 4 (entity exclusivity)**: within a contextGraph, a `rootEntity` URI can only be "owned" by one Knowledge Collection (KC) at a time. If Agent B tries to publish a KC whose manifest contains a `rootEntity` that Agent A already published, the request is rejected.
 
 This document evaluates this design against the alternative — allowing multiple agents to publish triples about the same subject URI — with concrete examples, real-world precedents, and analysis of how each approach interacts with the DKG's ownership, merkle, update, deletion, and economic models.
 
@@ -12,7 +12,7 @@ This document evaluates this design against the alternative — allowing multipl
 
 ### Approach A: Entity Exclusivity (Current)
 
-**Rule**: one KC owns each `rootEntity` per paranet. To describe someone else's entity, publish a *new* entity that *links to* it.
+**Rule**: one KC owns each `rootEntity` per contextGraph. To describe someone else's entity, publish a *new* entity that *links to* it.
 
 ```turtle
 # Agent A publishes KA with rootEntity = <did:dkg:product:ABC>
@@ -222,13 +222,13 @@ SELECT ?entity ?p ?o WHERE {
 **Pro**: clean ownership, opt-in merge, built-in provenance.
 **Con**: slightly more verbose queries (but could be abstracted by the SDK).
 
-### 3.2 Paranet-Level Policy (Approach A default, Approach B opt-in)
+### 3.2 ContextGraph-Level Policy (Approach A default, Approach B opt-in)
 
-Each paranet declares its subject policy:
+Each contextGraph declares its subject policy:
 
 ```json
 {
-  "paranetId": "product-reviews",
+  "contextGraphId": "product-reviews",
   "subjectPolicy": "shared",
   "requiredStake": "100 TRAC"
 }
@@ -237,7 +237,7 @@ Each paranet declares its subject policy:
 - `"exclusive"` (default): current Rule 4 — one owner per rootEntity.
 - `"shared"`: multiple publishers can add triples about the same subject, with per-publisher tracking and required stake.
 
-This pushes the decision to paranet operators who understand their domain.
+This pushes the decision to contextGraph operators who understand their domain.
 
 ### 3.3 Layered: Exclusive Core + Open Metadata
 
@@ -246,7 +246,7 @@ Layer 1 (exclusive):  <did:dkg:product:ABC> schema:name "Widget" .
                       Only the owner can set core properties.
 
 Layer 2 (open):       Anyone can add triples in a separate "community" graph
-                      <did:dkg:paranet:products/_community>
+                      <did:dkg:context-graph:products/_community>
                       with per-publisher provenance.
 ```
 
@@ -266,7 +266,7 @@ Queries against Layer 1 return authoritative data. Queries against Layer 1 + Lay
 | **Deletion** | Per-publisher deletion (only remove that publisher's triples for the subject) | High — need triple-level publisher attribution |
 | **Update flow** | Each publisher updates only their triples for a subject | High — current flow assumes one publisher per rootEntity |
 | **Storage model** | Need per-publisher triple tracking (quad + publisher = quint?) or per-publisher named subgraphs | High — fundamental storage model change |
-| **On-chain contracts** | Multiple KA tokens for the same rootEntity from different publishers | High — KnowledgeAssets contract assumes rootEntity uniqueness per paranet |
+| **On-chain contracts** | Multiple KA tokens for the same rootEntity from different publishers | High — KnowledgeAssets contract assumes rootEntity uniqueness per contextGraph |
 | **Access control** | Private triples: each publisher controls access to only their private triples for a shared subject | Medium |
 | **Query layer** | Need provenance-aware queries ("who said this?") | Medium |
 | **Spam prevention** | New mechanism needed (staking per subject, reputation, allow-lists) | High |
@@ -282,7 +282,7 @@ Queries against Layer 1 return authoritative data. Queries against Layer 1 + Lay
 | **Ship V9 with confidence** | Keep Approach A. It's sound, consistent with real-world systems, and avoids a class of hard problems (conflict resolution, per-triple provenance, spam). |
 | **Better UX now** | Improve error messages when Rule 4 fires. Add SDK helpers for the "describe by linking" pattern (e.g., `publisher.annotate(targetEntity, triples)`). Document it prominently. |
 | **Future flexibility** | Consider Approach 3.1 (endorsed annotations) as a first-class feature — it gives 80% of the UX benefit of shared subjects with none of the ownership/merkle complexity. |
-| **Long-term exploration** | Approach 3.2 (paranet-level policy) is the most powerful option but should be deferred to a future version after V9 has production data on how paranets are actually used. |
+| **Long-term exploration** | Approach 3.2 (contextGraph-level policy) is the most powerful option but should be deferred to a future version after V9 has production data on how contextGraphs are actually used. |
 
 ---
 

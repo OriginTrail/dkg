@@ -2,7 +2,7 @@ import { afterEach, beforeAll, afterAll, describe, expect, it } from 'vitest';
 import { DKGAgent } from '../src/index.js';
 import { NoChainAdapter, type ChainAdapter } from '@origintrail-official/dkg-chain';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
-import { SYSTEM_PARANETS } from '@origintrail-official/dkg-core';
+import { SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { ethers } from 'ethers';
@@ -118,7 +118,7 @@ describe('v10 ACK provider wiring', () => {
   it('publishes tentatively when chain does not support V10 but a publisher key is configured', async () => {
     ({ agent } = await createAgent(new NoChainAdapter(), [HARDHAT_KEYS.CORE_OP]));
 
-    const result = await agent.publish(SYSTEM_PARANETS.ONTOLOGY, [
+    const result = await agent.publish(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, [
       { subject: 'urn:test:no-ack-provider', predicate: 'http://schema.org/name', object: '"No ACK"', graph: '' },
     ]);
 
@@ -129,7 +129,7 @@ describe('v10 ACK provider wiring', () => {
   it('publishes tentatively without chain config using a non-zero local publisher address', async () => {
     ({ agent } = await createAgent(new NoChainAdapter()));
 
-    const result = await agent.publish(SYSTEM_PARANETS.ONTOLOGY, [
+    const result = await agent.publish(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, [
       { subject: 'urn:test:no-publisher-key', predicate: 'http://schema.org/name', object: '"No key"', graph: '' },
     ]);
 

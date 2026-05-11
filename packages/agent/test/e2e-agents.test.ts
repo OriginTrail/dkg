@@ -153,7 +153,7 @@ describe('Two-Agent E2E', () => {
     expect(result.error).toBeDefined();
   }, 10000);
 
-  it('agents publish and query knowledge in a custom paranet', async () => {
+  it('agents publish and query knowledge in a custom contextGraph', async () => {
     const agentA = await DKGAgent.create({
       name: 'KnowledgeA', listenPort: 0, skills: [], chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
@@ -161,12 +161,12 @@ describe('Two-Agent E2E', () => {
     await agentA.start();
 
     await agentA.createContextGraph({
-      id: 'test-paranet',
-      name: 'Test Paranet',
-      description: 'E2E test paranet',
+      id: 'test-contextGraph',
+      name: 'Test ContextGraph',
+      description: 'E2E test contextGraph',
     });
 
-    const result = await agentA.publish('test-paranet', [
+    const result = await agentA.publish('test-contextGraph', [
       { subject: 'did:dkg:entity:1', predicate: 'http://schema.org/name', object: '"TestEntity"', graph: '' },
       { subject: 'did:dkg:entity:1', predicate: 'http://schema.org/type', object: '"Thing"', graph: '' },
     ]);
@@ -176,7 +176,7 @@ describe('Two-Agent E2E', () => {
 
     const qr = await agentA.query(
       'SELECT ?name WHERE { <did:dkg:entity:1> <http://schema.org/name> ?name }',
-      'test-paranet',
+      'test-contextGraph',
     );
     expect(qr.bindings.length).toBe(1);
     expect(qr.bindings[0]['name']).toBe('"TestEntity"');

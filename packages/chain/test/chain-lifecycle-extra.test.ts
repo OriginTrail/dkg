@@ -56,6 +56,7 @@ import {
   HARDHAT_KEYS,
 } from './evm-test-context.js';
 import { mintTokens } from './hardhat-harness.js';
+import { buildAuthorAttestationTypedData } from '@origintrail-official/dkg-core';
 
 let fileSnapshotId: string;
 let testSnapshotId: string;
@@ -91,12 +92,19 @@ async function publishOneKCV10(opts: {
   const evmChainId = await adapter.getEvmChainId();
 
   const coreOp = new Wallet(HARDHAT_KEYS.CORE_OP, provider);
-  const pubDigest = ethers.getBytes(ethers.solidityPackedKeccak256(
-    ['uint256', 'address', 'uint72', 'uint256', 'bytes32'],
-    [evmChainId, kav10Address, publisherIdentityId, contextGraphId, ethers.hexlify(merkleRoot)],
-  ));
-  const pubRaw = ethers.Signature.from(await coreOp.signMessage(pubDigest));
-  const publisherSignature = { r: ethers.getBytes(pubRaw.r), vs: ethers.getBytes(pubRaw.yParityAndS) };
+
+  // RFC-001 §3 author attestation. EIP-712 typed data over
+  // (cgId, merkleRoot, authorAddress, schemeVersion=1) bound to KAV10.
+  const authorTyped = buildAuthorAttestationTypedData({
+    chainId: evmChainId,
+    kav10Address,
+    contextGraphId,
+    merkleRoot,
+    authorAddress: coreOp.address,
+  });
+  const authorRaw = ethers.Signature.from(
+    await coreOp.signTypedData(authorTyped.domain, authorTyped.types, authorTyped.message),
+  );
 
   // PR #357: V10 ACK now binds merkleLeafCount (uint256). Mirrors
   // helpers/v10-kc-helpers.ts:buildPublishAckDigest.
@@ -117,15 +125,21 @@ async function publishOneKCV10(opts: {
     tokenAmount,
     isImmutable: false,
     merkleLeafCount,
-    paymaster: ethers.ZeroAddress,
     publisherNodeIdentityId: publisherIdentityId,
-    publisherSignature,
+    author: {
+      address: coreOp.address,
+      signature: {
+        r: ethers.getBytes(authorRaw.r),
+        vs: ethers.getBytes(authorRaw.yParityAndS),
+      },
+      schemeVersion: 1,
+    },
     ackSignatures: [{
       identityId: publisherIdentityId,
       r: ethers.getBytes(ackRaw.r),
       vs: ethers.getBytes(ackRaw.yParityAndS),
     }],
-  } as any);
+  });
 
   expect(result.batchId).toBeGreaterThan(0n);
   expect(result.txHash).toMatch(/^0x[0-9a-f]{64}$/);
@@ -341,6 +355,11 @@ describe('chain-lifecycle-extra — V10 lifecycle + adapter invariants', () => {
       // above). Match that vocabulary OR any chain revert so a silent-
       // null regression (adapter returns success instead of throwing)
       // is unambiguously red.
+      const dummyAuthor = {
+        address: '0x0000000000000000000000000000000000000001',
+        signature: { r: new Uint8Array(32), vs: new Uint8Array(32) },
+        schemeVersion: 1,
+      };
       await expect(
         adapter.createKnowledgeAssetsV10!({
           publishOperationId: ethers.hexlify(ethers.randomBytes(32)),
@@ -351,11 +370,11 @@ describe('chain-lifecycle-extra — V10 lifecycle + adapter invariants', () => {
           epochs: 1,
           tokenAmount: 0n,
           isImmutable: false,
-          paymaster: ethers.ZeroAddress,
+          merkleLeafCount: 1,
           publisherNodeIdentityId: BigInt(coreProfileId),
-          publisherSignature: { r: new Uint8Array(32), vs: new Uint8Array(32) },
+          author: dummyAuthor,
           ackSignatures: [],
-        } as any),
+        }),
       ).rejects.toThrow(/No authorized publisher wallet|authorized|context graph|revert|Unauthorized/i);
     }, 60_000);
 
@@ -371,11 +390,15 @@ describe('chain-lifecycle-extra — V10 lifecycle + adapter invariants', () => {
           epochs: 1,
           tokenAmount: 0n,
           isImmutable: false,
-          paymaster: ethers.ZeroAddress,
+          merkleLeafCount: 1,
           publisherNodeIdentityId: 0n,
-          publisherSignature: { r: new Uint8Array(32), vs: new Uint8Array(32) },
+          author: {
+            address: '0x0000000000000000000000000000000000000001',
+            signature: { r: new Uint8Array(32), vs: new Uint8Array(32) },
+            schemeVersion: 1,
+          },
           ackSignatures: [],
-        } as any),
+        }),
       ).rejects.toThrow(/positive on-chain context graph id/);
     });
   });

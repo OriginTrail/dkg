@@ -25,7 +25,7 @@ describe('mapLiftRequestToPublishOptions', () => {
             subject: 'did:dkg:music-social:rihana',
             predicate: 'http://schema.org/name',
             object: '"Rihana"',
-            graph: 'did:dkg:paranet:music-social/_data',
+            graph: 'did:dkg:context-graph:music-social/_data',
           },
         ],
       },
@@ -38,8 +38,8 @@ describe('mapLiftRequestToPublishOptions', () => {
       resolved: {
         ...baseInput().resolved,
         publisherPeerId: '12D3KooWPublisher',
-        targetGraphUri: 'did:dkg:paranet:music-social/_data',
-        targetMetaGraphUri: 'did:dkg:paranet:music-social/_meta',
+        targetGraphUri: 'did:dkg:context-graph:music-social/_data',
+        targetMetaGraphUri: 'did:dkg:context-graph:music-social/_meta',
         entityProofs: true,
       },
     });
@@ -48,8 +48,8 @@ describe('mapLiftRequestToPublishOptions', () => {
     expect(options.publisherPeerId).toBe('12D3KooWPublisher');
     expect(options.accessPolicy).toBe('public');
     expect(options.entityProofs).toBe(true);
-    expect(options.targetGraphUri).toBe('did:dkg:paranet:music-social/_data');
-    expect(options.targetMetaGraphUri).toBe('did:dkg:paranet:music-social/_meta');
+    expect(options.targetGraphUri).toBe('did:dkg:context-graph:music-social/_data');
+    expect(options.targetMetaGraphUri).toBe('did:dkg:context-graph:music-social/_meta');
   });
 
   it('forwards the request subGraphName into canonical publish options', () => {
@@ -79,7 +79,7 @@ describe('mapLiftRequestToPublishOptions', () => {
             subject: 'did:dkg:music-social:rihana',
             predicate: 'http://schema.org/secret',
             object: '"top-secret"',
-            graph: 'did:dkg:paranet:music-social/_private',
+            graph: 'did:dkg:context-graph:music-social/_private',
           },
         ],
       },
@@ -115,7 +115,7 @@ describe('mapLiftRequestToPublishOptions', () => {
             subject: 'did:dkg:music-social:rihana',
             predicate: 'http://schema.org/secret',
             object: '"top-secret"',
-            graph: 'did:dkg:paranet:music-social/_private',
+            graph: 'did:dkg:context-graph:music-social/_private',
           },
         ],
         accessPolicy: 'allowList',
@@ -254,7 +254,7 @@ describe('mapLiftRequestToPublishOptions', () => {
             subject: 'did:dkg:music-social:rihana',
             predicate: 'http://schema.org/secret',
             object: '"top-secret"',
-            graph: 'did:dkg:paranet:music-social/_private',
+            graph: 'did:dkg:context-graph:music-social/_private',
           },
         ],
       },

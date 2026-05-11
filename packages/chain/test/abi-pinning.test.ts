@@ -101,11 +101,18 @@ const PINNED_DIGESTS: Record<string, string> = {
   //     KnowledgeCollectionUpdated still carry the same ABI shape today;
   //     the digest changed because the function inputs they originate from
   //     changed). Sanity tests below pin the actual event field shapes.
-  KnowledgeAssetsV10:           '8cd026c514ae7390760b3f5c10982af71bba624c8438a8a0f4ba16c4da006fab',
-  KnowledgeCollectionStorage:   '99dd188d290c191a9f7ab5e8bef78db123f9400da0e8fa2c20811db0df15c5da',
+  // Updated PR #436 round 2: agent-provenance review feedback. Reverted
+  // the `MerkleRoot.author` struct field (would have broken the dynamic
+  // array slot stride for already-deployed KCs) and moved author to a
+  // parallel `merkleRootAuthors[kcId][rootIndex]` mapping. Also added
+  // an `address author` argument to `createKnowledgeCollection` /
+  // `updateKnowledgeCollection` and the matching indexed topic on the
+  // `KnowledgeCollectionCreated` / `KnowledgeCollectionUpdated` events.
+  KnowledgeAssetsV10:           '785311d19ce39743522bf1db501f41276fb22d715a2cc94cc67d96f8a22e519e',
+  KnowledgeCollectionStorage:   'e165cbddc6569602d1d5c05c15909fd0a9ff851f974357cf80297041b2a83fd2',
   KnowledgeCollection:          'c906207c38ffded8944d7255498f7fc9f2c864098a3f8f3670df19006dbcd395',
-  ContextGraphs:                '25a5e18897044b88c129e7e0fc68eec8fd99e64ded658f29f69df85f95cd25fc',
-  ContextGraphStorage:          '7df78d2a870cd14236a2fa30461ea9bcae4a338e5ba20b466149a00ace5ee2be',
+  ContextGraphs:                'ee69f0d50b54df966b8bfb3bf457fe6d2865393f51f8770b4185fafd324b9462',
+  ContextGraphStorage:          '4e0ef683d10ead0f167ee08d7d980df4d37a24dcabf2dad3970cf9d7b6d4813b',
   // Identity / staking — consulted on every publish.
   Hub:                          '36976cc71bb87963b8b715791b32e4eb6b7bb85c712998afd6184221289a506b',
   Identity:                     '29d09dd97de53de69d5bf2282d2f3008044ab43fb86c812fc4912552c9288946',
@@ -144,10 +151,13 @@ describe('ABI content sanity — required event/error surfaces are present [CH-5
     const ev = abi.find((e) => e.type === 'event' && e.name === 'KnowledgeCollectionCreated');
     expect(ev).toBeDefined();
     const types = (ev!.inputs ?? []).map((i) => i.type);
-    // Spec §06 / §07: id, publishOperationId, merkleRoot, byteSize,
-    // startEpoch, endEpoch, tokenAmount, isImmutable.
+    // V10.1 author-attestation surface: id, author, publishOperationId,
+    // merkleRoot, byteSize, startEpoch, endEpoch, tokenAmount, isImmutable.
+    // `author` is an indexed `address` so off-chain readers can filter
+    // event logs by author identity without a storage call.
     expect(types).toEqual([
       'uint256',
+      'address',
       'string',
       'bytes32',
       'uint88',
@@ -156,6 +166,9 @@ describe('ABI content sanity — required event/error surfaces are present [CH-5
       'uint96',
       'bool',
     ]);
+    const authorInput = ev!.inputs?.[1];
+    expect(authorInput?.name).toBe('author');
+    expect(authorInput?.indexed).toBe(true);
   });
 
   it('KnowledgeCollectionStorage declares KnowledgeAssetsMinted (id, to, startId, endId)', () => {
@@ -182,6 +195,7 @@ describe('ABI content sanity — required event/error surfaces are present [CH-5
       'address[]', // participantAgents
       'uint8',     // requiredSignatures
       'uint256',   // metadataBatchId
+      'uint8',     // accessPolicy
       'uint8',     // publishPolicy
       'address',   // publishAuthority
       'uint256',   // publishAuthorityAccountId
@@ -195,6 +209,10 @@ describe('ABI content sanity — required event/error surfaces are present [CH-5
     const ev = abi.find((e) => e.type === 'event' && e.name === 'KnowledgeCollectionUpdated');
     expect(ev).toBeDefined();
     const types = (ev!.inputs ?? []).map((i) => i.type);
-    expect(types).toEqual(['uint256', 'string', 'bytes32', 'uint256', 'uint96']);
+    // V10.1 update event mirrors the publish event: the second indexed
+    // arg is `author`. The current V10.1 update path emits
+    // `address(0)` (no attestation yet) but the slot is reserved for
+    // vNext when updates start signing the EIP-712 envelope too.
+    expect(types).toEqual(['uint256', 'address', 'string', 'bytes32', 'uint256', 'uint96']);
   });
 });

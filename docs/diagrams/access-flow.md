@@ -50,9 +50,9 @@ sequenceDiagram
     end
 
     Handler ->> StoreB: query(metadataSparql for UAL)
-    StoreB -->> Handler: paranetId + rootEntity
+    StoreB -->> Handler: contextGraphId + rootEntity
 
-    Handler ->> PrivB: getPrivateTriples(paranetId, rootEntity)
+    Handler ->> PrivB: getPrivateTriples(contextGraphId, rootEntity)
     PrivB -->> Handler: private triples
 
     Handler ->> Handler: Serialize to N-Triples
@@ -75,7 +75,7 @@ sequenceDiagram
 ## Access policies
 
 The access handler on Agent B checks whether Agent A is allowed to access
-the private data. The policy is per-KC or per-paranet:
+the private data. The policy is per-KC or per-contextGraph:
 
 | Policy | Description |
 |--------|-------------|

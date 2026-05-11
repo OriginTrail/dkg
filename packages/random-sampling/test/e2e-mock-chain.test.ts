@@ -113,7 +113,7 @@ describe('Random Sampling E2E (MockChainAdapter)', () => {
     await store.insert([
       {
         subject: cgUri,
-        predicate: 'https://dkg.network/ontology#ParanetOnChainId',
+        predicate: 'https://dkg.network/ontology#ContextGraphOnChainId',
         object: `"${cgIdStr}"`,
         graph: 'did:dkg:context-graph:ontology',
       },

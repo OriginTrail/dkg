@@ -155,7 +155,7 @@ async function main() {
 
   console.log('[demo] Creating project …');
   try {
-    const created = await api('POST', '/api/paranet/create', {
+    const created = await api('POST', '/api/context-graph/create', {
       id: cgId,
       name: PROJECT_NAME,
       description:

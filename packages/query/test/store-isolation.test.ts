@@ -13,7 +13,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { OxigraphStore, GraphManager, type Quad } from '@origintrail-official/dkg-storage';
 import { DKGQueryEngine } from '../src/dkg-query-engine.js';
 
-const CONTEXT_GRAPH = 'test-paranet';
+const CONTEXT_GRAPH = 'test-contextGraph';
 const GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
 
 function q(s: string, p: string, o: string): Quad {

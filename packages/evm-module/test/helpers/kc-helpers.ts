@@ -289,6 +289,7 @@ async function _autoBridgeKCToDefaultCG(kcId: number): Promise<void> {
       [], // participant agents
       2, // requiredSignatures
       0, // metadataBatchId
+      0, // accessPolicy = public/discoverable
       1, // publishPolicy = open
       ethers.ZeroAddress,
       0,

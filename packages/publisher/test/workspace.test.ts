@@ -21,12 +21,25 @@ import {
 import { ethers } from 'ethers';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, createTestContextGraph, seedContextGraphRegistration, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
+import { wrapPublisherForTest, buildSeal } from './_helpers/seal.js';
 
-let PARANET = 'test-workspace';
-let DATA_GRAPH = `did:dkg:context-graph:${PARANET}`;
-let WORKSPACE_GRAPH = `did:dkg:context-graph:${PARANET}/_shared_memory`;
-let WORKSPACE_META_GRAPH = `did:dkg:context-graph:${PARANET}/_shared_memory_meta`;
+let CONTEXT_GRAPH = 'test-workspace';
+let DATA_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
+let WORKSPACE_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory`;
+let WORKSPACE_META_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory_meta`;
 const ENTITY = 'urn:test:entity:1';
+let _kav10Address: string;
+let _provider: ethers.JsonRpcProvider;
+const _author = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+
+async function sealForQuads(quads: Quad[], contextGraphId: string | bigint) {
+  return buildSeal({
+    quads,
+    author: _author,
+    contextGraphId,
+    ctx: { provider: _provider, kav10Address: _kav10Address },
+  });
+}
 
 function q(s: string, p: string, o: string, g = ''): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
@@ -58,10 +71,13 @@ async function signWorkspaceMessage(
 
 beforeAll(async () => {
   const cgId = await createTestContextGraph();
-  PARANET = String(cgId);
-  DATA_GRAPH = `did:dkg:context-graph:${PARANET}`;
-  WORKSPACE_GRAPH = `did:dkg:context-graph:${PARANET}/_shared_memory`;
-  WORKSPACE_META_GRAPH = `did:dkg:context-graph:${PARANET}/_shared_memory_meta`;
+  CONTEXT_GRAPH = String(cgId);
+  DATA_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
+  WORKSPACE_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory`;
+  WORKSPACE_META_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory_meta`;
+  _provider = createProvider();
+  const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+  _kav10Address = await chain.getKnowledgeAssetsV10Address();
 });
 
 describe('Workspace: share', () => {
@@ -94,6 +110,10 @@ describe('Workspace: share', () => {
       publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
       publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
+    publisher = wrapPublisherForTest(publisher, {
+      author: _author,
+      ctx: { provider: _provider, kav10Address: _kav10Address },
+    });
   });
   afterEach(async () => {
     await revertSnapshot(_testSnapshot);
@@ -108,7 +128,7 @@ describe('Workspace: share', () => {
       publisherPeerId: '12D3KooWTest',
     };
 
-    const result = await publisher.share(PARANET, quads, opts);
+    const result = await publisher.share(CONTEXT_GRAPH, quads, opts);
 
     expect(result.shareOperationId).toMatch(/^swm-\d+-[a-z0-9]+$/);
     expect(result.message).toBeInstanceOf(Uint8Array);
@@ -134,10 +154,10 @@ describe('Workspace: share', () => {
 
   it('allows same creator to upsert an existing workspace entity', async () => {
     const quads1 = [q(ENTITY, 'http://schema.org/name', '"First"')];
-    await publisher.share(PARANET, quads1, { publisherPeerId: 'peer1' });
+    await publisher.share(CONTEXT_GRAPH, quads1, { publisherPeerId: 'peer1' });
 
     const quads2 = [q(ENTITY, 'http://schema.org/name', '"Updated by same creator"')];
-    await publisher.share(PARANET, quads2, { publisherPeerId: 'peer1' });
+    await publisher.share(CONTEXT_GRAPH, quads2, { publisherPeerId: 'peer1' });
 
     const result = await store.query(
       `SELECT ?o WHERE { GRAPH <${WORKSPACE_GRAPH}> { <${ENTITY}> <http://schema.org/name> ?o } }`,
@@ -151,33 +171,33 @@ describe('Workspace: share', () => {
 
   it('rejects write when rootEntity in workspace was created by a different peer (Rule 4)', async () => {
     const quads1 = [q(ENTITY, 'http://schema.org/name', '"First"')];
-    await publisher.share(PARANET, quads1, { publisherPeerId: 'peer1' });
+    await publisher.share(CONTEXT_GRAPH, quads1, { publisherPeerId: 'peer1' });
 
     const quads2 = [q(ENTITY, 'http://schema.org/name', '"Second"')];
     await expect(
-      publisher.share(PARANET, quads2, { publisherPeerId: 'peer2' }),
+      publisher.share(CONTEXT_GRAPH, quads2, { publisherPeerId: 'peer2' }),
     ).rejects.toThrow(/Rule 4|Workspace validation failed/);
   });
 
   it('rejects write when rootEntity already in data graph (Rule 4)', async () => {
     await publisher.publish({
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY, 'http://schema.org/name', '"Published"')],
     });
 
     const quads = [q(ENTITY, 'http://schema.org/description', '"In workspace"')];
     await expect(
-      publisher.share(PARANET, quads, { publisherPeerId: 'peer1' }),
+      publisher.share(CONTEXT_GRAPH, quads, { publisherPeerId: 'peer1' }),
     ).rejects.toThrow(/Rule 4|Workspace validation failed/);
   });
 
   it('upsert replaces old triples, not appends', async () => {
-    await publisher.share(PARANET, [
+    await publisher.share(CONTEXT_GRAPH, [
       q(ENTITY, 'http://schema.org/name', '"Original"'),
       q(ENTITY, 'http://schema.org/description', '"Will be removed"'),
     ], { publisherPeerId: 'peer1' });
 
-    await publisher.share(PARANET, [
+    await publisher.share(CONTEXT_GRAPH, [
       q(ENTITY, 'http://schema.org/name', '"Replaced"'),
     ], { publisherPeerId: 'peer1' });
 
@@ -231,7 +251,11 @@ describe('Workspace: publishFromSharedMemory', () => {
       publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
       publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
-    await seedContextGraphRegistration(store, PARANET);
+    publisher = wrapPublisherForTest(publisher, {
+      author: _author,
+      ctx: { provider: _provider, kav10Address: _kav10Address },
+    });
+    await seedContextGraphRegistration(store, CONTEXT_GRAPH);
   });
   afterEach(async () => {
     await revertSnapshot(_testSnapshot);
@@ -242,9 +266,11 @@ describe('Workspace: publishFromSharedMemory', () => {
       q(ENTITY, 'http://schema.org/name', '"Enshrine Me"'),
       q(ENTITY, 'http://schema.org/description', '"Will be enshrined"'),
     ];
-    await publisher.share(PARANET, quads, { publisherPeerId: 'peer1' });
+    await publisher.share(CONTEXT_GRAPH, quads, { publisherPeerId: 'peer1' });
 
-    const result = await publisher.publishFromSharedMemory(PARANET, 'all');
+    const result = await publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all', {
+      precomputedAttestation: await sealForQuads(quads, CONTEXT_GRAPH),
+    });
 
     expect(result.status).toBe('confirmed');
     expect(result.kaManifest.length).toBe(1);
@@ -263,12 +289,12 @@ describe('Workspace: publishFromSharedMemory', () => {
   it('enshrine with rootEntities filter only enshrines those entities', async () => {
     const entity1 = 'urn:test:entity:1';
     const entity2 = 'urn:test:entity:2';
-    await publisher.share(PARANET, [
+    await publisher.share(CONTEXT_GRAPH, [
       q(entity1, 'http://schema.org/name', '"One"'),
       q(entity2, 'http://schema.org/name', '"Two"'),
     ], { publisherPeerId: 'peer1' });
 
-    const result = await publisher.publishFromSharedMemory(PARANET, {
+    const result = await publisher.publishFromSharedMemory(CONTEXT_GRAPH, {
       rootEntities: [entity1],
     });
 
@@ -290,10 +316,11 @@ describe('Workspace: publishFromSharedMemory', () => {
 
   it('clearSharedMemoryAfter removes enshrined rootEntities from workspace', async () => {
     const quads = [q(ENTITY, 'http://schema.org/name', '"Clear After"')];
-    await publisher.share(PARANET, quads, { publisherPeerId: 'peer1' });
+    await publisher.share(CONTEXT_GRAPH, quads, { publisherPeerId: 'peer1' });
 
-    await publisher.publishFromSharedMemory(PARANET, 'all', {
+    await publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all', {
       clearSharedMemoryAfter: true,
+      precomputedAttestation: await sealForQuads(quads, CONTEXT_GRAPH),
     });
 
     const stillInWorkspace = await store.query(
@@ -305,14 +332,14 @@ describe('Workspace: publishFromSharedMemory', () => {
 
   it('throws when workspace is empty for selection', async () => {
     await expect(
-      publisher.publishFromSharedMemory(PARANET, 'all'),
+      publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all'),
     ).rejects.toThrow(/No quads in shared memory/);
   });
 
   it('escapes backslash and double-quote in rootEntity filter (SPARQL injection prevention)', async () => {
     const entityWithSpecialChars = 'urn:test:entity:with\\"backslash';
     await expect(
-      publisher.publishFromSharedMemory(PARANET, {
+      publisher.publishFromSharedMemory(CONTEXT_GRAPH, {
         rootEntities: [entityWithSpecialChars],
       }),
     ).rejects.toThrow(/No valid rootEntities provided/);
@@ -320,7 +347,7 @@ describe('Workspace: publishFromSharedMemory', () => {
 
   it('throws distinct error for empty rootEntities array', async () => {
     await expect(
-      publisher.publishFromSharedMemory(PARANET, { rootEntities: [] }),
+      publisher.publishFromSharedMemory(CONTEXT_GRAPH, { rootEntities: [] }),
     ).rejects.toThrow(/No rootEntities provided/);
   });
 
@@ -330,17 +357,18 @@ describe('Workspace: publishFromSharedMemory', () => {
       requiredSignatures: 1,
     });
     const ctxId = String(cgResult.contextGraphId);
-    const ctxDataGraph = `did:dkg:context-graph:${PARANET}/context/${ctxId}`;
-    const ctxMetaGraph = `did:dkg:context-graph:${PARANET}/context/${ctxId}/_meta`;
+    const ctxDataGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/context/${ctxId}`;
+    const ctxMetaGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/context/${ctxId}/_meta`;
 
     const quads = [
       q(ENTITY, 'http://schema.org/name', '"Context Enshrine"'),
       q(ENTITY, 'http://schema.org/description', '"In context graph"'),
     ];
-    await publisher.share(PARANET, quads, { publisherPeerId: 'peer1' });
+    await publisher.share(CONTEXT_GRAPH, quads, { publisherPeerId: 'peer1' });
 
-    const result = await publisher.publishFromSharedMemory(PARANET, 'all', {
+    const result = await publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all', {
       publishContextGraphId: ctxId,
+      precomputedAttestation: await sealForQuads(quads, ctxId),
     });
 
     expect(result.status).toBe('confirmed');
@@ -371,9 +399,12 @@ describe('Workspace: publishFromSharedMemory', () => {
     const ctxId = String(cgResult.contextGraphId);
 
     const quads = [q(ENTITY, 'http://schema.org/name', '"Batch Test"')];
-    await publisher.share(PARANET, quads, { publisherPeerId: 'peer1' });
+    await publisher.share(CONTEXT_GRAPH, quads, { publisherPeerId: 'peer1' });
 
-    const result = await publisher.publishFromSharedMemory(PARANET, 'all', { publishContextGraphId: ctxId });
+    const result = await publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all', {
+      publishContextGraphId: ctxId,
+      precomputedAttestation: await sealForQuads(quads, ctxId),
+    });
     expect(result.status).toBe('confirmed');
   });
 });
@@ -408,7 +439,11 @@ describe('Workspace: ownership persistence and reconstruction', () => {
       publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
       publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
-    await seedContextGraphRegistration(store, PARANET);
+    publisher = wrapPublisherForTest(publisher, {
+      author: _author,
+      ctx: { provider: _provider, kav10Address: _kav10Address },
+    });
+    await seedContextGraphRegistration(store, CONTEXT_GRAPH);
   });
   afterEach(async () => {
     await revertSnapshot(_testSnapshot);
@@ -418,7 +453,7 @@ describe('Workspace: ownership persistence and reconstruction', () => {
     const quads: Quad[] = [
       q(ENTITY, 'http://schema.org/name', '"Test"'),
     ];
-    await publisher.share(PARANET, quads, { publisherPeerId: '12D3KooWCreator' });
+    await publisher.share(CONTEXT_GRAPH, quads, { publisherPeerId: '12D3KooWCreator' });
 
     const result = await store.query(
       `SELECT ?creator WHERE { GRAPH <${WORKSPACE_META_GRAPH}> { <${ENTITY}> <http://dkg.io/ontology/workspaceOwner> ?creator } }`,
@@ -431,12 +466,12 @@ describe('Workspace: ownership persistence and reconstruction', () => {
   });
 
   it('reconstructs sharedMemoryOwnedEntities from persisted ownership triples', async () => {
-    await publisher.share(PARANET, [
+    await publisher.share(CONTEXT_GRAPH, [
       q(ENTITY, 'http://schema.org/name', '"First"'),
     ], { publisherPeerId: 'peerA' });
 
     const entity2 = 'urn:test:entity:2';
-    await publisher.share(PARANET, [
+    await publisher.share(CONTEXT_GRAPH, [
       q(entity2, 'http://schema.org/name', '"Second"'),
     ], { publisherPeerId: 'peerB' });
 
@@ -455,16 +490,18 @@ describe('Workspace: ownership persistence and reconstruction', () => {
 
     const count = await freshPublisher.reconstructWorkspaceOwnership();
     expect(count).toBe(2);
-    expect(freshOwned.get(PARANET)?.get(ENTITY)).toBe('peerA');
-    expect(freshOwned.get(PARANET)?.get(entity2)).toBe('peerB');
+    expect(freshOwned.get(CONTEXT_GRAPH)?.get(ENTITY)).toBe('peerA');
+    expect(freshOwned.get(CONTEXT_GRAPH)?.get(entity2)).toBe('peerB');
   });
 
   it('clears ownership quads on publishFromSharedMemory with clearSharedMemoryAfter', async () => {
-    await publisher.share(PARANET, [
-      q(ENTITY, 'http://schema.org/name', '"Enshrine"'),
-    ], { publisherPeerId: 'peer1' });
+    const quads = [q(ENTITY, 'http://schema.org/name', '"Enshrine"')];
+    await publisher.share(CONTEXT_GRAPH, quads, { publisherPeerId: 'peer1' });
 
-    await publisher.publishFromSharedMemory(PARANET, 'all', { clearSharedMemoryAfter: true });
+    await publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all', {
+      clearSharedMemoryAfter: true,
+      precomputedAttestation: await sealForQuads(quads, CONTEXT_GRAPH),
+    });
 
     const result = await store.query(
       `ASK { GRAPH <${WORKSPACE_META_GRAPH}> { <${ENTITY}> <http://dkg.io/ontology/workspaceOwner> ?creator } }`,
@@ -476,11 +513,11 @@ describe('Workspace: ownership persistence and reconstruction', () => {
   });
 
   it('does not create duplicate ownership quads on upsert by same creator', async () => {
-    await publisher.share(PARANET, [
+    await publisher.share(CONTEXT_GRAPH, [
       q(ENTITY, 'http://schema.org/name', '"First"'),
     ], { publisherPeerId: 'peer1' });
 
-    await publisher.share(PARANET, [
+    await publisher.share(CONTEXT_GRAPH, [
       q(ENTITY, 'http://schema.org/name', '"Updated"'),
     ], { publisherPeerId: 'peer1' });
 
@@ -511,7 +548,7 @@ describe('SharedMemoryHandler', () => {
     const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
     const nquads = `<${ENTITY}> <http://schema.org/name> "Handler Test" <${DATA_GRAPH}> .`;
     const msg = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(nquads),
       manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeer',
@@ -522,8 +559,8 @@ describe('SharedMemoryHandler', () => {
     await handler.handle(msg, '12D3KooWPeer');
 
     const gm = new GraphManager(store);
-    await gm.ensureContextGraph(PARANET);
-    const wsGraph = gm.workspaceGraphUri(PARANET);
+    await gm.ensureContextGraph(CONTEXT_GRAPH);
+    const wsGraph = gm.workspaceGraphUri(CONTEXT_GRAPH);
     const result = await store.query(
       `SELECT ?o WHERE { GRAPH <${wsGraph}> { <${ENTITY}> <http://schema.org/name> ?o } }`,
     );
@@ -532,7 +569,7 @@ describe('SharedMemoryHandler', () => {
       expect(result.bindings.length).toBe(1);
       expect(result.bindings[0]['o']).toBe('"Handler Test"');
     }
-    expect(workspaceOwned.get(PARANET)?.has(ENTITY)).toBe(true);
+    expect(workspaceOwned.get(CONTEXT_GRAPH)?.has(ENTITY)).toBe(true);
   });
 
   it('rejects raw workspace gossip when the context graph is agent-gated', async () => {
@@ -541,12 +578,12 @@ describe('SharedMemoryHandler', () => {
       subject: DATA_GRAPH,
       predicate: 'https://dkg.network/ontology#allowedAgent',
       object: `"${wallet.address}"`,
-      graph: `did:dkg:context-graph:${PARANET}/_meta`,
+      graph: `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`,
     }]);
 
     const nquads = `<${ENTITY}> <http://schema.org/name> "Unsigned" <${DATA_GRAPH}> .`;
     const msg = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(nquads),
       manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeer',
@@ -557,9 +594,9 @@ describe('SharedMemoryHandler', () => {
     await handler.handle(msg, '12D3KooWPeer');
 
     const gm = new GraphManager(store);
-    await gm.ensureContextGraph(PARANET);
+    await gm.ensureContextGraph(CONTEXT_GRAPH);
     const askResult = await store.query(
-      `ASK { GRAPH <${gm.workspaceGraphUri(PARANET)}> { <${ENTITY}> ?p ?o } }`,
+      `ASK { GRAPH <${gm.workspaceGraphUri(CONTEXT_GRAPH)}> { <${ENTITY}> ?p ?o } }`,
     );
     expect(askResult.type).toBe('boolean');
     if (askResult.type === 'boolean') {
@@ -572,12 +609,12 @@ describe('SharedMemoryHandler', () => {
       subject: DATA_GRAPH,
       predicate: 'https://dkg.network/ontology#allowedAgent',
       object: '"not-an-address"',
-      graph: `did:dkg:context-graph:${PARANET}/_meta`,
+      graph: `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`,
     }]);
 
     const nquads = `<${ENTITY}> <http://schema.org/name> "Malformed Gate" <${DATA_GRAPH}> .`;
     const msg = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(nquads),
       manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeer',
@@ -588,9 +625,9 @@ describe('SharedMemoryHandler', () => {
     await handler.handle(msg, '12D3KooWPeer');
 
     const gm = new GraphManager(store);
-    await gm.ensureContextGraph(PARANET);
+    await gm.ensureContextGraph(CONTEXT_GRAPH);
     const askResult = await store.query(
-      `ASK { GRAPH <${gm.workspaceGraphUri(PARANET)}> { <${ENTITY}> ?p ?o } }`,
+      `ASK { GRAPH <${gm.workspaceGraphUri(CONTEXT_GRAPH)}> { <${ENTITY}> ?p ?o } }`,
     );
     expect(askResult.type).toBe('boolean');
     if (askResult.type === 'boolean') {
@@ -608,26 +645,26 @@ describe('SharedMemoryHandler', () => {
       subject: DATA_GRAPH,
       predicate: 'https://dkg.network/ontology#allowedAgent',
       object: `"${wallet.address}"`,
-      graph: `did:dkg:context-graph:${PARANET}/_meta`,
+      graph: `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`,
     }]);
 
     const nquads = `<${ENTITY}> <http://schema.org/name> "Signed" <${DATA_GRAPH}> .`;
     const raw = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(nquads),
       manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeer',
       workspaceOperationId: 'ws-signed-agent-gate',
       timestampMs: Date.now(),
     });
-    const msg = await signWorkspaceMessage(wallet, PARANET, raw);
+    const msg = await signWorkspaceMessage(wallet, CONTEXT_GRAPH, raw);
 
     await handler.handle(msg, '12D3KooWPeer');
 
     const gm = new GraphManager(store);
-    await gm.ensureContextGraph(PARANET);
+    await gm.ensureContextGraph(CONTEXT_GRAPH);
     const result = await store.query(
-      `SELECT ?o WHERE { GRAPH <${gm.workspaceGraphUri(PARANET)}> { <${ENTITY}> <http://schema.org/name> ?o } }`,
+      `SELECT ?o WHERE { GRAPH <${gm.workspaceGraphUri(CONTEXT_GRAPH)}> { <${ENTITY}> <http://schema.org/name> ?o } }`,
     );
     expect(result.type).toBe('bindings');
     if (result.type === 'bindings') {
@@ -646,26 +683,26 @@ describe('SharedMemoryHandler', () => {
       subject: DATA_GRAPH,
       predicate: 'https://dkg.network/ontology#allowedAgent',
       object: `"${allowed.address}"`,
-      graph: `did:dkg:context-graph:${PARANET}/_meta`,
+      graph: `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`,
     }]);
 
     const nquads = `<${ENTITY}> <http://schema.org/name> "Denied" <${DATA_GRAPH}> .`;
     const raw = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(nquads),
       manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeer',
       workspaceOperationId: 'ws-denied-agent-gate',
       timestampMs: Date.now(),
     });
-    const msg = await signWorkspaceMessage(denied, PARANET, raw);
+    const msg = await signWorkspaceMessage(denied, CONTEXT_GRAPH, raw);
 
     await handler.handle(msg, '12D3KooWPeer');
 
     const gm = new GraphManager(store);
-    await gm.ensureContextGraph(PARANET);
+    await gm.ensureContextGraph(CONTEXT_GRAPH);
     const askResult = await store.query(
-      `ASK { GRAPH <${gm.workspaceGraphUri(PARANET)}> { <${ENTITY}> ?p ?o } }`,
+      `ASK { GRAPH <${gm.workspaceGraphUri(CONTEXT_GRAPH)}> { <${ENTITY}> ?p ?o } }`,
     );
     expect(askResult.type).toBe('boolean');
     if (askResult.type === 'boolean') {
@@ -675,11 +712,11 @@ describe('SharedMemoryHandler', () => {
 
   it('rejects message when rootEntity was created by a different peer (Rule 4)', async () => {
     const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
-    workspaceOwned.set(PARANET, new Map([[ENTITY, 'otherPeer']]));
+    workspaceOwned.set(CONTEXT_GRAPH, new Map([[ENTITY, 'otherPeer']]));
 
     const nquads = `<${ENTITY}> <http://schema.org/name> "Duplicate" <${DATA_GRAPH}> .`;
     const msg = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(nquads),
       manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeer',
@@ -690,8 +727,8 @@ describe('SharedMemoryHandler', () => {
     await handler.handle(msg, '12D3KooWPeer');
 
     const gm = new GraphManager(store);
-    await gm.ensureContextGraph(PARANET);
-    const wsGraph = gm.workspaceGraphUri(PARANET);
+    await gm.ensureContextGraph(CONTEXT_GRAPH);
+    const wsGraph = gm.workspaceGraphUri(CONTEXT_GRAPH);
     const askResult = await store.query(
       `ASK { GRAPH <${wsGraph}> { <${ENTITY}> ?p ?o } }`,
     );
@@ -706,7 +743,7 @@ describe('SharedMemoryHandler', () => {
     const peerId = '12D3KooWSameCreator';
 
     const msg1 = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<${ENTITY}> <http://schema.org/name> "Original" <${DATA_GRAPH}> .`),
       manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
       publisherPeerId: peerId,
@@ -716,7 +753,7 @@ describe('SharedMemoryHandler', () => {
     await handler.handle(msg1, peerId);
 
     const msg2 = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<${ENTITY}> <http://schema.org/name> "Updated" <${DATA_GRAPH}> .`),
       manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
       publisherPeerId: peerId,
@@ -726,7 +763,7 @@ describe('SharedMemoryHandler', () => {
     await handler.handle(msg2, peerId);
 
     const gm = new GraphManager(store);
-    const wsGraph = gm.workspaceGraphUri(PARANET);
+    const wsGraph = gm.workspaceGraphUri(CONTEXT_GRAPH);
     const result = await store.query(
       `SELECT ?o WHERE { GRAPH <${wsGraph}> { <${ENTITY}> <http://schema.org/name> ?o } }`,
     );
@@ -742,7 +779,7 @@ describe('SharedMemoryHandler', () => {
     const peerId = '12D3KooWOwner';
 
     const msg1 = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<${ENTITY}> <http://schema.org/name> "First" <${DATA_GRAPH}> .`),
       manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
       publisherPeerId: peerId,
@@ -752,7 +789,7 @@ describe('SharedMemoryHandler', () => {
     await handler.handle(msg1, peerId);
 
     const gm = new GraphManager(store);
-    const wsMetaGraph = gm.workspaceMetaGraphUri(PARANET);
+    const wsMetaGraph = gm.workspaceMetaGraphUri(CONTEXT_GRAPH);
     const afterFirst = await store.query(
       `SELECT ?creator WHERE { GRAPH <${wsMetaGraph}> { <${ENTITY}> <http://dkg.io/ontology/workspaceOwner> ?creator } }`,
     );
@@ -763,7 +800,7 @@ describe('SharedMemoryHandler', () => {
     }
 
     const msg2 = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<${ENTITY}> <http://schema.org/name> "Updated" <${DATA_GRAPH}> .`),
       manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
       publisherPeerId: peerId,
@@ -803,7 +840,7 @@ describe('SharedMemoryHandler: CAS gossip enforcement', () => {
     const nquads = `<${safeEntity}> <http://schema.org/name> "Test" <${DATA_GRAPH}> .`;
 
     const msg = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(nquads),
       manifest: [{ rootEntity: safeEntity, privateTripleCount: 0 }],
       publisherPeerId: peerId,
@@ -820,7 +857,7 @@ describe('SharedMemoryHandler: CAS gossip enforcement', () => {
     await handler.handle(msg, peerId);
 
     const gm = new GraphManager(store);
-    const wsGraph = gm.workspaceGraphUri(PARANET);
+    const wsGraph = gm.workspaceGraphUri(CONTEXT_GRAPH);
     const result = await store.query(
       `ASK { GRAPH <${wsGraph}> { <${safeEntity}> ?p ?o } }`,
     );
@@ -835,7 +872,7 @@ describe('SharedMemoryHandler: CAS gossip enforcement', () => {
 
     // First write so the entity exists
     const setupMsg = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<${safeEntity}> <http://schema.org/name> "Setup" <${DATA_GRAPH}> .`),
       manifest: [{ rootEntity: safeEntity, privateTripleCount: 0 }],
       publisherPeerId: peerId,
@@ -846,7 +883,7 @@ describe('SharedMemoryHandler: CAS gossip enforcement', () => {
 
     const nquads = `<${safeEntity}> <http://schema.org/name> "Updated" <${DATA_GRAPH}> .`;
     const msg = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(nquads),
       manifest: [{ rootEntity: safeEntity, privateTripleCount: 0 }],
       publisherPeerId: peerId,
@@ -863,7 +900,7 @@ describe('SharedMemoryHandler: CAS gossip enforcement', () => {
     await handler.handle(msg, peerId);
 
     const gm = new GraphManager(store);
-    const wsGraph = gm.workspaceGraphUri(PARANET);
+    const wsGraph = gm.workspaceGraphUri(CONTEXT_GRAPH);
     const result = await store.query(
       `SELECT ?o WHERE { GRAPH <${wsGraph}> { <${safeEntity}> <http://schema.org/name> ?o } }`,
     );
@@ -880,7 +917,7 @@ describe('SharedMemoryHandler: CAS gossip enforcement', () => {
     const entity = 'urn:test:cas-valid';
 
     const setupMsg = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<${entity}> <http://example.org/status> "recruiting" <${DATA_GRAPH}> .`),
       manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
       publisherPeerId: peerId,
@@ -890,7 +927,7 @@ describe('SharedMemoryHandler: CAS gossip enforcement', () => {
     await handler.handle(setupMsg, peerId);
 
     const updateMsg = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<${entity}> <http://example.org/status> "traveling" <${DATA_GRAPH}> .`),
       manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
       publisherPeerId: peerId,
@@ -906,7 +943,7 @@ describe('SharedMemoryHandler: CAS gossip enforcement', () => {
     await handler.handle(updateMsg, peerId);
 
     const gm = new GraphManager(store);
-    const wsGraph = gm.workspaceGraphUri(PARANET);
+    const wsGraph = gm.workspaceGraphUri(CONTEXT_GRAPH);
     const result = await store.query(
       `SELECT ?o WHERE { GRAPH <${wsGraph}> { <${entity}> <http://example.org/status> ?o } }`,
     );
@@ -923,7 +960,7 @@ describe('SharedMemoryHandler: CAS gossip enforcement', () => {
     const entity = 'urn:test:cas-mismatch';
 
     const setupMsg = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<${entity}> <http://example.org/status> "traveling" <${DATA_GRAPH}> .`),
       manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
       publisherPeerId: peerId,
@@ -933,7 +970,7 @@ describe('SharedMemoryHandler: CAS gossip enforcement', () => {
     await handler.handle(setupMsg, peerId);
 
     const updateMsg = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<${entity}> <http://example.org/status> "arrived" <${DATA_GRAPH}> .`),
       manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
       publisherPeerId: peerId,
@@ -949,7 +986,7 @@ describe('SharedMemoryHandler: CAS gossip enforcement', () => {
     await handler.handle(updateMsg, peerId);
 
     const gm = new GraphManager(store);
-    const wsGraph = gm.workspaceGraphUri(PARANET);
+    const wsGraph = gm.workspaceGraphUri(CONTEXT_GRAPH);
     const result = await store.query(
       `SELECT ?o WHERE { GRAPH <${wsGraph}> { <${entity}> <http://example.org/status> ?o } }`,
     );
@@ -966,7 +1003,7 @@ describe('SharedMemoryHandler: CAS gossip enforcement', () => {
     const entity = 'urn:test:absent-pass';
 
     const msg = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<${entity}> <http://example.org/status> "recruiting" <${DATA_GRAPH}> .`),
       manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
       publisherPeerId: peerId,
@@ -982,7 +1019,7 @@ describe('SharedMemoryHandler: CAS gossip enforcement', () => {
     await handler.handle(msg, peerId);
 
     const gm = new GraphManager(store);
-    const wsGraph = gm.workspaceGraphUri(PARANET);
+    const wsGraph = gm.workspaceGraphUri(CONTEXT_GRAPH);
     const result = await store.query(
       `ASK { GRAPH <${wsGraph}> { <${entity}> <http://example.org/status> ?o } }`,
     );
@@ -996,7 +1033,7 @@ describe('SharedMemoryHandler: CAS gossip enforcement', () => {
     const entity = 'urn:test:absent-fail';
 
     const setupMsg = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<${entity}> <http://example.org/status> "recruiting" <${DATA_GRAPH}> .`),
       manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
       publisherPeerId: peerId,
@@ -1006,7 +1043,7 @@ describe('SharedMemoryHandler: CAS gossip enforcement', () => {
     await handler.handle(setupMsg, peerId);
 
     const updateMsg = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<${entity}> <http://example.org/status> "traveling" <${DATA_GRAPH}> .`),
       manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
       publisherPeerId: peerId,
@@ -1022,7 +1059,7 @@ describe('SharedMemoryHandler: CAS gossip enforcement', () => {
     await handler.handle(updateMsg, peerId);
 
     const gm = new GraphManager(store);
-    const wsGraph = gm.workspaceGraphUri(PARANET);
+    const wsGraph = gm.workspaceGraphUri(CONTEXT_GRAPH);
     const result = await store.query(
       `SELECT ?o WHERE { GRAPH <${wsGraph}> { <${entity}> <http://example.org/status> ?o } }`,
     );
@@ -1039,7 +1076,7 @@ describe('SharedMemoryHandler: CAS gossip enforcement', () => {
     const entity = 'urn:test:empty-expected';
 
     const setupMsg = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<${entity}> <http://schema.org/name> "Setup" <${DATA_GRAPH}> .`),
       manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
       publisherPeerId: peerId,
@@ -1049,7 +1086,7 @@ describe('SharedMemoryHandler: CAS gossip enforcement', () => {
     await handler.handle(setupMsg, peerId);
 
     const updateMsg = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<${entity}> <http://schema.org/name> "Updated" <${DATA_GRAPH}> .`),
       manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
       publisherPeerId: peerId,
@@ -1065,7 +1102,7 @@ describe('SharedMemoryHandler: CAS gossip enforcement', () => {
     await handler.handle(updateMsg, peerId);
 
     const gm = new GraphManager(store);
-    const wsGraph = gm.workspaceGraphUri(PARANET);
+    const wsGraph = gm.workspaceGraphUri(CONTEXT_GRAPH);
     const result = await store.query(
       `SELECT ?o WHERE { GRAPH <${wsGraph}> { <${entity}> <http://schema.org/name> ?o } }`,
     );
@@ -1093,11 +1130,15 @@ describe('Workspace: conditionalShare (CAS)', () => {
       publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
       publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
+    publisher = wrapPublisherForTest(publisher, {
+      author: _author,
+      ctx: { provider: _provider, kav10Address: _kav10Address },
+    });
   });
 
   it('succeeds when condition matches current value', async () => {
     const initial = [q(ENTITY, 'http://example.org/status', '"recruiting"')];
-    await publisher.share(PARANET, initial, { publisherPeerId: 'peer1' });
+    await publisher.share(CONTEXT_GRAPH, initial, { publisherPeerId: 'peer1' });
 
     const updated = [q(ENTITY, 'http://example.org/status', '"traveling"')];
     const opts: ConditionalShareOptions = {
@@ -1109,7 +1150,7 @@ describe('Workspace: conditionalShare (CAS)', () => {
       }],
     };
 
-    const result = await publisher.conditionalShare(PARANET, updated, opts);
+    const result = await publisher.conditionalShare(CONTEXT_GRAPH, updated, opts);
     expect(result.shareOperationId).toBeTruthy();
 
     const check = await store.query(
@@ -1123,7 +1164,7 @@ describe('Workspace: conditionalShare (CAS)', () => {
 
   it('throws StaleWriteError when condition does not match', async () => {
     const initial = [q(ENTITY, 'http://example.org/status', '"traveling"')];
-    await publisher.share(PARANET, initial, { publisherPeerId: 'peer1' });
+    await publisher.share(CONTEXT_GRAPH, initial, { publisherPeerId: 'peer1' });
 
     const updated = [q(ENTITY, 'http://example.org/status', '"traveling"')];
     const opts: ConditionalShareOptions = {
@@ -1135,13 +1176,13 @@ describe('Workspace: conditionalShare (CAS)', () => {
       }],
     };
 
-    await expect(publisher.conditionalShare(PARANET, updated, opts))
+    await expect(publisher.conditionalShare(CONTEXT_GRAPH, updated, opts))
       .rejects.toThrow(StaleWriteError);
   });
 
   it('throws StaleWriteError when expecting absent but triple exists', async () => {
     const initial = [q(ENTITY, 'http://example.org/status', '"recruiting"')];
-    await publisher.share(PARANET, initial, { publisherPeerId: 'peer1' });
+    await publisher.share(CONTEXT_GRAPH, initial, { publisherPeerId: 'peer1' });
 
     const newQuads = [q(ENTITY, 'http://example.org/status', '"recruiting"')];
     const opts: ConditionalShareOptions = {
@@ -1153,7 +1194,7 @@ describe('Workspace: conditionalShare (CAS)', () => {
       }],
     };
 
-    await expect(publisher.conditionalShare(PARANET, newQuads, opts))
+    await expect(publisher.conditionalShare(CONTEXT_GRAPH, newQuads, opts))
       .rejects.toThrow(StaleWriteError);
   });
 
@@ -1168,13 +1209,13 @@ describe('Workspace: conditionalShare (CAS)', () => {
       }],
     };
 
-    const result = await publisher.conditionalShare(PARANET, quads, opts);
+    const result = await publisher.conditionalShare(CONTEXT_GRAPH, quads, opts);
     expect(result.shareOperationId).toBeTruthy();
   });
 
   it('StaleWriteError includes condition and actual value', async () => {
     const initial = [q(ENTITY, 'http://example.org/status', '"traveling"')];
-    await publisher.share(PARANET, initial, { publisherPeerId: 'peer1' });
+    await publisher.share(CONTEXT_GRAPH, initial, { publisherPeerId: 'peer1' });
 
     const opts: ConditionalShareOptions = {
       publisherPeerId: 'peer1',
@@ -1186,7 +1227,7 @@ describe('Workspace: conditionalShare (CAS)', () => {
     };
 
     try {
-      await publisher.conditionalShare(PARANET, [q(ENTITY, 'http://example.org/status', '"traveling"')], opts);
+      await publisher.conditionalShare(CONTEXT_GRAPH, [q(ENTITY, 'http://example.org/status', '"traveling"')], opts);
       expect.unreachable('should have thrown');
     } catch (err) {
       expect(err).toBeInstanceOf(StaleWriteError);
@@ -1203,7 +1244,7 @@ describe('Workspace: conditionalShare (CAS)', () => {
       q(ENTITY, 'http://example.org/status', '"recruiting"'),
       q(ENTITY, 'http://example.org/turn', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>'),
     ];
-    await publisher.share(PARANET, initial, { publisherPeerId: 'peer1' });
+    await publisher.share(CONTEXT_GRAPH, initial, { publisherPeerId: 'peer1' });
 
     const updated = [
       q(ENTITY, 'http://example.org/status', '"traveling"'),
@@ -1217,7 +1258,7 @@ describe('Workspace: conditionalShare (CAS)', () => {
       ],
     };
 
-    const result = await publisher.conditionalShare(PARANET, updated, opts);
+    const result = await publisher.conditionalShare(CONTEXT_GRAPH, updated, opts);
     expect(result.shareOperationId).toBeTruthy();
   });
 
@@ -1226,7 +1267,7 @@ describe('Workspace: conditionalShare (CAS)', () => {
       q(ENTITY, 'http://example.org/status', '"recruiting"'),
       q(ENTITY, 'http://example.org/turn', '"5"^^<http://www.w3.org/2001/XMLSchema#integer>'),
     ];
-    await publisher.share(PARANET, initial, { publisherPeerId: 'peer1' });
+    await publisher.share(CONTEXT_GRAPH, initial, { publisherPeerId: 'peer1' });
 
     const updated = [q(ENTITY, 'http://example.org/status', '"traveling"')];
     const opts: ConditionalShareOptions = {
@@ -1237,7 +1278,7 @@ describe('Workspace: conditionalShare (CAS)', () => {
       ],
     };
 
-    await expect(publisher.conditionalShare(PARANET, updated, opts))
+    await expect(publisher.conditionalShare(CONTEXT_GRAPH, updated, opts))
       .rejects.toThrow(StaleWriteError);
   });
 
@@ -1250,12 +1291,12 @@ describe('Workspace: conditionalShare (CAS)', () => {
         expectedValue: '"recruiting" } } . DROP ALL #',
       }],
     };
-    await expect(publisher.conditionalShare(PARANET, [], opts))
+    await expect(publisher.conditionalShare(CONTEXT_GRAPH, [], opts))
       .rejects.toThrow('Unsafe RDF term');
   });
 
   it('accepts valid RDF literal and IRI terms', async () => {
-    await publisher.share(PARANET, [
+    await publisher.share(CONTEXT_GRAPH, [
       q(ENTITY, 'http://example.org/status', '"recruiting"'),
     ], { publisherPeerId: 'peer1' });
 
@@ -1272,18 +1313,18 @@ describe('Workspace: conditionalShare (CAS)', () => {
     // matched coincidentally. Pin both fields of the `ShareResult`
     // contract so a regression that silently no-ops the CAS (returns
     // a dummy "success" shape) cannot pass.
-    const casResult = await publisher.conditionalShare(PARANET, [], literalOpts);
+    const casResult = await publisher.conditionalShare(CONTEXT_GRAPH, [], literalOpts);
     expect(casResult.shareOperationId).toMatch(/.+/);
     expect(casResult.message).toBeInstanceOf(Uint8Array);
     expect(casResult.message.length).toBeGreaterThan(0);
   });
 
   it('serializes concurrent CAS writes to the same subject+predicate', async () => {
-    await publisher.share(PARANET, [
+    await publisher.share(CONTEXT_GRAPH, [
       q(ENTITY, 'http://example.org/counter', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>'),
     ], { publisherPeerId: 'peer1' });
 
-    const write1 = publisher.conditionalShare(PARANET, [
+    const write1 = publisher.conditionalShare(CONTEXT_GRAPH, [
       q(ENTITY, 'http://example.org/counter', '"2"^^<http://www.w3.org/2001/XMLSchema#integer>'),
     ], {
       publisherPeerId: 'peer1',
@@ -1294,7 +1335,7 @@ describe('Workspace: conditionalShare (CAS)', () => {
       }],
     });
 
-    const write2 = publisher.conditionalShare(PARANET, [
+    const write2 = publisher.conditionalShare(CONTEXT_GRAPH, [
       q(ENTITY, 'http://example.org/counter', '"3"^^<http://www.w3.org/2001/XMLSchema#integer>'),
     ], {
       publisherPeerId: 'peer1',
@@ -1334,7 +1375,7 @@ describe('SharedMemoryHandler: CAS edge cases', () => {
     const nquads = `<${entity}> <http://schema.org/name> "Test" <${DATA_GRAPH}> .`;
 
     const msg = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(nquads),
       manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
       publisherPeerId: peerId,
@@ -1351,7 +1392,7 @@ describe('SharedMemoryHandler: CAS edge cases', () => {
     await handler.handle(msg, peerId);
 
     const gm = new GraphManager(store);
-    const wsGraph = gm.workspaceGraphUri(PARANET);
+    const wsGraph = gm.workspaceGraphUri(CONTEXT_GRAPH);
     const result = await store.query(
       `ASK { GRAPH <${wsGraph}> { <${entity}> ?p ?o } }`,
     );
@@ -1366,7 +1407,7 @@ describe('SharedMemoryHandler: CAS edge cases', () => {
     const subjectB = 'urn:test:lock-b';
 
     const setupA = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<${subjectA}> <http://example.org/status> "active" <${DATA_GRAPH}> .`),
       manifest: [{ rootEntity: subjectA, privateTripleCount: 0 }],
       publisherPeerId: peerId,
@@ -1376,7 +1417,7 @@ describe('SharedMemoryHandler: CAS edge cases', () => {
     await handler.handle(setupA, peerId);
 
     const writeB = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<${subjectB}> <http://example.org/name> "Created conditionally" <${DATA_GRAPH}> .`),
       manifest: [{ rootEntity: subjectB, privateTripleCount: 0 }],
       publisherPeerId: peerId,
@@ -1392,7 +1433,7 @@ describe('SharedMemoryHandler: CAS edge cases', () => {
     await handler.handle(writeB, peerId);
 
     const gm = new GraphManager(store);
-    const wsGraph = gm.workspaceGraphUri(PARANET);
+    const wsGraph = gm.workspaceGraphUri(CONTEXT_GRAPH);
     const result = await store.query(
       `ASK { GRAPH <${wsGraph}> { <${subjectB}> <http://example.org/name> ?o } }`,
     );
@@ -1407,7 +1448,7 @@ describe('SharedMemoryHandler: CAS edge cases', () => {
     const subjectB = 'urn:test:lock-b2';
 
     const setupA = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<${subjectA}> <http://example.org/status> "inactive" <${DATA_GRAPH}> .`),
       manifest: [{ rootEntity: subjectA, privateTripleCount: 0 }],
       publisherPeerId: peerId,
@@ -1417,7 +1458,7 @@ describe('SharedMemoryHandler: CAS edge cases', () => {
     await handler.handle(setupA, peerId);
 
     const writeB = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<${subjectB}> <http://example.org/name> "Should not appear" <${DATA_GRAPH}> .`),
       manifest: [{ rootEntity: subjectB, privateTripleCount: 0 }],
       publisherPeerId: peerId,
@@ -1433,7 +1474,7 @@ describe('SharedMemoryHandler: CAS edge cases', () => {
     await handler.handle(writeB, peerId);
 
     const gm = new GraphManager(store);
-    const wsGraph = gm.workspaceGraphUri(PARANET);
+    const wsGraph = gm.workspaceGraphUri(CONTEXT_GRAPH);
     const result = await store.query(
       `ASK { GRAPH <${wsGraph}> { <${subjectB}> ?p ?o } }`,
     );
@@ -1447,7 +1488,7 @@ describe('SharedMemoryHandler: CAS edge cases', () => {
     const entity = 'urn:test:multi-cond';
 
     const setup = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(
         `<${entity}> <http://example.org/status> "recruiting" <${DATA_GRAPH}> .\n` +
         `<${entity}> <http://example.org/turn> "5"^^<http://www.w3.org/2001/XMLSchema#integer> <${DATA_GRAPH}> .`,
@@ -1460,7 +1501,7 @@ describe('SharedMemoryHandler: CAS edge cases', () => {
     await handler.handle(setup, peerId);
 
     const update = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<${entity}> <http://example.org/status> "traveling" <${DATA_GRAPH}> .`),
       manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
       publisherPeerId: peerId,
@@ -1474,7 +1515,7 @@ describe('SharedMemoryHandler: CAS edge cases', () => {
     await handler.handle(update, peerId);
 
     const gm = new GraphManager(store);
-    const wsGraph = gm.workspaceGraphUri(PARANET);
+    const wsGraph = gm.workspaceGraphUri(CONTEXT_GRAPH);
     const result = await store.query(
       `SELECT ?o WHERE { GRAPH <${wsGraph}> { <${entity}> <http://example.org/status> ?o } }`,
     );
@@ -1491,7 +1532,7 @@ describe('SharedMemoryHandler: CAS edge cases', () => {
     const entity = 'urn:test:typed-lit';
 
     const setup = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(
         `<${entity}> <http://example.org/turn> "1"^^<http://www.w3.org/2001/XMLSchema#integer> <${DATA_GRAPH}> .`,
       ),
@@ -1503,7 +1544,7 @@ describe('SharedMemoryHandler: CAS edge cases', () => {
     await handler.handle(setup, peerId);
 
     const update = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(
         `<${entity}> <http://example.org/turn> "2"^^<http://www.w3.org/2001/XMLSchema#integer> <${DATA_GRAPH}> .`,
       ),
@@ -1521,7 +1562,7 @@ describe('SharedMemoryHandler: CAS edge cases', () => {
     await handler.handle(update, peerId);
 
     const gm = new GraphManager(store);
-    const wsGraph = gm.workspaceGraphUri(PARANET);
+    const wsGraph = gm.workspaceGraphUri(CONTEXT_GRAPH);
     const result = await store.query(
       `SELECT ?o WHERE { GRAPH <${wsGraph}> { <${entity}> <http://example.org/turn> ?o } }`,
     );

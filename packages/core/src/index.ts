@@ -15,7 +15,6 @@ export {
   computeNetworkId,
   getGenesisRaw,
   SYSTEM_CONTEXT_GRAPHS,
-  SYSTEM_PARANETS,
   DKG_ONTOLOGY,
   type GenesisQuad,
 } from './genesis.js';
@@ -25,7 +24,15 @@ export {
   blueGreenSlotEntryPoint,
   blueGreenSlotReady,
 } from './blue-green.js';
-export { requestFaucetFunding, type FaucetResult } from './faucet.js';
+export {
+  FAUCET_WALLETS_PER_REQUEST,
+  getFundableWalletAddresses,
+  requestFaucetFunding,
+  type FaucetResult,
+  type FundableWalletConfigLike,
+  type FundableWalletEntryLike,
+  type FundableWalletSource,
+} from './faucet.js';
 export {
   fundWalletsBestEffort,
   logManualFundingInstructions,
@@ -83,3 +90,11 @@ export {
   ExtractionPipelineRegistry,
 } from './extraction-pipeline.js';
 export * from './transducers.js';
+export {
+  ASSERTION_SEAL_PREDICATES,
+  ASSERTION_PUBLISH_RECEIPT_PREDICATES,
+  buildAssertionSealQuads,
+  buildAssertionPublishReceiptQuads,
+  parseAssertionSealQuads,
+  type AssertionSeal,
+} from './assertion-seal.js';

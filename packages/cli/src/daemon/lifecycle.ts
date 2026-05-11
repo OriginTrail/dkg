@@ -120,7 +120,6 @@ import { type ExtractionStatusRecord, getExtractionStatusRecord, setExtractionSt
 import { FileStore } from '../file-store.js';
 import { VectorStore, OpenAIEmbeddingProvider, type EmbeddingProvider } from '../vector-store.js';
 import { parseBoundary, parseMultipart, MultipartParseError } from '../http/multipart.js';
-import { handleCapture, EpcisValidationError, handleEventsQuery, EpcisQueryError, type Publisher as EpcisPublisher } from '@origintrail-official/dkg-epcis';
 // Phase 8 — project-manifest publish + install (UI-driven onboarding flow).
 // Daemon constructs a self-pointing DkgClient (localhost:listenPort) and
 // reuses the same publish/fetch/plan/write helpers the CLI uses, so wire
@@ -324,6 +323,7 @@ import {
 } from './local-agents.js';
 
 import { handleRequest } from './handle-request.js';
+import type { MemoryGraphChangedEvent, MemoryGraphLayer } from './routes/context.js';
 
 /**
  * Resolve the WM agentAddress the daemon hands to `ChatMemoryManager`.
@@ -442,12 +442,12 @@ export async function runDaemonInner(
 ██║  ██╗██║ ╚████║╚██████╔╝╚███╔███╔╝███████╗███████╗██████╔╝╚██████╔╝███████╗
 ╚═╝  ╚═╝╚═╝  ╚═══╝ ╚═════╝  ╚══╝╚══╝ ╚══════╝╚══════╝╚═════╝  ╚═════╝ ╚══════╝
 
- ██████╗ ██████╗  █████╗ ██████╗ ██╗  ██╗              ██████╗ ██╗  ██╗ ██████╗     ██╗   ██╗ █████╗
-██╔════╝ ██╔══██╗██╔══██╗██╔══██╗██║  ██║              ██╔══██╗██║ ██╔╝██╔════╝     ██║   ██║██╔══██╗
-██║  ███╗██████╔╝███████║██████╔╝███████║    █████╗    ██║  ██║█████╔╝ ██║  ███╗    ██║   ██║╚██████║
-██║   ██║██╔══██╗██╔══██║██╔═══╝ ██╔══██║    ╚════╝    ██║  ██║██╔═██╗ ██║   ██║    ╚██╗ ██╔╝ ╚═══██║
-╚██████╔╝██║  ██║██║  ██║██║     ██║  ██║              ██████╔╝██║  ██╗╚██████╔╝     ╚████╔╝  █████╔╝
- ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     ╚═╝  ╚═╝              ╚═════╝ ╚═╝  ╚═╝ ╚═════╝       ╚═══╝   ╚════╝
+ ██████╗ ██████╗  █████╗ ██████╗ ██╗  ██╗              ██████╗ ██╗  ██╗ ██████╗     ██╗   ██╗ ██╗ ██████╗
+██╔════╝ ██╔══██╗██╔══██╗██╔══██╗██║  ██║              ██╔══██╗██║ ██╔╝██╔════╝     ██║   ██║███║██╔═████╗
+██║  ███╗██████╔╝███████║██████╔╝███████║    █████╗    ██║  ██║█████╔╝ ██║  ███╗    ██║   ██║╚██║██║██╔██║
+██║   ██║██╔══██╗██╔══██║██╔═══╝ ██╔══██║    ╚════╝    ██║  ██║██╔═██╗ ██║   ██║    ╚██╗ ██╔╝ ██║████╔╝██║
+╚██████╔╝██║  ██║██║  ██║██║     ██║  ██║              ██████╔╝██║  ██╗╚██████╔╝     ╚████╔╝  ██║╚██████╔╝
+ ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     ╚═╝  ╚═╝              ╚═════╝ ╚═╝  ╚═╝ ╚═════╝       ╚═══╝   ╚═╝ ╚═════╝
 `;
   origStdoutWrite(banner + "\n");
   appendFile(logFile, banner + "\n").catch(() => {});
@@ -761,7 +761,7 @@ export async function runDaemonInner(
   }
 
   // Ensure configured context graphs + network defaults are subscribed and available.
-  // Uses ensureParanetLocal (idempotent) to avoid duplicate creator claims
+  // Uses ensureContextGraphLocal (idempotent) to avoid duplicate creator claims
   // and to survive "already exists" gracefully.
   const contextGraphsToSubscribe = new Set(syncContextGraphs);
   for (const p of contextGraphsToSubscribe) {
@@ -1126,9 +1126,10 @@ export async function runDaemonInner(
   // Track publishes via KC_PUBLISHED event (covers GossipSub-received publishes)
   agent.eventBus.on(DKGEvent.KC_PUBLISHED, (data: any) => {
     const ctx = createOperationContext("publish");
+    const kcId = data.kcId != null ? String(data.kcId) : undefined;
     tracker.start(ctx, {
-      contextGraphId: data.paranetId,
-      details: { kcId: data.kcId, source: "gossipsub" },
+      contextGraphId: data.contextGraphId,
+      details: { kcId, source: "gossipsub" },
     });
     tracker.complete(ctx, { tripleCount: data.tripleCount });
     try {
@@ -1136,13 +1137,25 @@ export async function runDaemonInner(
         ts: Date.now(),
         type: "kc_published",
         title: "Knowledge published",
-        message: `Knowledge collection published${data.paranetId ? ` on context graph ${shortId(data.paranetId)}` : ""}`,
+        message: `Knowledge collection published${data.contextGraphId ? ` on context graph ${shortId(data.contextGraphId)}` : ""}`,
         source: "dkg",
         meta: JSON.stringify({
-          kcId: data.kcId,
-          contextGraphId: data.paranetId,
+          kcId,
+          contextGraphId: data.contextGraphId,
         }),
       });
+      if (data.contextGraphId) {
+        emitMemoryGraphChanged({
+          contextGraphId: data.contextGraphId,
+          layers: ["vm"],
+          ...(typeof data.subGraphName === "string" ? { subGraphName: data.subGraphName } : {}),
+          operation: "knowledge_collection_published",
+          source: "gossipsub",
+          counts: {
+            triples: typeof data.tripleCount === "number" ? data.tripleCount : undefined,
+          },
+        });
+      }
     } catch {
       /* never crash */
     }
@@ -1156,6 +1169,13 @@ export async function runDaemonInner(
     for (const client of sseClients) {
       try { client.write(msg); } catch { sseClients.delete(client); }
     }
+  }
+  function emitMemoryGraphChanged(event: MemoryGraphChangedEvent) {
+    if (!event.contextGraphId) return;
+    sseBroadcast("memory_graph_changed", {
+      ...event,
+      timestamp: new Date().toISOString(),
+    });
   }
 
   agent.eventBus.on(DKGEvent.JOIN_REQUEST_RECEIVED, (data: any) => {
@@ -1233,6 +1253,43 @@ export async function runDaemonInner(
         dataSynced: data.dataSynced,
         sharedMemorySynced: data.sharedMemorySynced,
       });
+      const layers: MemoryGraphLayer[] = [];
+      if (data.dataSynced) layers.push("vm");
+      if (data.sharedMemorySynced) layers.push("swm");
+      if (data.contextGraphId && layers.length > 0) {
+        emitMemoryGraphChanged({
+          contextGraphId: data.contextGraphId,
+          layers,
+          operation: "project_synced",
+          source: "sync",
+          dataSynced: data.dataSynced,
+          sharedMemorySynced: data.sharedMemorySynced,
+        });
+      }
+    } catch {
+      /* never crash */
+    }
+  });
+
+  agent.eventBus.on(DKGEvent.MEMORY_GRAPH_CHANGED, (data: any) => {
+    try {
+      const layers = Array.isArray(data?.layers)
+        ? data.layers.filter((layer: unknown): layer is MemoryGraphLayer =>
+            layer === "wm" || layer === "swm" || layer === "vm",
+          )
+        : [];
+      if (!data?.contextGraphId || layers.length === 0) return;
+      const counts = data.counts && typeof data.counts === "object"
+        ? data.counts as MemoryGraphChangedEvent["counts"]
+        : undefined;
+      emitMemoryGraphChanged({
+        contextGraphId: String(data.contextGraphId),
+        layers,
+        ...(typeof data.subGraphName === "string" ? { subGraphName: data.subGraphName } : {}),
+        operation: typeof data.operation === "string" ? data.operation : "memory_graph_changed",
+        source: typeof data.source === "string" ? data.source : "event_bus",
+        ...(counts ? { counts } : {}),
+      });
     } catch {
       /* never crash */
     }
@@ -1255,7 +1312,17 @@ export async function runDaemonInner(
       contextGraphId: string,
       quads: any[],
       opts?: { localOnly?: boolean; subGraphName?: string },
-    ) => agent.share(contextGraphId, quads, opts),
+    ) => agent.share(contextGraphId, quads, opts).then((result: any) => {
+      emitMemoryGraphChanged({
+        contextGraphId,
+        layers: ["swm"],
+        subGraphName: opts?.subGraphName,
+        operation: "shared_memory_written",
+        source: opts?.localOnly ? "agent_tool_local" : "agent_tool",
+        counts: { triples: quads.length },
+      });
+      return result;
+    }),
     createAssertion: async (
       contextGraphId: string,
       name: string,
@@ -1287,13 +1354,50 @@ export async function runDaemonInner(
         quads,
         opts?.subGraphName ? { subGraphName: opts.subGraphName } : undefined,
       );
+      emitMemoryGraphChanged({
+        contextGraphId,
+        layers: ["wm"],
+        subGraphName: opts?.subGraphName,
+        operation: "assertion_written",
+        source: "agent_tool",
+        counts: { triples: quads.length },
+      });
       return { written: quads.length };
     },
     publishFromSharedMemory: (
       contextGraphId: string,
       selection: "all" | { rootEntities: string[] },
-      opts?: { clearSharedMemoryAfter?: boolean },
-    ) => agent.publishFromSharedMemory(contextGraphId, selection, opts),
+      opts?: { clearSharedMemoryAfter?: boolean; subGraphName?: string },
+    ) => {
+      const publishOpts = {
+        ...opts,
+        clearSharedMemoryAfter: opts?.clearSharedMemoryAfter ?? false,
+      };
+      return agent.publishFromSharedMemory(contextGraphId, selection, publishOpts).then((result: any) => {
+        const clearAfter = publishOpts.clearSharedMemoryAfter;
+        const publishedSwmCleaned = result?.status === "confirmed";
+        const rootCount = Array.isArray(result?.kaManifest)
+          ? result.kaManifest.length
+          : undefined;
+        const publicTripleCount = Array.isArray(result?.publicQuads)
+          ? result.publicQuads.length
+          : undefined;
+        emitMemoryGraphChanged({
+          contextGraphId,
+          layers: publishedSwmCleaned ? ["swm", "vm"] : ["vm"],
+          subGraphName: opts?.subGraphName,
+          operation: "shared_memory_published",
+          source: "agent_tool",
+          clearSharedMemoryAfter: clearAfter,
+          status: typeof result?.status === "string" ? result.status : undefined,
+          counts: {
+            roots: rootCount,
+            triples: publicTripleCount,
+          },
+        });
+        return result;
+      });
+    },
     createContextGraph: (opts: {
       id: string;
       name: string;
@@ -1407,7 +1511,7 @@ export async function runDaemonInner(
 
   const catchupTracker: CatchupTracker = {
     jobs: new Map(),
-    latestByParanet: new Map(),
+    latestByContextGraph: new Map(),
   };
 
   // --- Extraction Pipelines ---
@@ -1643,6 +1747,7 @@ export async function runDaemonInner(
         validTokens,
         apiHost,
         apiPortRef,
+        emitMemoryGraphChanged,
       );
     } catch (err: any) {
       if (res.headersSent || res.writableEnded) return;

@@ -3,7 +3,7 @@ import { validatePublishRequest } from '../src/validation.js';
 import type { KAManifestEntry } from '../src/publisher.js';
 import type { Quad } from '@origintrail-official/dkg-storage';
 
-const P = 'test-paranet';
+const P = 'test-contextGraph';
 const G = `did:dkg:context-graph:${P}`;
 
 function quad(s: string, p: string, o: string, graph = G): Quad {
@@ -23,7 +23,7 @@ describe('validatePublishRequest', () => {
     expect(r.errors).toHaveLength(0);
   });
 
-  it('Rule 1: rejects quads in a graph other than the paranet graph', () => {
+  it('Rule 1: rejects quads in a graph other than the contextGraph graph', () => {
     const root = 'urn:entity:root';
     const nquads = [quad(root, 'http://ex.org/p', '"o"', 'http://wrong-graph')];
     const r = validatePublishRequest(nquads, manifest(root), P, new Set());
@@ -64,7 +64,7 @@ describe('validatePublishRequest', () => {
     expect(r.valid).toBe(true);
   });
 
-  it('Rule 4: rejects duplicate rootEntity in paranet', () => {
+  it('Rule 4: rejects duplicate rootEntity in contextGraph', () => {
     const root = 'urn:entity:exists';
     const nquads = [quad(root, 'http://ex.org/p', '"o"')];
     const r = validatePublishRequest(nquads, manifest(root), P, new Set([root]));

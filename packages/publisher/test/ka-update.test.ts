@@ -10,8 +10,12 @@ import { vmPublishPublicQuads } from './vm-publish-public-quads.js';
 import { ethers } from 'ethers';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, createTestContextGraph, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
+import { wrapPublisherForTest } from './_helpers/seal.js';
 
-let PARANET: string = 'test-update';
+let CONTEXT_GRAPH: string = 'test-update';
+let _kav10Address: string;
+let _provider: ethers.JsonRpcProvider;
+const _author = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
 let DATA_GRAPH: string;
 const ENTITY_A = 'urn:test:entity:a';
 const ENTITY_B = 'urn:test:entity:b';
@@ -57,7 +61,7 @@ function buildGossipMessage(opts: {
     .map((r) => new Uint8Array(r));
   const flatRoot = computeFlatKCRoot(merkleQuads, privateRoots);
   return encodeKAUpdateRequest({
-    paranetId: opts.contextGraphId,
+    contextGraphId: opts.contextGraphId,
     batchId: opts.batchId,
     nquads: quadsToNQuads(merkleQuads, `did:dkg:context-graph:${opts.contextGraphId}`),
     manifest: opts.manifest,
@@ -73,7 +77,7 @@ function buildGossipMessage(opts: {
 describe('KAUpdateRequest encode/decode', () => {
   it('round-trips a KAUpdateRequest message', () => {
     const original = {
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       batchId: 42n,
       nquads: new TextEncoder().encode('<urn:a> <urn:b> "c" .'),
       manifest: [{ rootEntity: ENTITY_A, privateTripleCount: 0 }],
@@ -89,7 +93,7 @@ describe('KAUpdateRequest encode/decode', () => {
     expect(encoded).toBeInstanceOf(Uint8Array);
 
     const decoded = decodeKAUpdateRequest(encoded);
-    expect(decoded.paranetId).toBe(PARANET);
+    expect(decoded.contextGraphId).toBe(CONTEXT_GRAPH);
     expect(decoded.batchId).toBe(42n);
     expect(decoded.publisherPeerId).toBe('12D3KooWTest');
     expect(decoded.publisherAddress).toBe('0xABCDEF');
@@ -103,7 +107,7 @@ describe('KAUpdateRequest encode/decode', () => {
     const largeBatchId = (1n << 53n) + 7n;
     const largeBlock = (1n << 60n) + 42n;
     const original = {
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       batchId: largeBatchId,
       nquads: new Uint8Array(),
       manifest: [],
@@ -137,8 +141,10 @@ describe('UpdateHandler', () => {
     await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const cgId = await createTestContextGraph(chain);
-    PARANET = String(cgId);
-    DATA_GRAPH = `did:dkg:context-graph:${PARANET}`;
+    CONTEXT_GRAPH = String(cgId);
+    DATA_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
+    _provider = createProvider();
+    _kav10Address = await chain.getKnowledgeAssetsV10Address();
   });
   afterAll(async () => {
     await revertSnapshot(_fileSnapshot);
@@ -159,6 +165,10 @@ describe('UpdateHandler', () => {
       publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
       publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
+    publisher = wrapPublisherForTest(publisher, {
+      author: _author,
+      ctx: { provider: _provider, kav10Address: _kav10Address },
+    });
     handler = new UpdateHandler(store, chain, eventBus);
   });
   afterEach(async () => {
@@ -167,7 +177,7 @@ describe('UpdateHandler', () => {
 
   it('applies a verified KA update: deletes old triples, inserts new ones', async () => {
     const original = await publisher.publish({
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [
         q(ENTITY_A, 'http://schema.org/name', '"Original"'),
         q(ENTITY_A, 'http://schema.org/description', '"Will be replaced"'),
@@ -177,14 +187,14 @@ describe('UpdateHandler', () => {
 
     const updateQuads = [q(ENTITY_A, 'http://schema.org/name', '"Updated via update()"')];
     const updateResult = await publisher.update(original.kcId, {
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: updateQuads,
     });
     expect(updateResult.onChainResult).toBeDefined();
 
     // Gossip must send the SAME quads as the publisher's update to match the on-chain merkle root
     const message = buildGossipMessage({
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       batchId: original.kcId,
       quads: updateQuads,
       manifest: [{ rootEntity: ENTITY_A, privateTripleCount: 0 }],
@@ -252,7 +262,7 @@ describe('UpdateHandler', () => {
     // non-undefined privateMerkleRoot, so the on-chain root factors in
     // the private commitment.
     const original = await publisher.publish({
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY_A, 'http://schema.org/name', '"Original-pub"')],
       privateQuads: [q(ENTITY_A, 'http://schema.org/ssn', '"before-update-private"')],
       publisherPeerId: '12D3KooWPeerA',
@@ -269,7 +279,7 @@ describe('UpdateHandler', () => {
     const updatePublic = [q(ENTITY_A, 'http://schema.org/name', '"UPDATED-pub"')];
     const updatePrivate = [q(ENTITY_A, 'http://schema.org/ssn', '"after-update-private"')];
     const updateResult = await publisher.update(original.kcId, {
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: updatePublic,
       privateQuads: updatePrivate,
       publisherPeerId: '12D3KooWPeerA',
@@ -304,7 +314,7 @@ describe('UpdateHandler', () => {
     ]);
 
     const message = encodeKAUpdateRequest({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       batchId: original.kcId,
       nquads: quadsToNQuads(vmPublishPublicQuads(updatePublic), dataGraph),
       manifest: [{
@@ -347,18 +357,18 @@ describe('UpdateHandler', () => {
 
   it('rejects update when chain verification fails (wrong publisher)', async () => {
     const original = await publisher.publish({
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY_A, 'http://schema.org/name', '"Original"')],
     });
 
     const updateQuads = [q(ENTITY_A, 'http://schema.org/name', '"Updated"')];
     const updateResult = await publisher.update(original.kcId, {
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: updateQuads,
     });
 
     const message = buildGossipMessage({
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       batchId: original.kcId,
       quads: updateQuads,
       manifest: [{ rootEntity: ENTITY_A, privateTripleCount: 0 }],
@@ -381,13 +391,13 @@ describe('UpdateHandler', () => {
 
   it('rejects gossip with tampered quads (payload root != on-chain root)', async () => {
     const original = await publisher.publish({
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY_A, 'http://schema.org/name', '"Original"')],
     });
 
     const updateQuads = [q(ENTITY_A, 'http://schema.org/name', '"Legit update"')];
     const updateResult = await publisher.update(original.kcId, {
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: updateQuads,
     });
 
@@ -395,7 +405,7 @@ describe('UpdateHandler', () => {
     // The on-chain merkle root matches the legit update, not the tampered payload.
     const tamperedQuads = [q(ENTITY_A, 'http://schema.org/name', '"Tampered content"')];
     const message = buildGossipMessage({
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       batchId: original.kcId,
       quads: tamperedQuads,
       manifest: [{ rootEntity: ENTITY_A, privateTripleCount: 0 }],
@@ -418,13 +428,13 @@ describe('UpdateHandler', () => {
 
   it('rejects update with unauthenticated extra roots in payload', async () => {
     const original = await publisher.publish({
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY_A, 'http://schema.org/name', '"Original"')],
     });
 
     const updateQuads = [q(ENTITY_A, 'http://schema.org/name', '"Updated"')];
     const updateResult = await publisher.update(original.kcId, {
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: updateQuads,
     });
 
@@ -436,7 +446,7 @@ describe('UpdateHandler', () => {
     const gossipRoot = computeGossipMerkleRoot(quadsWithExtra, manifestOnlyA);
 
     const message = encodeKAUpdateRequest({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       batchId: original.kcId,
       nquads: quadsToNQuads(quadsWithExtra, DATA_GRAPH),
       manifest: manifestOnlyA,
@@ -461,13 +471,13 @@ describe('UpdateHandler', () => {
 
   it('uses chain-verified block number for ordering, not gossip-supplied value', async () => {
     const original = await publisher.publish({
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY_A, 'http://schema.org/name', '"Original"')],
     });
 
     const update1Quads = [q(ENTITY_A, 'http://schema.org/name', '"Update 1"')];
     const update1 = await publisher.update(original.kcId, {
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: update1Quads,
     });
     const chainBlock1 = update1.onChainResult!.blockNumber;
@@ -475,7 +485,7 @@ describe('UpdateHandler', () => {
     // Send gossip for update1 with a forged high block number.
     // The handler should use the chain-verified block (chainBlock1), not 999999.
     const msg1 = encodeKAUpdateRequest({
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       batchId: original.kcId,
       nquads: quadsToNQuads(update1Quads, DATA_GRAPH),
       manifest: [{ rootEntity: ENTITY_A, privateTripleCount: 0 }],
@@ -501,7 +511,7 @@ describe('UpdateHandler', () => {
     // Now do update2 — its chain block will be chainBlock1 + N (strictly higher)
     const update2Quads = [q(ENTITY_A, 'http://schema.org/name', '"Update 2"')];
     const update2 = await publisher.update(original.kcId, {
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: update2Quads,
     });
     expect(update2.onChainResult!.blockNumber).toBeGreaterThan(chainBlock1);
@@ -509,7 +519,7 @@ describe('UpdateHandler', () => {
     // If the handler had stored 999999 (gossip value), this would be rejected.
     // Since it stored chainBlock1 (chain-verified), update2's higher block passes.
     const msg2 = buildGossipMessage({
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       batchId: original.kcId,
       quads: update2Quads,
       manifest: [{ rootEntity: ENTITY_A, privateTripleCount: 0 }],
@@ -532,26 +542,26 @@ describe('UpdateHandler', () => {
 
   it('rejects stale update with lower chain-verified block number', async () => {
     const original = await publisher.publish({
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY_A, 'http://schema.org/name', '"Original"')],
     });
 
     // Do two updates: update1 at block B1, update2 at block B2 > B1
     const update1Quads = [q(ENTITY_A, 'http://schema.org/name', '"Update 1"')];
     const update1 = await publisher.update(original.kcId, {
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: update1Quads,
     });
 
     const update2Quads = [q(ENTITY_A, 'http://schema.org/name', '"Update 2"')];
     const update2 = await publisher.update(original.kcId, {
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: update2Quads,
     });
 
     // Apply update2's gossip first (newer block)
     const msg2 = buildGossipMessage({
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       batchId: original.kcId,
       quads: update2Quads,
       manifest: [{ rootEntity: ENTITY_A, privateTripleCount: 0 }],
@@ -564,7 +574,7 @@ describe('UpdateHandler', () => {
 
     // Now try to apply update1's gossip (older block) — should be rejected
     const msg1 = buildGossipMessage({
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       batchId: original.kcId,
       quads: update1Quads,
       manifest: [{ rootEntity: ENTITY_A, privateTripleCount: 0 }],
@@ -587,18 +597,18 @@ describe('UpdateHandler', () => {
 
   it('rejects replayed update (same chain block height)', async () => {
     const original = await publisher.publish({
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY_A, 'http://schema.org/name', '"Original"')],
     });
 
     const updateQuads = [q(ENTITY_A, 'http://schema.org/name', '"Updated"')];
     const updateResult = await publisher.update(original.kcId, {
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: updateQuads,
     });
 
     const message = buildGossipMessage({
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       batchId: original.kcId,
       quads: updateQuads,
       manifest: [{ rootEntity: ENTITY_A, privateTripleCount: 0 }],
@@ -625,12 +635,12 @@ describe('UpdateHandler', () => {
 
   it('publisher.update() returns onChainResult with txHash and blockNumber', async () => {
     const original = await publisher.publish({
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY_A, 'http://schema.org/name', '"Original"')],
     });
 
     const result = await publisher.update(original.kcId, {
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY_A, 'http://schema.org/name', '"Updated"')],
     });
 
@@ -644,7 +654,7 @@ describe('UpdateHandler', () => {
 
   it('publisher.update() locally replaces triples in the data graph', async () => {
     const original = await publisher.publish({
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [
         q(ENTITY_A, 'http://schema.org/name', '"Original"'),
         q(ENTITY_A, 'http://schema.org/description', '"OldDesc"'),
@@ -652,7 +662,7 @@ describe('UpdateHandler', () => {
     });
 
     await publisher.update(original.kcId, {
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY_A, 'http://schema.org/name', '"Updated"')],
     });
 
@@ -676,7 +686,7 @@ describe('UpdateHandler', () => {
 
   it('handles multi-entity updates', async () => {
     const original = await publisher.publish({
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [
         q(ENTITY_A, 'http://schema.org/name', '"A"'),
         q(ENTITY_B, 'http://schema.org/name', '"B"'),
@@ -688,7 +698,7 @@ describe('UpdateHandler', () => {
       q(ENTITY_B, 'http://schema.org/name', '"B-updated"'),
     ];
     const updateResult = await publisher.update(original.kcId, {
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: updateQuads,
     });
 
@@ -698,7 +708,7 @@ describe('UpdateHandler', () => {
     ];
 
     const message = buildGossipMessage({
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       batchId: original.kcId,
       quads: updateQuads,
       manifest: gossipManifest,
@@ -724,13 +734,13 @@ describe('UpdateHandler', () => {
 
   it('verifyKAUpdate returns on-chain merkle root and block number', async () => {
     const original = await publisher.publish({
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY_A, 'http://schema.org/name', '"Original"')],
     });
 
     const updateQuads = [q(ENTITY_A, 'http://schema.org/name', '"Updated"')];
     const updateResult = await publisher.update(original.kcId, {
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: updateQuads,
     });
 
@@ -748,12 +758,12 @@ describe('UpdateHandler', () => {
 
   it('verifyKAUpdate rejects wrong publisher', async () => {
     const original = await publisher.publish({
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY_A, 'http://schema.org/name', '"Original"')],
     });
 
     await publisher.update(original.kcId, {
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY_A, 'http://schema.org/name', '"Updated"')],
     });
 
@@ -767,21 +777,21 @@ describe('UpdateHandler', () => {
     expect(verification.onChainMerkleRoot).toBeUndefined();
   });
 
-  it('rejects cross-paranet replay (batch bound to different paranet)', async () => {
+  it('rejects cross-contextGraph replay (batch bound to different contextGraph)', async () => {
     const original = await publisher.publish({
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY_A, 'http://schema.org/name', '"Original"')],
     });
 
     const updateQuads = [q(ENTITY_A, 'http://schema.org/name', '"Updated"')];
     const updateResult = await publisher.update(original.kcId, {
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: updateQuads,
     });
 
-    // First, apply on the correct paranet to bind the batch
+    // First, apply on the correct contextGraph to bind the batch
     const legitMsg = buildGossipMessage({
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       batchId: original.kcId,
       quads: updateQuads,
       manifest: [{ rootEntity: ENTITY_A, privateTripleCount: 0 }],
@@ -792,9 +802,9 @@ describe('UpdateHandler', () => {
     });
     await handler.handle(legitMsg, '12D3KooWPeerA');
 
-    // Now attempt to replay the same batch on a different paranet
-    const crossParanetMsg = buildGossipMessage({
-      contextGraphId: 'other-paranet',
+    // Now attempt to replay the same batch on a different contextGraph
+    const crossContextGraphMsg = buildGossipMessage({
+      contextGraphId: 'other-contextGraph',
       batchId: original.kcId,
       quads: updateQuads,
       manifest: [{ rootEntity: ENTITY_A, privateTripleCount: 0 }],
@@ -803,10 +813,10 @@ describe('UpdateHandler', () => {
       txHash: updateResult.onChainResult!.txHash,
       blockNumber: updateResult.onChainResult!.blockNumber,
     });
-    await handler.handle(crossParanetMsg, '12D3KooWPeerA');
+    await handler.handle(crossContextGraphMsg, '12D3KooWPeerA');
 
-    // The other paranet's graph should be empty
-    const otherGraph = 'did:dkg:context-graph:other-paranet';
+    // The other contextGraph's graph should be empty
+    const otherGraph = 'did:dkg:context-graph:other-contextGraph';
     const result = await store.query(
       `ASK { GRAPH <${otherGraph}> { <${ENTITY_A}> ?p ?o } }`,
     );
@@ -819,7 +829,7 @@ describe('UpdateHandler', () => {
   it('publisher.update() returns failed status when chain tx fails', async () => {
     // Attempt to update a non-existent batch (batchId=999 doesn't exist in mock)
     const result = await publisher.update(999n, {
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY_A, 'http://schema.org/name', '"Should fail"')],
     });
 
@@ -828,11 +838,11 @@ describe('UpdateHandler', () => {
   });
 
   it('publisher.update() updates the merkle root in _meta graph', async () => {
-    const META_GRAPH = `did:dkg:context-graph:${PARANET}/_meta`;
+    const META_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
     const DKG = 'http://dkg.io/ontology/';
 
     const original = await publisher.publish({
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [
         q(ENTITY_A, 'http://schema.org/name', '"Original"'),
         q(ENTITY_A, 'http://schema.org/description', '"Will be updated"'),
@@ -851,7 +861,7 @@ describe('UpdateHandler', () => {
     }
 
     const updateResult = await publisher.update(original.kcId, {
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY_A, 'http://schema.org/name', '"Updated"')],
     });
     expect(updateResult.status).toBe('confirmed');
@@ -870,11 +880,11 @@ describe('UpdateHandler', () => {
   });
 
   it('UpdateHandler.handle() updates the merkle root in _meta graph on gossip receiver', async () => {
-    const META_GRAPH = `did:dkg:context-graph:${PARANET}/_meta`;
+    const META_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
     const DKG = 'http://dkg.io/ontology/';
 
     const original = await publisher.publish({
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY_A, 'http://schema.org/name', '"Original"')],
     });
     expect(original.status).toBe('confirmed');
@@ -903,12 +913,12 @@ describe('UpdateHandler', () => {
 
     const updateQuads = [q(ENTITY_A, 'http://schema.org/name', '"Updated via gossip"')];
     const updateResult = await publisher.update(original.kcId, {
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: updateQuads,
     });
 
     const message = buildGossipMessage({
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       batchId: original.kcId,
       quads: updateQuads,
       manifest: [{ rootEntity: ENTITY_A, privateTripleCount: 0 }],
@@ -934,10 +944,10 @@ describe('UpdateHandler', () => {
 
   it('updateMetaMerkleRoot fails loudly for unsafe contextGraphId values', async () => {
     const DKG = 'http://dkg.io/ontology/';
-    const META_GRAPH = `did:dkg:context-graph:${PARANET}/_meta`;
+    const META_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
 
     const original = await publisher.publish({
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY_A, 'http://schema.org/name', '"SafeData"')],
     });
     const originalRootHex = toHex(original.merkleRoot);
@@ -963,12 +973,12 @@ describe('UpdateHandler', () => {
   });
 
   it('resolveUalByBatchId uses bigint string representation (no Number precision loss)', async () => {
-    const META_GRAPH = `did:dkg:context-graph:${PARANET}/_meta`;
+    const META_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
     const DKG = 'http://dkg.io/ontology/';
     const XSD = 'http://www.w3.org/2001/XMLSchema#';
 
     const original = await publisher.publish({
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY_A, 'http://schema.org/name', '"BigIntTest"')],
     });
 

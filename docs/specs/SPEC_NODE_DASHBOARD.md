@@ -135,7 +135,7 @@ status indicators. Uptime percentage badge.
 | Connected peers (total) | `libp2p.getConnections().length` | 10s |
 | Direct vs relayed peers | Connection address analysis | 10s |
 | GossipSub mesh peers | `gossipsub.getMeshPeers()` | 10s |
-| Subscribed paranets | `agent.listParanets()` | 60s |
+| Subscribed contextGraphs | `agent.listContextGraphs()` | 60s |
 | Bandwidth in/out | libp2p metrics (if enabled) | 10s |
 
 Visual: peer count line chart over time. World map of peer locations
@@ -148,11 +148,11 @@ Visual: peer count line chart over time. World map of peer locations
 | Total triples | `store.countQuads()` | 60s |
 | Total KCs | SPARQL: count distinct `rdf:type dkg:KC` in meta graphs | 60s |
 | Total KAs | SPARQL: count distinct `rdf:type dkg:KA` in meta graphs | 60s |
-| Triples per paranet | `store.countQuads(graphUri)` per paranet | 60s |
+| Triples per contextGraph | `store.countQuads(graphUri)` per contextGraph | 60s |
 | Store size on disk | Backend-dependent: `fs.stat(store.nq)` for Oxigraph, N/A for remote stores (Blazegraph) | 60s |
 | Confirmed vs tentative | SPARQL: count by `dkg:status` | 60s |
 
-Visual: donut chart (triples by paranet), bar chart (KCs over time),
+Visual: donut chart (triples by contextGraph), bar chart (KCs over time),
 number cards for totals.
 
 ### Panel 4: Economics
@@ -181,7 +181,7 @@ Full-featured query editor with:
 - Syntax highlighting and autocompletion (prefix suggestions, predicate hints)
 - Query history (stored in SQLite alongside operations)
 - Saved queries (user-defined bookmarks)
-- Pre-built query templates: "All agents", "KCs in paranet X",
+- Pre-built query templates: "All agents", "KCs in contextGraph X",
   "Triples about entity Y", "Confirmed vs tentative KCs"
 
 Results render in three modes:
@@ -199,7 +199,7 @@ Powered by `@origintrail-official/dkg-graph-viz` (already in the monorepo), **as
 - Interactive force-directed 2D layout; humanized labels; node click for details.
 - Interactive force-directed 2D layout (with optional 3D via `renderer-3d`)
 - Click a node → expand its triples (fetch neighbors on demand)
-- Color-coded by `rdf:type` or paranet
+- Color-coded by `rdf:type` or contextGraph
 - Provenance overlay: show which KC/KA a triple belongs to
 - Timeline overlay: filter by `dkg:publishedAt` date range
 - Export as SVG/PNG
@@ -210,17 +210,17 @@ The graph-viz package already has:
 - Turtle, N-Triples, JSON-LD parsers
 - Hexagon painter, label resolver, prefix manager, style engine
 
-#### Paranet Browser
+#### ContextGraph Browser
 
-- List all paranets → click to see KCs in that paranet
+- List all contextGraphs → click to see KCs in that contextGraph
 - KC detail view: UAL, merkle root, status, publisher, timestamp, KA list
 - KA detail view: root entity, triple count, private/public flag
 - Click root entity → opens in Graph Visualization
 
 #### Publish UI
 
-Simple form for publishing triples to a paranet:
-- Paranet selector (dropdown of subscribed paranets)
+Simple form for publishing triples to a contextGraph:
+- ContextGraph selector (dropdown of subscribed contextGraphs)
 - Turtle/N-Triples text input with syntax highlighting
 - Preview (parsed triples displayed as table)
 - Publish button → calls `/api/publish` → shows result with UAL
@@ -244,7 +244,7 @@ through the Logger.
 | `durationMs` | How long the operation took |
 | `status` | `success` / `error` / `in_progress` |
 | `peerId` | Remote peer involved (if any) |
-| `paranetId` | Paranet involved (if any) |
+| `contextGraphId` | ContextGraph involved (if any) |
 | `details` | JSON blob with operation-specific data |
 | `tripleCount` | Number of triples processed (for publish/sync) |
 | `errorMessage` | Error message if status = error |
@@ -315,10 +315,10 @@ Manage external adapters and extensions from the UI:
 - **Test skills**: invoke a skill manually with sample input, inspect output
 - **Register new skill**: upload or point to a skill definition
 
-#### Paranet Subscriptions
-- **List subscribed paranets**: name, UAL, KC count, last sync time
-- **Subscribe / unsubscribe**: join or leave a paranet from the UI
-- **Paranet health**: sync lag, peer count, data freshness
+#### ContextGraph Subscriptions
+- **List subscribed contextGraphs**: name, UAL, KC count, last sync time
+- **Subscribe / unsubscribe**: join or leave a contextGraph from the UI
+- **ContextGraph health**: sync lag, peer count, data freshness
 
 #### Webhooks & Events
 - **Configure outbound webhooks**: notify external systems on events
@@ -334,7 +334,7 @@ Embedded chatbot powered by the node's own DKG agent capabilities:
 - "What's my node's uptime this week?"
 - "How many triples did I receive yesterday?"
 - "Is my stake earning above average?"
-- "Show me all KCs published to the testing paranet"
+- "Show me all KCs published to the testing contextGraph"
 - "Show me all failed operations in the last hour"
 - "Which peer sent me the most data?"
 
@@ -388,7 +388,7 @@ CREATE TABLE metric_snapshots (
   direct_peers INTEGER,
   relayed_peers INTEGER,
   mesh_peers INTEGER,
-  paranet_count INTEGER,
+  contextGraph_count INTEGER,
   total_triples INTEGER,
   total_kcs INTEGER,
   total_kas INTEGER,
@@ -409,7 +409,7 @@ CREATE TABLE operations (
   duration_ms INTEGER,                    -- NULL while in progress
   status TEXT DEFAULT 'in_progress',      -- in_progress / success / error
   peer_id TEXT,                           -- remote peer (if any)
-  paranet_id TEXT,                        -- paranet involved (if any)
+  contextGraph_id TEXT,                        -- contextGraph involved (if any)
   triple_count INTEGER,                   -- triples processed
   error_message TEXT,                     -- error message if failed
   details TEXT                            -- JSON blob for operation-specific data
@@ -545,7 +545,7 @@ interface MetricSnapshot {
     directPeers: number;
     relayedPeers: number;
     meshPeers: number;
-    paranetCount: number;
+    contextGraphCount: number;
   };
   knowledge: {
     totalTriples: number;
@@ -599,7 +599,7 @@ const opsErrorCounter = meter.createCounter('dkg.operations.errors');
 
 // Traces (one span per operation)
 const span = tracer.startSpan('dkg.publish', {
-  attributes: { 'dkg.paranet': paranetId, 'dkg.peer': peerId },
+  attributes: { 'dkg.contextGraph': contextGraphId, 'dkg.peer': peerId },
 });
 // ... operation ...
 span.end();
@@ -626,7 +626,7 @@ GET /api/metrics/history    → time-series (params: from, to, resolution)
 GET /api/operations         → operation list (params: name, status, from, to, limit)
 GET /api/operations/:id     → single operation detail + associated logs
 GET /api/logs               → log search (params: q, operationId, level, module, from, to)
-GET /api/paranets           → subscribed paranets with counts
+GET /api/context-graphs           → subscribed contextGraphs with counts
 GET /api/query-history      → recent SPARQL queries with timing
 GET /api/integrations       → adapter list with status
 ```
@@ -646,9 +646,9 @@ a lightweight charting library (e.g., Chart.js or uPlot).
 | `/api/logs` | GET | Search logs (full-text, by operationId, level, module, time range) |
 | **Knowledge Explorer** | | |
 | `/api/query` | POST | Execute SPARQL query (existing) |
-| `/api/publish` | POST | Publish triples to a paranet (existing) |
-| `/api/paranets` | GET | List subscribed paranets with KC/KA counts |
-| `/api/paranets/:id/kcs` | GET | List KCs in a paranet |
+| `/api/publish` | POST | Publish triples to a contextGraph (existing) |
+| `/api/context-graphs` | GET | List subscribed contextGraphs with KC/KA counts |
+| `/api/context-graphs/:id/kcs` | GET | List KCs in a contextGraph |
 | `/api/query-history` | GET | SPARQL query history (paginated) |
 | `/api/saved-queries` | GET/POST/PUT/DELETE | Manage saved query bookmarks |
 | **Wallet & Economics** | | |
@@ -731,7 +731,7 @@ Power users enable the OTel exporter to pipe into their existing stack.
 - SPARQL editor (CodeMirror with SPARQL mode)
 - Table view for SELECT results
 - Graph visualization via `@origintrail-official/dkg-graph-viz` for CONSTRUCT/DESCRIBE
-- Paranet browser: list paranets → KCs → KAs → root entities
+- ContextGraph browser: list contextGraphs → KCs → KAs → root entities
 - Publish UI: simple form → `/api/publish`
 - Query history and saved queries (SQLite)
 
@@ -742,8 +742,8 @@ Power users enable the OTel exporter to pipe into their existing stack.
 
 ### Phase 5: Integrations Panel — **DONE**
 - Adapter list (static: ElizaOS, OpenClaw) — `GET /api/integrations`
-- Skill browser (discovered skills from agents paranet)
-- Paranet subscription management from UI — subscribe input + `POST /api/subscribe`
+- Skill browser (discovered skills from agents contextGraph)
+- ContextGraph subscription management from UI — subscribe input + `POST /api/subscribe`
 - Per-adapter config, webhook configuration — future (config file)
 
 ### Phase 6: OTel Export + AI Assistant — **PARTIAL**

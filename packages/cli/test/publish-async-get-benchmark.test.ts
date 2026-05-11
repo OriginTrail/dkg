@@ -21,6 +21,7 @@ import {
 
 const originalFetch = globalThis.fetch;
 const originalDkgHome = process.env.DKG_HOME;
+const originalEsbenchPayloadSizes = process.env.DKG_ESBENCH_PAYLOAD_SIZES;
 
 type FocusedBenchmarkRecord = {
   baseline: unknown;
@@ -30,6 +31,11 @@ type FocusedBenchmarkRecord = {
 };
 
 type EsbenchConfigForTest = {
+  addLinkedReportNavigation: (
+    html: string,
+    currentFile: string,
+    targets: Array<[string, string]>,
+  ) => string;
   filterResultByCase: (
     result: Record<string, unknown>,
     caseName: string,
@@ -38,10 +44,50 @@ type EsbenchConfigForTest = {
   publishAsyncGetSuite: string;
 };
 
+type EsbenchSuiteForTest = {
+  default: {
+    params?: {
+      payloadSize?: string[];
+    };
+  };
+  GENERATED_PAYLOAD_SIZES: Array<{ label: string; bytes: number }>;
+};
+
+type CpuProfileReportForTest = {
+  renderCpuProfileFlamegraphHtml: (profile: unknown, options?: Record<string, unknown>) => string;
+};
+
+type MethodAnalysisForTest = {
+  renderMethodAnalysisHtml: (report: {
+    benchmark: 'publish-async-get-method-analysis';
+    generatedAt: string;
+    payloadSizes: string[];
+    flows: Array<{
+      flow: string;
+      payloadSize: string;
+      totalMs: number;
+      measuredMs: number;
+      traces: Array<{
+        flow: string;
+        payloadSize: string;
+        phase: string;
+        method: string;
+        invokes: string[];
+        detail: string;
+        durationMs: number;
+        success: boolean;
+        context: Record<string, unknown>;
+      }>;
+    }>;
+  }) => string;
+};
+
 afterEach(() => {
   globalThis.fetch = originalFetch;
   if (originalDkgHome === undefined) delete process.env.DKG_HOME;
   else process.env.DKG_HOME = originalDkgHome;
+  if (originalEsbenchPayloadSizes === undefined) delete process.env.DKG_ESBENCH_PAYLOAD_SIZES;
+  else process.env.DKG_ESBENCH_PAYLOAD_SIZES = originalEsbenchPayloadSizes;
 });
 
 describe('publish async get benchmark', () => {
@@ -55,7 +101,7 @@ describe('publish async get benchmark', () => {
       '--timeout-ms',
       '5000',
       '--payload-size',
-      '256',
+      '10kb',
       '--fixture',
       'minimal',
       '--output-format',
@@ -71,7 +117,7 @@ describe('publish async get benchmark', () => {
       repeat: 7,
       warmups: 2,
       timeoutMs: 5000,
-      payloadSizeBytes: 256,
+      payloadSizeBytes: 10 * 1024,
       fixture: 'minimal',
       outputFormat: 'ndjson',
       apiUrl: 'http://127.0.0.1:9200',
@@ -84,16 +130,23 @@ describe('publish async get benchmark', () => {
       DKG_BENCH_CONTEXT_GRAPH_ID: 'env-cg',
       DKG_BENCH_WARMUPS: '4',
       DKG_BENCH_OUTPUT_FORMAT: 'json',
-      DKG_BENCH_PAYLOAD_SIZE: '512',
+      DKG_BENCH_PAYLOAD_SIZE: '100kb',
     });
 
     expect(config).toMatchObject({
       contextGraphId: 'env-cg',
       repeat: 30,
       warmups: 4,
-      payloadSizeBytes: 512,
+      payloadSizeBytes: 100 * 1024,
       outputFormat: 'json',
     });
+  });
+
+  it('parses generated payload sizes with mb units', () => {
+    expect(parseBenchmarkArgs(['--context-graph-id', 'bench-cg', '--payload-size', '2mb'], {}).payloadSizeBytes)
+      .toBe(2 * 1024 * 1024);
+    expect(parseBenchmarkArgs(['--context-graph-id', 'bench-cg', '--payload-size', '200mb'], {}).payloadSizeBytes)
+      .toBe(200 * 1024 * 1024);
   });
 
   it('aggregates measured timings while excluding warmups', () => {
@@ -247,6 +300,19 @@ describe('publish async get benchmark', () => {
     expect(isLoopbackApiUrl('http://192.168.1.50:9200')).toBe(false);
   });
 
+  it('runs the ESBench suite across the generated payload-size matrix', async () => {
+    delete process.env.DKG_ESBENCH_PAYLOAD_SIZES;
+    const suite = await import('../../../bench/publish-async-get.bench.ts') as EsbenchSuiteForTest;
+
+    expect(suite.GENERATED_PAYLOAD_SIZES).toEqual([
+      { label: '10kb', bytes: 10 * 1024 },
+      { label: '100kb', bytes: 100 * 1024 },
+      { label: '2mb', bytes: 2 * 1024 * 1024 },
+      { label: '200mb', bytes: 200 * 1024 * 1024 },
+    ]);
+    expect(suite.default.params?.payloadSize).toEqual(['10kb', '100kb', '2mb', '200mb']);
+  });
+
   it('keeps ESBench focused HTML scenes aligned with payload-size params', async () => {
     const {
       filterResultByCase,
@@ -259,7 +325,7 @@ describe('publish async get benchmark', () => {
         {
           notes: ['not copied'],
           baseline: { type: 'Name', value: 'synchronous publish with finalization' },
-          paramDef: [['payloadSizeBytes', ['128', '1024']]],
+          paramDef: [['payloadSize', ['10kb', '100kb', '2mb', '200mb']]],
           scenes: [
             {
               'get/read retrieval': { time: [1] },
@@ -284,7 +350,7 @@ describe('publish async get benchmark', () => {
       ['upload payload to local working memory', 'bench/results/publish-async-get/working-memory-upload.html'],
       ['lift local working memory to shared working memory', 'bench/results/publish-async-get/working-to-shared-memory.html'],
     ]);
-    expect(record.paramDef).toEqual([['payloadSizeBytes', ['128', '1024']]]);
+    expect(record.paramDef).toEqual([['payloadSize', ['10kb', '100kb', '2mb', '200mb']]]);
     expect(record.baseline).toEqual({ type: 'Name', value: caseName });
     expect(record.notes).toEqual([]);
     expect(record.scenes).toHaveLength(2);
@@ -292,14 +358,140 @@ describe('publish async get benchmark', () => {
     expect(record.scenes[1]).toEqual({ [caseName]: { time: [3] } });
   });
 
+  it('links the combined ESBench report and focused HTML pages together', async () => {
+    const {
+      addLinkedReportNavigation,
+      publishAsyncGetPages,
+    } = await import('../../../esbench.config.mjs') as EsbenchConfigForTest;
+    const targets: Array<[string, string]> = [
+      ['Combined report', 'bench/results/latest.html'],
+      ...publishAsyncGetPages,
+    ];
+
+    const html = addLinkedReportNavigation(
+      '<!doctype html><html><head><title>Benchmark</title></head><body><main></main></body></html>',
+      'bench/results/publish-async-get/get-read-retrieval.html',
+      targets,
+    );
+    const repeated = addLinkedReportNavigation(
+      html,
+      'bench/results/publish-async-get/get-read-retrieval.html',
+      targets,
+    );
+
+    expect(html).toContain('dkg-benchmark-report-nav');
+    expect(html).toContain('../latest.html');
+    expect(html).toContain('sync-publish-finalization.html');
+    expect(html).toContain('asynchronous publish enqueue and finalization');
+    expect(html).toContain('aria-current=\\"page\\"');
+    expect(html).toContain('DOMContentLoaded');
+    expect(repeated.match(/dkg-benchmark-report-nav:start/g)).toHaveLength(1);
+  });
+
+  it('renders a CPU profile flamegraph HTML report for benchmark analysis', async () => {
+    const { renderCpuProfileFlamegraphHtml } = await import('../../../bench/support/cpu-profile-report.mjs') as CpuProfileReportForTest;
+    const html = renderCpuProfileFlamegraphHtml({
+      nodes: [
+        {
+          id: 1,
+          callFrame: { functionName: '(root)', url: '', lineNumber: 0, columnNumber: 0 },
+          children: [2],
+        },
+        {
+          id: 2,
+          callFrame: {
+            functionName: 'publishFromSharedMemory',
+            url: 'file:///repo/packages/publisher/src/index.ts',
+            lineNumber: 41,
+            columnNumber: 1,
+          },
+          children: [3],
+        },
+        {
+          id: 3,
+          callFrame: {
+            functionName: 'finalizePublish',
+            url: 'file:///repo/packages/agent/src/publisher.ts',
+            lineNumber: 8,
+            columnNumber: 1,
+          },
+        },
+      ],
+      samples: [2, 3, 3],
+      timeDeltas: [1000, 2000, 3000],
+    }, {
+      profileName: 'publish-async-get-test.cpuprofile',
+      generatedAt: '2026-05-06T00:00:00.000Z',
+    });
+
+    expect(html).toContain('<svg');
+    expect(html).toContain('publishFromSharedMemory');
+    expect(html).toContain('finalizePublish');
+    expect(html).toContain('6.00 ms');
+    expect(html).toContain('Raw .cpuprofile');
+  });
+
+  it('renders method analysis with invoked methods and per-step timing', async () => {
+    const { renderMethodAnalysisHtml } = await import('../../../bench/analyze-publish-async-get.ts') as MethodAnalysisForTest;
+    const html = renderMethodAnalysisHtml({
+      benchmark: 'publish-async-get-method-analysis',
+      generatedAt: '2026-05-06T00:00:00.000Z',
+      payloadSizes: ['200mb'],
+      flows: [
+        {
+          flow: 'asynchronous publish enqueue and finalization',
+          payloadSize: '200mb',
+          totalMs: 12,
+          measuredMs: 7,
+          traces: [
+            {
+              flow: 'asynchronous publish enqueue and finalization',
+              payloadSize: '200mb',
+              phase: 'measured',
+              method: 'publisherEnqueue',
+              invokes: ['publisherJobs.set'],
+              detail: 'Enqueue the publish request through the publisher runtime path.',
+              durationMs: 2,
+              success: true,
+              context: { rootEntity: 'urn:test:root', quadCount: 1 },
+            },
+            {
+              flow: 'asynchronous publish enqueue and finalization',
+              payloadSize: '200mb',
+              phase: 'measured',
+              method: 'publisherJob',
+              invokes: ['promoteSharedRoot'],
+              detail: 'Poll the publisher job and finalize queued content.',
+              durationMs: 5,
+              success: true,
+              context: { jobId: 'job-1' },
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(html).toContain('DKG Benchmark Method Analysis');
+    expect(html).toContain('asynchronous publish enqueue and finalization');
+    expect(html).toContain('publisherEnqueue');
+    expect(html).toContain('publisherJob');
+    expect(html).toContain('promoteSharedRoot');
+    expect(html).toContain('2.000 ms');
+    expect(html).toContain('5.000 ms');
+  });
+
   it('keeps focused ESBench HTML pages wired into the documented benchmark script', async () => {
     const packageJson = JSON.parse(await readFile(new URL('../../../package.json', import.meta.url), 'utf8')) as {
       scripts?: Record<string, string>;
     };
     const benchHtml = packageJson.scripts?.['bench:html'];
+    const benchAnalysis = packageJson.scripts?.['bench:analysis'];
+    const benchProfile = packageJson.scripts?.['bench:profile'];
 
     expect(benchHtml).toContain('ESBENCH_HTML=1');
     expect(benchHtml).toContain('ESBENCH_PUBLISH_ASYNC_GET_HTML=1');
     expect(benchHtml).toContain('esbench --config esbench.config.mjs');
+    expect(benchAnalysis).toBe('node --experimental-strip-types bench/analyze-publish-async-get.ts');
+    expect(benchProfile).toBe('node bench/profile-publish-async-get.mjs');
   });
 });

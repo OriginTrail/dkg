@@ -5,6 +5,7 @@ import { TypedEventBus, generateEd25519Keypair, sha256 } from '@origintrail-offi
 import { ethers } from 'ethers';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, createTestContextGraph, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
+import { wrapPublisherForTest } from './_helpers/seal.js';
 import {
   DKGPublisher,
   TripleStoreAsyncLiftPublisher,
@@ -45,8 +46,18 @@ describe('TripleStoreAsyncLiftPublisher', () => {
   let now = 1_000;
   let ids = 0;
   let store: OxigraphStore;
-  let PARANET: string;
+  let CONTEXT_GRAPH: string;
   let _fileSnapshot: string;
+  let _kav10Address: string;
+  let _provider: ethers.JsonRpcProvider;
+  const _author = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+
+  function makeTestPublisher(opts: ConstructorParameters<typeof DKGPublisher>[0]): DKGPublisher {
+    return wrapPublisherForTest(new DKGPublisher(opts), {
+      author: _author,
+      ctx: { provider: _provider, kav10Address: _kav10Address },
+    });
+  }
 
   beforeAll(async () => {
     _fileSnapshot = await takeSnapshot();
@@ -55,7 +66,10 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
     await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
     const cgId = await createTestContextGraph();
-    PARANET = cgId.toString();
+    CONTEXT_GRAPH = cgId.toString();
+    _provider = provider;
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    _kav10Address = await chain.getKnowledgeAssetsV10Address();
   });
   afterAll(async () => {
     await revertSnapshot(_fileSnapshot);
@@ -120,7 +134,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       .slice(0, 6)
       .map((byte) => byte.toString(16).padStart(2, '0'))
       .join('');
-    return `dkg:${PARANET}:aloha:person-profile/rihana-${suffix}`;
+    return `dkg:${CONTEXT_GRAPH}:aloha:person-profile/rihana-${suffix}`;
   }
 
   it('creates accepted jobs and returns status', async () => {
@@ -139,7 +153,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
   });
 
   it('exposes the renamed shared-memory publisher contract', async () => {
-    const publisherContract: Publisher = new DKGPublisher({
+    const publisherContract: Publisher = makeTestPublisher({
       store,
       chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       eventBus: new TypedEventBus(),
@@ -601,7 +615,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     });
     const privateStore = new PrivateContentStore(store, new GraphManager(store));
 
-    const dkgPublisher = new DKGPublisher({
+    const dkgPublisher = makeTestPublisher({
       store,
       chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       eventBus: new TypedEventBus(),
@@ -643,7 +657,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       },
     });
 
-    const dkgPublisher = new DKGPublisher({
+    const dkgPublisher = makeTestPublisher({
       store,
       chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       eventBus: new TypedEventBus(),
@@ -679,7 +693,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       },
     });
 
-    const dkgPublisher = new DKGPublisher({
+    const dkgPublisher = makeTestPublisher({
       store,
       chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       eventBus: new TypedEventBus(),
@@ -735,7 +749,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
   it('uses renamed shared-memory fields in publisher APIs', async () => {
     const publisher = createPublisher();
-    const dkgPublisher = new DKGPublisher({
+    const dkgPublisher = makeTestPublisher({
       store,
       chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       eventBus: new TypedEventBus(),
@@ -767,7 +781,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
   });
 
   it('stores confirmed metadata in the graph manager meta graph', async () => {
-    const dkgPublisher = new DKGPublisher({
+    const dkgPublisher = makeTestPublisher({
       store,
       chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       eventBus: new TypedEventBus(),
@@ -778,7 +792,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     const graphManager = new GraphManager(store);
 
     const result = await dkgPublisher.publish({
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [
         { subject: canonicalRoot('urn:local:/rihana'), predicate: 'http://schema.org/name', object: '"Rihana"', graph: '' },
       ],
@@ -788,7 +802,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(result.status).toBe('confirmed');
 
     const metadata = await store.query(`SELECT ?p ?o WHERE {
-      GRAPH <${graphManager.metaGraphUri(PARANET)}> {
+      GRAPH <${graphManager.metaGraphUri(CONTEXT_GRAPH)}> {
         <${result.ual}> ?p ?o .
       }
     }`);
@@ -825,7 +839,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     };
     const publisher = createPublisher({ config: { publishExecutor } });
 
-    const dkgPublisher = new DKGPublisher({
+    const dkgPublisher = makeTestPublisher({
       store,
       chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       eventBus: new TypedEventBus(),
@@ -836,21 +850,21 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
     const canonical = canonicalRoot('urn:local:/rihana');
     await dkgPublisher.publish({
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [
         { subject: canonical, predicate: 'http://schema.org/name', object: '"Rihana"', graph: '' },
       ],
       publisherPeerId: 'peer-1',
     });
 
-    const write = await dkgPublisher.share(PARANET, [
+    const write = await dkgPublisher.share(CONTEXT_GRAPH, [
       { subject: 'urn:local:/rihana', predicate: 'http://schema.org/name', object: '"Rihana"', graph: '' },
       { subject: 'urn:local:/rihana', predicate: 'http://schema.org/genre', object: '"Pop"', graph: '' },
     ], { publisherPeerId: 'peer-1' });
 
     await publisher.lift({
       ...request(),
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       shareOperationId: write.shareOperationId,
     });
 
@@ -868,7 +882,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     };
     const publisher = createPublisher({ config: { publishExecutor } });
 
-    const dkgPublisher = new DKGPublisher({
+    const dkgPublisher = makeTestPublisher({
       store,
       chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       eventBus: new TypedEventBus(),
@@ -879,20 +893,20 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
     const canonical = canonicalRoot('urn:local:/rihana');
     await dkgPublisher.publish({
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [
         { subject: canonical, predicate: 'http://schema.org/name', object: '"Rihana"', graph: '' },
       ],
       publisherPeerId: 'peer-1',
     });
 
-    const write = await dkgPublisher.share(PARANET, [
+    const write = await dkgPublisher.share(CONTEXT_GRAPH, [
       { subject: 'urn:local:/rihana', predicate: 'http://schema.org/name', object: '"Rihana"', graph: '' },
     ], { publisherPeerId: 'peer-1' });
 
     await publisher.lift({
       ...request(),
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       shareOperationId: write.shareOperationId,
     });
 
@@ -919,7 +933,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       },
     });
 
-    const dkgPublisher = new DKGPublisher({
+    const dkgPublisher = makeTestPublisher({
       store,
       chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       eventBus: new TypedEventBus(),

@@ -11,6 +11,11 @@
     "type": "constructor"
   },
   {
+    "inputs": [],
+    "name": "AuthorRequired",
+    "type": "error"
+  },
+  {
     "inputs": [
       {
         "internalType": "uint96",
@@ -35,6 +40,16 @@
       }
     ],
     "name": "CannotUpdateImmutableKnowledgeCollection",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "InvalidAuthorSignature",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "InvalidAuthorSignature1271",
     "type": "error"
   },
   {
@@ -278,6 +293,17 @@
   {
     "inputs": [
       {
+        "internalType": "uint8",
+        "name": "schemeVersion",
+        "type": "uint8"
+      }
+    ],
+    "name": "UnsupportedAuthorScheme",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "string",
         "name": "name",
         "type": "string"
@@ -408,11 +434,6 @@
         "internalType": "uint96",
         "name": "tokenAmount",
         "type": "uint96"
-      },
-      {
-        "internalType": "address",
-        "name": "paymaster",
-        "type": "address"
       }
     ],
     "name": "extendKnowledgeCollectionLifetime",
@@ -493,19 +514,6 @@
     "type": "function"
   },
   {
-    "inputs": [],
-    "name": "paymasterManager",
-    "outputs": [
-      {
-        "internalType": "contract PaymasterManager",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
     "inputs": [
       {
         "components": [
@@ -560,14 +568,24 @@
             "type": "uint72"
           },
           {
+            "internalType": "address",
+            "name": "authorAddress",
+            "type": "address"
+          },
+          {
             "internalType": "bytes32",
-            "name": "publisherNodeR",
+            "name": "authorR",
             "type": "bytes32"
           },
           {
             "internalType": "bytes32",
-            "name": "publisherNodeVS",
+            "name": "authorVS",
             "type": "bytes32"
+          },
+          {
+            "internalType": "uint8",
+            "name": "authorSchemeVersion",
+            "type": "uint8"
           },
           {
             "internalType": "uint72[]",
@@ -602,107 +620,6 @@
     "type": "function"
   },
   {
-    "inputs": [
-      {
-        "components": [
-          {
-            "internalType": "string",
-            "name": "publishOperationId",
-            "type": "string"
-          },
-          {
-            "internalType": "uint256",
-            "name": "contextGraphId",
-            "type": "uint256"
-          },
-          {
-            "internalType": "bytes32",
-            "name": "merkleRoot",
-            "type": "bytes32"
-          },
-          {
-            "internalType": "uint256",
-            "name": "knowledgeAssetsAmount",
-            "type": "uint256"
-          },
-          {
-            "internalType": "uint88",
-            "name": "byteSize",
-            "type": "uint88"
-          },
-          {
-            "internalType": "uint40",
-            "name": "epochs",
-            "type": "uint40"
-          },
-          {
-            "internalType": "uint96",
-            "name": "tokenAmount",
-            "type": "uint96"
-          },
-          {
-            "internalType": "bool",
-            "name": "isImmutable",
-            "type": "bool"
-          },
-          {
-            "internalType": "uint32",
-            "name": "merkleLeafCount",
-            "type": "uint32"
-          },
-          {
-            "internalType": "uint72",
-            "name": "publisherNodeIdentityId",
-            "type": "uint72"
-          },
-          {
-            "internalType": "bytes32",
-            "name": "publisherNodeR",
-            "type": "bytes32"
-          },
-          {
-            "internalType": "bytes32",
-            "name": "publisherNodeVS",
-            "type": "bytes32"
-          },
-          {
-            "internalType": "uint72[]",
-            "name": "identityIds",
-            "type": "uint72[]"
-          },
-          {
-            "internalType": "bytes32[]",
-            "name": "r",
-            "type": "bytes32[]"
-          },
-          {
-            "internalType": "bytes32[]",
-            "name": "vs",
-            "type": "bytes32[]"
-          }
-        ],
-        "internalType": "struct KnowledgeAssetsV10.PublishParams",
-        "name": "p",
-        "type": "tuple"
-      },
-      {
-        "internalType": "address",
-        "name": "paymaster",
-        "type": "address"
-      }
-    ],
-    "name": "publishDirect",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "kcId",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
     "inputs": [],
     "name": "publishingConvictionNFT",
     "outputs": [
@@ -726,6 +643,19 @@
     "name": "setStatus",
     "outputs": [],
     "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "shardingTableStorage",
+    "outputs": [
+      {
+        "internalType": "contract ShardingTableStorage",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
     "type": "function"
   },
   {
@@ -804,16 +734,6 @@
             "type": "uint72"
           },
           {
-            "internalType": "bytes32",
-            "name": "publisherNodeR",
-            "type": "bytes32"
-          },
-          {
-            "internalType": "bytes32",
-            "name": "publisherNodeVS",
-            "type": "bytes32"
-          },
-          {
             "internalType": "uint72[]",
             "name": "identityIds",
             "type": "uint72[]"
@@ -835,96 +755,6 @@
       }
     ],
     "name": "update",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "components": [
-          {
-            "internalType": "uint256",
-            "name": "id",
-            "type": "uint256"
-          },
-          {
-            "internalType": "string",
-            "name": "updateOperationId",
-            "type": "string"
-          },
-          {
-            "internalType": "bytes32",
-            "name": "newMerkleRoot",
-            "type": "bytes32"
-          },
-          {
-            "internalType": "uint88",
-            "name": "newByteSize",
-            "type": "uint88"
-          },
-          {
-            "internalType": "uint96",
-            "name": "newTokenAmount",
-            "type": "uint96"
-          },
-          {
-            "internalType": "uint32",
-            "name": "newMerkleLeafCount",
-            "type": "uint32"
-          },
-          {
-            "internalType": "uint256",
-            "name": "mintKnowledgeAssetsAmount",
-            "type": "uint256"
-          },
-          {
-            "internalType": "uint256[]",
-            "name": "knowledgeAssetsToBurn",
-            "type": "uint256[]"
-          },
-          {
-            "internalType": "uint72",
-            "name": "publisherNodeIdentityId",
-            "type": "uint72"
-          },
-          {
-            "internalType": "bytes32",
-            "name": "publisherNodeR",
-            "type": "bytes32"
-          },
-          {
-            "internalType": "bytes32",
-            "name": "publisherNodeVS",
-            "type": "bytes32"
-          },
-          {
-            "internalType": "uint72[]",
-            "name": "identityIds",
-            "type": "uint72[]"
-          },
-          {
-            "internalType": "bytes32[]",
-            "name": "r",
-            "type": "bytes32[]"
-          },
-          {
-            "internalType": "bytes32[]",
-            "name": "vs",
-            "type": "bytes32[]"
-          }
-        ],
-        "internalType": "struct KnowledgeAssetsV10.UpdateParams",
-        "name": "p",
-        "type": "tuple"
-      },
-      {
-        "internalType": "address",
-        "name": "paymaster",
-        "type": "address"
-      }
-    ],
-    "name": "updateDirect",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"

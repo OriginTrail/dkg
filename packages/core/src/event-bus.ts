@@ -30,6 +30,7 @@ export const DKGEvent = {
   JOIN_APPROVED: 'join:approved',
   JOIN_REJECTED: 'join:rejected',
   PROJECT_SYNCED: 'project:synced',
+  MEMORY_GRAPH_CHANGED: 'memory-graph:changed',
 } as const;
 
 export type DKGEventType = (typeof DKGEvent)[keyof typeof DKGEvent];

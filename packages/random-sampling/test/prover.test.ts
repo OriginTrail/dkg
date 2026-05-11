@@ -86,7 +86,7 @@ async function seedKC(store: OxigraphStore, fixture: KCFixture): Promise<{ root:
   await store.insert([
     {
       subject: `did:dkg:context-graph:${cgName}`,
-      predicate: 'https://dkg.network/ontology#ParanetOnChainId',
+      predicate: 'https://dkg.network/ontology#ContextGraphOnChainId',
       object: `"${cgIdStr}"`,
       graph: 'did:dkg:context-graph:ontology',
     },

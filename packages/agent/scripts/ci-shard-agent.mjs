@@ -54,7 +54,7 @@ const WEIGHTS = {
   'test/workspace-ttl.test.ts': 8758,
   'test/e2e-context-graph.test.ts': 8003,
   'test/publish-jsonld.test.ts': 7601,
-  'test/paranet-discovery.test.ts': 5800,
+  'test/contextGraph-discovery.test.ts': 5800,
   'test/e2e-assertion-lifecycle.test.ts': 5318,
   'test/e2e-chain.test.ts': 5000,
   'test/e2e-finalization.test.ts': 5000,
@@ -64,7 +64,7 @@ const WEIGHTS = {
   'test/v10-ack-provider.test.ts': 1131,
   'test/finalization-promote-extra.test.ts': 1058,
   'test/wm-multi-agent-isolation-extra.test.ts': 1022,
-  'test/swm-512kb-boundary-extra.test.ts': 1000,
+  'test/swm-10mb-boundary-extra.test.ts': 1000,
 };
 const DEFAULT_WEIGHT = 500;
 

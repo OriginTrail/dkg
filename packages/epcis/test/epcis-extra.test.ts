@@ -9,10 +9,10 @@
  *                   suite silently skips. This file replaces that gap with
  *                   a stub-based **contract test that ALWAYS runs**,
  *                   exercising the REAL production code paths:
- *                     - createValidator() + handleCapture() for capture
+ *                     - createValidator() + handleCaptureAsync() for capture
  *                     - buildEpcisQuery() + handleEventsQuery() for query
  *                     - toEpcisEvent() shape of the EPCISQueryDocument envelope
- *                   …against a small in-memory Publisher + QueryEngine that
+ *                   …against a small in-memory AsyncPublisher + QueryEngine that
  *                   implement the two DI boundaries defined in `src/types.ts`.
  *                   No mocks on the code under test.
  *
@@ -22,8 +22,8 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
-import { handleCapture, handleEventsQuery, EpcisQueryError, EpcisValidationError } from '../src/handlers.js';
-import type { Publisher, QueryEngine, CaptureOptions, EPCISDocument } from '../src/types.js';
+import { handleCaptureAsync, handleEventsQuery, EpcisQueryError, EpcisValidationError } from '../src/handlers.js';
+import type { AsyncPublisher, QueryEngine, CaptureOptions, EPCISDocument } from '../src/types.js';
 import {
   VALID_OBJECT_EVENT_DOC,
   VALID_TRANSFORMATION_EVENT_DOC,
@@ -38,27 +38,35 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const E2E_PATH = resolve(HERE, 'epcis-api.e2e.test.ts');
 
 // ─────────────────────────────────────────────────────────────────────────────
-// In-memory DI implementations of Publisher + QueryEngine. These are the
+// In-memory DI implementations of AsyncPublisher + QueryEngine. These are the
 // exact surfaces declared in src/types.ts; no production code is stubbed.
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface Captured {
+  captureID: string;
   ual: string;
-  kcId: string;
-  doc: EPCISDocument;
+  content: unknown;
   opts?: CaptureOptions;
 }
 
-function inMemoryPublisher(store: Captured[]): Publisher {
+function inMemoryPublisher(store: Captured[]): AsyncPublisher {
   let nextId = 1;
   return {
-    async publish(contextGraphId, content, opts) {
-      const kcId = `kc-${nextId++}`;
-      const ual = `did:dkg:test:${contextGraphId}/${kcId}`;
-      store.push({ ual, kcId, doc: content as EPCISDocument, opts });
-      return { ual, kcId, status: 'confirmed' };
+    async publishAsync(contextGraphId, content, opts) {
+      const captureID = `capture-${nextId++}`;
+      const ual = `did:dkg:test:${contextGraphId}/${captureID}`;
+      store.push({ captureID, ual, content, opts });
+      return { captureID };
     },
   };
+}
+
+function capturedDocument(content: unknown): EPCISDocument {
+  if (content && typeof content === 'object' && !Array.isArray(content)) {
+    const envelope = content as { public?: unknown; private?: unknown };
+    return (envelope.public ?? envelope.private ?? content) as EPCISDocument;
+  }
+  return content as EPCISDocument;
 }
 
 /**
@@ -78,7 +86,8 @@ function inMemoryQueryEngine(store: Captured[]): QueryEngine & { lastSparql?: st
       const epcListMatch = sparql.match(/\?event epcis:epcList "([^"]+)"/);
       const wantEpc = epcListMatch?.[1];
       for (const c of store) {
-        const events = c.doc.epcisBody?.eventList ?? c.doc.eventList ?? [];
+        const doc = capturedDocument(c.content);
+        const events = doc.epcisBody?.eventList ?? doc.eventList ?? [];
         for (const e of events) {
           if (wantEpc && !(e.epcList ?? []).includes(wantEpc)) continue;
 
@@ -124,7 +133,7 @@ describe('[K-6] e2e suite skip pattern exists (evidence this file is needed)', (
 // ─────────────────────────────────────────────────────────────────────────────
 describe('[K-6] EPCIS capture → query contract (always runs, no devnet)', () => {
   const store: Captured[] = [];
-  let publisher: Publisher;
+  let publisher: AsyncPublisher;
   let engine: QueryEngine & { lastSparql?: string };
 
   beforeAll(() => {
@@ -134,37 +143,36 @@ describe('[K-6] EPCIS capture → query contract (always runs, no devnet)', () =
 
   describe('Category A: capture happy path (mirrors e2e Category 3)', () => {
     it('ObjectEvent: validates, publishes, returns receipt', async () => {
-      const result = await handleCapture(
+      const result = await handleCaptureAsync(
         { epcisDocument: VALID_OBJECT_EVENT_DOC },
         { contextGraphId: CONTEXT_GRAPH_ID, publisher },
       );
-      expect(result.status).toBe('confirmed');
+      expect(result.status).toBe('accepted');
       expect(result.eventCount).toBe(1);
-      expect(result.ual).toMatch(/^did:dkg:test:/);
-      expect(result.kcId).toMatch(/^kc-\d+$/);
+      expect(result.captureID).toMatch(/^capture-\d+$/);
       expect(() => new Date(result.receivedAt).toISOString()).not.toThrow();
     });
 
     it('TransformationEvent: validates and publishes', async () => {
-      const result = await handleCapture(
+      const result = await handleCaptureAsync(
         { epcisDocument: VALID_TRANSFORMATION_EVENT_DOC },
         { contextGraphId: CONTEXT_GRAPH_ID, publisher },
       );
-      expect(result.status).toBe('confirmed');
+      expect(result.status).toBe('accepted');
       expect(result.eventCount).toBe(1);
     });
 
-    it('publisher received exactly the submitted JSON-LD documents', () => {
+    it('publisher received submitted JSON-LD documents as private content', () => {
       expect(store.length).toBeGreaterThanOrEqual(2);
-      expect(store[0].doc).toBe(VALID_OBJECT_EVENT_DOC);
-      expect(store[1].doc).toBe(VALID_TRANSFORMATION_EVENT_DOC);
+      expect(store[0].content).toEqual({ private: VALID_OBJECT_EVENT_DOC });
+      expect(store[1].content).toEqual({ private: VALID_TRANSFORMATION_EVENT_DOC });
     });
   });
 
   describe('Category B: capture validation boundaries (mirrors e2e Category 5)', () => {
     it('INVALID_DOC is rejected with EpcisValidationError', async () => {
       await expect(
-        handleCapture(
+        handleCaptureAsync(
           { epcisDocument: INVALID_DOC },
           { contextGraphId: CONTEXT_GRAPH_ID, publisher: inMemoryPublisher([]) },
         ),
@@ -173,7 +181,7 @@ describe('[K-6] EPCIS capture → query contract (always runs, no devnet)', () =
 
     it('EMPTY_EVENT_LIST_DOC is rejected', async () => {
       await expect(
-        handleCapture(
+        handleCaptureAsync(
           { epcisDocument: EMPTY_EVENT_LIST_DOC },
           { contextGraphId: CONTEXT_GRAPH_ID, publisher: inMemoryPublisher([]) },
         ),
@@ -189,7 +197,7 @@ describe('[K-6] EPCIS capture → query contract (always runs, no devnet)', () =
       // publisher call was what actually failed — we want to prove
       // validation rejected first.
       await expect(
-        handleCapture(
+        handleCaptureAsync(
           { epcisDocument: INVALID_DOC },
           { contextGraphId: CONTEXT_GRAPH_ID, publisher: p },
         ),
@@ -199,10 +207,10 @@ describe('[K-6] EPCIS capture → query contract (always runs, no devnet)', () =
   });
 
   describe('Category C: capture with publishOptions (mirrors e2e Category 11)', () => {
-    it('forwards accessPolicy + allowedPeers to Publisher', async () => {
+    it('forwards accessPolicy + allowedPeers to AsyncPublisher', async () => {
       const scratch: Captured[] = [];
       const p = inMemoryPublisher(scratch);
-      await handleCapture(
+      await handleCaptureAsync(
         {
           epcisDocument: VALID_OBJECT_EVENT_DOC,
           publishOptions: { accessPolicy: 'allowList', allowedPeers: ['12D3KooWPeerA'] },
@@ -279,7 +287,7 @@ describe('[K-6] EPCIS capture → query contract (always runs, no devnet)', () =
       const eng = inMemoryQueryEngine(many);
       // Seed 12 captures of the valid object event so the engine returns 12 bindings.
       for (let i = 0; i < 12; i++) {
-        await handleCapture(
+        await handleCaptureAsync(
           { epcisDocument: VALID_OBJECT_EVENT_DOC },
           { contextGraphId: CONTEXT_GRAPH_ID, publisher: p },
         );
@@ -300,7 +308,7 @@ describe('[K-6] EPCIS capture → query contract (always runs, no devnet)', () =
       const p = inMemoryPublisher(few);
       const eng = inMemoryQueryEngine(few);
       for (let i = 0; i < 3; i++) {
-        await handleCapture(
+        await handleCaptureAsync(
           { epcisDocument: VALID_OBJECT_EVENT_DOC },
           { contextGraphId: CONTEXT_GRAPH_ID, publisher: p },
         );
@@ -320,15 +328,15 @@ describe('[K-6] EPCIS capture → query contract (always runs, no devnet)', () =
       const p = inMemoryPublisher(ccStore);
       const results = await Promise.all(
         Array.from({ length: 8 }, () =>
-          handleCapture(
+          handleCaptureAsync(
             { epcisDocument: VALID_OBJECT_EVENT_DOC },
             { contextGraphId: CONTEXT_GRAPH_ID, publisher: p },
           ),
         ),
       );
       expect(results).toHaveLength(8);
-      const uals = new Set(results.map((r) => r.ual));
-      expect(uals.size).toBe(8);
+      const captureIDs = new Set(results.map((r) => r.captureID));
+      expect(captureIDs.size).toBe(8);
       expect(ccStore).toHaveLength(8);
     });
   });

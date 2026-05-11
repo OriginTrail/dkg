@@ -9,7 +9,7 @@ const MAX_UINT64 = (1n << 64n) - 1n;
 function minimalFinalization(overrides: Record<string, unknown> = {}) {
   return {
     ual: 'did:dkg:evm:31337/0x0/1',
-    paranetId: 'p',
+    contextGraphId: 'p',
     kcMerkleRoot: new Uint8Array(32),
     txHash: '0xab',
     blockNumber: 1,

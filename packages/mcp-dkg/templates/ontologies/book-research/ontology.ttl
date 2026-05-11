@@ -99,4 +99,4 @@ chat:asks     a owl:ObjectProperty   ; rdfs:domain chat:Turn ; rdfs:range :Quest
   skos:definition "Bibliographic citation; aligned with bibo:Document via cito:cites." .
 
 :slug-normalisation a skos:Note ;
-  skos:definition "Lowercase → ASCII-fold → strip stopwords (the/a/an/of/for/and/or/to/in/on/with) → hyphenate → ≤60 chars. Apply BEFORE comparing dkg_search results to decide reuse-vs-mint." .
+  skos:definition "Lowercase → ASCII-fold → strip stopwords (the/a/an/of/for/and/or/to/in/on/with) → hyphenate → ≤60 chars. Apply BEFORE comparing free-text recall results (`dkg_memory_search`) to decide reuse-vs-mint." .

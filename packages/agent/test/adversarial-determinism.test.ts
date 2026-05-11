@@ -9,7 +9,7 @@ import { GossipPublishHandler } from '../src/gossip-publish-handler.js';
 import { monotonicTransition } from '../src/workspace-consistency.js';
 import { encodeFinalizationMessage, encodePublishRequest } from '@origintrail-official/dkg-core';
 
-const PARANET = 'adv-determinism';
+const CONTEXT_GRAPH = 'adv-determinism';
 
 async function totalQuadCount(store: OxigraphStore): Promise<number> {
   const res = await store.query('SELECT (COUNT(*) as ?c) WHERE { GRAPH ?g { ?s ?p ?o } }');
@@ -37,7 +37,7 @@ describe('Finalization (03 §10–11): malformed wire', () => {
     const handler = new FinalizationHandler(store, undefined);
     const countBefore = await totalQuadCount(store);
 
-    await expect(handler.handleFinalizationMessage(new Uint8Array([0xff, 0x80, 0x01]), PARANET)).resolves.toBeUndefined();
+    await expect(handler.handleFinalizationMessage(new Uint8Array([0xff, 0x80, 0x01]), CONTEXT_GRAPH)).resolves.toBeUndefined();
 
     const countAfter = await totalQuadCount(store);
     expect(countAfter).toBe(countBefore);
@@ -46,7 +46,7 @@ describe('Finalization (03 §10–11): malformed wire', () => {
   it('ignores root entities that are not safe IRIs (no workspace query injection)', async () => {
     const store = new OxigraphStore();
     const gm = new GraphManager(store);
-    await gm.ensureParanet(PARANET);
+    await gm.ensureContextGraph(CONTEXT_GRAPH);
     const handler = new FinalizationHandler(store, undefined);
     const INJECTED_ENTITY = 'not-a-valid-http-iri';
 
@@ -54,7 +54,7 @@ describe('Finalization (03 §10–11): malformed wire', () => {
 
     const data = encodeFinalizationMessage({
       ual: 'did:dkg:mock:31337/0x1/1',
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       kcMerkleRoot: new Uint8Array(32),
       txHash: '0xabc',
       blockNumber: 1,
@@ -66,7 +66,7 @@ describe('Finalization (03 §10–11): malformed wire', () => {
       timestampMs: Date.now(),
     });
 
-    await handler.handleFinalizationMessage(data, PARANET);
+    await handler.handleFinalizationMessage(data, CONTEXT_GRAPH);
 
     const countAfter = await totalQuadCount(store);
     expect(countAfter).toBe(countBefore);
@@ -84,14 +84,14 @@ describe('Gossip (03 §10–11): malformed publish broadcast', () => {
     const countBefore = await totalQuadCount(store);
 
     await expect(
-      handler.handlePublishMessage(new Uint8Array([0x0a, 0xff, 0xff, 0x01]), PARANET),
+      handler.handlePublishMessage(new Uint8Array([0x0a, 0xff, 0xff, 0x01]), CONTEXT_GRAPH),
     ).resolves.toBeUndefined();
 
     const countAfter = await totalQuadCount(store);
     expect(countAfter).toBe(countBefore);
   });
 
-  it('ignores publish when message paranetId does not match gossip topic', async () => {
+  it('ignores publish when message contextGraphId does not match gossip topic', async () => {
     const store = new OxigraphStore();
     const handler = new GossipPublishHandler(store, undefined, new Map(), {
       contextGraphExists: async () => true,
@@ -106,7 +106,7 @@ describe('Gossip (03 §10–11): malformed publish broadcast', () => {
     const data = encodePublishRequest({
       ual: 'did:dkg:mock:31337/0x1/1',
       nquads,
-      paranetId: 'topic-a',
+      contextGraphId: 'topic-a',
       kas: [{ tokenId: 1, rootEntity: 'http://ex.org/e' }],
       publisherIdentity: new Uint8Array(32),
       publisherAddress: '0x1111111111111111111111111111111111111111',
@@ -126,7 +126,7 @@ describe('Gossip (03 §10–11): malformed publish broadcast', () => {
   it('rejects gossip publish when no manifest rootEntity survives IRI safety filter', async () => {
     const store = new OxigraphStore();
     const gm = new GraphManager(store);
-    await gm.ensureParanet(PARANET);
+    await gm.ensureContextGraph(CONTEXT_GRAPH);
     const handler = new GossipPublishHandler(store, undefined, new Map(), {
       contextGraphExists: async () => true,
       getContextGraphOwner: async () => null,
@@ -137,7 +137,7 @@ describe('Gossip (03 §10–11): malformed publish broadcast', () => {
     const data = encodePublishRequest({
       ual: 'did:dkg:mock:31337/0x1/99',
       nquads: new Uint8Array(0),
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       kas: [{ tokenId: 1, rootEntity: 'http://evil">injection' }],
       publisherIdentity: new Uint8Array(32),
       publisherAddress: '0x2222222222222222222222222222222222222222',
@@ -148,7 +148,7 @@ describe('Gossip (03 §10–11): malformed publish broadcast', () => {
       publisherSignatureVs: new Uint8Array(0),
     });
 
-    await handler.handlePublishMessage(data, PARANET);
+    await handler.handlePublishMessage(data, CONTEXT_GRAPH);
 
     const countAfter = await totalQuadCount(store);
     expect(countAfter).toBe(countBefore);

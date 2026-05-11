@@ -12,7 +12,7 @@ Foundation package for DKG V10. Provides P2P networking, protocol messaging, cry
 - **Protobuf messages** — efficient serialization for all DKG protocol messages
 - **Event bus** — centralized internal event system (`DKGEvent`) for decoupled component communication
 - **Logger** — structured logging with operation context tracking
-- **Genesis ontology** — built-in DKG ontology quads and system paranet definitions
+- **Genesis ontology** — built-in DKG ontology quads and system contextGraph definitions
 - **Constants** — network IDs, protocol paths, topic naming conventions
 
 ## Usage

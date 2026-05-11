@@ -120,7 +120,7 @@ describe('E2E: DKGAgent with real blockchain', () => {
 
     await agents[0].createContextGraph({
       id: CONTEXT_GRAPH_ID,
-      name: 'Chain Test Paranet',
+      name: 'Chain Test ContextGraph',
       description: 'E2E test with real blockchain',
     });
 
@@ -233,7 +233,7 @@ describe('E2E: DKGAgent with real blockchain', () => {
 
     await agents[0].createContextGraph({
       id: secondCG,
-      name: 'Second Chain Paranet',
+      name: 'Second Chain ContextGraph',
       description: 'Second E2E context graph',
     });
     const sub2 = (agents[0] as any).subscribedContextGraphs.get(secondCG);

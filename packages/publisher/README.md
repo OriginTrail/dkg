@@ -7,7 +7,7 @@ Publishing protocol for DKG V10. Handles the complete lifecycle of getting Knowl
 - **DKGPublisher** — high-level publishing API: submit RDF, get back a finalized Knowledge Collection UAL
 - **PublishHandler** — P2P protocol handler that processes incoming publish requests from other nodes, validates data, stores triples, and returns signed ACKs
 - **SharedMemoryHandler** — feeless Shared Working Memory handling for local-only or staging workflows, including signed gossip envelope verification for agent-gated context graphs; signatures authenticate writers, but do not encrypt GossipSub payload bytes
-- **Context Graphs** — `createContextGraph` and `publishToContextGraph` for M/N signature-gated subgraphs within paranets
+- **Context Graphs** — `createContextGraph` and `publishToContextGraph` for M/N signature-gated subgraphs within contextGraphs
 - **Context Oracle** — `ContextOracle` class providing verifiable read operations on Context Graphs: `queryWithProofs` (SPARQL with Merkle inclusion proofs), `entityWithProofs` (entity lookup with proofs), and `proveTriple` (single triple existence proof). Provenance triples are scoped to subjects discovered in the query results for efficiency.
 - **Merkle trees** — per-KA triple hashing, public/private sub-roots, and collection-level Merkle root computation
 - **Skolemization** — blank node to skolemized URI conversion for deterministic RDF processing
@@ -25,7 +25,7 @@ const publisher = new DKGPublisher(config);
 
 // Publish a Knowledge Collection
 const result = await publisher.publish({
-  paranetId: 'urn:paranet:example',
+  contextGraphId: 'urn:contextGraph:example',
   quads: myTriples,
   privateQuads: sensitiveTriples,
   accessPolicy: 'ownerOnly',
@@ -33,12 +33,12 @@ const result = await publisher.publish({
 console.log('Published KC:', result.ual);
 
 // Write to workspace (feeless staging)
-await publisher.writeToWorkspace('urn:paranet:example', quads, {
+await publisher.writeToWorkspace('urn:contextGraph:example', quads, {
   publisherPeerId: agent.peerId,
 });
 
 // Conditional write with Compare-and-Swap
-await publisher.writeConditionalToWorkspace('urn:paranet:example', quads, {
+await publisher.writeConditionalToWorkspace('urn:contextGraph:example', quads, {
   publisherPeerId: agent.peerId,
   conditions: [
     { subject: 'urn:entity:1', predicate: 'urn:status', expectedValue: '"pending"' },

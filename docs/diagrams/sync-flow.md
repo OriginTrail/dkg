@@ -1,4 +1,4 @@
-# Paranet Sync Flow
+# ContextGraph Sync Flow
 
 Sequence diagram showing how a newly-joined node catches up on data it
 missed while offline. This solves the **"last to the party" problem** —
@@ -33,7 +33,7 @@ Timeline ───────────────────────�
 ## Solution: Verified sync on connect
 
 When C connects to any peer, it requests the full contents of the `agents`
-paranet from that peer, page by page. Every received Knowledge Collection
+contextGraph from that peer, page by page. Every received Knowledge Collection
 is **verified against its merkle root** before being accepted into the
 local store — a malicious peer cannot inject, alter, or omit triples
 without being detected.
@@ -67,7 +67,7 @@ RPC calls and is more expensive.
 
 ## Design decisions
 
-- **Paginated** — the request includes `offset|limit` so large paranets
+- **Paginated** — the request includes `offset|limit` so large contextGraphs
   don't blow up memory. Default page size is 500 triples per request.
   The requester loops until it gets an empty page.
 - **Data + meta graph** — the first sync page includes the full meta graph
@@ -92,10 +92,10 @@ Protocol:   /dkg/sync/1.0.0
 Transport:  libp2p stream (request → response)
 
 Request (UTF-8):
-  "<paranetId>|<offset>|<limit>"
+  "<contextGraphId>|<offset>|<limit>"
   e.g. "agents|0|500"
 
-  - paranetId:  which paranet to sync (default: "agents")
+  - contextGraphId:  which contextGraph to sync (default: "agents")
   - offset:     number of data triples to skip (default: 0)
   - limit:      max data triples to return (capped at 500)
 
@@ -104,8 +104,8 @@ Response (UTF-8):
   "<subject> <predicate> <object> <graph> .\n"
 
   Triples from TWO named graphs:
-  - did:dkg:paranet:{id}       — data graph (paginated)
-  - did:dkg:paranet:{id}/_meta — meta graph (full, first page only)
+  - did:dkg:context-graph:{id}       — data graph (paginated)
+  - did:dkg:context-graph:{id}/_meta — meta graph (full, first page only)
 
   Empty response = no more data (end of pagination).
 ```
@@ -168,7 +168,7 @@ sequenceDiagram
     alt Peer supports /dkg/sync/1.0.0
         Note over NewNode,Store: Phase 3 — Paginated Download
 
-        loop For each system paranet (agents, ontology, ...)
+        loop For each system contextGraph (agents, ontology, ...)
             NewNode ->> NewNode: offset = 0, staging = []
 
             loop Until empty page
@@ -250,7 +250,7 @@ then fetching only missing content.
 
 ### 1) Scope and modes
 
-- Add reconciliation scopes per paranet:
+- Add reconciliation scopes per contextGraph:
   - `confirmed` (chain-finalized KCs)
   - `tentative` (optional, best-effort)
   - `workspace` (optional, best-effort)
@@ -270,7 +270,7 @@ Rules:
 
 - Leaves sorted lexicographically by raw leaf key bytes.
 - Inventory root = Merkle root over sorted leaf keys.
-- Keep one root per `(paranetId, scope)`.
+- Keep one root per `(contextGraphId, scope)`.
 
 ### 3) New protocol: inventory exchange
 
@@ -280,7 +280,7 @@ Add a dedicated protocol (keep `/dkg/sync/1.0.0` for payload transfer):
 
 Message phases:
 
-1. `GetRoot(paranetId, scope)` -> `Root(snapshotId, leafCount, rootHash)`
+1. `GetRoot(contextGraphId, scope)` -> `Root(snapshotId, leafCount, rootHash)`
 2. If roots differ, binary split walk:
    - `GetRangeHash(snapshotId, start, end)` -> `RangeHash(...)`
 3. When a range is small, request concrete leaves:
@@ -306,7 +306,7 @@ This replaces blind offset-based full scans for healthy peers.
 
 Add targeted fetch requests for missing content:
 
-- Preferred for `confirmed`: `SyncByBatchIds(paranetId, batchIds[])`
+- Preferred for `confirmed`: `SyncByBatchIds(contextGraphId, batchIds[])`
 - Fallback: existing paginated `/dkg/sync/1.0.0`
 
 Receiver pipeline remains:
@@ -329,29 +329,29 @@ truth anchor for finalized state.
 
 ### 7) Subscribe/connect behavior changes
 
-- `subscribe` should trigger immediate reconciliation for that paranet.
+- `subscribe` should trigger immediate reconciliation for that contextGraph.
 - Startup sync scope must include:
-  - `config.paranets`
-  - `network.defaultParanets`
+  - `config.contextGraphs`
+  - `network.defaultContextGraphs`
 - On peer connect, run lightweight root comparison first; only diff when needed.
 
 ### 8) CLI/API surface
 
 Add operator-facing controls:
 
-- `dkg sync verify <paranet> [--scope confirmed] [--peer <id>]`
-- `dkg sync repair <paranet> [--scope confirmed] [--peer <id>]`
-- `dkg sync status <paranet>` (local root, peer roots, leaf counts, last sync)
+- `dkg sync verify <contextGraph> [--scope confirmed] [--peer <id>]`
+- `dkg sync repair <contextGraph> [--scope confirmed] [--peer <id>]`
+- `dkg sync status <contextGraph>` (local root, peer roots, leaf counts, last sync)
 
 Daemon endpoints:
 
 - `POST /api/sync/verify`
 - `POST /api/sync/repair`
-- `GET /api/sync/status?paranetId=...`
+- `GET /api/sync/status?contextGraphId=...`
 
 ### 9) Persistence and indexing
 
-Persist per `(paranetId, scope)` inventory state:
+Persist per `(contextGraphId, scope)` inventory state:
 
 - current `rootHash`
 - `leafCount`
@@ -364,7 +364,7 @@ Update incrementally on publish, update, sync insert, and cleanup.
 
 Phase A (fast reliability win)
 
-1. Fix startup sync scope (`config.paranets U network.defaultParanets`).
+1. Fix startup sync scope (`config.contextGraphs U network.defaultContextGraphs`).
 2. Make subscribe trigger catch-up sync.
 3. Add manual repair command using existing pagination.
 

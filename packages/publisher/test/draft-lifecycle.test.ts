@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
 import {
+  DKG_GOSSIP_MAX_MESSAGE_BYTES,
   TypedEventBus,
   generateEd25519Keypair,
   contextGraphAssertionUri,
@@ -16,6 +17,7 @@ const CG_ID = 'test-assertion-cg';
 const SWM_GRAPH = `did:dkg:context-graph:${CG_ID}/_shared_memory`;
 const AGENT = '0x1234567890abcdef1234567890abcdef12345678';
 const AGENT_B = '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd';
+const PEER = '12D3KooWPromoteBoundary';
 const ASSERTION_NAME = 'my-assertion';
 
 const TRIPLES = [
@@ -23,6 +25,25 @@ const TRIPLES = [
   { subject: 'urn:test:entity:alice', predicate: 'http://schema.org/age', object: '"30"' },
   { subject: 'urn:test:entity:bob', predicate: 'http://schema.org/name', object: '"Bob"' },
 ];
+
+function largePayloadQuads(prefix: string, bytes: number): Quad[] {
+  const chunkBytes = 16 * 1024;
+  const quads: Quad[] = [];
+  let remaining = bytes;
+  let index = 0;
+  while (remaining > 0) {
+    const size = Math.min(chunkBytes, remaining);
+    quads.push({
+      subject: `urn:test:entity:${prefix}:${index}`,
+      predicate: 'http://schema.org/description',
+      object: `"${'x'.repeat(size)}"`,
+      graph: '',
+    });
+    remaining -= size;
+    index += 1;
+  }
+  return quads;
+}
 
 describe('Working Memory Assertion Lifecycle', () => {
   let store: OxigraphStore;
@@ -90,6 +111,42 @@ describe('Working Memory Assertion Lifecycle', () => {
     expect(swmResult.type).toBe('bindings');
     if (swmResult.type === 'bindings') {
       expect(swmResult.bindings.length).toBe(3);
+    }
+  });
+
+  it('promote accepts a payload above the old 512 KB cap and below 10 MB', async () => {
+    await publisher.assertionCreate(CG_ID, 'large-promote', AGENT);
+    const quads = largePayloadQuads('large-promote', 2 * 1024 * 1024);
+    await publisher.assertionWrite(CG_ID, 'large-promote', AGENT, quads);
+
+    const result = await publisher.assertionPromote(CG_ID, 'large-promote', AGENT, {
+      publisherPeerId: PEER,
+    });
+
+    expect(result.promotedCount).toBe(quads.length);
+    expect(result.gossipMessage).toBeInstanceOf(Uint8Array);
+    expect(result.gossipMessage!.length).toBeGreaterThan(512 * 1024);
+    expect(result.gossipMessage!.length).toBeLessThan(DKG_GOSSIP_MAX_MESSAGE_BYTES);
+  });
+
+  it('promote rejects payloads above 10 MB before mutating WM or SWM', async () => {
+    await publisher.assertionCreate(CG_ID, 'too-large-promote', AGENT);
+    const quads = largePayloadQuads('too-large-promote', DKG_GOSSIP_MAX_MESSAGE_BYTES + 1024 * 1024);
+    await publisher.assertionWrite(CG_ID, 'too-large-promote', AGENT, quads);
+
+    await expect(
+      publisher.assertionPromote(CG_ID, 'too-large-promote', AGENT, { publisherPeerId: PEER }),
+    ).rejects.toThrow(/Promoted assertion too large for gossip.*10\s*MB/i);
+
+    const assertionQuads = await publisher.assertionQuery(CG_ID, 'too-large-promote', AGENT);
+    expect(assertionQuads.length).toBe(quads.length);
+
+    const swmResult = await store.query(
+      `SELECT ?o WHERE { GRAPH <${SWM_GRAPH}> { <urn:test:entity:too-large-promote:0> <http://schema.org/description> ?o } }`,
+    );
+    expect(swmResult.type).toBe('bindings');
+    if (swmResult.type === 'bindings') {
+      expect(swmResult.bindings.length).toBe(0);
     }
   });
 

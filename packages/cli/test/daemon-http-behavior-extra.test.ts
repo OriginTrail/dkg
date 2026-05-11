@@ -114,7 +114,7 @@ async function writeDaemonConfig(
         hubAddress,
         chainId: 'evm:31337',
       },
-      paranets: [],
+      contextGraphs: [],
       ...extra,
     }),
   );
@@ -585,7 +585,7 @@ describe('CLI-9 — /api/verify & /api/ccl error-code mapping', () => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
       body: JSON.stringify({
-        paranetId: 'no-such-cg',
+        contextGraphId: 'no-such-cg',
         policyUri: 'did:dkg:policy:does-not-exist',
         contextType: 'query',
       }),

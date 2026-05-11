@@ -10,13 +10,13 @@ RESULTS_DIR="$EXPERIMENT_DIR/results/exp-d2a"
 OPENCLAW_DIR="${OPENCLAW_DIR:-/Users/aleatoric/dev/openclaw}"
 CLAUDE_RUN="$SCRIPT_DIR/claude-run.mjs"
 RUN_ID="${RUN_ID:-d2a-$(date +%Y%m%d-%H%M%S)}"
-PARANET_ID="${PARANET_ID:-dev-coordination}"
+CONTEXT_GRAPH_ID="${CONTEXT_GRAPH_ID:-dev-coordination}"
 
 mkdir -p "$RESULTS_DIR/round1" "$RESULTS_DIR/round2"
 
 echo "=== Experiment D2A (DKG collaboration, apples-to-apples) ==="
 echo "Run ID: $RUN_ID"
-echo "Paranet: $PARANET_ID"
+echo "ContextGraph: $CONTEXT_GRAPH_ID"
 echo "Results: $RESULTS_DIR"
 
 setup_worktree() {
@@ -52,7 +52,7 @@ run_feature_bg() {
 runId: $RUN_ID
 agentId: $agent
 featureId: $feature_id
-paranetId: $PARANET_ID
+contextGraphId: $CONTEXT_GRAPH_ID
 
 MANDATORY:
 1) query prior run entities:
@@ -71,7 +71,7 @@ subject urn:exp-d2a:$RUN_ID:$agent:$feature_id:decision:<n>
 4) publish final handoff:
 subject urn:exp-d2a:$RUN_ID:$agent:$feature_id:handoff
 
-Use graph did:dkg:paranet:$PARANET_ID and include predicates:
+Use graph did:dkg:context-graph:$CONTEXT_GRAPH_ID and include predicates:
 rdf:type, devgraph:summary, devgraph:kind, devgraph:agent, devgraph:feature.
 
 Feature task:

@@ -655,6 +655,14 @@ export class DkgDaemonClient {
   // Publish
   // ---------------------------------------------------------------------------
 
+  /**
+   * One-shot publish: routes through the assertion lifecycle (RFC-001
+   * §9.x). The daemon creates an auto-named assertion, writes the
+   * supplied quads, finalizes (computing the merkleRoot and signing
+   * the EIP-712 AuthorAttestation stored in `_meta`), promotes to
+   * SWM, and the second call publishes verbatim — the publisher
+   * forwards the seal and never re-signs.
+   */
   async publish(
     contextGraphId: string,
     quads: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
@@ -663,15 +671,34 @@ export class DkgDaemonClient {
   ): Promise<any> {
     if (privateQuads?.length || opts?.accessPolicy || opts?.allowedPeers?.length) {
       throw new Error(
-        'privateQuads, accessPolicy, and allowedPeers are not supported in V10 SWM-first publish',
+        'privateQuads, accessPolicy, and allowedPeers are not supported in the V10 ' +
+        'assertion-lifecycle publish — every published assertion goes through finalize, ' +
+        'which signs an EIP-712 attestation over the public quads.',
       );
     }
-    await this.post('/api/shared-memory/write', { contextGraphId, quads });
-    return this.post('/api/shared-memory/publish', {
+    const assertionName = `openclaw-publish-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const quadsWithGraph = quads.map((q) => ({
+      subject: q.subject,
+      predicate: q.predicate,
+      object: q.object,
+      graph: q.graph ?? `did:dkg:context-graph:${contextGraphId}`,
+    }));
+    const created: any = await this.post('/api/assertion/create', {
       contextGraphId,
-      selection: 'all',
-      clearAfter: true,
+      name: assertionName,
+      quads: quadsWithGraph,
+      finalize: true,
+      promote: true,
     });
+    const published = await this.post('/api/shared-memory/publish', {
+      contextGraphId,
+      assertionName,
+    });
+    return {
+      ...(typeof published === 'object' && published !== null ? published : {}),
+      assertionUri: created?.assertionUri,
+      ...(created?.seal ? { seal: created.seal } : {}),
+    };
   }
 
   /**

@@ -11,7 +11,8 @@ memory, exercises synchronous and asynchronous publish paths, queries the
 published marker, and reports timings plus failures. The repository ESBench
 workflow for the same feature stays local to benchmark tooling: it uses a
 deterministic layered DKG client to measure focused WM, SWM, VM, publish, and
-read flows, then renders both the combined report and per-flow HTML pages.
+read flows across generated `10kb`, `100kb`, `2mb`, and `200mb` payloads, then
+renders both the combined report and per-flow HTML pages.
 
 ## Top-Level Components
 

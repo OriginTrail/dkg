@@ -88,13 +88,6 @@ export const buraCliCoverage: CoverageThresholds = {
   statements: 39,
 };
 
-export const buraAttestedAssetsCoverage: CoverageThresholds = {
-  lines: 65,
-  functions: 71,
-  branches: 58,
-  statements: 62,
-};
-
 export const kosavaNodeUiCoverage: CoverageThresholds = {
   lines: 60,
   functions: 51,
@@ -143,13 +136,6 @@ export const kosavaAdapterHermesCoverage: CoverageThresholds = {
   functions: 60,
   branches: 50,
   statements: 60,
-};
-
-export const kosavaAdapterAutoresearchCoverage: CoverageThresholds = {
-  lines: 90,
-  functions: 99,
-  branches: 77,
-  statements: 91,
 };
 
 export const kosavaEpcisCoverage: CoverageThresholds = {

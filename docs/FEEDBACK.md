@@ -56,7 +56,7 @@ Issue IDs stay stable on purpose, so references do not break.
 - `I-003`: receiver approval is represented in a way that can currently be produced by publisher flow.
 - `I-005`: private-access verification is completely unimplemented — `ed25519Verify` is imported but never called, the verification block is a no-op behind a misleading comment.
 - `I-008`: query handler is hard-wired to one engine class, so swapping/testing is harder.
-- `I-009`: specific SPARQL shapes can bypass intended paranet query limits.
+- `I-009`: specific SPARQL shapes can bypass intended contextGraph query limits.
 
 ## Issue Register
 
@@ -124,7 +124,7 @@ Issue IDs stay stable on purpose, so references do not break.
 - Decision option B (change, recommended): depend on `QueryEngine` interface in constructor.
 - Evidence: `packages/query/src/query-handler.ts:4`, `packages/query/src/query-engine.ts:17`.
 
-### I-009 - Paranet scoping can be bypassed by explicit SPARQL shape
+### I-009 - ContextGraph scoping can be bypassed by explicit SPARQL shape
 - Severity: High
 - What is happening: current wrapper is skipped in some SPARQL shapes (`FROM`/`GRAPH`).
 - Why it matters: remote queries may read more than intended.
@@ -150,7 +150,7 @@ Issue IDs stay stable on purpose, so references do not break.
 
 ### I-012 - Core integration files are merge-conflict hotspots
 - Severity: High
-- What is happening: `dkg-agent.ts` is **1451 lines** with a single class mixing at least **7 concerns**: node lifecycle (lines 216-302, 1092-1128), protocol handler registration (lines 228-370), gossip subscription and message handling (lines 764-866), publishing orchestration (lines 600-670, 1130-1166), query delegation (lines 669-762), agent discovery and messaging (lines 496-566), and paranet management (lines 764-1078). `daemon.ts` is **943 lines** mixing at least **5 concerns**: process lifecycle (lines 34-384), HTTP API with 20+ route handlers (lines 326-802), metrics/dashboard (lines 214-301), authentication (lines 313-322), and auto-update (lines 863-943).
+- What is happening: `dkg-agent.ts` is **1451 lines** with a single class mixing at least **7 concerns**: node lifecycle (lines 216-302, 1092-1128), protocol handler registration (lines 228-370), gossip subscription and message handling (lines 764-866), publishing orchestration (lines 600-670, 1130-1166), query delegation (lines 669-762), agent discovery and messaging (lines 496-566), and contextGraph management (lines 764-1078). `daemon.ts` is **943 lines** mixing at least **5 concerns**: process lifecycle (lines 34-384), HTTP API with 20+ route handlers (lines 326-802), metrics/dashboard (lines 214-301), authentication (lines 313-322), and auto-update (lines 863-943).
 - Why it matters: any change to publishing, querying, gossip handling, or API routes touches one of these two files. Two developers working on unrelated features (e.g., query improvements and a new API endpoint) will likely conflict. The original evidence lines (216, 764) understated the scope — they suggested ~550 lines of concern when the full file is nearly 3x that.
 - Decision option A (keep this design): keep file structure short term, but enforce strict code ownership and change windows.
 - Decision option B (change, recommended): split into smaller modules and keep top-level files thin.
@@ -278,12 +278,12 @@ Issue IDs stay stable on purpose, so references do not break.
 ### D-024 - Upstream learning loop (dev -> validate -> release)
 - This is one possible workflow option (not the only valid one): local linking/tarball test -> pre-release -> validation in reference implementation -> stable release, without editing `node_modules`.
 
-### I-019 - OpenClaw adapter missing paranet discovery tool
+### I-019 - OpenClaw adapter missing contextGraph discovery tool
 - Severity: Medium
-- What is happening: the OpenClaw adapter exposes `dkg_status`, `dkg_publish`, `dkg_query`, `dkg_find_agents`, `dkg_send_message`, and `dkg_invoke_skill`, but has no tool for discovering available paranets. The agent must know the paranet ID upfront.
-- Why it matters: agents have no way to discover which paranets exist on the network before publishing or querying. This forces hardcoded paranet IDs or user intervention.
-- Decision option A (keep this design): document that paranet IDs must be provided by the user or configured in advance.
-- Decision option B (change, recommended): add a `dkg_list_paranets` tool that wraps the existing `DKGAgent.listParanets()` method.
+- What is happening: the OpenClaw adapter exposes `dkg_status`, `dkg_publish`, `dkg_query`, `dkg_find_agents`, `dkg_send_message`, and `dkg_invoke_skill`, but has no tool for discovering available contextGraphs. The agent must know the contextGraph ID upfront.
+- Why it matters: agents have no way to discover which contextGraphs exist on the network before publishing or querying. This forces hardcoded contextGraph IDs or user intervention.
+- Decision option A (keep this design): document that contextGraph IDs must be provided by the user or configured in advance.
+- Decision option B (change, recommended): add a `dkg_list_contextGraphs` tool that wraps the existing `DKGAgent.listContextGraphs()` method.
 - Evidence: `packages/adapter-openclaw/src/DkgNodePlugin.ts:119`, `packages/agent/src/dkg-agent.ts:1021`.
 
 ### I-020 - OpenClaw adapter plugin ID is too generic

@@ -10,13 +10,13 @@ RESULTS_DIR="$EXPERIMENT_DIR/results/exp-d2"
 OPENCLAW_DIR="${OPENCLAW_DIR:-/Users/aleatoric/dev/openclaw}"
 CLAUDE_RUN="$SCRIPT_DIR/claude-run.mjs"
 RUN_ID="${RUN_ID:-d2-$(date +%Y%m%d-%H%M%S)}"
-PARANET_ID="${PARANET_ID:-dev-coordination}"
+CONTEXT_GRAPH_ID="${CONTEXT_GRAPH_ID:-dev-coordination}"
 
 mkdir -p "$RESULTS_DIR/round1"
 
 echo "=== Experiment D2 (DKG Swarm) ==="
 echo "Run ID: $RUN_ID"
-echo "Paranet: $PARANET_ID"
+echo "ContextGraph: $CONTEXT_GRAPH_ID"
 
 setup_worktree() {
   local stream="$1"
@@ -51,7 +51,7 @@ run_stream_bg() {
 runId: $RUN_ID
 agentId: $agent
 stream: $stream
-paranetId: $PARANET_ID
+contextGraphId: $CONTEXT_GRAPH_ID
 
 MANDATORY COLLAB PROTOCOL (DKG):
 1) FIRST query prior run entities:
@@ -70,7 +70,7 @@ urn:exp-d2:$RUN_ID:$agent:$stream:decision:<n>
 4) Publish FINAL HANDOFF entity:
 urn:exp-d2:$RUN_ID:$agent:$stream:handoff
 
-Use graph: did:dkg:paranet:$PARANET_ID
+Use graph: did:dkg:context-graph:$CONTEXT_GRAPH_ID
 Include predicates:
 - rdf:type
 - https://ontology.dkg.io/devgraph#summary

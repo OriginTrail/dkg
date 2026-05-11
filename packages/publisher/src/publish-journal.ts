@@ -4,7 +4,7 @@ import { randomBytes } from 'node:crypto';
 
 export interface JournalEntry {
   ual: string;
-  paranetId: string;
+  contextGraphId: string;
   expectedPublisherAddress: string;
   /** Hex-encoded merkle root */
   expectedMerkleRoot: string;

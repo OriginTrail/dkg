@@ -3,7 +3,7 @@
 **Status**: IMPLEMENTED (v10-rc)
 **Date**: 2026-04-07
 **Scope**: Agent identity model, context graph namespacing, access control, edge node requirements.
-**Supersedes**: Parts of SPEC_PARANET_LIFECYCLE §3–4, v9-protocol-operations §2.3 Phase 5b.
+**Supersedes**: Parts of SPEC_CONTEXT_GRAPH_LIFECYCLE §3–4, v9-protocol-operations §2.3 Phase 5b.
 
 ---
 
@@ -181,7 +181,7 @@ polling. See [17_NODE_API.md `GET /api/events`](../../dkgv10-spec/17_NODE_API.md
 
 | Route | Change |
 |-------|--------|
-| `POST /api/paranet/create` | Accepts `allowedAgents: string[]` and `accessPolicy: number` |
+| `POST /api/context-graph/create` | Accepts `allowedAgents: string[]` and `accessPolicy: number` |
 | `POST /api/context-graph/create` | Uses `participantAgents: string[]` instead of `participantIdentityIds: bigint[]` |
 
 ### Agent Resolution

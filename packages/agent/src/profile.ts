@@ -1,5 +1,5 @@
 import type { Quad } from '@origintrail-official/dkg-storage';
-import { DKG_ONTOLOGY, SYSTEM_PARANETS } from '@origintrail-official/dkg-core';
+import { DKG_ONTOLOGY, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 
 /**
  * Canonicalise the DID subject for an agent.
@@ -31,11 +31,8 @@ const ERC8004 = 'https://eips.ethereum.org/erc-8004#';
 const PROV = 'http://www.w3.org/ns/prov#';
 const SKILL = 'https://dkg.origintrail.io/skill#';
 
-export const AGENT_REGISTRY_CONTEXT_GRAPH = SYSTEM_PARANETS.AGENTS;
+export const AGENT_REGISTRY_CONTEXT_GRAPH = SYSTEM_CONTEXT_GRAPHS.AGENTS;
 export const AGENT_REGISTRY_GRAPH = `did:dkg:context-graph:${AGENT_REGISTRY_CONTEXT_GRAPH}`;
-
-/** @deprecated Use AGENT_REGISTRY_CONTEXT_GRAPH */
-export const AGENT_REGISTRY_PARANET = AGENT_REGISTRY_CONTEXT_GRAPH;
 
 export interface SkillOfferingConfig {
   skillType: string;
@@ -52,8 +49,6 @@ export interface AgentProfileConfig {
   framework?: string;
   skills: SkillOfferingConfig[];
   contextGraphsServed?: string[];
-  /** @deprecated Use contextGraphsServed */
-  paranetsServed?: string[];
   nodeRole?: 'core' | 'edge';
   publicKey?: string;
   relayAddress?: string;
@@ -153,14 +148,14 @@ export function buildAgentProfile(config: AgentProfileConfig): {
   q(activityUri, RDF_TYPE, `${PROV}Activity`);
   q(activityUri, `${PROV}atTime`, `"${new Date().toISOString()}"`);
 
-  const served = config.contextGraphsServed ?? config.paranetsServed;
+  const served = config.contextGraphsServed ?? config.contextGraphsServed;
   if (served?.length) {
     const hostingUri = `${entity}/.well-known/genid/hosting`;
     q(entity, `${SKILL}hostingProfile`, hostingUri);
     q(hostingUri, RDF_TYPE, `${SKILL}HostingProfile`);
     const val = `"${served.join(',')}"`;
     q(hostingUri, `${SKILL}contextGraphsServed`, val);
-    q(hostingUri, `${SKILL}paranetsServed`, val);
+    q(hostingUri, `${SKILL}contextGraphsServed`, val);
   }
 
   return { quads, rootEntity: entity };

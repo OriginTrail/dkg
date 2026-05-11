@@ -3,7 +3,7 @@
  * `scripts/lib/dkg-daemon.mjs` (so error messages / payload shapes stay
  * consistent with our Node scripts) but is TypeScript-typed and aware
  * of the v10 endpoint naming (`/api/context-graph/*` vs legacy
- * `/api/paranet/*`).
+ * `/api/context-graph/*`).
  */
 import type { DkgConfig } from './config.js';
 
@@ -104,24 +104,12 @@ export class DkgClient {
   }
 
   // ── Listing endpoints ──────────────────────────────────────────
-  /** v10 preferred; legacy `/api/paranet/list` retained as fallback. */
   async listProjects(): Promise<ProjectRow[]> {
-    try {
-      const v10 = await this.request<{ contextGraphs?: ProjectRow[]; paranets?: ProjectRow[] }>(
-        'GET',
-        '/api/context-graph/list',
-      );
-      return v10.contextGraphs ?? v10.paranets ?? [];
-    } catch (err) {
-      if (err instanceof DkgHttpError && err.status === 404) {
-        const legacy = await this.request<{ paranets?: ProjectRow[] }>(
-          'GET',
-          '/api/paranet/list',
-        );
-        return legacy.paranets ?? [];
-      }
-      throw err;
-    }
+    const response = await this.request<{ contextGraphs?: ProjectRow[] }>(
+      'GET',
+      '/api/context-graph/list',
+    );
+    return response.contextGraphs ?? [];
   }
 
   async listSubGraphs(contextGraphId: string): Promise<SubGraphRow[]> {
@@ -156,6 +144,14 @@ export class DkgClient {
     verifiedGraph?: string;
     assertionName?: string;
     /**
+     * Required for `view: "working-memory"` reads. The daemon scopes WM
+     * assertion-graph URIs to the agent's raw peer ID — DID-form values
+     * route to a non-existent namespace and silently return empty
+     * results. Pass the bare peer ID (strip any `did:dkg:agent:` prefix
+     * at the boundary; see `dkg_memory_search` for an example).
+     */
+    agentAddress?: string;
+    /**
      * P-13: minimum trust level to admit into results. Only meaningful for
      * `view: "verified-memory"`; silently ignored on WM/SWM views.
      *
@@ -176,10 +172,31 @@ export class DkgClient {
     if (args.view != null) body.view = args.view;
     if (args.verifiedGraph != null) body.verifiedGraph = args.verifiedGraph;
     if (args.assertionName) body.assertionName = args.assertionName;
+    if (args.agentAddress) body.agentAddress = args.agentAddress;
     if (args.minTrust != null) body.minTrust = args.minTrust;
 
     const r = await this.request<QueryResponse>('POST', '/api/query', body);
     return r.result ?? { bindings: [] };
+  }
+
+  /**
+   * Fetch the daemon's default agent identity. Used by `dkg_memory_search`
+   * to resolve the agent address required for WM view routing — the
+   * daemon scopes WM assertion-graph URIs to the raw peer ID, so a
+   * memory-search call without it would silently route into a
+   * non-existent namespace and return zero hits.
+   *
+   * Returns `agentAddress` (DID-form, e.g. `did:dkg:agent:<peerId>`) and
+   * `peerId` (raw form). For WM view routing pass `peerId`; for
+   * provenance triples (e.g. `prov:wasAttributedTo`) pass `agentAddress`.
+   */
+  async getAgentIdentity(): Promise<{
+    agentAddress?: string;
+    agentDid?: string;
+    peerId?: string;
+    [key: string]: unknown;
+  }> {
+    return this.request('GET', '/api/agent/identity');
   }
 
   /** List registered agents (human + AI) + their live connection health. */
@@ -291,6 +308,350 @@ export class DkgClient {
       `/api/assertion/${encodeURIComponent(args.assertionName)}/promote`,
       body,
     );
+  }
+
+  /**
+   * Create an empty Working Memory assertion graph (idempotent — duplicate
+   * names land as `alreadyExists: true` rather than throwing). The
+   * canonical write flow is `createAssertion` → `writeAssertion` →
+   * `promoteAssertion` (or `discardAssertion` to roll back).
+   */
+  async createAssertion(args: {
+    contextGraphId: string;
+    assertionName: string;
+    subGraphName?: string;
+  }): Promise<{ assertionUri: string | null; alreadyExists: boolean }> {
+    const body: Record<string, unknown> = {
+      contextGraphId: args.contextGraphId,
+      name: args.assertionName,
+    };
+    if (args.subGraphName) body.subGraphName = args.subGraphName;
+    try {
+      const response = await this.request<{ assertionUri: string }>(
+        'POST',
+        '/api/assertion/create',
+        body,
+      );
+      return { assertionUri: response.assertionUri, alreadyExists: false };
+    } catch (err) {
+      if (err instanceof DkgHttpError && /already exists/.test(String(err.message))) {
+        return { assertionUri: null, alreadyExists: true };
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Dump every quad in a Working Memory assertion. Returns `{ quads, count }`.
+   * Not a SPARQL endpoint — for ad-hoc filtering use `query()` with
+   * `view: 'working-memory'` plus the assertion's named graph.
+   */
+  async queryAssertion(args: {
+    contextGraphId: string;
+    assertionName: string;
+    subGraphName?: string;
+  }): Promise<{ quads: unknown[]; count: number }> {
+    const body: Record<string, unknown> = {
+      contextGraphId: args.contextGraphId,
+    };
+    if (args.subGraphName) body.subGraphName = args.subGraphName;
+    return this.request(
+      'POST',
+      `/api/assertion/${encodeURIComponent(args.assertionName)}/query`,
+      body,
+    );
+  }
+
+  /**
+   * Lifecycle descriptor for an assertion: author, extraction status,
+   * promotion state, timestamps. Returns 404 (`DkgHttpError`) when no
+   * record exists for the (contextGraphId, name, agentAddress) tuple.
+   */
+  async getAssertionHistory(args: {
+    contextGraphId: string;
+    assertionName: string;
+    agentAddress?: string;
+    subGraphName?: string;
+  }): Promise<Record<string, unknown>> {
+    const params = new URLSearchParams({ contextGraphId: args.contextGraphId });
+    if (args.agentAddress) params.set('agentAddress', args.agentAddress);
+    if (args.subGraphName) params.set('subGraphName', args.subGraphName);
+    return this.request(
+      'GET',
+      `/api/assertion/${encodeURIComponent(args.assertionName)}/history?${params.toString()}`,
+    );
+  }
+
+  /**
+   * Import a local document (markdown, PDF, etc.) into a WM assertion via
+   * multipart/form-data. The daemon runs its extraction pipeline and writes
+   * the resulting triples into the assertion's graph. text/markdown is
+   * native; other types need a registered converter (extraction returns
+   * `status: "skipped"` if none).
+   *
+   * Bypasses the JSON `request()` helper because multipart bodies need
+   * `FormData` rather than `JSON.stringify`. The auth header and base URL
+   * shape match `request()` so behaviour stays consistent.
+   */
+  async importAssertionFile(args: {
+    contextGraphId: string;
+    assertionName: string;
+    fileBuffer: Buffer | Uint8Array;
+    fileName: string;
+    contentType?: string;
+    ontologyRef?: string;
+    subGraphName?: string;
+  }): Promise<Record<string, unknown>> {
+    const form = new FormData();
+    // Copy into a fresh Uint8Array to satisfy TS's BlobPart union across
+    // Node Buffer / SharedArrayBuffer.
+    const bytes = new Uint8Array(args.fileBuffer.byteLength);
+    bytes.set(args.fileBuffer);
+    const blob = new Blob([bytes], {
+      type: args.contentType ?? 'application/octet-stream',
+    });
+    form.append('file', blob, args.fileName);
+    form.append('contextGraphId', args.contextGraphId);
+    if (args.contentType) form.append('contentType', args.contentType);
+    if (args.ontologyRef) form.append('ontologyRef', args.ontologyRef);
+    if (args.subGraphName) form.append('subGraphName', args.subGraphName);
+
+    const headers: Record<string, string> = { Accept: 'application/json' };
+    if (this.token) headers.Authorization = `Bearer ${this.token}`;
+    const res = await this.fetcher(
+      `${this.api}/api/assertion/${encodeURIComponent(args.assertionName)}/import-file`,
+      {
+        method: 'POST',
+        headers,
+        body: form,
+      },
+    );
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      let parsed: unknown = text;
+      try { parsed = JSON.parse(text); } catch { /* leave as raw text */ }
+      throw new DkgHttpError(
+        res.status,
+        parsed,
+        `POST /api/assertion/${args.assertionName}/import-file → ${res.status}: ${text}`,
+      );
+    }
+    return res.json() as Promise<Record<string, unknown>>;
+  }
+
+  /**
+   * Node status: peer ID, connected peers, multiaddrs, wallet addresses.
+   * Wraps `GET /api/status` (the same endpoint the OpenClaw adapter calls
+   * at `getFullStatus`).
+   */
+  async getStatus(): Promise<Record<string, unknown>> {
+    return this.request('GET', '/api/status');
+  }
+
+  /**
+   * Per-wallet TRAC + ETH balances + chain context. Wraps
+   * `GET /api/wallets/balances` — pre-publish "do I have funds" check.
+   */
+  async getWalletBalances(): Promise<{
+    wallets: string[];
+    balances: Array<{ address: string; eth: string; trac: string; symbol: string }>;
+    chainId: string | null;
+    rpcUrl: string | null;
+    error?: string;
+  }> {
+    return this.request('GET', '/api/wallets/balances');
+  }
+
+  /**
+   * Subscribe to a context graph so its data syncs locally. Required
+   * before querying or publishing into a remotely-authored CG.
+   */
+  async subscribe(args: {
+    contextGraphId: string;
+    includeSharedMemory?: boolean;
+  }): Promise<{
+    subscribed: string;
+    catchup?: { jobId: string; status: string; includeSharedMemory: boolean };
+  }> {
+    return this.request('POST', '/api/subscribe', {
+      contextGraphId: args.contextGraphId,
+      includeSharedMemory: args.includeSharedMemory,
+    });
+  }
+
+  /**
+   * Create a new context graph on the DKG node. The `id` is the slug; if
+   * omitted at the tool layer it should be derived from `name` before
+   * being passed through. Wraps `POST /api/context-graph/create`.
+   *
+   * Idempotent on duplicate `id`: the daemon route returns HTTP 409 with
+   * an `already exists` / `duplicate` / `conflict` body when a CG with
+   * the same id already exists; this wrapper catches that 409 and returns
+   * `{ alreadyExists: true, created, uri }` so callers (e.g.
+   * `dkg_context_graph_create`) can surface "already existed" vs
+   * "newly created" without parsing error strings. Mirrors the
+   * `createAssertion` shape — same convention, same idempotency contract.
+   */
+  async createContextGraph(args: {
+    id: string;
+    name: string;
+    description?: string;
+  }): Promise<{ created: string; uri: string; alreadyExists: boolean }> {
+    try {
+      const response = await this.request<{ created: string; uri: string }>(
+        'POST',
+        '/api/context-graph/create',
+        {
+          id: args.id,
+          name: args.name,
+          description: args.description,
+        },
+      );
+      return { ...response, alreadyExists: false };
+    } catch (err) {
+      // Daemon returns 409 with "already exists" / "duplicate" / "conflict"
+      // in the body when the id is taken; treat any of those as the
+      // idempotent already-exists case rather than a hard failure.
+      if (
+        err instanceof DkgHttpError &&
+        err.status === 409 &&
+        /already exists|duplicate|conflict/i.test(String(err.message))
+      ) {
+        return {
+          created: args.id,
+          uri: `did:dkg:context-graph:${args.id}`,
+          alreadyExists: true,
+        };
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Final canonical-flow step: publish the current contents of a context
+   * graph's Shared Working Memory to Verified Memory (on-chain) and
+   * (by default) clear SWM. The daemon route accepts `selection` as
+   * either the literal `"all"` or an array of root entity URIs — this
+   * wrapper exposes the latter as `rootEntities` and translates the
+   * omit-case to `"all"` server-side.
+   *
+   * Default `clearAfter` is `false` for subset publishes (so unpublished
+   * roots aren't dropped from SWM) and `true` for full publishes.
+   * Mirrors `packages/adapter-openclaw/src/dkg-client.ts:664-680`.
+   */
+  async publishSharedMemory(args: {
+    contextGraphId: string;
+    rootEntities?: string[];
+    subGraphName?: string;
+    clearAfter?: boolean;
+  }): Promise<Record<string, unknown>> {
+    const hasSubset = Array.isArray(args.rootEntities) && args.rootEntities.length > 0;
+    const clearAfter = args.clearAfter ?? !hasSubset;
+    return this.request('POST', '/api/shared-memory/publish', {
+      contextGraphId: args.contextGraphId,
+      selection: args.rootEntities ?? 'all',
+      clearAfter,
+      subGraphName: args.subGraphName,
+    });
+  }
+
+  /**
+   * One-shot publish helper: route through the new assertion
+   * lifecycle (RFC-001 §9.x) — create a fresh assertion with an
+   * auto-generated name, write the supplied quads, finalize (which
+   * computes the merkle root and signs the EIP-712 AuthorAttestation
+   * stored in `_meta`), promote into SWM, then publish to the
+   * verified-memory chain. The publisher forwards the seal verbatim
+   * and never re-signs.
+   *
+   * For step-wise control (long-running stage, late finalize, etc.)
+   * use the `assertion_create` / `assertion_finalize` /
+   * `shared_memory_publish` tools directly.
+   *
+   * Mirrors `packages/adapter-openclaw/src/dkg-client.ts:635-652`.
+   */
+  async publishQuads(args: {
+    contextGraphId: string;
+    quads: Array<{ subject: string; predicate: string; object: string; graph?: string }>;
+  }): Promise<Record<string, unknown>> {
+    const assertionName = `mcp-publish-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const quadsWithGraph = args.quads.map((q) => ({
+      subject: q.subject,
+      predicate: q.predicate,
+      object: q.object,
+      graph: q.graph ?? `did:dkg:context-graph:${args.contextGraphId}`,
+    }));
+    const created = await this.request<{ assertionUri?: string; seal?: Record<string, unknown> }>(
+      'POST',
+      '/api/assertion/create',
+      {
+        contextGraphId: args.contextGraphId,
+        name: assertionName,
+        quads: quadsWithGraph,
+        finalize: true,
+        promote: true,
+      },
+    );
+    const published = await this.request<Record<string, unknown>>(
+      'POST',
+      '/api/shared-memory/publish',
+      {
+        contextGraphId: args.contextGraphId,
+        assertionName,
+      },
+    );
+    return {
+      ...published,
+      ...(created.assertionUri ? { assertionUri: created.assertionUri } : {}),
+      ...(created.seal ? { seal: created.seal } : {}),
+    };
+  }
+
+  /**
+   * Register a context graph on-chain. Used in conjunction with
+   * `publishSharedMemory({ ... })` when `register_if_needed: true`.
+   * The CG must exist locally first (via `createContextGraph`).
+   *
+   * Idempotent on already-registered: the daemon route returns HTTP 409
+   * when the CG is already on-chain; this wrapper catches that 409 and
+   * returns `{ alreadyRegistered: true }` so callers can branch on a
+   * typed signal rather than parsing error message text. Mirrors the
+   * `createAssertion` / `createContextGraph` shape — same convention,
+   * same idempotency contract.
+   */
+  async registerContextGraph(args: {
+    id: string;
+    accessPolicy?: number;
+  }): Promise<{
+    registered: string;
+    onChainId?: string;
+    txHash?: string;
+    hint?: string;
+    alreadyRegistered: boolean;
+  }> {
+    try {
+      const response = await this.request<{
+        registered: string;
+        onChainId: string;
+        txHash?: string;
+        hint?: string;
+      }>('POST', '/api/context-graph/register', {
+        id: args.id,
+        accessPolicy: args.accessPolicy,
+      });
+      return { ...response, alreadyRegistered: false };
+    } catch (err) {
+      // Daemon returns 409 with "already registered" body when the CG
+      // is already on-chain. Surface as a typed flag so the tool layer
+      // can branch on it without the locale-fragile substring match.
+      if (err instanceof DkgHttpError && err.status === 409) {
+        return {
+          registered: args.id,
+          alreadyRegistered: true,
+        };
+      }
+      throw err;
+    }
   }
 }
 

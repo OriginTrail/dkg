@@ -1,12 +1,7 @@
 import { createValidator } from './validation.js';
 import { buildEpcisQuery } from './query-builder.js';
 import { parseQueryParams, hasValidDateRange, encodePageToken } from './utils.js';
-import type { Publisher, AsyncPublisher, CaptureResult, CaptureAcceptedResult, CaptureOptions, QueryEngine, EPCISQueryDocumentResponse } from './types.js';
-
-export interface CaptureConfig {
-  contextGraphId: string;
-  publisher: Publisher;
-}
+import type { AsyncPublisher, CaptureAcceptedResult, CaptureOptions, PublisherCaptureOpts, QueryEngine, EPCISQueryDocumentResponse } from './types.js';
 
 export interface AsyncCaptureConfig {
   contextGraphId: string;
@@ -16,6 +11,18 @@ export interface AsyncCaptureConfig {
 export interface CaptureRequest {
   epcisDocument: unknown;
   publishOptions?: CaptureOptions;
+  /**
+   * Optional per-request override for the target context graph. When
+   * present takes precedence over `AsyncCaptureConfig.contextGraphId`,
+   * which acts as the daemon-level fallback.
+   */
+  contextGraphId?: string;
+  /**
+   * Optional sub-graph name within the target context graph. Threaded
+   * straight into the publisher's opts — no fallback, sub-graphs are
+   * inherently per-payload.
+   */
+  subGraphName?: string;
 }
 
 export class EpcisValidationError extends Error {
@@ -37,6 +44,13 @@ export class EpcisQueryError extends Error {
 
 export interface EventsQueryConfig {
   contextGraphId: string;
+  /**
+   * Optional sub-graph name within the context graph. When set, the
+   * query reads from the `<cg>/<sub>/_shared_memory` (or canonical
+   * `<cg>/<sub>` for finalized) partition and joins from
+   * `<cg>/<sub>/_private`.
+   */
+  subGraphName?: string;
   queryEngine: QueryEngine;
   basePath: string;
 }
@@ -138,8 +152,14 @@ export async function handleEventsQuery(
   const perPage = Math.min(Math.max(params.perPage ?? DEFAULT_PER_PAGE, 1), MAX_PER_PAGE);
   const offset = Math.max(params.offset ?? 0, 0);
 
-  // Request one extra row to detect if more pages exist
-  const sparql = buildEpcisQuery({ ...params, limit: perPage + 1, offset }, config.contextGraphId);
+  // Request one extra row to detect if more pages exist. Sub-graph
+  // selection is per-request (route-level), not derivable from the
+  // SPARQL query string, so it lives on the config rather than in
+  // `params`.
+  const sparql = buildEpcisQuery(
+    { ...params, subGraphName: config.subGraphName, limit: perPage + 1, offset },
+    config.contextGraphId,
+  );
   const result = await config.queryEngine.query(sparql, { contextGraphId: config.contextGraphId });
 
   const hasMore = result.bindings.length > perPage;
@@ -183,10 +203,10 @@ export async function handleEventsQuery(
 
 const validator = createValidator();
 
-export async function handleCapture(
+export async function handleCaptureAsync(
   request: CaptureRequest,
-  config: CaptureConfig,
-): Promise<CaptureResult> {
+  config: AsyncCaptureConfig,
+): Promise<CaptureAcceptedResult> {
   const { document, content } = resolveCaptureContent(request.epcisDocument);
   const validation = validator.validate(document);
 
@@ -194,44 +214,17 @@ export async function handleCapture(
     throw new EpcisValidationError(validation.errors!);
   }
 
-  // REVISIT: eventID (EPCIS 2.0 §7.4.1) maps to @id in JSON-LD, giving each event a
-  // named URI as its RDF subject. Without it, blank nodes are auto-assigned uuid: URIs
-  // (like dkg.js v8), so publishing works either way. However, user-provided eventIDs
-  // are preferred because they're deterministic and meaningful for provenance queries.
-  // Consider making eventID mandatory once the EPCIS plugin is stable.
+  const effectiveContextGraphId = request.contextGraphId ?? config.contextGraphId;
 
-  const opts = request.publishOptions
-    ? { accessPolicy: request.publishOptions.accessPolicy, allowedPeers: request.publishOptions.allowedPeers }
+  const opts: PublisherCaptureOpts | undefined = (request.publishOptions || request.subGraphName)
+    ? {
+        ...(request.publishOptions?.accessPolicy !== undefined && { accessPolicy: request.publishOptions.accessPolicy }),
+        ...(request.publishOptions?.allowedPeers !== undefined && { allowedPeers: request.publishOptions.allowedPeers }),
+        ...(request.subGraphName !== undefined && { subGraphName: request.subGraphName }),
+      }
     : undefined;
 
-  const result = await config.publisher.publish(config.contextGraphId, content, opts);
-
-  return {
-    ual: result.ual,
-    kcId: result.kcId,
-    receivedAt: new Date().toISOString(),
-    eventCount: validation.eventCount!,
-    status: result.status,
-  };
-}
-
-export async function handleCaptureAsync(
-  request: CaptureRequest,
-  config: AsyncCaptureConfig,
-): Promise<CaptureAcceptedResult> {
-  const { document, content, isEnvelope } = resolveCaptureContent(request.epcisDocument);
-  const validation = validator.validate(document);
-
-  if (!validation.valid) {
-    throw new EpcisValidationError(validation.errors!);
-  }
-
-  const opts = request.publishOptions
-    ? { accessPolicy: request.publishOptions.accessPolicy, allowedPeers: request.publishOptions.allowedPeers }
-    : undefined;
-
-  const publishContent = isEnvelope ? content : { public: content };
-  const result = await config.publisher.publishAsync(config.contextGraphId, publishContent, opts);
+  const result = await config.publisher.publishAsync(effectiveContextGraphId, content, opts);
 
   return {
     captureID: result.captureID,
@@ -241,27 +234,38 @@ export async function handleCaptureAsync(
   };
 }
 
-function resolveCaptureContent(epcisDocument: unknown): { document: unknown; content: unknown; isEnvelope: boolean } {
+function resolveCaptureContent(epcisDocument: unknown): { document: unknown; content: unknown } {
   if (!epcisDocument || typeof epcisDocument !== 'object' || Array.isArray(epcisDocument)) {
-    return { document: epcisDocument, content: epcisDocument, isEnvelope: false };
+    return { document: epcisDocument, content: { private: epcisDocument } };
   }
 
   const obj = epcisDocument as Record<string, unknown>;
-  const isEnvelope = obj.type !== 'EPCISDocument' && ('public' in obj || 'private' in obj);
-  if (!isEnvelope) {
-    return { document: epcisDocument, content: epcisDocument, isEnvelope: false };
+  if (obj.type === 'EPCISDocument') {
+    return { document: epcisDocument, content: { private: epcisDocument } };
   }
 
-  if (!obj.public) {
-    throw new EpcisValidationError(['Privacy envelope requires a public EPCIS document']);
+  const hasPublic = Object.prototype.hasOwnProperty.call(obj, 'public');
+  const hasPrivate = Object.prototype.hasOwnProperty.call(obj, 'private');
+  if (!hasPublic && !hasPrivate) {
+    throw new EpcisValidationError(['Privacy envelope requires a public or private EPCIS document']);
+  }
+
+  const publicDoc = obj.public;
+  const privateDoc = obj.private;
+  if (publicDoc === undefined && privateDoc === undefined) {
+    throw new EpcisValidationError(['Privacy envelope requires a public or private EPCIS document']);
+  }
+
+  const content: Record<string, unknown> = {};
+  if (hasPublic) {
+    content.public = publicDoc;
+  }
+  if (hasPrivate) {
+    content.private = privateDoc;
   }
 
   return {
-    document: obj.public,
-    content: {
-      public: obj.public,
-      private: obj.private,
-    },
-    isEnvelope: true,
+    document: hasPublic ? publicDoc : privateDoc,
+    content,
   };
 }

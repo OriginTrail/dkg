@@ -304,8 +304,8 @@ jobs:
 
   # ------------------------------------------------------------------
   # Bura lane — `cli` is the heaviest BURA package (CLI daemon, HTTP API,
-  # auth, keystore, migration, indexer) so it owns a runner. The other
-  # two BURA packages (`query`, `attested-assets`) fit on one runner.
+  # auth, keystore, migration, indexer) so it owns a runner. The
+  # remaining BURA package (`query`) runs on its own runner.
   #
   # Tier: BURA — `dkgv10-spec/CRITICALITY_CATEGORIZATION.md` §1. Packages
   # on the critical path for users/operators; auth & quorum bugs here
@@ -335,7 +335,7 @@ jobs:
         run: pnpm --filter @origintrail-official/dkg test
 
   bura-supporting:
-    name: "Bura: query + attested-assets"
+    name: "Bura: query"
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -354,12 +354,8 @@ jobs:
           path: /tmp
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
-      - name: "Query + attested-assets tests"
-        run: |
-          pnpm \
-            --filter @origintrail-official/dkg-query \
-            --filter @origintrail-official/dkg-attested-assets \
-            run test
+      - name: "Query tests"
+        run: pnpm --filter @origintrail-official/dkg-query run test
 
   # ------------------------------------------------------------------
   # Kosava lanes — `node-ui` is heavy (React Testing Library, happy-dom)
@@ -417,14 +413,88 @@ jobs:
         run: |
           pnpm \
             --filter @origintrail-official/dkg-epcis \
-            --filter @origintrail-official/dkg-mcp-server \
+            --filter @origintrail-official/dkg-mcp \
             --filter @origintrail-official/dkg-network-sim \
             --filter @origintrail-official/dkg-graph-viz \
-            --filter @origintrail-official/dkg-adapter-autoresearch \
             --filter @origintrail-official/dkg-adapter-elizaos \
             --filter @origintrail-official/dkg-adapter-hermes \
             --filter @origintrail-official/dkg-adapter-openclaw \
             run test
+
+  # ------------------------------------------------------------------
+  # ABI freshness gate — guards the contract `auto-update.ts` deliberately
+  # never invokes `hardhat compile` on node hosts (would OOM small VPS,
+  # cold-solc on ARM64 trips the build timeout). It relies on the
+  # COMMITTED `packages/evm-module/abi/*.json` being the runtime
+  # contract surface (consumed by `packages/chain` via require()).
+  #
+  # This job catches the only way that contract can break: a contributor
+  # changes a `.sol` file and forgets to commit the regenerated ABIs.
+  # Runs only when `changes.outputs.contracts == 'true'` so PRs that
+  # don't touch contracts pay zero cost. On failure prints an explicit
+  # remediation command so the fix is one copy-paste away.
+  # ------------------------------------------------------------------
+  abi-freshness:
+    name: "Tornado: ABI freshness (committed abi/ vs hardhat compile)"
+    needs: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: needs.changes.outputs.contracts == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Cache Hardhat artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            packages/evm-module/artifacts
+            packages/evm-module/cache
+            packages/evm-module/typechain
+          # Hash both configs because abi/ regen depends on hardhat.config.ts
+          # (which is what loads hardhat-abi-exporter; see the next step).
+          key: hardhat-${{ runner.os }}-abi-${{ hashFiles('packages/evm-module/contracts/**/*.sol', 'packages/evm-module/hardhat.config.ts', 'packages/evm-module/hardhat.node.config.ts') }}
+          restore-keys: |
+            hardhat-${{ runner.os }}-abi-
+            hardhat-${{ runner.os }}-
+      - name: Compile contracts with the default config (regenerates abi/*.json)
+        # Subtle: `pnpm --filter dkg-evm-module build` ultimately calls
+        # `hardhat compile --config hardhat.node.config.ts`, which does NOT
+        # have `hardhat-abi-exporter` wired in. Only the default
+        # `hardhat.config.ts` imports the plugin and sets `abiExporter:
+        # { runOnCompile: true, ... }`. Running `npx hardhat compile`
+        # without a `--config` flag (so it picks up the default config)
+        # is what actually regenerates `abi/*.json`. Without this, the
+        # diff check below would always pass even with stale ABIs.
+        run: npx hardhat compile
+        working-directory: packages/evm-module
+      - name: Verify committed abi/ matches regenerated abi/
+        # `git diff --exit-code` returns 1 if anything under abi/ changed
+        # after compile. If so, the contributor forgot to commit the
+        # regenerated ABIs; the auto-updater would then activate code
+        # that loads stale ABIs against new contracts. Block the PR.
+        run: |
+          set -euo pipefail
+          if ! git diff --exit-code -- packages/evm-module/abi/; then
+            echo "::error title=ABI drift::Committed packages/evm-module/abi/*.json does not match the output of \`hardhat compile\` (default config)."
+            echo ""
+            echo "The auto-updater no longer runs hardhat compile on node hosts (see comment in packages/cli/src/daemon/auto-update.ts), so committed ABIs ARE the runtime contract surface. Drift here would silently activate stale ABIs against new contracts on every node."
+            echo ""
+            echo "To fix: regenerate and commit the ABIs locally:"
+            echo ""
+            echo "  cd packages/evm-module && npx hardhat compile && cd -"
+            echo "  git add packages/evm-module/abi/"
+            echo "  git commit --amend --no-edit   # or a fresh commit, your call"
+            echo "  git push --force-with-lease"
+            echo ""
+            exit 1
+          fi
+          echo "OK: committed packages/evm-module/abi/ matches hardhat output."
 
   # ------------------------------------------------------------------
   # Tornado Solidity lane — `packages/evm-module` is TORNADO-tier

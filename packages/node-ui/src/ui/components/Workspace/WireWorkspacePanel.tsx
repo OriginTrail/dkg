@@ -240,7 +240,7 @@ export function WireWorkspacePanel({
           <div style={{ fontWeight: 600, marginBottom: 6 }}>Workspace wired.</div>
           Open <code style={{ fontFamily: 'var(--font-mono)' }}>{workspaceRoot}</code> in {toolSelection === 'claude-code' ? 'Claude Code' : (toolSelection === 'both' ? 'Cursor or Claude Code' : 'Cursor')}.
           On the first chat, your agent will see the project ontology
-          {variant === 'join' ? ', tasks, and decisions' : ' you publish via dkg_add_task'}.
+          {variant === 'join' ? ', tasks, and decisions' : ' you publish via the canonical assertion-write flow'}.
         </div>
 
         <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 8 }}>

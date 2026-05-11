@@ -91,13 +91,13 @@ describe('versionedWrite', () => {
     const { agent, calls } = makeAgent();
     const quads = [{ subject: SUBJECT, predicate: 'http://schema.org/name', object: '"Test"', graph: '' }];
 
-    const result = await versionedWrite(agent, 'test-paranet', SUBJECT, null, quads);
+    const result = await versionedWrite(agent, 'test-contextGraph', SUBJECT, null, quads);
 
     expect(result.newVersion).toBe(1);
     expect(result.shareOperationId).toBe('ws-ver-1');
 
     const call = calls[0];
-    expect(call[0]).toBe('test-paranet');
+    expect(call[0]).toBe('test-contextGraph');
 
     const allQuads = call[1] as Array<{ subject: string; predicate: string; object: string }>;
     const versionQuad = allQuads.find(q => q.predicate === DKG_STATE_VERSION);
@@ -119,7 +119,7 @@ describe('versionedWrite', () => {
     const { agent, calls } = makeAgent();
     const quads = [{ subject: SUBJECT, predicate: 'http://schema.org/name', object: '"V3"', graph: '' }];
 
-    const result = await versionedWrite(agent, 'test-paranet', SUBJECT, 2, quads);
+    const result = await versionedWrite(agent, 'test-contextGraph', SUBJECT, 2, quads);
 
     expect(result.newVersion).toBe(3);
 
@@ -139,7 +139,7 @@ describe('versionedWrite', () => {
       { subject: SUBJECT, predicate: 'http://schema.org/desc', object: '"More Data"', graph: '' },
     ];
 
-    await versionedWrite(agent, 'test-paranet', SUBJECT, 0, appQuads);
+    await versionedWrite(agent, 'test-contextGraph', SUBJECT, 0, appQuads);
 
     const call = calls[0];
     const allQuads = call[1] as Array<{ predicate: string }>;
@@ -152,7 +152,7 @@ describe('versionedWrite', () => {
 
   it('passes localOnly option through to agent', async () => {
     const { agent, calls } = makeAgent();
-    await versionedWrite(agent, 'test-paranet', SUBJECT, 0, [], { localOnly: true });
+    await versionedWrite(agent, 'test-contextGraph', SUBJECT, 0, [], { localOnly: true });
 
     const call = calls[0];
     expect(call[3]).toEqual({ localOnly: true });
@@ -163,7 +163,7 @@ describe('versionedWrite', () => {
     err.name = 'StaleWriteError';
     const { agent } = makeAgent({ conditionalShareError: err });
 
-    await expect(versionedWrite(agent, 'test-paranet', SUBJECT, 1, []))
+    await expect(versionedWrite(agent, 'test-contextGraph', SUBJECT, 1, []))
       .rejects.toThrow('CAS failed');
   });
 });

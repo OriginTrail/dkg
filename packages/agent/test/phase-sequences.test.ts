@@ -10,7 +10,7 @@ import { encodePublishRequest } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { GossipPublishHandler, type GossipPhaseCallback } from '../src/gossip-publish-handler.js';
 
-const PARANET = 'test-phase-seq';
+const CONTEXT_GRAPH = 'test-phase-seq';
 
 function recorder(): { calls: [string, 'start' | 'end'][]; fn: GossipPhaseCallback } {
   const calls: [string, 'start' | 'end'][] = [];
@@ -24,7 +24,7 @@ function makePublishMsg(opts?: { ual?: string; nquads?: string }): Uint8Array {
     nquads: new TextEncoder().encode(
       opts?.nquads ?? '<http://example.org/s> <http://example.org/p> <http://example.org/o> .',
     ),
-    contextGraphId: PARANET,
+    contextGraphId: CONTEXT_GRAPH,
     kas: [{ tokenId: 1, rootEntity: 'http://example.org/s', privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 }],
     publisherIdentity: new Uint8Array(32),
     publisherAddress: '0x1111111111111111111111111111111111111111',
@@ -45,7 +45,7 @@ describe('Gossip handler phase-sequence contract', () => {
     );
 
     const { calls, fn } = recorder();
-    await handler.handlePublishMessage(makePublishMsg(), PARANET, fn);
+    await handler.handlePublishMessage(makePublishMsg(), CONTEXT_GRAPH, fn);
 
     const phases = calls.map(([p, s]) => `${p}:${s}`);
 
@@ -69,7 +69,7 @@ describe('Gossip handler phase-sequence contract', () => {
     const msg = encodePublishRequest({
       ual: '',
       nquads: new Uint8Array(0),
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       kas: [],
       publisherIdentity: new Uint8Array(32),
       publisherAddress: '0x0000000000000000000000000000000000000000',
@@ -81,7 +81,7 @@ describe('Gossip handler phase-sequence contract', () => {
     });
 
     const { calls, fn } = recorder();
-    await handler.handlePublishMessage(msg, PARANET, fn);
+    await handler.handlePublishMessage(msg, CONTEXT_GRAPH, fn);
 
     const phases = calls.map(([p, s]) => `${p}:${s}`);
 
@@ -100,7 +100,7 @@ describe('Gossip handler phase-sequence contract', () => {
     );
 
     const { calls, fn } = recorder();
-    await handler.handlePublishMessage(makePublishMsg(), PARANET, fn);
+    await handler.handlePublishMessage(makePublishMsg(), CONTEXT_GRAPH, fn);
 
     const starts = calls.filter(([, s]) => s === 'start').map(([p]) => p);
     const ends = calls.filter(([, s]) => s === 'end').map(([p]) => p);

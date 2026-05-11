@@ -1,7 +1,7 @@
 import type { TripleStore, Quad } from '@origintrail-official/dkg-storage';
 import { GraphManager } from '@origintrail-official/dkg-storage';
 import type { EventBus } from '@origintrail-official/dkg-core';
-import { Logger, createOperationContext, contextGraphDataUri, contextGraphMetaUri, DKG_ONTOLOGY, SYSTEM_PARANETS } from '@origintrail-official/dkg-core';
+import { DKGEvent, Logger, createOperationContext, contextGraphDataUri, contextGraphMetaUri, DKG_ONTOLOGY, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import type { PhaseCallback } from './publisher.js';
 import {
   decodeGossipEnvelope,
@@ -150,7 +150,7 @@ export class SharedMemoryHandler {
       if (request.operationId) {
         ctx = createOperationContext('share', request.operationId);
       }
-      const contextGraphId = request.paranetId;
+      const contextGraphId = request.contextGraphId;
       const { nquads, manifest, publisherPeerId, workspaceOperationId: shareOperationId, timestampMs, casConditions, subGraphName } = request;
       const sgLabel = subGraphName ? `/${subGraphName}` : '';
       this.log.info(ctx, `SWM write from ${fromPeerId} for context graph ${contextGraphId}${sgLabel} op=${shareOperationId}`);
@@ -346,6 +346,14 @@ export class SharedMemoryHandler {
       onPhase?.('store', 'end');
       if (applied) {
         this.log.info(ctx, `Stored SWM write ${shareOperationId} (${quads.length} quads)`);
+        this.eventBus.emit(DKGEvent.MEMORY_GRAPH_CHANGED, {
+          contextGraphId,
+          layers: ['swm'],
+          subGraphName,
+          operation: 'shared_memory_gossiped',
+          source: 'gossip',
+          counts: { triples: quads.length },
+        });
       }
     } catch (err) {
       this.log.error(ctx, `SWM handle failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -493,11 +501,11 @@ export class SharedMemoryHandler {
   }
 
   private async contextGraphHasPrivateAccessPolicy(contextGraphId: string): Promise<boolean> {
-    if ((Object.values(SYSTEM_PARANETS) as string[]).includes(contextGraphId)) {
+    if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) {
       return false;
     }
 
-    const ontologyGraph = contextGraphDataUri(SYSTEM_PARANETS.ONTOLOGY);
+    const ontologyGraph = contextGraphDataUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const cgMeta = contextGraphMetaUri(contextGraphId);
     const cgData = contextGraphDataUri(contextGraphId);
     const result = await this.store.query(

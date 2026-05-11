@@ -24,10 +24,10 @@ When the sim reports errors (e.g. 100 failed out of 500), check the following.
 
 ## Common causes and fixes
 
-### 1. **Publish: "Paranet X does not exist. Create it first with createParanet()"**
+### 1. **Publish: "ContextGraph X does not exist. Create it first with createContextGraph()"**
 
-- **Cause:** The sim only created the paranet on node 1. Each node checks for the paranet in its **local** store before publish; nodes 2–6 never had the definition.
-- **Fix:** The sim now ensures the paranet exists on **all** nodes (create on each if missing). Restart the sim and run again; the first run after a devnet restart will create the paranet on every node.
+- **Cause:** The sim only created the contextGraph on node 1. Each node checks for the contextGraph in its **local** store before publish; nodes 2–6 never had the definition.
+- **Fix:** The sim now ensures the contextGraph exists on **all** nodes (create on each if missing). Restart the sim and run again; the first run after a devnet restart will create the contextGraph on every node.
 
 ### 2. **Chat: "No peers with known peerId"**
 

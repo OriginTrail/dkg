@@ -254,15 +254,27 @@ async function execPublish(
     };
   });
 
+  // RFC-001 §9.x — route through the assertion lifecycle (sign at
+  // creation): the daemon's `/api/assertion/create` endpoint accepts a
+  // `quads + finalize: true + promote: true` shape that folds the
+  // create→write→finalize→promote chain into a single round-trip.
+  // The publish call then forwards the seal verbatim.
+  const assertionName = `netsim-publish-${Date.now()}-${rndId()}`;
   try {
-    const writeRes = await fetch(`http://127.0.0.1:${node.port}/api/shared-memory/write`, {
+    const createRes = await fetch(`http://127.0.0.1:${node.port}/api/assertion/create`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders(node) },
-      body: JSON.stringify({ contextGraphId: config.contextGraph, quads }),
+      body: JSON.stringify({
+        contextGraphId: config.contextGraph,
+        name: assertionName,
+        quads,
+        finalize: true,
+        promote: true,
+      }),
       signal: opSignal(signal, 'publish'),
     });
-    if (!writeRes.ok) {
-      const writeBody = (await writeRes.json().catch(() => ({}))) as { error?: string };
+    if (!createRes.ok) {
+      const createBody = (await createRes.json().catch(() => ({}))) as { error?: string };
       const dur = Date.now() - t0;
       return {
         type: 'op',
@@ -270,14 +282,14 @@ async function execPublish(
         nodeId: node.id,
         success: false,
         durationMs: dur,
-        detail: `SWM write failed: ${writeBody.error ?? `HTTP ${writeRes.status}`}`,
+        detail: `assertion create+finalize failed: ${createBody.error ?? `HTTP ${createRes.status}`}`,
         phases: {},
       };
     }
     const res = await fetch(`http://127.0.0.1:${node.port}/api/shared-memory/publish`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders(node) },
-      body: JSON.stringify({ contextGraphId: config.contextGraph, selection: 'all', clearAfter: true }),
+      body: JSON.stringify({ contextGraphId: config.contextGraph, assertionName }),
       signal: opSignal(signal, 'publish'),
     });
     const body = (await res.json()) as { kcId?: string; kas?: unknown[]; status?: string; error?: string; phases?: Record<string, number> };

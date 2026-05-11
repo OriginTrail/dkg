@@ -8,7 +8,7 @@ import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, rever
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { ethers } from 'ethers';
 
-const PARANET = 'workspace-e2e';
+const CONTEXT_GRAPH = 'workspace-e2e';
 const ENTITY = 'urn:e2e:workspace:entity:1';
 
 function sleep(ms: number) {
@@ -66,18 +66,18 @@ describe('Workspace E2E (2 nodes)', () => {
     expect(nodeB.peerId).toBeDefined();
   }, 10000);
 
-  it('node A creates a paranet; node B subscribes; A writes to workspace and B receives via GossipSub', async () => {
+  it('node A creates a contextGraph; node B subscribes; A writes to workspace and B receives via GossipSub', async () => {
     await nodeA.createContextGraph({
-      id: PARANET,
-      name: 'Workspace E2E Paranet',
+      id: CONTEXT_GRAPH,
+      name: 'Workspace E2E ContextGraph',
       description: 'For workspace graph tests',
     });
-    await nodeA.registerContextGraph(PARANET);
+    await nodeA.registerContextGraph(CONTEXT_GRAPH);
 
-    const exists = await nodeA.contextGraphExists(PARANET);
+    const exists = await nodeA.contextGraphExists(CONTEXT_GRAPH);
     expect(exists).toBe(true);
 
-    nodeB.subscribeToContextGraph(PARANET);
+    nodeB.subscribeToContextGraph(CONTEXT_GRAPH);
     await sleep(2000);
 
     const quads = [
@@ -85,14 +85,14 @@ describe('Workspace E2E (2 nodes)', () => {
       { subject: ENTITY, predicate: 'http://schema.org/description', object: '"Replicated via workspace topic"', graph: '' as const },
     ];
 
-    const result = await nodeA.share(PARANET, quads);
+    const result = await nodeA.share(CONTEXT_GRAPH, quads);
     expect(result.shareOperationId).toMatch(/^swm-\d+-[a-z0-9]+$/);
 
     await sleep(5000);
 
     const onA = await nodeA.query(
       'SELECT ?name WHERE { <urn:e2e:workspace:entity:1> <http://schema.org/name> ?name }',
-      { contextGraphId: PARANET, graphSuffix: '_shared_memory' },
+      { contextGraphId: CONTEXT_GRAPH, graphSuffix: '_shared_memory' },
     );
     expect(onA.bindings.length).toBe(1);
     expect(String(onA.bindings[0]['name'])).toMatch(/Workspace Draft/);
@@ -100,7 +100,7 @@ describe('Workspace E2E (2 nodes)', () => {
     // Node B should receive via GossipSub
     const onB = await nodeB.query(
       'SELECT ?name WHERE { <urn:e2e:workspace:entity:1> <http://schema.org/name> ?name }',
-      { contextGraphId: PARANET, graphSuffix: '_shared_memory' },
+      { contextGraphId: CONTEXT_GRAPH, graphSuffix: '_shared_memory' },
     );
     expect(onB.bindings.length).toBeGreaterThan(0);
     expect(String(onB.bindings[0]['name'])).toMatch(/Workspace Draft/);
@@ -109,7 +109,7 @@ describe('Workspace E2E (2 nodes)', () => {
   it('query with includeSharedMemory returns workspace data', async () => {
     const unionResult = await nodeA.query(
       'SELECT ?name WHERE { ?s <http://schema.org/name> ?name }',
-      { contextGraphId: PARANET, includeSharedMemory: true },
+      { contextGraphId: CONTEXT_GRAPH, includeSharedMemory: true },
     );
     expect(unionResult.bindings.length).toBeGreaterThanOrEqual(1);
     const names = unionResult.bindings.map((r) => String(r['name']));
@@ -117,7 +117,7 @@ describe('Workspace E2E (2 nodes)', () => {
   }, 5000);
 
   it('node A enshrines workspace to data graph', async () => {
-    const result = await nodeA.publishFromSharedMemory(PARANET, 'all');
+    const result = await nodeA.publishFromSharedMemory(CONTEXT_GRAPH, 'all');
     expect(result.status).toBe('confirmed');
     expect(result.kaManifest.length).toBe(1);
     expect(result.kaManifest[0].rootEntity).toBe(ENTITY);
@@ -126,7 +126,7 @@ describe('Workspace E2E (2 nodes)', () => {
   it('node A sees enshrined data in data graph', async () => {
     const dataGraphResult = await nodeA.query(
       'SELECT ?name WHERE { <urn:e2e:workspace:entity:1> <http://schema.org/name> ?name }',
-      PARANET,
+      CONTEXT_GRAPH,
     );
     expect(dataGraphResult.bindings.length).toBe(1);
     expect(dataGraphResult.bindings[0]['name']).toBe('"Workspace Draft"');

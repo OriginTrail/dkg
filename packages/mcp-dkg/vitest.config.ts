@@ -3,15 +3,13 @@ import { defineConfig } from 'vitest/config';
 /**
  * Local test config for @origintrail-official/dkg-mcp.
  *
- * Tests are pure unit tests (no daemon required) covering:
- *   - the slug normalisation algorithm (the URI-convergence rule)
- *   - URI helpers (mint vs pass-through)
- *   - the capture-chat hook's pure functions (config parsing, payload
- *     field resolution, regex backstop)
- *   - structural sanity of all 5 starter ontologies
- *
- * Integration (against a running daemon) is exercised by the smoke
- * scripts at scripts/smoke-writes.mjs and scripts/smoke-annotate.mjs.
+ * Wave-3 (#23) re-introduces unit-test fixtures for the post-wave-2 tool
+ * surface (assertion CRUD quintet, memory-search trust ranking, query
+ * schema migration, and the 9 wave-2 P0/P1/P2 adds). The four V9-era
+ * test files that wave-2's drop deleted were pinning now-removed
+ * surfaces (`dkg_annotate_turn` / `dkg_search` strings, the helpers in
+ * the dropped `tools/annotations.ts`); fixtures are shaped against the
+ * canonical V10 SKILL.md surface instead.
  */
 export default defineConfig({
   test: {

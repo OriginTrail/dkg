@@ -1,6 +1,6 @@
 // daemon/routes/context-graph.ts
 //
-// Route handlers for context-graph (+ paranet, sub-graph) CRUD, participants, join flow, manifest publish/install.
+// Route handlers for context-graph (+ contextGraph, sub-graph) CRUD, participants, join flow, manifest publish/install.
 //
 // Extracted verbatim from the legacy monolithic `handleRequest` —
 // every block is a contiguous slice of the original source with zero
@@ -122,7 +122,6 @@ import { type ExtractionStatusRecord, getExtractionStatusRecord, setExtractionSt
 import { FileStore } from '../../file-store.js';
 import { VectorStore, OpenAIEmbeddingProvider, type EmbeddingProvider } from '../../vector-store.js';
 import { parseBoundary, parseMultipart, MultipartParseError } from '../../http/multipart.js';
-import { handleCapture, EpcisValidationError, handleEventsQuery, EpcisQueryError, type Publisher as EpcisPublisher } from '@origintrail-official/dkg-epcis';
 // Phase 8 — project-manifest publish + install (UI-driven onboarding flow).
 // Daemon constructs a self-pointing DkgClient (localhost:listenPort) and
 // reuses the same publish/fetch/plan/write helpers the CLI uses, so wire
@@ -359,6 +358,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     path,
     requestToken,
     requestAgentAddress,
+    emitMemoryGraphChanged,
   } = ctx;
 
 
@@ -476,7 +476,11 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     // registered later via POST /api/context-graph/register.
     if (register === true) {
       try {
-        const regResult = await agent.registerContextGraph(id, { callerAgentAddress: requestAgentAddress });
+        const regResult = await agent.registerContextGraph(id, {
+          callerAgentAddress: requestAgentAddress,
+          accessPolicy: typeof accessPolicy === 'number' ? accessPolicy : undefined,
+          publishPolicy: typeof publishPolicy === 'number' ? publishPolicy : undefined,
+        });
         return jsonResponse(res, 200, {
           created: id,
           uri: `did:dkg:context-graph:${id}`,
@@ -502,15 +506,18 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     const body = await readBody(req, SMALL_BODY_BYTES);
     const parsed = safeParseJson(body, res);
     if (!parsed) return;
-    const { id, accessPolicy } = parsed;
+    const { id, accessPolicy, publishPolicy } = parsed;
     if (!id) return jsonResponse(res, 400, { error: 'Missing "id"' });
     if (typeof id !== 'string') return jsonResponse(res, 400, { error: '"id" must be a string' });
     if (!isValidContextGraphId(id)) return jsonResponse(res, 400, { error: 'Invalid context graph id' });
     if (accessPolicy !== undefined && (accessPolicy !== 0 && accessPolicy !== 1)) {
       return jsonResponse(res, 400, { error: '"accessPolicy" must be 0 (open) or 1 (private)' });
     }
+    if (publishPolicy !== undefined && (publishPolicy !== 0 && publishPolicy !== 1)) {
+      return jsonResponse(res, 400, { error: '"publishPolicy" must be 0 (curated) or 1 (open)' });
+    }
     try {
-      const result = await agent.registerContextGraph(id, { accessPolicy, callerAgentAddress: requestAgentAddress });
+      const result = await agent.registerContextGraph(id, { accessPolicy, publishPolicy, callerAgentAddress: requestAgentAddress });
       return jsonResponse(res, 200, {
         registered: id,
         onChainId: result.onChainId,
@@ -592,6 +599,13 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       });
     try {
       await agent.createSubGraph(contextGraphId, subGraphName);
+      emitMemoryGraphChanged?.({
+        contextGraphId,
+        layers: [],
+        subGraphName,
+        operation: "sub_graph_created",
+        source: "api",
+      });
       return jsonResponse(res, 200, { created: subGraphName, contextGraphId });
     } catch (err: any) {
       if (
@@ -1114,17 +1128,17 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     const body = await readBody(req, SMALL_BODY_BYTES);
     const parsed = JSON.parse(body);
     const { includeWorkspace, includeSharedMemory } = parsed;
-    const paranetId = parsed.contextGraphId ?? parsed.paranetId;
-    if (!paranetId)
+    const contextGraphId = parsed.contextGraphId;
+    if (!contextGraphId)
       return jsonResponse(res, 400, {
-        error: 'Missing "contextGraphId" (or legacy "paranetId")',
+        error: 'Missing "contextGraphId"',
       });
 
     // For curated CGs, verify this node's agent is on the allowlist.
     // The allowlist may not be available locally yet (it lives on the
     // curator's node), so this is a best-effort early rejection —
     // the sync protocol enforces access on the remote side regardless.
-    const localAllowed = await agent.getContextGraphAllowedAgents(paranetId).catch(() => [] as string[]);
+    const localAllowed = await agent.getContextGraphAllowedAgents(contextGraphId).catch(() => [] as string[]);
     if (localAllowed.length > 0) {
       const callerAddr = requestAgentAddress ?? agent.getDefaultAgentAddress();
       const isEthAddress = callerAddr && /^0x[0-9a-fA-F]{40}$/.test(callerAddr);
@@ -1139,14 +1153,14 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       (includeSharedMemory ?? includeWorkspace) !== false;
 
     const subMap = agent.getSubscribedContextGraphs();
-    const existingSub = subMap?.get(paranetId);
-    const existingJobId = catchupTracker.latestByParanet.get(paranetId);
+    const existingSub = subMap?.get(contextGraphId);
+    const existingJobId = catchupTracker.latestByContextGraph.get(contextGraphId);
     const existingJob = existingJobId ? catchupTracker.jobs.get(existingJobId) : undefined;
 
     if (existingSub?.subscribed) {
       if (existingJob && (existingJob.status === "queued" || existingJob.status === "running")) {
         return jsonResponse(res, 200, {
-          subscribed: paranetId,
+          subscribed: contextGraphId,
           catchup: {
             status: existingJob.status,
             includeWorkspace: existingJob.includeWorkspace,
@@ -1160,7 +1174,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         if (!existingJob) {
           const syntheticJob: CatchupJob = {
             jobId,
-            paranetId,
+            contextGraphId,
             includeWorkspace: shouldSyncSharedMemory,
             status: "done",
             queuedAt: Date.now(),
@@ -1168,10 +1182,10 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
             finishedAt: Date.now(),
           };
           catchupTracker.jobs.set(jobId, syntheticJob);
-          catchupTracker.latestByParanet.set(paranetId, jobId);
+          catchupTracker.latestByContextGraph.set(contextGraphId, jobId);
         }
         return jsonResponse(res, 200, {
-          subscribed: paranetId,
+          subscribed: contextGraphId,
           catchup: {
             status: "done",
             includeWorkspace: shouldSyncSharedMemory,
@@ -1181,19 +1195,19 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       }
     }
 
-    console.log(`[subscribe] contextGraph=${paranetId} includeSharedMemory=${shouldSyncSharedMemory}`);
-    agent.subscribeToContextGraph(paranetId);
+    console.log(`[subscribe] contextGraph=${contextGraphId} includeSharedMemory=${shouldSyncSharedMemory}`);
+    agent.subscribeToContextGraph(contextGraphId);
 
     const jobId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     const job: CatchupJob = {
       jobId,
-      paranetId,
+      contextGraphId,
       includeWorkspace: shouldSyncSharedMemory,
       status: "queued",
       queuedAt: Date.now(),
     };
     catchupTracker.jobs.set(jobId, job);
-    catchupTracker.latestByParanet.set(paranetId, jobId);
+    catchupTracker.latestByContextGraph.set(contextGraphId, jobId);
 
     while (catchupTracker.jobs.size > 100) {
       let oldestId: string | undefined;
@@ -1209,19 +1223,19 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       catchupTracker.jobs.delete(oldestId);
       if (
         removed &&
-        catchupTracker.latestByParanet.get(removed.paranetId) === oldestId
+        catchupTracker.latestByContextGraph.get(removed.contextGraphId) === oldestId
       ) {
-        catchupTracker.latestByParanet.delete(removed.paranetId);
+        catchupTracker.latestByContextGraph.delete(removed.contextGraphId);
       }
     }
 
     void (async () => {
       job.status = "running";
       job.startedAt = Date.now();
-      if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${jobId} contextGraph=${paranetId} started`);
+      if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${jobId} contextGraph=${contextGraphId} started`);
       try {
         const result = await daemonState.catchupRunner!.run({
-          contextGraphId: paranetId,
+          contextGraphId: contextGraphId,
           includeSharedMemory: shouldSyncSharedMemory,
         });
         job.result = result;
@@ -1244,28 +1258,48 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         if (result.denied && !servedByPeer) {
           job.status = "denied";
           job.error = result.deniedPeers > 1 ? `Sync denied by ${result.deniedPeers} remote peers` : "Sync denied by remote peer";
-          if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${jobId} contextGraph=${paranetId} denied by remote peer(s): ${result.deniedPeers}`);
+          if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${jobId} contextGraph=${contextGraphId} denied by remote peer(s): ${result.deniedPeers}`);
         }
 
         if (job.status === "done") {
           if (cleanResponse) {
-            const hasContent = await agent.contextGraphHasLocalContent(paranetId).catch(() => false);
-            agent.markContextGraphSubscriptionState(paranetId, {
+            const hasContent = await agent.contextGraphHasLocalContent(contextGraphId).catch(() => false);
+            agent.markContextGraphSubscriptionState(contextGraphId, {
               synced: true,
               ...(shouldSyncSharedMemory ? { sharedMemorySynced: true } : {}),
               ...(hasContent ? { metaSynced: true } : {}),
             });
+          } else if (result.peersTried > 0 && result.peersSucceeded === 0) {
+            // No peer answered within the run — curator likely offline
+            // or no node currently holds this CG. Distinct from `denied`
+            // so the UI can render "couldn't reach the curator" copy +
+            // the signed-join-request CTA. The previous behaviour
+            // collapsed this case into a generic `failed` whose message
+            // ("all reachable peers failed") was easy to misread as a
+            // local error. See `JoinProjectModal.tsx` `unreachable`
+            // branch and `CatchupJobState`.
+            job.status = "unreachable";
+            job.error = "No peer could deliver this project's data — the curator may be offline, or no node currently holds the data. You can still send a signed join request; they will receive it next time they come online.";
           } else if (result.peersTried > 0) {
             job.status = "failed";
             job.error = "Sync did not complete — all reachable peers failed (timeouts or transport errors). Retry once the network is healthier.";
           } else if (result.connectedPeers > 0 && result.syncCapablePeers === 0) {
-            job.status = "failed";
-            job.error = "No sync-capable peers found for catch-up";
+            // Connected to peers, but none speak the sync protocol —
+            // i.e. all our connections are non-DKG / mismatched
+            // versions. From the joiner's perspective this is the same
+            // unreachable outcome ("nobody can answer my sync"), so
+            // reuse the dedicated terminal status.
+            job.status = "unreachable";
+            job.error = "No sync-capable peers found for catch-up — the curator may be offline.";
+          } else if (result.connectedPeers === 0) {
+            // No peers connected at all → definitionally unreachable.
+            job.status = "unreachable";
+            job.error = "No peers connected — couldn't reach the curator. They may be offline, or your node hasn't bootstrapped to the network yet.";
           }
 
           if (DEBUG_SYNC_TRACE) {
             console.log(
-              `[catchup] job=${jobId} contextGraph=${paranetId} status=${job.status} ` +
+              `[catchup] job=${jobId} contextGraph=${contextGraphId} status=${job.status} ` +
                 `peers=${result.peersTried}/${result.syncCapablePeers} connected=${result.connectedPeers} ` +
                 `data=${result.dataSynced} swm=${result.sharedMemorySynced} denied=${result.denied}`,
             );
@@ -1274,14 +1308,14 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       } catch (err) {
         job.error = err instanceof Error ? err.message : String(err);
         job.status = "failed";
-        if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${jobId} contextGraph=${paranetId} threw: ${job.error}`);
+        if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${jobId} contextGraph=${contextGraphId} threw: ${job.error}`);
       } finally {
         job.finishedAt = Date.now();
       }
     })();
 
     return jsonResponse(res, 200, {
-      subscribed: paranetId,
+      subscribed: contextGraphId,
       catchup: {
         status: "queued",
         includeWorkspace: shouldSyncSharedMemory,
@@ -1290,28 +1324,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     });
   }
 
-  // POST /api/paranet/create (legacy) — create a context graph definition
-  // V10 route /api/context-graph/create is handled above (combined with on-chain context graph create).
-  if (req.method === "POST" && path === "/api/paranet/create") {
-    const body = await readBody(req, SMALL_BODY_BYTES);
-    const { id, name, description, allowedAgents, accessPolicy } = JSON.parse(body);
-    if (!id || !name)
-      return jsonResponse(res, 400, { error: 'Missing "id" or "name"' });
-    await agent.createContextGraph({
-      id,
-      name,
-      description,
-      callerAgentAddress: requestAgentAddress,
-      ...(Array.isArray(allowedAgents) ? { allowedAgents } : {}),
-      ...(typeof accessPolicy === 'number' ? { accessPolicy } : {}),
-    });
-    return jsonResponse(res, 200, {
-      created: id,
-      uri: `did:dkg:context-graph:${id}`,
-    });
-  }
-
-  // POST /api/context-graph/rename (or /api/paranet/rename)
+  // POST /api/context-graph/rename
   //
   // Updates the display name (schema:name) of an existing context graph
   // without touching any of its data. Delegates to `agent.renameContextGraph`
@@ -1320,10 +1333,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
   // from both the ONTOLOGY graph and the CG `_meta` graph, and (c) writes
   // the new name into both so the rename is durable for open AND private
   // CGs (private curated graphs read their definition from `_meta`).
-  if (
-    req.method === "POST" &&
-    (path === "/api/context-graph/rename" || path === "/api/paranet/rename")
-  ) {
+  if (req.method === "POST" && path === "/api/context-graph/rename") {
     const body = await readBody(req, SMALL_BODY_BYTES);
     const { id, name } = JSON.parse(body);
     if (!id || !name) {
@@ -1346,25 +1356,18 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     }
   }
 
-  // GET /api/context-graph/list (V10) or /api/paranet/list (legacy)
-  if (
-    req.method === "GET" &&
-    (path === "/api/context-graph/list" || path === "/api/paranet/list")
-  ) {
+  // GET /api/context-graph/list
+  if (req.method === "GET" && path === "/api/context-graph/list") {
     const contextGraphs = await agent.listContextGraphs({
       callerAgentAddress: requestAgentAddress ?? null,
     });
     return jsonResponse(res, 200, {
       contextGraphs,
-      paranets: contextGraphs, // backward compat
     });
   }
 
-  // GET /api/context-graph/exists (V10) or /api/paranet/exists (legacy)
-  if (
-    req.method === "GET" &&
-    (path === "/api/context-graph/exists" || path === "/api/paranet/exists")
-  ) {
+  // GET /api/context-graph/exists
+  if (req.method === "GET" && path === "/api/context-graph/exists") {
     const id = url.searchParams.get("id");
     if (!id)
       return jsonResponse(res, 400, { error: 'Missing "id" query param' });

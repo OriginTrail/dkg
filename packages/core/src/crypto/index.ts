@@ -33,6 +33,12 @@ export {
   computePublishACKDigest,
   computeUpdateACKDigest,
   computePublishPublisherDigest,
+  buildAuthorAttestationTypedData,
+  AUTHOR_ATTESTATION_DOMAIN_NAME,
+  AUTHOR_ATTESTATION_DOMAIN_VERSION,
+  AUTHOR_ATTESTATION_PRIMARY_TYPE,
+  AUTHOR_SCHEME_VERSION_V1,
+  type AuthorAttestationTypedData,
   eip191Hash,
   uint256ToBytes,
 } from './ack.js';

@@ -910,84 +910,6 @@ async function cleanGeneratedOutputs(
 }
 
 /**
- * Decide whether to rebuild Solidity contracts. Same semantics as the original
- * inline check (skip on terminal diff failure) plus one robustness improvement:
- * if the parent commit isn't reachable in the slot's pack files (most common
- * cause is a shallow clone or upstream force-push rebase), try a single
- * `git fetch --depth=1 origin <currentCommit>` and retry the diff once before
- * giving up. We've never observed an ABI/JS mismatch from this skipping in
- * practice, so we err toward "less work" rather than "build to be safe".
- */
-async function shouldRebuildContracts(args: {
-  au: ResolvedAutoUpdateConfig;
-  fetchUrl: string;
-  currentCommit: string;
-  checkedOutCommit: string;
-  targetDir: string;
-  execFileAsync: (file: string, args: string[], opts: any) => Promise<any>;
-  log: (m: string) => void;
-}): Promise<boolean> {
-  const { au, fetchUrl, currentCommit, checkedOutCommit, targetDir, execFileAsync, log } = args;
-  if (
-    !/^[0-9a-f]{6,40}$/i.test(currentCommit) ||
-    !/^[0-9a-f]{6,40}$/i.test(checkedOutCommit)
-  ) {
-    log('Auto-update: contract-change check skipped (commit SHAs invalid); skipping contract build.');
-    return false;
-  }
-  const tryDiff = async (): Promise<{ ok: boolean; stdout?: string; err?: any }> => {
-    try {
-      const result = await execFileAsync(
-        'git',
-        ['diff', '--name-only', `${currentCommit}..${checkedOutCommit}`],
-        { cwd: targetDir, encoding: 'utf-8', timeout: 30_000 },
-      );
-      return { ok: true, stdout: String(result?.stdout ?? '') };
-    } catch (err: any) {
-      return { ok: false, err };
-    }
-  };
-  let diff = await tryDiff();
-  if (!diff.ok) {
-    // Most common cause: the parent commit isn't in the slot's pack files.
-    // Fetch it explicitly (depth=1 on the SHA), then retry once. The slots
-    // are initialized with bare `git init` and fetched via direct URL — no
-    // `origin` remote is configured — so we must mirror the main fetch and
-    // pass the URL + auth args explicitly. Best-effort: if the fetch itself
-    // errors, skip the build (legacy behaviour); we've never observed a
-    // real ABI/JS mismatch from this path.
-    try {
-      log(`Auto-update: contract-diff failed; fetching parent commit ${currentCommit.slice(0, 8)} to retry.`);
-      await execFileAsync(
-        'git',
-        [...gitCommandArgs(fetchUrl, au), 'fetch', '--depth=1', fetchUrl, currentCommit],
-        {
-          cwd: targetDir,
-          encoding: 'utf-8',
-          timeout: 30_000,
-          env: gitCommandEnv(au),
-        },
-      );
-      diff = await tryDiff();
-    } catch (fetchErr: any) {
-      log(`Auto-update: parent-commit fetch failed (${fetchErr?.message ?? fetchErr}); skipping contract build.`);
-      return false;
-    }
-  }
-  if (!diff.ok) {
-    log(
-      `Auto-update: contract-change check failed (${diff.err?.message ?? diff.err}); skipping contract build.`,
-    );
-    return false;
-  }
-  const changedPaths = String(diff.stdout ?? '')
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean);
-  return changedPaths.some((p) => p.startsWith('packages/evm-module/contracts/'));
-}
-
-/**
  * Core blue-green update logic. Builds the new version in the inactive slot,
  * then atomically swaps the `releases/current` symlink.
  * Returns true if an update was applied (caller should SIGTERM to restart).
@@ -1252,7 +1174,6 @@ async function _performUpdateInner(
       label: "pnpm install",
       log,
     });
-    let usedFullBuildFallback = false;
     let runtimeBuildCommand = FULL_BUILD_COMMAND;
     try {
       const rootPkgRaw = await readFile(
@@ -1281,78 +1202,18 @@ async function _performUpdateInner(
         label: FULL_BUILD_COMMAND,
         log,
       });
-      usedFullBuildFallback = true;
     }
 
-    if (usedFullBuildFallback) {
-      log(
-        "Auto-update: contract build check skipped (full build fallback already executed).",
-      );
-    } else {
-      const shouldBuildContracts = await shouldRebuildContracts({
-        au,
-        fetchUrl,
-        currentCommit,
-        checkedOutCommit,
-        targetDir,
-        execFileAsync,
-        log,
-      });
-
-      if (shouldBuildContracts) {
-        log(
-          "Auto-update: contract folder changes detected; building @origintrail-official/dkg-evm-module...",
-        );
-        // Run `hardhat clean` first so stale artifacts/, abi/, and typechain
-        // outputs from a deleted/renamed contract don't survive into the
-        // inactive slot. We deliberately scope this to the
-        // `shouldBuildContracts` branch:
-        //   - the no-change branch keeps the Hardhat compile cache intact,
-        //     which is what saves us from the cold-solc / ARM64 build
-        //     timeout that the rest of this helper exists to prevent;
-        //   - when contract sources actually changed we're already paying
-        //     for a recompile, so wiping the cache here is essentially free
-        //     and guarantees the swap doesn't activate ghost ABIs/types.
-        // Best-effort: a clean failure must not abort an otherwise-valid
-        // contract rebuild — `hardhat compile` will still recreate every
-        // artifact that the new source tree references; only stale outputs
-        // for *deleted* contracts would be missed, which is a strict
-        // improvement over today's behaviour anyway.
-        try {
-          await runBuildStep(
-            execAsync,
-            "pnpm --filter @origintrail-official/dkg-evm-module clean",
-            {
-              cwd: targetDir,
-              timeoutMs: timeouts.contracts,
-              label: "pnpm --filter dkg-evm-module clean",
-              log,
-            },
-          );
-        } catch (cleanErr: any) {
-          log(
-            `Auto-update: hardhat clean failed (${cleanErr?.message ?? String(cleanErr)}); proceeding with rebuild — stale artifacts for renamed/deleted contracts may persist.`,
-          );
-        }
-        await runBuildStep(
-          execAsync,
-          "pnpm --filter @origintrail-official/dkg-evm-module build",
-          {
-            cwd: targetDir,
-            timeoutMs: timeouts.contracts,
-            label: "pnpm --filter dkg-evm-module build",
-            log,
-          },
-        );
-        log(
-          "Auto-update: @origintrail-official/dkg-evm-module build completed.",
-        );
-      } else {
-        log(
-          "Auto-update: no contract folder changes detected; skipping @origintrail-official/dkg-evm-module build.",
-        );
-      }
-    }
+    // NOTE: the auto-updater intentionally never invokes `hardhat compile` on
+    // node hosts. The committed `packages/evm-module/abi/*.json` files are the
+    // runtime contract surface (consumed by `packages/chain` via require()),
+    // and a CI gate (`abi-freshness` job in ci.yml) runs `npx hardhat compile`
+    // (default config, the one that loads `hardhat-abi-exporter`) on every
+    // contract-touching PR and blocks merge if the regenerated `abi/` differs
+    // from what was committed. This removes the single most failure-prone
+    // step from the update flow — hardhat compile routinely OOMs / times out
+    // on resource-constrained nodes (cold solc on ARM64, in particular) and
+    // any failure here would abort the slot swap.
 
     let nodeUiPackageNames = NODE_UI_PACKAGE_NAME_FALLBACKS;
     try {

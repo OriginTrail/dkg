@@ -139,7 +139,7 @@ pm2 save && pm2 startup
 
 ## Phase 3: First Node Smoke Test (15 min)
 
-Before inviting others, test the full flow yourself with a single node. The `testing` paranet is auto-created and auto-subscribed on startup (via `defaultParanets` in `testnet.json`).
+Before inviting others, test the full flow yourself with a single node. The `testing` contextGraph is auto-created and auto-subscribed on startup (via `defaultContextGraphs` in `testnet.json`).
 
 ### Steps
 
@@ -156,13 +156,13 @@ pnpm dkg wallet
 
 # 3. Start
 pnpm dkg start -f
-# The node auto-creates and subscribes to the "testing" paranet
+# The node auto-creates and subscribes to the "testing" contextGraph
 
 # 4. Check relay connection
 pnpm dkg status
 # Should show "Circuit reservation granted"
 
-# 5. Publish to the testing paranet (auto-created on startup)
+# 5. Publish to the testing contextGraph (auto-created on startup)
 pnpm dkg publish testing --subject "did:dkg:test:hello" \
   --predicate "https://schema.org/name" --object "Hello World"
 
@@ -249,7 +249,7 @@ Test the update flow end-to-end.
 
 ```bash
 # On Node A: note the KC ID from the publish output
-pnpm dkg update <kc-id> --paranet smoke-test \
+pnpm dkg update <kc-id> --context-graph smoke-test \
   --subject "did:dkg:test:from-a" \
   --predicate "https://schema.org/name" --object "Updated from Node A"
 
@@ -324,7 +324,7 @@ If something goes wrong after contract deployment:
 │    ├── Profile (V8)                                      │
 │    ├── Staking (V8)                                      │
 │    ├── KnowledgeCollection (V8, legacy)                  │
-│    └── Paranets (V8)                                     │
+│    └── ContextGraphs (V8)                                     │
 └──────────────────────────────────────────────────────────┘
             ▲                        ▲
             │ RPC                    │ RPC

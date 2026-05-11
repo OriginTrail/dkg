@@ -11,7 +11,7 @@ import {
   encodePublishIntent, decodePublishIntent,
   encodeStorageACK, decodeStorageACK,
   computePublishACKDigest,
-  computePublishPublisherDigest,
+  buildAuthorAttestationTypedData,
 } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 import type { Quad } from '@origintrail-official/dkg-storage';
@@ -287,16 +287,15 @@ describe('V10 Publish E2E', () => {
     expect(ackSignatures).toHaveLength(3);
 
     const pubWallet = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
-    const pubSig = ethers.Signature.from(
-      await pubWallet.signMessage(
-        computePublishPublisherDigest(
-          TEST_CHAIN_ID,
-          realKAV10Addr,
-          publisherIdentityId,
-          chainCgId,
-          merkleRoot,
-        ),
-      ),
+    const authorTyped = buildAuthorAttestationTypedData({
+      chainId: TEST_CHAIN_ID,
+      kav10Address: realKAV10Addr,
+      contextGraphId: chainCgId,
+      merkleRoot,
+      authorAddress: pubWallet.address,
+    });
+    const authorSig = ethers.Signature.from(
+      await pubWallet.signTypedData(authorTyped.domain, authorTyped.types, authorTyped.message),
     );
 
     const result = await adapter.createKnowledgeAssetsV10!({
@@ -309,11 +308,14 @@ describe('V10 Publish E2E', () => {
       tokenAmount,
       isImmutable: false,
       merkleLeafCount: publishMerkleLeafCount,
-      paymaster: ethers.ZeroAddress,
       publisherNodeIdentityId: publisherIdentityId,
-      publisherSignature: {
-        r: ethers.getBytes(pubSig.r),
-        vs: ethers.getBytes(pubSig.yParityAndS),
+      author: {
+        address: pubWallet.address,
+        signature: {
+          r: ethers.getBytes(authorSig.r),
+          vs: ethers.getBytes(authorSig.yParityAndS),
+        },
+        schemeVersion: 1,
       },
       ackSignatures,
     });

@@ -91,4 +91,13 @@ describe('install.sh validation', () => {
     expect(content).toContain('--build-current-platform');
     expect(content).toContain('--best-effort');
   });
+
+  it('fresh installs prefer UI-inclusive build:runtime over the package-only release build script', async () => {
+    const content = await readFile(INSTALL_SCRIPT, 'utf-8');
+    const runtimeCheck = content.indexOf("typeof pkg.scripts['build:runtime'] === 'string'");
+    const releaseRuntimeCheck = content.indexOf('typeof pkg.scripts[rrbs] === \'string\'');
+    expect(runtimeCheck).toBeGreaterThanOrEqual(0);
+    expect(releaseRuntimeCheck).toBeGreaterThanOrEqual(0);
+    expect(runtimeCheck).toBeLessThan(releaseRuntimeCheck);
+  });
 });

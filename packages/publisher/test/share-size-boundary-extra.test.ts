@@ -3,15 +3,15 @@
  *
  * Audit findings covered:
  *
- *   P-4 (HIGH) — 512 KB SHARE auto-batch boundary.
- *                `packages/publisher/src/dkg-publisher.ts` hard-codes
- *                `MAX_GOSSIP_MESSAGE_SIZE = 512 * 1024`. The existing
+ *   P-4 (HIGH) — 10 MB SHARE gossip boundary.
+ *                `packages/publisher/src/dkg-publisher.ts` enforces
+ *                `DKG_GOSSIP_MAX_MESSAGE_BYTES`. The existing
  *                suite never sends a payload near that limit, so a
  *                silent change to the cap (or a regression that stops
  *                measuring the encoded protobuf length) would not be
  *                detected. These tests pin both sides of the boundary:
- *                  • a payload JUST UNDER 512 KB must succeed; and
- *                  • a payload JUST OVER 512 KB must fail with a clear,
+ *                  • a multi-MB payload below 10 MB must succeed; and
+ *                  • a payload just over 10 MB must fail with a clear,
  *                    caller-actionable error that mentions the limit.
  *
  * Per QA policy: do NOT modify production code or spec docs. If the
@@ -20,7 +20,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { NoChainAdapter } from '@origintrail-official/dkg-chain';
-import { TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg-core';
+import { DKG_GOSSIP_MAX_MESSAGE_BYTES, TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import { DKGPublisher } from '../src/index.js';
 
 const CG = 'boundary-test-cg';
@@ -33,7 +33,7 @@ function q(s: string, p: string, o: string): Quad {
 /**
  * Build a single quad whose UTF-8 N-Quad serialization is approximately
  * `targetBytes` bytes. We pad the literal object so the encoded
- * WorkspacePublishRequest lands just under or just over 512 KB depending
+ * WorkspacePublishRequest lands below or above the cap depending
  * on `targetBytes`.
  *
  * Using a single root entity keeps manifest overhead constant so the
@@ -50,6 +50,20 @@ function buildQuadWithPayload(bytes: number): Quad {
   return q('urn:test:boundary:root', 'http://schema.org/description', `"${padding}"`);
 }
 
+function buildQuadsWithTotalPayload(bytes: number): Quad[] {
+  const chunkBytes = 16 * 1024;
+  const quads: Quad[] = [];
+  let remaining = bytes;
+  let index = 0;
+  while (remaining > 0) {
+    const size = Math.min(chunkBytes, remaining);
+    quads.push(q(`urn:test:boundary:root:${index}`, 'http://schema.org/description', `"${'x'.repeat(size)}"`));
+    remaining -= size;
+    index += 1;
+  }
+  return quads;
+}
+
 function makePublisher(store: OxigraphStore, eventBus: TypedEventBus): Promise<DKGPublisher> {
   return (async () => {
     const keypair = await generateEd25519Keypair();
@@ -62,7 +76,7 @@ function makePublisher(store: OxigraphStore, eventBus: TypedEventBus): Promise<D
   })();
 }
 
-describe('P-4: SWM share() 512 KB gossip-message boundary', () => {
+describe('P-4: SWM share() 10 MB gossip-message boundary', () => {
   let store: OxigraphStore;
   let eventBus: TypedEventBus;
   let publisher: DKGPublisher;
@@ -73,12 +87,12 @@ describe('P-4: SWM share() 512 KB gossip-message boundary', () => {
     publisher = await makePublisher(store, eventBus);
   });
 
-  it('accepts a payload just under the 512 KB cap and returns an encoded message', async () => {
-    // Target 500 KB of literal payload → total encoded protobuf
-    // message will be a few KB larger but still < 512 KB.
-    const under = buildQuadWithPayload(500 * 1024);
+  it('accepts a multi-MB payload below the 10 MB cap and returns an encoded message', async () => {
+    // Many modest literals match the large-context-graph shape without
+    // stressing storage's single-literal formatter.
+    const under = buildQuadsWithTotalPayload(2 * 1024 * 1024);
 
-    const result = await publisher.share(CG, [under], { publisherPeerId: PEER });
+    const result = await publisher.share(CG, under, { publisherPeerId: PEER });
 
     expect(result).toBeDefined();
     // The encoded message is the protobuf payload the agent would gossip.
@@ -86,14 +100,13 @@ describe('P-4: SWM share() 512 KB gossip-message boundary', () => {
     // without this check the size-limit codepath would be untested.
     expect(result.message).toBeDefined();
     expect(result.message).toBeInstanceOf(Uint8Array);
-    expect(result.message.length).toBeLessThanOrEqual(512 * 1024);
-    expect(result.message.length).toBeGreaterThan(400 * 1024); // sanity: did we actually build big
+    expect(result.message.length).toBeLessThanOrEqual(DKG_GOSSIP_MAX_MESSAGE_BYTES);
+    expect(result.message.length).toBeGreaterThan(1024 * 1024); // sanity: did we actually build big
   });
 
-  it('rejects a payload just over the 512 KB cap with a clear, actionable error', async () => {
-    // Target 600 KB of literal payload — well over the 512 KB cap so
-    // there is no ambiguity about which branch the encoder exits on.
-    const over = buildQuadWithPayload(600 * 1024);
+  it('rejects a payload just over the 10 MB cap with a clear, actionable error', async () => {
+    // Well over the 10 MB cap so there is no ambiguity about the exit path.
+    const over = buildQuadWithPayload(DKG_GOSSIP_MAX_MESSAGE_BYTES + 1024 * 1024);
 
     let thrown: unknown;
     try {
@@ -109,23 +122,23 @@ describe('P-4: SWM share() 512 KB gossip-message boundary', () => {
     // without attaching a debugger. We also assert the remediation
     // guidance (split by root entity) per spec §04.
     expect(msg).toMatch(/too large/i);
-    expect(msg).toMatch(/512\s*KB/);
+    expect(msg).toMatch(/10\s*MB/);
     expect(msg).toMatch(/split/i);
   });
 
-  it('the cap is exactly 512 KB — a just-over payload fails, a just-under payload passes', async () => {
-    // Pin the constant. If someone reduces the cap to, say, 256 KB
-    // without updating the guidance in the error or the spec, BOTH
+  it('the cap is 10 MB — an oversized payload fails, a multi-MB payload passes', async () => {
+    // Pin the constant. If someone reduces the cap without updating
+    // the guidance in the error or the spec, BOTH
     // halves of this test flip status and the regression is noisy.
-    const justUnder = buildQuadWithPayload(480 * 1024);
-    const justOver = buildQuadWithPayload(560 * 1024);
+    const justUnder = buildQuadsWithTotalPayload(2 * 1024 * 1024);
+    const justOver = buildQuadWithPayload(DKG_GOSSIP_MAX_MESSAGE_BYTES + 512 * 1024);
 
-    const ok = await publisher.share(CG, [justUnder], { publisherPeerId: PEER });
+    const ok = await publisher.share(CG, justUnder, { publisherPeerId: PEER });
     expect(ok).toBeDefined();
-    expect(ok.message.length).toBeLessThan(512 * 1024);
+    expect(ok.message.length).toBeLessThan(DKG_GOSSIP_MAX_MESSAGE_BYTES);
 
     await expect(
       publisher.share(CG, [justOver], { publisherPeerId: PEER }),
-    ).rejects.toThrow(/too large.*512\s*KB/i);
+    ).rejects.toThrow(/too large.*10\s*MB/i);
   });
 });

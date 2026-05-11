@@ -101,7 +101,7 @@ Publish this to the DKG:
 ```
 ```
 
-Agent responds: *"Published 2 triple(s) to paranet 'default'."*
+Agent responds: *"Published 2 triple(s) to contextGraph 'default'."*
 
 ### Querying
 

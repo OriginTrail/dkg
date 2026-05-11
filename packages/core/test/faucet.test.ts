@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { requestFaucetFunding } from '../src/faucet.js';
+import { describe, it, expect, vi } from 'vitest';
+import { getFundableWalletAddresses, requestFaucetFunding } from '../src/faucet.js';
 
 interface FetchCall {
   url: string | URL | Request;
@@ -21,6 +21,75 @@ function createTrackingFetch(status: number, body: unknown): { fetch: typeof glo
   };
   return { fetch: fn as typeof globalThis.fetch, calls };
 }
+
+describe('getFundableWalletAddresses', () => {
+  it('returns the admin wallet before operational wallets for the current shape', () => {
+    const result = getFundableWalletAddresses({
+      adminWallet: { address: '0xAdmin' },
+      wallets: [
+        { address: '0xWallet1' },
+        { address: '0xWallet2' },
+        { address: '0xWallet3' },
+      ],
+    });
+
+    expect(result).toEqual(['0xAdmin', '0xWallet1', '0xWallet2', '0xWallet3']);
+  });
+
+  it('returns only operational wallets for the legacy array shape', () => {
+    const result = getFundableWalletAddresses([
+      { address: '0xWallet1' },
+      { address: '0xWallet2' },
+    ]);
+
+    expect(result).toEqual(['0xWallet1', '0xWallet2']);
+  });
+
+  it('returns only operational wallets when adminWallet is missing', () => {
+    const result = getFundableWalletAddresses({
+      wallets: [
+        { address: '0xWallet1' },
+        { address: '0xWallet2' },
+      ],
+    });
+
+    expect(result).toEqual(['0xWallet1', '0xWallet2']);
+  });
+
+  it('deduplicates addresses case-insensitively with admin position winning', () => {
+    const result = getFundableWalletAddresses({
+      adminWallet: { address: '0xAdmin' },
+      wallets: [
+        { address: '0xadmin' },
+        { address: '0xWallet1' },
+        { address: '0xwallet1' },
+      ],
+    });
+
+    expect(result).toEqual(['0xAdmin', '0xWallet1']);
+  });
+
+  it('returns an empty list when there are no operational wallet addresses', () => {
+    expect(getFundableWalletAddresses({ adminWallet: { address: '0xAdmin' }, wallets: [] }))
+      .toEqual([]);
+    expect(getFundableWalletAddresses({ adminWallet: { address: '0xAdmin' } }))
+      .toEqual([]);
+  });
+
+  it('ignores malformed wallet address fields', () => {
+    const result = getFundableWalletAddresses({
+      adminWallet: { address: 123 },
+      wallets: [
+        { address: '' },
+        { address: null },
+        {},
+        { address: '0xWallet1' },
+      ],
+    });
+
+    expect(result).toEqual(['0xWallet1']);
+  });
+});
 
 describe('requestFaucetFunding', () => {
   it('returns funded amounts on success', async () => {
@@ -47,7 +116,22 @@ describe('requestFaucetFunding', () => {
     expect(reqBody.mode).toBe('v10_base_sepolia');
   });
 
-  it('funds wallets in batches of 3', async () => {
+  it('uses a three-minute timeout for faucet batches', async () => {
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout')
+      .mockReturnValue(new AbortController().signal);
+    const { fetch } = createTrackingFetch(200, { summary: { success: 0 }, results: [] });
+    try {
+      await requestFaucetFunding(
+        'https://faucet.example.com/fund', 'test', ['0xAAA'], 'timeout-node', fetch,
+      );
+
+      expect(timeoutSpy).toHaveBeenCalledWith(180_000);
+    } finally {
+      timeoutSpy.mockRestore();
+    }
+  });
+
+  it('funds wallets in batches of 4', async () => {
     const { fetch, calls } = createTrackingFetch(200, { summary: { success: 1 }, results: [] });
     await requestFaucetFunding(
       'https://faucet.example.com/fund', 'test',
@@ -55,10 +139,10 @@ describe('requestFaucetFunding', () => {
     );
     expect(calls).toHaveLength(2);
     const reqBody = JSON.parse(calls[0].init.body as string);
-    expect(reqBody.wallets).toHaveLength(3);
-    expect(reqBody.wallets).toEqual(['0x1', '0x2', '0x3']);
+    expect(reqBody.wallets).toHaveLength(4);
+    expect(reqBody.wallets).toEqual(['0x1', '0x2', '0x3', '0x4']);
     const secondReqBody = JSON.parse(calls[1].init.body as string);
-    expect(secondReqBody.wallets).toEqual(['0x4', '0x5']);
+    expect(secondReqBody.wallets).toEqual(['0x5']);
   });
 
   it('returns error on HTTP failure', async () => {
@@ -78,7 +162,7 @@ describe('requestFaucetFunding', () => {
       calls.push({ url: url as any, init: init as RequestInit });
       if (calls.length === 1) {
         return new Response(JSON.stringify({
-          summary: { success: 6 },
+          summary: { success: 8 },
           results: [{ chainId: 'eth-sepolia', amount: '0.01', status: 'success' }],
         }), { status: 200, headers: { 'Content-Type': 'application/json' } });
       }
@@ -87,14 +171,14 @@ describe('requestFaucetFunding', () => {
 
     const result = await requestFaucetFunding(
       'https://faucet.example.com/fund', 'test',
-      ['0x1', '0x2', '0x3', '0x4'], 'partial-node', fetch,
+      ['0x1', '0x2', '0x3', '0x4', '0x5'], 'partial-node', fetch,
     );
 
     expect(calls).toHaveLength(2);
     expect(result.success).toBe(true);
     expect(result.funded).toEqual(['0.01 ETH']);
-    expect(result.fundedWallets).toEqual(['0x1', '0x2', '0x3']);
-    expect(result.failedWallets).toEqual(['0x4']);
+    expect(result.fundedWallets).toEqual(['0x1', '0x2', '0x3', '0x4']);
+    expect(result.failedWallets).toEqual(['0x5']);
     expect(result.error).toContain('429');
   });
 
@@ -136,6 +220,36 @@ describe('requestFaucetFunding', () => {
     expect(result.error).toContain('0x2');
   });
 
+  it('surfaces faucet result reasons when no wallets are funded', async () => {
+    const { fetch } = createTrackingFetch(200, {
+      summary: { success: 0, failed: 2 },
+      results: [
+        {
+          chainId: 'v10_base_sepolia_eth',
+          address: '0x1',
+          status: 'cooldown_active',
+          error: 'Caller cooldown active until 2026-05-11T19:17:45.000Z',
+        },
+        {
+          chainId: 'v10_base_sepolia_trac',
+          address: '0x1',
+          status: 'cooldown_active',
+          error: 'Caller cooldown active until 2026-05-11T19:17:49.000Z',
+        },
+      ],
+    });
+    const result = await requestFaucetFunding(
+      'https://faucet.example.com/fund', 'test', ['0x1'], 'cooldown-node', fetch,
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.fundedWallets).toEqual([]);
+    expect(result.failedWallets).toEqual(['0x1']);
+    expect(result.error).toContain('Faucet did not fund all wallets: 0x1');
+    expect(result.error).toContain('cooldown_active: Caller cooldown active until 2026-05-11T19:17:45.000Z');
+    expect(result.error).toContain('cooldown_active: Caller cooldown active until 2026-05-11T19:17:49.000Z');
+  });
+
   it('returns no-wallets error for empty array', async () => {
     const { fetch, calls } = createTrackingFetch(200, {});
     const result = await requestFaucetFunding(
@@ -168,13 +282,23 @@ describe('requestFaucetFunding', () => {
     )).rejects.toThrow('ECONNREFUSED');
   });
 
+  it('explains that a first-batch timeout may still complete on-chain', async () => {
+    const fetch = (async () => {
+      throw new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+    }) as unknown as typeof globalThis.fetch;
+
+    await expect(requestFaucetFunding(
+      'https://faucet.example.com/fund', 'test', ['0xAAA'], 'timeout-node', fetch,
+    )).rejects.toThrow('funding may still complete');
+  });
+
   it('preserves earlier funded wallets when a later batch throws', async () => {
     const calls: FetchCall[] = [];
     const fetch = (async (url: string | URL | Request, init?: RequestInit) => {
       calls.push({ url: url as any, init: init as RequestInit });
       if (calls.length === 1) {
         return new Response(JSON.stringify({
-          summary: { success: 6 },
+          summary: { success: 8 },
           results: [],
         }), { status: 200, headers: { 'Content-Type': 'application/json' } });
       }
@@ -183,22 +307,22 @@ describe('requestFaucetFunding', () => {
 
     const result = await requestFaucetFunding(
       'https://faucet.example.com/fund', 'test',
-      ['0x1', '0x2', '0x3', '0x4'], 'throwing-node', fetch,
+      ['0x1', '0x2', '0x3', '0x4', '0x5'], 'throwing-node', fetch,
     );
 
     expect(result.success).toBe(true);
-    expect(result.fundedWallets).toEqual(['0x1', '0x2', '0x3']);
-    expect(result.failedWallets).toEqual(['0x4']);
+    expect(result.fundedWallets).toEqual(['0x1', '0x2', '0x3', '0x4']);
+    expect(result.failedWallets).toEqual(['0x5']);
     expect(result.error).toContain('faucet offline');
   });
 
-  it('includes nodeName in callerId and Idempotency-Key', async () => {
+  it('includes the idempotency seed in the Idempotency-Key without sending callerId', async () => {
     const { fetch, calls } = createTrackingFetch(200, { summary: { success: 0 }, results: [] });
     await requestFaucetFunding(
       'https://faucet.example.com/fund', 'test', ['0xAAA'], 'my-special-node', fetch,
     );
     const reqBody = JSON.parse(calls[0].init.body as string);
-    expect(reqBody.callerId).toBe('dkg-node:my-special-node');
+    expect(reqBody).toEqual({ mode: 'test', wallets: ['0xAAA'] });
     const headers = calls[0].init.headers as Record<string, string>;
     expect(headers['Idempotency-Key']).toMatch(/^init-test-my-special-node-/);
   });

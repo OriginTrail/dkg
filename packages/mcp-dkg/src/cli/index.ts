@@ -5,20 +5,21 @@
  * dispatcher in `index.ts` routes argv[2] to either CLI subcommand
  * or stdio MCP server.
  *
- * Subcommands (Phase 8 day 2):
+ * Operator-facing subcommands:
  *   join <invite-code> [opts]   Subscribe to a project + install workspace files
  *   status                      Show current install + project membership state
  *   help                        Print usage
  *
- * Subcommands coming in day 3:
+ * Planned for follow-up cycles (not in this PR's scope):
  *   sync                        Diff local install vs project's current manifest
  *   create-project              Curator-side: create CG + publish manifest
  *
- * Distribution:
- *   - Today:  `pnpm exec dkg-mcp join <invite>` (after `pnpm install` + `pnpm build`)
- *   - Or:     `node packages/mcp-dkg/dist/index.js join <invite>`
- *   - Future: `npx @origintrail-official/dkg-mcp join <invite>` once the package
- *             is published to npm.
+ * Distribution: invoked through the umbrella CLI as
+ * `dkg mcp serve <subcommand>` (production path; see
+ * `packages/cli/src/cli.ts:1789-1791` for the argv synthesis). The
+ * `dkg-mcp` bin remains for direct invocation in monorepo dev
+ * checkouts (`pnpm exec dkg-mcp join <invite>`) and for any consumer
+ * that installs `@origintrail-official/dkg-mcp` directly.
  */
 import { parseArgs } from 'node:util';
 import path from 'node:path';
@@ -161,19 +162,47 @@ function parseJoinArgs(args: string[]): JoinOptions {
   };
 }
 
-interface ParsedInvite {
+export interface ParsedInvite {
   contextGraphId: string;
+  /** Legacy V9: full multiaddr embedded in the invite. */
   multiaddr: string | null;
+  /** V10: bare libp2p peer id; resolved via DHT at dial time. */
+  curatorPeerId: string | null;
 }
 
-function parseInviteCode(raw: string): ParsedInvite {
+const PEER_ID_RE = /^(?:Qm[1-9A-HJ-NP-Za-km-z]{44}|12D3Koo[1-9A-HJ-NP-Za-km-z]{45,53})$/;
+
+export function parseInviteCode(raw: string): ParsedInvite {
   const trimmed = raw.trim();
-  // Two formats accepted:
-  //   "<cgId>"
-  //   "<cgId> @ <multiaddr>"
-  const m = trimmed.match(/^(.+?)\s*@\s*(\/.+)$/);
-  if (m) return { contextGraphId: m[1].trim(), multiaddr: m[2].trim() };
-  return { contextGraphId: trimmed, multiaddr: null };
+  // V9 single-line `<cgId> @ <multiaddr>`.
+  const atForm = trimmed.match(/^(.+?)\s*@\s*(\/.+)$/);
+  if (atForm) {
+    return { contextGraphId: atForm[1].trim(), multiaddr: atForm[2].trim(), curatorPeerId: null };
+  }
+
+  // Multi-line forms. Line 1 = cgId; line 2 = multiaddr (legacy) or peer id (V10).
+  const lines = trimmed.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  if (lines.length >= 2) {
+    const second = lines.slice(1).join('').replace(/\s+/g, '');
+    if (second.startsWith('/')) {
+      return { contextGraphId: lines[0], multiaddr: second, curatorPeerId: null };
+    }
+    if (PEER_ID_RE.test(lines[1])) {
+      return { contextGraphId: lines[0], multiaddr: null, curatorPeerId: lines[1] };
+    }
+    // 2+ lines, but neither parser claims line 2 (or beyond). Codex review
+    // on PR #431 (round 2) flagged that the old code silently fell through
+    // to `{ contextGraphId: trimmed }` here, so a typo'd peer id like
+    // `my-project\n12D3KooBAD` turned into a subscribe attempt for the
+    // garbage cgId `"my-project\n12D3KooBAD"`. Fail fast instead — the
+    // UI's parseInviteCode now does the same via `hasUnparsedExtra`.
+    throw new Error(
+      `Invalid invite: line 2 "${lines[1]}" is neither a valid peer ID (12D3Koo…) ` +
+      'nor a multiaddr (/ip4/…). Check for typos.',
+    );
+  }
+
+  return { contextGraphId: trimmed, multiaddr: null, curatorPeerId: null };
 }
 
 async function prompt(question: string, defaultValue?: string): Promise<string> {
@@ -196,9 +225,16 @@ async function cmdJoin(args: string[]): Promise<number> {
     return 2;
   }
 
-  const invite = parseInviteCode(opts.inviteCode);
+  let invite: ParsedInvite;
+  try {
+    invite = parseInviteCode(opts.inviteCode);
+  } catch (err) {
+    console.error(`[join] ${(err as Error).message}`);
+    return 2;
+  }
   console.log(`[join] context graph: ${invite.contextGraphId}`);
-  if (invite.multiaddr) console.log(`[join] curator multiaddr: ${invite.multiaddr}`);
+  if (invite.curatorPeerId) console.log(`[join] curator peer id: ${invite.curatorPeerId} (will resolve via DHT)`);
+  if (invite.multiaddr) console.log(`[join] curator multiaddr: ${invite.multiaddr} (legacy form, ask curator to regenerate via Share Project)`);
 
   // ── 1. Sanity-check the daemon ──
   console.log(`[join] checking local daemon at ${opts.daemonUrl}...`);
@@ -264,7 +300,45 @@ async function cmdJoin(args: string[]): Promise<number> {
     return 1;
   }
 
-  // ── 2. Subscribe (optional — skip with --no-subscribe if already subscribed) ──
+  // ── 2a. Dial the curator (V10 peerId via DHT, or legacy multiaddr) ──
+  //
+  // The /api/context-graph/subscribe route does NOT consume peer-connection
+  // hints — it only schedules a catchup job over whatever peers happen to
+  // already be connected. So if the joiner has no connection to the curator
+  // when we hit subscribe, the catchup can't reach them. Codex review on
+  // PR #431 flagged that mcp-dkg was parsing peerId invites and then
+  // silently dropping them on the floor here. Wire an explicit /api/connect
+  // call before subscribe so the catchup has a fresh edge to the curator
+  // by the time it runs.
+  //
+  // Soft-fail: if the dial fails (DHT slow, curator offline, transient
+  // transport), keep going. subscribe + catchup may still succeed via
+  // cached / gossipped connections, and the user can re-run join later.
+  if (invite.curatorPeerId) {
+    console.log(`[join] dialing curator via DHT (peer id ${invite.curatorPeerId})...`);
+    try {
+      await (client as any).request('POST', '/api/connect', {
+        peerId: invite.curatorPeerId,
+      });
+      console.log('[join]   connected.');
+    } catch (err) {
+      const msg = (err as Error).message;
+      console.warn(`[join]   could not dial curator (continuing): ${msg.slice(0, 200)}`);
+    }
+  } else if (invite.multiaddr) {
+    console.log(`[join] dialing curator via legacy multiaddr...`);
+    try {
+      await (client as any).request('POST', '/api/connect', {
+        multiaddr: invite.multiaddr,
+      });
+      console.log('[join]   connected.');
+    } catch (err) {
+      const msg = (err as Error).message;
+      console.warn(`[join]   could not dial curator (continuing): ${msg.slice(0, 200)}`);
+    }
+  }
+
+  // ── 2b. Subscribe (optional — skip with --no-subscribe if already subscribed) ──
   if (!opts.noSubscribe) {
     console.log(`[join] subscribing to ${invite.contextGraphId}...`);
     try {
@@ -273,7 +347,6 @@ async function cmdJoin(args: string[]): Promise<number> {
       // since the manifest itself is the source of truth for what to install.
       await (client as any).request('POST', '/api/context-graph/subscribe', {
         contextGraphId: invite.contextGraphId,
-        ...(invite.multiaddr ? { multiaddr: invite.multiaddr } : {}),
       });
       console.log('[join] subscribe call accepted; waiting for catchup...');
       // Short poll for catchup; the manifest may take a few seconds to land.

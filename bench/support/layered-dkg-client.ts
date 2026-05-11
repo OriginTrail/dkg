@@ -47,6 +47,13 @@ export class LayeredDkgBenchmarkClient implements BenchmarkClient {
     };
   }
 
+  clear(): void {
+    this.workingMemory.clear();
+    this.sharedWorkingMemory.clear();
+    this.verifiedMemory.clear();
+    this.publisherJobs.clear();
+  }
+
   async sharedMemoryWrite(contextGraphId: string, quads: Quad[]) {
     const working = await this.writeWorkingMemory(contextGraphId, quads);
     const shared = await this.liftWorkingMemoryToSharedMemory(contextGraphId, uniqueSubjects(quads));

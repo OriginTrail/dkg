@@ -67,7 +67,7 @@ describe('DKGQueryEngine', () => {
       },
       {
         subject: ual,
-        predicate: 'http://dkg.io/ontology/paranet',
+        predicate: 'http://dkg.io/ontology/contextGraph',
         object: `did:dkg:context-graph:${CONTEXT_GRAPH}`,
         graph: META,
       },

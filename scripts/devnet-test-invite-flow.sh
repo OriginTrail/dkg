@@ -137,7 +137,7 @@ poll_catchup() {
 
 list_has_cg() {
   local node="$1" cg_id="$2"
-  api "$node" GET /api/paranet/list | python3 -c "
+  api "$node" GET /api/context-graph/list | python3 -c "
 import sys,json
 d=json.load(sys.stdin); cgs=d.get('contextGraphs',[])
 match=[c for c in cgs if c.get('id')=='$cg_id']
@@ -147,7 +147,7 @@ print('yes' if match else 'no')
 
 list_cg_state() {
   local node="$1" cg_id="$2"
-  api "$node" GET /api/paranet/list | python3 -c "
+  api "$node" GET /api/context-graph/list | python3 -c "
 import sys,json
 d=json.load(sys.stdin); cgs=d.get('contextGraphs',[])
 match=[c for c in cgs if c.get('id')=='$cg_id']
@@ -173,7 +173,7 @@ print(json.dumps({
   'allowedAgents': ['$N1_ADDR'],
 }))
 ")
-create_resp=$(api "$N1" POST /api/paranet/create "$create_body")
+create_resp=$(api "$N1" POST /api/context-graph/create "$create_body")
 created=$(echo "$create_resp" | jq_field created)
 if [ "$created" = "$CG_ID" ]; then
   ok "CG created on N1: $(echo "$create_resp" | jq_field uri)"

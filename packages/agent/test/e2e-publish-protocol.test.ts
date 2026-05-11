@@ -3,7 +3,7 @@
  *
  * These tests verify the full end-to-end flows across 2+ nodes with EVMChainAdapter:
  *
- * 1. Paranet publish: write → replicate → collect receiver sigs → on-chain → finalization
+ * 1. ContextGraph publish: write → replicate → collect receiver sigs → on-chain → finalization
  * 2. Context graph publish: same + collect participant sigs → publishToContextGraph
  * 3. verify for already-published KCs
  * 4. Negative: insufficient receiver signatures → publish rejected
@@ -16,7 +16,7 @@ import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, rever
 import { mintTokens, stakeAndSetAsk, setMinimumRequiredSignatures } from '../../chain/test/hardhat-harness.js';
 import { ethers } from 'ethers';
 
-const PARANET = 'publish-protocol-e2e';
+const CONTEXT_GRAPH = 'publish-protocol-e2e';
 const ENTITY_1 = 'urn:protocol:entity:1';
 const ENTITY_2 = 'urn:protocol:entity:2';
 const ENTITY_3 = 'urn:protocol:entity:3';
@@ -56,10 +56,10 @@ afterAll(async () => {
 });
 
 // ========================================================================
-// 1. Paranet Publish — Replicate-then-Publish with Receiver Signatures
+// 1. ContextGraph Publish — Replicate-then-Publish with Receiver Signatures
 // ========================================================================
 
-describe('E2E: Paranet publish with receiver signature collection', () => {
+describe('E2E: ContextGraph publish with receiver signature collection', () => {
   const chainA = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
   let nodeA: DKGAgent;
   let nodeB: DKGAgent;
@@ -106,11 +106,11 @@ describe('E2E: Paranet publish with receiver signature collection', () => {
 
     expect(nodeA.node.libp2p.getPeers().length).toBeGreaterThanOrEqual(2);
 
-    await nodeA.createContextGraph({ id: PARANET, name: 'Publish Protocol E2E', description: '' });
-    await nodeA.registerContextGraph(PARANET);
-    nodeA.subscribeToContextGraph(PARANET);
-    nodeB.subscribeToContextGraph(PARANET);
-    nodeC.subscribeToContextGraph(PARANET);
+    await nodeA.createContextGraph({ id: CONTEXT_GRAPH, name: 'Publish Protocol E2E', description: '' });
+    await nodeA.registerContextGraph(CONTEXT_GRAPH);
+    nodeA.subscribeToContextGraph(CONTEXT_GRAPH);
+    nodeB.subscribeToContextGraph(CONTEXT_GRAPH);
+    nodeC.subscribeToContextGraph(CONTEXT_GRAPH);
     await sleep(1500);
   }, 20_000);
 
@@ -120,12 +120,12 @@ describe('E2E: Paranet publish with receiver signature collection', () => {
       { subject: ENTITY_1, predicate: 'http://schema.org/version', object: '"1"', graph: '' },
     ];
 
-    await nodeA.share(PARANET, quads);
+    await nodeA.share(CONTEXT_GRAPH, quads);
 
     const bBindings = await pollUntil(
       () => nodeB.query(
         `SELECT ?name WHERE { <${ENTITY_1}> <http://schema.org/name> ?name }`,
-        { contextGraphId: PARANET, graphSuffix: '_shared_memory' },
+        { contextGraphId: CONTEXT_GRAPH, graphSuffix: '_shared_memory' },
       ),
       (b) => b.length > 0,
       15_000,
@@ -135,7 +135,7 @@ describe('E2E: Paranet publish with receiver signature collection', () => {
     const cBindings = await pollUntil(
       () => nodeC.query(
         `SELECT ?name WHERE { <${ENTITY_1}> <http://schema.org/name> ?name }`,
-        { contextGraphId: PARANET, graphSuffix: '_shared_memory' },
+        { contextGraphId: CONTEXT_GRAPH, graphSuffix: '_shared_memory' },
       ),
       (b) => b.length > 0,
       15_000,
@@ -155,7 +155,7 @@ describe('E2E: Paranet publish with receiver signature collection', () => {
      * 7. Finalization broadcast → B, C promote workspace → data graph
      */
     const result = await nodeA.publishFromSharedMemory(
-      PARANET,
+      CONTEXT_GRAPH,
       { rootEntities: [ENTITY_1] },
     );
 
@@ -167,7 +167,7 @@ describe('E2E: Paranet publish with receiver signature collection', () => {
     // A has data in the data graph
     const aData = await nodeA.query(
       `SELECT ?name WHERE { <${ENTITY_1}> <http://schema.org/name> ?name }`,
-      PARANET,
+      CONTEXT_GRAPH,
     );
     expect(aData.bindings.length).toBe(1);
   }, 30_000);
@@ -176,7 +176,7 @@ describe('E2E: Paranet publish with receiver signature collection', () => {
     const bBindings = await pollUntil(
       () => nodeB.query(
         `SELECT ?name WHERE { <${ENTITY_1}> <http://schema.org/name> ?name }`,
-        PARANET,
+        CONTEXT_GRAPH,
       ),
       (b) => b.length > 0,
       20_000,
@@ -186,7 +186,7 @@ describe('E2E: Paranet publish with receiver signature collection', () => {
     const cBindings = await pollUntil(
       () => nodeC.query(
         `SELECT ?name WHERE { <${ENTITY_1}> <http://schema.org/name> ?name }`,
-        PARANET,
+        CONTEXT_GRAPH,
       ),
       (b) => b.length > 0,
       20_000,
@@ -249,9 +249,9 @@ describe('E2E: Context graph publish with receiver + participant signatures', ()
     await nodeB.connectTo(addrA);
     await sleep(2000);
 
-    await nodeA.createContextGraph({ id: PARANET, name: 'Context Graph Protocol E2E', description: '' });
-    nodeA.subscribeToContextGraph(PARANET);
-    nodeB.subscribeToContextGraph(PARANET);
+    await nodeA.createContextGraph({ id: CONTEXT_GRAPH, name: 'Context Graph Protocol E2E', description: '' });
+    nodeA.subscribeToContextGraph(CONTEXT_GRAPH);
+    nodeB.subscribeToContextGraph(CONTEXT_GRAPH);
     await sleep(1500);
 
     // Both A and B are participants
@@ -269,7 +269,7 @@ describe('E2E: Context graph publish with receiver + participant signatures', ()
       { subject: ENTITY_2, predicate: 'http://schema.org/name', object: '"Context Protocol Entity"', graph: '' },
     ];
 
-    await nodeA.share(PARANET, quads);
+    await nodeA.share(CONTEXT_GRAPH, quads);
     await sleep(5000);
 
     /**
@@ -281,7 +281,7 @@ describe('E2E: Context graph publish with receiver + participant signatures', ()
      * 5. Broadcast finalization to peers
      */
     const result = await nodeA.publishFromSharedMemory(
-      PARANET,
+      CONTEXT_GRAPH,
       { rootEntities: [ENTITY_2] },
       {
         subContextGraphId: contextGraphId,
@@ -297,7 +297,7 @@ describe('E2E: Context graph publish with receiver + participant signatures', ()
     expect(result.ual).toBeDefined();
 
     // A has data in context graph data graph
-    const ctxDataGraph = `did:dkg:context-graph:${PARANET}/context/${contextGraphId}`;
+    const ctxDataGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/context/${contextGraphId}`;
     const aData = await nodeA.query(
       `SELECT ?name WHERE { GRAPH <${ctxDataGraph}> { <${ENTITY_2}> <http://schema.org/name> ?name } }`,
     );
@@ -305,7 +305,7 @@ describe('E2E: Context graph publish with receiver + participant signatures', ()
   }, 40_000);
 
   it('B receives finalization and promotes to context graph', async () => {
-    const ctxDataGraph = `did:dkg:context-graph:${PARANET}/context/${contextGraphId}`;
+    const ctxDataGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/context/${contextGraphId}`;
 
     const bBindings = await pollUntil(
       () => nodeB.query(
@@ -317,12 +317,12 @@ describe('E2E: Context graph publish with receiver + participant signatures', ()
     expect(bBindings.length).toBe(1);
   }, 30_000);
 
-  it('context graph data is NOT in paranet data graph', async () => {
-    const aParanetData = await nodeA.query(
+  it('context graph data is NOT in contextGraph data graph', async () => {
+    const aContextGraphData = await nodeA.query(
       `SELECT ?name WHERE { <${ENTITY_2}> <http://schema.org/name> ?name }`,
-      PARANET,
+      CONTEXT_GRAPH,
     );
-    expect(aParanetData.bindings.length).toBe(0);
+    expect(aContextGraphData.bindings.length).toBe(0);
   }, 5_000);
 });
 
@@ -349,17 +349,17 @@ describe('E2E: Publish KC directly to context graph', () => {
     await nodeA.start();
     await sleep(500);
 
-    await nodeA.createContextGraph({ id: PARANET, name: 'Direct CG E2E', description: '' });
-    await nodeA.registerContextGraph(PARANET);
-    nodeA.subscribeToContextGraph(PARANET);
+    await nodeA.createContextGraph({ id: CONTEXT_GRAPH, name: 'Direct CG E2E', description: '' });
+    await nodeA.registerContextGraph(CONTEXT_GRAPH);
+    nodeA.subscribeToContextGraph(CONTEXT_GRAPH);
     await sleep(500);
 
-    await nodeA.share(PARANET, [
+    await nodeA.share(CONTEXT_GRAPH, [
       { subject: ENTITY_3, predicate: 'http://schema.org/name', object: '"Direct CG Publish"', graph: '' },
     ]);
     await sleep(2000);
 
-    const result = await nodeA.publishFromSharedMemory(PARANET, { rootEntities: [ENTITY_3] });
+    const result = await nodeA.publishFromSharedMemory(CONTEXT_GRAPH, { rootEntities: [ENTITY_3] });
     expect(result.status).toBe('confirmed');
     expect(result.onChainResult).toBeDefined();
     expect(result.onChainResult!.batchId).toBeGreaterThan(0n);
@@ -400,11 +400,11 @@ describe('E2E: Publish rejected with insufficient receiver signatures', () => {
     await nodeA.start();
     await sleep(500);
 
-    await nodeA.createContextGraph({ id: PARANET, name: 'Lonely Paranet', description: '' });
-    await nodeA.registerContextGraph(PARANET);
-    nodeA.subscribeToContextGraph(PARANET);
+    await nodeA.createContextGraph({ id: CONTEXT_GRAPH, name: 'Lonely ContextGraph', description: '' });
+    await nodeA.registerContextGraph(CONTEXT_GRAPH);
+    nodeA.subscribeToContextGraph(CONTEXT_GRAPH);
 
-    await nodeA.share(PARANET, [
+    await nodeA.share(CONTEXT_GRAPH, [
       { subject: ENTITY_1, predicate: 'http://schema.org/name', object: '"Lonely Data"', graph: '' },
     ]);
 
@@ -414,7 +414,7 @@ describe('E2E: Publish rejected with insufficient receiver signatures', () => {
      * resulting in a tentative (off-chain only) publish.
      */
     const result = await nodeA.publishFromSharedMemory(
-      PARANET,
+      CONTEXT_GRAPH,
       { rootEntities: [ENTITY_1] },
     );
 
@@ -447,8 +447,8 @@ describe('E2E: Context graph registration rejected with insufficient participant
     await nodeA.start();
     await sleep(500);
 
-    await nodeA.createContextGraph({ id: PARANET, name: 'Participant Test', description: '' });
-    nodeA.subscribeToContextGraph(PARANET);
+    await nodeA.createContextGraph({ id: CONTEXT_GRAPH, name: 'Participant Test', description: '' });
+    nodeA.subscribeToContextGraph(CONTEXT_GRAPH);
 
     // Context graph requires 2 signatures, but only 1 node available
     const cgResult = await nodeA.registerContextGraphOnChain({
@@ -457,12 +457,12 @@ describe('E2E: Context graph registration rejected with insufficient participant
     });
     const contextGraphId = cgResult.contextGraphId;
 
-    await nodeA.share(PARANET, [
+    await nodeA.share(CONTEXT_GRAPH, [
       { subject: ENTITY_1, predicate: 'http://schema.org/name', object: '"Needs Sigs"', graph: '' },
     ]);
 
     const result = await nodeA.publishFromSharedMemory(
-      PARANET,
+      CONTEXT_GRAPH,
       { rootEntities: [ENTITY_1] },
       { subContextGraphId: contextGraphId },
     );
@@ -522,9 +522,9 @@ describe('E2E: Edge node participates in context graph governance', () => {
     await edgeNode.connectTo(addrCore);
     await sleep(2000);
 
-    await coreNode.createContextGraph({ id: PARANET, name: 'Edge Participant E2E', description: '' });
-    coreNode.subscribeToContextGraph(PARANET);
-    edgeNode.subscribeToContextGraph(PARANET);
+    await coreNode.createContextGraph({ id: CONTEXT_GRAPH, name: 'Edge Participant E2E', description: '' });
+    coreNode.subscribeToContextGraph(CONTEXT_GRAPH);
+    edgeNode.subscribeToContextGraph(CONTEXT_GRAPH);
     await sleep(1500);
 
     // Both core and edge are participants
@@ -538,7 +538,7 @@ describe('E2E: Edge node participates in context graph governance', () => {
     contextGraphId = cgResult.contextGraphId;
 
     // Core writes data
-    await coreNode.share(PARANET, [
+    await coreNode.share(CONTEXT_GRAPH, [
       { subject: ENTITY_1, predicate: 'http://schema.org/name', object: '"Edge Governed Data"', graph: '' },
     ]);
     await sleep(5000);
@@ -553,7 +553,7 @@ describe('E2E: Edge node participates in context graph governance', () => {
      */
     // Both core and edge node sign as participants
     const result = await coreNode.publishFromSharedMemory(
-      PARANET,
+      CONTEXT_GRAPH,
       { rootEntities: [ENTITY_1] },
       {
         subContextGraphId: contextGraphId,
@@ -566,7 +566,7 @@ describe('E2E: Edge node participates in context graph governance', () => {
 
     expect(result.status).toBe('confirmed');
 
-    const ctxDataGraph = `did:dkg:context-graph:${PARANET}/context/${contextGraphId}`;
+    const ctxDataGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/context/${contextGraphId}`;
     const data = await coreNode.query(
       `SELECT ?name WHERE { GRAPH <${ctxDataGraph}> { <${ENTITY_1}> <http://schema.org/name> ?name } }`,
     );

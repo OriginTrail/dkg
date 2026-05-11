@@ -88,8 +88,14 @@ contract KnowledgeCollection is INamed, IVersioned, ContractStatus, IInitializab
         KnowledgeCollectionStorage kcs = knowledgeCollectionStorage;
         uint40 currentEpoch = uint40(chronos.getCurrentEpoch());
 
+        // Legacy V9-ish path — no author attestation, so `author` is
+        // recorded as `address(0)`. Readers MUST treat that as "this KC
+        // pre-dates on-chain author attestation," never as a valid author
+        // identity claim. New deployments should publish via
+        // `KnowledgeAssetsV10.publish` instead.
         uint256 id = kcs.createKnowledgeCollection(
             msg.sender,
+            address(0),
             publishOperationId,
             merkleRoot,
             knowledgeAssetsAmount,

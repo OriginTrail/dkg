@@ -1,8 +1,8 @@
 name: owner_valid_signature
 policy: owner_assertion.yaml
 context:
-  paranet: example-paranet
-  scope_ual: ual:dkg:example-paranet:auth:pk:0xalice:profile
+  contextGraph: example-contextGraph
+  scope_ual: ual:dkg:example-contextGraph:auth:pk:0xalice:profile
   view: accepted
   snapshot_id: snap-owner-01
 facts:

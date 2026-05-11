@@ -4,8 +4,8 @@
  * Run from repo root:
  *   node demo/node-a-publisher.mjs [port]
  *
- * This node publishes an ImageBot agent to the "agent-skills" paranet,
- * then waits for Node B to connect. Once a peer joins the paranet topic,
+ * This node publishes an ImageBot agent to the "agent-skills" contextGraph,
+ * then waits for Node B to connect. Once a peer joins the contextGraph topic,
  * it broadcasts the public triples via GossipSub and serves private
  * triple requests over /dkg/access/1.0.0.
  */
@@ -13,17 +13,17 @@
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus,
   generateEd25519Keypair, encodePublishRequest,
-  PROTOCOL_ACCESS, DKGEvent, paranetPublishTopic,
+  PROTOCOL_ACCESS, DKGEvent, contextGraphPublishTopic,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGPublisher, AccessHandler } from '@origintrail-official/dkg-publisher';
 
-const PARANET = 'agent-skills';
-const TOPIC = paranetPublishTopic(PARANET);
+const CONTEXT_GRAPH = 'agent-skills';
+const TOPIC = contextGraphPublishTopic(CONTEXT_GRAPH);
 const ENTITY = 'did:dkg:agent:QmImageBot';
 const SKOLEM = `${ENTITY}/.well-known/genid/offering1`;
-const GRAPH = `did:dkg:paranet:${PARANET}`;
+const GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
 
 function q(s, p, o) {
   return { subject: s, predicate: p, object: o, graph: GRAPH };
@@ -62,7 +62,7 @@ async function main() {
   const publisher = new DKGPublisher({ store, chain, eventBus, keypair });
 
   // --- Publish locally ---
-  console.log('Publishing ImageBot agent to paranet "agent-skills"...\n');
+  console.log('Publishing ImageBot agent to contextGraph "agent-skills"...\n');
 
   const publicQuads = [
     q(ENTITY, 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', 'http://dkg.io/ontology/Agent'),
@@ -80,7 +80,7 @@ async function main() {
     q(ENTITY, 'http://dkg.io/ontology/modelVersion', '"yolo-v9-2026-02"'),
   ];
 
-  const result = await publisher.publish({ paranetId: PARANET, quads: publicQuads, privateQuads });
+  const result = await publisher.publish({ contextGraphId: CONTEXT_GRAPH, quads: publicQuads, privateQuads });
 
   console.log('Published successfully!');
   console.log(`  KC ID:       ${result.kcId}`);
@@ -99,7 +99,7 @@ async function main() {
     console.log(`  [Access Event] requester=${data.requester?.slice(0, 20)}... granted=${data.granted}`);
   });
 
-  // --- Subscribe to paranet topic & prepare GossipSub broadcast ---
+  // --- Subscribe to contextGraph topic & prepare GossipSub broadcast ---
   const gossip = new GossipSubManager(node, eventBus);
   gossip.subscribe(TOPIC);
 
@@ -108,7 +108,7 @@ async function main() {
   const publishMsg = encodePublishRequest({
     ual: `did:dkg:${chain.chainId}/${result.kcId}`,
     nquads: nquadsBytes,
-    paranetId: PARANET,
+    contextGraphId: CONTEXT_GRAPH,
     kas: result.kaManifest.map(ka => ({
       tokenId: Number(ka.tokenId),
       rootEntity: ka.rootEntity,

@@ -150,6 +150,7 @@ describe('@integration D26 — time-accurate staking accounting', () => {
     const currentEpoch = await Chronos.getCurrentEpoch();
     const args = [
       accounts[0].address,
+      ethers.ZeroAddress,
       'd26-submit-proof-regression',
       merkleRoot,
       1,

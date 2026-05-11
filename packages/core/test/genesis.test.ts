@@ -52,13 +52,13 @@ describe('getGenesisQuads', () => {
     const classNames = classQuads.map(q => q.subject).sort();
     expect(classNames).toEqual([
       'https://dkg.network/ontology#Agent',
+      'https://dkg.network/ontology#ContextGraph',
       'https://dkg.network/ontology#CoreNode',
       'https://dkg.network/ontology#EdgeNode',
       'https://dkg.network/ontology#KnowledgeAsset',
       'https://dkg.network/ontology#KnowledgeCollection',
       'https://dkg.network/ontology#Network',
-      'https://dkg.network/ontology#Paranet',
-      'https://dkg.network/ontology#SystemParanet',
+      'https://dkg.network/ontology#SystemContextGraph',
     ]);
   });
 
@@ -126,8 +126,8 @@ describe('DKG_ONTOLOGY', () => {
       DKG_PUBLIC_KEY: 'https://dkg.network/ontology#publicKey',
       DKG_NODE_ROLE: 'https://dkg.network/ontology#nodeRole',
       DKG_RELAY_ADDRESS: 'https://dkg.network/ontology#relayAddress',
-      DKG_PARANET: 'https://dkg.network/ontology#Paranet',
-      DKG_SYSTEM_PARANET: 'https://dkg.network/ontology#SystemParanet',
+      DKG_CONTEXT_GRAPH: 'https://dkg.network/ontology#ContextGraph',
+      DKG_SYSTEM_CONTEXT_GRAPH: 'https://dkg.network/ontology#SystemContextGraph',
       DKG_NETWORK: 'https://dkg.network/ontology#Network',
       DKG_NETWORK_ID: 'https://dkg.network/ontology#networkId',
       DKG_GENESIS_VERSION: 'https://dkg.network/ontology#genesisVersion',

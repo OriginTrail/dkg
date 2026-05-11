@@ -123,7 +123,7 @@ describe('SKILL.md file', () => {
 
   it('does NOT contain V9 to V10 migration table (removed — first product release)', () => {
     expect(skillContent).not.toContain('V9 → V10 Migration');
-    expect(skillContent).not.toContain('| Paranet | Context Graph |');
+    expect(skillContent).not.toContain('| ContextGraph | Context Graph |');
     expect(skillContent).not.toContain('| `POST /api/workspace/write`');
   });
 

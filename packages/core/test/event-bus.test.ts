@@ -97,6 +97,10 @@ describe('TypedEventBus', () => {
     expect(DKGEvent.CONNECTION_UPGRADED).toBe('connection:upgraded');
   });
 
+  it('DKGEvent includes memory graph change notifications', () => {
+    expect(DKGEvent.MEMORY_GRAPH_CHANGED).toBe('memory-graph:changed');
+  });
+
   it('emits connection events through the bus', () => {
     const bus = new TypedEventBus();
     const openTracker = tracker();

@@ -63,21 +63,26 @@ export function registerReadTools(
   client: DkgClient,
   config: DkgConfig,
 ): void {
-  // ── dkg_list_projects ───────────────────────────────────────────
+  // ── dkg_list_context_graphs ─────────────────────────────────────
   server.registerTool(
-    'dkg_list_projects',
+    'dkg_list_context_graphs',
     {
-      title: 'List DKG Projects',
+      title: 'List Context Graphs',
+      // Description opens with the audit v1.1 verbatim-locked
+      // reconciliation note (SKILL.md §6 user-vs-internal
+      // terminology); the follow-up sentence is the existing
+      // mcp-dkg per-row payload notes.
       description:
-        'List every context graph (project) this DKG node knows about. ' +
-        'Returns id, display name, role (curator / participant), and layer. ' +
-        'The first call most agents make when joining a workspace.',
+        "List all context graphs the node knows about (called 'projects' " +
+        'in the DKG node UI). Returns id, display name, role (curator / ' +
+        'participant), and layer. The first call most agents make when ' +
+        'joining a workspace.',
       inputSchema: {},
     },
     async (): Promise<ToolResult> => {
       try {
         const rows = await client.listProjects();
-        if (!rows.length) return ok('No projects found on this DKG node.');
+        if (!rows.length) return ok('No context graphs found on this DKG node.');
         const pinned = config.defaultProject;
         const table = rows
           .map((r) => {
@@ -90,24 +95,25 @@ export function registerReadTools(
           })
           .join('\n');
         const hint = pinned
-          ? `\n\n★ pinned in .dkg/config.yaml — other tools default to this project.`
+          ? `\n\n★ pinned in .dkg/config.yaml — other tools default to this context graph.`
           : '';
-        return ok(`Found ${rows.length} project(s):\n\n${table}${hint}`);
+        return ok(`Found ${rows.length} context graph(s):\n\n${table}${hint}`);
       } catch (e) {
-        return err(`Failed to list projects: ${formatError(e)}`);
+        return err(`Failed to list context graphs: ${formatError(e)}`);
       }
     },
   );
 
-  // ── dkg_list_subgraphs ──────────────────────────────────────────
+  // ── dkg_sub_graph_list ──────────────────────────────────────────
   server.registerTool(
-    'dkg_list_subgraphs',
+    'dkg_sub_graph_list',
     {
       title: 'List Sub-graphs',
       description:
-        'List the sub-graphs inside a DKG project (e.g. code, github, ' +
-        'decisions, tasks, meta, chat) with entity counts. Use to figure ' +
-        'out what kind of knowledge the project exposes before querying.',
+        'List the sub-graphs inside a DKG context graph (e.g. code, ' +
+        'github, decisions, tasks, meta, chat) with entity counts. Use ' +
+        'to figure out what kind of knowledge the context graph exposes ' +
+        'before querying.',
       inputSchema: {
         projectId: z.string().optional().describe('contextGraphId; defaults to .dkg/config.yaml'),
       },
@@ -117,7 +123,7 @@ export function registerReadTools(
       if (!pid) return projectErr();
       try {
         const rows = await client.listSubGraphs(pid);
-        if (!rows.length) return ok(`Project '${pid}' has no sub-graphs yet.`);
+        if (!rows.length) return ok(`Context graph '${pid}' has no sub-graphs yet.`);
         const lines = rows.map(
           (r) =>
             `- **${r.name}**${r.entityCount != null ? ` · ${r.entityCount} entities` : ''}${
@@ -131,45 +137,60 @@ export function registerReadTools(
     },
   );
 
-  // ── dkg_sparql ──────────────────────────────────────────────────
+  // ── dkg_query ───────────────────────────────────────────────────
+  // Replaces the legacy `dkg_sparql` registration. SKILL.md + the
+  // OpenClaw adapter both use `dkg_query` against `POST /api/query`.
+  // The two-axis schema migration (audit §7 item 5):
+  //   - Old single `layer: 'wm' | 'swm' | 'union' | 'vm'` enum
+  //   - New separate axes:
+  //       view: 'working-memory' | 'shared-working-memory' | 'verified-memory'
+  //       includeSharedMemory?: boolean   (orthogonal — combines with view)
+  //   - The legacy `'union'` mode (`view: 'working-memory'` ∪ SWM)
+  //     was an enum-conflation of two orthogonal axes; callers
+  //     wanting that semantics now pass
+  //     `view: 'working-memory' + includeSharedMemory: true`.
+  // The daemon-side wire shape already matches this two-axis form
+  // (`DkgClient.query` accepts both as separate fields per
+  // `client.ts:133-183`); this is a public-tool-surface alignment
+  // only, no daemon change needed.
   server.registerTool(
-    'dkg_sparql',
+    'dkg_query',
     {
       title: 'Run SPARQL Query',
       description:
         'Execute an arbitrary SPARQL SELECT / ASK / CONSTRUCT against a ' +
-        'DKG project. Known prefixes are auto-prepended so you can just ' +
-        'write `SELECT ?d WHERE { ?d a decisions:Decision }`. Scope with ' +
-        '`layer` — "wm" (default), "swm", "union" (wm+swm), or "vm".',
+        'DKG context graph. Known prefixes are auto-prepended so you can ' +
+        'just write `SELECT ?d WHERE { ?d a decisions:Decision }`. Scope ' +
+        'with `view` — "working-memory" (default, private), ' +
+        '"shared-working-memory" (team), or "verified-memory" (on-chain). ' +
+        'Set `includeSharedMemory: true` alongside `view: "working-memory"` ' +
+        'to query WM ∪ SWM in one call.',
       inputSchema: {
         sparql: z.string().describe('SPARQL query body. Prefixes are auto-injected.'),
         projectId: z.string().optional().describe('contextGraphId; defaults to .dkg/config.yaml'),
         subGraphName: z.string().optional().describe('Limit the query to a single sub-graph'),
-        layer: z
-          .enum(['wm', 'swm', 'union', 'vm'])
+        view: z
+          .enum(['working-memory', 'shared-working-memory', 'verified-memory'])
           .optional()
-          .describe('Memory layer scope: wm (default, private), swm (team), union (wm+swm), vm (on-chain verified)'),
+          .describe('Memory tier: working-memory (default, private), shared-working-memory (team), verified-memory (on-chain).'),
+        includeSharedMemory: z
+          .boolean()
+          .optional()
+          .describe('When set with view: "working-memory", include SWM in the result set (the legacy `layer: "union"` semantics).'),
         limit: z.number().optional().describe('Row cap when rendering to markdown; does NOT modify the query'),
       },
     },
-    async ({ sparql, projectId, subGraphName, layer, limit }): Promise<ToolResult> => {
+    async ({ sparql, projectId, subGraphName, view, includeSharedMemory, limit }): Promise<ToolResult> => {
       const pid = resolveProject(projectId, config);
       if (!pid) return projectErr();
       const fullSparql = sparql.startsWith('PREFIX') ? sparql : `${PREFIXES}\n${sparql}`;
-      const scope =
-        layer === 'swm'
-          ? { graphSuffix: '_shared_memory' as const }
-          : layer === 'union'
-          ? { includeSharedMemory: true }
-          : layer === 'vm'
-          ? { view: 'verified-memory' as const }
-          : {};
       try {
         const result = await client.query({
           sparql: fullSparql,
           contextGraphId: pid,
           subGraphName,
-          ...scope,
+          view,
+          includeSharedMemory,
         });
         const all = result.bindings ?? [];
         const capped = typeof limit === 'number' ? all.slice(0, limit) : all;
@@ -194,24 +215,40 @@ export function registerReadTools(
       inputSchema: {
         uri: z.string().describe('Entity URI (e.g. urn:dkg:decision:shacl-on-vm-promotion)'),
         projectId: z.string().optional().describe('contextGraphId; defaults to .dkg/config.yaml'),
-        layer: z
-          .enum(['wm', 'swm', 'union', 'vm'])
+        view: z
+          .enum(['working-memory', 'shared-working-memory', 'verified-memory'])
           .optional()
-          .default('union')
-          .describe('Memory layer scope; default "union" (wm+swm)'),
+          .describe(
+            'Memory tier (explicit selection is STRICT — pick one tier only): ' +
+              '"working-memory" (private WM only — pair with includeSharedMemory: true to add SWM), ' +
+              '"shared-working-memory" (team SWM only), ' +
+              '"verified-memory" (on-chain VM only). ' +
+              'Omit `view` to get the WM ∪ SWM default (the V9-era `layer: "union"` shape).',
+          ),
+        includeSharedMemory: z
+          .boolean()
+          .optional()
+          .describe('When set with view: "working-memory", include SWM in the result set (the WM∪SWM combined view).'),
       },
     },
-    async ({ uri, projectId, layer }): Promise<ToolResult> => {
+    async ({ uri, projectId, view, includeSharedMemory }): Promise<ToolResult> => {
       const pid = resolveProject(projectId, config);
       if (!pid) return projectErr();
+      // Default behaviour mirrors the historical `layer: 'union'` default:
+      // when neither `view` nor `includeSharedMemory` is set, return WM∪SWM
+      // (the shape callers learned via the V9 surface). Explicit
+      // `view: 'verified-memory'` routes to VM; explicit
+      // `view: 'shared-working-memory'` routes to SWM only;
+      // `view: 'working-memory'` (without `includeSharedMemory: true`)
+      // returns WM only.
       const scope =
-        layer === 'swm'
-          ? { graphSuffix: '_shared_memory' as const }
-          : layer === 'wm'
-          ? {}
-          : layer === 'vm'
+        view === 'verified-memory'
           ? { view: 'verified-memory' as const }
-          : { includeSharedMemory: true };
+          : view === 'shared-working-memory'
+          ? { graphSuffix: '_shared_memory' as const }
+          : view === 'working-memory'
+          ? (includeSharedMemory === true ? { includeSharedMemory: true } : {})
+          : { includeSharedMemory: includeSharedMemory ?? true };
       try {
         // NOTE: no explicit `GRAPH ?g { … }` wrapper here — the query
         // engine injects one that scopes to the requested CG. Adding our
@@ -235,7 +272,13 @@ SELECT DISTINCT ?s ?p WHERE { ?s ?p <${uri}> } LIMIT 50`,
         const out = outgoing.bindings ?? [];
         const inc = incoming.bindings ?? [];
         if (!out.length && !inc.length) {
-          return ok(`No triples found for <${uri}> in '${pid}' (layer=${layer ?? 'union'}).`);
+          const scopeLabel =
+            view === 'verified-memory' ? 'verified-memory' :
+            view === 'shared-working-memory' ? 'shared-working-memory' :
+            view === 'working-memory'
+              ? (includeSharedMemory === true ? 'working-memory∪swm' : 'working-memory')
+              : 'working-memory∪swm';
+          return ok(`No triples found for <${uri}> in '${pid}' (view=${scopeLabel}).`);
         }
         const parts: string[] = [`# ${prettyTerm(uri)}`, `<${uri}>`, ''];
         if (out.length) {
@@ -264,89 +307,6 @@ SELECT DISTINCT ?s ?p WHERE { ?s ?p <${uri}> } LIMIT 50`,
     },
   );
 
-  // ── dkg_search ──────────────────────────────────────────────────
-  server.registerTool(
-    'dkg_search',
-    {
-      title: 'Full-text Search',
-      description:
-        'Keyword search across labels (rdfs:label, schema:name, dcterms:title) ' +
-        'and free-text body properties (schema:description, decisions:context, ' +
-        'tasks:description, schema:text). Returns URI + label + rdf:type for each hit.',
-      inputSchema: {
-        keyword: z.string().describe('Case-insensitive substring to match'),
-        projectId: z.string().optional().describe('contextGraphId; defaults to .dkg/config.yaml'),
-        types: z
-          .array(z.string())
-          .optional()
-          .describe('Restrict by rdf:type URIs (prefix form OK, e.g. decisions:Decision)'),
-        layer: z
-          .enum(['wm', 'swm', 'union', 'vm'])
-          .optional()
-          .default('union'),
-        limit: z.number().optional().default(25),
-      },
-    },
-    async ({ keyword, projectId, types, layer, limit }): Promise<ToolResult> => {
-      const pid = resolveProject(projectId, config);
-      if (!pid) return projectErr();
-      const scope =
-        layer === 'swm'
-          ? { graphSuffix: '_shared_memory' as const }
-          : layer === 'wm'
-          ? {}
-          : layer === 'vm'
-          ? { view: 'verified-memory' as const }
-          : { includeSharedMemory: true };
-      const kEsc = escapeSparqlLiteral(keyword);
-      const typeFilter = (types && types.length)
-        ? `FILTER(?t IN (${types.map((t) => `<${expandPrefixed(t)}>`).join(', ')}))`
-        : '';
-      // No `GRAPH ?g` wrapper — let the engine scope the query to the
-      // requested CG (see dkg_get_entity for the rationale).
-      const sparql = `${PREFIXES}
-SELECT DISTINCT ?s ?label ?t WHERE {
-  ?s a ?t .
-  OPTIONAL {
-    { ?s rdfs:label ?label } UNION
-    { ?s schema:name ?label } UNION
-    { ?s dcterms:title ?label }
-  }
-  OPTIONAL {
-    { ?s schema:description ?body } UNION
-    { ?s <${NS.decisions}context> ?body } UNION
-    { ?s <${NS.decisions}outcome> ?body } UNION
-    { ?s schema:text ?body } UNION
-    { ?s <${NS.chat}userPrompt> ?body } UNION
-    { ?s <${NS.chat}assistantResponse> ?body }
-  }
-  ${typeFilter}
-  FILTER(
-    CONTAINS(LCASE(STR(COALESCE(?label, ""))), LCASE("${kEsc}")) ||
-    CONTAINS(LCASE(STR(COALESCE(?body, ""))), LCASE("${kEsc}"))
-  )
-} LIMIT ${Math.max(1, Math.min(limit ?? 25, 200))}`;
-      try {
-        const r = await client.query({
-          sparql,
-          contextGraphId: pid,
-          ...scope,
-        });
-        const rows = r.bindings ?? [];
-        if (!rows.length) return ok(`No matches for "${keyword}".`);
-        const lines = rows.map((b) => {
-          const u = prettyTerm(bindingValue(b.s));
-          const label = prettyTerm(bindingValue(b.label)) || u;
-          const t = prettyTerm(bindingValue(b.t));
-          return `- **${label}** (${t})\n    \`${bindingValue(b.s)}\``;
-        });
-        return ok(`Found ${rows.length} match(es) for "${keyword}":\n\n${lines.join('\n')}`);
-      } catch (e) {
-        return err(`Search failed: ${formatError(e)}`);
-      }
-    },
-  );
-
   // ── dkg_list_activity ───────────────────────────────────────────
   server.registerTool(
     'dkg_list_activity',
@@ -362,21 +322,37 @@ SELECT DISTINCT ?s ?label ?t WHERE {
         subGraph: z.string().optional().describe('Narrow to one sub-graph (e.g. "decisions", "chat")'),
         agentUri: z.string().optional().describe('Only items attributed to this agent'),
         sinceIso: z.string().optional().describe('Earliest timestamp, ISO-8601'),
-        layer: z.enum(['wm', 'swm', 'union', 'vm']).optional().default('union'),
+        view: z
+          .enum(['working-memory', 'shared-working-memory', 'verified-memory'])
+          .optional()
+          .describe(
+            'Memory tier (explicit selection is STRICT — pick one tier only): ' +
+              '"working-memory" (private WM only — pair with includeSharedMemory: true to add SWM), ' +
+              '"shared-working-memory" (team SWM only), ' +
+              '"verified-memory" (on-chain VM only). ' +
+              'Omit `view` to get the WM ∪ SWM default (the V9-era `layer: "union"` shape).',
+          ),
+        includeSharedMemory: z
+          .boolean()
+          .optional()
+          .describe('When set with view: "working-memory", include SWM in the result set (the WM∪SWM combined view).'),
         limit: z.number().optional().default(25),
       },
     },
-    async ({ projectId, subGraph, agentUri, sinceIso, layer, limit }): Promise<ToolResult> => {
+    async ({ projectId, subGraph, agentUri, sinceIso, view, includeSharedMemory, limit }): Promise<ToolResult> => {
       const pid = resolveProject(projectId, config);
       if (!pid) return projectErr();
+      // Default mirrors historical `layer: 'union'`: WM∪SWM when neither
+      // `view` nor `includeSharedMemory` is supplied. Explicit values
+      // route to the requested tier (see dkg_get_entity for the parallel).
       const scope =
-        layer === 'swm'
-          ? { graphSuffix: '_shared_memory' as const }
-          : layer === 'wm'
-          ? {}
-          : layer === 'vm'
+        view === 'verified-memory'
           ? { view: 'verified-memory' as const }
-          : { includeSharedMemory: true };
+          : view === 'shared-working-memory'
+          ? { graphSuffix: '_shared_memory' as const }
+          : view === 'working-memory'
+          ? (includeSharedMemory === true ? { includeSharedMemory: true } : {})
+          : { includeSharedMemory: includeSharedMemory ?? true };
 
       const typeFilterBySubgraph: Record<string, string> = {
         decisions: `?s a <${NS.decisions}Decision> .`,
@@ -542,104 +518,4 @@ SELECT ?t (COUNT(DISTINCT ?s) AS ?n) WHERE {
     },
   );
 
-  // ── dkg_get_chat ────────────────────────────────────────────────
-  server.registerTool(
-    'dkg_get_chat',
-    {
-      title: 'Get Captured Chat',
-      description:
-        'Query the `chat` sub-graph for captured conversations between ' +
-        'operators and their coding assistants. Filter by sessionUri, ' +
-        'agentUri, keyword, or time range. Returns each turn with speaker, ' +
-        'prompt, and response — already markdown-formatted.',
-      inputSchema: {
-        projectId: z.string().optional(),
-        sessionUri: z.string().optional().describe('Restrict to one session'),
-        agentUri: z.string().optional().describe('Only turns authored by this agent'),
-        keyword: z.string().optional().describe('Substring to match in prompt or response'),
-        sinceIso: z.string().optional(),
-        layer: z.enum(['wm', 'swm', 'union']).optional().default('union'),
-        limit: z.number().optional().default(20),
-      },
-    },
-    async ({ projectId, sessionUri, agentUri, keyword, sinceIso, layer, limit }): Promise<ToolResult> => {
-      const pid = resolveProject(projectId, config);
-      if (!pid) return projectErr();
-      const scope =
-        layer === 'swm'
-          ? { graphSuffix: '_shared_memory' as const }
-          : layer === 'wm'
-          ? {}
-          : { includeSharedMemory: true };
-      const filters: string[] = [`?t a <${NS.chat}Turn> .`];
-      if (sessionUri) filters.push(`?t <${NS.chat}inSession> <${sessionUri}> .`);
-      if (agentUri) filters.push(`?t prov:wasAttributedTo <${agentUri}> .`);
-      if (keyword) {
-        const k = escapeSparqlLiteral(keyword);
-        filters.push(`OPTIONAL { ?t <${NS.chat}userPrompt> ?userText }`);
-        filters.push(`OPTIONAL { ?t <${NS.chat}assistantResponse> ?asstText }`);
-        filters.push(
-          `FILTER(CONTAINS(LCASE(STR(COALESCE(?userText, ""))), LCASE("${k}")) || CONTAINS(LCASE(STR(COALESCE(?asstText, ""))), LCASE("${k}")))`,
-        );
-      }
-      if (sinceIso) {
-        filters.push(`OPTIONAL { ?t dcterms:created ?when }`);
-        filters.push(`FILTER(!BOUND(?when) || ?when >= "${escapeSparqlLiteral(sinceIso)}"^^<http://www.w3.org/2001/XMLSchema#dateTime>)`);
-      }
-      // No `GRAPH ?g` wrapper — the client scopes to `contextGraphId` +
-      // `subGraphName` only when the engine is free to inject the graph.
-      // An explicit `GRAPH ?g { … }` pattern would match chat turns in
-      // other projects' `chat` sub-graphs on the same local daemon.
-      const sparql = `${PREFIXES}
-SELECT DISTINCT ?t ?when ?sess ?author ?userText ?asstText WHERE {
-  ${filters.join('\n  ')}
-  OPTIONAL { ?t <${NS.chat}inSession> ?sess }
-  OPTIONAL { ?t dcterms:created ?when }
-  OPTIONAL { ?t prov:wasAttributedTo ?author }
-  OPTIONAL { ?t <${NS.chat}userPrompt> ?userText }
-  OPTIONAL { ?t <${NS.chat}assistantResponse> ?asstText }
-}
-ORDER BY DESC(?when)
-LIMIT ${Math.max(1, Math.min(limit ?? 20, 100))}`;
-      try {
-        const r = await client.query({
-          sparql,
-          contextGraphId: pid,
-          subGraphName: 'chat',
-          ...scope,
-        });
-        const rows = r.bindings ?? [];
-        if (!rows.length) return ok('(no chat turns matched)');
-        const lines = rows.map((b, i) => {
-          const when = prettyTerm(bindingValue(b.when)) || '(undated)';
-          const sess = prettyTerm(bindingValue(b.sess)) || '(no session)';
-          const author = prettyTerm(bindingValue(b.author)) || '(unknown)';
-          const u = bindingValue(b.userText);
-          const a = bindingValue(b.asstText);
-          return [
-            `### Turn ${i + 1} · \`${when}\` · ${sess} · ${author}`,
-            u ? `\n**User:** ${u}` : '',
-            a ? `\n**Assistant:** ${a}` : '',
-          ].join('\n');
-        });
-        return ok(lines.join('\n\n---\n\n'));
-      } catch (e) {
-        return err(`Chat query failed: ${formatError(e)}`);
-      }
-    },
-  );
-}
-
-// ── Small utilities ──────────────────────────────────────────────
-
-/** Expand a prefixed name like "decisions:Decision" into a full URI. */
-function expandPrefixed(name: string): string {
-  const idx = name.indexOf(':');
-  if (idx < 0) return name;
-  const prefix = name.slice(0, idx);
-  const rest = name.slice(idx + 1);
-  // Full IRI already
-  if (prefix === 'http' || prefix === 'https' || prefix === 'urn') return name;
-  const base = (NS as Record<string, string>)[prefix];
-  return base ? base + rest : name;
 }

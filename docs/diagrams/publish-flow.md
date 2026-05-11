@@ -12,9 +12,9 @@ their tentative data to permanent.
 
 ## Design decisions
 
-- **Triples, not quads** — the publish message carries `paranetId` in the
+- **Triples, not quads** — the publish message carries `contextGraphId` in the
   envelope, so the graph component (`G` in SPOG) is redundant on the wire.
-  Receiving nodes derive it as `did:dkg:paranet:{paranetId}`.
+  Receiving nodes derive it as `did:dkg:context-graph:{contextGraphId}`.
 - **Two-level merkle root** — private triples hash into a `privateMerkleRoot`,
   which is anchored as a synthetic public triple. All public triples
   (including the anchor) hash into the `kcMerkleRoot` that goes on-chain.
@@ -89,11 +89,11 @@ sequenceDiagram
 
     Note over User,Gossip: Phase 1 — Local Preparation (publisher node)
 
-    User ->> Agent: publish(paranetId, triples, options?)
+    User ->> Agent: publish(contextGraphId, triples, options?)
     Agent ->> Agent: Generate operationId (UUID)
-    Agent ->> Agent: Validate paranet exists
+    Agent ->> Agent: Validate contextGraph exists
 
-    Agent ->> Publisher: publish(paranetId, triples, privateTriples, operationId)
+    Agent ->> Publisher: publish(contextGraphId, triples, privateTriples, operationId)
 
     Publisher ->> Publisher: autoPartition(triples)
     Note right of Publisher: Groups triples by root entity<br/>Skolemizes blank nodes
@@ -125,7 +125,7 @@ sequenceDiagram
 
     Note over User,Gossip: Phase 2 — Tentative Local Storage (publisher node)
 
-    Publisher ->> Store: graphManager.ensureParanet(paranetId)
+    Publisher ->> Store: graphManager.ensureContextGraph(contextGraphId)
     Store -->> Publisher: data graph + meta graph ready
 
     Publisher ->> Store: store.insert(triples into data graph)
@@ -140,10 +140,10 @@ sequenceDiagram
 
     Agent ->> Agent: Serialize triples to N-Triples
     Agent ->> Agent: encodePublishRequest (protobuf)
-    Note right of Agent: operationId / paranetId / ntriples<br/>entityProofs flag / kas[]<br/>publisherIdentity / merkleRoot
+    Note right of Agent: operationId / contextGraphId / ntriples<br/>entityProofs flag / kas[]<br/>publisherIdentity / merkleRoot
 
     Agent ->> Gossip: publish(topic, message)
-    Note right of Gossip: topic = dkg/paranet/id/publish
+    Note right of Gossip: topic = dkg/context-graph/id/finalization
     Gossip ->> RcvAgent: GossipSub broadcast
 
     Note over RcvAgent,RcvStore: Receiving node validates + stores (same operationId in logs)
@@ -279,12 +279,12 @@ time, and lock status while the lease is live.
 Current slug format:
 
 ```text
-{paranet}/{scope}/{transition}/{workspaceOperationId}/{root-range}
+{contextGraph}/{scope}/{transition}/{workspaceOperationId}/{root-range}
 ```
 
 Derivation rules:
 
-- `paranetId`, `scope`, and `workspaceOperationId` are lowercased and slugged
+- `contextGraphId`, `scope`, and `workspaceOperationId` are lowercased and slugged
 - `transitionType` is lowercased (`CREATE` -> `create`)
 - `root-range` is derived from sorted root tails
   - one root: `rihana`
@@ -456,8 +456,8 @@ Operational caveat:
 
 ## How tentative → committed is reflected in the graph
 
-Tentative vs committed is **reflected only in the paranet’s meta graph**
-(`did:dkg:paranet:{paranetId}/_meta`), not in the data graph. The data graph
+Tentative vs committed is **reflected only in the contextGraph’s meta graph**
+(`did:dkg:context-graph:{contextGraphId}/_meta`), not in the data graph. The data graph
 holds the same triples either way; the meta graph records lifecycle and
 on-chain provenance.
 

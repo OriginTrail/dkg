@@ -1,7 +1,24 @@
-import { useEffect, useRef } from 'react';
-import { authHeaders } from '../api.js';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 
-export type NodeEventType = 'join_request' | 'join_approved' | 'join_rejected' | 'project_synced' | 'connected';
+export type MemoryGraphLayer = 'wm' | 'swm' | 'vm';
+
+export interface MemoryGraphChangedData extends Record<string, unknown> {
+  contextGraphId?: string;
+  layers?: MemoryGraphLayer[];
+  layer?: MemoryGraphLayer;
+  subGraphName?: string;
+  operation?: string;
+  source?: string;
+  timestamp?: string;
+}
+
+export type NodeEventType =
+  | 'join_request'
+  | 'join_approved'
+  | 'join_rejected'
+  | 'project_synced'
+  | 'memory_graph_changed'
+  | 'connected';
 
 export interface NodeEvent {
   type: NodeEventType;
@@ -13,6 +30,32 @@ type Listener = (event: NodeEvent) => void;
 const listeners = new Set<Listener>();
 let source: EventSource | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+export const MEMORY_GRAPH_REFRESH_DEBOUNCE_MS = 350;
+
+function isMemoryGraphLayer(value: unknown): value is MemoryGraphLayer {
+  return value === 'wm' || value === 'swm' || value === 'vm';
+}
+
+export function getMemoryGraphEventLayers(data: Record<string, unknown>): MemoryGraphLayer[] {
+  const layers = data.layers;
+  if (Array.isArray(layers)) {
+    return layers.filter(isMemoryGraphLayer);
+  }
+  return isMemoryGraphLayer(data.layer) ? [data.layer] : [];
+}
+
+export function isMemoryGraphEventRelevant(
+  data: Record<string, unknown>,
+  contextGraphId: string,
+  layers?: MemoryGraphLayer[],
+): boolean {
+  if (!contextGraphId || data.contextGraphId !== contextGraphId) return false;
+  if (!layers || layers.length === 0) return true;
+
+  const eventLayers = getMemoryGraphEventLayers(data);
+  if (eventLayers.length === 0) return true;
+  return layers.some(layer => eventLayers.includes(layer));
+}
 
 function connect() {
   if (source) return;
@@ -34,6 +77,7 @@ function connect() {
   source.addEventListener('join_approved', handleEvent('join_approved'));
   source.addEventListener('join_rejected', handleEvent('join_rejected'));
   source.addEventListener('project_synced', handleEvent('project_synced'));
+  source.addEventListener('memory_graph_changed', handleEvent('memory_graph_changed'));
   source.addEventListener('connected', handleEvent('connected'));
 
   source.onerror = () => {
@@ -72,4 +116,37 @@ export function useNodeEvents(handler: Listener) {
   useEffect(() => {
     return subscribe((event) => handlerRef.current(event));
   }, []);
+}
+
+export function useMemoryGraphEvents(
+  contextGraphId: string,
+  handler: (event: MemoryGraphChangedData) => void,
+  options: { layers?: MemoryGraphLayer[]; debounceMs?: number } = {},
+) {
+  const handlerRef = useRef(handler);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  handlerRef.current = handler;
+
+  const debounceMs = options.debounceMs ?? MEMORY_GRAPH_REFRESH_DEBOUNCE_MS;
+  const layers = useMemo(() => options.layers ?? [], [options.layers?.join('|')]);
+
+  const clearDebounce = useCallback(() => {
+    if (debounceRef.current) {
+      clearTimeout(debounceRef.current);
+      debounceRef.current = null;
+    }
+  }, []);
+
+  useNodeEvents(useCallback((event) => {
+    if (event.type !== 'memory_graph_changed') return;
+    if (!isMemoryGraphEventRelevant(event.data, contextGraphId, layers)) return;
+
+    clearDebounce();
+    debounceRef.current = setTimeout(() => {
+      debounceRef.current = null;
+      handlerRef.current(event.data as MemoryGraphChangedData);
+    }, debounceMs);
+  }, [clearDebounce, contextGraphId, debounceMs, layers]));
+
+  useEffect(() => clearDebounce, [clearDebounce]);
 }

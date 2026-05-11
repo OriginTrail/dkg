@@ -7,8 +7,8 @@
 
 ## Problem
 
-Full paranet sync (`/dkg/sync/1.0.0`) downloads all triples for the
-agents paranet, which is comprehensive but potentially expensive for
+Full contextGraph sync (`/dkg/sync/1.0.0`) downloads all triples for the
+agents contextGraph, which is comprehensive but potentially expensive for
 large networks. In many cases, a connecting peer only needs to know about
 the **immediate neighbor** it just connected to — for example, to send it
 a message or invoke a skill.
@@ -17,7 +17,7 @@ a message or invoke a skill.
 
 A lightweight pairwise protocol where two peers swap their own agent
 profiles on connect. This is a complement to (not a replacement for)
-full paranet sync.
+full contextGraph sync.
 
 ### Protocol
 
@@ -27,7 +27,7 @@ Transport:  libp2p stream (bidirectional)
 
 Message (UTF-8):
   N-Quads containing the sender's own agent profile triples.
-  Same format as what publishProfile() stores in the agents paranet.
+  Same format as what publishProfile() stores in the agents contextGraph.
 ```
 
 ### Flow
@@ -54,7 +54,7 @@ Profile triples are a single KC with a merkle root. The receiver:
 
 ### Advantages over full sync
 
-- **Fast**: Only exchanges 1 profile, not the entire paranet
+- **Fast**: Only exchanges 1 profile, not the entire contextGraph
 - **Symmetric**: Both peers learn about each other simultaneously
 - **Lightweight**: No pagination needed; a single profile is small
 
@@ -68,7 +68,7 @@ Profile triples are a single KC with a merkle root. The receiver:
 
 - **GossipSub**: Broadcasts profiles to all subscribers. Fire-and-forget.
   Misses latecomers.
-- **Full sync** (`/dkg/sync/1.0.0`): Downloads entire paranet. Catches
-  up latecomers. Expensive for large paranets.
+- **Full sync** (`/dkg/sync/1.0.0`): Downloads entire contextGraph. Catches
+  up latecomers. Expensive for large contextGraphs.
 - **Profile exchange** (`/dkg/profile-exchange/1.0.0`): Pairwise swap
   of own profiles. Fast, lightweight, symmetric. Complement to both.

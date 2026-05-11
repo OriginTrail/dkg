@@ -10,7 +10,7 @@
  * ---------------------------------------------
  * The node-ui creates user-owned context graphs under the canonical id
  * `<wallet>/<slug>` (e.g. `0xd46E.../dkg-code-project`). When these scripts
- * used to pass a bare slug to `/api/paranet/create`, the daemon happily
+ * used to pass a bare slug to `/api/context-graph/create`, the daemon happily
  * created a *second*, wallet-less "phantom" CG with the same name but a
  * different graph URI — so any triples written by the importers landed in
  * the phantom while the UI/MCP kept reading from the canonical one.
@@ -152,7 +152,7 @@ export class DkgClient {
 
   async listContextGraphs() {
     const body = await this.request('GET', '/api/context-graph/list');
-    return body?.contextGraphs ?? body?.paranets ?? [];
+    return body?.contextGraphs ?? body?.contextGraphs ?? [];
   }
 
   /**
@@ -192,7 +192,7 @@ export class DkgClient {
         `Any triples previously written to the flat-slug CG are orphaned — ` +
         `inspect it with:\n` +
         `  curl -s -H "Authorization: Bearer $TOKEN" ${this.apiBase}/api/context-graph/list | jq '.contextGraphs[] | select(.id==\"${bareSlug}\")'\n` +
-        `and drop it via the UI or \`dkg paranet delete\` once confirmed safe.`,
+        `and drop it via the UI or \`dkg contextGraph delete\` once confirmed safe.`,
       );
     } else if (hasPhantom && hasCanonical) {
       this.logger.warn(
@@ -216,7 +216,7 @@ export class DkgClient {
     }
 
     try {
-      await this.request('POST', '/api/paranet/create', { id: cgId, name, description });
+      await this.request('POST', '/api/context-graph/create', { id: cgId, name, description });
       this.logger.log(`[dkg] Created project '${cgId}' (${name}).`);
       return { cgId, created: true, phantomDetected: hasPhantom };
     } catch (err) {

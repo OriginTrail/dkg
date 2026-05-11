@@ -49,7 +49,10 @@ const mcpEntry: IntegrationEntry = {
   install: {
     kind: 'mcp',
     command: 'npx',
-    args: ['-y', '@origintrail-official/dkg-mcp@0.1.0'],
+    // Unpinned per roadmap §9 decision 14: published version is
+    // `0.1.0-dev.<ts>.<sha>`, so a `@0.1.0` pin would not resolve. Tests
+    // assert on package id only, not the version suffix.
+    args: ['-y', '@origintrail-official/dkg-mcp'],
     envRequired: ['DKG_API_URL', 'DKG_AUTH_TOKEN'],
     supportedClients: ['cursor', 'claude-code', 'claude-desktop'],
   },
@@ -524,7 +527,10 @@ describe('installMcp', () => {
     const res = await installMcp({ entry: mcpEntry, apiUrl: 'http://127.0.0.1:9200', logger: (m) => logs.push(m) });
     const parsed = JSON.parse(res.mcpJson);
     expect(parsed.mcpServers['cursor-mcp-dkg'].command).toBe('npx');
-    expect(parsed.mcpServers['cursor-mcp-dkg'].args).toEqual(['-y', '@origintrail-official/dkg-mcp@0.1.0']);
+    // Loose match per roadmap §9 decision 14 — published version is
+    // `0.1.0-dev.<ts>.<sha>` so we assert on package id, not pin.
+    expect(parsed.mcpServers['cursor-mcp-dkg'].args).toContain('-y');
+    expect(parsed.mcpServers['cursor-mcp-dkg'].args).toContain('@origintrail-official/dkg-mcp');
     expect(parsed.mcpServers['cursor-mcp-dkg'].env.DKG_API_URL).toBe('http://127.0.0.1:9200');
     expect(parsed.mcpServers['cursor-mcp-dkg'].env.DKG_AUTH_TOKEN).toBe('<DKG_AUTH_TOKEN>');
     expect(res.token).toBeUndefined();

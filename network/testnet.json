@@ -1,6 +1,6 @@
 {
   "networkName": "DKG V10 Testnet",
-  "networkId": "f81f9df2e9604fcaa0aaeb34d07171434199d2bc70d9f35680614453300d9b9d",
+  "networkId": "7449c543ff04a550b2dafa999fe8ee577a00b212023bb4d4244e8d58a4792c7b",
   "genesisVersion": 1,
   "relays": [
     "/ip4/178.104.54.178/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M",
@@ -8,7 +8,7 @@
     "/ip4/178.156.252.147/tcp/9090/p2p/12D3KooWPyTpqBBtU1AvzSsd5rWXCQzFcGtG44qDmeYenWcpzsge",
     "/ip4/49.12.4.64/tcp/9090/p2p/12D3KooWJqhnnfouiNRUyJBEREpuKtV4A448LUbS6JiVCe8Q82bZ"
   ],
-  "defaultParanets": ["testing"],
+  "defaultContextGraphs": ["testing"],
   "defaultNodeRole": "edge",
   "autoUpdate": {
     "enabled": true,
@@ -16,7 +16,7 @@
     "branch": "main",
     "checkIntervalMinutes": 5
   },
-  "chainResetMarker": "v10-rs-staking-consolidation-2026-04-30",
+  "chainResetMarker": "v10-rc6-pca-author-attestation-2026-05-10",
   "chain": {
     "type": "evm",
     "rpcUrl": "https://sepolia.base.org",

@@ -6,7 +6,7 @@ Agent runtime for DKG V10. Provides the `DKGAgent` class — the primary entry p
 
 - **DKGAgent** — unified agent class that wires together a DKG node, storage, publishing, querying, and chain interaction
 - **Wallet management** — `DKGAgentWallet` for Ed25519 (P2P identity) and ECDSA (on-chain signing) key pairs, with persistent key storage and operational wallet support
-- **Agent profiles** — `ProfileManager` for publishing and updating agent skill profiles to the agent registry paranet
+- **Agent profiles** — `ProfileManager` for publishing and updating agent skill profiles to the agent registry contextGraph
 - **Discovery** — `DiscoveryClient` for finding other agents by name, skill keywords, or semantic search over published profiles
 - **Signed shared memory gossip** — SWM writes are wrapped in a signed gossip envelope when a local agent key is available, and agent-gated context graphs require a local `DKG_ALLOWED_AGENT` or `DKG_PARTICIPANT_AGENT` signing key before broadcasting; signatures authenticate writers, but do not encrypt GossipSub payload bytes
 - **Encrypted messaging** — Ed25519-to-X25519 key conversion, ECDH shared secrets, and encrypted P2P message channels
@@ -32,12 +32,12 @@ const agent = await DKGAgent.create({
 await agent.start();
 
 // Publish Knowledge Assets (positional args)
-const result = await agent.publish('urn:paranet:example', quads, privateQuads);
+const result = await agent.publish('urn:contextGraph:example', quads, privateQuads);
 
 // Query the knowledge graph
 const { bindings } = await agent.query(
   'SELECT ?s ?name WHERE { ?s <urn:name> ?name }',
-  { paranetId: 'urn:paranet:example' },
+  { contextGraphId: 'urn:contextGraph:example' },
 );
 
 // Discover agents and skills

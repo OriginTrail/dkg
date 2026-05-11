@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /**
- * Publish the production coordination plan JSON into a DKG paranet.
+ * Publish the production coordination plan JSON into a DKG contextGraph.
  *
  * Usage:
- *   node 01_PRODUCTION_PLAN_DKG.publish.mjs --plan ./01_PRODUCTION_PLAN_DKG.json --paranet dkgv9-production
+ *   node 01_PRODUCTION_PLAN_DKG.publish.mjs --plan ./01_PRODUCTION_PLAN_DKG.json --context-graph dkgv9-production
  */
 
 import { readFile } from 'node:fs/promises';
@@ -46,10 +46,10 @@ async function loadToken() {
 
 async function main() {
   const planPath = arg('plan', new URL('./01_PRODUCTION_PLAN_DKG.json', import.meta.url).pathname);
-  const paranetId = arg('paranet', 'dkgv9-production');
+  const contextGraphId = arg('contextGraph', 'dkgv9-production');
   const apiPort = Number(process.env.DKG_API_PORT ?? '9200');
 
-  const graph = `did:dkg:paranet:${paranetId}`;
+  const graph = `did:dkg:context-graph:${contextGraphId}`;
   const raw = await readFile(planPath, 'utf-8');
   const plan = JSON.parse(raw);
 
@@ -122,7 +122,7 @@ async function main() {
   const res = await fetch(`http://127.0.0.1:${apiPort}/api/publish`, {
     method: 'POST',
     headers,
-    body: JSON.stringify({ paranetId, quads }),
+    body: JSON.stringify({ contextGraphId, quads }),
   });
 
   const body = await res.text();
@@ -131,7 +131,7 @@ async function main() {
     process.exit(1);
   }
 
-  console.log(`Published production plan to paranet '${paranetId}'`);
+  console.log(`Published production plan to contextGraph '${contextGraphId}'`);
   console.log(`Root entity: ${root}`);
   console.log(`Quads: ${quads.length}`);
   console.log(body);

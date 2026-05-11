@@ -233,7 +233,7 @@ export function verifySyncedData(
 ): { data: Quad[]; meta: Quad[]; rejected: number } {
   if (metaQuads.length === 0) {
     // No meta graph → no verification possible. Accept data as-is
-    // (covers system paranets that don't have KC metadata).
+    // (covers system contextGraphs that don't have KC metadata).
     return { data: dataQuads, meta: metaQuads, rejected: 0 };
   }
 

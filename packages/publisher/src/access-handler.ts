@@ -179,7 +179,7 @@ export class AccessHandler {
         GRAPH ?g {
           <${safeUal}> <${DKG_NS}rootEntity> ?rootEntity .
           <${safeUal}> <${DKG_NS}partOf> ?kc .
-          ?kc <${DKG_NS}paranet> ?contextGraph .
+          ?kc <${DKG_NS}contextGraph> ?contextGraph .
           OPTIONAL { <${safeUal}> <${DKG_NS}privateMerkleRoot> ?privateMerkleRoot }
           OPTIONAL { <${safeUal}> <${DKG_NS}privateTripleCount> ?privateTripleCount }
           OPTIONAL { ?kc <${DKG_NS}accessPolicy> ?accessPolicy }

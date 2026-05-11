@@ -345,6 +345,12 @@
         "type": "uint256"
       },
       {
+        "indexed": true,
+        "internalType": "address",
+        "name": "author",
+        "type": "address"
+      },
+      {
         "indexed": false,
         "internalType": "string",
         "name": "publishOperationId",
@@ -567,6 +573,12 @@
         "internalType": "uint256",
         "name": "id",
         "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "author",
+        "type": "address"
       },
       {
         "indexed": false,
@@ -902,6 +914,11 @@
       {
         "internalType": "address",
         "name": "publisher",
+        "type": "address"
+      },
+      {
+        "internalType": "address",
+        "name": "author",
         "type": "address"
       },
       {
@@ -1360,6 +1377,25 @@
         "type": "uint256"
       }
     ],
+    "name": "getLatestMerkleRootAuthor",
+    "outputs": [
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "id",
+        "type": "uint256"
+      }
+    ],
     "name": "getLatestMerkleRootObject",
     "outputs": [
       {
@@ -1440,6 +1476,30 @@
         "internalType": "uint32",
         "name": "",
         "type": "uint32"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "id",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "index",
+        "type": "uint256"
+      }
+    ],
+    "name": "getMerkleRootAuthorByIndex",
+    "outputs": [
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
       }
     ],
     "stateMutability": "view",
@@ -1856,6 +1916,30 @@
         "internalType": "uint32",
         "name": "merkleLeafCount",
         "type": "uint32"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "name": "merkleRootAuthors",
+    "outputs": [
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
       }
     ],
     "stateMutability": "view",
@@ -2297,6 +2381,11 @@
       {
         "internalType": "address",
         "name": "publisher",
+        "type": "address"
+      },
+      {
+        "internalType": "address",
+        "name": "author",
         "type": "address"
       },
       {

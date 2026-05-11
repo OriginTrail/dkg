@@ -328,6 +328,75 @@ import {
 
 import type { RequestContext } from './context.js';
 
+type ResolveOk<T> = { ok: true; value: T };
+type ResolveErr = { ok: false; status: number; body: object };
+type ResolveResult<T> = ResolveOk<T> | ResolveErr;
+
+function resolveCgId(
+  input: unknown,
+  source: 'query string' | 'request body',
+  fallback?: string,
+): ResolveResult<string> {
+  // Distinguish "absent" (undefined/null) from "explicitly empty" (''):
+  //   - absent → fall back to config.epcis.contextGraphId or 400 if no fallback
+  //   - empty string → 400 InvalidContent (caller asked us to use a CG named
+  //     "", which can't possibly match a real graph; falling back silently
+  //     would route the request to the daemon default CG and could publish
+  //     to the wrong tenant)
+  if (input === '') {
+    return {
+      ok: false,
+      status: 400,
+      body: { error: 'InvalidContent', message: '"contextGraphId" cannot be an empty string' },
+    };
+  }
+  if (input !== undefined && input !== null) {
+    if (typeof input !== 'string') {
+      return { ok: false, status: 400, body: { error: 'InvalidContent', message: '"contextGraphId" must be a string' } };
+    }
+    const v = validateContextGraphId(input);
+    if (!v.valid) {
+      return { ok: false, status: 400, body: { error: 'InvalidContent', message: `Invalid "contextGraphId": ${v.reason}` } };
+    }
+    return { ok: true, value: input };
+  }
+  if (!fallback) {
+    return {
+      ok: false,
+      status: 400,
+      body: {
+        error: 'InvalidContent',
+        message: `Missing "contextGraphId": provide it in the ${source} or configure epcis.contextGraphId`,
+      },
+    };
+  }
+  return { ok: true, value: fallback };
+}
+
+function resolveSubGraphName(input: unknown): ResolveResult<string | undefined> {
+  // Same absent-vs-empty distinction as resolveCgId. Empty subGraphName
+  // can't be coerced to "root partition" silently — that would route a
+  // request the caller flagged with `subGraphName=""` to a different
+  // partition than the one they asked for. Reject explicitly.
+  if (input === '') {
+    return {
+      ok: false,
+      status: 400,
+      body: { error: 'InvalidContent', message: '"subGraphName" cannot be an empty string' },
+    };
+  }
+  if (input === undefined || input === null) {
+    return { ok: true, value: undefined };
+  }
+  if (typeof input !== 'string') {
+    return { ok: false, status: 400, body: { error: 'InvalidContent', message: 'subGraphName must be a string' } };
+  }
+  const v = validateSubGraphName(input);
+  if (!v.valid) {
+    return { ok: false, status: 400, body: { error: 'InvalidContent', message: `Invalid "subGraphName": ${v.reason}` } };
+  }
+  return { ok: true, value: input };
+}
 
 export async function handleEpcisRoutes(ctx: RequestContext): Promise<void> {
   const {
@@ -363,25 +432,24 @@ export async function handleEpcisRoutes(ctx: RequestContext): Promise<void> {
   } = ctx;
 
 
-  // GET /api/epcis/events?epc=...&bizStep=...&from=...&to=...&limit=100&offset=0
+  // GET /api/epcis/events?contextGraphId=...&subGraphName=...&epc=...&bizStep=...&from=...&to=...&limit=100&offset=0
   if (req.method === "GET" && path === "/api/epcis/events") {
-    const epcisContextGraphId =
-      config.epcis?.contextGraphId ?? config.epcis?.paranetId;
-    if (!epcisContextGraphId) {
-      return jsonResponse(res, 503, {
-        error:
-          "EPCIS plugin is not configured (missing epcis.contextGraphId in config)",
-      });
-    }
     const searchParams = new URL(req.url!, `http://${req.headers.host}`)
       .searchParams;
+
+    const cg = resolveCgId(searchParams.get('contextGraphId'), 'query string', config.epcis?.contextGraphId);
+    if (!cg.ok) return jsonResponse(res, cg.status, cg.body);
+    const sg = resolveSubGraphName(searchParams.get('subGraphName'));
+    if (!sg.ok) return jsonResponse(res, sg.status, sg.body);
+
     const epcisQueryEngine = {
       query: (sparql: string, opts?: { contextGraphId?: string }) =>
         agent.query(sparql, opts),
     };
     try {
       const result = await handleEventsQuery(searchParams, {
-        contextGraphId: epcisContextGraphId,
+        contextGraphId: cg.value,
+        subGraphName: sg.value,
         queryEngine: epcisQueryEngine,
         basePath: "/api/epcis/events",
       });
@@ -420,16 +488,8 @@ export async function handleEpcisRoutes(ctx: RequestContext): Promise<void> {
     });
   }
 
-  // POST /api/epcis/capture  { epcisDocument: {...} | { public, private }, publishOptions?: { accessPolicy? } }
+  // POST /api/epcis/capture  { contextGraphId?, subGraphName?, epcisDocument, publishOptions? }
   if (req.method === "POST" && path === "/api/epcis/capture") {
-    const captureContextGraphId =
-      config.epcis?.contextGraphId ?? config.epcis?.paranetId;
-    if (!captureContextGraphId) {
-      return jsonResponse(res, 503, {
-        error:
-          "EPCIS plugin is not configured (missing epcis.contextGraphId in config)",
-      });
-    }
     if (!config.publisher?.enabled) {
       return jsonResponse(res, 503, {
         error: "PublisherDisabled",
@@ -452,13 +512,19 @@ export async function handleEpcisRoutes(ctx: RequestContext): Promise<void> {
         message: "Invalid JSON in request body",
       });
     }
-    const { epcisDocument, publishOptions } = parsed;
+    const { epcisDocument, publishOptions, contextGraphId: bodyContextGraphId, subGraphName: bodySubGraphName } = parsed;
     if (!epcisDocument) {
       return jsonResponse(res, 400, {
         error: "InvalidContent",
         message: 'Missing "epcisDocument" in request body',
       });
     }
+
+    const cg = resolveCgId(bodyContextGraphId, 'request body', config.epcis?.contextGraphId);
+    if (!cg.ok) return jsonResponse(res, cg.status, cg.body);
+    const sg = resolveSubGraphName(bodySubGraphName);
+    if (!sg.ok) return jsonResponse(res, sg.status, sg.body);
+
     const epcisPublisher: EpcisAsyncPublisher = {
       async publishAsync(contextGraphId, content, opts) {
         return agent.publishAsync(
@@ -470,8 +536,13 @@ export async function handleEpcisRoutes(ctx: RequestContext): Promise<void> {
     };
     try {
       const result = await handleCaptureAsync(
-        { epcisDocument, publishOptions },
-        { contextGraphId: captureContextGraphId, publisher: epcisPublisher },
+        {
+          epcisDocument,
+          publishOptions,
+          contextGraphId: cg.value,
+          subGraphName: sg.value,
+        },
+        { contextGraphId: cg.value, publisher: epcisPublisher },
       );
       return jsonResponse(res, 202, result);
     } catch (err) {

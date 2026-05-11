@@ -127,7 +127,7 @@ export class MetricsCollector {
       direct_peers: this.source.getDirectPeerCount(),
       relayed_peers: this.source.getRelayedPeerCount(),
       mesh_peers: this.source.getMeshPeerCount(),
-      paranet_count: contextGraphCount,
+      contextGraph_count: contextGraphCount,
       total_triples: totalTriples,
       total_kcs: totalKCs,
       total_kas: totalKAs,

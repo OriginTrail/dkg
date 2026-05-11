@@ -114,9 +114,10 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'invalidateRandomSamplingPair',
   'resolveAndAssignRandomSamplingPair',
   'isContractMissingRevert',
-  // KC views (Phase 1) — TS-private helpers; the four public methods
+  // KC views (Phase 1) — TS-private helpers; the five public methods
   // (getLatestMerkleRoot, getMerkleLeafCount, getLatestMerkleRootPublisher,
-  // getKCContextGraphId) ARE mirrored on MockChainAdapter.
+  // getLatestMerkleRootAuthor, getKCContextGraphId) ARE mirrored on
+  // MockChainAdapter.
   'requireKCStorage',
   'requireContextGraphStorage',
 ]);
@@ -259,6 +260,11 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
 
     await expect(mock.createOnChainContextGraph({
       ...base,
+      accessPolicy: 2,
+    })).rejects.toThrow(/invalid accessPolicy/);
+
+    await expect(mock.createOnChainContextGraph({
+      ...base,
       publishPolicy: 2,
     })).rejects.toThrow(/invalid publishPolicy/);
 
@@ -301,9 +307,12 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
       tokenAmount: 1n,
       isImmutable: false,
       merkleLeafCount: 1,
-      paymaster: '0x0000000000000000000000000000000000000000',
       publisherNodeIdentityId: 1n,
-      publisherSignature: { r: new Uint8Array(32), vs: new Uint8Array(32) },
+      author: {
+        address: otherPublisher,
+        signature: { r: new Uint8Array(32), vs: new Uint8Array(32) },
+        schemeVersion: 1,
+      },
       ackSignatures: [],
     };
 
@@ -332,9 +341,12 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
       tokenAmount: 1n,
       isImmutable: false,
       merkleLeafCount: 1,
-      paymaster: ethers.ZeroAddress,
       publisherNodeIdentityId: 1n,
-      publisherSignature: { r: new Uint8Array(32), vs: new Uint8Array(32) },
+      author: {
+        address: delegatedPublisher,
+        signature: { r: new Uint8Array(32), vs: new Uint8Array(32) },
+        schemeVersion: 1,
+      },
       ackSignatures: [],
     });
 
@@ -368,9 +380,12 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
       tokenAmount: 1n,
       isImmutable: false,
       merkleLeafCount: 1,
-      paymaster: ethers.ZeroAddress,
       publisherNodeIdentityId: 1n,
-      publisherSignature: { r: new Uint8Array(32), vs: new Uint8Array(32) },
+      author: {
+        address: delegatedPublisher,
+        signature: { r: new Uint8Array(32), vs: new Uint8Array(32) },
+        schemeVersion: 1,
+      },
       ackSignatures: [],
     });
 

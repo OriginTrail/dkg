@@ -5,8 +5,8 @@ import {
   contextGraphMetaUri,
   contextGraphSharedMemoryUri,
   DKG_ONTOLOGY,
-  paranetWorkspaceTopic,
-  SYSTEM_PARANETS,
+  contextGraphWorkspaceTopic,
+  SYSTEM_CONTEXT_GRAPHS,
 } from '@origintrail-official/dkg-core';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, agentFromPrivateKey, type AgentKeyRecord } from '../src/index.js';
@@ -71,7 +71,7 @@ async function insertAccessMeta(
     {
       subject: contextGraphUri,
       predicate: DKG_ONTOLOGY.RDF_TYPE,
-      object: DKG_ONTOLOGY.DKG_PARANET,
+      object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
       graph: metaGraph,
     },
     {
@@ -107,8 +107,8 @@ async function insertOntologyContextGraph(agent: DKGAgent, contextGraphId: strin
   await agent.store.insert([{
     subject: contextGraphDataUri(contextGraphId),
     predicate: DKG_ONTOLOGY.RDF_TYPE,
-    object: DKG_ONTOLOGY.DKG_PARANET,
-    graph: contextGraphDataUri(SYSTEM_PARANETS.ONTOLOGY),
+    object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+    graph: contextGraphDataUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY),
   }]);
 }
 
@@ -143,7 +143,7 @@ describe('DKGAgent SWM agent-gate access', () => {
     agent.subscribeToContextGraph(contextGraphId);
     await flushAsync();
 
-    expect(gossip.subscribed.has(paranetWorkspaceTopic(contextGraphId))).toBe(false);
+    expect(gossip.subscribed.has(contextGraphWorkspaceTopic(contextGraphId))).toBe(false);
   });
 
   it('does not subscribe to SWM for explicit private context graphs without an enforceable allowlist', async () => {
@@ -159,7 +159,7 @@ describe('DKGAgent SWM agent-gate access', () => {
 
     expect(await internals.canReadContextGraph(contextGraphId)).toBe(true);
     expect(await internals.canUseSharedMemoryForContextGraph(contextGraphId)).toBe(false);
-    expect(gossip.subscribed.has(paranetWorkspaceTopic(contextGraphId))).toBe(false);
+    expect(gossip.subscribed.has(contextGraphWorkspaceTopic(contextGraphId))).toBe(false);
     const result = await querySharedMemoryName(agent, contextGraphId, subject);
     expect(result.bindings).toHaveLength(0);
   });
@@ -174,7 +174,7 @@ describe('DKGAgent SWM agent-gate access', () => {
 
     expect(await internals.canReadContextGraph(contextGraphId)).toBe(true);
     expect(await internals.canUseSharedMemoryForContextGraph(contextGraphId)).toBe(true);
-    expect(gossip.subscribed.has(paranetWorkspaceTopic(contextGraphId))).toBe(true);
+    expect(gossip.subscribed.has(contextGraphWorkspaceTopic(contextGraphId))).toBe(true);
   });
 
   it('preserves peer-only SWM access for a DKG_ALLOWED_PEER context graph', async () => {
@@ -190,7 +190,7 @@ describe('DKGAgent SWM agent-gate access', () => {
 
     expect(await internals.canReadContextGraph(contextGraphId)).toBe(true);
     expect(await internals.canUseSharedMemoryForContextGraph(contextGraphId)).toBe(true);
-    expect(gossip.subscribed.has(paranetWorkspaceTopic(contextGraphId))).toBe(true);
+    expect(gossip.subscribed.has(contextGraphWorkspaceTopic(contextGraphId))).toBe(true);
     const result = await querySharedMemoryName(agent, contextGraphId, subject);
     expect(result.bindings).toHaveLength(1);
     expect(result.bindings[0]?.['name']).toBe('"PeerInviteSecret"');
@@ -215,7 +215,7 @@ describe('DKGAgent SWM agent-gate access', () => {
     agent.subscribeToContextGraph(contextGraphId);
     await flushAsync();
 
-    expect(gossip.subscribed.has(paranetWorkspaceTopic(contextGraphId))).toBe(true);
+    expect(gossip.subscribed.has(contextGraphWorkspaceTopic(contextGraphId))).toBe(true);
     expect(await internals.canUseSharedMemoryForContextGraph(contextGraphId, {
       callerAgentAddress: deniedRecord.agentAddress,
     })).toBe(false);
@@ -245,7 +245,7 @@ describe('DKGAgent SWM agent-gate access', () => {
     agent.subscribeToContextGraph(contextGraphId);
     await flushAsync();
 
-    expect(gossip.subscribed.has(paranetWorkspaceTopic(contextGraphId))).toBe(true);
+    expect(gossip.subscribed.has(contextGraphWorkspaceTopic(contextGraphId))).toBe(true);
 
     await agent.store.deleteByPattern({
       graph: contextGraphMetaUri(contextGraphId),
@@ -256,7 +256,7 @@ describe('DKGAgent SWM agent-gate access', () => {
     await internals.reconcileSharedMemoryGossipSubscription(contextGraphId);
 
     expect(await internals.canUseSharedMemoryForContextGraph(contextGraphId)).toBe(false);
-    expect(gossip.subscribed.has(paranetWorkspaceTopic(contextGraphId))).toBe(false);
+    expect(gossip.subscribed.has(contextGraphWorkspaceTopic(contextGraphId))).toBe(false);
   });
 
   it.each([
@@ -278,7 +278,7 @@ describe('DKGAgent SWM agent-gate access', () => {
 
     expect(await internals.canReadContextGraph(contextGraphId)).toBe(false);
     expect(await internals.canUseSharedMemoryForContextGraph(contextGraphId)).toBe(false);
-    expect(gossip.subscribed.has(paranetWorkspaceTopic(contextGraphId))).toBe(false);
+    expect(gossip.subscribed.has(contextGraphWorkspaceTopic(contextGraphId))).toBe(false);
     await expect(agent.syncSharedMemoryFromPeer('12D3KooWAgentGateRemote', [contextGraphId])).resolves.toBe(0);
     const result = await querySharedMemoryName(agent, contextGraphId, subject);
     expect(result.bindings).toHaveLength(0);
@@ -306,7 +306,7 @@ describe('DKGAgent SWM agent-gate access', () => {
 
     expect(await internals.canReadContextGraph(contextGraphId)).toBe(true);
     expect(await internals.canUseSharedMemoryForContextGraph(contextGraphId)).toBe(true);
-    expect(gossip.subscribed.has(paranetWorkspaceTopic(contextGraphId))).toBe(true);
+    expect(gossip.subscribed.has(contextGraphWorkspaceTopic(contextGraphId))).toBe(true);
     const result = await querySharedMemoryName(agent, contextGraphId, subject);
     expect(result.bindings).toHaveLength(1);
     expect(result.bindings[0]?.['name']).toBe(`"${_label}Secret"`);

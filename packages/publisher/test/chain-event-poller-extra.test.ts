@@ -89,7 +89,7 @@ let _fileSnapshot: string;
 beforeAll(async () => {
   _fileSnapshot = await takeSnapshot();
   // Fund CORE_OP with enough TRAC to pay createContextGraph fees, which
-  // the V9 ParanetRegistry charges implicitly via gas. Keeps the adapter
+  // the V9 ContextGraphRegistry charges implicitly via gas. Keeps the adapter
   // transactions from reverting with insufficient funds on long test runs.
   const { hubAddress } = getSharedContext();
   const provider = createProvider();
@@ -429,7 +429,7 @@ describe('ChainEventPoller — SPEC-GAP SG-6: adapter missing 4 of 7 event types
     // them have callback slots on ChainEventPoller but are never produced
     // by the real adapter (see `packages/chain/src/evm-adapter.ts:793`
     // `listenForEvents` branches; grep shows only KnowledgeBatchCreated,
-    // KCCreated, ContextGraphExpanded, and NameClaimed). This test
+    // KCCreated, ContextGraphExpanded, NameClaimed, and ContextGraphCreated). This test
     // proves the gap end-to-end: we scan a broad block range asking for
     // every type and assert the four missing ones are never yielded.
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);

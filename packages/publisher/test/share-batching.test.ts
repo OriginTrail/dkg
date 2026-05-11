@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { DKG_GOSSIP_MAX_MESSAGE_BYTES } from '@origintrail-official/dkg-core';
 import { batchAssetsByEstimatedBytes, DEFAULT_MAX_SHARE_BATCH_BYTES, groupAssetsByRootEntity } from '../src/share-batching.js';
 
 describe('share batching helpers', () => {
@@ -19,9 +20,9 @@ describe('share batching helpers', () => {
     ]);
   });
 
-  it('uses a conservative default below the 512KB SWM gossip cap', () => {
+  it('uses a conservative default below the SWM gossip cap', () => {
     expect(DEFAULT_MAX_SHARE_BATCH_BYTES).toBe(450 * 1024);
-    expect(DEFAULT_MAX_SHARE_BATCH_BYTES).toBeLessThan(512 * 1024);
+    expect(DEFAULT_MAX_SHARE_BATCH_BYTES).toBeLessThan(DKG_GOSSIP_MAX_MESSAGE_BYTES);
   });
 
   it('splits grouped assets when batch byte estimate exceeds threshold', () => {

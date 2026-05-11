@@ -4,14 +4,14 @@ This repository uses a **Decentralized Knowledge Graph (DKG)** for multi-agent d
 
 ## Setup
 
-The DKG MCP server must be configured in your MCP settings:
+The MCP server is now reachable via `dkg mcp serve` (the umbrella `dkg` CLI subcommand on PATH after `npm install -g @origintrail-official/dkg`). Configure your MCP settings:
 
 ```json
 {
   "mcpServers": {
     "dkg": {
-      "command": "node",
-      "args": ["packages/mcp-server/dist/index.js"]
+      "command": "dkg",
+      "args": ["mcp", "serve"]
     }
   }
 }
@@ -21,7 +21,7 @@ The DKG daemon must be running (`dkg start`).
 
 ## Session Start Protocol
 
-Before exploring the codebase, **always** query the dev-coordination paranet first. These queries cost a fraction of the tokens that file exploration does.
+Before exploring the codebase, **always** query the dev-coordination contextGraph first. These queries cost a fraction of the tokens that file exploration does.
 
 ### 1. Check what has been worked on recently
 
@@ -180,4 +180,4 @@ All classes and properties use the `devgraph:` namespace (`https://ontology.dkg.
 | `Class` | An exported class |
 | `Contract` | A Solidity smart contract |
 
-The full ontology is at `packages/mcp-server/schema/dev-paranet.ttl`.
+The full ontology is at `packages/mcp-dkg/schema/dev-context-graph.ttl`.

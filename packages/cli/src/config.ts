@@ -22,7 +22,13 @@ export interface AutoUpdateBuildTimeouts {
   install?: number;
   /** `pnpm build:runtime` / `pnpm build` (default 180_000). */
   build?: number;
-  /** `pnpm --filter dkg-evm-module build` (default 300_000; bump to 900_000 on ARM64). */
+  /**
+   * @deprecated Ignored since the auto-updater stopped invoking `hardhat
+   * compile` on node hosts. Committed `packages/evm-module/abi/*.json` are
+   * now the runtime contract surface, and CI enforces freshness (see
+   * `abi-freshness` job in `.github/workflows/ci.yml`). The field is
+   * retained on the type so existing user configs don't fail to parse.
+   */
   contracts?: number;
   /** MarkItDown bundling step (default 900_000). */
   markitdown?: number;
@@ -67,9 +73,8 @@ export interface NetworkConfig {
   networkId: string;
   genesisVersion: number;
   relays: string[];
-  /** V10: context graphs (backward-compat alias: defaultParanets) */
+  /** V10: context graphs */
   defaultContextGraphs?: string[];
-  defaultParanets?: string[];
   defaultNodeRole: 'core' | 'edge';
   autoUpdate?: {
     enabled: boolean;
@@ -204,9 +209,8 @@ export interface DkgConfig {
   announceAddresses?: string[];
   /** Bootstrap peer multiaddrs to connect to on startup (for direct peer discovery without relay). */
   bootstrapPeers?: string[];
-  /** V10: context graphs to subscribe. Accepts both `contextGraphs` and legacy `paranets`. */
+  /** V10: context graphs to subscribe. */
   contextGraphs?: string[];
-  paranets?: string[];
   autoUpdate?: AutoUpdateConfig;
   /**
    * Chain config. Field-merged on top of `network/<env>.json#chain` via
@@ -242,7 +246,7 @@ export interface DkgConfig {
   /** @deprecated Legacy alias for sharedMemoryTtlMs */
   workspaceTtlMs?: number;
   /** EPCIS plugin config. When set, POST /api/epcis/capture is enabled. */
-  epcis?: { contextGraphId?: string; /** @deprecated */ paranetId?: string };
+  epcis?: { contextGraphId?: string };
   /** Async publisher runtime options. */
   publisher?: {
     enabled?: boolean;
@@ -308,14 +312,14 @@ const DEFAULT_CONFIG: DkgConfig = {
   nodeRole: 'edge',
 };
 
-/** Resolve context graphs from config, accepting both V10 `contextGraphs` and legacy `paranets` keys. */
+/** Resolve context graphs from config. */
 export function resolveContextGraphs(config: DkgConfig): string[] {
-  return config.contextGraphs ?? config.paranets ?? [];
+  return config.contextGraphs ?? [];
 }
 
-/** Resolve context graphs from network config, accepting both V10 and legacy keys. */
+/** Resolve context graphs from network config. */
 export function resolveNetworkDefaultContextGraphs(network: NetworkConfig | null | undefined): string[] {
-  return network?.defaultContextGraphs ?? network?.defaultParanets ?? [];
+  return network?.defaultContextGraphs ?? [];
 }
 
 /** Resolve shared memory TTL from config, accepting both V10 and legacy keys. */

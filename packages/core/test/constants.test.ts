@@ -5,8 +5,8 @@ import {
   contextGraphAppTopic,
   contextGraphDataUri,
   contextGraphSessionsTopic,
-  paranetPublishTopic,
-  paranetWorkspaceTopic,
+  contextGraphPublishTopic,
+  contextGraphWorkspaceTopic,
   validateContextGraphId,
   validateSubGraphName,
   validateAssertionName,
@@ -14,13 +14,13 @@ import {
 import { createOperationContext } from '../src/logger.js';
 
 describe('context graph topic helpers (V10)', () => {
-  it('contextGraphFinalizationTopic matches deprecated paranetPublishTopic', () => {
-    expect(paranetPublishTopic('testing')).toBe(contextGraphFinalizationTopic('testing'));
-    expect(paranetPublishTopic('testing')).toBe('dkg/context-graph/testing/finalization');
+  it('contextGraphFinalizationTopic matches deprecated contextGraphPublishTopic', () => {
+    expect(contextGraphPublishTopic('testing')).toBe(contextGraphFinalizationTopic('testing'));
+    expect(contextGraphPublishTopic('testing')).toBe('dkg/context-graph/testing/finalization');
   });
 
-  it('contextGraphSharedMemoryTopic matches deprecated paranetWorkspaceTopic', () => {
-    expect(paranetWorkspaceTopic('testing')).toBe(contextGraphSharedMemoryTopic('testing'));
+  it('contextGraphSharedMemoryTopic matches deprecated contextGraphWorkspaceTopic', () => {
+    expect(contextGraphWorkspaceTopic('testing')).toBe(contextGraphSharedMemoryTopic('testing'));
     expect(contextGraphSharedMemoryTopic('testing')).toBe('dkg/context-graph/testing/shared-memory');
   });
 
@@ -54,10 +54,10 @@ describe('context graph topic helpers (V10)', () => {
     expect(result).toBe('dkg/context-graph/a/b/finalization');
   });
 
-  it('deprecated paranetPublishTopic delegates to contextGraphFinalizationTopic', () => {
-    expect(paranetPublishTopic('my-paranet')).toBe(contextGraphFinalizationTopic('my-paranet'));
-    expect(paranetPublishTopic('')).toBe(contextGraphFinalizationTopic(''));
-    expect(paranetPublishTopic('a/b')).toBe(contextGraphFinalizationTopic('a/b'));
+  it('deprecated contextGraphPublishTopic delegates to contextGraphFinalizationTopic', () => {
+    expect(contextGraphPublishTopic('my-contextGraph')).toBe(contextGraphFinalizationTopic('my-contextGraph'));
+    expect(contextGraphPublishTopic('')).toBe(contextGraphFinalizationTopic(''));
+    expect(contextGraphPublishTopic('a/b')).toBe(contextGraphFinalizationTopic('a/b'));
   });
 });
 

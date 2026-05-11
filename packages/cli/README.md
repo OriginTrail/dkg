@@ -208,7 +208,7 @@ pnpm --filter @origintrail-official/dkg benchmark:publish-async-get -- \
   --context-graph-id my-project \
   --repeat 30 \
   --warmups 3 \
-  --payload-size 1024 \
+  --payload-size 10kb \
   --output-format json
 ```
 
@@ -217,6 +217,10 @@ Useful environment variables mirror the flags: `DKG_BENCH_CONTEXT_GRAPH_ID`,
 `DKG_BENCH_PAYLOAD_SIZE`, `DKG_BENCH_FIXTURE`, `DKG_BENCH_OUTPUT_FORMAT`,
 `DKG_BENCH_POLL_INTERVAL_MS`, `DKG_API_PORT`, `DKG_API_URL`, and
 `DKG_AUTH_TOKEN`.
+
+`--payload-size` and `DKG_BENCH_PAYLOAD_SIZE` accept raw bytes or generated-size
+labels such as `10kb`, `100kb`, `2mb`, and `200mb`. The repository ESBench suite
+uses those four generated sizes by default.
 
 The output includes per-operation timing records and summary rows for
 `syncPublish`, `asyncEnqueue`, `asyncCompletion`, and `get`. Each summary reports
@@ -228,7 +232,9 @@ The repository-level ESBench workflow for this same benchmark feature is
 documented in `BENCHMARKING.md`. It uses a deterministic layered DKG client, not
 a live daemon, so the generated reports avoid auth tokens and local node paths.
 `pnpm bench:html` writes the combined ESBench report plus one focused HTML page
-for each benchmark flow:
+for each benchmark flow and payload size. The full default matrix includes the
+`200mb` scene; set `DKG_ESBENCH_PAYLOAD_SIZES=10kb` or another comma-separated
+subset while doing quick local smoke checks:
 
 - get/read retrieval
 - synchronous publish with finalization

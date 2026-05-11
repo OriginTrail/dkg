@@ -121,7 +121,7 @@ Defines the `ChainAdapter` interface for on-chain operations (identity registrat
 ### @origintrail-official/dkg-evm-module
 `packages/evm-module/`
 
-The Solidity smart contracts that run on-chain (forked from DKG v8). Includes contracts for identity, staking, knowledge assets, knowledge collections, paranets, token management, random sampling, and fair-swap dispute resolution. Uses Hardhat for compilation, testing, and deployment. Other TypeScript packages import only the compiled ABI JSON files from this package.
+The Solidity smart contracts that run on-chain (forked from DKG v8). Includes contracts for identity, staking, knowledge assets, knowledge collections, contextGraphs, token management, random sampling, and fair-swap dispute resolution. Uses Hardhat for compilation, testing, and deployment. Other TypeScript packages import only the compiled ABI JSON files from this package.
 
 **Depends on**: OpenZeppelin, Solady (Solidity libraries only).
 
@@ -134,7 +134,7 @@ These packages implement the core DKG capabilities: publishing knowledge, queryi
 ### @origintrail-official/dkg-publisher
 `packages/publisher/`
 
-Handles the full publish lifecycle: validation, blank-node skolemization, auto-partitioning into knowledge assets, Merkle root computation (public, private, combined), metadata generation, on-chain commitment via `chain`, and gossip-based replication to peers. Also provides `AccessHandler`/`AccessClient` for private-data access control and `ChainEventPoller` for reacting to on-chain paranet events.
+Handles the full publish lifecycle: validation, blank-node skolemization, auto-partitioning into knowledge assets, Merkle root computation (public, private, combined), metadata generation, on-chain commitment via `chain`, and gossip-based replication to peers. Also provides `AccessHandler`/`AccessClient` for private-data access control and `ChainEventPoller` for reacting to on-chain contextGraph events.
 
 **Depends on**: `core`, `storage`, `chain`, `query`.
 
@@ -172,13 +172,6 @@ An OpenClaw plugin adapter that turns any OpenClaw agent into a DKG v9 node. Fol
 
 **Depends on**: `core`, `storage`, `agent`.
 
-### @origintrail-official/dkg-adapter-autoresearch
-`packages/adapter-autoresearch/`
-
-An adapter for the AutoResearch framework that integrates DKG capabilities into autonomous research pipelines.
-
-**Depends on**: `core`, `agent`.
-
 ### @origintrail-official/dkg-mcp-server
 `packages/mcp-server/`
 
@@ -195,7 +188,7 @@ These packages support development, operations, and visualization.
 ### @origintrail-official/dkg
 `packages/cli/`
 
-The `dkg` command-line tool. Provides commands for node lifecycle (`init`, `start`, `stop`, `status`), knowledge operations (`publish`, `query`, `query-remote`), paranet management (`paranet create`, `paranet list`), agent networking (`peers`, `send`, `chat`), wallet management, ask configuration, codebase indexing, and log tailing. This is the primary user-facing entry point for running a DKG node.
+The `dkg` command-line tool. Provides commands for node lifecycle (`init`, `start`, `stop`, `status`), knowledge operations (`publish`, `query`, `query-remote`), contextGraph management (`contextGraph create`, `contextGraph list`), agent networking (`peers`, `send`, `chat`), wallet management, ask configuration, codebase indexing, and log tailing. This is the primary user-facing entry point for running a DKG node.
 
 **Depends on**: `core`, `agent`, `node-ui`.
 
@@ -219,13 +212,6 @@ A standalone RDF knowledge graph visualizer. Renders force-directed graphs with 
 A browser-based network simulator for visualizing DKG node interactions. A React + Vite app that lets you spawn virtual nodes, watch them discover peers, publish knowledge, and propagate data -- useful for understanding network dynamics without running real nodes.
 
 **Depends on**: `react` (no workspace deps).
-
-### @origintrail-official/dkg-attested-assets
-`packages/attested-assets/`
-
-Attested Knowledge Assets (AKA) protocol implementation. Provides session management, multi-round attestation with M/N signature gating, canonical signing, and domain separation for collaborative knowledge attestation across multiple agents.
-
-**Depends on**: `core`, `agent`.
 
 ## "Where Do I Look?" Quick Reference
 

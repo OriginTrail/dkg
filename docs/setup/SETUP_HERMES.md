@@ -46,7 +46,7 @@ dkg hermes setup
 ```
 
 `dkg hermes setup` bootstraps `~/.dkg/config.json` when missing, starts the
-DKG daemon (unless `--no-start` is passed), funds the node's first wallets
+DKG daemon (unless `--no-start` is passed), funds the node's generated admin and operational wallets
 through the testnet faucet (unless `--no-fund` is passed), installs the DKG
 Hermes plugin, elects DKG as the active `memory.provider` (replacing any
 prior provider with a timestamped backup; `--preserve-provider` opts out),
@@ -119,7 +119,7 @@ custom daemon URL or gateway does not fall back to localhost during
 | `--dry-run` | off | Preview planned file changes, daemon start, and faucet calls without writing or invoking anything. No backup file is written. |
 | `--no-verify` | off | Skip the post-setup verification pass. |
 | `--no-start` | off (daemon starts) | Skip starting the DKG daemon. Best-effort daemon registration still fires against an already-running daemon. |
-| `--no-fund` / `--fund` | `--fund` | Fund the node's first wallets through the testnet faucet. `--no-fund` skips the faucet call. Faucet failures are non-fatal; a manual `curl` block is logged. |
+| `--no-fund` / `--fund` | `--fund` | Fund the node's generated admin and operational wallets through the testnet faucet. `--no-fund` skips the faucet call. Faucet failures are non-fatal; a manual `curl` block is logged. |
 | `--preserve-provider` | off (replace) | Refuse to replace an existing non-DKG `memory.provider`. Restores the pre-#386 throw-on-conflict behavior for advanced users. |
 | `--no-replace-provider` | off (replace) | Alias for `--preserve-provider`. |
 

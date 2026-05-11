@@ -29,7 +29,7 @@ import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { ethers } from 'ethers';
 import { DKGAgent } from '../src/index.js';
 
-const PARANET = 'test-gossip';
+const CONTEXT_GRAPH = 'test-gossip';
 
 function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 
@@ -57,7 +57,7 @@ describe('I-022: PublishRequestMsg txHash and blockNumber fields', () => {
     const encoded = encodePublishRequest({
       ual: 'did:dkg:mock:31337/0x1/1',
       nquads: new TextEncoder().encode('<s> <p> <o> .'),
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       kas: [],
       publisherIdentity: new Uint8Array(32),
       publisherAddress: '0x1111111111111111111111111111111111111111',
@@ -83,7 +83,7 @@ describe('I-022: PublishRequestMsg txHash and blockNumber fields', () => {
     const encoded = encodePublishRequest({
       ual: 'did:dkg:mock:31337/0x1/1',
       nquads: new TextEncoder().encode('<s> <p> <o> .'),
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       kas: [],
       publisherIdentity: new Uint8Array(32),
       publisherAddress: '0x1111111111111111111111111111111111111111',
@@ -107,7 +107,7 @@ describe('I-022: PublishRequestMsg txHash and blockNumber fields', () => {
     const msg = {
       ual: 'did:dkg:mock:31337/0x1/1',
       nquads: new TextEncoder().encode('<s> <p> <o> .'),
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       kas: [],
       publisherIdentity: new Uint8Array(32),
       publisherAddress: '0x1111111111111111111111111111111111111111',
@@ -122,7 +122,7 @@ describe('I-022: PublishRequestMsg txHash and blockNumber fields', () => {
     const decoded = decodePublishRequest(encoded);
 
     expect(decoded.ual).toBe(msg.ual);
-    expect(decoded.paranetId).toBe(msg.paranetId);
+    expect(decoded.contextGraphId).toBe(msg.contextGraphId);
     expect(decoded.publisherAddress).toBe(msg.publisherAddress);
   });
 });
@@ -139,7 +139,7 @@ describe('I-002: Gossip ingestion should not trust self-reported on-chain status
     // A-12 migration: agent DIDs are EVM-address form.
     const entity = 'did:dkg:agent:0x' + 'aa'.repeat(20);
     const triples = [
-      q(entity, 'http://schema.org/name', '"GossipBot"', `did:dkg:context-graph:${PARANET}`),
+      q(entity, 'http://schema.org/name', '"GossipBot"', `did:dkg:context-graph:${CONTEXT_GRAPH}`),
     ];
 
     const partitioned = autoPartition(triples);
@@ -162,7 +162,7 @@ describe('I-002: Gossip ingestion should not trust self-reported on-chain status
 
     const kcMeta = {
       ual: 'did:dkg:mock:31337/0xAttacker/1',
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       merkleRoot,
       kaCount: kaMetadata.length,
       publisherPeerId: '0xAttacker',
@@ -179,7 +179,7 @@ describe('I-002: Gossip ingestion should not trust self-reported on-chain status
     // Verify that the old behavior (confirmed) is NOT used
     const confirmedQuads = [
       ...generateKCMetadata(kcMeta, kaMetadata),
-      getConfirmedStatusQuad(kcMeta.ual, PARANET),
+      getConfirmedStatusQuad(kcMeta.ual, CONTEXT_GRAPH),
     ];
     const hasConfirmedStatus = confirmedQuads.some(
       tq => tq.predicate.includes('status') && tq.object.includes('confirmed'),
@@ -241,7 +241,7 @@ describe('I-002: Gossip ingestion should not trust self-reported on-chain status
     const msg = encodePublishRequest({
       ual: 'did:dkg:mock:31337/0x1/1',
       nquads: new TextEncoder().encode(ntriples),
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       kas: [{
         tokenId: 1,
         rootEntity: entity,
@@ -262,7 +262,7 @@ describe('I-002: Gossip ingestion should not trust self-reported on-chain status
     const decoded = decodePublishRequest(msg);
     expect(decoded.ual).toBe('did:dkg:mock:31337/0x1/1');
     expect(decoded.txHash).toBe(txHash);
-    expect(decoded.paranetId).toBe(PARANET);
+    expect(decoded.contextGraphId).toBe(CONTEXT_GRAPH);
     expect(decoded.kas).toHaveLength(1);
     expect(decoded.kas[0].rootEntity).toBe(entity);
 
@@ -330,12 +330,12 @@ describe('I-002: Gossip ingestion should not trust self-reported on-chain status
   it('merkle verification detects tampered gossip data', () => {
     const entity = 'did:dkg:agent:0x' + 'cc'.repeat(20);
     const legitimateTriples = [
-      q(entity, 'http://schema.org/name', '"Legitimate"', `did:dkg:context-graph:${PARANET}`),
-      q(entity, 'http://schema.org/version', '"1.0"', `did:dkg:context-graph:${PARANET}`),
+      q(entity, 'http://schema.org/name', '"Legitimate"', `did:dkg:context-graph:${CONTEXT_GRAPH}`),
+      q(entity, 'http://schema.org/version', '"1.0"', `did:dkg:context-graph:${CONTEXT_GRAPH}`),
     ];
     const tamperedTriples = [
-      q(entity, 'http://schema.org/name', '"Tampered"', `did:dkg:context-graph:${PARANET}`),
-      q(entity, 'http://schema.org/version', '"1.0"', `did:dkg:context-graph:${PARANET}`),
+      q(entity, 'http://schema.org/name', '"Tampered"', `did:dkg:context-graph:${CONTEXT_GRAPH}`),
+      q(entity, 'http://schema.org/version', '"1.0"', `did:dkg:context-graph:${CONTEXT_GRAPH}`),
     ];
 
     const legitimatePartitioned = autoPartition(legitimateTriples);

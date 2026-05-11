@@ -253,6 +253,17 @@ export function computeUpdateACKDigest(
   return keccak256(packed);
 }
 
+/**
+ * @deprecated RFC-001 (Phase 1) replaced the per-publish publisher
+ * signature with an EIP-712 `AuthorAttestation`. The V10 contract no
+ * longer accepts a publisher digest; `publisherNodeIdentityId` is now
+ * informational only. Off-chain code should switch to
+ * {@link buildAuthorAttestationTypedData} / {@link AUTHOR_ATTESTATION_DOMAIN}.
+ *
+ * Kept for one transition release so legacy callers compile while
+ * being migrated. Callers that still pack this digest will produce
+ * signatures the contract rejects.
+ */
 export function computePublishPublisherDigest(
   chainId: bigint,
   kav10Address: string,
@@ -275,4 +286,117 @@ export function computePublishPublisherDigest(
   packed.set(merkleRoot, offset); offset += 32;
 
   return keccak256(packed);
+}
+
+// =====================================================================
+// RFC-001 §3 — EIP-712 Author Attestation
+// =====================================================================
+
+/**
+ * EIP-712 domain name for the V10 author attestation. Must match
+ * `KnowledgeAssetsV10._EIP712_NAME_HASH` — any drift will produce
+ * signatures the contract rejects with `InvalidAuthorSignature`.
+ */
+export const AUTHOR_ATTESTATION_DOMAIN_NAME = 'KnowledgeAssetsV10';
+
+/**
+ * EIP-712 domain version. Bound to the major.minor portion of the
+ * contract's `_VERSION` literal ("10.1"). Patch bumps do NOT change
+ * this; only major.minor changes do. See
+ * `KnowledgeAssetsV10._EIP712_VERSION_HASH`.
+ */
+export const AUTHOR_ATTESTATION_DOMAIN_VERSION = '10.1';
+
+/**
+ * Currently-supported `authorSchemeVersion` value. v1 is single-key
+ * (EOA / EIP-1271 / EIP-7702) ECDSA recovery. Future schemes
+ * (multi-sig, threshold, passkey-aggregated) bump this and replace the
+ * compact `(authorR, authorVS)` pair with a `bytes` signature field —
+ * see RFC-001 §9.6.
+ */
+export const AUTHOR_SCHEME_VERSION_V1 = 1;
+
+/**
+ * EIP-712 typed-data primary type name and field layout. Mirrors the
+ * `_AUTHOR_ATTESTATION_TYPEHASH` literal in
+ * `KnowledgeAssetsV10.sol`:
+ *
+ *   AuthorAttestation(uint256 contextGraphId, bytes32 merkleRoot,
+ *                     address authorAddress, uint8 schemeVersion)
+ */
+export const AUTHOR_ATTESTATION_PRIMARY_TYPE = 'AuthorAttestation';
+
+export interface AuthorAttestationTypedData {
+  domain: {
+    name: string;
+    version: string;
+    chainId: bigint;
+    verifyingContract: string;
+  };
+  types: {
+    AuthorAttestation: Array<{ name: string; type: string }>;
+  };
+  primaryType: typeof AUTHOR_ATTESTATION_PRIMARY_TYPE;
+  message: {
+    contextGraphId: bigint;
+    merkleRoot: string;
+    authorAddress: string;
+    schemeVersion: number;
+  };
+}
+
+/**
+ * Build the EIP-712 typed-data payload for the V10 author attestation.
+ *
+ * Domain pins `(chainId, verifyingContract)` to defeat cross-chain and
+ * cross-deployment replay. Struct hash binds the publication's
+ * `(contextGraphId, merkleRoot)` to a specific
+ * `(authorAddress, schemeVersion)` — leaked signatures cannot be
+ * redirected to a different CG, root, or author.
+ *
+ * Pass directly to `ethers.Signer.signTypedData(domain, types, message)`
+ * or to a wallet-of-record (EIP-1271 contract).
+ */
+export function buildAuthorAttestationTypedData(args: {
+  chainId: bigint;
+  kav10Address: string;
+  contextGraphId: bigint;
+  merkleRoot: Uint8Array;
+  authorAddress: string;
+  schemeVersion?: number;
+}): AuthorAttestationTypedData {
+  if (args.merkleRoot.length !== 32) {
+    throw new Error(
+      `merkleRoot must be 32 bytes, got ${args.merkleRoot.length}`,
+    );
+  }
+  const merkleRootHex =
+    '0x' +
+    Array.from(args.merkleRoot)
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('');
+  const schemeVersion = args.schemeVersion ?? AUTHOR_SCHEME_VERSION_V1;
+  return {
+    domain: {
+      name: AUTHOR_ATTESTATION_DOMAIN_NAME,
+      version: AUTHOR_ATTESTATION_DOMAIN_VERSION,
+      chainId: args.chainId,
+      verifyingContract: args.kav10Address,
+    },
+    types: {
+      AuthorAttestation: [
+        { name: 'contextGraphId', type: 'uint256' },
+        { name: 'merkleRoot', type: 'bytes32' },
+        { name: 'authorAddress', type: 'address' },
+        { name: 'schemeVersion', type: 'uint8' },
+      ],
+    },
+    primaryType: AUTHOR_ATTESTATION_PRIMARY_TYPE,
+    message: {
+      contextGraphId: args.contextGraphId,
+      merkleRoot: merkleRootHex,
+      authorAddress: args.authorAddress,
+      schemeVersion,
+    },
+  };
 }

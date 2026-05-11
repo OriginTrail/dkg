@@ -633,9 +633,9 @@ describe('DkgNodePlugin', () => {
     expect(toolNames).toContain('dkg_shared_memory_publish');
     // dkg_share — direct SWM convenience helper, parity with Hermes (#382, #408).
     expect(toolNames).toContain('dkg_share');
-    // Legacy V9 paranet aliases are removed as of v10-rc.
-    expect(toolNames).not.toContain('dkg_list_paranets');
-    expect(toolNames).not.toContain('dkg_paranet_create');
+    // Legacy V9 contextGraph aliases are removed as of v10-rc.
+    expect(toolNames).not.toContain('dkg_list_contextGraphs');
+    expect(toolNames).not.toContain('dkg_contextGraph_create');
     // memory_search added by this feature branch (W2 — agent-callable recall button).
     expect(toolNames).toContain('memory_search');
     // Keep this resilient as main adds new exported tools; this test already
@@ -1528,19 +1528,19 @@ describe('DkgNodePlugin', () => {
       expect(result.content[0].text).toContain('DKG daemon is not reachable');
     });
 
-    it('dkg_query explicitly rejects the v9 paranet_id field with a clear error', async () => {
+    it('dkg_query explicitly rejects the v9 contextGraph_id field with a clear error', async () => {
       // V10-rc is the first product release; there is no v9 back-compat on the
-      // public tool surface. Silently ignoring `paranet_id` would let stale v9
+      // public tool surface. Silently ignoring `contextGraph_id` would let stale v9
       // agent code run unscoped queries thinking it was scoping them — a
       // dangerous failure mode. The handler rejects the field explicitly so
       // the caller's wrong assumption surfaces instead of producing garbage.
       const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
       const result = await byName.get('dkg_query')!.execute('tc', {
         sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
-        paranet_id: 'my-cg',
+        contextGraph_id: 'my-cg',
       });
       expect(fetchMock).not.toHaveBeenCalled();
-      expect(result.content[0].text).toContain('paranet_id');
+      expect(result.content[0].text).toContain('contextGraph_id');
       expect(result.content[0].text).toContain('context_graph_id');
     });
 
@@ -1931,7 +1931,7 @@ describe('DkgNodePlugin', () => {
 
   // ---------------------------------------------------------------------------
   // No v9 back-compat: v10-rc is the first product release. Any v9-era field
-  // (`paranet_id`, stringified `include_shared_memory`, etc.) is out of scope
+  // (`contextGraph_id`, stringified `include_shared_memory`, etc.) is out of scope
   // for the public tool surface. Handlers and schemas only accept the V10
   // shape. Strict JSON-schema validators and permissive hosts behave the
   // same: a stray legacy field is simply ignored (not a special-cased error),
@@ -1939,7 +1939,7 @@ describe('DkgNodePlugin', () => {
   // needs it.
   // ---------------------------------------------------------------------------
 
-  it('dkg_subscribe / dkg_publish / dkg_query do not advertise or honor the v9 paranet_id alias', () => {
+  it('dkg_subscribe / dkg_publish / dkg_query do not advertise or honor the v9 contextGraph_id alias', () => {
     const plugin = new DkgNodePlugin();
     const tools: OpenClawTool[] = [];
     plugin.register({
@@ -1952,7 +1952,7 @@ describe('DkgNodePlugin', () => {
     const byName = new Map(tools.map((t) => [t.name, t] as const));
     for (const name of ['dkg_subscribe', 'dkg_publish', 'dkg_query'] as const) {
       const props = byName.get(name)!.parameters.properties;
-      expect(props).not.toHaveProperty('paranet_id');
+      expect(props).not.toHaveProperty('contextGraph_id');
     }
   });
 
@@ -7268,7 +7268,7 @@ describe('DkgNodePlugin', () => {
   describe('context-graph cache filter on synced + non-system (Codex B51 + B54)', () => {
     it('caches only entries with synced=true AND isSystem=false (includes local private CGs per B54)', async () => {
       // B51: `agent.listContextGraphs()` returns every known CG —
-      // including system paranets (ontology, agents registry) and
+      // including system contextGraphs (ontology, agents registry) and
       // discovered-but-not-synced ontology entries. The cache is the
       // needs_clarification availability list AND the B42 / B46 / B48
       // subscribed-project allowlist for `dkg_memory_import`, so
@@ -7282,7 +7282,7 @@ describe('DkgNodePlugin', () => {
       // and broke `dkg_memory_import` writes against legitimate
       // private targets. The relaxed filter uses `synced === true`
       // to accept both public-subscribed AND local-private while
-      // still excluding system paranets and discovered-but-not-
+      // still excluding system contextGraphs and discovered-but-not-
       // synced entries.
       const fetchFn = vi.fn(async (input: any, _init?: any) => {
         const url = typeof input === 'string' ? input : input?.url ?? '';
@@ -7298,7 +7298,7 @@ describe('DkgNodePlugin', () => {
               contextGraphs: [
                 // Valid: public subscribed, synced, non-system → cached
                 { id: 'research-public', subscribed: true, synced: true, isSystem: false },
-                // System paranet → filtered out (isSystem)
+                // System contextGraph → filtered out (isSystem)
                 { id: 'ontology', subscribed: true, synced: true, isSystem: true },
                 // Subscribed but not yet synced (gossip subscribe lag) → filtered out
                 { id: 'research-syncing', subscribed: true, synced: false, isSystem: false },

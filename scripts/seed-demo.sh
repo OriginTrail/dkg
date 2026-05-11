@@ -8,7 +8,7 @@ CG="v10-design-session"
 post() { curl -s -X POST "$API$1" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d "$2"; }
 
 echo "=== Creating context graph ==="
-post /api/paranet/create "{\"id\":\"$CG\",\"name\":\"V10 Tri-Modal Memory Design\",\"description\":\"Design session between Branimir and Claude (Cursor) — architecting tri-modal memory for DKG V10: text, graph, and vector representations sharing a single UAL.\"}" | python3 -m json.tool 2>/dev/null || true
+post /api/context-graph/create "{\"id\":\"$CG\",\"name\":\"V10 Tri-Modal Memory Design\",\"description\":\"Design session between Branimir and Claude (Cursor) — architecting tri-modal memory for DKG V10: text, graph, and vector representations sharing a single UAL.\"}" | python3 -m json.tool 2>/dev/null || true
 
 echo ""
 echo "=== Seeding knowledge entities ==="

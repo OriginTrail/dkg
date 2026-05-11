@@ -23,7 +23,7 @@ export function parseBenchmarkArgs(argv = process.argv.slice(2), env = process.e
     warmups: parseOptionalNonNegativeInt(env.DKG_BENCH_WARMUPS, 'DKG_BENCH_WARMUPS') ?? DEFAULT_WARMUPS,
     timeoutMs: parseOptionalPositiveInt(env.DKG_BENCH_TIMEOUT_MS, 'DKG_BENCH_TIMEOUT_MS') ?? DEFAULT_TIMEOUT_MS,
     payloadSizeBytes:
-      parseOptionalPositiveInt(env.DKG_BENCH_PAYLOAD_SIZE, 'DKG_BENCH_PAYLOAD_SIZE') ?? DEFAULT_PAYLOAD_SIZE_BYTES,
+      parseOptionalByteSize(env.DKG_BENCH_PAYLOAD_SIZE, 'DKG_BENCH_PAYLOAD_SIZE') ?? DEFAULT_PAYLOAD_SIZE_BYTES,
     fixture: parseFixture(env.DKG_BENCH_FIXTURE ?? 'generated'),
     outputFormat: parseOutputFormat(env.DKG_BENCH_OUTPUT_FORMAT ?? 'json'),
     namespace: env.DKG_BENCH_NAMESPACE ?? 'benchmark',
@@ -65,7 +65,7 @@ export function parseBenchmarkArgs(argv = process.argv.slice(2), env = process.e
         break;
       case '--payload-size':
       case '--payload-size-bytes':
-        config.payloadSizeBytes = parsePositiveInt(value(), name);
+        config.payloadSizeBytes = parseByteSize(value(), name);
         break;
       case '--fixture':
         config.fixture = parseFixture(value());
@@ -143,6 +143,25 @@ function parseOptionalNonNegativeInt(value: string | undefined, name: string): n
   return value === undefined || value === '' ? undefined : parseNonNegativeInt(value, name);
 }
 
+function parseOptionalByteSize(value: string | undefined, name: string): number | undefined {
+  return value === undefined || value === '' ? undefined : parseByteSize(value, name);
+}
+
+function parseByteSize(value: string, name: string): number {
+  const match = value.trim().toLowerCase().match(/^(\d+)(b|kb|mb)?$/);
+  if (!match) {
+    throw new Error(`${name} must be a positive byte size such as 1024, 10kb, 2mb, or 200mb`);
+  }
+
+  const amount = Number.parseInt(match[1], 10);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    throw new Error(`${name} must be a positive byte size`);
+  }
+
+  const multiplier = match[2] === 'mb' ? 1024 * 1024 : match[2] === 'kb' ? 1024 : 1;
+  return amount * multiplier;
+}
+
 function parsePositiveInt(value: string, name: string): number {
   const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed) || parsed <= 0 || String(parsed) !== value.trim()) {
@@ -190,7 +209,7 @@ Options:
   --repeat <n>                   Measured iterations (default ${DEFAULT_REPEAT})
   --warmups <n>                  Warmup iterations excluded from summaries (default ${DEFAULT_WARMUPS})
   --timeout-ms <ms>              Per-operation timeout (default ${DEFAULT_TIMEOUT_MS})
-  --payload-size <bytes>         Generated text payload size target (default ${DEFAULT_PAYLOAD_SIZE_BYTES})
+  --payload-size <size>          Generated text payload size target, e.g. 1024, 10kb, 2mb (default ${DEFAULT_PAYLOAD_SIZE_BYTES})
   --fixture <generated|minimal>  Payload fixture (default generated)
   --output-format <json|ndjson>  Output format (default json)
   --poll-interval-ms <ms>        Async publisher job polling interval (default ${DEFAULT_POLL_INTERVAL_MS})

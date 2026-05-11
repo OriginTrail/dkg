@@ -1,8 +1,8 @@
 name: context_quorum_accept_with_readable_variables
 policy: context_corroboration_readable.yaml
 context:
-  paranet: ops-paranet
-  scope_ual: ual:dkg:ops-paranet:auth:context:incident-128:claim-c1
+  contextGraph: ops-contextGraph
+  scope_ual: ual:dkg:ops-contextGraph:auth:context:incident-128:claim-c1
   view: accepted
   snapshot_id: snap-context-readable-10
 facts:

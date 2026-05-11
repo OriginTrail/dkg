@@ -1225,8 +1225,8 @@ class DKGMemoryProvider(MemoryProvider):
         sparql = args.get("sparql", "")
         if not sparql:
             return tool_error("SPARQL query is required.")
-        if args.get("paranet_id") is not None or args.get("paranetId") is not None:
-            return tool_error('"paranet_id" is not a supported parameter. Use "context_graph_id".')
+        if args.get("contextGraph_id") is not None or args.get("contextGraphId") is not None:
+            return tool_error('"contextGraph_id" is not a supported parameter. Use "context_graph_id".')
         if args.get("include_shared_memory") is not None or args.get("includeSharedMemory") is not None:
             return tool_error(
                 '"include_shared_memory" is no longer supported on dkg_query. '

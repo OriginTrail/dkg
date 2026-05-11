@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Experiment C2: Parallel collaborative agents using full DKG publishing.
-# - Shared code graph + shared decision memory in common paranet
+# - Shared code graph + shared decision memory in common contextGraph
 # - Agents must query and publish structured decisions during execution
 #
 set -euo pipefail
@@ -14,8 +14,8 @@ CLAUDE_RUN="$SCRIPT_DIR/claude-run.mjs"
 
 export DKG_API_PORT=9200
 RUN_ID="${RUN_ID:-c2-$(date +%Y%m%d-%H%M%S)}"
-PARANET_ID="${PARANET_ID:-dev-coordination}"
-GRAPH_URI="did:dkg:paranet:${PARANET_ID}"
+CONTEXT_GRAPH_ID="${CONTEXT_GRAPH_ID:-dev-coordination}"
+GRAPH_URI="did:dkg:context-graph:${CONTEXT_GRAPH_ID}"
 DECISION_CLASS="https://ontology.dkg.io/devgraph#Decision"
 PRED_SUMMARY="https://ontology.dkg.io/devgraph#summary"
 PRED_FEATURE="https://ontology.dkg.io/devgraph#feature"
@@ -31,14 +31,14 @@ mkdir -p "$RESULTS_DIR/round1" "$RESULTS_DIR/round2"
 
 echo "=== Experiment C2: Full Publishing Collaboration ==="
 echo "  Run ID:    $RUN_ID"
-echo "  Paranet:   $PARANET_ID"
+echo "  ContextGraph:   $CONTEXT_GRAPH_ID"
 echo "  OpenClaw:  $OPENCLAW_DIR"
 echo "  Results:   $RESULTS_DIR"
 echo ""
 
-DKG_PREAMBLE='You have DKG MCP tools (dkg_query, dkg_publish) and MUST collaborate through a shared paranet memory.
+DKG_PREAMBLE='You have DKG MCP tools (dkg_query, dkg_publish) and MUST collaborate through a shared contextGraph memory.
 Always query the code graph before broad file reads.
-Always publish plan and final decisions as Decision entities in the same paranet.'
+Always publish plan and final decisions as Decision entities in the same contextGraph.'
 
 setup_worktree() {
   local feature_id="$1"
@@ -79,7 +79,7 @@ run_feature_bg() {
 - runId: $RUN_ID
 - agentId: $agent_id
 - featureId: $feature_id
-- paranetId: $PARANET_ID
+- contextGraphId: $CONTEXT_GRAPH_ID
 
 1) FIRST ACTION: query shared decisions already published by other agents in this run:
 SELECT ?d ?summary ?feature ?agent ?kind WHERE {

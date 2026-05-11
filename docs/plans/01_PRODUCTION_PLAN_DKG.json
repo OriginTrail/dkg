@@ -3,15 +3,15 @@
   "version": "2026-03-03",
   "updatedAt": "2026-03-03T00:45:00Z",
   "source": "graph-native",
-  "paranets": [
+  "contextGraphs": [
     {
       "id": "dkgv9-production",
-      "uri": "did:dkg:paranet:dkgv9-production",
+      "uri": "did:dkg:context-graph:dkgv9-production",
       "purpose": "Real-time human+agent implementation coordination and delivery state"
     },
     {
       "id": "dkgv9-trust-lab",
-      "uri": "did:dkg:paranet:dkgv9-trust-lab",
+      "uri": "did:dkg:context-graph:dkgv9-trust-lab",
       "purpose": "Trust, provenance, and adversarial validation experiments"
     }
   ],
@@ -52,7 +52,7 @@
       "status": "pending",
       "priority": "P0",
       "assignee": "planner-agent",
-      "summary": "Operationalize DKG-native coordination for humans and agents in shared production paranet.",
+      "summary": "Operationalize DKG-native coordination for humans and agents in shared production contextGraph.",
       "description": "Build claim/progress/handoff protocols, runbook automations, and graph query packs so teams coordinate from graph state.",
       "roiHypothesis": "Reduce coordination overhead by 30% and improve throughput by 25% in multi-agent development.",
       "metrics": ["cycleTimeMinutes", "coordinationMessagesPerFeature", "reworkRate", "completionRate"]
@@ -102,17 +102,17 @@
       "priority": "P0",
       "assignee": "planner-agent",
       "name": "Graph-native claim/progress/handoff protocol",
-      "description": "Define and enforce standard event entities for claim, progress, decision, handoff, completion in dkgv9-production paranet.",
+      "description": "Define and enforce standard event entities for claim, progress, decision, handoff, completion in dkgv9-production contextGraph.",
       "dependsOn": ["ws-collab-core-v1"]
     },
     {
-      "id": "task-shared-paranet-bootstrap-v1",
+      "id": "task-shared-contextGraph-bootstrap-v1",
       "class": "https://ontology.dkg.io/devgraph#Task",
       "status": "pending",
       "priority": "P0",
       "assignee": "ops-agent",
-      "name": "Shared paranet bootstrap and runbook",
-      "description": "Automate creation/health checks/subscription for dkgv9-production and dkgv9-trust-lab paranets across human+agent teams.",
+      "name": "Shared contextGraph bootstrap and runbook",
+      "description": "Automate creation/health checks/subscription for dkgv9-production and dkgv9-trust-lab contextGraphs across human+agent teams.",
       "dependsOn": ["ws-collab-core-v1"]
     },
     {
@@ -198,7 +198,7 @@
     {
       "id": "decision-2026-03-03-exec-default",
       "class": "https://ontology.dkg.io/devgraph#Decision",
-      "summary": "Default multi-agent execution should use shared paranet protocols with claim/progress/handoff events.",
+      "summary": "Default multi-agent execution should use shared contextGraph protocols with claim/progress/handoff events.",
       "rationale": "Parallel runs improve speed; structured shared state is required to avoid drift and central coordinator bottlenecks.",
       "madeBy": "human-lead",
       "madeAt": "2026-03-03T00:46:00Z"

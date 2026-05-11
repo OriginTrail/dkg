@@ -25,7 +25,7 @@ const { Type, Field } = protobuf;
 
 export const QueryRequestSchema = new Type('QueryRequest')
   .add(new Field('sparql', 1, 'string'))
-  .add(new Field('paranetId', 2, 'string'))
+  .add(new Field('contextGraphId', 2, 'string'))
   .add(new Field('timeout', 3, 'uint32'));
 
 export const QueryResponseSchema = new Type('QueryResponse')
@@ -35,7 +35,7 @@ export const QueryResponseSchema = new Type('QueryResponse')
 
 export interface QueryRequestMsg {
   sparql: string;
-  paranetId: string;
+  contextGraphId: string;
   timeout: number;
 }
 

@@ -361,6 +361,7 @@ describe('listAssertions query path', () => {
 
 describe('useMemoryEntities hook', () => {
   const hook = readFileSync(resolve(UI_DIR, 'hooks', 'useMemoryEntities.ts'), 'utf-8');
+  const nodeEventsHook = readFileSync(resolve(UI_DIR, 'hooks', 'useNodeEvents.ts'), 'utf-8');
 
   it('exports TrustLevel type with three levels', () => {
     expect(hook).toContain("type TrustLevel = 'working' | 'shared' | 'verified'");
@@ -396,6 +397,11 @@ describe('useMemoryEntities hook', () => {
 
   it('deduplicates triples across layers for graph data', () => {
     expect(hook).toContain('const seen = new Set<string>()');
+  });
+
+  it('subscribes to memory_graph_changed events for live graph refreshes', () => {
+    expect(nodeEventsHook).toContain("'memory_graph_changed'");
+    expect(hook).toContain('useMemoryGraphEvents(contextGraphId, fetchAll)');
   });
 });
 

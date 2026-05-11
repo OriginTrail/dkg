@@ -2,6 +2,7 @@ import React, { useState, useMemo, useCallback, lazy, Suspense } from 'react';
 import { useFetch } from '../hooks.js';
 import { executeQuery, listAssertions, promoteAssertion, publishSharedMemory, listSwmEntities, type AssertionInfo, type PublishResult, type SwmRootEntity } from '../api.js';
 import { FilePreviewModal } from '../components/Modals/FilePreviewModal.js';
+import { useMemoryGraphEvents } from '../hooks/useNodeEvents.js';
 
 const RdfGraph = lazy(() =>
   import('@origintrail-official/dkg-graph-viz/react').then(m => ({ default: m.RdfGraph }))
@@ -128,6 +129,7 @@ export function MemoryLayerView({ layer, contextGraphId }: MemoryLayerViewProps)
     [sparql, contextGraphId, includeShared, graphSuffix, queryView],
     0
   );
+  useMemoryGraphEvents(contextGraphId, refresh, { layers: [layer] });
 
   const runQuery = useCallback(() => {
     const next = draftQuery.trim();
@@ -362,6 +364,7 @@ function AssertionList({ contextGraphId, onPromoted }: { contextGraphId: string;
     [contextGraphId],
     0
   );
+  useMemoryGraphEvents(contextGraphId, refresh, { layers: ['wm'] });
   const [promoting, setPromoting] = useState<string | null>(null);
   const [promoteResult, setPromoteResult] = useState<{ name: string; count: number } | null>(null);
   const [promoteError, setPromoteError] = useState<string | null>(null);
@@ -476,6 +479,7 @@ function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: string;
     [contextGraphId],
     0
   );
+  useMemoryGraphEvents(contextGraphId, refresh, { layers: ['swm'] });
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [publishing, setPublishing] = useState(false);
   const [publishResult, setPublishResult] = useState<PublishResult | null>(null);

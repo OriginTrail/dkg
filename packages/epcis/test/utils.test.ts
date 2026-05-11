@@ -175,6 +175,23 @@ describe('parseQueryParams', () => {
     const params = parseQueryParams(new URLSearchParams('nextPageToken=not-valid-base64!!!&offset=200'));
     expect(params.offset).toBe(200);
   });
+
+  it('defaults finalized to true when omitted', () => {
+    const params = parseQueryParams(new URLSearchParams('epc=urn:test'));
+
+    expect(params.finalized).toBe(true);
+  });
+
+  it('parses finalized=true and finalized=false as booleans', () => {
+    expect(parseQueryParams(new URLSearchParams('finalized=true')).finalized).toBe(true);
+    expect(parseQueryParams(new URLSearchParams('finalized=false')).finalized).toBe(false);
+  });
+
+  it('treats invalid finalized values as the default finalized partition', () => {
+    const params = parseQueryParams(new URLSearchParams('finalized=maybe'));
+
+    expect(params.finalized).toBe(true);
+  });
 });
 
 describe('hasAtLeastOneFilter', () => {

@@ -36,7 +36,7 @@ import {
   V10MerkleTree,
   hashTripleV10,
   computePublishACKDigest,
-  computePublishPublisherDigest,
+  buildAuthorAttestationTypedData,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import {
@@ -165,16 +165,15 @@ describe('Random Sampling E2E (Hardhat)', () => {
         };
       }),
     );
-    const pubSig = ethers.Signature.from(
-      await coreOpWallet.signMessage(
-        computePublishPublisherDigest(
-          TEST_CHAIN_ID,
-          kav10Address,
-          publisherIdentityId,
-          cgId,
-          merkleRoot,
-        ),
-      ),
+    const authorTyped = buildAuthorAttestationTypedData({
+      chainId: TEST_CHAIN_ID,
+      kav10Address,
+      contextGraphId: cgId,
+      merkleRoot,
+      authorAddress: coreOpWallet.address,
+    });
+    const authorSig = ethers.Signature.from(
+      await coreOpWallet.signTypedData(authorTyped.domain, authorTyped.types, authorTyped.message),
     );
     const publishResult = await publisherAdapter.createKnowledgeAssetsV10!({
       publishOperationId: 'rs-e2e-publish',
@@ -186,11 +185,14 @@ describe('Random Sampling E2E (Hardhat)', () => {
       tokenAmount,
       isImmutable: false,
       merkleLeafCount,
-      paymaster: ethers.ZeroAddress,
       publisherNodeIdentityId: publisherIdentityId,
-      publisherSignature: {
-        r: ethers.getBytes(pubSig.r),
-        vs: ethers.getBytes(pubSig.yParityAndS),
+      author: {
+        address: coreOpWallet.address,
+        signature: {
+          r: ethers.getBytes(authorSig.r),
+          vs: ethers.getBytes(authorSig.yParityAndS),
+        },
+        schemeVersion: 1,
       },
       ackSignatures,
     });
@@ -249,7 +251,7 @@ describe('Random Sampling E2E (Hardhat)', () => {
     await store.insert([
       {
         subject: cgUri,
-        predicate: 'https://dkg.network/ontology#ParanetOnChainId',
+        predicate: 'https://dkg.network/ontology#ContextGraphOnChainId',
         object: `"${cgIdStr}"`,
         graph: 'did:dkg:context-graph:ontology',
       },

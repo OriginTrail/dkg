@@ -101,7 +101,7 @@ const jobId = await asyncPublisher.lift({
   workspaceId: 'workspace-main',
   workspaceOperationId: write.workspaceOperationId,
   roots: ['urn:local:/rihana'],
-  paranetId: 'music-social',
+  contextGraphId: 'music-social',
   namespace: 'aloha',
   scope: 'person-profile',
   transitionType: 'CREATE',

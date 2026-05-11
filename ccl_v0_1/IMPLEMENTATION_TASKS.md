@@ -13,7 +13,7 @@ This document turns the current CCL review gaps into concrete implementation tas
 The remaining items are already partly addressed on this branch:
 
 - policy content validation before publish/approve
-- duplicate republish protection for the same `paranetId + name + version`
+- duplicate republish protection for the same `contextGraphId + name + version`
 - reference-evaluator vs agent-evaluator parity tests
 - surface syntax compiler support
 
@@ -29,9 +29,9 @@ Make `same policy + same snapshot + same resolver version` produce the same fact
 
 ### Proposed solution
 
-- Add `resolveFactsFromSnapshot({ paranetId, snapshotId, view, scopeUal?, policyName?, contextType? })`
+- Add `resolveFactsFromSnapshot({ contextGraphId, snapshotId, view, scopeUal?, policyName?, contextType? })`
 - Implement a canonical extraction layer that:
-  - queries the relevant paranet graph
+  - queries the relevant contextGraph graph
   - applies a resolver profile for the policy family or context type
   - emits canonical `CclFactTuple[]`
   - sorts tuples deterministically before hashing
@@ -62,12 +62,12 @@ Policies can be published and approved, but not explicitly revoked, deactivated,
 
 ### Goal
 
-Allow paranet owners to retire policies cleanly and make resolution semantics explicit.
+Allow contextGraph owners to retire policies cleanly and make resolution semantics explicit.
 
 ### Proposed solution
 
 - Add a revoke flow:
-  - `revokeCclPolicy({ paranetId, policyUri, contextType? })`
+  - `revokeCclPolicy({ contextGraphId, policyUri, contextType? })`
   - CLI/API endpoint: `dkg ccl policy revoke`
 - Extend lifecycle state with explicit binding or policy statuses:
   - `proposed`
@@ -99,11 +99,11 @@ Prevent a modified node from gossiping fake approvals that other nodes accept wi
 ### Proposed solution
 
 - Short term:
-  - validate approval bindings on ingest against locally known paranet owner state
-  - reject bindings where `approvedBy` is not the current owner for the paranet
+  - validate approval bindings on ingest against locally known contextGraph owner state
+  - reject bindings where `approvedBy` is not the current owner for the contextGraph
 - Long term:
   - introduce signed approval envelopes
-  - sign the approval payload with the paranet owner key
+  - sign the approval payload with the contextGraph owner key
   - verify signatures before accepting approval triples into the ontology store
 
 ### Deliverables
@@ -163,7 +163,7 @@ Make identifiers reproducible and reduce time-based ambiguity.
 ### Proposed solution
 
 - Replace time-derived binding URIs with a hash-derived scheme based on stable fields such as:
-  - `paranetId`
+  - `contextGraphId`
   - `policyUri`
   - `contextType`
   - `approvedBy`

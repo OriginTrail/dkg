@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { handleEventsQuery, EpcisQueryError, toEpcisEvent } from '../src/handlers.js';
 import type { QueryEngine } from '../src/types.js';
 
-const CONTEXT_GRAPH_ID = 'test-paranet';
+const CONTEXT_GRAPH_ID = 'test-cg';
 const BASE_PATH = '/api/epcis/events';
 
 interface QueryCall {
@@ -68,7 +68,7 @@ describe('handleEventsQuery', () => {
     expect(event.bizLocation).toEqual({ id: 'urn:epc:id:sgln:4012345.00001.0' });
 
     expect(calls).toHaveLength(1);
-    expect(calls[0].sparql).toContain('GRAPH <did:dkg:context-graph:test-paranet>');
+    expect(calls[0].sparql).toContain('GRAPH <did:dkg:context-graph:test-cg>');
     expect(calls[0].opts).toEqual({ contextGraphId: CONTEXT_GRAPH_ID });
   });
 
@@ -278,6 +278,97 @@ describe('handleEventsQuery', () => {
     expect(calls[0].sparql).toContain('OFFSET 0');
   });
 
+  it('queries finalized canonical partition by default', async () => {
+    const { engine, calls } = createTrackingQueryEngine([makeBindings()]);
+
+    await handleEventsQuery(
+      new URLSearchParams('eventType=ObjectEvent'),
+      { contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH },
+    );
+
+    expect(calls[0].sparql).toContain('GRAPH <did:dkg:context-graph:test-cg>');
+    expect(calls[0].sparql).not.toContain('GRAPH <did:dkg:context-graph:test-cg/_shared_memory>');
+    expect(calls[0].sparql).toContain('GRAPH <did:dkg:context-graph:test-cg/_private>');
+  });
+
+  it('queries shared memory partition when finalized=false', async () => {
+    const { engine, calls } = createTrackingQueryEngine([makeBindings()]);
+
+    await handleEventsQuery(
+      new URLSearchParams('finalized=false&eventType=ObjectEvent'),
+      { contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH },
+    );
+
+    expect(calls[0].sparql).toContain('GRAPH <did:dkg:context-graph:test-cg/_shared_memory>');
+    expect(calls[0].sparql).toContain('GRAPH <did:dkg:context-graph:test-cg/_private>');
+    expect(calls[0].sparql).toContain('dkg:privateDataAnchor "true"');
+  });
+
+  it('returns full EPCIS fields from anchored private payload bindings when finalized=false', async () => {
+    const { engine, calls } = createTrackingQueryEngine([
+      makeBindings({
+        event: 'urn:uuid:private-event',
+        eventType: 'https://gs1.github.io/EPCIS/ObjectEvent',
+        eventTime: '2024-04-01T08:00:00.000Z',
+        action: 'OBSERVE',
+        epcList: 'urn:epc:id:sgtin:4012345.011111.9999',
+        bizStep: 'https://ref.gs1.org/cbv/BizStep-shipping',
+        ual: '',
+      }),
+    ]);
+
+    const { body } = await handleEventsQuery(
+      new URLSearchParams('finalized=false&epc=urn:epc:id:sgtin:4012345.011111.9999'),
+      { contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH },
+    );
+
+    expect(calls[0].sparql).toContain('dkg:privateDataAnchor "true"');
+    expect(calls[0].sparql).toContain('GRAPH <did:dkg:context-graph:test-cg/_private>');
+    expect(body.epcisBody.queryResults.resultsBody.eventList).toEqual([
+      expect.objectContaining({
+        type: 'ObjectEvent',
+        action: 'OBSERVE',
+        bizStep: 'https://ref.gs1.org/cbv/BizStep-shipping',
+        epcList: ['urn:epc:id:sgtin:4012345.011111.9999'],
+      }),
+    ]);
+  });
+
+  it('constructs finalized=false private branch so orphan private payloads cannot match', async () => {
+    const { engine, calls } = createTrackingQueryEngine([]);
+
+    await handleEventsQuery(
+      new URLSearchParams('finalized=false'),
+      { contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH },
+    );
+
+    // Orphan exclusion: the private event subject must equal the public
+    // anchor subject. We express the join by reusing `?event` across both
+    // graphs (SPARQL native bind-by-name) instead of `FILTER(?event = ?root)`,
+    // because some triplestores fail to bridge URI bindings across graph
+    // contexts via FILTER and the anchored payload otherwise stays empty
+    // on live data.
+    expect(calls[0].sparql).toContain('GRAPH <did:dkg:context-graph:test-cg/_shared_memory>');
+    expect(calls[0].sparql).toContain('?event dkg:privateDataAnchor "true" .');
+    expect(calls[0].sparql).toContain('GRAPH <did:dkg:context-graph:test-cg/_private>');
+    expect(calls[0].sparql).not.toContain('FILTER(?event = ?root)');
+  });
+
+  it('keeps finalized=false on pagination Link headers', async () => {
+    const bindings = Array.from({ length: 6 }, (_, i) =>
+      makeBindings({ event: `urn:uuid:event-${i}` }),
+    );
+    const { engine } = createTrackingQueryEngine(bindings);
+
+    const { headers } = await handleEventsQuery(
+      new URLSearchParams('finalized=false&perPage=5'),
+      { contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH },
+    );
+
+    expect(headers?.link).toContain('finalized=false');
+    expect(headers?.link).toContain('nextPageToken=');
+  });
+
   it('omits Link header on last page (fewer than perPage+1 rows)', async () => {
     const bindings = Array.from({ length: 5 }, (_, i) =>
       makeBindings({ event: `urn:uuid:event-${i}` }),
@@ -402,5 +493,68 @@ describe('handleEventsQuery — validation', () => {
     ).rejects.toThrow(/date|range|from|to|invalid|validation|before|after|order/i);
 
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe('handleEventsQuery — per-request sub-graph', () => {
+  it('threads subGraphName from config into the SPARQL graph URIs (finalized=true canonical partition)', async () => {
+    const { engine, calls } = createTrackingQueryEngine([makeBindings()]);
+
+    await handleEventsQuery(
+      new URLSearchParams('eventType=ObjectEvent'),
+      {
+        contextGraphId: CONTEXT_GRAPH_ID,
+        subGraphName: 'research',
+        queryEngine: engine,
+        basePath: BASE_PATH,
+      },
+    );
+
+    // Finalized sub-graph URI is `<cg>/<sub>` (no `/context/` segment),
+    // matching `packages/agent/src/finalization-handler.ts:358-362`
+    // (the publisher's actual write target). The earlier expectation
+    // against `<cg>/context/<sub>` read from a graph URI the publisher
+    // never populates — finalized sub-graph queries returned zero rows.
+    expect(calls[0].sparql).toContain('GRAPH <did:dkg:context-graph:test-cg/research>');
+    expect(calls[0].sparql).not.toContain('GRAPH <did:dkg:context-graph:test-cg/context/research>');
+    expect(calls[0].sparql).toContain('GRAPH <did:dkg:context-graph:test-cg/research/_private>');
+    expect(calls[0].sparql).not.toContain('GRAPH <did:dkg:context-graph:test-cg>');
+    expect(calls[0].sparql).not.toContain('GRAPH <did:dkg:context-graph:test-cg/_private>');
+  });
+
+  it('threads subGraphName into SPARQL graph URIs (finalized=false SWM partition)', async () => {
+    const { engine, calls } = createTrackingQueryEngine([makeBindings()]);
+
+    await handleEventsQuery(
+      new URLSearchParams('finalized=false&eventType=ObjectEvent'),
+      {
+        contextGraphId: CONTEXT_GRAPH_ID,
+        subGraphName: 'research',
+        queryEngine: engine,
+        basePath: BASE_PATH,
+      },
+    );
+
+    expect(calls[0].sparql).toContain('GRAPH <did:dkg:context-graph:test-cg/research/_shared_memory>');
+    expect(calls[0].sparql).toContain('GRAPH <did:dkg:context-graph:test-cg/research/_private>');
+    expect(calls[0].sparql).not.toContain('GRAPH <did:dkg:context-graph:test-cg/_shared_memory>');
+    expect(calls[0].sparql).not.toContain('GRAPH <did:dkg:context-graph:test-cg/_private>');
+  });
+
+  it('falls back to root partition when subGraphName is omitted', async () => {
+    const { engine, calls } = createTrackingQueryEngine([makeBindings()]);
+
+    await handleEventsQuery(
+      new URLSearchParams('eventType=ObjectEvent'),
+      {
+        contextGraphId: CONTEXT_GRAPH_ID,
+        queryEngine: engine,
+        basePath: BASE_PATH,
+      },
+    );
+
+    expect(calls[0].sparql).toContain('GRAPH <did:dkg:context-graph:test-cg>');
+    expect(calls[0].sparql).toContain('GRAPH <did:dkg:context-graph:test-cg/_private>');
+    expect(calls[0].sparql).not.toContain('test-cg/research');
   });
 });

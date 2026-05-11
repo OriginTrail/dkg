@@ -12,14 +12,14 @@ import {
   encodeWorkspacePublishRequest,
   GOSSIP_ENVELOPE_VERSION,
   GOSSIP_TYPE_WORKSPACE_PUBLISH,
-  SYSTEM_PARANETS,
+  SYSTEM_CONTEXT_GRAPHS,
 } from '@origintrail-official/dkg-core';
 import { SharedMemoryHandler } from '../src/index.js';
 
 const CONTEXT_GRAPH_ID = 'workspace-handler-agent-gate';
 const DATA_GRAPH = contextGraphDataUri(CONTEXT_GRAPH_ID);
 const META_GRAPH = contextGraphMetaUri(CONTEXT_GRAPH_ID);
-const ONTOLOGY_GRAPH = contextGraphDataUri(SYSTEM_PARANETS.ONTOLOGY);
+const ONTOLOGY_GRAPH = contextGraphDataUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
 const WORKSPACE_GRAPH = contextGraphSharedMemoryUri(CONTEXT_GRAPH_ID);
 const PEER_ID = '12D3KooWAgentGatePeer';
 const ENTITY = 'urn:test:workspace-handler-agent-gate';
@@ -30,7 +30,7 @@ let handler: SharedMemoryHandler;
 
 function workspaceMessage(name: string, operationId: string): Uint8Array {
   return encodeWorkspacePublishRequest({
-    paranetId: CONTEXT_GRAPH_ID,
+    contextGraphId: CONTEXT_GRAPH_ID,
     nquads: new TextEncoder().encode(
       `<${ENTITY}> <http://schema.org/name> "${name}" <${DATA_GRAPH}> .`,
     ),

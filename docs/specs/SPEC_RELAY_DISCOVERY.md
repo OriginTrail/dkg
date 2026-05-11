@@ -1,7 +1,7 @@
 # Relay Auto-Discovery
 
 **Status**: Draft
-**Depends on**: [SPEC_PARANET_LIFECYCLE.md](./SPEC_PARANET_LIFECYCLE.md), [SPEC_TRUST_LAYER.md](../SPEC_TRUST_LAYER.md)
+**Depends on**: [SPEC_CONTEXT_GRAPH_LIFECYCLE.md](./SPEC_CONTEXT_GRAPH_LIFECYCLE.md), [SPEC_TRUST_LAYER.md](../SPEC_TRUST_LAYER.md)
 
 ---
 
@@ -80,7 +80,7 @@ after initial bootstrap.
 **Option A (short term)** + **Option B (long term)**:
 
 1. Immediately: add `relays[]` array to network config with fallbacks
-2. Later: implement on-chain relay registry as part of paranet staking
+2. Later: implement on-chain relay registry as part of contextGraph staking
    (relay operators are node operators who stake to the relay role)
 3. DHT discovery as optional enhancement for resilience
 

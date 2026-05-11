@@ -111,7 +111,7 @@ async function main() {
   console.log(`[${ts()}] Publishing profile...`);
   await agent.publishProfile();
 
-  agent.subscribeToParanet('agent-skills');
+  agent.subscribeToContextGraph('agent-skills');
 
   let agentAPeerId = null;
 

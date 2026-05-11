@@ -10,13 +10,14 @@
  *
  * Stores them as literals on a single `prov:Entity` node in the
  * `meta/project-ontology` assertion, then auto-promotes to SWM so all
- * subscribed nodes (and their agents) can fetch via `dkg_get_ontology`.
+ * subscribed nodes (and their agents) can read it back via `dkg_query`
+ * against the `meta` sub-graph.
  *
  * Why store as literals (and not as parsed RDF triples expanded into
- * the graph)? v1 simplicity: agents fetch via dkg_get_ontology, get
- * back two strings, parse them in the agent's own context. The
- * ontology is metadata about the graph, not query-target data. v2 may
- * additionally parse the .ttl into the graph for SPARQLability.
+ * the graph)? v1 simplicity: agents fetch the two literals, parse them
+ * in the agent's own context. The ontology is metadata about the graph,
+ * not query-target data. v2 may additionally parse the .ttl into the
+ * graph for SPARQLability.
  *
  * Usage:
  *   node scripts/import-ontology.mjs                       # writes to dkg-code-project from coding-project starter

@@ -33,14 +33,6 @@ export interface ValidationResult {
   eventCount?: number;
 }
 
-export interface CaptureResult {
-  ual: string;
-  kcId: string;
-  receivedAt: string;
-  eventCount: number;
-  status: string;
-}
-
 export interface CaptureAcceptedResult {
   captureID: string;
   receivedAt: string;
@@ -53,20 +45,20 @@ export interface CaptureOptions {
   allowedPeers?: string[];
 }
 
-/** Dependency-inversion boundary: the EPCIS package needs something that can publish JSON-LD. */
-export interface Publisher {
-  publish(
-    contextGraphId: string,
-    content: unknown,
-    opts?: CaptureOptions,
-  ): Promise<{ ual: string; kcId: string; status: string }>;
+/**
+ * Options the EPCIS handler hands to the async publisher. Wire-level
+ * `publishOptions` (CaptureOptions) plus a per-payload `subGraphName`
+ * lifted from the top of the capture body.
+ */
+export interface PublisherCaptureOpts extends CaptureOptions {
+  subGraphName?: string;
 }
 
 export interface AsyncPublisher {
   publishAsync(
     contextGraphId: string,
     content: unknown,
-    opts?: CaptureOptions,
+    opts?: PublisherCaptureOpts,
   ): Promise<{ captureID: string }>;
 }
 
@@ -88,6 +80,8 @@ export interface EpcisQueryParams {
   action?: string;
   disposition?: string;
   readPoint?: string;
+  finalized?: boolean;
+  subGraphName?: string;
   perPage?: number;
   limit?: number;
   offset?: number;

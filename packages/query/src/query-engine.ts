@@ -9,8 +9,6 @@ export interface QueryResult {
 
 export interface QueryOptions {
   contextGraphId?: string;
-  /** @deprecated Use contextGraphId */
-  paranetId?: string;
   timeout?: number;
   /** When set to '_shared_memory', query runs over the context graph's shared memory graph only. */
   graphSuffix?: '_shared_memory';

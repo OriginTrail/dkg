@@ -56,7 +56,7 @@ function toHexNoPrefix(bytes: Uint8Array): string {
 }
 
 const ONTOLOGY_GRAPH = 'did:dkg:context-graph:ontology';
-const PARANET_ON_CHAIN_ID = 'https://dkg.network/ontology#ParanetOnChainId';
+const CONTEXT_GRAPH_ON_CHAIN_ID = 'https://dkg.network/ontology#ContextGraphOnChainId';
 
 async function seedOntology(
   store: OxigraphStore,
@@ -66,7 +66,7 @@ async function seedOntology(
   await store.insert([
     {
       subject: `did:dkg:context-graph:${cgName}`,
-      predicate: PARANET_ON_CHAIN_ID,
+      predicate: CONTEXT_GRAPH_ON_CHAIN_ID,
       object: `"${cgId.toString()}"`,
       graph: ONTOLOGY_GRAPH,
     },

@@ -27,11 +27,11 @@ Full deployment guide: [docs/setup/DEPLOY_BASE_SEPOLIA.md](../setup/DEPLOY_BASE_
 
 These rules apply to every milestone:
 
-1. **Never rename or modify V8 storage contracts.** `StakingStorage`, `KnowledgeCollectionStorage`, `DelegatorsInfo`, `ShardingTableStorage`, `ParanetsRegistry` keep their names, layouts, and on-chain addresses. `KnowledgeCollectionStorage` becomes **legacy** (read-only) — V9 writes go to the new `KnowledgeAssetsStorage`.
+1. **Never rename or modify V8 storage contracts.** `StakingStorage`, `KnowledgeCollectionStorage`, `DelegatorsInfo`, `ShardingTableStorage`, `ContextGraphsRegistry` keep their names, layouts, and on-chain addresses. `KnowledgeCollectionStorage` becomes **legacy** (read-only) — V9 writes go to the new `KnowledgeAssetsStorage`.
 2. **Never reorder struct fields.** New fields are appended at the end of structs only.
 3. **Prefer new mappings over struct changes.** `DelegatorsInfo` uses flat mappings — add new mappings for conviction lock data instead of modifying `DelegatorData`.
 4. **Logic contracts can be renamed and replaced.** They're registered in the Hub and upgraded by deploying a new version. `KnowledgeAssets.sol` replaces `KnowledgeCollection.sol` in the Hub.
-5. **New storage contracts are fine.** `KnowledgeAssetsStorage`, `ParanetStakingStorage`, `PublishingConvictionAccount` are entirely new — no migration needed.
+5. **New storage contracts are fine.** `KnowledgeAssetsStorage`, `ContextGraphStakingStorage`, `PublishingConvictionAccount` are entirely new — no migration needed.
 6. **1-epoch (≈30-day) stakers see no change.** The conviction multiplier evaluates to exactly 1.0x for 1-epoch locks, preserving V8 reward rates. Epochs are 30 days (same as V8 mainnet).
 
 ### Storage Contract → Logic Contract Mapping
@@ -43,14 +43,14 @@ KnowledgeCollectionStorage.sol          ←    (legacy reads only)
 V8 storage (UNCHANGED, on-chain state):
 StakingStorage.sol                      ←    Staking.sol (+ stakeWithLock)
 DelegatorsInfo.sol (+ new mappings)     ←    Staking.sol
-ShardingTableStorage.sol                ←    ShardingTable.sol (+ per-paranet views)
-ParanetsRegistry.sol (+ appended fields)←    Paranet.sol (+ node allocation)
-AskStorage.sol                          ←    Ask.sol (+ per-paranet pricing)
-RandomSamplingStorage.sol               ←    RandomSampling.sol (+ per-paranet scoring)
+ShardingTableStorage.sol                ←    ShardingTable.sol (+ per-contextGraph views)
+ContextGraphsRegistry.sol (+ appended fields)←    ContextGraph.sol (+ node allocation)
+AskStorage.sol                          ←    Ask.sol (+ per-contextGraph pricing)
+RandomSamplingStorage.sol               ←    RandomSampling.sol (+ per-contextGraph scoring)
 
 NEW storage (no migration):
 KnowledgeAssetsStorage.sol              ←    KnowledgeAssets.sol (clean V9 storage)
-ParanetStakingStorage.sol               ←    Staking.sol / Paranet.sol
+ContextGraphStakingStorage.sol               ←    Staking.sol / ContextGraph.sol
 PublishingConvictionAccount.sol              (self-contained)
 FairSwapJudge.sol                            (self-contained)
 ProtocolTreasury.sol                         (self-contained, governed by Hub owner)
@@ -147,7 +147,7 @@ V9 (M2b):  did:dkg:{chainId}/{publisherAddress}/{localKAId}
 ### What Doesn't Change
 - V8 contracts untouched
 - Core node identity system unchanged (identities still used for signature verification)
-- Staking, paranets, FairSwap — all unchanged
+- Staking, contextGraphs, FairSwap — all unchanged
 
 ---
 
@@ -234,70 +234,70 @@ V9 (M2b):  did:dkg:{chainId}/{publisherAddress}/{localKAId}
 
 ---
 
-## Milestone 5: Paranet Sharding (Option A — Allocate from Existing Stake)
+## Milestone 5: ContextGraph Sharding (Option A — Allocate from Existing Stake)
 
-**Goal**: Nodes allocate portions of their stake to specific paranets. Rewards, pricing, scoring, and challenges are all per-paranet.
+**Goal**: Nodes allocate portions of their stake to specific contextGraphs. Rewards, pricing, scoring, and challenges are all per-contextGraph.
 
 ### Design: Option A
 
-- Each node allocates portions of total stake to paranets
-- Minimum total stake: 50K TRAC per node (no minimum per paranet)
+- Each node allocates portions of total stake to contextGraphs
+- Minimum total stake: 50K TRAC per node (no minimum per contextGraph)
 - Reallocation cooldown: 1 epoch (30 days)
-- System paranets (`agents`, `ontology`): same mechanics as all other paranets (no exemptions). `dkg init` auto-subscribes as a client convenience.
+- System contextGraphs (`agents`, `ontology`): same mechanics as all other contextGraphs (no exemptions). `dkg init` auto-subscribes as a client convenience.
 - Unallocated stake: earns from global pool (10% of all fees) only
-- **No paranet operator fee** — operators participate by running nodes and allocating stake
+- **No contextGraph operator fee** — operators participate by running nodes and allocating stake
 
 ### Tasks
 
-1. **Create ParanetStakingStorage.sol** (entirely new storage contract)
+1. **Create ContextGraphStakingStorage.sol** (entirely new storage contract)
    ```solidity
-   mapping(uint72 => mapping(bytes32 => uint96)) public paranetStakeAllocations;
+   mapping(uint72 => mapping(bytes32 => uint96)) public contextGraphStakeAllocations;
    mapping(uint72 => mapping(bytes32 => uint40)) public lastReallocationEpoch;
    mapping(uint72 => uint96) public totalAllocatedStake;
-   mapping(bytes32 => uint96) public totalParanetStake;
-   mapping(bytes32 => uint72[]) public paranetNodeList;
+   mapping(bytes32 => uint96) public totalContextGraphStake;
+   mapping(bytes32 => uint72[]) public contextGraphNodeList;
    ```
    - No changes to existing `StakingStorage` — allocations are tracked separately
-2. **Add paranet staking to Staking.sol**
-   - `stakeToParanet(uint72 identityId, bytes32 paranetId, uint96 amount)`
-   - `unstakeFromParanet(uint72 identityId, bytes32 paranetId, uint96 amount)` (with 1-epoch cooldown)
+2. **Add contextGraph staking to Staking.sol**
+   - `stakeToContextGraph(uint72 identityId, bytes32 contextGraphId, uint96 amount)`
+   - `unstakeFromContextGraph(uint72 identityId, bytes32 contextGraphId, uint96 amount)` (with 1-epoch cooldown)
    - Validation: `totalAllocatedStake[id] <= nodes[id].stake`
-   - Validation: `totalStake[id] >= 50K` (minimum per node, no per-paranet minimum)
-3. **Per-paranet sharding table**
-   - Extend `ShardingTable.sol` to query per-paranet node lists from `ParanetStakingStorage`
-   - Node appears in paranet's table if it has any allocation to that paranet
+   - Validation: `totalStake[id] >= 50K` (minimum per node, no per-contextGraph minimum)
+3. **Per-contextGraph sharding table**
+   - Extend `ShardingTable.sol` to query per-contextGraph node lists from `ContextGraphStakingStorage`
+   - Node appears in contextGraph's table if it has any allocation to that contextGraph
    - Keep global sharding table intact for backward compat
-4. **Per-paranet ask pricing in Ask.sol**
-   - `recalculateParanetActiveSet(bytes32 paranetId)`: computes ask from paranet's allocated nodes
+4. **Per-contextGraph ask pricing in Ask.sol**
+   - `recalculateContextGraphActiveSet(bytes32 contextGraphId)`: computes ask from contextGraph's allocated nodes
    - Existing global `recalculateActiveSet()` unchanged (used for global pool pricing)
-5. **Per-paranet scoring in RandomSampling.sol**
-   - Challenges run every proof period (30 minutes), scoped to paranet
-   - Node score tracked per-paranet: `nodeParanetScore[identityId][paranetId]`
-   - Conviction multiplier applied: `effectiveScore = nodeParanetScore × convictionMultiplier`
+5. **Per-contextGraph scoring in RandomSampling.sol**
+   - Challenges run every proof period (30 minutes), scoped to contextGraph
+   - Node score tracked per-contextGraph: `nodeContextGraphScore[identityId][contextGraphId]`
+   - Conviction multiplier applied: `effectiveScore = nodeContextGraphScore × convictionMultiplier`
 6. **Reward distribution**
-   - Publishing fee split: 85% paranet pool, 10% global, 5% protocol treasury (no operator fee)
-   - Per-paranet epoch pool in `EpochStorage` (new mapping, appended)
+   - Publishing fee split: 85% contextGraph pool, 10% global, 5% protocol treasury (no operator fee)
+   - Per-contextGraph epoch pool in `EpochStorage` (new mapping, appended)
 7. **ProtocolTreasury.sol** (new contract)
    - Accumulates 5% of publishing fees and 5% of FairSwap sales
    - Governed by Hub owner (withdrawal, parameter adjustment)
-8. **Update Paranet.sol**
-   - Add `getParanetNodes`, `getParanetTotalStake` views
+8. **Update ContextGraph.sol**
+   - Add `getContextGraphNodes`, `getContextGraphTotalStake` views
 9. **Update EVM adapter and ChainAdapter**
-   - `stakeToParanet`, `unstakeFromParanet`, `getParanetStake`, `getParanetNodes`
+   - `stakeToContextGraph`, `unstakeFromContextGraph`, `getContextGraphStake`, `getContextGraphNodes`
 
 ### What Changes
 
-- New contracts: `ParanetStakingStorage.sol`, `ProtocolTreasury.sol`
-- Logic contracts updated: `Staking.sol`, `ShardingTable.sol`, `Ask.sol`, `RandomSampling.sol`, `Paranet.sol`
-- `ParanetsRegistry.sol`: fields appended to `Paranet` struct
-- `EpochStorage`: new mapping for per-paranet pools
+- New contracts: `ContextGraphStakingStorage.sol`, `ProtocolTreasury.sol`
+- Logic contracts updated: `Staking.sol`, `ShardingTable.sol`, `Ask.sol`, `RandomSampling.sol`, `ContextGraph.sol`
+- `ContextGraphsRegistry.sol`: fields appended to `ContextGraph` struct
+- `EpochStorage`: new mapping for per-contextGraph pools
 
 ### What Doesn't Change
 
 - `StakingStorage.sol` layout untouched (allocations tracked in new contract)
-- `ShardingTableStorage.sol` layout untouched (per-paranet views computed from ParanetStakingStorage)
+- `ShardingTableStorage.sol` layout untouched (per-contextGraph views computed from ContextGraphStakingStorage)
 - Global sharding table, global ask, global rewards all still work for unallocated stake / global pool
-- Existing paranet data in `ParanetsRegistry` preserved
+- Existing contextGraph data in `ContextGraphsRegistry` preserved
 
 ---
 
@@ -342,10 +342,10 @@ V9 (M2b):  did:dkg:{chainId}/{publisherAddress}/{localKAId}
 ### Tasks
 
 1. **Add permanent publishing to KnowledgeAssets.sol**
-   - `batchMintKnowledgeAssetsPermanent(kaIds, merkleRoot, paranetId)`
+   - `batchMintKnowledgeAssetsPermanent(kaIds, merkleRoot, contextGraphId)`
    - Cost = `annualCost × ENDOWMENT_MULTIPLIER` (default 10, governance-adjustable)
    - Tokens pre-allocated across 100 epochs with geometric decay (`0.97^i`)
-2. **Implement per-paranet endowment pool** (new storage or extend EpochStorage)
+2. **Implement per-contextGraph endowment pool** (new storage or extend EpochStorage)
    - Each epoch: release pre-allocated amount as rewards for nodes storing permanent KAs
    - After 100 epochs: storage becomes part of base-layer commitment (marginal cost → 0)
 3. **Update EVM adapter and ChainAdapter**
@@ -398,14 +398,14 @@ V9 deployment adds `KnowledgeAssets` + `KnowledgeAssetsStorage` to the existing 
    - Support permanent publishing
    - FairSwap integration for selling private knowledge
 2. **Update agent** (`packages/agent/src/dkg-agent.ts`)
-   - `stakeToParanet()`, `unstakeFromParanet()`
+   - `stakeToContextGraph()`, `unstakeFromContextGraph()`
    - `createConvictionAccount()`, `fundConvictionAccount()`
-   - Chain-aware paranet creation (registers on-chain)
+   - Chain-aware contextGraph creation (registers on-chain)
    - Event listener for on-chain confirmations
    - `buyPrivateKnowledge()` — initiates FairSwap flow
 3. **Update CLI** (`packages/cli/src/cli.ts`)
    - `pnpm dkg stake <node> <amount> [--lock <epochs>]`
-   - `pnpm dkg stake paranet <paranet> <amount>`
+   - `pnpm dkg stake contextGraph <contextGraph> <amount>`
    - `pnpm dkg conviction create <amount> <lock-epochs>`
    - `pnpm dkg conviction info`
    - `pnpm dkg chain status` (show connected chain, contract addresses, epoch)

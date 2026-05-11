@@ -25,7 +25,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveDkgConfigHome } from './dkg-home.js';
-import { requestFaucetFunding } from './faucet.js';
+import { FAUCET_WALLETS_PER_REQUEST, getFundableWalletAddresses, requestFaucetFunding } from './faucet.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -67,41 +67,11 @@ export function readWallets(): string[] {
     warn('wallets.json is malformed or still being written — skipping');
     return [];
   }
-  // The daemon writes { adminWallet, wallets: [{ address, privateKey }] }.
-  // Include admin first so profile/key-management transactions have gas, then
-  // fall back to the legacy operational-only array shapes.
-  const walletList: any[] = Array.isArray(raw?.wallets) ? raw.wallets
-    : Array.isArray(raw) ? raw
-    : [];
-  const operationalAddresses: string[] = [];
-  const operationalSeen = new Set<string>();
-  for (const w of walletList) {
-    const address = w?.address;
-    if (typeof address !== 'string' || address.length === 0) continue;
-    const key = address.toLowerCase();
-    if (operationalSeen.has(key)) continue;
-    operationalSeen.add(key);
-    operationalAddresses.push(address);
-  }
-  if (operationalAddresses.length === 0) {
+  const addresses = getFundableWalletAddresses(raw);
+  if (addresses.length === 0) {
     warn('wallets.json has no operational wallets — skipping faucet funding');
     return [];
   }
-
-  const addresses: string[] = [];
-  const seen = new Set<string>();
-  const addAddress = (address: unknown) => {
-    if (typeof address !== 'string' || address.length === 0) return;
-    const key = address.toLowerCase();
-    if (seen.has(key)) return;
-    seen.add(key);
-    addresses.push(address);
-  };
-  addAddress(raw?.adminWallet?.address);
-  for (const address of operationalAddresses) {
-    addAddress(address);
-  }
-
   if (addresses.length) {
     log(`Wallets: ${addresses.join(', ')}`);
   }
@@ -113,13 +83,13 @@ export function readWallets(): string[] {
  * only on faucet failure; the caller is expected to continue (funding is
  * best-effort / non-fatal).
  *
- * Addresses are split into batches of 3 to match the faucet's per-request
+ * Addresses are split into batches of 4 to match the faucet's per-request
  * cap. Including more wallets in one body would be rejected by the faucet.
  */
 export function logManualFundingInstructions(addresses: string[], faucetUrl: string, mode: string): void {
   const batches: string[][] = [];
-  for (let i = 0; i < addresses.length; i += 3) {
-    batches.push(addresses.slice(i, i + 3));
+  for (let i = 0; i < addresses.length; i += FAUCET_WALLETS_PER_REQUEST) {
+    batches.push(addresses.slice(i, i + FAUCET_WALLETS_PER_REQUEST));
   }
   console.log('\nTo fund wallets manually, run:');
   batches.forEach((batch, index) => {
@@ -132,7 +102,7 @@ export function logManualFundingInstructions(addresses: string[], faucetUrl: str
     console.log(`    --data-raw '{"mode":"${mode}","wallets":${JSON.stringify(batch)}}'`);
   });
   if (batches.length > 1) {
-    console.log(`\nNote: faucet supports up to 3 wallets per call; run each batch above.`);
+    console.log(`\nNote: faucet supports up to ${FAUCET_WALLETS_PER_REQUEST} wallets per call; run each batch above.`);
   }
   console.log('');
 }
@@ -180,7 +150,10 @@ export interface FundWalletsNetworkConfig {
  */
 export interface FundWalletsBestEffortOptions {
   network: FundWalletsNetworkConfig;
-  callerId: string;
+  /** Stable seed for deterministic faucet idempotency keys. */
+  idempotencySeed?: string;
+  /** @deprecated Use `idempotencySeed`; the faucet request body omits `callerId`. */
+  callerId?: string;
   didStartDaemon: boolean;
 }
 
@@ -206,7 +179,8 @@ export interface FundWalletsBestEffortOptions {
  *     by design — keeps it simple; cancellation lives in the caller).
  */
 export async function fundWalletsBestEffort(opts: FundWalletsBestEffortOptions): Promise<void> {
-  const { network, callerId, didStartDaemon } = opts;
+  const { network, didStartDaemon } = opts;
+  const idempotencySeed = opts.idempotencySeed ?? opts.callerId ?? 'setup';
   const faucetUrl = network?.faucet?.url;
   const faucetMode = network?.faucet?.mode;
   if (!faucetUrl || !faucetMode) {
@@ -226,7 +200,7 @@ export async function fundWalletsBestEffort(opts: FundWalletsBestEffortOptions):
 
   log('Funding wallets via testnet faucet...');
   try {
-    const result = await requestFaucetFunding(faucetUrl, faucetMode, walletAddresses, callerId);
+    const result = await requestFaucetFunding(faucetUrl, faucetMode, walletAddresses, idempotencySeed);
     if (result.success) {
       log(`Funded: ${result.funded.join(', ')}`);
       if (result.error) {

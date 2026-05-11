@@ -423,6 +423,7 @@ describe('V10 E2E Conviction System', function () {
         [],                // participant agents
         2,                 // requiredSignatures
         0,                 // metadataBatchId
+        0,                 // accessPolicy = public/discoverable
         1,                 // publishPolicy = open (any non-zero publisher auth'd)
         ethers.ZeroAddress,
         0,                 // publishAuthorityAccountId
@@ -453,10 +454,10 @@ describe('V10 E2E Conviction System', function () {
       const p = await buildPublishParams({
         chainId: DEFAULT_CHAIN_ID,
         kav10Address,
-        publishingNode,
         receivingNodes,
         publisherIdentityId,
         receiverIdentityIds,
+        author: creator,
         contextGraphId: cgId,
         merkleRoot,
         knowledgeAssetsAmount: 10,
@@ -529,6 +530,18 @@ describe('V10 E2E Conviction System', function () {
       expect(retrievedKc.merkleRoots.length).to.equal(1);
       expect(retrievedKc.merkleRoots[0].merkleRoot).to.equal(merkleRoot);
       expect(retrievedKc.merkleRoots[0].publisher).to.equal(creator.address);
+      // Verified author identity persisted on chain. In this conviction
+      // E2E the author signer == creator (the test builds `p` via
+      // `buildPublishParams` with the creator as both author and msg.sender).
+      // Author lives in the parallel `merkleRootAuthors` map (keeps the
+      // MerkleRoot struct at 3 storage slots so prior KCs decode correctly
+      // post-upgrade — see KnowledgeCollectionLib comments).
+      expect(
+        await KnowledgeCollectionStorage.getMerkleRootAuthorByIndex(kcId, 0),
+      ).to.equal(creator.address);
+      expect(
+        await KnowledgeCollectionStorage.getLatestMerkleRootAuthor(kcId),
+      ).to.equal(creator.address);
     });
   });
 

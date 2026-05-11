@@ -18,7 +18,7 @@
 #      identities are registered against random operational wallets only,
 #      so Hardhat signers no longer resolve to any identity.
 #   3. Creates a fresh open-policy V10 context graph on-chain via
-#      ContextGraphs.createContextGraph(hostingNodes, [], 1, 0, 1, ZeroAddress, 0).
+#      ContextGraphs.createContextGraph(hostingNodes, [], 1, 0, 0, 1, ZeroAddress, 0).
 #      Uses staticCall to preview the returned numeric cgId, then sends the
 #      real tx. Falls back to parsing ContextGraphStorage.ContextGraphCreated
 #      from the receipt if preview fails.
@@ -184,9 +184,10 @@ const path = require("path");
   // Open policy, requiredSignatures=1, no metadata, no curator, no authority.
   const args = [
     ids,                    // uint72[] hostingNodes
-    [],                     // uint72[] participantAgents (open — no curator list)
+    [],                     // address[] participantAgents (open — no curator list)
     1,                      // uint8 requiredSignatures  (contract needs > 0)
     0,                      // uint256 metadataBatchId  (none)
+    0,                      // uint8 accessPolicy       (0 = public/discoverable)
     1,                      // uint8 publishPolicy      (1 = open)
     ethers.ZeroAddress,     // address publishAuthority  (open rejects non-zero)
     0,                      // uint256 publishAuthorityAccountId (open rejects non-zero)

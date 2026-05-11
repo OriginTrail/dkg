@@ -20,7 +20,7 @@
  *   - `name`: explicit override > existing > supplied agentName
  *   - `apiPort`: explicit override > existing > supplied apiPort
  *   - `nodeRole`: existing > network.defaultNodeRole
- *   - `contextGraphs`: existing > existing.paranets > network defaults
+ *   - `contextGraphs`: existing > network defaults
  *   - `auth`: existing > { enabled: true }
  *   - `relay`: preserved from existing if present (never pinned new)
  *   - `autoUpdate`: only mirrors `enabled` from network when existing
@@ -54,8 +54,6 @@ export interface DkgNodeNetworkConfig {
   networkName: string;
   defaultNodeRole: string;
   defaultContextGraphs?: string[];
-  /** @deprecated Legacy key in older network config files. */
-  defaultParanets?: string[];
   autoUpdate?: {
     enabled: boolean;
     [key: string]: unknown;
@@ -84,7 +82,7 @@ export interface EnsureDkgNodeConfigOptions {
   /**
    * The existing `~/.dkg/config.json` parsed into a plain object,
    * **post-adapter-specific migration + prune**. The helper reads
-   * `existing.{name,apiPort,nodeRole,contextGraphs,paranets,auth,relay,autoUpdate}`
+   * `existing.{name,apiPort,nodeRole,contextGraphs,auth,relay,autoUpdate}`
    * to decide what to keep. Pass `{}` for a fresh setup.
    *
    * Adapter wrappers that own legacy migrations (e.g. OpenClaw's
@@ -128,10 +126,7 @@ export function ensureDkgNodeConfig(opts: EnsureDkgNodeConfigOptions): void {
     name: overrides?.nameExplicit ? agentName : (existing.name ?? agentName),
     apiPort: overrides?.portExplicit ? apiPort : (existing.apiPort ?? apiPort),
     nodeRole: existing.nodeRole ?? (network.defaultNodeRole as 'edge' | 'core'),
-    contextGraphs: existing.contextGraphs
-      ?? existing.paranets
-      ?? network.defaultContextGraphs
-      ?? network.defaultParanets,
+    contextGraphs: existing.contextGraphs ?? network.defaultContextGraphs,
     auth: existing.auth ?? { enabled: true },
   };
 

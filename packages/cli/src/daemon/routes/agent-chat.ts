@@ -123,7 +123,6 @@ import { type ExtractionStatusRecord, getExtractionStatusRecord, setExtractionSt
 import { FileStore } from '../../file-store.js';
 import { VectorStore, OpenAIEmbeddingProvider, type EmbeddingProvider } from '../../vector-store.js';
 import { parseBoundary, parseMultipart, MultipartParseError } from '../../http/multipart.js';
-import { handleCapture, EpcisValidationError, handleEventsQuery, EpcisQueryError, type Publisher as EpcisPublisher } from '@origintrail-official/dkg-epcis';
 // Phase 8 — project-manifest publish + install (UI-driven onboarding flow).
 // Daemon constructs a self-pointing DkgClient (localhost:listenPort) and
 // reuses the same publish/fetch/plan/write helpers the CLI uses, so wire
@@ -599,30 +598,70 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
     return jsonResponse(res, 200, { messages: msgs });
   }
 
-  // POST /api/connect  { multiaddr: "..." }
+  // POST /api/connect — accepts either:
+  //   { multiaddr: "/ip4/.../p2p/<id>" }    legacy direct dial
+  //   { peerId:   "12D3KooW..." }           V10 DHT lookup + dial
+  // The peerId form is preferred for invites: the daemon resolves the
+  // peer's current multiaddrs via libp2p Kademlia (`peerRouting.findPeer`)
+  // and dials them, so the invite survives the curator's relay rotations
+  // / public-IP changes.
   if (req.method === "POST" && path === "/api/connect") {
     const body = await readBody(req, SMALL_BODY_BYTES);
-    const { multiaddr: addr } = JSON.parse(body);
-    if (!addr) return jsonResponse(res, 400, { error: 'Missing "multiaddr"' });
+    const parsed = JSON.parse(body);
+    const { multiaddr: addr, peerId } = parsed;
+    if (!addr && !peerId) return jsonResponse(res, 400, { error: 'Missing "multiaddr" or "peerId"' });
     try {
-      await agent.connectTo(addr);
+      if (peerId) {
+        await agent.connectToPeerId(peerId);
+      } else {
+        await agent.connectTo(addr);
+      }
     } catch (err: any) {
-      return jsonResponse(res, 400, {
+      const code = err?.code as string | undefined;
+      // Map agent-side error codes to HTTP semantics so the UI can
+      // distinguish "wrong peer id" (don't retry) from "network is sick"
+      // (retry in a moment). Codex review on PR #431 flagged that the
+      // earlier blanket-404 mapping made every transient DHT issue look
+      // like an input error.
+      let status: number;
+      switch (code) {
+        case 'INVALID_PEER_ID':
+        case 'SELF_DIAL':
+          status = 400; // client error, retrying with same input won't help
+          break;
+        case 'PEER_NOT_FOUND':
+          status = 404; // genuine negative lookup
+          break;
+        case 'DHT_TIMEOUT':
+          status = 504; // retriable: walk didn't complete in time
+          break;
+        case 'DHT_UNAVAILABLE':
+        case 'PEER_ROUTING_UNAVAILABLE':
+          status = 503; // retriable: routing layer can't help right now
+          break;
+        case 'DIAL_FAILED':
+          status = 502; // retriable: addrs known but transport failed
+          break;
+        default:
+          status = 400;
+      }
+      return jsonResponse(res, status, {
         error: err.message ?? "Failed to connect",
+        ...(code ? { code } : {}),
       });
     }
     return jsonResponse(res, 200, { connected: true });
   }
 
-  // POST /api/update  { kcId: "...", contextGraphId|paranetId: "...", quads: [...], privateQuads?: [...] }
+  // POST /api/update  { kcId: "...", contextGraphId: "...", quads: [...], privateQuads?: [...] }
   if (req.method === "POST" && path === "/api/update") {
     const body = await readBody(req);
     const parsed = JSON.parse(body);
     const { kcId, quads, privateQuads } = parsed;
-    const paranetId = parsed.contextGraphId ?? parsed.paranetId;
-    if (!kcId || !paranetId || !quads?.length) {
+    const contextGraphId = parsed.contextGraphId;
+    if (!kcId || !contextGraphId || !quads?.length) {
       return jsonResponse(res, 400, {
-        error: 'Missing "kcId", "contextGraphId" (or "paranetId"), or "quads"',
+        error: 'Missing "kcId", "contextGraphId", or "quads"',
       });
     }
     let kcIdBigInt: bigint;
@@ -635,13 +674,13 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
     }
     const ctx = createOperationContext("update");
     tracker.start(ctx, {
-      contextGraphId: paranetId,
+      contextGraphId: contextGraphId,
       details: { kcId: String(kcId), tripleCount: quads.length, source: "api" },
     });
     try {
       const result = await agent.update(
         kcIdBigInt,
-        paranetId,
+        contextGraphId,
         quads,
         privateQuads,
         {

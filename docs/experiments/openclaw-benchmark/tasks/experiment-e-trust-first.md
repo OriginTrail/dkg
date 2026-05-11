@@ -11,7 +11,7 @@ Evaluate collaboration substrate not by speed/cost first, but by **trust propert
 
 Compare:
 - **E1 (MD Trust Baseline):** shared markdown artifacts
-- **E2 (DKG Trust):** signed, timestamped run-scoped entities in shared paranet
+- **E2 (DKG Trust):** signed, timestamped run-scoped entities in shared contextGraph
 
 ## Core hypothesis
 
@@ -41,7 +41,7 @@ Example:
 
 ### E2 — DKG trust mode
 
-- Agents publish signed decision/evidence entities to paranet.
+- Agents publish signed decision/evidence entities to contextGraph.
 - Required relationships:
   - decision -> author agent
   - decision -> timestamp

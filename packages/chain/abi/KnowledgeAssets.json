@@ -602,10 +602,10 @@
   },
   {
     "inputs": [],
-    "name": "paranetKnowledgeCollectionsRegistry",
+    "name": "contextGraphKnowledgeCollectionsRegistry",
     "outputs": [
       {
-        "internalType": "contract ParanetKnowledgeCollectionsRegistry",
+        "internalType": "contract ContextGraphKnowledgeCollectionsRegistry",
         "name": "",
         "type": "address"
       }
@@ -615,10 +615,10 @@
   },
   {
     "inputs": [],
-    "name": "paranetKnowledgeMinersRegistry",
+    "name": "contextGraphKnowledgeMinersRegistry",
     "outputs": [
       {
-        "internalType": "contract ParanetKnowledgeMinersRegistry",
+        "internalType": "contract ContextGraphKnowledgeMinersRegistry",
         "name": "",
         "type": "address"
       }
@@ -628,10 +628,10 @@
   },
   {
     "inputs": [],
-    "name": "paranetsRegistry",
+    "name": "contextGraphsRegistry",
     "outputs": [
       {
-        "internalType": "contract ParanetsRegistry",
+        "internalType": "contract ContextGraphsRegistry",
         "name": "",
         "type": "address"
       }

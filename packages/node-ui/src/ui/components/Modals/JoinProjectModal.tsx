@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import {
   subscribeToContextGraph, fetchContextGraphs,
   signJoinRequest, submitJoinRequest, fetchCurrentAgent, fetchCatchupStatus,
-  connectToPeerWithTimeout,
+  connectToPeerWithTimeout, connectToPeerIdWithTimeout,
 } from '../../api.js';
 import { useProjectsStore } from '../../stores/projects.js';
 import { useTabsStore } from '../../stores/tabs.js';
@@ -14,25 +14,97 @@ interface JoinProjectModalProps {
   initialContextGraphId?: string;
 }
 
-export function parseInviteCode(raw: string): { cgId: string; multiaddr: string | null } {
-  const normalized = raw.trim().replace(/\\n/g, '\n');
-  const lines = normalized.split('\n').map((line) => line.trim()).filter(Boolean);
-  const multilineMultiaddr = lines.slice(1).join('').replace(/\s+/g, '');
-  const inlineMultiaddrMatch = normalized.match(/(?:^|\s)(\/(?:ip4|ip6|dns|dns4|dns6)\/\S+)/);
-  const inlineMultiaddr = inlineMultiaddrMatch?.[1]?.replace(/\s+/g, '') ?? null;
-  const multiaddr = multilineMultiaddr.startsWith('/') ? multilineMultiaddr : inlineMultiaddr;
-  const firstLine = lines[0] ?? '';
-  const cgId = inlineMultiaddr && firstLine.includes(inlineMultiaddr)
-    ? firstLine.replace(inlineMultiaddr, '').trim()
-    : firstLine;
-  return { cgId, multiaddr };
+export interface ParsedInvite {
+  cgId: string;
+  /**
+   * V10 invite form: a bare libp2p peer id on the second line. The joiner's
+   * daemon resolves it via Kademlia DHT (`peerRouting.findPeer`) so the invite
+   * stays valid across the curator's relay rotations / IP changes.
+   */
+  curatorPeerId: string | null;
+  /**
+   * Legacy invite form: a `/ip4/.../p2p/.../p2p-circuit/p2p/<peerId>` style
+   * multiaddr embedded directly in the invite. Still accepted for one release;
+   * a console.warn deprecation notice fires when the joiner falls back to it.
+   */
+  legacyMultiaddr: string | null;
+  /**
+   * True when the invite carried content beyond the cgId line that neither
+   * parser (peer id / multiaddr) recognized. `validateInvite` uses this to
+   * reject silent-fallback behaviour where a typo'd peer id like
+   * `12D3KooBAD` would otherwise be discarded and the user dropped into the
+   * bare-cgId flow without an immediate input error. Codex review on
+   * PR #431 flagged this as Issue (yellow).
+   */
+  hasUnparsedExtra: boolean;
 }
 
-export function validateInvite(cgId: string, multiaddr: string | null): string | null {
-  if (!cgId) return 'Missing project ID';
-  if (!multiaddr) return null;
-  if (!multiaddr.startsWith('/')) return 'Invalid curator multiaddr';
-  if (!multiaddr.includes('/p2p/')) return 'Curator multiaddr is missing peer ID';
+const PEER_ID_RE = /^(?:Qm[1-9A-HJ-NP-Za-km-z]{44}|12D3Koo[1-9A-HJ-NP-Za-km-z]{45,53})$/;
+
+export function parseInviteCode(raw: string): ParsedInvite {
+  const normalized = raw.trim().replace(/\\n/g, '\n');
+  const lines = normalized.split('\n').map((line) => line.trim()).filter(Boolean);
+  const firstLine = lines[0] ?? '';
+  const remainder = lines.slice(1).join(' ').trim();
+
+  // Legacy: any `/ip4|ip6|dns…/.../p2p/<id>` token anywhere in the body.
+  // Codex review on PR #431 (round 2) flagged that the old alternation
+  // dropped `dnsaddr`, so a legacy invite of the form
+  // `my-project /dnsaddr/example.com/p2p/...` had its multiaddr ignored
+  // and the whole line collapsed into the cgId. Keep this synchronised
+  // with `isMultiaddrRemotelyDialable` in ShareProjectModal.tsx.
+  const inlineMultiaddrMatch = normalized.match(/(?:^|\s)(\/(?:ip4|ip6|dns|dns4|dns6|dnsaddr)\/\S+)/);
+  const inlineMultiaddr = inlineMultiaddrMatch?.[1]?.replace(/\s+/g, '') ?? null;
+  const multilineMultiaddr = remainder.replace(/\s+/g, '');
+  const legacyMultiaddr = multilineMultiaddr.startsWith('/')
+    ? multilineMultiaddr
+    : inlineMultiaddr;
+
+  // V10: a bare peer id on the second line (or anywhere after the cgId line).
+  // We accept libp2p ed25519 (`12D3Koo…`) and legacy multihash (`Qm…`) shapes.
+  let curatorPeerId: string | null = null;
+  if (!legacyMultiaddr) {
+    for (const candidate of [remainder, ...lines.slice(1)]) {
+      const trimmed = candidate.trim();
+      if (PEER_ID_RE.test(trimmed)) {
+        curatorPeerId = trimmed;
+        break;
+      }
+    }
+  }
+
+  // CG id: strip the inline multiaddr (if it appeared glued onto the same
+  // line — a quirk of the legacy single-line invite) AND the V9 `@`
+  // separator that sometimes joined them. Codex review on PR #431 (round
+  // 2) flagged that the old code only stripped the multiaddr token, so
+  // `my-project @ /ip4/...` parsed cgId as `"my-project @"`, which would
+  // then be silently subscribed to as a non-existent CG.
+  let cgId = firstLine;
+  if (inlineMultiaddr && cgId.includes(inlineMultiaddr)) {
+    cgId = cgId.replace(inlineMultiaddr, '');
+  }
+  cgId = cgId.replace(/\s*@\s*$/, '').trim();
+
+  // Detect content past the cgId line that neither parser claimed. The
+  // remainder lines combined yield non-empty text, but no peer-id and no
+  // multiaddr was extracted from it. This is almost certainly a typo'd
+  // invite that we should reject loudly rather than silently truncating.
+  const hadExtraContent = lines.length > 1 || remainder.length > 0;
+  const hasUnparsedExtra =
+    hadExtraContent && curatorPeerId === null && legacyMultiaddr === null;
+
+  return { cgId, curatorPeerId, legacyMultiaddr, hasUnparsedExtra };
+}
+
+export function validateInvite(invite: ParsedInvite): string | null {
+  if (!invite.cgId) return 'Missing project ID';
+  if (invite.hasUnparsedExtra) {
+    return 'Invite contains a second line that is not a valid peer ID (12D3Koo…) or multiaddr (/ip4/…). Check for typos.';
+  }
+  if (invite.legacyMultiaddr) {
+    if (!invite.legacyMultiaddr.startsWith('/')) return 'Invalid curator multiaddr';
+    if (!invite.legacyMultiaddr.includes('/p2p/')) return 'Curator multiaddr is missing peer ID';
+  }
   return null;
 }
 
@@ -54,7 +126,12 @@ async function pollCatchupStatus(
     onProgress?.(i + 1, maxAttempts);
     try {
       const result = await fetchCatchupStatus(cgId);
-      if (result.status === 'done' || result.status === 'denied' || result.status === 'failed') {
+      if (
+        result.status === 'done'
+        || result.status === 'denied'
+        || result.status === 'failed'
+        || result.status === 'unreachable'
+      ) {
         return { status: result.status, error: result.error };
       }
     } catch {
@@ -73,6 +150,24 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
   const [requestSent, setRequestSent] = useState(false);
   const [sendingRequest, setSendingRequest] = useState(false);
   const [accessDenied, setAccessDenied] = useState(false);
+  // Set when the catchup poll exits with `timeout` — neither success
+  // nor a confirmed ACL denial. Surfaces a softer "if this is curated,
+  // here's how to request access" affordance alongside the retry hint,
+  // without misclassifying slow-public CGs as denied. Closes the
+  // tier-4c G3 edge case where a CG's local-side gate
+  // (`canUseSharedMemoryForContextGraph`) refuses peer responses
+  // before the catchup runner can ever observe a `denied` from the
+  // network — the user otherwise loses all access to the join-request
+  // flow on a real curated project.
+  const [timedOut, setTimedOut] = useState(false);
+  // V10 `unreachable` status: catchup ran to completion, but no peer
+  // could deliver the CG content — curator offline, no node holds the
+  // data, or transport failures across the whole peer set. Distinct
+  // from `accessDenied` (responder explicitly refused) so we can render
+  // targeted copy without misleading public-CG users into thinking
+  // they were rejected. The dedicated CTA leads to the same signed
+  // join request flow as the curated-denied case.
+  const [unreachable, setUnreachable] = useState(false);
   // Phase 8: after subscribe + catchup completes we transition into a
   // wire-workspace step so the joiner can populate a local Cursor
   // workspace from the project's manifest. `wiredCgId` flips the modal
@@ -95,6 +190,8 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
       setSuccess(false);
       setRequestSent(false);
       setAccessDenied(false);
+      setTimedOut(false);
+      setUnreachable(false);
       setProgress('');
     }
   }, [open, initialContextGraphId]);
@@ -102,24 +199,43 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
   if (!open) return null;
 
   const handleJoin = async () => {
-    const { cgId, multiaddr } = parseInviteCode(inviteCode);
-    const inviteError = validateInvite(cgId, multiaddr);
+    const invite = parseInviteCode(inviteCode);
+    const inviteError = validateInvite(invite);
     if (inviteError) {
       setError(inviteError);
       return;
     }
+    const { cgId, curatorPeerId, legacyMultiaddr } = invite;
 
     setJoining(true);
     setError(null);
     setSuccess(false);
     setRequestSent(false);
     setAccessDenied(false);
+    setTimedOut(false);
+    setUnreachable(false);
 
     try {
-      if (multiaddr) {
+      if (curatorPeerId) {
+        setProgress('Looking up curator on DHT…');
+        try {
+          await connectToPeerIdWithTimeout(curatorPeerId);
+          await new Promise(r => setTimeout(r, 1000));
+        } catch {
+          // Non-fatal — subscribe/catch-up may still work via existing peers/relays.
+        }
+      } else if (legacyMultiaddr) {
+        // Legacy multiaddr-in-invite: keep working for one release while
+        // collaborators rotate to V10 peer-id invites. The DHT path is
+        // strictly better — multiaddr invites silently break whenever the
+        // chosen relay rotates. Surface a console warning so embedders /
+        // bot integrators see the deprecation.
+        console.warn(
+          '[DKG] This invite uses a legacy multiaddr (deprecated). Ask the curator to regenerate using the current Share Project modal — V10 invites carry a peer id and resolve via DHT, so they survive relay rotations.',
+        );
         setProgress('Connecting to curator node…');
         try {
-          await connectToPeerWithTimeout(multiaddr);
+          await connectToPeerWithTimeout(legacyMultiaddr);
           await new Promise(r => setTimeout(r, 1000));
         } catch {
           // Non-fatal — subscribe/catch-up may still work via existing peers/relays.
@@ -141,6 +257,18 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
 
       if (catchup.status === 'denied') {
         setAccessDenied(true);
+        setProgress('');
+        return;
+      }
+
+      if (catchup.status === 'unreachable') {
+        // Daemon reached a clean terminal state but no peer could
+        // deliver this CG's content. Show targeted copy + the same
+        // signed-join-request CTA so the user can ping a curator
+        // who is currently offline. Distinct from `accessDenied`
+        // (responder refused) and `timedOut` (UI poll ceiling hit
+        // before the daemon decided).
+        setUnreachable(true);
         setProgress('');
         return;
       }
@@ -170,6 +298,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
         setError(
           'Timed out waiting for peers to respond. The project may be slow to catch up, or no peer currently holds the data. Try again in a moment.',
         );
+        setTimedOut(true);
         setProgress('');
         return;
       }
@@ -207,20 +336,28 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
   };
 
   const handleSendRequest = async () => {
-    const { cgId, multiaddr } = parseInviteCode(inviteCode);
-    const inviteError = validateInvite(cgId, multiaddr);
+    const invite = parseInviteCode(inviteCode);
+    const inviteError = validateInvite(invite);
     if (inviteError) {
       setError(inviteError);
       return;
     }
+    const { cgId, curatorPeerId, legacyMultiaddr } = invite;
 
     setSendingRequest(true);
     setError(null);
 
     try {
-      if (multiaddr) {
+      if (curatorPeerId) {
         try {
-          await connectToPeerWithTimeout(multiaddr);
+          await connectToPeerIdWithTimeout(curatorPeerId);
+          await new Promise(r => setTimeout(r, 500));
+        } catch {
+          // Non-fatal — signed join requests can still be delivered via existing peers.
+        }
+      } else if (legacyMultiaddr) {
+        try {
+          await connectToPeerWithTimeout(legacyMultiaddr);
           await new Promise(r => setTimeout(r, 500));
         } catch {
           // Non-fatal — signed join requests can still be delivered via existing peers.
@@ -331,11 +468,57 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
             </div>
           )}
 
+          {unreachable && !accessDenied && !requestSent && (
+            <div style={{
+              padding: '10px 14px', borderRadius: 8, marginBottom: 16, fontSize: 12,
+              background: 'rgba(245, 158, 11, 0.06)', border: '1px solid rgba(245, 158, 11, 0.2)',
+              color: 'var(--text-secondary, #94a3b8)',
+            }}>
+              <div style={{ fontWeight: 600, marginBottom: 4 }}>Couldn't reach the curator</div>
+              We subscribed locally, but no peer was able to deliver this project's data.
+              The curator may be offline, or no node currently holds the data. You can still
+              send a <strong>signed join request</strong> — they'll see it next time they come online.
+              <div style={{ marginTop: 8 }}>
+                <button
+                  className="v10-modal-btn primary"
+                  onClick={handleSendRequest}
+                  disabled={sendingRequest}
+                  style={{ fontSize: 11 }}
+                >
+                  {sendingRequest ? 'Signing & sending…' : 'Send Join Request'}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {timedOut && !unreachable && !accessDenied && !requestSent && (
+            <div style={{
+              padding: '10px 14px', borderRadius: 8, marginBottom: 16, fontSize: 12,
+              background: 'rgba(148, 163, 184, 0.08)', border: '1px solid rgba(148, 163, 184, 0.25)',
+              color: 'var(--text-secondary, #94a3b8)',
+            }}>
+              <div style={{ fontWeight: 600, marginBottom: 4 }}>If this project is curated…</div>
+              The timeout above may also indicate this is a private project where your agent
+              isn't yet on the allowlist. If retrying doesn't help, you can send a{' '}
+              <strong>signed join request</strong> to the curator instead.
+              <div style={{ marginTop: 8 }}>
+                <button
+                  className="v10-modal-btn"
+                  onClick={handleSendRequest}
+                  disabled={sendingRequest}
+                  style={{ fontSize: 11 }}
+                >
+                  {sendingRequest ? 'Signing & sending…' : 'Send Join Request'}
+                </button>
+              </div>
+            </div>
+          )}
+
           <div className="v10-form-group">
             <label className="v10-form-label">Invite Code</label>
             <textarea
               className="v10-form-textarea"
-              placeholder={"Paste the invite code from the project curator.\n\ne.g.\ncg:my-project-abc123\n/ip4/1.2.3.4/tcp/10001/p2p/12D3KooW..."}
+              placeholder={"Paste the invite code from the project curator.\n\ne.g.\nmy-project-abc123\n12D3KooW..."}
               value={inviteCode}
               onChange={(e) => setInviteCode(e.target.value)}
               autoFocus
@@ -343,15 +526,17 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
               style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}
             />
             <div style={{ fontSize: 10, color: 'var(--text-tertiary)', marginTop: 4 }}>
-              The invite code contains a project ID and optionally the curator's node address.
+              The invite code contains a project ID and the curator's libp2p peer id. Legacy invites
+              with an embedded multiaddr still work but are deprecated — relay rotations break them.
             </div>
           </div>
 
           <div className="v10-modal-tip">
             <div className="v10-modal-tip-title">How it works</div>
-            Your node will connect to the curator's node (if an address is included), subscribe to the project,
-            and start syncing knowledge assets. For curated projects, the curator must approve your join request first.
-            All requests are signed with your agent's wallet key to verify your identity.
+            Your node looks up the curator's current addresses on the libp2p Kademlia DHT, dials them,
+            subscribes to the project, and starts syncing knowledge assets. For curated projects, the
+            curator must approve your join request first. All requests are signed with your agent's
+            wallet key to verify your identity.
           </div>
         </div>
 
