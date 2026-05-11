@@ -3531,6 +3531,36 @@ export class DKGAgent {
         '(Axiom 5: SWM provisional record must reference triples).',
       );
     }
+    // V10 Axiom 1: every shared write targets a CG this node knows
+    // about — either created locally (`createContextGraph`) or
+    // subscribed-to from a peer (`subscribeToContextGraph`). Allowing
+    // share() into an unknown CG would mint a SWM record under
+    // `did:dkg:context-graph:<unknown>/_shared_memory` with no
+    // registry/authority binding — the SHARE is unattributable to any
+    // CG record. Accept if the CG appears in either:
+    //   (a) the in-memory subscriptions map (subscriber path), OR
+    //   (b) the local `paranetMetaGraphUri` graph (creator path).
+    {
+      const knownInMemory = this.subscribedContextGraphs.has(contextGraphId);
+      let knownInStore = false;
+      if (!knownInMemory) {
+        const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
+        const cgUri = `did:dkg:context-graph:${contextGraphId}`;
+        const r = await this.store.query(
+          `SELECT ?id WHERE { GRAPH <${cgMetaGraph}> {
+             <${cgUri}> ?p ?id
+           } } LIMIT 1`,
+        );
+        knownInStore = r.type === 'bindings' && r.bindings.length > 0;
+      }
+      if (!knownInMemory && !knownInStore) {
+        throw new Error(
+          `share() requires a known contextGraphId; "${contextGraphId}" is not subscribed and ` +
+          'has no local CG record. Call createContextGraph() / registerContextGraph() / ' +
+          'subscribeToContextGraph() first (Axiom 1: every shared write targets a registered CG).',
+        );
+      }
+    }
     const ctx = opts?.operationCtx ?? createOperationContext('share');
     const sgLabel = opts?.subGraphName ? ` (sub-graph: ${opts.subGraphName})` : '';
     this.log.info(ctx, `Sharing ${quads.length} quads to SWM for context graph ${contextGraphId}${sgLabel}${opts?.localOnly ? ' (local-only)' : ''}`);
@@ -8803,6 +8833,29 @@ export class DKGAgent {
             `assertion.create requires a non-empty name; got ${JSON.stringify(name)} ` +
             '(Axiom 3: every lifecycle row has a name).',
           );
+        }
+        // V10 Axiom 3 closed lifecycle: a REVOKED row retains the
+        // (cg, agent, name) slot for audit — the revocation marker is
+        // the whole point. Permitting re-create on the same lifecycle
+        // URI would let an attacker silently re-attach data behind a
+        // revocation marker. (DISCARD purges _meta and the data graph,
+        // so re-create after DISCARD is fine — see test 3.aa.)
+        const lifecycleUri = assertionLifecycleUri(contextGraphId, agentAddress, name, opts?.subGraphName);
+        const metaGraph = contextGraphMetaUri(contextGraphId);
+        const DKG_NS = 'http://dkg.io/ontology/';
+        const r = await agent.store.query(
+          `SELECT ?revoked WHERE { GRAPH <${metaGraph}> {
+             <${lifecycleUri}> <${DKG_NS}revoked> ?revoked
+           } } LIMIT 1`,
+        );
+        if (r.type === 'bindings' && r.bindings.length > 0) {
+          const v = String(r.bindings[0]['revoked'] ?? '');
+          if (v.includes('"true"')) {
+            throw new Error(
+              `assertion.create: assertion "${name}" was revoked in context graph "${contextGraphId}" — ` +
+              're-create on a revoked lifecycle row is rejected (Axiom 3: REVOKED retains the slot for audit).',
+            );
+          }
         }
         return agent.publisher.assertionCreate(contextGraphId, name, agentAddress, opts?.subGraphName);
       },
