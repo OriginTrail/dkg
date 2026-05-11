@@ -3464,6 +3464,124 @@ describe('Axiom 1 — Context Graph isolation [gap-pass-17]', () => {
   }, 90_000);
 });
 
+describe('Axiom 2 — Authority domain [gap-pass-18]', () => {
+  it('2.s share() rejects predicates with N-Triples-breaking glyphs (no injection through predicate slot)', async () => {
+    // Spec §2 + V10 hardening: share() / publish() guard subject IRIs
+    // against `>` injection (2.n / 2.o). The predicate slot is the
+    // SAME N-Triples token shape and is just as exploitable — a `>`
+    // in the predicate closes the IRI bracket and lets an attacker
+    // forge `<...> ... <urn:hijack> <urn:o>` triples in the same KC.
+    const cg = freshCg('a2-pred-inj');
+    await agent.createContextGraph({ id: cg, name: 'pi', description: '' });
+    await agent.registerContextGraph(cg);
+    let threw = false;
+    try {
+      await agent.share(
+        cg,
+        [{
+          subject: urn('legit'),
+          predicate: 'http://schema.org/name> <urn:hijack> <urn:o',
+          object: '"x"',
+          graph: '',
+        }],
+        { localOnly: true },
+      );
+    } catch {
+      threw = true;
+    }
+    expect(
+      threw,
+      'agent.share must reject predicates containing N-Triples-breaking glyphs (Axiom 2: no injection at the write boundary)',
+    ).toBe(true);
+  }, 30_000);
+
+  it('2.t publish() rejects predicates with N-Triples-breaking glyphs AND leaves no partial state on rollback', async () => {
+    // Same hazard as 2.s, but via PUBLISH — a forged predicate would
+    // land on chain via the canonical merkle root. Pin both halves of
+    // the contract: (a) the call rejects, and (b) the malicious
+    // `<urn:hijack>` triple is NOT present in the local store after
+    // the failure, so a bug that throws AFTER inserting locally is
+    // also caught.
+    const cg = freshCg('a2-pred-pub-inj');
+    await agent.createContextGraph({ id: cg, name: 'pi', description: '' });
+    await agent.registerContextGraph(cg);
+    let threw = false;
+    try {
+      await agent.publish(cg, [{
+        subject: urn('legit'),
+        predicate: 'http://schema.org/name> <urn:hijack> <urn:o',
+        object: '"x"',
+        graph: '',
+      }]);
+    } catch {
+      threw = true;
+    }
+    expect(
+      threw,
+      'agent.publish must reject predicates containing N-Triples-breaking glyphs (Axiom 2: no injection at the write boundary)',
+    ).toBe(true);
+    // Tamper-evidence: the forged subject/predicate must NOT have
+    // landed in the local data graph despite the rejection.
+    const r = await agent.store.query(
+      `SELECT ?s ?p ?o WHERE { <urn:hijack> ?p ?o } LIMIT 1`,
+    );
+    const rows = ((r as { bindings?: unknown[] }).bindings ?? []);
+    expect(
+      rows.length,
+      'a rejected publish must NOT leave forged triples in the local store (Axiom 2: atomic rejection at the write boundary)',
+    ).toBe(0);
+  }, 30_000);
+});
+
+describe('Axiom 4 — PUBLISH is canonical; ENDORSE/VERIFY raise trust [gap-pass-19]', () => {
+  it('4.kk Endorsement signature is publicly verifiable — recovered signer address matches the endorser DID', async () => {
+    // Spec §4 corollary "trust transitions are independently verifiable":
+    // an ENDORSE that only attests "did:dkg:agent:0x.. endorses UAL"
+    // without a recoverable signature is a free-form social label —
+    // any node could stamp endorsements on behalf of any address.
+    // The contract: the data graph stores `dkg:endorsementDigest` +
+    // `dkg:endorsementSignature` such that a third party can recover
+    // the signing wallet via `ethers.verifyMessage(digest, signature)`
+    // and compare to the endorser DID, with no knowledge of the
+    // endorser's private key.
+    const cg = freshCg('a4-endorse-verify');
+    const sub = urn('verify');
+    await agent.createContextGraph({ id: cg, name: 'ev', description: '' });
+    await agent.registerContextGraph(cg);
+    const pub = await agent.publish(cg, [
+      { subject: sub, predicate: P_NAME, object: '"r"', graph: '' },
+    ]);
+    expect(pub.status).toBe('confirmed');
+    await agent.endorse({ contextGraphId: cg, knowledgeAssetUal: pub.ual });
+
+    const data = `did:dkg:context-graph:${cg}`;
+    const r = await agent.store.query(
+      `SELECT ?endorser ?digest ?signature WHERE { GRAPH <${data}> {
+         ?endorser <https://dkg.network/ontology#endorses> <${pub.ual}> .
+         ?endorser <https://dkg.network/ontology#endorsementDigest> ?digest .
+         ?endorser <https://dkg.network/ontology#endorsementSignature> ?signature
+       } } LIMIT 1`,
+    );
+    const rows = ((r as { bindings?: Record<string, string>[] }).bindings ?? []);
+    expect(
+      rows.length,
+      'endorsement quads must include digest + signature for independent verifiability (Axiom 4 corollary)',
+    ).toBeGreaterThan(0);
+
+    const endorserUri = rows[0]['endorser'] ?? '';
+    const digestRaw = rows[0]['digest'] ?? '';
+    const sigRaw = rows[0]['signature'] ?? '';
+    const digest = digestRaw.replace(/^"|"$/g, '').replace(/\\\\/g, '\\').replace(/\\"/g, '"');
+    const sig = sigRaw.replace(/^"|"$/g, '');
+    const recovered = ethers.verifyMessage(digest, sig);
+    const expectedAddr = endorserUri.replace(/^did:dkg:agent:/, '');
+    expect(
+      recovered.toLowerCase(),
+      'recovered signer address must match the DID-encoded endorser address (Axiom 4: anti-forgery via signature recovery)',
+    ).toBe(expectedAddr.toLowerCase());
+  }, 90_000);
+});
+
 // ────────────────────────────────────────────────────────────────────────
 // Report
 // ────────────────────────────────────────────────────────────────────────
