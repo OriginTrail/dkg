@@ -3374,10 +3374,10 @@ program
         console.log('  (missing from legacy wallets.json; add the profile admin key to enable key management)');
       }
 
-      console.log(`\nOperational wallets (${opWallets.wallets.length}):\n`);
+      console.log(`\nOperational wallets (${opWallets.wallets.length}) [publish pool]:\n`);
       for (let i = 0; i < opWallets.wallets.length; i++) {
         const addr = opWallets.wallets[i].address;
-        const label = i === 0 ? '(primary)' : `(pool #${i + 1})`;
+        const label = i === 0 ? '(primary default tx wallet)' : `(publish pool #${i + 1})`;
         console.log(`  ${label} ${addr}`);
         if (provider) {
           try {
@@ -3395,7 +3395,11 @@ program
       console.log(`  File:  ~/.dkg/wallets.json`);
       console.log('\nFund these addresses with ETH (gas) and TRAC (staking/publishing).');
       if (opWallets.adminWallet) {
-        console.log('The admin wallet is used for profile key management. The primary operational wallet is used for staking; all operational wallets are used for publishing.\n');
+        console.log(
+          'The admin wallet is used for profile/key management and operator actions (e.g., set-ask). ' +
+          'The primary operational wallet is the default node tx wallet (sampling/staking/PCA ops); ' +
+          'all operational wallets can be used for publishing.\n',
+        );
       } else {
         console.log('Add the real profile admin key to wallets.json to enable profile key management and operational-wallet repair.\n');
       }
@@ -3410,7 +3414,7 @@ program
 program
   .command('set-ask <amount>')
   .description('Set the node\'s on-chain ask (TRAC per KB·epoch)')
-  .option('--identity <id>', 'Override identity ID (auto-detected from primary wallet by default)')
+  .option('--identity <id>', 'Override identity ID (auto-detected from primary operational wallet by default)')
   .action(async (amount: string, opts: ActionOpts) => {
     try {
       const config = await loadConfig();

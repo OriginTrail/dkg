@@ -549,7 +549,7 @@ All three paths generate an Ed25519 master key on first run, saved to your `data
 
 - **Stable PeerId** — other agents can always find you at the same address
 - **Consistent profile** — your published agent profile is tied to a fixed identity
-- **Stable EVM wallets** — the CLI auto-generates operational wallets on first run (saved to `wallets.json`); OpenClaw/ElizaOS use an explicit private key from your env config. Either way, addresses stay the same across restarts
+- **Stable EVM wallets** — the CLI auto-generates one admin wallet plus operational wallets on first run (saved to `wallets.json`). The admin wallet is for operator/profile actions; operational wallets are node tx signers (the first is the primary default signer, and the full set is used as the publish wallet pool). OpenClaw/ElizaOS use an explicit private key from your env config. Either way, addresses stay the same across restarts
 
 Without a `dataDir`, a fresh ephemeral identity is generated every time (useful for tests only).
 
