@@ -90,8 +90,23 @@ describe.sequential('publisher CLI smoke', () => {
     }
     expect(ready).toBe(true);
 
-    const staged = await execFileAsync('node', [CLI_ENTRY, 'shared-memory', 'write', 'music-social', '--file', join(dkgHome, 'smoke.nt')], { env });
-    expect(staged.stdout).toContain('Written to shared memory for "music-social":');
+    // V10 Axiom 1: every shared write targets a registered CG. The
+    // smoke test's previous flow relied on the SHARE call to lazily
+    // accept any contextGraphId — that contract was removed in the
+    // axiom-checks pass (1.p) so a CG must exist locally before
+    // share() / `shared-memory write` is invoked. Create the CG
+    // explicitly here; we don't need on-chain registration for the
+    // SWM staging path the rest of the smoke test exercises. Use a
+    // namespaced id ("smoke/music-social") so `context-graph create`
+    // does NOT auto-prefix it with the agent address (it only
+    // auto-prefixes bare slugs without a "/"). That way the same id
+    // is reachable from `shared-memory write` (which never
+    // auto-prefixes) downstream.
+    const cg = 'smoke/music-social';
+    await execFileAsync('node', [CLI_ENTRY, 'context-graph', 'create', cg], { env });
+
+    const staged = await execFileAsync('node', [CLI_ENTRY, 'shared-memory', 'write', cg, '--file', join(dkgHome, 'smoke.nt')], { env });
+    expect(staged.stdout).toContain(`Written to shared memory for "${cg}":`);
     const stagedMatch = staged.stdout.match(/Share operation:\s+(\S+)/);
     expect(stagedMatch?.[1]).toBeDefined();
     const shareOperationId = stagedMatch![1];
@@ -115,7 +130,7 @@ describe.sequential('publisher CLI smoke', () => {
       CLI_ENTRY,
       'publisher',
       'enqueue',
-      'music-social',
+      cg,
       '--share-operation-id',
       shareOperationId,
       '--root',
@@ -165,6 +180,6 @@ describe.sequential('publisher CLI smoke', () => {
     }
     expect(payload.stdout).toContain('"status": "accepted"');
     expect(payload.stdout).toContain('publishOptions');
-    expect(payload.stdout).toContain('music-social');
+    expect(payload.stdout).toContain(cg);
   }, 45000);
 });
