@@ -1,12 +1,14 @@
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import { assertSafeIri, isSafeIri, validateSubGraphName } from '@origintrail-official/dkg-core';
+import { createHash } from 'node:crypto';
 import type { LiftRequest } from './lift-job.js';
 import type { LiftResolvedPublishSlice } from './async-lift-publish-options.js';
 import { generateShareMetadata } from './metadata.js';
 
 const DKG = 'http://dkg.io/ontology/';
 const PROV = 'http://www.w3.org/ns/prov#';
+const XSD = 'http://www.w3.org/2001/XMLSchema#';
 
 export type WorkspaceSelection = 'all' | { rootEntities: readonly string[] };
 
@@ -23,6 +25,12 @@ interface WorkspaceOperationPublicSnapshot {
 interface LegacyWorkspaceOperationPublicSnapshot extends WorkspaceOperationPublicSnapshot {
   readonly complete: boolean;
   readonly missingRoots: string[];
+}
+
+interface CompactWorkspaceOperationPublicSnapshot extends WorkspaceOperationPublicSnapshot {
+  readonly complete: boolean;
+  readonly missingRoots: string[];
+  readonly staleRoots: string[];
 }
 
 export async function resolveWorkspaceSelection(params: {
@@ -65,6 +73,8 @@ export async function storeWorkspaceOperationPublicQuads(params: {
   const subGraphName = normalizeOptionalSubGraphName(params.subGraphName);
   const workspaceMetaGraph = params.graphManager.sharedMemoryMetaUri(params.contextGraphId, subGraphName);
   const operationSubject = workspaceOperationSubject(params.contextGraphId, params.shareOperationId);
+  const publisherPeerId = params.publisherPeerId?.trim() || 'unknown';
+  const timestamp = params.timestamp ?? new Date();
 
   for (const root of roots) {
     const legacySubject = workspaceOperationPublicSliceSubject(
@@ -82,12 +92,37 @@ export async function storeWorkspaceOperationPublicQuads(params: {
       shareOperationId: params.shareOperationId,
       contextGraphId: params.contextGraphId,
       rootEntities: roots,
-      publisherPeerId: params.publisherPeerId?.trim() || 'unknown',
-      timestamp: params.timestamp ?? new Date(),
+      publisherPeerId,
+      timestamp,
       subGraphName,
     },
     workspaceMetaGraph,
   ));
+
+  const normalizedQuads = params.quads.map((quad) => ({ ...quad, graph: '' }));
+  const snapshotQuads: Quad[] = [];
+  for (const root of roots) {
+    const subject = workspaceOperationPublicSliceSubject(
+      params.contextGraphId,
+      params.shareOperationId,
+      root,
+      subGraphName,
+    );
+    const rootQuads = filterQuadsForRoot(normalizedQuads, root);
+    snapshotQuads.push(
+      { subject, predicate: `${DKG}contextGraphId`, object: lit(params.contextGraphId), graph: workspaceMetaGraph },
+      { subject, predicate: `${DKG}shareOperationId`, object: lit(params.shareOperationId), graph: workspaceMetaGraph },
+      { subject, predicate: `${DKG}publicSliceRootEntity`, object: root, graph: workspaceMetaGraph },
+      { subject, predicate: `${DKG}publicQuadsDigest`, object: lit(publicQuadsDigest(rootQuads)), graph: workspaceMetaGraph },
+      { subject, predicate: `${DKG}publicQuadsCount`, object: intLit(rootQuads.length), graph: workspaceMetaGraph },
+      { subject, predicate: `${PROV}wasAttributedTo`, object: lit(publisherPeerId), graph: workspaceMetaGraph },
+      { subject, predicate: `${DKG}publishedAt`, object: dateLit(timestamp), graph: workspaceMetaGraph },
+    );
+    if (subGraphName) {
+      snapshotQuads.push({ subject, predicate: `${DKG}subGraphName`, object: lit(subGraphName), graph: workspaceMetaGraph });
+    }
+  }
+  await params.store.insert(snapshotQuads);
 }
 
 /**
@@ -230,23 +265,105 @@ async function resolveWorkspaceOperationPublicQuads(params: {
     };
   }
 
-  if (!params.operation) {
+  const compact = await resolveCompactWorkspaceOperationPublicQuads(params);
+  if (compact.staleRoots.length > 0) {
     throw new Error(
-      `No public staged quads found for context graph ${params.contextGraphId} share operation ${params.shareOperationId} roots: ${legacy.missingRoots.join(', ')}`,
+      `Shared-memory operation ${params.shareOperationId} no longer matches current public SWM data for roots: ${compact.staleRoots.join(', ')}`,
     );
   }
 
-  const quads = await resolveWorkspaceSelection({
-    store: params.store,
-    graphManager: params.graphManager,
-    contextGraphId: params.contextGraphId,
-    selection: { rootEntities: roots },
-    subGraphName: params.subGraphName,
-  });
+  if (compact.complete) {
+    if (compact.quads.length === 0) {
+      throw new Error(
+        `No public staged quads found for context graph ${params.contextGraphId} share operation ${params.shareOperationId}`,
+      );
+    }
+    return {
+      quads: compact.quads,
+      publisherPeerId: compact.publisherPeerId ?? params.operation?.publisherPeerId,
+    };
+  }
+
+  if (!params.operation || compact.missingRoots.length > 0) {
+    const missingRoots = compact.missingRoots.length > 0 ? compact.missingRoots : legacy.missingRoots;
+    throw new Error(
+      `No immutable public snapshot metadata found for context graph ${params.contextGraphId} share operation ${params.shareOperationId} roots: ${missingRoots.join(', ')}`,
+    );
+  }
+
+  throw new Error(
+    `No immutable public snapshot metadata found for context graph ${params.contextGraphId} share operation ${params.shareOperationId} roots: ${roots.join(', ')}`,
+  );
+}
+
+async function resolveCompactWorkspaceOperationPublicQuads(params: {
+  store: TripleStore;
+  graphManager: GraphManager;
+  contextGraphId: string;
+  shareOperationId: string;
+  roots: readonly string[];
+  subGraphName?: string;
+}): Promise<CompactWorkspaceOperationPublicSnapshot> {
+  const roots = normalizeRoots(params.roots);
+  const workspaceMetaGraph = params.graphManager.sharedMemoryMetaUri(params.contextGraphId, params.subGraphName);
+  const quads: Quad[] = [];
+  const publisherPeerIds: string[] = [];
+  const missingRoots: string[] = [];
+  const staleRoots: string[] = [];
+
+  for (const root of roots) {
+    const subject = workspaceOperationPublicSliceSubject(
+      params.contextGraphId,
+      params.shareOperationId,
+      root,
+      params.subGraphName,
+    );
+    const result = await params.store.query(
+      `SELECT ?digest ?count ?publisherPeerId WHERE {
+        GRAPH <${assertSafeIri(workspaceMetaGraph)}> {
+          <${assertSafeIri(subject)}> <${DKG}publicQuadsDigest> ?digest ;
+            <${DKG}publicQuadsCount> ?count .
+          OPTIONAL { <${assertSafeIri(subject)}> <${PROV}wasAttributedTo> ?publisherPeerId }
+        }
+      } LIMIT 1`,
+    );
+
+    if (result.type !== 'bindings' || result.bindings.length === 0) {
+      missingRoots.push(root);
+      continue;
+    }
+
+    const expectedDigest = stripLiteral(result.bindings[0]?.['digest'])?.trim();
+    const expectedCount = parseIntegerLiteral(result.bindings[0]?.['count']);
+    if (!expectedDigest || !Number.isInteger(expectedCount)) {
+      missingRoots.push(root);
+      continue;
+    }
+
+    const currentQuads = await resolveWorkspaceSelection({
+      store: params.store,
+      graphManager: params.graphManager,
+      contextGraphId: params.contextGraphId,
+      selection: { rootEntities: [root] },
+      subGraphName: params.subGraphName,
+    });
+    const currentDigest = publicQuadsDigest(currentQuads);
+    if (currentDigest !== expectedDigest || currentQuads.length !== expectedCount) {
+      staleRoots.push(root);
+      continue;
+    }
+
+    quads.push(...currentQuads);
+    const publisherPeerId = stripLiteral(result.bindings[0]?.['publisherPeerId'])?.trim();
+    if (publisherPeerId) publisherPeerIds.push(publisherPeerId);
+  }
 
   return {
+    complete: missingRoots.length === 0 && staleRoots.length === 0,
+    missingRoots,
+    staleRoots,
     quads,
-    publisherPeerId: params.operation.publisherPeerId,
+    publisherPeerId: publisherPeerIds[0],
   };
 }
 
@@ -404,6 +521,31 @@ function parseStoredPublicQuads(value: string | undefined, shareOperationId: str
   });
 }
 
+function filterQuadsForRoot(quads: readonly Quad[], root: string): Quad[] {
+  return quads.filter((quad) => quad.subject === root || quad.subject.startsWith(`${root}/.well-known/genid/`));
+}
+
+function publicQuadsDigest(quads: readonly Quad[]): string {
+  const canonical = quads
+    .map((quad) => [quad.subject, quad.predicate, quad.object, ''])
+    .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  const hash = createHash('sha256');
+  hash.update(JSON.stringify(canonical));
+  return `sha256:${hash.digest('hex')}`;
+}
+
+function lit(value: string): string {
+  return JSON.stringify(value);
+}
+
+function intLit(value: number): string {
+  return `"${value}"^^<${XSD}integer>`;
+}
+
+function dateLit(value: Date): string {
+  return `"${value.toISOString()}"^^<${XSD}dateTime>`;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
@@ -422,6 +564,11 @@ function stripLiteral(value: string | undefined): string | undefined {
     }
   }
   return value;
+}
+
+function parseIntegerLiteral(value: string | undefined): number {
+  const parsed = Number(stripLiteral(value));
+  return Number.isInteger(parsed) ? parsed : NaN;
 }
 
 function isPresent<T>(value: T | undefined): value is T {

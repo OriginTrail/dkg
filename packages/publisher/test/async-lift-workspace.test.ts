@@ -107,6 +107,23 @@ describe('async lift workspace resolution', () => {
     if (payloads.type === 'bindings') {
       expect(payloads.bindings).toHaveLength(0);
     }
+
+    const fingerprints = await store.query(
+      `SELECT ?digest ?count WHERE {
+        GRAPH <${metaGraph}> {
+          ?s <${DKG}publicQuadsDigest> ?digest ;
+             <${DKG}publicQuadsCount> ?count .
+        }
+      }`,
+    );
+
+    expect(fingerprints.type).toBe('bindings');
+    if (fingerprints.type === 'bindings') {
+      expect(fingerprints.bindings).toHaveLength(2);
+      expect(fingerprints.bindings.every((row) => row['digest']?.includes('sha256:'))).toBe(true);
+      expect(JSON.stringify(fingerprints.bindings)).not.toContain('One');
+      expect(JSON.stringify(fingerprints.bindings)).not.toContain('Two');
+    }
   });
 
   it('resolves async lift payloads from the requested sub-graph partition', async () => {
@@ -215,6 +232,38 @@ describe('async lift workspace resolution', () => {
     expect(liveQuads).toEqual([
       { subject: ENTITY, predicate: 'http://schema.org/name', object: '"Two"', graph: '' },
     ]);
+  });
+
+  it('rejects stale public resolution when a requested share operation has been superseded', async () => {
+    const privateStore = new PrivateContentStore(store, graphManager);
+    const secretPredicate = 'http://schema.org/secret';
+    const write1 = await publisher.share(CONTEXT_GRAPH, [
+      { subject: ENTITY, predicate: 'http://schema.org/name', object: '"One"', graph: '' },
+    ], { publisherPeerId: 'peer1' });
+    await privateStore.storePrivateTriplesForOperation(CONTEXT_GRAPH, write1.shareOperationId, ENTITY, [
+      { subject: ENTITY, predicate: secretPredicate, object: '"first"', graph: '' },
+    ]);
+
+    await publisher.share(CONTEXT_GRAPH, [
+      { subject: ENTITY, predicate: 'http://schema.org/name', object: '"Two"', graph: '' },
+    ], { publisherPeerId: 'peer1' });
+
+    await expect(
+      resolveLiftWorkspaceSlice({
+        store,
+        graphManager,
+        request: {
+          swmId: 'swm-main',
+          shareOperationId: write1.shareOperationId,
+          roots: [ENTITY],
+          contextGraphId: CONTEXT_GRAPH,
+          namespace: 'aloha',
+          scope: 'person-profile',
+          transitionType: 'CREATE',
+          authority: { type: 'owner', proofRef: 'proof:owner:1' },
+        },
+      }),
+    ).rejects.toThrow(`Shared-memory operation ${write1.shareOperationId} no longer matches current public SWM data`);
   });
 
   it('keeps legacy publicStagedQuads metadata readable', async () => {
