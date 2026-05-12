@@ -1,27 +1,11 @@
-/**
- * Pluggable LLM provider interface for Layer 2 semantic extraction.
- *
- * Spec: 19_MARKDOWN_CONTENT_TYPE.md §3.2
- *
- * Each provider owns its endpoint URL, headers, request-body shape,
- * response parsing, and fail-soft warning prefix. The shared prompt text
- * `DOCUMENT_KG_PROMPT` lives in this module so providers reuse it.
- */
+// Pluggable LLM provider for Layer 2 semantic extraction.
 import type { LlmConfig } from '../config.js';
 import type { LlmExtractionInput, LlmExtractionOutput } from './llm-extractor.js';
 
 export interface LlmProvider {
   readonly name: 'openai' | 'anthropic';
-  /**
-   * Default model string used when {@link LlmConfig.model} is undefined.
-   * Exposed on the interface so the dispatcher's fallback path can read
-   * the provider's own default instead of duplicating it as a literal.
-   */
   readonly defaultModel: string;
-  invoke(
-    input: LlmExtractionInput,
-    config: LlmConfig,
-  ): Promise<LlmExtractionOutput>;
+  invoke(input: LlmExtractionInput, config: LlmConfig): Promise<LlmExtractionOutput>;
 }
 
 export const DOCUMENT_KG_PROMPT = `You are a knowledge graph extraction engine. Extract structured knowledge from the following document as RDF N-Triples.

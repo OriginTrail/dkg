@@ -1,33 +1,17 @@
-/**
- * Tolerant N-Triples parser for LLM-produced output. Shared by all
- * LlmProvider implementations so triple shapes are byte-identical across
- * providers. Lifted verbatim from the original inline parser in
- * llm-extractor.ts.
- */
-export function parseNTriples(
-  text: string,
-  _documentIri: string,
-): Array<{ subject: string; predicate: string; object: string }> {
-  const triples: Array<{ subject: string; predicate: string; object: string }> = [];
+// Tolerant N-Triples parser shared by all LlmProvider implementations.
+type Triple = { subject: string; predicate: string; object: string };
 
-  const cleaned = text
-    .replace(/^```[a-z]*\n?/gm, '')
-    .replace(/^```\s*$/gm, '');
+const TRIPLE_RE = /^<([^>]+)>\s+<([^>]+)>\s+(?:<([^>]+)>|("(?:[^"\\]|\\.)*"(?:\^\^<[^>]+>)?(?:@[a-z-]+)?))\s*\.?\s*$/;
 
+export function parseNTriples(text: string, _documentIri: string): Triple[] {
+  const cleaned = text.replace(/^```[a-z]*\n?/gm, '').replace(/^```\s*$/gm, '');
+  const triples: Triple[] = [];
   for (const line of cleaned.split('\n')) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith('#')) continue;
-
-    const match = trimmed.match(
-      /^<([^>]+)>\s+<([^>]+)>\s+(?:<([^>]+)>|("(?:[^"\\]|\\.)*"(?:\^\^<[^>]+>)?(?:@[a-z-]+)?))\s*\.?\s*$/,
-    );
-    if (match) {
-      const subject = match[1]!;
-      const predicate = match[2]!;
-      const object = match[3] ? match[3] : match[4]!;
-      if (subject.length > 0 && predicate.length > 0 && object.length > 0) {
-        triples.push({ subject, predicate, object });
-      }
+    const m = trimmed.match(TRIPLE_RE);
+    if (m && m[1] && m[2] && (m[3] || m[4])) {
+      triples.push({ subject: m[1], predicate: m[2], object: (m[3] ?? m[4])! });
     }
   }
   return triples;
