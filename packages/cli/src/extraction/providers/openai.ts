@@ -5,8 +5,14 @@
  *   - Reasoning family (gpt-5*, o1*, o3*, o4*): body uses
  *     `max_completion_tokens` and OMITS `temperature` — the API rejects
  *     both `max_tokens` and non-default `temperature` for these models.
+ *     The default `max_completion_tokens` is 16000 (hidden CoT plus
+ *     visible output must both fit inside the budget) and the body
+ *     includes `reasoning_effort: 'low'` so structured extraction does
+ *     not burn the entire budget on reasoning before any visible token
+ *     is emitted.
  *   - Legacy chat-completions models (e.g. gpt-4o-mini): body keeps the
- *     classic `max_tokens` + `temperature: 0.1` shape.
+ *     classic `max_tokens` (default 4096) + `temperature: 0.1` shape and
+ *     never carries `reasoning_effort`.
  *
  * Everything else is shared: same URL (`${baseURL}/chat/completions`),
  * same Bearer auth, same system/user message structure, same response
@@ -24,6 +30,8 @@ const DEFAULT_MODEL = 'gpt-5-nano';
 const DEFAULT_BASE_URL = 'https://api.openai.com/v1';
 const REQUEST_TIMEOUT_MS = 60_000;
 const MARKDOWN_TRUNCATE_CHARS = 60_000;
+const REASONING_DEFAULT_MAX_TOKENS = 16_000;
+const LEGACY_DEFAULT_MAX_TOKENS = 4096;
 
 /**
  * OpenAI reasoning-model prefixes. Membership is checked with `.startsWith`
@@ -35,6 +43,28 @@ const REASONING_MODEL_PREFIXES = ['gpt-5', 'o1', 'o3', 'o4'] as const;
 
 export function isReasoningModel(model: string): boolean {
   return REASONING_MODEL_PREFIXES.some((prefix) => model.startsWith(prefix));
+}
+
+/**
+ * Compute the model-family-specific fields of the chat-completions body.
+ * Reasoning models receive `max_completion_tokens` + `reasoning_effort`;
+ * legacy chat models receive `max_tokens` + `temperature`. The caller's
+ * `maxTokensOverride` (if defined) wins over the family default.
+ */
+function buildModelFamilyFields(
+  model: string,
+  maxTokensOverride: number | undefined,
+): Record<string, unknown> {
+  if (isReasoningModel(model)) {
+    return {
+      max_completion_tokens: maxTokensOverride ?? REASONING_DEFAULT_MAX_TOKENS,
+      reasoning_effort: 'low',
+    };
+  }
+  return {
+    max_tokens: maxTokensOverride ?? LEGACY_DEFAULT_MAX_TOKENS,
+    temperature: 0.1,
+  };
 }
 
 async function invoke(
@@ -62,10 +92,11 @@ async function invoke(
       content: `Document URI: ${input.documentIri}\n\n${truncated}`,
     },
   ];
-  const tokenBudget = input.maxTokens ?? 4096;
-  const body: Record<string, unknown> = isReasoningModel(model)
-    ? { model, messages, max_completion_tokens: tokenBudget }
-    : { model, messages, max_tokens: tokenBudget, temperature: 0.1 };
+  const body: Record<string, unknown> = {
+    model,
+    messages,
+    ...buildModelFamilyFields(model, input.maxTokens),
+  };
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
