@@ -2,7 +2,16 @@ import { describe, expect, it, vi, afterEach, beforeEach } from 'vitest';
 import { extractWithLlm } from '../src/extraction/llm-extractor.js';
 import { parseNTriples } from '../src/extraction/parse-ntriples.js';
 import { DOCUMENT_KG_PROMPT } from '../src/extraction/llm-provider.js';
+import { openaiProvider } from '../src/extraction/providers/openai.js';
+import { anthropicProvider } from '../src/extraction/providers/anthropic.js';
 import type { LlmConfig } from '../src/config.js';
+
+describe('LlmProvider — DEFAULT_MODEL on the interface', () => {
+  it('each provider exposes its DEFAULT_MODEL via the LlmProvider interface', () => {
+    expect(openaiProvider.defaultModel).toBe('gpt-4o-mini');
+    expect(anthropicProvider.defaultModel).toBe('claude-sonnet-4-6');
+  });
+});
 
 function makeConfig(overrides: Partial<LlmConfig> = {}): LlmConfig {
   return {
