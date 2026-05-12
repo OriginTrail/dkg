@@ -289,4 +289,30 @@ describe('extractWithLlm — provider selection', () => {
     expect(captured.url).toBe('https://api.anthropic.com/v1/messages');
     expect(result.model).toBe('claude-sonnet-4-6');
   });
+
+  it('unknown provider value warns and falls back to OpenAI', async () => {
+    const captured: { url?: string } = {};
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string | URL | Request) => {
+        captured.url = String(url);
+        return new Response(
+          JSON.stringify({
+            choices: [{ message: { content: 'NONE' } }],
+            usage: { total_tokens: 2 },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }),
+    );
+    vi.stubEnv('DKG_EXTRACTION_PROVIDER', 'mystery-vendor');
+
+    const result = await extractWithLlm(sampleInput, makeConfig());
+
+    expect(captured.url).toBe('https://api.openai.com/v1/chat/completions');
+    expect(result.model).toBe('gpt-4o-mini');
+    const message = warnSpy.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(message).toMatch(/Unknown provider "mystery-vendor"/);
+    expect(message).toMatch(/falling back to openai/);
+  });
 });
