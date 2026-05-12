@@ -303,6 +303,40 @@ jobs:
           pnpm exec vitest run "${SHARD_FILES[@]}"
 
   # ------------------------------------------------------------------
+  # Axiom audit lane — V10 protocol-correctness suite. Runs every rule
+  # from `dkgv10-spec/02_AXIOMS.md` (Context Graph isolation, authority
+  # domain, typed transitions, canonical PUBLISH, provisional SWM,
+  # declared views, deterministic conflict resolution) against a real
+  # `DKGAgent` (no mocks). Owns its own runner so the per-axiom result
+  # is visible at a glance on every PR rather than hiding inside one of
+  # the bin-packed `tornado-agent` shards.
+  #
+  # Excluded from `ci-shard-agent.mjs` to avoid double-running.
+  # ------------------------------------------------------------------
+  tornado-axiom-audit:
+    name: "Tornado: axiom audit (V10 spec)"
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-outputs
+          path: /tmp
+      - name: Restore build outputs
+        run: tar -xzf /tmp/build-outputs.tgz
+      - name: "V10 axiom audit (packages/agent/test/axiom-checks.e2e.test.ts)"
+        run: pnpm test:axioms
+
+  # ------------------------------------------------------------------
   # Bura lane — `cli` is the heaviest BURA package (CLI daemon, HTTP API,
   # auth, keystore, migration, indexer) so it owns a runner. The
   # remaining BURA package (`query`) runs on its own runner.
