@@ -65,8 +65,6 @@ export async function extractWithLlm(
     console.warn(
       `[llm-extractor] provider "${provider.name}" threw unexpectedly: ${err?.message ?? err}`,
     );
-    const fallbackModel =
-      llmConfig.model ?? (provider.name === 'anthropic' ? 'claude-sonnet-4-6' : 'gpt-4o-mini');
-    return { triples: [], model: fallbackModel };
+    return { triples: [], model: llmConfig.model ?? provider.defaultModel };
   }
 }

@@ -12,6 +12,12 @@ import type { LlmExtractionInput, LlmExtractionOutput } from './llm-extractor.js
 
 export interface LlmProvider {
   readonly name: 'openai' | 'anthropic';
+  /**
+   * Default model string used when {@link LlmConfig.model} is undefined.
+   * Exposed on the interface so the dispatcher's fallback path can read
+   * the provider's own default instead of duplicating it as a literal.
+   */
+  readonly defaultModel: string;
   invoke(
     input: LlmExtractionInput,
     config: LlmConfig,

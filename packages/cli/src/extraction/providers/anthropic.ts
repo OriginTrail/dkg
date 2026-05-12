@@ -111,5 +111,6 @@ async function invoke(
 
 export const anthropicProvider: LlmProvider = {
   name: 'anthropic',
+  defaultModel: DEFAULT_MODEL,
   invoke,
 };

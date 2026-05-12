@@ -105,5 +105,6 @@ async function invoke(
 
 export const openaiProvider: LlmProvider = {
   name: 'openai',
+  defaultModel: DEFAULT_MODEL,
   invoke,
 };
