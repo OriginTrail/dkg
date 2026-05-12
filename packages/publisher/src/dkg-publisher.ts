@@ -2436,7 +2436,13 @@ export class DKGPublisher implements Publisher {
     this.eventBus.emit(DKGEvent.KC_PUBLISHED, {
       ...result,
       contextGraphId,
-      tripleCount: allSkolemizedQuads.length,
+      // tripleCount reports the canonical (merkle-committed, publicly verifiable)
+      // count — `merkleFlatQuads` is the pre-stamp snapshot peers see and verify.
+      // The SelfAttested trust triple appended after merkle commitment is local
+      // metadata for VM trust-band filtering only and is NOT part of the published
+      // assertion (Axiom 4: PUBLISH is canonical / Axiom 6: trust gradient is a
+      // separate enrichment).
+      tripleCount: merkleFlatQuads.length,
     });
     return result;
   }
