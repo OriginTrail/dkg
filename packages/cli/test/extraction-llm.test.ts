@@ -200,4 +200,54 @@ describe('extractWithLlm — Anthropic provider', () => {
       { subject: 'urn:dkg:doc:1', predicate: 'http://schema.org/about', object: 'urn:dkg:entity:topic-x' },
     ]);
   });
+
+  it('default request body matches the pinned Anthropic /v1/messages shape', async () => {
+    const captured: { url?: string; init?: RequestInit } = {};
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+        captured.url = String(url);
+        captured.init = init;
+        return new Response(
+          JSON.stringify({
+            content: [{ type: 'text', text: 'NONE' }],
+            usage: { input_tokens: 3, output_tokens: 4 },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }),
+    );
+
+    const result = await extractWithLlm(sampleInput, makeConfig({ provider: 'anthropic' }));
+
+    expect(result.triples).toEqual([]);
+    expect(result.model).toBe('claude-sonnet-4-6');
+    expect(result.tokensUsed).toBe(7);
+
+    expect(captured.url).toBe('https://api.anthropic.com/v1/messages');
+    expect(captured.init?.method).toBe('POST');
+    const headers = captured.init?.headers as Record<string, string>;
+    expect(headers['x-api-key']).toBe('sk-test-key');
+    expect(headers['anthropic-version']).toBe('2023-06-01');
+    expect(headers['Content-Type']).toBe('application/json');
+
+    const body = JSON.parse(String(captured.init?.body));
+    expect(body).toEqual({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 4096,
+      system: body.system,
+      messages: [
+        {
+          role: 'user',
+          content: 'Document URI: urn:dkg:doc:1\n\n# Doc\n\nHello world.',
+        },
+      ],
+    });
+    // Pin: no temperature field on Anthropic requests.
+    expect(body).not.toHaveProperty('temperature');
+    // System prompt: pin load-bearing phrases without snapshotting verbatim.
+    expect(body.system).toContain('knowledge graph extraction engine');
+    expect(body.system).toContain('RDF N-Triples');
+    expect(body.system).toContain('output exactly: NONE');
+  });
 });
