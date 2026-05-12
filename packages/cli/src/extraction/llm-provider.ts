@@ -1,11 +1,98 @@
 // Pluggable LLM provider for Layer 2 semantic extraction.
 import type { LlmConfig } from '../config.js';
 import type { LlmExtractionInput, LlmExtractionOutput } from './llm-extractor.js';
+import { parseNTriples } from './parse-ntriples.js';
 
 export interface LlmProvider {
   readonly name: 'openai' | 'anthropic';
   readonly defaultModel: string;
   invoke(input: LlmExtractionInput, config: LlmConfig): Promise<LlmExtractionOutput>;
+}
+
+/**
+ * Per-provider differences in the shared request/response scaffolding.
+ * Everything else (apiKey check, 60s timeout, fail-soft, JSON parse,
+ * NONE/empty handling, parseNTriples) is centralised in `runProvider`.
+ */
+export interface ProviderSpec {
+  readonly name: 'openai' | 'anthropic';
+  readonly defaultModel: string;
+  buildRequest(
+    input: LlmExtractionInput,
+    config: LlmConfig,
+    model: string,
+  ): { url: string; headers: Record<string, string>; body: unknown };
+  parseResponse(data: any): {
+    text: string | undefined;
+    tokensUsed: number | undefined;
+  };
+}
+
+export function createProvider(spec: ProviderSpec): LlmProvider {
+  return {
+    name: spec.name,
+    defaultModel: spec.defaultModel,
+    invoke: (input, config) => runProvider(spec, input, config),
+  };
+}
+
+async function runProvider(
+  spec: ProviderSpec,
+  input: LlmExtractionInput,
+  config: LlmConfig,
+): Promise<LlmExtractionOutput> {
+  const model = config.model ?? spec.defaultModel;
+  const empty: LlmExtractionOutput = { triples: [], model };
+
+  if (!config.apiKey) {
+    console.warn(`[${spec.name}] missing apiKey — semantic extraction skipped`);
+    return empty;
+  }
+
+  const { url, headers, body } = spec.buildRequest(input, config, model);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 60_000);
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+
+    if (!res.ok) {
+      console.warn(
+        `[${spec.name}] API returned ${res.status}: ${await res.text().catch(() => '')}`,
+      );
+      return empty;
+    }
+
+    let data: any;
+    try {
+      data = await res.json();
+    } catch (err: any) {
+      console.warn(`[${spec.name}] malformed response body: ${err?.message ?? err}`);
+      return empty;
+    }
+
+    const { text, tokensUsed } = spec.parseResponse(data);
+    if (typeof text !== 'string') {
+      console.warn(`[${spec.name}] malformed response body: response text missing`);
+      return empty;
+    }
+    const trimmed = text.trim();
+    if (!trimmed || trimmed === 'NONE') return { triples: [], model, tokensUsed };
+    return { triples: parseNTriples(trimmed, input.documentIri), model, tokensUsed };
+  } catch (err: any) {
+    console.warn(
+      err?.name === 'AbortError'
+        ? `[${spec.name}] request timed out after 60s`
+        : `[${spec.name}] extraction failed: ${err?.message ?? err}`,
+    );
+    return empty;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 export const DOCUMENT_KG_PROMPT = `You are a knowledge graph extraction engine. Extract structured knowledge from the following document as RDF N-Triples.
