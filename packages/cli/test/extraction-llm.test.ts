@@ -45,7 +45,7 @@ describe('extractWithLlm — OpenAI provider', () => {
     expect(message).toMatch(/^\[openai\]/m);
   });
 
-  it('default request body matches the pinned OpenAI chat-completions shape', async () => {
+  it('default (reasoning-model) request body matches the pinned OpenAI chat-completions shape', async () => {
     const captured: { url?: string; init?: RequestInit } = {};
     vi.stubGlobal(
       'fetch',
@@ -84,13 +84,58 @@ describe('extractWithLlm — OpenAI provider', () => {
           content: 'Document URI: urn:dkg:doc:1\n\n# Doc\n\nHello world.',
         },
       ],
-      max_tokens: 4096,
-      temperature: 0.1,
+      max_completion_tokens: 4096,
     });
+    // Pin: reasoning-model body MUST NOT include the legacy keys.
+    expect(body).not.toHaveProperty('max_tokens');
+    expect(body).not.toHaveProperty('temperature');
     // System prompt: pin load-bearing phrases without snapshotting verbatim.
     expect(body.messages[0].content).toContain('knowledge graph extraction engine');
     expect(body.messages[0].content).toContain('RDF N-Triples');
     expect(body.messages[0].content).toContain('output exactly: NONE');
+  });
+
+  it('legacy chat-completions model (gpt-4o-mini) keeps max_tokens + temperature shape', async () => {
+    const captured: { url?: string; init?: RequestInit } = {};
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+        captured.url = String(url);
+        captured.init = init;
+        return new Response(
+          JSON.stringify({
+            choices: [{ message: { content: 'NONE' } }],
+            usage: { total_tokens: 9 },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }),
+    );
+
+    const result = await extractWithLlm(
+      sampleInput,
+      makeConfig({ model: 'gpt-4o-mini' }),
+    );
+
+    expect(result.triples).toEqual([]);
+    expect(result.model).toBe('gpt-4o-mini');
+    expect(result.tokensUsed).toBe(9);
+
+    const body = JSON.parse(String(captured.init?.body));
+    expect(body).toEqual({
+      model: 'gpt-4o-mini',
+      messages: [
+        { role: 'system', content: DOCUMENT_KG_PROMPT },
+        {
+          role: 'user',
+          content: 'Document URI: urn:dkg:doc:1\n\n# Doc\n\nHello world.',
+        },
+      ],
+      max_tokens: 4096,
+      temperature: 0.1,
+    });
+    // Pin: legacy body MUST NOT have the reasoning-model key.
+    expect(body).not.toHaveProperty('max_completion_tokens');
   });
 
   it('fail-soft: HTTP 500 returns empty and warns with [openai] prefix', async () => {
