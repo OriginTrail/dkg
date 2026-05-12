@@ -632,17 +632,28 @@ export function buildSkillMd(opts: {
   peerId: string;
   nodeRole: string;
   extractionPipelines: string[];
+  unavailablePipelines?: string[];
 }): string {
   const template = loadSkillTemplate();
-  const dynamicSection = [
+  const unavailable = opts.unavailablePipelines ?? [];
+  const dynamicLines = [
     `- **Node version:** ${opts.version}`,
     `- **Base URL:** ${opts.baseUrl}`,
     `- **Peer ID:** ${opts.peerId}`,
     `- **Node role:** ${opts.nodeRole}`,
     `- **Available extraction pipelines:** ${opts.extractionPipelines.length > 0 ? opts.extractionPipelines.join(", ") : "none (install markitdown to enable document conversion)"}`,
+  ];
+  if (unavailable.length > 0) {
+    dynamicLines.push(
+      `- **Unavailable extraction pipelines:** ${unavailable.join(", ")} (MarkItDown binary not installed — run \`pnpm --filter @origintrail-official/dkg run markitdown:bundle\` then restart the daemon)`,
+    );
+  }
+  dynamicLines.push(
     '',
-    'To see which context graphs (projects) are currently subscribed, call `GET /api/context-graph/list` — this returns a live list that stays current as projects are created or subscribed during the session.',
-  ].join("\n");
+    'To see which context graphs (projects) are currently subscribed, call the `dkg_status` tool (or `GET /api/context-graph/list`) — it returns a live list that stays current as projects are created or subscribed during the session.',
+    'The `dkg_status` tool also surfaces `extractionPipelines` and `warnings` — call it if a file import returns `extraction.status = "skipped"` to discover why (e.g. `markitdown_unavailable`).',
+  );
+  const dynamicSection = dynamicLines.join("\n");
 
   const staticPlaceholder =
     "> This section is dynamically generated from node state at serve-time.\n\n" +
@@ -650,9 +661,9 @@ export function buildSkillMd(opts: {
     "- **Base URL:** (dynamic)\n" +
     "- **Peer ID:** (dynamic)\n" +
     "- **Node role:** (dynamic — `core` or `edge`)\n" +
-    "- **Available extraction pipelines:** (dynamic)\n" +
+    "- **Available extraction pipelines:** (dynamic — call `dkg_status` for the live list and any `warnings`)\n" +
     "\n" +
-    "To see which context graphs (projects) are currently subscribed, call `GET /api/context-graph/list` — this returns a live list that stays current as projects are created or subscribed during the session.";
+    "To see which context graphs (projects) are currently subscribed, call the `dkg_status` tool (or `GET /api/context-graph/list`) — it returns a live list that stays current as projects are created or subscribed during the session.";
 
   return template.replace(staticPlaceholder, dynamicSection);
 }

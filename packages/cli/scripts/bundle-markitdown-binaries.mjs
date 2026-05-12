@@ -97,6 +97,7 @@ function parseArgs(argv) {
     releaseBaseUrl: null,
     releaseRepo: DEFAULT_RELEASE_REPO,
     quiet: false,
+    verifyReleaseArtifacts: null,
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -123,12 +124,14 @@ function parseArgs(argv) {
       opts.releaseBaseUrl = argv[++i];
     } else if (arg === '--release-repo') {
       opts.releaseRepo = argv[++i];
+    } else if (arg === '--verify-release-artifacts') {
+      opts.verifyReleaseArtifacts = resolve(argv[++i]);
     } else {
       throw new Error(`Unknown argument: ${arg}`);
     }
   }
 
-  if (!opts.all && !opts.currentPlatform && !opts.buildCurrentPlatform) {
+  if (!opts.all && !opts.currentPlatform && !opts.buildCurrentPlatform && !opts.verifyReleaseArtifacts) {
     opts.currentPlatform = true;
   }
 
@@ -373,7 +376,53 @@ function resolvePythonCommand() {
       // Try the next candidate.
     }
   }
-  throw new Error('Python executable not found. Install python3/python or set the PYTHON environment variable.');
+  throw new Error(rewriteVenvErrorMessage(
+    'Python executable not found. Install python3/python or set the PYTHON environment variable.',
+    'missing-python',
+  ));
+}
+
+// Per-OS install hints used when the build-from-source path fails because
+// python3-venv (or python itself) is not present on the host. The bundle
+// script's main `--best-effort` postinstall path does NOT invoke the
+// build-from-source flow, so this hint only fires for explicit
+// `markitdown:build` runs.
+const VENV_INSTALL_HINTS = [
+  '  Debian / Ubuntu / WSL: `sudo apt install -y python3-venv python3-pip`',
+  '  Fedora / RHEL:         `sudo dnf install -y python3 python3-pip`',
+  '  macOS (Homebrew):      `brew install python@3`',
+  '  Windows:               install Python 3.11+ from python.org and reopen the shell',
+];
+
+function rewriteVenvErrorMessage(originalMessage, kind) {
+  const header = kind === 'missing-python'
+    ? 'MarkItDown build: a working Python 3 is required for the build-from-source path.'
+    : 'MarkItDown build: python3 venv support is required for the build-from-source path.';
+  return [
+    header,
+    ...VENV_INSTALL_HINTS,
+    'Then re-run: pnpm --filter @origintrail-official/dkg run markitdown:build',
+    `(underlying error: ${originalMessage.trim()})`,
+  ].join('\n');
+}
+
+export function rewriteVenvError(err) {
+  const stderr = String(err?.stderr ?? '');
+  const stdout = String(err?.stdout ?? '');
+  const message = String(err?.message ?? '');
+  const text = `${stderr}\n${stdout}\n${message}`;
+  const venvSupportMissing =
+    /ensurepip is not available/i.test(text)
+    || /No module named ['"]?venv['"]?/i.test(text)
+    || /python3-venv/i.test(text);
+  const pythonMissing =
+    /command not found.*python/i.test(text)
+    || /ENOENT/i.test(text)
+    || /is not recognized as an internal or external command/i.test(text);
+  if (!venvSupportMissing && !pythonMissing) return err;
+  const wrapped = new Error(rewriteVenvErrorMessage(message, venvSupportMissing ? 'missing-venv' : 'missing-python'));
+  wrapped.cause = err;
+  return wrapped;
 }
 
 function venvPythonPath(venvDir) {
@@ -414,7 +463,11 @@ export async function buildCurrentPlatformBinary({
   const python = resolvePythonCommand();
 
   try {
-    await execFile(python.command, [...python.args, '-m', 'venv', venvDir], { cwd: tmpRoot, timeout: 120_000 });
+    try {
+      await execFile(python.command, [...python.args, '-m', 'venv', venvDir], { cwd: tmpRoot, timeout: 120_000 });
+    } catch (venvErr) {
+      throw rewriteVenvError(venvErr);
+    }
     const venvPython = venvPythonPath(venvDir);
 
     await execFile(venvPython, ['-m', 'pip', 'install', '--upgrade', 'pip'], {
@@ -535,15 +588,256 @@ export async function ensureCurrentPlatformBinary({
   }
 }
 
+function isHttp404Error(err) {
+  return /returned 404/.test(String(err?.message ?? ''));
+}
+
+export async function fetchLatestReleaseTag(repo) {
+  // GitHub's /releases/latest endpoint excludes prereleases and returns 404
+  // for repos that only publish prereleases (the OriginTrail/dkg case — all
+  // v10.0.0-rc.* tags are flagged prerelease). Use the listing endpoint so
+  // both stable and prerelease tags are eligible. Drafts are skipped.
+  const url = `https://api.github.com/repos/${repo}/releases?per_page=10`;
+  const res = await fetch(url, {
+    headers: { Accept: 'application/vnd.github+json' },
+    signal: AbortSignal.timeout(RELEASE_CHECKSUM_FETCH_TIMEOUT_MS),
+  });
+  if (!res.ok) throw new Error(`${url} returned ${res.status}`);
+  const body = await res.json();
+  if (!Array.isArray(body)) return null;
+  for (const entry of body) {
+    if (!entry || typeof entry !== 'object') continue;
+    if (entry.draft === true) continue;
+    if (typeof entry.tag_name === 'string' && entry.tag_name.length > 0) {
+      return entry.tag_name;
+    }
+  }
+  return null;
+}
+
+function emitMissingBinaryRemediation(warn, version, reason) {
+  warn(`MarkItDown bundle: could not stage the binary automatically (${reason}).`);
+  warn('PDF / DOCX / PPTX / XLSX / CSV / HTML / EPUB / XML extraction will be unavailable on this node.');
+  warn('To enable, once you have network access:');
+  warn('  pnpm --filter @origintrail-official/dkg run markitdown:bundle');
+  warn('Or to build locally from source (requires python3-venv):');
+  warn('  pnpm --filter @origintrail-official/dkg run markitdown:build');
+  warn('Then restart any running `dkg start` daemon.');
+}
+
+function maybeLogRestartHint(log) {
+  // Postinstall fires before the daemon is ever started, so the restart hint
+  // is noise there. Only surface it for explicit top-level runs of
+  // `markitdown:bundle` / `markitdown:build` where a running daemon is plausible.
+  if (process.env.npm_lifecycle_event === 'postinstall') return;
+  log('Restart any running `dkg start` daemon to pick up the new extraction pipelines.');
+}
+
+export async function verifyReleaseArtifacts({ directory, version, packageDir = DEFAULT_PACKAGE_DIR }) {
+  const expectedVersion = version ?? readCliVersion(packageDir);
+  const errors = [];
+  for (const target of SUPPORTED_TARGETS) {
+    const binaryPath = join(directory, target.assetName);
+    const checksumPath = checksumPathFor(binaryPath);
+    const metadataPath = metadataPathFor(binaryPath);
+    if (!existsSync(binaryPath)) {
+      errors.push(`${target.assetName}: binary missing at ${binaryPath}`);
+      continue;
+    }
+    if (!existsSync(checksumPath)) {
+      errors.push(`${target.assetName}: .sha256 sidecar missing`);
+      continue;
+    }
+    if (!existsSync(metadataPath)) {
+      errors.push(`${target.assetName}: .meta.json sidecar missing`);
+      continue;
+    }
+    let expectedHash;
+    try {
+      expectedHash = parseSha256File(await readFile(checksumPath, 'utf-8'));
+    } catch (err) {
+      errors.push(`${target.assetName}: malformed .sha256 (${err?.message ?? err})`);
+      continue;
+    }
+    const actualHash = sha256Hex(await readFile(binaryPath));
+    if (actualHash !== expectedHash) {
+      errors.push(`${target.assetName}: checksum mismatch (expected ${expectedHash}, got ${actualHash})`);
+      continue;
+    }
+    let metadata;
+    try {
+      metadata = parseMetadataText(await readFile(metadataPath, 'utf-8'));
+    } catch (err) {
+      errors.push(`${target.assetName}: malformed .meta.json (${err?.message ?? err})`);
+      continue;
+    }
+    if (metadata?.cliVersion !== expectedVersion) {
+      errors.push(`${target.assetName}: meta.cliVersion is "${metadata?.cliVersion}" but expected "${expectedVersion}"`);
+    }
+  }
+  return { ok: errors.length === 0, errors, expectedVersion, targetCount: SUPPORTED_TARGETS.length };
+}
+
+/**
+ * Implicit current-platform postinstall flow (issue #467).
+ *
+ * Workspace and published-install both attempt the release-asset download.
+ * The workspace-only branch falls back to the latest published tag when the
+ * local version has no matching asset yet.
+ *
+ * Pure-ish: env-var inputs (DKG_SKIP_MARKITDOWN_DOWNLOAD, CI, DKG_FORCE_…) and
+ * the latest-tag fetcher are passed in, not read here — so tests can inject
+ * mocks without mutating process.env.
+ *
+ * Returns a status object describing what happened. Never throws on failure
+ * paths; the caller decides whether to surface them.
+ */
+export async function bundleImplicitCurrentPlatform({
+  packageDir,
+  outputDir = null,
+  version = null,
+  workspace = null,
+  releaseBaseUrl: releaseBaseUrlOverride = null,
+  releaseRepo = DEFAULT_RELEASE_REPO,
+  force = false,
+  skipDownload = false,
+  ciMode = false,
+  log,
+  warn,
+  showRestartHint = true,
+  fetchLatestTag = fetchLatestReleaseTag,
+  buildReleaseUrl = releaseBaseUrl,
+}) {
+  const resolvedPackageDir = resolvePackageDir(packageDir);
+  const resolvedVersion = version ?? readCliVersion(resolvedPackageDir);
+  const resolvedWorkspace = workspace ?? isWorkspaceCheckout(resolvedPackageDir);
+
+  if (skipDownload) {
+    log('MarkItDown bundle: DKG_SKIP_MARKITDOWN_DOWNLOAD=1; skipping implicit release-asset download.');
+    emitMissingBinaryRemediation(log, resolvedVersion, 'opt-out via DKG_SKIP_MARKITDOWN_DOWNLOAD=1');
+    return { status: 'opted-out' };
+  }
+
+  const target = getSupportedTarget();
+  if (!target) {
+    log(`MarkItDown bundle: ${process.platform}-${process.arch} is not a supported bundled target. Skipping.`);
+    return { status: 'unsupported' };
+  }
+  const binaryPath = targetBinaryPath(target, resolvedPackageDir, outputDir);
+
+  if (!force && existsSync(binaryPath)) {
+    const releaseExpected = { source: 'release', cliVersion: resolvedVersion };
+    let buildExpected = null;
+    try {
+      buildExpected = {
+        source: 'build',
+        cliVersion: resolvedVersion,
+        buildFingerprint: buildFingerprintForPackage(resolvedPackageDir),
+      };
+    } catch {
+      // Entry script may be absent in test fixtures — fall back to release-only check.
+    }
+    const alreadyStaged =
+      (await hasVerifiedBundledBinary(binaryPath, releaseExpected))
+      || (buildExpected ? await hasVerifiedBundledBinary(binaryPath, buildExpected) : false);
+    if (alreadyStaged) {
+      log(`MarkItDown bundle: already staged ${binaryPath}.`);
+      return { status: 'already-staged', binaryPath };
+    }
+  }
+
+  if (ciMode) {
+    log('MarkItDown bundle: CI environment detected; skipping implicit release-asset download. Set DKG_FORCE_MARKITDOWN_DOWNLOAD=1 to override.');
+    return { status: 'ci-skipped' };
+  }
+
+  const baseUrl = releaseBaseUrlOverride ?? buildReleaseUrl(resolvedVersion, releaseRepo);
+  try {
+    const result = await downloadBinaryAsset({
+      assetName: target.assetName,
+      destinationDir: resolveBinDir(resolvedPackageDir, outputDir),
+      baseUrl,
+      cliVersion: resolvedVersion,
+      force,
+    });
+    log(`MarkItDown bundle: staged ${result.binaryPath} (release v${resolvedVersion}).`);
+    if (showRestartHint) maybeLogRestartHint(log);
+    return { status: 'staged', binaryPath: result.binaryPath, releaseTag: `v${resolvedVersion}` };
+  } catch (versionedErr) {
+    // Workspace-mode fallback only — published installs at a known release
+    // version should not silently swap in a different version's binary.
+    if (resolvedWorkspace && releaseBaseUrlOverride == null && isHttp404Error(versionedErr)) {
+      let latestTag = null;
+      try {
+        latestTag = await fetchLatestTag(releaseRepo);
+      } catch (latestErr) {
+        emitMissingBinaryRemediation(warn, resolvedVersion, `latest-release lookup failed: ${latestErr?.message ?? latestErr}`);
+        return { status: 'failed', reason: 'latest-lookup-error' };
+      }
+      if (!latestTag) {
+        emitMissingBinaryRemediation(warn, resolvedVersion, 'no published releases found for repo');
+        return { status: 'failed', reason: 'no-releases' };
+      }
+      const latestVersion = latestTag.replace(/^v/, '');
+      log(`MarkItDown bundle: v${resolvedVersion} has no release asset; falling back to latest tag ${latestTag}.`);
+      const latestBaseUrl = buildReleaseUrl(latestVersion, releaseRepo);
+      try {
+        const fallbackResult = await downloadBinaryAsset({
+          assetName: target.assetName,
+          destinationDir: resolveBinDir(resolvedPackageDir, outputDir),
+          baseUrl: latestBaseUrl,
+          cliVersion: latestVersion,
+          force,
+        });
+        // The downloaded meta.json claims cliVersion=latestVersion (matches the
+        // release we actually pulled from). But the daemon's converter check
+        // requires meta.cliVersion === local-package version, otherwise it
+        // logs "Ignoring bundled MarkItDown binary with incompatible metadata"
+        // and refuses to register the converter. For the workspace fallback
+        // path we rewrite the meta to reflect the LOCAL cliVersion (so the
+        // binary is actually usable), while preserving the actual release
+        // provenance in `effectiveTag` for operator inspection.
+        const overrideMeta = {
+          source: 'release',
+          cliVersion: resolvedVersion,
+          effectiveTag: latestTag,
+        };
+        await writeMetadataFile(fallbackResult.binaryPath, overrideMeta);
+        log(`MarkItDown bundle: staged ${fallbackResult.binaryPath} (release ${latestTag}, meta tagged v${resolvedVersion}).`);
+        if (showRestartHint) maybeLogRestartHint(log);
+        return { status: 'fallback-staged', binaryPath: fallbackResult.binaryPath, releaseTag: latestTag };
+      } catch (fallbackErr) {
+        emitMissingBinaryRemediation(warn, resolvedVersion, `latest-release download failed: ${fallbackErr?.message ?? fallbackErr}`);
+        return { status: 'failed', reason: 'fallback-download-error' };
+      }
+    }
+    emitMissingBinaryRemediation(warn, resolvedVersion, versionedErr?.message ?? String(versionedErr));
+    return { status: 'failed', reason: 'download-error' };
+  }
+}
+
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
   const packageDir = resolvePackageDir(opts.packageDir);
   const version = opts.version ?? readCliVersion(packageDir);
   const workspace = isWorkspaceCheckout(packageDir);
   const log = opts.quiet ? () => {} : logLine;
+  const warn = opts.quiet ? () => {} : warnLine;
 
-  if (workspace && !opts.all && !opts.buildCurrentPlatform) {
-    log('MarkItDown bundle: workspace checkout detected; skipping implicit release-asset download.');
+  // --verify-release-artifacts: standalone validation mode used by the release
+  // workflow before publishing assets. Fails loudly so a broken matrix job
+  // can't ship a Release with missing/mismatched sidecars.
+  if (opts.verifyReleaseArtifacts) {
+    const result = await verifyReleaseArtifacts({
+      directory: opts.verifyReleaseArtifacts,
+      version,
+      packageDir,
+    });
+    if (!result.ok) {
+      for (const err of result.errors) warn(`MarkItDown release verification: ${err}`);
+      throw new Error(`MarkItDown release verification failed for v${result.expectedVersion}: ${result.errors.length} error(s) across ${result.targetCount} supported target(s).`);
+    }
+    log(`MarkItDown release verification: ok (${result.targetCount} target(s), v${result.expectedVersion}).`);
     return;
   }
 
@@ -557,6 +851,7 @@ async function main() {
       force: opts.force,
     });
     log(`MarkItDown bundle: staged ${result.results.length} release asset(s) for v${version}.`);
+    maybeLogRestartHint(log);
     return;
   }
 
@@ -571,23 +866,35 @@ async function main() {
       return;
     }
     log(`MarkItDown bundle: built ${result.binaryPath}.`);
+    maybeLogRestartHint(log);
     return;
   }
 
-  const result = await ensureCurrentPlatformBinary({
+  const implicitResult = await bundleImplicitCurrentPlatform({
     packageDir,
     outputDir: opts.outputDir,
     version,
-    releaseBaseUrlOverride: opts.releaseBaseUrl,
+    workspace,
+    releaseBaseUrl: opts.releaseBaseUrl,
     releaseRepo: opts.releaseRepo,
     force: opts.force,
-    allowBuildFromSource: workspace,
+    skipDownload: process.env.DKG_SKIP_MARKITDOWN_DOWNLOAD === '1',
+    ciMode: process.env.CI === 'true' && process.env.DKG_FORCE_MARKITDOWN_DOWNLOAD !== '1',
+    log,
+    warn,
+    showRestartHint: true,
   });
-  if (result.status === 'unsupported') {
-    log(`MarkItDown bundle: ${process.platform}-${process.arch} is not a supported bundled target.`);
-    return;
+
+  // `bundleImplicitCurrentPlatform` deliberately returns `{ status: 'failed' }`
+  // instead of throwing so the postinstall path (which sets `--best-effort`)
+  // can record the remediation message and still exit 0. For an explicit
+  // top-level invocation (e.g. `pnpm run markitdown:bundle`, no
+  // `--best-effort`) the user expects a non-zero exit when staging failed —
+  // re-raise here so the IIFE's error handler at the bottom of this file
+  // surfaces it as a fatal error.
+  if (implicitResult?.status === 'failed' && !opts.bestEffort) {
+    throw new Error(`failed to stage current-platform binary (${implicitResult.reason ?? 'unknown reason'}); see remediation message above`);
   }
-  log(`MarkItDown bundle: staged ${result.binaryPath} (${result.source ?? result.status}).`);
 }
 
 const isMainModule = process.argv[1] && resolve(process.argv[1]) === __filename;

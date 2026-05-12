@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  bundleImplicitCurrentPlatform,
   checksumPathFor,
   downloadBinaryAsset,
   ensureCurrentPlatformBinary,
@@ -16,8 +17,10 @@ import {
   releaseAssetUrl,
   releaseBaseUrl,
   releaseTagForVersion,
+  rewriteVenvError,
   sha256Hex,
   SUPPORTED_TARGETS,
+  verifyReleaseArtifacts,
 } from '../scripts/bundle-markitdown-binaries.mjs';
 
 describe('bundle-markitdown-binaries helpers', () => {
@@ -450,5 +453,440 @@ describe('bundle-markitdown-binaries helpers', () => {
     expect(workflowRaw).toContain('Hello from MarkItDown smoke test.');
     expect(workflowRaw).toContain('Hello from DOCX smoke test.');
     expect(workflowRaw).toContain('.meta.json');
+  });
+
+  it('release workflow verifies bundled MarkItDown assets before publishing', async () => {
+    const workflowRaw = await readFile(new URL('../../../.github/workflows/release.yml', import.meta.url), 'utf-8');
+    // Acceptance criterion from issue #467: release/CI checks cover the
+    // presence/validation of bundled MarkItDown assets.
+    expect(workflowRaw).toContain('--verify-release-artifacts');
+    expect(workflowRaw).toContain('release-assets');
+  });
+});
+
+describe('bundleImplicitCurrentPlatform (issue #467)', () => {
+  const CLI_VERSION = '99.0.0-rc.1';
+  const LATEST_TAG = 'v98.0.0';
+  const LATEST_VERSION = '98.0.0';
+  const RELEASE_METADATA_TEXT = (version: string) =>
+    `${JSON.stringify({ source: 'release', cliVersion: version }, null, 2)}\n`;
+  let tmpPaths: string[] = [];
+
+  afterEach(async () => {
+    await Promise.all(tmpPaths.map((path) => rm(path, { recursive: true, force: true })));
+    tmpPaths = [];
+  });
+
+  // Workspace fixture: `src/` + `tsconfig.json` make isWorkspaceCheckout()
+  // return true, mirroring a real `git clone` + `pnpm install` scenario.
+  async function makeWorkspaceFixture(): Promise<{ packageDir: string; outputDir: string }> {
+    const packageDir = await mkdtemp(join(tmpdir(), 'dkg-implicit-pkg-'));
+    const outputDir = await mkdtemp(join(tmpdir(), 'dkg-implicit-out-'));
+    tmpPaths.push(packageDir, outputDir);
+    await writeFile(join(packageDir, 'package.json'), JSON.stringify({ version: CLI_VERSION }, null, 2));
+    await writeFile(join(packageDir, 'tsconfig.json'), '{}');
+    const { mkdir } = await import('node:fs/promises');
+    await mkdir(join(packageDir, 'src'), { recursive: true });
+    return { packageDir, outputDir };
+  }
+
+  function makeAssetServer(
+    target: { assetName: string },
+    { versionedBytes, fallbackBytes }: { versionedBytes: Buffer | null; fallbackBytes: Buffer | null },
+  ): { server: ReturnType<typeof createServer>; baseUrlForVersion: (v: string) => string } {
+    // Routes:
+    //   /release/v{CLI_VERSION}/...  → 404 when versionedBytes is null
+    //   /release/v{LATEST_VERSION}/... → fallbackBytes
+    const versionedHash = versionedBytes ? sha256Hex(versionedBytes) : null;
+    const fallbackHash = fallbackBytes ? sha256Hex(fallbackBytes) : null;
+    const server = createServer((req, res) => {
+      const url = req.url ?? '';
+      const versionPath = `/release/v${CLI_VERSION}`;
+      const latestPath = `/release/v${LATEST_VERSION}`;
+      if (versionedBytes && versionedHash) {
+        if (url === `${versionPath}/${target.assetName}`) {
+          res.writeHead(200, { 'content-type': 'application/octet-stream' });
+          res.end(versionedBytes);
+          return;
+        }
+        if (url === `${versionPath}/${target.assetName}.sha256`) {
+          res.writeHead(200, { 'content-type': 'text/plain' });
+          res.end(`${versionedHash}  ${target.assetName}\n`);
+          return;
+        }
+        if (url === `${versionPath}/${target.assetName}.meta.json`) {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(RELEASE_METADATA_TEXT(CLI_VERSION));
+          return;
+        }
+      }
+      if (fallbackBytes && fallbackHash) {
+        if (url === `${latestPath}/${target.assetName}`) {
+          res.writeHead(200, { 'content-type': 'application/octet-stream' });
+          res.end(fallbackBytes);
+          return;
+        }
+        if (url === `${latestPath}/${target.assetName}.sha256`) {
+          res.writeHead(200, { 'content-type': 'text/plain' });
+          res.end(`${fallbackHash}  ${target.assetName}\n`);
+          return;
+        }
+        if (url === `${latestPath}/${target.assetName}.meta.json`) {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(RELEASE_METADATA_TEXT(LATEST_VERSION));
+          return;
+        }
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    return {
+      server,
+      baseUrlForVersion: (v: string) => `http://127.0.0.1:${(server.address() as { port: number }).port}/release/v${v}`,
+    };
+  }
+
+  function makeLogCapture(): { log: (m: string) => void; warn: (m: string) => void; logs: string[]; warns: string[] } {
+    const logs: string[] = [];
+    const warns: string[] = [];
+    return {
+      log: (m) => { logs.push(String(m)); },
+      warn: (m) => { warns.push(String(m)); },
+      logs,
+      warns,
+    };
+  }
+
+  it('workspace + no binary → downloads the version-tagged release asset', async () => {
+    const target = getSupportedTarget();
+    expect(target).not.toBeNull();
+    if (!target) return;
+    const { packageDir, outputDir } = await makeWorkspaceFixture();
+    const bytes = Buffer.from('workspace versioned binary', 'utf-8');
+    const { server, baseUrlForVersion } = makeAssetServer(target, { versionedBytes: bytes, fallbackBytes: null });
+
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+    const capture = makeLogCapture();
+
+    try {
+      const result = await bundleImplicitCurrentPlatform({
+        packageDir,
+        outputDir,
+        releaseBaseUrl: baseUrlForVersion(CLI_VERSION),
+        log: capture.log,
+        warn: capture.warn,
+        showRestartHint: false,
+        fetchLatestTag: async () => { throw new Error('should not be called'); },
+      });
+
+      expect(result.status).toBe('staged');
+      expect(result.binaryPath).toBeTruthy();
+      expect(existsSync(join(outputDir, target.assetName))).toBe(true);
+      expect(await readFile(join(outputDir, target.assetName))).toEqual(bytes);
+      expect(capture.logs.some((line) => line.includes(`release v${CLI_VERSION}`))).toBe(true);
+      expect(capture.warns).toEqual([]);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+    }
+  });
+
+  it('workspace + binary already staged → skips network entirely', async () => {
+    const target = getSupportedTarget();
+    expect(target).not.toBeNull();
+    if (!target) return;
+    const { packageDir, outputDir } = await makeWorkspaceFixture();
+
+    // Pre-stage a valid binary + sidecars matching the local CLI version.
+    const bytes = Buffer.from('already-staged binary', 'utf-8');
+    const hash = sha256Hex(bytes);
+    const binaryPath = join(outputDir, target.assetName);
+    await writeFile(binaryPath, bytes);
+    await writeFile(checksumPathFor(binaryPath), `${hash}  ${target.assetName}\n`, 'utf-8');
+    await writeFile(metadataPathFor(binaryPath), RELEASE_METADATA_TEXT(CLI_VERSION), 'utf-8');
+
+    const capture = makeLogCapture();
+    const result = await bundleImplicitCurrentPlatform({
+      packageDir,
+      outputDir,
+      // Point at an unreachable URL — if we hit it the test fails with a timeout.
+      releaseBaseUrl: 'http://127.0.0.1:1/release/should-never-be-called',
+      log: capture.log,
+      warn: capture.warn,
+      showRestartHint: false,
+      fetchLatestTag: async () => { throw new Error('should not be called'); },
+    });
+
+    expect(result.status).toBe('already-staged');
+    expect(result.binaryPath).toBe(binaryPath);
+    expect(capture.logs.some((line) => line.includes('already staged'))).toBe(true);
+  });
+
+  it('workspace + version-tag 404 + injected URL builder stages the fallback binary with rewritten meta', async () => {
+    // Happy-path fallback: version-tag 404 → latest-tag 200. Both URLs
+    // resolve to the test server via the injectable `buildReleaseUrl` so we
+    // don't depend on github.com. Verifies the meta sidecar is rewritten
+    // with the LOCAL cliVersion (otherwise the daemon's converter check
+    // rejects the binary — issue #467 was originally regressed here).
+    const target = getSupportedTarget();
+    expect(target).not.toBeNull();
+    if (!target) return;
+    const { packageDir, outputDir } = await makeWorkspaceFixture();
+    const fallbackBytes = Buffer.from('fallback latest binary v2', 'utf-8');
+    const fallbackHash = sha256Hex(fallbackBytes);
+
+    const server = createServer((req, res) => {
+      const url = req.url ?? '';
+      // Version tag: unconditionally 404 (release for local CLI_VERSION does
+      // not exist yet — common pre-release state).
+      if (url.startsWith(`/release/v${CLI_VERSION}/`)) {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      // Latest tag: real bytes/sidecars.
+      if (url === `/release/v${LATEST_VERSION}/${target.assetName}`) {
+        res.writeHead(200, { 'content-type': 'application/octet-stream' });
+        res.end(fallbackBytes);
+        return;
+      }
+      if (url === `/release/v${LATEST_VERSION}/${target.assetName}.sha256`) {
+        res.writeHead(200, { 'content-type': 'text/plain' });
+        res.end(`${fallbackHash}  ${target.assetName}\n`);
+        return;
+      }
+      if (url === `/release/v${LATEST_VERSION}/${target.assetName}.meta.json`) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(RELEASE_METADATA_TEXT(LATEST_VERSION));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+    const port = (server.address() as { port: number }).port;
+
+    const capture = makeLogCapture();
+    let fetchLatestCalled = 0;
+
+    try {
+      const result = await bundleImplicitCurrentPlatform({
+        packageDir,
+        outputDir,
+        // releaseBaseUrl deliberately unset — that's required for the
+        // workspace fallback branch to engage (overrides are an explicit
+        // user choice and should not silently swap binaries).
+        log: capture.log,
+        warn: capture.warn,
+        showRestartHint: false,
+        fetchLatestTag: async () => {
+          fetchLatestCalled += 1;
+          return LATEST_TAG;
+        },
+        // Redirect BOTH the primary and fallback URLs to the local test
+        // server. Without this the fallback would hit github.com.
+        buildReleaseUrl: (v: string) => `http://127.0.0.1:${port}/release/v${v}`,
+      });
+
+      // The fallback happy path.
+      expect(result.status).toBe('fallback-staged');
+      expect(result.releaseTag).toBe(LATEST_TAG);
+      expect(result.binaryPath).toBe(join(outputDir, target.assetName));
+      expect(fetchLatestCalled).toBe(1);
+      // Binary actually staged.
+      expect(existsSync(join(outputDir, target.assetName))).toBe(true);
+      expect(await readFile(join(outputDir, target.assetName))).toEqual(fallbackBytes);
+      // CRITICAL invariant for issue #467: meta sidecar must report the
+      // LOCAL cliVersion (so the daemon's converter check accepts the
+      // binary) AND preserve the actual release tag in `effectiveTag` for
+      // operator inspection.
+      const metaContents = await readFile(metadataPathFor(join(outputDir, target.assetName)), 'utf-8');
+      const meta = JSON.parse(metaContents) as { source?: string; cliVersion?: string; effectiveTag?: string };
+      expect(meta.source).toBe('release');
+      expect(meta.cliVersion).toBe(CLI_VERSION);
+      expect(meta.effectiveTag).toBe(LATEST_TAG);
+      // Log surfacing.
+      expect(capture.logs.some((line) => line.includes('falling back to latest tag'))).toBe(true);
+      expect(capture.logs.some((line) => line.includes(`meta tagged v${CLI_VERSION}`))).toBe(true);
+      expect(capture.warns).toEqual([]);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+    }
+  });
+
+  it('skipDownload=true → opts out without hitting the network', async () => {
+    const target = getSupportedTarget();
+    if (!target) return;
+    const { packageDir, outputDir } = await makeWorkspaceFixture();
+
+    const capture = makeLogCapture();
+    const result = await bundleImplicitCurrentPlatform({
+      packageDir,
+      outputDir,
+      releaseBaseUrl: 'http://127.0.0.1:1/should-never-be-called',
+      skipDownload: true,
+      log: capture.log,
+      warn: capture.warn,
+      showRestartHint: false,
+      fetchLatestTag: async () => { throw new Error('should not be called'); },
+    });
+
+    expect(result.status).toBe('opted-out');
+    expect(capture.logs.some((line) => /DKG_SKIP_MARKITDOWN_DOWNLOAD/.test(line))).toBe(true);
+    expect(capture.logs.some((line) => /could not stage the binary/i.test(line))).toBe(true);
+    expect(existsSync(join(outputDir, target.assetName))).toBe(false);
+  });
+
+  it('ciMode=true + no binary → skips silently with a one-line message', async () => {
+    const target = getSupportedTarget();
+    if (!target) return;
+    const { packageDir, outputDir } = await makeWorkspaceFixture();
+
+    const capture = makeLogCapture();
+    const result = await bundleImplicitCurrentPlatform({
+      packageDir,
+      outputDir,
+      releaseBaseUrl: 'http://127.0.0.1:1/should-never-be-called',
+      ciMode: true,
+      log: capture.log,
+      warn: capture.warn,
+      showRestartHint: false,
+      fetchLatestTag: async () => { throw new Error('should not be called'); },
+    });
+
+    expect(result.status).toBe('ci-skipped');
+    expect(capture.logs.some((line) => /CI environment detected/.test(line))).toBe(true);
+    expect(capture.warns).toEqual([]); // CI skip is a notice, not a warning
+    expect(existsSync(join(outputDir, target.assetName))).toBe(false);
+  });
+
+  it('total download failure → returns failed with actionable remediation', async () => {
+    const target = getSupportedTarget();
+    if (!target) return;
+    const { packageDir, outputDir } = await makeWorkspaceFixture();
+    const server = createServer((_req, res) => { res.writeHead(500); res.end(); });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+    const port = (server.address() as { port: number }).port;
+
+    const capture = makeLogCapture();
+    try {
+      const result = await bundleImplicitCurrentPlatform({
+        packageDir,
+        outputDir,
+        releaseBaseUrl: `http://127.0.0.1:${port}/release`,
+        log: capture.log,
+        warn: capture.warn,
+        showRestartHint: false,
+        fetchLatestTag: async () => { throw new Error('should not be called'); },
+      });
+
+      expect(result.status).toBe('failed');
+      expect(result.reason).toBe('download-error');
+      const remediation = capture.warns.join('\n');
+      expect(remediation).toMatch(/could not stage the binary/i);
+      expect(remediation).toMatch(/markitdown:bundle/);
+      expect(remediation).toMatch(/markitdown:build/);
+      expect(remediation).toMatch(/python3-venv/);
+      expect(remediation).toMatch(/restart any running/i);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+    }
+  });
+});
+
+describe('rewriteVenvError (issue #467)', () => {
+  it('rewrites "ensurepip is not available" with per-OS install hints', () => {
+    const original = new Error('Command failed: python3 -m venv /tmp/x');
+    (original as any).stderr = 'The virtual environment was not created successfully because ensurepip is not available.\n';
+    const wrapped = rewriteVenvError(original);
+    expect(wrapped).not.toBe(original);
+    expect(wrapped.message).toContain('python3-venv');
+    expect(wrapped.message).toContain('apt install -y python3-venv');
+    expect(wrapped.message).toContain('brew install python@3');
+    expect(wrapped.message).toContain('markitdown:build');
+  });
+
+  it('rewrites "No module named venv" failures', () => {
+    const original = new Error("Command failed: python -m venv /tmp/x: No module named 'venv'");
+    const wrapped = rewriteVenvError(original);
+    expect(wrapped).not.toBe(original);
+    expect(wrapped.message).toContain('python3-venv');
+  });
+
+  it('passes through unrelated errors untouched', () => {
+    const original = new Error('PyInstaller crashed on entry script');
+    const result = rewriteVenvError(original);
+    expect(result).toBe(original);
+  });
+});
+
+describe('verifyReleaseArtifacts (issue #467)', () => {
+  let tmpPaths: string[] = [];
+  const TEST_VERSION = '99.0.0-rc.1';
+
+  afterEach(async () => {
+    await Promise.all(tmpPaths.map((path) => rm(path, { recursive: true, force: true })));
+    tmpPaths = [];
+  });
+
+  async function stageOneTarget(directory: string, target: { assetName: string }, version: string): Promise<void> {
+    const bytes = Buffer.from(`fake binary ${target.assetName}`, 'utf-8');
+    const hash = sha256Hex(bytes);
+    await writeFile(join(directory, target.assetName), bytes);
+    await writeFile(join(directory, `${target.assetName}.sha256`), `${hash}  ${target.assetName}\n`, 'utf-8');
+    await writeFile(
+      join(directory, `${target.assetName}.meta.json`),
+      `${JSON.stringify({ source: 'build', cliVersion: version }, null, 2)}\n`,
+      'utf-8',
+    );
+  }
+
+  it('accepts a complete artifact directory with matching version', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-verify-ok-'));
+    tmpPaths.push(directory);
+    for (const target of SUPPORTED_TARGETS) {
+      await stageOneTarget(directory, target, TEST_VERSION);
+    }
+    const result = await verifyReleaseArtifacts({ directory, version: TEST_VERSION });
+    expect(result.ok).toBe(true);
+    expect(result.errors).toEqual([]);
+    expect(result.targetCount).toBe(SUPPORTED_TARGETS.length);
+  });
+
+  it('fails when a binary is missing', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-verify-missing-bin-'));
+    tmpPaths.push(directory);
+    // Stage all but the first target.
+    for (let i = 1; i < SUPPORTED_TARGETS.length; i += 1) {
+      await stageOneTarget(directory, SUPPORTED_TARGETS[i], TEST_VERSION);
+    }
+    const result = await verifyReleaseArtifacts({ directory, version: TEST_VERSION });
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e: string) => e.includes(SUPPORTED_TARGETS[0].assetName))).toBe(true);
+    expect(result.errors.some((e: string) => /binary missing/.test(e))).toBe(true);
+  });
+
+  it('fails when a .meta.json reports a different cliVersion than the release tag', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-verify-version-mismatch-'));
+    tmpPaths.push(directory);
+    for (const target of SUPPORTED_TARGETS) {
+      await stageOneTarget(directory, target, '88.0.0-rc.9'); // wrong version in meta
+    }
+    const result = await verifyReleaseArtifacts({ directory, version: TEST_VERSION });
+    expect(result.ok).toBe(false);
+    expect(result.errors.every((e: string) => /meta\.cliVersion/.test(e))).toBe(true);
+  });
+
+  it('fails when a checksum does not match the binary', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-verify-bad-checksum-'));
+    tmpPaths.push(directory);
+    for (const target of SUPPORTED_TARGETS) {
+      await stageOneTarget(directory, target, TEST_VERSION);
+    }
+    // Corrupt the first target's binary so its sidecar hash no longer matches.
+    const tampered = SUPPORTED_TARGETS[0];
+    await writeFile(join(directory, tampered.assetName), Buffer.from('tampered'), 'utf-8');
+    const result = await verifyReleaseArtifacts({ directory, version: TEST_VERSION });
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e: string) => e.includes(tampered.assetName) && /checksum mismatch/.test(e))).toBe(true);
   });
 });

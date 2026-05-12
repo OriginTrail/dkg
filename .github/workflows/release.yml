@@ -259,6 +259,12 @@ jobs:
           merge-multiple: true
           path: release-assets
 
+      - name: Verify MarkItDown release assets
+        # Fail-fast presence + sidecar check: every supported platform must
+        # have a binary, .sha256, and .meta.json whose cliVersion matches
+        # the release tag (issue #467 acceptance criterion).
+        run: node packages/cli/scripts/bundle-markitdown-binaries.mjs --verify-release-artifacts release-assets --version "${{ needs.release-preflight.outputs.version }}"
+
       - name: Extract release notes
         id: notes
         run: |
