@@ -134,13 +134,19 @@ export interface ChainConfig {
   mockIdentityId?: string;
 }
 
-/** Optional LLM config for the Node UI chatbot (OpenAI-compatible API). */
+/**
+ * Optional LLM config for the Node UI chatbot and Layer 2 semantic
+ * extraction. Issue 0001 ships the OpenAI provider; Anthropic is added
+ * in issue 0002 alongside the `DKG_EXTRACTION_PROVIDER` env override.
+ */
 export interface LlmConfig {
-  /** API key (e.g. OpenAI, Anthropic, or compatible provider). */
+  /** Which LLM provider to use. Default 'openai'. */
+  provider?: 'openai';
+  /** API key for the selected provider. */
   apiKey: string;
-  /** Model name (default: gpt-4o-mini). */
+  /** Model name (default: openai → gpt-4o-mini). */
   model?: string;
-  /** Base URL for the API (default: https://api.openai.com/v1). */
+  /** Base URL override (default: openai → https://api.openai.com/v1). */
   baseURL?: string;
 }
 
