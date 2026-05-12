@@ -10,17 +10,10 @@
 import type { LlmConfig } from '../config.js';
 import type { LlmExtractionInput, LlmExtractionOutput } from './llm-extractor.js';
 
-/**
- * Internal alias for {@link LlmExtractionInput}. Providers receive the
- * same shape the public `extractWithLlm` caller supplies; this alias
- * keeps the provider-facing name distinct without duplicating fields.
- */
-export type LlmProviderInvocation = LlmExtractionInput;
-
 export interface LlmProvider {
   readonly name: 'openai' | 'anthropic';
   invoke(
-    input: LlmProviderInvocation,
+    input: LlmExtractionInput,
     config: LlmConfig,
   ): Promise<LlmExtractionOutput>;
 }

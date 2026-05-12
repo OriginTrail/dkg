@@ -12,8 +12,8 @@
  * resolve to `{ triples: [], model }` with a `console.warn('[openai] …')`.
  */
 import type { LlmConfig } from '../../config.js';
-import type { LlmExtractionOutput } from '../llm-extractor.js';
-import { DOCUMENT_KG_PROMPT, type LlmProvider, type LlmProviderInvocation } from '../llm-provider.js';
+import type { LlmExtractionInput, LlmExtractionOutput } from '../llm-extractor.js';
+import { DOCUMENT_KG_PROMPT, type LlmProvider } from '../llm-provider.js';
 import { parseNTriples } from '../parse-ntriples.js';
 
 const DEFAULT_MODEL = 'gpt-4o-mini';
@@ -22,7 +22,7 @@ const REQUEST_TIMEOUT_MS = 60_000;
 const MARKDOWN_TRUNCATE_CHARS = 60_000;
 
 async function invoke(
-  input: LlmProviderInvocation,
+  input: LlmExtractionInput,
   config: LlmConfig,
 ): Promise<LlmExtractionOutput> {
   const model = config.model ?? DEFAULT_MODEL;
