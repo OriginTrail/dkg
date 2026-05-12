@@ -287,6 +287,39 @@ describe('extractWithLlm — Anthropic provider', () => {
     ]);
   });
 
+  it('concatenates multiple text blocks and skips non-text blocks', async () => {
+    // Anthropic Messages API returns `content` as an array of typed blocks.
+    // A response can include thinking/tool_use blocks before/between text
+    // blocks, or simply split N-Triples across multiple text blocks.
+    // parseResponse MUST concatenate all `type === 'text'` blocks and skip
+    // any non-text block (rather than reading only `content[0].text`).
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            content: [
+              { type: 'thinking', thinking: 'meta-reasoning' },
+              { type: 'text', text: '<urn:dkg:doc:1> <http://schema.org/name> "Alpha" .' },
+              { type: 'text', text: '<urn:dkg:doc:1> <http://schema.org/about> <urn:dkg:entity:topic-x> .' },
+            ],
+            usage: { input_tokens: 5, output_tokens: 10 },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+      ),
+    );
+
+    const result = await extractWithLlm(sampleInput, makeConfig({ provider: 'anthropic' }));
+
+    expect(result.triples).toEqual([
+      { subject: 'urn:dkg:doc:1', predicate: 'http://schema.org/name', object: '"Alpha"' },
+      { subject: 'urn:dkg:doc:1', predicate: 'http://schema.org/about', object: 'urn:dkg:entity:topic-x' },
+    ]);
+    expect(result.model).toBe('claude-sonnet-4-6');
+    expect(result.tokensUsed).toBe(15);
+  });
+
   it('default request body matches the pinned Anthropic /v1/messages shape', async () => {
     const captured: { url?: string; init?: RequestInit } = {};
     vi.stubGlobal(
