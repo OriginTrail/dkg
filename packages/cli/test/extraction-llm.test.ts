@@ -160,3 +160,44 @@ describe('parseNTriples — shared module', () => {
     ]);
   });
 });
+
+describe('extractWithLlm — Anthropic provider', () => {
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+    warnSpy.mockRestore();
+  });
+
+  it('happy path: returns parsed triples from /v1/messages 200 with content[0].text', async () => {
+    const rawNT = [
+      '<urn:dkg:doc:1> <http://schema.org/name> "Alpha" .',
+      '<urn:dkg:doc:1> <http://schema.org/about> <urn:dkg:entity:topic-x> .',
+    ].join('\n');
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            content: [{ type: 'text', text: rawNT }],
+            usage: { input_tokens: 11, output_tokens: 22 },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+      ),
+    );
+
+    const result = await extractWithLlm(sampleInput, makeConfig({ provider: 'anthropic' }));
+
+    expect(result.model).toBe('claude-sonnet-4-6');
+    expect(result.tokensUsed).toBe(33);
+    expect(result.triples).toEqual([
+      { subject: 'urn:dkg:doc:1', predicate: 'http://schema.org/name', object: '"Alpha"' },
+      { subject: 'urn:dkg:doc:1', predicate: 'http://schema.org/about', object: 'urn:dkg:entity:topic-x' },
+    ]);
+  });
+});

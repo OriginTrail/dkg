@@ -136,17 +136,26 @@ export interface ChainConfig {
 
 /**
  * Optional LLM config for the Node UI chatbot and Layer 2 semantic
- * extraction. Issue 0001 ships the OpenAI provider; Anthropic is added
- * in issue 0002 alongside the `DKG_EXTRACTION_PROVIDER` env override.
+ * extraction. Provider selection is via the `provider` field; the
+ * `DKG_EXTRACTION_PROVIDER` env var overrides it at call time. Unknown
+ * values fall back to OpenAI with a console warning.
  */
 export interface LlmConfig {
-  /** Which LLM provider to use. Default 'openai'. */
-  provider?: 'openai';
+  /** Which LLM provider to use. Default 'openai'. Overridable via DKG_EXTRACTION_PROVIDER. */
+  provider?: 'openai' | 'anthropic';
   /** API key for the selected provider. */
   apiKey: string;
-  /** Model name (default: openai → gpt-4o-mini). */
+  /**
+   * Model name. Defaults per provider:
+   *   - openai → 'gpt-4o-mini'
+   *   - anthropic → 'claude-sonnet-4-6'
+   */
   model?: string;
-  /** Base URL override (default: openai → https://api.openai.com/v1). */
+  /**
+   * Base URL override. Defaults per provider:
+   *   - openai → 'https://api.openai.com/v1'
+   *   - anthropic → 'https://api.anthropic.com'
+   */
   baseURL?: string;
 }
 
