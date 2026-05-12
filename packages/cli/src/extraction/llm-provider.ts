@@ -8,15 +8,14 @@
  * `DOCUMENT_KG_PROMPT` lives in this module so providers reuse it.
  */
 import type { LlmConfig } from '../config.js';
-import type { LlmExtractionOutput } from './llm-extractor.js';
+import type { LlmExtractionInput, LlmExtractionOutput } from './llm-extractor.js';
 
-export interface LlmProviderInvocation {
-  markdown: string;
-  agentDid: string;
-  documentIri: string;
-  /** Maximum tokens for the LLM response. */
-  maxTokens?: number;
-}
+/**
+ * Internal alias for {@link LlmExtractionInput}. Providers receive the
+ * same shape the public `extractWithLlm` caller supplies; this alias
+ * keeps the provider-facing name distinct without duplicating fields.
+ */
+export type LlmProviderInvocation = LlmExtractionInput;
 
 export interface LlmProvider {
   readonly name: 'openai' | 'anthropic';
