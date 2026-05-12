@@ -1,5 +1,6 @@
 import { describe, expect, it, vi, afterEach, beforeEach } from 'vitest';
 import { extractWithLlm } from '../src/extraction/llm-extractor.js';
+import { parseNTriples } from '../src/extraction/parse-ntriples.js';
 import type { LlmConfig } from '../src/config.js';
 
 function makeConfig(overrides: Partial<LlmConfig> = {}): LlmConfig {
@@ -80,5 +81,82 @@ describe('extractWithLlm — OpenAI provider', () => {
     expect(body.messages[0].content).toContain('knowledge graph extraction engine');
     expect(body.messages[0].content).toContain('RDF N-Triples');
     expect(body.messages[0].content).toContain('output exactly: NONE');
+  });
+
+  it('fail-soft: HTTP 500 returns empty and warns with [openai] prefix', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('upstream boom', { status: 500 })),
+    );
+
+    const result = await extractWithLlm(sampleInput, makeConfig());
+
+    expect(result.triples).toEqual([]);
+    expect(result.model).toBe('gpt-4o-mini');
+    const message = warnSpy.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(message).toMatch(/^\[openai\]/m);
+    expect(message).toContain('500');
+  });
+
+  it('fail-soft: AbortError returns empty and warns with [openai] prefix', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        const err = new Error('aborted');
+        err.name = 'AbortError';
+        throw err;
+      }),
+    );
+
+    const result = await extractWithLlm(sampleInput, makeConfig());
+
+    expect(result.triples).toEqual([]);
+    expect(result.model).toBe('gpt-4o-mini');
+    const message = warnSpy.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(message).toMatch(/^\[openai\]/m);
+    expect(message).toMatch(/time(d)? ?out|abort/i);
+  });
+
+  it('fail-soft: malformed JSON body returns empty and warns with [openai] prefix', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('not json at all', {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })),
+    );
+
+    const result = await extractWithLlm(sampleInput, makeConfig());
+
+    expect(result.triples).toEqual([]);
+    expect(result.model).toBe('gpt-4o-mini');
+    const message = warnSpy.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(message).toMatch(/^\[openai\]/m);
+  });
+});
+
+describe('parseNTriples — shared module', () => {
+  it('parses URI and literal objects, tolerates markdown fences and comments', () => {
+    const raw = [
+      '```turtle',
+      '<urn:dkg:doc:1> <http://schema.org/name> "Alpha" .',
+      '# this is a comment',
+      '<urn:dkg:doc:1> <http://schema.org/about> <urn:dkg:entity:topic-x> .',
+      '<urn:dkg:doc:1> <http://schema.org/description> "Multi\\nline literal"@en .',
+      '',
+      '```',
+    ].join('\n');
+
+    const triples = parseNTriples(raw, 'urn:dkg:doc:1');
+
+    expect(triples).toEqual([
+      { subject: 'urn:dkg:doc:1', predicate: 'http://schema.org/name', object: '"Alpha"' },
+      { subject: 'urn:dkg:doc:1', predicate: 'http://schema.org/about', object: 'urn:dkg:entity:topic-x' },
+      {
+        subject: 'urn:dkg:doc:1',
+        predicate: 'http://schema.org/description',
+        object: '"Multi\\nline literal"@en',
+      },
+    ]);
   });
 });
