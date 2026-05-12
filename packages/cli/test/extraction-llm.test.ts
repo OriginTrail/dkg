@@ -251,3 +251,42 @@ describe('extractWithLlm — Anthropic provider', () => {
     expect(body.system).toContain('output exactly: NONE');
   });
 });
+
+describe('extractWithLlm — provider selection', () => {
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+    warnSpy.mockRestore();
+  });
+
+  it('DKG_EXTRACTION_PROVIDER env var overrides LlmConfig.provider', async () => {
+    const captured: { url?: string } = {};
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string | URL | Request) => {
+        captured.url = String(url);
+        return new Response(
+          JSON.stringify({
+            content: [{ type: 'text', text: 'NONE' }],
+            usage: { input_tokens: 1, output_tokens: 1 },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }),
+    );
+    vi.stubEnv('DKG_EXTRACTION_PROVIDER', 'anthropic');
+
+    const result = await extractWithLlm(
+      sampleInput,
+      makeConfig({ provider: 'openai' }),
+    );
+
+    // Routed to Anthropic despite config.provider === 'openai'
+    expect(captured.url).toBe('https://api.anthropic.com/v1/messages');
+    expect(result.model).toBe('claude-sonnet-4-6');
+  });
+});
