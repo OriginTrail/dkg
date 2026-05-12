@@ -147,7 +147,7 @@ export interface LlmConfig {
   apiKey: string;
   /**
    * Model name. Defaults per provider:
-   *   - openai → 'gpt-4o-mini'
+   *   - openai → 'gpt-5-nano'
    *   - anthropic → 'claude-sonnet-4-6'
    */
   model?: string;

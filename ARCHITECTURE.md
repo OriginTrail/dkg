@@ -523,7 +523,7 @@ class LlmProvider {
 class OpenaiProvider {
   <<provider>>
   +name = "openai"
-  +defaultModel = "gpt-4o-mini"
+  +defaultModel = "gpt-5-nano"
   +endpoint = POST baseURL/chat/completions
   +auth = Bearer apiKey
 }
@@ -596,7 +596,7 @@ Files under `packages/cli/src/extraction/`:
 |---|---|
 | `llm-extractor.ts` | Dispatcher: resolves provider, invokes it, applies the never-throw seam. |
 | `llm-provider.ts` | `LlmProvider` interface and the shared `DOCUMENT_KG_PROMPT`. |
-| `providers/openai.ts` | OpenAI Chat Completions transport. Default `gpt-4o-mini`, baseURL `https://api.openai.com/v1`. |
+| `providers/openai.ts` | OpenAI Chat Completions transport. Default `gpt-5-nano`, baseURL `https://api.openai.com/v1`. |
 | `providers/anthropic.ts` | Anthropic Messages transport. Default `claude-sonnet-4-6`, baseURL `https://api.anthropic.com`. |
 | `parse-ntriples.ts` | Tolerant N-Triples parser shared by both providers; strips fences and comment lines. |
 | `markdown-extractor.ts` | Layer 1 structural extractor; runs independently of any LLM. |

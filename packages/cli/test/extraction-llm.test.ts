@@ -8,7 +8,7 @@ import type { LlmConfig } from '../src/config.js';
 
 describe('LlmProvider — DEFAULT_MODEL on the interface', () => {
   it('each provider exposes its DEFAULT_MODEL via the LlmProvider interface', () => {
-    expect(openaiProvider.defaultModel).toBe('gpt-4o-mini');
+    expect(openaiProvider.defaultModel).toBe('gpt-5-nano');
     expect(anthropicProvider.defaultModel).toBe('claude-sonnet-4-6');
   });
 });
@@ -39,7 +39,7 @@ describe('extractWithLlm — OpenAI provider', () => {
   it('fail-soft: missing apiKey returns empty and warns with [openai] prefix', async () => {
     const result = await extractWithLlm(sampleInput, makeConfig({ apiKey: '' }));
     expect(result.triples).toEqual([]);
-    expect(result.model).toBe('gpt-4o-mini');
+    expect(result.model).toBe('gpt-5-nano');
     expect(warnSpy).toHaveBeenCalled();
     const message = warnSpy.mock.calls.map((c) => String(c[0])).join('\n');
     expect(message).toMatch(/^\[openai\]/m);
@@ -65,7 +65,7 @@ describe('extractWithLlm — OpenAI provider', () => {
     const result = await extractWithLlm(sampleInput, makeConfig());
 
     expect(result.triples).toEqual([]);
-    expect(result.model).toBe('gpt-4o-mini');
+    expect(result.model).toBe('gpt-5-nano');
     expect(result.tokensUsed).toBe(7);
 
     expect(captured.url).toBe('https://api.openai.com/v1/chat/completions');
@@ -76,7 +76,7 @@ describe('extractWithLlm — OpenAI provider', () => {
 
     const body = JSON.parse(String(captured.init?.body));
     expect(body).toEqual({
-      model: 'gpt-4o-mini',
+      model: 'gpt-5-nano',
       messages: [
         { role: 'system', content: DOCUMENT_KG_PROMPT },
         {
@@ -102,7 +102,7 @@ describe('extractWithLlm — OpenAI provider', () => {
     const result = await extractWithLlm(sampleInput, makeConfig());
 
     expect(result.triples).toEqual([]);
-    expect(result.model).toBe('gpt-4o-mini');
+    expect(result.model).toBe('gpt-5-nano');
     const message = warnSpy.mock.calls.map((c) => String(c[0])).join('\n');
     expect(message).toMatch(/^\[openai\]/m);
     expect(message).toContain('500');
@@ -121,7 +121,7 @@ describe('extractWithLlm — OpenAI provider', () => {
     const result = await extractWithLlm(sampleInput, makeConfig());
 
     expect(result.triples).toEqual([]);
-    expect(result.model).toBe('gpt-4o-mini');
+    expect(result.model).toBe('gpt-5-nano');
     const message = warnSpy.mock.calls.map((c) => String(c[0])).join('\n');
     expect(message).toMatch(/^\[openai\]/m);
     expect(message).toMatch(/time(d)? ?out|abort/i);
@@ -139,7 +139,7 @@ describe('extractWithLlm — OpenAI provider', () => {
     const result = await extractWithLlm(sampleInput, makeConfig());
 
     expect(result.triples).toEqual([]);
-    expect(result.model).toBe('gpt-4o-mini');
+    expect(result.model).toBe('gpt-5-nano');
     const message = warnSpy.mock.calls.map((c) => String(c[0])).join('\n');
     expect(message).toMatch(/^\[openai\]/m);
   });
@@ -436,7 +436,7 @@ describe('extractWithLlm — provider selection', () => {
     const result = await extractWithLlm(sampleInput, makeConfig());
 
     expect(captured.url).toBe('https://api.openai.com/v1/chat/completions');
-    expect(result.model).toBe('gpt-4o-mini');
+    expect(result.model).toBe('gpt-5-nano');
     const message = warnSpy.mock.calls.map((c) => String(c[0])).join('\n');
     expect(message).toMatch(/Unknown provider "mystery-vendor"/);
     expect(message).toMatch(/falling back to openai/);

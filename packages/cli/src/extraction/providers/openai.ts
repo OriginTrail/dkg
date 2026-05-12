@@ -16,7 +16,7 @@ import type { LlmExtractionInput, LlmExtractionOutput } from '../llm-extractor.j
 import { DOCUMENT_KG_PROMPT, type LlmProvider } from '../llm-provider.js';
 import { parseNTriples } from '../parse-ntriples.js';
 
-const DEFAULT_MODEL = 'gpt-4o-mini';
+const DEFAULT_MODEL = 'gpt-5-nano';
 const DEFAULT_BASE_URL = 'https://api.openai.com/v1';
 const REQUEST_TIMEOUT_MS = 60_000;
 const MARKDOWN_TRUNCATE_CHARS = 60_000;

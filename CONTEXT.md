@@ -55,7 +55,7 @@ Layer 2 is provider-pluggable via the `LlmProvider` interface in
 [packages/cli/src/extraction/llm-provider.ts](packages/cli/src/extraction/llm-provider.ts).
 Shipped concrete providers:
 
-- **`OpenAiProvider`** — `gpt-4o-mini` default, `POST {baseURL}/chat/completions`
+- **`OpenAiProvider`** — `gpt-5-nano` default, `POST {baseURL}/chat/completions`
   with `Authorization: Bearer <apiKey>`. Default baseURL `https://api.openai.com/v1`.
 - **`AnthropicProvider`** — `claude-sonnet-4-6` default, `POST {baseURL}/v1/messages`
   with `x-api-key: <apiKey>` and `anthropic-version: 2023-06-01`. Default
