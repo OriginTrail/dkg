@@ -110,7 +110,7 @@ import type { IntegrationEntry, TrustTier } from '../../integrations/schema.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
 import { loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
-import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
+import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm, MARKITDOWN_CONTENT_TYPES } from '../../extraction/index.js';
 import {
   expectedBundledMarkItDownBuildMetadata,
   readCliPackageVersion,
@@ -424,12 +424,15 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     // skill-driven clients see Markdown ingestion as supported regardless of
     // converter availability.
     const pipelines = extractionRegistry.availableContentTypes();
+    const available = new Set(pipelines);
+    const unavailablePipelines = MARKITDOWN_CONTENT_TYPES.filter((ct) => !available.has(ct));
     const content = buildSkillMd({
       version: nodeVersion,
       baseUrl,
       peerId: agent.peerId,
       nodeRole: config.nodeRole ?? "edge",
       extractionPipelines: [...new Set(["text/markdown", ...pipelines])],
+      unavailablePipelines,
     });
     const etag = skillEtag(content);
     if (req.headers["if-none-match"] === etag) {
@@ -477,6 +480,23 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       config.blockExplorerUrl ?? deriveBlockExplorerUrl(chainConf?.chainId);
     const identityId = agent.publisher.getIdentityId();
     const localAgentIntegrations = listLocalAgentIntegrations(config);
+    // text/markdown is always natively handled by the import-file route,
+    // mirroring the /.well-known/skill.md surface. The registry only carries
+    // Phase-1 converters (currently MarkItDown), so the merge here keeps
+    // markdown in the advertised list regardless of converter availability.
+    const registeredPipelines = extractionRegistry.availableContentTypes();
+    const extractionPipelines = [...new Set(["text/markdown", ...registeredPipelines])];
+    const availablePipelineSet = new Set(registeredPipelines);
+    const warnings: Array<{ code: string; message: string; remediation?: string }> = [];
+    if (!MARKITDOWN_CONTENT_TYPES.every((ct) => availablePipelineSet.has(ct))) {
+      warnings.push({
+        code: "markitdown_unavailable",
+        message:
+          "MarkItDown binary not registered — PDF, DOCX, PPTX, XLSX, CSV, HTML, EPUB, and XML extraction unavailable. Imports of those types will return extraction.status='skipped' and the file will be stored as a blob.",
+        remediation:
+          "Run `pnpm --filter @origintrail-official/dkg run markitdown:bundle`, then restart the daemon.",
+      });
+    }
     return jsonResponse(res, 200, {
       name: config.name,
       version: nodeVersion,
@@ -506,6 +526,8 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
         daemonState.lastUpdateCheck.checkedAt > 0 ? !daemonState.lastUpdateCheck.upToDate : null,
       latestCommit: daemonState.lastUpdateCheck.latestCommit || null,
       latestVersion: daemonState.lastUpdateCheck.latestVersion || null,
+      extractionPipelines,
+      warnings,
     });
   }
 

@@ -1532,7 +1532,10 @@ export async function runDaemonInner(
   log(`Extraction pipelines: ${supportedIngestionTypes.join(", ")}`);
   if (!isMarkItDownAvailable()) {
     log(
-      "MarkItDown binary not found — non-markdown document extraction unavailable (files stored as blobs)",
+      "MarkItDown binary not found — non-markdown document extraction unavailable (files stored as blobs).",
+    );
+    log(
+      "To enable: run `pnpm --filter @origintrail-official/dkg run markitdown:bundle`, then restart this daemon.",
     );
   }
 

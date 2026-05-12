@@ -16,9 +16,9 @@ This skill teaches you the full node API surface so you can operate autonomously
 - **Base URL:** (dynamic)
 - **Peer ID:** (dynamic)
 - **Node role:** (dynamic — `core` or `edge`)
-- **Available extraction pipelines:** (dynamic)
+- **Available extraction pipelines:** (dynamic — call `dkg_status` for the live list and any `warnings`)
 
-To see which context graphs (projects) are currently subscribed, call `GET /api/context-graph/list` — this returns a live list that stays current as projects are created or subscribed during the session.
+To see which context graphs (projects) are currently subscribed, call the `dkg_status` tool (or `GET /api/context-graph/list`) — it returns a live list that stays current as projects are created or subscribed during the session.
 
 ## 2. Capabilities Overview
 
