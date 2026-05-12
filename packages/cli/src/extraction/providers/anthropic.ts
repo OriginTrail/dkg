@@ -28,8 +28,22 @@ export const anthropicProvider: LlmProvider = {
   },
 
   parseResponse(data: any) {
+    // Anthropic Messages API responses model `content` as an array of typed
+    // blocks. A response may include thinking/tool_use blocks before/between
+    // text blocks, and the model can legitimately split output across
+    // multiple `{ type: 'text', text: '…' }` entries. Reading only
+    // `content[0].text` drops everything past index 0 and treats a leading
+    // non-text block as a missing response. Filter to text blocks, join,
+    // and return undefined when there are none so the runner emits the
+    // "response text missing" warn instead of silently treating empty as
+    // legitimate output.
+    const blocks: any[] = Array.isArray(data?.content) ? data.content : [];
+    const text = blocks
+      .filter((b) => b?.type === 'text' && typeof b?.text === 'string')
+      .map((b) => b.text)
+      .join('\n');
     return {
-      text: data?.content?.[0]?.text,
+      text: text || undefined,
       tokensUsed: (data?.usage?.input_tokens ?? 0) + (data?.usage?.output_tokens ?? 0),
     };
   },
