@@ -361,6 +361,51 @@ describe('extractWithLlm — provider selection', () => {
     expect(result.model).toBe('claude-sonnet-4-6');
   });
 
+  it('shared-parser parity: identical raw N-Triples yields deep-equal triples from both providers', async () => {
+    const rawNT = [
+      '<urn:dkg:doc:1> <http://schema.org/name> "Parity Doc" .',
+      '<urn:dkg:doc:1> <http://schema.org/author> <urn:dkg:entity:alice> .',
+      '<urn:dkg:doc:1> <http://schema.org/datePublished> "2024-01-15" .',
+      '<urn:dkg:entity:alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://schema.org/Person> .',
+      '<urn:dkg:entity:alice> <http://schema.org/name> "Alice"@en .',
+      '<urn:dkg:doc:1> <http://schema.org/about> <urn:dkg:entity:topic-x> .',
+    ].join('\n');
+
+    // Run via OpenAI response shape.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            choices: [{ message: { content: rawNT } }],
+            usage: { total_tokens: 50 },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+      ),
+    );
+    const openaiResult = await extractWithLlm(sampleInput, makeConfig({ provider: 'openai' }));
+
+    // Reset and run via Anthropic response shape with identical raw text.
+    vi.unstubAllGlobals();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            content: [{ type: 'text', text: rawNT }],
+            usage: { input_tokens: 20, output_tokens: 30 },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+      ),
+    );
+    const anthropicResult = await extractWithLlm(sampleInput, makeConfig({ provider: 'anthropic' }));
+
+    expect(openaiResult.triples).toEqual(anthropicResult.triples);
+    expect(openaiResult.triples).toHaveLength(6);
+  });
+
   it('unknown provider value warns and falls back to OpenAI', async () => {
     const captured: { url?: string } = {};
     vi.stubGlobal(
