@@ -7,6 +7,7 @@ import {
   PROTOCOL_MESSAGE,
   PROTOCOL_ACCESS,
   PROTOCOL_QUERY_REMOTE,
+  PROTOCOL_SWM_SENDER_KEY,
   PROTOCOL_VERIFY_PROPOSAL,
   PROTOCOL_VERIFY_APPROVAL,
   PROTOCOL_STORAGE_ACK,
@@ -54,6 +55,7 @@ describe('V10 protocol stream IDs', () => {
     expect(PROTOCOL_MESSAGE).toBe('/dkg/10.0.0/message');
     expect(PROTOCOL_ACCESS).toBe('/dkg/10.0.0/private-access');
     expect(PROTOCOL_QUERY_REMOTE).toBe('/dkg/10.0.0/query-remote');
+    expect(PROTOCOL_SWM_SENDER_KEY).toBe('/dkg/10.0.0/swm-sender-key');
   });
 
   it('defines new VERIFY and ACK protocols', () => {

@@ -22,11 +22,20 @@ export {
   DKGPublisher,
   StaleWriteError,
   type DKGPublisherConfig,
+  type WorkspaceSenderKeyEncryptInput,
+  type WorkspaceSenderKeyEncryptor,
   type ShareOptions,
   type ShareResult,
   type ShareConditionalOptions,
   type CASCondition,
 } from './dkg-publisher.js';
+export {
+  resolveWorkspaceAgentRecipients,
+  type WorkspaceAgentRecipientResolution,
+  type WorkspaceAgentRecipient,
+  type WorkspaceAgentRecipientResolver,
+  type WorkspaceAgentRecipientResolverInput,
+} from './workspace-agent-recipients.js';
 export {
   ACKCollector,
   type ACKCollectorDeps,
