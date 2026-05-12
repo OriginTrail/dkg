@@ -84,7 +84,8 @@ describe('extractWithLlm — OpenAI provider', () => {
           content: 'Document URI: urn:dkg:doc:1\n\n# Doc\n\nHello world.',
         },
       ],
-      max_completion_tokens: 4096,
+      max_completion_tokens: 16000,
+      reasoning_effort: 'low',
     });
     // Pin: reasoning-model body MUST NOT include the legacy keys.
     expect(body).not.toHaveProperty('max_tokens');
@@ -93,6 +94,35 @@ describe('extractWithLlm — OpenAI provider', () => {
     expect(body.messages[0].content).toContain('knowledge graph extraction engine');
     expect(body.messages[0].content).toContain('RDF N-Triples');
     expect(body.messages[0].content).toContain('output exactly: NONE');
+  });
+
+  it('reasoning-model honors caller-supplied maxTokens override for max_completion_tokens', async () => {
+    const captured: { init?: RequestInit } = {};
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+        captured.init = init;
+        return new Response(
+          JSON.stringify({
+            choices: [{ message: { content: 'NONE' } }],
+            usage: { total_tokens: 5 },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }),
+    );
+
+    const result = await extractWithLlm(
+      { ...sampleInput, maxTokens: 8192 },
+      makeConfig({ provider: 'openai' }),
+    );
+
+    expect(result.model).toBe('gpt-5-nano');
+    const body = JSON.parse(String(captured.init?.body));
+    expect(body.max_completion_tokens).toBe(8192);
+    expect(body.reasoning_effort).toBe('low');
+    expect(body).not.toHaveProperty('max_tokens');
+    expect(body).not.toHaveProperty('temperature');
   });
 
   it('legacy chat-completions model (gpt-4o-mini) keeps max_tokens + temperature shape', async () => {
@@ -134,8 +164,9 @@ describe('extractWithLlm — OpenAI provider', () => {
       max_tokens: 4096,
       temperature: 0.1,
     });
-    // Pin: legacy body MUST NOT have the reasoning-model key.
+    // Pin: legacy body MUST NOT have any reasoning-model keys.
     expect(body).not.toHaveProperty('max_completion_tokens');
+    expect(body).not.toHaveProperty('reasoning_effort');
   });
 
   it('fail-soft: HTTP 500 returns empty and warns with [openai] prefix', async () => {
