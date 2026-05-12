@@ -1,4 +1,10 @@
 // Pluggable LLM provider for Layer 2 semantic extraction.
+//
+// A provider declares two things: how to build the HTTP request from an
+// extraction input, and how to read the LLM's response payload back into
+// `{ text, tokensUsed }`. Everything else — apiKey check, 60s timeout,
+// fail-soft branches, JSON parse, NONE/empty handling, parseNTriples —
+// lives in `invokeProvider` below.
 import type { LlmConfig } from '../config.js';
 import type { LlmExtractionInput, LlmExtractionOutput } from './llm-extractor.js';
 import { parseNTriples } from './parse-ntriples.js';
@@ -6,50 +12,41 @@ import { parseNTriples } from './parse-ntriples.js';
 export interface LlmProvider {
   readonly name: 'openai' | 'anthropic';
   readonly defaultModel: string;
-  invoke(input: LlmExtractionInput, config: LlmConfig): Promise<LlmExtractionOutput>;
-}
 
-/**
- * Per-provider differences in the shared request/response scaffolding.
- * Everything else (apiKey check, 60s timeout, fail-soft, JSON parse,
- * NONE/empty handling, parseNTriples) is centralised in `runProvider`.
- */
-export interface ProviderSpec {
-  readonly name: 'openai' | 'anthropic';
-  readonly defaultModel: string;
+  /** Build the HTTP request to send. Called once per `invokeProvider` call. */
   buildRequest(
     input: LlmExtractionInput,
     config: LlmConfig,
     model: string,
   ): { url: string; headers: Record<string, string>; body: unknown };
-  parseResponse(data: any): {
+
+  /** Extract the LLM-emitted text and token count from the response JSON. */
+  parseResponse(data: unknown): {
     text: string | undefined;
     tokensUsed: number | undefined;
   };
 }
 
-export function createProvider(spec: ProviderSpec): LlmProvider {
-  return {
-    name: spec.name,
-    defaultModel: spec.defaultModel,
-    invoke: (input, config) => runProvider(spec, input, config),
-  };
-}
-
-async function runProvider(
-  spec: ProviderSpec,
+/**
+ * Run an `LlmProvider` end-to-end against an extraction input. Owns the
+ * shared scaffolding so providers only declare what makes them different.
+ * Never throws — every failure mode returns `{ triples: [], model }` and
+ * emits a `[<provider>] …` console.warn.
+ */
+export async function invokeProvider(
+  provider: LlmProvider,
   input: LlmExtractionInput,
   config: LlmConfig,
 ): Promise<LlmExtractionOutput> {
-  const model = config.model ?? spec.defaultModel;
+  const model = config.model ?? provider.defaultModel;
   const empty: LlmExtractionOutput = { triples: [], model };
 
   if (!config.apiKey) {
-    console.warn(`[${spec.name}] missing apiKey — semantic extraction skipped`);
+    console.warn(`[${provider.name}] missing apiKey — semantic extraction skipped`);
     return empty;
   }
 
-  const { url, headers, body } = spec.buildRequest(input, config, model);
+  const { url, headers, body } = provider.buildRequest(input, config, model);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 60_000);
   try {
@@ -61,34 +58,29 @@ async function runProvider(
     });
 
     if (!res.ok) {
-      console.warn(
-        `[${spec.name}] API returned ${res.status}: ${await res.text().catch(() => '')}`,
-      );
+      console.warn(`[${provider.name}] API returned ${res.status}: ${await res.text().catch(() => '')}`);
       return empty;
     }
 
-    let data: any;
-    try {
-      data = await res.json();
-    } catch (err: any) {
-      console.warn(`[${spec.name}] malformed response body: ${err?.message ?? err}`);
+    let data: unknown;
+    try { data = await res.json(); }
+    catch (err: any) {
+      console.warn(`[${provider.name}] malformed response body: ${err?.message ?? err}`);
       return empty;
     }
 
-    const { text, tokensUsed } = spec.parseResponse(data);
+    const { text, tokensUsed } = provider.parseResponse(data);
     if (typeof text !== 'string') {
-      console.warn(`[${spec.name}] malformed response body: response text missing`);
+      console.warn(`[${provider.name}] malformed response body: response text missing`);
       return empty;
     }
     const trimmed = text.trim();
     if (!trimmed || trimmed === 'NONE') return { triples: [], model, tokensUsed };
     return { triples: parseNTriples(trimmed, input.documentIri), model, tokensUsed };
   } catch (err: any) {
-    console.warn(
-      err?.name === 'AbortError'
-        ? `[${spec.name}] request timed out after 60s`
-        : `[${spec.name}] extraction failed: ${err?.message ?? err}`,
-    );
+    console.warn(err?.name === 'AbortError'
+      ? `[${provider.name}] request timed out after 60s`
+      : `[${provider.name}] extraction failed: ${err?.message ?? err}`);
     return empty;
   } finally {
     clearTimeout(timeout);

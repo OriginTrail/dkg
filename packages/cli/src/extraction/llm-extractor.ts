@@ -1,7 +1,7 @@
 // Layer 2 semantic extraction dispatcher. Routes to the configured
 // LlmProvider; DKG_EXTRACTION_PROVIDER env > LlmConfig.provider > 'openai'.
 import type { LlmConfig } from '../config.js';
-import type { LlmProvider } from './llm-provider.js';
+import { invokeProvider, type LlmProvider } from './llm-provider.js';
 import { openaiProvider } from './providers/openai.js';
 import { anthropicProvider } from './providers/anthropic.js';
 
@@ -32,7 +32,7 @@ export async function extractWithLlm(
 ): Promise<LlmExtractionOutput> {
   const provider = resolveProvider(config);
   try {
-    return await provider.invoke(input, config);
+    return await invokeProvider(provider, input, config);
   } catch (err: any) {
     console.warn(`[llm-extractor] provider "${provider.name}" threw: ${err?.message ?? err}`);
     return { triples: [], model: config.model ?? provider.defaultModel };

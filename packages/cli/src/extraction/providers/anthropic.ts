@@ -1,13 +1,12 @@
-// Anthropic provider (Messages API). All shared scaffolding (timeout,
-// fail-soft, JSON parse, parseNTriples) lives in the runner inside
-// `llm-provider.ts`; this file declares only the differences.
-import { createProvider, DOCUMENT_KG_PROMPT, type ProviderSpec } from '../llm-provider.js';
+// Anthropic provider (Messages API).
+import { DOCUMENT_KG_PROMPT, type LlmProvider } from '../llm-provider.js';
 
 const DEFAULT_MODEL = 'claude-sonnet-4-6';
 
-const spec: ProviderSpec = {
+export const anthropicProvider: LlmProvider = {
   name: 'anthropic',
   defaultModel: DEFAULT_MODEL,
+
   buildRequest(input, config, model) {
     const baseURL = config.baseURL ?? 'https://api.anthropic.com';
     return {
@@ -27,12 +26,11 @@ const spec: ProviderSpec = {
       },
     };
   },
-  parseResponse(data) {
+
+  parseResponse(data: any) {
     return {
       text: data?.content?.[0]?.text,
       tokensUsed: (data?.usage?.input_tokens ?? 0) + (data?.usage?.output_tokens ?? 0),
     };
   },
 };
-
-export const anthropicProvider = createProvider(spec);
