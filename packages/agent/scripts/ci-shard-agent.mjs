@@ -68,6 +68,14 @@ const WEIGHTS = {
 };
 const DEFAULT_WEIGHT = 500;
 
+// Test files that own a dedicated CI runner and therefore must NOT be
+// included in the bin-packed agent shards (otherwise they'd run twice).
+// Keep this list in sync with the standalone job names in `.github/workflows/ci.yml`.
+const STANDALONE_FILES = new Set([
+  // V10 axiom audit owns `tornado-axiom-audit` (Tornado: axiom audit).
+  'test/axiom-checks.e2e.test.ts',
+]);
+
 function walk(dir) {
   const out = [];
   for (const entry of readdirSync(dir)) {
@@ -91,6 +99,7 @@ const packageRoot = process.cwd();
 const testRoot = join(packageRoot, 'test');
 const files = walk(testRoot)
   .map(abs => relative(packageRoot, abs))
+  .filter(f => !STANDALONE_FILES.has(f))
   .sort();
 
 if (files.length === 0) {
