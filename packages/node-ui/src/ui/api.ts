@@ -866,7 +866,13 @@ function buildLocalAgentChatBody(
     ...(opts?.profile ? { profile: opts.profile } : {}),
     ...(opts?.attachments?.length ? { attachmentRefs: opts.attachments } : {}),
     ...(opts?.contextEntries?.length ? { contextEntries: opts.contextEntries } : {}),
-    ...(opts?.contextGraphId ? { contextGraphId: opts.contextGraphId } : {}),
+    // Always include `contextGraphId` (as null when no project is selected)
+    // so the daemon can tell "no project" apart from "field accidentally
+    // omitted". The daemon's optionalTrimmedString helper resolves null to
+    // undefined, which then triggers the per-session contextGraphId fallback
+    // cache in `routes/hermes.ts` if a prior turn on the same session
+    // carried a real value.
+    contextGraphId: opts?.contextGraphId ?? null,
   };
 }
 

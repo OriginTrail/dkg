@@ -1873,6 +1873,90 @@ assert turns[1]["turn_id"].split(":")[-2] == "2", turns
     expect(result.status, result.stderr || result.stdout).toBe(0);
   });
 
+  it('strips passive recall blocks before queuing offline Hermes turns', () => {
+    const script = String.raw`
+import importlib.util
+import json
+import sys
+import tempfile
+import types
+from pathlib import Path
+
+home = Path(tempfile.mkdtemp(prefix="hermes-dkg-provider-strip-"))
+
+agent_pkg = types.ModuleType("agent")
+memory_provider = types.ModuleType("agent.memory_provider")
+class MemoryProvider:
+    pass
+memory_provider.MemoryProvider = MemoryProvider
+sys.modules["agent"] = agent_pkg
+sys.modules["agent.memory_provider"] = memory_provider
+
+tools_pkg = types.ModuleType("tools")
+registry = types.ModuleType("tools.registry")
+def tool_error(message):
+    return json.dumps({"error": message})
+registry.tool_error = tool_error
+sys.modules["tools"] = tools_pkg
+sys.modules["tools.registry"] = registry
+
+constants = types.ModuleType("hermes_constants")
+constants.get_hermes_home = lambda: home
+sys.modules["hermes_constants"] = constants
+
+sys.modules["plugins"] = types.ModuleType("plugins")
+sys.modules["plugins.memory"] = types.ModuleType("plugins.memory")
+
+plugin_dir = Path(r"${process.cwd().replace(/\\/g, '\\\\')}") / "hermes-plugin"
+spec = importlib.util.spec_from_file_location(
+    "plugins.memory.dkg",
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+module = importlib.util.module_from_spec(spec)
+sys.modules["plugins.memory.dkg"] = module
+spec.loader.exec_module(module)
+
+provider = module.DKGMemoryProvider()
+provider._config = {"profile_name": "dev"}
+provider._agent_name = "agent"
+provider._session_id = module._scoped_session_id("session-1", provider._config)
+provider._cache = module._load_cache("agent")
+provider._offline = True
+provider._client = None
+
+assistant = "before <Recalled-Memory data-source='dkg-auto-recall'><snippet>secret recall</snippet></recalled-memory> after"
+provider.sync_turn("user", assistant)
+
+cache = module._load_cache("agent")
+turn = next(item for item in cache["queued_writes"] if item.get("type") == "turn")
+assert turn["assistant"] == "before  after", turn
+assert "secret recall" not in turn["assistant"], turn
+assert "recalled-memory" not in turn["assistant"], turn
+
+provider.sync_turn('project question\n\n<dkg-node-ui-context context_graph_id="project-cg" source="dkg-node-ui" />', "answer")
+cache = module._load_cache("agent")
+project_turn = [item for item in cache["queued_writes"] if item.get("type") == "turn"][-1]
+assert project_turn["user"] == "project question", project_turn
+assert "dkg-node-ui-context" not in project_turn["user"], project_turn
+
+malformed = "keep <Recalled-Memory data-source='dkg-auto-recall'><snippet>unterminated"
+assert module._strip_recalled_memory_blocks(malformed) == "keep "
+unquoted = "keep <Recalled-Memory data-source=dkg-auto-recall><snippet>unterminated"
+assert module._strip_recalled_memory_blocks(unquoted) == "keep "
+unrelated = "keep <Recalled-Memory><snippet>unterminated"
+assert module._strip_recalled_memory_blocks(unrelated) == unrelated
+wrong_source = "keep <Recalled-Memory data-source='other'><snippet>unterminated"
+assert module._strip_recalled_memory_blocks(wrong_source) == wrong_source
+`;
+    const result = spawnSync('python', ['-B', '-c', script], {
+      cwd: process.cwd(),
+      encoding: 'utf-8',
+    });
+
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+  });
+
   it('CLI sync preserves queued turn idempotency fields', () => {
     const script = String.raw`
 import importlib.util
@@ -1972,7 +2056,7 @@ assert saved[0][0]["queued_writes"] == [], saved
     expect(result.status, result.stderr || result.stdout).toBe(0);
   });
 
-  it('uses assertion-scoped reads for prefetch without requiring an agent-scoped token', () => {
+  it('prefetches agent-context memory across WM/SWM/VM with provenance', () => {
     const script = String.raw`
 import importlib.util
 import json
@@ -2047,34 +2131,407 @@ class FakeClient:
     def __init__(self):
         self.calls = []
 
-    def query_assertion(self, assertion_name, context_graph_id, sparql=""):
-        self.calls.append((assertion_name, context_graph_id, sparql))
-        return {
-            "quads": [
-                {
-                    "subject": "urn:hermes:agent:memory",
-                    "predicate": "urn:hermes:content",
-                    "object": "Needle fact from DKG",
-                }
-            ]
-        }
+    def _resolve_agent_address(self):
+        return "0xAgent"
 
-    def query(self, *args, **kwargs):
-        raise AssertionError("prefetch should use the assertion-scoped query path")
+    def query(self, sparql, context_graph_id, **kwargs):
+        self.calls.append((context_graph_id, kwargs))
+        return {
+            "result": {
+                "bindings": [{
+                    "uri": {"value": f"urn:{context_graph_id}:{kwargs['view']}"},
+                    "pred": {"value": "schema:description"},
+                    "text": {"value": f"Needle passive memory from {context_graph_id} {kwargs['view']}"},
+                }],
+            },
+        }
 
 provider = module.DKGMemoryProvider()
 provider._offline = False
 provider._client = FakeClient()
 provider._assertion_id = "hermes"
-provider._context_graph = "cg:test"
+provider._context_graph = "agent-context"
 text = provider.prefetch("Needle")
 
-assert len(provider._client.calls) == 1, provider._client.calls
-assert provider._client.calls[0][0] == "hermes", provider._client.calls
-assert provider._client.calls[0][1] == "cg:test", provider._client.calls
-assert "SELECT ?s ?p ?o" in provider._client.calls[0][2], provider._client.calls
-assert "CONTAINS" in provider._client.calls[0][2], provider._client.calls
-assert "Needle fact from DKG" in text, text
+assert provider._client.calls == [
+    ("agent-context", {"view": "working-memory", "agent_address": "0xAgent"}),
+    ("agent-context", {"view": "shared-working-memory", "agent_address": None}),
+    ("agent-context", {"view": "verified-memory", "agent_address": None}),
+], provider._client.calls
+assert '<recalled-memory data-source="dkg-auto-recall">' in text, text
+assert 'context_graph_id="agent-context"' in text, text
+assert 'view="working-memory"' in text, text
+assert 'layer="agent-context-wm"' in text, text
+assert 'source="sessions"' in text, text
+assert 'score="1.0000"' in text, text
+`;
+    const result = spawnSync('python', ['-B', '-c', script], {
+      cwd: process.cwd(),
+      encoding: 'utf-8',
+    });
+
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+  });
+
+  it('prefetches supplied project memory across six layers and matches memory_search ranking', () => {
+    const script = String.raw`
+import importlib.util
+import json
+import sys
+import tempfile
+import types
+from pathlib import Path
+
+home = Path(tempfile.mkdtemp(prefix="hermes-dkg-prefetch-project-"))
+
+agent_pkg = types.ModuleType("agent")
+memory_provider = types.ModuleType("agent.memory_provider")
+class MemoryProvider:
+    pass
+memory_provider.MemoryProvider = MemoryProvider
+sys.modules["agent"] = agent_pkg
+sys.modules["agent.memory_provider"] = memory_provider
+
+tools_pkg = types.ModuleType("tools")
+registry = types.ModuleType("tools.registry")
+def tool_error(message):
+    return json.dumps({"error": message})
+registry.tool_error = tool_error
+sys.modules["tools"] = tools_pkg
+sys.modules["tools.registry"] = registry
+
+constants = types.ModuleType("hermes_constants")
+constants.get_hermes_home = lambda: home
+sys.modules["hermes_constants"] = constants
+
+sys.modules["plugins"] = types.ModuleType("plugins")
+sys.modules["plugins.memory"] = types.ModuleType("plugins.memory")
+
+plugin_dir = Path(r"${process.cwd().replace(/\\/g, '\\\\')}") / "hermes-plugin"
+spec = importlib.util.spec_from_file_location(
+    "plugins.memory.dkg",
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+module = importlib.util.module_from_spec(spec)
+sys.modules["plugins.memory.dkg"] = module
+spec.loader.exec_module(module)
+
+class FakeLogger:
+    def __init__(self):
+        self.info_messages = []
+        self.debug_messages = []
+
+    def info(self, message, *args):
+        self.info_messages.append(message % args if args else message)
+
+    def debug(self, message, *args):
+        self.debug_messages.append(message % args if args else message)
+
+fake_logger = FakeLogger()
+module.logger = fake_logger
+
+class FakeClient:
+    def __init__(self):
+        self.calls = []
+
+    def _resolve_agent_address(self):
+        return "0xAgent"
+
+    def query(self, sparql, context_graph_id, **kwargs):
+        self.calls.append((context_graph_id, kwargs))
+        return {
+            "result": {
+                "bindings": [{
+                    "uri": {"value": f"urn:{context_graph_id}:same-memory"},
+                    "pred": {"value": "schema:description"},
+                    "text": {"value": f"alpha beta project recall from {context_graph_id}"},
+                }],
+            },
+        }
+
+provider = module.DKGMemoryProvider()
+provider._offline = False
+provider._client = FakeClient()
+provider._context_graph = "agent-context"
+
+search = json.loads(provider.handle_tool_call("memory_search", {
+    "query": "alpha beta",
+    "limit": 5,
+    "context_graph_id": "project-cg",
+}))
+prefetch = provider.prefetch("alpha beta", context_graph_id="project-cg")
+assert provider._client.calls[:6] == [
+    ("agent-context", {"view": "working-memory", "agent_address": "0xAgent"}),
+    ("agent-context", {"view": "shared-working-memory", "agent_address": None}),
+    ("agent-context", {"view": "verified-memory", "agent_address": None}),
+    ("project-cg", {"view": "working-memory", "agent_address": "0xAgent"}),
+    ("project-cg", {"view": "shared-working-memory", "agent_address": None}),
+    ("project-cg", {"view": "verified-memory", "agent_address": None}),
+], provider._client.calls
+assert provider._client.calls[6:] == provider._client.calls[:6], provider._client.calls
+assert [hit["layer"] for hit in search["hits"]] == [
+    "agent-context-vm",
+    "project-vm",
+], search
+assert all("context_graph_id" in hit and "view" in hit for hit in search["hits"]), search
+assert 'context_graph_id="project-cg"' in prefetch, prefetch
+assert 'layer="project-vm"' in prefetch, prefetch
+assert 'view="verified-memory"' in prefetch, prefetch
+assert 'source="memory"' in prefetch, prefetch
+
+provider._client.calls = []
+provider._context_graph = "project-cg"
+configured_prefetch = provider.prefetch("alpha beta")
+assert provider._client.calls == [
+    ("agent-context", {"view": "working-memory", "agent_address": "0xAgent"}),
+    ("agent-context", {"view": "shared-working-memory", "agent_address": None}),
+    ("agent-context", {"view": "verified-memory", "agent_address": None}),
+], provider._client.calls
+assert 'context_graph_id="agent-context"' in configured_prefetch, configured_prefetch
+assert 'context_graph_id="project-cg"' not in configured_prefetch, configured_prefetch
+
+provider._client.calls = []
+marker_prefetch = provider.prefetch('alpha beta\n\n<dkg-node-ui-context context_graph_id="project-cg" source="dkg-node-ui" />')
+assert provider._client.calls == [
+    ("agent-context", {"view": "working-memory", "agent_address": "0xAgent"}),
+    ("agent-context", {"view": "shared-working-memory", "agent_address": None}),
+    ("agent-context", {"view": "verified-memory", "agent_address": None}),
+    ("project-cg", {"view": "working-memory", "agent_address": "0xAgent"}),
+    ("project-cg", {"view": "shared-working-memory", "agent_address": None}),
+    ("project-cg", {"view": "verified-memory", "agent_address": None}),
+], provider._client.calls
+assert 'context_graph_id="project-cg"' in marker_prefetch, marker_prefetch
+assert 'layer="project-vm"' in marker_prefetch, marker_prefetch
+search_logs = [
+    message for message in fake_logger.info_messages
+    if "[dkg-memory] search fired" in message
+]
+assert any(
+    "caller=hook" in message
+    and "project=project-cg" in message
+    and "layers=6" in message
+    and "raw_hits=6" in message
+    and "agent-context-wm:1" in message
+    and "project-vm:1" in message
+    for message in search_logs
+), search_logs
+cleaned_query, marker_context = module._extract_node_ui_context_marker(
+    'alpha beta\n\n<dkg-node-ui-context context_graph_id="project-cg" source="dkg-node-ui" />'
+)
+assert cleaned_query == "alpha beta", cleaned_query
+assert marker_context == "project-cg", marker_context
+assert module._strip_node_ui_context_markers(
+    'alpha beta\n\n<dkg-node-ui-context context_graph_id="project-cg" source="dkg-node-ui" />'
+) == "alpha beta"
+
+keywords = module._memory_search_keywords(
+    "What does passive DKG memory recall say about qa664-577728 project unique memory?"
+)
+assert keywords[:2] == ["qa664-577728", "unique"], keywords
+assert "project" not in keywords, keywords
+assert "memory" not in keywords, keywords
+sparql = module._build_memory_search_sparql(keywords, 5)
+assert "qa664-577728" in sparql, sparql
+assert "ORDER BY DESC(?rank)" in sparql, sparql
+assert "LIMIT 50" in sparql, sparql
+`;
+    const result = spawnSync('python', ['-B', '-c', script], {
+      cwd: process.cwd(),
+      encoding: 'utf-8',
+    });
+
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+  });
+
+  it('keeps selected project recall visible when agent-context has many stale matches', () => {
+    const script = String.raw`
+import importlib.util
+import json
+import sys
+import tempfile
+import types
+from pathlib import Path
+
+home = Path(tempfile.mkdtemp(prefix="hermes-dkg-prefetch-project-crowding-"))
+
+agent_pkg = types.ModuleType("agent")
+memory_provider = types.ModuleType("agent.memory_provider")
+class MemoryProvider:
+    pass
+memory_provider.MemoryProvider = MemoryProvider
+sys.modules["agent"] = agent_pkg
+sys.modules["agent.memory_provider"] = memory_provider
+
+tools_pkg = types.ModuleType("tools")
+registry = types.ModuleType("tools.registry")
+def tool_error(message):
+    return json.dumps({"error": message})
+registry.tool_error = tool_error
+sys.modules["tools"] = tools_pkg
+sys.modules["tools.registry"] = registry
+
+constants = types.ModuleType("hermes_constants")
+constants.get_hermes_home = lambda: home
+sys.modules["hermes_constants"] = constants
+
+sys.modules["plugins"] = types.ModuleType("plugins")
+sys.modules["plugins.memory"] = types.ModuleType("plugins.memory")
+
+plugin_dir = Path(r"${process.cwd().replace(/\\/g, '\\\\')}") / "hermes-plugin"
+spec = importlib.util.spec_from_file_location(
+    "plugins.memory.dkg",
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+module = importlib.util.module_from_spec(spec)
+sys.modules["plugins.memory.dkg"] = module
+spec.loader.exec_module(module)
+
+class FakeClient:
+    def __init__(self):
+        self.calls = []
+
+    def _resolve_agent_address(self):
+        return "0xAgent"
+
+    def query(self, sparql, context_graph_id, **kwargs):
+        self.calls.append((context_graph_id, kwargs))
+        bindings = []
+        if context_graph_id == "agent-context" and kwargs["view"] == "working-memory":
+            for index in range(8):
+                bindings.append({
+                    "uri": {"value": f"urn:agent-context:stale:{index}"},
+                    "pred": {"value": "schema:description"},
+                    "text": {
+                        "value": (
+                            f"qa385-hook-731942 stale session prompt {index}: "
+                            "Do not call tools. Answer only from automatically recalled DKG memory "
+                            "and include provenance if available."
+                        ),
+                    },
+                })
+        if context_graph_id == "project-cg" and kwargs["view"] == "working-memory":
+            bindings.append({
+                "uri": {"value": "urn:project-cg:fact"},
+                "pred": {"value": "schema:description"},
+                "text": {"value": "qa385-hook-731942 means amber-lake."},
+            })
+        return {"result": {"bindings": bindings}}
+
+provider = module.DKGMemoryProvider()
+provider._offline = False
+provider._client = FakeClient()
+provider._context_graph = "agent-context"
+
+query = (
+    "What does passive DKG memory recall say about qa385-hook-731942? "
+    "Do not call tools. Answer only from automatically recalled DKG memory "
+    "and include provenance if available."
+)
+search = json.loads(provider.handle_tool_call("memory_search", {
+    "query": query,
+    "limit": 5,
+    "context_graph_id": "project-cg",
+}))
+layers = [hit["layer"] for hit in search["hits"]]
+assert "project-wm" in layers, search
+project_hits = [hit for hit in search["hits"] if hit["context_graph_id"] == "project-cg"]
+assert len(project_hits) == 1, search
+assert project_hits[0]["snippet"] == "qa385-hook-731942 means amber-lake.", project_hits
+assert project_hits[0]["path"].startswith("dkg://project-cg/project-wm/"), project_hits
+
+prefetch = provider.prefetch(query, context_graph_id="project-cg")
+assert 'context_graph_id="project-cg"' in prefetch, prefetch
+assert 'layer="project-wm"' in prefetch, prefetch
+assert 'path="dkg://project-cg/project-wm/' in prefetch, prefetch
+assert "qa385-hook-731942 means amber-lake." in prefetch, prefetch
+`;
+    const result = spawnSync('python', ['-B', '-c', script], {
+      cwd: process.cwd(),
+      encoding: 'utf-8',
+    });
+
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+  });
+
+  it('does not prefetch project memory when no project context is supplied', () => {
+    const script = String.raw`
+import importlib.util
+import json
+import sys
+import tempfile
+import types
+from pathlib import Path
+
+home = Path(tempfile.mkdtemp(prefix="hermes-dkg-prefetch-no-project-"))
+
+agent_pkg = types.ModuleType("agent")
+memory_provider = types.ModuleType("agent.memory_provider")
+class MemoryProvider:
+    pass
+memory_provider.MemoryProvider = MemoryProvider
+sys.modules["agent"] = agent_pkg
+sys.modules["agent.memory_provider"] = memory_provider
+
+tools_pkg = types.ModuleType("tools")
+registry = types.ModuleType("tools.registry")
+def tool_error(message):
+    return json.dumps({"error": message})
+registry.tool_error = tool_error
+sys.modules["tools"] = tools_pkg
+sys.modules["tools.registry"] = registry
+
+constants = types.ModuleType("hermes_constants")
+constants.get_hermes_home = lambda: home
+sys.modules["hermes_constants"] = constants
+
+sys.modules["plugins"] = types.ModuleType("plugins")
+sys.modules["plugins.memory"] = types.ModuleType("plugins.memory")
+
+plugin_dir = Path(r"${process.cwd().replace(/\\/g, '\\\\')}") / "hermes-plugin"
+spec = importlib.util.spec_from_file_location(
+    "plugins.memory.dkg",
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+module = importlib.util.module_from_spec(spec)
+sys.modules["plugins.memory.dkg"] = module
+spec.loader.exec_module(module)
+
+class FakeClient:
+    def __init__(self):
+        self.calls = []
+
+    def _resolve_agent_address(self):
+        return "0xAgent"
+
+    def query(self, sparql, context_graph_id, **kwargs):
+        self.calls.append((context_graph_id, kwargs))
+        return {
+            "result": {
+                "bindings": [{
+                    "uri": {"value": f"urn:{context_graph_id}:{kwargs['view']}"},
+                    "pred": {"value": "schema:description"},
+                    "text": {"value": f"alpha beta from {context_graph_id} {kwargs['view']}"},
+                }],
+            },
+        }
+
+provider = module.DKGMemoryProvider()
+provider._offline = False
+provider._client = FakeClient()
+provider._context_graph = "agent-context"
+
+prefetch = provider.prefetch("alpha beta")
+assert provider._client.calls == [
+    ("agent-context", {"view": "working-memory", "agent_address": "0xAgent"}),
+    ("agent-context", {"view": "shared-working-memory", "agent_address": None}),
+    ("agent-context", {"view": "verified-memory", "agent_address": None}),
+], provider._client.calls
+assert 'context_graph_id="agent-context"' in prefetch, prefetch
+assert 'context_graph_id="project-cg"' not in prefetch, prefetch
+assert 'layer="project-' not in prefetch, prefetch
 `;
     const result = spawnSync('python', ['-B', '-c', script], {
       cwd: process.cwd(),
@@ -2168,6 +2625,9 @@ assert "include_shared_memory" in subscribe_schema["parameters"]["properties"], 
 search_schema = next(schema for schema in provider.get_tool_schemas() if schema["name"] == "memory_search")
 assert "context_graph_id" in search_schema["parameters"]["properties"], search_schema
 assert "context_graph" not in search_schema["parameters"]["properties"], search_schema
+memory_schema = next(schema for schema in provider.get_tool_schemas() if schema["name"] == "dkg_memory")
+assert "context_graph_id" in memory_schema["parameters"]["properties"], memory_schema
+assert "context_graph" not in memory_schema["parameters"]["properties"], memory_schema
 query_schema = next(schema for schema in provider.get_tool_schemas() if schema["name"] == "dkg_query")
 assert "sub_graph_name" not in query_schema["parameters"]["properties"], query_schema
 share_schema = next(schema for schema in provider.get_tool_schemas() if schema["name"] == "dkg_share")
@@ -2501,7 +2961,113 @@ client_module.DKGClient = ExistingAssertionClient
 provider_existing._backlog_import_if_needed = lambda hermes_home: None
 provider_existing.initialize("session-1")
 assert provider_existing._assertion_id == "memory", provider_existing._assertion_id
-assert created_assertions == [("cg:test", "memory")], created_assertions
+assert created_assertions == [("agent-context", "memory")], created_assertions
+
+class LegacyRecallClient:
+    def __init__(self):
+        self.queries = []
+
+    def query_assertion(self, assertion_name, context_graph_id):
+        self.queries.append((assertion_name, context_graph_id))
+        if context_graph_id == "agent-context":
+            return {"quads": [
+                {
+                    "predicate": "urn:hermes:content",
+                    "object": "[memory]\\nnew default graph fact",
+                },
+                {
+                    "predicate": "urn:hermes:content",
+                    "object": "[memory]\\nduplicate graph fact",
+                },
+            ]}
+        if context_graph_id == "legacy-cg":
+            return {"quads": [
+                {
+                    "predicate": "urn:hermes:content",
+                    "object": "[memory]\\nlegacy configured graph fact",
+                },
+                {
+                    "predicate": "urn:hermes:content",
+                    "object": "[memory]\\nduplicate graph fact",
+                },
+            ]}
+        return {"quads": []}
+
+provider_legacy = module.DKGMemoryProvider()
+provider_legacy._offline = False
+provider_legacy._client = LegacyRecallClient()
+provider_legacy._assertion_id = ""
+provider_legacy._config = {"memory_assertion": "memory"}
+provider_legacy._context_graph = "legacy-cg"
+provider_legacy._cache = {"memory": [], "user": [], "queued_writes": []}
+facts = provider_legacy._recall_facts()
+assert facts == [
+    {"target": "memory", "content": "new default graph fact"},
+    {"target": "memory", "content": "duplicate graph fact"},
+], facts
+assert provider_legacy._client.queries == [
+    ("memory", "agent-context"),
+], provider_legacy._client.queries
+
+class EmptyDefaultLegacyRecallClient:
+    def __init__(self):
+        self.queries = []
+
+    def query_assertion(self, assertion_name, context_graph_id):
+        self.queries.append((assertion_name, context_graph_id))
+        if context_graph_id == "legacy-cg":
+            return {"quads": [{
+                "predicate": "urn:hermes:content",
+                "object": "[memory]\\nlegacy configured graph fact",
+            }]}
+        return {"quads": []}
+
+provider_legacy_empty_default = module.DKGMemoryProvider()
+provider_legacy_empty_default._offline = False
+provider_legacy_empty_default._client = EmptyDefaultLegacyRecallClient()
+provider_legacy_empty_default._assertion_id = ""
+provider_legacy_empty_default._config = {"memory_assertion": "memory"}
+provider_legacy_empty_default._context_graph = "legacy-cg"
+provider_legacy_empty_default._cache = {"memory": [], "user": [], "queued_writes": []}
+facts = provider_legacy_empty_default._recall_facts()
+assert facts == [
+    {"target": "memory", "content": "legacy configured graph fact"},
+], facts
+assert provider_legacy_empty_default._client.queries == [
+    ("memory", "agent-context"),
+    ("memory", "legacy-cg"),
+], provider_legacy_empty_default._client.queries
+
+class FailedDefaultLegacyRecallClient:
+    def __init__(self):
+        self.queries = []
+
+    def query_assertion(self, assertion_name, context_graph_id):
+        self.queries.append((assertion_name, context_graph_id))
+        if context_graph_id == "agent-context":
+            return {"success": False, "error": "default unavailable"}
+        if context_graph_id == "legacy-cg":
+            return {"quads": [{
+                "predicate": "urn:hermes:content",
+                "object": "[memory]\\nshould not leak",
+            }]}
+        return {"quads": []}
+
+provider_failed_default = module.DKGMemoryProvider()
+provider_failed_default._offline = False
+provider_failed_default._client = FailedDefaultLegacyRecallClient()
+provider_failed_default._assertion_id = ""
+provider_failed_default._config = {"memory_assertion": "memory"}
+provider_failed_default._context_graph = "legacy-cg"
+provider_failed_default._cache = {"memory": [], "user": [], "queued_writes": []}
+facts = provider_failed_default._recall_facts()
+assert facts == [], facts
+assert provider_failed_default._client.queries == [
+    ("memory", "agent-context"),
+], provider_failed_default._client.queries
+
+sparql = module._build_memory_search_sparql(["id42"], 5)
+assert "STRLEN" not in sparql, sparql
 
 class QueryClient:
     def __init__(self):
@@ -2789,13 +3355,21 @@ class FakeClient:
 
     def query(self, sparql, context_graph_id, **kwargs):
         self.calls.append((context_graph_id, kwargs))
+        pred = "urn:hermes:content" if context_graph_id == "agent-context" and kwargs["view"] == "verified-memory" else "schema:description"
+        bindings = [{
+            "uri": {"value": f"urn:{context_graph_id}:{kwargs['view']}"},
+            "pred": {"value": pred},
+            "text": {"value": f"alpha beta from {context_graph_id} {kwargs['view']}"},
+        }]
+        if context_graph_id == "agent-context" and kwargs["view"] == "verified-memory":
+            bindings.append({
+                "uri": {"value": f"urn:{context_graph_id}:{kwargs['view']}"},
+                "pred": {"value": pred},
+                "text": {"value": "alpha beta second durable note from agent-context verified-memory"},
+            })
         return {
             "result": {
-                "bindings": [{
-                    "uri": {"value": f"urn:{context_graph_id}:{kwargs['view']}"},
-                    "pred": {"value": "schema:description"},
-                    "text": {"value": f"alpha beta from {context_graph_id} {kwargs['view']}"},
-                }],
+                "bindings": bindings,
             },
         }
 
@@ -2805,10 +3379,14 @@ provider._client = FakeClient()
 provider._context_graph = "project-cg"
 provider._cache = {}
 
-result = json.loads(provider.handle_tool_call("memory_search", {"query": "alpha beta", "limit": 10}))
+result = json.loads(provider.handle_tool_call("memory_search", {
+    "query": "alpha beta",
+    "limit": 10,
+    "context_graph_id": "project-cg",
+}))
 assert result["query"] == "alpha beta", result
 assert result["scope"] == "project-cg", result
-assert result["count"] == 6, result
+assert result["count"] == 7, result
 layers = [hit["layer"] for hit in result["hits"]]
 assert set(layers) == {
     "agent-context-wm",
@@ -2818,8 +3396,18 @@ assert set(layers) == {
     "project-swm",
     "project-vm",
 }, layers
-assert layers[:2] == ["agent-context-vm", "project-vm"], layers
-assert {hit["source"] for hit in result["hits"] if hit["layer"].startswith("agent-context")} == {"sessions"}, result
+assert layers[:3] == ["agent-context-vm", "agent-context-vm", "project-vm"], layers
+assert {
+    hit["snippet"]
+    for hit in result["hits"]
+    if hit["context_graph_id"] == "agent-context" and hit["view"] == "verified-memory"
+} == {
+    "alpha beta from agent-context verified-memory",
+    "alpha beta second durable note from agent-context verified-memory",
+}, result
+sources_by_layer = {hit["layer"]: hit["source"] for hit in result["hits"]}
+assert sources_by_layer["agent-context-vm"] == "memory", result
+assert sources_by_layer["agent-context-wm"] == "sessions", result
 assert {hit["source"] for hit in result["hits"] if hit["layer"].startswith("project")} == {"memory"}, result
 assert all(hit["score"] == 1.0 for hit in result["hits"]), result
 assert all("_rank" not in hit for hit in result["hits"]), result
@@ -2831,6 +3419,51 @@ assert provider._client.calls == [
     ("project-cg", {"view": "shared-working-memory", "agent_address": None}),
     ("project-cg", {"view": "verified-memory", "agent_address": None}),
 ], provider._client.calls
+
+provider._client.calls = []
+configured_only = json.loads(provider.handle_tool_call("memory_search", {"query": "alpha beta", "limit": 10}))
+assert configured_only["scope"] is None, configured_only
+assert configured_only["count"] == 4, configured_only
+assert {hit["layer"] for hit in configured_only["hits"]} == {
+    "agent-context-wm",
+    "agent-context-swm",
+    "agent-context-vm",
+}, configured_only
+assert provider._client.calls == [
+    ("agent-context", {"view": "working-memory", "agent_address": "0xAgent"}),
+    ("agent-context", {"view": "shared-working-memory", "agent_address": None}),
+    ("agent-context", {"view": "verified-memory", "agent_address": None}),
+], provider._client.calls
+
+provider._client.calls = []
+null_context = json.loads(provider.handle_tool_call("memory_search", {
+    "query": "alpha beta",
+    "limit": 10,
+    "context_graph_id": None,
+}))
+assert null_context["scope"] is None, null_context
+assert {hit["layer"] for hit in null_context["hits"]} == {
+    "agent-context-wm",
+    "agent-context-swm",
+    "agent-context-vm",
+}, null_context
+assert provider._client.calls == [
+    ("agent-context", {"view": "working-memory", "agent_address": "0xAgent"}),
+    ("agent-context", {"view": "shared-working-memory", "agent_address": None}),
+    ("agent-context", {"view": "verified-memory", "agent_address": None}),
+], provider._client.calls
+calls_before_invalid = list(provider._client.calls)
+bad_context = json.loads(provider.handle_tool_call("memory_search", {
+    "query": "alpha beta",
+    "context_graph_id": {"id": "project-cg"},
+}))
+assert "error" in bad_context and "context_graph_id" in bad_context["error"], bad_context
+bad_blank_context = json.loads(provider.handle_tool_call("memory_search", {
+    "query": "alpha beta",
+    "context_graph_id": "   ",
+}))
+assert "error" in bad_blank_context and "context_graph_id" in bad_blank_context["error"], bad_blank_context
+assert provider._client.calls == calls_before_invalid, provider._client.calls
 `;
     const result = spawnSync('python', ['-B', '-c', script], {
       cwd: process.cwd(),
@@ -2977,11 +3610,11 @@ provider._context_graph = "project-cg"
 provider._cache = {"memory": [{"target": "memory", "content": "alpha stale cache"}]}
 
 online = json.loads(provider.handle_tool_call("memory_search", {"query": "alpha", "limit": 5}))
-assert online == {"query": "alpha", "count": 0, "scope": "project-cg", "hits": []}, online
+assert online == {"query": "alpha", "count": 0, "scope": None, "hits": []}, online
 
 provider._offline = True
 offline = json.loads(provider.handle_tool_call("memory_search", {"query": "alpha", "limit": 5}))
-assert offline["offline"] is True and offline["count"] == 1, offline
+assert offline["offline"] is True and offline["scope"] is None and offline["count"] == 1, offline
 `;
     const result = spawnSync('python', ['-B', '-c', script], {
       cwd: process.cwd(),
@@ -3183,7 +3816,12 @@ spec.loader.exec_module(module)
 
 class FakeClient:
     def __init__(self):
+        self.created = []
         self.writes = []
+
+    def create_assertion(self, context_graph_id, name, sub_graph_name=None):
+        self.created.append((context_graph_id, name, sub_graph_name))
+        return {"success": True, "assertionUri": f"urn:{context_graph_id}:{name}"}
 
     def write_assertion(self, assertion_name, context_graph_id, quads):
         self.writes.append((assertion_name, context_graph_id, quads))
@@ -3205,6 +3843,7 @@ provider._flush_queued_writes()
 assert provider._cache["memory"] == [{"target": "memory", "content": "cached fact"}], provider._cache
 assert provider._cache["queued_writes"] == [], provider._cache
 assert len(provider._client.writes) == 1, provider._client.writes
+assert provider._client.writes[0][1] == "agent-context", provider._client.writes
 assert provider._client.writes[0][2] == [{
     "subject": "urn:hermes:agent:memory",
     "predicate": "urn:hermes:content",
@@ -3215,11 +3854,41 @@ provider._cache = {"memory": [], "queued_writes": []}
 result = json.loads(provider._handle_memory({"action": "add", "target": "memory", "content": "live fact"}))
 assert result["store"] == "dkg", result
 assert result["queued"] is False, result
+assert result["context_graph_id"] == "agent-context", result
+assert provider._client.writes[-1][1] == "agent-context", provider._client.writes
 assert provider._client.writes[-1][2] == [{
     "subject": "urn:hermes:agent:memory",
     "predicate": "urn:hermes:content",
     "object": module._quote_literal("[memory]\nlive fact"),
 }], provider._client.writes
+
+write_count = len(provider._client.writes)
+bad_context = json.loads(provider._handle_memory({
+    "action": "add",
+    "target": "memory",
+    "content": "bad route",
+    "context_graph_id": {"id": "project-cg"},
+}))
+assert "error" in bad_context and "context_graph_id" in bad_context["error"], bad_context
+assert len(provider._client.writes) == write_count, provider._client.writes
+null_context = json.loads(provider._handle_memory({
+    "action": "add",
+    "target": "memory",
+    "content": "null route defaults",
+    "context_graph_id": None,
+}))
+assert null_context["success"] is True and null_context["context_graph_id"] == "agent-context", null_context
+assert len(provider._client.writes) == write_count + 1, provider._client.writes
+assert provider._client.writes[-1][1] == "agent-context", provider._client.writes
+write_count = len(provider._client.writes)
+bad_blank_context = json.loads(provider._handle_memory({
+    "action": "add",
+    "target": "memory",
+    "content": "bad blank route",
+    "context_graph_id": "   ",
+}))
+assert "error" in bad_blank_context and "context_graph_id" in bad_blank_context["error"], bad_blank_context
+assert len(provider._client.writes) == write_count, provider._client.writes
 
 class FailingClient:
     def write_assertion(self, assertion_name, context_graph_id, quads):
@@ -3236,6 +3905,7 @@ assert provider._cache["queued_writes"] == [{
     "target": "memory",
     "content": "queued fact",
     "old_text": "",
+    "context_graph_id": "agent-context",
 }], provider._cache
 
 provider._assertion_id = ""

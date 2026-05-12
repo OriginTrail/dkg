@@ -27,6 +27,8 @@ This package contains:
   plus Hermes-native helpers such as `dkg_memory` and `dkg_share`
 - stores provider memory facts in the `memory` assertion of the `agent-context`
   context graph by default
+- recalls passive memory across `agent-context` WM/SWM/VM and, when supplied
+  as selected project context, that context graph's WM/SWM/VM
 - syncs completed Hermes turns into DKG Working Memory with stable turn IDs and
   duplicate-turn protection
 - bridges the DKG Node UI right-panel chat to Hermes' OpenAI-compatible API
@@ -121,6 +123,8 @@ A healthy setup should satisfy all of the following:
   memory
 - `dkg_memory` writes can be read from the `memory` assertion in
   `agent-context`
+- passive recall snippets identify their `context_graph_id`, DKG view, layer
+  label, source, and score
 
 ## Config Files
 
@@ -145,7 +149,7 @@ with ownership metadata and leaves a non-managed file untouched.
 | `bridge.gatewayUrl` | `http://127.0.0.1:8642` | Hermes OpenAI-compatible API server base used by Node UI chat. |
 | `bridge.url` | unset | Optional custom loopback `/health`, `/send`, `/stream` bridge. |
 | `bridge.healthUrl` | derived | Optional health check URL tied to the configured transport base. |
-| `context_graph` | `agent-context` | Default context graph for provider memory facts. Env `DKG_CONTEXT_GRAPH` overrides at runtime. |
+| `context_graph` | `agent-context` | Default project context graph for explicit project-scoped DKG operations. `dkg_memory` still writes to `agent-context` unless `context_graph_id` is provided. Env `DKG_CONTEXT_GRAPH` overrides at runtime. |
 | `memory_assertion` | `memory` | Working Memory assertion used by `dkg_memory`. Env `DKG_MEMORY_ASSERTION` overrides at runtime. |
 | `memory_mode` | `provider` | Stored setup mode for status/reconnect/uninstall. |
 | `publish_tool` / `allow_direct_publish` | direct / `true` | Controls exposure of direct publish tools. Env `DKG_ALLOW_DIRECT_PUBLISH=false` hides them. |
@@ -193,6 +197,25 @@ warning on the Node UI row.
 Once DKG is the active provider, Hermes receives DKG-backed memory recall,
 `dkg_memory`, `memory_search`, `dkg_query`, `dkg_share`,
 assertion/sub-graph helpers, and status/wallet/network helpers.
+
+Passive recall and explicit `memory_search` share the same six-layer planner.
+Every turn searches `agent-context` Working Memory, Shared Working Memory, and
+Verified Memory. If the caller supplies a selected project with
+`context_graph_id` / `target_context_graph`, passive recall also searches that
+project's WM/SWM/VM layers; without a supplied project, both paths search only
+`agent-context`. Returned snippets use the
+OpenClaw layer labels `agent-context-wm`, `agent-context-swm`,
+`agent-context-vm`, `project-wm`, `project-swm`, and `project-vm`, and include
+the exact context graph id plus DKG view provenance.
+
+`dkg_memory` remains the simple provider-memory note helper. By default it
+writes to `agent-context` / `memory`. Advanced callers may pass
+`context_graph_id` for a scoped note in another context graph; the adapter
+stores and queues those notes separately so project-scoped notes do not bleed
+into default personal memory. Existing profiles that previously used a custom
+`context_graph` for provider memory are still read as a legacy fallback when the
+new `agent-context` assertion is empty, so older notes remain visible while new
+unscoped writes use the current default.
 
 ## Node UI Connect, Refresh, And Disconnect
 
@@ -248,6 +271,9 @@ provenance before forwarding them to Hermes.
   not enabled in the DKG local-agent registry. `persist-turn` remains
   daemon-authenticated so the active Hermes provider can persist completed
   turns even when UI chat registration is unavailable.
+- Passive recall blocks are read-only prompt context. The provider and daemon
+  strip adapter-generated recalled-memory blocks before chat-turn persistence
+  and extraction so recalled snippets do not boomerang into DKG chat history.
 - Direct publish tools are model-callable by default to match the node skill
   surface. Publishing Verified Memory is permanent and may cost TRAC; operators
   can hide direct publish exposure with `DKG_ALLOW_DIRECT_PUBLISH=false`.
