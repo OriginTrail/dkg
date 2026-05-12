@@ -447,6 +447,43 @@ describe('extractWithLlm — provider selection', () => {
     expect(result.model).toBe('claude-sonnet-4-6');
   });
 
+  it('DKG_EXTRACTION_PROVIDER env override drops per-provider model and baseURL', async () => {
+    // Operator has OpenAI configured end-to-end (provider + model + baseURL),
+    // but DKG_EXTRACTION_PROVIDER=anthropic flips the dispatcher. The
+    // OpenAI-specific model + baseURL must NOT leak into the Anthropic
+    // request; each provider should use its own defaults.
+    const captured: { url?: string; init?: RequestInit } = {};
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+        captured.url = String(url);
+        captured.init = init;
+        return new Response(
+          JSON.stringify({
+            content: [{ type: 'text', text: 'NONE' }],
+            usage: { input_tokens: 2, output_tokens: 3 },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }),
+    );
+    vi.stubEnv('DKG_EXTRACTION_PROVIDER', 'anthropic');
+
+    const result = await extractWithLlm(
+      sampleInput,
+      makeConfig({
+        provider: 'openai',
+        model: 'gpt-5-nano',
+        baseURL: 'https://api.openai.com/v1',
+      }),
+    );
+
+    expect(captured.url).toBe('https://api.anthropic.com/v1/messages');
+    const body = JSON.parse(String(captured.init?.body));
+    expect(body.model).toBe('claude-sonnet-4-6');
+    expect(result.model).toBe('claude-sonnet-4-6');
+  });
+
   it('shared-parser parity: identical raw N-Triples yields deep-equal triples from both providers', async () => {
     const rawNT = [
       '<urn:dkg:doc:1> <http://schema.org/name> "Parity Doc" .',
