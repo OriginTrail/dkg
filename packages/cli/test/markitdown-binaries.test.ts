@@ -621,62 +621,12 @@ describe('bundleImplicitCurrentPlatform (issue #467)', () => {
     expect(capture.logs.some((line) => line.includes('already staged'))).toBe(true);
   });
 
-  it('workspace + version-tag 404 → falls back to latest tag and stages it', async () => {
-    const target = getSupportedTarget();
-    expect(target).not.toBeNull();
-    if (!target) return;
-    const { packageDir, outputDir } = await makeWorkspaceFixture();
-    const fallbackBytes = Buffer.from('fallback latest binary', 'utf-8');
-    const { server } = makeAssetServer(target, { versionedBytes: null, fallbackBytes });
-
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
-    const port = (server.address() as { port: number }).port;
-    const capture = makeLogCapture();
-    let fetchLatestCalled = 0;
-
-    try {
-      const result = await bundleImplicitCurrentPlatform({
-        packageDir,
-        outputDir,
-        releaseBaseUrl: null, // important: fallback only triggers when no override
-        releaseRepo: `test-org/dkg-test-${port}`, // arbitrary; injected fetchLatestTag ignores it
-        log: capture.log,
-        warn: capture.warn,
-        showRestartHint: false,
-        fetchLatestTag: async () => {
-          fetchLatestCalled += 1;
-          return LATEST_TAG;
-        },
-      });
-
-      // The default releaseBaseUrl() points at https://github.com/... which we
-      // cannot reach in the test. To exercise the fallback path against our
-      // local server we need to also redirect both attempts to localhost.
-      // Easier: test via a second variant that simulates the production URL
-      // shape directly.
-      // For now: fallback path only succeeds when the second URL is reachable,
-      // which we cannot mock without monkey-patching fetch. So we assert the
-      // error path: version 404 → fallback tries the GitHub-shaped URL → fails
-      // (network unreachable) → remediation warning fired.
-      expect([
-        'fallback-staged',
-        'failed',
-      ]).toContain(result.status);
-      if (result.status === 'failed') {
-        expect(result.reason).toBe('fallback-download-error');
-        expect(capture.warns.some((line) => /could not stage the binary/i.test(line))).toBe(true);
-      }
-      expect(fetchLatestCalled).toBeGreaterThanOrEqual(0); // depends on path taken
-    } finally {
-      await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
-    }
-  });
-
-  it('workspace + 404 + injected latest URL stages the fallback binary', async () => {
-    // This variant exercises the happy-path fallback by serving BOTH the
-    // (404) version-tag AND the latest-tag from the same local server, with
-    // releaseBaseUrl pinned to the version tag so the fallback re-targets the
-    // latest-tag URL on the same host.
+  it('workspace + version-tag 404 + injected URL builder stages the fallback binary with rewritten meta', async () => {
+    // Happy-path fallback: version-tag 404 → latest-tag 200. Both URLs
+    // resolve to the test server via the injectable `buildReleaseUrl` so we
+    // don't depend on github.com. Verifies the meta sidecar is rewritten
+    // with the LOCAL cliVersion (otherwise the daemon's converter check
+    // rejects the binary — issue #467 was originally regressed here).
     const target = getSupportedTarget();
     expect(target).not.toBeNull();
     if (!target) return;
@@ -686,7 +636,8 @@ describe('bundleImplicitCurrentPlatform (issue #467)', () => {
 
     const server = createServer((req, res) => {
       const url = req.url ?? '';
-      // Version tag is unconditionally 404.
+      // Version tag: unconditionally 404 (release for local CLI_VERSION does
+      // not exist yet — common pre-release state).
       if (url.startsWith(`/release/v${CLI_VERSION}/`)) {
         res.writeHead(404);
         res.end();
@@ -714,42 +665,49 @@ describe('bundleImplicitCurrentPlatform (issue #467)', () => {
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
     const port = (server.address() as { port: number }).port;
 
-    // To make the fallback target the same host, we monkey-patch the global
-    // GitHub URL builder by passing releaseBaseUrl=null but also overriding
-    // releaseRepo so the fallback uses our server. Easiest: pass releaseRepo
-    // with a fake repo and use a custom fetchLatestTag — the fallback path
-    // calls releaseBaseUrl(latestVersion, releaseRepo) which hits github.com.
-    // Workaround: pass releaseBaseUrl explicitly (skip fallback) for the
-    // primary call, force a 404 via wrong asset URL pattern, then trigger
-    // fallback to localhost via injected fetchLatestTag returning a tag and
-    // by overriding releaseBaseUrl semantics. Simpler: assert the failed-
-    // gracefully outcome instead and trust the unit-level fallback
-    // construction is exercised by the dedicated `it` above.
-
     const capture = makeLogCapture();
+    let fetchLatestCalled = 0;
+
     try {
       const result = await bundleImplicitCurrentPlatform({
         packageDir,
         outputDir,
-        // Force a 404 on the primary attempt by pointing at the test server's
-        // version-tag path. The fallback path constructs the latest-tag URL
-        // via `releaseBaseUrl(latestVersion, releaseRepo)` which targets
-        // github.com — unreachable from the test sandbox. Expect a graceful
-        // failure with the remediation message.
-        releaseBaseUrl: `http://127.0.0.1:${port}/release/v${CLI_VERSION}`,
+        // releaseBaseUrl deliberately unset — that's required for the
+        // workspace fallback branch to engage (overrides are an explicit
+        // user choice and should not silently swap binaries).
         log: capture.log,
         warn: capture.warn,
         showRestartHint: false,
-        fetchLatestTag: async () => LATEST_TAG,
+        fetchLatestTag: async () => {
+          fetchLatestCalled += 1;
+          return LATEST_TAG;
+        },
+        // Redirect BOTH the primary and fallback URLs to the local test
+        // server. Without this the fallback would hit github.com.
+        buildReleaseUrl: (v: string) => `http://127.0.0.1:${port}/release/v${v}`,
       });
 
-      // releaseBaseUrl was set, so the fallback path is INTENTIONALLY skipped
-      // (we don't want a published install at a known version to swap binaries).
-      // Outcome: graceful failure with remediation.
-      expect(result.status).toBe('failed');
-      expect(result.reason).toBe('download-error');
-      expect(capture.warns.some((line) => /could not stage the binary/i.test(line))).toBe(true);
-      expect(capture.warns.some((line) => /markitdown:bundle/.test(line))).toBe(true);
+      // The fallback happy path.
+      expect(result.status).toBe('fallback-staged');
+      expect(result.releaseTag).toBe(LATEST_TAG);
+      expect(result.binaryPath).toBe(join(outputDir, target.assetName));
+      expect(fetchLatestCalled).toBe(1);
+      // Binary actually staged.
+      expect(existsSync(join(outputDir, target.assetName))).toBe(true);
+      expect(await readFile(join(outputDir, target.assetName))).toEqual(fallbackBytes);
+      // CRITICAL invariant for issue #467: meta sidecar must report the
+      // LOCAL cliVersion (so the daemon's converter check accepts the
+      // binary) AND preserve the actual release tag in `effectiveTag` for
+      // operator inspection.
+      const metaContents = await readFile(metadataPathFor(join(outputDir, target.assetName)), 'utf-8');
+      const meta = JSON.parse(metaContents) as { source?: string; cliVersion?: string; effectiveTag?: string };
+      expect(meta.source).toBe('release');
+      expect(meta.cliVersion).toBe(CLI_VERSION);
+      expect(meta.effectiveTag).toBe(LATEST_TAG);
+      // Log surfacing.
+      expect(capture.logs.some((line) => line.includes('falling back to latest tag'))).toBe(true);
+      expect(capture.logs.some((line) => line.includes(`meta tagged v${CLI_VERSION}`))).toBe(true);
+      expect(capture.warns).toEqual([]);
     } finally {
       await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
     }

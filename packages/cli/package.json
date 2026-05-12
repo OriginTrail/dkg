@@ -13,6 +13,7 @@
     "benchmark:daemon-responsiveness": "node scripts/daemon-responsiveness-benchmark.cjs",
     "benchmark:publish-async-get": "node scripts/publish-async-get-benchmark.cjs",
     "postinstall": "node ./scripts/bundle-markitdown-binaries.mjs --quiet --current-platform --best-effort",
+    "markitdown:bundle": "node ./scripts/bundle-markitdown-binaries.mjs --current-platform --force",
     "markitdown:build": "node ./scripts/bundle-markitdown-binaries.mjs --build-current-platform",
     "test": "vitest run",
     "test:benchmark:publish-async-get": "vitest run --config vitest.benchmark.config.ts",

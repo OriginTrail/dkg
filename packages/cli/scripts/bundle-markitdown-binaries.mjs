@@ -706,6 +706,7 @@ export async function bundleImplicitCurrentPlatform({
   warn,
   showRestartHint = true,
   fetchLatestTag = fetchLatestReleaseTag,
+  buildReleaseUrl = releaseBaseUrl,
 }) {
   const resolvedPackageDir = resolvePackageDir(packageDir);
   const resolvedVersion = version ?? readCliVersion(resolvedPackageDir);
@@ -750,7 +751,7 @@ export async function bundleImplicitCurrentPlatform({
     return { status: 'ci-skipped' };
   }
 
-  const baseUrl = releaseBaseUrlOverride ?? releaseBaseUrl(resolvedVersion, releaseRepo);
+  const baseUrl = releaseBaseUrlOverride ?? buildReleaseUrl(resolvedVersion, releaseRepo);
   try {
     const result = await downloadBinaryAsset({
       assetName: target.assetName,
@@ -779,7 +780,7 @@ export async function bundleImplicitCurrentPlatform({
       }
       const latestVersion = latestTag.replace(/^v/, '');
       log(`MarkItDown bundle: v${resolvedVersion} has no release asset; falling back to latest tag ${latestTag}.`);
-      const latestBaseUrl = releaseBaseUrl(latestVersion, releaseRepo);
+      const latestBaseUrl = buildReleaseUrl(latestVersion, releaseRepo);
       try {
         const fallbackResult = await downloadBinaryAsset({
           assetName: target.assetName,
@@ -869,7 +870,7 @@ async function main() {
     return;
   }
 
-  await bundleImplicitCurrentPlatform({
+  const implicitResult = await bundleImplicitCurrentPlatform({
     packageDir,
     outputDir: opts.outputDir,
     version,
@@ -883,6 +884,17 @@ async function main() {
     warn,
     showRestartHint: true,
   });
+
+  // `bundleImplicitCurrentPlatform` deliberately returns `{ status: 'failed' }`
+  // instead of throwing so the postinstall path (which sets `--best-effort`)
+  // can record the remediation message and still exit 0. For an explicit
+  // top-level invocation (e.g. `pnpm run markitdown:bundle`, no
+  // `--best-effort`) the user expects a non-zero exit when staging failed —
+  // re-raise here so the IIFE's error handler at the bottom of this file
+  // surfaces it as a fatal error.
+  if (implicitResult?.status === 'failed' && !opts.bestEffort) {
+    throw new Error(`failed to stage current-platform binary (${implicitResult.reason ?? 'unknown reason'}); see remediation message above`);
+  }
 }
 
 const isMainModule = process.argv[1] && resolve(process.argv[1]) === __filename;
