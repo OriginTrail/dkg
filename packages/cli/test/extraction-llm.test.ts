@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, afterEach, beforeEach } from 'vitest';
 import { extractWithLlm } from '../src/extraction/llm-extractor.js';
 import { parseNTriples } from '../src/extraction/parse-ntriples.js';
+import { DOCUMENT_KG_PROMPT } from '../src/extraction/llm-provider.js';
 import type { LlmConfig } from '../src/config.js';
 
 function makeConfig(overrides: Partial<LlmConfig> = {}): LlmConfig {
@@ -68,7 +69,7 @@ describe('extractWithLlm — OpenAI provider', () => {
     expect(body).toEqual({
       model: 'gpt-4o-mini',
       messages: [
-        { role: 'system', content: body.messages[0].content },
+        { role: 'system', content: DOCUMENT_KG_PROMPT },
         {
           role: 'user',
           content: 'Document URI: urn:dkg:doc:1\n\n# Doc\n\nHello world.',
@@ -235,7 +236,7 @@ describe('extractWithLlm — Anthropic provider', () => {
     expect(body).toEqual({
       model: 'claude-sonnet-4-6',
       max_tokens: 4096,
-      system: body.system,
+      system: DOCUMENT_KG_PROMPT,
       messages: [
         {
           role: 'user',
