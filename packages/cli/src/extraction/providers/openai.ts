@@ -1,15 +1,19 @@
 /**
  * OpenAI provider for Layer 2 semantic extraction.
  *
- * Byte-equivalent to the original inline implementation in llm-extractor.ts:
- *   - URL: ${baseURL}/chat/completions
- *   - Auth: Bearer ${apiKey}
- *   - Body: { model, messages: [system, user], max_tokens, temperature: 0.1 }
- *   - Response: data.choices[0].message.content
- *   - Tokens: data.usage.total_tokens
+ * Request shape depends on the model family:
+ *   - Reasoning family (gpt-5*, o1*, o3*, o4*): body uses
+ *     `max_completion_tokens` and OMITS `temperature` — the API rejects
+ *     both `max_tokens` and non-default `temperature` for these models.
+ *   - Legacy chat-completions models (e.g. gpt-4o-mini): body keeps the
+ *     classic `max_tokens` + `temperature: 0.1` shape.
  *
- * Fail-soft: missing apiKey / non-2xx / AbortError / malformed body all
- * resolve to `{ triples: [], model }` with a `console.warn('[openai] …')`.
+ * Everything else is shared: same URL (`${baseURL}/chat/completions`),
+ * same Bearer auth, same system/user message structure, same response
+ * parsing (`data.choices[0].message.content` + `data.usage.total_tokens`),
+ * same fail-soft contract (missing apiKey / non-2xx / AbortError /
+ * malformed body all resolve to `{ triples: [], model }` with a
+ * `console.warn('[openai] …')`).
  */
 import type { LlmConfig } from '../../config.js';
 import type { LlmExtractionInput, LlmExtractionOutput } from '../llm-extractor.js';
@@ -20,6 +24,18 @@ const DEFAULT_MODEL = 'gpt-5-nano';
 const DEFAULT_BASE_URL = 'https://api.openai.com/v1';
 const REQUEST_TIMEOUT_MS = 60_000;
 const MARKDOWN_TRUNCATE_CHARS = 60_000;
+
+/**
+ * OpenAI reasoning-model prefixes. Membership is checked with `.startsWith`
+ * so future point releases (e.g. `gpt-5-nano-2025-08-07`, `o1-mini`) match
+ * without code changes. Keep this list conservative — only add prefixes we
+ * are certain belong to the reasoning family.
+ */
+const REASONING_MODEL_PREFIXES = ['gpt-5', 'o1', 'o3', 'o4'] as const;
+
+export function isReasoningModel(model: string): boolean {
+  return REASONING_MODEL_PREFIXES.some((prefix) => model.startsWith(prefix));
+}
 
 async function invoke(
   input: LlmExtractionInput,
@@ -39,18 +55,17 @@ async function invoke(
     : input.markdown;
 
   const url = `${baseURL.replace(/\/$/, '')}/chat/completions`;
-  const body = {
-    model,
-    messages: [
-      { role: 'system', content: DOCUMENT_KG_PROMPT },
-      {
-        role: 'user',
-        content: `Document URI: ${input.documentIri}\n\n${truncated}`,
-      },
-    ],
-    max_tokens: input.maxTokens ?? 4096,
-    temperature: 0.1,
-  };
+  const messages = [
+    { role: 'system', content: DOCUMENT_KG_PROMPT },
+    {
+      role: 'user',
+      content: `Document URI: ${input.documentIri}\n\n${truncated}`,
+    },
+  ];
+  const tokenBudget = input.maxTokens ?? 4096;
+  const body: Record<string, unknown> = isReasoningModel(model)
+    ? { model, messages, max_completion_tokens: tokenBudget }
+    : { model, messages, max_tokens: tokenBudget, temperature: 0.1 };
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
