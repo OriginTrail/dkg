@@ -250,6 +250,77 @@ describe('extractWithLlm — Anthropic provider', () => {
     expect(body.system).toContain('RDF N-Triples');
     expect(body.system).toContain('output exactly: NONE');
   });
+
+  it('fail-soft: missing apiKey returns empty and warns with [anthropic] prefix', async () => {
+    const result = await extractWithLlm(
+      sampleInput,
+      makeConfig({ provider: 'anthropic', apiKey: '' }),
+    );
+    expect(result.triples).toEqual([]);
+    expect(result.model).toBe('claude-sonnet-4-6');
+    const message = warnSpy.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(message).toMatch(/^\[anthropic\]/m);
+  });
+
+  it('fail-soft: HTTP 500 returns empty and warns with [anthropic] prefix', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('upstream boom', { status: 500 })),
+    );
+
+    const result = await extractWithLlm(
+      sampleInput,
+      makeConfig({ provider: 'anthropic' }),
+    );
+
+    expect(result.triples).toEqual([]);
+    expect(result.model).toBe('claude-sonnet-4-6');
+    const message = warnSpy.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(message).toMatch(/^\[anthropic\]/m);
+    expect(message).toContain('500');
+  });
+
+  it('fail-soft: AbortError returns empty and warns with [anthropic] prefix', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        const err = new Error('aborted');
+        err.name = 'AbortError';
+        throw err;
+      }),
+    );
+
+    const result = await extractWithLlm(
+      sampleInput,
+      makeConfig({ provider: 'anthropic' }),
+    );
+
+    expect(result.triples).toEqual([]);
+    expect(result.model).toBe('claude-sonnet-4-6');
+    const message = warnSpy.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(message).toMatch(/^\[anthropic\]/m);
+    expect(message).toMatch(/time(d)? ?out|abort/i);
+  });
+
+  it('fail-soft: malformed JSON body returns empty and warns with [anthropic] prefix', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('not json at all', {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })),
+    );
+
+    const result = await extractWithLlm(
+      sampleInput,
+      makeConfig({ provider: 'anthropic' }),
+    );
+
+    expect(result.triples).toEqual([]);
+    expect(result.model).toBe('claude-sonnet-4-6');
+    const message = warnSpy.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(message).toMatch(/^\[anthropic\]/m);
+  });
 });
 
 describe('extractWithLlm — provider selection', () => {
