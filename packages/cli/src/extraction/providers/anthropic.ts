@@ -16,15 +16,11 @@ async function invoke(input: LlmExtractionInput, config: LlmConfig): Promise<Llm
     return empty;
   }
 
-  const truncated = input.markdown.length > 60_000
-    ? input.markdown.slice(0, 60_000) + '\n\n[... document truncated for extraction ...]'
-    : input.markdown;
-
   const body = {
     model,
     max_tokens: input.maxTokens ?? 4096,
     system: DOCUMENT_KG_PROMPT,
-    messages: [{ role: 'user', content: `Document URI: ${input.documentIri}\n\n${truncated}` }],
+    messages: [{ role: 'user', content: `Document URI: ${input.documentIri}\n\n${input.markdown}` }],
   };
 
   const controller = new AbortController();

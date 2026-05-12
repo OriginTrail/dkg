@@ -22,10 +22,6 @@ async function invoke(input: LlmExtractionInput, config: LlmConfig): Promise<Llm
     return empty;
   }
 
-  const truncated = input.markdown.length > 60_000
-    ? input.markdown.slice(0, 60_000) + '\n\n[... document truncated for extraction ...]'
-    : input.markdown;
-
   const familyFields = isReasoningModel(model)
     ? { max_completion_tokens: input.maxTokens ?? 16_000, reasoning_effort: 'low' }
     : { max_tokens: input.maxTokens ?? 4096, temperature: 0.1 };
@@ -34,7 +30,7 @@ async function invoke(input: LlmExtractionInput, config: LlmConfig): Promise<Llm
     model,
     messages: [
       { role: 'system', content: DOCUMENT_KG_PROMPT },
-      { role: 'user', content: `Document URI: ${input.documentIri}\n\n${truncated}` },
+      { role: 'user', content: `Document URI: ${input.documentIri}\n\n${input.markdown}` },
     ],
     ...familyFields,
   };
