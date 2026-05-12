@@ -7,9 +7,13 @@ import {
   generateEd25519Keypair,
   encodeWorkspacePublishRequest,
   encodeGossipEnvelope,
+  encodeEncryptedWorkspacePayload,
+  encryptWorkspacePayload,
+  generateWorkspaceRecipientEncryptionKey,
   computeGossipSigningPayload,
   GOSSIP_ENVELOPE_VERSION,
   GOSSIP_TYPE_WORKSPACE_PUBLISH,
+  type WorkspaceRecipientEncryptionKey,
 } from '@origintrail-official/dkg-core';
 import {
   DKGPublisher,
@@ -67,6 +71,32 @@ async function signWorkspaceMessage(
     signature: ethers.getBytes(signature),
     payload,
   });
+}
+
+function recipientKeyFor(agentAddress: string): WorkspaceRecipientEncryptionKey {
+  return generateWorkspaceRecipientEncryptionKey(
+    `did:dkg:agent:${agentAddress}`,
+    `did:dkg:agent:${agentAddress}#test-x25519`,
+  );
+}
+
+async function encryptWorkspaceMessage(
+  agentAddress: string,
+  contextGraphId: string,
+  payload: Uint8Array,
+  workspaceOperationId: string,
+  timestampMs: number,
+  recipientKey: WorkspaceRecipientEncryptionKey,
+): Promise<Uint8Array> {
+  return encodeEncryptedWorkspacePayload(await encryptWorkspacePayload({
+    contextGraphId,
+    senderIdentity: `did:dkg:agent:${agentAddress}`,
+    operationId: workspaceOperationId,
+    workspaceOperationId,
+    timestampMs,
+    plaintext: payload,
+    recipients: [recipientKey],
+  }));
 }
 
 beforeAll(async () => {
@@ -637,9 +667,11 @@ describe('SharedMemoryHandler', () => {
 
   it('accepts signed workspace gossip from an allowed agent', async () => {
     const wallet = ethers.Wallet.createRandom();
+    const recipientKey = recipientKeyFor(wallet.address);
     handler = new SharedMemoryHandler(store, new TypedEventBus(), {
       sharedMemoryOwnedEntities: workspaceOwned,
       localAgentAddresses: () => [wallet.address],
+      workspaceRecipientPrivateKeys: () => [recipientKey],
     });
     await store.insert([{
       subject: DATA_GRAPH,
@@ -649,15 +681,25 @@ describe('SharedMemoryHandler', () => {
     }]);
 
     const nquads = `<${ENTITY}> <http://schema.org/name> "Signed" <${DATA_GRAPH}> .`;
+    const timestampMs = Date.now();
+    const workspaceOperationId = 'ws-signed-agent-gate';
     const raw = encodeWorkspacePublishRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(nquads),
       manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeer',
-      workspaceOperationId: 'ws-signed-agent-gate',
-      timestampMs: Date.now(),
+      workspaceOperationId,
+      timestampMs,
     });
-    const msg = await signWorkspaceMessage(wallet, CONTEXT_GRAPH, raw);
+    const encrypted = await encryptWorkspaceMessage(
+      wallet.address,
+      CONTEXT_GRAPH,
+      raw,
+      workspaceOperationId,
+      timestampMs,
+      recipientKey,
+    );
+    const msg = await signWorkspaceMessage(wallet, CONTEXT_GRAPH, encrypted);
 
     await handler.handle(msg, '12D3KooWPeer');
 

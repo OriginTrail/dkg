@@ -7,6 +7,7 @@ export const PROTOCOL_SYNC = '/dkg/10.0.0/sync';
 export const PROTOCOL_MESSAGE = '/dkg/10.0.0/message';
 export const PROTOCOL_ACCESS = '/dkg/10.0.0/private-access';
 export const PROTOCOL_QUERY_REMOTE = '/dkg/10.0.0/query-remote';
+export const PROTOCOL_SWM_SENDER_KEY = '/dkg/10.0.0/swm-sender-key';
 
 export const PROTOCOL_JOIN_REQUEST = '/dkg/10.0.0/join-request';
 

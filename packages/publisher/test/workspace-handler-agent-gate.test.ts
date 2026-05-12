@@ -8,11 +8,16 @@ import {
   contextGraphMetaUri,
   contextGraphSharedMemoryUri,
   DKG_ONTOLOGY,
+  decodeWorkspacePublishRequest,
+  encodeEncryptedWorkspacePayload,
   encodeGossipEnvelope,
   encodeWorkspacePublishRequest,
+  encryptWorkspacePayload,
+  generateWorkspaceRecipientEncryptionKey,
   GOSSIP_ENVELOPE_VERSION,
   GOSSIP_TYPE_WORKSPACE_PUBLISH,
   SYSTEM_CONTEXT_GRAPHS,
+  type WorkspaceRecipientEncryptionKey,
 } from '@origintrail-official/dkg-core';
 import { SharedMemoryHandler } from '../src/index.js';
 
@@ -45,8 +50,8 @@ async function signWorkspaceMessage(
   wallet: ethers.Wallet,
   payload: Uint8Array,
   claimedAgentAddress = wallet.address,
+  timestamp = new Date().toISOString(),
 ): Promise<Uint8Array> {
-  const timestamp = new Date().toISOString();
   const signingPayload = computeGossipSigningPayload(
     GOSSIP_TYPE_WORKSPACE_PUBLISH,
     CONTEXT_GRAPH_ID,
@@ -62,6 +67,42 @@ async function signWorkspaceMessage(
     timestamp,
     signature: ethers.getBytes(signature),
     payload,
+  });
+}
+
+function recipientKeyFor(agentAddress: string): WorkspaceRecipientEncryptionKey {
+  return generateWorkspaceRecipientEncryptionKey(
+    `did:dkg:agent:${agentAddress}`,
+    `did:dkg:agent:${agentAddress}#test-x25519`,
+  );
+}
+
+async function encryptWorkspaceMessage(
+  agentAddress: string,
+  payload: Uint8Array,
+  recipientKey: WorkspaceRecipientEncryptionKey,
+): Promise<Uint8Array> {
+  const request = decodeWorkspacePublishRequest(payload);
+  return encodeEncryptedWorkspacePayload(await encryptWorkspacePayload({
+    contextGraphId: request.contextGraphId,
+    senderIdentity: `did:dkg:agent:${agentAddress}`,
+    operationId: request.operationId || request.workspaceOperationId,
+    workspaceOperationId: request.workspaceOperationId,
+    timestampMs: request.timestampMs,
+    subGraphName: request.subGraphName,
+    plaintext: payload,
+    recipients: [recipientKey],
+  }));
+}
+
+function createEncryptedHandler(
+  allowedAddress: string,
+  recipientKey: WorkspaceRecipientEncryptionKey,
+): SharedMemoryHandler {
+  return new SharedMemoryHandler(store, new TypedEventBus(), {
+    sharedMemoryOwnedEntities: workspaceOwned,
+    localAgentAddresses: () => [allowedAddress],
+    workspaceRecipientPrivateKeys: () => [recipientKey],
   });
 }
 
@@ -152,15 +193,14 @@ describe('SharedMemoryHandler agent-gated gossip', () => {
 
   it('accepts signed SWM gossip for explicit private accessPolicy from a DKG_ALLOWED_AGENT writer', async () => {
     const allowed = ethers.Wallet.createRandom();
-    handler = new SharedMemoryHandler(store, new TypedEventBus(), {
-      sharedMemoryOwnedEntities: workspaceOwned,
-      localAgentAddresses: () => [allowed.address],
-    });
+    const recipientKey = recipientKeyFor(allowed.address);
+    handler = createEncryptedHandler(allowed.address, recipientKey);
     await insertPrivateAccessPolicy(META_GRAPH);
     await insertAgentGate(DKG_ONTOLOGY.DKG_ALLOWED_AGENT, allowed.address);
 
     const raw = workspaceMessage('Private Agent Signed', 'ws-agent-gate-private-agent-signed');
-    await handler.handle(await signWorkspaceMessage(allowed, raw), PEER_ID);
+    const encrypted = await encryptWorkspaceMessage(allowed.address, raw, recipientKey);
+    await handler.handle(await signWorkspaceMessage(allowed, encrypted), PEER_ID);
 
     await expectStoredName('Private Agent Signed');
   });
@@ -177,19 +217,39 @@ describe('SharedMemoryHandler agent-gated gossip', () => {
     await expectWorkspaceEmpty();
   });
 
+  it('rejects signed plaintext envelopes for agent-gated context graphs', async () => {
+    const allowed = ethers.Wallet.createRandom();
+    const recipientKey = recipientKeyFor(allowed.address);
+    let recipientLookups = 0;
+    handler = new SharedMemoryHandler(store, new TypedEventBus(), {
+      sharedMemoryOwnedEntities: workspaceOwned,
+      localAgentAddresses: () => [allowed.address],
+      workspaceRecipientPrivateKeys: () => {
+        recipientLookups += 1;
+        return [recipientKey];
+      },
+    });
+    await insertAgentGate(DKG_ONTOLOGY.DKG_ALLOWED_AGENT, allowed.address);
+
+    const raw = workspaceMessage('Signed Plaintext', 'ws-agent-gate-signed-plaintext');
+    await handler.handle(await signWorkspaceMessage(allowed, raw), PEER_ID);
+
+    await expectWorkspaceEmpty();
+    expect(recipientLookups).toBe(0);
+  });
+
   it.each([
     ['DKG_ALLOWED_AGENT', DKG_ONTOLOGY.DKG_ALLOWED_AGENT],
     ['DKG_PARTICIPANT_AGENT', DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT],
   ])('accepts signed SWM gossip from a %s writer', async (label, predicate) => {
     const allowed = ethers.Wallet.createRandom();
-    handler = new SharedMemoryHandler(store, new TypedEventBus(), {
-      sharedMemoryOwnedEntities: workspaceOwned,
-      localAgentAddresses: () => [allowed.address],
-    });
+    const recipientKey = recipientKeyFor(allowed.address);
+    handler = createEncryptedHandler(allowed.address, recipientKey);
     await insertAgentGate(predicate, allowed.address);
 
     const raw = workspaceMessage(`${label} Signed`, `ws-agent-gate-signed-${label}`);
-    await handler.handle(await signWorkspaceMessage(allowed, raw), PEER_ID);
+    const encrypted = await encryptWorkspaceMessage(allowed.address, raw, recipientKey);
+    await handler.handle(await signWorkspaceMessage(allowed, encrypted), PEER_ID);
 
     await expectStoredName(`${label} Signed`);
   });
@@ -200,16 +260,94 @@ describe('SharedMemoryHandler agent-gated gossip', () => {
   ])('rejects signed SWM gossip from an unauthorized %s writer', async (_label, predicate) => {
     const allowed = ethers.Wallet.createRandom();
     const denied = ethers.Wallet.createRandom();
-    handler = new SharedMemoryHandler(store, new TypedEventBus(), {
-      sharedMemoryOwnedEntities: workspaceOwned,
-      localAgentAddresses: () => [allowed.address],
-    });
+    const recipientKey = recipientKeyFor(allowed.address);
+    handler = createEncryptedHandler(allowed.address, recipientKey);
     await insertAgentGate(predicate, allowed.address);
 
     const raw = workspaceMessage('Denied Signed', `ws-agent-gate-denied-${_label}`);
-    await handler.handle(await signWorkspaceMessage(denied, raw), PEER_ID);
+    const encrypted = await encryptWorkspaceMessage(denied.address, raw, recipientKey);
+    await handler.handle(await signWorkspaceMessage(denied, encrypted), PEER_ID);
 
     await expectWorkspaceEmpty();
+  });
+
+  it('does not look up recipient keys or decrypt before rejecting an unauthorized signature', async () => {
+    const allowed = ethers.Wallet.createRandom();
+    const denied = ethers.Wallet.createRandom();
+    const recipientKey = recipientKeyFor(allowed.address);
+    let recipientLookups = 0;
+    handler = new SharedMemoryHandler(store, new TypedEventBus(), {
+      sharedMemoryOwnedEntities: workspaceOwned,
+      localAgentAddresses: () => [allowed.address],
+      workspaceRecipientPrivateKeys: () => {
+        recipientLookups += 1;
+        return [recipientKey];
+      },
+    });
+    await insertAgentGate(DKG_ONTOLOGY.DKG_ALLOWED_AGENT, allowed.address);
+
+    const raw = workspaceMessage('Denied Before Decrypt', 'ws-agent-gate-denied-before-decrypt');
+    const encrypted = await encryptWorkspaceMessage(denied.address, raw, recipientKey);
+    await handler.handle(await signWorkspaceMessage(denied, encrypted), PEER_ID);
+
+    await expectWorkspaceEmpty();
+    expect(recipientLookups).toBe(0);
+  });
+
+  it('does not look up recipient keys or decrypt before rejecting stale signatures', async () => {
+    const allowed = ethers.Wallet.createRandom();
+    const recipientKey = recipientKeyFor(allowed.address);
+    let recipientLookups = 0;
+    handler = new SharedMemoryHandler(store, new TypedEventBus(), {
+      sharedMemoryOwnedEntities: workspaceOwned,
+      localAgentAddresses: () => [allowed.address],
+      workspaceRecipientPrivateKeys: () => {
+        recipientLookups += 1;
+        return [recipientKey];
+      },
+      now: () => Date.parse('2026-05-07T12:00:00.000Z'),
+    });
+    await insertAgentGate(DKG_ONTOLOGY.DKG_ALLOWED_AGENT, allowed.address);
+
+    const raw = workspaceMessage('Stale Before Decrypt', 'ws-agent-gate-stale-before-decrypt');
+    const encrypted = await encryptWorkspaceMessage(allowed.address, raw, recipientKey);
+    await handler.handle(
+      await signWorkspaceMessage(allowed, encrypted, allowed.address, '2026-05-07T11:00:00.000Z'),
+      PEER_ID,
+    );
+
+    await expectWorkspaceEmpty();
+    expect(recipientLookups).toBe(0);
+  });
+
+  it('rejects encrypted envelopes whose encrypted context binding differs from the signed envelope', async () => {
+    const allowed = ethers.Wallet.createRandom();
+    const recipientKey = recipientKeyFor(allowed.address);
+    let recipientLookups = 0;
+    handler = new SharedMemoryHandler(store, new TypedEventBus(), {
+      sharedMemoryOwnedEntities: workspaceOwned,
+      localAgentAddresses: () => [allowed.address],
+      workspaceRecipientPrivateKeys: () => {
+        recipientLookups += 1;
+        return [recipientKey];
+      },
+    });
+    await insertAgentGate(DKG_ONTOLOGY.DKG_ALLOWED_AGENT, allowed.address);
+
+    const raw = workspaceMessage('Cross Context', 'ws-agent-gate-cross-context');
+    const encrypted = encodeEncryptedWorkspacePayload(await encryptWorkspacePayload({
+      contextGraphId: 'other-context-graph',
+      senderIdentity: `did:dkg:agent:${allowed.address}`,
+      operationId: 'ws-agent-gate-cross-context',
+      workspaceOperationId: 'ws-agent-gate-cross-context',
+      timestampMs: Date.now(),
+      plaintext: raw,
+      recipients: [recipientKey],
+    }));
+    await handler.handle(await signWorkspaceMessage(allowed, encrypted), PEER_ID);
+
+    await expectWorkspaceEmpty();
+    expect(recipientLookups).toBe(0);
   });
 
   it.each([
@@ -231,15 +369,14 @@ describe('SharedMemoryHandler agent-gated gossip', () => {
   ])('rejects signed SWM gossip with a forged %s envelope claim even when DKG_ALLOWED_PEER passes', async (_label, predicate) => {
     const allowed = ethers.Wallet.createRandom();
     const denied = ethers.Wallet.createRandom();
-    handler = new SharedMemoryHandler(store, new TypedEventBus(), {
-      sharedMemoryOwnedEntities: workspaceOwned,
-      localAgentAddresses: () => [allowed.address],
-    });
+    const recipientKey = recipientKeyFor(allowed.address);
+    handler = createEncryptedHandler(allowed.address, recipientKey);
     await insertPeerGate(PEER_ID);
     await insertAgentGate(predicate, allowed.address);
 
     const raw = workspaceMessage('Mixed Forged', `ws-agent-gate-mixed-forged-${_label}`);
-    await handler.handle(await signWorkspaceMessage(denied, raw, allowed.address), PEER_ID);
+    const encrypted = await encryptWorkspaceMessage(denied.address, raw, recipientKey);
+    await handler.handle(await signWorkspaceMessage(denied, encrypted, allowed.address), PEER_ID);
 
     await expectWorkspaceEmpty();
   });
@@ -249,15 +386,14 @@ describe('SharedMemoryHandler agent-gated gossip', () => {
     ['DKG_PARTICIPANT_AGENT', DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT],
   ])('accepts signed SWM gossip only when DKG_ALLOWED_PEER and %s both pass', async (label, predicate) => {
     const allowed = ethers.Wallet.createRandom();
-    handler = new SharedMemoryHandler(store, new TypedEventBus(), {
-      sharedMemoryOwnedEntities: workspaceOwned,
-      localAgentAddresses: () => [allowed.address],
-    });
+    const recipientKey = recipientKeyFor(allowed.address);
+    handler = createEncryptedHandler(allowed.address, recipientKey);
     await insertPeerGate(PEER_ID);
     await insertAgentGate(predicate, allowed.address);
 
     const raw = workspaceMessage(`${label} Mixed Signed`, `ws-agent-gate-mixed-signed-${label}`);
-    await handler.handle(await signWorkspaceMessage(allowed, raw), PEER_ID);
+    const encrypted = await encryptWorkspaceMessage(allowed.address, raw, recipientKey);
+    await handler.handle(await signWorkspaceMessage(allowed, encrypted), PEER_ID);
 
     await expectStoredName(`${label} Mixed Signed`);
   });

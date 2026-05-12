@@ -8,6 +8,8 @@ import {
   createOperationContext,
   sha256,
   encodeWorkspacePublishRequest,
+  encodeEncryptedWorkspacePayload,
+  encryptWorkspacePayload,
   contextGraphDataUri,
   contextGraphMetaUri,
   contextGraphAssertionUri,
@@ -57,6 +59,7 @@ import {
 } from './metadata.js';
 import { storeWorkspaceOperationPublicQuads } from './workspace-resolution.js';
 import { ethers } from 'ethers';
+import type { WorkspaceAgentRecipientResolver } from './workspace-agent-recipients.js';
 
 export { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
 
@@ -97,7 +100,26 @@ export interface DKGPublisherConfig {
   knownBatchContextGraphs?: Map<string, string>;
   /** Shared write lock map. Pass to SharedMemoryHandler so gossip writes serialize against CAS writes. */
   writeLocks?: Map<string, Promise<void>>;
+  /** Resolves DKG-agent public encryption keys for private/agent-gated remote SWM gossip. */
+  workspaceAgentRecipientResolver?: WorkspaceAgentRecipientResolver;
+  /** Encrypts private/agent-gated SWM gossip with the node's Sender Key epoch state. */
+  workspaceSenderKeyEncryptor?: WorkspaceSenderKeyEncryptor;
 }
+
+export interface WorkspaceSenderKeyEncryptInput {
+  contextGraphId: string;
+  plaintext: Uint8Array;
+  senderAgentAddress: string;
+  operationId: string;
+  workspaceOperationId: string;
+  timestampMs: number;
+  subGraphName?: string;
+  publisherPeerId: string;
+}
+
+export type WorkspaceSenderKeyEncryptor = (
+  input: WorkspaceSenderKeyEncryptInput,
+) => Promise<Uint8Array>;
 
 interface PublisherAddressResolutionOptions {
   includeReservingPublisherProbe?: boolean;
@@ -165,6 +187,8 @@ export interface ShareOptions {
   publisherPeerId: string;
   operationCtx?: OperationContext;
   subGraphName?: string;
+  localOnly?: boolean;
+  senderAgentAddress?: string;
 }
 
 /** @deprecated Use ShareOptions */
@@ -351,6 +375,8 @@ export class DKGPublisher implements Publisher {
   private readonly publisherWallet?: ethers.Wallet;
   private adapterSignMessagePublisherAddress?: string;
   private readonly adapterSignMessageProbeCache = new Map<string, boolean>();
+  private workspaceAgentRecipientResolver?: WorkspaceAgentRecipientResolver;
+  private workspaceSenderKeyEncryptor?: WorkspaceSenderKeyEncryptor;
   /** Additional wallets that can provide receiver signatures. */
   private readonly additionalSignerWallets: ethers.Wallet[] = [];
   private readonly log = new Logger('DKGPublisher');
@@ -414,6 +440,16 @@ export class DKGPublisher implements Publisher {
     this.sharedMemoryOwnedEntities = config.sharedMemoryOwnedEntities ?? new Map();
     this.knownBatchContextGraphs = config.knownBatchContextGraphs ?? new Map();
     this.writeLocks = config.writeLocks ?? new Map();
+    this.workspaceAgentRecipientResolver = config.workspaceAgentRecipientResolver;
+    this.workspaceSenderKeyEncryptor = config.workspaceSenderKeyEncryptor;
+  }
+
+  setWorkspaceAgentRecipientResolver(resolver: WorkspaceAgentRecipientResolver | undefined): void {
+    this.workspaceAgentRecipientResolver = resolver;
+  }
+
+  setWorkspaceSenderKeyEncryptor(encryptor: WorkspaceSenderKeyEncryptor | undefined): void {
+    this.workspaceSenderKeyEncryptor = encryptor;
   }
 
   private async withSerializedChainTx<T>(fn: () => Promise<T>): Promise<T> {
@@ -885,8 +921,9 @@ export class DKGPublisher implements Publisher {
       expectAbsent: c.expectedValue === null,
     }));
 
-    const message = encodeWorkspacePublishRequest({
-      contextGraphId: contextGraphId,
+    const timestampMs = Date.now();
+    const workspaceRequestMessage = encodeWorkspacePublishRequest({
+      contextGraphId,
       nquads: new TextEncoder().encode(nquadsStr),
       manifest: manifestEntries.map((m) => ({
         rootEntity: m.rootEntity,
@@ -895,11 +932,24 @@ export class DKGPublisher implements Publisher {
       })),
       publisherPeerId: options.publisherPeerId,
       workspaceOperationId: shareOperationId,
-      timestampMs: Date.now(),
+      timestampMs,
       operationId: ctx.operationId,
       casConditions,
       subGraphName: options.subGraphName,
     });
+    const message = await this.encodeWorkspaceGossipPayload(
+      contextGraphId,
+      workspaceRequestMessage,
+      {
+        localOnly: options.localOnly === true,
+        senderAgentAddress: options.senderAgentAddress,
+        operationId: ctx.operationId,
+        workspaceOperationId: shareOperationId,
+        timestampMs,
+        subGraphName: options.subGraphName,
+        publisherPeerId: options.publisherPeerId,
+      },
+    );
 
     if (message.length > DKG_GOSSIP_MAX_MESSAGE_BYTES) {
       throw new Error(
@@ -969,6 +1019,60 @@ export class DKGPublisher implements Publisher {
 
     this.log.info(ctx, `Shared memory write complete: ${shareOperationId}`);
     return { shareOperationId, message };
+  }
+
+  private async encodeWorkspaceGossipPayload(
+    contextGraphId: string,
+    plaintext: Uint8Array,
+    options: {
+      localOnly: boolean;
+      senderAgentAddress?: string;
+      operationId: string;
+      workspaceOperationId: string;
+      timestampMs: number;
+      subGraphName?: string;
+      publisherPeerId: string;
+    },
+  ): Promise<Uint8Array> {
+    if (options.localOnly || !this.workspaceAgentRecipientResolver) {
+      return plaintext;
+    }
+
+    const resolution = await this.workspaceAgentRecipientResolver({ contextGraphId });
+    if (!resolution.requiresEncryption) {
+      return plaintext;
+    }
+    if (resolution.recipients.length === 0) {
+      throw new Error(`Context graph "${contextGraphId}" requires encrypted SWM gossip but has no valid DKG agent recipients`);
+    }
+    if (!options.senderAgentAddress) {
+      throw new Error(`Context graph "${contextGraphId}" requires a DKG agent sender identity for encrypted SWM gossip`);
+    }
+
+    if (this.workspaceSenderKeyEncryptor) {
+      return this.workspaceSenderKeyEncryptor({
+        contextGraphId,
+        plaintext,
+        senderAgentAddress: options.senderAgentAddress,
+        operationId: options.operationId,
+        workspaceOperationId: options.workspaceOperationId,
+        timestampMs: options.timestampMs,
+        subGraphName: options.subGraphName,
+        publisherPeerId: options.publisherPeerId,
+      });
+    }
+
+    const senderIdentity = `did:dkg:agent:${ethers.getAddress(options.senderAgentAddress)}`;
+    return encodeEncryptedWorkspacePayload(await encryptWorkspacePayload({
+      contextGraphId,
+      senderIdentity,
+      operationId: options.operationId,
+      workspaceOperationId: options.workspaceOperationId,
+      timestampMs: options.timestampMs,
+      subGraphName: options.subGraphName,
+      plaintext,
+      recipients: resolution.recipients,
+    }));
   }
 
   /**

@@ -3,11 +3,17 @@ import { ethers } from 'ethers';
 import {
   computeGossipSigningPayload,
   decodeGossipEnvelope,
+  decodeSwmSenderKeyMessage,
+  decodeWorkspacePublishRequest,
   DKG_ONTOLOGY,
   GOSSIP_TYPE_WORKSPACE_PUBLISH,
   GOSSIP_ENVELOPE_VERSION,
   contextGraphDataUri,
   contextGraphMetaUri,
+  contextGraphWorkspaceTopic,
+  SWM_SENDER_KEY_MESSAGE_TYPE,
+  type OperationContext,
+  type SwmSenderKeyMessageMsg,
 } from '@origintrail-official/dkg-core';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, agentFromPrivateKey, type AgentKeyRecord } from '../src/index.js';
@@ -16,6 +22,19 @@ interface DKGAgentInternals {
   localAgents: Map<string, AgentKeyRecord>;
   defaultAgentAddress?: string;
   encodeWorkspaceGossipMessage(contextGraphId: string, message: Uint8Array): Promise<Uint8Array>;
+  decryptWorkspacePayloadWithSenderKey(
+    message: SwmSenderKeyMessageMsg,
+    contextGraphId: string,
+    ctx: OperationContext,
+  ): Promise<Uint8Array>;
+}
+
+class CapturingGossip {
+  messages: Array<{ topic: string; data: Uint8Array }> = [];
+
+  async publish(topic: string, data: Uint8Array): Promise<void> {
+    this.messages.push({ topic, data });
+  }
 }
 
 async function insertAgentGate(
@@ -119,6 +138,63 @@ describe('DKGAgent SWM gossip signing', () => {
     const payload = new TextEncoder().encode('gated payload without a local signer');
     await expect(internals.encodeWorkspaceGossipMessage(contextGraphId, payload))
       .rejects.toThrow(/no local allowed signing agent key/);
+  });
+
+  it('encrypts agent-gated SWM wire payloads as a Sender Key broadcast', async () => {
+    const agent = await DKGAgent.create({
+      name: 'SwmEncryptedWire',
+      chainAdapter: new MockChainAdapter(),
+    });
+    const internals = agent as unknown as DKGAgentInternals;
+    const gossip = new CapturingGossip();
+    (agent as unknown as { gossip: CapturingGossip }).gossip = gossip;
+    Object.defineProperty((agent as unknown as { node: object }).node, 'peerId', {
+      value: { toString: () => '12D3KooWEncryptedWireLocal' },
+      configurable: true,
+    });
+
+    const allowedRecord = await agent.registerAgent('allowed-encryption-recipient');
+    internals.defaultAgentAddress = allowedRecord.agentAddress;
+    const contextGraphId = 'gated-swm-encrypted-wire';
+    await insertAgentGate(agent, contextGraphId, DKG_ONTOLOGY.DKG_ALLOWED_AGENT, allowedRecord.agentAddress);
+
+    await agent.share(contextGraphId, [{
+      subject: 'urn:test:encrypted-wire',
+      predicate: 'http://schema.org/name',
+      object: '"wire secret"',
+      graph: '',
+    }]);
+
+    expect(gossip.messages).toHaveLength(1);
+    expect(gossip.messages[0]?.topic).toBe(contextGraphWorkspaceTopic(contextGraphId));
+    const envelope = decodeGossipEnvelope(gossip.messages[0]!.data);
+    expect(envelope.agentAddress).toBe(allowedRecord.agentAddress);
+    let decodedAsPlainWorkspace = false;
+    try {
+      const request = decodeWorkspacePublishRequest(envelope.payload);
+      decodedAsPlainWorkspace = request.paranetId === contextGraphId &&
+        new TextDecoder().decode(request.nquads).includes('wire secret');
+    } catch {
+      decodedAsPlainWorkspace = false;
+    }
+    expect(decodedAsPlainWorkspace).toBe(false);
+
+    const senderKeyMessage = decodeSwmSenderKeyMessage(envelope.payload);
+    expect(senderKeyMessage.type).toBe(SWM_SENDER_KEY_MESSAGE_TYPE);
+    expect(senderKeyMessage.contextGraphId).toBe(contextGraphId);
+    expect(senderKeyMessage.senderAgentAddress).toBe(allowedRecord.agentAddress);
+    expect(senderKeyMessage.ciphertext.length).toBeGreaterThan(0);
+    expect(senderKeyMessage).not.toHaveProperty('recipients');
+    const wireText = Buffer.from(envelope.payload).toString('utf8');
+    expect(wireText).not.toContain('wire secret');
+
+    const decrypted = await internals.decryptWorkspacePayloadWithSenderKey(
+      senderKeyMessage,
+      contextGraphId,
+      { operationId: 'test', operationName: 'share' },
+    );
+    const request = decodeWorkspacePublishRequest(decrypted);
+    expect(new TextDecoder().decode(request.nquads)).toContain('wire secret');
   });
 
   it('keeps legacy raw SWM gossip for open graphs when no local signing key exists', async () => {
