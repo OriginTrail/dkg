@@ -22,7 +22,11 @@ export {
   type ResolveOpts,
   PeerResolver,
 } from './network/index.js';
-export { ProtocolRouter, DEFAULT_MAX_READ_BYTES } from './protocol-router.js';
+export {
+  ProtocolRouter,
+  type ProtocolRouterOptions,
+  DEFAULT_MAX_READ_BYTES,
+} from './protocol-router.js';
 export { GossipSubManager, type GossipMessageHandler } from './gossipsub-manager.js';
 export { PeerDiscoveryManager } from './discovery.js';
 export {
