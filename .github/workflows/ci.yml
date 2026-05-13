@@ -106,6 +106,19 @@ jobs:
       - name: Test audit-create-random lexer
         run: node --test scripts/audit-create-random.test.mjs
 
+      # RFC 07 §3.2 boundary gate. Bans raw `dialProtocol(` outside the
+      # network/protocol-router boundary so new protocols can't silently
+      # bypass the in-process PeerResolver and re-introduce the
+      # asymmetric-failure class RFC 07 was built to eliminate. See
+      # `scripts/audit-dial-protocol.mjs` for the full rationale and
+      # `dkgv10-spec/production_mainnet/07_IN_PROCESS_PEER_RESOLVER.md`
+      # for the architectural commitment.
+      - name: Audit dialProtocol boundary (RFC 07 §3.2)
+        run: node scripts/audit-dial-protocol.mjs
+
+      - name: Test audit-dial-protocol lexer
+        run: node --test scripts/audit-dial-protocol.test.mjs
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
