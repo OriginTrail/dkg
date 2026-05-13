@@ -44,12 +44,23 @@ export function expectTxSuccess(
  * (vs. silently returning an undefined `tokenId` and letting downstream
  * `.toBe(0n)` mask the bug).
  *
+ * **Important**: this helper matches by `topic[0]` (the event signature
+ * hash) only — it does NOT filter by the emitting contract address.
+ * If two contracts in the same tx emit an event with the same
+ * canonical signature (e.g. ERC-20 and ERC-721 both have
+ * `Transfer(address,address,uint256)` though with different `indexed`
+ * counts), ethers will skip ones whose topic count doesn't match the
+ * declared interface — but if signatures are truly identical (same
+ * arg types AND indexed flags), both decode and both will appear in
+ * `matches`. Use the `predicate` argument to disambiguate (e.g.
+ * filter by `args.tokenId` or by `log.address`).
+ *
  * @param iface The ethers Interface that knows the event signature.
  * @param logs The transaction receipt's `.logs` array.
  * @param name The event name (e.g. `'PositionWithdrawn'`).
  * @param predicate Optional extra filter — useful when the same event
  *                  fires multiple times in one tx and you want the one
- *                  matching a specific argument.
+ *                  matching a specific argument or originating contract.
  */
 export function parseEventOrThrow<T = LogDescription>(
   iface: Interface,
@@ -81,6 +92,15 @@ export function parseEventOrThrow<T = LogDescription>(
  * `undefined` if the event is not present, throws if more than one
  * matching event exists. Useful when an event is conditionally emitted
  * (e.g. `RewardsClaimed` only fires when `accruedRewards > 0`).
+ *
+ * The "≤ 1" cap is a safety rail for the most common usage pattern
+ * (one event per tx per tokenId). Callers that legitimately expect
+ * multiple events of the same name (e.g. a batch withdraw tx that
+ * fires N `PositionWithdrawn`s) MUST pass a discriminating
+ * `predicate` (typically a tokenId match) so each call resolves to
+ * a single event. If you really need "give me all matches", do not
+ * use this helper — iterate `iface.parseLog` yourself; the helper's
+ * job is to fail loudly on accidental duplication.
  */
 export function parseEventIfPresent<T = LogDescription>(
   iface: Interface,

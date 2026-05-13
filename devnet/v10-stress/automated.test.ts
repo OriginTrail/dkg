@@ -2253,6 +2253,38 @@ describe('V10 chain — stress + scenario validation', () => {
     const expiry: bigint = BigInt(pos.expiryTimestamp);
     expect(expiry, 'phase 7: tier-3 expiry must be non-zero').toBeGreaterThan(0n);
 
+    // Precondition: the boundary test below calls
+    // `evm_setNextBlockTimestamp(expiry - 1)`. Hardhat REQUIRES the
+    // next timestamp to be strictly greater than the latest mined
+    // block. If a prior phase fast-forwarded the chain past
+    // `expiry - 1` (e.g. Phase 6's reward-lifecycle warps drifted
+    // unusually far), the `evm_setNextBlockTimestamp` RPC would
+    // reject with a cryptic error and CI would see a generic test
+    // failure that doesn't point at the actual root cause. Assert
+    // the precondition explicitly so failures here are
+    // self-describing.
+    const headBlockBeforeWarp = await s.provider.getBlock('latest');
+    expect(
+      headBlockBeforeWarp,
+      'phase 7: provider returned no head block before time-warp',
+    ).toBeTruthy();
+    const headTsBeforeWarp = BigInt(headBlockBeforeWarp!.timestamp);
+    expect(
+      expiry,
+      `phase 7: tier-3 expiry (${expiry}) must be > head block timestamp + 1 (${headTsBeforeWarp + 1n}). ` +
+        `If this fails, an earlier phase's evm_setNextBlockTimestamp drifted past the tier-3 lock window. ` +
+        `That's the only way a freshly-staked tier-3 position would have an expiry already in the past.`,
+    ).toBeGreaterThan(headTsBeforeWarp + 1n);
+    // Number(expiry - 1n) bounds: expiry is uint40 (max ~1.1e12),
+    // well under Number.MAX_SAFE_INTEGER (~9e15) — conversion is
+    // lossless. Asserting just to make the assumption explicit;
+    // a future widening of `expiryTimestamp` to uint64 would need
+    // chunked timestamp passing here.
+    expect(
+      expiry - 1n,
+      'phase 7: expiry would overflow JS Number',
+    ).toBeLessThan(BigInt(Number.MAX_SAFE_INTEGER));
+
     // ── boundary 1: at expiry-1, withdraw MUST revert ────────────────
     // Mine an empty block at timestamp expiry-1, then staticCall the
     // withdraw against latest. block.timestamp inside the call ==
