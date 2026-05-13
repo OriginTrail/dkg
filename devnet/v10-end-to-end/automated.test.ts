@@ -70,6 +70,7 @@ import {
   parseEventOrThrow,
   parseEventIfPresent,
   assertDevnetReady,
+  assertAllStakingInvariants,
 } from '../_lib';
 
 const REPO_ROOT = resolve(__dirname, '../..');
@@ -443,6 +444,7 @@ async function detectDevnet(): Promise<DevnetState | null> {
     [
       'function stakeWithdrawalDelay() view returns (uint256)',
       'function minimumStake() view returns (uint96)',
+      'function maximumStake() view returns (uint96)',
     ],
     provider,
   );
@@ -1084,6 +1086,26 @@ describe('V10 chain — combined end-to-end devnet validation', () => {
           `(staked ${ethers.formatEther(stakeAmount)}, ` +
           `claimed=${rEvt ? ethers.formatEther(rEvt.args.amount) : '0'}, ` +
           `node stake ${ethers.formatEther(afterCreateStake)} → ${ethers.formatEther(afterWithdrawStake)})`,
+      );
+
+      // ── PROTOCOL INVARIANTS post-create + withdraw ──────────────────
+      // Phase 3 minted-then-burned an NFT — the most fragile boundary
+      // for the per-node aggregate / enumeration. Run the full Aave-
+      // style invariant sweep over every core's identity. `partial`
+      // mode because v10-end-to-end may have other identities outside
+      // [1..6] active in this devnet snapshot.
+      const e2eCores = [1, 2, 3, 4, 5, 6]
+        .map((n) => s.nodes[n])
+        .filter((n): n is DevnetNode => Boolean(n) && n.identityId > 0n);
+      await assertAllStakingInvariants(
+        {
+          css: s.convictionStakingStorage,
+          params: s.parametersStorage,
+          token: s.token,
+          label: 'v10-e2e.phase3 (post-stake-lifecycle)',
+        },
+        e2eCores.map((c) => c.identityId),
+        'partial',
       );
     },
     300_000,

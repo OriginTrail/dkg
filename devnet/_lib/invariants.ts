@@ -99,6 +99,14 @@ async function readPosition(css: ethers.Contract, tokenId: bigint): Promise<Posi
  * stakes across all NFT positions enumerated under that node must
  * equal `getNodeStakeV10(identityId)`.
  *
+ * Also verifies enumeration coherence — `nodeTokens[identityId]` is
+ * mutated via `_pushNodeToken` / `_popNodeToken` (swap-with-last);
+ * a missed pop would leave a burnt tokenId in the array with
+ * `raw == 0`, which would still SUM correctly (0 + everything = real
+ * total) but would corrupt every consumer that iterates the array.
+ * We therefore additionally assert that every enumerated tokenId has
+ * `raw > 0`.
+ *
  * Returns the per-token positions read so callers can chain further
  * checks without paying for a second enumeration pass.
  */
@@ -106,9 +114,10 @@ export async function assertPerNodeAggregation(
   ctx: InvariantContext,
   identityId: bigint,
 ): Promise<{ tokens: bigint[]; positions: Position[]; aggregate: bigint }> {
-  const tokens: bigint[] = (await ctx.css.getNodeTokens(identityId)).map((t: bigint) =>
-    BigInt(t),
-  );
+  // ethers v6 returns a Result that's array-like but not Array — copy
+  // into a plain array so .map / .reduce are stable across versions.
+  const rawTokens = await ctx.css.getNodeTokens(identityId);
+  const tokens: bigint[] = Array.from(rawTokens, (t) => BigInt(t as bigint));
   const positions: Position[] = await Promise.all(
     tokens.map((t) => readPosition(ctx.css, t)),
   );
@@ -122,6 +131,22 @@ export async function assertPerNodeAggregation(
       `This is a Conservation violation — every mint/burn/transfer/redelegate path ` +
       `must keep these two views in sync. Diff: ${summed - onChain} wei.`,
   ).toBe(onChain);
+
+  // Enumeration coherence — no stale (burnt) tokenIds should remain
+  // in `nodeTokens[id]`. A burnt position has raw=0; the aggregate
+  // sum check above would silently pass even with stale entries.
+  // This catch is the thing that pins a `_popNodeToken` regression.
+  const stale = positions
+    .map((p, i) => ({ tokenId: tokens[i]!, position: p }))
+    .filter((entry) => entry.position.raw === 0n);
+  expect(
+    stale.length,
+    `${ctx.label}: per-node enumeration coherence violated for identityId=${identityId}. ` +
+      `${stale.length} of ${tokens.length} enumerated tokens have raw=0 ` +
+      `(stale = burnt tokens not popped from nodeTokens[id]): ` +
+      `${stale.map((e) => e.tokenId.toString()).join(', ')}.`,
+  ).toBe(0);
+
   return { tokens, positions, aggregate: summed };
 }
 

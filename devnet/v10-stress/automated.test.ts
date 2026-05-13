@@ -2253,7 +2253,10 @@ describe('V10 chain — stress + scenario validation', () => {
     const expiry: bigint = BigInt(pos.expiryTimestamp);
     expect(expiry, 'phase 7: tier-3 expiry must be non-zero').toBeGreaterThan(0n);
 
-    // Warp to expiry - 1 second; withdraw MUST still revert.
+    // ── boundary 1: at expiry-1, withdraw MUST revert ────────────────
+    // Mine an empty block at timestamp expiry-1, then staticCall the
+    // withdraw against latest. block.timestamp inside the call ==
+    // expiry-1, which is one second before the lock window closes.
     await s.provider.send('evm_setNextBlockTimestamp', [Number(expiry - 1n)]);
     await s.provider.send('evm_mine', []);
     await expectRevert(
@@ -2261,16 +2264,34 @@ describe('V10 chain — stress + scenario validation', () => {
       `phase 7: withdraw at expiry-1=${expiry - 1n} (lock ends at ${expiry}) must revert`,
     );
 
-    // Warp to exactly expiry; withdraw MUST now succeed.
+    // ── boundary 2: at exactly expiry, withdraw MUST succeed ─────────
+    // Critical: do NOT mine an empty block first. We set the NEXT
+    // block's timestamp to `expiry` and let the withdraw tx itself
+    // BE that next block — so `block.timestamp` inside the EVM
+    // execution is *exactly* `expiry`, pinning the `>=` boundary.
+    //
+    // (If we minted an empty block first, the withdraw tx would land
+    // in a subsequent block at `expiry + 1`, which only tests the
+    // strictly-after case and would pass even with a `>` typo. The
+    // off-by-one bug we want to catch lives at the `==` second.)
     await s.provider.send('evm_setNextBlockTimestamp', [Number(expiry)]);
-    await s.provider.send('evm_mine', []);
-
     const tracBefore: bigint = await s.token.balanceOf(wallet.address);
     const withdrawTx = await nftAsW.withdraw(tokenId, {
       nonce: await nextNonceFor(s.provider, wallet.address),
     });
     const withdrawReceipt = await withdrawTx.wait();
     expectTxSuccess(withdrawReceipt, 'phase 7: withdraw at exactly expiry');
+
+    // Confirm the receipt actually mined at timestamp == expiry, not
+    // expiry+1 — defensive against future Hardhat semantics changes.
+    const minedBlock = await s.provider.getBlock(withdrawReceipt!.blockNumber);
+    expect(minedBlock, 'phase 7: receipt block missing').toBeTruthy();
+    expect(
+      BigInt(minedBlock!.timestamp),
+      `phase 7: withdraw mined at block.timestamp=${minedBlock!.timestamp}, expected exactly ${expiry}. ` +
+        `If Hardhat changed evm_setNextBlockTimestamp semantics this test must be updated; ` +
+        `otherwise the off-by-one boundary is not actually being exercised.`,
+    ).toBe(expiry);
 
     // Strict: TRAC moved back, NFT burned, position cleared.
     const tracAfter: bigint = await s.token.balanceOf(wallet.address);
