@@ -260,4 +260,136 @@ test.describe('Right Panel (Agent Panel)', () => {
       expect(fg).not.toBe('rgba(0, 0, 0, 0)');
     });
   });
+
+  // ─── PR2: Composer + dropzone + lucide iconography ────────────────────
+
+  test.describe('PR2: composer', () => {
+    test('autoGrows: textarea height increases as multi-line content is typed', async ({ page }) => {
+      const input = page.locator(sel.rightPanel.chatInput);
+      const visible = await input.isVisible().catch(() => false);
+      if (!visible) {
+        test.skip(true, 'Composer requires an active agent chat shell to be rendered.');
+      }
+
+      const initialHeight = await input.evaluate((el) => (el as HTMLTextAreaElement).clientHeight);
+      await input.fill('line one\nline two\nline three');
+      const grown = await input.evaluate((el) => (el as HTMLTextAreaElement).clientHeight);
+      expect(grown).toBeGreaterThan(initialHeight);
+
+      // 10 lines should clamp at maxRows=8 with overflow auto/scroll.
+      const tenLines = Array.from({ length: 10 }, (_, i) => `line ${i + 1}`).join('\n');
+      await input.fill(tenLines);
+      const clampedHeight = await input.evaluate((el) => (el as HTMLTextAreaElement).clientHeight);
+      const overflowY = await input.evaluate((el) => getComputedStyle(el as HTMLElement).overflowY);
+      expect(clampedHeight).toBeLessThanOrEqual(grown * 6 + 16);
+      expect(['auto', 'scroll']).toContain(overflowY);
+    });
+
+    test('attachOpensFilePicker: clicking the paperclip dispatches a click on the hidden file input', async ({ page }) => {
+      const attach = page.locator(sel.rightPanel.composerAttach);
+      const visible = await attach.isVisible().catch(() => false);
+      if (!visible) {
+        test.skip(true, 'Composer attach button requires an active agent chat shell.');
+      }
+      const hiddenAttachInput = page
+        .locator(sel.rightPanel.root)
+        .locator('input[type="file"]:not([tabindex])');
+
+      // Stub the click handler on the hidden input so the native picker can't
+      // open in CI; we just need to confirm the click dispatched.
+      await hiddenAttachInput.evaluate((el) => {
+        (el as HTMLInputElement & { __clicked?: number }).__clicked = 0;
+        (el as HTMLInputElement).click = function patched() {
+          (el as HTMLInputElement & { __clicked?: number }).__clicked! += 1;
+        };
+      });
+      await attach.click();
+      const clicks = await hiddenAttachInput.evaluate(
+        (el) => (el as HTMLInputElement & { __clicked?: number }).__clicked ?? 0,
+      );
+      expect(clicks).toBeGreaterThanOrEqual(1);
+    });
+  });
+
+  test.describe('PR2: drop zone', () => {
+    test('dragShowsOverlay: dragenter on messages region shows the accept overlay', async ({ page }) => {
+      const messages = page.locator(sel.rightPanel.messagesRegion);
+      const visible = await messages.isVisible().catch(() => false);
+      if (!visible) {
+        test.skip(true, 'Dropzone requires the chat-shell messages region.');
+      }
+      const trigger = page.locator(sel.rightPanel.projectSelectTrigger);
+      if (!(await trigger.isVisible().catch(() => false))) {
+        test.skip(true, 'Project picker not present; no active project to gate the accept overlay.');
+      }
+
+      await messages.dispatchEvent('dragenter', {
+        dataTransfer: { files: [], items: [{ kind: 'file', type: 'text/markdown' }], types: ['Files'] },
+      });
+      await expect(page.locator(sel.rightPanel.dropOverlayAccept)).toBeVisible();
+
+      await messages.dispatchEvent('dragleave', {
+        dataTransfer: { files: [], items: [], types: ['Files'] },
+      });
+      await expect(page.locator(sel.rightPanel.dropOverlay)).toBeHidden();
+    });
+
+    test('refusedWithoutProject: refuse overlay appears when no project is active', async ({ page }) => {
+      const messages = page.locator(sel.rightPanel.messagesRegion);
+      const visible = await messages.isVisible().catch(() => false);
+      if (!visible) {
+        test.skip(true, 'Dropzone requires the chat-shell messages region.');
+      }
+      const hasStoreHandle = await page.evaluate(() => Boolean((window as any).__dkgProjects));
+      if (!hasStoreHandle) {
+        test.skip(true, 'No test handle for projects store — refuse overlay is covered by unit tests.');
+      }
+      await page.evaluate(() => (window as any).__dkgProjects.setState({ activeProjectId: null }));
+
+      await messages.dispatchEvent('dragenter', {
+        dataTransfer: { files: [], items: [{ kind: 'file', type: 'text/markdown' }], types: ['Files'] },
+      });
+      await expect(page.locator(sel.rightPanel.dropOverlayRefuse)).toBeVisible();
+    });
+  });
+
+  test.describe('PR2: lucide iconography', () => {
+    test('iconography.lucideRendered: kebab icon renders as an SVG inside the active agent tab', async ({ page }) => {
+      const tabMenuTrigger = page.locator(sel.rightPanel.tabMenuTrigger);
+      if ((await tabMenuTrigger.count()) === 0) {
+        test.skip(true, 'No connected-agent kebab in this env — covered by unit tests.');
+      }
+      const svgCount = await tabMenuTrigger.first().locator('svg').count();
+      expect(svgCount).toBeGreaterThanOrEqual(1);
+    });
+
+    test('iconography.lucideRendered: Select caret IS a lucide SVG (.v10-select-caret renders as <svg>)', async ({ page }) => {
+      const caret = page
+        .locator(sel.rightPanel.projectSelect)
+        .locator('.v10-select-caret');
+      if ((await caret.count()) === 0) {
+        test.skip(true, 'No project picker rendered in this env.');
+      }
+      const tagName = await caret.first().evaluate((el) => el.tagName.toLowerCase());
+      expect(tagName).toBe('svg');
+    });
+
+    test('iconography.lucideRendered: composer Send button renders an SVG icon (lucide ArrowUp)', async ({ page }) => {
+      const send = page.locator(sel.rightPanel.sendBtnAria);
+      if (!(await send.isVisible().catch(() => false))) {
+        test.skip(true, 'Send button requires the chat-shell rendered.');
+      }
+      const svgCount = await send.locator('svg').count();
+      expect(svgCount).toBeGreaterThanOrEqual(1);
+    });
+
+    test('iconography.lucideRendered: composer attach button renders an SVG icon (lucide Paperclip)', async ({ page }) => {
+      const attach = page.locator(sel.rightPanel.composerAttach);
+      if (!(await attach.isVisible().catch(() => false))) {
+        test.skip(true, 'Attach button requires the chat-shell rendered.');
+      }
+      const svgCount = await attach.locator('svg').count();
+      expect(svgCount).toBeGreaterThanOrEqual(1);
+    });
+  });
 });

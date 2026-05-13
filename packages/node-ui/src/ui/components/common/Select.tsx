@@ -1,5 +1,6 @@
 import React, { useEffect, useLayoutEffect, useRef, useState, useCallback } from 'react';
 import { createPortal } from 'react-dom';
+import { ChevronDown } from 'lucide-react';
 
 export interface SelectOption {
   value: string;
@@ -174,7 +175,8 @@ export function Select({
         aria-label={ariaLabel}
       >
         <span className={`v10-select-value ${selected ? '' : 'placeholder'}`}>{displayLabel}</span>
-        <span className="v10-select-caret" aria-hidden="true">▾</span>
+        <ChevronDown className="v10-select-caret" size={12} aria-hidden="true" />
+
       </button>
 
       {open && position && createPortal(

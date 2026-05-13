@@ -311,12 +311,13 @@ describe('ConnectedAgentsTab rendering', () => {
     expect(markup).toContain('More actions for OpenClaw');
     expect(markup).toContain('Hello <strong>world</strong><br/><code>code</code>');
     expect(markup).toContain('spec.md');
-    expect(markup).toContain('Queued - imports on send');
-    expect(markup).toContain('Queued files keep their stored target: Testing.');
-    expect(markup).toContain('Project');
-    expect(markup).toContain('Upload file');
+    // Attachment chip + composer toolbar (PR2 redesign).
+    expect(markup).toContain('v10-attachment-chip');
+    expect(markup).toContain('Queued');
+    expect(markup).toContain('v10-composer-attach');
+    expect(markup).toContain('aria-label="Attach files"');
     expect(markup).toContain('Message OpenClaw');
-    expect(markup).toContain('Send');
+    expect(markup).toContain('aria-label="Send message"');
   });
 
   it('renders degraded connected-agent status dots', () => {

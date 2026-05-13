@@ -92,6 +92,21 @@ export const sel = {
     projectSelectTrigger: '.v10-local-agent-target-select .v10-select-trigger',
     projectSelectMenu: '.v10-local-agent-target-select .v10-select-menu',
     projectSelectOption: '.v10-local-agent-target-select .v10-select-option',
+    // PR2 composer (TextareaAutosize + lucide icons + react-dropzone)
+    composerShell: '.v10-local-agent-composer-shell',
+    composerAttach: '.v10-composer-attach',
+    composerToolbar: '.v10-composer-toolbar',
+    composerTarget: '.v10-composer-target',
+    sendBtnInline: '.v10-local-agent-inline-send',
+    sendBtnAria: 'button[aria-label="Send message"]',
+    attachmentChips: '.v10-attachment-chips',
+    attachmentChip: '.v10-attachment-chip',
+    attachmentChipRemove: '.v10-attachment-chip-remove',
+    attachmentChipStatus: '.v10-attachment-chip-status',
+    messagesRegion: '.v10-local-agent-messages',
+    dropOverlay: '.v10-drop-overlay',
+    dropOverlayAccept: '.v10-drop-overlay.active.accept',
+    dropOverlayRefuse: '.v10-drop-overlay.active.refuse',
   },
 
   dashboard: {
