@@ -24,7 +24,11 @@
     "better-sqlite3": "^11",
     "lucide-react": "^1.14.0",
     "react-dropzone": "^15.0.0",
+    "react-markdown": "^10.1.0",
     "react-textarea-autosize": "^8.5.9",
+    "remark-breaks": "^4.0.0",
+    "remark-gfm": "^4.0.1",
+    "shiki": "^4.0.2",
     "zod": "^3.25.76",
     "zustand": "^5.0.12"
   },

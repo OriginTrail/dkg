@@ -16,6 +16,10 @@
   --border-subtle: #1a1a1a;
   --border-default: #222222;
   --border-strong: #333333;
+  /* Higher-contrast border for chips that need to clear 3:1 non-text on any
+     surface (used by the inline-code chip, which can land on user bubbles
+     whose bg is identical to a chip fill). */
+  --border-prominent: #888888;
 
   /* Text */
   --text-primary: #e8e8e8;
@@ -32,6 +36,7 @@
   /* Semantic foregrounds (theme-aware) */
   --text-danger: #fca5a5;
   --text-danger-hover: #fecaca;
+  --text-link: #60a5fa;
 
   /* Layer identity */
   --layer-working: #64748b;
@@ -88,6 +93,7 @@ body.light {
   --border-subtle: #e5e5e5;
   --border-default: #d4d4d4;
   --border-strong: #a3a3a3;
+  --border-prominent: #525252;
   --text-primary: #171717;
   --text-secondary: #525252;
   --text-tertiary: #a3a3a3;
@@ -95,6 +101,7 @@ body.light {
   /* Light-theme danger foreground (~7.4:1 on --bg-elevated #f0f0f0) */
   --text-danger: #b91c1c;
   --text-danger-hover: #991b1b;
+  --text-link: #1d4ed8;
   --layer-working: #a3a3a3;
   --layer-shared: #737373;
   --layer-verified: #404040;
@@ -1723,6 +1730,190 @@ button:focus:not(:focus-visible) { outline: none; }
   color: var(--text-primary);
   border: 1px solid var(--border-subtle);
 }
+/* ── Markdown rendering (PR3) ── */
+.v10-md {
+  font-size: 12px;
+  line-height: 1.5;
+  color: inherit;
+}
+.v10-md > *:first-child { margin-top: 0; }
+.v10-md > *:last-child { margin-bottom: 0; }
+.v10-md-h1, .v10-md-h2, .v10-md-h3 {
+  font-weight: 600;
+  line-height: 1.3;
+  margin: 12px 0 6px;
+  color: var(--text-primary);
+}
+.v10-md-h4, .v10-md-h5, .v10-md-h6 {
+  font-weight: 600;
+  line-height: 1.4;
+  margin: 10px 0 6px;
+  color: var(--text-primary);
+}
+.v10-md-h1 { font-size: 18px; }
+.v10-md-h2 { font-size: 16px; }
+.v10-md-h3 { font-size: 14px; }
+.v10-md-h4 { font-size: 13px; }
+.v10-md-h5 { font-size: 12px; }
+.v10-md-h6 { font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.04em; }
+.v10-md-p { margin: 4px 0; }
+.v10-md-ul, .v10-md-ol { margin: 4px 0; padding-left: 20px; }
+.v10-md-ul { list-style: disc; }
+.v10-md-ol { list-style: decimal; }
+.v10-md-li { margin: 2px 0; }
+.v10-md-li > .v10-md-ul, .v10-md-li > .v10-md-ol { margin: 2px 0; padding-left: 18px; }
+/* Task lists (remark-gfm) */
+.v10-md-ul .v10-md-li input[type="checkbox"] {
+  margin-right: 6px;
+  vertical-align: middle;
+  accent-color: var(--accent-blue);
+}
+.v10-md-link {
+  color: var(--text-link);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  word-break: break-word;
+}
+.v10-md-link:hover { text-decoration: none; }
+.v10-md-blockquote {
+  margin: 6px 0;
+  padding: 4px 12px;
+  border-left: 3px solid var(--border-strong);
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--text-tertiary) 5%, transparent);
+  border-radius: 0 6px 6px 0;
+}
+.v10-md-hr {
+  margin: 12px 0;
+  border: 0;
+  border-top: 1px solid var(--border-subtle);
+}
+.v10-md-table-scroll {
+  margin: 8px 0;
+  overflow-x: auto;
+  border-radius: 8px;
+  border: 1px solid var(--border-subtle);
+}
+.v10-md-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+.v10-md-thead {
+  background: var(--bg-elevated);
+}
+.v10-md-th {
+  padding: 6px 10px;
+  text-align: left;
+  font-weight: 600;
+  color: var(--text-primary);
+  border-bottom: 1px solid var(--border-subtle);
+  white-space: nowrap;
+}
+.v10-md-td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  vertical-align: top;
+}
+.v10-md-tr:last-child .v10-md-td { border-bottom: 0; }
+.v10-md-code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--bg-active);
+  color: var(--text-primary);
+  /* 1px border keeps the chip visible on bubbles whose bg is also --bg-active
+     (e.g., user bubbles). Uses --border-prominent so contrast clears 3:1
+     non-text on every bubble × theme combination. */
+  border: 1px solid var(--border-prominent);
+}
+.v10-md-pre {
+  position: relative;
+  margin: 8px 0;
+  border-radius: 12px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.v10-md-pre-lang {
+  position: absolute;
+  top: 6px;
+  left: 10px;
+  padding: 2px 6px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  background: var(--bg-elevated);
+  border-radius: 4px;
+  pointer-events: none;
+}
+.v10-md-pre-rendered,
+.v10-md-pre-fallback {
+  margin: 0;
+  padding: 28px 12px 10px;
+  overflow-x: auto;
+}
+.v10-md-pre-rendered pre,
+.v10-md-pre-fallback {
+  margin: 0;
+  background: transparent !important;
+}
+.v10-md-pre-rendered code,
+.v10-md-pre-fallback code {
+  font-family: inherit;
+  font-size: inherit;
+  background: transparent;
+  padding: 0;
+}
+.v10-md-copy {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--bg-active) 75%, transparent);
+  color: var(--text-secondary);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms ease-out, background 0.15s, color 0.15s;
+}
+.v10-md-pre:hover .v10-md-copy,
+.v10-md-copy:focus-visible {
+  opacity: 1;
+}
+.v10-md-copy:hover {
+  background: var(--bg-active);
+  color: var(--text-primary);
+}
+@media (hover: none) {
+  .v10-md-copy { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .v10-md-copy { opacity: 1; transition: none; }
+}
+.v10-md-copy-announce {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .v10-chat-cursor {
   display: inline-block;
   width: 5px;

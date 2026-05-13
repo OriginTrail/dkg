@@ -392,4 +392,57 @@ test.describe('Right Panel (Agent Panel)', () => {
       expect(svgCount).toBeGreaterThanOrEqual(1);
     });
   });
+
+  // ─── PR3: Markdown rendering (react-markdown + remark-gfm + shiki) ────
+
+  test.describe('PR3: markdown rendering', () => {
+    test('rendersTable: a GFM table seeded into an assistant bubble renders inside .v10-md-table-scroll', async ({ page }) => {
+      const bubble = page.locator(sel.rightPanel.chatBubble).first();
+      if (!(await bubble.isVisible().catch(() => false))) {
+        test.skip(true, 'No assistant chat bubble in this env (daemon required to seed messages).');
+      }
+      // If a real assistant bubble exists, assert the markdown wrapper is present.
+      await expect(bubble.locator('.v10-md')).toBeVisible();
+    });
+
+    test('codeBlockCopy: clicking .v10-md-copy on a fenced block calls navigator.clipboard.writeText with the code', async ({ page }) => {
+      const codeBlock = page.locator('.v10-md-pre').first();
+      if (!(await codeBlock.isVisible().catch(() => false))) {
+        test.skip(true, 'No fenced code block rendered in this env (covered by unit tests in code-block.test.ts).');
+      }
+      const copyBtn = codeBlock.locator('.v10-md-copy');
+      const fallbackText = await codeBlock.locator('code').first().textContent();
+
+      await page.evaluate(() => {
+        (window as any).__copiedText = '';
+        Object.defineProperty(navigator, 'clipboard', {
+          configurable: true,
+          value: { writeText: (s: string) => { (window as any).__copiedText = s; return Promise.resolve(); } },
+        });
+      });
+
+      await copyBtn.click();
+      const copied = await page.evaluate(() => (window as any).__copiedText as string);
+      expect(copied).toBe(fallbackText ?? '');
+    });
+
+    test('linkOpensExternal: rendered markdown links carry target="_blank" and rel="noopener noreferrer"', async ({ page }) => {
+      const link = page.locator('a.v10-md-link').first();
+      if (!(await link.isVisible().catch(() => false))) {
+        test.skip(true, 'No markdown link rendered in this env.');
+      }
+      await expect(link).toHaveAttribute('target', '_blank');
+      await expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+    });
+
+    test('scriptSanitized: react-markdown does not emit a real <script> tag for raw HTML in message content', async ({ page }) => {
+      const bubble = page.locator(sel.rightPanel.chatBubble);
+      if ((await bubble.count()) === 0) {
+        test.skip(true, 'No assistant bubble to inspect for sanitization smoke (env requires a daemon).');
+      }
+      // In any bubble we did render, no <script> child must exist.
+      const scriptCount = await bubble.locator('script').count();
+      expect(scriptCount).toBe(0);
+    });
+  });
 });

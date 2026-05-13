@@ -309,7 +309,12 @@ describe('ConnectedAgentsTab rendering', () => {
     // demand; in the static markup we only see the trigger.
     expect(markup).toContain('v10-agent-tab-menu-trigger');
     expect(markup).toContain('More actions for OpenClaw');
-    expect(markup).toContain('Hello <strong>world</strong><br/><code>code</code>');
+    // PR3: react-markdown + remark-gfm + remark-breaks now renders the
+    // bold-then-inline-code content as proper markup wrapped in a `<p>`.
+    // remark-breaks preserves the single newline as a `<br>` per chat-UI
+    // convention (matches ChatGPT / Claude behavior).
+    expect(markup).toContain('<p class="v10-md-p">Hello <strong>world</strong>');
+    expect(markup).toContain('<code class="v10-md-code">code</code>');
     expect(markup).toContain('spec.md');
     // Attachment chip + composer toolbar (PR2 redesign).
     expect(markup).toContain('v10-attachment-chip');

@@ -28,6 +28,7 @@ import TextareaAutosize from 'react-textarea-autosize';
 import { useDropzone } from 'react-dropzone';
 import { ArrowUp, Ban, ChevronDown, MoreHorizontal, Paperclip, Upload, X } from 'lucide-react';
 import { Select } from '../common/Select.js';
+import { MarkdownMessage } from '../chat/MarkdownMessage.js';
 
 export interface LocalAgentMessage {
   id: string;
@@ -304,46 +305,14 @@ export function normalizeMessageContent(content: string): string {
     .replace(/(?:\n[ \t]*)+$/, '');
 }
 
-function renderInlineMarkdown(text: string): React.ReactNode[] {
-  const nodes: React.ReactNode[] = [];
-  const pattern = /(\*\*[^*]+\*\*|`[^`]+`)/g;
-  let lastIndex = 0;
-  let match: RegExpExecArray | null;
-  let key = 0;
-
-  while ((match = pattern.exec(text)) !== null) {
-    if (match.index > lastIndex) {
-      nodes.push(<React.Fragment key={`md-${key++}`}>{text.slice(lastIndex, match.index)}</React.Fragment>);
-    }
-
-    const token = match[0];
-    if (token.startsWith('**') && token.endsWith('**')) {
-      nodes.push(<strong key={`md-${key++}`}>{token.slice(2, -2)}</strong>);
-    } else if (token.startsWith('`') && token.endsWith('`')) {
-      nodes.push(<code key={`md-${key++}`}>{token.slice(1, -1)}</code>);
-    } else {
-      nodes.push(<React.Fragment key={`md-${key++}`}>{token}</React.Fragment>);
-    }
-
-    lastIndex = match.index + token.length;
-  }
-
-  if (lastIndex < text.length) {
-    nodes.push(<React.Fragment key={`md-${key++}`}>{text.slice(lastIndex)}</React.Fragment>);
-  }
-
-  return nodes;
-}
-
 function renderMessageContent(content: string): React.ReactNode {
+  // PR3: route assistant + user message content through react-markdown
+  // (with remark-gfm) so headings, lists, tables, blockquotes, links, and
+  // fenced code blocks (syntax-highlighted via shiki) render as proper
+  // structured markup. `normalizeMessageContent` still pre-trims and
+  // normalizes line endings.
   const normalized = normalizeMessageContent(content);
-  const lines = normalized.split('\n');
-  return lines.map((line, index) => (
-    <React.Fragment key={`line-${index}`}>
-      {renderInlineMarkdown(line)}
-      {index < lines.length - 1 && <br />}
-    </React.Fragment>
-  ));
+  return <MarkdownMessage content={normalized} />;
 }
 
 export function getLocalAgentConversationStateKey(
