@@ -21,6 +21,11 @@ export {
   type PeerResolverLogger,
   type ResolveOpts,
   PeerResolver,
+  dkgGossipMsgId,
+  dkgGossipMsgIdRaw,
+  type DkgGossipMsgIdInput,
+  DkgGossipUnsignedMessageError,
+  DkgGossipMissingPublisherError,
 } from './network/index.js';
 export {
   ProtocolRouter,

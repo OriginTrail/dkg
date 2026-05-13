@@ -18,3 +18,11 @@ export type {
   ResolveOpts,
 } from './peer-resolver.js';
 export { PeerResolver } from './peer-resolver.js';
+
+export type { DkgGossipMsgIdInput } from './gossip-msg-id.js';
+export {
+  dkgGossipMsgId,
+  dkgGossipMsgIdRaw,
+  DkgGossipUnsignedMessageError,
+  DkgGossipMissingPublisherError,
+} from './gossip-msg-id.js';
