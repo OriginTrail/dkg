@@ -741,7 +741,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
                             * nodeScore18) / allNodesScore18;
                         uint96 operatorFeeAmount = uint96(
                             (grossNodeRewards
-                                * profileStorage.getLatestOperatorFeePercentage(identityId))
+                                * profileStorage.getOperatorFeePercentageByTimestampReverse(identityId, chronos.timestampForEpoch(e + 1) - 1))
                                 / parametersStorage.maxOperatorFee()
                         );
                         netNodeRewards = grossNodeRewards - operatorFeeAmount;
