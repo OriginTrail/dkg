@@ -138,16 +138,36 @@ describe('PanelRight component', () => {
       await Promise.resolve();
     });
 
-    expect(container.textContent).toContain('OpenClaw connected');
+    // The connection status label moved into the kebab popover, which is
+    // rendered on demand. The active agent subtab still surfaces its name
+    // and the ⋯ trigger; open the menu to confirm the connected status text.
+    expect(container.textContent).toContain('OpenClaw');
+    const tabMenuTrigger = container.querySelector('.v10-agent-tab-menu-trigger') as HTMLButtonElement | null;
+    expect(tabMenuTrigger).toBeTruthy();
+    await act(async () => {
+      tabMenuTrigger!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+      tabMenuTrigger!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(document.body.textContent).toContain('OpenClaw connected');
+    // Close the menu so it doesn't intercept later interactions in this test.
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    });
     expect(container.textContent).toContain('Project');
     expect(container.textContent).toContain('Upload file');
 
-    const projectSelect = container.querySelector('select') as HTMLSelectElement | null;
-    expect(projectSelect).toBeTruthy();
+    // Project picker is now the custom <Select>. Open it via the trigger,
+    // then click the "Testing" option (rendered in a portal under document.body).
+    const projectTrigger = container.querySelector('.v10-local-agent-target-select .v10-select-trigger') as HTMLButtonElement | null;
+    expect(projectTrigger).toBeTruthy();
     await act(async () => {
-      const valueSetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set;
-      valueSetter?.call(projectSelect, 'testing');
-      projectSelect!.dispatchEvent(new Event('change', { bubbles: true }));
+      projectTrigger!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    const testingOption = Array.from(document.body.querySelectorAll('.v10-select-option'))
+      .find((opt) => opt.textContent?.trim() === 'Testing') as HTMLElement | undefined;
+    expect(testingOption).toBeTruthy();
+    await act(async () => {
+      testingOption!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
 
     const attachInput = container.querySelector('input[type="file"]') as HTMLInputElement | null;
@@ -272,12 +292,18 @@ describe('PanelRight component', () => {
       await Promise.resolve();
     });
 
-    const projectSelect = container.querySelector('select') as HTMLSelectElement | null;
-    expect(projectSelect).toBeTruthy();
+    // Project picker is now the custom <Select>. Open it via the trigger,
+    // then click the "Testing" option (rendered in a portal under document.body).
+    const projectTrigger = container.querySelector('.v10-local-agent-target-select .v10-select-trigger') as HTMLButtonElement | null;
+    expect(projectTrigger).toBeTruthy();
     await act(async () => {
-      const valueSetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set;
-      valueSetter?.call(projectSelect, 'testing');
-      projectSelect!.dispatchEvent(new Event('change', { bubbles: true }));
+      projectTrigger!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    const testingOption = Array.from(document.body.querySelectorAll('.v10-select-option'))
+      .find((opt) => opt.textContent?.trim() === 'Testing') as HTMLElement | undefined;
+    expect(testingOption).toBeTruthy();
+    await act(async () => {
+      testingOption!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
 
     const attachInput = container.querySelector('input[type="file"]') as HTMLInputElement | null;
@@ -381,12 +407,18 @@ describe('PanelRight component', () => {
       await Promise.resolve();
     });
 
-    const projectSelect = container.querySelector('select') as HTMLSelectElement | null;
-    expect(projectSelect).toBeTruthy();
+    // Project picker is now the custom <Select>. Open it via the trigger,
+    // then click the "Testing" option (rendered in a portal under document.body).
+    const projectTrigger = container.querySelector('.v10-local-agent-target-select .v10-select-trigger') as HTMLButtonElement | null;
+    expect(projectTrigger).toBeTruthy();
     await act(async () => {
-      const valueSetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set;
-      valueSetter?.call(projectSelect, 'testing');
-      projectSelect!.dispatchEvent(new Event('change', { bubbles: true }));
+      projectTrigger!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    const testingOption = Array.from(document.body.querySelectorAll('.v10-select-option'))
+      .find((opt) => opt.textContent?.trim() === 'Testing') as HTMLElement | undefined;
+    expect(testingOption).toBeTruthy();
+    await act(async () => {
+      testingOption!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
 
     const attachInput = container.querySelector('input[type="file"]') as HTMLInputElement | null;
@@ -471,12 +503,18 @@ describe('PanelRight component', () => {
       await Promise.resolve();
     });
 
-    const projectSelect = container.querySelector('select') as HTMLSelectElement | null;
-    expect(projectSelect).toBeTruthy();
+    // Project picker is now the custom <Select>. Open it via the trigger,
+    // then click the "Testing" option (rendered in a portal under document.body).
+    const projectTrigger = container.querySelector('.v10-local-agent-target-select .v10-select-trigger') as HTMLButtonElement | null;
+    expect(projectTrigger).toBeTruthy();
     await act(async () => {
-      const valueSetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set;
-      valueSetter?.call(projectSelect, 'testing');
-      projectSelect!.dispatchEvent(new Event('change', { bubbles: true }));
+      projectTrigger!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    const testingOption = Array.from(document.body.querySelectorAll('.v10-select-option'))
+      .find((opt) => opt.textContent?.trim() === 'Testing') as HTMLElement | undefined;
+    expect(testingOption).toBeTruthy();
+    await act(async () => {
+      testingOption!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
 
     const attachInput = container.querySelector('input[type="file"]') as HTMLInputElement | null;

@@ -304,9 +304,11 @@ describe('ConnectedAgentsTab rendering', () => {
       localInput: 'draft',
     });
 
-    expect(markup).toContain('OpenClaw connected');
-    expect(markup).toContain('Refresh');
-    expect(markup).toContain('Disconnect');
+    // Connection status + Refresh/Disconnect actions now live inside the
+    // kebab (⋯) menu on the active agent subtab. The popover is rendered on
+    // demand; in the static markup we only see the trigger.
+    expect(markup).toContain('v10-agent-tab-menu-trigger');
+    expect(markup).toContain('More actions for OpenClaw');
     expect(markup).toContain('Hello <strong>world</strong><br/><code>code</code>');
     expect(markup).toContain('spec.md');
     expect(markup).toContain('Queued - imports on send');
@@ -347,7 +349,8 @@ describe('ConnectedAgentsTab rendering', () => {
 
     expect(markup).toContain('Session history');
     expect(markup).toContain('is not currently attached to this node');
-    expect(markup).toContain('session history is available, but there are no stored turns to show yet');
+    // Empty-state copy was rewritten to title+hint (P1 fix from PR1 UX review).
+    expect(markup).toContain('No turns in this session yet.');
   });
 
   // ─── S3 H-AC tests (issue #386, test-matrix.md group H + I) ─────────────
@@ -379,7 +382,7 @@ describe('ConnectedAgentsTab rendering', () => {
     expect(markup).toContain('Connecting...');
   });
 
-  it('H-AC-47: Refresh button is rendered when an integration is connected and selected', () => {
+  it('H-AC-47: Kebab menu trigger is rendered on the active connected agent tab', () => {
     const ready = integration({
       id: 'hermes',
       name: 'Hermes',
@@ -395,8 +398,9 @@ describe('ConnectedAgentsTab rendering', () => {
       selectedIntegration: ready,
       selectedSessionId: 'hermes:dkg-ui',
     });
-    expect(markup).toContain('Refresh');
-    expect(markup).toContain('Disconnect');
+    // Refresh / Disconnect now live inside the kebab popover (open on click).
+    expect(markup).toContain('v10-agent-tab-menu-trigger');
+    expect(markup).toContain('More actions for Hermes');
   });
 
   it('H-AC-47b: Warning chip surfaces lastError on disconnected integration in Connect Another Agent tab', () => {

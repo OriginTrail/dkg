@@ -87,7 +87,21 @@ export class RightPanelPage {
   }
 
   async clickRefresh() {
-    await this.root.locator(sel.rightPanel.refreshBtn).first().click();
+    await this.openActiveTabMenu();
+    await this.page.locator(sel.rightPanel.tabMenuItem).filter({ hasText: /Refresh/i }).click();
+  }
+
+  async clickDisconnect() {
+    await this.openActiveTabMenu();
+    await this.page.locator(sel.rightPanel.tabMenuItemDanger).filter({ hasText: /Disconnect/i }).click();
+  }
+
+  async openActiveTabMenu() {
+    await this.root.locator(sel.rightPanel.tabMenuTrigger).first().click();
+  }
+
+  async isTabMenuOpen() {
+    return this.page.locator(sel.rightPanel.tabMenuPopover).isVisible();
   }
 
   async getPeerCards() {

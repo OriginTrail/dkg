@@ -24,6 +24,7 @@ import {
   streamLocalAgentChat,
 } from '../../api.js';
 import { api } from '../../api-wrapper.js';
+import { Select } from '../common/Select.js';
 
 export interface LocalAgentMessage {
   id: string;
@@ -646,6 +647,142 @@ function localAgentToolbarLabel(
   return `${integration.name} is unavailable`;
 }
 
+function AgentTabMenu(props: {
+  integration: LocalAgentIntegration;
+  statusLabel: string;
+  statusDotClass: string;
+  refreshBusy: boolean;
+  canDisconnect: boolean;
+  onRefresh: () => void;
+  onDisconnect: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const popoverRef = useRef<HTMLDivElement>(null);
+
+  const closeAndReturnFocus = useCallback(() => {
+    setOpen(false);
+    triggerRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    const onMouseDown = (e: MouseEvent) => {
+      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        closeAndReturnFocus();
+      }
+    };
+    document.addEventListener('mousedown', onMouseDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onMouseDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open, closeAndReturnFocus]);
+
+  // Focus first menuitem when popover opens (ARIA APG menu-button pattern).
+  useEffect(() => {
+    if (!open) return;
+    const firstItem = popoverRef.current?.querySelector<HTMLButtonElement>(
+      '.v10-agent-tab-menu-item:not(:disabled)',
+    );
+    firstItem?.focus();
+  }, [open]);
+
+  const onTriggerKeyDown = (e: React.KeyboardEvent<HTMLButtonElement>) => {
+    if (e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      setOpen(true);
+    }
+  };
+
+  const onPopoverKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.key === 'Tab') {
+      // Let tab close the menu so focus falls through naturally.
+      setOpen(false);
+      return;
+    }
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    e.preventDefault();
+    const items = Array.from(
+      popoverRef.current?.querySelectorAll<HTMLButtonElement>(
+        '.v10-agent-tab-menu-item:not(:disabled)',
+      ) ?? [],
+    );
+    if (items.length === 0) return;
+    const currentIndex = items.findIndex((el) => el === document.activeElement);
+    const delta = e.key === 'ArrowDown' ? 1 : -1;
+    const nextIndex = currentIndex === -1
+      ? (delta === 1 ? 0 : items.length - 1)
+      : (currentIndex + delta + items.length) % items.length;
+    items[nextIndex]?.focus();
+  };
+
+  return (
+    <div className="v10-agent-tab-menu" ref={rootRef}>
+      <button
+        ref={triggerRef}
+        type="button"
+        className="v10-agent-tab-menu-trigger"
+        aria-label={`More actions for ${props.integration.name}`}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title={`More actions for ${props.integration.name}`}
+        onClick={(e) => {
+          e.stopPropagation();
+          setOpen((o) => !o);
+        }}
+        onKeyDown={onTriggerKeyDown}
+      >
+        <span aria-hidden="true">⋯</span>
+      </button>
+      {open && (
+        <div
+          ref={popoverRef}
+          className="v10-agent-tab-menu-popover"
+          role="menu"
+          onKeyDown={onPopoverKeyDown}
+        >
+          <div className="v10-agent-tab-menu-status" aria-hidden="true">
+            <span className={`v10-agents-stat-dot ${props.statusDotClass}`} />
+            <span>{props.statusLabel}</span>
+          </div>
+          <button
+            type="button"
+            role="menuitem"
+            className="v10-agent-tab-menu-item"
+            disabled={props.refreshBusy}
+            onClick={() => {
+              closeAndReturnFocus();
+              props.onRefresh();
+            }}
+          >
+            {props.refreshBusy ? 'Refreshing…' : 'Refresh'}
+          </button>
+          {props.canDisconnect && (
+            <button
+              type="button"
+              role="menuitem"
+              className="v10-agent-tab-menu-item danger"
+              onClick={() => {
+                closeAndReturnFocus();
+                props.onDisconnect();
+              }}
+            >
+              Disconnect
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function formatLocalAgentErrorMessage(
   integration: LocalAgentIntegration,
   err: unknown,
@@ -755,25 +892,43 @@ export function ConnectedAgentsTab(props: {
   return (
     <div className="v10-agents-tab">
       <div className="v10-agent-subtabs" role="tablist" aria-label="Integrated agents">
-        {visibleAgentTabs.map((integration) => (
-          <button
-            key={integration.id}
-            className={`v10-agent-subtab ${selected?.id === integration.id && !showAddFlow ? 'active' : ''}`}
-            onClick={() => onSelectIntegration(integration.id, {
-              preserveSession: shouldPreserveSessionForIntegrationSelection({
-                integrationId: integration.id,
-                selectedSessionId,
-                integrations,
-              }),
-              sessionId: integration.defaultSessionId,
-            })}
-            role="tab"
-            aria-selected={selected?.id === integration.id && !showAddFlow}
-          >
-            <span className={`v10-agents-stat-dot ${bridgeStatusDotClass(integration)}`} />
-            <span>{integration.name}</span>
-          </button>
-        ))}
+        {visibleAgentTabs.map((integration) => {
+          const isActive = selected?.id === integration.id && !showAddFlow;
+          return (
+            <div
+              key={integration.id}
+              className={`v10-agent-subtab-group ${isActive ? 'active' : ''}`}
+            >
+              <button
+                className={`v10-agent-subtab ${isActive ? 'active' : ''}`}
+                onClick={() => onSelectIntegration(integration.id, {
+                  preserveSession: shouldPreserveSessionForIntegrationSelection({
+                    integrationId: integration.id,
+                    selectedSessionId,
+                    integrations,
+                  }),
+                  sessionId: integration.defaultSessionId,
+                })}
+                role="tab"
+                aria-selected={isActive}
+              >
+                <span className={`v10-agents-stat-dot ${bridgeStatusDotClass(integration)}`} />
+                <span>{integration.name}</span>
+              </button>
+              {isActive && (
+                <AgentTabMenu
+                  integration={integration}
+                  statusLabel={localAgentToolbarLabel(integration, showingSessionHistory)}
+                  statusDotClass={bridgeStatusDotClass(integration)}
+                  refreshBusy={refreshBusyId === integration.id}
+                  canDisconnect={integration.persistentChat}
+                  onRefresh={() => onRefreshIntegration(integration.id)}
+                  onDisconnect={() => onDisconnectIntegration(integration.id)}
+                />
+              )}
+            </div>
+          );
+        })}
         <button
           className={`v10-agent-subtab add ${showAddFlow ? 'active' : ''}`}
           onClick={() => onSelectIntegration(ADD_AGENT_TAB_ID)}
@@ -865,32 +1020,6 @@ export function ConnectedAgentsTab(props: {
       ) : (
         selected && (
           <div className="v10-local-agent-chat-shell">
-            <div className="v10-local-agent-chat-toolbar">
-              <span className="v10-agents-stat v10-local-agent-chat-toolbar-label">
-                <span className={`v10-agents-stat-dot ${bridgeStatusDotClass(selected)}`} />
-                {localAgentToolbarLabel(selected, showingSessionHistory)}
-              </span>
-              <div className="v10-local-agent-chat-actions">
-                <button
-                  className="v10-agents-refresh"
-                  onClick={() => onRefreshIntegration(selected.id)}
-                  disabled={refreshBusyId === selected.id}
-                  title={`Refresh ${selected.name}`}
-                >
-                  {refreshBusyId === selected.id ? 'Refreshing...' : 'Refresh'}
-                </button>
-                {selected.persistentChat && (
-                <button
-                  className="v10-agents-refresh disconnect"
-                  onClick={() => onDisconnectIntegration(selected.id)}
-                  title={`Disconnect ${selected.name} from this node`}
-                >
-                  Disconnect
-                </button>
-                )}
-              </div>
-            </div>
-
             {connectNotice && <div className="v10-local-agent-notice">{connectNotice}</div>}
             {connectError && <div className="v10-local-agent-error">{connectError}</div>}
 
@@ -914,17 +1043,33 @@ export function ConnectedAgentsTab(props: {
                   Loading the latest conversation from DKG memory...
                 </div>
               )}
-              {(!shouldShowConversationLoader && localMessages.length === 0) && (
-                <div className="v10-agent-empty-state">
-                  {showingSessionHistory
-                    ? `${selected.name} session history is available, but there are no stored turns to show yet.`
-                    : showingStoredSessions
-                    ? `${selected.name} has saved sessions on this node. Open one from Sessions or reconnect from the + tab to start a fresh live thread.`
-                    : selected.chatReady
-                    ? `Send a message to start chatting with ${selected.name}.`
-                    : `${selected.name} is attached to this node. Your conversation history will stay here even while the bridge reconnects.`}
-                </div>
-              )}
+              {(!shouldShowConversationLoader && localMessages.length === 0) && (() => {
+                const empty = showingSessionHistory
+                  ? {
+                      title: 'No turns in this session yet.',
+                      hint: `Reconnect ${selected.name} from the + tab to start a new live thread.`,
+                    }
+                  : showingStoredSessions
+                  ? {
+                      title: `${selected.name} has saved sessions.`,
+                      hint: 'Open one from Sessions, or reconnect from + to start fresh.',
+                    }
+                  : selected.chatReady
+                  ? {
+                      title: `Start a conversation with ${selected.name}.`,
+                      hint: 'Try: "What can you help me with?"',
+                    }
+                  : {
+                      title: `${selected.name} is offline.`,
+                      hint: 'Conversation history stays here while the bridge reconnects.',
+                    };
+                return (
+                  <div className="v10-agent-empty-state">
+                    <div className="v10-agent-empty-state-title">{empty.title}</div>
+                    <div className="v10-agent-empty-state-hint">{empty.hint}</div>
+                  </div>
+                );
+              })()}
               {localMessages.map((message) => (
                 <div key={message.id} className={`v10-chat-msg ${message.role}`}>
                   <div className={`v10-chat-bubble ${message.role}`}>
@@ -1009,22 +1154,18 @@ export function ConnectedAgentsTab(props: {
                 )}
 
                 <div className="v10-local-agent-toolbar">
-                  <label className="v10-local-agent-target-picker">
+                  <div className="v10-local-agent-target-picker">
                     <span className="v10-local-agent-target-label">Project</span>
-                    <select
+                    <Select
                       className="v10-local-agent-target-select"
                       value={activeProjectId ?? ''}
-                      onChange={(e) => onSelectProject(e.target.value)}
+                      onChange={onSelectProject}
+                      options={availableProjects.map((project) => ({ value: project.id, label: project.name }))}
+                      placeholder={projectsLoading ? 'Loading projects…' : 'Choose a project'}
                       disabled={projectsLoading || availableProjects.length === 0}
-                    >
-                      <option value="">{projectsLoading ? 'Loading projects...' : 'Choose a project'}</option>
-                      {availableProjects.map((project) => (
-                        <option key={project.id} value={project.id}>
-                          {project.name}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
+                      ariaLabel="Active project"
+                    />
+                  </div>
 
                   <div className="v10-local-agent-toolbar-actions" />
                 </div>

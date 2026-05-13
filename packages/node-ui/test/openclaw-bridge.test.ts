@@ -191,7 +191,7 @@ describe('PanelRight UI - connected agent flow', () => {
     expect(panelRight).toContain('Session history');
     expect(panelRight).toContain('OpenClaw');
     expect(panelRight).toContain('v10-agent-subtabs');
-    expect(panelRight).toContain('v10-local-agent-chat-toolbar');
+    expect(panelRight).toContain('v10-agent-tab-menu-trigger');
     expect(panelRight).not.toContain('Messages stay anchored in your private DKG memory graph');
   });
 
