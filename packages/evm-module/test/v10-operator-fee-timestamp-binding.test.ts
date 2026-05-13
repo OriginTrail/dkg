@@ -299,8 +299,13 @@ describe('@integration H-5 regression — operator fee bound to epoch timestamp'
       // Profile.updateOperatorFee: currentEpoch = 3, guard passes because
       // isOperatorFeeClaimedForEpoch(id, 2) = true. effectiveDate = start
       // of epoch 4 (first half of epoch 3 → nextEpochStart).
+      //
+      // Epoch 2 reward was compounded into pos.raw by the claim above, so
+      // re-read raw before computing epoch 3's scorePerStake36 to keep the
+      // injected math consistent with the post-compound effective stake.
       // ----------------------------------------------------------------
-      await injectEpochRewards(ctx, identityId, epoch3, RAW);
+      const posAfterEpoch2 = await CSS.getPosition(tokenId);
+      await injectEpochRewards(ctx, identityId, epoch3, posAfterEpoch2.raw);
 
       await ProfileContract.connect(nodeAdmin).updateOperatorFee(
         identityId,
@@ -368,8 +373,9 @@ describe('@integration H-5 regression — operator fee bound to epoch timestamp'
       // The fee applied for epoch 4 must be FEE_HIGH.
       // ----------------------------------------------------------------
 
-      // Inject rewards for epoch 4.
-      await injectEpochRewards(ctx, identityId, epoch4, RAW);
+      // Inject rewards for epoch 4 using the post-epoch-3-claim raw.
+      const posAfterEpoch3 = await CSS.getPosition(tokenId);
+      await injectEpochRewards(ctx, identityId, epoch4, posAfterEpoch3.raw);
 
       // Advance to epoch 5 so epoch 4 is claimable.
       await advanceEpoch(Chronos);
@@ -475,8 +481,9 @@ describe('@integration H-5 regression — operator fee bound to epoch timestamp'
       await NFT.connect(delegator).claim(tokenId);
       expect(await CSS.isOperatorFeeClaimedForEpoch(identityId, epoch3 - 1n)).to.equal(true);
 
-      // Inject rewards for epoch 3.
-      await injectEpochRewards(ctx, identityId, epoch3, RAW);
+      // Inject rewards for epoch 3 using post-epoch-2-claim raw.
+      const posKpiAfterEpoch2 = await CSS.getPosition(tokenId);
+      await injectEpochRewards(ctx, identityId, epoch3, posKpiAfterEpoch2.raw);
 
       // Queue FEE_HIGH (99%), effective epoch 4.
       await ProfileContract.connect(nodeAdmin).updateOperatorFee(
