@@ -65,6 +65,8 @@ import {
   parseEventOrThrow,
   parseEventIfPresent,
   assertDevnetReady,
+  assertAllStakingInvariants,
+  assertPerNodeAggregation,
 } from '../_lib';
 
 // ───────────────────────────── constants ─────────────────────────────────
@@ -759,11 +761,32 @@ describe('V10 chain — stress + scenario validation', () => {
       expect(delta).toBe(stakedToCore);
     }
 
+    // ── PROTOCOL INVARIANTS (Aave-style cross-cutting checks) ────────
+    //
+    // Phase 1 mutated stakes in bulk; this is exactly the kind of
+    // boundary where an accounting bug would manifest. Run the full
+    // invariant suite against the cores we know to have stake. We
+    // pass `partial` because v10-stress doesn't aggregate every
+    // identity in the system (only the ones it touched).
+    const phase1Identities = cores.map((c) => c.identityId);
+    await assertAllStakingInvariants(
+      {
+        css: s.convictionStakingStorage,
+        params: s.parametersStorage,
+        token: s.token,
+        label: 'phase 1 (post-stake bulk)',
+      },
+      phase1Identities,
+      'partial',
+    );
+
     appendFinding(
       'Phase 1 — 20 stakers passed',
       `Total staked: ${ethers.formatEther(totalStaked)} TRAC across ` +
         `${cores.length} cores. Vault delta matched sum-of-stakes exactly. ` +
-        `Tier mix: ${tiers.join('/')}.`,
+        `Tier mix: ${tiers.join('/')}. ` +
+        `All 4 protocol invariants (per-node aggregation, global aggregation, ` +
+        `vault solvency, max-stake cap) held.`,
     );
     console.log(
       `phase 1 PASS: ${STRESS_STAKERS} stakers, ${ethers.formatEther(totalStaked)} TRAC total, vault delta exact.`,
@@ -1968,6 +1991,24 @@ describe('V10 chain — stress + scenario validation', () => {
         `stake=${ethers.formatEther(sourceStaker.stakeAmount)} TRAC moved`,
     );
 
+    // ── PROTOCOL INVARIANTS post-redelegate ──────────────────────────
+    // ERC-721 transfer + redelegate is the most fragile cross-storage
+    // path in V10 (mutates ownership AND per-node aggregates AND
+    // position metadata). Re-verify all four invariants over EVERY
+    // core (not just the two redelegate touched) — a per-node
+    // aggregation bug could surface as a divergence on a third,
+    // unrelated node if the global aggregate accountancy slipped.
+    await assertAllStakingInvariants(
+      {
+        css: s.convictionStakingStorage,
+        params: s.parametersStorage,
+        token: s.token,
+        label: 'phase 5 (post-transfer + redelegate)',
+      },
+      cores.map((c) => c.identityId),
+      'partial',
+    );
+
     // Document V10 author-immutability finding (NOT a bug — design intent).
     appendFinding(
       'Phase 5 — stake transfer + redelegate passed; V10 KC author-immutability documented',
@@ -2118,6 +2159,27 @@ describe('V10 chain — stress + scenario validation', () => {
       `phase 6: restake OK — new tokenId=${newTokenId}, tier=1, amount=${ethers.formatEther(restakeAmount)} TRAC`,
     );
 
+    // ── PROTOCOL INVARIANTS post-withdraw + restake ─────────────────
+    // Withdraw burns an NFT (decrements per-node aggregate); restake
+    // mints a new one (increments). Per-node aggregation drift here
+    // is the highest-leverage class of bug — if `nodeTokens[id]`
+    // failed to remove the burnt token, the sum would diverge from
+    // `getNodeStakeV10` immediately. Verify all four invariants on
+    // every known core.
+    const phase6Cores = [1, 2, 3, 4]
+      .map((n) => s.nodes[n])
+      .filter((n): n is DevnetNode => Boolean(n) && n.identityId > 0n);
+    await assertAllStakingInvariants(
+      {
+        css: s.convictionStakingStorage,
+        params: s.parametersStorage,
+        token: s.token,
+        label: 'phase 6 (post-withdraw + restake)',
+      },
+      phase6Cores.map((c) => c.identityId),
+      'partial',
+    );
+
     appendFinding(
       'Phase 6 — claim/withdraw/restake passed',
       `Withdrew tokenId=${target.tokenId} (returned ${ethers.formatEther(returned)} TRAC, ` +
@@ -2128,6 +2190,124 @@ describe('V10 chain — stress + scenario validation', () => {
         `was untouched in this phase — see Phase 4 for operator-fee-route exercise in v10-end-to-end.`,
     );
   }, 600_000);
+
+  // =========================================================================
+  // Phase 7 — lock-window OFF-BY-ONE boundary.
+  //
+  // Pinpoints the `>=` vs `>` boundary in
+  // `StakingV10.sol:495`:
+  //   bool unlocked =
+  //     pos.expiryTimestamp == 0 || block.timestamp >= uint256(pos.expiryTimestamp);
+  //
+  // A typo flipping `>=` to `>` would still allow withdraw at expiry+1
+  // and beyond (so happy-path tests pass) but would block withdraw
+  // at exactly `expiryTimestamp`. This phase pins the exact boundary
+  // by:
+  //   1. provisioning a fresh tier-3 staker (independent of any
+  //      Phase-1/2/.../6 position),
+  //   2. reading position.expiryTimestamp (T),
+  //   3. warping the chain to T-1 and verifying withdraw STILL reverts,
+  //   4. warping the chain to exactly T and verifying withdraw NOW
+  //      succeeds (NFT burned cleanly).
+  //
+  // Runs LAST because the time-warp permanently advances the chain
+  // (~3 months for tier 3); putting it earlier would invalidate any
+  // tier-6/12 lock invariants exercised in Phases 5–6.
+  // =========================================================================
+  it('phase 7: lock-window off-by-one — withdraw reverts at expiry-1 and succeeds at exactly expiry', async () => {
+    const s = state.v!;
+    const cores = [1, 2, 3, 4]
+      .map((n) => s.nodes[n])
+      .filter((n): n is DevnetNode => Boolean(n) && n.identityId > 0n);
+    expect(cores.length).toBeGreaterThanOrEqual(1);
+    const target = cores[0]!;
+
+    // Fresh staker — fully independent of every prior phase. tier 3 =
+    // ~3-month lock per CSS tier table.
+    const stakeAmount = ethers.parseEther('1000');
+    const wallet = ethers.Wallet.createRandom().connect(s.provider) as ethers.HDNodeWallet;
+    await s.provider.send('hardhat_setBalance', [
+      wallet.address,
+      '0x' + ethers.parseEther('5').toString(16),
+    ]);
+    await fundTokenBalance(s, wallet.address, stakeAmount);
+    const stakingV10Address = await s.stakingV10.getAddress();
+    const tokenAsW = s.token.connect(wallet) as ethers.Contract;
+    const approveTx = await tokenAsW.approve(stakingV10Address, stakeAmount, {
+      nonce: await nextNonceFor(s.provider, wallet.address),
+    });
+    expectTxSuccess(await approveTx.wait(), 'phase 7: approve');
+    const nftAsW = s.stakingNft.connect(wallet) as ethers.Contract;
+    const createTx = await nftAsW.createConviction(target.identityId, stakeAmount, 3, {
+      nonce: await nextNonceFor(s.provider, wallet.address),
+    });
+    const createReceipt = await createTx.wait();
+    expectTxSuccess(createReceipt, 'phase 7: createConviction(tier-3)');
+    const tokenId = expectMintedTokenId(
+      createReceipt!.logs,
+      wallet.address,
+      'phase 7 mint',
+    );
+
+    const pos = await s.convictionStakingStorage.getPosition(tokenId);
+    const expiry: bigint = BigInt(pos.expiryTimestamp);
+    expect(expiry, 'phase 7: tier-3 expiry must be non-zero').toBeGreaterThan(0n);
+
+    // Warp to expiry - 1 second; withdraw MUST still revert.
+    await s.provider.send('evm_setNextBlockTimestamp', [Number(expiry - 1n)]);
+    await s.provider.send('evm_mine', []);
+    await expectRevert(
+      () => nftAsW.withdraw.staticCall(tokenId),
+      `phase 7: withdraw at expiry-1=${expiry - 1n} (lock ends at ${expiry}) must revert`,
+    );
+
+    // Warp to exactly expiry; withdraw MUST now succeed.
+    await s.provider.send('evm_setNextBlockTimestamp', [Number(expiry)]);
+    await s.provider.send('evm_mine', []);
+
+    const tracBefore: bigint = await s.token.balanceOf(wallet.address);
+    const withdrawTx = await nftAsW.withdraw(tokenId, {
+      nonce: await nextNonceFor(s.provider, wallet.address),
+    });
+    const withdrawReceipt = await withdrawTx.wait();
+    expectTxSuccess(withdrawReceipt, 'phase 7: withdraw at exactly expiry');
+
+    // Strict: TRAC moved back, NFT burned, position cleared.
+    const tracAfter: bigint = await s.token.balanceOf(wallet.address);
+    expect(
+      tracAfter - tracBefore,
+      'phase 7: TRAC delta must be at least the raw stake (claimed rewards may add)',
+    ).toBeGreaterThanOrEqual(stakeAmount);
+    await expectRevert(
+      () => s.stakingNft.ownerOf(tokenId),
+      'phase 7: NFT must be burned after withdraw',
+    );
+    const positionAfter = await s.convictionStakingStorage.getPosition(tokenId);
+    expect(positionAfter.raw).toBe(0n);
+    expect(positionAfter.identityId).toBe(0n);
+    expect(positionAfter.lockTier).toBe(0n);
+
+    // Final invariant sweep — phase 7 burned an NFT, so per-node
+    // aggregation on `target` MUST still hold. This is the most
+    // direct catch for an off-by-one in the burn path that didn't
+    // also corrupt the aggregate.
+    await assertPerNodeAggregation(
+      {
+        css: s.convictionStakingStorage,
+        params: s.parametersStorage,
+        token: s.token,
+        label: 'phase 7 (post-boundary-withdraw)',
+      },
+      target.identityId,
+    );
+
+    appendFinding(
+      'Phase 7 — lock-window off-by-one passed',
+      `Tier-3 position on identityId=${target.identityId} (tokenId=${tokenId}, expiry=${expiry}) ` +
+        `reverted withdraw at expiry-1 and succeeded at expiry exactly. ` +
+        `TRAC delta ≥ raw stake confirmed. NFT burned, position cleared, per-node aggregation held.`,
+    );
+  }, 300_000);
 });
 
 // ───────────────────────────── PCA helper ────────────────────────────────

@@ -61,6 +61,8 @@ import {
   expectRevert,
   assertDevnetReady,
   provisionFreshWallet,
+  assertAllStakingInvariants,
+  assertPerNodeAggregation,
 } from '../_lib';
 
 // ───────────────────────────── constants ─────────────────────────────────
@@ -93,6 +95,9 @@ const CSS_ABI = [
   'function getPosition(uint256 tokenId) view returns (tuple(uint96 raw, uint40 lockTier, uint40 expiryTimestamp, uint72 identityId, uint96 cumulativeRewardsClaimed, uint64 multiplier18, uint32 lastClaimedEpoch, uint32 migrationEpoch))',
   'function getOperatorFeeBalance(uint72 identityId) view returns (uint96)',
   'function getOperatorFeeWithdrawalRequest(uint72 identityId) view returns (uint96 amount, uint256 indexed_, uint256 releaseTimestamp)',
+  'function getNodeStakeV10(uint72 identityId) view returns (uint256)',
+  'function getTotalStakeV10() view returns (uint256)',
+  'function getNodeTokens(uint72 identityId) view returns (uint256[])',
 ];
 const STAKING_ABI = [
   'function requestOperatorFeeWithdrawal(uint72 identityId, uint96 withdrawalAmount)',
@@ -104,7 +109,10 @@ const PROFILE_STORAGE_ABI = [
   'function getOperatorFeesLength(uint72) view returns (uint256)',
   'function getOperatorFeeEffectiveDateByIndex(uint72,uint256) view returns (uint256)',
 ];
-const PARAMS_ABI = ['function stakeWithdrawalDelay() view returns (uint256)'];
+const PARAMS_ABI = [
+  'function stakeWithdrawalDelay() view returns (uint256)',
+  'function maximumStake() view returns (uint96)',
+];
 const CHRONOS_ABI = [
   'function getCurrentEpoch() view returns (uint256)',
   'function timeUntilNextEpoch() view returns (uint256)',
@@ -526,6 +534,22 @@ describe('3. NFT staking withdraw', () => {
     expect(positionAfter.lockTier).toBe(0n);
     expect(positionAfter.expiryTimestamp).toBe(0n);
     expect(positionAfter.multiplier18).toBe(0n);
+
+    // ── PROTOCOL INVARIANTS post-withdraw ────────────────────────────
+    // NFT burned + per-node aggregate decremented + vault TRAC moved.
+    // Verify the four cross-cutting invariants over every identityId
+    // bootstrap touched (1..6), so a per-node aggregation drift
+    // surfaces immediately rather than getting noticed downstream.
+    await assertAllStakingInvariants(
+      {
+        css: state.css,
+        params: state.params,
+        token: state.token,
+        label: 'core-flows.3a (post-tier-0-withdraw)',
+      },
+      [1n, 2n, 3n, 4n, 5n, 6n],
+      'partial',
+    );
   }, 60_000);
 
   it('still-locked tier-3 position reverts withdraw (lock window enforced)', async () => {

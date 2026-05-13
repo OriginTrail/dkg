@@ -1,0 +1,274 @@
+/**
+ * Protocol-level invariant assertions for V10 staking.
+ *
+ * These checks enforce properties that must hold REGARDLESS of which
+ * test phase is running, what order operations executed in, or what
+ * the prior state of the chain was. They are the DKG analogue of the
+ * Aave / Compound / Uniswap invariant suites — see e.g. the Aave v3
+ * invariant docs (`tests/invariants/docs/internal-docs.md`) and the
+ * "Invariant Testing for DeFi" 2026 industry guide.
+ *
+ * Categories covered:
+ *
+ *   1. Conservation — value neither created nor destroyed.
+ *      `assertPerNodeAggregation` — for every identity, the sum of raw
+ *      stakes across the node's enumerated NFT positions must equal
+ *      `getNodeStakeV10(identity)`. This catches mint/burn/transfer
+ *      bugs where the per-node aggregate diverges from the bag of
+ *      positions stored under that node.
+ *
+ *      `assertGlobalAggregation` — sum of per-node V10 stakes equals
+ *      `getTotalStakeV10()`. Catches accounting drift where one node's
+ *      mutation isn't mirrored in the global aggregate.
+ *
+ *   2. Solvency — protocol can meet obligations.
+ *      `assertVaultSolvency` — `TRAC.balanceOf(CSS) >= totalStakeV10`.
+ *      The CSS vault must always hold at least as much TRAC as the
+ *      sum of staked principal it owes back to stakers. (Rewards
+ *      and operator-fee escrow can ADD to the balance; nothing
+ *      legitimate should DROP it below totalStakeV10.)
+ *
+ *   3. Cap enforcement — for every identity, getNodeStakeV10(id) must
+ *      not exceed `parametersStorage.maximumStake()`. The negative
+ *      `MaxStakeExceeded` revert test pins one direction; this
+ *      invariant pins the dual direction (no successful path slipped
+ *      a stake past the cap).
+ *
+ *   4. Position validity — every enumerated position must have
+ *      `lockTier ∈ {0, 1, 3, 6, 12}` (the registered tier set in
+ *      bootstrap). Catches storage corruption / tier-table tampering.
+ *
+ * These invariants are CHEAP — each is O(positions on a node) of
+ * view-only RPC reads. They should be called at strategic phase
+ * boundaries (after bulk staking, after a transfer, after withdraws,
+ * after an epoch warp) so any divergence surfaces with the smallest
+ * possible reproduction window.
+ *
+ * IMPORTANT: this module talks to a real Hardhat-backed devnet and
+ * makes ZERO assumptions about which suite invokes it. Pass in the
+ * already-instantiated contracts; the helper does not fabricate
+ * addresses or short-circuit reads.
+ */
+import { expect } from 'vitest';
+import { ethers } from 'ethers';
+
+const VALID_LOCK_TIERS = new Set<bigint>([0n, 1n, 3n, 6n, 12n]);
+
+interface Position {
+  raw: bigint;
+  lockTier: bigint;
+  expiryTimestamp: bigint;
+  identityId: bigint;
+  cumulativeRewardsClaimed: bigint;
+  multiplier18: bigint;
+  lastClaimedEpoch: bigint;
+  migrationEpoch: bigint;
+}
+
+interface InvariantContext {
+  /** ConvictionStakingStorage contract (read-only is fine). MUST expose
+   * `getPosition(uint256)`, `getNodeStakeV10(uint72)`,
+   * `getTotalStakeV10()`, `getNodeTokens(uint72)`. */
+  css: ethers.Contract;
+  /** ParametersStorage contract; MUST expose `maximumStake()`. */
+  params: ethers.Contract;
+  /** ERC-20 TRAC token contract; MUST expose `balanceOf(address)`. */
+  token: ethers.Contract;
+  /** A short, free-form label that prefixes any failure message — use
+   *  the calling phase / test name so failures in CI logs are
+   *  immediately attributable. */
+  label: string;
+}
+
+async function readPosition(css: ethers.Contract, tokenId: bigint): Promise<Position> {
+  const p = await css.getPosition(tokenId);
+  return {
+    raw: BigInt(p.raw),
+    lockTier: BigInt(p.lockTier),
+    expiryTimestamp: BigInt(p.expiryTimestamp),
+    identityId: BigInt(p.identityId),
+    cumulativeRewardsClaimed: BigInt(p.cumulativeRewardsClaimed),
+    multiplier18: BigInt(p.multiplier18),
+    lastClaimedEpoch: BigInt(p.lastClaimedEpoch),
+    migrationEpoch: BigInt(p.migrationEpoch),
+  };
+}
+
+/**
+ * Conservation invariant: for the given identity, the sum of raw
+ * stakes across all NFT positions enumerated under that node must
+ * equal `getNodeStakeV10(identityId)`.
+ *
+ * Returns the per-token positions read so callers can chain further
+ * checks without paying for a second enumeration pass.
+ */
+export async function assertPerNodeAggregation(
+  ctx: InvariantContext,
+  identityId: bigint,
+): Promise<{ tokens: bigint[]; positions: Position[]; aggregate: bigint }> {
+  const tokens: bigint[] = (await ctx.css.getNodeTokens(identityId)).map((t: bigint) =>
+    BigInt(t),
+  );
+  const positions: Position[] = await Promise.all(
+    tokens.map((t) => readPosition(ctx.css, t)),
+  );
+  const summed = positions.reduce((acc, p) => acc + p.raw, 0n);
+  const onChain: bigint = BigInt(await ctx.css.getNodeStakeV10(identityId));
+  expect(
+    summed,
+    `${ctx.label}: per-node aggregation invariant violated for identityId=${identityId}. ` +
+      `sum(getPosition(token).raw across getNodeTokens) = ${summed}, but ` +
+      `getNodeStakeV10(${identityId}) = ${onChain}. ` +
+      `This is a Conservation violation — every mint/burn/transfer/redelegate path ` +
+      `must keep these two views in sync. Diff: ${summed - onChain} wei.`,
+  ).toBe(onChain);
+  return { tokens, positions, aggregate: summed };
+}
+
+/**
+ * Conservation invariant: sum(getNodeStakeV10(id)) over the supplied
+ * identities equals `getTotalStakeV10()`.
+ *
+ * Note: the supplied identity list MUST be exhaustive (i.e. cover
+ * every identity that has a non-zero stake). Pass the bootstrap's
+ * full identity set; passing a partial list means this check is
+ * directional (we can only assert `<= total`). The helper takes a
+ * `mode` argument so callers can be explicit about which they want.
+ */
+export async function assertGlobalAggregation(
+  ctx: InvariantContext,
+  identityIds: bigint[],
+  mode: 'exhaustive' | 'partial',
+): Promise<{ summed: bigint; total: bigint }> {
+  const perNode: bigint[] = await Promise.all(
+    identityIds.map((id) => ctx.css.getNodeStakeV10(id).then(BigInt)),
+  );
+  const summed = perNode.reduce((acc, v) => acc + v, 0n);
+  const total: bigint = BigInt(await ctx.css.getTotalStakeV10());
+  if (mode === 'exhaustive') {
+    expect(
+      summed,
+      `${ctx.label}: global aggregation invariant violated (exhaustive). ` +
+        `sum(getNodeStakeV10) over [${identityIds.join(',')}] = ${summed}, ` +
+        `but getTotalStakeV10() = ${total}. Diff: ${summed - total} wei.`,
+    ).toBe(total);
+  } else {
+    expect(
+      summed,
+      `${ctx.label}: global aggregation invariant violated (partial). ` +
+        `sum(getNodeStakeV10) over partial list [${identityIds.join(',')}] = ${summed}, ` +
+        `but getTotalStakeV10() = ${total}. Sum cannot exceed total.`,
+    ).toBeLessThanOrEqual(total);
+  }
+  return { summed, total };
+}
+
+/**
+ * Solvency invariant: the CSS vault's TRAC balance must be at least
+ * the total V10 stake. Rewards / operator-fee escrow can ADD to the
+ * balance; nothing legitimate drops it below totalStakeV10.
+ */
+export async function assertVaultSolvency(ctx: InvariantContext): Promise<{
+  vaultBalance: bigint;
+  totalStake: bigint;
+  surplus: bigint;
+}> {
+  const vaultAddress: string = await ctx.css.getAddress();
+  const vaultBalance: bigint = BigInt(await ctx.token.balanceOf(vaultAddress));
+  const totalStake: bigint = BigInt(await ctx.css.getTotalStakeV10());
+  expect(
+    vaultBalance,
+    `${ctx.label}: vault solvency invariant violated. ` +
+      `TRAC.balanceOf(CSS=${vaultAddress}) = ${vaultBalance}, ` +
+      `but getTotalStakeV10() = ${totalStake}. ` +
+      `Vault must hold at least totalStake; deficit = ${totalStake - vaultBalance} wei.`,
+  ).toBeGreaterThanOrEqual(totalStake);
+  return { vaultBalance, totalStake, surplus: vaultBalance - totalStake };
+}
+
+/**
+ * Cap invariant: for every identity, getNodeStakeV10(id) ≤ maximumStake().
+ * The dual of the `MaxStakeExceeded` revert test — pinning that no
+ * successful path lets a node accumulate stake above the cap.
+ */
+export async function assertMaxStakeCap(
+  ctx: InvariantContext,
+  identityIds: bigint[],
+): Promise<void> {
+  const cap: bigint = BigInt(await ctx.params.maximumStake());
+  expect(cap, `${ctx.label}: maximumStake() returned 0`).toBeGreaterThan(0n);
+  for (const id of identityIds) {
+    const stake: bigint = BigInt(await ctx.css.getNodeStakeV10(id));
+    expect(
+      stake,
+      `${ctx.label}: max-stake cap invariant violated for identityId=${id}. ` +
+        `getNodeStakeV10 = ${stake}, maximumStake = ${cap}. ` +
+        `A successful staking path slipped a node past the cap.`,
+    ).toBeLessThanOrEqual(cap);
+  }
+}
+
+/**
+ * Position-validity invariant: every enumerated position must have
+ * lockTier ∈ {0, 1, 3, 6, 12}. Registered tier set is the bootstrap
+ * default; if a tier table is mutated at runtime, the caller MUST pass
+ * the updated set in `validTiers`. Otherwise the default is enforced.
+ *
+ * Bonus check: every position with raw > 0 must have multiplier18 > 0
+ * (a position with raw stake but zero multiplier accrues no rewards
+ * — would silently drain the staker).
+ */
+export async function assertPositionValidity(
+  ctx: InvariantContext,
+  identityIds: bigint[],
+  validTiers?: Set<bigint>,
+): Promise<void> {
+  const tiers = validTiers ?? VALID_LOCK_TIERS;
+  for (const id of identityIds) {
+    const tokens: bigint[] = (await ctx.css.getNodeTokens(id)).map((t: bigint) =>
+      BigInt(t),
+    );
+    for (const tokenId of tokens) {
+      const p = await readPosition(ctx.css, tokenId);
+      expect(
+        tiers.has(p.lockTier),
+        `${ctx.label}: position validity violated. ` +
+          `tokenId=${tokenId} on identityId=${id} has lockTier=${p.lockTier}, ` +
+          `expected one of {${[...tiers].sort((a, b) => Number(a - b)).join(',')}}.`,
+      ).toBe(true);
+      if (p.raw > 0n) {
+        expect(
+          p.multiplier18,
+          `${ctx.label}: position validity violated. ` +
+            `tokenId=${tokenId} on identityId=${id} has raw=${p.raw} ` +
+            `but multiplier18=0 — would silently accrue zero rewards.`,
+        ).toBeGreaterThan(0n);
+        expect(
+          p.identityId,
+          `${ctx.label}: position validity violated. ` +
+            `tokenId=${tokenId} enumerated under identityId=${id}, but its ` +
+            `position.identityId=${p.identityId}. Enumeration corruption.`,
+        ).toBe(id);
+      }
+    }
+  }
+}
+
+/**
+ * Convenience composite: runs all four invariant classes in one call.
+ * Use at major phase boundaries; for hot loops prefer single-invariant
+ * calls to keep RPC traffic minimal.
+ */
+export async function assertAllStakingInvariants(
+  ctx: InvariantContext,
+  identityIds: bigint[],
+  mode: 'exhaustive' | 'partial' = 'exhaustive',
+): Promise<void> {
+  await assertGlobalAggregation(ctx, identityIds, mode);
+  for (const id of identityIds) {
+    await assertPerNodeAggregation(ctx, id);
+  }
+  await assertVaultSolvency(ctx);
+  await assertMaxStakeCap(ctx, identityIds);
+  await assertPositionValidity(ctx, identityIds);
+}

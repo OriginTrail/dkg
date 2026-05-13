@@ -42,3 +42,11 @@ export {
   fundTrac,
   provisionFreshWallet,
 } from './funding';
+export {
+  assertPerNodeAggregation,
+  assertGlobalAggregation,
+  assertVaultSolvency,
+  assertMaxStakeCap,
+  assertPositionValidity,
+  assertAllStakingInvariants,
+} from './invariants';
