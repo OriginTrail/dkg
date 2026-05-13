@@ -38,6 +38,7 @@ import {
   Profile,
   ProfileStorage,
   RandomSamplingStorage,
+  StakingKPI,
   StakingV10,
   Token,
 } from '../typechain';
@@ -79,6 +80,7 @@ type Fixture = {
   Profile: Profile;
   ProfileStorage: ProfileStorage;
   StakingV10: StakingV10;
+  StakingKPI: StakingKPI;
   ConvictionStakingStorage: ConvictionStakingStorage;
   RandomSamplingStorage: RandomSamplingStorage;
   EpochStorage: EpochStorage;
@@ -90,6 +92,7 @@ async function deployFixture(): Promise<Fixture> {
   await hre.deployments.fixture([
     'DKGStakingConvictionNFT',
     'StakingV10',
+    'StakingKPI',
     'Profile',
     'EpochStorage',
     'RandomSamplingStorage',
@@ -111,6 +114,7 @@ async function deployFixture(): Promise<Fixture> {
     Profile: await hre.ethers.getContract<Profile>('Profile'),
     ProfileStorage: await hre.ethers.getContract<ProfileStorage>('ProfileStorage'),
     StakingV10: await hre.ethers.getContract<StakingV10>('StakingV10'),
+    StakingKPI: await hre.ethers.getContract<StakingKPI>('StakingKPI'),
     ConvictionStakingStorage: await hre.ethers.getContract<ConvictionStakingStorage>(
       'ConvictionStakingStorage',
     ),
@@ -181,6 +185,7 @@ describe('@integration H-5 regression — operator fee bound to epoch timestamp'
   let ProfileContract: Profile;
   let ProfileStorageContract: ProfileStorage;
   let StakingV10Contract: StakingV10;
+  let StakingKPIContract: StakingKPI;
   let CSS: ConvictionStakingStorage;
   let ParametersStorageContract: ParametersStorage;
   let NFT: DKGStakingConvictionNFT;
@@ -196,6 +201,7 @@ describe('@integration H-5 regression — operator fee bound to epoch timestamp'
       Profile: ProfileContract,
       ProfileStorage: ProfileStorageContract,
       StakingV10: StakingV10Contract,
+      StakingKPI: StakingKPIContract,
       ConvictionStakingStorage: CSS,
       ParametersStorage: ParametersStorageContract,
       NFT,
@@ -391,6 +397,271 @@ describe('@integration H-5 regression — operator fee bound to epoch timestamp'
       const netEpoch4 = await CSS.getNetNodeEpochRewards(identityId, epoch4);
       const expectedNetEpoch4 = EPOCH_POOL - expectedOpFeeEpoch4High;
       expect(netEpoch4).to.be.closeTo(expectedNetEpoch4, toTRAC(1) / 1000n);
+    },
+  );
+
+  // -------------------------------------------------------------------------
+  // Fix 1: StakingKPI.getNetNodeRewards preview parity
+  // -------------------------------------------------------------------------
+  //
+  // Regression test for the stale-getter bug in StakingKPI.getNetNodeRewards.
+  // When an epoch's operator fee has NOT yet been settled (first-claim path),
+  // `getNetNodeRewards` must use the same timestamp-bound fee lookup as
+  // StakingV10._claim — not getLatestOperatorFeePercentage (which can return a
+  // future fee already queued but not yet effective).
+  //
+  // Timeline (mirrors Scenario A/B but read via KPI before the claim):
+  //
+  //   Epoch 1: profile created, FEE_OLD (5%) queued, effective epoch 2.
+  //   Epoch 2: delegator stakes. FEE_OLD active.
+  //   Epoch 3: inject rewards for epoch 3.
+  //            operator queues FEE_HIGH (99%), effective epoch 4.
+  //            getNetNodeRewards(id, epoch3) BEFORE first claim of epoch 3
+  //            must return the FEE_OLD-based value (bug: returns FEE_HIGH-based).
+  //   Advance to epoch 4: first claim of epoch 3 runs.
+  //            KPI preview must equal cached netNodeEpochRewards.
+  it(
+    'Fix 1: StakingKPI.getNetNodeRewards preview uses epoch-bound fee, not latest fee',
+    async function () {
+      // ----------------------------------------------------------------
+      // Actors
+      // ----------------------------------------------------------------
+      const nodeOp = accounts[1];
+      const nodeAdmin = accounts[2];
+      const delegator = accounts[3];
+
+      const maxFee = await ParametersStorageContract.maxOperatorFee();
+
+      // ----------------------------------------------------------------
+      // Epoch 1: Create profile, queue FEE_OLD (5%), effective epoch 2.
+      // ----------------------------------------------------------------
+      expect(await Chronos.getCurrentEpoch()).to.equal(1n);
+
+      const { identityId } = await createProfile(ProfileContract, {
+        operational: nodeOp,
+        admin: nodeAdmin,
+      });
+
+      await ProfileContract.connect(nodeAdmin).updateOperatorFee(
+        identityId,
+        Number(FEE_OLD),
+      );
+
+      // ----------------------------------------------------------------
+      // Advance to epoch 2 (FEE_OLD now active), stake.
+      // ----------------------------------------------------------------
+      await advanceEpoch(Chronos);
+      expect(await Chronos.getCurrentEpoch()).to.equal(2n);
+
+      await Token.mint(delegator.address, RAW);
+      await Token.connect(delegator).approve(
+        await StakingV10Contract.getAddress(),
+        RAW,
+      );
+      await NFT.connect(delegator).createConviction(identityId, RAW, LOCK_EPOCHS);
+      const tokenId = 1n;
+
+      // Inject rewards for epoch 2 so claim cursor advances.
+      await injectEpochRewards(ctx, identityId, 2n, RAW);
+
+      // ----------------------------------------------------------------
+      // Advance to epoch 3.
+      // ----------------------------------------------------------------
+      await advanceEpoch(Chronos);
+      const epoch3 = await Chronos.getCurrentEpoch();
+      expect(epoch3).to.equal(3n);
+
+      // Claim epoch 2 to satisfy Profile.updateOperatorFee guard.
+      await NFT.connect(delegator).claim(tokenId);
+      expect(await CSS.isOperatorFeeClaimedForEpoch(identityId, epoch3 - 1n)).to.equal(true);
+
+      // Inject rewards for epoch 3.
+      await injectEpochRewards(ctx, identityId, epoch3, RAW);
+
+      // Queue FEE_HIGH (99%), effective epoch 4.
+      await ProfileContract.connect(nodeAdmin).updateOperatorFee(
+        identityId,
+        Number(FEE_HIGH),
+      );
+
+      // Confirm latest getter now returns FEE_HIGH.
+      expect(
+        await ProfileStorageContract.getLatestOperatorFeePercentage(identityId),
+      ).to.equal(FEE_HIGH);
+
+      // Epoch 3 fee-settled flag must be FALSE (first claim hasn't happened yet).
+      expect(await CSS.isOperatorFeeClaimedForEpoch(identityId, epoch3)).to.equal(false);
+
+      // ----------------------------------------------------------------
+      // RED assertion: KPI preview for epoch 3 must use FEE_OLD (5%), not FEE_HIGH.
+      //
+      // With the bug, getNetNodeRewards calls getLatestOperatorFeePercentage →
+      // returns FEE_HIGH → preview overestimates the operator cut.
+      // ----------------------------------------------------------------
+      const kpiPreview = await StakingKPIContract.getNetNodeRewards(identityId, epoch3);
+
+      const expectedNetWithOldFee =
+        EPOCH_POOL - (EPOCH_POOL * FEE_OLD) / BigInt(maxFee);
+      const expectedNetWithHighFee =
+        EPOCH_POOL - (EPOCH_POOL * FEE_HIGH) / BigInt(maxFee);
+
+      // Must match FEE_OLD-based net (within dust tolerance).
+      expect(kpiPreview).to.be.closeTo(
+        expectedNetWithOldFee,
+        toTRAC(1) / 1000n,
+        'KPI preview must reflect epoch-bound FEE_OLD, not the queued FEE_HIGH',
+      );
+
+      // Must NOT match FEE_HIGH-based net.
+      expect(kpiPreview).to.not.be.closeTo(
+        expectedNetWithHighFee,
+        toTRAC(1) / 1000n,
+      );
+
+      // ----------------------------------------------------------------
+      // After first claim of epoch 3, KPI switches to the cached path —
+      // confirm parity (cached value == FEE_OLD-based net).
+      // ----------------------------------------------------------------
+      await advanceEpoch(Chronos);
+      expect(await Chronos.getCurrentEpoch()).to.equal(4n);
+
+      await NFT.connect(delegator).claim(tokenId);
+      expect(await CSS.isOperatorFeeClaimedForEpoch(identityId, epoch3)).to.equal(true);
+
+      const cachedNet = await CSS.getNetNodeEpochRewards(identityId, epoch3);
+      const kpiAfterClaim = await StakingKPIContract.getNetNodeRewards(identityId, epoch3);
+
+      // Cached path returns stored value — must match.
+      expect(kpiAfterClaim).to.equal(cachedNet);
+
+      // Cached value must reflect FEE_OLD.
+      expect(cachedNet).to.be.closeTo(
+        expectedNetWithOldFee,
+        toTRAC(1) / 1000n,
+      );
+    },
+  );
+
+  // -------------------------------------------------------------------------
+  // Fix 2: cursor correctness — 5 fee changes × 10+ epochs
+  // -------------------------------------------------------------------------
+  //
+  // Regression guard: verifies that the forward-advancing fee cursor in _claim
+  // produces the same per-epoch fee values as the reverse-lookup path (PR #493
+  // baseline). Fee schedule has 5 distinct entries; epoch window spans 11
+  // epochs. Each epoch's cached netNodeEpochRewards must match the value
+  // expected from the active fee at `timestampForEpoch(e+1) - 1`.
+  //
+  // This test passes both before and after the cursor optimization (behavior
+  // must be identical). It is a regression guard — if the cursor logic is
+  // wrong, netNodeEpochRewards for one or more epochs will diverge.
+  it(
+    'Multi-fee-change regression: per-epoch fee matches active entry across 5 fee changes',
+    async function () {
+      // ----------------------------------------------------------------
+      // Actors
+      // ----------------------------------------------------------------
+      const nodeAdmin = accounts[2];
+      const delegator = accounts[3];
+      const hub0 = accounts[0]; // hub owner — can call onlyContracts
+
+      const maxFee = await ParametersStorageContract.maxOperatorFee();
+
+      // ----------------------------------------------------------------
+      // Epoch 1: create profile with initial fee F0 = 0 (unset at create).
+      // We will inject fee schedule manually via ProfileStorage.setOperatorFees.
+      // ----------------------------------------------------------------
+      expect(await Chronos.getCurrentEpoch()).to.equal(1n);
+
+      const { identityId } = await createProfile(ProfileContract, {
+        operational: accounts[1],
+        admin: nodeAdmin,
+      });
+
+      // Stake in epoch 1.
+      await Token.mint(delegator.address, RAW);
+      await Token.connect(delegator).approve(
+        await StakingV10Contract.getAddress(),
+        RAW,
+      );
+      await NFT.connect(delegator).createConviction(identityId, RAW, LOCK_EPOCHS);
+      const tokenId = 1n;
+
+      // ----------------------------------------------------------------
+      // Build a 5-entry fee schedule using ProfileStorage.setOperatorFees
+      // (hub-owner bypass). Each entry has effectiveDate = start of the
+      // epoch where it becomes active, so the reverse-lookup at
+      // timestampForEpoch(e+1)-1 returns the entry for epoch e.
+      //
+      // Schedule:
+      //   epochs 1-2:  fee = 100 (1%)
+      //   epochs 3-4:  fee = 300 (3%)
+      //   epochs 5-6:  fee = 500 (5%)
+      //   epochs 7-8:  fee = 700 (7%)
+      //   epochs 9-11: fee = 900 (9%)
+      // ----------------------------------------------------------------
+      const feeSchedule: [bigint, number][] = [
+        [100n, 1],  // effectiveDate = timestampForEpoch(1)
+        [300n, 3],  // effectiveDate = timestampForEpoch(3)
+        [500n, 5],  // effectiveDate = timestampForEpoch(5)
+        [700n, 7],  // effectiveDate = timestampForEpoch(7)
+        [900n, 9],  // effectiveDate = timestampForEpoch(9)
+      ];
+
+      const feeEntries = await Promise.all(
+        feeSchedule.map(async ([feePct, activeSinceEpoch]) => ({
+          feePercentage: feePct,
+          effectiveDate: await Chronos.timestampForEpoch(BigInt(activeSinceEpoch)),
+        })),
+      );
+
+      await ProfileStorageContract.connect(hub0).setOperatorFees(identityId, feeEntries);
+
+      // ----------------------------------------------------------------
+      // Advance through epochs 2–11, injecting rewards each epoch.
+      // ----------------------------------------------------------------
+      const CLAIM_EPOCHS = 11;
+      for (let e = 2; e <= CLAIM_EPOCHS + 1; e++) {
+        await advanceEpoch(Chronos);
+        const cur = await Chronos.getCurrentEpoch();
+        if (cur <= BigInt(CLAIM_EPOCHS)) {
+          await injectEpochRewards(ctx, identityId, cur, RAW);
+        }
+      }
+
+      // Current epoch = 12; claim window = [1..11].
+      expect(await Chronos.getCurrentEpoch()).to.equal(BigInt(CLAIM_EPOCHS + 1));
+
+      // ----------------------------------------------------------------
+      // Claim all epochs in one shot.
+      // ----------------------------------------------------------------
+      await NFT.connect(delegator).claim(tokenId);
+
+      // ----------------------------------------------------------------
+      // Verify: for each epoch 2–11, check that netNodeEpochRewards equals
+      // EPOCH_POOL * (1 - activeFeePct / maxFee).
+      // ----------------------------------------------------------------
+      const activeFeeForEpoch = (e: number): bigint => {
+        // Return the fee active at timestampForEpoch(e+1) - 1.
+        // The schedule is sorted ascending. Walk to find the last entry
+        // whose activeSinceEpoch <= e.
+        let fee = feeSchedule[0][0];
+        for (const [feePct, since] of feeSchedule) {
+          if (since <= e) fee = feePct;
+        }
+        return fee;
+      };
+
+      for (let e = 2; e <= CLAIM_EPOCHS; e++) {
+        const feePct = activeFeeForEpoch(e);
+        const expectedNet = EPOCH_POOL - (EPOCH_POOL * feePct) / BigInt(maxFee);
+        const cached = await CSS.getNetNodeEpochRewards(identityId, BigInt(e));
+        expect(cached).to.be.closeTo(
+          expectedNet,
+          toTRAC(1) / 1000n,
+          `epoch ${e}: expected net with fee ${feePct}/10000`,
+        );
+      }
     },
   );
 });
