@@ -54,6 +54,13 @@ import { readFileSync, existsSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import * as http from 'node:http';
 import { ethers } from 'ethers';
+import {
+  expectTxSuccess,
+  parseEventOrThrow,
+  parseEventIfPresent,
+  expectRevert,
+  assertDevnetReady,
+} from '../_lib';
 
 // ───────────────────────────── constants ─────────────────────────────────
 const REPO_ROOT = resolve(__dirname, '../..');
@@ -195,13 +202,28 @@ function postJson(api: string, path: string, body: unknown, token: string): Prom
   });
 }
 
+interface SseHandle {
+  events: Array<{ event: string; data: any; receivedAt: string }>;
+  /** Resolves once the SSE stream has issued its 200 response headers (i.e.
+   * the HTTP layer has accepted the subscription). The daemon emits
+   * subsequent events through this connection. */
+  ready: Promise<void>;
+  close: () => void;
+}
+
 function openSseAndCollect(
   api: string,
   token: string,
   shouldKeep: (event: string, data: any) => boolean,
-): { events: Array<{ event: string; data: any; receivedAt: string }>; close: () => void } {
+): SseHandle {
   const events: Array<{ event: string; data: any; receivedAt: string }> = [];
   const u = new URL(api + '/api/events');
+  let resolveReady!: () => void;
+  let rejectReady!: (e: Error) => void;
+  const ready = new Promise<void>((res, rej) => {
+    resolveReady = res;
+    rejectReady = rej;
+  });
   const req = http.get({
     host: u.hostname,
     port: u.port,
@@ -211,7 +233,11 @@ function openSseAndCollect(
       'Accept': 'text/event-stream',
     },
   }, (res) => {
-    if (res.statusCode !== 200) return;
+    if (res.statusCode !== 200) {
+      rejectReady(new Error(`SSE subscribe failed: HTTP ${res.statusCode}`));
+      return;
+    }
+    resolveReady();
     let buf = '';
     let curEvent: string | null = null;
     res.on('data', (chunk) => {
@@ -231,7 +257,8 @@ function openSseAndCollect(
       }
     });
   });
-  return { events, close: () => req.destroy() };
+  req.on('error', rejectReady);
+  return { events, ready, close: () => req.destroy() };
 }
 
 async function fullPublish(api: string, token: string, name: string): Promise<{ kcId: string; status: string; merkleRoot: string }> {
@@ -257,6 +284,15 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // ───────────────────────────── beforeAll ─────────────────────────────────
 beforeAll(async () => {
+  // Preflight: actionable error if any precondition is missing — beats
+  // the cryptic ECONNREFUSED / ENOENT chain the inline ethers/contract
+  // calls produce when devnet isn't running.
+  await assertDevnetReady({
+    expectedNodes: 6,
+    requireWallets: true,
+    startCommandHint:
+      './scripts/devnet.sh clean && ./scripts/devnet.sh start 6 && node devnet/_bootstrap/bootstrap.cjs',
+  });
   const provider = new ethers.JsonRpcProvider(RPC);
   const hub = new ethers.Contract(HUB, HUB_ABI, provider);
 
@@ -319,7 +355,10 @@ describe('1. chained sign-at-creation assertion lifecycle', () => {
       (event, data) =>
         event === 'memory_graph_changed' && data?.contextGraphId === CONTEXT_GRAPH,
     );
-    await sleep(500); // SSE warm-up
+    // Deterministic ready: wait for the daemon's SSE handler to ack the
+    // subscription with HTTP 200 before issuing the create. The previous
+    // `sleep(500)` warm-up was a flake source on slow CI.
+    await sse.ready;
 
     let r = await postJson(NODE1_API, '/api/assertion/create', { contextGraphId: CONTEXT_GRAPH, name: assertionName }, state.node1Token);
     expect(r.status, `create: ${JSON.stringify(r.body)}`).toBe(200);
@@ -347,10 +386,28 @@ describe('1. chained sign-at-creation assertion lifecycle', () => {
     sse.close();
 
     const ops = sse.events.map((e) => e.data.operation);
-    expect(ops, `expected 4 lifecycle events; got: ${ops.join(', ')}`)
-      .toEqual(['assertion_created', 'assertion_written', 'assertion_finalized', 'assertion_promoted']);
-    // The /finalize emit was missing pre-fix; this assertion is the regression pin.
-    expect(ops).toContain('assertion_finalized');
+    const expectedOps = ['assertion_created', 'assertion_written', 'assertion_finalized', 'assertion_promoted'] as const;
+    expect(ops, `expected exactly 4 lifecycle events in order; got: ${ops.join(', ')}`)
+      .toEqual(expectedOps);
+    // Pin: each operation appears EXACTLY once. A duplicate would indicate
+    // the daemon double-emitted (e.g. retries or an idempotency-bug
+    // regression that re-fires the SSE on a no-op call). The previous
+    // assertion only checked the array equality, which would not catch a
+    // duplicate in the middle (`['a','a','b','c']`).
+    for (const op of expectedOps) {
+      const matches = ops.filter((o) => o === op);
+      expect(matches.length, `${op} fired ${matches.length} times; expected exactly 1`).toBe(1);
+    }
+    // Each event payload must reference the same assertionName.
+    for (const e of sse.events) {
+      expect(e.data?.contextGraphId).toBe(CONTEXT_GRAPH);
+      // The daemon includes the assertion's URI fragment somewhere in the
+      // payload — `assertionUri` for create/write/finalize, or `name` /
+      // `merkleRoot` for promote depending on shape. We just verify no
+      // event leaked from a different assertion (CG isolation).
+      const blob = JSON.stringify(e.data);
+      expect(blob, `event ${e.data.operation} did not reference ${assertionName}`).toContain(assertionName);
+    }
   }, 60_000);
 });
 
@@ -412,27 +469,58 @@ describe('3. NFT staking withdraw', () => {
 
     const tx = await nft.withdraw(tokenIdRaw);
     const receipt = await tx.wait();
-    expect(receipt.status, `withdraw tx reverted`).toBe(1);
+    expectTxSuccess(receipt, 'NFT.withdraw(tier-0)');
 
+    // Strict event verification — event MUST fire exactly once with the
+    // correct amount and the correct tokenId. The previous loop allowed
+    // a missing event to silently set `eventAmount = 0n` and then match
+    // a `raw=0` position — bug-hiding.
     const iface = new ethers.Interface(NFT_ABI);
-    let eventAmount = 0n;
-    for (const log of receipt.logs) {
-      try {
-        const parsed = iface.parseLog(log);
-        if (parsed?.name === 'PositionWithdrawn') eventAmount = parsed.args.amount;
-      } catch { /* not our event */ }
+    const withdrawEvent = parseEventOrThrow(
+      iface,
+      receipt.logs,
+      'PositionWithdrawn',
+      (parsed) => (parsed.args.tokenId as bigint) === tokenIdRaw,
+    ) as { args: { tokenId: bigint; amount: bigint } };
+    expect(withdrawEvent.args.amount, 'PositionWithdrawn.amount must equal raw stake').toBe(expectedAmount);
+
+    // RewardsClaimed is emitted iff the auto-claim component returned > 0.
+    // For a tier-0 no-rewards-yet position we expect NO RewardsClaimed
+    // event. If one fires, log the amount as a finding (it would mean
+    // RS has accrued rewards on this position since bootstrap — useful
+    // signal for downstream tests).
+    const rewardsEvent = parseEventIfPresent(
+      iface,
+      receipt.logs,
+      'RewardsClaimed',
+      (parsed) => (parsed.args.tokenId as bigint) === tokenIdRaw,
+    ) as { args: { tokenId: bigint; amount: bigint } } | undefined;
+    if (rewardsEvent && rewardsEvent.args.amount > 0n) {
+      recordFinding(
+        `RewardsClaimed during tier-0 withdraw: tokenId=${tokenIdRaw}, amount=${ethers.formatEther(rewardsEvent.args.amount)} TRAC. ` +
+          `Adjust the TRAC-delta assertion to expect raw + claimed if this happens regularly.`,
+      );
     }
-    expect(eventAmount).toBe(expectedAmount);
 
     const tracAfter = await state.token.balanceOf(target!.address);
-    expect(tracAfter - tracBefore, 'TRAC delta must match raw stake').toBe(expectedAmount);
+    const expectedDelta = expectedAmount + (rewardsEvent?.args.amount ?? 0n);
+    expect(
+      tracAfter - tracBefore,
+      `TRAC delta must equal raw stake (+ claimed rewards if any). ` +
+        `expected ${expectedDelta}, got ${tracAfter - tracBefore}`,
+    ).toBe(expectedDelta);
 
-    // NFT burned
-    await expect(nft.ownerOf(tokenIdRaw)).rejects.toThrow();
-    // Position cleared
+    // NFT burned — ownerOf reverts. Use the explicit ERC721NonexistentToken
+    // marker substring rather than ".rejects.toThrow()" so a different
+    // revert (e.g. RPC error) doesn't masquerade as a successful burn.
+    await expectRevert(() => nft.ownerOf(tokenIdRaw), 'ownerOf after burn');
+    // Position cleared — every field that should be 0 IS 0.
     const positionAfter = await state.css.getPosition(tokenIdRaw);
     expect(positionAfter.raw).toBe(0n);
     expect(positionAfter.identityId).toBe(0n);
+    expect(positionAfter.lockTier).toBe(0n);
+    expect(positionAfter.expiryTimestamp).toBe(0n);
+    expect(positionAfter.multiplier18).toBe(0n);
   }, 60_000);
 
   it('still-locked tier-3 position reverts withdraw (lock window enforced)', async () => {
@@ -443,14 +531,73 @@ describe('3. NFT staking withdraw', () => {
     const tokenId = BigInt(target!.tokenId);
 
     const positionBefore = await state.css.getPosition(tokenId);
-    if (positionBefore.raw === 0n) return; // already withdrawn in a prior run; nothing to assert
-    const block = await state.provider.getBlock('latest');
-    if (positionBefore.expiryTimestamp <= BigInt(block!.timestamp)) {
-      // lock has expired (e.g. after a long time-warp); skip the negative assertion
+    if (positionBefore.raw === 0n) {
+      // Already withdrawn (re-run on warm devnet). Surface as a finding so
+      // an operator running the suite knows the lock-revert assertion did
+      // not exercise — previously silently `return`ed and let the test
+      // appear green.
+      recordFinding(
+        `tier-3 lock-revert assertion not exercised: tokenId=${tokenId} already withdrawn ` +
+          `(raw=0). To validate the lock branch on this devnet, re-run \`devnet/_bootstrap/bootstrap.cjs\`.`,
+      );
       return;
     }
+    const block = await state.provider.getBlock('latest');
+    expect(block, 'provider returned no head block').toBeTruthy();
+    if (positionBefore.expiryTimestamp <= BigInt(block!.timestamp)) {
+      recordFinding(
+        `tier-3 lock-revert assertion not exercised: lock has already expired ` +
+          `(expiry=${positionBefore.expiryTimestamp}, now=${block!.timestamp}). ` +
+          `A long evm_increaseTime in a prior phase warped past the lock; clean devnet to re-arm.`,
+      );
+      return;
+    }
+    // Negative test — withdraw() on a tier > 0 position before
+    // expiryTimestamp must revert. We use staticCall to keep the nonce
+    // pristine (a real tx that reverts still consumes a nonce, which can
+    // race with subsequent same-wallet ops in the suite).
+    await expectRevert(
+      () => nft.withdraw.staticCall(tokenId),
+      'tier-3 lock must block withdraw',
+    );
+  }, 30_000);
 
-    await expect(nft.withdraw(tokenId), 'tier-3 lock must block withdraw').rejects.toThrow();
+  // ────────────────────────────────────────────────────────────────────────
+  // Negative: ERC-721 withdraw is owner-only.
+  //
+  // Documents and pins the access-control rule on
+  // `DKGStakingConvictionNFT.withdraw(tokenId)` — only the NFT's current
+  // owner can call it. A regression that allowed any caller to withdraw
+  // would silently drain stakes; this test catches it cheaply.
+  // ────────────────────────────────────────────────────────────────────────
+  it('non-owner withdraw reverts (NFT access control)', async () => {
+    const stillStaked = state.delegators
+      .filter((d) => d.tier === 0)
+      .find(async (d) => {
+        const p = await state.css.getPosition(BigInt(d.tokenId));
+        return p.raw !== 0n;
+      });
+    if (!stillStaked) {
+      recordFinding('non-owner-withdraw test skipped: no tier-0 stake remaining post-test-3a.');
+      return;
+    }
+    const tokenId = BigInt(stillStaked.tokenId);
+    const positionAtStart = await state.css.getPosition(tokenId);
+    if (positionAtStart.raw === 0n) {
+      recordFinding('non-owner-withdraw test skipped: position withdrawn between picks.');
+      return;
+    }
+    // Random fresh wallet — not the NFT owner.
+    const stranger = ethers.Wallet.createRandom().connect(state.provider);
+    await state.provider.send('hardhat_setBalance', [
+      stranger.address,
+      '0x' + ethers.parseEther('1').toString(16),
+    ]);
+    const strangerNft = new ethers.Contract(state.nft.target, NFT_ABI, stranger);
+    await expectRevert(
+      () => strangerNft.withdraw.staticCall(tokenId),
+      'non-owner cannot withdraw an NFT-keyed position',
+    );
   }, 30_000);
 });
 
@@ -546,32 +693,101 @@ describe('4. operator-fee accrual + withdrawal', () => {
 
     const claimTx = await nft.claim(BigInt(candidate!.tokenId));
     const claimReceipt = await claimTx.wait();
-    expect(claimReceipt.status).toBe(1);
+    expectTxSuccess(claimReceipt, 'NFT.claim');
+
+    // RewardsClaimed event — pin the on-chain reward amount that the
+    // delegator actually received (vs. the operator-fee accrual we measure
+    // via getOperatorFeeBalance). gross = delegatorReward + operatorFee.
+    const claimIface = new ethers.Interface(NFT_ABI);
+    const rewardsEvt = parseEventOrThrow(
+      claimIface,
+      claimReceipt.logs,
+      'RewardsClaimed',
+      (p) => (p.args.tokenId as bigint) === BigInt(candidate!.tokenId),
+    ) as { args: { tokenId: bigint; amount: bigint } };
+    const delegatorReward = rewardsEvt.args.amount;
+    expect(delegatorReward, 'delegator must receive a non-zero reward share').toBeGreaterThan(0n);
 
     const balAfter = BigInt(await state.css.getOperatorFeeBalance(identityId));
     const accrued: bigint = balAfter - BigInt(balBefore);
     expect(accrued, 'operator-fee must accrue on first claim').toBeGreaterThan(0n);
 
-    // RFC-26 conformance: accrual within 1% of `gross × bps / 10_000`.
+    // RFC-26 conformance: accrual within 0.5% of `gross × bps / 10_000`.
+    // Tightened from 1% (100 bps) — on a deterministic devnet the drift
+    // is only the rounding loss in the integer fee math (≤1 wei in
+    // practice), so 0.5% is plenty of slack but tight enough to catch
+    // any real formula regression. If a real-world gas/RS-noise effect
+    // ever justifies relaxing this, that's a finding worth reviewing —
+    // not a knob to turn quietly.
     const driftAbs: bigint = expectedFee > accrued ? expectedFee - accrued : accrued - expectedFee;
     const driftBps = expectedFee > 0n ? Number((driftAbs * 10000n) / expectedFee) : 0;
     expect(driftBps, `accrual ${ethers.formatUnits(accrued, 18)} TRAC drifts ${driftBps} bps from RFC prediction ${ethers.formatUnits(expectedFee, 18)} TRAC`)
-      .toBeLessThan(100);
+      .toBeLessThan(50);
     if (driftBps > 0) recordFinding(`operator-fee accrual drift: ${driftBps} bps from RFC-26 prediction`);
+
+    // Conservation check: gross epoch reward routed to this position
+    // (from RS) MUST equal delegatorReward + operatorFeeAccrued (within
+    // the same 50 bps slack — the math is a single multiply/divide so
+    // any real discrepancy is a bug). This catches a class of regressions
+    // where the fee path either over- or under-credits.
+    const totalCredited = delegatorReward + accrued;
+    const totalDriftAbs: bigint = grossNode1 > totalCredited ? grossNode1 - totalCredited : totalCredited - grossNode1;
+    const totalDriftBps = grossNode1 > 0n ? Number((totalDriftAbs * 10000n) / grossNode1) : 0;
+    expect(
+      totalDriftBps,
+      `delegatorReward+operatorFee=${ethers.formatUnits(totalCredited, 18)} vs gross=${ethers.formatUnits(grossNode1, 18)} drifts ${totalDriftBps} bps`,
+    ).toBeLessThan(50);
 
     // (f) Withdrawal cycle: request → assert cooldown → warp → finalize.
     const adminTracBefore = await state.token.balanceOf(state.adminWallet.address);
     const stakingWrite = state.staking.connect(state.adminWallet) as ethers.Contract;
+
+    // Negative: requesting 0 must revert (input validation).
+    await expectRevert(
+      () => stakingWrite.requestOperatorFeeWithdrawal.staticCall(identityId, 0n),
+      'requestOperatorFeeWithdrawal must reject 0 amount',
+    );
+    // Negative: requesting more than the balance must revert (overflow guard).
+    await expectRevert(
+      () => stakingWrite.requestOperatorFeeWithdrawal.staticCall(identityId, balAfter + 1n),
+      'requestOperatorFeeWithdrawal must reject withdrawal > balance',
+    );
+    // Negative: non-admin caller must be rejected. Identity-admin is
+    // enforced at the StakingV10 layer via IdentityStorage.keyHasPurpose
+    // — a stranger should hit the access-control branch.
+    const stranger = ethers.Wallet.createRandom().connect(state.provider);
+    await state.provider.send('hardhat_setBalance', [
+      stranger.address,
+      '0x' + ethers.parseEther('1').toString(16),
+    ]);
+    const stakingAsStranger = state.staking.connect(stranger) as ethers.Contract;
+    await expectRevert(
+      () => stakingAsStranger.requestOperatorFeeWithdrawal.staticCall(identityId, 1n),
+      'non-admin must not be able to request operator-fee withdrawal',
+    );
+
     const reqTx = await stakingWrite.requestOperatorFeeWithdrawal(identityId, balAfter);
-    await reqTx.wait();
+    const reqReceipt = await reqTx.wait();
+    expectTxSuccess(reqReceipt, 'requestOperatorFeeWithdrawal');
 
     const queued = await state.css.getOperatorFeeWithdrawalRequest(identityId);
     expect(queued.amount).toBe(balAfter);
     expect(await state.css.getOperatorFeeBalance(identityId)).toBe(0n);
 
+    // Negative: a second request while one is queued must revert (the
+    // queued amount is non-zero — `getOperatorFeeWithdrawalRequest`
+    // returned a valid record above). Pin: the contract MUST NOT
+    // overwrite an in-flight request without explicit cancellation.
+    await expectRevert(
+      () => stakingWrite.requestOperatorFeeWithdrawal.staticCall(identityId, 1n),
+      'second request while one is queued must revert',
+    );
+
     // Early finalize must revert (cooldown enforcement).
-    await expect(stakingWrite.finalizeOperatorFeeWithdrawal.staticCall(identityId))
-      .rejects.toThrow();
+    await expectRevert(
+      () => stakingWrite.finalizeOperatorFeeWithdrawal.staticCall(identityId),
+      'finalize before cooldown elapses must revert',
+    );
 
     const delay = await state.params.stakeWithdrawalDelay();
     await state.provider.send('evm_increaseTime', [Number(delay) + 5]);
@@ -582,12 +798,20 @@ describe('4. operator-fee accrual + withdrawal', () => {
     const nonce = await state.provider.getTransactionCount(state.adminWallet.address);
     const finTx = await stakingWrite.finalizeOperatorFeeWithdrawal(identityId, { nonce });
     const finReceipt = await finTx.wait();
-    expect(finReceipt.status).toBe(1);
+    expectTxSuccess(finReceipt, 'finalizeOperatorFeeWithdrawal');
 
     const adminTracAfter = await state.token.balanceOf(state.adminWallet.address);
     expect(adminTracAfter - adminTracBefore, 'TRAC must transfer to operator EOA on finalize')
       .toBe(balAfter);
     const queuedAfter = await state.css.getOperatorFeeWithdrawalRequest(identityId);
     expect(queuedAfter.amount).toBe(0n);
+
+    // Replay-safety: a second finalize call after the request slot is
+    // cleared must revert. Pins idempotency — without this, a partially
+    // observed finalize tx that races with retry logic could double-pay.
+    await expectRevert(
+      () => stakingWrite.finalizeOperatorFeeWithdrawal.staticCall(identityId),
+      'finalize after the queued request is cleared must revert',
+    );
   }, 600_000);
 });

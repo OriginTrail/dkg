@@ -63,6 +63,14 @@ import {
 } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { ethers } from 'ethers';
+import {
+  expectTxSuccess,
+  expectMintedTokenId,
+  expectRevert,
+  parseEventOrThrow,
+  parseEventIfPresent,
+  assertDevnetReady,
+} from '../_lib';
 
 const REPO_ROOT = resolve(__dirname, '../..');
 const RPC = 'http://127.0.0.1:8545';
@@ -552,40 +560,35 @@ async function ensurePcaAccountForOpWallets(
     ]);
     return parseInt(raw, 16);
   };
-  await (
+  const approveReceipt = await (
     await tokenAsAdmin.approve(nftAddress, committed, {
       nonce: await nextNonce(),
     })
   ).wait();
+  expectTxSuccess(approveReceipt, 'token.approve(nftAdmin → NFT)');
+
   const createTx = await nftAsAdmin.createAccount(committed, {
     nonce: await nextNonce(),
   });
   const createReceipt = await createTx.wait();
-  let accountId = 0n;
+  expectTxSuccess(createReceipt, 'NFT.createAccount');
   const iface = new ethers.Interface([
     'event AccountCreated(uint256 indexed accountId, address indexed owner, uint96 committedTRAC, uint16 discountBps, uint40 createdAtEpoch, uint40 expiresAtEpoch)',
   ]);
-  for (const log of createReceipt?.logs ?? []) {
-    try {
-      const parsed = iface.parseLog(log);
-      if (parsed?.name === 'AccountCreated') {
-        accountId = parsed.args.accountId as bigint;
-        break;
-      }
-    } catch {
-      // skip
-    }
-  }
-  if (accountId === 0n) throw new Error('AccountCreated event not found');
+  const accountEvt = parseEventOrThrow(
+    iface,
+    createReceipt!.logs,
+    'AccountCreated',
+  ) as { args: { accountId: bigint; committedTRAC: bigint } };
+  const accountId = accountEvt.args.accountId;
+  expect(accountEvt.args.committedTRAC, 'AccountCreated.committedTRAC must equal the committed amount').toBe(committed);
   console.log(`pca: created account ${accountId}`);
   for (const w of edge.opWallets) {
     const tx = await nftAsAdmin.registerAgent(accountId, w.address, {
       nonce: await nextNonce(),
     });
     const receipt = await tx.wait();
-    if (receipt?.status !== 1) {
-      throw new Error(`registerAgent for ${w.address} failed`);
-    }
+    expectTxSuccess(receipt, `registerAgent(${w.address})`);
   }
   return accountId;
 }
@@ -628,10 +631,18 @@ async function timeWarpSeconds(
 
 describe('V10 chain — combined end-to-end devnet validation', () => {
   beforeAll(async () => {
+    await assertDevnetReady({
+      expectedNodes: 6,
+      requireWallets: true,
+      startCommandHint: './scripts/devnet.sh clean && ./scripts/devnet.sh start 6',
+    });
     state.v = await detectDevnet();
     if (!state.v) {
+      // assertDevnetReady passed but detectDevnet still bailed — surfaces
+      // anything missed by the static preflight (e.g. Hub deployed but a
+      // sub-contract address missing, network identity flap).
       throw new Error(
-        'Devnet not running. Run `./scripts/devnet.sh clean && ./scripts/devnet.sh start 6` first.',
+        'detectDevnet() failed after preflight passed — check daemon stderr.',
       );
     }
     for (let i = 1; i <= 6; i++) {
@@ -791,8 +802,20 @@ describe('V10 chain — combined end-to-end devnet validation', () => {
         epoch,
         periodStart,
       );
+      // The score MUST be strictly positive — `solved=true` plus a 0
+      // score would mean the prover submitted a malformed proof that
+      // the chain accepted without crediting. That's a bug class worth
+      // catching. The previous test logged "0 on fresh devnet is
+      // benign" which was incorrect: a proven-and-solved challenge
+      // always yields a non-zero score under the V10 score formula
+      // (effective_stake × multiplier × proof_count > 0).
+      expect(
+        score,
+        `RS proof was solved on-chain but score is 0 — bug in the score formula or proof accounting. ` +
+          `idId=${success.identityId}, epoch=${epoch}, periodStart=${periodStart}`,
+      ).toBeGreaterThan(0n);
       console.log(
-        `phase 1 (RS): on-chain score=${score} (informational; 0 on fresh devnet is benign)`,
+        `phase 1 (RS): on-chain score=${score} (epoch=${epoch}, periodStart=${periodStart})`,
       );
     },
     240_000,
@@ -907,15 +930,45 @@ describe('V10 chain — combined end-to-end devnet validation', () => {
       // The NFT's createConviction calls StakingV10.stake under the hood,
       // which pulls TRAC via transferFrom(staker, CSS, amount) gated by
       // an allowance to StakingV10.
-      await (
+      const approveReceipt = await (
         await tokenAsDelegator.approve(stakingV10Address, stakeAmount, {
           nonce: await nextNonce(),
         })
       ).wait();
+      expectTxSuccess(approveReceipt, 'token.approve(delegator → StakingV10)');
+
+      // Negative: createConviction without an approval-bumped wallet must
+      // revert. We simulate this with a sibling wallet that has TRAC but
+      // no allowance — pins the standard ERC-20 pull-payment guard.
+      const noAllowanceWallet = ethers.Wallet.createRandom().connect(s.provider);
+      await s.provider.send('hardhat_setBalance', [
+        noAllowanceWallet.address,
+        '0x' + ethers.parseEther('1').toString(16),
+      ]);
+      await fundTokenBalance(s, noAllowanceWallet.address, stakeAmount);
+      const nftAsNoAllowance = s.stakingNft.connect(noAllowanceWallet) as ethers.Contract;
+      await expectRevert(
+        () => nftAsNoAllowance.createConviction.staticCall(core1.identityId, stakeAmount, 0),
+        'createConviction without allowance must revert',
+      );
 
       const beforeStake: bigint =
         await s.convictionStakingStorage.getNodeStakeV10(core1.identityId);
       const beforeBalance: bigint = await s.token.balanceOf(delegator.address);
+
+      // Negative tests run BEFORE the happy-path stake — keep nonce
+      // pristine via staticCall and don't pollute on-chain state.
+      // (i) zero stake must revert.
+      await expectRevert(
+        () => nftAsDelegator.createConviction.staticCall(core1.identityId, 0n, 0),
+        'createConviction must reject 0 stake amount',
+      );
+      // (ii) staking to a non-existent identity must revert. identityId
+      // counters monotonically increase from 1; a value 9_999 is safe.
+      await expectRevert(
+        () => nftAsDelegator.createConviction.staticCall(9_999n, stakeAmount, 0),
+        'createConviction must reject unknown identityId',
+      );
 
       // Lock tier 0 = no lock — withdraw is allowed immediately.
       const createTx = await nftAsDelegator.createConviction(
@@ -925,31 +978,9 @@ describe('V10 chain — combined end-to-end devnet validation', () => {
         { nonce: await nextNonce() },
       );
       const createReceipt = await createTx.wait();
-      expect(createReceipt?.status).toBe(1);
+      expectTxSuccess(createReceipt, 'NFT.createConviction(tier 0)');
 
-      // Find the minted NFT tokenId from Transfer event.
-      let tokenId = 0n;
-      const transferIface = new ethers.Interface([
-        'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)',
-      ]);
-      for (const log of createReceipt?.logs ?? []) {
-        try {
-          const parsed = transferIface.parseLog(log);
-          if (
-            parsed?.name === 'Transfer' &&
-            (parsed.args.from as string).toLowerCase() ===
-              '0x0000000000000000000000000000000000000000' &&
-            (parsed.args.to as string).toLowerCase() ===
-              delegator.address.toLowerCase()
-          ) {
-            tokenId = parsed.args.tokenId as bigint;
-            break;
-          }
-        } catch {
-          // non-Transfer log — skip
-        }
-      }
-      expect(tokenId).toBeGreaterThan(0n);
+      const tokenId = expectMintedTokenId(createReceipt!.logs, delegator.address, 'createConviction');
       console.log(
         `phase 3: createConviction OK, tokenId=${tokenId}, identityId=${core1.identityId}`,
       );
@@ -960,7 +991,13 @@ describe('V10 chain — combined end-to-end devnet validation', () => {
       expect(beforeBalance - afterCreateBalance).toBe(stakeAmount);
       const afterCreateStake: bigint =
         await s.convictionStakingStorage.getNodeStakeV10(core1.identityId);
-      expect(afterCreateStake - beforeStake).toBeGreaterThanOrEqual(stakeAmount);
+      // Strict equality — node's V10 stake delta MUST be exactly the
+      // staked amount. The previous `>= stakeAmount` was loose enough to
+      // mask a contract bug that double-credited (delta = 2×stake).
+      expect(
+        afterCreateStake - beforeStake,
+        'getNodeStakeV10 must increase by exactly stakeAmount',
+      ).toBe(stakeAmount);
 
       // Verify NFT ownership before withdraw.
       const ownerBefore: string = await s.stakingNft.ownerOf(tokenId);
@@ -968,39 +1005,84 @@ describe('V10 chain — combined end-to-end devnet validation', () => {
 
       // V10 atomic withdraw — burns the NFT, transfers TRAC back, no cooldown
       // for tier-0 positions.
+      // Negative: a non-owner cannot withdraw this NFT. Pin the
+      // ERC-721 access-control rule on `withdraw(tokenId)`.
+      const stranger = ethers.Wallet.createRandom().connect(s.provider);
+      await s.provider.send('hardhat_setBalance', [
+        stranger.address,
+        '0x' + ethers.parseEther('1').toString(16),
+      ]);
+      const nftAsStranger = s.stakingNft.connect(stranger) as ethers.Contract;
+      await expectRevert(
+        () => nftAsStranger.withdraw.staticCall(tokenId),
+        'non-owner cannot withdraw',
+      );
+
       const withdrawTx = await nftAsDelegator.withdraw(tokenId, {
         nonce: await nextNonce(),
       });
       const withdrawReceipt = await withdrawTx.wait();
-      expect(withdrawReceipt?.status).toBe(1);
+      expectTxSuccess(withdrawReceipt, 'NFT.withdraw(tier 0)');
 
-      // NFT must be burned: ownerOf(tokenId) reverts with ERC721NonexistentToken.
-      let burned = false;
-      try {
-        await s.stakingNft.ownerOf(tokenId);
-      } catch (err: unknown) {
-        burned = (err as Error).message.includes('ERC721NonexistentToken') ||
-          (err as Error).message.includes('reverted');
-      }
-      expect(burned).toBe(true);
+      // PositionWithdrawn event MUST fire exactly once with the correct
+      // amount and tokenId. The previous test only checked that ownerOf()
+      // reverts — silent missing event would have slipped through.
+      const nftIface = new ethers.Interface([
+        'event PositionWithdrawn(uint256 indexed tokenId, uint96 amount)',
+        'event RewardsClaimed(uint256 indexed tokenId, uint96 amount)',
+      ]);
+      const wEvt = parseEventOrThrow(
+        nftIface,
+        withdrawReceipt!.logs,
+        'PositionWithdrawn',
+        (p) => (p.args.tokenId as bigint) === tokenId,
+      ) as { args: { tokenId: bigint; amount: bigint } };
+      expect(wEvt.args.amount, 'PositionWithdrawn.amount must equal raw stake').toBe(stakeAmount);
 
-      const afterWithdrawBalance: bigint = await s.token.balanceOf(
-        delegator.address,
-      );
+      // RewardsClaimed is OPTIONAL on a fresh devnet (no RS-accrued yet).
+      // If it fires, the staker's TRAC delta must be raw + claimed.
+      const rEvt = parseEventIfPresent(
+        nftIface,
+        withdrawReceipt!.logs,
+        'RewardsClaimed',
+        (p) => (p.args.tokenId as bigint) === tokenId,
+      ) as { args: { tokenId: bigint; amount: bigint } } | undefined;
+      const expectedReturn = stakeAmount + (rEvt?.args.amount ?? 0n);
+
+      // NFT must be burned — explicit ERC721NonexistentToken assertion.
+      await expectRevert(() => s.stakingNft.ownerOf(tokenId), 'ownerOf after burn');
+
+      const afterWithdrawBalance: bigint = await s.token.balanceOf(delegator.address);
       const returned = afterWithdrawBalance - afterCreateBalance;
-      expect(returned).toBeGreaterThan(0n);
-      // Allow for any reward compounding / dilution adjustments — assert
-      // the staker got back at least 95% of principal.
-      const minExpected = (stakeAmount * 95n) / 100n;
-      expect(returned).toBeGreaterThanOrEqual(minExpected);
+      // Strict equality — tier-0 NEVER imposes a slashing penalty;
+      // returned == stake + any claimed rewards. The previous "≥95%"
+      // assertion was a slop — it would have passed even if the contract
+      // had a 5% bug burning principal. Tightened to exact equality.
+      expect(
+        returned,
+        `tier-0 withdraw must return raw stake (+ claimed rewards if any). ` +
+          `expected ${expectedReturn}, got ${returned}`,
+      ).toBe(expectedReturn);
 
+      // Per-node stake delta must equal exactly the staked amount —
+      // again, no slippage budget for tier-0.
       const afterWithdrawStake: bigint =
         await s.convictionStakingStorage.getNodeStakeV10(core1.identityId);
-      expect(afterWithdrawStake).toBeLessThan(afterCreateStake);
+      expect(
+        afterCreateStake - afterWithdrawStake,
+        'per-node stake must drop by exactly the withdrawn amount',
+      ).toBe(stakeAmount);
+
+      // Replay safety: a second withdraw of the same tokenId must revert.
+      await expectRevert(
+        () => nftAsDelegator.withdraw.staticCall(tokenId),
+        'second withdraw must revert (NFT burned)',
+      );
 
       console.log(
         `phase 3 PASS: NFT burned, returned=${ethers.formatEther(returned)} TRAC ` +
           `(staked ${ethers.formatEther(stakeAmount)}, ` +
+          `claimed=${rEvt ? ethers.formatEther(rEvt.args.amount) : '0'}, ` +
           `node stake ${ethers.formatEther(afterCreateStake)} → ${ethers.formatEther(afterWithdrawStake)})`,
       );
     },
@@ -1028,12 +1110,27 @@ describe('V10 chain — combined end-to-end devnet validation', () => {
         await s.convictionStakingStorage.getOperatorFeeBalance(
           core1.identityId,
         );
+      // Hard requirement: this phase MUST exercise the request → finalize
+      // round-trip. The previous behaviour was to `return` early on a
+      // zero balance, leaving the test green without exercising the
+      // operator-fee withdraw lifecycle — the very thing it claims to
+      // validate. The standalone v10-core-flows suite already actively
+      // seeds an operator-fee balance (publishes 5 KCs, waits for RS,
+      // warps an epoch, claims) and asserts the same code path; this
+      // suite's Phase 4 is the smaller smoke-test that runs after the
+      // staking lifecycle. If the balance is 0, we surface that loudly
+      // — a green CI without coverage is worse than a red CI with one.
       if (balance === 0n) {
-        console.log(
-          `phase 4: core1 operator fee balance is 0 (no KPI claims yet on this devnet) — skipping the request → finalize round-trip. ` +
-            `Phase 3's stake/withdraw/claim already proved the V10 conviction-staking lifecycle works; this phase is only meaningful once rewards have accumulated.`,
+        // Promote the case to a real `it.skip`-style outcome: fail the
+        // test with an actionable message rather than pass silently.
+        // Operators running the e2e suite should run v10-core-flows OR
+        // bootstrap.cjs first to seed claims so this phase has signal.
+        throw new Error(
+          `phase 4: core1 operator fee balance is 0 — phase MUST be seeded with rewards before run. ` +
+            `Run \`pnpm test:devnet:v10-core-flows\` first (which actively accrues operator fee), ` +
+            `or run \`node devnet/_bootstrap/bootstrap.cjs\` then make claims to seed. ` +
+            `Silently passing this test was masking real bugs in the request → finalize lifecycle.`,
         );
-        return;
       }
 
       // Withdraw 1 wei of fee — predictable, doesn't deplete the pool.
@@ -1050,14 +1147,31 @@ describe('V10 chain — combined end-to-end devnet validation', () => {
         adminWallet.address,
       );
 
+      // Negative: 0 amount must revert.
+      await expectRevert(
+        () => stakingV10AsAdmin.requestOperatorFeeWithdrawal.staticCall(core1.identityId, 0n),
+        'request 0 amount must revert',
+      );
+      // Negative: amount > balance must revert.
+      await expectRevert(
+        () => stakingV10AsAdmin.requestOperatorFeeWithdrawal.staticCall(core1.identityId, balance + 1n),
+        'request > balance must revert',
+      );
+
       const reqTx = await stakingV10AsAdmin.requestOperatorFeeWithdrawal(
         core1.identityId,
         withdrawAmount,
       );
       const reqReceipt = await reqTx.wait();
-      expect(reqReceipt?.status).toBe(1);
+      expectTxSuccess(reqReceipt, 'requestOperatorFeeWithdrawal');
       console.log(
         `phase 4: requestOperatorFeeWithdrawal(${core1.identityId}, ${withdrawAmount}) OK`,
+      );
+
+      // Cooldown enforcement: early finalize must revert.
+      await expectRevert(
+        () => stakingV10AsAdmin.finalizeOperatorFeeWithdrawal.staticCall(core1.identityId),
+        'finalize before cooldown elapses must revert',
       );
 
       // V10 reuses stakeWithdrawalDelay for the operator-fee cooldown
@@ -1072,12 +1186,19 @@ describe('V10 chain — combined end-to-end devnet validation', () => {
         core1.identityId,
       );
       const finalReceipt = await finalTx.wait();
-      expect(finalReceipt?.status).toBe(1);
+      expectTxSuccess(finalReceipt, 'finalizeOperatorFeeWithdrawal');
 
       const afterAdminBalance: bigint = await s.token.balanceOf(
         adminWallet.address,
       );
       expect(afterAdminBalance - beforeAdminBalance).toBe(withdrawAmount);
+
+      // Replay safety: re-finalize must revert (queued slot cleared).
+      await expectRevert(
+        () => stakingV10AsAdmin.finalizeOperatorFeeWithdrawal.staticCall(core1.identityId),
+        'finalize after the queued request is cleared must revert',
+      );
+
       console.log(
         `phase 4 PASS: admin balance +${withdrawAmount} wei TRAC after finalize`,
       );

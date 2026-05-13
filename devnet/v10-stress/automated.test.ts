@@ -58,6 +58,14 @@ import {
 } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { ethers } from 'ethers';
+import {
+  expectTxSuccess,
+  expectMintedTokenId,
+  expectRevert,
+  parseEventOrThrow,
+  parseEventIfPresent,
+  assertDevnetReady,
+} from '../_lib';
 
 // ───────────────────────────── constants ─────────────────────────────────
 const REPO_ROOT = resolve(__dirname, '../..');
@@ -586,10 +594,15 @@ function makeNquadsFile(name: string, contextGraph: string): string {
 
 describe('V10 chain — stress + scenario validation', () => {
   beforeAll(async () => {
+    await assertDevnetReady({
+      expectedNodes: 6,
+      requireWallets: true,
+      startCommandHint: './scripts/devnet.sh clean && ./scripts/devnet.sh start 6',
+    });
     state.v = await detectDevnet(7);
     if (!state.v) {
       throw new Error(
-        'Devnet not running. Run `./scripts/devnet.sh clean && ./scripts/devnet.sh start 6` first.',
+        'detectDevnet() failed after preflight passed — check daemon stderr.',
       );
     }
     // Reset findings file at run start.
@@ -685,12 +698,12 @@ describe('V10 chain — stress + scenario validation', () => {
       const beforeBalance: bigint = await s.token.balanceOf(wallet.address);
       expect(beforeBalance).toBe(initialTrac);
 
-      // Approve + stake.
-      await (
+      const approveReceipt = await (
         await tokenAsStaker.approve(stakingV10Address, stakeAmount, {
           nonce: await nextNonceFor(s.provider, wallet.address),
         })
       ).wait();
+      expectTxSuccess(approveReceipt, `staker[${i}].approve`);
       const createTx = await nftAsStaker.createConviction(
         targetCore.identityId,
         stakeAmount,
@@ -698,31 +711,13 @@ describe('V10 chain — stress + scenario validation', () => {
         { nonce: await nextNonceFor(s.provider, wallet.address) },
       );
       const createReceipt = await createTx.wait();
-      expect(createReceipt?.status).toBe(1);
+      expectTxSuccess(createReceipt, `staker[${i}].createConviction`);
 
-      // Extract minted tokenId from Transfer event.
-      let tokenId = 0n;
-      const transferIface = new ethers.Interface([
-        'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)',
-      ]);
-      for (const log of createReceipt?.logs ?? []) {
-        try {
-          const parsed = transferIface.parseLog(log);
-          if (
-            parsed?.name === 'Transfer' &&
-            (parsed.args.from as string) ===
-              '0x0000000000000000000000000000000000000000' &&
-            (parsed.args.to as string).toLowerCase() ===
-              wallet.address.toLowerCase()
-          ) {
-            tokenId = parsed.args.tokenId as bigint;
-            break;
-          }
-        } catch {
-          // skip non-Transfer
-        }
-      }
-      expect(tokenId).toBeGreaterThan(0n);
+      const tokenId = expectMintedTokenId(
+        createReceipt!.logs,
+        wallet.address,
+        `staker[${i}].createConviction`,
+      );
 
       const afterBalance: bigint = await s.token.balanceOf(wallet.address);
       expect(beforeBalance - afterBalance).toBe(stakeAmount);
@@ -773,6 +768,191 @@ describe('V10 chain — stress + scenario validation', () => {
       `phase 1 PASS: ${STRESS_STAKERS} stakers, ${ethers.formatEther(totalStaked)} TRAC total, vault delta exact.`,
     );
   }, 600_000);
+
+  // =========================================================================
+  // Phase 1.5 — Concurrent stakers (race-condition catcher).
+  //
+  // Phase 1 stakes serially. This phase stakes 8 fresh wallets in
+  // PARALLEL, all targeting the same core. The on-chain accounting must
+  // remain consistent — total stake delta == sum(stake amounts), no
+  // dropped or double-counted positions, every wallet ends up with
+  // exactly one NFT.
+  //
+  // This catches:
+  //   - per-node stake counter races,
+  //   - tokenId collision regressions in the NFT mint counter,
+  //   - allowance read-modify-write races (multiple stakers hitting the
+  //     same StakingV10 transferFrom path concurrently),
+  //   - any block-builder ordering surprise that violates the implicit
+  //     "stake transactions are commutative" assumption.
+  // =========================================================================
+  it('phase 1.5: 8 stakers stake in parallel; per-node delta + NFT count reconcile exactly', async () => {
+    const s = state.v!;
+    const cores = [1, 2, 3, 4]
+      .map((n) => s.nodes[n])
+      .filter((n): n is DevnetNode => Boolean(n) && n.identityId > 0n);
+    expect(cores.length).toBeGreaterThanOrEqual(1);
+    const target = cores[0]!;
+    const stakingV10Address = await s.stakingV10.getAddress();
+
+    const PARALLEL = 8;
+    const stakeAmount = ethers.parseEther('500');
+    const wallets: ethers.HDNodeWallet[] = [];
+
+    // Pre-fund every wallet sequentially (Hardhat setBalance/setStorage
+    // calls don't race well — prepare them serially, then race the
+    // actual stake calls).
+    for (let i = 0; i < PARALLEL; i++) {
+      const w = ethers.Wallet.createRandom().connect(s.provider) as ethers.HDNodeWallet;
+      await s.provider.send('hardhat_setBalance', [
+        w.address,
+        '0x' + ethers.parseEther('5').toString(16),
+      ]);
+      await fundTokenBalance(s, w.address, stakeAmount + ethers.parseEther('1'));
+      wallets.push(w);
+    }
+
+    const stakeBefore: bigint =
+      await s.convictionStakingStorage.getNodeStakeV10(target.identityId);
+
+    // Approve serially per-wallet (each wallet's nonce is independent).
+    // Then issue createConviction in parallel — every wallet has its own
+    // nonce stream so there's no cross-wallet collision.
+    await Promise.all(
+      wallets.map(async (w) => {
+        const tokenAsW = s.token.connect(w) as ethers.Contract;
+        const tx = await tokenAsW.approve(stakingV10Address, stakeAmount, {
+          nonce: await nextNonceFor(s.provider, w.address),
+        });
+        const r = await tx.wait();
+        expectTxSuccess(r, 'phase 1.5: approve');
+      }),
+    );
+
+    const stakeReceipts = await Promise.all(
+      wallets.map(async (w) => {
+        const nftAsW = s.stakingNft.connect(w) as ethers.Contract;
+        const tx = await nftAsW.createConviction(target.identityId, stakeAmount, 0, {
+          nonce: await nextNonceFor(s.provider, w.address),
+        });
+        const r = await tx.wait();
+        expectTxSuccess(r, 'phase 1.5: createConviction');
+        return { wallet: w, receipt: r! };
+      }),
+    );
+
+    // Every wallet must have minted exactly one NFT.
+    const tokenIds = stakeReceipts.map(({ wallet, receipt }) =>
+      expectMintedTokenId(receipt.logs, wallet.address, `phase 1.5 staker ${wallet.address.slice(0, 10)}`),
+    );
+    // tokenIds must be unique — a counter race that issued the same id
+    // to two parallel stakers would surface here.
+    const uniqueTokenIds = new Set(tokenIds.map((t) => t.toString()));
+    expect(
+      uniqueTokenIds.size,
+      `phase 1.5: tokenIds collided. Got ${tokenIds.join(',')} — NFT counter race`,
+    ).toBe(PARALLEL);
+
+    const stakeAfter: bigint =
+      await s.convictionStakingStorage.getNodeStakeV10(target.identityId);
+    const totalStakedThisPhase = BigInt(PARALLEL) * stakeAmount;
+    expect(
+      stakeAfter - stakeBefore,
+      'phase 1.5: per-node stake delta MUST equal sum of parallel stakes (no dropped or double-counted txs)',
+    ).toBe(totalStakedThisPhase);
+
+    // Each NFT owner is exactly the wallet that staked.
+    for (let i = 0; i < PARALLEL; i++) {
+      const owner: string = await s.stakingNft.ownerOf(tokenIds[i]!);
+      expect(owner.toLowerCase()).toBe(wallets[i]!.address.toLowerCase());
+    }
+
+    appendFinding(
+      'Phase 1.5 — concurrent stakers passed',
+      `${PARALLEL} parallel createConviction calls reconciled with exact per-node stake delta and unique tokenIds. ` +
+        `No nonce races, no counter collisions, no dropped txs.`,
+    );
+  }, 600_000);
+
+  // =========================================================================
+  // Phase 1.6 — Tier-12 lock invariants (negative + edge cases).
+  //
+  // Tier 12 is the longest lock window (12 months in the live config).
+  // Withdrawing a tier-12 position before its expiryTimestamp MUST
+  // revert. This phase verifies:
+  //   (i) any Phase-1 tier-12 staker cannot withdraw (lock enforced),
+  //   (ii) createConviction with tier > 12 must revert (out-of-range),
+  //   (iii) createConviction with stake < minimumStake must revert.
+  // =========================================================================
+  it('phase 1.6: tier-12 withdraw reverts; tier overflow + sub-minimum revert', async () => {
+    const s = state.v!;
+    const cores = [1, 2, 3, 4]
+      .map((n) => s.nodes[n])
+      .filter((n): n is DevnetNode => Boolean(n) && n.identityId > 0n);
+    expect(cores.length).toBeGreaterThanOrEqual(1);
+    const target = cores[0]!;
+
+    // (i) tier-12 lock enforcement.
+    const t12 = Array.from(s.stakersById.values()).find((r) => r.tier === 12);
+    if (!t12) {
+      appendFinding(
+        'Phase 1.6 — tier-12 staker missing',
+        `No tier-12 staker in stakersById. Bump STRESS_STAKERS or check the tier-cycling logic in Phase 1.`,
+      );
+    } else {
+      const nftAsT12 = s.stakingNft.connect(t12.wallet) as ethers.Contract;
+      await expectRevert(
+        () => nftAsT12.withdraw.staticCall(t12.tokenId),
+        'phase 1.6: tier-12 withdraw before expiry must revert',
+      );
+    }
+
+    // (ii) tier > 12 (out-of-range) revert.
+    const stranger = ethers.Wallet.createRandom().connect(s.provider);
+    await s.provider.send('hardhat_setBalance', [
+      stranger.address,
+      '0x' + ethers.parseEther('5').toString(16),
+    ]);
+    const stake = ethers.parseEther('100');
+    await fundTokenBalance(s, stranger.address, stake);
+    const stakingV10Address = await s.stakingV10.getAddress();
+    const tokenAsStranger = s.token.connect(stranger) as ethers.Contract;
+    const approveTx = await tokenAsStranger.approve(stakingV10Address, stake, {
+      nonce: await nextNonceFor(s.provider, stranger.address),
+    });
+    expectTxSuccess(await approveTx.wait(), 'phase 1.6: stranger approve');
+    const nftAsStranger = s.stakingNft.connect(stranger) as ethers.Contract;
+    await expectRevert(
+      () => nftAsStranger.createConviction.staticCall(target.identityId, stake, 13),
+      'phase 1.6: tier 13 (out-of-range) must revert',
+    );
+    await expectRevert(
+      () => nftAsStranger.createConviction.staticCall(target.identityId, stake, 255),
+      'phase 1.6: tier 255 (max u8) must revert',
+    );
+
+    // (iii) sub-minimum stake revert. Read minimumStake from contract.
+    const minStake: bigint = await s.parametersStorage.minimumStake();
+    if (minStake > 0n) {
+      const tooSmall = minStake - 1n;
+      // Approve more so the revert is for the tier/min check, not allowance.
+      await fundTokenBalance(s, stranger.address, tooSmall + ethers.parseEther('100'));
+      const approveTx2 = await tokenAsStranger.approve(stakingV10Address, tooSmall, {
+        nonce: await nextNonceFor(s.provider, stranger.address),
+      });
+      expectTxSuccess(await approveTx2.wait(), 'phase 1.6: stranger approve(tooSmall)');
+      await expectRevert(
+        () => nftAsStranger.createConviction.staticCall(target.identityId, tooSmall, 0),
+        `phase 1.6: stake < minimumStake (${tooSmall} < ${minStake}) must revert`,
+      );
+    } else {
+      appendFinding(
+        'Phase 1.6 — minimumStake is 0',
+        `parametersStorage.minimumStake() returned 0; sub-minimum revert assertion not exercised. ` +
+          `On a deployment with a non-zero minimumStake this branch fires.`,
+      );
+    }
+  }, 240_000);
 
   // =========================================================================
   // Phase 2 — 100 publishes mixing lifecycle stages and publish modes.
@@ -1424,9 +1604,13 @@ describe('V10 chain — stress + scenario validation', () => {
     }
 
     if (!rsSucceeded) {
-      // Soft-fail: dump the latest status for findings rather than hard
-      // throw. Node-7 RS is the most flow-sensitive part of the suite —
-      // log everything we know and proceed so later phases still run.
+      // Default: HARD FAIL. Node-7 not RS-proving within 120s of being
+      // brought up is a real bug — the libp2p relay sync path or RS
+      // prover loop has regressed. The previous behaviour silently
+      // logged a finding and let the test pass, masking exactly the
+      // class of bug this phase is designed to catch.
+      // Opt-out via STRESS_PHASE3_SOFT=1 for one-off debug runs against
+      // a known-flaky environment, but never the default.
       const res = await fetch(
         `http://127.0.0.1:${node7.apiPort}/api/random-sampling/status`,
         { headers: { Authorization: `Bearer ${node7.authToken}` } },
@@ -1438,10 +1622,19 @@ describe('V10 chain — stress + scenario validation', () => {
           `but did not submit an RS proof within ${rsTimeout}s of bring-up. ` +
           `Last outcome kind=\`${lastOutcomeKind}\`. Latest /api/random-sampling/status: ${text}`,
       );
-      console.warn(
-        `phase 3: node 7 did not RS-prove within ${rsTimeout}s (last outcome=${lastOutcomeKind}). ` +
-          `Logged as a finding and continuing.`,
-      );
+      if (process.env.STRESS_PHASE3_SOFT === '1') {
+        console.warn(
+          `phase 3: node 7 did not RS-prove within ${rsTimeout}s (last outcome=${lastOutcomeKind}). ` +
+            `STRESS_PHASE3_SOFT=1 set — logged as a finding and continuing.`,
+        );
+      } else {
+        throw new Error(
+          `phase 3: node 7 did not RS-prove within ${rsTimeout}s (last outcome=${lastOutcomeKind}). ` +
+            `This is a hard fail by default — the prove path is the load-bearing assertion of phase 3. ` +
+            `Use STRESS_PHASE3_SOFT=1 to convert to a warning, but only after manually verifying the ` +
+            `regression is environmental rather than a real bug.`,
+        );
+      }
     } else {
       console.log(
         `phase 3 PASS: node 7 submitted RS proof tx=${rsSucceeded.txHash}, count=${rsSucceeded.submittedCount}`,
@@ -1599,6 +1792,18 @@ describe('V10 chain — stress + scenario validation', () => {
     expect(ownerBefore.toLowerCase()).toBe(sourceStaker.wallet.address.toLowerCase());
 
     const nftAsSource = s.stakingNft.connect(sourceStaker.wallet) as ethers.Contract;
+
+    // Negative: cannot safeTransferFrom to address(0) (ERC-721 invariant).
+    await expectRevert(
+      () =>
+        nftAsSource['safeTransferFrom(address,address,uint256)'].staticCall(
+          sourceStaker.wallet.address,
+          ethers.ZeroAddress,
+          tokenId,
+        ),
+      'phase 5: safeTransferFrom to address(0) must revert',
+    );
+
     const transferTx = await nftAsSource['safeTransferFrom(address,address,uint256)'](
       sourceStaker.wallet.address,
       recipient.address,
@@ -1606,7 +1811,20 @@ describe('V10 chain — stress + scenario validation', () => {
       { nonce: await nextNonceFor(s.provider, sourceStaker.wallet.address) },
     );
     const transferReceipt = await transferTx.wait();
-    expect(transferReceipt?.status).toBe(1);
+    expectTxSuccess(transferReceipt, 'phase 5: ERC-721 safeTransferFrom');
+
+    // Verify the Transfer event's `from` and `to` are exactly correct.
+    const transferIface = new ethers.Interface([
+      'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)',
+    ]);
+    const tEvt = parseEventOrThrow(
+      transferIface,
+      transferReceipt!.logs,
+      'Transfer',
+      (p) => (p.args.tokenId as bigint) === tokenId,
+    ) as { args: { from: string; to: string } };
+    expect(tEvt.args.from.toLowerCase()).toBe(sourceStaker.wallet.address.toLowerCase());
+    expect(tEvt.args.to.toLowerCase()).toBe(recipient.address.toLowerCase());
 
     const ownerAfter: string = await s.stakingNft.ownerOf(tokenId);
     expect(ownerAfter.toLowerCase()).toBe(recipient.address.toLowerCase());
@@ -1629,11 +1847,36 @@ describe('V10 chain — stress + scenario validation', () => {
       await s.convictionStakingStorage.getNodeStakeV10(newCore.identityId);
 
     const nftAsRecipient = s.stakingNft.connect(recipient) as ethers.Contract;
+
+    // Negative: redelegate to the same identityId must revert (no-op).
+    // Catches an accounting bug class where a no-op redelegate could
+    // double-credit the same node's stake total.
+    await expectRevert(
+      () => nftAsRecipient.redelegate.staticCall(tokenId, sourceStaker.identityId),
+      'phase 5: redelegate(same identityId) must revert',
+    );
+    // Negative: redelegate to identityId 0 must revert.
+    await expectRevert(
+      () => nftAsRecipient.redelegate.staticCall(tokenId, 0n),
+      'phase 5: redelegate(0) must revert',
+    );
+    // Negative: stranger cannot redelegate someone else's NFT.
+    const stranger = ethers.Wallet.createRandom().connect(s.provider);
+    await s.provider.send('hardhat_setBalance', [
+      stranger.address,
+      '0x' + ethers.parseEther('1').toString(16),
+    ]);
+    const nftAsStranger = s.stakingNft.connect(stranger) as ethers.Contract;
+    await expectRevert(
+      () => nftAsStranger.redelegate.staticCall(tokenId, newCore.identityId),
+      'phase 5: non-owner cannot redelegate',
+    );
+
     const redelegateTx = await nftAsRecipient.redelegate(tokenId, newCore.identityId, {
       nonce: await nextNonceFor(s.provider, recipient.address),
     });
     const redelegateReceipt = await redelegateTx.wait();
-    expect(redelegateReceipt?.status).toBe(1);
+    expectTxSuccess(redelegateReceipt, 'phase 5: redelegate');
 
     // tokenId must be STABLE.
     const ownerAfterRedelegate: string = await s.stakingNft.ownerOf(tokenId);
@@ -1647,6 +1890,24 @@ describe('V10 chain — stress + scenario validation', () => {
     // Old node lost stakeAmount, new node gained it.
     expect(stakeBeforeOldNode - stakeAfterOldNode).toBe(sourceStaker.stakeAmount);
     expect(stakeAfterNewNode - stakeBeforeNewNode).toBe(sourceStaker.stakeAmount);
+
+    // The position record's identityId field MUST update to the new core.
+    // Without this, `redelegate` could move the per-node stake totals but
+    // leave the position pointing at the old core, leading to a phantom
+    // accounting state. Pin the storage update.
+    const positionAfterRedelegate = await s.convictionStakingStorage.getPosition(tokenId);
+    expect(
+      positionAfterRedelegate.identityId,
+      'redelegate must update position.identityId',
+    ).toBe(newCore.identityId);
+    expect(
+      positionAfterRedelegate.raw,
+      'redelegate must NOT alter raw stake',
+    ).toBe(sourceStaker.stakeAmount);
+
+    // Update sourceStaker.identityId so later phases reflect the new
+    // routing (otherwise Phase 6 reads a stale identityId).
+    sourceStaker.identityId = newCore.identityId;
 
     console.log(
       `phase 5: redelegate OK — tokenId=${tokenId}, ${sourceStaker.identityId}→${newCore.identityId}, ` +
@@ -1731,36 +1992,59 @@ describe('V10 chain — stress + scenario validation', () => {
       nonce: await nextNonceFor(s.provider, wallet.address),
     });
     const withdrawReceipt = await withdrawTx.wait();
-    expect(withdrawReceipt?.status).toBe(1);
+    expectTxSuccess(withdrawReceipt, 'phase 6: NFT.withdraw');
 
-    // NFT must be burned.
-    let burned = false;
-    try {
-      await s.stakingNft.ownerOf(target.tokenId);
-    } catch (err) {
-      burned = (err as Error).message.includes('ERC721NonexistentToken') ||
-        (err as Error).message.includes('reverted');
-    }
-    expect(burned).toBe(true);
+    // PositionWithdrawn event MUST fire with exact amount equal to raw stake.
+    const nftIface = new ethers.Interface([
+      'event PositionWithdrawn(uint256 indexed tokenId, uint96 amount)',
+      'event RewardsClaimed(uint256 indexed tokenId, uint96 amount)',
+    ]);
+    const wEvt = parseEventOrThrow(
+      nftIface,
+      withdrawReceipt!.logs,
+      'PositionWithdrawn',
+      (p) => (p.args.tokenId as bigint) === target.tokenId,
+    ) as { args: { amount: bigint } };
+    expect(wEvt.args.amount, 'PositionWithdrawn amount must equal staked principal').toBe(target.stakeAmount);
+
+    const rEvt = parseEventIfPresent(
+      nftIface,
+      withdrawReceipt!.logs,
+      'RewardsClaimed',
+      (p) => (p.args.tokenId as bigint) === target.tokenId,
+    ) as { args: { amount: bigint } } | undefined;
+
+    // NFT must be burned (explicit ERC721NonexistentToken).
+    await expectRevert(
+      () => s.stakingNft.ownerOf(target.tokenId),
+      'phase 6: ownerOf after burn',
+    );
 
     const afterBalance: bigint = await s.token.balanceOf(wallet.address);
     const returned = afterBalance - beforeBalance;
-    expect(returned).toBeGreaterThan(0n);
-    expect(returned).toBeGreaterThanOrEqual((target.stakeAmount * 95n) / 100n);
+    // Strict reconciliation: returned == raw + claimed. The previous "≥
+    // 95% of principal" was a slop that masked a 5%-bug class. Now we
+    // pin: raw stake + (RewardsClaimed event amount, if any).
+    const expectedReturn = target.stakeAmount + (rEvt?.args.amount ?? 0n);
+    expect(
+      returned,
+      `phase 6 withdraw: returned=${returned} must equal raw=${target.stakeAmount} + claimed=${rEvt?.args.amount ?? 0n}`,
+    ).toBe(expectedReturn);
     console.log(
       `phase 6: withdraw OK — returned=${ethers.formatEther(returned)} TRAC ` +
-        `(staked ${ethers.formatEther(target.stakeAmount)})`,
+        `(staked ${ethers.formatEther(target.stakeAmount)}, claimed=${rEvt ? ethers.formatEther(rEvt.args.amount) : '0'})`,
     );
 
     // Restake — same wallet, half the original amount, tier 1 (30d, 1.5×).
     const restakeAmount = target.stakeAmount / 2n;
     const stakingV10Address = await s.stakingV10.getAddress();
     const tokenAsOwner = s.token.connect(wallet) as ethers.Contract;
-    await (
+    const restakeApprove = await (
       await tokenAsOwner.approve(stakingV10Address, restakeAmount, {
         nonce: await nextNonceFor(s.provider, wallet.address),
       })
     ).wait();
+    expectTxSuccess(restakeApprove, 'phase 6: token.approve(restake)');
     const restakeTx = await nftAsOwner.createConviction(
       target.identityId,
       restakeAmount,
@@ -1768,29 +2052,13 @@ describe('V10 chain — stress + scenario validation', () => {
       { nonce: await nextNonceFor(s.provider, wallet.address) },
     );
     const restakeReceipt = await restakeTx.wait();
-    expect(restakeReceipt?.status).toBe(1);
+    expectTxSuccess(restakeReceipt, 'phase 6: createConviction(restake)');
 
-    let newTokenId = 0n;
-    const transferIface = new ethers.Interface([
-      'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)',
-    ]);
-    for (const log of restakeReceipt?.logs ?? []) {
-      try {
-        const parsed = transferIface.parseLog(log);
-        if (
-          parsed?.name === 'Transfer' &&
-          (parsed.args.from as string) ===
-            '0x0000000000000000000000000000000000000000' &&
-          (parsed.args.to as string).toLowerCase() === wallet.address.toLowerCase()
-        ) {
-          newTokenId = parsed.args.tokenId as bigint;
-          break;
-        }
-      } catch {
-        // skip
-      }
-    }
-    expect(newTokenId).toBeGreaterThan(0n);
+    const newTokenId = expectMintedTokenId(
+      restakeReceipt!.logs,
+      wallet.address,
+      'phase 6 restake',
+    );
     expect(newTokenId).not.toBe(target.tokenId);
     console.log(
       `phase 6: restake OK — new tokenId=${newTokenId}, tier=1, amount=${ethers.formatEther(restakeAmount)} TRAC`,

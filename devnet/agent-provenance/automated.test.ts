@@ -41,9 +41,10 @@
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { spawn } from 'node:child_process';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { ethers } from 'ethers';
+import { expectTxSuccess, expectRevert, parseEventOrThrow, assertDevnetReady } from '../_lib';
 
 const REPO_ROOT = resolve(__dirname, '../..');
 const RPC = 'http://127.0.0.1:8545';
@@ -200,30 +201,26 @@ async function ensurePcaAccountForOpWallets(
     return parseInt(raw, 16);
   };
 
-  await (await tokenAsAdmin.approve(nftAddress, committed, {
-    nonce: await nextNonce(),
-  })).wait();
+  const approveReceipt = await (
+    await tokenAsAdmin.approve(nftAddress, committed, { nonce: await nextNonce() })
+  ).wait();
+  expectTxSuccess(approveReceipt, 'token.approve(nftAdmin → NFT)');
   const createTx = await nftAsAdmin.createAccount(committed, {
     nonce: await nextNonce(),
   });
   const createReceipt = await createTx.wait();
+  expectTxSuccess(createReceipt, 'NFT.createAccount');
 
-  let accountId = 0n;
   const iface = new ethers.Interface([
     'event AccountCreated(uint256 indexed accountId, address indexed owner, uint96 committedTRAC, uint16 discountBps, uint40 createdAtEpoch, uint40 expiresAtEpoch)',
   ]);
-  for (const log of createReceipt?.logs ?? []) {
-    try {
-      const parsed = iface.parseLog(log);
-      if (parsed?.name === 'AccountCreated') {
-        accountId = parsed.args.accountId as bigint;
-        break;
-      }
-    } catch {
-      // Different event from another contract — skip.
-    }
-  }
-  if (accountId === 0n) throw new Error('AccountCreated event not found');
+  const evt = parseEventOrThrow(
+    iface,
+    createReceipt!.logs,
+    'AccountCreated',
+  ) as { args: { accountId: bigint; committedTRAC: bigint } };
+  const accountId = evt.args.accountId;
+  expect(evt.args.committedTRAC, 'AccountCreated.committedTRAC must equal committed amount').toBe(committed);
   // eslint-disable-next-line no-console
   console.log(`pca: created account ${accountId} (admin=${nftAdmin.address})`);
 
@@ -232,9 +229,7 @@ async function ensurePcaAccountForOpWallets(
       nonce: await nextNonce(),
     });
     const receipt = await tx.wait();
-    if (receipt?.status !== 1) {
-      throw new Error(`registerAgent for ${w.address} failed`);
-    }
+    expectTxSuccess(receipt, `registerAgent(${w.address})`);
   }
   return accountId;
 }
@@ -466,15 +461,16 @@ async function detectDevnet(): Promise<DevnetState | null> {
 // ---- per-test fixture writes -----------------------------------------------
 
 function makeNquadsFile(name: string): string {
-  const path = join(__dirname, `turns/${name}.nq`);
-  if (!existsSync(join(__dirname, 'turns'))) {
-    require('node:fs').mkdirSync(join(__dirname, 'turns'), { recursive: true });
-  }
+  // Imports are now top-level — the prior `require('node:fs')` calls
+  // here were a CommonJS leftover that broke type-aware tooling.
+  const dir = join(__dirname, 'turns');
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  const path = join(dir, `${name}.nq`);
   const ts = Date.now();
   const triples =
     `<urn:test:${name}:${ts}> <https://schema.org/name> "${name}-${ts}" .\n` +
     `<urn:test:${name}:${ts}> <https://schema.org/description> "automated devnet test" .\n`;
-  require('node:fs').writeFileSync(path, triples);
+  writeFileSync(path, triples);
   return path;
 }
 
@@ -484,10 +480,15 @@ const CONTEXT_GRAPH = 'devnet-test';
 
 describe('Agent provenance — automated 5-node devnet validation', () => {
   beforeAll(async () => {
+    await assertDevnetReady({
+      expectedNodes: 5,
+      requireWallets: true,
+      startCommandHint: './scripts/devnet.sh clean && ./scripts/devnet.sh start 5',
+    });
     state.v = await detectDevnet();
     if (!state.v) {
       throw new Error(
-        'Devnet not running. Run `./scripts/devnet.sh clean && ./scripts/devnet.sh start 5` first.',
+        'detectDevnet() failed after preflight passed — check daemon stderr.',
       );
     }
 
@@ -574,18 +575,27 @@ describe('Agent provenance — automated 5-node devnet validation', () => {
     const edge = s.nodes[5]!;
     if (core3.identityId === 0n) throw new Error('core3 has no identity');
 
-    // Skip if mode (a) ran before this and registered the edge op wallets
-    // on a PCA — re-registration would put us in mode (a) territory rather
-    // than testing direct-spend. Detect by probing one op wallet.
+    // Mode (c) is the direct-spend (no PCA) path. If a previous mode
+    // (a) run registered the edge op wallets on a PCA, the publish
+    // routes through that PCA and the "full-fee from edge wallet"
+    // assertion can't fire. The previous test silently skipped that
+    // assertion in the PCA-registered branch, leaving mode (c) without
+    // a load-bearing positive assertion. We replace the silent skip
+    // with explicit branching:
+    //   - PCA NOT registered  → run the original direct-spend assertion
+    //                            (TRAC decrements from edge pool by > 0)
+    //   - PCA IS registered   → still run the publish, but assert PCA
+    //                            spent ROSE (proving the PCA-routing
+    //                            still works). NEVER skip silently.
     const firstOpAccount: bigint = await s.nft.agentToAccountId(edge.opWallets[0]!.address);
-    if (firstOpAccount !== 0n) {
-      // eslint-disable-next-line no-console
-      console.warn('mode (c): edge op wallets are PCA-registered; full-fee assertion will be skipped');
-    }
+    const pcaRegistered = firstOpAccount !== 0n;
 
     const epoch: bigint = await s.chronos.getCurrentEpoch();
     const beforeBalance = await sumOpBalances(s.token, edge);
     const beforeEps: bigint = await s.eps.getNodeEpochProducedKnowledgeValue(core3.identityId, epoch);
+    const beforePcaSpent = pcaRegistered
+      ? ((await s.nft.epochSpent(firstOpAccount, epoch)) as bigint)
+      : 0n;
 
     const file = makeNquadsFile('mode-c');
     const result = await publishViaCli(edge, CONTEXT_GRAPH, file, {
@@ -595,10 +605,22 @@ describe('Agent provenance — automated 5-node devnet validation', () => {
     expect(result.status.toLowerCase()).toBe('confirmed');
     expect(result.kcId).toBeDefined();
 
-    // Edge op-wallet pool TRAC MUST decrement when no PCA covers it.
-    if (firstOpAccount === 0n) {
+    if (pcaRegistered) {
+      // PCA path: pool TRAC may stay flat (PCA covered the cost) but
+      // PCA epochSpent MUST grow. This is the assertion the previous
+      // test was missing.
+      const afterPcaSpent: bigint = await s.nft.epochSpent(firstOpAccount, epoch);
+      expect(
+        afterPcaSpent - beforePcaSpent,
+        'mode (c) on PCA-registered edge: PCA epochSpent must increase',
+      ).toBeGreaterThan(0n);
+    } else {
+      // Direct-spend: pool TRAC must drop strictly.
       const afterBalance = await sumOpBalances(s.token, edge);
-      expect(beforeBalance - afterBalance).toBeGreaterThan(0n);
+      expect(
+        beforeBalance - afterBalance,
+        'mode (c) direct-spend: edge op-wallet pool TRAC must decrement',
+      ).toBeGreaterThan(0n);
     }
 
     // core3 Eps incremented.
@@ -816,5 +838,145 @@ describe('Agent provenance — automated 5-node devnet validation', () => {
     // Attribution still flows to core2 (the routing node).
     const afterEps: bigint = await s.eps.getNodeEpochProducedKnowledgeValue(core2.identityId, epoch);
     expect(afterEps).toBeGreaterThan(beforeEps);
+  }, 180_000);
+
+  // =========================================================================
+  // Negative — Agent token isolation.
+  //
+  // A custodial agent token registered on core2 MUST NOT have access to
+  // privileged endpoints that require an admin auth token (e.g. the
+  // node-level identity-ensure flow, daemon-config endpoints). Pins the
+  // access-control rule on `/api/agent/register` and the agent-bearer
+  // token path: agents can publish on their own context, but cannot
+  // hijack node-level operations.
+  // =========================================================================
+  it('negative — agent bearer token cannot access node-admin endpoints', async () => {
+    const s = state.v!;
+    const core2 = s.nodes[2]!;
+    if (core2.identityId === 0n) throw new Error('core2 has no identity');
+
+    // Register a fresh agent so we have a token that is NOT the daemon
+    // admin token.
+    const reg = await fetch(`http://127.0.0.1:${core2.apiPort}/api/agent/register`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(core2.authToken ? { Authorization: `Bearer ${core2.authToken}` } : {}),
+      },
+      body: JSON.stringify({ name: `iso-${Date.now()}`, framework: 'isolation-test' }),
+    });
+    expect(reg.ok, `agent register failed: ${reg.status}`).toBe(true);
+    const agent = (await reg.json()) as { authToken: string };
+    expect(agent.authToken).toBeTruthy();
+
+    // Surface 1: identity-ensure is admin-only.
+    const ensureRes = await fetch(`http://127.0.0.1:${core2.apiPort}/api/identity/ensure`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${agent.authToken}`,
+      },
+    });
+    expect(
+      ensureRes.status,
+      `agent token must NOT be accepted by /api/identity/ensure (got ${ensureRes.status}). ` +
+        `Privilege escalation regression — agents should not be able to drive node-level identity registration.`,
+    ).toBeGreaterThanOrEqual(400);
+
+    // Surface 2: registering a *new* agent with the agent-token must
+    // also be rejected — agent tokens cannot bootstrap further agents.
+    const childReg = await fetch(`http://127.0.0.1:${core2.apiPort}/api/agent/register`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${agent.authToken}`,
+      },
+      body: JSON.stringify({ name: `iso-child-${Date.now()}`, framework: 'isolation-test' }),
+    });
+    expect(
+      childReg.status,
+      `agent token must NOT be accepted for /api/agent/register (got ${childReg.status}). ` +
+        `Allowing this would let any agent token clone itself indefinitely (DoS / resource exhaustion).`,
+    ).toBeGreaterThanOrEqual(400);
+  }, 60_000);
+
+  // =========================================================================
+  // Idempotency — duplicate publishes by the same agent.
+  //
+  // Issuing two publishes back-to-back from the same custodial agent
+  // with DIFFERENT root subjects must succeed independently — the
+  // daemon's nonce manager must not collide. Pins the publisher's
+  // sequential-publish behaviour (a regression here was the "publisher
+  // nonce race" finding from v10-stress).
+  // =========================================================================
+  it('idempotency — two consecutive publishes from same agent both succeed and produce distinct kcIds', async () => {
+    const s = state.v!;
+    const core2 = s.nodes[2]!;
+    if (core2.identityId === 0n) throw new Error('core2 has no identity');
+
+    const reg = await fetch(`http://127.0.0.1:${core2.apiPort}/api/agent/register`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(core2.authToken ? { Authorization: `Bearer ${core2.authToken}` } : {}),
+      },
+      body: JSON.stringify({ name: `seq-${Date.now()}`, framework: 'sequential-test' }),
+    });
+    expect(reg.ok).toBe(true);
+    const agent = (await reg.json()) as { authToken: string; agentAddress: string };
+
+    const publishOnce = async (subjSuffix: string): Promise<bigint> => {
+      const ts = Date.now();
+      const subj = `urn:test:seq:${subjSuffix}:${ts}`;
+      const writeRes = await fetch(`http://127.0.0.1:${core2.apiPort}/api/shared-memory/write`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${agent.authToken}`,
+        },
+        body: JSON.stringify({
+          contextGraphId: CONTEXT_GRAPH,
+          quads: [
+            {
+              subject: subj,
+              predicate: 'https://schema.org/name',
+              object: `"seq-${subjSuffix}-${ts}"`,
+              graph: `did:dkg:context-graph:${CONTEXT_GRAPH}`,
+            },
+          ],
+        }),
+      });
+      expect(writeRes.ok, `write ${subjSuffix}: ${writeRes.status}`).toBe(true);
+
+      const pubRes = await fetch(`http://127.0.0.1:${core2.apiPort}/api/shared-memory/publish`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${agent.authToken}`,
+        },
+        body: JSON.stringify({
+          contextGraphId: CONTEXT_GRAPH,
+          selection: { rootEntities: [subj] },
+          clearAfter: true,
+        }),
+      });
+      expect(pubRes.ok, `publish ${subjSuffix}: ${pubRes.status}`).toBe(true);
+      const j = (await pubRes.json()) as { kcId: string; status: string };
+      expect(j.status, `publish ${subjSuffix} status`).toBe('confirmed');
+      return BigInt(j.kcId);
+    };
+
+    const kcA = await publishOnce('A');
+    const kcB = await publishOnce('B');
+
+    expect(kcA, 'first publish must produce a non-zero kcId').toBeGreaterThan(0n);
+    expect(kcB, 'second publish must produce a non-zero kcId').toBeGreaterThan(0n);
+    expect(kcA, 'sequential publishes must produce distinct kcIds').not.toBe(kcB);
+
+    // Both KCs must list the same author (the agent's secp256k1 key).
+    const authorA: string = await s.kcs.getLatestMerkleRootAuthor(kcA);
+    const authorB: string = await s.kcs.getLatestMerkleRootAuthor(kcB);
+    expect(authorA.toLowerCase()).toBe(agent.agentAddress.toLowerCase());
+    expect(authorB.toLowerCase()).toBe(agent.agentAddress.toLowerCase());
   }, 180_000);
 });
