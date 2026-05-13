@@ -148,14 +148,73 @@ export function expectMintedTokenId(
 }
 
 /**
- * Asserts a contract call reverts. Wraps ethers' rejection in a friendlier
- * error that surfaces both the expected and the actual error string —
- * the default behaviour swallows the inner revert reason.
+ * Asserts a contract call reverts at the EVM layer. Wraps ethers'
+ * rejection in a friendlier error that surfaces the expected vs. actual
+ * error code — the default behaviour swallows everything.
  *
- * Pass `withReason` to additionally pin a substring of the revert message
- * (e.g. `'NotOwner'`, `'LockNotExpired'`).
+ * **Why we check `error.code === 'CALL_EXCEPTION'`**: the previous
+ * version of this helper accepted ANY thrown error as proof of revert.
+ * That meant a refactor that broke a function signature, an ABI
+ * mismatch with the deployed contract, an RPC outage, or a network
+ * timeout would all silently mark every `expectRevert(...)` site as
+ * passing — masking the protocol-level bug class the negative test
+ * was meant to pin. ethers v6 sets `code: 'CALL_EXCEPTION'` on every
+ * EVM revert (revert/panic/invalid-opcode/OOG); anything else is a
+ * tooling/network failure and should fail the test loudly so the
+ * operator can fix the harness, not the contract.
+ *
+ * Pass `withReason` to additionally pin a substring of the revert
+ * message (e.g. `'NotOwner'`, `'LockNotExpired'`). Note that custom-
+ * error names surface differently across ethers versions — only use
+ * `withReason` when the substring is stable in the project's pinned
+ * ethers version.
+ *
+ * Use {@link expectThrow} (below) if you genuinely want to accept any
+ * thrown error as success — the bar for that is high; it should only
+ * apply to non-EVM error paths (e.g. asserting a CLI/HTTP harness
+ * rejects bad input).
  */
 export async function expectRevert(
+  thunk: () => Promise<unknown>,
+  context: string,
+  withReason?: string,
+): Promise<void> {
+  let threw: (Error & { code?: string; shortMessage?: string }) | null = null;
+  try {
+    await thunk();
+  } catch (err) {
+    threw = err as Error & { code?: string };
+  }
+  expect(threw, `${context}: expected to revert but the call resolved`).toBeTruthy();
+  // CRITICAL: require a real EVM revert. Anything else is a harness
+  // failure masquerading as a revert and would mask refactor bugs.
+  expect(
+    threw!.code,
+    `${context}: expected EVM CALL_EXCEPTION, got code=${String(threw!.code)}. ` +
+      `This is almost certainly a harness/ABI/network problem rather than a protocol revert ` +
+      `(e.g. function signature mismatch, RPC outage, malformed argument). ` +
+      `Full error: ${String(threw!.message).slice(0, 400)}`,
+  ).toBe('CALL_EXCEPTION');
+  if (withReason) {
+    expect(
+      threw!.message,
+      `${context}: revert message does not contain "${withReason}". Got: ${threw!.message.slice(0, 400)}`,
+    ).toContain(withReason);
+  }
+}
+
+/**
+ * Lenient counterpart to {@link expectRevert}: accepts ANY thrown
+ * error as success. Use only for non-EVM error paths where checking
+ * the EVM code would be a category error — e.g. an HTTP-API harness
+ * that's expected to surface a 4xx, or a CLI subprocess that should
+ * exit non-zero.
+ *
+ * If you find yourself reaching for this on an `await contract.fn(...)`
+ * call, you almost certainly want `expectRevert` instead — the
+ * stricter helper catches a class of bugs the lenient one cannot.
+ */
+export async function expectThrow(
   thunk: () => Promise<unknown>,
   context: string,
   withReason?: string,
@@ -166,11 +225,11 @@ export async function expectRevert(
   } catch (err) {
     threw = err as Error;
   }
-  expect(threw, `${context}: expected to revert but the call resolved`).toBeTruthy();
+  expect(threw, `${context}: expected to throw but the call resolved`).toBeTruthy();
   if (withReason) {
     expect(
       threw!.message,
-      `${context}: revert message does not contain "${withReason}". Got: ${threw!.message.slice(0, 400)}`,
+      `${context}: error message does not contain "${withReason}". Got: ${threw!.message.slice(0, 400)}`,
     ).toContain(withReason);
   }
 }

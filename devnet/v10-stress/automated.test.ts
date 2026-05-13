@@ -2294,11 +2294,59 @@ describe('V10 chain — stress + scenario validation', () => {
     ).toBe(expiry);
 
     // Strict: TRAC moved back, NFT burned, position cleared.
+    // The previous "≥ stakeAmount" tolerance was loose enough to mask
+    // a contract bug that *inflated* the returned balance. For a fresh
+    // staker created in Phase 7, no RS proofs were submitted between
+    // createConviction and withdraw — `_claim` iterates from
+    // lastClaimedEpoch+1 to currentEpoch-1, but
+    // `getNodeEpochProducedKnowledgeValue` is 0 for those epochs,
+    // so the share is exactly 0. Therefore: delta == stakeAmount
+    // (and any RewardsClaimed event MUST report amount=0).
     const tracAfter: bigint = await s.token.balanceOf(wallet.address);
+    // Event signatures cross-checked against
+    // packages/evm-module/abi/StakingV10.json — `RewardsClaimed`/
+    // `PositionWithdrawn` both have signature `(uint256 indexed
+    // tokenId, uint96 amount)`. NB: no `recipient`/`claimer` fields
+    // (was a previous bug here that silently parsed 0 events because
+    // the wrong signature was passed and decoding failed mute).
+    const nftIface = new ethers.Interface([
+      'event PositionWithdrawn(uint256 indexed tokenId, uint96 amount)',
+      'event RewardsClaimed(uint256 indexed tokenId, uint96 amount)',
+    ]);
+    // Sanity: the PositionWithdrawn event MUST fire exactly once with
+    // amount == stakeAmount. Verifying this BEFORE the rewards check
+    // pins the happy-path event independently — if amount != stake,
+    // the next phase's invariant sweep would catch the bookkeeping
+    // bug, but pinning the event here makes the failure point obvious.
+    const withdrawEvt = parseEventOrThrow(
+      nftIface,
+      withdrawReceipt!.logs,
+      'PositionWithdrawn',
+      (p) => (p.args.tokenId as bigint) === tokenId,
+    ) as { args: { tokenId: bigint; amount: bigint } };
+    expect(
+      withdrawEvt.args.amount,
+      `phase 7: PositionWithdrawn.amount must equal raw stake (${stakeAmount})`,
+    ).toBe(stakeAmount);
+    const rewardsEvt = parseEventIfPresent(
+      nftIface,
+      withdrawReceipt!.logs,
+      'RewardsClaimed',
+      (p) => (p.args.tokenId as bigint) === tokenId,
+    ) as { args: { amount: bigint } } | undefined;
+    const claimedAmount = rewardsEvt?.args.amount ?? 0n;
+    expect(
+      claimedAmount,
+      `phase 7: a freshly-created staker with no submitted RS proofs in the warped ` +
+        `lock window must accrue zero rewards; got RewardsClaimed.amount=${claimedAmount}. ` +
+        `If this is non-zero, either the claim path is over-counting or the test setup ` +
+        `inadvertently submitted RS proofs during the warp.`,
+    ).toBe(0n);
     expect(
       tracAfter - tracBefore,
-      'phase 7: TRAC delta must be at least the raw stake (claimed rewards may add)',
-    ).toBeGreaterThanOrEqual(stakeAmount);
+      `phase 7: TRAC delta must equal raw stake exactly (no rewards accrued for fresh staker). ` +
+        `expected=${stakeAmount}, got=${tracAfter - tracBefore}, claimed=${claimedAmount}.`,
+    ).toBe(stakeAmount);
     await expectRevert(
       () => s.stakingNft.ownerOf(tokenId),
       'phase 7: NFT must be burned after withdraw',

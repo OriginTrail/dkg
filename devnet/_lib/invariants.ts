@@ -15,7 +15,9 @@
  *      stakes across the node's enumerated NFT positions must equal
  *      `getNodeStakeV10(identity)`. This catches mint/burn/transfer
  *      bugs where the per-node aggregate diverges from the bag of
- *      positions stored under that node.
+ *      positions stored under that node. Also checks enumeration
+ *      coherence: every enumerated tokenId must have raw > 0 (no
+ *      stale entries from missed `_popNodeToken` calls).
  *
  *      `assertGlobalAggregation` — sum of per-node V10 stakes equals
  *      `getTotalStakeV10()`. Catches accounting drift where one node's
@@ -37,6 +39,13 @@
  *   4. Position validity — every enumerated position must have
  *      `lockTier ∈ {0, 1, 3, 6, 12}` (the registered tier set in
  *      bootstrap). Catches storage corruption / tier-table tampering.
+ *      Also: any non-zero `raw` MUST come with `multiplier18 > 0`
+ *      (no silent reward starvation) and `position.identityId == id`
+ *      (no enumeration cross-contamination).
+ *
+ * All identityId-array helpers reject empty input — a vacuous-pass
+ * call site (forgetting to populate the bootstrap's identity set) is
+ * almost always a test bug, not a "no nodes to check" scenario.
  *
  * These invariants are CHEAP — each is O(positions on a node) of
  * view-only RPC reads. They should be called at strategic phase
@@ -165,6 +174,16 @@ export async function assertGlobalAggregation(
   identityIds: bigint[],
   mode: 'exhaustive' | 'partial',
 ): Promise<{ summed: bigint; total: bigint }> {
+  // Defensive: an empty list silently passes the partial-mode <= check
+  // and short-circuits the exhaustive check to "0 == total" which only
+  // succeeds on a totally-empty chain. Either is almost certainly a
+  // call-site bug (forgot to populate identityIds), not a real test.
+  expect(
+    identityIds.length,
+    `${ctx.label}: assertGlobalAggregation called with empty identityIds — ` +
+      `caller must pass the bootstrap's identity set, not an empty array. ` +
+      `(An empty list passes the partial-mode check vacuously and would mask drift.)`,
+  ).toBeGreaterThan(0);
   const perNode: bigint[] = await Promise.all(
     identityIds.map((id) => ctx.css.getNodeStakeV10(id).then(BigInt)),
   );
@@ -220,6 +239,11 @@ export async function assertMaxStakeCap(
   ctx: InvariantContext,
   identityIds: bigint[],
 ): Promise<void> {
+  expect(
+    identityIds.length,
+    `${ctx.label}: assertMaxStakeCap called with empty identityIds — ` +
+      `caller must pass the bootstrap's identity set, not an empty array.`,
+  ).toBeGreaterThan(0);
   const cap: bigint = BigInt(await ctx.params.maximumStake());
   expect(cap, `${ctx.label}: maximumStake() returned 0`).toBeGreaterThan(0n);
   for (const id of identityIds) {
@@ -248,11 +272,20 @@ export async function assertPositionValidity(
   identityIds: bigint[],
   validTiers?: Set<bigint>,
 ): Promise<void> {
+  expect(
+    identityIds.length,
+    `${ctx.label}: assertPositionValidity called with empty identityIds — ` +
+      `caller must pass the bootstrap's identity set, not an empty array.`,
+  ).toBeGreaterThan(0);
   const tiers = validTiers ?? VALID_LOCK_TIERS;
   for (const id of identityIds) {
-    const tokens: bigint[] = (await ctx.css.getNodeTokens(id)).map((t: bigint) =>
-      BigInt(t),
-    );
+    // ethers v6 returns a Result that's array-like but not Array — copy
+    // into a plain array so .map / iteration is stable across versions.
+    // (Same fix that's in assertPerNodeAggregation; previously this
+    //  call site relied on the Result's `.map`, which is not part of
+    //  ethers' stable contract.)
+    const rawTokens = await ctx.css.getNodeTokens(id);
+    const tokens: bigint[] = Array.from(rawTokens, (t) => BigInt(t as bigint));
     for (const tokenId of tokens) {
       const p = await readPosition(ctx.css, tokenId);
       expect(

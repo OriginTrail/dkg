@@ -47,12 +47,35 @@ export async function fundNative(
 }
 
 /**
- * Fund `recipient` with `amount` of an OZ-layout ERC-20 token (TRAC) by
- * directly writing the `_balances` slot.
+ * Set `recipient`'s ERC-20 balance to `amount` (NOT add — overwrites)
+ * by directly writing the OZ-layout `_balances` slot.
  *
- * The OZ ERC-20 layout puts `_balances` in storage slot 1. The mapping
- * key is the canonically-encoded `(address recipient, uint256 slot)` so
- * the value lives at `keccak256(abi.encode(recipient, 1))`.
+ * **Caveats every caller MUST be aware of**:
+ *
+ *   1. **Assignment, not addition.** This OVERWRITES the recipient's
+ *      current balance. Calling `fundTrac(addr, 1000)` twice leaves
+ *      `addr` with 1000, not 2000. For incremental top-ups, read the
+ *      current balance first.
+ *
+ *   2. **`_totalSupply` is NOT updated.** The token's `totalSupply()`
+ *      view will diverge from `sum(_balances)` after this cheat.
+ *      Tests that read `totalSupply()` (or compare it to
+ *      `sum(balances)` as a sanity check) will see inconsistent
+ *      values; that's a known limitation of cheat-code funding.
+ *
+ *   3. **Recipient must NOT be the deployer or another address whose
+ *      balance Phase-0 setup relies on.** Calling this on the
+ *      deployer would zero out their float; tests that subsequently
+ *      transfer from the deployer would revert.
+ *
+ *   4. **OZ storage layout assumption.** The TRAC token uses the
+ *      vanilla OZ ERC-20 layout where `_balances` is the second
+ *      mapping slot (index 1, since `_owner` from `Ownable` takes
+ *      slot 0). If the contract is recompiled with extra inherited
+ *      state, the layout shifts and this helper will silently fund
+ *      the wrong slot — the read-after-write check below catches
+ *      that and throws so the harness fails fast instead of letting
+ *      downstream tests assert against stale balances.
  *
  * @param provider - Hardhat-compatible JSON-RPC provider (must accept
  *                   the `hardhat_setStorageAt` cheat).
@@ -61,11 +84,7 @@ export async function fundNative(
  * @param amount - The new balance (in wei units of the token).
  *
  * @throws if the read-back balance does not equal `amount` after the
- *         cheat is applied, which is the only signal we have that the
- *         token's storage layout deviated from OZ defaults (a relayout
- *         would invalidate this helper). Surfacing that loudly is much
- *         better than letting downstream tests silently observe stale
- *         balances and assert against them.
+ *         cheat is applied — see caveat (4).
  */
 export async function fundTrac(
   provider: ethers.JsonRpcProvider,
