@@ -1,5 +1,6 @@
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
+  LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
   PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE, PROTOCOL_STORAGE_ACK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
   PROTOCOL_SWM_SENDER_KEY,
   contextGraphPublishTopic, contextGraphWorkspaceTopic, contextGraphAppTopic, contextGraphUpdateTopic, contextGraphFinalizationTopic,
@@ -898,6 +899,9 @@ export class DKGAgent {
   gossip!: GossipSubManager;
   router!: ProtocolRouter;
   messenger!: Messenger;
+  /** Single in-process peer-address resolver (RFC 07 §3). Used by Messenger
+   * today; ProtocolRouter / /api/connect migrate in PR-3 / PR-4. */
+  peerResolver!: PeerResolver;
   readonly eventBus: TypedEventBus;
   private readonly chain: ChainAdapter;
   /** Shared memory-owned root entities per context graph: entity → creatorPeerId. Used by publisher and shared memory handler. */
@@ -1311,10 +1315,73 @@ export class DKGAgent {
     }
 
     this.router = new ProtocolRouter(this.node);
+    const network = new LibP2PNetwork(this.node);
+    const peerResolver = new PeerResolver({
+      network,
+      registry: new StubNetworkStateRegistry(),
+      agentDirectory: {
+        // Wraps DiscoveryClient.findAgentByPeerId in the resolver's
+        // minimal AgentDirectoryLookup shape so packages/core doesn't
+        // need to know about the agents-CG SPARQL surface. Replaced
+        // when RFC 04 Phase 2 lands — at that point, the registry
+        // step takes precedence and this fallback is rarely hit.
+        //
+        // Codex review feedback on PR #496 round 5: the previous
+        // revision dropped `opts.signal` entirely, leaving the
+        // resolver's documented cancellation guarantee unhonored at
+        // the only production AgentDirectoryLookup. DiscoveryClient
+        // itself doesn't (yet) accept an AbortSignal, so we honor
+        // the contract at the adapter boundary instead: if the
+        // signal aborts the adapter resolves to `null` immediately,
+        // unblocking the resolver and the outer caller. The
+        // underlying SPARQL fetch then completes in the background
+        // and its result is discarded — a small leak in the abort
+        // path, acceptable given:
+        //   (a) it's bounded by the discovery client's own internal
+        //       timeout
+        //   (b) RFC 04 Phase 2 replaces this fallback path entirely
+        //   (c) the alternative (refactoring DiscoveryClient end-to-
+        //       end signal threading) is out of scope for this PR
+        // The follow-up to plumb signals into DiscoveryClient is
+        // tracked separately.
+        findRelayForPeer: async (peerId, opts) => {
+          if (opts?.signal?.aborted) return null;
+          const lookup = this.discovery.findAgentByPeerId(peerId)
+            .then((agent) => agent?.relayAddress ?? null);
+          const signal = opts?.signal;
+          if (!signal) return lookup;
+          return Promise.race<string | null>([
+            lookup,
+            new Promise<null>((resolve) => {
+              // Codex PR #499 round 5 (dkg-agent.ts:1354): the early
+              // `signal.aborted` check above and `addEventListener`
+              // are not atomic — the signal could fire in between, and
+              // since `abort` is a one-shot event, our late listener
+              // would never see it and this Promise would hang for the
+              // full lookup duration. Re-check INSIDE the constructor
+              // before subscribing so the abort branch resolves
+              // immediately if we lost that race.
+              if (signal.aborted) {
+                resolve(null);
+                return;
+              }
+              signal.addEventListener(
+                'abort',
+                () => resolve(null),
+                { once: true },
+              );
+            }),
+          ]);
+        },
+      },
+      // Bootstrap is a libp2p-startup concern (`bootstrap({ list })` in
+      // peerDiscovery, see node.ts) — not a per-peer resolution concern.
+      // Removed here per Codex review feedback on PR #496.
+    });
+    this.peerResolver = peerResolver;
     this.messenger = new Messenger({
-      libp2p: this.node.libp2p as any,
+      resolver: peerResolver,
       router: this.router,
-      discovery: this.discovery,
     });
     this.gossip = new GossipSubManager(this.node, this.eventBus);
     await this.loadSwmSenderKeyState();

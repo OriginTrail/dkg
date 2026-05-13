@@ -14,6 +14,13 @@ export {
   type DialOpts,
   type ProtocolHandler,
   LibP2PNetwork,
+  type NetworkStateRegistry,
+  StubNetworkStateRegistry,
+  type AgentDirectoryLookup,
+  type PeerResolverDeps,
+  type PeerResolverLogger,
+  type ResolveOpts,
+  PeerResolver,
 } from './network/index.js';
 export { ProtocolRouter, DEFAULT_MAX_READ_BYTES } from './protocol-router.js';
 export { GossipSubManager, type GossipMessageHandler } from './gossipsub-manager.js';

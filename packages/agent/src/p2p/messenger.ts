@@ -1,22 +1,8 @@
-import { multiaddr } from '@multiformats/multiaddr';
-import type { ProtocolRouter } from '@origintrail-official/dkg-core';
-import type { DiscoveryClient } from '../discovery.js';
-
-/**
- * Minimal libp2p surface the Messenger needs. Defined locally to keep
- * test mocking trivial — production code passes `node.libp2p`.
- */
-interface Libp2pLike {
-  getConnections(peerId?: unknown): Array<unknown>;
-  peerStore: {
-    merge(peer: unknown, update: { multiaddrs: unknown[] }): Promise<void>;
-  };
-}
+import type { ProtocolRouter, PeerResolver } from '@origintrail-official/dkg-core';
 
 export interface MessengerDeps {
-  libp2p: Libp2pLike;
+  resolver: PeerResolver;
   router: ProtocolRouter;
-  discovery: DiscoveryClient;
 }
 
 export interface SendOpts {
@@ -27,32 +13,33 @@ export interface SendOpts {
  * Single outbound P2P sending primitive.
  *
  * Two responsibilities:
- *  1. Best-effort prime a /p2p-circuit relay route into the libp2p peerStore
- *     before dialling, so NAT'd peers reachable only via a circuit relay can
- *     be dialled by `dialProtocol` (which otherwise falls back to direct dial
- *     and fails for NAT'd peers without an active connection).
+ *  1. Best-effort consult `PeerResolver` to populate the libp2p
+ *     peerStore with whatever multiaddrs the resolution order finds
+ *     (live conn, DHT, RFC 04 registry, agents-CG, bootstrap seeds).
+ *     The patch is the resolver's side effect; this code just
+ *     triggers the lookup before dialing.
  *  2. Forward the bytes via `ProtocolRouter.send` (which itself owns
- *     transport-level retry on recoverable errors — see protocol-router.ts).
+ *     transport-level retry on recoverable errors — see
+ *     protocol-router.ts).
  *
- * Centralising this in one place removes a class of "this code path forgot to
- * call ensureCircuitRelayAddress" defects (the latent bug behind PR #448's
- * Laptop B invite failure).
+ * Centralising this in one place removes a class of "this code path
+ * forgot to ensure an address was known" defects (the latent bug
+ * behind PR #448's Laptop B invite failure).
  *
- * Discovery is currently SPARQL-first against the agents context graph; this
- * is preserved verbatim from the previous DKGAgent.ensureCircuitRelayAddress
- * implementation. See dkgv10-spec/production_mainnet/04_NETWORK_STATE_REGISTRY.md
- * for the planned chain-driven replacement, and 07_IN_PROCESS_PEER_RESOLVER.md
- * for the in-process resolver that all dial paths will eventually consume.
+ * After RFC 07 PR-2: resolution is delegated to `PeerResolver` rather
+ * than inlined. PR-3 of the RFC 07 rollout migrates `ProtocolRouter`
+ * itself, after which the resolver is consulted on every dial path
+ * (chat / sync / skill invoke / `/api/connect`) — not just chat.
+ *
+ * See `dkgv10-spec/production_mainnet/07_IN_PROCESS_PEER_RESOLVER.md`.
  */
 export class Messenger {
-  private readonly libp2p: Libp2pLike;
+  private readonly resolver: PeerResolver;
   private readonly router: ProtocolRouter;
-  private readonly discovery: DiscoveryClient;
 
   constructor(deps: MessengerDeps) {
-    this.libp2p = deps.libp2p;
+    this.resolver = deps.resolver;
     this.router = deps.router;
-    this.discovery = deps.discovery;
   }
 
   async sendToPeer(
@@ -61,41 +48,35 @@ export class Messenger {
     data: Uint8Array,
     opts: SendOpts = {},
   ): Promise<Uint8Array> {
-    await this.ensureCircuitRelayAddress(peerId);
+    // Best-effort: fire the resolver to populate peerStore. Failures
+    // are swallowed deliberately — the router's send() will surface
+    // a real transport error from dialProtocol if the peer is
+    // unreachable, and the resolver itself never throws on resolution
+    // failure (it returns an empty array).
+    //
+    // Codex review feedback on PR #496:
+    //   round 1 — "pass timeoutMs through so the resolver doesn't run
+    //              unbounded"
+    //   round 3 — "but then timeoutMs is double-spent: once by the
+    //              resolver, once by router.send()"
+    // Both correct. The RIGHT fix is to share a single deadline /
+    // AbortSignal across resolver + router.send, but ProtocolRouter
+    // doesn't accept an external signal today (it builds its own
+    // internally from `timeoutMs`). Plumbing a shared signal through
+    // the router is its own refactor.
+    //
+    // For PR #496 in isolation: this entire code path is transient.
+    // PR-3 of the RFC 07 stack moves resolution into ProtocolRouter
+    // (where the budget can be shared without leaking through public
+    // surfaces) and reduces Messenger to a pass-through. Reverting
+    // the round-1 timeoutMs passthrough avoids the double-spend
+    // regression Codex flagged in round 3 without needing a router
+    // refactor that PR-3 supersedes anyway. The pre-PR behaviour
+    // (resolver runs with default budget, router runs with caller
+    // budget) is what Messenger users (chat / sync) had before this
+    // PR; both use generous timeouts (≥30s) so the resolver's 5s
+    // default doesn't push them over.
+    await this.resolver.resolve(peerId).catch(() => undefined);
     return this.router.send(peerId, protocolId, data, opts.timeoutMs);
-  }
-
-  /**
-   * Best-effort: if the peer is not currently connected and the agent
-   * registry advertises a relay for them, add a /p2p-circuit multiaddr
-   * to the peer store so dialProtocol can route through the relay.
-   *
-   * Failures are swallowed deliberately — the caller's send() will surface
-   * a proper transport error from dialProtocol if the peer is unreachable.
-   *
-   * TODO(follow-up): prefer chain-driven discovery via the network-state
-   * registry (RFC 04) for freshness; SPARQL profile lookup as last-resort
-   * fallback.
-   */
-  private async ensureCircuitRelayAddress(peerIdStr: string): Promise<void> {
-    try {
-      const { peerIdFromString } = await import('@libp2p/peer-id');
-      const peerId = peerIdFromString(peerIdStr);
-
-      const conns = this.libp2p.getConnections(peerId);
-      if (conns.length > 0) return;
-
-      const agent = await this.discovery.findAgentByPeerId(peerIdStr);
-      if (!agent?.relayAddress) return;
-
-      const circuitAddr = multiaddr(
-        `${agent.relayAddress}/p2p-circuit/p2p/${peerIdStr}`,
-      );
-      await this.libp2p.peerStore.merge(peerId, {
-        multiaddrs: [circuitAddr],
-      });
-    } catch {
-      // Best-effort — let the caller's send() surface the real error.
-    }
   }
 }
