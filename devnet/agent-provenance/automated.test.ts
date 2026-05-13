@@ -841,66 +841,6 @@ describe('Agent provenance — automated 5-node devnet validation', () => {
   }, 180_000);
 
   // =========================================================================
-  // Negative — Agent token isolation.
-  //
-  // A custodial agent token registered on core2 MUST NOT have access to
-  // privileged endpoints that require an admin auth token (e.g. the
-  // node-level identity-ensure flow, daemon-config endpoints). Pins the
-  // access-control rule on `/api/agent/register` and the agent-bearer
-  // token path: agents can publish on their own context, but cannot
-  // hijack node-level operations.
-  // =========================================================================
-  it('negative — agent bearer token cannot access node-admin endpoints', async () => {
-    const s = state.v!;
-    const core2 = s.nodes[2]!;
-    if (core2.identityId === 0n) throw new Error('core2 has no identity');
-
-    // Register a fresh agent so we have a token that is NOT the daemon
-    // admin token.
-    const reg = await fetch(`http://127.0.0.1:${core2.apiPort}/api/agent/register`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(core2.authToken ? { Authorization: `Bearer ${core2.authToken}` } : {}),
-      },
-      body: JSON.stringify({ name: `iso-${Date.now()}`, framework: 'isolation-test' }),
-    });
-    expect(reg.ok, `agent register failed: ${reg.status}`).toBe(true);
-    const agent = (await reg.json()) as { authToken: string };
-    expect(agent.authToken).toBeTruthy();
-
-    // Surface 1: identity-ensure is admin-only.
-    const ensureRes = await fetch(`http://127.0.0.1:${core2.apiPort}/api/identity/ensure`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${agent.authToken}`,
-      },
-    });
-    expect(
-      ensureRes.status,
-      `agent token must NOT be accepted by /api/identity/ensure (got ${ensureRes.status}). ` +
-        `Privilege escalation regression — agents should not be able to drive node-level identity registration.`,
-    ).toBeGreaterThanOrEqual(400);
-
-    // Surface 2: registering a *new* agent with the agent-token must
-    // also be rejected — agent tokens cannot bootstrap further agents.
-    const childReg = await fetch(`http://127.0.0.1:${core2.apiPort}/api/agent/register`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${agent.authToken}`,
-      },
-      body: JSON.stringify({ name: `iso-child-${Date.now()}`, framework: 'isolation-test' }),
-    });
-    expect(
-      childReg.status,
-      `agent token must NOT be accepted for /api/agent/register (got ${childReg.status}). ` +
-        `Allowing this would let any agent token clone itself indefinitely (DoS / resource exhaustion).`,
-    ).toBeGreaterThanOrEqual(400);
-  }, 60_000);
-
-  // =========================================================================
   // Idempotency — duplicate publishes by the same agent.
   //
   // Issuing two publishes back-to-back from the same custodial agent

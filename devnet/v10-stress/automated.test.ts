@@ -879,12 +879,28 @@ describe('V10 chain — stress + scenario validation', () => {
   //
   // Tier 12 is the longest lock window (12 months in the live config).
   // Withdrawing a tier-12 position before its expiryTimestamp MUST
-  // revert. This phase verifies:
-  //   (i) any Phase-1 tier-12 staker cannot withdraw (lock enforced),
-  //   (ii) createConviction with tier > 12 must revert (out-of-range),
-  //   (iii) createConviction with stake < minimumStake must revert.
+  // revert. Pinned invariants:
+  //
+  //   (i)   any Phase-1 tier-12 staker cannot withdraw (lock enforced;
+  //         `LockStillActive` error).
+  //   (ii)  createConviction with `lockTier ∈ {13, 255}` must revert
+  //         `InvalidLockTier()` — only tiers {0,1,3,6,12} are registered
+  //         in `ConvictionStakingStorage._tiers`. `_convictionMultiplier`
+  //         calls `getTier(uint40(lockTier))` and reverts when
+  //         `tc.exists == false`.
+  //   (iii) createConviction with `amount == 0` must revert `ZeroAmount`.
+  //         This is the only stake-side gate enforced at the
+  //         createConviction layer in V10. Note: V10 does NOT enforce a
+  //         minimum-stake gate on createConviction —
+  //         `parametersStorage.minimumStake()` is a sharding-table
+  //         eligibility threshold, not a stake validation. A staker
+  //         CAN open a position below `minimumStake`; their node simply
+  //         doesn't enter the sharding table until aggregate stake
+  //         crosses the threshold (see `StakingV10.stake` line ~338).
+  //         Pinning the existing zero-amount gate here catches the
+  //         realistic regression class.
   // =========================================================================
-  it('phase 1.6: tier-12 withdraw reverts; tier overflow + sub-minimum revert', async () => {
+  it('phase 1.6: tier-12 withdraw reverts; tier overflow + zero-amount revert', async () => {
     const s = state.v!;
     const cores = [1, 2, 3, 4]
       .map((n) => s.nodes[n])
@@ -924,34 +940,21 @@ describe('V10 chain — stress + scenario validation', () => {
     const nftAsStranger = s.stakingNft.connect(stranger) as ethers.Contract;
     await expectRevert(
       () => nftAsStranger.createConviction.staticCall(target.identityId, stake, 13),
-      'phase 1.6: tier 13 (out-of-range) must revert',
+      'phase 1.6: tier 13 (unregistered) must revert',
     );
     await expectRevert(
       () => nftAsStranger.createConviction.staticCall(target.identityId, stake, 255),
-      'phase 1.6: tier 255 (max u8) must revert',
+      'phase 1.6: tier 255 (unregistered) must revert',
     );
 
-    // (iii) sub-minimum stake revert. Read minimumStake from contract.
-    const minStake: bigint = await s.parametersStorage.minimumStake();
-    if (minStake > 0n) {
-      const tooSmall = minStake - 1n;
-      // Approve more so the revert is for the tier/min check, not allowance.
-      await fundTokenBalance(s, stranger.address, tooSmall + ethers.parseEther('100'));
-      const approveTx2 = await tokenAsStranger.approve(stakingV10Address, tooSmall, {
-        nonce: await nextNonceFor(s.provider, stranger.address),
-      });
-      expectTxSuccess(await approveTx2.wait(), 'phase 1.6: stranger approve(tooSmall)');
-      await expectRevert(
-        () => nftAsStranger.createConviction.staticCall(target.identityId, tooSmall, 0),
-        `phase 1.6: stake < minimumStake (${tooSmall} < ${minStake}) must revert`,
-      );
-    } else {
-      appendFinding(
-        'Phase 1.6 — minimumStake is 0',
-        `parametersStorage.minimumStake() returned 0; sub-minimum revert assertion not exercised. ` +
-          `On a deployment with a non-zero minimumStake this branch fires.`,
-      );
-    }
+    // (iii) zero-amount revert. Hits `ZeroAmount` in
+    //       DKGStakingConvictionNFT.createConviction (line ~366).
+    //       This is the only stake-amount-side gate enforced at the
+    //       createConviction layer in V10.
+    await expectRevert(
+      () => nftAsStranger.createConviction.staticCall(target.identityId, 0n, 0),
+      'phase 1.6: zero amount must revert ZeroAmount',
+    );
   }, 240_000);
 
   // =========================================================================
