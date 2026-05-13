@@ -60,6 +60,7 @@ import {
   parseEventIfPresent,
   expectRevert,
   assertDevnetReady,
+  provisionFreshWallet,
 } from '../_lib';
 
 // ───────────────────────────── constants ─────────────────────────────────
@@ -78,12 +79,16 @@ const HUB_ABI = [
   'function getAssetStorageAddress(string) view returns (address)',
 ];
 const NFT_ABI = [
+  'function createConviction(uint72 identityId, uint96 amount, uint40 lockTier) returns (uint256 tokenId)',
   'function withdraw(uint256 tokenId) returns (uint96 amount)',
   'function claim(uint256 tokenId)',
   'function ownerOf(uint256 tokenId) view returns (address)',
   'event PositionWithdrawn(uint256 indexed tokenId, uint96 amount)',
+  'event PositionCreated(address indexed staker, uint256 indexed tokenId, uint72 indexed identityId, uint96 amount, uint40 lockTier)',
   'event RewardsClaimed(uint256 indexed tokenId, uint96 amount)',
+  'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)',
 ];
+const ERC20_WRITE_ABI = ['function approve(address spender, uint256 value) returns (bool)'];
 const CSS_ABI = [
   'function getPosition(uint256 tokenId) view returns (tuple(uint96 raw, uint40 lockTier, uint40 expiryTimestamp, uint72 identityId, uint96 cumulativeRewardsClaimed, uint64 multiplier18, uint32 lastClaimedEpoch, uint32 migrationEpoch))',
   'function getOperatorFeeBalance(uint72 identityId) view returns (uint96)',
@@ -524,43 +529,67 @@ describe('3. NFT staking withdraw', () => {
   }, 60_000);
 
   it('still-locked tier-3 position reverts withdraw (lock window enforced)', async () => {
-    const target = state.delegators.find((d) => d.tier === 3);
-    expect(target, 'no tier-3 delegator found').toBeDefined();
-    const wallet = new ethers.Wallet(target!.privateKey, state.provider);
-    const nft = new ethers.Contract(state.nft.target, NFT_ABI, wallet);
-    const tokenId = BigInt(target!.tokenId);
+    // Provision a FRESH tier-3 staker inline rather than relying on a
+    // bootstrap.json delegator that a prior phase may have already
+    // withdrawn or warped past expiry. Hard-deterministic: every run
+    // exercises the lock-revert branch.
+    const stakeAmount = ethers.parseEther('1000');
+    const tokenAddress = (state.token.target as string).toString();
+    const stakingAddress = (state.staking.target as string).toString();
+    const nftAddress = (state.nft.target as string).toString();
 
-    const positionBefore = await state.css.getPosition(tokenId);
-    if (positionBefore.raw === 0n) {
-      // Already withdrawn (re-run on warm devnet). Surface as a finding so
-      // an operator running the suite knows the lock-revert assertion did
-      // not exercise — previously silently `return`ed and let the test
-      // appear green.
-      recordFinding(
-        `tier-3 lock-revert assertion not exercised: tokenId=${tokenId} already withdrawn ` +
-          `(raw=0). To validate the lock branch on this devnet, re-run \`devnet/_bootstrap/bootstrap.cjs\`.`,
-      );
-      return;
-    }
+    const wallet = await provisionFreshWallet(state.provider, tokenAddress, {
+      nativeWei: ethers.parseEther('5'),
+      tracWei: stakeAmount,
+    });
+    const tokenAsW = new ethers.Contract(tokenAddress, ERC20_WRITE_ABI, wallet);
+    const approveTx = await tokenAsW.approve(stakingAddress, stakeAmount);
+    expectTxSuccess(await approveTx.wait(), 'tier-3 lock test: approve');
+
+    const nft = new ethers.Contract(nftAddress, NFT_ABI, wallet);
+    // Stake against identityId=1 (always exists per bootstrap), tier=3.
+    // Tier 3 is registered in CSS._tiers (3-month lock).
+    const createTx = await nft.createConviction(1, stakeAmount, 3);
+    const createReceipt = await createTx.wait();
+    expectTxSuccess(createReceipt, 'tier-3 lock test: createConviction');
+
+    // Extract tokenId from the PositionCreated event (more
+    // semantically-meaningful than parsing the ERC-721 Transfer mint).
+    const iface = new ethers.Interface(NFT_ABI);
+    const created = parseEventOrThrow(
+      iface,
+      createReceipt!.logs,
+      'PositionCreated',
+      (p) => (p.args.staker as string).toLowerCase() === wallet.address.toLowerCase(),
+    ) as { args: { tokenId: bigint } };
+    const tokenId = created.args.tokenId;
+
+    // Sanity: the lock MUST be active. If for some reason the position
+    // has zero raw or already-expired timestamp, the test is broken
+    // (provisioning failed) — fail loudly, don't skip.
+    const position = await state.css.getPosition(tokenId);
+    expect(position.raw, 'fresh tier-3 position must have non-zero raw stake').toBe(stakeAmount);
     const block = await state.provider.getBlock('latest');
     expect(block, 'provider returned no head block').toBeTruthy();
-    if (positionBefore.expiryTimestamp <= BigInt(block!.timestamp)) {
-      recordFinding(
-        `tier-3 lock-revert assertion not exercised: lock has already expired ` +
-          `(expiry=${positionBefore.expiryTimestamp}, now=${block!.timestamp}). ` +
-          `A long evm_increaseTime in a prior phase warped past the lock; clean devnet to re-arm.`,
-      );
-      return;
-    }
-    // Negative test — withdraw() on a tier > 0 position before
-    // expiryTimestamp must revert. We use staticCall to keep the nonce
-    // pristine (a real tx that reverts still consumes a nonce, which can
-    // race with subsequent same-wallet ops in the suite).
+    expect(
+      position.expiryTimestamp,
+      `fresh tier-3 lock must be in the future (expiry=${position.expiryTimestamp}, now=${block!.timestamp})`,
+    ).toBeGreaterThan(BigInt(block!.timestamp));
+
+    // Real assertion — tier-3 withdraw before expiry must revert
+    // `LockStillActive` (StakingV10.sol line ~496). staticCall keeps
+    // the nonce pristine for the next same-wallet op (none here, but
+    // we keep the pattern consistent across the suite).
+    //
+    // The revert reason itself isn't pinned because the error-name
+    // string surfaced by ethers v6 / Hardhat varies between versions
+    // ("LockStillActive()" vs the bare 4-byte selector). The fact
+    // that the call reverts AT ALL is the protocol-level invariant.
     await expectRevert(
       () => nft.withdraw.staticCall(tokenId),
       'tier-3 lock must block withdraw',
     );
-  }, 30_000);
+  }, 90_000);
 
   // ────────────────────────────────────────────────────────────────────────
   // Negative: ERC-721 withdraw is owner-only.
@@ -571,33 +600,55 @@ describe('3. NFT staking withdraw', () => {
   // would silently drain stakes; this test catches it cheaply.
   // ────────────────────────────────────────────────────────────────────────
   it('non-owner withdraw reverts (NFT access control)', async () => {
-    const stillStaked = state.delegators
-      .filter((d) => d.tier === 0)
-      .find(async (d) => {
-        const p = await state.css.getPosition(BigInt(d.tokenId));
-        return p.raw !== 0n;
-      });
-    if (!stillStaked) {
-      recordFinding('non-owner-withdraw test skipped: no tier-0 stake remaining post-test-3a.');
-      return;
-    }
-    const tokenId = BigInt(stillStaked.tokenId);
-    const positionAtStart = await state.css.getPosition(tokenId);
-    if (positionAtStart.raw === 0n) {
-      recordFinding('non-owner-withdraw test skipped: position withdrawn between picks.');
-      return;
-    }
-    // Random fresh wallet — not the NFT owner.
+    // Provision a FRESH tier-0 staker inline so this test never depends
+    // on whatever state prior tests left behind. Tier 0 = no lock, so
+    // the negative test exercises ONLY the access-control gate (vs.
+    // both lock + access).
+    const stakeAmount = ethers.parseEther('500');
+    const tokenAddress = (state.token.target as string).toString();
+    const stakingAddress = (state.staking.target as string).toString();
+    const nftAddress = (state.nft.target as string).toString();
+
+    const owner = await provisionFreshWallet(state.provider, tokenAddress, {
+      nativeWei: ethers.parseEther('5'),
+      tracWei: stakeAmount,
+    });
+    const tokenAsOwner = new ethers.Contract(tokenAddress, ERC20_WRITE_ABI, owner);
+    expectTxSuccess(
+      await (await tokenAsOwner.approve(stakingAddress, stakeAmount)).wait(),
+      'non-owner-withdraw test: approve',
+    );
+    const nftAsOwner = new ethers.Contract(nftAddress, NFT_ABI, owner);
+    const createTx = await nftAsOwner.createConviction(1, stakeAmount, 0);
+    const createReceipt = await createTx.wait();
+    expectTxSuccess(createReceipt, 'non-owner-withdraw test: createConviction');
+
+    const iface = new ethers.Interface(NFT_ABI);
+    const created = parseEventOrThrow(
+      iface,
+      createReceipt!.logs,
+      'PositionCreated',
+      (p) => (p.args.staker as string).toLowerCase() === owner.address.toLowerCase(),
+    ) as { args: { tokenId: bigint } };
+    const tokenId = created.args.tokenId;
+
+    // Stranger != owner — must NOT be able to withdraw, regardless of
+    // whether the position is locked.
     const stranger = ethers.Wallet.createRandom().connect(state.provider);
     await state.provider.send('hardhat_setBalance', [
       stranger.address,
       '0x' + ethers.parseEther('1').toString(16),
     ]);
-    const strangerNft = new ethers.Contract(state.nft.target, NFT_ABI, stranger);
+    const strangerNft = new ethers.Contract(nftAddress, NFT_ABI, stranger);
     await expectRevert(
       () => strangerNft.withdraw.staticCall(tokenId),
       'non-owner cannot withdraw an NFT-keyed position',
     );
+
+    // And the rightful owner MUST be able to withdraw (no orphan
+    // position left behind).
+    const ownerWithdrawTx = await nftAsOwner.withdraw(tokenId);
+    expectTxSuccess(await ownerWithdrawTx.wait(), 'non-owner-withdraw test: owner withdraws');
   }, 30_000);
 });
 

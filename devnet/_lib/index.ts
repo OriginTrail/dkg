@@ -37,3 +37,8 @@ export {
   type DevnetNodeForCli,
   type PublishCliResult,
 } from './cli';
+export {
+  fundNative,
+  fundTrac,
+  provisionFreshWallet,
+} from './funding';

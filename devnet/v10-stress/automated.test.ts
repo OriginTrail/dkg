@@ -471,6 +471,7 @@ async function detectDevnet(maxNodes = 6): Promise<DevnetState | null> {
     [
       'function stakeWithdrawalDelay() view returns (uint256)',
       'function minimumStake() view returns (uint96)',
+      'function maximumStake() view returns (uint96)',
       'function epochLength() view returns (uint128)',
     ],
     provider,
@@ -908,20 +909,24 @@ describe('V10 chain — stress + scenario validation', () => {
     expect(cores.length).toBeGreaterThanOrEqual(1);
     const target = cores[0]!;
 
-    // (i) tier-12 lock enforcement.
+    // (i) tier-12 lock enforcement. If no tier-12 staker exists in
+    //     `stakersById` the test cannot exercise the lock revert. Hard
+    //     fail (vs. previous record-finding silent-skip) so a stale /
+    //     mis-configured Phase 1 immediately surfaces in CI.
     const t12 = Array.from(s.stakersById.values()).find((r) => r.tier === 12);
     if (!t12) {
-      appendFinding(
-        'Phase 1.6 — tier-12 staker missing',
-        `No tier-12 staker in stakersById. Bump STRESS_STAKERS or check the tier-cycling logic in Phase 1.`,
-      );
-    } else {
-      const nftAsT12 = s.stakingNft.connect(t12.wallet) as ethers.Contract;
-      await expectRevert(
-        () => nftAsT12.withdraw.staticCall(t12.tokenId),
-        'phase 1.6: tier-12 withdraw before expiry must revert',
+      throw new Error(
+        `phase 1.6: no tier-12 staker found in stakersById (size=${s.stakersById.size}). ` +
+          `Phase 1 must create at least one tier-12 staker for the lock-revert assertion ` +
+          `to exercise. With default STRESS_STAKERS=20 and 5 tiers this should always hold; ` +
+          `bump STRESS_STAKERS or fix the tier-cycling logic in Phase 1.`,
       );
     }
+    const nftAsT12 = s.stakingNft.connect(t12.wallet) as ethers.Contract;
+    await expectRevert(
+      () => nftAsT12.withdraw.staticCall(t12.tokenId),
+      'phase 1.6: tier-12 withdraw before expiry must revert',
+    );
 
     // (ii) tier > 12 (out-of-range) revert.
     const stranger = ethers.Wallet.createRandom().connect(s.provider);
@@ -954,6 +959,52 @@ describe('V10 chain — stress + scenario validation', () => {
     await expectRevert(
       () => nftAsStranger.createConviction.staticCall(target.identityId, 0n, 0),
       'phase 1.6: zero amount must revert ZeroAmount',
+    );
+
+    // (iv) MaxStakeExceeded — overshoot the per-node maxStake cap.
+    //      The check lives in StakingV10.stake (line 315):
+    //        currentNodeStakeAfter = getNodeStakeV10(id) + amount;
+    //        if (currentNodeStakeAfter > maxStake) revert MaxStakeExceeded;
+    //      We simulate a stake big enough to overshoot the cap from
+    //      the target's existing per-node stake. staticCall keeps state
+    //      pristine; we don't actually mint or transfer.
+    //
+    //      `amount` is `uint96`, so the overshoot is only triggerable
+    //      when `currentNodeStake + 1 ≤ uint96.max`. On any reasonable
+    //      devnet config (maxStake << uint96.max) this holds, so we
+    //      throw a hard error if the math says otherwise — silently
+    //      skipping would leave the cap untested, which is the
+    //      anti-bulletproof failure mode.
+    const maxStake: bigint = await s.parametersStorage.maximumStake();
+    const currentStake: bigint = await s.convictionStakingStorage.getNodeStakeV10(target.identityId);
+    expect(
+      maxStake,
+      `phase 1.6: parametersStorage.maximumStake() returned 0 — invalid config`,
+    ).toBeGreaterThan(0n);
+    // Smallest amount that overshoots: maxStake - currentStake + 1.
+    // Must fit in uint96.
+    const overshoot = maxStake - currentStake + 1n;
+    const UINT96_MAX = (1n << 96n) - 1n;
+    if (overshoot > UINT96_MAX || overshoot <= 0n) {
+      throw new Error(
+        `phase 1.6 (iv): cannot derive a uint96-fitting overshoot ` +
+          `(maxStake=${maxStake}, currentStake=${currentStake}, overshoot=${overshoot}). ` +
+          `Devnet config is unusual — re-tune Phase 1.6 (iv) for the new maxStake/uint96 ratio.`,
+      );
+    }
+    // Fund the stranger up to overshoot (no real transfer happens via
+    // staticCall, but `transferFrom` inside `stakingV10.stake` checks
+    // allowance + balance BEFORE the maxStake gate). Both must clear
+    // for the staticCall to actually reach the maxStake check.
+    await fundTokenBalance(s, stranger.address, overshoot);
+    const approveOvershoot = await tokenAsStranger.approve(stakingV10Address, overshoot, {
+      nonce: await nextNonceFor(s.provider, stranger.address),
+    });
+    expectTxSuccess(await approveOvershoot.wait(), 'phase 1.6 (iv): approve overshoot');
+    await expectRevert(
+      () => nftAsStranger.createConviction.staticCall(target.identityId, overshoot, 0),
+      `phase 1.6 (iv): createConviction(amount=${overshoot}) on identityId=${target.identityId} ` +
+        `must revert MaxStakeExceeded (cap=${maxStake}, currentStake=${currentStake})`,
     );
   }, 240_000);
 
