@@ -21,14 +21,18 @@ WARN=0
 # need wrapping each in a function.
 SCRIPT_T0=$(date +%s)
 
-# Optional knobs for the new RFC 07 sections. Defaults are conservative
+# Optional knobs for the newer sections. Defaults are conservative
 # enough to run end-to-end without surprising the operator. Override:
 #   SKIP_RESTART=1        — skip SECTION 30 (Node1 restart, ~30-60s)
 #   SKIP_MATRIX=1         — skip SECTION 29 (cross-node connect matrix)
+#   SKIP_INVITE_FLOW=1    — skip SECTION 31 (curated CG invite/join e2e, ~10-30s)
 #   RESTART_BOOT_TIMEOUT_S=60   — how long SECTION 30 waits for Node1's API
+#   INVITE_DENIED_TIMEOUT_S=90  — SECTION 31 catch-up poll budget (denied/done)
 SKIP_RESTART="${SKIP_RESTART:-0}"
 SKIP_MATRIX="${SKIP_MATRIX:-0}"
+SKIP_INVITE_FLOW="${SKIP_INVITE_FLOW:-0}"
 RESTART_BOOT_TIMEOUT_S="${RESTART_BOOT_TIMEOUT_S:-60}"
+INVITE_DENIED_TIMEOUT_S="${INVITE_DENIED_TIMEOUT_S:-90}"
 
 # Per-section timer helpers (used by sections 28-30). The existing 27
 # sections aren't wrapped — see comment on SCRIPT_T0 above.
@@ -2546,6 +2550,379 @@ except Exception:
       else
         warn "Node1 mesh only $mesh_count peers post-restart (expected ≥ 4)"
       fi
+    fi
+  fi
+fi
+section_done
+
+#------------------------------------------------------------
+section_start "SECTION 31: Curated CG — Invite & Join End-to-End (PR #448 flow)"
+# What this covers (and why §27i/27j alone are not enough):
+#
+# §27i + §27j only verify the OUTBOUND side of invite — N1 creates a
+# curated CG with `allowedPeers` and POSTs `/api/context-graph/invite`,
+# checking the response echoes the peerId. They never assert that:
+#   - the invitee can subscribe (or is correctly DENIED before approval),
+#   - the curator actually receives + persists the join request,
+#   - approval flips the allowlist,
+#   - the invitee then catches-up successfully and receives the
+#     `_meta` graph from the curator,
+#   - a non-allowlisted third party stays denied without a phantom
+#     CG entry.
+#
+# All those failure modes are routinely hit in real-world rollouts
+# (the "two-laptop debugging session" that birthed PR #448 round-6's
+# `deriveCuratorDidFromCgId` fallback + the `DKG_CURATOR` triple
+# regression guard). This section folds the standalone
+# `scripts/devnet-test-invite-flow.sh` into the main suite so future
+# CI runs can't silently regress invite/join.
+#
+# Requires ≥ 3 nodes (uses NODE_PORTS[0..2]). Skips with a SKIP if the
+# devnet is smaller, or if SKIP_INVITE_FLOW=1.
+if [[ "$SKIP_INVITE_FLOW" == "1" ]]; then
+  skip "Invite/Join e2e (SKIP_INVITE_FLOW=1)"
+elif [[ "${#NODE_PORTS[@]}" -lt 3 ]]; then
+  skip "Invite/Join e2e (need ≥3 nodes, have ${#NODE_PORTS[@]})"
+else
+  N1_PORT="${NODE_PORTS[0]}"
+  N2_PORT="${NODE_PORTS[1]}"
+  N3_PORT="${NODE_PORTS[2]}"
+
+  # Helper: extract self agent's address + peerId from /api/agents
+  invite_self_info() {
+    local port="$1"
+    c "http://127.0.0.1:$port/api/agents" | python3 -c "
+import sys, json
+try:
+  d = json.load(sys.stdin)
+  for a in d.get('agents', []):
+    if a.get('connectionStatus') == 'self':
+      print(a.get('agentAddress', '') + ' ' + a.get('peerId', ''))
+      break
+  else:
+    print(' ')
+except Exception:
+  print(' ')
+" 2>/dev/null
+  }
+
+  echo "--- 31a: capture N1/N2/N3 agent addresses + peerIds ---"
+  read -r N1_ADDR N1_PEER < <(invite_self_info "$N1_PORT")
+  read -r N2_ADDR N2_PEER < <(invite_self_info "$N2_PORT")
+  read -r N3_ADDR N3_PEER < <(invite_self_info "$N3_PORT")
+  if [[ -n "$N1_ADDR" && -n "$N2_ADDR" && -n "$N3_ADDR" ]]; then
+    ok "Captured N1/N2/N3 identities ($N1_ADDR / $N2_ADDR / $N3_ADDR)"
+  else
+    fail "Could not capture all three agent addresses (N1=$N1_ADDR N2=$N2_ADDR N3=$N3_ADDR) — aborting SECTION 31"
+    SKIP_INVITE_FLOW=1
+  fi
+
+  if [[ "$SKIP_INVITE_FLOW" != "1" ]]; then
+    INVITE_CG_ID="invite-test-$(date +%s)"
+    INVITE_CG_ENC="$INVITE_CG_ID"  # urlsafe — only [a-z0-9-] in id
+
+    echo "--- 31b: N1 creates curated CG '$INVITE_CG_ID' (allowlist = [N1 only]) ---"
+    INVITE_CREATE_BODY=$(python3 -c "
+import json
+print(json.dumps({
+  'id': '$INVITE_CG_ID',
+  'name': 'Invite flow test $INVITE_CG_ID',
+  'description': 'Curated CG for invite/acceptance regression test',
+  'accessPolicy': 1,
+  'allowedAgents': ['$N1_ADDR'],
+}))
+")
+    http_post_capture "http://127.0.0.1:$N1_PORT/api/context-graph/create" \
+      "$INVITE_CREATE_BODY" \
+      INV_CREATE_BODY INV_CREATE_CODE
+    INV_CREATED=$(json_get "$INV_CREATE_BODY" created)
+    if [[ "$INV_CREATE_CODE" == "200" && "$INV_CREATED" == "$INVITE_CG_ID" ]]; then
+      ok "N1 created curated CG $INVITE_CG_ID"
+    else
+      fail "Curated CG create failed (HTTP $INV_CREATE_CODE): ${INV_CREATE_BODY:0:200}"
+    fi
+
+    echo "--- 31c: assert DKG_CURATOR triple is present in N1's _meta graph (PR #448 round-6 silent-NACK regression guard) ---"
+    # Without DKG_CURATOR, getContextGraphOwner returns null and every
+    # PROTOCOL_JOIN_REQUEST silently NACKs. The wallet-prefix fallback
+    # (deriveCuratorDidFromCgId) heals stale data — this assertion
+    # protects today's create path from silently dropping the write.
+    INV_CURATOR_QUERY=$(CG="$INVITE_CG_ID" python3 <<'PY'
+import json, os
+cg = os.environ['CG']
+meta = f"did:dkg:context-graph:{cg}/_meta"
+subj = f"did:dkg:context-graph:{cg}"
+print(json.dumps({
+  "contextGraphId": cg,
+  "sparql": f"""SELECT ?owner WHERE {{ GRAPH <{meta}> {{ <{subj}> <https://dkg.network/ontology#curator> ?owner . }} }} LIMIT 1""",
+}))
+PY
+)
+    INV_CURATOR_RESP=$(c -X POST "http://127.0.0.1:$N1_PORT/api/query" -d "$INV_CURATOR_QUERY")
+    INV_CURATOR_OWNER=$(echo "$INV_CURATOR_RESP" | python3 -c "
+import sys, json
+try:
+  d = json.load(sys.stdin)
+  bindings = d.get('result', {}).get('bindings', [])
+  print(bindings[0].get('owner', '') if bindings else '')
+except Exception:
+  print('')
+" 2>/dev/null)
+    INV_EXPECTED_OWNER="did:dkg:agent:${N1_ADDR}"
+    INV_CURATOR_LC=$(printf '%s' "$INV_CURATOR_OWNER" | tr '[:upper:]' '[:lower:]')
+    INV_EXPECTED_LC=$(printf '%s' "$INV_EXPECTED_OWNER" | tr '[:upper:]' '[:lower:]')
+    if [[ "$INV_CURATOR_LC" == "$INV_EXPECTED_LC" ]]; then
+      ok "DKG_CURATOR triple present and points at N1"
+    elif [[ -n "$INV_CURATOR_OWNER" ]]; then
+      fail "DKG_CURATOR triple present but owner unexpected (got '$INV_CURATOR_OWNER', expected '$INV_EXPECTED_OWNER')"
+    else
+      fail "DKG_CURATOR triple MISSING — createContextGraph regression. Without it, every PROTOCOL_JOIN_REQUEST for $INVITE_CG_ID would silently NACK."
+    fi
+
+    echo "--- 31d: N1 publishes data into the CG (so N2 has something to sync after approval) ---"
+    INV_ASSERTION_NAME="widget-info-$(date +%s)"
+    c -X POST "http://127.0.0.1:$N1_PORT/api/assertion/create" \
+      -d "{\"contextGraphId\":\"$INVITE_CG_ID\",\"name\":\"$INV_ASSERTION_NAME\"}" >/dev/null
+    INV_WRITE_RESP=$(c -X POST "http://127.0.0.1:$N1_PORT/api/assertion/$INV_ASSERTION_NAME/write" \
+      -d "{\"contextGraphId\":\"$INVITE_CG_ID\",\"quads\":[{\"subject\":\"did:example:widget\",\"predicate\":\"http://www.w3.org/2000/01/rdf-schema#label\",\"object\":\"\\\"Widget\\\"\"},{\"subject\":\"did:example:widget\",\"predicate\":\"http://schema.org/price\",\"object\":\"\\\"42\\\"\"}]}")
+    INV_WRITTEN=$(json_get "$INV_WRITE_RESP" written)
+    if [[ "$INV_WRITTEN" == "2" ]]; then
+      ok "N1 wrote 2 quads into $INVITE_CG_ID"
+    else
+      fail "N1 write returned written=$INV_WRITTEN (expected 2): ${INV_WRITE_RESP:0:200}"
+    fi
+
+    # Helper: poll catch-up status until it terminates (done|denied|failed)
+    # or the timeout expires. Echoes the final status.
+    invite_poll_catchup() {
+      local port="$1" cg_id="$2" timeout="$3"
+      local enc t0 elapsed status last_status="" resp
+      enc=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$cg_id', safe=''))")
+      t0=$(date +%s)
+      while :; do
+        elapsed=$(( $(date +%s) - t0 ))
+        if [[ "$elapsed" -ge "$timeout" ]]; then
+          echo "${last_status:-timeout}"
+          return
+        fi
+        resp=$(c "http://127.0.0.1:$port/api/sync/catchup-status?contextGraphId=$enc" 2>/dev/null)
+        status=$(json_get "$resp" status)
+        if [[ -n "$status" && "$status" != "$last_status" ]]; then
+          last_status="$status"
+        fi
+        case "$status" in
+          done|denied|failed)
+            echo "$status"
+            return
+            ;;
+        esac
+        sleep 1
+      done
+    }
+
+    echo "--- 31e: N2 subscribes BEFORE allowlisted (expect catch-up status = denied) ---"
+    INV_SUB_BODY="{\"contextGraphId\":\"$INVITE_CG_ID\"}"
+    c -X POST "http://127.0.0.1:$N2_PORT/api/subscribe" -d "$INV_SUB_BODY" >/dev/null
+    INV_N2_STATUS=$(invite_poll_catchup "$N2_PORT" "$INVITE_CG_ID" "$INVITE_DENIED_TIMEOUT_S")
+    if [[ "$INV_N2_STATUS" == "denied" ]]; then
+      ok "N2 catch-up status = denied (curator correctly rejected unallowlisted subscriber)"
+    else
+      fail "N2 catch-up status = $INV_N2_STATUS (expected denied)"
+    fi
+
+    echo "--- 31f: N2 has no phantom entry for the inaccessible CG ---"
+    INV_N2_LIST=$(c "http://127.0.0.1:$N2_PORT/api/context-graph/list")
+    INV_N2_HAS=$(echo "$INV_N2_LIST" | python3 -c "
+import sys, json
+try:
+  d = json.load(sys.stdin)
+  cgs = d.get('contextGraphs', [])
+  print('yes' if any(c.get('id') == '$INVITE_CG_ID' for c in cgs) else 'no')
+except Exception:
+  print('parse-err')
+" 2>/dev/null)
+    if [[ "$INV_N2_HAS" == "no" ]]; then
+      ok "N2's project list correctly omits the inaccessible CG"
+    else
+      fail "N2 has a phantom entry for $INVITE_CG_ID (regression)"
+    fi
+
+    echo "--- 31g: N2 sign-join (sign-only, returns delegation) ---"
+    INV_SIGN_RESP=$(c -X POST "http://127.0.0.1:$N2_PORT/api/context-graph/$INVITE_CG_ENC/sign-join" -d "{}")
+    INV_DELEGATION=$(echo "$INV_SIGN_RESP" | python3 -c "
+import sys, json
+try:
+  d = json.load(sys.stdin)
+  deleg = d.get('delegation') or {}
+  print(json.dumps(deleg) if deleg else '')
+except Exception:
+  print('')
+" 2>/dev/null)
+    if [[ -n "$INV_DELEGATION" && "$INV_DELEGATION" != "{}" ]]; then
+      ok "sign-join returned a signed delegation"
+    else
+      fail "sign-join did not return a signed delegation: ${INV_SIGN_RESP:0:200}"
+    fi
+
+    echo "--- 31h: N2 request-join (forwards delegation to curator over libp2p) ---"
+    INV_SUBMIT_BODY=$(python3 -c "
+import json
+print(json.dumps({'delegation': json.loads('''$INV_DELEGATION'''), 'curatorPeerId': '$N1_PEER'}))
+")
+    # Capture the moment of submission so log assertions only consider
+    # lines written after this point (avoids stale matches across runs).
+    INV_REQ_TS=$(date -u +'%Y-%m-%d %H:%M:%S')
+    INV_SUBMIT_RESP=$(c -X POST "http://127.0.0.1:$N2_PORT/api/context-graph/$INVITE_CG_ENC/request-join" -d "$INV_SUBMIT_BODY")
+    INV_DELIVERED=$(json_get "$INV_SUBMIT_RESP" delivered)
+    INV_STATUS=$(json_get "$INV_SUBMIT_RESP" status)
+    if [[ "$INV_STATUS" == "pending" && -n "$INV_DELIVERED" && "$INV_DELIVERED" != "0" && "$INV_DELIVERED" != "__NONE__" ]]; then
+      ok "request-join delivered (delivered=$INV_DELIVERED, status=pending)"
+    else
+      fail "request-join did not deliver (status=$INV_STATUS delivered=$INV_DELIVERED): ${INV_SUBMIT_RESP:0:200}"
+    fi
+
+    echo "--- 31i: assert curator (N1) logged PROTOCOL_JOIN_REQUEST accepted + persisted (silent-NACK regression guard) ---"
+    sleep 1  # give the inbound handler a moment to flush
+    N1_LOG_PATH="$SCRIPT_DIR/../.devnet/node1/daemon.log"
+    if [[ -f "$N1_LOG_PATH" ]]; then
+      INV_LOG_ACCEPT=$(awk -v since="$INV_REQ_TS" '
+        match($0, /(\[)?20[0-9]{2}-[0-9]{2}-[0-9]{2}T?[ ][0-9:]{8}/) {
+          ts = substr($0, RSTART, RLENGTH); gsub(/[\[T]/, " ", ts); sub(/^ /, "", ts)
+          if (ts >= since) print
+        }' "$N1_LOG_PATH" | grep -E "PROTOCOL_JOIN_REQUEST from .* for \"$INVITE_CG_ID\": accepted" | awk 'NR==1 {print; exit}')
+      INV_LOG_STORE=$(awk -v since="$INV_REQ_TS" '
+        match($0, /(\[)?20[0-9]{2}-[0-9]{2}-[0-9]{2}T?[ ][0-9:]{8}/) {
+          ts = substr($0, RSTART, RLENGTH); gsub(/[\[T]/, " ", ts); sub(/^ /, "", ts)
+          if (ts >= since) print
+        }' "$N1_LOG_PATH" | grep -E "Stored pending join request from .* for \"$INVITE_CG_ID\"" | awk 'NR==1 {print; exit}')
+      if [[ -n "$INV_LOG_ACCEPT" ]]; then
+        ok "Curator logged PROTOCOL_JOIN_REQUEST accepted"
+      else
+        fail "Curator did NOT log accepting the join request — silent-NACK regression?"
+      fi
+      if [[ -n "$INV_LOG_STORE" ]]; then
+        ok "Curator logged 'Stored pending join request'"
+      else
+        fail "Curator accepted but did NOT persist — broken store path"
+      fi
+    else
+      warn "Skipped log assertion (n1 daemon.log not at expected path: $N1_LOG_PATH)"
+    fi
+
+    echo "--- 31j: N1 sees N2's pending request via /join-requests ---"
+    sleep 1
+    INV_REQ_RESP=$(c "http://127.0.0.1:$N1_PORT/api/context-graph/$INVITE_CG_ENC/join-requests")
+    INV_FOUND_N2=$(echo "$INV_REQ_RESP" | python3 -c "
+import sys, json
+try:
+  d = json.load(sys.stdin)
+  reqs = d.get('requests', [])
+  target = '$N2_ADDR'.lower()
+  print('yes' if any((r.get('agentAddress', '') or '').lower() == target for r in reqs) else 'no')
+except Exception:
+  print('parse-err')
+" 2>/dev/null)
+    if [[ "$INV_FOUND_N2" == "yes" ]]; then
+      ok "N1 sees N2's pending join request"
+    else
+      fail "N1 does NOT see N2's pending request: ${INV_REQ_RESP:0:200}"
+    fi
+
+    echo "--- 31k: N1 approves N2 via /approve-join ---"
+    INV_APPROVE_RESP=$(c -X POST "http://127.0.0.1:$N1_PORT/api/context-graph/$INVITE_CG_ENC/approve-join" \
+      -d "{\"agentAddress\":\"$N2_ADDR\"}")
+    INV_APPROVE_OK=$(json_get "$INV_APPROVE_RESP" ok)
+    if [[ "$INV_APPROVE_OK" == "true" ]]; then
+      ok "approve-join succeeded"
+    else
+      fail "approve-join failed: ${INV_APPROVE_RESP:0:200}"
+    fi
+
+    echo "--- 31l: N2 re-subscribes (expect catch-up status = done, with subscribed+synced) ---"
+    sleep 2  # allowlist write + any SSE notification
+    c -X POST "http://127.0.0.1:$N2_PORT/api/subscribe" -d "$INV_SUB_BODY" >/dev/null
+    # Post-approval catch-up does a full data + meta + SWM fan-out;
+    # under retries this can take ~1-2 minutes on a busy devnet. Use
+    # a 180s budget so we don't race pre-existing SWM sync cost.
+    INV_N2_AFTER=$(invite_poll_catchup "$N2_PORT" "$INVITE_CG_ID" 180)
+    if [[ "$INV_N2_AFTER" == "done" ]]; then
+      ok "N2 catch-up after approval = done"
+    else
+      fail "N2 catch-up after approval = $INV_N2_AFTER (expected done)"
+    fi
+
+    echo "--- 31m: N2's project state shows subscribed=true synced=true ---"
+    INV_N2_AFTER_LIST=$(c "http://127.0.0.1:$N2_PORT/api/context-graph/list")
+    INV_N2_FLAGS=$(echo "$INV_N2_AFTER_LIST" | python3 -c "
+import sys, json
+try:
+  d = json.load(sys.stdin)
+  cgs = d.get('contextGraphs', [])
+  match = next((c for c in cgs if c.get('id') == '$INVITE_CG_ID'), None)
+  if not match:
+    print('missing')
+  else:
+    print(f\"{bool(match.get('subscribed'))}-{bool(match.get('synced'))}\")
+except Exception:
+  print('parse-err')
+" 2>/dev/null)
+    if [[ "$INV_N2_FLAGS" == "True-True" ]]; then
+      ok "N2 sees CG legitimately (subscribed=true synced=true)"
+    else
+      fail "N2 project state unexpected (subscribed-synced=$INV_N2_FLAGS)"
+    fi
+
+    echo "--- 31n: N2 received the CG's _meta graph from the curator ---"
+    INV_META_QUERY=$(CG="$INVITE_CG_ID" python3 <<'PY'
+import json, os
+cg = os.environ['CG']
+meta = f"did:dkg:context-graph:{cg}/_meta"
+print(json.dumps({
+  "contextGraphId": cg,
+  "sparql": f"SELECT (COUNT(*) AS ?n) WHERE {{ GRAPH <{meta}> {{ ?s ?p ?o }} }}",
+}))
+PY
+)
+    INV_META_RESP=$(c -X POST "http://127.0.0.1:$N2_PORT/api/query" -d "$INV_META_QUERY")
+    INV_META_COUNT=$(echo "$INV_META_RESP" | python3 -c "
+import sys, json, re
+try:
+  d = json.load(sys.stdin)
+  b = d.get('result', {}).get('bindings', [])
+  v = b[0].get('n', '0') if b else '0'
+  m = re.search(r'\d+', str(v))
+  print(m.group(0) if m else '0')
+except Exception:
+  print('0')
+" 2>/dev/null)
+    if [[ "$INV_META_COUNT" -gt 0 ]] 2>/dev/null; then
+      ok "N2 holds $INV_META_COUNT triples in the CG's _meta graph"
+    else
+      fail "N2 has no _meta triples for $INVITE_CG_ID"
+    fi
+
+    echo "--- 31o: N3 (never allowlisted) tries the same CG (expect denied + no phantom) ---"
+    c -X POST "http://127.0.0.1:$N3_PORT/api/subscribe" -d "$INV_SUB_BODY" >/dev/null
+    INV_N3_STATUS=$(invite_poll_catchup "$N3_PORT" "$INVITE_CG_ID" "$INVITE_DENIED_TIMEOUT_S")
+    if [[ "$INV_N3_STATUS" == "denied" ]]; then
+      ok "N3 catch-up status = denied"
+    else
+      fail "N3 catch-up status = $INV_N3_STATUS (expected denied)"
+    fi
+    INV_N3_LIST=$(c "http://127.0.0.1:$N3_PORT/api/context-graph/list")
+    INV_N3_HAS=$(echo "$INV_N3_LIST" | python3 -c "
+import sys, json
+try:
+  d = json.load(sys.stdin)
+  cgs = d.get('contextGraphs', [])
+  print('yes' if any(c.get('id') == '$INVITE_CG_ID' for c in cgs) else 'no')
+except Exception:
+  print('parse-err')
+" 2>/dev/null)
+    if [[ "$INV_N3_HAS" == "no" ]]; then
+      ok "N3's project list correctly omits the inaccessible CG"
+    else
+      fail "N3 has a phantom entry for $INVITE_CG_ID"
     fi
   fi
 fi
