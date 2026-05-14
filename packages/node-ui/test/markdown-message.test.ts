@@ -128,6 +128,16 @@ describe('MarkdownMessage rendering', () => {
     expect(table).toBeTruthy();
     expect(container.querySelectorAll('th.v10-md-th').length).toBe(2);
     expect(container.querySelectorAll('td.v10-md-td').length).toBe(4);
+    // Codex CG3L5: react-markdown passes a synthetic `node` (HAST node)
+    // prop into custom renderers. Spreading `...props` onto a DOM
+    // element used to forward `node` to the underlying tag, which React
+    // flags as an unknown DOM attribute. Pin down that none of the
+    // table-family tags carry a `node` attribute.
+    for (const sel of ['thead.v10-md-thead', 'tbody.v10-md-tbody', 'tr.v10-md-tr', 'th.v10-md-th', 'td.v10-md-td']) {
+      for (const el of container.querySelectorAll(sel)) {
+        expect(el.hasAttribute('node'), `${sel} should not carry a 'node' DOM attribute`).toBe(false);
+      }
+    }
     await unmount();
   });
 

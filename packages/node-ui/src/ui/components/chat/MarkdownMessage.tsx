@@ -85,14 +85,20 @@ export function MarkdownMessage({ content }: MarkdownMessageProps) {
               <table className="v10-md-table">{children}</table>
             </div>
           ),
-          thead: ({ children, ...props }) => <thead className="v10-md-thead" {...props}>{children}</thead>,
-          tbody: ({ children, ...props }) => <tbody className="v10-md-tbody" {...props}>{children}</tbody>,
-          tr: ({ children, ...props }) => <tr className="v10-md-tr" {...props}>{children}</tr>,
+          // react-markdown passes a synthetic `node` (HAST node) prop into
+          // every component renderer. Spreading remaining props onto a
+          // DOM element forwards `node` to the underlying tag, which
+          // React then flags as an unknown DOM attribute in dev / test
+          // builds. Destructure `node` out before the spread so it
+          // never reaches the DOM — Codex CG3L5.
+          thead: ({ children, node: _node, ...props }) => <thead className="v10-md-thead" {...props}>{children}</thead>,
+          tbody: ({ children, node: _node, ...props }) => <tbody className="v10-md-tbody" {...props}>{children}</tbody>,
+          tr: ({ children, node: _node, ...props }) => <tr className="v10-md-tr" {...props}>{children}</tr>,
           // Spread remaining props so remark-gfm's column-alignment metadata
           // (`style={{ textAlign: 'right' | 'center' }}` derived from
           // `|:---|---:|:---:|` syntax) survives our wrapper.
-          th: ({ children, ...props }) => <th className="v10-md-th" {...props}>{children}</th>,
-          td: ({ children, ...props }) => <td className="v10-md-td" {...props}>{children}</td>,
+          th: ({ children, node: _node, ...props }) => <th className="v10-md-th" {...props}>{children}</th>,
+          td: ({ children, node: _node, ...props }) => <td className="v10-md-td" {...props}>{children}</td>,
           pre: ({ children, node }) => {
             // Block-vs-inline detection lives here, NOT in the `code`
             // renderer. react-markdown does not populate `node.parent`

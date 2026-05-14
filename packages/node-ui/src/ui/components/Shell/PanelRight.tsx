@@ -1595,19 +1595,26 @@ function NetworkTab(props: {
       const peerConnected = peer.connectionStatus === 'connected';
       const prevConnected = prev.connectionStatus === 'connected';
       if (peerConnected !== prevConnected) {
-        // Status disagrees → use the newer record's status. Naively
-        // preferring "connected" would stick the UI on a stale entry
-        // after a peer drops (Codex CGaLH). On `lastSeen` ties (or when
-        // the feed omits timestamps and both default to 0), use feed
-        // order as the deterministic freshness signal — `reduce`
-        // processes records left-to-right, so `peer` is the LATER
-        // record. Always take it on tie. This still lets the
-        // disconnected reading win when it arrives later, instead of
-        // letting a stale connected row mask a fresh disconnect for
-        // feeds without timestamps. Codex CGpfF.
-        const peerSeen = peer.lastSeen ?? 0;
-        const prevSeen = prev.lastSeen ?? 0;
-        if (peerSeen >= prevSeen) acc.set(key, peer);
+        // Status disagrees → freshness wins, not the connected reading.
+        // Naively preferring "connected" stuck the UI on a stale row
+        // after a peer dropped (CGaLH). Round-12 added a `lastSeen`
+        // tie-break that defaulted missing values to `0`, but
+        // `AgentInfo.lastSeen` is optional — if the newer record omits
+        // its timestamp while the older connected row has one, the
+        // older row wins forever (CG3Lw). Fall through to feed-order
+        // freshness whenever EITHER side is missing a timestamp:
+        // `reduce` processes records left-to-right, so `peer` is the
+        // later record by construction. Only do a timestamp comparison
+        // when both sides have one — then the larger timestamp wins,
+        // ties go to feed order (`>=`).
+        const hasBothTimestamps =
+          typeof peer.lastSeen === 'number' && typeof prev.lastSeen === 'number';
+        if (hasBothTimestamps) {
+          if (peer.lastSeen! >= prev.lastSeen!) acc.set(key, peer);
+        } else {
+          // Feed-order: the later record (peer) always wins.
+          acc.set(key, peer);
+        }
         return acc;
       }
       // Same status — prefer DIRECT transport (the better channel),
