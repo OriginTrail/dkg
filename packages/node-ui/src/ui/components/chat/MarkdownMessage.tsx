@@ -33,14 +33,22 @@ export function MarkdownMessage({ content }: MarkdownMessageProps) {
     <div className="v10-md">
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkBreaks]}
-        // Agent output is untrusted. The default `img` renderer would fetch
-        // arbitrary URLs (`![pixel](https://attacker.example/x.png)`),
-        // introducing a privacy/tracking surface that the previous regex
-        // renderer never had. Strip <img> here; the alt text falls through as
-        // plain prose for the user to evaluate.
-        disallowedElements={['img']}
-        unwrapDisallowed
         components={{
+          // Agent output is untrusted. The default `img` renderer would fetch
+          // arbitrary URLs (`![pixel](https://attacker.example/x.png)`),
+          // introducing a privacy/tracking surface that the previous regex
+          // renderer never had. Replace with an inert placeholder chip that
+          // surfaces the alt text + URL so the user can decide whether to
+          // open it manually — `disallowedElements` would just drop the
+          // node, including its alt text.
+          img: ({ src, alt, title }) => (
+            <span
+              className="v10-md-image-placeholder"
+              title={title || (typeof src === 'string' ? src : undefined)}
+            >
+              [image{alt ? `: ${alt}` : ''}]
+            </span>
+          ),
           h1: ({ children }) => <h1 className="v10-md-h1">{children}</h1>,
           h2: ({ children }) => <h2 className="v10-md-h2">{children}</h2>,
           h3: ({ children }) => <h3 className="v10-md-h3">{children}</h3>,

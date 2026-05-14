@@ -1990,6 +1990,22 @@ button:focus:not(:focus-visible) { outline: none; }
   vertical-align: top;
 }
 .v10-md-tr:last-child .v10-md-td { border-bottom: 0; }
+/* Inert placeholder rendered in place of markdown images. The chat renders
+   untrusted agent output, so `<img>` is replaced with a label that names
+   the resource without fetching it. */
+.v10-md-image-placeholder {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--bg-active);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-style: italic;
+  border: 1px solid var(--border-prominent);
+  cursor: help;
+}
+
 .v10-md-code {
   font-family: var(--font-mono);
   font-size: 11px;

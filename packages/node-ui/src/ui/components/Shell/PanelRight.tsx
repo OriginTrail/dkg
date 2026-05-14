@@ -853,6 +853,21 @@ export function ConnectedAgentsTab(props: {
     el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
   }, []);
 
+  // Recompute the scroll-pill state whenever the active conversation or its
+  // message list changes. Without this, switching to a conversation with a
+  // shorter history (or whose latest message just landed via auto-scroll)
+  // leaves the pill stuck visible from the previous thread until the user
+  // scrolls again. A rAF lets the layout settle after React commits.
+  useEffect(() => {
+    const el = messagesRegionRef.current;
+    if (!el) return;
+    const raf = requestAnimationFrame(() => {
+      const off = el.scrollHeight - el.scrollTop - el.clientHeight;
+      setShowScrollToBottom(off > 40);
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [selectedIntegrationId, selectedSessionId, localMessages.length]);
+
   // Drop-zone gating: three different reasons the dropzone refuses files.
   // Each surfaces a different recovery copy in the refuse-state overlay so
   // the user can act, rather than being told to "choose a project" when the
@@ -1931,9 +1946,14 @@ export function PanelRight() {
     setConnectError(null);
     let controller: AbortController | null = null;
     let assistantId = '';
+    // Hoisted so the `catch` path can restore the optimistically-cleared
+    // drafts without a TypeScript scope error and without a runtime
+    // ReferenceError when send fails before they're assigned.
+    let processedDrafts: LocalAgentAttachmentDraft[] = [];
+    let deliveredAttachmentIds: string[] = [];
 
     try {
-      const processedDrafts = await prepareAttachmentDraftsForSend(conversationKey, drafts);
+      processedDrafts = await prepareAttachmentDraftsForSend(conversationKey, drafts);
       const attachments = processedDrafts
         .map((draft) => draftToAttachmentRef(draft))
         .filter((item): item is LocalAgentChatAttachmentRef => item != null);
@@ -1952,7 +1972,7 @@ export function PanelRight() {
       const attachmentIds = attachments
         .map((attachment) => attachment.id)
         .filter((attachmentId): attachmentId is string => typeof attachmentId === 'string' && attachmentId.length > 0);
-      const deliveredAttachmentIds = [...attachmentIds, ...importContext.deliveredDraftIds];
+      deliveredAttachmentIds = [...attachmentIds, ...importContext.deliveredDraftIds];
       const userId = `local:${conversationKey}:${correlationId}:user`;
       assistantId = `local:${conversationKey}:${correlationId}:assistant`;
       const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });

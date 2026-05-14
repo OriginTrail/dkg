@@ -253,7 +253,11 @@ describe('PanelRight UI - connected agent flow', () => {
     );
 
     expect(addAttachmentsBlock).not.toContain('await importFile(');
-    expect(sendLocalMessageBlock).toContain('const processedDrafts = await prepareAttachmentDraftsForSend(conversationKey, drafts);');
+    // PR3 Codex round-2: processedDrafts is now hoisted above the try block
+    // (assigned, not declared with `const`, so the catch path can read it
+    // to restore drafts after a failed send). Assert the assignment shape
+    // without coupling to the lexical `const`.
+    expect(sendLocalMessageBlock).toContain('processedDrafts = await prepareAttachmentDraftsForSend(conversationKey, drafts);');
     expect(sendLocalMessageBlock).toContain('if (!text && attachments.length === 0 && importContext.results.length === 0) {');
     expect(panelRight).not.toContain('selectedCompletedAttachments');
   });
