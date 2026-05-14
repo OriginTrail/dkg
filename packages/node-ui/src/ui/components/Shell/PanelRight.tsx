@@ -1018,17 +1018,17 @@ export function ConnectedAgentsTab(props: {
               </div>
             )}
 
-            <div className="v10-chat-messages v10-local-agent-messages">
-              {dropzone.isDragActive && (
-                <div
-                  className={`v10-drop-overlay active ${attachmentsEnabled ? 'accept' : 'refuse'}`}
-                  role="status"
-                  aria-live="polite"
-                >
+            {dropzone.isDragActive && (
+              <div
+                className={`v10-drop-overlay active ${attachmentsEnabled ? 'accept' : 'refuse'}`}
+                role="status"
+                aria-live="polite"
+              >
+                <div className="v10-drop-overlay-card">
                   {attachmentsEnabled ? (
-                    <Upload className="v10-drop-overlay-icon" size={20} aria-hidden="true" />
+                    <Upload className="v10-drop-overlay-icon" size={32} aria-hidden="true" />
                   ) : (
-                    <Ban className="v10-drop-overlay-icon" size={20} aria-hidden="true" />
+                    <Ban className="v10-drop-overlay-icon" size={32} aria-hidden="true" />
                   )}
                   <div className="v10-drop-overlay-title">
                     {attachmentsEnabled
@@ -1041,7 +1041,9 @@ export function ConnectedAgentsTab(props: {
                       : 'Use the picker below the composer.'}
                   </div>
                 </div>
-              )}
+              </div>
+            )}
+            <div className="v10-chat-messages v10-local-agent-messages">
               {shouldShowConversationLoader && (
                 <div className="v10-agent-empty-state">
                   Loading the latest conversation from DKG memory...
@@ -1246,7 +1248,7 @@ export function ConnectedAgentsTab(props: {
                       </div>
                       <button
                         type="button"
-                        className="v10-agent-send-btn v10-local-agent-inline-send"
+                        className="v10-local-agent-inline-send"
                         onClick={onSendLocalMessage}
                         disabled={inputDisabled || (!localInput.trim() && !hasSendableAttachmentDrafts)}
                         aria-label="Send message"

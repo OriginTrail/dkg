@@ -199,6 +199,7 @@ export function Select({
               key={opt.value}
               role="option"
               aria-selected={opt.value === value}
+              title={opt.label}
               className={[
                 'v10-select-option',
                 opt.value === value ? 'selected' : '',
