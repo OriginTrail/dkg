@@ -1264,7 +1264,14 @@ export function ConnectedAgentsTab(props: {
                         if (e.nativeEvent.isComposing) return;
                         if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
                           e.preventDefault();
-                          onSendLocalMessage();
+                          // Gate Enter with the same sendability check the
+                          // send button uses, otherwise an empty-input
+                          // Enter or an Enter while inputDisabled would
+                          // fire onSendLocalMessage even though the
+                          // surfaced affordance (the button) is disabled.
+                          if (!inputDisabled && (localInput.trim() || hasSendableAttachmentDrafts)) {
+                            onSendLocalMessage();
+                          }
                           return;
                         }
                         if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
