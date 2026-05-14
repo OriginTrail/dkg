@@ -1346,9 +1346,14 @@ button:focus:not(:focus-visible) { outline: none; }
   .v10-scroll-to-bottom { transition: none; }
 }
 .v10-local-agent-msg-time {
+  /* Bumped from `--text-tertiary` to `--text-secondary` after PR4's
+     timestamp-expansion change made these strings noticeably more
+     visible (full date + time vs. previous time-only). Pre-existing
+     AA fail surfaced by PR4: tertiary clears only 2.31-2.66:1 against
+     bg-panel; secondary clears 5.58/7.17. UI-lead Task #68. */
   margin-top: 4px;
   font-size: 10px;
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
   font-family: var(--font-mono);
 }
 .v10-local-agent-msg-time.user {
@@ -2031,9 +2036,17 @@ button:focus:not(:focus-visible) { outline: none; }
   cursor: help;
 }
 .v10-md-blockquote {
+  /* Left rail bumped from `--border-strong` to `--border-prominent`
+     after the assistant bubble was removed in PR4 — the rail is the
+     only visual cue defining the blockquote (the 5% wash inside is
+     effectively imperceptible on bg-panel) and `--border-strong`
+     fails WCAG 1.4.11 (3:1 non-text) against `--bg-panel` in both
+     themes. `--border-prominent` clears 5.58:1 dark / 7.17:1 light,
+     same swap recipe as `.v10-md-hr` and the inline-code chip
+     border. Codex / UI-lead Task #67. */
   margin: 6px 0;
   padding: 4px 12px;
-  border-left: 3px solid var(--border-strong);
+  border-left: 3px solid var(--border-prominent);
   color: var(--text-secondary);
   background: color-mix(in srgb, var(--text-tertiary) 5%, transparent);
   border-radius: 0 6px 6px 0;
@@ -2051,10 +2064,15 @@ button:focus:not(:focus-visible) { outline: none; }
   border-top: 1px solid var(--border-prominent);
 }
 .v10-md-table-scroll {
+  /* Outer border bumped to `--border-prominent` for the same reason
+     `.v10-md-hr` / `.v10-md-blockquote` / `.v10-md-pre` did — after
+     PR4's bubble removal, the table sits on `--bg-panel` and the old
+     `--border-subtle` clears only ~1.15:1 against panel (fails 3:1).
+     UI-lead Task #66. */
   margin: 8px 0;
   overflow-x: auto;
   border-radius: 8px;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--border-prominent);
 }
 .v10-md-table {
   width: 100%;
@@ -2122,11 +2140,19 @@ button:focus:not(:focus-visible) { outline: none; }
   line-height: 1.85;
 }
 .v10-md-pre {
+  /* Code-block container outline bumped to `--border-prominent` for
+     the same reason as `.v10-md-hr` / `.v10-md-blockquote` /
+     `.v10-md-table-scroll` — the `--bg-elevated` fill is barely a
+     lift over `--bg-panel` (~1.05-1.11:1) once the assistant bubble
+     was removed in PR4, so the border is now the only visual cue
+     defining the code block. `--border-subtle` fails 3:1 against
+     panel; `--border-prominent` clears it in both themes. UI-lead
+     Task #65. */
   position: relative;
   margin: 8px 0;
   border-radius: 12px;
   background: var(--bg-elevated);
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--border-prominent);
   overflow: hidden;
   font-family: var(--font-mono);
   font-size: 11px;

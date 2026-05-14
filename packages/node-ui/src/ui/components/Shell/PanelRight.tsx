@@ -1323,7 +1323,14 @@ export function ConnectedAgentsTab(props: {
                           style={{
                             padding: '2px 8px',
                             borderRadius: 999,
-                            background: 'var(--panel-elevated)',
+                            // `--panel-elevated` is undefined in styles.css —
+                            // the token is `--bg-elevated`. Pre-existing typo
+                            // surfaced by UI-lead's PR4 audit (Task #69):
+                            // when the bubble was removed, the silent
+                            // fallback used to land near `--bg-surface` and
+                            // happened to look right; now it falls back to
+                            // `--bg-panel` and the chip blends in.
+                            background: 'var(--bg-elevated)',
                             fontSize: 11,
                           }}
                         >
