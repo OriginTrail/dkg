@@ -1361,8 +1361,23 @@ export function ConnectedAgentsTab(props: {
                           type="button"
                           className="v10-composer-attach"
                           onClick={() => attachmentInputRef.current?.click()}
-                          disabled={!selected?.chatAttachments || !activeProjectId || localSending}
-                          title={activeProjectId ? 'Attach files' : 'Choose a project to attach files'}
+                          // Single source of truth for "can attach right now":
+                          // the shared `dropDisabledReason` that the drop
+                          // overlay also uses, so the button's disabled state
+                          // and the dropzone stay in lockstep. The tooltip
+                          // mirrors the same reason chain instead of
+                          // advertising a generic "Attach files" in the
+                          // disabled states.
+                          disabled={!attachmentsEnabled}
+                          title={
+                            attachmentsEnabled
+                              ? 'Attach files'
+                              : dropDisabledReason === 'noProject'
+                                ? 'Choose a project to attach files'
+                                : dropDisabledReason === 'sending'
+                                  ? 'Wait for the current message to send'
+                                  : 'This agent does not support attachments'
+                          }
                           aria-label="Attach files"
                         >
                           <Paperclip size={14} aria-hidden="true" />

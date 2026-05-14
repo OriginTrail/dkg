@@ -274,8 +274,10 @@ describe('PanelRight UI - connected agent flow', () => {
     // retired — the project picker now lives INSIDE the composer-controls
     // row right next to the attach button, so the affordance is self-evident.
     // The attach-button title still mentions the gating ("Choose a project
-    // to attach files").
-    expect(panelRight).toContain("title={activeProjectId ? 'Attach files' : 'Choose a project to attach files'}");
+    // to attach files"); after round-8 (CFfZ3) the title chain reuses the
+    // shared `dropDisabledReason` state so it stays in lockstep with the
+    // drop overlay's recovery copy instead of repeating the ternary inline.
+    expect(panelRight).toContain("'Choose a project to attach files'");
   });
 
   it('turns skipped document-import results into server-verified sendable import results', () => {
