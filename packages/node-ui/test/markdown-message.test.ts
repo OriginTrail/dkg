@@ -64,6 +64,14 @@ describe('MarkdownMessage rendering', () => {
   beforeEach(() => {
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
     document.body.innerHTML = '';
+    // Clear Vitest's module cache so every test re-imports MarkdownMessage
+    // (and therefore CodeBlock) from a fresh state. Without this, the
+    // `vi.mock('shiki', ...)` factory above only runs once per test file:
+    // after the first fenced-block test imports shiki, the module is
+    // cached and any subsequent `import('shiki')` resolves without
+    // re-invoking the factory, so the `lazy-shiki gate` assertion can
+    // false-pass even if a real load happens. Codex CHMS6.
+    vi.resetModules();
     shikiImportCount = 0;
   });
 
@@ -255,12 +263,6 @@ describe('MarkdownMessage rendering', () => {
   });
 
   it('G3 plaintext fallback: unsupported lang ("pascal") renders the plain <pre><code> fallback (no shiki)', async () => {
-    // Snapshot the import counter BEFORE the render. The mock factory is
-    // module-cached across the file (vitest only calls it on first import of
-    // shiki), so an earlier test in this file may have already nudged the
-    // counter to 1. What we actually want to verify here is the DELTA —
-    // rendering a `pascal` fence must not trigger a fresh `import('shiki')`.
-    const before = shikiImportCount;
     const md = '```pascal\nbegin\nend.\n```';
     const { container, unmount } = await render(md);
 
@@ -274,9 +276,10 @@ describe('MarkdownMessage rendering', () => {
     // The original source is preserved verbatim in the fallback <code>.
     const code = container.querySelector('.v10-md-pre-fallback code');
     expect(code?.textContent).toBe('begin\nend.');
-    // CRITICAL: with no supported language, shiki must never be (re)loaded
-    // as a side effect of this render.
-    expect(shikiImportCount).toBe(before);
+    // CRITICAL: with no supported language, shiki must never load.
+    // `beforeEach` resets the module cache + counter, so this is the
+    // exact load count for THIS test — no delta arithmetic needed.
+    expect(shikiImportCount).toBe(0);
     await unmount();
   });
 

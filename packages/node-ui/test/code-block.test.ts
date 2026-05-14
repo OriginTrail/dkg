@@ -89,6 +89,56 @@ describe('CodeBlock', () => {
     await unmount();
   });
 
+  it('awaits the shiki-rendered path for a supported language (Codex CHMTB)', async () => {
+    // Regression cover: every other test in this suite asserts only the
+    // immediate plain-text fallback. A broken shiki bundle, a botched
+    // `normalizeLang` map, or a wrong theme key would still pass them
+    // all — the rendered branch never executes in the assertions. Mock
+    // `shiki` per-test, re-import CodeBlock through a fresh module
+    // graph (the test file imports the real component at the top), then
+    // wait for the async `loadHighlighter().then(setHtml)` chain to
+    // settle and assert that `.v10-md-pre-rendered` actually replaced
+    // the fallback with the highlighter's output.
+    vi.useRealTimers(); // shiki path uses promises/microtasks, not setTimeout
+    vi.resetModules();
+    vi.doMock('shiki', () => ({
+      createHighlighter: async () => ({
+        codeToHtml: (code: string, opts: { lang: string; theme: string }) =>
+          `<pre class="shiki shiki-${opts.theme}" data-lang="${opts.lang}"><code>SHIKI:${code}</code></pre>`,
+      }),
+    }));
+    const { CodeBlock: FreshCodeBlock } = await import('../src/ui/components/chat/CodeBlock.js');
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(React.createElement(FreshCodeBlock, { code: 'const x = 1;', lang: 'ts' }));
+    });
+    // Flush the loadHighlighter promise chain + the setHtml-triggered
+    // re-render. Two ticks: one for the dynamic import + createHighlighter
+    // resolution, one for React to commit the state update.
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const rendered = container.querySelector('.v10-md-pre-rendered') as HTMLElement | null;
+    expect(rendered, '.v10-md-pre-rendered should replace the fallback once shiki resolves').toBeTruthy();
+    expect(container.querySelector('.v10-md-pre-fallback')).toBeNull();
+    // The mocked highlighter output is what got dangerouslySetInnerHTML-ed.
+    // Confirms `code`, `lang`, and the theme key (dark default) all
+    // flowed through normalizeLang → useEffect → codeToHtml correctly.
+    expect(rendered!.innerHTML).toContain('SHIKI:const x = 1;');
+    expect(rendered!.innerHTML).toContain('data-lang="ts"');
+    expect(rendered!.innerHTML).toContain('shiki-github-dark');
+
+    await act(async () => { root.unmount(); });
+    container.remove();
+    vi.doUnmock('shiki');
+    vi.resetModules();
+  });
+
   it('renders a copy button with aria-label="Copy code" in the idle state', async () => {
     const { container, unmount } = await renderCodeBlock({ code: 'x', lang: 'ts' });
     const btn = container.querySelector('.v10-md-copy') as HTMLButtonElement | null;

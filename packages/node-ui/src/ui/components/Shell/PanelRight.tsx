@@ -1600,25 +1600,36 @@ function NetworkTab(props: {
       const peerConnected = peer.connectionStatus === 'connected';
       const prevConnected = prev.connectionStatus === 'connected';
       if (peerConnected !== prevConnected) {
-        // Status disagrees → freshness wins, not the connected reading.
-        // Naively preferring "connected" stuck the UI on a stale row
-        // after a peer dropped (CGaLH). Round-12 added a `lastSeen`
-        // tie-break that defaulted missing values to `0`, but
-        // `AgentInfo.lastSeen` is optional — if the newer record omits
-        // its timestamp while the older connected row has one, the
-        // older row wins forever (CG3Lw). Fall through to feed-order
-        // freshness whenever EITHER side is missing a timestamp:
-        // `reduce` processes records left-to-right, so `peer` is the
-        // later record by construction. Only do a timestamp comparison
-        // when both sides have one — then the larger timestamp wins,
-        // ties go to feed order (`>=`).
-        const hasBothTimestamps =
-          typeof peer.lastSeen === 'number' && typeof prev.lastSeen === 'number';
-        if (hasBothTimestamps) {
+        // Status disagrees → use the freshest available signal. The rule
+        // has shaken out across several Codex rounds:
+        //   CGaLH: don't naively prefer "connected" — a stale connected
+        //          row after a peer drops keeps the UI wrong.
+        //   CG3Lw: don't `?? 0` missing timestamps either — an older
+        //          timestamped connected row would beat a newer
+        //          un-timestamped disconnect.
+        //   CHMS1: don't fall through to feed-order on missing-timestamp
+        //          ties either — `/api/agents` doesn't sort by recency,
+        //          so an upstream ordering change can silently flip the
+        //          panel back. Prefer the timestamped row when only one
+        //          side has it; when neither has a timestamp, prefer
+        //          the disconnected reading so a stale connected row
+        //          can't mask a fresh disconnect.
+        const peerHasTs = typeof peer.lastSeen === 'number';
+        const prevHasTs = typeof prev.lastSeen === 'number';
+        if (peerHasTs && prevHasTs) {
+          // Both timestamped — pure numeric freshness; tie goes to peer
+          // (later in feed by construction, deterministic within the
+          // same numeric bucket).
           if (peer.lastSeen! >= prev.lastSeen!) acc.set(key, peer);
-        } else {
-          // Feed-order: the later record (peer) always wins.
+        } else if (peerHasTs) {
+          // Only peer has a timestamp — take it.
           acc.set(key, peer);
+        } else if (prevHasTs) {
+          // Only prev has a timestamp — keep prev (no-op).
+        } else {
+          // Neither has a timestamp — bias toward disconnected to keep
+          // stale connected rows from masking a real disconnect.
+          if (!peerConnected) acc.set(key, peer);
         }
         return acc;
       }
