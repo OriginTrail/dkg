@@ -34,6 +34,22 @@ const DEFAULTS = {
   rightWidth: 360,
 };
 
+// Must match the live drag handlers in App.tsx (`useDragResize`); without
+// clamping on load, a stale or manually edited `dkg-layout` entry like
+// `{"leftWidth":2000}` would reload into an unusable shell that can't be
+// recovered without clearing storage.
+const LEFT_WIDTH_MIN = 140;
+const LEFT_WIDTH_MAX = 400;
+const RIGHT_WIDTH_MIN = 200;
+const RIGHT_WIDTH_MAX = 500;
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+function clampWidth(parsed: unknown, fallback: number, min: number, max: number): number {
+  if (typeof parsed !== 'number' || !Number.isFinite(parsed)) return fallback;
+  return clamp(parsed, min, max);
+}
+
 function loadPersisted(): Required<PersistedLayout> {
   try {
     const raw = localStorage.getItem(LAYOUT_STORAGE_KEY);
@@ -43,8 +59,8 @@ function loadPersisted(): Required<PersistedLayout> {
       leftCollapsed: typeof parsed.leftCollapsed === 'boolean' ? parsed.leftCollapsed : DEFAULTS.leftCollapsed,
       rightCollapsed: typeof parsed.rightCollapsed === 'boolean' ? parsed.rightCollapsed : DEFAULTS.rightCollapsed,
       bottomCollapsed: typeof parsed.bottomCollapsed === 'boolean' ? parsed.bottomCollapsed : DEFAULTS.bottomCollapsed,
-      leftWidth: typeof parsed.leftWidth === 'number' && Number.isFinite(parsed.leftWidth) ? parsed.leftWidth : DEFAULTS.leftWidth,
-      rightWidth: typeof parsed.rightWidth === 'number' && Number.isFinite(parsed.rightWidth) ? parsed.rightWidth : DEFAULTS.rightWidth,
+      leftWidth: clampWidth(parsed.leftWidth, DEFAULTS.leftWidth, LEFT_WIDTH_MIN, LEFT_WIDTH_MAX),
+      rightWidth: clampWidth(parsed.rightWidth, DEFAULTS.rightWidth, RIGHT_WIDTH_MIN, RIGHT_WIDTH_MAX),
     };
   } catch {
     return DEFAULTS;

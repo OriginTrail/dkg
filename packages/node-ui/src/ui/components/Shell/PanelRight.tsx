@@ -1160,7 +1160,15 @@ export function ConnectedAgentsTab(props: {
                       className="v10-local-agent-target-select"
                       value={activeProjectId ?? ''}
                       onChange={onSelectProject}
-                      options={availableProjects.map((project) => ({ value: project.id, label: project.name }))}
+                      options={[
+                        // Leading "no project" row gives the user a path back
+                        // to a cleared context graph. Without this, once a
+                        // project is picked there's no way to unpick it
+                        // through the UI (the old native <select> had an
+                        // implicit empty option that handled this).
+                        { value: '', label: 'No project (clear selection)' },
+                        ...availableProjects.map((project) => ({ value: project.id, label: project.name })),
+                      ]}
                       placeholder={projectsLoading ? 'Loading projects…' : 'Choose a project'}
                       disabled={projectsLoading || availableProjects.length === 0}
                       ariaLabel="Active project"
