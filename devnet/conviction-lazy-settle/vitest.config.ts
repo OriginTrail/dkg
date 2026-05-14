@@ -36,6 +36,7 @@ export default defineConfig({
   resolve: {
     modules: [
       resolve(import.meta.dirname, '../../node_modules'),
+      resolve(import.meta.dirname, '../../packages/evm-module/node_modules'),
       'node_modules',
     ],
   },

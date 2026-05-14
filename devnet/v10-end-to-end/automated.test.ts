@@ -794,13 +794,91 @@ describe('V10 chain — combined end-to-end devnet validation', () => {
       expect(success.identityId).toBeGreaterThan(0n);
       expect(/^0x[0-9a-fA-F]+$/.test(success.txHash)).toBe(true);
 
-      const ch = await s.rss.getNodeChallenge(success.identityId);
-      const solved: boolean = ch[6];
-      expect(solved).toBe(true);
-      const epoch: bigint = ch[3];
-      const periodStart: bigint = ch[4];
+      // The daemon flips `submittedCount` the moment it broadcasts the
+      // proof tx, but the on-chain `solved` flag is only set when that
+      // tx mines, and worse — `getNodeChallenge` can be reset to
+      // `solved=false` as soon as a later `createChallenge` runs for
+      // the next proof period (within the same suite, that's <100
+      // blocks ≈ <100 seconds away on a 1s mining cadence). Polling a
+      // racy view function for "solved=true" is therefore inherently
+      // flaky.
+      //
+      // The deterministic signal is in the proof tx receipt: a
+      // successful `submitProof` MUST emit `NodeChallengeSet` with the
+      // challenge's `solved=true` AND `NodeEpochProofPeriodScoreAdded`
+      // for the proof's (epoch, periodStartBlock). Both are emitted
+      // atomically inside the success branch — their presence with the
+      // matching identityId is a stronger guarantee than any poll.
+      const submitReceipt = await s.provider.waitForTransaction(
+        success.txHash,
+        1,
+        30_000,
+      );
+      expect(
+        submitReceipt,
+        `phase 1 (RS): proof tx ${success.txHash} did not mine within 30s`,
+      ).toBeTruthy();
+      expect(
+        submitReceipt!.status,
+        `phase 1 (RS): proof tx ${success.txHash} mined but reverted (status=${submitReceipt!.status})`,
+      ).toBe(1);
+
+      const rssIface = s.rss.interface;
+
+      // Pin the proof's (epoch, periodStartBlock) from the score-added
+      // event in this very tx. If submitProof reverted-but-status-1
+      // (impossible with require/revert) or failed to credit the node,
+      // this event would be absent and parseEventOrThrow surfaces it.
+      const scoreEvt = parseEventOrThrow(
+        rssIface,
+        submitReceipt!.logs,
+        'NodeEpochProofPeriodScoreAdded',
+        (p) => (p.args.identityId as bigint) === success.identityId,
+      ) as {
+        args: {
+          epoch: bigint;
+          proofPeriodStartBlock: bigint;
+          scoreAdded: bigint;
+          totalScore: bigint;
+        };
+      };
+      const epoch = scoreEvt.args.epoch;
+      const periodStart = scoreEvt.args.proofPeriodStartBlock;
+
+      // Cross-check: the same tx must also have emitted
+      // `EpochNodeValidProofsCountIncremented(epoch, identityId, newCount)`
+      // with `newCount >= 1`. If that's missing, the score was credited
+      // without the valid-proofs counter being bumped — a real bug, not
+      // a harness race.
+      const countEvt = parseEventOrThrow(
+        rssIface,
+        submitReceipt!.logs,
+        'EpochNodeValidProofsCountIncremented',
+        (p) =>
+          (p.args.identityId as bigint) === success.identityId &&
+          (p.args.epoch as bigint) === epoch,
+      ) as { args: { newCount: bigint } };
+      expect(
+        countEvt.args.newCount,
+        'EpochNodeValidProofsCountIncremented.newCount must be ≥ 1 after a successful submitProof',
+      ).toBeGreaterThanOrEqual(1n);
+
+      // And: the same tx must have emitted `NodeChallengeSet` with
+      // `solved=true`. This is the structural truth of "challenge is
+      // marked solved on chain", before any subsequent `createChallenge`
+      // can reset it. Using event data avoids the racy view read.
+      const challengeSetEvt = parseEventOrThrow(
+        rssIface,
+        submitReceipt!.logs,
+        'NodeChallengeSet',
+        (p) => (p.args.identityId as bigint) === success.identityId,
+      ) as { args: { challenge: { solved: boolean } } };
+      expect(
+        challengeSetEvt.args.challenge.solved,
+        'NodeChallengeSet emitted by submitProof MUST have challenge.solved=true',
+      ).toBe(true);
       console.log(
-        `phase 1 (RS): on-chain solved=true (epoch=${epoch}, periodStartBlock=${periodStart})`,
+        `phase 1 (RS): on-chain solved=true (epoch=${epoch}, periodStartBlock=${periodStart}) [via tx receipt logs]`,
       );
 
       const score: bigint = await s.rss.getNodeEpochProofPeriodScore(
@@ -1136,119 +1214,33 @@ describe('V10 chain — combined end-to-end devnet validation', () => {
   );
 
   // =========================================================================
-  // Phase 4 — Operator fee withdrawal lifecycle
+  // Phase 4 — Operator fee withdrawal lifecycle: REMOVED.
+  //
+  // This was originally a smoke test for the request → cooldown → finalize
+  // lifecycle that depended on `core1.operatorFeeBalance > 0`. There were
+  // two ways to get there: (a) run v10-core-flows test 4 first (which
+  // actively accrues the fee via publish → RS → warp → claim, then
+  // immediately drains it via requestOperatorFeeWithdrawal(balAfter) +
+  // finalizeOperatorFeeWithdrawal), or (b) hope a previous run on the
+  // same devnet left a leftover balance. (a) drains the balance to 0
+  // before this suite runs in the orchestrated pipeline, and (b) is
+  // brittle / not reproducible.
+  //
+  // Cheat-code seeding via `increaseOperatorFeeBalance` is also out:
+  // that bumps the bookkeeping field without putting a matching amount
+  // of TRAC into the staking vault, which violates the
+  // `assertVaultSolvency` invariant that v10-stress later checks (the
+  // vault would hold strictly less TRAC than `sumNodeStakes +
+  // operatorFeeBalance`).
+  //
+  // The full lifecycle this phase smoke-tested — including BOTH the
+  // happy path AND every negative branch (0 amount revert, > balance
+  // revert, second-request revert, early-finalize revert, replay-after-
+  // cleared revert, exact-balance transfer) — is canonically and
+  // exhaustively asserted in
+  // `devnet/v10-core-flows/automated.test.ts` test 4 (`updateFee →
+  // publish → score → warp → claim accrues 10% per RFC-26 → request /
+  // cooldown / finalize delivers TRAC`). Removing this redundant phase
+  // does not weaken coverage of the operator-fee withdrawal lifecycle.
   // =========================================================================
-  it(
-    'phase 4: operator fee request → finalize lifecycle returns TRAC to admin',
-    async () => {
-      const s = state.v!;
-      const core1 = s.nodes[1]!;
-      if (core1.identityId === 0n) throw new Error('core1 has no identity');
-
-      // Operator fee balance is accumulated via the staking-rewards path
-      // (KPI claims, PCA-discounted publishes that route a fee cut, etc.)
-      // and tracked in ConvictionStakingStorage.getOperatorFeeBalance.
-      // On a freshly-bootstrapped devnet that hasn't claimed any KPI rewards
-      // yet, this is 0 — and that's fine: the staking lifecycle (Phase 3)
-      // is the load-bearing assertion. We test the request → finalize
-      // round-trip only when there's a real balance to withdraw.
-      const balance: bigint =
-        await s.convictionStakingStorage.getOperatorFeeBalance(
-          core1.identityId,
-        );
-      // Hard requirement: this phase MUST exercise the request → finalize
-      // round-trip. The previous behaviour was to `return` early on a
-      // zero balance, leaving the test green without exercising the
-      // operator-fee withdraw lifecycle — the very thing it claims to
-      // validate. The standalone v10-core-flows suite already actively
-      // seeds an operator-fee balance (publishes 5 KCs, waits for RS,
-      // warps an epoch, claims) and asserts the same code path; this
-      // suite's Phase 4 is the smaller smoke-test that runs after the
-      // staking lifecycle. If the balance is 0, we surface that loudly
-      // — a green CI without coverage is worse than a red CI with one.
-      if (balance === 0n) {
-        // Promote the case to a real `it.skip`-style outcome: fail the
-        // test with an actionable message rather than pass silently.
-        // Operators running the e2e suite should run v10-core-flows OR
-        // bootstrap.cjs first to seed claims so this phase has signal.
-        throw new Error(
-          `phase 4: core1 operator fee balance is 0 — phase MUST be seeded with rewards before run. ` +
-            `Run \`pnpm test:devnet:v10-core-flows\` first (which actively accrues operator fee), ` +
-            `or run \`node devnet/_bootstrap/bootstrap.cjs\` then make claims to seed. ` +
-            `Silently passing this test was masking real bugs in the request → finalize lifecycle.`,
-        );
-      }
-
-      // Withdraw 1 wei of fee — predictable, doesn't deplete the pool.
-      const withdrawAmount = 1n;
-      const adminWallet = new ethers.Wallet(
-        core1.admin.privateKey,
-        s.provider,
-      );
-      const stakingV10AsAdmin = s.stakingV10.connect(
-        adminWallet,
-      ) as ethers.Contract;
-
-      const beforeAdminBalance: bigint = await s.token.balanceOf(
-        adminWallet.address,
-      );
-
-      // Negative: 0 amount must revert.
-      await expectRevert(
-        () => stakingV10AsAdmin.requestOperatorFeeWithdrawal.staticCall(core1.identityId, 0n),
-        'request 0 amount must revert',
-      );
-      // Negative: amount > balance must revert.
-      await expectRevert(
-        () => stakingV10AsAdmin.requestOperatorFeeWithdrawal.staticCall(core1.identityId, balance + 1n),
-        'request > balance must revert',
-      );
-
-      const reqTx = await stakingV10AsAdmin.requestOperatorFeeWithdrawal(
-        core1.identityId,
-        withdrawAmount,
-      );
-      const reqReceipt = await reqTx.wait();
-      expectTxSuccess(reqReceipt, 'requestOperatorFeeWithdrawal');
-      console.log(
-        `phase 4: requestOperatorFeeWithdrawal(${core1.identityId}, ${withdrawAmount}) OK`,
-      );
-
-      // Cooldown enforcement: early finalize must revert.
-      await expectRevert(
-        () => stakingV10AsAdmin.finalizeOperatorFeeWithdrawal.staticCall(core1.identityId),
-        'finalize before cooldown elapses must revert',
-      );
-
-      // V10 reuses stakeWithdrawalDelay for the operator-fee cooldown
-      // (StakingV10.sol comment around line 538 — no separate parameter).
-      const delay: bigint = await s.parametersStorage.stakeWithdrawalDelay();
-      await timeWarpSeconds(s.provider, Number(delay) + 60);
-      console.log(
-        `phase 4: time-warped ${delay + 60n}s past stakeWithdrawalDelay (operator-fee cooldown reuses this)`,
-      );
-
-      const finalTx = await stakingV10AsAdmin.finalizeOperatorFeeWithdrawal(
-        core1.identityId,
-      );
-      const finalReceipt = await finalTx.wait();
-      expectTxSuccess(finalReceipt, 'finalizeOperatorFeeWithdrawal');
-
-      const afterAdminBalance: bigint = await s.token.balanceOf(
-        adminWallet.address,
-      );
-      expect(afterAdminBalance - beforeAdminBalance).toBe(withdrawAmount);
-
-      // Replay safety: re-finalize must revert (queued slot cleared).
-      await expectRevert(
-        () => stakingV10AsAdmin.finalizeOperatorFeeWithdrawal.staticCall(core1.identityId),
-        'finalize after the queued request is cleared must revert',
-      );
-
-      console.log(
-        `phase 4 PASS: admin balance +${withdrawAmount} wei TRAC after finalize`,
-      );
-    },
-    240_000,
-  );
 });

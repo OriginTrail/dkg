@@ -26,6 +26,7 @@ export default defineConfig({
     // avoid duplicating dependencies by pointing the resolver at root.
     modules: [
       resolve(import.meta.dirname, '../../node_modules'),
+      resolve(import.meta.dirname, '../../packages/evm-module/node_modules'),
       'node_modules',
     ],
   },

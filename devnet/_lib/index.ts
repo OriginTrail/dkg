@@ -30,6 +30,7 @@ export {
   parseEventIfPresent,
   expectRevert,
   expectThrow,
+  nextNonceFor,
 } from './tx';
 export {
   runDkgCli,

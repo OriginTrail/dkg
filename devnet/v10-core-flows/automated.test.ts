@@ -63,6 +63,7 @@ import {
   provisionFreshWallet,
   assertAllStakingInvariants,
   assertPerNodeAggregation,
+  nextNonceFor,
 } from '../_lib';
 
 // ───────────────────────────── constants ─────────────────────────────────
@@ -411,15 +412,50 @@ describe('1. chained sign-at-creation assertion lifecycle', () => {
       const matches = ops.filter((o) => o === op);
       expect(matches.length, `${op} fired ${matches.length} times; expected exactly 1`).toBe(1);
     }
-    // Each event payload must reference the same assertionName.
+    // Per-op semantic verification — the daemon emits a fixed schema
+    // for each `memory_graph_changed` (see `cli/src/daemon/routes/
+    // assertion.ts`): `{contextGraphId, layers, subGraphName, operation,
+    // source, counts}`. The assertion name is intentionally NOT in the
+    // payload (route-level CG-and-op-only schema), so the previous test
+    // that grepped for the name was checking something the daemon never
+    // emitted. We replace it with the strict semantic checks the schema
+    // actually supports:
+    //   - every event's contextGraphId == CONTEXT_GRAPH (CG isolation),
+    //   - source == "api" (i.e., the publisher route, not a gossip echo),
+    //   - layers and counts match the operation:
+    //       create     → layers=["wm"],        counts.triples == 0
+    //       write      → layers=["wm"],        counts.triples == 2 (we wrote 2)
+    //       finalize   → layers=["wm"],        counts may be absent
+    //       promote    → layers=["wm","swm"],  counts.triples == 2
     for (const e of sse.events) {
-      expect(e.data?.contextGraphId).toBe(CONTEXT_GRAPH);
-      // The daemon includes the assertion's URI fragment somewhere in the
-      // payload — `assertionUri` for create/write/finalize, or `name` /
-      // `merkleRoot` for promote depending on shape. We just verify no
-      // event leaked from a different assertion (CG isolation).
-      const blob = JSON.stringify(e.data);
-      expect(blob, `event ${e.data.operation} did not reference ${assertionName}`).toContain(assertionName);
+      const d = e.data as {
+        contextGraphId?: string;
+        operation?: string;
+        layers?: string[];
+        source?: string;
+        counts?: { triples?: number };
+      };
+      expect(d.contextGraphId, `${d.operation}: contextGraphId mismatch`).toBe(CONTEXT_GRAPH);
+      expect(d.source, `${d.operation}: must originate from the api route`).toBe('api');
+      switch (d.operation) {
+        case 'assertion_created':
+          expect(d.layers, 'assertion_created.layers').toEqual(['wm']);
+          expect(d.counts?.triples, 'assertion_created.counts.triples').toBe(0);
+          break;
+        case 'assertion_written':
+          expect(d.layers, 'assertion_written.layers').toEqual(['wm']);
+          expect(d.counts?.triples, 'assertion_written.counts.triples (we POSTed 2)').toBe(2);
+          break;
+        case 'assertion_finalized':
+          expect(d.layers, 'assertion_finalized.layers').toEqual(['wm']);
+          break;
+        case 'assertion_promoted':
+          expect(d.layers, 'assertion_promoted.layers').toEqual(['wm', 'swm']);
+          expect(d.counts?.triples, 'assertion_promoted.counts.triples (2 promoted)').toBe(2);
+          break;
+        default:
+          throw new Error(`unexpected operation in lifecycle SSE stream: ${String(d.operation)}`);
+      }
     }
   }, 60_000);
 });
@@ -567,13 +603,20 @@ describe('3. NFT staking withdraw', () => {
       tracWei: stakeAmount,
     });
     const tokenAsW = new ethers.Contract(tokenAddress, ERC20_WRITE_ABI, wallet);
-    const approveTx = await tokenAsW.approve(stakingAddress, stakeAmount);
+    // Explicit nonces — fresh wallets occasionally race with Hardhat's
+    // pending-count update under back-to-back tx submission and both
+    // calls get stamped with nonce 0. See `_lib/tx.ts::nextNonceFor`.
+    const approveTx = await tokenAsW.approve(stakingAddress, stakeAmount, {
+      nonce: await nextNonceFor(state.provider, wallet.address),
+    });
     expectTxSuccess(await approveTx.wait(), 'tier-3 lock test: approve');
 
     const nft = new ethers.Contract(nftAddress, NFT_ABI, wallet);
     // Stake against identityId=1 (always exists per bootstrap), tier=3.
     // Tier 3 is registered in CSS._tiers (3-month lock).
-    const createTx = await nft.createConviction(1, stakeAmount, 3);
+    const createTx = await nft.createConviction(1, stakeAmount, 3, {
+      nonce: await nextNonceFor(state.provider, wallet.address),
+    });
     const createReceipt = await createTx.wait();
     expectTxSuccess(createReceipt, 'tier-3 lock test: createConviction');
 
@@ -638,12 +681,15 @@ describe('3. NFT staking withdraw', () => {
       tracWei: stakeAmount,
     });
     const tokenAsOwner = new ethers.Contract(tokenAddress, ERC20_WRITE_ABI, owner);
-    expectTxSuccess(
-      await (await tokenAsOwner.approve(stakingAddress, stakeAmount)).wait(),
-      'non-owner-withdraw test: approve',
-    );
+    // Explicit nonces (see tier-3 test above for the fresh-wallet race).
+    const approveTx = await tokenAsOwner.approve(stakingAddress, stakeAmount, {
+      nonce: await nextNonceFor(state.provider, owner.address),
+    });
+    expectTxSuccess(await approveTx.wait(), 'non-owner-withdraw test: approve');
     const nftAsOwner = new ethers.Contract(nftAddress, NFT_ABI, owner);
-    const createTx = await nftAsOwner.createConviction(1, stakeAmount, 0);
+    const createTx = await nftAsOwner.createConviction(1, stakeAmount, 0, {
+      nonce: await nextNonceFor(state.provider, owner.address),
+    });
     const createReceipt = await createTx.wait();
     expectTxSuccess(createReceipt, 'non-owner-withdraw test: createConviction');
 
@@ -671,7 +717,9 @@ describe('3. NFT staking withdraw', () => {
 
     // And the rightful owner MUST be able to withdraw (no orphan
     // position left behind).
-    const ownerWithdrawTx = await nftAsOwner.withdraw(tokenId);
+    const ownerWithdrawTx = await nftAsOwner.withdraw(tokenId, {
+      nonce: await nextNonceFor(state.provider, owner.address),
+    });
     expectTxSuccess(await ownerWithdrawTx.wait(), 'non-owner-withdraw test: owner withdraws');
   }, 30_000);
 });
@@ -800,18 +848,32 @@ describe('4. operator-fee accrual + withdrawal', () => {
       .toBeLessThan(50);
     if (driftBps > 0) recordFinding(`operator-fee accrual drift: ${driftBps} bps from RFC-26 prediction`);
 
-    // Conservation check: gross epoch reward routed to this position
-    // (from RS) MUST equal delegatorReward + operatorFeeAccrued (within
-    // the same 50 bps slack — the math is a single multiply/divide so
-    // any real discrepancy is a bug). This catches a class of regressions
-    // where the fee path either over- or under-credits.
-    const totalCredited = delegatorReward + accrued;
-    const totalDriftAbs: bigint = grossNode1 > totalCredited ? grossNode1 - totalCredited : totalCredited - grossNode1;
-    const totalDriftBps = grossNode1 > 0n ? Number((totalDriftAbs * 10000n) / grossNode1) : 0;
+    // No-overpayment invariant. The previous version of this check
+    // asserted `delegatorReward + accrued ≈ grossNode1`, but identityId=1
+    // has multiple positions so a SINGLE delegator's reward is only one
+    // share of the post-fee gross — the equation as written can never
+    // hold and was failing with ~8000 bps drift on every run.
+    //
+    // What we CAN strictly assert with one claim:
+    //   • The protocol must not over-pay a single position: this
+    //     delegator's reward + the entire-node operator fee must be
+    //     ≤ grossNode1. A regression that double-credited would
+    //     immediately blow past gross.
+    //   • Both components must be strictly positive (already pinned
+    //     above for accrued; pin again here for delegatorReward).
+    //   • The claimed reward share must be at most the post-fee gross
+    //     (no position can take more than the whole-node residue).
+    const postFeeGross = grossNode1 - accrued;
     expect(
-      totalDriftBps,
-      `delegatorReward+operatorFee=${ethers.formatUnits(totalCredited, 18)} vs gross=${ethers.formatUnits(grossNode1, 18)} drifts ${totalDriftBps} bps`,
-    ).toBeLessThan(50);
+      delegatorReward,
+      `delegatorReward=${ethers.formatUnits(delegatorReward, 18)} TRAC must not exceed post-fee gross ` +
+        `${ethers.formatUnits(postFeeGross, 18)} TRAC (over-payment regression)`,
+    ).toBeLessThanOrEqual(postFeeGross);
+    expect(
+      delegatorReward + accrued,
+      `delegatorReward(${ethers.formatUnits(delegatorReward, 18)}) + operatorFee(${ethers.formatUnits(accrued, 18)}) ` +
+        `must not exceed gross(${ethers.formatUnits(grossNode1, 18)})`,
+    ).toBeLessThanOrEqual(grossNode1);
 
     // (f) Withdrawal cycle: request → assert cooldown → warp → finalize.
     const adminTracBefore = await state.token.balanceOf(state.adminWallet.address);

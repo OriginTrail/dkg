@@ -13,7 +13,42 @@
  */
 import { expect } from 'vitest';
 import { Interface as EthersInterface } from 'ethers';
-import type { ContractTransactionReceipt, Interface, Log, LogDescription } from 'ethers';
+import type {
+  ContractTransactionReceipt,
+  Interface,
+  JsonRpcProvider,
+  Log,
+  LogDescription,
+} from 'ethers';
+
+/**
+ * Fetch the next pending nonce for `address` directly from Hardhat.
+ *
+ * Why this helper exists: when a test provisions a fresh wallet via
+ * `hardhat_setBalance` + `hardhat_setStorageAt` (no real tx history) and
+ * then sends two back-to-back txs, ethers' default `populateTransaction`
+ * occasionally races with Hardhat's pending-count update — both txs get
+ * stamped with nonce 0 and the second one rejects with `NONCE_EXPIRED`.
+ *
+ * Querying `eth_getTransactionCount(addr, 'pending')` directly via the
+ * provider, immediately before signing each tx, sidesteps the race.
+ * Pass the result as `{ nonce }` in the call's overrides:
+ *
+ *   await contract.foo(args, { nonce: await nextNonceFor(provider, addr) });
+ *
+ * Returns the next nonce as a `number` (ethers v6 accepts number or hex
+ * string for `nonce` overrides).
+ */
+export async function nextNonceFor(
+  provider: JsonRpcProvider,
+  address: string,
+): Promise<number> {
+  const raw = await provider.send('eth_getTransactionCount', [
+    address,
+    'pending',
+  ]);
+  return parseInt(raw, 16);
+}
 
 /**
  * Asserts that a transaction receipt has `status === 1` (success). Throws

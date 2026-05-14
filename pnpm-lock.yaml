@@ -35,6 +35,9 @@ importers:
       esbench:
         specifier: ^0.8.1
         version: 0.8.1(esbuild@0.27.3)(playwright-core@1.59.1)(rollup@4.59.0)(sucrase@3.35.1)(typescript@5.9.3)(vite@7.3.1(@types/node@22.19.11)(jiti@2.6.1)(tsx@4.21.0)(yaml@2.8.3))
+      ethers:
+        specifier: ^6.16.0
+        version: 6.16.0(bufferutil@4.1.0)(utf-8-validate@5.0.10)
       knip:
         specifier: ^6.6.1
         version: 6.6.1(@emnapi/core@1.9.2)(@emnapi/runtime@1.9.2)

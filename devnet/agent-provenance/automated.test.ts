@@ -606,8 +606,16 @@ describe('Agent provenance — automated 5-node devnet validation', () => {
     const epoch: bigint = await s.chronos.getCurrentEpoch();
     const beforeBalance = await sumOpBalances(s.token, edge);
     const beforeEps: bigint = await s.eps.getNodeEpochProducedKnowledgeValue(core3.identityId, epoch);
-    const beforePcaSpent = pcaRegistered
-      ? ((await s.nft.epochSpent(firstOpAccount, epoch)) as bigint)
+    // PCA spending is tracked per-billing-window, NOT per-chain-epoch
+    // (DKGPublishingConvictionNFT.windowSpent[accountId][billingWindow]).
+    // Re-read the current window before AND after the publish; using a
+    // stale window key would silently miss spend that crossed a window
+    // boundary mid-test.
+    const beforePcaWindow: bigint = pcaRegistered
+      ? await s.nft.getCurrentBillingWindow(firstOpAccount)
+      : 0n;
+    const beforePcaSpent: bigint = pcaRegistered
+      ? await s.nft.windowSpent(firstOpAccount, beforePcaWindow)
       : 0n;
 
     const file = makeNquadsFile('mode-c');
@@ -620,12 +628,25 @@ describe('Agent provenance — automated 5-node devnet validation', () => {
 
     if (pcaRegistered) {
       // PCA path: pool TRAC may stay flat (PCA covered the cost) but
-      // PCA epochSpent MUST grow. This is the assertion the previous
-      // test was missing.
-      const afterPcaSpent: bigint = await s.nft.epochSpent(firstOpAccount, epoch);
+      // PCA windowSpent MUST grow. This is the assertion the previous
+      // test was missing. Compare against the same window we sampled
+      // before; if the publish straddled a window boundary, also accept
+      // the new window's spend as the "after" value (a window roll-over
+      // resets the counter to 0 plus whatever this publish drew).
+      const afterPcaWindow: bigint = await s.nft.getCurrentBillingWindow(firstOpAccount);
+      let delta: bigint;
+      if (afterPcaWindow === beforePcaWindow) {
+        const afterPcaSpent: bigint = await s.nft.windowSpent(firstOpAccount, afterPcaWindow);
+        delta = afterPcaSpent - beforePcaSpent;
+      } else {
+        const afterPcaSpent: bigint = await s.nft.windowSpent(firstOpAccount, afterPcaWindow);
+        delta = afterPcaSpent;
+      }
       expect(
-        afterPcaSpent - beforePcaSpent,
-        'mode (c) on PCA-registered edge: PCA epochSpent must increase',
+        delta,
+        `mode (c) on PCA-registered edge: PCA windowSpent must increase ` +
+          `(beforeWindow=${beforePcaWindow} beforeSpent=${beforePcaSpent} ` +
+          `afterWindow=${afterPcaWindow})`,
       ).toBeGreaterThan(0n);
     } else {
       // Direct-spend: pool TRAC must drop strictly.
