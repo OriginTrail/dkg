@@ -3,7 +3,7 @@ import 'dotenv/config';
 import { execSync } from 'child_process';
 import * as fs from 'fs';
 
-import { AddressLike, Contract } from 'ethers';
+import { AddressLike, Contract, keccak256 } from 'ethers';
 import { HardhatRuntimeEnvironment } from 'hardhat/types';
 
 import { HubLib } from '../typechain/contracts/storage/Hub';
@@ -27,6 +27,24 @@ type ContractDeployments = {
       deploymentTimestamp: number;
       deployed: boolean;
       migration?: boolean;
+      /**
+       * Source class name for the artifact. Set when the deployed-contract
+       * name in Hub differs from the Solidity contract class (e.g. the
+       * `EpochStorage` class is deployed twice as `EpochStorageV6` and
+       * `EpochStorageV8`). Optional — defaults to the entry key when
+       * artifact name == Hub name. Used by the hash-tracking scripts to
+       * find the correct artifact for change detection.
+       */
+      contractClassName?: string;
+      /**
+       * `keccak256` of the runtime (deployed) bytecode actually on chain
+       * at `evmAddress`. Computed at deploy time from the artifact's
+       * `deployedBytecode` (which equals `eth_getCode(addr)` for a fresh
+       * deploy). `scripts/check-contract-hashes.ts` re-hashes the current
+       * artifact and flags any mismatch as a redeploy candidate. Strips
+       * the need to compare git diffs across deploys.
+       */
+      deployedBytecodeHash?: string;
     };
   };
 };
@@ -433,6 +451,16 @@ export class Helpers {
       contractVersion = null;
     }
 
+    // Hash the runtime bytecode the compiler produced for this contract
+    // class. For a fresh deploy this equals `eth_getCode(addr)` exactly,
+    // so it anchors the on-chain identity of the deployed code. The
+    // hash-check script (`scripts/check-contract-hashes.ts`) re-runs this
+    // computation on later compiles and flags any drift as a redeploy
+    // candidate — no more diffing git ranges to figure out what changed.
+    const artifactName = originalContractName ?? newContractName;
+    const artifact = await this.hre.artifacts.readArtifact(artifactName);
+    const deployedBytecodeHash = keccak256(artifact.deployedBytecode);
+
     this.contractDeployments.contracts[newContractName] = {
       evmAddress: newContractAddress,
       version: contractVersion,
@@ -441,6 +469,8 @@ export class Helpers {
       deploymentBlock: deploymentBlock,
       deploymentTimestamp: Date.now(),
       deployed: true,
+      contractClassName: artifactName,
+      deployedBytecodeHash,
     };
   }
 

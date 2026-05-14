@@ -128,10 +128,59 @@ registers all the new addresses in a single batch — see
   ownership, and have them call `setAndReinitializeContracts` from
   their wallet (or queue it through the MultiSig UI).
 
+**Picking which contracts to redeploy:**
+
+A full reset (every contract except Hub/Token) is correct for a true reset
+of the testnet. For a targeted upgrade — only the contracts whose source
+has actually changed — let the `deployedBytecodeHash` check do the picking
+instead of eyeballing git diffs:
+
+```bash
+pnpm --filter @origintrail-official/dkg-evm-module check-contracts:testnet
+```
+
+The script `keccak256`s the current artifact's `deployedBytecode` for
+every `deployed: true` entry in
+`packages/evm-module/deployments/base_sepolia_v10_contracts.json` and
+compares it against the `deployedBytecodeHash` recorded there at deploy
+time (or backfilled via `record-contract-hashes:testnet`). The output
+lists every contract whose current build differs from what's on chain —
+that's your redeploy candidate set. The hash detects:
+- direct source edits to the contract,
+- transitive changes via imported libraries / interfaces / abstracts,
+- compiler-version or optimizer-setting drift in `hardhat.node.config.ts`,
+- standard-library or remapping shifts.
+
+"Changed" in the hash sense means "bytecode would differ from what's at
+`evmAddress`," which corresponds to either a behavioural change or — more
+commonly — a metadata-trailer drift that invalidates basescan source
+verification. Both are reasons to consider redeploying; the decision is
+still yours.
+
+**Bootstrap when the JSON has no recorded hashes yet:**
+
+```bash
+# Reads eth_getCode for every deployed contract on the configured
+# network and writes its keccak256 into the deployments JSON. Run once
+# after introducing the field on a network that pre-dates it. Idempotent.
+pnpm --filter @origintrail-official/dkg-evm-module record-contract-hashes:testnet
+```
+
+This populates `deployedBytecodeHash` (and `contractClassName` where
+artifact-name ≠ Hub-name, e.g. `EpochStorageV6/V8 → EpochStorage`). Commit
+the resulting JSON change before running the check script.
+
+After the targeted redeploy below lands, the deploy pipeline auto-writes
+the new `deployedBytecodeHash` to the JSON via
+`utils/helpers.ts#updateDeploymentsJson`, so subsequent runs of
+`check-contracts:testnet` will see them as up-to-date.
+
 **Deploy procedure:**
 
 1. Open `packages/evm-module/deployments/base_sepolia_v10_contracts.json`.
-2. For every entry **except** `Hub` and `Token`, set `deployed: false`:
+2. Set `deployed: false` on each contract. For a **full reset**, on every
+   entry except `Hub` and `Token`. For a **targeted upgrade**, on each
+   contract reported by `check-contracts:testnet`:
    ```bash
    node -e '
      const fs = require("fs");

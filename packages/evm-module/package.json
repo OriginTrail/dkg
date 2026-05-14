@@ -17,6 +17,8 @@
     "test:integration": "hardhat test --network hardhat --config hardhat.node.config.ts --grep '@integration'",
     "deploy:localhost": "hardhat deploy --network hardhat --config hardhat.node.config.ts",
     "deploy:testnet": "hardhat deploy --network base_sepolia_v10 --config hardhat.node.config.ts",
+    "check-contracts:testnet": "hardhat run scripts/check-contract-hashes.ts --network base_sepolia_v10 --config hardhat.node.config.ts",
+    "record-contract-hashes:testnet": "hardhat run scripts/record-contract-hashes-from-chain.ts --network base_sepolia_v10 --config hardhat.node.config.ts",
     "typechain": "hardhat typechain"
   },
   "dependencies": {
