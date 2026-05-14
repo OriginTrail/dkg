@@ -317,8 +317,20 @@ export function adoptLocalAgentTurnId(
 }
 
 export function normalizeMessageContent(content: string): string {
-  const normalized = content.replace(/\\n/g, '\n').replace(/\r\n/g, '\n');
-  return normalized
+  // Normalize CRLF → LF and trim leading/trailing blank lines so chat
+  // bubbles don't render with extra vertical whitespace.
+  //
+  // Earlier versions also rewrote literal backslash-n (`\\n` in source,
+  // i.e. the two characters `\` + `n`) into real newlines, to recover
+  // from a transport that double-escaped its strings. With PR3's
+  // markdown / code-block rendering, that rewrite actively corrupts
+  // legitimate agent output — a JSON snippet like `{"text":"a\\nb"}`
+  // or a shell sample like `echo -e "a\\nb"` would get split across
+  // two lines, breaking the displayed code (Codex CHWpS). Removed; if
+  // a specific transport ever needs unescaping, do it at the transport
+  // boundary, not in the renderer.
+  return content
+    .replace(/\r\n/g, '\n')
     .replace(/^(?:[ \t]*\n)+/, '')
     .replace(/(?:\n[ \t]*)+$/, '');
 }

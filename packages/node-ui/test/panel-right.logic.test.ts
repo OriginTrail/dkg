@@ -129,11 +129,27 @@ describe('PanelRight logic helpers', () => {
   });
 
   it('normalizes local-agent message content without leading empty bubble space', () => {
-    expect(normalizeMessageContent('\\n\\nDone.')).toBe('Done.');
+    // Real-newline leading + trailing whitespace gets trimmed.
+    expect(normalizeMessageContent('\n\nDone.')).toBe('Done.');
     expect(normalizeMessageContent('\n\nMatched entry in agent-context / memory:\n\n- fact')).toBe(
       'Matched entry in agent-context / memory:\n\n- fact',
     );
-    expect(normalizeMessageContent('Line one\\n\\nLine two\\n')).toBe('Line one\n\nLine two');
+    expect(normalizeMessageContent('Line one\n\nLine two\n')).toBe('Line one\n\nLine two');
+    // CRLF folds to LF.
+    expect(normalizeMessageContent('Line one\r\nLine two')).toBe('Line one\nLine two');
+  });
+
+  it('preserves literal backslash-n in agent content (Codex CHWpS)', () => {
+    // Earlier code rewrote `\\n` (two chars: backslash + n) into a real
+    // newline to recover from a transport that double-escaped its
+    // strings. With markdown / code-block rendering active that rewrite
+    // corrupts legitimate agent output — JSON, shell snippets, and any
+    // code sample that intentionally contains escaped newlines.
+    // Keep them literal.
+    expect(normalizeMessageContent('{"text":"a\\nb"}')).toBe('{"text":"a\\nb"}');
+    expect(normalizeMessageContent('echo -e "a\\nb"')).toBe('echo -e "a\\nb"');
+    // Mixed: real leading newlines still trim, embedded \\n stays literal.
+    expect(normalizeMessageContent('\n\n{"x":"a\\nb"}\n')).toBe('{"x":"a\\nb"}');
   });
 
   it('resolves conversation state keys and session preservation correctly', () => {
