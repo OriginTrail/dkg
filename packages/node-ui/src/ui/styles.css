@@ -1123,7 +1123,9 @@ button:focus:not(:focus-visible) { outline: none; }
   top: calc(100% + 6px);
   /* Anchor to the LEFT edge of the trigger so the popover grows rightward
      into the panel — left-most agent tabs (the common case) used to clip
-     against the panel's left edge with right:0. */
+     against the panel's left edge with right:0. AgentTabMenu measures
+     after open and flips to .align-right when the projected right edge
+     would overflow the panel (rightmost tabs on narrow layouts). */
   left: 0;
   min-width: 200px;
   background: var(--bg-elevated);
@@ -1133,6 +1135,13 @@ button:focus:not(:focus-visible) { outline: none; }
   z-index: 200;
   overflow: hidden;
   padding: 4px;
+}
+.v10-agent-tab-menu-popover.align-right {
+  /* Right-anchored fallback when the left-anchored popover would
+     overflow the panel's right edge (rightmost tabs on narrow layouts).
+     AgentTabMenu measures after open and toggles this class. */
+  left: auto;
+  right: 0;
 }
 .v10-agent-tab-menu-status {
   display: flex;

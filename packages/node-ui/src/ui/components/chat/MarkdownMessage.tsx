@@ -8,17 +8,6 @@ interface MarkdownMessageProps {
   content: string;
 }
 
-function extractCodeText(children: React.ReactNode): string {
-  if (typeof children === 'string') return children;
-  if (typeof children === 'number') return String(children);
-  if (Array.isArray(children)) return children.map(extractCodeText).join('');
-  if (React.isValidElement(children)) {
-    const childChildren = (children.props as { children?: React.ReactNode }).children;
-    return extractCodeText(childChildren);
-  }
-  return '';
-}
-
 // Treat a URL as absolute (and therefore worth opening in a new tab) only if
 // it has an explicit scheme. Relative routes, hash anchors, and mailto: should
 // keep their normal navigation semantics so an in-app link doesn't strand the
@@ -88,24 +77,44 @@ export function MarkdownMessage({ content }: MarkdownMessageProps) {
           // `|:---|---:|:---:|` syntax) survives our wrapper.
           th: ({ children, ...props }) => <th className="v10-md-th" {...props}>{children}</th>,
           td: ({ children, ...props }) => <td className="v10-md-td" {...props}>{children}</td>,
-          pre: ({ children }) => {
-            // Unwrap: fenced-block <code> children are rendered via CodeBlock
-            // directly, so <pre> should just pass through to avoid double-wrapping.
-            return <>{children}</>;
-          },
-          code: ({ className, children, node }) => {
-            const match = /language-([\w-]+)/.exec(className || '');
-            const text = extractCodeText(children).replace(/\n$/, '');
-            // Block-vs-inline detection: react-markdown's HAST tree marks the
-            // parent of a fenced block as a `<pre>` element. If the parent is
-            // a `<pre>`, this is a fenced block — regardless of whether the
-            // source had a language tag or only a single line of content.
-            // The previous newline-based heuristic missed `\`\`\`\nfoo\n\`\`\``.
-            const parent = (node as unknown as { parent?: { tagName?: string } } | undefined)?.parent;
-            const isBlock = Boolean(match) || parent?.tagName === 'pre';
-            if (isBlock) {
-              return <CodeBlock code={text} lang={match?.[1]} />;
+          pre: ({ children, node }) => {
+            // Block-vs-inline detection lives here, NOT in the `code`
+            // renderer. react-markdown does not populate `node.parent`
+            // reliably, so the previous `parent?.tagName === 'pre'` test
+            // missed unlabelled fenced blocks like:
+            //   ```
+            //   foo
+            //   ```
+            // In markdown, however, a `<pre>` always wraps a fenced code
+            // block — there's no other source construct that produces
+            // one. Read the inner <code> AST node directly from this
+            // renderer to get the language class + raw text, regardless
+            // of whether the fence had a language tag.
+            const codeAstNode = (
+              node as
+                | {
+                    children?: Array<{
+                      tagName?: string;
+                      properties?: { className?: string[] };
+                      children?: Array<{ value?: string }>;
+                    }>;
+                  }
+                | undefined
+            )?.children?.[0];
+            if (codeAstNode?.tagName === 'code') {
+              const classNameValue = codeAstNode.properties?.className?.[0] ?? '';
+              const match = /language-([\w-]+)/.exec(classNameValue);
+              const rawText = (codeAstNode.children ?? [])
+                .map((n) => n?.value ?? '')
+                .join('')
+                .replace(/\n$/, '');
+              return <CodeBlock code={rawText} lang={match?.[1]} />;
             }
+            return <pre>{children}</pre>;
+          },
+          code: ({ children }) => {
+            // Fenced blocks are handled in the `pre` renderer above —
+            // this path is strictly inline code now.
             return <code className="v10-md-code">{children}</code>;
           },
         }}

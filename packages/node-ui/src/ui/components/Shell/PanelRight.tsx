@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback, useEffect } from 'react';
+import React, { useState, useRef, useCallback, useEffect, useLayoutEffect } from 'react';
 import { useJourneyStore } from '../../stores/journey.js';
 import { useProjectsStore, type ContextGraph } from '../../stores/projects.js';
 import {
@@ -629,9 +629,35 @@ function AgentTabMenu(props: {
   onDisconnect: () => void;
 }) {
   const [open, setOpen] = useState(false);
+  // Default left-anchored. After the popover opens we measure whether it
+  // would overflow the panel's right edge (rightmost agent tabs on narrow
+  // layouts) and flip to right-anchored if so.
+  const [alignRight, setAlignRight] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    const popover = popoverRef.current;
+    const trigger = triggerRef.current;
+    if (!popover || !trigger) return;
+    // Find the nearest scroll/panel container — the right-side chat panel
+    // is the visible boundary the popover must fit inside. Fall back to
+    // the viewport width when there is no panel ancestor.
+    const panel = trigger.closest<HTMLElement>('.v10-panel-right') || document.body;
+    const panelRect = panel.getBoundingClientRect();
+    const triggerRect = trigger.getBoundingClientRect();
+    // Compute where the (left-anchored) popover's right edge would land.
+    // popover.offsetWidth already reflects min-width: 200px, even right
+    // after open when alignRight is still false on the first paint.
+    const projectedRight = triggerRect.left + popover.offsetWidth;
+    if (projectedRight > panelRect.right - 4) {
+      setAlignRight(true);
+    } else {
+      setAlignRight(false);
+    }
+  }, [open]);
 
   const closeAndReturnFocus = useCallback(() => {
     setOpen(false);
@@ -716,7 +742,7 @@ function AgentTabMenu(props: {
       {open && (
         <div
           ref={popoverRef}
-          className="v10-agent-tab-menu-popover"
+          className={`v10-agent-tab-menu-popover${alignRight ? ' align-right' : ''}`}
           role="menu"
           onKeyDown={onPopoverKeyDown}
         >

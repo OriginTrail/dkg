@@ -184,6 +184,21 @@ describe('MarkdownMessage rendering', () => {
     await unmount();
   });
 
+  it('renders UNLABELLED fenced code blocks via CodeBlock — not inline (Codex BOjOQ)', async () => {
+    // Block detection moved into the `pre` renderer so it doesn't rely on
+    // react-markdown's flaky `node.parent`. Fence without a language tag
+    // must still produce a CodeBlock (.v10-md-pre + .v10-md-copy), not an
+    // inline `<code class="v10-md-code">`.
+    const md = '```\nfoo\n```';
+    const { container, unmount } = await render(md);
+    expect(container.querySelector('.v10-md-pre')).toBeTruthy();
+    expect(container.querySelector('.v10-md-copy')).toBeTruthy();
+    // The text content survives as a code block, not as an inline chip.
+    expect(container.textContent ?? '').toContain('foo');
+    expect(container.querySelector('.v10-md-code')).toBeNull();
+    await unmount();
+  });
+
   it('G1 sanitization: <script> in content is rendered as escaped text, not as a script tag', async () => {
     const md = '<script>alert(1)</script>\n\nhello';
     const { container, unmount } = await render(md);
