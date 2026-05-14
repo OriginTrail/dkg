@@ -1338,14 +1338,41 @@ function NetworkTab(props: {
   const [disconnectedExpanded, setDisconnectedExpanded] = useState(false);
 
   // The /api/agents feed can report the same physical peer under multiple
-  // records (e.g. via different transports or polling overlaps), which
-  // inflates the on-screen list relative to the libp2p connection summary
-  // shown at the top. Collapse to one entry per peerId, preferring the
-  // most-recently-seen record so latency/status reflect current state.
+  // records (e.g. once via a direct transport, once via a relay). Collapse
+  // to one entry per peerId. Tie-break order:
+  //   1. Prefer a connected record over a disconnected one.
+  //   2. Among connected records, prefer DIRECT over relayed — direct is
+  //      the better transport, so a peer that has any direct connection
+  //      should be reported as direct (not arbitrarily classed as relayed
+  //      because the relay record arrived more recently in the feed).
+  //   3. Otherwise prefer the more-recently-seen record so latency/status
+  //      reflect current state.
+  // With this rule, direct + relayed = total unique connected peers and
+  // the top summary count agrees with the section counts.
+  const transportRank = (peer: AgentInfo): number =>
+    (peer.connectionTransport ?? 'direct') === 'direct' ? 1 : 0;
   const uniquePeers = Array.from(
     peerAgents.reduce<Map<string, AgentInfo>>((acc, peer) => {
       const prev = acc.get(peer.peerId);
-      if (!prev || (peer.lastSeen ?? 0) >= (prev.lastSeen ?? 0)) {
+      if (!prev) {
+        acc.set(peer.peerId, peer);
+        return acc;
+      }
+      const peerConnected = peer.connectionStatus === 'connected';
+      const prevConnected = prev.connectionStatus === 'connected';
+      if (peerConnected !== prevConnected) {
+        if (peerConnected) acc.set(peer.peerId, peer);
+        return acc;
+      }
+      // Both connected or both disconnected — prefer DIRECT transport,
+      // then most recent.
+      const peerRank = transportRank(peer);
+      const prevRank = transportRank(prev);
+      if (peerRank !== prevRank) {
+        if (peerRank > prevRank) acc.set(peer.peerId, peer);
+        return acc;
+      }
+      if ((peer.lastSeen ?? 0) >= (prev.lastSeen ?? 0)) {
         acc.set(peer.peerId, peer);
       }
       return acc;
