@@ -968,6 +968,11 @@ export function ConnectedAgentsTab(props: {
       const off = messagesRegionEl.scrollHeight - messagesRegionEl.scrollTop - messagesRegionEl.clientHeight;
       setShowScrollToBottom(off > 40);
     };
+    // Initial recompute when the region mounts — without this, switching
+    // from add-flow/loader to an already-populated chat leaves the pill
+    // stuck on its prior `false` until the next mutation or manual
+    // scroll fires (Codex CHBiH).
+    recompute();
     const mo = new MutationObserver(recompute);
     mo.observe(messagesRegionEl, { childList: true, subtree: true, characterData: true });
     return () => mo.disconnect();

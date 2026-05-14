@@ -435,67 +435,25 @@ test.describe('Right Panel (Agent Panel)', () => {
   });
 
   // ─── PR3: Markdown rendering (react-markdown + remark-gfm + shiki) ────
-
-  test.describe('PR3: markdown rendering', () => {
-    test('rendersTable: a GFM table in a chat bubble lands inside .v10-md-table-scroll', async ({ page }) => {
-      // Daemon-seeded chat content is non-deterministic in CI, so the
-      // bubble may or may not already contain a markdown table. Two-tier
-      // check: (1) if a table-scroll wrapper exists anywhere in a bubble,
-      // assert its structural pieces (`<th>` + `<td>` with our classnames);
-      // (2) otherwise skip with a pointer at the deterministic unit-test
-      // fixture that covers the same rendering path.
-      const bubble = page.locator(sel.rightPanel.chatBubble).first();
-      if (!(await bubble.isVisible().catch(() => false))) {
-        test.skip(true, 'No assistant chat bubble in this env (daemon required to seed messages).');
-      }
-      const tableScroll = page.locator(sel.rightPanel.chatBubble).locator('.v10-md-table-scroll').first();
-      if (!(await tableScroll.isVisible().catch(() => false))) {
-        test.skip(true, 'No table-bearing bubble in this env — covered by markdown-message.test.ts.');
-      }
-      await expect(tableScroll).toBeVisible();
-      await expect(tableScroll.locator('table.v10-md-table')).toBeVisible();
-      await expect(tableScroll.locator('th.v10-md-th').first()).toBeVisible();
-      await expect(tableScroll.locator('td.v10-md-td').first()).toBeVisible();
-    });
-
-    test('codeBlockCopy: clicking .v10-md-copy on a fenced block calls navigator.clipboard.writeText with the code', async ({ page }) => {
-      const codeBlock = page.locator('.v10-md-pre').first();
-      if (!(await codeBlock.isVisible().catch(() => false))) {
-        test.skip(true, 'No fenced code block rendered in this env (covered by unit tests in code-block.test.ts).');
-      }
-      const copyBtn = codeBlock.locator('.v10-md-copy');
-      const fallbackText = await codeBlock.locator('code').first().textContent();
-
-      await page.evaluate(() => {
-        (window as any).__copiedText = '';
-        Object.defineProperty(navigator, 'clipboard', {
-          configurable: true,
-          value: { writeText: (s: string) => { (window as any).__copiedText = s; return Promise.resolve(); } },
-        });
-      });
-
-      await copyBtn.click();
-      const copied = await page.evaluate(() => (window as any).__copiedText as string);
-      expect(copied).toBe(fallbackText ?? '');
-    });
-
-    test('linkOpensExternal: rendered markdown links carry target="_blank" and rel="noopener noreferrer"', async ({ page }) => {
-      const link = page.locator('a.v10-md-link').first();
-      if (!(await link.isVisible().catch(() => false))) {
-        test.skip(true, 'No markdown link rendered in this env.');
-      }
-      await expect(link).toHaveAttribute('target', '_blank');
-      await expect(link).toHaveAttribute('rel', 'noopener noreferrer');
-    });
-
-    test('scriptSanitized: react-markdown does not emit a real <script> tag for raw HTML in message content', async ({ page }) => {
-      const bubble = page.locator(sel.rightPanel.chatBubble);
-      if ((await bubble.count()) === 0) {
-        test.skip(true, 'No assistant bubble to inspect for sanitization smoke (env requires a daemon).');
-      }
-      // In any bubble we did render, no <script> child must exist.
-      const scriptCount = await bubble.locator('script').count();
-      expect(scriptCount).toBe(0);
-    });
-  });
+  //
+  // The four PR3 e2e checks that lived here (rendersTable, codeBlockCopy,
+  // linkOpensExternal, scriptSanitized) silently skipped when daemon-seeded
+  // chat content was absent, which is the common CI case — Codex CHBiK
+  // flagged that as misleading coverage. Removed.
+  //
+  // Coverage is now exclusively in the deterministic unit suites which
+  // exercise the same rendering paths against a real DOM via happy-dom:
+  //   - test/markdown-message.test.ts   (22 tests: GFM tables, blockquote,
+  //                                      task lists, links rel/target, img
+  //                                      placeholder, script sanitization,
+  //                                      lazy-shiki gate, fenced-block
+  //                                      detection inc. unlabelled, inert
+  //                                      relative-href, `node` prop guard)
+  //   - test/code-block.test.ts         (10 tests: shiki render, plaintext
+  //                                      fallback, copy button + clipboard,
+  //                                      language alias map)
+  //
+  // Re-add real-browser e2e checks here when a deterministic markdown
+  // fixture route is available (e.g. a `/test-harness/markdown` page that
+  // mounts MarkdownMessage with a known input).
 });
