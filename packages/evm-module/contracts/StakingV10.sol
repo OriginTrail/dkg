@@ -741,7 +741,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
                             * nodeScore18) / allNodesScore18;
                         uint96 operatorFeeAmount = uint96(
                             (grossNodeRewards
-                                * profileStorage.getLatestOperatorFeePercentage(identityId))
+                                * profileStorage.getOperatorFeePercentageByTimestampReverse(identityId, chronos.timestampForEpoch(e + 1) - 1))
                                 / parametersStorage.maxOperatorFee()
                         );
                         netNodeRewards = grossNodeRewards - operatorFeeAmount;
@@ -913,6 +913,13 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         if (pending > 0) {
             ss.deleteDelegatorWithdrawalRequest(identityId, v8Key);
         }
+        // Move the migrated TRAC physically from StakingStorage (SS) to
+        // ConvictionStakingStorage (CSS). The V8-side decrements above zero out
+        // SS's accounting; without this transfer CSS would be undercollateralized
+        // by Σ(migrated), allowing later withdrawers to drain fresh V10 deposits.
+        // StakingStorage.transferStake is onlyContracts and StakingV10 is
+        // Hub-registered, so the call is authorized.
+        ss.transferStake(address(convictionStorage), total);
 
         // Settle V10 side at zero stake — baseline the V10 token's score
         // cursor at `currentEpoch` so a later `claim()` doesn't collect

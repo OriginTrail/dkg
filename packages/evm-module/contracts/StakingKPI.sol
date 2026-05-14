@@ -6,6 +6,7 @@ import {IdentityStorage} from "./storage/IdentityStorage.sol";
 import {ProfileStorage} from "./storage/ProfileStorage.sol";
 import {StakingStorage} from "./storage/StakingStorage.sol";
 import {ConvictionStakingStorage} from "./storage/ConvictionStakingStorage.sol";
+import {Chronos} from "./storage/Chronos.sol";
 import {ContractStatus} from "./abstract/ContractStatus.sol";
 import {IInitializable} from "./interfaces/IInitializable.sol";
 import {INamed} from "./interfaces/INamed.sol";
@@ -45,6 +46,7 @@ contract StakingKPI is INamed, IVersioned, ContractStatus, IInitializable {
     ///         balance, per-epoch reward flags). Source of truth for the
     ///         node-level KPI surface.
     ConvictionStakingStorage public convictionStakingStorage;
+    Chronos public chronos;
     RandomSamplingStorage public randomSamplingStorage;
     EpochStorage public epochStorage;
     ParametersStorage public parametersStorage;
@@ -71,6 +73,7 @@ contract StakingKPI is INamed, IVersioned, ContractStatus, IInitializable {
         profileStorage = ProfileStorage(hub.getContractAddress("ProfileStorage"));
         stakingStorage = StakingStorage(hub.getContractAddress("StakingStorage"));
         convictionStakingStorage = ConvictionStakingStorage(hub.getContractAddress("ConvictionStakingStorage"));
+        chronos = Chronos(hub.getContractAddress("Chronos"));
         randomSamplingStorage = RandomSamplingStorage(hub.getContractAddress("RandomSamplingStorage"));
         epochStorage = EpochStorage(hub.getContractAddress("EpochStorageV8"));
         parametersStorage = ParametersStorage(hub.getContractAddress("ParametersStorage"));
@@ -226,7 +229,10 @@ contract StakingKPI is INamed, IVersioned, ContractStatus, IInitializable {
 
         uint256 totalNodeRewards = (epocRewardsPool * nodeScore18) / allNodesScore18;
 
-        uint256 feePercentageForEpoch = profileStorage.getLatestOperatorFeePercentage(identityId);
+        uint256 feePercentageForEpoch = profileStorage.getOperatorFeePercentageByTimestampReverse(
+            identityId,
+            chronos.timestampForEpoch(epoch + 1) - 1
+        );
         uint96 operatorFeeAmount = uint96(
             (totalNodeRewards * feePercentageForEpoch) / parametersStorage.maxOperatorFee()
         );
