@@ -22,4 +22,7 @@ func.dependencies = [
   'RandomSamplingStorage',
   'EpochStorage',
   'ParametersStorage',
+  // Bound in initialize() for timestamp-aware operator-fee lookup in
+  // getNetNodeRewards (must mirror StakingV10._claim).
+  'Chronos',
 ];
