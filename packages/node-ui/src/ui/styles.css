@@ -1294,8 +1294,19 @@ button:focus:not(:focus-visible) { outline: none; }
      and the input shell below. */
   bottom: 16px;
   align-self: center;
+  /* Lock the box to 32x32 in every direction. The messages region is a
+     flex column with default `align-items: stretch`; without min/max
+     and flex: none, the cross-axis sizing can drift the button into a
+     horizontal pill instead of a circle. */
   width: 32px;
   height: 32px;
+  min-width: 32px;
+  min-height: 32px;
+  max-width: 32px;
+  max-height: 32px;
+  flex: none;
+  aspect-ratio: 1;
+  padding: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
