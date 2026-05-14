@@ -304,6 +304,31 @@ export interface DkgConfig {
      */
     useWorkerThread?: boolean;
   };
+  /**
+   * RFC 04 v0.3 / Issue #461 — opt this node into the Network State
+   * Registry as a circuit-relay provider. When true, the daemon flips
+   * the on-chain `relayCapable` flag on the node's profile so other
+   * peers can resolve it as a candidate relay during the chain-driven
+   * NetworkStateRegistry rollout (Phase 2+ via attestation KCs).
+   *
+   * Multiaddrs themselves are NOT published to chain via Profile
+   * (RFC 04 §5.2 — they live in per-RS-round attestation KCs). This
+   * flag is the operator's "I intend to run as a relay" hint that
+   * gates whether they bother running the attestation cosig + submit
+   * pipeline at all.
+   *
+   * Tri-state semantics on startup (Codex PR #506 fix):
+   *   - true      → daemon ensures on-chain flag is true
+   *   - false     → daemon ensures on-chain flag is false (actively
+   *                 clears any stale prior opt-in)
+   *   - undefined → daemon does not touch the on-chain flag, preserving
+   *                 any manual `dkg admin set-relay-capable` flips
+   *
+   * Default: undefined (i.e. no chain interaction unless the operator
+   * has set this explicitly in config). For a fresh node this is
+   * equivalent to relay-incapable.
+   */
+  relayCapable?: boolean;
 }
 
 /**

@@ -582,6 +582,13 @@ export interface ChainAdapter {
   getConvictionDiscount?(accountId: bigint): Promise<{ discountBps: number; conviction: bigint }>;
   getConvictionAccountInfo?(accountId: bigint): Promise<ConvictionAccountInfo | null>;
   /**
+   * Live owner lookup for a PCA NFT — wraps `DKGPublishingConvictionNFT.ownerOf(accountId)`.
+   * Used by the daemon's curated-CG registration preflight to enforce
+   * `local curator == ownerOf(pcaAccountId)` so an agent wallet cannot
+   * impersonate ownership when tying a CG to a PCA.
+   */
+  getPublishingConvictionAccountOwner?(accountId: bigint): Promise<string>;
+  /**
    * Authorize an EOA to draw down on the PCA's discounted publishing
    * allowance. Wraps `PublishingConvictionAccount.addAuthorizedKey(accountId, key)`,
    * which the contract gates on `msg.sender == account.admin` — i.e. the
@@ -775,6 +782,30 @@ export interface ChainAdapter {
     identityId?: bigint;
     additionalAddresses?: string[];
   }): Promise<OperationalWalletRegistrationResult>;
+
+  // ----- Network State Registry (RFC 04 v0.3 / Issue #461) -----
+  //
+  // Surfaces the per-profile relay-capability flag. Multiaddrs themselves
+  // are NOT exposed here — they live in per-round attestation KCs that
+  // submitProofV2 mints (Phase 2), not on Profile (RFC 04 §5.2).
+  //
+  // The read method takes an explicit identityId so consumers can resolve
+  // any node's flag (their own or a peer's). The write method resolves
+  // the caller's identityId from the bound signer and calls the
+  // onlyIdentityOwner-gated update entry point on Profile.sol — an
+  // operator wanting to flip another node's flag would need that
+  // node's admin/operational key, which the adapter intentionally
+  // does not facilitate.
+
+  /** RFC 04 — read the relay-capability flag on a node profile. */
+  getRelayCapable?(identityId: bigint): Promise<boolean>;
+
+  /**
+   * RFC 04 — flip the bound signer's own relay-capability flag.
+   * Resolves the caller's identityId from the signer; throws when
+   * no profile is registered.
+   */
+  setRelayCapable?(relayCapable: boolean): Promise<TxResult>;
 
   /**
    * Confirm that an address is registered as an OPERATIONAL_KEY for an identity.

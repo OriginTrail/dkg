@@ -1327,6 +1327,12 @@ contextGraphCmd
 
       const participantIdentityIds = (opts.participantIdentityId as string[] | undefined) ?? [];
       const allowedAgents = (opts.allowedAgent as string[] | undefined) ?? [];
+      // pcaAccountId is intentionally NOT a flag on `create` —
+      // `createContextGraph` no longer persists the id, so a
+      // create-time flag would silently drop the PCA configuration
+      // before `register <id>` is run (Codex PR #502 round-4). Users
+      // who want PCA-curated registration pass `--pca-account-id` on
+      // `dkg context-graph register <id>` instead.
       const accessPolicy = allowedAgents.length > 0 ? 1 : (opts.accessPolicy as number | undefined);
 
       const result = await client.createContextGraph(id, opts.name ?? id, opts.description, {
@@ -1385,19 +1391,28 @@ contextGraphCmd
   .option('--reveal', 'Deprecated: V10 ContextGraphs registration does not reveal cleartext metadata on-chain')
   .option('--access-policy <n>', 'Access policy: 0 = public/discoverable, 1 = private/curated', parseInt)
   .option('--publish-policy <n>', 'Publish policy: 0 = curated, 1 = open', parseInt)
+  .option('--pca-account-id <id>', 'Publishing Conviction Account id for PCA-curated registration')
   .action(async (id: string, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
       if (opts.reveal) {
         console.warn('--reveal is deprecated and ignored for V10 ContextGraphs registration.');
       }
+      const pcaAccountId = opts.pcaAccountId as string | undefined;
+      if (pcaAccountId && !/^[1-9]\d*$/.test(pcaAccountId)) {
+        throw new Error('--pca-account-id must be a positive decimal integer');
+      }
       const result = await client.registerContextGraph(id, {
         accessPolicy: opts.accessPolicy != null ? Number(opts.accessPolicy) : undefined,
         publishPolicy: opts.publishPolicy != null ? Number(opts.publishPolicy) : undefined,
+        pcaAccountId,
       });
       console.log(`Context graph registered on-chain:`);
       console.log(`  ID:         ${id}`);
       console.log(`  On-chain:   ${result.onChainId}`);
+      if (pcaAccountId) {
+        console.log(`  PCA account id: ${pcaAccountId}`);
+      }
       console.log(`  ${result.hint ?? 'You can now publish SWM to Verified Memory.'}`);
     } catch (err) {
       console.error(toErrorMessage(err));
