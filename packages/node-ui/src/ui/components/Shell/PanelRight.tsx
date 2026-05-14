@@ -301,15 +301,49 @@ function buildChatContextEntries(
   return entries;
 }
 
+/**
+ * Un-escape literal backslash-n in history-loaded text.
+ *
+ * The DKG-memory persistence path stores message text with newlines
+ * encoded as `\n` (backslash + the letter n), not as real `
+`
+ * characters. When the panel reloads history, raw `\\n` shows up
+ * inline and breaks markdown parsing (paragraphs run together, code
+ * fences don't open, table separators don't render).
+ *
+ * Round-17 (Codex CHWpS) deliberately removed the equivalent
+ * un-escape from the global `normalizeMessageContent` because it
+ * corrupted legitimate `\\n` content in live-stream code samples
+ * (JSON like `{"text":"a\\nb"}`, shell like `echo -e "a\\nb"`). That
+ * concern still applies to LIVE content, which is why we do NOT
+ * un-escape there. But for history-load specifically, the
+ * persistence layer is responsible for the escape, so un-escaping
+ * here is the symmetric decode — the same fix Codex itself suggested
+ * ("the right place is the transport boundary, not the renderer").
+ *
+ * Tradeoff: a code sample containing a literal `\\n` that was
+ * persisted via history will still get its escape unwrapped on
+ * reload. That's a pre-existing daemon-layer quirk; fixing it
+ * cleanly requires the persistence layer to round-trip strings
+ * faithfully (e.g., emit them as raw UTF-8 with real newlines).
+ * Worth a future daemon-side follow-up; meanwhile the markdown
+ * regression after refresh is the worse user-visible problem.
+ */
+function unescapeNewlinesFromHistory(text: string | undefined): string {
+  if (!text) return '';
+  return text.replace(/\\n/g, '\n');
+}
+
 function mapHistoryMessage(message: LocalAgentHistoryMessage): LocalAgentMessage {
   const author = message.author.toLowerCase();
-  const hasAgentText = Boolean(message.text);
+  const decodedText = unescapeNewlinesFromHistory(message.text);
+  const hasAgentText = Boolean(decodedText);
   return {
     id: message.uri || `local-history:${++localMessageId}`,
     uri: message.uri,
     turnId: message.turnId,
     role: author.includes('assistant') || author.includes('agent') ? 'assistant' : 'user',
-    content: message.text || buildAttachmentSummary(message.attachmentRefs ?? []),
+    content: decodedText || buildAttachmentSummary(message.attachmentRefs ?? []),
     ts: formatLocalTimestamp(message.ts),
     tsRaw: toIsoTimestamp(message.ts),
     attachments: message.attachmentRefs,
