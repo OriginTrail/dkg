@@ -258,6 +258,49 @@ describe('Composer keybindings + autosize wiring', () => {
     await unmount();
   });
 
+  it('plain Enter does NOT send when input is empty and no attachments', async () => {
+    // The send button gates on `inputDisabled || (!localInput.trim() && !hasSendableAttachmentDrafts)`.
+    // Plain Enter must mirror that gate — otherwise pressing Enter on an
+    // empty composer would fire `onSendLocalMessage()` even though the
+    // visible affordance (the button) is disabled.
+    const onSendLocalMessage = vi.fn();
+    const { container, unmount } = await renderTab({
+      localInput: '   ',
+      onSendLocalMessage,
+      attachments: [],
+    });
+    const textarea = getTextarea(container);
+
+    await act(async () => {
+      pressKey(textarea, { key: 'Enter' });
+    });
+    expect(onSendLocalMessage).not.toHaveBeenCalled();
+    await unmount();
+  });
+
+  it('plain Enter sends when text is empty but attachments are queued', async () => {
+    const onSendLocalMessage = vi.fn();
+    const file = new File(['hello'], 'spec.md', { type: 'text/markdown' });
+    const { container, unmount } = await renderTab({
+      localInput: '',
+      onSendLocalMessage,
+      attachments: [{
+        id: 'draft-1',
+        file,
+        contextGraphId: 'testing',
+        assertionName: 'spec',
+        status: 'queued',
+      }],
+    });
+    const textarea = getTextarea(container);
+
+    await act(async () => {
+      pressKey(textarea, { key: 'Enter' });
+    });
+    expect(onSendLocalMessage).toHaveBeenCalledTimes(1);
+    await unmount();
+  });
+
   it('Escape on a populated composer calls onLocalInputChange("")', async () => {
     const onLocalInputChange = vi.fn();
     const { container, unmount } = await renderTab({

@@ -1267,7 +1267,14 @@ export function ConnectedAgentsTab(props: {
                         if (e.nativeEvent.isComposing) return;
                         if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
                           e.preventDefault();
-                          onSendLocalMessage();
+                          // Gate Enter with the same sendability check the
+                          // send button uses, otherwise an empty-input
+                          // Enter or an Enter while inputDisabled would
+                          // fire onSendLocalMessage even though the
+                          // surfaced affordance (the button) is disabled.
+                          if (!inputDisabled && (localInput.trim() || hasSendableAttachmentDrafts)) {
+                            onSendLocalMessage();
+                          }
                           return;
                         }
                         if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
@@ -1305,15 +1312,24 @@ export function ConnectedAgentsTab(props: {
                             value={activeProjectId ?? ''}
                             onChange={onSelectProject}
                             options={[
-                              // Leading "no project" row gives the user a path
-                              // back to a cleared context graph (the old native
-                              // <select> had an implicit empty option that
-                              // handled this).
-                              { value: '', label: 'No project (clear selection)' },
+                              // The "No project (clear selection)" row only
+                              // renders once a real project is active.
+                              // Otherwise its `value: ''` would match the
+                              // empty trigger value and the picker would show
+                              // "No project (clear selection)" as a fake
+                              // selection instead of the intended "Choose a
+                              // project" placeholder.
+                              ...(activeProjectId
+                                ? [{ value: '', label: 'No project (clear selection)' }]
+                                : []),
                               ...availableProjects.map((project) => ({ value: project.id, label: project.name })),
                             ]}
                             placeholder={projectsLoading ? 'Loading projects…' : 'Choose a project'}
-                            disabled={projectsLoading || availableProjects.length === 0}
+                            // Disable while loading. When no project is active
+                            // and the list is empty there's nothing to pick
+                            // yet, so disable then too — once a project is
+                            // active the clear row is always there.
+                            disabled={projectsLoading || (!activeProjectId && availableProjects.length === 0)}
                             ariaLabel="Active project"
                             prefixIcon={<Folder size={12} aria-hidden="true" />}
                           />
