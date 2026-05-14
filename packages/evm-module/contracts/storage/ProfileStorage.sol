@@ -9,7 +9,11 @@ import {IVersioned} from "../interfaces/IVersioned.sol";
 
 contract ProfileStorage is INamed, IVersioned, HubDependent {
     string private constant _NAME = "ProfileStorage";
-    string private constant _VERSION = "1.0.0";
+    // Bumped 1.0.0 -> 1.1.0: ProfileInfo struct extended with relayCapable
+    // (RFC 04 v0.3 / Issue #461). New mapping reads on existing keys return
+    // false for the new field. Multiaddrs were briefly added on a prior
+    // revision but are deliberately not stored on Profile (RFC 04 §5.2).
+    string private constant _VERSION = "1.1.0";
 
     event ProfileCreated(uint72 indexed identityId, string nodeName, bytes nodeId, uint16 initialOperatorFee);
     event ProfileDeleted(uint72 indexed identityId, bytes nodeId);
@@ -24,6 +28,8 @@ contract ProfileStorage is INamed, IVersioned, HubDependent {
         uint256 effectiveDate
     );
     event OperatorFeesUpdated(uint72 indexed identityId, ProfileLib.OperatorFee[] operatorFees);
+    // RFC 04 v0.3: relay-capability flag (multiaddrs live in attestation KCs, not Profile).
+    event RelayCapabilityUpdated(uint72 indexed identityId, bool oldValue, bool newValue);
 
     mapping(uint72 => ProfileLib.ProfileInfo) public profiles;
     mapping(string => bool) public isNameTaken;
@@ -57,10 +63,26 @@ contract ProfileStorage is INamed, IVersioned, HubDependent {
 
     function getProfile(
         uint72 identityId
-    ) external view returns (string memory, bytes memory, uint96, ProfileLib.OperatorFee[] memory) {
+    )
+        external
+        view
+        returns (
+            string memory,
+            bytes memory,
+            uint96,
+            ProfileLib.OperatorFee[] memory,
+            bool
+        )
+    {
         ProfileLib.ProfileInfo storage profile = profiles[identityId];
 
-        return (profile.name, profile.nodeId, profile.ask, profile.operatorFees);
+        return (
+            profile.name,
+            profile.nodeId,
+            profile.ask,
+            profile.operatorFees,
+            profile.relayCapable
+        );
     }
 
     function deleteProfile(uint72 identityId) external onlyContracts {
@@ -134,6 +156,28 @@ contract ProfileStorage is INamed, IVersioned, HubDependent {
         profiles[identityId].operatorFees = operatorFees;
 
         emit OperatorFeesUpdated(identityId, operatorFees);
+    }
+
+    // =====================================================================
+    // RFC 04 v0.3 / Issue #461 — relay-capability flag.
+    //
+    // This flag is the operator's "I intend to run as a relay" hint. It
+    // gates the operator's per-round attestation publish (RFC 04 Phase 2)
+    // — operators with relayCapable=false don't bother running the cosig
+    // + submit pipeline at all. Multiaddrs themselves live in the
+    // per-round attestation KC body, not on Profile (RFC 04 §5.2).
+    // =====================================================================
+
+    function getRelayCapable(uint72 identityId) external view returns (bool) {
+        return profiles[identityId].relayCapable;
+    }
+
+    function setRelayCapable(uint72 identityId, bool relayCapable) external onlyContracts {
+        ProfileLib.ProfileInfo storage profile = profiles[identityId];
+        bool oldValue = profile.relayCapable;
+        profile.relayCapable = relayCapable;
+
+        emit RelayCapabilityUpdated(identityId, oldValue, relayCapable);
     }
 
     function replacePendingOperatorFee(

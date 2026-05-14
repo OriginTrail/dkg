@@ -284,12 +284,34 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
       ...base,
       publishPolicy: 0,
       publishAuthorityAccountId: 1n,
-    })).rejects.toThrow(/PCA publishAuthorityAccountId is not supported/);
+    })).rejects.toThrow(/PCA account 1 does not exist/);
+
+    const { accountId } = await mock.createConvictionAccount(1n, 1);
 
     await expect(mock.createOnChainContextGraph({
       ...base,
       publishPolicy: 0,
+      publishAuthority: '0x2222222222222222222222222222222222222222',
+      publishAuthorityAccountId: accountId,
+    })).rejects.toThrow(/PCA publishAuthority must match account owner/);
+
+    await expect(mock.createOnChainContextGraph({
+      ...base,
+      publishPolicy: 0,
+      publishAuthority: '0x1111111111111111111111111111111111111111',
+      publishAuthorityAccountId: accountId,
     })).resolves.toMatchObject({ contextGraphId: 1n });
+
+    await expect(mock.createOnChainContextGraph({
+      ...base,
+      publishPolicy: 0,
+      publishAuthorityAccountId: accountId,
+    })).resolves.toMatchObject({ contextGraphId: 2n });
+
+    await expect(mock.createOnChainContextGraph({
+      ...base,
+      publishPolicy: 0,
+    })).resolves.toMatchObject({ contextGraphId: 3n });
   });
 
   it('requires explicit mock support for address-specific V10 publishing', async () => {

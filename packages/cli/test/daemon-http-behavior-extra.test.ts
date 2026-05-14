@@ -517,6 +517,213 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
     // "duplicate" / "conflict" substrings.
     expect(second.status).toBe(409);
   });
+
+  it('returns 400 when registering an existing open context graph with a PCA account id', async () => {
+    const d = daemon!;
+    const cgId = 'open-pca-register-' + Math.random().toString(36).slice(2, 8);
+    const create = await fetch(urlFor(d, '/api/context-graph/create'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
+      body: JSON.stringify({ id: cgId, name: cgId }),
+    });
+    expect([200, 201]).toContain(create.status);
+
+    const register = await fetch(urlFor(d, '/api/context-graph/register'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
+      body: JSON.stringify({ id: cgId, pcaAccountId: '1' }),
+    });
+    expect(register.status).toBe(400);
+    const body = await register.json();
+    expect(body.error).toMatch(/pcaAccountId|PCA account id/i);
+  });
+
+  // Codex PR #502 round-5: pcaAccountId on a create-only request used
+  // to be silently accepted (and silently dropped because
+  // createContextGraph no longer persists it). The daemon now rejects
+  // the create-without-register combo at the API boundary.
+  it('rejects pcaAccountId on POST /api/context-graph/create when register is not true', async () => {
+    const d = daemon!;
+    const cgId = 'pca-create-only-' + Math.random().toString(36).slice(2, 8);
+    const create = await fetch(urlFor(d, '/api/context-graph/create'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
+      body: JSON.stringify({ id: cgId, name: cgId, pcaAccountId: '1' }),
+    });
+    expect(create.status).toBe(400);
+    const body = (await create.json()) as { error?: string };
+    expect(body.error ?? '').toMatch(/register: true|register=true|register/i);
+    expect(body.error ?? '').toMatch(/pcaAccountId/);
+  });
+
+  // Codex review #502 round-3: pcaAccountId is a register-time knob —
+  // /create no longer persists it locally. A failed /create
+  // { register: true } leg must therefore leave NO stored PCA id
+  // behind, so a follow-up /register that omits the param can NOT
+  // silently replay the bad id.
+  it('never persists a bad pcaAccountId locally when /create { register: true } register leg fails', async () => {
+    const d = daemon!;
+    const cgId = 'pca-create-register-no-persist-' + Math.random().toString(36).slice(2, 8);
+
+    // /create { register: true } with a bad pcaAccountId. The register
+    // leg fails on chain owner-lookup. Per Codex round-3, the create
+    // path validates but does NOT persist pcaAccountId, so there's
+    // nothing to roll back and a follow-up /register without the
+    // param must NOT see the stale id.
+    const createAndRegister = await fetch(urlFor(d, '/api/context-graph/create'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
+      body: JSON.stringify({
+        id: cgId,
+        name: cgId,
+        accessPolicy: 1,
+        pcaAccountId: '99999999999999999999',
+        register: true,
+      }),
+    });
+    // /create itself succeeds (CG is created locally); only the
+    // register leg fails. Codex PR #502 round-9: the 200
+    // partial-success contract is preserved (backwards compat) —
+    // existing SDK callers rely on `created: true, registered: false`
+    // to retry the register step without re-running create. The new
+    // `registerErrorStatus` field surfaces what HTTP status the
+    // standalone /register endpoint would have returned for the same
+    // error (here: 404, nonexistent PCA token) so callers can map it
+    // to 4xx semantics without changing the envelope status.
+    expect(createAndRegister.status).toBe(200);
+    const body = (await createAndRegister.json()) as {
+      created?: string;
+      registered?: boolean;
+      registerError?: string;
+      registerErrorStatus?: number;
+    };
+    expect(body.created).toBe(cgId);
+    expect(body.registered).toBe(false);
+    expect(typeof body.registerError).toBe('string');
+    expect(body.registerError ?? '').toMatch(/PCA account 99999999999999999999 does not exist/);
+    expect(body.registerErrorStatus).toBe(404);
+
+    // Follow-up /register call omitting pcaAccountId. If the rollback
+    // worked, the agent resolver finds NOTHING in storage and falls
+    // through to the EOA-curated branch (which on the test daemon's
+    // edge node + shared Hardhat signer succeeds → 200). The
+    // alternative scenario — failure for *any* reason that isn't
+    // "PCA account 99... does not exist" — also counts: the only thing
+    // the rollback contract forbids is silently replaying the stale
+    // bad id.
+    const retryRegister = await fetch(urlFor(d, '/api/context-graph/register'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
+      body: JSON.stringify({ id: cgId, accessPolicy: 1 }),
+    });
+    const retryBody = (await retryRegister.json()) as { error?: string; registered?: string };
+    if (retryRegister.status >= 400) {
+      expect(retryBody.error ?? '').not.toMatch(/99999999999999999999.*does not exist/);
+    } else {
+      // 2xx success path: the create-time bad id is fully gone — the
+      // register call didn't even try the PCA branch.
+      expect([200, 201]).toContain(retryRegister.status);
+    }
+  });
+
+  // Codex PR #502 round-8: combined-flow register failures (caller
+  // input / unsupported feature) used to silently return 200 with
+  // `registered: false`. They now share the /register endpoint's 4xx
+  // mappings — this test pins the 501 mapping when the chain adapter
+  // is asked for a PCA registration but cannot introspect its tx
+  // signer.
+  //
+  // The shared test daemon uses the EVM adapter against a Hardhat node
+  // (which DOES introspect its signer), so we can't directly exercise
+  // the 501 path here. The complementary "rejects pcaAccountId on
+  // POST /api/context-graph/create when register is not true" test
+  // and the 404 mapping above already cover the realistic adapter
+  // scenarios — leaving this as a documentation marker.
+  // TODO(devnet-smoke): cover the 501 mapping via an adapter that
+  // surfaces `getPublishingConvictionAccountOwner()` but no signer.
+
+  // Codex PR #502 round-10 (raised by @branarakic): the combined-flow
+  // path must be able to send `{ accessPolicy: 0, publishPolicy: 0,
+  // pcaAccountId, register: true }` — public-discoverable but
+  // PCA-curated. Before round-10 the API client didn't forward
+  // `publishPolicy`, so `registerContextGraph` defaulted it to
+  // `open` (from `accessPolicy: 0`) and rejected the PCA id with
+  // "PCA account id can only be used with curated publish policy".
+  // This test pins the API-boundary contract: the request shape is
+  // NOT rejected by the daemon's input validation, and the
+  // register-leg failure (no such PCA token on the test chain) is
+  // surfaced via 200 + `registerErrorStatus: 404` — proving the
+  // combo reaches the chain layer.
+  it('accepts accessPolicy=0 + publishPolicy=0 + pcaAccountId + register=true (public-discoverable + PCA-curated combined flow)', async () => {
+    const d = daemon!;
+    const cgId = 'pca-public-discoverable-' + Math.random().toString(36).slice(2, 8);
+    const res = await fetch(urlFor(d, '/api/context-graph/create'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
+      body: JSON.stringify({
+        id: cgId,
+        name: cgId,
+        accessPolicy: 0,
+        publishPolicy: 0,
+        pcaAccountId: '99999999999999999999',
+        register: true,
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      created?: string;
+      registered?: boolean;
+      registerError?: string;
+      registerErrorStatus?: number;
+    };
+    expect(body.created).toBe(cgId);
+    expect(body.registered).toBe(false);
+    expect(body.registerErrorStatus).toBe(404);
+    expect(body.registerError ?? '').toMatch(/PCA account 99999999999999999999 does not exist/);
+    expect(body.registerError ?? '').not.toMatch(/curated publish policy/);
+  });
+
+  // Codex review #502-3: a bad pcaAccountId on /register surfaces as a
+  // chain revert ("ERC721NonexistentToken" or similar) from the EVM
+  // adapter. The daemon must translate it into a clean 4xx with the
+  // wrapped agent-error message — never a generic 500 with raw revert
+  // hex bleeding through.
+  it('maps a nonexistent pcaAccountId on register to a 4xx (not 500)', async () => {
+    const d = daemon!;
+    const cgId = 'pca-register-nonexistent-' + Math.random().toString(36).slice(2, 8);
+    const create = await fetch(urlFor(d, '/api/context-graph/create'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
+      body: JSON.stringify({ id: cgId, name: cgId, accessPolicy: 1 }),
+    });
+    expect([200, 201]).toContain(create.status);
+
+    // An astronomically high id that no minted PCA NFT will ever match
+    // on the shared Hardhat node. The agent wraps the ERC721 revert into
+    // "PCA account ... does not exist or cannot be looked up: ..." and
+    // the daemon catch maps that prefix to 404.
+    const register = await fetch(urlFor(d, '/api/context-graph/register'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
+      body: JSON.stringify({ id: cgId, pcaAccountId: '99999999999999999999' }),
+    });
+
+    // The exact 4xx code depends on which branch fires first:
+    //   - 404 when the wrapped "PCA account ... does not exist" error
+    //     bubbles up (EVM contract-deployed-but-token-missing case).
+    //   - 501 when this daemon's EVM adapter version pre-dates
+    //     `getPublishingConvictionAccountOwner` (older deployments).
+    //   - 400 when the value fails pcaAccountId parsing (shouldn't here,
+    //     but guards against regressions in the parser).
+    // The hard contract: NEVER a 5xx — that's the whole point of #502-3.
+    expect(register.status).toBeGreaterThanOrEqual(400);
+    expect(register.status).toBeLessThan(500);
+    const body = await register.json();
+    expect(typeof body.error).toBe('string');
+    // No raw revert hex / Hardhat internal frames in the surfaced
+    // message — callers should see something human-readable.
+    expect(body.error).not.toMatch(/^0x[0-9a-fA-F]+$/);
+  });
 });
 
 describe('DKG-419 — lazy context graph metadata from SWM writes', () => {

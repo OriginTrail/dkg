@@ -49,6 +49,7 @@ export class NoChainAdapter implements ChainAdapter {
   async isOperationalWalletRegistered(_identityId: bigint, _address: string): Promise<boolean> { return false; }
   async getKnowledgeAssetsV10Address(): Promise<string> { noChain(); }
   async getEvmChainId(): Promise<bigint> { noChain(); }
+  async getPublishingConvictionAccountOwner(_accountId: bigint): Promise<string> { noChain(); }
   isV10Ready(): boolean { return false; }
   isRandomSamplingReady(): boolean { return false; }
 }
