@@ -225,11 +225,13 @@ describe('PanelRight UI - connected agent flow', () => {
   });
 
   it('shows the inline attachment tray and project picker in the chat composer', () => {
-    // PR2: icon-only attach button + project picker moved to .v10-composer-toolbar below the textarea.
+    // PR2 (post iteration 1): composer shell is a vertical stack — textarea
+    // on top, a single .v10-composer-controls row below holding the attach
+    // button + project picker (left) and send button (right).
     expect(panelRight).toContain('aria-label="Attach files"');
     expect(panelRight).toContain('v10-composer-attach');
     expect(panelRight).toContain('Paperclip');
-    expect(panelRight).toContain('v10-composer-toolbar');
+    expect(panelRight).toContain('v10-composer-controls');
     expect(panelRight).toContain('Choose a project');
     expect(panelRight).toContain("value={activeProjectId ?? ''}");
     expect(panelRight).not.toContain('{activeProjectId ? (');
@@ -263,9 +265,12 @@ describe('PanelRight UI - connected agent flow', () => {
     expect(panelRight).toContain("draft.status === 'queued' || draft.status === 'completed' || draft.status === 'skipped'");
     expect(panelRight).toContain('selectedAttachmentDrafts.some(isSendableAttachmentDraft)');
     expect(panelRight).toContain('const hasSendableDrafts = drafts.some(isSendableAttachmentDraft);');
-    // PR2: the "choose a project" hint moved to a single line below the composer
-    // (and is also discoverable via the empty-project-picker placeholder in the toolbar).
-    expect(panelRight).toContain('Choose a project to attach files.');
+    // PR2 polish iter 1: the redundant "choose a project" hint copy was
+    // retired — the project picker now lives INSIDE the composer-controls
+    // row right next to the attach button, so the affordance is self-evident.
+    // The attach-button title still mentions the gating ("Choose a project
+    // to attach files").
+    expect(panelRight).toContain("title={activeProjectId ? 'Attach files' : 'Choose a project to attach files'}");
   });
 
   it('turns skipped document-import results into server-verified sendable import results', () => {

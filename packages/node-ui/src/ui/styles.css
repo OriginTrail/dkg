@@ -781,6 +781,17 @@ button:focus:not(:focus-visible) { outline: none; }
   overflow-y: auto;
   padding: 12px;
 }
+/* Network / Sessions tabs: simple padded scroll container (PR1 restored
+   the padding that was removed when .v10-agents-tab became a flex column). */
+.v10-agent-scroll-tab {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
 .v10-agents-summary {
   display: flex; align-items: center; gap: 12px;
   padding: 8px 0; margin-bottom: 8px;
@@ -1054,7 +1065,10 @@ button:focus:not(:focus-visible) { outline: none; }
 .v10-agent-tab-menu-popover {
   position: absolute;
   top: calc(100% + 6px);
-  right: 0;
+  /* Anchor to the LEFT edge of the trigger so the popover grows rightward
+     into the panel — left-most agent tabs (the common case) used to clip
+     against the panel's left edge with right:0. */
+  left: 0;
   min-width: 200px;
   background: var(--bg-elevated);
   border: 1px solid var(--border-default);
@@ -1289,14 +1303,16 @@ button:focus:not(:focus-visible) { outline: none; }
   align-items: stretch;
   gap: 8px;
 }
+/* Composer shell: vertical stack — textarea on top, controls toolbar
+   (attach + project picker + send) below, all inside one rounded box. */
 .v10-local-agent-composer-shell {
   position: relative;
   display: flex;
   flex: 1;
+  flex-direction: column;
   min-width: 0;
-  align-items: flex-end;
-  padding: 6px;
-  gap: 4px;
+  padding: 10px 12px;
+  gap: 8px;
   border-radius: 14px;
   border: 1px solid var(--border-default);
   background: var(--bg-surface);
@@ -1304,6 +1320,20 @@ button:focus:not(:focus-visible) { outline: none; }
 }
 .v10-local-agent-composer-shell:focus-within {
   border-color: var(--border-strong);
+}
+.v10-composer-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+.v10-composer-controls-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
 }
 .v10-composer-attach {
   flex-shrink: 0;
@@ -1357,16 +1387,22 @@ button:focus:not(:focus-visible) { outline: none; }
   cursor: not-allowed;
 }
 
-/* Composer toolbar — project picker sits below the composer shell */
-.v10-composer-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding-top: 2px;
-}
+/* Project picker now lives INSIDE the composer-controls row to the right of
+   the attach button. Cap its width so it doesn't crowd the send button. */
 .v10-composer-target {
-  flex: 1;
+  flex: 0 1 auto;
   min-width: 0;
+  max-width: 220px;
+}
+
+/* Inline Select prefix icon (e.g. Folder for the project picker). */
+.v10-select-prefix {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+  margin-right: 6px;
 }
 /* Attachment chips (compact, ChatGPT/Claude pattern) */
 .v10-attachment-chips {
@@ -1592,9 +1628,8 @@ button:focus:not(:focus-visible) { outline: none; }
   background: var(--bg-panel);
 }
 .v10-agent-input {
-  flex: 1;
   width: 100%;
-  padding: 6px 4px;
+  padding: 4px 2px;
   border-radius: 0;
   border: 0;
   background: transparent;
@@ -1820,7 +1855,7 @@ button:focus:not(:focus-visible) { outline: none; }
 .v10-md-code {
   font-family: var(--font-mono);
   font-size: 11px;
-  padding: 1px 5px;
+  padding: 2px 5px;
   border-radius: 4px;
   background: var(--bg-active);
   color: var(--text-primary);
@@ -1828,6 +1863,17 @@ button:focus:not(:focus-visible) { outline: none; }
      (e.g., user bubbles). Uses --border-prominent so contrast clears 3:1
      non-text on every bubble × theme combination. */
   border: 1px solid var(--border-prominent);
+  /* When inline code wraps across lines (long URNs etc.), each visual line
+     gets its own padding box and a hair of vertical gap so the stacked chips
+     don't visually touch. */
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+/* Paragraphs that contain inline-code chips need a little extra leading so
+   the boxed chips don't stack edge-to-edge when they wrap. */
+.v10-md-p:has(> .v10-md-code),
+.v10-md-li:has(> .v10-md-code) {
+  line-height: 1.75;
 }
 .v10-md-pre {
   position: relative;

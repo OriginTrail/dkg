@@ -26,7 +26,7 @@ import {
 import { api } from '../../api-wrapper.js';
 import TextareaAutosize from 'react-textarea-autosize';
 import { useDropzone } from 'react-dropzone';
-import { ArrowUp, Ban, ChevronDown, MoreHorizontal, Paperclip, Upload, X } from 'lucide-react';
+import { ArrowUp, Ban, ChevronDown, Folder, MoreHorizontal, Paperclip, Upload, X } from 'lucide-react';
 import { Select } from '../common/Select.js';
 import { MarkdownMessage } from '../chat/MarkdownMessage.js';
 
@@ -999,7 +999,8 @@ export function ConnectedAgentsTab(props: {
         </div>
       ) : (
         selected && (
-          <div className="v10-local-agent-chat-shell">
+          <div {...dropzone.getRootProps({ className: 'v10-local-agent-chat-shell' })}>
+            <input {...dropzone.getInputProps()} />
             {connectNotice && <div className="v10-local-agent-notice">{connectNotice}</div>}
             {connectError && <div className="v10-local-agent-error">{connectError}</div>}
 
@@ -1017,12 +1018,7 @@ export function ConnectedAgentsTab(props: {
               </div>
             )}
 
-            <div
-              {...dropzone.getRootProps({
-                className: 'v10-chat-messages v10-local-agent-messages',
-              })}
-            >
-              <input {...dropzone.getInputProps()} />
+            <div className="v10-chat-messages v10-local-agent-messages">
               {dropzone.isDragActive && (
                 <div
                   className={`v10-drop-overlay active ${attachmentsEnabled ? 'accept' : 'refuse'}`}
@@ -1185,16 +1181,6 @@ export function ConnectedAgentsTab(props: {
 
                 <div className="v10-local-agent-composer-row">
                   <div className="v10-local-agent-composer-shell">
-                    <button
-                      type="button"
-                      className="v10-composer-attach"
-                      onClick={() => attachmentInputRef.current?.click()}
-                      disabled={!selected?.chatAttachments || !activeProjectId || localSending}
-                      title={activeProjectId ? 'Attach files' : 'Choose a project to attach files'}
-                      aria-label="Attach files"
-                    >
-                      <Paperclip size={14} aria-hidden="true" />
-                    </button>
                     <TextareaAutosize
                       placeholder={
                         showingSessionHistory
@@ -1233,36 +1219,44 @@ export function ConnectedAgentsTab(props: {
                       minRows={1}
                       maxRows={8}
                     />
-                    <button
-                      type="button"
-                      className="v10-agent-send-btn v10-local-agent-inline-send"
-                      onClick={onSendLocalMessage}
-                      disabled={inputDisabled || (!localInput.trim() && !hasSendableAttachmentDrafts)}
-                      aria-label="Send message"
-                      title="Send message"
-                    >
-                      <ArrowUp size={14} aria-hidden="true" />
-                    </button>
+                    <div className="v10-composer-controls">
+                      <div className="v10-composer-controls-left">
+                        <button
+                          type="button"
+                          className="v10-composer-attach"
+                          onClick={() => attachmentInputRef.current?.click()}
+                          disabled={!selected?.chatAttachments || !activeProjectId || localSending}
+                          title={activeProjectId ? 'Attach files' : 'Choose a project to attach files'}
+                          aria-label="Attach files"
+                        >
+                          <Paperclip size={14} aria-hidden="true" />
+                        </button>
+                        <div className="v10-composer-target">
+                          <Select
+                            className="v10-local-agent-target-select"
+                            value={activeProjectId ?? ''}
+                            onChange={onSelectProject}
+                            options={availableProjects.map((project) => ({ value: project.id, label: project.name }))}
+                            placeholder={projectsLoading ? 'Loading projects…' : 'Choose a project'}
+                            disabled={projectsLoading || availableProjects.length === 0}
+                            ariaLabel="Active project"
+                            prefixIcon={<Folder size={12} aria-hidden="true" />}
+                          />
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        className="v10-agent-send-btn v10-local-agent-inline-send"
+                        onClick={onSendLocalMessage}
+                        disabled={inputDisabled || (!localInput.trim() && !hasSendableAttachmentDrafts)}
+                        aria-label="Send message"
+                        title="Send message"
+                      >
+                        <ArrowUp size={14} aria-hidden="true" />
+                      </button>
+                    </div>
                   </div>
                 </div>
-                <div className="v10-composer-toolbar">
-                  <div className="v10-composer-target">
-                    <Select
-                      className="v10-local-agent-target-select"
-                      value={activeProjectId ?? ''}
-                      onChange={onSelectProject}
-                      options={availableProjects.map((project) => ({ value: project.id, label: project.name }))}
-                      placeholder={projectsLoading ? 'Loading projects…' : 'Choose a project'}
-                      disabled={projectsLoading || availableProjects.length === 0}
-                      ariaLabel="Active project"
-                    />
-                  </div>
-                </div>
-                {!activeProjectId && (
-                  <div className="v10-local-agent-copy" style={{ margin: 0, color: 'var(--text-tertiary)' }}>
-                    Choose a project to attach files.
-                  </div>
-                )}
               </div>
             </div>
           </div>
@@ -1281,7 +1275,7 @@ function NetworkTab(props: {
   const { peerAgents, connections, loading, onRefresh } = props;
 
   return (
-    <div className="v10-agents-tab">
+    <div className="v10-agent-scroll-tab">
       <div className="v10-agents-summary">
         <span className="v10-agents-stat">
           <span className={`v10-agents-stat-dot ${connections.total > 0 ? 'connected' : 'known'}`} />
@@ -1331,7 +1325,7 @@ function SessionsTab(props: {
   const { sessions, onOpenSession } = props;
 
   return (
-    <div className="v10-agent-content">
+    <div className="v10-agent-scroll-tab">
       <div className="v10-sessions-list">
         <div className="v10-local-agent-copy" style={{ marginBottom: 12 }}>
           Sessions track DKG-persisted conversations for your integrated agents.
@@ -1797,6 +1791,12 @@ export function PanelRight() {
         { id: assistantId, turnId: correlationId, role: 'assistant', content: '', ts: now, streaming: true },
       ]);
       setLocalInputForConversation(conversationKey, '');
+      // Clear composer chips as soon as the user-message bubble owns the
+      // attachments — keeping them visible until the agent reply makes the
+      // attachment look "stuck in queue".
+      if (deliveredAttachmentIds.length > 0) {
+        clearCompletedAttachmentsForConversation(conversationKey, deliveredAttachmentIds);
+      }
 
       controller = new AbortController();
       localAbortRef.current = controller;
@@ -1838,9 +1838,6 @@ export function PanelRight() {
             : message,
         ),
       );
-      if (deliveredAttachmentIds.length > 0) {
-        clearCompletedAttachmentsForConversation(conversationKey, deliveredAttachmentIds);
-      }
       loadSessions();
       if (stage === 0) advance();
     } catch (err: any) {

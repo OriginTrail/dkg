@@ -16,6 +16,7 @@ interface SelectProps {
   disabled?: boolean;
   className?: string;
   ariaLabel?: string;
+  prefixIcon?: React.ReactNode;
 }
 
 interface MenuPosition {
@@ -33,6 +34,7 @@ export function Select({
   disabled = false,
   className,
   ariaLabel,
+  prefixIcon,
 }: SelectProps) {
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState<MenuPosition | null>(null);
@@ -174,6 +176,7 @@ export function Select({
         aria-expanded={open}
         aria-label={ariaLabel}
       >
+        {prefixIcon && <span className="v10-select-prefix" aria-hidden="true">{prefixIcon}</span>}
         <span className={`v10-select-value ${selected ? '' : 'placeholder'}`}>{displayLabel}</span>
         <ChevronDown className="v10-select-caret" size={12} aria-hidden="true" />
 

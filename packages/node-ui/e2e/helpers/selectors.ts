@@ -95,7 +95,7 @@ export const sel = {
     // PR2 composer (TextareaAutosize + lucide icons + react-dropzone)
     composerShell: '.v10-local-agent-composer-shell',
     composerAttach: '.v10-composer-attach',
-    composerToolbar: '.v10-composer-toolbar',
+    composerControls: '.v10-composer-controls',
     composerTarget: '.v10-composer-target',
     sendBtnInline: '.v10-local-agent-inline-send',
     sendBtnAria: 'button[aria-label="Send message"]',
