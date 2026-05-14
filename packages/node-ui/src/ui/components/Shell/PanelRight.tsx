@@ -1161,20 +1161,23 @@ export function ConnectedAgentsTab(props: {
                       value={activeProjectId ?? ''}
                       onChange={onSelectProject}
                       options={[
-                        // Leading "no project" row gives the user a path back
-                        // to a cleared context graph. Without this, once a
-                        // project is picked there's no way to unpick it
-                        // through the UI (the old native <select> had an
-                        // implicit empty option that handled this).
-                        { value: '', label: 'No project (clear selection)' },
+                        // The "No project (clear selection)" row only renders
+                        // once a real project is active. Otherwise its
+                        // `value: ''` would match the empty trigger value
+                        // and the picker would show "No project (clear
+                        // selection)" as a fake selection instead of the
+                        // intended "Choose a project" placeholder.
+                        ...(activeProjectId
+                          ? [{ value: '', label: 'No project (clear selection)' }]
+                          : []),
                         ...availableProjects.map((project) => ({ value: project.id, label: project.name })),
                       ]}
                       placeholder={projectsLoading ? 'Loading projects…' : 'Choose a project'}
-                      // Only disable while the list is loading. Even with
-                      // zero real projects, the "No project (clear selection)"
-                      // option is always present, so the user must always be
-                      // able to open the picker to clear a stale selection.
-                      disabled={projectsLoading}
+                      // Disable while loading. When no project is active and
+                      // the list is empty there's nothing to pick yet, so
+                      // disable then too — once a project is active the
+                      // "No project (clear selection)" row is always there.
+                      disabled={projectsLoading || (!activeProjectId && availableProjects.length === 0)}
                       ariaLabel="Active project"
                     />
                   </div>
