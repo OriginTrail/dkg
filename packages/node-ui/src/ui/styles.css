@@ -1283,6 +1283,46 @@ button:focus:not(:focus-visible) { outline: none; }
   overflow-y: auto;
   padding: 12px 14px;
 }
+
+/* Floating "scroll to latest" pill — sticks to the bottom-right of the
+   visible portion of the messages region while the user is scrolled away
+   from the bottom. Sticky inside the scroll container means it rides
+   along automatically with no scroll listener positioning math. */
+.v10-scroll-to-bottom {
+  position: sticky;
+  bottom: 8px;
+  align-self: flex-end;
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  border: 1px solid var(--border-default);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 150ms ease-out, background 0.15s, color 0.15s;
+  z-index: 5;
+  /* Negative margins so the pill overlays the previous message instead of
+     forcing extra vertical space when invisible. */
+  margin-top: -32px;
+  margin-bottom: 0;
+}
+.v10-scroll-to-bottom.visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+.v10-scroll-to-bottom:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+@media (prefers-reduced-motion: reduce) {
+  .v10-scroll-to-bottom { transition: none; }
+}
 .v10-local-agent-msg-time {
   margin-top: 4px;
   font-size: 10px;

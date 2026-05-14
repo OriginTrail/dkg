@@ -26,7 +26,7 @@ import {
 import { api } from '../../api-wrapper.js';
 import TextareaAutosize from 'react-textarea-autosize';
 import { useDropzone } from 'react-dropzone';
-import { ArrowUp, Ban, ChevronDown, ChevronRight, Folder, MoreHorizontal, Paperclip, Upload, X } from 'lucide-react';
+import { ArrowDown, ArrowUp, Ban, ChevronDown, ChevronRight, Folder, MoreHorizontal, Paperclip, Upload, X } from 'lucide-react';
 import { Select } from '../common/Select.js';
 import { MarkdownMessage } from '../chat/MarkdownMessage.js';
 
@@ -836,6 +836,22 @@ export function ConnectedAgentsTab(props: {
   const hasSendableAttachmentDrafts = selectedAttachmentDrafts.some(isSendableAttachmentDraft);
   const attachmentTargetIds = [...new Set(selectedAttachmentDrafts.map((attachment) => attachment.contextGraphId))];
   const attachmentInputRef = useRef<HTMLInputElement>(null);
+  const messagesRegionRef = useRef<HTMLDivElement>(null);
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+
+  const onMessagesScroll = useCallback(() => {
+    const el = messagesRegionRef.current;
+    if (!el) return;
+    // ~40px slack so the button doesn't flicker at the exact bottom edge.
+    const offFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    setShowScrollToBottom(offFromBottom > 40);
+  }, []);
+
+  const scrollMessagesToBottom = useCallback(() => {
+    const el = messagesRegionRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+  }, []);
 
   const attachmentsEnabled = Boolean(props.selectedIntegration?.chatAttachments) && Boolean(props.activeProjectId) && !props.localSending;
   const handleFilesDrop = useCallback((files: File[]) => {
@@ -1043,7 +1059,11 @@ export function ConnectedAgentsTab(props: {
                 </div>
               </div>
             )}
-            <div className="v10-chat-messages v10-local-agent-messages">
+            <div
+              className="v10-chat-messages v10-local-agent-messages"
+              ref={messagesRegionRef}
+              onScroll={onMessagesScroll}
+            >
               {shouldShowConversationLoader && (
                 <div className="v10-agent-empty-state">
                   Loading the latest conversation from DKG memory...
@@ -1108,6 +1128,17 @@ export function ConnectedAgentsTab(props: {
                 </div>
               ))}
               <div ref={localChatEndRef} />
+              <button
+                type="button"
+                className={`v10-scroll-to-bottom ${showScrollToBottom ? 'visible' : ''}`}
+                onClick={scrollMessagesToBottom}
+                aria-label="Scroll to latest message"
+                title="Scroll to latest message"
+                tabIndex={showScrollToBottom ? 0 : -1}
+                aria-hidden={!showScrollToBottom}
+              >
+                <ArrowDown size={14} aria-hidden="true" />
+              </button>
             </div>
             <div className="v10-agent-input-area">
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8, width: '100%' }}>
