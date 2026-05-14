@@ -365,6 +365,44 @@ describe('ConnectedAgentsTab rendering', () => {
     expect(userBubble).not.toContain('v10-md-');
   });
 
+  it('also bypasses markdown for synthesized assistant content (Codex CGpe9)', () => {
+    // Assistant-role messages whose content was locally synthesized
+    // (history fallback from `buildAttachmentSummary`, error / cancel
+    // text) must also skip markdown rendering — they embed raw
+    // filenames or error bodies which, if parsed as markdown, could
+    // synthesize live external links from attacker-controllable
+    // filenames in an assistant-styled bubble.
+    const markup = renderConnectedAgentsTab({
+      localMessages: [
+        {
+          id: 'a-synth',
+          role: 'assistant',
+          content: 'Attachment import result: [spec](https://attacker.example).',
+          ts: '10:00',
+          synthesized: true,
+        },
+        {
+          id: 'a-real',
+          role: 'assistant',
+          content: 'real **bold** text',
+          ts: '10:01',
+        },
+      ],
+    });
+    // Real agent text → markdown.
+    expect(markup).toContain('<strong>bold</strong>');
+    // Synthesized content renders as a plaintext span — its literal
+    // characters (brackets, parens, scheme) survive in the markup.
+    expect(markup).toContain('v10-chat-plaintext');
+    expect(markup).toContain('[spec](https://attacker.example)');
+    // No anchor tag points at the attacker URL anywhere on the page —
+    // markdown was never invoked for the synthesized string. Match
+    // anchors that specifically target the attacker URL (an assistant
+    // bubble for `real **bold**` could legitimately contain other
+    // `<a>` markup from markdown-rendered links, but never this URL).
+    expect(markup).not.toMatch(/<a[^>]*attacker\.example/);
+  });
+
   it('renders degraded connected-agent status dots', () => {
     const degraded = integration({
       id: 'hermes',

@@ -39,6 +39,18 @@ export interface LocalAgentMessage {
   ts?: string;
   streaming?: boolean;
   attachments?: LocalAgentChatAttachmentRef[];
+  /**
+   * True when `content` is locally synthesized by the UI (e.g. an
+   * attachment summary fallback from `mapHistoryMessage`, or a local
+   * error/cancel string), NOT real agent-authored markdown. The chat
+   * bubble renderer treats these as literal text — synthesized strings
+   * embed raw filenames / error details that may contain markdown
+   * metacharacters or absolute URLs, so feeding them through
+   * `MarkdownMessage` would let an attacker-controllable filename
+   * synthesize a live external link in an assistant-styled bubble.
+   * (Codex CGpe9.)
+   */
+  synthesized?: boolean;
 }
 
 type LocalAgentAttachmentStatus = 'queued' | 'uploading' | 'completed' | 'skipped' | 'error';
@@ -257,6 +269,7 @@ function buildChatContextEntries(
 
 function mapHistoryMessage(message: LocalAgentHistoryMessage): LocalAgentMessage {
   const author = message.author.toLowerCase();
+  const hasAgentText = Boolean(message.text);
   return {
     id: message.uri || `local-history:${++localMessageId}`,
     uri: message.uri,
@@ -265,6 +278,11 @@ function mapHistoryMessage(message: LocalAgentHistoryMessage): LocalAgentMessage
     content: message.text || buildAttachmentSummary(message.attachmentRefs ?? []),
     ts: formatLocalTimestamp(message.ts),
     attachments: message.attachmentRefs,
+    // The fallback path embeds raw filenames into a synthesized summary
+    // string. Mark synthesized so the renderer skips markdown for those —
+    // a filename like `[spec](https://attacker.example)` would otherwise
+    // render as a live external link in an assistant-styled bubble.
+    synthesized: !hasAgentText,
   };
 }
 
@@ -308,22 +326,22 @@ export function normalizeMessageContent(content: string): string {
 function renderMessageContent(
   content: string,
   role: 'user' | 'assistant',
+  synthesized: boolean,
 ): React.ReactNode {
   const normalized = normalizeMessageContent(content);
-  // Markdown rendering applies only to assistant output, which is the
-  // content that's actually authored as markdown. User-typed messages
-  // and synthetic user-side content (attachment summaries, import
-  // results) are rendered as literal text with whitespace preserved
-  // — otherwise:
-  //   1. Typing `# heading` or `---` would visibly transform the
-  //      bubble, so the transcript no longer matches the prompt that
-  //      was sent (Codex CBnNU / CCyxn).
-  //   2. Synthetic attachment summaries embed raw filenames. A file
-  //      named `[spec](https://attacker.com)` would otherwise render
-  //      as a live external link from the user-side bubble
-  //      (CFNsU / CFXYU). The CFThj relative-link guard doesn't
-  //      cover this — those hrefs are absolute and allowed.
-  if (role === 'assistant') {
+  // Markdown rendering applies only to agent-authored assistant output
+  // — the only content that's actually written as markdown. Everything
+  // else falls back to plain text:
+  //   - User-typed bubbles: typing `# heading` would otherwise visibly
+  //     transform, so the transcript no longer matches the prompt
+  //     (CBnNU / CCyxn).
+  //   - Synthetic strings (attachment summaries, history fallbacks,
+  //     local error / cancel text) embed raw filenames or error bodies.
+  //     A filename like `[spec](https://attacker.example)` would
+  //     otherwise render as a live external link in an assistant-styled
+  //     bubble (CFNsU / CFXYU / CGpe9). The CFThj relative-link guard
+  //     doesn't help — those hrefs are absolute and allowed.
+  if (role === 'assistant' && !synthesized) {
     return <MarkdownMessage content={normalized} />;
   }
   return <span className="v10-chat-plaintext">{normalized}</span>;
@@ -886,6 +904,18 @@ export function ConnectedAgentsTab(props: {
     selectedAttachmentDrafts.some((a) => a.contextGraphId !== activeProjectId);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
   const messagesRegionRef = useRef<HTMLDivElement>(null);
+  // Mirror of `messagesRegionRef` as state so observer effects can re-run
+  // when the region actually mounts. Necessary because the messages
+  // region is conditionally rendered (loader / add-flow / chat shell) —
+  // a one-shot useEffect at component mount sees `ref.current === null`
+  // when the panel starts in any non-chat state, and never re-attaches
+  // after the chat shell appears. Codex CGpfC. The callback ref below
+  // bridges both consumers.
+  const [messagesRegionEl, setMessagesRegionEl] = useState<HTMLDivElement | null>(null);
+  const setMessagesRegion = useCallback((el: HTMLDivElement | null) => {
+    messagesRegionRef.current = el;
+    setMessagesRegionEl(el);
+  }, []);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
 
   const onMessagesScroll = useCallback(() => {
@@ -928,18 +958,20 @@ export function ConnectedAgentsTab(props: {
   // across content-root transitions — earlier code captured
   // `firstElementChild` once at mount, which broke when the tab
   // initially rendered a loader/empty state and then transitioned to
-  // streaming a real conversation.
+  // streaming a real conversation. The effect re-runs whenever the
+  // messages region mounts / unmounts (panel may start in add-flow or
+  // empty state and only render the scroll container later) — Codex
+  // CGpfC.
   useEffect(() => {
-    const el = messagesRegionRef.current;
-    if (!el || typeof MutationObserver === 'undefined') return;
+    if (!messagesRegionEl || typeof MutationObserver === 'undefined') return;
     const recompute = () => {
-      const off = el.scrollHeight - el.scrollTop - el.clientHeight;
+      const off = messagesRegionEl.scrollHeight - messagesRegionEl.scrollTop - messagesRegionEl.clientHeight;
       setShowScrollToBottom(off > 40);
     };
     const mo = new MutationObserver(recompute);
-    mo.observe(el, { childList: true, subtree: true, characterData: true });
+    mo.observe(messagesRegionEl, { childList: true, subtree: true, characterData: true });
     return () => mo.disconnect();
-  }, []);
+  }, [messagesRegionEl]);
 
   // Drop-zone gating: three different reasons the dropzone refuses files.
   // Each surfaces a different recovery copy in the refuse-state overlay so
@@ -1169,7 +1201,7 @@ export function ConnectedAgentsTab(props: {
             )}
             <div
               className="v10-chat-messages v10-local-agent-messages"
-              ref={messagesRegionRef}
+              ref={setMessagesRegion}
               onScroll={onMessagesScroll}
             >
               {shouldShowConversationLoader && (
@@ -1207,7 +1239,7 @@ export function ConnectedAgentsTab(props: {
               {localMessages.map((message) => (
                 <div key={message.id} className={`v10-chat-msg ${message.role}`}>
                   <div className={`v10-chat-bubble ${message.role}`}>
-                    {renderMessageContent(message.content, message.role)}
+                    {renderMessageContent(message.content, message.role, Boolean(message.synthesized))}
                     {message.streaming && <span className="v10-chat-cursor" />}
                   </div>
                   {message.attachments && message.attachments.length > 0 && (
@@ -1565,17 +1597,17 @@ function NetworkTab(props: {
       if (peerConnected !== prevConnected) {
         // Status disagrees → use the newer record's status. Naively
         // preferring "connected" would stick the UI on a stale entry
-        // after a peer drops (if /api/agents briefly retains the old
-        // connected row), keeping the peer in the Connected section
-        // and skewing the summary counts. Codex CGaLH.
+        // after a peer drops (Codex CGaLH). On `lastSeen` ties (or when
+        // the feed omits timestamps and both default to 0), use feed
+        // order as the deterministic freshness signal — `reduce`
+        // processes records left-to-right, so `peer` is the LATER
+        // record. Always take it on tie. This still lets the
+        // disconnected reading win when it arrives later, instead of
+        // letting a stale connected row mask a fresh disconnect for
+        // feeds without timestamps. Codex CGpfF.
         const peerSeen = peer.lastSeen ?? 0;
         const prevSeen = prev.lastSeen ?? 0;
-        if (peerSeen > prevSeen) acc.set(key, peer);
-        // If timestamps tie, fall through to the freshness-only
-        // tie-break below (no transport-rank discrimination here —
-        // these are different statuses, not different transports for
-        // the same status).
-        else if (peerSeen === prevSeen && peerConnected) acc.set(key, peer);
+        if (peerSeen >= prevSeen) acc.set(key, peer);
         return acc;
       }
       // Same status — prefer DIRECT transport (the better channel),
@@ -2195,6 +2227,11 @@ export function PanelRight() {
                 content: result.text || message.content,
                 turnId: result.turnId?.trim() || message.turnId,
                 streaming: false,
+                // `result.text` is the real agent-authored content; the
+                // fallback path keeps whatever's already in `message.content`
+                // (which is either earlier streamed agent text or — empty).
+                // Only mark synthesized when neither is true.
+                synthesized: !result.text && !message.content ? true : message.synthesized,
                 ts: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
               }
             : message,
@@ -2213,6 +2250,10 @@ export function PanelRight() {
                     ? 'Request cancelled.'
                     : `Error: ${formatLocalAgentErrorMessage(integration, err)}`,
                   streaming: false,
+                  // Error / cancel strings are locally synthesized and may
+                  // surface details the agent didn't author (URLs in error
+                  // bodies, raw filenames). Render as plain text.
+                  synthesized: true,
                 }
               : message,
           ),
