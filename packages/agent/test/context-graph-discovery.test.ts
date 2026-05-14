@@ -366,6 +366,55 @@ describe('listContextGraphs merge', () => {
     expect(entry!.callerInvolved).toBeUndefined();
   }, 15000);
 
+  // Regression for the "chatt-test takes ~107s to appear in the sidebar
+  // after curator approval" bug. A curated CG has no on-chain ID and no
+  // local content the moment we receive `join-approved` — until the first
+  // meta sync completes. Without `pendingMeta`, the case-2 phantom filter
+  // hides the entry entirely. With it, the entry surfaces with
+  // synced=false so the UI's existing "waiting for sync" badge fires
+  // immediately on approval.
+  it('includes curator-approved CGs with pendingMeta (no on-chain ID, no local content yet)', async () => {
+    const result = await createTestAgent();
+    agent = result.agent;
+    await agent.start();
+
+    agent.subscribeToContextGraph('curator-only');
+    (agent as any).subscribedContextGraphs.set('curator-only', {
+      name: 'Curator Only',
+      subscribed: true,
+      synced: false,
+      pendingMeta: true,
+    } satisfies ContextGraphSub);
+
+    const contextGraphs = await agent.listContextGraphs();
+    const entry = contextGraphs.find(p => p.id === 'curator-only');
+    expect(entry).toBeDefined();
+    expect(entry!.subscribed).toBe(true);
+    expect(entry!.synced).toBe(false);
+    expect(entry!.name).toBe('Curator Only');
+    expect(entry!.onChainId).toBeUndefined();
+  }, 15000);
+
+  // Symmetric guard: a stale subscription with neither onChainId nor
+  // pendingMeta nor local content stays hidden as a phantom — the
+  // pendingMeta flag must not weaken the existing phantom filter for
+  // entries that don't actually have it set.
+  it('still hides phantom subscriptions (no onChainId, no pendingMeta, no local content)', async () => {
+    const result = await createTestAgent();
+    agent = result.agent;
+    await agent.start();
+
+    agent.subscribeToContextGraph('phantom-cg');
+    (agent as any).subscribedContextGraphs.set('phantom-cg', {
+      name: 'Phantom',
+      subscribed: true,
+      synced: false,
+    } satisfies ContextGraphSub);
+
+    const contextGraphs = await agent.listContextGraphs();
+    expect(contextGraphs.find(p => p.id === 'phantom-cg')).toBeUndefined();
+  }, 15000);
+
   it('marks SPARQL-only contextGraphs (not in registry) as subscribed=false', async () => {
     const store = new OxigraphStore();
     const result = await createTestAgent({ store });
