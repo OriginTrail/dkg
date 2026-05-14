@@ -905,26 +905,26 @@ export function ConnectedAgentsTab(props: {
 
   // Length-based recompute above misses the streaming case: the assistant's
   // last message grows in place (text appended to the same array entry),
-  // so `localMessages.length` is unchanged. Observe the messages region's
-  // content size directly — any height change (streamed chunk, image
-  // load, markdown re-render) re-evaluates whether the pill should show,
-  // so a user hovering just above the bottom doesn't end up stranded past
-  // the 40px threshold with the pill hidden.
+  // so `localMessages.length` is unchanged. Watch the messages region's
+  // subtree directly — any DOM mutation (streamed text chunk, new bubble,
+  // markdown re-render, image load resizing) re-evaluates whether the
+  // pill should show. MutationObserver beats ResizeObserver here because
+  // (a) the scroll container has a fixed flex height (ResizeObserver
+  // doesn't fire on scrollHeight changes alone) and (b) it's stable
+  // across content-root transitions — earlier code captured
+  // `firstElementChild` once at mount, which broke when the tab
+  // initially rendered a loader/empty state and then transitioned to
+  // streaming a real conversation.
   useEffect(() => {
     const el = messagesRegionRef.current;
-    if (!el || typeof ResizeObserver === 'undefined') return;
-    const ro = new ResizeObserver(() => {
+    if (!el || typeof MutationObserver === 'undefined') return;
+    const recompute = () => {
       const off = el.scrollHeight - el.scrollTop - el.clientHeight;
       setShowScrollToBottom(off > 40);
-    });
-    ro.observe(el);
-    // Also observe the inner content wrapper if the region itself has a
-    // fixed flex height — the size change is on the content, not the
-    // region. messagesRegionRef points at the scroll container; its first
-    // child is the actual content list.
-    const inner = el.firstElementChild;
-    if (inner instanceof Element) ro.observe(inner);
-    return () => ro.disconnect();
+    };
+    const mo = new MutationObserver(recompute);
+    mo.observe(el, { childList: true, subtree: true, characterData: true });
+    return () => mo.disconnect();
   }, []);
 
   // Drop-zone gating: three different reasons the dropzone refuses files.
@@ -1502,10 +1502,18 @@ function NetworkPeerGroup(props: {
 
 function NetworkTab(props: {
   peerAgents: AgentInfo[];
+  /**
+   * Raw libp2p connection counts from `/api/connections`. Used to drive
+   * the empty-state and to surface a transitional message when libp2p
+   * has connections but `/api/agents` has not emitted records yet — the
+   * deduped peerAgents list can otherwise show "0 connected / No
+   * network peers detected yet" even though the node is connected.
+   */
+  connections: { total: number; direct: number; relayed: number };
   loading: boolean;
   onRefresh: () => void;
 }) {
-  const { peerAgents, loading, onRefresh } = props;
+  const { peerAgents, connections, loading, onRefresh } = props;
   const [connectedExpanded, setConnectedExpanded] = useState(true);
   const [disconnectedExpanded, setDisconnectedExpanded] = useState(false);
 
@@ -1574,7 +1582,11 @@ function NetworkTab(props: {
     <div className="v10-agent-scroll-tab">
       <div className="v10-agents-summary">
         <span className="v10-agents-stat">
-          <span className={`v10-agents-stat-dot ${connectedPeers.length > 0 ? 'connected' : 'known'}`} />
+          {/* Dot reflects actual libp2p connectivity. If raw connections
+              report any peer up, light the dot — otherwise the panel can
+              briefly show a stale "disconnected" indicator while /api/agents
+              is still catching up. */}
+          <span className={`v10-agents-stat-dot ${connectedPeers.length > 0 || connections.total > 0 ? 'connected' : 'known'}`} />
           {/* "Connected" qualifier matches the Connected section header below
               — without it, "0 peers" reads as "no peers known" when there
               might be hundreds of disconnected peers in the section underneath. */}
@@ -1601,8 +1613,17 @@ function NetworkTab(props: {
       </div>
 
       {loading && <p className="v10-agents-loading">Loading peers...</p>}
-      {peerAgents.length === 0 && !loading && (
+      {peerAgents.length === 0 && !loading && connections.total === 0 && (
         <div className="v10-agent-empty-state">No network peers detected yet.</div>
+      )}
+      {peerAgents.length === 0 && !loading && connections.total > 0 && (
+        // libp2p reports connections but /api/agents hasn't emitted records
+        // for them yet (slow probe, or remote peers have no agent
+        // metadata). Surface that so the panel doesn't read as "no peers"
+        // when the node is actually connected.
+        <div className="v10-agent-empty-state">
+          Connected to {connections.total} peer{connections.total === 1 ? '' : 's'} (agent metadata syncing…).
+        </div>
       )}
       {peerAgents.length > 0 && (
         <>
@@ -2377,6 +2398,7 @@ export function PanelRight() {
       {mode === 'network' && (
         <NetworkTab
           peerAgents={peerAgents}
+          connections={connections}
           loading={peerLoading}
           onRefresh={refreshPeers}
         />

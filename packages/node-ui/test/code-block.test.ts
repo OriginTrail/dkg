@@ -175,4 +175,30 @@ describe('CodeBlock', () => {
     expect(container.querySelector('.v10-md-pre-lang')).toBeNull();
     await unmount();
   });
+
+  it('recognises monorepo-relevant aliases (Codex CF4Ae)', async () => {
+    // Solidity is the most common fenced-block language in this repo
+    // (contracts, audit notes). Earlier allow-list omitted it and similar
+    // languages (Rust, Go, TOML, diff, Dockerfile) — fenced blocks
+    // silently fell through to the plain-text path even though the
+    // panel advertises syntax-highlighted code blocks.
+    const cases: Array<[string, string]> = [
+      ['sol', 'solidity'],
+      ['solidity', 'solidity'],
+      ['rs', 'rust'],
+      ['rust', 'rust'],
+      ['golang', 'go'],
+      ['go', 'go'],
+      ['toml', 'toml'],
+      ['diff', 'diff'],
+      ['patch', 'diff'],
+      ['docker', 'dockerfile'],
+    ];
+    for (const [input, expected] of cases) {
+      const { container, unmount } = await renderCodeBlock({ code: 'x', lang: input });
+      const tag = container.querySelector('.v10-md-pre-lang');
+      expect(tag?.textContent, `expected ${input} → ${expected}`).toBe(expected);
+      await unmount();
+    }
+  });
 });
