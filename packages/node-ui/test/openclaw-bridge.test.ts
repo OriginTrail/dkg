@@ -227,10 +227,12 @@ describe('PanelRight UI - connected agent flow', () => {
   it('shows the inline attachment tray and project picker in the chat composer', () => {
     // PR2 (post iteration 1): composer shell is a vertical stack — textarea
     // on top, a single .v10-composer-controls row below holding the attach
-    // button + project picker (left) and send button (right).
+    // button + project picker (left) and send button (right). Assert on
+    // the rendered className / aria-label rather than the imported icon
+    // component name so swapping icon libraries doesn't break this test
+    // if the user-visible composer still works.
     expect(panelRight).toContain('aria-label="Attach files"');
     expect(panelRight).toContain('v10-composer-attach');
-    expect(panelRight).toContain('Paperclip');
     expect(panelRight).toContain('v10-composer-controls');
     expect(panelRight).toContain('Choose a project');
     expect(panelRight).toContain("value={activeProjectId ?? ''}");
