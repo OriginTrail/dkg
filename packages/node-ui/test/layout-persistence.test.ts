@@ -39,16 +39,31 @@ describe('useLayoutStore (dkg-layout localStorage persistence)', () => {
   it('reads persisted widths from the dkg-layout key on initial load', async () => {
     localStorage.setItem(
       LAYOUT_KEY,
-      JSON.stringify({ leftWidth: 420, rightWidth: 512, leftCollapsed: true }),
+      JSON.stringify({ leftWidth: 320, rightWidth: 420, leftCollapsed: true }),
     );
 
     const { useLayoutStore } = await loadFreshStore();
     const state = useLayoutStore.getState();
-    expect(state.leftWidth).toBe(420);
-    expect(state.rightWidth).toBe(512);
+    expect(state.leftWidth).toBe(320);
+    expect(state.rightWidth).toBe(420);
     expect(state.leftCollapsed).toBe(true);
     // bottomCollapsed not in the persisted blob -> default
     expect(state.bottomCollapsed).toBe(true);
+  });
+
+  it('clamps persisted widths to the drag-handler bounds on load', async () => {
+    // Stale or hand-edited `dkg-layout` entries that fall outside the bounds
+    // enforced by App.tsx's drag handlers would otherwise reload into an
+    // unusable shell. Clamp on load so the store is always within range.
+    localStorage.setItem(
+      LAYOUT_KEY,
+      JSON.stringify({ leftWidth: 2000, rightWidth: 1 }),
+    );
+
+    const { useLayoutStore } = await loadFreshStore();
+    const state = useLayoutStore.getState();
+    expect(state.leftWidth).toBe(400);   // clamp left to max 400
+    expect(state.rightWidth).toBe(200);  // clamp right to min 200
   });
 
   it('ignores corrupted JSON and falls back to defaults', async () => {

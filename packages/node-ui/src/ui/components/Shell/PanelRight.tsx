@@ -853,7 +853,19 @@ export function ConnectedAgentsTab(props: {
     el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
   }, []);
 
-  const attachmentsEnabled = Boolean(props.selectedIntegration?.chatAttachments) && Boolean(props.activeProjectId) && !props.localSending;
+  // Drop-zone gating: three different reasons the dropzone refuses files.
+  // Each surfaces a different recovery copy in the refuse-state overlay so
+  // the user can act, rather than being told to "choose a project" when the
+  // real cause is e.g. an in-flight send.
+  const dropDisabledReason: 'unsupported' | 'noProject' | 'sending' | null =
+    !props.selectedIntegration?.chatAttachments
+      ? 'unsupported'
+      : !props.activeProjectId
+        ? 'noProject'
+        : props.localSending
+          ? 'sending'
+          : null;
+  const attachmentsEnabled = dropDisabledReason === null;
   const handleFilesDrop = useCallback((files: File[]) => {
     if (!attachmentsEnabled) return;
     onAddAttachments(files);
@@ -1049,12 +1061,20 @@ export function ConnectedAgentsTab(props: {
                   <div className="v10-drop-overlay-title">
                     {attachmentsEnabled
                       ? `Drop files to attach to ${getProjectDisplayName(availableProjects, activeProjectId!)}`
-                      : 'Choose a project before attaching files.'}
+                      : dropDisabledReason === 'sending'
+                        ? 'Wait for the current send to finish.'
+                        : dropDisabledReason === 'unsupported'
+                          ? `${selected.name} doesn't accept file attachments.`
+                          : 'Choose a project before attaching files.'}
                   </div>
                   <div className="v10-drop-overlay-hint">
                     {attachmentsEnabled
                       ? 'Release to upload to this conversation.'
-                      : 'Use the picker below the composer.'}
+                      : dropDisabledReason === 'sending'
+                        ? 'Drop will be accepted once the agent reply lands.'
+                        : dropDisabledReason === 'unsupported'
+                          ? 'Try a different agent that supports attachments.'
+                          : 'Use the picker below the composer.'}
                   </div>
                 </div>
               </div>
@@ -1269,7 +1289,14 @@ export function ConnectedAgentsTab(props: {
                             className="v10-local-agent-target-select"
                             value={activeProjectId ?? ''}
                             onChange={onSelectProject}
-                            options={availableProjects.map((project) => ({ value: project.id, label: project.name }))}
+                            options={[
+                              // Leading "no project" row gives the user a path
+                              // back to a cleared context graph (the old native
+                              // <select> had an implicit empty option that
+                              // handled this).
+                              { value: '', label: 'No project (clear selection)' },
+                              ...availableProjects.map((project) => ({ value: project.id, label: project.name })),
+                            ]}
                             placeholder={projectsLoading ? 'Loading projects…' : 'Choose a project'}
                             disabled={projectsLoading || availableProjects.length === 0}
                             ariaLabel="Active project"

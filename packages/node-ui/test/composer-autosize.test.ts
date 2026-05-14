@@ -8,6 +8,20 @@ import React, { act } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot } from 'react-dom/client';
 
+// Capture the props PanelRight passes to react-textarea-autosize so we can
+// assert the `minRows={1}` / `maxRows={8}` contract without relying on
+// happy-dom layout (which won't run the library's measurement effect).
+const textareaAutosizeProps: Array<Record<string, unknown>> = [];
+vi.mock('react-textarea-autosize', () => {
+  const forwardRef = React.forwardRef;
+  const MockTextareaAutosize = forwardRef<HTMLTextAreaElement, any>((props, ref) => {
+    textareaAutosizeProps.push({ ...props });
+    const { minRows, maxRows, cacheMeasurements, ...rest } = props;
+    return React.createElement('textarea', { ...rest, ref });
+  });
+  return { __esModule: true, default: MockTextareaAutosize };
+});
+
 function integration(overrides: Record<string, unknown> = {}) {
   return {
     id: 'openclaw',
@@ -119,16 +133,21 @@ describe('Composer keybindings + autosize wiring', () => {
     document.body.innerHTML = '';
   });
 
-  it('renders the TextareaAutosize element with the composer class and current value', async () => {
+  it('renders the TextareaAutosize element with the composer class, current value, and forwards minRows=1/maxRows=8', async () => {
+    textareaAutosizeProps.length = 0;
     const { container, unmount } = await renderTab({ localInput: 'draft text' });
     const textarea = getTextarea(container);
     expect(textarea.tagName).toBe('TEXTAREA');
     expect(textarea.classList.contains('v10-agent-input')).toBe(true);
     expect(textarea.value).toBe('draft text');
-    // react-textarea-autosize wires `data-replicated-value`-style sizing via
-    // inline styles; the structural marker is that style.height is touched.
-    // We don't pin to a specific px value (jsdom/happy-dom layout is ~empty).
-    expect(textarea.style.height === '' || textarea.style.height.length >= 0).toBe(true);
+    // The autosize contract: minRows=1 (composer starts single-line) and
+    // maxRows=8 (then internal scroll). Assert via the mocked library so
+    // the check survives happy-dom (no layout) and doesn't depend on
+    // brittle DOM attributes that the real library doesn't forward.
+    expect(textareaAutosizeProps.length).toBeGreaterThanOrEqual(1);
+    const lastProps = textareaAutosizeProps[textareaAutosizeProps.length - 1];
+    expect(lastProps.minRows).toBe(1);
+    expect(lastProps.maxRows).toBe(8);
     await unmount();
   });
 
