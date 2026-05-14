@@ -960,6 +960,9 @@ export function ConnectedAgentsTab(props: {
     : isUploadingAttachments
       ? 'uploading'
       : 'idle';
+  // `canSend` is computed later (line ~1100) once `inputDisabled` is
+  // defined; the send-button JSX and the Enter / Cmd+Enter handlers
+  // both consult it.
   // Drafts pin to the contextGraphId they were attached under. If the user
   // later switches `activeProjectId`, those drafts are still routed to
   // their original target — the warning surfaces that divergence. Always
@@ -1088,6 +1091,18 @@ export function ConnectedAgentsTab(props: {
     localMessagesCount: localMessages.length,
   });
   const inputDisabled = localSending || !selected?.chatReady;
+  // Single source of truth for "is the user allowed to fire a send right
+  // now". Both the button click AND the keyboard Enter / Cmd+Enter
+  // handlers gate on this — earlier the button correctly disabled while
+  // a draft was `uploading`, but the Enter handler did not, so the user
+  // could submit a turn mid-upload. `prepareAttachmentDraftsForSend`
+  // treats `uploading` drafts as sendable work, which would either start
+  // a second import for the same file or push the turn before the first
+  // upload finished. Codex CIlgu.
+  const canSend =
+    !inputDisabled
+    && !isUploadingAttachments
+    && (localInput.trim() !== '' || hasSendableAttachmentDrafts);
 
   return (
     <div className="v10-agents-tab">
@@ -1462,20 +1477,21 @@ export function ConnectedAgentsTab(props: {
                         if (e.nativeEvent.isComposing) return;
                         if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
                           e.preventDefault();
-                          // Gate Enter with the same sendability check the
-                          // send button uses, otherwise an empty-input
-                          // Enter or an Enter while inputDisabled would
-                          // fire onSendLocalMessage even though the
-                          // surfaced affordance (the button) is disabled.
-                          if (!inputDisabled && (localInput.trim() || hasSendableAttachmentDrafts)) {
+                          // Single `canSend` gate shared with the send
+                          // button — if the button is disabled (input
+                          // off, empty composer, or any draft mid-upload),
+                          // Enter must be a no-op too. Codex CIlgu.
+                          if (canSend) {
                             onSendLocalMessage();
                           }
                           return;
                         }
                         if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
-                          // Force send even with empty textarea if attachments queued.
+                          // Force send even with empty textarea if attachments
+                          // queued — but still through the same shared gate so
+                          // a Cmd+Enter during upload doesn't race the upload.
                           e.preventDefault();
-                          if (!inputDisabled && (hasSendableAttachmentDrafts || localInput.trim())) {
+                          if (canSend) {
                             onSendLocalMessage();
                           }
                           return;
@@ -1550,13 +1566,17 @@ export function ConnectedAgentsTab(props: {
                         className={`v10-local-agent-inline-send v10-local-agent-inline-send-${sendButtonMode}`}
                         onClick={sendButtonMode === 'streaming' ? onStopLocalStream : onSendLocalMessage}
                         disabled={
-                          sendButtonMode === 'idle'
-                            ? inputDisabled || (!localInput.trim() && !hasSendableAttachmentDrafts)
-                            // Uploading: button is informational only,
-                            // no interaction (we'll auto-flip once the
-                            // upload settles or fails). Streaming: stop
-                            // is always clickable.
+                          // Streaming: stop is always clickable.
+                          // Uploading: button is informational only, no
+                          //   interaction — auto-flips once upload settles.
+                          // Idle: gated by the shared `canSend` flag, which
+                          //   the keyboard Enter / Cmd+Enter handlers also
+                          //   consult so the two surfaces stay in lockstep.
+                          sendButtonMode === 'streaming'
+                            ? false
                             : sendButtonMode === 'uploading'
+                              ? true
+                              : !canSend
                         }
                         aria-label={
                           // WAI-ARIA APG: button labels describe the action
@@ -1905,7 +1925,13 @@ export function PanelRight() {
   const [localHistoryLoadedByConversation, setLocalHistoryLoadedByConversation] = useState<Record<string, boolean>>({});
   const [attachmentDraftsByConversation, setAttachmentDraftsByConversation] = useState<Record<string, LocalAgentAttachmentDraft[]>>({});
 
-  const localAbortRef = useRef<AbortController | null>(null);
+  // AbortControllers keyed by `conversationKey` so the stop-button on
+  // conversation A always aborts A's in-flight request and never B's.
+  // Earlier code used a single shared ref, which was overwritten when a
+  // user switched conversations mid-stream and started a send in the
+  // new one — clicking Stop in the original conversation would then
+  // abort the wrong request. Codex CIV4a / CIcaM / CIlg0.
+  const localAbortRef = useRef<Map<string, AbortController>>(new Map());
   const autoFocusedLocalAgentRef = useRef(false);
   const localChatEndRef = useRef<HTMLDivElement>(null);
   const memorySessionsRef = useRef<MemorySession[]>([]);
@@ -2337,7 +2363,11 @@ export function PanelRight() {
       }
 
       controller = new AbortController();
-      localAbortRef.current = controller;
+      // Bind this controller to `conversationKey` rather than a global
+      // ref. Multiple conversations can stream concurrently, and the
+      // user can switch tabs mid-stream — each Stop button must abort
+      // its own request.
+      localAbortRef.current.set(conversationKey, controller);
       const contextEntries = [
         ...buildChatContextEntries(availableProjects, activeProjectId, currentAgent),
       ];
@@ -2425,7 +2455,13 @@ export function PanelRight() {
       void refreshLocalIntegrations();
     } finally {
       setLocalSendingForConversation(conversationKey, false);
-      localAbortRef.current = null;
+      // Only clear THIS conversation's controller — leave any other
+      // in-flight conversation's entry alone. Compare-and-delete so a
+      // late `finally` from a previous send can't accidentally wipe a
+      // newer entry under the same key after a quick retry.
+      if (localAbortRef.current.get(conversationKey) === controller) {
+        localAbortRef.current.delete(conversationKey);
+      }
     }
   }, [
     activeProjectId,
@@ -2448,13 +2484,19 @@ export function PanelRight() {
   ]);
 
   const stopLocalStream = useCallback(() => {
-    // Aborts the in-flight chat request. The existing `sendLocalMessage`
-    // `catch (err: any)` block already handles `err?.name === 'AbortError'`
-    // by replacing the assistant bubble content with "Request cancelled."
-    // and dropping `streaming: false`, so a single `.abort()` here is
-    // enough — no additional teardown needed.
-    localAbortRef.current?.abort();
-  }, []);
+    // Aborts ONLY the currently-selected conversation's in-flight
+    // request. With the per-conversation abort-controller map,
+    // clicking Stop in conversation A can no longer accidentally
+    // abort B's stream — even if B started later, B's controller
+    // lives under B's key. The existing `sendLocalMessage`
+    // `catch (err: any)` block already handles `err?.name ===
+    // 'AbortError'` by replacing the assistant bubble content with
+    // "Request cancelled." and dropping `streaming: false`, so a
+    // single `.abort()` here is enough — no additional teardown.
+    if (!selectedConversationKey) return;
+    const controller = localAbortRef.current.get(selectedConversationKey);
+    controller?.abort();
+  }, [selectedConversationKey]);
 
   const connectIntegration = useCallback(async (integrationId: string) => {
     setConnectBusyId(integrationId);
