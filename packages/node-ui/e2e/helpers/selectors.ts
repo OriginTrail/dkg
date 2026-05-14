@@ -90,8 +90,12 @@ export const sel = {
     warning: '.v10-local-agent-warning',
     projectSelect: '.v10-local-agent-target-select',
     projectSelectTrigger: '.v10-local-agent-target-select .v10-select-trigger',
-    projectSelectMenu: '.v10-local-agent-target-select .v10-select-menu',
-    projectSelectOption: '.v10-local-agent-target-select .v10-select-option',
+    // The Select menu/options portal to document.body (createPortal), so
+    // they're NOT descendants of `.v10-local-agent-target-select`. Use
+    // top-level selectors so Playwright actually finds them when the
+    // picker is open.
+    projectSelectMenu: '.v10-select-menu',
+    projectSelectOption: '.v10-select-option',
     // PR2 composer (TextareaAutosize + lucide icons + react-dropzone)
     composerShell: '.v10-local-agent-composer-shell',
     composerAttach: '.v10-composer-attach',
