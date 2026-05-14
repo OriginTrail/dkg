@@ -110,12 +110,16 @@ export const useLayoutStore = create<LayoutState>((set, get) => ({
     set({ theme: t });
   },
   setLeftWidth: (w) => {
-    set({ leftWidth: w });
+    // Clamp at the setter boundary so the store itself enforces the layout
+    // contract — any caller (not just the drag handler in App.tsx) pushes
+    // values within the supported bounds, and persisted state stays
+    // consistent with what loadPersisted accepts on reload.
+    set({ leftWidth: clamp(w, LEFT_WIDTH_MIN, LEFT_WIDTH_MAX) });
     const { leftCollapsed, rightCollapsed, bottomCollapsed, leftWidth, rightWidth } = get();
     persist({ leftCollapsed, rightCollapsed, bottomCollapsed, leftWidth, rightWidth });
   },
   setRightWidth: (w) => {
-    set({ rightWidth: w });
+    set({ rightWidth: clamp(w, RIGHT_WIDTH_MIN, RIGHT_WIDTH_MAX) });
     const { leftCollapsed, rightCollapsed, bottomCollapsed, leftWidth, rightWidth } = get();
     persist({ leftCollapsed, rightCollapsed, bottomCollapsed, leftWidth, rightWidth });
   },

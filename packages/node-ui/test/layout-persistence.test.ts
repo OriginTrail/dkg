@@ -115,16 +115,39 @@ describe('useLayoutStore (dkg-layout localStorage persistence)', () => {
     const { useLayoutStore } = await loadFreshStore();
     const spy = vi.spyOn(localStorage, 'setItem');
 
-    useLayoutStore.getState().setRightWidth(540);
+    // Pick a value inside the [200, 500] clamp bounds enforced by the
+    // setter — otherwise the assertion below would see the clamped value,
+    // not the raw input.
+    useLayoutStore.getState().setRightWidth(420);
     expect(spy).not.toHaveBeenCalled();
 
     await wait(DEBOUNCE_WAIT_MS);
 
     expect(spy).toHaveBeenCalledTimes(1);
     const [, raw] = spy.mock.calls[0]!;
-    expect(JSON.parse(raw as string).rightWidth).toBe(540);
+    expect(JSON.parse(raw as string).rightWidth).toBe(420);
 
     spy.mockRestore();
+  });
+
+  it('clamps setLeftWidth / setRightWidth at the setter boundary', async () => {
+    // The drag handler in App.tsx already clamps, but any other caller
+    // (programmatic resize, future code path) must not be able to push the
+    // store outside the supported range — and the persisted blob has to
+    // match what loadPersisted accepts on reload.
+    const { useLayoutStore } = await loadFreshStore();
+
+    useLayoutStore.getState().setLeftWidth(2000);
+    expect(useLayoutStore.getState().leftWidth).toBe(400);
+
+    useLayoutStore.getState().setLeftWidth(10);
+    expect(useLayoutStore.getState().leftWidth).toBe(140);
+
+    useLayoutStore.getState().setRightWidth(2000);
+    expect(useLayoutStore.getState().rightWidth).toBe(500);
+
+    useLayoutStore.getState().setRightWidth(10);
+    expect(useLayoutStore.getState().rightWidth).toBe(200);
   });
 
   it('round-trips a setRightWidth into the next module load', async () => {

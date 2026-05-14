@@ -1170,7 +1170,11 @@ export function ConnectedAgentsTab(props: {
                         ...availableProjects.map((project) => ({ value: project.id, label: project.name })),
                       ]}
                       placeholder={projectsLoading ? 'Loading projects…' : 'Choose a project'}
-                      disabled={projectsLoading || availableProjects.length === 0}
+                      // Only disable while the list is loading. Even with
+                      // zero real projects, the "No project (clear selection)"
+                      // option is always present, so the user must always be
+                      // able to open the picker to clear a stale selection.
+                      disabled={projectsLoading}
                       ariaLabel="Active project"
                     />
                   </div>
