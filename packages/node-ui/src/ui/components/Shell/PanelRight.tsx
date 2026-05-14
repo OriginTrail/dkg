@@ -26,7 +26,7 @@ import {
 import { api } from '../../api-wrapper.js';
 import TextareaAutosize from 'react-textarea-autosize';
 import { useDropzone } from 'react-dropzone';
-import { ArrowUp, Ban, ChevronDown, Folder, MoreHorizontal, Paperclip, Upload, X } from 'lucide-react';
+import { ArrowUp, Ban, ChevronDown, ChevronRight, Folder, MoreHorizontal, Paperclip, Upload, X } from 'lucide-react';
 import { Select } from '../common/Select.js';
 import { MarkdownMessage } from '../chat/MarkdownMessage.js';
 
@@ -1268,6 +1268,66 @@ export function ConnectedAgentsTab(props: {
   );
 }
 
+function NetworkPeerCard({ agent }: { agent: AgentInfo }) {
+  const statusClass = networkPeerCardStatusClass(agent);
+  return (
+    <div className={`v10-agent-card ${statusClass}`}>
+      <div className="v10-agent-card-header">
+        <span className={`v10-agent-card-dot ${statusClass}`} />
+        <span className="v10-agent-card-name">{agent.name}</span>
+        <span className="v10-agent-card-badge">
+          {agent.connectionStatus === 'connected'
+            ? (agent.connectionTransport ?? 'direct')
+            : 'Disconnected'}
+        </span>
+      </div>
+      <div className="v10-agent-card-meta">
+        <span>{agent.nodeRole ?? 'core'}</span>
+        <span title={agent.peerId}>{shortPeerId(agent.peerId)}</span>
+        {agent.latencyMs != null && <span>{agent.latencyMs}ms</span>}
+        {agent.lastSeen != null && <span>{formatDuration(Date.now() - agent.lastSeen)} ago</span>}
+      </div>
+    </div>
+  );
+}
+
+function NetworkPeerGroup(props: {
+  label: string;
+  peers: AgentInfo[];
+  expanded: boolean;
+  onToggle: () => void;
+  emptyMessage: string;
+}) {
+  const { label, peers, expanded, onToggle, emptyMessage } = props;
+  return (
+    <div className="v10-peer-group">
+      <button
+        type="button"
+        className="v10-peer-group-header"
+        onClick={onToggle}
+        aria-expanded={expanded}
+      >
+        <ChevronRight
+          size={14}
+          className={`v10-peer-group-chevron ${expanded ? 'expanded' : ''}`}
+          aria-hidden="true"
+        />
+        <span className="v10-peer-group-label">{label}</span>
+        <span className="v10-peer-group-count">{peers.length}</span>
+      </button>
+      {expanded && (
+        <div className="v10-peer-group-body">
+          {peers.length === 0 ? (
+            <div className="v10-agent-empty-state">{emptyMessage}</div>
+          ) : (
+            peers.map((agent) => <NetworkPeerCard key={agent.peerId} agent={agent} />)
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function NetworkTab(props: {
   peerAgents: AgentInfo[];
   connections: { total: number; direct: number; relayed: number };
@@ -1275,6 +1335,11 @@ function NetworkTab(props: {
   onRefresh: () => void;
 }) {
   const { peerAgents, connections, loading, onRefresh } = props;
+  const [connectedExpanded, setConnectedExpanded] = useState(true);
+  const [disconnectedExpanded, setDisconnectedExpanded] = useState(false);
+
+  const connectedPeers = peerAgents.filter((a) => a.connectionStatus === 'connected');
+  const disconnectedPeers = peerAgents.filter((a) => a.connectionStatus !== 'connected');
 
   return (
     <div className="v10-agent-scroll-tab">
@@ -1289,33 +1354,28 @@ function NetworkTab(props: {
         </button>
       </div>
 
-      <div className="v10-agents-section-label">Network Peers</div>
       {loading && <p className="v10-agents-loading">Loading peers...</p>}
       {peerAgents.length === 0 && !loading && (
-        <div className="v10-agent-empty-state">No connected peers yet.</div>
+        <div className="v10-agent-empty-state">No network peers detected yet.</div>
       )}
-      {peerAgents.map((agent) => {
-        const statusClass = networkPeerCardStatusClass(agent);
-        return (
-        <div key={agent.peerId} className={`v10-agent-card ${statusClass}`}>
-          <div className="v10-agent-card-header">
-            <span className={`v10-agent-card-dot ${statusClass}`} />
-            <span className="v10-agent-card-name">{agent.name}</span>
-            <span className="v10-agent-card-badge">
-              {agent.connectionStatus === 'connected'
-                ? (agent.connectionTransport ?? 'direct')
-                : 'Disconnected'}
-            </span>
-          </div>
-          <div className="v10-agent-card-meta">
-            <span>{agent.nodeRole ?? 'core'}</span>
-            <span title={agent.peerId}>{shortPeerId(agent.peerId)}</span>
-            {agent.latencyMs != null && <span>{agent.latencyMs}ms</span>}
-            {agent.lastSeen != null && <span>{formatDuration(Date.now() - agent.lastSeen)} ago</span>}
-          </div>
-        </div>
-        );
-      })}
+      {peerAgents.length > 0 && (
+        <>
+          <NetworkPeerGroup
+            label="Connected"
+            peers={connectedPeers}
+            expanded={connectedExpanded}
+            onToggle={() => setConnectedExpanded((p) => !p)}
+            emptyMessage="No peers currently connected."
+          />
+          <NetworkPeerGroup
+            label="Disconnected"
+            peers={disconnectedPeers}
+            expanded={disconnectedExpanded}
+            onToggle={() => setDisconnectedExpanded((p) => !p)}
+            emptyMessage="All known peers are connected."
+          />
+        </>
+      )}
     </div>
   );
 }
