@@ -1655,7 +1655,12 @@ button:focus:not(:focus-visible) { outline: none; }
 }
 .v10-drop-overlay.active {
   opacity: 1;
-  pointer-events: auto;
+  /* Keep the overlay non-interactive (`pointer-events: none` from the
+     base rule above). The dropzone root owns the drag lifecycle —
+     turning the overlay interactive while it sits inside the drop
+     target can steal the follow-up `dragenter`/`dragleave`/`drop`
+     sequence in real browsers and cause flicker or dropped files
+     failing to register. */
 }
 .v10-drop-overlay-card {
   display: flex;

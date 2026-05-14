@@ -368,11 +368,24 @@ test.describe('Right Panel (Agent Panel)', () => {
       if (!visible) {
         test.skip(true, 'Dropzone requires the chat-shell messages region.');
       }
-      const hasStoreHandle = await page.evaluate(() => Boolean((window as any).__dkgProjects));
-      if (!hasStoreHandle) {
-        test.skip(true, 'No test handle for projects store — refuse overlay is covered by unit tests.');
+      // Clear the active project through the picker UI rather than a
+      // synthetic store handle (`window.__dkgProjects` was never exposed,
+      // so the previous skip path made the assertion effectively dead).
+      // The "No project (clear selection)" option only renders when a
+      // project is active, so this skips cleanly when nothing is selected
+      // to begin with.
+      const trigger = page.locator(sel.rightPanel.projectSelectTrigger);
+      if ((await trigger.count()) === 0 || !(await trigger.first().isVisible().catch(() => false))) {
+        test.skip(true, 'Project picker not rendered in this env — refuse overlay is covered by unit tests.');
       }
-      await page.evaluate(() => (window as any).__dkgProjects.setState({ activeProjectId: null }));
+      await trigger.first().click();
+      const clearOption = page
+        .locator(sel.rightPanel.projectSelectOption)
+        .filter({ hasText: /clear selection/i });
+      if ((await clearOption.count()) === 0) {
+        test.skip(true, 'No active project to clear in this env — refuse overlay is covered by unit tests.');
+      }
+      await clearOption.first().click();
 
       await messages.dispatchEvent('dragenter', {
         dataTransfer: { files: [], items: [{ kind: 'file', type: 'text/markdown' }], types: ['Files'] },
