@@ -293,12 +293,23 @@ test.describe('Right Panel (Agent Panel)', () => {
       const grown = await input.evaluate((el) => (el as HTMLTextAreaElement).clientHeight);
       expect(grown).toBeGreaterThan(initialHeight);
 
-      // 10 lines should clamp at maxRows=8 with overflow auto/scroll.
-      const tenLines = Array.from({ length: 10 }, (_, i) => `line ${i + 1}`).join('\n');
-      await input.fill(tenLines);
-      const clampedHeight = await input.evaluate((el) => (el as HTMLTextAreaElement).clientHeight);
+      // The PR2 contract is `maxRows={8}`: once content exceeds 8 lines the
+      // textarea height stops growing AND internal scroll engages. Verify
+      // the BEHAVIOR (height plateaus at >8 lines + overflow becomes
+      // auto/scroll) rather than a font-metric-derived px number that
+      // varies by CI environment.
+      const heightAt8Lines = await (async () => {
+        await input.fill(Array.from({ length: 8 }, (_, i) => `line ${i + 1}`).join('\n'));
+        return input.evaluate((el) => (el as HTMLTextAreaElement).clientHeight);
+      })();
+      const heightAt12Lines = await (async () => {
+        await input.fill(Array.from({ length: 12 }, (_, i) => `line ${i + 1}`).join('\n'));
+        return input.evaluate((el) => (el as HTMLTextAreaElement).clientHeight);
+      })();
+      // Allow a 2px slack for sub-pixel rounding; the heights should be
+      // effectively identical (clamp held).
+      expect(Math.abs(heightAt12Lines - heightAt8Lines)).toBeLessThanOrEqual(2);
       const overflowY = await input.evaluate((el) => getComputedStyle(el as HTMLElement).overflowY);
-      expect(clampedHeight).toBeLessThanOrEqual(grown * 6 + 16);
       expect(['auto', 'scroll']).toContain(overflowY);
     });
 

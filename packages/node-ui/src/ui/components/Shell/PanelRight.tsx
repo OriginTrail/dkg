@@ -868,7 +868,19 @@ export function ConnectedAgentsTab(props: {
   const attachmentTargetIds = [...new Set(selectedAttachmentDrafts.map((attachment) => attachment.contextGraphId))];
   const attachmentInputRef = useRef<HTMLInputElement>(null);
 
-  const attachmentsEnabled = Boolean(props.selectedIntegration?.chatAttachments) && Boolean(props.activeProjectId) && !props.localSending;
+  // Drop-zone gating: three different reasons the dropzone refuses files.
+  // Each surfaces a different recovery copy in the refuse-state overlay so
+  // the user can act, rather than being told to "choose a project" when the
+  // real cause is e.g. an in-flight send.
+  const dropDisabledReason: 'unsupported' | 'noProject' | 'sending' | null =
+    !props.selectedIntegration?.chatAttachments
+      ? 'unsupported'
+      : !props.activeProjectId
+        ? 'noProject'
+        : props.localSending
+          ? 'sending'
+          : null;
+  const attachmentsEnabled = dropDisabledReason === null;
   const handleFilesDrop = useCallback((files: File[]) => {
     if (!attachmentsEnabled) return;
     onAddAttachments(files);
@@ -1068,12 +1080,20 @@ export function ConnectedAgentsTab(props: {
                   <div className="v10-drop-overlay-title">
                     {attachmentsEnabled
                       ? `Drop files to attach to ${getProjectDisplayName(availableProjects, activeProjectId!)}`
-                      : 'Choose a project before attaching files.'}
+                      : dropDisabledReason === 'sending'
+                        ? 'Wait for the current send to finish.'
+                        : dropDisabledReason === 'unsupported'
+                          ? `${selected.name} doesn't accept file attachments.`
+                          : 'Choose a project before attaching files.'}
                   </div>
                   <div className="v10-drop-overlay-hint">
                     {attachmentsEnabled
                       ? 'Release to upload to this conversation.'
-                      : 'Use the picker below the composer.'}
+                      : dropDisabledReason === 'sending'
+                        ? 'Drop will be accepted once the agent reply lands.'
+                        : dropDisabledReason === 'unsupported'
+                          ? 'Try a different agent that supports attachments.'
+                          : 'Use the picker below the composer.'}
                   </div>
                 </div>
               )}
