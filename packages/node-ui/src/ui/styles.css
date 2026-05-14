@@ -1885,17 +1885,18 @@ button:focus:not(:focus-visible) { outline: none; }
      (e.g., user bubbles). Uses --border-prominent so contrast clears 3:1
      non-text on every bubble × theme combination. */
   border: 1px solid var(--border-prominent);
-  /* When inline code wraps across lines (long URNs etc.), each visual line
-     gets its own padding box and a hair of vertical gap so the stacked chips
-     don't visually touch. */
-  -webkit-box-decoration-break: clone;
-  box-decoration-break: clone;
+  /* Default `box-decoration-break: slice` so that a single chip wrapping
+     across lines shows open edges at the wrap point (matches Claude
+     Desktop: the right edge of line 1 and the left edge of line 2 stay
+     open, signalling "this is one continuous token"). Vertical separation
+     between lines is handled by the parent's line-height below. */
 }
-/* Paragraphs that contain inline-code chips need a little extra leading so
-   the boxed chips don't stack edge-to-edge when they wrap. */
+/* Paragraphs and list items that contain inline-code chips bump line-height
+   so the chips have breathing room without needing each line to render a
+   fully-closed padding box. */
 .v10-md-p:has(> .v10-md-code),
 .v10-md-li:has(> .v10-md-code) {
-  line-height: 1.75;
+  line-height: 1.85;
 }
 .v10-md-pre {
   position: relative;
