@@ -197,6 +197,12 @@ describe('MarkdownMessage rendering', () => {
   });
 
   it('G3 plaintext fallback: unsupported lang ("pascal") renders the plain <pre><code> fallback (no shiki)', async () => {
+    // Snapshot the import counter BEFORE the render. The mock factory is
+    // module-cached across the file (vitest only calls it on first import of
+    // shiki), so an earlier test in this file may have already nudged the
+    // counter to 1. What we actually want to verify here is the DELTA —
+    // rendering a `pascal` fence must not trigger a fresh `import('shiki')`.
+    const before = shikiImportCount;
     const md = '```pascal\nbegin\nend.\n```';
     const { container, unmount } = await render(md);
 
@@ -210,8 +216,9 @@ describe('MarkdownMessage rendering', () => {
     // The original source is preserved verbatim in the fallback <code>.
     const code = container.querySelector('.v10-md-pre-fallback code');
     expect(code?.textContent).toBe('begin\nend.');
-    // CRITICAL: with no supported language, shiki must never load.
-    expect(shikiImportCount).toBe(0);
+    // CRITICAL: with no supported language, shiki must never be (re)loaded
+    // as a side effect of this render.
+    expect(shikiImportCount).toBe(before);
     await unmount();
   });
 

@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Check, Copy } from 'lucide-react';
+import { useLayoutStore } from '../../stores/layout.js';
 
 type Highlighter = {
   codeToHtml: (code: string, opts: { lang: string; theme: string }) => string;
@@ -42,11 +43,6 @@ function normalizeLang(raw: string | undefined): SupportedLang | null {
   return null;
 }
 
-function isDarkTheme(): boolean {
-  if (typeof document === 'undefined') return true;
-  return !document.body.classList.contains('light');
-}
-
 interface CodeBlockProps {
   code: string;
   lang?: string;
@@ -56,8 +52,13 @@ export function CodeBlock({ code, lang }: CodeBlockProps) {
   const normalizedLang = normalizeLang(lang);
   const [html, setHtml] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
-  const isDark = isDarkTheme();
-  const themeKey = isDark ? 'github-dark' : 'github-light';
+  // Read theme from the layout store (the same source that drives `body.light`
+  // via App.tsx's effect). Sampling `document.body.classList` here raced with
+  // that effect — on initial load with a saved light theme, code blocks would
+  // mount before the body class flipped and stay locked to `github-dark`
+  // until something else re-rendered them.
+  const theme = useLayoutStore((s) => s.theme);
+  const themeKey = theme === 'light' ? 'github-light' : 'github-dark';
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {

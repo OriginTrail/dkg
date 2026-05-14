@@ -424,13 +424,25 @@ test.describe('Right Panel (Agent Panel)', () => {
   // ─── PR3: Markdown rendering (react-markdown + remark-gfm + shiki) ────
 
   test.describe('PR3: markdown rendering', () => {
-    test('rendersTable: a GFM table seeded into an assistant bubble renders inside .v10-md-table-scroll', async ({ page }) => {
+    test('rendersTable: a GFM table in a chat bubble lands inside .v10-md-table-scroll', async ({ page }) => {
+      // Daemon-seeded chat content is non-deterministic in CI, so the
+      // bubble may or may not already contain a markdown table. Two-tier
+      // check: (1) if a table-scroll wrapper exists anywhere in a bubble,
+      // assert its structural pieces (`<th>` + `<td>` with our classnames);
+      // (2) otherwise skip with a pointer at the deterministic unit-test
+      // fixture that covers the same rendering path.
       const bubble = page.locator(sel.rightPanel.chatBubble).first();
       if (!(await bubble.isVisible().catch(() => false))) {
         test.skip(true, 'No assistant chat bubble in this env (daemon required to seed messages).');
       }
-      // If a real assistant bubble exists, assert the markdown wrapper is present.
-      await expect(bubble.locator('.v10-md')).toBeVisible();
+      const tableScroll = page.locator(sel.rightPanel.chatBubble).locator('.v10-md-table-scroll').first();
+      if (!(await tableScroll.isVisible().catch(() => false))) {
+        test.skip(true, 'No table-bearing bubble in this env — covered by markdown-message.test.ts.');
+      }
+      await expect(tableScroll).toBeVisible();
+      await expect(tableScroll.locator('table.v10-md-table')).toBeVisible();
+      await expect(tableScroll.locator('th.v10-md-th').first()).toBeVisible();
+      await expect(tableScroll.locator('td.v10-md-td').first()).toBeVisible();
     });
 
     test('codeBlockCopy: clicking .v10-md-copy on a fenced block calls navigator.clipboard.writeText with the code', async ({ page }) => {

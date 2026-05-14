@@ -1453,7 +1453,10 @@ function NetworkTab(props: {
       <div className="v10-agents-summary">
         <span className="v10-agents-stat">
           <span className={`v10-agents-stat-dot ${connectedPeers.length > 0 ? 'connected' : 'known'}`} />
-          {connectedPeers.length} peer{connectedPeers.length !== 1 ? 's' : ''}
+          {/* "Connected" qualifier matches the Connected section header below
+              — without it, "0 peers" reads as "no peers known" when there
+              might be hundreds of disconnected peers in the section underneath. */}
+          {connectedPeers.length} connected
         </span>
         <span className="v10-agents-stat">{directCount} direct / {relayedCount} relayed</span>
         <button className="v10-agents-refresh" onClick={onRefresh} title="Refresh network peers">
@@ -1960,9 +1963,11 @@ export function PanelRight() {
         { id: assistantId, turnId: correlationId, role: 'assistant', content: '', ts: now, streaming: true },
       ]);
       setLocalInputForConversation(conversationKey, '');
-      // Clear composer chips as soon as the user-message bubble owns the
-      // attachments — keeping them visible until the agent reply makes the
-      // attachment look "stuck in queue".
+      // Clear composer chips OPTIMISTICALLY as soon as the user-message
+      // bubble owns the attachments — keeping them visible until the agent
+      // reply makes the attachment look "stuck in queue". If the send fails
+      // or is aborted, the `catch` below restores these drafts so the user
+      // can retry without re-uploading.
       if (deliveredAttachmentIds.length > 0) {
         clearCompletedAttachmentsForConversation(conversationKey, deliveredAttachmentIds);
       }
@@ -2024,6 +2029,19 @@ export function PanelRight() {
               : message,
           ),
         );
+      }
+      // Restore the attachment drafts we optimistically cleared so the user
+      // can retry the same files without re-uploading. Merge instead of
+      // overwriting in case the user has queued NEW drafts during the
+      // in-flight request — keep those, prepend the failed ones.
+      if (deliveredAttachmentIds.length > 0 && processedDrafts.length > 0) {
+        setAttachmentDraftsByConversation((prev) => {
+          const current = prev[conversationKey] ?? [];
+          const existingIds = new Set(current.map((d) => d.id));
+          const restored = processedDrafts.filter((d) => !existingIds.has(d.id));
+          if (restored.length === 0) return prev;
+          return { ...prev, [conversationKey]: [...restored, ...current] };
+        });
       }
       void refreshLocalIntegrations();
     } finally {
