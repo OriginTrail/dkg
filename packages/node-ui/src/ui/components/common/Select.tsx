@@ -112,6 +112,16 @@ export function Select({
     }
   }, [open, value, options]);
 
+  // If the parent flips `disabled` to true while the menu is open the
+  // trigger greys out but the portal-rendered menu stays mounted and
+  // interactive — users could keep clicking stale options. Close the
+  // menu in that case so the menu state matches the trigger's affordance.
+  useEffect(() => {
+    if (disabled && open) {
+      setOpen(false);
+    }
+  }, [disabled, open]);
+
   const onTriggerKeyDown = (e: React.KeyboardEvent<HTMLButtonElement>) => {
     if (disabled) return;
     if (e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ') {
@@ -217,7 +227,13 @@ export function Select({
               onMouseEnter={() => setHighlight(idx)}
               onMouseDown={(e) => e.preventDefault()}
               onClick={() => {
-                if (opt.disabled) return;
+                // Guard with `disabled` as well — the menu lives in a portal,
+                // so without this a race where the parent flips `disabled`
+                // mid-interaction could still commit a stale option (the
+                // close-on-disabled effect above will follow up, but the
+                // click could still race ahead of the effect on the same
+                // tick).
+                if (disabled || opt.disabled) return;
                 onChange(opt.value);
                 close();
               }}
