@@ -325,6 +325,46 @@ describe('ConnectedAgentsTab rendering', () => {
     expect(markup).toContain('aria-label="Send message"');
   });
 
+  it('only routes assistant bubbles through markdown — user bubbles stay literal (Codex CBnNU / CCyxn / CFNsU / CFXYU)', () => {
+    // User-side content (typed prompts AND synthetic attachment summaries)
+    // must render as plain text so:
+    //  - the transcript shows the exact characters the user sent
+    //    (typing `# heading` doesn't visibly transform the bubble), and
+    //  - a filename like `[spec](https://attacker.com)` embedded in a
+    //    synthetic summary doesn't become a clickable external link
+    //    (CFThj's relative-link guard doesn't cover absolute http(s)).
+    const markup = renderConnectedAgentsTab({
+      localMessages: [
+        {
+          id: 'u1',
+          role: 'user',
+          content: '# heading and [link](https://example.test)',
+          ts: '10:00',
+        },
+        {
+          id: 'a1',
+          role: 'assistant',
+          content: '# real heading',
+          ts: '10:01',
+        },
+      ],
+    });
+    // Assistant bubble → markdown (h1 tag rendered).
+    expect(markup).toContain('<h1 class="v10-md-h1">real heading</h1>');
+    // User bubble → literal text in .v10-chat-plaintext, NOT a heading or
+    // anchor. Pre-wrap preserves the `#` so the user sees what they sent.
+    expect(markup).toContain('v10-chat-plaintext');
+    expect(markup).toContain('# heading and [link](https://example.test)');
+    // Pin down that the user bubble didn't sprout an `<a>` or `<h1>`.
+    // (The assistant `<h1>` above is fine — it's in a different bubble.)
+    const userBubbleStart = markup.indexOf('class="v10-chat-bubble user"');
+    const userBubbleEnd = markup.indexOf('</div>', userBubbleStart);
+    const userBubble = markup.slice(userBubbleStart, userBubbleEnd);
+    expect(userBubble).not.toContain('<a ');
+    expect(userBubble).not.toContain('<h1');
+    expect(userBubble).not.toContain('v10-md-');
+  });
+
   it('renders degraded connected-agent status dots', () => {
     const degraded = integration({
       id: 'hermes',

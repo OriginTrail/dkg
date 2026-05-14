@@ -305,14 +305,28 @@ export function normalizeMessageContent(content: string): string {
     .replace(/(?:\n[ \t]*)+$/, '');
 }
 
-function renderMessageContent(content: string): React.ReactNode {
-  // PR3: route assistant + user message content through react-markdown
-  // (with remark-gfm) so headings, lists, tables, blockquotes, links, and
-  // fenced code blocks (syntax-highlighted via shiki) render as proper
-  // structured markup. `normalizeMessageContent` still pre-trims and
-  // normalizes line endings.
+function renderMessageContent(
+  content: string,
+  role: 'user' | 'assistant',
+): React.ReactNode {
   const normalized = normalizeMessageContent(content);
-  return <MarkdownMessage content={normalized} />;
+  // Markdown rendering applies only to assistant output, which is the
+  // content that's actually authored as markdown. User-typed messages
+  // and synthetic user-side content (attachment summaries, import
+  // results) are rendered as literal text with whitespace preserved
+  // — otherwise:
+  //   1. Typing `# heading` or `---` would visibly transform the
+  //      bubble, so the transcript no longer matches the prompt that
+  //      was sent (Codex CBnNU / CCyxn).
+  //   2. Synthetic attachment summaries embed raw filenames. A file
+  //      named `[spec](https://attacker.com)` would otherwise render
+  //      as a live external link from the user-side bubble
+  //      (CFNsU / CFXYU). The CFThj relative-link guard doesn't
+  //      cover this — those hrefs are absolute and allowed.
+  if (role === 'assistant') {
+    return <MarkdownMessage content={normalized} />;
+  }
+  return <span className="v10-chat-plaintext">{normalized}</span>;
 }
 
 export function getLocalAgentConversationStateKey(
@@ -1193,7 +1207,7 @@ export function ConnectedAgentsTab(props: {
               {localMessages.map((message) => (
                 <div key={message.id} className={`v10-chat-msg ${message.role}`}>
                   <div className={`v10-chat-bubble ${message.role}`}>
-                    {renderMessageContent(message.content)}
+                    {renderMessageContent(message.content, message.role)}
                     {message.streaming && <span className="v10-chat-cursor" />}
                   </div>
                   {message.attachments && message.attachments.length > 0 && (

@@ -1907,6 +1907,14 @@ button:focus:not(:focus-visible) { outline: none; }
   word-break: break-word;
   overflow-wrap: anywhere;
 }
+.v10-chat-plaintext {
+  /* User-side bubbles render as literal text — preserve whitespace and
+     newlines so the transcript shows the exact prompt the user sent.
+     `pre-wrap` keeps `\n` visible without collapsing runs of spaces;
+     the inherited word-break / overflow-wrap on the bubble still
+     handles long unbroken tokens. */
+  white-space: pre-wrap;
+}
 .v10-chat-bubble.user {
   background: var(--bg-active);
   color: var(--text-primary);
