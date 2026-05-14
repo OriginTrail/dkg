@@ -5,6 +5,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 let ConnectedAgentsTab: any;
 let adoptLocalAgentTurnId: any;
 let formatLocalTimestamp: any;
+let unescapeNewlinesFromHistory: any;
 let getLocalAgentConversationStateKey: any;
 let markLocalAgentIntegrationDisconnected: any;
 let networkPeerCardStatusClass: any;
@@ -51,6 +52,7 @@ beforeAll(async () => {
   shouldPreserveSessionForIntegrationSelection = panelRight.shouldPreserveSessionForIntegrationSelection;
   shouldPreserveSessionOnReconnect = panelRight.shouldPreserveSessionOnReconnect;
   upsertLocalAgentIntegrationState = panelRight.upsertLocalAgentIntegrationState;
+  unescapeNewlinesFromHistory = panelRight.unescapeNewlinesFromHistory;
 });
 
 function integration(overrides: Record<string, unknown> = {}) {
@@ -159,6 +161,29 @@ describe('PanelRight logic helpers', () => {
     expect(formatLocalTimestamp(undefined)).toBe('');
     expect(formatLocalTimestamp('')).toBe('');
     expect(formatLocalTimestamp('not-a-date')).toBe('not-a-date');
+  });
+
+  it('unescapeNewlinesFromHistory: decodes persisted-escaped payloads but preserves intentional literals (Codex CLWmd)', () => {
+    // Persisted-escaped: no real newlines, only literal `\n`. Decode.
+    expect(unescapeNewlinesFromHistory('line one\\nline two')).toBe('line one\nline two');
+    expect(unescapeNewlinesFromHistory('one\\ntwo\\nthree')).toBe('one\ntwo\nthree');
+
+    // Live content that round-tripped correctly: has real newlines, may
+    // also contain intentional `\\n` literals from code/JSON samples.
+    // Don't touch — round-1 blanket decode corrupted exactly this case.
+    expect(unescapeNewlinesFromHistory('json:\n{"text":"a\\nb"}')).toBe('json:\n{"text":"a\\nb"}');
+    expect(unescapeNewlinesFromHistory('echo -e "a\\nb"\nrunme')).toBe('echo -e "a\\nb"\nrunme');
+
+    // Windows CRLF (`\\r\\n`) decodes ahead of `\\n` so we don't leave a
+    // half-decoded `\\r` + real newline (Codex CLWmd secondary concern).
+    expect(unescapeNewlinesFromHistory('line one\\r\\nline two')).toBe('line one\nline two');
+    expect(unescapeNewlinesFromHistory('one\\r\\ntwo\\r\\nthree')).toBe('one\ntwo\nthree');
+
+    // Edge cases: undefined / empty / no escapes → no-op.
+    expect(unescapeNewlinesFromHistory(undefined)).toBe('');
+    expect(unescapeNewlinesFromHistory('')).toBe('');
+    expect(unescapeNewlinesFromHistory('plain text no newlines')).toBe('plain text no newlines');
+    expect(unescapeNewlinesFromHistory('multi\nline\nplain')).toBe('multi\nline\nplain');
   });
 
   it('preserves literal backslash-n in agent content (Codex CHWpS)', () => {

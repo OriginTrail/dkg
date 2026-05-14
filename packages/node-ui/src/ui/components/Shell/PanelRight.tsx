@@ -302,36 +302,49 @@ function buildChatContextEntries(
 }
 
 /**
- * Un-escape literal backslash-n in history-loaded text.
+ * Un-escape literal backslash-n in history-loaded text — but only
+ * when the persistence layer was the one that did the escape.
  *
- * The DKG-memory persistence path stores message text with newlines
- * encoded as `\n` (backslash + the letter n), not as real `
-`
- * characters. When the panel reloads history, raw `\\n` shows up
- * inline and breaks markdown parsing (paragraphs run together, code
- * fences don't open, table separators don't render).
+ * Why this exists: the DKG-memory persistence path can store message
+ * text with newlines encoded as literal `\n` (backslash + the letter
+ * n), not as real `
+` characters. When the panel reloads history,
+ * raw `\\n` shows up inline and breaks markdown parsing (paragraphs
+ * run together, code fences don't open, table separators don't
+ * render).
  *
- * Round-17 (Codex CHWpS) deliberately removed the equivalent
- * un-escape from the global `normalizeMessageContent` because it
- * corrupted legitimate `\\n` content in live-stream code samples
- * (JSON like `{"text":"a\\nb"}`, shell like `echo -e "a\\nb"`). That
- * concern still applies to LIVE content, which is why we do NOT
- * un-escape there. But for history-load specifically, the
- * persistence layer is responsible for the escape, so un-escaping
- * here is the symmetric decode — the same fix Codex itself suggested
- * ("the right place is the transport boundary, not the renderer").
+ * Why this is heuristic: round-17 (Codex CHWpS) deliberately removed
+ * a blanket `\\n` → `\n` rewrite from `normalizeMessageContent`
+ * because it corrupted legitimate `\\n` content in live-stream code
+ * samples — JSON like `{"text":"a\\nb"}`, shell like
+ * `echo -e "a\\nb"`. Round-2 of PR4 re-introduced the same
+ * corruption for the history path. Codex CLWmd correctly flagged
+ * that blanket-decoding history-loaded content was also lossy.
  *
- * Tradeoff: a code sample containing a literal `\\n` that was
- * persisted via history will still get its escape unwrapped on
- * reload. That's a pre-existing daemon-layer quirk; fixing it
- * cleanly requires the persistence layer to round-trip strings
- * faithfully (e.g., emit them as raw UTF-8 with real newlines).
- * Worth a future daemon-side follow-up; meanwhile the markdown
- * regression after refresh is the worse user-visible problem.
+ * The detection rule: persisted-and-escaped content has zero real
+ * newlines (the persistence layer replaced them all with `\\n`).
+ * Live content that round-tripped correctly through persistence keeps
+ * its real newlines. So:
+ *
+ *   - If `text` already contains ANY real `
+` or `\r`, treat the
+ *     `\\n` sequences as intentional literals (code/JSON samples,
+ *     escaped-but-already-decoded payloads) and leave them alone.
+ *   - Otherwise the persistence-layer encoding is the only plausible
+ *     source of the `\\n`s, so decode. `\\r\\n` is decoded first
+ *     so we don't leave a half-decoded `\r` + real `
+` (Codex
+ *     CLWmd's secondary concern).
+ *
+ * False-positive scope: a single-line agent message that intentionally
+ * contains a literal `\\n` AND no real newline AND gets persisted.
+ * That's a rare combination and only the daemon-side persistence
+ * roundtrip fix would address it cleanly.
  */
-function unescapeNewlinesFromHistory(text: string | undefined): string {
+export function unescapeNewlinesFromHistory(text: string | undefined): string {
   if (!text) return '';
-  return text.replace(/\\n/g, '\n');
+  if (/[\r\n]/.test(text)) return text;
+  return text.replace(/\\r\\n/g, '\n').replace(/\\n/g, '\n');
 }
 
 function mapHistoryMessage(message: LocalAgentHistoryMessage): LocalAgentMessage {
