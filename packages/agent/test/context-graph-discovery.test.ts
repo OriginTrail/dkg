@@ -756,3 +756,147 @@ describe('hash-vs-name duplication regression', () => {
     expect(ghosts.length).toBe(0);
   }, 15000);
 });
+
+// Direct unit coverage for the post-approval sync method introduced
+// alongside `pendingMeta`. Stubs `ensurePeerConnected`,
+// `node.libp2p.getConnections`, `runCatchupOverPeers`, and
+// `syncContextGraphFromConnectedPeers` directly on the live agent
+// instance so we exercise the real branching logic without standing
+// up a second libp2p node + catchup pipeline. Mirrors the existing
+// `(agent as any).subscribedContextGraphs.set(...)` precedent.
+describe('runImmediatePostApprovalSync', () => {
+  let agent: DKGAgent | undefined;
+
+  afterEach(async () => {
+    await agent?.stop().catch(() => {});
+  });
+
+  const CURATOR_PEER = '12D3KooWFakeCuratorPeerForRunImmediatePostApprovalSyncTest';
+
+  function installStubs(a: DKGAgent, opts: {
+    ensurePeerConnected?: (pid: string) => Promise<void>;
+    connectedPeers?: string[];
+    runCatchupResult?: {
+      peersSucceeded: number;
+      dataSynced: number;
+      sharedMemorySynced: number;
+      denied: boolean;
+    };
+    runCatchupThrows?: Error;
+    broadcastThrows?: Error;
+  }) {
+    const calls = {
+      ensurePeerConnectedCalls: [] as string[],
+      runCatchupCalls: [] as Array<{ cg: string; includeSwm: boolean; peers: string[] }>,
+      broadcastCalls: [] as Array<{ cg: string; includeSwm: boolean }>,
+    };
+    (a as any).ensurePeerConnected = async (pid: string) => {
+      calls.ensurePeerConnectedCalls.push(pid);
+      if (opts.ensurePeerConnected) await opts.ensurePeerConnected(pid);
+    };
+    (a as any).node.libp2p.getConnections = () =>
+      (opts.connectedPeers ?? []).map((pid) => ({
+        remotePeer: { toString: () => pid },
+      }));
+    (a as any).runCatchupOverPeers = async (
+      cg: string,
+      includeSwm: boolean,
+      peers: Array<{ toString(): string }>,
+    ) => {
+      calls.runCatchupCalls.push({
+        cg,
+        includeSwm,
+        peers: peers.map((p) => p.toString()),
+      });
+      if (opts.runCatchupThrows) throw opts.runCatchupThrows;
+      return {
+        connectedPeers: 1,
+        syncCapablePeers: 1,
+        peersTried: 1,
+        peersSucceeded: opts.runCatchupResult?.peersSucceeded ?? 0,
+        dataSynced: opts.runCatchupResult?.dataSynced ?? 0,
+        sharedMemorySynced: opts.runCatchupResult?.sharedMemorySynced ?? 0,
+        denied: opts.runCatchupResult?.denied ?? false,
+        diagnostics: { noProtocolPeers: 0 } as any,
+      };
+    };
+    (a as any).syncContextGraphFromConnectedPeers = async (
+      cg: string,
+      sopts?: { includeSharedMemory?: boolean },
+    ) => {
+      calls.broadcastCalls.push({ cg, includeSwm: sopts?.includeSharedMemory ?? false });
+      if (opts.broadcastThrows) throw opts.broadcastThrows;
+    };
+    return calls;
+  }
+
+  it('uses curator-direct catchup when curator is connected and skips broadcast on success', async () => {
+    const result = await createTestAgent();
+    agent = result.agent;
+    await agent.start();
+
+    const calls = installStubs(agent, {
+      connectedPeers: [CURATOR_PEER],
+      runCatchupResult: { peersSucceeded: 1, dataSynced: 7, sharedMemorySynced: 11, denied: false },
+    });
+
+    await (agent as any).runImmediatePostApprovalSync('test-cg-success', CURATOR_PEER);
+
+    expect(calls.ensurePeerConnectedCalls).toEqual([CURATOR_PEER]);
+    expect(calls.runCatchupCalls).toHaveLength(1);
+    expect(calls.runCatchupCalls[0]).toMatchObject({
+      cg: 'test-cg-success',
+      includeSwm: true,
+      peers: [CURATOR_PEER],
+    });
+    expect(calls.broadcastCalls).toHaveLength(0);
+  }, 15000);
+
+  it('falls back to broadcast when curator is not in connected peers after ensurePeerConnected', async () => {
+    const result = await createTestAgent();
+    agent = result.agent;
+    await agent.start();
+
+    const calls = installStubs(agent, {
+      connectedPeers: [],
+    });
+
+    await (agent as any).runImmediatePostApprovalSync('test-cg-missing-peer', CURATOR_PEER);
+
+    expect(calls.ensurePeerConnectedCalls).toEqual([CURATOR_PEER]);
+    expect(calls.runCatchupCalls).toHaveLength(0);
+    expect(calls.broadcastCalls).toHaveLength(1);
+    expect(calls.broadcastCalls[0]).toMatchObject({
+      cg: 'test-cg-missing-peer',
+      includeSwm: true,
+    });
+  }, 15000);
+
+  // 🔴 Regression for the Lex-on-PR-#517 / Codex catch-block finding.
+  // If `ensurePeerConnected` throws (relay flap, dial timeout, abort),
+  // the broadcast fallback MUST still run — wrapping curator-direct
+  // and broadcast in a single try/catch reintroduces the silent-stall
+  // bug this method was added to close.
+  it('falls back to broadcast when ensurePeerConnected throws (regression for catch-block bug)', async () => {
+    const result = await createTestAgent();
+    agent = result.agent;
+    await agent.start();
+
+    const calls = installStubs(agent, {
+      ensurePeerConnected: async () => {
+        throw new Error('Remote closed connection during opening');
+      },
+      connectedPeers: [CURATOR_PEER],
+    });
+
+    await (agent as any).runImmediatePostApprovalSync('test-cg-throw', CURATOR_PEER);
+
+    expect(calls.ensurePeerConnectedCalls).toEqual([CURATOR_PEER]);
+    expect(calls.runCatchupCalls).toHaveLength(0);
+    expect(calls.broadcastCalls).toHaveLength(1);
+    expect(calls.broadcastCalls[0]).toMatchObject({
+      cg: 'test-cg-throw',
+      includeSwm: true,
+    });
+  }, 15000);
+});

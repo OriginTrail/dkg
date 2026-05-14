@@ -2968,12 +2968,20 @@ export class DKGAgent {
     curatorPeerId: string,
   ): Promise<void> {
     const ctx = createOperationContext('sync');
+    const curatorShort = curatorPeerId.slice(-8);
+    let curatorTargetSucceeded = false;
+
+    // Curator-direct attempt. Any throw here (relay reservation gone,
+    // dial timeout, AbortSignal, transient `Remote closed connection
+    // during opening`) MUST fall through to the broadcast fallback
+    // below — wrapping both the curator-direct attempt AND the
+    // broadcast in a single try/catch reintroduces the silent-stall
+    // bug this method exists to fix (Lex review on PR #517 + Codex).
     try {
       await this.ensurePeerConnected(curatorPeerId);
       const curatorRemote = this.node.libp2p
         .getConnections()
         .find((conn) => conn.remotePeer.toString() === curatorPeerId)?.remotePeer;
-      const curatorShort = curatorPeerId.slice(-8);
       if (curatorRemote) {
         const result = await this.runCatchupOverPeers(contextGraphId, true, [curatorRemote]);
         if (result.peersSucceeded > 0) {
@@ -2981,24 +2989,35 @@ export class DKGAgent {
             ctx,
             `Post-approval sync for "${contextGraphId}" from curator ${curatorShort} fetched ${result.dataSynced} data + ${result.sharedMemorySynced} SWM triples`,
           );
-          return;
+          curatorTargetSucceeded = true;
+        } else {
+          this.log.warn(
+            ctx,
+            `Post-approval sync for "${contextGraphId}" from curator ${curatorShort} produced no successful peer (denied=${result.denied}); falling back to broadcast catchup`,
+          );
         }
-        this.log.warn(
-          ctx,
-          `Post-approval sync for "${contextGraphId}" from curator ${curatorShort} produced no successful peer (denied=${result.denied}); falling back to broadcast catchup`,
-        );
       } else {
         this.log.warn(
           ctx,
           `Post-approval sync for "${contextGraphId}": curator ${curatorShort} not in connected peers after ensurePeerConnected; falling back to broadcast catchup`,
         );
       }
-      await this.syncContextGraphFromConnectedPeers(contextGraphId, { includeSharedMemory: true });
     } catch (err) {
       this.log.warn(
         ctx,
-        `Post-approval sync for "${contextGraphId}" failed: ${err instanceof Error ? err.message : String(err)}`,
+        `Post-approval sync for "${contextGraphId}": curator-direct attempt to ${curatorShort} failed (${err instanceof Error ? err.message : String(err)}); falling back to broadcast catchup`,
       );
+    }
+
+    if (!curatorTargetSucceeded) {
+      try {
+        await this.syncContextGraphFromConnectedPeers(contextGraphId, { includeSharedMemory: true });
+      } catch (err) {
+        this.log.warn(
+          ctx,
+          `Post-approval broadcast fallback for "${contextGraphId}" failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     }
   }
 
