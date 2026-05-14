@@ -866,6 +866,15 @@ export function ConnectedAgentsTab(props: {
   const selectedAttachmentDrafts = attachments;
   const hasSendableAttachmentDrafts = selectedAttachmentDrafts.some(isSendableAttachmentDraft);
   const attachmentTargetIds = [...new Set(selectedAttachmentDrafts.map((attachment) => attachment.contextGraphId))];
+  // Drafts pin to the contextGraphId they were attached under. If the user
+  // later switches `activeProjectId`, those drafts are still routed to
+  // their original target — the warning surfaces that divergence. Always
+  // show it whenever any draft's target differs from the active project
+  // (single-target mismatch was previously dropped in iteration-1 polish,
+  // which Codex flagged as a silent mis-route).
+  const hasMismatchedAttachmentTargets =
+    selectedAttachmentDrafts.length > 0 &&
+    selectedAttachmentDrafts.some((a) => a.contextGraphId !== activeProjectId);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
 
   // Drop-zone gating: three different reasons the dropzone refuses files.
@@ -1215,9 +1224,11 @@ export function ConnectedAgentsTab(props: {
                   </div>
                 )}
 
-                {selectedAttachmentDrafts.length > 0 && attachmentTargetIds.length > 1 && (
+                {hasMismatchedAttachmentTargets && (
                   <div className="v10-local-agent-copy" style={{ margin: 0, color: 'var(--text-tertiary)' }}>
-                    Queued files keep their stored targets and may span multiple projects.
+                    {attachmentTargetIds.length > 1
+                      ? 'Queued files keep their stored targets and may span multiple projects.'
+                      : `Queued files keep their stored target (${getProjectDisplayName(availableProjects, attachmentTargetIds[0]!)}), not the active project.`}
                   </div>
                 )}
 
