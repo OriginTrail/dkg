@@ -36,7 +36,21 @@ export interface LocalAgentMessage {
   turnId?: string;
   role: 'user' | 'assistant';
   content: string;
+  /**
+   * Human-readable, locale-formatted timestamp for display
+   * (e.g. "May 14, 2026, 10:05 PM"). Produced by
+   * `formatLocalTimestamp` at the three sites that create messages
+   * (history-load, user-send, assistant-complete).
+   */
   ts?: string;
+  /**
+   * ISO 8601 string for the same moment, kept alongside `ts` so the
+   * render layer can wrap the timestamp in `<time dateTime={tsRaw}>`
+   * for screen-reader / machine-parseable semantics, and so a future
+   * "X minutes ago" relative-time treatment can read the raw moment
+   * without round-tripping through a locale-formatted display string.
+   */
+  tsRaw?: string;
   streaming?: boolean;
   attachments?: LocalAgentChatAttachmentRef[];
   /**
@@ -116,6 +130,22 @@ export function formatLocalTimestamp(value?: string | Date): string {
   // crossed midnight. `medium` date + `short` time renders e.g.
   // "May 14, 2026, 10:05 PM" in en-US.
   return parsed.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+}
+
+/**
+ * Companion to `formatLocalTimestamp` that returns an ISO 8601 string
+ * for the same moment. Used to populate `<time dateTime={tsRaw}>` so
+ * screen readers and machine parsers can read the timestamp in a
+ * locale-independent format alongside the human-readable display
+ * (UX-lead P1-A minimum). Returns `undefined` for absent / unparseable
+ * input so the caller can drop the prop instead of emitting an empty
+ * `dateTime` attribute.
+ */
+export function toIsoTimestamp(value?: string | Date): string | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  const parsed = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(parsed.valueOf())) return undefined;
+  return parsed.toISOString();
 }
 
 function formatFileSize(bytes: number): string {
@@ -281,6 +311,7 @@ function mapHistoryMessage(message: LocalAgentHistoryMessage): LocalAgentMessage
     role: author.includes('assistant') || author.includes('agent') ? 'assistant' : 'user',
     content: message.text || buildAttachmentSummary(message.attachmentRefs ?? []),
     ts: formatLocalTimestamp(message.ts),
+    tsRaw: toIsoTimestamp(message.ts),
     attachments: message.attachmentRefs,
     // The fallback path embeds raw filenames into a synthesized summary
     // string. Mark synthesized so the renderer skips markdown for those —
@@ -1302,9 +1333,18 @@ export function ConnectedAgentsTab(props: {
                     </div>
                   )}
                   {message.ts && (
-                    <span className={`v10-local-agent-msg-time ${message.role}`}>
+                    // `<time dateTime>` is the semantic markup for a moment
+                    // in time — assistive tech and machine parsers read the
+                    // ISO string while sighted users see the locale-formatted
+                    // display. UX-lead P1-A (minimum). The full relative-
+                    // time + hover-only treatment lives in a future PR per
+                    // user direction.
+                    <time
+                      className={`v10-local-agent-msg-time ${message.role}`}
+                      dateTime={message.tsRaw}
+                    >
                       {message.ts}
-                    </span>
+                    </time>
                   )}
                 </div>
               ))}
@@ -1512,17 +1552,23 @@ export function ConnectedAgentsTab(props: {
                             : sendButtonMode === 'uploading'
                         }
                         aria-label={
+                          // WAI-ARIA APG: button labels describe the action
+                          // (or its current unavailability), not narrate
+                          // state. "Send message (attachments uploading)"
+                          // reads as "this button sends, but it's currently
+                          // waiting for uploads" — the role + reason model
+                          // screen readers expect. UX-lead P1-C.
                           sendButtonMode === 'streaming'
                             ? 'Stop reply'
                             : sendButtonMode === 'uploading'
-                              ? 'Uploading attachments'
+                              ? 'Send message (attachments uploading)'
                               : 'Send message'
                         }
                         title={
                           sendButtonMode === 'streaming'
                             ? 'Stop reply'
                             : sendButtonMode === 'uploading'
-                              ? 'Uploading attachments…'
+                              ? 'Send message (attachments uploading)…'
                               : 'Send message'
                         }
                       >
@@ -2262,12 +2308,16 @@ export function PanelRight() {
       assistantId = `local:${conversationKey}:${correlationId}:assistant`;
       // Route through `formatLocalTimestamp` so user-send timestamps
       // stay in lockstep with history-loaded ones (date + time format).
-      const now = formatLocalTimestamp(new Date());
+      // `nowDate` is captured once and passed to both formatters so the
+      // display value and the ISO `tsRaw` reflect the same instant.
+      const nowDate = new Date();
+      const now = formatLocalTimestamp(nowDate);
+      const nowIso = toIsoTimestamp(nowDate);
 
       updateLocalMessages(conversationKey, (prev) => [
         ...prev,
-        { id: userId, turnId: correlationId, role: 'user', content: messageText, ts: now, attachments },
-        { id: assistantId, turnId: correlationId, role: 'assistant', content: '', ts: now, streaming: true },
+        { id: userId, turnId: correlationId, role: 'user', content: messageText, ts: now, tsRaw: nowIso, attachments },
+        { id: assistantId, turnId: correlationId, role: 'assistant', content: '', ts: now, tsRaw: nowIso, streaming: true },
       ]);
       setLocalInputForConversation(conversationKey, '');
       // Clear composer chips OPTIMISTICALLY as soon as the user-message
@@ -2306,6 +2356,9 @@ export function PanelRight() {
         },
       });
 
+      // Captured once so the display string and the ISO `tsRaw`
+      // reflect the same instant.
+      const completedAt = new Date();
       updateLocalMessages(conversationKey, (prev) =>
         adoptLocalAgentTurnId(prev, correlationId, result.turnId).map((message) =>
           message.id === assistantId
@@ -2321,7 +2374,8 @@ export function PanelRight() {
                 synthesized: !result.text && !message.content ? true : message.synthesized,
                 // Same helper as user-send + history paths for a single
                 // consistent date+time timestamp format across all sources.
-                ts: formatLocalTimestamp(new Date()),
+                ts: formatLocalTimestamp(completedAt),
+                tsRaw: toIsoTimestamp(completedAt),
               }
             : message,
         ),

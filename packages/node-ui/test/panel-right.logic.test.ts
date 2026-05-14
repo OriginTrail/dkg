@@ -415,12 +415,15 @@ describe('ConnectedAgentsTab rendering', () => {
       localInput: 'send while uploading',
     });
     // Button carries the uploading state class + tooltip; spinner SVG
-    // present; click-handler is `aria-label="Uploading attachments"`.
+    // present; aria-label follows the WAI-ARIA APG pattern of describing
+    // the action plus a parenthesized reason for unavailability rather
+    // than narrating state (UX-lead P1-C).
     expect(markup).toContain('v10-local-agent-inline-send-uploading');
-    expect(markup).toContain('aria-label="Uploading attachments"');
+    expect(markup).toContain('aria-label="Send message (attachments uploading)"');
     expect(markup).toContain('v10-local-agent-inline-send-spinner');
-    // Should NOT show the default arrow's aria-label.
-    expect(markup).not.toContain('aria-label="Send message"');
+    // Plain `aria-label="Send message"` shouldn't appear — only the
+    // parenthesized variant is in flight in this state.
+    expect(markup).not.toMatch(/aria-label="Send message"/);
   });
 
   it('renders the send button in stop mode while the assistant is streaming (PR4)', () => {

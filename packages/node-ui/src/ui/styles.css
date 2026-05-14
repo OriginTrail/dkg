@@ -1508,10 +1508,26 @@ button:focus:not(:focus-visible) { outline: none; }
   color: var(--bg-surface);
   cursor: not-allowed;
 }
-/* Streaming: button remains clickable as a stop-button. Keep the
-   filled background so the stop-icon affordance reads loud. */
+/* Streaming: button remains clickable as a stop-button. Distinguish
+   it visually from the idle Send button so a user typing a follow-up
+   mid-stream doesn't reflexively click "Send" and accidentally abort
+   the in-flight reply (UX-lead P1-B). Switch the filled silhouette
+   for an outlined-square treatment — same shape, different surface
+   reading — matches Claude / ChatGPT's stop-button pattern. The
+   `--border-prominent` token clears WCAG 1.4.11 3:1 against
+   `--bg-active` in both themes (~3.8:1 dark / ~3.2:1 light). */
 .v10-local-agent-inline-send-streaming {
   cursor: pointer;
+  background: var(--bg-active);
+  color: var(--text-primary);
+  border: 1px solid var(--border-prominent);
+}
+/* Override the generic `:hover { opacity: 0.9 }` on .v10-local-agent-inline-send
+   — the outlined Stop button reads better with a surface bump than an
+   opacity dip. */
+.v10-local-agent-inline-send-streaming:hover {
+  background: var(--bg-hover);
+  opacity: 1;
 }
 /* Uploading: spinner spins continuously. The button is disabled in this
    state (informational only) — the underlying :disabled rule above
