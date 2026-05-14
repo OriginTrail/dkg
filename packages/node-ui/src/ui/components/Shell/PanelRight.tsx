@@ -1338,8 +1338,22 @@ function NetworkTab(props: {
   const [connectedExpanded, setConnectedExpanded] = useState(true);
   const [disconnectedExpanded, setDisconnectedExpanded] = useState(false);
 
-  const connectedPeers = peerAgents.filter((a) => a.connectionStatus === 'connected');
-  const disconnectedPeers = peerAgents.filter((a) => a.connectionStatus !== 'connected');
+  // The /api/agents feed can report the same physical peer under multiple
+  // records (e.g. via different transports or polling overlaps), which
+  // inflates the on-screen list relative to the libp2p connection summary
+  // shown at the top. Collapse to one entry per peerId, preferring the
+  // most-recently-seen record so latency/status reflect current state.
+  const uniquePeers = Array.from(
+    peerAgents.reduce<Map<string, AgentInfo>>((acc, peer) => {
+      const prev = acc.get(peer.peerId);
+      if (!prev || (peer.lastSeen ?? 0) >= (prev.lastSeen ?? 0)) {
+        acc.set(peer.peerId, peer);
+      }
+      return acc;
+    }, new Map()).values(),
+  );
+  const connectedPeers = uniquePeers.filter((a) => a.connectionStatus === 'connected');
+  const disconnectedPeers = uniquePeers.filter((a) => a.connectionStatus !== 'connected');
 
   return (
     <div className="v10-agent-scroll-tab">
