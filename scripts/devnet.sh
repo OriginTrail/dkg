@@ -24,6 +24,8 @@
 #                 Enable the async publisher runtime on each node
 #   DEVNET_EPCIS_CONTEXT_GRAPH
 #                 Context graph used by /api/epcis/capture when publisher is enabled
+#   DEVNET_SWM_SYNC_ON_CONNECT=0
+#                 Skip peer-connect SWM catch-up, useful for bulk SWM benchmarks
 #
 set -euo pipefail
 
@@ -425,6 +427,12 @@ create_node_config() {
     publisher_block='"publisher": { "enabled": true, "pollIntervalMs": 500, "errorBackoffMs": 500, "maxRetries": 10 },'
     epcis_block="\"epcis\": { \"contextGraphId\": \"${DEVNET_EPCIS_CONTEXT_GRAPH:-devnet-test}\" },"
   fi
+  local swm_sync_block=""
+  case "${DEVNET_SWM_SYNC_ON_CONNECT:-1}" in
+    0|false|FALSE|no|NO)
+      swm_sync_block='"syncSharedMemoryOnConnect": false,'
+      ;;
+  esac
 
   # Random Sampling prover (core-only). For devnet we want a
   # persistent WAL (so `dkg rs wal-tail` / smoke tests can read the
@@ -446,6 +454,7 @@ create_node_config() {
   ${relay_value}
   ${store_block}
   "contextGraphs": ["devnet-test", "devnet-isolation"],
+  ${swm_sync_block}
   "publisher": {
     "enabled": true,
     "pollIntervalMs": 12000,

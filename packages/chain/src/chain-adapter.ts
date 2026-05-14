@@ -582,6 +582,13 @@ export interface ChainAdapter {
   getConvictionDiscount?(accountId: bigint): Promise<{ discountBps: number; conviction: bigint }>;
   getConvictionAccountInfo?(accountId: bigint): Promise<ConvictionAccountInfo | null>;
   /**
+   * Live owner lookup for a PCA NFT — wraps `DKGPublishingConvictionNFT.ownerOf(accountId)`.
+   * Used by the daemon's curated-CG registration preflight to enforce
+   * `local curator == ownerOf(pcaAccountId)` so an agent wallet cannot
+   * impersonate ownership when tying a CG to a PCA.
+   */
+  getPublishingConvictionAccountOwner?(accountId: bigint): Promise<string>;
+  /**
    * Authorize an EOA to draw down on the PCA's discounted publishing
    * allowance. Wraps `PublishingConvictionAccount.addAuthorizedKey(accountId, key)`,
    * which the contract gates on `msg.sender == account.admin` — i.e. the
@@ -600,6 +607,40 @@ export interface ChainAdapter {
    * `pca authorize` actually landed on chain before driving a publish).
    */
   isPCAAuthorizedKey?(accountId: bigint, key: string): Promise<boolean>;
+
+  /**
+   * Reverse lookup: which PCA (if any) is `agent` registered against?
+   *
+   * Mirrors `DKGPublishingConvictionNFT.agentToAccountId(agent)`.
+   * Returns `0n` for any non-registered address. The publisher SDK uses
+   * this to decide, before constructing the publish tx, whether the
+   * publishing wallet is eligible for the PCA discount branch in
+   * `KnowledgeAssetsV10.publish()`. The contract takes the discount
+   * branch only when (1) the wallet is a registered agent, (2) the
+   * PCA is not past `expiresAtTimestamp`, AND
+   * (3) `publishEpochs == lockDurationEpochs`. Any miss falls through
+   * to direct spend at full price (no revert), so the SDK proactively
+   * coerces `publishEpochs` to keep the discount.
+   *
+   * Optional on the adapter surface so mock-chain unit tests that
+   * don't model PCA registration can omit the implementation. The
+   * publisher gracefully treats `undefined` as "no PCA path active".
+   */
+  getConvictionAgentAccountId?(agent: string): Promise<bigint>;
+
+  /**
+   * Returns the V10 NFT-backed PCA's `lockDurationEpochs` for the given
+   * `accountId` — i.e. the snapshotted publishing-conviction-epochs the
+   * account was created against. `0` when the account doesn't exist or
+   * the NFT contract isn't deployed.
+   *
+   * The publisher SDK uses this together with
+   * `getConvictionAgentAccountId` to coerce a publish's epochs to the
+   * exact lifetime the PCA's escrow was sized for — otherwise the
+   * publish silently falls through to direct spend at full price (the
+   * contract's PCA eligibility check fails the `==` constraint).
+   */
+  getConvictionAccountLockDurationEpochs?(accountId: bigint): Promise<number>;
 
   // Permanent Publishing
   publishKnowledgeAssetsPermanent?(params: PermanentPublishParams): Promise<OnChainPublishResult>;
@@ -741,6 +782,30 @@ export interface ChainAdapter {
     identityId?: bigint;
     additionalAddresses?: string[];
   }): Promise<OperationalWalletRegistrationResult>;
+
+  // ----- Network State Registry (RFC 04 v0.3 / Issue #461) -----
+  //
+  // Surfaces the per-profile relay-capability flag. Multiaddrs themselves
+  // are NOT exposed here — they live in per-round attestation KCs that
+  // submitProofV2 mints (Phase 2), not on Profile (RFC 04 §5.2).
+  //
+  // The read method takes an explicit identityId so consumers can resolve
+  // any node's flag (their own or a peer's). The write method resolves
+  // the caller's identityId from the bound signer and calls the
+  // onlyIdentityOwner-gated update entry point on Profile.sol — an
+  // operator wanting to flip another node's flag would need that
+  // node's admin/operational key, which the adapter intentionally
+  // does not facilitate.
+
+  /** RFC 04 — read the relay-capability flag on a node profile. */
+  getRelayCapable?(identityId: bigint): Promise<boolean>;
+
+  /**
+   * RFC 04 — flip the bound signer's own relay-capability flag.
+   * Resolves the caller's identityId from the signer; throws when
+   * no profile is registered.
+   */
+  setRelayCapable?(relayCapable: boolean): Promise<TxResult>;
 
   /**
    * Confirm that an address is registered as an OPERATIONAL_KEY for an identity.

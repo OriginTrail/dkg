@@ -10,6 +10,7 @@
 
 import { execFile, execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { stat } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { platform, arch } from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -128,6 +129,16 @@ export class MarkItDownConverter implements ExtractionPipeline {
   readonly contentTypes = [...MARKITDOWN_CONTENT_TYPES];
 
   async extract(input: ExtractionInput): Promise<ConverterOutput> {
+    // Binary availability is a node-level configuration concern that is true
+    // regardless of input file state. Surface it before any I/O on the input
+    // so callers always get the actionable "install markitdown" error instead
+    // of an ENOENT stat() failure when both the binary and the file are absent.
+    if (!isMarkItDownAvailable()) {
+      return { mdIntermediate: await runMarkItDown(input.filePath) };
+    }
+    if ((await stat(input.filePath)).size === 0) {
+      return { mdIntermediate: '' };
+    }
     const markdown = await runMarkItDown(input.filePath);
     return { mdIntermediate: markdown };
   }

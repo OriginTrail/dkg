@@ -84,15 +84,15 @@ async function encryptWorkspaceMessage(
   agentAddress: string,
   contextGraphId: string,
   payload: Uint8Array,
-  workspaceOperationId: string,
+  shareOperationId: string,
   timestampMs: number,
   recipientKey: WorkspaceRecipientEncryptionKey,
 ): Promise<Uint8Array> {
   return encodeEncryptedWorkspacePayload(await encryptWorkspacePayload({
     contextGraphId,
     senderIdentity: `did:dkg:agent:${agentAddress}`,
-    operationId: workspaceOperationId,
-    workspaceOperationId,
+    operationId: shareOperationId,
+    shareOperationId,
     timestampMs,
     plaintext: payload,
     recipients: [recipientKey],
@@ -617,7 +617,7 @@ describe('SharedMemoryHandler', () => {
       nquads: new TextEncoder().encode(nquads),
       manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeer',
-      workspaceOperationId: 'ws-unsigned-agent-gate',
+      shareOperationId: 'ws-unsigned-agent-gate',
       timestampMs: Date.now(),
     });
 
@@ -648,7 +648,7 @@ describe('SharedMemoryHandler', () => {
       nquads: new TextEncoder().encode(nquads),
       manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeer',
-      workspaceOperationId: 'ws-malformed-agent-gate',
+      shareOperationId: 'ws-malformed-agent-gate',
       timestampMs: Date.now(),
     });
 
@@ -682,20 +682,20 @@ describe('SharedMemoryHandler', () => {
 
     const nquads = `<${ENTITY}> <http://schema.org/name> "Signed" <${DATA_GRAPH}> .`;
     const timestampMs = Date.now();
-    const workspaceOperationId = 'ws-signed-agent-gate';
+    const shareOperationId = 'ws-signed-agent-gate';
     const raw = encodeWorkspacePublishRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(nquads),
       manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeer',
-      workspaceOperationId,
+      shareOperationId,
       timestampMs,
     });
     const encrypted = await encryptWorkspaceMessage(
       wallet.address,
       CONTEXT_GRAPH,
       raw,
-      workspaceOperationId,
+      shareOperationId,
       timestampMs,
       recipientKey,
     );
@@ -734,7 +734,7 @@ describe('SharedMemoryHandler', () => {
       nquads: new TextEncoder().encode(nquads),
       manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeer',
-      workspaceOperationId: 'ws-denied-agent-gate',
+      shareOperationId: 'ws-denied-agent-gate',
       timestampMs: Date.now(),
     });
     const msg = await signWorkspaceMessage(denied, CONTEXT_GRAPH, raw);

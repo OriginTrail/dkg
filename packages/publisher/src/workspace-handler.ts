@@ -23,10 +23,11 @@ import {
 import type { EncryptedWorkspacePayloadMsg, GossipEnvelopeMsg, OperationContext, SwmSenderKeyMessageMsg, WorkspaceCASConditionMsg, WorkspacePublishRequestMsg, WorkspaceRecipientEncryptionKey } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 import { validatePublishRequest } from './validation.js';
-import { generateShareMetadata, generateOwnershipQuads, generateSubGraphRegistration } from './metadata.js';
+import { generateOwnershipQuads, generateSubGraphRegistration } from './metadata.js';
 import { parseSimpleNQuads } from './publish-handler.js';
 import { storeWorkspaceOperationPublicQuads } from './workspace-resolution.js';
 import type { KAManifestEntry } from './publisher.js';
+import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
 
 interface WorkspaceGossipDecodeResult {
   request?: WorkspacePublishRequestMsg;
@@ -61,6 +62,7 @@ export class SharedMemoryHandler {
   ) => readonly WorkspaceRecipientEncryptionKey[] | Promise<readonly WorkspaceRecipientEncryptionKey[]>;
   private readonly workspaceSenderKeyDecryptor?: WorkspaceSenderKeyDecryptor;
   private readonly now: () => number;
+  private readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
   private readonly log = new Logger('SharedMemoryHandler');
 
   constructor(
@@ -75,6 +77,7 @@ export class SharedMemoryHandler {
       ) => readonly WorkspaceRecipientEncryptionKey[] | Promise<readonly WorkspaceRecipientEncryptionKey[]>;
       workspaceSenderKeyDecryptor?: WorkspaceSenderKeyDecryptor;
       now?: () => number;
+      publicSnapshotStore?: WorkspacePublicSnapshotStore;
     },
   ) {
     this.store = store;
@@ -88,6 +91,7 @@ export class SharedMemoryHandler {
     this.workspaceRecipientPrivateKeys = options?.workspaceRecipientPrivateKeys;
     this.workspaceSenderKeyDecryptor = options?.workspaceSenderKeyDecryptor;
     this.now = options?.now ?? (() => Date.now());
+    this.publicSnapshotStore = options?.publicSnapshotStore;
   }
 
   private async withWriteLocks<T>(keys: string[], fn: () => Promise<T>): Promise<T> {
@@ -251,9 +255,15 @@ export class SharedMemoryHandler {
       if (request.operationId) {
         ctx = createOperationContext('share', request.operationId);
       }
-      const { nquads, manifest, publisherPeerId, workspaceOperationId: shareOperationId, timestampMs, casConditions, subGraphName } = request;
+      const { nquads, manifest, publisherPeerId, timestampMs, casConditions, subGraphName } = request;
+      const shareOperationId = request.shareOperationId?.trim();
       const sgLabel = subGraphName ? `/${subGraphName}` : '';
       this.log.info(ctx, `SWM write from ${fromPeerId} for context graph ${contextGraphId}${sgLabel} op=${shareOperationId}`);
+
+      if (!shareOperationId) {
+        this.log.warn(ctx, `SWM write rejected: missing shareOperationId for context graph "${contextGraphId}"`);
+        return;
+      }
 
       if (publisherPeerId !== fromPeerId) {
         this.log.warn(ctx, `SWM write rejected: payload publisherPeerId "${publisherPeerId}" does not match sender "${fromPeerId}"`);
@@ -367,16 +377,8 @@ export class SharedMemoryHandler {
         await this.store.insert(normalized);
 
         const rootEntities = manifestForValidation.map((m) => m.rootEntity);
-        const metaQuads = generateShareMetadata(
-          {
-            shareOperationId,
-            contextGraphId,
-            rootEntities,
-            publisherPeerId,
-            timestamp: new Date(Number(timestampMs)),
-          },
-          swmMetaGraph,
-        );
+        const operationTimestamp = new Date(Number(timestampMs));
+        const metaQuads: Quad[] = [];
 
         for (const m of manifestForValidation) {
           if (m.privateMerkleRoot && m.privateMerkleRoot.length > 0) {
@@ -390,7 +392,9 @@ export class SharedMemoryHandler {
           }
         }
 
-        await this.store.insert(metaQuads);
+        if (metaQuads.length > 0) {
+          await this.store.insert(metaQuads);
+        }
         await storeWorkspaceOperationPublicQuads({
           store: this.store,
           graphManager: this.graphManager,
@@ -400,6 +404,8 @@ export class SharedMemoryHandler {
           quads: normalized,
           publisherPeerId,
           subGraphName,
+          timestamp: operationTimestamp,
+          publicSnapshotStore: this.publicSnapshotStore,
         });
 
         if (!this.sharedMemoryOwnedEntities.has(swmOwnershipKey)) {

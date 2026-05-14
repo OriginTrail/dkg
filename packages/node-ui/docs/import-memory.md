@@ -48,7 +48,7 @@ sequenceDiagram
 
     CMM->>CMM: Build RDF quads (MemoryImport batch + ImportedMemory items)
     CMM->>DKG: writeToWorkspace("agent-memory", quads, { localOnly: true })
-    DKG-->>CMM: { workspaceOperationId }
+    DKG-->>CMM: { shareOperationId }
 
     alt LLM configured — knowledge extraction
         CMM->>LLM: Extract N-Triples (MEMORY_KG_PROMPT)

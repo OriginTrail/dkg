@@ -1,6 +1,7 @@
 import type { Stream } from '@libp2p/interface';
 import type { StreamHandler as DKGStreamHandler } from './types.js';
 import type { DKGNode } from './node.js';
+import type { PeerResolver } from './network/peer-resolver.js';
 
 /** Default max bytes readAll will buffer before aborting (10 MB). */
 export const DEFAULT_MAX_READ_BYTES = 10 * 1024 * 1024;
@@ -29,13 +30,50 @@ export function isRecoverableSendError(err: unknown): boolean {
   );
 }
 
+export interface ProtocolRouterOptions {
+  maxReadBytes?: number;
+  /**
+   * RFC 07 §3.2 — when present, `send()` consults the resolver before
+   * dialing so the libp2p peerStore is primed with whatever multiaddrs
+   * the resolution order finds (live-conn → DHT → RFC 04 registry →
+   * agents-CG). Required for any router that handles agent P2P
+   * traffic in production; optional only for local/in-process tests
+   * that exclusively talk over already-warmed connections.
+   *
+   * Codex review feedback on PR #497 round 5: keeping this optional
+   * makes the cold-peer priming guarantee implicit. Two mitigations
+   * are in place:
+   *   1. CI grep gate (`scripts/audit-dial-protocol.mjs`, PR-4 of the
+   *      RFC 07 rollout) bans raw `dialProtocol(peerId)` calls
+   *      outside an allowlist, so any new outbound path is forced
+   *      through `ProtocolRouter`.
+   *   2. `send()` emits a one-time `console.warn` the first time it
+   *      runs without a `peerResolver` configured (see implementation
+   *      below), so a misconfiguration is loud at the first cold dial
+   *      rather than silently regressing PR-448's class of failures.
+   * Together these turn the "any future caller that omits the
+   * resolver silently skips priming" risk into a build-time + first-
+   * call-time surface.
+   */
+  peerResolver?: PeerResolver;
+}
+
 export class ProtocolRouter {
   private readonly node: DKGNode;
+  private readonly peerResolver?: PeerResolver;
   private handlers = new Map<string, DKGStreamHandler>();
+  /**
+   * One-shot guard: we warn the first time `send()` runs without a
+   * `peerResolver` so a misconfigured outbound router is loud, but
+   * we don't spam the logs on every subsequent call. Codex PR #497
+   * round 5 — see `ProtocolRouterOptions.peerResolver`.
+   */
+  private warnedMissingResolver = false;
   readonly maxReadBytes: number;
 
-  constructor(node: DKGNode, options?: { maxReadBytes?: number }) {
+  constructor(node: DKGNode, options?: ProtocolRouterOptions) {
     this.node = node;
+    this.peerResolver = options?.peerResolver;
     this.maxReadBytes = options?.maxReadBytes ?? DEFAULT_MAX_READ_BYTES;
   }
 
@@ -81,6 +119,44 @@ export class ProtocolRouter {
     const peerId = peerIdFromString(peerIdStr);
     const signal = AbortSignal.timeout(timeoutMs);
     const startedAt = Date.now();
+
+    // RFC 07 §3.2: ensure the libp2p peerStore has fresh multiaddrs
+    // before dialing. The resolver's step 1 is a sub-millisecond
+    // live-connection check, so this is effectively a no-op when we
+    // already have an open connection to the peer; the cost only
+    // shows up on cold dials, where it replaces the failure mode of
+    // "dialProtocol falls back to stale identify-cached addresses".
+    // Best-effort — the resolver itself never throws (it returns an
+    // empty array on miss); the caller's dial loop below will surface
+    // a real transport error if the peer is genuinely unreachable.
+    //
+    // Codex review feedback on PR #497: pass the same AbortSignal +
+    // remaining time budget to the resolver so a caller's `timeoutMs`
+    // bounds the entire send (resolver + dial + read), not just the
+    // dial loop. Without this a `timeoutMs: 1000` could block 5s+ on
+    // the resolver's default per-step DHT timeout before the dial
+    // even starts.
+    if (this.peerResolver) {
+      const remaining = Math.max(0, timeoutMs - (Date.now() - startedAt));
+      await this.peerResolver
+        .resolve(peerIdStr, { signal, perStepTimeoutMs: remaining })
+        .catch(() => undefined);
+    } else if (!this.warnedMissingResolver) {
+      // Codex PR #497 round 5: structural enforcement (CI grep gate)
+      // already prevents raw `dialProtocol(peerId)` calls outside an
+      // allowlist, but a router constructed without a resolver still
+      // silently skips priming. Surface it loudly the first time so a
+      // misconfigured outbound path is caught at first cold dial
+      // rather than reintroducing PR-448's relay-route failures.
+      this.warnedMissingResolver = true;
+      console.warn(
+        '[ProtocolRouter] send() called without a peerResolver configured. ' +
+          'Cold-peer dials will fall back to libp2p\'s identify-cached addresses ' +
+          'and may fail to find relay routes (see RFC 07 §3.2 / PR #448). ' +
+          'Pass `{ peerResolver }` to the ProtocolRouter constructor for any ' +
+          'router that handles agent P2P traffic.',
+      );
+    }
 
     // libp2p internally upgrades relay connections to direct during
     // dialProtocol/newStream (peerStore.merge triggers the connection manager

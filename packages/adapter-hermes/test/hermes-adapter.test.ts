@@ -2138,6 +2138,9 @@ expected_default = [
     "dkg_assertion_promote",
     "dkg_assertion_query",
     "dkg_assertion_write",
+    "dkg_import_artifact_read_markdown",
+    "dkg_import_artifact_resolve",
+    "dkg_semantic_enrichment_write",
     "dkg_context_graph_create",
     "dkg_context_graph_invite",
     "dkg_find_agents",
@@ -2181,6 +2184,12 @@ assert "sub_graph_name" in share_schema["parameters"]["properties"], share_schem
 assert share_schema["parameters"]["required"] == ["content", "context_graph_id"], share_schema
 missing_cg = provider.handle_tool_call("dkg_share", {"content": "alpha"})
 assert "context_graph_id is required" in missing_cg, missing_cg
+semantic_schema = next(schema for schema in provider.get_tool_schemas() if schema["name"] == "dkg_semantic_enrichment_write")
+assert "name" not in semantic_schema["parameters"]["properties"], semantic_schema
+assert "Append model-derived triples" in semantic_schema["description"], semantic_schema
+assert "separate Working Memory assertion" not in semantic_schema["description"], semantic_schema
+resolver_schema = next(schema for schema in provider.get_tool_schemas() if schema["name"] == "dkg_import_artifact_resolve")
+assert "Optional validation/debug helper" in resolver_schema["description"], resolver_schema
 
 provider._config = {
     "publish_tool": "disabled",
@@ -2312,6 +2321,16 @@ client.create_context_graph("OpenExplicit", "x", access_policy=0)
 
 client.subscribe("cg:test", include_shared_memory=True)
 client.write_assertion("a b", "cg:test", [{"subject": "urn:s", "predicate": "urn:p", "object": '"o"'}], "sub")
+client.resolve_import_artifact("cg:test", assertion_uri="did:dkg:context-graph:cg:test/assertion/agent/imported", file_hash="sha256:" + "a" * 64, sub_graph_name="sub")
+client.read_import_artifact_markdown("cg:test", assertion_uri="did:dkg:context-graph:cg:test/assertion/agent/imported", max_bytes=4096)
+client.write_semantic_enrichment(
+    "cg:test",
+    [{"subject": "urn:doc:1", "predicate": "http://schema.org/about", "object": '"Topic"'}],
+    assertion_uri="did:dkg:context-graph:cg:test/assertion/agent/imported",
+    generation_method="test-model",
+    agent_identity="did:dkg:agent:test",
+    generated_at="2026-05-11T00:00:00.000Z",
+)
 client.discard_assertion("a b", "cg:test")
 client.assertion_history("a b", "cg:test", agent_address="agent", sub_graph_name="sub")
 client.create_sub_graph("cg:test", "notes")
@@ -2331,6 +2350,9 @@ assert calls == [
     ("POST", "/api/context-graph/create", {"id": "openexplicit", "name": "OpenExplicit", "description": "x", "accessPolicy": 0}),
     ("POST", "/api/context-graph/subscribe", {"contextGraphId": "cg:test", "includeSharedMemory": True}),
     ("POST", "/api/assertion/a%20b/write", {"contextGraphId": "cg:test", "quads": [{"subject": "urn:s", "predicate": "urn:p", "object": '"o"'}], "subGraphName": "sub"}),
+    ("POST", "/api/assertion/import-artifact/resolve", {"contextGraphId": "cg:test", "assertionUri": "did:dkg:context-graph:cg:test/assertion/agent/imported", "fileHash": "sha256:" + "a" * 64, "subGraphName": "sub"}),
+    ("POST", "/api/assertion/import-artifact/read-markdown", {"contextGraphId": "cg:test", "assertionUri": "did:dkg:context-graph:cg:test/assertion/agent/imported", "maxBytes": 4096}),
+    ("POST", "/api/assertion/semantic-enrichment/write", {"contextGraphId": "cg:test", "semanticQuads": [{"subject": "urn:doc:1", "predicate": "http://schema.org/about", "object": '"Topic"'}], "assertionUri": "did:dkg:context-graph:cg:test/assertion/agent/imported", "generationMethod": "test-model", "agentIdentity": "did:dkg:agent:test", "generatedAt": "2026-05-11T00:00:00.000Z"}),
     ("POST", "/api/assertion/a%20b/discard", {"contextGraphId": "cg:test"}),
     ("GET", "/api/assertion/a%20b/history?contextGraphId=cg%3Atest&agentAddress=agent&subGraphName=sub", {}),
     ("POST", "/api/sub-graph/create", {"contextGraphId": "cg:test", "subGraphName": "notes"}),
@@ -2547,6 +2569,97 @@ result = json.loads(provider.handle_tool_call("dkg_query", {
 }))
 assert result["ok"] is True, result
 assert provider._client.queries[-1][2]["agent_address"] == "peer-default", provider._client.queries
+
+class ReadMarkdownClient:
+    def __init__(self):
+        self.calls = []
+
+    def read_import_artifact_markdown(self, context_graph_id, **kwargs):
+        self.calls.append((context_graph_id, kwargs))
+        return {"ok": True}
+
+provider._client = ReadMarkdownClient()
+result = json.loads(provider.handle_tool_call("dkg_import_artifact_read_markdown", {
+    "context_graph_id": "cg:test",
+    "assertion_uri": "did:dkg:context-graph:cg:test/assertion/agent/imported",
+    "max_bytes": "4096",
+}))
+assert result["ok"] is True, result
+assert provider._client.calls[-1][1]["max_bytes"] == 4096, provider._client.calls
+
+for bad_max_bytes in [0, -1, 1.5, True, "   "]:
+    result = json.loads(provider.handle_tool_call("dkg_import_artifact_read_markdown", {
+        "context_graph_id": "cg:test",
+        "assertion_uri": "did:dkg:context-graph:cg:test/assertion/agent/imported",
+        "max_bytes": bad_max_bytes,
+    }))
+    assert "positive integer" in result["error"], (bad_max_bytes, result)
+assert len(provider._client.calls) == 1, provider._client.calls
+
+class AssertionWriteClient:
+    def __init__(self):
+        self.calls = []
+
+    def write_assertion(self, name, context_graph_id, quads, sub_graph_name=None):
+        self.calls.append((name, context_graph_id, quads, sub_graph_name))
+        return {"ok": True}
+
+provider._client = AssertionWriteClient()
+result = json.loads(provider.handle_tool_call("dkg_assertion_write", {
+    "context_graph_id": "cg:test",
+    "name": "notes",
+    "quads": [
+        {"subject": "urn:doc:1", "predicate": "http://schema.org/contactPoint", "object": "mailto:alice@example.org"},
+    ],
+}))
+assert result["ok"] is True, result
+assert provider._client.calls[-1][2][0]["object"] == '"mailto:alice@example.org"', provider._client.calls
+
+class SemanticClient:
+    def __init__(self):
+        self.calls = []
+
+    def write_semantic_enrichment(self, context_graph_id, semantic_quads, **kwargs):
+        self.calls.append((context_graph_id, semantic_quads, kwargs))
+        return {"ok": True}
+
+provider._client = SemanticClient()
+result = json.loads(provider.handle_tool_call("dkg_semantic_enrichment_write", {
+    "context_graph_id": "cg:test",
+    "assertion_uri": "did:dkg:context-graph:cg:test/assertion/agent/imported",
+    "semantic_quads": [
+        {"subject": "urn:doc:1", "predicate": "http://schema.org/about", "object": "Topic"},
+        {"subject": "urn:doc:1", "predicate": "http://schema.org/author", "object": "mailto:alice@example.org"},
+        {"subject": "urn:doc:1", "predicate": "http://schema.org/sameAs", "object": "ipfs://bafy-test"},
+    ],
+}))
+assert result["ok"] is True, result
+assert provider._client.calls[-1][1] == [
+    {"subject": "urn:doc:1", "predicate": "http://schema.org/about", "object": '"Topic"'},
+    {"subject": "urn:doc:1", "predicate": "http://schema.org/author", "object": "mailto:alice@example.org"},
+    {"subject": "urn:doc:1", "predicate": "http://schema.org/sameAs", "object": "ipfs://bafy-test"},
+], provider._client.calls
+assert "name" not in provider._client.calls[-1][2], provider._client.calls
+
+name_result = json.loads(provider.handle_tool_call("dkg_semantic_enrichment_write", {
+    "context_graph_id": "cg:test",
+    "assertion_uri": "did:dkg:context-graph:cg:test/assertion/agent/imported",
+    "semanticAssertionName": "semantic-imported",
+    "semantic_quads": [
+        {"subject": "urn:doc:1", "predicate": "http://schema.org/about", "object": "Topic"},
+    ],
+}))
+assert "target assertion names are not supported" in name_result["error"], name_result
+
+graph_result = json.loads(provider.handle_tool_call("dkg_semantic_enrichment_write", {
+    "context_graph_id": "cg:test",
+    "assertion_uri": "did:dkg:context-graph:cg:test/assertion/agent/imported",
+    "semantic_quads": [
+        {"subject": "urn:doc:1", "predicate": "http://schema.org/about", "object": "Topic", "graph": "urn:graph:bad"},
+    ],
+}))
+assert "graph" in graph_result["error"], graph_result
+provider._client = QueryClient()
 provider._config = {"publish_tool": "direct", "allow_direct_publish": True}
 for tool_name, args in [
     ("memory_search", {"query": "alpha beta", "context_graph": "legacy"}),

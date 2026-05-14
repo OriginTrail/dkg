@@ -6,6 +6,22 @@ All notable changes to the DKG V9 node are documented here. The format is based 
 
 ---
 
+## [10.0.0-rc.7] - 2026-05-13
+
+RFC 07 in-process `PeerResolver` consolidation, Relay Registry tri-state on-chain semantics, PCA wiring at registration, and full invite/join e2e coverage in the devnet smoke suite. **No testnet contract redeploy** — `chainResetMarker` unchanged from rc.6 (`v10-rc6-pca-author-attestation-2026-05-10`); rc.7 is a node-only update over the existing on-chain world.
+
+### Added
+- **RFC 07 — In-process `PeerResolver` (consolidated PRs #494, #496, #497, #499, #501, #506)**: every outbound libp2p dial now flows through a single resolution chain (live-conn → DHT → RFC 04 registry stub → agents-CG fallback). New `/api/connect` semantics return precise HTTP codes (`504 PEER_NOT_FOUND`, `502 DIAL_FAILED`, `400 INVALID_PEER_ID`) with structured error bodies so callers can distinguish "peer is unknown to us" from "we know it but can't reach it." A CI grep gate (`scripts/audit-dial-protocol.mjs`) prevents new raw `libp2p.dialProtocol(peerId, …)` callers from sneaking in around the resolver.
+- **Backend-agnostic `dkgGossipMsgId` primitive** (PR #501): unified gossip message-id derivation behind a single helper so every gossipsub publisher (heartbeat, agent-ad, KC-ad, SWM-write) uses identical message-id logic regardless of transport (real libp2p vs in-memory test bus). Cuts class of duplicate-rebroadcast bugs the `/api/agents` heartbeat exhibited under restart.
+- **devnet-test.sh sections 28-31** (PRs #501, #506, #507): the smoke suite now exercises (28) `/api/connect` resolver path + HTTP semantics, (29) cross-node connect matrix, (30) Node1 cold-restart + post-restart resolver wiring, (31) curated CG invite/join end-to-end including silent-NACK regression guards. Knobs `SKIP_RESTART=1`, `SKIP_MATRIX=1`, `SKIP_INVITE_FLOW=1` for fast iteration.
+- **PCA wiring at registration** (PR #502, rebase of #423, `packages/cli/src/daemon/routes/context-graph.ts`, `packages/agent/src/dkg-agent.ts`): when an operator registers a CG with `publishPolicy: 'pca'`, the daemon now records the PCA owner address, the chain signer address, and the `getRegistrationTxSignerAddress` separately. PCA agents can publish to the registered CG without 500-error fallthroughs; non-existent PCA accounts return a clean `404` rather than a generic 500; `publishPolicy` is now exposed on `ApiClient.createContextGraph` so dkg-node-ui can surface the choice at create-time.
+
+### Fixed
+- **`relayCapable` was sticky on chain** (PR #506, `packages/agent/src/dkg-agent.ts`, `packages/cli/src/daemon/lifecycle.ts`): `publishRelayRegistry` previously treated `false` and `undefined` identically as no-ops, so a node that ever ran with `relayCapable=true` would keep advertising itself as relay-capable on chain forever. Now tri-state: `true` ensures on-chain flag is true, `false` actively clears any stale opt-in, `undefined` leaves the on-chain flag untouched (preserves manual `dkg admin set-relay-capable` flips). 12 new regression tests in `packages/agent/test/publish-relay-registry.test.ts`.
+- **Curated CG invite/acceptance regressions caught by SECTION 31** (PR #507): the standalone `scripts/devnet-test-invite-flow.sh` is folded into the main smoke suite, so future runs assert (a) `DKG_CURATOR` triple is present in the curator's `_meta` graph (silent-NACK regression guard for PR #448 round-6), (b) the inbound `PROTOCOL_JOIN_REQUEST` handler logs accept + persist, (c) `denied` catch-up status produces no phantom CG entries, and (d) post-approval catch-up actually completes with `_meta` triples mirrored to the invitee.
+
+---
+
 ## [10.0.0-rc.6] - 2026-05-10
 
 RFC-001 sign-at-creation lifecycle, on-chain agent provenance, robust replica sync, devnet release-gate test layer. **Testnet contract redeploy required** — `chainResetMarker` bumped to `v10-rc6-pca-author-attestation-2026-05-10`, which auto-wipes node-side state on first boot. All non-Hub/Token contracts on Base Sepolia have new addresses (Hub `0xC056e67Da4F51377Ad1B01f50F655fFdcCD809F6` and Token `0x2A58BdD13176D85906D804cdbFFA0D9119282DC8` preserved); operators must re-create profiles and stakers must re-stake (TRAC stuck in the orphaned `DKGStakingConvictionNFT` is non-recoverable on testnet by design).

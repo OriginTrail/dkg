@@ -59,7 +59,7 @@ type WorkspaceEncryptionMetadata = Required<Pick<
   | 'contextGraphId'
   | 'senderIdentity'
   | 'operationId'
-  | 'workspaceOperationId'
+  | 'shareOperationId'
   | 'timestampMs'
   | 'subGraphName'
   | 'keyAgreementAlgorithm'
@@ -315,7 +315,7 @@ function workspaceMetadata(
   assertNonEmpty('contextGraphId', fields.contextGraphId);
   assertNonEmpty('senderIdentity', fields.senderIdentity);
   assertNonEmpty('operationId', fields.operationId);
-  assertNonEmpty('workspaceOperationId', fields.workspaceOperationId);
+  assertNonEmpty('shareOperationId', fields.shareOperationId);
   if (fields.keyAgreementAlgorithm !== ENCRYPTED_WORKSPACE_KEY_AGREEMENT_ALGORITHM) {
     throw new Error(`Unsupported encrypted workspace key agreement algorithm: ${String(fields.keyAgreementAlgorithm)}`);
   }
@@ -326,7 +326,7 @@ function workspaceMetadata(
     contextGraphId: fields.contextGraphId,
     senderIdentity: fields.senderIdentity,
     operationId: fields.operationId,
-    workspaceOperationId: fields.workspaceOperationId,
+    shareOperationId: fields.shareOperationId,
     timestampMs: fields.timestampMs,
     subGraphName: fields.subGraphName ?? '',
     keyAgreementAlgorithm: fields.keyAgreementAlgorithm,

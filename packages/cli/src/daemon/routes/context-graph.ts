@@ -327,6 +327,67 @@ import {
 
 import type { RequestContext } from './context.js';
 
+/**
+ * Map a `registerContextGraph` failure message to an HTTP status +
+ * stable error body. Shared by:
+ *   - POST /api/context-graph/register (standalone register call).
+ *   - POST /api/context-graph/create { register: true, pcaAccountId }
+ *     (atomic combined-flow inline register leg).
+ *
+ * Codex PR #502 round-8: the combined-flow register failure used to
+ * always return HTTP 200 with `registered: false`, which silently
+ * masks PCA / authz / shape errors as success unless callers
+ * remember to inspect the response body. Both endpoints now share
+ * the same 4xx / 5xx mapping for caller-input / unsupported-feature
+ * failures; only genuinely transient chain failures keep the
+ * 200-partial-success shape via `genericFallbackStatus = 200`.
+ *
+ * Returns `undefined` when no specific mapping applies — callers
+ * decide whether that means generic 500 (standalone /register
+ * shape) or a 200-partial-success body (combined flow's transient
+ * fallback).
+ */
+function classifyRegisterContextGraphError(msg: string): { status: number; body?: Record<string, unknown> } | undefined {
+  if (msg.includes('already registered')) return { status: 409, body: { error: msg } };
+  if (msg.includes('does not exist')) return { status: 404, body: { error: msg } };
+  if (msg.includes('no known creator')) return { status: 503, body: { error: msg, hint: 'Creator not yet synced. Retry after sync completes.' } };
+  if (msg.includes('Only the context graph creator')) return { status: 403, body: { error: msg } };
+  if (msg.includes('Only the context graph curator')) return { status: 403, body: { error: msg } };
+  if (msg.includes('address-scoped curator')) return { status: 403, body: { error: msg } };
+  if (msg.includes('PCA account id can only be used with curated publish policy')
+    || msg.includes('PCA account id can only be used with curated/private context graphs')) {
+    return { status: 400, body: { error: msg } };
+  }
+  if (msg.includes('PCA account id must be a positive integer')) return { status: 400, body: { error: msg } };
+  if (msg.includes('requires chain adapter PCA owner lookup support')) return { status: 501, body: { error: msg } };
+  if (/PCA account \d+ does not exist or cannot be looked up/.test(msg)) return { status: 404, body: { error: msg } };
+  if (/PCA account \d+ is owned by/.test(msg)) return { status: 403, body: { error: msg } };
+  // PCA chain-signer / signer-introspection invariants (Codex round-4/5/8):
+  if (msg.includes('chain signer') && msg.includes('differs from PCA owner')) return { status: 403, body: { error: msg } };
+  if (msg.includes('does not expose its registration-tx signer')
+    || msg.includes('invariant cannot be verified')) {
+    return { status: 501, body: { error: msg } };
+  }
+  return undefined;
+}
+
+function parseOptionalPcaAccountId(body: Record<string, unknown>): { value?: bigint; error?: string } {
+  const raw = body.pcaAccountId;
+  if (raw === undefined || raw === null || raw === '') return {};
+  if (typeof raw === 'number') {
+    if (!Number.isSafeInteger(raw) || raw <= 0) {
+      return { error: 'pcaAccountId must be a positive safe integer' };
+    }
+    return { value: BigInt(raw) };
+  }
+  if (typeof raw === 'string') {
+    if (!/^[1-9]\d*$/.test(raw)) {
+      return { error: 'pcaAccountId must be a positive decimal integer string' };
+    }
+    return { value: BigInt(raw) };
+  }
+  return { error: 'pcaAccountId must be a positive integer or decimal integer string' };
+}
 
 export async function handleContextGraphRoutes(ctx: RequestContext): Promise<void> {
   const {
@@ -444,7 +505,73 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       return jsonResponse(res, 400, { error: 'Missing "id" or "name"' });
     if (!isValidContextGraphId(id))
       return jsonResponse(res, 400, { error: "Invalid context graph id" });
+    const parsedPcaAccountId = parseOptionalPcaAccountId(parsed);
+    if (parsedPcaAccountId.error) {
+      return jsonResponse(res, 400, { error: parsedPcaAccountId.error });
+    }
+    // publishPolicy override is forwarded to `registerContextGraph` in
+    // the combined-flow path (Codex PR #502 round-10) — validate the
+    // shape the same way /api/context-graph/register does so callers
+    // get an actionable 400 instead of a 500 from the agent layer.
+    if (publishPolicy !== undefined && publishPolicy !== 0 && publishPolicy !== 1) {
+      return jsonResponse(res, 400, { error: '"publishPolicy" must be 0 (curated) or 1 (open)' });
+    }
+    // pcaAccountId is a curated-publish signal: reject ONLY the
+    // explicit `publishPolicy: 1 (open)` combo at the API boundary
+    // instead of letting it surface as a 500 from the agent.
+    //
+    // Note: we deliberately do NOT reject `accessPolicy: 0 (public)`
+    // alongside pcaAccountId — the on-chain
+    // `ContextGraphs.createContextGraph` contract supports
+    // `{ accessPolicy: 0, publishPolicy: 0, pcaAccountId: !=0 }`
+    // (publicly-discoverable CG where only PCA-authorized publishers
+    // can write). Rejecting it here would block a valid registration
+    // mode (Codex PR #502 round-7).
+    if (parsedPcaAccountId.value !== undefined && publishPolicy === 1) {
+      return jsonResponse(res, 400, { error: 'pcaAccountId is only valid with curated publish policy (publishPolicy=0)' });
+    }
+    // pcaAccountId on a create-only request is a silent foot-gun:
+    // `createContextGraph()` no longer persists it (Codex PR #502
+    // round-3), so a later `/register` call without re-supplying the
+    // id would register as plain EOA-curated. Reject the
+    // create-without-register combo so callers either bundle the
+    // combined flow (`register: true`) or move the id to the
+    // dedicated `/register` call. Codex PR #502 round-5.
+    if (parsedPcaAccountId.value !== undefined && parsed.register !== true) {
+      return jsonResponse(res, 400, {
+        error:
+          'pcaAccountId on POST /api/context-graph/create requires `register: true` in the same call. '
+          + 'For two-step flows, pass pcaAccountId on POST /api/context-graph/register instead — '
+          + 'create-only requests do not persist the PCA id locally.',
+      });
+    }
+    // Effective accessPolicy for both the create and the (optional)
+    // register-during-create leg below. Priority:
+    //   1. `private: true` is a curated signal that overrides any
+    //      explicit `accessPolicy` (matches the agent's createContextGraph
+    //      treatment of the legacy `private` flag).
+    //   2. Explicit `accessPolicy` wins next.
+    //   3. `pcaAccountId` alone is a curated signal — coerce to 1 so raw
+    //      HTTP/SDK callers don't have to also know to set accessPolicy.
+    //   4. Otherwise leave undefined and let the agent default it.
+    // Codex review #502-2: the register leg used to read raw `accessPolicy`
+    // here, so `{ private: true, accessPolicy: 0, pcaAccountId, register: true }`
+    // created the CG locally and then immediately failed registration as
+    // open-with-PCA. Routing through `inferredAccessPolicy` keeps the
+    // create+register pair consistent.
+    const inferredAccessPolicy = parsed.private === true
+      ? 1
+      : typeof accessPolicy === 'number'
+        ? accessPolicy
+        : parsedPcaAccountId.value !== undefined
+          ? 1
+          : undefined;
     try {
+      // NOTE: parsedPcaAccountId.value is intentionally NOT forwarded
+      // to `agent.createContextGraph` — the agent now rejects that
+      // param at the boundary (Codex PR #502 round-6). The daemon
+      // route uses parsedPcaAccountId.value below in the (optional)
+      // register leg only.
       await agent.createContextGraph({
         id,
         name,
@@ -452,7 +579,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         allowedAgents: Array.isArray(allowedAgents) ? allowedAgents : undefined,
         allowedPeers: Array.isArray(allowedPeers) ? allowedPeers : undefined,
         participantAgents: Array.isArray(participantAgents) ? participantAgents : undefined,
-        accessPolicy: typeof accessPolicy === 'number' ? accessPolicy : undefined,
+        accessPolicy: inferredAccessPolicy,
         callerAgentAddress: requestAgentAddress,
         ...(parsed.private === true ? { private: true } : {}),
         ...(Array.isArray(parsed.participantIdentityIds)
@@ -478,8 +605,9 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       try {
         const regResult = await agent.registerContextGraph(id, {
           callerAgentAddress: requestAgentAddress,
-          accessPolicy: typeof accessPolicy === 'number' ? accessPolicy : undefined,
+          accessPolicy: inferredAccessPolicy,
           publishPolicy: typeof publishPolicy === 'number' ? publishPolicy : undefined,
+          publishAuthorityAccountId: parsedPcaAccountId.value,
         });
         return jsonResponse(res, 200, {
           created: id,
@@ -488,12 +616,34 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           onChainId: regResult.onChainId,
         });
       } catch (regErr: any) {
-        process.stderr.write(`[DKG-Daemon] WARN: Context graph "${id}" created locally but on-chain registration failed: ${regErr?.message ?? 'unknown error'}\n`);
+        const regMsg = regErr?.message ?? 'unknown error';
+        process.stderr.write(`[DKG-Daemon] WARN: Context graph "${id}" created locally but on-chain registration failed: ${regMsg}\n`);
+        // No rollback of `pcaAccountId` needed: `createContextGraph`
+        // no longer persists it (Codex PR #502 round-3) — callers must
+        // resupply at register time, so a failed register leg simply
+        // leaves the CG with no stored PCA id, which is the correct
+        // "no PCA yet" state.
+        //
+        // We deliberately keep the 200 partial-success shape here even
+        // for "classified" register failures (Codex PR #502 round-9
+        // reversal of round-8). The create leg already succeeded —
+        // the CG exists locally — so returning a hard HTTP error
+        // would break existing callers that rely on
+        // `created: true, registered: false` to retry the register
+        // step without re-running create (or hitting 409). Callers
+        // detect register-leg failures by inspecting `registered`
+        // (`true`/`false`) and `registerError`; the classified
+        // status code from `classifyRegisterContextGraphError` is
+        // surfaced as `registerErrorStatus` so SDK callers can map
+        // it to the same 4xx semantics as the standalone /register
+        // endpoint without changing the HTTP envelope status.
+        const classified = classifyRegisterContextGraphError(regMsg);
         return jsonResponse(res, 200, {
           created: id,
           uri: `did:dkg:context-graph:${id}`,
           registered: false,
-          registerError: regErr?.message ?? 'Registration failed',
+          registerError: regMsg,
+          ...(classified ? { registerErrorStatus: classified.status } : {}),
           hint: 'CG created locally. Use POST /api/context-graph/register to retry on-chain registration.',
         });
       }
@@ -516,8 +666,23 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     if (publishPolicy !== undefined && (publishPolicy !== 0 && publishPolicy !== 1)) {
       return jsonResponse(res, 400, { error: '"publishPolicy" must be 0 (curated) or 1 (open)' });
     }
+    const parsedPcaAccountId = parseOptionalPcaAccountId(parsed);
+    if (parsedPcaAccountId.error) {
+      return jsonResponse(res, 400, { error: parsedPcaAccountId.error });
+    }
+    // Early-reject obvious mismatch: explicit open publishPolicy with a PCA
+    // account id makes no sense. The agent enforces the canonical check too,
+    // but this gives callers a 400 at the API boundary instead of a 500.
+    if (parsedPcaAccountId.value !== undefined && publishPolicy === 1) {
+      return jsonResponse(res, 400, { error: 'pcaAccountId is only valid for curated context graphs (publishPolicy=0)' });
+    }
     try {
-      const result = await agent.registerContextGraph(id, { accessPolicy, publishPolicy, callerAgentAddress: requestAgentAddress });
+      const result = await agent.registerContextGraph(id, {
+        accessPolicy,
+        publishPolicy,
+        callerAgentAddress: requestAgentAddress,
+        publishAuthorityAccountId: parsedPcaAccountId.value,
+      });
       return jsonResponse(res, 200, {
         registered: id,
         onChainId: result.onChainId,
@@ -526,23 +691,9 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       });
     } catch (err: any) {
       const msg = err?.message ?? '';
-      if (msg.includes('already registered')) {
-        return jsonResponse(res, 409, { error: msg });
-      }
-      if (msg.includes('does not exist')) {
-        return jsonResponse(res, 404, { error: msg });
-      }
-      if (msg.includes('no known creator')) {
-        return jsonResponse(res, 503, { error: msg, hint: 'Creator not yet synced. Retry after sync completes.' });
-      }
-      if (msg.includes('Only the context graph creator')) {
-        return jsonResponse(res, 403, { error: msg });
-      }
-      if (msg.includes('Only the context graph curator')) {
-        return jsonResponse(res, 403, { error: msg });
-      }
-      if (msg.includes('address-scoped curator')) {
-        return jsonResponse(res, 403, { error: msg });
+      const classified = classifyRegisterContextGraphError(msg);
+      if (classified) {
+        return jsonResponse(res, classified.status, classified.body ?? { error: msg });
       }
       return jsonResponse(res, 500, { error: msg });
     }

@@ -113,6 +113,17 @@ describe('SKILL.md file', () => {
     expect(skillContent).toContain('/api/assertion/{name}/extraction-status');
   });
 
+  it('documents imported attachment semantic enrichment as same-assertion append', () => {
+    expect(skillContent).toContain('dkg_import_artifact_read_markdown');
+    expect(skillContent).toContain('dkg_import_artifact_resolve');
+    expect(skillContent).toContain('dkg_semantic_enrichment_write');
+    expect(skillContent).toContain('appends model-derived semantic triples');
+    expect(skillContent).toContain('same imported assertion graph');
+    expect(skillContent).toContain('Optional metadata re-check');
+    expect(skillContent).toContain('rejects target assertion names');
+    expect(skillContent).not.toContain('separate Working Memory assertion');
+  });
+
   it('documents error status codes', () => {
     expect(skillContent).toContain('| 400 |');
     expect(skillContent).toContain('| 401 |');

@@ -41,7 +41,7 @@ function workspaceMessage(name: string, operationId: string): Uint8Array {
     ),
     manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
     publisherPeerId: PEER_ID,
-    workspaceOperationId: operationId,
+    shareOperationId: operationId,
     timestampMs: Date.now(),
   });
 }
@@ -86,8 +86,8 @@ async function encryptWorkspaceMessage(
   return encodeEncryptedWorkspacePayload(await encryptWorkspacePayload({
     contextGraphId: request.contextGraphId,
     senderIdentity: `did:dkg:agent:${agentAddress}`,
-    operationId: request.operationId || request.workspaceOperationId,
-    workspaceOperationId: request.workspaceOperationId,
+    operationId: request.operationId || request.shareOperationId,
+    shareOperationId: request.shareOperationId,
     timestampMs: request.timestampMs,
     subGraphName: request.subGraphName,
     plaintext: payload,
@@ -339,7 +339,7 @@ describe('SharedMemoryHandler agent-gated gossip', () => {
       contextGraphId: 'other-context-graph',
       senderIdentity: `did:dkg:agent:${allowed.address}`,
       operationId: 'ws-agent-gate-cross-context',
-      workspaceOperationId: 'ws-agent-gate-cross-context',
+      shareOperationId: 'ws-agent-gate-cross-context',
       timestampMs: Date.now(),
       plaintext: raw,
       recipients: [recipientKey],

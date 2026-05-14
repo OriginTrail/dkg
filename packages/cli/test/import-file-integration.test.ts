@@ -965,6 +965,7 @@ async function runImportFileOrchestration(params: {
     { subject: assertionUri, predicate: 'http://dkg.io/ontology/sourceContentType', object: JSON.stringify(detectedContentType), graph: metaGraph },
     { subject: assertionUri, predicate: 'http://dkg.io/ontology/sourceFileHash', object: JSON.stringify(fileStoreEntry.keccak256), graph: metaGraph },
     { subject: assertionUri, predicate: 'http://dkg.io/ontology/extractionMethod', object: JSON.stringify('structural'), graph: metaGraph },
+    { subject: assertionUri, predicate: 'http://dkg.io/ontology/extractionStatus', object: JSON.stringify('completed'), graph: metaGraph },
     { subject: assertionUri, predicate: 'http://dkg.io/ontology/structuralTripleCount', object: `"${triples.length}"^^<http://www.w3.org/2001/XMLSchema#integer>`, graph: metaGraph },
     { subject: assertionUri, predicate: 'http://dkg.io/ontology/semanticTripleCount', object: `"0"^^<http://www.w3.org/2001/XMLSchema#integer>`, graph: metaGraph },
   ];
@@ -2522,7 +2523,7 @@ describe('import-file orchestration — source-file linkage (§10.1 / §6.3 / §
     expect(written.some(q => q.subject.startsWith('urn:dkg:extraction:'))).toBe(true);
   });
 
-  it('text/markdown import writes rows 14-19 into the CG root _meta graph and omits row 20', async () => {
+  it('text/markdown import writes completed status into the CG root _meta graph and omits mdIntermediateHash', async () => {
     const body = buildMultipart([
       { kind: 'text', name: 'contextGraphId', value: 'cg' },
       { kind: 'file', name: 'file', filename: 'note.md', contentType: 'text/markdown', content: Buffer.from('# Note\n\nBody.\n', 'utf-8') },
@@ -2537,9 +2538,9 @@ describe('import-file orchestration — source-file linkage (§10.1 / §6.3 / §
     const metaForAssertion = agent.insertedQuads.filter(q =>
       q.graph === metaGraph && q.subject === result.assertionUri,
     );
-    // Rows 14-19 plus Round 9 Bug 27 `dkg:sourceFileName` (7 total) —
-    // no row 20 because Phase 1 did not run for a direct markdown upload.
-    expect(metaForAssertion).toHaveLength(7);
+    // Rows 14-20 plus Round 9 Bug 27 `dkg:sourceFileName` (8 total) -
+    // no mdIntermediateHash because Phase 1 did not run for a direct markdown upload.
+    expect(metaForAssertion).toHaveLength(8);
 
     const byPredicate = (predLocal: string) =>
       metaForAssertion.find(q => q.predicate === `${DKG}${predLocal}`);
@@ -2555,11 +2556,11 @@ describe('import-file orchestration — source-file linkage (§10.1 / §6.3 / §
     expect(byPredicate('sourceFileHash')?.object).toBe(`"${result.fileHash}"`);
     // Row 17
     expect(byPredicate('extractionMethod')?.object).toBe('"structural"');
-    // Row 18 — structural triple count matches the Phase 2 result
+    expect(byPredicate('extractionStatus')?.object).toBe('"completed"');
+    // Row 19 - structural triple count matches the Phase 2 result
     expect(byPredicate('structuralTripleCount')?.object).toBe(`"${result.extraction.tripleCount}"^^<${XSD_INTEGER}>`);
-    // Row 19 — V10.0 has no semantic extraction yet
+    // Row 20 - V10.0 has no semantic extraction yet
     expect(byPredicate('semanticTripleCount')?.object).toBe(`"0"^^<${XSD_INTEGER}>`);
-    // Row 20 — absent because Phase 1 did not run for a direct markdown upload
     expect(byPredicate('mdIntermediateHash')).toBeUndefined();
     // Round 9 Bug 27 — `dkg:sourceFileName` present on the UAL, carrying
     // the original upload filename literal. This is the new home for
@@ -2567,7 +2568,7 @@ describe('import-file orchestration — source-file linkage (§10.1 / §6.3 / §
     expect(byPredicate('sourceFileName')?.object).toBe('"note.md"');
   });
 
-  it('application/pdf import writes row 15 in _meta and row 20 for mdIntermediateHash, with rows 2 and 15 both = application/pdf', async () => {
+  it('application/pdf import writes completed status and mdIntermediateHash in _meta, with rows 2 and 15 both = application/pdf', async () => {
     const convertedMarkdown = '---\nid: paper\n---\n\n# Paper\n\nBody.\n';
     const stubConverter: ExtractionPipeline = {
       contentTypes: ['application/pdf'],
@@ -2594,15 +2595,16 @@ describe('import-file orchestration — source-file linkage (§10.1 / §6.3 / §
     const metaForAssertion = agent.insertedQuads.filter(q =>
       q.graph === metaGraph && q.subject === result.assertionUri,
     );
-    // Rows 14-20 + Round 9 Bug 27 `dkg:sourceFileName` = 8 rows total.
-    expect(metaForAssertion).toHaveLength(8);
+    // Rows 14-21 + Round 9 Bug 27 `dkg:sourceFileName` = 9 rows total.
+    expect(metaForAssertion).toHaveLength(9);
 
     const byPredicate = (predLocal: string) =>
       metaForAssertion.find(q => q.predicate === `${DKG}${predLocal}`);
 
     // Row 15 — original content type is application/pdf in _meta
     expect(byPredicate('sourceContentType')?.object).toBe('"application/pdf"');
-    // Row 20 — mdIntermediateHash now present, matching the wire value
+    expect(byPredicate('extractionStatus')?.object).toBe('"completed"');
+    // mdIntermediateHash now present, matching the wire value
     expect(byPredicate('mdIntermediateHash')?.object).toBe(`"${result.extraction.mdIntermediateHash}"`);
     // Round 9 Bug 27 — sourceFileName present on the UAL for the PDF upload.
     expect(byPredicate('sourceFileName')?.object).toBe('"paper.pdf"');
@@ -4534,10 +4536,10 @@ describe('import-file orchestration — source-file linkage (§10.1 / §6.3 / §
     expect(ctB).toHaveLength(1);
   });
 
-  it('Round 9 Bug 27: no-filename upload skips `dkg:sourceFileName` entirely (matches row 20 optional pattern)', async () => {
+  it('Round 9 Bug 27: no-filename upload skips `dkg:sourceFileName` entirely (matches optional metadata pattern)', async () => {
     // Symmetric negative guard — when the multipart part carries no
     // filename (or a whitespace-only filename), the daemon skips
-    // the `_meta` row entirely, same way row 20 (`mdIntermediateHash`)
+    // the `_meta` row entirely, same way `mdIntermediateHash`
     // is absent for markdown-direct imports.
     const body = buildMultipart([
       { kind: 'text', name: 'contextGraphId', value: 'cg' },

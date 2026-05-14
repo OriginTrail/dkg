@@ -267,7 +267,7 @@ function makeManager(store: OxigraphStore): ChatMemoryManager {
         if (opts?.graphSuffix === '_workspace') return executeOnGraph(store, sparql, WORKSPACE_GRAPH);
         return executeOnGraph(store, sparql, DATA_GRAPH);
       },
-      writeToWorkspace: async () => ({ workspaceOperationId: 'noop' }),
+      writeToWorkspace: async () => ({ shareOperationId: 'noop' }),
       publishFromSharedMemory: async () => ({}),
       createContextGraph: async () => undefined,
       listContextGraphs: async () => [{ id: MEMORY_CONTEXT_GRAPH, name: 'Agent Memory' }],

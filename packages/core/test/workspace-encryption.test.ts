@@ -39,7 +39,7 @@ function inputFor(recipients: WorkspaceRecipientEncryptionKey[]): EncryptWorkspa
     contextGraphId: 'cg-private',
     senderIdentity: 'did:dkg:agent:0x1234',
     operationId: 'op-1',
-    workspaceOperationId: 'swm-op-1',
+    shareOperationId: 'swm-op-1',
     timestampMs: 1_770_000_000_000,
     subGraphName: 'chat',
     plaintext: textEncoder.encode('<urn:s> <urn:p> "secret" .'),

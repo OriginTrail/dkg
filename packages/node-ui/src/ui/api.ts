@@ -815,6 +815,9 @@ export interface LocalAgentChatAttachmentRef {
   extractionStatus?: 'completed';
   tripleCount?: number;
   rootEntity?: string;
+  mdIntermediateHash?: string;
+  markdownHash?: string;
+  markdownForm?: string;
 }
 
 export interface LocalAgentChatAttachmentImportResult {

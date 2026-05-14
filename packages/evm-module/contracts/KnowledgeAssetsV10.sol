@@ -329,11 +329,22 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
      * coverage:
      *
      * - **Discount branch** — taken when `msg.sender` is registered as an
-     *   agent on any active publisher conviction account
-     *   (`agentToAccountId[msg.sender] != 0`). TRAC was already written into
-     *   `EpochStorage.addTokensToEpochRange` at `createAccount` time, so
-     *   this branch MUST NOT call `_distributeTokens` — doing so would
-     *   double-count TRAC in the staker reward pool.
+     *   agent on a PCA whose escrow is still active AND whose
+     *   `lockDurationEpochs` exactly matches `p.epochs`. The NFT contract
+     *   is the funding agent on this branch: `coverPublishingCost`
+     *   deducts the discounted cost from the account's current
+     *   billing-window budget (or top-up buffer), distributes that cost
+     *   across the published KC's epoch range via
+     *   `EpochStorage.addTokensToEpochRange` (active sink), and lazily
+     *   settles any elapsed billing windows by sweeping their unspent
+     *   base remainder to the staker pool (passive sink). KAv10
+     *   therefore MUST NOT call `_distributeTokens` here — the NFT has
+     *   already accounted for staker rewards directly.
+     *
+     *   A stale agent registration (PCA expired) or a publish submitted
+     *   with the wrong epoch count silently falls through to direct
+     *   spend at full price — eligibility is a discount opt-in, never a
+     *   hard gate that bricks the publisher.
      *
      * - **Direct-spend branch** — taken otherwise. Pulls TRAC from
      *   `msg.sender`'s wallet via `transferFrom` and distributes it across
@@ -354,12 +365,45 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         uint40 currentEpoch;
         (currentEpoch, kcId) = _executePublishCore(p);
 
-        if (publishingConvictionNFT.agentToAccountId(msg.sender) != 0) {
-            // Discount branch. NFT auto-resolves the paying account from
-            // `agentToAccountId[msg.sender]` inside `coverPublishingCost`
-            // and emits `CostCovered` with full detail for off-chain
-            // accounting. Discounted amount is discarded here.
-            publishingConvictionNFT.coverPublishingCost(msg.sender, p.tokenAmount);
+        // PCA branch eligibility:
+        //   (1) `msg.sender` is registered as an agent on a PCA,
+        //   (2) the PCA is NOT past its expiry timestamp,
+        //   (3) `p.epochs == lockDurationEpochs` (the discount tier was
+        //       paid up-front for a KC lifetime of exactly that many
+        //       epochs; anything shorter would orphan post-KC windows
+        //       against passive sweeps, anything longer would extend the
+        //       active sink past the escrow runway).
+        //
+        // ALL three must hold to take the PCA path. If any fails, the
+        // publisher falls through to direct spend at full price — a
+        // stale agent registration on an expired PCA, or a publish
+        // submitted with the wrong epoch count, MUST NOT brick the
+        // publisher (Codex round-3 finding on PR #470). `update()`
+        // has a parallel gate (with `<=` instead of `==` since update
+        // legitimately passes the KC's remaining lifetime, a delta).
+        uint256 convictionAccountId = publishingConvictionNFT.agentToAccountId(msg.sender);
+        bool useConviction;
+        if (convictionAccountId != 0) {
+            (,,,, uint40 expiresAtTimestamp, uint16 lockDurationEpochs,,,) =
+                publishingConvictionNFT.accounts(convictionAccountId);
+            useConviction =
+                block.timestamp < uint256(expiresAtTimestamp) &&
+                p.epochs == uint256(lockDurationEpochs);
+        }
+
+        if (useConviction) {
+            // Discount branch. The NFT auto-resolves the paying account
+            // from `agentToAccountId[msg.sender]`, deducts the discounted
+            // cost, distributes it across the KC's epoch range (active
+            // sink), and lazily settles any elapsed billing windows
+            // (passive sink). KAv10 MUST NOT call `_distributeTokens`
+            // here — the NFT is the funding agent on this branch.
+            publishingConvictionNFT.coverPublishingCost(
+                msg.sender,
+                p.tokenAmount,
+                currentEpoch,
+                uint40(p.epochs)
+            );
         } else {
             // Direct-spend branch. `transferFrom(msg.sender, CSS, fullCost)`
             // + epoch-range distribution. The named core (if non-zero) still
@@ -834,27 +878,59 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
      * Metadata-only updates (`delta == 0`) bypass `coverPublishingCost`
      * entirely — no conviction spend, no zero-value NFT hop.
      *
-     * Double-count prevention (same reasoning as `publish`): conviction-path
-     * TRAC was already distributed by the NFT's `createAccount` /`topUp` at
-     * lock time, so this path MUST NOT call `_addTokens` / `_distributeTokens`.
+     * Double-count prevention (same reasoning as `publish`): on the
+     * conviction branch the NFT's `coverPublishingCost` directly distributes
+     * `deltaTokenAmount` across the KC's remaining epoch range (active
+     * sink) and lazily sweeps elapsed window remainders (passive sink), so
+     * this path MUST NOT call `_addTokens` / `_distributeTokens`.
      *
      * @param p Update parameters (see `UpdateParams` struct).
      */
     /**
      * @notice Update a knowledge collection (RFC-001: unified entrypoint).
      *
-     * Mirrors the unified `publish`: branches on
-     * `agentToAccountId[msg.sender]` to pick discount vs direct-spend cost
-     * coverage. Metadata-only updates (`delta == 0`) skip cost coverage
-     * entirely on either branch.
+     * Mirrors the unified `publish`: takes the PCA discount branch when
+     * `msg.sender` is a registered agent on an active PCA whose
+     * `lockDurationEpochs >= remainingEpochs`; otherwise falls through to
+     * direct spend. Metadata-only updates (`delta == 0`) skip cost
+     * coverage entirely on either branch.
      */
     function update(UpdateParams calldata p) external {
         (uint96 deltaTokenAmount, uint40 remainingEpochs, uint40 currentEpoch) = _executeUpdateCore(p);
 
         if (deltaTokenAmount == 0) return;
 
-        if (publishingConvictionNFT.agentToAccountId(msg.sender) != 0) {
-            publishingConvictionNFT.coverPublishingCost(msg.sender, deltaTokenAmount);
+        // PCA branch eligibility (mirrors `publish()`, with `<=` for the
+        // epoch count since `update()` passes the KC's REMAINING lifetime,
+        // a delta bounded above by `lockDurationEpochs`):
+        //   (1) `msg.sender` is registered as an agent on a PCA,
+        //   (2) the PCA is NOT past its expiry timestamp,
+        //   (3) `remainingEpochs <= lockDurationEpochs`.
+        // Otherwise fall through to direct spend so a stale agent
+        // registration / expired PCA / over-large remaining lifetime
+        // cannot brick `update()` (Codex round-3 finding on PR #470).
+        uint256 convictionAccountId = publishingConvictionNFT.agentToAccountId(msg.sender);
+        bool useConviction;
+        if (convictionAccountId != 0) {
+            (,,,, uint40 expiresAtTimestamp, uint16 lockDurationEpochs,,,) =
+                publishingConvictionNFT.accounts(convictionAccountId);
+            useConviction =
+                block.timestamp < uint256(expiresAtTimestamp) &&
+                remainingEpochs <= uint40(lockDurationEpochs);
+        }
+
+        if (useConviction) {
+            // Discount branch — delta funds the KC's REMAINING epoch range
+            // `[currentEpoch, currentEpoch + remainingEpochs - 1]` via the
+            // active sink. The active sink may extend past the conviction
+            // account's `expiresAtEpoch` (harmless — the staker pool just
+            // gets funded normally for those epochs).
+            publishingConvictionNFT.coverPublishingCost(
+                msg.sender,
+                deltaTokenAmount,
+                currentEpoch,
+                remainingEpochs
+            );
         } else {
             _addTokens(deltaTokenAmount);
             _distributeTokens(deltaTokenAmount, uint256(remainingEpochs), currentEpoch);
@@ -912,6 +988,7 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
             bool isImmutable,
             uint32 ignoredPreUpdateMerkleLeafCount
         ) = kcs.getKnowledgeCollectionUpdateContext(p.id);
+        ignoredPreUpdateMerkleLeafCount;
 
         if (isImmutable) {
             revert KnowledgeCollectionLib.CannotUpdateImmutableKnowledgeCollection(p.id);
