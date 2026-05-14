@@ -352,6 +352,50 @@ describe('Select (custom dropdown)', () => {
     await unmount();
   });
 
+  it('closes the menu and ignores option clicks when disabled flips true mid-interaction', async () => {
+    // Codex BOMw6: when the parent flips `disabled` while the menu is
+    // open, the trigger greys out but the portal-rendered menu must NOT
+    // remain interactive — otherwise users can keep selecting stale
+    // options. Two guards cover this:
+    //   1. an effect closes the menu when `disabled` becomes true;
+    //   2. the option `onClick` re-reads `disabled` so a click that
+    //      races the effect on the same tick is still a no-op.
+    const onChange = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    const props = (disabled: boolean) =>
+      React.createElement(Select, {
+        value: 'a',
+        onChange,
+        options: OPTIONS,
+        disabled,
+        ariaLabel: 'Project',
+      });
+
+    await act(async () => {
+      root.render(props(false));
+    });
+    const trigger = container.querySelector('.v10-select-trigger') as HTMLButtonElement;
+    await act(async () => {
+      trigger.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(getPortalMenu()).toBeTruthy();
+
+    // Parent flips `disabled` → menu must close.
+    await act(async () => {
+      root.render(props(true));
+    });
+    expect(getPortalMenu()).toBeNull();
+    expect(onChange).not.toHaveBeenCalled();
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
   it('renders an empty-state row when no options are provided', async () => {
     const { trigger, unmount } = await renderSelect({ value: '', options: [] });
     await act(async () => {
