@@ -1330,11 +1330,10 @@ function NetworkPeerGroup(props: {
 
 function NetworkTab(props: {
   peerAgents: AgentInfo[];
-  connections: { total: number; direct: number; relayed: number };
   loading: boolean;
   onRefresh: () => void;
 }) {
-  const { peerAgents, connections, loading, onRefresh } = props;
+  const { peerAgents, loading, onRefresh } = props;
   const [connectedExpanded, setConnectedExpanded] = useState(true);
   const [disconnectedExpanded, setDisconnectedExpanded] = useState(false);
 
@@ -1354,15 +1353,24 @@ function NetworkTab(props: {
   );
   const connectedPeers = uniquePeers.filter((a) => a.connectionStatus === 'connected');
   const disconnectedPeers = uniquePeers.filter((a) => a.connectionStatus !== 'connected');
+  // Derive the top-summary counts from the same deduped list the user is
+  // looking at, instead of pulling raw libp2p connection counts from
+  // /api/connections. /api/connections counts *connections* (so a peer
+  // reachable on direct + relayed transports counts twice), which is
+  // technically correct but confusing when the visible list says
+  // otherwise. Showing *peer* counts here keeps the top summary and the
+  // section counts consistent.
+  const directCount = connectedPeers.filter((a) => (a.connectionTransport ?? 'direct') === 'direct').length;
+  const relayedCount = connectedPeers.length - directCount;
 
   return (
     <div className="v10-agent-scroll-tab">
       <div className="v10-agents-summary">
         <span className="v10-agents-stat">
-          <span className={`v10-agents-stat-dot ${connections.total > 0 ? 'connected' : 'known'}`} />
-          {connections.total} peer{connections.total !== 1 ? 's' : ''}
+          <span className={`v10-agents-stat-dot ${connectedPeers.length > 0 ? 'connected' : 'known'}`} />
+          {connectedPeers.length} peer{connectedPeers.length !== 1 ? 's' : ''}
         </span>
-        <span className="v10-agents-stat">{connections.direct} direct / {connections.relayed} relayed</span>
+        <span className="v10-agents-stat">{directCount} direct / {relayedCount} relayed</span>
         <button className="v10-agents-refresh" onClick={onRefresh} title="Refresh network peers">
           Refresh
         </button>
@@ -2125,7 +2133,6 @@ export function PanelRight() {
       {mode === 'network' && (
         <NetworkTab
           peerAgents={peerAgents}
-          connections={connections}
           loading={peerLoading}
           onRefresh={refreshPeers}
         />
