@@ -206,6 +206,53 @@ describe('formatJoinRequestError', () => {
     expect(msg).toContain('dial failed');
   });
 
+  // Codex review on PR #508 round 1 caught a misdiagnosis: when the
+  // targeted curator dial times out, `forwardJoinRequest` falls through
+  // to the broadcast cohort. Non-curator peers in that cohort respond
+  // `not curator` and get appended to `errors[]` alongside the
+  // earlier `dial failed (timeout)` line. The original
+  // "any entry that isn't dial-failed ⇒ rejection" heuristic flipped
+  // the headline to "Curator rejected this join request" for this
+  // mix, even though the curator was never reached. Pin the corrected
+  // semantic: `dial failed` + `not curator` (the only two
+  // delivery-failure signals from forwardJoinRequest) must still read
+  // as a delivery failure.
+  it('treats targeted-dial-failed + non-curator-broadcast as a delivery failure (Codex #508 round 1)', () => {
+    const err = new HttpError(502, 'no reachable curator', {
+      error: 'Could not deliver join request to curator. No reachable curator found.',
+      errors: [
+        'kmTfyjRK: dial failed (timeout after 10000ms)',
+        'cAbCdEfG: not curator',
+        'hIjKlMnO: not curator',
+      ],
+    });
+
+    const msg = formatJoinRequestError(err);
+
+    expect(msg).toContain("Couldn't deliver");
+    expect(msg).not.toContain('Curator rejected');
+    expect(msg).toContain('dial failed');
+    expect(msg).toContain('not curator');
+    expect(msg).toContain('none of them curate this project');
+  });
+
+  it('treats broadcast-only `not curator` (no targeted curator reached) as a delivery failure', () => {
+    // If every broadcast peer answered `not curator` and there is no
+    // `dial failed` entry (e.g. legacy multiaddr invite path with no
+    // targeted curator step), it's still a delivery failure, not a
+    // rejection.
+    const err = new HttpError(502, 'no reachable curator', {
+      error: 'Could not deliver join request to curator. No reachable curator found.',
+      errors: ['cAbCdEfG: not curator', 'hIjKlMnO: not curator'],
+    });
+
+    const msg = formatJoinRequestError(err);
+
+    expect(msg).toContain("Couldn't deliver");
+    expect(msg).not.toContain('Curator rejected');
+    expect(msg).toContain('none of them curate this project');
+  });
+
   it('falls back to err.message for non-502 errors', () => {
     const err = new HttpError(400, 'Missing curatorPeerId', { error: 'Missing curatorPeerId' });
     expect(formatJoinRequestError(err)).toBe('Missing curatorPeerId');
