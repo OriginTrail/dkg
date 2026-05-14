@@ -903,6 +903,30 @@ export function ConnectedAgentsTab(props: {
     return () => cancelAnimationFrame(raf);
   }, [selectedIntegrationId, selectedSessionId, localMessages.length]);
 
+  // Length-based recompute above misses the streaming case: the assistant's
+  // last message grows in place (text appended to the same array entry),
+  // so `localMessages.length` is unchanged. Observe the messages region's
+  // content size directly — any height change (streamed chunk, image
+  // load, markdown re-render) re-evaluates whether the pill should show,
+  // so a user hovering just above the bottom doesn't end up stranded past
+  // the 40px threshold with the pill hidden.
+  useEffect(() => {
+    const el = messagesRegionRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => {
+      const off = el.scrollHeight - el.scrollTop - el.clientHeight;
+      setShowScrollToBottom(off > 40);
+    });
+    ro.observe(el);
+    // Also observe the inner content wrapper if the region itself has a
+    // fixed flex height — the size change is on the content, not the
+    // region. messagesRegionRef points at the scroll container; its first
+    // child is the actual content list.
+    const inner = el.firstElementChild;
+    if (inner instanceof Element) ro.observe(inner);
+    return () => ro.disconnect();
+  }, []);
+
   // Drop-zone gating: three different reasons the dropzone refuses files.
   // Each surfaces a different recovery copy in the refuse-state overlay so
   // the user can act, rather than being told to "choose a project" when the
@@ -1541,7 +1565,21 @@ function NetworkTab(props: {
               might be hundreds of disconnected peers in the section underneath. */}
           {connectedPeers.length} connected
         </span>
-        <span className="v10-agents-stat">{directCount} direct / {relayedCount} relayed</span>
+        {/*
+          The counts here reflect the *preferred transport per peer*, not
+          raw transport-channel counts. A peer reachable through both
+          transports is collapsed to its DIRECT record by the dedupe rule
+          above, so it shows under `direct` even if a relay path is also
+          active. The title surfaces this so "0 relayed" doesn't read as
+          "no relay paths in use" — for raw libp2p transport diagnostics
+          the /api/connections counters are still the source of truth.
+        */}
+        <span
+          className="v10-agents-stat"
+          title="Preferred transport per peer (peers reachable via direct + relay are bucketed under direct)"
+        >
+          {directCount} direct / {relayedCount} relayed
+        </span>
         <button className="v10-agents-refresh" onClick={onRefresh} title="Refresh network peers">
           Refresh
         </button>
