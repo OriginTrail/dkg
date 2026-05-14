@@ -1563,10 +1563,22 @@ function NetworkTab(props: {
       const peerConnected = peer.connectionStatus === 'connected';
       const prevConnected = prev.connectionStatus === 'connected';
       if (peerConnected !== prevConnected) {
-        if (peerConnected) acc.set(key, peer);
+        // Status disagrees → use the newer record's status. Naively
+        // preferring "connected" would stick the UI on a stale entry
+        // after a peer drops (if /api/agents briefly retains the old
+        // connected row), keeping the peer in the Connected section
+        // and skewing the summary counts. Codex CGaLH.
+        const peerSeen = peer.lastSeen ?? 0;
+        const prevSeen = prev.lastSeen ?? 0;
+        if (peerSeen > prevSeen) acc.set(key, peer);
+        // If timestamps tie, fall through to the freshness-only
+        // tie-break below (no transport-rank discrimination here —
+        // these are different statuses, not different transports for
+        // the same status).
+        else if (peerSeen === prevSeen && peerConnected) acc.set(key, peer);
         return acc;
       }
-      // Both connected or both disconnected — prefer DIRECT transport,
+      // Same status — prefer DIRECT transport (the better channel),
       // then most recent.
       const peerRank = transportRank(peer);
       const prevRank = transportRank(prev);

@@ -2058,9 +2058,11 @@ button:focus:not(:focus-visible) { outline: none; }
 }
 /* Paragraphs and list items that contain inline-code chips bump line-height
    so the chips have breathing room without needing each line to render a
-   fully-closed padding box. */
-.v10-md-p:has(> .v10-md-code),
-.v10-md-li:has(> .v10-md-code) {
+   fully-closed padding box. Codex CGaLL: drop the `>` child combinator —
+   `:has(> .v10-md-code)` only matched when the paragraph was a single
+   `<code>` node, so the common `text <code> text` case missed the rule. */
+.v10-md-p:has(.v10-md-code),
+.v10-md-li:has(.v10-md-code) {
   line-height: 1.85;
 }
 .v10-md-pre {
