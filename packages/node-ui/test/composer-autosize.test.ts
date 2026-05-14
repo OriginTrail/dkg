@@ -72,6 +72,7 @@ async function renderTab(
     localInput: '',
     onLocalInputChange: noop,
     onSendLocalMessage: noop,
+    onStopLocalStream: noop,
     localSending: false,
     activeProjectId: 'testing',
     availableProjects: [{ id: 'testing', name: 'Testing' }],

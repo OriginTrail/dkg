@@ -26,7 +26,7 @@ import {
 import { api } from '../../api-wrapper.js';
 import TextareaAutosize from 'react-textarea-autosize';
 import { useDropzone } from 'react-dropzone';
-import { ArrowDown, ArrowUp, Ban, ChevronDown, ChevronRight, Folder, MoreHorizontal, Paperclip, Upload, X } from 'lucide-react';
+import { ArrowDown, ArrowUp, Ban, ChevronDown, ChevronRight, Folder, Loader2, MoreHorizontal, Paperclip, Square, Upload, X } from 'lucide-react';
 import { Select } from '../common/Select.js';
 import { MarkdownMessage } from '../chat/MarkdownMessage.js';
 
@@ -107,11 +107,15 @@ function formatDuration(ms: number): string {
   return `${h}h ${m % 60}m`;
 }
 
-function formatLocalTimestamp(value?: string): string {
-  if (!value) return '';
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.valueOf())) return value;
-  return parsed.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+export function formatLocalTimestamp(value?: string | Date): string {
+  if (value === undefined || value === null || value === '') return '';
+  const parsed = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(parsed.valueOf())) return typeof value === 'string' ? value : '';
+  // Include the date so a chat that spans more than one day stays
+  // legible — `HH:MM AM/PM` alone was ambiguous as soon as a session
+  // crossed midnight. `medium` date + `short` time renders e.g.
+  // "May 14, 2026, 10:05 PM" in en-US.
+  return parsed.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
 }
 
 function formatFileSize(bytes: number): string {
@@ -863,6 +867,8 @@ export function ConnectedAgentsTab(props: {
   localInput: string;
   onLocalInputChange: (value: string) => void;
   onSendLocalMessage: () => void;
+  /** Aborts the active stream when the send button is in stop-icon mode. */
+  onStopLocalStream: () => void;
   localSending: boolean;
   activeProjectId: string | null;
   availableProjects: ContextGraph[];
@@ -893,6 +899,7 @@ export function ConnectedAgentsTab(props: {
     localInput,
     onLocalInputChange,
     onSendLocalMessage,
+    onStopLocalStream,
     localSending,
     activeProjectId,
     availableProjects,
@@ -905,6 +912,23 @@ export function ConnectedAgentsTab(props: {
   const selectedAttachmentDrafts = attachments;
   const hasSendableAttachmentDrafts = selectedAttachmentDrafts.some(isSendableAttachmentDraft);
   const attachmentTargetIds = [...new Set(selectedAttachmentDrafts.map((attachment) => attachment.contextGraphId))];
+  // Send-button state machine: idle / uploading / streaming.
+  //   - uploading: at least one attachment draft is mid-upload — show
+  //     a spinner so the user knows the click is in progress (no
+  //     interaction until the upload settles).
+  //   - streaming: an assistant bubble is still streaming text — show
+  //     a stop-square icon and rebind the click to `onStopLocalStream`
+  //     so the user can abort the in-flight reply.
+  //   - idle: default `ArrowUp` send icon, normal send semantics.
+  // The visible-affordance contract from PR2's CEdrv still applies: the
+  // disabled state mirrors the keyboard-Enter gate.
+  const isUploadingAttachments = selectedAttachmentDrafts.some((a) => a.status === 'uploading');
+  const isStreaming = localMessages.some((m) => m.streaming);
+  const sendButtonMode: 'idle' | 'uploading' | 'streaming' = isStreaming
+    ? 'streaming'
+    : isUploadingAttachments
+      ? 'uploading'
+      : 'idle';
   // Drafts pin to the contextGraphId they were attached under. If the user
   // later switches `activeProjectId`, those drafts are still routed to
   // their original target — the warning surfaces that divergence. Always
@@ -1476,13 +1500,39 @@ export function ConnectedAgentsTab(props: {
                       </div>
                       <button
                         type="button"
-                        className="v10-local-agent-inline-send"
-                        onClick={onSendLocalMessage}
-                        disabled={inputDisabled || (!localInput.trim() && !hasSendableAttachmentDrafts)}
-                        aria-label="Send message"
-                        title="Send message"
+                        className={`v10-local-agent-inline-send v10-local-agent-inline-send-${sendButtonMode}`}
+                        onClick={sendButtonMode === 'streaming' ? onStopLocalStream : onSendLocalMessage}
+                        disabled={
+                          sendButtonMode === 'idle'
+                            ? inputDisabled || (!localInput.trim() && !hasSendableAttachmentDrafts)
+                            // Uploading: button is informational only,
+                            // no interaction (we'll auto-flip once the
+                            // upload settles or fails). Streaming: stop
+                            // is always clickable.
+                            : sendButtonMode === 'uploading'
+                        }
+                        aria-label={
+                          sendButtonMode === 'streaming'
+                            ? 'Stop reply'
+                            : sendButtonMode === 'uploading'
+                              ? 'Uploading attachments'
+                              : 'Send message'
+                        }
+                        title={
+                          sendButtonMode === 'streaming'
+                            ? 'Stop reply'
+                            : sendButtonMode === 'uploading'
+                              ? 'Uploading attachments…'
+                              : 'Send message'
+                        }
                       >
-                        <ArrowUp size={14} aria-hidden="true" />
+                        {sendButtonMode === 'streaming' ? (
+                          <Square size={12} aria-hidden="true" />
+                        ) : sendButtonMode === 'uploading' ? (
+                          <Loader2 className="v10-local-agent-inline-send-spinner" size={14} aria-hidden="true" />
+                        ) : (
+                          <ArrowUp size={14} aria-hidden="true" />
+                        )}
                       </button>
                     </div>
                   </div>
@@ -2210,7 +2260,9 @@ export function PanelRight() {
       deliveredAttachmentIds = [...attachmentIds, ...importContext.deliveredDraftIds];
       const userId = `local:${conversationKey}:${correlationId}:user`;
       assistantId = `local:${conversationKey}:${correlationId}:assistant`;
-      const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      // Route through `formatLocalTimestamp` so user-send timestamps
+      // stay in lockstep with history-loaded ones (date + time format).
+      const now = formatLocalTimestamp(new Date());
 
       updateLocalMessages(conversationKey, (prev) => [
         ...prev,
@@ -2267,7 +2319,9 @@ export function PanelRight() {
                 // (which is either earlier streamed agent text or — empty).
                 // Only mark synthesized when neither is true.
                 synthesized: !result.text && !message.content ? true : message.synthesized,
-                ts: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                // Same helper as user-send + history paths for a single
+                // consistent date+time timestamp format across all sources.
+                ts: formatLocalTimestamp(new Date()),
               }
             : message,
         ),
@@ -2331,6 +2385,15 @@ export function PanelRight() {
     stage,
     updateLocalMessages,
   ]);
+
+  const stopLocalStream = useCallback(() => {
+    // Aborts the in-flight chat request. The existing `sendLocalMessage`
+    // `catch (err: any)` block already handles `err?.name === 'AbortError'`
+    // by replacing the assistant bubble content with "Request cancelled."
+    // and dropping `streaming: false`, so a single `.abort()` here is
+    // enough — no additional teardown needed.
+    localAbortRef.current?.abort();
+  }, []);
 
   const connectIntegration = useCallback(async (integrationId: string) => {
     setConnectBusyId(integrationId);
@@ -2486,6 +2549,7 @@ export function PanelRight() {
           localInput={localInput}
           onLocalInputChange={(value) => setLocalInputForConversation(selectedConversationKey, value)}
           onSendLocalMessage={sendLocalMessage}
+          onStopLocalStream={stopLocalStream}
           localSending={localSending}
           activeProjectId={activeProjectId}
           availableProjects={availableProjects}

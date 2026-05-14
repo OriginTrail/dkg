@@ -1508,6 +1508,23 @@ button:focus:not(:focus-visible) { outline: none; }
   color: var(--bg-surface);
   cursor: not-allowed;
 }
+/* Streaming: button remains clickable as a stop-button. Keep the
+   filled background so the stop-icon affordance reads loud. */
+.v10-local-agent-inline-send-streaming {
+  cursor: pointer;
+}
+/* Uploading: spinner spins continuously. The button is disabled in this
+   state (informational only) — the underlying :disabled rule above
+   handles its appearance; this rule just animates the inner icon. */
+.v10-local-agent-inline-send-spinner {
+  animation: v10-spin 0.85s linear infinite;
+}
+@keyframes v10-spin {
+  to { transform: rotate(360deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .v10-local-agent-inline-send-spinner { animation: none; }
+}
 
 /* Project picker now lives INSIDE the composer-controls row to the right of
    the attach button. Lets the picker fill the available space in the row
@@ -1613,6 +1630,10 @@ button:focus:not(:focus-visible) { outline: none; }
   color: var(--text-danger);
 }
 .v10-attachment-chip-remove {
+  /* Bumped from --text-tertiary to --text-secondary so the X icon at rest
+     clears WCAG 1.4.11 3:1 non-text contrast against the chip's
+     --bg-elevated background: ~4.07:1 dark, ~7.1:1 light. Hover still
+     promotes to --text-primary for additional affordance. */
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
@@ -1622,7 +1643,7 @@ button:focus:not(:focus-visible) { outline: none; }
   border-radius: 999px;
   border: 0;
   background: transparent;
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
   cursor: pointer;
   transition: background 0.15s, color 0.15s;
 }
@@ -1897,15 +1918,19 @@ button:focus:not(:focus-visible) { outline: none; }
 .v10-chat-messages { padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; }
 .v10-chat-msg { display: flex; flex-direction: column; }
 .v10-chat-msg.user { align-items: flex-end; }
-.v10-chat-msg.assistant { align-items: flex-start; }
+.v10-chat-msg.assistant {
+  align-items: stretch;
+  /* Assistant messages render full-width within the messages region,
+     matching Claude Desktop / ChatGPT / VS Code Copilot. The .v10-chat-msg
+     wrapper sets the stretch axis so the inner .v10-chat-bubble.assistant
+     fills the available width without an explicit width: 100%. */
+}
 .v10-chat-bubble {
-  padding: 10px 14px;
-  border-radius: 10px;
-  max-width: 85%;
   font-size: 12px;
   line-height: 1.55;
   word-break: break-word;
   overflow-wrap: anywhere;
+  color: var(--text-primary);
 }
 .v10-chat-plaintext {
   /* User-side bubbles render as literal text — preserve whitespace and
@@ -1916,14 +1941,22 @@ button:focus:not(:focus-visible) { outline: none; }
   white-space: pre-wrap;
 }
 .v10-chat-bubble.user {
+  /* User pill — right-aligned, capped width, distinct surface. */
+  padding: 10px 14px;
+  border-radius: 10px;
+  max-width: 85%;
   background: var(--bg-active);
-  color: var(--text-primary);
   border: 1px solid var(--border-default);
 }
 .v10-chat-bubble.assistant {
-  background: var(--bg-surface);
-  color: var(--text-primary);
-  border: 1px solid var(--border-subtle);
+  /* No bubble container — assistant content reads as full-width body
+     copy on the panel background, the same pattern industry-standard
+     AI chat UIs use. Padding stays narrow so the assistant typography
+     visually separates from the bordered code blocks / blockquotes /
+     tables that live inside `.v10-md`. No background, no border, no
+     `max-width` — those previously created the "two cramped chat boxes"
+     look. */
+  padding: 4px 0;
 }
 /* ── Markdown rendering (PR3) ── */
 .v10-md {
@@ -1990,9 +2023,16 @@ button:focus:not(:focus-visible) { outline: none; }
   border-radius: 0 6px 6px 0;
 }
 .v10-md-hr {
+  /* `--border-subtle` was invisible against the panel background — the
+     assistant content now sits directly on `--bg-panel` after the
+     bubble removal, and even the dark-theme `--border-default` /
+     `--border-strong` still fail WCAG 1.4.11 (3:1 non-text) here.
+     `--border-prominent` is the same chip-outline token already in
+     use by inline-code chips on user bubbles and clears 3:1 against
+     `--bg-panel` in both themes. */
   margin: 12px 0;
   border: 0;
-  border-top: 1px solid var(--border-subtle);
+  border-top: 1px solid var(--border-prominent);
 }
 .v10-md-table-scroll {
   margin: 8px 0;

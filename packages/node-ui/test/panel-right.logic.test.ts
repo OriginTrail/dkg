@@ -4,6 +4,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 
 let ConnectedAgentsTab: any;
 let adoptLocalAgentTurnId: any;
+let formatLocalTimestamp: any;
 let getLocalAgentConversationStateKey: any;
 let markLocalAgentIntegrationDisconnected: any;
 let networkPeerCardStatusClass: any;
@@ -39,6 +40,7 @@ beforeAll(async () => {
   const panelRight = await import('../src/ui/components/Shell/PanelRight.js');
   ConnectedAgentsTab = panelRight.ConnectedAgentsTab;
   adoptLocalAgentTurnId = panelRight.adoptLocalAgentTurnId;
+  formatLocalTimestamp = panelRight.formatLocalTimestamp;
   getLocalAgentConversationStateKey = panelRight.getLocalAgentConversationStateKey;
   markLocalAgentIntegrationDisconnected = panelRight.markLocalAgentIntegrationDisconnected;
   networkPeerCardStatusClass = panelRight.networkPeerCardStatusClass;
@@ -97,6 +99,7 @@ function renderConnectedAgentsTab(overrides: Record<string, unknown> = {}) {
     localInput: '',
     onLocalInputChange: noop,
     onSendLocalMessage: noop,
+    onStopLocalStream: noop,
     localSending: false,
     activeProjectId: 'testing',
     availableProjects: [
@@ -137,6 +140,25 @@ describe('PanelRight logic helpers', () => {
     expect(normalizeMessageContent('Line one\n\nLine two\n')).toBe('Line one\n\nLine two');
     // CRLF folds to LF.
     expect(normalizeMessageContent('Line one\r\nLine two')).toBe('Line one\nLine two');
+  });
+
+  it('formatLocalTimestamp includes date + time (PR4 expansion)', () => {
+    // Earlier the helper rendered only HH:MM AM/PM, which became
+    // ambiguous once a conversation crossed midnight. PR4 switches to
+    // dateStyle: 'medium' + timeStyle: 'short' so timestamps anchor
+    // both the day and the time. We don't pin the exact string here —
+    // locale formatting varies across runners — but we do pin that the
+    // formatted output includes both date and time signals.
+    const out = formatLocalTimestamp(new Date(Date.UTC(2026, 4, 14, 22, 5, 0)));
+    expect(out).toMatch(/2026/);
+    // Time portion always carries a colon or "AM/PM" marker — at
+    // least one of these must be present regardless of locale.
+    expect(out).toMatch(/:|AM|PM/);
+    // Empty / null / invalid inputs return an empty string (or echo
+    // the original on parse failure) — no exceptions.
+    expect(formatLocalTimestamp(undefined)).toBe('');
+    expect(formatLocalTimestamp('')).toBe('');
+    expect(formatLocalTimestamp('not-a-date')).toBe('not-a-date');
   });
 
   it('preserves literal backslash-n in agent content (Codex CHWpS)', () => {
@@ -379,6 +401,69 @@ describe('ConnectedAgentsTab rendering', () => {
     expect(userBubble).not.toContain('<a ');
     expect(userBubble).not.toContain('<h1');
     expect(userBubble).not.toContain('v10-md-');
+  });
+
+  it('renders the send button in spinner mode while attachments upload (PR4)', () => {
+    const markup = renderConnectedAgentsTab({
+      attachments: [{
+        id: 'draft-1',
+        file: new File(['x'], 'spec.md', { type: 'text/markdown' }),
+        contextGraphId: 'testing',
+        assertionName: 'spec',
+        status: 'uploading',
+      }],
+      localInput: 'send while uploading',
+    });
+    // Button carries the uploading state class + tooltip; spinner SVG
+    // present; click-handler is `aria-label="Uploading attachments"`.
+    expect(markup).toContain('v10-local-agent-inline-send-uploading');
+    expect(markup).toContain('aria-label="Uploading attachments"');
+    expect(markup).toContain('v10-local-agent-inline-send-spinner');
+    // Should NOT show the default arrow's aria-label.
+    expect(markup).not.toContain('aria-label="Send message"');
+  });
+
+  it('renders the send button in stop mode while the assistant is streaming (PR4)', () => {
+    const markup = renderConnectedAgentsTab({
+      localMessages: [
+        { id: 'u', role: 'user', content: 'hi', ts: '10:00' },
+        { id: 'a', role: 'assistant', content: 'partial reply...', ts: '10:01', streaming: true },
+      ],
+      localSending: true,
+    });
+    expect(markup).toContain('v10-local-agent-inline-send-streaming');
+    expect(markup).toContain('aria-label="Stop reply"');
+    // Spinner / send-arrow labels are gone in this state.
+    expect(markup).not.toContain('aria-label="Send message"');
+    expect(markup).not.toContain('aria-label="Uploading attachments"');
+  });
+
+  it('renders assistant bubble with no surface styling (PR4 — full-width no-bubble layout)', () => {
+    // PR4 drops the assistant bubble to match Claude Desktop / ChatGPT /
+    // VS Code Copilot: only user content stays as a pill. We pin two
+    // contracts:
+    //   1. Class names: `.v10-chat-msg.assistant` still wraps each
+    //      assistant turn (used for align-stretch in styles.css), and
+    //      `.v10-chat-bubble.assistant` still wraps the content (used
+    //      to scope markdown-component CSS and the streaming cursor).
+    //   2. No legacy inline background / border attributes on the
+    //      assistant bubble — visual surface comes solely from
+    //      styles.css, which has been stripped of background / border /
+    //      max-width for `.v10-chat-bubble.assistant`.
+    const markup = renderConnectedAgentsTab({
+      localMessages: [
+        { id: 'a', role: 'assistant', content: 'reply text', ts: '10:00' },
+      ],
+    });
+    expect(markup).toContain('class="v10-chat-msg assistant"');
+    expect(markup).toContain('class="v10-chat-bubble assistant"');
+    // Inline-style background/border on assistant bubble would
+    // reintroduce the visual pill — verify markup is clean.
+    const start = markup.indexOf('class="v10-chat-bubble assistant"');
+    const end = markup.indexOf('</div>', start);
+    const assistantBubble = markup.slice(start, end);
+    expect(assistantBubble).not.toContain('background:');
+    expect(assistantBubble).not.toContain('border:');
   });
 
   it('also bypasses markdown for synthesized assistant content (Codex CGpe9)', () => {
