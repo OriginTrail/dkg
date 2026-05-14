@@ -155,6 +155,39 @@ describe('MarkdownMessage rendering', () => {
     await unmount();
   });
 
+  it('renders mailto links as anchors (no target=_blank — system mail client opens out-of-band)', async () => {
+    const { container, unmount } = await render('email [team](mailto:team@example.test)');
+    const link = container.querySelector('a.v10-md-link') as HTMLAnchorElement | null;
+    expect(link).toBeTruthy();
+    expect(link!.getAttribute('href')).toBe('mailto:team@example.test');
+    expect(link!.getAttribute('target')).toBeNull();
+    await unmount();
+  });
+
+  it('renders relative links from untrusted chat content as inert text (Codex CFThj)', async () => {
+    // Chat content is untrusted. An agent emitting `[click here](/admin)`
+    // must not produce a clickable same-origin link — that would be a
+    // silent navigation hijack. The literal href is exposed via `title`
+    // so the user can still see what was claimed.
+    const { container, unmount } = await render('check [the admin page](/admin)');
+    expect(container.querySelector('a.v10-md-link')).toBeNull();
+    const inert = container.querySelector('.v10-md-link-inert') as HTMLSpanElement | null;
+    expect(inert).toBeTruthy();
+    expect(inert!.tagName.toLowerCase()).toBe('span');
+    expect(inert!.getAttribute('title')).toBe('/admin');
+    expect(inert!.textContent).toContain('the admin page');
+    await unmount();
+  });
+
+  it('renders javascript: / data: / fragment hrefs as inert (broader CFThj coverage)', async () => {
+    for (const href of ['javascript:alert(1)', 'data:text/html,<script>1</script>', '#section', '../foo']) {
+      const { container, unmount } = await render(`see [link](${href})`);
+      expect(container.querySelector('a.v10-md-link')).toBeNull();
+      expect(container.querySelector('.v10-md-link-inert')).toBeTruthy();
+      await unmount();
+    }
+  });
+
   it('renders inline code with .v10-md-code (not CodeBlock)', async () => {
     const { container, unmount } = await render('use `npm test` to run tests');
     const inline = container.querySelector('code.v10-md-code');

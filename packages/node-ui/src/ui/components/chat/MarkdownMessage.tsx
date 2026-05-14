@@ -8,13 +8,17 @@ interface MarkdownMessageProps {
   content: string;
 }
 
-// Treat a URL as absolute (and therefore worth opening in a new tab) only if
-// it has an explicit scheme. Relative routes, hash anchors, and mailto: should
-// keep their normal navigation semantics so an in-app link doesn't strand the
-// user in a popup.
-function isExternalHref(href: string | undefined): boolean {
-  if (!href) return false;
-  return /^https?:\/\//i.test(href);
+// Chat content is untrusted. Relative hrefs (`/admin`, `../foo`, `#section`)
+// would otherwise resolve against the current origin and silently navigate
+// the user away inside the app. Limit clickable links to an explicit safe
+// scheme allow-list — http(s) and mailto — and render anything else as
+// inert text so the user can still see the literal URL but cannot be
+// hijacked into a same-origin navigation by an agent message.
+function classifyHref(href: string | undefined): 'http' | 'mailto' | 'inert' {
+  if (!href) return 'inert';
+  if (/^https?:\/\//i.test(href)) return 'http';
+  if (/^mailto:/i.test(href)) return 'mailto';
+  return 'inert';
 }
 
 export function MarkdownMessage({ content }: MarkdownMessageProps) {
@@ -49,18 +53,30 @@ export function MarkdownMessage({ content }: MarkdownMessageProps) {
           ol: ({ children }) => <ol className="v10-md-ol">{children}</ol>,
           li: ({ children }) => <li className="v10-md-li">{children}</li>,
           a: ({ href, children }) => {
-            const external = isExternalHref(href);
-            return external
-              ? (
+            const kind = classifyHref(href);
+            if (kind === 'http') {
+              return (
                 <a className="v10-md-link" href={href} target="_blank" rel="noopener noreferrer">
                   {children}
                 </a>
-              )
-              : (
+              );
+            }
+            if (kind === 'mailto') {
+              return (
                 <a className="v10-md-link" href={href}>
                   {children}
                 </a>
               );
+            }
+            // Relative / fragment / javascript:/data: hrefs from untrusted
+            // chat content render as inert text so an agent can't silently
+            // navigate the user away inside the app. The literal URL is
+            // exposed via `title` so the user can still inspect it.
+            return (
+              <span className="v10-md-link v10-md-link-inert" title={href}>
+                {children}
+              </span>
+            );
           },
           blockquote: ({ children }) => <blockquote className="v10-md-blockquote">{children}</blockquote>,
           hr: () => <hr className="v10-md-hr" />,

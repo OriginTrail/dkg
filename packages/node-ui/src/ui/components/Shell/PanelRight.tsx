@@ -1446,7 +1446,14 @@ function NetworkPeerGroup(props: {
           {peers.length === 0 ? (
             <div className="v10-agent-empty-state">{emptyMessage}</div>
           ) : (
-            peers.map((agent) => <NetworkPeerCard key={agent.peerId} agent={agent} />)
+            // Key on the same identity used for dedupe upstream
+            // (agentUri, falling back to peerId). After the BNlko fix,
+            // distinct agents sharing a peerId now render as separate
+            // cards — keying on peerId alone would collide and cause
+            // React to reuse the wrong card across re-renders.
+            peers.map((agent) => (
+              <NetworkPeerCard key={agent.agentUri || agent.peerId} agent={agent} />
+            ))
           )}
         </div>
       )}

@@ -1957,6 +1957,17 @@ button:focus:not(:focus-visible) { outline: none; }
   word-break: break-word;
 }
 .v10-md-link:hover { text-decoration: none; }
+.v10-md-link-inert {
+  /* Inert sibling of .v10-md-link: relative / unsupported-scheme hrefs
+     from untrusted chat content render as a span (not <a>), so the user
+     can read the link text but can't be silently navigated by it.
+     Dotted underline keeps the affordance honest. */
+  color: var(--text-secondary);
+  text-decoration: underline dotted;
+  text-decoration-skip-ink: none;
+  text-underline-offset: 2px;
+  cursor: help;
+}
 .v10-md-blockquote {
   margin: 6px 0;
   padding: 4px 12px;
