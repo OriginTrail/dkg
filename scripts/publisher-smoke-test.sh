@@ -14,7 +14,7 @@ Example:
 Optional env vars:
   DKG_HOME=/tmp/dkg-home        Use a custom DKG home (defaults to a temp dir)
   START_DAEMON=1                Start `dkg start` in the background for the smoke
-  SEED_JOB=1                    Seed a real workspace operation + async publisher job
+  SEED_JOB=1                    Seed a real share operation + async publisher job
 EOF
   exit 1
 fi
@@ -64,7 +64,7 @@ fi
 
 if [[ "$SEED_JOB" == "1" ]]; then
   echo
-  echo "== Seeding a workspace operation and async publisher job =="
+  echo "== Seeding a share operation and async publisher job =="
   export SMOKE_PRIVATE_KEY="$PRIVATE_KEY"
   node --input-type=module <<'EOF'
 import { join } from 'node:path';
@@ -99,7 +99,7 @@ const write = await publisher.writeToWorkspace('music-social', [
 const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
 const jobId = await asyncPublisher.lift({
   workspaceId: 'workspace-main',
-  workspaceOperationId: write.workspaceOperationId,
+  shareOperationId: write.shareOperationId,
   roots: ['urn:local:/rihana'],
   contextGraphId: 'music-social',
   namespace: 'aloha',

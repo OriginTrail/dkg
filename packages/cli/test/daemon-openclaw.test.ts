@@ -1571,6 +1571,62 @@ describe('OpenClaw persist-turn validation', () => {
     expect(queryCalls).toHaveLength(0);
   });
 
+  it('does not let extraction status authorize Markdown metadata without durable _meta verification', async () => {
+    const now = new Date();
+    const startedAt = new Date(now.getTime() - 1000).toISOString();
+    const completedAt = now.toISOString();
+    const fileHash = `sha256:${'a'.repeat(64)}`;
+    const attachmentRefs = [{
+      assertionUri: 'did:dkg:context-graph:cg1/assertion/chat-doc',
+      fileHash,
+      contextGraphId: 'cg1',
+      fileName: 'chat-doc.md',
+      detectedContentType: 'text/markdown',
+      extractionStatus: 'completed' as const,
+      markdownHash: fileHash,
+      markdownForm: `urn:dkg:file:${fileHash}`,
+    }];
+    const queryCalls: unknown[][] = [];
+    const store = {
+      query: async (...args: unknown[]) => {
+        queryCalls.push(args);
+        const sparql = String(args[0]);
+        if (sparql.includes('SELECT ?fileHash')) {
+          return {
+            bindings: [{
+              fileHash: `"${fileHash}"`,
+              sourceFileName: '"chat-doc.md"',
+            }],
+          };
+        }
+        if (sparql.includes('SELECT ?markdownForm')) {
+          return {
+            bindings: [{ markdownForm: `urn:dkg:file:${fileHash}` }],
+          };
+        }
+        return { bindings: [] };
+      },
+    };
+    const extractionStatus = new Map([
+      ['did:dkg:context-graph:cg1/assertion/chat-doc', {
+        status: 'completed',
+        fileHash,
+        fileName: 'chat-doc.md',
+        detectedContentType: 'text/markdown',
+        pipelineUsed: 'text/markdown',
+        tripleCount: 42,
+        rootEntity: 'did:dkg:context-graph:cg1/assertion/chat-doc',
+        startedAt,
+        completedAt,
+      }],
+    ]);
+
+    await expect(
+      verifyOpenClawAttachmentRefsProvenance({ store } as any, extractionStatus as any, attachmentRefs),
+    ).resolves.toBeUndefined();
+    expect(queryCalls).toHaveLength(2);
+  });
+
   it('accepts sub-graph attachment refs backed by extraction status records without querying the store', async () => {
     const now = new Date();
     const startedAt = new Date(now.getTime() - 1000).toISOString();
@@ -1632,6 +1688,37 @@ describe('OpenClaw persist-turn validation', () => {
     expect(String(queryCalls[0][0])).toContain('GRAPH <did:dkg:context-graph:cg1/_meta>');
     expect(String(queryCalls[0][0])).not.toContain('did:dkg:context-graph:cg1/decisions/_meta');
     expect(String(queryCalls[0][0])).toContain('<did:dkg:context-graph:cg1/decisions/assertion/0xAgent/chat-doc>');
+  });
+
+  it('rejects completed attachment refs backed by skipped durable metadata after cache expiry', async () => {
+    const attachmentRefs = [{
+      assertionUri: 'did:dkg:context-graph:cg1/assertion/chat-doc',
+      fileHash: 'sha256:abc123',
+      contextGraphId: 'cg1',
+      fileName: 'chat-doc.bin',
+      detectedContentType: 'application/octet-stream',
+      extractionStatus: 'completed' as const,
+    }];
+    const queryCalls: unknown[][] = [];
+    const store = {
+      query: async (...args: unknown[]) => {
+        queryCalls.push(args);
+        return {
+          bindings: [{
+            fileHash: '"sha256:abc123"',
+            contentType: '"application/octet-stream"',
+            sourceFileName: '"chat-doc.bin"',
+            extractionStatus: '"skipped"',
+          }],
+        };
+      },
+    };
+
+    await expect(
+      verifyOpenClawAttachmentRefsProvenance({ store } as any, new Map(), attachmentRefs),
+    ).resolves.toBeUndefined();
+    expect(queryCalls).toHaveLength(1);
+    expect(String(queryCalls[0][0])).toContain('dkg.io/ontology/extractionStatus');
   });
 
   it('unescapes RDF string literals before comparing stored source file names', async () => {

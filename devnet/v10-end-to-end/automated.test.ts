@@ -20,7 +20,9 @@
  *             Publish a KC via the CLI through a node whose op-wallet
  *             is registered as an authorized agent on a fresh PCA.
  *             Asserts the on-chain merkle root, author attestation
- *             (KC.author == op-wallet), and that NFT.epochSpent grew.
+ *             (KC.author == op-wallet), and that NFT.windowSpent grew
+ *             for the current billing window (lazy-settlement model:
+ *             spend is bucketed by billing-window index, NOT chain epoch).
  *
  *   Phase 3 — V10 NFT-keyed conviction-staking lifecycle.
  *             Mint TRAC to a fresh delegator, approve StakingV10,
@@ -356,7 +358,9 @@ async function detectDevnet(): Promise<DevnetState | null> {
       'function createAccount(uint96) external returns (uint256)',
       'function registerAgent(uint256, address) external',
       'function agentToAccountId(address) view returns (uint256)',
-      'function epochSpent(uint256, uint40) view returns (uint96)',
+      'function windowSpent(uint256, uint40) view returns (uint96)',
+      'function getCurrentBillingWindow(uint256) view returns (uint40)',
+      'function settle(uint256) external',
     ],
     provider,
   );
@@ -803,12 +807,12 @@ describe('V10 chain — combined end-to-end devnet validation', () => {
   //
   // Mirrors mode (a) of the agent-provenance runbook: edge node 5 publishes
   // through core1's PCA (DKGPublishingConvictionNFT). Asserts attribution
-  // flowed to core1, NFT.epochSpent grew, and the on-chain merkle root
+  // flowed to core1, NFT.windowSpent grew, and the on-chain merkle root
   // author is one of the edge's op wallets. This must run AFTER phase 1
   // (RS) — see the design note in the file-level docstring.
   // =========================================================================
   it(
-    'phase 2: publish via PCA-discounted path; KC.author = op-wallet, NFT.epochSpent grows',
+    'phase 2: publish via PCA-discounted path; KC.author = op-wallet, NFT.windowSpent grows',
     async () => {
       const s = state.v!;
       const core1 = s.nodes[1]!;
@@ -816,8 +820,19 @@ describe('V10 chain — combined end-to-end devnet validation', () => {
       if (core1.identityId === 0n) throw new Error('core1 has no identity');
 
       const accountId = await ensurePcaAccountForOpWallets(s, edge);
+      // Lazy-settlement bookkeeping is bucketed by billing-window index
+      // (0-based, relative to the account's `createdAtTimestamp`), NOT by
+      // chain epoch — see DKGPublishingConvictionNFT.windowSpent docs. Snap
+      // before+after across the current window and the one immediately
+      // following it so a tx that lands across a window boundary still
+      // counts as growth.
       const epoch: bigint = await s.chronos.getCurrentEpoch();
-      const beforeSpent: bigint = await s.nft.epochSpent(accountId, epoch);
+      const beforeWindow: bigint = BigInt(
+        await s.nft.getCurrentBillingWindow(accountId),
+      );
+      const beforeSpent: bigint =
+        (await s.nft.windowSpent(accountId, beforeWindow)) +
+        (await s.nft.windowSpent(accountId, beforeWindow + 1n));
       const beforeEps: bigint =
         await s.eps.getNodeEpochProducedKnowledgeValue(
           core1.identityId,
@@ -840,7 +855,15 @@ describe('V10 chain — combined end-to-end devnet validation', () => {
       );
       expect(matchesOpWallet).toBe(true);
 
-      const afterSpent: bigint = await s.nft.epochSpent(accountId, epoch);
+      const afterWindow: bigint = BigInt(
+        await s.nft.getCurrentBillingWindow(accountId),
+      );
+      const afterSpent: bigint =
+        (await s.nft.windowSpent(accountId, beforeWindow)) +
+        (await s.nft.windowSpent(accountId, beforeWindow + 1n)) +
+        (afterWindow > beforeWindow + 1n
+          ? await s.nft.windowSpent(accountId, afterWindow)
+          : 0n);
       expect(afterSpent - beforeSpent).toBeGreaterThan(0n);
       const afterEps: bigint = await s.eps.getNodeEpochProducedKnowledgeValue(
         core1.identityId,
@@ -850,7 +873,8 @@ describe('V10 chain — combined end-to-end devnet validation', () => {
 
       console.log(
         `phase 2 PASS: kcId=${result.kcId}, author=${onChainAuthor}, ` +
-          `epochSpent +${afterSpent - beforeSpent}, core1.eps +${afterEps - beforeEps}`,
+          `windowSpent +${afterSpent - beforeSpent} (window ${beforeWindow}→${afterWindow}), ` +
+          `core1.eps +${afterEps - beforeEps}`,
       );
     },
     240_000,

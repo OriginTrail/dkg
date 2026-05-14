@@ -82,7 +82,7 @@ export interface BenchmarkClient {
   sharedMemoryWrite(
     contextGraphId: string,
     quads: BenchmarkPayload['quads'],
-  ): Promise<{ workspaceOperationId?: string; shareOperationId?: string }>;
+  ): Promise<{ shareOperationId?: string }>;
   publishFromSharedMemory(
     contextGraphId: string,
     selection: 'all' | { rootEntities: string[] },

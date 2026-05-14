@@ -128,7 +128,7 @@ export default defineSuite({
         beforeIteration: async () => {
           asyncPayload = createPayload(config, `esbench-async-${sequence++}`, 1, 'async', false);
           const prepared = await asyncClient.sharedMemoryWrite(config.contextGraphId, asyncPayload.quads);
-          asyncShareOperationId = prepared.shareOperationId ?? prepared.workspaceOperationId;
+          asyncShareOperationId = prepared.shareOperationId;
         },
         afterIteration: () => {
           asyncPayload = undefined;
@@ -146,8 +146,8 @@ export default defineSuite({
       async () => {
         const payload = requirePayload(uploadPayload, 'upload payload to local working memory');
         const prepared = await uploadClient.writeWorkingMemory(config.contextGraphId, payload.quads);
-        if (!prepared.workspaceOperationId) {
-          throw new Error('working-memory upload did not return a workspace operation id');
+        if (!prepared.shareOperationId) {
+          throw new Error('working-memory upload did not return a share operation id');
         }
       },
       {

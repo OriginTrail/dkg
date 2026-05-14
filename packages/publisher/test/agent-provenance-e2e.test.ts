@@ -302,7 +302,7 @@ describe('Diagram 3 — PCA-discounted vs full-fee cost coverage', () => {
     expect(before - after).toBeGreaterThan(0n);
   });
 
-  it('PCA branch: msg.sender registered as agent → epochSpent grows, msg.sender TRAC unchanged', async () => {
+  it('PCA branch: msg.sender registered as agent → windowSpent grows, msg.sender TRAC unchanged', async () => {
     // Admin wallet (separate from CORE_OP so we don't collide with other tests
     // that use CORE_OP) creates an NFT-based PCA and registers CORE_OP — the
     // publisher's submitter EOA — as a registered agent. When publisher.publish
@@ -317,7 +317,8 @@ describe('Diagram 3 — PCA-discounted vs full-fee cost coverage', () => {
         'function createAccount(uint96 committedTRAC) external returns (uint256)',
         'function registerAgent(uint256 accountId, address agent) external',
         'function agentToAccountId(address) view returns (uint256)',
-        'function epochSpent(uint256 accountId, uint40 epoch) view returns (uint96)',
+        'function accounts(uint256) view returns (uint96,uint40,uint40,uint40,uint40,uint16,uint16)',
+        'function windowSpent(uint256 accountId, uint40 billingWindow) view returns (uint96)',
       ],
       admin,
     );
@@ -346,9 +347,22 @@ describe('Diagram 3 — PCA-discounted vs full-fee cost coverage', () => {
     const accountId: bigint = await pca.agentToAccountId(submitter.address);
     expect(accountId).toBeGreaterThan(0n);
 
-    const epoch: bigint = await chronos().getCurrentEpoch();
+    const chronosContract = new ethers.Contract(
+      chronosAddress,
+      ['function epochLength() view returns (uint256)'],
+      provider,
+    );
+    const [, , , createdAtTimestamp] = await pca.accounts(accountId);
+    const epochLength: bigint = await chronosContract.epochLength();
+    const beforeTimestamp = BigInt((await provider.getBlock('latest'))!.timestamp);
+    const beforeBillingWindow = (beforeTimestamp - BigInt(createdAtTimestamp)) / epochLength;
+
     const beforeSubmitter: bigint = await trac.balanceOf(submitter.address);
-    const beforeSpent: bigint = await pca.epochSpent(accountId, epoch);
+    const beforeSpentWindow: bigint = await pca.windowSpent(accountId, beforeBillingWindow);
+    const beforeSpentNextWindow: bigint = await pca.windowSpent(
+      accountId,
+      beforeBillingWindow + 1n,
+    );
 
     const publisher = makePublisher();
     const result = await publishSealed(publisher, {
@@ -359,11 +373,18 @@ describe('Diagram 3 — PCA-discounted vs full-fee cost coverage', () => {
     expect(result.status).toBe('confirmed');
 
     const afterSubmitter: bigint = await trac.balanceOf(submitter.address);
-    const afterSpent: bigint = await pca.epochSpent(accountId, epoch);
+    const afterSpentWindow: bigint = await pca.windowSpent(accountId, beforeBillingWindow);
+    const afterSpentNextWindow: bigint = await pca.windowSpent(
+      accountId,
+      beforeBillingWindow + 1n,
+    );
 
-    // PCA epoch-spent must increase (discount drawn); submitter TRAC unchanged
+    // PCA epoch-spent must increase in the active billing window (or in the
+    // next window if the tx crosses the boundary); submitter TRAC unchanged
     // (committed TRAC was paid at createAccount, not per-publish).
-    expect(afterSpent - beforeSpent).toBeGreaterThan(0n);
+    const beforeSpentTotal = beforeSpentWindow + beforeSpentNextWindow;
+    const afterSpentTotal = afterSpentWindow + afterSpentNextWindow;
+    expect(afterSpentTotal - beforeSpentTotal).toBeGreaterThan(0n);
     expect(beforeSubmitter).toBe(afterSubmitter);
   });
 });

@@ -2,6 +2,7 @@ import type { LiftJob, LiftJobBroadcast, LiftJobFinalizationMetadata, LiftJobInc
 import type { PublishOptions, PublishResult } from './publisher.js';
 import type { AsyncLiftPublishFailureInput } from './async-lift-publish-result.js';
 import type { AsyncPreparedPublishPayload, LiftResolvedPublishSlice } from './async-lift-publish-options.js';
+import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
 
 export interface AsyncLiftPublisher {
   lift(request: LiftRequest): Promise<string>;
@@ -45,4 +46,5 @@ export interface AsyncLiftPublisherConfig {
   chainRecoveryResolver?: AsyncLiftPublisherRecoveryResolver;
   publishExecutor?: (input: AsyncLiftPublishExecutionInput) => Promise<PublishResult>;
   resolvedSliceOverrides?: Partial<LiftResolvedPublishSlice>;
+  publicSnapshotStore?: WorkspacePublicSnapshotStore;
 }

@@ -653,6 +653,7 @@ export function isValidOpenClawPersistTurnPayload(payload: {
 
 export interface OpenClawAttachmentRef {
   assertionUri: string;
+  assertionName?: string;
   fileHash: string;
   contextGraphId: string;
   fileName: string;
@@ -660,6 +661,9 @@ export interface OpenClawAttachmentRef {
   extractionStatus?: 'completed';
   tripleCount?: number;
   rootEntity?: string;
+  mdIntermediateHash?: string;
+  markdownHash?: string;
+  markdownForm?: string;
 }
 
 export interface OpenClawAttachmentImportResult {
@@ -685,6 +689,9 @@ export function normalizeOpenClawAttachmentRef(raw: unknown): OpenClawAttachment
   if (!assertionUri || !fileHash || !contextGraphId || !fileName) return null;
 
   const normalized: OpenClawAttachmentRef = { assertionUri, fileHash, contextGraphId, fileName };
+  if (typeof raw.assertionName === 'string' && raw.assertionName.trim()) {
+    normalized.assertionName = raw.assertionName.trim();
+  }
   if (typeof raw.detectedContentType === 'string' && raw.detectedContentType.trim()) {
     normalized.detectedContentType = raw.detectedContentType.trim();
   }
@@ -698,6 +705,15 @@ export function normalizeOpenClawAttachmentRef(raw: unknown): OpenClawAttachment
   }
   if (typeof raw.rootEntity === 'string' && raw.rootEntity.trim()) {
     normalized.rootEntity = raw.rootEntity.trim();
+  }
+  if (typeof raw.mdIntermediateHash === 'string' && raw.mdIntermediateHash.trim()) {
+    normalized.mdIntermediateHash = raw.mdIntermediateHash.trim();
+  }
+  if (typeof raw.markdownHash === 'string' && raw.markdownHash.trim()) {
+    normalized.markdownHash = raw.markdownHash.trim();
+  }
+  if (typeof raw.markdownForm === 'string' && raw.markdownForm.trim()) {
+    normalized.markdownForm = raw.markdownForm.trim();
   }
   return normalized;
 }
@@ -1151,6 +1167,48 @@ export function stripOpenClawAttachmentLiteral(raw: string | undefined): string 
   return match ? unescapeOpenClawAttachmentLiteralBody(match[1]) : raw;
 }
 
+function openClawBindingValue(cell: unknown): string {
+  if (typeof cell === 'string') return cell;
+  if (cell && typeof cell === 'object' && 'value' in cell) {
+    const value = (cell as { value?: unknown }).value;
+    return typeof value === 'string' ? value : '';
+  }
+  return '';
+}
+
+function stripOpenClawBindingLiteral(cell: unknown): string {
+  return stripOpenClawAttachmentLiteral(openClawBindingValue(cell)).trim();
+}
+
+function normalizeOpenClawBindingIri(cell: unknown): string {
+  return openClawBindingValue(cell).replace(/^<|>$/g, '').trim();
+}
+
+function openClawHashFromFileUrn(value: string | undefined): string | undefined {
+  const prefix = 'urn:dkg:file:';
+  if (!value?.startsWith(prefix)) return undefined;
+  const hash = value.slice(prefix.length);
+  return /^(?:sha256:|keccak256:)?[0-9a-f]{64}$/i.test(hash) ? hash : undefined;
+}
+
+function openClawMarkdownHashFor(
+  fileHash: string,
+  contentType: string | undefined,
+  mdIntermediateHash: string | undefined,
+): string | undefined {
+  return mdIntermediateHash
+    ?? (normalizeDetectedContentType(contentType) === 'text/markdown' ? fileHash : undefined);
+}
+
+function openClawAssertionNameFromUri(assertionUri: string): string | undefined {
+  const marker = '/assertion/';
+  const index = assertionUri.indexOf(marker);
+  if (index < 0) return undefined;
+  const tail = assertionUri.slice(index + marker.length);
+  const slash = tail.indexOf('/');
+  return slash >= 0 ? tail.slice(slash + 1) : undefined;
+}
+
 export function parseOpenClawAttachmentTripleCount(raw: string | undefined): number | undefined {
   const value = stripOpenClawAttachmentLiteral(raw).trim();
   if (!value) return undefined;
@@ -1188,7 +1246,36 @@ export function extractionRecordMatchesOpenClawAttachmentRef(
   if (ref.extractionStatus && ref.extractionStatus !== 'completed') return false;
   if (ref.tripleCount != null && ref.tripleCount !== record.tripleCount) return false;
   if (ref.rootEntity && ref.rootEntity !== record.rootEntity) return false;
+  if (ref.mdIntermediateHash && ref.mdIntermediateHash !== record.mdIntermediateHash) return false;
+  const markdownHash = openClawMarkdownHashFor(
+    record.fileHash,
+    record.detectedContentType,
+    record.mdIntermediateHash,
+  );
+  if (ref.markdownHash && ref.markdownHash !== markdownHash) return false;
+  if (ref.markdownForm && openClawHashFromFileUrn(ref.markdownForm) !== markdownHash) return false;
   return true;
+}
+
+function verifiedOpenClawAttachmentRefFromRecord(
+  ref: OpenClawAttachmentRef,
+  record: ExtractionStatusRecord,
+): OpenClawAttachmentRef {
+  const markdownHash = openClawMarkdownHashFor(
+    record.fileHash,
+    record.detectedContentType,
+    record.mdIntermediateHash,
+  );
+  return {
+    ...ref,
+    assertionUri: ref.assertionUri,
+    contextGraphId: ref.contextGraphId,
+    fileName: record.fileName ?? ref.fileName,
+    fileHash: record.fileHash,
+    extractionStatus: 'completed',
+    ...(record.mdIntermediateHash ? { mdIntermediateHash: record.mdIntermediateHash } : {}),
+    ...(markdownHash ? { markdownHash, markdownForm: `urn:dkg:file:${markdownHash}` } : {}),
+  };
 }
 
 export async function verifyOpenClawAttachmentRefsProvenance(
@@ -1198,20 +1285,31 @@ export async function verifyOpenClawAttachmentRefsProvenance(
 ): Promise<OpenClawAttachmentRef[] | undefined> {
   if (!attachmentRefs) return attachmentRefs;
 
+  const verified: OpenClawAttachmentRef[] = [];
   for (const ref of attachmentRefs) {
     if (!isSafeIri(ref.assertionUri)) return undefined;
     if (ref.rootEntity && !isSafeIri(ref.rootEntity)) return undefined;
+    if (ref.markdownForm && !isSafeIri(ref.markdownForm)) return undefined;
     if (!isOpenClawAttachmentAssertionUriForContextGraph(ref.assertionUri, ref.contextGraphId)) return undefined;
 
     const extractionRecord = getExtractionStatusRecord(extractionStatus, ref.assertionUri);
     if (extractionRecord) {
       if (!extractionRecordMatchesOpenClawAttachmentRef(ref, extractionRecord)) return undefined;
-      if (extractionRecord.fileName === ref.fileName) continue;
+      const recordMarkdownHash = openClawMarkdownHashFor(
+        extractionRecord.fileHash,
+        extractionRecord.detectedContentType,
+        extractionRecord.mdIntermediateHash,
+      );
+      const refHasMarkdownMetadata = Boolean(ref.mdIntermediateHash || ref.markdownHash || ref.markdownForm);
+      if (!recordMarkdownHash && !refHasMarkdownMetadata) {
+        verified.push(verifiedOpenClawAttachmentRefFromRecord(ref, extractionRecord));
+        continue;
+      }
     }
 
     const metaGraph = contextGraphMetaUri(ref.contextGraphId);
     const metaResult = await agent.store.query(`
-      SELECT ?fileHash ?contentType ?rootEntity ?extractionStatus ?tripleCount ?sourceFileName WHERE {
+      SELECT ?fileHash ?contentType ?rootEntity ?extractionStatus ?tripleCount ?sourceFileName ?mdIntermediateHash WHERE {
         GRAPH <${metaGraph}> {
           <${ref.assertionUri}> <http://dkg.io/ontology/sourceFileHash> ?fileHash .
           OPTIONAL { <${ref.assertionUri}> <http://dkg.io/ontology/sourceContentType> ?contentType }
@@ -1219,15 +1317,16 @@ export async function verifyOpenClawAttachmentRefsProvenance(
           OPTIONAL { <${ref.assertionUri}> <http://dkg.io/ontology/extractionStatus> ?extractionStatus }
           OPTIONAL { <${ref.assertionUri}> <http://dkg.io/ontology/structuralTripleCount> ?tripleCount }
           OPTIONAL { <${ref.assertionUri}> <http://dkg.io/ontology/sourceFileName> ?sourceFileName }
+          OPTIONAL { <${ref.assertionUri}> <http://dkg.io/ontology/mdIntermediateHash> ?mdIntermediateHash }
         }
       }
       LIMIT 1
-    `) as { bindings?: Array<Record<string, string>> };
+    `) as { bindings?: Array<Record<string, unknown>> };
     const binding = metaResult?.bindings?.[0];
     if (!binding) return undefined;
 
-    if (stripOpenClawAttachmentLiteral(binding.fileHash ?? '') !== ref.fileHash) return undefined;
-    const storedContentType = stripOpenClawAttachmentLiteral(binding.contentType ?? '').trim();
+    if (stripOpenClawBindingLiteral(binding.fileHash) !== ref.fileHash) return undefined;
+    const storedContentType = stripOpenClawBindingLiteral(binding.contentType);
     if (
       ref.detectedContentType &&
       storedContentType &&
@@ -1235,24 +1334,55 @@ export async function verifyOpenClawAttachmentRefsProvenance(
     ) {
       return undefined;
     }
-    const storedExtractionStatus = stripOpenClawAttachmentLiteral(binding.extractionStatus ?? '').trim();
-    if (storedExtractionStatus && storedExtractionStatus !== 'completed') return undefined;
     if (ref.extractionStatus && ref.extractionStatus !== 'completed') return undefined;
+    const storedExtractionStatus = stripOpenClawBindingLiteral(binding.extractionStatus);
+    if (storedExtractionStatus && storedExtractionStatus !== 'completed') return undefined;
 
-    const storedTripleCount = parseOpenClawAttachmentTripleCount(binding.tripleCount ?? '');
+    const storedTripleCount = parseOpenClawAttachmentTripleCount(openClawBindingValue(binding.tripleCount));
     if (ref.tripleCount != null && storedTripleCount != null && ref.tripleCount !== storedTripleCount) {
       return undefined;
     }
-    const storedFileName = stripOpenClawAttachmentLiteral(binding.sourceFileName ?? '').trim();
+    const storedFileName = stripOpenClawBindingLiteral(binding.sourceFileName);
     if (storedFileName && storedFileName !== ref.fileName) return undefined;
 
-    const storedRootEntity = typeof binding.rootEntity === 'string'
-      ? binding.rootEntity.replace(/[<>]/g, '').trim()
-      : '';
+    const storedRootEntity = normalizeOpenClawBindingIri(binding.rootEntity);
     if (ref.rootEntity && storedRootEntity && ref.rootEntity !== storedRootEntity) return undefined;
+
+    const mdIntermediateHash = stripOpenClawBindingLiteral(binding.mdIntermediateHash) || undefined;
+    if (ref.mdIntermediateHash && ref.mdIntermediateHash !== mdIntermediateHash) return undefined;
+    const markdownFormResult = await agent.store.query(`
+      SELECT DISTINCT ?markdownForm WHERE {
+        GRAPH <${ref.assertionUri}> {
+          ?document <http://dkg.io/ontology/markdownForm> ?markdownForm .
+        }
+      }
+    `) as { bindings?: Array<Record<string, unknown>> };
+    const markdownHash = openClawMarkdownHashFor(ref.fileHash, storedContentType, mdIntermediateHash);
+    const storedMarkdownForms = (markdownFormResult?.bindings ?? [])
+      .map((storedBinding) => normalizeOpenClawBindingIri(storedBinding.markdownForm))
+      .filter(Boolean);
+    for (const storedMarkdownForm of storedMarkdownForms) {
+      const markdownFormHash = openClawHashFromFileUrn(storedMarkdownForm);
+      if (!markdownFormHash || !markdownHash || markdownFormHash !== markdownHash) return undefined;
+    }
+    if (ref.markdownHash && ref.markdownHash !== markdownHash) return undefined;
+    if (ref.markdownForm && (!markdownHash || openClawHashFromFileUrn(ref.markdownForm) !== markdownHash)) {
+      return undefined;
+    }
+
+    verified.push({
+      ...ref,
+      assertionUri: ref.assertionUri,
+      contextGraphId: ref.contextGraphId,
+      fileName: storedFileName || ref.fileName,
+      fileHash: ref.fileHash,
+      extractionStatus: 'completed',
+      ...(mdIntermediateHash ? { mdIntermediateHash } : {}),
+      ...(markdownHash ? { markdownHash, markdownForm: `urn:dkg:file:${markdownHash}` } : {}),
+    });
   }
 
-  return attachmentRefs;
+  return verified;
 }
 
 function extractionRecordMatchesOpenClawAttachmentImportResult(

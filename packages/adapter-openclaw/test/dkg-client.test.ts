@@ -510,6 +510,80 @@ describe('DkgDaemonClient', () => {
     expect(body).not.toHaveProperty('sparql');
   });
 
+  it('resolveImportArtifact POSTs the completed ref to the resolver route', async () => {
+    fetchResponses.push(new Response(JSON.stringify({ artifact: { assertionUri: 'urn:assertion' } }), { status: 200 }));
+
+    await client.resolveImportArtifact({
+      contextGraphId: 'ctx',
+      assertionUri: 'did:dkg:context-graph:ctx/assertion/peer/imported',
+      fileHash: `sha256:${'a'.repeat(64)}`,
+      subGraphName: 'protocols',
+    });
+
+    const [url, opts] = fetchCalls[0];
+    expect(url).toBe('http://localhost:9200/api/assertion/import-artifact/resolve');
+    expect(opts?.method).toBe('POST');
+    expect(JSON.parse(opts?.body as string)).toEqual({
+      contextGraphId: 'ctx',
+      assertionUri: 'did:dkg:context-graph:ctx/assertion/peer/imported',
+      fileHash: `sha256:${'a'.repeat(64)}`,
+      subGraphName: 'protocols',
+    });
+  });
+
+  it('readImportArtifactMarkdown POSTs maxBytes to the safe markdown read route', async () => {
+    fetchResponses.push(new Response(JSON.stringify({ markdown: '# Doc' }), { status: 200 }));
+
+    await client.readImportArtifactMarkdown({
+      contextGraphId: 'ctx',
+      assertionUri: 'did:dkg:context-graph:ctx/assertion/peer/imported',
+      maxBytes: 4096,
+    });
+
+    const [url, opts] = fetchCalls[0];
+    expect(url).toBe('http://localhost:9200/api/assertion/import-artifact/read-markdown');
+    expect(opts?.method).toBe('POST');
+    expect(JSON.parse(opts?.body as string)).toEqual({
+      contextGraphId: 'ctx',
+      assertionUri: 'did:dkg:context-graph:ctx/assertion/peer/imported',
+      maxBytes: 4096,
+    });
+  });
+
+  it('writeSemanticEnrichment POSTs semantic quads without promotion flags', async () => {
+    fetchResponses.push(new Response(JSON.stringify({ promoted: false, published: false }), { status: 200 }));
+
+    await client.writeSemanticEnrichment({
+      contextGraphId: 'ctx',
+      assertionUri: 'did:dkg:context-graph:ctx/assertion/peer/imported',
+      semanticQuads: [
+        { subject: 'urn:doc:1', predicate: 'http://schema.org/about', object: '"Topic"' },
+      ],
+      generationMethod: 'test-model',
+      agentIdentity: 'did:dkg:agent:test',
+      generatedAt: '2026-05-11T00:00:00.000Z',
+    });
+
+    const [url, opts] = fetchCalls[0];
+    expect(url).toBe('http://localhost:9200/api/assertion/semantic-enrichment/write');
+    expect(opts?.method).toBe('POST');
+    const body = JSON.parse(opts?.body as string);
+    expect(body).toEqual({
+      contextGraphId: 'ctx',
+      assertionUri: 'did:dkg:context-graph:ctx/assertion/peer/imported',
+      semanticQuads: [
+        { subject: 'urn:doc:1', predicate: 'http://schema.org/about', object: '"Topic"' },
+      ],
+      generationMethod: 'test-model',
+      agentIdentity: 'did:dkg:agent:test',
+      generatedAt: '2026-05-11T00:00:00.000Z',
+    });
+    expect(body).not.toHaveProperty('name');
+    expect(body).not.toHaveProperty('semanticAssertionName');
+    expect(body).not.toHaveProperty('promote');
+    expect(body).not.toHaveProperty('publish');
+  });
+
   it('getAssertionHistory hits /api/assertion/:name/history as GET with camelCase query params', async () => {
     fetchResponses.push(new Response(JSON.stringify({ createdAt: 't' }), { status: 200 }));
 

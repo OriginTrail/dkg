@@ -169,6 +169,14 @@ export {
   type AsyncLiftPublishFailureInput,
 } from './async-lift-publish-result.js';
 export { SharedMemoryHandler, WorkspaceHandler } from './workspace-handler.js';
+export {
+  FileWorkspacePublicSnapshotStore,
+  parseWorkspacePublicSnapshotNQuads,
+  serializeWorkspacePublicSnapshotQuads,
+  workspacePublicQuadsDigest,
+  type SharedMemoryPublicSnapshotStorageConfig,
+  type WorkspacePublicSnapshotStore,
+} from './workspace-snapshot-store.js';
 export { UpdateHandler } from './update-handler.js';
 export { ChainEventPoller, type ChainEventPollerConfig, type OnContextGraphCreated } from './chain-event-poller.js';
 export { AccessHandler, type AccessPolicy } from './access-handler.js';

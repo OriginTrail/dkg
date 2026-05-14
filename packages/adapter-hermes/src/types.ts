@@ -244,6 +244,7 @@ export interface HermesChannelMessage {
 
 export interface HermesChannelAttachmentRef {
   assertionUri: string;
+  assertionName?: string;
   fileHash: string;
   contextGraphId: string;
   fileName: string;
@@ -251,10 +252,14 @@ export interface HermesChannelAttachmentRef {
   extractionStatus?: 'completed';
   tripleCount?: number;
   rootEntity?: string;
+  mdIntermediateHash?: string;
+  markdownHash?: string;
+  markdownForm?: string;
 }
 
 export interface HermesChannelAttachmentImportResult {
   assertionUri: string;
+  assertionName?: string;
   fileHash: string;
   contextGraphId: string;
   fileName: string;

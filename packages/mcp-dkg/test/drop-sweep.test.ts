@@ -7,7 +7,7 @@
  *    NOT reappear in `tools/list` output. The bug-class-most-likely is a
  *    well-meaning re-registration during a future cycle ("oh that look
  *    useful, let me revive it") slipping past review because the surface
- *    was 21 before the change and 22 after. This test catches that at the
+ *    was 24 before the change and 25 after. This test catches that at the
  *    suite level, not at the surface-probe level (which is harder to
  *    enforce in CI without a daemon).
  *
@@ -82,8 +82,8 @@ describe('drop-sweep — none of the 10 W2-dropped tools reappear in tools/list'
     expect(server.tools.has(name)).toBe(false);
   });
 
-  it('registered surface contains exactly 21 tools (post-PR locked count)', () => {
-    expect(server.tools.size).toBe(21);
+  it('registered surface contains exactly 24 tools (post-PR locked count)', () => {
+    expect(server.tools.size).toBe(24);
   });
 });
 

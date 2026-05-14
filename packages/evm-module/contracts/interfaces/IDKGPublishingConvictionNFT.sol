@@ -37,24 +37,63 @@ interface IDKGPublishingConvictionNFT {
     ///      use try/catch to distinguish "no such account" from a live miss.
     function ownerOf(uint256 accountId) external view returns (address);
 
-    /// @notice Spend a publishing agent's conviction allowance for a base cost.
+    /// @notice Returns a conviction account tuple by id.
+    function accounts(
+        uint256 accountId
+    )
+        external
+        view
+        returns (
+            uint96 committedTRAC,
+            uint40 createdAtEpoch,
+            uint40 expiresAtEpoch,
+            uint40 createdAtTimestamp,
+            uint40 expiresAtTimestamp,
+            uint16 lockDurationEpochs,
+            uint16 discountBps,
+            uint16 lastSettledWindow,
+            bool fullySwept
+        );
+
+    /// @notice Spend a publishing agent's conviction allowance for a base
+    ///         cost and fund the published KC's epoch range from escrow.
     /// @dev Caller MUST be `KnowledgeAssetsV10` — the NFT gates this via Hub
     ///      lookup. The NFT resolves the paying account internally from
     ///      `agentToAccountId[publishingAgent]`, so KAV10 MUST NOT supply an
     ///      account id (N28 closure: removes victim-account-drain vector).
     ///
+    ///      `kcStartEpoch` / `kcEpochs` describe the published KC's
+    ///      lifetime: the discounted cost will be distributed across the
+    ///      chain epochs `[kcStartEpoch, kcStartEpoch + kcEpochs - 1]`
+    ///      (active sink). `kcEpochs` MUST be <= the account's
+    ///      `lockDurationEpochs` or the call reverts with
+    ///      `InvalidConvictionKcEpochs`.
+    ///
     ///      Reverts:
     ///      - `NoConvictionAccount(publishingAgent)` if agent has no account.
     ///      - `AccountExpired(accountId, expiresAt)` if account is past lock.
+    ///      - `InvalidConvictionKcEpochs(lockDurationEpochs, kcEpochs)` if
+    ///         `kcEpochs == 0` or exceeds the account lock window.
     ///      - `InsufficientAllowance(...)` if epoch + top-up cannot cover cost.
     ///      - `OnlyKnowledgeAssetsV10(caller)` if msg.sender is not KAV10.
     ///
-    ///      Does NOT move TRAC — TRAC is already in StakingStorage from the
+    ///      Does NOT physically move TRAC — TRAC is already in CSS from the
     ///      NFT's `createAccount`/`topUp` paths. This call only updates the
-    ///      per-epoch spent ledger and returns the discounted amount for
-    ///      caller-side accounting.
+    ///      `EpochStorage` accounting (active sink distribution + lazy
+    ///      passive-sink settlement of elapsed windows) and returns the
+    ///      discounted amount for caller-side accounting.
     function coverPublishingCost(
         address publishingAgent,
-        uint96 baseCost
+        uint96 baseCost,
+        uint40 kcStartEpoch,
+        uint40 kcEpochs
     ) external returns (uint96 discountedCost);
+
+    /// @notice Public lazy settlement entry point. Sweeps elapsed billing
+    ///         windows' unspent base remainder to the staker pool, and (if
+    ///         past `expiresAtTimestamp`) the post-expiry tail
+    ///         (`topUpBalance` + committed-amount dust). Idempotent —
+    ///         safe to call repeatedly; subsequent calls after the final
+    ///         sweep are no-ops.
+    function settle(uint256 accountId) external;
 }

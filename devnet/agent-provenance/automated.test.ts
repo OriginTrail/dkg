@@ -426,7 +426,8 @@ async function detectDevnet(): Promise<DevnetState | null> {
       'function createAccount(uint96) external returns (uint256)',
       'function registerAgent(uint256, address) external',
       'function agentToAccountId(address) view returns (uint256)',
-      'function epochSpent(uint256, uint40) view returns (uint96)',
+      'function windowSpent(uint256, uint40) view returns (uint96)',
+      'function getCurrentBillingWindow(uint256) view returns (uint40)',
     ],
     provider,
   );
@@ -521,10 +522,10 @@ describe('Agent provenance — automated 5-node devnet validation', () => {
   //   4. Assert:
   //      - publish status == confirmed
   //      - kcs.getLatestMerkleRootAuthor(kcId) == node5.submitter.address
-  //      - nft.epochSpent(accountId, currentEpoch) increased
+  //      - nft.windowSpent(accountId, currentBillingWindow) increased
   //      - eps.getNodeEpochProducedKnowledgeValue(core1.id, epoch) increased
   // =========================================================================
-  it('mode (a) — edge op-wallet on core1 PCA, attribution to core1, NFT epochSpent grows', async () => {
+  it('mode (a) — edge op-wallet on core1 PCA, attribution to core1, NFT windowSpent grows', async () => {
     const s = state.v!;
     const core1 = s.nodes[1]!;
     const edge = s.nodes[5]!;
@@ -532,9 +533,15 @@ describe('Agent provenance — automated 5-node devnet validation', () => {
 
     const accountId = await ensurePcaAccountForOpWallets(s, edge);
 
-    // 3. Snapshot pre-publish state.
+    // 3. Snapshot pre-publish state. Lazy-settlement keys spend by the
+    // billing-window index (0-based, relative to the account's
+    // createdAtTimestamp), NOT by chain epoch. Sum the current window plus
+    // the next one so a tx that straddles a window boundary still counts.
     const epoch: bigint = await s.chronos.getCurrentEpoch();
-    const beforeSpent: bigint = await s.nft.epochSpent(accountId, epoch);
+    const beforeWindow: bigint = BigInt(await s.nft.getCurrentBillingWindow(accountId));
+    const beforeSpent: bigint =
+      (await s.nft.windowSpent(accountId, beforeWindow)) +
+      (await s.nft.windowSpent(accountId, beforeWindow + 1n));
     const beforeEps: bigint = await s.eps.getNodeEpochProducedKnowledgeValue(core1.identityId, epoch);
     const beforeBalance = await sumOpBalances(s.token, edge);
 
@@ -554,7 +561,13 @@ describe('Agent provenance — automated 5-node devnet validation', () => {
     );
     expect(matchesAnyOpWallet).toBe(true);
 
-    const afterSpent: bigint = await s.nft.epochSpent(accountId, epoch);
+    const afterWindow: bigint = BigInt(await s.nft.getCurrentBillingWindow(accountId));
+    const afterSpent: bigint =
+      (await s.nft.windowSpent(accountId, beforeWindow)) +
+      (await s.nft.windowSpent(accountId, beforeWindow + 1n)) +
+      (afterWindow > beforeWindow + 1n
+        ? await s.nft.windowSpent(accountId, afterWindow)
+        : 0n);
     expect(afterSpent - beforeSpent).toBeGreaterThan(0n);
 
     const afterEps: bigint = await s.eps.getNodeEpochProducedKnowledgeValue(core1.identityId, epoch);

@@ -570,11 +570,9 @@ WHERE {
       return jsonResponse(res, 400, { error: '"localOnly" must be a boolean' });
     }
     const contextGraphId = parsed.contextGraphId;
-    if (!contextGraphId || !quads?.length) {
-      return jsonResponse(res, 400, {
-        error: 'Missing "contextGraphId" or "quads"',
-      });
-    }
+    if (!quads?.length)
+      return jsonResponse(res, 400, { error: 'Missing "quads"' });
+    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
     if (!validateOptionalSubGraphName(subGraphName, res)) return;
     const ctx = createOperationContext("share");
     tracker.start(ctx, {
@@ -590,6 +588,7 @@ WHERE {
           subGraphName,
           localOnly,
           operationCtx: ctx,
+          callerAgentAddress: requestAgentAddress,
         }),
       );
       tracker.complete(ctx, { tripleCount: quads.length });
@@ -603,7 +602,6 @@ WHERE {
       });
       return jsonResponse(res, 200, {
         shareOperationId: result?.shareOperationId,
-        workspaceOperationId: result?.shareOperationId,
         contextGraphId,
         graph: contextGraphSharedMemoryUri(contextGraphId, subGraphName),
         triplesWritten: quads.length,
@@ -958,7 +956,7 @@ WHERE {
         contextGraphId,
         quads,
         conditions,
-        { subGraphName, operationCtx: ctx },
+        { subGraphName, operationCtx: ctx, callerAgentAddress: requestAgentAddress },
       );
       tracker.complete(ctx, { tripleCount: quads.length });
       emitMemoryGraphChanged?.({
@@ -1137,7 +1135,12 @@ WHERE {
         tracker.start(ctx, { contextGraphId, details: { tripleCount: shareQuads.length, source: 'memory-turn', subGraphName } });
         try {
           await tracker.trackPhase(ctx, 'store', () =>
-            agent.share(contextGraphId, shareQuads, { subGraphName, localOnly: false, operationCtx: ctx }),
+            agent.share(contextGraphId, shareQuads, {
+              subGraphName,
+              localOnly: false,
+              operationCtx: ctx,
+              callerAgentAddress: requestAgentAddress,
+            }),
           );
           tracker.complete(ctx, { tripleCount: shareQuads.length });
         } catch (err: any) {

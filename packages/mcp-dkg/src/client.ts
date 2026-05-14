@@ -362,6 +362,70 @@ export class DkgClient {
     );
   }
 
+  /** Resolve deterministic metadata for a completed imported assertion. */
+  async resolveImportArtifact(args: {
+    contextGraphId: string;
+    assertionUri: string;
+    assertionName?: string;
+    fileHash?: string;
+    subGraphName?: string;
+  }): Promise<Record<string, unknown>> {
+    const body: Record<string, unknown> = {
+      contextGraphId: args.contextGraphId,
+    };
+    body.assertionUri = args.assertionUri;
+    if (args.assertionName) body.assertionName = args.assertionName;
+    if (args.fileHash) body.fileHash = args.fileHash;
+    if (args.subGraphName) body.subGraphName = args.subGraphName;
+    return this.request('POST', '/api/assertion/import-artifact/resolve', body);
+  }
+
+  /** Read Markdown for a completed import via content-addressed daemon storage. */
+  async readImportArtifactMarkdown(args: {
+    contextGraphId: string;
+    assertionUri: string;
+    assertionName?: string;
+    fileHash?: string;
+    subGraphName?: string;
+    maxBytes?: number;
+  }): Promise<Record<string, unknown>> {
+    const body: Record<string, unknown> = {
+      contextGraphId: args.contextGraphId,
+    };
+    body.assertionUri = args.assertionUri;
+    if (args.assertionName) body.assertionName = args.assertionName;
+    if (args.fileHash) body.fileHash = args.fileHash;
+    if (args.subGraphName) body.subGraphName = args.subGraphName;
+    if (args.maxBytes != null) body.maxBytes = args.maxBytes;
+    return this.request('POST', '/api/assertion/import-artifact/read-markdown', body);
+  }
+
+  /** Append model-derived semantic triples to the completed imported assertion. */
+  async writeSemanticEnrichment(args: {
+    contextGraphId: string;
+    assertionUri: string;
+    assertionName?: string;
+    fileHash?: string;
+    subGraphName?: string;
+    semanticQuads: Array<{ subject: string; predicate: string; object: string }>;
+    generationMethod?: string;
+    agentIdentity?: string;
+    generatedAt?: string;
+  }): Promise<Record<string, unknown>> {
+    const body: Record<string, unknown> = {
+      contextGraphId: args.contextGraphId,
+      semanticQuads: args.semanticQuads,
+    };
+    body.assertionUri = args.assertionUri;
+    if (args.assertionName) body.assertionName = args.assertionName;
+    if (args.fileHash) body.fileHash = args.fileHash;
+    if (args.subGraphName) body.subGraphName = args.subGraphName;
+    if (args.generationMethod) body.generationMethod = args.generationMethod;
+    if (args.agentIdentity) body.agentIdentity = args.agentIdentity;
+    if (args.generatedAt) body.generatedAt = args.generatedAt;
+    return this.request('POST', '/api/assertion/semantic-enrichment/write', body);
+  }
+
   /**
    * Lifecycle descriptor for an assertion: author, extraction status,
    * promotion state, timestamps. Returns 404 (`DkgHttpError`) when no

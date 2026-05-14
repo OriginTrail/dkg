@@ -2140,6 +2140,7 @@ describe('DkgChannelPlugin', () => {
     const attachmentRefs = [
       {
         assertionUri: 'did:dkg:context-graph:cg-1/assertion/chat-doc',
+        assertionName: 'chat-doc',
         fileHash: 'sha256:feedbeef',
         contextGraphId: 'cg-1',
         fileName: 'chat-doc.pdf',
@@ -2147,6 +2148,9 @@ describe('DkgChannelPlugin', () => {
         extractionStatus: 'completed' as const,
         tripleCount: 42,
         rootEntity: 'did:dkg:context-graph:cg-1/assertion/chat-doc',
+        mdIntermediateHash: 'sha256:mdhash',
+        markdownHash: 'sha256:mdhash',
+        markdownForm: 'urn:dkg:file:sha256:mdhash',
       },
     ];
     const mockRuntime = {
@@ -2188,9 +2192,16 @@ describe('DkgChannelPlugin', () => {
       AttachmentRefs: attachmentRefs,
     });
     expect(dispatched.ctx.BodyForAgent).toContain('fileHash="sha256:feedbeef"');
+    expect(dispatched.ctx.BodyForAgent).toContain('assertionName="chat-doc"');
     expect(dispatched.ctx.BodyForAgent).toContain('status="completed"');
     expect(dispatched.ctx.BodyForAgent).toContain('tripleCount=42');
     expect(dispatched.ctx.BodyForAgent).toContain('rootEntity="did:dkg:context-graph:cg-1/assertion/chat-doc"');
+    expect(dispatched.ctx.BodyForAgent).toContain('markdownHash="sha256:mdhash"');
+    expect(dispatched.ctx.BodyForAgent).toContain('dkg_import_artifact_read_markdown');
+    expect(dispatched.ctx.BodyForAgent).toContain('dkg_semantic_enrichment_write');
+    expect(dispatched.ctx.BodyForAgent).toContain('Use dkg_import_artifact_resolve only when you need to re-check artifact metadata');
+    expect(dispatched.ctx.BodyForAgent).not.toContain('resolve the artifact with dkg_import_artifact_resolve');
+    expect(dispatched.ctx.BodyForAgent).not.toContain('Keep deterministic import assertions separate');
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(storeSpy).toHaveBeenCalledWith(
       'openclaw:dkg-ui',

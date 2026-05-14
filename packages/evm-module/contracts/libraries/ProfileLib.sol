@@ -13,6 +13,13 @@ library ProfileLib {
         bytes nodeId;
         uint96 ask;
         OperatorFee[] operatorFees;
+        // Network State Registry (RFC 04 v0.3 / Issue #461). Appended to the
+        // tail of the struct so existing storage layouts in mappings stay
+        // backwards-compatible at the slot level: old keys read this as
+        // false until the operator opts in via Profile.updateRelayCapable.
+        // Multiaddrs are deliberately NOT stored on Profile — they live in
+        // per-round attestation KCs (RFC 04 §5.2).
+        bool relayCapable;
     }
 
     error IdentityAlreadyExists(uint72 identityId, address wallet);

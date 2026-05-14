@@ -81,7 +81,7 @@ export class MockBenchmarkClient implements BenchmarkClient {
   ) {
     const markerQuad = quads.find((quad) => quad.predicate === 'http://schema.org/identifier');
     if (markerQuad) this.markersByRoot.set(markerQuad.subject, markerQuad.object);
-    return { workspaceOperationId: `share-${this.markersByRoot.size}` };
+    return { shareOperationId: `share-${this.markersByRoot.size}` };
   }
 
   async publishFromSharedMemory(
