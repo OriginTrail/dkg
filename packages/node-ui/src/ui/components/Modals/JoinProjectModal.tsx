@@ -129,6 +129,83 @@ export function validateInvite(invite: ParsedInvite): string | null {
   return null;
 }
 
+/**
+ * Render the user-visible error string for a failed /request-join call.
+ *
+ * The daemon's `POST /api/context-graph/{id}/request-join` returns a 502
+ * with `{ error, errors? }` when `forwardJoinRequest` couldn't deliver:
+ * `errors[]` carries the per-peer reason (e.g.
+ * `"<peerTag>: verifyAgentDelegation: scope mismatch (expected … got …)"`
+ * when the curator received the request but rejected it, or
+ * `"<peerTag>: dial failed (…)"` when the transport never landed). The
+ * previous UI swallowed `errors[]` and always showed "couldn't deliver
+ * to any reachable curator", which is misleading for the by-far-most-
+ * common failure mode — hub-address skew between joiner and curator
+ * after a testnet contract redeployment leaves the joiner's network
+ * config stale and the curator silently rejects every signed delegation.
+ *
+ * This helper:
+ *   1. Distinguishes "reached but rejected" from "couldn't reach" based
+ *      on whether any per-peer entry is NOT a `dial failed` line.
+ *   2. Surfaces the underlying reason(s) verbatim so daemon-log
+ *      spelunking isn't needed.
+ *   3. Appends an actionable hint for known patterns
+ *      (`scope mismatch`, `unknown CG`, `not curator`); if any of those
+ *      strings change in the daemon, the hint silently stops firing but
+ *      the verbatim reason is still shown.
+ *
+ * Exported so it can be unit-tested without rendering the React tree.
+ */
+export function formatJoinRequestError(err: unknown): string {
+  if (err instanceof HttpError && err.status === 502) {
+    const perPeer = readPerPeerErrors(err.body);
+    if (perPeer.length === 0) {
+      return 'Request signed, but we couldn\'t deliver it to any reachable curator. ' +
+        'Try again in a moment once your node has discovered more peers, or ask the curator for an updated invite.';
+    }
+    const reasons = perPeer.join('; ');
+    const reachedButRejected = perPeer.some((entry) => !/:\s*dial failed\b/i.test(entry));
+    const headline = reachedButRejected
+      ? 'Curator rejected this join request.'
+      : 'Couldn\'t deliver this join request to the curator.';
+    const hint = hintForJoinRejectReasons(reasons);
+    return hint
+      ? `${headline} Reason: ${reasons}. ${hint}`
+      : `${headline} Reason: ${reasons}.`;
+  }
+  if (err instanceof Error && err.message) return err.message;
+  return 'Failed to send join request';
+}
+
+function readPerPeerErrors(body: unknown): string[] {
+  if (!body || typeof body !== 'object') return [];
+  const errors = (body as { errors?: unknown }).errors;
+  if (!Array.isArray(errors)) return [];
+  return errors.filter((e): e is string => typeof e === 'string' && e.length > 0);
+}
+
+function hintForJoinRejectReasons(reasons: string): string | null {
+  // `scope mismatch` is the on-the-wire wording from
+  // `verifyAgentDelegation` (packages/agent/src/agent-delegation.ts).
+  // It fires when the joiner's daemon signed the delegation against a
+  // different ContextGraphsHub contract address than the curator's —
+  // in practice almost always because the joiner's
+  // `network/testnet.json` is still pointing at the pre-redeploy hub.
+  if (/scope mismatch/i.test(reasons)) {
+    return 'This usually means your daemon\'s network config has a stale ContextGraphsHub address — ' +
+      'pull the latest release (or `git pull && pnpm install && pnpm run build:runtime`) and try again.';
+  }
+  if (/unknown CG/i.test(reasons)) {
+    return 'The curator doesn\'t recognise this project id — double-check the invite, ' +
+      'or ask the curator to share an updated one.';
+  }
+  if (/not curator/i.test(reasons)) {
+    return 'The peer you reached isn\'t the curator of this project — ' +
+      'ask the curator to share a fresh invite with the correct curator peer id.';
+  }
+  return null;
+}
+
 type Phase = 'idle' | 'sending' | 'pending' | 'approved' | 'rejected';
 
 export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinProjectModalProps) {
@@ -264,18 +341,16 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
       }
 
       setPhase('pending');
-    } catch (err: any) {
-      // `post()` throws `HttpError` for non-2xx. The daemon returns 502
-      // with a structured `error` for the "no curator reachable" case
-      // (see context-graph.ts:777). Surface that as actionable copy,
-      // distinct from generic "failed to send" for transport errors.
-      if (err instanceof HttpError && err.status === 502) {
-        setError(
-          'Request signed, but we couldn\'t deliver it to any reachable curator. Try again in a moment once your node has discovered more peers, or ask the curator for an updated invite.',
-        );
-      } else {
-        setError(err?.message || 'Failed to send join request');
-      }
+    } catch (err: unknown) {
+      // `post()` throws `HttpError` for non-2xx, attaching the parsed
+      // JSON body. For 502 the daemon includes `errors[]` with per-peer
+      // reject reasons (`forwardJoinRequest` in
+      // packages/cli/src/daemon/routes/context-graph.ts). Delegate the
+      // copy to `formatJoinRequestError` so the underlying reason —
+      // most commonly a delegation-scope mismatch from a stale hub
+      // address — actually reaches the user instead of being smothered
+      // under a generic "no reachable curator" message.
+      setError(formatJoinRequestError(err));
       setPhase('idle');
     }
   };
