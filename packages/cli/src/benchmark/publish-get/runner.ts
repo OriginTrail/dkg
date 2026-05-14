@@ -102,7 +102,7 @@ async function runIteration(args: {
       config.timeoutMs,
       'async shared-memory write',
     );
-    shareOperationId = prepared.shareOperationId ?? prepared.workspaceOperationId ?? '';
+    shareOperationId = prepared.shareOperationId ?? '';
     if (!shareOperationId) throw new Error('Shared-memory write response did not include shareOperationId');
   } catch (error) {
     operations.push(createFailureRecord('asyncEnqueue', iteration, error, { ...asyncBaseContext, phase: 'sharedMemoryWrite' }, warmup));

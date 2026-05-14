@@ -207,6 +207,60 @@ export class FakeClient {
     return { quads: cell.quads, count: cell.quads.length };
   }
 
+  async resolveImportArtifact(args: {
+    contextGraphId: string;
+    assertionUri: string;
+    fileHash?: string;
+  }) {
+    if (this.overrides.resolveImportArtifact) return this.overrides.resolveImportArtifact.call(this, args);
+    return {
+      artifact: {
+        contextGraphId: args.contextGraphId,
+        assertionUri: args.assertionUri,
+        assertionName: args.assertionUri.split('/').pop(),
+        fileHash: args.fileHash ?? `sha256:${'a'.repeat(64)}`,
+        markdownHash: `sha256:${'b'.repeat(64)}`,
+        markdownForm: `urn:dkg:file:sha256:${'b'.repeat(64)}`,
+        extractionStatus: 'completed',
+        canReadMarkdown: true,
+      },
+    };
+  }
+
+  async readImportArtifactMarkdown(args: {
+    contextGraphId: string;
+    assertionUri: string;
+    fileHash?: string;
+    maxBytes?: number;
+  }) {
+    if (this.overrides.readImportArtifactMarkdown) return this.overrides.readImportArtifactMarkdown.call(this, args);
+    const artifact = await this.resolveImportArtifact(args);
+    return {
+      ...artifact,
+      markdownHash: `sha256:${'b'.repeat(64)}`,
+      contentType: 'text/markdown',
+      bytes: 18,
+      markdown: '# Imported\n\nBody.',
+    };
+  }
+
+  async writeSemanticEnrichment(args: {
+    contextGraphId: string;
+    assertionUri: string;
+    semanticQuads: Array<{ subject: string; predicate: string; object: string }>;
+  }) {
+    if (this.overrides.writeSemanticEnrichment) return this.overrides.writeSemanticEnrichment.call(this, args);
+    return {
+      assertionUri: args.assertionUri,
+      assertionName: 'imported-doc',
+      sourceAssertionUri: args.assertionUri,
+      semanticTripleCount: args.semanticQuads.length,
+      provenanceTripleCount: 8,
+      promoted: false,
+      published: false,
+    };
+  }
+
   async getAssertionHistory(args: { contextGraphId: string; assertionName: string }) {
     if (this.overrides.getAssertionHistory) return this.overrides.getAssertionHistory.call(this, args);
     return {

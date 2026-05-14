@@ -141,6 +141,129 @@ describe('ensureContextGraphLocal', () => {
   }, 15000);
 });
 
+describe('implicit SWM context graph metadata', () => {
+  let agent: DKGAgent | undefined;
+
+  afterEach(async () => {
+    await agent?.stop().catch(() => {});
+  });
+
+  it('direct share to a fresh context graph registers useful public metadata', async () => {
+    const result = await createTestAgent();
+    agent = result.agent;
+    await agent.start();
+
+    const contextGraphId = 'lazy-swm-direct';
+    const caller = new ethers.Wallet(HARDHAT_KEYS.DEPLOYER).address;
+
+    await agent.share(contextGraphId, [
+      {
+        subject: 'urn:lazy-swm-direct:root',
+        predicate: 'http://schema.org/name',
+        object: '"Lazy SWM Direct"',
+        graph: '',
+      },
+    ], { callerAgentAddress: caller });
+
+    const contextGraphs = await agent.listContextGraphs({ callerAgentAddress: caller });
+    const entry = contextGraphs.find(p => p.id === contextGraphId);
+    expect(entry).toBeDefined();
+    expect(entry).toMatchObject({
+      id: contextGraphId,
+      uri: contextGraphDataGraphUri(contextGraphId),
+      name: contextGraphId,
+      creator: `did:dkg:agent:${agent.peerId}`,
+      curator: `did:dkg:agent:${caller}`,
+      accessPolicy: 'public',
+      isSystem: false,
+      subscribed: true,
+      synced: true,
+      callerInvolved: true,
+    });
+    expect(Date.parse(entry!.createdAt!)).not.toBeNaN();
+
+    const sub = agent.getSubscribedContextGraphs().get(contextGraphId);
+    expect(sub).toMatchObject({
+      name: contextGraphId,
+      subscribed: true,
+      synced: true,
+      metaSynced: true,
+    });
+  }, 15000);
+
+  it('does not overwrite an explicitly created context graph on later SWM writes', async () => {
+    const result = await createTestAgent();
+    agent = result.agent;
+    await agent.start();
+
+    const contextGraphId = 'lazy-swm-explicit';
+    const caller = new ethers.Wallet(HARDHAT_KEYS.DEPLOYER).address;
+    await agent.createContextGraph({
+      id: contextGraphId,
+      name: 'Explicit Private Context',
+      accessPolicy: 1,
+      allowedAgents: [caller],
+      callerAgentAddress: caller,
+    });
+
+    const before = (await agent.listContextGraphs({ callerAgentAddress: caller }))
+      .find(p => p.id === contextGraphId);
+    expect(before).toBeDefined();
+
+    await agent.share(contextGraphId, [
+      {
+        subject: 'urn:lazy-swm-explicit:root',
+        predicate: 'http://schema.org/name',
+        object: '"Preserve Explicit"',
+        graph: '',
+      },
+    ], { localOnly: true, callerAgentAddress: caller });
+
+    const after = (await agent.listContextGraphs({ callerAgentAddress: caller }))
+      .find(p => p.id === contextGraphId);
+    expect(after).toBeDefined();
+    expect(after!.name).toBe('Explicit Private Context');
+    expect(after!.accessPolicy).toBe('private');
+    expect(after!.curator).toBe(`did:dkg:agent:${caller}`);
+    expect(after!.createdAt).toBe(before!.createdAt);
+    expect(after!.callerInvolved).toBe(true);
+  }, 15000);
+
+  it('ignores non-authoritative user triples when deciding whether metadata exists', async () => {
+    const result = await createTestAgent();
+    agent = result.agent;
+    await agent.start();
+
+    const contextGraphId = 'lazy-swm-user-type-triple';
+    await result.store.insert([{
+      subject: contextGraphDataGraphUri(contextGraphId),
+      predicate: DKG_ONTOLOGY.RDF_TYPE,
+      object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+      graph: contextGraphSharedMemoryUri(contextGraphId),
+    }]);
+
+    await agent.share(contextGraphId, [
+      {
+        subject: 'urn:lazy-swm-user-type-triple:root',
+        predicate: 'http://schema.org/name',
+        object: '"User Authored Type"',
+        graph: '',
+      },
+    ], { localOnly: true });
+
+    const entry = (await agent.listContextGraphs()).find(p => p.id === contextGraphId);
+    expect(entry).toBeDefined();
+    expect(entry).toMatchObject({
+      id: contextGraphId,
+      name: contextGraphId,
+      accessPolicy: 'public',
+      subscribed: true,
+      synced: true,
+    });
+    expect(Date.parse(entry!.createdAt!)).not.toBeNaN();
+  }, 15000);
+});
+
 describe('discoverContextGraphsFromStore', () => {
   let agent: DKGAgent | undefined;
 

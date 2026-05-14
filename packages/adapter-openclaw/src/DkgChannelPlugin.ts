@@ -74,6 +74,9 @@ function normalizeAttachmentRef(raw: unknown): OpenClawAttachmentRef | null {
   if (!assertionUri || !fileHash || !contextGraphId || !fileName) return null;
 
   const normalized: OpenClawAttachmentRef = { assertionUri, fileHash, contextGraphId, fileName };
+  if (typeof record.assertionName === 'string' && record.assertionName.trim()) {
+    normalized.assertionName = record.assertionName.trim();
+  }
   if (typeof record.detectedContentType === 'string' && record.detectedContentType.trim()) {
     normalized.detectedContentType = record.detectedContentType.trim();
   }
@@ -87,6 +90,15 @@ function normalizeAttachmentRef(raw: unknown): OpenClawAttachmentRef | null {
   }
   if (typeof record.rootEntity === 'string' && record.rootEntity.trim()) {
     normalized.rootEntity = record.rootEntity.trim();
+  }
+  if (typeof record.mdIntermediateHash === 'string' && record.mdIntermediateHash.trim()) {
+    normalized.mdIntermediateHash = record.mdIntermediateHash.trim();
+  }
+  if (typeof record.markdownHash === 'string' && record.markdownHash.trim()) {
+    normalized.markdownHash = record.markdownHash.trim();
+  }
+  if (typeof record.markdownForm === 'string' && record.markdownForm.trim()) {
+    normalized.markdownForm = record.markdownForm.trim();
   }
   return normalized;
 }
@@ -142,6 +154,9 @@ function sanitizeAttachmentRefForContext(ref: OpenClawAttachmentRef): OpenClawAt
     contextGraphId: sanitizeAttachmentContextValue(ref.contextGraphId),
     fileName: sanitizeAttachmentContextValue(ref.fileName),
   };
+  if (ref.assertionName) {
+    sanitized.assertionName = sanitizeAttachmentContextValue(ref.assertionName);
+  }
   if (ref.detectedContentType) {
     sanitized.detectedContentType = sanitizeAttachmentContextValue(ref.detectedContentType);
   }
@@ -153,6 +168,15 @@ function sanitizeAttachmentRefForContext(ref: OpenClawAttachmentRef): OpenClawAt
   }
   if (ref.rootEntity) {
     sanitized.rootEntity = sanitizeAttachmentContextValue(ref.rootEntity);
+  }
+  if (ref.mdIntermediateHash) {
+    sanitized.mdIntermediateHash = sanitizeAttachmentContextValue(ref.mdIntermediateHash);
+  }
+  if (ref.markdownHash) {
+    sanitized.markdownHash = sanitizeAttachmentContextValue(ref.markdownHash);
+  }
+  if (ref.markdownForm) {
+    sanitized.markdownForm = sanitizeAttachmentContextValue(ref.markdownForm);
   }
   return sanitized;
 }
@@ -169,15 +193,24 @@ function formatAttachmentContext(attachmentRefs: OpenClawAttachmentRef[]): strin
     const graph = ref.contextGraphId ? ` in ${sanitizeAttachmentPromptField(ref.contextGraphId, 'unknown context graph')}` : '';
     const details = [
       ref.detectedContentType ? `contentType=${sanitizeAttachmentPromptField(ref.detectedContentType, 'unknown content type')}` : null,
+      ref.assertionName ? `assertionName=${sanitizeAttachmentPromptField(ref.assertionName, 'unknown assertion name')}` : null,
       ref.fileHash ? `fileHash=${sanitizeAttachmentPromptField(ref.fileHash, 'unknown hash')}` : null,
       ref.extractionStatus ? `status=${sanitizeAttachmentPromptField(ref.extractionStatus, 'unknown status')}` : null,
       ref.tripleCount != null ? `tripleCount=${ref.tripleCount}` : null,
       ref.rootEntity ? `rootEntity=${sanitizeAttachmentPromptField(ref.rootEntity, 'unknown root entity')}` : null,
+      ref.mdIntermediateHash ? `mdIntermediateHash=${sanitizeAttachmentPromptField(ref.mdIntermediateHash, 'unknown markdown intermediate hash')}` : null,
+      ref.markdownHash ? `markdownHash=${sanitizeAttachmentPromptField(ref.markdownHash, 'unknown markdown hash')}` : null,
+      ref.markdownForm ? `markdownForm=${sanitizeAttachmentPromptField(ref.markdownForm, 'unknown markdown form')}` : null,
     ].filter((item): item is string => item != null);
     const detailText = details.length ? ` [${details.join('; ')}]` : '';
     return `- ${label}${graph}${detailText} -> ${sanitizeAttachmentPromptField(ref.assertionUri, 'unknown assertion')}`;
   });
-  return ['Attached Working Memory items:', ...lines].join('\n');
+  return [
+    'Attached Working Memory items:',
+    ...lines,
+    'For completed imported attachments, read Markdown with dkg_import_artifact_read_markdown when needed, inspect assertion quads with dkg_assertion_query when useful, and append model-derived triples to the imported assertion with dkg_semantic_enrichment_write.',
+    'Use dkg_import_artifact_resolve only when you need to re-check artifact metadata. Do not promote or publish enrichment output unless explicitly instructed.',
+  ].join('\n');
 }
 
 interface ChatContextEntry {

@@ -199,7 +199,7 @@ async function analyzeAsyncPublishFlow(config: BenchmarkConfig, payloadSize: Pay
       createPayload(config, `analysis-async-${payloadSize}`, 1, 'async', false)
     ));
     const prepared = await traceSharedMemoryWrite(trace, client, config, payload);
-    const shareOperationId = prepared.shareOperationId ?? prepared.workspaceOperationId ?? '';
+    const shareOperationId = prepared.shareOperationId ?? '';
     const queued = await traceAsync(trace, 'measured', 'publisherEnqueue', ['publisherJobs.set'], 'Enqueue the publish request through the publisher runtime path.', () => (
       client.publisherEnqueue({
         contextGraphId: config.contextGraphId,

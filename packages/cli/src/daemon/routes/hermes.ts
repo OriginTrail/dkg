@@ -483,6 +483,8 @@ function buildHermesNodeUiSystemPrompt(
     for (const attachment of attachmentRefs) {
       lines.push(formatHermesAttachmentPromptLine(attachment));
     }
+    lines.push('For completed imported attachments, read Markdown with dkg_import_artifact_read_markdown when needed, inspect assertion quads with dkg_assertion_query when useful, and append model-derived triples to the imported assertion with dkg_semantic_enrichment_write.');
+    lines.push('Use dkg_import_artifact_resolve only when you need to re-check artifact metadata. Do not promote or publish enrichment output unless explicitly instructed.');
   }
   return lines.join('\n');
 }
@@ -491,11 +493,15 @@ function formatHermesAttachmentPromptLine(attachment: OpenClawAttachmentRef): st
   const details = [
     `assertionUri=${formatHermesPromptValue(attachment.assertionUri)}`,
     `contextGraphId=${formatHermesPromptValue(attachment.contextGraphId)}`,
+    attachment.assertionName ? `assertionName=${formatHermesPromptValue(attachment.assertionName)}` : null,
     `fileHash=${formatHermesPromptValue(attachment.fileHash)}`,
     attachment.detectedContentType ? `contentType=${formatHermesPromptValue(attachment.detectedContentType)}` : null,
     attachment.extractionStatus ? `status=${formatHermesPromptValue(attachment.extractionStatus)}` : null,
     attachment.tripleCount != null ? `tripleCount=${attachment.tripleCount}` : null,
     attachment.rootEntity ? `rootEntity=${formatHermesPromptValue(attachment.rootEntity)}` : null,
+    attachment.mdIntermediateHash ? `mdIntermediateHash=${formatHermesPromptValue(attachment.mdIntermediateHash)}` : null,
+    attachment.markdownHash ? `markdownHash=${formatHermesPromptValue(attachment.markdownHash)}` : null,
+    attachment.markdownForm ? `markdownForm=${formatHermesPromptValue(attachment.markdownForm)}` : null,
   ].filter((item): item is string => item != null);
   return `- ${formatHermesPromptValue(attachment.fileName)}: ${details.join('; ')}`;
 }

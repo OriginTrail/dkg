@@ -4,6 +4,12 @@
  * Neptune, GraphDB, Jena, etc.) can implement this interface.
  */
 
+import { dirname, join } from 'node:path';
+import {
+  DEFAULT_LARGE_LITERAL_THRESHOLD_BYTES,
+  SharedMemoryLiteralBlobStore,
+} from './shared-memory-literal-blob-store.js';
+
 export interface Quad {
   subject: string;
   predicate: string;
@@ -59,9 +65,19 @@ export interface TripleStore {
 
 export type TripleStoreBackend = 'oxigraph' | 'oxigraph-persistent' | 'oxigraph-worker' | 'blazegraph' | 'sparql-http' | string;
 
+export interface LargeLiteralStorageConfig {
+  /** Enable large SWM literal blob storage. Defaults to true when present. */
+  enabled?: boolean;
+  /** Externalize literal object terms larger than this UTF-8 byte size. */
+  thresholdBytes?: number;
+  /** Content-addressed blob directory. Defaults to `<dirname(options.path)>/literal-blobs` when a persistent path is available. */
+  directory?: string;
+}
+
 export interface TripleStoreConfig {
   backend: TripleStoreBackend;
   options?: Record<string, unknown>;
+  largeLiteralStorage?: LargeLiteralStorageConfig;
 }
 
 type AdapterFactory = (
@@ -87,5 +103,31 @@ export async function createTripleStore(
         `Registered: [${[...adapterRegistry.keys()].join(', ')}]`,
     );
   }
-  return factory(config.options);
+  const store = await factory(config.options);
+  const largeLiteralStorage = resolveLargeLiteralStorageOptions(config);
+  if (!largeLiteralStorage) return store;
+  return new SharedMemoryLiteralBlobStore(store, largeLiteralStorage);
+}
+
+function resolveLargeLiteralStorageOptions(
+  config: TripleStoreConfig,
+): { blobDir: string; thresholdBytes: number } | undefined {
+  const largeLiteralStorage = config.largeLiteralStorage;
+  if (!largeLiteralStorage || largeLiteralStorage.enabled === false) return undefined;
+
+  const thresholdBytes = largeLiteralStorage.thresholdBytes ?? DEFAULT_LARGE_LITERAL_THRESHOLD_BYTES;
+  const directory = largeLiteralStorage.directory ?? inferLiteralBlobDirectory(config.options);
+  if (!directory) {
+    throw new Error(
+      'largeLiteralStorage.directory is required when the triple-store options do not include a persistent path',
+    );
+  }
+
+  return { blobDir: directory, thresholdBytes };
+}
+
+function inferLiteralBlobDirectory(options: Record<string, unknown> | undefined): string | undefined {
+  const persistPath = options?.path;
+  if (typeof persistPath !== 'string' || persistPath.trim().length === 0) return undefined;
+  return join(dirname(persistPath), 'literal-blobs');
 }

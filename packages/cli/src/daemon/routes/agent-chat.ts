@@ -633,6 +633,13 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
           status = 404; // genuine negative lookup
           break;
         case 'DHT_TIMEOUT':
+        case 'CONNECT_TIMEOUT':
+          // CONNECT_TIMEOUT is the post-RFC-07 equivalent of DHT_TIMEOUT:
+          // the resolver swallows per-step errors so the agent now
+          // surfaces the timeout at the boundary of the abort signal
+          // rather than at the inline DHT walk. Same retriable semantic.
+          // Codex PR #499 round 5 — without this case, transient routing
+          // failures would fall through `default` and 400 the caller.
           status = 504; // retriable: walk didn't complete in time
           break;
         case 'DHT_UNAVAILABLE':

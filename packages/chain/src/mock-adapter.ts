@@ -94,6 +94,11 @@ export class MockChainAdapter implements ChainAdapter {
   /** Configurable minimum receiver signatures. When > 0, publishKnowledgeAssets will check the count. Default: 1. */
   minimumRequiredSignatures = 1;
 
+  // RFC 04 v0.3 / Issue #461 — in-memory mirror of ProfileStorage's
+  // relay-capability flag. Keyed by identityId (bigint) to match the
+  // on-chain shape. Multiaddrs are not stored on Profile (RFC 04 §5.2).
+  private relayCapableByIdentity = new Map<bigint, boolean>();
+
   constructor(chainId = 'mock:31337', signerAddress = MOCK_DEFAULT_SIGNER) {
     this.chainId = chainId;
     this.signerAddress = signerAddress;
@@ -144,6 +149,30 @@ export class MockChainAdapter implements ChainAdapter {
    */
   allowPublisherAddress(address: string): void {
     this.allowedPublisherAddresses.add(ethers.getAddress(address).toLowerCase());
+  }
+
+  // --- RFC 04 v0.3 / Issue #461 — Network State Registry surface ---
+  //
+  // Reads return false for unknown identities, matching Solidity's
+  // zero-init mapping behaviour.
+
+  async getRelayCapable(identityId: bigint): Promise<boolean> {
+    return this.relayCapableByIdentity.get(identityId) ?? false;
+  }
+
+  async setRelayCapable(relayCapable: boolean): Promise<TxResult> {
+    const identityId = await this.getIdentityId();
+    if (identityId === 0n) {
+      throw new Error('setRelayCapable: signer has no profile (call ensureProfile first).');
+    }
+    const oldValue = this.relayCapableByIdentity.get(identityId) ?? false;
+    this.relayCapableByIdentity.set(identityId, relayCapable);
+    this.pushEvent('RelayCapabilityUpdated', {
+      identityId: identityId.toString(),
+      oldValue,
+      newValue: relayCapable,
+    });
+    return this.txResult(true);
   }
 
   // --- V9 UAL-based methods ---
@@ -621,6 +650,46 @@ export class MockChainAdapter implements ChainAdapter {
     };
   }
 
+  /**
+   * Mock does not model V10 `DKGPublishingConvictionNFT` agent
+   * registration — the legacy mock PCA flow doesn't ship reverse
+   * agent → accountId lookups. Always returns `0n` so the publisher
+   * SDK falls through to the direct-spend `publishEpochs = 1` default
+   * on mock chains (matching how mock-backed unit tests exercise the
+   * non-conviction publish path). Real-chain tests use
+   * `EVMChainAdapter`, which queries the live NFT contract.
+   */
+  async getConvictionAgentAccountId(_agent: string): Promise<bigint> {
+    return 0n;
+  }
+
+  /**
+   * Mock does not model V10 NFT `lockDurationEpochs` snapshotting.
+   * Returns `0` (no PCA path active) so the publisher SDK keeps the
+   * direct-spend default. Mirrors `getConvictionAgentAccountId` —
+   * either both are wired or neither, so the publisher's PCA probe
+   * never returns a half-set state on mock.
+   */
+  async getConvictionAccountLockDurationEpochs(_accountId: bigint): Promise<number> {
+    return 0;
+  }
+
+  /**
+   * Mock owner-lookup for the daemon's curated-CG registration
+   * preflight (`local curator == ownerOf(pcaAccountId)`).
+   *
+   * Mock does not model PCA NFT transfers, so the account `admin`
+   * doubles as the current "owner" for parity-test purposes. Real-chain
+   * tests use `EVMChainAdapter`, which queries `DKGPublishingConvictionNFT.ownerOf`.
+   */
+  async getPublishingConvictionAccountOwner(accountId: bigint): Promise<string> {
+    const acct = this.convictionAccounts.get(accountId);
+    if (!acct) {
+      throw new Error(`Mock: PCA account ${accountId} does not exist`);
+    }
+    return ethers.getAddress(acct.admin);
+  }
+
   // --- Staking Conviction ---
 
   private delegatorLocks = new Map<string, { lockTier: number; startEpoch: number }>();
@@ -715,11 +784,14 @@ export class MockChainAdapter implements ChainAdapter {
     }
     publishAuthority = ethers.getAddress(publishAuthority);
     if (publishPolicy === 0) {
-      if (publishAuthorityAccountId !== 0n) {
-        throw new Error('Mock: PCA publishAuthorityAccountId is not supported');
-      }
       if (publishAuthority === ethers.ZeroAddress) {
         publishAuthority = ethers.getAddress(this.signerAddress);
+      }
+      if (publishAuthorityAccountId !== 0n) {
+        const pcaOwner = await this.getPublishingConvictionAccountOwner(publishAuthorityAccountId);
+        if (publishAuthority.toLowerCase() !== pcaOwner.toLowerCase()) {
+          throw new Error('Mock: PCA publishAuthority must match account owner');
+        }
       }
     } else {
       if (publishAuthority !== ethers.ZeroAddress) {

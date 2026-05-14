@@ -31,6 +31,22 @@ contract ParametersStorage is INamed, IVersioned, HubDependent {
     uint16 public maxOperatorFee;
 
     uint256 public v81ReleaseEpoch;
+    uint256 public publishingConvictionEpochs;
+
+    /// @notice Hard upper bound on `publishingConvictionEpochs`.
+    ///
+    /// `DKGPublishingConvictionNFT._settleElapsed` / `_finalSweep` loop
+    /// `lockDurationEpochs` times in the worst case (dormant account
+    /// settled at expiry). Each iteration costs ~30–50k gas
+    /// (`windowSpent` SLOAD + one or two `epochStorage.addTokensToEpochRange`
+    /// writes + a `WindowSettled` event), so an unbounded
+    /// `publishingConvictionEpochs` (the previous cap was `uint16.max`)
+    /// would let governance brick PCAs by setting the parameter past
+    /// the block-gas budget. 60 chain epochs ≈ 5 years at a 1-month
+    /// epoch length and worst-cases at ~3M gas — comfortably below
+    /// the block limit while leaving room for the surrounding
+    /// `publish` / `topUp` / NFT-transfer work.
+    uint256 public constant MAX_PUBLISHING_CONVICTION_EPOCHS = 60;
 
     // @dev Only transactions by HubController owner or one of the owners of the MultiSig Wallet
     modifier onlyOwnerOrMultiSigOwner() {
@@ -59,6 +75,7 @@ contract ParametersStorage is INamed, IVersioned, HubDependent {
         // Epoch when v8.1 was released on mainnet/testnet
         // Change if you ever redeploy delegatorsInfo contract on either network
         v81ReleaseEpoch = _v81ReleaseEpoch;
+        publishingConvictionEpochs = 12;
     }
 
     function name() external pure virtual override returns (string memory) {
@@ -137,6 +154,22 @@ contract ParametersStorage is INamed, IVersioned, HubDependent {
         v81ReleaseEpoch = _v81ReleaseEpoch;
 
         emit ParameterChanged("v81ReleaseEpoch", _v81ReleaseEpoch);
+    }
+
+    function setPublishingConvictionEpochs(
+        uint256 _publishingConvictionEpochs
+    ) external onlyOwnerOrMultiSigOwner {
+        require(_publishingConvictionEpochs > 0, "publishingConvictionEpochs must be > 0");
+        // See `MAX_PUBLISHING_CONVICTION_EPOCHS` for the gas-budget
+        // rationale. The previous `<= type(uint16).max` bound permitted
+        // values that would gas-out PCA settlement.
+        require(
+            _publishingConvictionEpochs <= MAX_PUBLISHING_CONVICTION_EPOCHS,
+            "publishingConvictionEpochs too large"
+        );
+        publishingConvictionEpochs = _publishingConvictionEpochs;
+
+        emit ParameterChanged("publishingConvictionEpochs", _publishingConvictionEpochs);
     }
 
     function _isMultiSigOwner(address multiSigAddress) internal view returns (bool) {

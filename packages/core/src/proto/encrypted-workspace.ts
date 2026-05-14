@@ -31,7 +31,7 @@ export const EncryptedWorkspacePayloadSchema = new Type('EncryptedWorkspacePaylo
   .add(new Field('contextGraphId', 3, 'string'))
   .add(new Field('senderIdentity', 4, 'string'))
   .add(new Field('operationId', 5, 'string'))
-  .add(new Field('workspaceOperationId', 6, 'string'))
+  .add(new Field('shareOperationId', 6, 'string'))
   .add(new Field('timestampMs', 7, 'uint64'))
   .add(new Field('subGraphName', 8, 'string'))
   .add(new Field('cipherAlgorithm', 9, 'string'))
@@ -56,7 +56,7 @@ export interface EncryptedWorkspacePayloadMsg {
   contextGraphId: string;
   senderIdentity: string;
   operationId: string;
-  workspaceOperationId: string;
+  shareOperationId: string;
   timestampMs: number | bigint | LongLike;
   subGraphName?: string;
   cipherAlgorithm: string;
@@ -73,7 +73,7 @@ export interface EncryptedWorkspaceAADFields {
   contextGraphId: string;
   senderIdentity: string;
   operationId: string;
-  workspaceOperationId: string;
+  shareOperationId: string;
   timestampMs: number | bigint | LongLike;
   subGraphName?: string;
   keyAgreementAlgorithm?: string;
@@ -107,7 +107,7 @@ export function decodeEncryptedWorkspacePayload(buf: Uint8Array): EncryptedWorks
     contextGraphId: stringField(decoded.contextGraphId),
     senderIdentity: stringField(decoded.senderIdentity),
     operationId: stringField(decoded.operationId),
-    workspaceOperationId: stringField(decoded.workspaceOperationId),
+    shareOperationId: stringField(decoded.shareOperationId),
     timestampMs: timestampForProto(decoded.timestampMs ?? 0),
     subGraphName: stringField(decoded.subGraphName) || undefined,
     cipherAlgorithm: stringField(decoded.cipherAlgorithm),
@@ -152,8 +152,8 @@ export function computeEncryptedWorkspaceAAD(fields: EncryptedWorkspaceAADFields
     framedString(fields.senderIdentity),
     framedString('operationId'),
     framedString(fields.operationId),
-    framedString('workspaceOperationId'),
-    framedString(fields.workspaceOperationId),
+    framedString('shareOperationId'),
+    framedString(fields.shareOperationId),
     framedString('timestampMs'),
     framedString(timestampForAAD(fields.timestampMs)),
     framedString('subGraphName'),

@@ -387,8 +387,7 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
       seal,
     } = parsed;
     const contextGraphId = parsed.contextGraphId;
-    const shareOperationId =
-      parsed.shareOperationId ?? parsed.workspaceOperationId;
+    const shareOperationId = parsed.shareOperationId;
     const swmId = parsed.swmId ?? parsed.workspaceId ?? "swm-main";
     const transitionType = parsed.transitionType ?? "CREATE";
     const authorityType =

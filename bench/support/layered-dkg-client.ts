@@ -11,7 +11,6 @@ interface MemoryRecord {
   rootEntity: string;
   marker: string;
   quads: Quad[];
-  workspaceOperationId?: string;
   shareOperationId?: string;
   kcId?: string;
 }
@@ -31,7 +30,7 @@ export class LayeredDkgBenchmarkClient implements BenchmarkClient {
   readonly publisherJobs = new Map<string, PublisherJob>();
 
   private shareSequence = 0;
-  private workspaceSequence = 0;
+  private draftSequence = 0;
   private kcSequence = 0;
   private jobSequence = 0;
 
@@ -58,18 +57,17 @@ export class LayeredDkgBenchmarkClient implements BenchmarkClient {
     const working = await this.writeWorkingMemory(contextGraphId, quads);
     const shared = await this.liftWorkingMemoryToSharedMemory(contextGraphId, uniqueSubjects(quads));
     return {
-      workspaceOperationId: working.workspaceOperationId,
       shareOperationId: shared.shareOperationId,
     };
   }
 
   async writeWorkingMemory(contextGraphId: string, quads: Quad[]) {
-    const workspaceOperationId = `workspace-${++this.workspaceSequence}`;
+    const shareOperationId = `draft-${++this.draftSequence}`;
     for (const rootEntity of uniqueSubjects(quads)) {
-      const record = createMemoryRecord(contextGraphId, rootEntity, quads, { workspaceOperationId });
+      const record = createMemoryRecord(contextGraphId, rootEntity, quads, { shareOperationId });
       this.workingMemory.set(rootEntity, record);
     }
-    return { workspaceOperationId };
+    return { shareOperationId };
   }
 
   async liftWorkingMemoryToSharedMemory(contextGraphId: string, rootEntities: string[]) {
@@ -177,7 +175,7 @@ function createMemoryRecord(
   contextGraphId: string,
   rootEntity: string,
   quads: Quad[],
-  ids: Pick<MemoryRecord, 'workspaceOperationId' | 'shareOperationId'>,
+  ids: Pick<MemoryRecord, 'shareOperationId'>,
 ): MemoryRecord {
   const rootQuads = quads.filter((quad) => quad.subject === rootEntity);
   return {

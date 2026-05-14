@@ -71,6 +71,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
   private readonly chainRecoveryResolver?: AsyncLiftPublisherRecoveryResolver;
   private readonly publishExecutor?: AsyncLiftPublisherConfig['publishExecutor'];
   private readonly resolvedSliceOverrides?: Partial<LiftResolvedPublishSlice>;
+  private readonly publicSnapshotStore?: AsyncLiftPublisherConfig['publicSnapshotStore'];
   private readonly graphManager: GraphManager;
   private paused = false;
   private graphEnsured = false;
@@ -89,6 +90,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     this.chainRecoveryResolver = config.chainRecoveryResolver;
     this.publishExecutor = config.publishExecutor;
     this.resolvedSliceOverrides = config.resolvedSliceOverrides;
+    this.publicSnapshotStore = config.publicSnapshotStore;
     this.graphManager = new GraphManager(store);
   }
 
@@ -225,6 +227,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       store: this.store,
       graphManager: this.graphManager,
       request: job.request,
+      publicSnapshotStore: this.publicSnapshotStore,
     });
     const validated = validateLiftPublishPayload({
       request: job.request,
@@ -270,6 +273,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
         store: this.store,
         graphManager: this.graphManager,
         request: claimed.request,
+        publicSnapshotStore: this.publicSnapshotStore,
       });
       const validated = validateLiftPublishPayload({
         request: claimed.request,

@@ -24,7 +24,7 @@ import secrets
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
 
 from agent.memory_provider import MemoryProvider
@@ -520,6 +520,16 @@ QUAD_SCHEMA = {
     "required": ["subject", "predicate", "object"],
 }
 
+SEMANTIC_TRIPLE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "subject": {"type": "string", "description": "Subject URI."},
+        "predicate": {"type": "string", "description": "Predicate URI."},
+        "object": {"type": "string", "description": "Object URI or literal text."},
+    },
+    "required": ["subject", "predicate", "object"],
+}
+
 DKG_ASSERTION_CREATE_SCHEMA = {
     "name": "dkg_assertion_create",
     "description": "Create a Working Memory assertion in a context graph.",
@@ -597,7 +607,7 @@ DKG_ASSERTION_IMPORT_FILE_SCHEMA = {
 
 DKG_ASSERTION_QUERY_SCHEMA = {
     "name": "dkg_assertion_query",
-    "description": "Dump every quad from one Working Memory assertion. Use dkg_query for SPARQL.",
+    "description": "Dump every quad from one Working Memory assertion. Use dkg_query for SPARQL. Use this to inspect deterministic import quads before semantic enrichment.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -606,6 +616,59 @@ DKG_ASSERTION_QUERY_SCHEMA = {
             "sub_graph_name": {"type": "string", "description": "Optional sub-graph name."},
         },
         "required": ["context_graph_id", "name"],
+    },
+}
+
+DKG_IMPORT_ARTIFACT_RESOLVE_SCHEMA = {
+    "name": "dkg_import_artifact_resolve",
+    "description": "Optional validation/debug helper. Resolve a completed imported attachment/assertion into deterministic artifact metadata. Skipped imports are rejected.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "context_graph_id": {"type": "string", "description": "Context graph ID from the attachment ref."},
+            "assertion_uri": {"type": "string", "description": "Completed imported assertion URI."},
+            "assertion_name": {"type": "string", "description": "Optional source assertion name to cross-check against assertion_uri."},
+            "file_hash": {"type": "string", "description": "Optional source file hash to verify."},
+            "sub_graph_name": {"type": "string", "description": "Optional sub-graph name."},
+        },
+        "required": ["context_graph_id", "assertion_uri"],
+    },
+}
+
+DKG_IMPORT_ARTIFACT_READ_MARKDOWN_SCHEMA = {
+    "name": "dkg_import_artifact_read_markdown",
+    "description": "Read Markdown for a completed imported attachment through daemon content-addressed storage, never arbitrary filesystem paths.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "context_graph_id": {"type": "string", "description": "Context graph ID from the attachment ref."},
+            "assertion_uri": {"type": "string", "description": "Completed imported assertion URI."},
+            "assertion_name": {"type": "string", "description": "Optional source assertion name to cross-check against assertion_uri."},
+            "file_hash": {"type": "string", "description": "Optional source file hash to verify."},
+            "sub_graph_name": {"type": "string", "description": "Optional sub-graph name."},
+            "max_bytes": {"type": "integer", "description": "Optional positive integer byte cap; daemon maximum is 5 MiB."},
+        },
+        "required": ["context_graph_id", "assertion_uri"],
+    },
+}
+
+DKG_SEMANTIC_ENRICHMENT_WRITE_SCHEMA = {
+    "name": "dkg_semantic_enrichment_write",
+    "description": "Append model-derived triples to a completed imported assertion with daemon-stamped provenance. Does not promote, finalize, or publish.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "context_graph_id": {"type": "string", "description": "Context graph ID from the attachment ref."},
+            "assertion_uri": {"type": "string", "description": "Source imported assertion URI from the attachment ref."},
+            "assertion_name": {"type": "string", "description": "Optional source assertion name to cross-check against assertion_uri."},
+            "file_hash": {"type": "string", "description": "Optional source file hash to verify."},
+            "semantic_quads": {"type": "array", "items": SEMANTIC_TRIPLE_SCHEMA, "description": "Model-derived triples appended to the source imported assertion graph; provenance is added by the daemon."},
+            "generation_method": {"type": "string", "description": "Extraction/generation method label."},
+            "agent_identity": {"type": "string", "description": "Agent identity URI or label for provenance; only URIs are emitted as prov:wasAttributedTo resources."},
+            "generated_at": {"type": "string", "description": "ISO timestamp; defaults to daemon time."},
+            "sub_graph_name": {"type": "string", "description": "Optional sub-graph name."},
+        },
+        "required": ["context_graph_id", "assertion_uri", "semantic_quads"],
     },
 }
 
@@ -906,6 +969,9 @@ class DKGMemoryProvider(MemoryProvider):
             "  dkg_query — Search knowledge via SPARQL (fast, local)\n"
             "  dkg_assertion_create/write/promote/query/history/discard/import_file — Work with V10 WM assertions\n"
             "\n"
+            "  dkg_import_artifact_read_markdown + dkg_semantic_enrichment_write - Read imported attachment Markdown and append semantic triples to the imported assertion\n"
+            "  dkg_import_artifact_resolve - Optional metadata re-check for imported attachments\n"
+            "\n"
             "COLLABORATION WORKFLOW:\n"
             "  dkg_share — Share findings to Shared Working Memory (team-visible, free)\n"
             f"{publish_guidance}"
@@ -965,6 +1031,9 @@ class DKGMemoryProvider(MemoryProvider):
             DKG_ASSERTION_DISCARD_SCHEMA,
             DKG_ASSERTION_IMPORT_FILE_SCHEMA,
             DKG_ASSERTION_QUERY_SCHEMA,
+            DKG_IMPORT_ARTIFACT_RESOLVE_SCHEMA,
+            DKG_IMPORT_ARTIFACT_READ_MARKDOWN_SCHEMA,
+            DKG_SEMANTIC_ENRICHMENT_WRITE_SCHEMA,
             DKG_ASSERTION_HISTORY_SCHEMA,
             DKG_SUB_GRAPH_CREATE_SCHEMA,
             DKG_SUB_GRAPH_LIST_SCHEMA,
@@ -1016,6 +1085,9 @@ class DKGMemoryProvider(MemoryProvider):
             "dkg_assertion_discard": self._handle_assertion_discard,
             "dkg_assertion_import_file": self._handle_assertion_import_file,
             "dkg_assertion_query": self._handle_assertion_query,
+            "dkg_import_artifact_resolve": self._handle_import_artifact_resolve,
+            "dkg_import_artifact_read_markdown": self._handle_import_artifact_read_markdown,
+            "dkg_semantic_enrichment_write": self._handle_semantic_enrichment_write,
             "dkg_assertion_history": self._handle_assertion_history,
             "dkg_sub_graph_create": self._handle_sub_graph_create,
             "dkg_sub_graph_list": self._handle_sub_graph_list,
@@ -1853,6 +1925,86 @@ class DKGMemoryProvider(MemoryProvider):
             return tool_error("name is required.")
         return json.dumps(self._client.query_assertion(name, cg, sub_graph_name=_first_text(args, "sub_graph_name")))
 
+    def _handle_import_artifact_resolve(self, args: Dict[str, Any]) -> str:
+        if self._offline:
+            return tool_error("DKG daemon is offline.")
+        cg = _first_text(args, "context_graph_id")
+        assertion_uri = _first_text(args, "assertion_uri") or _first_text(args, "source_assertion_uri")
+        assertion_name = _first_text(args, "assertion_name")
+        if not cg:
+            return tool_error("context_graph_id is required.")
+        if not assertion_uri:
+            return tool_error("assertion_uri is required.")
+        return json.dumps(self._client.resolve_import_artifact(
+            cg,
+            assertion_uri=assertion_uri,
+            assertion_name=assertion_name,
+            file_hash=_first_text(args, "file_hash"),
+            sub_graph_name=_first_text(args, "sub_graph_name"),
+        ))
+
+    def _handle_import_artifact_read_markdown(self, args: Dict[str, Any]) -> str:
+        if self._offline:
+            return tool_error("DKG daemon is offline.")
+        cg = _first_text(args, "context_graph_id")
+        assertion_uri = _first_text(args, "assertion_uri") or _first_text(args, "source_assertion_uri")
+        assertion_name = _first_text(args, "assertion_name")
+        if not cg:
+            return tool_error("context_graph_id is required.")
+        if not assertion_uri:
+            return tool_error("assertion_uri is required.")
+        max_bytes = args.get("max_bytes")
+        if max_bytes is not None:
+            if isinstance(max_bytes, bool):
+                return tool_error("max_bytes must be a positive integer.")
+            if isinstance(max_bytes, str):
+                stripped_max_bytes = max_bytes.strip()
+                if not stripped_max_bytes:
+                    return tool_error("max_bytes must be a positive integer.")
+                try:
+                    max_bytes = int(stripped_max_bytes)
+                except Exception:
+                    return tool_error("max_bytes must be a positive integer.")
+            elif not isinstance(max_bytes, int):
+                return tool_error("max_bytes must be a positive integer.")
+            if max_bytes <= 0:
+                return tool_error("max_bytes must be a positive integer.")
+        return json.dumps(self._client.read_import_artifact_markdown(
+            cg,
+            assertion_uri=assertion_uri,
+            assertion_name=assertion_name,
+            file_hash=_first_text(args, "file_hash"),
+            sub_graph_name=_first_text(args, "sub_graph_name"),
+            max_bytes=max_bytes,
+        ))
+
+    def _handle_semantic_enrichment_write(self, args: Dict[str, Any]) -> str:
+        if self._offline:
+            return tool_error("DKG daemon is offline.")
+        cg = _first_text(args, "context_graph_id")
+        assertion_uri = _first_text(args, "assertion_uri") or _first_text(args, "source_assertion_uri")
+        assertion_name = _first_text(args, "assertion_name")
+        if not cg:
+            return tool_error("context_graph_id is required.")
+        if not assertion_uri:
+            return tool_error("assertion_uri is required.")
+        if "name" in args or "semanticAssertionName" in args or "semantic_assertion_name" in args:
+            return tool_error("Semantic enrichment is written into the source import assertion; target assertion names are not supported.")
+        quads, quad_error = _normalize_semantic_quads(args.get("semantic_quads"))
+        if quad_error:
+            return tool_error(quad_error)
+        return json.dumps(self._client.write_semantic_enrichment(
+            cg,
+            quads,
+            assertion_uri=assertion_uri,
+            assertion_name=assertion_name,
+            file_hash=_first_text(args, "file_hash"),
+            generation_method=_first_text(args, "generation_method"),
+            agent_identity=_first_text(args, "agent_identity"),
+            generated_at=_first_text(args, "generated_at"),
+            sub_graph_name=_first_text(args, "sub_graph_name"),
+        ))
+
     def _handle_assertion_history(self, args: Dict[str, Any]) -> str:
         if self._offline:
             return tool_error("DKG daemon is offline.")
@@ -2096,9 +2248,17 @@ class DKGMemoryProvider(MemoryProvider):
 # Helpers
 # ---------------------------------------------------------------------------
 
+_IRI_SCHEME_RE = re.compile(r'^[A-Za-z][A-Za-z0-9+.-]*:[^\s<>"{}|\\^`\x00-\x20]+$')
+
+
+def _is_safe_iri(value: str) -> bool:
+    """Mirror the daemon/core safe-IRI contract for SPARQL-interpolated terms."""
+    return bool(value) and bool(_IRI_SCHEME_RE.match(value))
+
+
 def _is_uri(value: str) -> bool:
-    """Check if a value looks like a URI."""
-    return bool(value) and any(value.startswith(p) for p in ("http://", "https://", "urn:", "did:"))
+    """Check if a value looks like a URI for legacy generic quad writes."""
+    return bool(value) and any(value.startswith(prefix) for prefix in ("http://", "https://", "urn:", "did:"))
 
 
 def _escape_sparql(text: str) -> str:
@@ -2213,6 +2373,28 @@ def _normalize_quads(raw_quads: Any) -> List[Dict[str, str]]:
             quad["graph"] = str(raw.get("graph", ""))
         quads.append(quad)
     return quads
+
+
+def _normalize_semantic_quads(raw_quads: Any) -> Tuple[List[Dict[str, str]], Optional[str]]:
+    if not isinstance(raw_quads, list) or not raw_quads:
+        return [], "semantic_quads must contain at least one item with subject, predicate, and object."
+    quads: List[Dict[str, str]] = []
+    for index, raw in enumerate(raw_quads):
+        if not isinstance(raw, dict):
+            return [], f"semantic_quads[{index}] must be an object."
+        if raw.get("graph") is not None:
+            return [], f"semantic_quads[{index}].graph is not supported; semantic triples are written to the source imported assertion graph."
+        subject = str(raw.get("subject", "")).strip()
+        predicate = str(raw.get("predicate", "")).strip()
+        object_value = str(raw.get("object", "")).strip()
+        if not subject or not predicate or not object_value:
+            return [], f"semantic_quads[{index}] must include non-empty subject, predicate, and object."
+        quads.append({
+            "subject": subject,
+            "predicate": predicate,
+            "object": object_value if _is_safe_iri(object_value) or object_value.startswith('"') else _quote_literal(object_value),
+        })
+    return quads, None
 
 
 def _quad_root_entities(quads: List[Dict[str, str]]) -> List[str]:

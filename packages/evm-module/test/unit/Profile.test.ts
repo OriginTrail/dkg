@@ -90,8 +90,8 @@ describe('@unit Profile contract', function () {
     expect(await Profile.name()).to.equal('Profile');
   });
 
-  it('The contract is version "1.1.0"', async () => {
-    expect(await Profile.version()).to.equal('1.1.0');
+  it('The contract is version "1.2.0"', async () => {
+    expect(await Profile.version()).to.equal('1.2.0');
   });
 
   it('Create a profile with valid inputs, expect to pass', async () => {
@@ -324,5 +324,56 @@ describe('@unit Profile contract', function () {
       Profile,
       'OnlyWhitelistedAddressesFunction',
     );
+  });
+
+  // =====================================================================
+  // RFC 04 v0.3 / Issue #461 — relay-capability flag.
+  // Multiaddrs are intentionally NOT stored on Profile — they live in
+  // per-round attestation KCs (RFC 04 §5.2).
+  // =====================================================================
+
+  describe('Relay capability flag (RFC 04 v0.3 / Issue #461)', () => {
+    beforeEach(async () => {
+      await Profile.createProfile(accounts[1].address, [], 'Node 1', nodeId1, 1000);
+    });
+
+    it('relayCapable defaults to false', async () => {
+      expect(await ProfileStorage.getRelayCapable(identityId1)).to.equal(false);
+    });
+
+    it('admin wallet can flip relayCapable', async () => {
+      await expect(Profile.connect(accounts[1]).updateRelayCapable(identityId1, true))
+        .to.emit(ProfileStorage, 'RelayCapabilityUpdated')
+        .withArgs(identityId1, false, true);
+      expect(await ProfileStorage.getRelayCapable(identityId1)).to.equal(true);
+    });
+
+    it('operational wallet can flip relayCapable (onlyIdentityOwner = admin OR operational)', async () => {
+      await Profile.connect(accounts[1]).addOperationalWallets(identityId1, [accounts[2].address]);
+      await expect(Profile.connect(accounts[2]).updateRelayCapable(identityId1, true)).to.not.be.reverted;
+      expect(await ProfileStorage.getRelayCapable(identityId1)).to.equal(true);
+    });
+
+    it('non-owner cannot flip relayCapable', async () => {
+      await expect(
+        Profile.connect(accounts[5]).updateRelayCapable(identityId1, true),
+      ).to.be.revertedWithCustomError(Profile, 'OnlyProfileAdminOrOperationalAddressesFunction');
+    });
+
+    it('updateRelayCapable reverts when profile does not exist', async () => {
+      await expect(
+        Profile.connect(accounts[1]).updateRelayCapable(9999, true),
+      ).to.be.reverted; // onlyIdentityOwner runs first against nonexistent identity
+    });
+
+    it('getProfile surfaces relayCapable alongside legacy fields', async () => {
+      await Profile.connect(accounts[1]).updateRelayCapable(identityId1, true);
+      const [name, nodeId, ask, opFees, relayCapable] = await ProfileStorage.getProfile(identityId1);
+      expect(name).to.equal('Node 1');
+      expect(nodeId).to.equal(nodeId1);
+      expect(ask).to.equal(0n);
+      expect(opFees.length).to.equal(1);
+      expect(relayCapable).to.equal(true);
+    });
   });
 });

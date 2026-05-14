@@ -30,6 +30,7 @@ export interface DkgClientOptions {
 
 export interface OpenClawAttachmentRef {
   assertionUri: string;
+  assertionName?: string;
   fileHash: string;
   contextGraphId: string;
   fileName: string;
@@ -37,6 +38,47 @@ export interface OpenClawAttachmentRef {
   extractionStatus?: 'completed';
   tripleCount?: number;
   rootEntity?: string;
+  mdIntermediateHash?: string;
+  markdownHash?: string;
+  markdownForm?: string;
+}
+
+export interface ImportedArtifactRequest {
+  contextGraphId: string;
+  assertionUri: string;
+  assertionName?: string;
+  fileHash?: string;
+  subGraphName?: string;
+}
+
+export interface ImportedArtifactResolution {
+  contextGraphId: string;
+  assertionUri: string;
+  assertionName?: string;
+  assertionAgentAddress?: string;
+  subGraphName?: string;
+  fileHash: string;
+  sourceFileHash: string;
+  detectedContentType: string;
+  sourceContentType: string;
+  extractionStatus: 'completed';
+  extractionMethod?: string;
+  rootEntity?: string;
+  sourceFileName?: string;
+  tripleCount?: number;
+  structuralTripleCount?: number;
+  semanticTripleCount?: number;
+  mdIntermediateHash?: string;
+  markdownForm?: string;
+  markdownHash?: string;
+  canReadMarkdown: boolean;
+}
+
+export interface SemanticEnrichmentWriteRequest extends ImportedArtifactRequest {
+  semanticQuads: Array<{ subject: string; predicate: string; object: string }>;
+  generationMethod?: string;
+  agentIdentity?: string;
+  generatedAt?: string;
 }
 
 export interface ChatTurnStoreStatus {
@@ -429,6 +471,44 @@ export class DkgDaemonClient {
       contextGraphId,
       subGraphName: opts?.subGraphName,
     });
+  }
+
+  /**
+   * Resolve deterministic import metadata for a completed attachment ref.
+   * This does not read arbitrary paths; it only returns graph/file-store
+   * metadata already attached to the imported assertion.
+   */
+  async resolveImportArtifact(
+    request: ImportedArtifactRequest,
+  ): Promise<{ artifact: ImportedArtifactResolution }> {
+    return this.post('/api/assertion/import-artifact/resolve', request);
+  }
+
+  /**
+   * Read the Markdown source for a completed imported assertion. The daemon
+   * resolves the markdown hash from deterministic import metadata and reads
+   * the content-addressed file store; callers never supply filesystem paths.
+   */
+  async readImportArtifactMarkdown(
+    request: ImportedArtifactRequest & { maxBytes?: number },
+  ): Promise<{
+    artifact: ImportedArtifactResolution;
+    markdownHash: string;
+    contentType: 'text/markdown';
+    bytes: number;
+    markdown: string;
+  }> {
+    return this.post('/api/assertion/import-artifact/read-markdown', request);
+  }
+
+  /**
+   * Append model-derived semantic triples into the completed imported assertion
+   * with provenance. The daemon intentionally does not promote or publish.
+   */
+  async writeSemanticEnrichment(
+    request: SemanticEnrichmentWriteRequest,
+  ): Promise<Record<string, unknown>> {
+    return this.post('/api/assertion/semantic-enrichment/write', request);
   }
 
   /**

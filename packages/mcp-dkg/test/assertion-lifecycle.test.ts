@@ -15,19 +15,77 @@ describe('assertion CRUD quintet — round-trip with @en literal preservation', 
     registerAssertionTools(server.asMcpServer(), client.asDkgClient(), makeConfig());
   });
 
-  it('registers all seven assertion-family tools', () => {
+  it('registers all ten assertion-family tools', () => {
     const expected = [
       'dkg_assertion_create',
       'dkg_assertion_write',
       'dkg_assertion_promote',
       'dkg_assertion_discard',
       'dkg_assertion_query',
+      'dkg_import_artifact_resolve',
+      'dkg_import_artifact_read_markdown',
+      'dkg_semantic_enrichment_write',
       'dkg_assertion_import_file',
       'dkg_assertion_history',
     ];
     for (const name of expected) {
       expect(server.tools.has(name)).toBe(true);
     }
+  });
+
+  it('exposes imported attachment resolve/read/enrichment helpers without promoting', async () => {
+    const assertionUri = 'did:dkg:context-graph:test-cg/assertion/peer-test/imported-doc';
+
+    const resolved = await server.call('dkg_import_artifact_resolve', {
+      assertionUri,
+    });
+    expect(resolved.isError).toBeFalsy();
+    expect(resolved.content[0].text).toContain('"canReadMarkdown": true');
+
+    const markdown = await server.call('dkg_import_artifact_read_markdown', {
+      assertionUri,
+      maxBytes: 1024,
+    });
+    expect(markdown.isError).toBeFalsy();
+    expect(markdown.content[0].text).toContain('# Imported');
+
+    const enrichment = await server.call('dkg_semantic_enrichment_write', {
+      assertionUri,
+      semanticQuads: [
+        { subject: 'urn:dkg:doc:imported', predicate: 'http://schema.org/about', object: '"Semantic topic"' },
+      ],
+    });
+    expect(enrichment.isError).toBeFalsy();
+    expect(enrichment.content[0].text).toContain(`"assertionUri": "${assertionUri}"`);
+    expect(enrichment.content[0].text).toContain('"sourceAssertionUri": "did:dkg:context-graph:test-cg/assertion/peer-test/imported-doc"');
+    expect(enrichment.content[0].text).toContain('"promoted": false');
+    expect(enrichment.content[0].text).toContain('"published": false');
+  });
+
+  it('does not expose a target assertion name on the semantic enrichment schema', () => {
+    const tool = server.tools.get('dkg_semantic_enrichment_write');
+    expect(tool).toBeTruthy();
+    expect(tool!.config.description).toMatch(/Append model-derived semantic triples/);
+    expect(tool!.config.description).not.toMatch(/separate Working Memory assertion/);
+    expect(tool!.config.inputSchema).not.toHaveProperty('name');
+  });
+
+  it('rejects semantic enrichment quads that try to set a graph at the MCP layer', async () => {
+    const assertionUri = 'did:dkg:context-graph:test-cg/assertion/peer-test/imported-doc';
+
+    await expect(
+      server.call('dkg_semantic_enrichment_write', {
+        assertionUri,
+        semanticQuads: [
+          {
+            subject: 'urn:dkg:doc:imported',
+            predicate: 'http://schema.org/about',
+            object: '"Semantic topic"',
+            graph: 'urn:dkg:graph:forged',
+          },
+        ],
+      }),
+    ).rejects.toThrow();
   });
 
   it('round-trips create → write → promote → query, preserving @en language tags on literals', async () => {

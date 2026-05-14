@@ -32,6 +32,12 @@ interface DKGAgentInternals {
 class CapturingGossip {
   messages: Array<{ topic: string; data: Uint8Array }> = [];
 
+  subscribe(_topic: string): void {}
+
+  unsubscribe(_topic: string): void {}
+
+  onMessage(_topic: string, _handler: (topic: string, data: Uint8Array, from?: string) => void | Promise<void>): void {}
+
   async publish(topic: string, data: Uint8Array): Promise<void> {
     this.messages.push({ topic, data });
   }

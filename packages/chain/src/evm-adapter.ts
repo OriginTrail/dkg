@@ -224,6 +224,12 @@ interface ContractCache {
   hub: Contract;
   identity?: Contract;
   profile?: Contract;
+  /**
+   * RFC 04 v0.3 — read getRelayCapable and listen for RelayCapabilityUpdated
+   * events from here. Profile.sol is the only writer (via onlyContracts) but
+   * the storage contract owns both the view surface and the event surface.
+   */
+  profileStorage?: Contract;
   knowledgeAssets?: Contract;
   knowledgeAssetsStorage?: Contract;
   knowledgeCollection?: Contract;
@@ -237,6 +243,19 @@ interface ContractCache {
   contextGraphStorage?: Contract;
   knowledgeAssetsV10?: Contract;
   publishingConvictionAccount?: Contract;
+  /**
+   * The V10 NFT-backed PCA (`DKGPublishingConvictionNFT`). Distinct from
+   * the legacy `publishingConvictionAccount` cache slot: lazy-settled
+   * escrow + agent reverse-lookup live on the NFT, while the legacy
+   * cache slot still backs the `getConvictionAccountInfo` / discount
+   * read paths off the older `PublishingConvictionAccount` contract.
+   * Used by the publisher SDK to detect PCA-funded publishes and
+   * mirror the `kcEpochs == lockDurationEpochs` eligibility check in
+   * `KnowledgeAssetsV10.publish()` — wrong epochs silently fall
+   * through to direct spend, so the SDK pre-coerces to keep the
+   * discount.
+   */
+  dkgPublishingConvictionNFT?: Contract;
   randomSampling?: Contract;
   randomSamplingStorage?: Contract;
 }
@@ -539,6 +558,38 @@ export class EVMChainAdapter implements ChainAdapter {
     return result;
   }
 
+  // =====================================================================
+  // RFC 04 v0.3 / Issue #461 — Network State Registry surface (relay-capable).
+  // Multiaddrs are NOT exposed here — they live in per-round attestation KCs
+  // (RFC 04 §5.2), not on Profile.
+  // =====================================================================
+
+  async getRelayCapable(identityId: bigint): Promise<boolean> {
+    await this.init();
+    if (!this.contracts.profileStorage) {
+      throw new Error('getRelayCapable: ProfileStorage not deployed on this Hub.');
+    }
+    return Boolean(await this.contracts.profileStorage.getRelayCapable(identityId));
+  }
+
+  async setRelayCapable(relayCapable: boolean): Promise<TxResult> {
+    await this.init();
+    if (!this.contracts.profile) {
+      throw new Error('setRelayCapable: Profile not deployed on this Hub.');
+    }
+    const identityId = await this.getIdentityId();
+    if (identityId === 0n) {
+      throw new Error('setRelayCapable: signer has no on-chain profile (call ensureProfile first).');
+    }
+    const tx = await this.contracts.profile.updateRelayCapable(identityId, relayCapable);
+    const receipt = await tx.wait();
+    return {
+      hash: receipt.hash,
+      blockNumber: receipt.blockNumber,
+      success: receipt.status === 1,
+    };
+  }
+
   private async resolveContract(name: string, abiName?: string): Promise<Contract> {
     let address: string;
     try {
@@ -594,6 +645,16 @@ export class EVMChainAdapter implements ChainAdapter {
     this.contracts.staking = await this.resolveContract('Staking');
     this.contracts.parametersStorage = await this.resolveContract('ParametersStorage');
 
+    // RFC 04 — ProfileStorage holds the relay registry views + events.
+    // Tolerated as optional so adapters bound to a Hub that pre-dates the
+    // Profile 1.2.0 / ProfileStorage 1.1.0 deploy still init cleanly; the
+    // relay-registry methods will throw with a clear message at call time.
+    try {
+      this.contracts.profileStorage = await this.resolveContract('ProfileStorage');
+    } catch {
+      // Older deployments without the relay registry surface.
+    }
+
     // V8 legacy contracts
     this.contracts.knowledgeCollection = await this.resolveContract('KnowledgeCollection');
     this.contracts.knowledgeCollectionStorage = await this.resolveAssetStorage('KnowledgeCollectionStorage');
@@ -630,6 +691,12 @@ export class EVMChainAdapter implements ChainAdapter {
       this.contracts.publishingConvictionAccount = await this.resolveContract('PublishingConvictionAccount');
     } catch {
       // PublishingConvictionAccount not deployed — conviction account operations unavailable
+    }
+
+    try {
+      this.contracts.dkgPublishingConvictionNFT = await this.resolveContract('DKGPublishingConvictionNFT');
+    } catch {
+      // DKGPublishingConvictionNFT not deployed — V10 PCA agent-resolution unavailable
     }
 
     try {
@@ -1329,6 +1396,30 @@ export class EVMChainAdapter implements ChainAdapter {
                   requiredSignatures: Number(parsed.args.requiredSignatures ?? 0),
                   accessPolicy: Number(parsed.args.accessPolicy ?? 0),
                   publishPolicy: Number(parsed.args.publishPolicy ?? 0),
+                  txHash: log.transactionHash,
+                },
+              };
+            }
+          }
+        }
+      }
+
+      // RFC 04 v0.3 / Issue #461 — Network State Registry events.
+      if (eventType === 'RelayCapabilityUpdated') {
+        const profileStorage = this.contracts.profileStorage;
+        if (profileStorage) {
+          const eventFilter = profileStorage.filters.RelayCapabilityUpdated();
+          const logs = await profileStorage.queryFilter(eventFilter, filter.fromBlock ?? 0, filter.toBlock);
+          for (const log of logs) {
+            const parsed = profileStorage.interface.parseLog({ topics: [...log.topics], data: log.data });
+            if (parsed) {
+              yield {
+                type: 'RelayCapabilityUpdated',
+                blockNumber: log.blockNumber,
+                data: {
+                  identityId: parsed.args.identityId?.toString() ?? '0',
+                  oldValue: Boolean(parsed.args.oldValue),
+                  newValue: Boolean(parsed.args.newValue),
                   txHash: log.transactionHash,
                 },
               };
@@ -2407,6 +2498,53 @@ export class EVMChainAdapter implements ChainAdapter {
     return await this.contracts.publishingConvictionAccount.authorizedKeys(accountId, key);
   }
 
+  /**
+   * Reverse-resolve a wallet to its V10 PCA account id, or `0n` if the
+   * wallet is not registered as a publishing agent. Mirrors the
+   * `DKGPublishingConvictionNFT.agentToAccountId(agent)` view.
+   *
+   * The publisher SDK uses this to decide, BEFORE building a publish
+   * tx, whether `KnowledgeAssetsV10.publish()` will route through the
+   * PCA discount branch — and therefore whether `publishEpochs` must
+   * be coerced to the PCA's `lockDurationEpochs`. Wrong epochs do NOT
+   * revert the contract any more; they just demote the publish to
+   * direct spend at full price.
+   *
+   * Returns `0n` (not registered) when the NFT contract is not
+   * deployed on this chain, the address is malformed, or the chain
+   * call fails — callers treat the unknown case as "no PCA path".
+   */
+  async getConvictionAgentAccountId(agent: string): Promise<bigint> {
+    await this.init();
+    if (!this.contracts.dkgPublishingConvictionNFT) return 0n;
+    if (!ethers.isAddress(agent)) return 0n;
+    try {
+      const id: bigint = await this.contracts.dkgPublishingConvictionNFT.agentToAccountId(agent);
+      return BigInt(id);
+    } catch (err: any) {
+      if (err?.code === 'CALL_EXCEPTION') return 0n;
+      throw err;
+    }
+  }
+
+  async getConvictionAccountLockDurationEpochs(accountId: bigint): Promise<number> {
+    await this.init();
+    if (!this.contracts.dkgPublishingConvictionNFT) return 0;
+    if (accountId <= 0n) return 0;
+    try {
+      // `accounts(uint256)` returns
+      // (committedTRAC, createdAtEpoch, expiresAtEpoch, createdAtTimestamp,
+      //  expiresAtTimestamp, lockDurationEpochs, discountBps,
+      //  lastSettledWindow, fullySwept). Pull index 5.
+      const tuple = await this.contracts.dkgPublishingConvictionNFT.accounts(accountId);
+      const lock = tuple[5];
+      return Number(lock);
+    } catch (err: any) {
+      if (err?.code === 'CALL_EXCEPTION') return 0;
+      throw err;
+    }
+  }
+
   async getConvictionAccountInfo(accountId: bigint): Promise<ConvictionAccountInfo | null> {
     await this.init();
     if (!this.contracts.publishingConvictionAccount) return null;
@@ -2430,6 +2568,13 @@ export class EVMChainAdapter implements ChainAdapter {
       if (err?.code === 'CALL_EXCEPTION') return null;
       throw err;
     }
+  }
+
+  async getPublishingConvictionAccountOwner(accountId: bigint): Promise<string> {
+    await this.init();
+    const nft = await this.resolveContract('DKGPublishingConvictionNFT');
+    const owner = await nft.ownerOf(accountId);
+    return ethers.getAddress(owner);
   }
 
   async getConvictionDiscount(accountId: bigint): Promise<{ discountBps: number; conviction: bigint }> {

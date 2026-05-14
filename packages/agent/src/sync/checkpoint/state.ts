@@ -1,3 +1,5 @@
+import type { SyncPhase } from '../auth/request-build.js';
+
 export interface SyncCheckpointStore {
   get(key: string): number | undefined;
   set(key: string, value: number): void;
@@ -8,7 +10,9 @@ export function getSyncCheckpointKey(
   remotePeerId: string,
   contextGraphId: string,
   includeSharedMemory: boolean,
-  phase: 'data' | 'meta',
+  phase: SyncPhase,
+  snapshotRef?: string,
 ): string {
-  return `${remotePeerId}|${contextGraphId}|${includeSharedMemory ? 'swm' : 'durable'}|${phase}`;
+  const refSuffix = phase === 'snapshot' && snapshotRef ? `|${snapshotRef}` : '';
+  return `${remotePeerId}|${contextGraphId}|${includeSharedMemory ? 'swm' : 'durable'}|${phase}${refSuffix}`;
 }

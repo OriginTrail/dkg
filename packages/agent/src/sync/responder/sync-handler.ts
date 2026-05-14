@@ -1,6 +1,7 @@
 import { createOperationContext, DKG_ONTOLOGY, MemoryLayer, type OperationContext } from '@origintrail-official/dkg-core';
 import { contextGraphDataGraphUri, contextGraphMetaGraphUri, contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri } from '@origintrail-official/dkg-core';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
+import { serializeWorkspacePublicSnapshotQuads, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
 import type { SyncRequestEnvelope } from '../auth/request-build.js';
 
 interface RegisterSyncHandlerParams {
@@ -10,6 +11,7 @@ interface RegisterSyncHandlerParams {
   syncPageSize: number;
   sharedMemoryTtlMs: number;
   store: TripleStore;
+  publicSnapshotStore?: WorkspacePublicSnapshotStore;
   peerId: string;
   parseSyncRequest: (data: Uint8Array) => SyncRequestEnvelope;
   authorizeSyncRequest: (request: SyncRequestEnvelope, remotePeerId: string) => Promise<boolean>;
@@ -25,6 +27,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     syncPageSize,
     sharedMemoryTtlMs,
     store,
+    publicSnapshotStore,
     parseSyncRequest,
     authorizeSyncRequest,
     logWarn,
@@ -57,7 +60,22 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
       const wsMetaGraph = contextGraphWorkspaceMetaGraphUri(contextGraphId);
       const cutoff = sharedMemoryTtlMs > 0 ? new Date(Date.now() - sharedMemoryTtlMs).toISOString() : null;
 
-      if (phase === 'meta') {
+      if (phase === 'snapshot') {
+        const snapshotRef = request.snapshotRef?.trim();
+        if (!snapshotRef || !publicSnapshotStore) {
+          return new TextEncoder().encode('');
+        }
+        const snapshot = await publicSnapshotStore.getSnapshot(snapshotRef);
+        if (!snapshot) {
+          return new TextEncoder().encode('');
+        }
+        const page = snapshot.slice(offset, offset + limit);
+        if (page.length === 0) {
+          return new TextEncoder().encode('');
+        }
+        nquads.push(serializeWorkspacePublicSnapshotQuads(page).trimEnd());
+        logDebug(createOperationContext('sync'), `Sync responder SWM snapshot for "${contextGraphId}" ref=${snapshotRef}: auth=${authDurationMs}ms quads=${page.length}`);
+      } else if (phase === 'meta') {
         const metaQuery = cutoff != null
           ? `SELECT ?s ?p ?o WHERE {
               GRAPH <${wsMetaGraph}> { ?s ?p ?o }

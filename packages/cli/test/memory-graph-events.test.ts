@@ -78,7 +78,7 @@ function createContext(path: string, body: unknown, overrides: Partial<RequestCo
     url,
     path: url.pathname,
     requestToken: undefined,
-    requestAgentAddress: '0x0',
+    requestAgentAddress: '0x0000000000000000000000000000000000000001',
     ...overrides,
   };
 }
@@ -104,6 +104,11 @@ describe('daemon memory_graph_changed route emissions', () => {
 
     expect((ctx.res as unknown as { statusCode: number }).statusCode).toBe(200);
     expect(responseBody(ctx)).toMatchObject({ contextGraphId: 'project-a', triplesWritten: 1 });
+    expect(share.mock.calls[0][2]).toMatchObject({
+      subGraphName: 'notes',
+      localOnly: false,
+      callerAgentAddress: '0x0000000000000000000000000000000000000001',
+    });
     expect(emitMemoryGraphChanged).toHaveBeenCalledWith({
       contextGraphId: 'project-a',
       layers: ['swm'],
@@ -266,6 +271,70 @@ describe('daemon memory_graph_changed route emissions', () => {
     expect((ctx.res as unknown as { statusCode: number }).statusCode).toBe(400);
     expect(share).not.toHaveBeenCalled();
     expect(emitMemoryGraphChanged).not.toHaveBeenCalled();
+  });
+
+  it('rejects unsafe shared-memory contextGraphId before calling the agent', async () => {
+    const emitMemoryGraphChanged = vi.fn();
+    const share = vi.fn();
+    const ctx = createContext('/api/shared-memory/write', {
+      contextGraphId: 'bad<id',
+      quads: [{ subject: 'urn:s', predicate: 'urn:p', object: 'urn:o' }],
+    }, {
+      agent: { share } as unknown as RequestContext['agent'],
+      emitMemoryGraphChanged,
+    });
+
+    await handleMemoryRoutes(ctx);
+
+    expect((ctx.res as unknown as { statusCode: number }).statusCode).toBe(400);
+    expect(responseBody(ctx).error).toMatch(/Invalid "contextGraphId"/);
+    expect(share).not.toHaveBeenCalled();
+    expect(emitMemoryGraphChanged).not.toHaveBeenCalled();
+  });
+
+  it('threads callerAgentAddress into conditional shared-memory writes', async () => {
+    const conditionalShare = vi.fn().mockResolvedValue({ shareOperationId: 'op-cas' });
+    const ctx = createContext('/api/shared-memory/conditional-write', {
+      contextGraphId: 'project-a',
+      quads: [{ subject: 'urn:s', predicate: 'urn:p', object: 'urn:o' }],
+      conditions: [{ subject: 'urn:s', predicate: 'urn:p', expectedValue: null }],
+    }, {
+      agent: { conditionalShare } as unknown as RequestContext['agent'],
+    });
+
+    await handleMemoryRoutes(ctx);
+
+    expect((ctx.res as unknown as { statusCode: number }).statusCode).toBe(200);
+    expect(conditionalShare.mock.calls[0][3]).toMatchObject({
+      callerAgentAddress: '0x0000000000000000000000000000000000000001',
+    });
+  });
+
+  it('threads callerAgentAddress into memory-turn SWM writes', async () => {
+    const share = vi.fn().mockResolvedValue({ shareOperationId: 'op-turn' });
+    const emitMemoryGraphChanged = vi.fn();
+    const fileStore = {
+      put: vi.fn().mockResolvedValue({ keccak256: 'turnhash' }),
+    };
+    const ctx = createContext('/api/memory/turn', {
+      contextGraphId: 'project-a',
+      markdown: '# Turn\n\nRemember this.',
+      layer: 'swm',
+    }, {
+      agent: { peerId: 'peer-test', share } as unknown as RequestContext['agent'],
+      fileStore: fileStore as unknown as RequestContext['fileStore'],
+      emitMemoryGraphChanged,
+    });
+
+    await handleMemoryRoutes(ctx);
+
+    expect((ctx.res as unknown as { statusCode: number }).statusCode).toBe(200);
+    expect(responseBody(ctx)).toMatchObject({ layer: 'swm', fileHash: 'turnhash' });
+    expect(share.mock.calls[0][2]).toMatchObject({
+      subGraphName: undefined,
+      localOnly: false,
+      callerAgentAddress: '0x0000000000000000000000000000000000000001',
+    });
   });
 
   it('emits SWM and VM refresh events after confirmed selective publishes', async () => {

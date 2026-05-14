@@ -1,5 +1,7 @@
 import { ethers } from 'ethers';
 
+export type SyncPhase = 'data' | 'meta' | 'snapshot';
+
 export interface SyncRequestEnvelope {
   contextGraphId: string;
   offset: number;
@@ -13,7 +15,8 @@ export interface SyncRequestEnvelope {
   requesterAgentAddress?: string;
   requesterSignatureR?: string;
   requesterSignatureVS?: string;
-  phase?: 'data' | 'meta';
+  phase?: SyncPhase;
+  snapshotRef?: string;
 }
 
 interface BuildSyncRequestParams {
@@ -23,7 +26,8 @@ interface BuildSyncRequestParams {
   includeSharedMemory: boolean;
   targetPeerId: string;
   requesterPeerId: string;
-  phase?: 'data' | 'meta';
+  phase?: SyncPhase;
+  snapshotRef?: string;
   needsAuth: boolean;
   computeSyncDigest: (
     contextGraphId: string,
@@ -59,6 +63,7 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
     targetPeerId,
     requesterPeerId,
     phase,
+    snapshotRef,
     needsAuth,
     computeSyncDigest,
     getIdentityId,
@@ -69,7 +74,11 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
 
   if (!needsAuth) {
     const prefix = includeSharedMemory ? `workspace:${contextGraphId}` : contextGraphId;
-    const phaseSuffix = phase === 'meta' ? '|meta' : '';
+    const phaseSuffix = phase === 'meta'
+      ? '|meta'
+      : phase === 'snapshot'
+        ? `|snapshot|${snapshotRef ?? ''}`
+        : '';
     return new TextEncoder().encode(`${prefix}|${offset}|${limit}${phaseSuffix}`);
   }
 
@@ -84,6 +93,7 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
     issuedAtMs: Date.now(),
   };
   if (phase) request.phase = phase;
+  if (snapshotRef) request.snapshotRef = snapshotRef;
 
   // Bind the "on behalf of" agent claim INTO the signed digest so the
   // responder's per-agent delegation lookup can't be steered by post-

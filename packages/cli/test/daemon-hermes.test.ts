@@ -84,6 +84,41 @@ function freshExtractionStatusTimes() {
   return { startedAt, completedAt };
 }
 
+function makeHermesAttachmentStore(refs: Array<{
+  assertionUri: string;
+  fileHash: string;
+  fileName: string;
+  detectedContentType?: string;
+  rootEntity?: string;
+  tripleCount?: number;
+  mdIntermediateHash?: string;
+  markdownForm?: string;
+}>) {
+  return {
+    query: vi.fn(async (sparql: string) => {
+      const ref = refs.find((candidate) => sparql.includes(`<${candidate.assertionUri}>`));
+      if (!ref) return { bindings: [] };
+      if (sparql.includes('SELECT ?fileHash')) {
+        return {
+          bindings: [{
+            fileHash: ref.fileHash,
+            contentType: ref.detectedContentType,
+            rootEntity: ref.rootEntity,
+            extractionStatus: 'completed',
+            tripleCount: ref.tripleCount != null ? String(ref.tripleCount) : undefined,
+            sourceFileName: ref.fileName,
+            mdIntermediateHash: ref.mdIntermediateHash,
+          }],
+        };
+      }
+      if (sparql.includes('?markdownForm')) {
+        return { bindings: ref.markdownForm ? [{ markdownForm: ref.markdownForm }] : [] };
+      }
+      return { bindings: [] };
+    }),
+  };
+}
+
 function deferred<T = void>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
   let reject!: (reason?: unknown) => void;
@@ -106,7 +141,7 @@ function makeHermesRouteContext(
     ctx: {
       req,
       res,
-      agent: { store: {} },
+      agent: { store: { query: vi.fn(async () => ({ bindings: [] })) } },
       config: makeConfig({
         localAgentIntegrations: {
           hermes: {
@@ -1265,6 +1300,11 @@ describe('Hermes daemon routes', () => {
       pipelineUsed: null,
       tripleCount: 0,
     };
+    const verifiedAttachmentRef = {
+      ...attachmentRef,
+      markdownHash: attachmentRef.fileHash,
+      markdownForm: `urn:dkg:file:${attachmentRef.fileHash}`,
+    };
     const contextEntries = [{
       key: 'target_context_graph',
       label: 'Target context graph',
@@ -1289,6 +1329,7 @@ describe('Hermes daemon routes', () => {
       hasChatTurn: vi.fn(async () => false),
       storeChatExchange: vi.fn(async () => {}),
     }, {}, '/api/hermes-channel/send');
+    ctx.agent.store = makeHermesAttachmentStore([attachmentRef]);
     ctx.extractionStatus.set(attachmentRef.assertionUri, {
       status: 'completed',
       fileName: attachmentRef.fileName,
@@ -1313,7 +1354,7 @@ describe('Hermes daemon routes', () => {
     expect(forwardedBodies).toHaveLength(1);
     expect(forwardedBodies[0]).toMatchObject({
       contextGraphId: 'project-1',
-      attachmentRefs: [attachmentRef],
+      attachmentRefs: [verifiedAttachmentRef],
     });
     expect(forwardedBodies[0].contextEntries[0]).toEqual(contextEntries[0]);
     expect(forwardedBodies[0].contextEntries[1]).toMatchObject({
@@ -1732,6 +1773,11 @@ describe('Hermes daemon routes', () => {
       pipelineUsed: null,
       tripleCount: 0,
     };
+    const verifiedAttachmentRef = {
+      ...attachmentRef,
+      markdownHash: attachmentRef.fileHash,
+      markdownForm: `urn:dkg:file:${attachmentRef.fileHash}`,
+    };
     vi.stubGlobal('fetch', vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       calls.push({ url: String(url), body: JSON.parse(String(init?.body)) });
       return new Response(JSON.stringify({
@@ -1762,6 +1808,7 @@ describe('Hermes daemon routes', () => {
         },
       },
     }, '/api/hermes-channel/send');
+    ctx.agent.store = makeHermesAttachmentStore([attachmentRef]);
     ctx.extractionStatus.set(attachmentRef.assertionUri, {
       status: 'completed',
       fileName: attachmentRef.fileName,
@@ -1796,13 +1843,19 @@ describe('Hermes daemon routes', () => {
     expect(systemPrompt).toContain('status="completed"');
     expect(systemPrompt).toContain('tripleCount=12');
     expect(systemPrompt).toContain('rootEntity="did:dkg:context-graph:project-1/assertion/notes"');
+    expect(systemPrompt).toContain(`markdownHash="${attachmentRef.fileHash}"`);
+    expect(systemPrompt).toContain('dkg_import_artifact_read_markdown');
+    expect(systemPrompt).toContain('dkg_semantic_enrichment_write');
+    expect(systemPrompt).toContain('Use dkg_import_artifact_resolve only when you need to re-check artifact metadata');
+    expect(systemPrompt).not.toContain('resolve the artifact with dkg_import_artifact_resolve');
+    expect(systemPrompt).not.toContain('Keep deterministic import assertions separate');
     expect(storeChatExchange).toHaveBeenCalledWith(
       'hermes:dkg-ui:attachments',
       'summarize attached context',
       'Hermes attachment reply',
       undefined,
       expect.objectContaining({
-        attachmentRefs: [attachmentRef],
+        attachmentRefs: [verifiedAttachmentRef],
         persistenceState: 'stored',
       }),
     );

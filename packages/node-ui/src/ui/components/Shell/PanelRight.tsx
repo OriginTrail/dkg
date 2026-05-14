@@ -136,6 +136,9 @@ function normalizeAttachmentFileName(file: File): string {
 
 function draftToAttachmentRef(draft: LocalAgentAttachmentDraft): LocalAgentChatAttachmentRef | null {
   if (draft.status !== 'completed' || !draft.result) return null;
+  const mdIntermediateHash = draft.result.extraction.mdIntermediateHash;
+  const markdownHash = mdIntermediateHash
+    ?? (draft.result.detectedContentType === 'text/markdown' ? draft.result.fileHash : undefined);
   return {
     id: draft.id,
     fileName: normalizeAttachmentFileName(draft.file),
@@ -147,6 +150,8 @@ function draftToAttachmentRef(draft: LocalAgentAttachmentDraft): LocalAgentChatA
     rootEntity: draft.result.rootEntity,
     extractionStatus: 'completed',
     tripleCount: draft.result.extraction.tripleCount ?? draft.result.extraction.triplesWritten,
+    ...(mdIntermediateHash ? { mdIntermediateHash } : {}),
+    ...(markdownHash ? { markdownHash, markdownForm: `urn:dkg:file:${markdownHash}` } : {}),
   };
 }
 

@@ -628,6 +628,9 @@ describe('DkgNodePlugin', () => {
     expect(toolNames).toContain('dkg_assertion_import_file');
     expect(toolNames).toContain('dkg_assertion_query');
     expect(toolNames).toContain('dkg_assertion_history');
+    expect(toolNames).toContain('dkg_import_artifact_resolve');
+    expect(toolNames).toContain('dkg_import_artifact_read_markdown');
+    expect(toolNames).toContain('dkg_semantic_enrichment_write');
     expect(toolNames).toContain('dkg_sub_graph_create');
     expect(toolNames).toContain('dkg_sub_graph_list');
     expect(toolNames).toContain('dkg_shared_memory_publish');
@@ -640,7 +643,7 @@ describe('DkgNodePlugin', () => {
     expect(toolNames).toContain('memory_search');
     // Keep this resilient as main adds new exported tools; this test already
     // asserts presence of the critical tool set above.
-    expect(registeredTools.length).toBeGreaterThanOrEqual(29);
+    expect(registeredTools.length).toBeGreaterThanOrEqual(32);
   });
 
   it('new dkg_assertion_* and dkg_sub_graph_* tools have the expected schema shape', () => {
@@ -682,6 +685,17 @@ describe('DkgNodePlugin', () => {
     expectRequired('dkg_assertion_discard', ['context_graph_id', 'name']);
     expectRequired('dkg_assertion_import_file', ['context_graph_id', 'name', 'file_path']);
     expectRequired('dkg_assertion_query', ['context_graph_id', 'name']);
+    expectRequired('dkg_import_artifact_resolve', ['context_graph_id', 'assertion_uri']);
+    expectRequired('dkg_import_artifact_read_markdown', ['context_graph_id', 'assertion_uri']);
+    expectRequired('dkg_semantic_enrichment_write', ['context_graph_id', 'assertion_uri', 'semantic_quads']);
+    expect(byName.get('dkg_semantic_enrichment_write')!.parameters.properties).not.toHaveProperty('name');
+    expect(byName.get('dkg_import_artifact_resolve')!.description).toMatch(/Optional validation\/debug helper/);
+    expect(byName.get('dkg_semantic_enrichment_write')!.description).toMatch(/Append model-derived semantic triples/);
+    expect(byName.get('dkg_semantic_enrichment_write')!.description).not.toMatch(/separate Working Memory assertion/);
+    expect(byName.get('dkg_import_artifact_read_markdown')!.parameters.properties.max_bytes).toMatchObject({
+      type: 'integer',
+    });
+    expect(byName.get('dkg_import_artifact_read_markdown')!.parameters.properties.max_bytes.description).toMatch(/positive integer/);
     expectRequired('dkg_assertion_history', ['context_graph_id', 'name']);
     expectRequired('dkg_sub_graph_create', ['context_graph_id', 'sub_graph_name']);
     expectRequired('dkg_sub_graph_list', ['context_graph_id']);
@@ -807,6 +821,123 @@ describe('DkgNodePlugin', () => {
         name: 'chat-turns',
         subGraphName: 'protocols',
       });
+    });
+
+    it('dkg_import_artifact_resolve forwards snake_case to the resolver route', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ artifact: { assertionUri: 'urn:x' } });
+      await byName.get('dkg_import_artifact_resolve')!.execute('tc', {
+        context_graph_id: 'ctx',
+        assertion_uri: 'did:dkg:context-graph:ctx/assertion/peer/imported',
+        file_hash: `sha256:${'a'.repeat(64)}`,
+        sub_graph_name: 'protocols',
+      });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://localhost:9200/api/assertion/import-artifact/resolve');
+      expect(JSON.parse(init.body as string)).toEqual({
+        contextGraphId: 'ctx',
+        assertionUri: 'did:dkg:context-graph:ctx/assertion/peer/imported',
+        fileHash: `sha256:${'a'.repeat(64)}`,
+        subGraphName: 'protocols',
+      });
+    });
+
+    it('dkg_import_artifact_read_markdown forwards max_bytes to the safe read route', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ markdown: '# Doc' });
+      await byName.get('dkg_import_artifact_read_markdown')!.execute('tc', {
+        context_graph_id: 'ctx',
+        assertion_uri: 'did:dkg:context-graph:ctx/assertion/peer/imported',
+        max_bytes: 4096,
+      });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://localhost:9200/api/assertion/import-artifact/read-markdown');
+      expect(JSON.parse(init.body as string)).toEqual({
+        contextGraphId: 'ctx',
+        assertionUri: 'did:dkg:context-graph:ctx/assertion/peer/imported',
+        maxBytes: 4096,
+      });
+    });
+
+    it('dkg_import_artifact_read_markdown coerces quoted max_bytes integers and rejects fractions', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ markdown: '# Doc' });
+      await byName.get('dkg_import_artifact_read_markdown')!.execute('tc', {
+        context_graph_id: 'ctx',
+        assertion_uri: 'did:dkg:context-graph:ctx/assertion/peer/imported',
+        max_bytes: '4096',
+      });
+      expect(JSON.parse((fetchMock.mock.calls[0] as [string, RequestInit])[1].body as string)).toMatchObject({
+        maxBytes: 4096,
+      });
+
+      const invalid = await byName.get('dkg_import_artifact_read_markdown')!.execute('tc', {
+        context_graph_id: 'ctx',
+        assertion_uri: 'did:dkg:context-graph:ctx/assertion/peer/imported',
+        max_bytes: 1.5,
+      });
+      expect(invalid.details?.error).toMatch(/positive integer/);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('dkg_semantic_enrichment_write normalizes plain semantic objects without promotion flags', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ promoted: false, published: false });
+      await byName.get('dkg_semantic_enrichment_write')!.execute('tc', {
+        context_graph_id: 'ctx',
+        assertion_uri: 'did:dkg:context-graph:ctx/assertion/peer/imported',
+        semantic_quads: [
+          { subject: 'urn:doc:1', predicate: 'http://schema.org/about', object: 'Topic' },
+          { subject: 'urn:doc:1', predicate: 'http://schema.org/author', object: 'mailto:alice@example.org' },
+        ],
+        generation_method: 'test-model',
+        agent_identity: 'did:dkg:agent:test',
+        generated_at: '2026-05-11T00:00:00.000Z',
+      });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://localhost:9200/api/assertion/semantic-enrichment/write');
+      const body = JSON.parse(init.body as string);
+      expect(body).toEqual({
+        contextGraphId: 'ctx',
+        assertionUri: 'did:dkg:context-graph:ctx/assertion/peer/imported',
+        semanticQuads: [
+          { subject: 'urn:doc:1', predicate: 'http://schema.org/about', object: '"Topic"' },
+          { subject: 'urn:doc:1', predicate: 'http://schema.org/author', object: 'mailto:alice@example.org' },
+        ],
+        generationMethod: 'test-model',
+        agentIdentity: 'did:dkg:agent:test',
+        generatedAt: '2026-05-11T00:00:00.000Z',
+      });
+      expect(body).not.toHaveProperty('name');
+      expect(body).not.toHaveProperty('semanticAssertionName');
+      expect(body).not.toHaveProperty('promote');
+      expect(body).not.toHaveProperty('publish');
+    });
+
+    it('dkg_semantic_enrichment_write rejects legacy target assertion names at the adapter boundary', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ promoted: false, published: false });
+      const result = await byName.get('dkg_semantic_enrichment_write')!.execute('tc', {
+        context_graph_id: 'ctx',
+        assertion_uri: 'did:dkg:context-graph:ctx/assertion/peer/imported',
+        semanticAssertionName: 'semantic-imported',
+        semantic_quads: [
+          { subject: 'urn:doc:1', predicate: 'http://schema.org/about', object: 'Topic' },
+        ],
+      });
+
+      expect(result.content[0].text).toMatch(/target assertion names are not supported/);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('dkg_semantic_enrichment_write rejects semantic graph placement at the adapter boundary', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ promoted: false, published: false });
+      const result = await byName.get('dkg_semantic_enrichment_write')!.execute('tc', {
+        context_graph_id: 'ctx',
+        assertion_uri: 'did:dkg:context-graph:ctx/assertion/peer/imported',
+        semantic_quads: [
+          { subject: 'urn:doc:1', predicate: 'http://schema.org/about', object: 'Topic', graph: 'urn:graph:forged' },
+        ],
+      });
+
+      expect(result.content[0].text).toMatch(/graph.*not supported/);
+      expect(result.details).toEqual(expect.objectContaining({ error: expect.stringMatching(/graph.*not supported/) }));
+      expect(fetchMock).not.toHaveBeenCalled();
     });
 
     it('dkg_context_graph_invite forwards snake_case → camelCase body', async () => {

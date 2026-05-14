@@ -174,6 +174,7 @@ export const DKG_ONTOLOGY = {
   DKG_ACCESS_POLICY: `${DKG}accessPolicy`,
   DKG_PARTICIPANT_IDENTITY_ID: `${DKG}participantIdentityId`,
   DKG_PARTICIPANT_AGENT: `${DKG}participantAgent`,
+  DKG_PUBLISH_AUTHORITY_ACCOUNT_ID: `${DKG}publishAuthorityAccountId`,
   // Agent-signed delegation: when an agent (allowedAgent / participantAgent)
   // is approved, the join request carries an AgentDelegation naming the
   // node that hosts the agent. The curator persists those delegatee
