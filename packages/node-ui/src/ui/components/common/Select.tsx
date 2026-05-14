@@ -146,10 +146,18 @@ export function Select({
       }
     } else if (e.key === 'Home') {
       e.preventDefault();
-      setHighlight(0);
+      // Find the first enabled option so Home doesn't land on a disabled
+      // entry that makes Enter a no-op (matches the ArrowUp/Down behavior).
+      const firstEnabled = options.findIndex((o) => !o.disabled);
+      if (firstEnabled >= 0) setHighlight(firstEnabled);
     } else if (e.key === 'End') {
       e.preventDefault();
-      setHighlight(options.length - 1);
+      // Find the last enabled option for the same reason.
+      let lastEnabled = -1;
+      for (let i = options.length - 1; i >= 0; i--) {
+        if (!options[i]?.disabled) { lastEnabled = i; break; }
+      }
+      if (lastEnabled >= 0) setHighlight(lastEnabled);
     }
   };
 

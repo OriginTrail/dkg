@@ -195,11 +195,13 @@ describe('Select (custom dropdown)', () => {
     await act(async () => {
       getPortalMenu()!.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true }));
     });
-    // End allows landing on the disabled Delta — it's the last option. The
-    // selection guard (Enter) further down still prevents committing it.
+    // End now skips disabled options (consistent with ArrowDown/ArrowUp), so
+    // it lands on Charlie — the last ENABLED option — instead of the
+    // disabled Delta entry below it. Enter on a disabled highlight was a
+    // no-op anyway; skipping at the navigation step avoids the dead-end.
     expect(
       getPortalMenu()!.querySelector('.v10-select-option.highlighted')?.textContent,
-    ).toBe('Delta');
+    ).toBe('Charlie');
 
     await unmount();
   });
@@ -230,19 +232,21 @@ describe('Select (custom dropdown)', () => {
 
   it('Enter on a disabled option does not commit and the menu stays open', async () => {
     const onChange = vi.fn();
-    const { trigger, unmount } = await renderSelect({ value: 'a', onChange });
+    // Initial value points at the disabled Delta option, so the menu opens
+    // with the highlight already on a disabled row. Keyboard navigation
+    // (Home/End/ArrowUp/ArrowDown) skips disabled now, but the Enter
+    // guard still has to be a no-op for this entry — that's what we're
+    // pinning down here.
+    const { trigger, unmount } = await renderSelect({ value: 'd', onChange });
 
     await act(async () => {
       trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     });
-    // Navigate to disabled Delta via End.
+    const menu = getPortalMenu()!;
+    expect(menu.querySelector('.v10-select-option.highlighted')?.textContent).toBe('Delta');
+
     await act(async () => {
-      getPortalMenu()!.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true }));
-    });
-    await act(async () => {
-      getPortalMenu()!.dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
-      );
+      menu.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     });
 
     expect(onChange).not.toHaveBeenCalled();
