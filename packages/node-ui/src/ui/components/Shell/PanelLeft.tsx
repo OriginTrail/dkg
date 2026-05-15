@@ -17,12 +17,9 @@ import {
 import {
   belongsInContextOracleSidebar,
   belongsInMyProjectsSidebar,
+  toSidebarIdentity,
   type AgentSidebarIdentity,
 } from '../../lib/contextGraphSidebar.js';
-
-function toSidebarIdentity(a: AgentIdentity): AgentSidebarIdentity {
-  return { agentDid: a.agentDid, peerId: a.peerId };
-}
 
 const CHEVRON_ICON = '▸';
 const COLLAPSE_ICON = '◂';

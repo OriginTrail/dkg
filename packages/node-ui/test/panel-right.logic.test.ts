@@ -106,6 +106,14 @@ function renderConnectedAgentsTab(overrides: Record<string, unknown> = {}) {
       { id: 'testing', name: 'Testing' },
       { id: 'agents', name: 'Agents' },
     ],
+    // ConnectedAgentsTab is presentational; the container derives this
+    // membership-filtered subset (covered by contextGraphSidebar
+    // computeSelectableProjects tests). Mirror availableProjects so the
+    // existing option-rendering assertions are unaffected.
+    selectableProjects: [
+      { id: 'testing', name: 'Testing' },
+      { id: 'agents', name: 'Agents' },
+    ],
     projectsLoading: false,
     onSelectProject: noop,
     attachments: [],
