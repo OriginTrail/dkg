@@ -4,7 +4,8 @@ import { DashboardView } from '../../views/DashboardView.js';
 import { ProjectView } from '../../views/ProjectView.js';
 import { MemoryLayerView } from '../../views/MemoryLayerView.js';
 import { MemoryStackView } from '../../views/MemoryStackView.js';
-import { authHeaders } from '../../api.js';
+import { authHeaders, fileUrl } from '../../api.js';
+import { MarkdownMessage } from '../chat/MarkdownMessage.js';
 
 const CLOSE_ICON = (
   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -57,7 +58,14 @@ function TabBar() {
 const TEXT_CONTENT_TYPES = ['text/', 'application/json', 'application/xml', 'application/javascript', 'application/x-yaml'];
 function isTextContentType(ct: string) { return TEXT_CONTENT_TYPES.some(t => ct.startsWith(t)); }
 
-function DocumentViewer({ docRef }: { docRef: string }) {
+// `expectedContentType` is the MIME the document list recorded for this file
+// (from the tab-id encoding). It is a hint passed to the daemon so it serves
+// the file inline with the right type; the authoritative type used for the
+// render branches below is `contentType`, read from the fetch response
+// headers. `docRef` is the full `urn:dkg:file:keccak256:<hex>` urn, or — when
+// the document has no source file — the entity uri, which does not start with
+// `urn:dkg:file:` and drives the "source not available" empty state.
+function DocumentViewer({ docRef, contentType: expectedContentType }: { docRef: string; contentType: string }) {
   const { tabs, activeTabId, closeTab } = useTabsStore();
   const setActiveTab = useTabsStore(s => s.setActiveTab);
   const [content, setContent] = useState<string | null>(null);
@@ -65,7 +73,9 @@ function DocumentViewer({ docRef }: { docRef: string }) {
   const [contentType, setContentType] = useState<string>('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<'formatted' | 'raw'>('formatted');
 
+  const hasFileRef = docRef.startsWith('urn:dkg:file:');
   const currentTab = tabs.find(t => t.id === activeTabId);
   const docLabel = currentTab?.label ?? 'Document';
 
@@ -85,10 +95,21 @@ function DocumentViewer({ docRef }: { docRef: string }) {
     setBlobUrl(null);
     setContentType('');
 
+    // No source file linked (docRef is the entity uri, not a file urn) —
+    // skip the request entirely; the render shows the empty state.
+    if (!hasFileRef) {
+      setLoading(false);
+      return;
+    }
+
+    // Strip only the `urn:dkg:file:` prefix so the algorithm-qualified
+    // digest (`keccak256:<hex>`) survives. fileUrl() passes it through
+    // unchanged and appends `?contentType=` so the daemon resolves the
+    // keccak pointer and serves the file inline with the right MIME type.
     const fileHash = docRef.replace('urn:dkg:file:', '');
     const controller = new AbortController();
 
-    fetch(`/api/file/${encodeURIComponent(fileHash)}`, { headers: authHeaders(), signal: controller.signal })
+    fetch(fileUrl(fileHash, expectedContentType || undefined), { headers: authHeaders(), signal: controller.signal })
       .then(async res => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const ct = res.headers.get('content-type') ?? 'application/octet-stream';
@@ -115,6 +136,14 @@ function DocumentViewer({ docRef }: { docRef: string }) {
       cancelled = true;
       controller.abort();
     };
+  }, [docRef, hasFileRef, expectedContentType]);
+
+  // Each newly opened document starts in the documented default view
+  // (Formatted). The toggle is per-document state, so it must reset when
+  // the viewer switches to a different doc — otherwise opening doc B after
+  // toggling doc A to Raw would surprise the user by showing B raw.
+  useEffect(() => {
+    setViewMode('formatted');
   }, [docRef]);
 
   useEffect(() => {
@@ -124,6 +153,14 @@ function DocumentViewer({ docRef }: { docRef: string }) {
 
   const isImage = contentType.startsWith('image/');
   const isPdf = contentType === 'application/pdf';
+  // Treat the document as markdown when either the served response type or
+  // the type recorded at import time says so — the daemon now returns the
+  // correct `text/markdown` for these files, but fall back to the encoded
+  // hint so the formatted view still engages if the header is generic.
+  const isMarkdown =
+    contentType.startsWith('text/markdown') ||
+    expectedContentType.startsWith('text/markdown');
+  const showToggle = !loading && !error && hasFileRef && isMarkdown && content !== null;
 
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
@@ -142,25 +179,85 @@ function DocumentViewer({ docRef }: { docRef: string }) {
           ← Back to Project
         </button>
         <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>📄 {docLabel}</span>
+        {showToggle && (
+          <div
+            role="group"
+            aria-label="Document view mode"
+            style={{
+              marginLeft: 'auto', display: 'flex', gap: 2, padding: 2,
+              border: '1px solid var(--border-default)', borderRadius: 6,
+              background: 'var(--bg-surface)',
+            }}
+          >
+            {(['formatted', 'raw'] as const).map(mode => {
+              const active = viewMode === mode;
+              return (
+                <button
+                  key={mode}
+                  type="button"
+                  aria-pressed={active}
+                  onClick={() => setViewMode(mode)}
+                  style={{
+                    border: 'none', borderRadius: 4, cursor: 'pointer',
+                    padding: '3px 12px', fontSize: 11, fontWeight: 600,
+                    fontFamily: 'var(--font-sans)',
+                    color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
+                    background: active ? 'var(--bg-elevated)' : 'transparent',
+                  }}
+                >
+                  {mode === 'formatted' ? 'Formatted' : 'Raw'}
+                </button>
+              );
+            })}
+          </div>
+        )}
       </div>
       <div style={{ flex: 1, overflow: 'auto', padding: '20px 24px' }}>
-        {loading && <div style={{ color: 'var(--text-tertiary)', fontSize: 12 }}>Loading document...</div>}
-        {error && <div style={{ color: 'var(--accent-red)', fontSize: 12 }}>Failed to load: {error}</div>}
-        {!loading && isImage && blobUrl && (
-          <img src={blobUrl} alt={docLabel} style={{ maxWidth: '100%', borderRadius: 8 }} />
-        )}
-        {!loading && isPdf && blobUrl && (
-          <iframe src={blobUrl} title={docLabel} style={{ width: '100%', height: '100%', border: 'none', borderRadius: 8 }} />
-        )}
-        {content && !isImage && !isPdf && (
-          <pre style={{
-            fontFamily: 'var(--font-mono)', fontSize: 12, lineHeight: 1.7,
-            color: 'var(--text-primary)', whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-            background: 'var(--bg-surface)', borderRadius: 8, padding: 16,
-            border: '1px solid var(--border-default)', margin: 0,
+        {!hasFileRef ? (
+          <div style={{
+            display: 'flex', flexDirection: 'column', alignItems: 'center',
+            justifyContent: 'center', gap: 10, height: '100%',
+            color: 'var(--text-tertiary)', textAlign: 'center',
           }}>
-            {content}
-          </pre>
+            <span style={{ fontSize: 28, opacity: 0.6 }}>📄</span>
+            <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)' }}>
+              Source file not available for this document
+            </span>
+            <span style={{ fontSize: 12, maxWidth: 360, lineHeight: 1.6 }}>
+              This document was indexed into the graph without a stored source
+              file, so there is nothing to preview here. You can still explore
+              its extracted entities and relationships in the graph.
+            </span>
+          </div>
+        ) : (
+          <>
+            {loading && <div style={{ color: 'var(--text-tertiary)', fontSize: 12 }}>Loading document...</div>}
+            {error && <div style={{ color: 'var(--accent-red)', fontSize: 12 }}>Failed to load: {error}</div>}
+            {!loading && isImage && blobUrl && (
+              <img src={blobUrl} alt={docLabel} style={{ maxWidth: '100%', borderRadius: 8 }} />
+            )}
+            {!loading && isPdf && blobUrl && (
+              <iframe src={blobUrl} title={docLabel} style={{ width: '100%', height: '100%', border: 'none', borderRadius: 8 }} />
+            )}
+            {content !== null && !isImage && !isPdf && isMarkdown && viewMode === 'formatted' && (
+              <div style={{
+                background: 'var(--bg-surface)', borderRadius: 8, padding: '16px 20px',
+                border: '1px solid var(--border-default)', color: 'var(--text-primary)',
+              }}>
+                <MarkdownMessage content={content} />
+              </div>
+            )}
+            {content !== null && !isImage && !isPdf && !(isMarkdown && viewMode === 'formatted') && (
+              <pre style={{
+                fontFamily: 'var(--font-mono)', fontSize: 12, lineHeight: 1.7,
+                color: 'var(--text-primary)', whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                background: 'var(--bg-surface)', borderRadius: 8, padding: 16,
+                border: '1px solid var(--border-default)', margin: 0,
+              }}>
+                {content}
+              </pre>
+            )}
+          </>
         )}
       </div>
     </div>
@@ -222,10 +319,19 @@ function ViewContainer() {
   }
 
   if (activeTabId.startsWith('doc:')) {
-    const raw = activeTabId.slice(4);
-    const lastColon = raw.lastIndexOf(':');
-    const docRef = lastColon > 0 ? raw.slice(lastColon + 1) : raw;
-    return <DocumentViewer docRef={docRef} />;
+    // Tab id shape: `doc:<contextGraphId>|<fileRef>|<contentType>` (see
+    // DocumentsList.handleOpenDoc). Split on the first and last `|` so a
+    // context-graph id containing `:` (or even `|`) stays intact: only the
+    // middle segment is the file ref. `fileRef` keeps its full
+    // `urn:dkg:file:keccak256:<hex>` form so the daemon resolves the digest
+    // with the correct algorithm. A legacy id with no `|` falls back to the
+    // whole payload as docRef (the viewer then shows the empty state).
+    const raw = activeTabId.slice('doc:'.length);
+    const firstPipe = raw.indexOf('|');
+    const lastPipe = raw.lastIndexOf('|');
+    const docRef = firstPipe < 0 ? raw : raw.slice(firstPipe + 1, lastPipe);
+    const contentType = firstPipe < 0 ? '' : raw.slice(lastPipe + 1);
+    return <DocumentViewer docRef={docRef} contentType={contentType} />;
   }
 
   if (activeTabId.startsWith('wm:')) {

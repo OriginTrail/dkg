@@ -1787,11 +1787,18 @@ export function DocumentsList({ entities, contextGraphId }: { entities: MemoryEn
   }, [entities]);
 
   const handleOpenDoc = (e: MemoryEntity) => {
+    // Tab id shape: `doc:<contextGraphId>|<fileRef>|<contentType>`. The `|`
+    // delimiter mirrors the `agent:` tab convention; it cannot appear in a
+    // `urn:dkg:file:keccak256:<hex>` ref, a context-graph id, or a MIME type,
+    // so the decoder can split unambiguously. We keep the FULL file ref
+    // (algorithm prefix intact) — stripping `keccak256:` would make the
+    // daemon misread the digest as sha256 and 404. When no source file is
+    // linked we encode the entity uri; the viewer detects the missing
+    // `urn:dkg:file:` prefix and shows a friendly empty state.
     const fileRef = e.connections.find(c => c.predicate === MARKDOWN_FORM || c.predicate === SOURCE_FILE)?.targetUri;
-    const fileHash = fileRef?.replace('urn:dkg:file:', '') ?? '';
-    const scope = contextGraphId ? `${contextGraphId}:` : '';
+    const contentType = e.properties.get(SOURCE_CONTENT_TYPE)?.[0] ?? '';
     openTab({
-      id: `doc:${scope}${fileHash || e.uri}`,
+      id: `doc:${contextGraphId ?? ''}|${fileRef ?? e.uri}|${contentType}`,
       label: e.label,
       closable: true,
       icon: '📄',
