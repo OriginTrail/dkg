@@ -404,9 +404,13 @@ describe('MarkdownMessage streaming caret (PR5 item C)', () => {
   it('does not inject the caret into a trailing fenced code block', async () => {
     const { container, unmount } = await renderStreaming('text\n\n```\ncode line\n```', true);
     // Code content is rebuilt from the raw AST by CodeBlock, so a caret
-    // there would be dropped — assert it is NOT inside the code block.
-    const codeRegion = container.querySelector('pre, code');
-    expect(codeRegion?.querySelector('.v10-chat-cursor')).toBeFalsy();
+    // there would be dropped — assert it is NOT inside the fenced block.
+    // Scope to `.v10-md-pre` (the CodeBlock container) specifically:
+    // a bare `pre, code` selector would also match inline <code>, which
+    // legitimately CAN hold the caret (see the inline-code test above).
+    const fenced = container.querySelector('.v10-md-pre');
+    expect(fenced).toBeTruthy();
+    expect(fenced?.querySelector('.v10-chat-cursor')).toBeFalsy();
     await unmount();
   });
 });
