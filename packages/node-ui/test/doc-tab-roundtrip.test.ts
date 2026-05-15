@@ -93,34 +93,43 @@ async function mount(node: React.ReactElement): Promise<Mounted> {
   };
 }
 
-/**
- * Replace global fetch with a recorder that returns a controlled markdown
- * (or arbitrary) response. Returns the list of URLs the component requested.
- *
- * Uses `vi.stubGlobal` rather than a bare `globalThis.fetch =` assignment so
- * vitest deterministically restores the original in `afterEach`
- * (`vi.unstubAllGlobals`). A manual assignment plus a module-load-time
- * `realFetch` capture is order-sensitive: if another suite in the same
- * worker mutates `globalThis.fetch`, the captured "original" is already
- * polluted and these tests flake depending on file execution order.
- */
+// Records every fetch the component issues. `beforeEach` installs a default
+// stub so EVERY test (incl. the DocumentsList encode tests that never fetch)
+// runs against a clean, deterministic `globalThis.fetch` from the very first
+// render — never an unstubbed or cross-file-contaminated global. vitest runs
+// test files in parallel workers sharing one globalThis, and ~6 sibling
+// suites also stub `fetch`; installing the stub in `beforeEach` (mirroring
+// use-memory-entities-live-updates.test.ts) + `vi.unstubAllGlobals()` in
+// `afterEach` is the proven isolation pattern in this package. Stubbing
+// mid-test (after render) instead races React effects and flakes.
+let fetchCalls: string[] = [];
+let fetchMock: ReturnType<typeof vi.fn>;
+
+/** Reconfigure the active fetch stub's response. Returns the live recorder. */
 function stubFetch(body: string, contentType: string) {
-  const calls: string[] = [];
-  const fn = vi.fn(async (input: any) => {
-    calls.push(String(input));
+  fetchMock.mockImplementation(async (input: any) => {
+    fetchCalls.push(String(input));
     return new Response(body, {
       status: 200,
       headers: { 'content-type': contentType },
     });
   });
-  vi.stubGlobal('fetch', fn);
-  return { calls, fn };
+  return { calls: fetchCalls, fn: fetchMock };
 }
 
 beforeEach(() => {
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
   document.body.innerHTML = '';
   resetTabs();
+  fetchCalls = [];
+  // Default: a 404 recorder. Tests that expect a successful body call
+  // stubFetch() to override; tests asserting "no fetch" simply assert the
+  // mock was never called (a leaked real fetch cannot satisfy that).
+  fetchMock = vi.fn(async (input: any) => {
+    fetchCalls.push(String(input));
+    return new Response('not found', { status: 404 });
+  });
+  vi.stubGlobal('fetch', fetchMock);
 });
 
 afterEach(() => {
