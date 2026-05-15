@@ -414,6 +414,20 @@ function renderMessageContent(
   streaming: boolean,
 ): React.ReactNode {
   const normalized = normalizeMessageContent(content);
+  // Pre-first-token wait: an assistant turn starts as `{ streaming:
+  // true, content: '' }`. The inline streaming caret lives inside the
+  // last text node, so with no content yet there is nothing to anchor
+  // it to and the row would render blank. Show an explicit animated
+  // "Thinking…" indicator until the first token arrives, at which
+  // point this falls through to the markdown path (whose inline caret
+  // then takes over). `role=status`/`aria-live` announces it to AT.
+  if (role === 'assistant' && streaming && normalized.trim() === '') {
+    return (
+      <span className="v10-chat-thinking" role="status" aria-live="polite">
+        Thinking…
+      </span>
+    );
+  }
   // Markdown rendering applies only to agent-authored assistant output
   // — the only content that's actually written as markdown. Everything
   // else falls back to plain text:
