@@ -163,23 +163,42 @@ describe('PanelRight logic helpers', () => {
     expect(formatLocalTimestamp('not-a-date')).toBe('not-a-date');
   });
 
-  it('unescapeNewlinesFromHistory: decodes persisted-escaped payloads but preserves intentional literals (Codex CLWmd)', () => {
-    // Persisted-escaped: no real newlines, only literal `\n`. Decode.
-    expect(unescapeNewlinesFromHistory('line one\\nline two')).toBe('line one\nline two');
-    expect(unescapeNewlinesFromHistory('one\\ntwo\\nthree')).toBe('one\ntwo\nthree');
+  it('unescapeNewlinesFromHistory: decodes persisted markdown but preserves single-line JSON / code literals (Codex CLWmd / CNGB8)', () => {
+    // Persisted markdown (paragraph break) → decode.
+    expect(unescapeNewlinesFromHistory('para one\\n\\npara two')).toBe('para one\n\npara two');
+    // Heading marker after `\\n` → decode.
+    expect(unescapeNewlinesFromHistory('# Title\\n\\nbody')).toBe('# Title\n\nbody');
+    // Bullet list → decode.
+    expect(unescapeNewlinesFromHistory('intro\\n- a\\n- b')).toBe('intro\n- a\n- b');
+    // Ordered list → decode.
+    expect(unescapeNewlinesFromHistory('intro\\n1. first\\n2. second')).toBe('intro\n1. first\n2. second');
+    // Fenced code block → decode.
+    expect(unescapeNewlinesFromHistory('explain:\\n```ts\\nfoo\\n```')).toBe('explain:\n```ts\nfoo\n```');
+    // Table → decode (the `\\n|` boundary is the structural marker).
+    expect(unescapeNewlinesFromHistory('table:\\n| a | b |\\n|---|---|\\n| 1 | 2 |')).toBe(
+      'table:\n| a | b |\n|---|---|\n| 1 | 2 |',
+    );
+    // Blockquote → decode.
+    expect(unescapeNewlinesFromHistory('intro\\n> quoted')).toBe('intro\n> quoted');
 
-    // Live content that round-tripped correctly: has real newlines, may
-    // also contain intentional `\\n` literals from code/JSON samples.
-    // Don't touch — round-1 blanket decode corrupted exactly this case.
+    // Single-line JSON / code samples WITHOUT markdown markers →
+    // preserve. The `\\n` between alphanumerics or quotes matches none
+    // of the structure regexes (Codex CNGB8 — the specific corruption
+    // that round-2.1's "no real newlines anywhere" rule still produced).
+    expect(unescapeNewlinesFromHistory('{"text":"a\\nb"}')).toBe('{"text":"a\\nb"}');
+    expect(unescapeNewlinesFromHistory('echo -e "a\\nb"')).toBe('echo -e "a\\nb"');
+    expect(unescapeNewlinesFromHistory('contains the sequence \\n as a literal')).toBe('contains the sequence \\n as a literal');
+
+    // Live content (has real newlines) → never touched, regardless of
+    // whether it also contains intentional `\\n` literals from code.
     expect(unescapeNewlinesFromHistory('json:\n{"text":"a\\nb"}')).toBe('json:\n{"text":"a\\nb"}');
-    expect(unescapeNewlinesFromHistory('echo -e "a\\nb"\nrunme')).toBe('echo -e "a\\nb"\nrunme');
 
-    // Windows CRLF (`\\r\\n`) decodes ahead of `\\n` so we don't leave a
-    // half-decoded `\\r` + real newline (Codex CLWmd secondary concern).
-    expect(unescapeNewlinesFromHistory('line one\\r\\nline two')).toBe('line one\nline two');
-    expect(unescapeNewlinesFromHistory('one\\r\\ntwo\\r\\nthree')).toBe('one\ntwo\nthree');
+    // Windows CRLF decodes ahead of `\\n` so we don't half-decode
+    // (Codex CLWmd secondary concern). Only fires when the markdown-
+    // marker gate has already opened.
+    expect(unescapeNewlinesFromHistory('para one\\r\\n\\r\\npara two')).toBe('para one\n\npara two');
 
-    // Edge cases: undefined / empty / no escapes → no-op.
+    // Edge cases.
     expect(unescapeNewlinesFromHistory(undefined)).toBe('');
     expect(unescapeNewlinesFromHistory('')).toBe('');
     expect(unescapeNewlinesFromHistory('plain text no newlines')).toBe('plain text no newlines');

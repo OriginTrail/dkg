@@ -303,47 +303,68 @@ function buildChatContextEntries(
 
 /**
  * Un-escape literal backslash-n in history-loaded text — but only
- * when the persistence layer was the one that did the escape.
+ * when the text carries unambiguous "this came from the buggy
+ * persistence path on markdown content" signals.
  *
- * Why this exists: the DKG-memory persistence path can store message
+ * Background: the DKG-memory persistence layer can store message
  * text with newlines encoded as literal `\n` (backslash + the letter
- * n), not as real `
-` characters. When the panel reloads history,
- * raw `\\n` shows up inline and breaks markdown parsing (paragraphs
- * run together, code fences don't open, table separators don't
- * render).
+ * n). When the panel reloads history, raw `\\n` shows up inline and
+ * breaks markdown parsing — paragraphs run together, code fences
+ * don't open, table separators don't render. Visible in PR4 user
+ * testing after a refresh.
  *
  * Why this is heuristic: round-17 (Codex CHWpS) deliberately removed
  * a blanket `\\n` → `\n` rewrite from `normalizeMessageContent`
- * because it corrupted legitimate `\\n` content in live-stream code
- * samples — JSON like `{"text":"a\\nb"}`, shell like
- * `echo -e "a\\nb"`. Round-2 of PR4 re-introduced the same
- * corruption for the history path. Codex CLWmd correctly flagged
- * that blanket-decoding history-loaded content was also lossy.
+ * because it corrupted live-stream code samples — JSON like
+ * `{"text":"a\\nb"}`, shell like `echo -e "a\\nb"`. Round-2 of PR4
+ * re-introduced the same corruption for the history path. Codex
+ * CLWmd flagged it. Round-2.1 narrowed to "no real newlines anywhere"
+ * but still mangled single-line JSON examples that contain literal
+ * `\\n`. Codex CNGB8 flagged that too.
  *
- * The detection rule: persisted-and-escaped content has zero real
- * newlines (the persistence layer replaced them all with `\\n`).
- * Live content that round-tripped correctly through persistence keeps
- * its real newlines. So:
+ * The right answer is daemon-side: the persistence layer should
+ * round-trip strings faithfully (raw UTF-8 with real newlines).
+ * Until that lands, this heuristic decodes only when the text
+ * carries one of seven unambiguous markdown-structure markers
+ * AFTER a `\\n`:
  *
- *   - If `text` already contains ANY real `
-` or `\r`, treat the
- *     `\\n` sequences as intentional literals (code/JSON samples,
- *     escaped-but-already-decoded payloads) and leave them alone.
- *   - Otherwise the persistence-layer encoding is the only plausible
- *     source of the `\\n`s, so decode. `\\r\\n` is decoded first
- *     so we don't leave a half-decoded `\r` + real `
-` (Codex
- *     CLWmd's secondary concern).
+ *   - `\\n\\n`     paragraph break
+ *   - `\\n#`       heading
+ *   - `\\n- ` / `\\n* `   bullet list
+ *   - `\\n[0-9]+. `       ordered list
+ *   - `\\n` + ``` + `` `` ``  fenced code block
+ *   - `\\n|`       table row
+ *   - `\\n>`       blockquote
  *
- * False-positive scope: a single-line agent message that intentionally
- * contains a literal `\\n` AND no real newline AND gets persisted.
- * That's a rare combination and only the daemon-side persistence
- * roundtrip fix would address it cleanly.
+ * Single-line JSON-ish payloads like `{"text":"a\\nb"}` (where `\\n`
+ * lives between alphanumerics or quotes) match none of these — they
+ * survive unchanged. A persisted plain "line1\\nline2" two-line
+ * message also doesn't match — false negative, but rare and
+ * cosmetically acceptable.
+ *
+ * Also: text that already contains any real `\r` or `\n` is left
+ * alone (live content or correctly-round-tripped persistence —
+ * `\\n` in that content is intentional). `\\r\\n` is decoded ahead
+ * of `\\n` so we don't half-decode CRLF (Codex CLWmd secondary
+ * concern).
  */
 export function unescapeNewlinesFromHistory(text: string | undefined): string {
   if (!text) return '';
   if (/[\r\n]/.test(text)) return text;
+  // Pre-collapse `\\r\\n` → `\\n` for the marker check so CRLF and LF
+  // payloads share the same regex set (CRLF content like
+  // `para\\r\\n\\r\\nfoo` would otherwise miss the `\\n\\n` paragraph-
+  // break marker because the `\\n`s aren't adjacent).
+  const probe = text.replace(/\\r\\n/g, '\\n');
+  const looksLikePersistedMarkdown =
+    /\\n\\n/.test(probe)
+    || /\\n#/.test(probe)
+    || /\\n[-*]\s/.test(probe)
+    || /\\n\d+\.\s/.test(probe)
+    || /\\n```/.test(probe)
+    || /\\n\|/.test(probe)
+    || /\\n>/.test(probe);
+  if (!looksLikePersistedMarkdown) return text;
   return text.replace(/\\r\\n/g, '\n').replace(/\\n/g, '\n');
 }
 
