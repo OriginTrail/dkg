@@ -1141,7 +1141,13 @@ export class ChatMemoryManager {
         const candidateStatus = normalizePersistenceStatus(mb.transitionState ?? mb.persistenceState ?? '');
         const transitionAssistantReply = String(mb.transitionAssistantReply ?? '');
         if (message.author === 'agent' && candidateStatus === 'stored' && transitionAssistantReply) {
-          message.text = stripRdfLiteral(transitionAssistantReply);
+          // The transition `assistantReply` is written via `JSON.stringify`
+          // (see opts.assistantReply quad) exactly like the base
+          // `schema:text`, so it needs the same decode — otherwise a
+          // stored turn (the dominant path on reload) overwrites the
+          // correctly-decoded base text with a literal-`\n` string and
+          // markdown breaks after refresh again.
+          message.text = decodeRdfStringLiteral(transitionAssistantReply);
         }
         const transitionAttachmentRefs = parseAttachmentRefsLiteral(String(mb.transitionAttachmentRefs ?? ''));
         if (message.author === 'user' && candidateStatus === 'stored' && transitionAttachmentRefs?.length) {

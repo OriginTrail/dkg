@@ -609,6 +609,43 @@ describe('ChatMemoryManager', () => {
     expect(session!.messages[1].persistStatus).toBe('stored');
   });
 
+  it('getSession decodes a multi-line assistant reply from the stored transition path', async () => {
+    // Regression for Codex round-6: the stored-transition overwrite at
+    // chat-memory.ts must use decodeRdfStringLiteral, not the
+    // wrapper-only stripRdfLiteral — otherwise a persisted (stored)
+    // assistant turn (the dominant path on reload) comes back with
+    // literal `\n` and markdown breaks after refresh again. The
+    // transition `assistantReply` is written via JSON.stringify, so
+    // the daemon literal carries escaped newlines.
+    const richReply = '# Title\n\nPara one\n\n- item a\n- item b\n\n```ts\nconst x = 1;\n```';
+    mockQuery.returns.push(
+      { bindings: [] },
+      {
+        bindings: [
+          {
+            m: 'urn:dkg:chat:msg:agent-1',
+            author: 'urn:dkg:chat:actor:agent',
+            text: JSON.stringify('Draft reply'),
+            ts: '"2026-01-01T12:00:01Z"',
+            turnId: '"turn-1"',
+            persistenceState: '"pending"',
+            transitionState: '"stored"',
+            transitionAssistantReply: JSON.stringify(richReply),
+          },
+        ],
+      },
+    );
+
+    const session = await manager.getSession('test-session-transition-multiline');
+
+    expect(session).not.toBeNull();
+    expect(session!.messages).toHaveLength(1);
+    // Real newlines recovered — NOT the literal two-char `\n` escape.
+    expect(session!.messages[0].text).toBe(richReply);
+    expect(session!.messages[0].text).not.toContain('\\n');
+    expect(session!.messages[0].persistStatus).toBe('stored');
+  });
+
   it('getStats returns session and triple counts', async () => {
     mockQuery.returns.push(
       { bindings: [] },

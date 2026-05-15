@@ -149,11 +149,19 @@ describe('PanelRight logic helpers', () => {
     // both the day and the time. We don't pin the exact string here —
     // locale formatting varies across runners — but we do pin that the
     // formatted output includes both date and time signals.
-    const out = formatLocalTimestamp(new Date(Date.UTC(2026, 4, 14, 22, 5, 0)));
-    expect(out).toMatch(/2026/);
-    // Time portion always carries a colon or "AM/PM" marker — at
-    // least one of these must be present regardless of locale.
-    expect(out).toMatch(/:|AM|PM/);
+    const d = new Date(Date.UTC(2026, 4, 14, 22, 5, 0));
+    const out = formatLocalTimestamp(d);
+    // Locale-agnostic: pin the actual PR4 contract (medium date +
+    // short time) by comparing against the same Intl API the helper
+    // uses, rather than hard-coding en-US / Gregorian traits like
+    // "2026" or ":" / "AM|PM" (which break under non-English or
+    // non-Gregorian runtime locales — Codex round-6).
+    expect(out).toBe(d.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }));
+    // The regression PR4 fixed: the date component must be present, so
+    // a full render differs from a time-only render. Compared in the
+    // runtime locale, so this holds in any locale/calendar.
+    expect(out).not.toBe(d.toLocaleString([], { timeStyle: 'short' }));
+    expect(out).toContain(new Intl.DateTimeFormat(undefined, { year: 'numeric' }).format(d));
     // Empty / null / invalid inputs return an empty string (or echo
     // the original on parse failure) — no exceptions.
     expect(formatLocalTimestamp(undefined)).toBe('');
