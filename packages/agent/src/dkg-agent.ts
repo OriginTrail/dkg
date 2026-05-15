@@ -576,6 +576,18 @@ export interface ContextGraphSub {
   participantIdentityIds?: bigint[];
   /** Participant agent addresses (V10 agent identity model). */
   participantAgents?: string[];
+  /**
+   * Set to true between receiving a curator `join-approved` notification
+   * and the first successful meta sync for this CG. Lets `listContextGraphs`
+   * surface freshly-joined curated CGs in the UI's "waiting for sync" state
+   * before `_meta` triples arrive — without this flag, a curated CG with
+   * no `onChainId` and no local content yet is filtered out as a "phantom"
+   * subscription and the project entry doesn't appear in the sidebar until
+   * the periodic catchup reconciler eventually pulls meta (~2 min worst
+   * case). In-memory only; not persisted because the periodic reconciler
+   * always recovers post-restart by populating `metaSynced` directly.
+   */
+  pendingMeta?: boolean;
 }
 
 export interface ContextGraphSubscriptionRecord {
@@ -1868,7 +1880,34 @@ export class DKGAgent {
               source: 'join-approved',
             });
             this.joinRequestAcceptedBy.delete(`${contextGraphId}::${approvedAddr.toLowerCase()}`);
-            this.syncContextGraphFromConnectedPeers(contextGraphId, { includeSharedMemory: true }).catch(() => {});
+            // Mark the subscription as "expecting meta" so listContextGraphs
+            // surfaces it in the UI immediately (with synced=false) instead
+            // of filtering it out as a phantom subscription until meta-sync
+            // completes. Cleared in `refreshMetaSyncedFlags` once meta lands.
+            //
+            // `metaSynced: false` is set together with `pendingMeta: true`
+            // because the two are complementary, not redundant: `metaSynced`
+            // is the FACTUAL state that downstream safety guards check
+            // (`shouldCreateImplicitSharedMemoryContextGraph` and the curated
+            // gossip pre-meta gate in gossip-publish-handler.ts both use
+            // strict `metaSynced === false` equality), and `pendingMeta` is
+            // the UI affordance layered on top. Without `metaSynced: false`,
+            // a freshly-approved private CG slips past both guards in the
+            // window between approval and the first `_meta` arrival — any
+            // SWM write or inbound gossip in that window then gets inferred
+            // as a public CG locally, which is the exact corruption these
+            // guards exist to prevent. Lex review on PR #517 round 2 + Codex.
+            this.markContextGraphSubscriptionState(contextGraphId, {
+              pendingMeta: true,
+              metaSynced: false,
+            });
+            // Sync immediately by targeting the curator peer we just received
+            // this notification from, instead of relying on the periodic
+            // catchup reconciler to pick it up minutes later. The previous
+            // `.catch(() => {})` swallowed every failure mode silently and
+            // also went through the regular peer-ranking path that produced
+            // zero sync attempts in the just-approved-but-no-meta-yet window.
+            void this.runImmediatePostApprovalSync(contextGraphId, peerId.toString());
             this.eventBus.emit(DKGEvent.JOIN_APPROVED, {
               contextGraphId,
               agentAddress: approvedAddr,
@@ -2915,6 +2954,89 @@ export class DKGAgent {
     await primeCatchupConnectionsAtom(this.node.libp2p as any, this.discovery, this.peerId);
   }
 
+  /**
+   * Pull `_meta` (and SWM) for a CG immediately after receiving a curator
+   * `join-approved` notification, targeting the curator peer directly.
+   *
+   * Fixes the ~107s window where a freshly-approved curated CG sat
+   * unsynced because the previous post-approval call
+   * (`syncContextGraphFromConnectedPeers(...).catch(() => {})`):
+   *
+   *   1. Swallowed every failure mode — including the case where the
+   *      regular peer-ranking heuristics produced zero sync attempts
+   *      because no other peer announced the CG yet (the freshly-
+   *      approved-but-no-meta-yet window). The next sync attempt only
+   *      came from the periodic catchup reconciler ~2 min later.
+   *
+   *   2. Re-walked the full `selectCatchupPeers` ranking even though
+   *      we already knew exactly who to ask: the curator peer that
+   *      just sent us the approval. Skipping that walk gets us to a
+   *      sync attempt within ~1s of approval.
+   *
+   * Falls back to the standard broadcast catchup if the curator-direct
+   * attempt yields zero successful peers — defensive for the case
+   * where the inbound notification connection was a one-shot relay
+   * that won't re-open for catchup, or the curator process happened
+   * to die between sending the approval and the catchup dial.
+   */
+  private async runImmediatePostApprovalSync(
+    contextGraphId: string,
+    curatorPeerId: string,
+  ): Promise<void> {
+    const ctx = createOperationContext('sync');
+    const curatorShort = curatorPeerId.slice(-8);
+    let curatorTargetSucceeded = false;
+
+    // Curator-direct attempt. Any throw here (relay reservation gone,
+    // dial timeout, AbortSignal, transient `Remote closed connection
+    // during opening`) MUST fall through to the broadcast fallback
+    // below — wrapping both the curator-direct attempt AND the
+    // broadcast in a single try/catch reintroduces the silent-stall
+    // bug this method exists to fix (Lex review on PR #517 + Codex).
+    try {
+      await this.ensurePeerConnected(curatorPeerId);
+      const curatorRemote = this.node.libp2p
+        .getConnections()
+        .find((conn) => conn.remotePeer.toString() === curatorPeerId)?.remotePeer;
+      if (curatorRemote) {
+        const result = await this.runCatchupOverPeers(contextGraphId, true, [curatorRemote]);
+        if (result.peersSucceeded > 0) {
+          this.log.info(
+            ctx,
+            `Post-approval sync for "${contextGraphId}" from curator ${curatorShort} fetched ${result.dataSynced} data + ${result.sharedMemorySynced} SWM triples`,
+          );
+          curatorTargetSucceeded = true;
+        } else {
+          this.log.warn(
+            ctx,
+            `Post-approval sync for "${contextGraphId}" from curator ${curatorShort} produced no successful peer (denied=${result.denied}); falling back to broadcast catchup`,
+          );
+        }
+      } else {
+        this.log.warn(
+          ctx,
+          `Post-approval sync for "${contextGraphId}": curator ${curatorShort} not in connected peers after ensurePeerConnected; falling back to broadcast catchup`,
+        );
+      }
+    } catch (err) {
+      this.log.warn(
+        ctx,
+        `Post-approval sync for "${contextGraphId}": curator-direct attempt to ${curatorShort} failed (${err instanceof Error ? err.message : String(err)}); falling back to broadcast catchup`,
+      );
+    }
+
+    if (!curatorTargetSucceeded) {
+      try {
+        await this.syncContextGraphFromConnectedPeers(contextGraphId, { includeSharedMemory: true });
+      } catch (err) {
+        this.log.warn(
+          ctx,
+          `Post-approval broadcast fallback for "${contextGraphId}" failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+  }
+
   private selectCatchupPeers(
     peers: Array<{ toString(): string }>,
     preferredPeerId?: string,
@@ -2956,6 +3078,13 @@ export class DKGAgent {
         if (sub.metaSynced !== true) {
           sub.metaSynced = true;
           this.persistContextGraphSubscription(contextGraphId);
+        }
+        if (sub.pendingMeta) {
+          // Meta arrived; the freshly-joined "waiting for sync" state
+          // (set by the join-approved handler) no longer applies — the
+          // CG will now surface via the normal `_meta` branch in
+          // `listContextGraphs`.
+          sub.pendingMeta = false;
         }
         this.queueSharedMemoryGossipSubscription(contextGraphId);
       }
@@ -10822,7 +10951,7 @@ export class DKGAgent {
         continue;
       }
 
-      // No declaration in ontology, agents, or _meta graphs. Two cases:
+      // No declaration in ontology, agents, or _meta graphs. Three cases:
       //
       //  1. Chain-attested but not-yet-synced (sub.onChainId set):
       //     auto-discovery from the on-chain registry found this CG and
@@ -10832,12 +10961,24 @@ export class DKGAgent {
       //     `subscribedContextGraphs` by the daemon's authoritative
       //     denial path (accessDeniedPeers > 0) before we get here.
       //
-      //  2. Not chain-attested AND no local content: a truly phantom
-      //     entry (pre-discovery subscribe that never resolved). Hide
-      //     it to avoid polluting the UI. If the user legitimately
-      //     subscribes later, the next catch-up writes _meta or data
-      //     and the entry will appear on the next refresh.
-      if (!sub.onChainId) {
+      //  2. Curator-approved but not-yet-meta-synced (sub.pendingMeta
+      //     set): the join-approved handler subscribed us seconds ago
+      //     and the first meta sync hasn't completed yet. Same UX
+      //     treatment as case 1 — surface as "waiting for sync" so the
+      //     project entry shows up in the sidebar immediately on
+      //     approval, instead of disappearing for ~107s until the
+      //     periodic catchup reconciler eventually pulls _meta. Cleared
+      //     in `refreshMetaSyncedFlags` once meta arrives, at which
+      //     point this entry instead surfaces via the `_meta` branch
+      //     above.
+      //
+      //  3. Not chain-attested, not pending-meta, AND no local content:
+      //     a truly phantom entry (pre-discovery subscribe that never
+      //     resolved). Hide it to avoid polluting the UI. If the user
+      //     legitimately subscribes later, the next catch-up writes
+      //     _meta or data and the entry will appear on the next
+      //     refresh.
+      if (!sub.onChainId && !sub.pendingMeta) {
         // Delegate to `contextGraphHasLocalContent()` so the check
         // covers sub-graphs, assertion graphs and SWM — not just the
         // root data graph. For any non-trivial project the root data

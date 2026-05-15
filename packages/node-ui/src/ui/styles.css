@@ -16,6 +16,10 @@
   --border-subtle: #1a1a1a;
   --border-default: #222222;
   --border-strong: #333333;
+  /* Higher-contrast border for chips that need to clear 3:1 non-text on any
+     surface (used by the inline-code chip, which can land on user bubbles
+     whose bg is identical to a chip fill). */
+  --border-prominent: #888888;
 
   /* Text */
   --text-primary: #e8e8e8;
@@ -28,6 +32,11 @@
   --accent-amber: #f59e0b;
   --accent-green: #22c55e;
   --accent-blue: #3b82f6;
+
+  /* Semantic foregrounds (theme-aware) */
+  --text-danger: #fca5a5;
+  --text-danger-hover: #fecaca;
+  --text-link: #60a5fa;
 
   /* Layer identity */
   --layer-working: #64748b;
@@ -84,10 +93,15 @@ body.light {
   --border-subtle: #e5e5e5;
   --border-default: #d4d4d4;
   --border-strong: #a3a3a3;
+  --border-prominent: #525252;
   --text-primary: #171717;
   --text-secondary: #525252;
   --text-tertiary: #a3a3a3;
   --text-ghost: #d4d4d4;
+  /* Light-theme danger foreground (~7.4:1 on --bg-elevated #f0f0f0) */
+  --text-danger: #b91c1c;
+  --text-danger-hover: #991b1b;
+  --text-link: #1d4ed8;
   --layer-working: #a3a3a3;
   --layer-shared: #737373;
   --layer-verified: #404040;
@@ -711,6 +725,7 @@ button:focus:not(:focus-visible) { outline: none; }
 /* ── Right panel ── */
 .v10-panel-right {
   height: 100%;
+  min-height: 0;
   flex-shrink: 0;
   background: var(--bg-panel);
   display: flex;
@@ -753,7 +768,85 @@ button:focus:not(:focus-visible) { outline: none; }
   line-height: 1.5;
 }
 /* Agent tab */
-.v10-agents-tab { padding: 12px; overflow-y: auto; flex: 1; }
+.v10-agents-tab {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.v10-agents-tab > .v10-agent-add-surface {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px;
+}
+/* Network / Sessions tabs: simple padded scroll container (PR1 restored
+   the padding that was removed when .v10-agents-tab became a flex column). */
+.v10-agent-scroll-tab {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Network tab collapsible peer groups (Connected / Disconnected). */
+.v10-peer-group {
+  display: flex;
+  flex-direction: column;
+}
+.v10-peer-group-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 4px;
+  background: transparent;
+  border: 0;
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  transition: color 0.15s;
+}
+.v10-peer-group-header:hover {
+  color: var(--text-primary);
+}
+.v10-peer-group-header:focus-visible {
+  outline: none;
+  color: var(--text-primary);
+}
+.v10-peer-group-chevron {
+  flex-shrink: 0;
+  transition: transform 0.15s;
+}
+.v10-peer-group-chevron.expanded {
+  transform: rotate(90deg);
+}
+.v10-peer-group-label {
+  flex: 1;
+}
+.v10-peer-group-count {
+  color: var(--text-tertiary);
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.v10-peer-group-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px 0 8px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .v10-peer-group-chevron { transition: none; }
+}
 .v10-agents-summary {
   display: flex; align-items: center; gap: 12px;
   padding: 8px 0; margin-bottom: 8px;
@@ -778,20 +871,38 @@ button:focus:not(:focus-visible) { outline: none; }
 .v10-agents-refresh:hover { background: var(--bg-elevated); color: var(--text-primary); }
 .v10-agents-refresh.disconnect {
   margin-left: 0;
-  color: #fca5a5;
+  color: var(--text-danger);
   border-color: color-mix(in srgb, #ef4444 35%, var(--border-subtle));
 }
 .v10-agents-refresh.disconnect:hover {
-  color: #fecaca;
+  color: var(--text-danger-hover);
   background: color-mix(in srgb, #ef4444 10%, var(--bg-elevated));
 }
 .v10-agent-subtabs {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
-  padding: 4px 0 10px;
+  padding: 10px 12px;
   border-bottom: 1px solid var(--border-subtle);
-  overflow-x: auto;
+  background: var(--bg-panel);
+  flex-shrink: 0;
+}
+.v10-agent-subtab-group {
+  display: inline-flex;
+  align-items: stretch;
+  position: relative;
+  border-radius: 4px;
+  overflow: visible;
+}
+.v10-agent-subtab-group.active {
+  background: var(--bg-active);
+}
+.v10-agent-subtab-group.active > .v10-agent-subtab.active {
+  background: transparent;
+  border-right-color: transparent;
+  border-radius: 4px 0 0 4px;
+  padding-right: 8px;
 }
 .v10-agent-subtab {
   display: inline-flex;
@@ -949,10 +1060,12 @@ button:focus:not(:focus-visible) { outline: none; }
   margin-top: 0;
 }
 .v10-local-agent-chat-shell {
-  margin-top: 12px;
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 0;
+  position: relative; /* anchor for the drop overlay */
 }
 .v10-local-agent-detail-head {
   display: flex;
@@ -971,28 +1084,266 @@ button:focus:not(:focus-visible) { outline: none; }
   color: var(--text-tertiary);
   line-height: 1.5;
 }
-.v10-local-agent-chat-toolbar {
-  display: flex;
+.v10-local-agent-chat-shell > .v10-local-agent-notice,
+.v10-local-agent-chat-shell > .v10-local-agent-error,
+.v10-local-agent-chat-shell > .v10-local-agent-warning {
+  margin: 8px 12px 0;
+}
+
+/* Agent tab kebab menu (Refresh / Disconnect overflow) */
+.v10-agent-tab-menu {
+  position: relative;
+  display: inline-flex;
+  align-items: stretch;
+}
+.v10-agent-tab-menu-trigger {
+  display: inline-flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 2px 0 10px;
-  border-bottom: 1px solid var(--border-subtle);
-}
-.v10-local-agent-chat-toolbar-label {
-  font-size: 12px;
-  font-weight: 500;
+  justify-content: center;
+  width: 24px;
+  min-height: 32px;
+  padding: 0 4px;
+  border: 0;
+  background: transparent;
   color: var(--text-secondary);
+  font-size: 14px;
+  line-height: 1;
+  border-radius: 0 4px 4px 0;
+  cursor: pointer;
 }
-.v10-local-agent-chat-actions {
+.v10-agent-tab-menu-trigger:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.v10-agent-subtab-group.active .v10-agent-tab-menu-trigger {
+  color: var(--text-primary);
+}
+.v10-agent-tab-menu-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  /* Anchor to the LEFT edge of the trigger so the popover grows rightward
+     into the panel — left-most agent tabs (the common case) used to clip
+     against the panel's left edge with right:0. AgentTabMenu measures
+     after open and flips to .align-right when the projected right edge
+     would overflow the panel (rightmost tabs on narrow layouts). */
+  left: 0;
+  min-width: 200px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  z-index: 200;
+  overflow: hidden;
+  padding: 4px;
+}
+.v10-agent-tab-menu-popover.align-right {
+  /* Right-anchored fallback when the left-anchored popover would
+     overflow the panel's right edge (rightmost tabs on narrow layouts).
+     AgentTabMenu measures after open and toggles this class. */
+  left: auto;
+  right: 0;
+}
+.v10-agent-tab-menu-status {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-left: auto;
+  padding: 8px 10px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border-subtle);
+  margin-bottom: 4px;
+}
+.v10-agent-tab-menu-item {
+  display: block;
+  width: 100%;
+  padding: 8px 10px;
+  background: transparent;
+  border: 0;
+  text-align: left;
+  font-size: 12px;
+  color: var(--text-primary);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+.v10-agent-tab-menu-item:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+.v10-agent-tab-menu-item:disabled {
+  color: var(--text-tertiary);
+  cursor: default;
+}
+.v10-agent-tab-menu-item.danger {
+  color: var(--text-danger);
+}
+.v10-agent-tab-menu-item.danger:hover:not(:disabled) {
+  background: color-mix(in srgb, #ef4444 12%, var(--bg-hover));
+  color: var(--text-danger-hover);
+}
+
+/* Custom Select (replaces native <select> for theme-aware dropdowns) */
+.v10-select {
+  position: relative;
+  display: inline-block;
+  width: 100%;
+  min-width: 0;
+}
+.v10-select-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  height: 36px;
+  padding: 0 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+  text-align: left;
+}
+.v10-select-trigger:hover:not(:disabled) {
+  border-color: var(--border-default);
+  background: var(--bg-hover);
+}
+.v10-select-trigger:focus-visible {
+  outline: none;
+  border-color: var(--accent-blue);
+  box-shadow: 0 0 0 1px var(--accent-blue);
+}
+.v10-select.open .v10-select-trigger {
+  border-color: var(--border-strong);
+}
+.v10-select-trigger:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.v10-select-value {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.v10-select-value.placeholder {
+  color: var(--text-secondary);
+}
+.v10-select-caret {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--text-tertiary);
+  transition: transform 0.15s;
+}
+.v10-select.open .v10-select-caret {
+  transform: rotate(180deg);
+}
+.v10-select-menu {
+  max-height: 240px;
+  overflow-y: auto;
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  z-index: 1000;
+}
+.v10-select-menu:focus { outline: none; }
+.v10-select-menu-above {
+  margin-top: -4px;
+}
+.v10-select-menu-below {
+  margin-top: 4px;
+}
+.v10-select-option {
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--text-primary);
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.v10-select-option.highlighted,
+.v10-select-option:hover {
+  background: var(--bg-hover);
+}
+.v10-select-option.selected {
+  background: var(--bg-active);
+  color: var(--text-primary);
+}
+.v10-select-option.disabled {
+  color: var(--text-tertiary);
+  cursor: not-allowed;
+}
+.v10-select-option.empty {
+  color: var(--text-tertiary);
+  cursor: default;
 }
 .v10-local-agent-messages {
-  padding: 4px 0 0;
-  min-height: 180px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 14px;
+}
+
+/* Floating "scroll to latest" pill — sticks to the bottom-center of the
+   visible portion of the messages region while the user is scrolled away
+   from the bottom. Sticky inside the scroll container means it rides
+   along automatically with no scroll listener positioning math. */
+.v10-scroll-to-bottom {
+  position: sticky;
+  /* Lift above the composer so there's breathing room between the pill
+     and the input shell below. */
+  bottom: 16px;
+  align-self: center;
+  /* Lock the box to 32x32 in every direction. The messages region is a
+     flex column with default `align-items: stretch`; without min/max
+     and flex: none, the cross-axis sizing can drift the button into a
+     horizontal pill instead of a circle. */
+  width: 32px;
+  height: 32px;
+  min-width: 32px;
+  min-height: 32px;
+  max-width: 32px;
+  max-height: 32px;
+  flex: none;
+  aspect-ratio: 1;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  border: 1px solid var(--border-default);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 150ms ease-out, background 0.15s, color 0.15s;
+  z-index: 5;
+  /* Negative top margin so the pill overlays the previous message instead
+     of forcing extra vertical space when invisible. */
+  margin-top: -32px;
+  margin-bottom: 0;
+}
+.v10-scroll-to-bottom.visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+.v10-scroll-to-bottom:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+@media (prefers-reduced-motion: reduce) {
+  .v10-scroll-to-bottom { transition: none; }
 }
 .v10-local-agent-msg-time {
   margin-top: 4px;
@@ -1059,12 +1410,6 @@ button:focus:not(:focus-visible) { outline: none; }
   flex: 1;
   width: 100%;
   min-width: 0;
-  height: 36px;
-  padding: 0 12px;
-  border-radius: 10px;
-  border: 1px solid var(--border-subtle);
-  background: var(--panel-elevated);
-  color: var(--text-primary);
 }
 .v10-local-agent-toolbar-actions {
   display: flex;
@@ -1073,93 +1418,289 @@ button:focus:not(:focus-visible) { outline: none; }
 }
 .v10-local-agent-composer-row {
   display: flex;
-  align-items: center;
+  align-items: stretch;
   gap: 8px;
 }
+/* Composer shell: vertical stack — textarea on top, controls toolbar
+   (attach + project picker + send) below, all inside one rounded box. */
 .v10-local-agent-composer-shell {
   position: relative;
   display: flex;
   flex: 1;
+  flex-direction: column;
   min-width: 0;
-  min-height: 96px;
-  padding: 0;
-  border-radius: 6px;
+  padding: 10px 12px;
+  gap: 8px;
+  border-radius: 14px;
   border: 1px solid var(--border-default);
   background: var(--bg-surface);
+  transition: border-color 0.15s;
 }
 .v10-local-agent-composer-shell:focus-within {
   border-color: var(--border-strong);
 }
-.v10-local-agent-inline-attach {
-  position: absolute;
-  left: 10px;
-  bottom: 10px;
-  min-width: 96px;
-  height: 26px;
-  padding: 0 10px;
-  border-radius: 999px;
-  display: inline-flex;
+.v10-composer-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+.v10-composer-controls-left {
+  display: flex;
   align-items: center;
   gap: 6px;
+  flex: 1;
+  min-width: 0;
+}
+.v10-composer-attach {
   flex-shrink: 0;
-  font-size: 11px;
-  font-weight: 500;
-  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.v10-composer-attach:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.v10-composer-attach:focus-visible {
+  outline: none;
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.v10-composer-attach:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 .v10-local-agent-inline-send {
-  position: absolute;
-  right: 10px;
-  bottom: 10px;
-  height: 24px;
-  min-width: 48px;
-  padding: 0 10px;
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  min-width: 28px;
+  padding: 0;
   border-radius: 999px;
-  flex-shrink: 0;
-}
-.v10-local-agent-attachment-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.v10-local-agent-attachment-item {
-  display: flex;
+  border: 0;
+  background: var(--text-primary);
+  color: var(--bg-root);
+  display: inline-flex;
   align-items: center;
-  gap: 10px;
-  padding: 10px 12px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 14px;
-  background: var(--panel-elevated);
-  min-width: 0;
+  justify-content: center;
+  cursor: pointer;
+  transition: opacity 0.15s, background 0.15s;
 }
-.v10-local-agent-attachment-main {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  min-width: 0;
+.v10-local-agent-inline-send:hover:not(:disabled) {
+  opacity: 0.9;
+}
+.v10-local-agent-inline-send:disabled {
+  /* Muted but still legibly filled — keeps the active-state silhouette
+     while clearly signalling disabled. --text-secondary lands in the
+     contrast sweet spot in both themes (~4.7:1 dark / ~5.5:1 light
+     against the composer shell). */
+  background: var(--text-secondary);
+  color: var(--bg-surface);
+  cursor: not-allowed;
+}
+
+/* Project picker now lives INSIDE the composer-controls row to the right of
+   the attach button. Lets the picker fill the available space in the row
+   (between the attach button on its left and the send button anchored
+   right) so most project names fit without truncation. Long names still
+   ellipsize and surface in a `title` tooltip on hover of each option. */
+.v10-composer-target {
   flex: 1;
+  min-width: 0;
 }
-.v10-local-agent-attachment-title-row {
+/* Borderless at rest — matches the ghost feel of the attach button. The
+   open state and hover state both lift the background instead of stamping
+   a visible outline. */
+.v10-composer-target .v10-select-trigger {
+  border-color: transparent;
+  background: transparent;
+}
+.v10-composer-target .v10-select-trigger:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: transparent;
+}
+.v10-composer-target .v10-select.open .v10-select-trigger {
+  background: var(--bg-hover);
+  border-color: transparent;
+}
+
+/* Inline Select prefix icon (e.g. Folder for the project picker). */
+.v10-select-prefix {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+  margin-right: 6px;
+}
+/* Attachment chips (compact, ChatGPT/Claude pattern) */
+.v10-attachment-chips {
   display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.v10-attachment-chip {
+  display: inline-flex;
   align-items: center;
   gap: 8px;
+  padding: 8px 8px 8px 8px;
+  border-radius: 12px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  max-width: 100%;
   min-width: 0;
 }
-.v10-local-agent-attachment-badge {
-  font-weight: 700;
+.v10-attachment-chip[data-status="error"] {
+  border-color: color-mix(in srgb, #ef4444 35%, var(--border-subtle));
+}
+.v10-attachment-chip[data-status="uploading"] {
+  border-color: color-mix(in srgb, var(--accent-blue) 35%, var(--border-subtle));
+}
+.v10-attachment-chip-badge {
   flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: var(--bg-active);
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
 }
-.v10-local-agent-attachment-name {
+.v10-attachment-chip-body {
+  display: flex;
+  flex-direction: column;
   min-width: 0;
+  gap: 2px;
+}
+.v10-attachment-chip-name {
+  font-size: 12px;
+  color: var(--text-primary);
+  font-weight: 500;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  max-width: 180px;
 }
-.v10-local-agent-attachment-meta-row {
+.v10-attachment-chip-meta {
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px 12px;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.v10-attachment-chip-status {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 140px;
+}
+.v10-attachment-chip[data-status="error"] .v10-attachment-chip-status {
+  color: var(--text-danger);
+}
+.v10-attachment-chip-remove {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  border: 0;
+  background: transparent;
   color: var(--text-tertiary);
-  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.v10-attachment-chip-remove:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.v10-attachment-chip-remove:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Drop overlay — covers the entire chat-shell (messages + composer) with a
+   centered card. Claude-Desktop-style affordance: clear visual cue with a
+   backdrop dim so the user knows the drop target is the chat. */
+.v10-drop-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 80ms ease-out;
+  background: color-mix(in srgb, var(--bg-root) 60%, transparent);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+}
+.v10-drop-overlay.active {
+  opacity: 1;
+  /* Keep the overlay non-interactive (`pointer-events: none` from the
+     base rule above). The dropzone root owns the drag lifecycle —
+     turning the overlay interactive while it sits inside the drop
+     target can steal the follow-up `dragenter`/`dragleave`/`drop`
+     sequence in real browsers and cause flicker or dropped files
+     failing to register. */
+}
+.v10-drop-overlay-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 24px 28px;
+  border-radius: 14px;
+  background: var(--bg-elevated);
+  /* Monochrome border + icon — matches the rest of the node design
+     instead of competing with it as the blue accent did. Theme-aware
+     via --text-primary (~white in dark mode, ~black in light mode). */
+  border: 2px dashed var(--text-primary);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  text-align: center;
+  max-width: 320px;
+}
+.v10-drop-overlay.refuse .v10-drop-overlay-card {
+  border-color: var(--border-strong);
+}
+.v10-drop-overlay-icon {
+  color: var(--text-primary);
+}
+.v10-drop-overlay.refuse .v10-drop-overlay-icon {
+  color: var(--text-tertiary);
+}
+.v10-drop-overlay-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.v10-drop-overlay.refuse .v10-drop-overlay-title {
+  color: var(--text-secondary);
+}
+.v10-drop-overlay-hint {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+@media (prefers-reduced-motion: reduce) {
+  .v10-drop-overlay { transition: none; }
 }
 .v10-local-agent-actions {
   display: flex;
@@ -1205,41 +1746,56 @@ button:focus:not(:focus-visible) { outline: none; }
   border-color: var(--border-strong);
 }
 .v10-agent-empty-state {
+  padding: 24px 16px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+.v10-agent-empty-state-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+.v10-agent-empty-state-hint {
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+/* Legacy: bare-text empty states elsewhere (NetworkTab, SessionsTab, Add-agent) */
+.v10-agent-empty-state:not(:has(.v10-agent-empty-state-title)) {
   padding: 16px;
   color: var(--text-tertiary);
   font-size: 12px;
-  text-align: center;
 }
 
 /* Agent input */
 .v10-agent-input-area {
-  position: sticky;
-  bottom: 0;
-  z-index: 2;
+  flex-shrink: 0;
   padding: 12px;
   border-top: 1px solid var(--border-subtle);
   display: flex;
   gap: 8px;
   align-items: center;
   background: var(--bg-panel);
-  box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.18);
 }
 .v10-agent-input {
-  flex: 1;
-  min-height: 94px;
   width: 100%;
-  padding: 14px 14px 42px;
+  padding: 4px 2px;
   border-radius: 0;
   border: 0;
   background: transparent;
   color: var(--text-primary);
   font-size: 12px;
   font-family: var(--font-sans);
+  line-height: 1.5;
   min-width: 0;
   resize: none;
-  align-self: stretch;
 }
 .v10-agent-input:focus { outline: none; }
+.v10-agent-input::placeholder {
+  color: var(--text-secondary);
+}
 .v10-agent-send-btn {
   min-width: 56px;
   height: 34px;
@@ -1351,6 +1907,14 @@ button:focus:not(:focus-visible) { outline: none; }
   word-break: break-word;
   overflow-wrap: anywhere;
 }
+.v10-chat-plaintext {
+  /* User-side bubbles render as literal text — preserve whitespace and
+     newlines so the transcript shows the exact prompt the user sent.
+     `pre-wrap` keeps `\n` visible without collapsing runs of spaces;
+     the inherited word-break / overflow-wrap on the bubble still
+     handles long unbroken tokens. */
+  white-space: pre-wrap;
+}
 .v10-chat-bubble.user {
   background: var(--bg-active);
   color: var(--text-primary);
@@ -1361,6 +1925,231 @@ button:focus:not(:focus-visible) { outline: none; }
   color: var(--text-primary);
   border: 1px solid var(--border-subtle);
 }
+/* ── Markdown rendering (PR3) ── */
+.v10-md {
+  font-size: 12px;
+  line-height: 1.5;
+  color: inherit;
+}
+.v10-md > *:first-child { margin-top: 0; }
+.v10-md > *:last-child { margin-bottom: 0; }
+.v10-md-h1, .v10-md-h2, .v10-md-h3 {
+  font-weight: 600;
+  line-height: 1.3;
+  margin: 12px 0 6px;
+  color: var(--text-primary);
+}
+.v10-md-h4, .v10-md-h5, .v10-md-h6 {
+  font-weight: 600;
+  line-height: 1.4;
+  margin: 10px 0 6px;
+  color: var(--text-primary);
+}
+.v10-md-h1 { font-size: 18px; }
+.v10-md-h2 { font-size: 16px; }
+.v10-md-h3 { font-size: 14px; }
+.v10-md-h4 { font-size: 13px; }
+.v10-md-h5 { font-size: 12px; }
+.v10-md-h6 { font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.04em; }
+.v10-md-p { margin: 4px 0; }
+.v10-md-ul, .v10-md-ol { margin: 4px 0; padding-left: 20px; }
+.v10-md-ul { list-style: disc; }
+.v10-md-ol { list-style: decimal; }
+.v10-md-li { margin: 2px 0; }
+.v10-md-li > .v10-md-ul, .v10-md-li > .v10-md-ol { margin: 2px 0; padding-left: 18px; }
+/* Task lists (remark-gfm) */
+.v10-md-ul .v10-md-li input[type="checkbox"] {
+  margin-right: 6px;
+  vertical-align: middle;
+  accent-color: var(--accent-blue);
+}
+.v10-md-link {
+  color: var(--text-link);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  word-break: break-word;
+}
+.v10-md-link:hover { text-decoration: none; }
+.v10-md-link-inert {
+  /* Inert sibling of .v10-md-link: relative / unsupported-scheme hrefs
+     from untrusted chat content render as a span (not <a>), so the user
+     can read the link text but can't be silently navigated by it.
+     Dotted underline keeps the affordance honest. */
+  color: var(--text-secondary);
+  text-decoration: underline dotted;
+  text-decoration-skip-ink: none;
+  text-underline-offset: 2px;
+  cursor: help;
+}
+.v10-md-blockquote {
+  margin: 6px 0;
+  padding: 4px 12px;
+  border-left: 3px solid var(--border-strong);
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--text-tertiary) 5%, transparent);
+  border-radius: 0 6px 6px 0;
+}
+.v10-md-hr {
+  margin: 12px 0;
+  border: 0;
+  border-top: 1px solid var(--border-subtle);
+}
+.v10-md-table-scroll {
+  margin: 8px 0;
+  overflow-x: auto;
+  border-radius: 8px;
+  border: 1px solid var(--border-subtle);
+}
+.v10-md-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+.v10-md-thead {
+  background: var(--bg-elevated);
+}
+.v10-md-th {
+  padding: 6px 10px;
+  text-align: left;
+  font-weight: 600;
+  color: var(--text-primary);
+  border-bottom: 1px solid var(--border-subtle);
+  white-space: nowrap;
+}
+.v10-md-td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  vertical-align: top;
+}
+.v10-md-tr:last-child .v10-md-td { border-bottom: 0; }
+/* Inert placeholder rendered in place of markdown images. The chat renders
+   untrusted agent output, so `<img>` is replaced with a label that names
+   the resource without fetching it. */
+.v10-md-image-placeholder {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--bg-active);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-style: italic;
+  border: 1px solid var(--border-prominent);
+  cursor: help;
+}
+
+.v10-md-code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: var(--bg-active);
+  color: var(--text-primary);
+  /* 1px border keeps the chip visible on bubbles whose bg is also --bg-active
+     (e.g., user bubbles). Uses --border-prominent so contrast clears 3:1
+     non-text on every bubble × theme combination. */
+  border: 1px solid var(--border-prominent);
+  /* Default `box-decoration-break: slice` so that a single chip wrapping
+     across lines shows open edges at the wrap point (matches Claude
+     Desktop: the right edge of line 1 and the left edge of line 2 stay
+     open, signalling "this is one continuous token"). Vertical separation
+     between lines is handled by the parent's line-height below. */
+}
+/* Paragraphs and list items that contain inline-code chips bump line-height
+   so the chips have breathing room without needing each line to render a
+   fully-closed padding box. Codex CGaLL: drop the `>` child combinator —
+   `:has(> .v10-md-code)` only matched when the paragraph was a single
+   `<code>` node, so the common `text <code> text` case missed the rule. */
+.v10-md-p:has(.v10-md-code),
+.v10-md-li:has(.v10-md-code) {
+  line-height: 1.85;
+}
+.v10-md-pre {
+  position: relative;
+  margin: 8px 0;
+  border-radius: 12px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.v10-md-pre-lang {
+  position: absolute;
+  top: 6px;
+  left: 10px;
+  padding: 2px 6px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  background: var(--bg-elevated);
+  border-radius: 4px;
+  pointer-events: none;
+}
+.v10-md-pre-rendered,
+.v10-md-pre-fallback {
+  margin: 0;
+  padding: 28px 12px 10px;
+  overflow-x: auto;
+}
+.v10-md-pre-rendered pre,
+.v10-md-pre-fallback {
+  margin: 0;
+  background: transparent !important;
+}
+.v10-md-pre-rendered code,
+.v10-md-pre-fallback code {
+  font-family: inherit;
+  font-size: inherit;
+  background: transparent;
+  padding: 0;
+}
+.v10-md-copy {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--bg-active) 75%, transparent);
+  color: var(--text-secondary);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms ease-out, background 0.15s, color 0.15s;
+}
+.v10-md-pre:hover .v10-md-copy,
+.v10-md-copy:focus-visible {
+  opacity: 1;
+}
+.v10-md-copy:hover {
+  background: var(--bg-active);
+  color: var(--text-primary);
+}
+@media (hover: none) {
+  .v10-md-copy { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .v10-md-copy { opacity: 1; transition: none; }
+}
+.v10-md-copy-announce {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .v10-chat-cursor {
   display: inline-block;
   width: 5px;

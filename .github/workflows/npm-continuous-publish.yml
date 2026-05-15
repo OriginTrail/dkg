@@ -339,10 +339,10 @@ jobs:
         # We iterate workspaces explicitly (rather than rely on
         # `pnpm -r pack`) so we can capture each tarball's path
         # deterministically and emit the SHASUMS manifest below.
-        # The output dir is `.publish-artifacts/` at the repo root.
+        # The output dir is `publish-artifacts/` at the repo root.
         run: |
           set -euo pipefail
-          OUT_DIR="${GITHUB_WORKSPACE}/.publish-artifacts"
+          OUT_DIR="${GITHUB_WORKSPACE}/publish-artifacts"
           mkdir -p "${OUT_DIR}"
           PUBLIC_PKGS=$(node -e "
             const fs = require('fs');
@@ -378,7 +378,7 @@ jobs:
         # registry already accepted the payload.
         run: |
           set -euo pipefail
-          OUT_DIR="${GITHUB_WORKSPACE}/.publish-artifacts"
+          OUT_DIR="${GITHUB_WORKSPACE}/publish-artifacts"
           ( cd "${OUT_DIR}" && sha256sum -- *.tgz > SHASUMS256.txt )
           {
             echo '## Packed tarballs'
@@ -398,7 +398,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ steps.artifact.outputs.NAME }}
-          path: .publish-artifacts/
+          path: publish-artifacts/
           if-no-files-found: error
           retention-days: 7
 
@@ -466,7 +466,7 @@ jobs:
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: ${{ needs.build-and-pack.outputs.artifact_name }}
-          path: .publish-artifacts/
+          path: publish-artifacts/
 
       - name: Verify SHA-256 manifest before publishing
         # Re-checksum the downloaded tarballs against the manifest
@@ -478,7 +478,7 @@ jobs:
         # silently-swapped tarball.
         run: |
           set -euo pipefail
-          cd .publish-artifacts
+          cd publish-artifacts
           sha256sum --check SHASUMS256.txt
 
       - name: Publish each tarball with provenance
@@ -502,7 +502,7 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
-          cd .publish-artifacts
+          cd publish-artifacts
           shopt -s nullglob
           tarballs=(*.tgz)
           if [ "${#tarballs[@]}" -eq 0 ]; then
