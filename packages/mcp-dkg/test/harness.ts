@@ -380,4 +380,127 @@ export class FakeClient {
       alreadyRegistered: false,
     };
   }
+
+  // ── Agent-to-agent chat (Phase 1: agent debug chat RFC) ────────
+  /**
+   * Inbound chat history surfaced by `dkg_check_inbox` (via the daemon's
+   * `GET /api/messages`). Pre-seed with `client.chatMessages.push({ … })`
+   * in tests; calls land here for assertions in `client.sendChatCalls`.
+   */
+  readonly chatMessages: Array<{
+    /** SQLite rowid — used by the compound cursor. Auto-assigned by
+     * `pushChatMessage` below if omitted. */
+    id?: number;
+    ts: number;
+    direction: 'in' | 'out';
+    peer: string;
+    peerName?: string;
+    text: string;
+    delivered?: boolean;
+  }> = [];
+
+  /** Auto-incremented when `pushChatMessage` assigns an id. */
+  private nextChatId = 1;
+
+  /**
+   * Convenience: push a message to `chatMessages` with a stable
+   * auto-assigned id, matching what the real daemon's
+   * `id INTEGER PRIMARY KEY AUTOINCREMENT` would do. Tests can still
+   * push to `chatMessages` directly if they need a specific id.
+   */
+  pushChatMessage(msg: Omit<(typeof this.chatMessages)[number], 'id'> & { id?: number }): number {
+    const id = msg.id ?? this.nextChatId++;
+    this.chatMessages.push({ ...msg, id });
+    return id;
+  }
+  readonly sendChatCalls: Array<{
+    to: string;
+    text: string;
+    contextGraphId?: string;
+  }> = [];
+  /**
+   * Toggle to make `sendChat` return a custom delivery result. Shape
+   * matches the DkgClient.sendChat return — supports the new
+   * `queued/messageId/attempts/nextAttemptAtMs` fields added in the
+   * MessageOutbox PR alongside the legacy `delivered/error` shape.
+   */
+  chatDeliveryOverride: {
+    delivered: boolean;
+    queued?: boolean;
+    messageId?: string;
+    attempts?: number;
+    nextAttemptAtMs?: number;
+    error?: string;
+  } | null = null;
+  /** Used by `buildPeerNameMap` to resolve friendly names. */
+  agents: Array<{ peerId: string; name: string }> = [];
+
+  async sendChat(args: { to: string; text: string; contextGraphId?: string }) {
+    if (this.overrides.sendChat) return this.overrides.sendChat.call(this, args);
+    this.sendChatCalls.push(args);
+    if (this.chatDeliveryOverride) return this.chatDeliveryOverride;
+    return { delivered: true };
+  }
+
+  /**
+   * Captures the params the tool passed through so tests can assert
+   * that e.g. `dkg_check_inbox` is sending `direction=in`, `sinceId`,
+   * and `order=asc` to the daemon. Cleared per-test in `beforeEach`.
+   */
+  readonly getMessagesCalls: Array<{
+    peer?: string;
+    since?: number;
+    sinceId?: number;
+    limit?: number;
+    direction?: 'in' | 'out';
+    order?: 'asc' | 'desc';
+  }> = [];
+
+  async getMessages(args: {
+    peer?: string;
+    since?: number;
+    sinceId?: number;
+    limit?: number;
+    direction?: 'in' | 'out';
+    order?: 'asc' | 'desc';
+  } = {}) {
+    this.getMessagesCalls.push(args);
+    if (this.overrides.getMessages) return this.overrides.getMessages.call(this, args);
+    let rows = this.chatMessages
+      .slice()
+      .map((m, idx) => ({ ...m, id: m.id ?? idx + 1 }));
+    if (args.peer) rows = rows.filter((m) => m.peer === args.peer);
+    // Compound cursor: matches the real daemon's
+    // `(ts > since) OR (ts = since AND id > sinceId)` predicate when
+    // both are provided; falls back to `ts > since` for back-compat.
+    if (typeof args.since === 'number') {
+      if (typeof args.sinceId === 'number') {
+        rows = rows.filter(
+          (m) => m.ts > args.since! || (m.ts === args.since && m.id > args.sinceId!),
+        );
+      } else {
+        rows = rows.filter((m) => m.ts > args.since!);
+      }
+    }
+    if (args.direction === 'in' || args.direction === 'out') {
+      rows = rows.filter((m) => m.direction === args.direction);
+    }
+    // Mirror DB ordering. Default `desc` (newest first) for back-compat
+    // with history-view callers; `asc` (oldest first) for forward
+    // inbox pagination.
+    if (args.order === 'asc') {
+      rows.sort((a, b) => a.ts - b.ts || a.id - b.id);
+    } else {
+      rows.sort((a, b) => b.ts - a.ts || b.id - a.id);
+    }
+    if (typeof args.limit === 'number') {
+      rows = args.order === 'asc' ? rows.slice(0, args.limit) : rows.slice(-args.limit);
+    }
+    return { messages: rows };
+  }
+
+  async listAgents() {
+    if (this.overrides.listAgents) return this.overrides.listAgents.call(this);
+    return this.agents;
+  }
 }

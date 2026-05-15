@@ -45,7 +45,54 @@ export type ChatHandler = (
   message: string,
   senderPeerId: string,
   conversationId: string,
+  // Optional `contextGraphId` carried in the encrypted payload by the sender.
+  // Receivers that scope chat to a specific CG can use this for ACL bookkeeping
+  // and per-graph storage; legacy chat handlers that don't take this arg keep
+  // working unchanged (extra positional args are silently ignored in JS).
+  senderContextGraphId?: string,
+  // Same value as `senderContextGraphId`, but ONLY set when the ACL has
+  // positively verified the sender's CG claim (i.e. `scoped` mode where
+  // the claim equals the receiver's configured CG, or `shared-context-graph`
+  // mode where the claim matches a subscribed CG the sender is an active
+  // member of). In `any` and `peer-allowlist` modes this is always
+  // undefined because the ACL doesn't check the CG claim, so downstream
+  // code that surfaces the CG to operators (notification titles, log
+  // suffixes) can show it without risking an attacker-controlled label.
+  // Codex PR #510 round 4/5 finding — `senderContextGraphId` alone is
+  // an unverified attacker-controllable claim outside scoped/shared-CG
+  // modes; consumers MUST prefer `verifiedContextGraphId` for display.
+  verifiedContextGraphId?: string,
 ) => void | Promise<void>;
+
+/**
+ * Authorisation hook invoked on every inbound chat AFTER signature
+ * verification and decryption, but BEFORE the user-level ChatHandler.
+ *
+ * Returning `{ accept: false, reason }` causes the receiver to send back
+ * `{ success: false, error: reason ?? 'unauthorized' }` and skip the
+ * ChatHandler entirely — the SQLite row + notification on the daemon
+ * side never get created, so unauthorised senders are inert.
+ *
+ * Authentication (who the sender is) is handled by the existing Ed25519
+ * signature check; this hook layers *authorisation* (are they allowed to
+ * be talking to us at all?) on top.
+ */
+export type ChatAclCheck = (
+  senderPeerId: string,
+  payload: { contextGraphId?: string },
+) => {
+  accept: boolean;
+  reason?: string;
+  // Set ONLY when the ACL implementation has positively verified the
+  // sender's `contextGraphId` claim against its policy (scoped mode:
+  // claim equals the receiver's configured CG; shared-context-graph
+  // mode: claim matches a subscribed CG the sender is an active member
+  // of). MUST remain undefined when the mode does not check the claim
+  // (`any`, `peer-allowlist`) so downstream consumers can distinguish
+  // a verified CG from an attacker-controllable one. See
+  // ChatHandler.verifiedContextGraphId for the consumer-side contract.
+  verifiedContextGraphId?: string;
+};
 
 interface ConversationState {
   highWaterMark: number;
@@ -73,6 +120,7 @@ export class MessageHandler {
   private readonly skillHandlers = new Map<string, SkillHandler>();
   private readonly peerKeys = new Map<string, Uint8Array>();
   private chatHandler: ChatHandler | null = null;
+  private chatAclCheck: ChatAclCheck | null = null;
 
   constructor(
     router: ProtocolRouter,
@@ -102,6 +150,15 @@ export class MessageHandler {
   }
 
   /**
+   * Install an authorisation hook for inbound chats. When unset, all
+   * authenticated senders are accepted (legacy behaviour). The daemon
+   * sets this from `chat.acl` in the node config — see lifecycle.ts.
+   */
+  setChatAcl(check: ChatAclCheck | null): void {
+    this.chatAclCheck = check;
+  }
+
+  /**
    * Cache a peer's Ed25519 public key for use in outgoing messages.
    * Keys are also auto-cached from incoming messages.
    */
@@ -112,6 +169,7 @@ export class MessageHandler {
   async sendChat(
     recipientPeerId: string,
     text: string,
+    options: { contextGraphId?: string } = {},
   ): Promise<{ delivered: boolean; error?: string }> {
     try {
       const conversationId = bytesToHex(randomBytes(16));
@@ -125,9 +183,14 @@ export class MessageHandler {
         sharedSecret,
       });
 
+      // `contextGraphId` is optional and only included when the caller scopes
+      // chat to a CG (e.g. for the receiver's `scoped`/`shared-context-graph`
+      // ACL modes). Older receivers that don't know the field will simply
+      // ignore it — backwards-compatible JSON addition.
       const payload = new TextEncoder().encode(JSON.stringify({
         type: 'chat',
         text,
+        ...(options.contextGraphId ? { contextGraphId: options.contextGraphId } : {}),
       }));
 
       const nonce = buildNonce(conversationId, 1);
@@ -336,9 +399,63 @@ export class MessageHandler {
 
     if (parsed.type === 'chat') {
       const text = (parsed.text as string) ?? '';
+      const senderContextGraphId =
+        typeof parsed.contextGraphId === 'string' ? parsed.contextGraphId : undefined;
+
+      // Authorisation check (layered on top of the existing Ed25519
+      // signature check above). When unset, all authenticated senders are
+      // accepted — this preserves the legacy behaviour for nodes that
+      // haven't configured `chat.acl`.
+      // `verifiedContextGraphId` is sourced from the ACL verdict (only
+      // set in scoped / shared-context-graph modes that actually check
+      // the claim). When the ACL is null or omits the field, downstream
+      // consumers see only the unverified `senderContextGraphId` and
+      // MUST treat that as attacker-controllable.
+      let verifiedContextGraphId: string | undefined;
+      if (this.chatAclCheck) {
+        // Defence in depth: an unexpected exception from the ACL
+        // callback (db lookup glitch, custom-callback bug, etc.) must
+        // NOT bubble up as a transport-layer error to the sender —
+        // the sender would interpret it as a network failure and
+        // retry, when the right semantic is "we couldn't authorize
+        // you, fail closed". Codex PR #510 round 4 caught this:
+        // without the try/catch, an ACL/db problem turned into a
+        // confusing send-side timeout. We log the exception locally
+        // and return a clean `unauthorized` so the sender's
+        // ACL-aware error handling kicks in.
+        let verdict: ReturnType<ChatAclCheck>;
+        try {
+          verdict = this.chatAclCheck(fromPeerId.toString(), {
+            contextGraphId: senderContextGraphId,
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          // Use console.warn rather than a structured log so we don't
+          // create a new MessageHandler→logger coupling for an edge
+          // case. The daemon's ACL helpers don't throw in normal
+          // operation; this branch is the misbehaving-custom-callback
+          // safety net.
+          console.warn(`[MessageHandler] chat ACL threw, failing closed: ${msg}`);
+          verdict = { accept: false, reason: 'unauthorized: ACL evaluation error' };
+        }
+        if (!verdict.accept) {
+          return this.encryptAndSign(conv.sharedSecret, convId, seq + 1, {
+            success: false,
+            error: verdict.reason ?? 'unauthorized',
+          });
+        }
+        verifiedContextGraphId = verdict.verifiedContextGraphId;
+      }
+
       if (this.chatHandler) {
         try {
-          await this.chatHandler(text, fromPeerId.toString(), convId);
+          await this.chatHandler(
+            text,
+            fromPeerId.toString(),
+            convId,
+            senderContextGraphId,
+            verifiedContextGraphId,
+          );
         } catch (err) {
           console.error(`[Messaging] chat handler error:`, err instanceof Error ? err.message : err);
         }

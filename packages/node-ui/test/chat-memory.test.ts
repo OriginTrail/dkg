@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { ChatMemoryManager } from '../src/chat-memory.js';
+import { ChatMemoryManager, decodeRdfStringLiteral } from '../src/chat-memory.js';
 
 interface TrackingFn {
   (...args: unknown[]): Promise<any>;
@@ -50,6 +50,70 @@ function createTools(overrides?: {
     },
   };
 }
+
+describe('decodeRdfStringLiteral (history-text deserialization)', () => {
+  // The write path stores chat text as `JSON.stringify(text)` inside an
+  // RDF literal. `decodeRdfStringLiteral` must be the exact inverse so
+  // history reload recovers the original string faithfully (the
+  // markdown-broken-after-refresh regression). Each case constructs the
+  // literal exactly as the write path would, then asserts a clean
+  // round-trip.
+  const asRdfLiteral = (s: string) => JSON.stringify(s); // e.g. "line1\nline2"
+
+  it('round-trips multi-line markdown (real newlines survive)', () => {
+    const original = '# Heading\n\nPara one\n\n- a\n- b\n\n```ts\nconst x = 1;\n```';
+    expect(decodeRdfStringLiteral(asRdfLiteral(original))).toBe(original);
+  });
+
+  it('round-trips an intentional literal backslash-n inside JSON content', () => {
+    // The encoder writes a literal backslash-n as `\\n`; the decoder must
+    // give it back as a literal, NOT a real newline. This is the case
+    // the four PR4 UI heuristics could not get right.
+    const original = 'Here is JSON: {"text":"a\\nb"}';
+    expect(decodeRdfStringLiteral(asRdfLiteral(original))).toBe(original);
+  });
+
+  it('round-trips a fenced block holding BOTH a real newline and a literal backslash-n', () => {
+    // The single fixture that locks both halves of the inverse at once:
+    // a regression to any heuristic decoder would either collapse the
+    // literal `\n` token or fail to restore the real line break.
+    const original = '```js\nconsole.log("a\\nb");\n```';
+    expect(decodeRdfStringLiteral(asRdfLiteral(original))).toBe(original);
+  });
+
+  it('round-trips embedded quotes, tabs, CRLF, and unicode escapes', () => {
+    const original = 'q="x"\ttab\r\nwin-newline\nημει — dash';
+    expect(decodeRdfStringLiteral(asRdfLiteral(original))).toBe(original);
+  });
+
+  it('round-trips a lone single backslash and an astral/surrogate-pair char', () => {
+    // Single backslash (not a `\n` token) — write stores `"a\\b"`,
+    // decode must give back `a\b`. Pins single-backslash distinctly
+    // from the literal-`\n` case above.
+    expect(decodeRdfStringLiteral(asRdfLiteral('path a\\b end'))).toBe('path a\\b end');
+    // Astral char (surrogate pair) must survive reload unmangled.
+    expect(decodeRdfStringLiteral(asRdfLiteral('👍 done 𝕏'))).toBe('👍 done 𝕏');
+  });
+
+  it('strips an RDF type / language annotation before decoding', () => {
+    expect(
+      decodeRdfStringLiteral(`${asRdfLiteral('a\nb')}^^<http://www.w3.org/2001/XMLSchema#string>`),
+    ).toBe('a\nb');
+    expect(decodeRdfStringLiteral(`${asRdfLiteral('hola')}@es`)).toBe('hola');
+  });
+
+  it('passes a bare / unquoted value through unchanged (parity with stripRdfLiteral)', () => {
+    expect(decodeRdfStringLiteral('not-a-literal')).toBe('not-a-literal');
+    expect(decodeRdfStringLiteral('')).toBe('');
+  });
+
+  it('falls back to the raw inner body when the literal is not valid JSON-escaped', () => {
+    // A lone trailing backslash is not a valid JSON string escape — the
+    // decoder must not throw; it returns the inner body verbatim,
+    // exactly as the old stripRdfLiteral did.
+    expect(decodeRdfStringLiteral('"bad\\"')).toBe('bad\\');
+  });
+});
 
 describe('ChatMemoryManager', () => {
   let manager: ChatMemoryManager;
@@ -543,6 +607,43 @@ describe('ChatMemoryManager', () => {
     expect(session!.messages[1].text).toBe('Final reply');
     expect(session!.messages[1].toolCalls?.[0]).toEqual(expect.objectContaining({ name: 'lookup' }));
     expect(session!.messages[1].persistStatus).toBe('stored');
+  });
+
+  it('getSession decodes a multi-line assistant reply from the stored transition path', async () => {
+    // Regression for Codex round-6: the stored-transition overwrite at
+    // chat-memory.ts must use decodeRdfStringLiteral, not the
+    // wrapper-only stripRdfLiteral — otherwise a persisted (stored)
+    // assistant turn (the dominant path on reload) comes back with
+    // literal `\n` and markdown breaks after refresh again. The
+    // transition `assistantReply` is written via JSON.stringify, so
+    // the daemon literal carries escaped newlines.
+    const richReply = '# Title\n\nPara one\n\n- item a\n- item b\n\n```ts\nconst x = 1;\n```';
+    mockQuery.returns.push(
+      { bindings: [] },
+      {
+        bindings: [
+          {
+            m: 'urn:dkg:chat:msg:agent-1',
+            author: 'urn:dkg:chat:actor:agent',
+            text: JSON.stringify('Draft reply'),
+            ts: '"2026-01-01T12:00:01Z"',
+            turnId: '"turn-1"',
+            persistenceState: '"pending"',
+            transitionState: '"stored"',
+            transitionAssistantReply: JSON.stringify(richReply),
+          },
+        ],
+      },
+    );
+
+    const session = await manager.getSession('test-session-transition-multiline');
+
+    expect(session).not.toBeNull();
+    expect(session!.messages).toHaveLength(1);
+    // Real newlines recovered — NOT the literal two-char `\n` escape.
+    expect(session!.messages[0].text).toBe(richReply);
+    expect(session!.messages[0].text).not.toContain('\\n');
+    expect(session!.messages[0].persistStatus).toBe('stored');
   });
 
   it('getStats returns session and triple counts', async () => {

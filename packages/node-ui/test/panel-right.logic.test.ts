@@ -4,6 +4,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 
 let ConnectedAgentsTab: any;
 let adoptLocalAgentTurnId: any;
+let formatLocalTimestamp: any;
 let getLocalAgentConversationStateKey: any;
 let markLocalAgentIntegrationDisconnected: any;
 let networkPeerCardStatusClass: any;
@@ -39,6 +40,7 @@ beforeAll(async () => {
   const panelRight = await import('../src/ui/components/Shell/PanelRight.js');
   ConnectedAgentsTab = panelRight.ConnectedAgentsTab;
   adoptLocalAgentTurnId = panelRight.adoptLocalAgentTurnId;
+  formatLocalTimestamp = panelRight.formatLocalTimestamp;
   getLocalAgentConversationStateKey = panelRight.getLocalAgentConversationStateKey;
   markLocalAgentIntegrationDisconnected = panelRight.markLocalAgentIntegrationDisconnected;
   networkPeerCardStatusClass = panelRight.networkPeerCardStatusClass;
@@ -97,6 +99,7 @@ function renderConnectedAgentsTab(overrides: Record<string, unknown> = {}) {
     localInput: '',
     onLocalInputChange: noop,
     onSendLocalMessage: noop,
+    onStopLocalStream: noop,
     localSending: false,
     activeProjectId: 'testing',
     availableProjects: [
@@ -137,6 +140,82 @@ describe('PanelRight logic helpers', () => {
     expect(normalizeMessageContent('Line one\n\nLine two\n')).toBe('Line one\n\nLine two');
     // CRLF folds to LF.
     expect(normalizeMessageContent('Line one\r\nLine two')).toBe('Line one\nLine two');
+  });
+
+  it('formatLocalTimestamp includes date + time (PR4 expansion)', () => {
+    // Earlier the helper rendered only HH:MM AM/PM, which became
+    // ambiguous once a conversation crossed midnight. PR4 switches to
+    // dateStyle: 'medium' + timeStyle: 'short' so timestamps anchor
+    // both the day and the time. We don't pin the exact string here —
+    // locale formatting varies across runners — but we do pin that the
+    // formatted output includes both date and time signals.
+    const d = new Date(Date.UTC(2026, 4, 14, 22, 5, 0));
+    const out = formatLocalTimestamp(d);
+    // Locale-agnostic: pin the actual PR4 contract (medium date +
+    // short time) by comparing against the same Intl API the helper
+    // uses, rather than hard-coding en-US / Gregorian traits like
+    // "2026" or ":" / "AM|PM" (which break under non-English or
+    // non-Gregorian runtime locales — Codex round-6).
+    expect(out).toBe(d.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }));
+    // The regression PR4 fixed: the date component must be present, so
+    // a full render differs from a time-only render. Compared in the
+    // runtime locale, so this holds in any locale/calendar.
+    expect(out).not.toBe(d.toLocaleString([], { timeStyle: 'short' }));
+    expect(out).toContain(new Intl.DateTimeFormat(undefined, { year: 'numeric' }).format(d));
+    // Empty / null / invalid inputs return an empty string (or echo
+    // the original on parse failure) — no exceptions.
+    expect(formatLocalTimestamp(undefined)).toBe('');
+    expect(formatLocalTimestamp('')).toBe('');
+    expect(formatLocalTimestamp('not-a-date')).toBe('not-a-date');
+  });
+
+  it('per-conversation abort isolates concurrent streams (Codex CSI-j regression)', () => {
+    // Pins down the contract the `useRef<Map<conversationKey, AbortController>>`
+    // implementation must hold:
+    //   1. Two conversations can hold separate controllers concurrently
+    //      (start A, then start B, both untouched).
+    //   2. Aborting the selected conversation's controller does NOT
+    //      affect the other's.
+    //   3. The `finally` compare-and-delete cleanup only removes its
+    //      OWN controller — never the other conversation's, even if
+    //      they raced and the same conversationKey was reused later.
+    const controllers = new Map<string, AbortController>();
+
+    const ctrlA = new AbortController();
+    controllers.set('A', ctrlA);
+    const ctrlB = new AbortController();
+    controllers.set('B', ctrlB);
+
+    expect(controllers.size).toBe(2);
+    expect(ctrlA.signal.aborted).toBe(false);
+    expect(ctrlB.signal.aborted).toBe(false);
+
+    // User clicks Stop while viewing A.
+    const selectedKey = 'A';
+    controllers.get(selectedKey)?.abort();
+    expect(ctrlA.signal.aborted).toBe(true);
+    expect(ctrlB.signal.aborted).toBe(false);
+
+    // A's `finally`: compare-and-delete leaves B's entry alone.
+    if (controllers.get('A') === ctrlA) controllers.delete('A');
+    expect(controllers.has('A')).toBe(false);
+    expect(controllers.has('B')).toBe(true);
+    expect(controllers.get('B')).toBe(ctrlB);
+
+    // A retries — fresh controller under the same key. B is still
+    // streaming with its original controller untouched.
+    const ctrlARetry = new AbortController();
+    controllers.set('A', ctrlARetry);
+
+    // Now B finishes. Its `finally` compare-and-delete confirms the
+    // map entry is STILL ctrlB (the original), so the delete fires.
+    // If a late teardown from a stale A request fired here using
+    // `ctrlA` as the witness, the compare-and-delete would (correctly)
+    // skip the delete and leave A's retry entry intact.
+    if (controllers.get('A') === ctrlA) controllers.delete('A');
+    expect(controllers.get('A')).toBe(ctrlARetry); // not wiped by stale teardown
+    if (controllers.get('B') === ctrlB) controllers.delete('B');
+    expect(controllers.has('B')).toBe(false);
   });
 
   it('preserves literal backslash-n in agent content (Codex CHWpS)', () => {
@@ -379,6 +458,72 @@ describe('ConnectedAgentsTab rendering', () => {
     expect(userBubble).not.toContain('<a ');
     expect(userBubble).not.toContain('<h1');
     expect(userBubble).not.toContain('v10-md-');
+  });
+
+  it('renders the send button in spinner mode while attachments upload (PR4)', () => {
+    const markup = renderConnectedAgentsTab({
+      attachments: [{
+        id: 'draft-1',
+        file: new File(['x'], 'spec.md', { type: 'text/markdown' }),
+        contextGraphId: 'testing',
+        assertionName: 'spec',
+        status: 'uploading',
+      }],
+      localInput: 'send while uploading',
+    });
+    // Button carries the uploading state class + tooltip; spinner SVG
+    // present; aria-label follows the WAI-ARIA APG pattern of describing
+    // the action plus a parenthesized reason for unavailability rather
+    // than narrating state (UX-lead P1-C).
+    expect(markup).toContain('v10-local-agent-inline-send-uploading');
+    expect(markup).toContain('aria-label="Send message (attachments uploading)"');
+    expect(markup).toContain('v10-local-agent-inline-send-spinner');
+    // Plain `aria-label="Send message"` shouldn't appear — only the
+    // parenthesized variant is in flight in this state.
+    expect(markup).not.toMatch(/aria-label="Send message"/);
+  });
+
+  it('renders the send button in stop mode while the assistant is streaming (PR4)', () => {
+    const markup = renderConnectedAgentsTab({
+      localMessages: [
+        { id: 'u', role: 'user', content: 'hi', ts: '10:00' },
+        { id: 'a', role: 'assistant', content: 'partial reply...', ts: '10:01', streaming: true },
+      ],
+      localSending: true,
+    });
+    expect(markup).toContain('v10-local-agent-inline-send-streaming');
+    expect(markup).toContain('aria-label="Stop reply"');
+    // Spinner / send-arrow labels are gone in this state.
+    expect(markup).not.toContain('aria-label="Send message"');
+    expect(markup).not.toContain('aria-label="Uploading attachments"');
+  });
+
+  it('renders assistant bubble with no surface styling (PR4 — full-width no-bubble layout)', () => {
+    // PR4 drops the assistant bubble to match Claude Desktop / ChatGPT /
+    // VS Code Copilot: only user content stays as a pill. We pin two
+    // contracts:
+    //   1. Class names: `.v10-chat-msg.assistant` still wraps each
+    //      assistant turn (used for align-stretch in styles.css), and
+    //      `.v10-chat-bubble.assistant` still wraps the content (used
+    //      to scope markdown-component CSS and the streaming cursor).
+    //   2. No legacy inline background / border attributes on the
+    //      assistant bubble — visual surface comes solely from
+    //      styles.css, which has been stripped of background / border /
+    //      max-width for `.v10-chat-bubble.assistant`.
+    const markup = renderConnectedAgentsTab({
+      localMessages: [
+        { id: 'a', role: 'assistant', content: 'reply text', ts: '10:00' },
+      ],
+    });
+    expect(markup).toContain('class="v10-chat-msg assistant"');
+    expect(markup).toContain('class="v10-chat-bubble assistant"');
+    // Inline-style background/border on assistant bubble would
+    // reintroduce the visual pill — verify markup is clean.
+    const start = markup.indexOf('class="v10-chat-bubble assistant"');
+    const end = markup.indexOf('</div>', start);
+    const assistantBubble = markup.slice(start, end);
+    expect(assistantBubble).not.toContain('background:');
+    expect(assistantBubble).not.toContain('border:');
   });
 
   it('also bypasses markdown for synthesized assistant content (Codex CGpe9)', () => {

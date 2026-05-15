@@ -1,25 +1,27 @@
-# Automatically publish all public packages to NPM on every push to the
-# release branch. Uses a dev pre-release suffix so each push gets a unique
-# version (e.g. 10.0.0-rc.1-dev.1774300000.abc1234) tagged as `dev` on the
-# npm registry. `latest` is intentionally reserved for tagged releases —
-# `release.yml` (when it gets promoted to a publisher) is the only path
-# that should ever set `--tag latest`.
+# Publish all public packages to NPM when a semver version tag is pushed.
+# Only fires on tags matching `v<digit>*.<digit>*.<digit>*` (e.g. `v10.0.0`,
+# `v10.0.0-rc.8`). Tags like `vnext` or `v-test` are ignored.
+# Full semver validation happens in the build-and-pack job.
+# Merges to main do NOT trigger a publish — only explicit releases do.
 #
-# To switch the release branch: change the branches list below.
+# The npm dist-tag is derived from the version string:
+#   * `-rc.*`    → `--tag rc`     (release candidates)
+#   * `-beta.*`  → `--tag beta`
+#   * `-alpha.*` → `--tag alpha`
+#   * otherwise  → `--tag latest` (stable releases)
+#
 # To disable publishing:
 #   * Recommended: disable the workflow from the Actions UI
-#     (Actions tab → Continuous NPM Publish → … → Disable workflow).
-#     This stops the push trigger entirely without any code change.
+#     (Actions tab → NPM Publish → … → Disable workflow).
 #   * Alternative: delete the `npm-publish` GitHub Environment in
 #     repo Settings → Environments. The `verify-environment` job
 #     fails-closed when the environment is missing, so the publish
 #     step never runs and NPM_TOKEN is never injected into a runner.
 #
-# What does NOT disable publishing anymore: removing the NPM_TOKEN
-# repo-level secret. After the hardening landed in this PR, NPM_TOKEN
-# should live INSIDE the `npm-publish` Environment, where it is
-# invisible to any job that does not declare `environment: npm-publish`.
-# This is the structural property that makes the gate fail-closed.
+# What does NOT disable publishing: removing the NPM_TOKEN
+# repo-level secret. NPM_TOKEN lives INSIDE the `npm-publish`
+# Environment, invisible to any job that does not declare
+# `environment: npm-publish`.
 #
 # JOB GRAPH (the critical design property):
 #
@@ -38,11 +40,11 @@
 # execute repository or package code, so a compromised lifecycle hook
 # in a transitively-installed dep cannot exfiltrate NPM_TOKEN.
 
-name: Continuous NPM Publish
+name: NPM Publish
 
 on:
   push:
-    branches: [main]  # ← change this when the release branch moves
+    tags: ['v[0-9]*.[0-9]*.[0-9]*']
 
 permissions:
   contents: read
@@ -77,7 +79,6 @@ jobs:
     name: Verify npm-publish environment protection rules
     runs-on: ubuntu-latest
     timeout-minutes: 2
-    if: "!startsWith(github.event.head_commit.message, 'chore: continuous publish')"
     permissions:
       contents: read
       # `actions: read` is the documented minimum scope for reading
@@ -146,20 +147,20 @@ jobs:
             exit 1
           fi
 
-          # deployment_branch_policy: the environment must be restricted
-          # to the release branch (currently `main`). Otherwise a feature
-          # branch could push to it and reuse the same NPM_TOKEN gate
-          # configured for prod, bypassing branch protection entirely.
+          # deployment_branch_policy: the environment must NOT allow "all
+          # branches". Otherwise a feature branch could push a tag to it
+          # and reuse the same NPM_TOKEN gate, bypassing branch protection.
           # The GitHub API shape for this rule is one of:
           #   * null                    — "all branches" (FAIL-CLOSED)
           #   * { protected_branches: true, custom_branch_policies: false }
-          #     → "all protected branches" (acceptable: main is protected
-          #     and feature branches are not, so this is a valid mode)
+          #     → "all protected branches" — acceptable: GitHub resolves
+          #     the tag's target to `main` (a protected branch)
           #   * { protected_branches: false, custom_branch_policies: true }
           #     + a custom branch-name list at
           #     /environments/{name}/deployment-branch-policies that
-          #     explicitly names `main`. We accept either form, but a
-          #     `null` policy (all branches allowed) is rejected.
+          #     includes `main` (and optionally a `v*` tag pattern).
+          #     We accept either form, but a `null` policy (all branches
+          #     allowed) is rejected.
           DEPLOY_POLICY=$(echo "${ENV_CONFIG}" | jq -c '.deployment_branch_policy // null' || echo null)
           if [ "${DEPLOY_POLICY}" = "null" ]; then
             echo "::error title=npm-publish branch policy missing::Environment allows ANY branch to deploy to npm-publish. A feature branch with a malicious lifecycle script would inherit the same NPM_TOKEN gate as the release branch. Configure deployment branch policy to 'Protected branches only' OR add an explicit allow-list containing only the release branch in repo Settings → Environments → npm-publish → Deployment branches."
@@ -172,50 +173,80 @@ jobs:
           if [ "${PROTECTED_ONLY}" = "true" ]; then
             echo "✓ npm-publish deployment branch policy: protected branches only"
           elif [ "${CUSTOM_POLICIES}" = "true" ]; then
-            # Custom policies are stored in a sibling API path. The
-            # intended policy is "main only" — anything else widens
-            # the surface that NPM_TOKEN is reachable from. So we
-            # walk the allow-list and assert it equals EXACTLY the
-            # single configured release branch. Wildcards
-            # (`release/*`), extra exact branches (`main`, `staging`),
-            # or empty lists all fail.
-            #
-            # `RELEASE_BRANCH` defines the single source of truth; if
-            # we ever move publishing to a different branch we update
-            # it here AND in the `on.push.branches:` trigger at the
-            # top of this file.
-            RELEASE_BRANCH=main
+            # Custom policies are stored in a sibling API path. Every
+            # entry must be a known release branch or the `v*` tag
+            # pattern. Keep ALLOWED_BRANCHES in sync with RELEASE_BRANCHES
+            # used in the ancestry check below and in release.yml.
+            ALLOWED_BRANCHES=("main" "v10-rc")
+            ALLOWED_TAG_PATTERN="v*"
             CUSTOM_BRANCHES=$(gh api "repos/${GH_REPO}/environments/npm-publish/deployment-branch-policies" --jq '[.branch_policies[]?.name]' 2>/dev/null || echo '[]')
-            BRANCH_COUNT=$(echo "${CUSTOM_BRANCHES}" | jq 'length')
-            HAS_RELEASE=$(echo "${CUSTOM_BRANCHES}" | jq --arg b "${RELEASE_BRANCH}" -r 'any(. == $b)')
-            HAS_WILDCARD=$(echo "${CUSTOM_BRANCHES}" | jq -r 'any(test("\\*"))')
 
-            if [ "${HAS_WILDCARD}" = "true" ]; then
-              echo "::error title=npm-publish custom branch policy contains wildcard::Wildcards like \`*\` or \`release/*\` defeat the branch-scoping control — any branch matching the pattern can mint a publish run and unlock NPM_TOKEN. Replace with exact branch names. Allowed branches: ${CUSTOM_BRANCHES}"
+            # Build a jq filter for all allowed values
+            ALLOWED_JQ=$(printf '%s\n' "${ALLOWED_BRANCHES[@]}" "${ALLOWED_TAG_PATTERN}" | jq -R . | jq -s .)
+            UNEXPECTED=$(echo "${CUSTOM_BRANCHES}" | jq --argjson allowed "${ALLOWED_JQ}" -c 'map(select(. as $e | $allowed | any(. == $e) | not))')
+            UNEXPECTED_COUNT=$(echo "${UNEXPECTED}" | jq 'length')
+            if [ "${UNEXPECTED_COUNT}" -gt 0 ]; then
+              echo "::error title=npm-publish custom branch policy has unexpected entries::Only release branches and \`${ALLOWED_TAG_PATTERN}\` are allowed. Remove: ${UNEXPECTED}"
               exit 1
             fi
-            if [ "${HAS_RELEASE}" != "true" ]; then
-              echo "::error title=npm-publish custom branch policy excludes release branch::Environment uses custom branch policies but \`${RELEASE_BRANCH}\` is not in the allow-list. Add it (or remove this workflow's push trigger). Allowed branches: ${CUSTOM_BRANCHES}"
+            # At least one release branch must be present
+            HAS_ANY_RELEASE=$(echo "${CUSTOM_BRANCHES}" | jq --argjson allowed "$(printf '%s\n' "${ALLOWED_BRANCHES[@]}" | jq -R . | jq -s .)" 'any(. as $e | $allowed | any(. == $e))')
+            if [ "${HAS_ANY_RELEASE}" != "true" ]; then
+              echo "::error title=npm-publish custom branch policy excludes release branches::None of the release branches (${ALLOWED_BRANCHES[*]}) are in the allow-list. Allowed: ${CUSTOM_BRANCHES}"
               exit 1
             fi
-            if [ "${BRANCH_COUNT}" != "1" ]; then
-              # The reviewer's exact wording: "if the policy is only
-              # `main`, enforce exactly one allowed branch." Any
-              # additional exact branch (e.g. `staging`, an old
-              # release branch nobody removed, a typo) creates a
-              # second path that inherits the same NPM_TOKEN gate.
-              # Fail closed with a clear remediation.
-              EXTRA=$(echo "${CUSTOM_BRANCHES}" | jq --arg b "${RELEASE_BRANCH}" -c 'map(select(. != $b))')
-              echo "::error title=npm-publish custom branch policy has extra branches::Allow-list contains ${BRANCH_COUNT} branches; the intended policy is \`${RELEASE_BRANCH}\` only. Remove the extras (${EXTRA}) in repo Settings → Environments → npm-publish → Deployment branches, leaving only \`${RELEASE_BRANCH}\`."
-              exit 1
-            fi
-            echo "✓ npm-publish deployment branch policy: custom allow-list exactly [\"${RELEASE_BRANCH}\"]"
+            echo "✓ npm-publish deployment branch policy: custom allow-list ${CUSTOM_BRANCHES}"
           else
             echo "::error title=npm-publish branch policy invalid::deployment_branch_policy is set but neither protected_branches nor custom_branch_policies is true. The API shape is unexpected; refusing to publish. Raw policy: ${DEPLOY_POLICY}"
             exit 1
           fi
 
           echo "✓ npm-publish environment configured with ${REVIEWER_COUNT} required reviewer(s) (self-review blocked) + ${WAIT_TIMER}-min wait timer + scoped deployment branch policy"
+
+      - name: Verify tag points to a commit on a release branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG_NAME: ${{ github.ref_name }}
+          TAG_SHA: ${{ github.sha }}
+          # Keep in sync with release.yml's RELEASE_BRANCHES
+          RELEASE_BRANCHES: "main v10-rc"
+        run: |
+          set -euo pipefail
+          for branch in ${RELEASE_BRANCHES}; do
+            STATUS=$(gh api "repos/${GH_REPO}/compare/${branch}...${TAG_SHA}" --jq '.status' 2>/dev/null || echo "error")
+            if [ "${STATUS}" = "identical" ] || [ "${STATUS}" = "behind" ]; then
+              echo "✓ Tag ${TAG_NAME} (${TAG_SHA}) is reachable from ${branch} (status: ${STATUS})"
+              exit 0
+            fi
+          done
+          echo "::error title=Tag not on release branch::Tag ${TAG_NAME} (${TAG_SHA}) is not reachable from any release branch (${RELEASE_BRANCHES}). Push tags only on commits that are on a release branch."
+          exit 1
+
+      - name: Require signed annotated tag
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Validate tag is annotated and signed
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF#refs/tags/}"
+          TAG_TYPE=$(git cat-file -t "${TAG}" 2>&1) || {
+            echo "::error title=Tag object missing::git cat-file failed for ${TAG}: ${TAG_TYPE}"
+            exit 1
+          }
+          if [ "${TAG_TYPE}" != "tag" ]; then
+            echo "::error title=Tag not annotated::Tag ${TAG} is a lightweight ref (type: ${TAG_TYPE}). Lightweight tags cannot carry signatures. Re-create with: git tag -s ${TAG} <commit>"
+            exit 1
+          fi
+          TAG_BODY=$(git cat-file -p "${TAG}")
+          if ! printf '%s' "${TAG_BODY}" | grep -qE '^-----BEGIN (PGP SIGNATURE|SSH SIGNATURE)-----'; then
+            echo "::error title=Tag not signed::Tag ${TAG} is annotated but has no signature block. Re-create with: git tag -s ${TAG} <commit>"
+            exit 1
+          fi
+          echo "✓ Tag ${TAG} is annotated and signed"
 
   # BUILD AND PACK — runs WITHOUT `environment: npm-publish`, so NPM_TOKEN
   # is NOT in scope. This is the job that executes arbitrary repository
@@ -235,7 +266,7 @@ jobs:
     permissions:
       contents: read
     outputs:
-      suffix: ${{ steps.version.outputs.SUFFIX }}
+      npm_tag: ${{ steps.dist-tag.outputs.NPM_TAG }}
       artifact_name: ${{ steps.artifact.outputs.NAME }}
       # `node_version` is the single source of truth for Node version
       # in this workflow. `.nvmrc` lives in the repo, so we can only
@@ -276,11 +307,9 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: ${{ steps.read-nvmrc.outputs.NODE_VERSION }}
-          # Cache pnpm at the dependency-install layer is acceptable
-          # here because NPM_TOKEN is not in scope. The publish job
-          # disables the cache entirely so a poisoned restored
-          # node_modules cannot influence the credential-bearing run.
-          cache: pnpm
+          # No cache on the publish path. Tag-triggered runs are
+          # infrequent (~weekly), so a clean install is acceptable
+          # and avoids the zizmor cache-poisoning surface entirely.
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -292,42 +321,56 @@ jobs:
         run: pnpm build
 
       # NOTE: tests are intentionally NOT re-run here. The main `ci.yml`
-      # workflow runs the full TORNADO / BURA / KOSAVA matrix in parallel on
-      # the same commit and is the authoritative test gate (enforced via
-      # branch protection on merges to v10-rc). Re-running `pnpm turbo test`
-      # in this publish workflow was redundant with `ci.yml` AND incompatible
-      # with the `accept-red-ci` policy on v10-rc: a deliberately-red
-      # PROD-BUG sentinel test (e.g. network-sim K-4/K-5 — no seeded RNG, no
-      # libp2p-parity harness) would fail this step and block every dev
-      # pre-release, even though CI was already reporting the same red state
-      # as documented bug evidence. See .test-audit/BUGS_FOUND.md.
+      # workflow runs the full test matrix on every push to `main` and is
+      # the authoritative test gate (enforced via branch protection). By
+      # the time a version tag is pushed, CI has already passed on `main`.
+      # Re-running tests here would block the publish for known-red
+      # sentinel tests. See .test-audit/BUGS_FOUND.md.
 
-      - name: Compute dev version suffix
-        id: version
+      - name: Validate git tag matches package.json versions
         run: |
-          EPOCH=$(date +%s)
-          SHORT_SHA=$(git rev-parse --short=7 HEAD)
-          echo "SUFFIX=dev.${EPOCH}.${SHORT_SHA}" >> "$GITHUB_OUTPUT"
-
-      - name: Bump all public packages to dev pre-release
-        env:
-          SUFFIX: ${{ steps.version.outputs.SUFFIX }}
-        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          EXPECTED_VER="${TAG#v}"
+          echo "Git tag: ${TAG} → expected npm version: ${EXPECTED_VER}"
           node -e "
             const fs = require('fs');
             const path = require('path');
+            const expected = '${EXPECTED_VER}';
             const pkgsDir = path.join(process.cwd(), 'packages');
             for (const dir of fs.readdirSync(pkgsDir)) {
               const pkgPath = path.join(pkgsDir, dir, 'package.json');
               if (!fs.existsSync(pkgPath)) continue;
               const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
               if (pkg.private) continue;
-              const base = pkg.version.replace(/-dev\\..*$/, '');
-              pkg.version = base + '-' + '${SUFFIX}';
-              fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n');
-              console.log(pkg.name + '@' + pkg.version);
+              if (pkg.version !== expected) {
+                console.error('MISMATCH: ' + pkg.name + '@' + pkg.version + ' (expected ' + expected + ')');
+                process.exitCode = 1;
+              } else {
+                console.log('✓ ' + pkg.name + '@' + pkg.version);
+              }
             }
           "
+
+      - name: Derive npm dist-tag from git tag
+        id: dist-tag
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VER="${TAG#v}"
+          if [[ "$VER" == *-rc.* ]]; then
+            NPM_TAG=rc
+          elif [[ "$VER" == *-beta.* ]]; then
+            NPM_TAG=beta
+          elif [[ "$VER" == *-alpha.* ]]; then
+            NPM_TAG=alpha
+          elif [[ "$VER" == *-* ]]; then
+            echo "::error title=Unrecognized prerelease::Version ${VER} has an unrecognized prerelease identifier. Only -rc.*, -beta.*, and -alpha.* are allowed. Refusing to publish to avoid accidentally tagging as 'latest'."
+            exit 1
+          else
+            NPM_TAG=latest
+          fi
+          echo "NPM_TAG=${NPM_TAG}" >> "$GITHUB_OUTPUT"
+          echo "Resolved dist-tag: ${NPM_TAG} for ${TAG}"
 
       - name: Pack public packages into tarballs
         # `pnpm pack` runs the same prepack/prepare lifecycle hooks
@@ -390,9 +433,7 @@ jobs:
 
       - name: Determine artifact name
         id: artifact
-        env:
-          SUFFIX: ${{ steps.version.outputs.SUFFIX }}
-        run: echo "NAME=npm-tarballs-${SUFFIX}" >> "$GITHUB_OUTPUT"
+        run: echo "NAME=npm-tarballs-${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
 
       - name: Upload packed tarballs as workflow artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -417,10 +458,9 @@ jobs:
     needs:
       - verify-environment
       - build-and-pack
-    if: "!startsWith(github.event.head_commit.message, 'chore: continuous publish')"
     # `npm-publish` Environment gates access to NPM_TOKEN. Configure required
     # reviewers + a wait timer in repo Settings → Environments → `npm-publish`
-    # so a compromised merge to main cannot auto-publish without human
+    # so a compromised tag push cannot auto-publish without human
     # approval. See docs/security/SUPPLY_CHAIN_HARDENING.md for the exact
     # setup steps. The environment value MUST match the Environment name
     # configured in repo Settings.
@@ -488,10 +528,8 @@ jobs:
         # tarball's contents. The combination of
         #   * `--ignore-scripts`           — no prepack/prepare/etc.
         #   * `--provenance`               — emits OIDC attestation
-        #   * `--tag dev`                  — channel scoping (NOT
-        #                                    `latest`; that is reserved
-        #                                    for signed release tags
-        #                                    promoted via release.yml)
+        #   * `--tag $NPM_TAG`             — dist-tag derived from the
+        #                                    git tag (latest / rc / beta / alpha)
         #   * `--access public`            — public packages by default
         #   * environment-scoped NPM_TOKEN — limits credential lifetime
         #                                    to this job
@@ -500,6 +538,7 @@ jobs:
         # leaving a partially-published version set on the registry.
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TAG: ${{ needs.build-and-pack.outputs.npm_tag }}
         run: |
           set -euo pipefail
           cd publish-artifacts
@@ -509,12 +548,13 @@ jobs:
             echo "::error::No tarballs to publish — artifact was empty"
             exit 1
           fi
+          echo "Publishing with dist-tag: ${NPM_TAG}"
           for tarball in "${tarballs[@]}"; do
             echo "::group::npm publish ${tarball}"
             npm publish "${tarball}" \
               --provenance \
               --access public \
-              --tag dev \
+              --tag "${NPM_TAG}" \
               --ignore-scripts
             echo "::endgroup::"
           done

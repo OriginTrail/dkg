@@ -205,6 +205,115 @@ export class DkgClient {
     return r.agents ?? [];
   }
 
+  // ── Agent-to-agent chat (Phase 1: agent debug chat RFC) ────────
+  /**
+   * Send an encrypted libp2p chat to another agent on the DKG network.
+   * Wraps `POST /api/chat`, which performs the peerId lookup,
+   * encrypted-and-signed exchange over `/dkg/message/1.0.0`, and (on
+   * the receiver) a SQLite insert + notification.
+   *
+   * `to` accepts a peerId or a friendly node name registered in the
+   * agent registry. `contextGraphId` is optional and is embedded in the
+   * encrypted chat payload so a receiver running `chat.acl.mode =
+   * scoped` / `shared-context-graph` can validate the sender belongs to
+   * the CG (and so the receiver's SQLite notification carries the CG
+   * tag).
+   *
+   * Returns `delivered: false` with an `error` field on any failure,
+   * including ACL rejections — the daemon already surfaces the
+   * receiver's `unauthorized: ...` response verbatim, so the model can
+   * react ("ask the operator to whitelist us in the receiver's chat
+   * ACL") without parsing.
+   */
+  async sendChat(args: {
+    to: string;
+    text: string;
+    contextGraphId?: string;
+  }): Promise<{
+    delivered: boolean;
+    /**
+     * True iff `delivered=false` and the daemon enqueued the message
+     * for retry in its in-memory chat outbox. Surfaced to the model so
+     * it can tell the operator "queued for delivery" instead of an
+     * opaque error. Added in the MessageOutbox PR.
+     */
+    queued?: boolean;
+    /** Outbox key fragment; stable across retries. */
+    messageId?: string;
+    /** Number of failed attempts so far (1 on first failure). */
+    attempts?: number;
+    /** Epoch-ms when the next retry is due. */
+    nextAttemptAtMs?: number;
+    error?: string;
+    phases?: Record<string, number>;
+  }> {
+    const body: Record<string, unknown> = { to: args.to, text: args.text };
+    if (args.contextGraphId) body.contextGraphId = args.contextGraphId;
+    return this.request('POST', '/api/chat', body);
+  }
+
+  /**
+   * Read this node's locally stored chat history. Backed by the
+   * `chat_messages` table in `DashboardDB` — every inbound peer chat
+   * lands here on receipt (after passing the ACL), and every outbound
+   * chat the daemon successfully sends is logged for the operator's
+   * UI. Used by `dkg_check_inbox` to surface unread peer messages.
+   */
+  async getMessages(args: {
+    peer?: string;
+    since?: number;
+    /**
+     * Compound-cursor secondary key — paired with `since`, makes the
+     * daemon's predicate `(ts > since) OR (ts = since AND id > sinceId)`
+     * so rows sharing a millisecond aren't dropped between pages.
+     * (Codex PR #510 round 2.)
+     */
+    sinceId?: number;
+    limit?: number;
+    /**
+     * Server-side direction filter. Applied BEFORE the daemon's LIMIT
+     * cap, so inbox readers asking for `direction: 'in'` won't have
+     * unread inbound messages skipped when the newest page is a burst
+     * of outbound replies. See `GET /api/messages` in
+     * `packages/cli/src/daemon/routes/agent-chat.ts` for the contract.
+     */
+    direction?: 'in' | 'out';
+    /**
+     * `asc` = forward pagination (oldest first). Inbox readers use this
+     * so the watermark only advances past rows we have actually
+     * returned. Default `desc` keeps history-view callers unchanged.
+     */
+    order?: 'asc' | 'desc';
+  } = {}): Promise<{
+    messages: Array<{
+      /**
+       * SQLite rowid — exposed so callers can build the next compound
+       * cursor `{ since: ts, sinceId: id }`.
+       */
+      id: number;
+      ts: number;
+      direction: 'in' | 'out';
+      peer: string;
+      peerName?: string;
+      text: string;
+      delivered?: boolean;
+    }>;
+  }> {
+    const params = new URLSearchParams();
+    if (args.peer) params.set('peer', args.peer);
+    if (typeof args.since === 'number') params.set('since', String(args.since));
+    if (typeof args.sinceId === 'number') params.set('sinceId', String(args.sinceId));
+    if (typeof args.limit === 'number') params.set('limit', String(args.limit));
+    if (args.direction === 'in' || args.direction === 'out') {
+      params.set('direction', args.direction);
+    }
+    if (args.order === 'asc' || args.order === 'desc') {
+      params.set('order', args.order);
+    }
+    const qs = params.toString();
+    return this.request('GET', `/api/messages${qs ? `?${qs}` : ''}`);
+  }
+
   // ── Writes ─────────────────────────────────────────────────────
   /**
    * Ensure a sub-graph exists on a project. Idempotent — a pre-existing

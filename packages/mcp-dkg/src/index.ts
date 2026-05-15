@@ -21,6 +21,7 @@ import { registerMemorySearchTool } from './tools/memory-search.js';
 import { registerSetupTools } from './tools/setup.js';
 import { registerHealthTools } from './tools/health.js';
 import { registerPublishTools } from './tools/publish.js';
+import { registerChatTools } from './tools/chat.js';
 import { runCli, isKnownCliSubcommand } from './cli/index.js';
 import { loadAdapters } from './adapters.js';
 
@@ -58,6 +59,7 @@ export async function main(argv: string[] = process.argv): Promise<void> {
   registerSetupTools(server, client, config);
   registerHealthTools(server, client, config);
   registerPublishTools(server, client, config);
+  registerChatTools(server, client, config);
 
   await loadAdapters(server, client, config);
 

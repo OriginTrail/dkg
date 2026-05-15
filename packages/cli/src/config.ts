@@ -193,6 +193,44 @@ export interface LocalAgentIntegrationRuntime {
   updatedAt?: string;
 }
 
+/**
+ * Inbound chat authorisation policy. Layered on top of the existing
+ * Ed25519 signature check on every libp2p chat message — this controls
+ * *which* authenticated peers we're willing to talk to, not *whether*
+ * they're authenticated.
+ *
+ * Modes:
+ *   - `any` — accept all authenticated peers (legacy behaviour). Only
+ *     appropriate on a closed dev network where every peer is trusted.
+ *   - `peer-allowlist` — only accept peerIds listed in `peerAllowlist`.
+ *     Strongest, also most manual.
+ *   - `scoped` (recommended Phase 1 default) — only accept peers whose
+ *     node-principal is an `active` member of `contextGraphId`. Requires
+ *     `contextGraphId` to be set; if it isn't, all inbound chats are
+ *     rejected (fail-closed).
+ *   - `shared-context-graph` — accept any peer that's an active
+ *     node-member of at least one CG this node is also subscribed to.
+ *     More flexible than `scoped`; less strict.
+ *
+ * Loopback (a node chatting itself) is always accepted, regardless of
+ * mode — useful for local CLI testing and for the daemon's own
+ * outbound→inbound debugging shortcuts.
+ */
+export type ChatAclMode = 'any' | 'peer-allowlist' | 'scoped' | 'shared-context-graph';
+
+export interface ChatAclConfig {
+  mode?: ChatAclMode;
+  /** Required when `mode: 'scoped'`. */
+  contextGraphId?: string;
+  /** Required when `mode: 'peer-allowlist'`. */
+  peerAllowlist?: string[];
+}
+
+export interface ChatConfig {
+  /** Inbound chat authorisation policy. See {@link ChatAclConfig}. */
+  acl?: ChatAclConfig;
+}
+
 export interface LocalAgentIntegrationConfig {
   id?: string;
   name?: string;
@@ -329,6 +367,14 @@ export interface DkgConfig {
    * equivalent to relay-incapable.
    */
   relayCapable?: boolean;
+  /**
+   * Agent-to-agent chat settings. Phase 1 (RFC: agent debug chat) only
+   * uses the `acl` block, which controls who is allowed to send us
+   * inbound chats over `/dkg/message/1.0.0`. Authentication is always
+   * enforced by the protocol; this is the authorisation layer on top.
+   * See {@link ChatConfig} / {@link ChatAclConfig}.
+   */
+  chat?: ChatConfig;
 }
 
 /**

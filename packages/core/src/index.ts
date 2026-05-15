@@ -44,6 +44,12 @@ export {
 } from './genesis.js';
 export { withRetry, type RetryOptions } from './retry.js';
 export {
+  RetryQueue,
+  type RetryEntry,
+  type RetryMetadata,
+  type RetryQueueOptions,
+} from './retry-queue.js';
+export {
   findPackageRepoDir,
   blueGreenSlotEntryPoint,
   blueGreenSlotReady,

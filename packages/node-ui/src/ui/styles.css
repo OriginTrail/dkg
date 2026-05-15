@@ -1346,9 +1346,14 @@ button:focus:not(:focus-visible) { outline: none; }
   .v10-scroll-to-bottom { transition: none; }
 }
 .v10-local-agent-msg-time {
+  /* Bumped from `--text-tertiary` to `--text-secondary` after PR4's
+     timestamp-expansion change made these strings noticeably more
+     visible (full date + time vs. previous time-only). Pre-existing
+     AA fail surfaced by PR4: tertiary clears only 2.31-2.66:1 against
+     bg-panel; secondary clears 5.58/7.17. UI-lead Task #68. */
   margin-top: 4px;
   font-size: 10px;
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
   font-family: var(--font-mono);
 }
 .v10-local-agent-msg-time.user {
@@ -1508,6 +1513,39 @@ button:focus:not(:focus-visible) { outline: none; }
   color: var(--bg-surface);
   cursor: not-allowed;
 }
+/* Streaming: button remains clickable as a stop-button. Distinguish
+   it visually from the idle Send button so a user typing a follow-up
+   mid-stream doesn't reflexively click "Send" and accidentally abort
+   the in-flight reply (UX-lead P1-B). Switch the filled silhouette
+   for an outlined-square treatment — same shape, different surface
+   reading — matches Claude / ChatGPT's stop-button pattern. The
+   `--border-prominent` token clears WCAG 1.4.11 3:1 against
+   `--bg-active` in both themes (~3.8:1 dark / ~3.2:1 light). */
+.v10-local-agent-inline-send-streaming {
+  cursor: pointer;
+  background: var(--bg-active);
+  color: var(--text-primary);
+  border: 1px solid var(--border-prominent);
+}
+/* Override the generic `:hover { opacity: 0.9 }` on .v10-local-agent-inline-send
+   — the outlined Stop button reads better with a surface bump than an
+   opacity dip. */
+.v10-local-agent-inline-send-streaming:hover {
+  background: var(--bg-hover);
+  opacity: 1;
+}
+/* Uploading: spinner spins continuously. The button is disabled in this
+   state (informational only) — the underlying :disabled rule above
+   handles its appearance; this rule just animates the inner icon. */
+.v10-local-agent-inline-send-spinner {
+  animation: v10-spin 0.85s linear infinite;
+}
+@keyframes v10-spin {
+  to { transform: rotate(360deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .v10-local-agent-inline-send-spinner { animation: none; }
+}
 
 /* Project picker now lives INSIDE the composer-controls row to the right of
    the attach button. Lets the picker fill the available space in the row
@@ -1613,6 +1651,10 @@ button:focus:not(:focus-visible) { outline: none; }
   color: var(--text-danger);
 }
 .v10-attachment-chip-remove {
+  /* Bumped from --text-tertiary to --text-secondary so the X icon at rest
+     clears WCAG 1.4.11 3:1 non-text contrast against the chip's
+     --bg-elevated background: ~4.07:1 dark, ~7.1:1 light. Hover still
+     promotes to --text-primary for additional affordance. */
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
@@ -1622,7 +1664,7 @@ button:focus:not(:focus-visible) { outline: none; }
   border-radius: 999px;
   border: 0;
   background: transparent;
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
   cursor: pointer;
   transition: background 0.15s, color 0.15s;
 }
@@ -1897,15 +1939,19 @@ button:focus:not(:focus-visible) { outline: none; }
 .v10-chat-messages { padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; }
 .v10-chat-msg { display: flex; flex-direction: column; }
 .v10-chat-msg.user { align-items: flex-end; }
-.v10-chat-msg.assistant { align-items: flex-start; }
+.v10-chat-msg.assistant {
+  align-items: stretch;
+  /* Assistant messages render full-width within the messages region,
+     matching Claude Desktop / ChatGPT / VS Code Copilot. The .v10-chat-msg
+     wrapper sets the stretch axis so the inner .v10-chat-bubble.assistant
+     fills the available width without an explicit width: 100%. */
+}
 .v10-chat-bubble {
-  padding: 10px 14px;
-  border-radius: 10px;
-  max-width: 85%;
   font-size: 12px;
   line-height: 1.55;
   word-break: break-word;
   overflow-wrap: anywhere;
+  color: var(--text-primary);
 }
 .v10-chat-plaintext {
   /* User-side bubbles render as literal text — preserve whitespace and
@@ -1916,14 +1962,22 @@ button:focus:not(:focus-visible) { outline: none; }
   white-space: pre-wrap;
 }
 .v10-chat-bubble.user {
+  /* User pill — right-aligned, capped width, distinct surface. */
+  padding: 10px 14px;
+  border-radius: 10px;
+  max-width: 85%;
   background: var(--bg-active);
-  color: var(--text-primary);
   border: 1px solid var(--border-default);
 }
 .v10-chat-bubble.assistant {
-  background: var(--bg-surface);
-  color: var(--text-primary);
-  border: 1px solid var(--border-subtle);
+  /* No bubble container — assistant content reads as full-width body
+     copy on the panel background, the same pattern industry-standard
+     AI chat UIs use. Padding stays narrow so the assistant typography
+     visually separates from the bordered code blocks / blockquotes /
+     tables that live inside `.v10-md`. No background, no border, no
+     `max-width` — those previously created the "two cramped chat boxes"
+     look. */
+  padding: 4px 0;
 }
 /* ── Markdown rendering (PR3) ── */
 .v10-md {
@@ -1951,11 +2005,23 @@ button:focus:not(:focus-visible) { outline: none; }
 .v10-md-h4 { font-size: 13px; }
 .v10-md-h5 { font-size: 12px; }
 .v10-md-h6 { font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.04em; }
-.v10-md-p { margin: 4px 0; }
+/* Explicit `--text-primary` on body-text elements. A global
+   `p { color: var(--text-secondary) }` (≈styles.css:2682) would
+   otherwise win over these (bare-element specificity 0,0,1 beats
+   inherited color from an ancestor). Before PR4 the assistant bubble's
+   own `color: var(--text-primary)` masked it; with the bubble removed
+   full-width assistant prose was inheriting the dim global and reading
+   as unreadable muted gray in dark mode. The `.v10-md-*` class
+   selectors (0,1,0) beat the global `p` cleanly. Headings already set
+   this explicitly; links / code / h6 keep their intentional non-primary
+   colors. Blockquote body is re-dimmed below (its inner `<p>` would
+   otherwise pick up this `--text-primary` directly, defeating the
+   intentional dim-quote affordance). */
+.v10-md-p { margin: 4px 0; color: var(--text-primary); }
 .v10-md-ul, .v10-md-ol { margin: 4px 0; padding-left: 20px; }
 .v10-md-ul { list-style: disc; }
 .v10-md-ol { list-style: decimal; }
-.v10-md-li { margin: 2px 0; }
+.v10-md-li { margin: 2px 0; color: var(--text-primary); }
 .v10-md-li > .v10-md-ul, .v10-md-li > .v10-md-ol { margin: 2px 0; padding-left: 18px; }
 /* Task lists (remark-gfm) */
 .v10-md-ul .v10-md-li input[type="checkbox"] {
@@ -1982,23 +2048,53 @@ button:focus:not(:focus-visible) { outline: none; }
   cursor: help;
 }
 .v10-md-blockquote {
+  /* Left rail bumped from `--border-strong` to `--border-prominent`
+     after the assistant bubble was removed in PR4 — the rail is the
+     only visual cue defining the blockquote (the 5% wash inside is
+     effectively imperceptible on bg-panel) and `--border-strong`
+     fails WCAG 1.4.11 (3:1 non-text) against `--bg-panel` in both
+     themes. `--border-prominent` clears 5.58:1 dark / 7.17:1 light,
+     same swap recipe as `.v10-md-hr` and the inline-code chip
+     border. Codex / UI-lead Task #67. */
   margin: 6px 0;
   padding: 4px 12px;
-  border-left: 3px solid var(--border-strong);
+  border-left: 3px solid var(--border-prominent);
   color: var(--text-secondary);
   background: color-mix(in srgb, var(--text-tertiary) 5%, transparent);
   border-radius: 0 6px 6px 0;
 }
+/* react-markdown renders blockquote body as `<blockquote><p
+   class="v10-md-p">…</p></blockquote>`. The `.v10-md-p` rule above now
+   sets `--text-primary` directly on that inner `<p>`, which a direct
+   rule always beats over the `--text-secondary` the `<p>` would
+   otherwise inherit from `.v10-md-blockquote`. Re-dim quoted body text
+   with a scoped descendant selector (0,2,0 > the 0,1,0 `.v10-md-p`),
+   preserving the "quoted content reads dimmer than body" affordance.
+   Clears WCAG AA at 5.45:1 dark / 6.92:1 light. UI-lead PR4 r6. */
+.v10-md-blockquote .v10-md-p,
+.v10-md-blockquote .v10-md-li { color: var(--text-secondary); }
 .v10-md-hr {
+  /* `--border-subtle` was invisible against the panel background — the
+     assistant content now sits directly on `--bg-panel` after the
+     bubble removal, and even the dark-theme `--border-default` /
+     `--border-strong` still fail WCAG 1.4.11 (3:1 non-text) here.
+     `--border-prominent` is the same chip-outline token already in
+     use by inline-code chips on user bubbles and clears 3:1 against
+     `--bg-panel` in both themes. */
   margin: 12px 0;
   border: 0;
-  border-top: 1px solid var(--border-subtle);
+  border-top: 1px solid var(--border-prominent);
 }
 .v10-md-table-scroll {
+  /* Outer border bumped to `--border-prominent` for the same reason
+     `.v10-md-hr` / `.v10-md-blockquote` / `.v10-md-pre` did — after
+     PR4's bubble removal, the table sits on `--bg-panel` and the old
+     `--border-subtle` clears only ~1.15:1 against panel (fails 3:1).
+     UI-lead Task #66. */
   margin: 8px 0;
   overflow-x: auto;
   border-radius: 8px;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--border-prominent);
 }
 .v10-md-table {
   width: 100%;
@@ -2017,9 +2113,12 @@ button:focus:not(:focus-visible) { outline: none; }
   white-space: nowrap;
 }
 .v10-md-td {
+  /* Table data is primary content, not metadata — `--text-secondary`
+     read as dim/unreadable on the no-bubble dark panel (same root
+     cause as `.v10-md-p`). Match the header (`--text-primary`). */
   padding: 6px 10px;
   border-bottom: 1px solid var(--border-subtle);
-  color: var(--text-secondary);
+  color: var(--text-primary);
   vertical-align: top;
 }
 .v10-md-tr:last-child .v10-md-td { border-bottom: 0; }
@@ -2066,11 +2165,19 @@ button:focus:not(:focus-visible) { outline: none; }
   line-height: 1.85;
 }
 .v10-md-pre {
+  /* Code-block container outline bumped to `--border-prominent` for
+     the same reason as `.v10-md-hr` / `.v10-md-blockquote` /
+     `.v10-md-table-scroll` — the `--bg-elevated` fill is barely a
+     lift over `--bg-panel` (~1.05-1.11:1) once the assistant bubble
+     was removed in PR4, so the border is now the only visual cue
+     defining the code block. `--border-subtle` fails 3:1 against
+     panel; `--border-prominent` clears it in both themes. UI-lead
+     Task #65. */
   position: relative;
   margin: 8px 0;
   border-radius: 12px;
   background: var(--bg-elevated);
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--border-prominent);
   overflow: hidden;
   font-family: var(--font-mono);
   font-size: 11px;
