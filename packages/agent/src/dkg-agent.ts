@@ -5662,36 +5662,18 @@ export class DKGAgent {
         '(Axiom 5: SWM provisional record must reference triples).',
       );
     }
-    // V10 Axiom 1: every shared write targets a CG this node knows
-    // about — either created locally (`createContextGraph`) or
-    // subscribed-to from a peer (`subscribeToContextGraph`). Allowing
-    // share() into an unknown CG would mint a SWM record under
-    // `did:dkg:context-graph:<unknown>/_shared_memory` with no
-    // registry/authority binding — the SHARE is unattributable to any
-    // CG record. Accept if the CG appears in either:
-    //   (a) the in-memory subscriptions map (subscriber path), OR
-    //   (b) the local `contextGraphMetaGraphUri` graph (creator path).
-    {
-      const knownInMemory = this.subscribedContextGraphs.has(contextGraphId);
-      let knownInStore = false;
-      if (!knownInMemory) {
-        const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
-        const cgUri = `did:dkg:context-graph:${contextGraphId}`;
-        const r = await this.store.query(
-          `SELECT ?id WHERE { GRAPH <${cgMetaGraph}> {
-             <${cgUri}> ?p ?id
-           } } LIMIT 1`,
-        );
-        knownInStore = r.type === 'bindings' && r.bindings.length > 0;
-      }
-      if (!knownInMemory && !knownInStore) {
-        throw new Error(
-          `share() requires a known contextGraphId; "${contextGraphId}" is not subscribed and ` +
-          'has no local CG record. Call createContextGraph() / registerContextGraph() / ' +
-          'subscribeToContextGraph() first (Axiom 1: every shared write targets a registered CG).',
-        );
-      }
-    }
+    // V10 Axiom 1 enforcement on registry presence used to live here as a
+    // hard pre-flight throw: if the CG was neither subscribed nor present
+    // in the local meta-graph, share() rejected. Main introduced the
+    // implicit-CG-from-SWM-write feature (DKG-419) where share() into a
+    // fresh CG is the registration path — `shouldCreateImplicitSharedMemoryContextGraph`
+    // + `ensureImplicitSharedMemoryContextGraph` below auto-register the
+    // CG record on first SWM write. Those two behaviours cannot coexist;
+    // the strict pre-flight guard would short-circuit lazy-creation
+    // entirely. The catalog-level axiom-1 test in axiom-checks.e2e.test.ts
+    // still probes the registered-CG requirement and continues to record
+    // this as an open audit item in the Tornado axiom audit lane (red by
+    // design); production share() defers to main's spec and lazy-creates.
     const ctx = opts?.operationCtx ?? createOperationContext('share');
     const sgLabel = opts?.subGraphName ? ` (sub-graph: ${opts.subGraphName})` : '';
     this.log.info(ctx, `Sharing ${quads.length} quads to SWM for context graph ${contextGraphId}${sgLabel}${opts?.localOnly ? ' (local-only)' : ''}`);
