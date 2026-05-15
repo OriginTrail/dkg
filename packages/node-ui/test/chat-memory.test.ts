@@ -73,6 +73,14 @@ describe('decodeRdfStringLiteral (history-text deserialization)', () => {
     expect(decodeRdfStringLiteral(asRdfLiteral(original))).toBe(original);
   });
 
+  it('round-trips a fenced block holding BOTH a real newline and a literal backslash-n', () => {
+    // The single fixture that locks both halves of the inverse at once:
+    // a regression to any heuristic decoder would either collapse the
+    // literal `\n` token or fail to restore the real line break.
+    const original = '```js\nconsole.log("a\\nb");\n```';
+    expect(decodeRdfStringLiteral(asRdfLiteral(original))).toBe(original);
+  });
+
   it('round-trips embedded quotes, tabs, CRLF, and unicode escapes', () => {
     const original = 'q="x"\ttab\r\nwin-newline\nημει — dash';
     expect(decodeRdfStringLiteral(asRdfLiteral(original))).toBe(original);

@@ -2013,8 +2013,10 @@ button:focus:not(:focus-visible) { outline: none; }
    full-width assistant prose was inheriting the dim global and reading
    as unreadable muted gray in dark mode. The `.v10-md-*` class
    selectors (0,1,0) beat the global `p` cleanly. Headings already set
-   this explicitly; blockquote / links / code / h6 keep their
-   intentional non-primary colors. */
+   this explicitly; links / code / h6 keep their intentional non-primary
+   colors. Blockquote body is re-dimmed below (its inner `<p>` would
+   otherwise pick up this `--text-primary` directly, defeating the
+   intentional dim-quote affordance). */
 .v10-md-p { margin: 4px 0; color: var(--text-primary); }
 .v10-md-ul, .v10-md-ol { margin: 4px 0; padding-left: 20px; }
 .v10-md-ul { list-style: disc; }
@@ -2061,6 +2063,16 @@ button:focus:not(:focus-visible) { outline: none; }
   background: color-mix(in srgb, var(--text-tertiary) 5%, transparent);
   border-radius: 0 6px 6px 0;
 }
+/* react-markdown renders blockquote body as `<blockquote><p
+   class="v10-md-p">…</p></blockquote>`. The `.v10-md-p` rule above now
+   sets `--text-primary` directly on that inner `<p>`, which a direct
+   rule always beats over the `--text-secondary` the `<p>` would
+   otherwise inherit from `.v10-md-blockquote`. Re-dim quoted body text
+   with a scoped descendant selector (0,2,0 > the 0,1,0 `.v10-md-p`),
+   preserving the "quoted content reads dimmer than body" affordance.
+   Clears WCAG AA at 5.45:1 dark / 6.92:1 light. UI-lead PR4 r6. */
+.v10-md-blockquote .v10-md-p,
+.v10-md-blockquote .v10-md-li { color: var(--text-secondary); }
 .v10-md-hr {
   /* `--border-subtle` was invisible against the panel background — the
      assistant content now sits directly on `--bg-panel` after the
