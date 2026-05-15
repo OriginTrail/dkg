@@ -3,6 +3,7 @@ import {
   belongsInContextOracleSidebar,
   belongsInMyProjectsSidebar,
   canonicalAgentDid,
+  computeSelectableProjects,
 } from '../src/ui/lib/contextGraphSidebar.js';
 import type { ContextGraph } from '../src/ui/stores/projects.js';
 
@@ -117,5 +118,36 @@ describe('contextGraphSidebar', () => {
       creator: 'did:dkg:agent:0x2000000000000000000000000000000000000000',
     } as ContextGraph;
     expect(belongsInContextOracleSidebar(cg, id)).toBe(false);
+  });
+});
+
+describe('computeSelectableProjects (chat project picker)', () => {
+  const mine1 = { id: 'm1', name: 'Mine 1', callerInvolved: true } as ContextGraph;
+  const mine2 = { id: 'm2', name: 'Mine 2', callerInvolved: true } as ContextGraph;
+  const notMine = { id: 'n1', name: 'Not Mine', callerInvolved: false, accessPolicy: 'public' } as ContextGraph;
+
+  it('includes member projects and excludes non-member ones', () => {
+    const out = computeSelectableProjects([mine1, notMine, mine2], id, null);
+    expect(out.map((c) => c.id)).toEqual(['m1', 'm2']);
+  });
+
+  it('still surfaces the active project even when it is not a member (prepended once)', () => {
+    const out = computeSelectableProjects([mine1, notMine, mine2], id, 'n1');
+    expect(out.map((c) => c.id)).toEqual(['n1', 'm1', 'm2']);
+  });
+
+  it('does not duplicate the active project when it is already a member', () => {
+    const out = computeSelectableProjects([mine1, notMine, mine2], id, 'm2');
+    expect(out.map((c) => c.id)).toEqual(['m1', 'm2']);
+  });
+
+  it('ignores an active id that is not in the available list', () => {
+    const out = computeSelectableProjects([mine1, notMine], id, 'ghost');
+    expect(out.map((c) => c.id)).toEqual(['m1']);
+  });
+
+  it('null identity → only daemon-confirmed (callerInvolved) member projects', () => {
+    const out = computeSelectableProjects([mine1, notMine], null, null);
+    expect(out.map((c) => c.id)).toEqual(['m1']);
   });
 });

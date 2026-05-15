@@ -58,7 +58,10 @@ const execFileAsync = promisify(execFile);
 import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
-import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
+import {
+  findReservedSubjectPrefix,
+  isSkolemizedUri,
+} from '@origintrail-official/dkg-publisher';
 import {
   DashboardDB,
   MetricsCollector,
@@ -328,6 +331,38 @@ import {
 } from '../local-agents.js';
 
 import type { RequestContext } from './context.js';
+
+
+// Keep these in sync with VerifyCollector's hard enforcement in
+// packages/publisher/src/verify-collector.ts. They exist here so bad
+// HTTP input is rejected before the agent starts VERIFY work.
+const VERIFY_COLLECTION_TIMEOUT_MIN_MS = 1_000;
+const VERIFY_COLLECTION_TIMEOUT_MAX_MS = 30 * 60 * 1000;
+
+function parseVerifyTimeoutMs(
+  raw: unknown,
+): { value: number | undefined } | { error: string } {
+  if (raw === undefined || raw === null || raw === '') return { value: undefined };
+  let value: number;
+  if (typeof raw === 'number') {
+    value = raw;
+  } else if (typeof raw === 'string' && /^\d+$/.test(raw.trim())) {
+    value = Number(raw.trim());
+  } else {
+    return { error: 'timeoutMs must be an integer number of milliseconds' };
+  }
+  if (!Number.isSafeInteger(value)) {
+    return { error: 'timeoutMs must be a safe integer number of milliseconds' };
+  }
+  if (value < VERIFY_COLLECTION_TIMEOUT_MIN_MS || value > VERIFY_COLLECTION_TIMEOUT_MAX_MS) {
+    return {
+      error:
+        `timeoutMs must be between ${VERIFY_COLLECTION_TIMEOUT_MIN_MS} and ` +
+        `${VERIFY_COLLECTION_TIMEOUT_MAX_MS} milliseconds`,
+    };
+  }
+  return { value };
+}
 
 
 export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
@@ -903,16 +938,24 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       timeoutMs,
       requiredSignatures,
     } = JSON.parse(body);
-    if (!contextGraphId || !verifiedMemoryId || !batchId) {
+    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
+    if (!verifiedMemoryId || !batchId) {
       return jsonResponse(res, 400, {
-        error: "Missing contextGraphId, verifiedMemoryId, or batchId",
+        error: "Missing verifiedMemoryId or batchId",
       });
+    }
+    if (typeof verifiedMemoryId !== 'string') {
+      return jsonResponse(res, 400, { error: '"verifiedMemoryId" must be a string' });
     }
     const parsedSigs = parseRequiredSignatures(requiredSignatures);
     if ("error" in parsedSigs) {
       return jsonResponse(res, 400, { error: parsedSigs.error });
     }
     const validatedRequiredSigs = parsedSigs.value || undefined;
+    const parsedTimeout = parseVerifyTimeoutMs(timeoutMs);
+    if ("error" in parsedTimeout) {
+      return jsonResponse(res, 400, { error: parsedTimeout.error });
+    }
 
     // CLI-9 (
     // unparseable value used to throw `SyntaxError: Cannot convert ...
@@ -932,16 +975,35 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
         contextGraphId,
         verifiedMemoryId,
         batchId: parsedBatchId,
-        timeoutMs: timeoutMs ? Number(timeoutMs) : undefined,
+        timeoutMs: parsedTimeout.value,
         requiredSignatures: validatedRequiredSigs,
       });
-      emitMemoryGraphChanged?.({
-        contextGraphId,
-        layers: ["vm"],
-        operation: "verified_memory_updated",
-        source: "api",
+      if (result.status === "verified") {
+        emitMemoryGraphChanged?.({
+          contextGraphId,
+          layers: ["vm"],
+          operation: "verified_memory_updated",
+          source: "api",
+        });
+      } else if (result.status === "partial" || result.status === "no_quorum") {
+        emitMemoryGraphChanged?.({
+          contextGraphId,
+          layers: ["wm"],
+          operation: "trust_metadata_updated",
+          source: "api",
+        });
+      }
+      if (result.status === "verified") {
+        return jsonResponse(res, 200, { ...result, batchId: String(batchId) });
+      }
+      return jsonResponse(res, 409, {
+        ...result,
+        batchId: String(batchId),
+        error:
+          result.status === "partial"
+            ? "Verification quorum was not reached; partial trust metadata was written without a chain transaction"
+            : "Verification quorum was not reached; no verified memory was written",
       });
-      return jsonResponse(res, 200, { ...result, batchId: String(batchId) });
     } catch (err) {
       // CLI-9 dup #158 #159: a non-existent (cgId, vmId, batchId)
       // tuple used to bubble up a chain custom-error revert as a
@@ -973,10 +1035,14 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
     const body = await readBody(req, SMALL_BODY_BYTES);
     const parsed = JSON.parse(body);
     const { contextGraphId, ual } = parsed;
-    if (!contextGraphId || !ual) {
+    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
+    if (!ual) {
       return jsonResponse(res, 400, {
-        error: "Missing contextGraphId or ual",
+        error: "Missing ual",
       });
+    }
+    if (typeof ual !== 'string' || !isSafeIri(ual)) {
+      return jsonResponse(res, 400, { error: '"ual" must be a safe IRI' });
     }
     // A-12 review: the endorser MUST come from the authenticated bearer
     // token, not from the request body. Trusting body.agentAddress let
@@ -1008,16 +1074,24 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
           `The endorser is resolved from the bearer token; omit body.agentAddress or use the matching agent's token.`,
       });
     }
-    const result = await agent.endorse({
-      contextGraphId,
-      knowledgeAssetUal: ual,
-      agentAddress: requestAgentAddress,
-    });
-    return jsonResponse(res, 200, {
-      endorsed: true,
-      endorserAddress: requestAgentAddress,
-      ...result,
-    });
+    try {
+      const result = await agent.endorse({
+        contextGraphId,
+        knowledgeAssetUal: ual,
+        agentAddress: requestAgentAddress,
+      });
+      return jsonResponse(res, 200, {
+        endorsed: true,
+        endorserAddress: requestAgentAddress,
+        ...result,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('Endorsement target') && msg.includes('not found')) {
+        return jsonResponse(res, 404, { error: msg });
+      }
+      throw err;
+    }
   }
 
   // POST /api/ccl/policy/publish

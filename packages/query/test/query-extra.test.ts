@@ -3,17 +3,10 @@
  *
  * Findings covered (see .test-audit/
  *
- *   Q-1  PROD-BUG  `QueryOptions.minTrust` on `verified-memory` view is a
- *                  *graph-scope* filter, not a per-triple filter. P-13
- *                  wired the graph-scope semantics end-to-end (drop root
- *                  when `minTrust > SelfAttested`), but the spec §14
- *                  trust-gradient guarantee also implies per-triple
- *                  filtering against `dkg:trustLevel` inside the
- *                  `/_verified_memory/*` sub-graphs. Test inserts mixed-
- *                  trust quads in a single sub-graph and asserts the
- *                  engine only returns HIGH-trust quads — the test
- *                  STAYS RED until Q-1 lands. P-13 (graph-scope) is
- *                  covered separately by publisher/test/views-min-trust-*.
+ *   Q-1  `QueryOptions.minTrust` on `verified-memory` view is enforced
+ *        with writer-side `dkg:trustLevel` metadata, not graph-scope trust
+ *        alone. Tests insert mixed-trust quads and assert the engine only
+ *        returns entities that meet the requested trust floor.
  *
  *   Q-2  SPEC-GAP  `QueryHandler.executeSparql` only wires `result.bindings`
  *                  into the response JSON. CONSTRUCT / DESCRIBE queries return
@@ -70,25 +63,11 @@ function quad(s: string, p: string, o: string, g: string): Quad {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Q-1  per-triple minTrust filtering — PROD-BUG (stays RED until engine honours
-//      `dkg:trustLevel` at the quad level inside /_verified_memory/*)
+// Q-1  writer-side minTrust filtering via `dkg:trustLevel`
 // ─────────────────────────────────────────────────────────────────────────────
-describe('[Q-1] DKGQueryEngine minTrust is graph-scope only — PROD-BUG', () => {
-  // P-13 closed the graph-scope half of minTrust (root is dropped when
-  // minTrust > SelfAttested). Q-1 is the remaining per-triple half: if a
-  // writer ever stamps mixed-trust quads into a single sub-graph, the
-  // graph-scope filter cannot catch it. This test pins that gap.
-  //
-  // the per-triple filter is now
-  // skipped at `Endorsed` because no production writer emits
-  // `dkg:trustLevel` literals — applying the join at Endorsed would
-  // collapse legitimate queries against real data. The per-triple
-  // filter still runs at `PartiallyVerified` / `ConsensusVerified`,
-  // where graph-scope alone cannot distinguish the tiers, and where
-  // a fail-closed empty result on un-tagged data is the correct
-  // behaviour. This test now exercises the per-triple filter at
-  // `ConsensusVerified` (the highest tier) — that path is what
-  // production callers asking for the strictest tier will hit.
+describe('[Q-1] DKGQueryEngine minTrust uses writer-side trust metadata', () => {
+  // All trust floors above SelfAttested require explicit writer-side
+  // trust metadata. Untagged production data fails closed for these queries.
   it('filters out sub-threshold trust quads WITHIN a verified-memory sub-graph at ConsensusVerified (Q-1)', async () => {
     const store = new OxigraphStore();
     const engine = new DKGQueryEngine(store);
@@ -104,7 +83,7 @@ describe('[Q-1] DKGQueryEngine minTrust is graph-scope only — PROD-BUG', () =>
       quad('urn:low', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.Endorsed}"`, mixedGraph),
       quad('urn:high', 'http://schema.org/name', '"HighTrust"', mixedGraph),
       quad('urn:high', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, mixedGraph),
-      // Root-level quad — P-13 graph-scope filter already excludes this.
+      // Untagged root-level quad — writer-side trust filtering excludes this.
       quad('urn:unknown', 'http://schema.org/name', '"UnknownTrust"', rootGraph),
     ]);
 
@@ -123,29 +102,18 @@ describe('[Q-1] DKGQueryEngine minTrust is graph-scope only — PROD-BUG', () =>
     expect(names).toEqual(['"HighTrust"']);
   });
 
-  // explicit pin that the new
-  // `> Endorsed` threshold leaves Endorsed queries reading from
-  // /_verified_memory/* sub-graphs without applying the per-triple
-  // join. Real production data lands in those sub-graphs WITHOUT a
-  // `dkg:trustLevel` literal (writer-side trust tagging is tracked
-  // upstream), so the previously-applied per-triple filter would
-  // collapse every Endorsed query to `[]`. This test exercises that
-  // exact production shape: data in /_verified_memory/{quorum}
-  // with NO trustLevel triples must still be visible at Endorsed.
-  it('Endorsed reads /_verified_memory/* WITHOUT requiring per-triple trustLevel (graph-scope is the trust gate)', async () => {
+  it('Endorsed uses writer-side trustLevel metadata instead of graph-scope trust', async () => {
     const store = new OxigraphStore();
     const engine = new DKGQueryEngine(store);
 
     const subGraph = contextGraphVerifiedMemoryUri(CG, 'no-trust-metadata-quorum');
     const rootGraph = contextGraphDataUri(CG);
 
-    // Production-shaped data: quads in a quorum sub-graph with NO
-    // trustLevel literals (matches today's publisher write path).
     await store.insert([
       quad('urn:prod1', 'http://schema.org/name', '"Production1"', subGraph),
       quad('urn:prod2', 'http://schema.org/name', '"Production2"', subGraph),
-      // Root-graph data must NOT leak into Endorsed (P-13 graph-scope filter).
       quad('urn:root', 'http://schema.org/name', '"RootDataGraph"', rootGraph),
+      quad('urn:root', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.Endorsed}"`, rootGraph),
     ]);
 
     const result = await engine.query(
@@ -158,9 +126,7 @@ describe('[Q-1] DKGQueryEngine minTrust is graph-scope only — PROD-BUG', () =>
     );
 
     const names = result.bindings.map((b) => b['name']).sort();
-    // BOTH quorum-sub-graph quads survive (no per-triple filter at
-    // Endorsed) and the root-graph quad is excluded by P-13.
-    expect(names).toEqual(['"Production1"', '"Production2"']);
+    expect(names).toEqual(['"RootDataGraph"']);
   });
 
   // pin that ConsensusVerified
@@ -377,10 +343,10 @@ describe('[Q-1] DKGQueryEngine minTrust is graph-scope only — PROD-BUG', () =>
     const engine = new DKGQueryEngine(store);
     const consensus = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
     await store.insert([
-      quad('urn:low', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.Unverified}"`, consensus),
+      quad('urn:low', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.SelfAttested}"`, consensus),
       quad('urn:low', 'http://example.org/name', '"Bob"', consensus),
     ]);
-    // ex:low has Unverified < ConsensusVerified, so the rewrite MUST
+    // ex:low has SelfAttested < ConsensusVerified, so the rewrite MUST
     // filter it out — not silently drop `_minTrust` and return "Bob".
     const sparql = [
       'PREFIX ex: <urn:>',
@@ -456,7 +422,7 @@ describe('[Q-1] DKGQueryEngine minTrust is graph-scope only — PROD-BUG', () =>
     const consensus = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
     await store.insert([
       quad('urn:hi', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensus),
-      quad('urn:lo', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.Unverified}"`, consensus),
+      quad('urn:lo', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.SelfAttested}"`, consensus),
       quad('urn:hi', 'http://example.org/label', '"H"', consensus),
       quad('urn:lo', 'http://example.org/label', '"L"', consensus),
     ]);
@@ -470,7 +436,7 @@ describe('[Q-1] DKGQueryEngine minTrust is graph-scope only — PROD-BUG', () =>
       sparql,
       { contextGraphId: CG, view: 'verified-memory', _minTrust: TrustLevel.ConsensusVerified },
     );
-    // `urn:lo` is Unverified — it must be filtered out, not silently
+    // `urn:lo` is SelfAttested — it must be filtered out, not silently
     // returned because the rewriter bailed on VALUES.
     expect(result.bindings.map((b) => b['l'])).toEqual(['"H"']);
   });
@@ -545,7 +511,7 @@ describe('[Q-1] DKGQueryEngine minTrust is graph-scope only — PROD-BUG', () =>
     const engine = new DKGQueryEngine(store);
     const consensus = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
     await store.insert([
-      quad('urn:lo', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.Unverified}"`, consensus),
+      quad('urn:lo', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.SelfAttested}"`, consensus),
       quad('urn:lo', 'http://schema.org/score', '"99"^^<http://www.w3.org/2001/XMLSchema#integer>', consensus),
     ]);
     const sparql = [

@@ -701,12 +701,15 @@ export class ApiClient {
       assertionName?: string;
       subGraphName?: string;
       verifiedGraph?: string;
-      /**
-       * P-13: implementable tiers are `SelfAttested` (0) and `Endorsed`
-       * (1) only. `PartiallyVerified` / `ConsensusVerified` fail fast
-       * with a 400 at the daemon until Q-1 lands.
-       */
-      minTrust?: 'SelfAttested' | 'Endorsed' | 0 | 1;
+      minTrust?:
+        | 'SelfAttested'
+        | 'Endorsed'
+        | 'PartiallyVerified'
+        | 'ConsensusVerified'
+        | 0
+        | 1
+        | 2
+        | 3;
     },
   ): Promise<{ result: QueryResult }> {
     return this.post('/api/query', {
@@ -1147,7 +1150,14 @@ export class ApiClient {
     batchId: string;
     timeoutMs?: number;
     requiredSignatures?: number;
-  }): Promise<{ txHash: string; blockNumber: number; verifiedMemoryId: string; signers: string[] }> {
+  }): Promise<{
+    txHash?: string;
+    blockNumber?: number;
+    verifiedMemoryId: string;
+    signers: string[];
+    status?: 'verified' | 'partial' | 'no_quorum';
+    trustLevel?: number;
+  }> {
     return this.post('/api/verify', request);
   }
 

@@ -1,5 +1,8 @@
-import { describe, it, expect } from 'vitest';
-import { VerifyCollector } from '../src/verify-collector.js';
+import { afterEach, describe, it, expect, vi } from 'vitest';
+import {
+  VerifyCollector,
+  VERIFY_COLLECTION_TIMEOUT_MAX_MS,
+} from '../src/verify-collector.js';
 import { encodeVerifyApproval, decodeVerifyProposal } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 
@@ -15,6 +18,10 @@ function makeApproval(proposalId: Uint8Array, wallet: ethers.Wallet, digest: Uin
 }
 
 describe('VerifyCollector', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('collects M-of-N approvals from participants', async () => {
     const walletA = ethers.Wallet.createRandom();
     const walletB = ethers.Wallet.createRandom();
@@ -60,6 +67,8 @@ describe('VerifyCollector', () => {
     expect(result.approvals).toHaveLength(1);
     expect(result.contextGraphId).toBe('test-cg');
     expect(result.verifiedMemoryId).toBe(1n);
+    expect(result.requiredRemoteApprovals).toBe(1);
+    expect(result.quorumReached).toBe(true);
   });
 
   it('throws when not enough peers are connected', async () => {
@@ -98,5 +107,87 @@ describe('VerifyCollector', () => {
       requiredSignatures: 2, // needs 1 remote, but 0 peers → error
       timeoutMs: 1000,
     })).rejects.toThrow('verify_no_peers');
+  });
+
+  it('returns no-quorum metadata instead of throwing when partial collection is allowed and no peers are connected', async () => {
+    const collector = new VerifyCollector({
+      sendP2P: async () => new Uint8Array(0),
+      getParticipantPeers: () => [],
+    });
+
+    const result = await collector.collect({
+      contextGraphId: 'test-cg',
+      contextGraphIdOnChain: 42n,
+      verifiedMemoryId: 1n,
+      batchId: 100n,
+      merkleRoot: new Uint8Array(32),
+      entities: [],
+      proposerSignature: { r: new Uint8Array(32), vs: new Uint8Array(32) },
+      requiredSignatures: 2,
+      timeoutMs: 1000,
+      allowPartial: true,
+    });
+
+    expect(result.approvals).toEqual([]);
+    expect(result.requiredRemoteApprovals).toBe(1);
+    expect(result.quorumReached).toBe(false);
+  });
+
+  it('rejects oversized timeout values before sending proposals', async () => {
+    const sendP2P = vi.fn(async () => new Uint8Array(0));
+    const collector = new VerifyCollector({
+      sendP2P,
+      getParticipantPeers: () => ['peer-a'],
+    });
+
+    await expect(collector.collect({
+      contextGraphId: 'test-cg',
+      contextGraphIdOnChain: 42n,
+      verifiedMemoryId: 1n,
+      batchId: 100n,
+      merkleRoot: new Uint8Array(32),
+      entities: [],
+      proposerSignature: { r: new Uint8Array(32), vs: new Uint8Array(32) },
+      requiredSignatures: 2,
+      timeoutMs: VERIFY_COLLECTION_TIMEOUT_MAX_MS + 1,
+    })).rejects.toThrow(/verify_timeout_invalid/);
+
+    expect(sendP2P).not.toHaveBeenCalled();
+  });
+
+  it('clears the timeout timer after quorum resolves', async () => {
+    vi.useFakeTimers();
+    const walletA = ethers.Wallet.createRandom();
+    const merkleRoot = ethers.getBytes(ethers.keccak256(ethers.toUtf8Bytes('timer-root')));
+    const sendP2P = async (_peerId: string, _protocol: string, data: Uint8Array) => {
+      const proposal = decodeVerifyProposal(data);
+      const contextGraphIdBig = BigInt(42);
+      const packed = new Uint8Array(64);
+      const cgBytes = new Uint8Array(32);
+      const view = new DataView(cgBytes.buffer);
+      view.setBigUint64(24, contextGraphIdBig);
+      packed.set(cgBytes, 0);
+      packed.set(proposal.merkleRoot, 32);
+      const digest = ethers.getBytes(ethers.keccak256(packed));
+      return makeApproval(proposal.proposalId, walletA, digest);
+    };
+    const collector = new VerifyCollector({
+      sendP2P,
+      getParticipantPeers: () => ['peer-a'],
+    });
+
+    await collector.collect({
+      contextGraphId: 'test-cg',
+      contextGraphIdOnChain: 42n,
+      verifiedMemoryId: 1n,
+      batchId: 100n,
+      merkleRoot,
+      entities: [],
+      proposerSignature: { r: new Uint8Array(32), vs: new Uint8Array(32) },
+      requiredSignatures: 2,
+      timeoutMs: 5000,
+    });
+
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

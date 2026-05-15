@@ -10,6 +10,7 @@
     "benchmark:sync-worker-responsiveness": "node scripts/sync-worker-responsiveness-benchmark.cjs",
     "test": "vitest run",
     "test:axioms": "vitest run test/axiom-checks.e2e.test.ts",
+    "test:unit": "vitest run --config vitest.unit.config.ts",
     "test:coverage": "vitest run --coverage",
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },

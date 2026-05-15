@@ -19,8 +19,11 @@ import {
   GOSSIP_TYPE_WORKSPACE_PUBLISH,
   encodeFinalizationMessage, type FinalizationMessageMsg,
   getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
-  Logger, createOperationContext, sparqlString, escapeSparqlLiteral, isSafeIri,
+  Logger, createOperationContext, sparqlString, escapeSparqlLiteral, isSafeIri, assertSafeIri,
   TrustLevel,
+  TRUST_LEVEL_PREDICATE,
+  buildTrustLevelQuads,
+  isTrustLevelQuad,
   buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, type AuthorAttestationTypedData,
   buildAssertionSealQuads, buildAssertionPublishReceiptQuads,
   parseAssertionSealQuads, type AssertionSeal,
@@ -1826,22 +1829,28 @@ export class DKGAgent {
         agentAddress: verifyWallet.address,
         getBatchMerkleRoot: async (cgId: string, batchId: bigint) => {
           const metaGraph = contextGraphMetaGraphUri(cgId);
-          // Try typed literal first, fallback to untyped for backward compat
-          for (const literal of [`"${batchId}"^^<http://www.w3.org/2001/XMLSchema#integer>`, `"${batchId}"`]) {
-            const result = await this.store.query(
-              `SELECT ?root WHERE { GRAPH <${metaGraph}> { ?kc <https://dkg.network/ontology#merkleRoot> ?root . ?kc <https://dkg.network/ontology#batchId> ${literal} } } LIMIT 1`,
-            );
-            if (result.type === 'bindings' && result.bindings.length > 0) {
-              const hex = (result.bindings[0] as Record<string, string>)['root'];
-              if (!hex) return null;
-              return ethers.getBytes(hex.startsWith('"') ? hex.slice(1, -1) : hex);
+          const namespaces = ['http://dkg.io/ontology/', 'https://dkg.network/ontology#'];
+          // Try typed literal first, fallback to untyped for backward compat.
+          for (const ns of namespaces) {
+            for (const literal of [`"${batchId}"^^<http://www.w3.org/2001/XMLSchema#integer>`, `"${batchId}"`]) {
+              const result = await this.store.query(
+                `SELECT ?root WHERE { GRAPH <${metaGraph}> { ?kc <${ns}merkleRoot> ?root . ?kc <${ns}batchId> ${literal} } } LIMIT 1`,
+              );
+              if (result.type === 'bindings' && result.bindings.length > 0) {
+                const hex = (result.bindings[0] as Record<string, string>)['root'];
+                if (!hex) return null;
+                const merkleRootValue = /^"([^"]+)"/.exec(hex)?.[1] ?? hex;
+                return ethers.getBytes(
+                  merkleRootValue.startsWith('0x') ? merkleRootValue : `0x${merkleRootValue}`,
+                );
+              }
             }
           }
           return null;
         },
         getContextGraphIdOnChain: async (cgId: string) => {
-          const sub = this.subscribedContextGraphs.get(cgId);
-          return sub?.onChainId ? BigInt(sub.onChainId) : null;
+          const onChainId = await this.getContextGraphOnChainId(cgId);
+          return onChainId ? BigInt(onChainId) : null;
         },
       });
       this.router.register(PROTOCOL_VERIFY_PROPOSAL, verifyHandler.handler);
@@ -5981,7 +5990,7 @@ export class DKGAgent {
     //     the post-strip set or it commits to a root the publish path
     //     can never recompute. (Round 4 review §8 — "assertionFinalize
     //     hashes WM-only urn:dkg:file: rows".)
-    const quads = rawQuads.filter((q) => !isReservedSubject(q.subject));
+    const quads = rawQuads.filter((q) => !isReservedSubject(q.subject) && !isTrustLevelQuad(q));
     if (quads.length === 0) {
       throw new Error(
         `Cannot finalize assertion <${assertionUri}>: every quad has a ` +
@@ -6990,14 +6999,9 @@ export class DKGAgent {
        */
       callerAgentAddress?: string;
       /**
-       * Minimum trust level for the verified-memory view (spec §14, P-13).
-       * When set to `TrustLevel.Endorsed`, the root content graph is
-       * excluded from resolution so only quorum-verified sub-graphs survive.
-       * Values above `Endorsed` (`PartiallyVerified`, `ConsensusVerified`)
-       * are currently rejected — see `QueryOptions.minTrust` in
-       * `packages/query/src/query-engine.ts` for the full rationale and
-       * the Q-1 gap tracking per-graph trust tagging.
-       * Ignored for views other than `verified-memory`.
+       * Minimum trust level for the verified-memory view (spec §14).
+       * Values above `SelfAttested` require explicit writer-side
+       * `dkg:trustLevel` metadata. Ignored for other views.
        */
       minTrust?: TrustLevel;
       /**
@@ -10082,6 +10086,83 @@ export class DKGAgent {
     this.log.info(ctx, `Ensured context graph "${opts.id}" locally (${opts.curated ? 'curated' : 'open'})`);
   }
 
+  private async resolveEndorsementTrustTargets(
+    contextGraphId: string,
+    targetUalOrRoot: string,
+  ): Promise<string[]> {
+    assertSafeIri(targetUalOrRoot);
+    const dataGraph = assertSafeIri(contextGraphDataGraphUri(contextGraphId));
+    const metaGraph = assertSafeIri(contextGraphMetaGraphUri(contextGraphId));
+    const target = `<${targetUalOrRoot}>`;
+    const namespaces = ['http://dkg.io/ontology/', 'https://dkg.network/ontology#'];
+    const existsPatterns = [
+      `GRAPH <${dataGraph}> { ${target} ?p ?o } BIND(${target} AS ?hit)`,
+      `GRAPH <${metaGraph}> { ${target} ?p ?o } BIND(${target} AS ?hit)`,
+      ...namespaces.flatMap((ns) => [
+        `GRAPH <${metaGraph}> { ?ka <${ns}rootEntity> ${target} } BIND(${target} AS ?hit)`,
+        `GRAPH <${metaGraph}> { ?ka <${ns}partOf> ${target} } BIND(?ka AS ?hit)`,
+      ]),
+    ];
+
+    const exists = await this.store.query(
+      `SELECT ?hit WHERE { ${existsPatterns.map((p) => `{ ${p} }`).join(' UNION ')} } LIMIT 1`,
+    );
+    if (exists.type !== 'bindings' || exists.bindings.length === 0) {
+      throw new Error(
+        `Endorsement target ${targetUalOrRoot} was not found in context graph ${contextGraphId}`,
+      );
+    }
+
+    const rootPatterns = namespaces.flatMap((ns) => [
+      `GRAPH <${metaGraph}> { ${target} <${ns}rootEntity> ?root . }`,
+      `GRAPH <${metaGraph}> { ?ka <${ns}partOf> ${target} ; <${ns}rootEntity> ?root . }`,
+    ]);
+    const roots = await this.store.query(
+      `SELECT DISTINCT ?root WHERE { ${rootPatterns.map((p) => `{ ${p} }`).join(' UNION ')} }`,
+    );
+    const rootEntities = roots.type === 'bindings'
+      ? (roots.bindings as Record<string, string>[]).map((row) => row.root).filter(Boolean)
+      : [];
+    return rootEntities.length > 0 ? rootEntities : [targetUalOrRoot];
+  }
+
+  private async stampTrustLevel(
+    graph: string,
+    subjects: Iterable<string>,
+    level: TrustLevel,
+  ): Promise<void> {
+    const quads = buildTrustLevelQuads(subjects, level, graph) as Quad[];
+    for (const quad of quads) {
+      await this.store.deleteByPattern({
+        graph: quad.graph,
+        subject: quad.subject,
+        predicate: TRUST_LEVEL_PREDICATE,
+      });
+    }
+    if (quads.length > 0) {
+      await this.store.insert(quads);
+    }
+  }
+
+  private async getSubjectsForRoots(graph: string, roots: Iterable<string>): Promise<string[]> {
+    const safeGraph = assertSafeIri(graph);
+    const rootEntities = [...new Set([...roots].filter(Boolean))];
+    if (rootEntities.length === 0) return [];
+    const filterClauses = rootEntities
+      .map(e => `(STR(?s) = ${sparqlString(e)} || STRSTARTS(STR(?s), ${sparqlString(e + '/.well-known/genid/')}))`)
+      .join(' || ');
+    const result = await this.store.query(
+      `SELECT DISTINCT ?s WHERE { GRAPH <${safeGraph}> { ?s ?p ?o . FILTER(${filterClauses}) } }`,
+    );
+    const subjects = new Set(rootEntities);
+    if (result.type === 'bindings') {
+      for (const row of result.bindings as Record<string, string>[]) {
+        if (row.s) subjects.add(row.s);
+      }
+    }
+    return [...subjects];
+  }
+
   // ── ENDORSE ─���────────────────────────────────────────────────────────
 
   /**
@@ -10113,12 +10194,25 @@ export class DKGAgent {
     // bearer token; see packages/cli/src/daemon.ts.
     const raw = opts.agentAddress ?? this.defaultAgentAddress ?? this.peerId;
     const endorser = canonicalAgentDidSubject(raw);
+    const trustTargets = await this.resolveEndorsementTrustTargets(
+      opts.contextGraphId,
+      opts.knowledgeAssetUal,
+    );
     const quads = buildEndorsementQuads(
       endorser,
       opts.knowledgeAssetUal,
       opts.contextGraphId,
     );
-    return this.publish(opts.contextGraphId, quads);
+    const result = await this.publish(opts.contextGraphId, quads);
+    if (result.status === 'confirmed') {
+      const dataGraph = contextGraphDataGraphUri(opts.contextGraphId);
+      await this.stampTrustLevel(
+        dataGraph,
+        await this.getSubjectsForRoots(dataGraph, trustTargets),
+        TrustLevel.Endorsed,
+      );
+    }
+    return result;
   }
 
   // ── VERIFY ────────────────────────────────────────────────────────
@@ -10134,35 +10228,44 @@ export class DKGAgent {
     requiredSignatures?: number;
     timeoutMs?: number;
   }): Promise<{
-    txHash: string;
-    blockNumber: number;
+    txHash?: string;
+    blockNumber?: number;
     verifiedMemoryId: string;
     signers: string[];
+    status: 'verified' | 'partial' | 'no_quorum';
+    trustLevel: TrustLevel;
   }> {
     const ctx = createOperationContext('verify');
 
     // 1. Look up batch merkle root from local metadata (use typed literal for batchId)
-    const metaGraph = contextGraphMetaGraphUri(opts.contextGraphId);
-    // Try typed literal first, fallback to untyped for backward compat
+    const metaGraph = assertSafeIri(contextGraphMetaGraphUri(opts.contextGraphId));
+    const dkgNamespaces = ['http://dkg.io/ontology/', 'https://dkg.network/ontology#'];
+    // Try typed literal first, fallback to untyped for backward compat.
     let batchBindings: Record<string, string>[] | null = null;
-    for (const literal of [`"${opts.batchId}"^^<http://www.w3.org/2001/XMLSchema#integer>`, `"${opts.batchId}"`]) {
-      const r = await this.store.query(
-        `SELECT ?root WHERE { GRAPH <${metaGraph}> { ?kc <https://dkg.network/ontology#merkleRoot> ?root . ?kc <https://dkg.network/ontology#batchId> ${literal} } } LIMIT 1`,
-      );
-      if (r.type === 'bindings' && r.bindings.length > 0) {
-        batchBindings = r.bindings as Record<string, string>[];
-        break;
+    for (const ns of dkgNamespaces) {
+      for (const literal of [`"${opts.batchId}"^^<http://www.w3.org/2001/XMLSchema#integer>`, `"${opts.batchId}"`]) {
+        const r = await this.store.query(
+          `SELECT ?root WHERE { GRAPH <${metaGraph}> { ?kc <${ns}merkleRoot> ?root . ?kc <${ns}batchId> ${literal} } } LIMIT 1`,
+        );
+        if (r.type === 'bindings' && r.bindings.length > 0) {
+          batchBindings = r.bindings as Record<string, string>[];
+          break;
+        }
       }
+      if (batchBindings) break;
     }
     if (!batchBindings) {
       throw new Error(`Batch ${opts.batchId} not found in context graph ${opts.contextGraphId}`);
     }
     const rootHex = batchBindings[0]['root'];
-    const merkleRoot = ethers.getBytes(rootHex.startsWith('"') ? rootHex.slice(1, -1) : rootHex);
+    const merkleRootValue = /^"([^"]+)"/.exec(rootHex)?.[1] ?? rootHex;
+    const merkleRoot = ethers.getBytes(
+      merkleRootValue.startsWith('0x') ? merkleRootValue : `0x${merkleRootValue}`,
+    );
 
     // 2. Look up context graph on-chain config
-    const sub = this.subscribedContextGraphs.get(opts.contextGraphId);
-    const contextGraphIdOnChain = sub?.onChainId ? BigInt(sub.onChainId) : null;
+    const onChainId = await this.getContextGraphOnChainId(opts.contextGraphId);
+    const contextGraphIdOnChain = onChainId ? BigInt(onChainId) : null;
     if (!contextGraphIdOnChain) {
       throw new Error(`Context graph ${opts.contextGraphId} not found on-chain`);
     }
@@ -10229,44 +10332,98 @@ export class DKGAgent {
       entities,
       proposerSignature: { r: ethers.getBytes(proposerSig.r), vs: ethers.getBytes(proposerSig.yParityAndS) },
       requiredSignatures,
-      timeoutMs: opts.timeoutMs ?? 30 * 60 * 1000, // 30 min default
+      timeoutMs: opts.timeoutMs ?? 30 * 60 * 1000, // 30 min default; VerifyCollector also enforces this as its max.
+      allowPartial: true,
     });
 
-    // 6. Submit on-chain
-    if (typeof this.chain.verify !== 'function') {
-      throw new Error('Chain adapter does not support verify');
-    }
-
     // 6. Resolve identity IDs for each approver before on-chain submission.
-    const resolvedSignatures: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }> = [
-      {
+    const participantIdentityIds = await this.getVerifyParticipantIdentityIds(
+      opts.contextGraphId,
+      contextGraphIdOnChain,
+    );
+    const isEligibleParticipant = (identityId: bigint): boolean =>
+      participantIdentityIds === null || participantIdentityIds.has(identityId);
+
+    const resolvedSignatures: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }> = [];
+    const resolvedSignerAddresses: string[] = [];
+    if (this.identityId > 0n && isEligibleParticipant(this.identityId)) {
+      resolvedSignatures.push({
         identityId: this.identityId,
         r: ethers.getBytes(proposerSig.r),
         vs: ethers.getBytes(proposerSig.yParityAndS),
-      },
-    ];
-    const resolvedSignerAddresses: string[] = [proposerAddress];
+      });
+      resolvedSignerAddresses.push(proposerAddress);
+    }
+    const participantResolvedRemoteAddresses: string[] = [];
     for (const a of result.approvals) {
-      let id = a.identityId;
-      if ((!id || id === 0n) && typeof (this.chain as any).getIdentityIdForAddress === 'function') {
-        try { id = await (this.chain as any).getIdentityIdForAddress(a.approverAddress); } catch { /* use 0n */ }
-      }
+      let id = a.identityId || await this.resolveVerifyApprovalIdentityId(
+        a.approverAddress,
+        participantIdentityIds,
+      );
       if (!id || id === 0n) continue;
+      if (!isEligibleParticipant(id)) continue;
       resolvedSignatures.push({ identityId: id, r: a.signatureR, vs: a.signatureVS });
       resolvedSignerAddresses.push(a.approverAddress);
+      if (participantIdentityIds !== null && participantIdentityIds.has(id)) {
+        participantResolvedRemoteAddresses.push(a.approverAddress);
+      }
     }
-    if (resolvedSignatures.length < requiredSignatures) {
-      throw new Error(`verify_identity_resolution: only ${resolvedSignatures.length}/${requiredSignatures} signers have resolvable identities (including proposer)`);
+    if (!result.quorumReached || resolvedSignatures.length < requiredSignatures) {
+      const trustLevel = participantResolvedRemoteAddresses.length > 0
+        ? TrustLevel.PartiallyVerified
+        : TrustLevel.SelfAttested;
+      const status = participantResolvedRemoteAddresses.length > 0 ? 'partial' : 'no_quorum';
+      await this.stampBatchTrustLevel(
+        opts.contextGraphId,
+        opts.batchId,
+        contextGraphDataGraphUri(opts.contextGraphId),
+        trustLevel,
+      );
+      this.log.info(
+        ctx,
+        `Verify batch ${opts.batchId} did not reach quorum ` +
+          `(${resolvedSignatures.length}/${requiredSignatures} identity-resolved signers, ` +
+          `${participantResolvedRemoteAddresses.length}/${result.requiredRemoteApprovals} participant remote approvals) — ` +
+          `stamped trustLevel=${trustLevel} without chain tx`,
+      );
+      return {
+        verifiedMemoryId: opts.verifiedMemoryId,
+        signers: resolvedSignerAddresses,
+        status,
+        trustLevel,
+      };
     }
 
-    const txResult = await this.chain.verify({
-      contextGraphId: contextGraphIdOnChain,
-      batchId: opts.batchId,
-      merkleRoot,
-      signerSignatures: resolvedSignatures,
-    });
+    // 7. Submit on-chain only after quorum. Partial writes above are
+    // metadata-only and deliberately do not claim a transaction hash.
+    let txResult: { hash: string; blockNumber: number };
+    const existingContextGraphId = typeof this.chain.getKCContextGraphId === 'function'
+      ? await this.chain.getKCContextGraphId(opts.batchId).catch(() => 0n)
+      : 0n;
+    if (existingContextGraphId === contextGraphIdOnChain) {
+      const provenance = await this.getBatchChainProvenance(opts.contextGraphId, opts.batchId);
+      if (!provenance) {
+        throw new Error(`Batch ${opts.batchId} is already registered on-chain but local chain provenance is missing`);
+      }
+      txResult = provenance;
+      this.log.info(
+        ctx,
+        `Verify batch ${opts.batchId} already registered on-chain for context graph ${contextGraphIdOnChain}; ` +
+          `using publish tx ${txResult.hash.slice(0, 16)}... for ConsensusVerified metadata`,
+      );
+    } else {
+      if (typeof this.chain.verify !== 'function') {
+        throw new Error('Chain adapter does not support verify');
+      }
+      txResult = await this.chain.verify({
+        contextGraphId: contextGraphIdOnChain,
+        batchId: opts.batchId,
+        merkleRoot,
+        signerSignatures: resolvedSignatures,
+      });
+    }
 
-    // 7. Promote triples to Verified Memory (only include signers actually sent on-chain)
+    // 8. Promote triples to Verified Memory (only include signers actually sent on-chain)
     await this.promoteToVerifiedMemory(
       opts.contextGraphId,
       opts.verifiedMemoryId,
@@ -10283,7 +10440,92 @@ export class DKGAgent {
       blockNumber: txResult.blockNumber,
       verifiedMemoryId: opts.verifiedMemoryId,
       signers: resolvedSignerAddresses,
+      status: 'verified',
+      trustLevel: TrustLevel.ConsensusVerified,
     };
+  }
+
+  private async resolveVerifyApprovalIdentityId(
+    approverAddress: string,
+    participantIdentityIds: Set<bigint> | null,
+  ): Promise<bigint> {
+    if (typeof (this.chain as any).getIdentityIdForAddress === 'function') {
+      try {
+        const id = await (this.chain as any).getIdentityIdForAddress(approverAddress);
+        if (id && id !== 0n) return BigInt(id);
+      } catch {
+        // Fall through to participant-set probing below.
+      }
+    }
+
+    if (participantIdentityIds === null || participantIdentityIds.size === 0) return 0n;
+    if (typeof this.chain.verifyACKIdentity === 'function') {
+      for (const candidateIdentityId of participantIdentityIds) {
+        try {
+          if (await this.chain.verifyACKIdentity.call(this.chain, approverAddress, candidateIdentityId)) {
+            return candidateIdentityId;
+          }
+        } catch {
+          // Ignore individual lookup failures; another participant may still match.
+        }
+      }
+    }
+
+    if (typeof this.chain.isOperationalWalletRegistered !== 'function') return 0n;
+    for (const candidateIdentityId of participantIdentityIds) {
+      try {
+        if (await this.chain.isOperationalWalletRegistered.call(this.chain, candidateIdentityId, approverAddress)) {
+          return candidateIdentityId;
+        }
+      } catch {
+        // Ignore individual lookup failures; another participant may still match.
+      }
+    }
+    return 0n;
+  }
+
+  private async getVerifyParticipantIdentityIds(
+    contextGraphId: string,
+    contextGraphIdOnChain: bigint,
+  ): Promise<Set<bigint> | null> {
+    if (typeof this.chain.getContextGraphParticipants === 'function') {
+      try {
+        const participants = await this.chain.getContextGraphParticipants(contextGraphIdOnChain);
+        if (participants && participants.length > 0) {
+          return new Set(participants);
+        }
+      } catch (err) {
+        this.log.warn(
+          createOperationContext('verify'),
+          `Could not resolve on-chain participants for context graph ${contextGraphIdOnChain}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+
+    const metaGraph = assertSafeIri(contextGraphMetaGraphUri(contextGraphId));
+    const contextGraphUri = assertSafeIri(`did:dkg:context-graph:${contextGraphId}`);
+    const result = await this.store.query(
+      `SELECT ?identityId WHERE {
+        GRAPH <${metaGraph}> {
+          <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_PARTICIPANT_IDENTITY_ID}> ?identityId
+        }
+      }`,
+    );
+    if (result.type !== 'bindings' || result.bindings.length === 0) {
+      return null;
+    }
+    const ids = new Set<bigint>();
+    for (const row of result.bindings as Record<string, string>[]) {
+      const raw = row.identityId?.replace(/^"|"$/g, '');
+      if (!raw) continue;
+      try {
+        const parsed = BigInt(raw);
+        if (parsed > 0n) ids.add(parsed);
+      } catch {
+        // Ignore malformed local metadata; it is not usable for trust elevation.
+      }
+    }
+    return ids.size > 0 ? ids : null;
   }
 
   private async promoteToVerifiedMemory(
@@ -10300,29 +10542,36 @@ export class DKGAgent {
       this.log.warn(createOperationContext('verify'), `No root entities found for batch ${batchId} — skipping VM promotion`);
       return;
     }
-    const dataGraph = contextGraphDataGraphUri(contextGraphId);
+    const dataGraph = assertSafeIri(contextGraphDataGraphUri(contextGraphId));
     // Query root entities AND their skolemized children (subjects starting
     // with the root entity URI, e.g. <root>/.well-known/genid/...).
     // We use FILTER with STRSTARTS to capture the full closure instead of
     // an exact VALUES match, which would miss child/blank-node subjects.
     const filterClauses = rootEntities
-      .map(e => `(STR(?s) = ${JSON.stringify(e)} || STRSTARTS(STR(?s), ${JSON.stringify(e + '/.well-known/genid/')}))`)
+      .map(e => `(STR(?s) = ${sparqlString(e)} || STRSTARTS(STR(?s), ${sparqlString(e + '/.well-known/genid/')}))`)
       .join(' || ');
     const result = await this.store.query(
       `SELECT ?s ?p ?o WHERE { GRAPH <${dataGraph}> { ?s ?p ?o . FILTER(${filterClauses}) } }`,
     );
     if (result.type !== 'bindings') return;
 
-    const vmGraph = contextGraphVerifiedMemoryUri(contextGraphId, verifiedMemoryId);
-    const vmQuads: Quad[] = (result.bindings as Record<string, string>[]).map(row => ({
-      subject: row['s'],
-      predicate: row['p'],
-      object: row['o'],
-      graph: vmGraph,
-    }));
+    const vmGraph = assertSafeIri(contextGraphVerifiedMemoryUri(contextGraphId, verifiedMemoryId));
+    const vmQuads: Quad[] = (result.bindings as Record<string, string>[])
+      .filter(row => !isTrustLevelQuad({ predicate: row.p }))
+      .map(row => ({
+        subject: row['s'],
+        predicate: row['p'],
+        object: row['o'],
+        graph: vmGraph,
+      }));
     if (vmQuads.length > 0) {
       await this.store.insert(vmQuads);
     }
+    await this.stampTrustLevel(
+      vmGraph,
+      [...new Set(vmQuads.map((q) => q.subject))],
+      TrustLevel.ConsensusVerified,
+    );
 
     // Write verification metadata
     const vmMetaGraph = contextGraphVerifiedMemoryMetaUri(contextGraphId, verifiedMemoryId);
@@ -10339,18 +10588,79 @@ export class DKGAgent {
     await this.store.insert(metaQuads);
   }
 
+  private async stampBatchTrustLevel(
+    contextGraphId: string,
+    batchId: bigint,
+    graph: string,
+    level: TrustLevel,
+  ): Promise<void> {
+    const subjects = await this.getBatchSubjects(contextGraphId, batchId);
+    await this.stampTrustLevel(graph, subjects, level);
+  }
+
+  private async getBatchSubjects(contextGraphId: string, batchId: bigint): Promise<string[]> {
+    const rootEntities = await this.getRootEntities(contextGraphId, batchId);
+    return this.getSubjectsForRoots(contextGraphDataGraphUri(contextGraphId), rootEntities);
+  }
+
   private async getRootEntities(contextGraphId: string, batchId: bigint): Promise<string[]> {
-    const metaGraph = contextGraphMetaGraphUri(contextGraphId);
+    const metaGraph = assertSafeIri(contextGraphMetaGraphUri(contextGraphId));
     // Try typed literal first, fallback to untyped for backward compat
-    for (const literal of [`"${batchId}"^^<http://www.w3.org/2001/XMLSchema#integer>`, `"${batchId}"`]) {
-      const result = await this.store.query(
-        `SELECT ?entity WHERE { GRAPH <${metaGraph}> { ?ka <https://dkg.network/ontology#rootEntity> ?entity . ?ka <https://dkg.network/ontology#batchId> ${literal} } }`,
-      );
-      if (result.type === 'bindings' && result.bindings.length > 0) {
-        return (result.bindings as Record<string, string>[]).map(r => r['entity']).filter(Boolean);
+    for (const ns of ['http://dkg.io/ontology/', 'https://dkg.network/ontology#']) {
+      for (const literal of [`"${batchId}"^^<http://www.w3.org/2001/XMLSchema#integer>`, `"${batchId}"`]) {
+        const result = await this.store.query(
+          `SELECT ?entity WHERE {
+            GRAPH <${metaGraph}> {
+              {
+                ?ka <${ns}rootEntity> ?entity .
+                ?ka <${ns}batchId> ${literal} .
+              }
+              UNION
+              {
+                ?ka <${ns}rootEntity> ?entity ;
+                    <${ns}partOf> ?kc .
+                ?kc <${ns}batchId> ${literal} .
+              }
+            }
+          }`,
+        );
+        if (result.type === 'bindings' && result.bindings.length > 0) {
+          return (result.bindings as Record<string, string>[]).map(r => r['entity']).filter(Boolean);
+        }
       }
     }
     return [];
+  }
+
+  private async getBatchChainProvenance(
+    contextGraphId: string,
+    batchId: bigint,
+  ): Promise<{ hash: string; blockNumber: number } | null> {
+    const metaGraph = assertSafeIri(contextGraphMetaGraphUri(contextGraphId));
+    for (const ns of ['http://dkg.io/ontology/', 'https://dkg.network/ontology#']) {
+      for (const literal of [`"${batchId}"^^<http://www.w3.org/2001/XMLSchema#integer>`, `"${batchId}"`]) {
+        const result = await this.store.query(
+          `SELECT ?tx ?block WHERE {
+            GRAPH <${metaGraph}> {
+              ?kc <${ns}batchId> ${literal} .
+              ?kc <${ns}transactionHash> ?tx .
+              OPTIONAL { ?kc <${ns}blockNumber> ?block }
+            }
+          } LIMIT 1`,
+        );
+        if (result.type !== 'bindings' || result.bindings.length === 0) continue;
+        const row = result.bindings[0] as Record<string, string>;
+        const hash = /^"([^"]+)"/.exec(row.tx ?? '')?.[1] ?? row.tx;
+        if (!hash) continue;
+        const rawBlock = /^"([^"]+)"/.exec(row.block ?? '')?.[1] ?? row.block;
+        const blockNumber = rawBlock ? Number(rawBlock) : 0;
+        return {
+          hash,
+          blockNumber: Number.isFinite(blockNumber) ? blockNumber : 0,
+        };
+      }
+    }
+    return null;
   }
 
   // ── CCL ──────────────────────────────────────────────────────────────

@@ -8,6 +8,7 @@ import {
   Logger,
   createOperationContext,
   assertSafeIri,
+  assertNoUserAuthoredTrustLevelQuads,
   type PublishRequestMsg,
 } from '@origintrail-official/dkg-core';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
@@ -217,6 +218,7 @@ export class PublishHandler {
 
       const nquadsStr = new TextDecoder().decode(request.nquads);
       const quads = parseSimpleNQuads(nquadsStr);
+      assertNoUserAuthoredTrustLevelQuads(quads);
 
       const manifest = request.kas.map((ka) => ({
         tokenId: BigInt(typeof ka.tokenId === 'number' ? ka.tokenId : 0),
