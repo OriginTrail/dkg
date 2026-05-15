@@ -872,6 +872,35 @@ describe('runImmediatePostApprovalSync', () => {
     });
   }, 15000);
 
+  // 🔴 Regression for the Lex-on-PR-#517 round-2 / Codex finding: the
+  // join-approved handler must leave `metaSynced: false` (not undefined)
+  // alongside `pendingMeta: true`, otherwise the strict-equality safety
+  // guards in `shouldCreateImplicitSharedMemoryContextGraph` and the
+  // curated gossip pre-meta gate (`metaSynced === false`) silently fall
+  // through and a freshly-approved private CG can be inferred as public
+  // locally during the window before _meta arrives. This test asserts
+  // the guard fires given the exact subscription shape the join-approved
+  // handler should produce — catches a future refactor that drops
+  // `metaSynced: false` from that call site.
+  it('shouldCreateImplicitSharedMemoryContextGraph rejects when pendingMeta+metaSynced:false', async () => {
+    const result = await createTestAgent();
+    agent = result.agent;
+    await agent.start();
+
+    agent.subscribeToContextGraph('curated-cg-pendingmeta');
+    (agent as any).subscribedContextGraphs.set('curated-cg-pendingmeta', {
+      name: 'Curated CG',
+      subscribed: true,
+      synced: false,
+      pendingMeta: true,
+      metaSynced: false,
+    } satisfies ContextGraphSub);
+
+    await expect(
+      (agent as any).shouldCreateImplicitSharedMemoryContextGraph('curated-cg-pendingmeta'),
+    ).rejects.toThrow(/awaiting metadata sync/);
+  }, 15000);
+
   // 🔴 Regression for the Lex-on-PR-#517 / Codex catch-block finding.
   // If `ensurePeerConnected` throws (relay flap, dial timeout, abort),
   // the broadcast fallback MUST still run — wrapping curator-direct

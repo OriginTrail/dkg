@@ -1884,7 +1884,23 @@ export class DKGAgent {
             // surfaces it in the UI immediately (with synced=false) instead
             // of filtering it out as a phantom subscription until meta-sync
             // completes. Cleared in `refreshMetaSyncedFlags` once meta lands.
-            this.markContextGraphSubscriptionState(contextGraphId, { pendingMeta: true });
+            //
+            // `metaSynced: false` is set together with `pendingMeta: true`
+            // because the two are complementary, not redundant: `metaSynced`
+            // is the FACTUAL state that downstream safety guards check
+            // (`shouldCreateImplicitSharedMemoryContextGraph` and the curated
+            // gossip pre-meta gate in gossip-publish-handler.ts both use
+            // strict `metaSynced === false` equality), and `pendingMeta` is
+            // the UI affordance layered on top. Without `metaSynced: false`,
+            // a freshly-approved private CG slips past both guards in the
+            // window between approval and the first `_meta` arrival — any
+            // SWM write or inbound gossip in that window then gets inferred
+            // as a public CG locally, which is the exact corruption these
+            // guards exist to prevent. Lex review on PR #517 round 2 + Codex.
+            this.markContextGraphSubscriptionState(contextGraphId, {
+              pendingMeta: true,
+              metaSynced: false,
+            });
             // Sync immediately by targeting the curator peer we just received
             // this notification from, instead of relying on the periodic
             // catchup reconciler to pick it up minutes later. The previous
