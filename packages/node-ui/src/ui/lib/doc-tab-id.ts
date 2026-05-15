@@ -34,6 +34,28 @@ export interface DecodedDocTab {
   contentType: string;
 }
 
+/**
+ * Choose which file ref + content-type hint to encode for a document entity.
+ *
+ * Prefer the **markdown form** (the human-readable extracted text). Its hint
+ * MUST be `text/markdown`: a document entity's `sourceContentType` describes
+ * the ORIGINAL upload (e.g. `application/pdf` for a PDF whose markdown
+ * intermediate is the markdown-form ref). Forwarding that original MIME
+ * alongside the markdown ref would make `DocumentViewer` request markdown
+ * bytes under a binary content type and take the wrong (PDF/image) render
+ * path. Only when falling back to the raw source file is `sourceContentType`
+ * the correct hint.
+ */
+export function resolveDocRef(
+  markdownFormRef: string | undefined,
+  sourceFileRef: string | undefined,
+  sourceContentType: string,
+): { ref: string | undefined; contentType: string } {
+  if (markdownFormRef) return { ref: markdownFormRef, contentType: 'text/markdown' };
+  if (sourceFileRef) return { ref: sourceFileRef, contentType: sourceContentType };
+  return { ref: undefined, contentType: sourceContentType };
+}
+
 export function decodeDocTabId(tabId: string): DecodedDocTab {
   const raw = tabId.slice(DOC_TAB_PREFIX.length);
   const firstPipe = raw.indexOf('|');

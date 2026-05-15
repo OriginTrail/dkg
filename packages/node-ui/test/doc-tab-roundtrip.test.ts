@@ -24,6 +24,7 @@ import {
   DOC_TAB_PREFIX,
   encodeDocTabId,
   decodeDocTabId,
+  resolveDocRef,
 } from '../src/ui/lib/doc-tab-id.js';
 import { fileUrl } from '../src/ui/api.js';
 
@@ -135,5 +136,38 @@ describe('end-to-end encode → decode → fileUrl (regression for the 404)', ()
       `/api/file/${encodeURIComponent(`keccak256:${HEX}`)}?contentType=${encodeURIComponent('text/markdown')}`,
     );
     expect(url).not.toBe(`/api/file/${HEX}`);
+  });
+});
+
+describe('resolveDocRef content-type hint (Codex review fix)', () => {
+  const MD_REF = `urn:dkg:file:keccak256:${'c'.repeat(64)}`;
+  const SRC_REF = `urn:dkg:file:keccak256:${'d'.repeat(64)}`;
+
+  it('converter-backed import (PDF→markdown): markdown ref + text/markdown hint, NOT application/pdf', () => {
+    // The regression: a PDF import has a markdown-form ref but
+    // sourceContentType = application/pdf. The hint must describe the chosen
+    // (markdown) ref, else the viewer requests markdown bytes as a PDF.
+    const { ref, contentType } = resolveDocRef(MD_REF, SRC_REF, 'application/pdf');
+    expect(ref).toBe(MD_REF);
+    expect(contentType).toBe('text/markdown');
+    expect(contentType).not.toBe('application/pdf');
+  });
+
+  it('markdown-native import: markdown ref + text/markdown hint', () => {
+    const { ref, contentType } = resolveDocRef(MD_REF, undefined, 'text/markdown');
+    expect(ref).toBe(MD_REF);
+    expect(contentType).toBe('text/markdown');
+  });
+
+  it('raw source only (no markdown form): forwards the source content type', () => {
+    const { ref, contentType } = resolveDocRef(undefined, SRC_REF, 'image/png');
+    expect(ref).toBe(SRC_REF);
+    expect(contentType).toBe('image/png');
+  });
+
+  it('no linked file: ref undefined (caller falls back to entity uri → empty state)', () => {
+    const { ref, contentType } = resolveDocRef(undefined, undefined, 'application/pdf');
+    expect(ref).toBeUndefined();
+    expect(contentType).toBe('application/pdf');
   });
 });

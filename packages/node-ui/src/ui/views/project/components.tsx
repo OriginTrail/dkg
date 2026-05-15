@@ -2,7 +2,7 @@ import React, { useMemo, useState, useCallback, useEffect, lazy, Suspense } from
 import type { ReactNode } from 'react';
 import { useFetch } from '../../hooks.js';
 import { api } from '../../api-wrapper.js';
-import { encodeDocTabId } from '../../lib/doc-tab-id.js';
+import { encodeDocTabId, resolveDocRef } from '../../lib/doc-tab-id.js';
 import {
   listJoinRequests, approveJoinRequest, rejectJoinRequest,
   listParticipants, listAssertions, promoteAssertion,
@@ -1796,10 +1796,18 @@ export function DocumentsList({ entities, contextGraphId }: { entities: MemoryEn
     // daemon misread the digest as sha256 and 404. When no source file is
     // linked we encode the entity uri; the viewer detects the missing
     // `urn:dkg:file:` prefix and shows a friendly empty state.
-    const fileRef = e.connections.find(c => c.predicate === MARKDOWN_FORM || c.predicate === SOURCE_FILE)?.targetUri;
-    const contentType = e.properties.get(SOURCE_CONTENT_TYPE)?.[0] ?? '';
+    //
+    // The content-type hint must describe the *chosen* ref, not the original
+    // upload: for a converter-backed import (e.g. PDF → markdown intermediate)
+    // the markdown-form ref holds markdown bytes while `sourceContentType` is
+    // `application/pdf`. `resolveDocRef` returns `text/markdown` for the
+    // markdown form and only forwards `sourceContentType` for the raw source.
+    const markdownFormRef = e.connections.find(c => c.predicate === MARKDOWN_FORM)?.targetUri;
+    const sourceFileRef = e.connections.find(c => c.predicate === SOURCE_FILE)?.targetUri;
+    const sourceContentType = e.properties.get(SOURCE_CONTENT_TYPE)?.[0] ?? '';
+    const { ref, contentType } = resolveDocRef(markdownFormRef, sourceFileRef, sourceContentType);
     openTab({
-      id: encodeDocTabId(contextGraphId ?? '', fileRef ?? e.uri, contentType),
+      id: encodeDocTabId(contextGraphId ?? '', ref ?? e.uri, contentType),
       label: e.label,
       closable: true,
       icon: '📄',
