@@ -326,3 +326,75 @@ describe('MarkdownMessage rendering', () => {
     await unmount();
   });
 });
+
+describe('MarkdownMessage streaming caret (PR5 item C)', () => {
+  beforeEach(() => {
+    (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+    document.body.innerHTML = '';
+    vi.resetModules();
+    shikiImportCount = 0;
+  });
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  async function renderStreaming(
+    content: string,
+    streaming: boolean,
+  ): Promise<{ container: HTMLDivElement; unmount: () => Promise<void> }> {
+    const { MarkdownMessage } = await import('../src/ui/components/chat/MarkdownMessage.js');
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(React.createElement(MarkdownMessage, { content, streaming }));
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    return {
+      container,
+      unmount: async () => {
+        await act(async () => { root.unmount(); });
+        container.remove();
+      },
+    };
+  }
+
+  it('renders no caret when not streaming', async () => {
+    const { container, unmount } = await renderStreaming('# Title\n\n- a\n- b', false);
+    expect(container.querySelectorAll('.v10-chat-cursor').length).toBe(0);
+    await unmount();
+  });
+
+  it('injects exactly one caret inside the last text node, not as a block sibling', async () => {
+    const { container, unmount } = await renderStreaming('# Title\n\nFirst para\n\n- a\n- b', true);
+    const carets = container.querySelectorAll('.v10-chat-cursor');
+    expect(carets.length).toBe(1);
+    // The caret lives inside the LAST list item (last rendered text),
+    // not as a trailing child of `.v10-md`.
+    const lastLi = container.querySelector('.v10-md-li:last-child');
+    expect(lastLi?.querySelector('.v10-chat-cursor')).toBeTruthy();
+    const md = container.querySelector('.v10-md')!;
+    expect(md.lastElementChild?.classList.contains('v10-chat-cursor')).toBe(false);
+    await unmount();
+  });
+
+  it('places the caret at the end of a trailing paragraph', async () => {
+    const { container, unmount } = await renderStreaming('Hello world', true);
+    const p = container.querySelector('.v10-md-p');
+    expect(p?.querySelector('.v10-chat-cursor')).toBeTruthy();
+    // Visible text is unaffected — no sentinel glyph leaks.
+    expect(p?.textContent).toBe('Hello world');
+    await unmount();
+  });
+
+  it('does not inject the caret into a trailing fenced code block', async () => {
+    const { container, unmount } = await renderStreaming('text\n\n```\ncode line\n```', true);
+    // Code content is rebuilt from the raw AST by CodeBlock, so a caret
+    // there would be dropped — assert it is NOT inside the code block.
+    const codeRegion = container.querySelector('pre, code');
+    expect(codeRegion?.querySelector('.v10-chat-cursor')).toBeFalsy();
+    await unmount();
+  });
+});
