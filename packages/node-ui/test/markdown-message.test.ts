@@ -401,16 +401,34 @@ describe('MarkdownMessage streaming caret (PR5 item C)', () => {
     await unmount();
   });
 
-  it('does not inject the caret into a trailing fenced code block', async () => {
-    const { container, unmount } = await renderStreaming('text\n\n```\ncode line\n```', true);
-    // Code content is rebuilt from the raw AST by CodeBlock, so a caret
-    // there would be dropped — assert it is NOT inside the fenced block.
-    // Scope to `.v10-md-pre` (the CodeBlock container) specifically:
-    // a bare `pre, code` selector would also match inline <code>, which
-    // legitimately CAN hold the caret (see the inline-code test above).
+  it('suppresses the caret (not parked at stale prose) when a fenced block trails prose', async () => {
+    // Regression for Codex PR5: prose then a trailing fenced code block.
+    // The last non-code text target is the *earlier* prose; splicing the
+    // caret there would park it mid-message before the code block. The
+    // caret must be fully suppressed in that case (ChatGPT parity /
+    // ux-lead-approved no-caret-while-tail-is-code), NOT left on the
+    // stale prose.
+    const { container, unmount } = await renderStreaming('Here is the code:\n\n```\nx = 1\n```', true);
     const fenced = container.querySelector('.v10-md-pre');
     expect(fenced).toBeTruthy();
-    expect(fenced?.querySelector('.v10-chat-cursor')).toBeFalsy();
+    // Zero carets anywhere — and specifically none parked in the prose.
+    expect(container.querySelectorAll('.v10-chat-cursor').length).toBe(0);
+    const prose = container.querySelector('.v10-md-p');
+    expect(prose?.textContent).toContain('Here is the code:');
+    expect(prose?.querySelector('.v10-chat-cursor')).toBeFalsy();
+    await unmount();
+  });
+
+  it('still places the caret in the last prose when code is NOT the trailing block', async () => {
+    // Inverse guard: code earlier, prose after → caret belongs in the
+    // trailing prose (trailingCode reset by the later text target).
+    const { container, unmount } = await renderStreaming('```\nx = 1\n```\n\nDone explaining', true);
+    const carets = container.querySelectorAll('.v10-chat-cursor');
+    expect(carets.length).toBe(1);
+    const paras = [...container.querySelectorAll('.v10-md-p')];
+    const last = paras[paras.length - 1];
+    expect(last?.textContent).toContain('Done explaining');
+    expect(last?.querySelector('.v10-chat-cursor')).toBeTruthy();
     await unmount();
   });
 

@@ -38,6 +38,14 @@ function rehypeStreamingCaret() {
     // node anywhere (e.g. ends in an image: still streaming, must show
     // a caret) when no normal text target was found.
     let sawCodeText = false;
+    // True when a fenced `<pre>` appears *after* the last non-code text
+    // target in document order — i.e. the message currently ends with a
+    // code block following earlier prose. Reset every time a new target
+    // is recorded, set when a `<pre>` is entered, so its final value
+    // reflects "is there trailing code after the last prose?". In that
+    // case the caret must NOT be left at the stale earlier prose; it is
+    // suppressed (ChatGPT parity / ux-lead-approved no-caret-in-code).
+    let trailingCode = false;
     const walk = (node: { children?: unknown[] }, inCode: boolean): void => {
       const children = node.children;
       if (!Array.isArray(children)) return;
@@ -58,8 +66,12 @@ function rehypeStreamingCaret() {
           child.value.trim().length > 0
         ) {
           if (inCode) sawCodeText = true;
-          else target = { siblings: children, index: i };
+          else {
+            target = { siblings: children, index: i };
+            trailingCode = false;
+          }
         } else if (child.type === 'element') {
+          if (child.tagName === 'pre') trailingCode = true;
           // Only fenced/preformatted code is excluded — those text
           // nodes are rebuilt from the raw AST by the `pre`/CodeBlock
           // renderer so an injected sibling there is dropped. Inline
@@ -78,9 +90,15 @@ function rehypeStreamingCaret() {
       properties: { className: ['v10-chat-cursor'] },
       children: [],
     };
-    if (target) {
+    if (target && !trailingCode) {
       const { siblings, index } = target;
       siblings.splice(index + 1, 0, caret);
+    } else if (target && trailingCode) {
+      // Prose followed by a trailing fenced code block: the last text
+      // target is stale (earlier prose). Splicing there would park the
+      // caret mid-message before the code. Suppress it — same outcome
+      // as a code-only stream (no inline caret while the tail is code).
+      return;
     } else if (!sawCodeText && Array.isArray(root.children) && root.children.length > 0) {
       // No eligible text node anywhere AND the content isn't code-only
       // (e.g. the message currently ends in an image placeholder).
