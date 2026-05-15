@@ -413,4 +413,26 @@ describe('MarkdownMessage streaming caret (PR5 item C)', () => {
     expect(fenced?.querySelector('.v10-chat-cursor')).toBeFalsy();
     await unmount();
   });
+
+  it('falls back to a trailing caret when the stream ends with no text node (image)', async () => {
+    // Regression for Codex PR5: a streamed message ending in an image
+    // has no HAST text node, so the per-text-node anchor finds nothing.
+    // Without the fallback the turn looks finished while still
+    // streaming. Expect exactly one caret, appended after the content.
+    const { container, unmount } = await renderStreaming('![diagram](https://example.com/x.png)', true);
+    expect(container.querySelector('.v10-md-image-placeholder')).toBeTruthy();
+    expect(container.querySelectorAll('.v10-chat-cursor').length).toBe(1);
+    await unmount();
+  });
+
+  it('keeps NO caret for a code-only stream (fallback must not regress the ux-approved behavior)', async () => {
+    // A stream that is only a fenced code block has text, but all of it
+    // is code (rebuilt by CodeBlock). Per ux-lead sign-off this shows
+    // no caret (ChatGPT parity). The image fallback must not leak a
+    // caret here — `sawCodeText` suppresses it.
+    const { container, unmount } = await renderStreaming('```\ncode only\n```', true);
+    expect(container.querySelector('.v10-md-pre')).toBeTruthy();
+    expect(container.querySelectorAll('.v10-chat-cursor').length).toBe(0);
+    await unmount();
+  });
 });

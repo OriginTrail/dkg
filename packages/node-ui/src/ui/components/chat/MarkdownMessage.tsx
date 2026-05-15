@@ -32,6 +32,12 @@ interface MarkdownMessageProps {
 function rehypeStreamingCaret() {
   return (tree: unknown): void => {
     let target: { siblings: unknown[]; index: number } | null = null;
+    // Did we see any non-whitespace text at all *inside* code? Used to
+    // distinguish a code-only stream (caret intentionally suppressed —
+    // matches ChatGPT, ux-lead-approved) from a stream with no text
+    // node anywhere (e.g. ends in an image: still streaming, must show
+    // a caret) when no normal text target was found.
+    let sawCodeText = false;
     const walk = (node: { children?: unknown[] }, inCode: boolean): void => {
       const children = node.children;
       if (!Array.isArray(children)) return;
@@ -51,7 +57,8 @@ function rehypeStreamingCaret() {
           // dropping the caret after the block instead of inside it.
           child.value.trim().length > 0
         ) {
-          if (!inCode) target = { siblings: children, index: i };
+          if (inCode) sawCodeText = true;
+          else target = { siblings: children, index: i };
         } else if (child.type === 'element') {
           // Only fenced/preformatted code is excluded — those text
           // nodes are rebuilt from the raw AST by the `pre`/CodeBlock
@@ -63,15 +70,25 @@ function rehypeStreamingCaret() {
         }
       }
     };
-    walk(tree as { children?: unknown[] }, false);
+    const root = tree as { children?: unknown[] };
+    walk(root, false);
+    const caret = {
+      type: 'element',
+      tagName: 'span',
+      properties: { className: ['v10-chat-cursor'] },
+      children: [],
+    };
     if (target) {
       const { siblings, index } = target;
-      siblings.splice(index + 1, 0, {
-        type: 'element',
-        tagName: 'span',
-        properties: { className: ['v10-chat-cursor'] },
-        children: [],
-      });
+      siblings.splice(index + 1, 0, caret);
+    } else if (!sawCodeText && Array.isArray(root.children) && root.children.length > 0) {
+      // No eligible text node anywhere AND the content isn't code-only
+      // (e.g. the message currently ends in an image placeholder).
+      // Without this the turn looks finished while still streaming, so
+      // fall back to a trailing caret after the last block. A code-only
+      // stream deliberately falls through with no caret (ChatGPT
+      // parity, ux-lead-approved).
+      root.children.push(caret);
     }
   };
 }
