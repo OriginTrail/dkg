@@ -133,6 +133,36 @@ export function validateContextGraphId(id: string): { valid: boolean; reason?: s
 }
 
 /**
+ * V10 wallet-scoped context-graph IDs follow the convention
+ * `<curatorAddress>/<name>` — e.g. `0xabc.../my-project`. For these
+ * CGs the curator's identity is structural: it can be derived from the
+ * cgId itself without consulting any local metadata store. This is the
+ * authoritative fallback when the local RDF `_meta` graph is missing
+ * the explicit curator triple — which happens for any CG whose
+ * on-chain registration did not complete locally (e.g. node had no
+ * funded identity at create time, RPC was down, or the create-flow
+ * crashed between SQLite and triple-store writes). Without this
+ * fallback the daemon silently rejects all join requests for those
+ * CGs with `unknown CG`, and the joiner sees only "no reachable
+ * curator" — a failure mode that consumed an entire two-laptop
+ * debugging session before being root-caused.
+ *
+ * Returns null for non-wallet-prefixed cgIds (system CGs like
+ * `agents`/`ontology`, legacy V9-style globals like `hbad-5`) — these
+ * genuinely have no derivable curator and the caller must fall
+ * through to "unknown CG".
+ *
+ * Case is preserved from the cgId. Comparisons against local agent
+ * keys should be case-insensitive on the address portion (Ethereum
+ * addresses are case-insensitive; the EIP-55 checksum is advisory).
+ */
+export function deriveCuratorDidFromCgId(contextGraphId: string): string | null {
+  const match = /^(0x[0-9a-fA-F]{40})\/.+$/.exec(contextGraphId);
+  if (!match) return null;
+  return `did:dkg:agent:${match[1]}`;
+}
+
+/**
  * Validates a sub-graph name: must be non-empty, no leading underscore
  * (reserved for protocol graphs), no slashes (flat namespace), and safe for IRIs.
  */

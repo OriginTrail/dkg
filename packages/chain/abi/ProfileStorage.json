@@ -244,6 +244,31 @@
     "type": "event"
   },
   {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "indexed": false,
+        "internalType": "bool",
+        "name": "oldValue",
+        "type": "bool"
+      },
+      {
+        "indexed": false,
+        "internalType": "bool",
+        "name": "newValue",
+        "type": "bool"
+      }
+    ],
+    "name": "RelayCapabilityUpdated",
+    "type": "event"
+  },
+  {
     "inputs": [
       {
         "internalType": "uint72",
@@ -883,6 +908,30 @@
         "internalType": "struct ProfileLib.OperatorFee[]",
         "name": "",
         "type": "tuple[]"
+      },
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      }
+    ],
+    "name": "getRelayCapable",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
       }
     ],
     "stateMutability": "view",
@@ -1014,6 +1063,11 @@
         "internalType": "uint96",
         "name": "ask",
         "type": "uint96"
+      },
+      {
+        "internalType": "bool",
+        "name": "relayCapable",
+        "type": "bool"
       }
     ],
     "stateMutability": "view",
@@ -1140,6 +1194,24 @@
       }
     ],
     "name": "setOperatorFees",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "internalType": "bool",
+        "name": "relayCapable",
+        "type": "bool"
+      }
+    ],
+    "name": "setRelayCapable",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"

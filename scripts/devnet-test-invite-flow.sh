@@ -14,6 +14,18 @@ set -u
 set -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEVNET_DIR="$SCRIPT_DIR/../.devnet"
+
+# Devnet daemon log paths — used by `assert_curator_log` to validate
+# server-side observability of the invite flow. Without these checks
+# this script could pass even when the curator silently NACKs every
+# join request (the failure mode that took an entire two-laptop session
+# to root-cause; see PR #448 round-6 + the `deriveCuratorDidFromCgId`
+# fallback). The script is now responsible for asserting curator-side
+# log lines exist whenever a join request is supposed to land.
+N1_LOG="$DEVNET_DIR/node1/daemon.log"
+N2_LOG="$DEVNET_DIR/node2/daemon.log"
+N3_LOG="$DEVNET_DIR/node3/daemon.log"
 
 # Resolve the devnet auth token the same way the other devnet test scripts do.
 # ./scripts/devnet.sh start generates a fresh shared token per run and writes
@@ -38,6 +50,10 @@ N3=http://127.0.0.1:9203
 N1_ADDR=""
 N2_ADDR=""
 N3_ADDR=""
+# Curator peer-id (libp2p) — required by /sign-join in V10. Real users
+# get this from the invite code (`<cgId>\n<peerId>`); test scripts
+# resolve it via /api/agents.
+N1_PEER_ID=""
 
 hr()   { printf '\n\033[1;34m── %s ──\033[0m\n' "$*"; }
 ok()   { printf '  \033[1;32m✓\033[0m %s\n' "$*"; }
@@ -87,17 +103,20 @@ identify() {
   for i in 1 2 3; do
     local node_url="N$i" api_url
     api_url=$(eval echo "\$N${i}")
-    local self
-    self=$(api "$api_url" GET /api/agents | python3 -c "
+    local self_json self_addr self_peer
+    self_json=$(api "$api_url" GET /api/agents | python3 -c "
 import sys,json
 d=json.load(sys.stdin)
 for a in d.get('agents',[]):
     if a.get('connectionStatus')=='self':
-        print(a.get('agentAddress','')); break
+        print(json.dumps({'addr': a.get('agentAddress',''), 'peer': a.get('peerId','')})); break
 ")
-    if [ -z "$self" ]; then fail "Node $i: could not fetch agent address"; exit 1; fi
-    eval "N${i}_ADDR=\"$self\""
-    ok "Node $i agent address: $self"
+    self_addr=$(echo "$self_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('addr',''))")
+    self_peer=$(echo "$self_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('peer',''))")
+    if [ -z "$self_addr" ]; then fail "Node $i: could not fetch agent address"; exit 1; fi
+    eval "N${i}_ADDR=\"$self_addr\""
+    eval "N${i}_PEER_ID=\"$self_peer\""
+    ok "Node $i agent address: $self_addr (peer: $self_peer)"
   done
 }
 
@@ -133,6 +152,40 @@ poll_catchup() {
     esac
     sleep 1.5
   done
+}
+
+# assert_log_recent <log-path> <since-iso> <expected-pattern> <human-label>
+# Greps for `expected-pattern` in `log-path`, restricted to lines that
+# look like they were written after `since-iso`. Uses awk because the
+# devnet logs interleave bracketed ISO timestamps with un-prefixed
+# multi-line stack traces; we want a "this matched while we were
+# watching" semantic, not "this was ever in the log".
+assert_log_recent() {
+  local log_path="$1" since_iso="$2" pattern="$3" label="$4"
+  if [ ! -f "$log_path" ]; then
+    fail "log file missing: $log_path (label=$label)"
+    return 1
+  fi
+  # Ignore lines older than `since_iso`. The grep is on the FILTERED
+  # window so a stale match from a previous test run can't satisfy us.
+  local hit
+  hit=$(awk -v since="$since_iso" '
+    # Match either bracketed ISO ([2026-01-…]) or whitespace-prefixed
+    # ISO (2026-01-… …) — both shapes show up in the devnet log mix.
+    match($0, /(\[)?20[0-9]{2}-[0-9]{2}-[0-9]{2}T?[ ][0-9:]{8}/) {
+      ts = substr($0, RSTART, RLENGTH); gsub(/[\[T]/, " ", ts); sub(/^ /, "", ts)
+      if (ts >= since) print
+    }
+  ' "$log_path" | grep -E "$pattern" | head -1)
+  if [ -n "$hit" ]; then
+    ok "log assertion ($label): matched"
+    note "  → $hit"
+    return 0
+  fi
+  fail "log assertion ($label) failed: pattern '$pattern' not in $log_path since $since_iso"
+  note "  hint: tail of log:"
+  tail -n 8 "$log_path" | sed 's/^/    /'
+  return 1
 }
 
 list_has_cg() {
@@ -180,6 +233,61 @@ if [ "$created" = "$CG_ID" ]; then
 else
   fail "create failed: $create_resp"
   exit 1
+fi
+
+hr "Step 1b — assert the curator triple landed in N1's RDF _meta graph"
+# Why this assertion exists: PR #448 round-6 traced "no reachable
+# curator" failures back to CGs whose _meta graph was missing the
+# DKG_CURATOR triple — `getContextGraphOwner` then returned null and
+# PROTOCOL_JOIN_REQUEST silently NACK'd. The wallet-prefix fallback
+# (`deriveCuratorDidFromCgId`) heals stale data from older code, but
+# the *real* prevention is keeping today's create path honest. If a
+# future PR ever drops the DKG_CURATOR write from `createContextGraph`
+# this assertion fails immediately — instead of the bug only showing
+# up on the next invite/sync test downstream.
+curator_query=$(CG="$CG_ID" python3 <<'PY'
+import json, os
+cg = os.environ["CG"]
+meta = f"did:dkg:context-graph:{cg}/_meta"
+subj = f"did:dkg:context-graph:{cg}"
+print(json.dumps({
+  "contextGraphId": cg,
+  "sparql": f"""SELECT ?owner WHERE {{
+    GRAPH <{meta}> {{
+      <{subj}> <https://dkg.network/ontology#curator> ?owner .
+    }}
+  }} LIMIT 1""",
+}))
+PY
+)
+curator_resp=$(api "$N1" POST /api/query "$curator_query")
+curator_owner=$(echo "$curator_resp" | python3 -c "
+import sys, json
+try:
+  d = json.load(sys.stdin)
+  bindings = d.get('result', {}).get('bindings', [])
+  print(bindings[0].get('owner', '') if bindings else '')
+except Exception:
+  print('')
+")
+expected_owner="did:dkg:agent:${N1_ADDR}"
+# Lower-case both sides: `/api/agents` returns wallet addresses
+# lower-cased, but `createContextGraph` writes them in EIP-55
+# checksum case to the RDF triple. Both forms denote the same
+# Ethereum address — and `getContextGraphOwner`'s downstream
+# consumers (`isCuratorOf`, `isCurator`) compare case-insensitively
+# for this exact reason. Mirror that here so the assertion only
+# fires on a real "missing/wrong owner" regression, not on cosmetic
+# checksum drift.
+curator_owner_lc=$(printf '%s' "$curator_owner" | tr '[:upper:]' '[:lower:]')
+expected_owner_lc=$(printf '%s' "$expected_owner" | tr '[:upper:]' '[:lower:]')
+if [ "$curator_owner_lc" = "$expected_owner_lc" ]; then
+  ok "DKG_CURATOR triple present and points at N1: $curator_owner"
+elif [ -n "$curator_owner" ]; then
+  fail "DKG_CURATOR triple present but owner unexpected (got '$curator_owner', expected '$expected_owner')"
+else
+  fail "DKG_CURATOR triple MISSING from $CG_ID's _meta graph — createContextGraph regression. Without it, every PROTOCOL_JOIN_REQUEST for this CG silently NACKs."
+  note "raw response: $curator_resp"
 fi
 
 hr "Step 2 — N1 publishes some durable data into the CG (so N2 has something to sync after approval)"
@@ -234,17 +342,58 @@ else
 fi
 
 hr "Step 4 — N2 signs & forwards a join request to N1 (curator)"
-sign_resp=$(api "$N2" POST "/api/context-graph/$(python3 -c "import urllib.parse; print(urllib.parse.quote('$CG_ID',safe=''))")/sign-join" "{}")
-sent_status=$(echo "$sign_resp" | jq_field status)
-delivered=$(echo "$sign_resp" | jq_field delivered)
-sig=$(echo "$sign_resp" | jq_field signature)
-ts=$(echo "$sign_resp" | jq_field timestamp)
+# PR #448 review: /sign-join is now sign-only — it returns the
+# SignedAgentDelegation but does NOT forward over P2P. Forwarding lives
+# in /request-join, mirroring the UI's two-step flow. The earlier
+# "sign-and-forward" path duplicated the forward when callers also
+# POSTed the delegation back to /request-join.
+ENC_CG=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$CG_ID',safe=''))")
+sign_resp=$(api "$N2" POST "/api/context-graph/$ENC_CG/sign-join" "{}")
 note "sign-join response: $sign_resp"
-if [ "$sent_status" = "sent" ] && [ -n "$delivered" ] && [ "$delivered" != "0" ]; then
-  ok "join request delivered to $delivered curator candidate(s)"
-else
-  fail "sign-join did not deliver (status=$sent_status delivered=$delivered)"
+delegation=$(echo "$sign_resp" | python3 -c "import sys,json; d=json.load(sys.stdin); print(json.dumps(d.get('delegation') or {}))")
+if [ -z "$delegation" ] || [ "$delegation" = "{}" ]; then
+  fail "sign-join did not return a signed delegation: $sign_resp"
 fi
+ok "sign-join returned a signed delegation"
+
+submit_body=$(python3 -c "
+import sys,json
+print(json.dumps({
+  'delegation': json.loads('''$delegation'''),
+  'curatorPeerId': '$N1_PEER_ID',
+}))
+")
+# Mark the moment of request submission so subsequent log assertions
+# only consider lines written from this point onward (avoids matching
+# stale entries from prior test runs that re-used the same fixture).
+JOIN_REQUEST_TS=$(date -u +'%Y-%m-%d %H:%M:%S')
+submit_resp=$(api "$N2" POST "/api/context-graph/$ENC_CG/request-join" "$submit_body")
+note "request-join response: $submit_resp"
+delivered=$(echo "$submit_resp" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('delivered',''))")
+status_field=$(echo "$submit_resp" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('status',''))")
+if [ "$status_field" = "pending" ] && [ -n "$delivered" ] && [ "$delivered" != "0" ]; then
+  ok "join request delivered ($delivered)"
+else
+  fail "request-join did not deliver (status=$status_field delivered=$delivered)"
+fi
+
+# Server-side observability assertions — protect against the silent-
+# rejection regression class where `delivered>0` is satisfied by a
+# broadcast peer that ack'd "ok" but isn't actually the curator, or
+# where the curator's own handler silently returned "unknown CG" /
+# "missing fields" without surfacing it. Both lines below come from
+# the inbound PROTOCOL_JOIN_REQUEST handler in `dkg-agent.ts` (added
+# in PR #448 round-6 along with the wallet-prefix curator fallback).
+hr "Step 4b — assert curator (N1) logged the inbound join request"
+sleep 1   # give the inbound handler a moment to flush
+assert_log_recent "$N1_LOG" "$JOIN_REQUEST_TS" \
+  "PROTOCOL_JOIN_REQUEST from .* for \"$CG_ID\": accepted" \
+  "curator accepted inbound request" \
+  || fail "curator did not log accepting the join request — silent-NACK regression?"
+assert_log_recent "$N1_LOG" "$JOIN_REQUEST_TS" \
+  "Stored pending join request from .* for \"$CG_ID\"" \
+  "curator persisted the request" \
+  || fail "curator accepted but did not persist — broken store path"
 
 hr "Step 5 — N1 lists pending join requests (expect: 1 for N2)"
 sleep 1  # allow P2P forward + store

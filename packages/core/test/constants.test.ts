@@ -10,6 +10,7 @@ import {
   validateContextGraphId,
   validateSubGraphName,
   validateAssertionName,
+  deriveCuratorDidFromCgId,
 } from '../src/constants.js';
 import { createOperationContext } from '../src/logger.js';
 
@@ -162,5 +163,70 @@ describe('validateSubGraphName', () => {
   it('rejects IRI-unsafe characters', () => {
     expect(validateSubGraphName('a<b').valid).toBe(false);
     expect(validateSubGraphName('a b').valid).toBe(false);
+  });
+});
+
+describe('deriveCuratorDidFromCgId (V10 wallet-scoped fallback)', () => {
+  // Why these tests exist: this fallback is the only thing standing
+  // between users and a complete-silent-rejection of every join request
+  // for any CG whose RDF `_meta` curator triple is missing locally
+  // (most commonly: on-chain CG registration didn't complete on the
+  // creating node). The bug is invisible — RDF query returns null →
+  // PROTOCOL_JOIN_REQUEST handler returns "unknown CG" with no log.
+  // Every regression here would re-introduce that failure mode.
+
+  it('extracts curator DID from a wallet-prefixed cgId', () => {
+    expect(
+      deriveCuratorDidFromCgId('0xd46E77003d74df9aAdF011A5115A72405b084a88/eems1'),
+    ).toBe('did:dkg:agent:0xd46E77003d74df9aAdF011A5115A72405b084a88');
+  });
+
+  it('preserves EIP-55 checksum case from the cgId', () => {
+    // We deliberately don't normalise here — the comparison site is
+    // case-insensitive (lowercased on both sides) so case-preservation
+    // keeps the returned DID legible in logs/errors. If we ever
+    // canonicalised here, the comparison code's lowercasing would
+    // still work, but log lines would lie about what was on the wire.
+    const checksumDid = deriveCuratorDidFromCgId('0xAbCdEf0000000000000000000000000000000000/foo');
+    expect(checksumDid).toBe('did:dkg:agent:0xAbCdEf0000000000000000000000000000000000');
+  });
+
+  it('accepts cgIds with multi-segment names (slashes after the wallet)', () => {
+    // The name part is `^.+$` so anything non-empty after the wallet
+    // counts. Sub-paths like `0xWALLET/proj/sub` are still
+    // wallet-scoped to the same curator.
+    expect(
+      deriveCuratorDidFromCgId('0x227e428480f965ee1d99FA16a4AbBc6F554159b9/proj/sub'),
+    ).toBe('did:dkg:agent:0x227e428480f965ee1d99FA16a4AbBc6F554159b9');
+  });
+
+  it('returns null for legacy non-prefixed cgIds (V9 globals)', () => {
+    // These genuinely have no derivable curator — caller should fall
+    // back to "unknown CG" rather than guess.
+    expect(deriveCuratorDidFromCgId('hbad-5')).toBeNull();
+    expect(deriveCuratorDidFromCgId('demo-final')).toBeNull();
+    expect(deriveCuratorDidFromCgId('testing')).toBeNull();
+  });
+
+  it('returns null for system context graphs (no wallet prefix)', () => {
+    expect(deriveCuratorDidFromCgId('agents')).toBeNull();
+    expect(deriveCuratorDidFromCgId('ontology')).toBeNull();
+  });
+
+  it('returns null for cgIds that look wallet-prefixed but aren\'t', () => {
+    // Wrong hex length (39 chars instead of 40)
+    expect(deriveCuratorDidFromCgId('0x123/foo')).toBeNull();
+    // Non-hex chars after 0x
+    expect(deriveCuratorDidFromCgId('0xZZZZ77003d74df9aAdF011A5115A72405b084a88/foo')).toBeNull();
+    // Missing 0x prefix
+    expect(deriveCuratorDidFromCgId('d46E77003d74df9aAdF011A5115A72405b084a88/foo')).toBeNull();
+    // Wallet but no name part
+    expect(deriveCuratorDidFromCgId('0xd46E77003d74df9aAdF011A5115A72405b084a88/')).toBeNull();
+    // Wallet with no separator
+    expect(deriveCuratorDidFromCgId('0xd46E77003d74df9aAdF011A5115A72405b084a88')).toBeNull();
+  });
+
+  it('returns null for empty/whitespace input', () => {
+    expect(deriveCuratorDidFromCgId('')).toBeNull();
   });
 });

@@ -1,5 +1,7 @@
 import { ethers } from 'ethers';
 
+export type SyncPhase = 'data' | 'meta' | 'snapshot';
+
 export interface SyncRequestEnvelope {
   contextGraphId: string;
   offset: number;
@@ -13,7 +15,8 @@ export interface SyncRequestEnvelope {
   requesterAgentAddress?: string;
   requesterSignatureR?: string;
   requesterSignatureVS?: string;
-  phase?: 'data' | 'meta';
+  phase?: SyncPhase;
+  snapshotRef?: string;
 }
 
 interface BuildSyncRequestParams {
@@ -23,7 +26,8 @@ interface BuildSyncRequestParams {
   includeSharedMemory: boolean;
   targetPeerId: string;
   requesterPeerId: string;
-  phase?: 'data' | 'meta';
+  phase?: SyncPhase;
+  snapshotRef?: string;
   needsAuth: boolean;
   computeSyncDigest: (
     contextGraphId: string,
@@ -34,11 +38,20 @@ interface BuildSyncRequestParams {
     requesterPeerId: string,
     requestId: string,
     issuedAtMs: number,
+    requesterAgentAddress: string | undefined,
   ) => Uint8Array;
   getIdentityId: () => Promise<bigint>;
   signMessage?: (digest: Uint8Array) => Promise<{ r: Uint8Array; vs: Uint8Array }>;
-  defaultAgentAddress?: string;
-  defaultAgentPrivateKey?: string;
+  /**
+   * Agent address the request is being made ON BEHALF OF for THIS
+   * context graph. NOT the process-wide default — the caller must pick
+   * the right agent for the CG (see `findLocalAgentForContextGraph`).
+   * The address is bound into the signed digest so post-signing
+   * envelope tampering can't steer the responder's delegation lookup.
+   */
+  claimedAgentAddress?: string;
+  /** Private key matching `claimedAgentAddress`, used as a fallback signer when no chain identity is available. */
+  claimedAgentPrivateKey?: string;
 }
 
 export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): Promise<Uint8Array> {
@@ -50,17 +63,22 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
     targetPeerId,
     requesterPeerId,
     phase,
+    snapshotRef,
     needsAuth,
     computeSyncDigest,
     getIdentityId,
     signMessage,
-    defaultAgentAddress,
-    defaultAgentPrivateKey,
+    claimedAgentAddress,
+    claimedAgentPrivateKey,
   } = params;
 
   if (!needsAuth) {
     const prefix = includeSharedMemory ? `workspace:${contextGraphId}` : contextGraphId;
-    const phaseSuffix = phase === 'meta' ? '|meta' : '';
+    const phaseSuffix = phase === 'meta'
+      ? '|meta'
+      : phase === 'snapshot'
+        ? `|snapshot|${snapshotRef ?? ''}`
+        : '';
     return new TextEncoder().encode(`${prefix}|${offset}|${limit}${phaseSuffix}`);
   }
 
@@ -75,7 +93,16 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
     issuedAtMs: Date.now(),
   };
   if (phase) request.phase = phase;
+  if (snapshotRef) request.snapshotRef = snapshotRef;
 
+  // Bind the "on behalf of" agent claim INTO the signed digest so the
+  // responder's per-agent delegation lookup can't be steered by post-
+  // signing envelope tampering. For op-key-signed envelopes the agent
+  // address still isn't a signing principal, but it IS material that
+  // the signature must commit to.
+  if (claimedAgentAddress) {
+    request.requesterAgentAddress = claimedAgentAddress;
+  }
   const digest = computeSyncDigest(
     request.contextGraphId,
     request.offset,
@@ -85,6 +112,7 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
     request.requesterPeerId!,
     request.requestId!,
     request.issuedAtMs!,
+    request.requesterAgentAddress,
   );
 
   const identityId = await getIdentityId();
@@ -93,17 +121,17 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
     request.requesterIdentityId = identityId.toString();
     request.requesterSignatureR = ethers.hexlify(signature.r);
     request.requesterSignatureVS = ethers.hexlify(signature.vs);
-  } else if (defaultAgentAddress && defaultAgentPrivateKey) {
-    const wallet = new ethers.Wallet(defaultAgentPrivateKey);
+  } else if (claimedAgentAddress && claimedAgentPrivateKey) {
+    const wallet = new ethers.Wallet(claimedAgentPrivateKey);
     const sig = ethers.Signature.from(await wallet.signMessage(digest));
     request.requesterIdentityId = '0';
-    request.requesterAgentAddress = defaultAgentAddress;
+    // requesterAgentAddress was already set above (and bound into the digest).
     request.requesterSignatureR = ethers.hexlify(sig.r);
     request.requesterSignatureVS = ethers.hexlify(sig.yParityAndS);
   }
 
   if (needsAuth && (!request.requesterSignatureR || !request.requesterSignatureVS)) {
-    const signingTarget = defaultAgentAddress ? `default agent ${defaultAgentAddress}` : 'node identity';
+    const signingTarget = claimedAgentAddress ? `claimed agent ${claimedAgentAddress}` : 'node identity';
     throw new Error(`Cannot build authenticated sync request for "${contextGraphId}": missing signing key for ${signingTarget}`);
   }
 

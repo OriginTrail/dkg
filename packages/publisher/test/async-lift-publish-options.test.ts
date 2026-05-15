@@ -297,4 +297,220 @@ describe('mapLiftRequestToPublishOptions', () => {
 
     expect(options.contextGraphId).toBe('music-social');
   });
+
+  it('threads request.seal byte-for-byte into PublishOptions.precomputedAttestation', () => {
+    // This is the linchpin of the agent-side seal model: a seal
+    // computed and signed by the AGENT (any wallet — not necessarily
+    // the publisher's) must land in the publisher's
+    // `precomputedAttestation` slot WITHOUT modification, so the
+    // existing SEAL INTEGRITY PREFLIGHT validates it as-is. Hex →
+    // bytes is the only conversion this layer applies.
+    const customAuthor = '0xAaaAAaaaAaaaaaAAAaAaaaaaAAAaaaaAaAaAAaaA' as `0x${string}`;
+    const merkleRootHex = ('0x' + 'aa'.repeat(32)) as `0x${string}`;
+    const sigR = ('0x' + 'bb'.repeat(32)) as `0x${string}`;
+    const sigVs = ('0x' + 'cc'.repeat(32)) as `0x${string}`;
+
+    const options = mapLiftRequestToPublishOptions({
+      ...baseInput(),
+      request: {
+        ...baseInput().request,
+        seal: {
+          merkleRoot: merkleRootHex,
+          authorAddress: customAuthor,
+          signature: { r: sigR, vs: sigVs },
+          schemeVersion: 1,
+        },
+      },
+      resolved: {
+        ...baseInput().resolved,
+        publisherPeerId: '12D3KooWPublisher',
+      },
+    });
+
+    expect(options.precomputedAttestation).toBeDefined();
+    const seal = options.precomputedAttestation!;
+    expect(seal.authorAddress).toBe(customAuthor);
+    expect(seal.schemeVersion).toBe(1);
+    expect(seal.expectedMerkleRoot).toEqual(new Uint8Array(32).fill(0xaa));
+    expect(seal.signature.r).toEqual(new Uint8Array(32).fill(0xbb));
+    expect(seal.signature.vs).toEqual(new Uint8Array(32).fill(0xcc));
+  });
+
+  it('rejects malformed hex in seal.merkleRoot instead of silently zeroing bytes', () => {
+    // Codex caught a real bug: the old `parseInt(pair, 16)` produced
+    // `NaN` for non-hex characters, which `Uint8Array` then coerced to
+    // `0` — silently corrupting the attestation bytes rather than
+    // failing the job. The fix routes through a validating decoder
+    // (`ethers.getBytes`) so non-hex content throws at the boundary.
+    const customAuthor = '0xAaaAAaaaAaaaaaAAAaAaaaaaAAAaAAAaAAAaaaaa' as `0x${string}`;
+    expect(() =>
+      mapLiftRequestToPublishOptions({
+        ...baseInput(),
+        request: {
+          ...baseInput().request,
+          seal: {
+            merkleRoot: ('0x' + 'zz'.repeat(32)) as `0x${string}`,
+            authorAddress: customAuthor,
+            signature: {
+              r: ('0x' + 'bb'.repeat(32)) as `0x${string}`,
+              vs: ('0x' + 'cc'.repeat(32)) as `0x${string}`,
+            },
+            schemeVersion: 1,
+          },
+        },
+        resolved: {
+          ...baseInput().resolved,
+          publisherPeerId: '12D3KooWPublisher',
+        },
+      }),
+    ).toThrow();
+  });
+
+  it('rejects wrong-length seal.merkleRoot (must be 32 bytes)', () => {
+    // Defensive length validation: a malformed seal that decodes
+    // cleanly as hex but has the wrong byte count would slip past
+    // `ethers.getBytes` alone. Bind expected lengths explicitly so
+    // the attestation can't be silently truncated/padded.
+    const customAuthor = '0xAaaAAaaaAaaaaaAAAaAaaaaaAAAaAAAaAAAaaaaa' as `0x${string}`;
+    expect(() =>
+      mapLiftRequestToPublishOptions({
+        ...baseInput(),
+        request: {
+          ...baseInput().request,
+          seal: {
+            merkleRoot: ('0x' + 'aa'.repeat(16)) as `0x${string}`, // 16 bytes, not 32
+            authorAddress: customAuthor,
+            signature: {
+              r: ('0x' + 'bb'.repeat(32)) as `0x${string}`,
+              vs: ('0x' + 'cc'.repeat(32)) as `0x${string}`,
+            },
+            schemeVersion: 1,
+          },
+        },
+        resolved: {
+          ...baseInput().resolved,
+          publisherPeerId: '12D3KooWPublisher',
+        },
+      }),
+    ).toThrow(/merkleRoot|32 bytes/);
+  });
+
+  it('rejects wrong-length seal.signature.r (must be 32 bytes)', () => {
+    const customAuthor = '0xAaaAAaaaAaaaaaAAAaAaaaaaAAAaAAAaAAAaaaaa' as `0x${string}`;
+    expect(() =>
+      mapLiftRequestToPublishOptions({
+        ...baseInput(),
+        request: {
+          ...baseInput().request,
+          seal: {
+            merkleRoot: ('0x' + 'aa'.repeat(32)) as `0x${string}`,
+            authorAddress: customAuthor,
+            signature: {
+              r: ('0x' + 'bb'.repeat(16)) as `0x${string}`, // 16 bytes
+              vs: ('0x' + 'cc'.repeat(32)) as `0x${string}`,
+            },
+            schemeVersion: 1,
+          },
+        },
+        resolved: {
+          ...baseInput().resolved,
+          publisherPeerId: '12D3KooWPublisher',
+        },
+      }),
+    ).toThrow(/signature\.r|32 bytes/);
+  });
+
+  it('forwards request.entityProofs to PublishOptions.entityProofs (overrides resolved.entityProofs)', () => {
+    // Caller intent at enqueue (`request`) > per-process resolution defaults (`resolved`).
+    const options = mapLiftRequestToPublishOptions({
+      ...baseInput(),
+      request: {
+        ...baseInput().request,
+        entityProofs: true,
+      },
+      resolved: {
+        ...baseInput().resolved,
+        publisherPeerId: '12D3KooWPublisher',
+        // Even if resolution layer set false, request layer wins.
+        entityProofs: false,
+      },
+    });
+
+    expect(options.entityProofs).toBe(true);
+  });
+
+  it('falls back to resolved.entityProofs when request.entityProofs is undefined', () => {
+    const options = mapLiftRequestToPublishOptions({
+      ...baseInput(),
+      resolved: {
+        ...baseInput().resolved,
+        publisherPeerId: '12D3KooWPublisher',
+        entityProofs: true,
+      },
+    });
+
+    expect(options.entityProofs).toBe(true);
+  });
+
+  it('parses request.publisherNodeIdentityIdOverride (stringified bigint) into PublishOptions (bigint)', () => {
+    // BigInt persisted as `${bigint}` for JSON safety; mapper parses back.
+    const options = mapLiftRequestToPublishOptions({
+      ...baseInput(),
+      request: {
+        ...baseInput().request,
+        publisherNodeIdentityIdOverride: '42',
+      },
+      resolved: {
+        ...baseInput().resolved,
+        publisherPeerId: '12D3KooWPublisher',
+      },
+    });
+
+    expect(options.publisherNodeIdentityIdOverride).toBe(42n);
+  });
+
+  it('preserves publisherNodeIdentityIdOverride === 0n (RFC-001 §4 mode d "no attribution")', () => {
+    // `'0'` is meaningful (no attribution), not "absent". The mapper
+    // distinguishes `'0'` from `undefined` using a strict `!== undefined`
+    // check rather than truthy coercion.
+    const options = mapLiftRequestToPublishOptions({
+      ...baseInput(),
+      request: {
+        ...baseInput().request,
+        publisherNodeIdentityIdOverride: '0',
+      },
+      resolved: {
+        ...baseInput().resolved,
+        publisherPeerId: '12D3KooWPublisher',
+      },
+    });
+
+    expect(options.publisherNodeIdentityIdOverride).toBe(0n);
+  });
+
+  it('omits publisherNodeIdentityIdOverride from PublishOptions when request value is undefined', () => {
+    // When the caller never set the override, the field stays absent
+    // from `PublishOptions` so the publisher uses its persistent
+    // identity (pre-RFC-001 single-tenant semantics).
+    const options = mapLiftRequestToPublishOptions({
+      ...baseInput(),
+      resolved: {
+        ...baseInput().resolved,
+        publisherPeerId: '12D3KooWPublisher',
+      },
+    });
+
+    expect(options.publisherNodeIdentityIdOverride).toBeUndefined();
+  });
+
+  it('does NOT set precomputedAttestation when request.seal is absent', () => {
+    const options = mapLiftRequestToPublishOptions({
+      ...baseInput(),
+      resolved: {
+        ...baseInput().resolved,
+        publisherPeerId: '12D3KooWPublisher',
+      },
+    });
+    expect(options.precomputedAttestation).toBeUndefined();
+  });
 });

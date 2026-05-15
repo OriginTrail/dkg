@@ -283,9 +283,14 @@ import {
   type OpenClawAttachmentRef,
   normalizeOpenClawAttachmentRef,
   normalizeOpenClawAttachmentRefs,
+  normalizeOpenClawAttachmentImportResults,
+  dedupeOpenClawAttachmentImportResults,
+  verifyOpenClawAttachmentImportResultsProvenance,
+  buildOpenClawAttachmentImportContextEntries,
   type OpenClawChatContextEntry,
   normalizeOpenClawChatContextEntry,
   normalizeOpenClawChatContextEntries,
+  normalizeOpenClawChatContextEntriesWithAttachmentImportResults,
   hasOpenClawChatTurnContent,
   unescapeOpenClawAttachmentLiteralBody,
   stripOpenClawAttachmentLiteral,
@@ -466,7 +471,119 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
   // OpenClaw channel bridge — routes DKG UI messages through OpenClaw agent
   // -----------------------------------------------------------------------
 
-  // POST /api/openclaw-channel/send  { text, correlationId, identity?, attachmentRefs?, contextEntries?, contextGraphId? }
+  type OpenClawChannelPayloadInput = {
+    text?: string;
+    correlationId?: string;
+    identity?: string;
+    persistUserMessage?: unknown;
+    attachmentRefs?: unknown;
+    attachmentImportResults?: unknown;
+    contextEntries?: unknown;
+    contextGraphId?: unknown;
+  };
+
+  type VerifiedOpenClawChannelForwardPayload = {
+    text: string;
+    corrId: string;
+    identity: string;
+    persistUserMessage?: string;
+    uiContextGraphId?: string;
+    attachmentRefs?: OpenClawAttachmentRef[];
+    verifiedContextEntries: OpenClawChatContextEntry[];
+  };
+
+  const buildVerifiedOpenClawChannelForwardPayload = async (
+    payload: OpenClawChannelPayloadInput,
+  ): Promise<
+    | { ok: true; value: VerifiedOpenClawChannelForwardPayload }
+    | { ok: false; error: string }
+  > => {
+    const normalizedAttachmentRefs = normalizeOpenClawAttachmentRefs(payload.attachmentRefs);
+    if (payload.attachmentRefs != null && normalizedAttachmentRefs === undefined) {
+      return { ok: false, error: 'Invalid "attachmentRefs"' };
+    }
+    const normalizedDirectAttachmentImportResults = normalizeOpenClawAttachmentImportResults(payload.attachmentImportResults);
+    if (payload.attachmentImportResults != null && normalizedDirectAttachmentImportResults === undefined) {
+      return { ok: false, error: 'Invalid "attachmentImportResults"' };
+    }
+    const normalizedContextPayload = normalizeOpenClawChatContextEntriesWithAttachmentImportResults(
+      payload.contextEntries,
+    );
+    if (payload.contextEntries != null && normalizedContextPayload === undefined) {
+      return { ok: false, error: 'Invalid "contextEntries"' };
+    }
+    const normalizedContextEntries = normalizedContextPayload?.contextEntries;
+    const normalizedLegacyAttachmentImportResults = normalizedContextPayload?.attachmentImportResults;
+    const normalizedAttachmentImportResults = dedupeOpenClawAttachmentImportResults(
+      normalizedDirectAttachmentImportResults != null || normalizedLegacyAttachmentImportResults?.length
+        ? [
+          ...(normalizedDirectAttachmentImportResults ?? []),
+          ...(normalizedLegacyAttachmentImportResults ?? []),
+        ]
+        : undefined,
+    );
+    const uiContextGraphId =
+      typeof payload.contextGraphId === "string" && payload.contextGraphId.trim()
+        ? payload.contextGraphId.trim()
+        : undefined;
+    if (payload.text !== undefined && typeof payload.text !== "string") {
+      return { ok: false, error: 'Invalid "text"' };
+    }
+    const text = typeof payload.text === "string" ? payload.text : "";
+    if (payload.persistUserMessage != null && typeof payload.persistUserMessage !== "string") {
+      return { ok: false, error: 'Invalid "persistUserMessage"' };
+    }
+    const persistUserMessage =
+      typeof payload.persistUserMessage === "string" && payload.persistUserMessage.trim()
+        ? payload.persistUserMessage
+        : undefined;
+    if (!hasOpenClawChatTurnContent(
+      text,
+      normalizedAttachmentRefs,
+      normalizedAttachmentImportResults,
+      normalizedContextEntries,
+    )) {
+      return { ok: false, error: 'Missing "text"' };
+    }
+    const corrId = payload.correlationId ?? crypto.randomUUID();
+    const attachmentRefs = await verifyOpenClawAttachmentRefsProvenance(
+      agent,
+      extractionStatus,
+      normalizedAttachmentRefs,
+    );
+    if (payload.attachmentRefs != null && attachmentRefs === undefined) {
+      return { ok: false, error: 'Invalid "attachmentRefs"' };
+    }
+    const attachmentImportResults = await verifyOpenClawAttachmentImportResultsProvenance(
+      agent,
+      extractionStatus,
+      normalizedAttachmentImportResults,
+    );
+    if (
+      (payload.attachmentImportResults != null || normalizedLegacyAttachmentImportResults?.length) &&
+      attachmentImportResults === undefined
+    ) {
+      return { ok: false, error: 'Invalid "attachmentImportResults"' };
+    }
+
+    return {
+      ok: true,
+      value: {
+        text,
+        corrId,
+        identity: payload.identity ?? "owner",
+        ...(persistUserMessage ? { persistUserMessage } : {}),
+        ...(attachmentRefs ? { attachmentRefs } : {}),
+        verifiedContextEntries: [
+          ...(normalizedContextEntries ?? []),
+          ...buildOpenClawAttachmentImportContextEntries(attachmentImportResults),
+        ],
+        ...(uiContextGraphId ? { uiContextGraphId } : {}),
+      },
+    };
+  };
+
+  // POST /api/openclaw-channel/send  { text, correlationId, identity?, persistUserMessage?, attachmentRefs?, attachmentImportResults?, contextEntries?, contextGraphId? }
   // DKG Node UI frontend calls this to send a message to the local OpenClaw
   // agent.  The daemon forwards to the adapter's channel bridge server and
   // returns the agent's reply. `contextGraphId` carries the UI-selected
@@ -478,7 +595,9 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
       text?: string;
       correlationId?: string;
       identity?: string;
+      persistUserMessage?: unknown;
       attachmentRefs?: unknown;
+      attachmentImportResults?: unknown;
       contextEntries?: unknown;
       contextGraphId?: unknown;
     };
@@ -488,33 +607,19 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
       return jsonResponse(res, 400, { error: "Invalid JSON" });
     }
 
-    const normalizedAttachmentRefs = normalizeOpenClawAttachmentRefs(payload.attachmentRefs);
-    if (payload.attachmentRefs != null && normalizedAttachmentRefs === undefined) {
-      return jsonResponse(res, 400, { error: 'Invalid "attachmentRefs"' });
+    const verifiedPayload = await buildVerifiedOpenClawChannelForwardPayload(payload);
+    if (!verifiedPayload.ok) {
+      return jsonResponse(res, 400, { error: verifiedPayload.error });
     }
-    const normalizedContextEntries = normalizeOpenClawChatContextEntries(
-      payload.contextEntries,
-    );
-    if (payload.contextEntries != null && normalizedContextEntries === undefined) {
-      return jsonResponse(res, 400, { error: 'Invalid "contextEntries"' });
-    }
-    const uiContextGraphId =
-      typeof payload.contextGraphId === "string" && payload.contextGraphId.trim()
-        ? payload.contextGraphId.trim()
-        : undefined;
-    const { text, correlationId, identity } = payload;
-    if (!hasOpenClawChatTurnContent(text, normalizedAttachmentRefs)) {
-      return jsonResponse(res, 400, { error: 'Missing "text"' });
-    }
-    const corrId = correlationId ?? crypto.randomUUID();
-    const attachmentRefs = await verifyOpenClawAttachmentRefsProvenance(
-      agent,
-      extractionStatus,
-      normalizedAttachmentRefs,
-    );
-    if (payload.attachmentRefs != null && attachmentRefs === undefined) {
-      return jsonResponse(res, 400, { error: 'Invalid "attachmentRefs"' });
-    }
+    const {
+      text,
+      corrId,
+      identity,
+      persistUserMessage,
+      attachmentRefs,
+      verifiedContextEntries,
+      uiContextGraphId,
+    } = verifiedPayload.value;
 
     const targets = getOpenClawChannelTargets(config);
     let lastFailure: {
@@ -542,10 +647,11 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
           body: JSON.stringify({
             text,
             correlationId: corrId,
-            identity: identity ?? "owner",
+            identity,
+            ...(persistUserMessage ? { persistUserMessage } : {}),
             ...(attachmentRefs ? { attachmentRefs } : {}),
-            ...(normalizedContextEntries
-              ? { contextEntries: normalizedContextEntries }
+            ...(verifiedContextEntries.length > 0
+              ? { contextEntries: verifiedContextEntries }
               : {}),
             ...(uiContextGraphId ? { uiContextGraphId } : {}),
           }),
@@ -596,7 +702,7 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
     });
   }
 
-  // POST /api/openclaw-channel/stream  { text, correlationId, identity?, attachmentRefs? }
+  // POST /api/openclaw-channel/stream  { text, correlationId, identity?, persistUserMessage?, attachmentRefs?, attachmentImportResults?, contextEntries?, contextGraphId? }
   // SSE streaming variant — pipes agent response chunks as they arrive.
   if (req.method === "POST" && path === "/api/openclaw-channel/stream") {
     const body = await readBody(req, SMALL_BODY_BYTES);
@@ -604,7 +710,9 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
       text?: string;
       correlationId?: string;
       identity?: string;
+      persistUserMessage?: unknown;
       attachmentRefs?: unknown;
+      attachmentImportResults?: unknown;
       contextEntries?: unknown;
       contextGraphId?: unknown;
     };
@@ -614,29 +722,19 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
       return jsonResponse(res, 400, { error: "Invalid JSON" });
     }
 
-    const normalizedAttachmentRefs = normalizeOpenClawAttachmentRefs(payload.attachmentRefs);
-    if (payload.attachmentRefs != null && normalizedAttachmentRefs === undefined) {
-      return jsonResponse(res, 400, { error: 'Invalid "attachmentRefs"' });
+    const verifiedPayload = await buildVerifiedOpenClawChannelForwardPayload(payload);
+    if (!verifiedPayload.ok) {
+      return jsonResponse(res, 400, { error: verifiedPayload.error });
     }
-    const normalizedContextEntries = normalizeOpenClawChatContextEntries(
-      payload.contextEntries,
-    );
-    if (payload.contextEntries != null && normalizedContextEntries === undefined) {
-      return jsonResponse(res, 400, { error: 'Invalid "contextEntries"' });
-    }
-    const uiContextGraphId =
-      typeof payload.contextGraphId === "string" && payload.contextGraphId.trim()
-        ? payload.contextGraphId.trim()
-        : undefined;
-    const { text, correlationId, identity } = payload;
-    if (!hasOpenClawChatTurnContent(text, normalizedAttachmentRefs)) {
-      return jsonResponse(res, 400, { error: 'Missing "text"' });
-    }
-    const corrId = correlationId ?? crypto.randomUUID();
-    const attachmentRefs = await verifyOpenClawAttachmentRefsProvenance(agent, extractionStatus, normalizedAttachmentRefs);
-    if (payload.attachmentRefs != null && attachmentRefs === undefined) {
-      return jsonResponse(res, 400, { error: 'Invalid "attachmentRefs"' });
-    }
+    const {
+      text,
+      corrId,
+      identity,
+      persistUserMessage,
+      attachmentRefs,
+      verifiedContextEntries,
+      uiContextGraphId,
+    } = verifiedPayload.value;
 
     const targets = getOpenClawChannelTargets(config);
     let lastFailure: {
@@ -669,10 +767,11 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
           body: JSON.stringify({
             text,
             correlationId: corrId,
-            identity: identity ?? "owner",
+            identity,
+            ...(persistUserMessage ? { persistUserMessage } : {}),
             ...(attachmentRefs ? { attachmentRefs } : {}),
-            ...(normalizedContextEntries
-              ? { contextEntries: normalizedContextEntries }
+            ...(verifiedContextEntries.length > 0
+              ? { contextEntries: verifiedContextEntries }
               : {}),
             ...(uiContextGraphId ? { uiContextGraphId } : {}),
           }),

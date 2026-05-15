@@ -14,10 +14,14 @@ import {
 } from './local-agents.js';
 import {
   normalizeOpenClawAttachmentRefs,
-  normalizeOpenClawChatContextEntries,
+  normalizeOpenClawAttachmentImportResults,
+  dedupeOpenClawAttachmentImportResults,
+  normalizeOpenClawChatContextEntriesWithAttachmentImportResults,
   pipeOpenClawStream,
   trimTrailingSlashes,
   verifyOpenClawAttachmentRefsProvenance,
+  verifyOpenClawAttachmentImportResultsProvenance,
+  type OpenClawAttachmentImportResult,
   type OpenClawAttachmentRef,
   type OpenClawChatContextEntry,
   type OpenClawStreamReader,
@@ -59,7 +63,9 @@ export interface HermesChatPayload {
   identity?: string;
   sessionId?: string;
   profile?: string;
+  persistUserMessage?: string;
   attachmentRefs?: OpenClawAttachmentRef[];
+  attachmentImportResults?: OpenClawAttachmentImportResult[];
   contextEntries?: OpenClawChatContextEntry[];
   contextGraphId?: string;
   currentAgentAddress?: string;
@@ -413,17 +419,42 @@ export function normalizeHermesChatPayload(raw: unknown): HermesChatPayload | { 
   if (raw.attachmentRefs != null && normalizedAttachmentRefs === undefined) {
     return { error: 'Invalid "attachmentRefs"' };
   }
-  const normalizedContextEntries = normalizeOpenClawChatContextEntries(raw.contextEntries);
-  if (raw.contextEntries != null && normalizedContextEntries === undefined) {
+  const normalizedDirectAttachmentImportResults = normalizeOpenClawAttachmentImportResults(raw.attachmentImportResults);
+  if (raw.attachmentImportResults != null && normalizedDirectAttachmentImportResults === undefined) {
+    return { error: 'Invalid "attachmentImportResults"' };
+  }
+  const normalizedContextPayload = normalizeOpenClawChatContextEntriesWithAttachmentImportResults(raw.contextEntries);
+  if (raw.contextEntries != null && normalizedContextPayload === undefined) {
     return { error: 'Invalid "contextEntries"' };
   }
+  const normalizedContextEntries = normalizedContextPayload?.contextEntries;
+  const normalizedLegacyAttachmentImportResults = normalizedContextPayload?.attachmentImportResults;
+  const normalizedAttachmentImportResults = dedupeOpenClawAttachmentImportResults((
+    normalizedDirectAttachmentImportResults != null || normalizedLegacyAttachmentImportResults?.length
+  )
+    ? [
+      ...(normalizedDirectAttachmentImportResults ?? []),
+      ...(normalizedLegacyAttachmentImportResults ?? []),
+    ]
+    : undefined);
 
+  if (raw.text !== undefined && typeof raw.text !== 'string') {
+    return { error: 'Invalid "text"' };
+  }
   const text = typeof raw.text === 'string' ? raw.text : '';
-  if (text.length === 0 && !normalizedAttachmentRefs?.length) {
+  if (
+    text.length === 0 &&
+    !normalizedAttachmentRefs?.length &&
+    !normalizedAttachmentImportResults?.length &&
+    !normalizedContextEntries?.length
+  ) {
     return { error: 'Missing "text"' };
   }
 
   const contextGraphId = optionalTrimmedString(raw.contextGraphId);
+  if (raw.persistUserMessage != null && typeof raw.persistUserMessage !== 'string') {
+    return { error: 'Invalid "persistUserMessage"' };
+  }
 
   return {
     text,
@@ -431,7 +462,11 @@ export function normalizeHermesChatPayload(raw: unknown): HermesChatPayload | { 
     identity: optionalTrimmedString(raw.identity),
     sessionId: optionalTrimmedString(raw.sessionId),
     profile: optionalTrimmedString(raw.profile),
+    persistUserMessage: typeof raw.persistUserMessage === 'string' && raw.persistUserMessage.trim()
+      ? raw.persistUserMessage
+      : undefined,
     attachmentRefs: normalizedAttachmentRefs,
+    attachmentImportResults: normalizedAttachmentImportResults,
     contextEntries: normalizedContextEntries,
     contextGraphId,
     currentAgentAddress: optionalTrimmedString(raw.currentAgentAddress),
@@ -555,6 +590,14 @@ export async function verifyHermesAttachmentRefsProvenance(
   attachmentRefs: OpenClawAttachmentRef[] | undefined,
 ): Promise<OpenClawAttachmentRef[] | undefined> {
   return verifyOpenClawAttachmentRefsProvenance(agent, extractionStatus, attachmentRefs);
+}
+
+export async function verifyHermesAttachmentImportResultsProvenance(
+  agent: Pick<DKGAgent, 'store'>,
+  extractionStatus: Map<string, ExtractionStatusRecord>,
+  attachmentImportResults: OpenClawAttachmentImportResult[] | undefined,
+): Promise<OpenClawAttachmentImportResult[] | undefined> {
+  return verifyOpenClawAttachmentImportResultsProvenance(agent, extractionStatus, attachmentImportResults);
 }
 
 export async function pipeHermesStream(

@@ -127,6 +127,9 @@ Drop to HTTP when the operation isn't in the table — participant self-service 
 | `dkg_assertion_import_file` | `POST /api/assertion/{name}/import-file` | Multipart upload a document + extract triples |
 | `dkg_assertion_query` | `POST /api/assertion/{name}/query` | Dump every quad in a single assertion (not SPARQL) |
 | `dkg_assertion_history` | `GET /api/assertion/{name}/history` | Read an assertion's lifecycle descriptor |
+| `dkg_import_artifact_read_markdown` | `POST /api/assertion/import-artifact/read-markdown` | Safely read Markdown for a completed imported attachment by content-addressed hash |
+| `dkg_import_artifact_resolve` | `POST /api/assertion/import-artifact/resolve` | Optional metadata re-check for completed imported attachments |
+| `dkg_semantic_enrichment_write` | `POST /api/assertion/semantic-enrichment/write` | Append model-derived semantic triples and provenance to the imported assertion |
 | `dkg_publish` | `POST /api/shared-memory/write` + `POST /api/shared-memory/publish` | **Two-call helper**: first writes supplied quads to SWM via `/write`, then publishes all SWM → VM (TRAC). Calling only the `/publish` route skips the write — if dropping to raw HTTP, use both calls in order |
 | `dkg_shared_memory_publish` | `POST /api/shared-memory/publish` | **Canonical finalizer** after `dkg_assertion_promote`: publish SWM → VM, no fresh quads |
 | `dkg_share` | `POST /api/shared-memory/write` | Directly write concise team-visible knowledge to SWM without staging a WM assertion. Prefer the WM assertion → promote flow for durable/canonical work. Both Hermes and OpenClaw expose the same tool schema (required `content` and `context_graph_id`, optional `sub_graph_name`), so MCP-discovered call signatures are portable. The OpenClaw implementation additionally validates content as non-whitespace, mints a unique subject per share (returned in the response), and N-Triples-quotes content; Hermes is currently looser on those points — the parallel hardening is tracked in OriginTrail/dkg#414. |
@@ -506,6 +509,26 @@ atomic; do not treat a non-zero `tripleCount` on `failed` as partial-write
 evidence. `skipped` usually means no converter was available, so the file was
 stored but no triples were written. `GET /api/assertion/{name}/extraction-status?contextGraphId=...`
 returns `404` if no import-file record exists or the tracker was TTL-pruned.
+
+### Imported attachment semantic enrichment
+
+When Node UI chat provides a completed imported attachment ref, treat its
+`contextGraphId`, `assertionUri`, `fileHash`, status, counts, and Markdown
+hash/form as the starting point. Do not read local filesystem paths.
+
+Canonical flow:
+
+1. Call `dkg_import_artifact_read_markdown` when you need the Markdown text. The
+   daemon validates the import and reads only the content-addressed Markdown blob.
+2. Optionally call `dkg_assertion_query` to inspect existing triples, or
+   `dkg_import_artifact_resolve` when you need to re-check artifact metadata.
+3. Call `dkg_semantic_enrichment_write` with `contextGraphId`, `assertionUri`,
+   `semanticQuads`, and optional generation metadata.
+
+`dkg_semantic_enrichment_write` appends model-derived semantic triples and
+daemon-stamped provenance to the same imported assertion graph. It rejects skipped
+or incomplete imports, rejects per-quad `graph`, rejects target assertion names,
+and does not promote, finalize, or publish.
 
 - `GET /api/file/{fileHash}` — fetch a stored file. Accepts `sha256:<hex>`,
   `keccak256:<hex>`, or bare `<hex>` (treated as sha256). The daemon does not

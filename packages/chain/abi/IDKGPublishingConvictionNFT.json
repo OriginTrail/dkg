@@ -1,0 +1,146 @@
+[
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      }
+    ],
+    "name": "accounts",
+    "outputs": [
+      {
+        "internalType": "uint96",
+        "name": "committedTRAC",
+        "type": "uint96"
+      },
+      {
+        "internalType": "uint40",
+        "name": "createdAtEpoch",
+        "type": "uint40"
+      },
+      {
+        "internalType": "uint40",
+        "name": "expiresAtEpoch",
+        "type": "uint40"
+      },
+      {
+        "internalType": "uint40",
+        "name": "createdAtTimestamp",
+        "type": "uint40"
+      },
+      {
+        "internalType": "uint40",
+        "name": "expiresAtTimestamp",
+        "type": "uint40"
+      },
+      {
+        "internalType": "uint16",
+        "name": "lockDurationEpochs",
+        "type": "uint16"
+      },
+      {
+        "internalType": "uint16",
+        "name": "discountBps",
+        "type": "uint16"
+      },
+      {
+        "internalType": "uint16",
+        "name": "lastSettledWindow",
+        "type": "uint16"
+      },
+      {
+        "internalType": "bool",
+        "name": "fullySwept",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "agent",
+        "type": "address"
+      }
+    ],
+    "name": "agentToAccountId",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "publishingAgent",
+        "type": "address"
+      },
+      {
+        "internalType": "uint96",
+        "name": "baseCost",
+        "type": "uint96"
+      },
+      {
+        "internalType": "uint40",
+        "name": "kcStartEpoch",
+        "type": "uint40"
+      },
+      {
+        "internalType": "uint40",
+        "name": "kcEpochs",
+        "type": "uint40"
+      }
+    ],
+    "name": "coverPublishingCost",
+    "outputs": [
+      {
+        "internalType": "uint96",
+        "name": "discountedCost",
+        "type": "uint96"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      }
+    ],
+    "name": "ownerOf",
+    "outputs": [
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      }
+    ],
+    "name": "settle",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  }
+]

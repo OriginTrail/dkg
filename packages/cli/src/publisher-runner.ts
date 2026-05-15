@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import { DKGAgentWallet } from '@origintrail-official/dkg-agent';
 import { EVMChainAdapter, NoChainAdapter } from '@origintrail-official/dkg-chain';
 import { TypedEventBus, type Ed25519Keypair } from '@origintrail-official/dkg-core';
-import { ACKCollector, AsyncLiftRunner, DKGPublisher, TripleStoreAsyncLiftPublisher, type AsyncLiftPublishExecutionInput, type AsyncLiftPublisher, type AsyncLiftPublisherRecoveryResult, type LiftJobBroadcast, type LiftJobIncluded, type PublishOptions } from '@origintrail-official/dkg-publisher';
+import { ACKCollector, AsyncLiftRunner, DKGPublisher, FileWorkspacePublicSnapshotStore, TripleStoreAsyncLiftPublisher, type AsyncLiftPublishExecutionInput, type AsyncLiftPublisher, type AsyncLiftPublisherRecoveryResult, type LiftJobBroadcast, type LiftJobIncluded, type PublishOptions, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
 import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import { loadNetworkConfig, resolveChainConfig, type DkgConfig } from './config.js';
 import { loadPublisherWallets } from './publisher-wallets.js';
@@ -53,6 +53,7 @@ export async function startPublisherRuntimeIfEnabled(args: {
       pollIntervalMs: args.config.publisher.pollIntervalMs,
       errorBackoffMs: args.config.publisher.errorBackoffMs,
       maxRetries: args.config.publisher.maxRetries,
+      config: args.config,
       ackTransportFactory: args.ackTransportFactory,
     });
     await runtime.runner.start();
@@ -83,6 +84,7 @@ interface PublisherRuntimeBaseArgs {
   maxRetries?: number;
   ackTransportFactory?: () => ACKTransportFactory;
   v10ACKProviderFactory?: () => PublishOptions['v10ACKProvider'];
+  publicSnapshotStore?: WorkspacePublicSnapshotStore;
   closeStoreOnStop: boolean;
 }
 
@@ -101,6 +103,7 @@ export async function createPublisherRuntime(args: {
   const network = await loadNetworkConfig();
   const keypair = await loadOrCreateAgentWallet(args.dataDir);
   const store = await createPublisherStore(args.dataDir, args.config);
+  const publicSnapshotStore = createPublicSnapshotStore(args.dataDir, args.config);
   // Field-merge config + network/<env>.json#chain, then guard for the
   // strict { rpcUrl, hubAddress, chainId? } shape the publisher runtime
   // expects. If either required field is missing, pass undefined and let
@@ -118,6 +121,7 @@ export async function createPublisherRuntime(args: {
     pollIntervalMs: args.pollIntervalMs,
     errorBackoffMs: args.errorBackoffMs,
     maxRetries: args.maxRetries ?? args.config.publisher?.maxRetries,
+    publicSnapshotStore,
     closeStoreOnStop: true,
   });
 }
@@ -127,12 +131,16 @@ export async function createPublisherInspector(args: {
   config: DkgConfig;
 }): Promise<PublisherInspector> {
   const store = await createPublisherStore(args.dataDir, args.config);
-  return createPublisherInspectorFromStore(store, true);
+  return createPublisherInspectorFromStore(store, true, createPublicSnapshotStore(args.dataDir, args.config));
 }
 
-export function createPublisherInspectorFromStore(store: TripleStore, closeStoreOnStop = false): PublisherInspector {
+export function createPublisherInspectorFromStore(
+  store: TripleStore,
+  closeStoreOnStop = false,
+  publicSnapshotStore?: WorkspacePublicSnapshotStore,
+): PublisherInspector {
   return {
-    publisher: new TripleStoreAsyncLiftPublisher(store),
+    publisher: new TripleStoreAsyncLiftPublisher(store, { publicSnapshotStore }),
     stop: async () => {
       if (closeStoreOnStop) {
         await store.close();
@@ -141,8 +149,11 @@ export function createPublisherInspectorFromStore(store: TripleStore, closeStore
   };
 }
 
-export function createPublisherControlFromStore(store: TripleStore): AsyncLiftPublisher {
-  return new TripleStoreAsyncLiftPublisher(store);
+export function createPublisherControlFromStore(
+  store: TripleStore,
+  publicSnapshotStore?: WorkspacePublicSnapshotStore,
+): AsyncLiftPublisher {
+  return new TripleStoreAsyncLiftPublisher(store, { publicSnapshotStore });
 }
 
 export async function createPublisherRuntimeFromAgent(args: {
@@ -157,6 +168,7 @@ export async function createPublisherRuntimeFromAgent(args: {
   pollIntervalMs?: number;
   errorBackoffMs?: number;
   maxRetries?: number;
+  config?: Pick<DkgConfig, 'sharedMemoryPublicSnapshotStorage'>;
   ackTransportFactory?: () => ACKTransportFactory;
   v10ACKProviderFactory?: () => PublishOptions['v10ACKProvider'];
 }): Promise<PublisherRuntime> {
@@ -170,6 +182,7 @@ export async function createPublisherRuntimeFromAgent(args: {
     maxRetries: args.maxRetries,
     ackTransportFactory: args.ackTransportFactory,
     v10ACKProviderFactory: args.v10ACKProviderFactory,
+    publicSnapshotStore: createPublicSnapshotStore(args.dataDir, args.config),
     closeStoreOnStop: false,
   });
 }
@@ -208,6 +221,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
         keypair: args.keypair,
         publisherNodeIdentityId: identityId,
         publisherPrivateKey: wallet.privateKey,
+        publicSnapshotStore: args.publicSnapshotStore,
       }),
     );
   }
@@ -235,6 +249,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
   const asyncPublisher = new TripleStoreAsyncLiftPublisher(args.store, {
     chainRecoveryResolver: hasChainRecovery ? createChainRecoveryResolver(publishers) : undefined,
     maxRetries: args.maxRetries,
+    publicSnapshotStore: args.publicSnapshotStore,
     publishExecutor: async ({ walletId, publishOptions }: AsyncLiftPublishExecutionInput) => {
       const publisher = publishers.get(walletId);
       if (!publisher) {
@@ -444,13 +459,47 @@ export function parsePositiveIntegerOption(value: string, optionName: string): n
 
 async function createPublisherStore(dataDir: string, config: DkgConfig): Promise<TripleStore> {
   if (config.store) {
-    return await createTripleStore(config.store as any);
+    const storeConfig = config.store as any;
+    return await createTripleStore({
+      ...storeConfig,
+      largeLiteralStorage: config.largeLiteralStorage ?? (
+        isLocalOxigraphStoreConfig(storeConfig)
+          ? defaultLargeLiteralStorage(dataDir, config)
+          : undefined
+      ),
+    });
   }
 
   return await createTripleStore({
     backend: 'oxigraph-worker',
     options: { path: join(dataDir, 'store.nq') },
+    largeLiteralStorage: defaultLargeLiteralStorage(dataDir, config),
   });
+}
+
+function defaultLargeLiteralStorage(dataDir: string, config: DkgConfig) {
+  return {
+    enabled: config.largeLiteralStorage?.enabled ?? true,
+    thresholdBytes: config.largeLiteralStorage?.thresholdBytes,
+    directory: config.largeLiteralStorage?.directory ?? join(dataDir, 'literal-blobs'),
+  };
+}
+
+export function createPublicSnapshotStore(
+  dataDir: string,
+  config?: Pick<DkgConfig, 'sharedMemoryPublicSnapshotStorage'>,
+): WorkspacePublicSnapshotStore | undefined {
+  const snapshotConfig = config?.sharedMemoryPublicSnapshotStorage;
+  if (snapshotConfig?.enabled === false) {
+    return undefined;
+  }
+  return new FileWorkspacePublicSnapshotStore(snapshotConfig?.directory ?? join(dataDir, 'swm-public-snapshots'));
+}
+
+function isLocalOxigraphStoreConfig(storeConfig: { backend?: unknown }): boolean {
+  return storeConfig.backend === 'oxigraph'
+    || storeConfig.backend === 'oxigraph-worker'
+    || storeConfig.backend === 'oxigraph-persistent';
 }
 
 async function loadOrCreateAgentWallet(dataDir: string): Promise<DKGAgentWallet> {

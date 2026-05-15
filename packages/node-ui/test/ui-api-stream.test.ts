@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import {
   fetchMemorySessionGraphDelta,
+  importFile,
   sendHermesLocalChat,
   streamHermesLocalChat,
   streamLocalAgentChat,
@@ -280,6 +281,127 @@ describe('ui local-agent stream api', () => {
       const payload = JSON.parse(String(fetchCalls[0]?.[1]?.body));
       expect(payload.attachmentRefs).toEqual(attachments);
       expect(payload.text).toBe('hello');
+    } finally {
+      globalThis.fetch = savedFetch;
+    }
+  });
+
+  it('forwards skipped import results separately from generic context entries', async () => {
+    const fetchCalls: [string | URL | Request, RequestInit | undefined][] = [];
+    const savedFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      fetchCalls.push([url, init]);
+      return new Response(
+        JSON.stringify({ text: 'Context response', correlationId: 'c4' }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }) as typeof globalThis.fetch;
+
+    const attachmentImportResults = [{
+      id: 'att-1',
+      fileName: 'notes.epub',
+      contextGraphId: 'project-1',
+      assertionName: 'import-1',
+      assertionUri: 'urn:dkg:assertion:1',
+      fileHash: 'abc123',
+      detectedContentType: 'application/epub+zip',
+      extractionStatus: 'skipped' as const,
+      pipelineUsed: null,
+      tripleCount: 0,
+    }];
+
+    try {
+      const result = await streamLocalAgentChat('openclaw', '', {
+        attachmentImportResults,
+        contextGraphId: 'project-1',
+        persistUserMessage: 'Attachment import result: notes.epub.',
+      });
+
+      expect(result.text).toBe('Context response');
+      const payload = JSON.parse(String(fetchCalls[0]?.[1]?.body));
+      expect(payload.text).toBe('');
+      expect(payload.persistUserMessage).toBe('Attachment import result: notes.epub.');
+      expect(payload.attachmentImportResults).toEqual(attachmentImportResults);
+      expect(payload.contextGraphId).toBe('project-1');
+      expect(payload).not.toHaveProperty('attachmentRefs');
+      expect(payload).not.toHaveProperty('contextEntries');
+    } finally {
+      globalThis.fetch = savedFetch;
+    }
+  });
+
+  it('forwards skipped import results through Hermes without attachment refs', async () => {
+    const fetchCalls: [string | URL | Request, RequestInit | undefined][] = [];
+    const savedFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      fetchCalls.push([url, init]);
+      return new Response(
+        JSON.stringify({ text: 'Hermes context response', correlationId: 'h-context' }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }) as typeof globalThis.fetch;
+
+    const attachmentImportResults = [{
+      id: 'att-1',
+      fileName: 'deck.pptx',
+      contextGraphId: 'project-1',
+      assertionName: 'deck',
+      assertionUri: 'urn:dkg:assertion:deck',
+      fileHash: 'sha256:deck',
+      detectedContentType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      extractionStatus: 'skipped' as const,
+      pipelineUsed: null,
+      tripleCount: 0,
+    }];
+
+    try {
+      const result = await streamLocalAgentChat('hermes', '', {
+        sessionId: 'hermes:dkg-ui',
+        attachmentImportResults,
+        contextGraphId: 'project-1',
+        persistUserMessage: 'Attachment import result: deck.pptx.',
+      });
+
+      expect(result.text).toBe('Hermes context response');
+      expect(String(fetchCalls[0]?.[0])).toBe('/api/hermes-channel/stream');
+      const payload = JSON.parse(String(fetchCalls[0]?.[1]?.body));
+      expect(payload.text).toBe('');
+      expect(payload.persistUserMessage).toBe('Attachment import result: deck.pptx.');
+      expect(payload.attachmentImportResults).toEqual(attachmentImportResults);
+      expect(payload.contextGraphId).toBe('project-1');
+      expect(payload).not.toHaveProperty('attachmentRefs');
+      expect(payload).not.toHaveProperty('contextEntries');
+    } finally {
+      globalThis.fetch = savedFetch;
+    }
+  });
+
+  it('adds a best-effort content type when importing chat attachments with empty browser MIME types', async () => {
+    const savedFetch = globalThis.fetch;
+    let postedContentType: FormDataEntryValue | null = null;
+    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = init?.body as FormData;
+      postedContentType = body.get('contentType');
+      return new Response(
+        JSON.stringify({
+          assertionUri: 'urn:dkg:assertion:deck',
+          fileHash: 'sha256:deck',
+          detectedContentType: String(postedContentType),
+          extraction: { status: 'skipped', tripleCount: 0, pipelineUsed: null },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }) as typeof globalThis.fetch;
+
+    try {
+      const result = await importFile(
+        'deck',
+        'project-1',
+        new File(['slides'], 'deck.pptx', { type: 'application/octet-stream' }),
+      );
+
+      expect(postedContentType).toBe('application/vnd.openxmlformats-officedocument.presentationml.presentation');
+      expect(result.detectedContentType).toBe('application/vnd.openxmlformats-officedocument.presentationml.presentation');
     } finally {
       globalThis.fetch = savedFetch;
     }

@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import {
-  authHeaders, addParticipant, removeParticipant, listParticipants,
+  authHeaders, removeParticipant, listParticipants,
   fetchAgents, listJoinRequests, approveJoinRequest, rejectJoinRequest,
   type PendingJoinRequest,
 } from '../../api.js';
@@ -110,20 +110,21 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
   // moves. The previous multiaddr-in-invite design broke whenever the
   // chosen relay rotated under the curator.
   const [peerId, setPeerId] = useState<string | null>(null);
-  // Multiaddrs are observed so we can refuse to emit an invite before this
-  // node has any remotely-dialable address. Without this gate the curator
-  // could paste an invite from a freshly-started NAT'd node whose AutoRelay
-  // hasn't yet reserved a circuit, and the joiner's DHT walk would return
-  // a record with only LAN/loopback addrs that no remote peer can reach.
-  // Codex review on PR #431 surfaced this as a follow-up to the DHT-only
-  // invite migration; we gate copy here rather than punting it to the
-  // joiner's "unreachable" branch because failing fast on the curator side
-  // is much cheaper than the joiner's 90s catchup deadline.
-  const [multiaddrs, setMultiaddrs] = useState<string[]>([]);
   const [allowedAgents, setAllowedAgents] = useState<string[]>([]);
-  const [newAgent, setNewAgent] = useState('');
-  const [addingAgent, setAddingAgent] = useState(false);
+  // Surfaced only for join-request approve/reject errors. The previous
+  // address-paste add-path that also wrote here was removed; the only
+  // way to add an agent now is to share the text invite and approve
+  // the inbound signed join request.
   const [agentError, setAgentError] = useState<string | null>(null);
+  // Kept solely for the friendly-name lookup on already-allowlisted
+  // entries (so the Allowed Agents list still renders peer names where
+  // we know them rather than just the raw 0x address). The previous
+  // "Network Agents" picker that surfaced this list as add-suggestions
+  // was removed because on long-running testnet nodes the historical
+  // agent registry routinely accumulates 1500+ rows dominated by
+  // offline smoke-node and one-off test agents — overwhelming and not
+  // actionable as an invite path. Inviting now goes through the text
+  // invite + signed join request flow exclusively.
   const [networkAgents, setNetworkAgents] = useState<NetworkAgent[]>([]);
   const [pendingRequests, setPendingRequests] = useState<PendingJoinRequest[]>([]);
   const [processingRequest, setProcessingRequest] = useState<string | null>(null);
@@ -136,9 +137,6 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
       .then((data: any) => {
         if (typeof data?.peerId === 'string' && data.peerId.length > 0) {
           setPeerId(data.peerId);
-        }
-        if (Array.isArray(data?.multiaddrs)) {
-          setMultiaddrs(data.multiaddrs.filter((m: unknown): m is string => typeof m === 'string'));
         }
       })
       .catch(() => {});
@@ -163,42 +161,25 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
 
   if (!open) return null;
 
-  // Refuse to emit a peer-id invite until we have at least one
-  // remotely-dialable multiaddr. Otherwise the DHT record we're about to
-  // ask the joiner to look up will only contain LAN/loopback addrs that no
-  // remote node can reach — guaranteed-broken invite. A curator who legitimately
-  // wants to share a "bare" cgId invite (public CG, joiner discovers us via
-  // gossip) can still copy the contextGraphId directly from the URL.
-  const inviteReady = peerId !== null && multiaddrs.some(isMultiaddrRemotelyDialable);
-  const invitePayload = inviteReady
-    ? `${contextGraphId}\n${peerId}`
-    : contextGraphId;
+  // Always emit `<cgId>\n<peerId>` once peer-id is loaded. The earlier
+  // `inviteReady` gate (which required at least one publicly-dialable
+  // multiaddr) was defensive against "no AutoRelay reservation yet"
+  // scenarios, but it's now too strict in two ways:
+  //   1. V10's `forwardJoinRequest` REQUIRES the curator peer id —
+  //      the bare-cgId fallback is dead, would always throw on submit.
+  //   2. LAN / loopback / CGNAT addrs are perfectly dialable from same-
+  //      machine (devnet) and same-LAN peers; the DHT record carries
+  //      them. The "remotely dialable" predicate was about INTERNET
+  //      reachability — too pessimistic for local / LAN testing.
+  // Worst case (truly isolated curator) the joiner gets an error on
+  // submit, identical to today.
+  const invitePayload = peerId ? `${contextGraphId}\n${peerId}` : null;
 
   const copyToClipboard = (text: string, label: string) => {
     navigator.clipboard.writeText(text).then(() => {
       setCopied(label);
       setTimeout(() => setCopied(null), 2000);
     }).catch(() => {});
-  };
-
-  const handleAddAgent = async (addr?: string) => {
-    const address = (addr ?? newAgent).trim();
-    if (!address) return;
-    if (!/^0x[0-9a-fA-F]{40}$/.test(address)) {
-      setAgentError('Invalid Ethereum address (expected 0x... 40 hex chars)');
-      return;
-    }
-    setAddingAgent(true);
-    setAgentError(null);
-    try {
-      await addParticipant(contextGraphId, address);
-      setAllowedAgents((prev) => [...new Set([...prev, address])]);
-      setNewAgent('');
-    } catch (err: any) {
-      setAgentError(err?.message || 'Failed to add agent');
-    } finally {
-      setAddingAgent(false);
-    }
   };
 
   const handleRemoveAgent = async (addr: string) => {
@@ -234,11 +215,6 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
       setProcessingRequest(null);
     }
   };
-
-  const allowedSet = new Set(allowedAgents.map(a => a.toLowerCase()));
-  const availablePeers = networkAgents.filter(
-    (a) => a.agentAddress && !allowedSet.has(a.agentAddress.toLowerCase()),
-  );
 
   return (
     <div className="v10-modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
@@ -290,51 +266,14 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
 
           {activeTab === 'allowlist' && (
             <>
-              {/* Network Agents (Peer Directory) */}
-              {availablePeers.length > 0 && (
-                <div className="v10-form-group">
-                  <label className="v10-form-label">Network Agents</label>
-                  <div style={{ fontSize: 10, color: 'var(--text-tertiary)', marginBottom: 8 }}>
-                    Connected agents on the network. Click + to add to the allowlist.
-                  </div>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 12 }}>
-                    {availablePeers.map((a) => (
-                      <div key={a.peerId} style={{
-                        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                        padding: '6px 10px', borderRadius: 6, fontSize: 11,
-                        background: 'var(--bg-surface)', border: '1px solid var(--border-default)',
-                      }}>
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                          <span style={{ color: 'var(--text-primary)', fontWeight: 500 }}>{a.name}</span>
-                          <span style={{
-                            color: 'var(--text-tertiary)', fontFamily: 'var(--font-mono)', fontSize: 10,
-                          }}>
-                            {a.agentAddress}
-                          </span>
-                        </div>
-                        <button
-                          onClick={() => handleAddAgent(a.agentAddress!)}
-                          disabled={addingAgent}
-                          style={{
-                            background: 'var(--accent-primary)', color: '#fff', border: 'none',
-                            cursor: 'pointer', borderRadius: 4, fontSize: 11, padding: '4px 10px',
-                            fontWeight: 600, whiteSpace: 'nowrap',
-                          }}
-                          title={`Add ${a.name} to allowlist`}
-                        >
-                          + Add
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Allowed Agents section */}
+              {/* Allowed Agents — read-only audit list. Agents are added
+                  exclusively via the text-invite + signed-join-request flow
+                  (see Invite Code below + the Join Requests tab). The ✕
+                  button revokes access for an existing participant. */}
               <div className="v10-form-group">
                 <label className="v10-form-label">Allowed Agents</label>
                 <div style={{ fontSize: 10, color: 'var(--text-tertiary)', marginBottom: 8 }}>
-                  Only agents on this list can read and write to the project. Add by Ethereum address or pick from network agents above.
+                  Only agents on this list can read and write to the project. To add someone, share the Invite Code below — they'll send a signed join request you can approve in the <strong>Join Requests</strong> tab.
                 </div>
 
                 {allowedAgents.length > 0 && (
@@ -380,29 +319,6 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
                     No agents on allowlist — project is open to anyone who subscribes.
                   </div>
                 )}
-
-                <div style={{ display: 'flex', gap: 6 }}>
-                  <input
-                    className="v10-form-input"
-                    type="text"
-                    placeholder="0x..."
-                    value={newAgent}
-                    onChange={(e) => { setNewAgent(e.target.value); setAgentError(null); }}
-                    style={{ flex: 1, fontFamily: 'var(--font-mono)', fontSize: 11 }}
-                    onKeyDown={(e) => { if (e.key === 'Enter') handleAddAgent(); }}
-                  />
-                  <button
-                    className="v10-modal-btn primary"
-                    onClick={() => handleAddAgent()}
-                    disabled={!newAgent.trim() || addingAgent}
-                    style={{ whiteSpace: 'nowrap', fontSize: 11 }}
-                  >
-                    {addingAgent ? 'Adding…' : 'Add Agent'}
-                  </button>
-                </div>
-                {agentError && (
-                  <div style={{ fontSize: 10, color: 'var(--accent-red, #ef4444)', marginTop: 4 }}>{agentError}</div>
-                )}
               </div>
 
               <div className="v10-form-divider" />
@@ -410,67 +326,36 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
               {/* Invite code */}
               <div className="v10-form-group">
                 <label className="v10-form-label">Invite Code</label>
-                {!inviteReady && (
+                {invitePayload === null ? (
                   <div style={{
-                    padding: '8px 12px', borderRadius: 6, fontSize: 11, marginBottom: 8,
-                    background: 'rgba(245, 158, 11, 0.1)',
-                    border: '1px solid rgba(245, 158, 11, 0.3)',
-                    color: 'var(--accent-amber, #f59e0b)',
+                    padding: '8px 12px', borderRadius: 6, fontSize: 11,
+                    color: 'var(--text-tertiary)', background: 'var(--bg-surface)',
+                    border: '1px dashed var(--border-default)',
                   }}>
-                    <strong>Peer-id invite not ready yet.</strong> Your node has no
-                    remotely-dialable address yet (no circuit-relay reservation, no public
-                    interface). The invite below is the bare project ID — joiners can subscribe
-                    if the project is <em>open</em>, but for <em>curated</em> projects they need
-                    to dial this node directly to send a join request, which won't work until
-                    AutoRelay negotiates a reservation. Re-open this modal in a few seconds to
-                    pick up the peer-id-enhanced form.
+                    Loading peer ID…
+                  </div>
+                ) : (
+                  <div style={{ position: 'relative' }}>
+                    <pre style={{
+                      background: 'var(--bg-surface)', border: '1px solid var(--border-default)',
+                      borderRadius: 6, padding: '10px 12px', fontSize: 11, lineHeight: 1.6,
+                      fontFamily: 'var(--font-mono)', color: 'var(--text-primary)',
+                      overflow: 'auto', margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-all',
+                    }}>
+                      {invitePayload}
+                    </pre>
+                    <button
+                      className="v10-modal-btn primary"
+                      onClick={() => copyToClipboard(invitePayload, 'invite')}
+                      style={{
+                        position: 'absolute', top: 6, right: 6, fontSize: 10, padding: '4px 10px', height: 26,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      {copied === 'invite' ? 'Copied' : 'Copy Invite'}
+                    </button>
                   </div>
                 )}
-                <div style={{ position: 'relative' }}>
-                  <pre style={{
-                    background: 'var(--bg-surface)', border: '1px solid var(--border-default)',
-                    borderRadius: 6, padding: '10px 12px', fontSize: 11, lineHeight: 1.6,
-                    fontFamily: 'var(--font-mono)', color: 'var(--text-primary)',
-                    overflow: 'auto', margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-all',
-                  }}>
-                    {invitePayload}
-                  </pre>
-                  <button
-                    className="v10-modal-btn primary"
-                    onClick={() => copyToClipboard(invitePayload, 'invite')}
-                    style={{
-                      position: 'absolute', top: 6, right: 6, fontSize: 10, padding: '4px 10px', height: 26,
-                      cursor: 'pointer',
-                    }}
-                    title={inviteReady ? undefined : 'Bare project ID (works for open projects). Wait for AutoRelay to upgrade to a peer-id invite for curated projects.'}
-                  >
-                    {copied === 'invite' ? 'Copied' : (inviteReady ? 'Copy Invite' : 'Copy Project ID')}
-                  </button>
-                </div>
-                <div style={{ fontSize: 10, color: 'var(--text-tertiary)', marginTop: 4 }}>
-                  Share this with collaborators. They paste it into <strong>Join Project</strong> on their node.
-                  {inviteReady ? (
-                    <>
-                      {' '}Their daemon dials your node by peer id over the libp2p DHT, so the
-                      invite stays valid even if your relay or public IP changes.
-                      {allowedAgents.length > 0 ? (
-                        <> The invitee must have their agent address on the allowlist, or they can submit a signed join request for your approval.</>
-                      ) : (
-                        <> Since no allowlist is set, anyone with this code can join.</>
-                      )}
-                    </>
-                  ) : (
-                    <>
-                      {' '}This is the bare project ID — sufficient for <em>open</em> projects
-                      (joiners discover via gossip without dialing your node).
-                      {allowedAgents.length > 0 ? (
-                        <> Because this project has an allowlist, joiners would also need to dial your node to submit a signed join request — that path won't work until AutoRelay negotiates a circuit-relay reservation. Re-open this modal then to copy the peer-id-enhanced form.</>
-                      ) : (
-                        <> For curated projects, re-open this modal once AutoRelay has negotiated to copy the peer-id-enhanced form.</>
-                      )}
-                    </>
-                  )}
-                </div>
               </div>
             </>
           )}

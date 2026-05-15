@@ -185,7 +185,8 @@ dkg context-graph invite <id> <peer>     # invite a peer to a context graph
 dkg context-graph list                   # list subscribed context graphs
 dkg context-graph info <id>              # show context-graph details
 dkg context-graph agents <id>            # list agents in the CG allowlist
-dkg context-graph request-join <id>      # request to join a curated CG
+dkg context-graph request-join <id> <curatorPeerId>   # request to join a curated CG (peer id from V10 invite)
+dkg context-graph sign-join <id>         # sign a join-request delegation locally without forwarding
 dkg context-graph approve-join <id>      # approve a pending join request
 dkg context-graph subscribe <id>         # subscribe to a CG without creating it
 

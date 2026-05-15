@@ -242,6 +242,65 @@ subset while doing quick local smoke checks:
 - upload payload to local working memory
 - lift local working memory to shared working memory
 
+### SWM Large-Payload Benchmark
+
+The live SWM large-payload benchmark is aimed at replication and storage
+amplification regressions. It writes large public literals through every node in
+a running devnet, waits until every node can query every benchmark payload from
+shared working memory, and verifies that the run did not create
+`dkg:publicStagedQuads` snapshot literals in SWM metadata.
+
+For the 5-node, 500 MiB regression case, start or reuse a 5-node devnet and run:
+
+```bash
+pnpm bench:swm-large-payload -- \
+  --ports 19101,19102,19103,19104,19105 \
+  --payload-mib-per-node 100 \
+  --chunk-mib 0.5 \
+  --output bench/results/swm-large-payload-500mib.json
+```
+
+Use `--auth-token`, `--auth-token-file`, or `DKG_BENCH_AUTH_TOKEN` when the
+target nodes require bearer auth. The final JSON includes per-node payload
+counts, write timing summaries, replication polls, metadata counts for
+`shareOperationId`, `rootEntity`, and `publishedAt`, the global
+`publicStagedQuads` delta, and an appended log scan for known
+Oxigraph/GossipSub failure signatures when a devnet directory is available.
+
+### SWM Triple-Volume Benchmark
+
+The live SWM triple-volume benchmark is aimed at Oxigraph graph/index scale,
+not large literal storage. It writes many small triples through every node in a
+running devnet, waits until every node can count all replicated benchmark
+triples from shared working memory, and stores a JSON report with write timing,
+replication polls, sample triples, and log-scan results.
+
+For a 5-node run targeting roughly 1 GiB of serialized N-Quad triples per node:
+
+```bash
+DEVNET_SWM_SYNC_ON_CONNECT=0 ./scripts/devnet.sh start 5
+pnpm bench:swm-triple-volume -- \
+  --ports 20101,20102,20103,20104,20105 \
+  --target-gib-per-node 1 \
+  --triples-per-write 1000 \
+  --write-concurrency 5 \
+  --output bench/results/swm-triple-volume-1gib-per-node.json
+```
+
+The target is based on estimated serialized N-Quad bytes for generated triples.
+This benchmark can be much harder on local Oxigraph than the large-literal
+benchmark because every triple and index entry still lives in the RDF store.
+`DEVNET_SWM_SYNC_ON_CONNECT=0` avoids a peer-connect catch-up storm during bulk
+write runs; live SWM gossip still replicates new writes. The report also checks
+that per-operation public snapshots are stored as disk refs, not Oxigraph
+snapshot graphs or `dkg:publicStagedQuads` literals.
+
+For throughput-drop diagnosis, add `--max-writes <count>` to stop at a smaller
+partial run and leave diagnostics enabled. The JSON report records interval
+throughput, write latency percentiles, per-node `store.nq`/snapshot/log/process
+samples, and appended daemon-log counters. A Markdown summary is written to
+`<output>.analysis.md` by default, or to `--analysis-output <path>`.
+
 ## Extending the Node
 
 The V9 "installable apps" framework (iframe-hosted third-party UIs loaded from

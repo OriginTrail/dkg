@@ -99,7 +99,7 @@ describe('Protobuf: SharePublishRequest round-trip (WorkspacePublishRequest wire
       nquads: new TextEncoder().encode('<urn:entity> <http://purl.org/dc/terms/title> "Hello" .'),
       manifest: [{ rootEntity: 'urn:entity', privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWTest',
-      workspaceOperationId: 'ws-123',
+      shareOperationId: 'ws-123',
       timestampMs: Date.now(),
     };
     const encoded = encodeSharePublishRequest(original);
@@ -108,9 +108,19 @@ describe('Protobuf: SharePublishRequest round-trip (WorkspacePublishRequest wire
     const decoded = decodeSharePublishRequest(encoded);
     expect(decoded.contextGraphId).toBe(contextGraphId);
     expect(decoded.publisherPeerId).toBe(original.publisherPeerId);
-    expect(decoded.workspaceOperationId).toBe(original.workspaceOperationId);
+    expect(decoded.shareOperationId).toBe(original.shareOperationId);
     expect(decoded.manifest).toHaveLength(1);
     expect(decoded.manifest[0].rootEntity).toBe('urn:entity');
+  });
+
+  it('requires shareOperationId', () => {
+    expect(() => encodeSharePublishRequest({
+      contextGraphId: 'test-para',
+      nquads: new TextEncoder().encode('<urn:entity> <http://purl.org/dc/terms/title> "Hello" .'),
+      manifest: [{ rootEntity: 'urn:entity', privateTripleCount: 0 }],
+      publisherPeerId: '12D3KooWTest',
+      timestampMs: Date.now(),
+    } as any)).toThrow('WorkspacePublishRequest requires shareOperationId');
   });
 });
 
@@ -121,7 +131,7 @@ describe('Protobuf: SharePublishRequest CAS conditions round-trip', () => {
       nquads: new TextEncoder().encode('<urn:e> <http://schema.org/name> "Test" .'),
       manifest: [{ rootEntity: 'urn:e', privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWTest',
-      workspaceOperationId: 'ws-cas-rt',
+      shareOperationId: 'ws-cas-rt',
       timestampMs: Date.now(),
       casConditions: [
         { subject: 'urn:e', predicate: 'http://example.org/status', expectedValue: '"recruiting"', expectAbsent: false },
@@ -143,7 +153,7 @@ describe('Protobuf: SharePublishRequest CAS conditions round-trip', () => {
       nquads: new TextEncoder().encode('<urn:e> <http://schema.org/name> "Test" .'),
       manifest: [{ rootEntity: 'urn:e', privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWTest',
-      workspaceOperationId: 'ws-no-cas',
+      shareOperationId: 'ws-no-cas',
       timestampMs: Date.now(),
     };
     const decoded = decodeSharePublishRequest(encodeSharePublishRequest(original));
@@ -261,7 +271,7 @@ describe('Protobuf: operationId propagation round-trip', () => {
       nquads: new TextEncoder().encode('<s> <p> <o> .'),
       manifest: [],
       publisherPeerId: '12D3KooWTest',
-      workspaceOperationId: 'ws-123',
+      shareOperationId: 'ws-123',
       timestampMs: Date.now(),
       operationId: OP_ID,
     };

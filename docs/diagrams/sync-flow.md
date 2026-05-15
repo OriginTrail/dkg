@@ -264,7 +264,7 @@ Define deterministic leaf IDs so all honest nodes build the same tree.
 
 - `confirmed` leaf key: `H(batchId || merkleRoot)`
 - `tentative` leaf key: `H(ual || merkleRoot)`
-- `workspace` leaf key: `H(workspaceOperationId || publishedAt)`
+- `workspace` leaf key: `H(shareOperationId || publishedAt)`
 
 Rules:
 

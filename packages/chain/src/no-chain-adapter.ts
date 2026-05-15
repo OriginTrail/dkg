@@ -30,6 +30,7 @@ function noChain(): never {
 export class NoChainAdapter implements ChainAdapter {
   readonly chainType = 'evm' as const;
   readonly chainId = 'none';
+  readonly deploymentId = 'none';
 
   async registerIdentity(_proof: IdentityProof): Promise<bigint> { noChain(); }
   async getIdentityId(): Promise<bigint> { return 0n; }
@@ -48,6 +49,7 @@ export class NoChainAdapter implements ChainAdapter {
   async isOperationalWalletRegistered(_identityId: bigint, _address: string): Promise<boolean> { return false; }
   async getKnowledgeAssetsV10Address(): Promise<string> { noChain(); }
   async getEvmChainId(): Promise<bigint> { noChain(); }
+  async getPublishingConvictionAccountOwner(_accountId: bigint): Promise<string> { noChain(); }
   isV10Ready(): boolean { return false; }
   isRandomSamplingReady(): boolean { return false; }
 }

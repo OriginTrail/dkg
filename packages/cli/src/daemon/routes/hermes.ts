@@ -25,9 +25,13 @@ import {
   probeHermesChannelHealth,
   shouldTryNextHermesTarget,
   verifyHermesAttachmentRefsProvenance,
+  verifyHermesAttachmentImportResultsProvenance,
   type HermesChatPayload,
   type HermesTurnPersistenceState,
 } from '../hermes.js';
+import {
+  buildOpenClawAttachmentImportContextEntries,
+} from '../openclaw.js';
 
 type HermesPersistRouteResult = {
   statusCode: number;
@@ -37,6 +41,21 @@ type HermesPersistRouteResult = {
 type NormalizedHermesPersistTurnPayload = Exclude<ReturnType<typeof normalizeHermesPersistTurnPayload>, { error: string }>;
 
 const hermesPersistTurnInflight = new Map<string, Promise<HermesPersistRouteResult>>();
+
+function withVerifiedAttachmentImportContextEntries(
+  payload: HermesChatPayload,
+  attachmentImportResults: HermesChatPayload['attachmentImportResults'],
+): HermesChatPayload {
+  const importContextEntries = buildOpenClawAttachmentImportContextEntries(attachmentImportResults);
+  if (importContextEntries.length === 0) return payload;
+  return {
+    ...payload,
+    contextEntries: [
+      ...(payload.contextEntries ?? []),
+      ...importContextEntries,
+    ],
+  };
+}
 
 export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
   const {
@@ -73,6 +92,15 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
     if (payload.attachmentRefs != null && attachmentRefs === undefined) {
       return jsonResponse(res, 400, { error: 'Invalid "attachmentRefs"' });
     }
+    const attachmentImportResults = await verifyHermesAttachmentImportResultsProvenance(
+      agent,
+      extractionStatus,
+      payload.attachmentImportResults,
+    );
+    if (payload.attachmentImportResults != null && attachmentImportResults === undefined) {
+      return jsonResponse(res, 400, { error: 'Invalid "attachmentImportResults"' });
+    }
+    const verifiedPayload = withVerifiedAttachmentImportContextEntries(payload, attachmentImportResults);
 
     const targets = getHermesChannelTargets(config);
     let lastFailure: { status?: number; details?: string; offline?: boolean } | null = null;
@@ -86,8 +114,8 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
 
       try {
         const forwardBody = target.protocol === 'hermes-openai'
-          ? buildHermesOpenAiChatBody(payload, attachmentRefs, requestAgentAddress, false)
-          : buildHermesChannelBody(payload, attachmentRefs, requestAgentAddress);
+          ? buildHermesOpenAiChatBody(verifiedPayload, attachmentRefs, requestAgentAddress, false)
+          : buildHermesChannelBody(verifiedPayload, attachmentRefs, requestAgentAddress);
         const forwardRes = await fetch(target.inboundUrl, {
           method: 'POST',
           headers: buildHermesChannelHeaders(target, bridgeAuthToken, {
@@ -113,10 +141,10 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
           });
         }
         if (target.protocol === 'hermes-openai') {
-          const reply = await readHermesOpenAiReply(forwardRes, payload);
+          const reply = await readHermesOpenAiReply(forwardRes, verifiedPayload);
           const persisted = await persistHermesOpenAiUiTurn(
             ctx,
-            payload,
+            verifiedPayload,
             attachmentRefs,
             reply.text,
             reply.sessionId,
@@ -171,6 +199,15 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
     if (payload.attachmentRefs != null && attachmentRefs === undefined) {
       return jsonResponse(res, 400, { error: 'Invalid "attachmentRefs"' });
     }
+    const attachmentImportResults = await verifyHermesAttachmentImportResultsProvenance(
+      agent,
+      extractionStatus,
+      payload.attachmentImportResults,
+    );
+    if (payload.attachmentImportResults != null && attachmentImportResults === undefined) {
+      return jsonResponse(res, 400, { error: 'Invalid "attachmentImportResults"' });
+    }
+    const verifiedPayload = withVerifiedAttachmentImportContextEntries(payload, attachmentImportResults);
 
     const targets = getHermesChannelTargets(config);
     let lastFailure: { status?: number; details?: string; offline?: boolean } | null = null;
@@ -184,8 +221,8 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
 
       try {
         const forwardBody = target.protocol === 'hermes-openai'
-          ? buildHermesOpenAiChatBody(payload, attachmentRefs, requestAgentAddress, true)
-          : buildHermesChannelBody(payload, attachmentRefs, requestAgentAddress);
+          ? buildHermesOpenAiChatBody(verifiedPayload, attachmentRefs, requestAgentAddress, true)
+          : buildHermesChannelBody(verifiedPayload, attachmentRefs, requestAgentAddress);
         const transportRes = await fetch(target.streamUrl ?? target.inboundUrl, {
           method: 'POST',
           headers: buildHermesChannelHeaders(target, bridgeAuthToken, {
@@ -226,12 +263,12 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
               const streamed = await pipeHermesOpenAiStream(
                 res,
                 (transportRes.body as any).getReader(),
-                payload,
+                verifiedPayload,
                 transportRes,
               );
               const persisted = await persistHermesOpenAiUiTurn(
                 ctx,
-                payload,
+                verifiedPayload,
                 attachmentRefs,
                 streamed.text,
                 streamed.sessionId,
@@ -258,10 +295,10 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
         }
 
         const reply = target.protocol === 'hermes-openai'
-          ? await readHermesOpenAiReply(transportRes, payload)
+          ? await readHermesOpenAiReply(transportRes, verifiedPayload)
           : await transportRes.json();
         const persisted = target.protocol === 'hermes-openai'
-          ? await persistHermesOpenAiUiTurn(ctx, payload, attachmentRefs, reply.text ?? '', reply.sessionId)
+          ? await persistHermesOpenAiUiTurn(ctx, verifiedPayload, attachmentRefs, reply.text ?? '', reply.sessionId)
           : null;
         res.writeHead(200, {
           'Content-Type': 'text/event-stream; charset=utf-8',
@@ -353,6 +390,7 @@ function buildHermesChannelBody(
     identity: payload.identity ?? 'owner',
     ...(payload.sessionId ? { sessionId: payload.sessionId } : {}),
     ...(payload.profile ? { profile: payload.profile } : {}),
+    ...(payload.persistUserMessage ? { persistUserMessage: payload.persistUserMessage } : {}),
     ...(attachmentRefs ? { attachmentRefs } : {}),
     ...(payload.contextEntries ? { contextEntries: payload.contextEntries } : {}),
     ...(payload.contextGraphId ? { contextGraphId: payload.contextGraphId } : {}),
@@ -378,10 +416,41 @@ function buildHermesOpenAiChatBody(
       },
       {
         role: 'user',
-        content: payload.text,
+        content: buildHermesOpenAiUserMessage(payload, attachmentRefs),
       },
     ],
   };
+}
+
+function buildHermesOpenAiUserMessage(
+  payload: HermesChatPayload,
+  attachmentRefs: OpenClawAttachmentRef[] | undefined,
+): string {
+  if (payload.text.trim()) return payload.text;
+  const lines: string[] = [];
+  if (payload.contextGraphId) {
+    lines.push(`Current DKG context graph id: ${formatHermesPromptValue(payload.contextGraphId)}`);
+  }
+  if (payload.contextEntries?.length) {
+    lines.push('Node UI context entries:');
+    for (const entry of payload.contextEntries) {
+      lines.push(`- ${formatHermesPromptValue(entry.label || entry.key)}: ${formatHermesPromptValue(entry.value)}`);
+    }
+  }
+  if (attachmentRefs?.length) {
+    lines.push('Node UI attachment assertion refs:');
+    for (const attachment of attachmentRefs) {
+      lines.push(formatHermesAttachmentPromptLine(attachment));
+    }
+  }
+  return lines.join('\n') || payload.text;
+}
+
+function buildHermesOpenAiPersistedUserMessage(
+  payload: HermesChatPayload,
+  attachmentRefs: OpenClawAttachmentRef[] | undefined,
+): string {
+  return payload.persistUserMessage ?? buildHermesOpenAiUserMessage(payload, attachmentRefs);
 }
 
 function buildHermesNodeUiSystemPrompt(
@@ -406,16 +475,39 @@ function buildHermesNodeUiSystemPrompt(
   if (payload.contextEntries?.length) {
     lines.push('Node UI context entries:');
     for (const entry of payload.contextEntries) {
-      lines.push(`- ${entry.label || entry.key}: ${entry.value}`);
+      lines.push(`- ${formatHermesPromptValue(entry.label || entry.key)}: ${formatHermesPromptValue(entry.value)}`);
     }
   }
   if (attachmentRefs?.length) {
     lines.push('Node UI attachment assertion refs:');
     for (const attachment of attachmentRefs) {
-      lines.push(`- ${attachment.fileName}: ${attachment.assertionUri} (${attachment.contextGraphId})`);
+      lines.push(formatHermesAttachmentPromptLine(attachment));
     }
+    lines.push('For completed imported attachments, read Markdown with dkg_import_artifact_read_markdown when needed, inspect assertion quads with dkg_assertion_query when useful, and append model-derived triples to the imported assertion with dkg_semantic_enrichment_write.');
+    lines.push('Use dkg_import_artifact_resolve only when you need to re-check artifact metadata. Do not promote or publish enrichment output unless explicitly instructed.');
   }
   return lines.join('\n');
+}
+
+function formatHermesAttachmentPromptLine(attachment: OpenClawAttachmentRef): string {
+  const details = [
+    `assertionUri=${formatHermesPromptValue(attachment.assertionUri)}`,
+    `contextGraphId=${formatHermesPromptValue(attachment.contextGraphId)}`,
+    attachment.assertionName ? `assertionName=${formatHermesPromptValue(attachment.assertionName)}` : null,
+    `fileHash=${formatHermesPromptValue(attachment.fileHash)}`,
+    attachment.detectedContentType ? `contentType=${formatHermesPromptValue(attachment.detectedContentType)}` : null,
+    attachment.extractionStatus ? `status=${formatHermesPromptValue(attachment.extractionStatus)}` : null,
+    attachment.tripleCount != null ? `tripleCount=${attachment.tripleCount}` : null,
+    attachment.rootEntity ? `rootEntity=${formatHermesPromptValue(attachment.rootEntity)}` : null,
+    attachment.mdIntermediateHash ? `mdIntermediateHash=${formatHermesPromptValue(attachment.mdIntermediateHash)}` : null,
+    attachment.markdownHash ? `markdownHash=${formatHermesPromptValue(attachment.markdownHash)}` : null,
+    attachment.markdownForm ? `markdownForm=${formatHermesPromptValue(attachment.markdownForm)}` : null,
+  ].filter((item): item is string => item != null);
+  return `- ${formatHermesPromptValue(attachment.fileName)}: ${details.join('; ')}`;
+}
+
+function formatHermesPromptValue(value: string): string {
+  return JSON.stringify(value.replace(/[\u0000-\u001F\u007F]/g, ' ').replace(/\s+/g, ' ').trim());
 }
 
 async function readHermesOpenAiReply(
@@ -456,7 +548,7 @@ async function persistHermesOpenAiUiTurn(
   });
   const persistPayload = normalizeHermesPersistTurnPayload({
     sessionId,
-    userMessage: payload.text,
+    userMessage: buildHermesOpenAiPersistedUserMessage(payload, verifiedAttachmentRefs),
     assistantReply,
     turnId,
     correlationId: payload.correlationId,

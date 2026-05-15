@@ -10,6 +10,7 @@ interface SyncOnConnectContext {
   refreshMetaSyncedFlags: (contextGraphIds: Iterable<string>) => Promise<void>;
   discoverContextGraphsFromStore: () => Promise<number>;
   syncSharedMemoryFromPeer: (peerId: string, contextGraphIds: string[]) => Promise<number>;
+  syncSharedMemoryOnConnect?: boolean;
   logInfo: (ctx: OperationContext, message: string) => void;
   /**
    * Optional. Called when the peer is reachable but does not currently
@@ -45,6 +46,7 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<v
     refreshMetaSyncedFlags,
     discoverContextGraphsFromStore,
     syncSharedMemoryFromPeer,
+    syncSharedMemoryOnConnect = true,
     logInfo,
   } = context;
 
@@ -94,9 +96,11 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<v
     }
 
     const wsContextGraphIds = getSyncContextGraphs() ?? [];
-    if (wsContextGraphIds.length > 0) {
+    if (syncSharedMemoryOnConnect && wsContextGraphIds.length > 0) {
       const wsSynced = await syncSharedMemoryFromPeer(remotePeer, wsContextGraphIds);
       logInfo(ctx, `Synced ${wsSynced} shared memory triples from peer ${shortPeer}`);
+    } else if (!syncSharedMemoryOnConnect && wsContextGraphIds.length > 0) {
+      logInfo(ctx, `Skipping shared memory sync from peer ${shortPeer} (syncSharedMemoryOnConnect=false)`);
     }
 
     context.onPeerSynced?.(remotePeer);

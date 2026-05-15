@@ -1,3 +1,4 @@
+import { ethers } from 'ethers';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type {
@@ -106,6 +107,12 @@ export function mapLiftRequestToPublishOptions(input: LiftPublishMappingInput): 
     throw new Error('Lift publish mapping only allows allowedPeers when accessPolicy is allowList');
   }
 
+  // Request flags (enqueue-time caller intent) win over resolved hints (per-process defaults).
+  const entityProofs = input.request.entityProofs ?? input.resolved.entityProofs;
+  const publisherNodeIdentityIdOverride = input.request.publisherNodeIdentityIdOverride !== undefined
+    ? BigInt(input.request.publisherNodeIdentityIdOverride)
+    : undefined;
+
   return {
     contextGraphId: input.request.contextGraphId,
     quads: input.resolved.quads,
@@ -113,7 +120,7 @@ export function mapLiftRequestToPublishOptions(input: LiftPublishMappingInput): 
     publisherPeerId,
     accessPolicy,
     allowedPeers: allowedPeers.length > 0 ? allowedPeers : undefined,
-    entityProofs: input.resolved.entityProofs,
+    entityProofs,
     targetGraphUri: input.resolved.targetGraphUri,
     targetMetaGraphUri: input.resolved.targetMetaGraphUri,
     subGraphName: input.request.subGraphName,
@@ -121,7 +128,52 @@ export function mapLiftRequestToPublishOptions(input: LiftPublishMappingInput): 
     onPhase: input.resolved.onPhase,
     receiverSignatureProvider: input.resolved.receiverSignatureProvider,
     publishContextGraphId: input.resolved.publishContextGraphId,
+    ...(publisherNodeIdentityIdOverride !== undefined
+      ? { publisherNodeIdentityIdOverride }
+      : {}),
+    // Publisher's SEAL INTEGRITY PREFLIGHT validates this against its own recomputed merkle.
+    ...(input.request.seal !== undefined
+      ? { precomputedAttestation: liftSealToPrecomputedAttestation(input.request.seal) }
+      : {}),
   };
+}
+
+function liftSealToPrecomputedAttestation(seal: NonNullable<LiftRequest['seal']>): {
+  expectedMerkleRoot: Uint8Array;
+  authorAddress: string;
+  signature: { r: Uint8Array; vs: Uint8Array };
+  schemeVersion: number;
+} {
+  return {
+    expectedMerkleRoot: decodeSealField('merkleRoot', seal.merkleRoot, 32),
+    authorAddress: seal.authorAddress,
+    signature: {
+      r: decodeSealField('signature.r', seal.signature.r, 32),
+      vs: decodeSealField('signature.vs', seal.signature.vs, 32),
+    },
+    schemeVersion: seal.schemeVersion,
+  };
+}
+
+/** Validating hex → bytes decoder with bound length check. */
+function decodeSealField(
+  fieldName: string,
+  hex: string,
+  expectedBytes: number,
+): Uint8Array {
+  let bytes: Uint8Array;
+  try {
+    bytes = ethers.getBytes(hex);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(`Lift seal ${fieldName} contains invalid hex: ${message}`);
+  }
+  if (bytes.length !== expectedBytes) {
+    throw new Error(
+      `Lift seal ${fieldName} must be exactly ${expectedBytes} bytes; got ${bytes.length} (hex: ${hex})`,
+    );
+  }
+  return bytes;
 }
 
 export function prepareAsyncPublishPayload(input: LiftPublishMappingInput): AsyncPreparedPublishPayload {

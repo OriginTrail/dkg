@@ -129,11 +129,27 @@ describe('PanelRight logic helpers', () => {
   });
 
   it('normalizes local-agent message content without leading empty bubble space', () => {
-    expect(normalizeMessageContent('\\n\\nDone.')).toBe('Done.');
+    // Real-newline leading + trailing whitespace gets trimmed.
+    expect(normalizeMessageContent('\n\nDone.')).toBe('Done.');
     expect(normalizeMessageContent('\n\nMatched entry in agent-context / memory:\n\n- fact')).toBe(
       'Matched entry in agent-context / memory:\n\n- fact',
     );
-    expect(normalizeMessageContent('Line one\\n\\nLine two\\n')).toBe('Line one\n\nLine two');
+    expect(normalizeMessageContent('Line one\n\nLine two\n')).toBe('Line one\n\nLine two');
+    // CRLF folds to LF.
+    expect(normalizeMessageContent('Line one\r\nLine two')).toBe('Line one\nLine two');
+  });
+
+  it('preserves literal backslash-n in agent content (Codex CHWpS)', () => {
+    // Earlier code rewrote `\\n` (two chars: backslash + n) into a real
+    // newline to recover from a transport that double-escaped its
+    // strings. With markdown / code-block rendering active that rewrite
+    // corrupts legitimate agent output — JSON, shell snippets, and any
+    // code sample that intentionally contains escaped newlines.
+    // Keep them literal.
+    expect(normalizeMessageContent('{"text":"a\\nb"}')).toBe('{"text":"a\\nb"}');
+    expect(normalizeMessageContent('echo -e "a\\nb"')).toBe('echo -e "a\\nb"');
+    // Mixed: real leading newlines still trim, embedded \\n stays literal.
+    expect(normalizeMessageContent('\n\n{"x":"a\\nb"}\n')).toBe('{"x":"a\\nb"}');
   });
 
   it('resolves conversation state keys and session preservation correctly', () => {
@@ -304,17 +320,103 @@ describe('ConnectedAgentsTab rendering', () => {
       localInput: 'draft',
     });
 
-    expect(markup).toContain('OpenClaw connected');
-    expect(markup).toContain('Refresh');
-    expect(markup).toContain('Disconnect');
-    expect(markup).toContain('Hello <strong>world</strong><br/><code>code</code>');
+    // Connection status + Refresh/Disconnect actions now live inside the
+    // kebab (⋯) menu on the active agent subtab. The popover is rendered on
+    // demand; in the static markup we only see the trigger.
+    expect(markup).toContain('v10-agent-tab-menu-trigger');
+    expect(markup).toContain('More actions for OpenClaw');
+    // PR3: react-markdown + remark-gfm + remark-breaks now renders the
+    // bold-then-inline-code content as proper markup wrapped in a `<p>`.
+    // remark-breaks preserves the single newline as a `<br>` per chat-UI
+    // convention (matches ChatGPT / Claude behavior).
+    expect(markup).toContain('<p class="v10-md-p">Hello <strong>world</strong>');
+    expect(markup).toContain('<code class="v10-md-code">code</code>');
     expect(markup).toContain('spec.md');
-    expect(markup).toContain('Queued - imports on send');
-    expect(markup).toContain('Queued files keep their stored target: Testing.');
-    expect(markup).toContain('Project');
-    expect(markup).toContain('Upload file');
+    // Attachment chip + composer toolbar (PR2 redesign).
+    expect(markup).toContain('v10-attachment-chip');
+    expect(markup).toContain('Queued');
+    expect(markup).toContain('v10-composer-attach');
+    expect(markup).toContain('aria-label="Attach files"');
     expect(markup).toContain('Message OpenClaw');
-    expect(markup).toContain('Send');
+    expect(markup).toContain('aria-label="Send message"');
+  });
+
+  it('only routes assistant bubbles through markdown — user bubbles stay literal (Codex CBnNU / CCyxn / CFNsU / CFXYU)', () => {
+    // User-side content (typed prompts AND synthetic attachment summaries)
+    // must render as plain text so:
+    //  - the transcript shows the exact characters the user sent
+    //    (typing `# heading` doesn't visibly transform the bubble), and
+    //  - a filename like `[spec](https://attacker.com)` embedded in a
+    //    synthetic summary doesn't become a clickable external link
+    //    (CFThj's relative-link guard doesn't cover absolute http(s)).
+    const markup = renderConnectedAgentsTab({
+      localMessages: [
+        {
+          id: 'u1',
+          role: 'user',
+          content: '# heading and [link](https://example.test)',
+          ts: '10:00',
+        },
+        {
+          id: 'a1',
+          role: 'assistant',
+          content: '# real heading',
+          ts: '10:01',
+        },
+      ],
+    });
+    // Assistant bubble → markdown (h1 tag rendered).
+    expect(markup).toContain('<h1 class="v10-md-h1">real heading</h1>');
+    // User bubble → literal text in .v10-chat-plaintext, NOT a heading or
+    // anchor. Pre-wrap preserves the `#` so the user sees what they sent.
+    expect(markup).toContain('v10-chat-plaintext');
+    expect(markup).toContain('# heading and [link](https://example.test)');
+    // Pin down that the user bubble didn't sprout an `<a>` or `<h1>`.
+    // (The assistant `<h1>` above is fine — it's in a different bubble.)
+    const userBubbleStart = markup.indexOf('class="v10-chat-bubble user"');
+    const userBubbleEnd = markup.indexOf('</div>', userBubbleStart);
+    const userBubble = markup.slice(userBubbleStart, userBubbleEnd);
+    expect(userBubble).not.toContain('<a ');
+    expect(userBubble).not.toContain('<h1');
+    expect(userBubble).not.toContain('v10-md-');
+  });
+
+  it('also bypasses markdown for synthesized assistant content (Codex CGpe9)', () => {
+    // Assistant-role messages whose content was locally synthesized
+    // (history fallback from `buildAttachmentSummary`, error / cancel
+    // text) must also skip markdown rendering — they embed raw
+    // filenames or error bodies which, if parsed as markdown, could
+    // synthesize live external links from attacker-controllable
+    // filenames in an assistant-styled bubble.
+    const markup = renderConnectedAgentsTab({
+      localMessages: [
+        {
+          id: 'a-synth',
+          role: 'assistant',
+          content: 'Attachment import result: [spec](https://attacker.example).',
+          ts: '10:00',
+          synthesized: true,
+        },
+        {
+          id: 'a-real',
+          role: 'assistant',
+          content: 'real **bold** text',
+          ts: '10:01',
+        },
+      ],
+    });
+    // Real agent text → markdown.
+    expect(markup).toContain('<strong>bold</strong>');
+    // Synthesized content renders as a plaintext span — its literal
+    // characters (brackets, parens, scheme) survive in the markup.
+    expect(markup).toContain('v10-chat-plaintext');
+    expect(markup).toContain('[spec](https://attacker.example)');
+    // No anchor tag points at the attacker URL anywhere on the page —
+    // markdown was never invoked for the synthesized string. Match
+    // anchors that specifically target the attacker URL (an assistant
+    // bubble for `real **bold**` could legitimately contain other
+    // `<a>` markup from markdown-rendered links, but never this URL).
+    expect(markup).not.toMatch(/<a[^>]*attacker\.example/);
   });
 
   it('renders degraded connected-agent status dots', () => {
@@ -347,7 +449,8 @@ describe('ConnectedAgentsTab rendering', () => {
 
     expect(markup).toContain('Session history');
     expect(markup).toContain('is not currently attached to this node');
-    expect(markup).toContain('session history is available, but there are no stored turns to show yet');
+    // Empty-state copy was rewritten to title+hint (P1 fix from PR1 UX review).
+    expect(markup).toContain('No turns in this session yet.');
   });
 
   // ─── S3 H-AC tests (issue #386, test-matrix.md group H + I) ─────────────
@@ -379,7 +482,7 @@ describe('ConnectedAgentsTab rendering', () => {
     expect(markup).toContain('Connecting...');
   });
 
-  it('H-AC-47: Refresh button is rendered when an integration is connected and selected', () => {
+  it('H-AC-47: Kebab menu trigger is rendered on the active connected agent tab', () => {
     const ready = integration({
       id: 'hermes',
       name: 'Hermes',
@@ -395,8 +498,9 @@ describe('ConnectedAgentsTab rendering', () => {
       selectedIntegration: ready,
       selectedSessionId: 'hermes:dkg-ui',
     });
-    expect(markup).toContain('Refresh');
-    expect(markup).toContain('Disconnect');
+    // Refresh / Disconnect now live inside the kebab popover (open on click).
+    expect(markup).toContain('v10-agent-tab-menu-trigger');
+    expect(markup).toContain('More actions for Hermes');
   });
 
   it('H-AC-47b: Warning chip surfaces lastError on disconnected integration in Connect Another Agent tab', () => {
