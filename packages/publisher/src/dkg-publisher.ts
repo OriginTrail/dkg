@@ -2,7 +2,7 @@ import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@origintrail-official/dkg-chain';
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
-import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphMetaUri, contextGraphAssertionUri, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, DKG_GOSSIP_MAX_MESSAGE_BYTES, type Ed25519Keypair, computePublishACKDigest, buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
+import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphMetaUri, contextGraphAssertionUri, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, DKG_GOSSIP_MAX_MESSAGE_BYTES, type Ed25519Keypair, computePublishACKDigest, buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import type { Publisher, PublishOptions, PublishResult, KAManifestEntry, PhaseCallback } from './publisher.js';
 import { autoPartition } from './auto-partition.js';
@@ -319,6 +319,47 @@ function rejectReservedSubjectPrefixes(quads: Quad[]): void {
       throw new ReservedNamespaceError(q.subject, findReservedSubjectPrefix(q.subject)!);
     }
   }
+}
+
+function rejectUserAuthoredProtocolMetadata(quads: Quad[]): void {
+  rejectReservedSubjectPrefixes(quads);
+  assertNoUserAuthoredTrustLevelQuads(quads);
+}
+
+async function stampTrustLevel(
+  store: TripleStore,
+  graph: string,
+  subjects: Iterable<string>,
+  level: TrustLevel,
+): Promise<void> {
+  const quads = buildTrustLevelQuads(subjects, level, graph) as Quad[];
+  for (const quad of quads) {
+    await store.deleteByPattern({
+      graph: quad.graph,
+      subject: quad.subject,
+      predicate: TRUST_LEVEL_PREDICATE,
+    });
+  }
+  if (quads.length > 0) {
+    await store.insert(quads);
+  }
+}
+
+function collectTrustSubjectsForRoots(
+  quads: Iterable<Pick<Quad, 'subject'>>,
+  roots: Iterable<string>,
+): string[] {
+  const rootSet = new Set([...roots].filter(Boolean));
+  const subjects = new Set(rootSet);
+  for (const quad of quads) {
+    for (const root of rootSet) {
+      if (quad.subject === root || quad.subject.startsWith(`${root}/.well-known/genid/`)) {
+        subjects.add(quad.subject);
+        break;
+      }
+    }
+  }
+  return [...subjects];
 }
 
 export class DKGPublisher implements Publisher {
@@ -747,7 +788,7 @@ export class DKGPublisher implements Publisher {
     // spec `19_MARKDOWN_CONTENT_TYPE.md §10.2`. Short-circuit so a
     // reserved-namespace violation cannot be masked by a lock timeout
     // or subject-level validation error downstream.
-    rejectReservedSubjectPrefixes(quads);
+    rejectUserAuthoredProtocolMetadata(quads);
     const subjects = [...new Set(quads.map(q => q.subject))];
     const lockPrefix = options.subGraphName ? `${contextGraphId}\0${options.subGraphName}` : contextGraphId;
     const lockKeys = subjects.map(s => `${lockPrefix}\0${s}`);
@@ -1009,7 +1050,7 @@ export class DKGPublisher implements Publisher {
     // CAS condition check (which could otherwise mask the namespace
     // violation with a StaleWriteError). Short-circuit per
     // `19_MARKDOWN_CONTENT_TYPE.md §10.2`.
-    rejectReservedSubjectPrefixes(quads);
+    rejectUserAuthoredProtocolMetadata(quads);
     for (const cond of options.conditions) {
       assertSafeIri(cond.subject);
       assertSafeIri(cond.predicate);
@@ -1176,8 +1217,9 @@ export class DKGPublisher implements Publisher {
     }
 
     const result = await this.store.query(sparql);
-    const quads: Quad[] =
-      result.type === 'quads' ? result.quads : [];
+    const quads: Quad[] = result.type === 'quads'
+      ? result.quads.filter((q) => !isTrustLevelQuad(q))
+      : [];
 
     if (quads.length === 0) {
       throw new Error(`No quads in shared memory for context graph ${contextGraphId} matching selection`);
@@ -1316,8 +1358,25 @@ export class DKGPublisher implements Publisher {
         ) {
           const storedQuads = publishResult.publicQuads.map(q => ({ ...q, graph: defaultDataGraph }));
           await this.store.insert(storedQuads.map(q => ({ ...q, graph: ctxDataGraph })));
+          const trustSubjects = collectTrustSubjectsForRoots(
+            storedQuads,
+            publishResult.kaManifest.map((ka) => ka.rootEntity),
+          );
+          await stampTrustLevel(
+            this.store,
+            ctxDataGraph,
+            trustSubjects,
+            TrustLevel.SelfAttested,
+          );
           if (ctxGraphId) {
             await this.store.delete(storedQuads);
+            for (const subject of trustSubjects) {
+              await this.store.deleteByPattern({
+                graph: defaultDataGraph,
+                subject,
+                predicate: TRUST_LEVEL_PREDICATE,
+              });
+            }
           }
         }
 
@@ -1541,8 +1600,8 @@ export class DKGPublisher implements Publisher {
     // `fromSharedMemory` retains its V10 ACK-path semantic
     // independently.
     if (!isInternalOrigin(options)) {
-      rejectReservedSubjectPrefixes(quads);
-      if (privateQuads.length > 0) rejectReservedSubjectPrefixes(privateQuads);
+      rejectUserAuthoredProtocolMetadata(quads);
+      if (privateQuads.length > 0) rejectUserAuthoredProtocolMetadata(privateQuads);
     }
     const ctx: OperationContext = operationCtx ?? createOperationContext('publish');
     const effectiveAccessPolicy = accessPolicy ?? (privateQuads.length > 0 ? 'ownerOnly' : 'public');
@@ -2254,6 +2313,15 @@ export class DKGPublisher implements Publisher {
           );
         }
         await this.store.insert(confirmedQuads);
+        await stampTrustLevel(
+          this.store,
+          dataGraph,
+          collectTrustSubjectsForRoots(
+            normalizedQuads,
+            manifestEntries.map((entry) => entry.rootEntity),
+          ),
+          TrustLevel.SelfAttested,
+        );
 
         // Agent authorship proof (spec §9.0.6): sign keccak256(merkleRoot) and store in _meta
         try {
@@ -2395,8 +2463,8 @@ export class DKGPublisher implements Publisher {
     // is a forward-looking safety net — the common path is always
     // guarded.
     if (!isInternalOrigin(options)) {
-      rejectReservedSubjectPrefixes(quads);
-      if (privateQuads.length > 0) rejectReservedSubjectPrefixes(privateQuads);
+      rejectUserAuthoredProtocolMetadata(quads);
+      if (privateQuads.length > 0) rejectUserAuthoredProtocolMetadata(privateQuads);
     }
     const ctx: OperationContext = operationCtx ?? createOperationContext('publish');
     let publisherContextGraphId: bigint | undefined;
@@ -3004,7 +3072,7 @@ export class DKGPublisher implements Publisher {
     }));
     // Round 9 Bug 25: reject user-authored quads whose subject is in a
     // protocol-reserved URN namespace. See RESERVED_SUBJECT_PREFIXES above.
-    rejectReservedSubjectPrefixes(quads);
+    rejectUserAuthoredProtocolMetadata(quads);
     await this.store.insert(quads);
   }
 
@@ -3097,7 +3165,9 @@ export class DKGPublisher implements Publisher {
     // semantically equivalent to `urn:dkg:file:...` and must be
     // filtered identically. See the helper's docstring for the full
     // argument.
-    quadsToPromote = quadsToPromote.filter((q) => !isReservedSubject(q.subject));
+    quadsToPromote = quadsToPromote.filter(
+      (q) => !isReservedSubject(q.subject) && !isTrustLevelQuad(q),
+    );
 
     if (opts?.entities && opts.entities !== 'all') {
       const entitySet = new Set(opts.entities);

@@ -6,6 +6,103 @@ import { CodeBlock } from './CodeBlock.js';
 
 interface MarkdownMessageProps {
   content: string;
+  /** When true, a blinking caret is rendered inline after the last
+   *  streamed text node (not as a block sibling below the content). */
+  streaming?: boolean;
+}
+
+/**
+ * rehype transform that appends an inline `<span class="v10-chat-cursor">`
+ * immediately after the last rendered text node, so the streaming caret
+ * sits right after the last streamed glyph regardless of markdown
+ * structure (end of a paragraph, list item, table cell, …) instead of
+ * orphaning onto its own line below the block.
+ *
+ * Chosen over a sentinel character injected into the markdown source
+ * (the original plan): a tree transform cannot leak a stray glyph into
+ * visible text if parsing splits unexpectedly, and it's equally
+ * structure-independent.
+ *
+ * Text inside a fenced code block is skipped: those nodes are rebuilt
+ * from the raw AST by the `pre`/`CodeBlock` renderer, so an injected
+ * sibling there would be dropped anyway. While a stream is momentarily
+ * ending inside an unclosed fence the caret is simply not shown that
+ * frame — transient and acceptable.
+ */
+function rehypeStreamingCaret() {
+  return (tree: unknown): void => {
+    // The caret must follow the *last rendered content* in document
+    // order, not merely the last text node. `tail` records what that
+    // trailing content is:
+    //   'text' — injectable inline text → splice the caret right there
+    //   'code' — a fenced block (rebuilt by CodeBlock, a spliced
+    //            sibling is dropped) → suppress the caret entirely
+    //            (ChatGPT parity, ux-lead-approved no-caret-in-code)
+    //   'leaf' — a non-text leaf (img / hr / br): no text to sit in, so
+    //            append a trailing caret so the turn doesn't look
+    //            finished while still streaming
+    //   'none' — nothing renderable yet (empty content is handled
+    //            upstream by the "Thinking…" indicator before this runs)
+    // This generalises the earlier `<pre>`-only stale-anchor guard to
+    // every non-text tail (Codex: trailing image / hr / hard break).
+    type Tail = 'none' | 'text' | 'code' | 'leaf';
+    let tail: Tail = 'none';
+    let target: { siblings: unknown[]; index: number } | null = null;
+    const LEAF_TAGS = new Set(['img', 'hr', 'br']);
+    const walk = (node: { children?: unknown[] }, inCode: boolean): void => {
+      const children = node.children;
+      if (!Array.isArray(children)) return;
+      for (let i = 0; i < children.length; i++) {
+        const child = children[i] as {
+          type?: string;
+          value?: unknown;
+          tagName?: string;
+          children?: unknown[];
+        };
+        if (
+          child.type === 'text' &&
+          typeof child.value === 'string' &&
+          // Whitespace-only nodes are hast's inter-block `\n`; ignore
+          // them so a trailing one isn't taken as the last content.
+          child.value.trim().length > 0
+        ) {
+          if (inCode) {
+            tail = 'code';
+          } else {
+            target = { siblings: children, index: i };
+            tail = 'text';
+          }
+        } else if (child.type === 'element') {
+          const tag = child.tagName;
+          if (tag === 'pre') {
+            tail = 'code';
+            walk(child, true);
+          } else if (tag && LEAF_TAGS.has(tag)) {
+            tail = 'leaf';
+          } else {
+            // Inline code is a bare `<code>` (no `<pre>`): its text
+            // must stay eligible, so don't force inCode here.
+            walk(child, inCode);
+          }
+        }
+      }
+    };
+    const root = tree as { children?: unknown[] };
+    walk(root, false);
+    const caret = {
+      type: 'element',
+      tagName: 'span',
+      properties: { className: ['v10-chat-cursor'] },
+      children: [],
+    };
+    if (tail === 'text' && target) {
+      const { siblings, index } = target;
+      siblings.splice(index + 1, 0, caret);
+    } else if (tail === 'leaf' && Array.isArray(root.children)) {
+      root.children.push(caret);
+    }
+    // tail 'code' / 'none': intentionally no caret.
+  };
 }
 
 // Chat content is untrusted. Relative hrefs (`/admin`, `../foo`, `#section`)
@@ -21,11 +118,12 @@ function classifyHref(href: string | undefined): 'http' | 'mailto' | 'inert' {
   return 'inert';
 }
 
-export function MarkdownMessage({ content }: MarkdownMessageProps) {
+export function MarkdownMessage({ content, streaming }: MarkdownMessageProps) {
   return (
     <div className="v10-md">
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkBreaks]}
+        rehypePlugins={streaming ? [rehypeStreamingCaret] : []}
         components={{
           // Agent output is untrusted. The default `img` renderer would fetch
           // arbitrary URLs (`![pixel](https://attacker.example/x.png)`),

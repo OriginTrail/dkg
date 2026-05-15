@@ -56,6 +56,7 @@ describe('P-8: VerifyCollector rejects single-voter promotion (requiredSignature
   const CG_ON_CHAIN = 42n;
   const VERIFIED_ID = 1n;
   const BATCH_ID = 7n;
+  const VALID_TIMEOUT_MS = 1_000;
   const merkleRoot = ethers.getBytes(
     ethers.keccak256(ethers.toUtf8Bytes('p8-verify-root')),
   );
@@ -93,7 +94,7 @@ describe('P-8: VerifyCollector rejects single-voter promotion (requiredSignature
         entities: ['urn:test:p8:entity'],
         proposerSignature,
         requiredSignatures: 2,
-        timeoutMs: 500,
+        timeoutMs: VALID_TIMEOUT_MS,
       }),
     ).rejects.toThrow(/verify_no_peers|verify_insufficient/);
   });
@@ -119,7 +120,7 @@ describe('P-8: VerifyCollector rejects single-voter promotion (requiredSignature
         entities: ['urn:test:p8:entity'],
         proposerSignature,
         requiredSignatures: 4,
-        timeoutMs: 500,
+        timeoutMs: VALID_TIMEOUT_MS,
       }),
     ).rejects.toThrow(/insufficient_peers/);
   });
@@ -149,9 +150,9 @@ describe('P-8: VerifyCollector rejects single-voter promotion (requiredSignature
         entities: ['urn:test:p8:entity'],
         proposerSignature,
         requiredSignatures: 2,
-        timeoutMs: 200,
+        timeoutMs: VALID_TIMEOUT_MS,
       }),
-    ).rejects.toThrow(/verify_(timeout|insufficient)/);
+    ).rejects.toThrow(/verify_timeout/);
   }, 15000);
 
   it('requiredSignatures=2 with 1 peer that signs for a DIFFERENT address is not counted (dedup by address)', async () => {

@@ -33,4 +33,14 @@ describe('buildEndorsementQuads', () => {
     const quads = buildEndorsementQuads('0x1', 'ual:1', 'my-project');
     expect(quads[0].graph).toBe('did:dkg:context-graph:my-project');
   });
+
+  it('rejects unsafe RDF terms before building endorsement quads', () => {
+    expect(() =>
+      buildEndorsementQuads('0x1', 'did:dkg:asset:1> } INSERT DATA { ?s ?p ?o } #', 'my-project'),
+    ).toThrow(/Unsafe or empty IRI value/);
+
+    expect(() =>
+      buildEndorsementQuads('0x1', 'did:dkg:asset:1', 'bad>graph'),
+    ).toThrow(/Unsafe or empty IRI value/);
+  });
 });

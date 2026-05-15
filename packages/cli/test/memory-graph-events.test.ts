@@ -379,9 +379,55 @@ describe('daemon memory_graph_changed route emissions', () => {
     expect(ctx.tracker.complete).toHaveBeenCalledWith(expect.anything(), { tripleCount: 2 });
   });
 
+  it('keeps implicit same-graph publishes out of the remap path', async () => {
+    const publishFromSharedMemory = vi.fn().mockResolvedValue({
+      kcId: 'kc-1',
+      status: 'confirmed',
+      kaManifest: [{ tokenId: 1n, rootEntity: 'urn:root' }],
+      publicQuads: [{ subject: 'urn:root', predicate: 'urn:p', object: 'urn:o', graph: 'urn:g' }],
+    });
+    const getContextGraphOnChainId = vi.fn().mockResolvedValue('7');
+    const ctx = createContext('/api/shared-memory/publish', {
+      contextGraphId: 'project-a',
+      selection: ['urn:root'],
+    }, {
+      agent: { publishFromSharedMemory, getContextGraphOnChainId } as unknown as RequestContext['agent'],
+    });
+
+    await handleMemoryRoutes(ctx);
+
+    expect((ctx.res as unknown as { statusCode: number }).statusCode).toBe(200);
+    expect(getContextGraphOnChainId).not.toHaveBeenCalled();
+    expect(publishFromSharedMemory.mock.calls[0][2]).not.toHaveProperty('contextGraphId');
+  });
+
+  it('still forwards explicit publishContextGraphId as a remap request', async () => {
+    const publishFromSharedMemory = vi.fn().mockResolvedValue({
+      kcId: 'kc-1',
+      status: 'confirmed',
+      kaManifest: [{ tokenId: 1n, rootEntity: 'urn:root' }],
+      publicQuads: [{ subject: 'urn:root', predicate: 'urn:p', object: 'urn:o', graph: 'urn:g' }],
+    });
+    const ctx = createContext('/api/shared-memory/publish', {
+      contextGraphId: 'project-a',
+      publishContextGraphId: '7',
+      selection: ['urn:root'],
+    }, {
+      agent: { publishFromSharedMemory } as unknown as RequestContext['agent'],
+    });
+
+    await handleMemoryRoutes(ctx);
+
+    expect((ctx.res as unknown as { statusCode: number }).statusCode).toBe(200);
+    expect(publishFromSharedMemory.mock.calls[0][2]).toMatchObject({
+      contextGraphId: '7',
+    });
+    expect(responseBody(ctx)).toMatchObject({ publishContextGraphId: '7' });
+  });
+
   it('emits VM refresh events after verified-memory verification', async () => {
     const emitMemoryGraphChanged = vi.fn();
-    const verify = vi.fn().mockResolvedValue({ verified: true });
+    const verify = vi.fn().mockResolvedValue({ verified: true, status: 'verified' });
     const ctx = createContext('/api/verify', {
       contextGraphId: 'project-a',
       verifiedMemoryId: 'vm-1',
@@ -406,6 +452,74 @@ describe('daemon memory_graph_changed route emissions', () => {
       contextGraphId: 'project-a',
       layers: ['vm'],
       operation: 'verified_memory_updated',
+      source: 'api',
+    });
+  });
+
+  it('returns 409 and emits WM refresh events for partial verification metadata', async () => {
+    const emitMemoryGraphChanged = vi.fn();
+    const verify = vi.fn().mockResolvedValue({
+      verifiedMemoryId: 'vm-1',
+      signers: ['0x0000000000000000000000000000000000000001'],
+      status: 'partial',
+      trustLevel: 2,
+    });
+    const ctx = createContext('/api/verify', {
+      contextGraphId: 'project-a',
+      verifiedMemoryId: 'vm-1',
+      batchId: '42',
+    }, {
+      agent: { verify } as unknown as RequestContext['agent'],
+      emitMemoryGraphChanged,
+    });
+
+    await handleQueryRoutes(ctx);
+
+    expect((ctx.res as unknown as { statusCode: number }).statusCode).toBe(409);
+    expect(responseBody(ctx)).toMatchObject({
+      batchId: '42',
+      status: 'partial',
+      verifiedMemoryId: 'vm-1',
+      error: expect.stringContaining('partial trust metadata'),
+    });
+    expect(emitMemoryGraphChanged).toHaveBeenCalledWith({
+      contextGraphId: 'project-a',
+      layers: ['wm'],
+      operation: 'trust_metadata_updated',
+      source: 'api',
+    });
+  });
+
+  it('returns 409 for no-quorum verification without claiming a VM write', async () => {
+    const emitMemoryGraphChanged = vi.fn();
+    const verify = vi.fn().mockResolvedValue({
+      verifiedMemoryId: 'vm-1',
+      signers: [],
+      status: 'no_quorum',
+      trustLevel: 0,
+    });
+    const ctx = createContext('/api/verify', {
+      contextGraphId: 'project-a',
+      verifiedMemoryId: 'vm-1',
+      batchId: '42',
+    }, {
+      agent: { verify } as unknown as RequestContext['agent'],
+      emitMemoryGraphChanged,
+    });
+
+    await handleQueryRoutes(ctx);
+
+    expect((ctx.res as unknown as { statusCode: number }).statusCode).toBe(409);
+    expect(responseBody(ctx)).toMatchObject({
+      batchId: '42',
+      status: 'no_quorum',
+      verifiedMemoryId: 'vm-1',
+      error: expect.stringContaining('no verified memory was written'),
+    });
+    expect(emitMemoryGraphChanged).toHaveBeenCalledWith({
+      contextGraphId: 'project-a',
+      layers: ['wm'],
+      operation: 'trust_metadata_updated',
       source: 'api',
     });
   });

@@ -20,9 +20,27 @@
  */
 import { describe, it, expect, afterAll } from 'vitest';
 import { DKGAgent } from '../src/index.js';
-import { createEVMAdapter, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 
 function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
+
+async function waitFor(
+  predicate: () => boolean,
+  timeoutMs = 5_000,
+  intervalMs = 50,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await sleep(intervalMs);
+  }
+  throw new Error('Timed out waiting for peer connection state');
+}
+
+function isConnectedTo(agent: DKGAgent, peerId: string): boolean {
+  return agent.node.libp2p.getConnections().some(
+    (c: any) => c.remotePeer.toString() === peerId,
+  );
+}
 
 describe('DHT-resolved peer dial (V10 invite redemption)', () => {
   let nodeA: DKGAgent | null = null;
@@ -39,15 +57,15 @@ describe('DHT-resolved peer dial (V10 invite redemption)', () => {
       name: 'CuratorA',
       framework: 'DKG',
       listenPort: 0,
+      listenHost: '127.0.0.1',
       skills: [],
-      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     nodeB = await DKGAgent.create({
       name: 'JoinerB',
       framework: 'DKG',
       listenPort: 0,
+      listenHost: '127.0.0.1',
       skills: [],
-      chainAdapter: createEVMAdapter(HARDHAT_KEYS.REC1_OP),
     });
     await nodeA.start();
     await nodeB.start();
@@ -68,17 +86,11 @@ describe('DHT-resolved peer dial (V10 invite redemption)', () => {
     // Disconnect, then redial via peer id only — the peer's addresses
     // must be resolved via peerRouting (peerStore-cached) without the
     // caller passing a multiaddr.
-    for (const conn of nodeB.node.libp2p.getConnections()) {
-      try { await conn.close(); } catch { /* best-effort */ }
-    }
-    await sleep(200);
+    await nodeB.node.libp2p.hangUp(nodeA.node.libp2p.peerId);
+    await waitFor(() => !isConnectedTo(nodeB!, nodeA!.peerId));
 
     await nodeB.connectToPeerId(nodeA.peerId);
-
-    const reconnected = nodeB.node.libp2p.getConnections().some(
-      (c: any) => c.remotePeer.toString() === nodeA!.peerId,
-    );
-    expect(reconnected).toBe(true);
+    await waitFor(() => isConnectedTo(nodeB!, nodeA!.peerId));
   }, 30000);
 
   it('throws INVALID_PEER_ID for malformed input', async () => {

@@ -106,6 +106,14 @@ function renderConnectedAgentsTab(overrides: Record<string, unknown> = {}) {
       { id: 'testing', name: 'Testing' },
       { id: 'agents', name: 'Agents' },
     ],
+    // ConnectedAgentsTab is presentational; the container derives this
+    // membership-filtered subset (covered by contextGraphSidebar
+    // computeSelectableProjects tests). Mirror availableProjects so the
+    // existing option-rendering assertions are unaffected.
+    selectableProjects: [
+      { id: 'testing', name: 'Testing' },
+      { id: 'agents', name: 'Agents' },
+    ],
     projectsLoading: false,
     onSelectProject: noop,
     attachments: [],
@@ -496,6 +504,33 @@ describe('ConnectedAgentsTab rendering', () => {
     // Spinner / send-arrow labels are gone in this state.
     expect(markup).not.toContain('aria-label="Send message"');
     expect(markup).not.toContain('aria-label="Uploading attachments"');
+  });
+
+  it('shows the animated "Thinking…" indicator while an assistant turn is streaming with no content yet (PR5)', () => {
+    const markup = renderConnectedAgentsTab({
+      localMessages: [
+        { id: 'u', role: 'user', content: 'give me some friday ideas', ts: '10:00' },
+        { id: 'a', role: 'assistant', content: '', ts: '10:01', streaming: true },
+      ],
+      localSending: true,
+    });
+    expect(markup).toContain('v10-chat-thinking');
+    expect(markup).toContain('Thinking');
+    expect(markup).toContain('role="status"');
+    // No inline caret yet — there is no text node to anchor it to.
+    expect(markup).not.toContain('v10-chat-cursor');
+  });
+
+  it('drops the "Thinking…" indicator once the first token arrives (hands off to inline caret)', () => {
+    const markup = renderConnectedAgentsTab({
+      localMessages: [
+        { id: 'u', role: 'user', content: 'hi', ts: '10:00' },
+        { id: 'a', role: 'assistant', content: 'The Friday ideas are', ts: '10:01', streaming: true },
+      ],
+      localSending: true,
+    });
+    expect(markup).not.toContain('v10-chat-thinking');
+    expect(markup).toContain('v10-chat-cursor');
   });
 
   it('renders assistant bubble with no surface styling (PR4 — full-width no-bubble layout)', () => {

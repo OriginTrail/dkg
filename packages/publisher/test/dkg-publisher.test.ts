@@ -1,7 +1,12 @@
 import { describe, it, expect, beforeEach, beforeAll, afterAll, afterEach } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
-import { TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg-core';
+import {
+  TRUST_LEVEL_PREDICATE,
+  TrustLevel,
+  TypedEventBus,
+  generateEd25519Keypair,
+} from '@origintrail-official/dkg-core';
 import { DKGPublisher, RESERVED_SUBJECT_PREFIXES } from '../src/dkg-publisher.js';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
@@ -106,7 +111,18 @@ describe('DKGPublisher', () => {
     expect(result.status).toBe('confirmed');
 
     const count = await store.countQuads(GRAPH);
-    expect(count).toBe(2);
+    expect(count).toBe(3);
+    const trust = await store.query(
+      `SELECT ?level WHERE {
+        GRAPH <${GRAPH}> {
+          <${ENTITY}> <${TRUST_LEVEL_PREDICATE}> ?level .
+        }
+      }`,
+    );
+    expect(trust.type).toBe('bindings');
+    expect(trust.type === 'bindings' ? trust.bindings.map((row) => row.level) : []).toEqual([
+      `"${TrustLevel.SelfAttested}"^^<http://www.w3.org/2001/XMLSchema#integer>`,
+    ]);
 
     const metaGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
     const metaCount = await store.countQuads(metaGraph);
@@ -763,4 +779,3 @@ describe('DKGPublisher', () => {
     });
   });
 });
-

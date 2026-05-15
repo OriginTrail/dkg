@@ -326,3 +326,165 @@ describe('MarkdownMessage rendering', () => {
     await unmount();
   });
 });
+
+describe('MarkdownMessage streaming caret (PR5 item C)', () => {
+  beforeEach(() => {
+    (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+    document.body.innerHTML = '';
+    vi.resetModules();
+    shikiImportCount = 0;
+  });
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  async function renderStreaming(
+    content: string,
+    streaming: boolean,
+  ): Promise<{ container: HTMLDivElement; unmount: () => Promise<void> }> {
+    const { MarkdownMessage } = await import('../src/ui/components/chat/MarkdownMessage.js');
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(React.createElement(MarkdownMessage, { content, streaming }));
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    return {
+      container,
+      unmount: async () => {
+        await act(async () => { root.unmount(); });
+        container.remove();
+      },
+    };
+  }
+
+  it('renders no caret when not streaming', async () => {
+    const { container, unmount } = await renderStreaming('# Title\n\n- a\n- b', false);
+    expect(container.querySelectorAll('.v10-chat-cursor').length).toBe(0);
+    await unmount();
+  });
+
+  it('injects exactly one caret inside the last text node, not as a block sibling', async () => {
+    const { container, unmount } = await renderStreaming('# Title\n\nFirst para\n\n- a\n- b', true);
+    const carets = container.querySelectorAll('.v10-chat-cursor');
+    expect(carets.length).toBe(1);
+    // The caret lives inside the LAST list item (last rendered text),
+    // not as a trailing child of `.v10-md`.
+    const lastLi = container.querySelector('.v10-md-li:last-child');
+    expect(lastLi?.querySelector('.v10-chat-cursor')).toBeTruthy();
+    const md = container.querySelector('.v10-md')!;
+    expect(md.lastElementChild?.classList.contains('v10-chat-cursor')).toBe(false);
+    await unmount();
+  });
+
+  it('places the caret at the end of a trailing paragraph', async () => {
+    const { container, unmount } = await renderStreaming('Hello world', true);
+    const p = container.querySelector('.v10-md-p');
+    expect(p?.querySelector('.v10-chat-cursor')).toBeTruthy();
+    // Visible text is unaffected — no sentinel glyph leaks.
+    expect(p?.textContent).toBe('Hello world');
+    await unmount();
+  });
+
+  it('injects the caret into a trailing INLINE code span (not skipped like fenced code)', async () => {
+    // Regression for Codex PR5: inline code is a bare <code> with no
+    // <pre> ancestor — a stream ending in `inline` must still show the
+    // caret, otherwise the message looks finished early.
+    const { container, unmount } = await renderStreaming('run `npm test`', true);
+    const inlineCode = container.querySelector('code.v10-md-code');
+    expect(inlineCode).toBeTruthy();
+    expect(inlineCode?.querySelector('.v10-chat-cursor')).toBeTruthy();
+    expect(container.querySelectorAll('.v10-chat-cursor').length).toBe(1);
+    await unmount();
+  });
+
+  it('suppresses the caret (not parked at stale prose) when a fenced block trails prose', async () => {
+    // Regression for Codex PR5: prose then a trailing fenced code block.
+    // The last non-code text target is the *earlier* prose; splicing the
+    // caret there would park it mid-message before the code block. The
+    // caret must be fully suppressed in that case (ChatGPT parity /
+    // ux-lead-approved no-caret-while-tail-is-code), NOT left on the
+    // stale prose.
+    const { container, unmount } = await renderStreaming('Here is the code:\n\n```\nx = 1\n```', true);
+    const fenced = container.querySelector('.v10-md-pre');
+    expect(fenced).toBeTruthy();
+    // Zero carets anywhere — and specifically none parked in the prose.
+    expect(container.querySelectorAll('.v10-chat-cursor').length).toBe(0);
+    const prose = container.querySelector('.v10-md-p');
+    expect(prose?.textContent).toContain('Here is the code:');
+    expect(prose?.querySelector('.v10-chat-cursor')).toBeFalsy();
+    await unmount();
+  });
+
+  it('still places the caret in the last prose when code is NOT the trailing block', async () => {
+    // Inverse guard: code earlier, prose after → caret belongs in the
+    // trailing prose (trailingCode reset by the later text target).
+    const { container, unmount } = await renderStreaming('```\nx = 1\n```\n\nDone explaining', true);
+    const carets = container.querySelectorAll('.v10-chat-cursor');
+    expect(carets.length).toBe(1);
+    const paras = [...container.querySelectorAll('.v10-md-p')];
+    const last = paras[paras.length - 1];
+    expect(last?.textContent).toContain('Done explaining');
+    expect(last?.querySelector('.v10-chat-cursor')).toBeTruthy();
+    await unmount();
+  });
+
+  it('falls back to a trailing caret when the stream ends with no text node (image)', async () => {
+    // Regression for Codex PR5: a streamed message ending in an image
+    // has no HAST text node, so the per-text-node anchor finds nothing.
+    // Without the fallback the turn looks finished while still
+    // streaming. Expect exactly one caret, appended after the content.
+    const { container, unmount } = await renderStreaming('![diagram](https://example.com/x.png)', true);
+    expect(container.querySelector('.v10-md-image-placeholder')).toBeTruthy();
+    expect(container.querySelectorAll('.v10-chat-cursor').length).toBe(1);
+    await unmount();
+  });
+
+  it('falls back to a trailing caret when an image follows earlier prose (not parked at prose)', async () => {
+    // Codex generalization: a non-text tail (image) after prose left the
+    // caret stale on the earlier prose. Expect one caret, not in prose.
+    const { container, unmount } = await renderStreaming(
+      'See diagram\n\n![img](https://example.com/x.png)',
+      true,
+    );
+    expect(container.querySelectorAll('.v10-chat-cursor').length).toBe(1);
+    const prose = container.querySelector('.v10-md-p');
+    expect(prose?.textContent).toContain('See diagram');
+    expect(prose?.querySelector('.v10-chat-cursor')).toBeFalsy();
+    await unmount();
+  });
+
+  it('falls back to a trailing caret when a horizontal rule follows prose', async () => {
+    const { container, unmount } = await renderStreaming('Done\n\n---', true);
+    expect(container.querySelector('.v10-md-hr')).toBeTruthy();
+    expect(container.querySelectorAll('.v10-chat-cursor').length).toBe(1);
+    const prose = container.querySelector('.v10-md-p');
+    expect(prose?.querySelector('.v10-chat-cursor')).toBeFalsy();
+    await unmount();
+  });
+
+  it('keeps the caret in the last text line when a <br> is mid-paragraph (not a tail)', async () => {
+    // remark-breaks turns a single newline into <br>. A mid-paragraph
+    // <br> is followed by more text, so the caret stays inline at the
+    // real end — the leaf tail only triggers when nothing text follows.
+    const { container, unmount } = await renderStreaming('line one\nline two', true);
+    const p = container.querySelector('.v10-md-p');
+    expect(p?.querySelector('.v10-chat-cursor')).toBeTruthy();
+    expect(container.querySelectorAll('.v10-chat-cursor').length).toBe(1);
+    await unmount();
+  });
+
+  it('keeps NO caret for a code-only stream (fallback must not regress the ux-approved behavior)', async () => {
+    // A stream that is only a fenced code block has text, but all of it
+    // is code (rebuilt by CodeBlock). Per ux-lead sign-off this shows
+    // no caret (ChatGPT parity). The image fallback must not leak a
+    // caret here — `sawCodeText` suppresses it.
+    const { container, unmount } = await renderStreaming('```\ncode only\n```', true);
+    expect(container.querySelector('.v10-md-pre')).toBeTruthy();
+    expect(container.querySelectorAll('.v10-chat-cursor').length).toBe(0);
+    await unmount();
+  });
+});

@@ -19,6 +19,7 @@ import {
   ENCRYPTED_WORKSPACE_ENVELOPE_TYPE,
   GOSSIP_TYPE_WORKSPACE_PUBLISH,
   SWM_SENDER_KEY_MESSAGE_TYPE,
+  assertNoUserAuthoredTrustLevelQuads,
 } from '@origintrail-official/dkg-core';
 import type { EncryptedWorkspacePayloadMsg, GossipEnvelopeMsg, OperationContext, SwmSenderKeyMessageMsg, WorkspaceCASConditionMsg, WorkspacePublishRequestMsg, WorkspaceRecipientEncryptionKey } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
@@ -312,6 +313,7 @@ export class SharedMemoryHandler {
 
       const nquadsStr = new TextDecoder().decode(nquads);
       const quads = parseSimpleNQuads(nquadsStr);
+      assertNoUserAuthoredTrustLevelQuads(quads);
       onPhase?.('decode', 'end');
 
       const manifestForValidation: KAManifestEntry[] = (manifest ?? []).map((m) => ({

@@ -852,11 +852,6 @@ WHERE {
       let resolvedPublishContextGraphId: string | null = null;
       if (publishContextGraphId != null) {
         resolvedPublishContextGraphId = String(publishContextGraphId);
-      } else if (!subGraphName) {
-        const onChainId = await agent.getContextGraphOnChainId(contextGraphId);
-        if (onChainId && /^\d+$/.test(onChainId)) {
-          resolvedPublishContextGraphId = onChainId;
-        }
       }
       const result = await tracker.trackPhase(ctx, "read-shared-memory", () =>
         agent.publishFromSharedMemory(contextGraphId, sel, {
