@@ -2,6 +2,7 @@ import React, { useMemo, useState, useCallback, useEffect, lazy, Suspense } from
 import type { ReactNode } from 'react';
 import { useFetch } from '../../hooks.js';
 import { api } from '../../api-wrapper.js';
+import { encodeDocTabId } from '../../lib/doc-tab-id.js';
 import {
   listJoinRequests, approveJoinRequest, rejectJoinRequest,
   listParticipants, listAssertions, promoteAssertion,
@@ -1798,7 +1799,7 @@ export function DocumentsList({ entities, contextGraphId }: { entities: MemoryEn
     const fileRef = e.connections.find(c => c.predicate === MARKDOWN_FORM || c.predicate === SOURCE_FILE)?.targetUri;
     const contentType = e.properties.get(SOURCE_CONTENT_TYPE)?.[0] ?? '';
     openTab({
-      id: `doc:${contextGraphId ?? ''}|${fileRef ?? e.uri}|${contentType}`,
+      id: encodeDocTabId(contextGraphId ?? '', fileRef ?? e.uri, contentType),
       label: e.label,
       closable: true,
       icon: '📄',

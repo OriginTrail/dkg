@@ -5,6 +5,7 @@ import { ProjectView } from '../../views/ProjectView.js';
 import { MemoryLayerView } from '../../views/MemoryLayerView.js';
 import { MemoryStackView } from '../../views/MemoryStackView.js';
 import { authHeaders, fileUrl } from '../../api.js';
+import { DOC_TAB_PREFIX, decodeDocTabId } from '../../lib/doc-tab-id.js';
 import { MarkdownMessage } from '../chat/MarkdownMessage.js';
 
 const CLOSE_ICON = (
@@ -318,19 +319,11 @@ function ViewContainer() {
     }
   }
 
-  if (activeTabId.startsWith('doc:')) {
-    // Tab id shape: `doc:<contextGraphId>|<fileRef>|<contentType>` (see
-    // DocumentsList.handleOpenDoc). Split on the first and last `|` so a
-    // context-graph id containing `:` (or even `|`) stays intact: only the
-    // middle segment is the file ref. `fileRef` keeps its full
-    // `urn:dkg:file:keccak256:<hex>` form so the daemon resolves the digest
-    // with the correct algorithm. A legacy id with no `|` falls back to the
-    // whole payload as docRef (the viewer then shows the empty state).
-    const raw = activeTabId.slice('doc:'.length);
-    const firstPipe = raw.indexOf('|');
-    const lastPipe = raw.lastIndexOf('|');
-    const docRef = firstPipe < 0 ? raw : raw.slice(firstPipe + 1, lastPipe);
-    const contentType = firstPipe < 0 ? '' : raw.slice(lastPipe + 1);
+  if (activeTabId.startsWith(DOC_TAB_PREFIX)) {
+    // Tab id shape: `doc:<contextGraphId>|<docRef>|<contentType>`. The
+    // encode/decode contract lives in doc-tab-id.ts (kept pure so it is
+    // unit-testable without mounting React).
+    const { docRef, contentType } = decodeDocTabId(activeTabId);
     return <DocumentViewer docRef={docRef} contentType={contentType} />;
   }
 
