@@ -1,6 +1,7 @@
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { sendSyncRequest } from '../../p2p/sync-transport.js';
+import type { SyncPhase } from '../auth/request-build.js';
 import { getSyncCheckpointKey, type SyncCheckpointStore } from '../checkpoint/state.js';
 
 export interface SyncPageResult {
@@ -17,8 +18,9 @@ interface FetchSyncPagesParams {
   remotePeerId: string;
   contextGraphId: string;
   includeSharedMemory: boolean;
-  phase: 'data' | 'meta';
+  phase: SyncPhase;
   graphUri: string;
+  snapshotRef?: string;
   deadline: number;
   syncPageTimeoutMs: number;
   syncRouterAttempts: number;
@@ -39,7 +41,7 @@ interface FetchSyncPagesParams {
   debugSyncProgress: boolean;
   protocolSync: string;
   checkpointStore: SyncCheckpointStore;
-  buildSyncRequest: (contextGraphId: string, offset: number, limit: number, includeSharedMemory: boolean, remotePeerId: string, phase?: 'data' | 'meta') => Promise<Uint8Array>;
+  buildSyncRequest: (contextGraphId: string, offset: number, limit: number, includeSharedMemory: boolean, remotePeerId: string, phase?: SyncPhase, snapshotRef?: string) => Promise<Uint8Array>;
   parseAndFilter: (nquadsText: string, graphUri: string, contextGraphId: string) => Promise<{ quads: Quad[]; totalQuads: number }>;
   send: (peerId: string, protocolId: string, data: Uint8Array, timeoutMs: number) => Promise<Uint8Array>;
   logWarn: (ctx: OperationContext, message: string) => void;
@@ -55,6 +57,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
     includeSharedMemory,
     phase,
     graphUri,
+    snapshotRef,
     deadline,
     syncPageTimeoutMs,
     syncRouterAttempts,
@@ -74,7 +77,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
   } = params;
 
   const allQuads: Quad[] = [];
-  const checkpointKey = getSyncCheckpointKey(remotePeerId, contextGraphId, includeSharedMemory, phase);
+  const checkpointKey = getSyncCheckpointKey(remotePeerId, contextGraphId, includeSharedMemory, phase, snapshotRef);
   let offset = checkpointStore.get(checkpointKey) ?? 0;
   const resumedFromOffset = offset;
   let bytesReceived = 0;
@@ -101,7 +104,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
       contextGraphId,
       offset,
       protocolId: protocolSync,
-      requestFactory: () => buildSyncRequest(contextGraphId, curOffset, syncPageSize, includeSharedMemory, remotePeerId, phase),
+      requestFactory: () => buildSyncRequest(contextGraphId, curOffset, syncPageSize, includeSharedMemory, remotePeerId, phase, snapshotRef),
       send,
       onRetry: (attempt, delay, err) => {
         logWarn(ctx, `Sync page retry ${attempt}/${syncPageRetryAttempts} for offset ${offset} (delay ${Math.round(delay)}ms): ${err instanceof Error ? err.message : String(err)}`);

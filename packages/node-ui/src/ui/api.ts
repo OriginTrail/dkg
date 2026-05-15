@@ -10,11 +10,13 @@ export function authHeaders(): Record<string, string> {
   return { Authorization: `Bearer ${token}` };
 }
 
-class HttpError extends Error {
+export class HttpError extends Error {
   status: number;
-  constructor(status: number) {
-    super(`HTTP ${status}`);
+  body?: unknown;
+  constructor(status: number, message?: string, body?: unknown) {
+    super(message ?? `HTTP ${status}`);
     this.status = status;
+    this.body = body;
   }
 }
 
@@ -44,7 +46,7 @@ async function post<T>(path: string, body: unknown): Promise<T> {
   if (!res.ok) {
     const errBody = await res.json().catch(() => ({}));
     const msg = (errBody as { error?: string })?.error ?? `HTTP ${res.status}`;
-    throw new Error(msg);
+    throw new HttpError(res.status, msg, errBody);
   }
   return res.json() as Promise<T>;
 }
@@ -249,12 +251,33 @@ export const removeParticipant = (contextGraphId: string, agentAddress: string) 
 export const listParticipants = (contextGraphId: string) =>
   get<{ contextGraphId: string; allowedAgents: string[] }>(`/api/context-graph/${encodeURIComponent(contextGraphId)}/participants`);
 
-// --- Join Request flow (Phase 2: signed requests + approval) ---
-export interface SignedJoinRequest {
-  contextGraphId: string;
+// --- Join Request flow (Phase 2: signed agent delegation) ---
+//
+// A join request now IS a `SignedAgentDelegation` — the agent's
+// signature scoped to `sync:<cgId>` that authorises their hosting node
+// (peer-id and/or operational key) to act on their behalf for that CG.
+// On approval the curator promotes the named delegatee identifiers
+// into the CG allowlist so post-approval sync passes auth without the
+// agent having to co-sign every wire message.
+export interface SignedAgentDelegation {
   agentAddress: string;
-  timestamp: number;
+  scope: string;
+  issuedAtMs: number;
+  expiresAtMs?: number;
+  delegateePeerId?: string;
+  delegateeOpKey?: string;
   signature: string;
+}
+
+// SignJoinResponse is intentionally narrow — `/sign-join` is sign-only
+// (PR #448 review: forwarding lives in `/request-join` to avoid a
+// duplicate-forward bug where the UI was sending the same delegation
+// twice). Delivery status comes back from `submitJoinRequest` instead.
+export interface SignJoinResponse {
+  ok: boolean;
+  contextGraphId: string;
+  delegation: SignedAgentDelegation;
+  agentAddress: string;
 }
 
 export interface PendingJoinRequest {
@@ -266,10 +289,28 @@ export interface PendingJoinRequest {
 }
 
 export const signJoinRequest = (contextGraphId: string) =>
-  post<SignedJoinRequest>(`/api/context-graph/${encodeURIComponent(contextGraphId)}/sign-join`, {});
+  post<SignJoinResponse>(
+    `/api/context-graph/${encodeURIComponent(contextGraphId)}/sign-join`,
+    {},
+  );
 
-export const submitJoinRequest = (contextGraphId: string, req: SignedJoinRequest & { agentName?: string }) =>
-  post<{ ok: boolean; status: string }>(`/api/context-graph/${encodeURIComponent(contextGraphId)}/request-join`, req);
+/**
+ * Daemon's `/request-join` returns `delivered` describing how the
+ * signed delegation was routed:
+ *  - `'local'`  — local node IS the curator; stored locally, no P2P
+ *  - `number`   — count of remote curator peers that returned `ok` for
+ *                 the broadcast/targeted forward (typically `1`)
+ * The 502 path (no curator reachable) throws here via `post()`, so a
+ * resolved response always implies at least one delivery destination.
+ */
+export const submitJoinRequest = (
+  contextGraphId: string,
+  req: { delegation: SignedAgentDelegation; agentName?: string; curatorPeerId?: string },
+) =>
+  post<{ ok: boolean; status: string; delivered: number | 'local'; alreadyMember?: boolean }>(
+    `/api/context-graph/${encodeURIComponent(contextGraphId)}/request-join`,
+    req,
+  );
 
 export const listJoinRequests = (contextGraphId: string) =>
   get<{ contextGraphId: string; requests: PendingJoinRequest[] }>(`/api/context-graph/${encodeURIComponent(contextGraphId)}/join-requests`);
@@ -345,6 +386,7 @@ export const fetchCatchupStatus = (contextGraphId: string) =>
 export interface ImportFileResult {
   assertionUri: string;
   fileHash: string;
+  rootEntity?: string;
   detectedContentType: string;
   extraction: {
     status: 'completed' | 'skipped' | 'failed';
@@ -352,18 +394,21 @@ export interface ImportFileResult {
     triplesWritten?: number;
     provenance?: any;
     error?: string;
-    pipelineUsed?: string;
+    pipelineUsed?: string | null;
+    mdIntermediateHash?: string;
   };
 }
 
 const EXT_TO_MIME: Record<string, string> = {
-  md: 'text/markdown', txt: 'text/plain', csv: 'text/csv',
+  md: 'text/markdown', markdown: 'text/markdown', txt: 'text/plain', csv: 'text/csv',
   json: 'application/json', xml: 'application/xml',
   yaml: 'text/yaml', yml: 'text/yaml',
   pdf: 'application/pdf',
   docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   doc: 'application/msword',
   xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  epub: 'application/epub+zip',
   ttl: 'text/turtle', rdf: 'application/rdf+xml', owl: 'application/rdf+xml',
   html: 'text/html', htm: 'text/html',
   py: 'text/x-python', ts: 'text/typescript', js: 'text/javascript',
@@ -770,6 +815,25 @@ export interface LocalAgentChatAttachmentRef {
   extractionStatus?: 'completed';
   tripleCount?: number;
   rootEntity?: string;
+  mdIntermediateHash?: string;
+  markdownHash?: string;
+  markdownForm?: string;
+}
+
+export interface LocalAgentChatAttachmentImportResult {
+  id?: string;
+  fileName: string;
+  contextGraphId: string;
+  assertionName?: string;
+  assertionUri: string;
+  fileHash: string;
+  detectedContentType: string;
+  extractionStatus: 'skipped';
+  pipelineUsed?: string | null;
+  tripleCount?: number;
+  rootEntity?: string;
+  mdIntermediateHash?: string;
+  error?: string;
 }
 
 export interface LocalAgentChatContextEntry {
@@ -784,7 +848,9 @@ interface LocalAgentChatRequestOptions {
   identity?: string;
   sessionId?: string;
   profile?: string;
+  persistUserMessage?: string;
   attachments?: LocalAgentChatAttachmentRef[];
+  attachmentImportResults?: LocalAgentChatAttachmentImportResult[];
   contextEntries?: LocalAgentChatContextEntry[];
   /**
    * UI-selected project context graph for this turn. Forwarded unchanged as
@@ -864,7 +930,9 @@ function buildLocalAgentChatBody(
     ...(opts?.identity ? { identity: opts.identity } : {}),
     ...(opts?.sessionId ? { sessionId: opts.sessionId } : {}),
     ...(opts?.profile ? { profile: opts.profile } : {}),
+    ...(opts?.persistUserMessage ? { persistUserMessage: opts.persistUserMessage } : {}),
     ...(opts?.attachments?.length ? { attachmentRefs: opts.attachments } : {}),
+    ...(opts?.attachmentImportResults?.length ? { attachmentImportResults: opts.attachmentImportResults } : {}),
     ...(opts?.contextEntries?.length ? { contextEntries: opts.contextEntries } : {}),
     ...(opts?.contextGraphId ? { contextGraphId: opts.contextGraphId } : {}),
   };
@@ -1680,16 +1748,8 @@ export async function fetchLocalAgentHistory(
 export async function streamLocalAgentChat(
   id: string,
   text: string,
-  opts: {
-    correlationId?: string;
-    signal?: AbortSignal;
+  opts: LocalAgentChatRequestOptions & {
     onEvent?: (event: LocalAgentStreamEvent) => void;
-    sessionId?: string;
-    profile?: string;
-    attachments?: LocalAgentChatAttachmentRef[];
-    contextEntries?: LocalAgentChatContextEntry[];
-    /** UI-selected project context graph for this turn (memory scope). */
-    contextGraphId?: string;
   } = {},
 ): Promise<LocalAgentChatResponse> {
   const normalizedId = id.trim().toLowerCase();

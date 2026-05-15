@@ -169,6 +169,39 @@ export class DKGNode {
         D: 4,
         Dlo: 2,
         Dhi: 8,
+        // NOTE — RFC 07 §5.4 ships the constant `dkgGossipMsgId` for
+        // cross-backend dedup, but it is intentionally NOT wired in
+        // here yet. Codex review feedback on PR #501 (round 2) flagged
+        // a real rolling-upgrade hazard: gossipsub puts msgIds into
+        // its IHAVE/IWANT control protocol, so during a rolling
+        // network upgrade old (default upstream `msgIdFnStrictSign`)
+        // and new (`dkgGossipMsgId`) nodes compute different IDs for
+        // the same payload and stop correlating cache entries. Push
+        // delivery still works (the message itself is the same wire
+        // bytes); only the dedup cache fragments, producing extra
+        // IWANT/SERVE round-trips per message until the upgrade
+        // completes. For an isolated devnet that's fine; for a live
+        // mainnet mesh it's wasteful and observable.
+        //
+        // Plan: keep using upstream's default `msgIdFnStrictSign` here
+        // (signed = sha256(from || seqno), unsigned = sha256(data)),
+        // ship `dkgGossipMsgId` and its tests so the constant is
+        // pinned and reviewable, and flip the wiring as part of a
+        // coordinated mesh-wide upgrade — most likely combined with a
+        // gossipsub protocol-version bump so old/new nodes segregate
+        // into separate meshes during the cutover instead of degrading
+        // a shared one.
+        //
+        // Cross-references:
+        //   - The function lives at
+        //     `packages/core/src/network/gossip-msg-id.ts` with the
+        //     full encoding test suite at
+        //     `packages/core/test/gossip-msg-id.test.ts`.
+        //   - The architectural rationale + cutover plan is documented
+        //     in the RFC 07 spec doc `07_IN_PROCESS_PEER_RESOLVER.md`
+        //     §5.4 + Phase 5, which lives in the sibling `dkgv10-spec`
+        //     repository (not in this repo). Re-stated in summary form
+        //     above so the wiring decision is reviewable in-place.
       }),
       dcutr: dcutr(),
     };

@@ -18,7 +18,8 @@
  *                    self-sovereign / unattributed third-party).
  *             Verifies: assertion seals stable across stages, on-chain
  *             author matches expected signer per mode, attribution flows
- *             to the right core, NFT.epochSpent grows.
+ *             to the right core, NFT.windowSpent grows (billing-window
+ *             bookkeeping; chain epoch is incidental).
  *
  *   Phase 3 — Mid-run 7th core. `devnet.sh addnode 7 core` while the test
  *             is running, drive identity registration + stake +
@@ -382,7 +383,8 @@ async function detectDevnet(maxNodes = 6): Promise<DevnetState | null> {
       'function createAccount(uint96) external returns (uint256)',
       'function registerAgent(uint256, address) external',
       'function agentToAccountId(address) view returns (uint256)',
-      'function epochSpent(uint256, uint40) view returns (uint96)',
+      'function windowSpent(uint256, uint40) view returns (uint96)',
+      'function getCurrentBillingWindow(uint256) view returns (uint40)',
     ],
     provider,
   );
@@ -915,7 +917,21 @@ describe('V10 chain — stress + scenario validation', () => {
       await s.eps.getNodeEpochProducedKnowledgeValue(core1.identityId, epochAtStart);
     const beforeEpsCore2: bigint =
       await s.eps.getNodeEpochProducedKnowledgeValue(core2.identityId, epochAtStart);
-    const beforeSpentPca: bigint = await s.nft.epochSpent(pcaAccountId, epochAtStart);
+    // Lazy-settlement bookkeeping uses billing-window index, not chain
+    // epoch. Sum the window at-snapshot plus the next 2 windows so a
+    // long-running stress phase that walks past one or two boundaries
+    // still observes the cumulative draw.
+    const beforeWindow: bigint = BigInt(
+      await s.nft.getCurrentBillingWindow(pcaAccountId),
+    );
+    const windowSpentSum = async (from: bigint, count: bigint): Promise<bigint> => {
+      let sum = 0n;
+      for (let i = 0n; i <= count; i++) {
+        sum += (await s.nft.windowSpent(pcaAccountId, from + i)) as bigint;
+      }
+      return sum;
+    };
+    const beforeSpentPca: bigint = await windowSpentSum(beforeWindow, 2n);
 
     // ── 2d: drain SWM on every core that named-publishes from ─────────────
     // See FINDINGS.md — `publishFromFinalizedAssertion` ignores the named
@@ -1160,11 +1176,19 @@ describe('V10 chain — stress + scenario validation', () => {
       }
     }
 
-    // Attribution to core1 grew + PCA epochSpent grew.
+    // Attribution to core1 grew + PCA windowSpent grew (billing-window
+    // bookkeeping; sum the same window range we sampled at-snapshot so
+    // window crossings during the stress phase are still counted).
     const afterEpsCore1: bigint =
       await s.eps.getNodeEpochProducedKnowledgeValue(core1.identityId, epochAtStart);
     expect(afterEpsCore1).toBeGreaterThan(beforeEpsCore1);
-    const afterSpentPca: bigint = await s.nft.epochSpent(pcaAccountId, epochAtStart);
+    const afterWindow: bigint = BigInt(
+      await s.nft.getCurrentBillingWindow(pcaAccountId),
+    );
+    const widenedSpan = afterWindow > beforeWindow + 2n
+      ? afterWindow - beforeWindow
+      : 2n;
+    const afterSpentPca: bigint = await windowSpentSum(beforeWindow, widenedSpan);
     expect(afterSpentPca - beforeSpentPca).toBeGreaterThan(0n);
 
     // ── 2h: WM → SWM batch (25) — runs LAST per the SWM-leakage finding ────

@@ -31,7 +31,7 @@ describe('EncryptedWorkspacePayload', () => {
     contextGraphId: 'cg-private',
     senderIdentity: 'did:dkg:agent:0x1234',
     operationId: 'op-1',
-    workspaceOperationId: 'swm-op-1',
+    shareOperationId: 'swm-op-1',
     timestampMs: 1_770_000_000_000,
     subGraphName: 'chat',
     cipherAlgorithm: ENCRYPTED_WORKSPACE_CIPHER_ALGORITHM,
@@ -58,7 +58,7 @@ describe('EncryptedWorkspacePayload', () => {
     expect(decoded.contextGraphId).toBe(payload.contextGraphId);
     expect(decoded.senderIdentity).toBe(payload.senderIdentity);
     expect(decoded.operationId).toBe(payload.operationId);
-    expect(decoded.workspaceOperationId).toBe(payload.workspaceOperationId);
+    expect(decoded.shareOperationId).toBe(payload.shareOperationId);
     expect(decoded.timestampMs).toBe(payload.timestampMs);
     expect(decoded.subGraphName).toBe(payload.subGraphName);
     expect(decoded.cipherAlgorithm).toBe(ENCRYPTED_WORKSPACE_CIPHER_ALGORITHM);
@@ -88,7 +88,7 @@ describe('computeEncryptedWorkspaceAAD', () => {
     contextGraphId: 'cg-private',
     senderIdentity: 'did:dkg:agent:0x1234',
     operationId: 'op-1',
-    workspaceOperationId: 'swm-op-1',
+    shareOperationId: 'swm-op-1',
     timestampMs: 1_770_000_000_000,
     subGraphName: 'chat',
   };
@@ -108,7 +108,7 @@ describe('computeEncryptedWorkspaceAAD', () => {
     expect(computeEncryptedWorkspaceAAD({ ...fields, type: 'other' })).not.toEqual(base);
     expect(computeEncryptedWorkspaceAAD({ ...fields, senderIdentity: 'did:dkg:agent:0xabcd' })).not.toEqual(base);
     expect(computeEncryptedWorkspaceAAD({ ...fields, operationId: 'op-2' })).not.toEqual(base);
-    expect(computeEncryptedWorkspaceAAD({ ...fields, workspaceOperationId: 'swm-op-2' })).not.toEqual(base);
+    expect(computeEncryptedWorkspaceAAD({ ...fields, shareOperationId: 'swm-op-2' })).not.toEqual(base);
     expect(computeEncryptedWorkspaceAAD({ ...fields, timestampMs: fields.timestampMs + 1 })).not.toEqual(base);
     expect(computeEncryptedWorkspaceAAD({ ...fields, subGraphName: 'tasks' })).not.toEqual(base);
     expect(computeEncryptedWorkspaceAAD({

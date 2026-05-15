@@ -82,6 +82,32 @@ describe('runSyncOnConnect callbacks', () => {
     expect(skipped).toEqual([]);
     expect(synced).toEqual([remotePeer]);
   });
+
+  it('can skip shared-memory catch-up on connect while still running durable sync', async () => {
+    const remotePeer = freshPeerIdString();
+    const syncFromPeer = vi.fn().mockResolvedValue(3);
+    const syncSharedMemoryFromPeer = vi.fn().mockResolvedValue(11);
+    const synced: string[] = [];
+
+    await runSyncOnConnect({
+      remotePeer,
+      syncingPeers: new Set(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      knownCorePeerIds: new Set(),
+      getSyncContextGraphs: () => ['devnet-test'],
+      syncFromPeer,
+      refreshMetaSyncedFlags: async () => {},
+      discoverContextGraphsFromStore: async () => 0,
+      syncSharedMemoryFromPeer,
+      syncSharedMemoryOnConnect: false,
+      logInfo: noopLog,
+      onPeerSynced: (peerId) => synced.push(peerId),
+    });
+
+    expect(syncFromPeer).toHaveBeenCalledOnce();
+    expect(syncSharedMemoryFromPeer).not.toHaveBeenCalled();
+    expect(synced).toEqual([remotePeer]);
+  });
 });
 
 describe('DKGAgent sync retry — event-driven via peer:update', () => {

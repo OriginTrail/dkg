@@ -7,9 +7,17 @@ export {
   type AskResult,
   type TripleStoreConfig,
   type TripleStoreBackend,
+  type LargeLiteralStorageConfig,
   registerTripleStoreAdapter,
   createTripleStore,
 } from './triple-store.js';
+export {
+  EXTERNAL_LITERAL_REF_DATATYPE,
+  SHARED_MEMORY_GRAPH_SUFFIX,
+  DEFAULT_LARGE_LITERAL_THRESHOLD_BYTES,
+  SharedMemoryLiteralBlobStore,
+  type SharedMemoryLiteralBlobStoreOptions,
+} from './shared-memory-literal-blob-store.js';
 
 export { OxigraphStore } from './adapters/oxigraph.js';
 export { OxigraphWorkerStore } from './adapters/oxigraph-worker.js';

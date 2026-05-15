@@ -362,6 +362,82 @@ class DKGClient:
             payload["sparql"] = sparql
         return self._post(f"/api/assertion/{quote(assertion_name, safe='')}/query", payload)
 
+    def resolve_import_artifact(
+        self,
+        context_graph_id: str,
+        assertion_uri: Optional[str] = None,
+        assertion_name: Optional[str] = None,
+        file_hash: Optional[str] = None,
+        sub_graph_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Resolve deterministic metadata for a completed imported attachment/assertion."""
+        payload: Dict[str, Any] = {"contextGraphId": context_graph_id}
+        if assertion_uri:
+            payload["assertionUri"] = assertion_uri
+        if assertion_name:
+            payload["assertionName"] = assertion_name
+        if file_hash:
+            payload["fileHash"] = file_hash
+        if sub_graph_name:
+            payload["subGraphName"] = sub_graph_name
+        return self._post("/api/assertion/import-artifact/resolve", payload)
+
+    def read_import_artifact_markdown(
+        self,
+        context_graph_id: str,
+        assertion_uri: Optional[str] = None,
+        assertion_name: Optional[str] = None,
+        file_hash: Optional[str] = None,
+        sub_graph_name: Optional[str] = None,
+        max_bytes: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Read Markdown for a completed imported attachment via daemon content-addressed storage."""
+        payload: Dict[str, Any] = {"contextGraphId": context_graph_id}
+        if assertion_uri:
+            payload["assertionUri"] = assertion_uri
+        if assertion_name:
+            payload["assertionName"] = assertion_name
+        if file_hash:
+            payload["fileHash"] = file_hash
+        if sub_graph_name:
+            payload["subGraphName"] = sub_graph_name
+        if max_bytes is not None:
+            payload["maxBytes"] = max_bytes
+        return self._post("/api/assertion/import-artifact/read-markdown", payload)
+
+    def write_semantic_enrichment(
+        self,
+        context_graph_id: str,
+        semantic_quads: List[Dict[str, str]],
+        assertion_uri: Optional[str] = None,
+        assertion_name: Optional[str] = None,
+        file_hash: Optional[str] = None,
+        generation_method: Optional[str] = None,
+        agent_identity: Optional[str] = None,
+        generated_at: Optional[str] = None,
+        sub_graph_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Append model-derived triples to a completed imported assertion with provenance."""
+        payload: Dict[str, Any] = {
+            "contextGraphId": context_graph_id,
+            "semanticQuads": semantic_quads,
+        }
+        if assertion_uri:
+            payload["assertionUri"] = assertion_uri
+        if assertion_name:
+            payload["assertionName"] = assertion_name
+        if file_hash:
+            payload["fileHash"] = file_hash
+        if generation_method:
+            payload["generationMethod"] = generation_method
+        if agent_identity:
+            payload["agentIdentity"] = agent_identity
+        if generated_at:
+            payload["generatedAt"] = generated_at
+        if sub_graph_name:
+            payload["subGraphName"] = sub_graph_name
+        return self._post("/api/assertion/semantic-enrichment/write", payload)
+
     def promote_assertion(self, assertion_name: str, context_graph_id: str,
                           entities: Optional[Any] = None,
                           sub_graph_name: Optional[str] = None) -> Dict[str, Any]:

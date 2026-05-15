@@ -19,4 +19,5 @@ func.dependencies = [
   'StakingStorage',
   'EpochStorage',
   'Chronos',
+  'ParametersStorage',
 ];

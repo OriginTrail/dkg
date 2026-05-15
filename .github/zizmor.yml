@@ -1,0 +1,60 @@
+# zizmor configuration — workflow audit policy for this repo.
+#
+# We run zizmor in `auditor` persona at `--min-severity low` so the bar is
+# deliberately strict. Anything we cannot fix at the moment must be either
+# (a) listed here with a tracking note + remediation owner, OR (b) fixed.
+# Don't silently bypass findings.
+#
+# Format: https://docs.zizmor.sh/configuration/
+
+rules:
+  # `forbidden-uses` is opt-in. We use it as a permanent denylist for the
+  # known-compromised actions involved in real-world supply-chain attacks.
+  # Even if a future PR (or a future maintainer who isn't familiar with the
+  # TeamPCP / Reviewdog incidents) tries to add one of these, the audit
+  # gate will block it before merge.
+  #
+  # Don't remove entries from this list without a security review. Adding
+  # entries is encouraged — every public attribution should be reflected
+  # here. The cost is zero (the audit runs in milliseconds); the upside is
+  # a hard merge gate against known-bad artifacts.
+  forbidden-uses:
+    config:
+      deny:
+        # TeamPCP campaign — March 2026, CVE-2026-33634. Tag-poisoned to
+        # exfiltrate credentials.
+        - aquasecurity/trivy-action
+        - aquasecurity/setup-trivy
+        - Checkmarx/kics-github-action
+        - Checkmarx/ast-github-action
+        # Reviewdog ecosystem compromise — January 2026.
+        - reviewdog/action-setup
+        - reviewdog/action-shellcheck
+        - reviewdog/action-actionlint
+        # tj-actions/changed-files — March 2025 supply-chain attack.
+        - tj-actions/changed-files
+        - tj-actions/branch-names
+        - tj-actions/glob
+        - tj-actions/verify-changed-files
+        - tj-actions/changed-files-action
+
+  # `artipacked` (deliberate non-suppression — historical note).
+  #
+  # Earlier revisions of this PR carried a global `artipacked: ignore:`
+  # block because the repo had six orphan submodule gitlinks in
+  # `experiments/agenthub-vs-dkg/` without a corresponding `.gitmodules`
+  # file. With `persist-credentials: false`, `actions/checkout`'s
+  # auth-cleanup ran in the MAIN action step and invoked
+  # `git submodule foreach --recursive`, which then failed with
+  #   fatal: No url found for submodule path '…/agenthub' in .gitmodules
+  # That fatal turned into a `##[error]` and killed every job on the
+  # run — so the workaround was to drop `persist-credentials: false`
+  # and silence the `artipacked` finding to keep the audit gate honest
+  # about what was actually enforced.
+  #
+  # This is now fixed at the source: the six orphan gitlinks were
+  # removed from the index in the same commit as this comment, and
+  # `persist-credentials: false` is restored on every `actions/checkout`
+  # call site. There is no longer any suppression of `artipacked` — if
+  # a future PR adds a checkout without that flag, zizmor will block it
+  # at the gate.

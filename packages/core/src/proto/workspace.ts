@@ -32,7 +32,7 @@ export const WorkspacePublishRequestSchema = new Type('WorkspacePublishRequest')
   .add(new Field('nquads', 2, 'bytes'))
   .add(new Field('manifest', 3, 'WorkspaceManifestEntry', 'repeated'))
   .add(new Field('publisherPeerId', 4, 'string'))
-  .add(new Field('workspaceOperationId', 5, 'string'))
+  .add(new Field('shareOperationId', 5, 'string'))
   .add(new Field('timestampMs', 6, 'uint64'))
   .add(new Field('operationId', 7, 'string'))
   .add(new Field('casConditions', 8, 'WorkspaceCASCondition', 'repeated'))
@@ -60,7 +60,7 @@ export interface WorkspacePublishRequestMsg {
   nquads: Uint8Array;
   manifest: WorkspaceManifestEntryMsg[];
   publisherPeerId: string;
-  workspaceOperationId: string;
+  shareOperationId: string;
   timestampMs: number | bigint;
   /** Originator's operation ID for cross-node log correlation. */
   operationId?: string;
@@ -71,6 +71,9 @@ export interface WorkspacePublishRequestMsg {
 }
 
 export function encodeWorkspacePublishRequest(msg: WorkspacePublishRequestMsg): Uint8Array {
+  if (!String(msg.shareOperationId ?? '').trim()) {
+    throw new Error('WorkspacePublishRequest requires shareOperationId');
+  }
   const ts = typeof msg.timestampMs === 'bigint' ? Number(msg.timestampMs) : msg.timestampMs;
   return WorkspacePublishRequestSchema.encode(
     WorkspacePublishRequestSchema.create({ ...msg, timestampMs: ts }),

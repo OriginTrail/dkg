@@ -279,12 +279,12 @@ time, and lock status while the lease is live.
 Current slug format:
 
 ```text
-{contextGraph}/{scope}/{transition}/{workspaceOperationId}/{root-range}
+{contextGraph}/{scope}/{transition}/{shareOperationId}/{root-range}
 ```
 
 Derivation rules:
 
-- `contextGraphId`, `scope`, and `workspaceOperationId` are lowercased and slugged
+- `contextGraphId`, `scope`, and `shareOperationId` are lowercased and slugged
 - `transitionType` is lowercased (`CREATE` -> `create`)
 - `root-range` is derived from sorted root tails
   - one root: `rihana`

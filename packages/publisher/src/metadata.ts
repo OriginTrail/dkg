@@ -378,6 +378,7 @@ export interface ShareMetadata {
   rootEntities: string[];
   publisherPeerId: string;
   timestamp: Date;
+  subGraphName?: string;
 }
 
 /** @deprecated Use ShareMetadata */
@@ -396,6 +397,9 @@ export function generateShareMetadata(
 
   quads.push(
     mq(subject, `${RDF}type`, `${DKG}WorkspaceOperation`, swmMetaGraph),
+    mq(subject, `${DKG}contextGraphId`, lit(meta.contextGraphId), swmMetaGraph),
+    mq(subject, `${DKG}shareOperationId`, lit(meta.shareOperationId), swmMetaGraph),
+    mq(subject, `${DKG}publisherPeerId`, lit(meta.publisherPeerId), swmMetaGraph),
     mq(
       subject,
       `${PROV}wasAttributedTo`,
@@ -409,6 +413,10 @@ export function generateShareMetadata(
       swmMetaGraph,
     ),
   );
+
+  if (meta.subGraphName) {
+    quads.push(mq(subject, `${DKG}subGraphName`, lit(meta.subGraphName), swmMetaGraph));
+  }
 
   for (const rootEntity of meta.rootEntities) {
     quads.push(

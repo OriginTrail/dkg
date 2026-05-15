@@ -18,6 +18,14 @@ export interface LiftAuthorityProof {
 
 export type LiftAccessPolicy = 'public' | 'ownerOnly' | 'allowList';
 
+/** EIP-712 AuthorAttestation seal computed at enqueue. Hex-encoded for JSON persistence. */
+export interface LiftRequestAuthorSeal {
+  readonly merkleRoot: LiftJobHex;
+  readonly authorAddress: LiftJobHex;
+  readonly signature: { readonly r: LiftJobHex; readonly vs: LiftJobHex };
+  readonly schemeVersion: number;
+}
+
 export interface LiftRequest {
   readonly swmId: string;
   readonly shareOperationId: string;
@@ -31,6 +39,12 @@ export interface LiftRequest {
   readonly subGraphName?: string;
   readonly accessPolicy?: LiftAccessPolicy;
   readonly allowedPeers?: readonly string[];
+  /** V10 selective-disclosure mode; agent must sign over the same flag value. */
+  readonly entityProofs?: boolean;
+  /** RFC-001 §4 attribution; stringified bigint, `'0'` = mode d (no attribution). */
+  readonly publisherNodeIdentityIdOverride?: LiftJobBigInt;
+  /** Agent-signed seal. Publisher rejects on-chain publish if absent on V10. */
+  readonly seal?: LiftRequestAuthorSeal;
 }
 
 export const LIFT_REQUEST_IMMUTABLE_FIELDS = [
@@ -46,6 +60,9 @@ export const LIFT_REQUEST_IMMUTABLE_FIELDS = [
   'subGraphName',
   'accessPolicy',
   'allowedPeers',
+  'entityProofs',
+  'publisherNodeIdentityIdOverride',
+  'seal',
 ] as const;
 
 export interface LiftJobTimestamps {

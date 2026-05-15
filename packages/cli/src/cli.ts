@@ -1327,6 +1327,12 @@ contextGraphCmd
 
       const participantIdentityIds = (opts.participantIdentityId as string[] | undefined) ?? [];
       const allowedAgents = (opts.allowedAgent as string[] | undefined) ?? [];
+      // pcaAccountId is intentionally NOT a flag on `create` —
+      // `createContextGraph` no longer persists the id, so a
+      // create-time flag would silently drop the PCA configuration
+      // before `register <id>` is run (Codex PR #502 round-4). Users
+      // who want PCA-curated registration pass `--pca-account-id` on
+      // `dkg context-graph register <id>` instead.
       const accessPolicy = allowedAgents.length > 0 ? 1 : (opts.accessPolicy as number | undefined);
 
       const result = await client.createContextGraph(id, opts.name ?? id, opts.description, {
@@ -1385,19 +1391,28 @@ contextGraphCmd
   .option('--reveal', 'Deprecated: V10 ContextGraphs registration does not reveal cleartext metadata on-chain')
   .option('--access-policy <n>', 'Access policy: 0 = public/discoverable, 1 = private/curated', parseInt)
   .option('--publish-policy <n>', 'Publish policy: 0 = curated, 1 = open', parseInt)
+  .option('--pca-account-id <id>', 'Publishing Conviction Account id for PCA-curated registration')
   .action(async (id: string, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
       if (opts.reveal) {
         console.warn('--reveal is deprecated and ignored for V10 ContextGraphs registration.');
       }
+      const pcaAccountId = opts.pcaAccountId as string | undefined;
+      if (pcaAccountId && !/^[1-9]\d*$/.test(pcaAccountId)) {
+        throw new Error('--pca-account-id must be a positive decimal integer');
+      }
       const result = await client.registerContextGraph(id, {
         accessPolicy: opts.accessPolicy != null ? Number(opts.accessPolicy) : undefined,
         publishPolicy: opts.publishPolicy != null ? Number(opts.publishPolicy) : undefined,
+        pcaAccountId,
       });
       console.log(`Context graph registered on-chain:`);
       console.log(`  ID:         ${id}`);
       console.log(`  On-chain:   ${result.onChainId}`);
+      if (pcaAccountId) {
+        console.log(`  PCA account id: ${pcaAccountId}`);
+      }
       console.log(`  ${result.hint ?? 'You can now publish SWM to Verified Memory.'}`);
     } catch (err) {
       console.error(toErrorMessage(err));
@@ -1500,19 +1515,53 @@ contextGraphCmd
   });
 
 contextGraphCmd
-  .command('request-join <contextGraphId>')
-  .description('Send a signed join request to the context graph curator')
+  .command('request-join <contextGraphId> <curatorPeerId>')
+  .description(
+    'Sign a join request and forward it to the curator. The curatorPeerId ' +
+    'is the libp2p peer id from the V10 invite ("<cgId>\\n<peerId>") and ' +
+    'is required so the daemon can authenticate the curator\'s eventual ' +
+    'approve/reject notification. To produce a signed delegation without ' +
+    'forwarding (e.g. to hand off to the curator out-of-band), use ' +
+    '`dkg context-graph sign-join` instead.',
+  )
+  .action(async (contextGraphId: string, curatorPeerId: string) => {
+    try {
+      const client = await ApiClient.connect();
+      // Step 1: sign-only. Returns the SignedAgentDelegation. Cheap and
+      // independent of P2P delivery — works on a freshly-started node
+      // before any peers are connected.
+      const signed = await client.signJoinRequest(contextGraphId);
+      // Step 2: forward via P2P. The daemon delivers the signed
+      // delegation to the curator (direct dial first, then broadcast
+      // fallback for legacy invites). Returns delivery count so we can
+      // warn on no-curator.
+      const result = await client.requestJoin(contextGraphId, signed.delegation, curatorPeerId);
+      if (result.delivered === 0) {
+        console.error(`Could not deliver join request to curator for "${contextGraphId}". No reachable curator found.`);
+        process.exit(1);
+      }
+      console.log(`Join request sent for "${contextGraphId}" (delivered to ${result.delivered} peer${result.delivered === 1 ? '' : 's'}).`);
+      console.log('  Waiting for curator approval. Check status with:');
+      console.log(`  dkg context-graph info ${contextGraphId}`);
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+contextGraphCmd
+  .command('sign-join <contextGraphId>')
+  .description(
+    'Sign a join-request delegation locally without forwarding it to the ' +
+    'curator. Prints the SignedAgentDelegation as JSON, suitable for ' +
+    'piping to another tool or sharing out-of-band. To both sign AND ' +
+    'forward (the common case), use `dkg context-graph request-join`.',
+  )
   .action(async (contextGraphId: string) => {
     try {
       const client = await ApiClient.connect();
-      const result = await client.signJoinRequest(contextGraphId);
-      if (result.status === 'already-member') {
-        console.log(`Already a member of "${contextGraphId}".`);
-      } else {
-        console.log(`Join request sent for "${contextGraphId}".`);
-        console.log('  Waiting for curator approval. Check status with:');
-        console.log(`  dkg context-graph info ${contextGraphId}`);
-      }
+      const signed = await client.signJoinRequest(contextGraphId);
+      console.log(JSON.stringify(signed.delegation, null, 2));
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);
@@ -2770,15 +2819,14 @@ publisherCmd
   .option('--swm-id <value>', 'Shared memory id', 'swm-main')
   .option('--workspace-id <value>', 'Legacy alias for --swm-id')
   .option('--share-operation-id <value>', 'Share operation id')
-  .option('--workspace-operation-id <value>', 'Legacy alias for --share-operation-id')
   .option('--transition-type <value>', 'Transition type (CREATE|MUTATE|REVOKE)', 'CREATE')
   .option('--authority-type <value>', 'Authority type (owner|multisig|quorum|capability)', 'owner')
   .option('--prior-version <value>', 'Prior version reference for MUTATE/REVOKE flows')
   .action(async (contextGraph: string, opts: ActionOpts) => {
     try {
-      const shareOperationId = opts.shareOperationId ?? opts.workspaceOperationId;
+      const shareOperationId = opts.shareOperationId;
       if (!shareOperationId) {
-        console.error('Provide --share-operation-id (or legacy --workspace-operation-id).');
+        console.error('Provide --share-operation-id.');
         process.exit(1);
       }
       const roots = (opts.root as string[] | undefined)?.map((v) => v.trim()).filter(Boolean) ?? [];

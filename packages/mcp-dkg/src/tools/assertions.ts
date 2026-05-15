@@ -306,6 +306,126 @@ export function registerAssertionTools(
   // the daemon's extraction pipeline turns markdown / PDF / DOCX /
   // etc. into RDF triples and writes them into the assertion's graph.
   server.registerTool(
+    'dkg_import_artifact_resolve',
+    {
+      title: 'Resolve Imported Artifact',
+      description:
+        'Optional validation/debug helper: resolve a completed imported attachment/assertion into deterministic metadata such as source file hash, Markdown hash/form, extraction method, root entity, and structural counts. Skipped imports are rejected.',
+      inputSchema: {
+        projectId: z.string().optional().describe('contextGraphId; defaults to .dkg/config.yaml'),
+        assertionUri: z.string().min(1).describe('Completed imported assertion URI from the attachment ref'),
+        fileHash: z.string().optional().describe('Optional source file hash to verify'),
+        subGraphName: z.string().optional(),
+      },
+    },
+    async ({ projectId, assertionUri, fileHash, subGraphName }): Promise<ToolResult> => {
+      const pid = resolveProject(projectId, config);
+      if (!pid) return projectErr();
+      try {
+        const result = await client.resolveImportArtifact({
+          contextGraphId: pid,
+          assertionUri,
+          fileHash,
+          subGraphName,
+        });
+        return ok(`Imported artifact:\n\n\`\`\`json\n${JSON.stringify(result, null, 2)}\n\`\`\``);
+      } catch (e) {
+        return errResult(`Failed to resolve imported artifact: ${formatError(e)}`);
+      }
+    },
+  );
+
+  server.registerTool(
+    'dkg_import_artifact_read_markdown',
+    {
+      title: 'Read Imported Artifact Markdown',
+      description:
+        'Read Markdown for a completed imported attachment via the daemon content-addressed file store. This never reads arbitrary filesystem paths.',
+      inputSchema: {
+        projectId: z.string().optional().describe('contextGraphId; defaults to .dkg/config.yaml'),
+        assertionUri: z.string().min(1).describe('Completed imported assertion URI from the attachment ref'),
+        fileHash: z.string().optional().describe('Optional source file hash to verify'),
+        subGraphName: z.string().optional(),
+        maxBytes: z.number().int().positive().optional().describe('Optional byte cap; daemon maximum is 5 MiB'),
+      },
+    },
+    async ({ projectId, assertionUri, fileHash, subGraphName, maxBytes }): Promise<ToolResult> => {
+      const pid = resolveProject(projectId, config);
+      if (!pid) return projectErr();
+      try {
+        const result = await client.readImportArtifactMarkdown({
+          contextGraphId: pid,
+          assertionUri,
+          fileHash,
+          subGraphName,
+          maxBytes,
+        });
+        return ok(`Imported artifact Markdown:\n\n\`\`\`json\n${JSON.stringify(result, null, 2)}\n\`\`\``);
+      } catch (e) {
+        return errResult(`Failed to read imported artifact Markdown: ${formatError(e)}`);
+      }
+    },
+  );
+
+  server.registerTool(
+    'dkg_semantic_enrichment_write',
+    {
+      title: 'Write Semantic Enrichment',
+      description:
+        'Append model-derived semantic triples to a completed imported assertion with daemon-stamped provenance. Does not promote, finalize, or publish.',
+      inputSchema: {
+        projectId: z.string().optional().describe('contextGraphId; defaults to .dkg/config.yaml'),
+        assertionUri: z.string().min(1).describe('Source imported assertion URI from the attachment ref'),
+        fileHash: z.string().optional().describe('Optional source file hash to verify'),
+        semanticQuads: z
+          .array(
+            z
+              .object({
+                subject: z.string(),
+                predicate: z.string(),
+                object: z.string(),
+              })
+              .strict(),
+          )
+          .min(1)
+          .describe('Model-derived semantic triples; plain-text objects become RDF literals, provenance is added by the daemon, and all triples are appended to the source imported assertion graph'),
+        generationMethod: z.string().optional(),
+        agentIdentity: z.string().optional().describe('Agent identity URI or label; only URIs are emitted as prov:wasAttributedTo resources'),
+        generatedAt: z.string().optional(),
+        subGraphName: z.string().optional(),
+      },
+    },
+    async ({
+      projectId,
+      assertionUri,
+      fileHash,
+      semanticQuads,
+      generationMethod,
+      agentIdentity,
+      generatedAt,
+      subGraphName,
+    }): Promise<ToolResult> => {
+      const pid = resolveProject(projectId, config);
+      if (!pid) return projectErr();
+      try {
+        const result = await client.writeSemanticEnrichment({
+          contextGraphId: pid,
+          assertionUri,
+          fileHash,
+          subGraphName,
+          semanticQuads,
+          generationMethod,
+          agentIdentity,
+          generatedAt,
+        });
+        return ok(`Semantic enrichment written:\n\n\`\`\`json\n${JSON.stringify(result, null, 2)}\n\`\`\``);
+      } catch (e) {
+        return errResult(`Failed to write semantic enrichment: ${formatError(e)}`);
+      }
+    },
+  );
+
+  server.registerTool(
     'dkg_assertion_import_file',
     {
       title: 'Import File into Assertion',

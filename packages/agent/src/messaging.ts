@@ -6,10 +6,10 @@ import {
   decodeAgentMessage,
   ed25519Sign,
   ed25519Verify,
-  withRetry,
   type AgentMessageMsg,
 } from '@origintrail-official/dkg-core';
 import type { ProtocolRouter } from '@origintrail-official/dkg-core';
+import type { Messenger } from './p2p/messenger.js';
 import { encrypt, decrypt, x25519SharedSecret, ed25519ToX25519Public } from './encryption.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
 import { sha256 } from '@noble/hashes/sha2.js';
@@ -64,7 +64,7 @@ const CONVERSATION_TTL = 60 * 60 * 1000; // 1 hour
  * Ed25519 and verified on receipt.
  */
 export class MessageHandler {
-  private readonly router: ProtocolRouter;
+  private readonly messenger: Messenger;
   private readonly keypair: Ed25519Keypair;
   private readonly x25519Private: Uint8Array;
   private readonly peerId: string;
@@ -76,17 +76,20 @@ export class MessageHandler {
 
   constructor(
     router: ProtocolRouter,
+    messenger: Messenger,
     keypair: Ed25519Keypair,
     x25519Private: Uint8Array,
     peerId: string,
     eventBus: EventBus,
   ) {
-    this.router = router;
+    this.messenger = messenger;
     this.keypair = keypair;
     this.x25519Private = x25519Private;
     this.peerId = peerId;
     this.eventBus = eventBus;
 
+    // Router is used only to install the inbound handler; outbound sends
+    // go through `messenger` so they inherit relay-prime + retry uniformly.
     router.register(PROTOCOL_MESSAGE, this.handleIncoming.bind(this));
   }
 
@@ -144,15 +147,10 @@ export class MessageHandler {
         senderPublicKey: this.keypair.publicKey,
       };
 
-      const responseBytes = await withRetry(
-        () => this.router.send(recipientPeerId, PROTOCOL_MESSAGE, encodeAgentMessage(msg)),
-        {
-          maxAttempts: 3,
-          baseDelayMs: 500,
-          onRetry: (attempt, delay) => {
-            console.warn(`[Messaging] sendChat retry ${attempt}/3 to ${recipientPeerId.slice(-8)} (delay ${Math.round(delay)}ms)`);
-          },
-        },
+      const responseBytes = await this.messenger.sendToPeer(
+        recipientPeerId,
+        PROTOCOL_MESSAGE,
+        encodeAgentMessage(msg),
       );
       const responseMsg = decodeAgentMessage(responseBytes);
       const plain = new TextDecoder().decode(
@@ -202,15 +200,10 @@ export class MessageHandler {
       senderPublicKey: this.keypair.publicKey,
     };
 
-    const responseBytes = await withRetry(
-      () => this.router.send(recipientPeerId, PROTOCOL_MESSAGE, encodeAgentMessage(msg)),
-      {
-        maxAttempts: 3,
-        baseDelayMs: 500,
-        onRetry: (attempt, delay) => {
-          console.warn(`[Messaging] sendSkillRequest retry ${attempt}/3 to ${recipientPeerId.slice(-8)} (delay ${Math.round(delay)}ms)`);
-        },
-      },
+    const responseBytes = await this.messenger.sendToPeer(
+      recipientPeerId,
+      PROTOCOL_MESSAGE,
+      encodeAgentMessage(msg),
     );
 
     const responseMsg = decodeAgentMessage(responseBytes);

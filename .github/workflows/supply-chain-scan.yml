@@ -1,0 +1,610 @@
+name: Supply chain scan
+
+# Static analysis of every `.github/workflows/*.yml` for the attack classes
+# the TeamPCP campaign exploited:
+#
+#   * `pull_request_target` workflows that check out fork-controlled code
+#     ("PWN request") — what got Aqua Security and Datadog targeted.
+#   * Actions pinned to mutable tags (e.g. `@v4`) instead of full commit
+#     SHAs — the surface a tag-poisoning attack repoints.
+#   * `${{ … }}` expansion of attacker-controlled input in `run:` blocks
+#     (the branch-name / markdown-filename injection used as the foothold).
+#   * Excessive `GITHUB_TOKEN` permissions (missing `permissions:` block).
+#
+# Tooling:
+#   * `zizmor` (woodruffw/zizmor) — purpose-built audit for the attack
+#     classes above. Outputs SARIF so findings can be browsed in GitHub
+#     Security → Code scanning.
+#   * `actionlint` (rhysd/actionlint) — syntax + schema linter. Catches
+#     malformed workflows before they ship to the runner.
+#
+# Triggers cover every change surface that can land a workflow file:
+#   * `pull_request` so new misconfigs are flagged before merge.
+#   * `push` to protected branches so the baseline keeps a fresh signal.
+#   * `schedule` weekly so a previously-clean repo gets re-scanned after
+#     zizmor's audit set is extended upstream.
+
+on:
+  pull_request:
+    branches: [main, v10-rc]
+    paths:
+      - '.github/workflows/**'
+      - '.github/actions/**'
+      - '.github/dependabot.yml'
+      - '.github/zizmor.yml'
+      # `pnpm-lock.yaml` and every `package.json` covers the npm-audit
+      # job — the only change that introduces or removes an npm
+      # advisory in our dep tree. Combined with the weekly cron below,
+      # this means the audit re-runs both on lockfile-touching PRs AND
+      # weekly (to catch newly-published advisories against an
+      # unchanged lockfile).
+      - 'pnpm-lock.yaml'
+      - '**/package.json'
+      - '.npmrc'
+  push:
+    branches: [main, v10-rc]
+    paths:
+      - '.github/workflows/**'
+      - '.github/actions/**'
+      - '.github/dependabot.yml'
+      - '.github/zizmor.yml'
+      - 'pnpm-lock.yaml'
+      - '**/package.json'
+      - '.npmrc'
+  schedule:
+    # Mondays 06:30 Europe/Belgrade ≈ 04:30 UTC. Same window as Dependabot
+    # so any week-over-week drift surfaces in a single review pass.
+    - cron: '30 4 * * 1'
+  workflow_dispatch:
+
+# Default to read-only; the zizmor job escalates `security-events: write`
+# at the job level only because it's the only step that needs to upload
+# SARIF. actionlint stays fully read-only.
+permissions:
+  contents: read
+
+concurrency:
+  group: supply-chain-scan-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  zizmor:
+    name: zizmor (GitHub Actions audit)
+    runs-on: ubuntu-latest
+    # 15 min ceiling — zizmor's online audits (impostor-commit,
+    # ref-confusion, known-vulnerable-actions, stale-action-refs) walk
+    # every released tag of every action via `compare_commits`. With
+    # ~10 actions and ~30 historical tags each that's hundreds of API
+    # calls; 5 min was hitting the cap and getting cancelled before the
+    # plain-format gate could run.
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+
+      - name: Install zizmor (hash-pinned PyPI wheel)
+        # Pin the exact version AND the exact wheel/sdist sha256s so even a
+        # PyPI compromise (forged release with the same version number)
+        # cannot land arbitrary code in the runner. `--require-hashes`
+        # refuses to install any artifact whose hash is not in the
+        # requirements list; `--no-deps` blocks transitive Python deps from
+        # bypassing the hash check (zizmor 1.7.0's PyPI metadata declares
+        # no Python deps anyway, but the flag is defense-in-depth in case
+        # a future bump introduces one without us updating this list).
+        #
+        # Hashes lifted verbatim from
+        # https://pypi.org/pypi/zizmor/1.7.0/json (.urls[].digests.sha256).
+        # All wheels relevant to a GitHub-hosted ubuntu-latest runner
+        # (manylinux/musllinux x86_64/aarch64/armv7) plus the sdist are
+        # listed so pip can pick the right one without falling open.
+        # Bumps require recomputing this block — Dependabot does not cover
+        # pip versions used in this single-line install.
+        run: |
+          set -euo pipefail
+          cat > "${RUNNER_TEMP}/zizmor-requirements.txt" <<'REQ'
+          zizmor==1.7.0 \
+            --hash=sha256:a7dd9fa77086836d4fc270372a4fed6273bb92287585388ba258ccd9f59c044f \
+            --hash=sha256:639d290d5074456542b6e5e275effe9565f88ffb24ef1088102bb7ca118ae7de \
+            --hash=sha256:8dd087a01ac713b8980af73f294c696ebcaafde38bade9a3773a3f792169c4d7 \
+            --hash=sha256:489ae4e9085d5aa80b9ae40e118f6e94a52af020cc17dc3942b51835ee02445b \
+            --hash=sha256:ca8a768db5dd267f985cf25515b99a4d893905fff05f4a45cecfc11dc84e4583 \
+            --hash=sha256:8320f78cf19a65b3e81794a731d64a155c24bc8614347ed946b066e3411bb9de \
+            --hash=sha256:4f987f4b81ef740863db629391c55d1e7ad75723fc30325dfde63ab36537d6b0
+          REQ
+          pip install --require-hashes --no-deps -r "${RUNNER_TEMP}/zizmor-requirements.txt"
+          zizmor --version
+
+      - name: Resolve zizmor scan targets
+        # Scan EVERYTHING under `.github/` that can land code on the runner:
+        # workflows + composite actions + reusable workflows. The previous
+        # version only scanned `.github/workflows/`, which left
+        # `.github/actions/` (referenced by the trigger paths above) outside
+        # the audit surface — a future composite action there would inherit
+        # the same trust boundary as a workflow but skip the gate. zizmor
+        # auto-detects workflow + composite-action YAML so passing the
+        # parent dir is safe; it ignores non-workflow YAML (dependabot,
+        # zizmor configs).
+        id: targets
+        run: |
+          set -euo pipefail
+          targets=(.github/workflows)
+          if [ -d .github/actions ]; then
+            targets+=(.github/actions)
+          fi
+          {
+            echo "paths<<EOF"
+            for t in "${targets[@]}"; do echo "${t}"; done
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          printf 'Scanning: %s\n' "${targets[@]}"
+
+      - name: Run zizmor (SARIF output)
+        # `--persona auditor` enables the strict ruleset (every finding is
+        # treated as a defect, including informational ones). `--min-severity
+        # low` keeps the CI gate noisy-on-purpose: an informational finding
+        # like "this third-party action is not SHA-pinned" is exactly the
+        # signal TeamPCP exploited and SHOULD block a PR.
+        #
+        # `--config .github/zizmor.yml` loads the per-repo policy. The only
+        # entries are documented exceptions with a tracking note + owner;
+        # never add a blanket suppression without one.
+        #
+        # `GH_TOKEN` is REQUIRED for zizmor's online audits — without it
+        # the four highest-value checks silently no-op:
+        #   * impostor-commit       — detects a SHA pointing at a commit
+        #                             not in the action's repo history
+        #                             (the TeamPCP attack signature).
+        #   * ref-confusion         — branch/tag/SHA ambiguity.
+        #   * known-vulnerable-     — maintained CVE list.
+        #     actions
+        #   * stale-action-refs     — pin is far behind upstream.
+        # We use the default GITHUB_TOKEN (contents: read at this job's
+        # scope is enough for zizmor's read-only API calls).
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ZIZMOR_TARGETS: ${{ steps.targets.outputs.paths }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2086 # ZIZMOR_TARGETS is a newline list of
+          # repo-relative paths we control entirely (resolved above); word
+          # splitting is the desired behaviour for the zizmor argv.
+          read -r -a TARGETS <<< "$(echo "$ZIZMOR_TARGETS" | tr '\n' ' ')"
+          zizmor \
+            --persona auditor \
+            --min-severity low \
+            --config .github/zizmor.yml \
+            --format sarif \
+            "${TARGETS[@]}" \
+            > zizmor.sarif
+        continue-on-error: true
+
+      - name: Upload SARIF to GitHub Security
+        # Skip SARIF upload on forked PRs. GitHub Actions downgrades
+        # `security-events: write` to read-only on `pull_request` runs
+        # from forks, so the upload step would 403 with `Resource not
+        # accessible by integration` and turn an otherwise-clean run
+        # red. The plain-format `Re-run zizmor as a gate` step below
+        # still runs on forked PRs and surfaces findings in the run log
+        # — SARIF persistence in the Security tab is a property of
+        # base-repo runs (push to main / schedule) anyway.
+        # `continue-on-error` is a belt for unrelated upload flakes
+        # (codeql-action retries, large SARIF parse failures, etc).
+        if: |
+          always()
+          && (github.event_name != 'pull_request'
+              || github.event.pull_request.head.repo.full_name == github.repository)
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@42213152a85ae7569bdb6bec7bcd74cd691bfe41 # v3.30.9
+        with:
+          sarif_file: zizmor.sarif
+          category: zizmor
+
+      - name: Re-run zizmor as a gate
+        # The previous run uploaded SARIF unconditionally so the Security tab
+        # always reflects the latest state. This second invocation re-runs
+        # with the SAME ruleset but allows the exit code to bubble up so the
+        # PR is blocked when findings exist. GH_TOKEN re-supplied for the
+        # same reason as the SARIF step above.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ZIZMOR_TARGETS: ${{ steps.targets.outputs.paths }}
+        run: |
+          set -euo pipefail
+          read -r -a TARGETS <<< "$(echo "$ZIZMOR_TARGETS" | tr '\n' ' ')"
+          zizmor --persona auditor --min-severity low --config .github/zizmor.yml --format plain "${TARGETS[@]}"
+
+  npm-audit:
+    name: pnpm audit (informational)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      # `pnpm install` runs only the lockfile resolution and metadata pass
+      # we need for `pnpm audit`. We're NOT building anything here — keep
+      # the audit job fast and independent of the heavy CI matrix.
+      - name: Install dependencies (lockfile only)
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Run pnpm audit (production deps)
+        # Informational only for now — the lockfile currently carries a
+        # known baseline of high + critical advisories (see
+        # docs/security/SUPPLY_CHAIN_HARDENING.md → Tier 3 §H). Flipping
+        # this to a hard gate is the second step of that follow-up,
+        # tracked separately. Output uploads as a job-summary table so
+        # reviewers can see at a glance whether a PR INTRODUCES a new
+        # advisory vs. carrying over the baseline.
+        #
+        # SECURITY: this step distinguishes three audit outcomes that the
+        # previous version silently collapsed into a binary "table or
+        # 'no advisories ≥ high'" rendering. The collapse was a
+        # false-confidence bug — an empty file, an invalid JSON blob, a
+        # registry 5xx, or a pnpm 10 `.vulnerabilities`-shape response
+        # all rendered as a confident "No advisories ≥ high. ✓" badge.
+        # We now branch on three distinct states:
+        #
+        #   * clean         — pnpm audit exited 0 (no advisories at or
+        #                     above the threshold) AND the JSON parsed
+        #                     as an object.
+        #   * findings      — pnpm audit exited 1 AND we can extract a
+        #                     count from either the legacy `.advisories`
+        #                     map or the npm v2 / pnpm 10 `.vulnerabilities`
+        #                     map. Both shapes are rendered.
+        #   * inconclusive  — exit >1, empty file, or non-object JSON.
+        #                     This typically means the registry, auth,
+        #                     or the network failed. Rendered as a
+        #                     `::warning::` annotation so the badge does
+        #                     not look clean. Job still succeeds because
+        #                     it is informational — see follow-up to
+        #                     flip to a hard gate after baseline cleanup.
+        #
+        # stderr is preserved (`pnpm-audit.stderr`) so reviewers can see
+        # the underlying registry / auth / network error on inconclusive
+        # runs without having to re-run the workflow locally.
+        continue-on-error: true
+        run: |
+          set +e
+          pnpm audit --audit-level=high --prod --json > pnpm-audit.json 2> pnpm-audit.stderr
+          STATUS=$?
+          set -e
+
+          inconclusive() {
+            local reason="$1"
+            echo "::warning title=pnpm audit inconclusive::${reason}"
+            {
+              echo '## pnpm audit (inconclusive)'
+              echo
+              echo "**Reason:** ${reason}"
+              echo
+              echo '**pnpm audit exit status:** `'"${STATUS}"'`'
+              if [ -s pnpm-audit.stderr ]; then
+                echo
+                echo '<details><summary>stderr (first 200 lines)</summary>'
+                echo
+                echo '```'
+                head -200 pnpm-audit.stderr
+                echo '```'
+                echo '</details>'
+              fi
+              echo
+              echo 'A clean pnpm audit run requires a valid registry response. This'
+              echo 'result does NOT mean the dependency tree is clean — it means the'
+              echo 'audit did not complete and cannot certify either outcome. Investigate'
+              echo 'before treating this run as evidence.'
+            } >> "$GITHUB_STEP_SUMMARY" || true
+          }
+
+          # pnpm follows npm semantics:
+          #   0 = no vulnerabilities at/above threshold
+          #   1 = vulnerabilities found at/above threshold
+          #   >1 = operational failure (auth, network, registry 5xx, …)
+          if [ "${STATUS}" -gt 1 ]; then
+            inconclusive "pnpm audit exited ${STATUS} (>1 = operational failure)"
+            exit 0
+          fi
+
+          if [ ! -s pnpm-audit.json ]; then
+            inconclusive 'pnpm audit produced no output file or an empty file'
+            exit 0
+          fi
+
+          if ! jq -e 'type == "object"' pnpm-audit.json >/dev/null 2>&1; then
+            inconclusive 'pnpm audit output is not a valid JSON object'
+            exit 0
+          fi
+
+          # COUNT = high/critical entries, supporting BOTH report shapes:
+          #   * legacy pnpm/npm v1 shape: `.advisories` map keyed by id
+          #     with .severity at the value level.
+          #   * npm v2 / pnpm 10 shape: `.vulnerabilities` map keyed by
+          #     package name with .severity at the value level.
+          # If neither key is present in a syntactically-valid object,
+          # treat the run as clean (the schema can legitimately be `{}`
+          # when there are zero findings on either path).
+          COUNT="$(
+            jq '
+              def sev: . == "high" or . == "critical";
+              if (has("vulnerabilities") and (.vulnerabilities | type == "object")) then
+                [.vulnerabilities | to_entries[] | select(.value.severity | sev)] | length
+              elif (has("advisories") and (.advisories | type == "object")) then
+                [.advisories | to_entries[] | .value | select(.severity | sev)] | length
+              else
+                0
+              end
+            ' pnpm-audit.json
+          )"
+
+          if [ "${STATUS}" -eq 0 ] && [ "${COUNT:-0}" -eq 0 ]; then
+            {
+              echo '## pnpm audit (high + critical, production deps)'
+              echo
+              echo 'No advisories ≥ high. ✓'
+              echo
+              echo '_Validated: pnpm audit exited 0 and the JSON report parsed as an object with zero matching entries._'
+            } >> "$GITHUB_STEP_SUMMARY" || true
+            echo "pnpm audit exit status: ${STATUS} — clean"
+            exit 0
+          fi
+
+          # Edge case: pnpm exited 1 (= findings ≥ threshold exist) but
+          # our jq extraction returned 0. That means a FUTURE pnpm
+          # version emitted findings under a key our `if has(...)`
+          # chain does not yet recognise. Rendering "Findings: 0"
+          # here would be exactly the false-confidence pattern this
+          # whole step exists to prevent. Treat as inconclusive and
+          # leave a copy of the raw JSON in the summary so a human
+          # can adjudicate.
+          if [ "${STATUS}" -eq 1 ] && [ "${COUNT:-0}" -eq 0 ]; then
+            # shellcheck disable=SC2016
+            # The single-quoted strings below contain Markdown backticks
+            # (e.g. `.advisories`, `supply-chain-scan.yml`) used as
+            # code-fence markers in the GitHub Step Summary output.
+            # Shellcheck flags backticks-inside-single-quotes as a
+            # possible missed command substitution; here it's intentional.
+            {
+              echo '## pnpm audit (inconclusive — schema mismatch)'
+              echo
+              echo 'pnpm audit reported findings (exit 1) but neither the'
+              echo 'legacy `.advisories` nor the npm v2 `.vulnerabilities`'
+              echo 'shape contains entries matching the high/critical filter.'
+              echo 'A new schema may have been introduced upstream. Update'
+              echo 'the jq extraction in `supply-chain-scan.yml` to recognise'
+              echo 'it before treating this run as clean.'
+              echo
+              echo '<details><summary>raw pnpm-audit.json (first 200 lines)</summary>'
+              echo
+              echo '```json'
+              head -200 pnpm-audit.json
+              echo '```'
+              echo '</details>'
+            } >> "$GITHUB_STEP_SUMMARY" || true
+            echo "::warning title=pnpm audit schema mismatch::pnpm exited 1 but neither known schema produced findings; refusing to report clean. See job summary for the raw report."
+            echo "pnpm audit exit status: ${STATUS} — inconclusive (schema mismatch)"
+            exit 0
+          fi
+
+          # If we got here the report has findings. Render whichever
+          # schema is present (or both, if a future pnpm version emits
+          # mixed output). Each branch is null-safe and falls open to
+          # an empty table on a malformed entry rather than crashing.
+          {
+            echo '## pnpm audit (high + critical, production deps)'
+            echo
+            echo "**Findings: ${COUNT}**  •  pnpm audit exit status: \`${STATUS}\`"
+            echo
+            echo '| Severity | Package | Vulnerable | Patched | Path | Advisory |'
+            echo '|----------|---------|------------|---------|------|----------|'
+            # legacy `.advisories` shape
+            jq -r '
+              (.advisories // {}) | to_entries[] |
+              .value |
+              select(.severity == "high" or .severity == "critical") |
+              [
+                (.severity // ""),
+                (.module_name // ""),
+                (.vulnerable_versions // ""),
+                (.patched_versions // ""),
+                ((.findings[0].paths[0] // "" ) | split(">") | .[0]),
+                ("[link](" + (.url // "") + ")")
+              ] | "| " + join(" | ") + " |"
+            ' pnpm-audit.json
+            # npm v2 / pnpm 10 `.vulnerabilities` shape
+            jq -r '
+              (.vulnerabilities // {}) | to_entries[] |
+              . as $entry |
+              $entry.value |
+              select(.severity == "high" or .severity == "critical") |
+              [
+                (.severity // ""),
+                ($entry.key),
+                (.range // ""),
+                ((.fixAvailable // {}) | if type == "object" then (.version // "") else (.|tostring) end),
+                "",
+                ((.via // []) | (.[0] // {}) | if type == "object" then ("[link](" + (.url // "") + ")") else ("via " + (.|tostring)) end)
+              ] | "| " + join(" | ") + " |"
+            ' pnpm-audit.json
+          } >> "$GITHUB_STEP_SUMMARY" || true
+
+          echo "pnpm audit exit status: ${STATUS} — ${COUNT} high/critical advisor(y|ies) — informational, see job summary"
+
+  actionlint:
+    name: actionlint (workflow syntax + schema)
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Download + verify actionlint release asset
+        # SECURITY: we deliberately do NOT `curl … | bash` from
+        # raw.githubusercontent.com here. Even though the upstream
+        # installer script verifies its own download, fetching the
+        # *installer* via a mutable tag ref (e.g. `v1.7.6`) and piping
+        # straight to `bash` reintroduces the exact tag-poisoning class
+        # this workflow exists to detect — a force-moved tag or a
+        # compromised upstream branch would give arbitrary code execution
+        # inside the security scanner. Instead we:
+        #
+        #   1. Pin the actionlint version to a specific release.
+        #   2. Download the release binary asset directly (GitHub release
+        #      assets are bound to the immutable release object, not to
+        #      raw.githubusercontent.com mirrored tree).
+        #   3. Verify its SHA-256 against the digest published in the same
+        #      release's `actionlint_${VERSION}_checksums.txt`. The digest
+        #      is committed verbatim into THIS workflow file, so any
+        #      retroactive re-upload of the release asset (or any MITM on
+        #      the download path) fails the check and aborts the run.
+        #   4. Only THEN extract and execute the binary.
+        #
+        # Bumps to a newer actionlint require recomputing ACTIONLINT_SHA256
+        # from the new release's checksums.txt and updating BOTH this
+        # workflow and the version string. Dependabot does not cover this
+        # path; bump deliberately via PR.
+        env:
+          ACTIONLINT_VERSION: 1.7.6
+          # sha256 of actionlint_1.7.6_linux_amd64.tar.gz, lifted from
+          # https://github.com/rhysd/actionlint/releases/download/v1.7.6/actionlint_1.7.6_checksums.txt
+          ACTIONLINT_SHA256: 5d1a70d9de15fee5371e6f9e20cc29b284e814d6ee1b882f9749e91caf716eba
+        run: |
+          set -euo pipefail
+          ASSET="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL --proto '=https' --tlsv1.2 \
+            -o "${ASSET}" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${ASSET}"
+          echo "${ACTIONLINT_SHA256}  ${ASSET}" | sha256sum --check --status
+          tar -xzf "${ASSET}" actionlint
+          ./actionlint --version
+
+      - name: Run actionlint (with shellcheck)
+        # `shellcheck` is pre-installed on ubuntu-latest GitHub-hosted
+        # runners, so actionlint invokes it as a sub-linter automatically
+        # (no `-shellcheck=` flag). Pre-existing SC2086 quoting issues
+        # were fixed in this same PR so the gate is clean from the
+        # outset.
+        run: ./actionlint -color
+
+  scanner-freshness:
+    name: Scanner pin freshness check
+    # This job is the answer to PR460-06 / P3 of the security review:
+    # "Add a documented scheduled check or Dependabot-compatible
+    # mechanism for scanner versions and hashes." Dependabot does not
+    # cover scanner versions that are pinned inside workflow YAML as
+    # env vars (actionlint binary release, hash-pinned PyPI wheels for
+    # zizmor, the npx-resolved @cyclonedx/cdxgen version). This job
+    # walks each pin, queries the upstream registry for the latest
+    # release, and surfaces drift as a job-summary warning. It is
+    # informational (`continue-on-error: true`) — the goal is to
+    # surface stale pins, not to block PRs. Bumps still go through a
+    # normal review PR.
+    #
+    # Only runs on the weekly cron + manual dispatch — drift is a
+    # cadence problem, not a per-PR problem.
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Compare pinned scanner versions against upstream latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          STALE=0
+          {
+            echo '## Scanner pin freshness'
+            echo
+            echo '| Scanner | Pinned | Latest upstream | Status |'
+            echo '|---------|--------|-----------------|--------|'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          report() {
+            local name="$1" pinned="$2" latest="$3" status="$4"
+            echo "| ${name} | \`${pinned}\` | \`${latest}\` | ${status} |" >> "$GITHUB_STEP_SUMMARY"
+            if [ "${status}" != "✓ current" ]; then
+              STALE=1
+              echo "::warning title=Scanner pin stale::${name} pinned to ${pinned}, upstream latest is ${latest}"
+            fi
+          }
+
+          # actionlint: pinned in this workflow's `actionlint` job as
+          # ACTIONLINT_VERSION. Parse it back out of THIS file so a
+          # bump there is automatically the source of truth here.
+          ACTIONLINT_PINNED=$(grep -E '^\s+ACTIONLINT_VERSION:\s*' "${GITHUB_WORKSPACE}/.github/workflows/supply-chain-scan.yml" | head -1 | sed -E 's/.*ACTIONLINT_VERSION:\s*//; s/[\"'\'' ]//g')
+          ACTIONLINT_LATEST=$(gh api repos/rhysd/actionlint/releases/latest --jq '.tag_name' | sed 's/^v//')
+          if [ -n "${ACTIONLINT_PINNED}" ] && [ -n "${ACTIONLINT_LATEST}" ]; then
+            if [ "${ACTIONLINT_PINNED}" = "${ACTIONLINT_LATEST}" ]; then
+              report 'actionlint' "${ACTIONLINT_PINNED}" "${ACTIONLINT_LATEST}" '✓ current'
+            else
+              report 'actionlint' "${ACTIONLINT_PINNED}" "${ACTIONLINT_LATEST}" '⚠ behind'
+            fi
+          else
+            report 'actionlint' "${ACTIONLINT_PINNED:-?}" "${ACTIONLINT_LATEST:-?}" '⚠ unable to compare'
+          fi
+
+          # zizmor: pinned via `zizmor==<version>` line in the
+          # heredoc-generated requirements.txt. Parse it back out of
+          # this workflow file.
+          ZIZMOR_PINNED=$(grep -E '^\s*zizmor==' "${GITHUB_WORKSPACE}/.github/workflows/supply-chain-scan.yml" | head -1 | sed -E 's/.*zizmor==//; s/\\.*$//; s/[[:space:]]//g')
+          # PyPI does not need a token for read-only metadata.
+          ZIZMOR_LATEST=$(curl -fsSL https://pypi.org/pypi/zizmor/json | jq -r '.info.version')
+          if [ -n "${ZIZMOR_PINNED}" ] && [ -n "${ZIZMOR_LATEST}" ]; then
+            if [ "${ZIZMOR_PINNED}" = "${ZIZMOR_LATEST}" ]; then
+              report 'zizmor' "${ZIZMOR_PINNED}" "${ZIZMOR_LATEST}" '✓ current'
+            else
+              report 'zizmor' "${ZIZMOR_PINNED}" "${ZIZMOR_LATEST}" '⚠ behind'
+            fi
+          else
+            report 'zizmor' "${ZIZMOR_PINNED:-?}" "${ZIZMOR_LATEST:-?}" '⚠ unable to compare'
+          fi
+
+          # @cyclonedx/cdxgen: pinned via the `npx --yes
+          # @cyclonedx/cdxgen@<ver>` line in release.yml. Parse it back
+          # out of that file so the check stays correct when release.yml
+          # is bumped.
+          if [ -f "${GITHUB_WORKSPACE}/.github/workflows/release.yml" ]; then
+            CDXGEN_PINNED=$(grep -oE '@cyclonedx/cdxgen@[^[:space:]"]+' "${GITHUB_WORKSPACE}/.github/workflows/release.yml" | head -1 | sed 's|@cyclonedx/cdxgen@||')
+            CDXGEN_LATEST=$(curl -fsSL https://registry.npmjs.org/@cyclonedx/cdxgen | jq -r '.["dist-tags"].latest')
+            if [ -n "${CDXGEN_PINNED}" ] && [ -n "${CDXGEN_LATEST}" ]; then
+              if [ "${CDXGEN_PINNED}" = "${CDXGEN_LATEST}" ]; then
+                report '@cyclonedx/cdxgen' "${CDXGEN_PINNED}" "${CDXGEN_LATEST}" '✓ current'
+              else
+                report '@cyclonedx/cdxgen' "${CDXGEN_PINNED}" "${CDXGEN_LATEST}" '⚠ behind'
+              fi
+            else
+              report '@cyclonedx/cdxgen' "${CDXGEN_PINNED:-?}" "${CDXGEN_LATEST:-?}" '⚠ unable to compare'
+            fi
+          fi
+
+          # shellcheck disable=SC2016
+          # Backticks in the markdown string below are intentional
+          # (code-fence formatting in the GitHub Step Summary), not
+          # missed command substitution.
+          {
+            echo
+            if [ "${STALE}" -eq 0 ]; then
+              echo '_All scanners up to date._'
+            else
+              echo '_One or more scanners are behind upstream. Open a bump PR — recompute hash pins where applicable (zizmor PyPI wheels in `supply-chain-scan.yml`, actionlint release `checksums.txt`)._'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

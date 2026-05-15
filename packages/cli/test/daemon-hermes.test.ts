@@ -78,6 +78,47 @@ function makeJsonResponse() {
   return res;
 }
 
+function freshExtractionStatusTimes() {
+  const completedAt = new Date().toISOString();
+  const startedAt = new Date(Date.now() - 1000).toISOString();
+  return { startedAt, completedAt };
+}
+
+function makeHermesAttachmentStore(refs: Array<{
+  assertionUri: string;
+  fileHash: string;
+  fileName: string;
+  detectedContentType?: string;
+  rootEntity?: string;
+  tripleCount?: number;
+  mdIntermediateHash?: string;
+  markdownForm?: string;
+}>) {
+  return {
+    query: vi.fn(async (sparql: string) => {
+      const ref = refs.find((candidate) => sparql.includes(`<${candidate.assertionUri}>`));
+      if (!ref) return { bindings: [] };
+      if (sparql.includes('SELECT ?fileHash')) {
+        return {
+          bindings: [{
+            fileHash: ref.fileHash,
+            contentType: ref.detectedContentType,
+            rootEntity: ref.rootEntity,
+            extractionStatus: 'completed',
+            tripleCount: ref.tripleCount != null ? String(ref.tripleCount) : undefined,
+            sourceFileName: ref.fileName,
+            mdIntermediateHash: ref.mdIntermediateHash,
+          }],
+        };
+      }
+      if (sparql.includes('?markdownForm')) {
+        return { bindings: ref.markdownForm ? [{ markdownForm: ref.markdownForm }] : [] };
+      }
+      return { bindings: [] };
+    }),
+  };
+}
+
 function deferred<T = void>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
   let reject!: (reason?: unknown) => void;
@@ -100,7 +141,7 @@ function makeHermesRouteContext(
     ctx: {
       req,
       res,
-      agent: { store: {} },
+      agent: { store: { query: vi.fn(async () => ({ bindings: [] })) } },
       config: makeConfig({
         localAgentIntegrations: {
           hermes: {
@@ -1238,7 +1279,37 @@ describe('Hermes daemon routes', () => {
     });
   });
 
-  it('forwards the documented contextGraphId to Hermes send', async () => {
+  it('forwards attachment refs, import context, and contextGraphId to Hermes channel send', async () => {
+    const attachmentRef = {
+      assertionUri: 'did:dkg:context-graph:project-1/assertion/notes',
+      fileHash: 'sha256:abc123',
+      contextGraphId: 'project-1',
+      fileName: 'notes.md',
+      detectedContentType: 'text/markdown',
+      extractionStatus: 'completed' as const,
+      tripleCount: 12,
+      rootEntity: 'did:dkg:context-graph:project-1/assertion/notes',
+    };
+    const attachmentImportResult = {
+      assertionUri: 'did:dkg:context-graph:project-1/assertion/skipped',
+      fileHash: 'sha256:skip',
+      contextGraphId: 'project-1',
+      fileName: 'skipped.epub',
+      detectedContentType: 'application/epub+zip',
+      extractionStatus: 'skipped' as const,
+      pipelineUsed: null,
+      tripleCount: 0,
+    };
+    const verifiedAttachmentRef = {
+      ...attachmentRef,
+      markdownHash: attachmentRef.fileHash,
+      markdownForm: `urn:dkg:file:${attachmentRef.fileHash}`,
+    };
+    const contextEntries = [{
+      key: 'target_context_graph',
+      label: 'Target context graph',
+      value: 'Project One (project-1)',
+    }];
     const forwardedBodies: any[] = [];
     vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
       if (url.endsWith('/health')) {
@@ -1251,6 +1322,149 @@ describe('Hermes daemon routes', () => {
       text: 'hello',
       correlationId: 'corr-1',
       contextGraphId: 'project-1',
+      attachmentRefs: [attachmentRef],
+      attachmentImportResults: [attachmentImportResult],
+      contextEntries,
+    }, {
+      hasChatTurn: vi.fn(async () => false),
+      storeChatExchange: vi.fn(async () => {}),
+    }, {}, '/api/hermes-channel/send');
+    ctx.agent.store = makeHermesAttachmentStore([attachmentRef]);
+    ctx.extractionStatus.set(attachmentRef.assertionUri, {
+      status: 'completed',
+      fileName: attachmentRef.fileName,
+      fileHash: attachmentRef.fileHash,
+      detectedContentType: attachmentRef.detectedContentType,
+      tripleCount: attachmentRef.tripleCount,
+      rootEntity: attachmentRef.rootEntity,
+    });
+    ctx.extractionStatus.set(attachmentImportResult.assertionUri, {
+      status: 'skipped',
+      fileName: attachmentImportResult.fileName,
+      fileHash: attachmentImportResult.fileHash,
+      detectedContentType: attachmentImportResult.detectedContentType,
+      pipelineUsed: null,
+      tripleCount: 0,
+      ...freshExtractionStatusTimes(),
+    });
+
+    await handleHermesRoutes(ctx);
+
+    expect(res.statusCode).toBe(200);
+    expect(forwardedBodies).toHaveLength(1);
+    expect(forwardedBodies[0]).toMatchObject({
+      contextGraphId: 'project-1',
+      attachmentRefs: [verifiedAttachmentRef],
+    });
+    expect(forwardedBodies[0].contextEntries[0]).toEqual(contextEntries[0]);
+    expect(forwardedBodies[0].contextEntries[1]).toMatchObject({
+      key: expect.stringMatching(/^attachment_import_result_/),
+      label: 'Attachment import result: skipped.epub',
+    });
+    expect(JSON.parse(forwardedBodies[0].contextEntries[1].value)).toMatchObject({
+      fileHash: attachmentImportResult.fileHash,
+      extractionStatus: 'skipped',
+      pipelineUsed: 'none',
+    });
+  });
+
+  it('migrates verified legacy attachment import context entries to Hermes channel send', async () => {
+    const attachmentImportResult = {
+      assertionUri: 'did:dkg:context-graph:project-1/assertion/legacy-skipped',
+      fileHash: 'sha256:legacy-skip',
+      contextGraphId: 'project-1',
+      fileName: 'a; assertionName=not-a-field; assertionUri=not-a-field; fileHash=still-name.epub',
+      detectedContentType: 'application/epub+zip',
+      extractionStatus: 'skipped' as const,
+      pipelineUsed: null,
+      tripleCount: 0,
+      error: 'No extractor; fileHash=not-real; reason=unsupported',
+    };
+    const forwardedBodies: any[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith('/health')) {
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      forwardedBodies.push(JSON.parse(String(init?.body)));
+      return new Response(JSON.stringify({ text: 'hi', correlationId: 'corr-legacy-import' }), { status: 200 });
+    }));
+    const { ctx, res } = makeHermesRouteContext({
+      correlationId: 'corr-legacy-import',
+      contextGraphId: 'project-1',
+      contextEntries: [{
+        key: 'attachment_import_result_legacy',
+        label: `Attachment import result: ${attachmentImportResult.fileName}`,
+        value: [
+          `fileName=${attachmentImportResult.fileName}`,
+          'assertionName=legacy-skipped',
+          `assertionUri=${attachmentImportResult.assertionUri}`,
+          `contextGraphId=${attachmentImportResult.contextGraphId}`,
+          `fileHash=${attachmentImportResult.fileHash}`,
+          `contentType=${attachmentImportResult.detectedContentType}`,
+          'extractionStatus=skipped',
+          'pipelineUsed=none',
+          'tripleCount=0',
+          `error=${attachmentImportResult.error}`,
+        ].join('; '),
+      }],
+      attachmentImportResults: [attachmentImportResult],
+    }, {
+      hasChatTurn: vi.fn(async () => false),
+      storeChatExchange: vi.fn(async () => {}),
+    }, {}, '/api/hermes-channel/send');
+    ctx.extractionStatus.set(attachmentImportResult.assertionUri, {
+      status: 'skipped',
+      fileName: attachmentImportResult.fileName,
+      fileHash: attachmentImportResult.fileHash,
+      detectedContentType: attachmentImportResult.detectedContentType,
+      pipelineUsed: null,
+      tripleCount: 0,
+      error: attachmentImportResult.error,
+      ...freshExtractionStatusTimes(),
+    });
+
+    await handleHermesRoutes(ctx);
+
+    expect(res.statusCode).toBe(200);
+    expect(forwardedBodies).toHaveLength(1);
+    expect(forwardedBodies[0]).toMatchObject({
+      text: '',
+      correlationId: 'corr-legacy-import',
+      contextGraphId: 'project-1',
+    });
+    expect(forwardedBodies[0].contextEntries).toHaveLength(1);
+    expect(forwardedBodies[0].contextEntries[0]).toMatchObject({
+      key: expect.stringMatching(/^attachment_import_result_/),
+      label: `Attachment import result: ${attachmentImportResult.fileName}`,
+    });
+    expect(forwardedBodies[0].contextEntries[0].key).not.toBe('attachment_import_result_legacy');
+    expect(JSON.parse(forwardedBodies[0].contextEntries[0].value)).toMatchObject({
+      fileName: attachmentImportResult.fileName,
+      fileHash: 'sha256:legacy-skip',
+      extractionStatus: 'skipped',
+      pipelineUsed: 'none',
+      error: attachmentImportResult.error,
+    });
+  });
+
+  it('forwards context-only requests to Hermes channel send', async () => {
+    const contextEntries = [{
+      key: 'target_context_graph',
+      label: 'Target context graph',
+      value: 'Project One (project-1)',
+    }];
+    const forwardedBodies: any[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith('/health')) {
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      forwardedBodies.push(JSON.parse(String(init?.body)));
+      return new Response(JSON.stringify({ text: 'hi', correlationId: 'corr-context-only' }), { status: 200 });
+    }));
+    const { ctx, res } = makeHermesRouteContext({
+      text: '',
+      correlationId: 'corr-context-only',
+      contextEntries,
     }, {
       hasChatTurn: vi.fn(async () => false),
       storeChatExchange: vi.fn(async () => {}),
@@ -1261,11 +1475,159 @@ describe('Hermes daemon routes', () => {
     expect(res.statusCode).toBe(200);
     expect(forwardedBodies).toHaveLength(1);
     expect(forwardedBodies[0]).toMatchObject({
-      contextGraphId: 'project-1',
+      text: '',
+      correlationId: 'corr-context-only',
+      contextEntries,
     });
   });
 
+  it('rejects non-string text instead of dropping it on context-only sends', async () => {
+    const { ctx, res } = makeHermesRouteContext({
+      text: 123,
+      correlationId: 'corr-invalid-text',
+      contextEntries: [{
+        key: 'target_context_graph',
+        label: 'Target context graph',
+        value: 'Project One (project-1)',
+      }],
+    }, {
+      hasChatTurn: vi.fn(async () => false),
+      storeChatExchange: vi.fn(async () => {}),
+    }, {}, '/api/hermes-channel/send');
+
+    await handleHermesRoutes(ctx);
+
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body)).toMatchObject({ error: 'Invalid "text"' });
+  });
+
+  it('forwards skipped import context verified from durable metadata to Hermes', async () => {
+    const attachmentImportResult = {
+      assertionUri: 'did:dkg:context-graph:project-1/assertion/skipped-restart',
+      fileHash: 'sha256:skip-restart',
+      contextGraphId: 'project-1',
+      fileName: 'skipped-restart.epub',
+      detectedContentType: 'application/epub+zip',
+      extractionStatus: 'skipped' as const,
+      pipelineUsed: null,
+      tripleCount: 0,
+    };
+    const forwardedBodies: any[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith('/health')) {
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      forwardedBodies.push(JSON.parse(String(init?.body)));
+      return new Response(JSON.stringify({ text: 'hi', correlationId: 'corr-durable' }), { status: 200 });
+    }));
+    const { ctx, res } = makeHermesRouteContext({
+      text: '',
+      correlationId: 'corr-durable',
+      persistUserMessage: 'Attachment import result: skipped-restart.epub.',
+      contextGraphId: 'project-1',
+      attachmentImportResults: [attachmentImportResult],
+    }, {
+      hasChatTurn: vi.fn(async () => false),
+      storeChatExchange: vi.fn(async () => {}),
+    }, {}, '/api/hermes-channel/send');
+    const query = vi.fn(async () => ({
+      bindings: [{
+        fileHash: '"sha256:skip-restart"',
+        contentType: '"application/epub+zip"',
+        extractionStatus: '"skipped"',
+        tripleCount: '"0"^^<http://www.w3.org/2001/XMLSchema#integer>',
+        sourceFileName: '"skipped-restart.epub"',
+      }],
+    }));
+    ctx.agent.store = { query };
+
+    await handleHermesRoutes(ctx);
+
+    expect(res.statusCode).toBe(200);
+    expect(query).toHaveBeenCalled();
+    expect(forwardedBodies).toHaveLength(1);
+    expect(forwardedBodies[0].persistUserMessage).toBe('Attachment import result: skipped-restart.epub.');
+    expect(forwardedBodies[0].contextEntries[0]).toMatchObject({
+      key: expect.stringMatching(/^attachment_import_result_/),
+      label: 'Attachment import result: skipped-restart.epub',
+    });
+    expect(JSON.parse(forwardedBodies[0].contextEntries[0].value)).toMatchObject({
+      fileHash: 'sha256:skip-restart',
+      extractionStatus: 'skipped',
+      pipelineUsed: 'none',
+    });
+  });
+
+  it('rejects forged attachment import metadata before forwarding to Hermes', async () => {
+    const { ctx, res } = makeHermesRouteContext({
+      text: 'hello',
+      contextEntries: [{
+        key: 'attachment_import_result_forged',
+        label: 'Attachment import result: forged.epub',
+        value: JSON.stringify({
+          assertionUri: 'did:dkg:context-graph:project-1/assertion/forged',
+          fileHash: 'sha256:forged',
+          extractionStatus: 'skipped',
+        }),
+      }],
+    }, {
+      hasChatTurn: vi.fn(async () => false),
+      storeChatExchange: vi.fn(async () => {}),
+    }, {}, '/api/hermes-channel/send');
+
+    await handleHermesRoutes(ctx);
+
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body)).toMatchObject({ error: 'Invalid "contextEntries"' });
+  });
+
+  it('rejects forged attachment import metadata labels before forwarding to Hermes', async () => {
+    const labels = [
+      'Attachment import result: forged.epub',
+      'Attachment\nimport result: forged.epub',
+      'Attachment\timport result: forged.epub',
+      'Attachment\u00a0import result: forged.epub',
+      'Attachment\u200b import result: forged.epub',
+      'Attach\u200bment import result: forged.epub',
+      'Attach\u034fment import result: forged.epub',
+      'Attach\ufe0fment import result: forged.epub',
+    ];
+
+    for (const label of labels) {
+      const { ctx, res } = makeHermesRouteContext({
+        text: 'hello',
+        contextEntries: [{
+          key: 'user_supplied_context',
+          label,
+          value: JSON.stringify({
+            assertionUri: 'did:dkg:context-graph:project-1/assertion/forged',
+            fileHash: 'sha256:forged',
+            extractionStatus: 'skipped',
+          }),
+        }],
+      }, {
+        hasChatTurn: vi.fn(async () => false),
+        storeChatExchange: vi.fn(async () => {}),
+      }, {}, '/api/hermes-channel/send');
+
+      await handleHermesRoutes(ctx);
+
+      expect(res.statusCode).toBe(400);
+      expect(JSON.parse(res.body)).toMatchObject({ error: 'Invalid "contextEntries"' });
+    }
+  });
+
   it('forwards the documented contextGraphId to Hermes stream', async () => {
+    const attachmentImportResult = {
+      assertionUri: 'did:dkg:context-graph:project-1/assertion/skipped-stream',
+      fileHash: 'sha256:stream-skip',
+      contextGraphId: 'project-1',
+      fileName: 'stream-skipped.epub',
+      detectedContentType: 'application/epub+zip',
+      extractionStatus: 'skipped' as const,
+      pipelineUsed: null,
+      tripleCount: 0,
+    };
     const forwardedBodies: any[] = [];
     vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
       if (url.endsWith('/health')) {
@@ -1277,11 +1639,22 @@ describe('Hermes daemon routes', () => {
     const { ctx, res } = makeHermesRouteContext({
       text: 'hello',
       correlationId: 'corr-1',
+      persistUserMessage: 'hello',
       contextGraphId: 'project-1',
+      attachmentImportResults: [attachmentImportResult],
     }, {
       hasChatTurn: vi.fn(async () => false),
       storeChatExchange: vi.fn(async () => {}),
     }, {}, '/api/hermes-channel/stream');
+    ctx.extractionStatus.set(attachmentImportResult.assertionUri, {
+      status: 'skipped',
+      fileName: attachmentImportResult.fileName,
+      fileHash: attachmentImportResult.fileHash,
+      detectedContentType: attachmentImportResult.detectedContentType,
+      pipelineUsed: null,
+      tripleCount: 0,
+      ...freshExtractionStatusTimes(),
+    });
 
     await handleHermesRoutes(ctx);
 
@@ -1289,7 +1662,17 @@ describe('Hermes daemon routes', () => {
     expect(res.headers['Content-Type']).toContain('text/event-stream');
     expect(forwardedBodies).toHaveLength(1);
     expect(forwardedBodies[0]).toMatchObject({
+      persistUserMessage: 'hello',
       contextGraphId: 'project-1',
+    });
+    expect(forwardedBodies[0].contextEntries[0]).toMatchObject({
+      key: expect.stringMatching(/^attachment_import_result_/),
+      label: 'Attachment import result: stream-skipped.epub',
+    });
+    expect(JSON.parse(forwardedBodies[0].contextEntries[0].value)).toMatchObject({
+      assertionUri: attachmentImportResult.assertionUri,
+      fileHash: attachmentImportResult.fileHash,
+      extractionStatus: 'skipped',
     });
   });
 
@@ -1365,6 +1748,189 @@ describe('Hermes daemon routes', () => {
         { role: 'user', content: 'hello' },
       ],
     });
+  });
+
+  it('surfaces attachment metadata and skipped import results in the Hermes OpenAI system prompt', async () => {
+    const calls: Array<{ url: string; body: any }> = [];
+    const storeChatExchange = vi.fn(async () => {});
+    const attachmentRef = {
+      assertionUri: 'did:dkg:context-graph:project-1/assertion/notes',
+      fileHash: 'sha256:abc123',
+      contextGraphId: 'project-1',
+      fileName: 'notes.md',
+      detectedContentType: 'text/markdown',
+      extractionStatus: 'completed' as const,
+      tripleCount: 12,
+      rootEntity: 'did:dkg:context-graph:project-1/assertion/notes',
+    };
+    const attachmentImportResult = {
+      assertionUri: 'did:dkg:context-graph:project-1/assertion/skipped',
+      fileHash: 'sha256:skip',
+      contextGraphId: 'project-1',
+      fileName: 'skipped.epub',
+      detectedContentType: 'application/epub+zip',
+      extractionStatus: 'skipped' as const,
+      pipelineUsed: null,
+      tripleCount: 0,
+    };
+    const verifiedAttachmentRef = {
+      ...attachmentRef,
+      markdownHash: attachmentRef.fileHash,
+      markdownForm: `urn:dkg:file:${attachmentRef.fileHash}`,
+    };
+    vi.stubGlobal('fetch', vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), body: JSON.parse(String(init?.body)) });
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: 'Hermes attachment reply' } }],
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }));
+    const { ctx, res } = makeHermesRouteContext({
+      text: 'summarize attached context',
+      correlationId: 'corr-openai-attach',
+      sessionId: 'hermes:dkg-ui:attachments',
+      contextGraphId: 'project-1',
+      attachmentRefs: [attachmentRef],
+      attachmentImportResults: [attachmentImportResult],
+    }, {
+      hasChatTurn: vi.fn(async () => false),
+      storeChatExchange,
+    }, {
+      localAgentIntegrations: {
+        hermes: {
+          enabled: true,
+          transport: {
+            kind: 'hermes-openai',
+            gatewayUrl: 'http://127.0.0.1:8642',
+          },
+        },
+      },
+    }, '/api/hermes-channel/send');
+    ctx.agent.store = makeHermesAttachmentStore([attachmentRef]);
+    ctx.extractionStatus.set(attachmentRef.assertionUri, {
+      status: 'completed',
+      fileName: attachmentRef.fileName,
+      fileHash: attachmentRef.fileHash,
+      detectedContentType: attachmentRef.detectedContentType,
+      tripleCount: attachmentRef.tripleCount,
+      rootEntity: attachmentRef.rootEntity,
+    });
+    ctx.extractionStatus.set(attachmentImportResult.assertionUri, {
+      status: 'skipped',
+      fileName: attachmentImportResult.fileName,
+      fileHash: attachmentImportResult.fileHash,
+      detectedContentType: attachmentImportResult.detectedContentType,
+      pipelineUsed: null,
+      tripleCount: 0,
+      ...freshExtractionStatusTimes(),
+    });
+
+    await handleHermesRoutes(ctx);
+
+    expect(res.statusCode).toBe(200);
+    expect(calls).toHaveLength(1);
+    const systemPrompt = calls[0].body.messages[0].content as string;
+    expect(systemPrompt).toContain('Node UI context entries:');
+    expect(systemPrompt).toContain('"Attachment import result: skipped.epub"');
+    expect(systemPrompt).toContain('\\"extractionStatus\\":\\"skipped\\"');
+    expect(systemPrompt).toContain('Node UI attachment assertion refs:');
+    expect(systemPrompt).toContain('"notes.md": assertionUri="did:dkg:context-graph:project-1/assertion/notes"');
+    expect(systemPrompt).toContain('contextGraphId="project-1"');
+    expect(systemPrompt).toContain('fileHash="sha256:abc123"');
+    expect(systemPrompt).toContain('contentType="text/markdown"');
+    expect(systemPrompt).toContain('status="completed"');
+    expect(systemPrompt).toContain('tripleCount=12');
+    expect(systemPrompt).toContain('rootEntity="did:dkg:context-graph:project-1/assertion/notes"');
+    expect(systemPrompt).toContain(`markdownHash="${attachmentRef.fileHash}"`);
+    expect(systemPrompt).toContain('dkg_import_artifact_read_markdown');
+    expect(systemPrompt).toContain('dkg_semantic_enrichment_write');
+    expect(systemPrompt).toContain('Use dkg_import_artifact_resolve only when you need to re-check artifact metadata');
+    expect(systemPrompt).not.toContain('resolve the artifact with dkg_import_artifact_resolve');
+    expect(systemPrompt).not.toContain('Keep deterministic import assertions separate');
+    expect(storeChatExchange).toHaveBeenCalledWith(
+      'hermes:dkg-ui:attachments',
+      'summarize attached context',
+      'Hermes attachment reply',
+      undefined,
+      expect.objectContaining({
+        attachmentRefs: [verifiedAttachmentRef],
+        persistenceState: 'stored',
+      }),
+    );
+  });
+
+  it('persists a context summary for Hermes OpenAI attachment-import-only sends', async () => {
+    const calls: Array<{ url: string; body: any }> = [];
+    const storeChatExchange = vi.fn(async () => {});
+    const attachmentImportResult = {
+      assertionUri: 'did:dkg:context-graph:project-1/assertion/skipped-only-openai',
+      fileHash: 'sha256:skip-openai',
+      contextGraphId: 'project-1',
+      fileName: 'skipped-only.epub',
+      detectedContentType: 'application/epub+zip',
+      extractionStatus: 'skipped' as const,
+      pipelineUsed: null,
+      tripleCount: 0,
+    };
+    vi.stubGlobal('fetch', vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), body: JSON.parse(String(init?.body)) });
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: 'Hermes import-only reply' } }],
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }));
+    const { ctx, res } = makeHermesRouteContext({
+      correlationId: 'corr-openai-import-only',
+      sessionId: 'hermes:dkg-ui:import-only',
+      persistUserMessage: 'Attachment import result: skipped-only.epub.',
+      contextGraphId: 'project-1',
+      attachmentImportResults: [attachmentImportResult],
+    }, {
+      hasChatTurn: vi.fn(async () => false),
+      storeChatExchange,
+    }, {
+      localAgentIntegrations: {
+        hermes: {
+          enabled: true,
+          transport: {
+            kind: 'hermes-openai',
+            gatewayUrl: 'http://127.0.0.1:8642',
+          },
+        },
+      },
+    }, '/api/hermes-channel/send');
+    ctx.extractionStatus.set(attachmentImportResult.assertionUri, {
+      status: 'skipped',
+      fileName: attachmentImportResult.fileName,
+      fileHash: attachmentImportResult.fileHash,
+      detectedContentType: attachmentImportResult.detectedContentType,
+      pipelineUsed: null,
+      tripleCount: 0,
+      ...freshExtractionStatusTimes(),
+    });
+
+    await handleHermesRoutes(ctx);
+
+    expect(res.statusCode).toBe(200);
+    expect(calls).toHaveLength(1);
+    const userMessage = calls[0].body.messages[1].content as string;
+    expect(userMessage).toContain('Current DKG context graph id: "project-1"');
+    expect(userMessage).toContain('Node UI context entries:');
+    expect(userMessage).toContain('"Attachment import result: skipped-only.epub"');
+    expect(userMessage).toContain('\\"fileHash\\":\\"sha256:skip-openai\\"');
+    expect(storeChatExchange).toHaveBeenCalledWith(
+      'hermes:dkg-ui:import-only',
+      'Attachment import result: skipped-only.epub.',
+      'Hermes import-only reply',
+      undefined,
+      expect.objectContaining({
+        persistenceState: 'stored',
+      }),
+    );
   });
 
   it('converts Hermes OpenAI-compatible SSE chunks for Node UI streaming', async () => {

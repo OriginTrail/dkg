@@ -20,7 +20,11 @@ import {Permissions} from "./libraries/Permissions.sol";
 
 contract Profile is INamed, IVersioned, ContractStatus, IInitializable {
     string private constant _NAME = "Profile";
-    string private constant _VERSION = "1.1.0";
+    // Bumped 1.1.0 -> 1.2.0: adds updateRelayCapable entry point for the
+    // Network State Registry (RFC 04 v0.3 / Issue #461). Multiaddrs were
+    // briefly added on a prior revision but are not stored on Profile —
+    // they live in per-round attestation KCs instead (RFC 04 §5.2).
+    string private constant _VERSION = "1.2.0";
 
     Ask public askContract;
     Identity public identityContract;
@@ -251,6 +255,25 @@ contract Profile is INamed, IVersioned, ContractStatus, IInitializable {
         } else {
             ps.addOperatorFee(identityId, newOperatorFee, effectiveStart);
         }
+    }
+
+    // =====================================================================
+    // RFC 04 v0.3 / Issue #461 — relay-capability flag.
+    //
+    // onlyIdentityOwner (admin OR operational): operators typically toggle
+    // this from the running daemon (operational key) on startup; admin
+    // override is supported. Multiaddrs are NOT stored here — see
+    // RFC 04 §5.2 for the rationale.
+    // =====================================================================
+
+    function updateRelayCapable(
+        uint72 identityId,
+        bool relayCapable
+    ) external onlyIdentityOwner(identityId) {
+        if (profileStorage.getNodeId(identityId).length == 0) {
+            revert ProfileLib.ProfileDoesntExist(identityId);
+        }
+        profileStorage.setRelayCapable(identityId, relayCapable);
     }
 
     function _checkIdentityOwner(uint72 identityId) internal view virtual {

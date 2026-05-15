@@ -123,6 +123,18 @@ for a in d.get('agents',[]):
 " 2>/dev/null
 }
 
+get_self_peer_id() {
+  local port=$1
+  curl -sS --max-time 5 -H "Authorization: Bearer $AUTH" \
+    "http://127.0.0.1:$port/api/agents" 2>/dev/null | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+for a in d.get('agents',[]):
+  if a.get('connectionStatus')=='self':
+    print(a.get('peerId','')); break
+" 2>/dev/null
+}
+
 CG_ID="sharing-test-$(date +%s)"
 
 echo "============================================================"
@@ -137,7 +149,8 @@ N1_ADDR=$(get_self_address 9201)
 N2_ADDR=$(get_self_address 9202)
 N3_ADDR=$(get_self_address 9203)
 N4_ADDR=$(get_self_address 9204)
-echo "  Node 1: $N1_ADDR"
+N1_PEER=$(get_self_peer_id 9201)
+echo "  Node 1: $N1_ADDR (peer: $N1_PEER)"
 echo "  Node 2: $N2_ADDR"
 echo "  Node 3: $N3_ADDR"
 echo "  Node 4: $N4_ADDR"
@@ -217,8 +230,11 @@ CATCHUP_ST=$(poll_catchup 9202 "$CG_ID" 10)
 check "Node 2 initial sync denied" "$CATCHUP_ST" "denied"
 
 echo "--- 2b: Node 2 sends signed join request ---"
-SIGN=$(c -X POST "http://127.0.0.1:9202/api/context-graph/$CG_ID/sign-join")
-SUBMIT=$(c -X POST "http://127.0.0.1:9202/api/context-graph/$CG_ID/request-join" -d "$SIGN")
+SIGN=$(c -X POST "http://127.0.0.1:9202/api/context-graph/$CG_ID/sign-join" -d "{\"curatorPeerId\":\"$N1_PEER\"}")
+# /request-join expects the signed delegation + curatorPeerId — splice the curator peer-id
+# into the response body before forwarding so the receiver can authenticate the decision.
+SUBMIT_BODY=$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); d['curatorPeerId']='$N1_PEER'; print(json.dumps(d))" "$SIGN")
+SUBMIT=$(c -X POST "http://127.0.0.1:9202/api/context-graph/$CG_ID/request-join" -d "$SUBMIT_BODY")
 SUBMIT_OK=$(json_get "$SUBMIT" ok)
 SUBMIT_DEL=$(json_get "$SUBMIT" delivered)
 check "Join request submitted" "$SUBMIT_OK" "true"
@@ -358,8 +374,9 @@ else
 fi
 
 echo "--- 5b: Node 4 sends signed join request ---"
-N4_SIGN=$(c -X POST "http://127.0.0.1:9204/api/context-graph/$CG_ID/sign-join")
-N4_SUBMIT=$(c -X POST "http://127.0.0.1:9204/api/context-graph/$CG_ID/request-join" -d "$N4_SIGN")
+N4_SIGN=$(c -X POST "http://127.0.0.1:9204/api/context-graph/$CG_ID/sign-join" -d "{\"curatorPeerId\":\"$N1_PEER\"}")
+N4_SUBMIT_BODY=$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); d['curatorPeerId']='$N1_PEER'; print(json.dumps(d))" "$N4_SIGN")
+N4_SUBMIT=$(c -X POST "http://127.0.0.1:9204/api/context-graph/$CG_ID/request-join" -d "$N4_SUBMIT_BODY")
 N4_SUB_OK=$(json_get "$N4_SUBMIT" ok)
 check "Node 4 join request submitted" "$N4_SUB_OK" "true"
 
@@ -735,8 +752,9 @@ else
 fi
 
 echo "--- 13e: Node 4 signs + submits join request ---"
-N4_SIGN=$(c -X POST "http://127.0.0.1:9204/api/context-graph/$(python3 -c 'import urllib.parse;print(urllib.parse.quote("'"$CG2_ID"'",safe=""))')/sign-join")
-N4_SUBMIT=$(c -X POST "http://127.0.0.1:9204/api/context-graph/$(python3 -c 'import urllib.parse;print(urllib.parse.quote("'"$CG2_ID"'",safe=""))')/request-join" -d "$N4_SIGN")
+N4_SIGN=$(c -X POST "http://127.0.0.1:9204/api/context-graph/$(python3 -c 'import urllib.parse;print(urllib.parse.quote("'"$CG2_ID"'",safe=""))')/sign-join" -d "{\"curatorPeerId\":\"$N1_PEER\"}")
+N4_SUBMIT_BODY=$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); d['curatorPeerId']='$N1_PEER'; print(json.dumps(d))" "$N4_SIGN")
+N4_SUBMIT=$(c -X POST "http://127.0.0.1:9204/api/context-graph/$(python3 -c 'import urllib.parse;print(urllib.parse.quote("'"$CG2_ID"'",safe=""))')/request-join" -d "$N4_SUBMIT_BODY")
 N4_SUBMIT_OK=$(json_get "$N4_SUBMIT" ok)
 check "Node 4 join request submitted" "$N4_SUBMIT_OK" "true"
 
@@ -807,8 +825,9 @@ echo "--- 13l: Node 5 sends join request + gets approved ---"
 c -X POST "http://127.0.0.1:9205/api/context-graph/subscribe" \
   -d "{\"contextGraphId\":\"$CG2_ID\"}" > /dev/null
 sleep 3
-N5_SIGN=$(c -X POST "http://127.0.0.1:9205/api/context-graph/$(python3 -c 'import urllib.parse;print(urllib.parse.quote("'"$CG2_ID"'",safe=""))')/sign-join")
-N5_SUBMIT=$(c -X POST "http://127.0.0.1:9205/api/context-graph/$(python3 -c 'import urllib.parse;print(urllib.parse.quote("'"$CG2_ID"'",safe=""))')/request-join" -d "$N5_SIGN")
+N5_SIGN=$(c -X POST "http://127.0.0.1:9205/api/context-graph/$(python3 -c 'import urllib.parse;print(urllib.parse.quote("'"$CG2_ID"'",safe=""))')/sign-join" -d "{\"curatorPeerId\":\"$N1_PEER\"}")
+N5_SUBMIT_BODY=$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); d['curatorPeerId']='$N1_PEER'; print(json.dumps(d))" "$N5_SIGN")
+N5_SUBMIT=$(c -X POST "http://127.0.0.1:9205/api/context-graph/$(python3 -c 'import urllib.parse;print(urllib.parse.quote("'"$CG2_ID"'",safe=""))')/request-join" -d "$N5_SUBMIT_BODY")
 check "Node 5 join request submitted" "$(json_get "$N5_SUBMIT" ok)" "true"
 sleep 2
 c -X POST "http://127.0.0.1:9201/api/context-graph/$(python3 -c 'import urllib.parse;print(urllib.parse.quote("'"$CG2_ID"'",safe=""))')/approve-join" \

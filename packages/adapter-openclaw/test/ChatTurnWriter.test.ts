@@ -8,9 +8,64 @@ import type { AgentEndContext, InternalMessageEvent } from "../src/ChatTurnWrite
 /** Wait long enough for fire-and-forget persistOne() to complete. */
 const flushMicrotasks = () => new Promise((r) => setTimeout(r, 20));
 
+const conversationInfoMetadataBlock = [
+  "Conversation info (untrusted metadata):",
+  "```json",
+  "{",
+  " \"chat_id\": \"telegram:test-chat-001\",",
+  " \"message_id\": \"test-message-1021\",",
+  " \"sender_id\": \"test-sender-001\",",
+  " \"sender\": \"Test Sender\",",
+  " \"timestamp\": \"Mon 2026-05-04 13:08 GMT+2\"",
+  "}",
+  "```",
+].join("\n");
+
+const senderMetadataBlock = [
+  "Sender (untrusted metadata):",
+  "```json",
+  "{",
+  " \"label\": \"Test Sender (test-sender-001)\",",
+  " \"id\": \"test-sender-001\",",
+  " \"name\": \"Test Sender\",",
+  " \"username\": \"test_sender_001\"",
+  "}",
+  "```",
+].join("\n");
+
+const pastedSenderMetadataBlock = [
+  "Sender (untrusted metadata):",
+  "```json",
+  "{",
+  " \"label\": \"Pasted Sender (user-pasted-sender-999)\",",
+  " \"id\": \"user-pasted-sender-999\",",
+  " \"name\": \"Pasted Sender\",",
+  " \"username\": \"pasted_sender_999\"",
+  "}",
+  "```",
+].join("\n");
+
+const channelContextMetadataBlock = [
+  "Channel context (untrusted metadata):",
+  "```json",
+  "{",
+  " \"example\": \"user-pasted channel context\"",
+  "}",
+  "```",
+].join("\n");
+
+function telegramWrappedUserText(userText: string, opts: { sender?: boolean } = {}): string {
+  const blocks = [conversationInfoMetadataBlock];
+  if (opts.sender !== false) blocks.push(senderMetadataBlock);
+  return [...blocks, userText].join("\n\n");
+}
+
 describe("ChatTurnWriter", () => {
   let writer: ChatTurnWriter;
-  let mockClient: { storeChatTurn: ReturnType<typeof vi.fn> };
+  let mockClient: {
+    storeChatTurn: ReturnType<typeof vi.fn>;
+    getChatTurnStoreStatus?: ReturnType<typeof vi.fn>;
+  };
   let mockLogger: {
     debug: ReturnType<typeof vi.fn>;
     info: ReturnType<typeof vi.fn>;
@@ -70,6 +125,556 @@ describe("ChatTurnWriter", () => {
       expect(fs.existsSync(path.join(directStateDir, "dkg-adapter", "chat-turn-watermarks.json"))).toBe(false);
     } finally {
       directWriter.flushSync();
+      fs.rmSync(directStateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("validates a loaded stale watermark against empty daemon chat-turn WM before W4a skips", async () => {
+    const directStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "chatturnwriter-stale-direct-"));
+    const sessionId = "openclaw:tg:acct:conv:sk-stale";
+    const directFile = path.join(directStateDir, "chat-turn-watermarks.json");
+    const localClient = {
+      storeChatTurn: vi.fn().mockResolvedValue(undefined),
+      getChatTurnStoreStatus: vi.fn().mockResolvedValue({
+        hasAnyChatTurnData: false,
+        existingSessionIds: [],
+      }),
+    };
+    const directWriter = new ChatTurnWriter({
+      client: localClient,
+      logger: mockLogger,
+      stateDir: directStateDir,
+      stateLayout: "direct",
+    });
+    try {
+      fs.writeFileSync(directFile, JSON.stringify({ [sessionId]: { w: 99, b: 0 } }));
+      const restarted = new ChatTurnWriter({
+        client: localClient,
+        logger: mockLogger,
+        stateDir: directStateDir,
+        stateLayout: "direct",
+      });
+      await restarted.onAgentEnd(
+        {
+          sessionId,
+          messages: [
+            { role: "user", content: "fresh telegram user" },
+            { role: "assistant", content: "fresh telegram reply" },
+          ],
+        },
+        { channelId: "tg", accountId: "acct", conversationId: "conv", sessionKey: "sk-stale" },
+      );
+      await restarted.flush();
+
+      expect(localClient.getChatTurnStoreStatus).toHaveBeenCalledWith(expect.arrayContaining([sessionId]));
+      expect(localClient.storeChatTurn).toHaveBeenCalledTimes(1);
+      expect(localClient.storeChatTurn.mock.calls[0][0]).toBe(sessionId);
+      expect(localClient.storeChatTurn.mock.calls[0][1]).toBe("fresh telegram user");
+      expect(localClient.storeChatTurn.mock.calls[0][2]).toBe("fresh telegram reply");
+      const persisted = JSON.parse(fs.readFileSync(directFile, "utf-8"));
+      expect(persisted[sessionId]).toEqual({ w: 0, b: 0 });
+      restarted.flushSync();
+    } finally {
+      directWriter.flushSync();
+      fs.rmSync(directStateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("validates migrated legacy stale watermarks against empty daemon chat-turn WM", async () => {
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "chatturnwriter-stale-legacy-"));
+    const legacyStateDir = path.join(workspace, ".openclaw");
+    const newStateDir = path.join(workspace, ".dkg-adapter");
+    const legacyFile = path.join(legacyStateDir, "dkg-adapter", "chat-turn-watermarks.json");
+    const newFile = path.join(newStateDir, "chat-turn-watermarks.json");
+    const sessionId = "openclaw:tg:acct:conv:sk-legacy-stale";
+    const localClient = {
+      storeChatTurn: vi.fn().mockResolvedValue(undefined),
+      getChatTurnStoreStatus: vi.fn().mockResolvedValue({
+        hasAnyChatTurnData: false,
+        existingSessionIds: [],
+      }),
+    };
+    try {
+      fs.mkdirSync(path.dirname(legacyFile), { recursive: true });
+      fs.writeFileSync(legacyFile, JSON.stringify({ [sessionId]: { w: 42, b: 0 } }));
+      const migrated = new ChatTurnWriter({
+        client: localClient,
+        logger: mockLogger,
+        stateDir: newStateDir,
+        stateLayout: "direct",
+        legacyStateDirs: [legacyStateDir],
+      });
+      await migrated.onAgentEnd(
+        {
+          sessionId,
+          messages: [
+            { role: "user", content: "after wm recreation" },
+            { role: "assistant", content: "stored again" },
+          ],
+        },
+        { channelId: "tg", accountId: "acct", conversationId: "conv", sessionKey: "sk-legacy-stale" },
+      );
+      await migrated.flush();
+
+      expect(localClient.storeChatTurn).toHaveBeenCalledTimes(1);
+      expect(localClient.storeChatTurn.mock.calls[0][0]).toBe(sessionId);
+      const persisted = JSON.parse(fs.readFileSync(newFile, "utf-8"));
+      expect(persisted[sessionId]).toEqual({ w: 0, b: 0 });
+      migrated.flushSync();
+    } finally {
+      fs.rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a loaded high watermark when daemon confirms the session exists", async () => {
+    const directStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "chatturnwriter-stale-positive-"));
+    const sessionId = "openclaw:tg:acct:conv:sk-present";
+    const directFile = path.join(directStateDir, "chat-turn-watermarks.json");
+    const localClient = {
+      storeChatTurn: vi.fn().mockResolvedValue(undefined),
+      getChatTurnStoreStatus: vi.fn().mockResolvedValue({
+        hasAnyChatTurnData: true,
+        existingSessionIds: [sessionId],
+      }),
+    };
+    try {
+      fs.writeFileSync(directFile, JSON.stringify({ [sessionId]: { w: 99, b: 0 } }));
+      const restarted = new ChatTurnWriter({
+        client: localClient,
+        logger: mockLogger,
+        stateDir: directStateDir,
+        stateLayout: "direct",
+      });
+      await restarted.onAgentEnd(
+        {
+          sessionId,
+          messages: [
+            { role: "user", content: "already saved" },
+            { role: "assistant", content: "already saved reply" },
+          ],
+        },
+        { channelId: "tg", accountId: "acct", conversationId: "conv", sessionKey: "sk-present" },
+      );
+      await restarted.flush();
+
+      expect(localClient.getChatTurnStoreStatus).toHaveBeenCalledWith(expect.arrayContaining([sessionId]));
+      expect(localClient.storeChatTurn).not.toHaveBeenCalled();
+      restarted.flushSync();
+    } finally {
+      fs.rmSync(directStateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves loaded direct-channel markers when daemon has chat data but the Telegram session is absent", async () => {
+    const directStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "chatturnwriter-stale-external-marker-"));
+    const sessionId = "openclaw:tg:acct:conv:shared-sk";
+    const externalCursorKey = "openclaw:transcript:shared-sk";
+    const directFile = path.join(directStateDir, "chat-turn-watermarks.json");
+    const localClient = {
+      storeChatTurn: vi.fn().mockResolvedValue(undefined),
+      getChatTurnStoreStatus: vi.fn().mockResolvedValue({
+        hasAnyChatTurnData: true,
+        existingSessionIds: [],
+      }),
+    };
+    try {
+      const seeder = new ChatTurnWriter({
+        client: localClient,
+        logger: mockLogger,
+        stateDir: directStateDir,
+        stateLayout: "direct",
+      });
+      await seeder.markExternalTurnPersistedDurable({
+        sessionKey: "shared-sk",
+        turnId: "ui-turn",
+        user: "ui user",
+        assistant: "ui assistant",
+      });
+      seeder.flushSync();
+      localClient.storeChatTurn.mockClear();
+      localClient.getChatTurnStoreStatus.mockClear();
+
+      const restarted = new ChatTurnWriter({
+        client: localClient,
+        logger: mockLogger,
+        stateDir: directStateDir,
+        stateLayout: "direct",
+      });
+      await restarted.onAgentEnd(
+        {
+          sessionId,
+          messages: [
+            { role: "user", content: "ui user", context: { channelId: "dkg-ui", turnId: "ui-turn" } },
+            { role: "assistant", content: "ui assistant" },
+          ],
+        },
+        { channelId: "tg", accountId: "acct", conversationId: "conv", sessionKey: "shared-sk" },
+      );
+      await restarted.flush();
+
+      expect(localClient.getChatTurnStoreStatus).toHaveBeenCalledWith(expect.arrayContaining([sessionId]));
+      expect(localClient.storeChatTurn).not.toHaveBeenCalled();
+      const persisted = JSON.parse(fs.readFileSync(directFile, "utf-8"));
+      expect(persisted[sessionId]).toEqual({ w: 0, b: 0 });
+      expect(Object.keys(persisted[externalCursorKey]?.m ?? {})).toHaveLength(3);
+      restarted.flushSync();
+    } finally {
+      fs.rmSync(directStateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("validates daemon WM once then trusts the external cursor key on the hot path", async () => {
+    // Regression: an earlier draft kept external cursor keys perpetually
+    // marked untrusted while the daemon had any chat-turn data, so every
+    // subsequent onAgentEnd re-issued the 2-query getChatTurnStoreStatus
+    // round trip even after the first validation already proved the keys
+    // were non-stale. Validation is a one-shot operation per
+    // untrusted-marked key; lifecycle events (load, migrate, setClient)
+    // re-mark it untrusted at the right time.
+    const directStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "chatturnwriter-trust-once-"));
+    const sessionId = "openclaw:tg:acct:conv:trust-sk";
+    const directFile = path.join(directStateDir, "chat-turn-watermarks.json");
+    const localClient = {
+      storeChatTurn: vi.fn().mockResolvedValue(undefined),
+      getChatTurnStoreStatus: vi.fn().mockResolvedValue({
+        hasAnyChatTurnData: true,
+        existingSessionIds: [sessionId],
+      }),
+    };
+    try {
+      const seeder = new ChatTurnWriter({
+        client: localClient,
+        logger: mockLogger,
+        stateDir: directStateDir,
+        stateLayout: "direct",
+      });
+      await seeder.markExternalTurnPersistedDurable({
+        sessionKey: "trust-sk",
+        turnId: "ui-turn",
+        user: "ui user",
+        assistant: "ui assistant",
+      });
+      seeder.flushSync();
+      localClient.storeChatTurn.mockClear();
+      localClient.getChatTurnStoreStatus.mockClear();
+
+      const restarted = new ChatTurnWriter({
+        client: localClient,
+        logger: mockLogger,
+        stateDir: directStateDir,
+        stateLayout: "direct",
+      });
+
+      await restarted.onAgentEnd(
+        {
+          sessionId,
+          messages: [
+            { role: "user", content: "tg user 1" },
+            { role: "assistant", content: "tg assistant 1" },
+          ],
+        },
+        { channelId: "tg", accountId: "acct", conversationId: "conv", sessionKey: "trust-sk" },
+      );
+      await restarted.flush();
+      expect(localClient.getChatTurnStoreStatus).toHaveBeenCalledTimes(1);
+
+      await restarted.onAgentEnd(
+        {
+          sessionId,
+          messages: [
+            { role: "user", content: "tg user 1" },
+            { role: "assistant", content: "tg assistant 1" },
+            { role: "user", content: "tg user 2" },
+            { role: "assistant", content: "tg assistant 2" },
+          ],
+        },
+        { channelId: "tg", accountId: "acct", conversationId: "conv", sessionKey: "trust-sk" },
+      );
+      await restarted.flush();
+      expect(localClient.getChatTurnStoreStatus).toHaveBeenCalledTimes(1);
+      const persistedDoc = JSON.parse(fs.readFileSync(directFile, "utf-8"));
+      expect(persistedDoc["openclaw:transcript:trust-sk"]?.m).toBeDefined();
+      restarted.flushSync();
+    } finally {
+      fs.rmSync(directStateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not clear fresh direct-channel markers written while stale daemon validation is in flight", async () => {
+    const directStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "chatturnwriter-stale-marker-race-"));
+    const sessionId = "openclaw:tg:acct:conv:race-sk";
+    const externalCursorKey = "openclaw:transcript:race-sk";
+    const directFile = path.join(directStateDir, "chat-turn-watermarks.json");
+    let resolveStatus!: (value: { hasAnyChatTurnData: boolean; existingSessionIds: string[] }) => void;
+    const statusPromise = new Promise<{ hasAnyChatTurnData: boolean; existingSessionIds: string[] }>((resolve) => {
+      resolveStatus = resolve;
+    });
+    const localClient = {
+      storeChatTurn: vi.fn().mockResolvedValue(undefined),
+      getChatTurnStoreStatus: vi.fn().mockReturnValue(statusPromise),
+    };
+    try {
+      const seeder = new ChatTurnWriter({
+        client: localClient,
+        logger: mockLogger,
+        stateDir: directStateDir,
+        stateLayout: "direct",
+      });
+      await seeder.markExternalTurnPersistedDurable({
+        sessionKey: "race-sk",
+        turnId: "old-ui-turn",
+        user: "old ui user",
+        assistant: "old ui assistant",
+      });
+      seeder.flushSync();
+      localClient.storeChatTurn.mockClear();
+      localClient.getChatTurnStoreStatus.mockClear();
+
+      const restarted = new ChatTurnWriter({
+        client: localClient,
+        logger: mockLogger,
+        stateDir: directStateDir,
+        stateLayout: "direct",
+      });
+      await restarted.onAgentEnd(
+        {
+          sessionId,
+          messages: [
+            { role: "user", content: "old ui user", context: { channelId: "dkg-ui", turnId: "old-ui-turn" } },
+            { role: "assistant", content: "old ui assistant" },
+          ],
+        },
+        { channelId: "tg", accountId: "acct", conversationId: "conv", sessionKey: "race-sk" },
+      );
+      for (let i = 0; i < 10 && localClient.getChatTurnStoreStatus.mock.calls.length === 0; i++) {
+        await flushMicrotasks();
+      }
+      expect(localClient.getChatTurnStoreStatus).toHaveBeenCalled();
+
+      await restarted.markExternalTurnPersistedDurable({
+        sessionKey: "race-sk",
+        turnId: "fresh-ui-turn",
+        user: "fresh ui user",
+        assistant: "fresh ui assistant",
+      });
+      resolveStatus({ hasAnyChatTurnData: false, existingSessionIds: [] });
+      await restarted.flush();
+
+      expect(localClient.storeChatTurn).not.toHaveBeenCalled();
+      const persisted = JSON.parse(fs.readFileSync(directFile, "utf-8"));
+      expect(Object.keys(persisted[externalCursorKey]?.m ?? {})).toHaveLength(5);
+      restarted.flushSync();
+    } finally {
+      fs.rmSync(directStateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("clears stale W4a watermark but preserves fresh W4b state written during daemon validation", async () => {
+    const directStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "chatturnwriter-stale-w4b-race-"));
+    const sessionId = "openclaw:tg:acct:conv:race-sk";
+    const directFile = path.join(directStateDir, "chat-turn-watermarks.json");
+    let resolveStatus!: (value: { hasAnyChatTurnData: boolean; existingSessionIds: string[] }) => void;
+    const statusPromise = new Promise<{ hasAnyChatTurnData: boolean; existingSessionIds: string[] }>((resolve) => {
+      resolveStatus = resolve;
+    });
+    const localClient = {
+      storeChatTurn: vi.fn().mockResolvedValue(undefined),
+      getChatTurnStoreStatus: vi.fn().mockReturnValue(statusPromise),
+    };
+    try {
+      fs.writeFileSync(directFile, JSON.stringify({ [sessionId]: { w: 99, b: 0 } }));
+      const restarted = new ChatTurnWriter({
+        client: localClient,
+        logger: mockLogger,
+        stateDir: directStateDir,
+        stateLayout: "direct",
+      });
+      await restarted.onAgentEnd(
+        {
+          sessionId,
+          messages: [
+            { role: "user", content: "race user" },
+            { role: "assistant", content: "race assistant" },
+          ],
+        },
+        { channelId: "tg", accountId: "acct", conversationId: "conv", sessionKey: "race-sk" },
+      );
+      for (let i = 0; i < 10 && localClient.getChatTurnStoreStatus.mock.calls.length === 0; i++) {
+        await flushMicrotasks();
+      }
+      expect(localClient.getChatTurnStoreStatus).toHaveBeenCalled();
+
+      restarted.onMessageReceived({
+        sessionKey: "race-sk",
+        context: {
+          content: "race user",
+          channelId: "tg",
+          accountId: "acct",
+          conversationId: "conv",
+          messageId: "in-race",
+        },
+      });
+      await restarted.onMessageSent({
+        sessionKey: "race-sk",
+        context: {
+          content: "race assistant",
+          channelId: "tg",
+          accountId: "acct",
+          conversationId: "conv",
+          messageId: "out-race",
+          success: true,
+        },
+      });
+
+      resolveStatus({ hasAnyChatTurnData: false, existingSessionIds: [] });
+      await restarted.flush();
+
+      expect(localClient.storeChatTurn).toHaveBeenCalledTimes(1);
+      const persisted = JSON.parse(fs.readFileSync(directFile, "utf-8"));
+      expect(persisted[sessionId]?.w).toBe(-1);
+      expect(persisted[sessionId]?.b).toBe(1);
+      expect((restarted as any).peekCrossPathStamp(
+        sessionId,
+        (restarted as any).w4bOriginKey("race user", "race assistant"),
+      )).toBe(true);
+      restarted.flushSync();
+    } finally {
+      fs.rmSync(directStateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("clears stale pending watermarks that roll into cached state during daemon validation", async () => {
+    const directStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "chatturnwriter-stale-pending-rollover-"));
+    const sessionId = "openclaw:tg:acct:conv:pending-sk";
+    let resolveStatus!: (value: { hasAnyChatTurnData: boolean; existingSessionIds: string[] }) => void;
+    const statusPromise = new Promise<{ hasAnyChatTurnData: boolean; existingSessionIds: string[] }>((resolve) => {
+      resolveStatus = resolve;
+    });
+    const localClient = {
+      storeChatTurn: vi.fn().mockResolvedValue(undefined),
+      getChatTurnStoreStatus: vi.fn().mockReturnValue(statusPromise),
+    };
+    try {
+      const restarted = new ChatTurnWriter({
+        client: localClient,
+        logger: mockLogger,
+        stateDir: directStateDir,
+        stateLayout: "direct",
+      });
+      (restarted as any).saveWatermark(sessionId, 99);
+      restarted.setClient(localClient);
+      await restarted.onAgentEnd(
+        {
+          sessionId,
+          messages: [
+            { role: "user", content: "pending user" },
+            { role: "assistant", content: "pending assistant" },
+          ],
+        },
+        { channelId: "tg", accountId: "acct", conversationId: "conv", sessionKey: "pending-sk" },
+      );
+      for (let i = 0; i < 10 && localClient.getChatTurnStoreStatus.mock.calls.length === 0; i++) {
+        await flushMicrotasks();
+      }
+      expect(localClient.getChatTurnStoreStatus).toHaveBeenCalled();
+      await new Promise((resolve) => setTimeout(resolve, 70));
+      expect((restarted as any).cachedWatermarks.get(sessionId)).toBe(99);
+
+      resolveStatus({ hasAnyChatTurnData: false, existingSessionIds: [] });
+      await restarted.flush();
+
+      expect(localClient.storeChatTurn).toHaveBeenCalledTimes(1);
+      expect(localClient.storeChatTurn.mock.calls[0][1]).toBe("pending user");
+      expect(localClient.storeChatTurn.mock.calls[0][2]).toBe("pending assistant");
+      restarted.flushSync();
+    } finally {
+      fs.rmSync(directStateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("clears stale cursor state then cold-start clamps a longer transcript to the latest pair", async () => {
+    const directStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "chatturnwriter-stale-clamp-"));
+    const sessionId = "openclaw:tg:acct:conv:sk-clamp";
+    const directFile = path.join(directStateDir, "chat-turn-watermarks.json");
+    const localClient = {
+      storeChatTurn: vi.fn().mockResolvedValue(undefined),
+      getChatTurnStoreStatus: vi.fn().mockResolvedValue({
+        hasAnyChatTurnData: false,
+        existingSessionIds: [],
+      }),
+    };
+    try {
+      fs.writeFileSync(directFile, JSON.stringify({ [sessionId]: { w: 0, b: 0 } }));
+      const restarted = new ChatTurnWriter({
+        client: localClient,
+        logger: mockLogger,
+        stateDir: directStateDir,
+        stateLayout: "direct",
+      });
+      await restarted.onAgentEnd(
+        {
+          sessionId,
+          messages: [
+            { role: "user", content: "old u1" },
+            { role: "assistant", content: "old a1" },
+            { role: "user", content: "old u2" },
+            { role: "assistant", content: "old a2" },
+            { role: "user", content: "current u3" },
+            { role: "assistant", content: "current a3" },
+          ],
+        },
+        { channelId: "tg", accountId: "acct", conversationId: "conv", sessionKey: "sk-clamp" },
+      );
+      await restarted.flush();
+
+      expect(localClient.storeChatTurn).toHaveBeenCalledTimes(1);
+      expect(localClient.storeChatTurn.mock.calls[0][1]).toBe("current u3");
+      expect(localClient.storeChatTurn.mock.calls[0][2]).toBe("current a3");
+      const persisted = JSON.parse(fs.readFileSync(directFile, "utf-8"));
+      expect(persisted[sessionId]).toEqual({ w: 2, b: 0 });
+      restarted.flushSync();
+    } finally {
+      fs.rmSync(directStateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves local cursor state when daemon status validation fails", async () => {
+    const directStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "chatturnwriter-stale-validation-failure-"));
+    const sessionId = "openclaw:tg:acct:conv:sk-validation-failure";
+    const directFile = path.join(directStateDir, "chat-turn-watermarks.json");
+    const localClient = {
+      storeChatTurn: vi.fn().mockResolvedValue(undefined),
+      getChatTurnStoreStatus: vi.fn().mockRejectedValue(new Error("network unavailable")),
+    };
+    try {
+      fs.writeFileSync(directFile, JSON.stringify({ [sessionId]: { w: 99, b: 0 } }));
+      const restarted = new ChatTurnWriter({
+        client: localClient,
+        logger: mockLogger,
+        stateDir: directStateDir,
+        stateLayout: "direct",
+      });
+      await restarted.onAgentEnd(
+        {
+          sessionId,
+          messages: [
+            { role: "user", content: "should remain skipped" },
+            { role: "assistant", content: "validation failed" },
+          ],
+        },
+        { channelId: "tg", accountId: "acct", conversationId: "conv", sessionKey: "sk-validation-failure" },
+      );
+      await restarted.flush();
+
+      expect(localClient.storeChatTurn).not.toHaveBeenCalled();
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        expect.stringContaining("Failed to validate chat-turn cursor state"),
+        expect.objectContaining({ sessionId }),
+      );
+      const persisted = JSON.parse(fs.readFileSync(directFile, "utf-8"));
+      expect(persisted[sessionId]).toEqual({ w: 99, b: 0 });
+      restarted.flushSync();
+    } finally {
       fs.rmSync(directStateDir, { recursive: true, force: true });
     }
   });
@@ -556,6 +1161,260 @@ describe("ChatTurnWriter", () => {
     expect(call[2]).toBe("answer text");
   });
 
+  it("T380 - W4a strips leading Conversation info and Sender metadata from persisted user text", async () => {
+    const event: AgentEndContext = {
+      sessionId: "test",
+      messages: [
+        { role: "user", content: telegramWrappedUserText("hello") },
+        { role: "assistant", content: "reply" },
+      ],
+    };
+
+    writer.onAgentEnd(event, { channelId: "telegram", sessionKey: "sk" });
+    await flushMicrotasks();
+
+    const [, persistedUser] = mockClient.storeChatTurn.mock.calls[0];
+    expect(persistedUser).toBe("hello");
+    expect(persistedUser).not.toContain("Conversation info");
+    expect(persistedUser).not.toContain("Sender");
+    expect(persistedUser).not.toContain("chat_id");
+    expect(persistedUser).not.toContain("sender_id");
+    expect(persistedUser).not.toContain("username");
+    expect(persistedUser).not.toContain("timestamp");
+  });
+
+  it("T380 - W4a strips leading Conversation info-only metadata", async () => {
+    const event: AgentEndContext = {
+      sessionId: "test",
+      messages: [
+        { role: "user", content: telegramWrappedUserText("hello", { sender: false }) },
+        { role: "assistant", content: "reply" },
+      ],
+    };
+
+    writer.onAgentEnd(event, { channelId: "telegram", sessionKey: "sk" });
+    await flushMicrotasks();
+
+    const [, persistedUser] = mockClient.storeChatTurn.mock.calls[0];
+    expect(persistedUser).toBe("hello");
+  });
+
+  it("T380 - W4a leaves pure user text unchanged", async () => {
+    const pureUserText = "  plain user text without channel metadata";
+    const event: AgentEndContext = {
+      sessionId: "test",
+      messages: [
+        { role: "user", content: pureUserText },
+        { role: "assistant", content: "reply" },
+      ],
+    };
+
+    writer.onAgentEnd(event, { channelId: "telegram", sessionKey: "sk" });
+    await flushMicrotasks();
+
+    const [, persistedUser] = mockClient.storeChatTurn.mock.calls[0];
+    expect(persistedUser).toBe(pureUserText);
+  });
+
+  it("T380 - W4a preserves multi-line user text after leading metadata blocks", async () => {
+    const actualUserText = "hello\nline two\n\nline four";
+    const event: AgentEndContext = {
+      sessionId: "test",
+      messages: [
+        { role: "user", content: telegramWrappedUserText(actualUserText) },
+        { role: "assistant", content: "reply" },
+      ],
+    };
+
+    writer.onAgentEnd(event, { channelId: "telegram", sessionKey: "sk" });
+    await flushMicrotasks();
+
+    const [, persistedUser] = mockClient.storeChatTurn.mock.calls[0];
+    expect(persistedUser).toBe(actualUserText);
+  });
+
+  it("T380 - W4a preserves indentation on the first user line after metadata blocks", async () => {
+    const actualUserText = "  const answer = 42;\n  return answer;";
+    const event: AgentEndContext = {
+      sessionId: "test",
+      messages: [
+        { role: "user", content: telegramWrappedUserText(actualUserText) },
+        { role: "assistant", content: "reply" },
+      ],
+    };
+
+    writer.onAgentEnd(event, { channelId: "telegram", sessionKey: "sk" });
+    await flushMicrotasks();
+
+    const [, persistedUser] = mockClient.storeChatTurn.mock.calls[0];
+    expect(persistedUser).toBe(actualUserText);
+  });
+
+  it("T380 - W4a preserves metadata-shaped text pasted in the middle", async () => {
+    const pastedMetadata = [
+      "Please inspect this payload:",
+      conversationInfoMetadataBlock,
+      "The block above is part of my message.",
+    ].join("\n");
+    const event: AgentEndContext = {
+      sessionId: "test",
+      messages: [
+        { role: "user", content: pastedMetadata },
+        { role: "assistant", content: "reply" },
+      ],
+    };
+
+    writer.onAgentEnd(event, { channelId: "telegram", sessionKey: "sk" });
+    await flushMicrotasks();
+
+    const [, persistedUser] = mockClient.storeChatTurn.mock.calls[0];
+    expect(persistedUser).toBe(pastedMetadata);
+    expect(persistedUser).toContain("Conversation info (untrusted metadata):");
+  });
+
+  it("T380 - W4a preserves leading metadata-shaped text outside Telegram context", async () => {
+    const pastedMetadata = telegramWrappedUserText("This block is part of my message");
+    const event: AgentEndContext = {
+      sessionId: "test",
+      messages: [
+        { role: "user", content: pastedMetadata },
+        { role: "assistant", content: "reply" },
+      ],
+    };
+
+    writer.onAgentEnd(event, { channelId: "discord", sessionKey: "sk" });
+    await flushMicrotasks();
+
+    const [, persistedUser] = mockClient.storeChatTurn.mock.calls[0];
+    expect(persistedUser).toBe(pastedMetadata);
+    expect(persistedUser).toContain("Conversation info (untrusted metadata):");
+  });
+
+  it("T380 - W4a preserves direct-channel backfill text before marker lookup in Telegram context", async () => {
+    const directUserText = telegramWrappedUserText("This metadata-shaped block belongs to DKG UI text");
+    await writer.markExternalTurnPersistedDurable({
+      sessionKey: "agent:main:main",
+      turnId: "node-ui-corr-metadata-shaped",
+      user: directUserText,
+      assistant: "node ui answer",
+    });
+    mockClient.storeChatTurn.mockClear();
+
+    writer.onAgentEnd({
+      sessionId: "test",
+      messages: [
+        {
+          role: "user",
+          content: directUserText,
+          context: { Provider: "dkg-ui", DkgTurnId: "node-ui-corr-metadata-shaped" },
+        },
+        { role: "assistant", content: "node ui answer" },
+        { role: "user", content: telegramWrappedUserText("live telegram question") },
+        { role: "assistant", content: "telegram answer" },
+      ],
+    }, { channelId: "telegram", sessionKey: "agent:main:main" });
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    const [, persistedUser] = mockClient.storeChatTurn.mock.calls[0];
+    expect(persistedUser).toBe("live telegram question");
+  });
+
+  it("T380 - W4a preserves leading metadata-shaped user text after Telegram wrapper", async () => {
+    const actualUserText = [conversationInfoMetadataBlock, "This block is part of my message"].join("\n");
+    const event: AgentEndContext = {
+      sessionId: "test",
+      messages: [
+        { role: "user", content: telegramWrappedUserText(actualUserText) },
+        { role: "assistant", content: "reply" },
+      ],
+    };
+
+    writer.onAgentEnd(event, { channelId: "telegram", sessionKey: "sk" });
+    await flushMicrotasks();
+
+    const [, persistedUser] = mockClient.storeChatTurn.mock.calls[0];
+    expect(persistedUser).toBe(actualUserText);
+    expect(persistedUser).toContain("Conversation info (untrusted metadata):");
+  });
+
+  it("T380 - W4a preserves pasted Sender block after Conversation-only Telegram wrapper", async () => {
+    const actualUserText = [pastedSenderMetadataBlock, "This Sender block is part of my message"].join("\n\n");
+    const event: AgentEndContext = {
+      sessionId: "test",
+      messages: [
+        { role: "user", content: telegramWrappedUserText(actualUserText, { sender: false }) },
+        { role: "assistant", content: "reply" },
+      ],
+    };
+
+    writer.onAgentEnd(event, { channelId: "telegram", sessionKey: "sk" });
+    await flushMicrotasks();
+
+    const [, persistedUser] = mockClient.storeChatTurn.mock.calls[0];
+    expect(persistedUser).toBe(actualUserText);
+    expect(persistedUser).toContain("Sender (untrusted metadata):");
+    expect(persistedUser).toContain("user-pasted-sender-999");
+  });
+
+  it("T380 - W4a preserves standalone leading Sender block as user text", async () => {
+    const event: AgentEndContext = {
+      sessionId: "test",
+      messages: [
+        { role: "user", content: pastedSenderMetadataBlock },
+        { role: "assistant", content: "reply" },
+      ],
+    };
+
+    writer.onAgentEnd(event, { channelId: "telegram", sessionKey: "sk" });
+    await flushMicrotasks();
+
+    const [, persistedUser] = mockClient.storeChatTurn.mock.calls[0];
+    expect(persistedUser).toBe(pastedSenderMetadataBlock);
+    expect(persistedUser).toContain("Sender (untrusted metadata):");
+    expect(persistedUser).toContain("user-pasted-sender-999");
+  });
+
+  it("T380 - W4a preserves non-Telegram metadata labels after Telegram wrapper", async () => {
+    const actualUserText = [channelContextMetadataBlock, "This block is part of my message"].join("\n");
+    const event: AgentEndContext = {
+      sessionId: "test",
+      messages: [
+        { role: "user", content: telegramWrappedUserText(actualUserText) },
+        { role: "assistant", content: "reply" },
+      ],
+    };
+
+    writer.onAgentEnd(event, { channelId: "telegram", sessionKey: "sk" });
+    await flushMicrotasks();
+
+    const [, persistedUser] = mockClient.storeChatTurn.mock.calls[0];
+    expect(persistedUser).toBe(actualUserText);
+    expect(persistedUser).toContain("Channel context (untrusted metadata):");
+  });
+
+  it("T380 - W4a turnId hashing uses stripped user text", async () => {
+    const event: AgentEndContext = {
+      sessionId: "test",
+      messages: [
+        { role: "user", content: telegramWrappedUserText("hello") },
+        { role: "assistant", content: "reply" },
+      ],
+    };
+
+    writer.onAgentEnd(event, { channelId: "telegram", sessionKey: "sk" });
+    await flushMicrotasks();
+
+    const call = mockClient.storeChatTurn.mock.calls[0];
+    expect(call[1]).toBe("hello");
+    expect(call[3]?.turnId).toBe(
+      (writer as any).deterministicTurnId("openclaw:telegram:::sk", "hello", "reply", 0),
+    );
+    expect(call[3]?.turnId).not.toBe(
+      (writer as any).deterministicTurnId("openclaw:telegram:::sk", telegramWrappedUserText("hello"), "reply", 0),
+    );
+  });
+
   it("stores user message on onMessageReceived", () => {
     writer.onMessageReceived({
       sessionKey: "session-123",
@@ -578,6 +1437,213 @@ describe("ChatTurnWriter", () => {
     });
     await flushMicrotasks();
     expect(mockClient.storeChatTurn).toHaveBeenCalled();
+  });
+
+  it("T380 - W4b onMessageReceived strips leading OpenClaw metadata before persist", async () => {
+    writer.onMessageReceived({
+      sessionKey: "key123",
+      direction: "inbound",
+      text: telegramWrappedUserText("hello"),
+      ...({ context: { channelId: "telegram" } } as any),
+    } as any);
+    await writer.onMessageSent({
+      sessionKey: "key123",
+      direction: "outbound",
+      text: "response",
+      ...({ context: { success: true, channelId: "telegram" } } as any),
+    } as any);
+    await flushMicrotasks();
+
+    const [, persistedUser] = mockClient.storeChatTurn.mock.calls[0];
+    expect(persistedUser).toBe("hello");
+    expect(persistedUser).not.toContain("chat_id");
+    expect(persistedUser).not.toContain("username");
+  });
+
+  it("T380 - W4b persists canonical internal Telegram envelopes and logs success", async () => {
+    writer.onMessageReceived({
+      sessionKey: "key123",
+      direction: "inbound",
+      context: {
+        channelId: "telegram",
+        accountId: "bot",
+        conversationId: "telegram:test-chat-001",
+        content: telegramWrappedUserText("hello"),
+        messageId: "in-test-message-1021",
+      },
+    } as any);
+
+    await writer.onMessageSent({
+      sessionKey: "key123",
+      direction: "outbound",
+      context: {
+        channelId: "telegram",
+        accountId: "bot",
+        conversationId: "telegram:test-chat-001",
+        content: "response",
+        success: true,
+        messageId: "out-test-message-1022",
+      },
+    } as any);
+    await writer.flush();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    const [sessionId, persistedUser, persistedAssistant] = mockClient.storeChatTurn.mock.calls[0];
+    expect(sessionId).toBe("openclaw:telegram:bot:telegram%3Atest-chat-001:key123");
+    expect(persistedUser).toBe("hello");
+    expect(persistedAssistant).toBe("response");
+    expect(mockLogger.info).toHaveBeenCalledWith(
+      expect.stringContaining("[ChatTurnWriter] Persisted turn"),
+    );
+  });
+
+  it("T380 - W4b preserves leading metadata-shaped text outside Telegram context", async () => {
+    const pastedMetadata = telegramWrappedUserText("This block is part of my message");
+    writer.onMessageReceived({
+      sessionKey: "key123",
+      direction: "inbound",
+      text: pastedMetadata,
+      ...({ context: { channelId: "discord" } } as any),
+    } as any);
+    await writer.onMessageSent({
+      sessionKey: "key123",
+      direction: "outbound",
+      text: "response",
+      ...({ context: { success: true, channelId: "discord" } } as any),
+    } as any);
+    await flushMicrotasks();
+
+    const [, persistedUser] = mockClient.storeChatTurn.mock.calls[0];
+    expect(persistedUser).toBe(pastedMetadata);
+    expect(persistedUser).toContain("Conversation info (untrusted metadata):");
+  });
+
+  it("T380 - W4b preserves leading metadata-shaped user text after Telegram wrapper", async () => {
+    const actualUserText = [conversationInfoMetadataBlock, "This block is part of my message"].join("\n");
+    writer.onMessageReceived({
+      sessionKey: "key123",
+      direction: "inbound",
+      text: telegramWrappedUserText(actualUserText),
+      ...({ context: { channelId: "telegram" } } as any),
+    } as any);
+    await writer.onMessageSent({
+      sessionKey: "key123",
+      direction: "outbound",
+      text: "response",
+      ...({ context: { success: true, channelId: "telegram" } } as any),
+    } as any);
+    await flushMicrotasks();
+
+    const [, persistedUser] = mockClient.storeChatTurn.mock.calls[0];
+    expect(persistedUser).toBe(actualUserText);
+    expect(persistedUser).toContain("Conversation info (untrusted metadata):");
+  });
+
+  it("T380 - W4b preserves pasted Sender block after Conversation-only Telegram wrapper", async () => {
+    const actualUserText = [pastedSenderMetadataBlock, "This Sender block is part of my message"].join("\n\n");
+    writer.onMessageReceived({
+      sessionKey: "key123",
+      direction: "inbound",
+      text: telegramWrappedUserText(actualUserText, { sender: false }),
+      ...({ context: { channelId: "telegram" } } as any),
+    } as any);
+    await writer.onMessageSent({
+      sessionKey: "key123",
+      direction: "outbound",
+      text: "response",
+      ...({ context: { success: true, channelId: "telegram" } } as any),
+    } as any);
+    await flushMicrotasks();
+
+    const [, persistedUser] = mockClient.storeChatTurn.mock.calls[0];
+    expect(persistedUser).toBe(actualUserText);
+    expect(persistedUser).toContain("Sender (untrusted metadata):");
+    expect(persistedUser).toContain("user-pasted-sender-999");
+  });
+
+  it("T380 - W4b preserves standalone leading Sender block as user text", async () => {
+    writer.onMessageReceived({
+      sessionKey: "key123",
+      direction: "inbound",
+      text: pastedSenderMetadataBlock,
+      ...({ context: { channelId: "telegram" } } as any),
+    } as any);
+    await writer.onMessageSent({
+      sessionKey: "key123",
+      direction: "outbound",
+      text: "response",
+      ...({ context: { success: true, channelId: "telegram" } } as any),
+    } as any);
+    await flushMicrotasks();
+
+    const [, persistedUser] = mockClient.storeChatTurn.mock.calls[0];
+    expect(persistedUser).toBe(pastedSenderMetadataBlock);
+    expect(persistedUser).toContain("Sender (untrusted metadata):");
+    expect(persistedUser).toContain("user-pasted-sender-999");
+  });
+
+  it("T380 - W4b preserves non-Telegram metadata labels after Telegram wrapper", async () => {
+    const actualUserText = [channelContextMetadataBlock, "This block is part of my message"].join("\n");
+    writer.onMessageReceived({
+      sessionKey: "key123",
+      direction: "inbound",
+      text: telegramWrappedUserText(actualUserText),
+      ...({ context: { channelId: "telegram" } } as any),
+    } as any);
+    await writer.onMessageSent({
+      sessionKey: "key123",
+      direction: "outbound",
+      text: "response",
+      ...({ context: { success: true, channelId: "telegram" } } as any),
+    } as any);
+    await flushMicrotasks();
+
+    const [, persistedUser] = mockClient.storeChatTurn.mock.calls[0];
+    expect(persistedUser).toBe(actualUserText);
+    expect(persistedUser).toContain("Channel context (untrusted metadata):");
+  });
+
+  it("T380 - W4b strips each queued inbound before joining", async () => {
+    writer.onMessageReceived({
+      sessionKey: "key123",
+      direction: "inbound",
+      text: telegramWrappedUserText("first"),
+      ...({ context: { channelId: "telegram", messageId: "in-1" } } as any),
+    } as any);
+    writer.onMessageReceived({
+      sessionKey: "key123",
+      direction: "inbound",
+      text: telegramWrappedUserText("second"),
+      ...({ context: { channelId: "telegram", messageId: "in-2" } } as any),
+    } as any);
+    await writer.onMessageSent({
+      sessionKey: "key123",
+      direction: "outbound",
+      text: "response",
+      ...({ context: { success: true, channelId: "telegram", messageId: "out-1" } } as any),
+    } as any);
+    await flushMicrotasks();
+
+    const [, persistedUser] = mockClient.storeChatTurn.mock.calls[0];
+    expect(persistedUser).toBe("first\nsecond");
+  });
+
+  it("T380 - typed Telegram W4b path strips leading metadata via normalization", async () => {
+    writer.onTypedMessageReceived(
+      {
+        from: "user-1",
+        content: telegramWrappedUserText("hello"),
+        metadata: { chatId: "chat-1", messageId: "typed-in-1" },
+      },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-1" },
+    );
+    await writer.onTypedMessageSent(
+      { to: "user-1", content: "typed response", success: true, metadata: { messageId: "typed-out-1" } },
+      { channelId: "telegram", accountId: "bot", conversationId: "chat-1" },
+    );
+
+    const [, persistedUser] = mockClient.storeChatTurn.mock.calls[0];
+    expect(persistedUser).toBe("hello");
   });
 
   it("T359 - typed message hooks persist one Telegram turn without internal sessionKey", async () => {
@@ -2429,6 +3495,253 @@ describe("ChatTurnWriter", () => {
     restarted.flushSync();
   });
 
+  it("T457 — direct-channel marker aliases skip formatted OpenClaw transcript bodies with assistant render drift", async () => {
+    await writer.onAgentEnd({
+      sessionId: "seed",
+      messages: [
+        { role: "user", content: "previous telegram question" },
+        { role: "assistant", content: "previous telegram answer" },
+      ],
+    }, { channelId: "telegram", sessionKey: "agent:main:main" });
+    await flushMicrotasks();
+    mockClient.storeChatTurn.mockClear();
+
+    await writer.markExternalTurnPersistedDurable({
+      sessionKey: "agent:main:main",
+      turnId: "node-ui-corr-formatted",
+      user: "raw ui question",
+      userAliases: ["[DKG UI Owner] raw ui question"],
+      assistant: "node ui answer",
+    });
+
+    await writer.onAgentEnd({
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "previous telegram question" },
+        { role: "assistant", content: "previous telegram answer" },
+        {
+          role: "user",
+          content: "[DKG UI Owner] raw ui question",
+          context: { Provider: "dkg-ui", DkgTurnId: "node-ui-corr-formatted" },
+        },
+        { role: "assistant", content: "[DKG UI delivered] node ui answer" },
+        { role: "user", content: "next telegram question" },
+        { role: "assistant", content: "next telegram answer" },
+      ],
+    }, { channelId: "telegram", sessionKey: "agent:main:main" });
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("next telegram question");
+    writer.flushSync();
+  });
+
+  it("T457 — ordered direct-channel marker skips metadata-stripped UI backfill before live Telegram pair", async () => {
+    await writer.onAgentEnd({
+      sessionId: "seed",
+      messages: [
+        { role: "user", content: "previous telegram question" },
+        { role: "assistant", content: "previous telegram answer" },
+      ],
+    }, { channelId: "telegram", sessionKey: "agent:main:main" });
+    await flushMicrotasks();
+    mockClient.storeChatTurn.mockClear();
+
+    await writer.markExternalTurnPersistedDurable({
+      sessionKey: "agent:main:main",
+      turnId: "node-ui-corr-stripped",
+      user: "raw ui question",
+      assistant: "node ui answer",
+    });
+
+    await writer.onAgentEnd({
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "previous telegram question" },
+        { role: "assistant", content: "previous telegram answer" },
+        { role: "user", content: "raw ui question" },
+        { role: "assistant", content: "[DKG UI delivered] rendered transcript answer" },
+        { role: "user", content: "next telegram question" },
+        { role: "assistant", content: "next telegram answer" },
+      ],
+    }, { channelId: "telegram", sessionKey: "agent:main:main" });
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("next telegram question");
+    writer.flushSync();
+  });
+
+  it("T457 — ordered direct-channel marker does not skip the live pair when no historical pair is present", async () => {
+    await writer.markExternalTurnPersistedDurable({
+      sessionKey: "agent:main:main",
+      turnId: "node-ui-corr-missing",
+      user: "ui question not in transcript",
+      assistant: "ui answer not in transcript",
+    });
+
+    await writer.onAgentEnd({
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "telegram only question" },
+        { role: "assistant", content: "telegram only answer" },
+      ],
+    }, { channelId: "telegram", sessionKey: "agent:main:main" });
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("telegram only question");
+    writer.flushSync();
+  });
+
+  it("T458 — N direct persists accumulate ordered tickets for N metadata-stripped UI backfill pairs", async () => {
+    // Seed prior Telegram persistence so savedUpTo > -1 and the
+    // cold-start clamp does not pre-drop historical UI pairs. This
+    // mirrors the live UI -> first Telegram regression: by the time
+    // the first Telegram agent_end fires after multiple direct UI
+    // persists, the OpenClaw transcript already carries every UI pair
+    // but their direct-channel metadata has been stripped, so only
+    // the ordered marker fallback can dedupe them.
+    await writer.onAgentEnd({
+      sessionId: "seed",
+      messages: [
+        { role: "user", content: "previous telegram question" },
+        { role: "assistant", content: "previous telegram answer" },
+      ],
+    }, { channelId: "telegram", sessionKey: "agent:main:main" });
+    await flushMicrotasks();
+    mockClient.storeChatTurn.mockClear();
+
+    await writer.markExternalTurnPersistedDurable({
+      sessionKey: "agent:main:main",
+      turnId: "node-ui-corr-1",
+      user: "raw ui question 1",
+      assistant: "node ui answer 1",
+    });
+    await writer.markExternalTurnPersistedDurable({
+      sessionKey: "agent:main:main",
+      turnId: "node-ui-corr-2",
+      user: "raw ui question 2",
+      assistant: "node ui answer 2",
+    });
+    await writer.markExternalTurnPersistedDurable({
+      sessionKey: "agent:main:main",
+      turnId: "node-ui-corr-3",
+      user: "raw ui question 3",
+      assistant: "node ui answer 3",
+    });
+
+    await writer.onAgentEnd({
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "previous telegram question" },
+        { role: "assistant", content: "previous telegram answer" },
+        { role: "user", content: "raw ui question 1" },
+        { role: "assistant", content: "[DKG UI delivered] rendered transcript answer 1" },
+        { role: "user", content: "raw ui question 2" },
+        { role: "assistant", content: "[DKG UI delivered] rendered transcript answer 2" },
+        { role: "user", content: "raw ui question 3" },
+        { role: "assistant", content: "[DKG UI delivered] rendered transcript answer 3" },
+        { role: "user", content: "next telegram question" },
+        { role: "assistant", content: "next telegram answer" },
+      ],
+    }, { channelId: "telegram", sessionKey: "agent:main:main" });
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("next telegram question");
+    writer.flushSync();
+  });
+
+  it("T459 — ordered fallback runs for an earlier metadata-stripped UI pair even when a later pair carries an exact marker for a DIFFERENT direct turn", async () => {
+    // Mixed-metadata regression from PR #457 review round (Codex review
+    // comment on `laterExactExternalMarker`). Transcript shape: an
+    // earlier UI pair has lost its DkgTurnId, a later UI pair still
+    // carries DkgTurnId, then live Telegram. The pre-fix gating
+    // disabled ordered fallback for the earlier pair because SOME
+    // later exact marker existed in the bucket — even though that
+    // marker's content didn't match the earlier pair. After the fix,
+    // ordered fallback is only blocked when the later exact marker's
+    // `(turnId, user, assistant)` actually matches THIS pair's
+    // content; otherwise the earlier stripped pair is correctly
+    // ordered-skipped.
+    await writer.onAgentEnd({
+      sessionId: "seed",
+      messages: [
+        { role: "user", content: "previous telegram question" },
+        { role: "assistant", content: "previous telegram answer" },
+      ],
+    }, { channelId: "telegram", sessionKey: "agent:main:main" });
+    await flushMicrotasks();
+    mockClient.storeChatTurn.mockClear();
+
+    await writer.markExternalTurnPersistedDurable({
+      sessionKey: "agent:main:main",
+      turnId: "node-ui-corr-older-stripped",
+      user: "older ui question",
+      assistant: "older ui answer",
+    });
+    await writer.markExternalTurnPersistedDurable({
+      sessionKey: "agent:main:main",
+      turnId: "node-ui-corr-newer-with-id",
+      user: "newer ui question",
+      assistant: "newer ui answer",
+    });
+
+    await writer.onAgentEnd({
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "previous telegram question" },
+        { role: "assistant", content: "previous telegram answer" },
+        { role: "user", content: "older ui question" },
+        { role: "assistant", content: "older ui answer" },
+        {
+          role: "user",
+          content: "newer ui question",
+          context: { Provider: "dkg-ui", DkgTurnId: "node-ui-corr-newer-with-id" },
+        },
+        { role: "assistant", content: "newer ui answer" },
+        { role: "user", content: "next telegram question" },
+        { role: "assistant", content: "next telegram answer" },
+      ],
+    }, { channelId: "telegram", sessionKey: "agent:main:main" });
+    await flushMicrotasks();
+
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("next telegram question");
+    writer.flushSync();
+  });
+
+  it("T460 — markExternalTurnPersistedDurable replay does not double the ordered-marker count", async () => {
+    // Marker-only retry idempotency. PR #457 review round (Codex
+    // comment on `incrementOrderedExternalTurnMarker`): a marker-write
+    // retry with identical opts left content-bound markers idempotent
+    // via Math.max but still incremented the ordered ticket count.
+    // After N retries, N - 1 leftover tickets could be consumed by a
+    // later W4a pass against unrelated metadata-stripped pairs (e.g.,
+    // a stale non-latest Telegram pair). After the fix, a replay
+    // detects the existing content markers and skips the ordered
+    // increment.
+    await writer.markExternalTurnPersistedDurable({
+      sessionKey: "agent:main:main",
+      turnId: "node-ui-corr-retry",
+      user: "ui question",
+      assistant: "ui answer",
+    });
+    await writer.markExternalTurnPersistedDurable({
+      sessionKey: "agent:main:main",
+      turnId: "node-ui-corr-retry",
+      user: "ui question",
+      assistant: "ui answer",
+    });
+
+    const externalCursorKey = (writer as any).externalCursorKeyFromSessionKey("agent:main:main");
+    const bucket = (writer as any).externalTurnMarkers.get(externalCursorKey) as Map<string, number>;
+    const orderedKey = (writer as any).constructor.EXTERNAL_ORDERED_TURN_MARKER as string;
+    expect(bucket?.get(orderedKey) ?? 0).toBe(1);
+    writer.flushSync();
+  });
+
   it("T359 - typed Telegram W4b and Node-UI external markers both suppress W4a duplicates after restart", async () => {
     await writer.markExternalTurnPersistedDurable({
       sessionKey: "agent:main:main",
@@ -2573,7 +3886,7 @@ describe("ChatTurnWriter", () => {
 
     const externalCursorKey = (writer as any).externalCursorKeyFromSessionKey("agent:main:main");
     const bucket: Map<string, number> | undefined = (writer as any).externalTurnMarkers.get(externalCursorKey);
-    expect(Array.from(bucket?.values() ?? [])).toEqual([1]);
+    expect(Array.from(bucket?.values() ?? [])).toEqual([1, 1, 1]);
     writeSpy.mockRestore();
   });
 
@@ -2686,7 +3999,7 @@ describe("ChatTurnWriter", () => {
     restarted.flushSync();
   });
 
-  it("T85 - session-key external markers require an exact ID", async () => {
+  it("T85 - ordered direct marker skips an ID-less historical direct pair before the live pair", async () => {
     await writer.markExternalTurnPersistedDurable({
       sessionKey: "agent:main:main",
       turnId: "node-ui-corr-unique-content",
@@ -2696,9 +4009,10 @@ describe("ChatTurnWriter", () => {
     const restarted = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
     mockClient.storeChatTurn.mockClear();
     // T362 — Seed past cold-start; the clamp would otherwise discard
-    // the historical UI pair and only emit the latest Telegram pair,
-    // defeating this test's verification that BOTH pairs persist
-    // when the external marker doesn't match an exact ID.
+    // the historical UI pair and only emit the latest Telegram pair.
+    // T457 — The historical direct-channel pair has lost its exact
+    // DkgTurnId by the time Telegram W4a scans the shared transcript,
+    // so the ordered direct marker skips exactly that non-latest pair.
     restarted.onAgentEnd({
       sessionId: "seed",
       messages: [
@@ -2722,9 +4036,8 @@ describe("ChatTurnWriter", () => {
     }, { channelId: "telegram", sessionKey: "agent:main:main" });
     await flushMicrotasks();
 
-    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(2);
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
     expect(mockClient.storeChatTurn.mock.calls.map((call) => call[1])).toEqual([
-      "unique ui question",
       "telegram question",
     ]);
     restarted.flushSync();

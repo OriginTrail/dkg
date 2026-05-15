@@ -7,7 +7,31 @@ export { Logger, createOperationContext, type OperationContext, type OperationNa
 export * from './crypto/index.js';
 export * from './proto/index.js';
 export { DKGNode } from './node.js';
-export { ProtocolRouter, DEFAULT_MAX_READ_BYTES } from './protocol-router.js';
+export {
+  type Network,
+  type NodeIdentity,
+  type Address,
+  type DialOpts,
+  type ProtocolHandler,
+  LibP2PNetwork,
+  type NetworkStateRegistry,
+  StubNetworkStateRegistry,
+  type AgentDirectoryLookup,
+  type PeerResolverDeps,
+  type PeerResolverLogger,
+  type ResolveOpts,
+  PeerResolver,
+  dkgGossipMsgId,
+  dkgGossipMsgIdRaw,
+  type DkgGossipMsgIdInput,
+  DkgGossipUnsignedMessageError,
+  DkgGossipMissingPublisherError,
+} from './network/index.js';
+export {
+  ProtocolRouter,
+  type ProtocolRouterOptions,
+  DEFAULT_MAX_READ_BYTES,
+} from './protocol-router.js';
 export { GossipSubManager, type GossipMessageHandler } from './gossipsub-manager.js';
 export { PeerDiscoveryManager } from './discovery.js';
 export {

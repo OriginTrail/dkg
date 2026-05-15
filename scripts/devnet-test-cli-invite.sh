@@ -79,7 +79,15 @@ fi
 echo ""
 echo "1c. Node 2: Request to join via CLI"
 sleep 3
-JOIN_OUT=$(cli_node $PORT2 context-graph request-join "$CG_ID")
+# `request-join` requires the curator's libp2p peer id (V10 invite
+# format `<cgId>\n<peerId>` carries it). For this devnet test we
+# query Node 1's status endpoint to discover its peer id.
+PEER1=$(api $PORT1 GET /api/status | python3 -c "import sys, json; print(json.load(sys.stdin).get('peerId',''))")
+if [ -z "$PEER1" ]; then
+  fail "Could not discover Node 1's peer id from /api/status"
+  exit 1
+fi
+JOIN_OUT=$(cli_node $PORT2 context-graph request-join "$CG_ID" "$PEER1")
 echo "$JOIN_OUT"
 if echo "$JOIN_OUT" | grep -qi "sent\|already"; then
   pass "Join request sent from Node 2"
