@@ -443,6 +443,40 @@ describe('MarkdownMessage streaming caret (PR5 item C)', () => {
     await unmount();
   });
 
+  it('falls back to a trailing caret when an image follows earlier prose (not parked at prose)', async () => {
+    // Codex generalization: a non-text tail (image) after prose left the
+    // caret stale on the earlier prose. Expect one caret, not in prose.
+    const { container, unmount } = await renderStreaming(
+      'See diagram\n\n![img](https://example.com/x.png)',
+      true,
+    );
+    expect(container.querySelectorAll('.v10-chat-cursor').length).toBe(1);
+    const prose = container.querySelector('.v10-md-p');
+    expect(prose?.textContent).toContain('See diagram');
+    expect(prose?.querySelector('.v10-chat-cursor')).toBeFalsy();
+    await unmount();
+  });
+
+  it('falls back to a trailing caret when a horizontal rule follows prose', async () => {
+    const { container, unmount } = await renderStreaming('Done\n\n---', true);
+    expect(container.querySelector('.v10-md-hr')).toBeTruthy();
+    expect(container.querySelectorAll('.v10-chat-cursor').length).toBe(1);
+    const prose = container.querySelector('.v10-md-p');
+    expect(prose?.querySelector('.v10-chat-cursor')).toBeFalsy();
+    await unmount();
+  });
+
+  it('keeps the caret in the last text line when a <br> is mid-paragraph (not a tail)', async () => {
+    // remark-breaks turns a single newline into <br>. A mid-paragraph
+    // <br> is followed by more text, so the caret stays inline at the
+    // real end — the leaf tail only triggers when nothing text follows.
+    const { container, unmount } = await renderStreaming('line one\nline two', true);
+    const p = container.querySelector('.v10-md-p');
+    expect(p?.querySelector('.v10-chat-cursor')).toBeTruthy();
+    expect(container.querySelectorAll('.v10-chat-cursor').length).toBe(1);
+    await unmount();
+  });
+
   it('keeps NO caret for a code-only stream (fallback must not regress the ux-approved behavior)', async () => {
     // A stream that is only a fenced code block has text, but all of it
     // is code (rebuilt by CodeBlock). Per ux-lead sign-off this shows

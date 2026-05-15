@@ -31,21 +31,24 @@ interface MarkdownMessageProps {
  */
 function rehypeStreamingCaret() {
   return (tree: unknown): void => {
+    // The caret must follow the *last rendered content* in document
+    // order, not merely the last text node. `tail` records what that
+    // trailing content is:
+    //   'text' — injectable inline text → splice the caret right there
+    //   'code' — a fenced block (rebuilt by CodeBlock, a spliced
+    //            sibling is dropped) → suppress the caret entirely
+    //            (ChatGPT parity, ux-lead-approved no-caret-in-code)
+    //   'leaf' — a non-text leaf (img / hr / br): no text to sit in, so
+    //            append a trailing caret so the turn doesn't look
+    //            finished while still streaming
+    //   'none' — nothing renderable yet (empty content is handled
+    //            upstream by the "Thinking…" indicator before this runs)
+    // This generalises the earlier `<pre>`-only stale-anchor guard to
+    // every non-text tail (Codex: trailing image / hr / hard break).
+    type Tail = 'none' | 'text' | 'code' | 'leaf';
+    let tail: Tail = 'none';
     let target: { siblings: unknown[]; index: number } | null = null;
-    // Did we see any non-whitespace text at all *inside* code? Used to
-    // distinguish a code-only stream (caret intentionally suppressed —
-    // matches ChatGPT, ux-lead-approved) from a stream with no text
-    // node anywhere (e.g. ends in an image: still streaming, must show
-    // a caret) when no normal text target was found.
-    let sawCodeText = false;
-    // True when a fenced `<pre>` appears *after* the last non-code text
-    // target in document order — i.e. the message currently ends with a
-    // code block following earlier prose. Reset every time a new target
-    // is recorded, set when a `<pre>` is entered, so its final value
-    // reflects "is there trailing code after the last prose?". In that
-    // case the caret must NOT be left at the stale earlier prose; it is
-    // suppressed (ChatGPT parity / ux-lead-approved no-caret-in-code).
-    let trailingCode = false;
+    const LEAF_TAGS = new Set(['img', 'hr', 'br']);
     const walk = (node: { children?: unknown[] }, inCode: boolean): void => {
       const children = node.children;
       if (!Array.isArray(children)) return;
@@ -59,26 +62,28 @@ function rehypeStreamingCaret() {
         if (
           child.type === 'text' &&
           typeof child.value === 'string' &&
-          // Skip whitespace-only nodes: hast inserts `\n` text nodes
-          // between block elements (e.g. between `<li>`s), and the
-          // trailing one would otherwise be picked as the "last text",
-          // dropping the caret after the block instead of inside it.
+          // Whitespace-only nodes are hast's inter-block `\n`; ignore
+          // them so a trailing one isn't taken as the last content.
           child.value.trim().length > 0
         ) {
-          if (inCode) sawCodeText = true;
-          else {
+          if (inCode) {
+            tail = 'code';
+          } else {
             target = { siblings: children, index: i };
-            trailingCode = false;
+            tail = 'text';
           }
         } else if (child.type === 'element') {
-          if (child.tagName === 'pre') trailingCode = true;
-          // Only fenced/preformatted code is excluded — those text
-          // nodes are rebuilt from the raw AST by the `pre`/CodeBlock
-          // renderer so an injected sibling there is dropped. Inline
-          // code is a bare `<code>` (no `<pre>` ancestor); a stream
-          // ending in `` `inline` `` must still get the caret, so do
-          // NOT propagate `inCode` for a standalone `code` tag.
-          walk(child, inCode || child.tagName === 'pre');
+          const tag = child.tagName;
+          if (tag === 'pre') {
+            tail = 'code';
+            walk(child, true);
+          } else if (tag && LEAF_TAGS.has(tag)) {
+            tail = 'leaf';
+          } else {
+            // Inline code is a bare `<code>` (no `<pre>`): its text
+            // must stay eligible, so don't force inCode here.
+            walk(child, inCode);
+          }
         }
       }
     };
@@ -90,24 +95,13 @@ function rehypeStreamingCaret() {
       properties: { className: ['v10-chat-cursor'] },
       children: [],
     };
-    if (target && !trailingCode) {
+    if (tail === 'text' && target) {
       const { siblings, index } = target;
       siblings.splice(index + 1, 0, caret);
-    } else if (target && trailingCode) {
-      // Prose followed by a trailing fenced code block: the last text
-      // target is stale (earlier prose). Splicing there would park the
-      // caret mid-message before the code. Suppress it — same outcome
-      // as a code-only stream (no inline caret while the tail is code).
-      return;
-    } else if (!sawCodeText && Array.isArray(root.children) && root.children.length > 0) {
-      // No eligible text node anywhere AND the content isn't code-only
-      // (e.g. the message currently ends in an image placeholder).
-      // Without this the turn looks finished while still streaming, so
-      // fall back to a trailing caret after the last block. A code-only
-      // stream deliberately falls through with no caret (ChatGPT
-      // parity, ux-lead-approved).
+    } else if (tail === 'leaf' && Array.isArray(root.children)) {
       root.children.push(caret);
     }
+    // tail 'code' / 'none': intentionally no caret.
   };
 }
 
