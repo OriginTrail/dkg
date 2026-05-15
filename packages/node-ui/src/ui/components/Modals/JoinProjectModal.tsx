@@ -1,11 +1,13 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
-  subscribeToContextGraph, fetchContextGraphs,
-  signJoinRequest, submitJoinRequest, fetchCurrentAgent, fetchCatchupStatus,
+  fetchContextGraphs,
+  signJoinRequest, submitJoinRequest, fetchCurrentAgent,
   connectToPeerWithTimeout, connectToPeerIdWithTimeout,
+  HttpError,
 } from '../../api.js';
 import { useProjectsStore } from '../../stores/projects.js';
 import { useTabsStore } from '../../stores/tabs.js';
+import { useNodeEvents } from '../../hooks/useNodeEvents.js';
 import { WireWorkspacePanel } from '../Workspace/WireWorkspacePanel.js';
 
 interface JoinProjectModalProps {
@@ -71,6 +73,16 @@ export function parseInviteCode(raw: string): ParsedInvite {
         break;
       }
     }
+  } else {
+    // Legacy multiaddr invites still carry the curator peer id at the
+    // tail (`/p2p/<peerId>`). Surface it so the join flow has the
+    // V10-required curator binding even for legacy invites — without
+    // this, `/request-join` would 400 with "Missing curatorPeerId" on
+    // every curated-project legacy invite. PR #448 review (round 4).
+    const p2pTail = legacyMultiaddr.match(/\/p2p\/([^/]+)$/);
+    if (p2pTail && PEER_ID_RE.test(p2pTail[1])) {
+      curatorPeerId = p2pTail[1];
+    }
   }
 
   // CG id: strip the inline multiaddr (if it appeared glued onto the same
@@ -101,6 +113,15 @@ export function validateInvite(invite: ParsedInvite): string | null {
   if (invite.hasUnparsedExtra) {
     return 'Invite contains a second line that is not a valid peer ID (12D3Koo…) or multiaddr (/ip4/…). Check for typos.';
   }
+  // V10: every join requires a curator peer id (the daemon's
+  // `/request-join` returns 400 when curatorPeerId is absent — see
+  // `forwardJoinRequest`). A bare cgId would silently 400 here, so
+  // reject it loudly with actionable copy. The old subscribe-to-public-CG
+  // paste flow has been removed; users who want a public CG that hasn't
+  // surfaced in the Oracle yet need to ask the creator for an invite.
+  if (!invite.curatorPeerId && !invite.legacyMultiaddr) {
+    return 'This invite is missing the curator peer id. Ask the curator to regenerate the invite from the Share Project dialog.';
+  }
   if (invite.legacyMultiaddr) {
     if (!invite.legacyMultiaddr.startsWith('/')) return 'Invalid curator multiaddr';
     if (!invite.legacyMultiaddr.includes('/p2p/')) return 'Curator multiaddr is missing peer ID';
@@ -108,75 +129,138 @@ export function validateInvite(invite: ParsedInvite): string | null {
   return null;
 }
 
-// Catchup iterates connected peers with a ~30s per-peer sync timeout. Even
-// with parallel per-peer sync on the backend, the slowest peer gates the
-// whole job, so we need a generous total wait to reliably observe denials
-// for curated projects before giving up. Timeout path is deliberately not
-// treated as success by the caller. (HEAD tier-4: raised from 10×1.5s to
-// 60×1.5s so denials on slow curators don't get misreported as transport
-// errors in the UI.)
-async function pollCatchupStatus(
-  cgId: string,
-  maxAttempts = 60,
-  intervalMs = 1500,
-  onProgress?: (attempt: number, total: number) => void,
-): Promise<{ status: string; error?: string }> {
-  for (let i = 0; i < maxAttempts; i++) {
-    await new Promise(r => setTimeout(r, intervalMs));
-    onProgress?.(i + 1, maxAttempts);
-    try {
-      const result = await fetchCatchupStatus(cgId);
-      if (
-        result.status === 'done'
-        || result.status === 'denied'
-        || result.status === 'failed'
-        || result.status === 'unreachable'
-      ) {
-        return { status: result.status, error: result.error };
-      }
-    } catch {
-      // Status endpoint may not be ready yet
+/**
+ * Render the user-visible error string for a failed /request-join call.
+ *
+ * The daemon's `POST /api/context-graph/{id}/request-join` returns a 502
+ * with `{ error, errors? }` when `forwardJoinRequest` couldn't deliver:
+ * `errors[]` carries the per-peer reason (e.g.
+ * `"<peerTag>: verifyAgentDelegation: scope mismatch (expected … got …)"`
+ * when the curator received the request but rejected it, or
+ * `"<peerTag>: dial failed (…)"` when the transport never landed). The
+ * previous UI swallowed `errors[]` and always showed "couldn't deliver
+ * to any reachable curator", which is misleading for the by-far-most-
+ * common failure mode — hub-address skew between joiner and curator
+ * after a testnet contract redeployment leaves the joiner's network
+ * config stale and the curator silently rejects every signed delegation.
+ *
+ * This helper:
+ *   1. Distinguishes "reached but rejected" from "couldn't reach" by
+ *      content of the per-peer entries (NOT by mere presence of a
+ *      non-`dial failed` line — see below).
+ *   2. Surfaces the underlying reason(s) verbatim so daemon-log
+ *      spelunking isn't needed.
+ *   3. Appends an actionable hint for known patterns. If any of those
+ *      strings change in the daemon, the hint silently stops firing
+ *      but the verbatim reason is still shown.
+ *
+ * Codex review on round 1 flagged that the original heuristic
+ * (`some entry that is not "dial failed"`) incorrectly classified the
+ * mixed case `["<curatorTag>: dial failed (timeout)",
+ * "<otherPeer>: not curator", ...]` as a curator rejection. That
+ * combination happens whenever the targeted curator dial times out and
+ * `forwardJoinRequest` then broadcasts to other peers, none of which
+ * curate the CG. The curator was never reached, so it must not be
+ * shown as a rejection. We now look at the reason content (post-prefix)
+ * and treat ONLY `dial failed (…)` and `not curator` as
+ * delivery-failure signals; anything else is treated as a
+ * curator-authoritative answer.
+ *
+ * Exported so it can be unit-tested without rendering the React tree.
+ */
+export function formatJoinRequestError(err: unknown): string {
+  if (err instanceof HttpError && err.status === 502) {
+    const perPeer = readPerPeerErrors(err.body);
+    if (perPeer.length === 0) {
+      return 'Request signed, but we couldn\'t deliver it to any reachable curator. ' +
+        'Try again in a moment once your node has discovered more peers, or ask the curator for an updated invite.';
     }
+    const reasons = perPeer.join('; ');
+    const reachedAndRejected = perPeer.some(isCuratorAuthoritativeReason);
+    const headline = reachedAndRejected
+      ? 'Curator rejected this join request.'
+      : 'Couldn\'t deliver this join request to the curator.';
+    const hint = hintForJoinRejectReasons(reasons, reachedAndRejected);
+    return hint
+      ? `${headline} Reason: ${reasons}. ${hint}`
+      : `${headline} Reason: ${reasons}.`;
   }
-  return { status: 'timeout' };
+  if (err instanceof Error && err.message) return err.message;
+  return 'Failed to send join request';
 }
+
+function readPerPeerErrors(body: unknown): string[] {
+  if (!body || typeof body !== 'object') return [];
+  const errors = (body as { errors?: unknown }).errors;
+  if (!Array.isArray(errors)) return [];
+  return errors.filter((e): e is string => typeof e === 'string' && e.length > 0);
+}
+
+/**
+ * A per-peer entry from `forwardJoinRequest.errors[]` looks like
+ * `"<peerTag>: <reason>"`. The known *non-authoritative* (delivery-failure)
+ * reasons are:
+ *   - `"dial failed (...)"` — only emitted by the targeted-dial path on
+ *     transport error; the curator never saw the request.
+ *   - `"not curator"`       — only emitted by broadcast cohort peers; we
+ *     reached someone, but they don't curate this CG.
+ * Anything else (`scope mismatch`, `unknown CG`, signature errors, …)
+ * is a curator-authoritative reject — the curator received the
+ * delegation and answered. Treat the entry as authoritative.
+ */
+function isCuratorAuthoritativeReason(entry: string): boolean {
+  const reason = entry.replace(/^[^:]+:\s*/, '').trim();
+  if (!reason) return false;
+  if (/^dial failed\b/i.test(reason)) return false;
+  if (/^not curator$/i.test(reason)) return false;
+  return true;
+}
+
+function hintForJoinRejectReasons(reasons: string, reachedAndRejected: boolean): string | null {
+  if (reachedAndRejected) {
+    // `scope mismatch` is the on-the-wire wording from
+    // `verifyAgentDelegation` (packages/agent/src/agent-delegation.ts).
+    // It fires when the joiner's daemon signed the delegation against a
+    // different ContextGraphsHub contract address than the curator's —
+    // in practice almost always because the joiner's
+    // `network/testnet.json` is still pointing at the pre-redeploy hub.
+    if (/scope mismatch/i.test(reasons)) {
+      return 'This usually means your daemon\'s network config has a stale ContextGraphsHub address — ' +
+        'pull the latest release (or `git pull && pnpm install && pnpm run build:runtime`) and try again.';
+    }
+    if (/unknown CG/i.test(reasons)) {
+      return 'The curator doesn\'t recognise this project id — double-check the invite, ' +
+        'or ask the curator to share an updated one.';
+    }
+    return null;
+  }
+  // Delivery-failure case: curator was never reached. `not curator`
+  // means the broadcast cohort had no curator in it; `dial failed`
+  // means the targeted curator dial timed out / errored. In both cases
+  // the most actionable advice is "make sure the curator's daemon is
+  // online and the invite carries the right peer id".
+  if (/not curator/i.test(reasons)) {
+    return 'Your node reached other peers, but none of them curate this project. ' +
+      'Make sure the curator\'s daemon is online and the invite carries the right curator peer id.';
+  }
+  return null;
+}
+
+type Phase = 'idle' | 'sending' | 'pending' | 'approved' | 'rejected';
 
 export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinProjectModalProps) {
   const [inviteCode, setInviteCode] = useState(initialContextGraphId ?? '');
-  const [joining, setJoining] = useState(false);
-  const [progress, setProgress] = useState('');
+  const [phase, setPhase] = useState<Phase>('idle');
   const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState(false);
-  const [requestSent, setRequestSent] = useState(false);
-  const [sendingRequest, setSendingRequest] = useState(false);
-  const [accessDenied, setAccessDenied] = useState(false);
-  // Set when the catchup poll exits with `timeout` — neither success
-  // nor a confirmed ACL denial. Surfaces a softer "if this is curated,
-  // here's how to request access" affordance alongside the retry hint,
-  // without misclassifying slow-public CGs as denied. Closes the
-  // tier-4c G3 edge case where a CG's local-side gate
-  // (`canUseSharedMemoryForContextGraph`) refuses peer responses
-  // before the catchup runner can ever observe a `denied` from the
-  // network — the user otherwise loses all access to the join-request
-  // flow on a real curated project.
-  const [timedOut, setTimedOut] = useState(false);
-  // V10 `unreachable` status: catchup ran to completion, but no peer
-  // could deliver the CG content — curator offline, no node holds the
-  // data, or transport failures across the whole peer set. Distinct
-  // from `accessDenied` (responder explicitly refused) so we can render
-  // targeted copy without misleading public-CG users into thinking
-  // they were rejected. The dedicated CTA leads to the same signed
-  // join request flow as the curated-denied case.
-  const [unreachable, setUnreachable] = useState(false);
-  // Phase 8: after subscribe + catchup completes we transition into a
-  // wire-workspace step so the joiner can populate a local Cursor
-  // workspace from the project's manifest. `wiredCgId` flips the modal
-  // into the WireWorkspacePanel; the operator can also click Skip if
-  // they only want to subscribe (e.g. running a passive observer node).
+  const [pendingCgId, setPendingCgId] = useState<string | null>(null);
+  // Phase 8: after approval we transition into a wire-workspace step so
+  // the joiner can populate a local Cursor workspace from the project's
+  // manifest. `wiredCgId` flips the modal into the WireWorkspacePanel;
+  // the operator can also click Skip if they only want to subscribe.
   const [wiredCgId, setWiredCgId] = useState<string | null>(null);
   const [wiredProjectName, setWiredProjectName] = useState<string>('');
 
-  const { setContextGraphs, setActiveProject } = useProjectsStore();
+  const { contextGraphs, setContextGraphs, setActiveProject } = useProjectsStore();
   const { openTab } = useTabsStore();
 
   useEffect(() => {
@@ -187,155 +271,58 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
     if (!open) {
       setInviteCode(initialContextGraphId ?? '');
       setError(null);
-      setSuccess(false);
-      setRequestSent(false);
-      setAccessDenied(false);
-      setTimedOut(false);
-      setUnreachable(false);
-      setProgress('');
+      setPhase('idle');
+      setPendingCgId(null);
     }
   }, [open, initialContextGraphId]);
 
-  if (!open) return null;
-
-  const handleJoin = async () => {
-    const invite = parseInviteCode(inviteCode);
-    const inviteError = validateInvite(invite);
-    if (inviteError) {
-      setError(inviteError);
-      return;
-    }
-    const { cgId, curatorPeerId, legacyMultiaddr } = invite;
-
-    setJoining(true);
-    setError(null);
-    setSuccess(false);
-    setRequestSent(false);
-    setAccessDenied(false);
-    setTimedOut(false);
-    setUnreachable(false);
-
+  // Drive the post-approval flow: refresh the sidebar, focus the new
+  // CG's tab, and hand off to the wire-workspace step. Idempotent —
+  // safe to call from both the SSE join_approved handler and the
+  // synchronous already-member short-circuit below. PR #448 review:
+  // the curator's `join-approved` P2P notification is fire-and-forget
+  // (`.catch(() => {})`), so the modal cannot rely on the SSE alone to
+  // advance after an authoritative HTTP success.
+  const transitionToApproved = useCallback(async (cgId: string) => {
+    setPhase('approved');
     try {
-      if (curatorPeerId) {
-        setProgress('Looking up curator on DHT…');
-        try {
-          await connectToPeerIdWithTimeout(curatorPeerId);
-          await new Promise(r => setTimeout(r, 1000));
-        } catch {
-          // Non-fatal — subscribe/catch-up may still work via existing peers/relays.
-        }
-      } else if (legacyMultiaddr) {
-        // Legacy multiaddr-in-invite: keep working for one release while
-        // collaborators rotate to V10 peer-id invites. The DHT path is
-        // strictly better — multiaddr invites silently break whenever the
-        // chosen relay rotates. Surface a console warning so embedders /
-        // bot integrators see the deprecation.
-        console.warn(
-          '[DKG] This invite uses a legacy multiaddr (deprecated). Ask the curator to regenerate using the current Share Project modal — V10 invites carry a peer id and resolve via DHT, so they survive relay rotations.',
-        );
-        setProgress('Connecting to curator node…');
-        try {
-          await connectToPeerWithTimeout(legacyMultiaddr);
-          await new Promise(r => setTimeout(r, 1000));
-        } catch {
-          // Non-fatal — subscribe/catch-up may still work via existing peers/relays.
-        }
-      }
-
-      setProgress('Subscribing to project…');
-      const subResult = await subscribeToContextGraph(cgId);
-
-      setProgress('Syncing knowledge from peers…');
-
-      // Poll catchup status to detect denials — the background job may take
-      // up to ~90s on curated projects because each peer's sync request is
-      // subject to the remote-side ACL timeout before we can conclude the
-      // CG is denied. Don't treat the poll timeout as success.
-      const catchup = await pollCatchupStatus(cgId, 60, 1500, (attempt, total) => {
-        setProgress(`Syncing knowledge from peers… (${attempt}/${total})`);
-      });
-
-      if (catchup.status === 'denied') {
-        setAccessDenied(true);
-        setProgress('');
-        return;
-      }
-
-      if (catchup.status === 'unreachable') {
-        // Daemon reached a clean terminal state but no peer could
-        // deliver this CG's content. Show targeted copy + the same
-        // signed-join-request CTA so the user can ping a curator
-        // who is currently offline. Distinct from `accessDenied`
-        // (responder refused) and `timedOut` (UI poll ceiling hit
-        // before the daemon decided).
-        setUnreachable(true);
-        setProgress('');
-        return;
-      }
-
-      if (catchup.status === 'failed') {
-        setError(catchup.error || 'Sync failed');
-        setProgress('');
-        return;
-      }
-
-      if (catchup.status === 'timeout') {
-        // A poll timeout is NOT evidence of ACL denial — it just means
-        // no peer finished the catchup within ~90s. Common reasons:
-        //   - project is public but peers are slow / offline,
-        //   - network path is congested,
-        //   - our subscribe hasn't reached a peer that holds the CG yet.
-        // Flipping `accessDenied` here used to push users of public
-        // projects straight into the "Access Restricted — send signed
-        // join request" flow, which is misleading and cuts them off
-        // from just retrying. Surface a neutral network error instead
-        // and let them retry; a real ACL denial lands in the `denied`
-        // branch above, or in the `err.message` check at the bottom
-        // of this function. (HEAD tier-4c G3; v10-rc's copy "syncing
-        // still in progress" was milder but still implied success —
-        // we'd rather the user retry explicitly than think the subscribe
-        // finished when the background sync never landed data.)
-        setError(
-          'Timed out waiting for peers to respond. The project may be slow to catch up, or no peer currently holds the data. Try again in a moment.',
-        );
-        setTimedOut(true);
-        setProgress('');
-        return;
-      }
-
-      setProgress('Refreshing project list…');
       const { contextGraphs: freshList } = await fetchContextGraphs();
       setContextGraphs(freshList ?? []);
-
       const joined = freshList?.find((cg: any) => cg.id === cgId);
       if (joined) {
         setActiveProject(joined.id);
         openTab({ id: `project:${joined.id}`, label: joined.name || joined.id, closable: true });
+        setWiredProjectName(joined.name ?? cgId);
+        setWiredCgId(cgId);
       }
-
-      setSuccess(true);
-      setProgress('');
-      // Phase 8: transition into wire-workspace step instead of
-      // auto-closing. The joiner can either install workspace files
-      // for Cursor or click Skip if they're only subscribing.
-      setWiredProjectName(joined?.name ?? cgId);
-      setWiredCgId(cgId);
-    } catch (err: any) {
-      const msg = err?.message || 'Failed to join project';
-      if (msg.includes('already subscribed') || msg.includes('409')) {
-        setError('You are already a member of this project.');
-      } else if (msg.includes('not on the allowlist') || msg.includes('403') || msg.includes('denied')) {
-        setAccessDenied(true);
-      } else {
-        setError(msg);
-      }
-      setProgress('');
-    } finally {
-      setJoining(false);
+    } catch {
+      // Sidebar refresh is best-effort; the user can still close the
+      // modal and re-open the project from the (eventually-refreshed)
+      // sidebar.
     }
-  };
+  }, [setContextGraphs, setActiveProject, openTab]);
 
-  const handleSendRequest = async () => {
+  // Auto-transition to wire-workspace when the curator approves a
+  // pending request. The SSE event arrives when the daemon's
+  // `JOIN_APPROVED` event bus fires for the cgId we're waiting on.
+  const onNodeEvent = useCallback((event: { type: string; data: Record<string, unknown> }) => {
+    if (!pendingCgId) return;
+    if (event.type !== 'join_approved' && event.type !== 'join_rejected') return;
+    const eventCgId = event.data?.contextGraphId;
+    if (eventCgId !== pendingCgId) return;
+
+    if (event.type === 'join_rejected') {
+      setPhase('rejected');
+      return;
+    }
+
+    void transitionToApproved(pendingCgId);
+  }, [pendingCgId, transitionToApproved]);
+  useNodeEvents(onNodeEvent);
+
+  if (!open) return null;
+
+  const handleRequestJoin = async () => {
     const invite = parseInviteCode(inviteCode);
     const inviteError = validateInvite(invite);
     if (inviteError) {
@@ -344,42 +331,67 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
     }
     const { cgId, curatorPeerId, legacyMultiaddr } = invite;
 
-    setSendingRequest(true);
     setError(null);
 
+    // Pre-check: if we already have this CG locally (previous join, or
+    // curator added us via add-agent), just open it. No need to re-sign
+    // a delegation we don't need.
+    const existing = contextGraphs.find((cg: any) => cg.id === cgId);
+    if (existing) {
+      setActiveProject(existing.id);
+      openTab({ id: `project:${existing.id}`, label: existing.name || existing.id, closable: true });
+      onClose();
+      return;
+    }
+
+    setPhase('sending');
+
     try {
+      // Warm the curator path so the daemon's targeted `forwardJoinRequest`
+      // dial doesn't pay the full DHT-walk + relay-handshake cost. Best-
+      // effort — the daemon will retry via DHT internally.
       if (curatorPeerId) {
-        try {
-          await connectToPeerIdWithTimeout(curatorPeerId);
-          await new Promise(r => setTimeout(r, 500));
-        } catch {
-          // Non-fatal — signed join requests can still be delivered via existing peers.
-        }
+        await connectToPeerIdWithTimeout(curatorPeerId).catch(() => {});
       } else if (legacyMultiaddr) {
-        try {
-          await connectToPeerWithTimeout(legacyMultiaddr);
-          await new Promise(r => setTimeout(r, 500));
-        } catch {
-          // Non-fatal — signed join requests can still be delivered via existing peers.
-        }
+        console.warn(
+          '[DKG] This invite uses a legacy multiaddr (deprecated). Ask the curator to regenerate using the current Share Project modal — V10 invites carry a peer id and resolve via DHT, so they survive relay rotations.',
+        );
+        await connectToPeerWithTimeout(legacyMultiaddr).catch(() => {});
       }
 
       const signed = await signJoinRequest(cgId);
+      const agentName = await fetchCurrentAgent().then((i) => i.name).catch(() => undefined);
 
-      let agentName: string | undefined;
-      try {
-        const identity = await fetchCurrentAgent();
-        agentName = identity.name;
-      } catch {
-        // Non-fatal
+      const result = await submitJoinRequest(cgId, {
+        delegation: signed.delegation,
+        agentName,
+        curatorPeerId: curatorPeerId ?? undefined,
+      });
+
+      setPendingCgId(cgId);
+
+      if (result.alreadyMember) {
+        // Curator-side short-circuit: requester is already in the
+        // allowlist. The HTTP response is itself authoritative — the
+        // curator's separate `join-approved` P2P notification is
+        // fire-and-forget and may be dropped, so don't make the modal
+        // depend on it. Drive the transition synchronously.
+        await transitionToApproved(cgId);
+        return;
       }
 
-      await submitJoinRequest(cgId, { ...signed, agentName });
-      setRequestSent(true);
-    } catch (err: any) {
-      setError(err?.message || 'Failed to send join request');
-    } finally {
-      setSendingRequest(false);
+      setPhase('pending');
+    } catch (err: unknown) {
+      // `post()` throws `HttpError` for non-2xx, attaching the parsed
+      // JSON body. For 502 the daemon includes `errors[]` with per-peer
+      // reject reasons (`forwardJoinRequest` in
+      // packages/cli/src/daemon/routes/context-graph.ts). Delegate the
+      // copy to `formatJoinRequestError` so the underlying reason —
+      // most commonly a delegation-scope mismatch from a stale hub
+      // address — actually reaches the user instead of being smothered
+      // under a generic "no reachable curator" message.
+      setError(formatJoinRequestError(err));
+      setPhase('idle');
     }
   };
 
@@ -396,7 +408,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
           <div className="v10-modal-header">
             <div className="v10-modal-title">Wire workspace for {wiredProjectName}</div>
             <div className="v10-modal-subtitle">
-              Subscribed and synced. Now wire a local workspace so this Cursor can collaborate on the project.
+              Curator approved. Now wire a local workspace so this Cursor can collaborate on the project.
             </div>
           </div>
           <div className="v10-modal-body">
@@ -412,105 +424,51 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
     );
   }
 
+  const sending = phase === 'sending';
+  const pending = phase === 'pending';
+  const approved = phase === 'approved';
+  const rejected = phase === 'rejected';
+
   return (
     <div className="v10-modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
       <div className="v10-modal-box">
         <div className="v10-modal-header">
           <div className="v10-modal-title">Join a Project</div>
           <div className="v10-modal-subtitle">
-            Enter the project ID shared by a collaborator. Your node will subscribe and sync existing knowledge.
+            Paste the invite from the curator. Your node will send a signed join request and wait for approval.
           </div>
         </div>
 
         <div className="v10-modal-body">
           {error && <div className="v10-modal-error">{error}</div>}
 
-          {success && (
-            <div style={{
-              padding: '10px 14px', borderRadius: 8, marginBottom: 16, fontSize: 12,
-              background: 'rgba(34, 197, 94, 0.08)', border: '1px solid rgba(34, 197, 94, 0.25)',
-              color: 'var(--accent-green)',
-            }}>
-              Successfully joined! Syncing knowledge from peers…
-            </div>
-          )}
-
-          {requestSent && (
+          {pending && (
             <div style={{
               padding: '10px 14px', borderRadius: 8, marginBottom: 16, fontSize: 12,
               background: 'rgba(59, 130, 246, 0.08)', border: '1px solid rgba(59, 130, 246, 0.25)',
               color: 'var(--accent-primary, #3b82f6)',
             }}>
-              Join request sent! The project curator will review and approve your request.
-              You'll be able to join once approved.
+              Join request sent. Waiting for the curator to approve — this modal will move forward automatically once they do.
             </div>
           )}
 
-          {accessDenied && !requestSent && (
+          {approved && (
+            <div style={{
+              padding: '10px 14px', borderRadius: 8, marginBottom: 16, fontSize: 12,
+              background: 'rgba(34, 197, 94, 0.08)', border: '1px solid rgba(34, 197, 94, 0.25)',
+              color: 'var(--accent-green)',
+            }}>
+              Approved! Loading project…
+            </div>
+          )}
+
+          {rejected && (
             <div style={{
               padding: '10px 14px', borderRadius: 8, marginBottom: 16, fontSize: 12,
               background: 'rgba(245, 158, 11, 0.08)', border: '1px solid rgba(245, 158, 11, 0.25)',
               color: 'var(--accent-warning, #f59e0b)',
             }}>
-              <div style={{ fontWeight: 600, marginBottom: 4 }}>Access Restricted</div>
-              This is a curated project and your agent is not on the allowlist.
-              You can send a <strong>signed join request</strong> to the curator for approval.
-              <div style={{ marginTop: 8 }}>
-                <button
-                  className="v10-modal-btn primary"
-                  onClick={handleSendRequest}
-                  disabled={sendingRequest}
-                  style={{ fontSize: 11 }}
-                >
-                  {sendingRequest ? 'Signing & sending…' : 'Send Join Request'}
-                </button>
-              </div>
-            </div>
-          )}
-
-          {unreachable && !accessDenied && !requestSent && (
-            <div style={{
-              padding: '10px 14px', borderRadius: 8, marginBottom: 16, fontSize: 12,
-              background: 'rgba(245, 158, 11, 0.06)', border: '1px solid rgba(245, 158, 11, 0.2)',
-              color: 'var(--text-secondary, #94a3b8)',
-            }}>
-              <div style={{ fontWeight: 600, marginBottom: 4 }}>Couldn't reach the curator</div>
-              We subscribed locally, but no peer was able to deliver this project's data.
-              The curator may be offline, or no node currently holds the data. You can still
-              send a <strong>signed join request</strong> — they'll see it next time they come online.
-              <div style={{ marginTop: 8 }}>
-                <button
-                  className="v10-modal-btn primary"
-                  onClick={handleSendRequest}
-                  disabled={sendingRequest}
-                  style={{ fontSize: 11 }}
-                >
-                  {sendingRequest ? 'Signing & sending…' : 'Send Join Request'}
-                </button>
-              </div>
-            </div>
-          )}
-
-          {timedOut && !unreachable && !accessDenied && !requestSent && (
-            <div style={{
-              padding: '10px 14px', borderRadius: 8, marginBottom: 16, fontSize: 12,
-              background: 'rgba(148, 163, 184, 0.08)', border: '1px solid rgba(148, 163, 184, 0.25)',
-              color: 'var(--text-secondary, #94a3b8)',
-            }}>
-              <div style={{ fontWeight: 600, marginBottom: 4 }}>If this project is curated…</div>
-              The timeout above may also indicate this is a private project where your agent
-              isn't yet on the allowlist. If retrying doesn't help, you can send a{' '}
-              <strong>signed join request</strong> to the curator instead.
-              <div style={{ marginTop: 8 }}>
-                <button
-                  className="v10-modal-btn"
-                  onClick={handleSendRequest}
-                  disabled={sendingRequest}
-                  style={{ fontSize: 11 }}
-                >
-                  {sendingRequest ? 'Signing & sending…' : 'Send Join Request'}
-                </button>
-              </div>
+              The curator declined this join request.
             </div>
           )}
 
@@ -523,31 +481,20 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
               onChange={(e) => setInviteCode(e.target.value)}
               autoFocus
               rows={3}
+              disabled={sending || pending || approved}
               style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}
             />
-            <div style={{ fontSize: 10, color: 'var(--text-tertiary)', marginTop: 4 }}>
-              The invite code contains a project ID and the curator's libp2p peer id. Legacy invites
-              with an embedded multiaddr still work but are deprecated — relay rotations break them.
-            </div>
-          </div>
-
-          <div className="v10-modal-tip">
-            <div className="v10-modal-tip-title">How it works</div>
-            Your node looks up the curator's current addresses on the libp2p Kademlia DHT, dials them,
-            subscribes to the project, and starts syncing knowledge assets. For curated projects, the
-            curator must approve your join request first. All requests are signed with your agent's
-            wallet key to verify your identity.
           </div>
         </div>
 
         <div className="v10-modal-footer">
-          <button className="v10-modal-btn" onClick={onClose}>Cancel</button>
+          <button className="v10-modal-btn" onClick={onClose}>{pending || approved ? 'Close' : 'Cancel'}</button>
           <button
             className="v10-modal-btn primary"
-            onClick={handleJoin}
-            disabled={!inviteCode.trim() || joining || success || requestSent}
+            onClick={handleRequestJoin}
+            disabled={!inviteCode.trim() || sending || pending || approved}
           >
-            {joining ? progress || 'Joining…' : success ? '✓ Joined' : 'Join Project'}
+            {sending ? 'Sending request…' : pending ? 'Awaiting approval…' : approved ? 'Approved' : 'Request to Join'}
           </button>
         </div>
       </div>

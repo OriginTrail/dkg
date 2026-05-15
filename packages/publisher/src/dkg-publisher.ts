@@ -2,10 +2,11 @@ import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@origintrail-official/dkg-chain';
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
-import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, contextGraphDataUri, contextGraphMetaUri, contextGraphAssertionUri, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, DKG_GOSSIP_MAX_MESSAGE_BYTES, type Ed25519Keypair, computePublishACKDigest, buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
+import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphMetaUri, contextGraphAssertionUri, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, DKG_GOSSIP_MAX_MESSAGE_BYTES, type Ed25519Keypair, computePublishACKDigest, buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import type { Publisher, PublishOptions, PublishResult, KAManifestEntry, PhaseCallback } from './publisher.js';
 import { autoPartition } from './auto-partition.js';
+import { canonicalPublishPayload } from './canonical-publish-payload.js';
 import { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
 import { skolemize } from './skolemize.js';
 import {
@@ -18,7 +19,6 @@ import { validatePublishRequest } from './validation.js';
 import {
   generateTentativeMetadata,
   generateConfirmedFullMetadata,
-  generateShareMetadata,
   generateOwnershipQuads,
   generateAuthorshipProof,
   generateShareTransitionMetadata,
@@ -32,7 +32,9 @@ import {
   type KAMetadata,
 } from './metadata.js';
 import { storeWorkspaceOperationPublicQuads } from './workspace-resolution.js';
+import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
 import { ethers } from 'ethers';
+import type { WorkspaceAgentRecipientResolver } from './workspace-agent-recipients.js';
 
 export { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
 
@@ -58,7 +60,28 @@ export interface DKGPublisherConfig {
   knownBatchContextGraphs?: Map<string, string>;
   /** Shared write lock map. Pass to SharedMemoryHandler so gossip writes serialize against CAS writes. */
   writeLocks?: Map<string, Promise<void>>;
+  /** Resolves DKG-agent public encryption keys for private/agent-gated remote SWM gossip. */
+  workspaceAgentRecipientResolver?: WorkspaceAgentRecipientResolver;
+  /** Encrypts private/agent-gated SWM gossip with the node's Sender Key epoch state. */
+  workspaceSenderKeyEncryptor?: WorkspaceSenderKeyEncryptor;
+  /** Optional out-of-Oxigraph store for immutable public SWM operation snapshots. */
+  publicSnapshotStore?: WorkspacePublicSnapshotStore;
 }
+
+export interface WorkspaceSenderKeyEncryptInput {
+  contextGraphId: string;
+  plaintext: Uint8Array;
+  senderAgentAddress: string;
+  operationId: string;
+  shareOperationId: string;
+  timestampMs: number;
+  subGraphName?: string;
+  publisherPeerId: string;
+}
+
+export type WorkspaceSenderKeyEncryptor = (
+  input: WorkspaceSenderKeyEncryptInput,
+) => Promise<Uint8Array>;
 
 interface PublisherAddressResolutionOptions {
   includeReservingPublisherProbe?: boolean;
@@ -126,6 +149,8 @@ export interface ShareOptions {
   publisherPeerId: string;
   operationCtx?: OperationContext;
   subGraphName?: string;
+  localOnly?: boolean;
+  senderAgentAddress?: string;
 }
 
 /** @deprecated Use ShareOptions */
@@ -312,12 +337,15 @@ export class DKGPublisher implements Publisher {
   private readonly publisherWallet?: ethers.Wallet;
   private adapterSignMessagePublisherAddress?: string;
   private readonly adapterSignMessageProbeCache = new Map<string, boolean>();
+  private workspaceAgentRecipientResolver?: WorkspaceAgentRecipientResolver;
+  private workspaceSenderKeyEncryptor?: WorkspaceSenderKeyEncryptor;
   /** Additional wallets that can provide receiver signatures. */
   private readonly additionalSignerWallets: ethers.Wallet[] = [];
   private readonly log = new Logger('DKGPublisher');
   private readonly sessionId = Date.now().toString(36);
   private tentativeCounter = 0;
   readonly writeLocks: Map<string, Promise<void>>;
+  private readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
 
   constructor(config: DKGPublisherConfig) {
     this.store = config.store;
@@ -368,6 +396,17 @@ export class DKGPublisher implements Publisher {
     this.sharedMemoryOwnedEntities = config.sharedMemoryOwnedEntities ?? new Map();
     this.knownBatchContextGraphs = config.knownBatchContextGraphs ?? new Map();
     this.writeLocks = config.writeLocks ?? new Map();
+    this.workspaceAgentRecipientResolver = config.workspaceAgentRecipientResolver;
+    this.workspaceSenderKeyEncryptor = config.workspaceSenderKeyEncryptor;
+    this.publicSnapshotStore = config.publicSnapshotStore;
+  }
+
+  setWorkspaceAgentRecipientResolver(resolver: WorkspaceAgentRecipientResolver | undefined): void {
+    this.workspaceAgentRecipientResolver = resolver;
+  }
+
+  setWorkspaceSenderKeyEncryptor(encryptor: WorkspaceSenderKeyEncryptor | undefined): void {
+    this.workspaceSenderKeyEncryptor = encryptor;
   }
 
   private async resolvePublisherAddress(
@@ -382,30 +421,12 @@ export class DKGPublisher implements Publisher {
     return this.inferAdapterPublisherAddress(contextGraphId, options);
   }
 
-  /**
-   * RFC-001 §9.x — public wrapper around `resolvePublisherAddress` that
-   * `agent.assertionFinalize()` calls when no agent override was
-   * supplied. Mirrors Phase 4 mode (a): the daemon's own publisher
-   * EOA acts as author when the request is admin-scoped.
-   *
-   * Returns `undefined` when no publisher signer is configured
-   * (tentative-only daemon); finalize must then fail because there's
-   * no key to sign with.
-   */
+  /** RFC-001 §9 fallback author when no agent override is supplied. Returns undefined if no signer configured. */
   async publisherFallbackAuthorAddress(): Promise<string | undefined> {
     return this.resolvePublisherAddress();
   }
 
-  /**
-   * RFC-001 §9.x — sign EIP-712 typed data with the publisher's own
-   * wallet (publisherPrivateKey or chain adapter's signer). Used by
-   * `agent.assertionFinalize()` when no agent override is supplied,
-   * so that the seal can still be produced for admin-scoped
-   * finalize requests.
-   *
-   * Returns the compact `(r, vs)` form expected by KAv10's
-   * AuthorAttestation struct.
-   */
+  /** Sign EIP-712 typed data with the publisher's own wallet. Returns KAv10's compact (r, vs). */
   async signAuthorAttestationAsPublisher(typedData: {
     domain: { name: string; version: string; chainId: bigint; verifyingContract: string };
     types: Record<string, Array<{ name: string; type: string }>>;
@@ -824,8 +845,9 @@ export class DKGPublisher implements Publisher {
       expectAbsent: c.expectedValue === null,
     }));
 
-    const message = encodeWorkspacePublishRequest({
-      contextGraphId: contextGraphId,
+    const timestampMs = Date.now();
+    const workspaceRequestMessage = encodeWorkspacePublishRequest({
+      contextGraphId,
       nquads: new TextEncoder().encode(nquadsStr),
       manifest: manifestEntries.map((m) => ({
         rootEntity: m.rootEntity,
@@ -833,12 +855,25 @@ export class DKGPublisher implements Publisher {
         privateTripleCount: m.privateTripleCount,
       })),
       publisherPeerId: options.publisherPeerId,
-      workspaceOperationId: shareOperationId,
-      timestampMs: Date.now(),
+      shareOperationId,
+      timestampMs,
       operationId: ctx.operationId,
       casConditions,
       subGraphName: options.subGraphName,
     });
+    const message = await this.encodeWorkspaceGossipPayload(
+      contextGraphId,
+      workspaceRequestMessage,
+      {
+        localOnly: options.localOnly === true,
+        senderAgentAddress: options.senderAgentAddress,
+        operationId: ctx.operationId,
+        shareOperationId,
+        timestampMs,
+        subGraphName: options.subGraphName,
+        publisherPeerId: options.publisherPeerId,
+      },
+    );
 
     if (message.length > DKG_GOSSIP_MAX_MESSAGE_BYTES) {
       throw new Error(
@@ -860,17 +895,7 @@ export class DKGPublisher implements Publisher {
     await this.store.insert(normalized);
 
     const rootEntities = manifestEntries.map((m) => m.rootEntity);
-    const metaQuads = generateShareMetadata(
-      {
-        shareOperationId,
-        contextGraphId,
-        rootEntities,
-        publisherPeerId: options.publisherPeerId,
-        timestamp: new Date(),
-      },
-      swmMetaGraph,
-    );
-    await this.store.insert(metaQuads);
+    const operationTimestamp = new Date();
     await storeWorkspaceOperationPublicQuads({
       store: this.store,
       graphManager: this.graphManager,
@@ -880,6 +905,8 @@ export class DKGPublisher implements Publisher {
       quads: normalized,
       publisherPeerId: options.publisherPeerId,
       subGraphName: options.subGraphName,
+      timestamp: operationTimestamp,
+      publicSnapshotStore: this.publicSnapshotStore,
     });
 
     if (!this.sharedMemoryOwnedEntities.has(ownershipKey)) {
@@ -908,6 +935,60 @@ export class DKGPublisher implements Publisher {
 
     this.log.info(ctx, `Shared memory write complete: ${shareOperationId}`);
     return { shareOperationId, message };
+  }
+
+  private async encodeWorkspaceGossipPayload(
+    contextGraphId: string,
+    plaintext: Uint8Array,
+    options: {
+      localOnly: boolean;
+      senderAgentAddress?: string;
+      operationId: string;
+      shareOperationId: string;
+      timestampMs: number;
+      subGraphName?: string;
+      publisherPeerId: string;
+    },
+  ): Promise<Uint8Array> {
+    if (options.localOnly || !this.workspaceAgentRecipientResolver) {
+      return plaintext;
+    }
+
+    const resolution = await this.workspaceAgentRecipientResolver({ contextGraphId });
+    if (!resolution.requiresEncryption) {
+      return plaintext;
+    }
+    if (resolution.recipients.length === 0) {
+      throw new Error(`Context graph "${contextGraphId}" requires encrypted SWM gossip but has no valid DKG agent recipients`);
+    }
+    if (!options.senderAgentAddress) {
+      throw new Error(`Context graph "${contextGraphId}" requires a DKG agent sender identity for encrypted SWM gossip`);
+    }
+
+    if (this.workspaceSenderKeyEncryptor) {
+      return this.workspaceSenderKeyEncryptor({
+        contextGraphId,
+        plaintext,
+        senderAgentAddress: options.senderAgentAddress,
+        operationId: options.operationId,
+        shareOperationId: options.shareOperationId,
+        timestampMs: options.timestampMs,
+        subGraphName: options.subGraphName,
+        publisherPeerId: options.publisherPeerId,
+      });
+    }
+
+    const senderIdentity = `did:dkg:agent:${ethers.getAddress(options.senderAgentAddress)}`;
+    return encodeEncryptedWorkspacePayload(await encryptWorkspacePayload({
+      contextGraphId,
+      senderIdentity,
+      operationId: options.operationId,
+      shareOperationId: options.shareOperationId,
+      timestampMs: options.timestampMs,
+      subGraphName: options.subGraphName,
+      plaintext,
+      recipients: resolution.recipients,
+    }));
   }
 
   /**
@@ -1539,7 +1620,7 @@ export class DKGPublisher implements Publisher {
     onPhase?.('prepare:ensureContextGraph', 'end');
 
     onPhase?.('prepare:partition', 'start');
-    const kaMap = autoPartition(quads);
+    const canonical = canonicalPublishPayload(quads, privateQuads);
     onPhase?.('prepare:partition', 'end');
 
     const manifestEntries: KAManifestEntry[] = [];
@@ -1547,35 +1628,27 @@ export class DKGPublisher implements Publisher {
 
     onPhase?.('prepare:manifest', 'start');
     let tokenCounter = 1n;
-    for (const [rootEntity, publicQuads] of kaMap) {
-      const entityPrivateQuads = privateQuads.filter(
-        (q) => q.subject === rootEntity || q.subject.startsWith(rootEntity + '/.well-known/genid/'),
-      );
-
+    for (const entry of canonical.manifestEntries) {
       manifestEntries.push({
         tokenId: tokenCounter,
-        rootEntity,
-        privateMerkleRoot: entityPrivateQuads.length > 0
-          ? computePrivateRoot(entityPrivateQuads)
-          : undefined,
-        privateTripleCount: entityPrivateQuads.length,
+        rootEntity: entry.rootEntity,
+        privateMerkleRoot: entry.privateMerkleRoot,
+        privateTripleCount: entry.privateTripleCount,
       });
 
       kaMetadata.push({
-        rootEntity,
+        rootEntity: entry.rootEntity,
         kcUal: '',
         tokenId: tokenCounter,
-        publicTripleCount: publicQuads.length,
-        privateTripleCount: entityPrivateQuads.length,
-        privateMerkleRoot: entityPrivateQuads.length > 0
-          ? computePrivateRoot(entityPrivateQuads)
-          : undefined,
+        publicTripleCount: entry.publicTripleCount,
+        privateTripleCount: entry.privateTripleCount,
+        privateMerkleRoot: entry.privateMerkleRoot,
       });
 
       tokenCounter++;
     }
 
-    const allSkolemizedQuads = [...kaMap.values()].flat();
+    const allSkolemizedQuads = canonical.skolemizedPublicQuads;
     onPhase?.('prepare:manifest', 'end');
 
     onPhase?.('prepare:validate', 'start');
@@ -1588,10 +1661,8 @@ export class DKGPublisher implements Publisher {
     onPhase?.('prepare:validate', 'end');
 
     onPhase?.('prepare:merkle', 'start');
-    const privateRoots = manifestEntries
-      .map(m => m.privateMerkleRoot)
-      .filter((r): r is Uint8Array => r != null);
-    const kcMerkleRoot = computeFlatKCRoot(allSkolemizedQuads, privateRoots);
+    const privateRoots = canonical.privateRoots;
+    const kcMerkleRoot = canonical.kcMerkleRoot;
     const kcMerkleLeafCount = computeFlatKCMerkleLeafCountV10(allSkolemizedQuads, privateRoots);
     if (kcMerkleLeafCount > 0xffffffff) {
       throw new Error(`V10 merkleLeafCount exceeds uint32: ${kcMerkleLeafCount}`);
@@ -1609,13 +1680,12 @@ export class DKGPublisher implements Publisher {
     this.log.info(ctx, `Storing ${normalizedQuads.length} triples in local store`);
     await this.store.insert(normalizedQuads);
 
-    // Store private quads
-    for (const [rootEntity] of kaMap) {
+    for (const entry of canonical.manifestEntries) {
       const entityPrivateQuads = privateQuads.filter(
-        (q) => q.subject === rootEntity || q.subject.startsWith(rootEntity + '/.well-known/genid/'),
+        (q) => q.subject === entry.rootEntity || q.subject.startsWith(entry.rootEntity + '/.well-known/genid/'),
       );
       if (entityPrivateQuads.length > 0) {
-        await this.privateStore.storePrivateTriples(contextGraphId, rootEntity, entityPrivateQuads, options.subGraphName);
+        await this.privateStore.storePrivateTriples(contextGraphId, entry.rootEntity, entityPrivateQuads, options.subGraphName);
       }
     }
 
@@ -1649,7 +1719,51 @@ export class DKGPublisher implements Publisher {
     // H5-prefixed publish ACK digest (incl. merkleLeafCount) — matches
     // `packages/core/src/crypto/ack.ts:computePublishACKDigest` and
     // `KnowledgeAssetsV10._executePublishCore`.
-    const publishEpochs = 1;
+    //
+    // PCA discount eligibility (`KnowledgeAssetsV10.publish`): the
+    // contract takes the PCA branch only when (1) the wallet is a
+    // registered PCA agent, (2) the PCA is not expired, AND
+    // (3) `p.epochs == lockDurationEpochs`. Any miss silently falls
+    // through to direct spend at FULL price. To make sure registered
+    // agents actually get the discount they paid for, we probe for the
+    // PCA mapping and snap `publishEpochs` to the PCA's
+    // `lockDurationEpochs` when one is found. Wallets without a PCA
+    // (direct-spend branch) keep the default lifetime of `1` epoch.
+    let publishEpochs = 1;
+    if (
+      canAttemptOnChainPublish &&
+      publisherSigner !== undefined &&
+      typeof this.chain.getConvictionAgentAccountId === 'function' &&
+      typeof this.chain.getConvictionAccountLockDurationEpochs === 'function'
+    ) {
+      try {
+        const accountId = await this.chain.getConvictionAgentAccountId(publisherSigner.address);
+        if (accountId > 0n) {
+          const lockEpochs = await this.chain.getConvictionAccountLockDurationEpochs(accountId);
+          if (lockEpochs > 0) {
+            publishEpochs = lockEpochs;
+            this.log.info(
+              ctx,
+              `PCA-funded publish detected (signer=${publisherSigner.address}, accountId=${accountId}) — coercing publishEpochs to lockDurationEpochs=${lockEpochs}`,
+            );
+          }
+        }
+      } catch (err) {
+        // PCA probe is best-effort. On any RPC hiccup we keep the
+        // default `publishEpochs=1`. The contract is still the source
+        // of truth: if the signer turns out to be a PCA agent but
+        // `p.epochs != lockDurationEpochs`, the publish silently
+        // falls through to direct spend at full price (no revert).
+        // That degraded path is acceptable for a hot publish — the
+        // missed discount is observable via the lack of a
+        // `CostCovered` event on the receipt.
+        this.log.warn(
+          ctx,
+          `PCA epochs probe failed — falling back to publishEpochs=1: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
     let precomputedTokenAmount = 0n;
     if (canAttemptOnChainPublish && typeof this.chain.getRequiredPublishTokenAmount === 'function') {
       try {
@@ -1857,6 +1971,7 @@ export class DKGPublisher implements Publisher {
     } else {
       const tokenAmount = precomputedTokenAmount;
       usedV10Path = true;
+
       // ─────────────────────────────────────────────────────────────
       // SEAL INTEGRITY PREFLIGHT (Round 4 review §12)
       //
@@ -2069,7 +2184,14 @@ export class DKGPublisher implements Publisher {
             merkleRoot: kcMerkleRoot,
             knowledgeAssetsAmount: kaCount,
             byteSize: publicByteSize,
-            epochs: 1,
+            // PCA strict-equality: must match the value committed to the
+            // ACK digest above (`computePublishACKDigest` at line ~1908)
+            // so the on-chain ECDSA recovery yields the same operator
+            // address the publisher signed with. Hard-coding `1` here
+            // re-introduces a digest mismatch on PCA-funded publishes
+            // and trips `SignerIsNotNodeOperator` even though the
+            // signatures were produced correctly.
+            epochs: publishEpochs,
             tokenAmount,
             merkleLeafCount: kcMerkleLeafCount,
             isImmutable: false,
@@ -2904,7 +3026,7 @@ export class DKGPublisher implements Publisher {
     contextGraphId: string,
     name: string,
     agentAddress: string,
-    opts?: { entities?: string[] | 'all'; subGraphName?: string; publisherPeerId?: string },
+    opts?: { entities?: string[] | 'all'; subGraphName?: string; publisherPeerId?: string; senderAgentAddress?: string },
   ): Promise<{ promotedCount: number; gossipMessage?: Uint8Array }> {
     await this.ensureSubGraphRegistered(contextGraphId, opts?.subGraphName);
     const graphUri = contextGraphAssertionUri(contextGraphId, agentAddress, name, opts?.subGraphName);
@@ -3023,24 +3145,46 @@ export class DKGPublisher implements Publisher {
         privateMerkleRoot: undefined,
         privateTripleCount: 0,
       }));
+      const timestampMs = Date.now();
       const encoded = encodeWorkspacePublishRequest({
         contextGraphId: contextGraphId,
         nquads: new TextEncoder().encode(nquadsStr),
         manifest: manifestEntries,
         publisherPeerId: opts.publisherPeerId,
-        workspaceOperationId: operationId,
-        timestampMs: Date.now(),
+        shareOperationId: operationId,
+        timestampMs,
         operationId,
         subGraphName: opts.subGraphName,
       });
 
-      if (encoded.length > DKG_GOSSIP_MAX_MESSAGE_BYTES) {
+      // Wrap the plaintext publish-request in the encrypted envelope
+      // when the CG requires it. Mirrors the `share()` and
+      // `conditionalShare()` paths — without this, the receiver-side
+      // check at `SharedMemoryHandler.handle` rejects the gossip
+      // ("Sender Key encrypted workspace payload required for private
+      // or agent-gated context graph"). Returns plaintext for public
+      // CGs (resolver returns requiresEncryption=false).
+      const wrapped = await this.encodeWorkspaceGossipPayload(
+        contextGraphId,
+        encoded,
+        {
+          localOnly: false,
+          senderAgentAddress: opts.senderAgentAddress,
+          operationId,
+          shareOperationId: operationId,
+          timestampMs,
+          subGraphName: opts.subGraphName,
+          publisherPeerId: opts.publisherPeerId,
+        },
+      );
+
+      if (wrapped.length > DKG_GOSSIP_MAX_MESSAGE_BYTES) {
         throw new Error(
-          `Promoted assertion too large for gossip (${formatBytesAsKb(encoded.length)}, limit ${formatGossipLimit(DKG_GOSSIP_MAX_MESSAGE_BYTES)}). ` +
+          `Promoted assertion too large for gossip (${formatBytesAsKb(wrapped.length)}, limit ${formatGossipLimit(DKG_GOSSIP_MAX_MESSAGE_BYTES)}). ` +
           `Promote fewer entities per call.`,
         );
       }
-      gossipMessage = encoded;
+      gossipMessage = wrapped;
     }
 
     // Rule 4: reject roots owned by a different peer before any mutations.
@@ -3136,11 +3280,7 @@ export class DKGPublisher implements Publisher {
     // _shareImpl and the remote SharedMemoryHandler both produce, so the
     // promoting node and replicas converge on identical ownership state.
     if (opts?.publisherPeerId) {
-      const metaQuads = generateShareMetadata(
-        { shareOperationId: operationId, contextGraphId, rootEntities: effectiveRoots, publisherPeerId: opts.publisherPeerId, timestamp: new Date() },
-        swmMetaGraph,
-      );
-      await this.store.insert(metaQuads);
+      const operationTimestamp = new Date();
       await storeWorkspaceOperationPublicQuads({
         store: this.store,
         graphManager: this.graphManager,
@@ -3150,6 +3290,8 @@ export class DKGPublisher implements Publisher {
         quads: swmQuads,
         publisherPeerId: opts.publisherPeerId,
         subGraphName: opts.subGraphName,
+        timestamp: operationTimestamp,
+        publicSnapshotStore: this.publicSnapshotStore,
       });
 
       if (!this.sharedMemoryOwnedEntities.has(ownershipKey)) {

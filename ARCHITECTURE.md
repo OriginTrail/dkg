@@ -87,6 +87,14 @@ classDiagram
     +finalize()
   }
 
+  class CoreProtocolCrypto {
+    <<package>>
+    +workspace_encryption()
+    +encrypted_workspace_proto()
+    +gossip_envelope_proto()
+    +workspace_publish_proto()
+  }
+
   class StorageAdapters {
     <<persistence>>
     +local_triple_store()
@@ -117,6 +125,7 @@ classDiagram
   DkgDaemonApi --> PublisherRuntime : delegates publish work
   LayeredBenchmarkClient ..> DkgAgentRuntime : mirrors WM and SWM behavior
   LayeredBenchmarkClient ..> PublisherRuntime : mirrors enqueue and finalization
+  DkgAgentRuntime --> CoreProtocolCrypto : uses SWM wire helpers
   DkgAgentRuntime --> StorageAdapters : reads and writes triples
   PublisherRuntime --> StorageAdapters : reads SWM staging data
   PublisherRuntime --> ChainAdapters : anchors VM commitments
@@ -326,6 +335,8 @@ sequenceDiagram
     Docs-->>Planner: leave working tree unchanged
   end
   Docs-->>Planner: report documentation outcome
+```
+
 # DKG V10 Architecture
 
 This document captures the top-level runtime boundaries for the node, CLI, and
@@ -402,6 +413,39 @@ class GossipEnvelope {
   +signature
   +payload
 }
+class WorkspacePublishRequest {
+  +paranetId
+  +nquads
+  +manifest
+  +publisherPeerId
+  +workspaceOperationId
+  +operationId
+  +subGraphName
+}
+class EncryptedWorkspacePayload {
+  +version
+  +type
+  +contextGraphId
+  +senderIdentity
+  +operationId
+  +workspaceOperationId
+  +timestampMs
+  +subGraphName
+  +ciphertext
+  +recipients
+}
+class WorkspaceEncryption {
+  +generateWorkspaceRecipientEncryptionKey()
+  +encryptWorkspacePayload()
+  +decryptWorkspacePayload()
+  +computeEncryptedWorkspaceAAD()
+}
+class WorkspaceRecipientEncryptionKey {
+  +purpose
+  +recipientId
+  +recipientKeyId
+  +keyBytes
+}
 class SharedMemoryHandler {
   +handle(data, from)
   +verifyAgentEnvelope()
@@ -433,6 +477,11 @@ DKGAgent --> SharedWorkingMemory : gossips
 DKGAgent --> AgentKeyStore : selects local signing agent
 DKGAgent --> ContextGraphAccessMetadata : reads agent gates
 DKGAgent --> GossipEnvelope : wraps signed SWM gossip
+DKGAgent ..> WorkspaceEncryption : private SWM payload primitive
+WorkspacePublishRequest --> WorkspaceEncryption : plaintext input and output
+WorkspaceEncryption --> EncryptedWorkspacePayload : creates and opens
+WorkspaceEncryption --> WorkspaceRecipientEncryptionKey : requires dedicated keys
+EncryptedWorkspacePayload --> GossipEnvelope : nests as payload bytes
 GossipEnvelope --> SharedMemoryHandler : delivered on SWM topic
 SharedMemoryHandler --> ContextGraphAccessMetadata : reads access policy and gates
 SharedMemoryHandler --> SharedWorkingMemory : stores accepted writes
@@ -464,9 +513,13 @@ fails closed and rejects received SWM gossip rather than accepting it as open.
 `DKG_ALLOWED_PEER` remains a libp2p peer-id allowlist, while the agent gates
 remain signed-envelope checks.
 
-`GossipEnvelope` signing authenticates the SWM writer and binds the payload to
-the claimed context graph, but it does not encrypt GossipSub payload bytes.
-Operators should treat SWM gossip contents as visible to subscribed peers.
+`GossipEnvelope` signing authenticates the SWM writer and binds the signed
+payload bytes to the claimed context graph, but signatures do not provide
+GossipSub payload confidentiality. Open public context graphs therefore retain
+the legacy plaintext-compatible `WorkspacePublishRequest` path. Private context
+graphs use the separate encrypted workspace payload primitive described below so
+raw GossipSub bytes do not expose the plaintext N-Quads or workspace request
+fields to non-recipients.
 
 ```mermaid
 sequenceDiagram
@@ -513,6 +566,60 @@ else receiver graph is open
   Handler->>Handler: decode envelope or legacy raw payload
   Handler->>SWM: store accepted write
 end
+```
+
+## Encrypted SWM Envelope Primitives
+
+Encrypted Shared Working Memory payloads are defined in `@origintrail-official/dkg-core`
+as a nested protocol layer, not as a replacement for the existing
+`GossipEnvelope` or `WorkspacePublishRequest` wire schemas. The plaintext
+workspace request is encrypted into an `EncryptedWorkspacePayload` with
+versioned type constants, AES-256-GCM payload encryption, AES-256-GCM recipient
+key slots, and deterministic authenticated data bound to `contextGraphId`,
+envelope version and type, sender identity, `operationId`,
+`workspaceOperationId`, timestamp, and optional `subGraphName`.
+
+Recipient keys are dedicated workspace encryption keys identified by
+`recipientId` and `recipientKeyId`; they are intentionally separate from
+Ethereum signing keys. The receiving side recomputes the authenticated data from
+decoded metadata and only releases plaintext when a matching recipient key slot
+decrypts successfully. Missing recipient keys, unsupported envelope constants,
+or metadata tampering fail closed. Open public graphs keep the legacy plaintext
+path for backward compatibility, while private graph integration rejects
+plaintext fallback.
+
+```mermaid
+sequenceDiagram
+  actor Writer as Local Writer
+  participant Runtime as SWM Runtime
+  participant Crypto as Core Workspace Encryption
+  participant Payload as EncryptedWorkspacePayload
+  participant Envelope as GossipEnvelope
+  participant Gossip as GossipSub
+  participant Receiver as Receiving Runtime
+  participant Handler as SharedMemoryHandler
+
+  Writer->>Runtime: prepare WorkspacePublishRequest bytes
+  alt private context graph
+    Runtime->>Crypto: encryptWorkspacePayload(metadata, plaintext, recipient keys)
+    Crypto->>Crypto: compute AAD from context graph, sender, operations, timestamp, subgraph
+    Crypto->>Payload: encrypt content key per recipient slot
+    Payload-->>Runtime: encoded encrypted workspace bytes
+    Runtime->>Envelope: place encrypted bytes in payload
+    Runtime->>Gossip: publish signed envelope with ciphertext
+    Gossip->>Receiver: deliver raw GossipSub bytes
+    Receiver->>Crypto: decodeEncryptedWorkspacePayload and decryptWorkspacePayload(keys)
+    alt no matching recipient key or AAD mismatch
+      Crypto-->>Receiver: reject fail closed
+    else authorized recipient
+      Crypto-->>Receiver: plaintext WorkspacePublishRequest bytes
+      Receiver->>Handler: apply normal SWM authorization and storage flow
+    end
+  else open public context graph
+    Runtime->>Envelope: keep legacy workspace payload bytes
+    Runtime->>Gossip: publish plaintext-compatible SWM message
+    Gossip->>Handler: decode envelope or legacy raw payload
+  end
 ```
 
 ## Source Worker Workflow

@@ -1,0 +1,65 @@
+# CODEOWNERS — required reviewer routing for security-sensitive paths.
+#
+# Branch protection on `main` / `v10-rc` should have "Require review from
+# Code Owners" enabled (admin task — see
+# docs/security/SUPPLY_CHAIN_HARDENING.md §C). With that toggle on, any
+# PR that touches a path listed below requires an approving review from
+# at least one of the listed owners before it can merge. Without
+# CODEOWNERS, the "code-owner review" branch protection rule is a no-op:
+# there is nobody to ask, so the requirement is silently satisfied for
+# every PR. The 2024 reviewdog supply-chain compromise hinged on this
+# exact failure mode — an attacker landed a workflow change that no
+# named maintainer was required to approve.
+#
+# Owner syntax: GitHub @-usernames or @org/team names. Teams are
+# preferred for shared infra (no churn when the active maintainer
+# rotates). Individual handles are fine for the bootstrap period below
+# and can be migrated to a team mention later without touching the
+# patterns.
+#
+# Bootstrap owners — derived from the most recent committers on these
+# paths at the time CODEOWNERS landed. Replace with `@OriginTrail/<team>`
+# once a maintainers' team is created in the org. Each path needs at
+# LEAST two owners so no single account compromise can self-approve a
+# malicious change here.
+
+# ----------------------------------------------------------------------
+# CI workflow files — full attacker surface. Anything that runs on a
+# privileged event (`push` to main, `pull_request_target`, `schedule`,
+# `workflow_dispatch`) inherits the workflow's `permissions:` block,
+# so a malicious workflow change is equivalent to handing out a token
+# in the worst case. These MUST get a security-aware review.
+.github/                                  @branarakic @Jurij89 @zsculac
+.github/workflows/                        @branarakic @Jurij89 @zsculac
+.github/actions/                          @branarakic @Jurij89 @zsculac
+.github/dependabot.yml                    @branarakic @Jurij89 @zsculac
+.github/zizmor.yml                        @branarakic @Jurij89 @zsculac
+.github/CODEOWNERS                        @branarakic @Jurij89 @zsculac
+
+# ----------------------------------------------------------------------
+# Publish credentials surface — anything that influences what gets
+# packed, published, or which packages are public. A change that flips
+# a `"private": true` to false on a previously-private package, or
+# that adds a postinstall script, lands here.
+package.json                              @branarakic @Jurij89 @zsculac
+pnpm-lock.yaml                            @branarakic @Jurij89 @zsculac
+pnpm-workspace.yaml                       @branarakic @Jurij89 @zsculac
+.npmrc                                    @branarakic @Jurij89 @zsculac
+packages/*/package.json                   @branarakic @Jurij89 @zsculac
+packages/*/.npmrc                         @branarakic @Jurij89 @zsculac
+
+# ----------------------------------------------------------------------
+# Release / deploy scripts — covered as code, not config. A modification
+# here can change what `pnpm build` produces or which file the release
+# workflow uploads as a release asset, both of which are publish-trust
+# boundaries.
+scripts/                                  @branarakic @Jurij89 @zsculac
+packages/cli/scripts/                     @branarakic @Jurij89 @zsculac
+
+# ----------------------------------------------------------------------
+# Security documentation — keeps the threat-model description in sync
+# with the controls actually configured in this repo. Drift between
+# the doc and the configured controls was the gap that PR review found
+# the first time around.
+docs/security/                            @branarakic @Jurij89 @zsculac
+SECURITY.md                               @branarakic @Jurij89 @zsculac

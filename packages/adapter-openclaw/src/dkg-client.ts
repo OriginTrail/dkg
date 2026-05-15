@@ -30,6 +30,7 @@ export interface DkgClientOptions {
 
 export interface OpenClawAttachmentRef {
   assertionUri: string;
+  assertionName?: string;
   fileHash: string;
   contextGraphId: string;
   fileName: string;
@@ -37,6 +38,52 @@ export interface OpenClawAttachmentRef {
   extractionStatus?: 'completed';
   tripleCount?: number;
   rootEntity?: string;
+  mdIntermediateHash?: string;
+  markdownHash?: string;
+  markdownForm?: string;
+}
+
+export interface ImportedArtifactRequest {
+  contextGraphId: string;
+  assertionUri: string;
+  assertionName?: string;
+  fileHash?: string;
+  subGraphName?: string;
+}
+
+export interface ImportedArtifactResolution {
+  contextGraphId: string;
+  assertionUri: string;
+  assertionName?: string;
+  assertionAgentAddress?: string;
+  subGraphName?: string;
+  fileHash: string;
+  sourceFileHash: string;
+  detectedContentType: string;
+  sourceContentType: string;
+  extractionStatus: 'completed';
+  extractionMethod?: string;
+  rootEntity?: string;
+  sourceFileName?: string;
+  tripleCount?: number;
+  structuralTripleCount?: number;
+  semanticTripleCount?: number;
+  mdIntermediateHash?: string;
+  markdownForm?: string;
+  markdownHash?: string;
+  canReadMarkdown: boolean;
+}
+
+export interface SemanticEnrichmentWriteRequest extends ImportedArtifactRequest {
+  semanticQuads: Array<{ subject: string; predicate: string; object: string }>;
+  generationMethod?: string;
+  agentIdentity?: string;
+  generatedAt?: string;
+}
+
+export interface ChatTurnStoreStatus {
+  hasAnyChatTurnData: boolean;
+  existingSessionIds: string[];
 }
 
 export interface LocalAgentIntegrationCapabilities {
@@ -103,6 +150,64 @@ export interface AgentIdentity {
   framework?: string;
   peerId: string;
   nodeIdentityId: string;
+}
+
+const CHAT_TURNS_CONTEXT_GRAPH_ID = 'agent-context';
+const CHAT_TURNS_ASSERTION_NAME = 'chat-turns';
+const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+const SCHEMA = 'http://schema.org/';
+const DKG_ONT = 'http://dkg.io/ontology/';
+
+function queryBindings(result: any): Array<Record<string, unknown>> {
+  const candidates = [
+    result?.results?.bindings,
+    result?.result?.bindings,
+    result?.result?.results?.bindings,
+    result?.bindings,
+  ];
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate)) return candidate as Array<Record<string, unknown>>;
+  }
+  return [];
+}
+
+function bindingValue(binding: Record<string, unknown>, key: string): string | undefined {
+  const value = binding[key];
+  if (typeof value === 'string') return stripRdfLiteral(value);
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    if (typeof record.value === 'string') return stripRdfLiteral(record.value);
+    if (typeof record.id === 'string') return stripRdfLiteral(record.id);
+  }
+  return undefined;
+}
+
+function stripRdfLiteral(value: string): string {
+  if (!value) return '';
+  const typed = value.match(/^"([\s\S]*)"(?:\^\^<[^>]+>)?(?:@[a-zA-Z-]+)?$/);
+  return typed ? typed[1] : value;
+}
+
+function bindingCount(result: any): number {
+  const binding = queryBindings(result)[0];
+  if (!binding) return 0;
+  const value = bindingValue(binding, 'c') ?? bindingValue(binding, 'count');
+  if (!value) return 0;
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+function isChatTurnStoreNotFoundError(err: unknown): boolean {
+  // Only treat a daemon 404 as "no chat-turn data yet" when the error
+  // message names the specific assertion this query reads. Broader
+  // substring matches (just "not found" / "context" / "graph") would
+  // swallow unrelated 404s and silently clear local cursor state via
+  // validateUntrustedDurableCursorsBeforeW4a, turning real daemon
+  // failures into cold-start replays.
+  const msg = err instanceof Error ? err.message : String(err);
+  const lower = msg.toLowerCase();
+  if (!lower.includes('responded 404')) return false;
+  return lower.includes(CHAT_TURNS_ASSERTION_NAME);
 }
 
 export class DkgDaemonClient {
@@ -369,6 +474,44 @@ export class DkgDaemonClient {
   }
 
   /**
+   * Resolve deterministic import metadata for a completed attachment ref.
+   * This does not read arbitrary paths; it only returns graph/file-store
+   * metadata already attached to the imported assertion.
+   */
+  async resolveImportArtifact(
+    request: ImportedArtifactRequest,
+  ): Promise<{ artifact: ImportedArtifactResolution }> {
+    return this.post('/api/assertion/import-artifact/resolve', request);
+  }
+
+  /**
+   * Read the Markdown source for a completed imported assertion. The daemon
+   * resolves the markdown hash from deterministic import metadata and reads
+   * the content-addressed file store; callers never supply filesystem paths.
+   */
+  async readImportArtifactMarkdown(
+    request: ImportedArtifactRequest & { maxBytes?: number },
+  ): Promise<{
+    artifact: ImportedArtifactResolution;
+    markdownHash: string;
+    contentType: 'text/markdown';
+    bytes: number;
+    markdown: string;
+  }> {
+    return this.post('/api/assertion/import-artifact/read-markdown', request);
+  }
+
+  /**
+   * Append model-derived semantic triples into the completed imported assertion
+   * with provenance. The daemon intentionally does not promote or publish.
+   */
+  async writeSemanticEnrichment(
+    request: SemanticEnrichmentWriteRequest,
+  ): Promise<Record<string, unknown>> {
+    return this.post('/api/assertion/semantic-enrichment/write', request);
+  }
+
+  /**
    * Fetch the lifecycle descriptor for an assertion (creation time, author,
    * latest extraction status, promotion state). Throws a 404-bearing error
    * when no record exists for the given (contextGraphId, name, agentAddress).
@@ -475,6 +618,59 @@ export class DkgDaemonClient {
   // ---------------------------------------------------------------------------
   // Chat turn persistence  (reuses the existing ChatMemoryManager pathway)
   // ---------------------------------------------------------------------------
+
+  async getChatTurnStoreStatus(sessionIds: string[]): Promise<ChatTurnStoreStatus> {
+    const identity = await this.getAgentIdentity();
+    const agentAddress = identity.ok ? identity.identity?.agentAddress?.trim() : '';
+    if (!agentAddress) {
+      throw new Error(
+        `Unable to resolve daemon agent identity for chat-turn WM status: ${identity.error ?? 'missing agentAddress'}`,
+      );
+    }
+    const wmReadOpts = {
+      contextGraphId: CHAT_TURNS_CONTEXT_GRAPH_ID,
+      view: 'working-memory' as const,
+      assertionName: CHAT_TURNS_ASSERTION_NAME,
+      agentAddress,
+    };
+    try {
+      const countResult = await this.query(
+        'SELECT (COUNT(*) AS ?c) WHERE { ?s ?p ?o }',
+        wmReadOpts,
+      );
+      const hasAnyChatTurnData = bindingCount(countResult) > 0;
+      if (!hasAnyChatTurnData) {
+        return { hasAnyChatTurnData: false, existingSessionIds: [] };
+      }
+      const uniqueSessionIds = Array.from(new Set(
+        sessionIds.map((sessionId) => sessionId.trim()).filter(Boolean),
+      ));
+      if (uniqueSessionIds.length === 0) {
+        return { hasAnyChatTurnData: true, existingSessionIds: [] };
+      }
+      const sessionValues = uniqueSessionIds.map((sessionId) => JSON.stringify(sessionId)).join(' ');
+      const sessionResult = await this.query(
+        `SELECT DISTINCT ?sid WHERE {
+          VALUES ?sid { ${sessionValues} }
+          ?session <${RDF_TYPE}> <${SCHEMA}Conversation> .
+          ?session <${DKG_ONT}sessionId> ?sid .
+        }`,
+        wmReadOpts,
+      );
+      const requested = new Set(uniqueSessionIds);
+      const existingSessionIds = Array.from(new Set(
+        queryBindings(sessionResult)
+          .map((binding) => bindingValue(binding, 'sid'))
+          .filter((value): value is string => typeof value === 'string' && requested.has(value)),
+      ));
+      return { hasAnyChatTurnData: true, existingSessionIds };
+    } catch (err) {
+      if (isChatTurnStoreNotFoundError(err)) {
+        return { hasAnyChatTurnData: false, existingSessionIds: [] };
+      }
+      throw err;
+    }
+  }
 
   /**
    * Persist a chat turn through the daemon's `/api/openclaw-channel/persist-turn`

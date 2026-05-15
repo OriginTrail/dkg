@@ -29,6 +29,10 @@ concurrency:
   group: evm-integration-${{ github.ref }}
   cancel-in-progress: true
 
+# Minimum-needed token scope (see ci.yml header for rationale).
+permissions:
+  contents: read
+
 jobs:
   # All three matrix scopes (chain, publisher, agent) are TORNADO-tier per
   # `dkgv10-spec/CRITICALITY_CATEGORIZATION.md` §1 — this workflow drives
@@ -45,11 +49,12 @@ jobs:
         scope: [chain, publisher, agent]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
 
-      - uses: pnpm/action-setup@v4
-
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version-file: .nvmrc
           cache: pnpm
@@ -58,7 +63,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Cache Hardhat artifacts
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             packages/evm-module/artifacts

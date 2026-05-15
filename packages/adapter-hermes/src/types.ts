@@ -244,6 +244,7 @@ export interface HermesChannelMessage {
 
 export interface HermesChannelAttachmentRef {
   assertionUri: string;
+  assertionName?: string;
   fileHash: string;
   contextGraphId: string;
   fileName: string;
@@ -251,6 +252,24 @@ export interface HermesChannelAttachmentRef {
   extractionStatus?: 'completed';
   tripleCount?: number;
   rootEntity?: string;
+  mdIntermediateHash?: string;
+  markdownHash?: string;
+  markdownForm?: string;
+}
+
+export interface HermesChannelAttachmentImportResult {
+  assertionUri: string;
+  assertionName?: string;
+  fileHash: string;
+  contextGraphId: string;
+  fileName: string;
+  detectedContentType: string;
+  extractionStatus: 'skipped';
+  pipelineUsed?: string | null;
+  tripleCount?: number;
+  rootEntity?: string;
+  mdIntermediateHash?: string;
+  error?: string;
 }
 
 export interface HermesChannelContextEntry {
@@ -267,8 +286,10 @@ export interface HermesChannelSendPayload {
   contextGraphId?: string;
   currentAgentAddress?: string;
   identity?: string;
+  persistUserMessage?: string;
   contextEntries?: HermesChannelContextEntry[];
   attachmentRefs?: HermesChannelAttachmentRef[];
+  attachmentImportResults?: HermesChannelAttachmentImportResult[];
   metadata?: Record<string, unknown>;
 }
 

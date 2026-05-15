@@ -323,41 +323,44 @@ describe('@unit KnowledgeAssetsV10', () => {
 
   describe('Tier 1 — critical regression checks', () => {
     // ----------------------------------------------------------------------
-    // T1.1: publish via conviction — double-count guard (CRITICAL)
+    // T1.1: publish via conviction — active-sink distribution (CRITICAL)
     // ----------------------------------------------------------------------
-    describe('T1.1: conviction-path `publish` double-count guard', () => {
-      it('does NOT call _distributeTokens — staker pool delta is zero during the publish itself', async () => {
+    describe('T1.1: conviction-path `publish` active-sink distribution', () => {
+      it('NFT distributes discounted cost into the KC epoch range; KAV10 does NOT call _distributeTokens', async () => {
+        // V10 lazy-settlement model: under the new model the conviction
+        // branch IS responsible for funding the staker pool over the KC's
+        // epoch range — but via the NFT's `addTokensToEpochRange` call
+        // through `coverPublishingCost`, NOT via KAV10's
+        // `_distributeTokens`. The double-count guard now reads:
+        //   exactly ONE `TokensAddedToEpochRange` event is emitted for the
+        //   discounted amount, on the KC's `[currentEpoch, currentEpoch +
+        //   epochs - 1]` range, from `EpochStorage`.
         const creator = getDefaultKCCreator(accounts);
         const { publishingNode, publisherIdentityId, receivingNodes, receiverIdentityIds } =
           await setupNodes();
 
-        // Create a conviction NFT account (committed TRAC already flows into
-        // StakingStorage + EpochStorage at createAccount time — see DKGPublishingConvictionNFT).
-        // The agent is the kc creator, so `publish` (conviction path) can resolve
-        // agent -> accountId.
+        // committed = 50K TRAC → discountBps = 20% (per the contract's
+        // tier ladder). discountedCost = baseCost * 0.8.
+        const committed = ethers.parseEther('50000');
+        const expectedDiscountBps = 2000n;
         await createConvictionAccountWithAgent(
           creator,
-          ethers.parseEther('50000'),
+          committed,
           creator.address,
         );
 
-        // Open CG so the creator is authorized without curator config.
         const cgId = await createOpenCG(creator);
 
+        const ParametersStorageContract =
+          await hre.ethers.getContract('ParametersStorage');
         const currentEpoch = await ChronosContract.getCurrentEpoch();
         const tokenAmount = ethers.parseEther('1000');
-        const epochs = 2;
+        const epochs = Number(
+          await ParametersStorageContract.publishingConvictionEpochs(),
+        );
+        const expectedDiscounted =
+          (tokenAmount * (10_000n - expectedDiscountBps)) / 10_000n;
         const merkleRoot = ethers.keccak256(ethers.toUtf8Bytes('t1.1-root'));
-
-        // Snapshot staker pool across the epoch range that `_distributeTokens`
-        // would touch (publish writes to [currentEpoch, currentEpoch + epochs]).
-        // For conviction path the deltas MUST be zero for every entry.
-        const poolsBefore: bigint[] = [];
-        for (let i = 0n; i <= BigInt(epochs); i++) {
-          poolsBefore.push(
-            await EpochStorageContract.getEpochPool(STAKER_SHARD_ID, currentEpoch + i),
-          );
-        }
 
         const p = await buildPublishParams({
           chainId,
@@ -376,35 +379,47 @@ describe('@unit KnowledgeAssetsV10', () => {
           publishOperationId: 't1.1-op',
         });
 
+        // Active-sink invariant: the discounted cost is spread across
+        // `epochs + 1` chain epochs (current partial + epochs-1 full +
+        // final partial), mirroring `KnowledgeAssetsV10._distributeTokens`.
+        // Sum of all `TokensAddedToEpochRange` events emitted by
+        // `EpochStorage` against shard 1 inside `[currentEpoch,
+        // currentEpoch+epochs]` MUST equal `expectedDiscounted`. We
+        // assert via the event sum (not per-epoch pool deltas) for the
+        // same reason as the NFT unit suite: shared shard storage with
+        // pre-existing unfinalized diffs pollutes per-epoch math.
         const tx = await KAV10.connect(creator).publish(p);
         const receipt = await tx.wait();
-        expect(receipt!.status).to.equal(1);
-
-        // Assert every epoch in the publish window got ZERO delta from publish.
-        // The createAccount-era deltas are already baked into poolsBefore
-        // because they happened earlier in the same fixture setup.
-        for (let i = 0n; i <= BigInt(epochs); i++) {
-          const after = await EpochStorageContract.getEpochPool(
-            STAKER_SHARD_ID,
-            currentEpoch + i,
-          );
-          const delta = after - poolsBefore[Number(i)];
-          expect(delta, `epoch +${i} delta must be 0 (double-count guard)`).to.equal(0n);
+        const epsAddr = (await EpochStorageContract.getAddress()).toLowerCase();
+        const iface = EpochStorageContract.interface;
+        let totalDistributed = 0n;
+        let eventCount = 0;
+        for (const log of receipt!.logs) {
+          if (log.address.toLowerCase() !== epsAddr) continue;
+          let parsed;
+          try { parsed = iface.parseLog({ topics: log.topics as string[], data: log.data }); }
+          catch { continue; }
+          if (parsed?.name !== 'TokensAddedToEpochRange') continue;
+          eventCount++;
+          expect(parsed.args.shardId).to.equal(STAKER_SHARD_ID);
+          expect(parsed.args.startEpoch).to.be.gte(currentEpoch);
+          expect(parsed.args.endEpoch).to.be.lte(currentEpoch + BigInt(epochs));
+          totalDistributed += BigInt(parsed.args.tokenAmount);
         }
+        expect(eventCount).to.be.greaterThan(0);
+        expect(totalDistributed).to.equal(expectedDiscounted);
 
         // KC landed correctly.
         const meta = await KCS.getKnowledgeCollectionMetadata(1);
-        expect(meta[3]).to.equal(1000n); // byteSize
-        expect(meta[4]).to.equal(currentEpoch); // startEpoch
-        expect(meta[5]).to.equal(currentEpoch + BigInt(epochs)); // endEpoch
+        expect(meta[3]).to.equal(1000n);
+        expect(meta[4]).to.equal(currentEpoch);
+        expect(meta[5]).to.equal(currentEpoch + BigInt(epochs));
         expect(meta[6]).to.equal(tokenAmount);
-        expect(meta[7]).to.equal(false); // isImmutable
+        expect(meta[7]).to.equal(false);
 
         // CG binding and value ledger are both non-zero after publish.
         expect(await CGStorageContract.kcToContextGraph(1)).to.equal(cgId);
         const currentCGValue = await CGValueStorage.getCurrentCGValue(cgId);
-        // Publish writes `tokenAmount / epochs` to `cgValueDiff[cgId][startEpoch]`;
-        // at currentEpoch (== startEpoch) the value read equals tokenAmount/epochs.
         expect(currentCGValue).to.be.gt(0n);
         expect(currentCGValue).to.equal(tokenAmount / BigInt(epochs));
       });
@@ -1295,11 +1310,13 @@ describe('@unit KnowledgeAssetsV10', () => {
       // shares `_executeUpdateCore` and only differs in how the delta is
       // paid (NFT.coverPublishingCost vs _addTokens+_distributeTokens). This
       // regression locks the conviction-path flow end-to-end.
-      it('T1.7f: conviction-path update() pays delta via NFT without touching the staker pool', async () => {
+      it('T1.7f: conviction-path update() pays delta via NFT active-sink (no _distributeTokens double-count)', async () => {
         const base = await publishBaselineKC();
 
-        // Register the creator as a conviction agent so `coverPublishingCost`
-        // auto-resolves msg.sender -> accountId via agentToAccountId.
+        // committed = 50K TRAC → discountBps = 20%. The discount applies
+        // to the DELTA only (newTokenAmount - currentTokenAmount), not
+        // the original tokenAmount.
+        const expectedDiscountBps = 2000n;
         await createConvictionAccountWithAgent(
           base.creator,
           ethers.parseEther('50000'),
@@ -1309,6 +1326,8 @@ describe('@unit KnowledgeAssetsV10', () => {
         const newMerkleRoot = ethers.keccak256(ethers.toUtf8Bytes('t1.7f-new'));
         const delta = ethers.parseEther('10');
         const newTokenAmount = base.tokenAmount + delta;
+        const expectedDiscountedDelta =
+          (delta * (10_000n - expectedDiscountBps)) / 10_000n;
 
         const up = await buildUpdateParams({
           chainId,
@@ -1327,28 +1346,37 @@ describe('@unit KnowledgeAssetsV10', () => {
           updateOperationId: 't1.7f-update',
         });
 
-        // Capture staker pool BEFORE update. Conviction path MUST leave it
-        // untouched — the NFT's allowance already lives in EpochStorage.
+        // Active-sink invariant for update(): the discounted delta is
+        // prorated across `remainingEpochs + 1` chain epochs (current
+        // partial + remainingEpochs-1 full + final partial), summed
+        // across all `TokensAddedToEpochRange` events emitted by
+        // `EpochStorage`. KAV10 still must NOT call `_distributeTokens`
+        // on the conviction branch — the NFT is the funding agent.
         const currentEpoch = await ChronosContract.getCurrentEpoch();
         const meta = await KCS.getKnowledgeCollectionMetadata(base.kcId);
         const endEpoch = meta[5];
-        const poolsBefore: bigint[] = [];
-        for (let e = currentEpoch; e <= endEpoch; e++) {
-          poolsBefore.push(
-            await EpochStorageContract.getEpochPool(STAKER_SHARD_ID, e),
-          );
+        const remainingEpochs = endEpoch - currentEpoch;
+        const tx = await KAV10.connect(base.creator).update(up);
+        const receipt = await tx.wait();
+        const epsAddr = (await EpochStorageContract.getAddress()).toLowerCase();
+        const iface = EpochStorageContract.interface;
+        let totalDistributed = 0n;
+        let eventCount = 0;
+        for (const log of receipt!.logs) {
+          if (log.address.toLowerCase() !== epsAddr) continue;
+          let parsed;
+          try { parsed = iface.parseLog({ topics: log.topics as string[], data: log.data }); }
+          catch { continue; }
+          if (parsed?.name !== 'TokensAddedToEpochRange') continue;
+          eventCount++;
+          expect(parsed.args.shardId).to.equal(STAKER_SHARD_ID);
+          expect(parsed.args.startEpoch).to.be.gte(currentEpoch);
+          expect(parsed.args.endEpoch).to.be.lte(currentEpoch + remainingEpochs);
+          totalDistributed += BigInt(parsed.args.tokenAmount);
         }
+        expect(eventCount).to.be.greaterThan(0);
+        expect(totalDistributed).to.equal(expectedDiscountedDelta);
 
-        await expect(KAV10.connect(base.creator).update(up)).to.not.be.reverted;
-
-        // Post-condition: staker pool delta zero across the remaining window.
-        let idx = 0;
-        for (let e = currentEpoch; e <= endEpoch; e++) {
-          const after = await EpochStorageContract.getEpochPool(STAKER_SHARD_ID, e);
-          expect(after - poolsBefore[idx++], `epoch ${e} double-count`).to.equal(0n);
-        }
-
-        // KC metadata updated.
         const metaAfter = await KCS.getKnowledgeCollectionMetadata(base.kcId);
         expect(metaAfter[6]).to.equal(newTokenAmount);
       });
@@ -2039,6 +2067,11 @@ describe('@unit KnowledgeAssetsV10', () => {
 
         const merkleRoot = ethers.keccak256(ethers.toUtf8Bytes('t2.3-root'));
         const tokenAmount = ethers.parseEther('100');
+        const ParametersStorageContract =
+          await hre.ethers.getContract('ParametersStorage');
+        const convictionEpochs = Number(
+          await ParametersStorageContract.publishingConvictionEpochs(),
+        );
 
         const p = await buildPublishParams({
           chainId,
@@ -2051,7 +2084,7 @@ describe('@unit KnowledgeAssetsV10', () => {
           merkleRoot,
           knowledgeAssetsAmount: 10,
           byteSize: 1000,
-          epochs: 2,
+          epochs: convictionEpochs,
           tokenAmount,
           isImmutable: false,
           publishOperationId: 't2.3-op',

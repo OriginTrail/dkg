@@ -7,6 +7,7 @@ export const PROTOCOL_SYNC = '/dkg/10.0.0/sync';
 export const PROTOCOL_MESSAGE = '/dkg/10.0.0/message';
 export const PROTOCOL_ACCESS = '/dkg/10.0.0/private-access';
 export const PROTOCOL_QUERY_REMOTE = '/dkg/10.0.0/query-remote';
+export const PROTOCOL_SWM_SENDER_KEY = '/dkg/10.0.0/swm-sender-key';
 
 export const PROTOCOL_JOIN_REQUEST = '/dkg/10.0.0/join-request';
 
@@ -129,6 +130,36 @@ export function validateContextGraphId(id: string): { valid: boolean; reason?: s
   if (id.length > 256) return { valid: false, reason: 'Context graph ID exceeds 256 characters' };
   if (!/^[\w:/.@\-]+$/.test(id)) return { valid: false, reason: 'Context graph ID contains disallowed characters (allowed: alphanumeric, _, :, /, ., @, -)' };
   return { valid: true };
+}
+
+/**
+ * V10 wallet-scoped context-graph IDs follow the convention
+ * `<curatorAddress>/<name>` — e.g. `0xabc.../my-project`. For these
+ * CGs the curator's identity is structural: it can be derived from the
+ * cgId itself without consulting any local metadata store. This is the
+ * authoritative fallback when the local RDF `_meta` graph is missing
+ * the explicit curator triple — which happens for any CG whose
+ * on-chain registration did not complete locally (e.g. node had no
+ * funded identity at create time, RPC was down, or the create-flow
+ * crashed between SQLite and triple-store writes). Without this
+ * fallback the daemon silently rejects all join requests for those
+ * CGs with `unknown CG`, and the joiner sees only "no reachable
+ * curator" — a failure mode that consumed an entire two-laptop
+ * debugging session before being root-caused.
+ *
+ * Returns null for non-wallet-prefixed cgIds (system CGs like
+ * `agents`/`ontology`, legacy V9-style globals like `hbad-5`) — these
+ * genuinely have no derivable curator and the caller must fall
+ * through to "unknown CG".
+ *
+ * Case is preserved from the cgId. Comparisons against local agent
+ * keys should be case-insensitive on the address portion (Ethereum
+ * addresses are case-insensitive; the EIP-55 checksum is advisory).
+ */
+export function deriveCuratorDidFromCgId(contextGraphId: string): string | null {
+  const match = /^(0x[0-9a-fA-F]{40})\/.+$/.exec(contextGraphId);
+  if (!match) return null;
+  return `did:dkg:agent:${match[1]}`;
 }
 
 /**

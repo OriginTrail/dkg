@@ -53,6 +53,9 @@ export interface AgentProfileConfig {
   publicKey?: string;
   relayAddress?: string;
   agentAddress?: string;
+  encryptionKeyAlgorithm?: string;
+  publicEncryptionKey?: string;
+  encryptionKeyProof?: string;
 }
 
 /**
@@ -108,6 +111,11 @@ export function buildAgentProfile(config: AgentProfileConfig): {
   }
   if (config.agentAddress) {
     q(entity, `${DKG}agentAddress`, `"${canonicalAgentDidSubject(config.agentAddress)}"`);
+  }
+  if (config.publicEncryptionKey && config.encryptionKeyAlgorithm && config.encryptionKeyProof) {
+    q(entity, `${DKG}publicEncryptionKey`, `"${config.publicEncryptionKey}"`);
+    q(entity, `${DKG}encryptionKeyAlgorithm`, `"${config.encryptionKeyAlgorithm}"`);
+    q(entity, `${DKG}encryptionKeyProof`, `"${config.encryptionKeyProof}"`);
   }
   if (config.framework) {
     q(entity, `${SKILL}framework`, `"${config.framework}"`);

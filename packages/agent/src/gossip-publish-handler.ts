@@ -169,7 +169,12 @@ export class GossipPublishHandler {
             this.subscribedContextGraphs.set(newId, {
               name,
               subscribed: true,
-              synced: true,
+              // `synced: false` — we just got the definition triple via
+              // gossip, no actual CG data has been pulled yet. The
+              // catchup runner flips this to true once data arrives.
+              // Setting it true here would lie about sync state and
+              // pollute the Oracle browse catalogue with stale entries.
+              synced: false,
               metaSynced: false,
               onChainId: this.subscribedContextGraphs.get(newId)?.onChainId,
             });

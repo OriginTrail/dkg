@@ -87,7 +87,21 @@ export class RightPanelPage {
   }
 
   async clickRefresh() {
-    await this.root.locator(sel.rightPanel.refreshBtn).first().click();
+    await this.openActiveTabMenu();
+    await this.page.locator(sel.rightPanel.tabMenuItem).filter({ hasText: /Refresh/i }).click();
+  }
+
+  async clickDisconnect() {
+    await this.openActiveTabMenu();
+    await this.page.locator(sel.rightPanel.tabMenuItemDanger).filter({ hasText: /Disconnect/i }).click();
+  }
+
+  async openActiveTabMenu() {
+    await this.root.locator(sel.rightPanel.tabMenuTrigger).first().click();
+  }
+
+  async isTabMenuOpen() {
+    return this.page.locator(sel.rightPanel.tabMenuPopover).isVisible();
   }
 
   async getPeerCards() {
@@ -105,4 +119,30 @@ export class RightPanelPage {
   async hasWarning() {
     return this.root.locator(sel.rightPanel.warning).isVisible();
   }
+
+  // PR2 composer helpers
+  async typeIntoComposer(text: string) {
+    await this.chatInput.fill(text);
+  }
+
+  async getComposerHeightPx(): Promise<number> {
+    return this.chatInput.evaluate((el) => (el as HTMLTextAreaElement).clientHeight);
+  }
+
+  async clickAttach() {
+    await this.root.locator(sel.rightPanel.composerAttach).click();
+  }
+
+  async getAttachmentChipCount(): Promise<number> {
+    return this.root.locator(sel.rightPanel.attachmentChip).count();
+  }
+
+  async removeAttachment(index: number) {
+    await this.root.locator(sel.rightPanel.attachmentChipRemove).nth(index).click();
+  }
+
+  async getAttachmentChipStatus(index: number): Promise<string | null> {
+    return this.root.locator(sel.rightPanel.attachmentChip).nth(index).getAttribute('data-status');
+  }
+
 }

@@ -43,4 +43,47 @@ export {
   uint256ToBytes,
 } from './ack.js';
 
+export {
+  WORKSPACE_RECIPIENT_ENCRYPTION_KEY_PURPOSE,
+  WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
+  WORKSPACE_AGENT_ENCRYPTION_KEY_PROOF_DOMAIN,
+  WORKSPACE_ENCRYPTION_KEY_BYTES,
+  WORKSPACE_X25519_KEY_BYTES,
+  WORKSPACE_ENCRYPTION_NONCE_BYTES,
+  generateWorkspaceRecipientEncryptionKey,
+  encryptWorkspacePayload,
+  decryptWorkspacePayload,
+  assertSupportedEncryptedWorkspaceEnvelope,
+  computeWorkspaceAgentEncryptionKeyProofPayload,
+  workspaceAgentEncryptionKeyId,
+  encodeWorkspaceEncryptionKey,
+  decodeWorkspaceEncryptionKey,
+  type WorkspaceRecipientEncryptionKey,
+  type EncryptWorkspacePayloadInput,
+  type DecryptedWorkspacePayload,
+  type WorkspaceAgentEncryptionKeyProofFields,
+} from './workspace-encryption.js';
+
+export {
+  SWM_SENDER_KEY_CHAIN_KEY_BYTES,
+  SWM_SENDER_KEY_SKIPPED_MESSAGE_CACHE_LIMIT,
+  generateSwmSenderChainKey,
+  generateSwmSenderEpochId,
+  computeSwmSenderKeyMembershipHash,
+  encryptSwmSenderKeyPackage,
+  decryptSwmSenderKeyPackage,
+  encryptSwmSenderKeyMessage,
+  decryptSwmSenderKeyMessage,
+  ratchetSwmSenderChainKey,
+  assertSupportedSwmSenderKeyPackage,
+  assertSupportedSwmSenderKeyMessage,
+  type SwmSenderKeyMembershipMember,
+  type ComputeSwmSenderKeyMembershipHashInput,
+  type EncryptSwmSenderKeyPackageInput,
+  type DecryptSwmSenderKeyPackageInput,
+  type EncryptSwmSenderKeyMessageInput,
+  type DecryptSwmSenderKeyMessageInput,
+  type SwmSenderKeyMessageCryptResult,
+} from './swm-sender-key.js';
+
 export { resolveRootEntities, type Quad as RootEntityQuad } from './root-entity.js';

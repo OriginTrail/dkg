@@ -174,6 +174,29 @@ export const DKG_ONTOLOGY = {
   DKG_ACCESS_POLICY: `${DKG}accessPolicy`,
   DKG_PARTICIPANT_IDENTITY_ID: `${DKG}participantIdentityId`,
   DKG_PARTICIPANT_AGENT: `${DKG}participantAgent`,
+  DKG_PUBLISH_AUTHORITY_ACCOUNT_ID: `${DKG}publishAuthorityAccountId`,
+  // Agent-signed delegation: when an agent (allowedAgent / participantAgent)
+  // is approved, the join request carries an AgentDelegation naming the
+  // node that hosts the agent. The curator persists those delegatee
+  // identifiers alongside the agent so post-approval traffic from that
+  // node can be authorised without the agent itself having to co-sign
+  // every wire message. Both fields are optional individually but at
+  // least one is recorded; sync auth allows on either match.
+  DKG_ALLOWED_DELEGATEE_PEER: `${DKG}allowedDelegateePeer`,
+  DKG_ALLOWED_DELEGATEE_KEY: `${DKG}allowedDelegateeKey`,
+  DKG_DELEGATION_ISSUED_AT: `${DKG}delegationIssuedAt`,
+  DKG_DELEGATION_EXPIRES_AT: `${DKG}delegationExpiresAt`,
+  DKG_DELEGATION_AGENT: `${DKG}delegationAgent`,
+  // Pending-side delegatee record carried on `did:dkg:join-request:*`
+  // entities. Holds the SAME values the agent signed (so the curator
+  // can re-verify the signature at approval time) but DOES NOT grant
+  // access — only after approval do these get promoted into the
+  // `allowedDelegatee*` triples on a `did:dkg:agent-delegation:*`
+  // entity. Splitting predicates makes that boundary explicit and
+  // prevents helpers from accidentally treating pending requests as
+  // approved gates.
+  DKG_DELEGATION_DELEGATEE_PEER: `${DKG}delegationDelegateePeer`,
+  DKG_DELEGATION_DELEGATEE_KEY: `${DKG}delegationDelegateeKey`,
   DKG_CCL_POLICY: `${DKG}CCLPolicy`,
   DKG_POLICY_BINDING: `${DKG}PolicyBinding`,
   DKG_POLICY_APPLIES_TO_CONTEXT_GRAPH: `${DKG}appliesToContextGraph`,

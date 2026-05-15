@@ -191,8 +191,7 @@ export class ApiClient {
   async sharedMemoryWrite(contextGraphId: string, quads: Array<{
     subject: string; predicate: string; object: string; graph: string;
   }>): Promise<{
-    workspaceOperationId: string;
-    shareOperationId?: string;
+    shareOperationId: string;
     contextGraphId: string;
     graph: string;
     triplesWritten: number;
@@ -535,6 +534,19 @@ export class ApiClient {
     transitionType?: 'CREATE' | 'MUTATE' | 'REVOKE';
     authorityType?: 'owner' | 'multisig' | 'quorum' | 'capability';
     priorVersion?: string;
+    subGraphName?: string;
+    accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
+    allowedPeers?: string[];
+    // V10 sign-at-enqueue. Absent `seal` → tentative; supply for on-chain attestation.
+    entityProofs?: boolean;
+    /** Stringified bigint; `'0'` = mode d (no attribution) per RFC-001 §4. */
+    publisherNodeIdentityIdOverride?: string;
+    seal?: {
+      merkleRoot: `0x${string}`;
+      authorAddress: `0x${string}`;
+      signature: { r: `0x${string}`; vs: `0x${string}` };
+      schemeVersion: number;
+    };
   }): Promise<{ jobId: string; contextGraphId: string; shareOperationId: string; rootsCount: number }> {
     return this.post('/api/publisher/enqueue', request);
   }
@@ -884,9 +896,43 @@ export class ApiClient {
     participantAgents?: string[];
     participantIdentityIds?: Array<string | number | bigint>;
     requiredSignatures?: number;
+    /**
+     * Atomic combined-flow flag. When `true`, the daemon registers the
+     * CG on-chain in the same call after the local create step
+     * succeeds. Required when `pcaAccountId` is supplied (a standalone
+     * `createContextGraph` does NOT persist PCA ids — Codex PR #502
+     * round-3).
+     */
+    register?: boolean;
+    /**
+     * Publish policy override forwarded to `registerContextGraph` in
+     * the combined-flow path. Only meaningful together with
+     * `register: true`. The agent otherwise defaults
+     * `publishPolicy = curated (0)` for curated/private CGs and
+     * `publishPolicy = open (1)` for public CGs — which makes the
+     * valid `{ accessPolicy: 0 (public), publishPolicy: 0 (curated),
+     * pcaAccountId }` combo unreachable unless the caller can pin
+     * `publishPolicy` explicitly. Codex PR #502 round-10 (raised by
+     * @branarakic).
+     */
+    publishPolicy?: number;
+    /**
+     * Publishing Conviction Account id for PCA-curated registration.
+     * Only meaningful together with `register: true`. The daemon
+     * rejects the create-only-with-pcaAccountId combo with a 400
+     * (Codex PR #502 round-5). For a two-step flow, use
+     * {@link registerContextGraph} instead.
+     */
+    pcaAccountId?: string | number | bigint;
   }, allowedPeers?: string[]): Promise<{
     created: string;
     uri: string;
+    /** Present only when caller passed `register: true`. */
+    registered?: boolean;
+    onChainId?: string;
+    /** Present when `register: true` was requested but the register leg failed. */
+    registerError?: string;
+    hint?: string;
   }> {
     return this.post('/api/context-graph/create', {
       id,
@@ -901,6 +947,9 @@ export class ApiClient {
         ? { participantIdentityIds: options.participantIdentityIds.map((id) => id.toString()) }
         : {}),
       ...(options?.requiredSignatures != null ? { requiredSignatures: options.requiredSignatures } : {}),
+      ...(options?.register === true ? { register: true } : {}),
+      ...(options?.publishPolicy != null ? { publishPolicy: options.publishPolicy } : {}),
+      ...(options?.pcaAccountId != null ? { pcaAccountId: options.pcaAccountId.toString() } : {}),
     });
   }
 
@@ -916,6 +965,7 @@ export class ApiClient {
     revealOnChain?: boolean;
     accessPolicy?: number;
     publishPolicy?: number;
+    pcaAccountId?: string | number | bigint;
   }): Promise<{
     registered: string;
     onChainId: string;
@@ -925,6 +975,7 @@ export class ApiClient {
       id,
       ...(opts?.accessPolicy != null ? { accessPolicy: opts.accessPolicy } : {}),
       ...(opts?.publishPolicy != null ? { publishPolicy: opts.publishPolicy } : {}),
+      ...(opts?.pcaAccountId != null ? { pcaAccountId: opts.pcaAccountId.toString() } : {}),
     });
   }
 
@@ -959,12 +1010,53 @@ export class ApiClient {
     return this.get(`/api/context-graph/${encodeURIComponent(contextGraphId)}/participants`);
   }
 
+  /**
+   * Sign-only join request. Returns the `SignedAgentDelegation` that
+   * the local agent produced; does NOT forward over P2P. To deliver it
+   * to the curator, follow up with `requestJoin(...)` and the
+   * `curatorPeerId` from the V10 invite. PR #448 split sign vs forward
+   * to fix a duplicate-forward bug — see daemon route comment.
+   *
+   * The `delegation` shape mirrors `SignedAgentDelegation` from
+   * `@dkg/agent`: `version` is part of the digest grammar (see
+   * `computeDelegationDigest`), not the on-the-wire payload, so it is
+   * intentionally absent here. Verifiers re-derive the digest from the
+   * fields below.
+   */
   async signJoinRequest(contextGraphId: string): Promise<{
     ok: boolean;
-    status?: string;
-    contextGraphId?: string;
+    contextGraphId: string;
+    delegation: {
+      agentAddress: string;
+      scope: string;
+      issuedAtMs: number;
+      expiresAtMs: number;
+      delegateePeerId?: string;
+      delegateeOpKey?: string;
+      signature: string;
+    };
+    agentAddress: string;
   }> {
     return this.post(`/api/context-graph/${encodeURIComponent(contextGraphId)}/sign-join`, {});
+  }
+
+  /**
+   * Forward a previously-signed join delegation to the curator over
+   * P2P. The daemon dials `curatorPeerId` directly (DHT-resolved if
+   * not currently connected) and falls back to broadcasting through
+   * connected peers. Returns the delivery count so callers can detect
+   * "no curator reachable" without inspecting log output.
+   */
+  async requestJoin(
+    contextGraphId: string,
+    delegation: unknown,
+    curatorPeerId: string,
+    agentName?: string,
+  ): Promise<{ ok: boolean; status: string; delivered: number | 'local'; alreadyMember?: boolean }> {
+    return this.post(
+      `/api/context-graph/${encodeURIComponent(contextGraphId)}/request-join`,
+      { delegation, curatorPeerId, ...(agentName ? { agentName } : {}) },
+    );
   }
 
   async approveJoin(contextGraphId: string, agentAddress: string): Promise<{

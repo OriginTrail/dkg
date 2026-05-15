@@ -22,14 +22,18 @@ concurrency:
   group: codex-review-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
+# Default everything to read-only; the one job that posts review comments
+# escalates `pull-requests: write` at the job level only.
 permissions:
   contents: read
-  pull-requests: write
 
 jobs:
   review:
     name: Codex Review
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
     # 30 min ceiling: gpt-5.4 / effort: medium can take ~25 min on a
     # large diff, so 15 min was hitting the cap mid-stream. The
     # concurrency group above already cancel-in-progress, so a new push
@@ -43,16 +47,19 @@ jobs:
 
     steps:
       - name: Checkout PR merge commit
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           ref: refs/pull/${{ github.event.pull_request.number }}/merge
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Generate filtered PR diff
         id: diff
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           # Filter out noise paths from the diff sent to the model.
-          git diff ${{ github.event.pull_request.base.sha }}...HEAD -- \
+          git diff "$BASE_SHA"...HEAD -- \
             ':!pnpm-lock.yaml' \
             ':!LICENSE' \
             ':!knip.json' \
@@ -78,9 +85,11 @@ jobs:
         id: hash_check
         if: steps.diff.outputs.diff_lines != '0'
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          DIFF_HASH: ${{ steps.diff.outputs.diff_hash }}
         with:
           script: |
-            const marker = `<!-- codex-review-diff-hash: ${{ steps.diff.outputs.diff_hash }} -->`;
+            const marker = `<!-- codex-review-diff-hash: ${process.env.DIFF_HASH} -->`;
             const reviews = await github.paginate(
               github.rest.pulls.listReviews,
               {
@@ -127,7 +136,7 @@ jobs:
           steps.diff.outputs.diff_lines != '0'
           && steps.diff.outputs.diff_lines <= 5000
           && steps.hash_check.outputs.skipped == 'false'
-        uses: openai/codex-action@v1
+        uses: openai/codex-action@e0fdf01220eb9a88167c4898839d273e3f2609d1 # v1.8
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
           model: gpt-5.4

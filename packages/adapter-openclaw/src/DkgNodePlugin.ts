@@ -21,6 +21,7 @@ import {
   createDkgPublisherExtension,
   type DkgPublisherExtension,
   escapeDkgRdfLiteral,
+  isSafeIri,
   resolveDkgHome,
   toEip55Checksum,
 } from '@origintrail-official/dkg-core';
@@ -93,6 +94,51 @@ function stripRdfTerm(value: unknown): string {
   const literalMatch = raw.match(/^("[\s\S]*")(\^\^.*|@.*)?$/);
   if (literalMatch) return decodeLiteral(literalMatch[1]);
   return raw;
+}
+
+function quoteOpenClawLiteral(value: string): string {
+  const escaped = escapeDkgRdfLiteral(value).replace(
+    new RegExp(
+      '[' +
+        String.fromCharCode(0x00) + '-' + String.fromCharCode(0x1F) +
+        String.fromCharCode(0x7F) +
+      ']',
+      'g',
+    ),
+    (ch) => '\\u' + ch.charCodeAt(0).toString(16).padStart(4, '0').toUpperCase(),
+  );
+  return `"${escaped}"`;
+}
+
+function normalizeSemanticEnrichmentQuads(rawQuads: unknown): {
+  quads?: Array<{ subject: string; predicate: string; object: string }>;
+  error?: string;
+} {
+  if (!Array.isArray(rawQuads) || rawQuads.length === 0) {
+    return { error: '"semantic_quads" must be a non-empty array of {subject, predicate, object} objects.' };
+  }
+  const quads: Array<{ subject: string; predicate: string; object: string }> = [];
+  for (const [index, raw] of rawQuads.entries()) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      return { error: `"semantic_quads[${index}]" must be an object.` };
+    }
+    const record = raw as Record<string, unknown>;
+    if (record.graph !== undefined && record.graph !== null) {
+      return { error: `"semantic_quads[${index}].graph" is not supported; semantic triples are written to the source imported assertion graph.` };
+    }
+    const subject = typeof record.subject === 'string' ? record.subject.trim() : '';
+    const predicate = typeof record.predicate === 'string' ? record.predicate.trim() : '';
+    const object = typeof record.object === 'string' ? record.object.trim() : '';
+    if (!subject || !predicate || !object) {
+      return { error: `"semantic_quads[${index}]" must include non-empty subject, predicate, and object strings.` };
+    }
+    quads.push({
+      subject,
+      predicate,
+      object: isSafeIri(object) || object.startsWith('"') ? object : quoteOpenClawLiteral(object),
+    });
+  }
+  return { quads };
 }
 
 function queryCatalogSlugFromIri(iri: string, marker: string, fallback: string): string {
@@ -2999,6 +3045,77 @@ export class DkgNodePlugin {
         execute: async (_toolCallId, args) => this.handleAssertionQuery(args),
       },
       {
+        name: 'dkg_import_artifact_resolve',
+        description:
+          'Optional validation/debug helper. Resolve a completed imported attachment/assertion into deterministic artifact metadata: source file hash, ' +
+          'Markdown hash/form when available, extraction method, root entity, and structural counts. Skipped imports are rejected.',
+        parameters: {
+          type: 'object',
+          properties: {
+            context_graph_id: { type: 'string', description: 'Context graph ID from the attachment ref.' },
+            assertion_uri: { type: 'string', description: 'Completed imported assertion URI from the attachment ref.' },
+            assertion_name: { type: 'string', description: 'Optional source assertion name to cross-check against assertion_uri.' },
+            file_hash: { type: 'string', description: 'Optional source file hash to verify against deterministic metadata.' },
+            sub_graph_name: { type: 'string', description: 'Optional sub-graph for the imported assertion.' },
+          },
+          required: ['context_graph_id', 'assertion_uri'],
+        },
+        execute: async (_toolCallId, args) => this.handleImportArtifactResolve(args),
+      },
+      {
+        name: 'dkg_import_artifact_read_markdown',
+        description:
+          'Read the Markdown source for a completed imported attachment through the daemon content-addressed file store. ' +
+          'Never reads arbitrary filesystem paths; the daemon resolves the Markdown hash from import metadata.',
+        parameters: {
+          type: 'object',
+          properties: {
+            context_graph_id: { type: 'string', description: 'Context graph ID from the attachment ref.' },
+            assertion_uri: { type: 'string', description: 'Completed imported assertion URI from the attachment ref.' },
+            assertion_name: { type: 'string', description: 'Optional source assertion name to cross-check against assertion_uri.' },
+            file_hash: { type: 'string', description: 'Optional source file hash to verify against deterministic metadata.' },
+            sub_graph_name: { type: 'string', description: 'Optional sub-graph for the imported assertion.' },
+            max_bytes: { type: 'integer', description: 'Optional positive integer byte cap; daemon maximum is 5 MiB.' },
+          },
+          required: ['context_graph_id', 'assertion_uri'],
+        },
+        execute: async (_toolCallId, args) => this.handleImportArtifactReadMarkdown(args),
+      },
+      {
+        name: 'dkg_semantic_enrichment_write',
+        description:
+          'Append model-derived semantic triples into the completed imported assertion with daemon-stamped provenance. ' +
+          'This does not promote, finalize, or publish.',
+        parameters: {
+          type: 'object',
+          properties: {
+            context_graph_id: { type: 'string', description: 'Context graph ID from the attachment ref.' },
+            assertion_uri: { type: 'string', description: 'Source imported assertion URI from the attachment ref.' },
+            assertion_name: { type: 'string', description: 'Optional source assertion name to cross-check against assertion_uri.' },
+            file_hash: { type: 'string', description: 'Optional source file hash to verify against deterministic metadata.' },
+            semantic_quads: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  subject: { type: 'string', description: 'Semantic subject URI.' },
+                  predicate: { type: 'string', description: 'Semantic predicate URI.' },
+                  object: { type: 'string', description: 'Semantic object URI, RDF literal, or plain text literal.' },
+                },
+                required: ['subject', 'predicate', 'object'],
+              },
+              description: 'Model-derived triples to append to the source imported assertion graph. Plain-text objects become RDF literals; provenance quads are added by the daemon.',
+            },
+            generation_method: { type: 'string', description: 'Extraction/generation method label.' },
+            agent_identity: { type: 'string', description: 'Agent identity URI or label for provenance; only URIs are emitted as prov:wasAttributedTo resources.' },
+            generated_at: { type: 'string', description: 'ISO timestamp for generation; defaults to daemon time.' },
+            sub_graph_name: { type: 'string', description: 'Optional sub-graph for the source imported assertion.' },
+          },
+          required: ['context_graph_id', 'assertion_uri', 'semantic_quads'],
+        },
+        execute: async (_toolCallId, args) => this.handleSemanticEnrichmentWrite(args),
+      },
+      {
         name: 'dkg_assertion_history',
         description:
           'Fetch an assertion\'s lifecycle descriptor (author, extraction status, promotion state). ' +
@@ -4170,6 +4287,90 @@ export class DkgNodePlugin {
       if (!name) return this.error('"name" is required.');
       const subGraphName = args.sub_graph_name ? String(args.sub_graph_name) : undefined;
       const result = await this.client.queryAssertion(contextGraphId, name, { subGraphName });
+      return this.json(result);
+    } catch (err: any) {
+      return this.daemonError(err);
+    }
+  }
+
+  private async handleImportArtifactResolve(args: Record<string, unknown>): Promise<OpenClawToolResult> {
+    try {
+      const contextGraphId = String(args.context_graph_id ?? '').trim();
+      if (!contextGraphId) return this.error('"context_graph_id" is required.');
+      const assertionUri = String(args.assertion_uri ?? args.source_assertion_uri ?? '').trim() || undefined;
+      const assertionName = String(args.assertion_name ?? '').trim() || undefined;
+      if (!assertionUri) return this.error('"assertion_uri" is required.');
+      const result = await this.client.resolveImportArtifact({
+        contextGraphId,
+        assertionUri,
+        assertionName,
+        fileHash: String(args.file_hash ?? '').trim() || undefined,
+        subGraphName: String(args.sub_graph_name ?? '').trim() || undefined,
+      });
+      return this.json(result);
+    } catch (err: any) {
+      return this.daemonError(err);
+    }
+  }
+
+  private async handleImportArtifactReadMarkdown(args: Record<string, unknown>): Promise<OpenClawToolResult> {
+    try {
+      const contextGraphId = String(args.context_graph_id ?? '').trim();
+      if (!contextGraphId) return this.error('"context_graph_id" is required.');
+      const assertionUri = String(args.assertion_uri ?? args.source_assertion_uri ?? '').trim() || undefined;
+      const assertionName = String(args.assertion_name ?? '').trim() || undefined;
+      if (!assertionUri) return this.error('"assertion_uri" is required.');
+      let maxBytes: number | undefined;
+      if (args.max_bytes !== undefined) {
+        const rawMaxBytes = typeof args.max_bytes === 'string' && args.max_bytes.trim()
+          ? Number(args.max_bytes.trim())
+          : args.max_bytes;
+        if (typeof rawMaxBytes !== 'number' || !Number.isInteger(rawMaxBytes) || rawMaxBytes <= 0) {
+          return this.error('"max_bytes" must be a positive integer.');
+        }
+        maxBytes = rawMaxBytes;
+      }
+      const result = await this.client.readImportArtifactMarkdown({
+        contextGraphId,
+        assertionUri,
+        assertionName,
+        fileHash: String(args.file_hash ?? '').trim() || undefined,
+        subGraphName: String(args.sub_graph_name ?? '').trim() || undefined,
+        maxBytes,
+      });
+      return this.json(result);
+    } catch (err: any) {
+      return this.daemonError(err);
+    }
+  }
+
+  private async handleSemanticEnrichmentWrite(args: Record<string, unknown>): Promise<OpenClawToolResult> {
+    try {
+      const contextGraphId = String(args.context_graph_id ?? '').trim();
+      if (!contextGraphId) return this.error('"context_graph_id" is required.');
+      const assertionUri = String(args.assertion_uri ?? args.source_assertion_uri ?? '').trim() || undefined;
+      const assertionName = String(args.assertion_name ?? '').trim() || undefined;
+      if (!assertionUri) return this.error('"assertion_uri" is required.');
+      if (
+        args.name !== undefined ||
+        args.semanticAssertionName !== undefined ||
+        args.semantic_assertion_name !== undefined
+      ) {
+        return this.error('Semantic enrichment is written into the source import assertion; target assertion names are not supported.');
+      }
+      const normalized = normalizeSemanticEnrichmentQuads(args.semantic_quads);
+      if (normalized.error || !normalized.quads) return this.error(normalized.error ?? '"semantic_quads" is invalid.');
+      const result = await this.client.writeSemanticEnrichment({
+        contextGraphId,
+        assertionUri,
+        assertionName,
+        fileHash: String(args.file_hash ?? '').trim() || undefined,
+        semanticQuads: normalized.quads,
+        generationMethod: String(args.generation_method ?? '').trim() || undefined,
+        agentIdentity: String(args.agent_identity ?? '').trim() || undefined,
+        generatedAt: String(args.generated_at ?? '').trim() || undefined,
+        subGraphName: String(args.sub_graph_name ?? '').trim() || undefined,
+      });
       return this.json(result);
     } catch (err: any) {
       return this.daemonError(err);

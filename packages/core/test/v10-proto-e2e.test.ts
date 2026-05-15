@@ -163,7 +163,7 @@ describe('V10 proto e2e: GossipSub envelope wrapping', () => {
         rootEntity: 'http://example.org/alice',
       }],
       publisherPeerId: '12D3KooW...',
-      workspaceOperationId: 'op-1',
+      shareOperationId: 'op-1',
       timestampMs: Date.now(),
     });
 

@@ -87,6 +87,7 @@ describe('OpenClaw bridge API contract', () => {
     expect(apiSrc).toContain('attachments?: LocalAgentChatAttachmentRef[]');
     expect(apiSrc).toContain('attachmentRefs');
     expect(apiSrc).toContain("extractionStatus?: 'completed';");
+    expect(readUiFile('components/Shell/PanelRight.tsx')).toContain("if (draft.status !== 'completed' || !draft.result) return null;");
     expect(readUiFile('components/Shell/PanelRight.tsx')).toContain("extractionStatus: 'completed'");
   });
 });
@@ -190,7 +191,7 @@ describe('PanelRight UI - connected agent flow', () => {
     expect(panelRight).toContain('Session history');
     expect(panelRight).toContain('OpenClaw');
     expect(panelRight).toContain('v10-agent-subtabs');
-    expect(panelRight).toContain('v10-local-agent-chat-toolbar');
+    expect(panelRight).toContain('v10-agent-tab-menu-trigger');
     expect(panelRight).not.toContain('Messages stay anchored in your private DKG memory graph');
   });
 
@@ -223,19 +224,21 @@ describe('PanelRight UI - connected agent flow', () => {
     expect(panelRight).toContain('Connect Hermes');
   });
 
-  it('shows the inline attachment tray and project fallback picker in the chat composer', () => {
+  it('shows the inline attachment tray and project picker in the chat composer', () => {
+    // PR2 (post iteration 1): composer shell is a vertical stack —
+    // textarea on top, a single .v10-composer-controls row below holding
+    // the attach button + project picker (left) and send button (right).
+    // Assert on the rendered className / aria-label / user-visible copy
+    // — the observable contract — and leave behavioral checks to the
+    // focused render-time tests (composer-autosize.test.ts,
+    // attachment-chip.test.ts, etc.). Asserting internal source
+    // expressions was brittle to harmless refactors without catching
+    // real regressions.
     expect(panelRight).toContain('aria-label="Attach files"');
-    expect(panelRight).toContain('Upload file');
-    expect(panelRight).toContain('📎');
-    expect(panelRight).toContain('Target');
+    expect(panelRight).toContain('v10-composer-attach');
+    expect(panelRight).toContain('v10-composer-controls');
     expect(panelRight).toContain('Choose a project');
-    expect(panelRight).toContain("value={activeProjectId ?? ''}");
-    expect(panelRight).not.toContain('{activeProjectId ? (');
     expect(panelRight).toContain('Stored only');
-    expect(panelRight).toContain('Queued - imports on send');
-    expect(panelRight).toContain('Queued files keep their stored target');
-    expect(panelRight).not.toContain('To {targetLabel}');
-    expect(panelRight).toContain('attachment.id ?? attachment.assertionUri ?? attachment.fileHash');
   });
 
   it('imports local-agent attachments on send instead of on selection', () => {
@@ -249,8 +252,12 @@ describe('PanelRight UI - connected agent flow', () => {
     );
 
     expect(addAttachmentsBlock).not.toContain('await importFile(');
-    expect(sendLocalMessageBlock).toContain('const processedDrafts = await prepareAttachmentDraftsForSend(conversationKey, drafts);');
-    expect(sendLocalMessageBlock).toContain("if (!text && attachments.length === 0) {");
+    // PR3 Codex round-2: processedDrafts is now hoisted above the try block
+    // (assigned, not declared with `const`, so the catch path can read it
+    // to restore drafts after a failed send). Assert the assignment shape
+    // without coupling to the lexical `const`.
+    expect(sendLocalMessageBlock).toContain('processedDrafts = await prepareAttachmentDraftsForSend(conversationKey, drafts);');
+    expect(sendLocalMessageBlock).toContain('if (!text && attachments.length === 0 && importContext.results.length === 0) {');
     expect(panelRight).not.toContain('selectedCompletedAttachments');
   });
 
@@ -260,15 +267,43 @@ describe('PanelRight UI - connected agent flow', () => {
   });
 
   it('only enables attachment-only sends when at least one draft is sendable', () => {
+    expect(panelRight).toContain("draft.status === 'queued' || draft.status === 'completed' || draft.status === 'skipped'");
     expect(panelRight).toContain('selectedAttachmentDrafts.some(isSendableAttachmentDraft)');
     expect(panelRight).toContain('const hasSendableDrafts = drafts.some(isSendableAttachmentDraft);');
-    expect(panelRight).toContain('Choose a target above before attaching files.');
+    // PR2 polish iter 1: the redundant "choose a project" hint copy was
+    // retired — the project picker now lives INSIDE the composer-controls
+    // row right next to the attach button, so the affordance is self-evident.
+    // The attach-button title still mentions the gating ("Choose a project
+    // to attach files"); after round-8 (CFfZ3) the title chain reuses the
+    // shared `dropDisabledReason` state so it stays in lockstep with the
+    // drop overlay's recovery copy instead of repeating the ternary inline.
+    expect(panelRight).toContain("'Choose a project to attach files'");
+  });
+
+  it('turns skipped document-import results into server-verified sendable import results', () => {
+    expect(panelRight).toContain('function buildAttachmentImportResultRefs');
+    expect(panelRight).toContain('function formatAttachmentImportContextValue');
+    expect(panelRight).toContain('function normalizeAttachmentFileName');
+    expect(panelRight).toContain("if (draft.status !== 'skipped' || !draft.result) return [];");
+    expect(panelRight).toContain('fileName: normalizeAttachmentFileName(draft.file)');
+    expect(panelRight).toContain('rootEntity: draft.result.rootEntity');
+    expect(panelRight).toContain("extractionStatus: 'skipped'");
+    expect(panelRight).toContain('pipelineUsed: extraction.pipelineUsed ?? null');
+    expect(panelRight).toContain('mdIntermediateHash: extraction.mdIntermediateHash');
+    expect(panelRight).toContain('attachmentImportResults: importContext.results');
+    expect(panelRight).toContain('...importContext.deliveredDraftIds');
+  });
+
+  it('normalizes browser filenames before sending completed or skipped chat attachments', () => {
+    expect(panelRight).toContain('fileName: normalizeAttachmentFileName(draft.file)');
+    expect(panelRight).not.toContain('fileName: draft.file.name');
   });
 
   it('keeps attachment-only summary text UI-only instead of sending it back through the bridge', () => {
     expect(panelRight).toContain('content: message.text || buildAttachmentSummary(message.attachmentRefs ?? [])');
-    expect(panelRight).toContain('const messageText = text || buildAttachmentSummary(attachments);');
-    expect(panelRight).toContain('streamLocalAgentChat(integrationId, text, {');
+    expect(panelRight).toContain('const messageText = text');
+    expect(panelRight).toContain("const outboundText = text ? textWithImportSummary : '';");
+    expect(panelRight).toContain('streamLocalAgentChat(integrationId, outboundText, {');
   });
 
   it('persists verified attachment refs separately from assistant tool calls', () => {
@@ -286,7 +321,7 @@ describe('PanelRight UI - connected agent flow', () => {
   });
 
   it('sends connected-agent chat through the local bridge from PanelRight', () => {
-    expect(panelRight).toContain('streamLocalAgentChat(integrationId, text');
+    expect(panelRight).toContain('streamLocalAgentChat(integrationId, outboundText');
   });
 
   it('does not clear attached agents on a transient integrations refresh failure', () => {

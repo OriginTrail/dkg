@@ -101,7 +101,7 @@ import {
   slotEntryPoint,
   CLI_NPM_PACKAGE,
 } from '../config.js';
-import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../publisher-runner.js';
+import { createPublicSnapshotStore, createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
 import { loadTokens, httpAuthGuard } from '../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
@@ -565,6 +565,9 @@ export async function runDaemonInner(
       backend: config.store.backend,
       options: config.store.options,
     } : undefined,
+    largeLiteralStorage: config.largeLiteralStorage,
+    sharedMemoryPublicSnapshotStorage: config.sharedMemoryPublicSnapshotStorage,
+    syncSharedMemoryOnConnect: config.syncSharedMemoryOnConnect,
     chainAdapter: mockChainAdapter,
     // Only forward chain to the agent when both required fields resolved.
     // resolveChainConfig() may return a partial block if neither config nor
@@ -634,7 +637,10 @@ export async function runDaemonInner(
   let publisherRuntime: PublisherRuntime | null = null;
 
   const networkId = await computeNetworkId();
-  const publisherControl = createPublisherControlFromStore(agent.store);
+  const publisherControl = createPublisherControlFromStore(
+    agent.store,
+    createPublicSnapshotStore(dkgDir(), config),
+  );
   log(`Network: ${networkId.slice(0, 16)}...`);
   if (network?.networkId && network.networkId !== networkId) {
     log(
@@ -759,6 +765,30 @@ export async function runDaemonInner(
       if (i === 9) log("WARNING: no circuit addresses after 10s");
     }
   }
+
+  // RFC 04 v0.3 / Issue #461 — sync the on-chain `relayCapable` hint
+  // flag from the operator's intent (config.relayCapable). Multiaddrs
+  // themselves are NOT published here — they go in per-RS-round
+  // attestation KCs once submitProofV2 lands (RFC 04 Phase 2).
+  // Best-effort and non-blocking: fired on a setTimeout(0) so chain RPC
+  // slowness can't delay daemon ready, and agent.publishRelayRegistry()
+  // is itself a no-throw (logs+returns on every error path).
+  //
+  // Pass `config.relayCapable` directly (no `=== true` coercion) so the
+  // agent can distinguish three cases (Codex PR #506 fix):
+  //   - true      → ensure on-chain flag is true
+  //   - false     → ensure on-chain flag is false (clears stale opt-in)
+  //   - undefined → don't touch on-chain (preserve manual admin flips)
+  const relayRegistryTimer = setTimeout(() => {
+    void agent
+      .publishRelayRegistry({ relayCapable: config.relayCapable })
+      .catch((err: unknown) => {
+        log(
+          `Relay registry publish failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
+  }, 0);
+  if (relayRegistryTimer.unref) relayRegistryTimer.unref();
 
   // Ensure configured context graphs + network defaults are subscribed and available.
   // Uses ensureContextGraphLocal (idempotent) to avoid duplicate creator claims

@@ -14,11 +14,24 @@
 
 import { ethers } from 'ethers';
 import { randomBytes, createHash } from 'node:crypto';
+import {
+  WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
+  computeWorkspaceAgentEncryptionKeyProofPayload,
+  decodeWorkspaceEncryptionKey,
+  encodeWorkspaceEncryptionKey,
+  generateWorkspaceRecipientEncryptionKey,
+  workspaceAgentEncryptionKeyId,
+} from '@origintrail-official/dkg-core';
 
 export interface AgentKeyRecord {
   agentAddress: string;
   publicKey: string;
   privateKey?: string;
+  encryptionKeyAlgorithm?: typeof WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519;
+  publicEncryptionKey?: string;
+  privateEncryptionKey?: string;
+  encryptionKeyProof?: string;
+  encryptionKeyId?: string;
   name: string;
   framework?: string;
   mode: 'custodial' | 'self-sovereign';
@@ -50,7 +63,7 @@ export function hashAgentToken(token: string): string {
  */
 export function generateCustodialAgent(name: string, framework?: string): AgentKeyRecord {
   const wallet = ethers.Wallet.createRandom();
-  return {
+  return withWorkspaceEncryptionKey({
     agentAddress: wallet.address,
     publicKey: wallet.signingKey.publicKey,
     privateKey: wallet.privateKey,
@@ -59,7 +72,7 @@ export function generateCustodialAgent(name: string, framework?: string): AgentK
     mode: 'custodial',
     authToken: generateAgentToken(),
     createdAt: new Date().toISOString(),
-  };
+  });
 }
 
 /**
@@ -70,9 +83,14 @@ export function registerSelfSovereignAgent(
   name: string,
   publicKey: string,
   framework?: string,
+  workspaceEncryption?: {
+    encryptionKeyAlgorithm: typeof WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519;
+    publicEncryptionKey: string;
+    encryptionKeyProof: string;
+  },
 ): AgentKeyRecord {
   const address = ethers.computeAddress(publicKey);
-  return {
+  const record: AgentKeyRecord = {
     agentAddress: address,
     publicKey,
     name,
@@ -81,6 +99,10 @@ export function registerSelfSovereignAgent(
     authToken: generateAgentToken(),
     createdAt: new Date().toISOString(),
   };
+  if (workspaceEncryption) {
+    attachVerifiedWorkspaceEncryptionPublicKey(record, workspaceEncryption);
+  }
+  return record;
 }
 
 /**
@@ -94,7 +116,7 @@ export function agentFromPrivateKey(
   framework?: string,
 ): AgentKeyRecord {
   const wallet = new ethers.Wallet(privateKey);
-  return {
+  return withWorkspaceEncryptionKey({
     agentAddress: wallet.address,
     publicKey: wallet.signingKey.publicKey,
     privateKey,
@@ -103,5 +125,101 @@ export function agentFromPrivateKey(
     mode: 'custodial',
     authToken: generateAgentToken(),
     createdAt: new Date().toISOString(),
+  });
+}
+
+export function ensureWorkspaceEncryptionKey(record: AgentKeyRecord): boolean {
+  if (record.privateEncryptionKey && record.publicEncryptionKey && record.encryptionKeyProof) {
+    return false;
+  }
+  if (!record.privateKey) {
+    return false;
+  }
+  withWorkspaceEncryptionKey(record);
+  return true;
+}
+
+export function signWorkspaceEncryptionKey(
+  agentAddress: string,
+  privateKey: string,
+  publicEncryptionKey: string,
+): { encryptionKeyProof: string; encryptionKeyId: string } {
+  const publicKeyBytes = decodeWorkspaceEncryptionKey(publicEncryptionKey);
+  const payload = computeWorkspaceAgentEncryptionKeyProofPayload({
+    agentAddress: ethers.getAddress(agentAddress),
+    encryptionKeyAlgorithm: WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
+    publicKeyBytes,
+  });
+  const wallet = new ethers.Wallet(privateKey);
+  const proof = wallet.signingKey.sign(ethers.hashMessage(payload)).serialized;
+  return {
+    encryptionKeyProof: proof,
+    encryptionKeyId: workspaceAgentEncryptionKeyId(ethers.getAddress(agentAddress), publicKeyBytes),
   };
+}
+
+export function verifyWorkspaceEncryptionKeyBinding(
+  agentAddress: string,
+  encryptionKeyAlgorithm: string,
+  publicEncryptionKey: string,
+  encryptionKeyProof: string,
+): boolean {
+  if (encryptionKeyAlgorithm !== WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519) {
+    return false;
+  }
+  const checksum = ethers.getAddress(agentAddress);
+  const publicKeyBytes = decodeWorkspaceEncryptionKey(publicEncryptionKey);
+  const payload = computeWorkspaceAgentEncryptionKeyProofPayload({
+    agentAddress: checksum,
+    encryptionKeyAlgorithm: WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
+    publicKeyBytes,
+  });
+  const recovered = ethers.verifyMessage(payload, encryptionKeyProof);
+  return recovered.toLowerCase() === checksum.toLowerCase();
+}
+
+function withWorkspaceEncryptionKey(record: AgentKeyRecord): AgentKeyRecord {
+  if (!record.privateKey) {
+    return record;
+  }
+  const recipientKey = generateWorkspaceRecipientEncryptionKey(
+    `did:dkg:agent:${record.agentAddress}`,
+    `did:dkg:agent:${record.agentAddress}#workspace-x25519`,
+  );
+  const publicEncryptionKey = encodeWorkspaceEncryptionKey(recipientKey.publicKeyBytes!);
+  const privateEncryptionKey = encodeWorkspaceEncryptionKey(recipientKey.privateKeyBytes!);
+  const { encryptionKeyProof, encryptionKeyId } = signWorkspaceEncryptionKey(
+    record.agentAddress,
+    record.privateKey,
+    publicEncryptionKey,
+  );
+  record.encryptionKeyAlgorithm = WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519;
+  record.publicEncryptionKey = publicEncryptionKey;
+  record.privateEncryptionKey = privateEncryptionKey;
+  record.encryptionKeyProof = encryptionKeyProof;
+  record.encryptionKeyId = encryptionKeyId;
+  return record;
+}
+
+function attachVerifiedWorkspaceEncryptionPublicKey(
+  record: AgentKeyRecord,
+  workspaceEncryption: {
+    encryptionKeyAlgorithm: typeof WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519;
+    publicEncryptionKey: string;
+    encryptionKeyProof: string;
+  },
+): void {
+  if (!verifyWorkspaceEncryptionKeyBinding(
+    record.agentAddress,
+    workspaceEncryption.encryptionKeyAlgorithm,
+    workspaceEncryption.publicEncryptionKey,
+    workspaceEncryption.encryptionKeyProof,
+  )) {
+    throw new Error(`Invalid workspace encryption key proof for agent ${record.agentAddress}`);
+  }
+  const publicKeyBytes = decodeWorkspaceEncryptionKey(workspaceEncryption.publicEncryptionKey);
+  record.encryptionKeyAlgorithm = workspaceEncryption.encryptionKeyAlgorithm;
+  record.publicEncryptionKey = workspaceEncryption.publicEncryptionKey;
+  record.encryptionKeyProof = workspaceEncryption.encryptionKeyProof;
+  record.encryptionKeyId = workspaceAgentEncryptionKeyId(record.agentAddress, publicKeyBytes);
 }

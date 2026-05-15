@@ -8,8 +8,13 @@ on:
     tags:
       - 'v*'
 
+# Repository-default token scope is `contents: read`. The release job is the
+# only one that needs to write — it creates a GitHub Release with the
+# preinstalled `gh` CLI (no third-party release action) and uploads the
+# release assets in one call. Other jobs (matrix resolution, preflight
+# checks, binary builds) only need to read the repo.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   markitdown-target-matrix:
@@ -20,10 +25,11 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
       - name: Node setup
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version-file: .nvmrc
 
@@ -37,14 +43,20 @@ jobs:
   release-preflight:
     name: Validate release candidate
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       version: ${{ steps.version.outputs.VERSION }}
       is_prerelease: ${{ steps.prerelease.outputs.IS_PRERELEASE }}
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          # `fetch-depth: 0` so we can verify the tag's commit ancestry
+          # against `main` below (origin/main must be locally walkable).
+          fetch-depth: 0
+          persist-credentials: false
       - name: Validate tag format
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
@@ -53,33 +65,153 @@ jobs:
             exit 1
           fi
 
+      - name: Verify tag points at a commit reachable from a release branch
+        # A signed tag verifies WHO pushed the tag. This step verifies the
+        # tag points AT THE RIGHT COMMIT — namely, a commit that is
+        # already part of the linear history of `main` (or `v10-rc`, the
+        # active release branch on this repo). Without this check, an
+        # attacker with `git push --tags` rights but no branch-protection
+        # bypass could push a tag at an arbitrary commit they crafted
+        # locally — bypassing all branch-level review controls — and the
+        # release workflow would happily build + publish that commit.
+        # `merge-base --is-ancestor` exits 0 if the tag's commit is in
+        # the branch history, non-zero otherwise.
+        #
+        # The branch list is intentionally narrow. Adding a new release
+        # branch requires updating it here; that's a deliberate change
+        # gate, not an oversight.
+        env:
+          RELEASE_BRANCHES: "main v10-rc"
+        run: |
+          set -euo pipefail
+          TAG_COMMIT="$(git rev-parse "${GITHUB_REF}^{commit}")"
+          for branch in ${RELEASE_BRANCHES}; do
+            # Make sure we actually have the branch locally before walking it.
+            if git rev-parse --verify "refs/remotes/origin/${branch}" >/dev/null 2>&1; then
+              if git merge-base --is-ancestor "${TAG_COMMIT}" "refs/remotes/origin/${branch}"; then
+                echo "✓ tag commit ${TAG_COMMIT} is reachable from origin/${branch}"
+                exit 0
+              fi
+            fi
+          done
+          echo "::error title=Release tag rejected::Tag commit ${TAG_COMMIT} is not part of the linear history of any release branch (${RELEASE_BRANCHES}). Push the changes to a release branch via a reviewed PR before tagging."
+          exit 1
+
+      - name: Require structurally signed tag (hard gate)
+        # Two-layer check, both running inside this job:
+        #
+        # LAYER 1 (HARD GATE) — structural signed-tag detection.
+        # GitHub-hosted runners do not ship maintainer GPG keys, so we
+        # cannot do a full trust-verify here without an outbound
+        # dependency on a key server (which itself becomes part of
+        # the trust surface). But we CAN reliably detect whether the
+        # tag is signed AT ALL: a signed annotated tag's object body
+        # always contains a PGP/SSH signature block. An unannotated
+        # ("lightweight") tag has no object body — it is just a ref
+        # to a commit. Either case is rejected here.
+        #
+        # This closes the "unsigned-tag-still-publishes" gap the
+        # security review flagged: it is no longer advisory-only.
+        # Even if a maintainer disables the "Require signed tags"
+        # branch ruleset by mistake, the release workflow itself
+        # refuses to proceed on an unsigned tag.
+        #
+        # LAYER 2 (ADVISORY) — `git tag --verify` for the WHO check.
+        # If a key happens to be available (e.g. via a future
+        # pre-import step), the verify result is surfaced in the job
+        # summary. The hard "who signed it" gate still lives in the
+        # branch ruleset (admin-only — see
+        # docs/security/SUPPLY_CHAIN_HARDENING.md §A).
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF#refs/tags/}"
+
+          # Layer 1: structural check (hard gate).
+          TAG_TYPE=$(git cat-file -t "${TAG}" 2>&1) || {
+            echo "::error title=Release tag missing::git cat-file failed for tag ${TAG}: ${TAG_TYPE}"
+            exit 1
+          }
+          if [ "${TAG_TYPE}" != "tag" ]; then
+            # `tag` = annotated tag object (can carry a signature).
+            # `commit` = lightweight tag pointing straight at a commit
+            # (cannot carry a signature). Reject the lightweight
+            # form outright.
+            echo "::error title=Release tag not annotated::Tag ${TAG} is a lightweight ref (git object type \`${TAG_TYPE}\`), not an annotated tag. Lightweight tags cannot carry a signature. Re-create the tag with \`git tag -s ${TAG} <commit>\` and re-push."
+            exit 1
+          fi
+
+          # Annotated tag object body. A signed tag's body contains
+          # one of these markers (PGP or SSH).
+          TAG_BODY=$(git cat-file -p "${TAG}")
+          if ! printf '%s' "${TAG_BODY}" | grep -qE '^-----BEGIN (PGP SIGNATURE|SSH SIGNATURE)-----'; then
+            echo "::error title=Release tag not signed::Tag ${TAG} is annotated but its body contains no PGP/SSH signature block. Re-create with \`git tag -s ${TAG} <commit>\` (signed) or \`git tag -m \"...\" -S ${TAG}\` and re-push. Branch ruleset \"Require signed tags\" (docs/security/SUPPLY_CHAIN_HARDENING.md §A) is the server-side gate; this workflow step is the runtime fallback that catches a misconfigured or temporarily-disabled ruleset."
+            exit 1
+          fi
+          echo "✓ Tag ${TAG} is annotated AND signed (PGP/SSH signature block present)"
+
+          # Layer 2: best-effort key-based verify (advisory).
+          set +e
+          VERIFY_OUTPUT=$(git tag --verify "${TAG}" 2>&1)
+          VERIFY_STATUS=$?
+          set -e
+          {
+            echo '## Tag signature verification'
+            echo
+            echo '**Structural check (hard gate):** passed — tag is annotated AND carries a signature block.'
+            echo
+            echo '**Key-based verify (advisory):**'
+            echo
+            echo '```'
+            echo "${VERIFY_OUTPUT}"
+            echo '```'
+            if [ "${VERIFY_STATUS}" -eq 0 ]; then
+              echo
+              echo '**WHO signed it:** key in runner keyring — verified ✓'
+            else
+              echo
+              echo "**WHO signed it:** could not verify (status ${VERIFY_STATUS})."
+              echo
+              echo 'This is expected on GitHub-hosted runners (no maintainer keys pre-imported). The WHO check lives in the branch ruleset "Require signed tags", configured under docs/security/SUPPLY_CHAIN_HARDENING.md §A. The release was already gated by the structural check above.'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Set version from tag
         id: version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
 
       - name: Detect pre-release
         id: prerelease
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
         run: |
-          VERSION="${{ steps.version.outputs.VERSION }}"
           if [[ "$VERSION" == *-* ]]; then
-            echo "IS_PRERELEASE=true" >> $GITHUB_OUTPUT
+            echo "IS_PRERELEASE=true" >> "$GITHUB_OUTPUT"
           else
-            echo "IS_PRERELEASE=false" >> $GITHUB_OUTPUT
+            echo "IS_PRERELEASE=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: pnpm setup
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
 
       - name: Node setup
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version-file: .nvmrc
-          cache: pnpm
+          # Cache disabled on the release path. A tag-triggered run writes
+          # to the actions/cache scope tied to the tag's ref, which is a
+          # cache-key namespace that subsequent CI runs on PR / push could
+          # restore from (cache scopes inherit across refs). A poisoned
+          # node_modules tree planted here would then propagate to every
+          # downstream CI run. The preflight job runs once per release
+          # tag and a clean re-install is ~30s — acceptable for the
+          # blast-radius reduction.
 
       - name: Validate CLI package version matches tag
+        env:
+          TAG_VERSION: ${{ steps.version.outputs.VERSION }}
         run: |
-          TAG_VERSION="${{ steps.version.outputs.VERSION }}"
           PKG_VERSION="$(node -p "require('./packages/cli/package.json').version")"
+          # shellcheck disable=SC2153 # TAG_VERSION comes from the step's `env:` block above
           if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
             echo "::error::packages/cli/package.json version ${PKG_VERSION} does not match pushed tag version ${TAG_VERSION}"
             exit 1
@@ -93,6 +225,36 @@ jobs:
 
       - name: Build packages and Node UI bundle
         run: pnpm build
+
+      - name: Generate CycloneDX SBOM
+        # Generate the dependency-tree SBOM HERE (in a job with only
+        # `contents: read`) rather than in the credential-bearing
+        # release job below. `npx @cyclonedx/cdxgen` fetches a fresh
+        # tool from npmjs each run — running it without any signing
+        # or release write scope means a compromised tool version
+        # cannot forge attestations or push to the release page.
+        # The SBOM is uploaded as a workflow artifact and consumed by
+        # `release:` below where `attest-build-provenance` covers it.
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: |
+          set -euo pipefail
+          mkdir -p .sbom-out
+          npx --yes @cyclonedx/cdxgen@10.10.6 \
+            --type js \
+            --output ".sbom-out/dkg-${VERSION}.cdx.json" \
+            --output-format json \
+            --spec-version 1.5 \
+            .
+          ls -la .sbom-out/
+
+      - name: Upload SBOM as artifact for release job
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-sbom
+          path: .sbom-out/
+          if-no-files-found: error
+          retention-days: 1
 
       # NOTE: tests are intentionally NOT re-run here. The main `ci.yml`
       # workflow is the authoritative test gate on the source commit.
@@ -116,15 +278,16 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
       - name: Node setup
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version-file: .nvmrc
 
       - name: Python setup
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.11'
 
@@ -229,7 +392,7 @@ jobs:
           NODE
 
       - name: Upload MarkItDown binary artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: markitdown-${{ matrix.asset_name }}
           path: |
@@ -245,42 +408,192 @@ jobs:
       - release-preflight
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    # This is the only release step that needs to write to the repo; scope is
+    # narrowed to JUST this job rather than left on the workflow root.
+    # `id-token: write` is added for `actions/attest-build-provenance` —
+    # the GitHub Actions OIDC token is exchanged for an attestation tied
+    # to this specific workflow run, so anyone can later verify that a
+    # release asset (e.g. the MarkItDown binaries) was produced HERE
+    # and not retroactively swapped on the release page.
+    # `attestations: write` is the matched scope on the receiving end:
+    # the attestation is uploaded to the repo's attestation store, which
+    # is what `gh attestation verify` reads from.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Download MarkItDown release assets
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: markitdown-*
           merge-multiple: true
           path: release-assets
 
+      - name: Download SBOM produced in release-preflight
+        # SBOM is generated in `release-preflight` (no credentials).
+        # The release job — which has `contents: write` +
+        # `id-token: write` + `attestations: write` — only consumes
+        # the prebuilt SBOM artifact. A compromised `cdxgen` cannot
+        # forge an attestation or push to the release page because it
+        # never ran here.
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-sbom
+          path: release-assets
+
+      - name: Generate SHA-256 manifest for release assets
+        # The release-asset SHASUMS file is what `gh attestation verify`
+        # uses to confirm that the asset on the release page matches
+        # the asset this workflow produced. Without it, a tampered
+        # release asset would silently appear genuine.
+        env:
+          VERSION: ${{ needs.release-preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd release-assets
+          # MarkItDown binaries already have per-asset .sha256 files
+          # next to them. We aggregate everything (including the new
+          # SBOM) into a single SHASUMS256.txt the attestation can
+          # cover in one pass.
+          find . -maxdepth 1 -type f ! -name 'SHASUMS256.txt' -print0 \
+            | xargs -0 sha256sum > SHASUMS256.txt
+          cat SHASUMS256.txt
+
+      - name: Attest build provenance for release assets
+        # `actions/attest-build-provenance` emits an in-toto SLSA
+        # provenance statement signed via the GitHub Actions OIDC
+        # identity (no maintainer keys required, no NPM_TOKEN-style
+        # long-lived credentials). The attestation records:
+        #   * the workflow run id
+        #   * the workflow file path + commit SHA
+        #   * the runner image
+        #   * the digest of every file under subject-path
+        # Stored in the repo's attestation API; users verify with
+        # `gh attestation verify <file> --repo OriginTrail/dkg`.
+        uses: actions/attest-build-provenance@bd77c077858b8d561b7a36cbe48ef4cc642ca39d # v2.2.2
+        with:
+          # Wildcards under release-assets/ cover every file we will
+          # upload below (MarkItDown binaries, .sha256s, .meta.json,
+          # the CycloneDX SBOM, and the aggregate SHASUMS256.txt).
+          subject-path: 'release-assets/*'
+
       - name: Extract release notes
         id: notes
+        # SECURITY: every value derived from a workflow context
+        # (`needs.*.outputs.*`, `github.*`, etc.) is passed via `env:`
+        # rather than `${{ … }}` interpolated directly into the shell
+        # body. Even though the upstream `Validate tag format` step
+        # enforces a semver regex on $VERSION, the structural fix is
+        # to keep that value out of the shell parser entirely — the
+        # variable is read from the runner env by the running shell,
+        # not by the workflow-expression preprocessor, which closes
+        # the entire template-injection class regardless of how much
+        # the upstream validation is loosened in the future.
+        env:
+          VERSION: ${{ needs.release-preflight.outputs.version }}
+          REPO: ${{ github.repository }}
         run: |
-          V="${{ needs.release-preflight.outputs.version }}"
+          set -euo pipefail
+          # shellcheck disable=SC2153 # VERSION / REPO come from the env: block above
           if [ -f CHANGELOG.md ]; then
-            sed -n "/^## \[$V\]/,/^## \[/p" CHANGELOG.md | sed '/^## \[/d' | sed '1d' > release_notes.md
+            sed -n "/^## \[${VERSION}\]/,/^## \[/p" CHANGELOG.md | sed '/^## \[/d' | sed '1d' > release_notes.md
           fi
           if [ ! -s release_notes.md ]; then
-            echo "## DKG V10 Node $V" > release_notes.md
-            echo "" >> release_notes.md
-            echo "See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/v$V/CHANGELOG.md) for details." >> release_notes.md
+            {
+              echo "## DKG V10 Node ${VERSION}"
+              echo
+              echo "See [CHANGELOG.md](https://github.com/${REPO}/blob/v${VERSION}/CHANGELOG.md) for details."
+            } > release_notes.md
           fi
 
+          # Append a stable footer that documents how to verify the
+          # attestations + SBOM that ship with every release. Consumers
+          # who want to confirm the asset came from this workflow run
+          # have a copy-pasteable command in the release body. The
+          # heredoc terminator is single-quoted (`<<'NOTE'`) so $REPO
+          # is NOT expanded inside the body — we substitute it once
+          # after the heredoc with sed against the literal ${REPO}
+          # placeholder, avoiding any chance of shell metacharacters in
+          # an attacker-influenced value reaching the parser.
+          cat >> release_notes.md <<'NOTE'
+
+          ---
+
+          ### Verifying this release
+
+          Every release asset (binaries, SBOM, SHASUMS256.txt) is covered
+          by a build-provenance attestation produced inside this workflow
+          run. To verify locally:
+
+          ```sh
+          gh attestation verify <asset> --repo __REPO__
+          ```
+
+          A CycloneDX 1.5 SBOM (`dkg-<version>.cdx.json`) is attached so
+          downstream scanners can audit the dependency closure of this
+          release.
+          NOTE
+          # Replace the literal placeholder with the runtime repo value.
+          # `${REPO}` is `owner/name` (validated by GitHub itself, no
+          # shell metacharacters possible), but using a placeholder
+          # keeps the heredoc body entirely free of interpolation.
+          sed -i "s|__REPO__|${REPO}|g" release_notes.md
+
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          name: v${{ needs.release-preflight.outputs.version }}
-          body_path: release_notes.md
-          draft: false
-          prerelease: ${{ needs.release-preflight.outputs.is_prerelease }}
-          generate_release_notes: true
-          files: |
-            release-assets/*
+        # SECURITY: this is the most privileged step in the workflow —
+        # `contents: write` + `id-token: write` + `attestations: write`
+        # are all in scope here. Replacing `softprops/action-gh-release`
+        # with the preinstalled `gh` CLI removes the last third-party
+        # action from the credential-bearing job's executable surface;
+        # the release job now uses only first-party `actions/*` and
+        # `gh` (shipped with the GitHub-hosted runner image). A future
+        # supply-chain compromise of any third-party release action
+        # cannot reach this token because no third-party code runs here.
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG_NAME: ${{ github.ref_name }}
+          REL_VERSION: ${{ needs.release-preflight.outputs.version }}
+          IS_PRERELEASE: ${{ needs.release-preflight.outputs.is_prerelease }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2153 # TAG_NAME / REL_VERSION / IS_PRERELEASE come from the step's `env:` block above
+          # Build the asset list explicitly so `gh release create` gets a
+          # deterministic argv. The release-assets/ dir is populated by
+          # the earlier `Download MarkItDown release assets`, `Download
+          # SBOM ...`, and `Generate SHA-256 manifest ...` steps.
+          shopt -s nullglob
+          assets=(release-assets/*)
+          shopt -u nullglob
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "::error::release-assets/ is empty; nothing to upload"
+            exit 1
+          fi
+          # `--generate-notes` appends GitHub's auto-generated release
+          # notes after our `release_notes.md` body — same behaviour as
+          # softprops/action-gh-release's `generate_release_notes: true`
+          # combined with `body_path`.
+          # `gh release create [<tag>] [<files>...] [flags]` — tag first,
+          # then assets, then flags (canonical cobra arg order). The
+          # `--prerelease` flag is appended conditionally; we avoid the
+          # empty-array-under-nounset pattern that breaks on bash 3.x.
+          if [ "${IS_PRERELEASE}" = "true" ]; then
+            gh release create "${TAG_NAME}" "${assets[@]}" \
+              --title "v${REL_VERSION}" \
+              --notes-file release_notes.md \
+              --generate-notes \
+              --prerelease
+          else
+            gh release create "${TAG_NAME}" "${assets[@]}" \
+              --title "v${REL_VERSION}" \
+              --notes-file release_notes.md \
+              --generate-notes
+          fi

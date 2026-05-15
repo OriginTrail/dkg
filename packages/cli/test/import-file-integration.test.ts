@@ -41,6 +41,7 @@ import {
   type ConverterOutput,
   contextGraphAssertionUri,
   contextGraphMetaUri,
+  assertionLifecycleUri,
 } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
 import { FileStore } from '../src/file-store.js';
@@ -81,8 +82,18 @@ interface MockAgent {
       opts?: { subGraphName?: string },
     ) => Promise<void>;
   };
+  publisher: {
+    assertionCreate: (
+      contextGraphId: string,
+      name: string,
+      agentAddress: string,
+      subGraphName?: string,
+    ) => Promise<string>;
+  };
   store: {
     insert: (quads: CapturedQuad[]) => Promise<void>;
+    createGraph: (graphUri: string) => Promise<void>;
+    hasGraph: (graphUri: string) => Promise<boolean>;
     /**
      * Removes every quad from `insertedQuads` that matches the given
      * partial pattern (subject / predicate / object / graph, any subset).
@@ -114,7 +125,7 @@ interface MockAgent {
    * tests filter this array by `graph` to assert on each side.
    */
   insertedQuads: CapturedQuad[];
-  createdAssertions: Array<{ contextGraphId: string; name: string; subGraphName?: string }>;
+  createdAssertions: Array<{ contextGraphId: string; name: string; agentAddress: string; subGraphName?: string }>;
   /**
    * Graph URIs that have been dropped via `store.dropGraph`. Used by
    * discard regression tests to verify the data graph was actually
@@ -147,6 +158,7 @@ interface MockAgentOptions {
    * the SECOND call (the snapshot restore) through.
    */
   insertErrorPredicate?: (quads: CapturedQuad[], callNumber: number) => Error | null;
+  insertPartialBeforeErrorPredicate?: (quads: CapturedQuad[], callNumber: number) => CapturedQuad[] | null;
   /**
    * When set, `agent.store.deleteByPattern` throws this error.
    * Bug 12 regression test uses this to simulate a `_meta` cleanup
@@ -172,8 +184,9 @@ interface MockAgentOptions {
 }
 
 function makeMockAgent(peerId = '0xMockAgentPeerId', options: MockAgentOptions = {}): MockAgent {
-  const createdAssertions: Array<{ contextGraphId: string; name: string; subGraphName?: string }> = [];
+  const createdAssertions: Array<{ contextGraphId: string; name: string; agentAddress: string; subGraphName?: string }> = [];
   const insertedQuads: CapturedQuad[] = [];
+  const createdGraphs = new Set<string>();
   const droppedGraphs: string[] = [];
   let insertCallCount = 0;
   const agent: MockAgent = {
@@ -187,9 +200,7 @@ function makeMockAgent(peerId = '0xMockAgentPeerId', options: MockAgentOptions =
     },
     assertion: {
       async create(contextGraphId: string, name: string, opts?: { subGraphName?: string }): Promise<string> {
-        if (options.createError) throw options.createError;
-        createdAssertions.push({ contextGraphId, name, subGraphName: opts?.subGraphName });
-        return contextGraphAssertionUri(contextGraphId, peerId, name, opts?.subGraphName);
+        return agent.publisher.assertionCreate(contextGraphId, name, peerId, opts?.subGraphName);
       },
       async discard(contextGraphId: string, name: string, opts?: { subGraphName?: string }): Promise<void> {
         // Mirror the post-Bug-12 publisher.assertionDiscard ordering:
@@ -204,15 +215,37 @@ function makeMockAgent(peerId = '0xMockAgentPeerId', options: MockAgentOptions =
         await agent.store.dropGraph(graphUri);
       },
     },
+    publisher: {
+      async assertionCreate(
+        contextGraphId: string,
+        name: string,
+        agentAddress: string,
+        subGraphName?: string,
+      ): Promise<string> {
+        if (options.createError) throw options.createError;
+        createdAssertions.push({ contextGraphId, name, agentAddress, subGraphName });
+        return contextGraphAssertionUri(contextGraphId, agentAddress, name, subGraphName);
+      },
+    },
     store: {
       async insert(quads: CapturedQuad[]): Promise<void> {
         insertCallCount++;
         if (options.insertError) throw options.insertError;
+        if (options.insertPartialBeforeErrorPredicate) {
+          const partialQuads = options.insertPartialBeforeErrorPredicate(quads, insertCallCount);
+          if (partialQuads?.length) insertedQuads.push(...partialQuads);
+        }
         if (options.insertErrorPredicate) {
           const err = options.insertErrorPredicate(quads, insertCallCount);
           if (err) throw err;
         }
         insertedQuads.push(...quads);
+      },
+      async createGraph(graphUri: string): Promise<void> {
+        createdGraphs.add(graphUri);
+      },
+      async hasGraph(graphUri: string): Promise<boolean> {
+        return createdGraphs.has(graphUri) || insertedQuads.some(q => q.graph === graphUri);
       },
       async deleteByPattern(pattern: Partial<CapturedQuad>): Promise<number> {
         if (options.deleteByPatternError) throw options.deleteByPatternError;
@@ -232,6 +265,7 @@ function makeMockAgent(peerId = '0xMockAgentPeerId', options: MockAgentOptions =
       },
       async dropGraph(graphUri: string): Promise<void> {
         if (options.dropGraphError) throw options.dropGraphError;
+        createdGraphs.delete(graphUri);
         droppedGraphs.push(graphUri);
         for (let i = insertedQuads.length - 1; i >= 0; i--) {
           if (insertedQuads[i]!.graph === graphUri) {
@@ -257,6 +291,32 @@ function makeMockAgent(peerId = '0xMockAgentPeerId', options: MockAgentOptions =
         // `<subject-iri>` token in the WHERE clause's triple pattern
         // instead of the `?s` variable. When detected, results are
         // filtered on both `graph` and `subject`.
+        if (/^\s*SELECT\s+DISTINCT\s+\?s/i.test(sparql)) {
+          const graphMatch = /GRAPH\s+<([^>]+)>/.exec(sparql);
+          if (!graphMatch) {
+            return { type: 'bindings', bindings: [] };
+          }
+          const targetGraph = graphMatch[1]!;
+          const literals = Array.from(sparql.matchAll(/"((?:[^"\\]|\\.)*)"/g))
+            .map(match => JSON.parse(`"${match[1]}"`) as string);
+          const exactSubjects = literals.filter(value => !value.endsWith('/'));
+          const subjectPrefixes = literals.filter(value => value.endsWith('/'));
+          const subjects = new Set(
+            insertedQuads
+              .filter(q =>
+                q.graph === targetGraph
+                && (
+                  exactSubjects.includes(q.subject)
+                  || subjectPrefixes.some(prefix => q.subject.startsWith(prefix))
+                )
+              )
+              .map(q => q.subject),
+          );
+          return {
+            type: 'bindings',
+            bindings: Array.from(subjects).map(s => ({ s })),
+          };
+        }
         if (!/^\s*CONSTRUCT/i.test(sparql)) {
           return { type: 'bindings', bindings: [] };
         }
@@ -371,9 +431,19 @@ async function runImportFileOrchestration(params: {
   // (safe for sequential tests). Concurrent-import tests that need to
   // observe the lock must pass a shared map across their parallel calls.
   assertionImportLocks?: Map<string, Promise<void>>;
+  requestAgentAddress?: string;
+  onMemoryGraphChanged?: (event: {
+    contextGraphId: string;
+    layers: string[];
+    subGraphName?: string;
+    operation: string;
+    source: string;
+    counts: { triples: number };
+  }) => void | Promise<void>;
 }): Promise<ImportFileResult> {
-  const { agent, fileStore, extractionRegistry, extractionStatus, multipartBody, boundary, assertionName, onInProgress } = params;
+  const { agent, fileStore, extractionRegistry, extractionStatus, multipartBody, boundary, assertionName, onInProgress, onMemoryGraphChanged } = params;
   const assertionImportLocks = params.assertionImportLocks ?? new Map<string, Promise<void>>();
+  const requestAgentAddress = params.requestAgentAddress ?? agent.peerId;
 
   const fields = parseMultipart(multipartBody, boundary);
   const filePart = fields.find(f => f.name === 'file' && f.filename !== undefined)!;
@@ -399,7 +469,8 @@ async function runImportFileOrchestration(params: {
   }
 
   const fileStoreEntry = await fileStore.put(filePart.content, detectedContentType);
-  const assertionUri = contextGraphAssertionUri(contextGraphId, agent.peerId, assertionName, subGraphName);
+  const assertionUri = contextGraphAssertionUri(contextGraphId, requestAgentAddress, assertionName, subGraphName);
+  const uploadedFilename = filePart.filename?.trim() ?? '';
   const startedAt = new Date().toISOString();
 
   // Round 14 Bug 42: per-assertion mutex BEFORE extraction — mirrors
@@ -466,6 +537,84 @@ async function runImportFileOrchestration(params: {
       },
     }));
   };
+  const previousExtractionStatusRecord = extractionStatus.get(assertionUri);
+  const importMetaValue = (
+    snapshot: CapturedQuad[],
+    predicate: string,
+  ): string | undefined => snapshot.find(q =>
+    q.subject === assertionUri &&
+    q.predicate === `http://dkg.io/ontology/${predicate}`
+  )?.object;
+  const parseImportMetaLiteral = (value: string | undefined): string | undefined => {
+    const trimmed = value?.trim();
+    if (!trimmed) return undefined;
+    const literalMatch = /^"((?:[^"\\]|\\.)*)"/.exec(trimmed);
+    if (literalMatch) {
+      try {
+        return JSON.parse(literalMatch[0]);
+      } catch {
+        return literalMatch[1];
+      }
+    }
+    return trimmed.replace(/^<|>$/g, '');
+  };
+  const parseImportMetaInteger = (value: string | undefined): number | undefined => {
+    const integerMatch = /^"(-?\d+)"/.exec(value?.trim() ?? '');
+    if (!integerMatch) return undefined;
+    const parsed = Number.parseInt(integerMatch[1], 10);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  };
+  const buildPreviousExtractionStatusRecordFromMeta = (
+    snapshot: CapturedQuad[],
+  ): ExtractionStatusRecord | undefined => {
+    const fileHash = parseImportMetaLiteral(importMetaValue(snapshot, 'sourceFileHash'));
+    const detectedContentType = parseImportMetaLiteral(importMetaValue(snapshot, 'sourceContentType'));
+    const tripleCount = parseImportMetaInteger(importMetaValue(snapshot, 'structuralTripleCount'));
+    if (!fileHash || !detectedContentType || tripleCount == null) {
+      return undefined;
+    }
+    const extractionStatus = parseImportMetaLiteral(importMetaValue(snapshot, 'extractionStatus'));
+    const statusValue = extractionStatus === 'skipped' ? 'skipped' : 'completed';
+    const restoredAt = new Date().toISOString();
+    const fileName = parseImportMetaLiteral(importMetaValue(snapshot, 'sourceFileName'));
+    const rootEntity = parseImportMetaLiteral(importMetaValue(snapshot, 'rootEntity'));
+    const mdIntermediateHashFromMeta = parseImportMetaLiteral(importMetaValue(snapshot, 'mdIntermediateHash'));
+    return {
+      status: statusValue,
+      fileHash,
+      ...(fileName ? { fileName } : {}),
+      ...(rootEntity ? { rootEntity } : {}),
+      detectedContentType,
+      pipelineUsed: statusValue === 'skipped' ? null : detectedContentType,
+      tripleCount,
+      ...(mdIntermediateHashFromMeta ? { mdIntermediateHash: mdIntermediateHashFromMeta } : {}),
+      startedAt: restoredAt,
+      completedAt: restoredAt,
+    };
+  };
+  const getRestorablePreviousExtractionStatusRecord = (
+    metaSnapshot: CapturedQuad[],
+  ): ExtractionStatusRecord | undefined =>
+    previousExtractionStatusRecord
+      ? { ...previousExtractionStatusRecord }
+      : buildPreviousExtractionStatusRecordFromMeta(metaSnapshot);
+  const restoreExtractionStatusRecord = (record: ExtractionStatusRecord): void => {
+    extractionStatus.set(assertionUri, record);
+  };
+  const failWithRestoredPreviousStatus = (
+    statusCode: number,
+    error: string,
+    tripleCount: number,
+    previousStatusRecord: ExtractionStatusRecord,
+    failedPipelineUsed: string | null = pipelineUsed,
+  ): never => {
+    try {
+      fail(statusCode, error, tripleCount, failedPipelineUsed);
+    } catch (routeError) {
+      restoreExtractionStatusRecord(previousStatusRecord);
+      throw routeError;
+    }
+  };
 
   await recordInProgress();
 
@@ -480,7 +629,7 @@ async function runImportFileOrchestration(params: {
         filePath: fileStoreEntry.path,
         contentType: detectedContentType,
         ontologyRef,
-        agentDid: `did:dkg:agent:${agent.peerId}`,
+        agentDid: `did:dkg:agent:${requestAgentAddress}`,
       });
       mdIntermediate = md;
       pipelineUsed = detectedContentType;
@@ -492,6 +641,182 @@ async function runImportFileOrchestration(params: {
 
   // Graceful degrade
   if (mdIntermediate === null) {
+    const metaGraph = contextGraphMetaUri(contextGraphId);
+    const lifecycleSubject = assertionLifecycleUri(contextGraphId, requestAgentAddress, assertionName, subGraphName);
+    const listCreateMetaSubjects = async (): Promise<string[]> => {
+      const lifecycleSubjectLiteral = JSON.stringify(lifecycleSubject);
+      const lifecyclePrefixLiteral = JSON.stringify(`${lifecycleSubject}/`);
+      const assertionUriLiteral = JSON.stringify(assertionUri);
+      const result = await agent.store.query(
+        `SELECT DISTINCT ?s WHERE { GRAPH <${metaGraph}> { ?s ?p ?o . FILTER(STR(?s) = ${lifecycleSubjectLiteral} || STRSTARTS(STR(?s), ${lifecyclePrefixLiteral}) || STR(?s) = ${assertionUriLiteral}) } }`,
+      );
+      if (result.type !== 'bindings') return [];
+      return result.bindings
+        .map(row => row['s'])
+        .filter((subject): subject is string => typeof subject === 'string' && subject.length > 0);
+    };
+    const snapshotCreateMeta = async (): Promise<CapturedQuad[]> => {
+      const subjects = new Set([
+        assertionUri,
+        lifecycleSubject,
+        ...(await listCreateMetaSubjects()),
+      ]);
+      const snapshot: CapturedQuad[] = [];
+      for (const subject of subjects) {
+        const result = await agent.store.query(
+          `CONSTRUCT { <${subject}> ?p ?o } WHERE { GRAPH <${metaGraph}> { <${subject}> ?p ?o } }`,
+        );
+        if (result.type === 'quads') {
+          snapshot.push(...result.quads.map(q => ({ ...q, graph: metaGraph })));
+        }
+      }
+      return snapshot;
+    };
+    const restoreCreateMetaSnapshot = async (snapshot: CapturedQuad[]): Promise<void> => {
+      const subjects = new Set([
+        assertionUri,
+        lifecycleSubject,
+        ...snapshot.map(q => q.subject),
+        ...(await listCreateMetaSubjects()),
+      ]);
+      for (const subject of subjects) {
+        await agent.store.deleteByPattern({ subject, graph: metaGraph });
+      }
+      if (snapshot.length > 0) {
+        await agent.store.insert(snapshot);
+      }
+    };
+    const snapshotCreateDataGraph = async (): Promise<CapturedQuad[]> => {
+      const result = await agent.store.query(
+        `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${assertionUri}> { ?s ?p ?o } }`,
+      );
+      if (result.type !== 'quads') return [];
+      return result.quads.map(q => ({ ...q, graph: assertionUri }));
+    };
+    const restoreCreateSnapshot = async (
+      metaSnapshot: CapturedQuad[],
+      dataSnapshot: CapturedQuad[],
+      hadDataGraphBeforeCreate: boolean,
+    ): Promise<void> => {
+      const restoreErrors: string[] = [];
+      try {
+        if (dataSnapshot.length > 0) {
+          await agent.store.dropGraph(assertionUri);
+          await agent.store.insert(dataSnapshot);
+        } else if (hadDataGraphBeforeCreate) {
+          await agent.store.dropGraph(assertionUri);
+          await agent.store.createGraph(assertionUri);
+        } else if (!hadDataGraphBeforeCreate) {
+          await agent.store.dropGraph(assertionUri);
+        }
+      } catch (err: any) {
+        restoreErrors.push(`data graph rollback failed: ${err?.message ?? err}`);
+      }
+      try {
+        await restoreCreateMetaSnapshot(metaSnapshot);
+      } catch (err: any) {
+        restoreErrors.push(`metadata rollback failed: ${err?.message ?? err}`);
+      }
+      if (restoreErrors.length > 0) {
+        throw new Error(restoreErrors.join('; '));
+      }
+    };
+
+    let preCreateDataGraphExisted = false;
+    let preCreateDataSnapshot: CapturedQuad[];
+    let preCreateMetaSnapshot: CapturedQuad[];
+    try {
+      preCreateDataGraphExisted = await agent.store.hasGraph(assertionUri);
+      preCreateDataSnapshot = await snapshotCreateDataGraph();
+      preCreateMetaSnapshot = await snapshotCreateMeta();
+    } catch (err: any) {
+      fail(500, `Failed to snapshot assertion create state for skipped extraction rollback: ${err?.message ?? String(err)}`, 0, null);
+    }
+
+    try {
+      await agent.publisher.assertionCreate(contextGraphId, assertionName, requestAgentAddress, subGraphName);
+    } catch (err: any) {
+      const message = err?.message ?? String(err);
+      if (!(message.includes('already exists') || message.includes('duplicate') || message.includes('conflict'))) {
+        const rollbackErrors: string[] = [];
+        try {
+          await restoreCreateSnapshot(preCreateMetaSnapshot, preCreateDataSnapshot, preCreateDataGraphExisted);
+        } catch (rollbackErr: any) {
+          rollbackErrors.push(`create rollback failed: ${rollbackErr?.message ?? rollbackErr}`);
+        }
+        const rollbackSuffix = rollbackErrors.length > 0
+          ? `; rollback failures: ${rollbackErrors.join('; ')}`
+          : '';
+        if (message.includes('has not been registered') || message.includes('Invalid') || message.includes('Unsafe')) {
+          const previousStatusRecord = rollbackErrors.length === 0
+            ? getRestorablePreviousExtractionStatusRecord(preCreateMetaSnapshot)
+            : undefined;
+          if (previousStatusRecord) {
+            failWithRestoredPreviousStatus(400, `${message}${rollbackSuffix}`, 0, previousStatusRecord);
+          }
+          fail(400, `${message}${rollbackSuffix}`, 0);
+        }
+        const previousStatusRecord = rollbackErrors.length === 0
+          ? getRestorablePreviousExtractionStatusRecord(preCreateMetaSnapshot)
+          : undefined;
+        if (previousStatusRecord) {
+          failWithRestoredPreviousStatus(500, `${message}${rollbackSuffix}`, 0, previousStatusRecord);
+        }
+        fail(500, `${message}${rollbackSuffix}`, 0);
+      }
+    }
+
+    const skippedMetaQuads: CapturedQuad[] = [
+      { subject: assertionUri, predicate: 'http://dkg.io/ontology/sourceContentType', object: JSON.stringify(detectedContentType), graph: metaGraph },
+      { subject: assertionUri, predicate: 'http://dkg.io/ontology/sourceFileHash', object: JSON.stringify(fileStoreEntry.keccak256), graph: metaGraph },
+      { subject: assertionUri, predicate: 'http://dkg.io/ontology/extractionStatus', object: JSON.stringify('skipped'), graph: metaGraph },
+      { subject: assertionUri, predicate: 'http://dkg.io/ontology/structuralTripleCount', object: '"0"^^<http://www.w3.org/2001/XMLSchema#integer>', graph: metaGraph },
+    ];
+    if (uploadedFilename.length > 0) {
+      skippedMetaQuads.push({
+        subject: assertionUri,
+        predicate: 'http://dkg.io/ontology/sourceFileName',
+        object: JSON.stringify(uploadedFilename),
+        graph: metaGraph,
+      });
+    }
+
+    let skippedMetaCleanupSucceeded = false;
+    let skippedDataDropSucceeded = false;
+    try {
+      await agent.store.deleteByPattern({ subject: assertionUri, graph: metaGraph });
+      skippedMetaCleanupSucceeded = true;
+      await agent.store.dropGraph(assertionUri);
+      skippedDataDropSucceeded = true;
+      await agent.store.insert(skippedMetaQuads);
+    } catch (err: any) {
+      const rollbackErrors: string[] = [];
+      if (skippedMetaCleanupSucceeded) {
+        try {
+          await agent.store.deleteByPattern({ subject: assertionUri, graph: metaGraph });
+        } catch (partialMetaCleanupErr: any) {
+          rollbackErrors.push(`partial _meta cleanup failed: ${partialMetaCleanupErr?.message ?? partialMetaCleanupErr}`);
+        }
+      }
+      try {
+        await restoreCreateSnapshot(preCreateMetaSnapshot, preCreateDataSnapshot, preCreateDataGraphExisted);
+      } catch (createRollbackErr: any) {
+        rollbackErrors.push(`create rollback failed: ${createRollbackErr?.message ?? createRollbackErr}`);
+      }
+      const rollbackSuffix = rollbackErrors.length > 0
+        ? `; rollback failures: ${rollbackErrors.join('; ')}`
+        : '';
+      const previousStatusRecord = rollbackErrors.length === 0
+        ? getRestorablePreviousExtractionStatusRecord(preCreateMetaSnapshot)
+        : undefined;
+      if (previousStatusRecord) {
+        restoreExtractionStatusRecord(previousStatusRecord);
+      } else {
+        recordFailed(`Failed to persist skipped extraction metadata: ${err?.message ?? String(err)}${rollbackSuffix}`, 0);
+      }
+      throw err;
+    }
+
     const skippedRecord: ExtractionStatusRecord = {
       status: 'skipped',
       fileHash: fileStoreEntry.keccak256,
@@ -502,6 +827,16 @@ async function runImportFileOrchestration(params: {
       completedAt: new Date().toISOString(),
     };
     extractionStatus.set(assertionUri, skippedRecord);
+    if (onMemoryGraphChanged) {
+      await onMemoryGraphChanged({
+        contextGraphId,
+        layers: ['wm'],
+        subGraphName,
+        operation: 'assertion_imported',
+        source: 'api',
+        counts: { triples: 0 },
+      });
+    }
     return buildImportFileResponse({
       assertionUri,
       fileHash: fileStoreEntry.keccak256,
@@ -518,7 +853,7 @@ async function runImportFileOrchestration(params: {
   // on the file URN is impossible on promote.
   const fileUri = `urn:dkg:file:${fileStoreEntry.keccak256}`;
   const provUri = `urn:dkg:extraction:${randomUUID()}`;
-  const agentDid = `did:dkg:agent:${agent.peerId}`;
+  const agentDid = `did:dkg:agent:${requestAgentAddress}`;
   let triples: ReturnType<typeof extractFromMarkdown>['triples'];
   let sourceFileLinkage: ReturnType<typeof extractFromMarkdown>['sourceFileLinkage'];
   let documentSubjectIri: string;
@@ -630,6 +965,7 @@ async function runImportFileOrchestration(params: {
     { subject: assertionUri, predicate: 'http://dkg.io/ontology/sourceContentType', object: JSON.stringify(detectedContentType), graph: metaGraph },
     { subject: assertionUri, predicate: 'http://dkg.io/ontology/sourceFileHash', object: JSON.stringify(fileStoreEntry.keccak256), graph: metaGraph },
     { subject: assertionUri, predicate: 'http://dkg.io/ontology/extractionMethod', object: JSON.stringify('structural'), graph: metaGraph },
+    { subject: assertionUri, predicate: 'http://dkg.io/ontology/extractionStatus', object: JSON.stringify('completed'), graph: metaGraph },
     { subject: assertionUri, predicate: 'http://dkg.io/ontology/structuralTripleCount', object: `"${triples.length}"^^<http://www.w3.org/2001/XMLSchema#integer>`, graph: metaGraph },
     { subject: assertionUri, predicate: 'http://dkg.io/ontology/semanticTripleCount', object: `"0"^^<http://www.w3.org/2001/XMLSchema#integer>`, graph: metaGraph },
   ];
@@ -644,7 +980,6 @@ async function runImportFileOrchestration(params: {
   // Round 9 Bug 27: `dkg:sourceFileName` on the assertion UAL —
   // per-upload metadata parallel to existing `dkg:sourceContentType`
   // (row 15). Skipped when no filename was provided.
-  const uploadedFilename = filePart.filename?.trim() ?? '';
   if (uploadedFilename.length > 0) {
     metaQuads.push({
       subject: assertionUri,
@@ -661,7 +996,7 @@ async function runImportFileOrchestration(params: {
   // lock-acquisition site above for full rationale.
   try {
     try {
-      await agent.assertion.create(contextGraphId, assertionName, subGraphName ? { subGraphName } : undefined);
+      await agent.publisher.assertionCreate(contextGraphId, assertionName, requestAgentAddress, subGraphName);
     } catch (err: any) {
       const message = err?.message ?? String(err);
       if (!(message.includes('already exists') || message.includes('duplicate') || message.includes('conflict'))) {
@@ -746,6 +1081,13 @@ async function runImportFileOrchestration(params: {
           triples.length,
         );
         (writeErr as any).__failureAlreadyRecorded = true;
+      } else {
+        const previousStatusRecord =
+          getRestorablePreviousExtractionStatusRecord(metaSnapshot);
+        if (previousStatusRecord) {
+          (writeErr as any).__previousExtractionStatusRecord =
+            previousStatusRecord;
+        }
       }
       throw writeErr;
     }
@@ -774,6 +1116,12 @@ async function runImportFileOrchestration(params: {
     // landed, but we still record the failure so /extraction-status
     // doesn't stay stuck at in_progress.
     recordFailed(err?.message ?? String(err), triples.length);
+    const previousStatusRecord = err?.__previousExtractionStatusRecord as
+      | ExtractionStatusRecord
+      | undefined;
+    if (previousStatusRecord) {
+      restoreExtractionStatusRecord(previousStatusRecord);
+    }
     throw err;
   }
 
@@ -908,7 +1256,12 @@ describe('import-file orchestration — happy paths', () => {
     // Assertion graph created and data-graph quads committed through the
     // atomic multi-graph insert (single `store.insert` for both graphs).
     expect(agent.createdAssertions).toHaveLength(1);
-    expect(agent.createdAssertions[0]).toEqual({ contextGraphId: 'research-cg', name: 'climate-report', subGraphName: undefined });
+    expect(agent.createdAssertions[0]).toEqual({
+      contextGraphId: 'research-cg',
+      name: 'climate-report',
+      agentAddress: agent.peerId,
+      subGraphName: undefined,
+    });
     const writtenTriples = getDataGraphQuads(agent, 'research-cg', 'climate-report');
     expect(writtenTriples.length).toBeGreaterThan(0);
 
@@ -1121,7 +1474,12 @@ describe('import-file orchestration — happy paths', () => {
       multipartBody: body, boundary: BOUNDARY, assertionName: 'decision-1',
     });
 
-    expect(agent.createdAssertions[0]).toEqual({ contextGraphId: 'cg', name: 'decision-1', subGraphName: 'decisions' });
+    expect(agent.createdAssertions[0]).toEqual({
+      contextGraphId: 'cg',
+      name: 'decision-1',
+      agentAddress: agent.peerId,
+      subGraphName: 'decisions',
+    });
     // Sub-graph routing: data-graph quads land in the sub-graph's assertion
     // graph URI (which embeds `decisions`), not the CG root assertion URI.
     const subGraphAssertionGraph = contextGraphAssertionUri('cg', agent.peerId, 'decision-1', 'decisions');
@@ -1172,7 +1530,12 @@ describe('import-file orchestration — happy paths', () => {
     // tripleCount reports Phase 2 content triples only, which is still zero.
     expect(result.extraction.tripleCount).toBe(0);
     expect(agent.createdAssertions).toHaveLength(1);
-    expect(agent.createdAssertions[0]).toEqual({ contextGraphId: 'cg', name: 'empty-doc', subGraphName: undefined });
+    expect(agent.createdAssertions[0]).toEqual({
+      contextGraphId: 'cg',
+      name: 'empty-doc',
+      agentAddress: agent.peerId,
+      subGraphName: undefined,
+    });
     // Data-graph quads: rows 1, 3 (linkage from extractor) + row 2
     // (daemon-owned original content type) + `dkg:markdownForm`
     // (daemon-owned markdown-input link) + rows 4, 5, 8 (file descriptor
@@ -1630,15 +1993,24 @@ describe('import-file orchestration — graceful degrade', () => {
     await rm(tmpDir, { recursive: true, force: true });
   });
 
-  it('unregistered content type — stores file, returns status="skipped", writes no triples', async () => {
+  it('unregistered content type — stores file, returns status="skipped", writes only durable metadata', async () => {
     const body = buildMultipart([
       { kind: 'text', name: 'contextGraphId', value: 'cg' },
       { kind: 'file', name: 'file', filename: 'photo.png', contentType: 'image/png', content: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]) },
     ]);
+    const events: Array<{
+      contextGraphId: string;
+      layers: string[];
+      subGraphName?: string;
+      operation: string;
+      source: string;
+      counts: { triples: number };
+    }> = [];
 
     const result = await runImportFileOrchestration({
       agent, fileStore, extractionRegistry: registry, extractionStatus: status,
       multipartBody: body, boundary: BOUNDARY, assertionName: 'photo',
+      onMemoryGraphChanged: event => { events.push(event); },
     });
 
     expect(result.extraction.status).toBe('skipped');
@@ -1652,16 +2024,189 @@ describe('import-file orchestration — graceful degrade', () => {
     expect(retrieved).not.toBeNull();
     expect(retrieved![0]).toBe(0x89); // PNG magic byte preserved
 
-    // No triples written to the assertion — graceful degrade should
-    // bypass both the assertion graph creation AND the atomic insert.
-    expect(agent.createdAssertions).toHaveLength(0);
-    expect(agent.insertedQuads).toHaveLength(0);
+    // No triples written to the assertion graph, but durable _meta
+    // provenance remains available after daemon restarts/cache loss.
+    expect(agent.createdAssertions).toEqual([
+      { contextGraphId: 'cg', name: 'photo', agentAddress: agent.peerId, subGraphName: undefined },
+    ]);
+    expect(getDataGraphQuads(agent, 'cg', 'photo')).toHaveLength(0);
+
+    const metaGraph = contextGraphMetaUri('cg');
+    const metaQuads = agent.insertedQuads.filter(q =>
+      q.graph === metaGraph && q.subject === result.assertionUri
+    );
+    expect(metaQuads).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        predicate: 'http://dkg.io/ontology/sourceFileHash',
+        object: JSON.stringify(result.fileHash),
+      }),
+      expect.objectContaining({
+        predicate: 'http://dkg.io/ontology/sourceContentType',
+        object: JSON.stringify('image/png'),
+      }),
+      expect.objectContaining({
+        predicate: 'http://dkg.io/ontology/extractionStatus',
+        object: JSON.stringify('skipped'),
+      }),
+      expect.objectContaining({
+        predicate: 'http://dkg.io/ontology/sourceFileName',
+        object: JSON.stringify('photo.png'),
+      }),
+      expect.objectContaining({
+        predicate: 'http://dkg.io/ontology/structuralTripleCount',
+        object: '"0"^^<http://www.w3.org/2001/XMLSchema#integer>',
+      }),
+    ]));
 
     // Status record reflects the skip
     const record = status.get(result.assertionUri)!;
     expect(record.status).toBe('skipped');
     expect(record.pipelineUsed).toBeNull();
     expect(record.tripleCount).toBe(0);
+    expect(events).toEqual([{
+      contextGraphId: 'cg',
+      layers: ['wm'],
+      subGraphName: undefined,
+      operation: 'assertion_imported',
+      source: 'api',
+      counts: { triples: 0 },
+    }]);
+  });
+
+  it('unregistered content type fails before durable metadata writes when assertion.create rejects', async () => {
+    const gatedAgent = makeMockAgent('0xMockAgentPeerId', {
+      createError: new Error('Storage backend unavailable'),
+    });
+    const body = buildMultipart([
+      { kind: 'text', name: 'contextGraphId', value: 'cg' },
+      { kind: 'file', name: 'file', filename: 'photo.png', contentType: 'image/png', content: Buffer.from([0x89, 0x50, 0x4e, 0x47]) },
+    ]);
+
+    let caught: unknown;
+    try {
+      await runImportFileOrchestration({
+        agent: gatedAgent, fileStore, extractionRegistry: registry, extractionStatus: status,
+        multipartBody: body, boundary: BOUNDARY, assertionName: 'photo-create-gate',
+      });
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(ImportFileRouteError);
+    const routeError = caught as ImportFileRouteError;
+    expect(routeError.statusCode).toBe(500);
+    expect(routeError.body.extraction.status).toBe('failed');
+    expect(routeError.body.extraction.error).toBe('Storage backend unavailable');
+    expect(gatedAgent.insertedQuads).toHaveLength(0);
+    const assertionUri = contextGraphAssertionUri('cg', gatedAgent.peerId, 'photo-create-gate');
+    expect(gatedAgent.droppedGraphs).toEqual([assertionUri]);
+    const record = status.get(assertionUri);
+    expect(record?.status).toBe('failed');
+    expect(record?.error).toBe('Storage backend unavailable');
+    expect(record?.tripleCount).toBe(0);
+  });
+
+  it('unregistered content type uses the request agent address for skipped import lifecycle and metadata', async () => {
+    const requestAgentAddress = '0xRequestAgentAddress';
+    const body = buildMultipart([
+      { kind: 'text', name: 'contextGraphId', value: 'cg' },
+      { kind: 'file', name: 'file', filename: 'photo.png', contentType: 'image/png', content: Buffer.from([0x89, 0x50, 0x4e, 0x47]) },
+    ]);
+
+    const result = await runImportFileOrchestration({
+      agent, fileStore, extractionRegistry: registry, extractionStatus: status,
+      multipartBody: body, boundary: BOUNDARY, assertionName: 'photo-request-agent',
+      requestAgentAddress,
+    });
+
+    const requestAssertionUri = contextGraphAssertionUri('cg', requestAgentAddress, 'photo-request-agent');
+    const defaultAssertionUri = contextGraphAssertionUri('cg', agent.peerId, 'photo-request-agent');
+    expect(result.assertionUri).toBe(requestAssertionUri);
+    expect(agent.createdAssertions).toEqual([
+      {
+        contextGraphId: 'cg',
+        name: 'photo-request-agent',
+        agentAddress: requestAgentAddress,
+        subGraphName: undefined,
+      },
+    ]);
+
+    const metaGraph = contextGraphMetaUri('cg');
+    expect(agent.insertedQuads).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        subject: requestAssertionUri,
+        predicate: 'http://dkg.io/ontology/sourceFileHash',
+        graph: metaGraph,
+      }),
+    ]));
+    expect(agent.insertedQuads.some(q => q.subject === defaultAssertionUri)).toBe(false);
+    expect(status.get(requestAssertionUri)?.status).toBe('skipped');
+  });
+
+  it('unregistered content type rolls back partial assertion.create metadata on create failure', async () => {
+    const partialAgent = makeMockAgent();
+    const assertionName = 'photo-partial-create';
+    const assertionUri = contextGraphAssertionUri('cg', partialAgent.peerId, assertionName);
+    const metaGraph = contextGraphMetaUri('cg');
+    const lifecycleUri = assertionLifecycleUri('cg', partialAgent.peerId, assertionName);
+    const priorMeta = [
+      {
+        subject: assertionUri,
+        predicate: 'http://dkg.io/ontology/sourceFileHash',
+        object: JSON.stringify('old-hash'),
+        graph: metaGraph,
+      },
+      {
+        subject: lifecycleUri,
+        predicate: 'http://dkg.io/ontology/state',
+        object: JSON.stringify('old-state'),
+        graph: metaGraph,
+      },
+    ];
+    await partialAgent.store.insert(priorMeta);
+    const before = partialAgent.insertedQuads.map(q => ({ ...q }));
+    partialAgent.publisher.assertionCreate = async () => {
+      await partialAgent.store.createGraph(assertionUri);
+      await partialAgent.store.deleteByPattern({ subject: lifecycleUri, graph: metaGraph });
+      await partialAgent.store.insert([
+        {
+          subject: lifecycleUri,
+          predicate: 'http://dkg.io/ontology/state',
+          object: JSON.stringify('created'),
+          graph: metaGraph,
+        },
+        {
+          subject: `${lifecycleUri}/event/create`,
+          predicate: 'http://www.w3.org/ns/prov#generated',
+          object: lifecycleUri,
+          graph: metaGraph,
+        },
+      ]);
+      throw new Error('Storage backend unavailable');
+    };
+    const body = buildMultipart([
+      { kind: 'text', name: 'contextGraphId', value: 'cg' },
+      { kind: 'file', name: 'file', filename: 'photo.png', contentType: 'image/png', content: Buffer.from([0x89, 0x50, 0x4e, 0x47]) },
+    ]);
+
+    await expect(runImportFileOrchestration({
+      agent: partialAgent, fileStore, extractionRegistry: registry, extractionStatus: status,
+      multipartBody: body, boundary: BOUNDARY, assertionName,
+    })).rejects.toMatchObject({
+      statusCode: 500,
+      body: {
+        extraction: expect.objectContaining({
+          status: 'failed',
+          error: 'Storage backend unavailable',
+        }),
+      },
+    });
+
+    expect(partialAgent.insertedQuads).toEqual(before);
+    await expect(partialAgent.store.hasGraph(assertionUri)).resolves.toBe(false);
+    expect(partialAgent.droppedGraphs).toContain(assertionUri);
+    expect(partialAgent.insertedQuads.some(q => q.subject === `${lifecycleUri}/event/create`)).toBe(false);
+    expect(status.get(assertionUri)?.status).toBe('failed');
   });
 
   it('unregistered content type with no content-type header — defaults to application/octet-stream and skips', async () => {
@@ -1686,6 +2231,178 @@ describe('import-file orchestration — graceful degrade', () => {
     expect(result.detectedContentType).toBe('application/octet-stream');
     expect(result.extraction.status).toBe('skipped');
     expect(result.extraction.pipelineUsed).toBeNull();
+  });
+
+  it('skipped re-import rolls back previous assertion data and metadata when metadata insert fails', async () => {
+    const bodyV1 = buildMultipart([
+      { kind: 'text', name: 'contextGraphId', value: 'cg' },
+      { kind: 'file', name: 'file', filename: 'doc.md', contentType: 'text/markdown', content: Buffer.from('# V1\n\nBody.\n', 'utf-8') },
+    ]);
+    const v1 = await runImportFileOrchestration({
+      agent, fileStore, extractionRegistry: registry, extractionStatus: status,
+      multipartBody: bodyV1, boundary: BOUNDARY, assertionName: 'skip-rollback',
+    });
+    const assertionGraph = v1.assertionUri;
+    const metaGraph = contextGraphMetaUri('cg');
+    const dataBefore = agent.insertedQuads
+      .filter(q => q.graph === assertionGraph)
+      .map(q => ({ ...q }));
+    const metaBefore = agent.insertedQuads
+      .filter(q => q.graph === metaGraph && q.subject === assertionGraph)
+      .map(q => ({ ...q }));
+    const statusBefore = { ...status.get(assertionGraph)! };
+    expect(statusBefore.status).toBe('completed');
+
+    const failingAgent = makeMockAgent('0xMockAgentPeerId', {
+      insertPartialBeforeErrorPredicate: (quads, callNumber) =>
+        callNumber === 1
+          ? quads
+            .filter(q => q.graph === metaGraph && q.subject === assertionGraph)
+            .slice(0, 1)
+            .map(q => ({ ...q }))
+          : null,
+      insertErrorPredicate: (_quads, callNumber) =>
+        callNumber === 1 ? new Error('simulated skipped metadata insert outage') : null,
+    });
+    for (const q of agent.insertedQuads) {
+      failingAgent.insertedQuads.push({ ...q });
+    }
+
+    const bodyV2 = buildMultipart([
+      { kind: 'text', name: 'contextGraphId', value: 'cg' },
+      { kind: 'file', name: 'file', filename: 'unsupported.png', contentType: 'image/png', content: Buffer.from([0x89, 0x50, 0x4e, 0x47]) },
+    ]);
+
+    await expect(runImportFileOrchestration({
+      agent: failingAgent, fileStore, extractionRegistry: registry, extractionStatus: status,
+      multipartBody: bodyV2, boundary: BOUNDARY, assertionName: 'skip-rollback',
+    })).rejects.toThrow('simulated skipped metadata insert outage');
+
+    expect(failingAgent.insertedQuads.filter(q => q.graph === assertionGraph)).toEqual(dataBefore);
+    expect(failingAgent.insertedQuads.filter(q =>
+      q.graph === metaGraph && q.subject === assertionGraph
+    )).toEqual(metaBefore);
+    expect(failingAgent.insertCallCount).toBe(3);
+    expect(status.get(assertionGraph)).toEqual(statusBefore);
+  });
+
+  it('skipped re-import rollback restores an existing empty assertion graph', async () => {
+    const assertionName = 'skip-empty-graph-rollback';
+    const assertionGraph = contextGraphAssertionUri('cg', agent.peerId, assertionName);
+    const metaGraph = contextGraphMetaUri('cg');
+    const metaBefore = [
+      {
+        subject: assertionGraph,
+        predicate: 'http://dkg.io/ontology/sourceFileHash',
+        object: JSON.stringify('keccak256:previous-empty'),
+        graph: metaGraph,
+      },
+      {
+        subject: assertionGraph,
+        predicate: 'http://dkg.io/ontology/sourceContentType',
+        object: JSON.stringify('text/markdown'),
+        graph: metaGraph,
+      },
+      {
+        subject: assertionGraph,
+        predicate: 'http://dkg.io/ontology/structuralTripleCount',
+        object: '"0"^^<http://www.w3.org/2001/XMLSchema#integer>',
+        graph: metaGraph,
+      },
+    ];
+    await agent.store.createGraph(assertionGraph);
+    await agent.store.insert(metaBefore);
+    const statusBefore: ExtractionStatusRecord = {
+      status: 'completed',
+      fileHash: 'keccak256:previous-empty',
+      detectedContentType: 'text/markdown',
+      pipelineUsed: 'text/markdown',
+      tripleCount: 0,
+      startedAt: new Date(Date.now() - 1000).toISOString(),
+      completedAt: new Date().toISOString(),
+    };
+    status.set(assertionGraph, statusBefore);
+    await expect(agent.store.hasGraph(assertionGraph)).resolves.toBe(true);
+
+    const failingAgent = makeMockAgent('0xMockAgentPeerId', {
+      insertErrorPredicate: (quads) =>
+        quads.some(q =>
+          q.graph === metaGraph &&
+          q.subject === assertionGraph &&
+          q.predicate === 'http://dkg.io/ontology/extractionStatus' &&
+          q.object === JSON.stringify('skipped')
+        )
+          ? new Error('simulated skipped metadata insert outage')
+          : null,
+    });
+    await failingAgent.store.createGraph(assertionGraph);
+    for (const q of agent.insertedQuads) {
+      failingAgent.insertedQuads.push({ ...q });
+    }
+
+    const body = buildMultipart([
+      { kind: 'text', name: 'contextGraphId', value: 'cg' },
+      { kind: 'file', name: 'file', filename: 'unsupported.png', contentType: 'image/png', content: Buffer.from([0x89, 0x50, 0x4e, 0x47]) },
+    ]);
+
+    await expect(runImportFileOrchestration({
+      agent: failingAgent, fileStore, extractionRegistry: registry, extractionStatus: status,
+      multipartBody: body, boundary: BOUNDARY, assertionName,
+    })).rejects.toThrow('simulated skipped metadata insert outage');
+
+    await expect(failingAgent.store.hasGraph(assertionGraph)).resolves.toBe(true);
+    expect(failingAgent.insertedQuads.filter(q => q.graph === assertionGraph)).toEqual([]);
+    expect(failingAgent.insertedQuads.filter(q =>
+      q.graph === metaGraph && q.subject === assertionGraph
+    )).toEqual(metaBefore);
+    expect(status.get(assertionGraph)).toEqual(statusBefore);
+  });
+
+  it('skipped re-import restores prior data even when metadata rollback also fails', async () => {
+    const bodyV1 = buildMultipart([
+      { kind: 'text', name: 'contextGraphId', value: 'cg' },
+      { kind: 'file', name: 'file', filename: 'doc.md', contentType: 'text/markdown', content: Buffer.from('# V1\n\nBody.\n', 'utf-8') },
+    ]);
+    const v1 = await runImportFileOrchestration({
+      agent, fileStore, extractionRegistry: registry, extractionStatus: status,
+      multipartBody: bodyV1, boundary: BOUNDARY, assertionName: 'skip-rollback-meta-fail',
+    });
+    const assertionGraph = v1.assertionUri;
+    const metaGraph = contextGraphMetaUri('cg');
+    const dataBefore = agent.insertedQuads
+      .filter(q => q.graph === assertionGraph)
+      .map(q => ({ ...q }));
+
+    const failingAgent = makeMockAgent('0xMockAgentPeerId', {
+      insertErrorPredicate: (_quads, callNumber) => {
+        if (callNumber === 1) return new Error('simulated skipped metadata insert outage');
+        if (callNumber === 3) return new Error('simulated metadata rollback outage');
+        return null;
+      },
+    });
+    for (const q of agent.insertedQuads) {
+      failingAgent.insertedQuads.push({ ...q });
+    }
+
+    const bodyV2 = buildMultipart([
+      { kind: 'text', name: 'contextGraphId', value: 'cg' },
+      { kind: 'file', name: 'file', filename: 'unsupported.png', contentType: 'image/png', content: Buffer.from([0x89, 0x50, 0x4e, 0x47]) },
+    ]);
+
+    await expect(runImportFileOrchestration({
+      agent: failingAgent, fileStore, extractionRegistry: registry, extractionStatus: status,
+      multipartBody: bodyV2, boundary: BOUNDARY, assertionName: 'skip-rollback-meta-fail',
+    })).rejects.toThrow('simulated skipped metadata insert outage');
+
+    expect(failingAgent.insertedQuads.filter(q => q.graph === assertionGraph)).toEqual(dataBefore);
+    expect(failingAgent.insertCallCount).toBe(3);
+    const record = status.get(assertionGraph);
+    expect(record?.status).toBe('failed');
+    expect(record?.error).toContain('Failed to persist skipped extraction metadata');
+    expect(record?.error).toContain('metadata rollback failed: simulated metadata rollback outage');
+    expect(failingAgent.insertedQuads.filter(q =>
+      q.graph === metaGraph && q.subject === assertionGraph
+    )).toHaveLength(0);
   });
 });
 
@@ -1806,7 +2523,7 @@ describe('import-file orchestration — source-file linkage (§10.1 / §6.3 / §
     expect(written.some(q => q.subject.startsWith('urn:dkg:extraction:'))).toBe(true);
   });
 
-  it('text/markdown import writes rows 14-19 into the CG root _meta graph and omits row 20', async () => {
+  it('text/markdown import writes completed status into the CG root _meta graph and omits mdIntermediateHash', async () => {
     const body = buildMultipart([
       { kind: 'text', name: 'contextGraphId', value: 'cg' },
       { kind: 'file', name: 'file', filename: 'note.md', contentType: 'text/markdown', content: Buffer.from('# Note\n\nBody.\n', 'utf-8') },
@@ -1821,9 +2538,9 @@ describe('import-file orchestration — source-file linkage (§10.1 / §6.3 / §
     const metaForAssertion = agent.insertedQuads.filter(q =>
       q.graph === metaGraph && q.subject === result.assertionUri,
     );
-    // Rows 14-19 plus Round 9 Bug 27 `dkg:sourceFileName` (7 total) —
-    // no row 20 because Phase 1 did not run for a direct markdown upload.
-    expect(metaForAssertion).toHaveLength(7);
+    // Rows 14-20 plus Round 9 Bug 27 `dkg:sourceFileName` (8 total) -
+    // no mdIntermediateHash because Phase 1 did not run for a direct markdown upload.
+    expect(metaForAssertion).toHaveLength(8);
 
     const byPredicate = (predLocal: string) =>
       metaForAssertion.find(q => q.predicate === `${DKG}${predLocal}`);
@@ -1839,11 +2556,11 @@ describe('import-file orchestration — source-file linkage (§10.1 / §6.3 / §
     expect(byPredicate('sourceFileHash')?.object).toBe(`"${result.fileHash}"`);
     // Row 17
     expect(byPredicate('extractionMethod')?.object).toBe('"structural"');
-    // Row 18 — structural triple count matches the Phase 2 result
+    expect(byPredicate('extractionStatus')?.object).toBe('"completed"');
+    // Row 19 - structural triple count matches the Phase 2 result
     expect(byPredicate('structuralTripleCount')?.object).toBe(`"${result.extraction.tripleCount}"^^<${XSD_INTEGER}>`);
-    // Row 19 — V10.0 has no semantic extraction yet
+    // Row 20 - V10.0 has no semantic extraction yet
     expect(byPredicate('semanticTripleCount')?.object).toBe(`"0"^^<${XSD_INTEGER}>`);
-    // Row 20 — absent because Phase 1 did not run for a direct markdown upload
     expect(byPredicate('mdIntermediateHash')).toBeUndefined();
     // Round 9 Bug 27 — `dkg:sourceFileName` present on the UAL, carrying
     // the original upload filename literal. This is the new home for
@@ -1851,7 +2568,7 @@ describe('import-file orchestration — source-file linkage (§10.1 / §6.3 / §
     expect(byPredicate('sourceFileName')?.object).toBe('"note.md"');
   });
 
-  it('application/pdf import writes row 15 in _meta and row 20 for mdIntermediateHash, with rows 2 and 15 both = application/pdf', async () => {
+  it('application/pdf import writes completed status and mdIntermediateHash in _meta, with rows 2 and 15 both = application/pdf', async () => {
     const convertedMarkdown = '---\nid: paper\n---\n\n# Paper\n\nBody.\n';
     const stubConverter: ExtractionPipeline = {
       contentTypes: ['application/pdf'],
@@ -1878,15 +2595,16 @@ describe('import-file orchestration — source-file linkage (§10.1 / §6.3 / §
     const metaForAssertion = agent.insertedQuads.filter(q =>
       q.graph === metaGraph && q.subject === result.assertionUri,
     );
-    // Rows 14-20 + Round 9 Bug 27 `dkg:sourceFileName` = 8 rows total.
-    expect(metaForAssertion).toHaveLength(8);
+    // Rows 14-21 + Round 9 Bug 27 `dkg:sourceFileName` = 9 rows total.
+    expect(metaForAssertion).toHaveLength(9);
 
     const byPredicate = (predLocal: string) =>
       metaForAssertion.find(q => q.predicate === `${DKG}${predLocal}`);
 
     // Row 15 — original content type is application/pdf in _meta
     expect(byPredicate('sourceContentType')?.object).toBe('"application/pdf"');
-    // Row 20 — mdIntermediateHash now present, matching the wire value
+    expect(byPredicate('extractionStatus')?.object).toBe('"completed"');
+    // mdIntermediateHash now present, matching the wire value
     expect(byPredicate('mdIntermediateHash')?.object).toBe(`"${result.extraction.mdIntermediateHash}"`);
     // Round 9 Bug 27 — sourceFileName present on the UAL for the PDF upload.
     expect(byPredicate('sourceFileName')?.object).toBe('"paper.pdf"');
@@ -2771,6 +3489,8 @@ describe('import-file orchestration — source-file linkage (§10.1 / §6.3 / §
       agent, fileStore, extractionRegistry: registry, extractionStatus: status,
       multipartBody: bodyV1, boundary: BOUNDARY, assertionName: 'meta-rollback',
     });
+    const statusBefore = { ...status.get(resultV1.assertionUri)! };
+    expect(statusBefore.status).toBe('completed');
     const metaGraphUri = contextGraphMetaUri('cg');
 
     // Snapshot V1's `_meta` state for post-rollback comparison.
@@ -2814,12 +3534,49 @@ describe('import-file orchestration — source-file linkage (§10.1 / §6.3 / §
     expect(metaAfter).toHaveLength(metaBefore.length);
     const sourceFileHashAfter = metaAfter.find(q => q.predicate === `${DKG}sourceFileHash`);
     expect(sourceFileHashAfter?.object).toBe(`"${resultV1.fileHash}"`);
+    expect(status.get(resultV1.assertionUri)).toEqual(statusBefore);
     // And data-graph rollback still works (Round 4 Bug 11 invariant).
     const assertionGraph = contextGraphAssertionUri('cg', rollbackAgent.peerId, 'meta-rollback');
     const dataContentHash = rollbackAgent.insertedQuads.find(q =>
       q.graph === assertionGraph && q.predicate === `${DKG}contentHash`,
     );
     expect(dataContentHash?.object).toBe(`"${resultV1.fileHash}"`);
+  });
+
+  it('failed re-import after daemon restart rebuilds previous extraction status from restored _meta', async () => {
+    const bodyV1 = buildMultipart([
+      { kind: 'text', name: 'contextGraphId', value: 'cg' },
+      { kind: 'file', name: 'file', filename: 'v1.md', contentType: 'text/markdown', content: Buffer.from('# V1 content\n\nFirst.\n', 'utf-8') },
+    ]);
+    const resultV1 = await runImportFileOrchestration({
+      agent, fileStore, extractionRegistry: registry, extractionStatus: status,
+      multipartBody: bodyV1, boundary: BOUNDARY, assertionName: 'restart-status-rollback',
+    });
+    status.clear();
+
+    const rollbackAgent = makeMockAgent('0xMockAgentPeerId', {
+      insertErrorPredicate: (_quads, callNumber) =>
+        callNumber === 1 ? new Error('simulated V2 atomic insert failure') : null,
+    });
+    for (const q of agent.insertedQuads) {
+      rollbackAgent.insertedQuads.push({ ...q });
+    }
+
+    const bodyV2 = buildMultipart([
+      { kind: 'text', name: 'contextGraphId', value: 'cg' },
+      { kind: 'file', name: 'file', filename: 'v2.md', contentType: 'text/markdown', content: Buffer.from('# V2 content\n\nSecond.\n', 'utf-8') },
+    ]);
+    await expect(runImportFileOrchestration({
+      agent: rollbackAgent, fileStore, extractionRegistry: registry, extractionStatus: status,
+      multipartBody: bodyV2, boundary: BOUNDARY, assertionName: 'restart-status-rollback',
+    })).rejects.toThrow('simulated V2 atomic insert failure');
+
+    const record = status.get(resultV1.assertionUri);
+    expect(record?.status).toBe('completed');
+    expect(record?.fileHash).toBe(resultV1.fileHash);
+    expect(record?.detectedContentType).toBe('text/markdown');
+    expect(record?.pipelineUsed).toBe('text/markdown');
+    expect(record?.tripleCount).toBeGreaterThan(0);
   });
 
   it('Bug 15: rollback does NOT restore `_meta` rows for OTHER assertions', async () => {
@@ -3779,10 +4536,10 @@ describe('import-file orchestration — source-file linkage (§10.1 / §6.3 / §
     expect(ctB).toHaveLength(1);
   });
 
-  it('Round 9 Bug 27: no-filename upload skips `dkg:sourceFileName` entirely (matches row 20 optional pattern)', async () => {
+  it('Round 9 Bug 27: no-filename upload skips `dkg:sourceFileName` entirely (matches optional metadata pattern)', async () => {
     // Symmetric negative guard — when the multipart part carries no
     // filename (or a whitespace-only filename), the daemon skips
-    // the `_meta` row entirely, same way row 20 (`mdIntermediateHash`)
+    // the `_meta` row entirely, same way `mdIntermediateHash`
     // is absent for markdown-direct imports.
     const body = buildMultipart([
       { kind: 'text', name: 'contextGraphId', value: 'cg' },
