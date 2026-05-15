@@ -26,7 +26,7 @@ import {
 import { api } from '../../api-wrapper.js';
 import TextareaAutosize from 'react-textarea-autosize';
 import { useDropzone } from 'react-dropzone';
-import { ArrowDown, ArrowUp, Ban, ChevronDown, ChevronRight, Folder, MoreHorizontal, Paperclip, Upload, X } from 'lucide-react';
+import { ArrowDown, ArrowUp, Ban, ChevronDown, ChevronRight, Folder, Loader2, MoreHorizontal, Paperclip, Square, Upload, X } from 'lucide-react';
 import { Select } from '../common/Select.js';
 import { MarkdownMessage } from '../chat/MarkdownMessage.js';
 
@@ -36,7 +36,21 @@ export interface LocalAgentMessage {
   turnId?: string;
   role: 'user' | 'assistant';
   content: string;
+  /**
+   * Human-readable, locale-formatted timestamp for display
+   * (e.g. "May 14, 2026, 10:05 PM"). Produced by
+   * `formatLocalTimestamp` at the three sites that create messages
+   * (history-load, user-send, assistant-complete).
+   */
   ts?: string;
+  /**
+   * ISO 8601 string for the same moment, kept alongside `ts` so the
+   * render layer can wrap the timestamp in `<time dateTime={tsRaw}>`
+   * for screen-reader / machine-parseable semantics, and so a future
+   * "X minutes ago" relative-time treatment can read the raw moment
+   * without round-tripping through a locale-formatted display string.
+   */
+  tsRaw?: string;
   streaming?: boolean;
   attachments?: LocalAgentChatAttachmentRef[];
   /**
@@ -107,11 +121,31 @@ function formatDuration(ms: number): string {
   return `${h}h ${m % 60}m`;
 }
 
-function formatLocalTimestamp(value?: string): string {
-  if (!value) return '';
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.valueOf())) return value;
-  return parsed.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+export function formatLocalTimestamp(value?: string | Date): string {
+  if (value === undefined || value === null || value === '') return '';
+  const parsed = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(parsed.valueOf())) return typeof value === 'string' ? value : '';
+  // Include the date so a chat that spans more than one day stays
+  // legible — `HH:MM AM/PM` alone was ambiguous as soon as a session
+  // crossed midnight. `medium` date + `short` time renders e.g.
+  // "May 14, 2026, 10:05 PM" in en-US.
+  return parsed.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+}
+
+/**
+ * Companion to `formatLocalTimestamp` that returns an ISO 8601 string
+ * for the same moment. Used to populate `<time dateTime={tsRaw}>` so
+ * screen readers and machine parsers can read the timestamp in a
+ * locale-independent format alongside the human-readable display
+ * (UX-lead P1-A minimum). Returns `undefined` for absent / unparseable
+ * input so the caller can drop the prop instead of emitting an empty
+ * `dateTime` attribute.
+ */
+export function toIsoTimestamp(value?: string | Date): string | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  const parsed = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(parsed.valueOf())) return undefined;
+  return parsed.toISOString();
 }
 
 function formatFileSize(bytes: number): string {
@@ -267,8 +301,44 @@ function buildChatContextEntries(
   return entries;
 }
 
+/**
+ * NOTE: a UI-side helper used to live here that tried to un-escape
+ * literal backslash-n in history-loaded text so markdown would render
+ * after a refresh. Codex (CLWmd → CNGB8 → CSI-f → CSqGa) caught
+ * progressively narrower false-positives across four rounds — the
+ * UI simply cannot reliably distinguish "agent intended a literal
+ * `\\n`" from "persistence encoded a newline as `\\n`" without a
+ * richer signal. Removed; see the comment block in
+ * `mapHistoryMessage` below for the known issue + proper fix path.
+ *
+ */
+
 function mapHistoryMessage(message: LocalAgentHistoryMessage): LocalAgentMessage {
   const author = message.author.toLowerCase();
+  // KNOWN ISSUE — persisted messages whose newlines were escape-
+  // encoded by the DKG-memory persistence layer (stored as literal
+  // backslash-n, two characters, not real newline characters)
+  // display with their literal backslash-n visible on history-reload.
+  // Markdown blocks like paragraphs, code fences, and tables won't
+  // render structurally until the message is re-streamed live.
+  //
+  // History across PR4: rounds 2-5 of Codex review on PR #516 walked
+  // a UI-side decode through four progressively narrower heuristics
+  // (blanket → no-real-newlines gate → markdown-marker gate →
+  // boundary-only decode). Codex CLWmd, CNGB8, CSI-f, and CSqGa each
+  // caught a new false-positive corruption case — JSON samples,
+  // prompts discussing escape sequences, code-inside-fence payloads,
+  // short text containing markdown-looking patterns like
+  // `{"pattern":"\\n- item"}`. The fundamental issue is that the UI
+  // cannot reliably distinguish "agent intended a literal `\\n`"
+  // from "persistence encoded a newline as `\\n`" without a richer
+  // signal.
+  //
+  // Proper fix is daemon-side: the persistence path should round-
+  // trip strings faithfully — emit raw UTF-8 with real newlines
+  // instead of escape-encoding them, or carry an explicit "escaped"
+  // marker on encoded payloads so the UI can decode only confirmed-
+  // escaped content. Tracked as a follow-up.
   const hasAgentText = Boolean(message.text);
   return {
     id: message.uri || `local-history:${++localMessageId}`,
@@ -277,6 +347,7 @@ function mapHistoryMessage(message: LocalAgentHistoryMessage): LocalAgentMessage
     role: author.includes('assistant') || author.includes('agent') ? 'assistant' : 'user',
     content: message.text || buildAttachmentSummary(message.attachmentRefs ?? []),
     ts: formatLocalTimestamp(message.ts),
+    tsRaw: toIsoTimestamp(message.ts),
     attachments: message.attachmentRefs,
     // The fallback path embeds raw filenames into a synthesized summary
     // string. Mark synthesized so the renderer skips markdown for those —
@@ -863,6 +934,8 @@ export function ConnectedAgentsTab(props: {
   localInput: string;
   onLocalInputChange: (value: string) => void;
   onSendLocalMessage: () => void;
+  /** Aborts the active stream when the send button is in stop-icon mode. */
+  onStopLocalStream: () => void;
   localSending: boolean;
   activeProjectId: string | null;
   availableProjects: ContextGraph[];
@@ -893,6 +966,7 @@ export function ConnectedAgentsTab(props: {
     localInput,
     onLocalInputChange,
     onSendLocalMessage,
+    onStopLocalStream,
     localSending,
     activeProjectId,
     availableProjects,
@@ -905,6 +979,26 @@ export function ConnectedAgentsTab(props: {
   const selectedAttachmentDrafts = attachments;
   const hasSendableAttachmentDrafts = selectedAttachmentDrafts.some(isSendableAttachmentDraft);
   const attachmentTargetIds = [...new Set(selectedAttachmentDrafts.map((attachment) => attachment.contextGraphId))];
+  // Send-button state machine: idle / uploading / streaming.
+  //   - uploading: at least one attachment draft is mid-upload — show
+  //     a spinner so the user knows the click is in progress (no
+  //     interaction until the upload settles).
+  //   - streaming: an assistant bubble is still streaming text — show
+  //     a stop-square icon and rebind the click to `onStopLocalStream`
+  //     so the user can abort the in-flight reply.
+  //   - idle: default `ArrowUp` send icon, normal send semantics.
+  // The visible-affordance contract from PR2's CEdrv still applies: the
+  // disabled state mirrors the keyboard-Enter gate.
+  const isUploadingAttachments = selectedAttachmentDrafts.some((a) => a.status === 'uploading');
+  const isStreaming = localMessages.some((m) => m.streaming);
+  const sendButtonMode: 'idle' | 'uploading' | 'streaming' = isStreaming
+    ? 'streaming'
+    : isUploadingAttachments
+      ? 'uploading'
+      : 'idle';
+  // `canSend` is computed later (line ~1100) once `inputDisabled` is
+  // defined; the send-button JSX and the Enter / Cmd+Enter handlers
+  // both consult it.
   // Drafts pin to the contextGraphId they were attached under. If the user
   // later switches `activeProjectId`, those drafts are still routed to
   // their original target — the warning surfaces that divergence. Always
@@ -1033,6 +1127,18 @@ export function ConnectedAgentsTab(props: {
     localMessagesCount: localMessages.length,
   });
   const inputDisabled = localSending || !selected?.chatReady;
+  // Single source of truth for "is the user allowed to fire a send right
+  // now". Both the button click AND the keyboard Enter / Cmd+Enter
+  // handlers gate on this — earlier the button correctly disabled while
+  // a draft was `uploading`, but the Enter handler did not, so the user
+  // could submit a turn mid-upload. `prepareAttachmentDraftsForSend`
+  // treats `uploading` drafts as sendable work, which would either start
+  // a second import for the same file or push the turn before the first
+  // upload finished. Codex CIlgu.
+  const canSend =
+    !inputDisabled
+    && !isUploadingAttachments
+    && (localInput.trim() !== '' || hasSendableAttachmentDrafts);
 
   return (
     <div className="v10-agents-tab">
@@ -1268,7 +1374,14 @@ export function ConnectedAgentsTab(props: {
                           style={{
                             padding: '2px 8px',
                             borderRadius: 999,
-                            background: 'var(--panel-elevated)',
+                            // `--panel-elevated` is undefined in styles.css —
+                            // the token is `--bg-elevated`. Pre-existing typo
+                            // surfaced by UI-lead's PR4 audit (Task #69):
+                            // when the bubble was removed, the silent
+                            // fallback used to land near `--bg-surface` and
+                            // happened to look right; now it falls back to
+                            // `--bg-panel` and the chip blends in.
+                            background: 'var(--bg-elevated)',
                             fontSize: 11,
                           }}
                         >
@@ -1278,9 +1391,18 @@ export function ConnectedAgentsTab(props: {
                     </div>
                   )}
                   {message.ts && (
-                    <span className={`v10-local-agent-msg-time ${message.role}`}>
+                    // `<time dateTime>` is the semantic markup for a moment
+                    // in time — assistive tech and machine parsers read the
+                    // ISO string while sighted users see the locale-formatted
+                    // display. UX-lead P1-A (minimum). The full relative-
+                    // time + hover-only treatment lives in a future PR per
+                    // user direction.
+                    <time
+                      className={`v10-local-agent-msg-time ${message.role}`}
+                      dateTime={message.tsRaw}
+                    >
                       {message.ts}
-                    </span>
+                    </time>
                   )}
                 </div>
               ))}
@@ -1391,20 +1513,21 @@ export function ConnectedAgentsTab(props: {
                         if (e.nativeEvent.isComposing) return;
                         if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
                           e.preventDefault();
-                          // Gate Enter with the same sendability check the
-                          // send button uses, otherwise an empty-input
-                          // Enter or an Enter while inputDisabled would
-                          // fire onSendLocalMessage even though the
-                          // surfaced affordance (the button) is disabled.
-                          if (!inputDisabled && (localInput.trim() || hasSendableAttachmentDrafts)) {
+                          // Single `canSend` gate shared with the send
+                          // button — if the button is disabled (input
+                          // off, empty composer, or any draft mid-upload),
+                          // Enter must be a no-op too. Codex CIlgu.
+                          if (canSend) {
                             onSendLocalMessage();
                           }
                           return;
                         }
                         if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
-                          // Force send even with empty textarea if attachments queued.
+                          // Force send even with empty textarea if attachments
+                          // queued — but still through the same shared gate so
+                          // a Cmd+Enter during upload doesn't race the upload.
                           e.preventDefault();
-                          if (!inputDisabled && (hasSendableAttachmentDrafts || localInput.trim())) {
+                          if (canSend) {
                             onSendLocalMessage();
                           }
                           return;
@@ -1476,13 +1599,49 @@ export function ConnectedAgentsTab(props: {
                       </div>
                       <button
                         type="button"
-                        className="v10-local-agent-inline-send"
-                        onClick={onSendLocalMessage}
-                        disabled={inputDisabled || (!localInput.trim() && !hasSendableAttachmentDrafts)}
-                        aria-label="Send message"
-                        title="Send message"
+                        className={`v10-local-agent-inline-send v10-local-agent-inline-send-${sendButtonMode}`}
+                        onClick={sendButtonMode === 'streaming' ? onStopLocalStream : onSendLocalMessage}
+                        disabled={
+                          // Streaming: stop is always clickable.
+                          // Uploading: button is informational only, no
+                          //   interaction — auto-flips once upload settles.
+                          // Idle: gated by the shared `canSend` flag, which
+                          //   the keyboard Enter / Cmd+Enter handlers also
+                          //   consult so the two surfaces stay in lockstep.
+                          sendButtonMode === 'streaming'
+                            ? false
+                            : sendButtonMode === 'uploading'
+                              ? true
+                              : !canSend
+                        }
+                        aria-label={
+                          // WAI-ARIA APG: button labels describe the action
+                          // (or its current unavailability), not narrate
+                          // state. "Send message (attachments uploading)"
+                          // reads as "this button sends, but it's currently
+                          // waiting for uploads" — the role + reason model
+                          // screen readers expect. UX-lead P1-C.
+                          sendButtonMode === 'streaming'
+                            ? 'Stop reply'
+                            : sendButtonMode === 'uploading'
+                              ? 'Send message (attachments uploading)'
+                              : 'Send message'
+                        }
+                        title={
+                          sendButtonMode === 'streaming'
+                            ? 'Stop reply'
+                            : sendButtonMode === 'uploading'
+                              ? 'Send message (attachments uploading)…'
+                              : 'Send message'
+                        }
                       >
-                        <ArrowUp size={14} aria-hidden="true" />
+                        {sendButtonMode === 'streaming' ? (
+                          <Square size={12} aria-hidden="true" />
+                        ) : sendButtonMode === 'uploading' ? (
+                          <Loader2 className="v10-local-agent-inline-send-spinner" size={14} aria-hidden="true" />
+                        ) : (
+                          <ArrowUp size={14} aria-hidden="true" />
+                        )}
                       </button>
                     </div>
                   </div>
@@ -1802,7 +1961,13 @@ export function PanelRight() {
   const [localHistoryLoadedByConversation, setLocalHistoryLoadedByConversation] = useState<Record<string, boolean>>({});
   const [attachmentDraftsByConversation, setAttachmentDraftsByConversation] = useState<Record<string, LocalAgentAttachmentDraft[]>>({});
 
-  const localAbortRef = useRef<AbortController | null>(null);
+  // AbortControllers keyed by `conversationKey` so the stop-button on
+  // conversation A always aborts A's in-flight request and never B's.
+  // Earlier code used a single shared ref, which was overwritten when a
+  // user switched conversations mid-stream and started a send in the
+  // new one — clicking Stop in the original conversation would then
+  // abort the wrong request. Codex CIV4a / CIcaM / CIlg0.
+  const localAbortRef = useRef<Map<string, AbortController>>(new Map());
   const autoFocusedLocalAgentRef = useRef(false);
   const localChatEndRef = useRef<HTMLDivElement>(null);
   const memorySessionsRef = useRef<MemorySession[]>([]);
@@ -2210,12 +2375,18 @@ export function PanelRight() {
       deliveredAttachmentIds = [...attachmentIds, ...importContext.deliveredDraftIds];
       const userId = `local:${conversationKey}:${correlationId}:user`;
       assistantId = `local:${conversationKey}:${correlationId}:assistant`;
-      const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      // Route through `formatLocalTimestamp` so user-send timestamps
+      // stay in lockstep with history-loaded ones (date + time format).
+      // `nowDate` is captured once and passed to both formatters so the
+      // display value and the ISO `tsRaw` reflect the same instant.
+      const nowDate = new Date();
+      const now = formatLocalTimestamp(nowDate);
+      const nowIso = toIsoTimestamp(nowDate);
 
       updateLocalMessages(conversationKey, (prev) => [
         ...prev,
-        { id: userId, turnId: correlationId, role: 'user', content: messageText, ts: now, attachments },
-        { id: assistantId, turnId: correlationId, role: 'assistant', content: '', ts: now, streaming: true },
+        { id: userId, turnId: correlationId, role: 'user', content: messageText, ts: now, tsRaw: nowIso, attachments },
+        { id: assistantId, turnId: correlationId, role: 'assistant', content: '', ts: now, tsRaw: nowIso, streaming: true },
       ]);
       setLocalInputForConversation(conversationKey, '');
       // Clear composer chips OPTIMISTICALLY as soon as the user-message
@@ -2228,7 +2399,11 @@ export function PanelRight() {
       }
 
       controller = new AbortController();
-      localAbortRef.current = controller;
+      // Bind this controller to `conversationKey` rather than a global
+      // ref. Multiple conversations can stream concurrently, and the
+      // user can switch tabs mid-stream — each Stop button must abort
+      // its own request.
+      localAbortRef.current.set(conversationKey, controller);
       const contextEntries = [
         ...buildChatContextEntries(availableProjects, activeProjectId, currentAgent),
       ];
@@ -2254,6 +2429,9 @@ export function PanelRight() {
         },
       });
 
+      // Captured once so the display string and the ISO `tsRaw`
+      // reflect the same instant.
+      const completedAt = new Date();
       updateLocalMessages(conversationKey, (prev) =>
         adoptLocalAgentTurnId(prev, correlationId, result.turnId).map((message) =>
           message.id === assistantId
@@ -2267,7 +2445,10 @@ export function PanelRight() {
                 // (which is either earlier streamed agent text or — empty).
                 // Only mark synthesized when neither is true.
                 synthesized: !result.text && !message.content ? true : message.synthesized,
-                ts: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                // Same helper as user-send + history paths for a single
+                // consistent date+time timestamp format across all sources.
+                ts: formatLocalTimestamp(completedAt),
+                tsRaw: toIsoTimestamp(completedAt),
               }
             : message,
         ),
@@ -2310,7 +2491,13 @@ export function PanelRight() {
       void refreshLocalIntegrations();
     } finally {
       setLocalSendingForConversation(conversationKey, false);
-      localAbortRef.current = null;
+      // Only clear THIS conversation's controller — leave any other
+      // in-flight conversation's entry alone. Compare-and-delete so a
+      // late `finally` from a previous send can't accidentally wipe a
+      // newer entry under the same key after a quick retry.
+      if (localAbortRef.current.get(conversationKey) === controller) {
+        localAbortRef.current.delete(conversationKey);
+      }
     }
   }, [
     activeProjectId,
@@ -2331,6 +2518,21 @@ export function PanelRight() {
     stage,
     updateLocalMessages,
   ]);
+
+  const stopLocalStream = useCallback(() => {
+    // Aborts ONLY the currently-selected conversation's in-flight
+    // request. With the per-conversation abort-controller map,
+    // clicking Stop in conversation A can no longer accidentally
+    // abort B's stream — even if B started later, B's controller
+    // lives under B's key. The existing `sendLocalMessage`
+    // `catch (err: any)` block already handles `err?.name ===
+    // 'AbortError'` by replacing the assistant bubble content with
+    // "Request cancelled." and dropping `streaming: false`, so a
+    // single `.abort()` here is enough — no additional teardown.
+    if (!selectedConversationKey) return;
+    const controller = localAbortRef.current.get(selectedConversationKey);
+    controller?.abort();
+  }, [selectedConversationKey]);
 
   const connectIntegration = useCallback(async (integrationId: string) => {
     setConnectBusyId(integrationId);
@@ -2486,6 +2688,7 @@ export function PanelRight() {
           localInput={localInput}
           onLocalInputChange={(value) => setLocalInputForConversation(selectedConversationKey, value)}
           onSendLocalMessage={sendLocalMessage}
+          onStopLocalStream={stopLocalStream}
           localSending={localSending}
           activeProjectId={activeProjectId}
           availableProjects={availableProjects}

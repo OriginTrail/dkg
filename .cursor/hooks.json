@@ -1,10 +1,15 @@
 {
   "version": 1,
-  "_comment": "DKG chat-capture hooks. When you open dkg-v9 as a Cursor workspace, every conversation turn is auto-promoted to the chat sub-graph of the project pinned in .dkg/config.yaml. The underlying script lives at packages/mcp-dkg/hooks/capture-chat.mjs — this file is just the Cursor wiring. The V9 sessionStart/sessionEnd hooks were retired in #21 (no V10-relevant work to do; chat:Session triples are bootstrapped lazily on the first afterAgentResponse).",
+  "_comment": "DKG chat-capture + inbox-injection hooks. capture-chat.mjs auto-promotes operator-Cursor conversation turns into the project's chat sub-graph (workspace bound). inject-inbox.mjs (Phase 1.5 of the agent debug chat RFC) auto-prepends unread agent-to-agent peer messages to the operator's next prompt so the Cursor agent always sees the inbox without the operator having to ask. Both fail open: hook errors never block the operator's chat. capture-chat.mjs is the legacy hook; inject-inbox.mjs is the new one. They share the same daemon-config loading conventions (DKG_HOME/config.json preferred, falling back to a cwd walk for .dkg/config.yaml).",
   "hooks": {
     "beforeSubmitPrompt": [
       {
+        "_comment": "capture-chat runs first so it stashes the operator's ORIGINAL prompt for later afterAgentResponse capture, before inject-inbox potentially prepends an inbox block via updated_input.",
         "command": "node packages/mcp-dkg/hooks/capture-chat.mjs beforeSubmitPrompt",
+        "failClosed": false
+      },
+      {
+        "command": "node packages/mcp-dkg/hooks/inject-inbox.mjs",
         "failClosed": false
       }
     ],

@@ -533,11 +533,30 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
     }
   }
 
-  // POST /api/chat  { to: "name-or-peerId", text: "..." }
+  // POST /api/chat  { to: "name-or-peerId", text: "...", contextGraphId?: "..." }
+  //
+  // Optional `contextGraphId` is embedded in the encrypted payload so a
+  // scoped receiver can validate that the sender is talking on behalf of
+  // a context graph both sides recognise. Callers must opt in
+  // EXPLICITLY by passing `contextGraphId` on the request; we do NOT
+  // auto-fill from `config.chat.acl.contextGraphId`. Codex PR #510
+  // round 3 caught that conflating the INBOUND ACL config with the
+  // OUTBOUND wire claim broke back-compat: a node configured to
+  // ACL-scope inbound chats to graph X would suddenly stamp every
+  // outgoing chat with the X claim, causing receivers that scope to a
+  // DIFFERENT graph (or to `shared-context-graph` mode) to reject
+  // messages that previously succeeded. ACL config and outbound
+  // claim are distinct concerns — if a future requirement needs a
+  // "default outbound CG" it should be a separate explicit config
+  // field, not overloaded on the ACL one.
   if (req.method === "POST" && path === "/api/chat") {
     const serverT0 = Date.now();
     const body = await readBody(req, SMALL_BODY_BYTES);
-    const { to, text } = JSON.parse(body);
+    const { to, text, contextGraphId } = JSON.parse(body) as {
+      to?: string;
+      text?: string;
+      contextGraphId?: string;
+    };
     if (!to || !text)
       return jsonResponse(res, 400, { error: 'Missing "to" or "text"' });
 
@@ -549,7 +568,7 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
 
     const sendT0 = Date.now();
     const result = await Promise.race([
-      agent.sendChat(peerId, text),
+      agent.sendChat(peerId, text, contextGraphId ? { contextGraphId } : {}),
       new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error("sendChat timeout (30s)")), 30_000),
       ),
@@ -576,18 +595,59 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
     });
   }
 
-  // GET /api/messages?peer=<name-or-id>&limit=N
+  // GET /api/messages
+  //   ?peer=<name-or-id>
+  //   &limit=N
+  //   &since=<ts>
+  //   &sinceId=<id>          ← lossless compound cursor (Codex PR #510 round 2)
+  //   &direction=in|out
+  //   &order=asc|desc
+  //
+  // `direction` is a server-side filter applied BEFORE `limit`. Inbox
+  // readers (the `dkg_check_inbox` MCP tool, the `inject-inbox` hook)
+  // pass `direction=in` so a burst of outbound replies in the newest
+  // page cannot push older unread inbound messages off the bottom and
+  // cause the inbox watermark to skip them.
+  //
+  // `sinceId` enables compound-cursor pagination — when paired with
+  // `since`, the predicate is `(ts > since) OR (ts = since AND id >
+  // sinceId)`. Without this, rows sharing the same millisecond `ts`
+  // would be silently dropped on the next page (chat bursts can easily
+  // produce duplicate `Date.now()` values).
+  //
+  // `order` defaults to `desc` (history view). Inbox readers pass
+  // `asc` for forward pagination so the watermark only advances past
+  // rows we have actually returned. We surface row `id` in the
+  // response so clients can build the next compound cursor.
   if (req.method === "GET" && path === "/api/messages") {
     const peerFilter = url.searchParams.get("peer");
     const limit = parseInt(url.searchParams.get("limit") ?? "100", 10);
     const since = parseInt(url.searchParams.get("since") ?? "0", 10);
+    const sinceIdRaw = url.searchParams.get("sinceId");
+    const sinceId = sinceIdRaw != null && /^\d+$/.test(sinceIdRaw)
+      ? parseInt(sinceIdRaw, 10)
+      : undefined;
+    const directionRaw = url.searchParams.get("direction");
+    const direction: "in" | "out" | undefined =
+      directionRaw === "in" || directionRaw === "out" ? directionRaw : undefined;
+    const orderRaw = url.searchParams.get("order");
+    const order: "asc" | "desc" | undefined =
+      orderRaw === "asc" || orderRaw === "desc" ? orderRaw : undefined;
 
     let peer: string | undefined;
     if (peerFilter) {
       peer = (await resolveNameToPeerId(agent, peerFilter)) ?? undefined;
     }
-    const rows = dashDb.getChatMessages({ peer, since: since || undefined, limit });
+    const rows = dashDb.getChatMessages({
+      peer,
+      since: since || undefined,
+      sinceId,
+      limit,
+      direction,
+      order,
+    });
     const msgs = rows.map((r: any) => ({
+      id: r.id,
       ts: r.ts,
       direction: r.direction,
       peer: r.peer,

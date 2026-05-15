@@ -72,6 +72,7 @@ async function renderTab(
     localInput: '',
     onLocalInputChange: noop,
     onSendLocalMessage: noop,
+    onStopLocalStream: noop,
     localSending: false,
     activeProjectId: 'testing',
     availableProjects: [{ id: 'testing', name: 'Testing' }],
@@ -298,6 +299,57 @@ describe('Composer keybindings + autosize wiring', () => {
       pressKey(textarea, { key: 'Enter' });
     });
     expect(onSendLocalMessage).toHaveBeenCalledTimes(1);
+    await unmount();
+  });
+
+  it('plain Enter does NOT send while an attachment draft is mid-upload (Codex CIlgu)', async () => {
+    // Earlier the button correctly disabled itself when a draft was
+    // `uploading`, but the textarea Enter handler still consulted only
+    // the original "inputDisabled / sendable drafts" gate. A user could
+    // press Enter mid-upload and race `prepareAttachmentDraftsForSend`,
+    // which treats `uploading` drafts as sendable work. The shared
+    // `canSend` flag now gates BOTH surfaces — Enter is a no-op while
+    // any draft is uploading.
+    const onSendLocalMessage = vi.fn();
+    const file = new File(['hello'], 'spec.md', { type: 'text/markdown' });
+    const { container, unmount } = await renderTab({
+      localInput: 'send while uploading',
+      onSendLocalMessage,
+      attachments: [{
+        id: 'draft-1',
+        file,
+        contextGraphId: 'testing',
+        assertionName: 'spec',
+        status: 'uploading',
+      }],
+    });
+    const textarea = getTextarea(container);
+    await act(async () => {
+      pressKey(textarea, { key: 'Enter' });
+    });
+    expect(onSendLocalMessage).not.toHaveBeenCalled();
+    await unmount();
+  });
+
+  it('Cmd+Enter ALSO blocks while a draft is uploading (Codex CIlgu)', async () => {
+    const onSendLocalMessage = vi.fn();
+    const file = new File(['hello'], 'spec.md', { type: 'text/markdown' });
+    const { container, unmount } = await renderTab({
+      localInput: '',
+      onSendLocalMessage,
+      attachments: [{
+        id: 'draft-1',
+        file,
+        contextGraphId: 'testing',
+        assertionName: 'spec',
+        status: 'uploading',
+      }],
+    });
+    const textarea = getTextarea(container);
+    await act(async () => {
+      pressKey(textarea, { key: 'Enter', ctrlKey: true });
+    });
+    expect(onSendLocalMessage).not.toHaveBeenCalled();
     await unmount();
   });
 

@@ -85,6 +85,37 @@ Write tools (auto-promoted to SWM; humans gate VM):
 - `dkg_annotate_turn` — **the main per-turn surface**; batches everything below
 - `dkg_propose_decision`, `dkg_add_task`, `dkg_comment`, `dkg_request_vm_publish`, `dkg_set_session_privacy` — the underlying primitives, available standalone for explicit "file a decision" / "open a task" requests
 
+## Agent-to-agent debug chat
+
+This repository's DKG nodes can be paired with each other. When they are, agents working on the same problem from different nodes can exchange encrypted libp2p messages — invaluable for debugging network features where neither agent has the whole picture on their own. Phase 1 ships two MCP tools:
+
+- **`dkg_check_inbox`** — read unread peer messages from this node's local SQLite history.
+- **`dkg_send_message`** — send an encrypted chat to another agent on the network.
+
+### When to call which
+
+**Call `dkg_check_inbox` at the start of every session.** If the digest is non-empty, surface the messages to the operator BEFORE doing anything else — those peers are waiting for a reply. A typical opener after operator types anything:
+
+> "Before I get to that — `bob-node` sent 2 messages while you were away: …"
+
+**Call `dkg_check_inbox` again whenever** the operator's prompt references another node, the current task is part of a known cross-node debugging effort, or you see an injected `<dkg-inbox-notice>` block in the session context (the prompt-hook may have already fetched fresh messages — re-check to be sure nothing was missed).
+
+**Call `dkg_send_message`** whenever the operator says "ask <name>", "tell <name>", "let <name> know", "ping <name>", or otherwise indicates cross-node communication. Use the operator's word for the recipient as `to` — the daemon resolves it to a peerId. Don't ask the operator to clarify if they used a recognisable name like "alice's agent" → `to: "alice-node"`.
+
+### ACL-aware error handling
+
+If `dkg_send_message` returns `delivered: false` with `error: "unauthorized: ..."`, the receiver's chat ACL rejected the message. Don't retry — the situation is human-fixable. Tell the operator something like:
+
+> "Receiver rejected my message via their chat ACL: `<reason>`. Ask the operator on the other node to either add this node to their `chat.acl.peerAllowlist`, or add us as a member of the CG they have scoped to."
+
+For any other error (peer not found, timeout, network), retry once before bothering the operator.
+
+### Don't
+
+- **Don't send messages without operator approval** when you're about to expose anything beyond standard debugging context (file contents, sensitive code paths). When in doubt, draft the message and let the operator confirm.
+- **Don't loop** — if you send a message and the response comes back asking another question, surface it to the operator before auto-replying. Phase 1 is operator-in-the-loop by design; Phase 3 (autonomous bridge) is a future RFC.
+- **Don't conflate chat with the `chat` sub-graph.** The `chat` sub-graph (captured by `capture-chat.mjs`) is the operator's conversation with you; `dkg_send_message` is *your* conversation with another agent. They're separate channels for now.
+
 ## Things to NOT do
 
 - **Don't fabricate URIs.** Every URI in `mentions` must come from `dkg_search` or be freshly minted via the look-before-mint protocol.
