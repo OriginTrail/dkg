@@ -86,6 +86,15 @@ describe('decodeRdfStringLiteral (history-text deserialization)', () => {
     expect(decodeRdfStringLiteral(asRdfLiteral(original))).toBe(original);
   });
 
+  it('round-trips a lone single backslash and an astral/surrogate-pair char', () => {
+    // Single backslash (not a `\n` token) — write stores `"a\\b"`,
+    // decode must give back `a\b`. Pins single-backslash distinctly
+    // from the literal-`\n` case above.
+    expect(decodeRdfStringLiteral(asRdfLiteral('path a\\b end'))).toBe('path a\\b end');
+    // Astral char (surrogate pair) must survive reload unmangled.
+    expect(decodeRdfStringLiteral(asRdfLiteral('👍 done 𝕏'))).toBe('👍 done 𝕏');
+  });
+
   it('strips an RDF type / language annotation before decoding', () => {
     expect(
       decodeRdfStringLiteral(`${asRdfLiteral('a\nb')}^^<http://www.w3.org/2001/XMLSchema#string>`),
