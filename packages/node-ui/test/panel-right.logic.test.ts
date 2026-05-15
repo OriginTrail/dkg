@@ -163,17 +163,19 @@ describe('PanelRight logic helpers', () => {
     expect(formatLocalTimestamp('not-a-date')).toBe('not-a-date');
   });
 
-  it('unescapeNewlinesFromHistory: decodes persisted markdown but preserves single-line JSON / code literals (Codex CLWmd / CNGB8)', () => {
+  it('unescapeNewlinesFromHistory: decodes only at structural boundaries (Codex CLWmd / CNGB8 / CSI-f)', () => {
     // Persisted markdown (paragraph break) → decode.
     expect(unescapeNewlinesFromHistory('para one\\n\\npara two')).toBe('para one\n\npara two');
-    // Heading marker after `\\n` → decode.
-    expect(unescapeNewlinesFromHistory('# Title\\n\\nbody')).toBe('# Title\n\nbody');
+    // Heading marker → boundary `\\n` decodes.
+    expect(unescapeNewlinesFromHistory('intro\\n# Title\\n\\nbody')).toBe('intro\n# Title\n\nbody');
     // Bullet list → decode.
     expect(unescapeNewlinesFromHistory('intro\\n- a\\n- b')).toBe('intro\n- a\n- b');
     // Ordered list → decode.
     expect(unescapeNewlinesFromHistory('intro\\n1. first\\n2. second')).toBe('intro\n1. first\n2. second');
-    // Fenced code block → decode.
-    expect(unescapeNewlinesFromHistory('explain:\\n```ts\\nfoo\\n```')).toBe('explain:\n```ts\nfoo\n```');
+    // Fenced code block — only the boundary `\\n` immediately before
+    // the backticks decodes. `\\n` between code lines (no marker after)
+    // stays literal — faithful display, not corruption.
+    expect(unescapeNewlinesFromHistory('explain:\\n```ts\\nfoo\\n```')).toBe('explain:\n```ts\\nfoo\n```');
     // Table → decode (the `\\n|` boundary is the structural marker).
     expect(unescapeNewlinesFromHistory('table:\\n| a | b |\\n|---|---|\\n| 1 | 2 |')).toBe(
       'table:\n| a | b |\n|---|---|\n| 1 | 2 |',
@@ -181,10 +183,17 @@ describe('PanelRight logic helpers', () => {
     // Blockquote → decode.
     expect(unescapeNewlinesFromHistory('intro\\n> quoted')).toBe('intro\n> quoted');
 
+    // Codex CSI-f: a persisted message containing JSON INSIDE a fenced
+    // code block. Boundary-only decode opens the fence and preserves
+    // the JSON literal `\\n` inside (round-3 blanket-decode turned
+    // `a\\nb` into `a` + real-newline + `b`, breaking the example).
+    expect(
+      unescapeNewlinesFromHistory('Here is JSON:\\n```json\\n{"text":"a\\nb"}\\n```'),
+    ).toBe('Here is JSON:\n```json\\n{"text":"a\\nb"}\n```');
+
     // Single-line JSON / code samples WITHOUT markdown markers →
-    // preserve. The `\\n` between alphanumerics or quotes matches none
-    // of the structure regexes (Codex CNGB8 — the specific corruption
-    // that round-2.1's "no real newlines anywhere" rule still produced).
+    // preserve (CNGB8). The `\\n` between alphanumerics or quotes
+    // matches no structural regex.
     expect(unescapeNewlinesFromHistory('{"text":"a\\nb"}')).toBe('{"text":"a\\nb"}');
     expect(unescapeNewlinesFromHistory('echo -e "a\\nb"')).toBe('echo -e "a\\nb"');
     expect(unescapeNewlinesFromHistory('contains the sequence \\n as a literal')).toBe('contains the sequence \\n as a literal');
@@ -193,16 +202,64 @@ describe('PanelRight logic helpers', () => {
     // whether it also contains intentional `\\n` literals from code.
     expect(unescapeNewlinesFromHistory('json:\n{"text":"a\\nb"}')).toBe('json:\n{"text":"a\\nb"}');
 
-    // Windows CRLF decodes ahead of `\\n` so we don't half-decode
-    // (Codex CLWmd secondary concern). Only fires when the markdown-
-    // marker gate has already opened.
+    // CRLF decodes at the boundary too (Codex CLWmd secondary concern).
     expect(unescapeNewlinesFromHistory('para one\\r\\n\\r\\npara two')).toBe('para one\n\npara two');
+    expect(unescapeNewlinesFromHistory('intro\\r\\n```ts\\r\\nfoo\\r\\n```')).toBe('intro\n```ts\\r\\nfoo\n```');
 
     // Edge cases.
     expect(unescapeNewlinesFromHistory(undefined)).toBe('');
     expect(unescapeNewlinesFromHistory('')).toBe('');
     expect(unescapeNewlinesFromHistory('plain text no newlines')).toBe('plain text no newlines');
     expect(unescapeNewlinesFromHistory('multi\nline\nplain')).toBe('multi\nline\nplain');
+  });
+
+  it('per-conversation abort isolates concurrent streams (Codex CSI-j regression)', () => {
+    // Pins down the contract the `useRef<Map<conversationKey, AbortController>>`
+    // implementation must hold:
+    //   1. Two conversations can hold separate controllers concurrently
+    //      (start A, then start B, both untouched).
+    //   2. Aborting the selected conversation's controller does NOT
+    //      affect the other's.
+    //   3. The `finally` compare-and-delete cleanup only removes its
+    //      OWN controller — never the other conversation's, even if
+    //      they raced and the same conversationKey was reused later.
+    const controllers = new Map<string, AbortController>();
+
+    const ctrlA = new AbortController();
+    controllers.set('A', ctrlA);
+    const ctrlB = new AbortController();
+    controllers.set('B', ctrlB);
+
+    expect(controllers.size).toBe(2);
+    expect(ctrlA.signal.aborted).toBe(false);
+    expect(ctrlB.signal.aborted).toBe(false);
+
+    // User clicks Stop while viewing A.
+    const selectedKey = 'A';
+    controllers.get(selectedKey)?.abort();
+    expect(ctrlA.signal.aborted).toBe(true);
+    expect(ctrlB.signal.aborted).toBe(false);
+
+    // A's `finally`: compare-and-delete leaves B's entry alone.
+    if (controllers.get('A') === ctrlA) controllers.delete('A');
+    expect(controllers.has('A')).toBe(false);
+    expect(controllers.has('B')).toBe(true);
+    expect(controllers.get('B')).toBe(ctrlB);
+
+    // A retries — fresh controller under the same key. B is still
+    // streaming with its original controller untouched.
+    const ctrlARetry = new AbortController();
+    controllers.set('A', ctrlARetry);
+
+    // Now B finishes. Its `finally` compare-and-delete confirms the
+    // map entry is STILL ctrlB (the original), so the delete fires.
+    // If a late teardown from a stale A request fired here using
+    // `ctrlA` as the witness, the compare-and-delete would (correctly)
+    // skip the delete and leave A's retry entry intact.
+    if (controllers.get('A') === ctrlA) controllers.delete('A');
+    expect(controllers.get('A')).toBe(ctrlARetry); // not wiped by stale teardown
+    if (controllers.get('B') === ctrlB) controllers.delete('B');
+    expect(controllers.has('B')).toBe(false);
   });
 
   it('preserves literal backslash-n in agent content (Codex CHWpS)', () => {

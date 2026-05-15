@@ -365,7 +365,34 @@ export function unescapeNewlinesFromHistory(text: string | undefined): string {
     || /\\n\|/.test(probe)
     || /\\n>/.test(probe);
   if (!looksLikePersistedMarkdown) return text;
-  return text.replace(/\\r\\n/g, '\n').replace(/\\n/g, '\n');
+  // Decode ONLY at structural boundaries — `\\n` immediately followed
+  // by a markdown marker. A blanket `replace(/\\n/g, '\n')` would also
+  // mangle `\\n` literals INSIDE fenced code blocks: a persisted
+  //   Here is JSON:\\n```json\\n{"text":"a\\nb"}\\n```
+  // would otherwise lose `a\\nb`'s literal escape and emit a real
+  // newline mid-string, breaking the rendered example. Codex CSI-f.
+  //
+  // Tradeoff: multi-line code blocks where the lines themselves were
+  // joined with `\\n` will still show literal `\\n` between lines
+  // because those internal `\\n`s have no structural marker after
+  // them. That's faithful-but-ugly, strictly better than the
+  // corruption blanket-decode would produce. Proper fix is daemon-side
+  // (round-trip strings as raw UTF-8 with real newlines instead of
+  // escape-encoding them).
+  //
+  // CRLF variants are paired with each LF variant; both forms get
+  // decoded at structural boundaries. `\\r\\n` outside a boundary is
+  // also left alone (same reasoning — we don't know if it's
+  // intentional in a code sample).
+  return text
+    .replace(/\\r\\n\\r\\n/g, '\n\n')
+    .replace(/\\n\\n/g, '\n\n')
+    .replace(/\\r\\n(#)/g, '\n$1').replace(/\\n(#)/g, '\n$1')
+    .replace(/\\r\\n([-*]\s)/g, '\n$1').replace(/\\n([-*]\s)/g, '\n$1')
+    .replace(/\\r\\n(\d+\.\s)/g, '\n$1').replace(/\\n(\d+\.\s)/g, '\n$1')
+    .replace(/\\r\\n(```)/g, '\n$1').replace(/\\n(```)/g, '\n$1')
+    .replace(/\\r\\n(\|)/g, '\n$1').replace(/\\n(\|)/g, '\n$1')
+    .replace(/\\r\\n(>)/g, '\n$1').replace(/\\n(>)/g, '\n$1');
 }
 
 function mapHistoryMessage(message: LocalAgentHistoryMessage): LocalAgentMessage {
