@@ -291,6 +291,7 @@ import {
   extractionRecordMatchesOpenClawAttachmentRef,
   verifyOpenClawAttachmentRefsProvenance,
 } from './openclaw.js';
+import { buildChatAcl } from './chat-acl.js';
 import {
   type LocalAgentIntegrationDefinition,
   type LocalAgentIntegrationRecord,
@@ -657,8 +658,22 @@ export async function runDaemonInner(
     );
   }
 
+  // Inbound chat authorisation (Phase 1 of agent debug chat RFC). Layered
+  // on top of the protocol-level Ed25519 signature check that messaging.ts
+  // already does — this controls *which* authenticated peers we'll accept
+  // chats from, configured via `chat.acl` in the node config. When unset,
+  // the legacy "accept all authenticated peers" behaviour is preserved.
+  agent.setChatAcl(
+    buildChatAcl({
+      config: config.chat?.acl,
+      dashDb,
+      getLocalPeerId: () => agent.peerId,
+      log,
+    }),
+  );
+
   let chatDb: DashboardDB | null = null;
-  agent.onChat((text, senderPeerId, _convId) => {
+  agent.onChat((text, senderPeerId, _convId, senderContextGraphId, verifiedContextGraphId) => {
     if (chatDb) {
       try {
         chatDb.insertChatMessage({
@@ -671,10 +686,21 @@ export async function runDaemonInner(
         /* never crash */
       }
       try {
+        // Display the CG ONLY when the ACL has positively verified the
+        // claim (`scoped` / `shared-context-graph` modes). In `any` and
+        // `peer-allowlist` modes `verifiedContextGraphId` is undefined
+        // even when the sender provided a claim, because the ACL
+        // doesn't check it — surfacing the raw claim would let an
+        // authenticated sender stamp arbitrary CG ids onto operator-
+        // facing notifications and logs (Codex PR #510 round 4/5
+        // finding). Storage above already records the message itself;
+        // we don't lose data, we just don't decorate it with an
+        // attacker-controllable label.
+        const titleSuffix = verifiedContextGraphId ? ` (${shortId(verifiedContextGraphId)})` : '';
         chatDb.insertNotification({
           ts: Date.now(),
           type: "chat_message",
-          title: "New message",
+          title: `New message${titleSuffix}`,
           message: `Message from ${shortId(senderPeerId)}: ${text.slice(0, 120)}`,
           source: "peer-chat",
           peer: senderPeerId,
@@ -683,7 +709,8 @@ export async function runDaemonInner(
         /* never crash */
       }
     }
-    log(`CHAT IN  [${shortId(senderPeerId)}]: ${text}`);
+    const cgTag = verifiedContextGraphId ? ` cg=${shortId(verifiedContextGraphId)}` : '';
+    log(`CHAT IN  [${shortId(senderPeerId)}]${cgTag}: ${text}`);
   });
 
   await agent.start();

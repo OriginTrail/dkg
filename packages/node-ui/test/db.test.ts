@@ -453,3 +453,106 @@ describe('DashboardDB — context graph memberships', () => {
     expect(remaining[0].principal_id).toBe('peer-1');
   });
 });
+
+// Regression coverage for the agent-to-agent debug chat inbox.
+// `getChatMessages` is consumed by `dkg_check_inbox` (mcp-dkg) and the
+// inject-inbox prompt-prefix hook. The three properties exercised here
+// were all flagged by Codex on PR #510 (the first round added direction
+// filtering; round 2 added compound-cursor pagination + ASC order).
+describe('DashboardDB.getChatMessages — chat inbox semantics', () => {
+  function seed() {
+    db.insertChatMessage({ ts: 1000, direction: 'in', peer: 'alice', text: 'a-in-1' });
+    db.insertChatMessage({ ts: 1000, direction: 'out', peer: 'alice', text: 'a-out-1', delivered: true });
+    // Same-ts burst — should NOT be lost by ts-only pagination.
+    db.insertChatMessage({ ts: 2000, direction: 'in', peer: 'alice', text: 'a-in-2' });
+    db.insertChatMessage({ ts: 2000, direction: 'in', peer: 'alice', text: 'a-in-3' });
+    db.insertChatMessage({ ts: 3000, direction: 'in', peer: 'bob', text: 'b-in-1' });
+  }
+
+  it('applies server-side `direction=in` filter BEFORE the LIMIT cap', () => {
+    // Without the filter, LIMIT=2 returns the newest 2 rows mixed
+    // across directions. With direction=in, LIMIT=2 returns the newest
+    // 2 INBOUND rows — what an inbox reader expects.
+    seed();
+    const rows = db.getChatMessages({ direction: 'in', limit: 2 });
+    expect(rows).toHaveLength(2);
+    expect(rows.every((r) => r.direction === 'in')).toBe(true);
+  });
+
+  it('compound (since, sinceId) cursor is lossless across same-millisecond rows', () => {
+    seed();
+    // Page 1: ASC pagination starting from ts=0 returns all 4 inbound.
+    const page1 = db.getChatMessages({
+      direction: 'in',
+      order: 'asc',
+      limit: 2,
+      since: 0,
+    });
+    expect(page1.map((r) => r.text)).toEqual(['a-in-1', 'a-in-2']);
+
+    // Advance compound cursor past the last row in page 1 — note that
+    // `a-in-2` and `a-in-3` share ts=2000, so a `ts > 2000` cursor
+    // would skip `a-in-3`. The compound cursor must carry id forward.
+    const lastP1 = page1[page1.length - 1];
+    const page2 = db.getChatMessages({
+      direction: 'in',
+      order: 'asc',
+      limit: 2,
+      since: lastP1.ts,
+      sinceId: lastP1.id,
+    });
+    expect(page2.map((r) => r.text)).toEqual(['a-in-3', 'b-in-1']);
+  });
+
+  it('ts-only cursor (no sinceId) preserves legacy behaviour for callers that opt out', () => {
+    // Without `sinceId`, paginating past a same-ts boundary would
+    // skip rows. This test pins the legacy predicate so we KNOW
+    // the compound path is what fixes it, and we don't accidentally
+    // change behaviour for callers that haven't migrated.
+    seed();
+    const skipped = db.getChatMessages({
+      direction: 'in',
+      order: 'asc',
+      since: 2000, // ts > 2000 → drops both 2000-ts rows AND a-in-1
+    });
+    expect(skipped.map((r) => r.text)).toEqual(['b-in-1']);
+  });
+
+  it('omitting `order` preserves legacy "newest N displayed oldest-first" dashboard contract', () => {
+    seed();
+    const rows = db.getChatMessages({ direction: 'in' });
+    // Pre-RFC dashboard expected the result laid out chronologically
+    // for a "history scroll" view, but bounded to the newest N.
+    // SQL picks DESC then we reverse — keeps existing UI callers
+    // working without any opt-in change.
+    expect(rows[rows.length - 1].text).toBe('b-in-1');
+    expect(rows[0].text).toBe('a-in-1');
+  });
+
+  // Codex PR #510 round 4 — previously `order: 'desc'` was not
+  // honoured: SQL returned DESC then `.reverse()` flipped it to ASC,
+  // so the API contract didn't match the behaviour. Explicit values
+  // are now applied literally.
+  it("explicit order='asc' returns oldest-first (true ASC)", () => {
+    seed();
+    const rows = db.getChatMessages({ direction: 'in', order: 'asc' });
+    expect(rows[0].text).toBe('a-in-1');
+    expect(rows[rows.length - 1].text).toBe('b-in-1');
+  });
+
+  it("explicit order='desc' returns newest-first (true DESC, no implicit reverse)", () => {
+    seed();
+    const rows = db.getChatMessages({ direction: 'in', order: 'desc' });
+    expect(rows[0].text).toBe('b-in-1');
+    expect(rows[rows.length - 1].text).toBe('a-in-1');
+  });
+
+  it('returns SQLite rowid (`id`) on every row so callers can build the next compound cursor', () => {
+    seed();
+    const rows = db.getChatMessages({});
+    for (const r of rows) {
+      expect(typeof r.id).toBe('number');
+      expect(r.id).toBeGreaterThan(0);
+    }
+  });
+});

@@ -120,28 +120,7 @@ export class ProtocolRouter {
     const signal = AbortSignal.timeout(timeoutMs);
     const startedAt = Date.now();
 
-    // RFC 07 §3.2: ensure the libp2p peerStore has fresh multiaddrs
-    // before dialing. The resolver's step 1 is a sub-millisecond
-    // live-connection check, so this is effectively a no-op when we
-    // already have an open connection to the peer; the cost only
-    // shows up on cold dials, where it replaces the failure mode of
-    // "dialProtocol falls back to stale identify-cached addresses".
-    // Best-effort — the resolver itself never throws (it returns an
-    // empty array on miss); the caller's dial loop below will surface
-    // a real transport error if the peer is genuinely unreachable.
-    //
-    // Codex review feedback on PR #497: pass the same AbortSignal +
-    // remaining time budget to the resolver so a caller's `timeoutMs`
-    // bounds the entire send (resolver + dial + read), not just the
-    // dial loop. Without this a `timeoutMs: 1000` could block 5s+ on
-    // the resolver's default per-step DHT timeout before the dial
-    // even starts.
-    if (this.peerResolver) {
-      const remaining = Math.max(0, timeoutMs - (Date.now() - startedAt));
-      await this.peerResolver
-        .resolve(peerIdStr, { signal, perStepTimeoutMs: remaining })
-        .catch(() => undefined);
-    } else if (!this.warnedMissingResolver) {
+    if (!this.peerResolver && !this.warnedMissingResolver) {
       // Codex PR #497 round 5: structural enforcement (CI grep gate)
       // already prevents raw `dialProtocol(peerId)` calls outside an
       // allowlist, but a router constructed without a resolver still
@@ -166,6 +145,40 @@ export class ProtocolRouter {
     let lastErr: unknown;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
+        // RFC 07 §3.2: re-prime the libp2p peerStore on EVERY attempt.
+        //
+        // Was originally a single pre-loop call (PR #497) but that left
+        // a real cold-dial gap surfaced during the two-laptop debug
+        // session that produced PR #517 + the MessageOutbox PR: if the
+        // first resolver call landed during a transient routing-table
+        // miss (peer's K-bucket entry expired, no live gossip source,
+        // DHT walk happened to time out), all 3 dialProtocol attempts
+        // hit the same empty peerStore in the next ~1.5s and the loop
+        // gave up with `'no valid addresses for peer'` before any DHT
+        // advertisement / `connection:open` event from the recipient
+        // could populate addresses for a later attempt.
+        //
+        // Re-running per-attempt is cheap on the warm path (the
+        // resolver's step 1 is a sub-millisecond live-connection check
+        // that short-circuits when we already have the peer connected
+        // or its addresses cached in the peerStore) and only pays the
+        // DHT-walk / registry-lookup cost on the cold path — which is
+        // exactly the case we want to keep paying for, because that's
+        // where address staleness actually hurts. The resolver itself
+        // never throws (returns empty array on miss); the dial below
+        // surfaces a real transport error if the peer is genuinely
+        // unreachable.
+        //
+        // Codex review feedback on PR #497: pass the same AbortSignal +
+        // remaining time budget to the resolver so a caller's
+        // `timeoutMs` bounds the entire send (resolver + dial + read).
+        if (this.peerResolver) {
+          const remaining = Math.max(0, timeoutMs - (Date.now() - startedAt));
+          await this.peerResolver
+            .resolve(peerIdStr, { signal, perStepTimeoutMs: remaining })
+            .catch(() => undefined);
+        }
+
         const dialStartedAt = Date.now();
         const stream = await libp2p.dialProtocol(peerId, protocolId, {
           runOnLimitedConnection: true,

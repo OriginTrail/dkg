@@ -971,6 +971,59 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     }
   }
 
+  // POST /api/context-graph/{id}/redeliver-approval — re-fire a `join-approved`
+  // P2P notification to a previously-approved agent. Companion to the
+  // join-approval retry queue (`DKGAgent.redeliverJoinApproval`). Used when:
+  //   * The transient transport reset that originally dropped the
+  //     notification is too long-lived for the periodic retry tick to
+  //     recover quickly enough,
+  //   * The operator notices the invitee is reachable again and wants to
+  //     re-poke immediately rather than wait for the next backoff window,
+  //   * The chat-MCP agent on the curator side (PR-510) wants to re-poke
+  //     after a peer agent reports their join is stuck.
+  // Returns the delivery result so the caller can distinguish "delivered
+  // now" (peer was reachable) from "still queued, attempt N" (will fire
+  // again on the next tick / next reconnect).
+  const redeliverApprovalMatch = path.match(/^\/api\/context-graph\/([^/]+)\/redeliver-approval$/);
+  if (req.method === "POST" && redeliverApprovalMatch) {
+    const contextGraphId = decodeURIComponent(redeliverApprovalMatch[1]);
+    const body = await readBody(req);
+    try {
+      const parsed = body ? JSON.parse(body) : {};
+      const { agentAddress } = parsed;
+      if (!agentAddress) return jsonResponse(res, 400, { error: 'Missing agentAddress' });
+      const result = await agent.redeliverJoinApproval(contextGraphId, agentAddress, requestAgentAddress);
+      return jsonResponse(res, 200, {
+        ok: true,
+        contextGraphId,
+        agentAddress,
+        ...result,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // Caller errors (no approval row, bad address) → 400. Anything else
+      // (store failure, etc.) bubbles up as 500 from the surrounding
+      // handler. The redeliver-approval code path itself catches transport
+      // failures internally and treats them as "still queued" successes.
+      return jsonResponse(res, 400, { error: msg });
+    }
+  }
+
+  // GET /api/context-graphs/pending-redeliveries — operator diagnostic for
+  // join-approvals currently stuck in the retry queue across all curated CGs.
+  // Useful for "is anyone still waiting on an approval that failed to deliver?"
+  // dashboards. Read-only; the actual retry firing happens via the periodic
+  // tick + on-connect listener inside the agent.
+  if (req.method === "GET" && path === '/api/context-graphs/pending-redeliveries') {
+    try {
+      const entries = agent.listPendingJoinApprovalRetries();
+      return jsonResponse(res, 200, { pending: entries });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return jsonResponse(res, 500, { error: msg });
+    }
+  }
+
   // POST /api/context-graph/{id}/reject-join — reject a pending request
   const rejectJoinMatch = path.match(/^\/api\/context-graph\/([^/]+)\/reject-join$/);
   if (req.method === "POST" && rejectJoinMatch) {
