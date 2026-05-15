@@ -1355,12 +1355,30 @@ button:focus:not(:focus-visible) { outline: none; }
   font-size: 10px;
   color: var(--text-secondary);
   font-family: var(--font-mono);
+  /* Hidden by default, revealed on message hover/focus — same recipe
+     as `.v10-md-copy`. Reduces transcript noise now that PR4 made
+     assistant turns full-width with no bubble. Colour/contrast (AA per
+     Task #68) is unchanged; only visibility toggles. */
+  opacity: 0;
+  transition: opacity 120ms ease-out;
+}
+.v10-chat-msg:hover .v10-local-agent-msg-time,
+.v10-chat-msg:focus-within .v10-local-agent-msg-time {
+  opacity: 1;
 }
 .v10-local-agent-msg-time.user {
   align-self: flex-end;
 }
 .v10-local-agent-msg-time.assistant {
   align-self: flex-start;
+}
+/* Touch (no hover) and reduced-motion users always see the timestamp —
+   mirrors the `.v10-md-copy` accessibility fallbacks. */
+@media (hover: none) {
+  .v10-local-agent-msg-time { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .v10-local-agent-msg-time { opacity: 1; transition: none; }
 }
 .v10-local-agent-setup {
   display: flex;
