@@ -1715,9 +1715,7 @@ export class DKGPublisher implements Publisher {
     // committed by this publish matches exactly what peers verify in
     // their pre-publish SWM snapshots (Axiom 7.b: deterministic conflict
     // resolution requires identical Merkle inputs across nodes).
-    // `let` is required because line ~1755 below re-binds this variable
-    // after SelfAttested-trust stamping for local VM filtering.
-    let allSkolemizedQuads = canonical.skolemizedPublicQuads;
+    const allSkolemizedQuads = canonical.skolemizedPublicQuads;
     onPhase?.('prepare:manifest', 'end');
 
     onPhase?.('prepare:validate', 'start');
@@ -1734,25 +1732,13 @@ export class DKGPublisher implements Publisher {
     // for privateRoots and kcMerkleRoot — the bytes peers verify in
     // pre-publish SWM snapshots come from the same canonical pipeline,
     // so divergence here would break Axiom 7.b deterministic resolution.
-    // SelfAttested trust literals are stamped only for local VM filtering
-    // after the root is fixed and never feed into the Merkle commitment.
     const privateRoots = canonical.privateRoots;
     const kcMerkleRoot = canonical.kcMerkleRoot;
     const kcMerkleLeafCount = computeFlatKCMerkleLeafCountV10(allSkolemizedQuads, privateRoots);
-    // Named locals retained for the downstream code paths that reference
-    // them (line ~1756 log message, line ~1781 nquadsStr serialization).
-    // Both observe the pre-stamping snapshot, identical to canonical.* .
-    const merklePublicTripleCount = allSkolemizedQuads.length;
-    const merkleFlatQuads = [...allSkolemizedQuads];
     if (kcMerkleLeafCount > 0xffffffff) {
       throw new Error(`V10 merkleLeafCount exceeds uint32: ${kcMerkleLeafCount}`);
     }
-    stampKaMapWithSelfAttestedTrust(kaMap);
-    for (const meta of kaMetadata) {
-      meta.publicTripleCount += 1;
-    }
-    allSkolemizedQuads = [...kaMap.values()].flat();
-    this.log.info(ctx, `Computed kcMerkleRoot (flat) over ${merklePublicTripleCount} triple hashes + ${privateRoots.length} private root(s), leafCount=${kcMerkleLeafCount}`);
+    this.log.info(ctx, `Computed kcMerkleRoot (flat) over ${allSkolemizedQuads.length} triple hashes + ${privateRoots.length} private root(s), leafCount=${kcMerkleLeafCount}`);
     const kaCount = manifestEntries.length;
     onPhase?.('prepare:merkle', 'end');
 
@@ -1776,8 +1762,11 @@ export class DKGPublisher implements Publisher {
 
     onPhase?.('store', 'end');
 
-    // Compute publicByteSize early — needed for signature collection
-    const nquadsStr = merkleFlatQuads
+    // Compute publicByteSize early — needed for signature collection.
+    // `allSkolemizedQuads` is the canonical pre-publish snapshot peers
+    // verify against (main removed the post-publish self-attested trust
+    // stamping that previously diverged this view from the merkle inputs).
+    const nquadsStr = allSkolemizedQuads
       .map(
         (q) =>
           `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${q.graph}> .`,
@@ -2458,7 +2447,7 @@ export class DKGPublisher implements Publisher {
       kaManifest: manifestEntries,
       status,
       onChainResult,
-      publicQuads: merkleFlatQuads,
+      publicQuads: allSkolemizedQuads,
       v10ACKs,
       v10Origin: usedV10Path,
       subGraphName: options.subGraphName,
@@ -2468,12 +2457,12 @@ export class DKGPublisher implements Publisher {
       ...result,
       contextGraphId,
       // tripleCount reports the canonical (merkle-committed, publicly verifiable)
-      // count — `merkleFlatQuads` is the pre-stamp snapshot peers see and verify.
-      // The SelfAttested trust triple appended after merkle commitment is local
-      // metadata for VM trust-band filtering only and is NOT part of the published
-      // assertion (Axiom 4: PUBLISH is canonical / Axiom 6: trust gradient is a
-      // separate enrichment).
-      tripleCount: merkleFlatQuads.length,
+      // count. `allSkolemizedQuads` is the canonical snapshot peers verify; main
+      // removed the post-publish SelfAttested-trust stamping that the branch
+      // previously appended for local VM filtering, so the published view and
+      // the merkle inputs are identical here (Axiom 4: PUBLISH is canonical /
+      // Axiom 6: trust gradient is a separate enrichment surface).
+      tripleCount: allSkolemizedQuads.length,
     });
     return result;
   }
