@@ -1746,7 +1746,26 @@ export class DKGPublisher implements Publisher {
     onPhase?.('store', 'start');
 
     const dataGraph = options.targetGraphUri ?? this.graphManager.dataGraphUri(contextGraphId);
-    const normalizedQuads = allSkolemizedQuads.map((q) => ({ ...q, graph: dataGraph }));
+    // Local store gets the canonical (merkle-committed) bytes PLUS one
+    // SelfAttested trustLevel triple per KA root. The merkle root is fixed
+    // above over the un-stamped canonical quads (Axiom 4: PUBLISH bytes are
+    // identical across nodes), and the trust stamp is a local-store-only
+    // enrichment that the VM minTrust filter reads (Axiom 6: trust is a
+    // separate gradient on top of the canonical commitment). kaMetadata's
+    // publicTripleCount must be bumped in lockstep so downstream views that
+    // count the local KA report the stamped count.
+    const trustLit = `"${TrustLevel.SelfAttested}"^^<${XSD_INTEGER}>`;
+    const trustStampQuads: Quad[] = canonical.manifestEntries.map((entry) => ({
+      subject: entry.rootEntity,
+      predicate: DKG_ENTITY_TRUST_LEVEL_PREDICATE,
+      object: trustLit,
+      graph: '',
+    }));
+    for (const meta of kaMetadata) {
+      meta.publicTripleCount += 1;
+    }
+    const localStoreQuads = [...allSkolemizedQuads, ...trustStampQuads];
+    const normalizedQuads = localStoreQuads.map((q) => ({ ...q, graph: dataGraph }));
 
     this.log.info(ctx, `Storing ${normalizedQuads.length} triples in local store`);
     await this.store.insert(normalizedQuads);
