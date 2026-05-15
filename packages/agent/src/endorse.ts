@@ -1,4 +1,4 @@
-import { contextGraphDataUri, DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
+import { assertSafeIri, contextGraphDataUri, DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 
 /** Ontology predicate: agent endorses a Knowledge Asset */
@@ -22,6 +22,9 @@ export function buildEndorsementQuads(
   const agentUri = `did:dkg:agent:${agentAddress}`;
   const graph = contextGraphDataUri(contextGraphId);
   const now = new Date().toISOString();
+  assertSafeIri(agentUri);
+  assertSafeIri(knowledgeAssetUal);
+  assertSafeIri(graph);
 
   return [
     {

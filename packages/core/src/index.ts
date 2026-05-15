@@ -1,6 +1,7 @@
 export * from './types.js';
 export * from './constants.js';
 export * from './memory-model.js';
+export * from './trust.js';
 export * from './publisher-extension.js';
 export * from './event-bus.js';
 export { Logger, createOperationContext, type OperationContext, type OperationName, type LogSink } from './logger.js';

@@ -66,6 +66,8 @@ import { registerIntegrationCommands } from './integrations/commands.js';
 
 /** Commander action callbacks receive parsed .option() values with loose types. */
 type ActionOpts = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+const VERIFY_COLLECTION_TIMEOUT_MIN_MS = 1_000;
+const VERIFY_COLLECTION_TIMEOUT_MAX_MS = 30 * 60 * 1000;
 
 const STARTUP_BANNER = `
 \x1b[36m██████╗ ██╗  ██╗ ██████╗     ██╗   ██╗ ██╗ ██████╗
@@ -100,6 +102,26 @@ function getCliVersion(): string {
   } catch {
     return '0.0.0';
   }
+}
+
+function parseOptionalVerifyTimeoutOption(raw: unknown): number | undefined {
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  const value = typeof raw === 'number'
+    ? raw
+    : typeof raw === 'string' && /^\d+$/.test(raw.trim())
+      ? Number(raw.trim())
+      : NaN;
+  if (
+    !Number.isSafeInteger(value) ||
+    value < VERIFY_COLLECTION_TIMEOUT_MIN_MS ||
+    value > VERIFY_COLLECTION_TIMEOUT_MAX_MS
+  ) {
+    throw new Error(
+      `--timeout must be an integer between ${VERIFY_COLLECTION_TIMEOUT_MIN_MS} ` +
+        `and ${VERIFY_COLLECTION_TIMEOUT_MAX_MS} milliseconds`,
+    );
+  }
+  return value;
 }
 
 function loadStructuredFile(filePath: string): any {
@@ -933,21 +955,30 @@ program
   .description('Propose M-of-N verification for a published batch')
   .requiredOption('--context-graph <id>', 'Context Graph ID')
   .requiredOption('--verified-graph <id>', 'Verified Graph ID')
-  .option('--timeout <ms>', 'Timeout in milliseconds (default: 30 min)')
+  .option('--timeout <ms>', `Timeout in milliseconds (default/max: ${VERIFY_COLLECTION_TIMEOUT_MAX_MS})`)
   .option('--required-signatures <n>', 'M-of-N quorum threshold (default: on-chain config, or 1 if adapter lacks getContextGraphConfig)')
   .action(async (batchId: string, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
+      const timeoutMs = parseOptionalVerifyTimeoutOption(opts.timeout);
       const result = await client.verify({
         contextGraphId: opts.contextGraph,
         verifiedMemoryId: opts.verifiedGraph,
         batchId,
-        timeoutMs: opts.timeout ? Number(opts.timeout) : undefined,
+        timeoutMs,
         requiredSignatures: opts.requiredSignatures ? Number(opts.requiredSignatures) : undefined,
       });
-      console.log(`Verified batch ${batchId} → _verified_memory/${result.verifiedMemoryId}`);
-      console.log(`  TX: ${result.txHash}`);
-      console.log(`  Block: ${result.blockNumber}`);
+      if (result.status === 'verified' || result.txHash) {
+        console.log(`Verified batch ${batchId} → _verified_memory/${result.verifiedMemoryId}`);
+        console.log(`  TX: ${result.txHash}`);
+        console.log(`  Block: ${result.blockNumber}`);
+      } else if (result.status === 'partial') {
+        console.log(`Partially verified batch ${batchId} (no chain tx)`);
+        console.log(`  Trust: ${result.trustLevel}`);
+      } else {
+        console.log(`Verification did not reach quorum for batch ${batchId} (no chain tx)`);
+        console.log(`  Trust: ${result.trustLevel ?? 'self-attested'}`);
+      }
       console.log(`  Signers: ${result.signers.join(', ')}`);
     } catch (err) {
       console.error(`Verify failed: ${err instanceof Error ? err.message : String(err)}`);

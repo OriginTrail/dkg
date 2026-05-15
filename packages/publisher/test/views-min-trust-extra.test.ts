@@ -12,15 +12,9 @@
  *                   was declared on the query-engine `QueryOptions`
  *                   type, but the resolver silently ignored it.
  *
- * Fix: `resolveViewGraphs` now accepts `minTrust`. When it is set
- * above `TrustLevel.SelfAttested`, the root data graph (which holds
- * chain-confirmed SelfAttested triples) is dropped from the resolution.
- * Only quorum-verified sub-graphs under `/_verified_memory/{quorum}`
- * survive the resolution step.
- *
- * Note: per-quad trust filtering inside the surviving sub-graphs (based
- * on a `dkg:trustLevel` predicate on each triple) is tracked as Q-1 and
- * is out of scope for this test.
+ * Fix: `resolveViewGraphs` keeps the root data graph and verified-memory
+ * graphs as candidates. `DKGQueryEngine` then enforces `minTrust` with
+ * writer-side `dkg:trustLevel` metadata instead of graph-scope inference.
  */
 import { describe, expect, it } from 'vitest';
 import { TrustLevel } from '@origintrail-official/dkg-core';
@@ -55,16 +49,12 @@ describe('P-13: resolveViewGraphs handles minTrust for verified-memory', () => {
   });
 
   it(
-    'minTrust=Endorsed drops the root data graph — prevents SelfAttested triples ' +
-      'from leaking into Endorsed queries (',
+    'minTrust=Endorsed keeps root and verified-memory graphs as candidates',
     () => {
       const res = resolveViewGraphs('verified-memory', CG, {
         minTrust: TrustLevel.Endorsed,
       });
-      // Root data graph must not be present above SelfAttested.
-      expect(res.graphs).not.toContain(`did:dkg:context-graph:${CG}`);
-      expect(res.graphs).toEqual([]);
-      // Quorum-verified sub-graphs are still discovered via the prefix.
+      expect(res.graphs).toEqual([`did:dkg:context-graph:${CG}`]);
       expect(res.graphPrefixes).toEqual([
         `did:dkg:context-graph:${CG}/_verified_memory/`,
       ]);
@@ -72,21 +62,8 @@ describe('P-13: resolveViewGraphs handles minTrust for verified-memory', () => {
   );
 
   it(
-    'minTrust > Endorsed resolves to the /_verified_memory/ prefix — per-triple trust ' +
-      'filtering (Q-1) handles `PartiallyVerified` / `ConsensusVerified` downstream',
+    'minTrust > Endorsed keeps root and verified-memory graphs for trust-tag filtering',
     () => {
-      // Pre-Q-1 the resolver rejected above-Endorsed because per-graph
-      // trust metadata was not available and returning the same graph
-      // set as Endorsed would silently serve lower-trust data. Q-1
-      // closed the hole at the PER-TRIPLE level (see
-      // `DKGQueryEngine.queryWithView` + `injectMinTrustFilter`): the
-      // user SPARQL is rewritten so every subject MUST carry
-      // `<http://dkg.io/ontology/trustLevel> "N"` with
-      // `N ≥ minTrust`, so sub-threshold triples in the sub-graph
-      // prefix are excluded. The graph-scope resolution therefore
-      // collapses to the same shape for `Endorsed` /
-      // `PartiallyVerified` / `ConsensusVerified`: drop the root
-      // data graph, union over the quorum prefix.
       const partially = resolveViewGraphs('verified-memory', CG, {
         minTrust: TrustLevel.PartiallyVerified,
       });
@@ -94,8 +71,7 @@ describe('P-13: resolveViewGraphs handles minTrust for verified-memory', () => {
         minTrust: TrustLevel.ConsensusVerified,
       });
       for (const res of [partially, consensus]) {
-        expect(res.graphs).not.toContain(`did:dkg:context-graph:${CG}`);
-        expect(res.graphs).toEqual([]);
+        expect(res.graphs).toEqual([`did:dkg:context-graph:${CG}`]);
         expect(res.graphPrefixes).toEqual([
           `did:dkg:context-graph:${CG}/_verified_memory/`,
         ]);
@@ -118,40 +94,22 @@ describe('P-13: resolveViewGraphs handles minTrust for verified-memory', () => {
   );
 
   it(
-    'verifiedGraph + minTrust ABOVE Endorsed REJECTS — the engine cannot yet prove a ' +
-      'named sub-graph satisfies PartiallyVerified/ConsensusVerified, so silently ' +
-      'reading it would violate spec §14',
+    'verifiedGraph + minTrust above Endorsed is allowed and enforced by trust tags',
     () => {
-      // Codex review on PR #239 originally flagged the "ignore minTrust
-      // when verifiedGraph is set" behaviour as a trust-bypass hole.
-      // Iter-6 refined that: because every `/_verified_memory/<id>`
-      // graph is written only by quorum-verified paths, the implicit
-      // floor on this path is Endorsed. `verifiedGraph + Endorsed`
-      // therefore returns the single named graph (callers who want
-      // SelfAttested still get it, callers who want Endorsed get the
-      // same data), while `PartiallyVerified` / `ConsensusVerified`
-      // remain rejected until Q-1 lands per-graph trust metadata.
-      expect(() =>
-        resolveViewGraphs('verified-memory', CG, {
+      for (const minTrust of [
+        TrustLevel.Endorsed,
+        TrustLevel.PartiallyVerified,
+        TrustLevel.ConsensusVerified,
+      ]) {
+        const res = resolveViewGraphs('verified-memory', CG, {
           verifiedGraph: VM_QUORUM_A,
-          minTrust: TrustLevel.ConsensusVerified,
-        }),
-      ).toThrow(/verifiedGraph cannot be combined with minTrust above Endorsed/);
-      expect(() =>
-        resolveViewGraphs('verified-memory', CG, {
-          verifiedGraph: VM_QUORUM_A,
-          minTrust: TrustLevel.PartiallyVerified,
-        }),
-      ).toThrow(/verifiedGraph cannot be combined with minTrust above Endorsed/);
-      // Endorsed is now the Q-1 ceiling for the exact-graph path and
-      // MUST succeed — the returned graph is the single sub-graph URI.
-      const endorsed = resolveViewGraphs('verified-memory', CG, {
-        verifiedGraph: VM_QUORUM_A,
-        minTrust: TrustLevel.Endorsed,
-      });
-      expect(endorsed.graphs).toEqual([
-        `did:dkg:context-graph:${CG}/_verified_memory/${VM_QUORUM_A}`,
-      ]);
+          minTrust,
+        });
+        expect(res.graphs).toEqual([
+          `did:dkg:context-graph:${CG}/_verified_memory/${VM_QUORUM_A}`,
+        ]);
+        expect(res.graphPrefixes).toEqual([]);
+      }
     },
   );
 
@@ -181,9 +139,8 @@ describe('P-13: resolveViewGraphs handles minTrust for verified-memory', () => {
         ).toThrow(/Invalid minTrust/);
       }
       // Every valid TrustLevel (SelfAttested..ConsensusVerified) must
-      // resolve without throwing — per-triple filtering (Q-1) handles
-      // the above-Endorsed tiers downstream at
-      // `DKGQueryEngine.queryWithView` via `injectMinTrustFilter`.
+      // resolve without throwing. `DKGQueryEngine.queryWithView`
+      // enforces trust floors downstream via `injectMinTrustFilter`.
       for (const mt of [
         TrustLevel.SelfAttested,
         TrustLevel.Endorsed,
@@ -208,16 +165,9 @@ describe('P-13: resolveViewGraphs handles minTrust for verified-memory', () => {
       // engine-level normalisation `options.minTrust ?? options._minTrust`
       // MUST forward the legacy form through.
       //
-      // To prove the alias is actually honoured (not silently dropped)
-      // we rely on the graph-scope contract from `resolveViewGraphs`:
-      //   - `minTrust === undefined` (or SelfAttested) keeps the root
-      //     data graph in the resolution;
-      //   - `minTrust > SelfAttested` drops the root graph.
-      // We probe for the presence of the root graph by inserting a
-      // single root-graph quad and running a SELECT; if the alias is
-      // silently dropped the root graph stays in scope and the result
-      // carries at least one binding, otherwise the binding is
-      // filtered out at the graph-resolution layer.
+      // We probe with an untagged root-graph quad. If `_minTrust` is
+      // silently dropped, the row remains visible; if it is honoured,
+      // the trust metadata filter removes it.
       const { OxigraphStore } = await import('@origintrail-official/dkg-storage');
       const { DKGQueryEngine } = await import('@origintrail-official/dkg-query');
       const store = new OxigraphStore();
@@ -234,8 +184,8 @@ describe('P-13: resolveViewGraphs handles minTrust for verified-memory', () => {
       const probeSparql = 'SELECT ?s WHERE { ?s ?p ?o }';
 
       // `_minTrust=Endorsed` via the legacy key alone — the alias
-      // MUST propagate to `resolveViewGraphs`, which drops the root
-      // data graph. Result: the probe quad is no longer visible.
+      // MUST propagate to the trust metadata filter. Result: the
+      // untagged probe quad is no longer visible.
       const aliased = await engine.query(probeSparql, {
         contextGraphId: CG,
         view: 'verified-memory',
@@ -253,10 +203,9 @@ describe('P-13: resolveViewGraphs handles minTrust for verified-memory', () => {
       expect(unconstrained.bindings.length).toBeGreaterThan(0);
 
       // Explicit `minTrust` wins over `_minTrust`. With
-      // `minTrust: SelfAttested` the root graph stays in scope even
-      // when `_minTrust: Endorsed` would drop it, so the probe quad
-      // surfaces again — rules out the "alias overrides explicit
-      // field" bug.
+      // `minTrust: SelfAttested` no trust filter is applied, so the
+      // probe quad surfaces again and rules out the "alias overrides
+      // explicit field" bug.
       const precedence = await engine.query(probeSparql, {
         contextGraphId: CG,
         view: 'verified-memory',
@@ -291,9 +240,8 @@ describe('P-13: resolveViewGraphs handles minTrust for verified-memory', () => {
       // `DKGAgent.query` collapses `opts.minTrust ?? opts._minTrust`
       // before calling `engine.query`, so by the time the engine sees
       // it, only `minTrust` is set. The engine must honour that
-      // contract and apply the graph-scope resolution — specifically
-      // above-SelfAttested drops the root data graph, so the probe
-      // quad (which lives in the root graph) must not be returned.
+      // contract and apply the trust metadata filter; the untagged
+      // root-graph quad must not be returned.
       const aboveEndorsed = await engine.query(
         'SELECT ?s WHERE { ?s ?p ?o }',
         {
@@ -348,17 +296,13 @@ describe('P-13: resolveViewGraphs handles minTrust for verified-memory', () => {
   );
 
   it(
-    'verifiedGraph + minTrust=Endorsed is ALLOWED on the exact-graph path ' +
-      '(Codex PR #239 iter-6: the previous iteration rejected any minTrust above ' +
-      'SelfAttested on this path, but every `/_verified_memory/<id>` graph is ' +
-      'populated only by quorum-verified writes so it already satisfies Endorsed)',
+    'verifiedGraph + minTrust is ALLOWED on the exact-graph path and enforced by trust tags',
     async () => {
       const { OxigraphStore } = await import('@origintrail-official/dkg-storage');
       const { DKGQueryEngine } = await import('@origintrail-official/dkg-query');
       const store = new OxigraphStore();
       const engine = new DKGQueryEngine(store);
 
-      // Happy path: Endorsed + verifiedGraph → empty result, no throw.
       await expect(
         engine.query('SELECT ?s WHERE { ?s ?p ?o }', {
           contextGraphId: CG,
@@ -368,7 +312,6 @@ describe('P-13: resolveViewGraphs handles minTrust for verified-memory', () => {
         }),
       ).resolves.toBeDefined();
 
-      // Values ABOVE Endorsed must still be rejected (same Q-1 reason).
       await expect(
         engine.query('SELECT ?s WHERE { ?s ?p ?o }', {
           contextGraphId: CG,
@@ -376,19 +319,15 @@ describe('P-13: resolveViewGraphs handles minTrust for verified-memory', () => {
           verifiedGraph: 'some-quorum',
           minTrust: TrustLevel.PartiallyVerified,
         }),
-      ).rejects.toThrow(/cannot be combined with minTrust above Endorsed/);
+      ).resolves.toBeDefined();
     },
   );
 
   it(
-    'zero-graph resolution respects query form ' +
-      '(Codex PR #239 iter-5: returning `{ bindings: [] }` for an ASK/CONSTRUCT ' +
-      'breaks the SPARQL response contract)',
+    'empty trust-filtered results respect query form',
     async () => {
-      // A `verified-memory` query with `minTrust=Endorsed` on a context
-      // graph that has zero `/_verified_memory/*` sub-graphs resolves to
-      // an empty graph set. Each query form must still return a shape
-      // that matches its spec:
+      // A `verified-memory` query with `minTrust=Endorsed` and no matching
+      // trust metadata must still return a shape that matches its query form:
       //   - SELECT  → { bindings: [] }
       //   - ASK     → { bindings: [{ result: 'false' }] }
       //   - CONSTRUCT/DESCRIBE → { bindings: [], quads: [] }

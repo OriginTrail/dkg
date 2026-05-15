@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback, useEffect, useLayoutEffect } from 'react';
+import React, { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo } from 'react';
 import { useJourneyStore } from '../../stores/journey.js';
 import { useProjectsStore, type ContextGraph } from '../../stores/projects.js';
 import {
@@ -29,6 +29,7 @@ import { useDropzone } from 'react-dropzone';
 import { ArrowDown, ArrowUp, Ban, ChevronDown, ChevronRight, Folder, Loader2, MoreHorizontal, Paperclip, Square, Upload, X } from 'lucide-react';
 import { Select } from '../common/Select.js';
 import { MarkdownMessage } from '../chat/MarkdownMessage.js';
+import { computeSelectableProjects, toSidebarIdentity } from '../../lib/contextGraphSidebar.js';
 
 export interface LocalAgentMessage {
   id: string;
@@ -410,8 +411,23 @@ function renderMessageContent(
   content: string,
   role: 'user' | 'assistant',
   synthesized: boolean,
+  streaming: boolean,
 ): React.ReactNode {
   const normalized = normalizeMessageContent(content);
+  // Pre-first-token wait: an assistant turn starts as `{ streaming:
+  // true, content: '' }`. The inline streaming caret lives inside the
+  // last text node, so with no content yet there is nothing to anchor
+  // it to and the row would render blank. Show an explicit animated
+  // "Thinking…" indicator until the first token arrives, at which
+  // point this falls through to the markdown path (whose inline caret
+  // then takes over). `role=status`/`aria-live` announces it to AT.
+  if (role === 'assistant' && streaming && normalized.trim() === '') {
+    return (
+      <span className="v10-chat-thinking" role="status" aria-live="polite">
+        Thinking…
+      </span>
+    );
+  }
   // Markdown rendering applies only to agent-authored assistant output
   // — the only content that's actually written as markdown. Everything
   // else falls back to plain text:
@@ -425,9 +441,16 @@ function renderMessageContent(
   //     bubble (CFNsU / CFXYU / CGpe9). The CFThj relative-link guard
   //     doesn't help — those hrefs are absolute and allowed.
   if (role === 'assistant' && !synthesized) {
-    return <MarkdownMessage content={normalized} />;
+    return <MarkdownMessage content={normalized} streaming={streaming} />;
   }
-  return <span className="v10-chat-plaintext">{normalized}</span>;
+  // Plaintext path (user / synthetic): keep the caret inline with the
+  // text rather than as a block sibling that drops to a new line.
+  return (
+    <span className="v10-chat-plaintext">
+      {normalized}
+      {streaming && <span className="v10-chat-cursor" />}
+    </span>
+  );
 }
 
 export function getLocalAgentConversationStateKey(
@@ -939,6 +962,10 @@ export function ConnectedAgentsTab(props: {
   localSending: boolean;
   activeProjectId: string | null;
   availableProjects: ContextGraph[];
+  /** Membership-filtered subset for the project picker (see container).
+   *  Optional: defaults to the full `availableProjects` so any renderer
+   *  that doesn't supply it keeps the pre-PR5 behaviour. */
+  selectableProjects?: ContextGraph[];
   projectsLoading: boolean;
   onSelectProject: (projectId: string) => void;
   attachments: LocalAgentAttachmentDraft[];
@@ -976,6 +1003,9 @@ export function ConnectedAgentsTab(props: {
     onAddAttachments,
     onRemoveAttachment,
   } = props;
+  // Defaults to the full list when a renderer doesn't supply the
+  // membership-filtered subset (the real container always does).
+  const selectableProjects = props.selectableProjects ?? availableProjects;
   const selectedAttachmentDrafts = attachments;
   const hasSendableAttachmentDrafts = selectedAttachmentDrafts.some(isSendableAttachmentDraft);
   const attachmentTargetIds = [...new Set(selectedAttachmentDrafts.map((attachment) => attachment.contextGraphId))];
@@ -1362,8 +1392,12 @@ export function ConnectedAgentsTab(props: {
               {localMessages.map((message) => (
                 <div key={message.id} className={`v10-chat-msg ${message.role}`}>
                   <div className={`v10-chat-bubble ${message.role}`}>
-                    {renderMessageContent(message.content, message.role, Boolean(message.synthesized))}
-                    {message.streaming && <span className="v10-chat-cursor" />}
+                    {renderMessageContent(
+                      message.content,
+                      message.role,
+                      Boolean(message.synthesized),
+                      Boolean(message.streaming),
+                    )}
                   </div>
                   {message.attachments && message.attachments.length > 0 && (
                     <div className="v10-local-agent-attachment-row" style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 }}>
@@ -1584,14 +1618,14 @@ export function ConnectedAgentsTab(props: {
                               ...(activeProjectId
                                 ? [{ value: '', label: 'No project (clear selection)' }]
                                 : []),
-                              ...availableProjects.map((project) => ({ value: project.id, label: project.name })),
+                              ...selectableProjects.map((project) => ({ value: project.id, label: project.name })),
                             ]}
                             placeholder={projectsLoading ? 'Loading projects…' : 'Choose a project'}
                             // Disable while loading. When no project is active
                             // and the list is empty there's nothing to pick
                             // yet, so disable then too — once a project is
                             // active the clear row is always there.
-                            disabled={projectsLoading || (!activeProjectId && availableProjects.length === 0)}
+                            disabled={projectsLoading || (!activeProjectId && selectableProjects.length === 0)}
                             ariaLabel="Active project"
                             prefixIcon={<Folder size={12} aria-hidden="true" />}
                           />
@@ -1978,6 +2012,23 @@ export function PanelRight() {
   const projectsLoading = useProjectsStore((state) => state.loading);
   const activeProjectId = useProjectsStore((state) => state.activeProjectId);
   const setActiveProject = useProjectsStore((state) => state.setActiveProject);
+
+  // The project picker must mirror the left sidebar's "My projects"
+  // *membership* (created/joined), not the full context-graph list —
+  // same `belongsInMyProjectsSidebar` predicate PanelLeft uses. The
+  // local "hidden from sidebar" dismissal is intentionally NOT applied
+  // here: hiding a project from the sidebar must not stop you posting
+  // chat to it. Other `availableProjects` consumers
+  // (getProjectDisplayName, buildChatContextEntries) deliberately keep
+  // the full list — only the picker is membership-scoped.
+  const selectableProjects = useMemo(
+    () => computeSelectableProjects(
+      availableProjects,
+      currentAgent ? toSidebarIdentity(currentAgent) : null,
+      activeProjectId,
+    ),
+    [availableProjects, currentAgent, activeProjectId],
+  );
 
   const localSessions = summarizeLocalAgentSessions(memorySessions, integrations);
   const {
@@ -2692,6 +2743,7 @@ export function PanelRight() {
           localSending={localSending}
           activeProjectId={activeProjectId}
           availableProjects={availableProjects}
+          selectableProjects={selectableProjects}
           projectsLoading={projectsLoading}
           onSelectProject={handleSelectProject}
           attachments={selectedAttachmentDrafts}

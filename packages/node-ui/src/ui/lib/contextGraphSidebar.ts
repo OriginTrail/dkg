@@ -13,6 +13,15 @@ export interface AgentSidebarIdentity {
   peerId?: string;
 }
 
+/**
+ * Narrow the full agent identity to the fields the sidebar predicates need.
+ * Structural param (not `api.AgentIdentity`) so this shared lib stays
+ * decoupled from the api layer; both panels pass an object that satisfies it.
+ */
+export function toSidebarIdentity(a: { agentDid: string; peerId?: string }): AgentSidebarIdentity {
+  return { agentDid: a.agentDid, peerId: a.peerId };
+}
+
 function normalizeAccessPolicy(raw?: string): 'public' | 'private' | 'unknown' {
   if (!raw?.trim()) return 'unknown';
   const t = raw.trim().replace(/^["']|["']$/g, '').toLowerCase();
@@ -48,6 +57,28 @@ export function belongsInMyProjectsSidebar(cg: ContextGraph, identity: AgentSide
     return true;
   }
   return false;
+}
+
+/**
+ * Projects offered by the chat composer's project picker: the agent's
+ * "My projects" *membership* set (same predicate as the sidebar), with
+ * one coherence rule — if `activeProjectId` is set but isn't a member
+ * project, it is still surfaced (prepended) so the picker shows the
+ * true active target instead of silently falling back to the
+ * placeholder. The local "hidden from sidebar" dismissal is
+ * deliberately NOT applied here.
+ */
+export function computeSelectableProjects(
+  available: ContextGraph[],
+  identity: AgentSidebarIdentity | null,
+  activeProjectId: string | null,
+): ContextGraph[] {
+  const mine = available.filter((cg) => belongsInMyProjectsSidebar(cg, identity));
+  if (activeProjectId && !mine.some((cg) => cg.id === activeProjectId)) {
+    const active = available.find((cg) => cg.id === activeProjectId);
+    if (active) return [active, ...mine];
+  }
+  return mine;
 }
 
 /**
