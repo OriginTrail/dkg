@@ -5,7 +5,6 @@ import { renderToStaticMarkup } from 'react-dom/server';
 let ConnectedAgentsTab: any;
 let adoptLocalAgentTurnId: any;
 let formatLocalTimestamp: any;
-let unescapeNewlinesFromHistory: any;
 let getLocalAgentConversationStateKey: any;
 let markLocalAgentIntegrationDisconnected: any;
 let networkPeerCardStatusClass: any;
@@ -52,7 +51,6 @@ beforeAll(async () => {
   shouldPreserveSessionForIntegrationSelection = panelRight.shouldPreserveSessionForIntegrationSelection;
   shouldPreserveSessionOnReconnect = panelRight.shouldPreserveSessionOnReconnect;
   upsertLocalAgentIntegrationState = panelRight.upsertLocalAgentIntegrationState;
-  unescapeNewlinesFromHistory = panelRight.unescapeNewlinesFromHistory;
 });
 
 function integration(overrides: Record<string, unknown> = {}) {
@@ -161,56 +159,6 @@ describe('PanelRight logic helpers', () => {
     expect(formatLocalTimestamp(undefined)).toBe('');
     expect(formatLocalTimestamp('')).toBe('');
     expect(formatLocalTimestamp('not-a-date')).toBe('not-a-date');
-  });
-
-  it('unescapeNewlinesFromHistory: decodes only at structural boundaries (Codex CLWmd / CNGB8 / CSI-f)', () => {
-    // Persisted markdown (paragraph break) → decode.
-    expect(unescapeNewlinesFromHistory('para one\\n\\npara two')).toBe('para one\n\npara two');
-    // Heading marker → boundary `\\n` decodes.
-    expect(unescapeNewlinesFromHistory('intro\\n# Title\\n\\nbody')).toBe('intro\n# Title\n\nbody');
-    // Bullet list → decode.
-    expect(unescapeNewlinesFromHistory('intro\\n- a\\n- b')).toBe('intro\n- a\n- b');
-    // Ordered list → decode.
-    expect(unescapeNewlinesFromHistory('intro\\n1. first\\n2. second')).toBe('intro\n1. first\n2. second');
-    // Fenced code block — only the boundary `\\n` immediately before
-    // the backticks decodes. `\\n` between code lines (no marker after)
-    // stays literal — faithful display, not corruption.
-    expect(unescapeNewlinesFromHistory('explain:\\n```ts\\nfoo\\n```')).toBe('explain:\n```ts\\nfoo\n```');
-    // Table → decode (the `\\n|` boundary is the structural marker).
-    expect(unescapeNewlinesFromHistory('table:\\n| a | b |\\n|---|---|\\n| 1 | 2 |')).toBe(
-      'table:\n| a | b |\n|---|---|\n| 1 | 2 |',
-    );
-    // Blockquote → decode.
-    expect(unescapeNewlinesFromHistory('intro\\n> quoted')).toBe('intro\n> quoted');
-
-    // Codex CSI-f: a persisted message containing JSON INSIDE a fenced
-    // code block. Boundary-only decode opens the fence and preserves
-    // the JSON literal `\\n` inside (round-3 blanket-decode turned
-    // `a\\nb` into `a` + real-newline + `b`, breaking the example).
-    expect(
-      unescapeNewlinesFromHistory('Here is JSON:\\n```json\\n{"text":"a\\nb"}\\n```'),
-    ).toBe('Here is JSON:\n```json\\n{"text":"a\\nb"}\n```');
-
-    // Single-line JSON / code samples WITHOUT markdown markers →
-    // preserve (CNGB8). The `\\n` between alphanumerics or quotes
-    // matches no structural regex.
-    expect(unescapeNewlinesFromHistory('{"text":"a\\nb"}')).toBe('{"text":"a\\nb"}');
-    expect(unescapeNewlinesFromHistory('echo -e "a\\nb"')).toBe('echo -e "a\\nb"');
-    expect(unescapeNewlinesFromHistory('contains the sequence \\n as a literal')).toBe('contains the sequence \\n as a literal');
-
-    // Live content (has real newlines) → never touched, regardless of
-    // whether it also contains intentional `\\n` literals from code.
-    expect(unescapeNewlinesFromHistory('json:\n{"text":"a\\nb"}')).toBe('json:\n{"text":"a\\nb"}');
-
-    // CRLF decodes at the boundary too (Codex CLWmd secondary concern).
-    expect(unescapeNewlinesFromHistory('para one\\r\\n\\r\\npara two')).toBe('para one\n\npara two');
-    expect(unescapeNewlinesFromHistory('intro\\r\\n```ts\\r\\nfoo\\r\\n```')).toBe('intro\n```ts\\r\\nfoo\n```');
-
-    // Edge cases.
-    expect(unescapeNewlinesFromHistory(undefined)).toBe('');
-    expect(unescapeNewlinesFromHistory('')).toBe('');
-    expect(unescapeNewlinesFromHistory('plain text no newlines')).toBe('plain text no newlines');
-    expect(unescapeNewlinesFromHistory('multi\nline\nplain')).toBe('multi\nline\nplain');
   });
 
   it('per-conversation abort isolates concurrent streams (Codex CSI-j regression)', () => {

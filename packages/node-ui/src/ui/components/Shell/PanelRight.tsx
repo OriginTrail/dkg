@@ -302,109 +302,50 @@ function buildChatContextEntries(
 }
 
 /**
- * Un-escape literal backslash-n in history-loaded text — but only
- * when the text carries unambiguous "this came from the buggy
- * persistence path on markdown content" signals.
+ * NOTE: a UI-side helper used to live here that tried to un-escape
+ * literal backslash-n in history-loaded text so markdown would render
+ * after a refresh. Codex (CLWmd → CNGB8 → CSI-f → CSqGa) caught
+ * progressively narrower false-positives across four rounds — the
+ * UI simply cannot reliably distinguish "agent intended a literal
+ * `\\n`" from "persistence encoded a newline as `\\n`" without a
+ * richer signal. Removed; see the comment block in
+ * `mapHistoryMessage` below for the known issue + proper fix path.
  *
- * Background: the DKG-memory persistence layer can store message
- * text with newlines encoded as literal `\n` (backslash + the letter
- * n). When the panel reloads history, raw `\\n` shows up inline and
- * breaks markdown parsing — paragraphs run together, code fences
- * don't open, table separators don't render. Visible in PR4 user
- * testing after a refresh.
- *
- * Why this is heuristic: round-17 (Codex CHWpS) deliberately removed
- * a blanket `\\n` → `\n` rewrite from `normalizeMessageContent`
- * because it corrupted live-stream code samples — JSON like
- * `{"text":"a\\nb"}`, shell like `echo -e "a\\nb"`. Round-2 of PR4
- * re-introduced the same corruption for the history path. Codex
- * CLWmd flagged it. Round-2.1 narrowed to "no real newlines anywhere"
- * but still mangled single-line JSON examples that contain literal
- * `\\n`. Codex CNGB8 flagged that too.
- *
- * The right answer is daemon-side: the persistence layer should
- * round-trip strings faithfully (raw UTF-8 with real newlines).
- * Until that lands, this heuristic decodes only when the text
- * carries one of seven unambiguous markdown-structure markers
- * AFTER a `\\n`:
- *
- *   - `\\n\\n`     paragraph break
- *   - `\\n#`       heading
- *   - `\\n- ` / `\\n* `   bullet list
- *   - `\\n[0-9]+. `       ordered list
- *   - `\\n` + ``` + `` `` ``  fenced code block
- *   - `\\n|`       table row
- *   - `\\n>`       blockquote
- *
- * Single-line JSON-ish payloads like `{"text":"a\\nb"}` (where `\\n`
- * lives between alphanumerics or quotes) match none of these — they
- * survive unchanged. A persisted plain "line1\\nline2" two-line
- * message also doesn't match — false negative, but rare and
- * cosmetically acceptable.
- *
- * Also: text that already contains any real `\r` or `\n` is left
- * alone (live content or correctly-round-tripped persistence —
- * `\\n` in that content is intentional). `\\r\\n` is decoded ahead
- * of `\\n` so we don't half-decode CRLF (Codex CLWmd secondary
- * concern).
  */
-export function unescapeNewlinesFromHistory(text: string | undefined): string {
-  if (!text) return '';
-  if (/[\r\n]/.test(text)) return text;
-  // Pre-collapse `\\r\\n` → `\\n` for the marker check so CRLF and LF
-  // payloads share the same regex set (CRLF content like
-  // `para\\r\\n\\r\\nfoo` would otherwise miss the `\\n\\n` paragraph-
-  // break marker because the `\\n`s aren't adjacent).
-  const probe = text.replace(/\\r\\n/g, '\\n');
-  const looksLikePersistedMarkdown =
-    /\\n\\n/.test(probe)
-    || /\\n#/.test(probe)
-    || /\\n[-*]\s/.test(probe)
-    || /\\n\d+\.\s/.test(probe)
-    || /\\n```/.test(probe)
-    || /\\n\|/.test(probe)
-    || /\\n>/.test(probe);
-  if (!looksLikePersistedMarkdown) return text;
-  // Decode ONLY at structural boundaries — `\\n` immediately followed
-  // by a markdown marker. A blanket `replace(/\\n/g, '\n')` would also
-  // mangle `\\n` literals INSIDE fenced code blocks: a persisted
-  //   Here is JSON:\\n```json\\n{"text":"a\\nb"}\\n```
-  // would otherwise lose `a\\nb`'s literal escape and emit a real
-  // newline mid-string, breaking the rendered example. Codex CSI-f.
-  //
-  // Tradeoff: multi-line code blocks where the lines themselves were
-  // joined with `\\n` will still show literal `\\n` between lines
-  // because those internal `\\n`s have no structural marker after
-  // them. That's faithful-but-ugly, strictly better than the
-  // corruption blanket-decode would produce. Proper fix is daemon-side
-  // (round-trip strings as raw UTF-8 with real newlines instead of
-  // escape-encoding them).
-  //
-  // CRLF variants are paired with each LF variant; both forms get
-  // decoded at structural boundaries. `\\r\\n` outside a boundary is
-  // also left alone (same reasoning — we don't know if it's
-  // intentional in a code sample).
-  return text
-    .replace(/\\r\\n\\r\\n/g, '\n\n')
-    .replace(/\\n\\n/g, '\n\n')
-    .replace(/\\r\\n(#)/g, '\n$1').replace(/\\n(#)/g, '\n$1')
-    .replace(/\\r\\n([-*]\s)/g, '\n$1').replace(/\\n([-*]\s)/g, '\n$1')
-    .replace(/\\r\\n(\d+\.\s)/g, '\n$1').replace(/\\n(\d+\.\s)/g, '\n$1')
-    .replace(/\\r\\n(```)/g, '\n$1').replace(/\\n(```)/g, '\n$1')
-    .replace(/\\r\\n(\|)/g, '\n$1').replace(/\\n(\|)/g, '\n$1')
-    .replace(/\\r\\n(>)/g, '\n$1').replace(/\\n(>)/g, '\n$1');
-}
 
 function mapHistoryMessage(message: LocalAgentHistoryMessage): LocalAgentMessage {
   const author = message.author.toLowerCase();
-  const decodedText = unescapeNewlinesFromHistory(message.text);
-  const hasAgentText = Boolean(decodedText);
+  // KNOWN ISSUE — persisted messages whose newlines were escape-
+  // encoded by the DKG-memory persistence layer (stored as literal
+  // backslash-n, two characters, not real newline characters)
+  // display with their literal backslash-n visible on history-reload.
+  // Markdown blocks like paragraphs, code fences, and tables won't
+  // render structurally until the message is re-streamed live.
+  //
+  // History across PR4: rounds 2-5 of Codex review on PR #516 walked
+  // a UI-side decode through four progressively narrower heuristics
+  // (blanket → no-real-newlines gate → markdown-marker gate →
+  // boundary-only decode). Codex CLWmd, CNGB8, CSI-f, and CSqGa each
+  // caught a new false-positive corruption case — JSON samples,
+  // prompts discussing escape sequences, code-inside-fence payloads,
+  // short text containing markdown-looking patterns like
+  // `{"pattern":"\\n- item"}`. The fundamental issue is that the UI
+  // cannot reliably distinguish "agent intended a literal `\\n`"
+  // from "persistence encoded a newline as `\\n`" without a richer
+  // signal.
+  //
+  // Proper fix is daemon-side: the persistence path should round-
+  // trip strings faithfully — emit raw UTF-8 with real newlines
+  // instead of escape-encoding them, or carry an explicit "escaped"
+  // marker on encoded payloads so the UI can decode only confirmed-
+  // escaped content. Tracked as a follow-up.
+  const hasAgentText = Boolean(message.text);
   return {
     id: message.uri || `local-history:${++localMessageId}`,
     uri: message.uri,
     turnId: message.turnId,
     role: author.includes('assistant') || author.includes('agent') ? 'assistant' : 'user',
-    content: decodedText || buildAttachmentSummary(message.attachmentRefs ?? []),
+    content: message.text || buildAttachmentSummary(message.attachmentRefs ?? []),
     ts: formatLocalTimestamp(message.ts),
     tsRaw: toIsoTimestamp(message.ts),
     attachments: message.attachmentRefs,

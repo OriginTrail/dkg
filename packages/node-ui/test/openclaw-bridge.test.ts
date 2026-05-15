@@ -300,12 +300,7 @@ describe('PanelRight UI - connected agent flow', () => {
   });
 
   it('keeps attachment-only summary text UI-only instead of sending it back through the bridge', () => {
-    // `message.text` is now passed through `unescapeNewlinesFromHistory` first
-    // (history-load transport boundary) before falling back to a synthesized
-    // attachment summary. Pin both halves so a refactor that drops the fallback
-    // still fails the test.
-    expect(panelRight).toContain('decodedText || buildAttachmentSummary(message.attachmentRefs ?? [])');
-    expect(panelRight).toContain('unescapeNewlinesFromHistory(message.text)');
+    expect(panelRight).toContain('content: message.text || buildAttachmentSummary(message.attachmentRefs ?? [])');
     expect(panelRight).toContain('const messageText = text');
     expect(panelRight).toContain("const outboundText = text ? textWithImportSummary : '';");
     expect(panelRight).toContain('streamLocalAgentChat(integrationId, outboundText, {');
