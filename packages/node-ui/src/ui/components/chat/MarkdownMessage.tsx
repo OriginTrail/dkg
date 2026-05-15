@@ -53,8 +53,13 @@ function rehypeStreamingCaret() {
         ) {
           if (!inCode) target = { siblings: children, index: i };
         } else if (child.type === 'element') {
-          const tag = child.tagName;
-          walk(child, inCode || tag === 'code' || tag === 'pre');
+          // Only fenced/preformatted code is excluded — those text
+          // nodes are rebuilt from the raw AST by the `pre`/CodeBlock
+          // renderer so an injected sibling there is dropped. Inline
+          // code is a bare `<code>` (no `<pre>` ancestor); a stream
+          // ending in `` `inline` `` must still get the caret, so do
+          // NOT propagate `inCode` for a standalone `code` tag.
+          walk(child, inCode || child.tagName === 'pre');
         }
       }
     };

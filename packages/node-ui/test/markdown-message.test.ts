@@ -389,6 +389,18 @@ describe('MarkdownMessage streaming caret (PR5 item C)', () => {
     await unmount();
   });
 
+  it('injects the caret into a trailing INLINE code span (not skipped like fenced code)', async () => {
+    // Regression for Codex PR5: inline code is a bare <code> with no
+    // <pre> ancestor — a stream ending in `inline` must still show the
+    // caret, otherwise the message looks finished early.
+    const { container, unmount } = await renderStreaming('run `npm test`', true);
+    const inlineCode = container.querySelector('code.v10-md-code');
+    expect(inlineCode).toBeTruthy();
+    expect(inlineCode?.querySelector('.v10-chat-cursor')).toBeTruthy();
+    expect(container.querySelectorAll('.v10-chat-cursor').length).toBe(1);
+    await unmount();
+  });
+
   it('does not inject the caret into a trailing fenced code block', async () => {
     const { container, unmount } = await renderStreaming('text\n\n```\ncode line\n```', true);
     // Code content is rebuilt from the raw AST by CodeBlock, so a caret
