@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { ChatMemoryManager } from '../src/chat-memory.js';
+import { ChatMemoryManager, decodeRdfStringLiteral } from '../src/chat-memory.js';
 
 interface TrackingFn {
   (...args: unknown[]): Promise<any>;
@@ -50,6 +50,53 @@ function createTools(overrides?: {
     },
   };
 }
+
+describe('decodeRdfStringLiteral (history-text deserialization)', () => {
+  // The write path stores chat text as `JSON.stringify(text)` inside an
+  // RDF literal. `decodeRdfStringLiteral` must be the exact inverse so
+  // history reload recovers the original string faithfully (the
+  // markdown-broken-after-refresh regression). Each case constructs the
+  // literal exactly as the write path would, then asserts a clean
+  // round-trip.
+  const asRdfLiteral = (s: string) => JSON.stringify(s); // e.g. "line1\nline2"
+
+  it('round-trips multi-line markdown (real newlines survive)', () => {
+    const original = '# Heading\n\nPara one\n\n- a\n- b\n\n```ts\nconst x = 1;\n```';
+    expect(decodeRdfStringLiteral(asRdfLiteral(original))).toBe(original);
+  });
+
+  it('round-trips an intentional literal backslash-n inside JSON content', () => {
+    // The encoder writes a literal backslash-n as `\\n`; the decoder must
+    // give it back as a literal, NOT a real newline. This is the case
+    // the four PR4 UI heuristics could not get right.
+    const original = 'Here is JSON: {"text":"a\\nb"}';
+    expect(decodeRdfStringLiteral(asRdfLiteral(original))).toBe(original);
+  });
+
+  it('round-trips embedded quotes, tabs, CRLF, and unicode escapes', () => {
+    const original = 'q="x"\ttab\r\nwin-newline\nημει — dash';
+    expect(decodeRdfStringLiteral(asRdfLiteral(original))).toBe(original);
+  });
+
+  it('strips an RDF type / language annotation before decoding', () => {
+    expect(
+      decodeRdfStringLiteral(`${asRdfLiteral('a\nb')}^^<http://www.w3.org/2001/XMLSchema#string>`),
+    ).toBe('a\nb');
+    expect(decodeRdfStringLiteral(`${asRdfLiteral('hola')}@es`)).toBe('hola');
+  });
+
+  it('passes a bare / unquoted value through unchanged (parity with stripRdfLiteral)', () => {
+    expect(decodeRdfStringLiteral('not-a-literal')).toBe('not-a-literal');
+    expect(decodeRdfStringLiteral('')).toBe('');
+  });
+
+  it('falls back to the raw inner body when the literal is not valid JSON-escaped', () => {
+    // A lone trailing backslash is not a valid JSON string escape — the
+    // decoder must not throw; it returns the inner body verbatim,
+    // exactly as the old stripRdfLiteral did.
+    expect(decodeRdfStringLiteral('"bad\\"')).toBe('bad\\');
+  });
+});
 
 describe('ChatMemoryManager', () => {
   let manager: ChatMemoryManager;

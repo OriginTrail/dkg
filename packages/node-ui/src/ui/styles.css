@@ -2005,11 +2005,21 @@ button:focus:not(:focus-visible) { outline: none; }
 .v10-md-h4 { font-size: 13px; }
 .v10-md-h5 { font-size: 12px; }
 .v10-md-h6 { font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.04em; }
-.v10-md-p { margin: 4px 0; }
+/* Explicit `--text-primary` on body-text elements. A global
+   `p { color: var(--text-secondary) }` (≈styles.css:2682) would
+   otherwise win over these (bare-element specificity 0,0,1 beats
+   inherited color from an ancestor). Before PR4 the assistant bubble's
+   own `color: var(--text-primary)` masked it; with the bubble removed
+   full-width assistant prose was inheriting the dim global and reading
+   as unreadable muted gray in dark mode. The `.v10-md-*` class
+   selectors (0,1,0) beat the global `p` cleanly. Headings already set
+   this explicitly; blockquote / links / code / h6 keep their
+   intentional non-primary colors. */
+.v10-md-p { margin: 4px 0; color: var(--text-primary); }
 .v10-md-ul, .v10-md-ol { margin: 4px 0; padding-left: 20px; }
 .v10-md-ul { list-style: disc; }
 .v10-md-ol { list-style: decimal; }
-.v10-md-li { margin: 2px 0; }
+.v10-md-li { margin: 2px 0; color: var(--text-primary); }
 .v10-md-li > .v10-md-ul, .v10-md-li > .v10-md-ol { margin: 2px 0; padding-left: 18px; }
 /* Task lists (remark-gfm) */
 .v10-md-ul .v10-md-li input[type="checkbox"] {
@@ -2091,9 +2101,12 @@ button:focus:not(:focus-visible) { outline: none; }
   white-space: nowrap;
 }
 .v10-md-td {
+  /* Table data is primary content, not metadata — `--text-secondary`
+     read as dim/unreadable on the no-bubble dark panel (same root
+     cause as `.v10-md-p`). Match the header (`--text-primary`). */
   padding: 6px 10px;
   border-bottom: 1px solid var(--border-subtle);
-  color: var(--text-secondary);
+  color: var(--text-primary);
   vertical-align: top;
 }
 .v10-md-tr:last-child .v10-md-td { border-bottom: 0; }
