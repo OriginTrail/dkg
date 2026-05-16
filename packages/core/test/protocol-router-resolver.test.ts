@@ -109,18 +109,23 @@ describe('ProtocolRouter.send + PeerResolver', () => {
 
   it('passes AbortSignal + perStepTimeoutMs to resolver (PR #497 round 1)', async () => {
     // Separate from the call-ordering test above so each test asserts
-    // one property. Pre-warming the connection here is fine — we're
-    // testing what arguments the resolver receives, not the priming
-    // side-effect.
+    // one property. The peers MUST be cold (no pre-dial) for the
+    // resolver to be consulted: after the May 2026 soak postmortem
+    // PR introduced the existing-connection fast path in
+    // `protocol-router.ts`, a pre-dialed peer would short-circuit
+    // through `tryReuseExistingConnection` and the resolver would
+    // never be called. Keeping the peers cold here keeps the test
+    // honestly exercising the resolver path it claims to test.
     const a = spawn();
     const b = spawn();
     await a.start();
     await b.start();
-    await a.libp2p.dial(multiaddr(b.multiaddrs[0]));
-    await new Promise((r) => setTimeout(r, 300));
 
-    const resolveSpy = vi.fn(async () => []);
     const networkA = new LibP2PNetwork(a);
+    const resolveSpy = vi.fn(async (_peerId, _opts) => {
+      await networkA.addKnownAddresses(b.peerId, [b.multiaddrs[0]]);
+      return [b.multiaddrs[0]];
+    });
     const resolver = new PeerResolver({
       network: networkA,
       registry: new StubNetworkStateRegistry(),
@@ -146,9 +151,25 @@ describe('ProtocolRouter.send + PeerResolver', () => {
     expect(opts).toBeDefined();
     expect(opts.signal).toBeInstanceOf(AbortSignal);
     expect(typeof opts.perStepTimeoutMs).toBe('number');
+
+    // Same brief settle as the "primes peerStore" test above so
+    // libp2p's incoming-stream cleanup on B can drain before
+    // `afterEach` tears the nodes down — otherwise the cold-dial
+    // produces an unhandled rejection from
+    // `Connection.onIncomingStream → stream.abort` racing the
+    // stop sequence.
+    await new Promise((r) => setTimeout(r, 50));
   }, 15000);
 
   it('resolver throwing does not block send (best-effort)', async () => {
+    // Pre-dial so the existing-connection fast path is the one that
+    // ultimately delivers the message — proves that even if the
+    // resolver layer is broken/throwing, send still succeeds against
+    // a live connection. This is the strictly stronger version of
+    // the previous assertion (which required resolver+dialProtocol
+    // to be tolerant of resolver-throw): the fast path makes the
+    // resolver irrelevant on the warm path, so the broken-resolver
+    // assertion shrinks to "irrelevant code can't break send".
     const a = spawn();
     const b = spawn();
     await a.start();
@@ -181,7 +202,12 @@ describe('ProtocolRouter.send + PeerResolver', () => {
       enc.encode('hi'),
     );
     expect(dec.decode(response)).toBe('ok:hi');
-    expect(resolveSpy).toHaveBeenCalledOnce();
+    // Warm path: fast-path reuse of the existing connection sends
+    // the bytes WITHOUT consulting the resolver. The previous
+    // assertion (`toHaveBeenCalledOnce`) reflected the pre-PR-5
+    // shape where every send always paid the resolver cost; with
+    // PR 5 the resolver is only called on a fast-path miss.
+    expect(resolveSpy).not.toHaveBeenCalled();
   }, 15000);
 
   it('omitting peerResolver preserves legacy behaviour (no consult, direct dial)', async () => {
