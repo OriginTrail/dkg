@@ -302,5 +302,71 @@ describe('p2p resilience hooks', () => {
         await agent.stop().catch(() => {});
       }
     }, 15_000);
+
+    // User review on PR #536: the `connection:open` listener used to
+    // call `enrichPeerStoreFromInboundCircuit` and
+    // `processMessageOutboxOnConnect` in parallel fire-and-forget,
+    // which meant the first outbox flush attempt could still hit
+    // `dialProtocol` against an EMPTY peerStore — exact same "no
+    // valid addresses for peer" failure the PR is meant to heal.
+    // Fix wraps both in a sequential IIFE so the flush sees the
+    // freshly-merged reverse-path address. Pin the ordering.
+    it('awaits enrichment BEFORE the outbox flush on inbound circuit open (PR #536 review)', async () => {
+      const agent = await DKGAgent.create({
+        name: 'ReversePathEnrichBeforeFlush',
+        listenHost: '127.0.0.1',
+        chainAdapter: new MockChainAdapter(),
+      });
+      try {
+        await agent.start();
+
+        const events: string[] = [];
+        let enrichResolve: (() => void) | null = null;
+        const enrichDone = new Promise<void>((r) => { enrichResolve = r; });
+
+        // Slow enrichment by 80ms so flush ordering is observable even if
+        // microtask queue races sneak in. We push markers in BOTH methods
+        // and the assertion is purely temporal — enrich-finish must precede
+        // flush-start, no overlapping window.
+        (agent as any).enrichPeerStoreFromInboundCircuit = async () => {
+          events.push('enrich:start');
+          await new Promise(r => setTimeout(r, 80));
+          events.push('enrich:end');
+          enrichResolve?.();
+        };
+        (agent as any).processMessageOutboxOnConnect = async () => {
+          events.push('flush:start');
+        };
+
+        const remotePeer = freshPeerIdString();
+        const relayPeer = freshPeerIdString();
+        agent.node.libp2p.dispatchEvent(new CustomEvent('connection:open', {
+          detail: {
+            remotePeer: { toString: () => remotePeer },
+            remoteAddr: {
+              toString: () =>
+                `/ip4/1.2.3.4/tcp/4001/p2p/${relayPeer}/p2p-circuit`,
+            },
+            direction: 'inbound',
+            timeline: { open: Date.now() },
+          },
+        } as any));
+
+        await enrichDone;
+        // Give the IIFE one more tick to schedule the flush.
+        await new Promise(r => setTimeout(r, 50));
+
+        expect(events).toContain('enrich:start');
+        expect(events).toContain('enrich:end');
+        expect(events).toContain('flush:start');
+        // The critical ordering: enrich:end MUST appear before flush:start.
+        // If the listener went back to parallel fire-and-forget, enrich:end
+        // would appear AFTER flush:start (since flush is synchronous and
+        // enrich sleeps 80ms).
+        expect(events.indexOf('enrich:end')).toBeLessThan(events.indexOf('flush:start'));
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    }, 15_000);
   });
 });

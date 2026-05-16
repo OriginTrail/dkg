@@ -2364,15 +2364,49 @@ export class DKGAgent {
         this.log.warn(ctx, `Opportunistic join-approval retry on connect failed for ${remotePeer}: ${message}`);
       });
 
-      // Symmetric flush for the chat outbox: any messages we tried to
-      // send to this peer while they were unreachable get a fresh
-      // delivery attempt now that the peer is back. Independent of
-      // the join-approval flush above (different queue, different
-      // payload shape), but same opportunistic-on-reconnect rationale.
-      this.processMessageOutboxOnConnect(remotePeer).catch((err: unknown) => {
-        const message = err instanceof Error ? err.message : String(err);
-        this.log.warn(ctx, `Opportunistic message-outbox retry on connect failed for ${remotePeer}: ${message}`);
-      });
+      // Reverse-path peerStore enrichment for inbound circuit-relay
+      // connections, then the symmetric chat-outbox flush.
+      //
+      // Closes the "Window D" class from the May 2026 Miles↔Lex 6h
+      // soak postmortem: an inbound circuit connection from peer P
+      // via relay R was open and live, but every
+      // `dialProtocol(P, ...)` retry on our side failed with "no
+      // valid addresses for peer" because P's identify-push didn't
+      // replicate the reservation address into our peerStore.
+      // Echoing the inbound circuit's relay back as an outbound
+      // multiaddr for P (`<R>/p2p-circuit/p2p/<P>`) lets the next
+      // dialProtocol find an address and try it.
+      //
+      // User review on PR #536 caught the original ordering bug:
+      // running enrichment and the outbox flush in parallel
+      // fire-and-forget meant the first flush attempt could
+      // still hit `dialProtocol` against an EMPTY peerStore and
+      // fail with the same "no valid addresses" error this PR is
+      // meant to heal — pushing recovery onto the next 30s tick
+      // or another reconnect. Sequence the two: await enrichment
+      // first, then flush. Both stay wrapped in their own
+      // try/catch so an enrichment failure logs a warning and
+      // still lets the outbox flush proceed (it might succeed
+      // anyway via a stale-but-usable cached path).
+      //
+      // The whole chain runs as a fire-and-forget IIFE so the
+      // listener itself doesn't await — libp2p's
+      // `connection:open` emitter is synchronous and we don't
+      // want to slow down other listeners.
+      void (async () => {
+        try {
+          await this.enrichPeerStoreFromInboundCircuit(evt.detail);
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : String(err);
+          this.log.warn(ctx, `Reverse-path peerStore enrichment failed for ${remotePeer}: ${message}`);
+        }
+        try {
+          await this.processMessageOutboxOnConnect(remotePeer);
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : String(err);
+          this.log.warn(ctx, `Opportunistic message-outbox retry on connect failed for ${remotePeer}: ${message}`);
+        }
+      })();
 
       const now = Date.now();
       const last = this.catchupOnConnectAt.get(remotePeer) ?? 0;
@@ -9553,6 +9587,85 @@ export class DKGAgent {
         );
       }
     }
+  }
+
+  /**
+   * "Reverse-path peerStore enrichment" — when an inbound circuit-relay
+   * connection from peer P via relay R opens, echo the inbound circuit
+   * back as an outbound multiaddr for P (`<R>/p2p-circuit/p2p/<P>`)
+   * and merge it into the local peerStore.
+   *
+   * The Miles↔Lex May 2026 6h soak postmortem identified the "Window D"
+   * class: an inbound circuit connection from P was open and live, but
+   * every `libp2p.dialProtocol(P, ...)` retry on our side failed with
+   * "The dial request has no valid addresses for peer" for several
+   * minutes. Daemon logs showed 31 `connection:open` events from P
+   * (all inbound, all via R) + 20 opportunistic-flush attempts, all
+   * failing dialProtocol — and then the moment ONE outbound connection
+   * succeeded (which populated peerStore from outbound identify), the
+   * very next opportunistic-flush delivered the queued message.
+   *
+   * The clean fix would be inside libp2p (`dialProtocol` should reuse
+   * an existing open connection of any direction — see PR 5 in the
+   * postmortem follow-up plan), but until that lands, populating
+   * peerStore from the inbound circuit's address gives the dialer
+   * something to find on the very next attempt.
+   *
+   * Public so a unit test can exercise it directly without standing up
+   * a full libp2p network (the listener that calls it is registered
+   * inside the giant `start()` method and is not easily mockable
+   * end-to-end).
+   *
+   * Guarantees:
+   * - Direct connections are a no-op (nothing to enrich — the dialer
+   *   already has the address it used to open the connection).
+   * - Outbound connections are a no-op (peerStore was already
+   *   populated to make the dial; re-merging the same address is
+   *   harmless but pointless).
+   * - Throws are swallowed by the caller's `.catch()` — the
+   *   `connection:open` listener must never propagate exceptions.
+   * - Merging an address libp2p already knows about is a no-op
+   *   (`peerStore.merge` dedupes internally).
+   *
+   * Trade-off (referenced from `docs/archive/UPSTREAM_ISSUE_DRAFT.md`):
+   * `peerStore.merge` can wake the connection manager to dial direct,
+   * which has been observed to disrupt streams mid-negotiation. We're
+   * NOT in mid-negotiation here (the call runs from
+   * `connection:open`, not from inside `newStream`), and the address
+   * we're merging IS the same relay path that the inbound connection
+   * already uses — so the worst case is the CM redundantly dialing
+   * out through R, which is exactly what we want.
+   */
+  async enrichPeerStoreFromInboundCircuit(connection: {
+    direction: 'inbound' | 'outbound';
+    remoteAddr?: { toString(): string };
+    remotePeer: { toString(): string };
+  }): Promise<void> {
+    if (connection.direction !== 'inbound') return;
+    const remoteStr = connection.remoteAddr?.toString();
+    if (!remoteStr) return;
+    const circIdx = remoteStr.indexOf('/p2p-circuit');
+    if (circIdx < 0) return;
+
+    const remotePeer = connection.remotePeer.toString();
+    if (remotePeer === this.node.libp2p.peerId.toString()) return;
+
+    // Reverse-path multiaddr: take the relay prefix up to (but not
+    // including) the `/p2p-circuit` segment, append the canonical
+    // `/p2p-circuit/p2p/<P>` suffix. Works whether the inbound
+    // remoteAddr ends at `/p2p-circuit` (the typical listener-side
+    // shape) OR already includes a trailing `/p2p/<self>` (defensive
+    // — older libp2p versions and some test transports surface the
+    // explicit-destination shape). Slicing on the FIRST occurrence
+    // of `/p2p-circuit` is correct either way.
+    const relayPrefix = remoteStr.slice(0, circIdx);
+    const reverseAddrStr = `${relayPrefix}/p2p-circuit/p2p/${remotePeer}`;
+
+    const { peerIdFromString } = await import('@libp2p/peer-id');
+    const { multiaddr } = await import('@multiformats/multiaddr');
+    const pid = peerIdFromString(remotePeer);
+    const reverseAddr = multiaddr(reverseAddrStr);
+    await this.node.libp2p.peerStore.merge(pid, { multiaddrs: [reverseAddr] });
   }
 
   /**
