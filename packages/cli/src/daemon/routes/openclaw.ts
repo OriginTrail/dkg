@@ -418,6 +418,7 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
         peer: peerId,
         text,
         delivered: sendResult.delivered,
+        messageId: sendResult.messageId,
       });
     } catch {
       /* never crash */

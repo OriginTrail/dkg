@@ -587,12 +587,19 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
     ]);
     const sendDur = Date.now() - sendT0;
     try {
+      // Store the sender-assigned `messageId` so an operator who
+      // refreshes the chat panel during an outbox-retry sequence
+      // doesn't see N copies of the same logical outbound message —
+      // each retry attempt reuses the same `messageId` (see
+      // `DKGAgent.sendChat` / `retryOutboxEntry`), so the dedup
+      // index suppresses the duplicate inserts.
       dashDb.insertChatMessage({
         ts: Date.now(),
         direction: "out",
         peer: peerId,
         text,
         delivered: result.delivered,
+        messageId: result.messageId,
       });
     } catch {
       /* never crash */

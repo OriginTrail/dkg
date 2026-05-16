@@ -4461,12 +4461,20 @@ export class DKGAgent {
     options: { contextGraphId?: string; messageId?: string } = {},
   ): Promise<ChatSendResult> {
     if (!this.messageHandler) throw new Error('Agent not started');
-    // Per-send unique id for the outbox key. Caller-supplied wins so a
-    // higher-level component (e.g. the MCP tool layer or a UI) that
-    // wants to correlate retries with its own bookkeeping can pass its
-    // own id. Default is a uuidv4 from `node:crypto`.
+    // Per-send unique id for the outbox key AND the on-wire receiver
+    // dedup key. Caller-supplied wins so a higher-level component
+    // (e.g. the MCP tool layer or a UI) that wants to correlate
+    // retries with its own bookkeeping can pass its own id. Default
+    // is a uuidv4 from `node:crypto`. The same id is forwarded into
+    // the encrypted payload via `messageHandler.sendChat`, where the
+    // receiver's `idx_chat_msgid` partial unique index uses it to
+    // drop the seq=13 class of multi-path-race duplicates from the
+    // May 2026 soak postmortem.
     const messageId = options.messageId ?? crypto.randomUUID();
-    const result = await this.messageHandler.sendChat(recipientPeerId, text, options);
+    const result = await this.messageHandler.sendChat(recipientPeerId, text, {
+      ...options,
+      messageId,
+    });
 
     if (result.delivered) {
       // Successful delivery clears any pending retry from a prior
@@ -9487,8 +9495,17 @@ export class DKGAgent {
       return;
     }
     try {
+      // Forward the outbox entry's `messageId` into the wire-format
+      // payload so the receiver's `idx_chat_msgid` partial unique
+      // index recognises the retry as the same logical message as
+      // the original send (or any prior retry) and dedupes it. This
+      // is the receiver-side complement to the sender-side
+      // inflight-guard above: even if both layers race a duplicate
+      // through, the receiver still sees only one row in
+      // `chat_messages`.
       const result = await this.messageHandler.sendChat(entry.recipientPeerId, entry.text, {
         contextGraphId: entry.contextGraphId,
+        messageId: entry.messageId,
       });
       if (result.delivered) {
         this.messageOutbox.markDelivered(entry.recipientPeerId, entry.messageId);

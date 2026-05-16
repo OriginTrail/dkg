@@ -62,6 +62,15 @@ export type ChatHandler = (
   // an unverified attacker-controllable claim outside scoped/shared-CG
   // modes; consumers MUST prefer `verifiedContextGraphId` for display.
   verifiedContextGraphId?: string,
+  // Optional sender-assigned message id (UUID v4 by default, see
+  // `DKGAgent.sendChat` → `options.messageId`). Receivers use it to
+  // deduplicate messages that arrived twice on parallel transport
+  // paths (e.g. happy-eyeballs racing two relay legs, both winning,
+  // both delivering the same encrypted payload). Older senders that
+  // don't include the field pass `undefined`; the receiver's storage
+  // layer treats it as "no dedup possible" and inserts the row
+  // unconditionally — i.e. legacy on-the-wire behaviour is preserved.
+  messageId?: string,
 ) => void | Promise<void>;
 
 /**
@@ -169,7 +178,7 @@ export class MessageHandler {
   async sendChat(
     recipientPeerId: string,
     text: string,
-    options: { contextGraphId?: string } = {},
+    options: { contextGraphId?: string; messageId?: string } = {},
   ): Promise<{ delivered: boolean; error?: string }> {
     try {
       const conversationId = bytesToHex(randomBytes(16));
@@ -187,10 +196,22 @@ export class MessageHandler {
       // chat to a CG (e.g. for the receiver's `scoped`/`shared-context-graph`
       // ACL modes). Older receivers that don't know the field will simply
       // ignore it — backwards-compatible JSON addition.
+      //
+      // `messageId` is the sender-assigned dedup key (V11+ receivers use
+      // it to drop duplicates of the same encrypted payload arriving on
+      // parallel transport paths — the seq=13 class from the May 2026
+      // soak postmortem). Same back-compat shape: older receivers
+      // ignore the field; older senders omit it and receivers fall back
+      // to insert-without-dedup. `MessageOutbox` retries that resend
+      // the same logical message MUST reuse the same `messageId` so the
+      // dedup index recognises them — `DKGAgent.sendChat` and
+      // `retryOutboxEntry` both already key off the outbox entry's
+      // `messageId` for exactly this reason.
       const payload = new TextEncoder().encode(JSON.stringify({
         type: 'chat',
         text,
         ...(options.contextGraphId ? { contextGraphId: options.contextGraphId } : {}),
+        ...(options.messageId ? { messageId: options.messageId } : {}),
       }));
 
       const nonce = buildNonce(conversationId, 1);
@@ -401,6 +422,11 @@ export class MessageHandler {
       const text = (parsed.text as string) ?? '';
       const senderContextGraphId =
         typeof parsed.contextGraphId === 'string' ? parsed.contextGraphId : undefined;
+      // Pre-V11 senders omit this; missing or non-string ⇒ undefined ⇒
+      // receiver's dedup layer treats the row as un-dedupable and
+      // inserts unconditionally (legacy on-wire behaviour preserved).
+      const senderMessageId =
+        typeof parsed.messageId === 'string' ? parsed.messageId : undefined;
 
       // Authorisation check (layered on top of the existing Ed25519
       // signature check above). When unset, all authenticated senders are
@@ -455,6 +481,7 @@ export class MessageHandler {
             convId,
             senderContextGraphId,
             verifiedContextGraphId,
+            senderMessageId,
           );
         } catch (err) {
           console.error(`[Messaging] chat handler error:`, err instanceof Error ? err.message : err);

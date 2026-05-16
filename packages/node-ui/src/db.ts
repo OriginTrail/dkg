@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { join } from 'node:path';
 
-const SCHEMA_VERSION = 10;
+const SCHEMA_VERSION = 11;
 const DEFAULT_RETENTION_DAYS = 90;
 
 export interface DashboardDBOptions {
@@ -155,6 +155,12 @@ export class DashboardDB {
     }
 
     if (version < 3) {
+      // The `message_id` column landed in V11 (chat receiver-side dedup
+      // after the May 2026 soak postmortem's seq=13 duplicate finding).
+      // We add it to the fresh-install CREATE so new nodes get the
+      // column + the partial unique index in one step; the V11 block
+      // below idempotently adds the column to nodes that upgraded
+      // through versions 3..10 first.
       this.db.exec(`
         CREATE TABLE IF NOT EXISTS chat_messages (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -163,7 +169,8 @@ export class DashboardDB {
           peer TEXT NOT NULL,
           peer_name TEXT,
           text TEXT NOT NULL,
-          delivered INTEGER
+          delivered INTEGER,
+          message_id TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_chat_ts ON chat_messages(ts);
         CREATE INDEX IF NOT EXISTS idx_chat_peer ON chat_messages(peer);
@@ -299,6 +306,54 @@ export class DashboardDB {
           this.db.exec(`ALTER TABLE metric_snapshots ADD COLUMN ${col} INTEGER;`);
         }
       }
+    }
+
+    if (version < 11) {
+      // Chat receiver-side dedup by `messageId` — addresses the seq=13
+      // duplicate finding from the May 2026 Miles↔Lex soak postmortem
+      // (same encrypted payload arrived twice on the receiver, 1s apart,
+      // both stored because the schema had no idempotency key).
+      //
+      // The V3 CREATE above already declares `message_id` so fresh
+      // installs get it. This block uses the same defensive
+      // PRAGMA-then-ALTER pattern as V9/V10 to add the column for
+      // nodes upgrading through versions 3..10 first, then creates
+      // the partial unique index that powers `INSERT OR IGNORE` dedup
+      // semantics in `insertChatMessage`.
+      //
+      // The index is keyed by `(peer, direction, message_id)`:
+      //   - Per-direction keying — Codex review of PR #534 flagged
+      //     that omitting `direction` lets an outbound row collide
+      //     with a legitimate inbound row carrying the same
+      //     `messageId` from the same peer. Negligible probability
+      //     with v4 UUIDs but real for any future caller that
+      //     supplies its own deterministic ids (the MCP layer, an
+      //     external bridge, etc.) — and the failure mode would be
+      //     a SILENTLY dropped inbound message, which is exactly the
+      //     class this PR is trying to close. Including `direction`
+      //     makes inbound + outbound dedup live in independent
+      //     namespaces.
+      //   - Per-sender keying — two different senders that happen to
+      //     pick the same UUID (vanishingly unlikely with v4 UUIDs
+      //     but non-zero in theory, and any future migration to a
+      //     smaller id space would make it real) must not collide.
+      //   - Predicate `WHERE message_id IS NOT NULL` keeps the legacy
+      //     null-id rows (pre-V11 messages, plus any future sender
+      //     that omits the field) outside the uniqueness constraint
+      //     so an old persistent row can't block a new identical-text
+      //     resend.
+      const chatCols = new Set(
+        (this.db.prepare('PRAGMA table_info(chat_messages)').all() as Array<{ name: string }>)
+          .map((c) => c.name),
+      );
+      if (!chatCols.has('message_id')) {
+        this.db.exec(`ALTER TABLE chat_messages ADD COLUMN message_id TEXT;`);
+      }
+      this.db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_msgid
+          ON chat_messages(peer, direction, message_id)
+          WHERE message_id IS NOT NULL;
+      `);
     }
 
     this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
@@ -940,6 +995,20 @@ export class DashboardDB {
 
   // --- Chat messages ---
 
+  /**
+   * Insert a chat message. When `messageId` is supplied AND the
+   * `(peer, messageId)` pair already exists in the table, the insert
+   * is silently ignored via `INSERT OR IGNORE` against the
+   * `idx_chat_msgid` partial unique index — this is the receiver-side
+   * dedup that closes the seq=13 duplicate class from the May 2026
+   * soak postmortem (multi-path race that delivered the same encrypted
+   * payload twice, ~1s apart). Returns `true` when a row was actually
+   * inserted, `false` when the dedup index dropped a duplicate.
+   *
+   * Calls without `messageId` (pre-V11 callers, plus any future sender
+   * that omits the field) fall outside the partial-unique-index
+   * predicate and are always inserted — never blocked, never deduped.
+   */
   insertChatMessage(msg: {
     ts: number;
     direction: 'in' | 'out';
@@ -947,10 +1016,11 @@ export class DashboardDB {
     peerName?: string | null;
     text: string;
     delivered?: boolean | null;
-  }): void {
-    this.stmt('insertChat', `
-      INSERT INTO chat_messages (ts, direction, peer, peer_name, text, delivered)
-      VALUES (@ts, @direction, @peer, @peer_name, @text, @delivered)
+    messageId?: string | null;
+  }): boolean {
+    const info = this.stmt('insertChat', `
+      INSERT OR IGNORE INTO chat_messages (ts, direction, peer, peer_name, text, delivered, message_id)
+      VALUES (@ts, @direction, @peer, @peer_name, @text, @delivered, @message_id)
     `).run({
       ts: msg.ts,
       direction: msg.direction,
@@ -958,7 +1028,9 @@ export class DashboardDB {
       peer_name: msg.peerName ?? null,
       text: msg.text,
       delivered: msg.delivered == null ? null : msg.delivered ? 1 : 0,
+      message_id: msg.messageId ?? null,
     });
+    return info.changes > 0;
   }
 
   /**
@@ -1538,6 +1610,14 @@ export interface ChatMessageRow {
   peer_name: string | null;
   text: string;
   delivered: number | null;
+  /**
+   * Sender-assigned message id (UUID v4 by default; caller-overridable
+   * via `dkg-agent.ts`'s `options.messageId`). Nullable for pre-V11
+   * rows AND for any future sender that intentionally omits it.
+   * Powers receiver-side dedup via the partial unique index
+   * `idx_chat_msgid` on `(peer, message_id)`.
+   */
+  message_id: string | null;
 }
 
 export type ChatPersistenceStatus = 'pending' | 'in_progress' | 'stored' | 'failed';
