@@ -33,6 +33,15 @@
 
 set -uo pipefail
 
+# Accept KEY=VALUE positional args as env vars (so `bash script.sh FOO=bar`
+# works the same as `FOO=bar bash script.sh`). Spotted by Lex during the
+# 2026-05 rc9 soak — silent fallback to defaults is a footgun otherwise.
+for kv in "$@"; do
+  case "$kv" in
+    *=*) export "$kv" ;;
+  esac
+done
+
 RECIPIENT="${RECIPIENT:-dkg-testnet-edge}"
 RECIPIENT_PEER_ID="${RECIPIENT_PEER_ID:-}"   # optional; required for per-peer preflight diagnostics
 SENDER_TAG="${SENDER_TAG:-MILES}"
