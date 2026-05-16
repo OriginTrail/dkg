@@ -82,8 +82,13 @@ describe('drop-sweep — none of the 10 W2-dropped tools reappear in tools/list'
     expect(server.tools.has(name)).toBe(false);
   });
 
-  it('registered surface contains exactly 24 tools (post-PR locked count)', () => {
-    expect(server.tools.size).toBe(24);
+  // Locked count bumped to 25 in the `dkg_peer_info` PR (per-peer
+  // diagnostics surface added under registerHealthTools after the
+  // May 2026 soak postmortem). Bump again when a new tool is
+  // intentionally added, drop when a tool is removed, and keep a
+  // comment trail so future drops are auditable.
+  it('registered surface contains exactly 25 tools (post-PR locked count)', () => {
+    expect(server.tools.size).toBe(25);
   });
 });
 

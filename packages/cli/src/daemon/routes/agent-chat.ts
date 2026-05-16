@@ -456,30 +456,42 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
   }
 
   // GET /api/peer-info?peerId=<id>
+  //
+  // Returns the {@link PeerDiagnostics} snapshot from
+  // `agent.getPeerDiagnostics()`. The legacy flat fields
+  // (`connectionCount`, `transports`, `directions`, `remoteAddrs`,
+  // `lastSeen`, `latencyMs`) are preserved alongside the richer
+  // `connections` array + `getConnectionsReturnsForPeer` + `peerStore`
+  // + `outbox` blocks so any existing consumer that grew up on the
+  // pre-diagnostic shape still works.
   if (req.method === "GET" && path === "/api/peer-info") {
     const peerId = url.searchParams.get("peerId");
     if (!peerId) {
       return jsonResponse(res, 400, { error: 'Missing "peerId" query param' });
     }
 
-    const allConns = agent.node.libp2p.getConnections();
-    const peerConns = allConns.filter((c) => c.remotePeer.toString() === peerId);
-    const protocols = await agent.getPeerProtocols(peerId);
-
-    const health = agent.getPeerHealth().get(peerId);
+    const diag = await agent.getPeerDiagnostics(peerId);
     return jsonResponse(res, 200, {
       peerId,
-      connected: peerConns.length > 0,
-      connectionCount: peerConns.length,
-      transports: peerConns.map((c) =>
-        c.remoteAddr?.toString().includes('/p2p-circuit') ? 'relayed' : 'direct',
-      ),
-      directions: peerConns.map((c) => c.direction),
-      remoteAddrs: peerConns.map((c) => c.remoteAddr?.toString() ?? null),
-      protocols,
-      syncCapable: protocols.includes('/dkg/10.0.0/sync'),
-      lastSeen: health?.lastSeen ?? null,
-      latencyMs: health?.latencyMs ?? null,
+      connected: diag.connected,
+      // Legacy flat fields kept for back-compat with pre-PR callers.
+      connectionCount: diag.rawConnectionCount,
+      transports: diag.connections.map((c) => c.transport),
+      directions: diag.connections.map((c) => c.direction),
+      remoteAddrs: diag.connections.map((c) => c.remoteAddr),
+      // New diagnostic surface.
+      rawConnectionCount: diag.rawConnectionCount,
+      getConnectionsReturnsForPeer: diag.getConnectionsReturnsForPeer,
+      connections: diag.connections,
+      peerStore: diag.peerStore,
+      outbox: diag.outbox,
+      // Existing health fields, kept flat and ALSO available under
+      // `health` for callers that want the typed snapshot.
+      protocols: diag.protocols,
+      syncCapable: diag.syncCapable,
+      lastSeen: diag.health?.lastSeen ?? null,
+      latencyMs: diag.health?.latencyMs ?? null,
+      health: diag.health,
     });
   }
 

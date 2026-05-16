@@ -598,6 +598,103 @@ export interface PeerHealth {
   lastChecked: number;
 }
 
+/** Per-connection snapshot for diagnostics. */
+export interface PeerConnectionSnapshot {
+  direction: 'inbound' | 'outbound';
+  /** `'relayed'` when the remote multiaddr includes `/p2p-circuit`, else `'direct'`. */
+  transport: 'direct' | 'relayed';
+  /**
+   * The connection's remote multiaddr as a string, or `null` when
+   * libp2p didn't expose one. Preserving the `null` (rather than
+   * defaulting to `''`) keeps the legacy `/api/peer-info`
+   * `remoteAddrs` contract intact for callers that distinguish
+   * "address unavailable" from a real multiaddr — Codex review of
+   * PR #533 flagged the prior empty-string default as a silent
+   * response-shape change.
+   */
+  remoteAddr: string | null;
+  /**
+   * `true` when libp2p marks the connection as limited (circuit-relay v2
+   * data-limit + duration-limit semantics). Limited connections can be
+   * dialed via {@link CONNECTION_REUSE_PROTOCOLS} but are subject to the
+   * relay's per-connection caps; the Window D postmortem traced the
+   * "outbound failed while inbound from same peer was open" class to
+   * limited connections not being reused by `dialProtocol`.
+   */
+  limited: boolean;
+  /** Active stream count (multiplexer-level). */
+  streams: number;
+  /** UNIX-ms when the connection was opened, or `null` if libp2p didn't expose it. */
+  openedAt: number | null;
+}
+
+/**
+ * Per-peer diagnostic snapshot. Surfaces the libp2p observability state
+ * we need to triage the Window D class of asymmetric reachability bugs
+ * documented in the Miles↔Lex 6h soak postmortem (May 16 2026), where an
+ * inbound circuit-relay connection from peer P was open but
+ * `dialProtocol(P, ...)` kept failing with "no valid addresses for peer"
+ * for several minutes. The key field is `getConnectionsReturnsForPeer`,
+ * which lets an operator (or a downstream test) detect at a glance when
+ * libp2p's peerId-keyed lookup disagrees with a raw walk over all open
+ * connections — the smoking gun for the "limited connection not
+ * surfaced for outbound stream-open" behaviour.
+ *
+ * All fields are best-effort: any libp2p internal that throws or
+ * returns an unexpected shape degrades to `null`/`[]` rather than
+ * surfacing as a route 500. This route is most useful WHEN the network
+ * is broken; it must not itself break.
+ */
+export interface PeerDiagnostics {
+  peerId: string;
+  /** `true` when at least one open connection to this peer exists. */
+  connected: boolean;
+  /**
+   * Number of connections returned by walking every open libp2p
+   * connection and filtering by `remotePeer === peerId`. This is the
+   * legacy path used by `/api/peer-info` before this PR.
+   */
+  rawConnectionCount: number;
+  /**
+   * Number of connections returned by the peerId-keyed lookup
+   * `libp2p.getConnections(peerId)`. This is the path `PeerResolver`
+   * (see `packages/core/src/network/peer-resolver.ts`) uses to decide
+   * whether to short-circuit address resolution.
+   *
+   * When this value is LESS than `rawConnectionCount` for an otherwise
+   * open peer, libp2p's peerId-keyed lookup is filtering out connections
+   * the raw walk can see — the exact Window D signature. The operator
+   * can then file an upstream issue against js-libp2p with this number
+   * as repro evidence, and the local workaround in PR 5
+   * (`dialProtocol`-reuses-inbound-circuit) becomes the right next step.
+   */
+  getConnectionsReturnsForPeer: number;
+  connections: PeerConnectionSnapshot[];
+  /**
+   * Snapshot of what libp2p's local peerStore knows about this peer.
+   * `null` when the peer has no peerStore entry at all (cold cache) —
+   * a common precondition for the "no valid addresses for peer" dial
+   * failure that the soak postmortem identified.
+   */
+  peerStore: {
+    knownMultiaddrCount: number;
+    multiaddrs: string[];
+    protocols: string[];
+  } | null;
+  /** Pending chat-outbox entries for this peer (oldest-first). */
+  outbox: {
+    pendingCount: number;
+    oldestFirstFailureAt: number | null;
+    attempts: number[];
+  };
+  /** Latest ping-round health snapshot (`null` if never pinged). */
+  health: PeerHealth | null;
+  /** Protocols this peer's identify-handshake advertised. */
+  protocols: string[];
+  /** Convenience flag — peer speaks `/dkg/10.0.0/sync`. */
+  syncCapable: boolean;
+}
+
 /**
  * Caller-visible result of `DKGAgent.sendChat`. Backwards-compatible
  * extension of the original `{ delivered, error }` shape: existing
@@ -12674,6 +12771,120 @@ export class DKGAgent {
     } catch {
       return [];
     }
+  }
+
+  /**
+   * Build a {@link PeerDiagnostics} snapshot for the given peer. Every
+   * sub-lookup is wrapped in defensive error handling — if libp2p throws
+   * mid-introspection (e.g. peerStore miss, internal shape mismatch),
+   * the corresponding field degrades to `null`/`[]` rather than
+   * propagating. See the interface JSDoc for the postmortem context
+   * that motivated the `getConnectionsReturnsForPeer` field in
+   * particular.
+   */
+  async getPeerDiagnostics(peerId: string): Promise<PeerDiagnostics> {
+    const libp2p = this.node.libp2p;
+
+    // libp2p's PeerId + Connection types live in `@libp2p/interface`,
+    // but `packages/agent` only depends on `@libp2p/peer-id` directly
+    // (Connection types come transitively through `@origintrail-official/dkg-core`).
+    // Inferring shapes from the live `libp2p.getConnections()` return
+    // avoids adding a new package dep just for two type annotations.
+    type LibConnection = ReturnType<typeof libp2p.getConnections>[number];
+    type LibPeerId = LibConnection['remotePeer'];
+
+    let pid: LibPeerId | null = null;
+    try {
+      const { peerIdFromString } = await import('@libp2p/peer-id');
+      pid = peerIdFromString(peerId) as unknown as LibPeerId;
+    } catch {
+      // Invalid peerId string — surface as a fully-empty snapshot so
+      // the route still returns 200 with an obviously-broken shape
+      // (connected=false, everything zero) rather than a route 500.
+      return {
+        peerId,
+        connected: false,
+        rawConnectionCount: 0,
+        getConnectionsReturnsForPeer: 0,
+        connections: [],
+        peerStore: null,
+        outbox: { pendingCount: 0, oldestFirstFailureAt: null, attempts: [] },
+        health: null,
+        protocols: [],
+        syncCapable: false,
+      };
+    }
+
+    let rawConns: LibConnection[] = [];
+    try {
+      rawConns = libp2p
+        .getConnections()
+        .filter((c: LibConnection) => c.remotePeer.equals(pid!));
+    } catch {
+      rawConns = [];
+    }
+
+    // libp2p's peerId-keyed lookup. See `getConnectionsReturnsForPeer`
+    // JSDoc — divergence from `rawConns.length` is the Window D signature.
+    let keyedConns: LibConnection[] = [];
+    try {
+      keyedConns = libp2p.getConnections(pid);
+    } catch {
+      keyedConns = [];
+    }
+
+    const connections: PeerConnectionSnapshot[] = rawConns.map((c) => {
+      const remoteAddr = c.remoteAddr?.toString() ?? null;
+      return {
+        direction: c.direction,
+        transport: remoteAddr?.includes('/p2p-circuit') ? 'relayed' : 'direct',
+        remoteAddr,
+        // libp2p marks limited circuit-relay connections via
+        // `connection.limits` (presence ⇒ limited). Defensive cast
+        // against future shape drift.
+        limited: Boolean((c as unknown as { limits?: unknown }).limits),
+        streams: c.streams?.length ?? 0,
+        openedAt: c.timeline?.open ?? null,
+      };
+    });
+
+    let peerStoreSnapshot: PeerDiagnostics['peerStore'] = null;
+    try {
+      const peer = await libp2p.peerStore.get(pid);
+      const multiaddrs = (peer.addresses ?? []).map((a) => a.multiaddr.toString());
+      peerStoreSnapshot = {
+        knownMultiaddrCount: multiaddrs.length,
+        multiaddrs,
+        protocols: [...(peer.protocols ?? [])],
+      };
+    } catch {
+      // peerStore.get throws on cold-cache miss; that IS the diagnostic
+      // signal — degrade to null and let the caller see the absence.
+      peerStoreSnapshot = null;
+    }
+
+    const pending = this.messageOutbox.pendingFor(peerId);
+    const outbox = {
+      pendingCount: pending.length,
+      oldestFirstFailureAt: pending.length > 0 ? pending[0].firstFailureAt : null,
+      attempts: pending.map((e) => e.attempts),
+    };
+
+    const protocols = peerStoreSnapshot?.protocols ?? [];
+    const syncCapable = protocols.includes('/dkg/10.0.0/sync');
+
+    return {
+      peerId,
+      connected: rawConns.length > 0,
+      rawConnectionCount: rawConns.length,
+      getConnectionsReturnsForPeer: keyedConns.length,
+      connections,
+      peerStore: peerStoreSnapshot,
+      outbox,
+      health: this.peerHealth.get(peerId) ?? null,
+      protocols,
+      syncCapable,
+    };
   }
 
   /**

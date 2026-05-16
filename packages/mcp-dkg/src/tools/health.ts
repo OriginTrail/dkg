@@ -10,6 +10,7 @@
  * reading either surface sees the same diagnostic output.
  */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { z } from 'zod';
 import type { DkgClient } from '../client.js';
 import type { DkgConfig } from '../config.js';
 
@@ -52,6 +53,51 @@ export function registerHealthTools(
         return ok(`DKG node status:\n\n\`\`\`json\n${JSON.stringify(status, null, 2)}\n\`\`\``);
       } catch (e) {
         return errResult(`Failed to fetch node status: ${formatError(e)}`);
+      }
+    },
+  );
+
+  // ── dkg_peer_info ───────────────────────────────────────────────
+  //
+  // Surfaces the per-peer diagnostic snapshot — open connections (with
+  // direction, transport, limited flag), peerStore contents, outbox
+  // state, and the `getConnectionsReturnsForPeer` discrepancy field
+  // that reveals the Window D class of libp2p asymmetric reachability
+  // bugs (an inbound circuit-relay connection is open, but
+  // `libp2p.getConnections(peerId)` returns 0 ⇒ `dialProtocol` will
+  // fail with "no valid addresses for peer" until DHT-walk eventually
+  // re-primes peerStore). The May 2026 Miles↔Lex soak postmortem
+  // motivated this surface so the diagnostic doesn't require grepping
+  // daemon.log to triage.
+  server.registerTool(
+    'dkg_peer_info',
+    {
+      title: 'Per-Peer Diagnostics',
+      description:
+        'Diagnose connectivity to a specific peer. Returns open ' +
+        'connections (direction + transport + limited flag), peerStore ' +
+        'contents, outbox state, and a `getConnectionsReturnsForPeer` ' +
+        "field that diverges from `rawConnectionCount` when libp2p's " +
+        'peerId-keyed lookup is filtering out connections the raw walk ' +
+        'can see (the smoking-gun signature for the "inbound circuit ' +
+        'open but outbound dial fails" class of asymmetric reachability ' +
+        'bugs).',
+      inputSchema: {
+        peerId: z.string().describe(
+          'The libp2p peer ID to diagnose (a base58btc or base32 string, ' +
+            'typically starting with `12D3Koo…`). Names are NOT accepted ' +
+            'here — resolve first with `dkg_list_agents` if needed.',
+        ),
+      },
+    },
+    async ({ peerId }): Promise<ToolResult> => {
+      try {
+        const info = await client.getPeerInfo(peerId);
+        return ok(
+          `Peer ${peerId} diagnostics:\n\n\`\`\`json\n${JSON.stringify(info, null, 2)}\n\`\`\``,
+        );
+      } catch (e) {
+        return errResult(`Failed to fetch peer info for ${peerId}: ${formatError(e)}`);
       }
     },
   );

@@ -143,6 +143,17 @@ export class FakeClient {
     rpcUrl: 'http://rpc.example',
   };
 
+  /**
+   * Default per-peer info payload returned by `getPeerInfo`. Tests that
+   * care about the diagnostic shape (`dkg_peer_info` tool) override
+   * this via `client.peerInfoByPeerId.set(peerId, {...})` or via the
+   * `overrides.getPeerInfo` constructor option for full control.
+   */
+  readonly peerInfoByPeerId = new Map<
+    string,
+    Record<string, unknown>
+  >();
+
   constructor(private readonly overrides: ClientMethods = {}) {}
 
   asDkgClient(): DkgClient {
@@ -356,6 +367,31 @@ export class FakeClient {
   async getWalletBalances() {
     if (this.overrides.getWalletBalances) return this.overrides.getWalletBalances.call(this);
     return this.walletBalances;
+  }
+
+  async getPeerInfo(peerId: string) {
+    if (this.overrides.getPeerInfo) return this.overrides.getPeerInfo.call(this, peerId);
+    const seeded = this.peerInfoByPeerId.get(peerId);
+    if (seeded) return seeded as ReturnType<DkgClient['getPeerInfo']> extends Promise<infer T> ? T : never;
+    // Default fixture: not connected, no peerStore entry, no outbox.
+    return {
+      peerId,
+      connected: false,
+      rawConnectionCount: 0,
+      getConnectionsReturnsForPeer: 0,
+      connections: [],
+      peerStore: null,
+      outbox: { pendingCount: 0, oldestFirstFailureAt: null, attempts: [] },
+      protocols: [],
+      syncCapable: false,
+      lastSeen: null,
+      latencyMs: null,
+      health: null,
+      connectionCount: 0,
+      transports: [],
+      directions: [],
+      remoteAddrs: [],
+    } as unknown as ReturnType<DkgClient['getPeerInfo']> extends Promise<infer T> ? T : never;
   }
 
   // ── Publish ─────────────────────────────────────────────────────

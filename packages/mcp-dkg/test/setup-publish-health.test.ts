@@ -391,11 +391,16 @@ describe('health tools — status + wallet balances', () => {
     registerHealthTools(server.asMcpServer(), client.asDkgClient(), makeConfig());
   });
 
-  it('registers both health tools with empty inputSchemas', () => {
+  it('registers the no-arg health tools with empty inputSchemas', () => {
     expect(server.tools.has('dkg_status')).toBe(true);
     expect(server.tools.has('dkg_wallet_balances')).toBe(true);
     expect(server.get('dkg_status').config.inputSchema).toEqual({});
     expect(server.get('dkg_wallet_balances').config.inputSchema).toEqual({});
+    // `dkg_peer_info` is also registered by this module but takes a
+    // required `peerId` arg, so it's covered by its own test file
+    // (`health-tools.test.ts`) where the schema + handler assertions
+    // live alongside the peer-info diagnostic fixtures.
+    expect(server.tools.has('dkg_peer_info')).toBe(true);
   });
 
   it('dkg_status renders the daemon status payload as a JSON code block', async () => {
