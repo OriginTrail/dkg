@@ -14014,18 +14014,14 @@ export class DKGAgent {
         // (visible to the publisher as a stream reset). The collector
         // warns and falls back to the full set if too few cores match,
         // so a stale/incomplete hosting registry never blocks publishes.
-        try {
-          const advertised = await resolvePeersHostingContextGraph(this.store, cgIdStr);
-          if (advertised.length === 0) return [];
-          const advertisedSet = new Set(advertised);
-          const peers = this.node.libp2p.getPeers();
-          return peers
-            .map(p => p.toString())
-            .filter(id => id !== this.peerId)
-            .filter(id => advertisedSet.has(id));
-        } catch {
-          return [];
-        }
+        const advertised = await resolvePeersHostingContextGraph(this.store, cgIdStr);
+        if (advertised.length === 0) return [];
+        const advertisedSet = new Set(advertised);
+        const peers = this.node.libp2p.getPeers();
+        return peers
+          .map(p => p.toString())
+          .filter(id => id !== this.peerId)
+          .filter(id => advertisedSet.has(id));
       },
       verifyIdentity: typeof this.chain.verifyACKIdentity === 'function'
         ? async (recoveredAddress: string, claimedIdentityId: bigint) => {

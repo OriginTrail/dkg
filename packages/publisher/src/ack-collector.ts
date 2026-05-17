@@ -13,7 +13,7 @@ export interface ACKCollectorDeps {
   sendP2P: (peerId: string, protocol: string, data: Uint8Array) => Promise<Uint8Array>;
   getConnectedCorePeers: () => string[];
   /**
-   * Optional hosting filter. Given the target context-graph UAL, return
+   * Optional hosting filter. Given the source SWM context-graph UAL, return
    * the subset of currently-connected core peers whose published agent
    * profile (`<https://dkg.origintrail.io/skill#contextGraphsServed>`)
    * advertises hosting it.
@@ -160,7 +160,7 @@ export class ACKCollector {
     }
 
     // Split connected cores into two waves:
-    //   priorityPeers — advertise hosting the target CG; tried first.
+    //   priorityPeers — advertise hosting the source SWM CG; tried first.
     //   fallbackPeers — connected but don't advertise; only tried if
     //                   the priority wave can't satisfy quorum.
     //
@@ -174,10 +174,13 @@ export class ACKCollector {
     let priorityPeers: string[] = allConnected;
     let fallbackPeers: string[] = [];
     if (this.deps.getCorePeersHostingContextGraph) {
+      const hostingGraphIdStr = params.swmGraphId && params.swmGraphId.length > 0
+        ? params.swmGraphId
+        : contextGraphIdStr;
       let hostingPeers: string[] = [];
       try {
         const lookupPromise = Promise.resolve(
-          this.deps.getCorePeersHostingContextGraph(contextGraphIdStr),
+          this.deps.getCorePeersHostingContextGraph(hostingGraphIdStr),
         );
         // Bound the local-store lookup so a slow / hung registry query
         // can't block the publish before the ACK_TIMEOUT_MS budget even
@@ -193,7 +196,7 @@ export class ACKCollector {
         if (timeoutHandle) clearTimeout(timeoutHandle);
         if (settled === timeoutSentinel) {
           log(
-            `[ACKCollector] hosting-filter lookup did not return within ${HOSTING_FILTER_TIMEOUT_MS}ms for "${contextGraphIdStr}"; ` +
+            `[ACKCollector] hosting-filter lookup did not return within ${HOSTING_FILTER_TIMEOUT_MS}ms for "${hostingGraphIdStr}"; ` +
             `dialling all ${allConnected.length} connected cores in a single wave`,
           );
           hostingPeers = [];
@@ -203,7 +206,7 @@ export class ACKCollector {
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err);
         log(
-          `[ACKCollector] hosting-filter lookup failed for "${contextGraphIdStr}" (${errMsg}); ` +
+          `[ACKCollector] hosting-filter lookup failed for "${hostingGraphIdStr}" (${errMsg}); ` +
           `dialling all ${allConnected.length} connected cores in a single wave`,
         );
         hostingPeers = [];
@@ -215,7 +218,7 @@ export class ACKCollector {
       if (matched.length === 0) {
         // No hosting signal at all — keep the legacy single-wave shape.
         log(
-          `[ACKCollector] hosting filter: no connected cores advertise hosting "${contextGraphIdStr}"; ` +
+          `[ACKCollector] hosting filter: no connected cores advertise hosting "${hostingGraphIdStr}"; ` +
           `dialling all ${allConnected.length} connected cores in a single wave (expect declines from non-hosting cores).`,
         );
       } else {
@@ -224,14 +227,14 @@ export class ACKCollector {
         const includedTag = matched.map(p => p.slice(-8)).join(', ');
         const excludedTag = excluded.length > 0 ? excluded.map(p => p.slice(-8)).join(', ') : '<none>';
         log(
-          `[ACKCollector] hosting filter: priority wave = ${matched.length}/${allConnected.length} cores advertising "${contextGraphIdStr}" [${includedTag}]; ` +
+          `[ACKCollector] hosting filter: priority wave = ${matched.length}/${allConnected.length} cores advertising "${hostingGraphIdStr}" [${includedTag}]; ` +
           `fallback wave = ${excluded.length} non-advertising cores [${excludedTag}].`,
         );
         if (matched.length < REQUIRED_ACKS) {
           log(
-            `[ACKCollector] WARN: only ${matched.length} connected cores advertise hosting "${contextGraphIdStr}" (need ${REQUIRED_ACKS}); ` +
+            `[ACKCollector] WARN: only ${matched.length} connected cores advertise hosting "${hostingGraphIdStr}" (need ${REQUIRED_ACKS}); ` +
             `fallback wave will be dialled if priority wave can't satisfy quorum. ` +
-            `If "${contextGraphIdStr}" has replicationPolicy=full, the non-advertising cores have a coverage bug (see GitHub issue #541).`,
+            `If "${hostingGraphIdStr}" has replicationPolicy=full, the non-advertising cores have a coverage bug (see GitHub issue #541).`,
           );
         }
       }

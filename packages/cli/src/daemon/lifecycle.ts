@@ -806,20 +806,16 @@ export async function runDaemonInner(
             // throw "No data found in SWM graph …" (visible to us as a
             // libp2p stream reset). Fail-soft: collector falls back to the
             // unfiltered set if too few cores match.
-            try {
-              const advertised = await resolvePeersHostingContextGraph(
-                agent.store,
-                cgIdStr,
-              );
-              if (advertised.length === 0) return [];
-              const advertisedSet = new Set(advertised);
-              return agent.node.libp2p
-                .getPeers()
-                .map((p) => p.toString())
-                .filter((id) => id !== agent.peerId && advertisedSet.has(id));
-            } catch {
-              return [];
-            }
+            const advertised = await resolvePeersHostingContextGraph(
+              agent.store,
+              cgIdStr,
+            );
+            if (advertised.length === 0) return [];
+            const advertisedSet = new Set(advertised);
+            return agent.node.libp2p
+              .getPeers()
+              .map((p) => p.toString())
+              .filter((id) => id !== agent.peerId && advertisedSet.has(id));
           },
           log,
         }),

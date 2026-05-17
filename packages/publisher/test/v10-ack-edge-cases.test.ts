@@ -945,6 +945,37 @@ describe('ACKCollector hosting filter (#541)', () => {
     )).toBe(false);
   });
 
+  it('uses swmGraphId, not target contextGraphIdStr, for hosting lookup on remap publishes', async () => {
+    const sendP2P = tracked(buildSendP2P());
+    const log = noop();
+    const sourceSwmGraphId = '0x8fb6dcd4/source-swm';
+    const hostingFilter = tracked((cgId: string) =>
+      cgId === sourceSwmGraphId ? ['peer-1', 'peer-2', 'peer-4'] : [],
+    );
+    const deps: ACKCollectorDeps = {
+      gossipPublish: noop(),
+      sendP2P: sendP2P as any,
+      getConnectedCorePeers: () => ['peer-0', 'peer-1', 'peer-2', 'peer-3', 'peer-4'],
+      getCorePeersHostingContextGraph: hostingFilter,
+      log,
+    };
+    const collector = new ACKCollector(deps);
+
+    const result = await collector.collect(buildCollectParams({
+      swmGraphId: sourceSwmGraphId,
+    }));
+
+    expect(result.acks).toHaveLength(3);
+    expect(hostingFilter.calls).toHaveLength(1);
+    expect(hostingFilter.calls[0][0]).toBe(sourceSwmGraphId);
+
+    const targeted = sendP2P.calls.map((c) => c[0] as string).sort();
+    expect(targeted).toEqual(['peer-1', 'peer-2', 'peer-4']);
+    expect(log.calls.some(
+      (c: unknown[]) => (c[0] as string).includes(`advertising "${sourceSwmGraphId}"`),
+    )).toBe(true);
+  });
+
   it('falls back to non-advertising cores when priority wave cannot satisfy quorum (stale advertisements)', async () => {
     // Codex Review on PR#556 flagged this: matched advertisement was a
     // hard gate, so a single stale entry could fail the publish. Now the
