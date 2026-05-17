@@ -997,17 +997,28 @@ export class DashboardDB {
 
   /**
    * Insert a chat message. When `messageId` is supplied AND the
-   * `(peer, messageId)` pair already exists in the table, the insert
-   * is silently ignored via `INSERT OR IGNORE` against the
-   * `idx_chat_msgid` partial unique index — this is the receiver-side
-   * dedup that closes the seq=13 duplicate class from the May 2026
-   * soak postmortem (multi-path race that delivered the same encrypted
-   * payload twice, ~1s apart). Returns `true` when a row was actually
-   * inserted, `false` when the dedup index dropped a duplicate.
+   * `(peer, direction, messageId)` triple already exists in the table,
+   * the insert is silently ignored via a targeted `ON CONFLICT ... DO
+   * NOTHING` clause against the `idx_chat_msgid` partial unique index
+   * — this is the receiver-side dedup that closes the seq=13 duplicate
+   * class from the May 2026 soak postmortem (multi-path race that
+   * delivered the same encrypted payload twice, ~1s apart). Returns
+   * `true` when a row was actually inserted, `false` when the dedup
+   * index dropped a duplicate.
    *
    * Calls without `messageId` (pre-V11 callers, plus any future sender
    * that omits the field) fall outside the partial-unique-index
    * predicate and are always inserted — never blocked, never deduped.
+   *
+   * Conflict target is explicit (`ON CONFLICT (peer, direction,
+   * message_id) WHERE message_id IS NOT NULL DO NOTHING`) rather than
+   * the looser `INSERT OR IGNORE` — that variant suppresses EVERY
+   * SQLite constraint violation, so a future NOT NULL / CHECK / other
+   * unique-index failure would silently look identical to a dedup hit
+   * (`changes === 0`) and the daemon would skip notification + logging
+   * as if the row were already stored. Targeted conflict handling lets
+   * unrelated persistence bugs surface as thrown errors. Codex review
+   * on PR #538.
    */
   insertChatMessage(msg: {
     ts: number;
@@ -1019,8 +1030,9 @@ export class DashboardDB {
     messageId?: string | null;
   }): boolean {
     const info = this.stmt('insertChat', `
-      INSERT OR IGNORE INTO chat_messages (ts, direction, peer, peer_name, text, delivered, message_id)
+      INSERT INTO chat_messages (ts, direction, peer, peer_name, text, delivered, message_id)
       VALUES (@ts, @direction, @peer, @peer_name, @text, @delivered, @message_id)
+      ON CONFLICT (peer, direction, message_id) WHERE message_id IS NOT NULL DO NOTHING
     `).run({
       ts: msg.ts,
       direction: msg.direction,

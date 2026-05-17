@@ -781,6 +781,36 @@ describe('DashboardDB.insertChatMessage — V11 receiver-side dedup', () => {
     expect(db.getChatMessages({ peer: 'alice', direction: 'out' })).toHaveLength(1);
     expect(db.getChatMessages({ peer: 'alice' })).toHaveLength(2);
   });
+
+  // 🟡 Codex review on PR #538: the original `INSERT OR IGNORE`
+  // suppressed EVERY SQLite constraint violation, not just the
+  // dedup-index hit. That meant a future NOT NULL / CHECK / other
+  // unique-index failure would silently look identical to a dedup
+  // (`changes === 0`), and the daemon would skip notification +
+  // logging as if the row were already stored. Fix uses a targeted
+  // `ON CONFLICT (peer, direction, message_id) WHERE message_id IS
+  // NOT NULL DO NOTHING` clause; non-dedup constraint violations
+  // must still throw. `peer` is `NOT NULL` per the schema; insert
+  // with `peer = ''` then patch via raw SQL doesn't help us here
+  // because better-sqlite3 enforces the binding type, but a NULL
+  // peer triggers the schema-level NOT NULL — that's the assertion.
+  it('non-dedup constraint violations still throw (peer NOT NULL is not swallowed)', () => {
+    expect(() => {
+      db.insertChatMessage({
+        ts: 1000,
+        direction: 'in',
+        // @ts-expect-error — deliberately passing null to trigger the
+        // schema's NOT NULL constraint on `peer`. The point of the
+        // test is to confirm this raises an error rather than getting
+        // silently absorbed by the dedup-clause.
+        peer: null,
+        text: 'should-throw',
+        messageId: 'msg-not-null-violation',
+      });
+    }).toThrow(/NOT NULL constraint failed: chat_messages\.peer/i);
+    // And confirm no row leaked through.
+    expect(db.getChatMessages({})).toHaveLength(0);
+  });
 });
 
 // Regression coverage for the V11 schema migration itself — analogous to
