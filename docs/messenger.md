@@ -168,7 +168,7 @@ is idempotent at the app layer) or surface a terminal error.
 | `/dkg/10.0.1/swm-sender-key`    | PR-8        | 1             | Batch with `/private-access`.                                                      |
 | `/dkg/10.0.1/private-access`    | PR-8        | 1             | Batch with `/swm-sender-key`.                                                      |
 | `/dkg/10.0.1/query-remote`      | PR-9        | 1             | First caller exercising RESPONSE_GONE retry path.                                  |
-| `/dkg/10.0.1/join-request`      | PR-10 ✅     | 1             | Synchronous; `JoinApprovalRetryQueue` deleted (`join-approval-retry-queue.ts` + tests). Substrate outbox now drives retries on the same 30s tick + on-connect flush — and SQLite-backed so they survive daemon restart. Operator diagnostic `GET /api/context-graphs/pending-redeliveries` returns `[]` until PR-12 ships the substrate-backed view. |
+| `/dkg/10.0.1/join-request`      | PR-10 ✅     | 1             | Synchronous wire path now uses the Messenger substrate envelope. Join approvals keep the logical `JoinApprovalRetryQueue` so retries re-resolve `(contextGraphId, agentAddress)` before sending; broadcast fallback remains best-effort and does not leave durable substrate retries. |
 | `/dkg/10.0.1/storage-ack`       | PR-11       | 1             | ACKCollector quorum stays untouched; only the transport swaps.                     |
 | `/dkg/10.0.1/verify-proposal`   | PR-11       | 1             | Same shape as storage-ack.                                                         |
 

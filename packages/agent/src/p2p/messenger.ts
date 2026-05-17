@@ -533,6 +533,15 @@ export class Messenger {
     return this.outbox?.getEntry(peerId, protocolId, messageId);
   }
 
+  /**
+   * Remove a queued substrate entry without recording it as delivered.
+   * Domain-level retry queues use this when they need to retry by a
+   * logical key that can re-resolve to a different peer ID.
+   */
+  discardOutboxEntry(peerId: string, protocolId: string, messageId: string): boolean {
+    return this.outbox?.markDelivered(peerId, protocolId, messageId) ?? false;
+  }
+
   private requireSubstrate(method: string): void {
     if (!this.idempotencyStore || !this.outbox) {
       throw new MessengerNotConfiguredError(method);
