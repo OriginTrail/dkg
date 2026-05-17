@@ -14,16 +14,68 @@
  * flips RED. See also ack-eip191-agent-extra.test.ts for the constant
  * pin.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { PROTOCOL_STORAGE_ACK } from '@origintrail-official/dkg-core';
+import {
+  InMemoryMessageIdempotencyStore,
+  InMemoryProtocolOutboxStore,
+  PROTOCOL_STORAGE_ACK,
+  PROTOCOL_VERIFY_PROPOSAL,
+  RELIABLE_ENVELOPE_VERSION,
+  TypedEventBus,
+  decodeStorageACK,
+  decodeVerifyApproval,
+  encodePublishIntent,
+  encodeReliableEnvelope,
+  encodeVerifyProposal,
+  type ProtocolRouter,
+  type StreamHandler,
+} from '@origintrail-official/dkg-core';
+import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import {
+  StorageACKHandler,
+  type StorageACKHandlerConfig,
+} from '../../publisher/src/storage-ack-handler.js';
+import { VerifyProposalHandler } from '../../publisher/src/verify-proposal-handler.js';
+import {
+  computeFlatKCRootV10 as computeFlatKCRoot,
+  computeFlatKCMerkleLeafCountV10,
+} from '../../publisher/src/merkle.js';
+import { ethers } from 'ethers';
+import { Messenger } from '../src/p2p/messenger.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const AGENT_SRC = resolve(__dirname, '..', 'src');
 const DKG_AGENT_FILE = join(AGENT_SRC, 'dkg-agent.ts');
 const CLI_LIFECYCLE_FILE = resolve(__dirname, '..', '..', 'cli', 'src', 'daemon', 'lifecycle.ts');
+
+interface RouterDouble {
+  send: ReturnType<typeof vi.fn>;
+  register: ReturnType<typeof vi.fn>;
+  inboundHandlers: Map<string, StreamHandler>;
+}
+
+function makeMessengerDouble() {
+  const router: RouterDouble = {
+    send: vi.fn(),
+    inboundHandlers: new Map(),
+    register: vi.fn((protocol: string, handler: StreamHandler) => {
+      router.inboundHandlers.set(protocol, handler);
+    }),
+  };
+  const messenger = new Messenger({
+    router: router as unknown as ProtocolRouter,
+    idempotencyStore: new InMemoryMessageIdempotencyStore(),
+    outboxStore: new InMemoryProtocolOutboxStore(),
+  });
+  return { messenger, router };
+}
+
+function q(subject: string, predicate: string, object: string, graph: string): Quad {
+  return { subject, predicate, object, graph };
+}
 
 function walk(dir: string, acc: string[] = []): string[] {
   for (const name of readdirSync(dir)) {
@@ -70,6 +122,91 @@ describe('A-9: storage-ack protocol id (libp2p) pin', () => {
     expect(lifecycleSrc).toMatch(
       /messageId:\s*stableReliableRequestMessageId\(peerId,\s*protocol,\s*data\)/,
     );
+  });
+
+  it('drives StorageACK and VerifyProposal handlers through Messenger reliable envelopes', async () => {
+    const contextGraphId = '42';
+    const swmGraph = `did:dkg:context-graph:${contextGraphId}/_shared_memory`;
+    const quads = [
+      q('urn:entity:1', 'urn:p:name', '"Entity One"', swmGraph),
+      q('urn:entity:1', 'urn:p:type', 'urn:type:Thing', swmGraph),
+    ];
+    const merkleRoot = computeFlatKCRoot(quads, []);
+    const merkleLeafCount = computeFlatKCMerkleLeafCountV10(quads, []);
+    const store = new OxigraphStore();
+    await store.insert(quads);
+
+    const coreWallet = ethers.Wallet.createRandom();
+    const ackConfig: StorageACKHandlerConfig = {
+      nodeRole: 'core',
+      nodeIdentityId: 7n,
+      signerWallet: coreWallet,
+      contextGraphSharedMemoryUri: (cgId: string) =>
+        `did:dkg:context-graph:${cgId}/_shared_memory`,
+      chainId: 31337n,
+      kav10Address: '0x000000000000000000000000000000000000c10a',
+    };
+    const ackHandler = new StorageACKHandler(
+      store as any,
+      ackConfig,
+      new TypedEventBus() as any,
+    );
+    const verifyHandler = new VerifyProposalHandler({
+      store: store as any,
+      agentPrivateKey: coreWallet.privateKey,
+      agentAddress: coreWallet.address,
+      getBatchMerkleRoot: async () => merkleRoot,
+      getContextGraphIdOnChain: async () => 42n,
+    });
+    const { messenger, router } = makeMessengerDouble();
+    messenger.register(PROTOCOL_STORAGE_ACK, ackHandler.handler);
+    messenger.register(PROTOCOL_VERIFY_PROPOSAL, verifyHandler.handler);
+
+    const intentBytes = encodePublishIntent({
+      merkleRoot,
+      contextGraphId,
+      publisherPeerId: 'publisher-peer',
+      publicByteSize: 123,
+      isPrivate: false,
+      kaCount: 1,
+      rootEntities: ['urn:entity:1'],
+      epochs: 1,
+      tokenAmountStr: '1000',
+      merkleLeafCount,
+    });
+    const ackEnvelope = encodeReliableEnvelope({
+      messageId: '00000000-0000-4000-8000-000000000555',
+      version: RELIABLE_ENVELOPE_VERSION,
+      tsMs: Date.now(),
+      payload: intentBytes,
+    });
+    const ackBytes = await router.inboundHandlers.get(PROTOCOL_STORAGE_ACK)!(
+      ackEnvelope,
+      { toString: () => 'publisher-peer', toBytes: () => new Uint8Array() },
+    );
+    const ack = decodeStorageACK(ackBytes);
+    expect(Number(ack.nodeIdentityId)).toBe(7);
+
+    const proposalId = crypto.getRandomValues(new Uint8Array(16));
+    const proposalEnvelope = encodeReliableEnvelope({
+      messageId: '00000000-0000-4000-8000-000000000556',
+      version: RELIABLE_ENVELOPE_VERSION,
+      tsMs: Date.now(),
+      payload: encodeVerifyProposal({
+        proposalId,
+        contextGraphId,
+        batchId: 1,
+        merkleRoot,
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+    });
+    const verifyBytes = await router.inboundHandlers.get(PROTOCOL_VERIFY_PROPOSAL)!(
+      proposalEnvelope,
+      { toString: () => 'publisher-peer', toBytes: () => new Uint8Array() },
+    );
+    const approval = decodeVerifyApproval(verifyBytes);
+    expect(approval.approverAddress).toBe(coreWallet.address);
+    expect(Array.from(approval.proposalId)).toEqual(Array.from(proposalId));
   });
 
   it('agent source never publishes ACKs on GossipSub', () => {

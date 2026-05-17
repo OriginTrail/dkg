@@ -13,6 +13,12 @@ import {
 import { parseSimpleNQuads } from './publish-handler.js';
 import { ethers } from 'ethers';
 
+type PeerIdLike = string | { toString(): string };
+
+function normalizePeerId(peerId: PeerIdLike): string {
+  return typeof peerId === 'string' ? peerId : peerId.toString();
+}
+
 export interface StorageACKHandlerConfig {
   nodeRole: 'core' | 'edge';
   nodeIdentityId: bigint;
@@ -78,10 +84,11 @@ export class StorageACKHandler {
   }
 
   /**
-   * Protocol stream handler for `/dkg/10.0.0/storage-ack`.
+   * Protocol stream handler for `/dkg/10.0.1/storage-ack`.
    * Receives PublishIntent, returns StorageACK.
    */
-  handler = async (data: Uint8Array, _peerId: string): Promise<Uint8Array> => {
+  handler = async (data: Uint8Array, peerId: PeerIdLike): Promise<Uint8Array> => {
+    void normalizePeerId(peerId);
     if (this.config.nodeRole !== 'core') {
       throw new Error('Only core nodes can issue StorageACKs');
     }

@@ -9,7 +9,12 @@ import {
 import { ethers } from 'ethers';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 
-type StreamHandler = (data: Uint8Array, peerId: string) => Promise<Uint8Array>;
+type PeerIdLike = string | { toString(): string };
+type StreamHandler = (data: Uint8Array, peerId: PeerIdLike) => Promise<Uint8Array>;
+
+function normalizePeerId(peerId: PeerIdLike): string {
+  return typeof peerId === 'string' ? peerId : peerId.toString();
+}
 
 export interface VerifyProposalHandlerDeps {
   store: TripleStore;
@@ -36,8 +41,8 @@ export class VerifyProposalHandler {
   }
 
   get handler(): StreamHandler {
-    return async (data: Uint8Array, peerId: string) => {
-      return this.handleProposal(data, peerId);
+    return async (data: Uint8Array, peerId: PeerIdLike) => {
+      return this.handleProposal(data, normalizePeerId(peerId));
     };
   }
 
