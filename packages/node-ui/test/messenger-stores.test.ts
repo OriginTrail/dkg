@@ -30,16 +30,40 @@ afterEach(() => {
 });
 
 describe('V12 migration', () => {
+  function sqliteNames(type: 'table' | 'index'): string[] {
+    return (db.db
+      .prepare('SELECT name FROM sqlite_master WHERE type = ?')
+      .all(type) as Array<{ name: string }>).map((row) => row.name);
+  }
+
   it('creates message_idempotency and protocol_outbox tables', () => {
-    const tables = (db.db
-      .prepare("SELECT name FROM sqlite_master WHERE type='table'")
-      .all() as Array<{ name: string }>).map((t) => t.name);
+    const tables = sqliteNames('table');
     expect(tables).toContain('message_idempotency');
     expect(tables).toContain('protocol_outbox');
   });
 
   it('records user_version = 12 after migration', () => {
     expect(db.db.pragma('user_version', { simple: true })).toBe(12);
+  });
+
+  it('adds messenger tables and indexes when reopening an existing V11 database', () => {
+    db.db.exec(`
+      DROP TABLE IF EXISTS message_idempotency;
+      DROP TABLE IF EXISTS protocol_outbox;
+      PRAGMA user_version = 11;
+    `);
+    db.close();
+
+    db = new DashboardDB({ dataDir: dir });
+
+    expect(db.db.pragma('user_version', { simple: true })).toBe(12);
+    const tables = sqliteNames('table');
+    expect(tables).toContain('message_idempotency');
+    expect(tables).toContain('protocol_outbox');
+
+    const indexes = sqliteNames('index');
+    expect(indexes).toContain('idx_idem_ts');
+    expect(indexes).toContain('idx_outbox_next_attempt');
   });
 });
 
@@ -125,6 +149,25 @@ describe('SqliteMessageIdempotencyStore', () => {
     expect(dropped).toBe(1);
     expect(store.check(PEER_A, PROTO, MSG_1, 'in')).toEqual({ seen: false });
     expect(store.check(PEER_A, PROTO, MSG_2, 'in')).toEqual({ seen: true });
+  });
+
+  it('does not prepare SQL statements on the check/record/prune hot path', () => {
+    const store = new SqliteMessageIdempotencyStore(db);
+    const originalPrepare = db.db.prepare.bind(db.db);
+    let prepares = 0;
+    (db.db as any).prepare = ((sql: string) => {
+      prepares += 1;
+      return originalPrepare(sql);
+    }) as any;
+    try {
+      store.check(PEER_A, PROTO, MSG_1, 'in');
+      store.record(PEER_A, PROTO, MSG_1, 'in', new TextEncoder().encode('ack'));
+      store.check(PEER_A, PROTO, MSG_1, 'in');
+      store.pruneOlderThan(0);
+      expect(prepares).toBe(0);
+    } finally {
+      (db.db as any).prepare = originalPrepare;
+    }
   });
 
   it('survives a re-open with data preserved (durability sanity)', () => {
@@ -234,6 +277,28 @@ describe('SqliteProtocolOutboxStore', () => {
     expect(store.size()).toBe(1);
     store.enqueue(PEER_B, PROTO, MSG_1, PAYLOAD, 'e', 1000);
     expect(store.size()).toBe(2);
+  });
+
+  it('does not prepare SQL statements on the enqueue/query hot path', () => {
+    const store = new SqliteProtocolOutboxStore(db, { backoffFor: () => 5_000 });
+    const originalPrepare = db.db.prepare.bind(db.db);
+    let prepares = 0;
+    (db.db as any).prepare = ((sql: string) => {
+      prepares += 1;
+      return originalPrepare(sql);
+    }) as any;
+    try {
+      store.enqueue(PEER_A, PROTO, MSG_1, PAYLOAD, 'e', 1000);
+      store.hasEntry(PEER_A, PROTO, MSG_1);
+      store.pendingFor(PEER_A);
+      store.due(6000);
+      store.size();
+      store.dropExpired(1000);
+      store.markDelivered(PEER_A, PROTO, MSG_1);
+      expect(prepares).toBe(0);
+    } finally {
+      (db.db as any).prepare = originalPrepare;
+    }
   });
 
   it('survives re-open with entries preserved (durability sanity)', () => {

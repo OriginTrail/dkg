@@ -1590,11 +1590,25 @@ export class DashboardDB {
 export class SqliteMessageIdempotencyStore implements MessageIdempotencyStore {
   private readonly db: Database.Database;
   private readonly clock: () => number;
+  private readonly checkStmt: Database.Statement;
+  private readonly recordStmt: Database.Statement;
+  private readonly pruneStmt: Database.Statement;
 
   /** @param clock injectable for deterministic tests. Defaults to `Date.now`. */
   constructor(dashboard: DashboardDB, options: { clock?: () => number } = {}) {
     this.db = dashboard.db;
     this.clock = options.clock ?? (() => Date.now());
+    this.checkStmt = this.db.prepare(
+      `SELECT response_blob FROM message_idempotency
+       WHERE peer_id = ? AND protocol = ? AND message_id = ? AND direction = ?`,
+    );
+    this.recordStmt = this.db.prepare(
+      `INSERT INTO message_idempotency
+         (peer_id, protocol, message_id, direction, response_blob, response_size, ts)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (peer_id, protocol, message_id, direction) DO NOTHING`,
+    );
+    this.pruneStmt = this.db.prepare(`DELETE FROM message_idempotency WHERE ts < ?`);
   }
 
   check(
@@ -1603,12 +1617,7 @@ export class SqliteMessageIdempotencyStore implements MessageIdempotencyStore {
     messageId: string,
     direction: MessageDirection,
   ): IdempotencyCheckResult {
-    const row = this.db
-      .prepare(
-        `SELECT response_blob FROM message_idempotency
-         WHERE peer_id = ? AND protocol = ? AND message_id = ? AND direction = ?`,
-      )
-      .get(peer, protocol, messageId, direction) as
+    const row = this.checkStmt.get(peer, protocol, messageId, direction) as
       | { response_blob: Buffer | null }
       | undefined;
     if (!row) return { seen: false };
@@ -1643,20 +1652,11 @@ export class SqliteMessageIdempotencyStore implements MessageIdempotencyStore {
     // no-op; any other constraint violation surfaces as a thrown
     // SqliteError so the substrate's bug doesn't disguise itself as
     // a normal duplicate.
-    this.db
-      .prepare(
-        `INSERT INTO message_idempotency
-           (peer_id, protocol, message_id, direction, response_blob, response_size, ts)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT (peer_id, protocol, message_id, direction) DO NOTHING`,
-      )
-      .run(peer, protocol, messageId, direction, blob, responseSize, this.clock());
+    this.recordStmt.run(peer, protocol, messageId, direction, blob, responseSize, this.clock());
   }
 
   pruneOlderThan(tsMs: number): number {
-    const result = this.db
-      .prepare(`DELETE FROM message_idempotency WHERE ts < ?`)
-      .run(tsMs);
+    const result = this.pruneStmt.run(tsMs);
     return result.changes;
   }
 }
@@ -1702,9 +1702,55 @@ export class SqliteProtocolOutboxStore implements ProtocolOutboxStore {
   private readonly db: Database.Database;
   private maxAgeMs = 24 * 60 * 60 * 1000;
   private backoffFor: (attempts: number) => number = (_attempts) => 5_000;
+  private readonly selectEntryStmt: Database.Statement;
+  private readonly updateEntryStmt: Database.Statement;
+  private readonly insertEntryStmt: Database.Statement;
+  private readonly markDeliveredStmt: Database.Statement;
+  private readonly hasEntryStmt: Database.Statement;
+  private readonly pendingForStmt: Database.Statement;
+  private readonly dueStmt: Database.Statement;
+  private readonly selectExpiredStmt: Database.Statement;
+  private readonly deleteExpiredStmt: Database.Statement;
+  private readonly sizeStmt: Database.Statement;
 
   constructor(dashboard: DashboardDB, options: SqliteProtocolOutboxStoreOptions = {}) {
     this.db = dashboard.db;
+    this.selectEntryStmt = this.db.prepare(
+      `SELECT * FROM protocol_outbox
+       WHERE peer_id = ? AND protocol = ? AND message_id = ?`,
+    );
+    this.updateEntryStmt = this.db.prepare(
+      `UPDATE protocol_outbox
+       SET attempts = ?, last_attempt_at = ?, next_attempt_at = ?, last_error = ?
+       WHERE peer_id = ? AND protocol = ? AND message_id = ?`,
+    );
+    this.insertEntryStmt = this.db.prepare(
+      `INSERT INTO protocol_outbox
+         (peer_id, protocol, message_id, payload, attempts,
+          first_failure_at, last_attempt_at, next_attempt_at, last_error)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    this.markDeliveredStmt = this.db.prepare(
+      `DELETE FROM protocol_outbox
+       WHERE peer_id = ? AND protocol = ? AND message_id = ?`,
+    );
+    this.hasEntryStmt = this.db.prepare(
+      `SELECT 1 FROM protocol_outbox
+       WHERE peer_id = ? AND protocol = ? AND message_id = ? LIMIT 1`,
+    );
+    this.pendingForStmt = this.db.prepare(
+      `SELECT * FROM protocol_outbox WHERE peer_id = ? ORDER BY first_failure_at ASC`,
+    );
+    this.dueStmt = this.db.prepare(
+      `SELECT * FROM protocol_outbox WHERE next_attempt_at <= ?`,
+    );
+    this.selectExpiredStmt = this.db.prepare(
+      `SELECT * FROM protocol_outbox WHERE first_failure_at < ?`,
+    );
+    this.deleteExpiredStmt = this.db.prepare(
+      `DELETE FROM protocol_outbox WHERE first_failure_at < ?`,
+    );
+    this.sizeStmt = this.db.prepare(`SELECT COUNT(*) as c FROM protocol_outbox`);
     this.configurePolicy(options);
   }
 
@@ -1721,12 +1767,7 @@ export class SqliteProtocolOutboxStore implements ProtocolOutboxStore {
     error: string,
     now: number,
   ): ProtocolOutboxEntry {
-    const existing = this.db
-      .prepare(
-        `SELECT * FROM protocol_outbox
-         WHERE peer_id = ? AND protocol = ? AND message_id = ?`,
-      )
-      .get(peer, protocol, messageId) as
+    const existing = this.selectEntryStmt.get(peer, protocol, messageId) as
       | {
           peer_id: string;
           protocol: string;
@@ -1743,13 +1784,7 @@ export class SqliteProtocolOutboxStore implements ProtocolOutboxStore {
     if (existing) {
       const newAttempts = existing.attempts + 1;
       const nextAttemptAt = now + this.backoffFor(newAttempts);
-      this.db
-        .prepare(
-          `UPDATE protocol_outbox
-           SET attempts = ?, last_attempt_at = ?, next_attempt_at = ?, last_error = ?
-           WHERE peer_id = ? AND protocol = ? AND message_id = ?`,
-        )
-        .run(newAttempts, now, nextAttemptAt, error, peer, protocol, messageId);
+      this.updateEntryStmt.run(newAttempts, now, nextAttemptAt, error, peer, protocol, messageId);
       return {
         peer,
         protocol,
@@ -1766,14 +1801,7 @@ export class SqliteProtocolOutboxStore implements ProtocolOutboxStore {
     const attempts = 1;
     const nextAttemptAt = now + this.backoffFor(attempts);
     const blob = Buffer.from(payload);
-    this.db
-      .prepare(
-        `INSERT INTO protocol_outbox
-           (peer_id, protocol, message_id, payload, attempts,
-            first_failure_at, last_attempt_at, next_attempt_at, last_error)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(peer, protocol, messageId, blob, attempts, now, now, nextAttemptAt, error);
+    this.insertEntryStmt.run(peer, protocol, messageId, blob, attempts, now, now, nextAttemptAt, error);
     return {
       peer,
       protocol,
@@ -1788,31 +1816,17 @@ export class SqliteProtocolOutboxStore implements ProtocolOutboxStore {
   }
 
   markDelivered(peer: string, protocol: string, messageId: string): boolean {
-    const result = this.db
-      .prepare(
-        `DELETE FROM protocol_outbox
-         WHERE peer_id = ? AND protocol = ? AND message_id = ?`,
-      )
-      .run(peer, protocol, messageId);
+    const result = this.markDeliveredStmt.run(peer, protocol, messageId);
     return result.changes > 0;
   }
 
   hasEntry(peer: string, protocol: string, messageId: string): boolean {
-    const row = this.db
-      .prepare(
-        `SELECT 1 FROM protocol_outbox
-         WHERE peer_id = ? AND protocol = ? AND message_id = ? LIMIT 1`,
-      )
-      .get(peer, protocol, messageId) as { 1: number } | undefined;
+    const row = this.hasEntryStmt.get(peer, protocol, messageId) as { 1: number } | undefined;
     return row !== undefined;
   }
 
   pendingFor(peer: string): ProtocolOutboxEntry[] {
-    const rows = this.db
-      .prepare(
-        `SELECT * FROM protocol_outbox WHERE peer_id = ? ORDER BY first_failure_at ASC`,
-      )
-      .all(peer) as Array<{
+    const rows = this.pendingForStmt.all(peer) as Array<{
       peer_id: string;
       protocol: string;
       message_id: string;
@@ -1827,11 +1841,7 @@ export class SqliteProtocolOutboxStore implements ProtocolOutboxStore {
   }
 
   due(now: number): ProtocolOutboxEntry[] {
-    const rows = this.db
-      .prepare(
-        `SELECT * FROM protocol_outbox WHERE next_attempt_at <= ?`,
-      )
-      .all(now) as Array<{
+    const rows = this.dueStmt.all(now) as Array<{
       peer_id: string;
       protocol: string;
       message_id: string;
@@ -1847,9 +1857,7 @@ export class SqliteProtocolOutboxStore implements ProtocolOutboxStore {
 
   dropExpired(now: number): ProtocolOutboxEntry[] {
     const cutoff = now - this.maxAgeMs;
-    const rows = this.db
-      .prepare(`SELECT * FROM protocol_outbox WHERE first_failure_at < ?`)
-      .all(cutoff) as Array<{
+    const rows = this.selectExpiredStmt.all(cutoff) as Array<{
       peer_id: string;
       protocol: string;
       message_id: string;
@@ -1860,12 +1868,12 @@ export class SqliteProtocolOutboxStore implements ProtocolOutboxStore {
       next_attempt_at: number;
       last_error: string | null;
     }>;
-    this.db.prepare(`DELETE FROM protocol_outbox WHERE first_failure_at < ?`).run(cutoff);
+    this.deleteExpiredStmt.run(cutoff);
     return rows.map(SqliteProtocolOutboxStore.rowToEntry);
   }
 
   size(): number {
-    const row = this.db.prepare(`SELECT COUNT(*) as c FROM protocol_outbox`).get() as {
+    const row = this.sizeStmt.get() as {
       c: number;
     };
     return row.c;
