@@ -163,7 +163,7 @@ is idempotent at the app layer) or surface a terminal error.
 
 | Protocol                        | Migrated in | parallelPaths | Notes                                                                              |
 | ------------------------------- | ----------- | ------------- | ---------------------------------------------------------------------------------- |
-| `/dkg/10.0.1/message` (chat)    | PR-3        | 2 (PR-4)      | Pilot. Wire-format break replaces `chat_messages.message_id` index uniqueness.     |
+| `/dkg/10.0.1/message` (chat)    | PR-3        | 1 (2 planned) | Pilot. Wire-format break replaces `chat_messages.message_id` index uniqueness.     |
 | `/dkg/10.0.1/skill_request`     | PR-3        | 1             | Migrated alongside chat (shares `agent.sendMessage` path).                         |
 | `/dkg/10.0.1/swm-sender-key`    | PR-8        | 1             | Batch with `/private-access`.                                                      |
 | `/dkg/10.0.1/private-access`    | PR-8        | 1             | Batch with `/swm-sender-key`.                                                      |
@@ -206,11 +206,13 @@ is idempotent at the app layer) or surface a terminal error.
   runtime check** — the sender cannot inspect the receiver's
   substrate version, the protocol-prefix string IS the contract.
 
-  Per-protocol defaults (set at the call site by each caller):
+  Per-protocol defaults (set at the call site by each caller). PR-4
+  ships the router primitive only; chat remains at the safe default
+  until its call site explicitly opts into `parallelPaths: 2`:
 
   | Protocol             | Default `parallelPaths` | Reason                                                                 |
   | -------------------- | ----------------------- | ---------------------------------------------------------------------- |
-  | chat (`/message`)    | 2                       | Latency-sensitive UX path; cheap to race 2 relays.                     |
+  | chat (`/message`)    | 1 (2 planned)           | Latency-sensitive UX path; opt-in happens where chat calls Messenger.  |
   | skill_request        | 1                       | Same wire prefix as chat; usually synchronous-blocking caller.         |
   | swm-sender-key       | 1                       | Low frequency; latency tolerates single-path retries.                  |
   | private-access       | 1                       | Same as swm-key.                                                       |

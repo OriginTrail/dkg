@@ -1109,6 +1109,47 @@ describe('ProtocolRouter', () => {
       expect(fallbackSignal?.aborted).toBe(false);
     });
 
+    it('bounds the multi-path pre-attempt so fallback keeps time budget', async () => {
+      let newStreamCalls = 0;
+      let dialCalls = 0;
+      const stalledConn = (label: string) => makeConn({
+        label,
+        onNewStream: async (_protocols, options) => {
+          newStreamCalls += 1;
+          if (newStreamCalls <= 2) {
+            await new Promise((_resolve, reject) => {
+              options?.signal?.addEventListener('abort', () => reject(new Error('stalled multipath aborted')), {
+                once: true,
+              });
+            });
+          }
+          throw new Error('stream returned in closed state');
+        },
+      });
+      const node = {
+        libp2p: {
+          getConnections: () => [stalledConn('A-stalled'), stalledConn('B-stalled')],
+          dialProtocol: async () => {
+            dialCalls += 1;
+            return makeWorkingStream(new Uint8Array([0xCE])) as any;
+          },
+          handle: () => undefined,
+          unhandle: () => undefined,
+          peerStore: { get: async () => { throw new Error('NotFound'); } },
+        },
+      } as unknown as DKGNode;
+      const peerResolver = { resolve: async () => [] } as unknown as PeerResolver;
+      const router = new ProtocolRouter(node, { peerResolver });
+
+      const result = await router.send(FAKE_PEER_ID, '/dkg/10.0.1/test', new Uint8Array([1]), {
+        parallelPaths: 2,
+        timeoutMs: 120,
+      });
+
+      expect(result).toEqual(new Uint8Array([0xCE]));
+      expect(dialCalls).toBe(1);
+    });
+
     it('parallelPaths>1 accepts the number-form timeoutMs still working via opts.timeoutMs', async () => {
       // Backwards-compat smoke: passing a number as the 4th arg
       // still works (rc.8 call sites untouched).
@@ -1273,6 +1314,44 @@ describe('ProtocolRouter', () => {
       await new Promise((r) => setTimeout(r, 50));
       expect(lateLoserAborted).toBe(true);
       expect(lateLoserSent).toBe(false);
+    });
+
+    it('aborts pending loser newStream attempts when a winner settles', async () => {
+      const { raceMultiPath } = await import('../src/protocol-router.js');
+      let pendingLoserAborted = false;
+      const winnerStream: any = {
+        writeStatus: 'open',
+        send: () => undefined,
+        close: async () => undefined,
+        abort: () => undefined,
+        async *[Symbol.asyncIterator]() { yield new Uint8Array([0xCC]); },
+      };
+      const conns = [
+        { status: 'open', newStream: async () => winnerStream },
+        {
+          status: 'open',
+          newStream: async (_protocols: string, options?: { signal?: AbortSignal }) => {
+            await new Promise((_resolve, reject) => {
+              options?.signal?.addEventListener('abort', () => {
+                pendingLoserAborted = true;
+                reject(new Error('pending loser aborted'));
+              }, { once: true });
+            });
+          },
+        },
+      ];
+      const result = await raceMultiPath({
+        getConnections: () => conns as any[],
+        protocolId: '/test/1.0.0',
+        data: new Uint8Array([1]),
+        parallelPaths: 2,
+        signal: AbortSignal.timeout(1000),
+        maxReadBytes: 1024,
+      });
+      expect(result?.response).toEqual(new Uint8Array([0xCC]));
+
+      await new Promise((r) => setTimeout(r, 0));
+      expect(pendingLoserAborted).toBe(true);
     });
   });
 });

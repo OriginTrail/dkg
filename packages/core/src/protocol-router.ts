@@ -161,14 +161,18 @@ export class ProtocolRouter {
     const peerId = peerIdFromString(peerIdStr);
     const startedAt = Date.now();
 
-    if (parallelPaths > 1) {
-      const multipathSignal = AbortSignal.timeout(timeoutMs);
+    if (parallelPaths > 1 && timeoutMs > 1) {
+      const multipathBudgetMs = Math.max(1, Math.min(timeoutMs - 1, Math.ceil(timeoutMs / 3)));
+      const multipathSignal = AbortSignal.timeout(multipathBudgetMs);
       // Multi-path pre-attempt — race up to N live connections.
       // Returns the response on a winning path, or null if there
       // weren't enough live candidates (or all candidates failed).
       // On null we fall through to the single-path retry loop below
       // so cold peers + total-multipath-failure both keep the rc.8
-      // semantics intact.
+      // semantics intact. The pre-attempt gets only an initial slice
+      // of the caller's timeout so a wedged set of live connections
+      // cannot consume the whole budget before resolver+dial fallback
+      // has a chance to run.
       const multipathResult = await raceMultiPath({
         getConnections: () =>
           rawGetConnectionsFor(libp2p, peerId),
@@ -706,6 +710,8 @@ export async function raceMultiPath(args: {
   const streams: Array<{ stream: import('@libp2p/interface').Stream; aborted: boolean } | null> =
     picked.map(() => null);
   let winnerIdx = -1;
+  const winnerController = new AbortController();
+  const raceSignal = abortSignalAny([signal, winnerController.signal]);
 
   const abortPath = (idx: number, reason: Error): void => {
     const s = streams[idx];
@@ -729,7 +735,7 @@ export async function raceMultiPath(args: {
   const attempts = picked.map(async (conn, idx): Promise<Uint8Array> => {
     const stream = await conn.newStream(protocolId, {
       runOnLimitedConnection: true,
-      signal,
+      signal: raceSignal,
     });
     streams[idx] = { stream, aborted: false };
     if (winnerIdx !== -1 && winnerIdx !== idx) {
@@ -745,7 +751,7 @@ export async function raceMultiPath(args: {
       throw new Error('multipath: stream returned in closed state');
     }
     stream.send(data);
-    await stream.close({ signal });
+    await stream.close({ signal: raceSignal });
     return await readAll(stream, maxReadBytes);
   });
 
@@ -760,6 +766,9 @@ export async function raceMultiPath(args: {
           if (winnerIdx === -1) {
             winnerIdx = i;
             abortLosers(i);
+            if (!winnerController.signal.aborted) {
+              winnerController.abort(new Error('multipath: winner settled'));
+            }
             resolve(res);
           } else if (winnerIdx !== i) {
             abortPath(i, new Error('multipath: loser path'));
@@ -777,6 +786,9 @@ export async function raceMultiPath(args: {
     // All N attempts failed — return null so caller falls through
     // to single-path. At this point every attempt rejected, so any
     // streams that opened can be aborted synchronously.
+    if (!winnerController.signal.aborted) {
+      winnerController.abort(new Error('multipath: all paths failed'));
+    }
     for (const s of streams) {
       if (s && !s.aborted) {
         s.aborted = true;
@@ -791,6 +803,28 @@ export async function raceMultiPath(args: {
   }
 
   return { response: winnerResponse, attemptedPaths: picked.length };
+}
+
+function abortSignalAny(signals: AbortSignal[]): AbortSignal {
+  const any = (AbortSignal as unknown as { any?: (signals: AbortSignal[]) => AbortSignal }).any;
+  if (typeof any === 'function') {
+    return any(signals);
+  }
+
+  const controller = new AbortController();
+  const abortFrom = (signal: AbortSignal): void => {
+    if (!controller.signal.aborted) {
+      controller.abort(signal.reason ?? new Error('aborted'));
+    }
+  };
+  for (const signal of signals) {
+    if (signal.aborted) {
+      abortFrom(signal);
+      break;
+    }
+    signal.addEventListener('abort', () => abortFrom(signal), { once: true });
+  }
+  return controller.signal;
 }
 
 async function readAll(
