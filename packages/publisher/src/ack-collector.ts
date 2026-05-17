@@ -53,6 +53,17 @@ export interface ACKCollectionResult {
 const DEFAULT_REQUIRED_ACKS = 3;
 const ACK_TIMEOUT_MS = 120_000;
 const MAX_RETRIES = 3;
+/**
+ * Hard ceiling for the optional `getCorePeersHostingContextGraph`
+ * lookup. The lookup runs against the local triple store BEFORE the
+ * `ACK_TIMEOUT_MS` budget begins, so an unbounded await here can block
+ * a publish indefinitely if the store is under load or the query
+ * implementation hangs (Codex Review on PR#556). On timeout the
+ * collector treats the lookup as "no hosting signal" — falling back to
+ * the legacy single-wave behaviour against all connected cores —
+ * rather than escalating into a publish failure.
+ */
+const HOSTING_FILTER_TIMEOUT_MS = 1_500;
 
 /**
  * ACKCollector implements V10 spec §9.0 Phase 3: collecting 3 core node
@@ -165,9 +176,30 @@ export class ACKCollector {
     if (this.deps.getCorePeersHostingContextGraph) {
       let hostingPeers: string[] = [];
       try {
-        hostingPeers = await Promise.resolve(
+        const lookupPromise = Promise.resolve(
           this.deps.getCorePeersHostingContextGraph(contextGraphIdStr),
         );
+        // Bound the local-store lookup so a slow / hung registry query
+        // can't block the publish before the ACK_TIMEOUT_MS budget even
+        // begins (Codex Review on PR#556). On timeout we treat the
+        // result as "no hosting signal" — i.e. fall back to the legacy
+        // single-wave path against all connected cores.
+        let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+        const timeoutSentinel: unique symbol = Symbol('hosting-filter-timeout');
+        const timeoutPromise = new Promise<typeof timeoutSentinel>(resolve => {
+          timeoutHandle = setTimeout(() => resolve(timeoutSentinel), HOSTING_FILTER_TIMEOUT_MS);
+        });
+        const settled = await Promise.race([lookupPromise, timeoutPromise]);
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+        if (settled === timeoutSentinel) {
+          log(
+            `[ACKCollector] hosting-filter lookup did not return within ${HOSTING_FILTER_TIMEOUT_MS}ms for "${contextGraphIdStr}"; ` +
+            `dialling all ${allConnected.length} connected cores in a single wave`,
+          );
+          hostingPeers = [];
+        } else {
+          hostingPeers = settled;
+        }
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err);
         log(

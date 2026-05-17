@@ -1095,6 +1095,40 @@ describe('ACKCollector hosting filter (#541)', () => {
     expect(targeted).toEqual(['peer-1', 'peer-2', 'peer-3']);
   });
 
+  it('does NOT block the publish when the hosting-filter lookup hangs (Codex Review on PR#556)', async () => {
+    // Bound the local-store hosting query so a slow registry can't
+    // burn the entire publish budget before the collector even starts
+    // dialling peers. On lookup timeout the collector falls back to
+    // the single-wave path against all connected cores.
+    const sendP2P = tracked(buildSendP2P());
+    const log = noop();
+    const deps: ACKCollectorDeps = {
+      gossipPublish: noop(),
+      sendP2P: sendP2P as any,
+      getConnectedCorePeers: () => ['peer-0', 'peer-1', 'peer-2'],
+      getCorePeersHostingContextGraph: () => new Promise<string[]>(() => {}),
+      log,
+    };
+    const collector = new ACKCollector(deps);
+
+    const start = Date.now();
+    const result = await collector.collect(buildCollectParams());
+    const elapsed = Date.now() - start;
+
+    expect(result.acks).toHaveLength(3);
+    // Lookup ceiling is 1.5s; with collector and signature work it
+    // still has to land well under the 120s ACK timeout.
+    expect(elapsed).toBeLessThan(8_000);
+
+    expect(log.calls.some(
+      (c: unknown[]) => (c[0] as string).includes('hosting-filter lookup did not return within'),
+    )).toBe(true);
+    // All connected cores get dialled (single fallback wave) since
+    // the timeout means we have no hosting signal.
+    const targeted = new Set(sendP2P.calls.map((c) => c[0] as string));
+    expect(targeted.size).toBe(3);
+  });
+
   it('without the dep, behaviour is identical to today (no filter)', async () => {
     const sendP2P = tracked(buildSendP2P());
     const deps: ACKCollectorDeps = {
@@ -1154,6 +1188,39 @@ describe('resolvePeersHostingContextGraph', () => {
       .toEqual(['12D3KooWnWcpzsge']);
     expect(await resolvePeersHostingContextGraph(store, '0x8fb6dcd4/testing'))
       .toEqual(['12D3KooWnWcpzsge']);
+  });
+
+  it('only trusts profile triples in the authoritative agent-registry named graph (Codex Review on PR#556)', async () => {
+    // A copied / stale profile snapshot landing in some other named
+    // graph (e.g. a developer's playground graph, or a partial sync
+    // staging area) MUST NOT influence ACK routing — otherwise the
+    // collector's priority wave can be skewed toward whichever peers
+    // happen to appear in the strongest snapshot.
+    const { resolvePeersHostingContextGraph } = await import('../src/hosting-resolver.js');
+    const store = new OxigraphStore();
+
+    const STRAY_GRAPH = 'did:dkg:context-graph:some-other-graph';
+    const buildQuadsInGraph = (peerId: string, graph: string): Quad[] => {
+      const entity = `did:dkg:agent:${peerId}`;
+      const hosting = `${entity}/.well-known/genid/hosting`;
+      return [
+        { subject: entity, predicate: RDF_TYPE, object: `${DKG_NS}Agent`, graph },
+        { subject: entity, predicate: RDF_TYPE, object: `${DKG_NS}CoreNode`, graph },
+        { subject: entity, predicate: `${DKG_NS}nodeRole`, object: `"core"`, graph },
+        { subject: entity, predicate: `${DKG_NS}peerId`, object: `"${peerId}"`, graph },
+        { subject: entity, predicate: `${SKILL}hostingProfile`, object: hosting, graph },
+        { subject: hosting, predicate: `${SKILL}contextGraphsServed`, object: `"0x8fb6dcd4/repnet"`, graph },
+      ];
+    };
+
+    await store.insert([
+      ...buildQuadsInGraph('12D3KooWauthoritative', REGISTRY_GRAPH),
+      ...buildQuadsInGraph('12D3KooWstray', STRAY_GRAPH),
+    ]);
+
+    const peers = await resolvePeersHostingContextGraph(store, '0x8fb6dcd4/repnet');
+    expect(peers).toEqual(['12D3KooWauthoritative']);
+    expect(peers).not.toContain('12D3KooWstray');
   });
 
   it('filters out edge nodes even if they advertise contextGraphsServed (Codex Review on PR#556)', async () => {
