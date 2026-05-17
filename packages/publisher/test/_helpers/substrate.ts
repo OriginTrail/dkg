@@ -21,6 +21,7 @@ import {
   encodeReliableEnvelope,
   InMemoryMessageIdempotencyStore,
   RELIABLE_ENVELOPE_VERSION,
+  isRecoverableSendError,
   type ProtocolRouter,
 } from '@origintrail-official/dkg-core';
 import type { AccessSendSurface } from '../../src/access-client.js';
@@ -56,8 +57,9 @@ export function registerSubstrateHandler(
  * Mint an `AccessSendSurface` over a raw `ProtocolRouter` so tests
  * can construct an `AccessClient` without depending on the agent
  * package's `Messenger` class. Wraps each send in a fresh
- * `ReliableEnvelope`; reports the `router.send` failure as `queued`
- * (the substrate's standard recoverable shape).
+ * `ReliableEnvelope`; reports recoverable `router.send` failures as
+ * `queued` (the substrate's standard recoverable shape) and rethrows
+ * non-recoverable errors.
  */
 export function createSubstrateClient(router: ProtocolRouter): AccessSendSurface {
   return {
@@ -73,6 +75,9 @@ export function createSubstrateClient(router: ProtocolRouter): AccessSendSurface
         const response = await router.send(peerId, protocolId, envelope, opts?.timeoutMs);
         return { delivered: true as const, response, attempts: 1, messageId };
       } catch (err) {
+        if (!isRecoverableSendError(err)) {
+          throw err;
+        }
         return {
           delivered: false as const,
           queued: true as const,

@@ -1,7 +1,11 @@
+import { randomUUID } from 'node:crypto';
 import {
   PROTOCOL_ACCESS,
   encodeAccessRequest,
   decodeAccessResponse,
+  encodeReliableEnvelope,
+  RELIABLE_ENVELOPE_VERSION,
+  isRecoverableSendError,
   ed25519Sign,
   type Ed25519Keypair,
 } from '@origintrail-official/dkg-core';
@@ -42,6 +46,17 @@ export interface AccessSendSurface {
   >;
 }
 
+export interface AccessRouterSurface {
+  send(
+    peerId: string,
+    protocolId: string,
+    payload: Uint8Array,
+    timeoutMs?: number,
+  ): Promise<Uint8Array>;
+}
+
+export type AccessTransport = AccessSendSurface | AccessRouterSurface;
+
 /**
  * Client-side access protocol for requesting private triples from a publisher node.
  * After receiving triples, verifies them against the privateMerkleRoot to ensure
@@ -50,17 +65,17 @@ export interface AccessSendSurface {
  * rc.9 PR-8: migrated from `ProtocolRouter.send` to Messenger
  * substrate (`sendReliable`). Wire prefix bumped to
  * `/dkg/10.0.1/private-access`; receivers must run the substrate.
- * Queued returns are surfaced to the caller as a failed access
- * request — access is synchronous-by-design (the requester is
- * waiting for triples, not enqueueing a background fetch).
+ * Queued returns are surfaced to the caller as transport errors —
+ * access is synchronous-by-design (the requester is waiting for
+ * triples, not enqueueing a background fetch).
  */
 export class AccessClient {
   private readonly messenger: AccessSendSurface;
   private readonly keypair: Ed25519Keypair;
   private readonly peerId: string;
 
-  constructor(messenger: AccessSendSurface, keypair: Ed25519Keypair, peerId: string) {
-    this.messenger = messenger;
+  constructor(transport: AccessTransport, keypair: Ed25519Keypair, peerId: string) {
+    this.messenger = asAccessSendSurface(transport);
     this.keypair = keypair;
     this.peerId = peerId;
   }
@@ -90,16 +105,11 @@ export class AccessClient {
     );
 
     if (!sendResult.delivered) {
-      // Access is synchronous-by-design — surface queued as a
-      // rejection so the caller can retry with a fresh request rather
-      // than waiting for a background outbox flush. The substrate
-      // still keeps the outbox entry around for diagnostics.
-      return {
-        granted: false,
-        quads: [],
-        verified: false,
-        rejectionReason: `transport: ${sendResult.error}`,
-      };
+      // Access is synchronous-by-design — the requester is waiting
+      // for private triples now. A queued transport retry is not an
+      // authorization denial, so preserve it as a transport failure
+      // and let the caller retry with a fresh request.
+      throw new Error(`Access transport queued: ${sendResult.error}`);
     }
 
     const response = decodeAccessResponse(sendResult.response);
@@ -135,6 +145,45 @@ export class AccessClient {
       verified,
     };
   }
+}
+
+function asAccessSendSurface(transport: AccessTransport): AccessSendSurface {
+  const maybeReliable = transport as AccessSendSurface;
+  if (typeof maybeReliable.sendReliable === 'function') {
+    return maybeReliable;
+  }
+
+  const maybeRouter = transport as AccessRouterSurface;
+  if (typeof maybeRouter.send === 'function') {
+    return {
+      async sendReliable(peerId, protocolId, payload, opts) {
+        const messageId = opts?.messageId ?? randomUUID();
+        const envelope = encodeReliableEnvelope({
+          messageId,
+          version: RELIABLE_ENVELOPE_VERSION,
+          tsMs: Date.now(),
+          payload,
+        });
+        try {
+          const response = await maybeRouter.send(peerId, protocolId, envelope, opts?.timeoutMs);
+          return { delivered: true as const, response, attempts: 1, messageId };
+        } catch (err) {
+          if (!isRecoverableSendError(err)) {
+            throw err;
+          }
+          return {
+            delivered: false as const,
+            queued: true as const,
+            attempts: 1,
+            messageId,
+            error: err instanceof Error ? err.message : String(err),
+          };
+        }
+      },
+    };
+  }
+
+  throw new TypeError('AccessClient requires a Messenger sendReliable surface or ProtocolRouter send surface');
 }
 
 function toHex(bytes: Uint8Array): string {
