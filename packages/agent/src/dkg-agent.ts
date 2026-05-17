@@ -2075,9 +2075,8 @@ export class DKGAgent {
     // rc.9 PR-10: migrated onto the Universal Messenger substrate
     // (wire prefix bumped to /dkg/10.0.1/join-request). messenger.register
     // wraps the handler with envelope-decode + receiver-side dedup;
-    // the application logic below is unchanged.
+    // messenger.register passes the remote peer id as a string.
     this.messenger.register(PROTOCOL_JOIN_REQUEST, async (data, peerIdStr) => {
-      const peerId = { toString: () => peerIdStr, toBytes: () => new Uint8Array() };
       try {
         const payload = JSON.parse(new TextDecoder().decode(data));
 
@@ -2104,16 +2103,16 @@ export class DKGAgent {
             const senderTrusted = await this.isTrustedJoinDecisionSender(
               contextGraphId,
               approvedAddr,
-              peerId.toString(),
+              peerIdStr,
             );
             if (!senderTrusted) {
               this.log.warn(
                 createOperationContext('system'),
-                `Dropping join-approved for "${contextGraphId}" from ${peerId.toString()} — sender did not previously accept the join request and is not the recorded curator`,
+                `Dropping join-approved for "${contextGraphId}" from ${peerIdStr} — sender did not previously accept the join request and is not the recorded curator`,
               );
               return new TextEncoder().encode(JSON.stringify({ ok: true, skipped: true }));
             }
-            this.preferredSyncPeers.set(contextGraphId, peerId.toString());
+            this.preferredSyncPeers.set(contextGraphId, peerIdStr);
             // Curator just confirmed `approvedAddr` is the principal —
             // record it BEFORE auto-subscribe / sync kick in, so the
             // first post-approval `buildSyncRequest` claims the right
@@ -2158,7 +2157,7 @@ export class DKGAgent {
             // `.catch(() => {})` swallowed every failure mode silently and
             // also went through the regular peer-ranking path that produced
             // zero sync attempts in the just-approved-but-no-meta-yet window.
-            void this.runImmediatePostApprovalSync(contextGraphId, peerId.toString());
+            void this.runImmediatePostApprovalSync(contextGraphId, peerIdStr);
             this.eventBus.emit(DKGEvent.JOIN_APPROVED, {
               contextGraphId,
               agentAddress: approvedAddr,
@@ -2201,12 +2200,12 @@ export class DKGAgent {
           const senderTrusted = await this.isTrustedJoinDecisionSender(
             contextGraphId,
             rejectedAddr,
-            peerId.toString(),
+            peerIdStr,
           );
           if (!senderTrusted) {
             this.log.warn(
               createOperationContext('system'),
-              `Dropping join-rejected for "${contextGraphId}" from ${peerId.toString()} — sender did not previously accept the join request and is not the recorded curator`,
+              `Dropping join-rejected for "${contextGraphId}" from ${peerIdStr} — sender did not previously accept the join request and is not the recorded curator`,
             );
             return new TextEncoder().encode(JSON.stringify({ ok: true, skipped: true }));
           }
@@ -2248,7 +2247,7 @@ export class DKGAgent {
         // — the failing joiner just sees "no reachable curator" and the
         // curator's log shows nothing. PR #448 round-6 testing burned a
         // lot of time on that gap; surface it.
-        const remotePeer = peerId.toString();
+        const remotePeer = peerIdStr;
         const peerTag = remotePeer.slice(-8);
         const requestCtx = createOperationContext('system');
         if (!contextGraphId || !delegation?.agentAddress || !delegation?.signature) {
@@ -2300,7 +2299,7 @@ export class DKGAgent {
         // send approval/rejection back to the same peer later, even if
         // the agent registry hasn't indexed them yet.
         const originKey = `${contextGraphId}::${delegation.agentAddress.toLowerCase()}`;
-        this.joinRequestOriginPeers.set(originKey, peerId.toString());
+        this.joinRequestOriginPeers.set(originKey, peerIdStr);
 
         // Already-member short-circuit: if the requester is already in
         // the allowlist (e.g. they were added directly via add-agent,
@@ -9991,6 +9990,13 @@ export class DKGAgent {
     const candidates = this.joinApprovalRetryQueue.list();
     for (const entry of candidates) {
       try {
+        const target = await this.resolvePrivateJoinNotificationTarget(
+          entry.contextGraphId,
+          entry.agentAddress,
+        );
+        if (target.peerId !== remotePeerId) {
+          continue;
+        }
         const result = await this.redeliverJoinApproval(entry.contextGraphId, entry.agentAddress);
         if (result.delivered) {
           this.log.info(
@@ -10160,6 +10166,40 @@ export class DKGAgent {
     await this.deliverPrivateJoinNotification(contextGraphId, agentAddress, payload, 'join-rejection');
   }
 
+  private async resolvePrivateJoinNotificationTarget(
+    contextGraphId: string,
+    agentAddress: string,
+  ): Promise<{ peerId: string | null; error: string | null }> {
+    const addrLower = agentAddress.toLowerCase();
+    const originKey = `${contextGraphId}::${addrLower}`;
+    const rememberedPeerId = this.joinRequestOriginPeers.get(originKey) ?? null;
+
+    // Re-resolve the logical invitee identity on every attempt. Peer IDs
+    // can change across restarts; the retry queue is keyed by
+    // (contextGraphId, agentAddress), so the registry's current peer ID
+    // should win whenever it is available.
+    try {
+      const agents = await this.discovery.findAgents();
+      const match = agents.find((a) => a.agentAddress?.toLowerCase() === addrLower);
+      if (match?.peerId) {
+        return { peerId: match.peerId, error: null };
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!rememberedPeerId) {
+        return { peerId: null, error: `agent registry lookup failed: ${msg}` };
+      }
+      // Fall through to the process-local origin peer. This keeps
+      // approval delivery working when the request arrived over P2P but
+      // the registry is temporarily unavailable.
+    }
+
+    if (rememberedPeerId) {
+      return { peerId: rememberedPeerId, error: null };
+    }
+    return { peerId: null, error: 'no origin peer remembered and agent not in local registry' };
+  }
+
   /**
    * Resolve the target agent's peer ID and send the payload only to that
    * peer. Never broadcasts — leaking a curated CG's membership to every
@@ -10169,16 +10209,16 @@ export class DKGAgent {
    *
    * Two resolution sources, in order:
    *
-   *   1. `joinRequestOriginPeers` — the peer that actually delivered the
+   *   1. `discovery.findAgents()` — the current peer ID for the logical
+   *      agent identity. This wins on every attempt so queued approval
+   *      retries survive invitee restarts / peer-ID rotation.
+   *   2. `joinRequestOriginPeers` — the peer that actually delivered the
    *      original join request over P2P. Set by the handler at register
    *      time and persists for the curator's process lifetime. This
    *      avoids a regression from the old broadcast implementation: the
    *      requester may reach us via P2P before their agent profile is
    *      indexed locally, so relying on `findAgents()` alone would drop
    *      every approval/rejection until registry replication catches up.
-   *   2. `discovery.findAgents()` fallback for the case where the
-   *      curator restarted between receiving the request and acting on
-   *      it (and thus lost the in-memory peer mapping).
    *
    * @returns void (logged success/failure; callers treat this as
    *          fire-and-forget)
@@ -10191,59 +10231,12 @@ export class DKGAgent {
   ): Promise<{ delivered: boolean; peerId: string | null; error: string | null }> {
     const payloadBytes = new TextEncoder().encode(payload);
     const ctx = createOperationContext('system');
-    const addrLower = agentAddress.toLowerCase();
-
-    let targetPeerId: string | null = null;
-
-    // Preferred source: the peer that actually delivered the join
-    // request. This is always correct for the common flow and doesn't
-    // depend on registry replication timing.
-    const originKey = `${contextGraphId}::${addrLower}`;
-    const rememberedPeerId = this.joinRequestOriginPeers.get(originKey);
-    if (rememberedPeerId) {
-      targetPeerId = rememberedPeerId;
-    }
-
-    // Always consult the registry when we either had no remembered peer
-    // OR we have one but no live connection to it right now. This fixes
-    // two related regressions:
-    //
-    //   * If the requester disconnected between submitting the request
-    //     and the curator acting on it, with only the remembered-peer
-    //     path we'd have no relay address to redial and the
-    //     notification would be silently dropped even though the
-    //     registry knows exactly how to reach them.
-    //   * If the requester reconnected with a brand-new peer ID (e.g.
-    //     ephemeral peer IDs, node restart on a volatile host), the
-    //     remembered ID is now stale. Sending to a dead peer ID just
-    //     times out; the registry's current peer ID is authoritative.
-    //
-    // So when the remembered peer isn't connected, we REPLACE it with
-    // the registry's current peer ID (not just supplement it with a
-    // relay hint), which is what Codex N25 asks for. Registry lookup is
-    // cheap (local graph query).
-    const rememberedIsConnected = rememberedPeerId
-      ? this.node.libp2p
-          .getConnections()
-          .some((c) => c.remotePeer.toString() === rememberedPeerId)
-      : false;
-    if (!targetPeerId || !rememberedIsConnected) {
-      try {
-        const agents = await this.discovery.findAgents();
-        const match = agents.find((a) => a.agentAddress?.toLowerCase() === addrLower);
-        if (match) {
-          // Take the registry's peer ID whenever we don't have a live
-          // connection to the remembered one — it may be fresher.
-          targetPeerId = match.peerId;
-        }
-      } catch {
-        // Registry unavailable — we'll just skip delivery below if we
-        // also have no live connection to the remembered peer.
-      }
-    }
+    const originKey = `${contextGraphId}::${agentAddress.toLowerCase()}`;
+    const { peerId: targetPeerId, error: resolveError } =
+      await this.resolvePrivateJoinNotificationTarget(contextGraphId, agentAddress);
 
     if (!targetPeerId) {
-      const errMsg = `no origin peer remembered and agent not in local registry`;
+      const errMsg = resolveError ?? 'no origin peer remembered and agent not in local registry';
       this.log.warn(
         ctx,
         `Cannot deliver ${label} for "${contextGraphId}" to ${agentAddress} — ${errMsg}. ` +
@@ -10374,13 +10367,15 @@ export class DKGAgent {
         // rc.9 PR-10: substrate send. queued surfaces as a throw
         // (matches the legacy sendToPeer ergonomics so the existing
         // catch path with broadcast fallback still kicks in).
+        const messageId = crypto.randomUUID();
         const sendResult = await this.messenger.sendReliable(
           curatorPeerId,
           PROTOCOL_JOIN_REQUEST,
           payloadBytes,
-          { timeoutMs: JOIN_REQUEST_SEND_TIMEOUT_MS },
+          { timeoutMs: JOIN_REQUEST_SEND_TIMEOUT_MS, messageId },
         );
         if (!sendResult.delivered) {
+          this.messenger.discardOutboxEntry(curatorPeerId, PROTOCOL_JOIN_REQUEST, messageId);
           throw new Error(`substrate queued (transport): ${sendResult.error}`);
         }
         const responseBytes = sendResult.response;

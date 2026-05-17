@@ -5,6 +5,7 @@ import { JoinApprovalRetryQueue } from '../src/join-approval-retry-queue.js';
 
 const CG = '0xC541F50f734E01d10dAF1bC1aEc3891fb3eA372E/chatt-test';
 const AGENT = '0x3D6b4dee92805715cFfbE2A6C79D842f7Dce6b81';
+const AGENT_TWO = '0x9fFd742fC9a07E7f4A91b9524764f2E21b5bC5f1';
 
 function peer(id: string): { toString(): string } {
   return { toString: () => id };
@@ -12,6 +13,7 @@ function peer(id: string): { toString(): string } {
 
 function makeAgentLike(opts: {
   registryPeerId?: string;
+  registryPeersByAgent?: Record<string, string>;
   connectedPeers?: string[];
   sendReliable?: ReturnType<typeof vi.fn>;
 } = {}): DKGAgent {
@@ -35,9 +37,16 @@ function makeAgentLike(opts: {
     },
   };
   agent.discovery = {
-    findAgents: vi.fn(async () => opts.registryPeerId
-      ? [{ agentAddress: AGENT, peerId: opts.registryPeerId }]
-      : []),
+    findAgents: vi.fn(async () => {
+      const entries: Array<{ agentAddress: string; peerId: string }> = [];
+      if (opts.registryPeerId) {
+        entries.push({ agentAddress: AGENT, peerId: opts.registryPeerId });
+      }
+      for (const [agentAddress, peerId] of Object.entries(opts.registryPeersByAgent ?? {})) {
+        entries.push({ agentAddress, peerId });
+      }
+      return entries;
+    }),
   };
   agent.messenger = {
     sendReliable,
@@ -108,6 +117,29 @@ describe('join approval substrate retry semantics', () => {
     );
   });
 
+  it('opportunistic reconnect retry only redelivers approvals for the reconnected peer', async () => {
+    const agent = makeAgentLike({
+      registryPeersByAgent: {
+        [AGENT]: 'peer-a',
+        [AGENT_TWO]: 'peer-b',
+      },
+    }) as any;
+    agent.joinApprovalRetryQueue.enqueueFailure(CG, AGENT, 'offline', Date.now());
+    agent.joinApprovalRetryQueue.enqueueFailure(CG, AGENT_TWO, 'offline', Date.now());
+
+    await agent.processJoinApprovalRetryQueueOnConnect('peer-a');
+
+    expect(agent.messenger.sendReliable).toHaveBeenCalledTimes(1);
+    expect(agent.messenger.sendReliable).toHaveBeenCalledWith(
+      'peer-a',
+      PROTOCOL_JOIN_REQUEST,
+      expect.any(Uint8Array),
+      expect.objectContaining({ timeoutMs: expect.any(Number), messageId: expect.any(String) }),
+    );
+    expect(agent.listPendingJoinApprovalRetries()).toHaveLength(1);
+    expect(agent.listPendingJoinApprovalRetries()[0].agentAddress).toBe(AGENT_TWO);
+  });
+
   it('keeps broadcast join-request fallback best-effort by discarding queued broadcast entries', async () => {
     let sendCount = 0;
     const sendReliable = vi.fn(async (
@@ -151,5 +183,52 @@ describe('join approval substrate retry semantics', () => {
       PROTOCOL_JOIN_REQUEST,
       expect.any(String),
     );
+  });
+
+  it('discards queued targeted join requests before broadcast fallback can succeed', async () => {
+    let sendCount = 0;
+    const sendReliable = vi.fn(async (
+      peerId: string,
+      _protocolId: string,
+      _payload: Uint8Array,
+      opts: { messageId?: string },
+    ) => {
+      sendCount += 1;
+      if (sendCount === 1) {
+        return {
+          delivered: false as const,
+          queued: true as const,
+          attempts: 1,
+          messageId: opts.messageId ?? `target-${peerId}`,
+          error: 'ECONNRESET',
+        };
+      }
+      return {
+        delivered: true as const,
+        response: new TextEncoder().encode(JSON.stringify({ ok: peerId === 'curator-peer' })),
+        attempts: 1,
+        messageId: opts.messageId ?? `broadcast-${peerId}`,
+      };
+    });
+    const agent = makeAgentLike({
+      connectedPeers: ['curator-peer'],
+      sendReliable,
+    }) as any;
+
+    const result = await agent.forwardJoinRequest(
+      CG,
+      { agentAddress: AGENT } as any,
+      undefined,
+      'curator-peer',
+    );
+
+    expect(result.delivered).toBe(1);
+    const targetedMessageId = sendReliable.mock.calls[0][3].messageId;
+    expect(agent.messenger.discardOutboxEntry).toHaveBeenCalledWith(
+      'curator-peer',
+      PROTOCOL_JOIN_REQUEST,
+      targetedMessageId,
+    );
+    expect(sendReliable).toHaveBeenCalledTimes(2);
   });
 });
