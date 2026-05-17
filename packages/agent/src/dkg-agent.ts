@@ -12945,11 +12945,31 @@ export class DKGAgent {
       };
     }
 
+    // Canonical base58btc form. The MCP tool accepts both base58btc
+    // and base32 peerId encodings; libp2p's connection/peerStore
+    // lookups normalise via `peerIdFromString`, but `messageOutbox`
+    // and `peerHealth` are keyed by the canonical string from
+    // `peerId.toString()` (see `pingPeers` which populates `peerHealth`
+    // via `peerId.toString()`). Looking them up with the raw input
+    // string would silently miss for base32 callers, returning
+    // `connected:true` alongside empty `outbox`/`health` — a real
+    // diagnostic-noise bug (PR #538 Codex review).
+    const peerKey = pid.toString();
+
     let rawConns: LibConnection[] = [];
     try {
-      rawConns = libp2p
-        .getConnections()
-        .filter((c: LibConnection) => c.remotePeer.equals(pid!));
+      // Per-connection try/catch so a single tearing-down or shape-drift
+      // connection that throws from `remotePeer.equals(pid)` doesn't
+      // zero out the WHOLE snapshot (which would surface as a
+      // misleading `connected:false` — the inverse of what the route
+      // is meant to diagnose). Skip the bad entry, keep the rest.
+      rawConns = libp2p.getConnections().filter((c: LibConnection) => {
+        try {
+          return c.remotePeer.equals(pid!);
+        } catch {
+          return false;
+        }
+      });
     } catch {
       rawConns = [];
     }
@@ -12993,7 +13013,7 @@ export class DKGAgent {
       peerStoreSnapshot = null;
     }
 
-    const pending = this.messageOutbox.pendingFor(peerId);
+    const pending = this.messageOutbox.pendingFor(peerKey);
     const outbox = {
       pendingCount: pending.length,
       oldestFirstFailureAt: pending.length > 0 ? pending[0].firstFailureAt : null,
@@ -13004,14 +13024,14 @@ export class DKGAgent {
     const syncCapable = protocols.includes('/dkg/10.0.0/sync');
 
     return {
-      peerId,
+      peerId: peerKey,
       connected: rawConns.length > 0,
       rawConnectionCount: rawConns.length,
       getConnectionsReturnsForPeer: keyedConns.length,
       connections,
       peerStore: peerStoreSnapshot,
       outbox,
-      health: this.peerHealth.get(peerId) ?? null,
+      health: this.peerHealth.get(peerKey) ?? null,
       protocols,
       syncCapable,
     };

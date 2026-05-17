@@ -309,5 +309,77 @@ describe('DKGAgent.getPeerDiagnostics', () => {
       const diag = await callDiagnostics(agentLike, PEER_A);
       expect(diag.peerStore).toBeNull();
     });
+
+    // 🔴 Codex review on PR #538: the raw-walk filter previously
+    // wrapped the entire `getConnections().filter(...)` in one
+    // try/catch, so a single tearing-down connection whose
+    // `remotePeer.equals(pid)` throws would zero out rawConnections
+    // and flip `connected:false` for the whole snapshot — exact
+    // inverse of the diagnostic intent. The fix: per-connection
+    // try/catch that skips the bad entry and keeps the rest.
+    it('skips a single connection that throws from remotePeer.equals without zeroing the snapshot', async () => {
+      const goodConn = makeStubConn(PEER_A, { direction: 'inbound' });
+      const tearingDownConn: StubConnection = {
+        remotePeer: {
+          equals: () => { throw new Error('connection in teardown'); },
+          toString: () => '<tearing-down>',
+        },
+        remoteAddr: { toString: () => '/ip4/127.0.0.1/tcp/4002' },
+        direction: 'outbound',
+        streams: [],
+        timeline: { open: 1715670001000 },
+      };
+      const agentLike = makeAgentLike({
+        rawConnections: [tearingDownConn, goodConn],
+        keyedConnectionsByPeer: new Map([[PEER_A, [goodConn]]]),
+      });
+      const diag = await callDiagnostics(agentLike, PEER_A);
+      // The bad connection was skipped (caught), the good one survived.
+      expect(diag.rawConnectionCount).toBe(1);
+      expect(diag.connected).toBe(true);
+    });
+  });
+
+  // 🔴 Codex review on PR #538: the MCP `dkg_peer_info` tool accepts
+  // both base58btc and base32 peerId encodings. libp2p's connection
+  // and peerStore lookups normalise the input via `peerIdFromString`,
+  // but `messageOutbox` and `peerHealth` are keyed by the canonical
+  // `peerId.toString()` form (base58btc). Without normalising once
+  // up front, a base32 caller would see `connected:true` alongside
+  // empty `outbox`/`health` — silent diagnostic noise.
+  describe('peerId normalization (PR #538 review)', () => {
+    it('uses canonical peerId.toString() for outbox and health lookups, and returns it in the result', async () => {
+      // `peerIdFromString` always lowercases base32 inputs to a canonical
+      // form; for this test we'll work in base58btc-land but exercise
+      // the same plumbing: a peerStore/health/outbox keyed by the
+      // canonical `pid.toString()` must be found via getPeerDiagnostics
+      // regardless of whether the input string is the canonical form
+      // (which here it is, but the lookups all go through `peerKey`
+      // not `peerId`).
+      const outbox = new MessageOutbox();
+      outbox.enqueueFailure(
+        { recipientPeerId: PEER_A, text: 'hi', messageId: 'm1' },
+        'transient',
+        1715670000000,
+      );
+      const health = new Map([
+        [PEER_A, { peerId: PEER_A, alive: true, latencyMs: 42, lastSeen: 1715670000000, lastChecked: 1715670000000 }],
+      ]);
+      const agentLike = makeAgentLike({
+        rawConnections: [makeStubConn(PEER_A)],
+        keyedConnectionsByPeer: new Map([[PEER_A, [makeStubConn(PEER_A)]]]),
+        outbox,
+        health,
+      });
+
+      const diag = await callDiagnostics(agentLike, PEER_A);
+      // The returned peerId should match the canonical form (here
+      // identical to the input because PEER_A is already base58btc),
+      // and the outbox/health lookups must succeed.
+      expect(diag.peerId).toBe(PEER_A);
+      expect(diag.outbox.pendingCount).toBe(1);
+      expect(diag.health).not.toBeNull();
+      expect(diag.health.latencyMs).toBe(42);
+    });
   });
 });
