@@ -905,15 +905,15 @@ describe('StorageACKHandler signature format', () => {
 // often `No data found in SWM graph …`) and the publisher sees that as a
 // libp2p stream reset, not as a graceful "I can't ACK this" signal.
 //
-// Policy chosen for #541: warn-and-fall-back. We use the filtered set
-// when ≥ requiredACKs cores match. Otherwise we log a clear warning
-// naming the CG, then fall back to all connected cores so legitimate
-// publishes still attempt during discovery races / stale-registry
-// windows. This deliberately keeps the path live but makes hosting-
-// coverage bugs (the beacon-3 case in #541) visible in the log.
+// The filter doesn't behave as a hard gate — Codex Review on PR#556
+// flagged that a stale advertisement on one matched peer could block a
+// publish the rest of the connected pool could have satisfied. Wave-
+// based dial: priority wave (matched cores) is dialled first; the
+// fallback wave (the rest) is only dialled if the priority wave can't
+// satisfy quorum on its own.
 
 describe('ACKCollector hosting filter (#541)', () => {
-  it('uses filtered hosting set when ≥ requiredACKs cores advertise the CG', async () => {
+  it('uses only the priority wave when it satisfies quorum (no fallback dialled)', async () => {
     const sendP2P = tracked(buildSendP2P());
     const log = noop();
     const hostingFilter = tracked((_cgId: string) => ['peer-1', 'peer-2', 'peer-4']);
@@ -935,17 +935,74 @@ describe('ACKCollector hosting filter (#541)', () => {
     expect(targeted).toEqual(['peer-1', 'peer-2', 'peer-4']);
 
     expect(log.calls.some(
-      (c: unknown[]) => (c[0] as string).includes('hosting filter: using 3/5'),
+      (c: unknown[]) => (c[0] as string).includes('priority wave = 3/5'),
     )).toBe(true);
     expect(log.calls.some(
-      (c: unknown[]) => (c[0] as string).includes('WARN'),
+      (c: unknown[]) => (c[0] as string).includes('fallback wave'),
+    )).toBe(true);
+    expect(log.calls.some(
+      (c: unknown[]) => (c[0] as string).includes('Priority wave settled'),
     )).toBe(false);
   });
 
-  it('falls back to all connected cores with a WARN when filter is too small', async () => {
+  it('falls back to non-advertising cores when priority wave cannot satisfy quorum (stale advertisements)', async () => {
+    // Codex Review on PR#556 flagged this: matched advertisement was a
+    // hard gate, so a single stale entry could fail the publish. Now the
+    // collector dials the fallback wave whenever priority falls short.
+    const advertisedButStale = new Set(['peer-1']);
+    const sendP2P = tracked(async (peerId: string) => {
+      // Stale-advertised peer signs an ACK with a bad merkle root so the
+      // collector rejects it; legacy code would have failed because only
+      // matched peers were dialled.
+      if (advertisedButStale.has(peerId)) {
+        const wrong = new Uint8Array(32).fill(0xff);
+        const idx = parseInt(peerId.replace('peer-', ''), 10);
+        const wallet = coreWallets[idx];
+        const { r, vs } = await signACK(wallet, testCGId, wrong);
+        return encodeStorageACK({
+          merkleRoot: wrong,
+          coreNodeSignatureR: r,
+          coreNodeSignatureVS: vs,
+          contextGraphId: testCGIdStr,
+          nodeIdentityId: idx + 1,
+        });
+      }
+      return buildSendP2P()(peerId);
+    });
+    const log = noop();
+    const deps: ACKCollectorDeps = {
+      gossipPublish: noop(),
+      sendP2P: sendP2P as any,
+      getConnectedCorePeers: () => ['peer-0', 'peer-1', 'peer-2', 'peer-3', 'peer-4'],
+      // peer-1 is advertised but stale; peer-3, peer-4 advertise correctly.
+      getCorePeersHostingContextGraph: () => ['peer-1', 'peer-3', 'peer-4'],
+      log,
+    };
+    const collector = new ACKCollector(deps);
+
+    const result = await collector.collect(buildCollectParams());
+    expect(result.acks).toHaveLength(3);
+
+    const targeted = new Set(sendP2P.calls.map((c) => c[0] as string));
+    expect(targeted.has('peer-1')).toBe(true);
+    expect(targeted.has('peer-3')).toBe(true);
+    expect(targeted.has('peer-4')).toBe(true);
+    // Fallback wave kicked in because priority got 2/3 (peer-1 sent a
+    // bad-root ACK that was rejected). At least one of peer-0, peer-2
+    // must have been dialled to backfill.
+    expect(targeted.has('peer-0') || targeted.has('peer-2')).toBe(true);
+
+    expect(log.calls.some(
+      (c: unknown[]) => (c[0] as string).includes('Priority wave settled with 2/3'),
+    )).toBe(true);
+    expect(log.calls.some(
+      (c: unknown[]) => (c[0] as string).includes('dialling fallback wave'),
+    )).toBe(true);
+  });
+
+  it('uses fallback as a single wave with WARN when priority is smaller than requiredACKs', async () => {
     const sendP2P = tracked(buildSendP2P());
     const log = noop();
-    // Only 1 connected core advertises the CG → 1 < 3 → warn + fall back
     const deps: ACKCollectorDeps = {
       gossipPublish: noop(),
       sendP2P: sendP2P as any,
@@ -962,16 +1019,14 @@ describe('ACKCollector hosting filter (#541)', () => {
     expect(targeted.size).toBe(4);
 
     const warnLog = log.calls.find(
-      (c: unknown[]) => (c[0] as string).includes('WARN: hosting filter found only 1/4'),
+      (c: unknown[]) => (c[0] as string).includes('WARN: only 1 connected cores advertise hosting'),
     );
     expect(warnLog).toBeDefined();
     expect(warnLog && (warnLog[0] as string)).toContain(testCGIdStr);
-    expect(warnLog && (warnLog[0] as string)).toContain('Hosting cores: [peer-2]');
-    expect(warnLog && (warnLog[0] as string)).toContain('non-hosting cores: [peer-0, peer-1, peer-3]');
     expect(warnLog && (warnLog[0] as string)).toContain('#541');
   });
 
-  it('falls back to all connected cores with WARN when filter returns empty list', async () => {
+  it('treats empty filter result as "no hosting signal" and dials all connected cores in a single wave', async () => {
     const sendP2P = tracked(buildSendP2P());
     const log = noop();
     const deps: ACKCollectorDeps = {
@@ -987,14 +1042,14 @@ describe('ACKCollector hosting filter (#541)', () => {
     expect(result.acks).toHaveLength(3);
 
     expect(log.calls.some(
-      (c: unknown[]) => (c[0] as string).includes('WARN: hosting filter found only 0/3'),
+      (c: unknown[]) => (c[0] as string).includes('no connected cores advertise hosting'),
     )).toBe(true);
     expect(log.calls.some(
-      (c: unknown[]) => (c[0] as string).includes('Hosting cores: [<none>]'),
-    )).toBe(true);
+      (c: unknown[]) => (c[0] as string).includes('Priority wave settled'),
+    )).toBe(false);
   });
 
-  it('falls back to all connected cores with WARN when filter throws', async () => {
+  it('treats filter throw as "no hosting signal" and dials all connected cores in a single wave', async () => {
     const sendP2P = tracked(buildSendP2P());
     const log = noop();
     const deps: ACKCollectorDeps = {
@@ -1063,23 +1118,30 @@ describe('ACKCollector hosting filter (#541)', () => {
 describe('resolvePeersHostingContextGraph', () => {
   const SKILL = 'https://dkg.origintrail.io/skill#';
   const DKG_NS = 'https://dkg.network/ontology#';
+  const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
   const REGISTRY_GRAPH = 'did:dkg:context-graph:agents';
 
   function buildAgentProfileQuads(args: {
     walletOrPeerId: string;
     peerId: string;
     contextGraphsServed: string;
+    role?: 'core' | 'edge';
   }): Quad[] {
     const entity = `did:dkg:agent:${args.walletOrPeerId}`;
     const hosting = `${entity}/.well-known/genid/hosting`;
+    const role = args.role ?? 'core';
+    const roleType = role === 'core' ? `${DKG_NS}CoreNode` : `${DKG_NS}EdgeNode`;
     return [
+      { subject: entity, predicate: RDF_TYPE, object: `${DKG_NS}Agent`, graph: REGISTRY_GRAPH },
+      { subject: entity, predicate: RDF_TYPE, object: roleType, graph: REGISTRY_GRAPH },
+      { subject: entity, predicate: `${DKG_NS}nodeRole`, object: `"${role}"`, graph: REGISTRY_GRAPH },
       { subject: entity, predicate: `${DKG_NS}peerId`, object: `"${args.peerId}"`, graph: REGISTRY_GRAPH },
       { subject: entity, predicate: `${SKILL}hostingProfile`, object: hosting, graph: REGISTRY_GRAPH },
       { subject: hosting, predicate: `${SKILL}contextGraphsServed`, object: `"${args.contextGraphsServed}"`, graph: REGISTRY_GRAPH },
     ];
   }
 
-  it('returns the peer id for an agent advertising the exact UAL', async () => {
+  it('returns the peer id for a core agent advertising the exact UAL', async () => {
     const { resolvePeersHostingContextGraph } = await import('../src/hosting-resolver.js');
     const store = new OxigraphStore();
     await store.insert(buildAgentProfileQuads({
@@ -1092,6 +1154,35 @@ describe('resolvePeersHostingContextGraph', () => {
       .toEqual(['12D3KooWnWcpzsge']);
     expect(await resolvePeersHostingContextGraph(store, '0x8fb6dcd4/testing'))
       .toEqual(['12D3KooWnWcpzsge']);
+  });
+
+  it('filters out edge nodes even if they advertise contextGraphsServed (Codex Review on PR#556)', async () => {
+    // Edge nodes don't register the StorageACK protocol handler, so an
+    // edge node that publishes a contextGraphsServed list (e.g. for
+    // join-time discovery) must NOT be considered a candidate. Without
+    // this constraint, `getConnectedCorePeers()`'s early-startup
+    // fallback to "all connected peers" would let the collector dial a
+    // peer that just stream-resets the request.
+    const { resolvePeersHostingContextGraph } = await import('../src/hosting-resolver.js');
+    const store = new OxigraphStore();
+    await store.insert([
+      ...buildAgentProfileQuads({
+        walletOrPeerId: '0xCoreA',
+        peerId: '12D3KooWcoreA',
+        contextGraphsServed: '0x8fb6dcd4/repnet',
+        role: 'core',
+      }),
+      ...buildAgentProfileQuads({
+        walletOrPeerId: '0xEdgeB',
+        peerId: '12D3KooWedgeB',
+        contextGraphsServed: '0x8fb6dcd4/repnet',
+        role: 'edge',
+      }),
+    ]);
+
+    const peers = await resolvePeersHostingContextGraph(store, '0x8fb6dcd4/repnet');
+    expect(peers).toEqual(['12D3KooWcoreA']);
+    expect(peers).not.toContain('12D3KooWedgeB');
   });
 
   it('does NOT match when the requested UAL is only a string prefix of an entry', async () => {

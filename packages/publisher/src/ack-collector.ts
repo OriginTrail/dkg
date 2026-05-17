@@ -148,7 +148,20 @@ export class ACKCollector {
       throw new Error('ACK collection failed: no connected core peers');
     }
 
-    let corePeers = allConnected;
+    // Split connected cores into two waves:
+    //   priorityPeers — advertise hosting the target CG; tried first.
+    //   fallbackPeers — connected but don't advertise; only tried if
+    //                   the priority wave can't satisfy quorum.
+    //
+    // Cores outside the priority set are NOT a hard gate (a stale or
+    // missing advertisement on one peer in `priorityPeers` shouldn't
+    // be able to fail a publish that the rest of the connected pool
+    // could have satisfied — Codex Review on PR#556 flagged this).
+    // Wave 2 only fires when wave 1 doesn't reach quorum, so the happy
+    // path still avoids dialling cores that would just decline / reset
+    // the stream (the GitHub #541 cost).
+    let priorityPeers: string[] = allConnected;
+    let fallbackPeers: string[] = [];
     if (this.deps.getCorePeersHostingContextGraph) {
       let hostingPeers: string[] = [];
       try {
@@ -159,7 +172,7 @@ export class ACKCollector {
         const errMsg = err instanceof Error ? err.message : String(err);
         log(
           `[ACKCollector] hosting-filter lookup failed for "${contextGraphIdStr}" (${errMsg}); ` +
-          `falling back to all ${allConnected.length} connected cores`,
+          `dialling all ${allConnected.length} connected cores in a single wave`,
         );
         hostingPeers = [];
       }
@@ -167,34 +180,37 @@ export class ACKCollector {
       const matched = allConnected.filter(p => hostingSet.has(p));
       const excluded = allConnected.filter(p => !hostingSet.has(p));
 
-      if (matched.length >= REQUIRED_ACKS) {
-        corePeers = matched;
-        if (excluded.length > 0) {
+      if (matched.length === 0) {
+        // No hosting signal at all — keep the legacy single-wave shape.
+        log(
+          `[ACKCollector] hosting filter: no connected cores advertise hosting "${contextGraphIdStr}"; ` +
+          `dialling all ${allConnected.length} connected cores in a single wave (expect declines from non-hosting cores).`,
+        );
+      } else {
+        priorityPeers = matched;
+        fallbackPeers = excluded;
+        const includedTag = matched.map(p => p.slice(-8)).join(', ');
+        const excludedTag = excluded.length > 0 ? excluded.map(p => p.slice(-8)).join(', ') : '<none>';
+        log(
+          `[ACKCollector] hosting filter: priority wave = ${matched.length}/${allConnected.length} cores advertising "${contextGraphIdStr}" [${includedTag}]; ` +
+          `fallback wave = ${excluded.length} non-advertising cores [${excludedTag}].`,
+        );
+        if (matched.length < REQUIRED_ACKS) {
           log(
-            `[ACKCollector] hosting filter: using ${matched.length}/${allConnected.length} connected cores ` +
-            `that advertise hosting "${contextGraphIdStr}" ` +
-            `(excluded ${excluded.length}: ${excluded.map(p => p.slice(-8)).join(', ')})`,
+            `[ACKCollector] WARN: only ${matched.length} connected cores advertise hosting "${contextGraphIdStr}" (need ${REQUIRED_ACKS}); ` +
+            `fallback wave will be dialled if priority wave can't satisfy quorum. ` +
+            `If "${contextGraphIdStr}" has replicationPolicy=full, the non-advertising cores have a coverage bug (see GitHub issue #541).`,
           );
         }
-      } else {
-        const matchedTags = matched.length > 0 ? matched.map(p => p.slice(-8)).join(', ') : '<none>';
-        const excludedTags = excluded.length > 0 ? excluded.map(p => p.slice(-8)).join(', ') : '<none>';
-        log(
-          `[ACKCollector] WARN: hosting filter found only ${matched.length}/${allConnected.length} ` +
-          `connected cores advertising "${contextGraphIdStr}" (need ${REQUIRED_ACKS}). ` +
-          `Falling back to all connected cores. Hosting cores: [${matchedTags}]; non-hosting cores: [${excludedTags}]. ` +
-          `If "${contextGraphIdStr}" has replicationPolicy=full, the non-hosting cores have a coverage bug — ` +
-          `publish may collect fewer than ${REQUIRED_ACKS} valid ACKs and fail (see GitHub issue #541).`,
-        );
       }
     }
 
-    if (corePeers.length < REQUIRED_ACKS) {
+    if (allConnected.length < REQUIRED_ACKS) {
       throw new Error(
-        `ACK collection failed: need ${REQUIRED_ACKS} ACKs but only ${corePeers.length} core peers connected — quorum impossible`,
+        `ACK collection failed: need ${REQUIRED_ACKS} ACKs but only ${allConnected.length} core peers connected — quorum impossible`,
       );
     }
-    log(`[ACKCollector] Requesting ACKs from ${corePeers.length} core peers (need ${REQUIRED_ACKS})`);
+    log(`[ACKCollector] Requesting ACKs from ${allConnected.length} core peers (need ${REQUIRED_ACKS}; priority=${priorityPeers.length}, fallback=${fallbackPeers.length})`);
 
     const ackDigest = computePublishACKDigest(
       chainId,
@@ -265,22 +281,41 @@ export class ACKCollector {
     let quorumResolve: (() => void) | undefined;
     const quorumPromise = new Promise<void>(resolve => { quorumResolve = resolve; });
 
+    /**
+     * Dial a wave of peers in parallel, accumulating their ACKs into
+     * the shared `collected` slot. Stops early when the publisher has
+     * `REQUIRED_ACKS` distinct (peer, identity) ACKs.
+     */
+    const dialWave = async (peers: string[]): Promise<void> => {
+      if (peers.length === 0) return;
+      const promises = peers.map(async (peerId) => {
+        if (collected.length >= REQUIRED_ACKS) return;
+        const ack = await requestACK(peerId);
+        if (ack && !seenPeers.has(ack.peerId) && !seenIdentityIds.has(ack.nodeIdentityId)) {
+          seenPeers.add(ack.peerId);
+          seenIdentityIds.add(ack.nodeIdentityId);
+          collected.push(ack);
+          if (collected.length >= REQUIRED_ACKS) {
+            quorumResolve?.();
+          }
+        }
+      });
+      await Promise.race([Promise.allSettled(promises), quorumPromise]);
+    };
+
+    let triedPeerCount = 0;
     await Promise.race([
       (async () => {
-        const promises = corePeers.map(async (peerId) => {
-          if (collected.length >= REQUIRED_ACKS) return;
-          const ack = await requestACK(peerId);
-          if (ack && !seenPeers.has(ack.peerId) && !seenIdentityIds.has(ack.nodeIdentityId)) {
-            seenPeers.add(ack.peerId);
-            seenIdentityIds.add(ack.nodeIdentityId);
-            collected.push(ack);
-            if (collected.length >= REQUIRED_ACKS) {
-              quorumResolve?.();
-              return;
-            }
-          }
-        });
-        await Promise.race([Promise.allSettled(promises), quorumPromise]);
+        await dialWave(priorityPeers);
+        triedPeerCount = priorityPeers.length;
+        if (collected.length < REQUIRED_ACKS && fallbackPeers.length > 0) {
+          log(
+            `[ACKCollector] Priority wave settled with ${collected.length}/${REQUIRED_ACKS} ACKs; ` +
+            `dialling fallback wave (${fallbackPeers.length} non-advertising core(s))`,
+          );
+          await dialWave(fallbackPeers);
+          triedPeerCount += fallbackPeers.length;
+        }
       })(),
       new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error(`storage_ack_timeout: only ${collected.length}/${REQUIRED_ACKS} ACKs received within ${ACK_TIMEOUT_MS}ms`)),
@@ -292,7 +327,7 @@ export class ACKCollector {
     if (collected.length < REQUIRED_ACKS) {
       throw new Error(
         `storage_ack_insufficient: got ${collected.length}/${REQUIRED_ACKS} valid ACKs. ` +
-        `Tried ${corePeers.length} core peers.`,
+        `Tried ${triedPeerCount} core peers.`,
       );
     }
 

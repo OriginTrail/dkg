@@ -42,12 +42,23 @@ export async function resolvePeersHostingContextGraph(
   // registry IRI) keeps the helper robust to non-production embeddings
   // where profiles might be loaded into a different named graph for
   // testing — at zero cost, since the BGP is selective enough.
+  //
+  // The `dkg:CoreNode` constraint is mandatory: edge nodes can also
+  // emit `skill:contextGraphsServed` (e.g. for join-time discovery),
+  // and they don't register the StorageACK protocol handler. Without
+  // this filter the collector would target peers that just stream-
+  // reset on `/dkg/10.0.0/storage-ack`. The companion
+  // `getConnectedCorePeers()` already does protocol-discovery-time
+  // filtering, but during early startup it falls back to "all
+  // connected peers", so we must enforce the role constraint here too.
   const sparql = `
+PREFIX rdf:   <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
 PREFIX dkg:   <https://dkg.network/ontology#>
 PREFIX skill: <https://dkg.origintrail.io/skill#>
 SELECT DISTINCT ?peerId WHERE {
   GRAPH ?g {
-    ?agent dkg:peerId ?peerId ;
+    ?agent rdf:type dkg:CoreNode ;
+           dkg:peerId ?peerId ;
            skill:hostingProfile ?hosting .
     ?hosting skill:contextGraphsServed ?served .
     BIND(CONCAT(",", STR(?served), ",") AS ?normalizedServed)
