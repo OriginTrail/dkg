@@ -1725,6 +1725,8 @@ export class DKGAgent {
         const pid = peerIdFromString(peerId);
         await this.node.libp2p.peerRouting.findPeer(pid, { signal });
       },
+      logInfo: (message) => this.log.info(createOperationContext('system'), message),
+      logWarn: (message) => this.log.warn(createOperationContext('system'), message),
     });
     this.gossip = new GossipSubManager(this.node, this.eventBus);
     await this.loadSwmSenderKeyState();

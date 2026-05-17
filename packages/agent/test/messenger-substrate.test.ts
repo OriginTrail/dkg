@@ -9,7 +9,12 @@ import {
   type ProtocolRouter,
   type StreamHandler,
 } from '@origintrail-official/dkg-core';
-import { Messenger, MessengerNotConfiguredError } from '../src/p2p/messenger.js';
+import {
+  DHT_WALK_RATE_LIMIT_MAX_PEERS,
+  DHT_WALK_RATE_LIMIT_MS,
+  Messenger,
+  MessengerNotConfiguredError,
+} from '../src/p2p/messenger.js';
 
 const PEER_A = '12D3KooWAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
 const PEER_B = '12D3KooWBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB';
@@ -332,6 +337,8 @@ describe('Messenger construction guardrails', () => {
 describe('Messenger DHT-walk-on-stall recovery (rc.9 PR-5)', () => {
   function makeStallSubstrate(opts: {
     resolvePeer?: ReturnType<typeof vi.fn>;
+    logInfo?: ReturnType<typeof vi.fn>;
+    logWarn?: ReturnType<typeof vi.fn>;
     backoffs?: readonly number[];
     initialClock?: number;
     errorMessage?: string;
@@ -357,6 +364,8 @@ describe('Messenger DHT-walk-on-stall recovery (rc.9 PR-5)', () => {
       maxAgeMs: 60_000,
       clock: () => nowMs,
       resolvePeer,
+      logInfo: opts.logInfo,
+      logWarn: opts.logWarn,
     });
     return { messenger, router, outboxStore, resolvePeer, advance, now: () => nowMs };
   }
@@ -430,11 +439,27 @@ describe('Messenger DHT-walk-on-stall recovery (rc.9 PR-5)', () => {
 
     // Cross the rate-limit boundary (default 5 min) → next failure
     // fires walk #2.
-    advance(5 * 60 * 1000 + 1);
+    advance(DHT_WALK_RATE_LIMIT_MS + 1);
     await messenger.sendReliable(PEER_A, PROTO, new Uint8Array([1]), {
       messageId: FIXED_MSG_ID,
     });
     expect(resolvePeer).toHaveBeenCalledTimes(2);
+  });
+
+  it('also treats spaced "no reservation" relay errors as DHT-walk triggers', async () => {
+    const { messenger, resolvePeer, advance } = makeStallSubstrate({
+      errorMessage: 'relay returned no reservation for peer',
+    });
+
+    for (let i = 0; i < 5; i++) {
+      const result = await messenger.sendReliable(PEER_A, PROTO, new Uint8Array([1]), {
+        messageId: FIXED_MSG_ID,
+      });
+      expect(result.queued).toBe(true);
+      advance(1000);
+    }
+
+    expect(resolvePeer).toHaveBeenCalledTimes(1);
   });
 
   it('does NOT fire resolvePeer for non-address-resolution errors (stream resets etc.)', async () => {
@@ -532,10 +557,11 @@ describe('Messenger DHT-walk-on-stall recovery (rc.9 PR-5)', () => {
   });
 
   it('swallows resolvePeer rejections (failure must not bubble to caller)', async () => {
+    const logWarn = vi.fn();
     const resolvePeer = vi.fn(async () => {
       throw new Error('DHT walk timed out');
     });
-    const { messenger } = makeStallSubstrate({ resolvePeer });
+    const { messenger } = makeStallSubstrate({ resolvePeer, logWarn });
 
     // 5 failures → walk fires + rejects. The user-visible send result
     // should still be the normal queued shape; no unhandled rejection.
@@ -545,6 +571,65 @@ describe('Messenger DHT-walk-on-stall recovery (rc.9 PR-5)', () => {
       });
     }
     expect(resolvePeer).toHaveBeenCalledTimes(1);
+    await Promise.resolve();
+    expect(logWarn).toHaveBeenCalledWith(expect.stringContaining('DHT walk timed out'));
+  });
+
+  it('logs completed DHT walks through the injected logger', async () => {
+    const logInfo = vi.fn();
+    const { messenger, resolvePeer } = makeStallSubstrate({ logInfo });
+
+    for (let i = 0; i < 5; i++) {
+      await messenger.sendReliable(PEER_A, PROTO, new Uint8Array([1]), {
+        messageId: FIXED_MSG_ID,
+      });
+    }
+
+    expect(resolvePeer).toHaveBeenCalledTimes(1);
+    await Promise.resolve();
+    expect(logInfo).toHaveBeenCalledWith(expect.stringContaining('DHT walk completed'));
+  });
+
+  it('prunes stale DHT-walk rate-limit entries on the next scheduling attempt', async () => {
+    const { messenger, advance } = makeStallSubstrate();
+
+    for (let i = 0; i < 5; i++) {
+      await messenger.sendReliable(PEER_A, PROTO, new Uint8Array([1]), {
+        messageId: FIXED_MSG_ID,
+      });
+      advance(1000);
+    }
+    const rateLimit = (messenger as unknown as { lastDhtWalkAt: Map<string, number> }).lastDhtWalkAt;
+    expect(rateLimit.has(PEER_A)).toBe(true);
+
+    advance(DHT_WALK_RATE_LIMIT_MS + 1);
+    for (let i = 0; i < 5; i++) {
+      await messenger.sendReliable(PEER_B, PROTO, new Uint8Array([1]), {
+        messageId: '00000000-0000-4000-8000-000000000010',
+      });
+      advance(1000);
+    }
+
+    expect(rateLimit.has(PEER_A)).toBe(false);
+    expect(rateLimit.has(PEER_B)).toBe(true);
+  });
+
+  it('bounds the DHT-walk rate-limit cache', async () => {
+    const { messenger } = makeStallSubstrate();
+    const rateLimit = (messenger as unknown as { lastDhtWalkAt: Map<string, number> }).lastDhtWalkAt;
+    for (let i = 0; i < DHT_WALK_RATE_LIMIT_MAX_PEERS; i++) {
+      rateLimit.set(`peer-${i}`, 1_700_000_000_000);
+    }
+
+    for (let i = 0; i < 5; i++) {
+      await messenger.sendReliable(PEER_A, PROTO, new Uint8Array([1]), {
+        messageId: FIXED_MSG_ID,
+      });
+    }
+
+    expect(rateLimit.size).toBeLessThanOrEqual(DHT_WALK_RATE_LIMIT_MAX_PEERS);
+    expect(rateLimit.has('peer-0')).toBe(false);
+    expect(rateLimit.has(PEER_A)).toBe(true);
   });
 
   it('also fires from the retry tick path (not only from sendReliable)', async () => {

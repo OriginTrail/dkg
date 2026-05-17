@@ -45,6 +45,14 @@ export const DHT_WALK_TIMEOUT_MS = 10_000;
 export const DHT_WALK_RATE_LIMIT_MS = 5 * 60 * 1000;
 
 /**
+ * Hard cap for the per-peer DHT-walk rate-limit map. The map is also
+ * time-pruned on every scheduling attempt, but this cap prevents a
+ * malicious or broken caller from retaining unbounded peer IDs inside
+ * one still-fresh rate-limit window.
+ */
+export const DHT_WALK_RATE_LIMIT_MAX_PEERS = 1024;
+
+/**
  * Error-message substrings that indicate "the dialer couldn't find
  * an address for the peer" — exactly the failure class the DHT walk
  * is designed to heal. Match is case-insensitive `.includes` so we
@@ -60,6 +68,7 @@ export const DHT_WALK_RATE_LIMIT_MS = 5 * 60 * 1000;
 const DHT_WALK_TRIGGER_ERRORS = [
   'no valid addresses',
   'no_reservation',
+  'no reservation',
 ];
 
 function shouldTriggerDhtWalk(errMsg: string): boolean {
@@ -115,6 +124,9 @@ export interface MessengerDeps {
    * don't block backoff (the entry's `nextAttemptAt` is unaffected).
    */
   resolvePeer?: (peerId: string, opts: { signal: AbortSignal }) => Promise<void>;
+  /** Optional structured logger callbacks for background DHT-walk diagnostics. */
+  logInfo?: (message: string) => void;
+  logWarn?: (message: string) => void;
   /**
    * Max age (ms) from `firstFailureAt` before an outbox entry is
    * dropped. Defaults to 24h. Caller-supplied for tests; production
@@ -241,6 +253,8 @@ export class Messenger {
   private readonly outbox?: ProtocolOutbox;
   private readonly clock: () => number;
   private readonly resolvePeer?: (peerId: string, opts: { signal: AbortSignal }) => Promise<void>;
+  private readonly logInfo: (message: string) => void;
+  private readonly logWarn: (message: string) => void;
 
   /**
    * Application handlers registered via `register`. Stored separately
@@ -270,6 +284,8 @@ export class Messenger {
     }
     this.clock = deps.clock ?? (() => Date.now());
     this.resolvePeer = deps.resolvePeer;
+    this.logInfo = deps.logInfo ?? (() => undefined);
+    this.logWarn = deps.logWarn ?? deps.logInfo ?? (() => undefined);
   }
 
   /**
@@ -581,7 +597,8 @@ export class Messenger {
    *      spend a DHT walk on a transient blip the backoff would
    *      have healed anyway).
    *   3. No-op for non-address-resolution errors (DHT walk
-   *      doesn't fix stream resets or NO_RESERVATION-after-handshake).
+   *      doesn't fix stream resets); address/reservation misses
+   *      such as "no valid addresses" and NO_RESERVATION do trigger.
    *   4. Per-peer rate limit (`DHT_WALK_RATE_LIMIT_MS`).
    *   5. Time-bounded (`DHT_WALK_TIMEOUT_MS`) — failures logged,
    *      never bubble.
@@ -590,10 +607,16 @@ export class Messenger {
     if (!this.resolvePeer) return;
     if (attempts < OUTBOX_STALL_THRESHOLD) return;
     if (!shouldTriggerDhtWalk(errMsg)) return;
-    const last = this.lastDhtWalkAt.get(peerId);
     const now = this.clock();
+    this.pruneDhtWalkRateLimit(now);
+    const last = this.lastDhtWalkAt.get(peerId);
     if (last !== undefined && now - last < DHT_WALK_RATE_LIMIT_MS) return;
 
+    while (this.lastDhtWalkAt.size >= DHT_WALK_RATE_LIMIT_MAX_PEERS) {
+      const oldest = this.lastDhtWalkAt.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      this.lastDhtWalkAt.delete(oldest);
+    }
     this.lastDhtWalkAt.set(peerId, now);
     const signal = AbortSignal.timeout(DHT_WALK_TIMEOUT_MS);
     // Fire-and-forget; never await. Any error swallowed + logged.
@@ -602,16 +625,24 @@ export class Messenger {
     // multiaddrs here.
     void this.resolvePeer(peerId, { signal })
       .then(() => {
-        console.warn(
+        this.logInfo(
           `[Messenger] DHT walk completed for ${peerId.slice(-8)} after ${attempts} stalled outbox attempts — peerStore should now be primed`,
         );
       })
       .catch((err: unknown) => {
         const msg = err instanceof Error ? err.message : String(err);
-        console.warn(
+        this.logWarn(
           `[Messenger] DHT walk for ${peerId.slice(-8)} failed (attempts=${attempts}): ${msg}`,
         );
       });
+  }
+
+  private pruneDhtWalkRateLimit(now: number): void {
+    for (const [peer, ts] of this.lastDhtWalkAt) {
+      if (now - ts >= DHT_WALK_RATE_LIMIT_MS) {
+        this.lastDhtWalkAt.delete(peer);
+      }
+    }
   }
 
   private clearDhtWalkRateLimitIfDrained(peerId: string): void {
