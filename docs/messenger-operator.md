@@ -39,12 +39,13 @@ well, but operators running their own infrastructure may want to
 prioritise relays they control — for capacity, geography, or
 operational independence.
 
-### CLI flag
+### Future CLI flag (after PR #548 lands)
 
 ```bash
-dkg start \
-  --relay-preferred /ip4/203.0.113.10/tcp/4001/p2p/12D3KooWMyRelayOne... \
-  --relay-preferred /dns4/relay.example.com/tcp/4001/p2p/12D3KooWMyRelayTwo...
+# Future PR #548+ builds only; not supported by this docs branch.
+# dkg start \
+#   --relay-preferred /ip4/203.0.113.10/tcp/4001/p2p/12D3KooWMyRelayOne... \
+#   --relay-preferred /dns4/relay.example.com/tcp/4001/p2p/12D3KooWMyRelayTwo...
 ```
 
 Repeatable. Each `--relay-preferred` adds one multiaddr; the order
@@ -103,10 +104,12 @@ In summary:
 4. **Capture the relay's multiaddr** from the startup log:
    `/ip4/<public-ip>/tcp/4001/p2p/<peer-id>` — this is what you
    share with your other nodes' `--relay-preferred`.
-5. **Wire it up** on every node that should prefer your relay:
+5. **After PR #548 lands, wire it up** on every node that should
+   prefer your relay:
 
    ```bash
-   dkg start --relay-preferred /ip4/<public-ip>/tcp/4001/p2p/<peer-id>
+   # Future PR #548+ builds only.
+   # dkg start --relay-preferred /ip4/<public-ip>/tcp/4001/p2p/<peer-id>
    ```
 
 6. **Monitor** — the relay exposes the same `/api/peer-info`
