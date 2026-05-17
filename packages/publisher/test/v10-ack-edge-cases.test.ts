@@ -895,3 +895,261 @@ describe('StorageACKHandler signature format', () => {
     expect(identityId).toBe(coreIdentityId);
   });
 });
+
+// ── ACKCollector hosting filter (GitHub issue #541) ──────────────────────
+//
+// When a publisher targets a context graph that not every connected core
+// hosts, the ACK collector should prefer cores that publicly advertise
+// hosting it via `<contextGraphsServed>`. Cores that don't host the CG
+// would otherwise have to throw inside their StorageACK handler (most
+// often `No data found in SWM graph …`) and the publisher sees that as a
+// libp2p stream reset, not as a graceful "I can't ACK this" signal.
+//
+// Policy chosen for #541: warn-and-fall-back. We use the filtered set
+// when ≥ requiredACKs cores match. Otherwise we log a clear warning
+// naming the CG, then fall back to all connected cores so legitimate
+// publishes still attempt during discovery races / stale-registry
+// windows. This deliberately keeps the path live but makes hosting-
+// coverage bugs (the beacon-3 case in #541) visible in the log.
+
+describe('ACKCollector hosting filter (#541)', () => {
+  it('uses filtered hosting set when ≥ requiredACKs cores advertise the CG', async () => {
+    const sendP2P = tracked(buildSendP2P());
+    const log = noop();
+    const hostingFilter = tracked((_cgId: string) => ['peer-1', 'peer-2', 'peer-4']);
+    const deps: ACKCollectorDeps = {
+      gossipPublish: noop(),
+      sendP2P: sendP2P as any,
+      getConnectedCorePeers: () => ['peer-0', 'peer-1', 'peer-2', 'peer-3', 'peer-4'],
+      getCorePeersHostingContextGraph: hostingFilter,
+      log,
+    };
+    const collector = new ACKCollector(deps);
+
+    const result = await collector.collect(buildCollectParams());
+    expect(result.acks).toHaveLength(3);
+    expect(hostingFilter.calls).toHaveLength(1);
+    expect(hostingFilter.calls[0][0]).toBe(testCGIdStr);
+
+    const targeted = sendP2P.calls.map((c) => c[0] as string).sort();
+    expect(targeted).toEqual(['peer-1', 'peer-2', 'peer-4']);
+
+    expect(log.calls.some(
+      (c: unknown[]) => (c[0] as string).includes('hosting filter: using 3/5'),
+    )).toBe(true);
+    expect(log.calls.some(
+      (c: unknown[]) => (c[0] as string).includes('WARN'),
+    )).toBe(false);
+  });
+
+  it('falls back to all connected cores with a WARN when filter is too small', async () => {
+    const sendP2P = tracked(buildSendP2P());
+    const log = noop();
+    // Only 1 connected core advertises the CG → 1 < 3 → warn + fall back
+    const deps: ACKCollectorDeps = {
+      gossipPublish: noop(),
+      sendP2P: sendP2P as any,
+      getConnectedCorePeers: () => ['peer-0', 'peer-1', 'peer-2', 'peer-3'],
+      getCorePeersHostingContextGraph: () => ['peer-2'],
+      log,
+    };
+    const collector = new ACKCollector(deps);
+
+    const result = await collector.collect(buildCollectParams());
+    expect(result.acks).toHaveLength(3);
+
+    const targeted = new Set(sendP2P.calls.map((c) => c[0] as string));
+    expect(targeted.size).toBe(4);
+
+    const warnLog = log.calls.find(
+      (c: unknown[]) => (c[0] as string).includes('WARN: hosting filter found only 1/4'),
+    );
+    expect(warnLog).toBeDefined();
+    expect(warnLog && (warnLog[0] as string)).toContain(testCGIdStr);
+    expect(warnLog && (warnLog[0] as string)).toContain('Hosting cores: [peer-2]');
+    expect(warnLog && (warnLog[0] as string)).toContain('non-hosting cores: [peer-0, peer-1, peer-3]');
+    expect(warnLog && (warnLog[0] as string)).toContain('#541');
+  });
+
+  it('falls back to all connected cores with WARN when filter returns empty list', async () => {
+    const sendP2P = tracked(buildSendP2P());
+    const log = noop();
+    const deps: ACKCollectorDeps = {
+      gossipPublish: noop(),
+      sendP2P: sendP2P as any,
+      getConnectedCorePeers: () => ['peer-0', 'peer-1', 'peer-2'],
+      getCorePeersHostingContextGraph: () => [],
+      log,
+    };
+    const collector = new ACKCollector(deps);
+
+    const result = await collector.collect(buildCollectParams());
+    expect(result.acks).toHaveLength(3);
+
+    expect(log.calls.some(
+      (c: unknown[]) => (c[0] as string).includes('WARN: hosting filter found only 0/3'),
+    )).toBe(true);
+    expect(log.calls.some(
+      (c: unknown[]) => (c[0] as string).includes('Hosting cores: [<none>]'),
+    )).toBe(true);
+  });
+
+  it('falls back to all connected cores with WARN when filter throws', async () => {
+    const sendP2P = tracked(buildSendP2P());
+    const log = noop();
+    const deps: ACKCollectorDeps = {
+      gossipPublish: noop(),
+      sendP2P: sendP2P as any,
+      getConnectedCorePeers: () => ['peer-0', 'peer-1', 'peer-2'],
+      getCorePeersHostingContextGraph: () => {
+        throw new Error('triple-store unavailable');
+      },
+      log,
+    };
+    const collector = new ACKCollector(deps);
+
+    const result = await collector.collect(buildCollectParams());
+    expect(result.acks).toHaveLength(3);
+
+    expect(log.calls.some(
+      (c: unknown[]) => (c[0] as string).includes('hosting-filter lookup failed'),
+    )).toBe(true);
+    expect(log.calls.some(
+      (c: unknown[]) => (c[0] as string).includes('triple-store unavailable'),
+    )).toBe(true);
+  });
+
+  it('handles async filter implementations that resolve to peer ids', async () => {
+    const sendP2P = tracked(buildSendP2P());
+    const deps: ACKCollectorDeps = {
+      gossipPublish: noop(),
+      sendP2P: sendP2P as any,
+      getConnectedCorePeers: () => ['peer-0', 'peer-1', 'peer-2', 'peer-3'],
+      getCorePeersHostingContextGraph: async (cgId: string) => {
+        await new Promise((r) => setTimeout(r, 1));
+        return cgId === testCGIdStr ? ['peer-1', 'peer-2', 'peer-3'] : [];
+      },
+      log: noop(),
+    };
+    const collector = new ACKCollector(deps);
+
+    const result = await collector.collect(buildCollectParams());
+    expect(result.acks).toHaveLength(3);
+
+    const targeted = sendP2P.calls.map((c) => c[0] as string).sort();
+    expect(targeted).toEqual(['peer-1', 'peer-2', 'peer-3']);
+  });
+
+  it('without the dep, behaviour is identical to today (no filter)', async () => {
+    const sendP2P = tracked(buildSendP2P());
+    const deps: ACKCollectorDeps = {
+      gossipPublish: noop(),
+      sendP2P: sendP2P as any,
+      getConnectedCorePeers: () => ['peer-0', 'peer-1', 'peer-2'],
+      log: noop(),
+    };
+    const collector = new ACKCollector(deps);
+
+    const result = await collector.collect(buildCollectParams());
+    expect(result.acks).toHaveLength(3);
+
+    const targeted = sendP2P.calls.map((c) => c[0] as string).sort();
+    expect(targeted).toEqual(['peer-0', 'peer-1', 'peer-2']);
+  });
+});
+
+// ── resolvePeersHostingContextGraph (triple-store helper) ────────────────
+
+describe('resolvePeersHostingContextGraph', () => {
+  const SKILL = 'https://dkg.origintrail.io/skill#';
+  const DKG_NS = 'https://dkg.network/ontology#';
+  const REGISTRY_GRAPH = 'did:dkg:context-graph:agents';
+
+  function buildAgentProfileQuads(args: {
+    walletOrPeerId: string;
+    peerId: string;
+    contextGraphsServed: string;
+  }): Quad[] {
+    const entity = `did:dkg:agent:${args.walletOrPeerId}`;
+    const hosting = `${entity}/.well-known/genid/hosting`;
+    return [
+      { subject: entity, predicate: `${DKG_NS}peerId`, object: `"${args.peerId}"`, graph: REGISTRY_GRAPH },
+      { subject: entity, predicate: `${SKILL}hostingProfile`, object: hosting, graph: REGISTRY_GRAPH },
+      { subject: hosting, predicate: `${SKILL}contextGraphsServed`, object: `"${args.contextGraphsServed}"`, graph: REGISTRY_GRAPH },
+    ];
+  }
+
+  it('returns the peer id for an agent advertising the exact UAL', async () => {
+    const { resolvePeersHostingContextGraph } = await import('../src/hosting-resolver.js');
+    const store = new OxigraphStore();
+    await store.insert(buildAgentProfileQuads({
+      walletOrPeerId: '0xb8625ad8',
+      peerId: '12D3KooWnWcpzsge',
+      contextGraphsServed: '0x8fb6dcd4/repnet,0x8fb6dcd4/repnet-edge-smoke,0x8fb6dcd4/testing',
+    }));
+
+    expect(await resolvePeersHostingContextGraph(store, '0x8fb6dcd4/repnet'))
+      .toEqual(['12D3KooWnWcpzsge']);
+    expect(await resolvePeersHostingContextGraph(store, '0x8fb6dcd4/testing'))
+      .toEqual(['12D3KooWnWcpzsge']);
+  });
+
+  it('does NOT match when the requested UAL is only a string prefix of an entry', async () => {
+    // Guards against `0x.../repnet` falsely matching `0x.../repnet-edge-smoke`.
+    const { resolvePeersHostingContextGraph } = await import('../src/hosting-resolver.js');
+    const store = new OxigraphStore();
+    await store.insert(buildAgentProfileQuads({
+      walletOrPeerId: '0xb8625ad8',
+      peerId: '12D3KooWnWcpzsge',
+      contextGraphsServed: '0x8fb6dcd4/repnet-edge-smoke,0x8fb6dcd4/testing',
+    }));
+
+    expect(await resolvePeersHostingContextGraph(store, '0x8fb6dcd4/repnet'))
+      .toEqual([]);
+  });
+
+  it('returns peer ids for the cores that host repnet-v2-official, excludes the one that doesn\'t (the #541 hosting layout)', async () => {
+    const { resolvePeersHostingContextGraph } = await import('../src/hosting-resolver.js');
+    const store = new OxigraphStore();
+
+    const TARGET = '0x8fb6dcd4B3e07E610958750DbD72Ae4acdce3738/repnet-v2-official';
+    const SIBLINGS = '0x8fb6dcd4B3e07E610958750DbD72Ae4acdce3738/repnet,0x8fb6dcd4B3e07E610958750DbD72Ae4acdce3738/repnet-edge-smoke,0x8fb6dcd4B3e07E610958750DbD72Ae4acdce3738/testing';
+
+    await store.insert([
+      ...buildAgentProfileQuads({
+        walletOrPeerId: '0x75bdf866',
+        peerId: '12D3KooWaijsNrWw',
+        contextGraphsServed: `${SIBLINGS},${TARGET}`,
+      }),
+      ...buildAgentProfileQuads({
+        walletOrPeerId: '0xf822793d',
+        peerId: '12D3KooWCe8Q82bZ',
+        contextGraphsServed: `${SIBLINGS},${TARGET}`,
+      }),
+      ...buildAgentProfileQuads({
+        walletOrPeerId: '0xb8625ad8',
+        peerId: '12D3KooWnWcpzsge',
+        contextGraphsServed: SIBLINGS,
+      }),
+    ]);
+
+    const peers = await resolvePeersHostingContextGraph(store, TARGET);
+    expect(new Set(peers)).toEqual(new Set(['12D3KooWaijsNrWw', '12D3KooWCe8Q82bZ']));
+    expect(peers).not.toContain('12D3KooWnWcpzsge');
+  });
+
+  it('returns [] for an empty UAL without throwing', async () => {
+    const { resolvePeersHostingContextGraph } = await import('../src/hosting-resolver.js');
+    const store = new OxigraphStore();
+    expect(await resolvePeersHostingContextGraph(store, '')).toEqual([]);
+  });
+
+  it('safely handles UALs containing characters that need SPARQL escaping', async () => {
+    const { resolvePeersHostingContextGraph } = await import('../src/hosting-resolver.js');
+    const store = new OxigraphStore();
+    // Pathological UAL with a quote — should not produce an unescaped
+    // SPARQL string and either match cleanly or return [] without throw.
+    const result = await resolvePeersHostingContextGraph(store, '0xabc/we"ird');
+    expect(Array.isArray(result)).toBe(true);
+  });
+});

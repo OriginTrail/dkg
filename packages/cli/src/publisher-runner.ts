@@ -24,6 +24,15 @@ interface ACKTransportFactory {
   gossipPublish: (topic: string, data: Uint8Array) => Promise<void>;
   sendP2P: (peerId: string, protocol: string, data: Uint8Array) => Promise<Uint8Array>;
   getConnectedCorePeers: () => string[];
+  /**
+   * Optional hosting filter, threaded straight through to
+   * `ACKCollectorDeps.getCorePeersHostingContextGraph`. Implementations
+   * should consult their local agent registry (e.g. via
+   * `resolvePeersHostingContextGraph` from `@origintrail-official/dkg-publisher`)
+   * intersected with currently-connected cores. Optional so existing
+   * embedders that don't supply a hosting registry still work.
+   */
+  getCorePeersHostingContextGraph?: (cgIdStr: string) => string[] | Promise<string[]>;
   log?: (message: string) => void;
 }
 
@@ -328,6 +337,7 @@ function createV10ACKProviderForPublisher(
     gossipPublish: transport.gossipPublish,
     sendP2P: transport.sendP2P,
     getConnectedCorePeers: transport.getConnectedCorePeers,
+    getCorePeersHostingContextGraph: transport.getCorePeersHostingContextGraph,
     verifyIdentity: async (recoveredAddress: string, claimedIdentityId: bigint) => chain.verifyACKIdentity!(recoveredAddress, claimedIdentityId),
     log: transport.log,
   });

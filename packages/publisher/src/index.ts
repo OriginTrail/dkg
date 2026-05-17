@@ -48,6 +48,7 @@ export {
   type CollectedACK,
   type ACKCollectionResult,
 } from './ack-collector.js';
+export { resolvePeersHostingContextGraph } from './hosting-resolver.js';
 export { StorageACKHandler, type StorageACKHandlerConfig } from './storage-ack-handler.js';
 export {
   VerifyCollector,

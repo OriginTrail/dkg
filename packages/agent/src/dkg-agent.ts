@@ -64,7 +64,7 @@ import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig,
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
-  ACKCollector, StorageACKHandler,
+  ACKCollector, StorageACKHandler, resolvePeersHostingContextGraph,
   VerifyCollector, VerifyProposalHandler, buildVerificationMetadata,
   resolveWorkspaceAgentRecipients,
   computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot, autoPartition, isReservedSubject, computePrivateRootV10 as computePrivateRoot,
@@ -14005,6 +14005,27 @@ export class DKGAgent {
         // StorageACK handler, requests to edge nodes fail at protocol
         // negotiation (fast, no error logs on the remote side).
         return connected;
+      },
+      getCorePeersHostingContextGraph: async (cgIdStr: string) => {
+        // Restrict the candidate set to cores whose latest agent profile
+        // advertises serving the target CG via `skill:contextGraphsServed`.
+        // This filters out cores that would otherwise have to throw
+        // "No data found in SWM graph …" inside their StorageACK handler
+        // (visible to the publisher as a stream reset). The collector
+        // warns and falls back to the full set if too few cores match,
+        // so a stale/incomplete hosting registry never blocks publishes.
+        try {
+          const advertised = await resolvePeersHostingContextGraph(this.store, cgIdStr);
+          if (advertised.length === 0) return [];
+          const advertisedSet = new Set(advertised);
+          const peers = this.node.libp2p.getPeers();
+          return peers
+            .map(p => p.toString())
+            .filter(id => id !== this.peerId)
+            .filter(id => advertisedSet.has(id));
+        } catch {
+          return [];
+        }
       },
       verifyIdentity: typeof this.chain.verifyACKIdentity === 'function'
         ? async (recoveredAddress: string, claimedIdentityId: bigint) => {

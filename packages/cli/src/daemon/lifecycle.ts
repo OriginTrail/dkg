@@ -54,7 +54,11 @@ const execFileAsync = promisify(execFile);
 import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
-import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
+import {
+  findReservedSubjectPrefix,
+  isSkolemizedUri,
+  resolvePeersHostingContextGraph,
+} from '@origintrail-official/dkg-publisher';
 import {
   DashboardDB,
   MetricsCollector,
@@ -793,6 +797,29 @@ export async function runDaemonInner(
               if (filtered.length > 0) return filtered;
             }
             return allPeers;
+          },
+          getCorePeersHostingContextGraph: async (cgIdStr: string) => {
+            // See `packages/publisher/src/ack-collector.ts` — restricts the
+            // ACK candidate set to cores whose latest agent profile
+            // advertises `skill:contextGraphsServed`-ing the target CG, so
+            // we don't waste a quorum slot on a core that would have to
+            // throw "No data found in SWM graph …" (visible to us as a
+            // libp2p stream reset). Fail-soft: collector falls back to the
+            // unfiltered set if too few cores match.
+            try {
+              const advertised = await resolvePeersHostingContextGraph(
+                agent.store,
+                cgIdStr,
+              );
+              if (advertised.length === 0) return [];
+              const advertisedSet = new Set(advertised);
+              return agent.node.libp2p
+                .getPeers()
+                .map((p) => p.toString())
+                .filter((id) => id !== agent.peerId && advertisedSet.has(id));
+            } catch {
+              return [];
+            }
           },
           log,
         }),

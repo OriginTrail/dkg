@@ -12,6 +12,27 @@ export interface ACKCollectorDeps {
   gossipPublish: (topic: string, data: Uint8Array) => Promise<void>;
   sendP2P: (peerId: string, protocol: string, data: Uint8Array) => Promise<Uint8Array>;
   getConnectedCorePeers: () => string[];
+  /**
+   * Optional hosting filter. Given the target context-graph UAL, return
+   * the subset of currently-connected core peers whose published agent
+   * profile (`<https://dkg.origintrail.io/skill#contextGraphsServed>`)
+   * advertises hosting it.
+   *
+   * When provided, the collector prefers this filtered candidate set —
+   * cores that don't host the CG would otherwise have to reject the
+   * StorageACK request mid-stream (most often as `No data found in SWM
+   * graph ...`), which the publisher sees as a libp2p stream reset and
+   * has to retry/timeout against. Filtering up front avoids that cost.
+   *
+   * Behaviour when fewer than `requiredACKs` peers match: the collector
+   * logs a warning naming the CG + which connected cores are vs. aren't
+   * advertising it, and **falls back to the full connected-core set** so
+   * publishes still proceed when the hosting registry is incomplete or
+   * stale. This deliberately keeps the path live during discovery races,
+   * but makes hosting-coverage bugs (see GitHub issue #541) visible in
+   * the log instead of presenting as opaque ACK timeouts.
+   */
+  getCorePeersHostingContextGraph?: (cgIdStr: string) => string[] | Promise<string[]>;
   verifyIdentity?: (recoveredAddress: string, claimedIdentityId: bigint) => Promise<boolean>;
   log?: (msg: string) => void;
 }
@@ -122,10 +143,52 @@ export class ACKCollector {
     // that decode payloads as FinalizationMessages, causing decode errors.
     log(`[ACKCollector] Collecting ACKs via direct P2P (merkleRoot=${ethers.hexlify(merkleRoot).slice(0, 18)}...)`);
 
-    const corePeers = this.deps.getConnectedCorePeers();
-    if (corePeers.length === 0) {
+    const allConnected = this.deps.getConnectedCorePeers();
+    if (allConnected.length === 0) {
       throw new Error('ACK collection failed: no connected core peers');
     }
+
+    let corePeers = allConnected;
+    if (this.deps.getCorePeersHostingContextGraph) {
+      let hostingPeers: string[] = [];
+      try {
+        hostingPeers = await Promise.resolve(
+          this.deps.getCorePeersHostingContextGraph(contextGraphIdStr),
+        );
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        log(
+          `[ACKCollector] hosting-filter lookup failed for "${contextGraphIdStr}" (${errMsg}); ` +
+          `falling back to all ${allConnected.length} connected cores`,
+        );
+        hostingPeers = [];
+      }
+      const hostingSet = new Set(hostingPeers);
+      const matched = allConnected.filter(p => hostingSet.has(p));
+      const excluded = allConnected.filter(p => !hostingSet.has(p));
+
+      if (matched.length >= REQUIRED_ACKS) {
+        corePeers = matched;
+        if (excluded.length > 0) {
+          log(
+            `[ACKCollector] hosting filter: using ${matched.length}/${allConnected.length} connected cores ` +
+            `that advertise hosting "${contextGraphIdStr}" ` +
+            `(excluded ${excluded.length}: ${excluded.map(p => p.slice(-8)).join(', ')})`,
+          );
+        }
+      } else {
+        const matchedTags = matched.length > 0 ? matched.map(p => p.slice(-8)).join(', ') : '<none>';
+        const excludedTags = excluded.length > 0 ? excluded.map(p => p.slice(-8)).join(', ') : '<none>';
+        log(
+          `[ACKCollector] WARN: hosting filter found only ${matched.length}/${allConnected.length} ` +
+          `connected cores advertising "${contextGraphIdStr}" (need ${REQUIRED_ACKS}). ` +
+          `Falling back to all connected cores. Hosting cores: [${matchedTags}]; non-hosting cores: [${excludedTags}]. ` +
+          `If "${contextGraphIdStr}" has replicationPolicy=full, the non-hosting cores have a coverage bug — ` +
+          `publish may collect fewer than ${REQUIRED_ACKS} valid ACKs and fail (see GitHub issue #541).`,
+        );
+      }
+    }
+
     if (corePeers.length < REQUIRED_ACKS) {
       throw new Error(
         `ACK collection failed: need ${REQUIRED_ACKS} ACKs but only ${corePeers.length} core peers connected — quorum impossible`,
