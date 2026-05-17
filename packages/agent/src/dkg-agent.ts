@@ -2107,6 +2107,41 @@ export class DKGAgent {
       this.eventBus,
     );
 
+    // Long-lived stream pooling for the chat protocol — opt-in via
+    // env. When `DKG_POOLED_MESSAGES=1`, ProtocolRouter wraps the
+    // chat protocol (`/dkg/10.0.1/message`) with a per-peer pooled
+    // wire variant (`/dkg/10.0.2/message`) that re-uses a single
+    // bidirectional yamux substream + framed multiplexing across
+    // every send to the same peer. Backward-compatible: peers that
+    // don't advertise the pooled wire variant fall back to one-shot
+    // automatically via multistream-select.
+    //
+    // Designed for the May 2026 multi-node soak finding: circuit-
+    // relay-v2 connections were being torn down between every send
+    // (200–365 ms per re-dial), dominating the latency tail (p95
+    // ~8.5s, p99 ~9.6s). Long-lived streams keep both the substream
+    // and the underlying relay connection warm via periodic PING
+    // frames. See packages/core/src/message-stream-pool.ts.
+    if (process.env.DKG_POOLED_MESSAGES === '1') {
+      this.router.enablePooling(PROTOCOL_MESSAGE, {
+        // Conservative keepalive: 10s is fast enough to keep
+        // relay-v2 reservations alive (default reservation TTL is
+        // far longer) and slow enough to add <0.1Hz of background
+        // traffic per peer.
+        keepaliveIntervalMs: 10_000,
+        // 5 min idle close: a peer the local node hasn't messaged in
+        // 5 min probably isn't going to message again soon; closing
+        // the stream releases the relay reservation slot, and the
+        // next send re-opens cheaply.
+        idleTimeoutMs: 5 * 60_000,
+      });
+      this.log.info(
+        ctx,
+        '[messenger] pooled wire variant /dkg/10.0.2/message enabled for ' +
+          'chat protocol (long-lived per-peer streams).',
+      );
+    }
+
     // Wire up pending chat handler
     if (this._pendingChatHandler) {
       this.messageHandler.onChat(this._pendingChatHandler);
@@ -13928,6 +13963,15 @@ export class DKGAgent {
     if (this.randomSamplingHandle) {
       try { await this.randomSamplingHandle.stop(); } catch { /* swallow on shutdown */ }
       this.randomSamplingHandle = null;
+    }
+    // Tear down any pooled wire-protocol overlays before libp2p
+    // stops so per-peer streams close gracefully rather than via
+    // libp2p teardown (which would surface as recoverable resets
+    // and trigger spurious outbox retries on the very last cycle).
+    try {
+      await this.router.closePooling();
+    } catch {
+      // best-effort; libp2p teardown below will close residual streams
     }
     await this.node.stop();
     if (this.syncVerifyWorker) {
