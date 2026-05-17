@@ -533,6 +533,16 @@ export class Messenger {
     return this.outbox?.getEntry(peerId, protocolId, messageId);
   }
 
+  /**
+   * Remove a queued substrate entry without recording it as delivered.
+   * Synchronous request/response protocols use this when a first
+   * attempt is queued but the caller cannot wait for a background
+   * retry (for example `queryRemote`).
+   */
+  discardOutboxEntry(peerId: string, protocolId: string, messageId: string): boolean {
+    return this.outbox?.markDelivered(peerId, protocolId, messageId) ?? false;
+  }
+
   private requireSubstrate(method: string): void {
     if (!this.idempotencyStore || !this.outbox) {
       throw new MessengerNotConfiguredError(method);

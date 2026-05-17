@@ -3,6 +3,7 @@ import {
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
   PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE, PROTOCOL_STORAGE_ACK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
   PROTOCOL_SWM_SENDER_KEY, PROTOCOL_MESSAGE,
+  RESPONSE_GONE_MARKER,
   contextGraphPublishTopic, contextGraphWorkspaceTopic, contextGraphAppTopic, contextGraphUpdateTopic, contextGraphFinalizationTopic,
   contextGraphDataGraphUri, contextGraphMetaGraphUri, contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri,
   contextGraphSharedMemoryUri,
@@ -8134,25 +8135,27 @@ export class DKGAgent {
     peerId: string,
     payload: Uint8Array,
   ): Promise<Uint8Array> {
-    const RESPONSE_GONE = 'RESPONSE_GONE';
     const MAX_ATTEMPTS = 2;
     let lastErr: unknown;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      const messageId = crypto.randomUUID();
       const sendResult = await this.messenger.sendReliable(
         peerId,
         PROTOCOL_QUERY_REMOTE,
         payload,
+        { messageId },
       );
       if (!sendResult.delivered) {
+        this.messenger.discardOutboxEntry(peerId, PROTOCOL_QUERY_REMOTE, messageId);
         throw new Error(
           `query-remote send not synchronously deliverable (queued): ${sendResult.error}`,
         );
       }
       const respText = new TextDecoder().decode(sendResult.response);
-      if (respText === RESPONSE_GONE) {
+      if (respText === RESPONSE_GONE_MARKER) {
         // Original response was mark-only; re-issue with a fresh
         // messageId next loop iteration (sendReliable mints one
-        // when opts.messageId is absent).
+        // per loop before calling the substrate).
         lastErr = new Error('RESPONSE_GONE: original response too large to cache; retrying with fresh messageId');
         continue;
       }
