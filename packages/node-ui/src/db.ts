@@ -9,7 +9,7 @@ import {
   type ProtocolOutboxStore,
 } from '@origintrail-official/dkg-core';
 
-const SCHEMA_VERSION = 12;
+const SCHEMA_VERSION = 13;
 const DEFAULT_RETENTION_DAYS = 90;
 
 export interface DashboardDBOptions {
@@ -413,10 +413,10 @@ export class DashboardDB {
       //     queue sizes (~tens of entries per peer).
       //
       // No data migration: pure additive. The chat-specific
-      // `idx_chat_msgid` from V11 stays in place — PR-3 will drop
-      // it (V13) once chat migrates onto the substrate and
+      // `idx_chat_msgid` from V11 stays in place — a later migration
+      // will drop it once chat migrates onto the substrate and
       // `message_id` is enforced via `message_idempotency` instead.
-      // V13 will also preserve `chat_messages.message_id` as
+      // That migration will also preserve `chat_messages.message_id` as
       // nullable + unwritten for rollback safety.
       this.db.exec(`
         CREATE TABLE IF NOT EXISTS message_idempotency (
@@ -436,6 +436,7 @@ export class DashboardDB {
           protocol TEXT NOT NULL,
           message_id TEXT NOT NULL,
           payload BLOB NOT NULL,
+          timeout_ms INTEGER,
           attempts INTEGER NOT NULL DEFAULT 0,
           first_failure_at INTEGER NOT NULL,
           last_attempt_at INTEGER NOT NULL,
@@ -446,6 +447,17 @@ export class DashboardDB {
         CREATE INDEX IF NOT EXISTS idx_outbox_next_attempt
           ON protocol_outbox(next_attempt_at);
       `);
+
+    }
+
+    if (version < 13) {
+      const outboxCols = new Set(
+        (this.db.prepare('PRAGMA table_info(protocol_outbox)').all() as Array<{ name: string }>)
+          .map((c) => c.name),
+      );
+      if (outboxCols.size > 0 && !outboxCols.has('timeout_ms')) {
+        this.db.exec(`ALTER TABLE protocol_outbox ADD COLUMN timeout_ms INTEGER;`);
+      }
     }
 
     this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
@@ -1722,6 +1734,7 @@ export class SqliteProtocolOutboxStore implements ProtocolOutboxStore {
     payload: Uint8Array,
     error: string,
     now: number,
+    options: { timeoutMs?: number } = {},
   ): ProtocolOutboxEntry {
     const existing = this.db
       .prepare(
@@ -1734,6 +1747,7 @@ export class SqliteProtocolOutboxStore implements ProtocolOutboxStore {
           protocol: string;
           message_id: string;
           payload: Buffer;
+          timeout_ms: number | null;
           attempts: number;
           first_failure_at: number;
           last_attempt_at: number;
@@ -1745,13 +1759,14 @@ export class SqliteProtocolOutboxStore implements ProtocolOutboxStore {
     if (existing) {
       const newAttempts = existing.attempts + 1;
       const nextAttemptAt = now + this.backoffFor(newAttempts);
+      const timeoutMs = options.timeoutMs ?? existing.timeout_ms ?? undefined;
       this.db
         .prepare(
           `UPDATE protocol_outbox
-           SET attempts = ?, last_attempt_at = ?, next_attempt_at = ?, last_error = ?
+           SET attempts = ?, last_attempt_at = ?, next_attempt_at = ?, last_error = ?, timeout_ms = ?
            WHERE peer_id = ? AND protocol = ? AND message_id = ?`,
         )
-        .run(newAttempts, now, nextAttemptAt, error, peer, protocol, messageId);
+        .run(newAttempts, now, nextAttemptAt, error, timeoutMs ?? null, peer, protocol, messageId);
       return {
         peer,
         protocol,
@@ -1761,6 +1776,7 @@ export class SqliteProtocolOutboxStore implements ProtocolOutboxStore {
           existing.payload.byteOffset,
           existing.payload.byteLength,
         ),
+        timeoutMs,
         attempts: newAttempts,
         firstFailureAt: existing.first_failure_at,
         lastAttemptAt: now,
@@ -1775,16 +1791,17 @@ export class SqliteProtocolOutboxStore implements ProtocolOutboxStore {
     this.db
       .prepare(
         `INSERT INTO protocol_outbox
-           (peer_id, protocol, message_id, payload, attempts,
+           (peer_id, protocol, message_id, payload, timeout_ms, attempts,
             first_failure_at, last_attempt_at, next_attempt_at, last_error)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(peer, protocol, messageId, blob, attempts, now, now, nextAttemptAt, error);
+      .run(peer, protocol, messageId, blob, options.timeoutMs ?? null, attempts, now, now, nextAttemptAt, error);
     return {
       peer,
       protocol,
       messageId,
       payload,
+      timeoutMs: options.timeoutMs,
       attempts,
       firstFailureAt: now,
       lastAttemptAt: now,
@@ -1823,6 +1840,7 @@ export class SqliteProtocolOutboxStore implements ProtocolOutboxStore {
       protocol: string;
       message_id: string;
       payload: Buffer;
+      timeout_ms: number | null;
       attempts: number;
       first_failure_at: number;
       last_attempt_at: number;
@@ -1842,6 +1860,7 @@ export class SqliteProtocolOutboxStore implements ProtocolOutboxStore {
       protocol: string;
       message_id: string;
       payload: Buffer;
+      timeout_ms: number | null;
       attempts: number;
       first_failure_at: number;
       last_attempt_at: number;
@@ -1860,6 +1879,7 @@ export class SqliteProtocolOutboxStore implements ProtocolOutboxStore {
       protocol: string;
       message_id: string;
       payload: Buffer;
+      timeout_ms: number | null;
       attempts: number;
       first_failure_at: number;
       last_attempt_at: number;
@@ -1882,6 +1902,7 @@ export class SqliteProtocolOutboxStore implements ProtocolOutboxStore {
     protocol: string;
     message_id: string;
     payload: Buffer;
+    timeout_ms: number | null;
     attempts: number;
     first_failure_at: number;
     last_attempt_at: number;
@@ -1893,6 +1914,7 @@ export class SqliteProtocolOutboxStore implements ProtocolOutboxStore {
       protocol: row.protocol,
       messageId: row.message_id,
       payload: new Uint8Array(row.payload.buffer, row.payload.byteOffset, row.payload.byteLength),
+      timeoutMs: row.timeout_ms ?? undefined,
       attempts: row.attempts,
       firstFailureAt: row.first_failure_at,
       lastAttemptAt: row.last_attempt_at,

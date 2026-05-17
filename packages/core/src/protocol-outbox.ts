@@ -32,6 +32,7 @@ import type {
   MessageDirection,
   MessageIdempotencyStore,
   ProtocolOutboxEntry,
+  ProtocolOutboxEnqueueOptions,
   ProtocolOutboxStore,
 } from './messenger-types.js';
 import { RESPONSE_CACHE_BYTES } from './messenger-types.js';
@@ -155,8 +156,9 @@ export class ProtocolOutbox {
     payload: Uint8Array,
     error: string,
     now: number,
+    options?: ProtocolOutboxEnqueueOptions,
   ): ProtocolOutboxEntry {
-    return this.store.enqueue(peer, protocol, messageId, payload, error, now);
+    return this.store.enqueue(peer, protocol, messageId, payload, error, now, options);
   }
 
   /**
@@ -250,6 +252,7 @@ export class InMemoryProtocolOutboxStore implements ProtocolOutboxStore {
     payload: Uint8Array,
     error: string,
     now: number,
+    options: ProtocolOutboxEnqueueOptions = {},
   ): ProtocolOutboxEntry {
     const key = InMemoryProtocolOutboxStore.key(peer, protocol, messageId);
     const existing = this.entries.get(key);
@@ -258,6 +261,7 @@ export class InMemoryProtocolOutboxStore implements ProtocolOutboxStore {
       existing.lastAttemptAt = now;
       existing.nextAttemptAt = now + this.backoffFor(existing.attempts);
       existing.lastError = error;
+      existing.timeoutMs = options.timeoutMs ?? existing.timeoutMs;
       return { ...existing };
     }
     const entry: ProtocolOutboxEntry = {
@@ -265,6 +269,7 @@ export class InMemoryProtocolOutboxStore implements ProtocolOutboxStore {
       protocol,
       messageId,
       payload,
+      timeoutMs: options.timeoutMs,
       attempts: 1,
       firstFailureAt: now,
       lastAttemptAt: now,

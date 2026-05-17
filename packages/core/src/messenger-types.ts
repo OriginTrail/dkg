@@ -162,11 +162,16 @@ export interface ProtocolOutboxEntry {
   protocol: string;
   messageId: string;
   payload: Uint8Array;
+  timeoutMs?: number;
   attempts: number;
   firstFailureAt: number;
   lastAttemptAt: number;
   nextAttemptAt: number;
   lastError: string;
+}
+
+export interface ProtocolOutboxEnqueueOptions {
+  timeoutMs?: number;
 }
 
 export interface ProtocolOutboxStore {
@@ -186,6 +191,7 @@ export interface ProtocolOutboxStore {
     payload: Uint8Array,
     error: string,
     now: number,
+    options?: ProtocolOutboxEnqueueOptions,
   ): ProtocolOutboxEntry;
 
   /**

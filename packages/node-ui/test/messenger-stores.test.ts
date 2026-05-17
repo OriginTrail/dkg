@@ -29,7 +29,7 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-describe('V12 migration', () => {
+describe('V13 migration', () => {
   it('creates message_idempotency and protocol_outbox tables', () => {
     const tables = (db.db
       .prepare("SELECT name FROM sqlite_master WHERE type='table'")
@@ -38,8 +38,38 @@ describe('V12 migration', () => {
     expect(tables).toContain('protocol_outbox');
   });
 
-  it('records user_version = 12 after migration', () => {
-    expect(db.db.pragma('user_version', { simple: true })).toBe(12);
+  it('records user_version = 13 after migration', () => {
+    expect(db.db.pragma('user_version', { simple: true })).toBe(13);
+  });
+
+  it('adds timeout_ms when reopening an existing V12 protocol_outbox table', () => {
+    db.db.exec(`
+      DROP TABLE protocol_outbox;
+      CREATE TABLE protocol_outbox (
+        peer_id TEXT NOT NULL,
+        protocol TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        payload BLOB NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        first_failure_at INTEGER NOT NULL,
+        last_attempt_at INTEGER NOT NULL,
+        next_attempt_at INTEGER NOT NULL,
+        last_error TEXT,
+        PRIMARY KEY (peer_id, protocol, message_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_outbox_next_attempt
+        ON protocol_outbox(next_attempt_at);
+      PRAGMA user_version = 12;
+    `);
+    db.close();
+
+    db = new DashboardDB({ dataDir: dir });
+
+    const cols = (db.db
+      .prepare('PRAGMA table_info(protocol_outbox)')
+      .all() as Array<{ name: string }>).map((col) => col.name);
+    expect(cols).toContain('timeout_ms');
+    expect(db.db.pragma('user_version', { simple: true })).toBe(13);
   });
 });
 
@@ -130,8 +160,11 @@ describe('SqliteMessageIdempotencyStore', () => {
 describe('SqliteProtocolOutboxStore', () => {
   it('enqueue creates a new entry with attempts=1', () => {
     const store = new SqliteProtocolOutboxStore(db, { backoffFor: () => 5_000 });
-    const entry = store.enqueue(PEER_A, PROTO, MSG_1, PAYLOAD, 'reset', 1_000_000);
+    const entry = store.enqueue(PEER_A, PROTO, MSG_1, PAYLOAD, 'reset', 1_000_000, {
+      timeoutMs: 1234,
+    });
     expect(entry.attempts).toBe(1);
+    expect(entry.timeoutMs).toBe(1234);
     expect(entry.firstFailureAt).toBe(1_000_000);
     expect(entry.nextAttemptAt).toBe(1_005_000);
     expect(entry.lastError).toBe('reset');
@@ -140,9 +173,12 @@ describe('SqliteProtocolOutboxStore', () => {
 
   it('enqueue bumps attempts and reschedules on repeat failure for the same key', () => {
     const store = new SqliteProtocolOutboxStore(db, { backoffFor: (n) => n * 1000 });
-    store.enqueue(PEER_A, PROTO, MSG_1, PAYLOAD, 'first', 1_000_000);
+    store.enqueue(PEER_A, PROTO, MSG_1, PAYLOAD, 'first', 1_000_000, {
+      timeoutMs: 1234,
+    });
     const second = store.enqueue(PEER_A, PROTO, MSG_1, PAYLOAD, 'second', 1_005_000);
     expect(second.attempts).toBe(2);
+    expect(second.timeoutMs).toBe(1234);
     expect(second.firstFailureAt).toBe(1_000_000);
     expect(second.lastAttemptAt).toBe(1_005_000);
     expect(second.nextAttemptAt).toBe(1_005_000 + 2000);
@@ -209,6 +245,7 @@ describe('SqliteProtocolOutboxStore', () => {
     const pending = reopened.pendingFor(PEER_A);
     expect(pending).toHaveLength(1);
     expect(pending[0].lastError).toBe('crash-before-delivery');
+    expect(pending[0].timeoutMs).toBeUndefined();
     expect(Array.from(pending[0].payload)).toEqual(Array.from(PAYLOAD));
   });
 });

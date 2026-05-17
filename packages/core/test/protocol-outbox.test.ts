@@ -62,6 +62,22 @@ describe('ProtocolOutbox.enqueueFailure', () => {
     outbox.enqueueFailure(PEER_A, PROTO, MSG_2, PAYLOAD, 'b', 1000);
     expect(outbox.size()).toBe(2);
   });
+
+  it('preserves per-message timeout metadata on queued entries', () => {
+    const { outbox } = fixture();
+    const entry = outbox.enqueueFailure(
+      PEER_A,
+      PROTO,
+      MSG_1,
+      PAYLOAD,
+      'reset',
+      1000,
+      { timeoutMs: 1234 },
+    );
+
+    expect(entry.timeoutMs).toBe(1234);
+    expect(outbox.due(Number.MAX_SAFE_INTEGER)[0].timeoutMs).toBe(1234);
+  });
 });
 
 describe('ProtocolOutbox.markDelivered + hasEntry', () => {

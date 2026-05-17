@@ -66,14 +66,6 @@ export interface SendReliableOpts {
    */
   messageId?: string;
   timeoutMs?: number;
-  /**
-   * Max age (ms) before an outbox entry for this `(peer, protocol,
-   * messageId)` is considered stale and dropped. Defaults to the
-   * Messenger's instance-level `maxAgeMs` (24h). Override for callers
-   * that want shorter expiry (e.g. ephemeral chat) or longer
-   * (e.g. join-approval).
-   */
-  maxAgeMs?: number;
 }
 
 /**
@@ -311,6 +303,7 @@ export class Messenger {
         envelope,
         errMsg,
         this.clock(),
+        { timeoutMs: opts.timeoutMs },
       );
       return {
         delivered: false,
@@ -453,6 +446,7 @@ export class Messenger {
     protocol: string;
     messageId: string;
     payload: Uint8Array;
+    timeoutMs?: number;
   }): Promise<void> {
     const outbox = this.outbox!;
     if (!outbox.tryBeginAttempt(entry.peer, entry.protocol, entry.messageId)) {
@@ -471,6 +465,7 @@ export class Messenger {
         entry.peer,
         entry.protocol,
         entry.payload,
+        entry.timeoutMs,
       );
       this.idempotencyStore!.record(
         entry.peer,
@@ -490,6 +485,7 @@ export class Messenger {
           entry.payload,
           errMsg,
           this.clock(),
+          { timeoutMs: entry.timeoutMs },
         );
       }
       // Non-recoverable: leave the entry alone. `dropExpired` will

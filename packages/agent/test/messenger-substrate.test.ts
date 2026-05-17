@@ -143,6 +143,21 @@ describe('Messenger.sendReliable (failure / outbox)', () => {
     expect(outboxStore.hasEntry(PEER_A, PROTO, FIXED_MSG_ID)).toBe(true);
   });
 
+  it('persists timeoutMs with queued entries for background retries', async () => {
+    const router = makeRouter(async () => {
+      throw new Error('no valid addresses for peer');
+    });
+    const { messenger, outboxStore } = makeSubstrate({ router });
+
+    await messenger.sendReliable(PEER_A, PROTO, new Uint8Array([1]), {
+      messageId: FIXED_MSG_ID,
+      timeoutMs: 1234,
+    });
+
+    const [entry] = outboxStore.pendingFor(PEER_A);
+    expect(entry.timeoutMs).toBe(1234);
+  });
+
   it('reports inFlight instead of queued when a duplicate send races the active attempt', async () => {
     let release!: (value: Uint8Array) => void;
     const router = makeRouter(
@@ -322,6 +337,7 @@ describe('Messenger.processOutboxTick (retry loop semantics)', () => {
     // First attempt fails + enqueues.
     await messenger.sendReliable(PEER_A, PROTO, new Uint8Array([1]), {
       messageId: FIXED_MSG_ID,
+      timeoutMs: 4321,
     });
     expect(outboxStore.size()).toBe(1);
 
@@ -332,6 +348,7 @@ describe('Messenger.processOutboxTick (retry loop semantics)', () => {
     expect(due).toHaveLength(1);
 
     await messenger.processOutboxTick(clock() + 100);
+    expect(router.send.mock.calls[1][3]).toBe(4321);
     expect(outboxStore.size()).toBe(0);
   });
 
