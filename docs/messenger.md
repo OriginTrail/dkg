@@ -1,14 +1,16 @@
 # Universal Messenger
 
-> Status: shipping in `v10.0.0-rc.9`. All 8 short-message protocols now route through the substrate; per-message delivery + latency observable via `/api/slo`.
+> Status: PR-13 docs branch, stacked on PR-12. This branch contains the
+> substrate primitives, Messenger class, chat/skill pilot migration,
+> and `/api/slo`. Later stack PRs (#545, #546, #548, #550, #551,
+> #554, #555) finish multi-path, DHT-walk recovery, relay preference,
+> and the remaining protocol migrations.
 
-The Universal Messenger is the reliability substrate every short
-peer-to-peer DKG protocol travels through. It generalises the chat-
-specific outbox + receiver-dedup work from rc.8 (PRs #533, #534, #536,
-#537, #538) into a single layer that wraps `ProtocolRouter.send` and
-gives every caller — chat, skill request, query-remote, swm-sender-key,
-private-access, join-request, storage-ack, verify-proposal — the same
-delivery guarantees:
+The Universal Messenger is the reliability substrate for short
+peer-to-peer DKG protocols as they migrate onto it. It generalises the
+chat-specific outbox + receiver-dedup work from rc.8 (PRs #533, #534,
+#536, #537, #538) into a single layer that wraps `ProtocolRouter.send`
+and gives substrate callers the same delivery guarantees:
 
 - **At-least-once delivery** with sender-side durable retry (survives
   daemon crash mid-retry).
@@ -26,8 +28,9 @@ This page is the architecture reference. Two siblings live alongside it:
   for migrating an existing protocol onto the Messenger, or adding a
   new short-message protocol.
 - [`messenger-operator.md`](./messenger-operator.md) — how to read
-  `/api/slo`, what `--relay-preferred` does, and how to debug a peer
-  that "should be" reachable but isn't.
+  `/api/slo`, how the planned `--relay-preferred` surface is expected
+  to work after PR #548 lands, and how to debug a peer that "should
+  be" reachable but isn't.
 
 ## Architecture
 
@@ -84,10 +87,10 @@ The substrate is composed of:
 
 4. **`Messenger`** class (`packages/agent/src/p2p/messenger.ts`) — wires
    the above together around `ProtocolRouter`. Provides `sendReliable`
-   + `register` as the only public surface every protocol needs.
+   + `register` as the only public surface every migrated protocol
+   needs.
    Legacy `sendToPeer` is retained as a bare pass-through for any
-   `/dkg/10.0.0/*` caller that hasn't migrated yet (none remain at
-   rc.9 ship; the surface exists for future incremental migrations).
+   `/dkg/10.0.0/*` caller that has not migrated yet.
 
 ## Topology + sequence flows
 
@@ -150,8 +153,9 @@ Key topology facts:
 
 - Every agent daemon reserves on **2-4 relays simultaneously**
   (multi-reservation, rc.8 PR #526). The relay set today is the
-  testnet core nodes; operators stand up their own via PR-7's
-  `--relay-preferred` (see [`messenger-operator.md`](./messenger-operator.md)).
+  testnet core nodes; PR #548 will add `--relay-preferred` so
+  operators can prioritise their own relays (see
+  [`messenger-operator.md`](./messenger-operator.md)).
 - The relay is a transparent libp2p hop: it forwards encrypted
   frames; the `ReliableEnvelope` is opaque to it.
 - Both daemons run the identical Messenger stack — including the
@@ -165,7 +169,8 @@ Key topology facts:
 
 ### Flow 1 — Happy path
 
-Applies to all 8 protocols. The relay forwards bytes opaquely.
+Applies to every protocol that has migrated onto the substrate. The
+relay forwards bytes opaquely.
 
 ```mermaid
 sequenceDiagram
@@ -273,13 +278,14 @@ sequenceDiagram
 
 This is exactly the failure recipe the rc.8 8h soak surfaced. The new
 substrate makes outbox durability the floor (no chat-specific limit);
-PR-5 adds the DHT-walk-on-stall recovery channel on top of the
-inbound-from-receiver path that rc.8 already provides.
+pending PR #546 adds the DHT-walk-on-stall recovery channel on top of
+the inbound-from-receiver path that rc.8 already provides.
 
-### Flow 3 — Multi-path parallel send (PR-4)
+### Planned Flow 3 — Multi-path parallel send (PR #545)
 
-Sender races N relays in parallel; whichever forwards first wins;
-receiver dedup absorbs anything from losing paths.
+After PR #545 lands, the sender can race N relays in parallel;
+whichever forwards first wins, and receiver dedup absorbs anything
+from losing paths.
 
 ```mermaid
 sequenceDiagram
@@ -318,12 +324,13 @@ sequenceDiagram
     SLib-->>SMS: response from R2
 ```
 
-Critical guard in PR-4: `parallelPaths > 1` is only safe because every
-substrate-routed protocol lives on the `/dkg/10.0.1/*` prefix where
+Critical guard in PR #545: `parallelPaths > 1` is only safe for
+substrate-routed protocols on the `/dkg/10.0.1/*` prefix where
 receiver dedup is mandatory. Default `parallelPaths` per protocol is
 in the [per-protocol coverage table](#per-protocol-coverage) below.
-`/storage-ack` + `/verify-proposal` stay at **1** because they
-already fan out at the app layer — N=3 would be 9x amplification.
+`/storage-ack` + `/verify-proposal` stay at **1** in the planned ACK
+migration because they already fan out at the app layer — N=3 would
+be 9x amplification.
 
 ## Wire format
 
@@ -392,25 +399,26 @@ Fixed at 256 KiB inline cache. No per-protocol or per-call knob.
 | `>` 256 KiB                         | Stored mark-only (`response_blob = NULL`, `response_size` set). Duplicate → RESPONSE_GONE. |
 
 Callers on the receive of `RESPONSE_GONE` decide whether to re-issue
-with a fresh `messageId` (acceptable for `/query-remote` since SPARQL
-is idempotent at the app layer) or surface a terminal error.
+with a fresh `messageId` (planned for `/query-remote` in PR #551 since
+SPARQL is idempotent at the app layer) or surface a terminal error.
 
 ## Per-protocol coverage
 
-All 8 short-message protocols ship on the substrate in `v10.0.0-rc.9`.
-The migration recipe (for adding a hypothetical 9th protocol later) is
-in [`messenger-add-protocol.md`](./messenger-add-protocol.md).
+This docs branch is stacked on PR-12, so the table separates what is
+available in this branch from later migrations in the rc.9 stack. The
+migration recipe (for adding a hypothetical 9th protocol later) is in
+[`messenger-add-protocol.md`](./messenger-add-protocol.md).
 
-| Protocol                       | Migrated in | parallelPaths | Notes                                                                                            |
-| ------------------------------ | ----------- | ------------- | ------------------------------------------------------------------------------------------------ |
-| `/dkg/10.0.1/message` (chat)   | PR-3        | 2 (default)   | Pilot. Wire-format break replaces `chat_messages.message_id` index uniqueness.                   |
-| `/dkg/10.0.1/skill_request`    | PR-3        | 1             | Migrated alongside chat (shares `agent.sendMessage` path).                                       |
-| `/dkg/10.0.1/swm-sender-key`   | PR-8        | 1             | Batch with `/private-access`.                                                                    |
-| `/dkg/10.0.1/private-access`   | PR-8        | 1             | Batch with `/swm-sender-key`; `AccessClient` takes the minimal `AccessSendSurface` interface.    |
-| `/dkg/10.0.1/query-remote`     | PR-9        | 1             | Sole caller of `RESPONSE_GONE` retry path; `sendQueryReliable` re-issues with fresh messageId (cap 2). |
-| `/dkg/10.0.1/join-request`     | PR-10       | 1             | Removes `JoinApprovalRetryQueue` in favour of generic outbox — substrate now owns persistence.   |
-| `/dkg/10.0.1/storage-ack`      | PR-11       | 1             | ACKCollector quorum unchanged; only transport swaps. parallelPaths=1 prevents 9x fan-out.        |
-| `/dkg/10.0.1/verify-proposal`  | PR-11       | 1             | Same shape as storage-ack. `/dkg/10.0.0/verify-approval` stays bare (not a substrate caller).    |
+| Protocol                       | Status in this branch | parallelPaths | Notes                                                                                            |
+| ------------------------------ | --------------------- | ------------- | ------------------------------------------------------------------------------------------------ |
+| `/dkg/10.0.1/message` (chat)   | Shipped in PR-3       | 1 here; 2 after PR #545 | Pilot. Wire-format break replaces `chat_messages.message_id` index uniqueness.          |
+| `/dkg/10.0.1/skill_request`    | Shipped in PR-3       | 1             | Migrated alongside chat (shares `agent.sendMessage` path).                                       |
+| `/dkg/10.0.1/swm-sender-key`   | Pending PR #550       | 1             | Planned batch with `/private-access`.                                                           |
+| `/dkg/10.0.1/private-access`   | Pending PR #550       | 1             | Planned batch with `/swm-sender-key`; `AccessClient` takes the minimal `AccessSendSurface` interface. |
+| `/dkg/10.0.1/query-remote`     | Pending PR #551       | 1             | Planned `RESPONSE_GONE` retry path; `sendQueryReliable` re-issues with fresh messageId (cap 2).  |
+| `/dkg/10.0.1/join-request`     | Pending PR #554       | 1             | Planned removal of `JoinApprovalRetryQueue` in favour of generic outbox persistence.             |
+| `/dkg/10.0.1/storage-ack`      | Pending PR #555       | 1             | ACKCollector quorum unchanged; only transport swaps. parallelPaths=1 prevents 9x fan-out.        |
+| `/dkg/10.0.1/verify-proposal`  | Pending PR #555       | 1             | Same shape as storage-ack. `/dkg/10.0.0/verify-approval` stays bare (not a substrate caller).    |
 
 ## Recovery primitives
 
@@ -420,17 +428,18 @@ in [`messenger-add-protocol.md`](./messenger-add-protocol.md).
   reconnects, drain its `pendingFor(peer)` queue immediately rather
   than wait for backoff. Stale-snapshot-safe via `hasEntry` guard
   (rc.8 #538 lesson, lifted into the substrate).
-- **`parallelPaths`** _(PR-4)_ — `Messenger.sendReliable` opts can
-  race N candidate paths; receiver dedup absorbs duplicates. Only
-  safe on `/dkg/10.0.1/*` where dedup is mandatory.
-- **DHT walk on stall** _(PR-5)_ — outbox entry with ≥ 5 attempts of
-  "no valid addresses for peer" triggers a time-bounded
+- **`parallelPaths`** _(pending PR #545)_ — `Messenger.sendReliable`
+  opts can race N candidate paths; receiver dedup absorbs duplicates.
+  Only safe on `/dkg/10.0.1/*` where dedup is mandatory.
+- **DHT walk on stall** _(pending PR #546)_ — outbox entry with ≥ 5
+  attempts of "no valid addresses for peer" triggers a time-bounded
   (`DHT_WALK_TIMEOUT_MS=10s`), rate-limited
   (`DHT_WALK_RATE_LIMIT_MS=5min/peer`) `libp2p.peerRouting.findPeer()`.
 - **Gossip peer-hints** _(PR-6, cancelled per Gate B)_ — Gate B
-  decision was to skip; DHT walk + inbound-from-receiver are
-  sufficient. If a post-ship soak shows DHT walk insufficient, PR-6
-  lands as a fast follow-up under the original gossip-hints design.
+  decision was to skip; pending DHT walk + inbound-from-receiver are
+  expected to be sufficient. If a post-ship soak shows DHT walk
+  insufficient, PR-6 lands as a fast follow-up under the original
+  gossip-hints design.
 
 ## SLO
 
@@ -444,16 +453,21 @@ attempt (initial send or any background outbox retry) resolves to
 
 - Initial wire I/O time is included.
 - Time spent waiting in the outbox between failed attempts is included.
-- Re-issues with a fresh `messageId` (e.g. `RESPONSE_GONE` retry on
-  `/query-remote` — see PR-9) are **separate** SLO samples; each
+- Re-issues with a fresh `messageId` (e.g. the planned
+  `RESPONSE_GONE` retry on `/query-remote` in PR #551) are
+  **separate** SLO samples; each
   `messageId` is its own user-visible operation.
-- Receiver-side dedup hits (`sentBefore.seen`) are recorded as
-  delivered with zero latency (the caller's effective "perceived" RTT).
+- Sender-side and receiver-side idempotency cache hits are not new
+  deliveries. They return cached bytes or `RESPONSE_GONE` without
+  adding a latency sample or incrementing `delivered`.
 
 This is the operator-visible "I clicked send → it arrived" time, which
 is what the 99.9%/15s ship-gate target measures.
 
 ### Target
+
+These are the final rc.9 stack targets. On this branch, only migrated
+protocols contribute samples.
 
 | Protocol family                                                          | SLO       |
 | ------------------------------------------------------------------------ | --------- |
@@ -486,15 +500,15 @@ Authorization: Bearer <token from ~/.dkg/auth.token>
       "p99Ms": 1240,
       "delivered": 1602,     // monotonic counter (since daemon start)
       "queued": 14           // monotonic counter; "queued" = first send failed → outbox
-    },
-    "/dkg/10.0.1/storage-ack": { ... }
+    }
   }
 }
 ```
 
 Empty body `{ "protocols": {} }` means no substrate traffic has flowed
-since daemon start — either the node is idle, or every protocol it has
-exercised is still on `/dkg/10.0.0/*` and hasn't been migrated yet.
+since daemon start — either the node is idle, or the protocols it has
+exercised are still on `/dkg/10.0.0/*` and have not been migrated on
+this branch.
 
 ### Reading guide
 
@@ -502,23 +516,23 @@ exercised is still on `/dkg/10.0.0/*` and hasn't been migrated yet.
   target, check `p99Ms` against the 15000 ms budget. If `p99Ms <=
   15000`, that protocol is meeting the latency target for the last
   `samples` operations.
-- **Delivery rate.** `delivered / (delivered + queued)` is the
-  approximate single-attempt success rate. The substrate guarantees
-  at-least-once delivery, so `queued` entries are eventually delivered
-  too — they just took at least one retry. A high `queued` count with
-  matching `delivered` growth means the substrate is doing its job;
-  high `queued` with stalled `delivered` is the warning sign (the
-  peer is unreachable for an extended period).
+- **Delivery and queue counters.** `delivered` and `queued` are
+  independent monotonic totals since daemon start, not disjoint
+  buckets. A message can increment `queued` after its first send
+  fails and later increment `delivered` when an outbox retry lands, so
+  `delivered / (delivered + queued)` is not a success rate. Use
+  `queued` growth as "first attempt needed retry" pressure and
+  compare it with `delivered` growth to spot stuck peers.
 - **No `samples`, only `queued`?** The protocol has only ever seen
   failed first attempts — typically a brand-new peer where address
   resolution hasn't settled. Watch for `delivered` to start climbing
-  as the outbox retries land; PR-5's DHT-walk-on-stall should kick in
-  after 5 failed attempts.
+  as the outbox retries land; after PR #546 lands, DHT-walk-on-stall
+  should kick in after 5 failed attempts.
 - **Soak runs.** `scripts/libp2p-soak-test.sh` writes a per-cycle
   snapshot of `/api/slo` to `~/.dkg/soak-test-*/slo.jsonl` alongside
   the existing `preflight.jsonl`, `sends.jsonl`, `inbox.jsonl`. The
   human-readable summary line in `main.log` reads e.g.
-  `slo: message=d12/q0 p99=145ms, query-remote=d3/q0 p99=890ms, ...`.
+  `slo: message=d12/q0 p99=145ms, skill_request=d3/q0 p99=890ms, ...`.
 
 ### Caveats
 
@@ -535,7 +549,7 @@ exercised is still on `/dkg/10.0.0/*` and hasn't been migrated yet.
   `messageId`) — out of scope for rc.9; explored in a follow-up RFC.
 - Cross-process idempotency (multiple daemons sharing the same store)
   — not needed today (one daemon per node) but the schema accommodates it.
-- Operator-relay infrastructure — code-side ships in PR-7
+- Operator-relay infrastructure — code-side is planned in PR #548
   (`--relay-preferred`); actual relay provisioning is an out-of-band
   ops track. See [`messenger-operator.md`](./messenger-operator.md).
 - `Messenger.sendToPeer` legacy pass-through: kept at rc.9 for any

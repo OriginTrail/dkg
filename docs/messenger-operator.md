@@ -5,17 +5,20 @@
 > For the new-protocol migration recipe, see
 > [`messenger-add-protocol.md`](./messenger-add-protocol.md).
 >
-> Status: shipping in `v10.0.0-rc.9`.
+> Status: PR-13 docs branch, stacked on PR-12. `/api/slo` is
+> available here. `--relay-preferred` is planned for PR #548 and is
+> not available until that branch is merged.
 
 This is the operator-facing manual for running a DKG node on top of
 the Universal Messenger substrate. The two surfaces you'll touch in
 practice are:
 
-1. **`--relay-preferred`** _(PR-7)_ — when you stand up your own relay
-   infrastructure, point your node at it first.
-2. **`/api/slo`** _(PR-12)_ — per-protocol latency + delivery-rate
+1. **`/api/slo`** _(PR-12)_ — per-protocol latency + delivery-rate
    histograms exposed on localhost; the source-of-truth for "is
    messaging healthy on this node?".
+2. **Planned `--relay-preferred`** _(PR #548)_ — when the relay
+   preference branch lands, operators can point nodes at their own
+   relay infrastructure first.
 
 Most operators won't need either — defaults are safe, the public
 testnet relay set works, and the substrate self-heals through the
@@ -23,7 +26,12 @@ recovery primitives documented in `messenger.md`. The surfaces below
 exist for operators running custom infrastructure or chasing a
 specific reliability tail.
 
-## `--relay-preferred` — using operator-controlled relays
+## Planned: `--relay-preferred` — using operator-controlled relays
+
+This section documents the planned PR #548 operator surface. Do not
+run these commands against builds from this branch; `dkg start
+--relay-preferred` and `preferredRelays` config are available only
+after the relay-preference branch is merged.
 
 By default, every daemon reserves on the public testnet relay set
 (declared in `network/<env>.json#relays`). The public relays work
@@ -69,20 +77,20 @@ relay list.
 After restart, the daemon logs:
 
 ```
-Preferred relays (rc.9 PR-7): 2 operator-supplied multiaddr(s) prepended (sources: 2 from --relay-preferred, 0 from config.preferredRelays). Effective relayPeers count: 5.
+Preferred relays (PR #548): 2 operator-supplied multiaddr(s) prepended (sources: 2 from --relay-preferred, 0 from config.preferredRelays). Effective relayPeers count: 5.
 ```
 
-You can also confirm via `/api/peer-info` (rc.8 PR #533) which
+The planned PR #548 log line is shown above. You can also confirm via
+`/api/peer-info` (rc.8 PR #533) which
 reservations the libp2p stack is currently holding.
 
 ### Relay-setup playbook (standing up your own relay)
 
 You'll get the most reliability lift from running 2-3 relays in
 geographically distinct regions. Each relay is a vanilla DKG node
-configured as a circuit-relay-v2 server. The full step-by-step lives
-in [`packages/cli/README.md`](../packages/cli/README.md#operator-relays-rc9-pr-7) — that's the
-authoritative playbook with infra recommendations, port-forwarding
-rules, and monitoring.
+configured as a circuit-relay-v2 server. The full CLI README playbook
+lands with PR #548; until then, treat the steps below as the intended
+shape rather than an operator command that exists on this branch.
 
 In summary:
 
@@ -129,16 +137,15 @@ curl -s http://127.0.0.1:9200/api/slo \
       "p99Ms": 1240,
       "delivered": 1602,     // monotonic counter (since daemon start)
       "queued": 14           // monotonic; "queued" = first send failed → outbox
-    },
-    "/dkg/10.0.1/storage-ack": { ... }
+    }
   }
 }
 ```
 
 Empty body `{ "protocols": {} }` means no substrate traffic has flowed
-since daemon start — either the node is idle, or every protocol it has
-exercised is still on `/dkg/10.0.0/*` and hasn't been migrated yet
-(no such protocol remains at rc.9 ship).
+since daemon start — either the node is idle, or the protocols it has
+exercised are still on `/dkg/10.0.0/*` and have not been migrated on
+this branch.
 
 ### Clock definition
 
@@ -153,13 +160,17 @@ attempt (initial send or any background outbox retry) resolves to
 - Re-issues with a fresh `messageId` (e.g. `RESPONSE_GONE` retry on
   `/query-remote`) are **separate** SLO samples; each `messageId` is
   its own user-visible operation.
-- Receiver-side dedup hits are recorded as delivered with zero
-  latency (the caller's effective "perceived" RTT).
+- Sender-side and receiver-side idempotency cache hits are not new
+  deliveries. They return cached bytes or `RESPONSE_GONE` without
+  adding a latency sample or incrementing `delivered`.
 
 This is the operator-visible "I clicked send → it arrived" time, which
 is what the ship-gate SLO targets measure.
 
 ### SLO targets
+
+These are the final rc.9 stack targets. On this branch, only migrated
+protocols contribute samples.
 
 | Protocol family                                                                  | SLO         |
 | -------------------------------------------------------------------------------- | ----------- |
@@ -177,24 +188,24 @@ overnight run; `/api/slo` is the source of truth for go/no-go on the
   `p99Ms` against the 15000 ms budget. If `p99Ms <= 15000`, that
   protocol is meeting the latency target for the last `samples`
   operations.
-- **Delivery rate.** `delivered / (delivered + queued)` is the
-  approximate single-attempt success rate. The substrate guarantees
-  at-least-once delivery, so `queued` entries are eventually
-  delivered too — they just took at least one retry. A high `queued`
-  count with matching `delivered` growth means the substrate is
-  doing its job; high `queued` with stalled `delivered` is the
-  warning sign (the peer is unreachable for an extended period).
+- **Delivery and queue counters.** `delivered` and `queued` are
+  independent monotonic totals since daemon start, not disjoint
+  buckets. A message can increment `queued` after its first send
+  fails and later increment `delivered` when an outbox retry lands, so
+  `delivered / (delivered + queued)` is not a success rate. Use
+  `queued` growth as "first attempt needed retry" pressure and
+  compare it with `delivered` growth to spot stuck peers.
 - **No `samples`, only `queued`?** The protocol has only ever seen
   failed first attempts — typically a brand-new peer where address
   resolution hasn't settled. Watch for `delivered` to start climbing
-  as the outbox retries land; PR-5's DHT-walk-on-stall should kick
-  in after 5 failed attempts (see `messenger.md` § Recovery
-  primitives).
+  as the outbox retries land; after PR #546 lands, DHT-walk-on-stall
+  should kick in after 5 failed attempts (see `messenger.md` §
+  Recovery primitives).
 - **Soak runs.** `scripts/libp2p-soak-test.sh` writes a per-cycle
   snapshot of `/api/slo` to `~/.dkg/soak-test-*/slo.jsonl` alongside
   the existing `preflight.jsonl`, `sends.jsonl`, `inbox.jsonl`. The
   human-readable summary line in `main.log` reads e.g.
-  `slo: message=d12/q0 p99=145ms, query-remote=d3/q0 p99=890ms, ...`.
+  `slo: message=d12/q0 p99=145ms, skill_request=d3/q0 p99=890ms, ...`.
 
 ### Caveats
 
@@ -202,19 +213,19 @@ overnight run; `/api/slo` is the source of truth for go/no-go on the
   counters and samples. The SQLite outbox itself survives restart;
   the SLO view does not.
 - Samples are recorded only for protocols routed through the
-  substrate. Anything still on `/dkg/10.0.0/*` (none at rc.9 ship;
-  the surface remains for future incremental migrations) is
-  invisible to `/api/slo`.
+  substrate. Anything still on `/dkg/10.0.0/*` is invisible to
+  `/api/slo`.
 
 ## Debugging a stuck outbox entry
 
 ```bash
 sqlite3 ~/.dkg/dashboard.db <<'SQL'
 SELECT peer_id, protocol, message_id, attempts, last_error,
+       datetime(first_failure_at/1000, 'unixepoch') AS first_failure,
        datetime(last_attempt_at/1000, 'unixepoch') AS last_attempt,
        datetime(next_attempt_at/1000, 'unixepoch') AS next_attempt
 FROM protocol_outbox
-ORDER BY last_attempt_at DESC
+ORDER BY first_failure_at ASC
 LIMIT 20;
 SQL
 ```
@@ -222,9 +233,10 @@ SQL
 Or via the dashboard UI (`/ui/chat`) for chat-specific entries.
 
 If you see entries with `attempts >= 5` and `last_error LIKE '%no
-valid addresses%'`, the daemon is already retrying via the DHT-walk
-recovery primitive (PR-5) and the entry will heal as soon as the
-peer's reservations get re-discovered. If `attempts` keeps climbing
+valid addresses%'`, a build with PR #546 will start a DHT-walk
+recovery attempt and the entry should heal as soon as the peer's
+reservations get re-discovered. On this branch, the generic outbox
+still retries with its normal backoff. If `attempts` keeps climbing
 past 10 with the same error, the peer may be genuinely unreachable —
 check your own internet connectivity (the rc.8 soak data showed "no
 valid addresses" tails are often correlated with sender-side network
@@ -242,19 +254,20 @@ online and you want to verify the flush ran, watch the daemon log for
 The outbox auto-prunes entries older than 24h via `DashboardDB.prune()`.
 If you have a backlog larger than that and want to clear it manually
 (e.g. after a multi-day outage), it's safe to `DELETE FROM
-protocol_outbox WHERE last_attempt_at < <cutoff_ms>` — the substrate
+protocol_outbox WHERE first_failure_at < <cutoff_ms>` — the substrate
 will not retry deleted entries, and the receiver-side idempotency
 table still absorbs duplicates if the same `messageId` ever shows up
 on a re-issue path.
 
 ## Upgrade from rc.8 to rc.9
 
-Wire-format break: all 8 short-message protocols moved from
-`/dkg/10.0.0/*` to `/dkg/10.0.1/*`. Both daemons in a pair must be on
-rc.9 for chat / skill / query / etc. to work between them. Mixed-pair
-deploys (one node rc.8, one node rc.9) will fail negotiation on the
-substrate-bumped protocols and surface as `delivered: false, queued:
-true` outbox entries that drain once both sides upgrade.
+Wire-format break: each substrate-routed protocol moves from
+`/dkg/10.0.0/*` to `/dkg/10.0.1/*` as its migration PR lands. Both
+daemons in a pair must be on the same substrate-aware build for chat /
+skill / query / etc. to work between them. Mixed-pair deploys (one
+node rc.8, one node rc.9) fail negotiation on the substrate-bumped
+protocols and surface as `delivered: false, queued: true` outbox
+entries that drain once both sides upgrade.
 
 Upgrade order recommendation:
 
