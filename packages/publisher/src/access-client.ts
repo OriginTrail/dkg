@@ -1,11 +1,7 @@
-import { randomUUID } from 'node:crypto';
 import {
   PROTOCOL_ACCESS,
   encodeAccessRequest,
   decodeAccessResponse,
-  encodeReliableEnvelope,
-  RELIABLE_ENVELOPE_VERSION,
-  isRecoverableSendError,
   ed25519Sign,
   type Ed25519Keypair,
 } from '@origintrail-official/dkg-core';
@@ -46,17 +42,6 @@ export interface AccessSendSurface {
   >;
 }
 
-export interface AccessRouterSurface {
-  send(
-    peerId: string,
-    protocolId: string,
-    payload: Uint8Array,
-    timeoutMs?: number,
-  ): Promise<Uint8Array>;
-}
-
-export type AccessTransport = AccessSendSurface | AccessRouterSurface;
-
 /**
  * Client-side access protocol for requesting private triples from a publisher node.
  * After receiving triples, verifies them against the privateMerkleRoot to ensure
@@ -74,7 +59,7 @@ export class AccessClient {
   private readonly keypair: Ed25519Keypair;
   private readonly peerId: string;
 
-  constructor(transport: AccessTransport, keypair: Ed25519Keypair, peerId: string) {
+  constructor(transport: AccessSendSurface, keypair: Ed25519Keypair, peerId: string) {
     this.messenger = asAccessSendSurface(transport);
     this.keypair = keypair;
     this.peerId = peerId;
@@ -147,43 +132,13 @@ export class AccessClient {
   }
 }
 
-function asAccessSendSurface(transport: AccessTransport): AccessSendSurface {
+function asAccessSendSurface(transport: AccessSendSurface): AccessSendSurface {
   const maybeReliable = transport as AccessSendSurface;
   if (typeof maybeReliable.sendReliable === 'function') {
     return maybeReliable;
   }
 
-  const maybeRouter = transport as AccessRouterSurface;
-  if (typeof maybeRouter.send === 'function') {
-    return {
-      async sendReliable(peerId, protocolId, payload, opts) {
-        const messageId = opts?.messageId ?? randomUUID();
-        const envelope = encodeReliableEnvelope({
-          messageId,
-          version: RELIABLE_ENVELOPE_VERSION,
-          tsMs: Date.now(),
-          payload,
-        });
-        try {
-          const response = await maybeRouter.send(peerId, protocolId, envelope, opts?.timeoutMs);
-          return { delivered: true as const, response, attempts: 1, messageId };
-        } catch (err) {
-          if (!isRecoverableSendError(err)) {
-            throw err;
-          }
-          return {
-            delivered: false as const,
-            queued: true as const,
-            attempts: 1,
-            messageId,
-            error: err instanceof Error ? err.message : String(err),
-          };
-        }
-      },
-    };
-  }
-
-  throw new TypeError('AccessClient requires a Messenger sendReliable surface or ProtocolRouter send surface');
+  throw new TypeError('AccessClient requires a Messenger sendReliable surface');
 }
 
 function toHex(bytes: Uint8Array): string {

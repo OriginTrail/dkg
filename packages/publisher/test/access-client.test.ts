@@ -11,7 +11,7 @@ import { AccessClient } from '../src/access-client.js';
 import { createSubstrateClient } from './_helpers/substrate.js';
 
 describe('AccessClient transport wiring', () => {
-  it('wraps legacy ProtocolRouter.send callers in a ReliableEnvelope', async () => {
+  it('accepts a sendReliable surface that wraps requests in a ReliableEnvelope', async () => {
     const keypair = await generateEd25519Keypair();
     const send = vi.fn(async (_peerId: string, protocolId: string, payload: Uint8Array) => {
       expect(protocolId).toBe(PROTOCOL_ACCESS);
@@ -27,12 +27,22 @@ describe('AccessClient transport wiring', () => {
       });
     });
 
-    const client = new AccessClient({ send }, keypair, 'requester-peer');
+    const client = new AccessClient(
+      createSubstrateClient({ send } as unknown as ProtocolRouter),
+      keypair,
+      'requester-peer',
+    );
     const result = await client.requestAccess('publisher-peer', 'did:dkg:test/1');
 
     expect(send).toHaveBeenCalledTimes(1);
     expect(result.granted).toBe(false);
     expect(result.rejectionReason).toBe('denied by policy');
+  });
+
+  it('rejects raw ProtocolRouter.send surfaces (no durable outbox)', async () => {
+    const keypair = await generateEd25519Keypair();
+    expect(() => new AccessClient({ send: async () => new Uint8Array() } as any, keypair, 'requester-peer'))
+      .toThrow('AccessClient requires a Messenger sendReliable surface');
   });
 
   it('throws queued transport failures instead of reporting access denial', async () => {
