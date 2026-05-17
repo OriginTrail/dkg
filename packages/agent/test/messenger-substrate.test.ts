@@ -33,14 +33,20 @@ function makeRouter(sendImpl?: () => Promise<Uint8Array>): RouterDouble {
   return router;
 }
 
-function makeSubstrate(overrides: { router?: RouterDouble } = {}) {
+function makeSubstrate(
+  overrides: {
+    router?: RouterDouble;
+    clock?: () => number;
+    sloWindowSamples?: number;
+  } = {},
+) {
   const router = overrides.router ?? makeRouter();
   const idempotencyStore = new InMemoryMessageIdempotencyStore();
   const outboxStore = new InMemoryProtocolOutboxStore({
     backoffs: [10],
     maxAgeMs: 60_000,
   });
-  const clock = vi.fn(() => 1_700_000_000_000);
+  const clock = vi.fn(overrides.clock ?? (() => 1_700_000_000_000));
   const messenger = new Messenger({
     router: router as unknown as ProtocolRouter,
     idempotencyStore,
@@ -48,6 +54,7 @@ function makeSubstrate(overrides: { router?: RouterDouble } = {}) {
     backoffs: [10],
     maxAgeMs: 60_000,
     clock,
+    sloWindowSamples: overrides.sloWindowSamples,
   });
   return { messenger, router, idempotencyStore, outboxStore, clock };
 }
@@ -374,6 +381,23 @@ describe('Messenger.getSloStats (SLO histogram)', () => {
     expect(stats[PROTO].queued).toBe(0);
   });
 
+  it('clamps latency to zero when the injected clock moves backward', async () => {
+    const ticks = [1_000, 1_000, 900];
+    const clock = () => ticks.shift() ?? 900;
+    const { messenger } = makeSubstrate({ clock });
+
+    const result = await messenger.sendReliable(PEER_A, PROTO, new Uint8Array([1]), {
+      messageId: FIXED_MSG_ID,
+    });
+    expect(result.delivered).toBe(true);
+
+    const stats = messenger.getSloStats();
+    expect(stats[PROTO].samples).toBe(1);
+    expect(stats[PROTO].p50Ms).toBe(0);
+    expect(stats[PROTO].p95Ms).toBe(0);
+    expect(stats[PROTO].p99Ms).toBe(0);
+  });
+
   it('latency clock spans queue + retries (queued first, then retry succeeds)', async () => {
     let shouldFail = true;
     const router = makeRouter(async () => {
@@ -432,6 +456,28 @@ describe('Messenger.getSloStats (SLO histogram)', () => {
     expect(stats[PROTO].p99Ms).toBe(500);
     expect(stats[PROTO].delivered).toBe(latencies.length);
     expect(stats[PROTO].queued).toBe(0);
+  });
+
+  it('honors sloWindowSamples from MessengerDeps', async () => {
+    const { messenger, clock } = makeSubstrate({ sloWindowSamples: 2 });
+    const latencies = [10, 20, 30];
+    for (let i = 0; i < latencies.length; i++) {
+      const sendStart = 1_700_000_000_000 + i * 1_000_000;
+      let next = sendStart;
+      clock.mockImplementation(() => next);
+      const p = messenger.sendReliable(PEER_B, PROTO, new Uint8Array([i]), {
+        messageId: `window-${i}-${'0'.repeat(30)}`,
+      });
+      next = sendStart + latencies[i];
+      await p;
+    }
+
+    const stats = messenger.getSloStats();
+    expect(stats[PROTO].samples).toBe(2);
+    expect(stats[PROTO].p50Ms).toBe(20);
+    expect(stats[PROTO].p95Ms).toBe(30);
+    expect(stats[PROTO].p99Ms).toBe(30);
+    expect(stats[PROTO].delivered).toBe(3);
   });
 
   it('returns empty {} when no substrate traffic has flowed yet', () => {

@@ -153,18 +153,47 @@ snapshot_slo() {
   # per-cycle preflight + inbox snapshots.
   local label=$1 ts
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  local resp
-  resp=$(curl -s --max-time 10 "${API}/api/slo" \
-    -H "Authorization: Bearer $AUTH")
+  local curl_out http_code resp
+  curl_out=$(curl -sS --max-time 10 -w '\n%{http_code}' "${API}/api/slo" \
+    -H "Authorization: Bearer $AUTH" 2>/dev/null || printf '\n000')
+  http_code="${curl_out##*$'\n'}"
+  resp="${curl_out%$'\n'*}"
+  local data_json
+  data_json=$(SLO_HTTP_CODE="$http_code" SLO_RESP="$resp" python3 -c "
+import json, os
+
+code = os.environ.get('SLO_HTTP_CODE', '000')
+raw = os.environ.get('SLO_RESP', '')
+try:
+  parsed = json.loads(raw) if raw else None
+except Exception:
+  parsed = None
+
+if not code.startswith('2'):
+  print(json.dumps({'error': 'http_error', 'http_code': code, 'body': raw[:500]}, separators=(',', ':')))
+elif not isinstance(parsed, dict) or not isinstance(parsed.get('protocols'), dict):
+  print(json.dumps({'error': 'missing_protocols', 'http_code': code, 'body': raw[:500]}, separators=(',', ':')))
+else:
+  print(json.dumps(parsed, separators=(',', ':')))
+")
   printf '{"label":"%s","ts":"%s","data":%s}\n' \
-    "$label" "$ts" "${resp:-{\"error\":\"empty response\"\}}" \
+    "$label" "$ts" "$data_json" \
     >> "$LOG_DIR/slo.jsonl"
   local summary
-  summary=$(printf '%s' "$resp" | python3 -c "
+  summary=$(printf '%s' "$data_json" | python3 -c "
 import json, sys
 try:
   d = json.loads(sys.stdin.read())
-  protos = (d or {}).get('protocols', {}) or {}
+  if not isinstance(d, dict):
+    print('slo=err(non-object response)')
+    raise SystemExit
+  if 'error' in d:
+    print(f'slo=err({d.get(\"error\")} http={d.get(\"http_code\", \"?\")})')
+    raise SystemExit
+  protos = d.get('protocols')
+  if not isinstance(protos, dict):
+    print('slo=err(missing protocols)')
+    raise SystemExit
   if not protos:
     print('slo=(no traffic yet)')
   else:

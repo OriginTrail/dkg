@@ -70,6 +70,11 @@ export interface MessengerDeps {
    * production uses the default `Date.now`.
    */
   clock?: () => number;
+  /**
+   * Sliding-window size for per-protocol SLO latency observations.
+   * Defaults to `DEFAULT_SLO_WINDOW_SAMPLES`.
+   */
+  sloWindowSamples?: number;
 }
 
 export interface SendOpts {
@@ -265,7 +270,7 @@ export class Messenger {
   /** Sliding-window cap from `MessengerDeps.sloWindowSamples`. */
   private readonly sloWindowSamples: number;
 
-  constructor(deps: MessengerDeps & { sloWindowSamples?: number }) {
+  constructor(deps: MessengerDeps) {
     this.router = deps.router;
     this.idempotencyStore = deps.idempotencyStore;
     if (deps.outboxStore) {
@@ -327,7 +332,7 @@ export class Messenger {
       return;
     }
     this.firstAttemptAt.delete(k);
-    const latency = this.clock() - startedAt;
+    const latency = Math.max(0, this.clock() - startedAt);
     const samples = this.sloLatencies.get(protocolId) ?? [];
     samples.push(latency);
     if (samples.length > this.sloWindowSamples) {
