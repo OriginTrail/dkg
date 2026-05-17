@@ -350,6 +350,30 @@ describe('Messenger.getSloStats (SLO histogram)', () => {
     expect(stats[PROTO].queued).toBe(0);
   });
 
+  it('does not count sender-side idempotency cache hits as new deliveries', async () => {
+    const router = makeRouter(async () => new Uint8Array([0x42]));
+    const { messenger, clock } = makeSubstrate({ router });
+
+    clock.mockImplementation(() => 1_700_000_000_000);
+    const first = messenger.sendReliable(PEER_A, PROTO, new Uint8Array([1]), {
+      messageId: FIXED_MSG_ID,
+    });
+    clock.mockImplementation(() => 1_700_000_000_050);
+    await first;
+
+    const second = await messenger.sendReliable(PEER_A, PROTO, new Uint8Array([2]), {
+      messageId: FIXED_MSG_ID,
+    });
+    expect(second.delivered).toBe(true);
+    expect(router.send).toHaveBeenCalledTimes(1);
+
+    const stats = messenger.getSloStats();
+    expect(stats[PROTO].samples).toBe(1);
+    expect(stats[PROTO].p99Ms).toBe(50);
+    expect(stats[PROTO].delivered).toBe(1);
+    expect(stats[PROTO].queued).toBe(0);
+  });
+
   it('latency clock spans queue + retries (queued first, then retry succeeds)', async () => {
     let shouldFail = true;
     const router = makeRouter(async () => {

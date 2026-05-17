@@ -320,9 +320,9 @@ export class Messenger {
     const k = sloKey(protocolId, peerId, messageId);
     const startedAt = this.firstAttemptAt.get(k);
     if (startedAt == null) {
-      // Sender-idempotency cache hit (we never recorded a start) or
-      // late-retry on an entry whose start was already cleared.
-      // Either way: count the delivery but skip the latency record.
+      // Late retry after process restart, or an entry whose start was
+      // already cleared. Count the real wire delivery but skip the
+      // latency record because there is no reliable start timestamp.
       this.bumpCounter(protocolId, 'delivered');
       return;
     }
@@ -393,16 +393,6 @@ export class Messenger {
     const idem = this.idempotencyStore!;
     const outbox = this.outbox!;
 
-    // rc.9 PR-12: SLO clock starts on the FIRST sendReliable
-    // invocation for a given (protocol, peer, messageId). If we get
-    // re-entered with the same messageId (e.g. operator clicked send
-    // twice), the existing firstAttemptAt is preserved so the
-    // latency includes the full retry chain.
-    const sloK = sloKey(protocolId, peerId, messageId);
-    if (!this.firstAttemptAt.has(sloK)) {
-      this.firstAttemptAt.set(sloK, this.clock());
-    }
-
     // Sender-side dedup: if we previously delivered this exact
     // `(peer, protocol, messageId)` (e.g. operator clicked send
     // twice; same caller-supplied id replayed across a daemon
@@ -412,10 +402,7 @@ export class Messenger {
     if (sentBefore.seen) {
       // No SLO sample to record here — sender-side dedup means we
       // didn't actually deliver this call; the original delivery
-      // already counted. Still bump the delivered counter so
-      // operators see traffic.
-      this.bumpCounter(protocolId, 'delivered');
-      this.firstAttemptAt.delete(sloK);
+      // already counted.
       return {
         delivered: true,
         // Mark-only original response surfaces as RESPONSE_GONE so
@@ -425,6 +412,15 @@ export class Messenger {
         attempts: 1,
         messageId,
       };
+    }
+
+    // rc.9 PR-12: SLO clock starts on the FIRST non-cache-hit
+    // sendReliable invocation for a given (protocol, peer, messageId).
+    // If a queued message is re-entered before delivery, preserve the
+    // existing start so latency includes the full retry chain.
+    const sloK = sloKey(protocolId, peerId, messageId);
+    if (!this.firstAttemptAt.has(sloK)) {
+      this.firstAttemptAt.set(sloK, this.clock());
     }
 
     const envelope = encodeReliableEnvelope({
