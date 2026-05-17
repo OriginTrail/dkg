@@ -167,7 +167,7 @@ is idempotent at the app layer) or surface a terminal error.
 | `/dkg/10.0.1/skill_request`     | PR-3        | 1             | Migrated alongside chat (shares `agent.sendMessage` path).                         |
 | `/dkg/10.0.1/swm-sender-key`    | PR-8        | 1             | Batch with `/private-access`.                                                      |
 | `/dkg/10.0.1/private-access`    | PR-8        | 1             | Batch with `/swm-sender-key`.                                                      |
-| `/dkg/10.0.1/query-remote`      | PR-9 ✅      | 1             | Synchronous; `sendQueryReliable()` retries up to 2× on `RESPONSE_GONE` with a fresh `messageId` (SPARQL is app-layer idempotent). |
+| `/dkg/10.0.1/query-remote`      | PR-9 ✅      | 1             | Synchronous; `sendQueryReliable()` retries up to two times on `RESPONSE_GONE` with fresh `messageId`s (three total attempts; SPARQL is app-layer idempotent). |
 | `/dkg/10.0.1/join-request`      | PR-10       | 1             | Removes `JoinApprovalRetryQueue` in favour of generic outbox.                      |
 | `/dkg/10.0.1/storage-ack`       | PR-11       | 1             | ACKCollector quorum stays untouched; only the transport swaps.                     |
 | `/dkg/10.0.1/verify-proposal`   | PR-11       | 1             | Same shape as storage-ack.                                                         |

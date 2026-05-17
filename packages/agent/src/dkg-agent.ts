@@ -1752,13 +1752,24 @@ export class DKGAgent {
     // Messenger substrate. Wire prefix bumped to /dkg/10.0.1/* (hard
     // cutover; rc.8 ↔ rc.9 cross-version query stops working) so
     // receiver-side dedup + envelope unwrap happen transparently.
-    // QueryHandler's contract is unchanged.
+    // Messenger.register passes the remote peer id as a string, so call
+    // QueryHandler.handle directly instead of fabricating a PeerId object.
     this.messenger.register(PROTOCOL_QUERY_REMOTE, async (data, peerId) => {
-      const peerIdObj = {
-        toString: () => peerId,
-        toBytes: () => new Uint8Array(),
-      };
-      return queryRemoteHandler.handler(data, peerIdObj);
+      let request: QueryRequest;
+      try {
+        request = JSON.parse(new TextDecoder().decode(data)) as QueryRequest;
+      } catch {
+        const malformed: QueryResponse = {
+          operationId: '',
+          status: 'ERROR',
+          truncated: false,
+          resultCount: 0,
+          error: 'Invalid request: malformed JSON',
+        };
+        return new TextEncoder().encode(JSON.stringify(malformed));
+      }
+      const response = await queryRemoteHandler.handle(request, peerId);
+      return new TextEncoder().encode(JSON.stringify(response));
     });
     this.router.register(PROTOCOL_SWM_SENDER_KEY, async (data, peerId) => {
       return this.handleSwmSenderKeyPackage(data, peerId.toString());
@@ -8124,10 +8135,10 @@ export class DKGAgent {
    * built-in RESPONSE_GONE retry. SPARQL queries are app-layer
    * idempotent — if the substrate replies with the RESPONSE_GONE
    * sentinel (the original response was too big to inline-cache and
-   * we got a duplicate-receive), we re-issue with a fresh messageId
-   * and try again. Capped at 2 attempts so a peer that always blows
-   * the 256 KiB response cache surfaces as a hard error to the
-   * caller instead of looping forever.
+   * we got a duplicate-receive), we retry with fresh messageIds up to
+   * two times. Capped at 3 total attempts so a peer that always blows
+   * the 256 KiB response cache surfaces as a hard error to the caller
+   * instead of looping forever.
    *
    * rc.9 PR-9.
    */
@@ -8135,7 +8146,7 @@ export class DKGAgent {
     peerId: string,
     payload: Uint8Array,
   ): Promise<Uint8Array> {
-    const MAX_ATTEMPTS = 2;
+    const MAX_ATTEMPTS = 3;
     let lastErr: unknown;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       const messageId = crypto.randomUUID();
