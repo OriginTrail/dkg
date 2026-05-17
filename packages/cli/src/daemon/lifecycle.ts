@@ -51,6 +51,18 @@ const daemonRequire = createRequire(import.meta.url);
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
+
+function stableReliableRequestMessageId(peerId: string, protocol: string, data: Uint8Array): string {
+  const hash = createHash('sha256');
+  hash.update('dkg-cli:ack-transport');
+  hash.update('\0');
+  hash.update(protocol);
+  hash.update('\0');
+  hash.update(peerId);
+  hash.update('\0');
+  hash.update(data);
+  return `request-${hash.digest('hex')}`;
+}
 import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
@@ -814,9 +826,12 @@ export async function runDaemonInner(
           // (envelope wrap + sender-side idempotency + durable
           // outbox). queued surfaces as a thrown transport error so
           // ACKCollector's MAX_RETRIES loop + per-peer skip semantics
-          // kick in unchanged.
+          // kick in unchanged. A stable per-peer request id keeps retry
+          // attempts on the same outbox/idempotency entry.
           sendP2P: async (peerId: string, protocol: string, data: Uint8Array) => {
-            const sendResult = await agent.messenger.sendReliable(peerId, protocol, data);
+            const sendResult = await agent.messenger.sendReliable(peerId, protocol, data, {
+              messageId: stableReliableRequestMessageId(peerId, protocol, data),
+            });
             if (!sendResult.delivered) {
               throw new Error(`substrate queued (transport): ${sendResult.error}`);
             }

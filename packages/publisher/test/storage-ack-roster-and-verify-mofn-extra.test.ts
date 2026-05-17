@@ -290,7 +290,7 @@ describe('P-9: StorageACKHandler nodeRole guard (edge nodes cannot issue ACKs)',
       merkleLeafCount: 1,
     });
 
-    await expect(handler.handler(intent, { toString: () => 'peer-1' })).rejects.toThrow(
+    await expect(handler.handler(intent, 'peer-1')).rejects.toThrow(
       /core nodes can issue StorageACKs/i,
     );
   });
@@ -354,7 +354,7 @@ describe('P-9: StorageACKHandler roster gap — core-flagged node signs with ANY
         merkleLeafCount: rosterTestLeafCount,
       });
 
-      const responseBytes = await handler.handler(intent, { toString: () => 'rogue' });
+      const responseBytes = await handler.handler(intent, 'rogue');
       // If the handler had a proper roster check, we'd never reach
       // here — the call would throw. It doesn't, so we assert the
       // fact directly: ACK is produced and signed by a wallet the

@@ -23,6 +23,7 @@ import { PROTOCOL_STORAGE_ACK } from '@origintrail-official/dkg-core';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const AGENT_SRC = resolve(__dirname, '..', 'src');
 const DKG_AGENT_FILE = join(AGENT_SRC, 'dkg-agent.ts');
+const CLI_LIFECYCLE_FILE = resolve(__dirname, '..', '..', 'cli', 'src', 'daemon', 'lifecycle.ts');
 
 function walk(dir: string, acc: string[] = []): string[] {
   for (const name of readdirSync(dir)) {
@@ -49,6 +50,26 @@ describe('A-9: storage-ack protocol id (libp2p) pin', () => {
     // decode + receiver-side dedup). Pin against the new shape.
     const registerRE = /messenger\.register\s*\(\s*PROTOCOL_STORAGE_ACK\s*,/;
     expect(src).toMatch(registerRE);
+  });
+
+  it('messenger handler registrations pass the real peer id string, not a partial PeerId object', () => {
+    const src = readFileSync(DKG_AGENT_FILE, 'utf8');
+    expect(src).not.toMatch(/toBytes:\s*\(\)\s*=>\s*new Uint8Array/);
+    expect(src).toMatch(/ackHandler\.handler\(data,\s*peerIdStr\)/);
+    expect(src).toMatch(/verifyHandler\.handler\(data,\s*peerIdStr\)/);
+  });
+
+  it('ACK and VERIFY reliable requests use stable retry message ids', () => {
+    const agentSrc = readFileSync(DKG_AGENT_FILE, 'utf8');
+    const lifecycleSrc = readFileSync(CLI_LIFECYCLE_FILE, 'utf8');
+    const agentMessageIds = agentSrc.match(
+      /messageId:\s*stableReliableRequestMessageId\(peerId,\s*protocol,\s*data\)/g,
+    ) ?? [];
+
+    expect(agentMessageIds).toHaveLength(2);
+    expect(lifecycleSrc).toMatch(
+      /messageId:\s*stableReliableRequestMessageId\(peerId,\s*protocol,\s*data\)/,
+    );
   });
 
   it('agent source never publishes ACKs on GossipSub', () => {

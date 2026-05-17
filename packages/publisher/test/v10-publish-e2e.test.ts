@@ -126,8 +126,7 @@ describe('V10 Publish E2E', () => {
       sendP2P: async (peerId, _protocol, data) => {
         const idx = parseInt(peerId.replace('core-', ''), 10);
         const handler = handlers[idx];
-        const fakePeerId = { toString: () => peerId };
-        return handler.handler(data, fakePeerId);
+        return handler.handler(data, peerId);
       },
       getConnectedCorePeers: () => ['core-0', 'core-1', 'core-2'],
       log: () => {},

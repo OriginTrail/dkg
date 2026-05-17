@@ -37,7 +37,7 @@ describe('StorageACKHandler', () => {
 
   const coreWallet = ethers.Wallet.createRandom();
   const coreIdentityId = 42n;
-  const fakePeerId = { toString: () => 'publisher-peer' };
+  const fakePeerId = 'publisher-peer';
 
   async function createHandler(
     storeQuads: Quad[],

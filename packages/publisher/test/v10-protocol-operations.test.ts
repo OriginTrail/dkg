@@ -685,7 +685,7 @@ describe('V10 ACK Edge Cases', () => {
       merkleLeafCount: singleEntityLeafCount,
     });
 
-    await expect(handler.handler(intent, { toString: () => 'peer' }))
+    await expect(handler.handler(intent, 'peer'))
       .rejects.toThrow('exceeds');
   });
 });
@@ -792,7 +792,7 @@ describe('V10 StorageACKHandler round-trip', () => {
   const contextGraphId = '42';
   const cgIdBigInt = 42n;
   const coreWallet = ethers.Wallet.createRandom();
-  const fakePeerId = { toString: () => 'requester-peer' };
+  const fakePeerId = 'requester-peer';
 
   const testQuads: Quad[] = [
     makeQuad('urn:entity:1', 'urn:p:name', '"Entity One"'),

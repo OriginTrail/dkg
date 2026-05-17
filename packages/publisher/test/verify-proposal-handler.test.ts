@@ -31,7 +31,7 @@ function makeProposalBytes(overrides?: Record<string, unknown>): Uint8Array {
   });
 }
 
-const peerId = { toString: () => '12D3KooWTest' };
+const peerId = '12D3KooWTest';
 
 describe('VerifyProposalHandler', () => {
   it('returns a signed approval for a valid proposal', async () => {

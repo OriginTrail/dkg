@@ -328,7 +328,7 @@ describe('V10 remap wire (PublishIntent.swmGraphId + subGraphName)', () => {
       merkleLeafCount,
     });
 
-    const response = await handler.handler(intent, { toString: () => 'publisher-peer-0' });
+    const response = await handler.handler(intent, 'publisher-peer-0');
     const ack = decodeStorageACK(response);
 
     // 1. Handler looked up SWM under the SOURCE graph + sub-graph, NOT the

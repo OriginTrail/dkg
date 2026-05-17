@@ -88,6 +88,7 @@ import {
   type SharedMemoryPublicSnapshotStorageConfig, type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import {
   DKGQueryEngine, QueryHandler,
@@ -115,6 +116,18 @@ type PreSignedAuthorAttestation = {
   address: string;
   signature: { r: Uint8Array; vs: Uint8Array };
 };
+
+function stableReliableRequestMessageId(peerId: string, protocol: string, data: Uint8Array): string {
+  const hash = createHash('sha256');
+  hash.update('dkg-agent:reliable-request');
+  hash.update('\0');
+  hash.update(protocol);
+  hash.update('\0');
+  hash.update(peerId);
+  hash.update('\0');
+  hash.update(data);
+  return `request-${hash.digest('hex')}`;
+}
 
 type LocalSwmSenderKeySendState = {
   contextGraphId: string;
@@ -1938,10 +1951,10 @@ export class DKGAgent {
             // rc.9 PR-11: migrated onto the Universal Messenger
             // substrate (wire prefix /dkg/10.0.1/storage-ack).
             // messenger.register handles envelope decode + receiver
-            // dedup; ackHandler's signature stays the same.
+            // dedup; the publisher handler receives the peer id string
+            // emitted by the substrate.
             this.messenger.register(PROTOCOL_STORAGE_ACK, async (data, peerIdStr) => {
-              const peerId = { toString: () => peerIdStr, toBytes: () => new Uint8Array() };
-              return ackHandler.handler(data, peerId);
+              return ackHandler.handler(data, peerIdStr);
             });
             storageACKProtocolRegistered = true;
             this.clearStorageACKRegistrationRetry();
@@ -2039,8 +2052,7 @@ export class DKGAgent {
       // (wire prefix /dkg/10.0.1/verify-proposal). messenger.register
       // wraps the handler with envelope decode + receiver dedup.
       this.messenger.register(PROTOCOL_VERIFY_PROPOSAL, async (data, peerIdStr) => {
-        const peerId = { toString: () => peerIdStr, toBytes: () => new Uint8Array() };
-        return verifyHandler.handler(data, peerId);
+        return verifyHandler.handler(data, peerIdStr);
       });
       this.log.info(ctx, 'Registered VERIFY proposal handler');
     }
@@ -11031,9 +11043,12 @@ export class DKGAgent {
       // idempotency. App-level fan-out via VerifyCollector is
       // unchanged; queued is treated as a per-peer failure (caller
       // moves on to the next peer; substrate keeps the queued entry
-      // in the outbox for diagnostics).
+      // in the outbox for diagnostics). Use a stable per-peer request id
+      // so collector retries converge on the same outbox/idempotency row.
       sendP2P: async (peerId: string, protocol: string, data: Uint8Array) => {
-        const sendResult = await this.messenger.sendReliable(peerId, protocol, data);
+        const sendResult = await this.messenger.sendReliable(peerId, protocol, data, {
+          messageId: stableReliableRequestMessageId(peerId, protocol, data),
+        });
         if (!sendResult.delivered) {
           throw new Error(`substrate queued (transport): ${sendResult.error}`);
         }
@@ -13943,9 +13958,12 @@ export class DKGAgent {
       // Reliable so /dkg/10.0.1/storage-ack gets envelope wrap +
       // sender-side idempotency. ACKCollector's own MAX_RETRIES=3 loop
       // sits on top; queued counts as a per-peer failure that the
-      // collector handles via its existing retry-then-skip path.
+      // collector handles via its existing retry-then-skip path. Use a
+      // stable per-peer request id so retries update the same outbox row.
       sendP2P: async (peerId: string, protocol: string, data: Uint8Array) => {
-        const sendResult = await this.messenger.sendReliable(peerId, protocol, data);
+        const sendResult = await this.messenger.sendReliable(peerId, protocol, data, {
+          messageId: stableReliableRequestMessageId(peerId, protocol, data),
+        });
         if (!sendResult.delivered) {
           throw new Error(`substrate queued (transport): ${sendResult.error}`);
         }

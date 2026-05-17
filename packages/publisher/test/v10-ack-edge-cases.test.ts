@@ -493,7 +493,7 @@ describe('ACKCollector retry behavior', () => {
 describe('StorageACKHandler inline verification', () => {
   const coreWallet = ethers.Wallet.createRandom();
   const coreIdentityId = 42n;
-  const fakePeerId = { toString: () => 'publisher-peer' };
+  const fakePeerId = 'publisher-peer';
 
   function createConfig(overrides: Partial<StorageACKHandlerConfig> = {}): StorageACKHandlerConfig {
     return {
@@ -627,7 +627,7 @@ describe('StorageACKHandler inline verification', () => {
 
 describe('StorageACKHandler security', () => {
   const coreWallet = ethers.Wallet.createRandom();
-  const fakePeerId = { toString: () => 'publisher-peer' };
+  const fakePeerId = 'publisher-peer';
 
   function createConfig(overrides: Partial<StorageACKHandlerConfig> = {}): StorageACKHandlerConfig {
     return {
@@ -759,7 +759,7 @@ describe('StorageACKHandler security', () => {
 describe('StorageACKHandler signature format', () => {
   const coreWallet = ethers.Wallet.createRandom();
   const coreIdentityId = 99n;
-  const fakePeerId = { toString: () => 'publisher-peer' };
+  const fakePeerId = 'publisher-peer';
 
   function createConfig(): StorageACKHandlerConfig {
     return {
