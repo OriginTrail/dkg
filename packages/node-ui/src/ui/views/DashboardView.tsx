@@ -34,6 +34,13 @@ interface CgReport {
   agents: string[]; // canonical agent DIDs collaborating on this CG
   sizeLoading: boolean;
   sizeError: boolean;
+  agentsLoading: boolean;
+  agentsError: boolean;
+  // Full-fidelity change key: per-layer counts + sorted agent ids +
+  // every flag. The parent dedups on this so a WM→SWM/VM promotion
+  // (totals unchanged) or an agent swap (count unchanged) still
+  // refreshes the cards instead of going stale (Codex).
+  sig: string;
 }
 
 // Compact number: 1234 → "1.2k", 4500000 → "4.5M". Keeps list/stat
@@ -118,12 +125,20 @@ function CgRow({
 }) {
   const mem = useMemoryEntities(cg.id);
   const [agents, setAgents] = useState<string[] | null>(null);
+  const [agentsError, setAgentsError] = useState(false);
+  const agentsLoading = agents === null && !agentsError;
 
   useEffect(() => {
     let mounted = true;
+    setAgents(null);
+    setAgentsError(false);
     listParticipants(cg.id)
       .then((r) => { if (mounted) setAgents((r.allowedAgents ?? []).map(canonicalAgentDid)); })
-      .catch(() => { if (mounted) setAgents([]); });
+      // Distinguish "failed" from "zero collaborators": keep agents
+      // null and flag the error so the parent excludes this CG from
+      // the unique-agent union rather than silently counting it as 0
+      // (Codex).
+      .catch(() => { if (mounted) setAgentsError(true); });
     return () => { mounted = false; };
   }, [cg.id]);
 
@@ -140,6 +155,13 @@ function CgRow({
     return { wm, swm, vm, total: mem.allTriples.length };
   }, [mem.allTriples]);
 
+  const sig = [
+    mem.loading ? 1 : 0, mem.error ? 1 : 0, agentsLoading ? 1 : 0, agentsError ? 1 : 0,
+    entities.wm, entities.swm, entities.vm, entities.total,
+    triples.wm, triples.swm, triples.vm, triples.total,
+    agents ? agents.slice().sort().join(',') : '∅',
+  ].join('|');
+
   useEffect(() => {
     onReport(cg.id, {
       entities,
@@ -147,9 +169,14 @@ function CgRow({
       agents: agents ?? [],
       sizeLoading: mem.loading,
       sizeError: Boolean(mem.error),
+      agentsLoading,
+      agentsError,
+      sig,
     });
+    // Depend on the full `sig` (not coarse totals) so a per-layer
+    // promotion or an agent-id swap still re-reports (Codex).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cg.id, mem.loading, mem.error, entities.total, triples.total, agents]);
+  }, [cg.id, sig]);
 
   const policy = normalizeAccessPolicy(cg.accessPolicy);
   const typeLabel = policy === 'private' ? 'Curated' : policy === 'public' ? 'Public' : 'Unknown';
@@ -203,10 +230,7 @@ export function DashboardView() {
   const [reports, setReports] = useState<Record<string, CgReport>>({});
   const onReport = useCallback((id: string, r: CgReport) => {
     setReports((prev) => {
-      const p = prev[id];
-      if (p && p.sizeLoading === r.sizeLoading && p.sizeError === r.sizeError &&
-          p.entities.total === r.entities.total && p.triples.total === r.triples.total &&
-          p.agents.length === r.agents.length) return prev;
+      if (prev[id]?.sig === r.sig) return prev;
       return { ...prev, [id]: r };
     });
   }, []);
@@ -222,13 +246,16 @@ export function DashboardView() {
       const r = reports[cg.id];
       if (!r) { anyLoading = true; continue; }
       reported++;
-      if (r.sizeLoading) anyLoading = true;
-      if (r.sizeError) anyError = true;
+      if (r.sizeLoading || r.agentsLoading) anyLoading = true;
+      if (r.sizeError || r.agentsError) anyError = true;
       for (const k of ['wm', 'swm', 'vm', 'total'] as const) {
         entities[k] += r.entities[k];
         triples[k] += r.triples[k];
       }
-      for (const a of r.agents) agentSet.add(a);
+      // Exclude CGs whose participant probe failed from the unique
+      // count — they're "unknown", not "zero" (Codex). `partial`
+      // (anyError) surfaces that the total may be undercounting.
+      if (!r.agentsError) for (const a of r.agents) agentSet.add(a);
     }
     return {
       entities, triples,
@@ -305,7 +332,9 @@ export function DashboardView() {
         <StatCard
           label="Connected Agents"
           value={!agg.hasCgs ? '—' : agg.loading ? <span className="v10-cg-dim">loading…</span> : agg.agentCount}
-          sub="Unique agents collaborating with you."
+          sub={agg.hasCgs && agg.partial
+            ? 'Some context graphs could not report agents; count is partial.'
+            : 'Unique agents collaborating with you.'}
           accentColor="var(--purple)"
         />
       </div>

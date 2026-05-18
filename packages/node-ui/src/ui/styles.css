@@ -2507,7 +2507,12 @@ button:focus:not(:focus-visible) { outline: none; }
   border: 1px solid var(--border-subtle);
   background: var(--bg-elevated);
 }
-.v10-cg-badge-curator { color: var(--accent-green); border-color: color-mix(in srgb, var(--accent-green) 45%, transparent); }
+/* Filled chip: `--accent-green` text on `--bg-elevated` fails AA in
+   light theme (~1.9:1 — accent-green is theme-invariant, bg-elevated is
+   not). Invert to a solid green chip with fixed near-black text — AA in
+   BOTH themes (~10:1, accent-green is constant) and rightly emphasises
+   the consequential "curator" role vs the quiet outlined "joined". #86 */
+.v10-cg-badge-curator { background: var(--accent-green); color: #0a0a0a; border-color: var(--accent-green); }
 .v10-cg-badge-joined { color: var(--text-secondary); }
 .v10-cg-empty { color: var(--text-secondary); font-size: 12px; padding: 16px 4px; }
 
