@@ -48,6 +48,15 @@ const RIGHT_WIDTH_MIN = 200;
 const RIGHT_WIDTH_MAX = 500;
 const BOTTOM_HEIGHT_MIN = 120;
 const BOTTOM_HEIGHT_MAX = 600;
+// Minimum vertical space the center pane must keep. The static 600 cap
+// is storage sanity only; the *effective* max is also clamped to the
+// viewport so a height persisted on a tall screen can't squeeze the
+// center pane out of view after reload on a shorter one (Codex / ui-lead).
+const CENTER_MIN_HEIGHT = 240;
+export function maxBottomHeight(): number {
+  const vh = typeof window !== 'undefined' && window.innerHeight ? window.innerHeight : Infinity;
+  return Math.max(BOTTOM_HEIGHT_MIN, Math.min(BOTTOM_HEIGHT_MAX, vh - CENTER_MIN_HEIGHT));
+}
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }

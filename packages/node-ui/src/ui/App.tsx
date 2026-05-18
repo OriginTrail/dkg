@@ -5,7 +5,7 @@ import { PanelLeft } from './components/Shell/PanelLeft.js';
 import { PanelCenter } from './components/Shell/PanelCenter.js';
 import { PanelBottom } from './components/Shell/PanelBottom.js';
 import { PanelRight } from './components/Shell/PanelRight.js';
-import { useLayoutStore } from './stores/layout.js';
+import { useLayoutStore, maxBottomHeight } from './stores/layout.js';
 import { useAgentsStore } from './stores/agents.js';
 import { api } from './api-wrapper.js';
 
@@ -144,10 +144,11 @@ function AppShell() {
   }, [setRightWidth]);
 
   // Handle sits above the bottom panel; dragging UP (negative delta)
-  // makes the panel taller, so subtract the delta. Store clamps.
+  // makes the panel taller, so subtract the delta. Clamp to the
+  // viewport-aware max so the center pane keeps its minimum height.
   const onDragBottom = useCallback((delta: number) => {
     const h = useLayoutStore.getState().bottomHeight;
-    setBottomHeight(h - delta);
+    setBottomHeight(Math.min(h - delta, maxBottomHeight()));
   }, [setBottomHeight]);
 
   const leftHandle = useDragResize(onDragLeft);

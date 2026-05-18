@@ -200,7 +200,7 @@ function CgRow({
             : <span className="v10-cg-dim">—</span>}
       </span>
       <span className="v10-cg-cell v10-cg-size">
-        {mem.loading && agents === null
+        {mem.loading
           ? <span className="v10-cg-dim">loading…</span>
           : mem.error
             ? <span className="v10-cg-dim" title={mem.error}>—</span>
@@ -358,7 +358,7 @@ export function DashboardView() {
           value={!agg.hasCgs ? '—' : agg.agentsLoading ? <span className="v10-cg-dim">loading…</span> : agg.agentCount}
           sub={agg.hasCgs && agg.agentsPartial
             ? 'Some context graphs could not report agents; count is partial.'
-            : 'Unique agents collaborating with you.'}
+            : 'Unique agents allow-listed with access to your context graphs.'}
           accentColor="var(--purple)"
         />
       </div>
@@ -379,7 +379,12 @@ export function DashboardView() {
                 <span className="v10-cg-cell v10-cg-name">Name</span>
                 <span className="v10-cg-cell v10-cg-type">Type</span>
                 <span className="v10-cg-cell v10-cg-size">Size</span>
-                <span className="v10-cg-cell v10-cg-agents">Agents</span>
+                <span
+                  className="v10-cg-cell v10-cg-agents"
+                  title="Agents allow-listed with access to this context graph"
+                >
+                  Agents
+                </span>
                 <span className="v10-cg-cell v10-cg-role">Role</span>
               </div>
               <div className="v10-cg-list">

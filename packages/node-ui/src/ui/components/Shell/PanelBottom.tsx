@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { useLayoutStore } from '../../stores/layout.js';
+import { useLayoutStore, maxBottomHeight } from '../../stores/layout.js';
 import { api } from '../../api-wrapper.js';
 
 const BOTTOM_TABS = ['Node Log', 'Transactions'] as const;
@@ -62,7 +62,10 @@ export function PanelBottom() {
   return (
     <div
       className={`v10-panel-bottom ${bottomCollapsed ? 'collapsed' : ''}`}
-      style={bottomCollapsed ? undefined : { height: bottomHeight }}
+      // Clamp against the viewport at render so a height persisted on a
+      // taller screen can't crush the center pane after reload on a
+      // shorter one (Codex / ui-lead).
+      style={bottomCollapsed ? undefined : { height: Math.min(bottomHeight, maxBottomHeight()) }}
     >
       <div className="v10-bottom-tabs">
         {BOTTOM_TABS.map((tab) => (
