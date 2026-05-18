@@ -43,7 +43,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1",
-    "zod": "^3.25",
+    "zod": "^4.4",
     "yaml": "^2.6.0"
   },
   "devDependencies": {
