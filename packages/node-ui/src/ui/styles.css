@@ -377,6 +377,16 @@ button:focus:not(:focus-visible) { outline: none; }
 }
 .v10-resize-handle-h:hover,
 .v10-resize-handle-h.active { background: var(--accent-green); width: 3px; }
+/* Vertical twin for the bottom panel (drag the top edge up/down). */
+.v10-resize-handle-v {
+  height: 1px;
+  flex-shrink: 0;
+  background: var(--border-subtle);
+  cursor: row-resize;
+  transition: background 0.15s, height 0.1s;
+}
+.v10-resize-handle-v:hover,
+.v10-resize-handle-v.active { background: var(--accent-green); height: 3px; }
 
 /* ── Left panel ── */
 .v10-panel-left {
@@ -1883,11 +1893,12 @@ button:focus:not(:focus-visible) { outline: none; }
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  transition: height 0.15s ease;
   flex-shrink: 0;
 }
+/* Expanded height is driven by an inline style from the layout store
+   (user-resizable, persisted). No height transition: it would rubber-band
+   during drag, and collapse is instant like the side panels. */
 .v10-panel-bottom.collapsed { height: var(--tab-h); }
-.v10-panel-bottom:not(.collapsed) { height: 200px; }
 .v10-bottom-tabs {
   height: var(--tab-h);
   min-height: var(--tab-h);
@@ -2392,6 +2403,113 @@ button:focus:not(:focus-visible) { outline: none; }
   transition: color 0.15s;
 }
 .v10-dash-section-link:hover { color: var(--text-primary); }
+
+/* ── PR6 dashboard: 3 stat panels + My Context Graphs list ── */
+.v10-dash-stats-3 { grid-template-columns: repeat(3, 1fr); }
+@media (max-width: 720px) { .v10-dash-stats-3 { grid-template-columns: 1fr; } }
+.v10-dash-grid-2 { grid-template-columns: minmax(0, 2.4fr) minmax(0, 1fr); }
+@media (max-width: 720px) { .v10-dash-grid-2 { grid-template-columns: 1fr; } }
+.v10-dash-section-wide { min-width: 0; }
+
+/* One canonical "what is a Context Graph?" affordance in the dashboard
+   header (not a per-card tooltip — ux-lead). */
+.v10-dash-info {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 10px;
+  color: var(--text-secondary);
+  cursor: help;
+  font-size: 11px;
+}
+.v10-dash-info:hover { color: var(--text-primary); }
+
+/* Dim inline label. `--text-secondary` (NOT tertiary): these annotate
+   real numbers, so they must clear AA on the card surface. */
+.v10-cg-dim { color: var(--text-secondary); font-weight: 400; }
+
+/* Context Graph Size: two numbers, each with a WM/SWM/VM bar. */
+.v10-cg-size-detail { margin-top: 10px; display: flex; flex-direction: column; gap: 10px; }
+.v10-cg-size-metric { display: flex; flex-direction: column; gap: 4px; }
+.v10-cg-size-num { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+/* Track background + 1px gap between segments shows the track colour as
+   a hairline separator, and the outline keeps the light-theme WM
+   segment's boundary readable even though its remapped token fill is
+   low-contrast on its own (ui-lead non-text-contrast fix). */
+.v10-layerbar {
+  display: flex;
+  gap: 1px;
+  height: 7px;
+  border-radius: 3px;
+  overflow: hidden;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+}
+.v10-layerbar-seg { height: 100%; }
+.v10-layerbar-empty { flex: 1; background: var(--bg-elevated); }
+.v10-layer-legend { display: flex; gap: 12px; margin-top: 2px; }
+.v10-layer-legend-item {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 10px; color: var(--text-secondary); font-family: var(--font-mono);
+}
+.v10-layer-legend-dot { width: 8px; height: 8px; border-radius: 2px; }
+
+/* My Context Graphs list — column grid shared by header + rows. */
+.v10-cg-colhead, .v10-cg-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 44px minmax(150px, 190px) 56px 82px;
+  align-items: center;
+  gap: 8px;
+}
+.v10-cg-colhead {
+  padding: 5px 8px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.v10-cg-list {
+  display: flex;
+  flex-direction: column;
+  /* ~10 rows then internal scroll; global scrollbar styling applies. */
+  max-height: 360px;
+  overflow-y: auto;
+}
+.v10-cg-row {
+  width: 100%;
+  text-align: left;
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: none;
+  transition: background 0.12s;
+}
+.v10-cg-row:last-child { border-bottom: 0; }
+.v10-cg-row:hover { background: var(--bg-hover); }
+.v10-cg-cell { font-size: 12px; color: var(--text-secondary); min-width: 0; }
+.v10-cg-name {
+  color: var(--text-primary);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.v10-cg-type { display: flex; align-items: center; justify-content: center; color: var(--text-secondary); }
+.v10-cg-agents { text-align: right; font-variant-numeric: tabular-nums; }
+/* Role badge — same small-status-badge family as `.v10-agent-card-badge`. */
+.v10-cg-badge {
+  display: inline-block;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
+}
+.v10-cg-badge-curator { color: var(--accent-green); border-color: color-mix(in srgb, var(--accent-green) 45%, transparent); }
+.v10-cg-badge-joined { color: var(--text-secondary); }
+.v10-cg-empty { color: var(--text-secondary); font-size: 12px; padding: 16px 4px; }
 
 /* Quick actions */
 .v10-quick-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 8px; }

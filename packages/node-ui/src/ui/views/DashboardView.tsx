@@ -1,71 +1,254 @@
-import React, { useState } from 'react';
+import React, { useCallback, useMemo, useState, useEffect } from 'react';
+import { Lock, Globe, HelpCircle } from 'lucide-react';
 import { useFetch } from '../hooks.js';
 import { api } from '../api-wrapper.js';
+import { listParticipants } from '../api.js';
 import { useTabsStore } from '../stores/tabs.js';
-import { useProjectsStore } from '../stores/projects.js';
-import { CreateProjectModal } from '../components/Modals/CreateProjectModal.js';
-import { JoinProjectModal } from '../components/Modals/JoinProjectModal.js';
-import { ImportFilesModal } from '../components/Modals/ImportFilesModal.js';
+import { useProjectsStore, type ContextGraph } from '../stores/projects.js';
+import { useMyContextGraphs } from '../hooks/useMyContextGraphs.js';
+import { useMemoryEntities } from '../hooks/useMemoryEntities.js';
+import {
+  canonicalAgentDid,
+  normalizeAccessPolicy,
+  type AgentSidebarIdentity,
+} from '../lib/contextGraphSidebar.js';
 
-function StatCard({ label, value, sub, accentColor }: { label: string; value: string | number; sub?: string; accentColor?: string }) {
+const CG_DEFINITION =
+  'A Context Graph is a scoped knowledge domain with configurable access and ' +
+  'governance — keep it private, open it to specific peers, or require on-chain ' +
+  'group consensus before anything is finalized.';
+
+// Memory-layer palette + labels. Colours are the shared CSS-var tokens
+// (NOT raw hex) so they remap correctly in light theme — keep in sync
+// with MemoryStackView so the dashboard reads as the same system.
+const LAYERS = [
+  { key: 'wm', label: 'Working Memory', short: 'WM', color: 'var(--layer-working)' },
+  { key: 'swm', label: 'Shared Working Memory', short: 'SWM', color: 'var(--layer-shared)' },
+  { key: 'vm', label: 'Verified Memory', short: 'VM', color: 'var(--layer-verified)' },
+] as const;
+
+interface LayerCounts { wm: number; swm: number; vm: number; total: number }
+interface CgReport {
+  entities: LayerCounts;
+  triples: LayerCounts;
+  agents: string[]; // canonical agent DIDs collaborating on this CG
+  sizeLoading: boolean;
+  sizeError: boolean;
+}
+
+// Compact number: 1234 → "1.2k", 4500000 → "4.5M". Keeps list/stat
+// columns narrow and scannable (ux-lead).
+function abbrev(n: number): string {
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`.replace('.0', '');
+  return `${(n / 1_000_000).toFixed(1)}M`.replace('.0', '');
+}
+
+function StatCard({
+  label, value, sub, accentColor, children,
+}: {
+  label: string;
+  value: React.ReactNode;
+  sub?: string;
+  accentColor?: string;
+  children?: React.ReactNode;
+}) {
   return (
     <div className="stat-card">
       {accentColor && <div className="accent" style={{ background: accentColor }} />}
       <div className="stat-label">{label}</div>
       <div className="stat-value">{value}</div>
+      {children}
       {sub && <div className="stat-sub">{sub}</div>}
     </div>
   );
 }
 
-function QuickAction({ icon, label, onClick }: { icon: string; label: string; onClick?: () => void }) {
+// 3-segment proportion bar (WM/SWM/VM). A 1px inter-segment + track
+// outline keeps the light-theme WM segment legible (its remapped token
+// fails 3:1 non-text on its own — ui-lead). Exact counts on hover.
+function LayerBar({ counts }: { counts: LayerCounts }) {
+  const sum = counts.wm + counts.swm + counts.vm;
+  const title = LAYERS.map((l) => `${l.short} ${counts[l.key]}`).join(' · ');
   return (
-    <button className="v10-quick-action" onClick={onClick}>
-      <span className="v10-quick-action-icon">{icon}</span>
-      <span>{label}</span>
-    </button>
-  );
-}
-
-function RecentOp({ op }: { op: any }) {
-  const type = op.name || op.type || '—';
-  const status = op.status || 'unknown';
-  const statusColor = status === 'completed' ? 'var(--accent-green)' : status === 'failed' ? 'var(--accent-red)' : 'var(--accent-amber)';
-  const time = op.startedAt ? new Date(op.startedAt).toLocaleTimeString() : '—';
-
-  return (
-    <div className="v10-recent-op">
-      <span className="v10-recent-op-type">{type}</span>
-      <span className="v10-recent-op-status" style={{ color: statusColor }}>{status}</span>
-      <span className="v10-recent-op-time">{time}</span>
+    <div className="v10-layerbar" title={title} aria-label={title}>
+      {sum === 0 ? (
+        <span className="v10-layerbar-empty" />
+      ) : (
+        LAYERS.map((l) => {
+          const pct = (counts[l.key] / sum) * 100;
+          if (pct <= 0) return null;
+          return (
+            <span
+              key={l.key}
+              className="v10-layerbar-seg"
+              style={{ width: `${pct}%`, background: l.color }}
+            />
+          );
+        })
+      )}
     </div>
   );
 }
 
+function LayerLegend() {
+  return (
+    <div className="v10-layer-legend">
+      {LAYERS.map((l) => (
+        <span key={l.key} className="v10-layer-legend-item" title={l.label}>
+          <span className="v10-layer-legend-dot" style={{ background: l.color }} />
+          {l.short}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+// One row of the My Context Graphs list. Also the single data probe for
+// this CG: it owns exactly one useMemoryEntities + one listParticipants
+// and reports its numbers up so the top cards aggregate without a second
+// fetch (mirrors MemoryStackView's per-row fan-out).
+function CgRow({
+  cg, identity, onReport, onOpen,
+}: {
+  cg: ContextGraph;
+  identity: AgentSidebarIdentity | null;
+  onReport: (id: string, r: CgReport) => void;
+  onOpen: (cg: ContextGraph) => void;
+}) {
+  const mem = useMemoryEntities(cg.id);
+  const [agents, setAgents] = useState<string[] | null>(null);
+
+  useEffect(() => {
+    let mounted = true;
+    listParticipants(cg.id)
+      .then((r) => { if (mounted) setAgents((r.allowedAgents ?? []).map(canonicalAgentDid)); })
+      .catch(() => { if (mounted) setAgents([]); });
+    return () => { mounted = false; };
+  }, [cg.id]);
+
+  const entities: LayerCounts = {
+    wm: mem.counts.wm, swm: mem.counts.swm, vm: mem.counts.vm, total: mem.counts.total,
+  };
+  const triples: LayerCounts = useMemo(() => {
+    let wm = 0, swm = 0, vm = 0;
+    for (const t of mem.allTriples) {
+      if (t.layer === 'working') wm++;
+      else if (t.layer === 'shared') swm++;
+      else if (t.layer === 'verified') vm++;
+    }
+    return { wm, swm, vm, total: mem.allTriples.length };
+  }, [mem.allTriples]);
+
+  useEffect(() => {
+    onReport(cg.id, {
+      entities,
+      triples,
+      agents: agents ?? [],
+      sizeLoading: mem.loading,
+      sizeError: Boolean(mem.error),
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cg.id, mem.loading, mem.error, entities.total, triples.total, agents]);
+
+  const policy = normalizeAccessPolicy(cg.accessPolicy);
+  const typeLabel = policy === 'private' ? 'Curated' : policy === 'public' ? 'Public' : 'Unknown';
+  const isCurator = Boolean(
+    cg.curator?.trim() && identity?.agentDid?.trim() &&
+    canonicalAgentDid(cg.curator) === canonicalAgentDid(identity.agentDid),
+  );
+
+  return (
+    <button className="v10-cg-row" onClick={() => onOpen(cg)}>
+      <span className="v10-cg-cell v10-cg-name">{cg.name || cg.id.slice(0, 16)}</span>
+      <span
+        className="v10-cg-cell v10-cg-type"
+        title={`${typeLabel} context graph`}
+        aria-label={`${typeLabel} context graph`}
+      >
+        {policy === 'private'
+          ? <Lock size={13} aria-hidden="true" />
+          : policy === 'public'
+            ? <Globe size={13} aria-hidden="true" />
+            : <span className="v10-cg-dim">—</span>}
+      </span>
+      <span className="v10-cg-cell v10-cg-size">
+        {mem.loading && agents === null
+          ? <span className="v10-cg-dim">loading…</span>
+          : mem.error
+            ? <span className="v10-cg-dim" title={mem.error}>—</span>
+            : <>{abbrev(entities.total)} <span className="v10-cg-dim">entities</span> · {abbrev(triples.total)} <span className="v10-cg-dim">triples</span></>}
+      </span>
+      <span className="v10-cg-cell v10-cg-agents">
+        {agents === null ? <span className="v10-cg-dim">—</span> : agents.length}
+      </span>
+      <span className="v10-cg-cell v10-cg-role">
+        <span className={`v10-cg-badge v10-cg-badge-${isCurator ? 'curator' : 'joined'}`}>
+          {isCurator ? 'CURATOR' : 'JOINED'}
+        </span>
+      </span>
+    </button>
+  );
+}
+
+const ZERO: LayerCounts = { wm: 0, swm: 0, vm: 0, total: 0 };
+
 export function DashboardView() {
   const { data: status } = useFetch(api.fetchStatus, [], 10_000);
-  const { data: metrics } = useFetch(api.fetchMetrics, [], 10_000);
-  const { data: cgData } = useFetch(api.fetchContextGraphs, [], 30_000);
-  const { data: agentData } = useFetch(api.fetchAgents, [], 15_000);
-  const { data: opsData } = useFetch(() => api.fetchOperationsWithPhases({ limit: '6' }), [], 10_000);
   const { data: econ } = useFetch(api.fetchEconomics, [], 60_000);
   const { openTab } = useTabsStore();
-  const { activeProjectId: activeProject, setActiveProject } = useProjectsStore();
-  const [showCreateProject, setShowCreateProject] = useState(false);
-  const [showJoinProject, setShowJoinProject] = useState(false);
-  const [showImportFiles, setShowImportFiles] = useState(false);
-  const [importTargetId, setImportTargetId] = useState<string | null>(null);
+  const { setActiveProject } = useProjectsStore();
+  const { myCgs, identity } = useMyContextGraphs();
 
-  const totalKCs = metrics?.total_kcs ?? metrics?.totalKnowledgeCollections ?? 0;
-  const peers = status?.connectedPeers ?? status?.peerCount ?? 0;
-  const agents = agentData?.agents?.length ?? 0;
-  const contextGraphCount = cgData?.contextGraphs?.length ?? 0;
-  const ops = opsData?.operations ?? [];
+  const [reports, setReports] = useState<Record<string, CgReport>>({});
+  const onReport = useCallback((id: string, r: CgReport) => {
+    setReports((prev) => {
+      const p = prev[id];
+      if (p && p.sizeLoading === r.sizeLoading && p.sizeError === r.sizeError &&
+          p.entities.total === r.entities.total && p.triples.total === r.triples.total &&
+          p.agents.length === r.agents.length) return prev;
+      return { ...prev, [id]: r };
+    });
+  }, []);
+
+  const agg = useMemo(() => {
+    const entities = { ...ZERO };
+    const triples = { ...ZERO };
+    const agentSet = new Set<string>();
+    let anyLoading = false;
+    let anyError = false;
+    let reported = 0;
+    for (const cg of myCgs) {
+      const r = reports[cg.id];
+      if (!r) { anyLoading = true; continue; }
+      reported++;
+      if (r.sizeLoading) anyLoading = true;
+      if (r.sizeError) anyError = true;
+      for (const k of ['wm', 'swm', 'vm', 'total'] as const) {
+        entities[k] += r.entities[k];
+        triples[k] += r.triples[k];
+      }
+      for (const a of r.agents) agentSet.add(a);
+    }
+    return {
+      entities, triples,
+      agentCount: agentSet.size,
+      loading: myCgs.length > 0 && (anyLoading || reported === 0),
+      partial: anyError,
+      hasCgs: myCgs.length > 0,
+    };
+  }, [myCgs, reports]);
 
   const latestPeriod = econ?.periods?.[0];
   const spending = latestPeriod
     ? `${latestPeriod.publishCount} publishes · ${latestPeriod.totalTrac.toFixed(2)} TRAC`
     : '—';
+
+  const sizeValue = !agg.hasCgs
+    ? '—'
+    : agg.loading
+      ? <span className="v10-cg-dim">loading…</span>
+      : `${abbrev(agg.entities.total)} · ${abbrev(agg.triples.total)}`;
 
   return (
     <div className="v10-dashboard">
@@ -73,78 +256,95 @@ export function DashboardView() {
         <h1 className="v10-dash-title">Dashboard</h1>
         <p className="v10-dash-subtitle">
           {status?.name || 'DKG Node'} · {status?.networkName || 'network'}
+          {/* One canonical "what is a Context Graph?" entry point for the
+              whole dashboard — not a per-card tooltip (ux-lead). */}
+          <span className="v10-dash-info" title={CG_DEFINITION} aria-label={CG_DEFINITION}>
+            <HelpCircle size={13} aria-hidden="true" />
+            <span>What is a Context Graph?</span>
+          </span>
         </p>
       </div>
 
-      <div className="v10-dash-stats">
-        <StatCard label="Knowledge Assets" value={totalKCs} accentColor="var(--accent-green)" />
-        <StatCard label="Context Graphs" value={contextGraphCount} accentColor="var(--accent-blue)" />
-        <StatCard label="Connected Peers" value={peers} accentColor="var(--accent-amber)" />
-        <StatCard label="Agents" value={agents} accentColor="var(--purple)" />
+      <div className="v10-dash-stats v10-dash-stats-3">
+        <StatCard
+          label="My Context Graphs"
+          value={myCgs.length}
+          sub="Context graphs you created or joined."
+          accentColor="var(--accent-blue)"
+        />
+        <StatCard
+          label="Context Graph Size"
+          value={sizeValue}
+          accentColor="var(--accent-green)"
+        >
+          {agg.hasCgs && !agg.loading && (
+            <div className="v10-cg-size-detail">
+              <div className="v10-cg-size-metric">
+                <div className="v10-cg-size-num">
+                  {agg.entities.total.toLocaleString()} <span className="v10-cg-dim">entities / Knowledge Assets</span>
+                </div>
+                <LayerBar counts={agg.entities} />
+              </div>
+              <div className="v10-cg-size-metric">
+                <div className="v10-cg-size-num">
+                  {agg.triples.total.toLocaleString()} <span className="v10-cg-dim">triples</span>
+                </div>
+                <LayerBar counts={agg.triples} />
+              </div>
+              <LayerLegend />
+            </div>
+          )}
+          <div className="stat-sub">
+            {agg.hasCgs
+              ? (agg.partial
+                  ? 'Some context graphs could not report size; total is partial.'
+                  : 'Across Working, Shared Working & Verified Memory. Entities become Knowledge Assets once published to Verified Memory.')
+              : 'No context graphs yet.'}
+          </div>
+        </StatCard>
+        <StatCard
+          label="Connected Agents"
+          value={!agg.hasCgs ? '—' : agg.loading ? <span className="v10-cg-dim">loading…</span> : agg.agentCount}
+          sub="Unique agents collaborating with you."
+          accentColor="var(--purple)"
+        />
       </div>
 
-      <div className="v10-dash-grid">
-        <div className="v10-dash-section">
+      <div className="v10-dash-grid v10-dash-grid-2">
+        <div className="v10-dash-section v10-dash-section-wide">
           <div className="v10-dash-section-header">
-            <h3>Quick Actions</h3>
+            <h3>My Context Graphs</h3>
+            <span className="v10-dash-section-badge">{myCgs.length}</span>
           </div>
-          <div className="v10-quick-actions">
-            <QuickAction icon="+" label="Create Project" onClick={() => setShowCreateProject(true)} />
-            <QuickAction icon="↗" label="Join Project" onClick={() => setShowJoinProject(true)} />
-            <QuickAction icon="↑" label="Import Memories" onClick={() => {
-              const cgs = cgData?.contextGraphs ?? [];
-              if (cgs.length === 0) {
-                setShowCreateProject(true);
-              } else {
-                const target = cgs.find((c: any) => c.id === activeProject) ?? cgs[0];
-                setImportTargetId(target.id);
-                setShowImportFiles(true);
-              }
-            }} />
-            <QuickAction icon="⟐" label="Run SPARQL" onClick={() => openTab({ id: 'sparql', label: 'SPARQL', closable: true })} />
-            <QuickAction icon="⬡" label="Browse Graph" onClick={() => openTab({ id: 'explorer', label: 'Explorer', closable: true })} />
-          </div>
-        </div>
-
-        <div className="v10-dash-section">
-          <div className="v10-dash-section-header">
-            <h3>Recent Operations</h3>
-            <button
-              className="v10-dash-section-link"
-              onClick={() => openTab({ id: 'operations', label: 'Operations', closable: true })}
-            >
-              View all →
-            </button>
-          </div>
-          <div className="v10-recent-ops">
-            {ops.length === 0 ? (
-              <p style={{ color: 'var(--text-tertiary)', fontSize: 12, padding: '12px 0' }}>No recent operations</p>
-            ) : (
-              ops.slice(0, 6).map((op: any, i: number) => <RecentOp key={op.id ?? i} op={op} />)
-            )}
-          </div>
-        </div>
-
-        <div className="v10-dash-section">
-          <div className="v10-dash-section-header">
-            <h3>Projects</h3>
-            <span className="v10-dash-section-badge">{contextGraphCount}</span>
-          </div>
-          <div className="v10-dash-projects">
-            {(cgData?.contextGraphs ?? []).slice(0, 5).map((cg: any) => (
-              <button
-                key={cg.id}
-                className="v10-dash-project-card"
-                onClick={() => {
-                  setActiveProject(cg.id);
-                  openTab({ id: `project:${cg.id}`, label: cg.name || cg.id.slice(0, 12), closable: true });
-                }}
-              >
-                <span className="v10-dash-project-name">{cg.name || cg.id.slice(0, 12)}</span>
-                <span className="v10-dash-project-count">{cg.assetCount ?? cg.assets ?? 0} assets</span>
-              </button>
-            ))}
-          </div>
+          {myCgs.length === 0 ? (
+            <p className="v10-cg-empty">
+              No context graphs yet — create or join one from the sidebar.
+            </p>
+          ) : (
+            <>
+              <div className="v10-cg-colhead">
+                <span className="v10-cg-cell v10-cg-name">Name</span>
+                <span className="v10-cg-cell v10-cg-type">Type</span>
+                <span className="v10-cg-cell v10-cg-size">Size</span>
+                <span className="v10-cg-cell v10-cg-agents">Agents</span>
+                <span className="v10-cg-cell v10-cg-role">Role</span>
+              </div>
+              <div className="v10-cg-list">
+                {myCgs.map((cg) => (
+                  <CgRow
+                    key={cg.id}
+                    cg={cg}
+                    identity={identity}
+                    onReport={onReport}
+                    onOpen={(c) => {
+                      setActiveProject(c.id);
+                      openTab({ id: `project:${c.id}`, label: c.name || c.id.slice(0, 12), closable: true });
+                    }}
+                  />
+                ))}
+              </div>
+            </>
+          )}
         </div>
 
         <div className="v10-dash-section">
@@ -154,15 +354,6 @@ export function DashboardView() {
           <p style={{ fontSize: 12, color: 'var(--text-secondary)', padding: '8px 0' }}>{spending}</p>
         </div>
       </div>
-
-      <CreateProjectModal open={showCreateProject} onClose={() => setShowCreateProject(false)} />
-      <JoinProjectModal open={showJoinProject} onClose={() => setShowJoinProject(false)} />
-      <ImportFilesModal
-        open={showImportFiles}
-        onClose={() => { setShowImportFiles(false); setImportTargetId(null); }}
-        contextGraphId={importTargetId ?? ''}
-        contextGraphName={(cgData?.contextGraphs ?? []).find((c: any) => c.id === importTargetId)?.name}
-      />
     </div>
   );
 }

@@ -22,7 +22,7 @@ export function toSidebarIdentity(a: { agentDid: string; peerId?: string }): Age
   return { agentDid: a.agentDid, peerId: a.peerId };
 }
 
-function normalizeAccessPolicy(raw?: string): 'public' | 'private' | 'unknown' {
+export function normalizeAccessPolicy(raw?: string): 'public' | 'private' | 'unknown' {
   if (!raw?.trim()) return 'unknown';
   const t = raw.trim().replace(/^["']|["']$/g, '').toLowerCase();
   if (t === 'private') return 'private';

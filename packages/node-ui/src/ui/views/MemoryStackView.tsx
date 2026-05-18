@@ -18,9 +18,7 @@ import { useProjectsStore, type ContextGraph } from '../stores/projects.js';
 import { useTabsStore } from '../stores/tabs.js';
 import { useMemoryEntities, type MemoryEntity, type TrustLevel } from '../hooks/useMemoryEntities.js';
 import { relativeTime } from '../hooks/useProjectActivity.js';
-
-const HIDDEN_KEY = 'v10:hiddenProjectIds';
-const HIDDEN_CHANGE_EVENT = 'v10:hidden-projects-change';
+import { useHiddenContextGraphIds } from '../hooks/useHiddenContextGraphIds.js';
 
 const LAYERS: Array<{
   key: 'working' | 'shared' | 'verified';
@@ -44,32 +42,10 @@ const TS_PREDS = [
   'http://dkg.io/ontology/tasks/dueDate',
 ];
 
-// Mirror of PanelLeft's hidden-projects preference so the Memory Stack
-// never surfaces projects the user has dismissed from the sidebar.
-function useHiddenIds(): Set<string> {
-  const read = () => {
-    try {
-      const raw = localStorage.getItem(HIDDEN_KEY);
-      const arr = raw ? JSON.parse(raw) : [];
-      return new Set<string>(Array.isArray(arr) ? arr : []);
-    } catch { return new Set<string>(); }
-  };
-  const [hidden, setHidden] = useState<Set<string>>(read);
-  useEffect(() => {
-    const sync = () => setHidden(read());
-    window.addEventListener(HIDDEN_CHANGE_EVENT, sync);
-    window.addEventListener('storage', sync);
-    return () => {
-      window.removeEventListener(HIDDEN_CHANGE_EVENT, sync);
-      window.removeEventListener('storage', sync);
-    };
-  }, []);
-  return hidden;
-}
-
 export function MemoryStackView() {
   const { contextGraphs } = useProjectsStore();
-  const hidden = useHiddenIds();
+  // Shared hidden-CG preference (same set as PanelLeft + Dashboard).
+  const { hidden } = useHiddenContextGraphIds();
   const visible = useMemo(
     () => contextGraphs.filter(cg => !hidden.has(cg.id)),
     [contextGraphs, hidden],
@@ -80,14 +56,14 @@ export function MemoryStackView() {
       <div className="v10-memstack-head">
         <h1 className="v10-memstack-title">Memory Stack</h1>
         <p className="v10-memstack-sub">
-          Every layer across every project, at a glance. {visible.length} visible project{visible.length === 1 ? '' : 's'} ·
-          hidden projects are skipped.
+          Every layer across every context graph, at a glance. {visible.length} visible context graph{visible.length === 1 ? '' : 's'} ·
+          hidden context graphs are skipped.
         </p>
       </div>
 
       {visible.length === 0 ? (
         <div className="v10-memstack-empty">
-          No visible projects. Create one from the sidebar or un-hide dismissed ones.
+          No visible context graphs. Create one from the sidebar or un-hide dismissed ones.
         </div>
       ) : (
         <div className="v10-memstack-table">

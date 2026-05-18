@@ -7,6 +7,7 @@ import { api } from '../../api-wrapper.js';
 import { CreateProjectModal } from '../Modals/CreateProjectModal.js';
 import { JoinProjectModal } from '../Modals/JoinProjectModal.js';
 import { useNodeEvents } from '../../hooks/useNodeEvents.js';
+import { useHiddenContextGraphIds as useHiddenProjectIds } from '../../hooks/useHiddenContextGraphIds.js';
 import {
   fetchCurrentAgent,
   fetchLocalAgentIntegrations,
@@ -30,51 +31,9 @@ const COLLAPSE_ICON = '◂';
 
 type TreeMode = 'explorer' | 'oracle';
 
-// ─── Hidden projects (local dismiss) — ─────────────────────────────
-// My Projects vs Context Oracle: daemon subscription + curator + policy
-// (GET /api/context-graph/list); no manual overrides (see sidebar helper).
-const HIDDEN_KEY = 'v10:hiddenProjectIds';
-const HIDDEN_CHANGE_EVENT = 'v10:hidden-projects-change';
-
-function loadHiddenIds(): Set<string> {
-  try {
-    const raw = localStorage.getItem(HIDDEN_KEY);
-    if (!raw) return new Set();
-    const arr = JSON.parse(raw);
-    return new Set(Array.isArray(arr) ? arr : []);
-  } catch { return new Set(); }
-}
-
-function saveHiddenIds(ids: Set<string>): void {
-  try {
-    localStorage.setItem(HIDDEN_KEY, JSON.stringify([...ids]));
-    window.dispatchEvent(new Event(HIDDEN_CHANGE_EVENT));
-  } catch { /* non-critical */ }
-}
-
-function useHiddenProjectIds(): {
-  hidden: Set<string>;
-  hide: (id: string) => void;
-  unhideAll: () => void;
-} {
-  const [hidden, setHidden] = useState<Set<string>>(() => loadHiddenIds());
-  useEffect(() => {
-    const sync = () => setHidden(loadHiddenIds());
-    window.addEventListener(HIDDEN_CHANGE_EVENT, sync);
-    window.addEventListener('storage', sync);
-    return () => {
-      window.removeEventListener(HIDDEN_CHANGE_EVENT, sync);
-      window.removeEventListener('storage', sync);
-    };
-  }, []);
-  const hide = useCallback((id: string) => {
-    const next = new Set(loadHiddenIds());
-    next.add(id);
-    saveHiddenIds(next);
-  }, []);
-  const unhideAll = useCallback(() => { saveHiddenIds(new Set()); }, []);
-  return { hidden, hide, unhideAll };
-}
+// Hidden-context-graph dismiss is now the shared `useHiddenProjectIds`
+// (aliased import above) so PanelLeft, the Memory Stack and the Dashboard
+// filter on the identical set — required for sidebar/dashboard parity.
 
 interface ProjectTreeItemProps {
   cg: ContextGraph;
@@ -103,7 +62,7 @@ function ProjectTreeItem({
         <button
           type="button"
           className="v10-tree-hide-btn"
-          title="Hide this project from the sidebar (reversible)"
+          title="Hide this context graph from the sidebar (reversible)"
           onClick={(e) => { e.stopPropagation(); onHide(); }}
         >
           ×
@@ -248,8 +207,8 @@ export function PanelLeft() {
   return (
     <div className="v10-panel-left">
       <div style={{ display: 'flex', gap: 4, padding: '8px 8px 4px' }}>
-        <button className="v10-new-project-btn" onClick={() => setShowCreateModal(true)}>+ New Project</button>
-        <button className="v10-new-project-btn" onClick={() => setShowJoinModal(true)}>↗ Join Project</button>
+        <button className="v10-new-project-btn" onClick={() => setShowCreateModal(true)}>+ New Context Graph</button>
+        <button className="v10-new-project-btn" onClick={() => setShowJoinModal(true)}>↗ Join Context Graph</button>
       </div>
 
       <div className="v10-tree-header">
@@ -257,7 +216,7 @@ export function PanelLeft() {
           className={`v10-tree-mode-btn ${treeMode === 'explorer' ? 'active' : ''}`}
           onClick={() => setTreeMode('explorer')}
         >
-          Projects
+          Context Graphs
         </button>
         <button
           className={`v10-tree-mode-btn ${treeMode === 'oracle' ? 'active' : ''}`}
@@ -281,15 +240,15 @@ export function PanelLeft() {
 
           {contextGraphs.length === 0 && stage <= 1 && (
             <div className="v10-journey-empty-card">
-              <div className="v10-jec-title">No projects yet</div>
+              <div className="v10-jec-title">No context graphs yet</div>
               <div className="v10-jec-hint">
                 {stage === 0
                   ? 'Connect an agent to get started.'
-                  : 'Create your first project to give your agent structured memory.'}
+                  : 'Create your first context graph to give your agent structured memory.'}
               </div>
               {stage === 1 && (
                 <button className="v10-new-project-btn" style={{ margin: 0 }} onClick={() => setShowCreateModal(true)}>
-                  + Create First Project
+                  + Create First Context Graph
                 </button>
               )}
             </div>
@@ -297,7 +256,7 @@ export function PanelLeft() {
 
           {myProjects.length > 0 && (
             <>
-              <div className="v10-tree-group-label">My Projects</div>
+              <div className="v10-tree-group-label">My Context Graphs</div>
               {myProjects.map((cg) => (
                 <ProjectTreeItem
                   key={cg.id}
@@ -321,9 +280,9 @@ export function PanelLeft() {
               type="button"
               className="v10-tree-show-hidden"
               onClick={unhideAll}
-              title="Restore all projects dismissed from the sidebar"
+              title="Restore all context graphs dismissed from the sidebar"
             >
-              ↺ Show {hiddenCount} hidden project{hiddenCount !== 1 ? 's' : ''}
+              ↺ Show {hiddenCount} hidden context graph{hiddenCount !== 1 ? 's' : ''}
             </button>
           )}
 
@@ -355,7 +314,7 @@ export function PanelLeft() {
           )}
           {contextOracleProjects.length === 0 && (
             <p style={{ fontSize: 12, color: 'var(--text-tertiary)', padding: '20px 12px', textAlign: 'center', lineHeight: 1.5 }}>
-              No public catalogue entries yet. Projects you sync or curate appear under <strong>Projects</strong>; non-private graphs you discover but haven&apos;t joined list here — use <strong>Join Project</strong> to subscribe.
+              No public catalogue entries yet. Context graphs you sync or curate appear under <strong>Context Graphs</strong>; non-private graphs you discover but haven&apos;t joined list here — use <strong>Join Context Graph</strong> to subscribe.
             </p>
           )}
           {hiddenCount > 0 && (
@@ -363,9 +322,9 @@ export function PanelLeft() {
               type="button"
               className="v10-tree-show-hidden"
               onClick={unhideAll}
-              title="Restore all projects dismissed from the sidebar"
+              title="Restore all context graphs dismissed from the sidebar"
             >
-              ↺ Show {hiddenCount} hidden project{hiddenCount !== 1 ? 's' : ''}
+              ↺ Show {hiddenCount} hidden context graph{hiddenCount !== 1 ? 's' : ''}
             </button>
           )}
         </div>
