@@ -382,6 +382,49 @@ describe('ProtocolRouter pooled overlay', () => {
     await fixture.router.closePooling();
   });
 
+  it('overall send timeoutMs is shared across pool + one-shot fallback (Codex #560 round 4)', async () => {
+    // Slow pool failure → fall-through to one-shot. Total elapsed
+    // wall-clock MUST stay under `timeoutMs`, not 2x.
+    const fixture = makeRouterFixture({
+      onDial: async (_peer, protocols) => {
+        if (protocols === POOLED_MESSAGE_PROTOCOL) {
+          // Simulate a slow pool failure that consumes ~half the
+          // overall budget.
+          await new Promise((r) => setTimeout(r, 150));
+          throw new Error('no valid addresses');
+        }
+        // One-shot succeeds quickly.
+        const s = new FakeStream();
+        queueMicrotask(() => {
+          s.feed(new TextEncoder().encode('shot-resp'));
+          s.endRemote();
+        });
+        return s;
+      },
+    });
+    fixture.router.enablePooling('/dkg/10.0.1/message', {
+      keepaliveIntervalMs: 0,
+      idleTimeoutMs: 0,
+      peerIdFromString: (s) => ({ toString: () => s }) as unknown,
+    });
+
+    const started = Date.now();
+    const resp = await fixture.router.send(
+      PEER_NEW,
+      '/dkg/10.0.1/message',
+      new TextEncoder().encode('x'),
+      { timeoutMs: 500 },
+    );
+    const elapsed = Date.now() - started;
+    expect(new TextDecoder().decode(resp)).toBe('shot-resp');
+    // Total wall-clock MUST be well under 2 * timeoutMs (the bug
+    // shape) — we allow some headroom for the one-shot path's own
+    // retry budget but cap at 750ms to fail loudly on a regression.
+    expect(elapsed).toBeLessThan(750);
+
+    await fixture.router.closePooling();
+  });
+
   it('throws when a second logical claims an already-used wire id (Codex #560 round 3)', () => {
     const fixture = makeRouterFixture();
     fixture.router.enablePooling('/dkg/10.0.1/message', {

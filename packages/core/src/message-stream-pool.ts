@@ -370,18 +370,44 @@ export class MessageStreamPool {
       return;
     }
 
+    // Race the shared open against this caller's signal. Codex PR
+    // #560 round 4: `getOrOpenPeer` is shared infrastructure that
+    // doesn't observe per-caller cancellation (otherwise one caller's
+    // timeout would abort the dial for everyone). To let an aborting
+    // caller reject IMMEDIATELY without waiting for the dial to
+    // complete, we race the open against an abort-signal-driven
+    // promise. The dial itself continues for the other waiters.
     let state: PerPeerState;
     try {
-      state = await this.getOrOpenPeer(peerIdStr, req.signal);
+      const openPromise = this.getOrOpenPeer(peerIdStr, req.signal);
+      if (req.signal) {
+        const abortPromise = new Promise<never>((_, rej) => {
+          if (req.signal!.aborted) {
+            rej(new Error('request aborted'));
+            return;
+          }
+          const onAbort = (): void => rej(new Error('request aborted'));
+          req.signal!.addEventListener('abort', onAbort, { once: true });
+        });
+        state = await Promise.race([openPromise, abortPromise]);
+      } else {
+        state = await openPromise;
+      }
     } catch (err) {
-      req.reject(this.toResetError(err, 'open failed'));
+      // Caller-abort surfaces here as 'request aborted'; pass through
+      // verbatim. Dial / prime failures surface as the underlying
+      // error wrapped in a PooledStreamResetError.
+      if (err instanceof Error && err.message === 'request aborted') {
+        req.reject(err);
+      } else {
+        req.reject(this.toResetError(err, 'open failed'));
+      }
       return;
     }
 
-    // Re-check after the await — the signal may have aborted while
-    // `getOrOpenPeer` was resolving the peer + dialing. Without this
-    // second checkpoint, an abort that fires mid-dial gets ignored
-    // and the request still hits the wire. Codex PR #560 round-2.
+    // Belt-and-suspenders: re-check after the await — covers the
+    // race where the signal aborts between `Promise.race` resolving
+    // (with the open) and this line running.
     if (req.signal?.aborted) {
       req.reject(new Error('request aborted'));
       return;
@@ -567,8 +593,23 @@ export class MessageStreamPool {
 
   private async getOrOpenPeer(
     peerIdStr: string,
-    signal?: AbortSignal,
+    _signal?: AbortSignal,
   ): Promise<PerPeerState> {
+    // NOTE: `_signal` is intentionally NOT propagated into the
+    // dial. Codex PR #560 round-4 caught that openLocks shares one
+    // in-flight open across every concurrent caller — and the FIRST
+    // caller's signal was the one driving cancellation. If caller A
+    // timed out while caller B was still willing to wait, B's dial
+    // inherited A's abort and failed even though B's budget was
+    // intact.
+    //
+    // Each caller's individual signal is honored by `dispatchSend`'s
+    // post-open abort listener — see round-2 fix. The shared open
+    // itself runs to completion regardless of any one caller, with
+    // the dial's natural transport timeout providing the upper
+    // bound. Callers whose signal aborts while waiting on the
+    // shared open are rejected in `dispatchSend`'s post-await
+    // abort checkpoint.
     const existing = this.peers.get(peerIdStr);
     if (existing && !existing.closed) return existing;
     const pending = this.openLocks.get(peerIdStr);
@@ -595,7 +636,9 @@ export class MessageStreamPool {
       // peerStore so the dial CAN reach a routable address).
       if (this.primePeer) {
         try {
-          await this.primePeer(peerIdStr, { signal });
+          // No caller-bound signal — the shared open is infra,
+          // not per-caller. See top-of-method comment.
+          await this.primePeer(peerIdStr, {});
         } catch {
           // primePeer never gates the dial — the existing
           // identify-cache path may still resolve.
@@ -604,8 +647,23 @@ export class MessageStreamPool {
       const peerId = await this.resolvePeerId(peerIdStr);
       const stream = await this.node.libp2p.dialProtocol(peerId, this.protocolId, {
         runOnLimitedConnection: true,
-        signal,
       });
+      // Race-with-close guard. Codex PR #560 round-4 caught: while
+      // `dialProtocol` was awaiting, `pool.close()` may have run.
+      // `installState` after close would re-create per-peer state
+      // (with timers) AFTER shutdown, leaving a stream alive past
+      // `closePooling()`. Close the just-opened stream instead.
+      if (this.closed) {
+        try {
+          // Use abort here — close() during shutdown is an error
+          // path for the would-be caller, not a graceful peer
+          // teardown.
+          stream.abort(new Error('pool closed during dial'));
+        } catch {
+          // already torn down
+        }
+        throw new PooledStreamResetError('pool closed');
+      }
       return this.installState(peerIdStr, stream);
     })();
 
@@ -614,7 +672,13 @@ export class MessageStreamPool {
       const state = await opening;
       return state;
     } finally {
-      this.openLocks.delete(peerIdStr);
+      // Only delete if we're still the registered open — close()
+      // already cleared the map and a new caller might have
+      // registered a fresh open in the interim. Idempotent delete
+      // is safe regardless.
+      if (this.openLocks.get(peerIdStr) === opening) {
+        this.openLocks.delete(peerIdStr);
+      }
     }
   }
 

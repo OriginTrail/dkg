@@ -787,6 +787,65 @@ describe('MessageStreamPool', () => {
     expect(stream.abortReason).not.toBeNull();
   });
 
+  it('one caller cancelling does not abort a shared open for another caller (Codex #560 round 4)', async () => {
+    // Hold the dial in flight so two concurrent callers serialize
+    // on the same `openLocks` promise.
+    let resolveDial: ((s: FakeStream) => void) | null = null;
+    const dialPromise = new Promise<FakeStream>((r) => { resolveDial = r; });
+    const node = makeFakeNode({ onDial: () => dialPromise });
+    const pool = new MessageStreamPool(node, {
+      peerIdFromString: stubPeerIdFromString,
+      keepaliveIntervalMs: 0,
+      idleTimeoutMs: 0,
+    });
+
+    const acA = new AbortController();
+    const sendA = pool.send(PEER_A, new TextEncoder().encode('a'), { signal: acA.signal });
+    const sendB = pool.send(PEER_A, new TextEncoder().encode('b'));
+    await flush();
+    // Both share the same in-flight dial. A aborts.
+    acA.abort();
+    await expect(sendA).rejects.toThrow(/aborted/);
+    // Now the dial completes — B's request MUST still go through.
+    const stream = new FakeStream();
+    resolveDial!(stream);
+    await flush();
+    await flush();
+    // Only B should be in-flight on the stream now.
+    stream.feed(encodeFrame(FrameType.RESPONSE, new TextEncoder().encode('b-ok')));
+    expect(new TextDecoder().decode(await sendB)).toBe('b-ok');
+    // Exactly ONE dial attempt was made (the shared open).
+    expect(node.state.dials.get(PEER_A)).toBe(1);
+
+    await pool.close();
+  });
+
+  it('close() during in-flight dial closes the resulting stream rather than installing it (Codex #560 round 4)', async () => {
+    let resolveDial: ((s: FakeStream) => void) | null = null;
+    const dialPromise = new Promise<FakeStream>((r) => { resolveDial = r; });
+    const node = makeFakeNode({ onDial: () => dialPromise });
+    const pool = new MessageStreamPool(node, {
+      peerIdFromString: stubPeerIdFromString,
+      keepaliveIntervalMs: 0,
+      idleTimeoutMs: 0,
+    });
+
+    const pSend = pool.send(PEER_A, new TextEncoder().encode('hi'));
+    await flush();
+    // close() runs WHILE the dial is in flight.
+    const closing = pool.close();
+    // Now resolve the dial — pool must NOT install the stream.
+    const lateStream = new FakeStream();
+    resolveDial!(lateStream);
+    await closing;
+    await expect(pSend).rejects.toBeInstanceOf(PooledStreamResetError);
+    // No peer state was registered post-close.
+    expect(pool.size()).toBe(0);
+    // The late stream was aborted by the pool (no leaked alive stream).
+    await flush();
+    expect(lateStream.abortReason).not.toBeNull();
+  });
+
   it('honors caller-supplied timeoutMs above the pool default (Codex #560 round 2)', async () => {
     vi.useFakeTimers();
     try {

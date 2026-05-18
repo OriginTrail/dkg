@@ -417,20 +417,30 @@ export class ProtocolRouter {
     // substrate outbox can retry; without bubbling we'd convert a
     // genuine transport failure into a phantom one-shot fallback and
     // mask the underlying issue.
+    // Overall wall-clock budget guard. Codex PR #560 round-4 caught
+    // that the pool branch and the one-shot fallback each got a
+    // FRESH `timeoutMs` budget — a slow pool failure followed by a
+    // slow one-shot retry could blow the API contract by ~2x. We
+    // now stamp the start, share a single AbortSignal across both
+    // branches, and compute a remaining-budget that the one-shot
+    // fallback honors. The shared signal aborts BOTH the pool
+    // attempt and any one-shot retry as soon as the overall budget
+    // is exhausted.
+    const overallStartedAt = Date.now();
+    const overallDeadline = AbortSignal.timeout(timeoutMs);
+
     const overlay = this.pooledByLogical.get(protocolId);
     const memoizedVariant = this.peerWireVariantFor(peerIdStr, protocolId);
     if (overlay && memoizedVariant !== 'one-shot') {
       try {
+        const remainingForPool = Math.max(0, timeoutMs - (Date.now() - overallStartedAt));
         const response = await overlay.pool.send(peerIdStr, data, {
-          signal: AbortSignal.timeout(timeoutMs),
-          // Thread the router's per-call timeout into the pool's
-          // own request timer so a caller asking for, say, 60s
-          // isn't silently capped at the pool's 20s default. The
-          // pool's signal-abort path covers the wall-clock budget;
-          // the request-timer is the in-pool fallback when the
-          // signal isn't observed (e.g. mid-write). Codex PR #560
-          // round 2.
-          timeoutMs,
+          // Share the OVERALL deadline so a fall-through to one-shot
+          // doesn't get a fresh budget. Codex PR #560 round 4.
+          signal: overallDeadline,
+          // Thread the remaining wall-clock into the pool's own
+          // request timer so it lines up with the shared deadline.
+          timeoutMs: remainingForPool,
         });
         this.memoizePeerWire(peerIdStr, protocolId, 'pooled');
         return response;
@@ -468,13 +478,26 @@ export class ProtocolRouter {
       }
     }
 
+    // One-shot path: reuse the OVERALL wall-clock budget rather
+    // than starting a fresh timer. If the pool branch already
+    // consumed most of `timeoutMs`, the one-shot retry inherits the
+    // remainder — and `overallDeadline` aborts mid-attempt the
+    // moment the total budget is exhausted. Codex PR #560 round 4.
+    const remainingMs = Math.max(0, timeoutMs - (Date.now() - overallStartedAt));
+    if (remainingMs === 0) {
+      throw new Error(
+        `send timeout: pooled fallback exhausted the ${timeoutMs}ms budget before one-shot attempt`,
+      );
+    }
     const libp2p = this.node.libp2p;
     const { peerIdFromString } = await import('@libp2p/peer-id');
     const peerId = peerIdFromString(peerIdStr);
-    const startedAt = Date.now();
+    const startedAt = overallStartedAt;
 
     if (parallelPaths > 1) {
-      const multipathSignal = AbortSignal.timeout(timeoutMs);
+      // Reuse the overall budget rather than starting a fresh one
+      // — see comment above. Codex PR #560 round 4.
+      const multipathSignal = overallDeadline;
       // Multi-path pre-attempt — race up to N live connections.
       // Returns the response on a winning path, or null if there
       // weren't enough live candidates (or all candidates failed).
