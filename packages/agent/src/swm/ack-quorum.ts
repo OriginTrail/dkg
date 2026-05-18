@@ -480,9 +480,25 @@ export function createSwmAckQuorum(deps: SwmAckQuorumDeps): SwmAckQuorum {
       const record = records.get(shareOperationId);
       if (!record) return;
       if (!record.expectedMembers.delete(peerId)) return;
-      // If the dropped peer was the ONLY thing keeping us below
-      // threshold, completion fires immediately. Mirror the
-      // `onAck` / `track` paths' completion check.
+      // PR-H round 2 (codex feedback on #582 round 2): special-case
+      // the "all-rejected, nobody accepted" terminal. Without this,
+      // dropPeer'ing the LAST remaining recipient when no acks have
+      // arrived would empty `expectedMembers`, `ackPctOf` would
+      // return 1 (its `size === 0 → 1` happy-path guard), and
+      // `completeRecord` would fire — converting an all-rejected
+      // share into a false success and skewing the
+      // `shareAckQuorum.completed` SLO metric. Treat it as a
+      // deadline-expiry instead: same observer the hard-deadline
+      // path uses, so operators see one consistent "share failed"
+      // signal regardless of whether failure came from time-out or
+      // unanimous rejection.
+      if (record.expectedMembers.size === 0 && record.acked.size === 0) {
+        expireRecord(record);
+        return;
+      }
+      // Normal path: dropping a peer may have shrunken the
+      // denominator past the quorum threshold. Mirror the `onAck`
+      // / `track` paths' completion check.
       if (ackPctOf(record) >= record.quorumThreshold) {
         completeRecord(record);
       }

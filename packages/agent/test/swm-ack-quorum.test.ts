@@ -659,6 +659,76 @@ describe('createSwmAckQuorum: dropPeer (PR-H bug 2)', () => {
     const q = makeQuorum();
     expect(() => q.dropPeer('op-unknown', 'p1')).not.toThrow();
   });
+
+  /**
+   * PR-H round 2 (codex feedback on #582 round 2): if dropPeer
+   * empties `expectedMembers` while `acked` is also empty
+   * (all-rejected, nobody accepted), the share MUST surface as
+   * a deadline-expiry — NOT a completion. The naive
+   * implementation would let `ackPctOf` return 1 (the empty-set
+   * guard) and fire `completeRecord`, converting an
+   * all-rejection into a false success and skewing the SLO
+   * metric.
+   */
+  it('treats an all-rejected share (no acks) as deadline-expired, NOT completed', () => {
+    let expiredCalls = 0;
+    let completedCalls = 0;
+    const q = makeQuorum({
+      observers: {
+        onDeadlineExpired: () => { expiredCalls += 1; },
+        onQuorumCompleted: () => { completedCalls += 1; },
+      },
+    });
+    q.track({
+      shareOperationId: 'op-all-rejected',
+      cgId: 'cg',
+      expectedMembers: ['p1', 'p2'],
+      payload: PAYLOAD,
+      enumerationSource: 'allowlist',
+    });
+
+    q.dropPeer('op-all-rejected', 'p1');
+    q.dropPeer('op-all-rejected', 'p2');
+
+    expect(completedCalls).toBe(0);
+    expect(expiredCalls).toBe(1);
+    expect(q.stats().completed).toBe(0);
+    expect(q.stats().deadlineExpired).toBe(1);
+    expect(q.stats().pending).toBe(0);
+    expect(q.inspect('op-all-rejected')).toBeUndefined();
+  });
+
+  /**
+   * Companion to the all-rejected test: when SOME peers acked
+   * before all remaining peers rejected, dropPeer'ing the last
+   * non-acked peer is a legitimate completion (the share got
+   * acks from everyone it possibly could). Pins the
+   * "expectedMembers empty BUT acked non-empty" branch as
+   * complete, not expired.
+   */
+  it('completes when dropPeer empties expected but acked has at least one entry', () => {
+    let expiredCalls = 0;
+    let completedCalls = 0;
+    const q = makeQuorum({
+      observers: {
+        onDeadlineExpired: () => { expiredCalls += 1; },
+        onQuorumCompleted: () => { completedCalls += 1; },
+      },
+    });
+    q.track({
+      shareOperationId: 'op-partial-then-drop',
+      cgId: 'cg',
+      expectedMembers: ['p1', 'p2'],
+      payload: PAYLOAD,
+      enumerationSource: 'allowlist',
+    });
+
+    q.onAck('op-partial-then-drop', 'p1');
+    q.dropPeer('op-partial-then-drop', 'p2');
+
+    expect(completedCalls).toBe(1);
+    expect(expiredCalls).toBe(0);
+  });
 });
 
 describe('createSwmAckQuorum: error isolation', () => {
