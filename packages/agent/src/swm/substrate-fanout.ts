@@ -96,6 +96,14 @@ export interface FanOutPlan {
    * `useSubstrate === false`. Already de-duplicated and
    * self-excluded by `CGMemberEnumerator`; this module does NOT
    * filter further.
+   *
+   * PR-J round 2 (codex RED #3 on #584): for `topic-subscribers`
+   * CGs this is the `CGMemberEnumeration.substrateEligibleMembers`
+   * subset when an `isPeerDialable` predicate was wired —
+   * potentially smaller than `enumeratedMembers`. For
+   * `allowlist` CGs the substrate target IS the full enumerated
+   * set (curated CGs deliberately track offline allowlistees so
+   * the watchdog can fire substrate top-up on reconnect).
    */
   substrateMembers: readonly string[];
   /**
@@ -189,6 +197,16 @@ export interface ChooseFanOutTierInput {
 export function chooseFanOutTier(input: ChooseFanOutTierInput): FanOutPlan {
   const { enumeration, maxSubstrateMembers } = input;
   const enumeratedCount = enumeration.members.length;
+  // PR-J round 2 (codex RED #3 on #584): substrate target may be
+  // a subset of `members` when the enumerator's `isPeerDialable`
+  // filter dropped ghost peer-exchange entries. `members` stays
+  // as the full gossip-eligible set (drives `enumeratedMembers`
+  // → SwmAckQuorum.expectedMembers); the substrate target uses
+  // the filtered subset when available. For curated
+  // (`allowlist`) CGs the enumerator never populates this field
+  // (we deliberately track offline allowlistees), so the
+  // fallback to `members` preserves curated semantics.
+  const substrateTarget = enumeration.substrateEligibleMembers ?? enumeration.members;
 
   switch (enumeration.source) {
     case 'allowlist':
@@ -205,7 +223,7 @@ export function chooseFanOutTier(input: ChooseFanOutTierInput): FanOutPlan {
         return {
           useSubstrate: true,
           useGossip: true,
-          substrateMembers: enumeration.members,
+          substrateMembers: substrateTarget,
           enumeratedMembers: enumeration.members,
           enumerationSource: 'topic-subscribers',
           enumeratedCount,
