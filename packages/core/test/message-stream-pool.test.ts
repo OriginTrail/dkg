@@ -639,4 +639,89 @@ describe('MessageStreamPool', () => {
 
     await pool.close();
   });
+
+  it('rejects immediately if signal already aborted before send() (Codex #560 round 2)', async () => {
+    const node = makeFakeNode();
+    const pool = new MessageStreamPool(node, {
+      peerIdFromString: stubPeerIdFromString,
+      keepaliveIntervalMs: 0,
+      idleTimeoutMs: 0,
+    });
+
+    const ac = new AbortController();
+    ac.abort();
+    const pSend = pool.send(PEER_A, new TextEncoder().encode('preborn'), { signal: ac.signal });
+    await expect(pSend).rejects.toThrow(/aborted/);
+    // Critically: no dial was attempted (we MUST NOT hit the wire
+    // for a request that was cancelled before it was even sent).
+    expect(node.state.dials.get(PEER_A) ?? 0).toBe(0);
+
+    await pool.close();
+  });
+
+  it('rejects if signal aborts mid-dial, without writing to the wire (Codex #560 round 2)', async () => {
+    let resolveDial: ((s: FakeStream) => void) | null = null;
+    const dialPromise = new Promise<FakeStream>((r) => {
+      resolveDial = r;
+    });
+    const node = makeFakeNode({
+      onDial: () => dialPromise,
+    });
+    const pool = new MessageStreamPool(node, {
+      peerIdFromString: stubPeerIdFromString,
+      keepaliveIntervalMs: 0,
+      idleTimeoutMs: 0,
+    });
+
+    const ac = new AbortController();
+    const pSend = pool.send(PEER_A, new TextEncoder().encode('inflight'), { signal: ac.signal });
+    await flush();
+    // Dial in flight, not yet resolved. Abort now.
+    ac.abort();
+    // Let the dial resolve AFTER abort.
+    const stream = new FakeStream();
+    resolveDial!(stream);
+    await expect(pSend).rejects.toThrow(/aborted/);
+    // The request must NOT have written to the stream.
+    expect(stream.sent.length).toBe(0);
+
+    await pool.close();
+  });
+
+  it('honors caller-supplied timeoutMs above the pool default (Codex #560 round 2)', async () => {
+    vi.useFakeTimers();
+    try {
+      const node = makeFakeNode();
+      const pool = new MessageStreamPool(node, {
+        peerIdFromString: stubPeerIdFromString,
+        keepaliveIntervalMs: 0,
+        idleTimeoutMs: 0,
+        requestTimeoutMs: 1000,
+      });
+
+      // Caller asks for 5x the pool default — must NOT be capped.
+      const pSend = pool.send(PEER_A, new TextEncoder().encode('long'), {
+        timeoutMs: 5000,
+      });
+      // Pump open + write paths.
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(0);
+
+      // At T=1500ms (past pool default), the request must still be pending.
+      await vi.advanceTimersByTimeAsync(1500);
+      let settled = false;
+      pSend.then(() => { settled = true; }, () => { settled = true; });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(settled).toBe(false);
+
+      // At T=5000ms (caller's budget), the request must reject with
+      // the pool's recoverable timeout error.
+      await vi.advanceTimersByTimeAsync(3600);
+      await expect(pSend).rejects.toBeInstanceOf(PooledStreamResetError);
+
+      await pool.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

@@ -177,6 +177,13 @@ interface PendingRequest {
   signal?: AbortSignal;
   enqueuedAt: number;
   abortListener?: () => void;
+  /**
+   * Per-call response timeout in ms, or `undefined` to use the
+   * pool-wide default. Threaded from `send()`'s `opts.timeoutMs` so
+   * callers asking for a larger budget than the pool default aren't
+   * silently capped at 20s (Codex PR #560 round-2 review).
+   */
+  perRequestTimeoutMs?: number;
 }
 
 interface PerPeerState {
@@ -298,7 +305,7 @@ export class MessageStreamPool {
   send(
     peerIdStr: string,
     payload: Uint8Array,
-    opts: { signal?: AbortSignal } = {},
+    opts: { signal?: AbortSignal; timeoutMs?: number } = {},
   ): Promise<Uint8Array> {
     if (this.closed) {
       return Promise.reject(new PooledStreamResetError('pool closed'));
@@ -311,6 +318,15 @@ export class MessageStreamPool {
         reject,
         signal: opts.signal,
         enqueuedAt: this.clock(),
+        // If the caller supplied a per-call timeout, honor it
+        // regardless of the pool-wide default. Otherwise fall back
+        // to the pool's `requestTimeoutMs` at schedule time. Codex
+        // PR #560 round-2 caught: previously `router.send(...,
+        // { timeoutMs: 60_000 })` was silently capped at 20s.
+        perRequestTimeoutMs:
+          typeof opts.timeoutMs === 'number' && opts.timeoutMs > 0
+            ? opts.timeoutMs
+            : undefined,
       };
       // Track every outstanding request so `close()` can reject any
       // that haven't reached an installed state yet (dial still in
@@ -334,11 +350,31 @@ export class MessageStreamPool {
     // exactly once regardless of which path resolves the request.
     this.wrapTerminal(req);
 
+    // Pre-dial abort fast-path. Codex PR #560 round-2 review caught
+    // this: if the caller's signal is already aborted by the time
+    // dispatchSend runs, we MUST reject before doing any work — not
+    // attempt the dial, not queue the request, not write on the
+    // wire. Otherwise the request silently outlives the caller's
+    // cancel budget.
+    if (req.signal?.aborted) {
+      req.reject(new Error('request aborted'));
+      return;
+    }
+
     let state: PerPeerState;
     try {
       state = await this.getOrOpenPeer(peerIdStr, req.signal);
     } catch (err) {
       req.reject(this.toResetError(err, 'open failed'));
+      return;
+    }
+
+    // Re-check after the await — the signal may have aborted while
+    // `getOrOpenPeer` was resolving the peer + dialing. Without this
+    // second checkpoint, an abort that fires mid-dial gets ignored
+    // and the request still hits the wire. Codex PR #560 round-2.
+    if (req.signal?.aborted) {
+      req.reject(new Error('request aborted'));
       return;
     }
 
@@ -671,7 +707,12 @@ export class MessageStreamPool {
   }
 
   private scheduleRequestTimeout(state: PerPeerState, req: PendingRequest): void {
-    if (this.requestTimeoutMs <= 0) return;
+    // Per-call timeout takes precedence over the pool-wide default;
+    // both 0 and negative disable the timer. Codex PR #560 round-2:
+    // previously the per-call value was silently capped at the
+    // pool's `requestTimeoutMs` (default 20s).
+    const effective = req.perRequestTimeoutMs ?? this.requestTimeoutMs;
+    if (effective <= 0) return;
     const t = setTimeout(() => {
       if (state.inFlight !== req) return;
       // Treat as recoverable so the substrate outbox retries.
@@ -680,7 +721,7 @@ export class MessageStreamPool {
       req.reject(err);
       // Trigger a teardown — a stalled stream is unlikely to recover.
       this.handleReaderEnd(state, err).catch(() => undefined);
-    }, this.requestTimeoutMs);
+    }, effective);
     if (typeof (t as unknown as { unref?: () => void }).unref === 'function') {
       (t as unknown as { unref: () => void }).unref();
     }

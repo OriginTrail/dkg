@@ -333,11 +333,29 @@ export class ProtocolRouter {
   unregister(protocolId: string): void {
     this.handlers.delete(protocolId);
     this.node.libp2p.unhandle(protocolId);
-    // If we had a pooled overlay for this logical protocol, leave
-    // it in place — the pool's libp2p.handle was already
-    // unregistered by `closePooling` if that path was used; bare
-    // `unregister` is a per-handler operation that doesn't touch
-    // the pool.
+    // If a pooled overlay is attached to this logical protocol, tear
+    // it down too. Codex PR #560 round-2: leaving the overlay alive
+    // means the `/dkg/10.0.2/...` wire handler stays advertised on
+    // libp2p, and any peer that already memoized this side as
+    // "pooled" will keep dialing the wire variant — but the inbound
+    // handler is gone, so each dial answers "no application
+    // handler" instead of cleanly falling back. The pool's
+    // `close()` `unhandle`s its wire protocol AND rejects every
+    // outstanding request with a recoverable error (substrate
+    // outbox retries → next dial sees protocol-unsupported → memo
+    // flips to one-shot → fallback path runs).
+    //
+    // Fire-and-forget the async close: `unregister` is sync by
+    // contract, and the close is idempotent + safe even if the
+    // pool tears down before its handlers detach from libp2p.
+    // Errors are swallowed (a teardown failure here doesn't block
+    // re-registration).
+    const overlay = this.pooledByLogical.get(protocolId);
+    if (overlay) {
+      this.pooledByLogical.delete(protocolId);
+      this.logicalByWire.delete(overlay.pool.pooledProtocolId);
+      overlay.pool.close().catch(() => undefined);
+    }
   }
 
   async send(
@@ -371,6 +389,14 @@ export class ProtocolRouter {
       try {
         const response = await overlay.pool.send(peerIdStr, data, {
           signal: AbortSignal.timeout(timeoutMs),
+          // Thread the router's per-call timeout into the pool's
+          // own request timer so a caller asking for, say, 60s
+          // isn't silently capped at the pool's 20s default. The
+          // pool's signal-abort path covers the wall-clock budget;
+          // the request-timer is the in-pool fallback when the
+          // signal isn't observed (e.g. mid-write). Codex PR #560
+          // round 2.
+          timeoutMs,
         });
         this.memoizePeerWire(peerIdStr, protocolId, 'pooled');
         return response;

@@ -99,6 +99,12 @@ function makeRouterFixture(opts: {
    * throw on pooled protocol, succeed on logical).
    */
   onDial?: (peerStr: string, protocols: string | string[]) => Promise<FakeStream>;
+  /**
+   * Spy hook for `libp2p.unhandle(protocolId)`. Tests can use it to
+   * assert that both logical and pooled wire handlers are released
+   * (Codex PR #560 round-2 unregister leak).
+   */
+  onUnhandle?: (protocolId: string) => void;
 } = {}): RouterFixture {
   const dialed: Array<{ peer: string; protocols: string | string[] }> = [];
   const streamsByCall: FakeStream[] = [];
@@ -114,7 +120,9 @@ function makeRouterFixture(opts: {
         return stream as unknown as import('@libp2p/interface').Stream;
       },
       handle: () => undefined,
-      unhandle: () => undefined,
+      unhandle: (protocolId: string) => {
+        if (opts.onUnhandle) opts.onUnhandle(protocolId);
+      },
       getConnections: () => [],
       peerStore: { get: async () => ({ addresses: [] }) },
     },
@@ -372,6 +380,30 @@ describe('ProtocolRouter pooled overlay', () => {
     expect(fixture.router.peerWireVariantFor(PEER_NEW, '/dkg/10.0.1/message')).toBe('pooled');
 
     await fixture.router.closePooling();
+  });
+
+  it('unregister(logicalId) tears down the pooled wire handler (Codex #560 round 2)', async () => {
+    const unhandleCalls: string[] = [];
+    const fixture = makeRouterFixture({
+      onUnhandle: (protocolId) => {
+        unhandleCalls.push(protocolId);
+      },
+    });
+    fixture.router.register('/dkg/10.0.1/message', async () => new Uint8Array([0xaa]));
+    fixture.router.enablePooling('/dkg/10.0.1/message', {
+      keepaliveIntervalMs: 0,
+      idleTimeoutMs: 0,
+      peerIdFromString: (s) => ({ toString: () => s }) as unknown,
+    });
+
+    fixture.router.unregister('/dkg/10.0.1/message');
+    await flush();
+
+    // Both the logical AND the wire protocol must have been unhandled.
+    expect(unhandleCalls).toContain('/dkg/10.0.1/message');
+    expect(unhandleCalls).toContain(POOLED_MESSAGE_PROTOCOL);
+    // Overlay is fully detached — pooledStatus reports it gone.
+    expect(fixture.router.pooledStatus()).toEqual([]);
   });
 
   it('primes peerResolver before pool dial (cold-peer recovery, Codex #560 round 1)', async () => {
