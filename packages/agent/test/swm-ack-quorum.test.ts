@@ -455,6 +455,115 @@ describe('createSwmAckQuorum: tick + watchdog + deadline', () => {
   });
 });
 
+describe('createSwmAckQuorum: rearmWatchdog (PR-H bug 1)', () => {
+  it('re-arms the watchdog so it can fire again after another watchdogMs', () => {
+    let nowMs = 1_000_000;
+    const { calls, fn } = makeTopUp();
+    const q = makeQuorum({ now: () => nowMs, topUp: fn });
+
+    q.track({
+      shareOperationId: 'op-rearm',
+      cgId: 'cg',
+      expectedMembers: ['p1', 'p2', 'p3'],
+      payload: PAYLOAD,
+      enumerationSource: 'allowlist',
+      watchdogMs: 30_000,
+      deadlineHardMs: 5 * 60_000,
+    });
+
+    nowMs += 30_000;
+    q.tick();
+    expect(calls).toHaveLength(1);
+    expect(q.stats().watchdogFired).toBe(1);
+    expect(q.inspect('op-rearm')?.watchdogFired).toBe(true);
+
+    nowMs += 60_000;
+    q.tick();
+    expect(calls).toHaveLength(1);
+
+    q.rearmWatchdog('op-rearm');
+    expect(q.inspect('op-rearm')?.watchdogFired).toBe(false);
+    expect(q.inspect('op-rearm')?.watchdogArmedAtMs).toBe(nowMs);
+
+    nowMs += 20_000;
+    q.tick();
+    expect(calls).toHaveLength(1);
+
+    nowMs += 10_000;
+    q.tick();
+    expect(calls).toHaveLength(2);
+    expect(q.stats().watchdogFired).toBe(2);
+  });
+
+  it('rearm does NOT extend the hard deadline (deadline reference is the original startedAtMs)', () => {
+    let nowMs = 1_000_000;
+    const { calls, fn } = makeTopUp();
+    const onDeadlineExpired = vi.fn();
+    const q = makeQuorum({
+      now: () => nowMs,
+      topUp: fn,
+      observers: { onDeadlineExpired },
+    });
+
+    q.track({
+      shareOperationId: 'op-rearm-dl',
+      cgId: 'cg',
+      expectedMembers: ['p1', 'p2', 'p3'],
+      payload: PAYLOAD,
+      enumerationSource: 'allowlist',
+      watchdogMs: 30_000,
+      deadlineHardMs: 2 * 60_000,
+    });
+
+    nowMs += 30_000;
+    q.tick();
+    expect(calls).toHaveLength(1);
+
+    nowMs += 60_000;
+    q.rearmWatchdog('op-rearm-dl');
+
+    nowMs += 31_000;
+    q.tick();
+
+    expect(q.stats().deadlineExpired).toBe(1);
+    expect(q.inspect('op-rearm-dl')).toBeUndefined();
+    expect(onDeadlineExpired).toHaveBeenCalledTimes(1);
+  });
+
+  it('rearm on an unknown shareOperationId is a no-op (does not throw)', () => {
+    const q = makeQuorum();
+    expect(() => q.rearmWatchdog('op-unknown')).not.toThrow();
+    expect(q.stats()).toMatchObject({ pending: 0 });
+  });
+
+  it('rearm before the first watchdog fire pushes the first fire out by the elapsed gap', () => {
+    let nowMs = 1_000_000;
+    const { calls, fn } = makeTopUp();
+    const q = makeQuorum({ now: () => nowMs, topUp: fn });
+
+    q.track({
+      shareOperationId: 'op-early-rearm',
+      cgId: 'cg',
+      expectedMembers: ['p1', 'p2'],
+      payload: PAYLOAD,
+      enumerationSource: 'allowlist',
+      watchdogMs: 30_000,
+      deadlineHardMs: 5 * 60_000,
+    });
+
+    nowMs += 10_000;
+    q.rearmWatchdog('op-early-rearm');
+
+    nowMs += 25_000;
+    q.tick();
+    expect(calls).toHaveLength(0);
+
+    nowMs += 10_000;
+    q.tick();
+    expect(calls).toHaveLength(1);
+  });
+});
+
 describe('createSwmAckQuorum: error isolation', () => {
   it('throwing observer does not crash the tick', () => {
     let nowMs = 1_000_000;

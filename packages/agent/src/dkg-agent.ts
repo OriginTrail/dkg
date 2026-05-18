@@ -6167,6 +6167,25 @@ export class DKGAgent {
     const wh = this.getOrCreateSharedMemoryHandler();
     const outcome = await wh.handle(data, fromPeerId);
     if (outcome.applied) {
+      // PR-H bug 2: emit SwmShareAck on substrate-applied shares
+      // too (not just gossip-applied). Pre-PR-H the sender only
+      // counted substrate-`delivered` peers via the in-process
+      // bookkeeper, which silently dropped any peer that started
+      // as `queued`/`inFlight` and was delivered LATER by the
+      // outbox — the outbox-completion callback isn't wired to
+      // the quorum, so a successful eventual delivery never
+      // called `onAck`. Those peers stayed pending until the
+      // watchdog fired a top-up they didn't need.
+      //
+      // The fix is symmetric: the receiver emits an ack on
+      // apply regardless of which transport delivered the
+      // share. The publisher's `SwmAckQuorum.onAck` is
+      // idempotent (no-op when the peer is already in the
+      // `acked` set), so a fast substrate-bookkeeper ack
+      // followed by a redundant SwmShareAck is harmless.
+      // Late deliveries now reach quorum the same way fast
+      // ones do.
+      this.maybeEmitSwmShareAck(outcome).catch(() => { /* swallowed; logged inside */ });
       return new Uint8Array();
     }
     if (outcome.retryable) {
@@ -9111,15 +9130,15 @@ export class DKGAgent {
     this.gossip.onMessage(swmTopic, async (_topic, data, from) => {
       const wh = this.getOrCreateSharedMemoryHandler();
       const outcome = await wh.handle(data, from);
-      // rc.9 PR-D: emit SwmShareAck on gossip-applied shares so
-      // the publisher's SwmAckQuorum can compute per-share
-      // delivery quorum. Substrate-applied shares (via
-      // PROTOCOL_SWM_UPDATE → handleSwmUpdate) DO NOT emit a
-      // separate ack — the substrate response is itself the ack
-      // signal at the substrate layer (consumed by PR-C's
-      // classifySendResult / pre-acked set passed to
-      // SwmAckQuorum.track). Doing both would double-count
-      // delivery to peers reachable via both transports.
+      // Emit SwmShareAck on gossip-applied shares so the
+      // publisher's SwmAckQuorum can compute per-share delivery
+      // quorum. PR-H bug 2 made this symmetric — `handleSwmUpdate`
+      // emits one too on substrate-applied shares — so the
+      // quorum sees the same ack signal regardless of which
+      // transport delivered. A peer reachable via BOTH
+      // transports may produce two acks (substrate bookkeeper
+      // + this receiver ack); that's fine — `SwmAckQuorum.onAck`
+      // dedups via `record.acked.has(fromPeerId)`.
       //
       // Best-effort throughout: missing metadata fields, failed
       // sendReliable, throws — all swallowed. The publisher's
@@ -9423,6 +9442,22 @@ export class DKGAgent {
       ctx,
       `SWM ack-quorum watchdog firing substrate top-up for ${shareOperationId} to ${missingPeers.length} peer(s) (cg=${cgId})`,
     );
+    // PR-H bug 1: track per-peer outcomes so we can decide
+    // post-fan-out whether to re-arm the watchdog. The pre-PR-H
+    // implementation ignored outcomes entirely except for the
+    // `delivered` → onAck call, which left `retryable` peers
+    // stranded: the wire `sendReliable` returned `delivered:
+    // true` (with a 0x02 sentinel response body), so the
+    // substrate outbox saw success and did NOT retry, but the
+    // receiver had transient-rejected the apply so the peer
+    // never ack'd. With `watchdogFired` already true on the
+    // tracking record, the watchdog couldn't fire again — the
+    // share sat pending until `deadlineHardMs` (5 min) for no
+    // useful reason. We now count retryable outcomes and
+    // explicitly `rearmWatchdog` if any survived, so the next
+    // tick fires another top-up `watchdogMs` from now (hard
+    // deadline still enforced from original `startedAtMs`).
+    let retryableCount = 0;
     await Promise.allSettled(missingPeers.map(async (peerId: string) => {
       try {
         const sendResult = await this.messenger.sendReliable(peerId, PROTOCOL_SWM_UPDATE, payload, {
@@ -9432,12 +9467,21 @@ export class DKGAgent {
         const classified = classifySendResult(peerId, sendResult);
         if (classified.outcome === 'delivered') {
           this.swmAckQuorum?.onAck(shareOperationId, peerId);
+        } else if (classified.outcome === 'retryable') {
+          retryableCount += 1;
         }
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err);
         this.log.warn(ctx, `SWM top-up to ${peerId} failed: ${reason}`);
       }
     }));
+    if (retryableCount > 0) {
+      this.log.info(
+        ctx,
+        `SWM top-up saw ${retryableCount} retryable receiver(s) — re-arming watchdog`,
+      );
+      this.swmAckQuorum?.rearmWatchdog(shareOperationId);
+    }
   }
 
   /**

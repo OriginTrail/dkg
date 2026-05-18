@@ -28,15 +28,26 @@
  *      transition is deterministic on `track` / `onAck` / `tick`
  *      inputs.
  *
- *   3. **Watchdog fires once per record.** The first `tick`
- *      after `startedAtMs + watchdogMs` AND quorum-not-yet-met
+ *   3. **Watchdog fires once per re-arm window.** The first `tick`
+ *      after `watchdogArmedAtMs + watchdogMs` AND quorum-not-yet-met
  *      dispatches the substrate top-up. Subsequent ticks before
- *      deadline don't re-fire — if the top-up succeeded the acks
- *      will land and complete quorum; if it failed, repeating it
- *      every 5s would just amplify the wire-load for no benefit
- *      (the substrate's own outbox has the retry budget). PR-G
- *      may revisit if soak data shows the once-only policy
- *      drops too many shares.
+ *      the next re-arm don't re-fire — if the top-up's wire
+ *      layer succeeded (`delivered` or permanent `rejected`)
+ *      there's no signal that further top-ups would help, and
+ *      hammering at every interval just amplifies wire-load for
+ *      no benefit (the substrate outbox owns retry for
+ *      `queued` / `inFlight` outcomes).
+ *
+ *      The PR-H exception: when the receiver returns the
+ *      `FANOUT_RESPONSE_RETRYABLE` (0x02) sentinel — meaning
+ *      "transient apply error, retry later" — the outbox sees
+ *      `delivered: true` at the wire level and WON'T retry.
+ *      For those outcomes the caller (DKGAgent.swmSubstrateTopUp)
+ *      explicitly calls {@link rearmWatchdog} so the next tick
+ *      fires another top-up `watchdogMs` later, giving upstream
+ *      state more time to converge. The hard deadline
+ *      (`startedAtMs + deadlineHardMs`) is immutable — re-arming
+ *      doesn't extend the total tracking lifetime.
  *
  *   4. **Deadline reaps records.** At `startedAtMs + deadlineHardMs`,
  *      a record is dropped from tracking regardless of ack state.
@@ -205,6 +216,20 @@ export interface SwmAckQuorum {
   stats(): SwmAckQuorumStats;
   /** Test/debug helper: snapshot a single record by id (or undefined if not tracked). */
   inspect(shareOperationId: string): TrackedRecordSnapshot | undefined;
+  /**
+   * Re-arm the watchdog for an existing record so it can fire
+   * another substrate top-up after `watchdogMs` elapses from
+   * NOW. No-op if the record is unknown (already completed or
+   * expired). Intended for the caller's substrate top-up
+   * handler to invoke when peers returned a transient/retryable
+   * outcome (e.g. `FANOUT_RESPONSE_RETRYABLE` sentinel) and
+   * neither completed quorum nor surfaced through the substrate
+   * outbox's own retry. The hard deadline
+   * (`startedAtMs + deadlineHardMs`) is unaffected — re-arming
+   * does NOT extend total tracking lifetime; it only resets
+   * the per-tick watchdog timer.
+   */
+  rearmWatchdog(shareOperationId: string, nowMs?: number): void;
 }
 
 /** Read-only snapshot returned by {@link SwmAckQuorum.inspect}. */
@@ -216,6 +241,7 @@ export interface TrackedRecordSnapshot {
   ackPct: number;
   watchdogFired: boolean;
   startedAtMs: number;
+  watchdogArmedAtMs: number;
   watchdogMs: number;
   deadlineHardMs: number;
   enumerationSource: CGMemberEnumeration['source'];
@@ -234,7 +260,17 @@ interface TrackedRecord {
   quorumThreshold: number;
   watchdogMs: number;
   deadlineHardMs: number;
+  /** Immutable creation timestamp — reference for `deadlineHardMs` reap. */
   startedAtMs: number;
+  /**
+   * Mutable watchdog timer reference. Equals `startedAtMs` on
+   * `track()`; updated to the current time on `rearmWatchdog()`
+   * (PR-H bug 1 — retryable top-ups). The next watchdog fire is
+   * `watchdogArmedAtMs + watchdogMs`. The hard deadline is
+   * always computed from `startedAtMs`, so re-arming does not
+   * extend total tracking lifetime.
+   */
+  watchdogArmedAtMs: number;
   watchdogFired: boolean;
   enumerationSource: CGMemberEnumeration['source'];
 }
@@ -321,6 +357,7 @@ export function createSwmAckQuorum(deps: SwmAckQuorumDeps): SwmAckQuorum {
         if (expectedMembers.has(p)) acked.add(p);
       }
 
+      const startedAtMs = now();
       const record: TrackedRecord = {
         shareOperationId: input.shareOperationId,
         cgId: input.cgId,
@@ -330,7 +367,8 @@ export function createSwmAckQuorum(deps: SwmAckQuorumDeps): SwmAckQuorum {
         quorumThreshold: threshold,
         watchdogMs: Math.max(0, input.watchdogMs ?? DEFAULT_WATCHDOG_MS),
         deadlineHardMs: Math.max(0, input.deadlineHardMs ?? DEFAULT_DEADLINE_HARD_MS),
-        startedAtMs: now(),
+        startedAtMs,
+        watchdogArmedAtMs: startedAtMs,
         watchdogFired: false,
         enumerationSource: input.enumerationSource,
       };
@@ -362,7 +400,15 @@ export function createSwmAckQuorum(deps: SwmAckQuorumDeps): SwmAckQuorum {
           expireRecord(record);
           continue;
         }
-        if (!record.watchdogFired && age >= record.watchdogMs) {
+        // PR-H bug 1: watchdog timer is keyed off
+        // `watchdogArmedAtMs` (mutable on rearm), NOT
+        // `startedAtMs`. After a retryable top-up, the caller
+        // calls `rearmWatchdog()` which resets this; the next
+        // watchdog fire is `watchdogMs` from rearm. Hard
+        // deadline above still uses `startedAtMs` so re-arming
+        // does not extend total lifetime.
+        const watchdogAge = t - record.watchdogArmedAtMs;
+        if (!record.watchdogFired && watchdogAge >= record.watchdogMs) {
           if (ackPctOf(record) < record.quorumThreshold) {
             fireWatchdog(record);
           }
@@ -391,10 +437,18 @@ export function createSwmAckQuorum(deps: SwmAckQuorumDeps): SwmAckQuorum {
         ackPct: ackPctOf(record),
         watchdogFired: record.watchdogFired,
         startedAtMs: record.startedAtMs,
+        watchdogArmedAtMs: record.watchdogArmedAtMs,
         watchdogMs: record.watchdogMs,
         deadlineHardMs: record.deadlineHardMs,
         enumerationSource: record.enumerationSource,
       };
+    },
+
+    rearmWatchdog(shareOperationId: string, nowMs?: number): void {
+      const record = records.get(shareOperationId);
+      if (!record) return;
+      record.watchdogArmedAtMs = nowMs ?? now();
+      record.watchdogFired = false;
     },
   };
 }

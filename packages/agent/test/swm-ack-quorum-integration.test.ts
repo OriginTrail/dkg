@@ -677,4 +677,191 @@ describe('DKGAgent SwmAckQuorum integration (rc.9 PR-D)', () => {
     // pending until a SwmShareAck arrives (or watchdog fires).
     expect(record?.acked).toEqual([]);
   });
+
+  /**
+   * PR-H bug 1: when substrate top-up returns the 0x02
+   * retryable sentinel, the watchdog MUST be re-armed so the
+   * next tick fires another top-up. Pre-PR-H `watchdogFired`
+   * stayed `true` after the first fire so the record sat
+   * pending until `deadlineHardMs` (5 min) even though the
+   * 0x02 sentinel was an explicit "retry later" signal.
+   *
+   * Exercises the production callback chain via
+   * `invokeSwmSubstrateTopUpForTests` (bypassing the 5s
+   * setInterval so the test isn't real-time-flaky) and asserts
+   * the watchdog state transitions through fire → rearm.
+   */
+  it('PR-H bug 1: substrate top-up with retryable outcomes re-arms the watchdog', async () => {
+    const agent = register(await createAgent('AckQuorumHBug1Rearm'));
+    const gossip = new CapturingGossip();
+    gossip.subscribers = ['12D3KooWRetry1', '12D3KooWRetry2'];
+    (agent as unknown as { gossip: CapturingGossip }).gossip = gossip;
+
+    const { install } = stubMessengerSendReliable((_peerId, _proto, msgId) => {
+      const isTopUp = msgId?.startsWith('swm-topup-');
+      if (!isTopUp) {
+        return { delivered: false, queued: true, attempts: 1, messageId: 'q-init', error: 'transient', nextAttemptAtMs: Date.now() + 1000 };
+      }
+      return { delivered: true, response: new Uint8Array([0x02]), attempts: 1, messageId: msgId! };
+    });
+    install(agent);
+
+    const { shareOperationId } = await agent.share('cg-h-bug1-rearm', [{
+      subject: 'urn:test:hbug1', predicate: 'http://schema.org/name', object: '"hbug1"', graph: '',
+    }]);
+
+    const before = agent.getSwmAckQuorumRecordSnapshotForTests(shareOperationId);
+    expect(before?.watchdogFired).toBe(false);
+    const watchdogArmedAtInitially = before?.watchdogArmedAtMs ?? 0;
+
+    const quorum = (agent as unknown as {
+      getOrCreateSwmAckQuorum: () => { tick: (now?: number) => void };
+    }).getOrCreateSwmAckQuorum();
+    quorum.tick(Date.now() + 30_001);
+
+    await agent.invokeSwmSubstrateTopUpForTests({
+      shareOperationId,
+      cgId: 'cg-h-bug1-rearm',
+      payload: new Uint8Array([0xde, 0xad]),
+      missingPeers: ['12D3KooWRetry1', '12D3KooWRetry2'],
+    });
+
+    const after = agent.getSwmAckQuorumRecordSnapshotForTests(shareOperationId);
+    expect(after).toBeDefined();
+    expect(after?.acked).toEqual([]);
+    expect(after?.watchdogFired).toBe(false);
+    expect(after?.watchdogArmedAtMs).toBeGreaterThanOrEqual(watchdogArmedAtInitially);
+  });
+
+  /**
+   * PR-H bug 1 negative case: when the top-up returns ONLY
+   * non-retryable outcomes (delivered + rejected), the
+   * watchdog MUST stay fired and NOT re-arm. Pins the
+   * asymmetric semantics so a future refactor doesn't
+   * accidentally re-arm on every top-up (which would amplify
+   * wire-load for no benefit).
+   */
+  it('PR-H bug 1: substrate top-up with NO retryable outcomes does NOT re-arm the watchdog', async () => {
+    const agent = register(await createAgent('AckQuorumHBug1NoRearm'));
+    const gossip = new CapturingGossip();
+    gossip.subscribers = ['12D3KooWFinal1', '12D3KooWFinal2'];
+    (agent as unknown as { gossip: CapturingGossip }).gossip = gossip;
+
+    const { install } = stubMessengerSendReliable((peerId, _proto, msgId) => {
+      const isTopUp = msgId?.startsWith('swm-topup-');
+      if (!isTopUp) {
+        return { delivered: false, queued: true, attempts: 1, messageId: 'q-init', error: 'transient', nextAttemptAtMs: Date.now() + 1000 };
+      }
+      if (peerId === '12D3KooWFinal1') return { delivered: true, response: new Uint8Array(), attempts: 1, messageId: msgId! };
+      return { delivered: true, response: new Uint8Array([0x01]), attempts: 1, messageId: msgId! };
+    });
+    install(agent);
+
+    const { shareOperationId } = await agent.share('cg-h-bug1-norearm', [{
+      subject: 'urn:test:hbug1n', predicate: 'http://schema.org/name', object: '"hbug1n"', graph: '',
+    }]);
+
+    const quorum = (agent as unknown as {
+      getOrCreateSwmAckQuorum: () => { tick: (now?: number) => void };
+    }).getOrCreateSwmAckQuorum();
+    quorum.tick(Date.now() + 30_001);
+
+    await agent.invokeSwmSubstrateTopUpForTests({
+      shareOperationId,
+      cgId: 'cg-h-bug1-norearm',
+      payload: new Uint8Array([0xde, 0xad]),
+      missingPeers: ['12D3KooWFinal1', '12D3KooWFinal2'],
+    });
+
+    const after = agent.getSwmAckQuorumRecordSnapshotForTests(shareOperationId);
+    expect(after?.acked).toEqual(['12D3KooWFinal1']);
+    expect(after?.watchdogFired).toBe(true);
+  });
+
+  /**
+   * PR-H bug 2: late substrate deliveries (peers that started
+   * as queued/inFlight on the synchronous fan-out and were
+   * delivered LATER by the outbox) MUST reach the quorum. The
+   * fix is for receivers to emit SwmShareAck on substrate
+   * apply too — symmetric with the gossip-apply path. Pre-PR-H
+   * only the gossip path emitted, so outbox-delivered peers
+   * never ack'd and stayed pending until deadlineHardMs even
+   * though the share had actually applied.
+   */
+  it('PR-H bug 2: handleSwmUpdate emits SwmShareAck on substrate-applied shares (late deliveries reach quorum)', async () => {
+    const agent = register(await createAgent('AckQuorumHBug2SubstrateAck'));
+    const gossip = new CapturingGossip();
+    (agent as unknown as { gossip: CapturingGossip }).gossip = gossip;
+
+    const { calls, install } = stubMessengerSendReliable(new Map());
+    install(agent);
+
+    const wh = (agent as unknown as {
+      getOrCreateSharedMemoryHandler: () => { handle: (data: Uint8Array, from: string) => Promise<unknown> };
+    }).getOrCreateSharedMemoryHandler();
+    const origHandle = wh.handle.bind(wh);
+    wh.handle = async () => ({
+      applied: true,
+      cgId: 'cg-h-bug2',
+      shareOperationId: 'op-h-bug2-late-delivery',
+      publisherPeerId: '12D3KooWPublisherLate',
+    });
+
+    try {
+      const handler = (agent as unknown as {
+        handleSwmUpdate: (data: Uint8Array, from: string) => Promise<Uint8Array>;
+      }).handleSwmUpdate.bind(agent);
+
+      const response = await handler(new Uint8Array([0x01, 0x02, 0x03]), '12D3KooWSenderForLate');
+      expect(response).toEqual(new Uint8Array());
+
+      await new Promise((r) => setTimeout(r, 5));
+
+      const ackCalls = calls.filter((c) => c.protocolId === PROTOCOL_SWM_SHARE_ACK);
+      expect(ackCalls).toHaveLength(1);
+      expect(ackCalls[0]?.peerId).toBe('12D3KooWPublisherLate');
+      expect(ackCalls[0]?.method).toBe('sendToPeer');
+    } finally {
+      wh.handle = origHandle;
+    }
+  });
+
+  /**
+   * PR-H bug 2 negative case: when `handleSwmUpdate` returns
+   * `applied: false` (retryable OR permanent rejection), it
+   * MUST NOT emit a SwmShareAck — only successful applies ack.
+   */
+  it('PR-H bug 2: handleSwmUpdate does NOT emit SwmShareAck on rejected (retryable or permanent) substrate shares', async () => {
+    const agent = register(await createAgent('AckQuorumHBug2NoAckOnReject'));
+    const gossip = new CapturingGossip();
+    (agent as unknown as { gossip: CapturingGossip }).gossip = gossip;
+
+    const { calls, install } = stubMessengerSendReliable(new Map());
+    install(agent);
+
+    const wh = (agent as unknown as {
+      getOrCreateSharedMemoryHandler: () => { handle: (data: Uint8Array, from: string) => Promise<unknown> };
+    }).getOrCreateSharedMemoryHandler();
+    const origHandle = wh.handle.bind(wh);
+
+    try {
+      wh.handle = async () => ({ applied: false, retryable: true, reason: 'transient apply error' });
+      const handler = (agent as unknown as {
+        handleSwmUpdate: (data: Uint8Array, from: string) => Promise<Uint8Array>;
+      }).handleSwmUpdate.bind(agent);
+      const retryResp = await handler(new Uint8Array([0x01]), '12D3KooWSenderRetry');
+      expect(retryResp).toEqual(new Uint8Array([0x02]));
+
+      wh.handle = async () => ({ applied: false, retryable: false, reason: 'bad signature' });
+      const rejectResp = await handler(new Uint8Array([0x02]), '12D3KooWSenderReject');
+      expect(rejectResp).toEqual(new Uint8Array([0x01]));
+
+      await new Promise((r) => setTimeout(r, 5));
+
+      const ackCalls = calls.filter((c) => c.protocolId === PROTOCOL_SWM_SHARE_ACK);
+      expect(ackCalls).toEqual([]);
+    } finally {
+      wh.handle = origHandle;
+    }
+  });
 });
