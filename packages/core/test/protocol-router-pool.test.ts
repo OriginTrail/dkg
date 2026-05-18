@@ -451,6 +451,60 @@ describe('ProtocolRouter pooled overlay', () => {
     ).not.toThrow();
   });
 
+  it('unregister(logicalId) clears peerWireVariant memos for that logical (Codex #560 round 5)', () => {
+    const fixture = makeRouterFixture();
+    fixture.router.register('/dkg/10.0.1/message', async () => new Uint8Array());
+    fixture.router.register('/dkg/other/1.0.0', async () => new Uint8Array());
+    fixture.router.memoizePeerWire(PEER_NEW, '/dkg/10.0.1/message', 'one-shot');
+    fixture.router.memoizePeerWire(PEER_NEW, '/dkg/other/1.0.0', 'pooled');
+    expect(fixture.router.peerWireVariantFor(PEER_NEW, '/dkg/10.0.1/message')).toBe('one-shot');
+    expect(fixture.router.peerWireVariantFor(PEER_NEW, '/dkg/other/1.0.0')).toBe('pooled');
+
+    fixture.router.unregister('/dkg/10.0.1/message');
+    // Memos for the unregistered logical must be cleared.
+    expect(fixture.router.peerWireVariantFor(PEER_NEW, '/dkg/10.0.1/message')).toBeUndefined();
+    // Memos for OTHER logicals are preserved.
+    expect(fixture.router.peerWireVariantFor(PEER_NEW, '/dkg/other/1.0.0')).toBe('pooled');
+  });
+
+  it('one-shot backoff respects the overall deadline (Codex #560 round 5)', async () => {
+    let oneShotAttempts = 0;
+    const fixture = makeRouterFixture({
+      onDial: async (_peer, protocols) => {
+        if (protocols === POOLED_MESSAGE_PROTOCOL) {
+          // Pool burns ~half the overall budget then fails recoverably.
+          await new Promise((r) => setTimeout(r, 200));
+          throw new Error('no valid addresses');
+        }
+        oneShotAttempts += 1;
+        // One-shot always fails recoverably — would normally retry
+        // with 500ms backoff, then 1000ms.
+        throw new Error('stream reset');
+      },
+    });
+    fixture.router.enablePooling('/dkg/10.0.1/message', {
+      keepaliveIntervalMs: 0,
+      idleTimeoutMs: 0,
+      peerIdFromString: (s) => ({ toString: () => s }) as unknown,
+    });
+
+    const started = Date.now();
+    await expect(
+      fixture.router.send(PEER_NEW, '/dkg/10.0.1/message', new TextEncoder().encode('x'), {
+        timeoutMs: 400,
+      }),
+    ).rejects.toThrow();
+    const elapsed = Date.now() - started;
+    // Total elapsed must respect the 400ms budget — the bug shape
+    // would let one-shot's 500ms backoff push us to ~900ms.
+    expect(elapsed).toBeLessThan(650);
+    // The first one-shot attempt should have run; the SECOND
+    // attempt's backoff aborts on overall deadline.
+    expect(oneShotAttempts).toBeGreaterThanOrEqual(1);
+
+    await fixture.router.closePooling();
+  });
+
   it('unregister(logicalId) tears down the pooled wire handler (Codex #560 round 2)', async () => {
     const unhandleCalls: string[] = [];
     const fixture = makeRouterFixture({

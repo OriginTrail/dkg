@@ -688,6 +688,43 @@ describe('MessageStreamPool', () => {
     await pool.close();
   });
 
+  it('inbound stream closes local half on remote clean EOF (Codex #560 round 5)', async () => {
+    let stubHandle:
+      | ((stream: unknown, conn: { remotePeer: unknown }) => void)
+      | null = null;
+    const pool = new MessageStreamPool(
+      {
+        libp2p: {
+          dialProtocol: () => { throw new Error('not used'); },
+          handle: (
+            _p: string,
+            h: (stream: unknown, conn: { remotePeer: unknown }) => void,
+          ) => { stubHandle = h; },
+          unhandle: () => undefined,
+        },
+      } as unknown as PoolNode,
+      { keepaliveIntervalMs: 0, idleTimeoutMs: 0 },
+    );
+    pool.registerHandler(async () => new TextEncoder().encode('ack'));
+    expect(stubHandle).not.toBeNull();
+
+    const inboundStream = new FakeStream();
+    stubHandle!(inboundStream as unknown, { remotePeer: { toString: () => PEER_A } });
+    await flush();
+    // Remote closes its write side cleanly — no frames, just EOF.
+    inboundStream.endRemote();
+    // Let the handler's for-await loop exit + finally run.
+    await flush();
+    await flush();
+    await flush();
+    // Local half should now be closed — without the round-5 fix
+    // it stayed 'open'.
+    expect(inboundStream.writeStatus).toBe('closed');
+    expect(inboundStream.abortReason).toBeNull(); // ← graceful, not abort
+
+    await pool.close();
+  });
+
   it('inbound handler receives the full remotePeer object (real PeerId parity, Codex #560 round 3)', async () => {
     let stubHandle:
       | ((stream: unknown, conn: { remotePeer: unknown }) => void)

@@ -915,6 +915,15 @@ export class MessageStreamPool {
       return;
     }
 
+    // Track whether we exited via clean EOF or an error path so the
+    // finally block knows which teardown to use. Codex PR #560
+    // round-5: previously the `for await` loop simply returned on
+    // remote-side EOF and we never closed our local half. That
+    // leaked half-open substream state until the underlying
+    // connection died (and circuit-relay reservations along with
+    // it). The finally now guarantees the local side is released
+    // on every exit path.
+    let cleanEof = true;
     try {
       for await (const frame of decodeFrames(
         stream as unknown as AsyncIterable<Uint8Array>,
@@ -962,12 +971,26 @@ export class MessageStreamPool {
         }
       }
     } catch (err) {
+      cleanEof = false;
       // Reader-side decode error or transport error — abort and let
       // the dialer reconnect.
       try {
         stream.abort(err instanceof Error ? err : new Error('reader error'));
       } catch {
         // already torn down
+      }
+    } finally {
+      // Clean EOF: remote half-closed gracefully. Close our local
+      // write side too so the substream releases cleanly. Without
+      // this, the local half stays open until the underlying
+      // connection dies, leaking inbound stream slots and (on
+      // circuit-relay-v2) relay reservations.
+      if (cleanEof) {
+        try {
+          await stream.close();
+        } catch {
+          // already torn down
+        }
       }
     }
   }

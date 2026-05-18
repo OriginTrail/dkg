@@ -390,6 +390,14 @@ export class ProtocolRouter {
       this.logicalByWire.delete(overlay.pool.pooledProtocolId);
       overlay.pool.close().catch(() => undefined);
     }
+    // Clear any per-peer wire-variant memos for this logical
+    // protocol. Codex PR #560 round-5 caught: without this, a peer
+    // pinned to 'one-shot' for protocol X would stay pinned across
+    // unregister + re-register + re-enable-pooling cycles, never
+    // renegotiating the pooled wire variant until process restart.
+    for (const [_peerId, inner] of this.peerWireVariant) {
+      inner.delete(protocolId);
+    }
   }
 
   async send(
@@ -746,7 +754,25 @@ export class ProtocolRouter {
         }
         if (!isRecoverableSendError(err) || attempt >= 2) throw err;
         const backoff = (attempt + 1) * 500;
-        await new Promise(r => setTimeout(r, backoff));
+        // Make the backoff abortable so the overall deadline is
+        // honored. Codex PR #560 round-5 caught: if the pool burned
+        // most of `timeoutMs`, the one-shot retry's fixed 500/1000ms
+        // sleep would still push past the deadline before the next
+        // attempt could fail loudly. Now: if `overallDeadline` fires
+        // during the backoff, we throw immediately rather than
+        // continuing into another attempt that's already over budget.
+        await new Promise<void>((resolve, reject) => {
+          const t = setTimeout(resolve, backoff);
+          const onAbort = (): void => {
+            clearTimeout(t);
+            reject(new Error(`send timeout: backoff aborted by overall deadline (${timeoutMs}ms)`));
+          };
+          if (overallDeadline.aborted) {
+            onAbort();
+            return;
+          }
+          overallDeadline.addEventListener('abort', onAbort, { once: true });
+        });
       }
     }
     throw lastErr;
