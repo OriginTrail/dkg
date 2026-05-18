@@ -142,6 +142,32 @@ export interface MessageStreamPoolOptions {
    * internals.
    */
   peerIdFromString?: (s: string) => unknown;
+  /**
+   * Address-resolution hook called BEFORE `dialProtocol` on the
+   * first stream open per peer. Critical for cold-peer first
+   * contact: libp2p's peerStore may be empty/stale for a peer we
+   * haven't recently talked to, and `dialProtocol` returns
+   * "no valid addresses for peer" without ever consulting the DHT
+   * / agent registry / RFC 04 routing.
+   *
+   * The wrapping `ProtocolRouter` always primes via `peerResolver`
+   * on the one-shot path (RFC 07 §3.2 — see `protocol-router.ts`
+   * for the rationale + grep gate). Threading the same hook here
+   * keeps the pooled path on parity: the pool's first dial pays
+   * the same priming cost as the one-shot first dial, no more, no
+   * less.
+   *
+   * Codex PR #560 review: without this, enabling pooling
+   * regressed first-contact delivery to cold peers — the failure
+   * mode the soak postmortem was built around.
+   *
+   * Failure-tolerant by contract: any throw from `primePeer` is
+   * swallowed (the dial itself surfaces a real transport error if
+   * the peer is genuinely unreachable). Per-step timeout is owned
+   * by the caller — pass an `AbortSignal` tied to the overall
+   * send budget.
+   */
+  primePeer?: (peerIdStr: string, opts: { signal?: AbortSignal }) => Promise<void>;
 }
 
 interface PendingRequest {
@@ -218,6 +244,7 @@ export class MessageStreamPool {
   private readonly clock: () => number;
   private readonly peerIdFromStringOverride?: (s: string) => unknown;
   private peerIdFromString?: (s: string) => unknown;
+  private readonly primePeer?: (peerIdStr: string, opts: { signal?: AbortSignal }) => Promise<void>;
   private inboundHandler: PooledStreamHandler | null = null;
   private inboundRegistered = false;
   private closed = false;
@@ -250,6 +277,7 @@ export class MessageStreamPool {
     this.maxFrameBytes = options.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES;
     this.clock = options.clock ?? (() => Date.now());
     this.peerIdFromStringOverride = options.peerIdFromString;
+    this.primePeer = options.primePeer;
   }
 
   /** Protocol id this pool advertises on the wire. */
@@ -321,13 +349,35 @@ export class MessageStreamPool {
 
     if (req.signal) {
       const onAbort = (): void => {
-        // Caller cancelled. If still queued, splice out and reject.
-        // If in-flight, leave the request entry in place — the
-        // reader will resolve/reject when the response arrives or
-        // the stream tears down. Don't tear down the stream just
-        // because one caller cancelled.
+        // Caller cancelled. Three cases:
+        //
+        //   1. Request still queued — splice out, reject the caller's
+        //      promise. The stream and other peers are unaffected.
+        //
+        //   2. Request in-flight — we cannot let `state.inFlight` stay
+        //      pointed at the cancelled request: the remote will
+        //      eventually send a response frame for THIS request, and
+        //      since the pool serialises (one in-flight at a time)
+        //      every later send queues behind it, waiting forever for
+        //      a response that's already been delivered to nobody.
+        //      Codex PR #560 round-1 review caught this — one cancel
+        //      poisons every subsequent send to the same peer.
+        //
+        //      Fix: treat in-flight cancel as a stream reset. Reject
+        //      every pending request with a recoverable error so the
+        //      substrate outbox retries them on a fresh stream, then
+        //      tear down state via the standard reader-end path.
+        //      The next send opens a clean stream.
+        //
+        //   3. Request neither queued nor in-flight (dispatchSend not
+        //      yet awaited / already settled). No-op — `wrapTerminal`
+        //      ensures resolve/reject is idempotent.
         if (state.inFlight === req) {
           req.reject(new Error('request aborted'));
+          this.handleReaderEnd(
+            state,
+            new PooledStreamResetError('in-flight request aborted'),
+          ).catch(() => undefined);
           return;
         }
         const idx = state.queue.indexOf(req);
@@ -474,6 +524,32 @@ export class MessageStreamPool {
     if (pending) return pending;
 
     const opening = (async (): Promise<PerPeerState> => {
+      // Cold-peer priming. The pool dials the wire variant directly
+      // via `dialProtocol`, which consults libp2p's peerStore for
+      // addresses. If peerStore is empty / stale (the soak-
+      // postmortem Window D shape — first contact after a node
+      // restart, or after a long quiet), the dial returns
+      // "no valid addresses for peer" and the pool fails the open
+      // without ever asking the DHT / agent registry / RFC 04
+      // routing surface where the peer might be findable.
+      //
+      // The wrapping `ProtocolRouter` always primes via
+      // `peerResolver.resolve` before its one-shot dial — see RFC
+      // 07 §3.2. Without the same priming here, enabling pooling
+      // would regress first-contact delivery to cold peers.
+      //
+      // Best-effort: any throw is swallowed (the dial below
+      // surfaces a real transport error if the peer is genuinely
+      // unreachable; the prime hook's only job is to populate
+      // peerStore so the dial CAN reach a routable address).
+      if (this.primePeer) {
+        try {
+          await this.primePeer(peerIdStr, { signal });
+        } catch {
+          // primePeer never gates the dial — the existing
+          // identify-cache path may still resolve.
+        }
+      }
       const peerId = await this.resolvePeerId(peerIdStr);
       const stream = await this.node.libp2p.dialProtocol(peerId, this.protocolId, {
         runOnLimitedConnection: true,

@@ -46,6 +46,31 @@ describe('encodeVarint / tryDecodeVarint', () => {
     expect(() => tryDecodeVarint(overlong, 0)).toThrow(/exceeds 5 bytes/);
   });
 
+  it('rejects 5-byte varints whose high bits would exceed 32-bit range (Codex #560 round 1)', () => {
+    // 5-byte varint with the 5th byte payload = 0x10 (decimal 16):
+    // value = 0 + 0*7 + 0*14 + 0*21 + 16*2^28 = 0x100000000 = 2^32.
+    // 32-bit unsigned only supports 0..2^32-1, so this MUST throw
+    // rather than silently wrapping (the old `<<` impl truncated
+    // the high bits and returned a much smaller value, letting a
+    // malicious frame-length prefix desynchronise the decoder).
+    const bytes = new Uint8Array([0x80, 0x80, 0x80, 0x80, 0x10]);
+    expect(() => tryDecodeVarint(bytes, 0)).toThrow(/exceeds 32-bit range/);
+
+    // 5-byte varint with the 5th byte payload = 0x7f (the MAX
+    // possible 7-bit payload). This is way beyond 2^32; must also
+    // throw.
+    const bytesMax = new Uint8Array([0xff, 0xff, 0xff, 0xff, 0x7f]);
+    expect(() => tryDecodeVarint(bytesMax, 0)).toThrow(/exceeds 32-bit range/);
+  });
+
+  it('accepts the largest valid 5-byte varint (2^32 - 1)', () => {
+    // 4 high-bit continuation bytes of 0xff + final byte 0x0f.
+    // value = 0x7f + 0x7f<<7 + 0x7f<<14 + 0x7f<<21 + 0x0f<<28
+    //       = 0x0fffffff + 0xf0000000 = 0xffffffff = 4294967295
+    const bytes = new Uint8Array([0xff, 0xff, 0xff, 0xff, 0x0f]);
+    expect(tryDecodeVarint(bytes, 0)).toEqual({ value: 0xffffffff, bytesRead: 5 });
+  });
+
   it('throws on out-of-range input to encodeVarint', () => {
     expect(() => encodeVarint(-1)).toThrow(RangeError);
     expect(() => encodeVarint(1.5)).toThrow(RangeError);

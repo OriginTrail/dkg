@@ -553,4 +553,90 @@ describe('MessageStreamPool', () => {
   it('POOLED_MESSAGE_PROTOCOL is the wire-version-bump constant', () => {
     expect(POOLED_MESSAGE_PROTOCOL).toBe('/dkg/10.0.2/message');
   });
+
+  it('aborting an in-flight request tears down the stream so the pool does not stall (Codex #560 round 1)', async () => {
+    const node = makeFakeNode();
+    const pool = new MessageStreamPool(node, {
+      peerIdFromString: stubPeerIdFromString,
+      keepaliveIntervalMs: 0,
+      idleTimeoutMs: 0,
+    });
+
+    // Start a send that we will abort.
+    const ac = new AbortController();
+    const cancelled = pool.send(PEER_A, new TextEncoder().encode('first'), { signal: ac.signal });
+    await flush();
+    const firstStream = node.state.streams.get(PEER_A)!;
+    expect(firstStream).toBeDefined();
+    // Cancel mid-flight (no response fed yet).
+    ac.abort();
+    await expect(cancelled).rejects.toThrow(/aborted/);
+
+    // After cancel, the pool should have torn down state — next send
+    // opens a fresh stream rather than queuing behind the dead in-flight.
+    await flush();
+    const next = pool.send(PEER_A, new TextEncoder().encode('second'));
+    await flush();
+    expect(node.state.dials.get(PEER_A)).toBe(2);
+    const secondStream = node.state.streams.get(PEER_A)!;
+    expect(secondStream).not.toBe(firstStream);
+    secondStream.feed(encodeFrame(FrameType.RESPONSE, new TextEncoder().encode('ok')));
+    expect(new TextDecoder().decode(await next)).toBe('ok');
+
+    await pool.close();
+  });
+
+  it('runs primePeer before dialProtocol on first contact (Codex #560 round 1)', async () => {
+    let primed = false;
+    let dialed = false;
+    const node = makeFakeNode({
+      onDial: async () => {
+        // Dial must run AFTER prime — assert ordering by spying.
+        expect(primed).toBe(true);
+        dialed = true;
+        return new FakeStream();
+      },
+    });
+    const pool = new MessageStreamPool(node, {
+      peerIdFromString: stubPeerIdFromString,
+      keepaliveIntervalMs: 0,
+      idleTimeoutMs: 0,
+      primePeer: async () => {
+        primed = true;
+      },
+    });
+    const pSend = pool.send(PEER_A, new TextEncoder().encode('hi'));
+    await flush();
+    expect(primed).toBe(true);
+    expect(dialed).toBe(true);
+
+    node.state.streams.get(PEER_A)!.feed(
+      encodeFrame(FrameType.RESPONSE, new TextEncoder().encode('ok')),
+    );
+    expect(new TextDecoder().decode(await pSend)).toBe('ok');
+
+    await pool.close();
+  });
+
+  it('primePeer failures are swallowed; dial still attempted', async () => {
+    const node = makeFakeNode();
+    const pool = new MessageStreamPool(node, {
+      peerIdFromString: stubPeerIdFromString,
+      keepaliveIntervalMs: 0,
+      idleTimeoutMs: 0,
+      primePeer: async () => {
+        throw new Error('DHT timeout');
+      },
+    });
+    const pSend = pool.send(PEER_A, new TextEncoder().encode('hi'));
+    await flush();
+    // Dial happened despite the prime throwing.
+    expect(node.state.dials.get(PEER_A)).toBe(1);
+    node.state.streams.get(PEER_A)!.feed(
+      encodeFrame(FrameType.RESPONSE, new TextEncoder().encode('ok')),
+    );
+    expect(new TextDecoder().decode(await pSend)).toBe('ok');
+
+    await pool.close();
+  });
 });

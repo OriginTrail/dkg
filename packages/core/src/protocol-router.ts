@@ -5,7 +5,6 @@ import type { PeerResolver } from './network/peer-resolver.js';
 import {
   MessageStreamPool,
   POOLED_MESSAGE_PROTOCOL,
-  PooledStreamResetError,
   type MessageStreamPoolOptions,
 } from './message-stream-pool.js';
 
@@ -190,6 +189,22 @@ export class ProtocolRouter {
       return;
     }
     const wireProtocolId = options.protocolId ?? POOLED_MESSAGE_PROTOCOL;
+    // Thread the router's `peerResolver` into the pool unless the
+    // caller already supplied a `primePeer` hook. Without this, the
+    // pool would skip resolver priming and regress first-contact
+    // delivery to cold peers (Codex PR #560 review). The router's
+    // own one-shot path already primes per RFC 07 §3.2; this just
+    // keeps the pooled path on parity.
+    const peerResolver = this.peerResolver;
+    const primePeer =
+      options.primePeer ??
+      (peerResolver
+        ? async (peerIdStr: string, opts: { signal?: AbortSignal }) => {
+            await peerResolver
+              .resolve(peerIdStr, { signal: opts.signal })
+              .catch(() => undefined);
+          }
+        : undefined);
     const pool = new MessageStreamPool(
       // The node shape required by the pool overlaps with DKGNode but
       // is narrower; pass the node directly (DKGNode satisfies the
@@ -201,6 +216,7 @@ export class ProtocolRouter {
         ...options,
         protocolId: wireProtocolId,
         maxFrameBytes: options.maxFrameBytes ?? this.maxReadBytes,
+        primePeer,
       },
     );
     this.pooledByLogical.set(logicalProtocolId, {
@@ -350,7 +366,8 @@ export class ProtocolRouter {
     // genuine transport failure into a phantom one-shot fallback and
     // mask the underlying issue.
     const overlay = this.pooledByLogical.get(protocolId);
-    if (overlay && this.peerWireVariantFor(peerIdStr, protocolId) !== 'one-shot') {
+    const memoizedVariant = this.peerWireVariantFor(peerIdStr, protocolId);
+    if (overlay && memoizedVariant !== 'one-shot') {
       try {
         const response = await overlay.pool.send(peerIdStr, data, {
           signal: AbortSignal.timeout(timeoutMs),
@@ -359,19 +376,34 @@ export class ProtocolRouter {
         return response;
       } catch (err) {
         if (isProtocolUnsupportedError(err)) {
-          // Peer doesn't advertise the pooled wire variant. Pin to
-          // one-shot for future sends; fall through to existing
-          // single-path / multi-path logic below.
+          // Definitive: peer doesn't advertise the pooled wire
+          // variant. Pin to one-shot for future sends; fall through
+          // to existing single-path / multi-path logic below.
           this.memoizePeerWire(peerIdStr, protocolId, 'one-shot');
-        } else if (err instanceof PooledStreamResetError) {
-          // Pool-level reset: don't fall through (would silently
-          // double-send on a stream that the pool will re-open on
-          // the next call). Surface the recoverable error to the
-          // caller so the substrate retries through the pool path
-          // next attempt.
+        } else if (memoizedVariant === 'pooled') {
+          // Peer is KNOWN to speak the pooled wire (we've delivered
+          // on it before). This is a transient failure on the held
+          // stream — the pool has already torn down state and will
+          // reopen on the next call. Bubble the recoverable error
+          // so the substrate's outbox retries on the pooled wire
+          // rather than silently switching to one-shot (which would
+          // pay a fresh dial cost when the next pooled retry would
+          // succeed). Codex PR #560 round 1.
           throw err;
         } else {
-          throw err;
+          // First contact + non-protocol error (no valid addresses,
+          // dial timeout, ECONNRESET, etc.). Without this fallback,
+          // enabling pooling would regress first-contact delivery
+          // versus the one-shot path: one-shot has the full
+          // resolver-re-prime + 3x retry budget INTERNAL to a
+          // single send, while the pool has just one dial attempt.
+          // Codex PR #560 round 1 caught this.
+          //
+          // Fall through to one-shot WITHOUT memoizing — next send
+          // retries the pool, and if it succeeds we transition to
+          // pooled steady-state. We only memoize on a definitive
+          // negotiation outcome (success → pooled, unsupported →
+          // one-shot).
         }
       }
     }

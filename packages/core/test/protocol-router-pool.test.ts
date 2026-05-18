@@ -278,7 +278,7 @@ describe('ProtocolRouter pooled overlay', () => {
     expect(fixture.router.pooledStatus()).toEqual([]);
   });
 
-  it('closePooling tears down peer state', async () => {
+  it('closePooling tears down peer state (live peer count drops to zero)', async () => {
     const fixture = makeRouterFixture();
     fixture.router.enablePooling('/dkg/10.0.1/message', {
       keepaliveIntervalMs: 0,
@@ -286,32 +286,41 @@ describe('ProtocolRouter pooled overlay', () => {
       peerIdFromString: (s) => ({ toString: () => s }) as unknown,
     });
 
+    // Open a stream + complete one request so the peer is fully
+    // established (we can then assert closePooling() drops it).
     const pSend = fixture.router.send(
       PEER_NEW,
       '/dkg/10.0.1/message',
       new TextEncoder().encode('a'),
     );
     await flush();
+    fixture.streamsByCall[0]!.feed(encodeFrame(FrameType.RESPONSE, new TextEncoder().encode('ok')));
+    expect(new TextDecoder().decode(await pSend)).toBe('ok');
     expect(fixture.router.pooledStatus()[0].livePeers).toBe(1);
+
     await fixture.router.closePooling();
     expect(fixture.router.pooledStatus()).toEqual([]);
-    await expect(pSend).rejects.toThrow();
   });
 
-  it('pool-level transient errors do not silently fall back', async () => {
+  it('first-contact transient pool error falls through to one-shot (Codex #560 round 1)', async () => {
     let pooledCalls = 0;
     let logicalCalls = 0;
     const fixture = makeRouterFixture({
       onDial: async (_peer, protocols) => {
         if (protocols === POOLED_MESSAGE_PROTOCOL) {
           pooledCalls += 1;
-          // Simulate a transient transport error, NOT a protocol
-          // negotiation failure. Per design this should bubble up
-          // to the caller, not fall back to one-shot.
-          throw new Error('ECONNRESET');
+          // Cold-peer-class failure: no addresses in peerStore. Not
+          // a protocol-negotiation error; without fallback, enabling
+          // pooling would regress first-contact delivery.
+          throw new Error('The dial request has no valid addresses for peer');
         }
         logicalCalls += 1;
-        return new FakeStream();
+        const s = new FakeStream();
+        queueMicrotask(() => {
+          s.feed(new TextEncoder().encode('one-shot-resp'));
+          s.endRemote();
+        });
+        return s;
       },
     });
     fixture.router.enablePooling('/dkg/10.0.1/message', {
@@ -320,15 +329,92 @@ describe('ProtocolRouter pooled overlay', () => {
       peerIdFromString: (s) => ({ toString: () => s }) as unknown,
     });
 
+    const resp = await fixture.router.send(
+      PEER_NEW,
+      '/dkg/10.0.1/message',
+      new TextEncoder().encode('x'),
+    );
+    expect(new TextDecoder().decode(resp)).toBe('one-shot-resp');
+    expect(pooledCalls).toBe(1);
+    expect(logicalCalls).toBe(1);
+    // Crucially we do NOT memoize as one-shot — the failure was
+    // transient, not a definitive protocol-unsupported signal — so
+    // the next send retries the pool.
+    expect(fixture.router.peerWireVariantFor(PEER_NEW, '/dkg/10.0.1/message')).toBeUndefined();
+
+    await fixture.router.closePooling();
+  });
+
+  it('established pooled peer transient errors still bubble (no spurious wire switch)', async () => {
+    // Use a manual peer-wire memo so we can simulate "we already
+    // know this peer is pooled-capable" without the round-trip
+    // setup.
+    const fixture = makeRouterFixture({
+      onDial: async (_peer, protocols) => {
+        if (protocols === POOLED_MESSAGE_PROTOCOL) {
+          throw new Error('ECONNRESET');
+        }
+        return new FakeStream();
+      },
+    });
+    fixture.router.enablePooling('/dkg/10.0.1/message', {
+      keepaliveIntervalMs: 0,
+      idleTimeoutMs: 0,
+      peerIdFromString: (s) => ({ toString: () => s }) as unknown,
+    });
+    // Manually mark the peer as pooled-capable.
+    fixture.router.memoizePeerWire(PEER_NEW, '/dkg/10.0.1/message', 'pooled');
+
     await expect(
       fixture.router.send(PEER_NEW, '/dkg/10.0.1/message', new TextEncoder().encode('x')),
     ).rejects.toThrow();
-    // Pool attempted, but we did NOT call into the one-shot path —
-    // surface to caller so substrate retries on the same wire.
-    expect(pooledCalls).toBe(1);
-    expect(logicalCalls).toBe(0);
+    // Wire memo is preserved — next outbox retry stays on pooled.
+    expect(fixture.router.peerWireVariantFor(PEER_NEW, '/dkg/10.0.1/message')).toBe('pooled');
 
     await fixture.router.closePooling();
+  });
+
+  it('primes peerResolver before pool dial (cold-peer recovery, Codex #560 round 1)', async () => {
+    const resolveCalls: string[] = [];
+    const peerResolver = {
+      resolve: async (peerIdStr: string) => {
+        resolveCalls.push(peerIdStr);
+        return [];
+      },
+    } as unknown as import('../src/network/peer-resolver.js').PeerResolver;
+    let dialCalls = 0;
+    const node = {
+      libp2p: {
+        dialProtocol: async () => {
+          dialCalls += 1;
+          // Assert the resolver ran BEFORE the dial.
+          expect(resolveCalls.length).toBeGreaterThan(0);
+          const s = new FakeStream();
+          return s as unknown as import('@libp2p/interface').Stream;
+        },
+        handle: () => undefined,
+        unhandle: () => undefined,
+        getConnections: () => [],
+        peerStore: { get: async () => ({ addresses: [] }) },
+      },
+    } as unknown as DKGNode;
+    const { ProtocolRouter } = await import('../src/protocol-router.js');
+    const router = new ProtocolRouter(node, { peerResolver });
+    router.enablePooling('/dkg/10.0.1/message', {
+      keepaliveIntervalMs: 0,
+      idleTimeoutMs: 0,
+      peerIdFromString: (s) => ({ toString: () => s }) as unknown,
+    });
+    // Avoid awaiting the send — the FakeStream never responds, so
+    // the test's job is just to verify the prime → dial ordering
+    // happened. Swallow the eventual rejection so it doesn't leak
+    // as an unhandled promise.
+    const pSend = router.send(PEER_NEW, '/dkg/10.0.1/message', new TextEncoder().encode('a'));
+    pSend.catch(() => undefined);
+    await flush();
+    expect(resolveCalls).toEqual([PEER_NEW]);
+    expect(dialCalls).toBe(1);
+    await router.closePooling();
   });
 });
 

@@ -100,22 +100,44 @@ export function encodeVarint(value: number): Uint8Array {
  * `{ value, bytesRead }` on success or `null` if the buffer doesn't
  * yet contain the full varint (caller should buffer more bytes and
  * retry). Throws on overlong / out-of-range encodings.
+ *
+ * Implementation note: accumulates arithmetically rather than via
+ * `<<` shifts because the 5th byte of a varint contributes bits
+ * 28..34 to the result. JavaScript's bitwise operators are 32-bit
+ * signed-coerce, so `(byte & 0x7f) << 28` truncates bits 31..34
+ * and would let a 5-byte varint with payload > 2^32-1 wrap to a
+ * smaller value instead of throwing as the docstring promises.
+ * Codex PR #560 review caught the regression. We use `Math.pow(2,
+ * shift) * payload` to stay in IEEE 754 double space (lossless up
+ * to 2^53) and explicitly reject values >= 2^32 on the 5th byte.
  */
 export function tryDecodeVarint(
   buf: Uint8Array,
   offset = 0,
 ): { value: number; bytesRead: number } | null {
   let value = 0;
-  let shift = 0;
   for (let i = 0; i < MAX_VARINT_BYTES; i++) {
     if (offset + i >= buf.length) return null;
     const byte = buf[offset + i]!;
-    value |= (byte & 0x7f) << shift;
-    if ((byte & 0x80) === 0) {
-      // For JS bitwise ops, values > 2^31 - 1 sign-extend; coerce to unsigned.
-      return { value: value >>> 0, bytesRead: i + 1 };
+    const payload = byte & 0x7f;
+    // On the 5th byte (i === 4) the payload contributes bits 28..34.
+    // Only the low 4 bits (0..15) are representable inside a 32-bit
+    // unsigned integer; anything larger is an out-of-range encoding.
+    if (i === 4 && payload > 0x0f) {
+      throw new RangeError('tryDecodeVarint: varint exceeds 32-bit range');
     }
-    shift += 7;
+    value += payload * Math.pow(2, 7 * i);
+    if ((byte & 0x80) === 0) {
+      // Defensive: ensure we never return a value outside the
+      // documented 0..2^32-1 range, even on legal 5-byte encodings
+      // whose high bits sum to just under the cap. The check above
+      // already covers this in practice, but the bound makes the
+      // post-condition explicit.
+      if (value > 0xffffffff) {
+        throw new RangeError('tryDecodeVarint: varint exceeds 32-bit range');
+      }
+      return { value, bytesRead: i + 1 };
+    }
   }
   throw new RangeError('tryDecodeVarint: varint exceeds 5 bytes');
 }
