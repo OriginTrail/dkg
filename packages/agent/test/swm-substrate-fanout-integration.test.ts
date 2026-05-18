@@ -118,7 +118,11 @@ async function createAgent(name: string): Promise<DKGAgent> {
 
 function installAllReachableLibp2pStub(agent: DKGAgent): void {
   const stub = {
-    getPeers: (): Array<{ toString: () => string }> => [],
+    getPeers: (): Array<{ toString: () => string }> => {
+      const gossip = (agent as unknown as { gossip?: { subscribers?: string[] } }).gossip;
+      const subs = gossip?.subscribers ?? [];
+      return subs.map((id) => ({ toString: () => id }));
+    },
     peerStore: {
       get: async (_peerId: unknown) => ({
         addresses: [{ multiaddr: { toString: () => '/ip4/127.0.0.1/tcp/0' } }],

@@ -9400,6 +9400,57 @@ export class DKGAgent {
    *    bubble out of `enumerate()`, where the R1 try/catch in
    *    `publishWorkspaceGossip` rescues into the gossip-only path.
    */
+  /**
+   * Liveness predicate for the SUBSTRATE TARGET subset of an
+   * enumerated CG. Returns true iff `sendReliable` has a
+   * realistic chance of putting bytes on the wire to this peer.
+   *
+   * **Reachability MUST match what `sendReliable` actually tries**
+   * (codex RED #1 on #584). The router's send path consults
+   * `libp2p.getConnections` (live) AND `libp2p.peerStore` (cached
+   * addresses for dial). Filtering only on `getPeers()` would
+   * silently drop legitimate substrate targets that we briefly
+   * disconnected from but still have addresses for. We
+   * OR-combine the two sources to mirror the send path:
+   * connected OR peerStore-known.
+   *
+   * PeerId hygiene (codex RED #4 on #584 round 2):
+   * `libp2p.peerStore.get` requires a `PeerId` object, NOT a
+   * string. A type-cast call throws on the disconnected-but-
+   * known path in the real libp2p API, which would make this
+   * predicate return false for peers we DO have cached addresses
+   * for — dropping legitimate substrate targets. We parse with
+   * `peerIdFromString` first; on parse failure (malformed
+   * gossipsub entry) the catch returns false (safe drop).
+   *
+   * Pre-start: if libp2p hasn't booted, `getPeers()` throws →
+   * caught → return false → substrate target set is empty →
+   * substrate fan-out is a no-op (gossip still runs). The
+   * pre-start GossipSub subscriber list is normally empty anyway.
+   *
+   * Single source of truth: this method is consumed BOTH by the
+   * CG enumerator (filters topic-subscribers to populate
+   * `substrateEligibleMembers`) AND by `swmSubstrateTopUp` (re-
+   * filters watchdog missingPeers so the top-up doesn't keep
+   * blasting ghost peers that ackQuorum legitimately tracks but
+   * substrate can't reach). PR-J round 2 introduces the second
+   * use to close the watchdog leg of the same soak bug — without
+   * it, the queued counter would inflate once per 30s tick
+   * instead of once per share.
+   */
+  private async isPeerDialable(peerId: string): Promise<boolean> {
+    try {
+      if (this.node.libp2p.getPeers().some((p) => p.toString() === peerId)) {
+        return true;
+      }
+      const { peerIdFromString } = await import('@libp2p/peer-id');
+      const peer = await this.node.libp2p.peerStore.get(peerIdFromString(peerId));
+      return (peer?.addresses?.length ?? 0) > 0;
+    } catch {
+      return false;
+    }
+  }
+
   private getOrCreateCGMemberEnumerator(): CGMemberEnumerator {
     if (!this.cgMemberEnumerator) {
       this.cgMemberEnumerator = createCGMemberEnumerator({
@@ -9408,46 +9459,40 @@ export class DKGAgent {
         getTopicSubscribers: (topic) => this.gossip.getSubscribers(topic),
         topicForCG: (cgId) => contextGraphWorkspaceTopic(cgId),
         getSelfPeerId: () => this.peerId,
-        // PR-J liveness filter: drop GossipSub-advertised subscribers
-        // we have no realistic chance of reaching via the send path.
-        // Bug fix for the 2026-05-18 Miles<->Lex soak where 3-of-4
-        // enumerated public-CG subscribers were ghosts (peer-exchange
-        // residue), every substrate send queued, ackQuorum never
-        // completed.
+        // PR-J liveness filter: marks the substrate target subset
+        // (NOT `members`/`enumeratedMembers`) so the substrate
+        // fan-out doesn't waste sends on peers we have no
+        // addressing for. Bug fix for the 2026-05-18 Miles<->Lex
+        // soak where 3-of-4 enumerated public-CG subscribers were
+        // ghosts (peer-exchange residue) and every substrate send
+        // queued forever.
         //
         // **Reachability MUST match what `sendReliable` actually
-        // tries** (codex RED on #584 round 1). The router's send
-        // path consults libp2p.getConnections (live) AND
+        // tries** (codex RED #1 on #584 round 1). The router's
+        // send path consults libp2p.getConnections (live) AND
         // libp2p.peerStore (cached addresses for dial). Filtering
         // only on `getPeers()` would silently drop legitimate
-        // subscribers that we briefly disconnected from but still
-        // have addresses for. We OR-combine the two sources to
-        // mirror the send path: connected OR peerStore-known.
+        // substrate targets that we briefly disconnected from but
+        // still have addresses for. We OR-combine the two sources
+        // to mirror the send path: connected OR peerStore-known.
+        //
+        // PeerId hygiene (codex RED #4 on #584 round 2):
+        // libp2p.peerStore.get requires a `PeerId` object, NOT a
+        // string. The pre-fix cast threw on the disconnected-but-
+        // known path (real libp2p) and silently returned `false`,
+        // making the filter drop legitimate subscribers that
+        // SHOULD have been dialable. Parse with `peerIdFromString`
+        // first; on parse failure (malformed gossipsub entry)
+        // fall through to the catch → false → safe drop.
         //
         // Pre-start: if libp2p hasn't booted, `getPeers()` throws
-        // → caught → return false → all subscribers filtered out
-        // → source=none → publishWorkspaceGossip's gossip-only
-        // fallback kicks in (preserving the pre-start `share()`
-        // contract documented on the `getSelfPeerId` thunk). The
-        // pre-start GossipSub subscriber list is normally empty
-        // anyway since we haven't joined the mesh yet, so this
-        // path is rare in practice.
-        isPeerDialable: async (peerId) => {
-          try {
-            if (this.node.libp2p.getPeers().some((p) => p.toString() === peerId)) {
-              return true;
-            }
-            // peerStore.get throws on cold-cache miss — treat that
-            // as "we have no addressing info for this peer" =
-            // false. Any addresses present (direct OR circuit
-            // relay) count as dialable; the protocol router will
-            // make the final transport choice.
-            const peer = await this.node.libp2p.peerStore.get(peerId as unknown as Parameters<typeof this.node.libp2p.peerStore.get>[0]);
-            return (peer?.addresses?.length ?? 0) > 0;
-          } catch {
-            return false;
-          }
-        },
+        // → caught → return false → substrate target subset
+        // becomes empty for this CG → substrate fan-out is a
+        // no-op (gossip leg still runs). The pre-start GossipSub
+        // subscriber list is normally empty anyway since we
+        // haven't joined the mesh yet, so this path is rare in
+        // practice.
+        isPeerDialable: (peerId) => this.isPeerDialable(peerId),
       });
     }
     return this.cgMemberEnumerator;
@@ -9508,9 +9553,34 @@ export class DKGAgent {
     missingPeers: readonly string[];
   }): Promise<void> {
     const ctx = createOperationContext('share', shareOperationId);
+    // PR-J round 2: ackQuorum's `expectedMembers` is now the FULL
+    // enumerated set (gossip-eligible) per codex RED #3 on #584.
+    // `missingPeers` therefore includes peers ackQuorum tracks but
+    // substrate can't reach (ghost peer-exchange entries, or
+    // gossip-only-reachable peers without peerStore addresses).
+    // Re-apply the same dialability filter here so the watchdog
+    // top-up doesn't keep blasting wire sends that will queue
+    // forever — that would inflate the `swm.substrateFanout.queued`
+    // counter once per 30s tick for each ghost, recreating the
+    // soak bug at watchdog cadence instead of share cadence.
+    //
+    // Filtered-out peers remain in ackQuorum's expectedMembers and
+    // get reaped via deadlineHardMs if they never ack (a metric
+    // blip, not a wire-load regression — exactly the tradeoff
+    // codex called out as "noise we can't distinguish from
+    // legitimate churn" in the round-2 review).
+    const dialabilityChecks = await Promise.all(missingPeers.map((p) => this.isPeerDialable(p)));
+    const dialableMissingPeers = missingPeers.filter((_, idx) => dialabilityChecks[idx]);
+    if (dialableMissingPeers.length === 0) {
+      this.log.info(
+        ctx,
+        `SWM ack-quorum watchdog skipping substrate top-up for ${shareOperationId} (cg=${cgId}): no dialable peers among ${missingPeers.length} missing`,
+      );
+      return;
+    }
     this.log.info(
       ctx,
-      `SWM ack-quorum watchdog firing substrate top-up for ${shareOperationId} to ${missingPeers.length} peer(s) (cg=${cgId})`,
+      `SWM ack-quorum watchdog firing substrate top-up for ${shareOperationId} to ${dialableMissingPeers.length}/${missingPeers.length} dialable peer(s) (cg=${cgId})`,
     );
     // PR-H bug 1: route per-peer outcomes to the right ack-quorum
     // hook. Pre-PR-H ignored outcomes entirely except for
@@ -9550,7 +9620,7 @@ export class DKGAgent {
     //     publisher) would tighten this further; out of scope
     //     for this PR — see PR #582 comments / follow-up issue.
     let rearmCount = 0;
-    await Promise.allSettled(missingPeers.map(async (peerId: string) => {
+    await Promise.allSettled(dialableMissingPeers.map(async (peerId: string) => {
       try {
         const sendResult = await this.messenger.sendReliable(peerId, PROTOCOL_SWM_UPDATE, payload, {
           messageId: `swm-topup-${shareOperationId}-${peerId}`,

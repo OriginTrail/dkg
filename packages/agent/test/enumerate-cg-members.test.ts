@@ -131,22 +131,29 @@ describe('createCGMemberEnumerator: public CG (topic-subscribers source)', () =>
   });
 
   /**
-   * PR-J (2026-05-18): drop GossipSub-advertised subscribers that
-   * we have no realistic chance of reaching via the send path.
-   * Soak data: the 2026-05-18 Miles<->Lex run enumerated 4
+   * PR-J (2026-05-18): identify GossipSub-advertised subscribers
+   * that the substrate fan-out has no realistic chance of
+   * reaching, so substrate doesn't waste sends on them. Soak
+   * data: the 2026-05-18 Miles<->Lex run enumerated 4
    * subscribers on a CG with one real subscriber — three were
    * ghosts in the local mesh view, every substrate send to them
-   * queued forever, and the ackQuorum's expectedMembers waited on
-   * acks that would never arrive.
+   * queued forever, ackQuorum waited on acks that would never
+   * arrive.
    *
-   * Round 2 (codex feedback on #584): the filter is now async
-   * (the real predicate consults libp2p.peerStore.get for the
-   * non-connected branch) AND is applied OUTSIDE the TTL cache so
-   * a transient disconnect doesn't strand a real subscriber for
-   * up to 60s.
+   * Round 2 (codex feedback on #584):
+   *   - The filter is async (real wiring consults
+   *     libp2p.peerStore.get for the non-connected branch).
+   *   - It's applied OUTSIDE the TTL cache (codex YELLOW round
+   *     1) so a transient disconnect doesn't strand a real
+   *     subscriber for up to 60s.
+   *   - It populates a NEW `substrateEligibleMembers` field
+   *     instead of shrinking `members` in place (codex RED #3
+   *     round 2) — `members` stays as the full gossip-eligible
+   *     set so ackQuorum keeps tracking everyone, and only
+   *     substrate fan-out consults the filtered subset.
    */
   describe('isPeerDialable filter (PR-J)', () => {
-    it('drops topic-subscribers that fail the dialable predicate', async () => {
+    it('populates substrateEligibleMembers with the dialable subset, leaves members unfiltered', async () => {
       const enumerator = createCGMemberEnumerator(makeDeps({
         getContextGraphAllowedPeers: async () => null,
         getTopicSubscribers: () => ['liveA', 'ghostB', 'liveC', 'ghostD'],
@@ -156,13 +163,11 @@ describe('createCGMemberEnumerator: public CG (topic-subscribers source)', () =>
       const result = await enumerator.enumerate('cg-public-ghosts');
 
       expect(result.source).toBe('topic-subscribers');
-      expect(result.members.sort()).toEqual(['liveA', 'liveC']);
+      expect(result.members.sort()).toEqual(['ghostB', 'ghostD', 'liveA', 'liveC']);
+      expect(result.substrateEligibleMembers?.sort()).toEqual(['liveA', 'liveC']);
     });
 
     it('supports an async (Promise-returning) predicate', async () => {
-      // The real wiring in DKGAgent is async (libp2p.peerStore.get
-      // is async). Predicate must be awaited per-peer; throws are
-      // caught and treated as "not dialable".
       const enumerator = createCGMemberEnumerator(makeDeps({
         getContextGraphAllowedPeers: async () => null,
         getTopicSubscribers: () => ['liveA', 'ghostB', 'throwC', 'liveD'],
@@ -175,10 +180,19 @@ describe('createCGMemberEnumerator: public CG (topic-subscribers source)', () =>
       const result = await enumerator.enumerate('cg-public-async');
 
       expect(result.source).toBe('topic-subscribers');
-      expect(result.members.sort()).toEqual(['liveA', 'liveD']);
+      expect(result.members.length).toBe(4);
+      expect(result.substrateEligibleMembers?.sort()).toEqual(['liveA', 'liveD']);
     });
 
-    it('returns source=none when filter removes every subscriber', async () => {
+    /**
+     * Codex RED #3 (round 2): even when EVERY subscriber fails
+     * the dialability filter, `members` MUST stay populated so
+     * ackQuorum tracks all of them. The pre-round-2 design
+     * collapsed `source` to `'none'` and emptied `members` in
+     * this case, silently disabling the watchdog for shares
+     * fanning out to a gossip-only-reachable subscriber set.
+     */
+    it('keeps members populated and source=topic-subscribers even when nobody is dialable', async () => {
       const enumerator = createCGMemberEnumerator(makeDeps({
         getContextGraphAllowedPeers: async () => null,
         getTopicSubscribers: () => ['ghostA', 'ghostB'],
@@ -187,13 +201,12 @@ describe('createCGMemberEnumerator: public CG (topic-subscribers source)', () =>
 
       const result = await enumerator.enumerate('cg-public-all-ghosts');
 
-      expect(result).toEqual({ source: 'none', members: [] });
+      expect(result.source).toBe('topic-subscribers');
+      expect(result.members.sort()).toEqual(['ghostA', 'ghostB']);
+      expect(result.substrateEligibleMembers).toEqual([]);
     });
 
-    it('does NOT apply the filter to the allowlist branch', async () => {
-      // Curated CGs deliberately track offline allowlistees so the
-      // watchdog can fire substrate top-up when they reconnect.
-      // Filtering here would silently regress that behaviour.
+    it('does NOT populate substrateEligibleMembers for the allowlist branch', async () => {
       let isPeerDialableCalled = 0;
       const enumerator = createCGMemberEnumerator(makeDeps({
         getContextGraphAllowedPeers: async () => ['peerA', 'peerB'],
@@ -207,6 +220,7 @@ describe('createCGMemberEnumerator: public CG (topic-subscribers source)', () =>
 
       expect(result.source).toBe('allowlist');
       expect(result.members.sort()).toEqual(['peerA', 'peerB']);
+      expect(result.substrateEligibleMembers).toBeUndefined();
       expect(isPeerDialableCalled).toBe(0);
     });
 
@@ -220,6 +234,7 @@ describe('createCGMemberEnumerator: public CG (topic-subscribers source)', () =>
 
       expect(result.source).toBe('topic-subscribers');
       expect(result.members.sort()).toEqual(['peerA', 'peerB']);
+      expect(result.substrateEligibleMembers).toBeUndefined();
     });
 
     it('filter is applied AFTER dedupAndExcludeSelf', async () => {
@@ -236,15 +251,16 @@ describe('createCGMemberEnumerator: public CG (topic-subscribers source)', () =>
       const result = await enumerator.enumerate('cg-public-filter-order');
 
       expect(result.source).toBe('topic-subscribers');
-      expect(result.members).toEqual(['peerA']);
+      expect(result.members.sort()).toEqual(['peerA', 'peerB']);
+      expect(result.substrateEligibleMembers).toEqual(['peerA']);
       expect(seenByFilter.sort()).toEqual(['peerA', 'peerB']);
     });
 
     /**
-     * Codex YELLOW regression on #584 round 1: the liveness filter
-     * is applied OUTSIDE the 60s TTL cache. A subscriber that
-     * goes from non-dialable → dialable → non-dialable across
-     * three successive calls must surface that exact pattern,
+     * Codex YELLOW regression on #584 round 1: the liveness
+     * filter is applied OUTSIDE the 60s TTL cache. A subscriber
+     * that goes from non-dialable → dialable → non-dialable
+     * across three successive calls must surface that pattern,
      * even when the underlying subscriber snapshot is cached.
      */
     it('filter result reflects current state on every call (not cached)', async () => {
@@ -256,23 +272,19 @@ describe('createCGMemberEnumerator: public CG (topic-subscribers source)', () =>
       }));
 
       const r1 = await enumerator.enumerate('cg-public-cache');
-      expect(r1.source).toBe('none');
+      expect(r1.substrateEligibleMembers).toEqual([]);
+      expect(r1.members).toEqual(['peerA']);
 
       isDialable = true;
       const r2 = await enumerator.enumerate('cg-public-cache');
-      expect(r2.source).toBe('topic-subscribers');
-      expect(r2.members).toEqual(['peerA']);
+      expect(r2.substrateEligibleMembers).toEqual(['peerA']);
 
       isDialable = false;
       const r3 = await enumerator.enumerate('cg-public-cache');
-      expect(r3.source).toBe('none');
+      expect(r3.substrateEligibleMembers).toEqual([]);
     });
 
     it('cached subscriber snapshot is reused across calls (only filter re-runs)', async () => {
-      // Sanity check: the EXPENSIVE work (getSubscribers,
-      // getContextGraphAllowedPeers) is still cached. Only the
-      // cheap liveness filter is invalidated per-call. Verifies
-      // we didn't accidentally undo the TTL optimisation.
       let getSubscribersCalls = 0;
       let getAllowedCalls = 0;
       const enumerator = createCGMemberEnumerator(makeDeps({
