@@ -102,7 +102,10 @@ body.light {
   --text-danger: #b91c1c;
   --text-danger-hover: #991b1b;
   --text-link: #1d4ed8;
-  --layer-working: #a3a3a3;
+  /* `working` darkened from #a3a3a3 → #8a8a8a so the light-theme
+     proportion-bar segment has a visible edge (~3:1 vs the white card)
+     instead of near-invisible 2.0:1 — ui-lead PR6 layerbar note. */
+  --layer-working: #8a8a8a;
   --layer-shared: #737373;
   --layer-verified: #404040;
   --bg: var(--bg-root);

@@ -235,6 +235,21 @@ export function DashboardView() {
     });
   }, []);
 
+  // Drop reports for CGs no longer in the membership set so `reports`
+  // doesn't accumulate orphaned entries across hide/unhide cycles
+  // (qa-lead). The aggregate already iterates `myCgs` so this is
+  // memory hygiene, not a correctness fix — guarded to avoid a loop.
+  useEffect(() => {
+    const ids = new Set(myCgs.map((c) => c.id));
+    setReports((prev) => {
+      const keys = Object.keys(prev);
+      if (keys.every((k) => ids.has(k))) return prev;
+      const next: Record<string, CgReport> = {};
+      for (const k of keys) if (ids.has(k)) next[k] = prev[k];
+      return next;
+    });
+  }, [myCgs]);
+
   const agg = useMemo(() => {
     const entities = { ...ZERO };
     const triples = { ...ZERO };
