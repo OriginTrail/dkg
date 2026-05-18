@@ -114,10 +114,19 @@ export interface PoolNode {
   };
 }
 
-/** Application-level handler signature — identical to ProtocolRouter's. */
+/**
+ * Application-level handler signature for inbound pooled traffic.
+ * `peerId` is whatever libp2p hands us as `connection.remotePeer`
+ * — in production this is a full `PeerId` with `toMultihash()`,
+ * `toBytes()`, `equals()`, etc.; in tests it can be any object
+ * with at least `toString()`. The router wraps this into the same
+ * shape the one-shot path provides before passing to application
+ * handlers, so calling `peerId.toBytes()` from a handler works on
+ * both wire variants (Codex PR #560 round-3).
+ */
 export type PooledStreamHandler = (
   requestData: Uint8Array,
-  peerId: { toString: () => string },
+  peerId: unknown,
 ) => Promise<Uint8Array>;
 
 export interface MessageStreamPoolOptions {
@@ -474,7 +483,13 @@ export class MessageStreamPool {
     this.node.libp2p.handle(
       this.protocolId,
       (stream, connection) => {
-        this.handleInboundStream(stream, connection.remotePeer.toString()).catch((err) => {
+        // Pass the WHOLE `remotePeer` object through (not just its
+        // string form) so application handlers can call methods
+        // like `.toBytes()` / `.toMultihash()` exactly as they do
+        // on the one-shot path. Codex PR #560 round-3 caught this:
+        // previously only `.toString()` was threaded, which meant
+        // pooled traffic broke handlers that worked on one-shot.
+        this.handleInboundStream(stream, connection.remotePeer).catch((err) => {
           // eslint-disable-next-line no-console
           console.error(
             `[MessageStreamPool] inbound stream error on ${this.protocolId}:`,
@@ -823,7 +838,7 @@ export class MessageStreamPool {
     }
   }
 
-  private async handleInboundStream(stream: Stream, remotePeerStr: string): Promise<void> {
+  private async handleInboundStream(stream: Stream, remotePeer: unknown): Promise<void> {
     const handler = this.inboundHandler;
     if (!handler) {
       // No application handler registered yet — reject the stream
@@ -835,10 +850,6 @@ export class MessageStreamPool {
       }
       return;
     }
-
-    const peerIdLike = {
-      toString: () => remotePeerStr,
-    };
 
     try {
       for await (const frame of decodeFrames(
@@ -868,7 +879,7 @@ export class MessageStreamPool {
         // requests on this same peer).
         let response: Uint8Array;
         try {
-          response = await handler(frame.payload, peerIdLike);
+          response = await handler(frame.payload, remotePeer);
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           try {
@@ -897,7 +908,34 @@ export class MessageStreamPool {
     }
   }
 
-  private async handleReaderEnd(state: PerPeerState, err: Error): Promise<void> {
+  /**
+   * Tear down per-peer state. `graceful` controls how we signal the
+   * tear-down to the remote:
+   *
+   *   * `graceful: true` (idle expiry / pool close / unregister) —
+   *     use `stream.close()` to send a FIN. The remote reader sees
+   *     EOF (clean half-close), not RST_STREAM. This matters during
+   *     intentional shutdown: a RST surfaces on the remote as a
+   *     stream reset, which the remote messenger's substrate (or
+   *     ours, on a peer-initiated graceful close) may interpret as
+   *     a transport failure worth re-enqueuing — even though the
+   *     last delivery was complete. Codex PR #560 round-3 caught
+   *     this.
+   *
+   *   * `graceful: false` (transport error, reader threw, write
+   *     failure) — use `stream.abort()` to send RST_STREAM. The
+   *     remote sees the error and acts on it (retry / dial fresh).
+   *
+   * Pending requests are rejected with `PooledStreamResetError`
+   * in BOTH cases. The receiver-side dedup-by-messageId from PR
+   * #534 catches any duplicate retries the substrate generates on
+   * graceful shutdown.
+   */
+  private async handleReaderEnd(
+    state: PerPeerState,
+    err: Error,
+    opts: { graceful?: boolean } = {},
+  ): Promise<void> {
     if (state.closed) return;
     state.closed = true;
     if (state.keepaliveTimer) clearInterval(state.keepaliveTimer);
@@ -921,7 +959,13 @@ export class MessageStreamPool {
     }
 
     try {
-      state.stream.abort(wrapped);
+      if (opts.graceful) {
+        // Best-effort FIN — close() is async, errors during teardown
+        // don't matter (the stream is going away regardless).
+        await state.stream.close();
+      } else {
+        state.stream.abort(wrapped);
+      }
     } catch {
       // already torn down
     }
@@ -934,7 +978,9 @@ export class MessageStreamPool {
 
   private async closePeer(state: PerPeerState, reason: string): Promise<void> {
     if (state.closed) return;
-    await this.handleReaderEnd(state, new PooledStreamResetError(reason));
+    // Graceful — caller invoked this intentionally (idle expiry,
+    // pool close, unregister). Codex PR #560 round-3 fix.
+    await this.handleReaderEnd(state, new PooledStreamResetError(reason), { graceful: true });
   }
 
   private toResetError(err: unknown, fallback: string): PooledStreamResetError {

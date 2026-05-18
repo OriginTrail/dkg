@@ -189,6 +189,26 @@ export class ProtocolRouter {
       return;
     }
     const wireProtocolId = options.protocolId ?? POOLED_MESSAGE_PROTOCOL;
+    // Wire-id collision guard. Codex PR #560 round-3 review caught
+    // that every pool defaults to the same `/dkg/10.0.2/message`
+    // wire id. If a SECOND logical protocol opts in without an
+    // explicit `options.protocolId`, its `libp2p.handle()` would
+    // overwrite the first pool's inbound handler — and inbound
+    // traffic for the first logical protocol would silently
+    // dispatch to the wrong application handler.
+    //
+    // We refuse to install a duplicate wire handler. The caller
+    // must supply a distinct `options.protocolId` for the second
+    // pool (no auto-derived suffix — wire ids are part of the
+    // protocol contract, ad-hoc names would break peer interop).
+    const claimedBy = this.logicalByWire.get(wireProtocolId);
+    if (claimedBy && claimedBy !== logicalProtocolId) {
+      throw new Error(
+        `enablePooling: wire protocol ${wireProtocolId} is already claimed by ` +
+          `logical protocol ${claimedBy}. Pass options.protocolId to use a ` +
+          `distinct wire id for ${logicalProtocolId}.`,
+      );
+    }
     // Thread the router's `peerResolver` into the pool unless the
     // caller already supplied a `primePeer` hook. Without this, the
     // pool would skip resolver priming and regress first-contact
@@ -242,15 +262,29 @@ export class ProtocolRouter {
       if (!handler) {
         throw new Error(`no application handler for ${logicalProtocolId}`);
       }
-      // Wrap the libp2p-shape peerId object into the same shape the
-      // one-shot path uses (`toString` only; toBytes optional).
+      // Wrap into the exact same `{ toString, toBytes }` shape the
+      // one-shot register() path passes to application handlers
+      // (see `register()` ~30 lines below). The pool now threads
+      // the REAL `connection.remotePeer` through, so on production
+      // traffic this exposes `.toMultihash().bytes` just like
+      // one-shot. Tests can pass minimal peer-like objects with
+      // only `.toString()` and the wrap still works (toBytes()
+      // surfaces a typed error rather than silently corrupting).
+      // Codex PR #560 round-3.
+      const remote = peerId as {
+        toString: () => string;
+        toMultihash?: () => { bytes: Uint8Array };
+        toBytes?: () => Uint8Array;
+      };
       const wrappedPeerId = {
-        toString: () => peerId.toString(),
+        toString: () => remote.toString(),
         toBytes: () => {
-          // We don't need bytes for substrate dispatch; pass through
-          // when available, else throw to surface unexpected use.
-          const maybe = peerId as { toBytes?: () => Uint8Array };
-          if (maybe.toBytes) return maybe.toBytes();
+          if (typeof remote.toMultihash === 'function') {
+            return remote.toMultihash().bytes;
+          }
+          if (typeof remote.toBytes === 'function') {
+            return remote.toBytes();
+          }
           throw new Error('peerId.toBytes not available on pooled handler');
         },
       };

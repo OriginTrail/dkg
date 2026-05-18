@@ -688,6 +688,105 @@ describe('MessageStreamPool', () => {
     await pool.close();
   });
 
+  it('inbound handler receives the full remotePeer object (real PeerId parity, Codex #560 round 3)', async () => {
+    let stubHandle:
+      | ((stream: unknown, conn: { remotePeer: unknown }) => void)
+      | null = null;
+    const pool = new MessageStreamPool(
+      {
+        libp2p: {
+          dialProtocol: () => { throw new Error('not used'); },
+          handle: (
+            _p: string,
+            h: (stream: unknown, conn: { remotePeer: unknown }) => void,
+          ) => {
+            stubHandle = h;
+          },
+          unhandle: () => undefined,
+        },
+      } as unknown as PoolNode,
+      { keepaliveIntervalMs: 0, idleTimeoutMs: 0 },
+    );
+    let handlerReceivedPeer: unknown = null;
+    pool.registerHandler(async (_data, peerId) => {
+      handlerReceivedPeer = peerId;
+      return new TextEncoder().encode('ack');
+    });
+    expect(stubHandle).not.toBeNull();
+
+    // Drive an inbound REQUEST through the libp2p.handle callback.
+    const inboundStream = new FakeStream();
+    inboundStream.feed(encodeFrame(FrameType.REQUEST, new TextEncoder().encode('hi')));
+    const productionLikePeer = {
+      toString: () => PEER_A,
+      toBytes: () => new Uint8Array([0x12, 0x34, 0x56]),
+      toMultihash: () => ({ bytes: new Uint8Array([0xde, 0xad, 0xbe, 0xef]) }),
+      equals: (_other: unknown) => false,
+    };
+    stubHandle!(inboundStream as unknown, { remotePeer: productionLikePeer });
+    await flush();
+    await flush();
+
+    // The handler must receive the EXACT remotePeer object — not a
+    // hollow `{ toString }` shim. This is what gives ProtocolRouter's
+    // wrapper access to `.toMultihash().bytes` for one-shot parity.
+    expect(handlerReceivedPeer).toBe(productionLikePeer);
+    const asPeer = handlerReceivedPeer as { toBytes: () => Uint8Array };
+    expect(Array.from(asPeer.toBytes())).toEqual([0x12, 0x34, 0x56]);
+
+    inboundStream.endRemote();
+    await pool.close();
+  });
+
+  it('graceful close uses stream.close() not stream.abort() (Codex #560 round 3)', async () => {
+    const node = makeFakeNode();
+    const pool = new MessageStreamPool(node, {
+      peerIdFromString: stubPeerIdFromString,
+      keepaliveIntervalMs: 0,
+      idleTimeoutMs: 0,
+    });
+    const pSend = pool.send(PEER_A, new TextEncoder().encode('hi'));
+    await flush();
+    const stream = node.state.streams.get(PEER_A)!;
+    expect(stream).toBeDefined();
+    // Complete the request normally so close() finds clean state.
+    stream.feed(encodeFrame(FrameType.RESPONSE, new TextEncoder().encode('ok')));
+    expect(new TextDecoder().decode(await pSend)).toBe('ok');
+
+    // Now close. This is an intentional teardown — must use FIN
+    // (stream.close()), not RST_STREAM (stream.abort()). Remote
+    // sees clean EOF; their messenger substrate does NOT re-enqueue
+    // anything as a transport error.
+    const closeStatusBefore = stream.writeStatus;
+    await pool.close();
+    expect(stream.writeStatus).toBe('closed');
+    expect(stream.abortReason).toBeNull(); // ← key assertion: NO abort
+    expect(closeStatusBefore).toBe('open');
+  });
+
+  it('error teardown still uses stream.abort() (graceful path is opt-in only)', async () => {
+    const node = makeFakeNode();
+    const pool = new MessageStreamPool(node, {
+      peerIdFromString: stubPeerIdFromString,
+      keepaliveIntervalMs: 0,
+      idleTimeoutMs: 0,
+    });
+    const pSend = pool.send(PEER_A, new TextEncoder().encode('hi'));
+    await flush();
+    const stream = node.state.streams.get(PEER_A)!;
+    expect(stream).toBeDefined();
+
+    // Simulate a transport-level reset from the remote: feed a
+    // malformed frame so the reader's decoder throws.
+    stream.feed(new Uint8Array([0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]));
+    await flush();
+    await flush();
+    // The send should have rejected (recoverable).
+    await expect(pSend).rejects.toBeInstanceOf(PooledStreamResetError);
+    // Error path MUST abort (RST_STREAM), not gracefully close.
+    expect(stream.abortReason).not.toBeNull();
+  });
+
   it('honors caller-supplied timeoutMs above the pool default (Codex #560 round 2)', async () => {
     vi.useFakeTimers();
     try {

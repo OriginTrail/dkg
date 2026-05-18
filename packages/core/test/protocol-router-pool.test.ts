@@ -382,6 +382,32 @@ describe('ProtocolRouter pooled overlay', () => {
     await fixture.router.closePooling();
   });
 
+  it('throws when a second logical claims an already-used wire id (Codex #560 round 3)', () => {
+    const fixture = makeRouterFixture();
+    fixture.router.enablePooling('/dkg/10.0.1/message', {
+      keepaliveIntervalMs: 0,
+      idleTimeoutMs: 0,
+      peerIdFromString: (s) => ({ toString: () => s }) as unknown,
+    });
+    // Second logical, default wire id (collides with first pool).
+    expect(() =>
+      fixture.router.enablePooling('/dkg/10.0.1/some-other-logical', {
+        keepaliveIntervalMs: 0,
+        idleTimeoutMs: 0,
+        peerIdFromString: (s) => ({ toString: () => s }) as unknown,
+      }),
+    ).toThrow(/already claimed by/);
+    // Passing a DISTINCT wire id works.
+    expect(() =>
+      fixture.router.enablePooling('/dkg/10.0.1/some-other-logical', {
+        protocolId: '/dkg/10.0.3/some-other-wire',
+        keepaliveIntervalMs: 0,
+        idleTimeoutMs: 0,
+        peerIdFromString: (s) => ({ toString: () => s }) as unknown,
+      }),
+    ).not.toThrow();
+  });
+
   it('unregister(logicalId) tears down the pooled wire handler (Codex #560 round 2)', async () => {
     const unhandleCalls: string[] = [];
     const fixture = makeRouterFixture({
