@@ -220,7 +220,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
     <div className="v10-modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
       <div className="v10-modal-box" style={{ maxWidth: 560 }}>
         <div className="v10-modal-header">
-          <div className="v10-modal-title">Share Project</div>
+          <div className="v10-modal-title">Share Context Graph</div>
           <div className="v10-modal-subtitle">
             Invite agents to collaborate on <strong>{contextGraphName}</strong>.
           </div>
@@ -273,7 +273,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
               <div className="v10-form-group">
                 <label className="v10-form-label">Allowed Agents</label>
                 <div style={{ fontSize: 10, color: 'var(--text-tertiary)', marginBottom: 8 }}>
-                  Only agents on this list can read and write to the project. To add someone, share the Invite Code below — they'll send a signed join request you can approve in the <strong>Join Requests</strong> tab.
+                  Only agents on this list can read and write to the context graph. To add someone, share the Invite Code below — they'll send a signed join request you can approve in the <strong>Join Requests</strong> tab.
                 </div>
 
                 {allowedAgents.length > 0 && (
@@ -316,7 +316,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
                     color: 'var(--text-tertiary)', background: 'var(--bg-surface)',
                     border: '1px dashed var(--border-default)', marginBottom: 8,
                   }}>
-                    No agents on allowlist — project is open to anyone who subscribes.
+                    No agents on allowlist — context graph is open to anyone who subscribes.
                   </div>
                 )}
               </div>
@@ -364,7 +364,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
             <div className="v10-form-group">
               <label className="v10-form-label">Pending Join Requests</label>
               <div style={{ fontSize: 10, color: 'var(--text-tertiary)', marginBottom: 8 }}>
-                Agents who submitted a signed request to join this project. Approve to add them to the allowlist.
+                Agents who submitted a signed request to join this context graph. Approve to add them to the allowlist.
               </div>
 
               {pendingRequests.length === 0 && (

@@ -128,7 +128,7 @@ describe('JoinProjectModal invite parsing', () => {
 
     it('validates missing project id', () => {
       const parsed = parseInviteCode('');
-      expect(validateInvite(parsed)).toBe('Missing project ID');
+      expect(validateInvite(parsed)).toBe('Missing context graph ID');
     });
   });
 });
@@ -233,7 +233,7 @@ describe('formatJoinRequestError', () => {
     expect(msg).not.toContain('Curator rejected');
     expect(msg).toContain('dial failed');
     expect(msg).toContain('not curator');
-    expect(msg).toContain('none of them curate this project');
+    expect(msg).toContain('none of them curate this context graph');
   });
 
   it('treats broadcast-only `not curator` (no targeted curator reached) as a delivery failure', () => {
@@ -250,7 +250,7 @@ describe('formatJoinRequestError', () => {
 
     expect(msg).toContain("Couldn't deliver");
     expect(msg).not.toContain('Curator rejected');
-    expect(msg).toContain('none of them curate this project');
+    expect(msg).toContain('none of them curate this context graph');
   });
 
   it('falls back to err.message for non-502 errors', () => {

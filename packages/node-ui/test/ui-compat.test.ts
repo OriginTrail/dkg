@@ -259,28 +259,9 @@ describe('notification items are non-interactive until peer chat exists', () => 
   });
 });
 
-describe('dashboard import target uses explicit selection', () => {
-  const dashboard = readFile('views/DashboardView.tsx');
-
-  it('import memories resolves target from active project or cgData', () => {
-    expect(dashboard).toContain('importTargetId');
-    expect(dashboard).toContain('setImportTargetId');
-  });
-
-  it('prefers active project when selecting import target', () => {
-    expect(dashboard).toContain('activeProject');
-    expect(dashboard).toMatch(/cgs\.find.*activeProject/);
-  });
-
-  it('ImportFilesModal receives importTargetId, not hardcoded [0]', () => {
-    expect(dashboard).toMatch(/contextGraphId=\{importTargetId/);
-    expect(dashboard).not.toMatch(/contextGraphId=\{.*\[0\]/);
-  });
-
-  it('shows create-project when no context graphs exist', () => {
-    expect(dashboard).toContain('setShowCreateProject(true)');
-  });
-});
+// NOTE: the dashboard "Import Memories" Quick Action was removed in PR6
+// (dashboard revamp). Import still launches from the left sidebar; the
+// old import-target-resolution regression guard no longer applies here.
 
 describe('file serving security (daemon)', () => {
   const daemon = readDaemonSources();

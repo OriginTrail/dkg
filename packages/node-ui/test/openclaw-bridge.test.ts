@@ -237,7 +237,7 @@ describe('PanelRight UI - connected agent flow', () => {
     expect(panelRight).toContain('aria-label="Attach files"');
     expect(panelRight).toContain('v10-composer-attach');
     expect(panelRight).toContain('v10-composer-controls');
-    expect(panelRight).toContain('Choose a project');
+    expect(panelRight).toContain('Choose a context graph');
     expect(panelRight).toContain('Stored only');
   });
 
@@ -277,7 +277,7 @@ describe('PanelRight UI - connected agent flow', () => {
     // to attach files"); after round-8 (CFfZ3) the title chain reuses the
     // shared `dropDisabledReason` state so it stays in lockstep with the
     // drop overlay's recovery copy instead of repeating the ternary inline.
-    expect(panelRight).toContain("'Choose a project to attach files'");
+    expect(panelRight).toContain("'Choose a context graph to attach files'");
   });
 
   it('turns skipped document-import results into server-verified sendable import results', () => {

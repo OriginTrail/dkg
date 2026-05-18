@@ -161,7 +161,7 @@ export function ProjectHeaderStrip({
         className="v10-project-strip-name"
         onClick={activeSubGraph ? onClearSubGraph : undefined}
         disabled={!activeSubGraph}
-        title={activeSubGraph ? 'Back to project overview' : cg.id}
+        title={activeSubGraph ? 'Back to context graph overview' : cg.id}
       >
         {name}
       </button>

@@ -1338,7 +1338,7 @@ export function ConnectedAgentsTab(props: {
                         ? 'Wait for the current send to finish.'
                         : dropDisabledReason === 'unsupported'
                           ? `${selected.name} doesn't accept file attachments.`
-                          : 'Choose a project before attaching files.'}
+                          : 'Choose a context graph before attaching files.'}
                   </div>
                   <div className="v10-drop-overlay-hint">
                     {attachmentsEnabled
@@ -1593,7 +1593,7 @@ export function ConnectedAgentsTab(props: {
                             attachmentsEnabled
                               ? 'Attach files'
                               : dropDisabledReason === 'noProject'
-                                ? 'Choose a project to attach files'
+                                ? 'Choose a context graph to attach files'
                                 : dropDisabledReason === 'sending'
                                   ? 'Wait for the current message to send'
                                   : 'This agent does not support attachments'
@@ -1616,11 +1616,11 @@ export function ConnectedAgentsTab(props: {
                               // selection instead of the intended "Choose a
                               // project" placeholder.
                               ...(activeProjectId
-                                ? [{ value: '', label: 'No project (clear selection)' }]
+                                ? [{ value: '', label: 'No context graph (clear selection)' }]
                                 : []),
                               ...selectableProjects.map((project) => ({ value: project.id, label: project.name })),
                             ]}
-                            placeholder={projectsLoading ? 'Loading projects…' : 'Choose a project'}
+                            placeholder={projectsLoading ? 'Loading context graphs…' : 'Choose a context graph'}
                             // Disable while loading. When no project is active
                             // and the list is empty there's nothing to pick
                             // yet, so disable then too — once a project is

@@ -82,7 +82,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
 
     setCreating(true);
     setError(null);
-    setProgress('Registering project on the network…');
+    setProgress('Registering context graph on the network…');
 
     const finalSlug = slugify(trimmedName);
     if (!agentAddress) {
@@ -116,7 +116,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
           // Don't roll back the CG — log the warning, surface a hint, and
           // let the operator re-run installation later if they want.
           console.warn('[CreateProjectModal] ontology install failed:', ontoErr);
-          setProgress(`Project created, but ontology install failed: ${ontoErr?.message ?? ontoErr}`);
+          setProgress(`Context graph created, but ontology install failed: ${ontoErr?.message ?? ontoErr}`);
         }
       }
 
@@ -126,15 +126,15 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
       // doesn't invalidate the CG; the curator can re-publish later.
       let manifestPublished = true;
       try {
-        setProgress('Publishing project manifest…');
+        setProgress('Publishing context graph manifest…');
         await publishProjectManifest(result.created, {});
       } catch (manifestErr: any) {
         manifestPublished = false;
         console.warn('[CreateProjectModal] manifest publish failed:', manifestErr);
-        setProgress(`Project created, but manifest publish failed: ${manifestErr?.message ?? manifestErr}`);
+        setProgress(`Context graph created, but manifest publish failed: ${manifestErr?.message ?? manifestErr}`);
       }
 
-      setProgress('Refreshing project list…');
+      setProgress('Refreshing context graph list…');
       const { contextGraphs: freshList } = await fetchContextGraphs();
       setContextGraphs(freshList ?? []);
 
@@ -167,9 +167,9 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
         }, 2500);
       }
     } catch (err: any) {
-      const msg = err?.message || 'Failed to create project';
+      const msg = err?.message || 'Failed to create context graph';
       if (msg.includes('already exists') || msg.includes('409')) {
-        setError('A project with this ID already exists. Try a different name.');
+        setError('A context graph with this ID already exists. Try a different name.');
       } else if (msg.includes('taking longer')) {
         setError(msg);
       } else {
@@ -201,7 +201,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
           <div className="v10-modal-header">
             <div className="v10-modal-title">Wire workspace for {wiredProjectName}</div>
             <div className="v10-modal-subtitle">
-              Project created. Now wire a local workspace so you can plan it from your own Cursor.
+              Context graph created. Now wire a local workspace so you can plan it from your own Cursor.
             </div>
           </div>
           <div className="v10-modal-body">
@@ -221,9 +221,9 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
     <div className="v10-modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
       <div className="v10-modal-box">
         <div className="v10-modal-header">
-          <div className="v10-modal-title">Create New Project</div>
+          <div className="v10-modal-title">Create New Context Graph</div>
           <div className="v10-modal-subtitle">
-            A project gives your agent structured memory — a place to draft, share, and publish knowledge.
+            A context graph gives your agent structured memory — a place to draft, share, and publish knowledge.
           </div>
         </div>
 
@@ -236,14 +236,14 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
 
           {isFirstProject && (
             <div className="v10-modal-tip">
-              <div className="v10-modal-tip-title">First project tip</div>
+              <div className="v10-modal-tip-title">First context graph tip</div>
               This is your agent's first memory space. Consider importing any existing knowledge
               your agent has — notes, documents, conversation logs — so it can build on what it already knows.
             </div>
           )}
 
           <div className="v10-form-group">
-            <label className="v10-form-label">Project Name</label>
+            <label className="v10-form-label">Context Graph Name</label>
             <input
               className="v10-form-input"
               type="text"
@@ -304,7 +304,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
             <div className="v10-form-radio-group">
               <label className="v10-form-radio">
                 <input type="radio" checked={ontology === 'community'} onChange={() => setOntology('community')} />
-                Choose a starter — install one of the bundled project-type ontologies
+                Choose a starter — install one of the bundled context-graph-type ontologies
               </label>
               {ontology === 'community' && (
                 <div style={{ marginLeft: 24, marginTop: 4, marginBottom: 8 }}>
@@ -329,8 +329,8 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
               {ontology === 'agent' && (
                 <div className="v10-form-radio-desc" style={{ marginLeft: 24, marginTop: 4, marginBottom: 8 }}>
                   v1 installs the <code>{starterSlug}</code> starter as a sensible default. A future
-                  release will have the agent draft a project-specific ontology by extending the closest
-                  starter from the project description.
+                  release will have the agent draft a context-graph-specific ontology by extending the closest
+                  starter from the context graph description.
                 </div>
               )}
               <label className="v10-form-radio" style={{ opacity: 0.5 }}>
@@ -390,7 +390,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
             onClick={handleCreate}
             disabled={!name.trim() || creating || !agentAddress || identityLoading}
           >
-            {creating ? progress || 'Creating…' : identityLoading ? 'Loading agent…' : !agentAddress ? 'Agent unavailable' : 'Create Project'}
+            {creating ? progress || 'Creating…' : identityLoading ? 'Loading agent…' : !agentAddress ? 'Agent unavailable' : 'Create Context Graph'}
           </button>
         </div>
       </div>

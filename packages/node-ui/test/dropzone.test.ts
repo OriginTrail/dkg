@@ -255,7 +255,7 @@ describe('Drop zone over the messages region', () => {
     expect(overlay).toBeTruthy();
     expect(overlay!.classList.contains('refuse')).toBe(true);
     expect(overlay!.classList.contains('accept')).toBe(false);
-    expect(overlay!.textContent ?? '').toMatch(/choose a project/i);
+    expect(overlay!.textContent ?? '').toMatch(/choose a context graph/i);
     await unmount();
   });
 });

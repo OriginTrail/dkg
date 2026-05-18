@@ -109,7 +109,7 @@ export function parseInviteCode(raw: string): ParsedInvite {
 }
 
 export function validateInvite(invite: ParsedInvite): string | null {
-  if (!invite.cgId) return 'Missing project ID';
+  if (!invite.cgId) return 'Missing context graph ID';
   if (invite.hasUnparsedExtra) {
     return 'Invite contains a second line that is not a valid peer ID (12D3Koo…) or multiaddr (/ip4/…). Check for typos.';
   }
@@ -120,7 +120,7 @@ export function validateInvite(invite: ParsedInvite): string | null {
   // paste flow has been removed; users who want a public CG that hasn't
   // surfaced in the Oracle yet need to ask the creator for an invite.
   if (!invite.curatorPeerId && !invite.legacyMultiaddr) {
-    return 'This invite is missing the curator peer id. Ask the curator to regenerate the invite from the Share Project dialog.';
+    return 'This invite is missing the curator peer id. Ask the curator to regenerate the invite from the Share Context Graph dialog.';
   }
   if (invite.legacyMultiaddr) {
     if (!invite.legacyMultiaddr.startsWith('/')) return 'Invalid curator multiaddr';
@@ -229,7 +229,7 @@ function hintForJoinRejectReasons(reasons: string, reachedAndRejected: boolean):
         'pull the latest release (or `git pull && pnpm install && pnpm run build:runtime`) and try again.';
     }
     if (/unknown CG/i.test(reasons)) {
-      return 'The curator doesn\'t recognise this project id — double-check the invite, ' +
+      return 'The curator doesn\'t recognise this context graph id — double-check the invite, ' +
         'or ask the curator to share an updated one.';
     }
     return null;
@@ -240,7 +240,7 @@ function hintForJoinRejectReasons(reasons: string, reachedAndRejected: boolean):
   // the most actionable advice is "make sure the curator's daemon is
   // online and the invite carries the right peer id".
   if (/not curator/i.test(reasons)) {
-    return 'Your node reached other peers, but none of them curate this project. ' +
+    return 'Your node reached other peers, but none of them curate this context graph. ' +
       'Make sure the curator\'s daemon is online and the invite carries the right curator peer id.';
   }
   return null;
@@ -354,7 +354,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
         await connectToPeerIdWithTimeout(curatorPeerId).catch(() => {});
       } else if (legacyMultiaddr) {
         console.warn(
-          '[DKG] This invite uses a legacy multiaddr (deprecated). Ask the curator to regenerate using the current Share Project modal — V10 invites carry a peer id and resolve via DHT, so they survive relay rotations.',
+          '[DKG] This invite uses a legacy multiaddr (deprecated). Ask the curator to regenerate using the current Share Context Graph modal — V10 invites carry a peer id and resolve via DHT, so they survive relay rotations.',
         );
         await connectToPeerWithTimeout(legacyMultiaddr).catch(() => {});
       }
@@ -408,7 +408,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
           <div className="v10-modal-header">
             <div className="v10-modal-title">Wire workspace for {wiredProjectName}</div>
             <div className="v10-modal-subtitle">
-              Curator approved. Now wire a local workspace so this Cursor can collaborate on the project.
+              Curator approved. Now wire a local workspace so this Cursor can collaborate on the context graph.
             </div>
           </div>
           <div className="v10-modal-body">
@@ -433,7 +433,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
     <div className="v10-modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
       <div className="v10-modal-box">
         <div className="v10-modal-header">
-          <div className="v10-modal-title">Join a Project</div>
+          <div className="v10-modal-title">Join a Context Graph</div>
           <div className="v10-modal-subtitle">
             Paste the invite from the curator. Your node will send a signed join request and wait for approval.
           </div>
@@ -458,7 +458,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
               background: 'rgba(34, 197, 94, 0.08)', border: '1px solid rgba(34, 197, 94, 0.25)',
               color: 'var(--accent-green)',
             }}>
-              Approved! Loading project…
+              Approved! Loading context graph…
             </div>
           )}
 
@@ -476,7 +476,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
             <label className="v10-form-label">Invite Code</label>
             <textarea
               className="v10-form-textarea"
-              placeholder={"Paste the invite code from the project curator.\n\ne.g.\nmy-project-abc123\n12D3KooW..."}
+              placeholder={"Paste the invite code from the context graph curator.\n\ne.g.\nmy-context-graph-abc123\n12D3KooW..."}
               value={inviteCode}
               onChange={(e) => setInviteCode(e.target.value)}
               autoFocus
