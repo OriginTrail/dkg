@@ -564,6 +564,103 @@ describe('createSwmAckQuorum: rearmWatchdog (PR-H bug 1)', () => {
   });
 });
 
+/**
+ * PR-H round 2 (codex feedback on #582 bug 2): `dropPeer` removes
+ * a peer from `expectedMembers` so future watchdog ticks don't
+ * keep resending to permanently-rejected peers AND the shrunken
+ * denominator lets quorum complete on the remaining acks instead
+ * of waiting out `deadlineHardMs`.
+ */
+describe('createSwmAckQuorum: dropPeer (PR-H bug 2)', () => {
+  it('removes the peer from missingPeers on subsequent watchdog fires', () => {
+    let nowMs = 1_000_000;
+    const { calls, fn } = makeTopUp();
+    const q = makeQuorum({ now: () => nowMs, topUp: fn });
+    q.track({
+      shareOperationId: 'op-drop',
+      cgId: 'cg',
+      expectedMembers: ['p1', 'p2', 'p3'],
+      payload: PAYLOAD,
+      enumerationSource: 'allowlist',
+      watchdogMs: 30_000,
+      deadlineHardMs: 5 * 60_000,
+    });
+
+    nowMs += 30_001;
+    q.tick();
+    expect(calls).toHaveLength(1);
+    expect([...calls[0].missingPeers].sort()).toEqual(['p1', 'p2', 'p3']);
+
+    q.dropPeer('op-drop', 'p2');
+    q.rearmWatchdog('op-drop');
+
+    nowMs += 30_001;
+    q.tick();
+    expect(calls).toHaveLength(2);
+    expect([...calls[1].missingPeers].sort()).toEqual(['p1', 'p3']);
+  });
+
+  it('completes quorum when dropping a peer pushes ackPct past threshold', () => {
+    const q = makeQuorum();
+    q.track({
+      shareOperationId: 'op-drop-complete',
+      cgId: 'cg',
+      expectedMembers: ['p1', 'p2', 'p3'],
+      payload: PAYLOAD,
+      enumerationSource: 'allowlist',
+      quorumThreshold: 0.9,
+    });
+
+    q.onAck('op-drop-complete', 'p1');
+    q.onAck('op-drop-complete', 'p2');
+    expect(q.stats().pending).toBe(1);
+    expect(q.stats().completed).toBe(0);
+
+    q.dropPeer('op-drop-complete', 'p3');
+
+    expect(q.stats().pending).toBe(0);
+    expect(q.stats().completed).toBe(1);
+  });
+
+  it('is idempotent for repeated drops of the same peer', () => {
+    const q = makeQuorum();
+    q.track({
+      shareOperationId: 'op-drop-idem',
+      cgId: 'cg',
+      expectedMembers: ['p1', 'p2'],
+      payload: PAYLOAD,
+      enumerationSource: 'allowlist',
+    });
+
+    q.dropPeer('op-drop-idem', 'p1');
+    q.dropPeer('op-drop-idem', 'p1');
+    q.dropPeer('op-drop-idem', 'p1');
+
+    const snap = q.inspect('op-drop-idem');
+    expect(snap?.expectedMembers).toEqual(['p2']);
+  });
+
+  it('is a no-op when peer is not in expectedMembers', () => {
+    const q = makeQuorum();
+    q.track({
+      shareOperationId: 'op-drop-noop',
+      cgId: 'cg',
+      expectedMembers: ['p1', 'p2'],
+      payload: PAYLOAD,
+      enumerationSource: 'allowlist',
+    });
+
+    expect(() => q.dropPeer('op-drop-noop', 'pX')).not.toThrow();
+    const snap = q.inspect('op-drop-noop');
+    expect([...(snap?.expectedMembers ?? [])].sort()).toEqual(['p1', 'p2']);
+  });
+
+  it('is a no-op for an unknown shareOperationId', () => {
+    const q = makeQuorum();
+    expect(() => q.dropPeer('op-unknown', 'p1')).not.toThrow();
+  });
+});
+
 describe('createSwmAckQuorum: error isolation', () => {
   it('throwing observer does not crash the tick', () => {
     let nowMs = 1_000_000;

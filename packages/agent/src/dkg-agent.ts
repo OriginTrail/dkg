@@ -9442,22 +9442,44 @@ export class DKGAgent {
       ctx,
       `SWM ack-quorum watchdog firing substrate top-up for ${shareOperationId} to ${missingPeers.length} peer(s) (cg=${cgId})`,
     );
-    // PR-H bug 1: track per-peer outcomes so we can decide
-    // post-fan-out whether to re-arm the watchdog. The pre-PR-H
-    // implementation ignored outcomes entirely except for the
-    // `delivered` → onAck call, which left `retryable` peers
-    // stranded: the wire `sendReliable` returned `delivered:
-    // true` (with a 0x02 sentinel response body), so the
-    // substrate outbox saw success and did NOT retry, but the
-    // receiver had transient-rejected the apply so the peer
-    // never ack'd. With `watchdogFired` already true on the
-    // tracking record, the watchdog couldn't fire again — the
-    // share sat pending until `deadlineHardMs` (5 min) for no
-    // useful reason. We now count retryable outcomes and
-    // explicitly `rearmWatchdog` if any survived, so the next
-    // tick fires another top-up `watchdogMs` from now (hard
-    // deadline still enforced from original `startedAtMs`).
-    let retryableCount = 0;
+    // PR-H bug 1: route per-peer outcomes to the right ack-quorum
+    // hook. Pre-PR-H ignored outcomes entirely except for
+    // `delivered` → onAck; the watchdog couldn't fire again so
+    // shares sat until `deadlineHardMs` (5 min) on transient
+    // receiver errors.
+    //
+    // PR-H round 2 (codex feedback on #582):
+    //   - `delivered` → onAck (terminal-success; counts toward
+    //     quorum).
+    //   - `rejected` (0x01 sentinel) / `failed` → dropPeer; the
+    //     peer is permanently out of this share's recipient set.
+    //     Round 1 just no-op'd on these, which (combined with
+    //     rearmWatchdog rebuilding `missingPeers` from
+    //     `expectedMembers \ acked`) re-sent permanently-bad
+    //     payloads to the same rejected peer on every subsequent
+    //     watchdog tick. Dropping shrinks both the top-up target
+    //     set AND the quorum denominator, so a CG where 1/3
+    //     peers permanently rejects can still hit quorum on the
+    //     remaining 2 acks instead of waiting out
+    //     `deadlineHardMs`.
+    //   - `retryable` (0x02 sentinel) / `queued` / `inFlight` →
+    //     count toward `rearmCount`. `queued`/`inFlight` was a
+    //     round-1 gap: the substrate outbox owns wire retry for
+    //     those outcomes, but the outbox doesn't notify back
+    //     into the ack-quorum when its eventual retry hits the
+    //     receiver. The watchdog firing again at next interval
+    //     is the loosely-coupled signal — if the outbox
+    //     succeeded AND the receiver ack'd via gossip, quorum
+    //     already grew via `onAck` from the SWM_SHARE_ACK
+    //     receiver and the next watchdog will see the record
+    //     already completed (no-op). If still missing, the next
+    //     top-up cycle gives both the outbox and the receiver
+    //     another chance, bounded by `deadlineHardMs`. Open
+    //     follow-up: full outbox→quorum wiring (markDelivered
+    //     observer surfacing response sentinels back to the
+    //     publisher) would tighten this further; out of scope
+    //     for this PR — see PR #582 comments / follow-up issue.
+    let rearmCount = 0;
     await Promise.allSettled(missingPeers.map(async (peerId: string) => {
       try {
         const sendResult = await this.messenger.sendReliable(peerId, PROTOCOL_SWM_UPDATE, payload, {
@@ -9465,20 +9487,29 @@ export class DKGAgent {
           timeoutMs: DKGAgent.SWM_SUBSTRATE_FANOUT_TIMEOUT_MS,
         });
         const classified = classifySendResult(peerId, sendResult);
-        if (classified.outcome === 'delivered') {
-          this.swmAckQuorum?.onAck(shareOperationId, peerId);
-        } else if (classified.outcome === 'retryable') {
-          retryableCount += 1;
+        switch (classified.outcome) {
+          case 'delivered':
+            this.swmAckQuorum?.onAck(shareOperationId, peerId);
+            break;
+          case 'rejected':
+          case 'failed':
+            this.swmAckQuorum?.dropPeer(shareOperationId, peerId);
+            break;
+          case 'retryable':
+          case 'queued':
+          case 'inFlight':
+            rearmCount += 1;
+            break;
         }
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err);
         this.log.warn(ctx, `SWM top-up to ${peerId} failed: ${reason}`);
       }
     }));
-    if (retryableCount > 0) {
+    if (rearmCount > 0) {
       this.log.info(
         ctx,
-        `SWM top-up saw ${retryableCount} retryable receiver(s) — re-arming watchdog`,
+        `SWM top-up saw ${rearmCount} non-terminal outcome(s) — re-arming watchdog`,
       );
       this.swmAckQuorum?.rearmWatchdog(shareOperationId);
     }

@@ -221,15 +221,40 @@ export interface SwmAckQuorum {
    * another substrate top-up after `watchdogMs` elapses from
    * NOW. No-op if the record is unknown (already completed or
    * expired). Intended for the caller's substrate top-up
-   * handler to invoke when peers returned a transient/retryable
-   * outcome (e.g. `FANOUT_RESPONSE_RETRYABLE` sentinel) and
-   * neither completed quorum nor surfaced through the substrate
-   * outbox's own retry. The hard deadline
+   * handler to invoke when peers returned a non-terminal outcome
+   * (`retryable` sentinel, or `queued` / `inFlight` whose
+   * eventual completion the substrate outbox owns but does not
+   * surface back to this quorum). The hard deadline
    * (`startedAtMs + deadlineHardMs`) is unaffected — re-arming
    * does NOT extend total tracking lifetime; it only resets
    * the per-tick watchdog timer.
    */
   rearmWatchdog(shareOperationId: string, nowMs?: number): void;
+  /**
+   * Drop a peer from a record's `expectedMembers` and re-evaluate
+   * quorum. Intended for terminal failure outcomes (`rejected`
+   * sentinel, `failed`) where retrying won't help — the peer is
+   * permanently out of this share's recipient set, and waiting
+   * on its ack would block quorum completion until
+   * `deadlineHardMs`. Removing it from `expectedMembers` shrinks
+   * both the watchdog top-up's `missingPeers` (so future ticks
+   * don't keep retrying the rejected peer) AND the quorum
+   * denominator (so the share can complete on the remaining
+   * acks). Idempotent: no-op if the peer was already dropped
+   * or never in the expected set. No-op if the record is
+   * unknown.
+   *
+   * PR-H round 2 (codex feedback on #582 bug 2): the pre-round-2
+   * `rearmWatchdog` re-armed the whole record, so the next
+   * watchdog tick rebuilt `missingPeers` from every non-acked
+   * member — including peers we'd already seen reject with the
+   * `FANOUT_RESPONSE_REJECTED` sentinel. That meant a mixed
+   * batch (retryable + rejected) kept resending permanently-bad
+   * payloads at every interval. This method lets the caller
+   * persist the rejection signal so future ticks skip the
+   * rejected peers.
+   */
+  dropPeer(shareOperationId: string, peerId: string): void;
 }
 
 /** Read-only snapshot returned by {@link SwmAckQuorum.inspect}. */
@@ -449,6 +474,18 @@ export function createSwmAckQuorum(deps: SwmAckQuorumDeps): SwmAckQuorum {
       if (!record) return;
       record.watchdogArmedAtMs = nowMs ?? now();
       record.watchdogFired = false;
+    },
+
+    dropPeer(shareOperationId: string, peerId: string): void {
+      const record = records.get(shareOperationId);
+      if (!record) return;
+      if (!record.expectedMembers.delete(peerId)) return;
+      // If the dropped peer was the ONLY thing keeping us below
+      // threshold, completion fires immediately. Mirror the
+      // `onAck` / `track` paths' completion check.
+      if (ackPctOf(record) >= record.quorumThreshold) {
+        completeRecord(record);
+      }
     },
   };
 }

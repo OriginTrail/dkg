@@ -734,15 +734,25 @@ describe('DKGAgent SwmAckQuorum integration (rc.9 PR-D)', () => {
   });
 
   /**
-   * PR-H bug 1 negative case: when the top-up returns ONLY
-   * non-retryable outcomes (delivered + rejected), the
-   * watchdog MUST stay fired and NOT re-arm. Pins the
-   * asymmetric semantics so a future refactor doesn't
-   * accidentally re-arm on every top-up (which would amplify
-   * wire-load for no benefit).
+   * PR-H round 2 (codex feedback on #582 bug 2): when the top-up
+   * returns ONLY terminal outcomes (delivered + rejected), the
+   * rejected peer is dropped from `expectedMembers` instead of
+   * lingering and forcing another watchdog top-up. With the
+   * denominator shrunk, the single ack from `Final1` now
+   * represents 100% of expected (1/1) so the record completes
+   * cleanly — no re-arm, no five-minute deadline wait.
+   *
+   * Pre-round-2 behaviour (kept here for the test name to
+   * provide historical context): the rejected peer stayed in
+   * `expectedMembers`, `acked = ['Final1']` was only 50%, and
+   * since no peer was retryable the watchdog stayed `fired =
+   * true` until `deadlineHardMs` reaped the record. The new
+   * behaviour is strictly an improvement (avoids the 5-min
+   * wall-clock wait for a share that already has all the acks
+   * it can ever get).
    */
-  it('PR-H bug 1: substrate top-up with NO retryable outcomes does NOT re-arm the watchdog', async () => {
-    const agent = register(await createAgent('AckQuorumHBug1NoRearm'));
+  it('PR-H bug 2: top-up with terminal outcomes (delivered + rejected) completes via dropPeer instead of stalling until deadline', async () => {
+    const agent = register(await createAgent('AckQuorumHBug2DropPeer'));
     const gossip = new CapturingGossip();
     gossip.subscribers = ['12D3KooWFinal1', '12D3KooWFinal2'];
     (agent as unknown as { gossip: CapturingGossip }).gossip = gossip;
@@ -757,25 +767,28 @@ describe('DKGAgent SwmAckQuorum integration (rc.9 PR-D)', () => {
     });
     install(agent);
 
-    const { shareOperationId } = await agent.share('cg-h-bug1-norearm', [{
-      subject: 'urn:test:hbug1n', predicate: 'http://schema.org/name', object: '"hbug1n"', graph: '',
+    const { shareOperationId } = await agent.share('cg-h-bug2-dropper', [{
+      subject: 'urn:test:hbug2', predicate: 'http://schema.org/name', object: '"hbug2"', graph: '',
     }]);
 
     const quorum = (agent as unknown as {
-      getOrCreateSwmAckQuorum: () => { tick: (now?: number) => void };
+      getOrCreateSwmAckQuorum: () => { tick: (now?: number) => void; stats: () => { completed: number; pending: number } };
     }).getOrCreateSwmAckQuorum();
     quorum.tick(Date.now() + 30_001);
 
     await agent.invokeSwmSubstrateTopUpForTests({
       shareOperationId,
-      cgId: 'cg-h-bug1-norearm',
+      cgId: 'cg-h-bug2-dropper',
       payload: new Uint8Array([0xde, 0xad]),
       missingPeers: ['12D3KooWFinal1', '12D3KooWFinal2'],
     });
 
+    // The record completed and was removed from tracking. Snapshot
+    // returns undefined; stats show the completion counter ticked.
     const after = agent.getSwmAckQuorumRecordSnapshotForTests(shareOperationId);
-    expect(after?.acked).toEqual(['12D3KooWFinal1']);
-    expect(after?.watchdogFired).toBe(true);
+    expect(after).toBeUndefined();
+    expect(quorum.stats().completed).toBe(1);
+    expect(quorum.stats().pending).toBe(0);
   });
 
   /**
