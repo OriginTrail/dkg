@@ -254,30 +254,39 @@ export function DashboardView() {
     const entities = { ...ZERO };
     const triples = { ...ZERO };
     const agentSet = new Set<string>();
-    let anyLoading = false;
-    let anyError = false;
-    let reported = 0;
+    // Size and agents track their own loading/partial state so a
+    // participant refetch doesn't make the unrelated Size card flash
+    // "loading…" and vice-versa (qa-lead). A missing report counts as
+    // both still loading.
+    let sizeLoading = false;
+    let agentsLoading = false;
+    let sizePartial = false;
+    let agentsPartial = false;
     for (const cg of myCgs) {
       const r = reports[cg.id];
-      if (!r) { anyLoading = true; continue; }
-      reported++;
-      if (r.sizeLoading || r.agentsLoading) anyLoading = true;
-      if (r.sizeError || r.agentsError) anyError = true;
+      if (!r) { sizeLoading = true; agentsLoading = true; continue; }
+      if (r.sizeLoading) sizeLoading = true;
+      if (r.agentsLoading) agentsLoading = true;
+      if (r.sizeError) sizePartial = true;
+      if (r.agentsError) agentsPartial = true;
       for (const k of ['wm', 'swm', 'vm', 'total'] as const) {
         entities[k] += r.entities[k];
         triples[k] += r.triples[k];
       }
       // Exclude CGs whose participant probe failed from the unique
-      // count — they're "unknown", not "zero" (Codex). `partial`
-      // (anyError) surfaces that the total may be undercounting.
+      // count — they're "unknown", not "zero" (Codex); agentsPartial
+      // surfaces that the total may be undercounting.
       if (!r.agentsError) for (const a of r.agents) agentSet.add(a);
     }
+    const hasCgs = myCgs.length > 0;
     return {
       entities, triples,
       agentCount: agentSet.size,
-      loading: myCgs.length > 0 && (anyLoading || reported === 0),
-      partial: anyError,
-      hasCgs: myCgs.length > 0,
+      sizeLoading: hasCgs && sizeLoading,
+      agentsLoading: hasCgs && agentsLoading,
+      sizePartial,
+      agentsPartial,
+      hasCgs,
     };
   }, [myCgs, reports]);
 
@@ -288,7 +297,7 @@ export function DashboardView() {
 
   const sizeValue = !agg.hasCgs
     ? '—'
-    : agg.loading
+    : agg.sizeLoading
       ? <span className="v10-cg-dim">loading…</span>
       : `${abbrev(agg.entities.total)} · ${abbrev(agg.triples.total)}`;
 
@@ -319,7 +328,7 @@ export function DashboardView() {
           value={sizeValue}
           accentColor="var(--accent-green)"
         >
-          {agg.hasCgs && !agg.loading && (
+          {agg.hasCgs && !agg.sizeLoading && (
             <div className="v10-cg-size-detail">
               <div className="v10-cg-size-metric">
                 <div className="v10-cg-size-num">
@@ -338,7 +347,7 @@ export function DashboardView() {
           )}
           <div className="stat-sub">
             {agg.hasCgs
-              ? (agg.partial
+              ? (agg.sizePartial
                   ? 'Some context graphs could not report size; total is partial.'
                   : 'Across Working, Shared Working & Verified Memory. Entities become Knowledge Assets once published to Verified Memory.')
               : 'No context graphs yet.'}
@@ -346,8 +355,8 @@ export function DashboardView() {
         </StatCard>
         <StatCard
           label="Connected Agents"
-          value={!agg.hasCgs ? '—' : agg.loading ? <span className="v10-cg-dim">loading…</span> : agg.agentCount}
-          sub={agg.hasCgs && agg.partial
+          value={!agg.hasCgs ? '—' : agg.agentsLoading ? <span className="v10-cg-dim">loading…</span> : agg.agentCount}
+          sub={agg.hasCgs && agg.agentsPartial
             ? 'Some context graphs could not report agents; count is partial.'
             : 'Unique agents collaborating with you.'}
           accentColor="var(--purple)"
