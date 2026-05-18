@@ -141,7 +141,45 @@ async function createAgent(name: string): Promise<DKGAgent> {
     value: SELF_PEER,
     configurable: true,
   });
+  // PR-J: CGMemberEnumerator now filters topic-subscribers
+  // through libp2p reachability (connected OR peerStore-known).
+  // These tests don't drive a real libp2p — without a stub the
+  // filter would strip every fake-peer subscriber and `track()`
+  // would never fire. Treat ALL test peers as dialable; the
+  // PR-J test that actually exercises the filter lives in
+  // `enumerate-cg-members.test.ts` where it can drive the
+  // predicate directly.
+  installAllReachableLibp2pStub(agent);
   return agent;
+}
+
+/**
+ * Install a `node.libp2p` shim that reports EVERY peer-id as
+ * dialable. Matches the pre-PR-J behaviour the integration tests
+ * expect — they care about ack-quorum wiring, not reachability
+ * filtering. The PR-J filter is exercised in
+ * `enumerate-cg-members.test.ts` where the predicate is the unit
+ * under test.
+ *
+ * Stubs only the surfaces `DKGAgent.getOrCreateCGMemberEnumerator`'s
+ * `isPeerDialable` consults: `getPeers()` (sync; we don't have a
+ * fixed list so this returns empty and we lean on `peerStore.get`
+ * returning a dialable record for everything).
+ */
+function installAllReachableLibp2pStub(agent: DKGAgent): void {
+  const stub = {
+    getPeers: (): Array<{ toString: () => string }> => [],
+    peerStore: {
+      get: async (_peerId: unknown) => ({
+        addresses: [{ multiaddr: { toString: () => '/ip4/127.0.0.1/tcp/0' } }],
+      }),
+    },
+  };
+  Object.defineProperty((agent as unknown as { node: { libp2p?: unknown } }).node, 'libp2p', {
+    value: stub,
+    configurable: true,
+    writable: true,
+  });
 }
 
 describe('DKGAgent SwmAckQuorum integration (rc.9 PR-D)', () => {

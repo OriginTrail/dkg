@@ -9409,21 +9409,43 @@ export class DKGAgent {
         topicForCG: (cgId) => contextGraphWorkspaceTopic(cgId),
         getSelfPeerId: () => this.peerId,
         // PR-J liveness filter: drop GossipSub-advertised subscribers
-        // that we don't currently have a connection to. Bug fix for
-        // the 2026-05-18 Miles<->Lex soak where 3-of-4 enumerated
-        // public-CG subscribers were ghosts (peer-exchange residue),
-        // every substrate send queued, ackQuorum never completed.
-        // libp2p.getPeers() is cheap (returns the connected set, no
-        // I/O) so calling it on every enumeration miss is fine. If
-        // libp2p hasn't started yet (pre-start share()), getPeers()
-        // throws — match the getSelfPeerId thunk fallback by
-        // returning true (don't filter) so the enumeration still
-        // succeeds and falls through to gossip-only.
-        isPeerDialable: (peerId) => {
+        // we have no realistic chance of reaching via the send path.
+        // Bug fix for the 2026-05-18 Miles<->Lex soak where 3-of-4
+        // enumerated public-CG subscribers were ghosts (peer-exchange
+        // residue), every substrate send queued, ackQuorum never
+        // completed.
+        //
+        // **Reachability MUST match what `sendReliable` actually
+        // tries** (codex RED on #584 round 1). The router's send
+        // path consults libp2p.getConnections (live) AND
+        // libp2p.peerStore (cached addresses for dial). Filtering
+        // only on `getPeers()` would silently drop legitimate
+        // subscribers that we briefly disconnected from but still
+        // have addresses for. We OR-combine the two sources to
+        // mirror the send path: connected OR peerStore-known.
+        //
+        // Pre-start: if libp2p hasn't booted, `getPeers()` throws
+        // → caught → return false → all subscribers filtered out
+        // → source=none → publishWorkspaceGossip's gossip-only
+        // fallback kicks in (preserving the pre-start `share()`
+        // contract documented on the `getSelfPeerId` thunk). The
+        // pre-start GossipSub subscriber list is normally empty
+        // anyway since we haven't joined the mesh yet, so this
+        // path is rare in practice.
+        isPeerDialable: async (peerId) => {
           try {
-            return this.node.libp2p.getPeers().some((p) => p.toString() === peerId);
+            if (this.node.libp2p.getPeers().some((p) => p.toString() === peerId)) {
+              return true;
+            }
+            // peerStore.get throws on cold-cache miss — treat that
+            // as "we have no addressing info for this peer" =
+            // false. Any addresses present (direct OR circuit
+            // relay) count as dialable; the protocol router will
+            // make the final transport choice.
+            const peer = await this.node.libp2p.peerStore.get(peerId as unknown as Parameters<typeof this.node.libp2p.peerStore.get>[0]);
+            return (peer?.addresses?.length ?? 0) > 0;
           } catch {
-            return true;
+            return false;
           }
         },
       });

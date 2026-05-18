@@ -132,12 +132,18 @@ describe('createCGMemberEnumerator: public CG (topic-subscribers source)', () =>
 
   /**
    * PR-J (2026-05-18): drop GossipSub-advertised subscribers that
-   * we don't currently have a live connection to. Soak data: the
-   * 2026-05-18 Miles<->Lex run enumerated 4 subscribers on a CG
-   * with one real subscriber — three were ghosts in the local
-   * mesh view, every substrate send to them queued forever, and
-   * the ackQuorum's expectedMembers waited on acks that would
-   * never arrive.
+   * we have no realistic chance of reaching via the send path.
+   * Soak data: the 2026-05-18 Miles<->Lex run enumerated 4
+   * subscribers on a CG with one real subscriber — three were
+   * ghosts in the local mesh view, every substrate send to them
+   * queued forever, and the ackQuorum's expectedMembers waited on
+   * acks that would never arrive.
+   *
+   * Round 2 (codex feedback on #584): the filter is now async
+   * (the real predicate consults libp2p.peerStore.get for the
+   * non-connected branch) AND is applied OUTSIDE the TTL cache so
+   * a transient disconnect doesn't strand a real subscriber for
+   * up to 60s.
    */
   describe('isPeerDialable filter (PR-J)', () => {
     it('drops topic-subscribers that fail the dialable predicate', async () => {
@@ -151,6 +157,25 @@ describe('createCGMemberEnumerator: public CG (topic-subscribers source)', () =>
 
       expect(result.source).toBe('topic-subscribers');
       expect(result.members.sort()).toEqual(['liveA', 'liveC']);
+    });
+
+    it('supports an async (Promise-returning) predicate', async () => {
+      // The real wiring in DKGAgent is async (libp2p.peerStore.get
+      // is async). Predicate must be awaited per-peer; throws are
+      // caught and treated as "not dialable".
+      const enumerator = createCGMemberEnumerator(makeDeps({
+        getContextGraphAllowedPeers: async () => null,
+        getTopicSubscribers: () => ['liveA', 'ghostB', 'throwC', 'liveD'],
+        isPeerDialable: async (peerId) => {
+          if (peerId === 'throwC') throw new Error('peerStore cold cache miss');
+          return peerId.startsWith('live');
+        },
+      }));
+
+      const result = await enumerator.enumerate('cg-public-async');
+
+      expect(result.source).toBe('topic-subscribers');
+      expect(result.members.sort()).toEqual(['liveA', 'liveD']);
     });
 
     it('returns source=none when filter removes every subscriber', async () => {
@@ -189,8 +214,6 @@ describe('createCGMemberEnumerator: public CG (topic-subscribers source)', () =>
       const enumerator = createCGMemberEnumerator(makeDeps({
         getContextGraphAllowedPeers: async () => null,
         getTopicSubscribers: () => ['peerA', 'peerB'],
-        // Note: no isPeerDialable in deps. Compatibility with
-        // older callers that don't yet pass the filter.
       }));
 
       const result = await enumerator.enumerate('cg-public-no-filter');
@@ -200,8 +223,6 @@ describe('createCGMemberEnumerator: public CG (topic-subscribers source)', () =>
     });
 
     it('filter is applied AFTER dedupAndExcludeSelf', async () => {
-      // Self should never be passed to the filter; duplicates
-      // should be collapsed before the filter runs.
       const seenByFilter: string[] = [];
       const enumerator = createCGMemberEnumerator(makeDeps({
         getContextGraphAllowedPeers: async () => null,
@@ -216,8 +237,62 @@ describe('createCGMemberEnumerator: public CG (topic-subscribers source)', () =>
 
       expect(result.source).toBe('topic-subscribers');
       expect(result.members).toEqual(['peerA']);
-      // Filter never sees self or duplicates.
       expect(seenByFilter.sort()).toEqual(['peerA', 'peerB']);
+    });
+
+    /**
+     * Codex YELLOW regression on #584 round 1: the liveness filter
+     * is applied OUTSIDE the 60s TTL cache. A subscriber that
+     * goes from non-dialable → dialable → non-dialable across
+     * three successive calls must surface that exact pattern,
+     * even when the underlying subscriber snapshot is cached.
+     */
+    it('filter result reflects current state on every call (not cached)', async () => {
+      let isDialable = false;
+      const enumerator = createCGMemberEnumerator(makeDeps({
+        getContextGraphAllowedPeers: async () => null,
+        getTopicSubscribers: () => ['peerA'],
+        isPeerDialable: () => isDialable,
+      }));
+
+      const r1 = await enumerator.enumerate('cg-public-cache');
+      expect(r1.source).toBe('none');
+
+      isDialable = true;
+      const r2 = await enumerator.enumerate('cg-public-cache');
+      expect(r2.source).toBe('topic-subscribers');
+      expect(r2.members).toEqual(['peerA']);
+
+      isDialable = false;
+      const r3 = await enumerator.enumerate('cg-public-cache');
+      expect(r3.source).toBe('none');
+    });
+
+    it('cached subscriber snapshot is reused across calls (only filter re-runs)', async () => {
+      // Sanity check: the EXPENSIVE work (getSubscribers,
+      // getContextGraphAllowedPeers) is still cached. Only the
+      // cheap liveness filter is invalidated per-call. Verifies
+      // we didn't accidentally undo the TTL optimisation.
+      let getSubscribersCalls = 0;
+      let getAllowedCalls = 0;
+      const enumerator = createCGMemberEnumerator(makeDeps({
+        getContextGraphAllowedPeers: async () => {
+          getAllowedCalls += 1;
+          return null;
+        },
+        getTopicSubscribers: () => {
+          getSubscribersCalls += 1;
+          return ['peerA', 'peerB'];
+        },
+        isPeerDialable: () => true,
+      }));
+
+      await enumerator.enumerate('cg-public-cache-hit');
+      await enumerator.enumerate('cg-public-cache-hit');
+      await enumerator.enumerate('cg-public-cache-hit');
+
+      expect(getAllowedCalls).toBe(1);
+      expect(getSubscribersCalls).toBe(1);
     });
   });
 });

@@ -104,7 +104,32 @@ async function createAgent(name: string): Promise<DKGAgent> {
     value: SELF_PEER,
     configurable: true,
   });
+  // PR-J: the CGMemberEnumerator filters topic-subscribers
+  // through libp2p reachability. These tests don't drive a real
+  // libp2p, so without a stub the filter strips every fake
+  // subscriber and substrate fan-out has nobody to send to. The
+  // PR-J filter is exercised in `enumerate-cg-members.test.ts`
+  // where the predicate is the unit under test; here it's the
+  // ack-quorum + bookkeeper wiring that matters, so make
+  // EVERYTHING reachable.
+  installAllReachableLibp2pStub(agent);
   return agent;
+}
+
+function installAllReachableLibp2pStub(agent: DKGAgent): void {
+  const stub = {
+    getPeers: (): Array<{ toString: () => string }> => [],
+    peerStore: {
+      get: async (_peerId: unknown) => ({
+        addresses: [{ multiaddr: { toString: () => '/ip4/127.0.0.1/tcp/0' } }],
+      }),
+    },
+  };
+  Object.defineProperty((agent as unknown as { node: { libp2p?: unknown } }).node, 'libp2p', {
+    value: stub,
+    configurable: true,
+    writable: true,
+  });
 }
 
 describe('DKGAgent SWM substrate fan-out integration (rc.9 PR-C)', () => {

@@ -103,11 +103,12 @@ export interface CGMemberEnumeratorDeps {
   topicForCG: (cgId: string) => string;
   /**
    * Optional liveness filter for the `topic-subscribers` branch.
-   * Returns true iff the peer is currently dialable from this
-   * node (e.g. a live libp2p connection exists). Applied AFTER
-   * `dedupAndExcludeSelf` to drop ghost subscribers that
-   * GossipSub's peer-exchange / heartbeat still advertises but
-   * that have since gone offline (or were never reachable).
+   * Returns true iff the peer is reachable from this node — i.e.
+   * `sendReliable` has a realistic chance of putting bytes on the
+   * wire to them. Applied AFTER `dedupAndExcludeSelf` to drop
+   * ghost subscribers that GossipSub's peer-exchange / heartbeat
+   * still advertises but that have no addressing info anywhere
+   * in our local stack.
    *
    * Bug fix (PR-J, 2026-05-18): the 2026-05-18 soak between
    * Miles and Lex surfaced `enumerated=4 attempted=4 queued=4`
@@ -118,6 +119,22 @@ export interface CGMemberEnumeratorDeps {
    * outbox row, monotonically rising `queued` counter, no acks.
    * The filter drops those before substrate fan-out attempts.
    *
+   * **MUST match the reachability data the send path uses**, not
+   * just `libp2p.getPeers()` (live connections only). The send
+   * path also dials via peerStore-cached addresses, so a peer we
+   * briefly disconnected from but still know addresses for is
+   * dialable — filtering it out would silently drop a legitimate
+   * subscriber from substrate fan-out + ackQuorum's
+   * expectedMembers. The wiring in `DKGAgent` therefore returns
+   * true for `connected OR peerStore-has-addresses`. PR-J round
+   * 2 (codex feedback on #584).
+   *
+   * Async to accommodate libp2p's `peerStore.get` API (sync
+   * `getPeers()` alone is too narrow per the bug above). The
+   * enumerator awaits each peer in parallel — the dedup'd
+   * subscriber list is small (tens of peers typical), so the
+   * extra await batch is negligible.
+   *
    * Intentionally NOT applied to the `allowlist` branch: curated
    * CGs deliberately track ALL allowlisted peers (online or not)
    * so the watchdog can fire substrate top-up when a previously
@@ -126,12 +143,21 @@ export interface CGMemberEnumeratorDeps {
    * `topic-subscribers` offline subscribers are noise we can't
    * distinguish from churn, so we drop them.
    *
+   * Applied OUTSIDE the TTL cache (PR-J round 2, codex YELLOW on
+   * #584): the cache stores the unfiltered deduped subscriber
+   * snapshot (the expensive SPARQL + getSubscribers work), and
+   * the filter runs on EVERY `enumerate()` against the current
+   * connection state. A peer that briefly disconnects and
+   * reconnects within the 60s cache window is therefore eligible
+   * again on the very next call, not stranded for up to a
+   * minute.
+   *
    * Optional so existing tests / non-substrate callers that
    * construct an enumerator without a libp2p handle keep
    * working. When omitted, the filter is a no-op and pre-PR-J
    * behaviour is preserved.
    */
-  isPeerDialable?: (peerId: string) => boolean;
+  isPeerDialable?: (peerId: string) => boolean | Promise<boolean>;
   /**
    * Lazy accessor for our own peer ID. Always excluded from the
    * returned member set — we don't fan-out to ourselves (the local
@@ -251,28 +277,62 @@ export function createCGMemberEnumerator(deps: CGMemberEnumeratorDeps): CGMember
     // Public CG: no on-chain roster exists by design (subscribers
     // don't pay to subscribe). Use the live GossipSub view.
     //
-    // Source label is derived from the FILTERED member list, not
-    // from the raw subscriber count. Bug fix (codex review on #571
-    // round 2): when the only subscriber visible is `self` (common
-    // when we're the first to subscribe to a public CG and no one
-    // else has joined yet) or duplicates collapse away, we'd
-    // otherwise return `{ source: 'topic-subscribers', members: [] }`
-    // and any caller that treats `source !== 'none'` as "I have
-    // remote recipients" would skip the intended fallback.
+    // Source label is derived from the deduped member list. Bug
+    // fix (codex review on #571 round 2): when the only subscriber
+    // visible is `self` (common when we're the first to subscribe
+    // to a public CG and no one else has joined yet) or duplicates
+    // collapse away, we'd otherwise return `{ source:
+    // 'topic-subscribers', members: [] }` and any caller that
+    // treats `source !== 'none'` as "I have remote recipients"
+    // would skip the intended fallback.
     //
-    // PR-J (2026-05-18) adds a second filter pass: ghost peers
-    // that GossipSub still lists as subscribers but that we
-    // can't actually reach (no live connection) are dropped
-    // before reporting. See the `isPeerDialable` jsdoc on
-    // CGMemberEnumeratorDeps for the soak data this fixes.
+    // PR-J round 2: the `isPeerDialable` filter (added for the
+    // 2026-05-18 ghost-subscribers soak bug — see jsdoc) is
+    // intentionally NOT applied here. We cache the UNFILTERED
+    // deduped subscriber snapshot and let `enumerate()` apply
+    // the liveness filter on every call against current
+    // connection state. Reason: a peer that briefly disconnects
+    // shouldn't be stranded for up to 60s waiting for the cache
+    // to expire (codex YELLOW on #584). The expensive work the
+    // TTL was meant to amortise (SPARQL allowlist resolution,
+    // GossipSub subscriber snapshot) IS cached; only the cheap
+    // liveness check repeats.
     const subscribers = deps.getTopicSubscribers(deps.topicForCG(cgId));
-    const deduped = dedupAndExcludeSelf(subscribers, deps.getSelfPeerId());
-    const members = deps.isPeerDialable
-      ? deduped.filter(deps.isPeerDialable)
-      : deduped;
+    const members = dedupAndExcludeSelf(subscribers, deps.getSelfPeerId());
     return members.length === 0
       ? { source: 'none', members: [] }
       : { source: 'topic-subscribers', members };
+  }
+
+  /**
+   * Apply the `isPeerDialable` filter to a topic-subscribers
+   * result. No-op for other sources or when no filter is wired.
+   * Async to accommodate libp2p's `peerStore.get`. Empty filtered
+   * sets collapse to `source: 'none'` for the same reason the
+   * unfiltered self-only path does (callers gate substrate /
+   * ackQuorum on `source !== 'none'`).
+   *
+   * On predicate throw: treat as `false` (drop the peer). Less
+   * aggressive than crashing the whole enumeration — a single
+   * bad peerStore lookup shouldn't take down all SWM fan-out for
+   * this CG.
+   */
+  async function applyLivenessFilter(value: CGMemberEnumeration): Promise<CGMemberEnumeration> {
+    if (value.source !== 'topic-subscribers') return value;
+    if (!deps.isPeerDialable) return value;
+    const predicate = deps.isPeerDialable;
+    const checks = await Promise.all(value.members.map(async (peerId) => {
+      try {
+        return await predicate(peerId);
+      } catch {
+        return false;
+      }
+    }));
+    const filtered = value.members.filter((_, idx) => checks[idx]);
+    if (filtered.length === value.members.length) return value;
+    return filtered.length === 0
+      ? { source: 'none', members: [] }
+      : { source: 'topic-subscribers', members: filtered };
   }
 
   return {
@@ -280,11 +340,11 @@ export function createCGMemberEnumerator(deps: CGMemberEnumeratorDeps): CGMember
       const nowMs = now();
       const cached = cache.get(cgId);
       if (cached && isFresh(cached, nowMs)) {
-        return cached.value;
+        return applyLivenessFilter(cached.value);
       }
 
       const existing = inFlight.get(cgId);
-      if (existing) return existing;
+      if (existing) return applyLivenessFilter(await existing);
 
       const gen = currentGen(cgId);
       const promise = resolve(cgId, gen, nowMs).finally(() => {
@@ -297,7 +357,7 @@ export function createCGMemberEnumerator(deps: CGMemberEnumeratorDeps): CGMember
         }
       });
       inFlight.set(cgId, promise);
-      return promise;
+      return applyLivenessFilter(await promise);
     },
 
     invalidate(cgId: string): void {
