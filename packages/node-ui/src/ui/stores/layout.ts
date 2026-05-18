@@ -7,6 +7,7 @@ interface LayoutState {
   theme: 'dark' | 'light';
   leftWidth: number;
   rightWidth: number;
+  bottomHeight: number;
 
   toggleLeft: () => void;
   toggleRight: () => void;
@@ -14,6 +15,7 @@ interface LayoutState {
   setTheme: (t: 'dark' | 'light') => void;
   setLeftWidth: (w: number) => void;
   setRightWidth: (w: number) => void;
+  setBottomHeight: (h: number) => void;
 }
 
 const LAYOUT_STORAGE_KEY = 'dkg-layout';
@@ -24,6 +26,7 @@ interface PersistedLayout {
   bottomCollapsed?: boolean;
   leftWidth?: number;
   rightWidth?: number;
+  bottomHeight?: number;
 }
 
 const DEFAULTS = {
@@ -32,6 +35,7 @@ const DEFAULTS = {
   bottomCollapsed: true,
   leftWidth: 240,
   rightWidth: 360,
+  bottomHeight: 200,
 };
 
 // Must match the live drag handlers in App.tsx (`useDragResize`); without
@@ -42,6 +46,8 @@ const LEFT_WIDTH_MIN = 140;
 const LEFT_WIDTH_MAX = 400;
 const RIGHT_WIDTH_MIN = 200;
 const RIGHT_WIDTH_MAX = 500;
+const BOTTOM_HEIGHT_MIN = 120;
+const BOTTOM_HEIGHT_MAX = 600;
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
@@ -61,6 +67,7 @@ function loadPersisted(): Required<PersistedLayout> {
       bottomCollapsed: typeof parsed.bottomCollapsed === 'boolean' ? parsed.bottomCollapsed : DEFAULTS.bottomCollapsed,
       leftWidth: clampWidth(parsed.leftWidth, DEFAULTS.leftWidth, LEFT_WIDTH_MIN, LEFT_WIDTH_MAX),
       rightWidth: clampWidth(parsed.rightWidth, DEFAULTS.rightWidth, RIGHT_WIDTH_MIN, RIGHT_WIDTH_MAX),
+      bottomHeight: clampWidth(parsed.bottomHeight, DEFAULTS.bottomHeight, BOTTOM_HEIGHT_MIN, BOTTOM_HEIGHT_MAX),
     };
   } catch {
     return DEFAULTS;
@@ -89,21 +96,22 @@ export const useLayoutStore = create<LayoutState>((set, get) => ({
   theme: (localStorage.getItem('dkg-theme') as 'dark' | 'light') || 'dark',
   leftWidth: initial.leftWidth,
   rightWidth: initial.rightWidth,
+  bottomHeight: initial.bottomHeight,
 
   toggleLeft: () => {
     set((s) => ({ leftCollapsed: !s.leftCollapsed }));
-    const { leftCollapsed, rightCollapsed, bottomCollapsed, leftWidth, rightWidth } = get();
-    persist({ leftCollapsed, rightCollapsed, bottomCollapsed, leftWidth, rightWidth });
+    const { leftCollapsed, rightCollapsed, bottomCollapsed, leftWidth, rightWidth, bottomHeight } = get();
+    persist({ leftCollapsed, rightCollapsed, bottomCollapsed, leftWidth, rightWidth, bottomHeight });
   },
   toggleRight: () => {
     set((s) => ({ rightCollapsed: !s.rightCollapsed }));
-    const { leftCollapsed, rightCollapsed, bottomCollapsed, leftWidth, rightWidth } = get();
-    persist({ leftCollapsed, rightCollapsed, bottomCollapsed, leftWidth, rightWidth });
+    const { leftCollapsed, rightCollapsed, bottomCollapsed, leftWidth, rightWidth, bottomHeight } = get();
+    persist({ leftCollapsed, rightCollapsed, bottomCollapsed, leftWidth, rightWidth, bottomHeight });
   },
   toggleBottom: () => {
     set((s) => ({ bottomCollapsed: !s.bottomCollapsed }));
-    const { leftCollapsed, rightCollapsed, bottomCollapsed, leftWidth, rightWidth } = get();
-    persist({ leftCollapsed, rightCollapsed, bottomCollapsed, leftWidth, rightWidth });
+    const { leftCollapsed, rightCollapsed, bottomCollapsed, leftWidth, rightWidth, bottomHeight } = get();
+    persist({ leftCollapsed, rightCollapsed, bottomCollapsed, leftWidth, rightWidth, bottomHeight });
   },
   setTheme: (t) => {
     localStorage.setItem('dkg-theme', t);
@@ -115,12 +123,17 @@ export const useLayoutStore = create<LayoutState>((set, get) => ({
     // values within the supported bounds, and persisted state stays
     // consistent with what loadPersisted accepts on reload.
     set({ leftWidth: clamp(w, LEFT_WIDTH_MIN, LEFT_WIDTH_MAX) });
-    const { leftCollapsed, rightCollapsed, bottomCollapsed, leftWidth, rightWidth } = get();
-    persist({ leftCollapsed, rightCollapsed, bottomCollapsed, leftWidth, rightWidth });
+    const { leftCollapsed, rightCollapsed, bottomCollapsed, leftWidth, rightWidth, bottomHeight } = get();
+    persist({ leftCollapsed, rightCollapsed, bottomCollapsed, leftWidth, rightWidth, bottomHeight });
   },
   setRightWidth: (w) => {
     set({ rightWidth: clamp(w, RIGHT_WIDTH_MIN, RIGHT_WIDTH_MAX) });
-    const { leftCollapsed, rightCollapsed, bottomCollapsed, leftWidth, rightWidth } = get();
-    persist({ leftCollapsed, rightCollapsed, bottomCollapsed, leftWidth, rightWidth });
+    const { leftCollapsed, rightCollapsed, bottomCollapsed, leftWidth, rightWidth, bottomHeight } = get();
+    persist({ leftCollapsed, rightCollapsed, bottomCollapsed, leftWidth, rightWidth, bottomHeight });
+  },
+  setBottomHeight: (h) => {
+    set({ bottomHeight: clamp(h, BOTTOM_HEIGHT_MIN, BOTTOM_HEIGHT_MAX) });
+    const { leftCollapsed, rightCollapsed, bottomCollapsed, leftWidth, rightWidth, bottomHeight } = get();
+    persist({ leftCollapsed, rightCollapsed, bottomCollapsed, leftWidth, rightWidth, bottomHeight });
   },
 }));

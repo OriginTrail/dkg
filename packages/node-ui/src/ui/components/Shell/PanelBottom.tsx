@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useLayoutStore } from '../../stores/layout.js';
 import { api } from '../../api-wrapper.js';
 
-const BOTTOM_TABS = ['Node Log', 'Transactions', 'Gossip', 'Agent Runs', 'SPARQL'] as const;
+const BOTTOM_TABS = ['Node Log', 'Transactions'] as const;
 type BottomTab = typeof BOTTOM_TABS[number];
 
 const CHEVRON_DOWN = (
@@ -56,11 +56,14 @@ function NodeLogContent() {
 }
 
 export function PanelBottom() {
-  const { bottomCollapsed, toggleBottom } = useLayoutStore();
+  const { bottomCollapsed, toggleBottom, bottomHeight } = useLayoutStore();
   const [activeTab, setActiveTab] = useState<BottomTab>('Node Log');
 
   return (
-    <div className={`v10-panel-bottom ${bottomCollapsed ? 'collapsed' : ''}`}>
+    <div
+      className={`v10-panel-bottom ${bottomCollapsed ? 'collapsed' : ''}`}
+      style={bottomCollapsed ? undefined : { height: bottomHeight }}
+    >
       <div className="v10-bottom-tabs">
         {BOTTOM_TABS.map((tab) => (
           <button

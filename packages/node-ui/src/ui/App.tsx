@@ -79,10 +79,55 @@ function useDragResize(onDrag: (delta: number) => void) {
   return handleRef;
 }
 
+// Vertical twin of useDragResize for the bottom panel — tracks clientY
+// and uses a row-resize cursor. Kept as a separate hook (rather than
+// generalising useDragResize) to keep the horizontal path untouched.
+function useDragResizeV(onDrag: (delta: number) => void) {
+  const handleRef = useRef<HTMLDivElement>(null);
+  const cbRef = useRef(onDrag);
+  cbRef.current = onDrag;
+
+  useEffect(() => {
+    const handle = handleRef.current;
+    if (!handle) return;
+
+    let startY = 0;
+
+    const onMouseMove = (e: MouseEvent) => {
+      const delta = e.clientY - startY;
+      startY = e.clientY;
+      cbRef.current(delta);
+    };
+
+    const onMouseUp = () => {
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      handle.classList.remove('active');
+    };
+
+    const onMouseDown = (e: MouseEvent) => {
+      e.preventDefault();
+      startY = e.clientY;
+      document.addEventListener('mousemove', onMouseMove);
+      document.addEventListener('mouseup', onMouseUp);
+      document.body.style.cursor = 'row-resize';
+      document.body.style.userSelect = 'none';
+      handle.classList.add('active');
+    };
+
+    handle.addEventListener('mousedown', onMouseDown);
+    return () => handle.removeEventListener('mousedown', onMouseDown);
+  }, []);
+
+  return handleRef;
+}
+
 function AppShell() {
   useLiveStatus();
   useKeyboardShortcuts();
-  const { leftCollapsed, rightCollapsed, theme, leftWidth, rightWidth, setLeftWidth, setRightWidth } = useLayoutStore();
+  const { leftCollapsed, rightCollapsed, bottomCollapsed, theme, leftWidth, rightWidth, setLeftWidth, setRightWidth, setBottomHeight } = useLayoutStore();
 
   useEffect(() => {
     document.body.classList.toggle('light', theme === 'light');
@@ -98,8 +143,16 @@ function AppShell() {
     setRightWidth(Math.max(200, Math.min(500, w - delta)));
   }, [setRightWidth]);
 
+  // Handle sits above the bottom panel; dragging UP (negative delta)
+  // makes the panel taller, so subtract the delta. Store clamps.
+  const onDragBottom = useCallback((delta: number) => {
+    const h = useLayoutStore.getState().bottomHeight;
+    setBottomHeight(h - delta);
+  }, [setBottomHeight]);
+
   const leftHandle = useDragResize(onDragLeft);
   const rightHandle = useDragResize(onDragRight);
+  const bottomHandle = useDragResizeV(onDragBottom);
 
   return (
     <div className="v10-app">
@@ -118,6 +171,7 @@ function AppShell() {
           <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
             <PanelCenter />
           </div>
+          {!bottomCollapsed && <div className="v10-resize-handle-v" ref={bottomHandle} />}
           <PanelBottom />
         </div>
 
