@@ -6760,6 +6760,11 @@ export class DKGAgent {
     //      quorum target as gossip-side acks.
     if (plan.useSubstrate) {
       const baseBookkeeper = this.substrateFanoutBookkeeper();
+      // PR-J: capture per-peer outcomes for the optional detail
+      // line emitted when anything queues/fails/is rejected. Lets
+      // operators see WHICH peer is failing rather than just an
+      // aggregate "queued=4" with no way to attribute it.
+      const perPeerDetail: { peerId: string; outcome: string; error: string }[] = [];
       const substratePromise: Promise<void> = (async () => {
         try {
           const substrateResult = await executeSubstrateFanOut({
@@ -6778,6 +6783,18 @@ export class DKGAgent {
                 ) {
                   trackedQuorum.onAck(shareOperationId, record.peerId);
                 }
+                if (
+                  record.outcome === 'queued'
+                  || record.outcome === 'failed'
+                  || record.outcome === 'rejected'
+                  || record.outcome === 'retryable'
+                ) {
+                  perPeerDetail.push({
+                    peerId: record.peerId,
+                    outcome: record.outcome,
+                    error: record.error,
+                  });
+                }
                 baseBookkeeper.recordOutcome(cgId, record);
               },
             },
@@ -6793,6 +6810,19 @@ export class DKGAgent {
             + `inFlight=${substrateResult.inFlight} failed=${substrateResult.failed} `
             + `also_gossiped=${plan.useGossip}`,
           );
+          // PR-J per-peer detail. Logged at WARN so it surfaces in
+          // operator dashboards that filter by level (the aggregate
+          // INFO line is the steady-state observability; this is the
+          // "something's wrong, here's who" follow-up).
+          if (perPeerDetail.length > 0) {
+            const summary = perPeerDetail
+              .map((d) => `${d.peerId.slice(-12)}=${d.outcome}` + (d.error ? `(${d.error.slice(0, 80)})` : ''))
+              .join(' ');
+            this.log.warn(
+              ctx,
+              `SWM substrate fan-out non-delivered detail cgId=${contextGraphId} peers=[${summary}]`,
+            );
+          }
         } catch (err) {
           const reason = err instanceof Error ? err.message : String(err);
           this.log.warn(
@@ -9378,6 +9408,24 @@ export class DKGAgent {
         getTopicSubscribers: (topic) => this.gossip.getSubscribers(topic),
         topicForCG: (cgId) => contextGraphWorkspaceTopic(cgId),
         getSelfPeerId: () => this.peerId,
+        // PR-J liveness filter: drop GossipSub-advertised subscribers
+        // that we don't currently have a connection to. Bug fix for
+        // the 2026-05-18 Miles<->Lex soak where 3-of-4 enumerated
+        // public-CG subscribers were ghosts (peer-exchange residue),
+        // every substrate send queued, ackQuorum never completed.
+        // libp2p.getPeers() is cheap (returns the connected set, no
+        // I/O) so calling it on every enumeration miss is fine. If
+        // libp2p hasn't started yet (pre-start share()), getPeers()
+        // throws — match the getSelfPeerId thunk fallback by
+        // returning true (don't filter) so the enumeration still
+        // succeeds and falls through to gossip-only.
+        isPeerDialable: (peerId) => {
+          try {
+            return this.node.libp2p.getPeers().some((p) => p.toString() === peerId);
+          } catch {
+            return true;
+          }
+        },
       });
     }
     return this.cgMemberEnumerator;

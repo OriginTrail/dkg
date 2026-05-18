@@ -102,6 +102,37 @@ export interface CGMemberEnumeratorDeps {
   getTopicSubscribers: (topic: string) => string[];
   topicForCG: (cgId: string) => string;
   /**
+   * Optional liveness filter for the `topic-subscribers` branch.
+   * Returns true iff the peer is currently dialable from this
+   * node (e.g. a live libp2p connection exists). Applied AFTER
+   * `dedupAndExcludeSelf` to drop ghost subscribers that
+   * GossipSub's peer-exchange / heartbeat still advertises but
+   * that have since gone offline (or were never reachable).
+   *
+   * Bug fix (PR-J, 2026-05-18): the 2026-05-18 soak between
+   * Miles and Lex surfaced `enumerated=4 attempted=4 queued=4`
+   * every cycle on a public CG that had exactly one real
+   * subscriber (Lex). Three of the four enumerated peers were
+   * ghost entries in our local GossipSub mesh view — sendReliable
+   * to each hit `no valid addresses` (recoverable) → permanent
+   * outbox row, monotonically rising `queued` counter, no acks.
+   * The filter drops those before substrate fan-out attempts.
+   *
+   * Intentionally NOT applied to the `allowlist` branch: curated
+   * CGs deliberately track ALL allowlisted peers (online or not)
+   * so the watchdog can fire substrate top-up when a previously
+   * offline allowlistee reconnects. For `allowlist` the offline
+   * peer eventually recovers via `runSyncOnConnect`; for
+   * `topic-subscribers` offline subscribers are noise we can't
+   * distinguish from churn, so we drop them.
+   *
+   * Optional so existing tests / non-substrate callers that
+   * construct an enumerator without a libp2p handle keep
+   * working. When omitted, the filter is a no-op and pre-PR-J
+   * behaviour is preserved.
+   */
+  isPeerDialable?: (peerId: string) => boolean;
+  /**
    * Lazy accessor for our own peer ID. Always excluded from the
    * returned member set — we don't fan-out to ourselves (the local
    * apply already happened in the caller).
@@ -228,8 +259,17 @@ export function createCGMemberEnumerator(deps: CGMemberEnumeratorDeps): CGMember
     // otherwise return `{ source: 'topic-subscribers', members: [] }`
     // and any caller that treats `source !== 'none'` as "I have
     // remote recipients" would skip the intended fallback.
+    //
+    // PR-J (2026-05-18) adds a second filter pass: ghost peers
+    // that GossipSub still lists as subscribers but that we
+    // can't actually reach (no live connection) are dropped
+    // before reporting. See the `isPeerDialable` jsdoc on
+    // CGMemberEnumeratorDeps for the soak data this fixes.
     const subscribers = deps.getTopicSubscribers(deps.topicForCG(cgId));
-    const members = dedupAndExcludeSelf(subscribers, deps.getSelfPeerId());
+    const deduped = dedupAndExcludeSelf(subscribers, deps.getSelfPeerId());
+    const members = deps.isPeerDialable
+      ? deduped.filter(deps.isPeerDialable)
+      : deduped;
     return members.length === 0
       ? { source: 'none', members: [] }
       : { source: 'topic-subscribers', members };
