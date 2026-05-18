@@ -129,6 +129,97 @@ describe('createCGMemberEnumerator: public CG (topic-subscribers source)', () =>
 
     expect(result).toEqual({ source: 'none', members: [] });
   });
+
+  /**
+   * PR-J (2026-05-18): drop GossipSub-advertised subscribers that
+   * we don't currently have a live connection to. Soak data: the
+   * 2026-05-18 Miles<->Lex run enumerated 4 subscribers on a CG
+   * with one real subscriber — three were ghosts in the local
+   * mesh view, every substrate send to them queued forever, and
+   * the ackQuorum's expectedMembers waited on acks that would
+   * never arrive.
+   */
+  describe('isPeerDialable filter (PR-J)', () => {
+    it('drops topic-subscribers that fail the dialable predicate', async () => {
+      const enumerator = createCGMemberEnumerator(makeDeps({
+        getContextGraphAllowedPeers: async () => null,
+        getTopicSubscribers: () => ['liveA', 'ghostB', 'liveC', 'ghostD'],
+        isPeerDialable: (peerId) => peerId.startsWith('live'),
+      }));
+
+      const result = await enumerator.enumerate('cg-public-ghosts');
+
+      expect(result.source).toBe('topic-subscribers');
+      expect(result.members.sort()).toEqual(['liveA', 'liveC']);
+    });
+
+    it('returns source=none when filter removes every subscriber', async () => {
+      const enumerator = createCGMemberEnumerator(makeDeps({
+        getContextGraphAllowedPeers: async () => null,
+        getTopicSubscribers: () => ['ghostA', 'ghostB'],
+        isPeerDialable: () => false,
+      }));
+
+      const result = await enumerator.enumerate('cg-public-all-ghosts');
+
+      expect(result).toEqual({ source: 'none', members: [] });
+    });
+
+    it('does NOT apply the filter to the allowlist branch', async () => {
+      // Curated CGs deliberately track offline allowlistees so the
+      // watchdog can fire substrate top-up when they reconnect.
+      // Filtering here would silently regress that behaviour.
+      let isPeerDialableCalled = 0;
+      const enumerator = createCGMemberEnumerator(makeDeps({
+        getContextGraphAllowedPeers: async () => ['peerA', 'peerB'],
+        isPeerDialable: () => {
+          isPeerDialableCalled += 1;
+          return false;
+        },
+      }));
+
+      const result = await enumerator.enumerate('cg-curated-with-offline');
+
+      expect(result.source).toBe('allowlist');
+      expect(result.members.sort()).toEqual(['peerA', 'peerB']);
+      expect(isPeerDialableCalled).toBe(0);
+    });
+
+    it('treats missing isPeerDialable as a no-op (pre-PR-J behaviour)', async () => {
+      const enumerator = createCGMemberEnumerator(makeDeps({
+        getContextGraphAllowedPeers: async () => null,
+        getTopicSubscribers: () => ['peerA', 'peerB'],
+        // Note: no isPeerDialable in deps. Compatibility with
+        // older callers that don't yet pass the filter.
+      }));
+
+      const result = await enumerator.enumerate('cg-public-no-filter');
+
+      expect(result.source).toBe('topic-subscribers');
+      expect(result.members.sort()).toEqual(['peerA', 'peerB']);
+    });
+
+    it('filter is applied AFTER dedupAndExcludeSelf', async () => {
+      // Self should never be passed to the filter; duplicates
+      // should be collapsed before the filter runs.
+      const seenByFilter: string[] = [];
+      const enumerator = createCGMemberEnumerator(makeDeps({
+        getContextGraphAllowedPeers: async () => null,
+        getTopicSubscribers: () => [SELF, 'peerA', 'peerA', SELF, 'peerB'],
+        isPeerDialable: (peerId) => {
+          seenByFilter.push(peerId);
+          return peerId !== 'peerB';
+        },
+      }));
+
+      const result = await enumerator.enumerate('cg-public-filter-order');
+
+      expect(result.source).toBe('topic-subscribers');
+      expect(result.members).toEqual(['peerA']);
+      // Filter never sees self or duplicates.
+      expect(seenByFilter.sort()).toEqual(['peerA', 'peerB']);
+    });
+  });
 });
 
 /**
