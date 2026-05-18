@@ -26,6 +26,13 @@ export function useMyContextGraphs(): {
   const [identity, setIdentity] = useState<AgentSidebarIdentity | null>(null);
   const [identityLoading, setIdentityLoading] = useState(true);
 
+  // Re-fetch identity whenever the context-graph list changes — the
+  // sidebar refreshes identity alongside each CG reload (PanelLeft
+  // loadCGs), so a one-shot fetch here would permanently diverge from
+  // the sidebar if it failed at startup or the active agent later
+  // changed, breaking the parity invariant this hook guarantees
+  // (Codex). The store array reference changes on each reload, giving
+  // us the same cadence; fetchCurrentAgent is a cheap GET.
   useEffect(() => {
     let mounted = true;
     fetchCurrentAgent()
@@ -33,7 +40,7 @@ export function useMyContextGraphs(): {
       .catch(() => { /* membership falls back to callerInvolved flags */ })
       .finally(() => { if (mounted) setIdentityLoading(false); });
     return () => { mounted = false; };
-  }, []);
+  }, [contextGraphs]);
 
   const myCgs = useMemo(
     () => contextGraphs

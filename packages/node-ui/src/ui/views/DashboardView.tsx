@@ -142,6 +142,19 @@ function CgRow({
     return () => { mounted = false; };
   }, [cg.id]);
 
+  // The /participants allow-list can omit the curator (and is empty on
+  // fully-public graphs), so fold the CG's curator into the agent set —
+  // they inherently have access and must count toward the user's
+  // "unique agents with access" metric (Codex). null (loading/error)
+  // stays null so the parent's unknown-vs-zero handling is preserved.
+  const effectiveAgents = useMemo(() => {
+    if (agents === null) return null;
+    const s = new Set(agents);
+    const cur = cg.curator?.trim();
+    if (cur) s.add(canonicalAgentDid(cur));
+    return [...s];
+  }, [agents, cg.curator]);
+
   const entities: LayerCounts = {
     wm: mem.counts.wm, swm: mem.counts.swm, vm: mem.counts.vm, total: mem.counts.total,
   };
@@ -159,14 +172,14 @@ function CgRow({
     mem.loading ? 1 : 0, mem.error ? 1 : 0, agentsLoading ? 1 : 0, agentsError ? 1 : 0,
     entities.wm, entities.swm, entities.vm, entities.total,
     triples.wm, triples.swm, triples.vm, triples.total,
-    agents ? agents.slice().sort().join(',') : '∅',
+    effectiveAgents ? effectiveAgents.slice().sort().join(',') : '∅',
   ].join('|');
 
   useEffect(() => {
     onReport(cg.id, {
       entities,
       triples,
-      agents: agents ?? [],
+      agents: effectiveAgents ?? [],
       sizeLoading: mem.loading,
       sizeError: Boolean(mem.error),
       agentsLoading,
@@ -207,7 +220,7 @@ function CgRow({
             : <>{abbrev(entities.total)} <span className="v10-cg-dim">entities</span> · {abbrev(triples.total)} <span className="v10-cg-dim">triples</span></>}
       </span>
       <span className="v10-cg-cell v10-cg-agents">
-        {agents === null ? <span className="v10-cg-dim">—</span> : agents.length}
+        {effectiveAgents === null ? <span className="v10-cg-dim">—</span> : effectiveAgents.length}
       </span>
       <span className="v10-cg-cell v10-cg-role">
         <span className={`v10-cg-badge v10-cg-badge-${isCurator ? 'curator' : 'joined'}`}>

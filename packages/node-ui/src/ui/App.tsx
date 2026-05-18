@@ -118,7 +118,14 @@ function useDragResizeV(onDrag: (delta: number) => void) {
     };
 
     handle.addEventListener('mousedown', onMouseDown);
-    return () => handle.removeEventListener('mousedown', onMouseDown);
+    return () => {
+      handle.removeEventListener('mousedown', onMouseDown);
+      // If the shell unmounts mid-drag, fully tear down: onMouseUp
+      // removes the document mousemove/mouseup listeners and resets the
+      // body cursor/user-select so the app can't get stuck in
+      // row-resize still firing setBottomHeight (Codex).
+      onMouseUp();
+    };
   }, []);
 
   return handleRef;
@@ -132,6 +139,18 @@ function AppShell() {
   useEffect(() => {
     document.body.classList.toggle('light', theme === 'light');
   }, [theme]);
+
+  // Keep the persisted bottom height within the current viewport: clamp
+  // it into the store on mount and on window resize so the rendered
+  // height AND the drag base (which reads the store) stay in sync — a
+  // render-only clamp would leave the store holding a stale large value
+  // and make the first shrink-drag feel stuck (Codex).
+  useEffect(() => {
+    const sync = () => setBottomHeight(Math.min(useLayoutStore.getState().bottomHeight, maxBottomHeight()));
+    sync();
+    window.addEventListener('resize', sync);
+    return () => window.removeEventListener('resize', sync);
+  }, [setBottomHeight]);
 
   const onDragLeft = useCallback((delta: number) => {
     const w = useLayoutStore.getState().leftWidth;
