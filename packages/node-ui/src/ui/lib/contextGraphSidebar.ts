@@ -44,6 +44,12 @@ export function canonicalAgentDid(did: string): string {
     if (evm) return `${PREFIX}${evm[1].toLowerCase()}`;
     return `${PREFIX}${rest}`;
   }
+  // A bare EVM address and its `did:dkg:agent:<addr>` form are the same
+  // agent. `/participants` returns bare addresses while `cg.curator` is
+  // a DID URI; without converging them here the same curator is counted
+  // twice when the two sources are unioned (Codex).
+  const bareEvm = /^0x[a-fA-F0-9]{40}$/.exec(t);
+  if (bareEvm) return `${PREFIX}${t.toLowerCase()}`;
   return t.toLowerCase();
 }
 

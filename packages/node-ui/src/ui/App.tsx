@@ -143,22 +143,26 @@ function AppShell() {
   useLiveStatus();
   useKeyboardShortcuts();
   const { leftCollapsed, rightCollapsed, bottomCollapsed, theme, leftWidth, rightWidth, setLeftWidth, setRightWidth, setBottomHeight } = useLayoutStore();
+  const [, setVpTick] = useState(0);
 
   useEffect(() => {
     document.body.classList.toggle('light', theme === 'light');
   }, [theme]);
 
-  // Keep the persisted bottom height within the current viewport: clamp
-  // it into the store on mount and on window resize so the rendered
-  // height AND the drag base (which reads the store) stay in sync — a
-  // render-only clamp would leave the store holding a stale large value
-  // and make the first shrink-drag feel stuck (Codex).
+  // Re-render on viewport resize so the render-time clamp in PanelBottom
+  // and the drag base both recompute against the new maxBottomHeight().
+  // We deliberately do NOT write a clamped value back into the store
+  // here: persisting the shrunk height would destroy the user's
+  // preferred panel size whenever the window is only temporarily
+  // smaller, and it could never be restored on re-enlarge (Codex). The
+  // unclamped preference stays in the store; only a user drag changes
+  // it. Shrink-drag still isn't sticky because onDragBottom bases off
+  // the clamped effective height, not the raw stored value.
   useEffect(() => {
-    const sync = () => setBottomHeight(Math.min(useLayoutStore.getState().bottomHeight, maxBottomHeight()));
-    sync();
-    window.addEventListener('resize', sync);
-    return () => window.removeEventListener('resize', sync);
-  }, [setBottomHeight]);
+    const onResize = () => setVpTick((t) => t + 1);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
 
   const onDragLeft = useCallback((delta: number) => {
     const w = useLayoutStore.getState().leftWidth;
@@ -173,9 +177,15 @@ function AppShell() {
   // Handle sits above the bottom panel; dragging UP (negative delta)
   // makes the panel taller, so subtract the delta. Clamp to the
   // viewport-aware max so the center pane keeps its minimum height.
+  // Base the drag off the *clamped effective* height (what the user
+  // actually sees), not the raw stored preference — otherwise, when the
+  // stored value exceeds the viewport max, the first shrink-drag has to
+  // chew through the phantom off-screen height before the panel moves
+  // (Codex). This write is a user-initiated change, so persisting it is
+  // intended.
   const onDragBottom = useCallback((delta: number) => {
-    const h = useLayoutStore.getState().bottomHeight;
-    setBottomHeight(Math.min(h - delta, maxBottomHeight()));
+    const eff = Math.min(useLayoutStore.getState().bottomHeight, maxBottomHeight());
+    setBottomHeight(Math.min(eff - delta, maxBottomHeight()));
   }, [setBottomHeight]);
 
   const leftHandle = useDragResize(onDragLeft);
