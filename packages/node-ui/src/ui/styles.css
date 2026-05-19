@@ -2368,10 +2368,18 @@ button:focus:not(:focus-visible) { outline: none; }
 /* ══════════════════════════════════════════
    DASHBOARD VIEW
    ══════════════════════════════════════════ */
-/* Widened from 1200 → 1600: on large screens the old cap left a big
-   empty right gutter and the cards read sparse. 1600 fills more of the
-   viewport while keeping readable line lengths (ux/ui-lead). */
-.v10-dashboard { max-width: 1600px; min-width: 0; }
+/* Widened from 1200 → 1440: the old cap left a big empty right gutter
+   and the cards read sparse. 1440 fills the viewport on common large
+   screens while keeping readable line lengths and stopping the list row
+   from over-stretching past comfort (ui-lead — capped below 1600). */
+.v10-dashboard { max-width: 1440px; min-width: 0; }
+/* Subtle one-shot mount lift for dashboard cards/sections. Short
+   (160ms), opacity + 4px translate only, `both` so it doesn't flash the
+   pre-animation state. Fully disabled under reduced-motion. */
+@keyframes v10DashMount { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+.v10-anim-mount { animation: v10DashMount 160ms ease-out both; }
+@media (prefers-reduced-motion: reduce) { .v10-anim-mount { animation: none; } }
+
 .v10-dash-header { margin-bottom: 24px; }
 .v10-dash-title { font-size: 20px; font-weight: 600; color: var(--text-primary); margin-bottom: 4px; }
 .v10-dash-subtitle { font-size: 12px; color: var(--text-tertiary); font-family: var(--font-mono); }
@@ -2395,6 +2403,10 @@ button:focus:not(:focus-visible) { outline: none; }
   font-weight: 600;
   color: var(--text-primary);
 }
+/* Icon + title cluster on the left of a section header. Icon inherits
+   --text-secondary so it reads as a quiet affordance, not a control. */
+.v10-dash-section-title { display: flex; align-items: center; gap: 6px; }
+.v10-dash-section-title svg { color: var(--text-secondary); flex-shrink: 0; }
 .v10-dash-section-badge {
   font-family: var(--font-mono);
   font-size: 10px;
@@ -2413,7 +2425,7 @@ button:focus:not(:focus-visible) { outline: none; }
 /* ── PR6 dashboard: 3 stat panels + My Context Graphs list ── */
 .v10-dash-stats-3 { grid-template-columns: repeat(3, 1fr); }
 @media (max-width: 720px) { .v10-dash-stats-3 { grid-template-columns: 1fr; } }
-.v10-dash-grid-2 { grid-template-columns: minmax(0, 2.4fr) minmax(0, 1fr); }
+.v10-dash-grid-2 { grid-template-columns: minmax(0, 2.2fr) minmax(320px, 1fr); }
 @media (max-width: 720px) { .v10-dash-grid-2 { grid-template-columns: 1fr; } }
 .v10-dash-section-wide { min-width: 0; }
 
@@ -2422,11 +2434,16 @@ button:focus:not(:focus-visible) { outline: none; }
    belongs with the metric). Muted, smaller, with a little separation. */
 .v10-cg-defn {
   display: block;
-  margin-top: 6px;
+  /* Footnote at the bottom of the card, separated by a hairline so it
+     reads as supporting context, not a competing line under the sub
+     (ui-lead). */
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-subtle);
   /* --text-secondary, not tertiary: it's informational copy and must
      clear AA on the card surface (recurring team rule). */
   color: var(--text-secondary);
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1.5;
 }
 
@@ -2437,11 +2454,13 @@ button:focus:not(:focus-visible) { outline: none; }
 /* Context Graph Size: the two metrics ARE the headline now (the
    redundant combined top number was removed). Big number + small unit
    label, each over its WM/SWM/VM bar; tightened so the card is compact. */
-.v10-cg-size-detail { margin-top: 2px; display: flex; flex-direction: column; gap: 8px; }
-.v10-cg-size-metric { display: flex; flex-direction: column; gap: 3px; }
+/* The two metrics carry the panel — give them air now they're large
+   (ui-lead: 14px between metrics, 6px number→bar). */
+.v10-cg-size-detail { margin-top: 2px; display: flex; flex-direction: column; gap: 14px; }
+.v10-cg-size-metric { display: flex; flex-direction: column; gap: 6px; }
 .v10-cg-size-num { display: flex; align-items: baseline; gap: 6px; }
 .v10-cg-size-big {
-  font-size: 24px;
+  font-size: 26px;
   font-weight: 700;
   color: var(--text-primary);
   line-height: 1.1;
@@ -2449,6 +2468,10 @@ button:focus:not(:focus-visible) { outline: none; }
 }
 .v10-cg-size-num .v10-cg-dim { font-size: 11px; }
 .v10-cg-size-empty { font-size: 20px; font-weight: 600; padding: 6px 0; }
+/* The Size card is the densest of the three stat cards; trim its
+   padding so the two big numbers + bars + legend + sub don't bloat it
+   past the other two (ui-lead). */
+.stat-card.v10-size-card { padding: 16px 18px; }
 /* Track background + 1px gap between segments shows the track colour as
    a hairline separator, and the outline keeps the light-theme WM
    segment's boundary readable even though its remapped token fill is
@@ -2464,7 +2487,7 @@ button:focus:not(:focus-visible) { outline: none; }
 }
 .v10-layerbar-seg { height: 100%; }
 .v10-layerbar-empty { flex: 1; background: var(--bg-elevated); }
-.v10-layer-legend { display: flex; gap: 12px; margin-top: 2px; }
+.v10-layer-legend { display: flex; gap: 12px; margin-top: 4px; }
 .v10-layer-legend-item {
   display: inline-flex; align-items: center; gap: 5px;
   font-size: 10px; color: var(--text-secondary); font-family: var(--font-mono);
@@ -2474,7 +2497,7 @@ button:focus:not(:focus-visible) { outline: none; }
 /* My Context Graphs list — column grid shared by header + rows. */
 .v10-cg-colhead, .v10-cg-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 44px minmax(150px, 190px) 56px 82px;
+  grid-template-columns: minmax(0, 1fr) 40px minmax(140px, 190px) 52px 76px;
   align-items: center;
   gap: 8px;
 }
@@ -2513,15 +2536,15 @@ button:focus:not(:focus-visible) { outline: none; }
 }
 .v10-cg-type { display: flex; align-items: center; justify-content: center; color: var(--text-secondary); }
 .v10-cg-agents { text-align: right; font-variant-numeric: tabular-nums; }
-/* Role cell: center the badge so the column reads tidily under a
-   centered header. */
-.v10-cg-role { display: flex; align-items: center; justify-content: center; }
-/* Header cells align to their column's content (Name/Size left, Type &
-   Role centered over the glyph/badge, Agents right over the numbers) —
-   a left-aligned header over centered/right content read as misaligned
+/* Role cell: left-anchor the badge. A pill centered in its column reads
+   as unmoored (ui-lead) — left-aligning it under a left header keeps the
+   column edge stable as role labels vary in width. */
+.v10-cg-role { display: flex; align-items: center; justify-content: flex-start; }
+/* Header cells align to their column's content (Name/Size/Role left,
+   Type centered over the glyph, Agents right over the numbers) — a
+   left-aligned header over centered/right content read as misaligned
    in the screenshot review. */
-.v10-cg-colhead .v10-cg-type,
-.v10-cg-colhead .v10-cg-role { justify-content: center; text-align: center; }
+.v10-cg-colhead .v10-cg-type { justify-content: center; text-align: center; }
 .v10-cg-colhead .v10-cg-agents { text-align: right; }
 /* Role badge — same small-status-badge family as `.v10-agent-card-badge`. */
 .v10-cg-badge {
@@ -2552,22 +2575,65 @@ button:focus:not(:focus-visible) { outline: none; }
   margin: 10px 0 6px;
 }
 .v10-ws-subhead:first-of-type { margin-top: 2px; }
-.v10-ws-wallets, .v10-ws-spend { list-style: none; display: flex; flex-direction: column; gap: 4px; }
-.v10-ws-wallet, .v10-ws-spend-row {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
+.v10-ws-wallets { list-style: none; display: flex; flex-direction: column; gap: 6px; }
+/* Wallet row: address left, balances right-stacked (TRAC primary, ETH
+   secondary) — a 2-col grid so the address can ellipsis while the
+   balance column stays a stable right edge (ui-lead). */
+.v10-ws-wallet {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
   gap: 8px;
   font-size: 12px;
 }
-.v10-ws-addr { color: var(--text-primary); font-family: var(--font-mono); font-size: 11px; }
-.v10-ws-bal, .v10-ws-spend-val {
+.v10-ws-addr {
   color: var(--text-primary);
-  font-variant-numeric: tabular-nums;
-  text-align: right;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
-.v10-ws-spend-val { font-size: 11px; }
+.v10-ws-balcol { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; }
+.v10-ws-bal {
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+/* Secondary ETH line: smaller, --text-secondary (NOT tertiary — it's a
+   real balance, must clear AA). */
+.v10-ws-bal-sec {
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+/* Spending mini-table: Period | Publishes | TRAC, with a tiny header
+   row so the bare numbers are labelled (ui-lead). */
+.v10-ws-spend { display: flex; flex-direction: column; gap: 4px; }
+.v10-ws-spend-head, .v10-ws-spend-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 12px;
+}
+.v10-ws-spend-head {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-secondary);
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.v10-ws-spend-head span:not(:first-child),
+.v10-ws-spend-val { text-align: right; }
+.v10-ws-spend-val {
+  color: var(--text-primary);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
 
 /* Quick actions */
 .v10-quick-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 8px; }

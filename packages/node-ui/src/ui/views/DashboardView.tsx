@@ -1,5 +1,5 @@
 import React, { useCallback, useMemo, useState, useEffect } from 'react';
-import { Lock, Globe } from 'lucide-react';
+import { Lock, Globe, Boxes, Database, Network, Wallet } from 'lucide-react';
 import { useFetch } from '../hooks.js';
 import { api } from '../api-wrapper.js';
 import { listParticipants } from '../api.js';
@@ -59,18 +59,20 @@ function abbrev(n: number): string {
 }
 
 function StatCard({
-  label, value, sub, accentColor, children,
+  label, value, sub, accentColor, children, icon, className,
 }: {
   label: string;
   value?: React.ReactNode;
   sub?: React.ReactNode;
   accentColor?: string;
   children?: React.ReactNode;
+  icon?: React.ReactNode;
+  className?: string;
 }) {
   return (
-    <div className="stat-card">
+    <div className={`stat-card v10-anim-mount${className ? ` ${className}` : ''}`}>
       {accentColor && <div className="accent" style={{ background: accentColor }} />}
-      <div className="stat-label">{label}</div>
+      <div className="stat-label">{icon}{label}</div>
       {value != null && value !== '' && <div className="stat-value">{value}</div>}
       {children}
       {sub != null && sub !== '' && <div className="stat-sub">{sub}</div>}
@@ -320,11 +322,19 @@ export function DashboardView() {
     { label: '7d', display: 'Last 7d' },
     { label: '30d', display: 'Last 30d' },
   ] as const;
+  // Grouped thousands, no decimals at scale (TRAC balances/spend run
+  // large); ≤2 decimals under 1000 so small balances stay legible (ui-lead).
+  const fmtTrac = (v: string | number) => {
+    const n = Number(v);
+    if (!isFinite(n)) return String(v);
+    return n.toLocaleString(undefined, { maximumFractionDigits: n >= 1000 ? 0 : 2 });
+  };
   const spendingRows = SPEND_ROWS.map((r) => {
     const p = econ?.periods?.find((x) => x.label === r.label);
     return {
       display: r.display,
-      text: p ? `${p.publishCount} publishes · ${p.totalTrac.toFixed(2)} TRAC` : '—',
+      publishes: p ? String(p.publishCount) : '—',
+      trac: p ? fmtTrac(p.totalTrac) : '—',
     };
   });
 
@@ -345,6 +355,7 @@ export function DashboardView() {
       <div className="v10-dash-stats v10-dash-stats-3">
         <StatCard
           label="My Context Graphs"
+          icon={<Boxes size={13} aria-hidden />}
           value={myCgs.length}
           accentColor="var(--accent-blue)"
           sub={
@@ -356,6 +367,8 @@ export function DashboardView() {
         />
         <StatCard
           label="Context Graph Size"
+          icon={<Database size={13} aria-hidden />}
+          className="v10-size-card"
           accentColor="var(--accent-green)"
         >
           {!agg.hasCgs ? (
@@ -391,6 +404,7 @@ export function DashboardView() {
         </StatCard>
         <StatCard
           label="Connected Agents"
+          icon={<Network size={13} aria-hidden />}
           value={!agg.hasCgs ? '—' : agg.agentsLoading ? <span className="v10-cg-dim">loading…</span> : agg.agentCount}
           sub={agg.hasCgs && agg.agentsPartial
             ? 'Some context graphs could not report agents; count is partial.'
@@ -400,9 +414,12 @@ export function DashboardView() {
       </div>
 
       <div className="v10-dash-grid v10-dash-grid-2">
-        <div className="v10-dash-section v10-dash-section-wide">
+        <div className="v10-dash-section v10-dash-section-wide v10-anim-mount">
           <div className="v10-dash-section-header">
-            <h3>My Context Graphs</h3>
+            <div className="v10-dash-section-title">
+              <Boxes size={13} aria-hidden />
+              <h3>My Context Graphs</h3>
+            </div>
             <span className="v10-dash-section-badge">{myCgs.length}</span>
           </div>
           {myCgs.length === 0 ? (
@@ -441,9 +458,12 @@ export function DashboardView() {
           )}
         </div>
 
-        <div className="v10-dash-section">
+        <div className="v10-dash-section v10-anim-mount">
           <div className="v10-dash-section-header">
-            <h3>Wallets and Spending</h3>
+            <div className="v10-dash-section-title">
+              <Wallet size={13} aria-hidden />
+              <h3>Wallets and Spending</h3>
+            </div>
           </div>
 
           <div className="v10-ws-subhead">Node wallets</div>
@@ -468,9 +488,11 @@ export function DashboardView() {
               {walletRows.map((b) => (
                 <li key={b.address} className="v10-ws-wallet">
                   <span className="v10-ws-addr" title={b.address}>{shortAddr(b.address)}</span>
-                  <span className="v10-ws-bal">
-                    {Number(b.trac).toLocaleString(undefined, { maximumFractionDigits: 2 })}{' '}
-                    <span className="v10-cg-dim">{walletSym}</span>
+                  <span className="v10-ws-balcol">
+                    <span className="v10-ws-bal">
+                      {fmtTrac(b.trac)} <span className="v10-cg-dim">{walletSym}</span>
+                    </span>
+                    <span className="v10-ws-bal-sec">{b.eth} ETH</span>
                   </span>
                 </li>
               ))}
@@ -480,14 +502,20 @@ export function DashboardView() {
           )}
 
           <div className="v10-ws-subhead">Spending</div>
-          <ul className="v10-ws-spend">
+          <div className="v10-ws-spend">
+            <div className="v10-ws-spend-head">
+              <span>Period</span>
+              <span>Publishes</span>
+              <span>{walletSym}</span>
+            </div>
             {spendingRows.map((r) => (
-              <li key={r.display} className="v10-ws-spend-row">
+              <div key={r.display} className="v10-ws-spend-row">
                 <span className="v10-cg-dim">{r.display}</span>
-                <span className="v10-ws-spend-val">{r.text}</span>
-              </li>
+                <span className="v10-ws-spend-val">{r.publishes}</span>
+                <span className="v10-ws-spend-val">{r.trac}</span>
+              </div>
             ))}
-          </ul>
+          </div>
         </div>
       </div>
     </div>
