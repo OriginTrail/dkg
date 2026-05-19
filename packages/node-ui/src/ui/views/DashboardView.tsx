@@ -2,7 +2,6 @@ import React, { useCallback, useMemo, useState, useEffect } from 'react';
 import { Lock, Globe, Boxes, Database, Network, Wallet } from 'lucide-react';
 import { useFetch } from '../hooks.js';
 import { api } from '../api-wrapper.js';
-import { listParticipants } from '../api.js';
 import { useTabsStore } from '../stores/tabs.js';
 import { useProjectsStore, type ContextGraph } from '../stores/projects.js';
 import { useMyContextGraphs } from '../hooks/useMyContextGraphs.js';
@@ -142,7 +141,7 @@ function CgRow({
     let mounted = true;
     setAgents(null);
     setAgentsError(false);
-    listParticipants(cg.id)
+    api.listParticipants(cg.id)
       .then((r) => { if (mounted) setAgents((r.allowedAgents ?? []).map(canonicalAgentDid)); })
       // Distinguish "failed" from "zero collaborators": keep agents
       // null and flag the error so the parent excludes this CG from
@@ -337,6 +336,12 @@ export function DashboardView() {
       agentsLoading: hasCgs && agentsLoading,
       sizePartial,
       agentsPartial,
+      // Entities can fall back to the `cg.assetCount` summary when the
+      // live query fails, but there is no triple count in that summary.
+      // If every size-bearing row failed, `triples.total` is a hollow 0
+      // sitting next to a real entity total — show it as unknown rather
+      // than a misleading exact 0 (Codex).
+      triplesUnknown: hasCgs && sizePartial && triples.total === 0,
       hasCgs,
     };
   }, [myCgs, reports]);
@@ -416,10 +421,12 @@ export function DashboardView() {
               </div>
               <div className="v10-cg-size-metric">
                 <div className="v10-cg-size-num">
-                  <span className="v10-cg-size-big">{agg.triples.total.toLocaleString()}</span>
+                  <span className="v10-cg-size-big">
+                    {agg.triplesUnknown ? '—' : agg.triples.total.toLocaleString()}
+                  </span>
                   <span className="v10-cg-dim">triples</span>
                 </div>
-                <LayerBar counts={agg.triples} />
+                {agg.triplesUnknown ? null : <LayerBar counts={agg.triples} />}
               </div>
               <LayerLegend />
             </div>
@@ -433,7 +440,7 @@ export function DashboardView() {
           </div>
         </StatCard>
         <StatCard
-          label="Connected Agents"
+          label="Collaborating Agents"
           icon={<Network size={13} aria-hidden />}
           value={!agg.hasCgs ? '—' : agg.agentsLoading ? <span className="v10-cg-dim">loading…</span> : agg.agentCount}
           sub={agg.hasCgs && agg.agentsPartial

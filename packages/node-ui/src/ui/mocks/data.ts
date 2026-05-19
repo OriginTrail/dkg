@@ -29,6 +29,8 @@ export const MOCK_CONTEXT_GRAPHS = {
       description: 'Drug interaction knowledge graph for clinical decision support',
       assetCount: 227,
       agentCount: 3,
+      callerInvolved: true,
+      curator: 'did:dkg:agent:0x1111111111111111111111111111111111111111',
     },
     {
       id: 'cg:climate-science',
@@ -36,6 +38,8 @@ export const MOCK_CONTEXT_GRAPHS = {
       description: 'Climate research data and projections',
       assetCount: 45,
       agentCount: 2,
+      callerInvolved: true,
+      curator: 'did:dkg:agent:0x1111111111111111111111111111111111111111',
     },
     {
       id: 'cg:supply-chain-eu',
@@ -43,8 +47,34 @@ export const MOCK_CONTEXT_GRAPHS = {
       description: 'European supply chain provenance tracking',
       assetCount: 89,
       agentCount: 1,
+      callerInvolved: true,
+      curator: 'did:dkg:agent:0x5555555555555555555555555555555555555555',
     },
   ],
+};
+
+// Mock allow-lists keyed by CG id. Curator is intentionally a
+// `did:dkg:agent:` URI while participants are bare EVM addresses
+// (mirrors the real /participants vs cg.curator shape) so mock mode
+// exercises canonicalAgentDid convergence + cross-CG dedup: the same
+// curator 0x1111… spans pharma + climate, so the aggregate unique
+// count is 5, not 3+2+1.
+export const MOCK_PARTICIPANTS: Record<string, { contextGraphId: string; allowedAgents: string[] }> = {
+  'cg:pharma-drug-interactions': {
+    contextGraphId: 'cg:pharma-drug-interactions',
+    allowedAgents: [
+      '0x2222222222222222222222222222222222222222',
+      '0x3333333333333333333333333333333333333333',
+    ],
+  },
+  'cg:climate-science': {
+    contextGraphId: 'cg:climate-science',
+    allowedAgents: ['0x4444444444444444444444444444444444444444'],
+  },
+  'cg:supply-chain-eu': {
+    contextGraphId: 'cg:supply-chain-eu',
+    allowedAgents: [],
+  },
 };
 
 export const MOCK_OPERATIONS = {

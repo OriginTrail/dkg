@@ -12,6 +12,8 @@ export const mockApi = {
   fetchOperationsWithPhases: () => delay(mock.MOCK_OPERATIONS),
   fetchEconomics: () => delay(mock.MOCK_ECONOMICS),
   fetchWalletsBalances: () => delay(mock.MOCK_WALLETS),
+  listParticipants: (id: string) =>
+    delay(mock.MOCK_PARTICIPANTS[id] ?? { contextGraphId: id, allowedAgents: [] }),
   fetchNotifications: () => delay(mock.MOCK_NOTIFICATIONS),
   fetchNodeLog: () => delay(mock.MOCK_NODE_LOG),
   fetchMemorySessions: () => delay(mock.MOCK_SESSIONS),
