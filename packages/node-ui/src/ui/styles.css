@@ -2634,6 +2634,9 @@ button:focus:not(:focus-visible) { outline: none; }
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+/* Chain/RPC partial-error caveat under the wallet list. --text-secondary
+   (AA on the card surface), small but not micro. */
+.v10-ws-note { color: var(--text-secondary); font-size: 11px; margin-top: 6px; }
 
 /* Quick actions */
 .v10-quick-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 8px; }

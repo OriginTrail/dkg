@@ -246,7 +246,7 @@ const ZERO: LayerCounts = { wm: 0, swm: 0, vm: 0, total: 0 };
 export function DashboardView() {
   const { data: status } = useFetch(api.fetchStatus, [], 10_000);
   const { data: econ } = useFetch(api.fetchEconomics, [], 60_000);
-  const { data: wb } = useFetch(api.fetchWalletsBalances, [], 30_000);
+  const { data: wb, loading: wbLoading } = useFetch(api.fetchWalletsBalances, [], 30_000);
   const { openTab } = useTabsStore();
   const { setActiveProject } = useProjectsStore();
   const { myCgs, identity } = useMyContextGraphs();
@@ -325,6 +325,9 @@ export function DashboardView() {
   // Grouped thousands, no decimals at scale (TRAC balances/spend run
   // large); ≤2 decimals under 1000 so small balances stay legible (ui-lead).
   const fmtTrac = (v: string | number) => {
+    // Empty/whitespace/nullish input is missing data, not a real zero
+    // balance — show an em-dash, not a misleading "0" (qa-lead).
+    if (v == null || (typeof v === 'string' && v.trim() === '')) return '—';
     const n = Number(v);
     if (!isFinite(n)) return String(v);
     return n.toLocaleString(undefined, { maximumFractionDigits: n >= 1000 ? 0 : 2 });
@@ -467,22 +470,8 @@ export function DashboardView() {
           </div>
 
           <div className="v10-ws-subhead">Node wallets</div>
-          {wb?.error && walletRows.length === 0 ? (
-            <p className="v10-cg-empty">
-              {(wb.wallets ?? []).length > 0
-                ? 'Balances unavailable (chain/RPC). Showing addresses only.'
-                : 'Wallet balances unavailable.'}
-            </p>
-          ) : null}
-          {walletRows.length === 0 && (wb?.wallets?.length ?? 0) > 0 ? (
-            <ul className="v10-ws-wallets">
-              {wb!.wallets.map((a) => (
-                <li key={a} className="v10-ws-wallet">
-                  <span className="v10-ws-addr" title={a}>{shortAddr(a)}</span>
-                  <span className="v10-cg-dim">—</span>
-                </li>
-              ))}
-            </ul>
+          {wbLoading && !wb ? (
+            <p className="v10-cg-empty">Loading wallets…</p>
           ) : walletRows.length > 0 ? (
             <ul className="v10-ws-wallets">
               {walletRows.map((b) => (
@@ -497,10 +486,25 @@ export function DashboardView() {
                 </li>
               ))}
             </ul>
-          ) : !wb ? (
-            <p className="v10-cg-empty">Loading wallets…</p>
-          ) : !wb.error ? (
+          ) : (wb?.wallets?.length ?? 0) > 0 ? (
+            <ul className="v10-ws-wallets">
+              {(wb?.wallets ?? []).map((a) => (
+                <li key={a} className="v10-ws-wallet">
+                  <span className="v10-ws-addr" title={a}>{shortAddr(a)}</span>
+                  <span className="v10-cg-dim">—</span>
+                </li>
+              ))}
+            </ul>
+          ) : wb?.error ? (
+            <p className="v10-cg-empty">Wallet balances unavailable.</p>
+          ) : (
             <p className="v10-cg-empty">No node wallets found.</p>
+          )}
+          {/* Surface a chain/RPC error even when (possibly stale) balances
+              or addresses are still shown — mirrors the agentsPartial
+              caveat pattern; without this the error is swallowed (qa-lead). */}
+          {wb?.error && (walletRows.length > 0 || (wb?.wallets?.length ?? 0) > 0) ? (
+            <p className="v10-ws-note">Balances may be stale — the chain/RPC reported an error.</p>
           ) : null}
 
           <div className="v10-ws-subhead">Spending</div>
