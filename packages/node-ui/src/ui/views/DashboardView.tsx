@@ -328,7 +328,12 @@ export function DashboardView() {
   const { data: wb, loading: wbLoading, error: wbError } = useFetch(api.fetchWalletsBalances, [], 30_000);
   const { openTab } = useTabsStore();
   const { setActiveProject } = useProjectsStore();
-  const { myCgs, identity } = useMyContextGraphs();
+  const { myCgs, identity, identityLoading } = useMyContextGraphs();
+  // Older daemons with no `callerInvolved` resolve membership only once
+  // the agent identity (curator-DID fallback) arrives. Until then an
+  // empty list is "not known yet", not a real zero — show a loading
+  // state rather than a false "0 / No context graphs yet" flash (Codex).
+  const cgsResolving = identityLoading && myCgs.length === 0;
 
   const [reports, setReports] = useState<Record<string, CgReport>>({});
   const onReport = useCallback((id: string, r: CgReport) => {
@@ -447,7 +452,7 @@ export function DashboardView() {
         <StatCard
           label="My Context Graphs"
           icon={<Boxes size={13} aria-hidden />}
-          value={myCgs.length}
+          value={cgsResolving ? <span className="v10-cg-dim">loading…</span> : myCgs.length}
           accentColor="var(--accent-blue)"
           sub={
             <>
@@ -517,7 +522,9 @@ export function DashboardView() {
             </div>
             <span className="v10-dash-section-badge">{myCgs.length}</span>
           </div>
-          {myCgs.length === 0 ? (
+          {cgsResolving ? (
+            <p className="v10-cg-empty">Loading context graphs…</p>
+          ) : myCgs.length === 0 ? (
             <p className="v10-cg-empty">
               No context graphs yet — create or join one from the sidebar.
             </p>
