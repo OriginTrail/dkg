@@ -497,16 +497,20 @@ export function DashboardView() {
                 </li>
               ))}
             </ul>
-          ) : (
+          ) : !wb ? (
             <p className="v10-cg-empty">Loading wallets…</p>
-          )}
+          ) : !wb.error ? (
+            <p className="v10-cg-empty">No node wallets found.</p>
+          ) : null}
 
           <div className="v10-ws-subhead">Spending</div>
           <div className="v10-ws-spend">
             <div className="v10-ws-spend-head">
               <span>Period</span>
               <span>Publishes</span>
-              <span>{walletSym}</span>
+              {/* economics totalTrac is always TRAC-denominated, independent
+                  of the node wallet token symbol — label it literally. */}
+              <span>TRAC</span>
             </div>
             {spendingRows.map((r) => (
               <div key={r.display} className="v10-ws-spend-row">
