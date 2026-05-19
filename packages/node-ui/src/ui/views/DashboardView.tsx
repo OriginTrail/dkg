@@ -443,9 +443,11 @@ export function DashboardView() {
           label="Collaborating Agents"
           icon={<Network size={13} aria-hidden />}
           value={!agg.hasCgs ? '—' : agg.agentsLoading ? <span className="v10-cg-dim">loading…</span> : agg.agentCount}
-          sub={agg.hasCgs && agg.agentsPartial
-            ? 'Some context graphs could not report agents; count is partial.'
-            : 'Unique agents allow-listed and collaborating across your context graphs.'}
+          sub={!agg.hasCgs
+            ? 'No context graphs yet.'
+            : agg.agentsPartial
+              ? 'Some context graphs could not report agents; count is partial.'
+              : 'Unique agents allow-listed and collaborating across your context graphs.'}
           accentColor="var(--purple)"
         />
       </div>

@@ -287,7 +287,13 @@ export function useMemoryEntities(contextGraphId: string): MemoryData {
     setError(null);
 
     try {
-      const [wmTriples, swmTriples, vmTriples] = await Promise.all([
+      // Per-layer settle, not Promise.all: one layer's timeout/500 must
+      // not blank the other two for every consumer of this hook
+      // (ProjectView/MemoryStackView). We keep whatever layers
+      // succeeded and only treat the fetch as errored when *all three*
+      // failed — that total-failure case is what the dashboard's
+      // size-unavailable fallback keys off (Codex).
+      const [wmR, swmR, vmR] = await Promise.allSettled([
         queryLayer(wmSparql(contextGraphId), contextGraphId),
         queryLayer(swmSparql(contextGraphId), contextGraphId),
         queryLayer(vmSparql(contextGraphId), contextGraphId),
@@ -295,13 +301,20 @@ export function useMemoryEntities(contextGraphId: string): MemoryData {
 
       if (version !== versionRef.current) return;
 
+      const layerOf = (r: PromiseSettledResult<Triple[]>): Triple[] =>
+        r.status === 'fulfilled' ? r.value : [];
       const all: LayeredTriple[] = [
-        ...wmTriples.map(t => ({ ...t, layer: 'working' as const })),
-        ...swmTriples.map(t => ({ ...t, layer: 'shared' as const })),
-        ...vmTriples.map(t => ({ ...t, layer: 'verified' as const })),
+        ...layerOf(wmR).map(t => ({ ...t, layer: 'working' as const })),
+        ...layerOf(swmR).map(t => ({ ...t, layer: 'shared' as const })),
+        ...layerOf(vmR).map(t => ({ ...t, layer: 'verified' as const })),
       ];
 
       setLayeredTriples(all);
+      const failed = [wmR, swmR, vmR].filter(r => r.status === 'rejected').length;
+      // Only a total failure is an "error" (drives the dashboard's
+      // assetCount fallback + the views' error state). A partial
+      // failure shows the readable layers rather than nothing.
+      setError(failed === 3 ? 'Failed to load memory data' : null);
     } catch (err: any) {
       if (version === versionRef.current) {
         setError(err.message ?? 'Failed to load memory data');
