@@ -193,7 +193,15 @@ function CgRow({
   // they inherently have access and must count toward the user's
   // "unique agents with access" metric (Codex). null (loading/error)
   // stays null so the parent's unknown-vs-zero handling is preserved.
+  const isPublicCg = normalizeAccessPolicy(cg.accessPolicy) === 'public';
   const effectiveAgents = useMemo(() => {
+    // Public graphs have open-ended membership — the /participants
+    // allow-list is not the authoritative collaborator set, and the
+    // curator alone is not a meaningful count. Report "unknown" (null
+    // → parent excludes it, row shows —) rather than a confidently
+    // wrong concrete number, unless/until the backend can return an
+    // authoritative participant count (Codex).
+    if (isPublicCg) return null;
     const cur = cg.curator?.trim();
     const curDid = cur ? canonicalAgentDid(cur) : null;
     if (agents === null) {
@@ -207,7 +215,7 @@ function CgRow({
     const s = new Set(agents);
     if (curDid) s.add(curDid);
     return [...s];
-  }, [agents, agentsError, cg.curator]);
+  }, [agents, agentsError, cg.curator, isPublicCg]);
 
   // Per-CG summary asset count, with the same `assetCount ?? assets`
   // legacy-field compatibility the rest of the UI uses (PanelLeft) —
@@ -484,9 +492,23 @@ export function DashboardView() {
               <div className="v10-cg-size-metric">
                 <div className="v10-cg-size-num">
                   <span className="v10-cg-size-big">{agg.entities.total.toLocaleString()}</span>
-                  <span className="v10-cg-dim">entities / Knowledge Assets</span>
+                  {agg.triplesUnknown ? (
+                    // Pure fallback: the live entity probe was
+                    // unavailable so this number is the published
+                    // Knowledge-Asset summary, NOT the all-layer
+                    // entity count — different unit, label it
+                    // explicitly rather than silently (Codex).
+                    <span
+                      className="v10-cg-dim"
+                      title="Live entity count unavailable — showing the published Knowledge-Asset summary (not the full WM/SWM/VM entity total)"
+                    >
+                      Knowledge Assets (summary)
+                    </span>
+                  ) : (
+                    <span className="v10-cg-dim">entities / Knowledge Assets</span>
+                  )}
                 </div>
-                <LayerBar counts={agg.entities} />
+                {agg.triplesUnknown ? null : <LayerBar counts={agg.entities} />}
               </div>
               <div className="v10-cg-size-metric">
                 <div className="v10-cg-size-num">
