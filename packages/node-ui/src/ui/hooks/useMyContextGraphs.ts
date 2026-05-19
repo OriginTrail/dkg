@@ -45,23 +45,27 @@ export function useMyContextGraphs(): {
     const iv = setInterval(loadCGs, 60_000);
     return () => clearInterval(iv);
   }, [loadCGs]);
-  useNodeEvents(loadCGs);
+  // Refresh the CG list only on membership-changing events, not on
+  // every SSE message — high-volume `memory_graph_changed` traffic
+  // would otherwise refetch the list + identity continuously while the
+  // dashboard is open (mirrors PanelLeft's filtering) (Codex).
+  useNodeEvents(useCallback((event) => {
+    if (event.type !== 'join_approved' && event.type !== 'join_rejected' && event.type !== 'project_synced') return;
+    loadCGs();
+  }, [loadCGs]));
 
-  // Re-fetch identity whenever the context-graph list changes — the
-  // sidebar refreshes identity alongside each CG reload, so a one-shot
-  // fetch here would permanently diverge if it failed at startup or the
-  // active agent later changed, breaking the parity invariant. Reset
-  // identity + loading BEFORE the request and clear it on failure, so a
-  // stale DID from a prior agent/node can't be used to compute
-  // membership after a switch — membership then falls back to
-  // `callerInvolved` instead of stale identity (Codex).
+  // Re-fetch identity whenever the context-graph list changes so the
+  // dashboard tracks agent/node switches. Keep the previous identity
+  // until a replacement fetch SUCCEEDS — do not clear it eagerly or on
+  // failure: a transient `/api/agent/identity` blip (or the brief
+  // window each reload) must not drop every graph for older daemons
+  // that rely on the curator-DID fallback. A real agent/node change
+  // resolves successfully and replaces the identity (Codex).
   useEffect(() => {
     let mounted = true;
-    setIdentity(null);
-    setIdentityLoading(true);
     api.fetchCurrentAgent()
       .then((a) => { if (mounted) setIdentity(toSidebarIdentity(a)); })
-      .catch(() => { if (mounted) setIdentity(null); })
+      .catch(() => { /* keep last good identity (see above) */ })
       .finally(() => { if (mounted) setIdentityLoading(false); });
     return () => { mounted = false; };
   }, [contextGraphs]);

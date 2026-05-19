@@ -55,6 +55,12 @@ function NodeLogContent() {
   );
 }
 
+// Must match `--tab-h` in styles.css. An expanded panel must never
+// render shorter than its own tab strip, or the tabs + collapse button
+// disappear while bottomCollapsed is still false and the user can't
+// recover it (Codex).
+const TAB_STRIP_H = 36;
+
 export function PanelBottom() {
   const { bottomCollapsed, toggleBottom, bottomHeight } = useLayoutStore();
   const [activeTab, setActiveTab] = useState<BottomTab>('Node Log');
@@ -64,8 +70,9 @@ export function PanelBottom() {
       className={`v10-panel-bottom ${bottomCollapsed ? 'collapsed' : ''}`}
       // Clamp against the viewport at render so a height persisted on a
       // taller screen can't crush the center pane after reload on a
-      // shorter one (Codex / ui-lead).
-      style={bottomCollapsed ? undefined : { height: Math.min(bottomHeight, maxBottomHeight()) }}
+      // shorter one; floor at the tab-strip height so the controls stay
+      // reachable on very short viewports (Codex / ui-lead).
+      style={bottomCollapsed ? undefined : { height: Math.max(TAB_STRIP_H, Math.min(bottomHeight, maxBottomHeight())) }}
     >
       <div className="v10-bottom-tabs">
         {BOTTOM_TABS.map((tab) => (
