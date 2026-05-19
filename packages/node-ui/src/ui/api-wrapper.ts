@@ -52,6 +52,7 @@ export const api = {
   fetchContextGraphs: () => withFallback(realApi.fetchContextGraphs, mockApi.fetchContextGraphs),
   fetchOperationsWithPhases: (p?: any) => withFallback(() => realApi.fetchOperationsWithPhases(p), mockApi.fetchOperationsWithPhases),
   fetchEconomics: () => withFallback(realApi.fetchEconomics, mockApi.fetchEconomics),
+  fetchWalletsBalances: () => withFallback(realApi.fetchWalletsBalances, mockApi.fetchWalletsBalances),
   fetchNotifications: (p?: any) => withFallback(() => realApi.fetchNotifications(p), mockApi.fetchNotifications),
   fetchNodeLog: (p?: any) => withFallback(() => realApi.fetchNodeLog(p), mockApi.fetchNodeLog),
   fetchMemorySessions: (n?: number) => withFallback(() => realApi.fetchMemorySessions(n), mockApi.fetchMemorySessions),

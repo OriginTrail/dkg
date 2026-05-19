@@ -60,10 +60,28 @@ export const MOCK_OPERATIONS = {
 };
 
 export const MOCK_ECONOMICS = {
+  // Labels mirror the real /api/economics scheme (db.ts: 24h/7d/30d/all).
   periods: [
-    { label: 'Last 7 days', publishCount: 14, successCount: 12, totalGasEth: 0.0034, totalTrac: 42.5, avgGasEth: 0.00024, avgTrac: 3.04 },
-    { label: 'Last 30 days', publishCount: 47, successCount: 43, totalGasEth: 0.012, totalTrac: 156.8, avgGasEth: 0.00026, avgTrac: 3.34 },
+    { label: '24h', publishCount: 3, successCount: 3, totalGasEth: 0.0007, totalTrac: 9.1, avgGasEth: 0.00023, avgTrac: 3.03 },
+    { label: '7d', publishCount: 14, successCount: 12, totalGasEth: 0.0034, totalTrac: 42.5, avgGasEth: 0.00024, avgTrac: 3.04 },
+    { label: '30d', publishCount: 47, successCount: 43, totalGasEth: 0.012, totalTrac: 156.8, avgGasEth: 0.00026, avgTrac: 3.34 },
   ],
+};
+
+export const MOCK_WALLETS = {
+  wallets: [
+    '0xA1b2C3d4E5f60718293a4B5c6D7e8F9012345678',
+    '0xB2c3D4e5F60718293a4B5c6D7e8F90123456789a',
+    '0xC3d4E5f60718293a4B5c6D7e8F90123456789aB1',
+  ],
+  balances: [
+    { address: '0xA1b2C3d4E5f60718293a4B5c6D7e8F9012345678', eth: '0.842', trac: '1250.50', symbol: 'TRAC' },
+    { address: '0xB2c3D4e5F60718293a4B5c6D7e8F90123456789a', eth: '0.310', trac: '480.00', symbol: 'TRAC' },
+    { address: '0xC3d4E5f60718293a4B5c6D7e8F90123456789aB1', eth: '0.005', trac: '0.00', symbol: 'TRAC' },
+  ],
+  chainId: '8453',
+  rpcUrl: 'https://mock.rpc',
+  symbol: 'TRAC',
 };
 
 export const MOCK_NOTIFICATIONS = {

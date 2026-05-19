@@ -1,5 +1,5 @@
 import React, { useCallback, useMemo, useState, useEffect } from 'react';
-import { Lock, Globe, HelpCircle } from 'lucide-react';
+import { Lock, Globe } from 'lucide-react';
 import { useFetch } from '../hooks.js';
 import { api } from '../api-wrapper.js';
 import { listParticipants } from '../api.js';
@@ -13,18 +13,25 @@ import {
   type AgentSidebarIdentity,
 } from '../lib/contextGraphSidebar.js';
 
+// Concise, user-facing definition shown inside the My Context Graphs
+// card (the old header "What is a Context Graph?" affordance was
+// removed — ux-lead: meaning belongs with the metric, not a stray
+// header link). Trimmed from the README definition.
 const CG_DEFINITION =
-  'A Context Graph is a scoped knowledge domain with configurable access and ' +
-  'governance — keep it private, open it to specific peers, or require on-chain ' +
-  'group consensus before anything is finalized.';
+  'A scoped knowledge domain with configurable access — keep it private, ' +
+  'share with specific peers, or require on-chain group consensus.';
 
-// Memory-layer palette + labels. Colours are the shared CSS-var tokens
-// (NOT raw hex) so they remap correctly in light theme — keep in sync
-// with MemoryStackView so the dashboard reads as the same system.
+// Memory-layer palette + labels + concise tooltip descriptions
+// (README "three memory layers" + MemoryStackView desc). Colours are
+// the shared CSS-var tokens (NOT raw hex) so they remap in light theme;
+// kept in sync with MemoryStackView so the dashboard reads as one system.
 const LAYERS = [
-  { key: 'wm', label: 'Working Memory', short: 'WM', color: 'var(--layer-working)' },
-  { key: 'swm', label: 'Shared Working Memory', short: 'SWM', color: 'var(--layer-shared)' },
-  { key: 'vm', label: 'Verified Memory', short: 'VM', color: 'var(--layer-verified)' },
+  { key: 'wm', label: 'Working Memory', short: 'WM', color: 'var(--layer-working)',
+    desc: 'Private agent drafts — free, self-attested, persists locally.' },
+  { key: 'swm', label: 'Shared Working Memory', short: 'SWM', color: 'var(--layer-shared)',
+    desc: 'Team proposals — free, gossip-replicated across context-graph peers.' },
+  { key: 'vm', label: 'Verified Memory', short: 'VM', color: 'var(--layer-verified)',
+    desc: 'On-chain knowledge — permanent, verified, requires TRAC to publish.' },
 ] as const;
 
 interface LayerCounts { wm: number; swm: number; vm: number; total: number }
@@ -55,8 +62,8 @@ function StatCard({
   label, value, sub, accentColor, children,
 }: {
   label: string;
-  value: React.ReactNode;
-  sub?: string;
+  value?: React.ReactNode;
+  sub?: React.ReactNode;
   accentColor?: string;
   children?: React.ReactNode;
 }) {
@@ -64,9 +71,9 @@ function StatCard({
     <div className="stat-card">
       {accentColor && <div className="accent" style={{ background: accentColor }} />}
       <div className="stat-label">{label}</div>
-      <div className="stat-value">{value}</div>
+      {value != null && value !== '' && <div className="stat-value">{value}</div>}
       {children}
-      {sub && <div className="stat-sub">{sub}</div>}
+      {sub != null && sub !== '' && <div className="stat-sub">{sub}</div>}
     </div>
   );
 }
@@ -89,6 +96,7 @@ function LayerBar({ counts }: { counts: LayerCounts }) {
             <span
               key={l.key}
               className="v10-layerbar-seg"
+              title={`${l.label} (${counts[l.key]}) — ${l.desc}`}
               style={{ width: `${pct}%`, background: l.color }}
             />
           );
@@ -102,7 +110,7 @@ function LayerLegend() {
   return (
     <div className="v10-layer-legend">
       {LAYERS.map((l) => (
-        <span key={l.key} className="v10-layer-legend-item" title={l.label}>
+        <span key={l.key} className="v10-layer-legend-item" title={`${l.label} — ${l.desc}`}>
           <span className="v10-layer-legend-dot" style={{ background: l.color }} />
           {l.short}
         </span>
@@ -236,6 +244,7 @@ const ZERO: LayerCounts = { wm: 0, swm: 0, vm: 0, total: 0 };
 export function DashboardView() {
   const { data: status } = useFetch(api.fetchStatus, [], 10_000);
   const { data: econ } = useFetch(api.fetchEconomics, [], 60_000);
+  const { data: wb } = useFetch(api.fetchWalletsBalances, [], 30_000);
   const { openTab } = useTabsStore();
   const { setActiveProject } = useProjectsStore();
   const { myCgs, identity } = useMyContextGraphs();
@@ -303,16 +312,26 @@ export function DashboardView() {
     };
   }, [myCgs, reports]);
 
-  const latestPeriod = econ?.periods?.[0];
-  const spending = latestPeriod
-    ? `${latestPeriod.publishCount} publishes · ${latestPeriod.totalTrac.toFixed(2)} TRAC`
-    : '—';
+  // Spending overview rows from the existing /api/economics periods
+  // (real labels: 24h/7d/30d/all). No backend change; "Last hr" was
+  // deferred per product decision.
+  const SPEND_ROWS = [
+    { label: '24h', display: 'Last 24h' },
+    { label: '7d', display: 'Last 7d' },
+    { label: '30d', display: 'Last 30d' },
+  ] as const;
+  const spendingRows = SPEND_ROWS.map((r) => {
+    const p = econ?.periods?.find((x) => x.label === r.label);
+    return {
+      display: r.display,
+      text: p ? `${p.publishCount} publishes · ${p.totalTrac.toFixed(2)} TRAC` : '—',
+    };
+  });
 
-  const sizeValue = !agg.hasCgs
-    ? '—'
-    : agg.sizeLoading
-      ? <span className="v10-cg-dim">loading…</span>
-      : `${abbrev(agg.entities.total)} · ${abbrev(agg.triples.total)}`;
+  const walletSym = wb?.symbol || 'TRAC';
+  const walletRows = wb?.balances ?? [];
+  const shortAddr = (a: string) => (a.length > 12 ? `${a.slice(0, 6)}…${a.slice(-4)}` : a);
+
 
   return (
     <div className="v10-dashboard">
@@ -320,12 +339,6 @@ export function DashboardView() {
         <h1 className="v10-dash-title">Dashboard</h1>
         <p className="v10-dash-subtitle">
           {status?.name || 'DKG Node'} · {status?.networkName || 'network'}
-          {/* One canonical "what is a Context Graph?" entry point for the
-              whole dashboard — not a per-card tooltip (ux-lead). */}
-          <span className="v10-dash-info" title={CG_DEFINITION} aria-label={CG_DEFINITION}>
-            <HelpCircle size={13} aria-hidden="true" />
-            <span>What is a Context Graph?</span>
-          </span>
         </p>
       </div>
 
@@ -333,25 +346,35 @@ export function DashboardView() {
         <StatCard
           label="My Context Graphs"
           value={myCgs.length}
-          sub="Context graphs you created or joined."
           accentColor="var(--accent-blue)"
+          sub={
+            <>
+              Context graphs you created or joined.
+              <span className="v10-cg-defn">{CG_DEFINITION}</span>
+            </>
+          }
         />
         <StatCard
           label="Context Graph Size"
-          value={sizeValue}
           accentColor="var(--accent-green)"
         >
-          {agg.hasCgs && !agg.sizeLoading && (
+          {!agg.hasCgs ? (
+            <div className="v10-cg-size-empty v10-cg-dim">—</div>
+          ) : agg.sizeLoading ? (
+            <div className="v10-cg-size-empty v10-cg-dim">loading…</div>
+          ) : (
             <div className="v10-cg-size-detail">
               <div className="v10-cg-size-metric">
                 <div className="v10-cg-size-num">
-                  {agg.entities.total.toLocaleString()} <span className="v10-cg-dim">entities / Knowledge Assets</span>
+                  <span className="v10-cg-size-big">{agg.entities.total.toLocaleString()}</span>
+                  <span className="v10-cg-dim">entities / Knowledge Assets</span>
                 </div>
                 <LayerBar counts={agg.entities} />
               </div>
               <div className="v10-cg-size-metric">
                 <div className="v10-cg-size-num">
-                  {agg.triples.total.toLocaleString()} <span className="v10-cg-dim">triples</span>
+                  <span className="v10-cg-size-big">{agg.triples.total.toLocaleString()}</span>
+                  <span className="v10-cg-dim">triples</span>
                 </div>
                 <LayerBar counts={agg.triples} />
               </div>
@@ -362,7 +385,7 @@ export function DashboardView() {
             {agg.hasCgs
               ? (agg.sizePartial
                   ? 'Some context graphs could not report size; total is partial.'
-                  : 'Across Working, Shared Working & Verified Memory. Entities become Knowledge Assets once published to Verified Memory.')
+                  : 'Totals across all your context graphs, summed over Working, Shared Working & Verified Memory. Entities become Knowledge Assets once published to Verified Memory.')
               : 'No context graphs yet.'}
           </div>
         </StatCard>
@@ -371,7 +394,7 @@ export function DashboardView() {
           value={!agg.hasCgs ? '—' : agg.agentsLoading ? <span className="v10-cg-dim">loading…</span> : agg.agentCount}
           sub={agg.hasCgs && agg.agentsPartial
             ? 'Some context graphs could not report agents; count is partial.'
-            : 'Unique agents allow-listed with access to your context graphs.'}
+            : 'Unique agents allow-listed and collaborating across your context graphs.'}
           accentColor="var(--purple)"
         />
       </div>
@@ -420,9 +443,51 @@ export function DashboardView() {
 
         <div className="v10-dash-section">
           <div className="v10-dash-section-header">
-            <h3>Spending</h3>
+            <h3>Wallets and Spending</h3>
           </div>
-          <p style={{ fontSize: 12, color: 'var(--text-secondary)', padding: '8px 0' }}>{spending}</p>
+
+          <div className="v10-ws-subhead">Node wallets</div>
+          {wb?.error && walletRows.length === 0 ? (
+            <p className="v10-cg-empty">
+              {(wb.wallets ?? []).length > 0
+                ? 'Balances unavailable (chain/RPC). Showing addresses only.'
+                : 'Wallet balances unavailable.'}
+            </p>
+          ) : null}
+          {walletRows.length === 0 && (wb?.wallets?.length ?? 0) > 0 ? (
+            <ul className="v10-ws-wallets">
+              {wb!.wallets.map((a) => (
+                <li key={a} className="v10-ws-wallet">
+                  <span className="v10-ws-addr" title={a}>{shortAddr(a)}</span>
+                  <span className="v10-cg-dim">—</span>
+                </li>
+              ))}
+            </ul>
+          ) : walletRows.length > 0 ? (
+            <ul className="v10-ws-wallets">
+              {walletRows.map((b) => (
+                <li key={b.address} className="v10-ws-wallet">
+                  <span className="v10-ws-addr" title={b.address}>{shortAddr(b.address)}</span>
+                  <span className="v10-ws-bal">
+                    {Number(b.trac).toLocaleString(undefined, { maximumFractionDigits: 2 })}{' '}
+                    <span className="v10-cg-dim">{walletSym}</span>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="v10-cg-empty">Loading wallets…</p>
+          )}
+
+          <div className="v10-ws-subhead">Spending</div>
+          <ul className="v10-ws-spend">
+            {spendingRows.map((r) => (
+              <li key={r.display} className="v10-ws-spend-row">
+                <span className="v10-cg-dim">{r.display}</span>
+                <span className="v10-ws-spend-val">{r.text}</span>
+              </li>
+            ))}
+          </ul>
         </div>
       </div>
     </div>
