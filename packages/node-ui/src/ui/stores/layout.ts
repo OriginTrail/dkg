@@ -53,9 +53,17 @@ const BOTTOM_HEIGHT_MAX = 600;
 // viewport so a height persisted on a tall screen can't squeeze the
 // center pane out of view after reload on a shorter one (Codex / ui-lead).
 const CENTER_MIN_HEIGHT = 240;
+// The bottom panel lives inside `.v10-app-body`, which sits *below* the
+// fixed-height header — so the space available to it is the viewport
+// minus the shell chrome, not the full `innerHeight`. Must stay in sync
+// with `--header-h` in styles.css; without subtracting it the panel
+// could grow ~44px too tall and squeeze the center pane below
+// CENTER_MIN_HEIGHT (Codex).
+const SHELL_CHROME_HEIGHT = 44;
 export function maxBottomHeight(): number {
   const vh = typeof window !== 'undefined' && window.innerHeight ? window.innerHeight : Infinity;
-  return Math.max(BOTTOM_HEIGHT_MIN, Math.min(BOTTOM_HEIGHT_MAX, vh - CENTER_MIN_HEIGHT));
+  const avail = vh === Infinity ? Infinity : vh - SHELL_CHROME_HEIGHT;
+  return Math.max(BOTTOM_HEIGHT_MIN, Math.min(BOTTOM_HEIGHT_MAX, avail - CENTER_MIN_HEIGHT));
 }
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));

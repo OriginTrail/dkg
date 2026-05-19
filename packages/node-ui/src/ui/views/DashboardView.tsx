@@ -158,12 +158,20 @@ function CgRow({
   // "unique agents with access" metric (Codex). null (loading/error)
   // stays null so the parent's unknown-vs-zero handling is preserved.
   const effectiveAgents = useMemo(() => {
-    if (agents === null) return null;
-    const s = new Set(agents);
     const cur = cg.curator?.trim();
-    if (cur) s.add(canonicalAgentDid(cur));
+    const curDid = cur ? canonicalAgentDid(cur) : null;
+    if (agents === null) {
+      // Participants list unknown. On a hard /participants failure the
+      // curator is still locally known and inherently has access — count
+      // them so an endpoint outage doesn't undercount/zero a CG we know
+      // has an agent (Codex). Pure loading (no error yet) stays null so
+      // the parent keeps its loading state instead of flashing a count.
+      return agentsError && curDid ? [curDid] : null;
+    }
+    const s = new Set(agents);
+    if (curDid) s.add(curDid);
     return [...s];
-  }, [agents, cg.curator]);
+  }, [agents, agentsError, cg.curator]);
 
   const entities: LayerCounts = {
     wm: mem.counts.wm, swm: mem.counts.swm, vm: mem.counts.vm, total: mem.counts.total,
@@ -246,7 +254,7 @@ const ZERO: LayerCounts = { wm: 0, swm: 0, vm: 0, total: 0 };
 export function DashboardView() {
   const { data: status } = useFetch(api.fetchStatus, [], 10_000);
   const { data: econ } = useFetch(api.fetchEconomics, [], 60_000);
-  const { data: wb, loading: wbLoading } = useFetch(api.fetchWalletsBalances, [], 30_000);
+  const { data: wb, loading: wbLoading, error: wbError } = useFetch(api.fetchWalletsBalances, [], 30_000);
   const { openTab } = useTabsStore();
   const { setActiveProject } = useProjectsStore();
   const { myCgs, identity } = useMyContextGraphs();
@@ -495,7 +503,10 @@ export function DashboardView() {
                 </li>
               ))}
             </ul>
-          ) : wb?.error ? (
+          ) : wb?.error || wbError ? (
+            // `wb.error` = API-level error field; `wbError` = the fetch
+            // itself rejected (network/auth/RPC) so `wb` is null. Both
+            // mean "unavailable", not "no wallets" (Codex).
             <p className="v10-cg-empty">Wallet balances unavailable.</p>
           ) : (
             <p className="v10-cg-empty">No node wallets found.</p>
