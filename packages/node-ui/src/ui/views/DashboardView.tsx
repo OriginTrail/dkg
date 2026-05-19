@@ -41,8 +41,14 @@ interface CgReport {
   agents: string[]; // canonical agent DIDs collaborating on this CG
   sizeLoading: boolean;
   sizeError: boolean;
+  // entities.total is the cg.assetCount summary substitute (live entity
+  // probe failed), NOT a real WM/SWM/VM entity count — different unit.
+  sizeFallback: boolean;
   agentsLoading: boolean;
   agentsError: boolean;
+  // Agents genuinely not measurable from /participants (public graph:
+  // open membership) — distinct from agentsError (probe failed).
+  agentsUnknown: boolean;
   // Full-fidelity change key: per-layer counts + sorted agent ids +
   // every flag. The parent dedups on this so a WM→SWM/VM promotion
   // (totals unchanged) or an agent swap (count unchanged) still
@@ -253,7 +259,7 @@ function CgRow({
   }, [mem.allTriples]);
 
   const sig = [
-    mem.loading ? 1 : 0, mem.error ? 1 : 0, mem.partial ? 1 : 0, agentsLoading ? 1 : 0, agentsError ? 1 : 0,
+    mem.loading ? 1 : 0, mem.error ? 1 : 0, mem.partial ? 1 : 0, agentsLoading ? 1 : 0, agentsError ? 1 : 0, isPublicCg ? 1 : 0,
     entities.wm, entities.swm, entities.vm, entities.total,
     triples.wm, triples.swm, triples.vm, triples.total,
     effectiveAgents ? effectiveAgents.slice().sort().join(',') : '∅',
@@ -270,8 +276,10 @@ function CgRow({
       // layers missing) make the size total inexact, so both must
       // light the aggregate's "partial" caveat (Codex).
       sizeError: Boolean(mem.error) || mem.partial,
+      sizeFallback: Boolean(mem.error),
       agentsLoading,
       agentsError,
+      agentsUnknown: isPublicCg,
       sig,
     });
     // Depend on the full `sig` (not coarse totals) so a per-layer
@@ -386,13 +394,18 @@ export function DashboardView() {
     let agentsLoading = false;
     let sizePartial = false;
     let agentsPartial = false;
+    let sizeFallbackAny = false;
     for (const cg of myCgs) {
       const r = reports[cg.id];
       if (!r) { sizeLoading = true; agentsLoading = true; continue; }
       if (r.sizeLoading) sizeLoading = true;
       if (r.agentsLoading) agentsLoading = true;
       if (r.sizeError) sizePartial = true;
-      if (r.agentsError) agentsPartial = true;
+      if (r.sizeFallback) sizeFallbackAny = true;
+      // A public graph contributes no measurable agents — that's
+      // "unknown", so the aggregate must read partial, not a confident
+      // exact count that silently excludes it (Codex).
+      if (r.agentsError || r.agentsUnknown) agentsPartial = true;
       for (const k of ['wm', 'swm', 'vm', 'total'] as const) {
         entities[k] += r.entities[k];
         triples[k] += r.triples[k];
@@ -419,6 +432,10 @@ export function DashboardView() {
       // sitting next to a real entity total — show it as unknown rather
       // than a misleading exact 0 (Codex).
       triplesUnknown: hasCgs && sizePartial && triples.total === 0,
+      // Any row using the assetCount summary substitute makes the
+      // headline a mix of summary + live units → not a clean entity
+      // total. Surfaced approximately, not as an exact figure (Codex).
+      sizeApprox: hasCgs && sizeFallbackAny,
       hasCgs,
     };
   }, [myCgs, reports]);
@@ -491,33 +508,49 @@ export function DashboardView() {
             <div className="v10-cg-size-detail">
               <div className="v10-cg-size-metric">
                 <div className="v10-cg-size-num">
-                  <span className="v10-cg-size-big">{agg.entities.total.toLocaleString()}</span>
+                  <span className="v10-cg-size-big">
+                    {/* Mixed (some rows on the summary fallback, some
+                        live) → "~" approximate prefix; pure all-fallback
+                        keeps the bare number under the explicit
+                        "summary" label below (Codex). */}
+                    {agg.sizeApprox && !agg.triplesUnknown ? '~' : ''}
+                    {agg.entities.total.toLocaleString()}
+                  </span>
                   {agg.triplesUnknown ? (
-                    // Pure fallback: the live entity probe was
-                    // unavailable so this number is the published
-                    // Knowledge-Asset summary, NOT the all-layer
-                    // entity count — different unit, label it
-                    // explicitly rather than silently (Codex).
+                    // Pure fallback: number is the published
+                    // Knowledge-Asset summary, NOT the all-layer entity
+                    // count — different unit, labelled explicitly.
                     <span
                       className="v10-cg-dim"
                       title="Live entity count unavailable — showing the published Knowledge-Asset summary (not the full WM/SWM/VM entity total)"
                     >
                       Knowledge Assets (summary)
                     </span>
+                  ) : agg.sizeApprox ? (
+                    <span
+                      className="v10-cg-dim"
+                      title="Some context graphs reported only their Knowledge-Asset summary — this total mixes summary and live counts and is approximate"
+                    >
+                      entities / KA · approx.
+                    </span>
                   ) : (
                     <span className="v10-cg-dim">entities / Knowledge Assets</span>
                   )}
                 </div>
-                {agg.triplesUnknown ? null : <LayerBar counts={agg.entities} />}
+                {/* Hide the proportion bar whenever any row fell back —
+                    the WM/SWM/VM breakdown is unreliable then. */}
+                {agg.triplesUnknown || agg.sizeApprox ? null : <LayerBar counts={agg.entities} />}
               </div>
               <div className="v10-cg-size-metric">
                 <div className="v10-cg-size-num">
                   <span className="v10-cg-size-big">
-                    {agg.triplesUnknown ? '—' : agg.triples.total.toLocaleString()}
+                    {agg.triplesUnknown
+                      ? '—'
+                      : `${agg.sizeApprox ? '~' : ''}${agg.triples.total.toLocaleString()}`}
                   </span>
                   <span className="v10-cg-dim">triples</span>
                 </div>
-                {agg.triplesUnknown ? null : <LayerBar counts={agg.triples} />}
+                {agg.triplesUnknown || agg.sizeApprox ? null : <LayerBar counts={agg.triples} />}
               </div>
               <LayerLegend />
             </div>
@@ -533,7 +566,14 @@ export function DashboardView() {
         <StatCard
           label="Collaborating Agents"
           icon={<Network size={13} aria-hidden />}
-          value={!agg.hasCgs ? '—' : agg.agentsLoading ? <span className="v10-cg-dim">loading…</span> : agg.agentCount}
+          value={!agg.hasCgs
+            ? '—'
+            : agg.agentsLoading
+              ? <span className="v10-cg-dim">loading…</span>
+              // Partial (a probe failed or a public graph's membership
+              // is unmeasurable) → "~" so the count doesn't read as an
+              // exact figure that silently excludes those graphs (Codex).
+              : agg.agentsPartial ? `~${agg.agentCount}` : agg.agentCount}
           sub={!agg.hasCgs
             ? 'No context graphs yet.'
             : agg.agentsPartial
