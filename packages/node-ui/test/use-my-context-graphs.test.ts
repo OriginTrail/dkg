@@ -26,8 +26,18 @@ vi.mock('../src/ui/api.js', async () => {
   return { ...actual, fetchCurrentAgent: fetchCurrentAgentMock };
 });
 vi.mock('../src/ui/api-wrapper.js', () => ({
-  api: { fetchCurrentAgent: () => fetchCurrentAgentMock() },
+  // fetchContextGraphs rejects so the hook's store-hydration loadCGs
+  // catch is a no-op and the store keeps the fixtures each test seeds
+  // directly (simulates "no daemon" — membership logic is what's under
+  // test here, not the loader).
+  api: {
+    fetchCurrentAgent: () => fetchCurrentAgentMock(),
+    fetchContextGraphs: () => Promise.reject(new Error('no daemon (test)')),
+  },
 }));
+// The hook now subscribes to node events for live CG/membership
+// refresh; stub it so the test doesn't need an EventSource.
+vi.mock('../src/ui/hooks/useNodeEvents.js', () => ({ useNodeEvents: () => {} }));
 
 async function importHooks() {
   const hidden = await import('../src/ui/hooks/useHiddenContextGraphIds.js');

@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState, useEffect } from 'react';
+import React, { useCallback, useMemo, useState, useEffect, useRef } from 'react';
 import { Lock, Globe, Boxes, Database, Network, Wallet } from 'lucide-react';
 import { useFetch } from '../hooks.js';
 import { api } from '../api-wrapper.js';
@@ -6,6 +6,7 @@ import { useTabsStore } from '../stores/tabs.js';
 import { useProjectsStore, type ContextGraph } from '../stores/projects.js';
 import { useMyContextGraphs } from '../hooks/useMyContextGraphs.js';
 import { useMemoryEntities } from '../hooks/useMemoryEntities.js';
+import { useNodeEvents } from '../hooks/useNodeEvents.js';
 import {
   canonicalAgentDid,
   normalizeAccessPolicy,
@@ -140,26 +141,44 @@ function CgRow({
   const [agentsError, setAgentsError] = useState(false);
   const agentsLoading = agents === null && !agentsError;
 
-  useEffect(() => {
-    let mounted = true;
-    setAgents(null);
-    setAgentsError(false);
-    const load = () => api.listParticipants(cg.id)
-      .then((r) => { if (mounted) { setAgents((r.allowedAgents ?? []).map(canonicalAgentDid)); setAgentsError(false); } })
+  const agentsMounted = useRef(true);
+  const loadParticipants = useCallback(() => {
+    api.listParticipants(cg.id)
+      .then((r) => {
+        if (agentsMounted.current) {
+          setAgents((r.allowedAgents ?? []).map(canonicalAgentDid));
+          setAgentsError(false);
+        }
+      })
       // Distinguish "failed" from "zero collaborators": keep agents
       // null and flag the error so the parent excludes this CG from
       // the unique-agent union rather than silently counting it as 0
       // (Codex).
-      .catch(() => { if (mounted) setAgentsError(true); });
-    load();
-    // The row stays mounted across join approvals/removals and sidebar
-    // CG refreshes, so a one-shot fetch goes stale until reload. Poll on
-    // the same 30s cadence the dashboard's other live data uses, and
-    // also re-probe on memory-graph events for this CG (participant
-    // changes ride the same node event stream) (Codex).
-    const timer = setInterval(load, 30_000);
-    return () => { mounted = false; clearInterval(timer); };
+      .catch(() => { if (agentsMounted.current) setAgentsError(true); });
   }, [cg.id]);
+
+  useEffect(() => {
+    agentsMounted.current = true;
+    setAgents(null);
+    setAgentsError(false);
+    loadParticipants();
+    // 30s poll is the backstop; the node-event subscription below makes
+    // join approvals/removals reflect immediately so the count isn't
+    // stale for up to 30s after a membership change (Codex).
+    const timer = setInterval(loadParticipants, 30_000);
+    return () => { agentsMounted.current = false; clearInterval(timer); };
+  }, [loadParticipants]);
+
+  // Membership-changing events → re-probe this CG's allow-list at once.
+  // Filter to the relevant event types (and this CG when the event
+  // carries an id) so we don't re-fetch every row on memory/heartbeat
+  // traffic.
+  useNodeEvents(useCallback((event) => {
+    if (event.type !== 'join_approved' && event.type !== 'join_rejected' && event.type !== 'project_synced') return;
+    const evCg = (event.data as any)?.contextGraphId ?? (event.data as any)?.projectId;
+    if (evCg && evCg !== cg.id) return;
+    loadParticipants();
+  }, [cg.id, loadParticipants]));
 
   // The /participants allow-list can omit the curator (and is empty on
   // fully-public graphs), so fold the CG's curator into the agent set —
