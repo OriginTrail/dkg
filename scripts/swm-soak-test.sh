@@ -694,9 +694,17 @@ split_cgs() {
   printf '%s' "$raw" | tr ',' '\n' | sed '/^$/d'
 }
 
-ALL_CGS=()
-while IFS= read -r cg; do ALL_CGS+=("$cg"); done < <(split_cgs "$SWM_CG_CURATED")
-while IFS= read -r cg; do ALL_CGS+=("$cg"); done < <(split_cgs "$SWM_CG_PUBLIC")
+# Build ALL_CGS via a single CSV → `read -ra` so bash 3.2 (macOS
+# default) doesn't trip its `set -u` "unbound variable" quirk on
+# arrays populated solely via `+=` inside `while ... < <(...)`
+# subshells. `read -ra` assigns elements directly, which bash 3.2
+# tracks correctly. We've already required at least one of
+# SWM_CG_CURATED / SWM_CG_PUBLIC above, so ALL_CGS is guaranteed
+# non-empty before any `"${ALL_CGS[@]}"` expansion below.
+ALL_CGS_CSV=""
+[ -n "$SWM_CG_CURATED" ] && ALL_CGS_CSV="$SWM_CG_CURATED"
+[ -n "$SWM_CG_PUBLIC" ] && ALL_CGS_CSV="${ALL_CGS_CSV:+$ALL_CGS_CSV,}$SWM_CG_PUBLIC"
+IFS=',' read -ra ALL_CGS <<< "$ALL_CGS_CSV"
 
 trap 'log "INTERRUPTED — stopping at cycle ${seq:-?}"; exit 130' INT TERM
 
