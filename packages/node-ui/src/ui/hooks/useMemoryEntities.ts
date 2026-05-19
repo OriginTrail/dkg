@@ -176,32 +176,39 @@ async function queryLayer(
   sparql: string,
   contextGraphId: string,
   opts?: { view?: string; includeSharedMemory?: boolean; graphSuffix?: string },
+  throwOnError = false,
 ): Promise<Triple[]> {
-  // Failures must propagate, not coerce to `[]`: the dashboard derives
-  // its "size unavailable / partial" state from this hook's `error`, and
-  // in mock/offline mode `/api/query` is unreachable. Swallowing the
-  // failure would present every context graph as a real 0/0 instead of
-  // an unavailable read (Codex). The caller's try/catch sets `error`.
-  const body: any = { sparql, contextGraphId, ...opts };
-  const res = await fetch('/api/query', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error(`/api/query failed (${res.status})`);
-  const data = await res.json();
-  const bindings = data?.result?.bindings ?? data?.results?.bindings ?? [];
-  return bindings
-    .map((row: any) => {
-      const g = bv(row.g);
-      return {
-        subject: bv(row.s) ?? '',
-        predicate: bv(row.p) ?? '',
-        object: bv(row.o) ?? '',
-        subGraph: g ? subGraphOf(g, contextGraphId) : undefined,
-      };
-    })
-    .filter((t: Triple) => t.subject && t.predicate && t.object);
+  // By default a failed/unreachable `/api/query` coerces to `[]` — the
+  // original behavior every consumer (ProjectView/MemoryStackView/
+  // AgentProfilePage) relies on, so they degrade to "empty" rather than
+  // a hard error in mock/offline mode. Only the dashboard opts in
+  // (`throwOnError`) so it can distinguish failed-vs-empty and show its
+  // unavailable/partial state (Codex).
+  try {
+    const body: any = { sparql, contextGraphId, ...opts };
+    const res = await fetch('/api/query', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(`/api/query failed (${res.status})`);
+    const data = await res.json();
+    const bindings = data?.result?.bindings ?? data?.results?.bindings ?? [];
+    return bindings
+      .map((row: any) => {
+        const g = bv(row.g);
+        return {
+          subject: bv(row.s) ?? '',
+          predicate: bv(row.p) ?? '',
+          object: bv(row.o) ?? '',
+          subGraph: g ? subGraphOf(g, contextGraphId) : undefined,
+        };
+      })
+      .filter((t: Triple) => t.subject && t.predicate && t.object);
+  } catch (err) {
+    if (throwOnError) throw err;
+    return [];
+  }
 }
 
 function buildEntities(layered: LayeredTriple[]): Map<string, MemoryEntity> {
@@ -277,7 +284,15 @@ function buildEntities(layered: LayeredTriple[]): Map<string, MemoryEntity> {
   return entities;
 }
 
-export function useMemoryEntities(contextGraphId: string): MemoryData {
+export function useMemoryEntities(
+  contextGraphId: string,
+  opts?: { signalErrors?: boolean },
+): MemoryData {
+  // Off by default: every existing caller (ProjectView/MemoryStackView/
+  // AgentProfilePage) keeps the original "failed query → empty, never a
+  // hard error" behavior. Only the dashboard opts in so it alone gets
+  // the failed-vs-empty distinction it needs (Codex).
+  const signalErrors = opts?.signalErrors ?? false;
   const [layeredTriples, setLayeredTriples] = useState<LayeredTriple[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -299,9 +314,9 @@ export function useMemoryEntities(contextGraphId: string): MemoryData {
       // failed — that total-failure case is what the dashboard's
       // size-unavailable fallback keys off (Codex).
       const [wmR, swmR, vmR] = await Promise.allSettled([
-        queryLayer(wmSparql(contextGraphId), contextGraphId),
-        queryLayer(swmSparql(contextGraphId), contextGraphId),
-        queryLayer(vmSparql(contextGraphId), contextGraphId),
+        queryLayer(wmSparql(contextGraphId), contextGraphId, undefined, signalErrors),
+        queryLayer(swmSparql(contextGraphId), contextGraphId, undefined, signalErrors),
+        queryLayer(vmSparql(contextGraphId), contextGraphId, undefined, signalErrors),
       ]);
 
       if (version !== versionRef.current) return;
@@ -330,7 +345,7 @@ export function useMemoryEntities(contextGraphId: string): MemoryData {
     } finally {
       if (version === versionRef.current) setLoading(false);
     }
-  }, [contextGraphId]);
+  }, [contextGraphId, signalErrors]);
 
   useMemoryGraphEvents(contextGraphId, fetchAll);
 

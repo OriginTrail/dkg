@@ -27,7 +27,8 @@ function triple(subject: string, graph: string) {
 }
 
 function Probe({ id }: { id: string }) {
-  const m = useMemoryEntities(id);
+  // Dashboard-style consumer: opts into failed-vs-empty signalling.
+  const m = useMemoryEntities(id, { signalErrors: true });
   return React.createElement('div', {
     id: 'probe',
     'data-loading': String(m.loading),

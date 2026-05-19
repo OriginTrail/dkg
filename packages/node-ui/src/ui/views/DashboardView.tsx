@@ -132,7 +132,10 @@ function CgRow({
   onReport: (id: string, r: CgReport) => void;
   onOpen: (cg: ContextGraph) => void;
 }) {
-  const mem = useMemoryEntities(cg.id);
+  // Dashboard alone opts into failed-vs-empty signalling; other
+  // useMemoryEntities consumers keep the original empty-on-failure
+  // behavior (Codex).
+  const mem = useMemoryEntities(cg.id, { signalErrors: true });
   const [agents, setAgents] = useState<string[] | null>(null);
   const [agentsError, setAgentsError] = useState(false);
   const agentsLoading = agents === null && !agentsError;
@@ -141,14 +144,21 @@ function CgRow({
     let mounted = true;
     setAgents(null);
     setAgentsError(false);
-    api.listParticipants(cg.id)
-      .then((r) => { if (mounted) setAgents((r.allowedAgents ?? []).map(canonicalAgentDid)); })
+    const load = () => api.listParticipants(cg.id)
+      .then((r) => { if (mounted) { setAgents((r.allowedAgents ?? []).map(canonicalAgentDid)); setAgentsError(false); } })
       // Distinguish "failed" from "zero collaborators": keep agents
       // null and flag the error so the parent excludes this CG from
       // the unique-agent union rather than silently counting it as 0
       // (Codex).
       .catch(() => { if (mounted) setAgentsError(true); });
-    return () => { mounted = false; };
+    load();
+    // The row stays mounted across join approvals/removals and sidebar
+    // CG refreshes, so a one-shot fetch goes stale until reload. Poll on
+    // the same 30s cadence the dashboard's other live data uses, and
+    // also re-probe on memory-graph events for this CG (participant
+    // changes ride the same node event stream) (Codex).
+    const timer = setInterval(load, 30_000);
+    return () => { mounted = false; clearInterval(timer); };
   }, [cg.id]);
 
   // The /participants allow-list can omit the curator (and is empty on
@@ -268,7 +278,16 @@ function CgRow({
                 {abbrev(entities.total)} <span className="v10-cg-dim">entities</span> · <span className="v10-cg-dim">— triples</span>
               </span>
             )
-            : <>{abbrev(entities.total)} <span className="v10-cg-dim">entities</span> · {abbrev(triples.total)} <span className="v10-cg-dim">triples</span></>}
+            : mem.partial
+              ? (
+                // Some (not all) memory layers failed — the counts are
+                // a lower bound, not exact. Mark with a "~" + tooltip so
+                // the row doesn't silently undercount (Codex).
+                <span title="Partial — one or more memory layers were unavailable; counts are a lower bound">
+                  ~{abbrev(entities.total)} <span className="v10-cg-dim">entities</span> · ~{abbrev(triples.total)} <span className="v10-cg-dim">triples</span>
+                </span>
+              )
+              : <>{abbrev(entities.total)} <span className="v10-cg-dim">entities</span> · {abbrev(triples.total)} <span className="v10-cg-dim">triples</span></>}
       </span>
       <span className="v10-cg-cell v10-cg-agents">
         {effectiveAgents === null ? <span className="v10-cg-dim">—</span> : effectiveAgents.length}
