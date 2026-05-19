@@ -305,10 +305,13 @@ export function DashboardView() {
         entities[k] += r.entities[k];
         triples[k] += r.triples[k];
       }
-      // Exclude CGs whose participant probe failed from the unique
-      // count — they're "unknown", not "zero" (Codex); agentsPartial
-      // surfaces that the total may be undercounting.
-      if (!r.agentsError) for (const a of r.agents) agentSet.add(a);
+      // Always union whatever agents the row knows. `r.agents` already
+      // carries only known DIDs: the full set on success, just the
+      // curator fallback on a participant-probe failure, [] while
+      // loading. Skipping the row on error would cancel that fallback
+      // and drop the curator to 0; `agentsPartial` still surfaces that
+      // the total may be undercounting (Codex).
+      for (const a of r.agents) agentSet.add(a);
     }
     const hasCgs = myCgs.length > 0;
     return {

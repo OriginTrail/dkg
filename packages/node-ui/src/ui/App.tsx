@@ -139,9 +139,6 @@ function useDragResizeV(onDrag: (delta: number) => void) {
   return useCallback((node: HTMLDivElement | null) => setHandle(node), []);
 }
 
-  return handleRef;
-}
-
 function AppShell() {
   useLiveStatus();
   useKeyboardShortcuts();
