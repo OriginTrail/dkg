@@ -37,6 +37,9 @@ export interface MemoryData {
   counts: { wm: number; swm: number; vm: number; total: number };
   loading: boolean;
   error: string | null;
+  /** True when some (but not all) layer queries failed — counts are
+   *  incomplete but not absent. `error` stays null in this case. */
+  partial: boolean;
   refresh: () => void;
 }
 
@@ -278,6 +281,7 @@ export function useMemoryEntities(contextGraphId: string): MemoryData {
   const [layeredTriples, setLayeredTriples] = useState<LayeredTriple[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [partial, setPartial] = useState(false);
   const versionRef = useRef(0);
 
   const fetchAll = useCallback(async () => {
@@ -285,6 +289,7 @@ export function useMemoryEntities(contextGraphId: string): MemoryData {
     const version = ++versionRef.current;
     setLoading(true);
     setError(null);
+    setPartial(false);
 
     try {
       // Per-layer settle, not Promise.all: one layer's timeout/500 must
@@ -313,8 +318,11 @@ export function useMemoryEntities(contextGraphId: string): MemoryData {
       const failed = [wmR, swmR, vmR].filter(r => r.status === 'rejected').length;
       // Only a total failure is an "error" (drives the dashboard's
       // assetCount fallback + the views' error state). A partial
-      // failure shows the readable layers rather than nothing.
+      // failure keeps the readable layers but must still be SIGNALLED
+      // (`partial`) so consumers don't present truncated counts as
+      // exact (Codex).
       setError(failed === 3 ? 'Failed to load memory data' : null);
+      setPartial(failed > 0 && failed < 3);
     } catch (err: any) {
       if (version === versionRef.current) {
         setError(err.message ?? 'Failed to load memory data');
@@ -377,6 +385,7 @@ export function useMemoryEntities(contextGraphId: string): MemoryData {
     counts,
     loading,
     error,
+    partial,
     refresh: fetchAll,
   };
 }

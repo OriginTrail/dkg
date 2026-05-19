@@ -172,6 +172,13 @@ function CgRow({
     return [...s];
   }, [agents, agentsError, cg.curator]);
 
+  // Per-CG summary asset count, with the same `assetCount ?? assets`
+  // legacy-field compatibility the rest of the UI uses (PanelLeft) —
+  // older daemons only return `assets` (Codex). Drives both the size
+  // fallback and the per-row coarse display when the live probe fails.
+  const summaryAssets = Number.isFinite((cg.assetCount ?? cg.assets) as number)
+    ? ((cg.assetCount ?? cg.assets) as number)
+    : 0;
   const entities: LayerCounts = useMemo(() => {
     if (mem.error) {
       // Live size probe (/api/query) unavailable — e.g. mock/offline
@@ -181,8 +188,7 @@ function CgRow({
       // populates instead of regressing to an unavailable/0 state; no
       // layer breakdown exists in the summary (Codex). sizeError stays
       // set, so the "partial" caveat still tells the user it's coarse.
-      const fb = Number.isFinite(cg.assetCount as number) ? (cg.assetCount as number) : 0;
-      return { wm: 0, swm: 0, vm: 0, total: fb };
+      return { wm: 0, swm: 0, vm: 0, total: summaryAssets };
     }
     // "Knowledge Assets" = distinct triple subjects. `mem.counts.total`
     // is the entity-map size, which also counts object-only link
@@ -190,7 +196,7 @@ function CgRow({
     // wm/swm/vm stay subject-distinct and drive the proportion bar.
     const subjects = new Set(mem.allTriples.map((t) => t.subject)).size;
     return { wm: mem.counts.wm, swm: mem.counts.swm, vm: mem.counts.vm, total: subjects };
-  }, [mem.error, mem.allTriples, mem.counts.wm, mem.counts.swm, mem.counts.vm, cg.assetCount]);
+  }, [mem.error, mem.allTriples, mem.counts.wm, mem.counts.swm, mem.counts.vm, summaryAssets]);
   const triples: LayerCounts = useMemo(() => {
     let wm = 0, swm = 0, vm = 0;
     for (const t of mem.allTriples) {
@@ -202,7 +208,7 @@ function CgRow({
   }, [mem.allTriples]);
 
   const sig = [
-    mem.loading ? 1 : 0, mem.error ? 1 : 0, agentsLoading ? 1 : 0, agentsError ? 1 : 0,
+    mem.loading ? 1 : 0, mem.error ? 1 : 0, mem.partial ? 1 : 0, agentsLoading ? 1 : 0, agentsError ? 1 : 0,
     entities.wm, entities.swm, entities.vm, entities.total,
     triples.wm, triples.swm, triples.vm, triples.total,
     effectiveAgents ? effectiveAgents.slice().sort().join(',') : '∅',
@@ -214,7 +220,11 @@ function CgRow({
       triples,
       agents: effectiveAgents ?? [],
       sizeLoading: mem.loading,
-      sizeError: Boolean(mem.error),
+      // Both a total failure (mem.error → entities fell back to the
+      // summary count) and a partial failure (mem.partial → some
+      // layers missing) make the size total inexact, so both must
+      // light the aggregate's "partial" caveat (Codex).
+      sizeError: Boolean(mem.error) || mem.partial,
       agentsLoading,
       agentsError,
       sig,
@@ -249,7 +259,15 @@ function CgRow({
         {mem.loading
           ? <span className="v10-cg-dim">loading…</span>
           : mem.error
-            ? <span className="v10-cg-dim" title={mem.error}>—</span>
+            ? (
+              // Live size unavailable: show the coarse summary count
+              // (same value the aggregate card uses) rather than a
+              // bare — so the row isn't empty while the card is
+              // populated; triples have no summary fallback (Codex).
+              <span title="Live size unavailable — showing the context-graph summary count">
+                {abbrev(entities.total)} <span className="v10-cg-dim">entities</span> · <span className="v10-cg-dim">— triples</span>
+              </span>
+            )
             : <>{abbrev(entities.total)} <span className="v10-cg-dim">entities</span> · {abbrev(triples.total)} <span className="v10-cg-dim">triples</span></>}
       </span>
       <span className="v10-cg-cell v10-cg-agents">
