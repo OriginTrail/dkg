@@ -158,7 +158,15 @@ export const useLayoutStore = create<LayoutState>((set, get) => ({
     persist({ leftCollapsed, rightCollapsed, bottomCollapsed, leftWidth, rightWidth, bottomHeight });
   },
   setBottomHeight: (h) => {
-    set({ bottomHeight: clamp(h, BOTTOM_HEIGHT_MIN, BOTTOM_HEIGHT_MAX) });
+    // Lower bound is viewport-aware, not a hard 120: on a short
+    // viewport `maxBottomHeight()` can be < BOTTOM_HEIGHT_MIN, and a
+    // static floor here would snap every drag back up to 120 while
+    // render-time clamping pins it at the smaller viewport max — the
+    // handle then appears inert and the store holds a wrong value
+    // (Codex). On normal viewports maxBottomHeight() >= 120 so the
+    // effective floor is still 120.
+    const lo = Math.min(BOTTOM_HEIGHT_MIN, maxBottomHeight());
+    set({ bottomHeight: clamp(h, lo, BOTTOM_HEIGHT_MAX) });
     const { leftCollapsed, rightCollapsed, bottomCollapsed, leftWidth, rightWidth, bottomHeight } = get();
     persist({ leftCollapsed, rightCollapsed, bottomCollapsed, leftWidth, rightWidth, bottomHeight });
   },
