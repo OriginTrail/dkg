@@ -2,7 +2,7 @@ import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
   PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE, PROTOCOL_STORAGE_ACK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
-  PROTOCOL_SWM_SENDER_KEY,
+  PROTOCOL_SWM_SENDER_KEY, PROTOCOL_SWM_UPDATE, PROTOCOL_SWM_SHARE_ACK, PROTOCOL_MESSAGE,
   contextGraphPublishTopic, contextGraphWorkspaceTopic, contextGraphAppTopic, contextGraphUpdateTopic, contextGraphFinalizationTopic,
   contextGraphDataGraphUri, contextGraphMetaGraphUri, contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri,
   contextGraphSharedMemoryUri,
@@ -46,6 +46,8 @@ import {
   encodeSwmSenderKeyMessage,
   encodeSwmSenderKeyPackage,
   encodeSwmSenderKeyPackageAck,
+  encodeSwmShareAck,
+  decodeSwmShareAck,
   encryptSwmSenderKeyMessage,
   encryptSwmSenderKeyPackage,
   generateEd25519Keypair,
@@ -58,6 +60,11 @@ import {
   type SwmSenderKeyMessageMsg,
   type SwmSenderKeyPackageMsg,
   type WorkspaceRecipientEncryptionKey,
+  InMemoryMessageIdempotencyStore,
+  InMemoryProtocolOutboxStore,
+  type MessageIdempotencyStore,
+  type ProtocolOutboxStore,
+  type ProtocolOutboxEntry,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
@@ -92,50 +99,6 @@ import {
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 
-/**
- * Pre-signed AuthorAttestation payload supplied at finalize-time by
- * self-sovereign agents whose private key isn't held by the daemon.
- * Compact ECDSA `(r, vs)` over the EIP-712 typed data
- * `buildAuthorAttestationTypedData({ chainId, kav10Address,
- * contextGraphId, merkleRoot, authorAddress: address })`. The agent
- * verifies the recovered signer matches `address` before stamping the
- * seal.
- *
- * Lives at the agent layer (rather than as a publisher
- * `PublishOptions` field) since RFC-001 §9.x — Phase C — the
- * publisher only accepts already-sealed `precomputedAttestation`
- * payloads. Pre-signed signing is a finalize-time concern.
- */
-type PreSignedAuthorAttestation = {
-  address: string;
-  signature: { r: Uint8Array; vs: Uint8Array };
-};
-
-type LocalSwmSenderKeySendState = {
-  contextGraphId: string;
-  subGraphName?: string;
-  senderAgentAddress: string;
-  epochId: string;
-  membershipHash: string;
-  chainKey: Uint8Array;
-  nextMessageIndex: number;
-  senderSigningSecretKey: Uint8Array;
-  senderSigningPublicKey: Uint8Array;
-  createdAtMs: number;
-};
-
-type LocalSwmSenderKeyReceiveState = {
-  contextGraphId: string;
-  subGraphName?: string;
-  senderAgentAddress: string;
-  epochId: string;
-  membershipHash: string;
-  chainKey: Uint8Array;
-  nextMessageIndex: number;
-  senderSigningPublicKey: Uint8Array;
-  createdAtMs: number;
-  skippedChainKeys: Map<number, Uint8Array>;
-};
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
 import { MessageHandler, type SkillHandler, type SkillRequest, type SkillResponse, type ChatHandler, type ChatAclCheck } from './messaging.js';
@@ -149,7 +112,25 @@ import {
 import { SyncVerifyWorker } from './sync-verify-worker.js';
 import { bindRandomSampling, type RandomSamplingHandle, type RandomSamplingStatus } from './random-sampling-bind.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
-import { Messenger } from './p2p/messenger.js';
+import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
+import {
+  createCGMemberEnumerator,
+  type CGMemberEnumerator,
+} from './swm/enumerate-cg-members.js';
+import {
+  chooseFanOutTier,
+  executeSubstrateFanOut,
+  classifySendResult,
+  FANOUT_RESPONSE_REJECTED,
+  FANOUT_RESPONSE_RETRYABLE,
+  type FanOutBookkeeper,
+  type FanOutPeerRecord,
+  type FanOutPlan,
+} from './swm/substrate-fanout.js';
+import {
+  createSwmAckQuorum,
+  type SwmAckQuorum,
+} from './swm/ack-quorum.js';
 import { waitForPeerProtocol } from './p2p/protocol-readiness.js';
 import { orderCatchupPeers } from './p2p/peer-selection.js';
 import { fetchSyncPages, type SyncPageResult } from './sync/requester/page-fetch.js';
@@ -176,14 +157,20 @@ import {
 } from './agent-keystore.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler } from './finalization-handler.js';
-import {
-  JoinApprovalRetryQueue,
-  type JoinApprovalRetryEntry,
-} from './join-approval-retry-queue.js';
-import {
-  MessageOutbox,
-  type ChatOutboxRetryEntry,
-} from './message-outbox.js';
+// rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
+// (durable, SQLite-backed) replaces it. We keep a minimal local
+// type alias so listPendingJoinApprovalRetries() retains its old
+// public shape while it stubs out to []. PR-12 rebuilds the operator
+// diagnostic surface on top of the substrate outbox and will return
+// real entries with substrate-shaped metadata.
+type JoinApprovalRetryEntry = {
+  contextGraphId: string;
+  agentAddress: string;
+  attempts: number;
+  firstFailureAt: number;
+  nextAttemptAt: number;
+  lastError: string;
+};
 import { multiaddr } from '@multiformats/multiaddr';
 import { buildCclPolicyQuads, buildPolicyApprovalQuads, buildPolicyRevocationQuads, hashCclPolicy, type CclPolicyRecord, type PolicyApprovalBinding } from './ccl-policy.js';
 import { CclEvaluator, parseCclPolicy, validateCclPolicy, type CclEvaluationResult, type CclFactTuple } from './ccl-evaluator.js';
@@ -193,958 +180,136 @@ import {
   strip, stripLiteral, jsonLdToQuads,
   type JsonLdContent,
 } from './dkg-agent-utils.js';
-
-export interface CclPublishedResultEntry {
-  entryUri: string;
-  kind: 'derived' | 'decision';
-  name: string;
-  tuple: unknown[];
-}
-
-export interface CclPublishedEvaluationRecord {
-  evaluationUri: string;
-  policyUri: string;
-  factSetHash: string;
-   factQueryHash?: string;
-   factResolverVersion?: string;
-   factResolutionMode?: CclFactResolutionMode;
-  createdAt?: string;
-  view?: string;
-  snapshotId?: string;
-  scopeUal?: string;
-  contextType?: string;
-  results: CclPublishedResultEntry[];
-}
-
-export interface PublishOpts {
-  onPhase?: PhaseCallback;
-  operationCtx?: OperationContext;
-  accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
-  allowedPeers?: string[];
-  /** Target sub-graph within the context graph (e.g. "code", "decisions"). */
-  subGraphName?: string;
-}
-
-export interface PublishAsyncOpts extends PublishOpts {
-  namespace?: string;
-  scope?: string;
-  transitionType?: LiftTransitionType;
-  authority?: LiftAuthorityProof;
-  /** Prior KC reference; required for MUTATE/REVOKE. */
-  priorVersion?: string;
-  /** V10 selective-disclosure: per-entity kaRoot instead of flat-hash KC. */
-  entityProofs?: boolean;
-  /** RFC-001 §4 per-publish attribution override; `0n` = mode d. */
-  publisherNodeIdentityIdOverride?: bigint;
-  localOnly?: boolean;
-  /** Registered local agent whose key signs the seal. Mirrors sync `assertionFinalize`. */
-  authorAgentAddress?: string;
-  /** Externally pre-signed seal. Mutually exclusive with `authorAgentAddress` / `authorSignTypedData`. */
-  preSignedAuthorAttestation?: {
-    expectedMerkleRoot: Uint8Array;
-    authorAddress: string;
-    signature: { r: Uint8Array; vs: Uint8Array };
-    schemeVersion: number;
-  };
-  /** Caller signs typed-data built by the daemon. Requires `authorAgentAddress`. */
-  authorSignTypedData?: (typedData: AuthorAttestationTypedData) => Promise<{ r: Uint8Array; vs: Uint8Array }>;
-}
-
-export interface PublishAsyncQuadEnvelope {
-  publicQuads?: Quad[];
-  privateQuads?: Quad[];
-}
-
-export type PublishAsyncContent = JsonLdContent | PublishAsyncQuadEnvelope;
-
-export class ContextGraphNotFoundError extends Error {
-  readonly code = 'ContextGraphNotFound';
-
-  constructor(contextGraphId: string) {
-    super(`Context graph "${contextGraphId}" does not exist or is not subscribed locally`);
-    this.name = 'ContextGraphNotFound';
-  }
-}
-
-export class InvalidContentError extends Error {
-  readonly code = 'InvalidContent';
-
-  constructor(message: string) {
-    super(message);
-    this.name = 'InvalidContent';
-  }
-}
-
-const PRIVATE_DATA_ANCHOR = 'http://dkg.io/ontology/privateDataAnchor';
-
-function normalizePublishContextGraphId(input: string): string {
-  const value = String(input).trim().replace(/^<(.+)>$/, '$1');
-  const prefix = 'did:dkg:context-graph:';
-  if (!value.startsWith(prefix)) return value;
-  const rest = value.slice(prefix.length);
-  const slash = rest.indexOf('/');
-  return slash >= 0 ? rest.slice(0, slash) : rest;
-}
-
-function isPublishAsyncQuadEnvelope(input: unknown): input is PublishAsyncQuadEnvelope {
-  return !!input
-    && typeof input === 'object'
-    && !Array.isArray(input)
-    && ('publicQuads' in input || 'privateQuads' in input);
-}
-
-function assertQuadArray(value: unknown, fieldName: string): Quad[] {
-  if (value == null) return [];
-  if (!Array.isArray(value)) {
-    throw new InvalidContentError(`${fieldName} must be an array of RDF quads`);
-  }
-  for (const quad of value) {
-    if (
-      !quad
-      || typeof quad.subject !== 'string'
-      || typeof quad.predicate !== 'string'
-      || typeof quad.object !== 'string'
-    ) {
-      throw new InvalidContentError(`${fieldName} must contain RDF quads with subject, predicate, and object strings`);
-    }
-  }
-  return value.map((quad) => ({ ...quad, graph: quad.graph ?? '' })) as Quad[];
-}
-
-function partitionPublishAsyncQuads(publicQuads: Quad[], privateQuads: Quad[]): {
-  publicQuads: Quad[];
-  privateQuadsByRoot: Map<string, Quad[]>;
-  roots: string[];
-} {
-  const privateByRoot = autoPartition(privateQuads);
-  let stagedPublicQuads = [...publicQuads];
-  let publicByRoot = autoPartition(stagedPublicQuads);
-
-  for (const rootEntity of privateByRoot.keys()) {
-    if (!publicByRoot.has(rootEntity)) {
-      stagedPublicQuads.push({
-        subject: rootEntity,
-        predicate: PRIVATE_DATA_ANCHOR,
-        object: '"true"',
-        graph: '',
-      });
-    }
-  }
-
-  publicByRoot = autoPartition(stagedPublicQuads);
-  const roots = [...publicByRoot.keys()];
-  if (roots.length === 0) {
-    throw new InvalidContentError('Content produced no publishable root entities');
-  }
-
-  return {
-    publicQuads: stagedPublicQuads,
-    privateQuadsByRoot: privateByRoot,
-    roots,
-  };
-}
-
-/** Sign EIP-712 typed data with a raw private key, returning compact (r, vs). */
-async function signWithPrivateKey(
-  privateKey: string,
-  typedData: AuthorAttestationTypedData,
-): Promise<{ r: Uint8Array; vs: Uint8Array }> {
-  const wallet = new ethers.Wallet(privateKey.startsWith('0x') ? privateKey : '0x' + privateKey);
-  const sigHex = await wallet.signTypedData(typedData.domain, typedData.types, typedData.message);
-  const sig = ethers.Signature.from(sigHex);
-  return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
-}
-
-/** Bytes → hex for lift-queue persistence. Inverse: `liftSealToPrecomputedAttestation`. */
-function preSignedAttestationToLiftSeal(input: {
-  expectedMerkleRoot: Uint8Array;
-  authorAddress: string;
-  signature: { r: Uint8Array; vs: Uint8Array };
-  schemeVersion: number;
-}): LiftRequestAuthorSeal {
-  return {
-    merkleRoot: ethers.hexlify(input.expectedMerkleRoot) as `0x${string}`,
-    authorAddress: input.authorAddress as `0x${string}`,
-    signature: {
-      r: ethers.hexlify(input.signature.r) as `0x${string}`,
-      vs: ethers.hexlify(input.signature.vs) as `0x${string}`,
-    },
-    schemeVersion: input.schemeVersion,
-  };
-}
-
-const SYNC_PAGE_SIZE = 500;
-const SYNC_PAGE_RETRY_ATTEMPTS = 3;
-const SYNC_TOTAL_TIMEOUT_MS = 120_000;
-/** Per-page timeout for sync when we have budget (relay links can be slow). */
-const SYNC_PAGE_TIMEOUT_MS = 45_000;
-/** ProtocolRouter.send retries internally 3 times with the same timeout; cap so 3× fits in remaining budget. */
-const SYNC_ROUTER_ATTEMPTS = 3;
-const SYNC_PROTOCOL_CHECK_ATTEMPTS = 3;
-const SYNC_PROTOCOL_CHECK_DELAY_MS = 500;
-const SYNC_AUTH_MAX_AGE_MS = 90_000;
-
-/**
- * How long an agent's join-request delegation is valid for. The same
- * delegation authorises the joiner's node to sync this CG on behalf of
- * the agent for the lifetime of the membership; we default to 1 year so
- * that approved joiners don't silently lose access after a short window.
- * The agent can re-issue at any time by signing a fresh delegation.
- */
-const JOIN_DELEGATION_VALIDITY_MS = 365 * 24 * 60 * 60 * 1000;
-
-/**
- * Send timeout for `/dkg/.../join-request` deliveries between joiner ↔ curator.
- *
- * Why 20s and not the previous 5s: `ProtocolRouter.send` shares a single
- * `AbortSignal.timeout(timeoutMs)` across its 3 retry attempts (see
- * `protocol-router.ts:82-97`), so this value is the budget for the *entire*
- * dial-retry loop, not per attempt. A fresh circuit-relay dial against a
- * NAT'd peer routinely takes 1-3s to establish; 5s leaves no headroom for
- * the back-off-and-retry path the loop is designed for, so the very first
- * approval-notification after a curator's `approve-join` would routinely
- * abort before libp2p got a chance to upgrade the relay connection. Two
- * laptops on home internet (PR #448) reproduced this consistently.
- *
- * 20s matches `DEFAULT_SEND_TIMEOUT_MS` and gives ProtocolRouter's loop room
- * for ~3 attempts of ~3-5s each before declaring the peer unreachable.
- *
- * The proper fix is per-attempt timeouts in ProtocolRouter (the shared signal
- * is a latent design issue) — tracked separately, not in scope here.
- */
-const JOIN_REQUEST_SEND_TIMEOUT_MS = 20_000;
-
-/**
- * Normalise an `did:dkg:agent:<id>` DID for case-insensitive equality
- * comparison. The agent ID can be either an Ethereum address (which IS
- * case-insensitive on the wire — checksum is purely advisory per
- * EIP-55) or a libp2p peer ID (which is NOT case-insensitive — base58
- * has uppercase characters that carry information). The previous
- * approach lower-cased the entire DID, which works in practice because
- * peer IDs round-trip the same way on both sides of a comparison, but
- * is semantically wrong: a non-EVM owner DID could in principle be
- * stored with one case and read back with another. Make the
- * normalisation explicit and only touch the EVM-address suffix.
- */
-function normalizeAgentDid(did: string): string {
-  const m = did.match(/^did:dkg:agent:(0x[0-9a-fA-F]{40})$/);
-  if (m) return `did:dkg:agent:${m[1].toLowerCase()}`;
-  return did;
-}
-
-/**
- * Scope string for join-request delegations. Authorises the named node
- * to sync the CG on the named DKG deployment.
- *
- * The `deploymentId` (e.g. `evm:84532:hub=0x...`) namespaces the scope
- * to a SPECIFIC deployment, not just a chain — every Hardhat instance
- * shares `evm:31337`, and a single chain can host multiple independent
- * DKG deployments with different Hub contracts. Without deployment-id
- * binding, a delegation signed against testnet's CG "X" could be
- * replayed against a devnet's CG "X" with the same delegatee
- * identifiers. See `ChainAdapter.deploymentId`.
- *
- * Fails closed if `deploymentId` is empty/undefined. `ChainAdapter` is
- * a TypeScript-only interface, so a JS / cast / custom adapter can omit
- * the field at runtime; without this guard we'd silently sign and
- * verify against `sync:deployment=undefined:<cgId>`, dropping the
- * cross-deployment replay protection this scope is meant to add.
- * PR #448 review (round 4): make misconfigured adapters fail loudly
- * instead of minting broad delegations.
- */
-function joinDelegationScope(deploymentId: string | undefined, contextGraphId: string): string {
-  if (!deploymentId || typeof deploymentId !== 'string' || deploymentId.trim().length === 0) {
-    throw new Error(
-      'Cannot derive join-delegation scope: chain adapter did not advertise a deploymentId. '
-      + 'Every adapter (EVM, mock, custom) must implement `get deploymentId(): string` so '
-      + 'delegations can\'t be cross-deployment replayed. Update the adapter or wrap it.',
-    );
-  }
-  return `sync:deployment=${deploymentId}:${contextGraphId}`;
-}
-
-/**
- * Wire-level sentinel returned by the sync responder when ACL authorization
- * fails for a request. Distinguishes an explicit denial from an empty page
- * (peer is up but has no data) and a transport error (peer unreachable).
- * Chosen to never collide with nquads output (nquads lines always contain
- * `<…>` tokens and end with `.`; this is a `#`-comment string).
- */
-const SYNC_ACCESS_DENIED_MARKER = '#DKG-SYNC-ACCESS-DENIED';
-
-const LOCAL_ACCESS_OPEN = 0;
-const LOCAL_ACCESS_CURATED = 1;
-const EVM_PUBLISH_CURATED = 0;
-const EVM_PUBLISH_OPEN = 1;
-const MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS = 256;
-
-/**
- * Thrown by `fetchSyncPages` when the remote responder returned
- * SYNC_ACCESS_DENIED_MARKER. Caught by `syncFromPeer` and surfaced as a
- * per-CG denial observation to the caller via its `onAccessDenied` hook,
- * so higher-level flows (catch-up job) can distinguish ACL denial from
- * transport errors without heuristics.
- */
-class SyncAccessDeniedError extends Error {
-  readonly contextGraphId: string;
-  constructor(contextGraphId: string) {
-    super(`Sync access denied for context graph "${contextGraphId}"`);
-    this.name = 'SyncAccessDeniedError';
-    this.contextGraphId = contextGraphId;
-  }
-}
-const META_REFRESH_COOLDOWN_MS = 30_000;
-const SYNC_MIN_GRAPH_BUDGET_MS = 10_000;
-const DEBUG_SYNC_PROGRESS = process.env.DKG_DEBUG_SYNC_PROGRESS === '1';
-const DEFAULT_SWM_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
-const SWM_CLEANUP_INTERVAL_MS = 15 * 60 * 1000; // run cleanup every 15 minutes
-const SYNC_DENIED_RESPONSE = '__DKG_SYNC_DENIED__';
-/**
- * How long to wait between reconnect-on-gossip dial attempts for the same peer.
- * A CG with chatty gossip could otherwise produce a dial per message; this
- * throttles us to at most one attempted dial per peer per window.
- */
-const GOSSIP_DIAL_COOLDOWN_MS = 30_000;
-/** Per-dial-attempt timeout for reconnect-on-gossip so a stuck dial can't starve the gossip handler path. */
-const GOSSIP_DIAL_TIMEOUT_MS = 10_000;
-/**
- * Cooldown for catchup-on-connection:open: suppresses duplicate catchup kicks
- * when the same peer briefly has overlapping direct + relayed connections
- * (each of which fires its own connection:open).
- */
-const CATCHUP_ON_CONNECT_COOLDOWN_MS = 60_000;
-/**
- * Period of the sync reconciler tick. The reconciler is the safety net
- * for the event-driven `peer:update` retry path: if libp2p drops a
- * `peer:update` event (in-process race, version bug, listener thrown),
- * or if a peer's protocol list changes via a transport we don't get
- * notified about, the reconciler eventually re-probes and re-syncs.
- *
- * Worst-case sync staleness for a connected peer is ~ this interval.
- * 5 minutes balances "catch missed events quickly enough that RS
- * proofs don't drift" against "don't pin the event loop with chatty
- * sync probes". See the dkg-agent design notes around
- * `startSyncReconciler` for the trade-off.
- */
-const SYNC_RECONCILER_INTERVAL_MS = 5 * 60_000;
-/**
- * A peer is considered "stale" — eligible for a reconciler-driven sync
- * retry — if no successful sync has completed for it within this window.
- * Set higher than `SYNC_RECONCILER_INTERVAL_MS` so a single missed
- * tick doesn't immediately retry every connected peer; that gives
- * the event-driven path time to win the race in the common case.
- */
-const SYNC_STALENESS_THRESHOLD_MS = 10 * 60_000;
-const RANDOM_SAMPLING_BIND_RETRY_MS = 30_000;
-const STORAGE_ACK_REGISTRATION_RETRY_MS = 30_000;
-/**
- * Period of the join-approval retry tick. The retry queue (see
- * `packages/agent/src/join-approval-retry-queue.ts`) holds entries for
- * `join-approved` notifications that the curator wrote locally but couldn't
- * deliver over libp2p — usually because of a transient transport reset
- * (`Remote closed connection during opening`, NAT mapping flap, the
- * invitee's daemon restarting). Without retry the invitee gets stuck:
- * the local curator state is correct but the invitee never learns to
- * sync, and their own retries can't help because they don't yet hold the
- * delegation that would let private-sync auth succeed. The tick walks the
- * queue's `due()` entries with exponential backoff. Opportunistic retries
- * also fire from `connection:open` when the invitee's peer reconnects,
- * which usually wins the race; the timer is the safety net for cases
- * where reconnect events are missed (e.g. relayed reconnects that don't
- * surface a fresh `connection:open` on the curator).
- */
-const JOIN_APPROVAL_RETRY_TICK_MS = 30_000;
-
-/**
- * Tick interval for the chat outbox retry queue. Same 30s cadence as
- * the join-approval queue (`JOIN_APPROVAL_RETRY_TICK_MS`). The cadence
- * doesn't gate the FIRST retry — a backoff-due entry that's been
- * waiting since 5s after first failure may sit idle for up to 25s
- * before this tick picks it up — but the dominant retry trigger in
- * practice is the `connection:open` opportunistic flush
- * (`processMessageOutboxOnConnect`), which fires the moment the
- * recipient peer becomes reachable again. The tick is the safety net
- * for cases where reconnect events are missed (e.g. relayed reconnects
- * that don't surface a fresh `connection:open` on the sender) or
- * where the recipient was reachable all along but transport failures
- * are coming from somewhere upstream of libp2p.
- */
-const MESSAGE_OUTBOX_TICK_MS = 30_000;
-
-type RandomSamplingStartResult = 'started' | 'retryable' | 'disabled';
-type ACKSignerResolution = {
-  wallet: ethers.Wallet | null;
-  retryable: boolean;
+import {
+  PRIVATE_DATA_ANCHOR,
+  SYNC_PAGE_SIZE,
+  SYNC_PAGE_RETRY_ATTEMPTS,
+  SYNC_TOTAL_TIMEOUT_MS,
+  SYNC_PAGE_TIMEOUT_MS,
+  SYNC_ROUTER_ATTEMPTS,
+  SYNC_PROTOCOL_CHECK_ATTEMPTS,
+  SYNC_PROTOCOL_CHECK_DELAY_MS,
+  SYNC_AUTH_MAX_AGE_MS,
+  JOIN_DELEGATION_VALIDITY_MS,
+  JOIN_REQUEST_SEND_TIMEOUT_MS,
+  SYNC_ACCESS_DENIED_MARKER,
+  LOCAL_ACCESS_OPEN,
+  LOCAL_ACCESS_CURATED,
+  EVM_PUBLISH_CURATED,
+  EVM_PUBLISH_OPEN,
+  MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS,
+  META_REFRESH_COOLDOWN_MS,
+  SYNC_MIN_GRAPH_BUDGET_MS,
+  DEBUG_SYNC_PROGRESS,
+  DEFAULT_SWM_TTL_MS,
+  SWM_CLEANUP_INTERVAL_MS,
+  SYNC_DENIED_RESPONSE,
+  GOSSIP_DIAL_COOLDOWN_MS,
+  GOSSIP_DIAL_TIMEOUT_MS,
+  CATCHUP_ON_CONNECT_COOLDOWN_MS,
+  SYNC_RECONCILER_INTERVAL_MS,
+  SYNC_STALENESS_THRESHOLD_MS,
+  RANDOM_SAMPLING_BIND_RETRY_MS,
+  STORAGE_ACK_REGISTRATION_RETRY_MS,
+  JOIN_APPROVAL_RETRY_TICK_MS,
+  MESSAGE_OUTBOX_TICK_MS,
+} from './dkg-agent-constants.js';
+import {
+  ContextGraphNotFoundError,
+  InvalidContentError,
+  SyncAccessDeniedError,
+  type PreSignedAuthorAttestation,
+  type LocalSwmSenderKeySendState,
+  type LocalSwmSenderKeyReceiveState,
+  type RandomSamplingStartResult,
+  type ACKSignerResolution,
+  type SyncRequestEnvelope,
+  type CclPublishedResultEntry,
+  type CclPublishedEvaluationRecord,
+  type PublishOpts,
+  type PublishAsyncOpts,
+  type PublishAsyncQuadEnvelope,
+  type PublishAsyncContent,
+  type PeerHealth,
+  type PeerConnectionSnapshot,
+  type PeerDiagnostics,
+  type ChatSendResult,
+  type ContextGraphSub,
+  type ContextGraphSubscriptionRecord,
+  type ContextGraphSubscriptionStore,
+  type ContextGraphMemberPrincipalType,
+  type ContextGraphMemberStatus,
+  type ContextGraphMembershipRecord,
+  type ContextGraphMembershipStore,
+  type DurableSyncDiagnostics,
+  type SharedMemorySyncDiagnostics,
+  type CatchupSyncDiagnostics,
+  type DurableSyncResult,
+  type SharedMemorySyncResult,
+  type DKGAgentConfig,
+} from './dkg-agent-types.js';
+import {
+  normalizePublishContextGraphId,
+  isPublishAsyncQuadEnvelope,
+  assertQuadArray,
+  partitionPublishAsyncQuads,
+  signWithPrivateKey,
+  preSignedAttestationToLiftSeal,
+  normalizeAgentDid,
+  joinDelegationScope,
+  normalizeSyncPhase,
+  normalizeAdapterPublisherAddress,
+  recoverCompactSigner,
+  adapterOperationalPrivateKeyAddress,
+  adapterHasOperationalPrivateKey,
+  adapterGenericSignMessageMatchesAddress,
+  adapterAdvertisesPublisherSigner,
+  privateKeyAddress,
+  inferAdapterPublisherAddress,
+  defaultLargeLiteralStorage,
+  createPublicSnapshotStore,
+  applyDefaultLargeLiteralStorage,
+  isLocalOxigraphConfig,
+} from './dkg-agent-helpers.js';
+import {
+  swmSenderStateKey,
+  swmReceiverStateKey,
+  serializeSwmSenderSendState,
+  serializeSwmSenderReceiveState,
+  deserializeSwmSenderSendState,
+  deserializeSwmSenderReceiveState,
+} from './dkg-agent-swm-state.js';
+// Public surface re-exported so external consumers that import directly
+// from `./dkg-agent.js` keep working. The new file `dkg-agent-types.ts`
+// is the canonical home; `packages/agent/src/index.ts` re-exports from
+// there.
+export {
+  ContextGraphNotFoundError,
+  InvalidContentError,
 };
-
-interface SyncRequestEnvelope {
-  contextGraphId: string;
-  offset: number;
-  limit: number;
-  includeSharedMemory: boolean;
-  phase?: SyncPhase;
-  snapshotRef?: string;
-  targetPeerId?: string;
-  requesterPeerId?: string;
-  requestId?: string;
-  issuedAtMs?: number;
-  requesterIdentityId?: string;
-  requesterAgentAddress?: string;
-  requesterSignatureR?: string;
-  requesterSignatureVS?: string;
-}
-
-function normalizeSyncPhase(value: unknown): SyncPhase {
-  if (value === 'meta' || value === 'snapshot') return value;
-  return 'data';
-}
-
-/** Health status of a peer from the last ping round. */
-export interface PeerHealth {
-  peerId: string;
-  alive: boolean;
-  latencyMs: number | null;
-  lastSeen: number | null;
-  lastChecked: number;
-}
-
-/** Per-connection snapshot for diagnostics. */
-export interface PeerConnectionSnapshot {
-  direction: 'inbound' | 'outbound';
-  /** `'relayed'` when the remote multiaddr includes `/p2p-circuit`, else `'direct'`. */
-  transport: 'direct' | 'relayed';
-  /**
-   * The connection's remote multiaddr as a string, or `null` when
-   * libp2p didn't expose one. Preserving the `null` (rather than
-   * defaulting to `''`) keeps the legacy `/api/peer-info`
-   * `remoteAddrs` contract intact for callers that distinguish
-   * "address unavailable" from a real multiaddr — Codex review of
-   * PR #533 flagged the prior empty-string default as a silent
-   * response-shape change.
-   */
-  remoteAddr: string | null;
-  /**
-   * `true` when libp2p marks the connection as limited (circuit-relay v2
-   * data-limit + duration-limit semantics). Limited connections can be
-   * dialed via {@link CONNECTION_REUSE_PROTOCOLS} but are subject to the
-   * relay's per-connection caps; the Window D postmortem traced the
-   * "outbound failed while inbound from same peer was open" class to
-   * limited connections not being reused by `dialProtocol`.
-   */
-  limited: boolean;
-  /** Active stream count (multiplexer-level). */
-  streams: number;
-  /** UNIX-ms when the connection was opened, or `null` if libp2p didn't expose it. */
-  openedAt: number | null;
-}
-
-/**
- * Per-peer diagnostic snapshot. Surfaces the libp2p observability state
- * we need to triage the Window D class of asymmetric reachability bugs
- * documented in the Miles↔Lex 6h soak postmortem (May 16 2026), where an
- * inbound circuit-relay connection from peer P was open but
- * `dialProtocol(P, ...)` kept failing with "no valid addresses for peer"
- * for several minutes. The key field is `getConnectionsReturnsForPeer`,
- * which lets an operator (or a downstream test) detect at a glance when
- * libp2p's peerId-keyed lookup disagrees with a raw walk over all open
- * connections — the smoking gun for the "limited connection not
- * surfaced for outbound stream-open" behaviour.
- *
- * All fields are best-effort: any libp2p internal that throws or
- * returns an unexpected shape degrades to `null`/`[]` rather than
- * surfacing as a route 500. This route is most useful WHEN the network
- * is broken; it must not itself break.
- */
-export interface PeerDiagnostics {
-  peerId: string;
-  /** `true` when at least one open connection to this peer exists. */
-  connected: boolean;
-  /**
-   * Number of connections returned by walking every open libp2p
-   * connection and filtering by `remotePeer === peerId`. This is the
-   * legacy path used by `/api/peer-info` before this PR.
-   */
-  rawConnectionCount: number;
-  /**
-   * Number of connections returned by the peerId-keyed lookup
-   * `libp2p.getConnections(peerId)`. This is the path `PeerResolver`
-   * (see `packages/core/src/network/peer-resolver.ts`) uses to decide
-   * whether to short-circuit address resolution.
-   *
-   * When this value is LESS than `rawConnectionCount` for an otherwise
-   * open peer, libp2p's peerId-keyed lookup is filtering out connections
-   * the raw walk can see — the exact Window D signature. The operator
-   * can then file an upstream issue against js-libp2p with this number
-   * as repro evidence, and the local workaround in PR 5
-   * (`dialProtocol`-reuses-inbound-circuit) becomes the right next step.
-   */
-  getConnectionsReturnsForPeer: number;
-  connections: PeerConnectionSnapshot[];
-  /**
-   * Snapshot of what libp2p's local peerStore knows about this peer.
-   * `null` when the peer has no peerStore entry at all (cold cache) —
-   * a common precondition for the "no valid addresses for peer" dial
-   * failure that the soak postmortem identified.
-   */
-  peerStore: {
-    knownMultiaddrCount: number;
-    multiaddrs: string[];
-    protocols: string[];
-  } | null;
-  /** Pending chat-outbox entries for this peer (oldest-first). */
-  outbox: {
-    pendingCount: number;
-    oldestFirstFailureAt: number | null;
-    attempts: number[];
-  };
-  /** Latest ping-round health snapshot (`null` if never pinged). */
-  health: PeerHealth | null;
-  /** Protocols this peer's identify-handshake advertised. */
-  protocols: string[];
-  /** Convenience flag — peer speaks `/dkg/10.0.0/sync`. */
-  syncCapable: boolean;
-}
-
-/**
- * Caller-visible result of `DKGAgent.sendChat`. Backwards-compatible
- * extension of the original `{ delivered, error }` shape: existing
- * callers that only check `delivered` keep working, callers that want
- * to surface "queued for retry" (e.g. the MCP `dkg_send_message` tool)
- * can read `queued + attempts + nextAttemptAtMs`.
- */
-export interface ChatSendResult {
-  /** Whether the FIRST attempt's wire send + handler reply succeeded. */
-  delivered: boolean;
-  /** True iff `delivered=false` and the message was added to the outbox for retry. */
-  queued?: boolean;
-  /**
-   * Outbox key fragment for this send. Stable across retries so a
-   * caller can correlate the queued state with later delivery
-   * notifications. Currently a uuidv4 unless the caller passed
-   * `options.messageId`.
-   */
-  messageId?: string;
-  /** Number of failed attempts so far (1 on first failure). Only set when `queued=true`. */
-  attempts?: number;
-  /** Epoch-ms when the next retry is due. Only set when `queued=true`. */
-  nextAttemptAtMs?: number;
-  /** Last error string from the wire send. Set on `delivered=false`. */
-  error?: string;
-}
-
-/** Tracks the subscription and sync state of a context graph. */
-export interface ContextGraphSub {
-  name?: string;
-  /** GossipSub topics are active for this context graph. */
-  subscribed: boolean;
-  /** Definition triples exist in the local triple store. */
-  synced: boolean;
-  /** Shared-memory catch-up has completed at least once for this subscription. */
-  sharedMemorySynced?: boolean;
-  /**
-   * Whether the `_meta` graph (allowlist, registration status) has been
-   * fetched via authenticated sync or is known from local creation.
-   * When false, the gossip handler denies writes to prevent unauthorized
-   * access during the window before _meta arrives.
-   */
-  metaSynced?: boolean;
-  /** On-chain context graph ID (keccak256 hash), if known. */
-  onChainId?: string;
-  /** Local participant identities used for private SWM authorization before anchoring. */
-  participantIdentityIds?: bigint[];
-  /** Participant agent addresses (V10 agent identity model). */
-  participantAgents?: string[];
-  /**
-   * Set to true between receiving a curator `join-approved` notification
-   * and the first successful meta sync for this CG. Lets `listContextGraphs`
-   * surface freshly-joined curated CGs in the UI's "waiting for sync" state
-   * before `_meta` triples arrive — without this flag, a curated CG with
-   * no `onChainId` and no local content yet is filtered out as a "phantom"
-   * subscription and the project entry doesn't appear in the sidebar until
-   * the periodic catchup reconciler eventually pulls meta (~2 min worst
-   * case). In-memory only; not persisted because the periodic reconciler
-   * always recovers post-restart by populating `metaSynced` directly.
-   */
-  pendingMeta?: boolean;
-}
-
-export interface ContextGraphSubscriptionRecord {
-  id: string;
-  name?: string;
-  subscribed: boolean;
-  synced: boolean;
-  sharedMemorySynced?: boolean;
-  metaSynced?: boolean;
-  onChainId?: string;
-  syncScoped: boolean;
-}
-
-export interface ContextGraphSubscriptionStore {
-  loadAll(): Promise<ContextGraphSubscriptionRecord[]>;
-  save(record: ContextGraphSubscriptionRecord): Promise<void>;
-  delete(contextGraphId: string): Promise<void>;
-}
-
-export type ContextGraphMemberPrincipalType = 'node' | 'agent' | 'identity';
-export type ContextGraphMemberStatus = 'active' | 'removed' | 'pending';
-
-export interface ContextGraphMembershipRecord {
-  contextGraphId: string;
-  principalType: ContextGraphMemberPrincipalType;
-  principalId: string;
-  role?: string;
-  status: ContextGraphMemberStatus;
-  source?: string;
-  displayName?: string;
-  metadata?: Record<string, unknown>;
-}
-
-export interface ContextGraphMembershipStore {
-  upsert(record: ContextGraphMembershipRecord & { firstSeenAt?: number; updatedAt: number }): Promise<void>;
-  delete(contextGraphId: string, principalType: ContextGraphMemberPrincipalType, principalId: string): Promise<void>;
-}
-
-export interface DurableSyncDiagnostics {
-  fetchedMetaTriples: number;
-  fetchedDataTriples: number;
-  insertedMetaTriples: number;
-  insertedDataTriples: number;
-  bytesReceived: number;
-  resumedPhases: number;
-  emptyResponses: number;
-  metaOnlyResponses: number;
-  dataRejectedMissingMeta: number;
-  rejectedKcs: number;
-  failedPeers: number;
-}
-
-export interface SharedMemorySyncDiagnostics {
-  fetchedMetaTriples: number;
-  fetchedDataTriples: number;
-  insertedMetaTriples: number;
-  insertedDataTriples: number;
-  bytesReceived: number;
-  resumedPhases: number;
-  emptyResponses: number;
-  droppedDataTriples: number;
-  failedPeers: number;
-}
-
-export interface CatchupSyncDiagnostics {
-  noProtocolPeers: number;
-  durable: DurableSyncDiagnostics;
-  sharedMemory: SharedMemorySyncDiagnostics;
-}
-
-interface DurableSyncResult extends DurableSyncDiagnostics {
-  insertedTriples: number;
-  deniedPhases: number;
-}
-
-interface SharedMemorySyncResult extends SharedMemorySyncDiagnostics {
-  insertedTriples: number;
-  deniedPhases: number;
-}
-
-export interface DKGAgentConfig {
-  name: string;
-  framework?: string;
-  description?: string;
-  listenPort?: number;
-  /** IP address to listen on. Default: '0.0.0.0' (all interfaces). Use '127.0.0.1' for tests. */
-  listenHost?: string;
-  bootstrapPeers?: string[];
-  /** Multiaddrs of relay nodes for NAT traversal. */
-  relayPeers?: string[];
-  /** Multiaddrs to announce to the network (for VPS/cloud nodes with a public IP not on the interface). */
-  announceAddresses?: string[];
-  skills?: Array<{
-    skillType: string;
-    pricePerCall?: number;
-    currency?: string;
-    handler: SkillHandler;
-  }>;
-  dataDir?: string;
-  store?: TripleStore;
-  /** Triple store backend configuration (e.g. oxigraph-worker, blazegraph). If omitted, defaults to oxigraph-worker when dataDir is set. */
-  storeConfig?: TripleStoreConfig;
-  /** Out-of-line storage for large public SWM RDF literal object terms. Defaults on for local Oxigraph-backed dataDir stores. */
-  largeLiteralStorage?: LargeLiteralStorageConfig;
-  /** Out-of-Oxigraph immutable public SWM operation snapshots. Defaults on when dataDir is set. */
-  sharedMemoryPublicSnapshotStorage?: SharedMemoryPublicSnapshotStorageConfig;
-  /** When false, peer-connect sync skips SWM catch-up and relies on gossip for new SWM writes. */
-  syncSharedMemoryOnConnect?: boolean;
-  /** Node deployment tier: 'core' (cloud, relay) or 'edge' (personal, behind NAT). Default: 'edge'. */
-  nodeRole?: 'core' | 'edge';
-  /**
-   * Core Node relay-server capacity tuning. Forwarded straight into
-   * `DKGNodeConfig.relayServerCapacity` — sets the maximum number of
-   * simultaneous circuit-relay v2 reservations this node will hold.
-   * HOP/STOP stream caps and `connectionManager.maxConnections` are
-   * derived at a 1:2 ratio. Default 1024 when omitted on a Core Node;
-   * ignored on edge nodes (with a startup warning). Invalid values
-   * fall back to the default. See `packages/core/src/types.ts` for
-   * the full rationale + ulimit -n requirements.
-   */
-  relayServerCapacity?: number;
-  /**
-   * Number of relay reservations to hold in parallel when behind NAT.
-   * Forwarded straight into `DKGNodeConfig.relayReservationCount`.
-   * Default 3 when relayPeers are configured (N-2 tolerance to relay
-   * blackouts). Capped at 16. Ignored (with a warning when set
-   * explicitly) when no relayPeers are configured or when the node
-   * itself runs a relay server — relay servers don't multi-reserve
-   * through other relays. Invalid values fall back to the default
-   * with a warning. See `packages/core/src/types.ts` for the full
-   * rationale.
-   */
-  relayReservationCount?: number;
-  /**
-   * Path to the V10 Random Sampling prover write-ahead log. Core
-   * nodes only; ignored on edge. When omitted, an in-memory WAL is
-   * used (loses crash-recovery context on restart). Production
-   * deployments SHOULD set this to a persistent path under `dataDir`.
-   */
-  randomSamplingWalPath?: string;
-  /**
-   * If true (default on core), run the V10 Merkle proof build on a
-   * `worker_threads` worker so a 100k-leaf KC does not block the
-   * agent's event loop. Set false to keep the build on the main
-   * thread (test ergonomics, deterministic profiling).
-   */
-  randomSamplingUseWorkerThread?: boolean;
-  /**
-   * Tick cadence for the prover loop (ms). Default 30s. The
-   * orchestrator is idempotent under double-ticks; a tighter cadence
-   * is safe but yields more chain reads.
-   */
-  randomSamplingTickIntervalMs?: number;
-  /** Pre-built chain adapter (for testing). If provided, chainConfig is ignored. */
-  chainAdapter?: ChainAdapter;
-  /** Private key for the V10 ACK signer. When omitted, falls back to chainConfig.operationalKeys[0]. */
-  ackSignerKey?: string;
-  /**
-   * Publisher EVM address used when publish signing is delegated to the
-   * ChainAdapter instead of an in-process publisherPrivateKey.
-   */
-  publisherAddress?: string;
-  /**
-   * EVM chain configuration. If omitted, publishing won't have on-chain finality.
-   * `adminPrivateKey` is the private key for the profile admin wallet used
-   * only for profile/key-management transactions. Nodes may omit it when they
-   * already have an on-chain identity and do not need profile creation/key-repair
-   * privileges; profile mutation paths will fail fast if admin authority is
-   * required but unavailable.
-   * `operationalKeys` are the private keys for operational wallets.
-   * The first key is the primary signer (identity, staking); all are used
-   * round-robin for publish TXs to avoid nonce collisions on parallel publishes.
-   */
-  chainConfig?: {
-    rpcUrl: string;
-    hubAddress: string;
-    adminPrivateKey?: string;
-    operationalKeys: string[];
-    chainId?: string;
-  };
-  /** Cross-agent query access configuration. */
-  queryAccess?: QueryAccessConfig;
-  /** Additional context graph IDs to sync on peer connect (beyond system context graphs). */
-  syncContextGraphs?: string[];
-  /** TTL for shared memory data in milliseconds. Expired operations are periodically cleaned up. Default: 48 hours. Set to 0 to disable. */
-  sharedMemoryTtlMs?: number;
-  /** Durable local store for subscribed context-graph runtime state. */
-  contextGraphSubscriptionStore?: ContextGraphSubscriptionStore;
-  /** Durable local cache for nodes/agents known to be members of a context graph. */
-  contextGraphMembershipStore?: ContextGraphMembershipStore;
-}
-
-function normalizeAdapterPublisherAddress(value: unknown): string | undefined {
-  if (typeof value !== 'string' || !ethers.isAddress(value)) return undefined;
-  const address = ethers.getAddress(value);
-  return address === ethers.ZeroAddress ? undefined : address;
-}
-
-function recoverCompactSigner(message: Uint8Array, compact: { r: Uint8Array; vs: Uint8Array }): string {
-  const signature = ethers.Signature.from({
-    r: ethers.hexlify(compact.r),
-    yParityAndS: ethers.hexlify(compact.vs),
-  }).serialized;
-  return ethers.verifyMessage(message, signature);
-}
-
-function adapterOperationalPrivateKeyAddress(chain: ChainAdapter): string | undefined {
-  const operationalKeyGetter = (chain as unknown as { getOperationalPrivateKey?: () => unknown })
-    .getOperationalPrivateKey;
-  if (typeof operationalKeyGetter !== 'function') return undefined;
-  try {
-    const privateKey = operationalKeyGetter.call(chain);
-    return typeof privateKey === 'string' && privateKey.length > 0
-      ? privateKeyAddress(privateKey)
-      : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function adapterHasOperationalPrivateKey(chain: ChainAdapter): boolean {
-  return adapterOperationalPrivateKeyAddress(chain) !== undefined;
-}
-
-async function adapterGenericSignMessageMatchesAddress(
-  chain: ChainAdapter,
-  expectedAddress: string,
-): Promise<boolean> {
-  if (chain.chainId === 'none' || typeof chain.signMessage !== 'function') return false;
-  const normalized = normalizeAdapterPublisherAddress(expectedAddress);
-  if (!normalized) return false;
-
-  try {
-    const challenge = ethers.getBytes(ethers.id(`dkg-agent:chain-signer-probe:${normalized.toLowerCase()}`));
-    const compact = await chain.signMessage(challenge);
-    const recovered = normalizeAdapterPublisherAddress(recoverCompactSigner(challenge, compact));
-    return recovered?.toLowerCase() === normalized.toLowerCase();
-  } catch {
-    return false;
-  }
-}
-
-async function adapterAdvertisesPublisherSigner(chain: ChainAdapter): Promise<boolean> {
-  const hasReservingOrMultiAddressProbe = typeof chain.getAuthorizedPublisherAddress === 'function' ||
-    typeof (chain as unknown as { getSignerAddresses?: unknown }).getSignerAddresses === 'function';
-  const hasSingleAddressProbe = typeof (chain as unknown as { getSignerAddress?: unknown }).getSignerAddress === 'function' ||
-    Boolean(normalizeAdapterPublisherAddress((chain as unknown as { signerAddress?: unknown }).signerAddress));
-  const hasAnyAddressProbe = hasReservingOrMultiAddressProbe || hasSingleAddressProbe;
-
-  if (typeof chain.signMessageAs === 'function') return hasAnyAddressProbe;
-  if (adapterHasOperationalPrivateKey(chain)) return true;
-  if (typeof chain.signMessage !== 'function') return false;
-
-  const advertisedAddress = await inferAdapterPublisherAddress(chain, undefined, {
-    includeReservingPublisherProbe: false,
-    includeGenericSignMessageProbe: false,
-  });
-  if (!advertisedAddress) return false;
-  return adapterGenericSignMessageMatchesAddress(chain, advertisedAddress);
-}
-
-function privateKeyAddress(privateKey: string | undefined): string | undefined {
-  if (!privateKey) return undefined;
-  try {
-    return normalizeAdapterPublisherAddress(new ethers.Wallet(privateKey).address);
-  } catch {
-    return undefined;
-  }
-}
-
-async function inferAdapterPublisherAddress(
-  chain: ChainAdapter,
-  contextGraphId?: bigint,
-  options?: {
-    includeReservingPublisherProbe?: boolean;
-    includeGenericSignMessageProbe?: boolean;
-  },
-): Promise<string | undefined> {
-  if (
-    options?.includeReservingPublisherProbe !== false &&
-    contextGraphId !== undefined &&
-    typeof chain.getAuthorizedPublisherAddress === 'function'
-  ) {
-    try {
-      const address = normalizeAdapterPublisherAddress(
-        await chain.getAuthorizedPublisherAddress(contextGraphId),
-      );
-      if (address) return address;
-    } catch {
-      // Best-effort probe; the publisher resolver retries on later publish/update attempts.
-    }
-  }
-
-  const signerAddressGetter = (chain as unknown as { getSignerAddress?: () => unknown }).getSignerAddress;
-  if (typeof signerAddressGetter === 'function') {
-    try {
-      const address = normalizeAdapterPublisherAddress(
-        await Promise.resolve(signerAddressGetter.call(chain)),
-      );
-      if (address) return address;
-    } catch {
-      // Best-effort probe; fall through to broader adapter surfaces.
-    }
-  }
-
-  const signerAddresses = (chain as unknown as { getSignerAddresses?: () => unknown }).getSignerAddresses;
-  if (typeof signerAddresses === 'function') {
-    try {
-      const advertised = await Promise.resolve(signerAddresses.call(chain));
-      if (Array.isArray(advertised)) {
-        for (const value of advertised) {
-          const address = normalizeAdapterPublisherAddress(value);
-          if (address) return address;
-        }
-      }
-    } catch {
-      // Best-effort probe; the publisher resolver retries on later publish/update attempts.
-    }
-  }
-
-  const signerAddress = normalizeAdapterPublisherAddress(
-    (chain as unknown as { signerAddress?: unknown }).signerAddress,
-  );
-  if (signerAddress) return signerAddress;
-
-  const adapterOperationalAddress = adapterOperationalPrivateKeyAddress(chain);
-  if (adapterOperationalAddress) return adapterOperationalAddress;
-
-  if (options?.includeGenericSignMessageProbe === false) return undefined;
-  if (chain.chainId === 'none' || typeof chain.signMessage !== 'function') return undefined;
-
-  try {
-    const challenge = ethers.getBytes(ethers.id('dkg-agent:publisher-address-probe'));
-    const compact = await chain.signMessage(challenge);
-    return normalizeAdapterPublisherAddress(recoverCompactSigner(challenge, compact));
-  } catch {
-    return undefined;
-  }
-}
-
-function defaultLargeLiteralStorage(
-  dataDir: string,
-  config: LargeLiteralStorageConfig | undefined,
-): LargeLiteralStorageConfig {
-  return {
-    enabled: config?.enabled ?? true,
-    thresholdBytes: config?.thresholdBytes,
-    directory: config?.directory ?? join(dataDir, 'literal-blobs'),
-  };
-}
-
-function createPublicSnapshotStore(
-  dataDir: string | undefined,
-  config: SharedMemoryPublicSnapshotStorageConfig | undefined,
-): WorkspacePublicSnapshotStore | undefined {
-  if (!dataDir || config?.enabled === false) return undefined;
-  return new FileWorkspacePublicSnapshotStore(config?.directory ?? join(dataDir, 'swm-public-snapshots'));
-}
-
-function applyDefaultLargeLiteralStorage(
-  storeConfig: TripleStoreConfig,
-  dataDir: string | undefined,
-  config: LargeLiteralStorageConfig | undefined,
-): TripleStoreConfig {
-  if (storeConfig.largeLiteralStorage || !dataDir || !isLocalOxigraphConfig(storeConfig)) {
-    return storeConfig;
-  }
-
-  return {
-    ...storeConfig,
-    largeLiteralStorage: defaultLargeLiteralStorage(dataDir, config),
-  };
-}
-
-function isLocalOxigraphConfig(storeConfig: TripleStoreConfig): boolean {
-  return storeConfig.backend === 'oxigraph'
-    || storeConfig.backend === 'oxigraph-worker'
-    || storeConfig.backend === 'oxigraph-persistent';
-}
+export type {
+  CclPublishedResultEntry,
+  CclPublishedEvaluationRecord,
+  PublishOpts,
+  PublishAsyncOpts,
+  PublishAsyncQuadEnvelope,
+  PublishAsyncContent,
+  PeerHealth,
+  PeerConnectionSnapshot,
+  PeerDiagnostics,
+  ChatSendResult,
+  ContextGraphSub,
+  ContextGraphSubscriptionRecord,
+  ContextGraphSubscriptionStore,
+  ContextGraphMemberPrincipalType,
+  ContextGraphMemberStatus,
+  ContextGraphMembershipRecord,
+  ContextGraphMembershipStore,
+  DurableSyncDiagnostics,
+  SharedMemorySyncDiagnostics,
+  CatchupSyncDiagnostics,
+  DKGAgentConfig,
+};
 
 /**
  * High-level facade that ties together all DKG agent capabilities:
@@ -1183,30 +348,174 @@ export class DKGAgent {
   private finalizationHandler?: FinalizationHandler;
   private readonly log = new Logger('DKGAgent');
 
+  /**
+   * Per-cgId count of SWM gossip publish failures. Populated by
+   * publishWorkspaceGossip's catch block (rc.9 PR-A / SWM reliable
+   * fan-out plan, Step 0). Exposed via /api/slo `gossip.publishFailures`.
+   * Process-lifetime in-memory only — no persistence; on daemon
+   * restart counters reset. Sufficient for soak measurement; if
+   * operators ever need cross-restart aggregation, escalate to a
+   * SQLite table.
+   *
+   * Codex PR #570 R5 caught that the map would grow unbounded for any
+   * caller that fails publishes against arbitrary cgIds. To prevent
+   * runaway memory + a permanently bloated /api/slo payload, we cap
+   * the per-cgId set at SWM_GOSSIP_FAILURE_MAX_TRACKED_CGS. Overflow
+   * counters are summed into `swmGossipPublishFailuresOverflow` so the
+   * total stays accurate; a sticky `swmGossipPublishFailuresTruncated`
+   * flag tells operators that the per-cgId breakdown is partial.
+   */
+  private readonly swmGossipPublishFailures = new Map<string, number>();
+  private swmGossipPublishFailuresOverflow = 0;
+  private swmGossipPublishFailuresTruncated = false;
+  private static readonly SWM_GOSSIP_FAILURE_MAX_TRACKED_CGS = 1024;
+
+  /**
+   * Per-cgId, per-outcome counters for substrate-fan-out SWM
+   * shares (rc.9 PR-C / SWM reliable fan-out plan, Step 3).
+   * Populated by the {@link FanOutBookkeeper} the agent passes to
+   * `executeSubstrateFanOut` inside `publishWorkspaceGossip`.
+   * Same overflow-cap shape as `swmGossipPublishFailures` (Codex
+   * PR #570 R5/R8): the per-cgId map is hard-capped at
+   * {@link SWM_SUBSTRATE_FANOUT_MAX_TRACKED_CGS}; once exceeded,
+   * the cgId with the GLOBAL smallest total (delivered + queued +
+   * inFlight + failed) gets evicted into
+   * {@link swmSubstrateFanoutOverflow} so the grand total stays
+   * accurate. A sticky {@link swmSubstrateFanoutTruncated} flag
+   * tells `/api/slo` consumers that the per-cgId breakdown is
+   * partial.
+   *
+   * `delivered` is the only "good" outcome — `rejected` means
+   * the receiver explicitly dropped the share for a permanent
+   * reason (peer not in allowlist, bad signature, validation
+   * failed; PR-C codex R6 split this out from `delivered` so
+   * the metric doesn't overstate end-to-end success), `queued`
+   * means the substrate accepted the entry into the durable
+   * outbox (will retry; not a delivery confirmation), `inFlight`
+   * means another sender already owns the attempt, `failed` is
+   * the unrecoverable case. PR-D will add an ACK / watchdog that
+   * upgrades `queued → delivered` after the receiver confirms.
+   */
+  private readonly swmSubstrateFanoutDelivered = new Map<string, number>();
+  private readonly swmSubstrateFanoutRejected = new Map<string, number>();
+  /**
+   * rc.9 PR-D (codex follow-up from PR-G #G1): per-cgId count
+   * of substrate sends that returned the FANOUT_RESPONSE_RETRYABLE
+   * sentinel. NOT counted as delivered; SwmAckQuorum's watchdog
+   * fires substrate top-up.
+   */
+  private readonly swmSubstrateFanoutRetryable = new Map<string, number>();
+  private readonly swmSubstrateFanoutQueued = new Map<string, number>();
+  private readonly swmSubstrateFanoutInFlight = new Map<string, number>();
+  private readonly swmSubstrateFanoutFailed = new Map<string, number>();
+  private swmSubstrateFanoutOverflow = {
+    delivered: 0,
+    rejected: 0,
+    retryable: 0,
+    queued: 0,
+    inFlight: 0,
+    failed: 0,
+  };
+  private swmSubstrateFanoutTruncated = false;
+  private static readonly SWM_SUBSTRATE_FANOUT_MAX_TRACKED_CGS = 1024;
+
+  /**
+   * rc.9 PR-G codex follow-up #G2: in-flight substrate fan-out
+   * promises detached from the foreground `share()` call. Pre-PR-G
+   * `publishWorkspaceGossip` awaited both the substrate and
+   * gossip legs together, which meant one slow / offline
+   * allowlisted peer could hold `share()` open for up to
+   * `SWM_SUBSTRATE_FANOUT_TIMEOUT_MS` (15s) — a regression from
+   * the pre-rc.9 gossip-only path that returned in tens of ms.
+   *
+   * Now we fire substrate fan-out without awaiting it, await
+   * only the (fast) gossip publish, and return. The substrate
+   * promise still runs to completion in the background — its
+   * bookkeeper still updates the per-cgId counter maps as each
+   * peer's send completes, and its `.then()` still emits the
+   * fan-out INFO summary log. Failures (which executeSubstrateFanOut
+   * already swallows internally via Promise.allSettled) get a
+   * defensive `.catch()` to log any escaped error without
+   * crashing the unhandled-rejection handler.
+   *
+   * The Set holds the wrapped promises (after the bookkeeper +
+   * INFO-log chain is attached) so tests can drain them via
+   * `awaitInFlightSubstrateFanOuts()`. .finally() removes each
+   * promise on completion so the Set stays bounded by
+   * concurrency, not by cumulative shares.
+   */
+  private readonly inFlightSubstrateFanOuts = new Set<Promise<void>>();
+  /**
+   * Member-count cap above which public CGs fall back to gossip-
+   * only delivery (substrate fan-out is N-round-trips, so cost
+   * grows linearly in members; gossip cost is independent of N).
+   * Configurable via `DKG_SWM_SUBSTRATE_MAX_MEMBERS` env so soak
+   * runs can sweep the parameter without rebuilding. Curated CGs
+   * (`source: 'allowlist'`) are NOT truncated by this cap — see
+   * `chooseFanOutTier` jsdoc for the rationale.
+   */
+  private readonly swmSubstrateMaxMembers: number = (() => {
+    const raw = process.env.DKG_SWM_SUBSTRATE_MAX_MEMBERS;
+    if (!raw) return 100;
+    const n = Number.parseInt(raw, 10);
+    if (!Number.isFinite(n) || n < 0) return 100;
+    return n;
+  })();
+  /**
+   * Per-send substrate timeout for SWM update fan-out. Matches the
+   * 15s reliability SLO the messenger targets for chat. Kept as a
+   * named constant so the soak script can correlate /api/slo
+   * `protocols['/dkg/10.0.1/swm-update']` p99 latency against the
+   * timeout budget.
+   */
+  private static readonly SWM_SUBSTRATE_FANOUT_TIMEOUT_MS = 15_000;
+
+  /**
+   * Lazy CGMemberEnumerator — single instance per agent. Holds the
+   * 60s membership cache shared across every share to the same
+   * cgId within a window. See {@link getOrCreateCGMemberEnumerator}.
+   */
+  private cgMemberEnumerator?: CGMemberEnumerator;
+
+  /**
+   * Lazy SwmAckQuorum — single instance per agent. Tracks
+   * outstanding SWM shares to compute per-share delivery quorum
+   * across the gossip + substrate hybrid (rc.9 PR-D, RFC-003
+   * §4.2 + §5). Substrate-acked peers from PR-C's
+   * `executeSubstrateFanOut` pre-populate the `acked` set so the
+   * gossip-side `PROTOCOL_SWM_SHARE_ACK` arrivals fill in the
+   * remaining gap. See {@link getOrCreateSwmAckQuorum}.
+   */
+  private swmAckQuorum?: SwmAckQuorum;
+  private swmAckQuorumTimer: ReturnType<typeof setInterval> | null = null;
+  /**
+   * Period at which `SwmAckQuorum.tick()` runs. Picked to match
+   * RFC-003 §5.2 ("watchdog tick: 5s") — a finer cadence buys
+   * nothing useful (watchdogMs is 30s by default, deadlineHardMs
+   * is 5min, so 5s is already 6x and 60x resolution respectively).
+   */
+  private static readonly SWM_ACK_QUORUM_TICK_MS = 5_000;
+
   private messageHandler: MessageHandler | null = null;
   private chainPoller: ChainEventPoller | null = null;
   private swmCleanupTimer: ReturnType<typeof setInterval> | null = null;
+  // rc.9 PR-10: joinApprovalRetryQueue + joinApprovalRetryTimer
+  // deleted. The substrate's SQLite-backed ProtocolOutbox + its tick
+  // (`Messenger.processOutboxTick`) + opportunistic on-connect flush
+  // (`Messenger.processOutboxOnConnect`) replace the entire in-memory
+  // queue: persistence across restart, generic per-protocol coverage,
+  // identical backoff-ladder semantics. Operator-facing diagnostics
+  // (`listPendingJoinApprovalRetries`) are stubbed to [] until PR-12
+  // adds a per-protocol substrate-outbox view.
   /**
-   * Retry queue for `join-approved` notifications whose libp2p delivery
-   * failed. See `JOIN_APPROVAL_RETRY_TICK_MS` for the design rationale
-   * and `join-approval-retry-queue.ts` for the queue semantics. The
-   * queue is in-memory; daemon restarts drop pending entries. Operators
-   * can re-trigger manually via `POST /api/context-graph/{id}/redeliver-approval`
-   * and the invitee's own re-submission of the join request is also
-   * handled idempotently by `approveJoinRequest`.
+   * Periodic tick driving `Messenger.processOutboxTick` for the
+   * Universal Messenger substrate outbox (rc.9 PR-3+). The
+   * rc.8-era chat-specific `MessageOutbox` was deleted in PR-3 in
+   * favour of the substrate's SQLite-backed generic outbox; the
+   * substrate now carries every short-message protocol that opts
+   * onto `/dkg/10.0.x` with x ≥ 1.
    */
-  private readonly joinApprovalRetryQueue: JoinApprovalRetryQueue = new JoinApprovalRetryQueue();
-  private joinApprovalRetryTimer: ReturnType<typeof setInterval> | null = null;
-  /**
-   * Retry queue for outbound chat messages whose libp2p delivery
-   * failed. Symmetric to `joinApprovalRetryQueue` but invitee-side:
-   * the operator-typed text from `dkg_send_message` no longer drops
-   * silently when the recipient peer is briefly unreachable. See
-   * `message-outbox.ts` for the queue semantics and the chat thread
-   * with Lex on PR #510 for the joint design notes.
-   */
-  private readonly messageOutbox: MessageOutbox = new MessageOutbox();
-  private messageOutboxTimer: ReturnType<typeof setInterval> | null = null;
+  private messengerOutboxTimer: ReturnType<typeof setInterval> | null = null;
   private randomSamplingHandle: RandomSamplingHandle | null = null;
   private randomSamplingBindRetryTimer: ReturnType<typeof setInterval> | null = null;
   private randomSamplingBindRetryInFlight = false;
@@ -1680,14 +989,50 @@ export class DKGAgent {
     });
     this.peerResolver = peerResolver;
     this.router = new ProtocolRouter(this.node, { peerResolver });
-    this.messenger = new Messenger({ router: this.router });
+    // Default to in-memory substrate stores when no durable stores
+    // are supplied. The production daemon (`cli/src/daemon/
+    // lifecycle.ts`) always wires SQLite-backed stores against the
+    // shared DashboardDB; the in-memory fallback exists so that
+    // test fixtures and ad-hoc DKGAgent embedders get working
+    // reliability semantics without having to plumb a database.
+    // In-memory means: substrate works correctly within one daemon
+    // lifetime, but outbox entries don't survive restart.
+    // Production picks up the SQLite path via `messengerStores`.
+    const idempotencyStore =
+      this.config.messengerStores?.idempotencyStore ??
+      new InMemoryMessageIdempotencyStore();
+    const outboxStore =
+      this.config.messengerStores?.outboxStore ??
+      new InMemoryProtocolOutboxStore();
+    this.messenger = new Messenger({
+      router: this.router,
+      idempotencyStore,
+      outboxStore,
+      resolvePeer: async (peerId, { signal }) => {
+        const { peerIdFromString } = await import('@libp2p/peer-id');
+        const pid = peerIdFromString(peerId);
+        await this.node.libp2p.peerRouting.findPeer(pid, { signal });
+      },
+    });
     this.gossip = new GossipSubManager(this.node, this.eventBus);
     await this.loadSwmSenderKeyState();
     await this.rehydrateContextGraphSubscriptions();
 
-    // Register protocol handlers
+    // Register protocol handlers. PROTOCOL_ACCESS migrated onto the
+    // Universal Messenger substrate in rc.9 PR-8 — handler is
+    // registered via messenger.register so receiver-side dedup +
+    // envelope unwrap happen transparently. AccessHandler's contract
+    // is unchanged (it still receives the application bytes and
+    // returns the application response bytes); the substrate sits
+    // between it and the wire.
     const accessHandler = new AccessHandler(this.store, this.eventBus);
-    this.router.register(PROTOCOL_ACCESS, accessHandler.handler);
+    this.messenger.register(PROTOCOL_ACCESS, async (data, peerId) => {
+      const peerIdObj = {
+        toString: () => peerId,
+        toBytes: () => new Uint8Array(),
+      };
+      return accessHandler.handler(data, peerIdObj);
+    });
 
     const journal = this.config.dataDir ? new PublishJournal(this.config.dataDir) : undefined;
     const publishHandler = new PublishHandler(this.store, this.eventBus, { journal });
@@ -1708,10 +1053,91 @@ export class DKGAgent {
       this.log.warn(ctx, 'Query access policy is "public" — all remote queries will be accepted. Set queryAccess.defaultPolicy to "deny" for stricter security.');
     }
     const queryRemoteHandler = new QueryHandler(this.queryEngine, queryAccessConfig);
-    this.router.register(PROTOCOL_QUERY_REMOTE, queryRemoteHandler.handler);
-    this.router.register(PROTOCOL_SWM_SENDER_KEY, async (data, peerId) => {
-      return this.handleSwmSenderKeyPackage(data, peerId.toString());
+    // rc.9 PR-9: PROTOCOL_QUERY_REMOTE migrated onto the Universal
+    // Messenger substrate. Wire prefix bumped to /dkg/10.0.1/* (hard
+    // cutover; rc.8 ↔ rc.9 cross-version query stops working) so
+    // receiver-side dedup + envelope unwrap happen transparently.
+    // QueryHandler's contract is unchanged.
+    this.messenger.register(PROTOCOL_QUERY_REMOTE, async (data, peerId) => {
+      const peerIdObj = {
+        toString: () => peerId,
+        toBytes: () => new Uint8Array(),
+      };
+      return queryRemoteHandler.handler(data, peerIdObj);
     });
+    // PROTOCOL_SWM_SENDER_KEY migrated onto the substrate in rc.9 PR-8.
+    // messenger.register handles envelope unwrap + receiver dedup
+    // before the in-process handleSwmSenderKeyPackage call.
+    this.messenger.register(PROTOCOL_SWM_SENDER_KEY, async (data, peerId) => {
+      return this.handleSwmSenderKeyPackage(data, peerId);
+    });
+
+    // rc.9 PR-C (SWM reliable fan-out plan, Step 3): NEW protocol
+    // for point-to-point SWM share delivery as an alternative to
+    // GossipSub's best-effort mesh. The wire bytes are the same
+    // encoded workspace gossip message the gossip subscription
+    // delivers (see `encodeWorkspaceGossipMessage` in publisher),
+    // so we route them through the exact same in-process apply
+    // path — `SharedMemoryHandler.handle()`. That means PR-A's
+    // `seenShareOps` / `redundantApplies` accounting transparently
+    // covers double-delivery (gossip + substrate to the same
+    // peer): the second arrival just bumps `swm.redundantApplies`
+    // for that cgId. No separate dedup machinery needed here.
+    //
+    // PR-C codex R3 (receiver ACK semantics): the substrate
+    // response distinguishes three outcomes returned by
+    // `handle()`:
+    //   - `applied: true`         → empty Uint8Array ACK (success).
+    //   - `applied: false, retryable: false` → empty Uint8Array
+    //       (permanent rejection; nothing more for the sender to
+    //       do — bad signature, peer not in allowlist, CAS
+    //       conditions don't hold, etc. The sender drops the
+    //       share, matching pre-PR-C gossip semantics where the
+    //       same rejection would silently fall on the floor).
+    //   - `applied: false, retryable: true`  → THROW from the
+    //       handler so `messenger.sendReliable` reports the send
+    //       as failed and the substrate outbox keeps the share
+    //       queued for retry. Dominant production case: sender
+    //       key package for the current epoch hasn't arrived
+    //       yet; once it does, the same wire bytes apply on the
+    //       next retry.
+    // PR-D will replace the empty response with a structured ACK
+    // message (SwmShareAck) carrying the outcome explicitly, so
+    // the sender's quorum tracker can upgrade queued → delivered
+    // after receiver-side application succeeds (rather than the
+    // current proxy through substrate-level wire delivery).
+    this.messenger.register(PROTOCOL_SWM_UPDATE, async (data, peerId) => this.handleSwmUpdate(data, peerId));
+    // PR-C codex R7: tell Messenger that the 1-byte rejection
+    // sentinel is an APP-LEVEL rejection — Messenger's
+    // protocol-level `delivered` counter + latency histogram
+    // (`/api/slo`'s `protocols['/dkg/10.0.1/swm-update']`) should
+    // NOT bump for these responses. The application-level
+    // truth (delivered vs rejected) lives in
+    // `swm.substrateFanout.{delivered,rejected}`.
+    // rc.9 PR-D (codex follow-up from PR-G #G1): exclude BOTH
+    // the 0x01 (permanent) AND 0x02 (transient) sentinels from
+    // the protocol-level `delivered` count — neither maps to an
+    // application-level successful apply. The application-side
+    // truth (delivered / rejected / retryable) lives in
+    // `swm.substrateFanout.*`.
+    this.messenger.setResponseDeliveredClassifier(
+      PROTOCOL_SWM_UPDATE,
+      (response) => !(response.byteLength === 1 && (response[0] === 0x01 || response[0] === 0x02)),
+    );
+
+    // rc.9 PR-D: gossip-applied share acks. Receiver-only —
+    // senders don't read the response (returns empty Uint8Array
+    // as a no-op ACK at the wire level). The handler simply
+    // funnels arrivals into SwmAckQuorum.onAck which is the
+    // source of truth for delivery quorum tracking. Decoupled
+    // from the substrate path entirely: PROTOCOL_SWM_UPDATE's
+    // own response is the substrate-side ack and is consumed by
+    // PR-C's classifySendResult — it does NOT route through
+    // SwmAckQuorum.onAck (the substrate-delivered peers are
+    // pre-populated into the `acked` set at track time instead,
+    // which is structurally identical and avoids a second
+    // round-trip per peer).
+    this.messenger.register(PROTOCOL_SWM_SHARE_ACK, (data, fromPeerId) => this.handleSwmShareAck(data, fromPeerId));
 
     const effectiveRole = this.config.nodeRole ?? 'edge';
     const ackSignerCandidates = this.getACKSignerCandidateWallets(ctx);
@@ -1857,6 +1283,10 @@ export class DKGAgent {
                 if (storageACKFailoverInFlight) return;
                 storageACKFailoverInFlight = true;
                 storageACKProtocolRegistered = false;
+                // rc.9 PR-11: messenger.register stored the handler
+                // in the substrate's wrapper which delegates to
+                // router.register under the hood (see Messenger.register
+                // implementation), so router.unregister still removes it.
                 this.router.unregister(PROTOCOL_STORAGE_ACK);
                 this.log.warn(
                   attemptCtx,
@@ -1892,7 +1322,14 @@ export class DKGAgent {
                 );
               },
             }, this.eventBus);
-            this.router.register(PROTOCOL_STORAGE_ACK, ackHandler.handler);
+            // rc.9 PR-11: migrated onto the Universal Messenger
+            // substrate (wire prefix /dkg/10.0.1/storage-ack).
+            // messenger.register handles envelope decode + receiver
+            // dedup; ackHandler's signature stays the same.
+            this.messenger.register(PROTOCOL_STORAGE_ACK, async (data, peerIdStr) => {
+              const peerId = { toString: () => peerIdStr, toBytes: () => new Uint8Array() };
+              return ackHandler.handler(data, peerId);
+            });
             storageACKProtocolRegistered = true;
             this.clearStorageACKRegistrationRetry();
             this.log.info(
@@ -1985,7 +1422,13 @@ export class DKGAgent {
           return onChainId ? BigInt(onChainId) : null;
         },
       });
-      this.router.register(PROTOCOL_VERIFY_PROPOSAL, verifyHandler.handler);
+      // rc.9 PR-11: migrated onto the Universal Messenger substrate
+      // (wire prefix /dkg/10.0.1/verify-proposal). messenger.register
+      // wraps the handler with envelope decode + receiver dedup.
+      this.messenger.register(PROTOCOL_VERIFY_PROPOSAL, async (data, peerIdStr) => {
+        const peerId = { toString: () => peerIdStr, toBytes: () => new Uint8Array() };
+        return verifyHandler.handler(data, peerId);
+      });
       this.log.info(ctx, 'Registered VERIFY proposal handler');
     }
 
@@ -2017,13 +1460,47 @@ export class DKGAgent {
     // Set up messaging
     const x25519Priv = ed25519ToX25519Private(this.wallet.keypair.secretKey);
     this.messageHandler = new MessageHandler(
-      this.router,
       this.messenger,
       this.wallet.keypair,
       x25519Priv,
       this.node.peerId,
       this.eventBus,
     );
+
+    // Long-lived stream pooling for the chat protocol — opt-in via
+    // env. When `DKG_POOLED_MESSAGES=1`, ProtocolRouter wraps the
+    // chat protocol (`/dkg/10.0.1/message`) with a per-peer pooled
+    // wire variant (`/dkg/10.0.2/message`) that re-uses a single
+    // bidirectional yamux substream + framed multiplexing across
+    // every send to the same peer. Backward-compatible: peers that
+    // don't advertise the pooled wire variant fall back to one-shot
+    // automatically via multistream-select.
+    //
+    // Designed for the May 2026 multi-node soak finding: circuit-
+    // relay-v2 connections were being torn down between every send
+    // (200–365 ms per re-dial), dominating the latency tail (p95
+    // ~8.5s, p99 ~9.6s). Long-lived streams keep both the substream
+    // and the underlying relay connection warm via periodic PING
+    // frames. See packages/core/src/message-stream-pool.ts.
+    if (process.env.DKG_POOLED_MESSAGES === '1') {
+      this.router.enablePooling(PROTOCOL_MESSAGE, {
+        // Conservative keepalive: 10s is fast enough to keep
+        // relay-v2 reservations alive (default reservation TTL is
+        // far longer) and slow enough to add <0.1Hz of background
+        // traffic per peer.
+        keepaliveIntervalMs: 10_000,
+        // 5 min idle close: a peer the local node hasn't messaged in
+        // 5 min probably isn't going to message again soon; closing
+        // the stream releases the relay reservation slot, and the
+        // next send re-opens cheaply.
+        idleTimeoutMs: 5 * 60_000,
+      });
+      this.log.info(
+        ctx,
+        '[messenger] pooled wire variant /dkg/10.0.2/message enabled for ' +
+          'chat protocol (long-lived per-peer streams).',
+      );
+    }
 
     // Wire up pending chat handler
     if (this._pendingChatHandler) {
@@ -2045,8 +1522,14 @@ export class DKGAgent {
       }
     }
 
+    // rc.9 PR-E: bind to messenger.register so the /dkg/10.0.1/sync
+    // handler receives envelope-unwrapped payload + benefits from
+    // receiver-side idempotency dedup. Pre-PR-E this registered on
+    // the raw router, so the constant bump on its own (commit at
+    // PROTOCOL_SYNC declaration) gave the new protocol ID none of
+    // the substrate semantics — Codex review #569 caught the gap.
     registerSyncHandler({
-      router: this.router,
+      register: this.messenger.register.bind(this.messenger),
       protocolSync: PROTOCOL_SYNC,
       syncDeniedResponse: SYNC_DENIED_RESPONSE,
       syncPageSize: SYNC_PAGE_SIZE,
@@ -2062,7 +1545,12 @@ export class DKGAgent {
 
     // Join-request protocol: receives signed join requests forwarded by peers.
     // Stores them locally if this node is the curator; ACKs with "ok" or "error".
-    this.router.register(PROTOCOL_JOIN_REQUEST, async (data, peerId) => {
+    // rc.9 PR-10: migrated onto the Universal Messenger substrate
+    // (wire prefix bumped to /dkg/10.0.1/join-request). messenger.register
+    // wraps the handler with envelope-decode + receiver-side dedup;
+    // the application logic below is unchanged.
+    this.messenger.register(PROTOCOL_JOIN_REQUEST, async (data, peerIdStr) => {
+      const peerId = { toString: () => peerIdStr, toBytes: () => new Uint8Array() };
       try {
         const payload = JSON.parse(new TextDecoder().decode(data));
 
@@ -2362,17 +1850,11 @@ export class DKGAgent {
     this.node.libp2p.addEventListener('connection:open', (evt) => {
       const remotePeer = evt.detail.remotePeer.toString();
       if (remotePeer === this.node.libp2p.peerId.toString()) return;
-      // Opportunistically flush any pending join-approval retries that
-      // were waiting for this peer to come back. Fires BEFORE the
-      // catch-up cooldown returns so a flaky-relay reconnect that
-      // happens twice in quick succession still gets two retry passes,
-      // which matches the catch-up handler's own per-connection
-      // semantics. Failures inside are swallowed and logged by the
-      // helper — the connection:open listener must not throw.
-      this.processJoinApprovalRetryQueueOnConnect(remotePeer).catch((err: unknown) => {
-        const message = err instanceof Error ? err.message : String(err);
-        this.log.warn(ctx, `Opportunistic join-approval retry on connect failed for ${remotePeer}: ${message}`);
-      });
+      // rc.9 PR-10: the dedicated join-approval on-connect flush is
+      // gone. The substrate's `Messenger.processOutboxOnConnect` (a
+      // few lines further down in this handler) now covers join-
+      // approved retries too, since /dkg/10.0.1/join-request is now
+      // a substrate-managed protocol.
 
       // Reverse-path peerStore enrichment for inbound circuit-relay
       // connections, then the symmetric chat-outbox flush.
@@ -2410,11 +1892,16 @@ export class DKGAgent {
           const message = err instanceof Error ? err.message : String(err);
           this.log.warn(ctx, `Reverse-path peerStore enrichment failed for ${remotePeer}: ${message}`);
         }
+        // Universal Messenger substrate (rc.9 PR-2/PR-3): drain
+        // the generic outbox for this peer. Replaces the rc.8
+        // chat-specific outbox flush — the substrate now carries
+        // chat (PR-3) and will carry every other short-message
+        // protocol after PR-8..PR-11.
         try {
-          await this.processMessageOutboxOnConnect(remotePeer);
+          await this.messenger.processOutboxOnConnect(remotePeer);
         } catch (err: unknown) {
           const message = err instanceof Error ? err.message : String(err);
-          this.log.warn(ctx, `Opportunistic message-outbox retry on connect failed for ${remotePeer}: ${message}`);
+          this.log.warn(ctx, `Opportunistic Messenger-outbox retry on connect failed for ${remotePeer}: ${message}`);
         }
       })();
 
@@ -2528,17 +2015,11 @@ export class DKGAgent {
     }, SYNC_RECONCILER_INTERVAL_MS);
     if (this.syncReconcilerTimer.unref) this.syncReconcilerTimer.unref();
 
-    // Periodic tick for the join-approval retry queue. See
-    // JOIN_APPROVAL_RETRY_TICK_MS for the rationale (transient transport
-    // resets used to silently lose approvals; this is the safety-net
-    // retry loop that turns them into eventual successes).
-    this.joinApprovalRetryTimer = setInterval(() => {
-      this.processJoinApprovalRetryQueueTick().catch((err: unknown) => {
-        const message = err instanceof Error ? err.message : String(err);
-        this.log.warn(ctx, `Join-approval retry tick failed: ${message}`);
-      });
-    }, JOIN_APPROVAL_RETRY_TICK_MS);
-    if (this.joinApprovalRetryTimer.unref) this.joinApprovalRetryTimer.unref();
+    // rc.9 PR-10: dedicated join-approval retry tick removed. The
+    // substrate's Messenger.processOutboxTick (set up immediately
+    // below) now drives retries for /dkg/10.0.1/join-request the
+    // same way it does for chat — same cadence, same backoff ladder,
+    // persisted across daemon restart.
 
     // Periodic tick for the chat outbox retry queue. See
     // MESSAGE_OUTBOX_TICK_MS for the rationale (silent-drop on
@@ -2546,13 +2027,31 @@ export class DKGAgent {
     // `dkg_send_message`; this is the safety-net retry loop that turns
     // them into eventual successes, complemented by the
     // opportunistic-on-reconnect path in the connection:open listener).
-    this.messageOutboxTimer = setInterval(() => {
-      this.processMessageOutboxTick().catch((err: unknown) => {
-        const message = err instanceof Error ? err.message : String(err);
-        this.log.warn(ctx, `Message-outbox retry tick failed: ${message}`);
-      });
+    // Universal Messenger substrate retry tick (rc.9 PR-2 +
+    // PR-3). The rc.8 chat-specific tick was deleted in PR-3;
+    // this is now the only outbox tick — chat (PR-3) and every
+    // future migrated protocol drain on the same cadence so
+    // operators see a single "outbox tick" beat.
+    this.messengerOutboxTimer = setInterval(() => {
+      const now = Date.now();
+      this.messenger.processOutboxTick(now)
+        .catch((err: unknown) => {
+          const message = err instanceof Error ? err.message : String(err);
+          this.log.warn(ctx, `Messenger-outbox retry tick failed: ${message}`);
+        })
+        .finally(() => {
+          const dropped = this.messenger.dropExpiredOutbox(now);
+          for (const entry of dropped) {
+            this.log.warn(
+              ctx,
+              `Messenger-outbox dropped after ${entry.attempts} attempts: ` +
+                `peer=${entry.peer.slice(-8)} protocol=${entry.protocol} ` +
+                `msgId=${entry.messageId.slice(0, 8)} lastError="${entry.lastError}"`,
+            );
+          }
+        });
     }, MESSAGE_OUTBOX_TICK_MS);
-    if (this.messageOutboxTimer.unref) this.messageOutboxTimer.unref();
+    if (this.messengerOutboxTimer.unref) this.messengerOutboxTimer.unref();
 
     // Wire V10 Random Sampling prover. Edge nodes no-op. Core nodes with
     // transient identity/RPC startup failures retry in the background so
@@ -2928,7 +2427,68 @@ export class DKGAgent {
         }
         return this.getOrCreateSyncVerifyWorker().parseAndFilter(nquadsText, targetGraphUri, targetContextGraphId);
       },
-      send: (peerId, protocolId, data, sendTimeoutMs) => this.messenger.sendToPeer(peerId, protocolId, data, { timeoutMs: sendTimeoutMs }),
+      // rc.9 PR-E: route page fetches through `messenger.sendReliable`
+      // so the sync RPC gets the same ReliableEnvelope wrapping +
+      // outbox + (best-effort) sender-side idempotency cache as the
+      // other migrated protocols (chat, access, query-remote,
+      // storage-ack, verify-proposal, join-request). Pre-PR-E this
+      // used `messenger.sendToPeer` — the raw pass-through — which
+      // gave the new /dkg/10.0.1/sync wire ID none of the substrate
+      // semantics it was named for.
+      //
+      // Sync RPC is synchronous-by-contract: the caller needs the
+      // page bytes back NOW to advance pagination. `queued=true`
+      // means the request landed in the durable outbox but no
+      // response is available yet — the page-fetch layer treats
+      // that as a hard failure for this attempt; the surrounding
+      // `withRetry` (in sync-transport.ts) handles the retry +
+      // backoff loop.
+      //
+      // `messageId` is freshly minted on every retry attempt by
+      // sync-transport.ts (codex review on #569 follow-ups #1-#8
+      // explored stable messageIds and found that every variant
+      // either defeated dedup OR enabled silent replay of stale
+      // responses past sync's app-layer freshness gate; fresh
+      // per-attempt is the only design that holds under all timing
+      // scenarios). The trade-off is no sender-side dedup of
+      // retry-storms — the responder may run a SPARQL page query
+      // up to `syncPageRetryAttempts` times if all attempts
+      // succeed at the receiver but the responses are lost in
+      // transit. Bounded waste, app-layer idempotent, acceptable.
+      //
+      // Known residual concern (codex review #569 follow-up #10,
+      // deferred): recoverable sync send failures land in the
+      // Messenger's shared outbox with the default 24h max-age.
+      // Sync envelopes carry their own 90s freshness TTL
+      // (`SYNC_AUTH_MAX_AGE_MS`), so any outbox-delivered envelope
+      // past that window is denied by the receiver — wasted tick
+      // work, but NOT a correctness problem because fresh
+      // messageIds prevent the cached denial from ever replaying
+      // onto a different attempt. A per-call `maxAgeMs` was
+      // explored, but `Messenger.sendReliable`'s
+      // `enqueueFailure` path doesn't currently read
+      // `opts.maxAgeMs` (only the instance-wide setting at
+      // construction time), so wiring it through is out of scope
+      // for this PR. Also out of scope: extending
+      // `getPeerDiagnostics()` to include per-protocol queued
+      // counts so stuck sync catch-up is observable in the MCP
+      // health endpoint (today only `PROTOCOL_MESSAGE` queued
+      // entries are reported there). Both follow-ups are tracked
+      // for rc.10.
+      send: async (peerId, protocolId, data, sendTimeoutMs, messageId) => {
+        const result = await this.messenger.sendReliable(peerId, protocolId, data, {
+          timeoutMs: sendTimeoutMs,
+          messageId,
+        });
+        if (!result.delivered) {
+          throw new Error(
+            `Sync send to ${peerId} ${
+              result.queued ? 'queued (not synchronously deliverable)' : 'failed'
+            }: ${result.error ?? 'unknown'}`,
+          );
+        }
+        return result.response;
+      },
       logWarn: (opCtx, message) => this.log.warn(opCtx, message),
       logInfo: (opCtx, message) => this.log.info(opCtx, message),
       logDebug: (opCtx, message) => this.log.debug(opCtx, message),
@@ -4897,21 +4457,32 @@ export class DKGAgent {
     return this.messenger.sendToPeer(peerId, protocolId, data, opts);
   }
 
+  /**
+   * Send a chat message via the Universal Messenger substrate
+   * (rc.9 PR-3). `MessageHandler.sendChat` already wraps the
+   * encrypted AgentMessage in a ReliableEnvelope and routes
+   * through `messenger.sendReliable`, which:
+   *
+   *   * dedups sender-side on `(peer, protocol, messageId)`,
+   *   * encodes the envelope onto the wire,
+   *   * on recoverable failure enqueues to the SQLite outbox and
+   *     surfaces `{ queued: true, attempts, nextAttemptAtMs }`
+   *     so the MCP tool can show "queued, retrying" instead of an
+   *     opaque transport error,
+   *   * on success returns the response bytes.
+   *
+   * The chat-specific `MessageOutbox` from rc.8 has been deleted —
+   * the substrate's outbox is the single source of truth (durable
+   * across restarts, generic across protocols). Existing return
+   * shape is preserved so the MCP `dkg_send_message` tool and the
+   * `/api/chat` HTTP route continue to work unchanged.
+   */
   async sendChat(
     recipientPeerId: string,
     text: string,
     options: { contextGraphId?: string; messageId?: string } = {},
   ): Promise<ChatSendResult> {
     if (!this.messageHandler) throw new Error('Agent not started');
-    // Per-send unique id for the outbox key AND the on-wire receiver
-    // dedup key. Caller-supplied wins so a higher-level component
-    // (e.g. the MCP tool layer or a UI) that wants to correlate
-    // retries with its own bookkeeping can pass its own id. Default
-    // is a uuidv4 from `node:crypto`. The same id is forwarded into
-    // the encrypted payload via `messageHandler.sendChat`, where the
-    // receiver's `idx_chat_msgid` partial unique index uses it to
-    // drop the seq=13 class of multi-path-race duplicates from the
-    // May 2026 soak postmortem.
     const messageId = options.messageId ?? crypto.randomUUID();
     const result = await this.messageHandler.sendChat(recipientPeerId, text, {
       ...options,
@@ -4919,64 +4490,53 @@ export class DKGAgent {
     });
 
     if (result.delivered) {
-      // Successful delivery clears any pending retry from a prior
-      // failure for THIS exact `(recipient, messageId)`. A fresh
-      // first-attempt with a new messageId is a no-op here, which is
-      // the correct semantic — markDelivered returns false in that case
-      // and we ignore the bool.
-      this.messageOutbox.markDelivered(recipientPeerId, messageId);
       return { delivered: true, messageId };
     }
 
-    // First-attempt failure → enqueue for retry. The outbox keeps the
-    // payload, the periodic tick (`processMessageOutboxTick`) and the
-    // `connection:open` opportunistic flush (`processMessageOutboxOnConnect`)
-    // will both try to deliver it again until it succeeds or
-    // `maxAgeMs` runs out.
-    //
-    // The caller-visible return shape gains `queued`, `attempts`, and
-    // `nextAttemptAtMs` so the MCP `dkg_send_message` tool can surface
-    // "queued for retry" to the operator instead of an opaque error.
-    // `delivered` and `error` retain their existing semantics for
-    // backwards-compatibility with any pre-outbox caller.
-    const entry = this.messageOutbox.enqueueFailure(
-      {
-        recipientPeerId,
-        text,
-        contextGraphId: options.contextGraphId,
+    if (result.queued) {
+      const ctx = createOperationContext('system');
+      this.log.warn(
+        ctx,
+        `Substrate-outbox queued chat retry #${result.attempts} for ${recipientPeerId.slice(-8)} ` +
+          `(messageId=${messageId.slice(0, 8)}, ` +
+          `next attempt at ${new Date(result.nextAttemptAtMs ?? Date.now()).toISOString()}, ` +
+          `lastError=${result.error ?? 'unknown'}). ` +
+          `Will retry on the periodic tick (every ${MESSAGE_OUTBOX_TICK_MS / 1000}s) ` +
+          `or opportunistically on the next direct re-connect from the recipient's peer.`,
+      );
+      return {
+        delivered: false,
+        queued: true,
         messageId,
-      },
-      result.error ?? 'unknown',
-      Date.now(),
-    );
-    const ctx = createOperationContext('system');
-    this.log.warn(
-      ctx,
-      `Queued chat outbox retry #${entry.attempts} for ${recipientPeerId.slice(-8)} ` +
-        `(messageId=${messageId.slice(0, 8)}, ` +
-        `next attempt at ${new Date(entry.nextAttemptAt).toISOString()}, ` +
-        `lastError=${entry.lastError}). ` +
-        `Will retry on the periodic tick (every ${MESSAGE_OUTBOX_TICK_MS / 1000}s) ` +
-        `or opportunistically on the next direct re-connect from the recipient's peer.`,
-    );
+        attempts: result.attempts ?? 1,
+        nextAttemptAtMs: result.nextAttemptAtMs ?? Date.now(),
+        error: result.error,
+      };
+    }
+
     return {
       delivered: false,
-      queued: true,
       messageId,
-      attempts: entry.attempts,
-      nextAttemptAtMs: entry.nextAttemptAt,
       error: result.error,
     };
   }
 
   /**
-   * Snapshot of the chat outbox for diagnostics. Used by the
+   * Snapshot of the substrate outbox for diagnostics. Used by the
    * `GET /api/chat/outbox` route + the MCP `dkg_outbox_status` tool
-   * (if/when added) so operators can see what's pending after a long
-   * recipient outage.
+   * so operators can see what's pending after a long recipient
+   * outage. Returns the generic `ProtocolOutboxEntry` shape from
+   * the substrate (rc.9 PR-3) rather than the chat-specific
+   * `ChatOutboxRetryEntry` that rc.8 used — same fields are
+   * exposed (`peer`, `messageId`, `attempts`, `firstFailureAt`,
+   * `nextAttemptAt`, `lastError`), but filtered to the chat
+   * protocol so the existing operator surface still talks about
+   * "the chat outbox".
    */
-  listMessageOutbox(): ChatOutboxRetryEntry[] {
-    return this.messageOutbox.list();
+  listMessageOutbox(): ProtocolOutboxEntry[] {
+    return this.messenger
+      .listOutbox()
+      .filter((entry) => entry.protocol === PROTOCOL_MESSAGE);
   }
 
   onChat(handler: ChatHandler): void {
@@ -5570,12 +5130,24 @@ export class DKGAgent {
         `epoch=${state.epochId} membershipHash=${state.membershipHash} recipientKeyId=${recipient.recipientKeyId}`,
       );
       try {
-        const ackBytes = await this.messenger.sendToPeer(
+        // rc.9 PR-8: route through messenger.sendReliable so
+        // sender-side idempotency + durable outbox + retry-with-
+        // backoff cover this protocol the same way they cover chat.
+        // sendReliable can return queued=true on transient failures;
+        // SWM sender-key send treats that as a hard failure because
+        // the ACK is synchronous-by-contract (epoch setup blocks on
+        // it).
+        const sendResult = await this.messenger.sendReliable(
           recipient.peerId,
           PROTOCOL_SWM_SENDER_KEY,
           encodeSwmSenderKeyPackage(pkg),
         );
-        const ack = decodeSwmSenderKeyPackageAck(ackBytes);
+        if (!sendResult.delivered) {
+          throw new Error(
+            `SWM sender-key send queued (not synchronously deliverable): ${sendResult.error}`,
+          );
+        }
+        const ack = decodeSwmSenderKeyPackageAck(sendResult.response);
         if (
           ack.version !== SWM_SENDER_KEY_PACKAGE_VERSION ||
           ack.type !== SWM_SENDER_KEY_PACKAGE_ACK_TYPE ||
@@ -5637,6 +5209,91 @@ export class DKGAgent {
     const signature = await new ethers.Wallet(input.senderPrivateKey)
       .signMessage(computeSwmSenderKeyPackageAAD(pkg));
     return { ...pkg, signature: ethers.getBytes(signature) };
+  }
+
+  /**
+   * `PROTOCOL_SWM_UPDATE` substrate receiver. Routes substrate-
+   * delivered SWM share bytes through `SharedMemoryHandler.handle()`
+   * (the same in-process apply path the gossip subscription
+   * drives) and maps the {@link SharedMemoryApplyOutcome} to a
+   * substrate response:
+   *
+   *   - `applied: true`                          → empty Uint8Array
+   *      (ACK; sender records `delivered`).
+   *   - `applied: false, retryable: true`        → THROW so
+   *      `messenger.sendReliable` reports a stream error,
+   *      `isRecoverableSendError` classifies it as recoverable
+   *      (the libp2p stream-reset signature contains "closed" /
+   *      "reset"), and the substrate outbox keeps the share
+   *      queued for retry. Dominant case: sender key package
+   *      for the current epoch hasn't arrived yet — once it
+   *      does, the SAME wire bytes apply cleanly on retry.
+   *   - `applied: false, retryable: false`       → return
+   *      {@link FANOUT_RESPONSE_REJECTED} (1-byte sentinel
+   *      `0x01`). The sender's `classifySendResult` recognises
+   *      the sentinel and records the outcome as `rejected`,
+   *      NOT `delivered` (codex R6 on PR #576). The share is
+   *      dropped — retrying the same wire bytes would produce
+   *      the same permanent rejection (bad signature, peer not
+   *      in allowlist, validation failed, malformed protobuf).
+   *
+   * Extracted into a named method so the receiver contract can
+   * be unit-tested in isolation without spinning up a real
+   * Messenger registration.
+   */
+  private async handleSwmUpdate(data: Uint8Array, fromPeerId: string): Promise<Uint8Array> {
+    const wh = this.getOrCreateSharedMemoryHandler();
+    const outcome = await wh.handle(data, fromPeerId);
+    if (outcome.applied) {
+      // PR-H bug 2: emit SwmShareAck on substrate-applied shares
+      // too (not just gossip-applied). Pre-PR-H the sender only
+      // counted substrate-`delivered` peers via the in-process
+      // bookkeeper, which silently dropped any peer that started
+      // as `queued`/`inFlight` and was delivered LATER by the
+      // outbox — the outbox-completion callback isn't wired to
+      // the quorum, so a successful eventual delivery never
+      // called `onAck`. Those peers stayed pending until the
+      // watchdog fired a top-up they didn't need.
+      //
+      // The fix is symmetric: the receiver emits an ack on
+      // apply regardless of which transport delivered the
+      // share. The publisher's `SwmAckQuorum.onAck` is
+      // idempotent (no-op when the peer is already in the
+      // `acked` set), so a fast substrate-bookkeeper ack
+      // followed by a redundant SwmShareAck is harmless.
+      // Late deliveries now reach quorum the same way fast
+      // ones do.
+      this.maybeEmitSwmShareAck(outcome).catch(() => { /* swallowed; logged inside */ });
+      return new Uint8Array();
+    }
+    if (outcome.retryable) {
+      // rc.9 PR-D (codex follow-up from PR-G #G1): return the
+      // 0x02 sentinel instead of throwing. Pre-PR-D this branch
+      // threw, hoping libp2p would surface the handler abort as
+      // a recoverable stream-reset so `isRecoverableSendError`
+      // would re-queue into the outbox. That hope was fragile:
+      // the non-pooled ProtocolRouter aborts with the literal
+      // string "handler error", which doesn't match
+      // reset/closed/timeout — the share got DROPPED instead of
+      // queued. The sentinel sidesteps the abort path entirely:
+      // wire layer succeeds, sender's `classifySendResult`
+      // re-buckets 0x02 into the `retryable` outcome, the peer
+      // is NOT added to the pre-acked set, and SwmAckQuorum's
+      // watchdog fires substrate top-up at watchdogMs — giving
+      // upstream state time to converge before the retry.
+      this.log.info(
+        createOperationContext('share'),
+        `SWM substrate receiver transient rejection from ${fromPeerId} (PR-D watchdog will retry): ${outcome.reason}`,
+      );
+      return FANOUT_RESPONSE_RETRYABLE;
+    }
+    // Permanent rejection: signal via the 1-byte sentinel so the
+    // sender records `rejected` (not `delivered`) and stops here.
+    this.log.warn(
+      createOperationContext('share'),
+      `SWM substrate receiver dropping share from ${fromPeerId} (permanent rejection): ${outcome.reason}`,
+    );
+    return FANOUT_RESPONSE_REJECTED;
   }
 
   private async handleSwmSenderKeyPackage(data: Uint8Array, fromPeerId: string): Promise<Uint8Array> {
@@ -6035,14 +5692,377 @@ export class DKGAgent {
     message: Uint8Array,
     ctx: OperationContext,
     resolvedSigner?: (AgentKeyRecord & { privateKey: string }) | null,
+    /**
+     * Publisher-minted unique share ID. When provided, this share
+     * is registered with `SwmAckQuorum` after fan-out so the
+     * watchdog can fire substrate top-up if gossip-side acks
+     * don't reach quorum within `watchdogMs`. Omitted by
+     * callers that aren't tracking per-share delivery (legacy
+     * code paths and tests); the share still publishes
+     * identically — only the quorum tracking is skipped.
+     *
+     * The cheapest way to keep backward compat with the existing
+     * three call sites: ONLY `share()` provides this for now.
+     * `liftToShared` / `sharedMemoryCAS` can add it in a
+     * follow-up if/when soak shows their share types benefit
+     * from quorum tracking too.
+     */
+    shareOperationId?: string,
   ): Promise<void> {
     const topic = contextGraphWorkspaceTopic(contextGraphId);
     const wireMessage = await this.encodeWorkspaceGossipMessage(contextGraphId, message, resolvedSigner);
+
+    // rc.9 PR-C (SWM reliable fan-out plan, Step 3): tier-switch
+    // between substrate fan-out (point-to-point reliable via
+    // /dkg/10.0.1/swm-update) and GossipSub mesh based on CG
+    // membership shape. See `chooseFanOutTier` jsdoc + RFC-003 §6
+    // for the full policy. Both legs run when the policy says so
+    // — receiver-side dedup via SharedMemoryHandler's seenShareOps
+    // (PR-A) absorbs the resulting double-delivery cleanly and
+    // PR-A's `swm.redundantApplies` gauge makes it observable.
+    //
+    // Enumeration cost: at most one SPARQL query + one
+    // getSubscribers() call per CG per 60s window (enumerator
+    // caches). Independent of share rate.
+    //
+    // Errors are intentionally NOT re-thrown — share() in the
+    // caller already committed locally; transport failures here
+    // become observable via /api/slo (gossip.publishFailures +
+    // swm.substrateFanout) and the next sync-on-reconnect is the
+    // ultimate safety net.
+    //
+    // PR-C Codex R1 (planning-throw safety): `enumerate()` calls
+    // `getContextGraphAllowedPeers()` + `isPrivateContextGraph()`
+    // which both run SPARQL queries against `this.store`. A
+    // triple-store query failure (worker timeout, transient
+    // backend hiccup, corrupt graph) would otherwise bubble out
+    // of `publishWorkspaceGossip` and reject `share()` AFTER the
+    // local commit already succeeded — silently changing the
+    // pre-PR-C "share() never re-throws on transport failure"
+    // contract. Wrap planning in the same swallow-and-log shell
+    // as the gossip publish: on throw, fall back to a gossip-only
+    // plan (exactly the pre-PR-C behaviour for this share). The
+    // next share to the same cgId pays the SPARQL retry; the
+    // 60s enumeration cache means a one-off blip is recovered on
+    // the next call.
+    let plan: FanOutPlan;
+    try {
+      const enumeration = await this.getOrCreateCGMemberEnumerator().enumerate(contextGraphId);
+      plan = chooseFanOutTier({
+        enumeration,
+        maxSubstrateMembers: this.swmSubstrateMaxMembers,
+      });
+    } catch (err) {
+      const errClass = err instanceof Error
+        ? (err.name && err.name !== 'Error' ? err.name : err.constructor.name)
+        : typeof err;
+      const errMessage = err instanceof Error ? err.message : String(err);
+      this.log.warn(
+        ctx,
+        `SWM fan-out planning FAILED for cgId=${contextGraphId} errorClass="${errClass}" error="${errMessage}" — falling back to gossip-only (pre-PR-C behaviour)`,
+      );
+      plan = {
+        useSubstrate: false,
+        useGossip: true,
+        substrateMembers: [],
+        enumeratedMembers: [],
+        enumerationSource: 'none',
+        enumeratedCount: 0,
+      };
+    }
+
+    // rc.9 PR-D codex follow-up #D5 (rebased onto PR-G's G2
+    // detach): register the SwmAckQuorum tracker BEFORE
+    // substrate + gossip fire so a fast receiver's
+    // PROTOCOL_SWM_SHARE_ACK arrival lands against a known
+    // shareOperationId.
+    //
+    // Pre-D5 the track call ran AFTER `Promise.all([substrate,
+    // gossip])`, so a fast receiver could:
+    //   1. apply the gossip payload,
+    //   2. send PROTOCOL_SWM_SHARE_ACK back to us,
+    //   3. our handler runs `swmAckQuorum.onAck(opId, peer)`,
+    //   4. but the record doesn't exist yet → ack DROPPED,
+    //   5. quorum stays short → spurious watchdog top-up fires.
+    //
+    // PR-G's G2 detach made that race even tighter since
+    // share() now returns BEFORE substrate finishes. Tracking
+    // up-front side-steps both — the quorum record is alive
+    // the moment any wire packet leaves this method.
+    //
+    // We track with `preAckedFromSubstrate: []` and pipe
+    // substrate-delivered peers into the quorum via the
+    // bookkeeper instead — they go through `onAck()` exactly
+    // like gossip-applied receivers do, so the quorum
+    // arithmetic is identical regardless of which transport
+    // delivered first.
+    //
+    // Three preconditions for tracking:
+    //   1. Caller supplied a shareOperationId (`share()` does;
+    //      legacy callers don't).
+    //   2. The plan ran a gossip leg — SwmShareAck only covers
+    //      gossip-applied receivers. A hypothetical future
+    //      no-gossip / substrate-only plan would already cover
+    //      quorum via PR-C's substrate counters.
+    //   3. We have at least one ack-roundtrip-eligible peer
+    //      (`plan.substrateMembers.length > 0`). PR-K change:
+    //      pre-PR-K keyed off `plan.enumeratedMembers.length` to
+    //      keep the gossip-only-too-many-subscribers branch
+    //      tracking (PR-D #D3, codex RED #3 on PR #584), on the
+    //      assumption that any gossip-deliverable peer can ALSO
+    //      send a SwmShareAck back. The 2026-05-18 Miles<->Lex
+    //      soak refuted that assumption: when both peers have
+    //      only limited Circuit Relay V2 connectivity, gossip
+    //      delivery works (mesh-forwarded, no reservation
+    //      budget consumed) but `messenger.sendReliable` for
+    //      `/dkg/10.0.1/swm-share-ack` exhausts the limited
+    //      reservation just like substrate fan-out does — the
+    //      ack never returns. With ack-quorum keyed to
+    //      enumeratedMembers, those shares stayed `pending` for
+    //      the full deadlineHardMs window then hit
+    //      `deadlineExpired`, making `completed=0` indefinitely
+    //      even though delivery actually worked.
+    //
+    //      Switching to `substrateMembers` collapses the
+    //      visibility model: ack-quorum now tracks the subset
+    //      we can substrate-roundtrip-eligible with (= same
+    //      reachability the `isPeerDialable` predicate accepts
+    //      after PR-K's limited-circuit filter). For CGs whose
+    //      eligible set is empty (all subscribers behind
+    //      limited relays), we publish via gossip and skip
+    //      quorum tracking entirely — gossip is best-effort,
+    //      we don't pretend we can verify those deliveries.
+    //      Cross-peer SWM-inbox SPARQL remains the ground-truth
+    //      check.
+    const ackQuorumActive = !!shareOperationId
+      && plan.useGossip
+      && plan.substrateMembers.length > 0;
+    let trackedQuorum: SwmAckQuorum | null = null;
+    if (ackQuorumActive && shareOperationId) {
+      trackedQuorum = this.getOrCreateSwmAckQuorum();
+      trackedQuorum.track({
+        shareOperationId,
+        cgId: contextGraphId,
+        expectedMembers: plan.substrateMembers,
+        preAckedFromSubstrate: [],
+        payload: wireMessage,
+        enumerationSource: plan.enumerationSource,
+      });
+    }
+
+    // rc.9 PR-G #G2: substrate fan-out is detached from the
+    // share() critical path — share() awaits only the gossip
+    // publish (fast). Substrate runs in the background and
+    // feeds per-peer outcomes through the bookkeeper as each
+    // send completes. The bookkeeper does double duty:
+    //   1. Bump per-(cgId, outcome) counters for /api/slo.
+    //   2. (PR-D #D5) Feed substrate-`delivered` peers into
+    //      the quorum via onAck so they count toward the same
+    //      quorum target as gossip-side acks.
+    if (plan.useSubstrate) {
+      const baseBookkeeper = this.substrateFanoutBookkeeper();
+      // PR-J: capture per-peer outcomes for the optional detail
+      // line emitted when anything queues/fails/is rejected. Lets
+      // operators see WHICH peer is failing rather than just an
+      // aggregate "queued=4" with no way to attribute it.
+      const perPeerDetail: { peerId: string; outcome: string; error: string }[] = [];
+      const substratePromise: Promise<void> = (async () => {
+        try {
+          const substrateResult = await executeSubstrateFanOut({
+            contextGraphId,
+            protocolId: PROTOCOL_SWM_UPDATE,
+            payload: wireMessage,
+            members: plan.substrateMembers,
+            sendTimeoutMs: DKGAgent.SWM_SUBSTRATE_FANOUT_TIMEOUT_MS,
+            substrate: this.messenger,
+            bookkeeper: {
+              recordOutcome: (cgId, record) => {
+                if (
+                  trackedQuorum
+                  && shareOperationId
+                  && record.outcome === 'delivered'
+                ) {
+                  trackedQuorum.onAck(shareOperationId, record.peerId);
+                }
+                if (
+                  record.outcome === 'queued'
+                  || record.outcome === 'failed'
+                  || record.outcome === 'rejected'
+                  || record.outcome === 'retryable'
+                ) {
+                  perPeerDetail.push({
+                    peerId: record.peerId,
+                    outcome: record.outcome,
+                    error: record.error,
+                  });
+                }
+                baseBookkeeper.recordOutcome(cgId, record);
+              },
+            },
+          });
+          this.log.info(
+            ctx,
+            `SWM substrate fan-out cgId=${contextGraphId} source=${plan.enumerationSource} `
+            + `enumerated=${plan.enumeratedCount} `
+            + `attempted=${substrateResult.attempted} `
+            + `delivered=${substrateResult.delivered} rejected=${substrateResult.rejected} `
+            + `retryable=${substrateResult.retryable} `
+            + `queued=${substrateResult.queued} `
+            + `inFlight=${substrateResult.inFlight} failed=${substrateResult.failed} `
+            + `also_gossiped=${plan.useGossip}`,
+          );
+          // PR-J per-peer detail. Logged at WARN so it surfaces in
+          // operator dashboards that filter by level (the aggregate
+          // INFO line is the steady-state observability; this is the
+          // "something's wrong, here's who" follow-up).
+          if (perPeerDetail.length > 0) {
+            const summary = perPeerDetail
+              .map((d) => `${d.peerId.slice(-12)}=${d.outcome}` + (d.error ? `(${d.error.slice(0, 80)})` : ''))
+              .join(' ');
+            this.log.warn(
+              ctx,
+              `SWM substrate fan-out non-delivered detail cgId=${contextGraphId} peers=[${summary}]`,
+            );
+          }
+        } catch (err) {
+          const reason = err instanceof Error ? err.message : String(err);
+          this.log.warn(
+            ctx,
+            `SWM substrate fan-out cgId=${contextGraphId} threw out of allSettled boundary: ${reason}`,
+          );
+        }
+      })();
+      const tracked = substratePromise.finally(() => {
+        this.inFlightSubstrateFanOuts.delete(tracked);
+      });
+      this.inFlightSubstrateFanOuts.add(tracked);
+    }
+
+    if (plan.useGossip) {
+      await this.publishViaGossip(contextGraphId, topic, wireMessage, ctx);
+    }
+
+    if (!plan.useSubstrate && plan.enumerationSource === 'topic-subscribers' && plan.enumeratedCount > this.swmSubstrateMaxMembers) {
+      // Public CG above the threshold: gossip-only. Surface the
+      // gate trip at INFO so soak postmortems can correlate share
+      // delivery against transport choice without grepping for
+      // a separate decision log.
+      this.log.info(
+        ctx,
+        `SWM gossip-only (public CG above substrate cap) cgId=${contextGraphId} `
+        + `enumerated=${plan.enumeratedCount} cap=${this.swmSubstrateMaxMembers}`,
+      );
+    }
+  }
+
+  /**
+   * Pre-rc.9-PR-C body of `publishWorkspaceGossip` — the
+   * GossipSub publish + loud-fail counter from PR-A. Extracted
+   * into a named helper so the tier-switch above can call it
+   * conditionally (alongside or instead of the substrate fan-out
+   * leg) without duplicating the failure-bookkeeping logic.
+   */
+  private async publishViaGossip(
+    contextGraphId: string,
+    topic: string,
+    wireMessage: Uint8Array,
+    ctx: OperationContext,
+  ): Promise<void> {
     try {
       await this.gossip.publish(topic, wireMessage);
-    } catch {
-      this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
+    } catch (err) {
+      // rc.9 PR-A (SWM reliable fan-out plan, Step 0): replace the
+      // pre-rc.9 silent log.warn with a structured failure record so
+      // operators can see exactly which shares dropped. The local SWM
+      // commit already happened in the caller; on-connect-sync will
+      // catch remote peers up eventually. We intentionally do NOT
+      // re-throw — share() should still return success because the
+      // local commit succeeded — but the failure becomes observable
+      // via the new /api/slo `gossip.publishFailures` counter and the
+      // WARN log now carries the cgId + error class + error message
+      // for greppability (Codex PR #570 R6: previously the comment
+      // claimed "error class" but the implementation only logged
+      // err.message, collapsing distinct failure types).
+      // Codex PR #570 R12: source the running failure count from
+      // `recordSwmGossipPublishFailure`'s return value, not by
+      // re-reading the map. Pre-fix, when the just-incremented
+      // entry was itself the smallest and got evicted into the
+      // overflow bucket on the very same call, the subsequent
+      // map.get() returned 0 (or an older count for a recycled
+      // cgId), producing misleading `failureCountForCg=0` log lines
+      // for a cgId that had just failed. We now log the actual
+      // post-increment count, and flag the overflow case explicitly
+      // so operators can see why the per-cgId breakdown in
+      // /api/slo's `gossip.publishFailures` may not show this cgId.
+      const { failureCountForCg, evictedToOverflow } = this.recordSwmGossipPublishFailure(contextGraphId);
+      const errClass = err instanceof Error
+        ? (err.name && err.name !== 'Error' ? err.name : err.constructor.name)
+        : typeof err;
+      const errMessage = err instanceof Error ? err.message : String(err);
+      const overflowSuffix = evictedToOverflow
+        ? ' (evicted to overflow bucket; per-cgId breakdown truncated)'
+        : '';
+      this.log.warn(
+        ctx,
+        `Gossip publish FAILED for topic="${topic}" cgId=${contextGraphId} errorClass="${errClass}" error="${errMessage}" failureCountForCg=${failureCountForCg}${overflowSuffix}`,
+      );
     }
+  }
+
+  /**
+   * PR-A R5+R8: bookkeep a gossip-publish failure with a hard cap on
+   * the per-cgId tracking set. Once we cross
+   * SWM_GOSSIP_FAILURE_MAX_TRACKED_CGS distinct cgIds, the entry
+   * with the GLOBAL smallest count is evicted into
+   * `swmGossipPublishFailuresOverflow` and a sticky
+   * `swmGossipPublishFailuresTruncated` flag is set so /api/slo can
+   * surface "the per-cgId breakdown is partial; total count is still
+   * accurate". This keeps the most-failing cgIds visible
+   * (operationally what operators care about) while bounding memory /
+   * response size.
+   *
+   * Codex PR #570 R8: the eviction comparison MUST include the
+   * just-incremented entry. Otherwise a stream of one-off failures
+   * against fresh cgIds (count=1 each) would each evict an existing
+   * HOT cgId (count>=2), even though the new entry is by definition
+   * the smallest. With this comparison, when the new entry IS the
+   * smallest, it's the one that gets evicted into overflow — leaving
+   * the existing hot spots intact, exactly what operators want.
+   *
+   * Codex PR #570 R12: returns the post-increment count and an
+   * `evictedToOverflow` flag so the caller's WARN log accurately
+   * reflects what just happened without having to re-read the map
+   * (which is stale if THIS cgId was the one evicted into the
+   * overflow bucket on the same call).
+   */
+  private recordSwmGossipPublishFailure(contextGraphId: string): {
+    failureCountForCg: number;
+    evictedToOverflow: boolean;
+  } {
+    const next = (this.swmGossipPublishFailures.get(contextGraphId) ?? 0) + 1;
+    this.swmGossipPublishFailures.set(contextGraphId, next);
+    let evictedToOverflow = false;
+    if (this.swmGossipPublishFailures.size > DKGAgent.SWM_GOSSIP_FAILURE_MAX_TRACKED_CGS) {
+      let smallestCg: string | null = null;
+      let smallestCount = Infinity;
+      for (const [cg, count] of this.swmGossipPublishFailures) {
+        if (count < smallestCount) {
+          smallestCount = count;
+          smallestCg = cg;
+        }
+      }
+      if (smallestCg !== null) {
+        this.swmGossipPublishFailures.delete(smallestCg);
+        this.swmGossipPublishFailuresOverflow += smallestCount;
+        if (!this.swmGossipPublishFailuresTruncated) {
+          this.swmGossipPublishFailuresTruncated = true;
+        }
+        if (smallestCg === contextGraphId) {
+          evictedToOverflow = true;
+        }
+      }
+    }
+    return { failureCountForCg: next, evictedToOverflow };
   }
 
   async publishAsync(
@@ -6460,7 +6480,10 @@ export class DKGAgent {
       });
     }
     if (!opts?.localOnly) {
-      await this.publishWorkspaceGossip(contextGraphId, message, ctx, gossipSigner);
+      // rc.9 PR-D: pass shareOperationId so publishWorkspaceGossip
+      // can register the share with SwmAckQuorum and the watchdog
+      // can fire substrate top-up if gossip-side acks miss quorum.
+      await this.publishWorkspaceGossip(contextGraphId, message, ctx, gossipSigner, shareOperationId);
     }
     return { shareOperationId };
   }
@@ -6495,7 +6518,7 @@ export class DKGAgent {
       });
     }
     if (!opts?.localOnly) {
-      await this.publishWorkspaceGossip(contextGraphId, message, ctx, gossipSigner);
+      await this.publishWorkspaceGossip(contextGraphId, message, ctx, gossipSigner, shareOperationId);
     }
     return { shareOperationId };
   }
@@ -8034,11 +8057,64 @@ export class DKGAgent {
     this.log.info(ctx, `Remote query to ${peerId.slice(-8)} type=${request.lookupType}`);
 
     const payload = new TextEncoder().encode(JSON.stringify(fullRequest));
-    const responseBytes = await this.messenger.sendToPeer(peerId, PROTOCOL_QUERY_REMOTE, payload);
+    // rc.9 PR-9: route through messenger.sendReliable so the query
+    // gains sender-side idempotency + receiver-side dedup. SPARQL is
+    // idempotent at the app layer so on RESPONSE_GONE (duplicate-
+    // receive on a too-big-to-cache response) we transparently re-
+    // issue with a fresh messageId — the substrate makes this safe.
+    // queued returns are surfaced as a transport error: queryRemote
+    // is synchronous-by-design (callers await results), not a fire-
+    // and-forget enqueue.
+    const responseBytes = await this.sendQueryReliable(peerId, payload);
     const response = JSON.parse(new TextDecoder().decode(responseBytes)) as QueryResponse;
 
     this.log.info(ctx, `Remote query response: status=${response.status} resultCount=${response.resultCount}`);
     return response;
+  }
+
+  /**
+   * Send a query-remote payload via the Messenger substrate with
+   * built-in RESPONSE_GONE retry. SPARQL queries are app-layer
+   * idempotent — if the substrate replies with the RESPONSE_GONE
+   * sentinel (the original response was too big to inline-cache and
+   * we got a duplicate-receive), we re-issue with a fresh messageId
+   * and try again. Capped at 2 attempts so a peer that always blows
+   * the 256 KiB response cache surfaces as a hard error to the
+   * caller instead of looping forever.
+   *
+   * rc.9 PR-9.
+   */
+  private async sendQueryReliable(
+    peerId: string,
+    payload: Uint8Array,
+  ): Promise<Uint8Array> {
+    const RESPONSE_GONE = 'RESPONSE_GONE';
+    const MAX_ATTEMPTS = 2;
+    let lastErr: unknown;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      const sendResult = await this.messenger.sendReliable(
+        peerId,
+        PROTOCOL_QUERY_REMOTE,
+        payload,
+      );
+      if (!sendResult.delivered) {
+        throw new Error(
+          `query-remote send not synchronously deliverable (queued): ${sendResult.error}`,
+        );
+      }
+      const respText = new TextDecoder().decode(sendResult.response);
+      if (respText === RESPONSE_GONE) {
+        // Original response was mark-only; re-issue with a fresh
+        // messageId next loop iteration (sendReliable mints one
+        // when opts.messageId is absent).
+        lastErr = new Error('RESPONSE_GONE: original response too large to cache; retrying with fresh messageId');
+        continue;
+      }
+      return sendResult.response;
+    }
+    throw lastErr instanceof Error
+      ? lastErr
+      : new Error('query-remote exhausted RESPONSE_GONE retries');
   }
 
   /**
@@ -8184,8 +8260,164 @@ export class DKGAgent {
     this.gossip.subscribe(swmTopic);
     this.gossip.onMessage(swmTopic, async (_topic, data, from) => {
       const wh = this.getOrCreateSharedMemoryHandler();
-      await wh.handle(data, from);
+      const outcome = await wh.handle(data, from);
+      // Emit SwmShareAck on gossip-applied shares so the
+      // publisher's SwmAckQuorum can compute per-share delivery
+      // quorum. PR-H bug 2 made this symmetric — `handleSwmUpdate`
+      // emits one too on substrate-applied shares — so the
+      // quorum sees the same ack signal regardless of which
+      // transport delivered. A peer reachable via BOTH
+      // transports may produce two acks (substrate bookkeeper
+      // + this receiver ack); that's fine — `SwmAckQuorum.onAck`
+      // dedups via `record.acked.has(fromPeerId)`.
+      //
+      // Best-effort throughout: missing metadata fields, failed
+      // sendReliable, throws — all swallowed. The publisher's
+      // watchdog will fire substrate top-up if the ack count
+      // doesn't reach quorum, which makes the ack channel an
+      // opportunistic fast-path rather than a correctness
+      // requirement.
+      if (!outcome.applied) return;
+      this.maybeEmitSwmShareAck(outcome).catch(() => { /* swallowed; logged inside */ });
     });
+  }
+
+  /**
+   * Receiver handler for `PROTOCOL_SWM_SHARE_ACK`. Extracted into
+   * a named method (mirrors `handleSwmUpdate`'s shape) so the
+   * spoof-rejection contract from PR-D codex follow-up #D2 can
+   * be unit-tested in isolation without spinning up a real
+   * Messenger registration. Always returns `new Uint8Array()`
+   * at the wire level — senders don't read the response (acks
+   * use fire-and-forget `sendToPeer` per #D1).
+   */
+  private async handleSwmShareAck(data: Uint8Array, fromPeerId: string): Promise<Uint8Array> {
+    try {
+      const ack = decodeSwmShareAck(data);
+      // rc.9 PR-D codex follow-up #D2: authoritative ack identity
+      // is the libp2p-authenticated `fromPeerId`, NOT the
+      // self-asserted `ack.ackPeerId` in the protobuf body.
+      // Pre-D2 we trusted the body, which let any peer that had
+      // learned a `shareOperationId` spoof acks on behalf of
+      // other expected members — suppressing watchdog top-up
+      // for those members and degrading delivery quorum
+      // reliability. The body's `ackPeerId` is kept on the wire
+      // for forward-compat with a possible future relayed-ack
+      // path (where `fromPeerId` would be a relay node, not the
+      // original receiver), but in the current direct-Messenger
+      // world we reject any non-empty mismatch as either a
+      // misconfiguration or a spoof attempt.
+      if (ack.ackPeerId && ack.ackPeerId !== fromPeerId) {
+        this.log.warn(
+          createOperationContext('share', ack.shareOperationId),
+          `SWM share ack body/transport peerId mismatch — body=${ack.ackPeerId} transport=${fromPeerId} — dropping (potential spoof)`,
+        );
+        return new Uint8Array();
+      }
+      this.getOrCreateSwmAckQuorum().onAck(ack.shareOperationId, fromPeerId);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      this.log.warn(
+        createOperationContext('share'),
+        `SWM share ack decode failed from ${fromPeerId}: ${reason}`,
+      );
+    }
+    return new Uint8Array();
+  }
+
+  /**
+   * Test-only view onto {@link handleSwmShareAck} for the PR-D
+   * codex follow-up #D2 regression. Production traffic invokes
+   * the same handler via the `messenger.register()` callback
+   * registered in {@link initialize}; tests need the same
+   * arrow-function shape without having to intercept the
+   * register call (which happens before the test can install
+   * its messenger stub). Not part of the public API; method
+   * exists purely to make the spoof-rejection contract testable.
+   */
+  async getOrCreateSwmShareAckHandlerForTests(): Promise<(data: Uint8Array, from: string) => Promise<Uint8Array>> {
+    return (data, from) => this.handleSwmShareAck(data, from);
+  }
+
+  /**
+   * Test-only inspector for SwmAckQuorum's tracked-record
+   * snapshot, exposed so integration tests can assert on the
+   * `acked` / `expectedMembers` after driving ack arrivals
+   * through `handleSwmShareAck`. Returns `undefined` for
+   * unknown shareOperationIds (matches the underlying
+   * component's `inspect()` contract — once a record completes
+   * quorum or expires, it's reaped). Not part of the public
+   * API surface; the production caller talks to the quorum
+   * directly via `getOrCreateSwmAckQuorum()`.
+   */
+  getSwmAckQuorumRecordSnapshotForTests(shareOperationId: string): {
+    acked: readonly string[];
+    expectedMembers: readonly string[];
+    ackPct: number;
+  } | undefined {
+    return this.swmAckQuorum?.inspect(shareOperationId);
+  }
+
+  /**
+   * Best-effort send of `PROTOCOL_SWM_SHARE_ACK` to the share's
+   * publisher peer after a successful gossip-path apply.
+   * Extracted into a named method so the receiver contract can
+   * be unit-tested in isolation without spinning up a real
+   * GossipSub subscription.
+   *
+   * Self-acks are filtered: if the publisher peerId equals our
+   * own (we both published AND happened to receive our own
+   * gossip back via the mesh — rare but possible), we skip the
+   * send because the publisher-side track() already counts the
+   * local apply via the substrate pre-acked set / never enters
+   * the watchdog branch.
+   */
+  private async maybeEmitSwmShareAck(outcome: {
+    applied: true;
+    cgId?: string;
+    shareOperationId?: string;
+    publisherPeerId?: string;
+  }): Promise<void> {
+    const { shareOperationId, publisherPeerId } = outcome;
+    if (!shareOperationId || !publisherPeerId) return;
+    let selfPeerId: string;
+    try {
+      selfPeerId = this.peerId;
+    } catch {
+      return;
+    }
+    if (publisherPeerId === selfPeerId) return;
+
+    const ackBytes = encodeSwmShareAck({ shareOperationId, ackPeerId: selfPeerId });
+    // rc.9 PR-D codex follow-up #D1: use fire-and-forget
+    // `sendToPeer` instead of durable `sendReliable`. Pre-D1
+    // the ack went through the substrate outbox — but
+    // PROTOCOL_SWM_SHARE_ACK is a new rc.9-PR-D-only protocol,
+    // and during a rolling upgrade the publisher peer may not
+    // have it registered yet. A `sendReliable` to an
+    // unsupported protocol enqueues into the outbox and retries
+    // forever on protocol negotiation, accumulating a permanent
+    // queued row per received share. By contrast `sendToPeer`
+    // just delegates to `ProtocolRouter.send`: one network
+    // attempt, no envelope, no idempotency cache, no outbox row.
+    // On any failure (peer offline, protocol unsupported,
+    // stream reset) we WARN and drop — that's the right
+    // semantic anyway since acks are pure observability: a
+    // missed ack just means the watchdog will eventually fire
+    // substrate top-up, which the receiver dedups via
+    // `seenShareOps`. Losing an ack is recoverable; persisting
+    // a doomed retry forever is not.
+    try {
+      await this.messenger.sendToPeer(publisherPeerId, PROTOCOL_SWM_SHARE_ACK, ackBytes, {
+        timeoutMs: DKGAgent.SWM_SUBSTRATE_FANOUT_TIMEOUT_MS,
+      });
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      this.log.warn(
+        createOperationContext('share', shareOperationId),
+        `SWM share ack to ${publisherPeerId} failed (best-effort, watchdog will retry the share if quorum slips): ${reason}`,
+      );
+    }
   }
 
   /**
@@ -8237,6 +8469,634 @@ export class DKGAgent {
       });
     }
     return this.sharedMemoryHandler;
+  }
+
+  /**
+   * Lazy single-instance CGMemberEnumerator. The enumerator owns
+   * a 60s membership cache so a burst of N shares to the same CG
+   * within the window pays one SPARQL query + one
+   * `getSubscribers` call total, not N.
+   *
+   * Deps are bound here to:
+   *  - `getContextGraphAllowedPeers` — the same accessor
+   *    `authorizePrivateSyncRequest` uses; returns null for CGs
+   *    with no `DKG_ALLOWED_PEER` allowlist triples (curated by
+   *    peer-allowlist returns the array; agent-gated returns
+   *    null, then `isPrivateContextGraph` discriminates).
+   *  - `isPrivateContextGraph` — closes the agent-gated-CG
+   *    misclassification hole (codex review on #571 bug #1): a CG
+   *    private via `DKG_ALLOWED_AGENT` without `DKG_ALLOWED_PEER`
+   *    falls into `source: 'none'` (fail closed) instead of
+   *    falling through to live topic subscribers.
+   *  - `getTopicSubscribers` — wrapping `GossipSubManager`'s
+   *    PR-B-added subscriber-snapshot accessor (best-effort, may
+   *    lag by one heartbeat interval; documented in
+   *    GossipSubManager.getSubscribers).
+   *  - `getSelfPeerId` — never fan out to ourselves; the local apply
+   *    already happened in the caller of `publishWorkspaceGossip`.
+   *    Passed as a thunk (not the resolved string) because
+   *    `this.peerId` throws `DKGNode not started` before libp2p has
+   *    booted — eagerly capturing it here would break pre-start
+   *    `share()` callers (PR-C codex R8). The thunk lets any throw
+   *    bubble out of `enumerate()`, where the R1 try/catch in
+   *    `publishWorkspaceGossip` rescues into the gossip-only path.
+   */
+  /**
+   * Liveness predicate for the SUBSTRATE TARGET subset of an
+   * enumerated CG. Returns true iff `sendReliable` has a
+   * realistic chance of putting bytes on the wire to this peer.
+   *
+   * **Reachability MUST match what `sendReliable` actually tries**
+   * (codex RED #1 on #584). The router's send path consults
+   * `libp2p.getConnections` (live) AND `libp2p.peerStore` (cached
+   * addresses for dial). Filtering only on `getPeers()` would
+   * silently drop legitimate substrate targets that we briefly
+   * disconnected from but still have addresses for. We
+   * OR-combine the two sources to mirror the send path:
+   * connected OR peerStore-known.
+   *
+   * PeerId hygiene (codex RED #4 on #584 round 2):
+   * `libp2p.peerStore.get` requires a `PeerId` object, NOT a
+   * string. A type-cast call throws on the disconnected-but-
+   * known path in the real libp2p API, which would make this
+   * predicate return false for peers we DO have cached addresses
+   * for — dropping legitimate substrate targets. We parse with
+   * `peerIdFromString` first; on parse failure (malformed
+   * gossipsub entry) the catch returns false (safe drop).
+   *
+   * Pre-start: if libp2p hasn't booted, `getPeers()` throws →
+   * caught → return false → substrate target set is empty →
+   * substrate fan-out is a no-op (gossip still runs). The
+   * pre-start GossipSub subscriber list is normally empty anyway.
+   *
+   * Single source of truth: this method is consumed BOTH by the
+   * CG enumerator (filters topic-subscribers to populate
+   * `substrateEligibleMembers`) AND by `swmSubstrateTopUp` (re-
+   * filters watchdog missingPeers so the top-up doesn't keep
+   * blasting ghost peers that ackQuorum legitimately tracks but
+   * substrate can't reach). PR-J round 2 introduces the second
+   * use to close the watchdog leg of the same soak bug — without
+   * it, the queued counter would inflate once per 30s tick
+   * instead of once per share.
+   */
+  private async isPeerDialable(peerId: string): Promise<boolean> {
+    try {
+      // Test-stub fast path: short peer ids like '12D3KooWPeerA'
+      // don't pass libp2p's base58 length check in
+      // peerIdFromString. Preserve pre-PR-K
+      // "connected ⇒ dialable" semantics for them so existing
+      // integration tests that stub gossip subscribers with
+      // these short ids keep working.
+      const { peerIdFromString } = await import('@libp2p/peer-id');
+      let pid: ReturnType<typeof peerIdFromString>;
+      try {
+        pid = peerIdFromString(peerId);
+      } catch {
+        return this.node.libp2p.getPeers().some((p) => p.toString() === peerId);
+      }
+
+      // PR-K filter tier 1: connectivity. Reject peers whose
+      // ONLY live connections are *limited* Circuit Relay V2
+      // reservations. Limited reservations cap data (~128 KiB)
+      // and duration (~2 min) per stream; the aggressive
+      // per-cycle traffic of SWM substrate fan-out exhausts
+      // these caps almost immediately, after which every
+      // `messenger.sendReliable` hits a stream-reset / aborted
+      // error that `isRecoverableSendError` (correctly)
+      // classifies as recoverable. The outbox queues + retries
+      // forever, each retry eating fresh budget — a death
+      // spiral the 2026-05-18 Miles<->Lex soak surfaced as
+      // `swm-update: d=0 q=2031` after ~60 cycles, with both
+      // peers behind NAT and connected only via limited relays.
+      const conns = this.node.libp2p.getConnections(pid);
+      if (conns.length > 0) {
+        const hasNonLimited = conns.some((c) => !((c as unknown as { limits?: unknown }).limits));
+        if (!hasNonLimited) return false;
+      } else {
+        // No live connection — fall back to peerStore-cached
+        // addresses. A future dial may yield a non-limited
+        // path; if it doesn't, the next isPeerDialable call
+        // catches it via the connected branch above.
+        const peerForAddrs = await this.node.libp2p.peerStore.get(pid);
+        if ((peerForAddrs?.addresses?.length ?? 0) === 0) return false;
+      }
+
+      // PR-K filter tier 2: protocol support. The substrate
+      // fan-out specifically uses `/dkg/10.0.1/swm-update`. rc8
+      // beacon relays subscribe to gossip topics (they
+      // participate in the mesh-forwarding to deliver shares)
+      // but they don't register a handler for the rc9-only
+      // `/dkg/10.0.1/swm-update` protocol — sendReliable to
+      // them errors with `"Protocol selection failed - could
+      // not negotiate /dkg/10.0.1/swm-update"`, which
+      // `isRecoverableSendError` matches via the
+      // `"could not negotiate"` substring and queues for
+      // perpetual retry. (The classifier rule itself is
+      // correct for transient connection-warmup negotiation
+      // failures; pre-filtering at enumeration is the
+      // surgical fix.)
+      //
+      // Surfaced by the PR-K verification soak (2026-05-18,
+      // post-restart with PR-K tier 1 only): all 4 queued
+      // sends in the first cycle were to Hetzner beacon
+      // relays (12D3KooW...mkauaijsNrWw etc), each erroring
+      // with "could not negotiate". The relays themselves
+      // are direct TCP connections (NOT limited circuits) so
+      // tier 1 doesn't catch them.
+      try {
+        const peer = await this.node.libp2p.peerStore.get(pid);
+        const protos = peer?.protocols ?? [];
+        if (!protos.includes(PROTOCOL_SWM_UPDATE)) return false;
+      } catch {
+        // peerStore.get can throw on cold-cache miss for a
+        // peer we've just learned about via peer-exchange. Be
+        // conservative: if we can't confirm protocol support,
+        // skip substrate fan-out for them this round. The next
+        // isPeerDialable call (after the next peerStore
+        // identify exchange) will succeed if they speak it.
+        return false;
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private getOrCreateCGMemberEnumerator(): CGMemberEnumerator {
+    if (!this.cgMemberEnumerator) {
+      this.cgMemberEnumerator = createCGMemberEnumerator({
+        getContextGraphAllowedPeers: (cgId) => this.getContextGraphAllowedPeers(cgId),
+        isPrivateContextGraph: (cgId) => this.isPrivateContextGraph(cgId),
+        getTopicSubscribers: (topic) => this.gossip.getSubscribers(topic),
+        topicForCG: (cgId) => contextGraphWorkspaceTopic(cgId),
+        getSelfPeerId: () => this.peerId,
+        // PR-J liveness filter: marks the substrate target subset
+        // (NOT `members`/`enumeratedMembers`) so the substrate
+        // fan-out doesn't waste sends on peers we have no
+        // addressing for. Bug fix for the 2026-05-18 Miles<->Lex
+        // soak where 3-of-4 enumerated public-CG subscribers were
+        // ghosts (peer-exchange residue) and every substrate send
+        // queued forever.
+        //
+        // **Reachability MUST match what `sendReliable` actually
+        // tries** (codex RED #1 on #584 round 1). The router's
+        // send path consults libp2p.getConnections (live) AND
+        // libp2p.peerStore (cached addresses for dial). Filtering
+        // only on `getPeers()` would silently drop legitimate
+        // substrate targets that we briefly disconnected from but
+        // still have addresses for. We OR-combine the two sources
+        // to mirror the send path: connected OR peerStore-known.
+        //
+        // PeerId hygiene (codex RED #4 on #584 round 2):
+        // libp2p.peerStore.get requires a `PeerId` object, NOT a
+        // string. The pre-fix cast threw on the disconnected-but-
+        // known path (real libp2p) and silently returned `false`,
+        // making the filter drop legitimate subscribers that
+        // SHOULD have been dialable. Parse with `peerIdFromString`
+        // first; on parse failure (malformed gossipsub entry)
+        // fall through to the catch → false → safe drop.
+        //
+        // Pre-start: if libp2p hasn't booted, `getPeers()` throws
+        // → caught → return false → substrate target subset
+        // becomes empty for this CG → substrate fan-out is a
+        // no-op (gossip leg still runs). The pre-start GossipSub
+        // subscriber list is normally empty anyway since we
+        // haven't joined the mesh yet, so this path is rare in
+        // practice.
+        isPeerDialable: (peerId) => this.isPeerDialable(peerId),
+      });
+    }
+    return this.cgMemberEnumerator;
+  }
+
+  /**
+   * Lazy single-instance SwmAckQuorum (rc.9 PR-D). Constructs on
+   * first share through `publishWorkspaceGossip` and lives for
+   * the agent's lifetime. The 5s tick is wired here too — kept
+   * inside the lazy constructor so an agent that never shares
+   * pays no timer overhead.
+   *
+   * `substrateTopUp` callback is implemented inline against
+   * `messenger.sendReliable(PROTOCOL_SWM_UPDATE, ...)` so the
+   * watchdog re-fires through the exact same protocol PR-C's
+   * substrate fan-out uses — receivers (`handleSwmUpdate`) are
+   * idempotent on (cgId, shareOperationId), so a top-up arriving
+   * for a peer that already got the gossip-leg is dedup'd
+   * server-side via `seenShareOps`. Top-up uses Promise.allSettled
+   * (mirrors `executeSubstrateFanOut`) so one slow peer doesn't
+   * tail-latency the rest. Failures get swallowed — the substrate's
+   * own outbox handles retry.
+   */
+  /**
+   * Watchdog-driven substrate top-up for SwmAckQuorum.
+   * Extracted into a named method (mirrors PR-C's
+   * `handleSwmUpdate` / PR-D's `handleSwmShareAck` shape) so
+   * the per-outcome classification contract from rc.9 PR-D
+   * codex follow-up #D6 can be unit-tested in isolation
+   * without driving real-time watchdog ticks.
+   *
+   * Per-peer outcomes (classified via the SAME
+   * `classifySendResult` the main fan-out uses):
+   *   - `delivered` → call `swmAckQuorum.onAck` so the peer
+   *     counts toward quorum. PROTOCOL_SWM_UPDATE does NOT
+   *     emit `PROTOCOL_SWM_SHARE_ACK` (acks ride the gossip
+   *     applier path only), so without this call a successful
+   *     top-up never moves the peer into `acked` and the
+   *     share stays `pending` until `deadlineHardMs` even
+   *     after the actual delivery succeeded.
+   *   - `retryable` (0x02 sentinel) → no-op; next watchdog
+   *     tick fires another top-up, giving upstream state more
+   *     time to converge.
+   *   - `rejected` (0x01 sentinel) → no-op; receiver
+   *     permanently rejected the share, retrying won't help.
+   *     (Pre-PR-D receivers that fell back to the throw path
+   *     instead of the sentinel surface this as `failed`
+   *     here — also a no-op for the same reason.)
+   *   - `queued` / `inFlight` / `failed` → no-op; the
+   *     substrate outbox owns retry for these.
+   */
+  private async swmSubstrateTopUp({
+    shareOperationId, cgId, payload, missingPeers,
+  }: {
+    shareOperationId: string;
+    cgId: string;
+    payload: Uint8Array;
+    missingPeers: readonly string[];
+  }): Promise<void> {
+    const ctx = createOperationContext('share', shareOperationId);
+    // PR-J round 2: ackQuorum's `expectedMembers` is now the FULL
+    // enumerated set (gossip-eligible) per codex RED #3 on #584.
+    // `missingPeers` therefore includes peers ackQuorum tracks but
+    // substrate can't reach (ghost peer-exchange entries, or
+    // gossip-only-reachable peers without peerStore addresses).
+    // Re-apply the same dialability filter here so the watchdog
+    // top-up doesn't keep blasting wire sends that will queue
+    // forever — that would inflate the `swm.substrateFanout.queued`
+    // counter once per 30s tick for each ghost, recreating the
+    // soak bug at watchdog cadence instead of share cadence.
+    //
+    // Filtered-out peers remain in ackQuorum's expectedMembers and
+    // get reaped via deadlineHardMs if they never ack (a metric
+    // blip, not a wire-load regression — exactly the tradeoff
+    // codex called out as "noise we can't distinguish from
+    // legitimate churn" in the round-2 review).
+    const dialabilityChecks = await Promise.all(missingPeers.map((p) => this.isPeerDialable(p)));
+    const dialableMissingPeers = missingPeers.filter((_, idx) => dialabilityChecks[idx]);
+    if (dialableMissingPeers.length === 0) {
+      this.log.info(
+        ctx,
+        `SWM ack-quorum watchdog skipping substrate top-up for ${shareOperationId} (cg=${cgId}): no dialable peers among ${missingPeers.length} missing`,
+      );
+      return;
+    }
+    this.log.info(
+      ctx,
+      `SWM ack-quorum watchdog firing substrate top-up for ${shareOperationId} to ${dialableMissingPeers.length}/${missingPeers.length} dialable peer(s) (cg=${cgId})`,
+    );
+    // PR-H bug 1: route per-peer outcomes to the right ack-quorum
+    // hook. Pre-PR-H ignored outcomes entirely except for
+    // `delivered` → onAck; the watchdog couldn't fire again so
+    // shares sat until `deadlineHardMs` (5 min) on transient
+    // receiver errors.
+    //
+    // PR-H round 2 (codex feedback on #582):
+    //   - `delivered` → onAck (terminal-success; counts toward
+    //     quorum).
+    //   - `rejected` (0x01 sentinel) / `failed` → dropPeer; the
+    //     peer is permanently out of this share's recipient set.
+    //     Round 1 just no-op'd on these, which (combined with
+    //     rearmWatchdog rebuilding `missingPeers` from
+    //     `expectedMembers \ acked`) re-sent permanently-bad
+    //     payloads to the same rejected peer on every subsequent
+    //     watchdog tick. Dropping shrinks both the top-up target
+    //     set AND the quorum denominator, so a CG where 1/3
+    //     peers permanently rejects can still hit quorum on the
+    //     remaining 2 acks instead of waiting out
+    //     `deadlineHardMs`.
+    //   - `retryable` (0x02 sentinel) / `queued` / `inFlight` →
+    //     count toward `rearmCount`. `queued`/`inFlight` was a
+    //     round-1 gap: the substrate outbox owns wire retry for
+    //     those outcomes, but the outbox doesn't notify back
+    //     into the ack-quorum when its eventual retry hits the
+    //     receiver. The watchdog firing again at next interval
+    //     is the loosely-coupled signal — if the outbox
+    //     succeeded AND the receiver ack'd via gossip, quorum
+    //     already grew via `onAck` from the SWM_SHARE_ACK
+    //     receiver and the next watchdog will see the record
+    //     already completed (no-op). If still missing, the next
+    //     top-up cycle gives both the outbox and the receiver
+    //     another chance, bounded by `deadlineHardMs`. Open
+    //     follow-up: full outbox→quorum wiring (markDelivered
+    //     observer surfacing response sentinels back to the
+    //     publisher) would tighten this further; out of scope
+    //     for this PR — see PR #582 comments / follow-up issue.
+    let rearmCount = 0;
+    await Promise.allSettled(dialableMissingPeers.map(async (peerId: string) => {
+      try {
+        const sendResult = await this.messenger.sendReliable(peerId, PROTOCOL_SWM_UPDATE, payload, {
+          messageId: `swm-topup-${shareOperationId}-${peerId}`,
+          timeoutMs: DKGAgent.SWM_SUBSTRATE_FANOUT_TIMEOUT_MS,
+        });
+        const classified = classifySendResult(peerId, sendResult);
+        switch (classified.outcome) {
+          case 'delivered':
+            this.swmAckQuorum?.onAck(shareOperationId, peerId);
+            break;
+          case 'rejected':
+          case 'failed':
+            this.swmAckQuorum?.dropPeer(shareOperationId, peerId);
+            break;
+          case 'retryable':
+          case 'queued':
+          case 'inFlight':
+            rearmCount += 1;
+            break;
+        }
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        this.log.warn(ctx, `SWM top-up to ${peerId} failed: ${reason}`);
+      }
+    }));
+    if (rearmCount > 0) {
+      this.log.info(
+        ctx,
+        `SWM top-up saw ${rearmCount} non-terminal outcome(s) — re-arming watchdog`,
+      );
+      this.swmAckQuorum?.rearmWatchdog(shareOperationId);
+    }
+  }
+
+  /**
+   * Test-only view onto {@link swmSubstrateTopUp} for the
+   * PR-D codex follow-up #D6 regression. Bypasses the
+   * watchdog's setInterval so tests can pin the per-outcome
+   * classification → onAck wiring without real-time flake.
+   */
+  async invokeSwmSubstrateTopUpForTests(args: {
+    shareOperationId: string;
+    cgId: string;
+    payload: Uint8Array;
+    missingPeers: readonly string[];
+  }): Promise<void> {
+    return this.swmSubstrateTopUp(args);
+  }
+
+  private getOrCreateSwmAckQuorum(): SwmAckQuorum {
+    if (!this.swmAckQuorum) {
+      this.swmAckQuorum = createSwmAckQuorum({
+        substrateTopUp: (args) => this.swmSubstrateTopUp(args),
+        observers: {
+          onQuorumCompleted: (e: {
+            shareOperationId: string; cgId: string; ackedCount: number; expectedCount: number; ackPct: number;
+          }) => {
+            this.log.debug(
+              createOperationContext('share', e.shareOperationId),
+              `SWM share quorum reached cg=${e.cgId} acked=${e.ackedCount}/${e.expectedCount} (${(e.ackPct * 100).toFixed(1)}%)`,
+            );
+          },
+          onWatchdogFired: (e: {
+            shareOperationId: string; cgId: string; missingCount: number; expectedCount: number;
+          }) => {
+            this.log.warn(
+              createOperationContext('share', e.shareOperationId),
+              `SWM share watchdog fired cg=${e.cgId} missing=${e.missingCount}/${e.expectedCount}`,
+            );
+          },
+          onDeadlineExpired: (e: {
+            shareOperationId: string; cgId: string; ackedCount: number; expectedCount: number; ackPct: number;
+          }) => {
+            this.log.warn(
+              createOperationContext('share', e.shareOperationId),
+              `SWM share deadline expired cg=${e.cgId} acked=${e.ackedCount}/${e.expectedCount} (${(e.ackPct * 100).toFixed(1)}%) — offline peers will recover via runSyncOnConnect`,
+            );
+          },
+        },
+      });
+      this.swmAckQuorumTimer = setInterval(() => {
+        try {
+          this.swmAckQuorum?.tick();
+        } catch (err) {
+          // Defensive — tick() should not throw, but if some
+          // future observer/callback path breaks the contract we'd
+          // rather drop one tick than crash the daemon's tick loop.
+          const reason = err instanceof Error ? err.message : String(err);
+          this.log.warn(createOperationContext('system'), `SWM ack-quorum tick failed: ${reason}`);
+        }
+      }, DKGAgent.SWM_ACK_QUORUM_TICK_MS);
+      const t = this.swmAckQuorumTimer as { unref?: () => void };
+      if (typeof t.unref === 'function') t.unref();
+    }
+    return this.swmAckQuorum;
+  }
+
+  /**
+   * {@link FanOutBookkeeper} implementation backed by the four
+   * per-cgId outcome maps + the overflow buckets. Mirrors the
+   * Codex PR #570 R5/R8 shape from `recordSwmGossipPublishFailure`:
+   * once the per-cgId map crosses
+   * `SWM_SUBSTRATE_FANOUT_MAX_TRACKED_CGS`, the cgId with the
+   * GLOBAL smallest TOTAL count (summed across all four outcome
+   * maps) is evicted into the appropriate overflow bucket, so the
+   * grand total stays accurate and the hot cgIds stay visible.
+   *
+   * Returned as a single object literal (not a class) so the
+   * tier-switch in `publishWorkspaceGossip` can pass it inline
+   * to `executeSubstrateFanOut` without extra plumbing.
+   */
+  private substrateFanoutBookkeeper(): FanOutBookkeeper {
+    return {
+      recordOutcome: (cgId: string, record: FanOutPeerRecord) => {
+        this.recordSwmSubstrateFanoutOutcome(cgId, record);
+      },
+    };
+  }
+
+  /**
+   * Increment the per-(cgId, outcome) substrate counter and apply
+   * the overflow-cap eviction policy. Returns the post-increment
+   * count for the caller's WARN log on `failed` outcomes (parity
+   * with `recordSwmGossipPublishFailure`'s R12-fix shape).
+   */
+  private recordSwmSubstrateFanoutOutcome(cgId: string, record: FanOutPeerRecord): void {
+    const targetMap = this.substrateFanoutMapFor(record.outcome);
+    targetMap.set(cgId, (targetMap.get(cgId) ?? 0) + 1);
+    this.maybeEvictSubstrateFanoutCgId(cgId);
+  }
+
+  private substrateFanoutMapFor(outcome: FanOutPeerRecord['outcome']): Map<string, number> {
+    switch (outcome) {
+      case 'delivered': return this.swmSubstrateFanoutDelivered;
+      case 'rejected':  return this.swmSubstrateFanoutRejected;
+      case 'retryable': return this.swmSubstrateFanoutRetryable;
+      case 'queued':    return this.swmSubstrateFanoutQueued;
+      case 'inFlight':  return this.swmSubstrateFanoutInFlight;
+      case 'failed':    return this.swmSubstrateFanoutFailed;
+    }
+  }
+
+  private substrateFanoutTotalForCg(cgId: string): number {
+    return (this.swmSubstrateFanoutDelivered.get(cgId) ?? 0)
+      + (this.swmSubstrateFanoutRejected.get(cgId) ?? 0)
+      + (this.swmSubstrateFanoutRetryable.get(cgId) ?? 0)
+      + (this.swmSubstrateFanoutQueued.get(cgId) ?? 0)
+      + (this.swmSubstrateFanoutInFlight.get(cgId) ?? 0)
+      + (this.swmSubstrateFanoutFailed.get(cgId) ?? 0);
+  }
+
+  /**
+   * If the per-cgId tracking set is at or above
+   * `SWM_SUBSTRATE_FANOUT_MAX_TRACKED_CGS`, find the cgId with
+   * the smallest TOTAL count (summed across all four outcome
+   * maps), drain its four per-outcome counts into the overflow
+   * buckets, and delete it from the four maps. Setting the
+   * sticky `swmSubstrateFanoutTruncated` flag tells operators
+   * the per-cgId breakdown on /api/slo is partial.
+   *
+   * Eviction key = TOTAL across outcomes (not any single map),
+   * because the operator-facing definition of "hot cgId" is "lots
+   * of substrate activity", regardless of how it broke down. A
+   * cgId with 100 delivers is hotter than a cgId with 5 failed,
+   * even though `failed` is the more alarming outcome.
+   */
+  private maybeEvictSubstrateFanoutCgId(_justBumped: string): void {
+    // Use any of the five maps to count distinct tracked cgIds —
+    // they're populated together via `substrateFanoutTotalForCg`.
+    const distinctCgIds = new Set<string>([
+      ...this.swmSubstrateFanoutDelivered.keys(),
+      ...this.swmSubstrateFanoutRejected.keys(),
+      ...this.swmSubstrateFanoutRetryable.keys(),
+      ...this.swmSubstrateFanoutQueued.keys(),
+      ...this.swmSubstrateFanoutInFlight.keys(),
+      ...this.swmSubstrateFanoutFailed.keys(),
+    ]);
+    if (distinctCgIds.size <= DKGAgent.SWM_SUBSTRATE_FANOUT_MAX_TRACKED_CGS) return;
+
+    let smallestCg: string | null = null;
+    let smallestTotal = Infinity;
+    for (const cg of distinctCgIds) {
+      const total = this.substrateFanoutTotalForCg(cg);
+      if (total < smallestTotal) {
+        smallestTotal = total;
+        smallestCg = cg;
+      }
+    }
+    if (smallestCg === null) return;
+
+    this.swmSubstrateFanoutOverflow.delivered += this.swmSubstrateFanoutDelivered.get(smallestCg) ?? 0;
+    this.swmSubstrateFanoutOverflow.rejected  += this.swmSubstrateFanoutRejected.get(smallestCg) ?? 0;
+    this.swmSubstrateFanoutOverflow.retryable += this.swmSubstrateFanoutRetryable.get(smallestCg) ?? 0;
+    this.swmSubstrateFanoutOverflow.queued    += this.swmSubstrateFanoutQueued.get(smallestCg) ?? 0;
+    this.swmSubstrateFanoutOverflow.inFlight  += this.swmSubstrateFanoutInFlight.get(smallestCg) ?? 0;
+    this.swmSubstrateFanoutOverflow.failed    += this.swmSubstrateFanoutFailed.get(smallestCg) ?? 0;
+    this.swmSubstrateFanoutDelivered.delete(smallestCg);
+    this.swmSubstrateFanoutRejected.delete(smallestCg);
+    this.swmSubstrateFanoutRetryable.delete(smallestCg);
+    this.swmSubstrateFanoutQueued.delete(smallestCg);
+    this.swmSubstrateFanoutInFlight.delete(smallestCg);
+    this.swmSubstrateFanoutFailed.delete(smallestCg);
+    this.swmSubstrateFanoutTruncated = true;
+  }
+
+  /**
+   * Snapshot of the substrate fan-out counters for /api/slo.
+   * Same surface shape as `getSwmGossipStats()` / `getSwmHandlerStats()`
+   * — pure read, safe to call from a fresh daemon (returns
+   * pristine zeroes when no shares have fanned out yet). Pre-
+   * serializing into `Record<string, number>` happens via
+   * `Object.fromEntries` consistent with the existing /api/slo
+   * shape.
+   */
+  /**
+   * Test/observability helper (rc.9 PR-G codex follow-up #G2).
+   * Resolves once every detached substrate fan-out spawned by
+   * `publishWorkspaceGossip` has settled (counters updated,
+   * INFO log emitted). Production code DOES NOT need to call
+   * this — the whole point of the G2 detach is that share()
+   * returns without waiting on the substrate side. Used by
+   * integration tests that assert on substrate counters after
+   * a `share()` call, and by the soak script's shutdown flush
+   * so in-flight outbox writes don't get lost across process
+   * boundaries.
+   *
+   * Returns a snapshot of the in-flight set at call time, so a
+   * fan-out enqueued AFTER this call returns will not be awaited.
+   * Callers that need full drain should loop until
+   * `inFlightSubstrateFanOutCount() === 0`.
+   */
+  async awaitInFlightSubstrateFanOuts(): Promise<void> {
+    await Promise.allSettled([...this.inFlightSubstrateFanOuts]);
+  }
+
+  /** Sibling of {@link awaitInFlightSubstrateFanOuts} — gauge for diagnostic / drain-loop use. */
+  inFlightSubstrateFanOutCount(): number {
+    return this.inFlightSubstrateFanOuts.size;
+  }
+
+  getSwmSubstrateFanoutStats(): {
+    delivered: Record<string, number>;
+    rejected: Record<string, number>;
+    retryable: Record<string, number>;
+    queued: Record<string, number>;
+    inFlight: Record<string, number>;
+    failed: Record<string, number>;
+    overflow: { delivered: number; rejected: number; retryable: number; queued: number; inFlight: number; failed: number };
+    truncated: boolean;
+  } {
+    return {
+      delivered: Object.fromEntries(this.swmSubstrateFanoutDelivered),
+      rejected: Object.fromEntries(this.swmSubstrateFanoutRejected),
+      retryable: Object.fromEntries(this.swmSubstrateFanoutRetryable),
+      queued: Object.fromEntries(this.swmSubstrateFanoutQueued),
+      inFlight: Object.fromEntries(this.swmSubstrateFanoutInFlight),
+      failed: Object.fromEntries(this.swmSubstrateFanoutFailed),
+      overflow: {
+        delivered: this.swmSubstrateFanoutOverflow.delivered,
+        rejected: this.swmSubstrateFanoutOverflow.rejected,
+        retryable: this.swmSubstrateFanoutOverflow.retryable,
+        queued: this.swmSubstrateFanoutOverflow.queued,
+        inFlight: this.swmSubstrateFanoutOverflow.inFlight,
+        failed: this.swmSubstrateFanoutOverflow.failed,
+      },
+      truncated: this.swmSubstrateFanoutTruncated,
+    };
+  }
+
+  /**
+   * Snapshot of the SwmAckQuorum counters for /api/slo (rc.9
+   * PR-D). Returns pristine zeroes when the quorum tracker hasn't
+   * been lazy-constructed yet (no shares have been published, or
+   * none of them met the tracking preconditions in
+   * `publishWorkspaceGossip`). Safe to call from a fresh daemon.
+   *
+   * Counter semantics (cumulative since process start, except
+   * `pending` which is an instantaneous gauge):
+   *   - tracked          — every successful `track()` call
+   *   - completed        — records that reached quorumThreshold
+   *   - watchdogFired    — records where the watchdog fired
+   *                        substrate top-up (at most once per
+   *                        record)
+   *   - deadlineExpired  — records reaped at deadlineHardMs
+   *                        without reaching quorum
+   *   - pending          — currently tracked (not yet completed
+   *                        or expired)
+   *
+   * A healthy soak surfaces: `completed >> watchdogFired >>
+   * deadlineExpired`. A spike in `deadlineExpired` is the
+   * operator alarm — those peers will recover via
+   * `runSyncOnConnect` but the share's per-recipient delivery
+   * window blew past the 5min budget.
+   */
+  getSwmAckQuorumStats(): {
+    tracked: number;
+    completed: number;
+    watchdogFired: number;
+    deadlineExpired: number;
+    pending: number;
+  } {
+    if (!this.swmAckQuorum) {
+      return { tracked: 0, completed: 0, watchdogFired: 0, deadlineExpired: 0, pending: 0 };
+    }
+    return this.swmAckQuorum.stats();
   }
 
   private updateHandler?: UpdateHandler;
@@ -9763,31 +10623,20 @@ export class DKGAgent {
       'join-approval',
     );
     if (result.delivered) {
-      // Successful delivery clears any pending retry from a prior failure
-      // (covers the "transport hiccup recovered on its own before the
-      // periodic tick fired" case).
-      this.joinApprovalRetryQueue.markDelivered(contextGraphId, agentAddress);
       return;
     }
-    // The transport-level failure path (`no target peer` is also covered:
-    // the peer may show up in discovery later or the invitee may
-    // re-submit the join request, both of which we want to retry into).
-    const entry = this.joinApprovalRetryQueue.enqueueFailure(
-      contextGraphId,
-      agentAddress,
-      result.error ?? 'unknown',
-      Date.now(),
-    );
+    // rc.9 PR-10: the substrate outbox already holds the queued send
+    // (deliverPrivateJoinNotification → messenger.sendReliable enqueues
+    // on failure). All we do here is log the transport failure for
+    // operator visibility — the substrate's periodic tick + on-connect
+    // flush will drive the retry to eventual delivery without our help.
     const ctx = createOperationContext('system');
     this.log.warn(
       ctx,
-      `Queued join-approval retry #${entry.attempts} for "${contextGraphId}" → ${agentAddress} ` +
-        `(next attempt at ${new Date(entry.nextAttemptAt).toISOString()}, ` +
-        `firstFailureAt=${new Date(entry.firstFailureAt).toISOString()}, ` +
-        `lastError=${entry.lastError}). ` +
-        `Curator-local state is correct; retry will fire on the periodic tick ` +
-        `(every ${JOIN_APPROVAL_RETRY_TICK_MS / 1000}s) or opportunistically on the next ` +
-        `direct re-connect from the invitee's peer.`,
+      `join-approval for "${contextGraphId}" → ${agentAddress} not delivered now ` +
+        `(error=${result.error ?? 'unknown'}). Curator-local state is correct; ` +
+        `substrate outbox holds the queued send and will retry on its backoff ` +
+        `ladder + on the invitee's next reconnect.`,
     );
   }
 
@@ -9797,9 +10646,8 @@ export class DKGAgent {
    * delivery state matters.
    *
    * Used by:
-   *   * The periodic retry tick (`processJoinApprovalRetryQueueTick`),
-   *   * Opportunistic retry from `connection:open` when the invitee's peer
-   *     reconnects (`processJoinApprovalRetryQueueOnConnect`),
+   *   * The substrate's periodic outbox tick + on-connect flush —
+   *     both transparent to this call (rc.9 PR-10).
    *   * The operator-facing route `POST /api/context-graph/{id}/redeliver-approval`,
    *     which lets an operator (or peer agent via the chat MCP) re-poke
    *     the curator when the automated retry isn't fast enough.
@@ -9845,29 +10693,25 @@ export class DKGAgent {
       payload,
       'join-approval',
     );
+    // rc.9 PR-10: attempts counter is no longer tracked at the agent
+    // layer (substrate outbox owns retry bookkeeping per messageId).
+    // Operators interested in retry depth can read it from the
+    // substrate diagnostic surface that PR-12 adds. Until then we
+    // surface a flat attempts=1 for delivered / 0 for queued so the
+    // operator UI keeps rendering without code changes; the
+    // delivered/error pair is the source of truth.
     if (result.delivered) {
-      this.joinApprovalRetryQueue.markDelivered(contextGraphId, agentAddress);
-      const existing = this.joinApprovalRetryQueue.getEntry(contextGraphId, agentAddress);
       return {
         delivered: true,
         peerId: result.peerId,
-        // The successful attempt counts on top of any prior failures —
-        // `existing` is now undefined (we just removed it), so the caller
-        // sees attempts=N where N includes this final successful send.
-        attempts: (existing?.attempts ?? 0) + 1,
+        attempts: 1,
         error: null,
       };
     }
-    const entry = this.joinApprovalRetryQueue.enqueueFailure(
-      contextGraphId,
-      agentAddress,
-      result.error ?? 'unknown',
-      Date.now(),
-    );
     return {
       delivered: false,
       peerId: result.peerId,
-      attempts: entry.attempts,
+      attempts: 0,
       error: result.error,
     };
   }
@@ -9907,11 +10751,16 @@ export class DKGAgent {
   /**
    * Snapshot of pending approval retries. Surfaced via the daemon for
    * operator-facing diagnostics ("how many approvals are stuck on
-   * transport, and how long since the first failure?"). Returns a shallow
-   * copy so callers can't mutate queue internals.
+   * transport, and how long since the first failure?").
+   *
+   * rc.9 PR-10: stubbed to return [] until PR-12 rebuilds the
+   * operator diagnostic surface on top of the substrate outbox.
+   * The substrate is now driving retries durably and transparently;
+   * operators who need raw state can inspect the
+   * `protocol_outbox` SQLite table directly in the interim.
    */
   listPendingJoinApprovalRetries(): JoinApprovalRetryEntry[] {
-    return this.joinApprovalRetryQueue.list();
+    return [];
   }
 
   /**
@@ -9924,87 +10773,14 @@ export class DKGAgent {
    * entry is dropped to prevent the tick from spinning on a permanently
    * unrecoverable target.
    */
-  private async processJoinApprovalRetryQueueTick(): Promise<void> {
-    const ctx = createOperationContext('system');
-    const now = Date.now();
-    const expired = this.joinApprovalRetryQueue.dropExpired(now);
-    for (const entry of expired) {
-      this.log.warn(
-        ctx,
-        `Giving up on join-approval retry for "${entry.contextGraphId}" → ${entry.agentAddress} ` +
-          `after ${entry.attempts} attempt(s) over ${Math.round((now - entry.firstFailureAt) / 1000)}s; ` +
-          `lastError=${entry.lastError}. Operator can re-trigger via ` +
-          `POST /api/context-graph/{id}/redeliver-approval or have the joiner re-submit.`,
-      );
-    }
-    const due = this.joinApprovalRetryQueue.due(now);
-    if (due.length === 0) return;
-    this.log.info(
-      ctx,
-      `Processing ${due.length} due join-approval retry/retries`,
-    );
-    for (const entry of due) {
-      try {
-        await this.redeliverJoinApproval(entry.contextGraphId, entry.agentAddress);
-      } catch (err) {
-        const errMsg = err instanceof Error ? err.message : String(err);
-        // The most common cause is "approval row no longer exists" —
-        // e.g. operator manually rejected after queueing, or the CG was
-        // deleted. Drop the entry rather than spinning on it forever.
-        this.log.warn(
-          ctx,
-          `Dropping retry for "${entry.contextGraphId}" → ${entry.agentAddress}: ${errMsg}`,
-        );
-        this.joinApprovalRetryQueue.markDelivered(entry.contextGraphId, entry.agentAddress);
-      }
-    }
-  }
-
-  /**
-   * Opportunistic retry from a `connection:open` event. When the
-   * invitee's peer reconnects, the periodic tick may be up to
-   * `JOIN_APPROVAL_RETRY_TICK_MS` away — much longer than necessary now
-   * that the transport is back. Fire any matching retries immediately.
-   *
-   * Matching is done by re-resolving each entry's target peer via the
-   * agent registry / remembered peer map, which is the same logic
-   * `deliverPrivateJoinNotification` uses. Per-tick cost scales with
-   * queue size, which is bounded in practice (typically < 20 entries)
-   * so the linear scan is acceptable.
-   */
-  private async processJoinApprovalRetryQueueOnConnect(remotePeerId: string): Promise<void> {
-    if (this.joinApprovalRetryQueue.size() === 0) return;
-    const ctx = createOperationContext('system');
-    const candidates = this.joinApprovalRetryQueue.list();
-    for (const entry of candidates) {
-      // Cheap pre-filter: skip entries whose remembered origin peer is
-      // known and does NOT match the connecting peer. Falls through to
-      // a full redeliver attempt (which re-resolves via the registry)
-      // for entries with no remembered peer, so a NAT-flipped peer ID
-      // still benefits.
-      const originKey = `${entry.contextGraphId}::${entry.agentAddress.toLowerCase()}`;
-      const remembered = this.joinRequestOriginPeers.get(originKey);
-      if (remembered && remembered !== remotePeerId) continue;
-      try {
-        const result = await this.redeliverJoinApproval(entry.contextGraphId, entry.agentAddress);
-        if (result.delivered) {
-          this.log.info(
-            ctx,
-            `Opportunistic redelivery succeeded for "${entry.contextGraphId}" → ${entry.agentAddress} ` +
-              `on reconnect from ${remotePeerId} (attempts=${result.attempts})`,
-          );
-        }
-      } catch (err) {
-        // Same drop-on-permanent-failure semantics as the periodic tick.
-        const errMsg = err instanceof Error ? err.message : String(err);
-        this.log.warn(
-          ctx,
-          `Dropping retry for "${entry.contextGraphId}" → ${entry.agentAddress} on reconnect: ${errMsg}`,
-        );
-        this.joinApprovalRetryQueue.markDelivered(entry.contextGraphId, entry.agentAddress);
-      }
-    }
-  }
+  // rc.9 PR-10: processJoinApprovalRetryQueueTick +
+  // processJoinApprovalRetryQueueOnConnect deleted. The substrate's
+  // Messenger.processOutboxTick + Messenger.processOutboxOnConnect
+  // cover /dkg/10.0.1/join-request automatically (same as chat in
+  // PR-3), so the two dedicated processors are obsolete. Operator
+  // re-fire route POST /api/context-graph/{id}/redeliver-approval is
+  // unchanged — it still calls redeliverJoinApproval which now
+  // simply re-issues the substrate send.
 
   /**
    * Re-attempt delivery of a single chat outbox entry. Centralised so
@@ -10017,153 +10793,6 @@ export class DKGAgent {
    * re-enqueue or re-mint a fresh `messageId` — the outbox owns the
    * messageId for the lifetime of the entry.
    */
-  private async retryOutboxEntry(entry: ChatOutboxRetryEntry): Promise<void> {
-    if (!this.messageHandler) return;
-    const ctx = createOperationContext('system');
-    // Per-key inflight guard against the duplicate-delivery race
-    // identified by Lex review on PR #521: the periodic tick and the
-    // connection:open opportunistic flush can both call this method
-    // for the same entry, the first call's `messageHandler.sendChat`
-    // yields, and the second call observes the entry still in the
-    // queue (`markDelivered` hasn't fired yet) and starts a concurrent
-    // second send. Without this guard the recipient sees the message
-    // twice — real user-visible UX corruption. See `MessageOutbox.tryBeginAttempt`
-    // for the full rationale.
-    if (!this.messageOutbox.tryBeginAttempt(entry.recipientPeerId, entry.messageId)) {
-      return;
-    }
-    try {
-      // Defend against the stale-snapshot race surfaced by the 2026-05
-      // rc9 soak: `processMessageOutboxOnConnect` iterates a snapshot
-      // of `pendingFor(peer)`; during the iteration a concurrent flush
-      // (triggered by a sibling `connection:open` in a reconnect storm)
-      // may have already completed delivery for THIS entry and called
-      // `markDelivered`. The `tryBeginAttempt` guard above only blocks
-      // TRULY-PARALLEL races (the prior flush is still mid-send) — once
-      // the prior flush completes and releases the inflight slot, this
-      // stale-snapshot caller would otherwise fire a duplicate wire
-      // send and, if it fails, `enqueueFailure` resurrects the deleted
-      // entry with `attempts=1`, triggering the full retry storm
-      // again. Re-checking presence inside the inflight guard
-      // (single-threaded, no yield between the check and the send)
-      // makes the no-op exit atomic. Smoking gun: 29 queues -> 63
-      // succeeded events in the soak, attempts counters resetting
-      // to 1 after `markDelivered` had run.
-      if (!this.messageOutbox.hasEntry(entry.recipientPeerId, entry.messageId)) {
-        return;
-      }
-
-      // Forward the outbox entry's `messageId` into the wire-format
-      // payload so the receiver's `idx_chat_msgid` partial unique
-      // index recognises the retry as the same logical message as
-      // the original send (or any prior retry) and dedupes it. This
-      // is the receiver-side complement to the sender-side
-      // inflight-guard above: even if both layers race a duplicate
-      // through, the receiver still sees only one row in
-      // `chat_messages`.
-      const result = await this.messageHandler.sendChat(entry.recipientPeerId, entry.text, {
-        contextGraphId: entry.contextGraphId,
-        messageId: entry.messageId,
-      });
-      if (result.delivered) {
-        this.messageOutbox.markDelivered(entry.recipientPeerId, entry.messageId);
-        this.log.info(
-          ctx,
-          `Outbox redelivery succeeded for ${entry.recipientPeerId.slice(-8)} ` +
-            `(messageId=${entry.messageId.slice(0, 8)}) after ${entry.attempts + 1} attempt(s)`,
-        );
-        return;
-      }
-      const updated = this.messageOutbox.enqueueFailure(
-        {
-          recipientPeerId: entry.recipientPeerId,
-          text: entry.text,
-          contextGraphId: entry.contextGraphId,
-          messageId: entry.messageId,
-        },
-        result.error ?? 'unknown',
-        Date.now(),
-      );
-      this.log.warn(
-        ctx,
-        `Outbox redelivery still failing for ${entry.recipientPeerId.slice(-8)} ` +
-          `(messageId=${entry.messageId.slice(0, 8)}, attempts=${updated.attempts}, ` +
-          `next=${new Date(updated.nextAttemptAt).toISOString()}, error=${updated.lastError})`,
-      );
-    } finally {
-      this.messageOutbox.endAttempt(entry.recipientPeerId, entry.messageId);
-    }
-  }
-
-  /**
-   * Periodic tick: walk the chat outbox and re-attempt every entry
-   * whose `nextAttemptAt` has passed. Also evicts entries past their
-   * max age (24h since first failure by default). Symmetric to
-   * `processJoinApprovalRetryQueueTick` — same shape, different queue.
-   */
-  private async processMessageOutboxTick(): Promise<void> {
-    const ctx = createOperationContext('system');
-    const now = Date.now();
-    const expired = this.messageOutbox.dropExpired(now);
-    for (const entry of expired) {
-      this.log.warn(
-        ctx,
-        `Giving up on chat outbox delivery for ${entry.recipientPeerId.slice(-8)} ` +
-          `(messageId=${entry.messageId.slice(0, 8)}) after ${entry.attempts} attempt(s) ` +
-          `over ${Math.round((now - entry.firstFailureAt) / 1000)}s; lastError=${entry.lastError}. ` +
-          `Operator will need to re-send via dkg_send_message if they still want it delivered.`,
-      );
-    }
-    const due = this.messageOutbox.due(now);
-    if (due.length === 0) return;
-    this.log.info(ctx, `Processing ${due.length} due chat outbox retry/retries`);
-    for (const entry of due) {
-      try {
-        await this.retryOutboxEntry(entry);
-      } catch (err) {
-        const errMsg = err instanceof Error ? err.message : String(err);
-        // Defensive: retryOutboxEntry already routes failures through
-        // enqueueFailure, so a thrown error here is a bug-or-bypass
-        // case (e.g. messageHandler dropped during shutdown). Log and
-        // continue rather than letting the tick crash mid-batch.
-        this.log.warn(
-          ctx,
-          `Outbox retry for ${entry.recipientPeerId.slice(-8)} threw unexpectedly: ${errMsg}`,
-        );
-      }
-    }
-  }
-
-  /**
-   * Opportunistic retry from a `connection:open` event. When a peer
-   * we've been waiting on reconnects, fire any queued messages for
-   * that peer NOW — drains in send-order (FIFO by `firstFailureAt`).
-   * Symmetric to `processJoinApprovalRetryQueueOnConnect` and shares
-   * the same opportunistic-on-reconnect rationale: the periodic tick
-   * may be up to `MESSAGE_OUTBOX_TICK_MS` away, but the transport is
-   * back NOW, so retry NOW.
-   */
-  private async processMessageOutboxOnConnect(remotePeerId: string): Promise<void> {
-    const pending = this.messageOutbox.pendingFor(remotePeerId);
-    if (pending.length === 0) return;
-    const ctx = createOperationContext('system');
-    this.log.info(
-      ctx,
-      `Flushing ${pending.length} pending chat outbox entry/entries for ${remotePeerId.slice(-8)} on reconnect`,
-    );
-    for (const entry of pending) {
-      try {
-        await this.retryOutboxEntry(entry);
-      } catch (err) {
-        const errMsg = err instanceof Error ? err.message : String(err);
-        this.log.warn(
-          ctx,
-          `Outbox retry for ${remotePeerId.slice(-8)} on reconnect threw unexpectedly: ${errMsg}`,
-        );
-      }
-    }
-  }
-
   /**
    * "Reverse-path peerStore enrichment" — when an inbound circuit-relay
    * connection from peer P via relay R opens, echo the inbound circuit
@@ -10403,7 +11032,27 @@ export class DKGAgent {
     }
 
     try {
-      await this.messenger.sendToPeer(targetPeerId, PROTOCOL_JOIN_REQUEST, payloadBytes, { timeoutMs: JOIN_REQUEST_SEND_TIMEOUT_MS });
+      // rc.9 PR-10: send via the Universal Messenger substrate. If
+      // the substrate can't deliver synchronously it enqueues into
+      // the SQLite outbox and retries in the background — this
+      // replaces the deleted in-memory JoinApprovalRetryQueue. Note
+      // queued counts as "not delivered now" so the caller can log
+      // the failure; the substrate keeps trying behind the scenes.
+      const sendResult = await this.messenger.sendReliable(
+        targetPeerId,
+        PROTOCOL_JOIN_REQUEST,
+        payloadBytes,
+        { timeoutMs: JOIN_REQUEST_SEND_TIMEOUT_MS },
+      );
+      if (!sendResult.delivered) {
+        this.log.warn(
+          ctx,
+          `${label} for "${contextGraphId}" to ${agentAddress} (${targetPeerId}) ` +
+          `queued in substrate outbox: ${sendResult.error}. ` +
+          `Substrate will retry on its own backoff ladder + on the invitee's next reconnect.`,
+        );
+        return { delivered: false, peerId: targetPeerId, error: sendResult.error };
+      }
       this.log.info(ctx, `Delivered ${label} for "${contextGraphId}" to ${agentAddress} (${targetPeerId})`);
       // The join request is finalised now — forget the origin peer so
       // the map doesn't grow unbounded over the curator's lifetime.
@@ -10494,7 +11143,19 @@ export class DKGAgent {
     let curatorTargetedSuccess = false;
     if (curatorPeerId !== this.peerId) {
       try {
-        const responseBytes = await this.messenger.sendToPeer(curatorPeerId, PROTOCOL_JOIN_REQUEST, payloadBytes, { timeoutMs: JOIN_REQUEST_SEND_TIMEOUT_MS });
+        // rc.9 PR-10: substrate send. queued surfaces as a throw
+        // (matches the legacy sendToPeer ergonomics so the existing
+        // catch path with broadcast fallback still kicks in).
+        const sendResult = await this.messenger.sendReliable(
+          curatorPeerId,
+          PROTOCOL_JOIN_REQUEST,
+          payloadBytes,
+          { timeoutMs: JOIN_REQUEST_SEND_TIMEOUT_MS },
+        );
+        if (!sendResult.delivered) {
+          throw new Error(`substrate queued (transport): ${sendResult.error}`);
+        }
+        const responseBytes = sendResult.response;
         const response = JSON.parse(new TextDecoder().decode(responseBytes));
         if (response.ok) {
           // Only the explicit invite-supplied curator is recorded as a
@@ -10558,8 +11219,19 @@ export class DKGAgent {
       .filter((id) => id !== this.peerId && (!curatorTargetedSuccess || id !== curatorPeerId));
     const results = await Promise.allSettled(
       broadcastTargets.map(async (remotePeerId) => {
-        const responseBytes = await this.messenger.sendToPeer(remotePeerId, PROTOCOL_JOIN_REQUEST, payloadBytes, { timeoutMs: JOIN_REQUEST_SEND_TIMEOUT_MS });
-        const response = JSON.parse(new TextDecoder().decode(responseBytes));
+        // rc.9 PR-10: substrate send. Broadcast queued = treat as
+        // failure for this peer (the cohort is parallel — losing one
+        // peer is fine, the others may succeed).
+        const sendResult = await this.messenger.sendReliable(
+          remotePeerId,
+          PROTOCOL_JOIN_REQUEST,
+          payloadBytes,
+          { timeoutMs: JOIN_REQUEST_SEND_TIMEOUT_MS },
+        );
+        if (!sendResult.delivered) {
+          throw new Error(`substrate queued (transport): ${sendResult.error}`);
+        }
+        const response = JSON.parse(new TextDecoder().decode(sendResult.response));
         return { remotePeerId, response };
       }),
     );
@@ -11098,7 +11770,19 @@ export class DKGAgent {
 
     // 5. Collect M-of-N approvals
     const collector = new VerifyCollector({
-      sendP2P: async (peerId: string, protocol: string, data: Uint8Array) => this.messenger.sendToPeer(peerId, protocol, data),
+      // rc.9 PR-11: route through messenger.sendReliable so
+      // /dkg/10.0.1/verify-proposal gets envelope wrap + sender-side
+      // idempotency. App-level fan-out via VerifyCollector is
+      // unchanged; queued is treated as a per-peer failure (caller
+      // moves on to the next peer; substrate keeps the queued entry
+      // in the outbox for diagnostics).
+      sendP2P: async (peerId: string, protocol: string, data: Uint8Array) => {
+        const sendResult = await this.messenger.sendReliable(peerId, protocol, data);
+        if (!sendResult.delivered) {
+          throw new Error(`substrate queued (transport): ${sendResult.error}`);
+        }
+        return sendResult.response;
+      },
       getParticipantPeers: (cgId?: string) => {
         const allPeers = this.node.libp2p.getPeers().map(p => p.toString()).filter(id => id !== this.peerId);
         // TODO: Filter by on-chain participant set once getContextGraphParticipants() is available.
@@ -13470,6 +14154,93 @@ export class DKGAgent {
    * that motivated the `getConnectionsReturnsForPeer` field in
    * particular.
    */
+  /**
+   * Snapshot of the Universal Messenger SLO histogram + counters
+   * across every protocol the substrate has seen traffic for.
+   * Source of truth for the rc.9 ship-gate overnight soak; surfaced
+   * via the daemon's localhost-only `/api/slo` endpoint.
+   *
+   * rc.9 PR-12.
+   */
+  getMessengerSloStats(): Record<string, SloProtocolStats> {
+    return this.messenger.getSloStats();
+  }
+
+  /**
+   * Snapshot of SWM gossip publish health (rc.9 PR-A).
+   *
+   * - `publishFailures` — per-cgId count of failed `gossip.publish`
+   *   calls. Pre-rc.9 these were silently swallowed; now they're
+   *   observable. A non-zero counter is operator-visible signal that
+   *   some shares went out-of-band only (local commit succeeded;
+   *   catch-up will run via `runSyncOnConnect` on the next peer
+   *   reconnect).
+   * - `publishFailuresOverflow` — sum of counters that were evicted
+   *   when the per-cgId tracking set crossed
+   *   `SWM_GOSSIP_FAILURE_MAX_TRACKED_CGS`. Always 0 in normal
+   *   deployments; non-zero only when a caller has been failing
+   *   publishes against thousands of distinct cgIds.
+   * - `publishFailuresTruncated` — sticky boolean, true once the
+   *   eviction path has fired. Surfaced via Codex PR #570 R5 so
+   *   operators see that the per-cgId breakdown is partial even
+   *   though the grand total (`sum(publishFailures) +
+   *   publishFailuresOverflow`) is still accurate.
+   */
+  getSwmGossipStats(): {
+    publishFailures: Record<string, number>;
+    publishFailuresOverflow: number;
+    publishFailuresTruncated: boolean;
+  } {
+    return {
+      publishFailures: Object.fromEntries(this.swmGossipPublishFailures),
+      publishFailuresOverflow: this.swmGossipPublishFailuresOverflow,
+      publishFailuresTruncated: this.swmGossipPublishFailuresTruncated,
+    };
+  }
+
+  /**
+   * Snapshot of receiver-side SWM apply metrics (rc.9 PR-A).
+   *
+   * - `redundantApplies` — per-cgId count of times
+   *   `SharedMemoryHandler.handle()` saw a (cgId, shareOpId) it had
+   *   already processed within the TTL window AND both deliveries
+   *   actually applied to the store. Used to inform the rc10
+   *   decision on whether to add explicit receiver-side dedup
+   *   (Concern-2 in the SWM reliable fan-out plan).
+   * - `redundantAppliesLowerBound` — sticky boolean, true once the
+   *   seenShareOps cap eviction had to trim a still-live entry.
+   *   Surfaced via Codex PR #570 R3 so operators can detect that
+   *   the metric has become a lower bound (configured cap too small
+   *   for current throughput).
+   * - `redundantAppliesOverflow` — sum of per-cgId counters evicted
+   *   into the overflow bucket when the per-cgId map crossed the
+   *   `redundantAppliesMaxCgs` cap. Surfaced via Codex PR #570 R9.
+   * - `redundantAppliesTruncated` — sticky boolean, true once R9
+   *   eviction has fired. Means the per-cgId breakdown is partial;
+   *   the grand total is still `sum(redundantApplies) +
+   *   redundantAppliesOverflow`.
+   *
+   * Returns the empty / pristine snapshot if the SharedMemoryHandler
+   * has not yet been initialised (no SWM share has ever been received
+   * locally).
+   */
+  getSwmHandlerStats(): {
+    redundantApplies: Record<string, number>;
+    redundantAppliesLowerBound: boolean;
+    redundantAppliesOverflow: number;
+    redundantAppliesTruncated: boolean;
+  } {
+    if (!this.sharedMemoryHandler) {
+      return {
+        redundantApplies: {},
+        redundantAppliesLowerBound: false,
+        redundantAppliesOverflow: 0,
+        redundantAppliesTruncated: false,
+      };
+    }
+    return this.sharedMemoryHandler.getStats();
+  }
+
   async getPeerDiagnostics(peerId: string): Promise<PeerDiagnostics> {
     const libp2p = this.node.libp2p;
 
@@ -13496,7 +14267,7 @@ export class DKGAgent {
         getConnectionsReturnsForPeer: 0,
         connections: [],
         peerStore: null,
-        outbox: { pendingCount: 0, oldestFirstFailureAt: null, attempts: [] },
+        outbox: { pendingCount: 0, oldestFirstFailureAt: null, attempts: [], byProtocol: {} },
         health: null,
         protocols: [],
         syncCapable: false,
@@ -13505,13 +14276,13 @@ export class DKGAgent {
 
     // Canonical base58btc form. The MCP tool accepts both base58btc
     // and base32 peerId encodings; libp2p's connection/peerStore
-    // lookups normalise via `peerIdFromString`, but `messageOutbox`
-    // and `peerHealth` are keyed by the canonical string from
-    // `peerId.toString()` (see `pingPeers` which populates `peerHealth`
-    // via `peerId.toString()`). Looking them up with the raw input
-    // string would silently miss for base32 callers, returning
-    // `connected:true` alongside empty `outbox`/`health` — a real
-    // diagnostic-noise bug (PR #538 Codex review).
+    // lookups normalise via `peerIdFromString`, but the substrate
+    // outbox and `peerHealth` are keyed by the canonical string
+    // from `peerId.toString()` (see `pingPeers` which populates
+    // `peerHealth` via `peerId.toString()`). Looking them up with
+    // the raw input string would silently miss for base32 callers,
+    // returning `connected:true` alongside empty `outbox`/`health`
+    // — a real diagnostic-noise bug (PR #538 Codex review).
     const peerKey = pid.toString();
 
     let rawConns: LibConnection[] = [];
@@ -13571,15 +14342,57 @@ export class DKGAgent {
       peerStoreSnapshot = null;
     }
 
-    const pending = this.messageOutbox.pendingFor(peerKey);
+    // Substrate outbox snapshot for this peer.
+    //
+    // The top-level fields (`pendingCount`, `oldestFirstFailureAt`,
+    // `attempts`) summarise the CHAT protocol only — the rc.8
+    // diagnostics shape that `/api/peer-info` + MCP `dkg_peer_info`
+    // consumers expect. Preserved as-is so we don't break that
+    // contract.
+    //
+    // The new `byProtocol` map (rc.9 PR-E codex follow-up #10)
+    // surfaces queued entries for EVERY protocol the substrate
+    // now carries, including sync (`/dkg/10.0.1/sync` migrated in
+    // this PR). Without it, stuck sync catch-up — or any future
+    // protocol-substrate migration — would be invisible in
+    // operator diagnostics. Each per-protocol summary mirrors the
+    // top-level summary's shape so tooling can render a per-
+    // protocol view with zero extra plumbing.
+    const peerEntries = this.messenger
+      .listOutbox()
+      .filter((entry) => entry.peer === peerKey)
+      .sort((a, b) => a.firstFailureAt - b.firstFailureAt);
+    const chatPending = peerEntries.filter((entry) => entry.protocol === PROTOCOL_MESSAGE);
+    const byProtocol: Record<string, { pendingCount: number; oldestFirstFailureAt: number | null; attempts: number[] }> = {};
+    for (const entry of peerEntries) {
+      const bucket = byProtocol[entry.protocol] ?? {
+        pendingCount: 0,
+        oldestFirstFailureAt: null,
+        attempts: [],
+      };
+      bucket.pendingCount += 1;
+      bucket.oldestFirstFailureAt =
+        bucket.oldestFirstFailureAt === null
+          ? entry.firstFailureAt
+          : Math.min(bucket.oldestFirstFailureAt, entry.firstFailureAt);
+      bucket.attempts.push(entry.attempts);
+      byProtocol[entry.protocol] = bucket;
+    }
     const outbox = {
-      pendingCount: pending.length,
-      oldestFirstFailureAt: pending.length > 0 ? pending[0].firstFailureAt : null,
-      attempts: pending.map((e) => e.attempts),
+      pendingCount: chatPending.length,
+      oldestFirstFailureAt: chatPending.length > 0 ? chatPending[0].firstFailureAt : null,
+      attempts: chatPending.map((e) => e.attempts),
+      byProtocol,
     };
 
     const protocols = peerStoreSnapshot?.protocols ?? [];
-    const syncCapable = protocols.includes('/dkg/10.0.0/sync');
+    // rc.9 PR-E: tracks the active `PROTOCOL_SYNC` constant rather
+    // than the literal `/dkg/10.0.0/sync`, so a node running rc.9+
+    // (advertising `/dkg/10.0.1/sync`) is correctly reported as
+    // sync-capable. Hard cutover — legacy `/dkg/10.0.0/sync`-only
+    // peers are no longer compatible and intentionally report
+    // syncCapable=false.
+    const syncCapable = protocols.includes(PROTOCOL_SYNC);
 
     return {
       peerId: peerKey,
@@ -13906,24 +14719,69 @@ export class DKGAgent {
       clearInterval(this.syncReconcilerTimer);
       this.syncReconcilerTimer = null;
     }
-    if (this.joinApprovalRetryTimer) {
-      clearInterval(this.joinApprovalRetryTimer);
-      this.joinApprovalRetryTimer = null;
+    if (this.messengerOutboxTimer) {
+      clearInterval(this.messengerOutboxTimer);
+      this.messengerOutboxTimer = null;
     }
-    if (this.messageOutboxTimer) {
-      clearInterval(this.messageOutboxTimer);
-      this.messageOutboxTimer = null;
+    if (this.swmAckQuorumTimer) {
+      clearInterval(this.swmAckQuorumTimer);
+      this.swmAckQuorumTimer = null;
     }
-    // Drop in-memory retry queue on shutdown; entries don't survive a
-    // restart (the operator can re-fire via the redeliver-approval route
-    // when needed).
-    this.joinApprovalRetryQueue.clear();
+    // rc.9 PR-10: joinApprovalRetryTimer + joinApprovalRetryQueue
+    // deleted; substrate outbox owns retry state and drains itself
+    // via the messengerOutboxTimer cleared just above.
     this.clearRandomSamplingBindRetry();
     this.clearStorageACKRegistrationRetry();
     this.storageACKRegistrationRetryInFlight = false;
     if (this.randomSamplingHandle) {
       try { await this.randomSamplingHandle.stop(); } catch { /* swallow on shutdown */ }
       this.randomSamplingHandle = null;
+    }
+    // rc.9 PR-G codex follow-up #G3: drain background substrate
+    // fan-outs spawned by `publishWorkspaceGossip` (G2's
+    // fire-and-forget detach) before tearing down libp2p. Without
+    // this drain, a process that calls `share()` and then
+    // shuts down (test runs, soak script SIGTERM, daemon
+    // restart) could abandon mid-flight per-peer substrate sends
+    // — regressing the pre-G2 guarantee that share() didn't
+    // return until every substrate attempt either succeeded or
+    // landed in the durable outbox. The bookkeeper still feeds
+    // the per-cgId counters during the drain, so /api/slo's
+    // last sample before shutdown reflects the true completion
+    // state.
+    //
+    // We bound the wait with `Promise.race` against
+    // `SWM_SUBSTRATE_FANOUT_TIMEOUT_MS + 1s`. Per-peer sends
+    // already have that timeout; the +1s slack covers post-
+    // timeout cleanup (counter update + INFO log emit) for
+    // peers that hit the timeout right as `stop()` is called.
+    // After the bound we proceed with libp2p teardown even if
+    // some fan-outs remain — better to enforce a shutdown SLA
+    // than to hang the process indefinitely on one unresponsive
+    // peer. The unfinished sends will fall back to outbox on
+    // recoverable failures (queued count bumps) just as they
+    // would under any other teardown.
+    if (this.inFlightSubstrateFanOutCount() > 0) {
+      const drainBoundMs = DKGAgent.SWM_SUBSTRATE_FANOUT_TIMEOUT_MS + 1000;
+      await Promise.race([
+        this.awaitInFlightSubstrateFanOuts(),
+        new Promise<void>((resolve) => setTimeout(resolve, drainBoundMs).unref?.()),
+      ]);
+      if (this.inFlightSubstrateFanOutCount() > 0) {
+        this.log.warn(
+          createOperationContext('share'),
+          `DKGAgent.stop: ${this.inFlightSubstrateFanOutCount()} substrate fan-outs still in flight after ${drainBoundMs}ms drain bound — proceeding with shutdown (outbox will pick up residual queued sends on next start)`,
+        );
+      }
+    }
+    // Tear down any pooled wire-protocol overlays before libp2p
+    // stops so per-peer streams close gracefully rather than via
+    // libp2p teardown (which would surface as recoverable resets
+    // and trigger spurious outbox retries on the very last cycle).
+    try {
+      await this.router.closePooling();
+    } catch {
+      // best-effort; libp2p teardown below will close residual streams
     }
     await this.node.stop();
     if (this.syncVerifyWorker) {
@@ -13989,8 +14847,17 @@ export class DKGAgent {
       gossipPublish: async (topic: string, data: Uint8Array) => {
         await this.gossip.publish(topic, data);
       },
+      // rc.9 PR-11: ACKCollector now routes through messenger.send
+      // Reliable so /dkg/10.0.1/storage-ack gets envelope wrap +
+      // sender-side idempotency. ACKCollector's own MAX_RETRIES=3 loop
+      // sits on top; queued counts as a per-peer failure that the
+      // collector handles via its existing retry-then-skip path.
       sendP2P: async (peerId: string, protocol: string, data: Uint8Array) => {
-        return this.messenger.sendToPeer(peerId, protocol, data);
+        const sendResult = await this.messenger.sendReliable(peerId, protocol, data);
+        if (!sendResult.delivered) {
+          throw new Error(`substrate queued (transport): ${sendResult.error}`);
+        }
+        return sendResult.response;
       },
       getConnectedCorePeers: () => {
         const peers = this.node.libp2p.getPeers();
@@ -14349,105 +15216,3 @@ export class DKGAgent {
 
 }
 
-function swmSenderStateKey(contextGraphId: string, subGraphName: string | undefined, senderAgentAddress: string): string {
-  return `${contextGraphId}\0${subGraphName ?? ''}\0${senderAgentAddress.toLowerCase()}`;
-}
-
-function swmReceiverStateKey(
-  contextGraphId: string,
-  subGraphName: string | undefined,
-  senderAgentAddress: string,
-  epochId: string,
-): string {
-  return `${swmSenderStateKey(contextGraphId, subGraphName, senderAgentAddress)}\0${epochId}`;
-}
-
-function serializeSwmSenderSendState(state: LocalSwmSenderKeySendState): Record<string, unknown> {
-  return {
-    contextGraphId: state.contextGraphId,
-    subGraphName: state.subGraphName,
-    senderAgentAddress: state.senderAgentAddress,
-    epochId: state.epochId,
-    membershipHash: state.membershipHash,
-    chainKey: encodeWorkspaceEncryptionKey(state.chainKey),
-    nextMessageIndex: state.nextMessageIndex,
-    senderSigningSecretKey: encodeWorkspaceEncryptionKey(state.senderSigningSecretKey),
-    senderSigningPublicKey: encodeWorkspaceEncryptionKey(state.senderSigningPublicKey),
-    createdAtMs: state.createdAtMs,
-  };
-}
-
-function serializeSwmSenderReceiveState(state: LocalSwmSenderKeyReceiveState): Record<string, unknown> {
-  return {
-    contextGraphId: state.contextGraphId,
-    subGraphName: state.subGraphName,
-    senderAgentAddress: state.senderAgentAddress,
-    epochId: state.epochId,
-    membershipHash: state.membershipHash,
-    chainKey: encodeWorkspaceEncryptionKey(state.chainKey),
-    nextMessageIndex: state.nextMessageIndex,
-    senderSigningPublicKey: encodeWorkspaceEncryptionKey(state.senderSigningPublicKey),
-    createdAtMs: state.createdAtMs,
-    skippedChainKeys: [...state.skippedChainKeys.entries()].map(([index, chainKey]) => ({
-      index,
-      chainKey: encodeWorkspaceEncryptionKey(chainKey),
-    })),
-  };
-}
-
-function deserializeSwmSenderSendState(entry: Record<string, unknown>): LocalSwmSenderKeySendState {
-  return {
-    contextGraphId: requiredString(entry.contextGraphId, 'contextGraphId'),
-    subGraphName: optionalString(entry.subGraphName),
-    senderAgentAddress: ethers.getAddress(requiredString(entry.senderAgentAddress, 'senderAgentAddress')),
-    epochId: requiredString(entry.epochId, 'epochId'),
-    membershipHash: requiredString(entry.membershipHash, 'membershipHash'),
-    chainKey: decodeWorkspaceEncryptionKey(requiredString(entry.chainKey, 'chainKey')),
-    nextMessageIndex: requiredNumber(entry.nextMessageIndex, 'nextMessageIndex'),
-    senderSigningSecretKey: decodeWorkspaceEncryptionKey(requiredString(entry.senderSigningSecretKey, 'senderSigningSecretKey')),
-    senderSigningPublicKey: decodeWorkspaceEncryptionKey(requiredString(entry.senderSigningPublicKey, 'senderSigningPublicKey')),
-    createdAtMs: requiredNumber(entry.createdAtMs, 'createdAtMs'),
-  };
-}
-
-function deserializeSwmSenderReceiveState(entry: Record<string, unknown>): LocalSwmSenderKeyReceiveState {
-  const skippedChainKeys = new Map<number, Uint8Array>();
-  const skipped = Array.isArray(entry.skippedChainKeys) ? entry.skippedChainKeys : [];
-  for (const raw of skipped) {
-    const item = raw as Record<string, unknown>;
-    skippedChainKeys.set(
-      requiredNumber(item.index, 'skippedChainKeys.index'),
-      decodeWorkspaceEncryptionKey(requiredString(item.chainKey, 'skippedChainKeys.chainKey')),
-    );
-  }
-  return {
-    contextGraphId: requiredString(entry.contextGraphId, 'contextGraphId'),
-    subGraphName: optionalString(entry.subGraphName),
-    senderAgentAddress: ethers.getAddress(requiredString(entry.senderAgentAddress, 'senderAgentAddress')),
-    epochId: requiredString(entry.epochId, 'epochId'),
-    membershipHash: requiredString(entry.membershipHash, 'membershipHash'),
-    chainKey: decodeWorkspaceEncryptionKey(requiredString(entry.chainKey, 'chainKey')),
-    nextMessageIndex: requiredNumber(entry.nextMessageIndex, 'nextMessageIndex'),
-    senderSigningPublicKey: decodeWorkspaceEncryptionKey(requiredString(entry.senderSigningPublicKey, 'senderSigningPublicKey')),
-    createdAtMs: requiredNumber(entry.createdAtMs, 'createdAtMs'),
-    skippedChainKeys,
-  };
-}
-
-function requiredString(value: unknown, name: string): string {
-  if (typeof value !== 'string' || value.length === 0) {
-    throw new Error(`Invalid Sender Key state: ${name} is required`);
-  }
-  return value;
-}
-
-function optionalString(value: unknown): string | undefined {
-  return typeof value === 'string' && value.length > 0 ? value : undefined;
-}
-
-function requiredNumber(value: unknown, name: string): number {
-  if (!Number.isSafeInteger(value) || (value as number) < 0) {
-    throw new Error(`Invalid Sender Key state: ${name} must be a non-negative safe integer`);
-  }
-  return value as number;
-}

@@ -1,4 +1,9 @@
-export { DashboardDB } from './db.js';
+export {
+  DashboardDB,
+  SqliteMessageIdempotencyStore,
+  SqliteProtocolOutboxStore,
+  type SqliteProtocolOutboxStoreOptions,
+} from './db.js';
 export type {
   DashboardDBOptions,
   MetricSnapshotRow,

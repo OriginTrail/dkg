@@ -69,8 +69,8 @@ export {
   type CclPolicyRecord,
   type PolicyApprovalBinding,
 } from './ccl-policy.js';
+export { DKGAgent } from './dkg-agent.js';
 export {
-  DKGAgent,
   ContextGraphNotFoundError,
   InvalidContentError,
   type DKGAgentConfig,
@@ -86,8 +86,9 @@ export {
   type ContextGraphSubscriptionRecord,
   type ContextGraphSubscriptionStore,
   type PeerHealth,
-} from './dkg-agent.js';
-export type { CclPublishedEvaluationRecord, CclPublishedResultEntry } from './dkg-agent.js';
+  type CclPublishedEvaluationRecord,
+  type CclPublishedResultEntry,
+} from './dkg-agent-types.js';
 export {
   bindRandomSampling,
   type RandomSamplingBindOptions,
@@ -97,5 +98,37 @@ export {
 } from './random-sampling-bind.js';
 export { monotonicTransition, versionedWrite, type MonotonicStages } from './workspace-consistency.js';
 export { StaleWriteError, type CASCondition } from '@origintrail-official/dkg-publisher';
+export {
+  createCGMemberEnumerator,
+  type CGMemberEnumerator,
+  type CGMemberEnumeration,
+  type CGMemberEnumeratorDeps,
+  type CGMemberSource,
+} from './swm/enumerate-cg-members.js';
+export {
+  chooseFanOutTier,
+  classifySendResult,
+  executeSubstrateFanOut,
+  FANOUT_RESPONSE_REJECTED,
+  FANOUT_RESPONSE_RETRYABLE,
+  type ChooseFanOutTierInput,
+  type FanOutPlan,
+  type FanOutOutcome,
+  type FanOutPeerRecord,
+  type FanOutBookkeeper,
+  type FanOutSubstrate,
+  type ExecuteSubstrateFanOutInput,
+  type ExecuteSubstrateFanOutResult,
+} from './swm/substrate-fanout.js';
+export {
+  createSwmAckQuorum,
+  type SwmAckQuorum,
+  type SwmAckQuorumDeps,
+  type SwmAckQuorumObservers,
+  type SwmAckQuorumStats,
+  type SubstrateTopUp,
+  type TrackInput,
+  type TrackedRecordSnapshot,
+} from './swm/ack-quorum.js';
 export * from './source-worker.js';
 export * from './source-registry.js';

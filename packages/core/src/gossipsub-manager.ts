@@ -85,4 +85,26 @@ export class GossipSubManager {
   get subscribedTopics(): string[] {
     return this.node.libp2p.services.pubsub.getTopics();
   }
+
+  /**
+   * The set of peers we've observed subscribed to {@link topic} via
+   * GossipSub's peer-exchange + heartbeat. Returned as plain peer-id
+   * strings (no PeerId object dependency leaks out).
+   *
+   * Empty array when no peers are subscribed OR when the underlying
+   * pubsub implementation does not expose `getSubscribers` (legacy
+   * test doubles). Callers MUST treat the result as "best-effort, may
+   * be stale by up to one heartbeat interval" — GossipSub's view of
+   * topic membership lags real subscription state because there's no
+   * authoritative roster.
+   *
+   * rc.9 PR-B (SWM reliable fan-out plan, Step 1a): consumed by
+   * {@link createCGMemberEnumerator} for runtime fan-out decisions
+   * on public (non-curated) context graphs.
+   */
+  getSubscribers(topic: string): string[] {
+    const pubsub = this.node.libp2p.services.pubsub as { getSubscribers?: (t: string) => Array<{ toString(): string }> };
+    if (typeof pubsub.getSubscribers !== 'function') return [];
+    return pubsub.getSubscribers(topic).map(p => p.toString());
+  }
 }

@@ -22,11 +22,14 @@
 # RECIPIENT_PEER_ID is optional; when set, enables per-peer preflight
 # probe of /api/peer-info (PR #533 fields incl. getConnectionsReturnsForPeer).
 #
-# Usage (run from anywhere — logs always go to ~/.dkg/soak-test-<ts>-<TAG>/):
+# Usage (run from anywhere — logs always go to $DKG_HOME/soak-test-<ts>-<TAG>/):
 #   nohup caffeinate -i bash scripts/libp2p-soak-test.sh \
 #     RECIPIENT_PEER_ID=12D3Koo... \
 #     >> ~/.dkg/soak-test.out 2>&1 &
 #   disown
+#
+# Operators with a non-default home (e.g. ~/.dkg-dev) prefix with
+# DKG_HOME=~/.dkg-dev so auth token + log dir resolve correctly.
 #
 # Stop early:
 #   pkill -f libp2p-soak-test.sh
@@ -49,10 +52,17 @@ TOTAL_CYCLES="${TOTAL_CYCLES:-18}"
 INTERVAL_S="${INTERVAL_S:-1200}"   # 20 min
 INTERNET_PROBE_HOST="${INTERNET_PROBE_HOST:-1.1.1.1}"   # cloudflare DNS — universal, fast, no captive-portal interception
 
-API="${API:-http://127.0.0.1:9200}"
-AUTH=$(grep -v '^#' "${HOME}/.dkg/auth.token" | head -1)
+# DKG_HOME defaults to ~/.dkg but operators running dev nodes (e.g. hermes
+# with ~/.dkg-dev) can override it. All filesystem paths derive from this:
+# auth token, log dir, soak.out. Spotted by hermes-default during the 2026-05
+# rc9 soak — they were on ~/.dkg-dev and the hardcoded ~/.dkg path broke
+# auth resolution.
+DKG_HOME="${DKG_HOME:-${HOME}/.dkg}"
 
-LOG_DIR="${HOME}/.dkg/soak-test-$(date -u +%Y%m%d-%H%M%S)-${SENDER_TAG}"
+API="${API:-http://127.0.0.1:9200}"
+AUTH=$(grep -v '^#' "${DKG_HOME}/auth.token" | head -1)
+
+LOG_DIR="${DKG_HOME}/soak-test-$(date -u +%Y%m%d-%H%M%S)-${SENDER_TAG}"
 mkdir -p "$LOG_DIR"
 echo "$$" > "$LOG_DIR/pid"
 
@@ -144,6 +154,43 @@ print(f'{local_s} | {net_s} | {peer_s}')
   log "  preflight ($label): $summary"
 }
 
+snapshot_slo() {
+  # rc.9 PR-12. Snapshots the Universal Messenger SLO histogram
+  # across ALL protocols (chat, skill, swm-key, private-access,
+  # query, join, ack, verify). Source of truth for the ship-gate
+  # 99.9%/15s SLO measurement. JSON dump goes to slo.jsonl; the
+  # human-readable summary line appears in main.log alongside the
+  # per-cycle preflight + inbox snapshots.
+  local label=$1 ts
+  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  local resp
+  resp=$(curl -s --max-time 10 "${API}/api/slo" \
+    -H "Authorization: Bearer $AUTH")
+  printf '{"label":"%s","ts":"%s","data":%s}\n' \
+    "$label" "$ts" "${resp:-{\"error\":\"empty response\"\}}" \
+    >> "$LOG_DIR/slo.jsonl"
+  local summary
+  summary=$(printf '%s' "$resp" | python3 -c "
+import json, sys
+try:
+  d = json.loads(sys.stdin.read())
+  protos = (d or {}).get('protocols', {}) or {}
+  if not protos:
+    print('slo=(no traffic yet)')
+  else:
+    parts = []
+    for proto, s in sorted(protos.items()):
+      short = proto.split('/')[-1]
+      p99 = s.get('p99Ms')
+      p99_s = f'{p99}ms' if p99 is not None else 'n/a'
+      parts.append(f'{short}=d{s.get(\"delivered\", 0)}/q{s.get(\"queued\", 0)} p99={p99_s}')
+    print('slo: ' + ', '.join(parts))
+except Exception as e:
+  print(f'slo=err({e})')
+" 2>/dev/null)
+  log "  $summary"
+}
+
 snapshot_inbox() {
   local label=$1 ts
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -180,9 +227,10 @@ log "  internet_probe=$INTERNET_PROBE_HOST"
 log "  log_dir=$LOG_DIR"
 log "  pid=$$"
 log ""
-log "Baseline preflight + inbox snapshot (before first send):"
+log "Baseline preflight + inbox + SLO snapshot (before first send):"
 preflight_snapshot "baseline"
 snapshot_inbox "baseline"
+snapshot_slo "baseline"
 log ""
 
 for seq in $(seq 1 "$TOTAL_CYCLES"); do
@@ -191,6 +239,7 @@ for seq in $(seq 1 "$TOTAL_CYCLES"); do
   send_one "$seq" "$TOTAL_CYCLES"
   sleep 5
   snapshot_inbox "post-send-$seq"
+  snapshot_slo "post-send-$seq"
   if [ "$seq" -lt "$TOTAL_CYCLES" ]; then
     log "  ... sleeping ${INTERVAL_S}s until next cycle"
     sleep "$INTERVAL_S"
@@ -201,6 +250,7 @@ log ""
 log "All cycles done. Waiting 5min for any queued/retried inbound to land..."
 sleep 300
 snapshot_inbox "final"
+snapshot_slo "final"
 
 log ""
 log "=== END soak-test ==="
@@ -228,4 +278,5 @@ log ""
 log "Detailed logs:"
 log "  sends:  $LOG_DIR/sends.jsonl"
 log "  inbox:  $LOG_DIR/inbox.jsonl"
+log "  slo:    $LOG_DIR/slo.jsonl  (per-cycle /api/slo dumps across all 8 protocols)"
 log "  trace:  $LOG_DIR/main.log"

@@ -282,6 +282,23 @@ export interface DkgConfig {
    * full rationale.
    */
   relayReservationCount?: number;
+  /**
+   * Operator-preferred relay multiaddrs that take priority over the
+   * network/<env>.json public relay set (rc.9 PR-7).
+   *
+   * When set, these multiaddrs are prepended to the active relayPeers
+   * list at daemon startup so libp2p attempts reservations on them
+   * first. The public testnet relays remain configured as fallback —
+   * if an operator-relay disappears, the node continues to function
+   * via the public set. Repeatable; populate from CLI via
+   * `dkg start --relay-preferred <multiaddr>` (sets env var
+   * `DKG_RELAY_PREFERRED` for the spawned daemon, comma-separated)
+   * or write into `~/.dkg/config.json` for persistence.
+   *
+   * See `docs/messenger-operator.md` for the relay-setup playbook
+   * (standing up a relay VM, sharing multiaddrs, monitoring).
+   */
+  preferredRelays?: string[];
   /** Public multiaddrs to announce (for VPS/cloud nodes where the public IP is not on the interface). */
   announceAddresses?: string[];
   /** Bootstrap peer multiaddrs to connect to on startup (for direct peer discovery without relay). */

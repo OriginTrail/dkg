@@ -304,14 +304,20 @@ describe('p2p resilience hooks', () => {
     }, 15_000);
 
     // User review on PR #536: the `connection:open` listener used to
-    // call `enrichPeerStoreFromInboundCircuit` and
-    // `processMessageOutboxOnConnect` in parallel fire-and-forget,
-    // which meant the first outbox flush attempt could still hit
-    // `dialProtocol` against an EMPTY peerStore — exact same "no
-    // valid addresses for peer" failure the PR is meant to heal.
-    // Fix wraps both in a sequential IIFE so the flush sees the
-    // freshly-merged reverse-path address. Pin the ordering.
-    it('awaits enrichment BEFORE the outbox flush on inbound circuit open (PR #536 review)', async () => {
+    // call `enrichPeerStoreFromInboundCircuit` and the outbox flush
+    // in parallel fire-and-forget, which meant the first outbox
+    // flush attempt could still hit `dialProtocol` against an EMPTY
+    // peerStore — exact same "no valid addresses for peer" failure
+    // the PR is meant to heal. Fix wraps both in a sequential IIFE
+    // so the flush sees the freshly-merged reverse-path address.
+    //
+    // rc.9 PR-3 substrate cutover: the outbox flush moved from
+    // `processMessageOutboxOnConnect` (chat-specific, deleted) to
+    // `messenger.processOutboxOnConnect` (substrate, generic). The
+    // ordering invariant is the same — enrich BEFORE the substrate
+    // flush so the substrate's dialProtocol calls see the merged
+    // peerStore address.
+    it('awaits enrichment BEFORE the substrate outbox flush on inbound circuit open (PR #536 review, rc.9 substrate)', async () => {
       const agent = await DKGAgent.create({
         name: 'ReversePathEnrichBeforeFlush',
         listenHost: '127.0.0.1',
@@ -324,17 +330,13 @@ describe('p2p resilience hooks', () => {
         let enrichResolve: (() => void) | null = null;
         const enrichDone = new Promise<void>((r) => { enrichResolve = r; });
 
-        // Slow enrichment by 80ms so flush ordering is observable even if
-        // microtask queue races sneak in. We push markers in BOTH methods
-        // and the assertion is purely temporal — enrich-finish must precede
-        // flush-start, no overlapping window.
         (agent as any).enrichPeerStoreFromInboundCircuit = async () => {
           events.push('enrich:start');
           await new Promise(r => setTimeout(r, 80));
           events.push('enrich:end');
           enrichResolve?.();
         };
-        (agent as any).processMessageOutboxOnConnect = async () => {
+        (agent as any).messenger.processOutboxOnConnect = async () => {
           events.push('flush:start');
         };
 
@@ -359,93 +361,17 @@ describe('p2p resilience hooks', () => {
         expect(events).toContain('enrich:start');
         expect(events).toContain('enrich:end');
         expect(events).toContain('flush:start');
-        // The critical ordering: enrich:end MUST appear before flush:start.
-        // If the listener went back to parallel fire-and-forget, enrich:end
-        // would appear AFTER flush:start (since flush is synchronous and
-        // enrich sleeps 80ms).
         expect(events.indexOf('enrich:end')).toBeLessThan(events.indexOf('flush:start'));
       } finally {
         await agent.stop().catch(() => {});
       }
     }, 15_000);
 
-    // 🔴 Regression for the stale-snapshot race surfaced by the 2026-05
-    // rc9 soak: `processMessageOutboxOnConnect` takes a snapshot of
-    // `pendingFor(peer)` and iterates it. If two `connection:open`
-    // events fire in rapid succession (relay reconnect storm), Flush A
-    // completes (`markDelivered` deletes the entry, `endAttempt` clears
-    // the inflight slot), then Flush B — holding the now-stale entry
-    // reference from its own pre-A snapshot — calls
-    // `retryOutboxEntry(staleEntry)`. The `tryBeginAttempt` guard
-    // returns true (Flush A already released the slot), and without
-    // the `hasEntry` re-check below it, Flush B fires a duplicate
-    // `sendChat` for an already-delivered message. Worst case the
-    // duplicate `sendChat` fails ("Remote closed connection during
-    // opening") and `enqueueFailure` resurrects the deleted entry
-    // with attempts=1, triggering the full retry storm again. Soak
-    // smoking gun: 29 outbox queues produced 63 daemon "succeeded"
-    // events (2.17x amplification).
-    it('does not re-send an entry that a sibling flush already markDelivered (stale-snapshot guard, PR 6)', async () => {
-      const agent = await DKGAgent.create({
-        name: 'StaleSnapshotGuard',
-        listenHost: '127.0.0.1',
-        chainAdapter: new MockChainAdapter(),
-      });
-      try {
-        await agent.start();
-
-        const peer = freshPeerIdString();
-        const messageId = 'soak-rc9-stale-snapshot-msg-1';
-
-        // Pre-populate the outbox with one failed entry so
-        // retryOutboxEntry has something to drain.
-        (agent as any).messageOutbox.enqueueFailure(
-          { recipientPeerId: peer, text: 'hi', messageId },
-          'initial transport failure',
-          Date.now(),
-        );
-        const staleEntry = (agent as any).messageOutbox.pendingFor(peer)[0];
-        expect(staleEntry).toBeTruthy();
-
-        // Capture every sendChat invocation. A correctly-guarded
-        // retryOutboxEntry must call sendChat EXACTLY ONCE across both
-        // flushes — the second flush's stale-snapshot entry should be
-        // dropped by the hasEntry guard before any wire I/O.
-        const sendChatCalls: Array<{ peer: string; messageId: string }> = [];
-        (agent as any).messageHandler = {
-          sendChat: vi.fn(async (peerId: string, _text: string, opts: any) => {
-            sendChatCalls.push({ peer: peerId, messageId: opts?.messageId });
-            return { delivered: true, messageId: opts?.messageId };
-          }),
-        };
-
-        // Flush A: drains the entry cleanly (sendChat returns
-        // delivered, markDelivered fires, entry removed, endAttempt
-        // clears inflight). Same entry reference is reused by Flush B
-        // below — modelling exactly what the sibling-snapshot
-        // iteration does in production.
-        await (agent as any).retryOutboxEntry(staleEntry);
-
-        // Verify Flush A succeeded and the entry is gone.
-        expect((agent as any).messageOutbox.hasEntry(peer, messageId)).toBe(false);
-        expect(sendChatCalls.length).toBe(1);
-
-        // Flush B: stale-snapshot iteration on the same entry. Without
-        // the hasEntry guard added in PR 6, this would call sendChat a
-        // second time (the inflight slot was already released by A).
-        await (agent as any).retryOutboxEntry(staleEntry);
-
-        // The whole regression is captured here: sendChat must NOT
-        // have been called twice.
-        expect(sendChatCalls.length).toBe(1);
-        expect(sendChatCalls[0].messageId).toBe(messageId);
-
-        // Entry must still be gone — Flush B must not have resurrected
-        // it via the enqueueFailure path either.
-        expect((agent as any).messageOutbox.hasEntry(peer, messageId)).toBe(false);
-      } finally {
-        await agent.stop().catch(() => {});
-      }
-    }, 15_000);
+    // Stale-snapshot guard regression: the equivalent test for the
+    // substrate's `Messenger.processOutboxOnConnect` lives in
+    // `messenger-substrate.test.ts` ("honours the stale-snapshot
+    // guard (rc.9 #538)") — same race, same fix, just at the
+    // generic substrate layer rather than the chat-specific one
+    // which was deleted in rc.9 PR-3.
   });
 });

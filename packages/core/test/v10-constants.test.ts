@@ -8,6 +8,8 @@ import {
   PROTOCOL_ACCESS,
   PROTOCOL_QUERY_REMOTE,
   PROTOCOL_SWM_SENDER_KEY,
+  PROTOCOL_SWM_UPDATE,
+  PROTOCOL_SWM_SHARE_ACK,
   PROTOCOL_VERIFY_PROPOSAL,
   PROTOCOL_VERIFY_APPROVAL,
   PROTOCOL_STORAGE_ACK,
@@ -47,21 +49,32 @@ import {
 } from '../src/constants.js';
 
 describe('V10 protocol stream IDs', () => {
-  it('uses /dkg/10.0.0/ version prefix', () => {
+  // rc.9 plan: protocols on /dkg/10.0.1/* are migrated onto the
+  // Universal Messenger substrate (envelope wrap + receiver dedup +
+  // durable outbox). PR-3 migrated /message (chat + skill); PR-8
+  // migrated /private-access + /swm-sender-key; PR-9 migrated
+  // /query-remote; PR-11 migrated /storage-ack + /verify-proposal;
+  // PR-E (SWM reliable fan-out plan, Step 2) migrates /sync so the
+  // catch-up safety net itself rides the same reliability substrate.
+  it('legacy + not-yet-migrated protocols on the /dkg/10.0.0/ prefix', () => {
     expect(PROTOCOL_PUBLISH).toBe('/dkg/10.0.0/publish');
     expect(PROTOCOL_QUERY).toBe('/dkg/10.0.0/query');
     expect(PROTOCOL_DISCOVER).toBe('/dkg/10.0.0/discover');
-    expect(PROTOCOL_SYNC).toBe('/dkg/10.0.0/sync');
-    expect(PROTOCOL_MESSAGE).toBe('/dkg/10.0.0/message');
-    expect(PROTOCOL_ACCESS).toBe('/dkg/10.0.0/private-access');
-    expect(PROTOCOL_QUERY_REMOTE).toBe('/dkg/10.0.0/query-remote');
-    expect(PROTOCOL_SWM_SENDER_KEY).toBe('/dkg/10.0.0/swm-sender-key');
   });
 
-  it('defines new VERIFY and ACK protocols', () => {
-    expect(PROTOCOL_VERIFY_PROPOSAL).toBe('/dkg/10.0.0/verify-proposal');
+  // /verify-approval stays on /dkg/10.0.0/ because it's an async
+  // follow-up signal, not a synchronous request.
+  it('substrate-migrated protocols use /dkg/10.0.1/ prefix', () => {
+    expect(PROTOCOL_MESSAGE).toBe('/dkg/10.0.1/message');
+    expect(PROTOCOL_SYNC).toBe('/dkg/10.0.1/sync');
+    expect(PROTOCOL_ACCESS).toBe('/dkg/10.0.1/private-access');
+    expect(PROTOCOL_QUERY_REMOTE).toBe('/dkg/10.0.1/query-remote');
+    expect(PROTOCOL_SWM_SENDER_KEY).toBe('/dkg/10.0.1/swm-sender-key');
+    expect(PROTOCOL_SWM_UPDATE).toBe('/dkg/10.0.1/swm-update');
+    expect(PROTOCOL_SWM_SHARE_ACK).toBe('/dkg/10.0.1/swm-share-ack');
+    expect(PROTOCOL_VERIFY_PROPOSAL).toBe('/dkg/10.0.1/verify-proposal');
     expect(PROTOCOL_VERIFY_APPROVAL).toBe('/dkg/10.0.0/verify-approval');
-    expect(PROTOCOL_STORAGE_ACK).toBe('/dkg/10.0.0/storage-ack');
+    expect(PROTOCOL_STORAGE_ACK).toBe('/dkg/10.0.1/storage-ack');
   });
 
   it('DHT protocol is unchanged', () => {

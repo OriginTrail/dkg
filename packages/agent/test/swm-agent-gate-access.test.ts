@@ -38,6 +38,12 @@ class FakeGossip {
   onMessage(): void {}
 
   async publish(): Promise<void> {}
+
+  // rc.9 PR-C: tier-switch in publishWorkspaceGossip consults
+  // GossipSubManager.getSubscribers. Empty roster keeps the
+  // agent-gate-access flow on the gossip-only branch (no
+  // substrate fan-out picks up the encoded share bytes here).
+  getSubscribers(_topic: string): string[] { return []; }
 }
 
 async function flushAsync(): Promise<void> {

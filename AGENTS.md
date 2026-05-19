@@ -116,12 +116,19 @@ For any other error (peer not found, timeout, network), retry once before bother
 - **Don't loop** — if you send a message and the response comes back asking another question, surface it to the operator before auto-replying. Phase 1 is operator-in-the-loop by design; Phase 3 (autonomous bridge) is a future RFC.
 - **Don't conflate chat with the `chat` sub-graph.** The `chat` sub-graph (captured by `capture-chat.mjs`) is the operator's conversation with you; `dkg_send_message` is *your* conversation with another agent. They're separate channels for now.
 
+## Universal Messenger (v10.0.0-rc.9)
+
+DKG's short peer-to-peer protocols (chat, skill request, query-remote, swm-sender-key, private-access, join-request, storage-ack, verify-proposal) all route through a single reliability substrate called the **Universal Messenger**. Architecture: [`docs/messenger.md`](./docs/messenger.md). Operator-facing surfaces: [`docs/messenger-operator.md`](./docs/messenger-operator.md). Migration recipe for a hypothetical 9th protocol: [`docs/messenger-add-protocol.md`](./docs/messenger-add-protocol.md).
+
+**Convergence rule for agents working on this codebase**: route any new short-message protocol through `Messenger.sendReliable` and register handlers via `Messenger.register` — never `ProtocolRouter.send` / `ProtocolRouter.register` directly. The substrate gives you sender-side durable retry (SQLite outbox surviving daemon restart), receiver-side dedup keyed by `messageId`, sender-side response cache, stale-snapshot-safe retries, opportunistic flush on `connection:open`, DHT-walk-on-stall, and observability via `/api/slo`. Bypassing it loses every one of those properties. The migration recipe lives at `docs/messenger-add-protocol.md` and includes the worked example from PR-3 (chat).
+
 ## Things to NOT do
 
 - **Don't fabricate URIs.** Every URI in `mentions` must come from `dkg_search` or be freshly minted via the look-before-mint protocol.
 - **Don't skip turns to "save tokens".** One annotation call per turn is cheap (~few hundred ms). Coverage wins.
 - **Don't publish to VM via MCP.** That's `dkg_request_vm_publish` (marker for human review), not `/api/shared-memory/publish`. The agent is never the gating actor for on-chain commitment.
 - **Don't normalise slugs in your `dkg_search` query.** Pass the unnormalised label so the daemon's fuzzy match has the most signal; only normalise when comparing for reuse-vs-mint.
+- **Don't call `ProtocolRouter.send` directly for new short-message protocols.** Use `Messenger.sendReliable` (see Universal Messenger section above).
 
 ## Cheat sheet
 

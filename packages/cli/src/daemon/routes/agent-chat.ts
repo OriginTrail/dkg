@@ -603,6 +603,33 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
     });
   }
 
+  // GET /api/slo
+  //
+  // rc.9 PR-12. Per-protocol Universal Messenger SLO snapshot:
+  // p50/p95/p99 latency over the last ~1000 deliveries plus the
+  // monotonic delivered / queued counters. Source of truth for the
+  // ship-gate overnight soak.
+  //
+  // rc.9 PR-A (SWM reliable fan-out plan, Step 0) extended the
+  // response shape with two new top-level sections — `gossip` for
+  // SWM gossip publish failures (pre-rc.9 silently swallowed) and
+  // `swm` for receiver-side redundant-apply measurement (informs
+  // rc10 Concern-2 dedup decision). Both are additive; existing
+  // consumers that parse `protocols` keep working.
+  //
+  // SECURITY: this endpoint is reachable only from localhost via the
+  // daemon's bind address (the daemon binds /api/* to 127.0.0.1 by
+  // default — see packages/cli/src/daemon/lifecycle.ts). Per-protocol
+  // traffic patterns + latency distributions are operationally
+  // sensitive metadata (traffic rates leak peer activity); default-
+  // public would be an info-leak regression. Operators who want
+  // remote visibility should put their own reverse proxy with auth
+  // in front. The agent.getMessengerSloStats() call itself is cheap
+  // (≤ 8 protocols × ≤ 1k samples sort) so no rate limit is needed.
+  if (req.method === "GET" && path === "/api/slo") {
+    return jsonResponse(res, 200, buildSloPayload(agent));
+  }
+
   // GET /api/skills
   // Optional query params: ?skillType=X
   if (req.method === "GET" && path === "/api/skills") {
@@ -921,4 +948,133 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
       throw err;
     }
   }
+}
+
+/**
+ * Build the `/api/slo` response payload. Extracted out of the inline
+ * route block so the public wire shape is testable in isolation
+ * (rc.9 PR-A / Codex PR #570 R10) — production route + regression
+ * test share the exact same code path, so a future drift in any
+ * field name / nesting can't slip past CI.
+ *
+ * Cold-start safety: when `sharedMemoryHandler` has never been
+ * instantiated (no SWM share has ever been received), the agent's
+ * `getSwmHandlerStats()` returns its pristine snapshot rather than
+ * throwing — `buildSloPayload` is safe to call against a fresh
+ * daemon.
+ */
+export function buildSloPayload(agent: {
+  getMessengerSloStats: () => Record<string, unknown>;
+  getSwmGossipStats: () => {
+    publishFailures: Record<string, number>;
+    publishFailuresOverflow: number;
+    publishFailuresTruncated: boolean;
+  };
+  getSwmHandlerStats: () => {
+    redundantApplies: Record<string, number>;
+    redundantAppliesLowerBound: boolean;
+    redundantAppliesOverflow: number;
+    redundantAppliesTruncated: boolean;
+  };
+  /**
+   * rc.9 PR-C addition. Optional on the interface so a hypothetical
+   * test double that only exercises the gossip + receiver sides
+   * doesn't have to stub it. Implementations that omit it simply
+   * leave `swm.substrateFanout` off the response — soak scripts
+   * check for its presence before referencing fields.
+   */
+  getSwmSubstrateFanoutStats?: () => {
+    delivered: Record<string, number>;
+    rejected: Record<string, number>;
+    /**
+     * rc.9 PR-D (codex follow-up from PR-G #G1): transient
+     * receiver-side rejections. Optional on the interface for
+     * back-compat with pre-PR-D test doubles.
+     */
+    retryable?: Record<string, number>;
+    queued: Record<string, number>;
+    inFlight: Record<string, number>;
+    failed: Record<string, number>;
+    overflow: {
+      delivered: number;
+      rejected: number;
+      retryable?: number;
+      queued: number;
+      inFlight: number;
+      failed: number;
+    };
+    truncated: boolean;
+  };
+  /**
+   * rc.9 PR-D addition. Optional for the same reason
+   * getSwmSubstrateFanoutStats is — test doubles don't need to
+   * stub a tracker they aren't exercising.
+   */
+  getSwmAckQuorumStats?: () => {
+    tracked: number;
+    completed: number;
+    watchdogFired: number;
+    deadlineExpired: number;
+    pending: number;
+  };
+}): {
+  protocols: Record<string, unknown>;
+  gossip: {
+    publishFailures: Record<string, number>;
+    publishFailuresOverflow: number;
+    publishFailuresTruncated: boolean;
+  };
+  swm: {
+    redundantApplies: Record<string, number>;
+    redundantAppliesLowerBound: boolean;
+    redundantAppliesOverflow: number;
+    redundantAppliesTruncated: boolean;
+    /**
+     * rc.9 PR-C: substrate fan-out per-outcome counters. Present
+     * iff the agent exposes `getSwmSubstrateFanoutStats()` (every
+     * production agent does; opt-out is for test doubles).
+     */
+    substrateFanout?: {
+      delivered: Record<string, number>;
+      rejected: Record<string, number>;
+      retryable?: Record<string, number>;
+      queued: Record<string, number>;
+      inFlight: Record<string, number>;
+      failed: Record<string, number>;
+      overflow: {
+        delivered: number;
+        rejected: number;
+        retryable?: number;
+        queued: number;
+        inFlight: number;
+        failed: number;
+      };
+      truncated: boolean;
+    };
+    /**
+     * rc.9 PR-D: ack-quorum overlay counters. Same opt-out
+     * mechanic as `substrateFanout` — present iff the agent
+     * exposes `getSwmAckQuorumStats()`.
+     */
+    shareAckQuorum?: {
+      tracked: number;
+      completed: number;
+      watchdogFired: number;
+      deadlineExpired: number;
+      pending: number;
+    };
+  };
+} {
+  const swmHandler = agent.getSwmHandlerStats();
+  const substrateFanout = agent.getSwmSubstrateFanoutStats?.();
+  const shareAckQuorum = agent.getSwmAckQuorumStats?.();
+  return {
+    protocols: agent.getMessengerSloStats(),
+    gossip: agent.getSwmGossipStats(),
+    swm: {
+      ...swmHandler,
+      ...(substrateFanout !== undefined ? { substrateFanout } : {}),
+      ...(shareAckQuorum !== undefined ? { shareAckQuorum } : {}),
+    },
+  };
 }

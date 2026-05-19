@@ -43,7 +43,25 @@ interface FetchSyncPagesParams {
   checkpointStore: SyncCheckpointStore;
   buildSyncRequest: (contextGraphId: string, offset: number, limit: number, includeSharedMemory: boolean, remotePeerId: string, phase?: SyncPhase, snapshotRef?: string) => Promise<Uint8Array>;
   parseAndFilter: (nquadsText: string, graphUri: string, contextGraphId: string) => Promise<{ quads: Quad[]; totalQuads: number }>;
-  send: (peerId: string, protocolId: string, data: Uint8Array, timeoutMs: number) => Promise<Uint8Array>;
+  /**
+   * Per-attempt send hook. The substrate-backed implementation
+   * (`DKGAgent`'s adapter routing through `messenger.sendReliable`)
+   * receives a fresh `messageId` on EVERY retry attempt. Stable
+   * messageIds were explored on this PR (codex review #569
+   * follow-ups #1, #4, #5, #6, #7, #8) but every variant either
+   * defeated sender-side dedup OR enabled silent replay of stale
+   * cached responses past sync's app-layer freshness gate
+   * (`SYNC_AUTH_MAX_AGE_MS`). Fresh-per-attempt is the only design
+   * that holds under all timing scenarios — see jsdoc on
+   * `sendSyncRequest` for the full rationale.
+   */
+  send: (
+    peerId: string,
+    protocolId: string,
+    data: Uint8Array,
+    timeoutMs: number,
+    messageId: string,
+  ) => Promise<Uint8Array>;
   logWarn: (ctx: OperationContext, message: string) => void;
   logInfo: (ctx: OperationContext, message: string) => void;
   logDebug: (ctx: OperationContext, message: string) => void;
@@ -104,6 +122,13 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
       contextGraphId,
       offset,
       protocolId: protocolSync,
+      // `requestFactory` runs per-attempt so each retry carries a
+      // fresh `issuedAtMs`/`requestId`. Required for sync's auth
+      // gate (`SYNC_AUTH_MAX_AGE_MS` freshness TTL +
+      // `seenRequestIds` replay protection). The matching
+      // fresh-messageId-per-attempt is generated inside
+      // `sendSyncRequest`. See `sendSyncRequest`'s jsdoc for the
+      // full rationale (codex review on #569 follow-ups #1, #4-#8).
       requestFactory: () => buildSyncRequest(contextGraphId, curOffset, syncPageSize, includeSharedMemory, remotePeerId, phase, snapshotRef),
       send,
       onRetry: (attempt, delay, err) => {

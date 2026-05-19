@@ -11,6 +11,7 @@ import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGPublisher } from '../src/dkg-publisher.js';
 import { AccessHandler } from '../src/access-handler.js';
 import { AccessClient } from '../src/access-client.js';
+import { createSubstrateClient, registerSubstrateHandler } from './_helpers/substrate.js';
 import { multiaddr } from '@multiformats/multiaddr';
 import { ethers } from 'ethers';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, createTestContextGraph, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
@@ -130,11 +131,11 @@ describe('Access Protocol', () => {
 
     const accessHandler = new AccessHandler(storeA, bus);
     const routerA = new ProtocolRouter(nodeA);
-    routerA.register(PROTOCOL_ACCESS, accessHandler.handler);
+    registerSubstrateHandler(routerA, PROTOCOL_ACCESS, async (data, peerId) => accessHandler.handler(data, { toString: () => peerId, toBytes: () => new Uint8Array() }));
 
     const keypairB = await generateEd25519Keypair();
     const routerB = new ProtocolRouter(nodeB);
-    const accessClient = new AccessClient(routerB, keypairB, nodeB.peerId);
+    const accessClient = new AccessClient(createSubstrateClient(routerB), keypairB, nodeB.peerId);
 
     const kaUal = `${result.ual}/1`;
     // accessClient is bound to nodeB (requester); nodeA.peerId is the remote provider target.
@@ -199,11 +200,11 @@ describe('Access Protocol', () => {
 
     const accessHandler = new AccessHandler(storeA, bus);
     const routerA = new ProtocolRouter(nodeA);
-    routerA.register(PROTOCOL_ACCESS, accessHandler.handler);
+    registerSubstrateHandler(routerA, PROTOCOL_ACCESS, async (data, peerId) => accessHandler.handler(data, { toString: () => peerId, toBytes: () => new Uint8Array() }));
 
     const keypairB = await generateEd25519Keypair();
     const routerB = new ProtocolRouter(nodeB);
-    const accessClient = new AccessClient(routerB, keypairB, nodeB.peerId);
+    const accessClient = new AccessClient(createSubstrateClient(routerB), keypairB, nodeB.peerId);
 
     const accessResult = await accessClient.requestAccess(nodeA.peerId, kaUal);
 
@@ -223,11 +224,11 @@ describe('Access Protocol', () => {
     const bus = new TypedEventBus();
     const accessHandler = new AccessHandler(storeA, bus);
     const routerA = new ProtocolRouter(nodeA);
-    routerA.register(PROTOCOL_ACCESS, accessHandler.handler);
+    registerSubstrateHandler(routerA, PROTOCOL_ACCESS, async (data, peerId) => accessHandler.handler(data, { toString: () => peerId, toBytes: () => new Uint8Array() }));
 
     const keypairB = await generateEd25519Keypair();
     const routerB = new ProtocolRouter(nodeB);
-    const accessClient = new AccessClient(routerB, keypairB, nodeB.peerId);
+    const accessClient = new AccessClient(createSubstrateClient(routerB), keypairB, nodeB.peerId);
 
     const accessResult = await accessClient.requestAccess(
       nodeA.peerId,
@@ -246,11 +247,11 @@ describe('Access Protocol', () => {
 
     const accessHandler = new AccessHandler(storeA, bus);
     const routerA = new ProtocolRouter(nodeA);
-    routerA.register(PROTOCOL_ACCESS, accessHandler.handler);
+    registerSubstrateHandler(routerA, PROTOCOL_ACCESS, async (data, peerId) => accessHandler.handler(data, { toString: () => peerId, toBytes: () => new Uint8Array() }));
 
     const keypairB = await generateEd25519Keypair();
     const routerB = new ProtocolRouter(nodeB);
-    const accessClient = new AccessClient(routerB, keypairB, nodeB.peerId);
+    const accessClient = new AccessClient(createSubstrateClient(routerB), keypairB, nodeB.peerId);
 
     const kaUal = `${result.ual}/1`;
     const accessResult = await accessClient.requestAccess(nodeA.peerId, kaUal);
@@ -276,11 +277,11 @@ describe('Access Protocol', () => {
 
     const accessHandler = new AccessHandler(storeA, bus);
     const routerA = new ProtocolRouter(nodeA);
-    routerA.register(PROTOCOL_ACCESS, accessHandler.handler);
+    registerSubstrateHandler(routerA, PROTOCOL_ACCESS, async (data, peerId) => accessHandler.handler(data, { toString: () => peerId, toBytes: () => new Uint8Array() }));
 
     const keypairB = await generateEd25519Keypair();
     const routerB = new ProtocolRouter(nodeB);
-    const accessClient = new AccessClient(routerB, keypairB, nodeB.peerId);
+    const accessClient = new AccessClient(createSubstrateClient(routerB), keypairB, nodeB.peerId);
 
     const accessResult = await accessClient.requestAccess(nodeA.peerId, kaUal);
 
@@ -304,11 +305,11 @@ describe('Access Protocol', () => {
 
     const accessHandler = new AccessHandler(storeA, bus);
     const routerA = new ProtocolRouter(nodeA);
-    routerA.register(PROTOCOL_ACCESS, accessHandler.handler);
+    registerSubstrateHandler(routerA, PROTOCOL_ACCESS, async (data, peerId) => accessHandler.handler(data, { toString: () => peerId, toBytes: () => new Uint8Array() }));
 
     const keypairB = await generateEd25519Keypair();
     const routerB = new ProtocolRouter(nodeB);
-    const accessClient = new AccessClient(routerB, keypairB, nodeB.peerId);
+    const accessClient = new AccessClient(createSubstrateClient(routerB), keypairB, nodeB.peerId);
 
     const kaUal = `${result.ual}/1`;
     const accessResult = await accessClient.requestAccess(nodeA.peerId, kaUal);
@@ -328,11 +329,11 @@ describe('Access Protocol', () => {
 
     const accessHandler = new AccessHandler(storeA, bus);
     const routerA = new ProtocolRouter(nodeA);
-    routerA.register(PROTOCOL_ACCESS, accessHandler.handler);
+    registerSubstrateHandler(routerA, PROTOCOL_ACCESS, async (data, peerId) => accessHandler.handler(data, { toString: () => peerId, toBytes: () => new Uint8Array() }));
 
     const keypairB = await generateEd25519Keypair();
     const routerB = new ProtocolRouter(nodeB);
-    const accessClient = new AccessClient(routerB, keypairB, nodeB.peerId);
+    const accessClient = new AccessClient(createSubstrateClient(routerB), keypairB, nodeB.peerId);
 
     const kcUal = result.ual;
     const metaGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;

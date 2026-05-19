@@ -53,8 +53,33 @@ export {
 export {
   ProtocolRouter,
   type ProtocolRouterOptions,
+  type SendOptions,
   DEFAULT_MAX_READ_BYTES,
+  DEFAULT_SEND_TIMEOUT_MS,
+  isRecoverableSendError,
+  isProtocolUnsupportedError,
 } from './protocol-router.js';
+export {
+  MessageStreamPool,
+  POOLED_MESSAGE_PROTOCOL,
+  DEFAULT_KEEPALIVE_MS,
+  DEFAULT_IDLE_TIMEOUT_MS,
+  DEFAULT_REQUEST_TIMEOUT_MS,
+  PooledStreamResetError,
+  type MessageStreamPoolOptions,
+  type PooledStreamHandler,
+  type PerPeerStats,
+  type PoolNode,
+} from './message-stream-pool.js';
+export {
+  FrameType,
+  encodeFrame,
+  encodeVarint,
+  tryDecodeVarint,
+  decodeFrames,
+  DEFAULT_MAX_FRAME_BYTES,
+  type DecodedFrame,
+} from './message-frame.js';
 export { GossipSubManager, type GossipMessageHandler } from './gossipsub-manager.js';
 export { PeerDiscoveryManager } from './discovery.js';
 export {
@@ -72,6 +97,23 @@ export {
   type RetryMetadata,
   type RetryQueueOptions,
 } from './retry-queue.js';
+export {
+  type MessageIdempotencyStore,
+  type MessageDirection,
+  type IdempotencyCheckResult,
+  type ProtocolOutboxStore,
+  type ProtocolOutboxEntry,
+  RESPONSE_CACHE_BYTES,
+  RESPONSE_GONE_MARKER,
+} from './messenger-types.js';
+export {
+  ProtocolOutbox,
+  type ProtocolOutboxOptions,
+  DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS,
+  DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS,
+  InMemoryProtocolOutboxStore,
+  InMemoryMessageIdempotencyStore,
+} from './protocol-outbox.js';
 export {
   findPackageRepoDir,
   blueGreenSlotEntryPoint,

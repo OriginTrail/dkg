@@ -36,15 +36,18 @@ function walk(dir: string, acc: string[] = []): string[] {
 
 describe('A-9: storage-ack protocol id (libp2p) pin', () => {
   it('constant is the exact spec string', () => {
-    expect(PROTOCOL_STORAGE_ACK).toBe('/dkg/10.0.0/storage-ack');
+    // rc.9 PR-11: bumped to /dkg/10.0.1/* hard cutover (Universal
+    // Messenger substrate; receiver dedup + envelope wrap mandatory).
+    expect(PROTOCOL_STORAGE_ACK).toBe('/dkg/10.0.1/storage-ack');
   });
 
-  it('`dkg-agent.ts` registers PROTOCOL_STORAGE_ACK on the protocol router', () => {
+  it('`dkg-agent.ts` registers PROTOCOL_STORAGE_ACK on the messenger substrate', () => {
     const src = readFileSync(DKG_AGENT_FILE, 'utf8');
-    // Must import the constant and use it with router.register.
     expect(src).toMatch(/PROTOCOL_STORAGE_ACK/);
-    // The registration call — `this.router.register(PROTOCOL_STORAGE_ACK, ...)`
-    const registerRE = /router\.register\s*\(\s*PROTOCOL_STORAGE_ACK\s*,/;
+    // rc.9 PR-11: registration moved from `router.register` to
+    // `messenger.register` (substrate auto-wraps with envelope
+    // decode + receiver-side dedup). Pin against the new shape.
+    const registerRE = /messenger\.register\s*\(\s*PROTOCOL_STORAGE_ACK\s*,/;
     expect(src).toMatch(registerRE);
   });
 

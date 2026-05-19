@@ -92,10 +92,43 @@ export interface PeerInfo {
     multiaddrs: string[];
     protocols: string[];
   } | null;
+  /**
+   * Pending substrate-outbox entries for this peer.
+   *
+   * Top-level fields (`pendingCount`, `oldestFirstFailureAt`,
+   * `attempts`) keep the rc.8 chat-only contract (chat was the
+   * only protocol on the substrate before rc.9 PR-E). Existing
+   * consumers that read just these fields continue to work
+   * unchanged.
+   *
+   * {@link byProtocol} (rc.9 PR-E codex follow-up #10 — daemon
+   * shipped in b3dd4db4) breaks out queued entries per libp2p
+   * protocol id so the per-protocol substrate-outbox state
+   * (sync, SWM, future protocols) is visible to MCP consumers.
+   * Each per-protocol summary mirrors the top-level shape.
+   */
   outbox: {
+    /** Chat-protocol pending count (rc.8 contract). */
     pendingCount: number;
+    /** Chat-protocol oldest `firstFailureAt`. */
     oldestFirstFailureAt: number | null;
+    /** Chat-protocol per-entry attempts. */
     attempts: number[];
+    /**
+     * Per-protocol pending breakdown. Empty object when this peer
+     * has no pending entries on the substrate at all.
+     *
+     * Keys are libp2p protocol ids (e.g. `/dkg/10.0.1/sync`,
+     * `/dkg/10.0.1/message`).
+     */
+    byProtocol: Record<
+      string,
+      {
+        pendingCount: number;
+        oldestFirstFailureAt: number | null;
+        attempts: number[];
+      }
+    >;
   };
   protocols: string[];
   syncCapable: boolean;

@@ -381,7 +381,7 @@ export class FakeClient {
       getConnectionsReturnsForPeer: 0,
       connections: [],
       peerStore: null,
-      outbox: { pendingCount: 0, oldestFirstFailureAt: null, attempts: [] },
+      outbox: { pendingCount: 0, oldestFirstFailureAt: null, attempts: [], byProtocol: {} },
       protocols: [],
       syncCapable: false,
       lastSeen: null,

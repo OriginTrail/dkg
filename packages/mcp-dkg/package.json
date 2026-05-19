@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg-mcp",
-  "version": "10.0.0-rc.8",
+  "version": "10.0.0-rc.9",
   "description": "MCP server that exposes the local DKG daemon (projects, sub-graphs, activity, chat) to Cursor, Claude Code, and any other MCP-aware coding assistant.",
   "type": "module",
   "main": "dist/index.js",

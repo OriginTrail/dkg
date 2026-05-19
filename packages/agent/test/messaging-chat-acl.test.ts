@@ -20,10 +20,17 @@
 // strings.
 
 import { describe, it, expect, vi } from 'vitest';
-import { generateEd25519Keypair, type Ed25519Keypair } from '@origintrail-official/dkg-core';
-import type { ProtocolRouter, EventBus, DKGStreamHandler } from '@origintrail-official/dkg-core';
+import {
+  generateEd25519Keypair,
+  InMemoryMessageIdempotencyStore,
+  InMemoryProtocolOutboxStore,
+  type Ed25519Keypair,
+  type EventBus,
+  type DKGStreamHandler,
+  type ProtocolRouter,
+} from '@origintrail-official/dkg-core';
 import { MessageHandler, ed25519ToX25519Private, type ChatHandler, type ChatAclCheck } from '../src/index.js';
-import type { Messenger } from '../src/p2p/messenger.js';
+import { Messenger } from '../src/p2p/messenger.js';
 
 // Two PeerId-shaped opaque tokens. We pre-cache the Ed25519 pubkeys via
 // registerPeerKey() so MessageHandler never tries to decode these as
@@ -55,8 +62,11 @@ async function buildPair(): Promise<TestPair> {
   const xA = ed25519ToX25519Private(keyA.secretKey);
   const xB = ed25519ToX25519Private(keyB.secretKey);
 
-  // Capture each side's `handleIncoming` so we can wire the
-  // messengers across without needing real libp2p.
+  // Build a pair of substrate-backed Messengers that route directly
+  // through each other's handler maps. rc.9 PR-3 substrate
+  // semantics — receiver-side dedup, ReliableEnvelope wrapping,
+  // sender-side idempotency cache — are exercised end-to-end by
+  // these tests because they cover the full chat round-trip.
   let aIncoming: DKGStreamHandler | null = null;
   let bIncoming: DKGStreamHandler | null = null;
 
@@ -64,36 +74,36 @@ async function buildPair(): Promise<TestPair> {
     register: (_proto: string, handler: DKGStreamHandler) => {
       aIncoming = handler;
     },
+    send: async (_to: string, _proto: string, data: Uint8Array) => {
+      if (!bIncoming) throw new Error('bIncoming not registered');
+      return await bIncoming(data, { toString: () => PEER_A });
+    },
   } as unknown as ProtocolRouter;
 
   const routerB: ProtocolRouter = {
     register: (_proto: string, handler: DKGStreamHandler) => {
       bIncoming = handler;
     },
-  } as unknown as ProtocolRouter;
-
-  // A's messenger routes outbound frames to B.handleIncoming and back.
-  const messengerA: Messenger = {
-    sendToPeer: async (_to: string, _proto: string, data: Uint8Array) => {
-      if (!bIncoming) throw new Error('bIncoming not registered');
-      return await bIncoming(data, { toString: () => PEER_A });
-    },
-  } as unknown as Messenger;
-
-  // B's messenger isn't actually used by the test cases (B only
-  // receives), but provide a stub so construction succeeds.
-  const messengerB: Messenger = {
-    sendToPeer: async (_to: string, _proto: string, data: Uint8Array) => {
+    send: async (_to: string, _proto: string, data: Uint8Array) => {
       if (!aIncoming) throw new Error('aIncoming not registered');
       return await aIncoming(data, { toString: () => PEER_B });
     },
-  } as unknown as Messenger;
+  } as unknown as ProtocolRouter;
 
-  const a = new MessageHandler(routerA, messengerA, keyA, xA, PEER_A, makeEventBus());
-  const b = new MessageHandler(routerB, messengerB, keyB, xB, PEER_B, makeEventBus());
+  const messengerA = new Messenger({
+    router: routerA,
+    idempotencyStore: new InMemoryMessageIdempotencyStore(),
+    outboxStore: new InMemoryProtocolOutboxStore(),
+  });
+  const messengerB = new Messenger({
+    router: routerB,
+    idempotencyStore: new InMemoryMessageIdempotencyStore(),
+    outboxStore: new InMemoryProtocolOutboxStore(),
+  });
 
-  // Cache each side's public key on the other so MessageHandler
-  // doesn't try to decode PEER_A/PEER_B as a real libp2p PeerId.
+  const a = new MessageHandler(messengerA, keyA, xA, PEER_A, makeEventBus());
+  const b = new MessageHandler(messengerB, keyB, xB, PEER_B, makeEventBus());
+
   a.registerPeerKey(PEER_B, keyB.publicKey);
   b.registerPeerKey(PEER_A, keyA.publicKey);
 

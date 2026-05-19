@@ -50,9 +50,9 @@ describe('health tools', () => {
             openedAt: 1715670000000,
           },
         ],
-        peerStore: { knownMultiaddrCount: 1, multiaddrs: ['/ip4/1.2.3.4/tcp/4001'], protocols: ['/dkg/10.0.0/sync'] },
-        outbox: { pendingCount: 0, oldestFirstFailureAt: null, attempts: [] },
-        protocols: ['/dkg/10.0.0/sync'],
+        peerStore: { knownMultiaddrCount: 1, multiaddrs: ['/ip4/1.2.3.4/tcp/4001'], protocols: ['/dkg/10.0.1/sync'] },
+        outbox: { pendingCount: 0, oldestFirstFailureAt: null, attempts: [], byProtocol: {} },
+        protocols: ['/dkg/10.0.1/sync'],
         syncCapable: true,
         lastSeen: 1715670010000,
         latencyMs: 42,
@@ -69,7 +69,8 @@ describe('health tools', () => {
       expect(body).toContain(PEER_A);
       expect(body).toContain('"connected": true');
       expect(body).toContain('"getConnectionsReturnsForPeer": 1');
-      expect(body).toContain('/dkg/10.0.0/sync');
+      // rc.9 PR-E: protocol bump to /dkg/10.0.1/sync.
+      expect(body).toContain('/dkg/10.0.1/sync');
     });
 
     // The Window D bug surface — when the two counts diverge, an
@@ -95,7 +96,18 @@ describe('health tools', () => {
           },
         ],
         peerStore: null,
-        outbox: { pendingCount: 1, oldestFirstFailureAt: 1715669999000, attempts: [3] },
+        outbox: {
+          pendingCount: 1,
+          oldestFirstFailureAt: 1715669999000,
+          attempts: [3],
+          byProtocol: {
+            '/dkg/10.0.1/message': {
+              pendingCount: 1,
+              oldestFirstFailureAt: 1715669999000,
+              attempts: [3],
+            },
+          },
+        },
         protocols: [],
         syncCapable: false,
         lastSeen: null,
@@ -155,7 +167,7 @@ describe('health tools', () => {
             },
           ],
           peerStore: null,
-          outbox: { pendingCount: 0, oldestFirstFailureAt: null, attempts: [] },
+          outbox: { pendingCount: 0, oldestFirstFailureAt: null, attempts: [], byProtocol: {} },
           protocols: [],
           syncCapable: false,
           lastSeen: null,

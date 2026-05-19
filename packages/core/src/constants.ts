@@ -3,17 +3,96 @@
 export const PROTOCOL_PUBLISH = '/dkg/10.0.0/publish';
 export const PROTOCOL_QUERY = '/dkg/10.0.0/query';
 export const PROTOCOL_DISCOVER = '/dkg/10.0.0/discover';
-export const PROTOCOL_SYNC = '/dkg/10.0.0/sync';
-export const PROTOCOL_MESSAGE = '/dkg/10.0.0/message';
-export const PROTOCOL_ACCESS = '/dkg/10.0.0/private-access';
-export const PROTOCOL_QUERY_REMOTE = '/dkg/10.0.0/query-remote';
-export const PROTOCOL_SWM_SENDER_KEY = '/dkg/10.0.0/swm-sender-key';
+// rc.9 PR-E (SWM reliable fan-out plan, Step 2): bumped from
+// /dkg/10.0.0/sync to /dkg/10.0.1/sync. The sync RPC is the eventual-
+// consistency safety net for SWM share delivery (runSyncOnConnect →
+// syncSharedMemoryFromPeer when peers reconnect). Pre-rc.9 the
+// safety net itself ran over an un-migrated transport: no envelope
+// versioning, no idempotency, no durable outbox — a stream reset
+// mid-sync was unrecoverable except by the next reconnect. Bumping
+// onto the /dkg/10.0.1/ prefix gives the safety net the same
+// reliability primitives as chat / access / query-remote / etc.
+// Hard cutover, consistent with the rc.9 protocol migration model:
+// rc.8 nodes cannot sync from rc.9 nodes and vice versa.
+export const PROTOCOL_SYNC = '/dkg/10.0.1/sync';
+// Universal Messenger pilot protocol (rc.9 PR-3). Bumped from
+// /dkg/10.0.0/message to /dkg/10.0.1/message to opt into the
+// reliability substrate (ReliableEnvelope wrapper, sender +
+// receiver idempotency, durable SQLite outbox). Hard cutover —
+// nodes on rc.8 cannot chat with nodes on rc.9; both daemons MUST
+// be on the same prefix (see docs/messenger.md "Versioning" + the
+// rc.9 plan note "Safe by /dkg/10.0.1/* prefix-version invariant").
+// PR-8+ migrate the remaining short-message protocols onto the
+// same 10.0.1 minor.
+export const PROTOCOL_MESSAGE = '/dkg/10.0.1/message';
+// rc.9 PR-8: bumped from /dkg/10.0.0/private-access to opt into the
+// Universal Messenger substrate (envelope wrapper, sender-side
+// idempotency cache, receiver-side dedup, durable SQLite outbox).
+// Hard cutover — rc.8 nodes can no longer request private access
+// from rc.9 nodes and vice versa. The handler registers via
+// messenger.register and the only production-shaped sender (the
+// publisher AccessClient — currently exercised only by integration
+// tests) routes through messenger.sendReliable.
+export const PROTOCOL_ACCESS = '/dkg/10.0.1/private-access';
+// rc.9 PR-9: bumped from /dkg/10.0.0/query-remote to opt into the
+// Universal Messenger substrate. Query responses can be large
+// (SPARQL result sets), so a duplicate receive (multi-path race or
+// idempotency-retry) that hits the 256 KiB mark-only response cache
+// returns RESPONSE_GONE. queryRemote() handles RESPONSE_GONE by
+// re-issuing the query with a fresh messageId — SPARQL is idempotent
+// at the app layer so this is semantically safe (see
+// docs/messenger.md "Response caching policy").
+export const PROTOCOL_QUERY_REMOTE = '/dkg/10.0.1/query-remote';
+// rc.9 PR-8: bumped from /dkg/10.0.0/swm-sender-key to opt into the
+// Universal Messenger substrate (same rationale as PROTOCOL_ACCESS).
+// SWM sender-key send sites in dkg-agent.ts route through
+// messenger.sendReliable; handler registers via messenger.register.
+export const PROTOCOL_SWM_SENDER_KEY = '/dkg/10.0.1/swm-sender-key';
+// rc.9 PR-C (SWM reliable fan-out plan, Step 3): NEW protocol — no
+// rc.8 predecessor. Carries the same workspace-gossip wire bytes
+// (produced by `encodeWorkspaceGossipMessage`) point-to-point over
+// the reliable messenger substrate, as a deterministic alternative
+// to GossipSub's best-effort mesh. The receiver handler hands the
+// bytes directly to `SharedMemoryHandler.handle()` — same in-process
+// apply path that the gossip subscription drives, so dedup and
+// metrics behave identically. Activated by the tier-switch in
+// `publishWorkspaceGossip` for any CG whose `CGMemberEnumerator`
+// returns `source: 'allowlist'`, and as a top-up for public CGs at
+// or below `DKG_SWM_SUBSTRATE_MAX_MEMBERS`. See RFC-003 §6 for the
+// full transport policy.
+export const PROTOCOL_SWM_UPDATE = '/dkg/10.0.1/swm-update';
+// rc.9 PR-D (SWM reliable fan-out plan, Step 1b): NEW protocol — no
+// rc.8 predecessor. Per-recipient acknowledgement that the receiver
+// successfully applied a SWM share via the GOSSIP path. Receivers
+// emit this on every gossip-applied share to the share's author peer
+// (extracted from the gossip envelope signature); senders track ack
+// arrivals against the enumerated `expectedMembers` set in
+// `SwmAckQuorum` to compute per-share delivery quorum. Substrate-
+// delivered shares (PROTOCOL_SWM_UPDATE) ACK via the substrate
+// response itself and DO NOT emit a separate SwmShareAck to avoid
+// double counting. The watchdog runs substrate top-up over the
+// long-tail non-acked peers (`expectedMembers \ acked`) and gives
+// up at the deadline, falling back to runSyncOnConnect for offline
+// peers. See RFC-003 §4.2 + §5.2 for the full ack-quorum policy.
+export const PROTOCOL_SWM_SHARE_ACK = '/dkg/10.0.1/swm-share-ack';
 
-export const PROTOCOL_JOIN_REQUEST = '/dkg/10.0.0/join-request';
+// rc.9 PR-10: bumped from /dkg/10.0.0/join-request to opt into the
+// Universal Messenger substrate. The in-memory JoinApprovalRetryQueue
+// (rc.9 PR #510) is replaced by the substrate's durable SQLite outbox
+// — same backoff ladder semantics, persists across daemon restart.
+export const PROTOCOL_JOIN_REQUEST = '/dkg/10.0.1/join-request';
 
-export const PROTOCOL_VERIFY_PROPOSAL = '/dkg/10.0.0/verify-proposal';
+// rc.9 PR-11: bumped from /dkg/10.0.0/* to opt into the Universal
+// Messenger substrate. ACKCollector + VerifyCollector keep their
+// existing app-level fan-out + quorum semantics; substrate gives
+// them envelope-versioned wire + receiver-side dedup + sender
+// idempotency under the hood. Default `parallelPaths` for these two
+// is intentionally **1** (the app already fans out; parallelPaths>1
+// would 9x amplify the wire load with no SLO win — see plan PR-4
+// runtime guard + PR-11 rationale).
+export const PROTOCOL_VERIFY_PROPOSAL = '/dkg/10.0.1/verify-proposal';
 export const PROTOCOL_VERIFY_APPROVAL = '/dkg/10.0.0/verify-approval';
-export const PROTOCOL_STORAGE_ACK = '/dkg/10.0.0/storage-ack';
+export const PROTOCOL_STORAGE_ACK = '/dkg/10.0.1/storage-ack';
 
 export const DHT_PROTOCOL = '/dkg/kad/1.0.0';
 

@@ -102,6 +102,85 @@ To verify the live daemon's effective limit, look for the startup log line
 `[dkg-core] relay server: ulimit -n soft=<N> >= recommended <M>, ok` (or the
 WARN equivalent if the host needs tuning).
 
+## Operator relays (rc.9 PR-7)
+
+By default every daemon reserves on the public testnet relay set declared in
+`network/<env>.json#relays`. The public set is enough for reliable chat /
+skill / query traffic; operators who run their own relay infrastructure can
+prioritise their own relays via `--relay-preferred` (CLI) or the
+`preferredRelays` config field (persistent).
+
+### Standing up your own relay
+
+1. **Provision a small cloud VM.** 1 vCPU + 1 GiB RAM + 20 GiB disk is plenty
+   for a relay-only node. Public IP + ports `4001/tcp` open. AWS t4g.small,
+   Hetzner CPX11, GCP e2-micro all work.
+
+2. **Install + init DKG** as you would for any other node (see "Quick Start"
+   above).
+
+3. **Switch the role to relay-server.** Edit `~/.dkg/config.json`:
+
+   ```jsonc
+   {
+     "name": "my-relay-eu",
+     "nodeRole": "core",            // enables circuit-relay-v2 server
+     "relayServerCapacity": 1024,   // tune per the capacity table above
+     "announceAddresses": [
+       "/ip4/<your-public-ip>/tcp/4001"
+     ]
+   }
+   ```
+
+4. **Bump `ulimit -n`** per the table in "Required `ulimit -n`" above.
+
+5. **Start the daemon and capture the relay's multiaddr** from the startup
+   log. It will look like:
+
+   ```
+   /ip4/<public-ip>/tcp/4001/p2p/12D3KooWMyRelayPeerId...
+   ```
+
+   This is the string you share with your other nodes.
+
+6. **Wire it up on every node that should prefer your relay:**
+
+   ```bash
+   dkg start --relay-preferred /ip4/<public-ip>/tcp/4001/p2p/12D3KooW...
+   ```
+
+   Or persistently in each node's `~/.dkg/config.json`:
+
+   ```jsonc
+   {
+     "preferredRelays": [
+       "/ip4/203.0.113.10/tcp/4001/p2p/12D3KooWMyRelayEU...",
+       "/dns4/relay-us.example.com/tcp/4001/p2p/12D3KooWMyRelayUS..."
+     ]
+   }
+   ```
+
+### Recommended infrastructure
+
+- **2–3 relays in geographically distinct regions.** A two-relay topology
+  (EU + US) gives 100% uptime tolerance to single-region outages; three
+  (EU + US + APAC) lets you survive an entire cloud-provider failure.
+- **Restart policy.** systemd `Restart=always` (or the equivalent for your
+  init system). The local relay watchdog handles transient libp2p failures,
+  but a daemon crash needs OS-level restart.
+- **Monitoring.** Probe `/api/peer-info` (rc.9 #533) every 30s; alert on
+  `currentReservations.length == 0` for more than 5 minutes (means the
+  relay is technically running but holding no client reservations — usually
+  a port-forward / NAT issue).
+- **Backups.** A relay holds no application state — `~/.dkg` is reconstructible
+  from `dkg init`. The only persistent artifact you care about is the libp2p
+  peer key (`~/.dkg/key`); back it up if you want the same multiaddr after a
+  VM rebuild.
+
+See [`docs/messenger-operator.md`](../../docs/messenger-operator.md) for the
+full operator-side guide (debugging stuck outbox entries, reading `/api/slo`
+once it lands in rc.9 PR-12).
+
 ## Edge tuning
 
 ### Multi-reservation (NAT'd nodes)

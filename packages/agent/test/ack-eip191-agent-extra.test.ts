@@ -157,8 +157,9 @@ describe('A-10: 6-field ACK digest + EIP-191 signing (agent identity)', () => {
 describe('A-10 / A-12: storage-ack libp2p protocol id is pinned', () => {
   // If the constant shifts, ACK collectors and handlers will disagree and
   // ACK collection silently times out. See also storage-ack-protocol-extra.
-  it(`is exactly "/dkg/10.0.0/storage-ack"`, () => {
-    expect(PROTOCOL_STORAGE_ACK).toBe('/dkg/10.0.0/storage-ack');
+  // rc.9 PR-11: pin bumped to the substrate-versioned prefix.
+  it(`is exactly "/dkg/10.0.1/storage-ack"`, () => {
+    expect(PROTOCOL_STORAGE_ACK).toBe('/dkg/10.0.1/storage-ack');
   });
 });
 

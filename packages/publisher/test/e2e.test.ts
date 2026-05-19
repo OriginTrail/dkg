@@ -16,6 +16,7 @@ import { DKGPublisher } from '../src/dkg-publisher.js';
 import { PublishHandler } from '../src/publish-handler.js';
 import { AccessHandler } from '../src/access-handler.js';
 import { AccessClient } from '../src/access-client.js';
+import { createSubstrateClient, registerSubstrateHandler } from './_helpers/substrate.js';
 import { DKGQueryEngine } from '@origintrail-official/dkg-query';
 import { multiaddr } from '@multiformats/multiaddr';
 import { ethers } from 'ethers';
@@ -237,11 +238,11 @@ describe('End-to-end: Publish → Replicate → Query', () => {
     // Register access handler on A
     const accessHandler = new AccessHandler(storeA, busA);
     const routerA = new ProtocolRouter(nodeA);
-    routerA.register(PROTOCOL_ACCESS, accessHandler.handler);
+    registerSubstrateHandler(routerA, PROTOCOL_ACCESS, async (data, peerId) => accessHandler.handler(data, { toString: () => peerId, toBytes: () => new Uint8Array() }));
 
     // AccessClient on B requests private triples from A
     const routerB = new ProtocolRouter(nodeB);
-    const accessClient = new AccessClient(routerB, keypairB, nodeB.peerId);
+    const accessClient = new AccessClient(createSubstrateClient(routerB), keypairB, nodeB.peerId);
 
     const onChain = result.onChainResult!;
     const accessResult = await accessClient.requestAccess(

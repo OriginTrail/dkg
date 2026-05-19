@@ -41,6 +41,12 @@ class CapturingGossip {
   async publish(topic: string, data: Uint8Array): Promise<void> {
     this.messages.push({ topic, data });
   }
+
+  // rc.9 PR-C: tier-switch in publishWorkspaceGossip consults
+  // GossipSubManager.getSubscribers. Empty roster keeps these
+  // tests focused on the gossip-signing path (no substrate
+  // fan-out competes for the encoded message bytes).
+  getSubscribers(_topic: string): string[] { return []; }
 }
 
 async function insertAgentGate(

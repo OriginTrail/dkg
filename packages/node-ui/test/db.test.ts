@@ -86,7 +86,7 @@ describe('DashboardDB — metric snapshots', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(11);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(13);
 
     const cols = (db.db.prepare('PRAGMA table_info(metric_snapshots)').all() as Array<{ name: string }>)
       .map((c) => c.name);
@@ -626,16 +626,17 @@ describe('DashboardDB.getChatMessages — chat inbox semantics', () => {
   });
 });
 
-// Receiver-side dedup by `message_id` — addresses the seq=13 duplicate
-// class from the May 2026 Miles↔Lex 6h soak postmortem (same encrypted
-// payload arrived on Miles's side twice ~1s apart and both rows were
-// stored because there was no idempotency key). V11 adds the partial
-// unique index `idx_chat_msgid ON (peer, direction, message_id)
-// WHERE message_id IS NOT NULL`, and `insertChatMessage` switches to
-// `INSERT OR IGNORE`. `direction` is in the key per Codex review of
-// PR #534 so inbound + outbound rows from the same peer that happen
-// to reuse a `messageId` (e.g. caller-supplied via MCP) don't collide.
-describe('DashboardDB.insertChatMessage — V11 receiver-side dedup', () => {
+// Receiver-side message-id semantics — V13 (rc.9 PR-3) moved chat
+// dedup from SQL to the substrate (`Messenger.register` +
+// `message_idempotency`). The `chat_messages.message_id` COLUMN is
+// preserved as nullable + persisted so existing readers (HTTP API +
+// MCP) keep working. The partial unique INDEX
+// `idx_chat_msgid(peer, direction, message_id) WHERE message_id IS
+// NOT NULL` was DROPPED — duplicate inserts at SQL level are no
+// longer blocked because the substrate intercepts them upstream.
+// These tests pin the V13 contract: column persists, no SQL dedup,
+// non-dedup constraint violations still throw.
+describe('DashboardDB.insertChatMessage — V13 substrate-owned dedup', () => {
   it('returns true on first insert with a messageId', () => {
     const inserted = db.insertChatMessage({
       ts: 1000,
@@ -648,13 +649,13 @@ describe('DashboardDB.insertChatMessage — V11 receiver-side dedup', () => {
     expect(db.getChatMessages({ peer: 'alice' })).toHaveLength(1);
   });
 
-  it('returns false and drops the row on duplicate (peer, messageId)', () => {
+  it('V13: duplicate (peer, direction, messageId) tuples are persisted (substrate gates upstream)', () => {
     db.insertChatMessage({ ts: 1000, direction: 'in', peer: 'alice', text: 'first', messageId: 'msg-1' });
-    // Same peer + same messageId — receiver-side dedup must drop this.
-    // The dropped insert may carry different `ts` / `text` (e.g. an
-    // application-level retry that mutated the timestamp): the index
-    // still recognises it as the same logical message because dedup
-    // keys off `(peer, message_id)` only.
+    // V13 contract: SQL no longer enforces uniqueness. If two
+    // identical rows reach the insert, both are persisted —
+    // because in the rc.9 substrate-owned model, both reaching
+    // this layer means the substrate did NOT detect a duplicate
+    // (e.g. test-direct insert that bypasses Messenger.register).
     const inserted = db.insertChatMessage({
       ts: 1500,
       direction: 'in',
@@ -662,13 +663,9 @@ describe('DashboardDB.insertChatMessage — V11 receiver-side dedup', () => {
       text: 'first-but-different-text',
       messageId: 'msg-1',
     });
-    expect(inserted).toBe(false);
+    expect(inserted).toBe(true);
     const rows = db.getChatMessages({ peer: 'alice' });
-    expect(rows).toHaveLength(1);
-    // Original row is the survivor — partial-unique-index INSERT OR
-    // IGNORE drops the second insert before any column is overwritten.
-    expect(rows[0].text).toBe('first');
-    expect(rows[0].ts).toBe(1000);
+    expect(rows).toHaveLength(2);
   });
 
   it('different messageIds from the same peer are NOT deduped', () => {
@@ -716,16 +713,13 @@ describe('DashboardDB.insertChatMessage — V11 receiver-side dedup', () => {
     expect(row.message_id).toBe('mid-XYZ');
   });
 
-  // The dedup index includes `direction` (Codex review of PR #534
-  // flagged the original `(peer, message_id)` shape as letting a
-  // legitimate inbound message collide with an outbound row from
-  // the same peer that reused the same id). Within ONE direction
-  // the index still drops re-INSERTs of the same `(peer, dir, id)`:
-  // current code paths only INSERT outbound rows once (via
-  // `/api/chat`; retries reuse the row by design — they don't
-  // re-INSERT), but this pin protects any future code path that
-  // re-INSERTs from accidentally duplicating.
-  it('dedup applies WITHIN one direction (outbound retry replays drop on the existing row)', () => {
+  // V13: substrate owns dedup. Repeated outbound INSERTs at the
+  // SQL layer are no longer suppressed — they persist as separate
+  // rows. The new contract for callers that previously relied on
+  // SQL dedup is to delegate to `Messenger.sendReliable` (sender
+  // idempotency cache) instead of calling `insertChatMessage`
+  // multiple times with the same key.
+  it('V13: outbound INSERT replay with the same messageId persists both rows', () => {
     const firstAttempt = db.insertChatMessage({
       ts: 1000,
       direction: 'out',
@@ -743,9 +737,9 @@ describe('DashboardDB.insertChatMessage — V11 receiver-side dedup', () => {
       delivered: true,
       messageId: 'out-msg-1',
     });
-    expect(replay).toBe(false);
+    expect(replay).toBe(true);
     const rows = db.getChatMessages({ peer: 'alice', direction: 'out' });
-    expect(rows).toHaveLength(1);
+    expect(rows).toHaveLength(2);
   });
 
   // Codex review of PR #534 regression: with the original
@@ -782,18 +776,11 @@ describe('DashboardDB.insertChatMessage — V11 receiver-side dedup', () => {
     expect(db.getChatMessages({ peer: 'alice' })).toHaveLength(2);
   });
 
-  // 🟡 Codex review on PR #538: the original `INSERT OR IGNORE`
-  // suppressed EVERY SQLite constraint violation, not just the
-  // dedup-index hit. That meant a future NOT NULL / CHECK / other
-  // unique-index failure would silently look identical to a dedup
-  // (`changes === 0`), and the daemon would skip notification +
-  // logging as if the row were already stored. Fix uses a targeted
-  // `ON CONFLICT (peer, direction, message_id) WHERE message_id IS
-  // NOT NULL DO NOTHING` clause; non-dedup constraint violations
-  // must still throw. `peer` is `NOT NULL` per the schema; insert
-  // with `peer = ''` then patch via raw SQL doesn't help us here
-  // because better-sqlite3 enforces the binding type, but a NULL
-  // peer triggers the schema-level NOT NULL — that's the assertion.
+  // V13 (rc.9 PR-3) removed the `ON CONFLICT ... DO NOTHING` clause
+  // entirely — but the underlying schema constraints (NOT NULL
+  // etc.) remain. Make sure non-dedup constraint violations still
+  // throw, so a bug in the daemon's chat path can't silently
+  // swallow a NULL peer or similar.
   it('non-dedup constraint violations still throw (peer NOT NULL is not swallowed)', () => {
     expect(() => {
       db.insertChatMessage({
@@ -813,15 +800,18 @@ describe('DashboardDB.insertChatMessage — V11 receiver-side dedup', () => {
   });
 });
 
-// Regression coverage for the V11 schema migration itself — analogous to
-// the V10 metric_snapshots upgrade test above. Strategy: take the freshly
-// created V11 db (full schema), simulate a pre-V11 baseline by dropping
-// the `message_id` column AND the `idx_chat_msgid` index AND resetting
-// `user_version` to 10, then reopen via DashboardDB and verify the
-// upgrade restores both schema artefacts and that the dedup semantic
-// kicks in on subsequent inserts.
-describe('DashboardDB — V11 schema migration', () => {
-  it('upgrades a pre-V11 chat_messages table by adding `message_id` + the partial unique index', () => {
+// Regression coverage for the V11→V13 chat schema migration chain. V11
+// added `chat_messages.message_id` + the partial unique index
+// `idx_chat_msgid` to dedup multi-path-race chat duplicates at SQL
+// level. V12 added the substrate's protocol-agnostic
+// `message_idempotency` table. V13 (rc.9 PR-3) drops
+// `idx_chat_msgid` because dedup is now owned by `Messenger.register`
+// + `message_idempotency` — the substrate intercepts duplicates
+// before they reach the chat-messages insert. The `message_id`
+// COLUMN is preserved as nullable + unwritten for rollback safety
+// (downgrade to rc.8 finds a structurally-compatible schema).
+describe('DashboardDB — V11→V13 chat schema migration chain', () => {
+  it('upgrades pre-V11 → V13: adds `message_id` column, drops the partial unique index, accepts duplicate inserts (substrate owns dedup)', () => {
     const dbPath = join(dir, 'node-ui.db');
     db.close();
 
@@ -829,12 +819,6 @@ describe('DashboardDB — V11 schema migration', () => {
     const raw = new Database(dbPath);
     raw.exec('DROP INDEX IF EXISTS idx_chat_msgid;');
     raw.exec('ALTER TABLE chat_messages DROP COLUMN message_id;');
-    // Seed a pre-V11 row that has no message_id by definition. After
-    // the upgrade this row must still be addressable AND must not
-    // block future inserts (the partial index excludes NULL rows).
-    // `ts` must be within the DashboardDB retention window (default
-    // 14d) or the constructor's prune-on-open will sweep it before
-    // the test can read it back.
     const preV11Ts = Date.now() - 60_000;
     raw.prepare(
       `INSERT INTO chat_messages (ts, direction, peer, text) VALUES (?, ?, ?, ?)`,
@@ -843,21 +827,17 @@ describe('DashboardDB — V11 schema migration', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(11);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(13);
 
     const cols = (db.db.prepare('PRAGMA table_info(chat_messages)').all() as Array<{ name: string }>)
       .map((c) => c.name);
     expect(cols).toContain('message_id');
 
+    // V13 explicitly drops the V11 partial unique index. The column
+    // stays for rollback safety; the uniqueness contract is gone.
     const indexes = (db.db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='chat_messages'").all() as Array<{ name: string }>)
       .map((i) => i.name);
-    expect(indexes).toContain('idx_chat_msgid');
-
-    const idxSql = (db.db
-      .prepare("SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_chat_msgid'")
-      .get() as { sql: string }).sql;
-    expect(idxSql).toMatch(/\bdirection\b/);
-    expect(idxSql).toMatch(/WHERE\s+message_id\s+IS\s+NOT\s+NULL/i);
+    expect(indexes).not.toContain('idx_chat_msgid');
 
     // Pre-V11 row survives the migration with a NULL message_id.
     const pre = db.getChatMessages({ peer: 'alice' });
@@ -865,13 +845,17 @@ describe('DashboardDB — V11 schema migration', () => {
     expect(pre[0].text).toBe('pre-v11-row');
     expect(pre[0].message_id).toBeNull();
 
-    // V11 semantics kick in for new inserts.
+    // V13 semantics: duplicate (peer, direction, message_id) tuples
+    // are NO LONGER blocked at SQL level — the substrate's
+    // `message_idempotency` cache intercepts duplicates upstream.
+    // Both inserts succeed; the second is the "if substrate let it
+    // through, persist it" outcome.
     expect(
       db.insertChatMessage({ ts: 1000, direction: 'in', peer: 'alice', text: 'v11-a', messageId: 'm1' }),
     ).toBe(true);
     expect(
       db.insertChatMessage({ ts: 1000, direction: 'in', peer: 'alice', text: 'v11-a-dup', messageId: 'm1' }),
-    ).toBe(false);
-    expect(db.getChatMessages({ peer: 'alice' })).toHaveLength(2);
+    ).toBe(true);
+    expect(db.getChatMessages({ peer: 'alice' })).toHaveLength(3);
   });
 });

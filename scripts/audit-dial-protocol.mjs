@@ -175,6 +175,13 @@ const ALLOWLIST = new Map([
       justification: 'ProtocolRouter.send consults PeerResolver before dialing (RFC 07 PR-3)',
     },
   ],
+  [
+    'packages/core/src/message-stream-pool.ts',
+    {
+      expectedHits: 2,
+      justification: 'Long-lived per-peer stream pool for /dkg/10.0.2/message substrate (PR #560): structural PoolNode interface declaration + the single underlying libp2p dial that opens the pooled stream. The pool itself IS the substrate gateway — it owns one outbound stream per (localNode, peerId) for the lifetime of the connection and is consulted by Messenger.sendReliable, exactly mirroring the LibP2PNetwork gateway role for the request-response transport.',
+    },
+  ],
 ]);
 
 // Codex feedback PR #499 round 4: detect ANY occurrence of the bare

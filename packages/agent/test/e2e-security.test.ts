@@ -27,6 +27,22 @@ import {
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { AccessClient, AccessHandler, DKGPublisher } from '@origintrail-official/dkg-publisher';
+import { InMemoryMessageIdempotencyStore, InMemoryProtocolOutboxStore } from '@origintrail-official/dkg-core';
+import { Messenger } from '../src/p2p/messenger.js';
+
+// rc.9 PR-8: PROTOCOL_ACCESS migrated onto the Universal Messenger
+// substrate (wire prefix bumped to /dkg/10.0.1/private-access). The
+// helper below mints a Messenger over a raw ProtocolRouter with
+// in-memory stores so these tests exercise the same wire shape as
+// production (envelope wrap on send, envelope unwrap + idempotency
+// on receive).
+function messengerFor(router: import('@origintrail-official/dkg-core').ProtocolRouter): Messenger {
+  return new Messenger({
+    router,
+    idempotencyStore: new InMemoryMessageIdempotencyStore(),
+    outboxStore: new InMemoryProtocolOutboxStore(),
+  });
+}
 import { wrapPublisherForTest } from '../../publisher/test/_helpers/seal.js';
 import { ethers } from 'ethers';
 
@@ -231,11 +247,11 @@ describe('Access protocol denial', () => {
     const busA = new TypedEventBus();
     const accessHandler = new AccessHandler(storeA, busA);
     const routerA = new ProtocolRouter(nodeA);
-    routerA.register(PROTOCOL_ACCESS, accessHandler.handler);
+    messengerFor(routerA).register(PROTOCOL_ACCESS, async (data, peerId) => accessHandler.handler(data, { toString: () => peerId, toBytes: () => new Uint8Array() }));
 
     const routerB = new ProtocolRouter(nodeB);
     const keypairB = await generateEd25519Keypair();
-    const accessClient = new AccessClient(routerB, keypairB, nodeB.peerId);
+    const accessClient = new AccessClient(messengerFor(routerB), keypairB, nodeB.peerId);
 
     const result = await accessClient.requestAccess(
       nodeA.peerId,
@@ -287,11 +303,11 @@ describe('Access protocol denial', () => {
 
     const accessHandler = new AccessHandler(storeA, busA);
     const routerA = new ProtocolRouter(nodeA);
-    routerA.register(PROTOCOL_ACCESS, accessHandler.handler);
+    messengerFor(routerA).register(PROTOCOL_ACCESS, async (data, peerId) => accessHandler.handler(data, { toString: () => peerId, toBytes: () => new Uint8Array() }));
 
     const routerB = new ProtocolRouter(nodeB);
     const keypairB = await generateEd25519Keypair();
-    const accessClient = new AccessClient(routerB, keypairB, nodeB.peerId);
+    const accessClient = new AccessClient(messengerFor(routerB), keypairB, nodeB.peerId);
 
     const result = await accessClient.requestAccess(
       nodeA.peerId,
@@ -448,12 +464,12 @@ describe('Access protocol round-trip', () => {
     // Register access handler on A
     const accessHandler = new AccessHandler(storeA, busA);
     const routerA = new ProtocolRouter(nodeA);
-    routerA.register(PROTOCOL_ACCESS, accessHandler.handler);
+    messengerFor(routerA).register(PROTOCOL_ACCESS, async (data, peerId) => accessHandler.handler(data, { toString: () => peerId, toBytes: () => new Uint8Array() }));
 
     // B requests access
     const routerB = new ProtocolRouter(nodeB);
     const keypairB = await generateEd25519Keypair();
-    const accessClient = new AccessClient(routerB, keypairB, nodeB.peerId);
+    const accessClient = new AccessClient(messengerFor(routerB), keypairB, nodeB.peerId);
 
     const onChain = result.onChainResult!;
     const ual = `did:dkg:evm:31337/${onChain.publisherAddress}/${onChain.startKAId}/1`;

@@ -6,12 +6,15 @@ import {
   decodeVerifyApproval,
   encodeStorageACK,
   decodeStorageACK,
+  encodeSwmShareAck,
+  decodeSwmShareAck,
   encodeGossipEnvelope,
   decodeGossipEnvelope,
   computeGossipSigningPayload,
   type VerifyProposalMsg,
   type VerifyApprovalMsg,
   type StorageACKMsg,
+  type SwmShareAckMsg,
   type GossipEnvelopeMsg,
 } from '../src/index.js';
 
@@ -126,6 +129,39 @@ describe('StorageACKMsg', () => {
 
   it('deterministic encoding', () => {
     expect(encodeStorageACK(ack)).toEqual(encodeStorageACK(ack));
+  });
+});
+
+// ── SwmShareAck (rc.9 PR-D) ───────────────────────────────────────────
+
+describe('SwmShareAckMsg', () => {
+  const ack: SwmShareAckMsg = {
+    shareOperationId: 'op-01HXYZABCDEFGHJKMNPQRSTVWX',
+    ackPeerId: '12D3KooWPeerAck',
+  };
+
+  it('encode → decode round-trip preserves both fields', () => {
+    const encoded = encodeSwmShareAck(ack);
+    expect(encoded).toBeInstanceOf(Uint8Array);
+    expect(encoded.length).toBeGreaterThan(0);
+
+    const decoded = decodeSwmShareAck(encoded);
+    expect(decoded.shareOperationId).toBe(ack.shareOperationId);
+    expect(decoded.ackPeerId).toBe(ack.ackPeerId);
+  });
+
+  it('deterministic encoding', () => {
+    expect(encodeSwmShareAck(ack)).toEqual(encodeSwmShareAck(ack));
+  });
+
+  it('handles long peerIds and operation IDs', () => {
+    const long: SwmShareAckMsg = {
+      shareOperationId: 'op-' + 'x'.repeat(200),
+      ackPeerId: '12D3KooW' + 'y'.repeat(200),
+    };
+    const decoded = decodeSwmShareAck(encodeSwmShareAck(long));
+    expect(decoded.shareOperationId).toBe(long.shareOperationId);
+    expect(decoded.ackPeerId).toBe(long.ackPeerId);
   });
 });
 

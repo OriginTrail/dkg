@@ -48,22 +48,22 @@ const REMOTE_PEER_ID = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
 const noopLog = (_ctx: OperationContext, _msg: string) => {};
 
 // Captures the handler that registerSyncHandler installs so the test can drive
-// it directly without a real libp2p stack.
+// it directly without a real libp2p stack. PR-E migrated the responder onto
+// `messenger.register`, so the handler receives the peerId as a plain string
+// (previously `{ toString(): string }`).
 function captureHandler(): {
-  router: { register: (proto: string, h: (data: Uint8Array, peerId: { toString(): string }) => Promise<Uint8Array>) => void };
+  register: (proto: string, h: (data: Uint8Array, peerId: string) => Promise<Uint8Array>) => void;
   invoke: (envelope: SyncRequestEnvelope) => Promise<string>;
 } {
-  let captured: ((data: Uint8Array, peerId: { toString(): string }) => Promise<Uint8Array>) | null = null;
+  let captured: ((data: Uint8Array, peerId: string) => Promise<Uint8Array>) | null = null;
   return {
-    router: {
-      register: (_proto, h) => {
-        captured = h;
-      },
+    register: (_proto, h) => {
+      captured = h;
     },
     invoke: async (envelope) => {
       if (!captured) throw new Error('handler not registered');
       const bytes = new TextEncoder().encode(JSON.stringify(envelope));
-      const out = await captured(bytes, { toString: () => REMOTE_PEER_ID });
+      const out = await captured(bytes, REMOTE_PEER_ID);
       return new TextDecoder().decode(out);
     },
   };
@@ -107,7 +107,7 @@ describe('sync responder data phase — per-cgId meta inclusion', () => {
 
     cap = captureHandler();
     registerSyncHandler({
-      router: cap.router,
+      register: cap.register,
       protocolSync: '/origintrail/dkg/sync/1.0.0',
       syncDeniedResponse: 'sync-denied',
       syncPageSize: 5000,

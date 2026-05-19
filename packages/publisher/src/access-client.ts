@@ -1,4 +1,3 @@
-import type { ProtocolRouter } from '@origintrail-official/dkg-core';
 import {
   PROTOCOL_ACCESS,
   encodeAccessRequest,
@@ -19,17 +18,49 @@ export interface AccessResult {
 }
 
 /**
+ * Minimal substrate-shaped send surface AccessClient depends on.
+ * Lets callers inject any object with a `sendReliable` method —
+ * production wires in the agent's Universal Messenger; tests can
+ * wire in a Messenger fixture or a mock. We don't import the
+ * Messenger class directly to avoid the publisher → agent dep cycle.
+ */
+export interface AccessSendSurface {
+  sendReliable(
+    peerId: string,
+    protocolId: string,
+    payload: Uint8Array,
+    opts?: { messageId?: string; timeoutMs?: number },
+  ): Promise<
+    | { delivered: true; response: Uint8Array; attempts: number; messageId: string }
+    | {
+        delivered: false;
+        queued: true;
+        attempts: number;
+        messageId: string;
+        error: string;
+      }
+  >;
+}
+
+/**
  * Client-side access protocol for requesting private triples from a publisher node.
  * After receiving triples, verifies them against the privateMerkleRoot to ensure
  * data integrity.
+ *
+ * rc.9 PR-8: migrated from `ProtocolRouter.send` to Messenger
+ * substrate (`sendReliable`). Wire prefix bumped to
+ * `/dkg/10.0.1/private-access`; receivers must run the substrate.
+ * Queued returns are surfaced to the caller as a failed access
+ * request — access is synchronous-by-design (the requester is
+ * waiting for triples, not enqueueing a background fetch).
  */
 export class AccessClient {
-  private readonly router: ProtocolRouter;
+  private readonly messenger: AccessSendSurface;
   private readonly keypair: Ed25519Keypair;
   private readonly peerId: string;
 
-  constructor(router: ProtocolRouter, keypair: Ed25519Keypair, peerId: string) {
-    this.router = router;
+  constructor(messenger: AccessSendSurface, keypair: Ed25519Keypair, peerId: string) {
+    this.messenger = messenger;
     this.keypair = keypair;
     this.peerId = peerId;
   }
@@ -52,13 +83,26 @@ export class AccessClient {
       requesterPublicKey: this.keypair.publicKey,
     });
 
-    const responseData = await this.router.send(
+    const sendResult = await this.messenger.sendReliable(
       publisherPeerId,
       PROTOCOL_ACCESS,
       requestData,
     );
 
-    const response = decodeAccessResponse(responseData);
+    if (!sendResult.delivered) {
+      // Access is synchronous-by-design — surface queued as a
+      // rejection so the caller can retry with a fresh request rather
+      // than waiting for a background outbox flush. The substrate
+      // still keeps the outbox entry around for diagnostics.
+      return {
+        granted: false,
+        quads: [],
+        verified: false,
+        rejectionReason: `transport: ${sendResult.error}`,
+      };
+    }
+
+    const response = decodeAccessResponse(sendResult.response);
 
     if (!response.granted) {
       return {

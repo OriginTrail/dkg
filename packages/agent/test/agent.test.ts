@@ -3737,7 +3737,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       const remotePeer = agent.node.peerId.toString();
       const seenCalls: string[][] = [];
 
-      (agent as any).getPeerProtocols = async () => ['/dkg/10.0.0/sync'];
+      (agent as any).getPeerProtocols = async () => [PROTOCOL_SYNC];
       (agent as any).syncFromPeer = async (_peerId: string, contextGraphIds?: string[]) => {
         seenCalls.push([...(contextGraphIds ?? [SYSTEM_CONTEXT_GRAPHS.AGENTS, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, ...((agent as any).config.syncContextGraphs ?? [])])]);
         return 0;

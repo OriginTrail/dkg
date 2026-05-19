@@ -42,6 +42,13 @@ export {
 } from './message.js';
 
 export {
+  type ReliableEnvelopeMsg,
+  RELIABLE_ENVELOPE_VERSION,
+  encodeReliableEnvelope,
+  decodeReliableEnvelope,
+} from './reliable-envelope.js';
+
+export {
   type WorkspacePublishRequestMsg,
   type WorkspaceManifestEntryMsg,
   type WorkspaceCASConditionMsg,
@@ -83,6 +90,12 @@ export {
   encodeStorageACK,
   decodeStorageACK,
 } from './storage-ack.js';
+
+export {
+  type SwmShareAckMsg,
+  encodeSwmShareAck,
+  decodeSwmShareAck,
+} from './swm-share-ack.js';
 
 export {
   type GossipEnvelopeMsg,

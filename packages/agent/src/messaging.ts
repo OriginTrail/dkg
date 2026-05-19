@@ -1,4 +1,4 @@
-import type { StreamHandler, EventBus, Ed25519Keypair } from '@origintrail-official/dkg-core';
+import type { EventBus, Ed25519Keypair } from '@origintrail-official/dkg-core';
 import {
   DKGEvent,
   PROTOCOL_MESSAGE,
@@ -6,9 +6,9 @@ import {
   decodeAgentMessage,
   ed25519Sign,
   ed25519Verify,
+  RESPONSE_GONE_MARKER,
   type AgentMessageMsg,
 } from '@origintrail-official/dkg-core';
-import type { ProtocolRouter } from '@origintrail-official/dkg-core';
 import type { Messenger } from './p2p/messenger.js';
 import { encrypt, decrypt, x25519SharedSecret, ed25519ToX25519Public } from './encryption.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
@@ -132,7 +132,6 @@ export class MessageHandler {
   private chatAclCheck: ChatAclCheck | null = null;
 
   constructor(
-    router: ProtocolRouter,
     messenger: Messenger,
     keypair: Ed25519Keypair,
     x25519Private: Uint8Array,
@@ -145,9 +144,16 @@ export class MessageHandler {
     this.peerId = peerId;
     this.eventBus = eventBus;
 
-    // Router is used only to install the inbound handler; outbound sends
-    // go through `messenger` so they inherit relay-prime + retry uniformly.
-    router.register(PROTOCOL_MESSAGE, this.handleIncoming.bind(this));
+    // PR-3 substrate migration: register via `messenger.register`
+    // rather than `router.register` so inbound chats get
+    // receiver-side dedup (ReliableEnvelope + idempotency cache)
+    // for free — the multi-path duplicate-arrival class from the
+    // May 2026 soak (seq=13 arriving twice) is now absorbed by the
+    // substrate, not by the chat-specific `idx_chat_msgid` SQL
+    // index.
+    messenger.register(PROTOCOL_MESSAGE, async (data, fromPeerId) => {
+      return this.handleIncoming(data, fromPeerId);
+    });
   }
 
   registerSkill(skillUri: string, handler: SkillHandler): void {
@@ -175,11 +181,39 @@ export class MessageHandler {
     this.peerKeys.set(peerId, ed25519Public);
   }
 
+  /**
+   * Send an encrypted chat over the Universal Messenger substrate.
+   *
+   * Outbound semantics (rc.9 PR-3):
+   *
+   *   * **Delivered** → the recipient's ACK was returned synchronously.
+   *     Returns `{ delivered: true }`.
+   *   * **Queued** → the dial failed with a recoverable error
+   *     (`'no valid addresses for peer'`, `NO_RESERVATION`, etc.).
+   *     The substrate has enqueued the encoded envelope to the SQLite
+   *     outbox and will retry on the periodic tick + every
+   *     `connection:open` from the recipient. Returns
+   *     `{ delivered: false, queued: true, attempts, nextAttemptAtMs, error }`.
+   *   * **Hard failure** → encoding bug, unknown protocol, or other
+   *     non-recoverable error. Returns `{ delivered: false, error }`
+   *     (no retry, no queue entry).
+   *
+   * Sender-side idempotency: if the caller passes the same
+   * `messageId` twice (operator double-click, daemon restart replay
+   * via in-flight outbox), the substrate returns the cached response
+   * without a second wire send.
+   */
   async sendChat(
     recipientPeerId: string,
     text: string,
     options: { contextGraphId?: string; messageId?: string } = {},
-  ): Promise<{ delivered: boolean; error?: string }> {
+  ): Promise<{
+    delivered: boolean;
+    error?: string;
+    queued?: boolean;
+    attempts?: number;
+    nextAttemptAtMs?: number;
+  }> {
     try {
       const conversationId = bytesToHex(randomBytes(16));
 
@@ -192,21 +226,6 @@ export class MessageHandler {
         sharedSecret,
       });
 
-      // `contextGraphId` is optional and only included when the caller scopes
-      // chat to a CG (e.g. for the receiver's `scoped`/`shared-context-graph`
-      // ACL modes). Older receivers that don't know the field will simply
-      // ignore it — backwards-compatible JSON addition.
-      //
-      // `messageId` is the sender-assigned dedup key (V11+ receivers use
-      // it to drop duplicates of the same encrypted payload arriving on
-      // parallel transport paths — the seq=13 class from the May 2026
-      // soak postmortem). Same back-compat shape: older receivers
-      // ignore the field; older senders omit it and receivers fall back
-      // to insert-without-dedup. `MessageOutbox` retries that resend
-      // the same logical message MUST reuse the same `messageId` so the
-      // dedup index recognises them — `DKGAgent.sendChat` and
-      // `retryOutboxEntry` both already key off the outbox entry's
-      // `messageId` for exactly this reason.
       const payload = new TextEncoder().encode(JSON.stringify({
         type: 'chat',
         text,
@@ -231,11 +250,42 @@ export class MessageHandler {
         senderPublicKey: this.keypair.publicKey,
       };
 
-      const responseBytes = await this.messenger.sendToPeer(
+      const sendResult = await this.messenger.sendReliable(
         recipientPeerId,
         PROTOCOL_MESSAGE,
         encodeAgentMessage(msg),
+        { messageId: options.messageId },
       );
+
+      if (!sendResult.delivered) {
+        // inFlight === true means another sender holds the slot;
+        // no durable outbox row exists yet, so surface it as a
+        // not-yet-queued attempt the caller should retry immediately.
+        const nextAttemptAtMs = sendResult.queued
+          ? sendResult.nextAttemptAtMs
+          : Date.now();
+        return {
+          delivered: false,
+          queued: sendResult.queued,
+          attempts: sendResult.attempts,
+          nextAttemptAtMs,
+          error: sendResult.error,
+        };
+      }
+
+      // RESPONSE_GONE: the receiver cached this messageId mark-only
+      // (response > 256 KiB). For chat the ACK payload is tiny so
+      // this branch should never fire in practice; if it did the
+      // safe thing is to treat the send as delivered (because the
+      // recipient definitely processed it, we just don't have the
+      // ACK body to introspect). Documented in
+      // docs/messenger.md "RESPONSE_GONE handling".
+      const responseBytes = sendResult.response;
+      const responseText = new TextDecoder().decode(responseBytes);
+      if (responseText === RESPONSE_GONE_MARKER) {
+        return { delivered: true };
+      }
+
       const responseMsg = decodeAgentMessage(responseBytes);
       const plain = new TextDecoder().decode(
         decrypt(sharedSecret, responseMsg.encryptedPayload, responseMsg.nonce),
@@ -284,11 +334,31 @@ export class MessageHandler {
       senderPublicKey: this.keypair.publicKey,
     };
 
-    const responseBytes = await this.messenger.sendToPeer(
+    // Skill requests are synchronous request/response — we don't
+    // want the outbox to silently queue a skill call (the operator
+    // is waiting on the reply). If `sendReliable` queues instead of
+    // delivering, surface that as an explicit failure so the caller
+    // can retry deliberately rather than blocking on a background
+    // tick.
+    const sendResult = await this.messenger.sendReliable(
       recipientPeerId,
       PROTOCOL_MESSAGE,
       encodeAgentMessage(msg),
     );
+    if (!sendResult.delivered) {
+      return {
+        success: false,
+        error: `Skill request queued (not delivered): ${sendResult.error}`,
+      };
+    }
+    const responseBytes = sendResult.response;
+    const responseText = new TextDecoder().decode(responseBytes);
+    if (responseText === RESPONSE_GONE_MARKER) {
+      return {
+        success: false,
+        error: 'Skill response exceeded receiver-side response cache (RESPONSE_GONE); retry with a fresh messageId',
+      };
+    }
 
     const responseMsg = decodeAgentMessage(responseBytes);
     const responsePlain = decrypt(
@@ -307,7 +377,7 @@ export class MessageHandler {
     };
   }
 
-  private async handleIncoming(data: Uint8Array, fromPeerId: { toString(): string }): Promise<Uint8Array> {
+  private async handleIncoming(data: Uint8Array, fromPeerId: string): Promise<Uint8Array> {
     const msg = decodeAgentMessage(data);
     const convId = msg.conversationId;
     const seq = typeof msg.sequence === 'number' ? msg.sequence : msg.sequence.low;
@@ -381,7 +451,7 @@ export class MessageHandler {
 
     this.eventBus.emit(DKGEvent.MESSAGE_RECEIVED, {
       conversationId: convId,
-      from: fromPeerId.toString(),
+      from: fromPeerId,
       type: parsed.type,
     });
 
@@ -406,7 +476,7 @@ export class MessageHandler {
       };
 
       try {
-        const response = await handler(request, fromPeerId.toString());
+        const response = await handler(request, fromPeerId);
         response.executionTimeMs = Date.now() - startTime;
         return this.encryptAndSign(conv.sharedSecret, convId, seq + 1, response);
       } catch (err) {
@@ -451,7 +521,7 @@ export class MessageHandler {
         // ACL-aware error handling kicks in.
         let verdict: ReturnType<ChatAclCheck>;
         try {
-          verdict = this.chatAclCheck(fromPeerId.toString(), {
+          verdict = this.chatAclCheck(fromPeerId, {
             contextGraphId: senderContextGraphId,
           });
         } catch (err) {
@@ -477,7 +547,7 @@ export class MessageHandler {
         try {
           await this.chatHandler(
             text,
-            fromPeerId.toString(),
+            fromPeerId,
             convId,
             senderContextGraphId,
             verifiedContextGraphId,

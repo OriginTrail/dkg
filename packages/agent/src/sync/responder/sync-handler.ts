@@ -5,7 +5,29 @@ import { serializeWorkspacePublicSnapshotQuads, type WorkspacePublicSnapshotStor
 import type { SyncRequestEnvelope } from '../auth/request-build.js';
 
 interface RegisterSyncHandlerParams {
-  router: { register: (protocol: string, handler: (data: Uint8Array, peerId: { toString(): string }) => Promise<Uint8Array>) => void };
+  /**
+   * Substrate `register` callable. In production this is bound to
+   * `Messenger.register`, so the wrapped handler receives an
+   * envelope-unwrapped payload + a string `peerId` and benefits from
+   * receiver-side idempotency dedup + envelope versioning (rc.9
+   * PR-E migration to `/dkg/10.0.1/sync`).
+   *
+   * In tests this can be any callable matching the signature; the
+   * caller doesn't need to provide a real ProtocolRouter or full
+   * Messenger.
+   *
+   * Before PR-E this was `router: { register }` with a peerId
+   * `{ toString(): string }` object — Codex caught that bumping the
+   * advertised `/sync` protocol ID without also moving the sender/
+   * receiver onto the substrate left the new ID without
+   * ReliableEnvelope/dedup/outbox semantics. Migrating the handler
+   * here is half of the fix (the other half is the requester-side
+   * `sendReliable` swap in dkg-agent.ts:fetchSyncPages).
+   */
+  register: (
+    protocolId: string,
+    handler: (data: Uint8Array, peerId: string) => Promise<Uint8Array>,
+  ) => void;
   protocolSync: string;
   syncDeniedResponse: string;
   syncPageSize: number;
@@ -21,7 +43,7 @@ interface RegisterSyncHandlerParams {
 
 export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
   const {
-    router,
+    register,
     protocolSync,
     syncDeniedResponse,
     syncPageSize,
@@ -34,7 +56,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     logDebug,
   } = params;
 
-  router.register(protocolSync, async (data, peerId) => {
+  register(protocolSync, async (data, peerId) => {
     const handlerStartedAt = Date.now();
     const request = parseSyncRequest(data);
     const offset = Math.max(0, Math.min(Number.isSafeInteger(Number(request.offset)) ? Number(request.offset) : 0, 1_000_000));
@@ -48,7 +70,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     const nquads: string[] = [];
 
     const authStartedAt = Date.now();
-    const authorized = await authorizeSyncRequest(request, peerId.toString());
+    const authorized = await authorizeSyncRequest(request, peerId);
     const authDurationMs = Date.now() - authStartedAt;
     if (!authorized) {
       logWarn(createOperationContext('sync'), `Denied sync request for "${contextGraphId}" from peer ${peerId} (phase=${phase})`);
