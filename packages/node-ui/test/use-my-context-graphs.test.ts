@@ -16,12 +16,18 @@ import { createRoot } from 'react-dom/client';
 const HIDDEN_KEY = 'v10:hiddenProjectIds';
 
 // fetchCurrentAgent is hit by useMyContextGraphs on mount; stub it so the
-// hook's identity path is deterministic and offline.
+// hook's identity path is deterministic and offline. The hook now calls
+// it through api-wrapper (mock-aware), so mock at that layer — the
+// wrapper's withFallback would otherwise route to the mock provider in
+// the test env and bypass a plain api.js stub.
 const fetchCurrentAgentMock = vi.fn();
 vi.mock('../src/ui/api.js', async () => {
   const actual = await vi.importActual<any>('../src/ui/api.js');
   return { ...actual, fetchCurrentAgent: fetchCurrentAgentMock };
 });
+vi.mock('../src/ui/api-wrapper.js', () => ({
+  api: { fetchCurrentAgent: () => fetchCurrentAgentMock() },
+}));
 
 async function importHooks() {
   const hidden = await import('../src/ui/hooks/useHiddenContextGraphIds.js');

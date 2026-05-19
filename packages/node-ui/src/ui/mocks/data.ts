@@ -98,6 +98,19 @@ export const MOCK_ECONOMICS = {
   ],
 };
 
+// Mock node-agent identity. agentDid matches the pharma + climate
+// mock curators (0x1111…) so mock mode exercises curator-aware UI
+// (CURATOR vs JOINED badge, identity-based membership fallback) the
+// same way the real daemon would.
+export const MOCK_AGENT_IDENTITY = {
+  agentAddress: '0x1111111111111111111111111111111111111111',
+  agentDid: 'did:dkg:agent:0x1111111111111111111111111111111111111111',
+  name: 'mock-node-agent',
+  framework: 'mock',
+  peerId: 'QmMockNodeAgentPeer000000000000000000000000',
+  nodeIdentityId: 'mock-node-identity',
+};
+
 export const MOCK_WALLETS = {
   wallets: [
     '0xA1b2C3d4E5f60718293a4B5c6D7e8F9012345678',

@@ -61,9 +61,18 @@ const CENTER_MIN_HEIGHT = 240;
 // CENTER_MIN_HEIGHT (Codex).
 const SHELL_CHROME_HEIGHT = 44;
 export function maxBottomHeight(): number {
-  const vh = typeof window !== 'undefined' && window.innerHeight ? window.innerHeight : Infinity;
-  const avail = vh === Infinity ? Infinity : vh - SHELL_CHROME_HEIGHT;
-  return Math.max(BOTTOM_HEIGHT_MIN, Math.min(BOTTOM_HEIGHT_MAX, avail - CENTER_MIN_HEIGHT));
+  const vh = typeof window !== 'undefined' && window.innerHeight ? window.innerHeight : 0;
+  // No window (SSR/tests): only the storage-sanity cap applies.
+  if (!vh) return BOTTOM_HEIGHT_MAX;
+  // Real space the panel may occupy without pushing the center pane
+  // below its minimum. On short viewports this can fall below
+  // BOTTOM_HEIGHT_MIN — we must NOT floor it back up to 120 (that's a
+  // storage-sanity constant, enforced on load, not a viewport rule):
+  // doing so would let the panel overrun the center pane. Returning
+  // the true available space lets the panel shrink (toward 0 →
+  // effectively collapsed) so the center keeps CENTER_MIN_HEIGHT (Codex).
+  const avail = vh - SHELL_CHROME_HEIGHT - CENTER_MIN_HEIGHT;
+  return Math.max(0, Math.min(BOTTOM_HEIGHT_MAX, avail));
 }
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));

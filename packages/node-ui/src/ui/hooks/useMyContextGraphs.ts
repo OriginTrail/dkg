@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useProjectsStore, type ContextGraph } from '../stores/projects.js';
-import { fetchCurrentAgent } from '../api.js';
+import { api } from '../api-wrapper.js';
 import {
   belongsInMyProjectsSidebar,
   toSidebarIdentity,
@@ -35,7 +35,7 @@ export function useMyContextGraphs(): {
   // us the same cadence; fetchCurrentAgent is a cheap GET.
   useEffect(() => {
     let mounted = true;
-    fetchCurrentAgent()
+    api.fetchCurrentAgent()
       .then((a) => { if (mounted) setIdentity(toSidebarIdentity(a)); })
       .catch(() => { /* membership falls back to callerInvolved flags */ })
       .finally(() => { if (mounted) setIdentityLoading(false); });
