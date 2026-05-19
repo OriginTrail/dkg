@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useCallback } from 'react';
+import React, { useEffect, useRef, useCallback, useState } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { Header } from './components/Shell/Header.js';
 import { PanelLeft } from './components/Shell/PanelLeft.js';
@@ -83,12 +83,17 @@ function useDragResize(onDrag: (delta: number) => void) {
 // and uses a row-resize cursor. Kept as a separate hook (rather than
 // generalising useDragResize) to keep the horizontal path untouched.
 function useDragResizeV(onDrag: (delta: number) => void) {
-  const handleRef = useRef<HTMLDivElement>(null);
   const cbRef = useRef(onDrag);
   cbRef.current = onDrag;
+  // The bottom handle only renders while the panel is expanded, and the
+  // panel defaults to collapsed — so a one-shot useEffect([]) keyed on a
+  // ref would bind to `null` on its only run and never re-bind when the
+  // handle later appears, leaving it inert. Track the node in state and
+  // key the effect on it so the listener (re)attaches whenever the
+  // handle mounts/unmounts (Codex).
+  const [handle, setHandle] = useState<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    const handle = handleRef.current;
     if (!handle) return;
 
     let startY = 0;
@@ -120,13 +125,19 @@ function useDragResizeV(onDrag: (delta: number) => void) {
     handle.addEventListener('mousedown', onMouseDown);
     return () => {
       handle.removeEventListener('mousedown', onMouseDown);
-      // If the shell unmounts mid-drag, fully tear down: onMouseUp
-      // removes the document mousemove/mouseup listeners and resets the
-      // body cursor/user-select so the app can't get stuck in
-      // row-resize still firing setBottomHeight (Codex).
+      // If the handle unmounts (panel collapsed) or the shell unmounts
+      // mid-drag, fully tear down: onMouseUp removes the document
+      // mousemove/mouseup listeners and resets the body cursor/
+      // user-select so the app can't get stuck in row-resize still
+      // firing setBottomHeight (Codex).
       onMouseUp();
     };
-  }, []);
+  }, [handle]);
+
+  // Stable callback ref: React invokes it with the node on mount and
+  // null on unmount, driving the effect above.
+  return useCallback((node: HTMLDivElement | null) => setHandle(node), []);
+}
 
   return handleRef;
 }

@@ -174,30 +174,31 @@ async function queryLayer(
   contextGraphId: string,
   opts?: { view?: string; includeSharedMemory?: boolean; graphSuffix?: string },
 ): Promise<Triple[]> {
-  try {
-    const body: any = { sparql, contextGraphId, ...opts };
-    const res = await fetch('/api/query', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...authHeaders() },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) return [];
-    const data = await res.json();
-    const bindings = data?.result?.bindings ?? data?.results?.bindings ?? [];
-    return bindings
-      .map((row: any) => {
-        const g = bv(row.g);
-        return {
-          subject: bv(row.s) ?? '',
-          predicate: bv(row.p) ?? '',
-          object: bv(row.o) ?? '',
-          subGraph: g ? subGraphOf(g, contextGraphId) : undefined,
-        };
-      })
-      .filter((t: Triple) => t.subject && t.predicate && t.object);
-  } catch {
-    return [];
-  }
+  // Failures must propagate, not coerce to `[]`: the dashboard derives
+  // its "size unavailable / partial" state from this hook's `error`, and
+  // in mock/offline mode `/api/query` is unreachable. Swallowing the
+  // failure would present every context graph as a real 0/0 instead of
+  // an unavailable read (Codex). The caller's try/catch sets `error`.
+  const body: any = { sparql, contextGraphId, ...opts };
+  const res = await fetch('/api/query', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`/api/query failed (${res.status})`);
+  const data = await res.json();
+  const bindings = data?.result?.bindings ?? data?.results?.bindings ?? [];
+  return bindings
+    .map((row: any) => {
+      const g = bv(row.g);
+      return {
+        subject: bv(row.s) ?? '',
+        predicate: bv(row.p) ?? '',
+        object: bv(row.o) ?? '',
+        subGraph: g ? subGraphOf(g, contextGraphId) : undefined,
+      };
+    })
+    .filter((t: Triple) => t.subject && t.predicate && t.object);
 }
 
 function buildEntities(layered: LayeredTriple[]): Map<string, MemoryEntity> {

@@ -514,7 +514,7 @@ export function DashboardView() {
           {/* Surface a chain/RPC error even when (possibly stale) balances
               or addresses are still shown — mirrors the agentsPartial
               caveat pattern; without this the error is swallowed (qa-lead). */}
-          {wb?.error && (walletRows.length > 0 || (wb?.wallets?.length ?? 0) > 0) ? (
+          {(wb?.error || wbError) && (walletRows.length > 0 || (wb?.wallets?.length ?? 0) > 0) ? (
             <p className="v10-ws-note">Balances may be stale — the chain/RPC reported an error.</p>
           ) : null}
 
