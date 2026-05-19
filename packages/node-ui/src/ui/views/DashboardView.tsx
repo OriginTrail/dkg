@@ -1,5 +1,5 @@
 import React, { useCallback, useMemo, useState, useEffect, useRef } from 'react';
-import { Lock, Globe, Boxes, Database, Network, Wallet } from 'lucide-react';
+import { Lock, Globe, Workflow, TrendingUp, UsersRound, Wallet } from 'lucide-react';
 import { useFetch } from '../hooks.js';
 import { api } from '../api-wrapper.js';
 import { useTabsStore } from '../stores/tabs.js';
@@ -13,13 +13,13 @@ import {
   type AgentSidebarIdentity,
 } from '../lib/contextGraphSidebar.js';
 
-// Concise, user-facing definition shown inside the My Context Graphs
-// card (the old header "What is a Context Graph?" affordance was
-// removed — ux-lead: meaning belongs with the metric, not a stray
-// header link). Trimmed from the README definition.
+// Single user-facing description shown inside the My Context Graphs
+// card (one line, no separate footnote — round-2 feedback: the split
+// copy + divider read as misplaced).
 const CG_DEFINITION =
-  'A scoped knowledge domain with configurable access — keep it private, ' +
-  'share with specific peers, or require on-chain group consensus.';
+  'Context graphs you created or joined — scoped knowledge domains with ' +
+  'configurable access (private, curated and peer-shared, or public) where ' +
+  'agents build and collaborate on shared context with verifiable provenance.';
 
 // Memory-layer palette + labels + concise tooltip descriptions
 // (README "three memory layers" + MemoryStackView desc). Colours are
@@ -54,6 +54,24 @@ interface CgReport {
   // (totals unchanged) or an agent swap (count unchanged) still
   // refreshes the cards instead of going stale (Codex).
   sig: string;
+}
+
+// chainId → display name + native gas-token symbol. Only the chains
+// DKG runs on; unknown ids fall back to "Chain <id>" / "ETH". The TRAC
+// token symbol still comes from the wallets endpoint — this is only
+// chain + gas naming (no backend change).
+const CHAIN_INFO: Record<string, { name: string; gas: string }> = {
+  '1': { name: 'Ethereum', gas: 'ETH' },
+  '8453': { name: 'Base', gas: 'ETH' },
+  '84532': { name: 'Base Sepolia', gas: 'ETH' },
+  '100': { name: 'Gnosis', gas: 'xDAI' },
+  '10200': { name: 'Chiado', gas: 'xDAI' },
+  '2043': { name: 'NeuroWeb', gas: 'NEURO' },
+  '20430': { name: 'NeuroWeb Testnet', gas: 'NEURO' },
+};
+function chainInfo(id: unknown): { name: string; gas: string } {
+  const k = id == null ? '' : String(id);
+  return CHAIN_INFO[k] ?? { name: k ? `Chain ${k}` : 'Unknown chain', gas: 'ETH' };
 }
 
 // Compact number: 1234 → "1.2k", 4500000 → "4.5M". Keeps list/stat
@@ -123,6 +141,44 @@ function LayerLegend() {
           {l.short}
         </span>
       ))}
+    </div>
+  );
+}
+
+// Single proportion bar + legend for the curator/joined split of the
+// user's context graphs — mirrors the LayerBar treatment in the Size
+// card so the two top cards read as one system (round-2 feedback).
+function RoleBar({ curator, joined }: { curator: number; joined: number }) {
+  const sum = curator + joined;
+  const title = `Curator ${curator} · Joined ${joined}`;
+  const CUR = 'var(--accent-green)';
+  const JOIN = 'var(--text-secondary)';
+  return (
+    <div className="v10-cg-rolesplit">
+      <div className="v10-layerbar" title={title} aria-label={title}>
+        {sum === 0 ? (
+          <span className="v10-layerbar-empty" />
+        ) : (
+          <>
+            {curator > 0 && (
+              <span className="v10-layerbar-seg" title={`Curator (${curator})`}
+                style={{ width: `${(curator / sum) * 100}%`, background: CUR }} />
+            )}
+            {joined > 0 && (
+              <span className="v10-layerbar-seg" title={`Joined (${joined})`}
+                style={{ width: `${(joined / sum) * 100}%`, background: JOIN }} />
+            )}
+          </>
+        )}
+      </div>
+      <div className="v10-layer-legend">
+        <span className="v10-layer-legend-item" title="Context graphs you curate">
+          <span className="v10-layer-legend-dot" style={{ background: CUR }} />Curator {curator}
+        </span>
+        <span className="v10-layer-legend-item" title="Context graphs you joined">
+          <span className="v10-layer-legend-dot" style={{ background: JOIN }} />Joined {joined}
+        </span>
+      </div>
     </div>
   );
 }
@@ -447,6 +503,18 @@ export function DashboardView() {
     };
   }, [myCgs, reports]);
 
+  // Curator vs joined split for the My Context Graphs card bar — same
+  // isCurator rule CgRow uses for the Role badge (round-2 feedback).
+  const roleSplit = useMemo(() => {
+    const myDid = identity?.agentDid?.trim() ? canonicalAgentDid(identity.agentDid) : null;
+    let curator = 0, joined = 0;
+    for (const cg of myCgs) {
+      const isCur = Boolean(myDid && cg.curator?.trim() && canonicalAgentDid(cg.curator) === myDid);
+      if (isCur) curator++; else joined++;
+    }
+    return { curator, joined };
+  }, [myCgs, identity]);
+
   // Spending overview rows from the existing /api/economics periods
   // (real labels: 24h/7d/30d/all). No backend change; "Last hr" was
   // deferred per product decision.
@@ -485,25 +553,25 @@ export function DashboardView() {
         <h1 className="v10-dash-title">Dashboard</h1>
         <p className="v10-dash-subtitle">
           {status?.name || 'DKG Node'} · {status?.networkName || 'network'}
+          {wb?.chainId != null ? ` · ${chainInfo(wb.chainId).name}` : ''}
         </p>
       </div>
 
       <div className="v10-dash-stats v10-dash-stats-3">
         <StatCard
           label="My Context Graphs"
-          icon={<Boxes size={13} aria-hidden />}
+          icon={<Workflow size={13} aria-hidden />}
           value={cgsResolving ? <span className="v10-cg-dim">loading…</span> : myCgs.length}
           accentColor="var(--accent-blue)"
-          sub={
-            <>
-              Context graphs you created or joined.
-              <span className="v10-cg-defn">{CG_DEFINITION}</span>
-            </>
-          }
-        />
+          sub={CG_DEFINITION}
+        >
+          {agg.hasCgs && !cgsResolving ? (
+            <RoleBar curator={roleSplit.curator} joined={roleSplit.joined} />
+          ) : null}
+        </StatCard>
         <StatCard
           label="Context Graph Size"
-          icon={<Database size={13} aria-hidden />}
+          icon={<TrendingUp size={13} aria-hidden />}
           className="v10-size-card"
           accentColor="var(--accent-green)"
         >
@@ -566,13 +634,13 @@ export function DashboardView() {
             {agg.hasCgs
               ? (agg.sizePartial
                   ? 'Some context graphs could not report size; total is partial.'
-                  : 'Totals across all your context graphs, summed over Working, Shared Working & Verified Memory. Entities become Knowledge Assets once published to Verified Memory.')
+                  : <>Totals across all your context graphs, summed over Working, Shared Working &amp; Verified Memory.<br />Note: Entities become Knowledge Assets once published to Verified Memory.</>)
               : 'No context graphs yet.'}
           </div>
         </StatCard>
         <StatCard
           label="Collaborating Agents"
-          icon={<Network size={13} aria-hidden />}
+          icon={<UsersRound size={13} aria-hidden />}
           value={!agg.hasCgs
             ? '—'
             : agg.agentsLoading
@@ -594,7 +662,7 @@ export function DashboardView() {
         <div className="v10-dash-section v10-dash-section-wide v10-anim-mount">
           <div className="v10-dash-section-header">
             <div className="v10-dash-section-title">
-              <Boxes size={13} aria-hidden />
+              <Workflow size={13} aria-hidden />
               <h3>My Context Graphs</h3>
             </div>
             <span className="v10-dash-section-badge">{myCgs.length}</span>
@@ -645,23 +713,27 @@ export function DashboardView() {
             </div>
           </div>
 
-          <div className="v10-ws-subhead">Node wallets</div>
+          <div className="v10-ws-subhead">
+            Node wallets
+            {wb?.chainId != null ? <span className="v10-ws-chain"> · {chainInfo(wb.chainId).name}</span> : null}
+          </div>
           {wbLoading && !wb ? (
             <p className="v10-cg-empty">Loading wallets…</p>
           ) : walletRows.length > 0 ? (
-            <ul className="v10-ws-wallets">
+            <div className="v10-ws-wtable">
+              <div className="v10-ws-wrow v10-ws-whead">
+                <span>Wallet</span>
+                <span>{walletSym}</span>
+                <span>Gas ({chainInfo(wb?.chainId).gas})</span>
+              </div>
               {walletRows.map((b) => (
-                <li key={b.address} className="v10-ws-wallet">
+                <div key={b.address} className="v10-ws-wrow">
                   <span className="v10-ws-addr" title={b.address}>{shortAddr(b.address)}</span>
-                  <span className="v10-ws-balcol">
-                    <span className="v10-ws-bal">
-                      {fmtTrac(b.trac)} <span className="v10-cg-dim">{walletSym}</span>
-                    </span>
-                    <span className="v10-ws-bal-sec">{b.eth} ETH</span>
-                  </span>
-                </li>
+                  <span className="v10-ws-bal">{fmtTrac(b.trac)}</span>
+                  <span className="v10-ws-bal-sec">{b.eth}</span>
+                </div>
               ))}
-            </ul>
+            </div>
           ) : (wb?.wallets?.length ?? 0) > 0 ? (
             <ul className="v10-ws-wallets">
               {(wb?.wallets ?? []).map((a) => (
@@ -690,7 +762,7 @@ export function DashboardView() {
           <div className="v10-ws-spend">
             <div className="v10-ws-spend-head">
               <span>Period</span>
-              <span>Publishes</span>
+              <span title="Publishes to Verified Memory that spent TRAC on-chain. Free SWM/local/testnet publishes are not counted (they don't burn TRAC).">Publishes to VM</span>
               {/* economics totalTrac is always TRAC-denominated, independent
                   of the node wallet token symbol — label it literally. */}
               <span>TRAC</span>

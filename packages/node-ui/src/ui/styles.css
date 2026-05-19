@@ -2391,6 +2391,13 @@ button:focus:not(:focus-visible) { outline: none; }
   border: 1px solid var(--border-default);
   border-radius: 10px;
   padding: 16px 18px;
+  /* Same hover lift/glow as the stat cards so the lower panels feel
+     part of the same surface family (round-2 feedback). */
+  transition: border-color .15s, box-shadow .15s;
+}
+.v10-dash-section:hover {
+  border-color: var(--border-strong);
+  box-shadow: 0 2px 8px rgba(0,0,0,.15);
 }
 .v10-dash-section-header {
   display: flex;
@@ -2429,23 +2436,9 @@ button:focus:not(:focus-visible) { outline: none; }
 @media (max-width: 720px) { .v10-dash-grid-2 { grid-template-columns: 1fr; } }
 .v10-dash-section-wide { min-width: 0; }
 
-/* Context Graph definition, shown inside the My Context Graphs card
-   under its one-line sub (the header affordance was removed — meaning
-   belongs with the metric). Muted, smaller, with a little separation. */
-.v10-cg-defn {
-  display: block;
-  /* Footnote at the bottom of the card, separated by a hairline so it
-     reads as supporting context, not a competing line under the sub
-     (ui-lead). */
-  margin-top: 12px;
-  padding-top: 10px;
-  border-top: 1px solid var(--border-subtle);
-  /* --text-secondary, not tertiary: it's informational copy and must
-     clear AA on the card surface (recurring team rule). */
-  color: var(--text-secondary);
-  font-size: 11px;
-  line-height: 1.5;
-}
+/* Curator/Joined split bar in the My Context Graphs card — same
+   spacing rhythm as the Size card's metric → bar → legend stack. */
+.v10-cg-rolesplit { display: flex; flex-direction: column; gap: 4px; margin: 8px 0 2px; }
 
 /* Dim inline label. `--text-secondary` (NOT tertiary): these annotate
    real numbers, so they must clear AA on the card surface. */
@@ -2497,7 +2490,10 @@ button:focus:not(:focus-visible) { outline: none; }
 /* My Context Graphs list — column grid shared by header + rows. */
 .v10-cg-colhead, .v10-cg-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 40px minmax(140px, 190px) 52px 76px;
+  /* Name gets the lion's share and Size flexes/shrinks with it (fr,
+     no hard min) so on a narrow window the CG name stays readable
+     instead of the Size column staying broad (round-2 feedback). */
+  grid-template-columns: minmax(0, 2.4fr) 34px minmax(0, 1.2fr) 52px 72px;
   align-items: center;
   gap: 8px;
 }
@@ -2575,6 +2571,32 @@ button:focus:not(:focus-visible) { outline: none; }
   margin: 10px 0 6px;
 }
 .v10-ws-subhead:first-of-type { margin-top: 2px; }
+/* Chain name appended to the "Node wallets" subhead. */
+.v10-ws-chain { color: var(--text-secondary); text-transform: none; letter-spacing: 0; }
+
+/* Wallet table: Wallet | TRAC | Gas — one shared grid for header +
+   rows so values sit under their column headers (round-2 feedback). */
+.v10-ws-wtable { display: flex; flex-direction: column; gap: 5px; }
+.v10-ws-wrow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 5.5em 5em;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 12px;
+}
+.v10-ws-wrow .v10-ws-bal,
+.v10-ws-wrow .v10-ws-bal-sec { text-align: right; font-size: 12px; }
+.v10-ws-wrow .v10-ws-bal-sec { color: var(--text-secondary); }
+.v10-ws-whead {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-secondary);
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.v10-ws-whead span:not(:first-child) { text-align: right; }
+
 .v10-ws-wallets { list-style: none; display: flex; flex-direction: column; gap: 6px; }
 /* Wallet row: address left, balances right-stacked (TRAC primary, ETH
    secondary) — a 2-col grid so the address can ellipsis while the
@@ -2613,7 +2635,11 @@ button:focus:not(:focus-visible) { outline: none; }
 .v10-ws-spend { display: flex; flex-direction: column; gap: 4px; }
 .v10-ws-spend-head, .v10-ws-spend-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  /* Fixed numeric columns (not `auto auto`): with auto, small numbers
+     collapsed together so Publishes looked empty and both sat under
+     TRAC. Explicit widths keep each value under its own header
+     (round-2 feedback). */
+  grid-template-columns: minmax(0, 1fr) 7em 5em;
   align-items: baseline;
   gap: 10px;
   font-size: 12px;

@@ -1093,16 +1093,20 @@ export class DashboardDB {
 
     for (const p of periods) {
       const cutoff = now - p.ms;
+      // "Publishes to VM": only publishes that actually spent TRAC
+      // on-chain (Verified Memory commits) are counted, so the publish
+      // count and the TRAC total are consistent. Free SWM/local/testnet
+      // publishes record trac_cost = 0 and are intentionally excluded.
       const row = this.db.prepare(`
         SELECT
-          COUNT(*) as publishCount,
-          SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as successCount,
+          SUM(CASE WHEN trac_cost > 0 THEN 1 ELSE 0 END) as publishCount,
+          SUM(CASE WHEN status = 'success' AND trac_cost > 0 THEN 1 ELSE 0 END) as successCount,
           COALESCE(SUM(gas_cost_eth), 0) as totalGasEth,
           COALESCE(SUM(trac_cost), 0) as totalTrac,
-          COALESCE(AVG(gas_cost_eth), 0) as avgGasEth,
-          COALESCE(AVG(trac_cost), 0) as avgTrac
+          COALESCE(AVG(CASE WHEN trac_cost > 0 THEN gas_cost_eth END), 0) as avgGasEth,
+          COALESCE(AVG(CASE WHEN trac_cost > 0 THEN trac_cost END), 0) as avgTrac
         FROM operations
-        WHERE operation_name = 'publish' AND started_at >= ?
+        WHERE operation_name = 'publish' AND trac_cost > 0 AND started_at >= ?
       `).get(cutoff) as any;
 
       results.periods.push({
