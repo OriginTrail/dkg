@@ -317,8 +317,8 @@ function CgRow({
               // (same value the aggregate card uses) rather than a
               // bare — so the row isn't empty while the card is
               // populated; triples have no summary fallback (Codex).
-              <span title="Live size unavailable — showing the context-graph summary count">
-                {abbrev(entities.total)} <span className="v10-cg-dim">entities</span> · <span className="v10-cg-dim">— triples</span>
+              <span title="Live entity count unavailable — showing the published Knowledge-Asset summary, not the full WM/SWM/VM entity total">
+                {abbrev(entities.total)} <span className="v10-cg-dim">KA (summary)</span> · <span className="v10-cg-dim">— triples</span>
               </span>
             )
             : mem.partial
@@ -333,7 +333,14 @@ function CgRow({
               : <>{abbrev(entities.total)} <span className="v10-cg-dim">entities</span> · {abbrev(triples.total)} <span className="v10-cg-dim">triples</span></>}
       </span>
       <span className="v10-cg-cell v10-cg-agents">
-        {effectiveAgents === null ? <span className="v10-cg-dim">—</span> : effectiveAgents.length}
+        {effectiveAgents === null
+          ? <span className="v10-cg-dim">—</span>
+          : agentsError
+            // Curator-only degraded fallback (/participants failed):
+            // a lower bound, not authoritative — mark approximate so
+            // the row matches the aggregate card's "~N" (Codex).
+            ? <span title="Participant list unavailable — curator-only lower bound">~{effectiveAgents.length}</span>
+            : effectiveAgents.length}
       </span>
       <span className="v10-cg-cell v10-cg-role">
         <span className={`v10-cg-badge v10-cg-badge-${isCurator ? 'curator' : 'joined'}`}>
