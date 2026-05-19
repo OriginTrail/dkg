@@ -150,11 +150,19 @@ function CgRow({
           setAgentsError(false);
         }
       })
-      // Distinguish "failed" from "zero collaborators": keep agents
-      // null and flag the error so the parent excludes this CG from
-      // the unique-agent union rather than silently counting it as 0
+      // On failure clear `agents` back to null in addition to flagging
+      // the error. Keeping the last-good array would show a STALE
+      // member list/count after a failed refresh — hiding a real
+      // membership removal behind the "partial" caveat. null routes
+      // through effectiveAgents' error branch (curator-only fallback +
+      // parent marks the total partial) instead of trusting stale data
       // (Codex).
-      .catch(() => { if (agentsMounted.current) setAgentsError(true); });
+      .catch(() => {
+        if (agentsMounted.current) {
+          setAgents(null);
+          setAgentsError(true);
+        }
+      });
   }, [cg.id]);
 
   useEffect(() => {
