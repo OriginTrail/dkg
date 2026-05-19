@@ -173,9 +173,25 @@ function CgRow({
     return [...s];
   }, [agents, agentsError, cg.curator]);
 
-  const entities: LayerCounts = {
-    wm: mem.counts.wm, swm: mem.counts.swm, vm: mem.counts.vm, total: mem.counts.total,
-  };
+  const entities: LayerCounts = useMemo(() => {
+    if (mem.error) {
+      // Live size probe (/api/query) unavailable — e.g. mock/offline
+      // mode, where the dashboard is intentionally served through
+      // api-wrapper. Fall back to the per-CG summary the (mock-aware)
+      // contextGraphs endpoint already returns so the card still
+      // populates instead of regressing to an unavailable/0 state; no
+      // layer breakdown exists in the summary (Codex). sizeError stays
+      // set, so the "partial" caveat still tells the user it's coarse.
+      const fb = Number.isFinite(cg.assetCount as number) ? (cg.assetCount as number) : 0;
+      return { wm: 0, swm: 0, vm: 0, total: fb };
+    }
+    // "Knowledge Assets" = distinct triple subjects. `mem.counts.total`
+    // is the entity-map size, which also counts object-only link
+    // targets and over-reports link-heavy graphs (Codex). Per-layer
+    // wm/swm/vm stay subject-distinct and drive the proportion bar.
+    const subjects = new Set(mem.allTriples.map((t) => t.subject)).size;
+    return { wm: mem.counts.wm, swm: mem.counts.swm, vm: mem.counts.vm, total: subjects };
+  }, [mem.error, mem.allTriples, mem.counts.wm, mem.counts.swm, mem.counts.vm, cg.assetCount]);
   const triples: LayerCounts = useMemo(() => {
     let wm = 0, swm = 0, vm = 0;
     for (const t of mem.allTriples) {
