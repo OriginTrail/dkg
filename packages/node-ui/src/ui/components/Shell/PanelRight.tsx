@@ -167,17 +167,16 @@ export function shortAgentUri(uri: string): string {
 //     relay shows up twice and is collapsed here. Any-direct-wins for
 //     the displayed transport; `hasDirect`/`hasRelay` flags carry the
 //     raw signal for the badge tooltip.
-//   * Recently-seen peers are the peers in `/api/agents` (filtered to
+//   * Recently-seen peers are every peer in `/api/agents` (filtered to
 //     non-self upstream) whose peerId isn't currently connected and
-//     whose latest `lastSeen` across their agents is within
-//     `recentlySeenWindowMs` (default 24h). Sorted by `lastSeen` desc.
+//     that has any `lastSeen` timestamp across its agents. Sorted by
+//     `lastSeen` desc — no window cap (operators want long-term
+//     visibility into previously-discovered peers).
 //   * Summary counts derive from the de-duped peer set, not the raw
 //     connection rows.
 export function buildPeers(
   connections: ConnectionRow[],
   agents: AgentInfo[],
-  now: number,
-  recentlySeenWindowMs: number = 24 * 60 * 60 * 1000,
 ): {
   connected: PeerInfo[];
   recentlySeen: PeerInfo[];
@@ -266,7 +265,7 @@ export function buildPeers(
   for (const [peerId, peerAgents] of agentsByPeer) {
     if (connectedPeerIds.has(peerId)) continue;
     const lastSeen = pickLastSeen(peerAgents);
-    if (lastSeen == null || now - lastSeen > recentlySeenWindowMs) continue;
+    if (lastSeen == null) continue;
     recentlySeen.push({
       peerId,
       name: pickName(peerAgents),
@@ -2002,12 +2001,11 @@ function NetworkTab(props: {
   // Peer-axis derivation — one card per libp2p peerId. Replaces the
   // earlier agent-axis dedupe tower (which existed to merge same-agent
   // records across transports; that's no longer needed once peerId is
-  // the grouping key). Recently-seen list filters disconnected peers
-  // to the last 24h, sorted by lastSeen desc.
+  // the grouping key). Recently-seen list is uncapped, sorted by
+  // lastSeen desc.
   const { connected, recentlySeen, directCount, relayedCount } = buildPeers(
     connections.rows,
     peerAgents,
-    Date.now(),
   );
 
   return (
@@ -2065,7 +2063,7 @@ function NetworkTab(props: {
             peers={recentlySeen}
             expanded={recentlySeenExpanded}
             onToggle={() => setRecentlySeenExpanded((p) => !p)}
-            emptyMessage="No peers seen in the last 24 hours."
+            emptyMessage="No previously-seen peers."
           />
         </>
       )}

@@ -780,7 +780,7 @@ describe('buildPeers', () => {
       conn({ peerId: 'peer-a', transport: 'relayed', openedAt: NOW - 30_000 }),
     ];
     const agents = [agent({ peerId: 'peer-a' })];
-    const result = buildPeers(connections, agents, NOW);
+    const result = buildPeers(connections, agents);
 
     expect(result.connected).toHaveLength(1);
     const p = result.connected[0];
@@ -796,7 +796,7 @@ describe('buildPeers', () => {
 
   it('counts relay-only peers as relayed', () => {
     const connections = [conn({ peerId: 'peer-r', transport: 'relayed' })];
-    const result = buildPeers(connections, [], NOW);
+    const result = buildPeers(connections, []);
 
     expect(result.connected).toHaveLength(1);
     expect(result.connected[0].transport).toBe('relayed');
@@ -813,7 +813,7 @@ describe('buildPeers', () => {
       agent({ agentUri: 'did:dkg:agent:two', peerId: 'peer-a', name: 'node-alpha' }),
       agent({ agentUri: 'did:dkg:agent:three', peerId: 'peer-a', name: 'node-alpha' }),
     ];
-    const result = buildPeers(connections, agents, NOW);
+    const result = buildPeers(connections, agents);
 
     expect(result.connected).toHaveLength(1);
     expect(result.connected[0].name).toBe('node-alpha');
@@ -827,7 +827,7 @@ describe('buildPeers', () => {
 
   it('renders a relay-only / bootstrap peer (no agents) as a peerId-only card', () => {
     const connections = [conn({ peerId: 'peer-bootstrap', transport: 'relayed' })];
-    const result = buildPeers(connections, [], NOW);
+    const result = buildPeers(connections, []);
 
     expect(result.connected).toHaveLength(1);
     expect(result.connected[0].peerId).toBe('peer-bootstrap');
@@ -835,29 +835,25 @@ describe('buildPeers', () => {
     expect(result.connected[0].agents).toEqual([]);
   });
 
-  it('includes a peer in "Recently seen" when lastSeen is within the 24h window', () => {
+  it('includes any disconnected peer with a lastSeen timestamp in "Recently seen" (no time cap)', () => {
     const agents = [
-      agent({ peerId: 'peer-gone', lastSeen: NOW - 23 * HOUR }),
+      // Old (10 days) — still shown; operators want long-term visibility.
+      agent({ peerId: 'peer-ancient', lastSeen: NOW - 240 * HOUR }),
+      // Recent (23h).
+      agent({ peerId: 'peer-recent', lastSeen: NOW - 23 * HOUR }),
     ];
-    const result = buildPeers([], agents, NOW);
+    const result = buildPeers([], agents);
 
     expect(result.connected).toHaveLength(0);
-    expect(result.recentlySeen).toHaveLength(1);
-    expect(result.recentlySeen[0].peerId).toBe('peer-gone');
-    expect(result.recentlySeen[0].connected).toBe(false);
-    expect(result.recentlySeen[0].lastSeen).toBe(NOW - 23 * HOUR);
-  });
-
-  it('excludes a peer from "Recently seen" once it is older than 24h', () => {
-    const agents = [agent({ peerId: 'peer-stale', lastSeen: NOW - 25 * HOUR })];
-    const result = buildPeers([], agents, NOW);
-
-    expect(result.recentlySeen).toHaveLength(0);
+    expect(result.recentlySeen.map((p: any) => p.peerId)).toEqual(['peer-recent', 'peer-ancient']);
+    expect(result.recentlySeen.every((p: any) => p.connected === false)).toBe(true);
   });
 
   it('excludes a peer from "Recently seen" when lastSeen is missing', () => {
+    // No timestamp means we can't sort it; drop it (without a timestamp
+    // it would always render at the bottom regardless of true freshness).
     const agents = [agent({ peerId: 'peer-no-ts', lastSeen: undefined })];
-    const result = buildPeers([], agents, NOW);
+    const result = buildPeers([], agents);
 
     expect(result.recentlySeen).toHaveLength(0);
   });
@@ -868,7 +864,7 @@ describe('buildPeers', () => {
       agent({ peerId: 'peer-fresh', lastSeen: NOW - 1 * HOUR }),
       agent({ peerId: 'peer-mid', lastSeen: NOW - 5 * HOUR }),
     ];
-    const result = buildPeers([], agents, NOW);
+    const result = buildPeers([], agents);
 
     expect(result.recentlySeen.map((p: any) => p.peerId)).toEqual([
       'peer-fresh',
@@ -880,7 +876,7 @@ describe('buildPeers', () => {
   it('does not include a peer in "Recently seen" if it is currently connected', () => {
     const connections = [conn({ peerId: 'peer-a' })];
     const agents = [agent({ peerId: 'peer-a', lastSeen: NOW - 2 * HOUR })];
-    const result = buildPeers(connections, agents, NOW);
+    const result = buildPeers(connections, agents);
 
     expect(result.connected).toHaveLength(1);
     expect(result.recentlySeen).toHaveLength(0);
@@ -891,7 +887,7 @@ describe('buildPeers', () => {
       agent({ agentUri: 'did:dkg:agent:one', peerId: 'peer-multi', lastSeen: NOW - 10 * HOUR }),
       agent({ agentUri: 'did:dkg:agent:two', peerId: 'peer-multi', lastSeen: NOW - 2 * HOUR }),
     ];
-    const result = buildPeers([], agents, NOW);
+    const result = buildPeers([], agents);
 
     expect(result.recentlySeen).toHaveLength(1);
     expect(result.recentlySeen[0].lastSeen).toBe(NOW - 2 * HOUR);
@@ -906,7 +902,7 @@ describe('buildPeers', () => {
       conn({ peerId: 'peer-mixed', transport: 'direct' }),
       conn({ peerId: 'peer-mixed', transport: 'relayed' }),
     ];
-    const result = buildPeers(connections, [], NOW);
+    const result = buildPeers(connections, []);
 
     expect(result.connected).toHaveLength(4);
     expect(result.directCount).toBe(3);
@@ -919,7 +915,7 @@ describe('buildPeers', () => {
       conn({ peerId: '' }),
       conn({ peerId: 'peer-a' }),
     ];
-    const result = buildPeers(connections, [], NOW);
+    const result = buildPeers(connections, []);
 
     expect(result.connected).toHaveLength(1);
     expect(result.connected[0].peerId).toBe('peer-a');
@@ -930,7 +926,7 @@ describe('buildPeers', () => {
       agent({ peerId: '', lastSeen: NOW - 1 * HOUR }),
       agent({ peerId: 'peer-b', lastSeen: NOW - 1 * HOUR }),
     ];
-    const result = buildPeers([], agents, NOW);
+    const result = buildPeers([], agents);
 
     expect(result.recentlySeen).toHaveLength(1);
     expect(result.recentlySeen[0].peerId).toBe('peer-b');
@@ -949,7 +945,7 @@ describe('buildPeers', () => {
         lastSeen: NOW - 30_000,
       }),
     ];
-    const result = buildPeers([], agents, NOW);
+    const result = buildPeers([], agents);
 
     expect(result.connected).toHaveLength(1);
     expect(result.connected[0].peerId).toBe('peer-lag');
@@ -969,7 +965,7 @@ describe('buildPeers', () => {
         lastSeen: NOW - 10_000,
       }),
     ];
-    const result = buildPeers([], agents, NOW);
+    const result = buildPeers([], agents);
 
     expect(result.connected).toHaveLength(1);
     expect(result.connected[0].transport).toBe('relayed');
@@ -983,7 +979,7 @@ describe('buildPeers', () => {
     const agents = [
       agent({ peerId: 'peer-a', connectionStatus: 'connected', connectionTransport: 'direct' }),
     ];
-    const result = buildPeers(connections, agents, NOW);
+    const result = buildPeers(connections, agents);
 
     expect(result.connected).toHaveLength(1);
     expect(result.connected[0].peerId).toBe('peer-a');
@@ -999,20 +995,10 @@ describe('buildPeers', () => {
         lastSeen: NOW - 1 * HOUR,
       }),
     ];
-    const result = buildPeers([], agents, NOW);
+    const result = buildPeers([], agents);
 
     expect(result.connected).toHaveLength(0);
     expect(result.recentlySeen).toHaveLength(1);
     expect(result.recentlySeen[0].peerId).toBe('peer-x');
-  });
-
-  it('honours a custom recentlySeenWindowMs', () => {
-    const agents = [agent({ peerId: 'peer-x', lastSeen: NOW - 2 * HOUR })];
-    // 1-hour window — peer is too old.
-    const tight = buildPeers([], agents, NOW, 1 * HOUR);
-    expect(tight.recentlySeen).toHaveLength(0);
-    // 3-hour window — peer fits.
-    const loose = buildPeers([], agents, NOW, 3 * HOUR);
-    expect(loose.recentlySeen).toHaveLength(1);
   });
 });
