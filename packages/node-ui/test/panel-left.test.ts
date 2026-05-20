@@ -256,34 +256,46 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
   });
 
   it('opening Integrations triggers the local-integrations fetch; closing it halts further polls', async () => {
-    // qa-lead Pass 2 #10: validate the design claim that
-    // `IntegrationsSectionBody` only polls while mounted. The body lives
-    // inside the section header, so toggling the header off unmounts it
-    // and the 30s setInterval is cleaned up by React's effect-cleanup.
-    const { container } = await renderPanel();
-    const headers = container.querySelectorAll('.v10-peer-group-header');
-    const integrationsHeader = headers[1] as HTMLButtonElement;
+    // qa-lead Pass 2 #10 + Codex follow-up: validate the design claim
+    // that `IntegrationsSectionBody` only polls while mounted by
+    // actually advancing past the 30s setInterval after collapse.
+    // `shouldAdvanceTime: true` lets microtask/render flushes still
+    // resolve on real time, while explicit advanceTimersByTime jumps
+    // the polling clock — so a leaked setInterval would visibly bump
+    // the mock call count.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const { container } = await renderPanel();
+      const headers = container.querySelectorAll('.v10-peer-group-header');
+      const integrationsHeader = headers[1] as HTMLButtonElement;
 
-    // Open Integrations — the body mounts and fires its first fetch.
-    await act(async () => {
-      integrationsHeader.click();
-    });
-    await flush();
-    expect(fetchLocalAgentIntegrationsMock.mock.calls.length).toBeGreaterThanOrEqual(1);
-    const callsAfterOpen = fetchLocalAgentIntegrationsMock.mock.calls.length;
+      // Open Integrations — the body mounts and fires its first fetch.
+      await act(async () => {
+        integrationsHeader.click();
+      });
+      await flush();
+      expect(fetchLocalAgentIntegrationsMock.mock.calls.length).toBeGreaterThanOrEqual(1);
+      const callsAfterOpen = fetchLocalAgentIntegrationsMock.mock.calls.length;
 
-    // Close it — the body unmounts and the interval is cleared.
-    await act(async () => {
-      integrationsHeader.click();
-    });
-    await flush();
-    // No new fetches should be issued while collapsed. We don't have to
-    // advance a 30s timer to prove this: the body is gone from the DOM,
-    // so the setInterval callback cannot be queued at all.
-    expect(container.textContent).not.toContain('Agents');
-    // A small idle wait — no fetch should fire from the collapsed state.
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(fetchLocalAgentIntegrationsMock.mock.calls.length).toBe(callsAfterOpen);
+      // Close it — the body unmounts and React's effect cleanup should
+      // clear the 30s setInterval.
+      await act(async () => {
+        integrationsHeader.click();
+      });
+      await flush();
+      expect(container.textContent).not.toContain('Agents');
+
+      // Advance past the polling interval. If cleanup leaked, the
+      // setInterval callback would queue another loadLocal() and the
+      // call count would bump. Mock-call counting is sync so no need
+      // to flush microtasks for the assertion.
+      await act(async () => {
+        vi.advanceTimersByTime(31_000);
+      });
+      expect(fetchLocalAgentIntegrationsMock.mock.calls.length).toBe(callsAfterOpen);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('hydrates section open-state defaults when a pre-existing dkg-layout blob lacks the new fields', async () => {

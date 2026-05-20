@@ -28,7 +28,12 @@ export const sel = {
     root: '.v10-panel-left',
     treeHeader: '.v10-tree-header',
     modeBtn: '.v10-tree-mode-btn',
-    collapseBtn: '.v10-collapse-btn',
+    // `.v10-collapse-btn` was removed in PR8 — the in-panel ◂ triangle
+    // duplicated the always-visible global header toggle. Use the
+    // global header `sidebarToggle` instead. `.v10-tree-section-badge`
+    // and `.v10-tree-chevron` were also removed; the per-project
+    // chevron-expand pattern no longer exists. Broader e2e
+    // modernization is tracked separately — see task #120.
     treeContent: '.v10-tree-content',
     dashboard: '.v10-tree-dashboard',
     newProjectBtn: '.v10-new-project-btn',
@@ -38,14 +43,17 @@ export const sel = {
     section: '.v10-tree-section',
     sectionHeader: '.v10-tree-section-header',
     sectionLabel: '.v10-tree-section-label',
-    sectionBadge: '.v10-tree-section-badge',
-    chevron: '.v10-tree-chevron',
     treeItems: '.v10-tree-items',
     treeItem: '.v10-tree-item',
     itemLabel: '.v10-tree-item-label',
     layerHeader: '.v10-tree-layer-header',
     oraclePlaceholder: '.v10-oracle-placeholder',
     integrationDot: '.v10-tree-integration-dot',
+    // PR8 sibling-section pattern (My Context Graphs + Integrations):
+    peerGroup: '.v10-peer-group',
+    peerGroupHeader: '.v10-peer-group-header',
+    peerGroupLabel: '.v10-peer-group-label',
+    peerGroupBody: '.v10-peer-group-body',
   },
 
   center: {

@@ -119,12 +119,15 @@ body.light {
   --text-danger: #b91c1c;
   --text-danger-hover: #991b1b;
   --text-link: #1d4ed8;
-  /* `working` darkened from #a3a3a3 → #8a8a8a so the light-theme
-     proportion-bar segment has a visible edge (~3:1 vs the white card)
-     instead of near-invisible 2.0:1 — ui-lead PR6 layerbar note. */
-  --layer-working: #8a8a8a;
-  --layer-shared: #737373;
-  --layer-verified: #404040;
+  /* Layer accents are NOT overridden in light mode — the slate/amber/
+     green from :root carry through, matching the Context Graph and
+     project pages (which already use the unified palette in both
+     themes). The earlier PR6 desaturation to greys (#8a8a8a / #737373
+     / #404040) read as "weird variations of gray" against the white
+     dashboard card vs the colored CG pages; reverting per user
+     directive (PR8 round-4). Non-text contrast at small decoration
+     sizes is acceptable below AA's 3:1 floor — the bars/dots aren't
+     text. */
   --bg: var(--bg-root);
   --surface: var(--bg-surface);
   --surface-hover: var(--bg-hover);

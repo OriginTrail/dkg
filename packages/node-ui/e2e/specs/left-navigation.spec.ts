@@ -30,11 +30,11 @@ test.describe('Left Panel Navigation', () => {
     expect(names.length).toBe(3);
   });
 
-  test('project badge shows asset count', async ({ leftPanel }) => {
-    const badge = leftPanel.root.locator(sel.leftPanel.section)
-      .filter({ hasText: 'Pharma Drug Interactions' })
-      .locator(sel.leftPanel.sectionBadge);
-    await expect(badge).toHaveText('227');
+  // Per-row asset-count badges were removed in PR8 — the count was
+  // broken (always 0) and the dashboard already surfaces this number.
+  // Broader e2e modernization tracked in follow-up #120.
+  test.skip('project badge shows asset count', async () => {
+    // intentionally skipped — `.v10-tree-section-badge` no longer rendered.
   });
 
   test('expanding a project reveals memory layer items', async ({ leftPanel }) => {
@@ -136,9 +136,12 @@ test.describe('Left Panel Navigation', () => {
     expect(await createProjectModal.isOpen()).toBe(true);
   });
 
-  test('collapse button hides left panel', async ({ leftPanel, shell }) => {
-    await leftPanel.collapse();
-    await expect(shell.leftPanel).toBeHidden();
+  // The in-panel ◂ collapse button was removed in PR8 — the global
+  // header sidebar toggle is the sole control. A future spec should
+  // exercise the global toggle path (`shell.header.sidebarToggle`)
+  // instead. Tracked in follow-up #120.
+  test.skip('collapse button hides left panel', async () => {
+    // intentionally skipped — `.v10-collapse-btn` no longer rendered.
   });
 
   test('clicking Dashboard row switches to dashboard view', async ({ leftPanel, centerPanel }) => {

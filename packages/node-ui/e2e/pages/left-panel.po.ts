@@ -4,14 +4,12 @@ import { sel } from '../helpers/selectors.js';
 export class LeftPanelPage {
   readonly page: Page;
   readonly root: Locator;
-  readonly collapseBtn: Locator;
   readonly newProjectBtn: Locator;
   readonly oraclePlaceholder: Locator;
 
   constructor(page: Page) {
     this.page = page;
     this.root = page.locator(sel.leftPanel.root).first();
-    this.collapseBtn = page.locator(sel.leftPanel.collapseBtn);
     this.newProjectBtn = page.locator(sel.leftPanel.newProjectBtn);
     this.oraclePlaceholder = page.locator(sel.leftPanel.oraclePlaceholder);
   }
@@ -40,10 +38,6 @@ export class LeftPanelPage {
   async getActiveMode() {
     const active = this.root.locator(`${sel.leftPanel.modeBtn}.active`);
     return active.textContent();
-  }
-
-  async collapse() {
-    await this.collapseBtn.click();
   }
 
   async clickNewProject() {
