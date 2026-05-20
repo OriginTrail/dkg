@@ -987,6 +987,56 @@ describe('buildPeers', () => {
     expect(result.connected[0].openedAt).not.toBeNull();
   });
 
+  it('agent-based fallback applies any-direct-wins when transports disagree across the peer\'s agents', () => {
+    // Defense-in-depth: the daemon today emits the same transport for every
+    // agent on a peer (peerId-keyed lookup), but the rollup must not depend
+    // on iteration order if that ever changes.
+    const agents = [
+      agent({
+        agentUri: 'did:dkg:agent:relayed-first',
+        peerId: 'peer-mixed',
+        connectionStatus: 'connected',
+        connectionTransport: 'relayed',
+        lastSeen: NOW - 1000,
+      }),
+      agent({
+        agentUri: 'did:dkg:agent:direct-second',
+        peerId: 'peer-mixed',
+        connectionStatus: 'connected',
+        connectionTransport: 'direct',
+        lastSeen: NOW - 500,
+      }),
+    ];
+    const result = buildPeers([], agents);
+
+    expect(result.connected).toHaveLength(1);
+    // Direct wins even though the relayed record comes first in the feed.
+    expect(result.connected[0].transport).toBe('direct');
+    expect(result.connected[0].hasDirect).toBe(true);
+    expect(result.connected[0].hasRelay).toBe(true);
+    expect(result.directCount).toBe(1);
+  });
+
+  it('agent-based fallback handles null connectionTransport without downgrading to relayed', () => {
+    // An agent reporting `connectionStatus: "connected"` but no transport
+    // info: don't classify as relayed; default to 'direct' and leave both
+    // hasDirect/hasRelay false so the tooltip stays silent.
+    const agents = [
+      agent({
+        peerId: 'peer-null-transport',
+        connectionStatus: 'connected',
+        connectionTransport: null,
+        lastSeen: NOW - 1000,
+      }),
+    ];
+    const result = buildPeers([], agents);
+
+    expect(result.connected).toHaveLength(1);
+    expect(result.connected[0].transport).toBe('direct');
+    expect(result.connected[0].hasDirect).toBe(false);
+    expect(result.connected[0].hasRelay).toBe(false);
+  });
+
   it('agent-based fallback does NOT promote disconnected agents to connected', () => {
     const agents = [
       agent({

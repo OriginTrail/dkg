@@ -241,18 +241,26 @@ export function buildPeers(
   // `/api/agents`, the agents endpoint can still report `connectionStatus:
   // "connected"` for a peer that isn't in `connByPeer`. Synthesize an entry
   // from the agent record so the peer doesn't vanish during the transient
-  // gap. Transport comes from the agent's own hint.
+  // gap. Transport rolls up with the same any-direct-wins rule used for
+  // real connection rows — today the daemon emits a single transport per
+  // peerId (it's a peerId-keyed lookup at agent-chat.ts:551,556), so this
+  // is defense-in-depth against any future change.
   for (const [peerId, peerAgents] of agentsByPeer) {
     if (connectedPeerIds.has(peerId)) continue;
-    const connectedAgent = peerAgents.find((a) => a.connectionStatus === 'connected');
-    if (!connectedAgent) continue;
-    const isRelayed = connectedAgent.connectionTransport === 'relayed';
+    const connectedAgents = peerAgents.filter((a) => a.connectionStatus === 'connected');
+    if (connectedAgents.length === 0) continue;
+    const hasDirect = connectedAgents.some((a) => a.connectionTransport === 'direct');
+    const hasRelay = connectedAgents.some((a) => a.connectionTransport === 'relayed');
+    // Any-direct-wins on the displayed transport. Default to 'direct' when
+    // neither flag is set (e.g. an agent reporting `connectionTransport: null`
+    // — we have no signal, so don't downgrade the badge to relayed).
+    const transport: 'direct' | 'relayed' = hasRelay && !hasDirect ? 'relayed' : 'direct';
     connected.push({
       peerId,
       name: pickName(peerAgents),
-      transport: isRelayed ? 'relayed' : 'direct',
-      hasDirect: !isRelayed,
-      hasRelay: isRelayed,
+      transport,
+      hasDirect,
+      hasRelay,
       openedAt: null,
       connected: true,
       lastSeen: pickLastSeen(peerAgents),
