@@ -621,7 +621,7 @@ export function DashboardView() {
           accentColor="var(--accent-green)"
         >
           {!agg.hasCgs ? (
-            <div className="v10-cg-size-empty v10-cg-dim">—</div>
+            <div className="v10-stat-empty">—</div>
           ) : agg.sizeLoading ? (
             <div className="v10-stat-loading">loading…</div>
           ) : (
@@ -687,7 +687,7 @@ export function DashboardView() {
           label="Collaborating Agents"
           icon={<UsersRound size={13} aria-hidden />}
           value={!agg.hasCgs
-            ? '—'
+            ? <span className="v10-stat-empty">—</span>
             : agg.agentsLoading
               ? <span className="v10-stat-loading">loading…</span>
               // Partial (a probe failed or a public graph's membership

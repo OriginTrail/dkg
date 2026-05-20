@@ -2487,6 +2487,19 @@ button:focus:not(:focus-visible) { outline: none; }
   line-height: 1.4;
   padding: 6px 0;
 }
+/* Empty placeholder ("—") for the same value slot. Same sizing as the
+   loading state but non-italic so it reads as "no data" rather than
+   "still loading". Resets the inherited `.stat-value` and the older
+   `.v10-cg-size-empty` font sizes so the dash is consistent across
+   all three top cards. */
+.v10-stat-empty {
+  display: inline-block;
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--text-secondary);
+  line-height: 1.4;
+  padding: 6px 0;
+}
 /* Track background + 1px gap between segments shows the track colour as
    a hairline separator, and the outline keeps the light-theme WM
    segment's boundary readable even though its remapped token fill is
