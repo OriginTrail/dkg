@@ -234,10 +234,16 @@ function CgRow({
   const agentsLoading = agents === null && !agentsError;
 
   const agentsMounted = useRef(true);
+  // Sequence guard: mount load, 30s poll and node-event refreshes all
+  // hit the same promise chain; without this a slow older response
+  // could arrive AFTER a newer one and overwrite the fresh allow-list,
+  // making the agent count jump backwards after a join/remove (Codex).
+  const partSeqRef = useRef(0);
   const loadParticipants = useCallback(() => {
+    const seq = ++partSeqRef.current;
     api.listParticipants(cg.id)
       .then((r) => {
-        if (agentsMounted.current) {
+        if (agentsMounted.current && seq === partSeqRef.current) {
           setAgents((r.allowedAgents ?? []).map(canonicalAgentDid));
           setAgentsError(false);
         }
@@ -250,7 +256,7 @@ function CgRow({
       // parent marks the total partial) instead of trusting stale data
       // (Codex).
       .catch(() => {
-        if (agentsMounted.current) {
+        if (agentsMounted.current && seq === partSeqRef.current) {
           setAgents(null);
           setAgentsError(true);
         }
@@ -445,12 +451,16 @@ export function DashboardView() {
   const { data: wb, loading: wbLoading, error: wbError } = useFetch(api.fetchWalletsBalances, [], 30_000);
   const { openTab } = useTabsStore();
   const { setActiveProject } = useProjectsStore();
-  const { myCgs, identity, identityLoading } = useMyContextGraphs();
+  const { myCgs, identity, identityLoading, cgsLoading } = useMyContextGraphs();
   // Older daemons with no `callerInvolved` resolve membership only once
   // the agent identity (curator-DID fallback) arrives. Until then an
   // empty list is "not known yet", not a real zero — show a loading
   // state rather than a false "0 / No context graphs yet" flash (Codex).
-  const cgsResolving = identityLoading && myCgs.length === 0;
+  // Suppress the "no context graphs" empty state until BOTH the
+  // identity AND the first CG-list fetch have settled — on a cold load
+  // one can settle before the other, briefly flashing a false empty
+  // state (Codex).
+  const cgsResolving = (identityLoading || cgsLoading) && myCgs.length === 0;
 
   const [reports, setReports] = useState<Record<string, CgReport>>({});
   const onReport = useCallback((id: string, r: CgReport) => {

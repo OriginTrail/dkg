@@ -21,12 +21,22 @@ export function useMyContextGraphs(): {
   identity: AgentSidebarIdentity | null;
   /** True until the agent identity request has resolved (or failed). */
   identityLoading: boolean;
+  /** True until the FIRST context-graph list fetch has settled. The
+   *  store may already be hydrated by PanelLeft (so contextGraphs.length
+   *  > 0 immediately), in which case this flips false right away. */
+  cgsLoading: boolean;
 } {
   const contextGraphs = useProjectsStore((s) => s.contextGraphs);
   const setContextGraphs = useProjectsStore((s) => s.setContextGraphs);
   const { hidden } = useHiddenContextGraphIds();
   const [identity, setIdentity] = useState<AgentSidebarIdentity | null>(null);
   const [identityLoading, setIdentityLoading] = useState(true);
+  // Initial CG-list-loading flag — distinct from identity. On a cold
+  // load `fetchCurrentAgent` can settle before `fetchContextGraphs`,
+  // which previously made the dashboard briefly render "No context
+  // graphs yet" even though graphs exist; consumers can now wait for
+  // BOTH before showing the empty state (Codex).
+  const [cgsLoading, setCgsLoading] = useState(() => contextGraphs.length === 0);
 
   // Hydrate the context-graph store ourselves rather than relying on
   // PanelLeft.loadCGs() as a side effect: PanelLeft is unmounted when
@@ -37,7 +47,11 @@ export function useMyContextGraphs(): {
   const loadCGs = useCallback(() => {
     api.fetchContextGraphs()
       .then(({ contextGraphs: cgs }: any) => setContextGraphs(cgs ?? []))
-      .catch(() => { /* keep last list; PanelLeft/next tick may recover */ });
+      .catch(() => { /* keep last list; PanelLeft/next tick may recover */ })
+      // Settle the initial-load flag whether the fetch succeeded or
+      // failed — after this we know the list is either populated or
+      // really empty, not "still pending".
+      .finally(() => setCgsLoading(false));
   }, [setContextGraphs]);
 
   useEffect(() => {
@@ -85,5 +99,5 @@ export function useMyContextGraphs(): {
     [contextGraphs, hidden, identity],
   );
 
-  return { myCgs, identity, identityLoading };
+  return { myCgs, identity, identityLoading, cgsLoading };
 }
