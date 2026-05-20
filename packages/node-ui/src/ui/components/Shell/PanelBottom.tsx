@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { useLayoutStore, maxBottomHeight } from '../../stores/layout.js';
+import { useLayoutStore, maxBottomHeight, readPxVar } from '../../stores/layout.js';
 import { api } from '../../api-wrapper.js';
 
 const BOTTOM_TABS = ['Node Log', 'Transactions'] as const;
@@ -55,15 +55,12 @@ function NodeLogContent() {
   );
 }
 
-// Must match `--tab-h` in styles.css. An expanded panel must never
-// render shorter than its own tab strip, or the tabs + collapse button
-// disappear while bottomCollapsed is still false and the user can't
-// recover it (Codex).
-const TAB_STRIP_H = 36;
-
 export function PanelBottom() {
   const { bottomCollapsed, toggleBottom, bottomHeight } = useLayoutStore();
   const [activeTab, setActiveTab] = useState<BottomTab>('Node Log');
+  // The tab-strip height lives in CSS (`--tab-h`); read it at runtime
+  // so a CSS tweak can't silently break the floor below (Codex).
+  const tabStripH = readPxVar('--tab-h', 36);
 
   return (
     <div
@@ -72,7 +69,7 @@ export function PanelBottom() {
       // taller screen can't crush the center pane after reload on a
       // shorter one; floor at the tab-strip height so the controls stay
       // reachable on very short viewports (Codex / ui-lead).
-      style={bottomCollapsed ? undefined : { height: Math.max(TAB_STRIP_H, Math.min(bottomHeight, maxBottomHeight())) }}
+      style={bottomCollapsed ? undefined : { height: Math.max(tabStripH, Math.min(bottomHeight, maxBottomHeight())) }}
     >
       <div className="v10-bottom-tabs">
         {BOTTOM_TABS.map((tab) => (

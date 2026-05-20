@@ -63,6 +63,14 @@ export function useMyContextGraphs(): {
   // resolves successfully and replaces the identity (Codex).
   useEffect(() => {
     let mounted = true;
+    // Flip identityLoading TRUE at the start of every refetch so
+    // consumers (e.g. the dashboard's curator/joined split) can mark
+    // role-dependent UI as in-flight after a node/agent switch instead
+    // of asserting the stale value with confidence (Codex). We still
+    // do NOT setIdentity(null) here — keeping the previous identity
+    // visible during the in-flight window avoids the round-12
+    // regression where a transient blip emptied the dashboard.
+    setIdentityLoading(true);
     api.fetchCurrentAgent()
       .then((a) => { if (mounted) setIdentity(toSidebarIdentity(a)); })
       .catch(() => { /* keep last good identity (see above) */ })

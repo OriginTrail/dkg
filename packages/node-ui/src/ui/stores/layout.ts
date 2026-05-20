@@ -53,14 +53,22 @@ const BOTTOM_HEIGHT_MAX = 600;
 // viewport so a height persisted on a tall screen can't squeeze the
 // center pane out of view after reload on a shorter one (Codex / ui-lead).
 const CENTER_MIN_HEIGHT = 240;
-// The bottom panel lives inside `.v10-app-body`, which sits *below* the
-// fixed-height header — so the space available to it is the viewport
-// minus the shell chrome, not the full `innerHeight`. Must stay in sync
-// with `--header-h` in styles.css; without subtracting it the panel
-// could grow ~44px too tall and squeeze the center pane below
-// CENTER_MIN_HEIGHT (Codex).
-const SHELL_CHROME_HEIGHT = 44;
+// Read a CSS custom property (px) at runtime so the JS clamp doesn't
+// duplicate the layout numbers and silently drift if the CSS values
+// change (Codex). Falls back when the document isn't available or the
+// var is unset.
+export function readPxVar(name: string, fallback: number): number {
+  if (typeof document === 'undefined') return fallback;
+  const raw = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  const n = parseFloat(raw);
+  return Number.isFinite(n) ? n : fallback;
+}
+
 export function maxBottomHeight(): number {
+  // Shell chrome (header) and the bottom-panel tab strip live in CSS
+  // (`--header-h`, `--tab-h`); read them at runtime rather than copying
+  // the numbers here so a CSS tweak can't silently break the clamp.
+  const SHELL_CHROME_HEIGHT = readPxVar('--header-h', 44);
   const vh = typeof window !== 'undefined' && window.innerHeight ? window.innerHeight : 0;
   // No window (SSR/tests): only the storage-sanity cap applies.
   if (!vh) return BOTTOM_HEIGHT_MAX;

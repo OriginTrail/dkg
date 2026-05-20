@@ -2438,7 +2438,12 @@ button:focus:not(:focus-visible) { outline: none; }
 
 /* Curator/Joined split bar in the My Context Graphs card — same
    spacing rhythm as the Size card's metric → bar → legend stack. */
-.v10-cg-rolesplit { display: flex; flex-direction: column; gap: 4px; margin: 8px 0 2px; }
+.v10-cg-rolesplit { display: flex; flex-direction: column; gap: 4px; margin: 8px 0 2px; transition: opacity 0.12s; }
+/* Identity refetch in flight: signal the split is not authoritative
+   right now without flickering it away (the underlying data may still
+   be correct after the refetch). */
+.v10-cg-rolesplit.is-refreshing { opacity: 0.55; }
+@media (prefers-reduced-motion: reduce) { .v10-cg-rolesplit { transition: none; } }
 
 /* Dim inline label. `--text-secondary` (NOT tertiary): these annotate
    real numbers, so they must clear AA on the card surface. */

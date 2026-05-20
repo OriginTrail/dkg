@@ -148,13 +148,17 @@ function LayerLegend() {
 // Single proportion bar + legend for the curator/joined split of the
 // user's context graphs — mirrors the LayerBar treatment in the Size
 // card so the two top cards read as one system (round-2 feedback).
-function RoleBar({ curator, joined }: { curator: number; joined: number }) {
+function RoleBar({ curator, joined, refreshing }: { curator: number; joined: number; refreshing?: boolean }) {
   const sum = curator + joined;
   const title = `Curator ${curator} · Joined ${joined}`;
   const CUR = 'var(--accent-green)';
   const JOIN = 'var(--text-secondary)';
   return (
-    <div className="v10-cg-rolesplit">
+    <div
+      className={`v10-cg-rolesplit${refreshing ? ' is-refreshing' : ''}`}
+      title={refreshing ? 'Refreshing — agent identity is being re-checked' : undefined}
+      aria-busy={refreshing || undefined}
+    >
       <div className="v10-layerbar" title={title} aria-label={title}>
         {sum === 0 ? (
           <span className="v10-layerbar-empty" />
@@ -566,7 +570,11 @@ export function DashboardView() {
           sub={CG_DEFINITION}
         >
           {agg.hasCgs && !cgsResolving ? (
-            <RoleBar curator={roleSplit.curator} joined={roleSplit.joined} />
+            <RoleBar
+              curator={roleSplit.curator}
+              joined={roleSplit.joined}
+              refreshing={identityLoading}
+            />
           ) : null}
         </StatCard>
         <StatCard
