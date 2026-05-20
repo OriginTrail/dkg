@@ -116,9 +116,13 @@ function StatCard({
 // fails 3:1 non-text on its own — ui-lead). Exact counts on hover.
 function LayerBar({ counts }: { counts: LayerCounts }) {
   const sum = counts.wm + counts.swm + counts.vm;
-  const title = LAYERS.map((l) => `${l.short} ${counts[l.key]}`).join(' · ');
+  const summary = LAYERS.map((l) => `${l.short} ${counts[l.key]}`).join(' · ');
+  // No parent `title` — each segment already carries a descriptive
+  // tooltip and a parent title bleeds through the 1px gap/track edge
+  // (round-3 feedback). `aria-label` keeps the bar accessible as a
+  // single utterance for screen readers.
   return (
-    <div className="v10-layerbar" title={title} aria-label={title}>
+    <div className="v10-layerbar" aria-label={summary}>
       {sum === 0 ? (
         <span className="v10-layerbar-empty" />
       ) : (
@@ -157,7 +161,7 @@ function LayerLegend() {
 // card so the two top cards read as one system (round-2 feedback).
 function RoleBar({ curator, joined, refreshing }: { curator: number; joined: number; refreshing?: boolean }) {
   const sum = curator + joined;
-  const title = `Curator ${curator} · Joined ${joined}`;
+  const summary = `Curator ${curator} · Joined ${joined}`;
   const CUR = 'var(--accent-green)';
   const JOIN = 'var(--text-secondary)';
   return (
@@ -166,7 +170,10 @@ function RoleBar({ curator, joined, refreshing }: { curator: number; joined: num
       title={refreshing ? 'Refreshing — agent identity is being re-checked' : undefined}
       aria-busy={refreshing || undefined}
     >
-      <div className="v10-layerbar" title={title} aria-label={title}>
+      {/* No parent `title` on the bar — each segment already has its
+          own descriptive tooltip and a parent title would bleed
+          through the 1px gap/track edge (round-3 feedback). */}
+      <div className="v10-layerbar" aria-label={summary}>
         {sum === 0 ? (
           <span className="v10-layerbar-empty" />
         ) : (
