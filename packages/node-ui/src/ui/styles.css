@@ -991,6 +991,56 @@ button:focus:not(:focus-visible) { outline: none; }
   flex-wrap: wrap;
 }
 
+/* Peer-axis Network-tab card — extends .v10-agent-card. The peer's
+   name reads as a primary identifier (own line treatment via
+   .v10-peer-card-name). Meta line uses the same mono treatment as
+   .v10-agent-card-meta. */
+.v10-peer-card-name {
+  font-size: 12px; font-weight: 600; color: var(--text-primary);
+  flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.v10-peer-card-meta {
+  display: flex; gap: 8px; margin-top: 4px;
+  font-size: 10px; color: var(--text-tertiary); font-family: var(--font-mono);
+  flex-wrap: wrap;
+}
+/* Agents-as-chips inside each peer card. flex-wrap handles long lists
+   gracefully; the +N more button toggles inline expansion (card grows
+   vertically). */
+.v10-peer-card-chips {
+  list-style: none; padding: 0; margin: 6px 0 0;
+  display: flex; flex-wrap: wrap; gap: 4px;
+}
+.v10-agent-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  max-width: 140px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  font-size: 10px;
+  line-height: 16px;
+  color: var(--text-secondary);
+}
+.v10-agent-chip-label {
+  font-family: var(--font-mono);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* "+N more" / "− less" toggle button. Sits in the same chip row;
+   reuses the chip surface so layout stays predictable. */
+.v10-agent-chip-more {
+  cursor: pointer;
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  font-family: inherit;
+}
+.v10-agent-chip-more:hover { color: var(--text-primary); }
+.v10-agent-chip-more:focus-visible {
+  outline: 1px solid var(--accent-blue);
+  outline-offset: 1px;
+}
+
 .v10-local-agent-list {
   display: flex;
   flex-direction: column;

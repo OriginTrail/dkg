@@ -77,7 +77,16 @@ describe('PanelRight component', () => {
       peerId: 'peer-2',
       connectionStatus: 'connected',
     }] });
-    fetchConnectionsMock.mockResolvedValue({ total: 1, direct: 1, relayed: 0 });
+    // The peer-axis NetworkTab derives connected peers from
+    // `connections.connections[]`; totals alone aren't enough.
+    fetchConnectionsMock.mockResolvedValue({
+      total: 1,
+      direct: 1,
+      relayed: 0,
+      connections: [
+        { peerId: 'peer-2', transport: 'direct', direction: 'outbound', openedAt: Date.now() - 60_000, durationMs: 60_000 },
+      ],
+    });
     fetchLocalAgentIntegrationsMock.mockResolvedValue({ integrations: [{
       id: 'openclaw',
       name: 'OpenClaw',

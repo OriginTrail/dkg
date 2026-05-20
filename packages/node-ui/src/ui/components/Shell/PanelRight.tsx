@@ -93,6 +93,36 @@ interface AgentInfo {
   latencyMs?: number;
 }
 
+// One row from `/api/connections.connections` — a single libp2p
+// connection. A peer can appear multiple times when reachable via both
+// a direct and a relay transport simultaneously; `buildPeers` collapses
+// those to one card per peerId.
+export interface ConnectionRow {
+  peerId: string;
+  remoteAddr?: string;
+  transport: 'direct' | 'relayed';
+  direction?: string;
+  openedAt?: number | null;
+  durationMs?: number | null;
+}
+
+// Peer-axis model for the Network tab. One per libp2p peerId. Agents
+// hosted by the peer (0..N) attach as a list and surface inside the
+// card as chips. `name` is the peer's (node's) name — same value across
+// every agent on this peer — sampled from any one of them since the
+// `/api/connections` endpoint doesn't expose it.
+export interface PeerInfo {
+  peerId: string;
+  name?: string;
+  transport: 'direct' | 'relayed';
+  hasDirect: boolean;
+  hasRelay: boolean;
+  openedAt: number | null;
+  connected: boolean;
+  lastSeen?: number;
+  agents: AgentInfo[];
+}
+
 interface LocalAgentSessionSummary {
   sessionId: string;
   integrationId: string;
@@ -111,6 +141,122 @@ let localMessageId = 0;
 
 function shortPeerId(peerId: string): string {
   return peerId.length > 12 ? peerId.slice(-8) : peerId;
+}
+
+// Compact chip label for an agentUri. agentUris are typically
+// colon-separated (e.g. `did:dkg:agent:0x…`); take the last segment so
+// the most-specific identifier shows, trimmed to 10 chars. Falls back
+// to the URI's last 8 chars if there's no colon. The full URI is
+// surfaced via `title` on the chip so the truncated tail isn't lossy.
+export function shortAgentUri(uri: string): string {
+  if (!uri) return '';
+  const colonIdx = uri.lastIndexOf(':');
+  const tail = colonIdx >= 0 ? uri.slice(colonIdx + 1) : uri;
+  return tail.length > 10 ? tail.slice(-10) : tail || uri.slice(-8);
+}
+
+// Group raw connections + agents into the peer-axis model the Network
+// tab renders. Frontend-only — no backend changes needed; the `name`
+// field travels with every agent record (it's the peer's/node's name,
+// identical across agents on the same peer), so we sample it from any
+// agent on the peer.
+//
+// Rules:
+//   * Connected peers come from `/api/connections.connections` grouped
+//     by peerId. Per-connection records — a peer reachable via direct +
+//     relay shows up twice and is collapsed here. Any-direct-wins for
+//     the displayed transport; `hasDirect`/`hasRelay` flags carry the
+//     raw signal for the badge tooltip.
+//   * Recently-seen peers are the peers in `/api/agents` (filtered to
+//     non-self upstream) whose peerId isn't currently connected and
+//     whose latest `lastSeen` across their agents is within
+//     `recentlySeenWindowMs` (default 24h). Sorted by `lastSeen` desc.
+//   * Summary counts derive from the de-duped peer set, not the raw
+//     connection rows.
+export function buildPeers(
+  connections: ConnectionRow[],
+  agents: AgentInfo[],
+  now: number,
+  recentlySeenWindowMs: number = 24 * 60 * 60 * 1000,
+): {
+  connected: PeerInfo[];
+  recentlySeen: PeerInfo[];
+  directCount: number;
+  relayedCount: number;
+} {
+  // peerId → AgentInfo[] (preserves all agents per peer for the chip list).
+  const agentsByPeer = new Map<string, AgentInfo[]>();
+  for (const a of agents) {
+    if (!a.peerId) continue;
+    const list = agentsByPeer.get(a.peerId) ?? [];
+    list.push(a);
+    agentsByPeer.set(a.peerId, list);
+  }
+
+  // peerId → { hasDirect, hasRelay, openedAt (earliest) }.
+  const connByPeer = new Map<string, {
+    hasDirect: boolean;
+    hasRelay: boolean;
+    openedAt: number | null;
+  }>();
+  for (const c of connections) {
+    if (!c.peerId) continue;
+    const prev = connByPeer.get(c.peerId) ?? { hasDirect: false, hasRelay: false, openedAt: null };
+    const hasDirect = prev.hasDirect || c.transport === 'direct';
+    const hasRelay = prev.hasRelay || c.transport === 'relayed';
+    const openedAt = c.openedAt != null
+      ? (prev.openedAt != null ? Math.min(prev.openedAt, c.openedAt) : c.openedAt)
+      : prev.openedAt;
+    connByPeer.set(c.peerId, { hasDirect, hasRelay, openedAt });
+  }
+
+  const pickName = (peerAgents: AgentInfo[]): string | undefined =>
+    peerAgents.find((a) => a.name)?.name;
+  const pickLastSeen = (peerAgents: AgentInfo[]): number | undefined =>
+    peerAgents.reduce<number | undefined>(
+      (acc, a) => (a.lastSeen != null && (acc == null || a.lastSeen > acc) ? a.lastSeen : acc),
+      undefined,
+    );
+
+  const connected: PeerInfo[] = [];
+  for (const [peerId, c] of connByPeer) {
+    const peerAgents = agentsByPeer.get(peerId) ?? [];
+    connected.push({
+      peerId,
+      name: pickName(peerAgents),
+      transport: c.hasDirect ? 'direct' : 'relayed',
+      hasDirect: c.hasDirect,
+      hasRelay: c.hasRelay,
+      openedAt: c.openedAt,
+      connected: true,
+      lastSeen: pickLastSeen(peerAgents),
+      agents: peerAgents,
+    });
+  }
+
+  const recentlySeen: PeerInfo[] = [];
+  for (const [peerId, peerAgents] of agentsByPeer) {
+    if (connByPeer.has(peerId)) continue;
+    const lastSeen = pickLastSeen(peerAgents);
+    if (lastSeen == null || now - lastSeen > recentlySeenWindowMs) continue;
+    recentlySeen.push({
+      peerId,
+      name: pickName(peerAgents),
+      // Transport is not meaningful for a peer we aren't connected to;
+      // mark `direct` arbitrarily so the type stays narrow.
+      transport: 'direct',
+      hasDirect: false,
+      hasRelay: false,
+      openedAt: null,
+      connected: false,
+      lastSeen,
+      agents: peerAgents,
+    });
+  }
+  recentlySeen.sort((a, b) => (b.lastSeen ?? 0) - (a.lastSeen ?? 0));
+
+  const directCount = connected.filter((p) => p.transport === 'direct').length;
+  return { connected, recentlySeen, directCount, relayedCount: connected.length - directCount };
 }
 
 function formatDuration(ms: number): string {
@@ -1689,32 +1835,82 @@ export function ConnectedAgentsTab(props: {
   );
 }
 
-function NetworkPeerCard({ agent }: { agent: AgentInfo }) {
-  const statusClass = networkPeerCardStatusClass(agent);
+// Per-peer card: header + meta + agents-as-chips. Nodes are
+// infrastructure; agents live on them. Up to 3 chips inline, with a
+// "+N more" button that expands inline (card grows vertically).
+function NetworkPeerCard({ peer }: { peer: PeerInfo }) {
+  const [expanded, setExpanded] = useState(false);
+  const CHIP_BUDGET = 3;
+  const statusClass: 'connected' | 'offline' = peer.connected ? 'connected' : 'offline';
+  const displayName = peer.name?.trim() || shortPeerId(peer.peerId);
+  const visibleAgents = expanded ? peer.agents : peer.agents.slice(0, CHIP_BUDGET);
+  const hiddenCount = peer.agents.length - visibleAgents.length;
+  const transportLabel = peer.connected ? peer.transport : 'Disconnected';
+  // Any-direct-wins means a peer reachable on direct + relay is
+  // labelled "direct" — surface the raw availability in the tooltip
+  // so the relay path isn't completely hidden.
+  const transportTitle =
+    peer.connected && peer.hasDirect && peer.hasRelay
+      ? 'Direct + relay paths active — direct shown'
+      : undefined;
   return (
-    <div className={`v10-agent-card ${statusClass}`}>
+    <div className={`v10-agent-card v10-peer-card ${statusClass}`}>
       <div className="v10-agent-card-header">
         <span className={`v10-agent-card-dot ${statusClass}`} />
-        <span className="v10-agent-card-name">{agent.name}</span>
-        <span className="v10-agent-card-badge">
-          {agent.connectionStatus === 'connected'
-            ? (agent.connectionTransport ?? 'direct')
-            : 'Disconnected'}
+        <span className="v10-peer-card-name">{displayName}</span>
+        <span className="v10-agent-card-badge" title={transportTitle}>
+          {transportLabel}
         </span>
       </div>
-      <div className="v10-agent-card-meta">
-        <span>{agent.nodeRole ?? 'core'}</span>
-        <span title={agent.peerId}>{shortPeerId(agent.peerId)}</span>
-        {agent.latencyMs != null && <span>{agent.latencyMs}ms</span>}
-        {agent.lastSeen != null && <span>{formatDuration(Date.now() - agent.lastSeen)} ago</span>}
+      <div className="v10-peer-card-meta">
+        <span title={peer.peerId}>{shortPeerId(peer.peerId)}</span>
+        {peer.connected && peer.openedAt != null && (
+          <span>up {formatDuration(Date.now() - peer.openedAt)}</span>
+        )}
+        {!peer.connected && peer.lastSeen != null && (
+          <span>{formatDuration(Date.now() - peer.lastSeen)} ago</span>
+        )}
+        {peer.agents.length > 0 && (
+          <span>{peer.agents.length} agent{peer.agents.length === 1 ? '' : 's'}</span>
+        )}
       </div>
+      {peer.agents.length > 0 && (
+        <ul
+          className="v10-peer-card-chips"
+          aria-label={`Agents on ${displayName}`}
+        >
+          {visibleAgents.map((a, idx) => (
+            <li
+              key={a.agentUri || `${peer.peerId}:${idx}`}
+              className="v10-agent-chip"
+              title={a.agentUri || ''}
+            >
+              <span className="v10-agent-chip-label">
+                {shortAgentUri(a.agentUri) || shortPeerId(a.peerId)}
+              </span>
+            </li>
+          ))}
+          {peer.agents.length > CHIP_BUDGET && (
+            <li>
+              <button
+                type="button"
+                className="v10-agent-chip v10-agent-chip-more"
+                aria-expanded={expanded}
+                onClick={() => setExpanded((e) => !e)}
+              >
+                {expanded ? '− less' : `+${peer.agents.length - CHIP_BUDGET} more`}
+              </button>
+            </li>
+          )}
+        </ul>
+      )}
     </div>
   );
 }
 
 function NetworkPeerGroup(props: {
   label: string;
-  peers: AgentInfo[];
+  peers: PeerInfo[];
   expanded: boolean;
   onToggle: () => void;
   emptyMessage: string;
@@ -1741,13 +1937,10 @@ function NetworkPeerGroup(props: {
           {peers.length === 0 ? (
             <div className="v10-agent-empty-state">{emptyMessage}</div>
           ) : (
-            // Key on the same identity used for dedupe upstream
-            // (agentUri, falling back to peerId). After the BNlko fix,
-            // distinct agents sharing a peerId now render as separate
-            // cards — keying on peerId alone would collide and cause
-            // React to reuse the wrong card across re-renders.
-            peers.map((agent) => (
-              <NetworkPeerCard key={agent.agentUri || agent.peerId} agent={agent} />
+            // One card per libp2p peerId — keying on peerId is now
+            // safe and intended (the previous agent-axis dedup is gone).
+            peers.map((peer) => (
+              <NetworkPeerCard key={peer.peerId} peer={peer} />
             ))
           )}
         </div>
@@ -1759,134 +1952,51 @@ function NetworkPeerGroup(props: {
 function NetworkTab(props: {
   peerAgents: AgentInfo[];
   /**
-   * Raw libp2p connection counts from `/api/connections`. Used to drive
-   * the empty-state and to surface a transitional message when libp2p
-   * has connections but `/api/agents` has not emitted records yet — the
-   * deduped peerAgents list can otherwise show "0 connected / No
-   * network peers detected yet" even though the node is connected.
+   * `/api/connections` totals + per-connection rows. Both are needed:
+   *   - `total` drives the empty-state (libp2p has connections but
+   *     `/api/agents` hasn't emitted records yet).
+   *   - `rows` is the source of truth for the peer axis — grouped by
+   *     peerId inside `buildPeers` to derive one card per peer.
+   * Per-connection records may include the same peerId twice when a
+   * peer is reachable via both direct + relay simultaneously;
+   * `buildPeers` collapses those.
    */
-  connections: { total: number; direct: number; relayed: number };
+  connections: { total: number; direct: number; relayed: number; rows: ConnectionRow[] };
   loading: boolean;
   onRefresh: () => void;
 }) {
   const { peerAgents, connections, loading, onRefresh } = props;
   const [connectedExpanded, setConnectedExpanded] = useState(true);
-  const [disconnectedExpanded, setDisconnectedExpanded] = useState(false);
+  const [recentlySeenExpanded, setRecentlySeenExpanded] = useState(false);
 
-  // The /api/agents feed can report the same agent under multiple records
-  // (e.g. once via a direct transport, once via a relay). Collapse to one
-  // entry per agent. Dedupe on `agentUri` — a stable per-agent identifier
-  // — rather than `peerId`, since a remote node may advertise multiple
-  // distinct agents on the same peer (different `agentUri` values), and
-  // those are NOT duplicates. Fall back to `peerId` only when `agentUri`
-  // is missing so older records still collapse instead of multiplying.
-  //
-  // Tie-break order when collapsing records for the same agent:
-  //   1. Prefer a connected record over a disconnected one.
-  //   2. Among connected records, prefer DIRECT over relayed — direct is
-  //      the better transport, so an agent that has any direct connection
-  //      should be reported as direct (not arbitrarily classed as relayed
-  //      because the relay record arrived more recently in the feed).
-  //   3. Otherwise prefer the more-recently-seen record so latency/status
-  //      reflect current state.
-  // With this rule, direct + relayed = total unique connected agents and
-  // the top summary count agrees with the section counts.
-  const transportRank = (peer: AgentInfo): number =>
-    (peer.connectionTransport ?? 'direct') === 'direct' ? 1 : 0;
-  const dedupeKey = (peer: AgentInfo): string => peer.agentUri || peer.peerId;
-  const uniquePeers = Array.from(
-    peerAgents.reduce<Map<string, AgentInfo>>((acc, peer) => {
-      const key = dedupeKey(peer);
-      const prev = acc.get(key);
-      if (!prev) {
-        acc.set(key, peer);
-        return acc;
-      }
-      const peerConnected = peer.connectionStatus === 'connected';
-      const prevConnected = prev.connectionStatus === 'connected';
-      if (peerConnected !== prevConnected) {
-        // Status disagrees → use the freshest available signal. The rule
-        // has shaken out across several Codex rounds:
-        //   CGaLH: don't naively prefer "connected" — a stale connected
-        //          row after a peer drops keeps the UI wrong.
-        //   CG3Lw: don't `?? 0` missing timestamps either — an older
-        //          timestamped connected row would beat a newer
-        //          un-timestamped disconnect.
-        //   CHMS1: don't fall through to feed-order on missing-timestamp
-        //          ties either — `/api/agents` doesn't sort by recency,
-        //          so an upstream ordering change can silently flip the
-        //          panel back. Prefer the timestamped row when only one
-        //          side has it; when neither has a timestamp, prefer
-        //          the disconnected reading so a stale connected row
-        //          can't mask a fresh disconnect.
-        const peerHasTs = typeof peer.lastSeen === 'number';
-        const prevHasTs = typeof prev.lastSeen === 'number';
-        if (peerHasTs && prevHasTs) {
-          // Both timestamped — pure numeric freshness; tie goes to peer
-          // (later in feed by construction, deterministic within the
-          // same numeric bucket).
-          if (peer.lastSeen! >= prev.lastSeen!) acc.set(key, peer);
-        } else if (peerHasTs) {
-          // Only peer has a timestamp — take it.
-          acc.set(key, peer);
-        } else if (prevHasTs) {
-          // Only prev has a timestamp — keep prev (no-op).
-        } else {
-          // Neither has a timestamp — bias toward disconnected to keep
-          // stale connected rows from masking a real disconnect.
-          if (!peerConnected) acc.set(key, peer);
-        }
-        return acc;
-      }
-      // Same status — prefer DIRECT transport (the better channel),
-      // then most recent.
-      const peerRank = transportRank(peer);
-      const prevRank = transportRank(prev);
-      if (peerRank !== prevRank) {
-        if (peerRank > prevRank) acc.set(key, peer);
-        return acc;
-      }
-      if ((peer.lastSeen ?? 0) >= (prev.lastSeen ?? 0)) {
-        acc.set(key, peer);
-      }
-      return acc;
-    }, new Map()).values(),
+  // Peer-axis derivation — one card per libp2p peerId. Replaces the
+  // earlier agent-axis dedupe tower (which existed to merge same-agent
+  // records across transports; that's no longer needed once peerId is
+  // the grouping key). Recently-seen list filters disconnected peers
+  // to the last 24h, sorted by lastSeen desc.
+  const { connected, recentlySeen, directCount, relayedCount } = buildPeers(
+    connections.rows,
+    peerAgents,
+    Date.now(),
   );
-  const connectedPeers = uniquePeers.filter((a) => a.connectionStatus === 'connected');
-  const disconnectedPeers = uniquePeers.filter((a) => a.connectionStatus !== 'connected');
-  // Derive the top-summary counts from the same deduped list the user is
-  // looking at, instead of pulling raw libp2p connection counts from
-  // /api/connections. /api/connections counts *connections* (so a peer
-  // reachable on direct + relayed transports counts twice), which is
-  // technically correct but confusing when the visible list says
-  // otherwise. Showing *peer* counts here keeps the top summary and the
-  // section counts consistent.
-  const directCount = connectedPeers.filter((a) => (a.connectionTransport ?? 'direct') === 'direct').length;
-  const relayedCount = connectedPeers.length - directCount;
 
   return (
     <div className="v10-agent-scroll-tab">
       <div className="v10-agents-summary">
         <span className="v10-agents-stat">
-          {/* Dot reflects actual libp2p connectivity. If raw connections
-              report any peer up, light the dot — otherwise the panel can
-              briefly show a stale "disconnected" indicator while /api/agents
-              is still catching up. */}
-          <span className={`v10-agents-stat-dot ${connectedPeers.length > 0 || connections.total > 0 ? 'connected' : 'known'}`} />
-          {/* "Connected" qualifier matches the Connected section header below
-              — without it, "0 peers" reads as "no peers known" when there
-              might be hundreds of disconnected peers in the section underneath. */}
-          {connectedPeers.length} connected
+          {/* Dot reflects libp2p connectivity. Light it if either
+              `/api/connections` reports peers OR our derived count is
+              non-zero — so a brief skew between the two endpoints
+              doesn't briefly show "disconnected" while data is in flight. */}
+          <span className={`v10-agents-stat-dot ${connected.length > 0 || connections.total > 0 ? 'connected' : 'known'}`} />
+          <span title="Unique libp2p peers connected to this node — matches the count in the header.">
+            {connected.length} peer{connected.length === 1 ? '' : 's'}
+          </span>
         </span>
-        {/*
-          The counts here reflect the *preferred transport per peer*, not
-          raw transport-channel counts. A peer reachable through both
-          transports is collapsed to its DIRECT record by the dedupe rule
-          above, so it shows under `direct` even if a relay path is also
-          active. The title surfaces this so "0 relayed" doesn't read as
-          "no relay paths in use" — for raw libp2p transport diagnostics
-          the /api/connections counters are still the source of truth.
-        */}
+        {/* Any-direct-wins per peer: a peer reachable on direct + relay
+            simultaneously is bucketed as direct. The transport tooltip
+            on each card surfaces the raw availability so the relay path
+            isn't completely hidden. */}
         <span
           className="v10-agents-stat"
           title="Preferred transport per peer (peers reachable via direct + relay are bucketed under direct)"
@@ -1899,33 +2009,33 @@ function NetworkTab(props: {
       </div>
 
       {loading && <p className="v10-agents-loading">Loading peers...</p>}
-      {peerAgents.length === 0 && !loading && connections.total === 0 && (
+      {!loading && connected.length === 0 && recentlySeen.length === 0 && connections.total === 0 && (
         <div className="v10-agent-empty-state">No network peers detected yet.</div>
       )}
-      {peerAgents.length === 0 && !loading && connections.total > 0 && (
-        // libp2p reports connections but /api/agents hasn't emitted records
-        // for them yet (slow probe, or remote peers have no agent
-        // metadata). Surface that so the panel doesn't read as "no peers"
-        // when the node is actually connected.
+      {!loading && connected.length === 0 && connections.total > 0 && (
+        // libp2p reports connections but we haven't yet derived peers
+        // from the row data — surface the raw count so the panel
+        // doesn't read as "no peers" when the node IS actually
+        // connected.
         <div className="v10-agent-empty-state">
-          Connected to {connections.total} peer{connections.total === 1 ? '' : 's'} (agent metadata syncing…).
+          Connected to {connections.total} peer{connections.total === 1 ? '' : 's'} (peer metadata syncing…).
         </div>
       )}
-      {peerAgents.length > 0 && (
+      {(connected.length > 0 || recentlySeen.length > 0) && (
         <>
           <NetworkPeerGroup
             label="Connected"
-            peers={connectedPeers}
+            peers={connected}
             expanded={connectedExpanded}
             onToggle={() => setConnectedExpanded((p) => !p)}
             emptyMessage="No peers currently connected."
           />
           <NetworkPeerGroup
-            label="Disconnected"
-            peers={disconnectedPeers}
-            expanded={disconnectedExpanded}
-            onToggle={() => setDisconnectedExpanded((p) => !p)}
-            emptyMessage="All known peers are connected."
+            label="Recently seen"
+            peers={recentlySeen}
+            expanded={recentlySeenExpanded}
+            onToggle={() => setRecentlySeenExpanded((p) => !p)}
+            emptyMessage="No peers seen in the last 24 hours."
           />
         </>
       )}
@@ -1975,7 +2085,7 @@ export function PanelRight() {
 
   const [memorySessions, setMemorySessions] = useState<MemorySession[]>([]);
   const [peerAgents, setPeerAgents] = useState<AgentInfo[]>([]);
-  const [connections, setConnections] = useState<{ total: number; direct: number; relayed: number }>({ total: 0, direct: 0, relayed: 0 });
+  const [connections, setConnections] = useState<{ total: number; direct: number; relayed: number; rows: ConnectionRow[] }>({ total: 0, direct: 0, relayed: 0, rows: [] });
   const [peerLoading, setPeerLoading] = useState(true);
   const [currentAgent, setCurrentAgent] = useState<AgentIdentity | null>(null);
 
@@ -2234,7 +2344,7 @@ export function PanelRight() {
     try {
       const [agentData, connData] = await Promise.all([
         fetchAgents().catch(() => ({ agents: [] })),
-        fetchConnections().catch(() => ({ total: 0, direct: 0, relayed: 0 })),
+        fetchConnections().catch(() => ({ total: 0, direct: 0, relayed: 0, connections: [] })),
       ]);
       const agents = (agentData.agents ?? []).filter((agent: AgentInfo) => agent.connectionStatus !== 'self');
       setPeerAgents(agents);
@@ -2242,6 +2352,9 @@ export function PanelRight() {
         total: connData.total ?? 0,
         direct: connData.direct ?? 0,
         relayed: connData.relayed ?? 0,
+        // Per-connection rows are the source of truth for the peer
+        // axis — grouped by peerId inside NetworkTab's `buildPeers`.
+        rows: Array.isArray(connData.connections) ? connData.connections : [],
       });
     } catch {
       // ignore
