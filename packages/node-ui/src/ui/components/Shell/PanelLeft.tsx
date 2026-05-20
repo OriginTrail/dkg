@@ -332,7 +332,7 @@ export function PanelLeft() {
                 <span className="v10-peer-group-label">Integrations</span>
               </button>
               {leftSectionIntegrationsOpen && (
-                <div id={integrationsBodyId}>
+                <div id={integrationsBodyId} className="v10-peer-group-body">
                   <IntegrationsSectionBody />
                 </div>
               )}

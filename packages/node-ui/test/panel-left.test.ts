@@ -7,8 +7,8 @@
 // under test for the sidebar sections work.
 
 import React, { act } from 'react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { createRoot } from 'react-dom/client';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createRoot, type Root } from 'react-dom/client';
 
 const fetchCurrentAgentMock = vi.fn();
 const fetchLocalAgentIntegrationsMock = vi.fn();
@@ -35,7 +35,28 @@ async function flush(): Promise<void> {
   });
 }
 
+// Cross-test cleanup registry. PanelLeft spins up a 60s polling interval
+// (`loadCGs`) and subscribes to `useNodeEvents` on mount — without an
+// explicit unmount, those listeners + timers leak into the next test and
+// can produce flaky extra mock calls (qa-lead / Codex).
+const mountedRoots: Root[] = [];
+const mountedContainers: HTMLElement[] = [];
+
 describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
+  afterEach(() => {
+    // Unmount in reverse-mount order so any teardown effects fire in the
+    // expected sequence. Wrap each unmount in `act` so React's flush
+    // (effects, microtasks) completes before the next test runs.
+    while (mountedRoots.length > 0) {
+      const root = mountedRoots.pop()!;
+      const container = mountedContainers.pop()!;
+      act(() => {
+        root.unmount();
+      });
+      container.remove();
+    }
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -102,6 +123,8 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
     const root = createRoot(container);
+    mountedRoots.push(root);
+    mountedContainers.push(container);
     await act(async () => {
       root.render(React.createElement(PanelLeft));
     });
@@ -197,6 +220,8 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
     const root = createRoot(container);
+    mountedRoots.push(root);
+    mountedContainers.push(container);
     await act(async () => {
       root.render(React.createElement(PanelLeft));
     });
@@ -220,12 +245,14 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     expect(myCgControls).toBeTruthy();
     expect(integrationsControls).toBeTruthy();
     // The id pointed at by aria-controls of the (open) My CG header
-    // must exist in the DOM.
-    expect(container.querySelector(`#${myCgControls}`)).toBeTruthy();
+    // must exist in the DOM. `useId()` returns ids shaped like ":r0:"
+    // which aren't valid CSS selectors — use getElementById, not
+    // querySelector (Codex).
+    expect(document.getElementById(myCgControls!)).toBeTruthy();
     // Integrations is collapsed by default → its body is unmounted, so
     // the id is currently absent (aria-controls is still allowed to
     // reference a not-yet-rendered region per WAI-ARIA).
-    expect(container.querySelector(`#${integrationsControls}`)).toBeNull();
+    expect(document.getElementById(integrationsControls!)).toBeNull();
   });
 
   it('opening Integrations triggers the local-integrations fetch; closing it halts further polls', async () => {
