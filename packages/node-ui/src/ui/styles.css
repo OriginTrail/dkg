@@ -3107,7 +3107,11 @@ button:focus:not(:focus-visible) { outline: none; }
 .v10-assertion-list-title { font-size: 12px; font-weight: 600; color: var(--text-secondary); }
 .v10-btn-promote-all {
   padding: 5px 14px; border-radius: 6px; border: none;
-  background: var(--layer-shared, #7c6ef0); color: #fff;
+  /* Fallback corrected (PR8 round-4): was #7c6ef0 (purple) — `--layer-shared`
+     is amber. The fallback only kicks in if the var is undefined, which
+     shouldn't happen, but the wrong color leaks a brand inconsistency
+     in any token-stripped render. */
+  background: var(--layer-shared, #f59e0b); color: #fff;
   font-size: 11px; font-weight: 600; cursor: pointer; transition: opacity .15s;
 }
 .v10-btn-promote-all:hover { opacity: .85; }
@@ -3126,10 +3130,11 @@ button:focus:not(:focus-visible) { outline: none; }
 .v10-assertion-item-count { font-size: 10px; color: var(--text-tertiary); flex-shrink: 0; }
 .v10-btn-promote {
   padding: 3px 10px; border-radius: 5px; background: transparent;
-  border: 1px solid var(--layer-shared, #7c6ef0); color: var(--layer-shared, #7c6ef0);
+  /* Fallback corrected (PR8 round-4): purple → amber, see promote-all. */
+  border: 1px solid var(--layer-shared, #f59e0b); color: var(--layer-shared, #f59e0b);
   font-size: 11px; font-weight: 500; cursor: pointer; transition: all .15s; flex-shrink: 0;
 }
-.v10-btn-promote:hover { background: var(--layer-shared, #7c6ef0); color: #fff; }
+.v10-btn-promote:hover { background: var(--layer-shared, #f59e0b); color: #fff; }
 .v10-btn-promote:disabled { opacity: .5; cursor: not-allowed; }
 .v10-promote-result { padding: 8px 12px; font-size: 12px; }
 .v10-promote-result.success { color: var(--accent-green); background: rgba(34,197,94,.06); }
@@ -3167,7 +3172,9 @@ button:focus:not(:focus-visible) { outline: none; }
 .v10-assertion-item.selected { background: rgba(245,158,11,.04); }
 .v10-btn-publish {
   padding: 5px 14px; border-radius: 6px; border: none;
-  background: var(--layer-verified, #f59e0b); color: #fff;
+  /* Fallback corrected (PR8 round-4): was #f59e0b (amber) — `--layer-verified`
+     is green. Same brand-leak concern as promote-all. */
+  background: var(--layer-verified, #22c55e); color: #fff;
   font-size: 11px; font-weight: 600; cursor: pointer; transition: opacity .15s; white-space: nowrap;
 }
 .v10-btn-publish:hover { opacity: .85; }

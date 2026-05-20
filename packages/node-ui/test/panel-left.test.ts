@@ -288,7 +288,13 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
       // Advance past the polling interval. If cleanup leaked, the
       // setInterval callback would queue another loadLocal() and the
       // call count would bump. Mock-call counting is sync so no need
-      // to flush microtasks for the assertion.
+      // to flush microtasks for the assertion. NB: 31_000 sits BELOW
+      // PanelLeft's separate `setInterval(loadCGs, 60_000)` (which calls
+      // `fetchContextGraphs`, not `fetchLocalAgentIntegrations`, so the
+      // mock we assert on would be unaffected even if it fired). Keep
+      // this gap if either constant moves — the polling-halt cleanup
+      // proof depends on advancing *just enough* to fire Integrations
+      // polling but not the unrelated CG-list refresh.
       await act(async () => {
         vi.advanceTimersByTime(31_000);
       });

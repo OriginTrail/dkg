@@ -33,7 +33,9 @@ export const sel = {
     // global header `sidebarToggle` instead. `.v10-tree-section-badge`
     // and `.v10-tree-chevron` were also removed; the per-project
     // chevron-expand pattern no longer exists. Broader e2e
-    // modernization is tracked separately — see task #120.
+    // modernization is a standalone follow-up (chevron-expand /
+    // memory-layer rows / fixture CG names — all gone for multiple
+    // PRs); this PR only triages the cases its removals directly broke.
     treeContent: '.v10-tree-content',
     dashboard: '.v10-tree-dashboard',
     newProjectBtn: '.v10-new-project-btn',

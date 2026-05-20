@@ -28,9 +28,15 @@ test.describe('Shell Layout', () => {
     await expect(shell.leftPanel).toBeVisible();
   });
 
-  test('left panel collapse button hides tree entirely', async ({ leftPanel, shell }) => {
-    await leftPanel.collapse();
-    await expect(shell.leftPanel).toBeHidden();
+  // The in-panel `.v10-collapse-btn` was removed in PR8 — the global
+  // header sidebar toggle is the sole control. The test directly above
+  // ("header toggle collapses left panel") already exercises that path,
+  // so this case is now redundant rather than just stale. `fixme` so it
+  // ties to the broader e2e modernization in follow-up task (in this
+  // workspace; not a GitHub issue) — see `feat/sidebar-cleanup-and-dark-contrast`
+  // commit history for context.
+  test.fixme('left panel collapse button hides tree entirely', async () => {
+    // intentionally skipped — `.v10-collapse-btn` no longer rendered.
   });
 
   test('header toggle collapses right panel', async ({ header, page }) => {

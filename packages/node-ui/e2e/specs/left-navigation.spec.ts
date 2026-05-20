@@ -32,8 +32,10 @@ test.describe('Left Panel Navigation', () => {
 
   // Per-row asset-count badges were removed in PR8 — the count was
   // broken (always 0) and the dashboard already surfaces this number.
-  // Broader e2e modernization tracked in follow-up #120.
-  test.skip('project badge shows asset count', async () => {
+  // `fixme` so this stays visible in the test report until the broader
+  // e2e revamp picks it up (broader rot is tracked outside this PR;
+  // grep this commit for "left-navigation.spec" in the PR8 series).
+  test.fixme('project badge shows asset count', async () => {
     // intentionally skipped — `.v10-tree-section-badge` no longer rendered.
   });
 
@@ -139,8 +141,8 @@ test.describe('Left Panel Navigation', () => {
   // The in-panel ◂ collapse button was removed in PR8 — the global
   // header sidebar toggle is the sole control. A future spec should
   // exercise the global toggle path (`shell.header.sidebarToggle`)
-  // instead. Tracked in follow-up #120.
-  test.skip('collapse button hides left panel', async () => {
+  // instead. `fixme` so it stays visible in the test report.
+  test.fixme('collapse button hides left panel', async () => {
     // intentionally skipped — `.v10-collapse-btn` no longer rendered.
   });
 
