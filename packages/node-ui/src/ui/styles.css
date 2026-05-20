@@ -21,18 +21,18 @@
      whose bg is identical to a chip fill). */
   --border-prominent: #888888;
 
-  /* Text — dark mode. Round-2 bump 2026-05-20 (PR8): the PR7 lift
-     (#8a8a8a tertiary) still read as "footnotes" on a real 14"+ laptop
-     screen — pushed tertiary another step (~7.1:1). Ghost stays at the
-     pre-PR8 #333 — qa-lead caught that bumping ghost promoted ~50
-     decorative usages (separators, dot backgrounds, select-arrow
-     gradients) from "near-invisible whisper" to "mid-tier text". The
-     two real labels that used ghost (.v10-tree-group-label,
-     .v10-tree-layer-header) were moved to --text-tertiary instead, so
-     ghost can stay decoration-only. Ratios on --bg-panel #0a0a0a:
-     primary 15.9:1, secondary 9.7:1, tertiary ~7.1:1. */
+  /* Text — dark mode. Round-3 nudge 2026-05-20 (PR8): user feedback on
+     the live state was "almost there but still could be a bit better."
+     Single targeted bump on secondary (the tier that touches the most
+     body text): #a8a8a8 → #b8b8b8 — opens the secondary↔primary gap to
+     ~5pt luminance and pushes secondary to AAA on both bg-panel and
+     bg-surface. Tertiary, primary, and ghost stay. Future cleanup:
+     tertiary tier could be rebalanced (#9a9a9a is perceptually very
+     close to the new secondary), but that's its own pass. Ratios on
+     --bg-panel #0a0a0a: primary 15.9:1, secondary 9.98:1, tertiary
+     ~7.1:1. */
   --text-primary: #f0f0f0;
-  --text-secondary: #a8a8a8;
+  --text-secondary: #b8b8b8;
   --text-tertiary: #9a9a9a;
   --text-ghost: #333333;
 
@@ -104,14 +104,15 @@ body.light {
   --border-strong: #a3a3a3;
   --border-prominent: #525252;
   --text-primary: #171717;
-  --text-secondary: #525252;
-  /* Light tokens round-2 (PR8): tertiary further down from #737373 →
-     #6b6b6b (~5.4:1) — PR7's value cleared AA on paper but still read
-     as "dust" at 11px in live testing. Ghost stays at #d4d4d4 —
-     qa-lead caught that bumping ghost would promote decorative
-     usages (separators, dot backgrounds, gradient arrows) from
-     whisper to mid-tier. The two real labels that used ghost moved
-     to --text-tertiary instead. */
+  /* Light secondary round-3 nudge: #525252 → #444444. Same rationale
+     as the dark-mode bump — single targeted step on the tier that
+     touches the most body text. Ratios on bg-panel #f5f5f5: 7.4 →
+     8.93:1 (AAA); on bg-surface #ffffff: 7.81 → 9.74:1 (AAA). */
+  --text-secondary: #444444;
+  /* Light tertiary stays at #6b6b6b (~5.4:1) — was just lifted in the
+     PR8 round-2 cascade; further darkening here would close the
+     tertiary↔secondary gap. Future cleanup if tier balance needs
+     it. Ghost stays at #d4d4d4 (decoration-only). */
   --text-tertiary: #6b6b6b;
   --text-ghost: #d4d4d4;
   /* Light-theme danger foreground (~7.4:1 on --bg-elevated #f0f0f0) */
@@ -2045,12 +2046,14 @@ button:focus:not(:focus-visible) { outline: none; }
 .v10-log-line {
   padding: 0 12px;
   /* Log lines stay at 11px mono (industry-standard density — bumping
-     loses ~15-20% visible lines per scroll). The PR8 fix is contrast:
-     promote body text to --text-primary so the active payload reads
-     cleanly. Timestamps share the same color today — the line is one
-     pre-formatted string in PanelBottom. A follow-up could split the
-     timestamp prefix into its own span and dim it back to tertiary. */
-  color: var(--text-primary);
+     loses ~15-20% visible lines per scroll). Payload reads at
+     --text-secondary, not primary: post-PR8 secondary is
+     #a8a8a8 (8.33:1 dark on bg-panel) / #525252 (7.4:1 light), which
+     is materially brighter than the pre-PR8 #888 and matches the
+     "VS Code terminal" zone. Promoting to primary was the cee47488
+     fix that user feedback flagged as too attention-grabbing — log
+     is background telemetry and shouldn't compete with the dashboard. */
+  color: var(--text-secondary);
   white-space: pre;
 }
 .v10-log-line:hover { background: var(--bg-hover); }
