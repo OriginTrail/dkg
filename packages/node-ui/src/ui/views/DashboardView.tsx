@@ -1,5 +1,5 @@
 import React, { useCallback, useMemo, useState, useEffect, useRef } from 'react';
-import { Lock, Globe, Workflow, TrendingUp, UsersRound, Wallet } from 'lucide-react';
+import { Lock, Globe, Share2, TrendingUp, UsersRound, Wallet } from 'lucide-react';
 import { useFetch } from '../hooks.js';
 import { api } from '../api-wrapper.js';
 import { useTabsStore } from '../stores/tabs.js';
@@ -70,8 +70,15 @@ const CHAIN_INFO: Record<string, { name: string; gas: string }> = {
   '20430': { name: 'NeuroWeb Testnet', gas: 'NEURO' },
 };
 function chainInfo(id: unknown): { name: string; gas: string } {
-  const k = id == null ? '' : String(id);
-  return CHAIN_INFO[k] ?? { name: k ? `Chain ${k}` : 'Unknown chain', gas: 'ETH' };
+  if (id == null) return { name: 'Unknown chain', gas: 'ETH' };
+  const k = String(id);
+  // The daemon may return a compound id like "base:84532" (slug:chainId).
+  // Try the raw string first, then the numeric suffix; fall back to a
+  // human-readable "Chain <id>" rather than echoing "base:84532".
+  if (CHAIN_INFO[k]) return CHAIN_INFO[k];
+  const numeric = k.match(/(\d+)\s*$/)?.[1];
+  if (numeric && CHAIN_INFO[numeric]) return CHAIN_INFO[numeric];
+  return { name: numeric ? `Chain ${numeric}` : `Chain ${k}`, gas: 'ETH' };
 }
 
 // Compact number: 1234 → "1.2k", 4500000 → "4.5M". Keeps list/stat
@@ -165,21 +172,33 @@ function RoleBar({ curator, joined, refreshing }: { curator: number; joined: num
         ) : (
           <>
             {curator > 0 && (
-              <span className="v10-layerbar-seg" title={`Curator (${curator})`}
-                style={{ width: `${(curator / sum) * 100}%`, background: CUR }} />
+              <span
+                className="v10-layerbar-seg"
+                title={`Curator (${curator}) — context graphs you created and curate`}
+                style={{ width: `${(curator / sum) * 100}%`, background: CUR }}
+              />
             )}
             {joined > 0 && (
-              <span className="v10-layerbar-seg" title={`Joined (${joined})`}
-                style={{ width: `${(joined / sum) * 100}%`, background: JOIN }} />
+              <span
+                className="v10-layerbar-seg"
+                title={`Joined (${joined}) — context graphs you joined as a member`}
+                style={{ width: `${(joined / sum) * 100}%`, background: JOIN }}
+              />
             )}
           </>
         )}
       </div>
       <div className="v10-layer-legend">
-        <span className="v10-layer-legend-item" title="Context graphs you curate">
+        <span
+          className="v10-layer-legend-item"
+          title="Curator — context graphs you created and curate"
+        >
           <span className="v10-layer-legend-dot" style={{ background: CUR }} />Curator {curator}
         </span>
-        <span className="v10-layer-legend-item" title="Context graphs you joined">
+        <span
+          className="v10-layer-legend-item"
+          title="Joined — context graphs you joined as a member"
+        >
           <span className="v10-layer-legend-dot" style={{ background: JOIN }} />Joined {joined}
         </span>
       </div>
@@ -564,7 +583,8 @@ export function DashboardView() {
       <div className="v10-dash-stats v10-dash-stats-3">
         <StatCard
           label="My Context Graphs"
-          icon={<Workflow size={13} aria-hidden />}
+          className="v10-stat-tight"
+          icon={<Share2 size={13} aria-hidden />}
           value={cgsResolving ? <span className="v10-cg-dim">loading…</span> : myCgs.length}
           accentColor="var(--accent-blue)"
           sub={CG_DEFINITION}
@@ -580,7 +600,7 @@ export function DashboardView() {
         <StatCard
           label="Context Graph Size"
           icon={<TrendingUp size={13} aria-hidden />}
-          className="v10-size-card"
+          className="v10-stat-tight"
           accentColor="var(--accent-green)"
         >
           {!agg.hasCgs ? (
@@ -642,7 +662,7 @@ export function DashboardView() {
             {agg.hasCgs
               ? (agg.sizePartial
                   ? 'Some context graphs could not report size; total is partial.'
-                  : <>Totals across all your context graphs, summed over Working, Shared Working &amp; Verified Memory.<br />Note: Entities become Knowledge Assets once published to Verified Memory.</>)
+                  : 'Totals across all your context graphs, summed over Working, Shared Working & Verified Memory. Knowledge Assets are entities that have been published to Verified Memory.')
               : 'No context graphs yet.'}
           </div>
         </StatCard>
@@ -661,7 +681,7 @@ export function DashboardView() {
             ? 'No context graphs yet.'
             : agg.agentsPartial
               ? 'Some context graphs could not report agents; count is partial.'
-              : 'Unique agents allow-listed and collaborating across your context graphs.'}
+              : "Unique agents — your own and others' — allow-listed and collaborating across your context graphs."}
           accentColor="var(--purple)"
         />
       </div>
@@ -670,7 +690,7 @@ export function DashboardView() {
         <div className="v10-dash-section v10-dash-section-wide v10-anim-mount">
           <div className="v10-dash-section-header">
             <div className="v10-dash-section-title">
-              <Workflow size={13} aria-hidden />
+              <Share2 size={13} aria-hidden />
               <h3>My Context Graphs</h3>
             </div>
             <span className="v10-dash-section-badge">{myCgs.length}</span>
@@ -721,17 +741,24 @@ export function DashboardView() {
             </div>
           </div>
 
-          <div className="v10-ws-subhead">
-            Node wallets
-            {wb?.chainId != null ? <span className="v10-ws-chain"> · {chainInfo(wb.chainId).name}</span> : null}
-          </div>
+          {wb?.chainId != null ? (
+            <div className="v10-ws-chain-row">
+              <span className="v10-ws-chain-label">Chain</span>
+              <span className="v10-ws-chain-value">{chainInfo(wb.chainId).name}</span>
+            </div>
+          ) : null}
+
+          <div className="v10-ws-subhead">Node wallets</div>
           {wbLoading && !wb ? (
             <p className="v10-cg-empty">Loading wallets…</p>
           ) : walletRows.length > 0 ? (
             <div className="v10-ws-wtable">
               <div className="v10-ws-wrow v10-ws-whead">
                 <span>Wallet</span>
-                <span>{walletSym}</span>
+                {/* Always display TRAC literally — the on-chain symbol
+                    from the contract (e.g. "v9TRAC" on testnet) is
+                    noise in this header (round-3 feedback). */}
+                <span>TRAC</span>
                 <span>Gas ({chainInfo(wb?.chainId).gas})</span>
               </div>
               {walletRows.map((b) => (

@@ -2469,7 +2469,10 @@ button:focus:not(:focus-visible) { outline: none; }
 /* The Size card is the densest of the three stat cards; trim its
    padding so the two big numbers + bars + legend + sub don't bloat it
    past the other two (ui-lead). */
-.stat-card.v10-size-card { padding: 16px 18px; }
+/* Tighter padding for content-heavy stat cards (Size + My Context
+   Graphs) so the inner bar's right edge aligns across both cards
+   (round-3 feedback). */
+.stat-card.v10-stat-tight { padding: 16px 18px; }
 /* Track background + 1px gap between segments shows the track colour as
    a hairline separator, and the outline keeps the light-theme WM
    segment's boundary readable even though its remapped token fill is
@@ -2495,10 +2498,12 @@ button:focus:not(:focus-visible) { outline: none; }
 /* My Context Graphs list — column grid shared by header + rows. */
 .v10-cg-colhead, .v10-cg-row {
   display: grid;
-  /* Name gets the lion's share and Size flexes/shrinks with it (fr,
-     no hard min) so on a narrow window the CG name stays readable
-     instead of the Size column staying broad (round-2 feedback). */
-  grid-template-columns: minmax(0, 2.4fr) 34px minmax(0, 1.2fr) 52px 72px;
+  /* Reverted from the round-2 over-flex: a fully-flexible Size column
+     wrapped the inline "N entities · M triples" onto multiple lines on
+     narrow widths, which read worse than a slightly-truncated name
+     (round-3 feedback). Back to the pre-round-2 fixed-ish Size width
+     and 1fr Name (Name truncates with ellipsis when squeezed). */
+  grid-template-columns: minmax(0, 1fr) 40px minmax(140px, 190px) 52px 76px;
   align-items: center;
   gap: 8px;
 }
@@ -2568,16 +2573,43 @@ button:focus:not(:focus-visible) { outline: none; }
 .v10-cg-empty { color: var(--text-secondary); font-size: 12px; padding: 16px 4px; }
 
 /* Wallets and Spending sidebar card — compact, reuses existing tokens. */
+/* Section titles inside the Wallets card. Stronger than the previous
+   10px caps so "Node wallets" and "Spending" read as distinct sections
+   rather than blending with rows, with extra top-spacing + a hairline
+   divider to separate them (round-3 feedback). */
 .v10-ws-subhead {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 18px 0 8px;
+}
+.v10-ws-subhead:first-of-type { margin-top: 4px; }
+/* Hairline divider above every section except the first to reinforce
+   the section break visually. */
+.v10-ws-subhead + * { margin-top: 0; }
+.v10-ws-subhead:not(:first-of-type) {
+  padding-top: 12px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+/* Chain row above the wallet table: small key:value pair, muted key,
+   primary value. */
+.v10-ws-chain-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0 0 6px;
+  font-size: 12px;
+}
+.v10-ws-chain-label {
+  color: var(--text-secondary);
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  color: var(--text-secondary);
-  margin: 10px 0 6px;
 }
-.v10-ws-subhead:first-of-type { margin-top: 2px; }
-/* Chain name appended to the "Node wallets" subhead. */
-.v10-ws-chain { color: var(--text-secondary); text-transform: none; letter-spacing: 0; }
+.v10-ws-chain-value { color: var(--text-primary); }
+/* (Older `.v10-ws-chain` inline subhead suffix is no longer used — the
+   chain now has its own `.v10-ws-chain-row` above the wallets section.) */
 
 /* Wallet table: Wallet | TRAC | Gas — one shared grid for header +
    rows so values sit under their column headers (round-2 feedback). */
