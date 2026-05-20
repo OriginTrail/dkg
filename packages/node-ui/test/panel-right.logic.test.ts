@@ -936,6 +936,76 @@ describe('buildPeers', () => {
     expect(result.recentlySeen[0].peerId).toBe('peer-b');
   });
 
+  it('falls back to agent.connectionStatus when /api/connections is empty (transient lag / error)', () => {
+    // Simulates `/api/connections` returning `{ rows: [] }` (endpoint error
+    // or older daemon shape) while `/api/agents` still reports the peer as
+    // connected via the `connectionStatus` field.
+    const agents = [
+      agent({
+        agentUri: 'did:dkg:agent:a',
+        peerId: 'peer-lag',
+        connectionStatus: 'connected',
+        connectionTransport: 'direct',
+        lastSeen: NOW - 30_000,
+      }),
+    ];
+    const result = buildPeers([], agents, NOW);
+
+    expect(result.connected).toHaveLength(1);
+    expect(result.connected[0].peerId).toBe('peer-lag');
+    expect(result.connected[0].transport).toBe('direct');
+    expect(result.connected[0].hasDirect).toBe(true);
+    expect(result.connected[0].hasRelay).toBe(false);
+    expect(result.recentlySeen).toHaveLength(0);
+    expect(result.directCount).toBe(1);
+  });
+
+  it('agent-based fallback honours connectionTransport: "relayed"', () => {
+    const agents = [
+      agent({
+        peerId: 'peer-relay-only',
+        connectionStatus: 'connected',
+        connectionTransport: 'relayed',
+        lastSeen: NOW - 10_000,
+      }),
+    ];
+    const result = buildPeers([], agents, NOW);
+
+    expect(result.connected).toHaveLength(1);
+    expect(result.connected[0].transport).toBe('relayed');
+    expect(result.connected[0].hasDirect).toBe(false);
+    expect(result.connected[0].hasRelay).toBe(true);
+    expect(result.relayedCount).toBe(1);
+  });
+
+  it('does not double-count: connByPeer wins when both sources agree the peer is connected', () => {
+    const connections = [conn({ peerId: 'peer-a', transport: 'direct' })];
+    const agents = [
+      agent({ peerId: 'peer-a', connectionStatus: 'connected', connectionTransport: 'direct' }),
+    ];
+    const result = buildPeers(connections, agents, NOW);
+
+    expect(result.connected).toHaveLength(1);
+    expect(result.connected[0].peerId).toBe('peer-a');
+    // openedAt comes from the connection row, not the synthesized fallback (which is null)
+    expect(result.connected[0].openedAt).not.toBeNull();
+  });
+
+  it('agent-based fallback does NOT promote disconnected agents to connected', () => {
+    const agents = [
+      agent({
+        peerId: 'peer-x',
+        connectionStatus: 'disconnected',
+        lastSeen: NOW - 1 * HOUR,
+      }),
+    ];
+    const result = buildPeers([], agents, NOW);
+
+    expect(result.connected).toHaveLength(0);
+    expect(result.recentlySeen).toHaveLength(1);
+    expect(result.recentlySeen[0].peerId).toBe('peer-x');
+  });
+
   it('honours a custom recentlySeenWindowMs', () => {
     const agents = [agent({ peerId: 'peer-x', lastSeen: NOW - 2 * HOUR })];
     // 1-hour window — peer is too old.

@@ -219,6 +219,9 @@ export function buildPeers(
     );
 
   const connected: PeerInfo[] = [];
+  const connectedPeerIds = new Set<string>();
+  // Phase 1a: peers from `/api/connections.connections[]` (the authoritative
+  // signal — comes straight from libp2p `getConnections()`).
   for (const [peerId, c] of connByPeer) {
     const peerAgents = agentsByPeer.get(peerId) ?? [];
     connected.push({
@@ -232,11 +235,36 @@ export function buildPeers(
       lastSeen: pickLastSeen(peerAgents),
       agents: peerAgents,
     });
+    connectedPeerIds.add(peerId);
+  }
+  // Phase 1b: graceful-degradation fallback. If `/api/connections` errors,
+  // returns an older shape without a `connections[]` array, or briefly lags
+  // `/api/agents`, the agents endpoint can still report `connectionStatus:
+  // "connected"` for a peer that isn't in `connByPeer`. Synthesize an entry
+  // from the agent record so the peer doesn't vanish during the transient
+  // gap. Transport comes from the agent's own hint.
+  for (const [peerId, peerAgents] of agentsByPeer) {
+    if (connectedPeerIds.has(peerId)) continue;
+    const connectedAgent = peerAgents.find((a) => a.connectionStatus === 'connected');
+    if (!connectedAgent) continue;
+    const isRelayed = connectedAgent.connectionTransport === 'relayed';
+    connected.push({
+      peerId,
+      name: pickName(peerAgents),
+      transport: isRelayed ? 'relayed' : 'direct',
+      hasDirect: !isRelayed,
+      hasRelay: isRelayed,
+      openedAt: null,
+      connected: true,
+      lastSeen: pickLastSeen(peerAgents),
+      agents: peerAgents,
+    });
+    connectedPeerIds.add(peerId);
   }
 
   const recentlySeen: PeerInfo[] = [];
   for (const [peerId, peerAgents] of agentsByPeer) {
-    if (connByPeer.has(peerId)) continue;
+    if (connectedPeerIds.has(peerId)) continue;
     const lastSeen = pickLastSeen(peerAgents);
     if (lastSeen == null || now - lastSeen > recentlySeenWindowMs) continue;
     recentlySeen.push({
