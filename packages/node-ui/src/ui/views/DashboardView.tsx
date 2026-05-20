@@ -396,7 +396,7 @@ function CgRow({
       </span>
       <span className="v10-cg-cell v10-cg-size">
         {mem.loading
-          ? <span className="v10-cg-dim">loading…</span>
+          ? <span className="v10-stat-loading">loading…</span>
           : mem.error
             ? (
               // Live size unavailable: show the coarse summary count
@@ -592,7 +592,7 @@ export function DashboardView() {
           label="My Context Graphs"
           className="v10-stat-tight"
           icon={<Share2 size={13} aria-hidden />}
-          value={cgsResolving ? <span className="v10-cg-dim">loading…</span> : myCgs.length}
+          value={cgsResolving ? <span className="v10-stat-loading">loading…</span> : myCgs.length}
           accentColor="var(--accent-blue)"
           sub={CG_DEFINITION}
         >
@@ -613,7 +613,7 @@ export function DashboardView() {
           {!agg.hasCgs ? (
             <div className="v10-cg-size-empty v10-cg-dim">—</div>
           ) : agg.sizeLoading ? (
-            <div className="v10-cg-size-empty v10-cg-dim">loading…</div>
+            <div className="v10-stat-loading">loading…</div>
           ) : (
             <div className="v10-cg-size-detail">
               <div className="v10-cg-size-metric">
@@ -679,7 +679,7 @@ export function DashboardView() {
           value={!agg.hasCgs
             ? '—'
             : agg.agentsLoading
-              ? <span className="v10-cg-dim">loading…</span>
+              ? <span className="v10-stat-loading">loading…</span>
               // Partial (a probe failed or a public graph's membership
               // is unmeasurable) → "~" so the count doesn't read as an
               // exact figure that silently excludes those graphs (Codex).

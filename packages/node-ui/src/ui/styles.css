@@ -2473,6 +2473,20 @@ button:focus:not(:focus-visible) { outline: none; }
    Graphs) so the inner bar's right edge aligns across both cards
    (round-3 feedback). */
 .stat-card.v10-stat-tight { padding: 16px 18px; }
+/* Loading placeholder used in every stat card's value slot AND in the
+   Size card's inline empty/loading area. Reset the inherited
+   `.stat-value` (28px/700) so "loading…" reads as a quiet placeholder
+   instead of a huge headline. Keeps the layout box close to a real
+   value so the surrounding sub-text doesn't jump on settle. */
+.v10-stat-loading {
+  display: inline-block;
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--text-secondary);
+  font-style: italic;
+  line-height: 1.4;
+  padding: 6px 0;
+}
 /* Track background + 1px gap between segments shows the track colour as
    a hairline separator, and the outline keeps the light-theme WM
    segment's boundary readable even though its remapped token fill is
