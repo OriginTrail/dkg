@@ -993,8 +993,9 @@ button:focus:not(:focus-visible) { outline: none; }
 
 /* Peer-axis Network-tab card — extends .v10-agent-card. The peer's
    name reads as a primary identifier (own line treatment via
-   .v10-peer-card-name). Meta line uses the same mono treatment as
-   .v10-agent-card-meta. */
+   .v10-peer-card-name). Meta line: --text-secondary (identifying state,
+   not decoration); we intentionally diverge from .v10-agent-card-meta's
+   legacy tertiary here for AA on bg-elevated. */
 .v10-peer-card-name {
   font-size: 12px; font-weight: 600; color: var(--text-primary);
   flex: 1; min-width: 0;
@@ -1002,43 +1003,60 @@ button:focus:not(:focus-visible) { outline: none; }
 }
 .v10-peer-card-meta {
   display: flex; gap: 8px; margin-top: 4px;
-  font-size: 10px; color: var(--text-tertiary); font-family: var(--font-mono);
+  font-size: 10px; color: var(--text-secondary); font-family: var(--font-mono);
   flex-wrap: wrap;
 }
+/* Override the legacy badge color to --text-secondary on peer cards
+   (the badge carries identifying state — `direct` / `relayed` — not
+   decoration; tertiary on bg-elevated is borderline AA). Scoped so the
+   legacy Agents-tab cards keep their existing token. */
+.v10-peer-card .v10-agent-card-badge { color: var(--text-secondary); }
 /* Agents-as-chips inside each peer card. flex-wrap handles long lists
    gracefully; the +N more button toggles inline expansion (card grows
-   vertically). */
+   vertically). Class is .v10-peer-chip (NOT .v10-agent-chip) — the
+   latter is the attribution-pill component (~styles.css:5451) and the
+   namespaces would collide. */
 .v10-peer-card-chips {
   list-style: none; padding: 0; margin: 6px 0 0;
   display: flex; flex-wrap: wrap; gap: 4px;
 }
-.v10-agent-chip {
+.v10-peer-chip {
   display: inline-flex; align-items: center; gap: 4px;
   max-width: 140px;
-  padding: 1px 6px;
-  border-radius: 10px;
+  min-width: 0;
+  padding: 2px 7px;
+  border-radius: 999px;
   background: var(--bg-elevated);
   border: 1px solid var(--border-subtle);
-  font-size: 10px;
-  line-height: 16px;
   color: var(--text-secondary);
-}
-.v10-agent-chip-label {
   font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.4;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-/* "+N more" / "− less" toggle button. Sits in the same chip row;
-   reuses the chip surface so layout stays predictable. */
-.v10-agent-chip-more {
-  cursor: pointer;
-  background: var(--bg-elevated);
-  color: var(--text-secondary);
-  font-family: inherit;
+.v10-peer-chip-label {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.v10-agent-chip-more:hover { color: var(--text-primary); }
-.v10-agent-chip-more:focus-visible {
-  outline: 1px solid var(--accent-blue);
-  outline-offset: 1px;
+/* "+N more" / "Show less" toggle button. Shares the chip-pill geometry
+   so it sits in the same row; one-tier-stronger border + transparent
+   background distinguish it as interactive. No scoped :focus-visible —
+   the global focus ring (styles.css:167) is the convention. */
+.v10-peer-chip-more {
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border-default);
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+.v10-peer-chip-more:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+  color: var(--text-primary);
 }
 
 .v10-local-agent-list {

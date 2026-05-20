@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo } from 'react';
+import React, { useState, useRef, useCallback, useEffect, useId, useLayoutEffect, useMemo } from 'react';
 import { useJourneyStore } from '../../stores/journey.js';
 import { useProjectsStore, type ContextGraph } from '../../stores/projects.js';
 import {
@@ -1840,11 +1840,11 @@ export function ConnectedAgentsTab(props: {
 // "+N more" button that expands inline (card grows vertically).
 function NetworkPeerCard({ peer }: { peer: PeerInfo }) {
   const [expanded, setExpanded] = useState(false);
+  const chipsId = useId();
   const CHIP_BUDGET = 3;
   const statusClass: 'connected' | 'offline' = peer.connected ? 'connected' : 'offline';
   const displayName = peer.name?.trim() || shortPeerId(peer.peerId);
   const visibleAgents = expanded ? peer.agents : peer.agents.slice(0, CHIP_BUDGET);
-  const hiddenCount = peer.agents.length - visibleAgents.length;
   const transportLabel = peer.connected ? peer.transport : 'Disconnected';
   // Any-direct-wins means a peer reachable on direct + relay is
   // labelled "direct" — surface the raw availability in the tooltip
@@ -1876,16 +1876,17 @@ function NetworkPeerCard({ peer }: { peer: PeerInfo }) {
       </div>
       {peer.agents.length > 0 && (
         <ul
+          id={chipsId}
           className="v10-peer-card-chips"
           aria-label={`Agents on ${displayName}`}
         >
           {visibleAgents.map((a, idx) => (
             <li
               key={a.agentUri || `${peer.peerId}:${idx}`}
-              className="v10-agent-chip"
+              className="v10-peer-chip"
               title={a.agentUri || ''}
             >
-              <span className="v10-agent-chip-label">
+              <span className="v10-peer-chip-label">
                 {shortAgentUri(a.agentUri) || shortPeerId(a.peerId)}
               </span>
             </li>
@@ -1894,11 +1895,12 @@ function NetworkPeerCard({ peer }: { peer: PeerInfo }) {
             <li>
               <button
                 type="button"
-                className="v10-agent-chip v10-agent-chip-more"
+                className="v10-peer-chip-more"
                 aria-expanded={expanded}
+                aria-controls={chipsId}
                 onClick={() => setExpanded((e) => !e)}
               >
-                {expanded ? '− less' : `+${peer.agents.length - CHIP_BUDGET} more`}
+                {expanded ? 'Show less' : `+${peer.agents.length - CHIP_BUDGET} more`}
               </button>
             </li>
           )}
