@@ -21,10 +21,14 @@
      whose bg is identical to a chip fill). */
   --border-prominent: #888888;
 
-  /* Text */
-  --text-primary: #e8e8e8;
-  --text-secondary: #888888;
-  --text-tertiary: #555555;
+  /* Text — dark mode. Bumped 2026-05-20 (PR7) to clear AA across all
+     three steps on --bg-panel #0a0a0a, and to tighten the visual gap
+     between secondary and primary (user reported "muted-to-disabled"
+     feel on the prior #888888). Contrast ratios: primary 15.9:1,
+     secondary 9.7:1, tertiary 6.7:1. */
+  --text-primary: #f0f0f0;
+  --text-secondary: #a8a8a8;
+  --text-tertiary: #8a8a8a;
   --text-ghost: #333333;
 
   /* Accent — reserved for signals */
@@ -96,7 +100,10 @@ body.light {
   --border-prominent: #525252;
   --text-primary: #171717;
   --text-secondary: #525252;
-  --text-tertiary: #a3a3a3;
+  /* Light-mode tertiary bumped #a3a3a3 → #737373 (2026-05-20 PR7) so it
+     clears AA on --bg-panel #f5f5f5 (5.0:1). Primary + secondary stay
+     unchanged — they were already AA-strong on light. */
+  --text-tertiary: #737373;
   --text-ghost: #d4d4d4;
   /* Light-theme danger foreground (~7.4:1 on --bg-elevated #f0f0f0) */
   --text-danger: #b91c1c;
@@ -353,7 +360,7 @@ button:focus:not(:focus-visible) { outline: none; }
 .v10-header-notif-item:hover { background: var(--bg-hover); }
 .v10-header-notif-item:last-child { border-bottom: none; }
 .v10-header-notif-item-text { font-size: 12px; color: var(--text-primary); }
-.v10-header-notif-item-time { font-size: 10px; color: var(--text-tertiary); margin-top: 2px; font-family: var(--font-mono); }
+.v10-header-notif-item-time { font-size: 11px; color: var(--text-tertiary); margin-top: 2px; font-family: var(--font-mono); }
 .v10-notif-join { border-left: 3px solid #f59e0b; padding-left: 9px; }
 .v10-notif-approved { border-left: 3px solid #10b981; padding-left: 9px; }
 .v10-notif-rejected { border-left: 3px solid #ef4444; padding-left: 9px; }
@@ -407,20 +414,12 @@ button:focus:not(:focus-visible) { outline: none; }
   align-items: center;
   padding: 0 12px;
   border-bottom: 1px solid var(--border-subtle);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
   letter-spacing: 1.2px;
   text-transform: uppercase;
   color: var(--text-tertiary);
 }
-.v10-collapse-btn {
-  margin-left: auto;
-  color: var(--text-tertiary);
-  transition: color 0.15s;
-  display: flex;
-  align-items: center;
-}
-.v10-collapse-btn:hover { color: var(--text-primary); }
 .v10-tree-content {
   flex: 1;
   overflow-y: auto;
@@ -478,14 +477,6 @@ button:focus:not(:focus-visible) { outline: none; }
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.v10-tree-section-badge {
-  font-family: var(--font-mono);
-  font-size: 10px;
-  color: var(--text-tertiary);
-  min-width: 18px;
-  text-align: right;
-}
-
 /* Hover-revealed "hide" affordance on each project row. Keeps the tree
    quiet by default and lets the user dismiss any leftover project from
    their sidebar without a daemon-side delete. */
@@ -586,7 +577,7 @@ button:focus:not(:focus-visible) { outline: none; }
 .v10-tree-mode-btn {
   padding: 0 10px;
   height: 100%;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.5px;
   text-transform: uppercase;
@@ -616,7 +607,7 @@ button:focus:not(:focus-visible) { outline: none; }
 /* Layer headers inside project tree */
 .v10-tree-layer-header {
   padding: 3px 12px 3px 32px;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.5px;
   text-transform: uppercase;

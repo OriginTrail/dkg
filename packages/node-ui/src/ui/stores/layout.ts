@@ -4,6 +4,11 @@ interface LayoutState {
   leftCollapsed: boolean;
   rightCollapsed: boolean;
   bottomCollapsed: boolean;
+  // Per-section open state inside the left sidebar. Persisted alongside
+  // `leftCollapsed` so section preferences survive reloads in lockstep
+  // with the sidebar collapse state itself.
+  leftSectionMyProjectsOpen: boolean;
+  leftSectionIntegrationsOpen: boolean;
   theme: 'dark' | 'light';
   leftWidth: number;
   rightWidth: number;
@@ -12,6 +17,8 @@ interface LayoutState {
   toggleLeft: () => void;
   toggleRight: () => void;
   toggleBottom: () => void;
+  toggleLeftSectionMyProjects: () => void;
+  toggleLeftSectionIntegrations: () => void;
   setTheme: (t: 'dark' | 'light') => void;
   setLeftWidth: (w: number) => void;
   setRightWidth: (w: number) => void;
@@ -24,6 +31,8 @@ interface PersistedLayout {
   leftCollapsed?: boolean;
   rightCollapsed?: boolean;
   bottomCollapsed?: boolean;
+  leftSectionMyProjectsOpen?: boolean;
+  leftSectionIntegrationsOpen?: boolean;
   leftWidth?: number;
   rightWidth?: number;
   bottomHeight?: number;
@@ -33,6 +42,12 @@ const DEFAULTS = {
   leftCollapsed: false,
   rightCollapsed: false,
   bottomCollapsed: true,
+  // Sidebar sections: My Context Graphs is the primary navigation surface
+  // so it stays open by default; Integrations is an escape-hatch surface
+  // (status check, no day-to-day click target) so it stays closed and
+  // doesn't run its 30s polling loop until the user opens it.
+  leftSectionMyProjectsOpen: true,
+  leftSectionIntegrationsOpen: false,
   leftWidth: 240,
   rightWidth: 360,
   bottomHeight: 200,
@@ -99,6 +114,12 @@ function loadPersisted(): Required<PersistedLayout> {
       leftCollapsed: typeof parsed.leftCollapsed === 'boolean' ? parsed.leftCollapsed : DEFAULTS.leftCollapsed,
       rightCollapsed: typeof parsed.rightCollapsed === 'boolean' ? parsed.rightCollapsed : DEFAULTS.rightCollapsed,
       bottomCollapsed: typeof parsed.bottomCollapsed === 'boolean' ? parsed.bottomCollapsed : DEFAULTS.bottomCollapsed,
+      leftSectionMyProjectsOpen: typeof parsed.leftSectionMyProjectsOpen === 'boolean'
+        ? parsed.leftSectionMyProjectsOpen
+        : DEFAULTS.leftSectionMyProjectsOpen,
+      leftSectionIntegrationsOpen: typeof parsed.leftSectionIntegrationsOpen === 'boolean'
+        ? parsed.leftSectionIntegrationsOpen
+        : DEFAULTS.leftSectionIntegrationsOpen,
       leftWidth: clampWidth(parsed.leftWidth, DEFAULTS.leftWidth, LEFT_WIDTH_MIN, LEFT_WIDTH_MAX),
       rightWidth: clampWidth(parsed.rightWidth, DEFAULTS.rightWidth, RIGHT_WIDTH_MIN, RIGHT_WIDTH_MAX),
       bottomHeight: clampWidth(parsed.bottomHeight, DEFAULTS.bottomHeight, BOTTOM_HEIGHT_MIN, BOTTOM_HEIGHT_MAX),
@@ -121,12 +142,30 @@ function persist(state: PersistedLayout): void {
   }, 150);
 }
 
+// Pull only the persistable fields off the live state so callers don't
+// have to re-list every field in every action. Theme is intentionally
+// excluded — it has its own `dkg-theme` key.
+function snapshot(state: LayoutState): PersistedLayout {
+  return {
+    leftCollapsed: state.leftCollapsed,
+    rightCollapsed: state.rightCollapsed,
+    bottomCollapsed: state.bottomCollapsed,
+    leftSectionMyProjectsOpen: state.leftSectionMyProjectsOpen,
+    leftSectionIntegrationsOpen: state.leftSectionIntegrationsOpen,
+    leftWidth: state.leftWidth,
+    rightWidth: state.rightWidth,
+    bottomHeight: state.bottomHeight,
+  };
+}
+
 const initial = loadPersisted();
 
 export const useLayoutStore = create<LayoutState>((set, get) => ({
   leftCollapsed: initial.leftCollapsed,
   rightCollapsed: initial.rightCollapsed,
   bottomCollapsed: initial.bottomCollapsed,
+  leftSectionMyProjectsOpen: initial.leftSectionMyProjectsOpen,
+  leftSectionIntegrationsOpen: initial.leftSectionIntegrationsOpen,
   theme: (localStorage.getItem('dkg-theme') as 'dark' | 'light') || 'dark',
   leftWidth: initial.leftWidth,
   rightWidth: initial.rightWidth,
@@ -134,18 +173,23 @@ export const useLayoutStore = create<LayoutState>((set, get) => ({
 
   toggleLeft: () => {
     set((s) => ({ leftCollapsed: !s.leftCollapsed }));
-    const { leftCollapsed, rightCollapsed, bottomCollapsed, leftWidth, rightWidth, bottomHeight } = get();
-    persist({ leftCollapsed, rightCollapsed, bottomCollapsed, leftWidth, rightWidth, bottomHeight });
+    persist(snapshot(get()));
   },
   toggleRight: () => {
     set((s) => ({ rightCollapsed: !s.rightCollapsed }));
-    const { leftCollapsed, rightCollapsed, bottomCollapsed, leftWidth, rightWidth, bottomHeight } = get();
-    persist({ leftCollapsed, rightCollapsed, bottomCollapsed, leftWidth, rightWidth, bottomHeight });
+    persist(snapshot(get()));
   },
   toggleBottom: () => {
     set((s) => ({ bottomCollapsed: !s.bottomCollapsed }));
-    const { leftCollapsed, rightCollapsed, bottomCollapsed, leftWidth, rightWidth, bottomHeight } = get();
-    persist({ leftCollapsed, rightCollapsed, bottomCollapsed, leftWidth, rightWidth, bottomHeight });
+    persist(snapshot(get()));
+  },
+  toggleLeftSectionMyProjects: () => {
+    set((s) => ({ leftSectionMyProjectsOpen: !s.leftSectionMyProjectsOpen }));
+    persist(snapshot(get()));
+  },
+  toggleLeftSectionIntegrations: () => {
+    set((s) => ({ leftSectionIntegrationsOpen: !s.leftSectionIntegrationsOpen }));
+    persist(snapshot(get()));
   },
   setTheme: (t) => {
     localStorage.setItem('dkg-theme', t);
@@ -157,13 +201,11 @@ export const useLayoutStore = create<LayoutState>((set, get) => ({
     // values within the supported bounds, and persisted state stays
     // consistent with what loadPersisted accepts on reload.
     set({ leftWidth: clamp(w, LEFT_WIDTH_MIN, LEFT_WIDTH_MAX) });
-    const { leftCollapsed, rightCollapsed, bottomCollapsed, leftWidth, rightWidth, bottomHeight } = get();
-    persist({ leftCollapsed, rightCollapsed, bottomCollapsed, leftWidth, rightWidth, bottomHeight });
+    persist(snapshot(get()));
   },
   setRightWidth: (w) => {
     set({ rightWidth: clamp(w, RIGHT_WIDTH_MIN, RIGHT_WIDTH_MAX) });
-    const { leftCollapsed, rightCollapsed, bottomCollapsed, leftWidth, rightWidth, bottomHeight } = get();
-    persist({ leftCollapsed, rightCollapsed, bottomCollapsed, leftWidth, rightWidth, bottomHeight });
+    persist(snapshot(get()));
   },
   setBottomHeight: (h) => {
     // Lower bound is viewport-aware, not a hard 120: on a short
@@ -175,7 +217,6 @@ export const useLayoutStore = create<LayoutState>((set, get) => ({
     // effective floor is still 120.
     const lo = Math.min(BOTTOM_HEIGHT_MIN, maxBottomHeight());
     set({ bottomHeight: clamp(h, lo, BOTTOM_HEIGHT_MAX) });
-    const { leftCollapsed, rightCollapsed, bottomCollapsed, leftWidth, rightWidth, bottomHeight } = get();
-    persist({ leftCollapsed, rightCollapsed, bottomCollapsed, leftWidth, rightWidth, bottomHeight });
+    persist(snapshot(get()));
   },
 }));

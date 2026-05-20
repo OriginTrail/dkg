@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
+import { ChevronRight } from 'lucide-react';
 import { useLayoutStore } from '../../stores/layout.js';
 import { useTabsStore } from '../../stores/tabs.js';
 import { useProjectsStore, type ContextGraph } from '../../stores/projects.js';
@@ -21,9 +22,6 @@ import {
   toSidebarIdentity,
   type AgentSidebarIdentity,
 } from '../../lib/contextGraphSidebar.js';
-
-const CHEVRON_ICON = '▸';
-const COLLAPSE_ICON = '◂';
 
 // Project tree row: a flat, clickable header that opens the project tab.
 // Memory-layer expansion was removed by request — layers are surfaced inside
@@ -48,8 +46,6 @@ function ProjectTreeItem({
   onSelect,
   onHide,
 }: ProjectTreeItemProps) {
-  const assetCount = cg.assetCount ?? cg.assets ?? 0;
-
   return (
     <div className="v10-tree-section">
       <div
@@ -58,7 +54,6 @@ function ProjectTreeItem({
       >
         <span className="v10-tree-project-dot" />
         <span className="v10-tree-section-label">{cg.name || cg.id.slice(0, 16)}</span>
-        <span className="v10-tree-section-badge">{assetCount}</span>
         <button
           type="button"
           className="v10-tree-hide-btn"
@@ -91,80 +86,73 @@ function localAgentDotColor(status: LocalAgentIntegrationStatus): string {
   }
 }
 
-function IntegrationsSection() {
-  const [open, setOpen] = useState(false);
+// Body of the Integrations sidebar section. Open/closed state is owned by
+// the layout store; this component is only mounted while the section is
+// open, so the 30s polling effect naturally pauses when the user
+// collapses the section (no in-component `if (!open) return` guard).
+function IntegrationsSectionBody() {
   const [localAgents, setLocalAgents] = useState<LocalAgentIntegration[]>([]);
   const [localAgentsError, setLocalAgentsError] = useState<string | null>(null);
 
-  // Lazy-load on first open and refresh every 30s while open.
   useEffect(() => {
-    if (!open) return;
     let cancelled = false;
-
     const loadLocal = () => {
       fetchLocalAgentIntegrations()
         .then((r) => { if (!cancelled) { setLocalAgents(r.integrations); setLocalAgentsError(null); } })
         .catch((e: Error) => { if (!cancelled) setLocalAgentsError(e.message); });
     };
-
     loadLocal();
     const iv = setInterval(loadLocal, 30_000);
     return () => { cancelled = true; clearInterval(iv); };
-  }, [open]);
+  }, []);
 
   return (
-    <div className="v10-tree-section">
-      <div className="v10-tree-section-header" onClick={() => setOpen((v) => !v)}>
-        <span className={`v10-tree-chevron ${open ? 'open' : ''}`}>{CHEVRON_ICON}</span>
-        <span className="v10-tree-integration-dot" />
-        <span className="v10-tree-section-label">Integrations</span>
+    <div className="v10-tree-items" style={{ display: 'block' }}>
+      <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: 0.5, padding: '6px 12px 2px 24px' }}>
+        Agents
       </div>
-      {open && (
-        <div className="v10-tree-items" style={{ display: 'block' }}>
-          <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: 0.5, padding: '6px 12px 2px 38px' }}>
-            Agents
-          </div>
-          {localAgentsError && (
-            <div style={{ fontSize: 11, color: 'var(--accent-orange, #f97316)', padding: '4px 12px 4px 38px' }}>
-              {localAgentsError}
-            </div>
-          )}
-          {!localAgentsError && localAgents.length === 0 && (
-            <div style={{ fontSize: 11, color: 'var(--text-tertiary)', padding: '4px 12px 4px 38px', fontStyle: 'italic' }}>
-              No agents detected.
-            </div>
-          )}
-          {localAgents.map((a) => (
-            <div
-              key={a.id}
-              className="v10-tree-item"
-              title={a.detail}
-              style={{ cursor: 'default' }}
-            >
-              <span
-                aria-label={a.statusLabel}
-                style={{
-                  width: 7,
-                  height: 7,
-                  borderRadius: '50%',
-                  background: localAgentDotColor(a.status),
-                  flexShrink: 0,
-                }}
-              />
-              <span className="v10-tree-item-label">{a.name}</span>
-              <span style={{ fontSize: 10, color: 'var(--text-tertiary)', marginLeft: 4 }}>
-                {a.statusLabel}
-              </span>
-            </div>
-          ))}
+      {localAgentsError && (
+        <div style={{ fontSize: 11, color: 'var(--accent-orange, #f97316)', padding: '4px 12px 4px 24px' }}>
+          {localAgentsError}
         </div>
       )}
+      {!localAgentsError && localAgents.length === 0 && (
+        <div style={{ fontSize: 11, color: 'var(--text-tertiary)', padding: '4px 12px 4px 24px', fontStyle: 'italic' }}>
+          No agents detected.
+        </div>
+      )}
+      {localAgents.map((a) => (
+        <div
+          key={a.id}
+          className="v10-tree-item"
+          title={a.detail}
+          style={{ cursor: 'default' }}
+        >
+          <span
+            aria-label={a.statusLabel}
+            style={{
+              width: 7,
+              height: 7,
+              borderRadius: '50%',
+              background: localAgentDotColor(a.status),
+              flexShrink: 0,
+            }}
+          />
+          <span className="v10-tree-item-label">{a.name}</span>
+          <span style={{ fontSize: 11, color: 'var(--text-tertiary)', marginLeft: 4 }}>
+            {a.statusLabel}
+          </span>
+        </div>
+      ))}
     </div>
   );
 }
 
 export function PanelLeft() {
-  const { toggleLeft } = useLayoutStore();
+  const leftSectionMyProjectsOpen = useLayoutStore((s) => s.leftSectionMyProjectsOpen);
+  const leftSectionIntegrationsOpen = useLayoutStore((s) => s.leftSectionIntegrationsOpen);
+  const toggleLeftSectionMyProjects = useLayoutStore((s) => s.toggleLeftSectionMyProjects);
+  const toggleLeftSectionIntegrations = useLayoutStore((s) => s.toggleLeftSectionIntegrations);
   const { openTab, activeTabId, setActiveTab } = useTabsStore();
   const { contextGraphs, setContextGraphs, setLoading, activeProjectId, setActiveProject } = useProjectsStore();
   const stage = useJourneyStore((s) => s.stage);
@@ -224,9 +212,6 @@ export function PanelLeft() {
         >
           Context Oracle
         </button>
-        <button className="v10-collapse-btn" onClick={toggleLeft} style={{ marginLeft: 4, padding: '0 6px' }}>
-          {COLLAPSE_ICON}
-        </button>
       </div>
 
       {treeMode === 'explorer' && (
@@ -238,6 +223,8 @@ export function PanelLeft() {
             <span>▦</span> Dashboard
           </div>
 
+          {/* Empty-state card hoisted ABOVE the collapsible sections so it
+              stays visible if both sections are collapsed. */}
           {contextGraphs.length === 0 && stage <= 1 && (
             <div className="v10-journey-empty-card">
               <div className="v10-jec-title">No context graphs yet</div>
@@ -254,25 +241,44 @@ export function PanelLeft() {
             </div>
           )}
 
+          {/* Section A: My Context Graphs (default expanded). Uses the
+              .v10-peer-group-* pattern from the right panel — polished
+              focus-visible + prefers-reduced-motion + button semantics. */}
           {myProjects.length > 0 && (
-            <>
-              <div className="v10-tree-group-label">My Context Graphs</div>
-              {myProjects.map((cg) => (
-                <ProjectTreeItem
-                  key={cg.id}
-                  cg={cg}
-                  isActive={activeProjectId === cg.id}
-                  onSelect={() => {
-                    setActiveProject(cg.id);
-                    openTab({ id: `project:${cg.id}`, label: cg.name || cg.id.slice(0, 16), closable: true });
-                  }}
-                  onHide={() => {
-                    hideProject(cg.id);
-                    if (activeProjectId === cg.id) setActiveProject(null);
-                  }}
+            <div className="v10-peer-group">
+              <button
+                type="button"
+                className="v10-peer-group-header"
+                aria-expanded={leftSectionMyProjectsOpen}
+                onClick={toggleLeftSectionMyProjects}
+              >
+                <ChevronRight
+                  size={14}
+                  className={`v10-peer-group-chevron ${leftSectionMyProjectsOpen ? 'expanded' : ''}`}
+                  aria-hidden="true"
                 />
-              ))}
-            </>
+                <span className="v10-peer-group-label">My Context Graphs</span>
+              </button>
+              {leftSectionMyProjectsOpen && (
+                <div className="v10-peer-group-body">
+                  {myProjects.map((cg) => (
+                    <ProjectTreeItem
+                      key={cg.id}
+                      cg={cg}
+                      isActive={activeProjectId === cg.id}
+                      onSelect={() => {
+                        setActiveProject(cg.id);
+                        openTab({ id: `project:${cg.id}`, label: cg.name || cg.id.slice(0, 16), closable: true });
+                      }}
+                      onHide={() => {
+                        hideProject(cg.id);
+                        if (activeProjectId === cg.id) setActiveProject(null);
+                      }}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
           )}
 
           {hiddenCount > 0 && (
@@ -286,7 +292,28 @@ export function PanelLeft() {
             </button>
           )}
 
-          {stage >= 1 && <IntegrationsSection />}
+          {/* Section B: Integrations (default collapsed — escape-hatch
+              surface). Body is only mounted while open, so the 30s
+              polling effect in IntegrationsSectionBody naturally pauses
+              when collapsed. */}
+          {stage >= 1 && (
+            <div className="v10-peer-group">
+              <button
+                type="button"
+                className="v10-peer-group-header"
+                aria-expanded={leftSectionIntegrationsOpen}
+                onClick={toggleLeftSectionIntegrations}
+              >
+                <ChevronRight
+                  size={14}
+                  className={`v10-peer-group-chevron ${leftSectionIntegrationsOpen ? 'expanded' : ''}`}
+                  aria-hidden="true"
+                />
+                <span className="v10-peer-group-label">Integrations</span>
+              </button>
+              {leftSectionIntegrationsOpen && <IntegrationsSectionBody />}
+            </div>
+          )}
         </div>
       )}
 
