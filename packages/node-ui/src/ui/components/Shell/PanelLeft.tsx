@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useId, useState } from 'react';
 import { ChevronRight } from 'lucide-react';
 import { useLayoutStore } from '../../stores/layout.js';
 import { useTabsStore } from '../../stores/tabs.js';
@@ -153,6 +153,11 @@ export function PanelLeft() {
   const leftSectionIntegrationsOpen = useLayoutStore((s) => s.leftSectionIntegrationsOpen);
   const toggleLeftSectionMyProjects = useLayoutStore((s) => s.toggleLeftSectionMyProjects);
   const toggleLeftSectionIntegrations = useLayoutStore((s) => s.toggleLeftSectionIntegrations);
+  // Stable per-render ids for the section bodies so the chevron buttons
+  // can use `aria-controls` to point at the disclosed region (screen
+  // readers can then programmatically associate trigger ↔ content).
+  const myProjectsBodyId = useId();
+  const integrationsBodyId = useId();
   const { openTab, activeTabId, setActiveTab } = useTabsStore();
   const { contextGraphs, setContextGraphs, setLoading, activeProjectId, setActiveProject } = useProjectsStore();
   const stage = useJourneyStore((s) => s.stage);
@@ -243,13 +248,20 @@ export function PanelLeft() {
 
           {/* Section A: My Context Graphs (default expanded). Uses the
               .v10-peer-group-* pattern from the right panel — polished
-              focus-visible + prefers-reduced-motion + button semantics. */}
-          {myProjects.length > 0 && (
+              focus-visible + prefers-reduced-motion + button semantics.
+              Header renders even when `myProjects` is empty (but at
+              least one CG exists, or the journey is past first-run) —
+              otherwise a sidebar with CGs only in the Context Oracle
+              view would collapse to a lone "Integrations" header
+              (qa-lead). The empty-state journey card above handles the
+              "no CGs at all" first-run case. */}
+          {(contextGraphs.length > 0 || stage >= 2) && (
             <div className="v10-peer-group">
               <button
                 type="button"
                 className="v10-peer-group-header"
                 aria-expanded={leftSectionMyProjectsOpen}
+                aria-controls={myProjectsBodyId}
                 onClick={toggleLeftSectionMyProjects}
               >
                 <ChevronRight
@@ -260,8 +272,15 @@ export function PanelLeft() {
                 <span className="v10-peer-group-label">My Context Graphs</span>
               </button>
               {leftSectionMyProjectsOpen && (
-                <div className="v10-peer-group-body">
-                  {myProjects.map((cg) => (
+                <div id={myProjectsBodyId} className="v10-peer-group-body">
+                  {myProjects.length === 0 ? (
+                    <div
+                      className="v10-tree-item"
+                      style={{ cursor: 'default', color: 'var(--text-tertiary)', fontStyle: 'italic' }}
+                    >
+                      <span className="v10-tree-item-label">No context graphs in this view yet.</span>
+                    </div>
+                  ) : myProjects.map((cg) => (
                     <ProjectTreeItem
                       key={cg.id}
                       cg={cg}
@@ -302,6 +321,7 @@ export function PanelLeft() {
                 type="button"
                 className="v10-peer-group-header"
                 aria-expanded={leftSectionIntegrationsOpen}
+                aria-controls={integrationsBodyId}
                 onClick={toggleLeftSectionIntegrations}
               >
                 <ChevronRight
@@ -311,7 +331,11 @@ export function PanelLeft() {
                 />
                 <span className="v10-peer-group-label">Integrations</span>
               </button>
-              {leftSectionIntegrationsOpen && <IntegrationsSectionBody />}
+              {leftSectionIntegrationsOpen && (
+                <div id={integrationsBodyId}>
+                  <IntegrationsSectionBody />
+                </div>
+              )}
             </div>
           )}
         </div>

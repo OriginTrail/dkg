@@ -169,4 +169,115 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     expect(persisted.leftSectionIntegrationsOpen).toBe(true);
     expect(persisted.leftSectionMyProjectsOpen).toBe(true);
   });
+
+  it('still renders the "My Context Graphs" header when the membership filter yields zero (with empty-body hint)', async () => {
+    // qa-lead Pass 1 #2: at stage>=2 with CGs that all live in the
+    // Context Oracle view (no callerInvolved match), the sidebar must
+    // still surface the My CG header so the user has a visible anchor —
+    // otherwise it shrinks to a lone collapsed "Integrations" toggle.
+    const { PanelLeft } = await import('../src/ui/components/Shell/PanelLeft.js');
+    const { useJourneyStore } = await import('../src/ui/stores/journey.js');
+    const { useProjectsStore } = await import('../src/ui/stores/projects.js');
+    const { useLayoutStore } = await import('../src/ui/stores/layout.js');
+    apiFetchContextGraphsMock.mockResolvedValue({
+      contextGraphs: [{ id: 'cg-x', name: 'Catalog Only CG', callerInvolved: false } as any],
+    });
+    act(() => {
+      useJourneyStore.setState({ stage: 2 });
+      useProjectsStore.setState({
+        contextGraphs: [{ id: 'cg-x', name: 'Catalog Only CG', callerInvolved: false } as any],
+        loading: false,
+        activeProjectId: null,
+      });
+      useLayoutStore.setState({
+        leftSectionMyProjectsOpen: true,
+        leftSectionIntegrationsOpen: false,
+      });
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(React.createElement(PanelLeft));
+    });
+    await flush();
+    await flush();
+
+    const labels = Array.from(container.querySelectorAll('.v10-peer-group-label')).map((el) => el.textContent);
+    expect(labels).toContain('My Context Graphs');
+    expect(container.textContent).toContain('No context graphs in this view yet.');
+    // The catalog-only CG should NOT render as a row in this section.
+    expect(container.textContent).not.toContain('Catalog Only CG');
+  });
+
+  it('section headers point at their body containers via aria-controls', async () => {
+    const { container } = await renderPanel();
+    const headers = container.querySelectorAll('.v10-peer-group-header');
+    const myCgHeader = headers[0] as HTMLButtonElement;
+    const integrationsHeader = headers[1] as HTMLButtonElement;
+    const myCgControls = myCgHeader.getAttribute('aria-controls');
+    const integrationsControls = integrationsHeader.getAttribute('aria-controls');
+    expect(myCgControls).toBeTruthy();
+    expect(integrationsControls).toBeTruthy();
+    // The id pointed at by aria-controls of the (open) My CG header
+    // must exist in the DOM.
+    expect(container.querySelector(`#${myCgControls}`)).toBeTruthy();
+    // Integrations is collapsed by default → its body is unmounted, so
+    // the id is currently absent (aria-controls is still allowed to
+    // reference a not-yet-rendered region per WAI-ARIA).
+    expect(container.querySelector(`#${integrationsControls}`)).toBeNull();
+  });
+
+  it('opening Integrations triggers the local-integrations fetch; closing it halts further polls', async () => {
+    // qa-lead Pass 2 #10: validate the design claim that
+    // `IntegrationsSectionBody` only polls while mounted. The body lives
+    // inside the section header, so toggling the header off unmounts it
+    // and the 30s setInterval is cleaned up by React's effect-cleanup.
+    const { container } = await renderPanel();
+    const headers = container.querySelectorAll('.v10-peer-group-header');
+    const integrationsHeader = headers[1] as HTMLButtonElement;
+
+    // Open Integrations — the body mounts and fires its first fetch.
+    await act(async () => {
+      integrationsHeader.click();
+    });
+    await flush();
+    expect(fetchLocalAgentIntegrationsMock.mock.calls.length).toBeGreaterThanOrEqual(1);
+    const callsAfterOpen = fetchLocalAgentIntegrationsMock.mock.calls.length;
+
+    // Close it — the body unmounts and the interval is cleared.
+    await act(async () => {
+      integrationsHeader.click();
+    });
+    await flush();
+    // No new fetches should be issued while collapsed. We don't have to
+    // advance a 30s timer to prove this: the body is gone from the DOM,
+    // so the setInterval callback cannot be queued at all.
+    expect(container.textContent).not.toContain('Agents');
+    // A small idle wait — no fetch should fire from the collapsed state.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(fetchLocalAgentIntegrationsMock.mock.calls.length).toBe(callsAfterOpen);
+  });
+
+  it('hydrates section open-state defaults when a pre-existing dkg-layout blob lacks the new fields', async () => {
+    // Simulates an upgrade from before PR7: the user already has a
+    // `dkg-layout` blob with the original fields but no
+    // leftSectionMyProjectsOpen / leftSectionIntegrationsOpen. The
+    // layout store's loadPersisted should backfill both with their
+    // defaults (My CG open, Integrations closed) so the user doesn't
+    // boot into a broken state.
+    vi.resetModules();
+    localStorage.setItem('dkg-layout', JSON.stringify({
+      leftCollapsed: false,
+      rightCollapsed: false,
+      bottomCollapsed: true,
+      leftWidth: 240,
+      rightWidth: 360,
+      bottomHeight: 200,
+      // Intentionally NO leftSectionMyProjectsOpen / leftSectionIntegrationsOpen.
+    }));
+    const { useLayoutStore } = await import('../src/ui/stores/layout.js');
+    expect(useLayoutStore.getState().leftSectionMyProjectsOpen).toBe(true);
+    expect(useLayoutStore.getState().leftSectionIntegrationsOpen).toBe(false);
+  });
 });
