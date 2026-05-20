@@ -22,16 +22,19 @@
   --border-prominent: #888888;
 
   /* Text — dark mode. Round-2 bump 2026-05-20 (PR8): the PR7 lift
-     (#8a8a8a tertiary, #333 ghost) still read as "footnotes" on a real
-     14"+ laptop screen. Pushed tertiary another step + lifted ghost
-     out of the sub-3:1 invisible band — it was decoration-only on
-     paper but used by real labels (.v10-tree-group-label, etc.).
-     Contrast ratios on --bg-panel #0a0a0a: primary 15.9:1,
-     secondary 9.7:1, tertiary ~7.1:1, ghost ~3.2:1. */
+     (#8a8a8a tertiary) still read as "footnotes" on a real 14"+ laptop
+     screen — pushed tertiary another step (~7.1:1). Ghost stays at the
+     pre-PR8 #333 — qa-lead caught that bumping ghost promoted ~50
+     decorative usages (separators, dot backgrounds, select-arrow
+     gradients) from "near-invisible whisper" to "mid-tier text". The
+     two real labels that used ghost (.v10-tree-group-label,
+     .v10-tree-layer-header) were moved to --text-tertiary instead, so
+     ghost can stay decoration-only. Ratios on --bg-panel #0a0a0a:
+     primary 15.9:1, secondary 9.7:1, tertiary ~7.1:1. */
   --text-primary: #f0f0f0;
   --text-secondary: #a8a8a8;
   --text-tertiary: #9a9a9a;
-  --text-ghost: #6a6a6a;
+  --text-ghost: #333333;
 
   /* Accent — reserved for signals */
   --accent-red: #ef4444;
@@ -104,12 +107,13 @@ body.light {
   --text-secondary: #525252;
   /* Light tokens round-2 (PR8): tertiary further down from #737373 →
      #6b6b6b (~5.4:1) — PR7's value cleared AA on paper but still read
-     as "dust" at 11px in live testing. Ghost lifted out of the
-     ~1.4:1 invisible band (the prior #d4d4d4 disappeared on bg-panel
-     #f5f5f5 — fine for borders, not for the labels that use it).
-     Ghost target ~3:1 — intentional de-emphasis but readable. */
+     as "dust" at 11px in live testing. Ghost stays at #d4d4d4 —
+     qa-lead caught that bumping ghost would promote decorative
+     usages (separators, dot backgrounds, gradient arrows) from
+     whisper to mid-tier. The two real labels that used ghost moved
+     to --text-tertiary instead. */
   --text-tertiary: #6b6b6b;
-  --text-ghost: #8a8a8a;
+  --text-ghost: #d4d4d4;
   /* Light-theme danger foreground (~7.4:1 on --bg-elevated #f0f0f0) */
   --text-danger: #b91c1c;
   --text-danger-hover: #991b1b;
@@ -1935,7 +1939,11 @@ button:focus:not(:focus-visible) { outline: none; }
   border: 0;
   background: transparent;
   color: var(--text-primary);
-  font-size: 12px;
+  /* Match the chat bubble (13px) — typed text and rendered reply
+     should read at the same size in the same column (qa-lead). The
+     global input/textarea rule (12px, mono) is for compact forms; the
+     chat composer is conversational. */
+  font-size: 13px;
   font-family: var(--font-sans);
   line-height: 1.5;
   min-width: 0;
@@ -1997,7 +2005,7 @@ button:focus:not(:focus-visible) { outline: none; }
   border-bottom: 2px solid transparent;
   transition: all 0.15s;
 }
-.v10-bottom-tab:hover { color: var(--text-secondary); }
+.v10-bottom-tab:hover { color: var(--text-primary); }
 .v10-bottom-tab.active { color: var(--text-primary); border-bottom-color: var(--text-secondary); }
 .v10-bottom-toggle {
   color: var(--text-tertiary);
@@ -2039,8 +2047,9 @@ button:focus:not(:focus-visible) { outline: none; }
   /* Log lines stay at 11px mono (industry-standard density — bumping
      loses ~15-20% visible lines per scroll). The PR8 fix is contrast:
      promote body text to --text-primary so the active payload reads
-     cleanly; the timestamp prefix can be styled separately by callers
-     that want quieter timestamps. */
+     cleanly. Timestamps share the same color today — the line is one
+     pre-formatted string in PanelBottom. A follow-up could split the
+     timestamp prefix into its own span and dim it back to tertiary. */
   color: var(--text-primary);
   white-space: pre;
 }
