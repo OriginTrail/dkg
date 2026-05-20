@@ -21,15 +21,17 @@
      whose bg is identical to a chip fill). */
   --border-prominent: #888888;
 
-  /* Text — dark mode. Bumped 2026-05-20 (PR7) to clear AA across all
-     three steps on --bg-panel #0a0a0a, and to tighten the visual gap
-     between secondary and primary (user reported "muted-to-disabled"
-     feel on the prior #888888). Contrast ratios: primary 15.9:1,
-     secondary 9.7:1, tertiary 6.7:1. */
+  /* Text — dark mode. Round-2 bump 2026-05-20 (PR8): the PR7 lift
+     (#8a8a8a tertiary, #333 ghost) still read as "footnotes" on a real
+     14"+ laptop screen. Pushed tertiary another step + lifted ghost
+     out of the sub-3:1 invisible band — it was decoration-only on
+     paper but used by real labels (.v10-tree-group-label, etc.).
+     Contrast ratios on --bg-panel #0a0a0a: primary 15.9:1,
+     secondary 9.7:1, tertiary ~7.1:1, ghost ~3.2:1. */
   --text-primary: #f0f0f0;
   --text-secondary: #a8a8a8;
-  --text-tertiary: #8a8a8a;
-  --text-ghost: #333333;
+  --text-tertiary: #9a9a9a;
+  --text-ghost: #6a6a6a;
 
   /* Accent — reserved for signals */
   --accent-red: #ef4444;
@@ -100,11 +102,14 @@ body.light {
   --border-prominent: #525252;
   --text-primary: #171717;
   --text-secondary: #525252;
-  /* Light-mode tertiary bumped #a3a3a3 → #737373 (2026-05-20 PR7) so it
-     clears AA on --bg-panel #f5f5f5 (5.0:1). Primary + secondary stay
-     unchanged — they were already AA-strong on light. */
-  --text-tertiary: #737373;
-  --text-ghost: #d4d4d4;
+  /* Light tokens round-2 (PR8): tertiary further down from #737373 →
+     #6b6b6b (~5.4:1) — PR7's value cleared AA on paper but still read
+     as "dust" at 11px in live testing. Ghost lifted out of the
+     ~1.4:1 invisible band (the prior #d4d4d4 disappeared on bg-panel
+     #f5f5f5 — fine for borders, not for the labels that use it).
+     Ghost target ~3:1 — intentional de-emphasis but readable. */
+  --text-tertiary: #6b6b6b;
+  --text-ghost: #8a8a8a;
   /* Light-theme danger foreground (~7.4:1 on --bg-elevated #f0f0f0) */
   --text-danger: #b91c1c;
   --text-danger-hover: #991b1b;
@@ -135,7 +140,14 @@ html, body, #root {
   background: var(--bg-root);
   color: var(--text-primary);
   font-family: var(--font-sans);
-  font-size: 13px;
+  /* Body base 13 → 14 (PR8). PR7's surgical 10→11 bumps on a handful of
+     classes weren't enough — the long tail of inherited 13px chrome
+     still read as footnotes on a real laptop screen. Bumping the base
+     lifts every un-pinned surface (paragraph bodies, modal copy, form
+     labels, tooltips) via the cascade. Explicit "keep" overrides below
+     prevent the very largest surfaces (stat hero numbers, dashboard
+     title) from ballooning. */
+  font-size: 14px;
   line-height: 1.5;
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
@@ -263,21 +275,21 @@ button:focus:not(:focus-visible) { outline: none; }
 }
 .v10-header-agent-name {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 500;
   color: var(--text-primary);
 }
 .v10-header-agent-addr {
   font-family: var(--font-mono);
-  font-size: 10px;
-  color: var(--text-tertiary);
-  opacity: 0.7;
+  font-size: 11px;
+  color: var(--text-secondary);
+  opacity: 0.85;
 }
 .v10-header-spacer { flex: 1; }
 .v10-header-meta {
   font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--text-tertiary);
+  font-size: 12px;
+  color: var(--text-secondary);
   display: flex;
   align-items: center;
   gap: 6px;
@@ -469,7 +481,8 @@ button:focus:not(:focus-visible) { outline: none; }
 }
 .v10-tree-chevron.open { transform: rotate(90deg); }
 .v10-tree-section-label {
-  font-size: 12px;
+  /* CG names — the single biggest sidebar readability win. 12 → 13. */
+  font-size: 13px;
   font-weight: 500;
   color: var(--text-secondary);
   flex: 1;
@@ -499,14 +512,17 @@ button:focus:not(:focus-visible) { outline: none; }
   color: var(--accent-red, #ef4444);
 }
 
-/* "My Projects" / "Participating Projects" group dividers */
+/* "My Projects" / "Participating Projects" group dividers. Token
+   moved from --text-ghost → --text-tertiary (PR8) — ghost was never
+   meant for navigational labels; the contrast was below the 3:1 floor
+   even after PR8's ghost bump. */
 .v10-tree-group-label {
   padding: 10px 14px 3px;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  color: var(--text-ghost);
+  color: var(--text-tertiary);
 }
 
 /* Move-to-other-group button (⤑), same reveal-on-hover shape as hide */
@@ -538,7 +554,7 @@ button:focus:not(:focus-visible) { outline: none; }
   border: 1px dashed var(--border-subtle);
   border-radius: 6px;
   color: var(--text-tertiary);
-  font-size: 11px; font-family: var(--font-sans);
+  font-size: 12px; font-family: var(--font-sans);
   cursor: pointer;
   text-align: center;
   transition: border-color 0.15s, color 0.15s;
@@ -571,7 +587,7 @@ button:focus:not(:focus-visible) { outline: none; }
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  font-size: 11px;
+  font-size: 12px;
 }
 /* Tree mode tabs */
 .v10-tree-mode-btn {
@@ -604,14 +620,15 @@ button:focus:not(:focus-visible) { outline: none; }
   flex-shrink: 0;
 }
 
-/* Layer headers inside project tree */
+/* Layer headers inside project tree. Same token + size fix as
+   .v10-tree-group-label — was unreadable on --text-ghost. */
 .v10-tree-layer-header {
   padding: 3px 12px 3px 32px;
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.5px;
   text-transform: uppercase;
-  color: var(--text-ghost);
+  color: var(--text-tertiary);
   margin-top: 4px;
   cursor: default;
 }
@@ -626,7 +643,7 @@ button:focus:not(:focus-visible) { outline: none; }
   padding: 6px 12px;
   border-radius: 6px;
   border: 1px dashed var(--border-strong);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
   color: var(--text-secondary);
   transition: all 0.15s;
@@ -1973,10 +1990,10 @@ button:focus:not(:focus-visible) { outline: none; }
 .v10-bottom-tab {
   padding: 0 12px;
   height: 100%;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
   font-family: var(--font-mono);
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
   border-bottom: 2px solid transparent;
   transition: all 0.15s;
 }
@@ -2002,7 +2019,7 @@ button:focus:not(:focus-visible) { outline: none; }
 .v10-log-filter {
   width: 200px;
   padding: 4px 8px;
-  font-size: 11px;
+  font-size: 12px;
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
   border-radius: 4px;
@@ -2019,7 +2036,12 @@ button:focus:not(:focus-visible) { outline: none; }
 }
 .v10-log-line {
   padding: 0 12px;
-  color: var(--text-secondary);
+  /* Log lines stay at 11px mono (industry-standard density — bumping
+     loses ~15-20% visible lines per scroll). The PR8 fix is contrast:
+     promote body text to --text-primary so the active payload reads
+     cleanly; the timestamp prefix can be styled separately by callers
+     that want quieter timestamps. */
+  color: var(--text-primary);
   white-space: pre;
 }
 .v10-log-line:hover { background: var(--bg-hover); }
@@ -2038,7 +2060,9 @@ button:focus:not(:focus-visible) { outline: none; }
      fills the available width without an explicit width: 100%. */
 }
 .v10-chat-bubble {
-  font-size: 12px;
+  /* Chat copy is dense; +1 not +2 — keeps the bubble height-economical
+     while tracking the body base bump (PR8). */
+  font-size: 13px;
   line-height: 1.55;
   word-break: break-word;
   overflow-wrap: anywhere;
@@ -2440,8 +2464,10 @@ button:focus:not(:focus-visible) { outline: none; }
 @media (prefers-reduced-motion: reduce) { .v10-anim-mount { animation: none; } }
 
 .v10-dash-header { margin-bottom: 24px; }
+/* Keep hero title pinned (PR8); subtitle gets promoted from tertiary
+   muted-mono to a readable secondary line. */
 .v10-dash-title { font-size: 20px; font-weight: 600; color: var(--text-primary); margin-bottom: 4px; }
-.v10-dash-subtitle { font-size: 12px; color: var(--text-tertiary); font-family: var(--font-mono); }
+.v10-dash-subtitle { font-size: 13px; color: var(--text-secondary); font-family: var(--font-mono); }
 .v10-dash-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px; margin-bottom: 24px; }
 .v10-dash-stats .stat-card { min-width: 0; }
 .v10-dash-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; }
@@ -2475,15 +2501,15 @@ button:focus:not(:focus-visible) { outline: none; }
 .v10-dash-section-title svg { color: var(--text-secondary); flex-shrink: 0; }
 .v10-dash-section-badge {
   font-family: var(--font-mono);
-  font-size: 10px;
-  color: var(--text-tertiary);
+  font-size: 11px;
+  color: var(--text-secondary);
   background: var(--bg-elevated);
   padding: 2px 8px;
   border-radius: 4px;
 }
 .v10-dash-section-link {
-  font-size: 11px;
-  color: var(--text-tertiary);
+  font-size: 12px;
+  color: var(--text-secondary);
   transition: color 0.15s;
 }
 .v10-dash-section-link:hover { color: var(--text-primary); }
@@ -2523,7 +2549,7 @@ button:focus:not(:focus-visible) { outline: none; }
   line-height: 1.1;
   font-variant-numeric: tabular-nums;
 }
-.v10-cg-size-num .v10-cg-dim { font-size: 11px; }
+.v10-cg-size-num .v10-cg-dim { font-size: 12px; }
 .v10-cg-size-empty { font-size: 20px; font-weight: 600; padding: 6px 0; }
 /* The Size card is the densest of the three stat cards; trim its
    padding so the two big numbers + bars + legend + sub don't bloat it
@@ -2577,7 +2603,7 @@ button:focus:not(:focus-visible) { outline: none; }
 .v10-layer-legend { display: flex; gap: 12px; margin-top: 4px; }
 .v10-layer-legend-item {
   display: inline-flex; align-items: center; gap: 5px;
-  font-size: 10px; color: var(--text-secondary); font-family: var(--font-mono);
+  font-size: 11px; color: var(--text-secondary); font-family: var(--font-mono);
 }
 .v10-layer-legend-dot { width: 8px; height: 8px; border-radius: 2px; }
 
@@ -2595,7 +2621,7 @@ button:focus:not(:focus-visible) { outline: none; }
 }
 .v10-cg-colhead {
   padding: 5px 8px;
-  font-size: 10px;
+  font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--text-secondary);
@@ -2618,7 +2644,7 @@ button:focus:not(:focus-visible) { outline: none; }
 }
 .v10-cg-row:last-child { border-bottom: 0; }
 .v10-cg-row:hover { background: var(--bg-hover); }
-.v10-cg-cell { font-size: 12px; color: var(--text-secondary); min-width: 0; }
+.v10-cg-cell { font-size: 13px; color: var(--text-secondary); min-width: 0; }
 .v10-cg-name {
   color: var(--text-primary);
   font-weight: 500;
@@ -2641,7 +2667,7 @@ button:focus:not(:focus-visible) { outline: none; }
 /* Role badge — same small-status-badge family as `.v10-agent-card-badge`. */
 .v10-cg-badge {
   display: inline-block;
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 600;
   letter-spacing: 0.04em;
   padding: 2px 7px;
@@ -2685,11 +2711,11 @@ button:focus:not(:focus-visible) { outline: none; }
   align-items: baseline;
   gap: 8px;
   margin: 0 0 6px;
-  font-size: 12px;
+  font-size: 13px;
 }
 .v10-ws-chain-label {
   color: var(--text-secondary);
-  font-size: 10px;
+  font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
@@ -2705,13 +2731,13 @@ button:focus:not(:focus-visible) { outline: none; }
   grid-template-columns: minmax(0, 1fr) 5.5em 5em;
   align-items: baseline;
   gap: 10px;
-  font-size: 12px;
+  font-size: 13px;
 }
 .v10-ws-wrow .v10-ws-bal,
-.v10-ws-wrow .v10-ws-bal-sec { text-align: right; font-size: 12px; }
+.v10-ws-wrow .v10-ws-bal-sec { text-align: right; font-size: 13px; }
 .v10-ws-wrow .v10-ws-bal-sec { color: var(--text-secondary); }
 .v10-ws-whead {
-  font-size: 10px;
+  font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--text-secondary);
@@ -2729,12 +2755,12 @@ button:focus:not(:focus-visible) { outline: none; }
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
-  font-size: 12px;
+  font-size: 13px;
 }
 .v10-ws-addr {
   color: var(--text-primary);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 12px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2749,7 +2775,7 @@ button:focus:not(:focus-visible) { outline: none; }
    real balance, must clear AA). */
 .v10-ws-bal-sec {
   color: var(--text-secondary);
-  font-size: 10px;
+  font-size: 11px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -2765,10 +2791,10 @@ button:focus:not(:focus-visible) { outline: none; }
   grid-template-columns: minmax(0, 1fr) 7em 5em;
   align-items: baseline;
   gap: 10px;
-  font-size: 12px;
+  font-size: 13px;
 }
 .v10-ws-spend-head {
-  font-size: 10px;
+  font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--text-secondary);
@@ -2779,13 +2805,13 @@ button:focus:not(:focus-visible) { outline: none; }
 .v10-ws-spend-val { text-align: right; }
 .v10-ws-spend-val {
   color: var(--text-primary);
-  font-size: 11px;
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 /* Chain/RPC partial-error caveat under the wallet list. --text-secondary
    (AA on the card surface), small but not micro. */
-.v10-ws-note { color: var(--text-secondary); font-size: 11px; margin-top: 6px; }
+.v10-ws-note { color: var(--text-secondary); font-size: 12px; margin-top: 6px; }
 
 /* Quick actions */
 .v10-quick-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 8px; }
@@ -3171,9 +3197,9 @@ p { font-size: 13px; color: var(--text-secondary); line-height: 1.6; }
 .stat-card{background:var(--bg-surface);border:1px solid var(--border-default);border-radius:12px;padding:18px 20px;flex:1;min-width:0;position:relative;overflow:hidden;transition:border-color .15s,box-shadow .15s}
 .stat-card:hover{border-color:var(--border-strong);box-shadow:0 2px 8px rgba(0,0,0,.15)}
 .stat-card .accent{position:absolute;top:0;left:0;right:0;height:2px}
-.stat-label{font-size:11px;color:var(--text-secondary);font-weight:600;letter-spacing:.06em;text-transform:uppercase;margin-bottom:8px;display:flex;align-items:center;gap:6px}
+.stat-label{font-size:12px;color:var(--text-secondary);font-weight:600;letter-spacing:.06em;text-transform:uppercase;margin-bottom:8px;display:flex;align-items:center;gap:6px}
 .stat-value{font-size:28px;font-weight:700;color:var(--text-primary);line-height:1}
-.stat-sub{font-size:11px;color:var(--text-secondary);margin-top:6px}
+.stat-sub{font-size:13px;color:var(--text-secondary);margin-top:6px}
 
 /* Badges */
 .agent-badge{display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border-radius:6px;font-size:10px;font-weight:600;white-space:nowrap;font-family:var(--font-mono)}
