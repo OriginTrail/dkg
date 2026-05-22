@@ -49,13 +49,13 @@ function isMemoryLayerView(layer: LayerView): layer is MemoryLayerView {
   return layer === 'wm' || layer === 'swm' || layer === 'vm';
 }
 
-function scrollSelector(key: string): string {
-  return `[data-cg-scroll-key="${key.replace(/"/g, '\\"')}"]`;
-}
-
 function scrollElementFor(key: string, fallback: HTMLElement | null): HTMLElement | null {
   if (typeof document === 'undefined') return fallback;
-  return document.querySelector<HTMLElement>(scrollSelector(key)) ?? fallback;
+  const elements = document.querySelectorAll<HTMLElement>('[data-cg-scroll-key]');
+  for (const element of elements) {
+    if (element.dataset.cgScrollKey === key) return element;
+  }
+  return fallback;
 }
 
 export function ProjectView({ contextGraphId }: ProjectViewProps) {
