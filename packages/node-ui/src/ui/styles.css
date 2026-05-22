@@ -2974,7 +2974,7 @@ button:focus:not(:focus-visible) { outline: none; }
 .v10-memory-explorer-page .v10-cg-query-view {
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  overflow: auto;
 }
 .v10-cg-query-editor {
   display: grid;
@@ -3073,7 +3073,7 @@ button:focus:not(:focus-visible) { outline: none; }
 .v10-mlv-table-wrap { overflow-x: auto; border: 1px solid var(--border-default); border-radius: 8px; }
 .v10-cg-query-results {
   flex: 1 1 auto;
-  min-height: 0;
+  min-height: 180px;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -3906,7 +3906,10 @@ body.light .v10-import-dropzone.drag-over { border-color: #b0b0b0; background: #
   flex-direction: column;
   overflow: hidden;
 }
-.v10-memory-explorer-page[data-view="overview"] {
+.v10-memory-explorer-page[data-view="overview"],
+.v10-memory-explorer-page[data-view="query"],
+.v10-memory-explorer-page[data-view="entity"],
+.v10-memory-explorer-page[data-view="subgraph"] {
   overflow: auto;
 }
 .v10-memory-explorer-page > .v10-layer-detail,
@@ -3925,6 +3928,10 @@ body.light .v10-import-dropzone.drag-over { border-color: #b0b0b0; background: #
   display: flex;
   align-items: center;
   justify-content: center;
+}
+.v10-memory-explorer-page[data-view="entity"] > .v10-ka-detail,
+.v10-memory-explorer-page[data-view="subgraph"] > .v10-layer-detail {
+  min-height: 420px;
 }
 
 /* ── Trust Summary ── */
