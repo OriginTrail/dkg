@@ -1054,7 +1054,7 @@ export function LayerContent({
       </div>
 
       {activeTab === 'items' && (
-        <div className="v10-layer-expand-body entities-tab">
+        <div className="v10-layer-expand-body entities-tab" data-cg-scroll-key={`layer:${layer}:items`}>
           {layer === 'vm' && !isInitialVerifiedMemoryLoad && !isVerifiedMemoryUnavailable && (
             <VerifiedMemoryHeroBanner
               entities={entities}
@@ -1103,12 +1103,17 @@ export function LayerContent({
 
       {activeTab === 'assertions' && layer !== 'vm' && (
         <div className="v10-layer-expand-body full-width">
-          <AssertionsList contextGraphId={contextGraphId} layer={layer} onComplete={memory.refresh} />
+          <AssertionsList
+            contextGraphId={contextGraphId}
+            layer={layer}
+            onComplete={memory.refresh}
+            scrollKey={`layer:${layer}:assertions`}
+          />
         </div>
       )}
 
       {activeTab === 'graph' && (
-        <div className="v10-layer-expand-body full-width">
+        <div className="v10-layer-expand-body full-width" data-cg-scroll-key={`layer:${layer}:graph`}>
           <LayerGraphPanel
             layer={layer}
             triples={layerTriples}
@@ -1120,7 +1125,11 @@ export function LayerContent({
 
       {activeTab === 'docs' && (
         <div className="v10-layer-expand-body full-width">
-          <DocumentsList entities={entities} contextGraphId={contextGraphId} />
+          <DocumentsList
+            entities={entities}
+            contextGraphId={contextGraphId}
+            scrollKey={`layer:${layer}:docs`}
+          />
         </div>
       )}
     </>
@@ -1686,10 +1695,11 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
 
 // Small helper: compute unique triples for a given layer slice of memory.
 
-export function AssertionsList({ contextGraphId, layer, onComplete }: {
+export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }: {
   contextGraphId: string;
   layer: 'wm' | 'swm';
   onComplete: () => void;
+  scrollKey?: string;
 }) {
   const { data: assertions, loading, refresh } = useFetch(
     () => listAssertions(contextGraphId, layer),
@@ -1747,19 +1757,29 @@ export function AssertionsList({ contextGraphId, layer, onComplete }: {
     }
   }, [assertions, contextGraphId, layer, refresh, onComplete]);
 
+  const scrollRootStyle = { flex: 1, overflow: 'auto' } as const;
+
   if (loading) {
-    return <div className="v10-layer-state">Loading assertions...</div>;
+    return (
+      <div style={scrollRootStyle} data-cg-scroll-key={scrollKey}>
+        <div className="v10-layer-state">Loading assertions...</div>
+      </div>
+    );
   }
 
   if (!assertions?.length) {
-    return <div className="v10-layer-state">No assertions in this layer</div>;
+    return (
+      <div style={scrollRootStyle} data-cg-scroll-key={scrollKey}>
+        <div className="v10-layer-state">No assertions in this layer</div>
+      </div>
+    );
   }
 
   const actionLabel = layer === 'wm' ? 'Promote → Shared' : 'Publish to VM';
   const actionAllLabel = layer === 'wm' ? 'Promote All → Shared' : 'Publish all to Verified Memory';
 
   return (
-    <div style={{ flex: 1, overflow: 'auto' }}>
+    <div style={scrollRootStyle} data-cg-scroll-key={scrollKey}>
       <div style={{ padding: '8px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: '1px solid var(--border-subtle)' }}>
         <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{assertions.length} assertion{assertions.length !== 1 ? 's' : ''}</span>
         <button
@@ -1798,14 +1818,23 @@ export function AssertionsList({ contextGraphId, layer, onComplete }: {
 
 // ─── Full Layer Detail View (WM / SWM / VM) ─────────────────
 
-export function LayerDetailView({ layer, memory, onNodeClick, onSelectEntity, contextGraphId }: {
+export function LayerDetailView({
+  layer,
+  memory,
+  onNodeClick,
+  onSelectEntity,
+  contextGraphId,
+  activeTab,
+  onTabChange,
+}: {
   layer: 'wm' | 'swm' | 'vm';
   memory: ReturnType<typeof useMemoryEntities>;
   onNodeClick: (node: any) => void;
   onSelectEntity: (uri: string) => void;
   contextGraphId: string;
+  activeTab: LayerContentTab;
+  onTabChange: (tab: LayerContentTab) => void;
 }) {
-  const [contentTab, setContentTab] = useState<LayerContentTab>('items');
   const config = LAYER_CONFIG[layer];
 
   const entities = useMemo(
@@ -1832,8 +1861,8 @@ export function LayerDetailView({ layer, memory, onNodeClick, onSelectEntity, co
           layerTriples={layerTriples}
           contextGraphId={contextGraphId}
           memory={memory}
-          activeTab={contentTab}
-          onTabChange={setContentTab}
+          activeTab={activeTab}
+          onTabChange={onTabChange}
           onSelectEntity={onSelectEntity}
           onNodeClick={onNodeClick}
         />
@@ -1845,7 +1874,15 @@ export function LayerDetailView({ layer, memory, onNodeClick, onSelectEntity, co
 // ─── Documents List ──────────────────────────────────────────
 
 
-export function DocumentsList({ entities, contextGraphId }: { entities: MemoryEntity[]; contextGraphId?: string }) {
+export function DocumentsList({
+  entities,
+  contextGraphId,
+  scrollKey,
+}: {
+  entities: MemoryEntity[];
+  contextGraphId?: string;
+  scrollKey?: string;
+}) {
   const openTab = useTabsStore(s => s.openTab);
 
   const docs = useMemo(() => {
@@ -1881,14 +1918,14 @@ export function DocumentsList({ entities, contextGraphId }: { entities: MemoryEn
 
   if (docs.length === 0) {
     return (
-      <div className="v10-docs-placeholder" style={{ flex: 1 }}>
+      <div className="v10-docs-placeholder" style={{ flex: 1 }} data-cg-scroll-key={scrollKey}>
         No documents in this layer. Import a file to get started.
       </div>
     );
   }
 
   return (
-    <div className="v10-layer-detail-content">
+    <div className="v10-layer-detail-content" data-cg-scroll-key={scrollKey}>
       <div className="v10-items-list">
         {docs.map(e => {
           const contentType = e.properties.get(SOURCE_CONTENT_TYPE)?.[0] ?? '';
@@ -2221,7 +2258,7 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
   return (
     <div className="v10-ka-detail">
       <div className="v10-ka-header">
-        <button className="v10-ka-back" onClick={onClose}>← Back to Project</button>
+        <button className="v10-ka-back" onClick={onClose}>← Back to Context Graph</button>
         <div className="v10-ka-header-left">
           <div className="v10-ka-label">Knowledge Asset</div>
           <div className="v10-ka-name">
@@ -2824,10 +2861,12 @@ export function SubGraphTimeline({
   items,
   color,
   onSelectEntity,
+  scrollKey,
 }: {
   items: Array<{ entity: MemoryEntity; date: Date }>;
   color: string;
   onSelectEntity: (uri: string) => void;
+  scrollKey?: string;
 }) {
   const profile = useProjectProfileContext();
   const agents = useAgentsContext();
@@ -2844,14 +2883,14 @@ export function SubGraphTimeline({
 
   if (items.length === 0) {
     return (
-      <div className="v10-subgraph-timeline-empty">
+      <div className="v10-subgraph-timeline-empty" data-cg-scroll-key={scrollKey}>
         No entities in this sub-graph have a timeline value (check the profile's <code>timelinePredicate</code> and the underlying data).
       </div>
     );
   }
 
   return (
-    <div className="v10-subgraph-timeline">
+    <div className="v10-subgraph-timeline" data-cg-scroll-key={scrollKey}>
       {grouped.map(([bucket, rows]) => (
         <div key={bucket} className="v10-subgraph-timeline-bucket">
           <div className="v10-subgraph-timeline-bucket-head">
@@ -2905,12 +2944,16 @@ export function SubGraphDetailView({
   contextGraphId,
   onNodeClick,
   onSelectEntity,
+  activeTab,
+  onTabChange,
 }: {
   slug: string;
   rawMemory: ReturnType<typeof useMemoryEntities>;
   contextGraphId: string;
   onNodeClick: (node: any) => void;
   onSelectEntity: (uri: string) => void;
+  activeTab?: SubGraphTab;
+  onTabChange?: (tab: SubGraphTab) => void;
 }) {
   const profile = useProjectProfileContext();
   const binding = profile?.forSubGraph(slug);
@@ -2918,7 +2961,9 @@ export function SubGraphDetailView({
   const queryCatalogs = profile?.savedQueryCatalogsFor(slug) ?? [];
   const timelinePredicate = binding?.timelinePredicate;
 
-  const [activeTab, setActiveTab] = useState<SubGraphTab>('items');
+  const [localActiveTab, setLocalActiveTab] = useState<SubGraphTab>('items');
+  const selectedTab = activeTab ?? localActiveTab;
+  const setSelectedTab = onTabChange ?? setLocalActiveTab;
   // Default to newest-first for any sub-graph that defines a timeline
   // predicate (chat, github, tasks, decisions). Sub-graphs with no time
   // signal (code, meta) fall back to the legacy "richest entity first"
@@ -3129,11 +3174,14 @@ export function SubGraphDetailView({
   // `tasks` would linger when the user jumps to `decisions` and silently
   // zero out the list.
   useEffect(() => {
-    setActiveTab('items');
     setEnabledLayers(new Set<TrustLevel>(['working', 'shared', 'verified']));
     setChipState(new Map());
     clearQuery();
   }, [slug, clearQuery]);
+
+  useEffect(() => {
+    if (!activeTab) setLocalActiveTab('items');
+  }, [slug, activeTab]);
 
   const hasAnyFilter = enabledLayers.size < 3 || chipState.size > 0 || !!queryResults;
   const resetFilters = () => {
@@ -3239,35 +3287,35 @@ export function SubGraphDetailView({
       <div className="v10-layer-detail-body">
         <div className="v10-layer-expand-tabs">
           <button
-            className={`v10-layer-expand-tab ${activeTab === 'items' ? 'active' : ''}`}
-            onClick={() => setActiveTab('items')}
+            className={`v10-layer-expand-tab ${selectedTab === 'items' ? 'active' : ''}`}
+            onClick={() => setSelectedTab('items')}
           >
             Entities ({filteredEntities.length}{filteredEntities.length !== scopedEntities.length ? ` / ${scopedEntities.length}` : ''})
           </button>
           <button
-            className={`v10-layer-expand-tab ${activeTab === 'graph' ? 'active' : ''}`}
-            onClick={() => setActiveTab('graph')}
+            className={`v10-layer-expand-tab ${selectedTab === 'graph' ? 'active' : ''}`}
+            onClick={() => setSelectedTab('graph')}
           >
             Graph
           </button>
           {timelinePredicate && (
             <button
-              className={`v10-layer-expand-tab ${activeTab === 'timeline' ? 'active' : ''}`}
-              onClick={() => setActiveTab('timeline')}
+              className={`v10-layer-expand-tab ${selectedTab === 'timeline' ? 'active' : ''}`}
+              onClick={() => setSelectedTab('timeline')}
             >
               Timeline
             </button>
           )}
           <button
-            className={`v10-layer-expand-tab ${activeTab === 'docs' ? 'active' : ''}`}
-            onClick={() => setActiveTab('docs')}
+            className={`v10-layer-expand-tab ${selectedTab === 'docs' ? 'active' : ''}`}
+            onClick={() => setSelectedTab('docs')}
           >
             Documents
           </button>
         </div>
 
-        {activeTab === 'items' && (
-          <div className="v10-layer-expand-body entities-tab">
+        {selectedTab === 'items' && (
+          <div className="v10-layer-expand-body entities-tab" data-cg-scroll-key={`subgraph:${slug}:items`}>
             <EntityList
               entities={sortedEntities}
               layerKey="wm"
@@ -3300,8 +3348,8 @@ export function SubGraphDetailView({
           </div>
         )}
 
-        {activeTab === 'graph' && (
-          <div className="v10-layer-expand-body full-width">
+        {selectedTab === 'graph' && (
+          <div className="v10-layer-expand-body full-width" data-cg-scroll-key={`subgraph:${slug}:graph`}>
             <LayerGraphPanel
               layer="wm"
               triples={filteredTriples}
@@ -3311,21 +3359,23 @@ export function SubGraphDetailView({
           </div>
         )}
 
-        {activeTab === 'timeline' && timelinePredicate && (
+        {selectedTab === 'timeline' && timelinePredicate && (
           <div className="v10-layer-expand-body full-width">
             <SubGraphTimeline
               items={timelineItems}
               color={color}
               onSelectEntity={onSelectEntity}
+              scrollKey={`subgraph:${slug}:timeline`}
             />
           </div>
         )}
 
-        {activeTab === 'docs' && (
+        {selectedTab === 'docs' && (
           <div className="v10-layer-expand-body full-width">
             <DocumentsList
               entities={filteredEntities}
               contextGraphId={contextGraphId}
+              scrollKey={`subgraph:${slug}:docs`}
             />
           </div>
         )}

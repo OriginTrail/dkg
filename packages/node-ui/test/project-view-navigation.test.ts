@@ -1,0 +1,256 @@
+// @vitest-environment happy-dom
+
+import React from 'react';
+import { act } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+(globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+
+const memory = {
+  entities: new Map([
+    ['urn:entity:working', {
+      uri: 'urn:entity:working',
+      label: 'Working entity',
+      types: [],
+      trustLevel: 'working',
+      layers: new Set(['working']),
+      subGraphs: new Set(['demo']),
+      properties: new Map(),
+      connections: [],
+    }],
+    ['urn:entity:demo', {
+      uri: 'urn:entity:demo',
+      label: 'Demo entity',
+      types: [],
+      trustLevel: 'working',
+      layers: new Set(['working']),
+      subGraphs: new Set(['demo']),
+      properties: new Map(),
+      connections: [{ predicate: 'related', targetUri: 'urn:entity:other', targetLabel: 'Other entity' }],
+    }],
+    ['urn:entity:other', {
+      uri: 'urn:entity:other',
+      label: 'Other entity',
+      types: [],
+      trustLevel: 'working',
+      layers: new Set(['working']),
+      subGraphs: new Set(['other']),
+      properties: new Map(),
+      connections: [],
+    }],
+  ]),
+  entityList: [] as any[],
+  allTriples: [],
+  graphTriples: [],
+  trustMap: new Map(),
+  counts: { wm: 2, swm: 0, vm: 0, total: 2 },
+  loading: false,
+  error: null,
+  partial: false,
+  refresh: vi.fn(),
+};
+memory.entityList = [...memory.entities.values()];
+
+const profile = {
+  primaryColor: '#64748b',
+  forSubGraph: (slug: string) => ({ slug, displayName: slug, color: '#38bdf8', icon: '#', description: '' }),
+};
+
+const agentsData = {
+  agents: new Map(),
+  list: [],
+  loading: false,
+  get: () => undefined,
+  openAgent: vi.fn(),
+};
+
+vi.mock('../src/ui/api-wrapper.js', () => ({
+  api: {
+    fetchContextGraphs: vi.fn(async () => ({
+      contextGraphs: [{ id: 'cg-test', name: 'Context Graph Test' }],
+    })),
+  },
+}));
+
+vi.mock('../src/ui/api.js', () => ({
+  listParticipants: vi.fn(async () => ({ allowedAgents: [] })),
+}));
+
+vi.mock('../src/ui/hooks/useMemoryEntities.js', () => ({
+  useMemoryEntities: () => memory,
+}));
+
+vi.mock('../src/ui/hooks/useProjectProfile.js', () => ({
+  ProjectProfileContext: React.createContext(profile),
+  useProjectProfile: () => profile,
+}));
+
+vi.mock('../src/ui/hooks/useAgents.js', () => ({
+  AgentsContext: React.createContext(agentsData),
+  useAgents: () => agentsData,
+}));
+
+vi.mock('../src/ui/stores/tabs.js', () => ({
+  useTabsStore: () => vi.fn(),
+}));
+
+vi.mock('../src/ui/components/Modals/ImportFilesModal.js', () => ({
+  ImportFilesModal: () => null,
+}));
+
+vi.mock('../src/ui/components/Modals/ShareProjectModal.js', () => ({
+  ShareProjectModal: () => null,
+}));
+
+vi.mock('../src/ui/components/ActivityFeed.js', () => ({
+  ActivityFeed: ({ onSelectEntity }: { onSelectEntity: (uri: string) => void }) =>
+    React.createElement('button', {
+      'data-testid': 'open-activity-entity',
+      onClick: () => onSelectEntity('urn:entity:working'),
+    }, 'Open activity entity'),
+}));
+
+vi.mock('../src/ui/components/SubGraphBar.js', () => ({
+  SubGraphBar: ({ selected, onSelect }: { selected: string | null; onSelect: (slug: string | null) => void }) =>
+    React.createElement('div', { 'data-testid': 'subgraph-bar', 'data-selected': selected ?? '' },
+      React.createElement('button', { 'data-testid': 'select-subgraph-demo', onClick: () => onSelect('demo') }, 'demo'),
+      React.createElement('button', { 'data-testid': 'clear-subgraph', onClick: () => onSelect(null) }, 'all')),
+}));
+
+vi.mock('../src/ui/views/project/components.js', () => ({
+  ProjectHeaderStrip: ({ activeSubGraph }: { activeSubGraph: any }) =>
+    React.createElement('div', { 'data-testid': 'active-subgraph' }, activeSubGraph?.slug ?? 'none'),
+  LayerSwitcher: ({ active, onSwitch }: { active: string; onSwitch: (layer: string) => void }) =>
+    React.createElement('div', { 'data-testid': 'active-layer', 'data-layer': active },
+      React.createElement('button', { 'data-testid': 'switch-wm', onClick: () => onSwitch('wm') }, 'WM'),
+      React.createElement('button', { 'data-testid': 'switch-swm', onClick: () => onSwitch('swm') }, 'SWM')),
+  KADetailView: ({ entity, onNavigate, onClose }: { entity: any; onNavigate: (uri: string) => void; onClose: () => void }) =>
+    React.createElement('section', { 'data-testid': 'entity-detail', 'data-entity': entity.uri },
+      React.createElement('div', {}, entity.label),
+      React.createElement('button', { 'data-testid': 'open-related-entity', onClick: () => onNavigate('urn:entity:other') }, 'Open related'),
+      React.createElement('button', { 'data-testid': 'detail-back', onClick: onClose }, 'Back to Context Graph')),
+  SubGraphDetailView: ({ slug, activeTab = 'items', onTabChange, onSelectEntity }: {
+    slug: string;
+    activeTab?: string;
+    onTabChange: (tab: string) => void;
+    onSelectEntity: (uri: string) => void;
+  }) =>
+    React.createElement('section', { 'data-testid': 'subgraph-detail', 'data-slug': slug, 'data-tab': activeTab },
+      React.createElement('button', { 'data-testid': 'subgraph-tab-graph', onClick: () => onTabChange('graph') }, 'Graph'),
+      React.createElement('div', { 'data-testid': 'subgraph-scroll', 'data-cg-scroll-key': `subgraph:${slug}:${activeTab}` },
+        React.createElement('button', { 'data-testid': 'open-subgraph-entity', onClick: () => onSelectEntity('urn:entity:demo') }, 'Open demo entity'))),
+  ProjectOverviewCard: () => React.createElement('div', {}, 'Overview'),
+  PendingJoinRequestsBar: () => null,
+  MemoryStrip: () => null,
+  SubGraphOverviewGrid: () => null,
+  ContextGraphQueryView: () => null,
+  LayerDetailView: ({ layer, activeTab, onTabChange, onSelectEntity }: {
+    layer: string;
+    activeTab: string;
+    onTabChange: (tab: string) => void;
+    onSelectEntity: (uri: string) => void;
+  }) =>
+    React.createElement('section', { 'data-testid': 'layer-detail', 'data-layer': layer, 'data-tab': activeTab },
+      React.createElement('button', { 'data-testid': 'layer-tab-graph', onClick: () => onTabChange('graph') }, 'Graph'),
+      React.createElement('div', { 'data-testid': 'layer-scroll', 'data-cg-scroll-key': `layer:${layer}:${activeTab}` },
+        React.createElement('button', { 'data-testid': 'open-layer-entity', onClick: () => onSelectEntity('urn:entity:working') }, 'Open layer entity'))),
+  ProvenanceBar: () => null,
+}));
+
+const { ProjectView } = await import('../src/ui/views/ProjectView.js');
+
+function query(testId: string): HTMLElement {
+  const el = document.querySelector<HTMLElement>(`[data-testid="${testId}"]`);
+  if (!el) throw new Error(`Missing test element ${testId}`);
+  return el;
+}
+
+async function click(testId: string): Promise<void> {
+  await act(async () => {
+    query(testId).dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  });
+}
+
+async function flush(): Promise<void> {
+  await act(async () => {
+    await Promise.resolve();
+    await new Promise(resolve => setTimeout(resolve, 0));
+  });
+}
+
+describe('ProjectView entity detail navigation', () => {
+  let root: Root;
+  let originalRaf: typeof window.requestAnimationFrame;
+
+  beforeEach(async () => {
+    document.body.innerHTML = '<div id="root"></div>';
+    originalRaf = window.requestAnimationFrame;
+    Object.defineProperty(window, 'requestAnimationFrame', {
+      configurable: true,
+      value: (cb: FrameRequestCallback) => {
+        cb(0);
+        return 0;
+      },
+    });
+    const container = document.getElementById('root');
+    if (!container) throw new Error('Missing root');
+    root = createRoot(container);
+    await act(async () => {
+      root.render(React.createElement(ProjectView, { contextGraphId: 'cg-test' }));
+    });
+    await flush();
+  });
+
+  afterEach(async () => {
+    await act(async () => {
+      root.unmount();
+    });
+    Object.defineProperty(window, 'requestAnimationFrame', {
+      configurable: true,
+      value: originalRaf,
+    });
+    document.body.innerHTML = '';
+    vi.clearAllMocks();
+  });
+
+  it('restores layer, subtab, and scroll when entity detail closes', async () => {
+    await click('switch-swm');
+    await click('layer-tab-graph');
+
+    const scroller = query('layer-scroll');
+    scroller.scrollTop = 86;
+
+    await click('open-layer-entity');
+    expect(query('entity-detail').dataset.entity).toBe('urn:entity:working');
+
+    await click('detail-back');
+    await flush();
+
+    expect(query('active-layer').dataset.layer).toBe('swm');
+    expect(query('layer-detail').dataset.tab).toBe('graph');
+    expect(query('layer-scroll').scrollTop).toBe(86);
+  });
+
+  it('keeps the originating subgraph stable while following cross-subgraph entity links', async () => {
+    await click('select-subgraph-demo');
+    await click('subgraph-tab-graph');
+    expect(query('active-subgraph').textContent).toBe('demo');
+    expect(query('subgraph-detail').dataset.tab).toBe('graph');
+
+    await click('open-subgraph-entity');
+    expect(query('entity-detail').dataset.entity).toBe('urn:entity:demo');
+    expect(query('active-subgraph').textContent).toBe('demo');
+
+    await click('open-related-entity');
+    expect(query('entity-detail').dataset.entity).toBe('urn:entity:other');
+    expect(query('active-subgraph').textContent).toBe('demo');
+
+    await click('detail-back');
+    await flush();
+
+    expect(query('subgraph-detail').dataset.slug).toBe('demo');
+    expect(query('subgraph-detail').dataset.tab).toBe('graph');
+  });
+
+});
