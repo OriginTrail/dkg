@@ -1020,6 +1020,8 @@ export function LayerContent({
 }) {
   const config = LAYER_CONFIG[layer];
   const itemsLabel = layer === 'vm' ? 'Knowledge Assets' : 'Entities';
+  const isInitialVerifiedMemoryLoad = layer === 'vm' && memory.loading && entities.length === 0;
+  const isEmptyVerifiedMemory = layer === 'vm' && !memory.loading && entities.length === 0;
 
   const handleTab = (tab: LayerContentTab) => (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -1051,26 +1053,39 @@ export function LayerContent({
 
       {activeTab === 'items' && (
         <div className="v10-layer-expand-body entities-tab">
-          {layer === 'vm' && (
+          {layer === 'vm' && !isInitialVerifiedMemoryLoad && (
             <VerifiedMemoryHeroBanner
               entities={entities}
               tripleCount={tripleCount}
               contextGraphId={contextGraphId}
             />
           )}
-          <LayerWidgetStrip
-            layer={layer}
-            entities={entities}
-            tripleCount={tripleCount}
-            contextGraphId={contextGraphId}
-            onComplete={memory.refresh}
-          />
-          <EntityList
-            entities={entities}
-            layerKey={layer}
-            layerIcon={config.icon}
-            onSelectEntity={onSelectEntity}
-          />
+          {isInitialVerifiedMemoryLoad ? (
+            <div className="v10-layer-widgets-strip empty">
+              <div className="v10-canvas-empty">
+                <div className="v10-canvas-empty-icon">◉</div>
+                <div className="v10-canvas-empty-text">
+                  Loading Verifiable Memory...
+                </div>
+              </div>
+            </div>
+          ) : !isEmptyVerifiedMemory && (
+            <>
+              <LayerWidgetStrip
+                layer={layer}
+                entities={entities}
+                tripleCount={tripleCount}
+                contextGraphId={contextGraphId}
+                onComplete={memory.refresh}
+              />
+              <EntityList
+                entities={entities}
+                layerKey={layer}
+                layerIcon={config.icon}
+                onSelectEntity={onSelectEntity}
+              />
+            </>
+          )}
           {footer}
         </div>
       )}
@@ -1115,11 +1130,41 @@ export function VerifiedMemoryHeroBanner({ entities, tripleCount, contextGraphId
   for (const e of entities) for (const t of e.types) typeSet.add(t);
   const typeCount = typeSet.size;
 
+  if (totalAssets === 0) {
+    return (
+      <div className="v10-vm-hero v10-vm-hero-empty">
+        <div className="v10-vm-hero-title">
+          <span className="v10-vm-hero-badge">◉ Verifiable Memory</span>
+          <div className="v10-vm-hero-heading">
+            <span className="v10-vm-hero-headline">Nothing published yet</span>
+            <span className="v10-vm-hero-context" title={contextGraphId}>
+              Context Graph: {contextGraphId}
+            </span>
+          </div>
+        </div>
+        <div className="v10-vm-empty-state">
+          <div className="v10-vm-empty-icon">◉</div>
+          <div className="v10-vm-empty-copy">
+            <div className="v10-vm-empty-title">No Knowledge Assets yet.</div>
+            <div className="v10-vm-empty-text">
+              Publish entities from Shared Working Memory to verify them on-chain.
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="v10-vm-hero">
       <div className="v10-vm-hero-title">
-        <span className="v10-vm-hero-badge">◉ Verified</span>
-        <span className="v10-vm-hero-headline">On-chain anchored · cryptographically signed</span>
+        <span className="v10-vm-hero-badge">◉ Verifiable Memory</span>
+        <div className="v10-vm-hero-heading">
+          <span className="v10-vm-hero-headline">On-chain anchored · cryptographically signed</span>
+          <span className="v10-vm-hero-context" title={contextGraphId}>
+            Context Graph: {contextGraphId}
+          </span>
+        </div>
       </div>
       <div className="v10-vm-hero-stats">
         <div className="v10-vm-hero-stat">
@@ -1133,10 +1178,6 @@ export function VerifiedMemoryHeroBanner({ entities, tripleCount, contextGraphId
         <div className="v10-vm-hero-stat">
           <div className="v10-vm-hero-stat-val">{typeCount}</div>
           <div className="v10-vm-hero-stat-lbl">Entity Types</div>
-        </div>
-        <div className="v10-vm-hero-stat">
-          <div className="v10-vm-hero-stat-val" title={contextGraphId}>{contextGraphId.slice(0, 10)}…</div>
-          <div className="v10-vm-hero-stat-lbl">Context Graph</div>
         </div>
       </div>
       <div className="v10-vm-hero-strip">
