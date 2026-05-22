@@ -152,13 +152,16 @@ export function useSwmAttributions(contextGraphId: string | undefined): SwmAttri
   const [palette, setPalette] = useState<AgentPaletteEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [resolvedContextGraphId, setResolvedContextGraphId] = useState<string | undefined>(undefined);
   const versionRef = useRef(0);
 
   useEffect(() => {
     if (!contextGraphId) {
+      versionRef.current += 1;
       setAttributions(new Map());
       setPalette([]);
       setLoading(false);
+      setResolvedContextGraphId(undefined);
       return;
     }
     const version = ++versionRef.current;
@@ -220,11 +223,13 @@ export function useSwmAttributions(contextGraphId: string | undefined): SwmAttri
         if (version !== versionRef.current) return;
         setAttributions(attrMap);
         setPalette(paletteEntries);
+        setResolvedContextGraphId(contextGraphId);
       } catch (err: any) {
         if (version !== versionRef.current) return;
         setError(err?.message ?? 'Failed to load SWM attributions');
         setAttributions(new Map());
         setPalette([]);
+        setResolvedContextGraphId(contextGraphId);
       } finally {
         if (version === versionRef.current) setLoading(false);
       }
@@ -252,5 +257,7 @@ export function useSwmAttributions(contextGraphId: string | undefined): SwmAttri
     return { nodeColors: nc, conflicts: confl };
   }, [attributions]);
 
-  return { attributions, palette, nodeColors, conflicts, loading, error };
+  const attributionPending = Boolean(contextGraphId && (loading || resolvedContextGraphId !== contextGraphId));
+
+  return { attributions, palette, nodeColors, conflicts, loading: attributionPending, error };
 }

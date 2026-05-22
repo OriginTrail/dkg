@@ -378,6 +378,8 @@ export function LayerGraphPanel({
     () => buildLayerGraphOptions(layer, layer === 'swm' ? swmAttr.nodeColors : undefined),
     [layer, swmAttr.nodeColors],
   );
+  const graphKey = `${contextGraphId ?? 'context'}:${layer}`;
+  const swmAttributionPending = layer === 'swm' && Boolean(contextGraphId) && swmAttr.loading;
 
   if (uniqueTriples.length === 0) {
     return (
@@ -387,10 +389,19 @@ export function LayerGraphPanel({
     );
   }
 
+  if (swmAttributionPending) {
+    return (
+      <div className="v10-graph-view v10-graph-view-fill">
+        <span className="v10-graph-placeholder">Loading Shared Working Memory attribution...</span>
+      </div>
+    );
+  }
+
   return (
     <div className="v10-graph-view v10-graph-view-fill" style={{ position: 'relative' }}>
       <Suspense fallback={<span className="v10-graph-placeholder">Loading graph...</span>}>
         <RdfGraph
+          key={graphKey}
           data={uniqueTriples}
           format="triples"
           options={graphOptions}
