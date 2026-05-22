@@ -1578,43 +1578,45 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
       {saveMessage && <p className="v10-mlv-status" style={{ color: 'var(--accent-green)' }}>{saveMessage}</p>}
       {saveError && <p className="v10-mlv-status" style={{ color: 'var(--accent-red)' }}>{saveError}</p>}
 
-      {loading && <p className="v10-mlv-status">Loading...</p>}
-      {error && <p className="v10-mlv-status" style={{ color: 'var(--accent-red)' }}>Error: {error}</p>}
+      <div className="v10-cg-query-results">
+        {loading && <p className="v10-mlv-status">Loading...</p>}
+        {error && <p className="v10-mlv-status" style={{ color: 'var(--accent-red)' }}>Error: {error}</p>}
 
-      {!loading && !error && rows.length === 0 && (
-        <div className="v10-mlv-empty">
-          <p>No results for this query.</p>
-        </div>
-      )}
+        {!loading && !error && rows.length === 0 && (
+          <div className="v10-mlv-empty">
+            <p>No results for this query.</p>
+          </div>
+        )}
 
-      {!loading && !error && rows.length > 0 && (
-        <div className="v10-mlv-table-wrap">
-          <div className="v10-mlv-result-count">{rows.length} result{rows.length === 1 ? '' : 's'}</div>
-          <table className="v10-mlv-table">
-            <thead>
-              <tr>
-                {columns.map((column) => (
-                  <th key={column}>{column}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row: Record<string, unknown>, index: number) => (
-                <tr key={index}>
-                  {columns.map((column) => {
-                    const value = bindingValue(row[column]);
-                    return (
-                      <td key={column} className="v10-mlv-cell" title={value}>
-                        {shortenBindingValue(value)}
-                      </td>
-                    );
-                  })}
+        {!loading && !error && rows.length > 0 && (
+          <div className="v10-mlv-table-wrap">
+            <div className="v10-mlv-result-count">{rows.length} result{rows.length === 1 ? '' : 's'}</div>
+            <table className="v10-mlv-table">
+              <thead>
+                <tr>
+                  {columns.map((column) => (
+                    <th key={column}>{column}</th>
+                  ))}
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+              </thead>
+              <tbody>
+                {rows.map((row: Record<string, unknown>, index: number) => (
+                  <tr key={index}>
+                    {columns.map((column) => {
+                      const value = bindingValue(row[column]);
+                      return (
+                        <td key={column} className="v10-mlv-cell" title={value}>
+                          {shortenBindingValue(value)}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -1683,11 +1685,11 @@ export function AssertionsList({ contextGraphId, layer, onComplete }: {
   }, [assertions, contextGraphId, layer, refresh, onComplete]);
 
   if (loading) {
-    return <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-ghost)', fontSize: 12 }}>Loading assertions...</div>;
+    return <div className="v10-layer-state">Loading assertions...</div>;
   }
 
   if (!assertions?.length) {
-    return <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-ghost)', fontSize: 12 }}>No assertions in this layer</div>;
+    return <div className="v10-layer-state">No assertions in this layer</div>;
   }
 
   const actionLabel = layer === 'wm' ? 'Promote → Shared' : 'Publish to VM';

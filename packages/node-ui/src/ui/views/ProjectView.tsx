@@ -143,6 +143,11 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   // Active sub-graph binding (for the breadcrumb strip) — stays in scope
   // across sub-graph / layer / overview routes.
   const activeSubGraphBinding = activeSubGraph ? profile.forSubGraph(activeSubGraph) : null;
+  const activePage = selectedEntity
+    ? 'entity'
+    : activeSubGraph
+      ? 'subgraph'
+      : activeLayer;
 
   return (
     <ProjectProfileContext.Provider value={profile}>
@@ -170,8 +175,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
         onRefresh={rawMemory.refresh}
       />
 
-
-
+      <main className="v10-memory-explorer-page" data-view={activePage}>
       {/* Drilldown overlay */}
       {selectedEntity && (
         <KADetailView
@@ -230,6 +234,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
             limit={40}
             includeUndated={false}
             emptyHint="Once agents start proposing decisions or tasks they'll show up here as a live feed."
+            className="v10-overview-activity"
           />
           <MemoryStrip
             memory={rawMemory}
@@ -274,6 +279,8 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
           />
         </>
       )}
+
+      </main>
 
       {/* Provenance Bar */}
       <ProvenanceBar memory={rawMemory} />
