@@ -69,6 +69,7 @@ describe('LayerGraphPanel graph lifecycle', () => {
   afterEach(() => {
     act(() => root.unmount());
     container.remove();
+    vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 
@@ -152,9 +153,48 @@ describe('LayerGraphPanel graph lifecycle', () => {
     expect(graph.getAttribute('data-default-color')).toBe('#f59e0b');
   });
 
+  it('releases the SWM graph if attribution lookup stalls', async () => {
+    vi.useFakeTimers();
+    let requestSignal: AbortSignal | undefined;
+    vi.stubGlobal('fetch', vi.fn((_url, init?: RequestInit) => {
+      requestSignal = init?.signal as AbortSignal | undefined;
+      return new Promise(() => {});
+    }));
+    const { LayerGraphPanel } = await import('../src/ui/views/project/components.js');
+
+    await act(async () => {
+      root.render(React.createElement(LayerGraphPanel, {
+        layer: 'swm',
+        triples,
+        contextGraphId: 'cg-1',
+      }));
+    });
+
+    expect(container.textContent).toContain('Loading Shared Working Memory attribution...');
+    expect(container.querySelector('[data-testid="rdf-graph"]')).toBeNull();
+    expect(requestSignal?.aborted).toBe(false);
+
+    await act(async () => {
+      vi.advanceTimersByTime(10_000);
+      await Promise.resolve();
+    });
+    vi.useRealTimers();
+
+    await waitForAssertion(() => {
+      expect(container.querySelector('[data-testid="rdf-graph"]')).toBeTruthy();
+    });
+
+    const graph = container.querySelector('[data-testid="rdf-graph"]') as HTMLElement;
+    expect(requestSignal?.aborted).toBe(true);
+    expect(graph.getAttribute('data-default-color')).toBe('#f59e0b');
+    expect(JSON.parse(graph.getAttribute('data-node-colors') ?? '{}')).toEqual({});
+  });
+
   it('invalidates in-flight attribution when the hook is disabled', async () => {
     const resolvers: Array<(response: any) => void> = [];
-    vi.stubGlobal('fetch', vi.fn(() => new Promise((resolve) => {
+    const signals: AbortSignal[] = [];
+    vi.stubGlobal('fetch', vi.fn((_url, init?: RequestInit) => new Promise((resolve) => {
+      if (init?.signal) signals.push(init.signal as AbortSignal);
       resolvers.push(resolve);
     })));
     const { LayerGraphPanel } = await import('../src/ui/views/project/components.js');
@@ -178,6 +218,7 @@ describe('LayerGraphPanel graph lifecycle', () => {
     await waitForAssertion(() => {
       expect(container.querySelector('[data-testid="rdf-graph"]')).toBeTruthy();
     });
+    expect(signals[0]?.aborted).toBe(true);
 
     await act(async () => {
       resolvers[0]!({

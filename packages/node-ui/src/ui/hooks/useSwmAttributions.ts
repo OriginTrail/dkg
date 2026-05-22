@@ -76,6 +76,7 @@ const AGENT_PALETTE = [
   '#0ea5e9', // sky
   '#d946ef', // fuchsia
 ];
+const ATTRIBUTION_QUERY_TIMEOUT_MS = 10_000;
 
 function bv(v: unknown): string | undefined {
   if (v == null) return undefined;
@@ -165,21 +166,38 @@ export function useSwmAttributions(contextGraphId: string | undefined): SwmAttri
       return;
     }
     const version = ++versionRef.current;
+    const controller = new AbortController();
+    let cancelled = false;
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    const isCurrent = () => !cancelled && version === versionRef.current;
+
     setLoading(true);
     setError(null);
 
     (async () => {
       try {
-        const res = await fetch('/api/query', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...authHeaders() },
-          body: JSON.stringify({
-            sparql: buildAttributionsQuery(contextGraphId),
-            contextGraphId,
-          }),
+        const timeout = new Promise<never>((_, reject) => {
+          timeoutId = setTimeout(() => {
+            controller.abort();
+            reject(new Error(
+              `SWM attribution query timed out after ${Math.round(ATTRIBUTION_QUERY_TIMEOUT_MS / 1000)}s`,
+            ));
+          }, ATTRIBUTION_QUERY_TIMEOUT_MS);
         });
-        if (!res.ok) throw new Error(`SPARQL query failed: ${res.status}`);
-        const data = await res.json();
+        const request = (async () => {
+          const res = await fetch('/api/query', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...authHeaders() },
+            signal: controller.signal,
+            body: JSON.stringify({
+              sparql: buildAttributionsQuery(contextGraphId),
+              contextGraphId,
+            }),
+          });
+          if (!res.ok) throw new Error(`SPARQL query failed: ${res.status}`);
+          return res.json();
+        })();
+        const data = await Promise.race([request, timeout]);
         const rows: any[] = data?.result?.bindings ?? [];
 
         const attrMap = new Map<string, AgentAttribution[]>();
@@ -220,20 +238,27 @@ export function useSwmAttributions(contextGraphId: string | undefined): SwmAttri
           }))
           .sort((a, b) => b.entityCount - a.entityCount);
 
-        if (version !== versionRef.current) return;
+        if (!isCurrent()) return;
         setAttributions(attrMap);
         setPalette(paletteEntries);
         setResolvedContextGraphId(contextGraphId);
       } catch (err: any) {
-        if (version !== versionRef.current) return;
+        if (!isCurrent()) return;
         setError(err?.message ?? 'Failed to load SWM attributions');
         setAttributions(new Map());
         setPalette([]);
         setResolvedContextGraphId(contextGraphId);
       } finally {
-        if (version === versionRef.current) setLoading(false);
+        if (timeoutId) clearTimeout(timeoutId);
+        if (isCurrent()) setLoading(false);
       }
     })();
+
+    return () => {
+      cancelled = true;
+      if (timeoutId) clearTimeout(timeoutId);
+      controller.abort();
+    };
   }, [contextGraphId]);
 
   const { nodeColors, conflicts } = useMemo(() => {
