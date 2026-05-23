@@ -51,7 +51,7 @@ import {
   entityAuthorUri, transitionAgentUri, transitionAtISO,
   shortType, shortPred, entityMeta,
   buildLayerGraphOptions, getDescription, neighborhoodTriples,
-  matchesSearch, humanizeLabel, useLayerTriples,
+  matchesSearch, humanizeLabel, layerNoun, useLayerTriples,
   entityTimestamp, formatRelativeTime, formatTimelineBucket, formatTrailTimestamp,
   type LayerView, type LayerContentTab, type KAPane,
   type SubGraphTab, type SubGraphEntitySort,
@@ -602,7 +602,7 @@ export function MemoryStrip({
               <div className="v10-layer-items">
                 <span className="v10-layer-chevron">▸</span>
                 {layer.entities.length === 0 && (
-                  <span style={{ fontSize: 11, color: 'var(--text-tertiary)', fontStyle: 'italic' }}>No assets yet</span>
+                  <span style={{ fontSize: 11, color: 'var(--text-tertiary)', fontStyle: 'italic' }}>No {layerNoun(layer.key, 2).toLowerCase()} yet</span>
                 )}
                 {layer.entities.slice(0, 6).map(e => {
                   const { icon } = entityMeta(e, profile);
@@ -782,7 +782,7 @@ export function LayerStatsWidget({ entities, entityCount, triples, layer }: {
     <GenWidget title="Layer Stats">
       <div className="v10-layer-summary">
         <div className="v10-layer-summary-stat">
-          <span className="v10-layer-summary-label">Knowledge Assets</span>
+          <span className="v10-layer-summary-label">{layerNoun(layer, entityCount)}</span>
           <span className="v10-layer-summary-value">{entityCount}</span>
         </div>
         <div className="v10-layer-summary-stat">
@@ -849,12 +849,13 @@ export function LayerActionsWidget({ layer, count, contextGraphId, onComplete }:
 
   if (count === 0) return null;
   const color = isWm ? '#f59e0b' : '#22c55e';
-  const target = isWm ? 'Shared Memory' : 'Verified Memory';
+  const target = isWm ? 'Shared Working Memory' : 'Verified Memory';
+  const noun = layerNoun(layer, count).toLowerCase();
 
   return (
-    <GenWidget title={isWm ? 'Promote' : 'Publish'} footnote={`Moves assets from this layer to ${target}.`}>
+    <GenWidget title={isWm ? 'Promote' : 'Publish'} footnote={`Moves ${noun} from this layer to ${target}.`}>
       <div className="v10-decision-context" style={{ marginBottom: 10 }}>
-        {count} asset{count !== 1 ? 's' : ''} in this layer can be {isWm ? 'promoted to Shared Memory for collaborative review' : 'published to Verified Memory on-chain'}.
+        {count} {noun} in this layer can be {isWm ? 'promoted to Shared Working Memory for collaborative review' : 'published to Verified Memory on-chain'}.
       </div>
       {result && <div style={{ fontSize: 11, color: 'var(--text-success)', marginBottom: 8 }}>✓ {result}</div>}
       {error && <div style={{ fontSize: 11, color: 'var(--text-danger)', marginBottom: 8 }}>✕ {error}</div>}
@@ -944,6 +945,7 @@ export function EntityList({
 }) {
   const profile = useProjectProfileContext();
   const agents = useAgentsContext();
+  const noun = layerNoun(layerKey, entities.length).toLowerCase();
   const sorted = useMemo(() => {
     if (externallySorted) return entities;
     const copy = [...entities];
@@ -960,7 +962,7 @@ export function EntityList({
   if (entities.length === 0) {
     return (
       <div className="v10-entity-list empty">
-        <div className="v10-entity-list-empty">No entities in this layer yet.</div>
+        <div className="v10-entity-list-empty">No {layerNoun(layerKey, 2).toLowerCase()} in this layer yet.</div>
       </div>
     );
   }
@@ -970,7 +972,7 @@ export function EntityList({
   return (
     <div className="v10-entity-list">
       <div className="v10-entity-list-header">
-        <span className="v10-entity-list-count">{sorted.length} entit{sorted.length === 1 ? 'y' : 'ies'}</span>
+        <span className="v10-entity-list-count">{sorted.length} {noun}</span>
         <span className="v10-entity-list-hint">{hint}</span>
         {headerExtra && <span className="v10-entity-list-extra">{headerExtra}</span>}
       </div>
@@ -1051,7 +1053,7 @@ export function LayerContent({
   footer?: React.ReactNode;
 }) {
   const config = LAYER_CONFIG[layer];
-  const itemsLabel = layer === 'vm' ? 'Knowledge Assets' : 'Entities';
+  const itemsLabel = layerNoun(layer, 2);
   const vmLayerStatus = memory.layerStatus?.vm ?? (memory.loading ? 'loading' : memory.error ? 'error' : 'ok');
   const isInitialVerifiedMemoryLoad = layer === 'vm' && vmLayerStatus === 'loading' && entities.length === 0;
   const isVerifiedMemoryUnavailable = layer === 'vm' && vmLayerStatus === 'error' && entities.length === 0;
@@ -1989,9 +1991,9 @@ export function DocumentsList({
 
 export function ProvenanceBar({ memory }: { memory: ReturnType<typeof useMemoryEntities> }) {
   const latestEvent = useMemo(() => {
-    if (memory.counts.vm > 0) return `${memory.counts.vm} knowledge assets verified on-chain`;
-    if (memory.counts.swm > 0) return `${memory.counts.swm} assets in shared memory`;
-    if (memory.counts.wm > 0) return `${memory.counts.wm} drafts in working memory`;
+    if (memory.counts.vm > 0) return `${memory.counts.vm} ${layerNoun('vm', memory.counts.vm).toLowerCase()} verified on-chain`;
+    if (memory.counts.swm > 0) return `${memory.counts.swm} ${layerNoun('swm', memory.counts.swm).toLowerCase()} in shared working memory`;
+    if (memory.counts.wm > 0) return `${memory.counts.wm} ${layerNoun('wm', memory.counts.wm).toLowerCase()} in working memory`;
     return 'No activity yet';
   }, [memory.counts]);
 
@@ -2233,6 +2235,7 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
   const author = authorUri ? agents?.get(authorUri) ?? null : null;
   const layerBadge = entity.trustLevel === 'verified' ? 'vm' : entity.trustLevel === 'shared' ? 'swm' : 'wm';
   const layerLabel = entity.trustLevel === 'verified' ? 'Verified Memory' : entity.trustLevel === 'shared' ? 'Shared Working Memory' : 'Working Memory';
+  const detailNoun = layerNoun(entity.trustLevel, 1);
 
   const incoming = useMemo(() => {
     const result: Array<{ pred: string; entity: MemoryEntity }> = [];
@@ -2294,7 +2297,7 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
       <div className="v10-ka-header">
         <button className="v10-ka-back" onClick={onClose}>← Back to Context Graph</button>
         <div className="v10-ka-header-left">
-          <div className="v10-ka-label">Knowledge Asset</div>
+          <div className="v10-ka-label">{detailNoun}</div>
           <div className="v10-ka-name">
             {icon} {entity.label}
             <span className={`v10-trust-badge ${layerBadge}`}>{layerLabel}</span>

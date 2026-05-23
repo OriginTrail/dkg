@@ -5,11 +5,23 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { KADetailView, TrailEvent } from '../src/ui/views/project/components.js';
+import { layerNoun } from '../src/ui/views/project/helpers.js';
 import { ProjectProfileContext, type ProjectProfile } from '../src/ui/hooks/useProjectProfile.js';
 import { AgentsContext, type AgentsData } from '../src/ui/hooks/useAgents.js';
 import type { MemoryEntity } from '../src/ui/hooks/useMemoryEntities.js';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+
+describe('layerNoun', () => {
+  it('uses entities for WM/SWM and knowledge assets for VM', () => {
+    expect(layerNoun('wm', 1)).toBe('Entity');
+    expect(layerNoun('wm', 2)).toBe('Entities');
+    expect(layerNoun('swm', 1)).toBe('Entity');
+    expect(layerNoun('swm', 2)).toBe('Entities');
+    expect(layerNoun('vm', 1)).toBe('Knowledge Asset');
+    expect(layerNoun('vm', 2)).toBe('Knowledge Assets');
+  });
+});
 
 const profile: ProjectProfile = {
   contextGraphId: 'cg-test',
@@ -104,6 +116,35 @@ describe('KADetailView navigation label', () => {
     });
 
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses layer-aware nouns in the detail header', async () => {
+    const render = async (testEntity: MemoryEntity) => {
+      await act(async () => {
+        root.render(
+          React.createElement(ProjectProfileContext.Provider, { value: profile },
+            React.createElement(AgentsContext.Provider, { value: agents },
+              React.createElement(KADetailView, {
+                entity: testEntity,
+                allEntities: new Map([[testEntity.uri, testEntity]]),
+                allTriples: [],
+                onNavigate: vi.fn(),
+                onClose: vi.fn(),
+                contextGraphId: 'cg-test',
+                onRefresh: vi.fn(),
+              }))),
+        );
+      });
+    };
+
+    await render({ ...entity, trustLevel: 'working', layers: new Set(['working']) });
+    expect(query('.v10-ka-label').textContent).toBe('Entity');
+
+    await render({ ...entity, uri: 'urn:entity:shared', trustLevel: 'shared', layers: new Set(['shared']) });
+    expect(query('.v10-ka-label').textContent).toBe('Entity');
+
+    await render({ ...entity, uri: 'urn:entity:verified', trustLevel: 'verified', layers: new Set(['verified']) });
+    expect(query('.v10-ka-label').textContent).toBe('Knowledge Asset');
   });
 
   it('renders provenance timestamps in the event header without requiring an agent', async () => {

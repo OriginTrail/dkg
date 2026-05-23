@@ -48,6 +48,13 @@ export interface MemoryData {
 }
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+const NAME_PREDS = [
+  'http://schema.org/name',
+  'http://www.w3.org/2000/01/rdf-schema#label',
+  'http://purl.org/dc/terms/title',
+  'http://purl.org/dc/elements/1.1/title',
+  'http://xmlns.com/foaf/0.1/name',
+];
 
 function bv(v: unknown): string | undefined {
   if (v == null) return undefined;
@@ -73,6 +80,56 @@ function shortLabel(uri: string): string {
 function shortPredicate(uri: string): string {
   const s = shortLabel(uri);
   return s.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/_/g, ' ');
+}
+
+function uriTail(uri: string): string {
+  const hash = uri.lastIndexOf('#');
+  const slash = uri.lastIndexOf('/');
+  const colon = uri.lastIndexOf(':');
+  const cut = Math.max(hash, slash, colon);
+  const raw = cut >= 0 ? uri.slice(cut + 1) : uri;
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
+function readableTail(uri: string): string {
+  const tail = uriTail(uri).trim();
+  if (!tail) return '';
+  const shortened = /^[0-9a-f-]{16,}$/i.test(tail) ? tail.replace(/-/g, '').slice(0, 12) : tail;
+  return shortened.replace(/[_-]+/g, ' ').trim();
+}
+
+function isRawExtractionLabel(label: string, uri: string): boolean {
+  return label === uri && /^urn:dkg:extraction:[^\s]+$/i.test(uri);
+}
+
+function readableFallbackLabel(entity: MemoryEntity): string {
+  const tail = readableTail(entity.uri);
+  const type = entity.types
+    .map(shortLabel)
+    .find(t => t && t !== 'Thing' && t !== 'Entity');
+  if (/^urn:dkg:extraction:[^\s]+$/i.test(entity.uri)) {
+    return tail ? `Extraction ${tail}` : 'Extraction';
+  }
+  if (type) return tail && tail !== type ? `${type} ${tail}` : type;
+  return tail || shortLabel(entity.uri);
+}
+
+function deriveEntityLabel(entity: MemoryEntity): string {
+  for (const pred of NAME_PREDS) {
+    const vals = entity.properties.get(pred);
+    const name = vals?.find(v => v.trim().length > 0);
+    if (name) return name;
+  }
+
+  if (entity.label && !isRawExtractionLabel(entity.label, entity.uri)) {
+    return entity.label;
+  }
+
+  return readableFallbackLabel(entity);
 }
 
 // All three layer queries walk the named-graph space directly with a
@@ -279,25 +336,18 @@ function buildEntities(layered: LayeredTriple[]): Map<string, MemoryEntity> {
     }
   }
 
-  const NAME_PREDS = [
-    'http://schema.org/name',
-    'http://www.w3.org/2000/01/rdf-schema#label',
-    'http://purl.org/dc/terms/title',
-    'http://xmlns.com/foaf/0.1/name',
-  ];
-
   for (const entity of entities.values()) {
-    for (const pred of NAME_PREDS) {
-      const vals = entity.properties.get(pred);
-      if (vals?.[0]) {
-        entity.label = vals[0];
-        break;
-      }
-    }
+    entity.label = deriveEntityLabel(entity);
 
     if (entity.layers.has('verified')) entity.trustLevel = 'verified';
     else if (entity.layers.has('shared')) entity.trustLevel = 'shared';
     else entity.trustLevel = 'working';
+  }
+
+  for (const entity of entities.values()) {
+    for (const connection of entity.connections) {
+      connection.targetLabel = entities.get(connection.targetUri)?.label ?? shortLabel(connection.targetUri);
+    }
   }
 
   return entities;

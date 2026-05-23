@@ -169,6 +169,20 @@ export const LAYER_CONFIG: Record<'wm' | 'swm' | 'vm', {
   },
 };
 
+export function layerNoun(
+  layer: 'wm' | 'swm' | 'vm' | TrustLevel,
+  count: number = 2,
+): string {
+  const normalized =
+    layer === 'working' ? 'wm' :
+    layer === 'shared' ? 'swm' :
+    layer === 'verified' ? 'vm' :
+    layer;
+  const plural = count !== 1;
+  if (normalized === 'vm') return plural ? 'Knowledge Assets' : 'Knowledge Asset';
+  return plural ? 'Entities' : 'Entity';
+}
+
 // ─── Shared graph styling ────────────────────────────────────
 // Rich palette for known ontologies — applied in any RdfGraph rendered
 // from this view. Nodes without matching types fall back to the layer's
@@ -304,8 +318,18 @@ export function humanizeLabel(entity: MemoryEntity | undefined, uri: string): st
   if (entity) return entity.label;
   const slash = uri.lastIndexOf('/');
   const hash = uri.lastIndexOf('#');
-  const cut = Math.max(slash, hash);
-  return cut >= 0 ? uri.slice(cut + 1) : uri;
+  const colon = uri.lastIndexOf(':');
+  const cut = Math.max(slash, hash, colon);
+  const tail = cut >= 0 ? uri.slice(cut + 1) : uri;
+  const decoded = (() => {
+    try { return decodeURIComponent(tail); }
+    catch { return tail; }
+  })();
+  if (/^urn:dkg:extraction:[^\s]+$/i.test(uri)) {
+    const short = decoded.replace(/-/g, '').replace(/_+/g, ' ').slice(0, 12).trim();
+    return short ? `Extraction ${short}` : 'Extraction';
+  }
+  return decoded || uri;
 }
 
 // ─── Layer Switcher Bar ──────────────────────────────────────
