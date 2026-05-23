@@ -94,14 +94,11 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     if (isMemoryLayerView(activeLayer)) {
       return `layer:${activeLayer}:${layerContentTabs[activeLayer]}`;
     }
-    if (activeLayer === 'overview' && overviewExpandedLayer) {
-      return `layer:${overviewExpandedLayer}:${overviewLayerTabs[overviewExpandedLayer]}`;
-    }
     return 'page';
-  }, [activeLayer, activeSubGraph, layerContentTabs, overviewExpandedLayer, overviewLayerTabs, subGraphTabs]);
+  }, [activeLayer, activeSubGraph, layerContentTabs, subGraphTabs]);
 
-  const captureDetailOrigin = useCallback((): DetailOrigin => {
-    const key = currentScrollKey();
+  const captureDetailOrigin = useCallback((originScrollKey?: string): DetailOrigin => {
+    const key = originScrollKey ?? currentScrollKey();
     const scrollEl = scrollElementFor(key, pageRef.current);
     return {
       activeLayer,
@@ -134,9 +131,9 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     }
   }, []);
 
-  const openEntityDetail = useCallback((uri: string) => {
+  const openEntityDetail = useCallback((uri: string, originScrollKey?: string) => {
     if (!selectedUri || !detailOriginRef.current) {
-      detailOriginRef.current = captureDetailOrigin();
+      detailOriginRef.current = captureDetailOrigin(originScrollKey);
     }
     setSelectedUri(uri);
   }, [captureDetailOrigin, selectedUri]);
@@ -248,8 +245,8 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   // M2 keeps the user's origin stable: linked entities open in the detail
   // pane, but the underlying layer/sub-graph page does not silently change
   // until S5 adds breadcrumbs that can make that movement visible.
-  const handleNavigate = useCallback((uri: string) => {
-    openEntityDetail(uri);
+  const handleNavigate = useCallback((uri: string, originScrollKey?: string) => {
+    openEntityDetail(uri, originScrollKey);
   }, [openEntityDetail]);
 
   const handleDetailClose = useCallback(() => {
@@ -269,6 +266,21 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   const handleNodeClick = useCallback((node: any) => {
     if (node?.id) handleNavigate(node.id);
   }, [handleNavigate]);
+
+  const handleOverviewActivityNavigate = useCallback((uri: string) => {
+    handleNavigate(uri, 'page');
+  }, [handleNavigate]);
+
+  const handleOverviewStripNavigate = useCallback((uri: string) => {
+    const key = overviewExpandedLayer
+      ? `layer:${overviewExpandedLayer}:${overviewLayerTabs[overviewExpandedLayer]}`
+      : 'page';
+    handleNavigate(uri, key);
+  }, [handleNavigate, overviewExpandedLayer, overviewLayerTabs]);
+
+  const handleOverviewStripNodeClick = useCallback((node: any) => {
+    if (node?.id) handleOverviewStripNavigate(node.id);
+  }, [handleOverviewStripNavigate]);
 
   if (!cg) {
     return (
@@ -369,7 +381,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
           )}
           <ActivityFeed
             entities={rawMemory.entityList}
-            onSelectEntity={handleNavigate}
+            onSelectEntity={handleOverviewActivityNavigate}
             title="Recent activity"
             limit={40}
             includeUndated={false}
@@ -379,9 +391,9 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
           <MemoryStrip
             memory={rawMemory}
             onSwitchLayer={handleLayerSwitch}
-            onSelectEntity={handleNavigate}
+            onSelectEntity={handleOverviewStripNavigate}
             contextGraphId={contextGraphId}
-            onNodeClick={handleNodeClick}
+            onNodeClick={handleOverviewStripNodeClick}
             expandedLayer={overviewExpandedLayer}
             onExpandedLayerChange={setOverviewExpandedLayer}
             expandTabs={overviewLayerTabs}

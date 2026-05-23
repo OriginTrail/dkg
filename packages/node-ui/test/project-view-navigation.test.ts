@@ -205,6 +205,12 @@ function query(testId: string): HTMLElement {
   return el;
 }
 
+function scrollRoot(key: string): HTMLElement {
+  const el = document.querySelector<HTMLElement>(`[data-cg-scroll-key="${key}"]`);
+  if (!el) throw new Error(`Missing scroll root ${key}`);
+  return el;
+}
+
 async function click(testId: string): Promise<void> {
   await act(async () => {
     query(testId).dispatchEvent(new MouseEvent('click', { bubbles: true }));
@@ -289,6 +295,29 @@ describe('ProjectView entity detail navigation', () => {
     expect(query('memory-strip').dataset.expanded).toBe('swm');
     expect(query('memory-strip').dataset.tab).toBe('graph');
     expect(query('strip-scroll').scrollTop).toBe(64);
+  });
+
+  it('restores page scroll when overview activity opens while the strip is expanded', async () => {
+    await click('expand-strip-swm');
+    await click('strip-tab-graph');
+
+    const pageScroller = scrollRoot('page');
+    const stripScroller = query('strip-scroll');
+    pageScroller.scrollTop = 140;
+    stripScroller.scrollTop = 32;
+
+    await click('open-activity-entity');
+    expect(query('entity-detail').dataset.entity).toBe('urn:entity:working');
+
+    pageScroller.scrollTop = 0;
+
+    await click('detail-back');
+    await flush();
+
+    expect(query('active-layer').dataset.layer).toBe('overview');
+    expect(query('memory-strip').dataset.expanded).toBe('swm');
+    expect(query('memory-strip').dataset.tab).toBe('graph');
+    expect(scrollRoot('page').scrollTop).toBe(140);
   });
 
   it('keeps the originating subgraph stable while following cross-subgraph entity links', async () => {
