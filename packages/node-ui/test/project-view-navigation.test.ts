@@ -7,8 +7,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
-const memory = {
-  entities: new Map([
+function createEntities() {
+  return new Map([
     ['urn:entity:working', {
       uri: 'urn:entity:working',
       label: 'Working entity',
@@ -39,7 +39,11 @@ const memory = {
       properties: new Map(),
       connections: [],
     }],
-  ]),
+  ]);
+}
+
+const memory = {
+  entities: createEntities(),
   entityList: [] as any[],
   allTriples: [],
   graphTriples: [],
@@ -50,7 +54,12 @@ const memory = {
   partial: false,
   refresh: vi.fn(),
 };
-memory.entityList = [...memory.entities.values()];
+
+function resetMemory() {
+  memory.entities = createEntities();
+  memory.entityList = [...memory.entities.values()];
+}
+resetMemory();
 
 const profile = {
   primaryColor: '#64748b',
@@ -142,7 +151,37 @@ vi.mock('../src/ui/views/project/components.js', () => ({
         React.createElement('button', { 'data-testid': 'open-subgraph-entity', onClick: () => onSelectEntity('urn:entity:demo') }, 'Open demo entity'))),
   ProjectOverviewCard: () => React.createElement('div', {}, 'Overview'),
   PendingJoinRequestsBar: () => null,
-  MemoryStrip: () => null,
+  MemoryStrip: ({ expandedLayer, onExpandedLayerChange, expandTabs, onExpandTabChange, onSelectEntity }: {
+    expandedLayer: 'wm' | 'swm' | 'vm' | null;
+    onExpandedLayerChange: (layer: 'wm' | 'swm' | 'vm' | null) => void;
+    expandTabs: Record<'wm' | 'swm' | 'vm', string>;
+    onExpandTabChange: (layer: 'wm' | 'swm' | 'vm', tab: string) => void;
+    onSelectEntity: (uri: string) => void;
+  }) => {
+    const activeTab = expandedLayer ? expandTabs[expandedLayer] : 'items';
+    return React.createElement('section', {
+      'data-testid': 'memory-strip',
+      'data-expanded': expandedLayer ?? '',
+      'data-tab': activeTab,
+    },
+      React.createElement('button', {
+        'data-testid': 'expand-strip-swm',
+        onClick: () => onExpandedLayerChange(expandedLayer === 'swm' ? null : 'swm'),
+      }, 'Expand SWM'),
+      expandedLayer && React.createElement(React.Fragment, {},
+        React.createElement('button', {
+          'data-testid': 'strip-tab-graph',
+          onClick: () => onExpandTabChange(expandedLayer, 'graph'),
+        }, 'Graph'),
+        React.createElement('div', {
+          'data-testid': 'strip-scroll',
+          'data-cg-scroll-key': `layer:${expandedLayer}:${activeTab}`,
+        },
+          React.createElement('button', {
+            'data-testid': 'open-strip-entity',
+            onClick: () => onSelectEntity('urn:entity:working'),
+          }, 'Open strip entity'))));
+  },
   SubGraphOverviewGrid: () => null,
   ContextGraphQueryView: () => null,
   LayerDetailView: ({ layer, activeTab, onTabChange, onSelectEntity }: {
@@ -184,6 +223,7 @@ describe('ProjectView entity detail navigation', () => {
   let originalRaf: typeof window.requestAnimationFrame;
 
   beforeEach(async () => {
+    resetMemory();
     document.body.innerHTML = '<div id="root"></div>';
     originalRaf = window.requestAnimationFrame;
     Object.defineProperty(window, 'requestAnimationFrame', {
@@ -232,6 +272,25 @@ describe('ProjectView entity detail navigation', () => {
     expect(query('layer-scroll').scrollTop).toBe(86);
   });
 
+  it('restores overview strip expansion, subtab, and scroll when entity detail closes', async () => {
+    await click('expand-strip-swm');
+    await click('strip-tab-graph');
+
+    const scroller = query('strip-scroll');
+    scroller.scrollTop = 64;
+
+    await click('open-strip-entity');
+    expect(query('entity-detail').dataset.entity).toBe('urn:entity:working');
+
+    await click('detail-back');
+    await flush();
+
+    expect(query('active-layer').dataset.layer).toBe('overview');
+    expect(query('memory-strip').dataset.expanded).toBe('swm');
+    expect(query('memory-strip').dataset.tab).toBe('graph');
+    expect(query('strip-scroll').scrollTop).toBe(64);
+  });
+
   it('keeps the originating subgraph stable while following cross-subgraph entity links', async () => {
     await click('select-subgraph-demo');
     await click('subgraph-tab-graph');
@@ -245,6 +304,32 @@ describe('ProjectView entity detail navigation', () => {
     await click('open-related-entity');
     expect(query('entity-detail').dataset.entity).toBe('urn:entity:other');
     expect(query('active-subgraph').textContent).toBe('demo');
+
+    await click('detail-back');
+    await flush();
+
+    expect(query('subgraph-detail').dataset.slug).toBe('demo');
+    expect(query('subgraph-detail').dataset.tab).toBe('graph');
+  });
+
+  it('clears stale detail origin when the selected entity disappears', async () => {
+    await click('switch-swm');
+    await click('open-layer-entity');
+    expect(query('entity-detail').dataset.entity).toBe('urn:entity:working');
+
+    await act(async () => {
+      memory.entities = new Map([...memory.entities].filter(([uri]) => uri !== 'urn:entity:working'));
+      memory.entityList = [...memory.entities.values()];
+      root.render(React.createElement(ProjectView, { contextGraphId: 'cg-test' }));
+    });
+    await flush();
+
+    expect(document.querySelector('[data-testid="entity-detail"]')).toBeNull();
+
+    await click('select-subgraph-demo');
+    await click('subgraph-tab-graph');
+    await click('open-subgraph-entity');
+    expect(query('entity-detail').dataset.entity).toBe('urn:entity:demo');
 
     await click('detail-back');
     await flush();

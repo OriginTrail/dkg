@@ -501,15 +501,37 @@ export function VerifiedGraphLegend({ anchors }: { anchors: PublishAnchor[] }) {
 
 // ─── Memory Strip (expandable layer rows) ────────────────────
 
-export function MemoryStrip({ memory, onSwitchLayer, onSelectEntity, contextGraphId, onNodeClick }: {
+type MemoryStripLayer = 'wm' | 'swm' | 'vm';
+
+export function MemoryStrip({
+  memory,
+  onSwitchLayer,
+  onSelectEntity,
+  contextGraphId,
+  onNodeClick,
+  expandedLayer,
+  onExpandedLayerChange,
+  expandTabs,
+  onExpandTabChange,
+}: {
   memory: ReturnType<typeof useMemoryEntities>;
   onSwitchLayer: (layer: LayerView) => void;
   onSelectEntity: (uri: string) => void;
   contextGraphId: string;
   onNodeClick?: (node: any) => void;
+  expandedLayer?: MemoryStripLayer | null;
+  onExpandedLayerChange?: (layer: MemoryStripLayer | null) => void;
+  expandTabs?: Record<MemoryStripLayer, LayerContentTab>;
+  onExpandTabChange?: (layer: MemoryStripLayer, tab: LayerContentTab) => void;
 }) {
-  const [expanded, setExpanded] = useState<string | null>(null);
-  const [expandTab, setExpandTab] = useState<Record<string, string>>({ wm: 'items', swm: 'items', vm: 'items' });
+  const [localExpanded, setLocalExpanded] = useState<MemoryStripLayer | null>(null);
+  const [localExpandTabs, setLocalExpandTabs] = useState<Record<MemoryStripLayer, LayerContentTab>>({
+    wm: 'items',
+    swm: 'items',
+    vm: 'items',
+  });
+  const expanded = expandedLayer !== undefined ? expandedLayer : localExpanded;
+  const activeExpandTabs = expandTabs ?? localExpandTabs;
   const profile = useProjectProfileContext();
 
   const layerEntities = useMemo(() => {
@@ -534,12 +556,19 @@ export function MemoryStrip({ memory, onSwitchLayer, onSelectEntity, contextGrap
     return { wm, swm, vm };
   }, [memory.allTriples]);
 
-  const toggleExpand = (layer: string) => {
-    setExpanded(prev => prev === layer ? null : layer);
+  const toggleExpand = (layer: MemoryStripLayer) => {
+    const next = expanded === layer ? null : layer;
+    if (onExpandedLayerChange) onExpandedLayerChange(next);
+    else setLocalExpanded(next);
+  };
+
+  const handleExpandTab = (layer: MemoryStripLayer, tab: LayerContentTab) => {
+    if (onExpandTabChange) onExpandTabChange(layer, tab);
+    else setLocalExpandTabs(prev => ({ ...prev, [layer]: tab }));
   };
 
   const layers: Array<{
-    key: string;
+    key: MemoryStripLayer;
     label: string;
     color: string;
     icon: string;
@@ -556,7 +585,7 @@ export function MemoryStrip({ memory, onSwitchLayer, onSelectEntity, contextGrap
     <div className="v10-memory-strip">
       {layers.map(layer => {
         const isExpanded = expanded === layer.key;
-        const activeTab = expandTab[layer.key] ?? 'items';
+        const activeTab = activeExpandTabs[layer.key] ?? 'items';
         return (
           <React.Fragment key={layer.key}>
             <div
@@ -596,9 +625,7 @@ export function MemoryStrip({ memory, onSwitchLayer, onSelectEntity, contextGrap
                   contextGraphId={contextGraphId}
                   memory={memory}
                   activeTab={activeTab as LayerContentTab}
-                  onTabChange={tab =>
-                    setExpandTab(prev => ({ ...prev, [layer.key]: tab }))
-                  }
+                  onTabChange={tab => handleExpandTab(layer.key, tab)}
                   onSelectEntity={onSelectEntity}
                   onNodeClick={onNodeClick}
                   onSwitchLayer={() => onSwitchLayer(layer.viewLayer)}
@@ -2962,7 +2989,8 @@ export function SubGraphDetailView({
   const timelinePredicate = binding?.timelinePredicate;
 
   const [localActiveTab, setLocalActiveTab] = useState<SubGraphTab>('items');
-  const selectedTab = activeTab ?? localActiveTab;
+  const rawSelectedTab = activeTab ?? localActiveTab;
+  const selectedTab = rawSelectedTab === 'timeline' && !timelinePredicate ? 'items' : rawSelectedTab;
   const setSelectedTab = onTabChange ?? setLocalActiveTab;
   // Default to newest-first for any sub-graph that defines a timeline
   // predicate (chat, github, tasks, decisions). Sub-graphs with no time
@@ -3182,6 +3210,10 @@ export function SubGraphDetailView({
   useEffect(() => {
     if (!activeTab) setLocalActiveTab('items');
   }, [slug, activeTab]);
+
+  useEffect(() => {
+    if (rawSelectedTab !== selectedTab) setSelectedTab(selectedTab);
+  }, [rawSelectedTab, selectedTab, setSelectedTab]);
 
   const hasAnyFilter = enabledLayers.size < 3 || chipState.size > 0 || !!queryResults;
   const resetFilters = () => {

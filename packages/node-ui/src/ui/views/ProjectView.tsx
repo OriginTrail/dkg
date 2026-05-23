@@ -35,6 +35,8 @@ interface DetailOrigin {
   activeLayer: LayerView;
   activeSubGraph: string | null;
   layerTabs: Record<MemoryLayerView, LayerContentTab>;
+  overviewExpandedLayer: MemoryLayerView | null;
+  overviewLayerTabs: Record<MemoryLayerView, LayerContentTab>;
   subGraphTabs: Record<string, SubGraphTab>;
   scroll: { key: string; top: number };
 }
@@ -73,6 +75,10 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   const [layerContentTabs, setLayerContentTabs] = useState<Record<MemoryLayerView, LayerContentTab>>(
     DEFAULT_LAYER_TABS,
   );
+  const [overviewExpandedLayer, setOverviewExpandedLayer] = useState<MemoryLayerView | null>(null);
+  const [overviewLayerTabs, setOverviewLayerTabs] = useState<Record<MemoryLayerView, LayerContentTab>>(
+    DEFAULT_LAYER_TABS,
+  );
   const [subGraphTabs, setSubGraphTabs] = useState<Record<string, SubGraphTab>>({});
   const pageRef = useRef<HTMLElement | null>(null);
   const detailOriginRef = useRef<DetailOrigin | null>(null);
@@ -88,8 +94,11 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     if (isMemoryLayerView(activeLayer)) {
       return `layer:${activeLayer}:${layerContentTabs[activeLayer]}`;
     }
+    if (activeLayer === 'overview' && overviewExpandedLayer) {
+      return `layer:${overviewExpandedLayer}:${overviewLayerTabs[overviewExpandedLayer]}`;
+    }
     return 'page';
-  }, [activeLayer, activeSubGraph, layerContentTabs, subGraphTabs]);
+  }, [activeLayer, activeSubGraph, layerContentTabs, overviewExpandedLayer, overviewLayerTabs, subGraphTabs]);
 
   const captureDetailOrigin = useCallback((): DetailOrigin => {
     const key = currentScrollKey();
@@ -98,10 +107,20 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
       activeLayer,
       activeSubGraph,
       layerTabs: { ...layerContentTabs },
+      overviewExpandedLayer,
+      overviewLayerTabs: { ...overviewLayerTabs },
       subGraphTabs: { ...subGraphTabs },
       scroll: { key, top: scrollEl?.scrollTop ?? 0 },
     };
-  }, [activeLayer, activeSubGraph, currentScrollKey, layerContentTabs, subGraphTabs]);
+  }, [
+    activeLayer,
+    activeSubGraph,
+    currentScrollKey,
+    layerContentTabs,
+    overviewExpandedLayer,
+    overviewLayerTabs,
+    subGraphTabs,
+  ]);
 
   const restoreScroll = useCallback((scroll: DetailOrigin['scroll']) => {
     const restore = () => {
@@ -192,6 +211,12 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     [selectedUri, rawMemory.entities]
   );
 
+  useEffect(() => {
+    if (!selectedUri || selectedEntity || rawMemory.loading) return;
+    setSelectedUri(null);
+    clearDetailOrigin();
+  }, [selectedUri, selectedEntity, rawMemory.loading, clearDetailOrigin]);
+
   // Route a sub-graph chip click to the sub-graph page. Selecting "All"
   // (null) exits the page back to the current layer view, or overview if
   // we were already on one.
@@ -210,6 +235,10 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
 
   const handleLayerTabChange = useCallback((layer: MemoryLayerView, tab: LayerContentTab) => {
     setLayerContentTabs(prev => prev[layer] === tab ? prev : { ...prev, [layer]: tab });
+  }, []);
+
+  const handleOverviewLayerTabChange = useCallback((layer: MemoryLayerView, tab: LayerContentTab) => {
+    setOverviewLayerTabs(prev => prev[layer] === tab ? prev : { ...prev, [layer]: tab });
   }, []);
 
   const handleSubGraphTabChange = useCallback((slug: string, tab: SubGraphTab) => {
@@ -231,6 +260,8 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     setActiveLayer(origin.activeLayer);
     setActiveSubGraph(origin.activeSubGraph);
     setLayerContentTabs(origin.layerTabs);
+    setOverviewExpandedLayer(origin.overviewExpandedLayer);
+    setOverviewLayerTabs(origin.overviewLayerTabs);
     setSubGraphTabs(origin.subGraphTabs);
     pendingScrollRestoreRef.current = origin.scroll;
   }, []);
@@ -351,6 +382,10 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
             onSelectEntity={handleNavigate}
             contextGraphId={contextGraphId}
             onNodeClick={handleNodeClick}
+            expandedLayer={overviewExpandedLayer}
+            onExpandedLayerChange={setOverviewExpandedLayer}
+            expandTabs={overviewLayerTabs}
+            onExpandTabChange={handleOverviewLayerTabChange}
           />
         </>
       )}
