@@ -43,7 +43,9 @@ function tripleBinding(subject: string, graph: string) {
 }
 
 function bindingsForLayer(sparql: string, contextGraphId: string, revision: number) {
-  if (!sparql.includes('/assertion/')) return [];
+  const isVm = sparql.includes('_verified_memory_meta');
+  const isSwm = !isVm && sparql.includes('STRENDS');
+  if (isVm || isSwm) return [];
   return Array.from({ length: revision }, (_, i) =>
     tripleBinding(
       `urn:test:${contextGraphId}:wm-${i + 1}`,

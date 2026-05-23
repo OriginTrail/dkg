@@ -575,12 +575,13 @@ export function MemoryStrip({
     color: string;
     icon: string;
     entities: MemoryEntity[];
+    count: number;
     promoteLabel: string | null;
     viewLayer: LayerView;
   }> = [
-    { key: 'wm', label: 'Working Memory', color: '#64748b', icon: '◇', entities: layerEntities.wm, promoteLabel: 'Promote All → Shared', viewLayer: 'wm' },
-    { key: 'swm', label: 'Shared Working Memory', color: '#f59e0b', icon: '◈', entities: layerEntities.swm, promoteLabel: 'Publish to Verified Memory', viewLayer: 'swm' },
-    { key: 'vm', label: 'Verified Memory', color: '#22c55e', icon: '◉', entities: layerEntities.vm, promoteLabel: null, viewLayer: 'vm' },
+    { key: 'wm', label: 'Working Memory', color: '#64748b', icon: '◇', entities: layerEntities.wm, count: memory.counts.wm, promoteLabel: 'Promote All → Shared', viewLayer: 'wm' },
+    { key: 'swm', label: 'Shared Working Memory', color: '#f59e0b', icon: '◈', entities: layerEntities.swm, count: memory.counts.swm, promoteLabel: 'Publish to Verified Memory', viewLayer: 'swm' },
+    { key: 'vm', label: 'Verified Memory', color: '#22c55e', icon: '◉', entities: layerEntities.vm, count: memory.counts.vm, promoteLabel: null, viewLayer: 'vm' },
   ];
 
   return (
@@ -596,7 +597,7 @@ export function MemoryStrip({
             >
               <div className="v10-layer-label">
                 <span className="v10-layer-abbr">{layer.label}</span>
-                <span className="v10-layer-count">{layer.entities.length}</span>
+                <span className="v10-layer-count">{layer.count}</span>
               </div>
               <div className="v10-layer-items">
                 <span className="v10-layer-chevron">▸</span>
@@ -756,8 +757,9 @@ export function TypeBreakdownWidget({ entities }: { entities: MemoryEntity[] }) 
   );
 }
 
-export function LayerStatsWidget({ entities, triples, layer }: {
+export function LayerStatsWidget({ entities, entityCount, triples, layer }: {
   entities: MemoryEntity[];
+  entityCount: number;
   triples: number;
   layer: 'wm' | 'swm' | 'vm';
 }) {
@@ -781,7 +783,7 @@ export function LayerStatsWidget({ entities, triples, layer }: {
       <div className="v10-layer-summary">
         <div className="v10-layer-summary-stat">
           <span className="v10-layer-summary-label">Knowledge Assets</span>
-          <span className="v10-layer-summary-value">{entities.length}</span>
+          <span className="v10-layer-summary-value">{entityCount}</span>
         </div>
         <div className="v10-layer-summary-stat">
           <span className="v10-layer-summary-label">Triples</span>
@@ -874,14 +876,15 @@ export function LayerActionsWidget({ layer, count, contextGraphId, onComplete }:
 
 // ─── Horizontal widget strip (stats + types + CTA) for the Entities tab ──
 
-export function LayerWidgetStrip({ layer, entities, tripleCount, contextGraphId, onComplete }: {
+export function LayerWidgetStrip({ layer, entities, entityCount, tripleCount, contextGraphId, onComplete }: {
   layer: 'wm' | 'swm' | 'vm';
   entities: MemoryEntity[];
+  entityCount: number;
   tripleCount: number;
   contextGraphId?: string;
   onComplete?: () => void;
 }) {
-  if (entities.length === 0) {
+  if (entityCount === 0) {
     return (
       <div className="v10-layer-widgets-strip empty">
         <div className="v10-canvas-empty">
@@ -896,12 +899,12 @@ export function LayerWidgetStrip({ layer, entities, tripleCount, contextGraphId,
   return (
     <div className="v10-layer-widgets-strip">
       <div className="v10-layer-widgets-strip-stats">
-        <LayerStatsWidget entities={entities} triples={tripleCount} layer={layer} />
+        <LayerStatsWidget entities={entities} entityCount={entityCount} triples={tripleCount} layer={layer} />
         <TypeBreakdownWidget entities={entities} />
       </div>
       {(layer === 'wm' || layer === 'swm') && (
         <div className="v10-layer-widgets-strip-action">
-          <LayerActionsWidget layer={layer} count={entities.length} contextGraphId={contextGraphId} onComplete={onComplete} />
+          <LayerActionsWidget layer={layer} count={entityCount} contextGraphId={contextGraphId} onComplete={onComplete} />
         </div>
       )}
     </div>
@@ -1053,6 +1056,7 @@ export function LayerContent({
   const isInitialVerifiedMemoryLoad = layer === 'vm' && vmLayerStatus === 'loading' && entities.length === 0;
   const isVerifiedMemoryUnavailable = layer === 'vm' && vmLayerStatus === 'error' && entities.length === 0;
   const isEmptyVerifiedMemory = layer === 'vm' && vmLayerStatus === 'ok' && entities.length === 0;
+  const entityCount = memory.counts[layer];
 
   const handleTab = (tab: LayerContentTab) => (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -1114,6 +1118,7 @@ export function LayerContent({
               <LayerWidgetStrip
                 layer={layer}
                 entities={entities}
+                entityCount={entityCount}
                 tripleCount={tripleCount}
                 contextGraphId={contextGraphId}
                 onComplete={memory.refresh}

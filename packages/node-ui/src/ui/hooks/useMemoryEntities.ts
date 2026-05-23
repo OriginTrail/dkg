@@ -410,11 +410,14 @@ export function useMemoryEntities(
   }, [entities]);
 
   const counts = useMemo(() => {
-    const wm = new Set(layeredTriples.filter(t => t.layer === 'working').map(t => t.subject)).size;
-    const swm = new Set(layeredTriples.filter(t => t.layer === 'shared').map(t => t.subject)).size;
-    const vm = new Set(layeredTriples.filter(t => t.layer === 'verified').map(t => t.subject)).size;
-    return { wm, swm, vm, total: entities.size };
-  }, [layeredTriples, entities]);
+    let wm = 0, swm = 0, vm = 0;
+    for (const entity of entityList) {
+      if (entity.trustLevel === 'verified') vm++;
+      else if (entity.trustLevel === 'shared') swm++;
+      else wm++;
+    }
+    return { wm, swm, vm, total: entityList.length };
+  }, [entityList]);
 
   return {
     entities,
