@@ -1021,7 +1021,8 @@ export function LayerContent({
   const config = LAYER_CONFIG[layer];
   const itemsLabel = layer === 'vm' ? 'Knowledge Assets' : 'Entities';
   const isInitialVerifiedMemoryLoad = layer === 'vm' && memory.loading && entities.length === 0;
-  const isEmptyVerifiedMemory = layer === 'vm' && !memory.loading && entities.length === 0;
+  const isVerifiedMemoryUnavailable = layer === 'vm' && !memory.loading && memory.partial && entities.length === 0;
+  const isEmptyVerifiedMemory = layer === 'vm' && !memory.loading && !memory.partial && entities.length === 0;
 
   const handleTab = (tab: LayerContentTab) => (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -1053,7 +1054,7 @@ export function LayerContent({
 
       {activeTab === 'items' && (
         <div className="v10-layer-expand-body entities-tab">
-          {layer === 'vm' && !isInitialVerifiedMemoryLoad && (
+          {layer === 'vm' && !isInitialVerifiedMemoryLoad && !isVerifiedMemoryUnavailable && (
             <VerifiedMemoryHeroBanner
               entities={entities}
               tripleCount={tripleCount}
@@ -1065,7 +1066,16 @@ export function LayerContent({
               <div className="v10-canvas-empty">
                 <div className="v10-canvas-empty-icon">◉</div>
                 <div className="v10-canvas-empty-text">
-                  Loading Verifiable Memory...
+                  Loading Verified Memory...
+                </div>
+              </div>
+            </div>
+          ) : isVerifiedMemoryUnavailable ? (
+            <div className="v10-layer-widgets-strip empty">
+              <div className="v10-canvas-empty">
+                <div className="v10-canvas-empty-icon">◉</div>
+                <div className="v10-canvas-empty-text">
+                  Verified Memory status unavailable.
                 </div>
               </div>
             </div>
@@ -1134,7 +1144,7 @@ export function VerifiedMemoryHeroBanner({ entities, tripleCount, contextGraphId
     return (
       <div className="v10-vm-hero v10-vm-hero-empty">
         <div className="v10-vm-hero-title">
-          <span className="v10-vm-hero-badge">◉ Verifiable Memory</span>
+          <span className="v10-vm-hero-badge">◉ Verified Memory</span>
           <div className="v10-vm-hero-heading">
             <span className="v10-vm-hero-headline">Nothing published yet</span>
             <span className="v10-vm-hero-context" title={contextGraphId}>
@@ -1158,7 +1168,7 @@ export function VerifiedMemoryHeroBanner({ entities, tripleCount, contextGraphId
   return (
     <div className="v10-vm-hero">
       <div className="v10-vm-hero-title">
-        <span className="v10-vm-hero-badge">◉ Verifiable Memory</span>
+        <span className="v10-vm-hero-badge">◉ Verified Memory</span>
         <div className="v10-vm-hero-heading">
           <span className="v10-vm-hero-headline">On-chain anchored · cryptographically signed</span>
           <span className="v10-vm-hero-context" title={contextGraphId}>

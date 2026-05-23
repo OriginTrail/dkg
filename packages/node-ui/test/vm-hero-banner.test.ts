@@ -84,6 +84,7 @@ describe('VerifiedMemoryHeroBanner', () => {
     });
 
     expect(container.querySelector('.v10-vm-empty-state')).toBeTruthy();
+    expect(container.textContent).toContain('Verified Memory');
     expect(container.textContent).toContain('Nothing published yet');
     expect(container.textContent).toContain('No Knowledge Assets yet.');
     expect(container.textContent).toContain('Publish entities from Shared Working Memory');
@@ -141,6 +142,39 @@ describe('VerifiedMemoryHeroBanner', () => {
     expect(container.querySelector('.v10-vm-empty-state')).toBeTruthy();
     expect(container.querySelector('.v10-layer-widgets-strip')).toBeNull();
     expect(container.querySelector('.v10-entity-list')).toBeNull();
+    expect(container.textContent).toContain('View full layer');
+
+    await unmount();
+  });
+
+  it('suppresses the empty VM hero while memory layer loading is partial', async () => {
+    const { container, unmount } = await renderLayerContent({
+      layer: 'vm',
+      entities: [],
+      tripleCount: 0,
+      layerTriples: [],
+      contextGraphId: 'cg-partial',
+      memory: {
+        entities: new Map(),
+        entityList: [],
+        allTriples: [],
+        graphTriples: [],
+        trustMap: new Map(),
+        counts: { wm: 0, swm: 0, vm: 0, total: 0 },
+        loading: false,
+        error: null,
+        partial: true,
+        refresh: () => {},
+      } as any,
+      activeTab: 'items',
+      onTabChange: () => {},
+      onSelectEntity: () => {},
+      footer: React.createElement('button', null, 'View full layer'),
+    });
+
+    expect(container.querySelector('.v10-vm-empty-state')).toBeNull();
+    expect(container.textContent).not.toContain('Nothing published yet');
+    expect(container.textContent).toContain('Verified Memory status unavailable.');
     expect(container.textContent).toContain('View full layer');
 
     await unmount();
