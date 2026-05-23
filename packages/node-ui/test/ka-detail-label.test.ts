@@ -4,7 +4,7 @@ import React from 'react';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { KADetailView } from '../src/ui/views/project/components.js';
+import { KADetailView, TrailEvent } from '../src/ui/views/project/components.js';
 import { ProjectProfileContext, type ProjectProfile } from '../src/ui/hooks/useProjectProfile.js';
 import { AgentsContext, type AgentsData } from '../src/ui/hooks/useAgents.js';
 import type { MemoryEntity } from '../src/ui/hooks/useMemoryEntities.js';
@@ -104,5 +104,42 @@ describe('KADetailView navigation label', () => {
     });
 
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders provenance timestamps in the event header without requiring an agent', async () => {
+    const at = '2026-05-23T12:34:00.000Z';
+
+    await act(async () => {
+      root.render(React.createElement(TrailEvent, {
+        toneClass: 'created',
+        title: 'Created in Working Memory',
+        actionWord: 'Created',
+        agent: null,
+        agentUri: null,
+        at,
+      }));
+    });
+
+    const timestamp = query('.v10-ka-event-time') as HTMLTimeElement;
+    expect(timestamp.tagName).toBe('TIME');
+    expect(timestamp.dateTime).toBe(at);
+    expect(timestamp.textContent).toContain('2026');
+    expect(document.querySelector('.v10-ka-event-attribution')).toBeNull();
+  });
+
+  it('omits provenance timestamp chrome when a lifecycle step has no timestamp', async () => {
+    await act(async () => {
+      root.render(React.createElement(TrailEvent, {
+        toneClass: 'shared',
+        title: 'Promoted to Shared Working Memory',
+        actionWord: 'Promoted',
+        agent: null,
+        agentUri: null,
+        at: null,
+      }));
+    });
+
+    expect(document.querySelector('.v10-ka-event-time')).toBeNull();
+    expect(query('.v10-ka-event-title').textContent).toContain('Promoted to Shared Working Memory');
   });
 });

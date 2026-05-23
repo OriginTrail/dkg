@@ -168,11 +168,13 @@ export function ProjectHeaderStrip({
       {activeSubGraph ? (
         <>
           <span className="v10-project-strip-sep">›</span>
-          <span
-            className="v10-project-strip-sg"
-            style={{ color: activeSubGraph.color }}
-          >
-            <span className="v10-project-strip-sg-icon">{activeSubGraph.icon ?? '•'}</span>
+          <span className="v10-project-strip-sg">
+            <span
+              className="v10-project-strip-sg-icon"
+              style={{ color: activeSubGraph.color }}
+            >
+              {activeSubGraph.icon ?? '•'}
+            </span>
             {activeSubGraph.displayName ?? activeSubGraph.slug}
           </span>
           {activeSubGraph.description && (
@@ -238,7 +240,7 @@ export function ProjectOverviewCard({ cg, memory, participants }: {
         <div className="v10-po-progress">
           <div className="v10-po-progress-label">
             <span>Knowledge Progress</span>
-            <span style={{ color: '#22c55e', fontWeight: 600 }}>{pctVm}% verified</span>
+            <span style={{ color: 'var(--text-success)', fontWeight: 600 }}>{pctVm}% verified</span>
           </div>
           <div className="v10-po-progress-bar">
             {pctVm > 0 && <div className="v10-po-progress-seg vm" style={{ width: `${pctVm}%` }} />}
@@ -290,7 +292,7 @@ export function PendingJoinRequestsBar({ contextGraphId, onParticipantsChanged }
 
   return (
     <div className="v10-ph-join-requests" style={{ margin: '0 16px 8px', padding: '8px 12px', borderRadius: 8, background: 'var(--bg-surface)', border: '1px solid #f59e0b44' }}>
-      <span style={{ fontSize: 9, fontWeight: 700, textTransform: 'uppercase' as const, letterSpacing: '0.8px', color: 'var(--text-ghost)', marginBottom: 6, display: 'block' }}>
+      <span style={{ fontSize: 9, fontWeight: 700, textTransform: 'uppercase' as const, letterSpacing: '0.8px', color: 'var(--text-tertiary)', marginBottom: 6, display: 'block' }}>
         Pending Join Requests <span className="v10-ph-join-badge">{requests.length}</span>
       </span>
       <div className="v10-ph-join-list">
@@ -592,14 +594,14 @@ export function MemoryStrip({
               className={`v10-memory-layer ${layer.key} ${isExpanded ? 'expanded' : ''}`}
               onClick={() => toggleExpand(layer.key)}
             >
-              <div className="v10-layer-label" style={{ color: layer.color }}>
+              <div className="v10-layer-label">
                 <span className="v10-layer-abbr">{layer.label}</span>
                 <span className="v10-layer-count">{layer.entities.length}</span>
               </div>
               <div className="v10-layer-items">
                 <span className="v10-layer-chevron">▸</span>
                 {layer.entities.length === 0 && (
-                  <span style={{ fontSize: 11, color: 'var(--text-ghost)', fontStyle: 'italic' }}>No assets yet</span>
+                  <span style={{ fontSize: 11, color: 'var(--text-tertiary)', fontStyle: 'italic' }}>No assets yet</span>
                 )}
                 {layer.entities.slice(0, 6).map(e => {
                   const { icon } = entityMeta(e, profile);
@@ -852,13 +854,13 @@ export function LayerActionsWidget({ layer, count, contextGraphId, onComplete }:
       <div className="v10-decision-context" style={{ marginBottom: 10 }}>
         {count} asset{count !== 1 ? 's' : ''} in this layer can be {isWm ? 'promoted to Shared Memory for collaborative review' : 'published to Verified Memory on-chain'}.
       </div>
-      {result && <div style={{ fontSize: 11, color: 'var(--accent-green)', marginBottom: 8 }}>✓ {result}</div>}
-      {error && <div style={{ fontSize: 11, color: 'var(--accent-red)', marginBottom: 8 }}>✕ {error}</div>}
+      {result && <div style={{ fontSize: 11, color: 'var(--text-success)', marginBottom: 8 }}>✓ {result}</div>}
+      {error && <div style={{ fontSize: 11, color: 'var(--text-danger)', marginBottom: 8 }}>✕ {error}</div>}
       <div className="v10-decision-actions">
         <button
           className={isWm ? 'v10-decision-btn approve' : 'v10-decision-btn primary-cta publish-vm'}
           style={isWm
-            ? { borderColor: `${color}50`, color, background: `${color}15`, opacity: busy ? 0.5 : 1 }
+            ? { borderColor: `${color}50`, color: 'var(--text-warning)', background: `${color}15`, opacity: busy ? 0.5 : 1 }
             : { opacity: busy ? 0.5 : 1 }}
           disabled={busy}
           onClick={handleAction}
@@ -1674,12 +1676,12 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
         </form>
       )}
 
-      {saveMessage && <p className="v10-mlv-status" style={{ color: 'var(--accent-green)' }}>{saveMessage}</p>}
-      {saveError && <p className="v10-mlv-status" style={{ color: 'var(--accent-red)' }}>{saveError}</p>}
+      {saveMessage && <p className="v10-mlv-status" style={{ color: 'var(--text-success)' }}>{saveMessage}</p>}
+      {saveError && <p className="v10-mlv-status" style={{ color: 'var(--text-danger)' }}>{saveError}</p>}
 
       <div className="v10-cg-query-results">
         {loading && <p className="v10-mlv-status">Loading...</p>}
-        {error && <p className="v10-mlv-status" style={{ color: 'var(--accent-red)' }}>Error: {error}</p>}
+        {error && <p className="v10-mlv-status" style={{ color: 'var(--text-danger)' }}>Error: {error}</p>}
 
         {!loading && !error && rows.length === 0 && (
           <div className="v10-mlv-empty">
@@ -1818,8 +1820,8 @@ export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }:
           {busy === '__all__' ? '...' : actionAllLabel}
         </button>
       </div>
-      {result && <div style={{ padding: '6px 16px', fontSize: 11, color: 'var(--accent-green)' }}>✓ {result}</div>}
-      {error && <div style={{ padding: '6px 16px', fontSize: 11, color: 'var(--accent-red)' }}>✕ {error}</div>}
+      {result && <div style={{ padding: '6px 16px', fontSize: 11, color: 'var(--text-success)' }}>✓ {result}</div>}
+      {error && <div style={{ padding: '6px 16px', fontSize: 11, color: 'var(--text-danger)' }}>✕ {error}</div>}
       {assertions.map(a => (
         <div key={a.name} className="v10-item-row">
           <span className="v10-item-icon">▤</span>
@@ -2408,7 +2410,7 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
                   ))}
                 </tbody>
               </table>
-              <div style={{ fontSize: 10, color: 'var(--text-ghost)', fontFamily: 'var(--font-mono)', padding: '6px 8px' }}>
+              <div style={{ fontSize: 10, color: 'var(--text-tertiary)', fontFamily: 'var(--font-mono)', padding: '6px 8px' }}>
                 {Math.min(entityTriples.length, 50)} of {entityTriples.length} triples shown
               </div>
             </div>
@@ -2563,12 +2565,12 @@ export function TrailEvent({
       <div className={`v10-ka-event-dot ${toneClass}`} />
       <div className="v10-ka-event-header">
         <span className="v10-ka-event-title">{title}</span>
+        {when && <time className="v10-ka-event-time" dateTime={at ?? undefined}>{when}</time>}
       </div>
       {(agent || agentUri) && (
         <div className="v10-ka-event-attribution">
           <span className="v10-ka-event-attribution-prefix">{actionWord} by</span>
           <AgentChip agent={agent ?? undefined} fallbackUri={agentUri ?? undefined} size="sm" />
-          {when && <span className="v10-ka-event-attribution-when">{when}</span>}
         </div>
       )}
     </div>

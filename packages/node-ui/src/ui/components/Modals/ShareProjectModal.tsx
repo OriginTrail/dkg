@@ -254,7 +254,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
               {pendingRequests.length > 0 && (
                 <span style={{
                   position: 'absolute', top: 4, right: 4,
-                  background: 'var(--accent-red, #ef4444)', color: '#fff',
+                  background: 'var(--accent-red, #ef4444)', color: 'var(--text-on-accent)',
                   borderRadius: 999, fontSize: 9, fontWeight: 700,
                   padding: '1px 5px', minWidth: 16, textAlign: 'center',
                 }}>
@@ -402,7 +402,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
                       onClick={() => handleApprove(req.agentAddress)}
                       disabled={processingRequest === req.agentAddress}
                       style={{
-                        background: 'rgba(34, 197, 94, 0.15)', color: 'var(--accent-green, #22c55e)',
+                        background: 'rgba(34, 197, 94, 0.15)', color: 'var(--text-success)',
                         border: '1px solid rgba(34, 197, 94, 0.3)', cursor: 'pointer',
                         borderRadius: 4, fontSize: 10, padding: '4px 10px', fontWeight: 600,
                       }}
@@ -413,7 +413,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
                       onClick={() => handleReject(req.agentAddress)}
                       disabled={processingRequest === req.agentAddress}
                       style={{
-                        background: 'rgba(239, 68, 68, 0.1)', color: 'var(--accent-red, #ef4444)',
+                        background: 'rgba(239, 68, 68, 0.1)', color: 'var(--text-danger)',
                         border: '1px solid rgba(239, 68, 68, 0.2)', cursor: 'pointer',
                         borderRadius: 4, fontSize: 10, padding: '4px 10px', fontWeight: 600,
                       }}
@@ -425,7 +425,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
               ))}
 
               {agentError && (
-                <div style={{ fontSize: 10, color: 'var(--accent-red, #ef4444)', marginTop: 4 }}>{agentError}</div>
+                <div style={{ fontSize: 10, color: 'var(--text-danger)', marginTop: 4 }}>{agentError}</div>
               )}
             </div>
           )}

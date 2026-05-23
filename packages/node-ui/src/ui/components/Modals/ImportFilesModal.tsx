@@ -263,7 +263,7 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
                         {r.status === 'success' ? '✓' : r.status === 'skipped' ? '–' : '✗'}
                       </span>
                       <span className="v10-import-file-name">{r.fileName}</span>
-                      <span className="v10-import-file-size" style={r.status === 'error' ? { color: 'var(--accent-red)' } : undefined}>
+                      <span className="v10-import-file-size" style={r.status === 'error' ? { color: 'var(--text-danger)' } : undefined}>
                         {r.status === 'success' && r.triplesWritten != null ? `${r.triplesWritten} triples` :
                          r.status === 'skipped' ? 'stored (no extraction)' :
                          r.error ?? 'failed'}
