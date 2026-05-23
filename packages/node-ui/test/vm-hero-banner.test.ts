@@ -131,6 +131,7 @@ describe('VerifiedMemoryHeroBanner', () => {
         loading: false,
         error: null,
         partial: false,
+        layerStatus: { wm: 'ok', swm: 'ok', vm: 'ok' },
         refresh: () => {},
       } as any,
       activeTab: 'items',
@@ -147,7 +148,7 @@ describe('VerifiedMemoryHeroBanner', () => {
     await unmount();
   });
 
-  it('suppresses the empty VM hero while memory layer loading is partial', async () => {
+  it('keeps the empty VM hero when another layer is partial but VM loaded successfully', async () => {
     const { container, unmount } = await renderLayerContent({
       layer: 'vm',
       entities: [],
@@ -164,6 +165,41 @@ describe('VerifiedMemoryHeroBanner', () => {
         loading: false,
         error: null,
         partial: true,
+        layerStatus: { wm: 'error', swm: 'ok', vm: 'ok' },
+        refresh: () => {},
+      } as any,
+      activeTab: 'items',
+      onTabChange: () => {},
+      onSelectEntity: () => {},
+      footer: React.createElement('button', null, 'View full layer'),
+    });
+
+    expect(container.querySelector('.v10-vm-empty-state')).toBeTruthy();
+    expect(container.textContent).toContain('Nothing published yet');
+    expect(container.textContent).not.toContain('Verified Memory status unavailable.');
+    expect(container.textContent).toContain('View full layer');
+
+    await unmount();
+  });
+
+  it('suppresses the empty VM hero when the VM layer failed to load', async () => {
+    const { container, unmount } = await renderLayerContent({
+      layer: 'vm',
+      entities: [],
+      tripleCount: 0,
+      layerTriples: [],
+      contextGraphId: 'cg-vm-error',
+      memory: {
+        entities: new Map(),
+        entityList: [],
+        allTriples: [],
+        graphTriples: [],
+        trustMap: new Map(),
+        counts: { wm: 0, swm: 0, vm: 0, total: 0 },
+        loading: false,
+        error: null,
+        partial: false,
+        layerStatus: { wm: 'error', swm: 'error', vm: 'error' },
         refresh: () => {},
       } as any,
       activeTab: 'items',

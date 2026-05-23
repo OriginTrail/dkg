@@ -1020,9 +1020,10 @@ export function LayerContent({
 }) {
   const config = LAYER_CONFIG[layer];
   const itemsLabel = layer === 'vm' ? 'Knowledge Assets' : 'Entities';
-  const isInitialVerifiedMemoryLoad = layer === 'vm' && memory.loading && entities.length === 0;
-  const isVerifiedMemoryUnavailable = layer === 'vm' && !memory.loading && memory.partial && entities.length === 0;
-  const isEmptyVerifiedMemory = layer === 'vm' && !memory.loading && !memory.partial && entities.length === 0;
+  const vmLayerStatus = memory.layerStatus?.vm ?? (memory.loading ? 'loading' : memory.error ? 'error' : 'ok');
+  const isInitialVerifiedMemoryLoad = layer === 'vm' && vmLayerStatus === 'loading' && entities.length === 0;
+  const isVerifiedMemoryUnavailable = layer === 'vm' && vmLayerStatus === 'error' && entities.length === 0;
+  const isEmptyVerifiedMemory = layer === 'vm' && vmLayerStatus === 'ok' && entities.length === 0;
 
   const handleTab = (tab: LayerContentTab) => (e: React.MouseEvent) => {
     e.stopPropagation();

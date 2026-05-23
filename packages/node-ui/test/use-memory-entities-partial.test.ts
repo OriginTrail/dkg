@@ -34,6 +34,9 @@ function Probe({ id }: { id: string }) {
     'data-loading': String(m.loading),
     'data-error': String(m.error),
     'data-partial': String(m.partial),
+    'data-wm-status': m.layerStatus.wm,
+    'data-swm-status': m.layerStatus.swm,
+    'data-vm-status': m.layerStatus.vm,
     'data-wm': String(m.counts.wm),
     'data-vm': String(m.counts.vm),
     'data-total': String(m.counts.total),
@@ -95,6 +98,9 @@ describe('useMemoryEntities — partial layer failure', () => {
     // One layer (SWM) failed → partial, NOT a hard error.
     expect(el.getAttribute('data-error')).toBe('null');
     expect(el.getAttribute('data-partial')).toBe('true');
+    expect(el.getAttribute('data-wm-status')).toBe('ok');
+    expect(el.getAttribute('data-swm-status')).toBe('error');
+    expect(el.getAttribute('data-vm-status')).toBe('ok');
     // WM + VM still populated despite SWM's 500.
     expect(el.getAttribute('data-wm')).toBe('2');
     expect(el.getAttribute('data-vm')).toBe('1');

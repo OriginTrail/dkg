@@ -3,6 +3,8 @@ import { authHeaders } from '../api.js';
 import { useMemoryGraphEvents } from './useNodeEvents.js';
 
 export type TrustLevel = 'working' | 'shared' | 'verified';
+export type MemoryLayerKey = 'wm' | 'swm' | 'vm';
+export type MemoryLayerStatus = 'loading' | 'ok' | 'error';
 
 export interface MemoryEntity {
   uri: string;
@@ -40,6 +42,8 @@ export interface MemoryData {
   /** True when some (but not all) layer queries failed — counts are
    *  incomplete but not absent. `error` stays null in this case. */
   partial: boolean;
+  /** Per-layer query status so UI can distinguish a VM miss from WM/SWM failures. */
+  layerStatus: Record<MemoryLayerKey, MemoryLayerStatus>;
   refresh: () => void;
 }
 
@@ -174,6 +178,18 @@ function subGraphOf(gUri: string, cgId: string): string | undefined {
 
 interface LayerResult { triples: Triple[]; ok: boolean }
 
+const LOADING_LAYER_STATUS: Record<MemoryLayerKey, MemoryLayerStatus> = {
+  wm: 'loading',
+  swm: 'loading',
+  vm: 'loading',
+};
+
+const ERROR_LAYER_STATUS: Record<MemoryLayerKey, MemoryLayerStatus> = {
+  wm: 'error',
+  swm: 'error',
+  vm: 'error',
+};
+
 async function queryLayer(
   sparql: string,
   contextGraphId: string,
@@ -300,6 +316,9 @@ export function useMemoryEntities(
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [partial, setPartial] = useState(false);
+  const [layerStatus, setLayerStatus] = useState<Record<MemoryLayerKey, MemoryLayerStatus>>(
+    LOADING_LAYER_STATUS,
+  );
   const versionRef = useRef(0);
 
   const fetchAll = useCallback(async () => {
@@ -308,6 +327,7 @@ export function useMemoryEntities(
     setLoading(true);
     setError(null);
     setPartial(false);
+    setLayerStatus(LOADING_LAYER_STATUS);
 
     try {
       // queryLayer never throws — it returns { triples, ok }. We keep
@@ -328,6 +348,11 @@ export function useMemoryEntities(
       ];
 
       setLayeredTriples(all);
+      setLayerStatus({
+        wm: wmR.ok ? 'ok' : 'error',
+        swm: swmR.ok ? 'ok' : 'error',
+        vm: vmR.ok ? 'ok' : 'error',
+      });
       const failed = [wmR, swmR, vmR].filter(r => !r.ok).length;
       // `partial` is computed UNCONDITIONALLY for every caller — it was
       // previously dead unless a caller opted in, making truncated
@@ -340,6 +365,7 @@ export function useMemoryEntities(
     } catch (err: any) {
       if (version === versionRef.current) {
         setError(err.message ?? 'Failed to load memory data');
+        setLayerStatus(ERROR_LAYER_STATUS);
       }
     } finally {
       if (version === versionRef.current) setLoading(false);
@@ -400,6 +426,7 @@ export function useMemoryEntities(
     loading,
     error,
     partial,
+    layerStatus,
     refresh: fetchAll,
   };
 }
