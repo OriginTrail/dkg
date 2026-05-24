@@ -154,6 +154,60 @@ describe('useCurrentAgent', () => {
     await act(async () => root.unmount());
   });
 
+  it('starts a replacement load when a pending request detects auth changed', async () => {
+    const oldLoad = deferred<any>();
+    const newLoad = deferred<any>();
+    fetchCurrentAgentMock
+      .mockReturnValueOnce(oldLoad.promise)
+      .mockReturnValueOnce(newLoad.promise);
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(React.createElement(Probe));
+      await Promise.resolve();
+    });
+    expect(fetchCurrentAgentMock).toHaveBeenCalledTimes(1);
+
+    (window as any).__DKG_TOKEN__ = 'token-new';
+    await act(async () => {
+      oldLoad.resolve({
+        agentDid: 'did:dkg:agent:0xold',
+        agentAddress: '0xold',
+        name: 'Old agent',
+        framework: 'DKG',
+        peerId: 'peer-old',
+        nodeIdentityId: '0',
+      });
+      await oldLoad.promise;
+      await Promise.resolve();
+    });
+
+    expect(fetchCurrentAgentMock).toHaveBeenCalledTimes(2);
+    expect(container.firstElementChild?.getAttribute('data-agent-did')).toBe('');
+    expect(container.firstElementChild?.getAttribute('data-loading')).toBe('true');
+
+    await act(async () => {
+      newLoad.resolve({
+        agentDid: 'did:dkg:agent:0xnew',
+        agentAddress: '0xnew',
+        name: 'New agent',
+        framework: 'DKG',
+        peerId: 'peer-new',
+        nodeIdentityId: '0',
+      });
+      await newLoad.promise;
+      await Promise.resolve();
+    });
+
+    expect(container.firstElementChild?.getAttribute('data-agent-did')).toBe('did:dkg:agent:0xnew');
+    expect(container.firstElementChild?.getAttribute('data-loading')).toBe('false');
+
+    await act(async () => root.unmount());
+  });
+
   it('loads immediately for a new consumer after auth changes while polling is active', async () => {
     fetchCurrentAgentMock.mockResolvedValueOnce({
       agentDid: 'did:dkg:agent:0xold',

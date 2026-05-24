@@ -67,10 +67,12 @@ function loadCurrentAgent() {
       if (loadGeneration !== generation) return;
       if (loadAuthKey !== currentAuthKey()) {
         const authKey = currentAuthKey();
+        const shouldLoadCurrentAuth = stateAuthKey !== authKey || state.loading;
         if (stateAuthKey !== authKey) {
           resetStateForAuthKey(authKey);
           emit();
         }
+        if (shouldLoadCurrentAuth) void loadCurrentAgent();
         return;
       }
       setState({ data, loading: false, error: null });
@@ -79,10 +81,12 @@ function loadCurrentAgent() {
       if (loadGeneration !== generation) return;
       if (loadAuthKey !== currentAuthKey()) {
         const authKey = currentAuthKey();
+        const shouldLoadCurrentAuth = stateAuthKey !== authKey || state.loading;
         if (stateAuthKey !== authKey) {
           resetStateForAuthKey(authKey);
           emit();
         }
+        if (shouldLoadCurrentAuth) void loadCurrentAgent();
         return;
       }
       setState({

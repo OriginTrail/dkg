@@ -7,6 +7,7 @@ import { MemoryLayerView } from '../../views/MemoryLayerView.js';
 import { MemoryStackView } from '../../views/MemoryStackView.js';
 import { authHeaders, fileUrl } from '../../api.js';
 import { DOC_TAB_PREFIX, decodeDocTabId } from '../../lib/doc-tab-id.js';
+import { CONTEXT_GRAPH_PRIMER_TAB_ID } from '../../lib/contextGraphPrimer.js';
 import { MarkdownMessage } from '../chat/MarkdownMessage.js';
 
 const CLOSE_ICON = (
@@ -297,7 +298,7 @@ function ViewContainer() {
 
   if (activeTabId === 'memory-stack') return <MemoryStackView />;
 
-  if (activeTabId === 'context-graph-primer') return <ContextGraphPrimerView />;
+  if (activeTabId === CONTEXT_GRAPH_PRIMER_TAB_ID) return <ContextGraphPrimerView />;
 
   if (activeTabId.startsWith('project:')) {
     const cgId = activeTabId.slice('project:'.length);

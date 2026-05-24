@@ -9,6 +9,7 @@ import { useLayoutStore, maxBottomHeight } from './stores/layout.js';
 import { useAgentsStore } from './stores/agents.js';
 import { useTabsStore } from './stores/tabs.js';
 import { api } from './api-wrapper.js';
+import { CONTEXT_GRAPH_PRIMER_TAB } from './lib/contextGraphPrimer.js';
 
 function useLiveStatus() {
   const setNodeStatus = useAgentsStore((s) => s.setNodeStatus);
@@ -230,12 +231,6 @@ function AppShell() {
 const NetworkDebugPage = React.lazy(() =>
   import('./pages/Network.js').then((m) => ({ default: m.NetworkPage }))
 );
-
-const CONTEXT_GRAPH_PRIMER_TAB = {
-  id: 'context-graph-primer',
-  label: 'What is a Context Graph?',
-  closable: true,
-};
 
 function ContextGraphPrimerRoute() {
   const openTab = useTabsStore((s) => s.openTab);

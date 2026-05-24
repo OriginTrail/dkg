@@ -9,6 +9,7 @@ import { useAgents, AgentsContext } from '../hooks/useAgents.js';
 import { useCurrentAgent } from '../hooks/useCurrentAgent.js';
 import { ActivityFeed } from '../components/ActivityFeed.js';
 import { SubGraphBar } from '../components/SubGraphBar.js';
+import { CONTEXT_GRAPH_PRIMER_TAB } from '../lib/contextGraphPrimer.js';
 import { useTabsStore } from '../stores/tabs.js';
 import type { LayerView, LayerContentTab, SubGraphTab } from './project/helpers.js';
 import {
@@ -276,11 +277,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   }, [handleNavigate]);
 
   const handleOpenPrimer = useCallback(() => {
-    openTab({
-      id: 'context-graph-primer',
-      label: 'What is a Context Graph?',
-      closable: true,
-    });
+    openTab(CONTEXT_GRAPH_PRIMER_TAB);
   }, [openTab]);
 
   if (!cg) {
