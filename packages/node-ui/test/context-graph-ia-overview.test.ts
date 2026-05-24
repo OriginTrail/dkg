@@ -168,7 +168,7 @@ describe('Context Graph IA and Overview', () => {
       }),
     );
 
-    expect(container.textContent).toContain('Participant');
+    expect(container.textContent).toContain('Joined');
     expect(container.textContent).not.toContain('Role unknown');
 
     await act(async () => root.unmount());

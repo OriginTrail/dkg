@@ -280,8 +280,8 @@ function overviewRoleState(cg: any, currentAgent: Pick<AgentIdentity, 'agentDid'
   }
   if (cg?.callerInvolved === true) {
     return {
-      label: 'Participant',
-      title: 'This agent is listed as a member of this Context Graph.',
+      label: 'Joined',
+      title: 'This agent is involved in this Context Graph; curator status is shown only when identity metadata confirms it.',
       tone: 'participant',
     };
   }

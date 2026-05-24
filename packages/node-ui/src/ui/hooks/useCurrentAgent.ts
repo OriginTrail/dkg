@@ -17,6 +17,7 @@ let state: CurrentAgentState = {
 };
 let inFlight: Promise<void> | null = null;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
+let generation = 0;
 const listeners = new Set<() => void>();
 
 function emit() {
@@ -31,12 +32,15 @@ function setState(next: CurrentAgentState) {
 function loadCurrentAgent() {
   if (inFlight) return inFlight;
 
+  const loadGeneration = generation;
   setState({ ...state, loading: true, error: null });
   inFlight = api.fetchCurrentAgent()
     .then((data) => {
+      if (loadGeneration !== generation) return;
       setState({ data, loading: false, error: null });
     })
     .catch((error) => {
+      if (loadGeneration !== generation) return;
       setState({
         data: state.data,
         loading: false,
@@ -44,7 +48,7 @@ function loadCurrentAgent() {
       });
     })
     .finally(() => {
-      inFlight = null;
+      if (loadGeneration === generation) inFlight = null;
     });
 
   return inFlight;
@@ -62,6 +66,13 @@ function stopPollingIfIdle() {
   if (listeners.size > 0 || !pollTimer) return;
   clearInterval(pollTimer);
   pollTimer = null;
+  generation += 1;
+  inFlight = null;
+  state = {
+    data: null,
+    loading: false,
+    error: null,
+  };
 }
 
 export function useCurrentAgent() {
