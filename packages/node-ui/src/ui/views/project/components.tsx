@@ -1,4 +1,4 @@
-import React, { useMemo, useState, useCallback, useEffect, lazy, Suspense } from 'react';
+import React, { useMemo, useState, useCallback, useEffect, useRef, lazy, Suspense } from 'react';
 import type { ReactNode } from 'react';
 import { useFetch } from '../../hooks.js';
 import { api } from '../../api-wrapper.js';
@@ -73,10 +73,22 @@ export function LayerSwitcher({ active, counts, onSwitch, onShare, onImport, onR
   onRefresh: () => void;
 }) {
   const [moreOpen, setMoreOpen] = useState(false);
+  const moreRef = useRef<HTMLDivElement | null>(null);
   const switchTo = (layer: LayerView) => {
     setMoreOpen(false);
     onSwitch(layer);
   };
+
+  useEffect(() => {
+    if (!moreOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (target && moreRef.current?.contains(target)) return;
+      setMoreOpen(false);
+    };
+    document.addEventListener('pointerdown', onPointerDown);
+    return () => document.removeEventListener('pointerdown', onPointerDown);
+  }, [moreOpen]);
 
   return (
     <div className="v10-layer-switcher">
@@ -139,6 +151,7 @@ export function LayerSwitcher({ active, counts, onSwitch, onShare, onImport, onR
         <span className="v10-layer-switch-label">Subgraphs</span>
       </button>
       <div
+        ref={moreRef}
         className="v10-layer-more"
         onBlur={(event) => {
           if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {

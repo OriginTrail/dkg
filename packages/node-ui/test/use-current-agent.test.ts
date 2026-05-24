@@ -28,16 +28,18 @@ function Probe() {
 describe('useCurrentAgent', () => {
   beforeEach(() => {
     document.body.innerHTML = '';
+    (window as any).__DKG_TOKEN__ = 'token-old';
     fetchCurrentAgentMock.mockReset();
     vi.useFakeTimers();
   });
 
   afterEach(() => {
     vi.useRealTimers();
+    delete (window as any).__DKG_TOKEN__;
     document.body.innerHTML = '';
   });
 
-  it('clears cached identity when a refresh fails', async () => {
+  it('preserves identity on transient failure but clears it when auth changes', async () => {
     fetchCurrentAgentMock.mockResolvedValueOnce({
       agentDid: 'did:dkg:agent:0xold',
       agentAddress: '0xold',
@@ -57,6 +59,17 @@ describe('useCurrentAgent', () => {
     });
     expect(container.firstElementChild?.getAttribute('data-agent-did')).toBe('did:dkg:agent:0xold');
 
+    fetchCurrentAgentMock.mockRejectedValueOnce(new Error('temporary failure'));
+    await act(async () => {
+      vi.advanceTimersByTime(60_000);
+      await Promise.resolve();
+    });
+
+    expect(container.firstElementChild?.getAttribute('data-agent-did')).toBe('did:dkg:agent:0xold');
+    expect(container.firstElementChild?.getAttribute('data-loading')).toBe('false');
+    expect(container.firstElementChild?.getAttribute('data-error')).toBe('temporary failure');
+
+    (window as any).__DKG_TOKEN__ = 'token-new';
     fetchCurrentAgentMock.mockRejectedValueOnce(new Error('auth failed'));
     await act(async () => {
       vi.advanceTimersByTime(60_000);

@@ -18,7 +18,29 @@ let state: CurrentAgentState = {
 let inFlight: Promise<void> | null = null;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let generation = 0;
+let stateAuthKey = '';
 const listeners = new Set<() => void>();
+
+function currentAuthKey() {
+  if (typeof window === 'undefined') return '';
+  const token = (window as any).__DKG_TOKEN__;
+  return token ? `Bearer ${token}` : '';
+}
+
+function resetStateForAuthKey(authKey: string) {
+  stateAuthKey = authKey;
+  state = {
+    data: null,
+    loading: true,
+    error: null,
+  };
+}
+
+function snapshotForCurrentAuth() {
+  const authKey = currentAuthKey();
+  if (authKey !== stateAuthKey) resetStateForAuthKey(authKey);
+  return state;
+}
 
 function emit() {
   for (const listener of listeners) listener();
@@ -33,16 +55,32 @@ function loadCurrentAgent() {
   if (inFlight) return inFlight;
 
   const loadGeneration = generation;
-  setState({ ...state, loading: true, error: null });
+  const loadAuthKey = currentAuthKey();
+  if (loadAuthKey !== stateAuthKey) {
+    resetStateForAuthKey(loadAuthKey);
+    emit();
+  } else {
+    setState({ ...state, loading: true, error: null });
+  }
   inFlight = api.fetchCurrentAgent()
     .then((data) => {
       if (loadGeneration !== generation) return;
+      if (loadAuthKey !== currentAuthKey()) {
+        resetStateForAuthKey(currentAuthKey());
+        emit();
+        return;
+      }
       setState({ data, loading: false, error: null });
     })
     .catch((error) => {
       if (loadGeneration !== generation) return;
+      if (loadAuthKey !== currentAuthKey()) {
+        resetStateForAuthKey(currentAuthKey());
+        emit();
+        return;
+      }
       setState({
-        data: null,
+        data: state.data,
         loading: false,
         error: error instanceof Error ? error.message : 'Failed to load current agent',
       });
@@ -73,15 +111,16 @@ function stopPollingIfIdle() {
     loading: true,
     error: null,
   };
+  stateAuthKey = currentAuthKey();
 }
 
 export function useCurrentAgent() {
-  const [snapshot, setSnapshot] = useState(state);
+  const [snapshot, setSnapshot] = useState(snapshotForCurrentAuth);
 
   useEffect(() => {
-    const listener = () => setSnapshot(state);
+    const listener = () => setSnapshot(snapshotForCurrentAuth());
     listeners.add(listener);
-    setSnapshot(state);
+    setSnapshot(snapshotForCurrentAuth());
     startPolling();
 
     return () => {

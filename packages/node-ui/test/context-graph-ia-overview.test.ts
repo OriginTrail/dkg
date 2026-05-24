@@ -86,6 +86,32 @@ describe('Context Graph IA and Overview', () => {
     await act(async () => root.unmount());
   });
 
+  it('closes the More menu on outside pointer input', async () => {
+    const { container, root } = await render(
+      React.createElement(LayerSwitcher, {
+        active: 'overview',
+        counts: baseMemory.counts,
+        onSwitch: vi.fn(),
+        onShare: vi.fn(),
+        onImport: vi.fn(),
+        onRefresh: vi.fn(),
+      }),
+    );
+
+    const more = container.querySelector<HTMLButtonElement>('.v10-layer-more-btn');
+    await act(async () => {
+      more!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(container.textContent).toContain('Query Catalogue');
+
+    await act(async () => {
+      document.dispatchEvent(new Event('pointerdown', { bubbles: true }));
+    });
+    expect(container.textContent).not.toContain('Query Catalogue');
+
+    await act(async () => root.unmount());
+  });
+
   it('renders Overview as a summary with one clickable Knowledge Pipeline', async () => {
     const onSwitchLayer = vi.fn();
     const onOpenPrimer = vi.fn();
