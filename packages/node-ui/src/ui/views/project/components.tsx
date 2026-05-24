@@ -266,6 +266,7 @@ type OverviewRoleState = {
   title: string;
   tone: 'curator' | 'participant' | 'viewer' | 'unknown';
 };
+type OverviewParticipantsStatus = 'loading' | 'ok' | 'error';
 
 function overviewRoleState(cg: any, currentAgent: Pick<AgentIdentity, 'agentDid'> | null): OverviewRoleState {
   const curator = typeof cg?.curator === 'string' ? cg.curator.trim() : '';
@@ -298,7 +299,11 @@ function overviewRoleState(cg: any, currentAgent: Pick<AgentIdentity, 'agentDid'
   };
 }
 
-function overviewAccessAgentStat(cg: any, participants: string[]) {
+function overviewAccessAgentStat(
+  cg: any,
+  participants: string[],
+  participantsStatus: OverviewParticipantsStatus,
+) {
   const policy = normalizeAccessPolicy(cg?.accessPolicy);
   if (policy === 'public') {
     return {
@@ -306,6 +311,22 @@ function overviewAccessAgentStat(cg: any, participants: string[]) {
       value: 'Open',
       label: 'Public access',
       hint: 'Public Context Graphs do not have an authoritative allowlist count.',
+    };
+  }
+  if (participantsStatus === 'loading') {
+    return {
+      id: 'participants',
+      value: '...',
+      label: 'Agents with access',
+      hint: 'Participant list is loading.',
+    };
+  }
+  if (participantsStatus === 'error') {
+    return {
+      id: 'participants',
+      value: 'Unavailable',
+      label: 'Agents with access',
+      hint: 'Participant list unavailable; access count is unknown.',
     };
   }
 
@@ -353,6 +374,7 @@ export function ProjectOverviewCard({
   cg,
   memory,
   participants,
+  participantsStatus = 'ok',
   currentAgent,
   onSwitchLayer,
   onOpenPrimer,
@@ -360,6 +382,7 @@ export function ProjectOverviewCard({
   cg: any;
   memory: ReturnType<typeof useMemoryEntities>;
   participants: string[];
+  participantsStatus?: OverviewParticipantsStatus;
   currentAgent?: Pick<AgentIdentity, 'agentDid'> | null;
   onSwitchLayer?: (layer: LayerView) => void;
   onOpenPrimer?: () => void;
@@ -368,7 +391,7 @@ export function ProjectOverviewCard({
   const layerSum = working + shared + verified;
   const role = overviewRoleState(cg, currentAgent ?? null);
   const access = overviewAccessState(cg?.accessPolicy);
-  const accessAgentStat = overviewAccessAgentStat(cg, participants);
+  const accessAgentStat = overviewAccessAgentStat(cg, participants, participantsStatus);
   const statusHint = memory.loading
     ? 'Loading memory layers...'
     : memory.partial

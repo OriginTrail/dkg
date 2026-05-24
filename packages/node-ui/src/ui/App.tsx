@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useCallback, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useCallback, useState } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { Header } from './components/Shell/Header.js';
 import { PanelLeft } from './components/Shell/PanelLeft.js';
@@ -237,19 +237,12 @@ const CONTEXT_GRAPH_PRIMER_TAB = {
   closable: true,
 };
 
-function activateContextGraphPrimerTab() {
-  const { tabs, activeTabId } = useTabsStore.getState();
-  const hasPrimerTab = tabs.some(tab => tab.id === CONTEXT_GRAPH_PRIMER_TAB.id);
-  if (hasPrimerTab && activeTabId === CONTEXT_GRAPH_PRIMER_TAB.id) return;
-
-  useTabsStore.setState({
-    tabs: hasPrimerTab ? tabs : [...tabs, CONTEXT_GRAPH_PRIMER_TAB],
-    activeTabId: CONTEXT_GRAPH_PRIMER_TAB.id,
-  });
-}
-
 function ContextGraphPrimerRoute() {
-  activateContextGraphPrimerTab();
+  const openTab = useTabsStore((s) => s.openTab);
+
+  useLayoutEffect(() => {
+    openTab(CONTEXT_GRAPH_PRIMER_TAB);
+  }, [openTab]);
 
   return <Navigate to="/" replace />;
 }

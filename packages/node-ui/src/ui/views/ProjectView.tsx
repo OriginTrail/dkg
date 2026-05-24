@@ -7,6 +7,7 @@ import { ShareProjectModal } from '../components/Modals/ShareProjectModal.js';
 import { useMemoryEntities } from '../hooks/useMemoryEntities.js';
 import { useProjectProfile, ProjectProfileContext } from '../hooks/useProjectProfile.js';
 import { useAgents, AgentsContext } from '../hooks/useAgents.js';
+import { useCurrentAgent } from '../hooks/useCurrentAgent.js';
 import { ActivityFeed } from '../components/ActivityFeed.js';
 import { SubGraphBar } from '../components/SubGraphBar.js';
 import { useTabsStore } from '../stores/tabs.js';
@@ -29,6 +30,7 @@ interface ProjectViewProps {
 }
 
 type MemoryLayerView = Extract<LayerView, 'wm' | 'swm' | 'vm'>;
+type ParticipantsStatus = 'loading' | 'ok' | 'error';
 
 interface DetailOrigin {
   activeLayer: LayerView;
@@ -64,6 +66,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   const [activeLayer, setActiveLayer] = useState<LayerView>('overview');
   const [selectedUri, setSelectedUri] = useState<string | null>(null);
   const [participants, setParticipants] = useState<string[]>([]);
+  const [participantsStatus, setParticipantsStatus] = useState<ParticipantsStatus>('loading');
   // Active sub-graph *page* — when set, the middle pane renders the sub-graph
   // detail view instead of the overview / layer views. This is structurally
   // a sibling of `activeLayer`, not a filter over it: sub-graphs are a peer
@@ -79,7 +82,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   const profile = useProjectProfile(contextGraphId);
   const agentsData = useAgents(contextGraphId);
   const openTab = useTabsStore((s) => s.openTab);
-  const { data: currentAgent } = useFetch(api.fetchCurrentAgent, [], 60_000);
+  const { data: currentAgent } = useCurrentAgent();
 
   const currentScrollKey = useCallback(() => {
     if (activeSubGraph) {
@@ -185,9 +188,16 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
 
   const refreshParticipants = useCallback(() => {
     if (cg?.id) {
+      setParticipantsStatus('loading');
       listParticipants(cg.id)
-        .then(data => setParticipants(data.allowedAgents))
-        .catch(() => setParticipants([]));
+        .then(data => {
+          setParticipants(data.allowedAgents);
+          setParticipantsStatus('ok');
+        })
+        .catch(() => {
+          setParticipants([]);
+          setParticipantsStatus('error');
+        });
     }
   }, [cg?.id]);
 
@@ -349,6 +359,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
             cg={cg}
             memory={rawMemory}
             participants={participants}
+            participantsStatus={participantsStatus}
             currentAgent={currentAgent ?? null}
             onSwitchLayer={handleLayerSwitch}
             onOpenPrimer={handleOpenPrimer}

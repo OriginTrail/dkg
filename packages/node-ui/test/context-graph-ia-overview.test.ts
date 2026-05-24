@@ -196,6 +196,30 @@ describe('Context Graph IA and Overview', () => {
     await act(async () => root.unmount());
   });
 
+  it('does not turn participant fetch failures into exact access counts', async () => {
+    const { container, root } = await render(
+      React.createElement(ProjectOverviewCard, {
+        cg: {
+          id: 'cg-private-error',
+          name: 'Private Graph',
+          accessPolicy: 'private',
+          curator: 'did:dkg:agent:0xabcdefabcdefabcdefabcdefabcdefabcdefabcd',
+          callerInvolved: true,
+        },
+        memory: baseMemory,
+        participants: [],
+        participantsStatus: 'error',
+        currentAgent: { agentDid: 'did:dkg:agent:0xdef' },
+      }),
+    );
+
+    expect(container.textContent).toContain('Agents with access');
+    expect(container.textContent).toContain('Unavailable');
+    expect(container.textContent).not.toContain('Allowlisted agents');
+
+    await act(async () => root.unmount());
+  });
+
   it('renders the linked Context Graph primer with the required concepts', async () => {
     const { container, root } = await render(React.createElement(ContextGraphPrimerView));
 
