@@ -87,6 +87,7 @@ vi.mock('../src/ui/api-wrapper.js', () => ({
       agentDid: 'did:dkg:agent:0xabc',
       peerId: 'peer-1',
     })),
+    listParticipants: vi.fn(async () => ({ allowedAgents: [] })),
   },
 }));
 

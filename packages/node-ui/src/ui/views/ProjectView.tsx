@@ -1,7 +1,6 @@
 import { useMemo, useState, useCallback, useEffect, useRef } from 'react';
 import { useFetch } from '../hooks.js';
 import { api } from '../api-wrapper.js';
-import { listParticipants } from '../api.js';
 import { ImportFilesModal } from '../components/Modals/ImportFilesModal.js';
 import { ShareProjectModal } from '../components/Modals/ShareProjectModal.js';
 import { useMemoryEntities } from '../hooks/useMemoryEntities.js';
@@ -189,7 +188,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   const refreshParticipants = useCallback(() => {
     if (cg?.id) {
       setParticipantsStatus('loading');
-      listParticipants(cg.id)
+      api.listParticipants(cg.id)
         .then(data => {
           setParticipants(data.allowedAgents);
           setParticipantsStatus('ok');

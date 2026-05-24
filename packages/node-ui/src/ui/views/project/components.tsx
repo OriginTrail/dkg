@@ -5,7 +5,7 @@ import { api } from '../../api-wrapper.js';
 import { encodeDocTabId, resolveDocRef } from '../../lib/doc-tab-id.js';
 import {
   listJoinRequests, approveJoinRequest, rejectJoinRequest,
-  listParticipants, listAssertions, promoteAssertion,
+  listAssertions, promoteAssertion,
   publishSharedMemory, executeQuery,
   writeProfileQueryCatalog,
   fetchSubGraphs,
@@ -425,6 +425,7 @@ export function ProjectOverviewCard({
   const layerSum = working + shared + verified;
   const role = overviewRoleState(cg, currentAgent ?? null, currentAgentStatus);
   const access = overviewAccessState(cg?.accessPolicy);
+  const isPublicAccess = normalizeAccessPolicy(cg?.accessPolicy) === 'public';
   const accessAgentStat = overviewAccessAgentStat(cg, participants, participantsStatus);
   const layerStatuses = Object.values(memory.layerStatus ?? {});
   const unavailableLayerCount = layerStatuses.filter(status => status === 'error').length;
@@ -445,6 +446,7 @@ export function ProjectOverviewCard({
       label: 'Working Memory',
       desc: 'Private staging area',
       count: working,
+      status: memory.layerStatus?.wm ?? 'ok',
       color: '#64748b',
     },
     {
@@ -452,6 +454,7 @@ export function ProjectOverviewCard({
       label: 'Shared Working Memory',
       desc: 'Collaborative review',
       count: shared,
+      status: memory.layerStatus?.swm ?? 'ok',
       color: '#f59e0b',
     },
     {
@@ -459,9 +462,11 @@ export function ProjectOverviewCard({
       label: 'Verifiable Memory',
       desc: 'Published on-chain',
       count: verified,
+      status: memory.layerStatus?.vm ?? 'ok',
       color: '#22c55e',
     },
   ];
+  const pipelineHasUnavailableLayer = pipeline.some(item => item.status === 'error');
 
   return (
     <div className="v10-po">
@@ -496,7 +501,7 @@ export function ProjectOverviewCard({
           )}
         </div>
         <div className="v10-po-pipeline-track" aria-hidden="true">
-          {layerSum > 0
+          {!pipelineHasUnavailableLayer && layerSum > 0
             ? pipeline.map(item => {
               const width = item.count > 0 ? (item.count / layerSum) * 100 : 0;
               return (
@@ -524,7 +529,7 @@ export function ProjectOverviewCard({
                 <span className="v10-po-pipeline-step-desc">{item.desc}</span>
               </span>
               <span className="v10-po-pipeline-step-count">
-                {allLayerCountsUnavailable
+                {item.status === 'error'
                   ? 'Unavailable'
                   : `${item.count.toLocaleString()} ${layerNoun(item.key, item.count)}`}
               </span>
@@ -534,7 +539,9 @@ export function ProjectOverviewCard({
       </div>
       {participants.length > 0 && (
         <div className="v10-po-participants">
-          <div className="v10-po-participants-label">Allowlisted participants</div>
+          <div className="v10-po-participants-label">
+            {isPublicAccess ? 'Known participants' : 'Allowlisted participants'}
+          </div>
           <div className="v10-po-participants-list">
             {participants.map(addr => (
               <span key={addr} className="v10-po-participant" title={addr}>

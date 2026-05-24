@@ -268,6 +268,27 @@ describe('Context Graph IA and Overview', () => {
     await act(async () => root.unmount());
   });
 
+  it('labels public graph participant lists as known, not allowlisted', async () => {
+    const { container, root } = await render(
+      React.createElement(ProjectOverviewCard, {
+        cg: {
+          id: 'cg-public-participants',
+          name: 'Open Graph',
+          accessPolicy: 'public',
+          callerInvolved: true,
+        },
+        memory: baseMemory,
+        participants: ['0x1234567890abcdef'],
+        currentAgent: { agentDid: 'did:dkg:agent:0xdef' },
+      }),
+    );
+
+    expect(container.textContent).toContain('Known participants');
+    expect(container.textContent).not.toContain('Allowlisted participants');
+
+    await act(async () => root.unmount());
+  });
+
   it('does not present all-layer query failures as authoritative zero counts', async () => {
     const outageMemory = {
       ...baseMemory,
@@ -293,6 +314,37 @@ describe('Context Graph IA and Overview', () => {
     expect(container.textContent).toContain('Unavailable');
     expect(container.textContent).toContain('Live memory counts are unavailable.');
     expect(container.textContent).not.toContain('Canonical current-layer entity counts.');
+
+    await act(async () => root.unmount());
+  });
+
+  it('does not fold failed layer counts into pipeline percentages', async () => {
+    const partialOutageMemory = {
+      ...baseMemory,
+      counts: { wm: 4, swm: 2, vm: 0, total: 6 },
+      layerStatus: { wm: 'ok', swm: 'ok', vm: 'error' },
+      partial: true,
+      error: null,
+    };
+    const { container, root } = await render(
+      React.createElement(ProjectOverviewCard, {
+        cg: {
+          id: 'cg-partial-outage',
+          name: 'Partial Outage Graph',
+          accessPolicy: 'private',
+          callerInvolved: false,
+        },
+        memory: partialOutageMemory,
+        participants: [],
+        currentAgent: null,
+      }),
+    );
+
+    expect(container.textContent).toContain('One or more layer counts are currently a lower bound.');
+    expect(container.querySelector('.v10-po-pipeline-step.vm .v10-po-pipeline-step-count')?.textContent)
+      .toBe('Unavailable');
+    expect(container.querySelectorAll('.v10-po-pipeline-seg')).toHaveLength(0);
+    expect(container.querySelector('.v10-po-pipeline-empty')).toBeTruthy();
 
     await act(async () => root.unmount());
   });
