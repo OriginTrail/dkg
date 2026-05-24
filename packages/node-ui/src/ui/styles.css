@@ -5371,7 +5371,10 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
 }
 .v10-sgov-title { font-size: 13px; font-weight: 600; color: var(--text-primary); letter-spacing: 0.02em; }
 .v10-sgov-sub { font-size: 11px; color: var(--text-tertiary); font-family: var(--font-mono); }
-.v10-sgov-state { margin: 0 12px 12px; }
+.v10-empty-state.v10-sgov-state {
+  min-height: 220px;
+  margin: 0 12px 12px;
+}
 /* The grid auto-fills: 3-up on wide screens, 2-up around 1100px, single column
    under 720px. Each cell has a stable minimum height so the mini graphs get
    room to breathe regardless of triple density. */
