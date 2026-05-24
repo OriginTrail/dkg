@@ -3,6 +3,7 @@ import { useFetch } from '../hooks.js';
 import { executeQuery, listAssertions, promoteAssertion, publishSharedMemory, listSwmEntities, type AssertionInfo, type PublishResult, type SwmRootEntity } from '../api.js';
 import { FilePreviewModal } from '../components/Modals/FilePreviewModal.js';
 import { useMemoryGraphEvents } from '../hooks/useNodeEvents.js';
+import { MEMORY_LABEL_PREDICATES } from '../lib/memoryLabels.js';
 
 const RdfGraph = lazy(() =>
   import('@origintrail-official/dkg-graph-viz/react').then(m => ({ default: m.RdfGraph }))
@@ -26,9 +27,7 @@ const GRAPH_OPTIONS = {
   labels: {
     predicates: [
       'http://schema.org/text',
-      'http://schema.org/name',
-      'http://www.w3.org/2000/01/rdf-schema#label',
-      'http://purl.org/dc/terms/title',
+      ...MEMORY_LABEL_PREDICATES,
     ],
   },
   style: {

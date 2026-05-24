@@ -99,8 +99,10 @@ describe('useMemoryEntities readable labels', () => {
 
     expect(el.getAttribute('data-loading')).toBe('false');
     expect(labels).toContain('urn:test:named=Friendly title');
+    expect(labels).toContain('urn:test:source=source');
     expect(labels).toContain('urn:dkg:extraction:123e4567-e89b-12d3-a456-426614174000=Extraction 123e4567e89b');
     expect(labels).not.toContain('urn:dkg:extraction:123e4567-e89b-12d3-a456-426614174000=urn:dkg:extraction');
+    expect(labels).not.toContain('urn:test:source=urn:test:source');
     expect(targets).toContain('urn:dkg:extraction:123e4567-e89b-12d3-a456-426614174000=Extraction 123e4567e89b');
   });
 });

@@ -9,6 +9,7 @@ import {
   VIZ_ANCHOR_TYPE, VIZ_AGENT_TYPE,
   VIZ_PRED_ANCHORED_IN, VIZ_PRED_SIGNED_BY, VIZ_PRED_CONSENSUS,
 } from '../../hooks/useVerifiedMemoryAnchors.js';
+import { MEMORY_LABEL_PREDICATES } from '../../lib/memoryLabels.js';
 
 export type LayerView = 'overview' | 'graph-overview' | 'query' | 'wm' | 'swm' | 'vm';
 export type LayerContentTab = 'items' | 'assertions' | 'graph' | 'docs';
@@ -235,11 +236,7 @@ export function buildLayerGraphOptions(
     labelMode: 'humanized' as const,
     renderer: '2d' as const,
     labels: {
-      predicates: [
-        'http://schema.org/name',
-        'http://www.w3.org/2000/01/rdf-schema#label',
-        'http://purl.org/dc/terms/title',
-      ],
+      predicates: [...MEMORY_LABEL_PREDICATES],
       minZoomForLabels: isVM ? 0.2 : 0.3,
     },
     style: {

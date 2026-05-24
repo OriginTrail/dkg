@@ -342,6 +342,7 @@ describe('listAssertions query path', () => {
 
 describe('useMemoryEntities hook', () => {
   const hook = readFileSync(resolve(UI_DIR, 'hooks', 'useMemoryEntities.ts'), 'utf-8');
+  const memoryLabels = readFileSync(resolve(UI_DIR, 'lib', 'memoryLabels.ts'), 'utf-8');
   const nodeEventsHook = readFileSync(resolve(UI_DIR, 'hooks', 'useNodeEvents.ts'), 'utf-8');
 
   it('exports TrustLevel type with three levels', () => {
@@ -372,8 +373,9 @@ describe('useMemoryEntities hook', () => {
   });
 
   it('resolves entity labels from name predicates', () => {
-    expect(hook).toContain('schema.org/name');
-    expect(hook).toContain('rdf-schema#label');
+    expect(hook).toContain('MEMORY_LABEL_PREDICATES');
+    expect(memoryLabels).toContain('schema.org/name');
+    expect(memoryLabels).toContain('rdf-schema#label');
   });
 
   it('deduplicates triples across layers for graph data', () => {

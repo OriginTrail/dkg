@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { authHeaders } from '../api.js';
 import { useMemoryGraphEvents } from './useNodeEvents.js';
+import { MEMORY_LABEL_PREDICATES } from '../lib/memoryLabels.js';
 
 export type TrustLevel = 'working' | 'shared' | 'verified';
 export type MemoryLayerKey = 'wm' | 'swm' | 'vm';
@@ -48,13 +49,6 @@ export interface MemoryData {
 }
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
-const NAME_PREDS = [
-  'http://schema.org/name',
-  'http://www.w3.org/2000/01/rdf-schema#label',
-  'http://purl.org/dc/terms/title',
-  'http://purl.org/dc/elements/1.1/title',
-  'http://xmlns.com/foaf/0.1/name',
-];
 
 function bv(v: unknown): string | undefined {
   if (v == null) return undefined;
@@ -119,13 +113,18 @@ function readableFallbackLabel(entity: MemoryEntity): string {
 }
 
 function deriveEntityLabel(entity: MemoryEntity): string {
-  for (const pred of NAME_PREDS) {
+  for (const pred of MEMORY_LABEL_PREDICATES) {
     const vals = entity.properties.get(pred);
     const name = vals?.find(v => v.trim().length > 0);
     if (name) return name;
   }
 
-  if (entity.label && !isRawExtractionLabel(entity.label, entity.uri)) {
+  const defaultUriLabel = shortLabel(entity.uri);
+  if (
+    entity.label &&
+    entity.label !== defaultUriLabel &&
+    !isRawExtractionLabel(entity.label, entity.uri)
+  ) {
     return entity.label;
   }
 
