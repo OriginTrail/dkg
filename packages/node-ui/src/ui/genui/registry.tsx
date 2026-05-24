@@ -209,7 +209,7 @@ const TaskCard = defineComponent({
 const VerifiedProvenancePanel = defineComponent({
   name: 'VerifiedProvenancePanel',
   description:
-    'The Verified Memory hero block. Use at the top of any entity in the VM layer. Surfaces on-chain anchor (tx hash, block), consensus (signing agents with reputation), knowledge-asset identity (UAL, content hash, TRAC locked, NFT token id), and finalisation timeline.',
+    'The Verifiable Memory hero block. Use at the top of any entity in the VM layer. Surfaces on-chain anchor (tx hash, block), consensus (signing agents with reputation), knowledge-asset identity (UAL, content hash, TRAC locked, NFT token id), and finalisation timeline.',
   props: z.object({
     onChain: z
       .object({
@@ -279,7 +279,7 @@ export const genuiLibrary = createLibrary({
     { name: 'Code domain', components: ['PackageCard', 'FileCard'] },
     { name: 'GitHub domain', components: ['PRCard'] },
     { name: 'Decisions & tasks', components: ['DecisionCard', 'TaskCard'] },
-    { name: 'Verified memory', components: ['VerifiedProvenancePanel'] },
+    { name: 'Verifiable memory', components: ['VerifiedProvenancePanel'] },
   ],
 });
 
@@ -297,7 +297,7 @@ export function getGenuiLibraryPrompt(): string {
         'Always wrap the response in the EntityDetail root element.',
       additionalRules: [
         'Prefer specialised cards (PackageCard, PRCard, DecisionCard, TaskCard, FileCard) when the rdf:type matches.',
-        'Include VerifiedProvenancePanel at the very top if the entity appears in verified memory or has on-chain / signature triples.',
+        'Include VerifiedProvenancePanel at the very top if the entity appears in verifiable memory or has on-chain / signature triples.',
         'Keep the tree compact: aim for 3–8 top-level blocks.',
         'Do not invent triple data — only use values present in the provided triples.',
       ],

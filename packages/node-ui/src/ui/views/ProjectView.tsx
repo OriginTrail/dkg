@@ -18,7 +18,6 @@ import {
   SubGraphDetailView,
   ProjectOverviewCard,
   PendingJoinRequestsBar,
-  MemoryStrip,
   SubGraphOverviewGrid,
   ContextGraphQueryView,
   LayerDetailView,
@@ -35,8 +34,6 @@ interface DetailOrigin {
   activeLayer: LayerView;
   activeSubGraph: string | null;
   layerTabs: Record<MemoryLayerView, LayerContentTab>;
-  overviewExpandedLayer: MemoryLayerView | null;
-  overviewLayerTabs: Record<MemoryLayerView, LayerContentTab>;
   subGraphTabs: Record<string, SubGraphTab>;
   scroll: { key: string; top: number };
 }
@@ -75,10 +72,6 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   const [layerContentTabs, setLayerContentTabs] = useState<Record<MemoryLayerView, LayerContentTab>>(
     DEFAULT_LAYER_TABS,
   );
-  const [overviewExpandedLayer, setOverviewExpandedLayer] = useState<MemoryLayerView | null>(null);
-  const [overviewLayerTabs, setOverviewLayerTabs] = useState<Record<MemoryLayerView, LayerContentTab>>(
-    DEFAULT_LAYER_TABS,
-  );
   const [subGraphTabs, setSubGraphTabs] = useState<Record<string, SubGraphTab>>({});
   const pageRef = useRef<HTMLElement | null>(null);
   const detailOriginRef = useRef<DetailOrigin | null>(null);
@@ -86,6 +79,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   const profile = useProjectProfile(contextGraphId);
   const agentsData = useAgents(contextGraphId);
   const openTab = useTabsStore((s) => s.openTab);
+  const { data: currentAgent } = useFetch(api.fetchCurrentAgent, [], 60_000);
 
   const currentScrollKey = useCallback(() => {
     if (activeSubGraph) {
@@ -104,8 +98,6 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
       activeLayer,
       activeSubGraph,
       layerTabs: { ...layerContentTabs },
-      overviewExpandedLayer,
-      overviewLayerTabs: { ...overviewLayerTabs },
       subGraphTabs: { ...subGraphTabs },
       scroll: { key, top: scrollEl?.scrollTop ?? 0 },
     };
@@ -114,8 +106,6 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     activeSubGraph,
     currentScrollKey,
     layerContentTabs,
-    overviewExpandedLayer,
-    overviewLayerTabs,
     subGraphTabs,
   ]);
 
@@ -234,10 +224,6 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     setLayerContentTabs(prev => prev[layer] === tab ? prev : { ...prev, [layer]: tab });
   }, []);
 
-  const handleOverviewLayerTabChange = useCallback((layer: MemoryLayerView, tab: LayerContentTab) => {
-    setOverviewLayerTabs(prev => prev[layer] === tab ? prev : { ...prev, [layer]: tab });
-  }, []);
-
   const handleSubGraphTabChange = useCallback((slug: string, tab: SubGraphTab) => {
     setSubGraphTabs(prev => prev[slug] === tab ? prev : { ...prev, [slug]: tab });
   }, []);
@@ -257,8 +243,6 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     setActiveLayer(origin.activeLayer);
     setActiveSubGraph(origin.activeSubGraph);
     setLayerContentTabs(origin.layerTabs);
-    setOverviewExpandedLayer(origin.overviewExpandedLayer);
-    setOverviewLayerTabs(origin.overviewLayerTabs);
     setSubGraphTabs(origin.subGraphTabs);
     pendingScrollRestoreRef.current = origin.scroll;
   }, []);
@@ -271,16 +255,20 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     handleNavigate(uri, 'page');
   }, [handleNavigate]);
 
-  const handleOverviewStripNavigate = useCallback((uri: string) => {
-    const key = overviewExpandedLayer
-      ? `layer:${overviewExpandedLayer}:${overviewLayerTabs[overviewExpandedLayer]}`
-      : 'page';
-    handleNavigate(uri, key);
-  }, [handleNavigate, overviewExpandedLayer, overviewLayerTabs]);
-
-  const handleOverviewStripNodeClick = useCallback((node: any) => {
-    if (node?.id) handleOverviewStripNavigate(node.id);
-  }, [handleOverviewStripNavigate]);
+  const handleOpenPrimer = useCallback(() => {
+    openTab({
+      id: 'context-graph-primer',
+      label: 'What is a Context Graph?',
+      closable: true,
+    });
+    if (typeof window !== 'undefined') {
+      const base = window.location.pathname.startsWith('/ui') ? '/ui' : '';
+      const target = `${base}/context-graph-primer`;
+      if (window.location.pathname !== target) {
+        window.history.pushState(null, '', target);
+      }
+    }
+  }, [openTab]);
 
   if (!cg) {
     return (
@@ -364,15 +352,15 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
       {/* Overview View */}
       {!activeSubGraph && activeLayer === 'overview' && !selectedEntity && (
         <>
-          <ProjectOverviewCard cg={cg} memory={rawMemory} participants={participants} />
-          <PendingJoinRequestsBar contextGraphId={contextGraphId} onParticipantsChanged={refreshParticipants} />
-          <SubGraphBar
-            contextGraphId={contextGraphId}
-            profile={profile}
-            selected={activeSubGraph}
-            entities={rawMemory.entityList}
-            onSelect={handleSelectSubGraph}
+          <ProjectOverviewCard
+            cg={cg}
+            memory={rawMemory}
+            participants={participants}
+            currentAgent={currentAgent ?? null}
+            onSwitchLayer={handleLayerSwitch}
+            onOpenPrimer={handleOpenPrimer}
           />
+          <PendingJoinRequestsBar contextGraphId={contextGraphId} onParticipantsChanged={refreshParticipants} />
           {rawMemory.loading && (
             <div className="v10-me-loading"><div className="v10-me-loading-text">Loading memory...</div></div>
           )}
@@ -388,21 +376,10 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
             emptyHint="Once agents start proposing decisions or tasks they'll show up here as a live feed."
             className="v10-overview-activity"
           />
-          <MemoryStrip
-            memory={rawMemory}
-            onSwitchLayer={handleLayerSwitch}
-            onSelectEntity={handleOverviewStripNavigate}
-            contextGraphId={contextGraphId}
-            onNodeClick={handleOverviewStripNodeClick}
-            expandedLayer={overviewExpandedLayer}
-            onExpandedLayerChange={setOverviewExpandedLayer}
-            expandTabs={overviewLayerTabs}
-            onExpandTabChange={handleOverviewLayerTabChange}
-          />
         </>
       )}
 
-      {/* Graph Overview — one mini graph per sub-graph, side-by-side */}
+      {/* Subgraphs — one mini graph per sub-graph, side-by-side */}
       {!activeSubGraph && activeLayer === 'graph-overview' && !selectedEntity && (
         <SubGraphOverviewGrid
           contextGraphId={contextGraphId}

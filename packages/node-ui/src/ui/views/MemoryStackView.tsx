@@ -3,7 +3,7 @@
  * every project the user is in.
  *
  * Each visible, non-hidden project becomes a row with three cards:
- * Working / Shared / Verified Memory. Each card shows the layer's
+ * Working / Shared / Verifiable Memory. Each card shows the layer's
  * entity + triple counts for that project, a short preview of the
  * newest entities, and a button that deep-links into the project's
  * layer tab (reusing the existing `wm:` / `swm:` / `vm:` tab ids).
@@ -31,7 +31,7 @@ const LAYERS: Array<{
 }> = [
   { key: 'working',  title: 'Working Memory',        short: 'WM',  icon: '◇', color: '#64748b', desc: 'Private agent drafts', tabPrefix: 'wm' },
   { key: 'shared',   title: 'Shared Working Memory', short: 'SWM', icon: '◈', color: '#f59e0b', desc: 'Team proposals',       tabPrefix: 'swm' },
-  { key: 'verified', title: 'Verified Memory',       short: 'VM',  icon: '◉', color: '#22c55e', desc: 'On-chain knowledge',   tabPrefix: 'vm' },
+  { key: 'verified', title: 'Verifiable Memory',     short: 'VM',  icon: '◉', color: '#22c55e', desc: 'On-chain knowledge',   tabPrefix: 'vm' },
 ];
 
 const TS_PREDS = [

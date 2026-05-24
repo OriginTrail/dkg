@@ -290,11 +290,11 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
             <div className="v10-form-radio-group">
               <label className="v10-form-radio">
                 <input type="radio" checked={publishPolicy === 'curator-only'} readOnly disabled />
-                Curator only — only the curator can publish to Verified Memory
+                Curator only — only the curator can publish to Verifiable Memory
               </label>
               <label className="v10-form-radio">
                 <input type="radio" checked={publishPolicy === 'open'} readOnly disabled />
-                Open — any collaborator can publish to Verified Memory
+                Open — any collaborator can publish to Verifiable Memory
               </label>
             </div>
           </div>

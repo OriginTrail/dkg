@@ -2,6 +2,7 @@ import React, { Suspense, useState, useEffect } from 'react';
 import { useTabsStore } from '../../stores/tabs.js';
 import { DashboardView } from '../../views/DashboardView.js';
 import { ProjectView } from '../../views/ProjectView.js';
+import { ContextGraphPrimerView } from '../../views/ContextGraphPrimerView.js';
 import { MemoryLayerView } from '../../views/MemoryLayerView.js';
 import { MemoryStackView } from '../../views/MemoryStackView.js';
 import { authHeaders, fileUrl } from '../../api.js';
@@ -295,6 +296,8 @@ function ViewContainer() {
   }
 
   if (activeTabId === 'memory-stack') return <MemoryStackView />;
+
+  if (activeTabId === 'context-graph-primer') return <ContextGraphPrimerView />;
 
   if (activeTabId.startsWith('project:')) {
     const cgId = activeTabId.slice('project:'.length);

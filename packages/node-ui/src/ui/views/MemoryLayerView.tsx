@@ -18,7 +18,7 @@ type ViewMode = 'table' | 'graph';
 const LAYER_META: Record<MemoryLayer, { label: string; color: string; icon: string; description: string }> = {
   wm: { label: 'Working Memory', color: 'var(--layer-working)', icon: '◇', description: 'Private agent drafts. Fast local storage.' },
   swm: { label: 'Shared Working Memory', color: 'var(--layer-shared)', icon: '◈', description: 'Shared proposals with collaborators. TTL-bounded.' },
-  vm: { label: 'Verified Memory', color: 'var(--layer-verified)', icon: '◉', description: 'Endorsed, published, on-chain knowledge.' },
+  vm: { label: 'Verifiable Memory', color: 'var(--layer-verified)', icon: '◉', description: 'Endorsed, published, on-chain knowledge.' },
 };
 
 const GRAPH_OPTIONS = {
@@ -202,7 +202,7 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
         <div className="v10-vm-search-panel">
           <div className="v10-vm-search-header">
             <div>
-              <div className="v10-vm-search-title">Search Verified Memory</div>
+              <div className="v10-vm-search-title">Search Verifiable Memory</div>
               <div className="v10-vm-search-desc">
                 Search published triples by subject, predicate, object, or across all fields.
               </div>
@@ -220,7 +220,7 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
             <input
               type="text"
               className="v10-mlv-query-input"
-              placeholder="Search verified memory..."
+              placeholder="Search verifiable memory..."
               value={draftSearch}
               onChange={(e) => setDraftSearch(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') runVerifiedSearch(); }}
@@ -575,7 +575,7 @@ function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: string;
     return (
       <div className="v10-publish-panel">
         <div className="v10-publish-panel-header">
-          <span className="v10-publish-panel-title">Publish to Verified Memory</span>
+          <span className="v10-publish-panel-title">Publish to Verifiable Memory</span>
         </div>
         <div className="v10-publish-panel-empty">
           No data in Shared Working Memory yet. Promote assertions from Working Memory first.
@@ -638,7 +638,7 @@ function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: string;
 
       {publishResult && (
         <div className="v10-publish-result-card success">
-          <div className="v10-publish-result-title">Published to Verified Memory</div>
+          <div className="v10-publish-result-title">Published to Verifiable Memory</div>
           <div className="v10-publish-result-details">
             <div><span className="v10-publish-result-label">Knowledge Collection:</span> {publishResult.kcId}</div>
             <div><span className="v10-publish-result-label">Status:</span> {publishResult.status}</div>

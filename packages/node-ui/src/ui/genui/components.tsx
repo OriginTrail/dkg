@@ -282,7 +282,7 @@ export const VerifiedProvenancePanelImpl: React.FC<RenderProps<{
     <div className="v10-genui-vm-panel-head">
       <div className="v10-genui-vm-badge">
         <span className="v10-genui-vm-badge-dot" />
-        Verified Memory
+        Verifiable Memory
       </div>
       <div className="v10-genui-vm-title">On-chain provenance</div>
     </div>

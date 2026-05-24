@@ -129,7 +129,7 @@ export const MOCK_WALLETS = {
 
 export const MOCK_NOTIFICATIONS = {
   notifications: [
-    { id: 1, ts: Date.now() - 60000, type: 'publish', title: 'Publish complete', message: 'warfarin-aspirin-001 published to Verified Memory', source: null, peer: null, read: 0, meta: null },
+    { id: 1, ts: Date.now() - 60000, type: 'publish', title: 'Publish complete', message: 'warfarin-aspirin-001 published to Verifiable Memory', source: null, peer: null, read: 0, meta: null },
     { id: 2, ts: Date.now() - 300000, type: 'agent', title: 'Agent connected', message: 'research-agent joined Pharma Drug Interactions', source: null, peer: 'QmResearch456', read: 0, meta: null },
     { id: 3, ts: Date.now() - 900000, type: 'sync', title: 'Sync complete', message: '12 new triples synced from data-curator', source: null, peer: 'QmCurator789', read: 1, meta: null },
   ],
@@ -146,7 +146,7 @@ export const MOCK_NODE_LOG = {
     '[2026-04-11 10:30:15] INFO  Agent research-agent connected via libp2p',
     '[2026-04-11 10:31:00] INFO  Publish operation started: warfarin-aspirin-001',
     '[2026-04-11 10:31:12] INFO  Triple store updated: +34 triples',
-    '[2026-04-11 10:31:15] INFO  Publish complete: warfarin-aspirin-001 → Verified Memory',
+    '[2026-04-11 10:31:15] INFO  Publish complete: warfarin-aspirin-001 → Verifiable Memory',
     '[2026-04-11 10:32:00] DEBUG SPARQL query executed in 23ms (42 results)',
     '[2026-04-11 10:33:00] INFO  Gossip: received 3 proposals from data-curator',
     '[2026-04-11 10:34:00] INFO  SWM cleanup: 0 expired triples removed',
@@ -168,7 +168,7 @@ export const MOCK_SESSIONS = {
       session: 'sess-def456',
       messages: [
         { author: 'user', text: 'Summarize the latest climate data for Arctic ice', ts: '2026-04-10T14:00:00Z' },
-        { author: 'assistant', text: 'Based on the latest projections in the verified memory...', ts: '2026-04-10T14:00:03Z' },
+        { author: 'assistant', text: 'Based on the latest projections in the verifiable memory...', ts: '2026-04-10T14:00:03Z' },
       ],
     },
   ],

@@ -79,6 +79,10 @@ vi.mock('../src/ui/api-wrapper.js', () => ({
     fetchContextGraphs: vi.fn(async () => ({
       contextGraphs: [{ id: 'cg-test', name: 'Context Graph Test' }],
     })),
+    fetchCurrentAgent: vi.fn(async () => ({
+      agentDid: 'did:dkg:agent:0xabc',
+      peerId: 'peer-1',
+    })),
   },
 }));
 
@@ -133,7 +137,8 @@ vi.mock('../src/ui/views/project/components.js', () => ({
   LayerSwitcher: ({ active, onSwitch }: { active: string; onSwitch: (layer: string) => void }) =>
     React.createElement('div', { 'data-testid': 'active-layer', 'data-layer': active },
       React.createElement('button', { 'data-testid': 'switch-wm', onClick: () => onSwitch('wm') }, 'WM'),
-      React.createElement('button', { 'data-testid': 'switch-swm', onClick: () => onSwitch('swm') }, 'SWM')),
+      React.createElement('button', { 'data-testid': 'switch-swm', onClick: () => onSwitch('swm') }, 'SWM'),
+      React.createElement('button', { 'data-testid': 'switch-subgraphs', onClick: () => onSwitch('graph-overview') }, 'Subgraphs')),
   KADetailView: ({ entity, onNavigate, onClose }: { entity: any; onNavigate: (uri: string) => void; onClose: () => void }) =>
     React.createElement('section', { 'data-testid': 'entity-detail', 'data-entity': entity.uri },
       React.createElement('div', {}, entity.label),
@@ -182,7 +187,11 @@ vi.mock('../src/ui/views/project/components.js', () => ({
             onClick: () => onSelectEntity('urn:entity:working'),
           }, 'Open strip entity'))));
   },
-  SubGraphOverviewGrid: () => null,
+  SubGraphOverviewGrid: ({ onSelectSubGraph }: { onSelectSubGraph: (slug: string) => void }) =>
+    React.createElement('button', {
+      'data-testid': 'select-subgraph-demo',
+      onClick: () => onSelectSubGraph('demo'),
+    }, 'Open demo subgraph'),
   ContextGraphQueryView: () => null,
   LayerDetailView: ({ layer, activeTab, onTabChange, onSelectEntity }: {
     layer: string;
@@ -278,33 +287,9 @@ describe('ProjectView entity detail navigation', () => {
     expect(query('layer-scroll').scrollTop).toBe(86);
   });
 
-  it('restores overview strip expansion, subtab, and scroll when entity detail closes', async () => {
-    await click('expand-strip-swm');
-    await click('strip-tab-graph');
-
-    const scroller = query('strip-scroll');
-    scroller.scrollTop = 64;
-
-    await click('open-strip-entity');
-    expect(query('entity-detail').dataset.entity).toBe('urn:entity:working');
-
-    await click('detail-back');
-    await flush();
-
-    expect(query('active-layer').dataset.layer).toBe('overview');
-    expect(query('memory-strip').dataset.expanded).toBe('swm');
-    expect(query('memory-strip').dataset.tab).toBe('graph');
-    expect(query('strip-scroll').scrollTop).toBe(64);
-  });
-
-  it('restores page scroll when overview activity opens while the strip is expanded', async () => {
-    await click('expand-strip-swm');
-    await click('strip-tab-graph');
-
+  it('restores page scroll when overview activity opens an entity detail', async () => {
     const pageScroller = scrollRoot('page');
-    const stripScroller = query('strip-scroll');
     pageScroller.scrollTop = 140;
-    stripScroller.scrollTop = 32;
 
     await click('open-activity-entity');
     expect(query('entity-detail').dataset.entity).toBe('urn:entity:working');
@@ -315,12 +300,11 @@ describe('ProjectView entity detail navigation', () => {
     await flush();
 
     expect(query('active-layer').dataset.layer).toBe('overview');
-    expect(query('memory-strip').dataset.expanded).toBe('swm');
-    expect(query('memory-strip').dataset.tab).toBe('graph');
     expect(scrollRoot('page').scrollTop).toBe(140);
   });
 
   it('keeps the originating subgraph stable while following cross-subgraph entity links', async () => {
+    await click('switch-subgraphs');
     await click('select-subgraph-demo');
     await click('subgraph-tab-graph');
     expect(query('active-subgraph').textContent).toBe('demo');

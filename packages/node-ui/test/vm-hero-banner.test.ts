@@ -84,7 +84,7 @@ describe('VerifiedMemoryHeroBanner', () => {
     });
 
     expect(container.querySelector('.v10-vm-empty-state')).toBeTruthy();
-    expect(container.textContent).toContain('Verified Memory');
+    expect(container.textContent).toContain('Verifiable Memory');
     expect(container.textContent).toContain('Nothing published yet');
     expect(container.textContent).toContain('No Knowledge Assets yet.');
     expect(container.textContent).toContain('Publish entities from Shared Working Memory');
@@ -176,7 +176,7 @@ describe('VerifiedMemoryHeroBanner', () => {
 
     expect(container.querySelector('.v10-vm-empty-state')).toBeTruthy();
     expect(container.textContent).toContain('Nothing published yet');
-    expect(container.textContent).not.toContain('Verified Memory status unavailable.');
+    expect(container.textContent).not.toContain('Verifiable Memory status unavailable.');
     expect(container.textContent).toContain('View full layer');
 
     await unmount();
@@ -210,7 +210,7 @@ describe('VerifiedMemoryHeroBanner', () => {
 
     expect(container.querySelector('.v10-vm-empty-state')).toBeNull();
     expect(container.textContent).not.toContain('Nothing published yet');
-    expect(container.textContent).toContain('Verified Memory status unavailable.');
+    expect(container.textContent).toContain('Verifiable Memory status unavailable.');
     expect(container.textContent).toContain('View full layer');
 
     await unmount();

@@ -163,7 +163,7 @@ export const LAYER_CONFIG: Record<'wm' | 'swm' | 'vm', {
   vm: {
     icon: '◉',
     color: '#22c55e',
-    title: 'Verified Memory',
+    title: 'Verifiable Memory',
     desc: 'Endorsed, published, on-chain knowledge',
     trustLabel: 'Verified',
     trustLevel: 'verified',
@@ -227,7 +227,7 @@ export function buildLayerGraphOptions(
   nodeColors?: Record<string, string>,
 ) {
   const { color } = LAYER_CONFIG[layer];
-  // VM ("Verified Memory") is the DKG hero view — we deliberately juice it:
+  // VM ("Verifiable Memory") is the DKG hero view — we deliberately juice it:
   // thicker & brighter edges, bigger hub/leaf spread, higher gradient so every
   // node reads as a "trust gem". WM/SWM stay quieter so VM clearly wins the
   // eye. This is the visual equivalent of "this knowledge is anchored on-chain".

@@ -30,8 +30,8 @@ const LAYERS = [
     desc: 'Private agent drafts — free, self-attested, persists locally.' },
   { key: 'swm', label: 'Shared Working Memory', short: 'SWM', color: 'var(--layer-shared)',
     desc: 'Team proposals — free, gossip-replicated across context-graph peers.' },
-  { key: 'vm', label: 'Verified Memory', short: 'VM', color: 'var(--layer-verified)',
-    desc: 'On-chain knowledge — permanent, verified, requires TRAC to publish.' },
+  { key: 'vm', label: 'Verifiable Memory', short: 'VM', color: 'var(--layer-verified)',
+    desc: 'On-chain knowledge — permanent, verifiable, requires TRAC to publish.' },
 ] as const;
 
 interface LayerCounts { wm: number; swm: number; vm: number; total: number }
@@ -679,7 +679,7 @@ export function DashboardView() {
             {agg.hasCgs
               ? (agg.sizePartial
                   ? 'Some context graphs could not report size; total is partial.'
-                  : 'Totals across all your context graphs, summed over Working, Shared Working & Verified Memory. Knowledge Assets are entities that have been published to Verified Memory.')
+                  : 'Totals across all your context graphs, summed over Working, Shared Working & Verifiable Memory. Knowledge Assets are entities that have been published to Verifiable Memory.')
               : 'No context graphs yet.'}
           </div>
         </StatCard>
@@ -814,7 +814,7 @@ export function DashboardView() {
           <div className="v10-ws-spend">
             <div className="v10-ws-spend-head">
               <span>Period</span>
-              <span title="Publishes to Verified Memory that spent TRAC on-chain. Free SWM/local/testnet publishes are not counted (they don't burn TRAC).">Publishes to VM</span>
+              <span title="Publishes to Verifiable Memory that spent TRAC on-chain. Free SWM/local/testnet publishes are not counted (they don't burn TRAC).">Publishes to VM</span>
               {/* economics totalTrac is always TRAC-denominated, independent
                   of the node wallet token symbol — label it literally. */}
               <span>TRAC</span>
