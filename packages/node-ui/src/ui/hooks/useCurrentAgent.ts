@@ -15,7 +15,7 @@ let state: CurrentAgentState = {
   loading: true,
   error: null,
 };
-let inFlight: Promise<void> | null = null;
+let inFlight: { authKey: string; promise: Promise<void> } | null = null;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let generation = 0;
 let stateAuthKey = '';
@@ -52,22 +52,25 @@ function setState(next: CurrentAgentState) {
 }
 
 function loadCurrentAgent() {
-  if (inFlight) return inFlight;
-
   const loadGeneration = generation;
   const loadAuthKey = currentAuthKey();
+  if (inFlight?.authKey === loadAuthKey) return inFlight.promise;
+
   if (loadAuthKey !== stateAuthKey) {
     resetStateForAuthKey(loadAuthKey);
     emit();
   } else {
     setState({ ...state, loading: true, error: null });
   }
-  inFlight = api.fetchCurrentAgent()
+  const promise = api.fetchCurrentAgent()
     .then((data) => {
       if (loadGeneration !== generation) return;
       if (loadAuthKey !== currentAuthKey()) {
-        resetStateForAuthKey(currentAuthKey());
-        emit();
+        const authKey = currentAuthKey();
+        if (stateAuthKey !== authKey) {
+          resetStateForAuthKey(authKey);
+          emit();
+        }
         return;
       }
       setState({ data, loading: false, error: null });
@@ -75,8 +78,11 @@ function loadCurrentAgent() {
     .catch((error) => {
       if (loadGeneration !== generation) return;
       if (loadAuthKey !== currentAuthKey()) {
-        resetStateForAuthKey(currentAuthKey());
-        emit();
+        const authKey = currentAuthKey();
+        if (stateAuthKey !== authKey) {
+          resetStateForAuthKey(authKey);
+          emit();
+        }
         return;
       }
       setState({
@@ -86,10 +92,12 @@ function loadCurrentAgent() {
       });
     })
     .finally(() => {
-      if (loadGeneration === generation) inFlight = null;
+      if (loadGeneration === generation && inFlight?.promise === promise) inFlight = null;
     });
 
-  return inFlight;
+  inFlight = { authKey: loadAuthKey, promise };
+
+  return promise;
 }
 
 function startPolling() {
