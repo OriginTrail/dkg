@@ -57,6 +57,7 @@ import {
   type LayerView, type LayerContentTab, type KAPane,
   type SubGraphTab, type SubGraphEntitySort,
 } from './helpers.js';
+import { EmptyState, StatStrip, toneForLayer } from './primitives.js';
 
 export const RdfGraph = lazy(() =>
   import('@origintrail-official/dkg-graph-viz/react').then(m => ({ default: m.RdfGraph }))
@@ -217,13 +218,16 @@ export function ProjectOverviewCard({ cg, memory, participants }: {
           {cg.description && <div className="v10-po-desc">{cg.description}</div>}
         </div>
       </div>
-      <div className="v10-po-stats">
-        <div className="v10-po-stat"><span className="v10-po-stat-val">{layerSum}</span><span className="v10-po-stat-label">Entities total</span></div>
-        <div className="v10-po-stat"><span className="v10-po-stat-val">{working}</span><span className="v10-po-stat-label">in Working</span></div>
-        <div className="v10-po-stat"><span className="v10-po-stat-val">{shared}</span><span className="v10-po-stat-label">in Shared</span></div>
-        <div className="v10-po-stat"><span className="v10-po-stat-val">{verified}</span><span className="v10-po-stat-label">in Verified</span></div>
-        <div className="v10-po-stat"><span className="v10-po-stat-val">{participants.length}</span><span className="v10-po-stat-label">participants</span></div>
-      </div>
+      <StatStrip
+        className="v10-po-stat-strip"
+        items={[
+          { id: 'total', value: layerSum, label: 'Entities total' },
+          { id: 'wm', value: working, label: 'in Working' },
+          { id: 'swm', value: shared, label: 'in Shared' },
+          { id: 'vm', value: verified, label: 'in Verified' },
+          { id: 'participants', value: participants.length, label: 'participants' },
+        ]}
+      />
       {participants.length > 0 && (
         <div className="v10-po-participants">
           <div className="v10-po-participants-label">Participants</div>
@@ -387,7 +391,13 @@ export function LayerGraphPanel({
   if (uniqueTriples.length === 0) {
     return (
       <div className="v10-graph-view v10-graph-view-fill">
-        <span className="v10-graph-placeholder">No triples in {title}</span>
+        <EmptyState
+          compact
+          tone={toneForLayer(layer)}
+          icon={LAYER_CONFIG[layer].icon}
+          title={`No triples in ${title}`}
+          description="The graph will appear when this layer has connected triples."
+        />
       </div>
     );
   }
@@ -395,7 +405,13 @@ export function LayerGraphPanel({
   if (swmAttributionPending) {
     return (
       <div className="v10-graph-view v10-graph-view-fill">
-        <span className="v10-graph-placeholder">Loading Shared Working Memory attribution...</span>
+        <EmptyState
+          compact
+          tone="swm"
+          icon={LAYER_CONFIG.swm.icon}
+          title="Loading Shared Working Memory attribution..."
+          description="Agent colors are being prepared before the graph renders."
+        />
       </div>
     );
   }
@@ -603,7 +619,12 @@ export function MemoryStrip({
               <div className="v10-layer-items">
                 <span className="v10-layer-chevron">▸</span>
                 {layer.entities.length === 0 && (
-                  <span style={{ fontSize: 11, color: 'var(--text-tertiary)', fontStyle: 'italic' }}>No {layerNoun(layer.key, 2).toLowerCase()} yet</span>
+                  <EmptyState
+                    inline
+                    tone={toneForLayer(layer.key)}
+                    icon={layer.icon}
+                    title={`No ${layerNoun(layer.key, 2).toLowerCase()} yet`}
+                  />
                 )}
                 {layer.entities.slice(0, 6).map(e => {
                   const { icon } = entityMeta(e, profile);
@@ -746,14 +767,14 @@ export function TypeBreakdownWidget({ entities }: { entities: MemoryEntity[] }) 
 
   return (
     <GenWidget title="Entity Types">
-      <div className="v10-layer-summary">
-        {breakdown.map(([type, { icon, count }]) => (
-          <div key={type} className="v10-layer-summary-stat">
-            <span className="v10-layer-summary-label">{icon} {type}</span>
-            <span className="v10-layer-summary-value">{count}</span>
-          </div>
-        ))}
-      </div>
+      <StatStrip
+        compact
+        items={breakdown.map(([type, { icon, count }]) => ({
+          id: type,
+          label: `${icon} ${type}`,
+          value: count,
+        }))}
+      />
     </GenWidget>
   );
 }
@@ -773,41 +794,19 @@ export function LayerStatsWidget({ entities, entityCount, triples, layer }: {
     [entities]
   );
   const avgConns = entities.length > 0 ? (totalConns / entities.length).toFixed(1) : '0';
-  const layerConfig = {
-    wm: { icon: '◇', color: '#64748b' },
-    swm: { icon: '◈', color: '#f59e0b' },
-    vm: { icon: '◉', color: '#22c55e' },
-  }[layer];
-
   return (
     <GenWidget title="Layer Stats">
-      <div className="v10-layer-summary">
-        <div className="v10-layer-summary-stat">
-          <span className="v10-layer-summary-label">{layerNoun(layer, entityCount)}</span>
-          <span className="v10-layer-summary-value">{entityCount}</span>
-        </div>
-        <div className="v10-layer-summary-stat">
-          <span className="v10-layer-summary-label">Triples</span>
-          <span className="v10-layer-summary-value">{triples}</span>
-        </div>
-        <div className="v10-layer-summary-stat">
-          <span className="v10-layer-summary-label">Connections</span>
-          <span className="v10-layer-summary-value">{totalConns}</span>
-        </div>
-        <div className="v10-layer-summary-stat">
-          <span className="v10-layer-summary-label">Avg. connections / entity</span>
-          <span className="v10-layer-summary-value">{avgConns}</span>
-        </div>
-        {docCount > 0 && (
-          <div className="v10-layer-summary-stat">
-            <span className="v10-layer-summary-label">📄 Documents</span>
-            <span className="v10-layer-summary-value">{docCount}</span>
-          </div>
-        )}
-        <div className="v10-layer-summary-bar">
-          <div className="v10-layer-summary-bar-fill" style={{ width: '100%', background: layerConfig.color }} />
-        </div>
-      </div>
+      <StatStrip
+        compact
+        layer={layer}
+        items={[
+          { id: 'entities', label: layerNoun(layer, entityCount), value: entityCount },
+          { id: 'triples', label: 'Triples', value: triples },
+          { id: 'connections', label: 'Connections', value: totalConns },
+          { id: 'avg', label: 'Avg. connections / entity', value: avgConns },
+          ...(docCount > 0 ? [{ id: 'documents', label: 'Documents', value: docCount }] : []),
+        ]}
+      />
     </GenWidget>
   );
 }
@@ -889,12 +888,19 @@ export function LayerWidgetStrip({ layer, entities, entityCount, tripleCount, co
   if (entityCount === 0) {
     return (
       <div className="v10-layer-widgets-strip empty">
-        <div className="v10-canvas-empty">
-          <div className="v10-canvas-empty-icon">⬡</div>
-          <div className="v10-canvas-empty-text">
-            Import data or chat with agents to populate this layer.
-          </div>
-        </div>
+        <EmptyState
+          compact
+          tone={toneForLayer(layer)}
+          icon={LAYER_CONFIG[layer].icon}
+          title={`No ${layerNoun(layer, 2).toLowerCase()} yet`}
+          description={
+            layer === 'wm'
+              ? 'Import data or chat with agents to populate Working Memory.'
+              : layer === 'swm'
+                ? 'Promote entities from Working Memory to share them with the team.'
+                : 'Publish entities from Shared Working Memory to verify them on-chain.'
+          }
+        />
       </div>
     );
   }
@@ -963,7 +969,13 @@ export function EntityList({
   if (entities.length === 0) {
     return (
       <div className="v10-entity-list empty">
-        <div className="v10-entity-list-empty">No {layerNoun(layerKey, 2).toLowerCase()} in this layer yet.</div>
+        <EmptyState
+          compact
+          tone={toneForLayer(layerKey)}
+          icon={layerIcon}
+          title={`No ${layerNoun(layerKey, 2).toLowerCase()} yet`}
+          description={`This view will fill when matching ${layerNoun(layerKey, 2).toLowerCase()} are available.`}
+        />
       </div>
     );
   }
@@ -1100,21 +1112,23 @@ export function LayerContent({
           )}
           {isInitialVerifiedMemoryLoad ? (
             <div className="v10-layer-widgets-strip empty">
-              <div className="v10-canvas-empty">
-                <div className="v10-canvas-empty-icon">◉</div>
-                <div className="v10-canvas-empty-text">
-                  Loading Verified Memory...
-                </div>
-              </div>
+              <EmptyState
+                compact
+                tone="vm"
+                icon={LAYER_CONFIG.vm.icon}
+                title="Loading Verified Memory..."
+                description="Knowledge Assets are being read from the verified layer."
+              />
             </div>
           ) : isVerifiedMemoryUnavailable ? (
             <div className="v10-layer-widgets-strip empty">
-              <div className="v10-canvas-empty">
-                <div className="v10-canvas-empty-icon">◉</div>
-                <div className="v10-canvas-empty-text">
-                  Verified Memory status unavailable.
-                </div>
-              </div>
+              <EmptyState
+                compact
+                tone="vm"
+                icon={LAYER_CONFIG.vm.icon}
+                title="Verified Memory status unavailable."
+                description="This node could not read the verified layer right now."
+              />
             </div>
           ) : !isEmptyVerifiedMemory && (
             <>
@@ -1199,15 +1213,14 @@ export function VerifiedMemoryHeroBanner({ entities, tripleCount, contextGraphId
             </span>
           </div>
         </div>
-        <div className="v10-vm-empty-state">
-          <div className="v10-vm-empty-icon">◉</div>
-          <div className="v10-vm-empty-copy">
-            <div className="v10-vm-empty-title">No Knowledge Assets yet.</div>
-            <div className="v10-vm-empty-text">
-              Publish entities from Shared Working Memory to verify them on-chain.
-            </div>
-          </div>
-        </div>
+        <EmptyState
+          compact
+          className="v10-vm-empty-state"
+          tone="vm"
+          icon={LAYER_CONFIG.vm.icon}
+          title="No Knowledge Assets yet."
+          description="Publish entities from Shared Working Memory to verify them on-chain."
+        />
       </div>
     );
   }
@@ -1223,20 +1236,15 @@ export function VerifiedMemoryHeroBanner({ entities, tripleCount, contextGraphId
           </span>
         </div>
       </div>
-      <div className="v10-vm-hero-stats">
-        <div className="v10-vm-hero-stat">
-          <div className="v10-vm-hero-stat-val">{totalAssets}</div>
-          <div className="v10-vm-hero-stat-lbl">Knowledge Assets</div>
-        </div>
-        <div className="v10-vm-hero-stat">
-          <div className="v10-vm-hero-stat-val">{tripleCount.toLocaleString()}</div>
-          <div className="v10-vm-hero-stat-lbl">Verified Triples</div>
-        </div>
-        <div className="v10-vm-hero-stat">
-          <div className="v10-vm-hero-stat-val">{typeCount}</div>
-          <div className="v10-vm-hero-stat-lbl">Entity Types</div>
-        </div>
-      </div>
+      <StatStrip
+        className="v10-vm-hero-stats"
+        layer="vm"
+        items={[
+          { id: 'assets', value: totalAssets, label: 'Knowledge Assets' },
+          { id: 'triples', value: tripleCount.toLocaleString(), label: 'Verified Triples' },
+          { id: 'types', value: typeCount, label: 'Entity Types' },
+        ]}
+      />
       <div className="v10-vm-hero-strip">
         <div className="v10-vm-hero-chip" title="Multi-agent endorsement">
           <span className="v10-vm-hero-chip-dot" style={{ background: '#22c55e' }} />
@@ -1688,13 +1696,32 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
       {saveError && <p className="v10-mlv-status" style={{ color: 'var(--text-danger)' }}>{saveError}</p>}
 
       <div className="v10-cg-query-results">
-        {loading && <p className="v10-mlv-status">Loading...</p>}
-        {error && <p className="v10-mlv-status" style={{ color: 'var(--text-danger)' }}>Error: {error}</p>}
+        {loading && (
+          <EmptyState
+            compact
+            tone="query"
+            icon="?"
+            title="Loading query results..."
+          />
+        )}
+        {error && (
+          <EmptyState
+            compact
+            tone="danger"
+            icon="!"
+            title="Query failed"
+            description={error}
+          />
+        )}
 
         {!loading && !error && rows.length === 0 && (
-          <div className="v10-mlv-empty">
-            <p>No results for this query.</p>
-          </div>
+          <EmptyState
+            compact
+            tone="query"
+            icon="?"
+            title="No results for this query."
+            description="Adjust the query or run a saved query against this Context Graph."
+          />
         )}
 
         {!loading && !error && rows.length > 0 && (
@@ -1799,7 +1826,12 @@ export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }:
   if (loading) {
     return (
       <div style={scrollRootStyle} data-cg-scroll-key={scrollKey}>
-        <div className="v10-layer-state">Loading assertions...</div>
+        <EmptyState
+          compact
+          tone={toneForLayer(layer)}
+          icon={LAYER_CONFIG[layer].icon}
+          title="Loading assertions..."
+        />
       </div>
     );
   }
@@ -1807,7 +1839,16 @@ export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }:
   if (!assertions?.length) {
     return (
       <div style={scrollRootStyle} data-cg-scroll-key={scrollKey}>
-        <div className="v10-layer-state">No assertions in this layer</div>
+        <EmptyState
+          tone={toneForLayer(layer)}
+          icon={LAYER_CONFIG[layer].icon}
+          title={layer === 'swm'
+            ? 'No Shared Working Memory assertions listed yet.'
+            : 'No Working Memory assertions yet.'}
+          description={layer === 'swm'
+            ? 'Promoted assertion contents are available as Shared Working Memory entities. The assertion list will populate once promoted assertions are exposed by the node.'
+            : 'Create or import data to stage assertions in Working Memory.'}
+        />
       </div>
     );
   }
@@ -1956,7 +1997,11 @@ export function DocumentsList({
   if (docs.length === 0) {
     return (
       <div className="v10-docs-placeholder" style={{ flex: 1 }} data-cg-scroll-key={scrollKey}>
-        No documents in this layer. Import a file to get started.
+        <EmptyState
+          compact
+          title="No documents in this layer yet."
+          description="Import a file to add document-backed entities."
+        />
       </div>
     );
   }
@@ -2698,14 +2743,22 @@ export function SubGraphOverviewGrid({
 
   if (loading && cards.length === 0) {
     return (
-      <div className="v10-sgov-loading">Loading sub-graphs…</div>
+      <EmptyState
+        compact
+        icon="#"
+        title="Loading sub-graphs..."
+        className="v10-sgov-state"
+      />
     );
   }
   if (cards.length === 0) {
     return (
-      <div className="v10-sgov-empty">
-        No sub-graphs registered on this project yet.
-      </div>
+      <EmptyState
+        icon="#"
+        title="No sub-graphs registered yet."
+        description="This Context Graph currently only has the root memory view."
+        className="v10-sgov-state"
+      />
     );
   }
 
@@ -2912,7 +2965,11 @@ export function SubGraphTimeline({
   if (items.length === 0) {
     return (
       <div className="v10-subgraph-timeline-empty" data-cg-scroll-key={scrollKey}>
-        No entities in this sub-graph have a timeline value (check the profile's <code>timelinePredicate</code> and the underlying data).
+        <EmptyState
+          compact
+          title="No timeline values yet."
+          description="Entities in this sub-graph do not currently expose the configured timeline field."
+        />
       </div>
     );
   }

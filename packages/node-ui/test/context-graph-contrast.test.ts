@@ -95,6 +95,9 @@ describe('Context Graph contrast tokens', () => {
       '.v10-gen-widget-footnote',
       '.v10-evidence-title',
       '.v10-canvas-empty',
+      '.v10-empty-state-title',
+      '.v10-empty-state-desc',
+      '.v10-stat-strip-label',
       '.v10-entity-list-sort-select',
     ];
 

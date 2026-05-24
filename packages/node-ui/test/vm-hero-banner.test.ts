@@ -103,7 +103,7 @@ describe('VerifiedMemoryHeroBanner', () => {
       contextGraphId: 'cg-populated',
     });
 
-    const statValues = Array.from(container.querySelectorAll('.v10-vm-hero-stat-val'))
+    const statValues = Array.from(container.querySelectorAll('.v10-vm-hero-stats .v10-stat-strip-value'))
       .map((node) => node.textContent);
 
     expect(statValues).toEqual(['2', (1234).toLocaleString(), '2']);

@@ -24,6 +24,7 @@ import {
 } from '../hooks/useProjectActivity.js';
 import { useAgentsContext } from '../hooks/useAgents.js';
 import { useProjectProfileContext } from '../hooks/useProjectProfile.js';
+import { EmptyState } from '../views/project/primitives.js';
 import { AgentChip } from './AgentChip.js';
 
 const LAYER_COLOR: Record<TrustLevel, string> = {
@@ -83,9 +84,11 @@ export const ActivityFeed: React.FC<ActivityFeedProps> = ({
     return (
       <div className={`v10-activity-feed v10-activity-feed-empty ${className}`}>
         {title && <div className="v10-activity-feed-title">{title}</div>}
-        <div className="v10-activity-feed-empty-body">
-          {emptyHint ?? 'No activity with a timestamp yet.'}
-        </div>
+        <EmptyState
+          compact
+          title={emptyHint ?? 'No activity with a timestamp yet.'}
+          className="v10-activity-feed-empty-state"
+        />
       </div>
     );
   }
