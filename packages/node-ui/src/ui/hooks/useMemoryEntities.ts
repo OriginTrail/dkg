@@ -100,6 +100,10 @@ function isRawExtractionLabel(label: string, uri: string): boolean {
   return label === uri && /^urn:dkg:extraction:[^\s]+$/i.test(uri);
 }
 
+function isUnreadableDefaultUriLabel(label: string, uri: string): boolean {
+  return label === uri && (uri.startsWith('urn:') || uri.startsWith('did:'));
+}
+
 function readableFallbackLabel(entity: MemoryEntity): string {
   const tail = readableTail(entity.uri);
   const type = entity.types
@@ -122,7 +126,7 @@ function deriveEntityLabel(entity: MemoryEntity): string {
   const defaultUriLabel = shortLabel(entity.uri);
   if (
     entity.label &&
-    entity.label !== defaultUriLabel &&
+    (entity.label !== defaultUriLabel || !isUnreadableDefaultUriLabel(entity.label, entity.uri)) &&
     !isRawExtractionLabel(entity.label, entity.uri)
   ) {
     return entity.label;

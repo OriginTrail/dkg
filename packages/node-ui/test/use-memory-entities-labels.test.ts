@@ -73,6 +73,8 @@ describe('useMemoryEntities readable labels', () => {
             binding('urn:test:named', SCHEMA_NAME, 'Friendly title', graph),
             binding('urn:test:source', RDF_TYPE, 'http://schema.org/Thing', graph),
             binding('urn:test:source', MENTIONS, extraction, graph),
+            binding('urn:dkg:code:file:demo/project/src/file.ts', RDF_TYPE, 'http://dkg.io/ontology/code/File', graph),
+            binding('did:dkg:agent:12D3KooWExample', RDF_TYPE, 'http://schema.org/Person', graph),
           ];
       return {
         ok: true,
@@ -100,9 +102,13 @@ describe('useMemoryEntities readable labels', () => {
     expect(el.getAttribute('data-loading')).toBe('false');
     expect(labels).toContain('urn:test:named=Friendly title');
     expect(labels).toContain('urn:test:source=source');
+    expect(labels).toContain('urn:dkg:code:file:demo/project/src/file.ts=file.ts');
+    expect(labels).toContain('did:dkg:agent:12D3KooWExample=Person 12D3KooWExample');
     expect(labels).toContain('urn:dkg:extraction:123e4567-e89b-12d3-a456-426614174000=Extraction 123e4567e89b');
     expect(labels).not.toContain('urn:dkg:extraction:123e4567-e89b-12d3-a456-426614174000=urn:dkg:extraction');
     expect(labels).not.toContain('urn:test:source=urn:test:source');
+    expect(labels).not.toContain('urn:dkg:code:file:demo/project/src/file.ts=File file.ts');
+    expect(labels).not.toContain('did:dkg:agent:12D3KooWExample=did:dkg:agent:12D3KooWExample');
     expect(targets).toContain('urn:dkg:extraction:123e4567-e89b-12d3-a456-426614174000=Extraction 123e4567e89b');
   });
 });

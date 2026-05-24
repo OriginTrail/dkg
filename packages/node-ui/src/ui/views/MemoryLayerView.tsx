@@ -3,7 +3,7 @@ import { useFetch } from '../hooks.js';
 import { executeQuery, listAssertions, promoteAssertion, publishSharedMemory, listSwmEntities, type AssertionInfo, type PublishResult, type SwmRootEntity } from '../api.js';
 import { FilePreviewModal } from '../components/Modals/FilePreviewModal.js';
 import { useMemoryGraphEvents } from '../hooks/useNodeEvents.js';
-import { MEMORY_LABEL_PREDICATES } from '../lib/memoryLabels.js';
+import { memoryGraphLabels } from '../lib/memoryLabels.js';
 
 const RdfGraph = lazy(() =>
   import('@origintrail-official/dkg-graph-viz/react').then(m => ({ default: m.RdfGraph }))
@@ -24,12 +24,7 @@ const LAYER_META: Record<MemoryLayer, { label: string; color: string; icon: stri
 const GRAPH_OPTIONS = {
   labelMode: 'humanized' as const,
   renderer: '2d' as const,
-  labels: {
-    predicates: [
-      'http://schema.org/text',
-      ...MEMORY_LABEL_PREDICATES,
-    ],
-  },
+  labels: memoryGraphLabels({ extraPredicates: ['http://schema.org/text'] }),
   style: {
     classColors: {
       'http://schema.org/Person': '#f472b6',
