@@ -42,7 +42,7 @@ function loadCurrentAgent() {
     .catch((error) => {
       if (loadGeneration !== generation) return;
       setState({
-        data: state.data,
+        data: null,
         loading: false,
         error: error instanceof Error ? error.message : 'Failed to load current agent',
       });

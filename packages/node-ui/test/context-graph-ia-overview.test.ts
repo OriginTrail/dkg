@@ -242,6 +242,35 @@ describe('Context Graph IA and Overview', () => {
     await act(async () => root.unmount());
   });
 
+  it('does not present all-layer query failures as authoritative zero counts', async () => {
+    const outageMemory = {
+      ...baseMemory,
+      counts: { wm: 0, swm: 0, vm: 0, total: 0 },
+      layerStatus: { wm: 'error', swm: 'error', vm: 'error' },
+      partial: false,
+      error: null,
+    };
+    const { container, root } = await render(
+      React.createElement(ProjectOverviewCard, {
+        cg: {
+          id: 'cg-outage',
+          name: 'Outage Graph',
+          accessPolicy: 'private',
+          callerInvolved: false,
+        },
+        memory: outageMemory,
+        participants: [],
+        currentAgent: null,
+      }),
+    );
+
+    expect(container.textContent).toContain('Unavailable');
+    expect(container.textContent).toContain('Live memory counts are unavailable.');
+    expect(container.textContent).not.toContain('Canonical current-layer entity counts.');
+
+    await act(async () => root.unmount());
+  });
+
   it('does not turn participant fetch failures into exact access counts', async () => {
     const { container, root } = await render(
       React.createElement(ProjectOverviewCard, {

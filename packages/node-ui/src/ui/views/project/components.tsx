@@ -413,13 +413,19 @@ export function ProjectOverviewCard({
   const role = overviewRoleState(cg, currentAgent ?? null, currentAgentStatus);
   const access = overviewAccessState(cg?.accessPolicy);
   const accessAgentStat = overviewAccessAgentStat(cg, participants, participantsStatus);
+  const layerStatuses = Object.values(memory.layerStatus ?? {});
+  const unavailableLayerCount = layerStatuses.filter(status => status === 'error').length;
+  const allLayerCountsUnavailable =
+    !memory.loading && layerStatuses.length === 3 && unavailableLayerCount === 3;
+  const hasUnavailableLayer = !memory.loading && unavailableLayerCount > 0;
   const statusHint = memory.loading
     ? 'Loading memory layers...'
-    : memory.partial
-      ? 'One or more layer counts are currently a lower bound.'
-      : memory.error
+    : allLayerCountsUnavailable || memory.error
         ? 'Live memory counts are unavailable.'
-        : 'Canonical current-layer entity counts.';
+        : memory.partial || hasUnavailableLayer
+          ? 'One or more layer counts are currently a lower bound.'
+          : 'Canonical current-layer entity counts.';
+  const totalEntitiesValue = allLayerCountsUnavailable ? 'Unavailable' : layerSum.toLocaleString();
   const pipeline = [
     {
       key: 'wm' as const,
@@ -460,7 +466,7 @@ export function ProjectOverviewCard({
       <StatStrip
         className="v10-po-stat-strip"
         items={[
-          { id: 'total', value: layerSum.toLocaleString(), label: 'Total entities', hint: statusHint },
+          { id: 'total', value: totalEntitiesValue, label: 'Total entities', hint: statusHint },
           accessAgentStat,
         ]}
       />
@@ -505,7 +511,9 @@ export function ProjectOverviewCard({
                 <span className="v10-po-pipeline-step-desc">{item.desc}</span>
               </span>
               <span className="v10-po-pipeline-step-count">
-                {item.count.toLocaleString()} {layerNoun(item.key, item.count)}
+                {allLayerCountsUnavailable
+                  ? 'Unavailable'
+                  : `${item.count.toLocaleString()} ${layerNoun(item.key, item.count)}`}
               </span>
             </button>
           ))}
