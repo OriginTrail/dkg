@@ -153,4 +153,48 @@ describe('useCurrentAgent', () => {
 
     await act(async () => root.unmount());
   });
+
+  it('loads immediately for a new consumer after auth changes while polling is active', async () => {
+    fetchCurrentAgentMock.mockResolvedValueOnce({
+      agentDid: 'did:dkg:agent:0xold',
+      agentAddress: '0xold',
+      name: 'Old agent',
+      framework: 'DKG',
+      peerId: 'peer-old',
+      nodeIdentityId: '0',
+    });
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(React.createElement(Probe));
+      await Promise.resolve();
+    });
+    expect(fetchCurrentAgentMock).toHaveBeenCalledTimes(1);
+
+    fetchCurrentAgentMock.mockResolvedValueOnce({
+      agentDid: 'did:dkg:agent:0xnew',
+      agentAddress: '0xnew',
+      name: 'New agent',
+      framework: 'DKG',
+      peerId: 'peer-new',
+      nodeIdentityId: '0',
+    });
+
+    (window as any).__DKG_TOKEN__ = 'token-new';
+    await act(async () => {
+      root.render(React.createElement(React.Fragment, {},
+        React.createElement(Probe),
+        React.createElement(Probe),
+      ));
+      await Promise.resolve();
+    });
+
+    expect(fetchCurrentAgentMock).toHaveBeenCalledTimes(2);
+    expect(container.querySelector('[data-agent-did="did:dkg:agent:0xnew"]')).toBeTruthy();
+
+    await act(async () => root.unmount());
+  });
 });

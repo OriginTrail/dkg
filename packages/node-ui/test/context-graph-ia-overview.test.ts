@@ -246,6 +246,57 @@ describe('Context Graph IA and Overview', () => {
     await act(async () => root.unmount());
   });
 
+  it('uses participant membership as the joined-role fallback for older daemons', async () => {
+    const agentAddress = '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd';
+    const { container, root } = await render(
+      React.createElement(ProjectOverviewCard, {
+        cg: {
+          id: 'cg-member-legacy',
+          name: 'Member Graph',
+          accessPolicy: 'private',
+        },
+        memory: baseMemory,
+        participants: [agentAddress],
+        currentAgent: {
+          agentDid: `did:dkg:agent:${agentAddress}`,
+          agentAddress,
+        },
+        currentAgentStatus: 'ok',
+      }),
+    );
+
+    expect(container.textContent).toContain('Joined');
+    expect(container.textContent).not.toContain('Role unknown');
+
+    await act(async () => root.unmount());
+  });
+
+  it('does not use stale participant membership while participants are loading', async () => {
+    const agentAddress = '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd';
+    const { container, root } = await render(
+      React.createElement(ProjectOverviewCard, {
+        cg: {
+          id: 'cg-member-loading',
+          name: 'Member Graph',
+          accessPolicy: 'private',
+        },
+        memory: baseMemory,
+        participants: [agentAddress],
+        participantsStatus: 'loading',
+        currentAgent: {
+          agentDid: `did:dkg:agent:${agentAddress}`,
+          agentAddress,
+        },
+        currentAgentStatus: 'ok',
+      }),
+    );
+
+    expect(container.textContent).toContain('Role unknown');
+    expect(container.textContent).not.toContain('Joined');
+
+    await act(async () => root.unmount());
+  });
+
   it('summarizes public access without pretending the allowlist is an exact count', async () => {
     const { container, root } = await render(
       React.createElement(ProjectOverviewCard, {

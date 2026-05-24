@@ -281,14 +281,22 @@ type OverviewRoleState = {
 };
 type OverviewAgentStatus = 'loading' | 'ok' | 'error';
 type OverviewParticipantsStatus = 'loading' | 'ok' | 'error';
+type OverviewAgentIdentity = Pick<AgentIdentity, 'agentDid'> & Partial<Pick<AgentIdentity, 'agentAddress'>>;
 
 function overviewRoleState(
   cg: any,
-  currentAgent: Pick<AgentIdentity, 'agentDid'> | null,
+  currentAgent: OverviewAgentIdentity | null,
   currentAgentStatus: OverviewAgentStatus,
+  participants: string[],
+  participantsStatus: OverviewParticipantsStatus,
 ): OverviewRoleState {
   const curator = typeof cg?.curator === 'string' ? cg.curator.trim() : '';
   const agentDid = currentAgent?.agentDid?.trim() ?? '';
+  const agentIds = new Set(
+    [currentAgent?.agentDid, currentAgent?.agentAddress]
+      .filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
+      .map(canonicalAgentDid),
+  );
   if (curator && agentDid && canonicalAgentDid(curator) === canonicalAgentDid(agentDid)) {
     return {
       label: 'Curator',
@@ -322,6 +330,17 @@ function overviewRoleState(
       label: 'Not joined',
       title: 'This agent is not listed as curator or participant for this Context Graph.',
       tone: 'viewer',
+    };
+  }
+  const isListedParticipant = participantsStatus === 'ok' && participants
+    .map(participant => participant.trim())
+    .filter(Boolean)
+    .some(participant => agentIds.has(canonicalAgentDid(participant)));
+  if (isListedParticipant) {
+    return {
+      label: 'Joined',
+      title: 'This agent is listed as a participant for this Context Graph.',
+      tone: 'participant',
     };
   }
   return {
@@ -416,14 +435,14 @@ export function ProjectOverviewCard({
   memory: ReturnType<typeof useMemoryEntities>;
   participants: string[];
   participantsStatus?: OverviewParticipantsStatus;
-  currentAgent?: Pick<AgentIdentity, 'agentDid'> | null;
+  currentAgent?: OverviewAgentIdentity | null;
   currentAgentStatus?: OverviewAgentStatus;
   onSwitchLayer?: (layer: LayerView) => void;
   onOpenPrimer?: () => void;
 }) {
   const { wm: working, swm: shared, vm: verified } = memory.counts;
   const layerSum = working + shared + verified;
-  const role = overviewRoleState(cg, currentAgent ?? null, currentAgentStatus);
+  const role = overviewRoleState(cg, currentAgent ?? null, currentAgentStatus, participants, participantsStatus);
   const access = overviewAccessState(cg?.accessPolicy);
   const isPublicAccess = normalizeAccessPolicy(cg?.accessPolicy) === 'public';
   const accessAgentStat = overviewAccessAgentStat(cg, participants, participantsStatus);

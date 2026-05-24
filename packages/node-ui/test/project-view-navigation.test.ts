@@ -78,17 +78,14 @@ const tabsStoreMock = vi.hoisted(() => ({
   openTab: vi.fn(),
 }));
 
+const apiWrapperMock = vi.hoisted(() => ({
+  fetchContextGraphs: vi.fn(),
+  fetchCurrentAgent: vi.fn(),
+  listParticipants: vi.fn(),
+}));
+
 vi.mock('../src/ui/api-wrapper.js', () => ({
-  api: {
-    fetchContextGraphs: vi.fn(async () => ({
-      contextGraphs: [{ id: 'cg-test', name: 'Context Graph Test' }],
-    })),
-    fetchCurrentAgent: vi.fn(async () => ({
-      agentDid: 'did:dkg:agent:0xabc',
-      peerId: 'peer-1',
-    })),
-    listParticipants: vi.fn(async () => ({ allowedAgents: [] })),
-  },
+  api: apiWrapperMock,
 }));
 
 vi.mock('../src/ui/api.js', () => ({
@@ -162,8 +159,16 @@ vi.mock('../src/ui/views/project/components.js', () => ({
       React.createElement('button', { 'data-testid': 'subgraph-tab-graph', onClick: () => onTabChange('graph') }, 'Graph'),
       React.createElement('div', { 'data-testid': 'subgraph-scroll', 'data-cg-scroll-key': `subgraph:${slug}:${activeTab}` },
         React.createElement('button', { 'data-testid': 'open-subgraph-entity', onClick: () => onSelectEntity('urn:entity:demo') }, 'Open demo entity'))),
-  ProjectOverviewCard: ({ onOpenPrimer }: { onOpenPrimer: () => void }) =>
-    React.createElement('div', {},
+  ProjectOverviewCard: ({ onOpenPrimer, participants, participantsStatus }: {
+    onOpenPrimer: () => void;
+    participants: string[];
+    participantsStatus: string;
+  }) =>
+    React.createElement('div', {
+      'data-testid': 'overview-card',
+      'data-participants': participants.join(','),
+      'data-participants-status': participantsStatus,
+    },
       'Overview',
       React.createElement('button', { 'data-testid': 'open-primer', onClick: onOpenPrimer }, 'What is a Context Graph?')),
   PendingJoinRequestsBar: () => null,
@@ -250,6 +255,14 @@ describe('ProjectView entity detail navigation', () => {
 
   beforeEach(async () => {
     resetMemory();
+    apiWrapperMock.fetchContextGraphs.mockResolvedValue({
+      contextGraphs: [{ id: 'cg-test', name: 'Context Graph Test' }],
+    });
+    apiWrapperMock.fetchCurrentAgent.mockResolvedValue({
+      agentDid: 'did:dkg:agent:0xabc',
+      peerId: 'peer-1',
+    });
+    apiWrapperMock.listParticipants.mockResolvedValue({ allowedAgents: [] });
     document.body.innerHTML = '<div id="root"></div>';
     originalRaf = window.requestAnimationFrame;
     Object.defineProperty(window, 'requestAnimationFrame', {
@@ -327,6 +340,42 @@ describe('ProjectView entity detail navigation', () => {
     expect(pushStateSpy).not.toHaveBeenCalled();
 
     pushStateSpy.mockRestore();
+  });
+
+  it('does not pass participants loaded for another context graph into Overview', async () => {
+    await act(async () => {
+      root.unmount();
+    });
+    document.body.innerHTML = '<div id="root"></div>';
+    const container = document.getElementById('root');
+    if (!container) throw new Error('Missing root');
+    root = createRoot(container);
+
+    apiWrapperMock.fetchContextGraphs.mockResolvedValue({
+      contextGraphs: [
+        { id: 'cg-test', name: 'Context Graph Test' },
+        { id: 'cg-next', name: 'Next Context Graph' },
+      ],
+    });
+    apiWrapperMock.listParticipants.mockReset();
+    apiWrapperMock.listParticipants
+      .mockResolvedValueOnce({ allowedAgents: ['0xabc'] })
+      .mockImplementation(() => new Promise(() => {}));
+
+    await act(async () => {
+      root.render(React.createElement(ProjectView, { contextGraphId: 'cg-test' }));
+    });
+    await flush();
+    expect(query('overview-card').dataset.participants).toBe('0xabc');
+    expect(query('overview-card').dataset.participantsStatus).toBe('ok');
+
+    await act(async () => {
+      root.render(React.createElement(ProjectView, { contextGraphId: 'cg-next' }));
+    });
+    await flush();
+
+    expect(query('overview-card').dataset.participants).toBe('');
+    expect(query('overview-card').dataset.participantsStatus).toBe('loading');
   });
 
   it('keeps the originating subgraph stable while following cross-subgraph entity links', async () => {

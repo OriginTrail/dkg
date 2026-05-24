@@ -30,6 +30,11 @@ interface ProjectViewProps {
 
 type MemoryLayerView = Extract<LayerView, 'wm' | 'swm' | 'vm'>;
 type ParticipantsStatus = 'loading' | 'ok' | 'error';
+type ParticipantsState = {
+  contextGraphId: string | null;
+  list: string[];
+  status: ParticipantsStatus;
+};
 
 interface DetailOrigin {
   activeLayer: LayerView;
@@ -64,8 +69,11 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   const [showShare, setShowShare] = useState(false);
   const [activeLayer, setActiveLayer] = useState<LayerView>('overview');
   const [selectedUri, setSelectedUri] = useState<string | null>(null);
-  const [participants, setParticipants] = useState<string[]>([]);
-  const [participantsStatus, setParticipantsStatus] = useState<ParticipantsStatus>('loading');
+  const [participantsState, setParticipantsState] = useState<ParticipantsState>({
+    contextGraphId: null,
+    list: [],
+    status: 'loading',
+  });
   // Active sub-graph *page* — when set, the middle pane renders the sub-graph
   // detail view instead of the overview / layer views. This is structurally
   // a sibling of `activeLayer`, not a filter over it: sub-graphs are a peer
@@ -78,6 +86,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   const pageRef = useRef<HTMLElement | null>(null);
   const detailOriginRef = useRef<DetailOrigin | null>(null);
   const pendingScrollRestoreRef = useRef<DetailOrigin['scroll'] | null>(null);
+  const participantsRequestRef = useRef(0);
   const profile = useProjectProfile(contextGraphId);
   const agentsData = useAgents(contextGraphId);
   const openTab = useTabsStore((s) => s.openTab);
@@ -186,18 +195,20 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   const rawMemory = useMemoryEntities(contextGraphId);
 
   const refreshParticipants = useCallback(() => {
-    if (cg?.id) {
-      setParticipantsStatus('loading');
-      api.listParticipants(cg.id)
-        .then(data => {
-          setParticipants(data.allowedAgents);
-          setParticipantsStatus('ok');
-        })
-        .catch(() => {
-          setParticipants([]);
-          setParticipantsStatus('error');
-        });
-    }
+    const targetId = cg?.id;
+    if (!targetId) return;
+    const requestId = participantsRequestRef.current + 1;
+    participantsRequestRef.current = requestId;
+    setParticipantsState({ contextGraphId: targetId, list: [], status: 'loading' });
+    api.listParticipants(targetId)
+      .then(data => {
+        if (participantsRequestRef.current !== requestId) return;
+        setParticipantsState({ contextGraphId: targetId, list: data.allowedAgents, status: 'ok' });
+      })
+      .catch(() => {
+        if (participantsRequestRef.current !== requestId) return;
+        setParticipantsState({ contextGraphId: targetId, list: [], status: 'error' });
+      });
   }, [cg?.id]);
 
   useEffect(() => { refreshParticipants(); }, [refreshParticipants]);
@@ -288,6 +299,12 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     : activeSubGraph
       ? 'subgraph'
       : activeLayer;
+  const participantsForCurrentGraph = participantsState.contextGraphId === cg.id
+    ? participantsState.list
+    : [];
+  const participantsStatusForCurrentGraph = participantsState.contextGraphId === cg.id
+    ? participantsState.status
+    : 'loading';
 
   return (
     <ProjectProfileContext.Provider value={profile}>
@@ -357,8 +374,8 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
           <ProjectOverviewCard
             cg={cg}
             memory={rawMemory}
-            participants={participants}
-            participantsStatus={participantsStatus}
+            participants={participantsForCurrentGraph}
+            participantsStatus={participantsStatusForCurrentGraph}
             currentAgent={currentAgent ?? null}
             currentAgentStatus={currentAgentLoading ? 'loading' : currentAgentError ? 'error' : 'ok'}
             onSwitchLayer={handleLayerSwitch}

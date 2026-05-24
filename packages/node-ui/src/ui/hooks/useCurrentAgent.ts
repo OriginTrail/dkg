@@ -101,8 +101,8 @@ function loadCurrentAgent() {
 }
 
 function startPolling() {
-  if (pollTimer) return;
   void loadCurrentAgent();
+  if (pollTimer) return;
   pollTimer = setInterval(() => {
     void loadCurrentAgent();
   }, POLL_MS);
