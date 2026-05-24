@@ -1630,7 +1630,7 @@ function contextGraphBuiltInCatalog(contextGraphId: string): QueryCatalog {
     subGraph,
     catalogSlug,
     catalogName,
-    catalogDescription: 'Built-in queries for every public graph in this Context Graph.',
+    catalogDescription: 'Built-in queries for available non-private graphs in this Context Graph.',
     catalogRank,
     resultColumn: '',
     ...query,
@@ -1640,13 +1640,13 @@ function contextGraphBuiltInCatalog(contextGraphId: string): QueryCatalog {
     slug: catalogSlug,
     subGraph,
     name: catalogName,
-    description: 'Built-in queries for every public graph in this Context Graph.',
+    description: 'Built-in queries for available non-private graphs in this Context Graph.',
     rank: catalogRank,
     queries: [
       withQueryDefaults({
         slug: 'all-triples',
         name: 'All triples',
-        description: 'Show triples across every public graph in this context graph.',
+        description: 'Show triples across available non-private graphs in this context graph.',
         sparql: contextGraphQueryTemplate(contextGraphId),
         resultColumn: 'o',
         rank: 1,
@@ -1654,7 +1654,7 @@ function contextGraphBuiltInCatalog(contextGraphId: string): QueryCatalog {
       withQueryDefaults({
         slug: 'graphs',
         name: 'Graphs',
-        description: 'List public named graphs and triple counts.',
+        description: 'List available non-private named graphs and triple counts.',
         sparql: `SELECT ?g (COUNT(*) AS ?triples) WHERE {
   GRAPH ?g { ?s ?p ?o }
   ${contextGraphQueryFilter(contextGraphId)}
@@ -1854,10 +1854,35 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
     [catalogueScope, queryCatalogs],
   );
 
-  const hasTeamSavedQueries = useMemo(
-    () => queryCatalogs.some(catalog => !isBuiltInQueryCatalog(catalog) && catalog.queries.length > 0),
-    [queryCatalogs],
+  const hasSavedQueriesForSelectedScope = useMemo(
+    () => queryCatalogs.some((catalog) => {
+      if (isBuiltInQueryCatalog(catalog) || catalog.queries.length === 0) return false;
+      const scope = queryCatalogueScope(catalog);
+      if (catalogueScope === 'context') return scope === 'context';
+      if (catalogueScope === 'subgraphs') return scope === 'subgraph';
+      return true;
+    }),
+    [catalogueScope, queryCatalogs],
   );
+
+  const savedQueryEmptyCopy = useMemo(() => {
+    if (catalogueScope === 'context') {
+      return {
+        title: 'No saved context queries yet.',
+        description: 'Use Save after editing SPARQL to add a reusable context-level query.',
+      };
+    }
+    if (catalogueScope === 'subgraphs') {
+      return {
+        title: 'No saved subgraph queries yet.',
+        description: 'Subgraph-specific saved queries appear when profile metadata includes a subgraph catalogue.',
+      };
+    }
+    return {
+      title: 'No saved profile queries yet.',
+      description: 'Use Save after editing SPARQL to add a reusable query to this catalogue.',
+    };
+  }, [catalogueScope]);
 
   const columns = useMemo(() => {
     const out: string[] = [];
@@ -1931,6 +1956,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
       setLocalSavedCatalogs(prev => appendSavedQueryCatalog(prev, query));
       const key = `${query.subGraph}|${query.catalogSlug}|${query.slug}`;
       setActiveCatalogQueryKey(key);
+      setCatalogueScope('context');
       setDraftQuery(query.sparql);
       if (activeQuery === query.sparql) refresh();
       else setActiveQuery(query.sparql);
@@ -2059,14 +2085,14 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
           </div>
         ) : null}
 
-        {!profile?.loading && !profile?.error && !hasTeamSavedQueries && catalogueScope !== 'subgraphs' && (
+        {!profile?.loading && !profile?.error && visibleQueryCatalogs.length > 0 && !hasSavedQueriesForSelectedScope && (
           <EmptyState
             compact
             inline
             tone="query"
             icon="?"
-            title="No saved profile queries yet."
-            description="Use Save after editing SPARQL to add a reusable query to this catalogue."
+            title={savedQueryEmptyCopy.title}
+            description={savedQueryEmptyCopy.description}
           />
         )}
       </section>

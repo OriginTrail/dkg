@@ -121,6 +121,7 @@ describe('ContextGraphQueryView', () => {
     expect(container.textContent).toContain('Catalogue scope');
     expect(container.textContent).toContain('Ad-hoc SPARQL');
     expect(container.textContent).toContain('Editor and results');
+    expect(container.textContent).toContain('available non-private graphs in this Context Graph');
     expect(container.textContent).toContain('No saved profile queries yet.');
 
     await act(async () => { root.unmount(); });
@@ -165,6 +166,17 @@ describe('ContextGraphQueryView', () => {
 
     const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
     expect(textarea.value).toContain('schema.org/name');
+
+    const contextButton = Array.from(container.querySelectorAll('button'))
+      .find(button => button.textContent === 'Context graph');
+    expect(contextButton).toBeTruthy();
+
+    await act(async () => {
+      contextButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(contextButton!.getAttribute('aria-pressed')).toBe('true');
+    expect(container.textContent).toContain('No saved context queries yet.');
 
     await act(async () => { root.unmount(); });
   });
@@ -225,6 +237,14 @@ describe('ContextGraphQueryView', () => {
       setFieldValue(textarea, 'SELECT ?s WHERE { ?s ?p ?o } LIMIT 10');
     });
 
+    const subgraphButton = Array.from(container.querySelectorAll('button'))
+      .find(button => button.textContent === 'Subgraphs');
+    expect(subgraphButton).toBeTruthy();
+    await act(async () => {
+      subgraphButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(subgraphButton!.getAttribute('aria-pressed')).toBe('true');
+
     const saveButton = Array.from(container.querySelectorAll('button'))
       .find(button => button.textContent === 'Save');
     expect(saveButton).toBeTruthy();
@@ -252,6 +272,9 @@ describe('ContextGraphQueryView', () => {
     expect(apiMocks.writeProfileQueryCatalog).toHaveBeenCalledWith('cg-test', expect.any(Array));
     expect(container.textContent).toContain('Reusable triples');
     expect(container.textContent).toContain('A reusable triples query.');
+    const contextButton = Array.from(container.querySelectorAll('button'))
+      .find(button => button.textContent === 'Context graph');
+    expect(contextButton?.getAttribute('aria-pressed')).toBe('true');
 
     await act(async () => { root.unmount(); });
   });
