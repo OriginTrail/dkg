@@ -1,0 +1,270 @@
+// @vitest-environment happy-dom
+
+import React, { act } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { ProjectProfile } from '../src/ui/hooks/useProjectProfile.js';
+
+(globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+
+const apiMocks = vi.hoisted(() => ({
+  executeQuery: vi.fn(),
+  writeProfileQueryCatalog: vi.fn(),
+}));
+
+vi.mock('../src/ui/api.js', () => ({
+  listJoinRequests: vi.fn(async () => ({ requests: [] })),
+  approveJoinRequest: vi.fn(),
+  rejectJoinRequest: vi.fn(),
+  listParticipants: vi.fn(async () => ({ allowedAgents: [] })),
+  listAssertions: vi.fn(),
+  promoteAssertion: vi.fn(),
+  publishSharedMemory: vi.fn(),
+  executeQuery: apiMocks.executeQuery,
+  writeProfileQueryCatalog: apiMocks.writeProfileQueryCatalog,
+  fetchSubGraphs: vi.fn(async () => ({ subGraphs: [] })),
+}));
+
+const {
+  ContextGraphQueryView,
+} = await import('../src/ui/views/project/components.js');
+
+const {
+  ProjectProfileContext,
+} = await import('../src/ui/hooks/useProjectProfile.js');
+
+function profile(overrides: Partial<ProjectProfile> = {}): ProjectProfile {
+  return {
+    contextGraphId: 'cg-test',
+    displayName: 'Test graph',
+    primaryColor: '#a855f7',
+    accentColor: '#22c55e',
+    subGraphs: [],
+    typeBindings: [],
+    views: [],
+    filterChips: [],
+    queryCatalogs: [],
+    savedQueries: [],
+    loading: false,
+    error: undefined,
+    forSubGraph: (slug: string) => ({
+      slug,
+      displayName: slug === 'docs' ? 'Documents' : slug,
+      color: '#38bdf8',
+      rank: 1,
+    }),
+    forType: () => undefined,
+    view: () => undefined,
+    chipsFor: () => [],
+    savedQueryCatalogsFor: () => [],
+    savedQueriesFor: () => [],
+    ...overrides,
+  };
+}
+
+async function renderWithProfile(value: ProjectProfile): Promise<{
+  container: HTMLDivElement;
+  root: Root;
+}> {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  const root = createRoot(container);
+
+  await act(async () => {
+    root.render(
+      React.createElement(ProjectProfileContext.Provider, { value },
+        React.createElement(ContextGraphQueryView, { contextGraphId: 'cg-test' }),
+      ),
+    );
+  });
+
+  return { container, root };
+}
+
+async function waitForText(container: HTMLElement, text: string): Promise<void> {
+  const started = Date.now();
+  while (Date.now() - started < 1000) {
+    if ((container.textContent ?? '').includes(text)) return;
+    await act(async () => { await Promise.resolve(); });
+  }
+  throw new Error(`Timed out waiting for text: ${text}`);
+}
+
+function setFieldValue(field: HTMLInputElement | HTMLTextAreaElement, value: string): void {
+  const proto = field instanceof HTMLTextAreaElement
+    ? HTMLTextAreaElement.prototype
+    : HTMLInputElement.prototype;
+  const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+  setter?.call(field, value);
+  field.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+describe('ContextGraphQueryView', () => {
+  beforeEach(() => {
+    apiMocks.executeQuery.mockResolvedValue({ result: { bindings: [] } });
+    apiMocks.writeProfileQueryCatalog.mockResolvedValue({});
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+    document.body.innerHTML = '';
+  });
+
+  it('frames the page as a catalogue first and editor second', async () => {
+    const { container, root } = await renderWithProfile(profile());
+
+    await waitForText(container, 'Query Catalogue');
+
+    expect(container.textContent).toContain('Reusable SPARQL queries for this Context Graph');
+    expect(container.textContent).toContain('Saved Queries');
+    expect(container.textContent).toContain('Reusable query catalogue');
+    expect(container.textContent).toContain('Catalogue scope');
+    expect(container.textContent).toContain('Ad-hoc SPARQL');
+    expect(container.textContent).toContain('Editor and results');
+    expect(container.textContent).toContain('No team-saved queries yet.');
+
+    await act(async () => { root.unmount(); });
+  });
+
+  it('groups saved queries and loads the selected query into the editor', async () => {
+    const savedProfile = profile({
+      queryCatalogs: [{
+        slug: 'research',
+        subGraph: 'docs',
+        name: 'Document research',
+        description: 'Queries for document-backed entities.',
+        rank: 1,
+        queries: [{
+          slug: 'find-documents',
+          subGraph: 'docs',
+          catalogSlug: 'research',
+          catalogName: 'Document research',
+          catalogDescription: 'Queries for document-backed entities.',
+          catalogRank: 1,
+          name: 'Find documents',
+          description: 'List markdown-backed document entities.',
+          sparql: 'SELECT ?doc WHERE { GRAPH ?g { ?doc <http://schema.org/name> ?name } } LIMIT 5',
+          resultColumn: 'doc',
+          rank: 1,
+        }],
+      }],
+    });
+    const { container, root } = await renderWithProfile(savedProfile);
+
+    await waitForText(container, 'Documents: Document research');
+    expect(container.textContent).toContain('Queries for document-backed entities.');
+    expect(container.textContent).toContain('List markdown-backed document entities.');
+
+    const findButton = Array.from(container.querySelectorAll('button'))
+      .find(button => button.textContent?.includes('Find documents'));
+    expect(findButton).toBeTruthy();
+
+    await act(async () => {
+      findButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+    expect(textarea.value).toContain('schema.org/name');
+
+    await act(async () => { root.unmount(); });
+  });
+
+  it('shows profile loading and subgraph-empty catalogue states', async () => {
+    const { container, root } = await renderWithProfile(profile({ loading: true }));
+
+    await waitForText(container, 'Loading saved query catalogue...');
+
+    const subgraphButton = Array.from(container.querySelectorAll('button'))
+      .find(button => button.textContent === 'Subgraphs');
+    expect(subgraphButton).toBeTruthy();
+    expect(subgraphButton!.getAttribute('aria-pressed')).toBe('false');
+
+    await act(async () => {
+      subgraphButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(subgraphButton!.getAttribute('aria-pressed')).toBe('true');
+    expect(container.textContent).not.toContain('No subgraph saved queries yet.');
+
+    await act(async () => { root.unmount(); });
+    document.body.innerHTML = '';
+
+    const emptyRender = await renderWithProfile(profile());
+    const emptySubgraphButton = Array.from(emptyRender.container.querySelectorAll('button'))
+      .find(button => button.textContent === 'Subgraphs');
+    expect(emptySubgraphButton).toBeTruthy();
+
+    await act(async () => {
+      emptySubgraphButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    const { container: emptyContainer, root: emptyRoot } = emptyRender;
+    expect(emptyContainer.textContent).toContain('No subgraph saved queries yet.');
+
+    await act(async () => { emptyRoot.unmount(); });
+  });
+
+  it('shows profile errors without also implying an empty catalogue', async () => {
+    const { container, root } = await renderWithProfile(profile({ error: 'Profile query failed' }));
+
+    await waitForText(container, 'Saved query catalogue unavailable');
+
+    expect(container.textContent).toContain('Profile query failed');
+    expect(container.textContent).not.toContain('No team-saved queries yet.');
+
+    await act(async () => { root.unmount(); });
+  });
+
+  it('saves the draft query into the local catalogue', async () => {
+    const { container, root } = await renderWithProfile(profile());
+
+    await waitForText(container, 'Query Catalogue');
+
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+    await act(async () => {
+      setFieldValue(textarea, 'SELECT ?s WHERE { ?s ?p ?o } LIMIT 10');
+    });
+
+    const saveButton = Array.from(container.querySelectorAll('button'))
+      .find(button => button.textContent === 'Save');
+    expect(saveButton).toBeTruthy();
+
+    await act(async () => {
+      saveButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    const nameInput = container.querySelector('input[placeholder="Query name"]') as HTMLInputElement;
+    const descriptionInput = container.querySelector('input[placeholder="Optional"]') as HTMLInputElement;
+    await act(async () => {
+      setFieldValue(nameInput, 'Reusable triples');
+      setFieldValue(descriptionInput, 'A reusable triples query.');
+    });
+
+    const submitButton = Array.from(container.querySelectorAll('button'))
+      .find(button => button.textContent === 'Save query');
+    expect(submitButton).toBeTruthy();
+
+    await act(async () => {
+      submitButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    await waitForText(container, 'Saved to catalog.');
+    expect(apiMocks.writeProfileQueryCatalog).toHaveBeenCalledWith('cg-test', expect.any(Array));
+    expect(container.textContent).toContain('Reusable triples');
+    expect(container.textContent).toContain('A reusable triples query.');
+
+    await act(async () => { root.unmount(); });
+  });
+
+  it('renders query failures as a friendly EmptyState', async () => {
+    apiMocks.executeQuery.mockRejectedValueOnce(new Error('HTTP 500'));
+    const { container, root } = await renderWithProfile(profile());
+
+    await waitForText(container, 'Query could not run.');
+
+    expect(container.textContent).toContain('Check the SPARQL syntax or try again after the node recovers.');
+    expect(container.textContent).toContain('HTTP 500');
+
+    await act(async () => { root.unmount(); });
+  });
+});
