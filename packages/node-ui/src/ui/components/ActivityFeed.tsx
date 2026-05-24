@@ -24,7 +24,7 @@ import {
 } from '../hooks/useProjectActivity.js';
 import { useAgentsContext } from '../hooks/useAgents.js';
 import { useProjectProfileContext } from '../hooks/useProjectProfile.js';
-import { EmptyState } from '../views/project/primitives.js';
+import { EmptyState } from './ContextGraphPrimitives.js';
 import { AgentChip } from './AgentChip.js';
 
 const LAYER_COLOR: Record<TrustLevel, string> = {

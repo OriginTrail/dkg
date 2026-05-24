@@ -1,8 +1,9 @@
 import React from 'react';
 import type { ReactNode } from 'react';
-import { LAYER_CONFIG } from './helpers.js';
 
-export type EmptyStateTone = 'neutral' | 'wm' | 'swm' | 'vm' | 'danger' | 'query';
+type ContextGraphLayer = 'wm' | 'swm' | 'vm';
+
+export type EmptyStateTone = 'neutral' | ContextGraphLayer | 'danger' | 'query';
 
 type EmptyStateAction = {
   label: string;
@@ -12,14 +13,14 @@ type EmptyStateAction = {
 
 const EMPTY_STATE_ACCENTS: Record<EmptyStateTone, string> = {
   neutral: 'var(--border-strong)',
-  wm: LAYER_CONFIG.wm.color,
-  swm: LAYER_CONFIG.swm.color,
-  vm: LAYER_CONFIG.vm.color,
+  wm: 'var(--layer-working, #64748b)',
+  swm: 'var(--layer-shared, #f59e0b)',
+  vm: 'var(--layer-verified, #22c55e)',
   danger: 'var(--text-danger)',
   query: '#38bdf8',
 };
 
-export function toneForLayer(layer: 'wm' | 'swm' | 'vm'): EmptyStateTone {
+export function toneForLayer(layer: ContextGraphLayer): EmptyStateTone {
   return layer;
 }
 
@@ -94,12 +95,12 @@ export function StatStrip({
   className = '',
 }: {
   items: StatStripItem[];
-  layer?: 'wm' | 'swm' | 'vm';
+  layer?: ContextGraphLayer;
   compact?: boolean;
   className?: string;
 }) {
   const style = layer
-    ? ({ '--v10-stat-accent': LAYER_CONFIG[layer].color } as React.CSSProperties)
+    ? ({ '--v10-stat-accent': EMPTY_STATE_ACCENTS[layer] } as React.CSSProperties)
     : undefined;
 
   return (

@@ -26,7 +26,7 @@ vi.mock('../src/ui/api.js', () => ({
 const {
   EmptyState,
   StatStrip,
-} = await import('../src/ui/views/project/primitives.js');
+} = await import('../src/ui/components/ContextGraphPrimitives.js');
 
 const {
   AssertionsList,

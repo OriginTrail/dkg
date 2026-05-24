@@ -57,7 +57,7 @@ import {
   type LayerView, type LayerContentTab, type KAPane,
   type SubGraphTab, type SubGraphEntitySort,
 } from './helpers.js';
-import { EmptyState, StatStrip, toneForLayer } from './primitives.js';
+import { EmptyState, StatStrip, toneForLayer } from '../../components/ContextGraphPrimitives.js';
 
 export const RdfGraph = lazy(() =>
   import('@origintrail-official/dkg-graph-viz/react').then(m => ({ default: m.RdfGraph }))

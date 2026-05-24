@@ -4148,9 +4148,10 @@ body.light .v10-vm-hero {
 .v10-vm-hero-empty {
   gap: 16px;
 }
-.v10-vm-empty-state {
+.v10-empty-state.v10-vm-empty-state {
   display: flex;
   align-items: flex-start;
+  justify-content: flex-start;
   gap: 12px;
   padding: 16px;
   background: var(--v10-vm-surface);
@@ -5928,7 +5929,7 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
   text-transform: uppercase; letter-spacing: 0.06em;
   color: var(--text-tertiary);
 }
-.v10-activity-feed-empty-state { min-height: 96px; }
+.v10-empty-state.v10-activity-feed-empty-state { min-height: 96px; }
 .v10-overview-activity.v10-activity-feed-empty {
   min-height: 140px;
 }
