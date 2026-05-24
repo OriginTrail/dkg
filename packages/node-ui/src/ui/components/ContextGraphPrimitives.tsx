@@ -58,7 +58,7 @@ export function EmptyState({
       data-tone={tone}
       style={style}
     >
-      {icon && <div className="v10-empty-state-icon">{icon}</div>}
+      {icon && <div className="v10-empty-state-icon" aria-hidden="true">{icon}</div>}
       <div className="v10-empty-state-copy">
         <div className="v10-empty-state-title">{title}</div>
         {description && <div className="v10-empty-state-desc">{description}</div>}
@@ -111,8 +111,8 @@ export function StatStrip({
     >
       {items.map((item, index) => (
         <div key={item.id ?? index} className="v10-stat-strip-cell">
-          <span className="v10-stat-strip-value">{item.value}</span>
           <span className="v10-stat-strip-label">{item.label}</span>
+          <span className="v10-stat-strip-value">{item.value}</span>
           {item.hint && <span className="v10-stat-strip-hint">{item.hint}</span>}
         </div>
       ))}

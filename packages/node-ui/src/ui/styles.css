@@ -4712,6 +4712,8 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
   min-width: 0;
 }
 .v10-stat-strip-cell {
+  display: flex;
+  flex-direction: column;
   min-width: 0;
   padding: 10px 12px;
   border: 1px solid color-mix(in srgb, var(--v10-stat-accent) 18%, var(--border-default));
@@ -4720,6 +4722,7 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
 }
 .v10-stat-strip-value {
   display: block;
+  order: 1;
   color: var(--text-primary);
   font-family: var(--font-mono);
   font-size: 18px;
@@ -4729,6 +4732,7 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
 }
 .v10-stat-strip-label {
   display: block;
+  order: 2;
   margin-top: 5px;
   color: var(--text-tertiary);
   font-size: 10px;
@@ -4739,6 +4743,7 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
 }
 .v10-stat-strip-hint {
   display: block;
+  order: 3;
   margin-top: 4px;
   color: var(--text-secondary);
   font-size: 11px;
@@ -4755,6 +4760,7 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
 }
 .v10-stat-strip.compact .v10-stat-strip-cell {
   display: flex;
+  flex-direction: row;
   align-items: center;
   justify-content: space-between;
   gap: 10px;

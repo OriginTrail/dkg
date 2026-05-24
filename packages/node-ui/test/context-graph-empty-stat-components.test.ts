@@ -96,6 +96,7 @@ describe('Context Graph shared empty/stat patterns', () => {
     );
 
     expect(container.querySelector('.v10-empty-state')).toBeTruthy();
+    expect(container.querySelector('.v10-empty-state-icon')?.getAttribute('aria-hidden')).toBe('true');
     expect(container.querySelector('.v10-empty-state-action')).toBeNull();
     expect(container.textContent).toContain('No entities yet');
     expect(container.textContent).toContain('Import data to populate this layer.');
@@ -119,6 +120,25 @@ describe('Context Graph shared empty/stat patterns', () => {
       .toEqual(['2', '1,234']);
     expect(container.textContent).toContain('Knowledge Assets');
     expect(container.textContent).toContain('Verified Triples');
+
+    await unmount();
+  });
+
+  it('keeps compact StatStrip labels before values in DOM reading order', async () => {
+    const { container, unmount } = await render(
+      React.createElement(StatStrip, {
+        compact: true,
+        items: [
+          { id: 'entities', value: 12, label: 'Entities' },
+        ],
+      }),
+    );
+
+    const cell = container.querySelector('.v10-stat-strip-cell');
+    expect(cell?.children[0]?.className).toBe('v10-stat-strip-label');
+    expect(cell?.children[0]?.textContent).toBe('Entities');
+    expect(cell?.children[1]?.className).toBe('v10-stat-strip-value');
+    expect(cell?.children[1]?.textContent).toBe('12');
 
     await unmount();
   });
