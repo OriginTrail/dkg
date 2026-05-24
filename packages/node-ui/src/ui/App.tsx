@@ -231,16 +231,25 @@ const NetworkDebugPage = React.lazy(() =>
   import('./pages/Network.js').then((m) => ({ default: m.NetworkPage }))
 );
 
-function ContextGraphPrimerRoute() {
-  const openTab = useTabsStore((s) => s.openTab);
+const CONTEXT_GRAPH_PRIMER_TAB = {
+  id: 'context-graph-primer',
+  label: 'What is a Context Graph?',
+  closable: true,
+};
 
-  useEffect(() => {
-    openTab({
-      id: 'context-graph-primer',
-      label: 'What is a Context Graph?',
-      closable: true,
-    });
-  }, [openTab]);
+function activateContextGraphPrimerTab() {
+  const { tabs, activeTabId } = useTabsStore.getState();
+  const hasPrimerTab = tabs.some(tab => tab.id === CONTEXT_GRAPH_PRIMER_TAB.id);
+  if (hasPrimerTab && activeTabId === CONTEXT_GRAPH_PRIMER_TAB.id) return;
+
+  useTabsStore.setState({
+    tabs: hasPrimerTab ? tabs : [...tabs, CONTEXT_GRAPH_PRIMER_TAB],
+    activeTabId: CONTEXT_GRAPH_PRIMER_TAB.id,
+  });
+}
+
+function ContextGraphPrimerRoute() {
+  activateContextGraphPrimerTab();
 
   return <AppShell />;
 }

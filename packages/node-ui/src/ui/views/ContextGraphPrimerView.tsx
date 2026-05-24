@@ -11,7 +11,7 @@ const primerSections = [
   },
   {
     title: 'Entities and Knowledge Assets',
-    body: 'Working Memory and Shared Working Memory contain entities. Once an entity is published to Verifiable Memory, it becomes a Knowledge Asset with on-chain provenance.',
+    body: 'Working Memory and Shared Working Memory contain entities. When published, an assertion/triple bundle is anchored as a Knowledge Asset in Verifiable Memory, giving included entities on-chain provenance.',
   },
   {
     title: 'Assertions',

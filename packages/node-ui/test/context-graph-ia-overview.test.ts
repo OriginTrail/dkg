@@ -185,9 +185,12 @@ describe('Context Graph IA and Overview', () => {
       'Working Memory',
       'Shared Working Memory',
       'Verifiable Memory',
+      'assertion/triple bundle is anchored as a Knowledge Asset',
+      'included entities on-chain provenance',
     ]) {
       expect(container.textContent).toContain(text);
     }
+    expect(container.textContent).not.toContain('entity is published to Verifiable Memory, it becomes a Knowledge Asset');
 
     await act(async () => root.unmount());
   });
