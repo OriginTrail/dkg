@@ -266,9 +266,14 @@ type OverviewRoleState = {
   title: string;
   tone: 'curator' | 'participant' | 'viewer' | 'unknown';
 };
+type OverviewAgentStatus = 'loading' | 'ok' | 'error';
 type OverviewParticipantsStatus = 'loading' | 'ok' | 'error';
 
-function overviewRoleState(cg: any, currentAgent: Pick<AgentIdentity, 'agentDid'> | null): OverviewRoleState {
+function overviewRoleState(
+  cg: any,
+  currentAgent: Pick<AgentIdentity, 'agentDid'> | null,
+  currentAgentStatus: OverviewAgentStatus,
+): OverviewRoleState {
   const curator = typeof cg?.curator === 'string' ? cg.curator.trim() : '';
   const agentDid = currentAgent?.agentDid?.trim() ?? '';
   if (curator && agentDid && canonicalAgentDid(curator) === canonicalAgentDid(agentDid)) {
@@ -279,6 +284,20 @@ function overviewRoleState(cg: any, currentAgent: Pick<AgentIdentity, 'agentDid'
     };
   }
   if (cg?.callerInvolved === true) {
+    if (curator && !agentDid && currentAgentStatus === 'loading') {
+      return {
+        label: 'Role checking',
+        title: 'This agent is involved in this Context Graph; curator status is still loading.',
+        tone: 'unknown',
+      };
+    }
+    if (curator && !agentDid && currentAgentStatus === 'error') {
+      return {
+        label: 'Role unknown',
+        title: 'This agent is involved in this Context Graph, but curator status could not be confirmed.',
+        tone: 'unknown',
+      };
+    }
     return {
       label: 'Joined',
       title: 'This agent is involved in this Context Graph; curator status is shown only when identity metadata confirms it.',
@@ -376,6 +395,7 @@ export function ProjectOverviewCard({
   participants,
   participantsStatus = 'ok',
   currentAgent,
+  currentAgentStatus = 'ok',
   onSwitchLayer,
   onOpenPrimer,
 }: {
@@ -384,12 +404,13 @@ export function ProjectOverviewCard({
   participants: string[];
   participantsStatus?: OverviewParticipantsStatus;
   currentAgent?: Pick<AgentIdentity, 'agentDid'> | null;
+  currentAgentStatus?: OverviewAgentStatus;
   onSwitchLayer?: (layer: LayerView) => void;
   onOpenPrimer?: () => void;
 }) {
   const { wm: working, swm: shared, vm: verified } = memory.counts;
   const layerSum = working + shared + verified;
-  const role = overviewRoleState(cg, currentAgent ?? null);
+  const role = overviewRoleState(cg, currentAgent ?? null, currentAgentStatus);
   const access = overviewAccessState(cg?.accessPolicy);
   const accessAgentStat = overviewAccessAgentStat(cg, participants, participantsStatus);
   const statusHint = memory.loading

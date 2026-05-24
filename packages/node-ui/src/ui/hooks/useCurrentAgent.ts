@@ -12,7 +12,7 @@ const POLL_MS = 60_000;
 
 let state: CurrentAgentState = {
   data: null,
-  loading: false,
+  loading: true,
   error: null,
 };
 let inFlight: Promise<void> | null = null;
@@ -70,7 +70,7 @@ function stopPollingIfIdle() {
   inFlight = null;
   state = {
     data: null,
-    loading: false,
+    loading: true,
     error: null,
   };
 }

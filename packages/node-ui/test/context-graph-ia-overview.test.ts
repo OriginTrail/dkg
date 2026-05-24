@@ -152,7 +152,7 @@ describe('Context Graph IA and Overview', () => {
     await act(async () => root.unmount());
   });
 
-  it('uses caller involvement as the joined-role fallback when curator identity is unresolved', async () => {
+  it('keeps curator-owned membership role neutral while current-agent identity is loading', async () => {
     const { container, root } = await render(
       React.createElement(ProjectOverviewCard, {
         cg: {
@@ -165,6 +165,52 @@ describe('Context Graph IA and Overview', () => {
         memory: baseMemory,
         participants: [],
         currentAgent: null,
+        currentAgentStatus: 'loading',
+      }),
+    );
+
+    expect(container.textContent).toContain('Role checking');
+    expect(container.textContent).not.toContain('Joined');
+
+    await act(async () => root.unmount());
+  });
+
+  it('does not show joined for curator-owned graphs when current-agent lookup fails', async () => {
+    const { container, root } = await render(
+      React.createElement(ProjectOverviewCard, {
+        cg: {
+          id: 'cg-member-error',
+          name: 'Member Graph',
+          accessPolicy: 'private',
+          curator: 'did:dkg:agent:0xabcdefabcdefabcdefabcdefabcdefabcdefabcd',
+          callerInvolved: true,
+        },
+        memory: baseMemory,
+        participants: [],
+        currentAgent: null,
+        currentAgentStatus: 'error',
+      }),
+    );
+
+    expect(container.textContent).toContain('Role unknown');
+    expect(container.textContent).not.toContain('Joined');
+
+    await act(async () => root.unmount());
+  });
+
+  it('uses caller involvement as the joined-role fallback when curator metadata is absent', async () => {
+    const { container, root } = await render(
+      React.createElement(ProjectOverviewCard, {
+        cg: {
+          id: 'cg-member-no-curator',
+          name: 'Member Graph',
+          accessPolicy: 'private',
+          callerInvolved: true,
+        },
+        memory: baseMemory,
+        participants: [],
+        currentAgent: null,
+        currentAgentStatus: 'ok',
       }),
     );
 

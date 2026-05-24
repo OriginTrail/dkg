@@ -5427,23 +5427,6 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
 .v10-layer-action-btn.promote:hover { background: rgba(245,158,11,0.15); }
 .v10-layer-detail-content { flex: 1; overflow: auto; }
 
-@media (max-width: 1500px) {
-  .v10-layer-action-btn {
-    min-width: 30px;
-    padding-left: 9px;
-    padding-right: 9px;
-  }
-}
-
-@media (max-width: 920px) {
-  .v10-layer-action-btn {
-    min-width: 28px;
-    width: 28px;
-    padding-left: 0;
-    padding-right: 0;
-  }
-}
-
 /* ── Content tabs (inside layer views) ── */
 .v10-content-tabs {
   flex-shrink: 0; display: flex; align-items: center;

@@ -82,7 +82,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   const profile = useProjectProfile(contextGraphId);
   const agentsData = useAgents(contextGraphId);
   const openTab = useTabsStore((s) => s.openTab);
-  const { data: currentAgent } = useCurrentAgent();
+  const { data: currentAgent, loading: currentAgentLoading, error: currentAgentError } = useCurrentAgent();
 
   const currentScrollKey = useCallback(() => {
     if (activeSubGraph) {
@@ -361,6 +361,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
             participants={participants}
             participantsStatus={participantsStatus}
             currentAgent={currentAgent ?? null}
+            currentAgentStatus={currentAgentLoading ? 'loading' : currentAgentError ? 'error' : 'ok'}
             onSwitchLayer={handleLayerSwitch}
             onOpenPrimer={handleOpenPrimer}
           />
