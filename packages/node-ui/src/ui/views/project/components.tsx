@@ -1794,7 +1794,7 @@ function queryCatalogueScope(catalog: QueryCatalog): 'context' | 'subgraph' {
 function queryErrorMessage(error: string | null): ReactNode {
   return (
     <>
-      <span>Check the SPARQL syntax or try again after the node recovers.</span>
+      <span>Review the query or node response details, then try again.</span>
       {error && <span className="v10-cg-query-error-detail">{error}</span>}
     </>
   );
@@ -1952,7 +1952,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
         <div>
           <h2 className="v10-mlv-title">Query Catalogue</h2>
           <p className="v10-mlv-desc">
-            Reusable SPARQL queries for this Context Graph. People and agents can save queries here, then load them back into the editor.
+            Profile-backed reusable SPARQL queries for this Context Graph. Save queries here, then load them back into the editor.
           </p>
         </div>
       </div>
@@ -1962,7 +1962,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
           <div>
             <span className="v10-cg-query-eyebrow">Saved Queries</span>
             <h3 id="query-catalogue-saved-title">Reusable query catalogue</h3>
-            <p>Named, described SPARQL saved for people and agents to run again.</p>
+            <p>Named, described SPARQL saved in this node profile to run again.</p>
           </div>
           <div className="v10-cg-query-scope">
             <span className="v10-cg-query-scope-label">Catalogue scope</span>
@@ -2065,7 +2065,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
             inline
             tone="query"
             icon="?"
-            title="No team-saved queries yet."
+            title="No saved profile queries yet."
             description="Use Save after editing SPARQL to add a reusable query to this catalogue."
           />
         )}

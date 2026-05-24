@@ -115,13 +115,13 @@ describe('ContextGraphQueryView', () => {
 
     await waitForText(container, 'Query Catalogue');
 
-    expect(container.textContent).toContain('Reusable SPARQL queries for this Context Graph');
+    expect(container.textContent).toContain('Profile-backed reusable SPARQL queries for this Context Graph');
     expect(container.textContent).toContain('Saved Queries');
     expect(container.textContent).toContain('Reusable query catalogue');
     expect(container.textContent).toContain('Catalogue scope');
     expect(container.textContent).toContain('Ad-hoc SPARQL');
     expect(container.textContent).toContain('Editor and results');
-    expect(container.textContent).toContain('No team-saved queries yet.');
+    expect(container.textContent).toContain('No saved profile queries yet.');
 
     await act(async () => { root.unmount(); });
   });
@@ -210,7 +210,7 @@ describe('ContextGraphQueryView', () => {
     await waitForText(container, 'Saved query catalogue unavailable');
 
     expect(container.textContent).toContain('Profile query failed');
-    expect(container.textContent).not.toContain('No team-saved queries yet.');
+    expect(container.textContent).not.toContain('No saved profile queries yet.');
 
     await act(async () => { root.unmount(); });
   });
@@ -262,7 +262,7 @@ describe('ContextGraphQueryView', () => {
 
     await waitForText(container, 'Query could not run.');
 
-    expect(container.textContent).toContain('Check the SPARQL syntax or try again after the node recovers.');
+    expect(container.textContent).toContain('Review the query or node response details, then try again.');
     expect(container.textContent).toContain('HTTP 500');
 
     await act(async () => { root.unmount(); });
