@@ -277,10 +277,10 @@ function overviewRoleState(cg: any, currentAgent: Pick<AgentIdentity, 'agentDid'
       tone: 'curator',
     };
   }
-  if (cg?.callerInvolved === true && agentDid && curator) {
+  if (cg?.callerInvolved === true) {
     return {
       label: 'Participant',
-      title: 'This agent is listed as a participant in this Context Graph.',
+      title: 'This agent is listed as a member of this Context Graph.',
       tone: 'participant',
     };
   }
@@ -295,6 +295,34 @@ function overviewRoleState(cg: any, currentAgent: Pick<AgentIdentity, 'agentDid'
     label: 'Role unknown',
     title: 'The node did not provide enough role metadata for this Context Graph.',
     tone: 'unknown',
+  };
+}
+
+function overviewAccessAgentStat(cg: any, participants: string[]) {
+  const policy = normalizeAccessPolicy(cg?.accessPolicy);
+  if (policy === 'public') {
+    return {
+      id: 'participants',
+      value: 'Open',
+      label: 'Public access',
+      hint: 'Public Context Graphs do not have an authoritative allowlist count.',
+    };
+  }
+
+  const agents = new Set(
+    participants
+      .map(agent => agent.trim())
+      .filter(Boolean)
+      .map(canonicalAgentDid),
+  );
+  const curator = typeof cg?.curator === 'string' ? cg.curator.trim() : '';
+  if (curator) agents.add(canonicalAgentDid(curator));
+
+  return {
+    id: 'participants',
+    value: agents.size.toLocaleString(),
+    label: 'Agents with access',
+    hint: 'Includes the curator plus allowlisted participants reported by the node.',
   };
 }
 
@@ -340,6 +368,7 @@ export function ProjectOverviewCard({
   const layerSum = working + shared + verified;
   const role = overviewRoleState(cg, currentAgent ?? null);
   const access = overviewAccessState(cg?.accessPolicy);
+  const accessAgentStat = overviewAccessAgentStat(cg, participants);
   const statusHint = memory.loading
     ? 'Loading memory layers...'
     : memory.partial
@@ -388,14 +417,14 @@ export function ProjectOverviewCard({
         className="v10-po-stat-strip"
         items={[
           { id: 'total', value: layerSum.toLocaleString(), label: 'Total entities', hint: statusHint },
-          { id: 'participants', value: participants.length.toLocaleString(), label: 'Allowlisted agents' },
+          accessAgentStat,
         ]}
       />
       <div className="v10-po-pipeline" aria-label="Knowledge Pipeline">
         <div className="v10-po-pipeline-head">
           <div>
             <div className="v10-po-section-title">Knowledge Pipeline</div>
-            <div className="v10-po-section-desc">Entities move from private staging to shared review and, when published, become Knowledge Assets.</div>
+            <div className="v10-po-section-desc">Entities move from private staging to shared review; published assertion bundles become Knowledge Assets with on-chain provenance.</div>
           </div>
           {onOpenPrimer && (
             <button type="button" className="v10-po-primer-link" onClick={onOpenPrimer}>

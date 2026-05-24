@@ -109,7 +109,9 @@ describe('Context Graph IA and Overview', () => {
 
     expect(container.textContent).toContain('Curator');
     expect(container.textContent).toContain('Curated');
+    expect(container.textContent).toContain('Agents with access');
     expect(container.textContent).toContain('Knowledge Pipeline');
+    expect(container.textContent).toContain('published assertion bundles become Knowledge Assets');
     expect(container.querySelector('.v10-memory-strip')).toBeNull();
     expect(container.querySelectorAll('.v10-po-pipeline-step')).toHaveLength(3);
 
@@ -150,7 +152,7 @@ describe('Context Graph IA and Overview', () => {
     await act(async () => root.unmount());
   });
 
-  it('does not downgrade an unresolved curator role to participant before identity is available', async () => {
+  it('uses caller involvement as the joined-role fallback when curator identity is unresolved', async () => {
     const { container, root } = await render(
       React.createElement(ProjectOverviewCard, {
         cg: {
@@ -166,8 +168,30 @@ describe('Context Graph IA and Overview', () => {
       }),
     );
 
-    expect(container.textContent).toContain('Role unknown');
-    expect(container.textContent).not.toContain('Participant');
+    expect(container.textContent).toContain('Participant');
+    expect(container.textContent).not.toContain('Role unknown');
+
+    await act(async () => root.unmount());
+  });
+
+  it('summarizes public access without pretending the allowlist is an exact count', async () => {
+    const { container, root } = await render(
+      React.createElement(ProjectOverviewCard, {
+        cg: {
+          id: 'cg-public-open',
+          name: 'Open Graph',
+          accessPolicy: 'public',
+          callerInvolved: true,
+        },
+        memory: baseMemory,
+        participants: [],
+        currentAgent: { agentDid: 'did:dkg:agent:0xdef' },
+      }),
+    );
+
+    expect(container.textContent).toContain('Public access');
+    expect(container.textContent).toContain('Open');
+    expect(container.textContent).not.toContain('Allowlisted agents');
 
     await act(async () => root.unmount());
   });

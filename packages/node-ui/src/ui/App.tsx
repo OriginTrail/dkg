@@ -251,7 +251,7 @@ function activateContextGraphPrimerTab() {
 function ContextGraphPrimerRoute() {
   activateContextGraphPrimerTab();
 
-  return <AppShell />;
+  return <Navigate to="/" replace />;
 }
 
 export function App() {
