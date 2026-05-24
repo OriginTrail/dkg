@@ -261,13 +261,6 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
       label: 'What is a Context Graph?',
       closable: true,
     });
-    if (typeof window !== 'undefined') {
-      const base = window.location.pathname.startsWith('/ui') ? '/ui' : '';
-      const target = `${base}/context-graph-primer`;
-      if (window.location.pathname !== target) {
-        window.history.pushState(null, '', target);
-      }
-    }
   }, [openTab]);
 
   if (!cg) {

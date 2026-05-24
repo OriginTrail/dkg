@@ -74,6 +74,10 @@ const agentsData = {
   openAgent: vi.fn(),
 };
 
+const tabsStoreMock = vi.hoisted(() => ({
+  openTab: vi.fn(),
+}));
+
 vi.mock('../src/ui/api-wrapper.js', () => ({
   api: {
     fetchContextGraphs: vi.fn(async () => ({
@@ -105,7 +109,10 @@ vi.mock('../src/ui/hooks/useAgents.js', () => ({
 }));
 
 vi.mock('../src/ui/stores/tabs.js', () => ({
-  useTabsStore: () => vi.fn(),
+  useTabsStore: (selector?: (state: { openTab: typeof tabsStoreMock.openTab }) => unknown) => {
+    const state = { openTab: tabsStoreMock.openTab };
+    return selector ? selector(state) : state;
+  },
 }));
 
 vi.mock('../src/ui/components/Modals/ImportFilesModal.js', () => ({
@@ -154,7 +161,10 @@ vi.mock('../src/ui/views/project/components.js', () => ({
       React.createElement('button', { 'data-testid': 'subgraph-tab-graph', onClick: () => onTabChange('graph') }, 'Graph'),
       React.createElement('div', { 'data-testid': 'subgraph-scroll', 'data-cg-scroll-key': `subgraph:${slug}:${activeTab}` },
         React.createElement('button', { 'data-testid': 'open-subgraph-entity', onClick: () => onSelectEntity('urn:entity:demo') }, 'Open demo entity'))),
-  ProjectOverviewCard: () => React.createElement('div', {}, 'Overview'),
+  ProjectOverviewCard: ({ onOpenPrimer }: { onOpenPrimer: () => void }) =>
+    React.createElement('div', {},
+      'Overview',
+      React.createElement('button', { 'data-testid': 'open-primer', onClick: onOpenPrimer }, 'What is a Context Graph?')),
   PendingJoinRequestsBar: () => null,
   MemoryStrip: ({ expandedLayer, onExpandedLayerChange, expandTabs, onExpandTabChange, onSelectEntity }: {
     expandedLayer: 'wm' | 'swm' | 'vm' | null;
@@ -301,6 +311,21 @@ describe('ProjectView entity detail navigation', () => {
 
     expect(query('active-layer').dataset.layer).toBe('overview');
     expect(scrollRoot('page').scrollTop).toBe(140);
+  });
+
+  it('opens the primer as a tab without mutating browser history', async () => {
+    const pushStateSpy = vi.spyOn(window.history, 'pushState');
+
+    await click('open-primer');
+
+    expect(tabsStoreMock.openTab).toHaveBeenCalledWith({
+      id: 'context-graph-primer',
+      label: 'What is a Context Graph?',
+      closable: true,
+    });
+    expect(pushStateSpy).not.toHaveBeenCalled();
+
+    pushStateSpy.mockRestore();
   });
 
   it('keeps the originating subgraph stable while following cross-subgraph entity links', async () => {
