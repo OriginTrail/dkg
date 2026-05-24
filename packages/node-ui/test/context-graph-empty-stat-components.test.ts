@@ -30,6 +30,8 @@ const {
 
 const {
   AssertionsList,
+  LayerGraphPanel,
+  VerifiedMemoryHeroBanner,
 } = await import('../src/ui/views/project/components.js');
 
 const {
@@ -169,8 +171,36 @@ describe('Context Graph shared empty/stat patterns', () => {
     );
 
     await waitForText(container, 'No Shared Working Memory assertions listed yet.');
+    expect(container.querySelector('.v10-layer-empty-shell .v10-empty-state')).toBeTruthy();
     expect(container.textContent).toContain('Promoted assertion contents are available as Shared Working Memory entities.');
     expect(container.textContent).not.toContain('No assertions in this layer');
+
+    await unmount();
+  });
+
+  it('keeps graph and VM empty states inside the shared content gutter', async () => {
+    const { container, unmount } = await render(
+      React.createElement(React.Fragment, null,
+        React.createElement(LayerGraphPanel, {
+          layer: 'wm',
+          triples: [],
+          onNodeClick: vi.fn(),
+          contextGraphId: 'cg-test',
+        }),
+        React.createElement('div', { className: 'v10-layer-expand-body entities-tab' },
+          React.createElement(VerifiedMemoryHeroBanner, {
+            entities: [],
+            tripleCount: 0,
+            contextGraphId: 'cg-test',
+          }),
+        ),
+      ),
+    );
+
+    expect(container.querySelector('.v10-graph-view.v10-layer-empty-shell .v10-empty-state')).toBeTruthy();
+    expect(container.querySelector('.v10-layer-expand-body.entities-tab > .v10-vm-hero')).toBeTruthy();
+    expect(container.textContent).toContain('No triples in Working Memory');
+    expect(container.textContent).toContain('No Knowledge Assets yet.');
 
     await unmount();
   });

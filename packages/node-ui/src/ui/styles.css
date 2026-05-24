@@ -4145,6 +4145,9 @@ body.light .v10-vm-hero {
   --v10-vm-accent: #166534;
   --v10-vm-accent-strong: #16a34a;
 }
+.v10-layer-expand-body.entities-tab > .v10-vm-hero {
+  margin: 16px 16px 10px;
+}
 .v10-vm-hero-empty {
   gap: 16px;
 }
@@ -4873,6 +4876,10 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
 .v10-layer-expand-body.full-width > * {
   flex: 1 1 auto; min-height: 0;
   width: 100%;
+}
+.v10-layer-empty-shell {
+  padding: 16px;
+  box-sizing: border-box;
 }
 /* Entities tab body is a single block-level scroll region. We deliberately
    opt out of the parent's flex-column layout here: with flex, each child

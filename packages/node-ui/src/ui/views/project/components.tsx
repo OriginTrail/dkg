@@ -390,7 +390,7 @@ export function LayerGraphPanel({
 
   if (uniqueTriples.length === 0) {
     return (
-      <div className="v10-graph-view v10-graph-view-fill">
+      <div className="v10-graph-view v10-graph-view-fill v10-layer-empty-shell">
         <EmptyState
           compact
           tone={toneForLayer(layer)}
@@ -404,7 +404,7 @@ export function LayerGraphPanel({
 
   if (swmAttributionPending) {
     return (
-      <div className="v10-graph-view v10-graph-view-fill">
+      <div className="v10-graph-view v10-graph-view-fill v10-layer-empty-shell">
         <EmptyState
           compact
           tone="swm"
@@ -1825,7 +1825,7 @@ export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }:
 
   if (loading) {
     return (
-      <div style={scrollRootStyle} data-cg-scroll-key={scrollKey}>
+      <div className="v10-layer-empty-shell" style={scrollRootStyle} data-cg-scroll-key={scrollKey}>
         <EmptyState
           compact
           tone={toneForLayer(layer)}
@@ -1838,7 +1838,7 @@ export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }:
 
   if (!assertions?.length) {
     return (
-      <div style={scrollRootStyle} data-cg-scroll-key={scrollKey}>
+      <div className="v10-layer-empty-shell" style={scrollRootStyle} data-cg-scroll-key={scrollKey}>
         <EmptyState
           tone={toneForLayer(layer)}
           icon={LAYER_CONFIG[layer].icon}
@@ -1996,7 +1996,7 @@ export function DocumentsList({
 
   if (docs.length === 0) {
     return (
-      <div className="v10-docs-placeholder" style={{ flex: 1 }} data-cg-scroll-key={scrollKey}>
+      <div className="v10-docs-placeholder v10-layer-empty-shell" style={{ flex: 1 }} data-cg-scroll-key={scrollKey}>
         <EmptyState
           compact
           title="No documents in this layer yet."
