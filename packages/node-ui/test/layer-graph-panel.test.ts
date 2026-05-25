@@ -342,6 +342,43 @@ describe('LayerGraphPanel graph lifecycle', () => {
 
     expect(document.body.querySelector('.v10-graph-expanded-panel')).toBeTruthy();
     expect(document.body.querySelectorAll('[data-testid="rdf-graph"]').length).toBeGreaterThanOrEqual(2);
+
+    const backdrop = document.body.querySelector('.v10-graph-expanded-backdrop') as HTMLDivElement;
+    await act(async () => {
+      backdrop.click();
+    });
+    expect(document.body.querySelector('.v10-graph-expanded-panel')).toBeNull();
+  });
+
+  it('keeps valid non-http RDF resource IRIs connected in the graph', async () => {
+    vi.stubGlobal('fetch', vi.fn());
+    const { LayerGraphPanel } = await import('../src/ui/views/project/components.js');
+
+    await act(async () => {
+      root.render(React.createElement(LayerGraphPanel, {
+        layer: 'wm',
+        triples: [
+          {
+            subject: 'urn:test:root',
+            predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+            object: 'http://schema.org/Thing',
+          },
+          {
+            subject: 'urn:test:root',
+            predicate: 'https://schema.org/mentions',
+            object: 'ipfs://bafybeigdyrzt',
+          },
+        ],
+      }));
+    });
+
+    await waitForAssertion(() => {
+      expect(container.querySelector('[data-testid="rdf-graph"]')).toBeTruthy();
+    });
+
+    const graph = container.querySelector('[data-testid="rdf-graph"]') as HTMLElement;
+    expect(graph.getAttribute('data-triples')).toBe('2');
+    expect(container.textContent).not.toContain('Singleton shelf');
   });
 
   it('moves disconnected singleton subjects into the shelf instead of the graph data', async () => {
@@ -383,6 +420,8 @@ describe('LayerGraphPanel graph lifecycle', () => {
 
     const singletonItems = container.querySelectorAll('.v10-graph-singleton-item');
     expect(singletonItems.length).toBe(18);
+    const labels = Array.from(singletonItems).map((item) => item.textContent);
+    expect(labels).toContain('Solo document 17');
     const singleton = singletonItems[17] as HTMLButtonElement;
     await act(async () => {
       singleton.click();

@@ -30,7 +30,7 @@ import { ActivityFeed } from '../../components/ActivityFeed.js';
 import { VerifiedIdentityBanner } from '../../components/VerifiedIdentityBanner.js';
 import { SubGraphBar } from '../../components/SubGraphBar.js';
 import { GenUIEntityPanel } from '../../genui/index.js';
-import { memoryGraphLabels } from '../../lib/memoryLabels.js';
+import { MEMORY_LABEL_PREDICATES, memoryGraphLabels } from '../../lib/memoryLabels.js';
 import { canonicalAgentDid, normalizeAccessPolicy } from '../../lib/contextGraphSidebar.js';
 import { useTabsStore } from '../../stores/tabs.js';
 import {
@@ -65,47 +65,66 @@ export const RdfGraph = lazy(() =>
 );
 
 const RDF_TYPE_URI = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+const LABEL_PREDICATE_SET = new Set<string>(MEMORY_LABEL_PREDICATES);
+
+interface SingletonShelfItem {
+  uri: string;
+  label: string;
+}
 
 function isResourceNode(value: string): boolean {
-  return (
-    value.startsWith('http://') ||
-    value.startsWith('https://') ||
-    value.startsWith('urn:') ||
-    value.startsWith('did:') ||
-    value.startsWith('_:') ||
-    (value.startsWith('<') && value.endsWith('>'))
-  );
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.startsWith('"')) return false;
+  if (trimmed.startsWith('_:')) return true;
+  if (trimmed.startsWith('<') && trimmed.endsWith('>')) return true;
+  if (/\s/.test(trimmed)) return false;
+  return /^[A-Za-z][A-Za-z0-9+.-]*:/.test(trimmed);
 }
 
 function graphNodeKey(value: string): string {
   return value.startsWith('<') && value.endsWith('>') ? value.slice(1, -1) : value;
 }
 
-function splitGraphTriplesForShelf(triples: Triple[]): { canvasTriples: Triple[]; singletonUris: string[] } {
+function literalDisplayValue(value: string): string {
+  const trimmed = value.trim();
+  const quoted = /^"((?:\\.|[^"\\])*)"/.exec(trimmed);
+  if (!quoted) return trimmed;
+  return quoted[1].replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+}
+
+function splitGraphTriplesForShelf(triples: Triple[]): { canvasTriples: Triple[]; singletonItems: SingletonShelfItem[] } {
   const subjects = new Map<string, Set<string>>();
   const degree = new Map<string, number>();
+  const labels = new Map<string, string>();
 
   for (const triple of triples) {
     const subjectKey = graphNodeKey(triple.subject);
     const rawSubjects = subjects.get(subjectKey) ?? new Set<string>();
     rawSubjects.add(triple.subject);
     subjects.set(subjectKey, rawSubjects);
+    if (LABEL_PREDICATE_SET.has(triple.predicate)) {
+      const label = literalDisplayValue(triple.object);
+      if (label && !labels.has(subjectKey)) labels.set(subjectKey, label);
+    }
     if (triple.predicate === RDF_TYPE_URI || !isResourceNode(triple.object)) continue;
     const objectKey = graphNodeKey(triple.object);
     degree.set(subjectKey, (degree.get(subjectKey) ?? 0) + 1);
     degree.set(objectKey, (degree.get(objectKey) ?? 0) + 1);
   }
 
-  const singletonUris = [...subjects.entries()]
+  const singletonItems = [...subjects.entries()]
     .filter(([key]) => (degree.get(key) ?? 0) === 0)
-    .flatMap(([, rawSubjects]) => [...rawSubjects])
-    .sort((a, b) => humanizeLabel(undefined, a).localeCompare(humanizeLabel(undefined, b)));
-  if (singletonUris.length === 0) return { canvasTriples: triples, singletonUris };
+    .flatMap(([key, rawSubjects]) => [...rawSubjects].map(uri => ({
+      uri,
+      label: labels.get(key) ?? humanizeLabel(undefined, uri),
+    })))
+    .sort((a, b) => a.label.localeCompare(b.label));
+  if (singletonItems.length === 0) return { canvasTriples: triples, singletonItems };
 
-  const singletonSet = new Set(singletonUris);
+  const singletonSet = new Set(singletonItems.map(item => item.uri));
   return {
     canvasTriples: triples.filter(triple => !singletonSet.has(triple.subject)),
-    singletonUris,
+    singletonItems,
   };
 }
 
@@ -135,22 +154,21 @@ function GraphTrustLegend({ activeLayer }: { activeLayer?: 'wm' | 'swm' | 'vm' |
 }
 
 function GraphSingletonShelf({
-  uris,
+  items,
   onSelect,
 }: {
-  uris: string[];
+  items: SingletonShelfItem[];
   onSelect?: (uri: string) => void;
 }) {
-  if (uris.length === 0) return null;
+  if (items.length === 0) return null;
   return (
     <div className="v10-graph-singleton-shelf" aria-label="Disconnected singleton entities">
       <div className="v10-graph-singleton-head">
         <span>Singleton shelf</span>
-        <span>{uris.length}</span>
+        <span>{items.length}</span>
       </div>
       <div className="v10-graph-singleton-list">
-        {uris.map(uri => {
-          const label = humanizeLabel(undefined, uri);
+        {items.map(({ uri, label }) => {
           return (
             <button
               key={uri}
@@ -174,7 +192,7 @@ function GraphSurface({
   tone,
   className,
   rail,
-  singletonUris = [],
+  singletonItems = [],
   onSingletonClick,
   renderGraph,
 }: {
@@ -183,7 +201,7 @@ function GraphSurface({
   tone: 'wm' | 'swm' | 'vm';
   className?: string;
   rail?: ReactNode;
-  singletonUris?: string[];
+  singletonItems?: SingletonShelfItem[];
   onSingletonClick?: (uri: string) => void;
   renderGraph: (expanded: boolean) => ReactNode;
 }) {
@@ -217,7 +235,7 @@ function GraphSurface({
           <div className="v10-graph-view">
             {renderGraph(expandedView)}
           </div>
-          <GraphSingletonShelf uris={singletonUris} onSelect={onSingletonClick} />
+          <GraphSingletonShelf items={singletonItems} onSelect={onSingletonClick} />
         </div>
         {rail && <aside className="v10-graph-rail">{rail}</aside>}
       </div>
@@ -230,7 +248,15 @@ function GraphSurface({
         {body(false)}
       </div>
       {expanded && (
-        <div className="v10-graph-expanded-backdrop" role="dialog" aria-modal="true" aria-label={`${title} expanded`}>
+        <div
+          className="v10-graph-expanded-backdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-label={`${title} expanded`}
+          onClick={(event) => {
+            if (event.target === event.currentTarget) setExpanded(false);
+          }}
+        >
           <div className={`v10-graph-expanded-panel v10-graph-shell-${tone}`}>
             <div className="v10-graph-expanded-head">
               <div>
@@ -896,7 +922,7 @@ export function LayerGraphPanel({
     () => buildLayerGraphOptions(layer, layer === 'swm' ? swmAttr.nodeColors : undefined),
     [layer, swmAttr.nodeColors],
   );
-  const { canvasTriples, singletonUris } = useMemo(
+  const { canvasTriples, singletonItems } = useMemo(
     () => splitGraphTriplesForShelf(uniqueTriples),
     [uniqueTriples],
   );
@@ -970,7 +996,7 @@ export function LayerGraphPanel({
       tone={layer}
       className="v10-graph-view-fill"
       rail={rail}
-      singletonUris={singletonUris}
+      singletonItems={singletonItems}
       onSingletonClick={(uri) => onNodeClick?.({ id: uri })}
       renderGraph={(expanded) => (
         canvasTriples.length > 0 ? (
