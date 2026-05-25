@@ -64,6 +64,198 @@ export const RdfGraph = lazy(() =>
   import('@origintrail-official/dkg-graph-viz/react').then(m => ({ default: m.RdfGraph }))
 );
 
+const RDF_TYPE_URI = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+
+function isResourceNode(value: string): boolean {
+  return (
+    value.startsWith('http://') ||
+    value.startsWith('https://') ||
+    value.startsWith('urn:') ||
+    value.startsWith('did:') ||
+    value.startsWith('_:') ||
+    (value.startsWith('<') && value.endsWith('>'))
+  );
+}
+
+function graphNodeKey(value: string): string {
+  return value.startsWith('<') && value.endsWith('>') ? value.slice(1, -1) : value;
+}
+
+function splitGraphTriplesForShelf(triples: Triple[]): { canvasTriples: Triple[]; singletonUris: string[] } {
+  const subjects = new Map<string, Set<string>>();
+  const degree = new Map<string, number>();
+
+  for (const triple of triples) {
+    const subjectKey = graphNodeKey(triple.subject);
+    const rawSubjects = subjects.get(subjectKey) ?? new Set<string>();
+    rawSubjects.add(triple.subject);
+    subjects.set(subjectKey, rawSubjects);
+    if (triple.predicate === RDF_TYPE_URI || !isResourceNode(triple.object)) continue;
+    const objectKey = graphNodeKey(triple.object);
+    degree.set(subjectKey, (degree.get(subjectKey) ?? 0) + 1);
+    degree.set(objectKey, (degree.get(objectKey) ?? 0) + 1);
+  }
+
+  const singletonUris = [...subjects.entries()]
+    .filter(([key]) => (degree.get(key) ?? 0) === 0)
+    .flatMap(([, rawSubjects]) => [...rawSubjects])
+    .sort((a, b) => humanizeLabel(undefined, a).localeCompare(humanizeLabel(undefined, b)));
+  if (singletonUris.length === 0) return { canvasTriples: triples, singletonUris };
+
+  const singletonSet = new Set(singletonUris);
+  return {
+    canvasTriples: triples.filter(triple => !singletonSet.has(triple.subject)),
+    singletonUris,
+  };
+}
+
+function defaultGraphScopeLabel(layer: 'wm' | 'swm' | 'vm'): string {
+  if (layer === 'wm') return 'Working Memory graph: local entities connected by entity-to-entity triples from loaded layer data.';
+  if (layer === 'swm') return 'Shared Working Memory graph: promoted shared entities connected by entity-to-entity triples from loaded layer data.';
+  return 'Verifiable Memory graph: published knowledge assets, provenance anchors, and connected entity-to-entity triples from loaded layer data.';
+}
+
+function GraphTrustLegend({ activeLayer }: { activeLayer?: 'wm' | 'swm' | 'vm' | null }) {
+  const items: Array<{ layer: 'wm' | 'swm' | 'vm'; label: string; color: string }> = [
+    { layer: 'wm', label: 'Working Memory', color: '#64748b' },
+    { layer: 'swm', label: 'Shared Working Memory', color: '#f59e0b' },
+    { layer: 'vm', label: 'Verifiable Memory', color: '#22c55e' },
+  ];
+  return (
+    <div className="v10-graph-rail-section" aria-label="Trust layer legend">
+      <div className="v10-graph-rail-title">Trust layers</div>
+      {items.map(item => (
+        <div key={item.layer} className={`v10-graph-rail-row${activeLayer === item.layer ? ' active' : ''}`}>
+          <span className="v10-graph-trust-swatch" style={{ background: item.color }} />
+          <span className="v10-graph-rail-label">{item.label}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function GraphSingletonShelf({
+  uris,
+  onSelect,
+}: {
+  uris: string[];
+  onSelect?: (uri: string) => void;
+}) {
+  if (uris.length === 0) return null;
+  return (
+    <div className="v10-graph-singleton-shelf" aria-label="Disconnected singleton entities">
+      <div className="v10-graph-singleton-head">
+        <span>Singleton shelf</span>
+        <span>{uris.length}</span>
+      </div>
+      <div className="v10-graph-singleton-list">
+        {uris.map(uri => {
+          const label = humanizeLabel(undefined, uri);
+          return (
+            <button
+              key={uri}
+              type="button"
+              className="v10-graph-singleton-item"
+              title={uri}
+              onClick={() => onSelect?.(uri)}
+            >
+              {label}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function GraphSurface({
+  title,
+  scopeLabel,
+  tone,
+  className,
+  rail,
+  singletonUris = [],
+  onSingletonClick,
+  renderGraph,
+}: {
+  title: string;
+  scopeLabel: string;
+  tone: 'wm' | 'swm' | 'vm';
+  className?: string;
+  rail?: ReactNode;
+  singletonUris?: string[];
+  onSingletonClick?: (uri: string) => void;
+  renderGraph: (expanded: boolean) => ReactNode;
+}) {
+  const [expanded, setExpanded] = useState(false);
+
+  useEffect(() => {
+    if (!expanded) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setExpanded(false);
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [expanded]);
+
+  const body = (expandedView: boolean) => (
+    <>
+      <div className="v10-graph-shell-bar">
+        <div className="v10-graph-scope" title={scopeLabel}>{scopeLabel}</div>
+        <button
+          type="button"
+          className="v10-graph-expand-btn"
+          onClick={() => setExpanded(true)}
+          title={`Expand ${title}`}
+          aria-label={`Expand ${title}`}
+        >
+          ⤢
+        </button>
+      </div>
+      <div className="v10-graph-body">
+        <div className="v10-graph-canvas">
+          <div className="v10-graph-view">
+            {renderGraph(expandedView)}
+          </div>
+          <GraphSingletonShelf uris={singletonUris} onSelect={onSingletonClick} />
+        </div>
+        {rail && <aside className="v10-graph-rail">{rail}</aside>}
+      </div>
+    </>
+  );
+
+  return (
+    <>
+      <div className={`v10-graph-shell v10-graph-shell-${tone}${className ? ` ${className}` : ''}`}>
+        {body(false)}
+      </div>
+      {expanded && (
+        <div className="v10-graph-expanded-backdrop" role="dialog" aria-modal="true" aria-label={`${title} expanded`}>
+          <div className={`v10-graph-expanded-panel v10-graph-shell-${tone}`}>
+            <div className="v10-graph-expanded-head">
+              <div>
+                <div className="v10-graph-expanded-title">{title}</div>
+                <div className="v10-graph-expanded-subtitle">{scopeLabel}</div>
+              </div>
+              <button
+                type="button"
+                className="v10-graph-expanded-close"
+                onClick={() => setExpanded(false)}
+                aria-label={`Close expanded ${title}`}
+              >
+                ×
+              </button>
+            </div>
+            <div className="v10-graph-expanded-body">
+              {body(true)}
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
 export function LayerSwitcher({ active, counts, onSwitch, onShare, onImport, onRefresh }: {
   active: LayerView;
   counts: { wm: number; swm: number; vm: number; total: number };
@@ -639,13 +831,20 @@ export function LayerGraphPanel({
   triples,
   onNodeClick,
   contextGraphId,
+  scopeLabel,
+  trustLegendActiveLayer,
+  title: titleOverride,
 }: {
   layer: 'wm' | 'swm' | 'vm';
   triples: Triple[];
   onNodeClick?: (node: any) => void;
   contextGraphId?: string;
+  scopeLabel?: string;
+  trustLegendActiveLayer?: 'wm' | 'swm' | 'vm' | null;
+  title?: string;
 }) {
-  const { title } = LAYER_CONFIG[layer];
+  const { title: layerTitle } = LAYER_CONFIG[layer];
+  const title = titleOverride ?? layerTitle;
 
   // All URIs that already appear as subject or object in the base VM triples.
   // We pass this into the anchor hook so synthetic anchor→entity edges only
@@ -656,7 +855,7 @@ export function LayerGraphPanel({
     for (const t of triples) {
       s.add(t.subject);
       // Literals (`"..."`) are never anchor roots; skip them.
-      if (!t.object.startsWith('"')) s.add(t.object);
+      if (isResourceNode(t.object)) s.add(t.object);
     }
     return s;
   }, [triples, layer]);
@@ -697,67 +896,109 @@ export function LayerGraphPanel({
     () => buildLayerGraphOptions(layer, layer === 'swm' ? swmAttr.nodeColors : undefined),
     [layer, swmAttr.nodeColors],
   );
+  const { canvasTriples, singletonUris } = useMemo(
+    () => splitGraphTriplesForShelf(uniqueTriples),
+    [uniqueTriples],
+  );
   const graphKey = `${contextGraphId ?? 'context'}:${layer}`;
   const swmAttributionPending = layer === 'swm' && Boolean(contextGraphId) && swmAttr.loading;
-
-  if (uniqueTriples.length === 0) {
-    return (
-      <div className="v10-graph-view v10-graph-view-fill v10-layer-empty-shell">
-        <EmptyState
-          compact
-          tone={toneForLayer(layer)}
-          icon={LAYER_CONFIG[layer].icon}
-          title={`No triples in ${title}`}
-          description="The graph will appear when this layer has connected triples."
-        />
-      </div>
-    );
-  }
-
-  if (swmAttributionPending) {
-    return (
-      <div className="v10-graph-view v10-graph-view-fill v10-layer-empty-shell">
-        <EmptyState
-          compact
-          tone="swm"
-          icon={LAYER_CONFIG.swm.icon}
-          title="Loading Shared Working Memory attribution..."
-          description="Agent colors are being prepared before the graph renders."
-        />
-      </div>
-    );
-  }
-
-  return (
-    <div className="v10-graph-view v10-graph-view-fill" style={{ position: 'relative' }}>
-      <Suspense fallback={<span className="v10-graph-placeholder">Loading graph...</span>}>
-        <RdfGraph
-          key={graphKey}
-          data={uniqueTriples}
-          format="triples"
-          options={graphOptions}
-          style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }}
-          onNodeClick={onNodeClick}
-          initialFit
-        />
-      </Suspense>
+  const graphTitle = `${title} graph`;
+  const resolvedScopeLabel = scopeLabel ?? defaultGraphScopeLabel(layer);
+  const legendActiveLayer = trustLegendActiveLayer === undefined ? layer : trustLegendActiveLayer;
+  const rail = (
+    <>
+      <GraphTrustLegend activeLayer={legendActiveLayer} />
       {layer === 'vm' && anchors.length > 0 && (
         <VerifiedGraphLegend anchors={anchors} />
       )}
       {layer === 'swm' && swmAttr.palette.length > 0 && (
         <SwmAttributionLegend palette={swmAttr.palette} conflicts={swmAttr.conflicts.length} />
       )}
-    </div>
+    </>
+  );
+
+  if (uniqueTriples.length === 0) {
+    return (
+      <GraphSurface
+        title={graphTitle}
+        scopeLabel={resolvedScopeLabel}
+        tone={layer}
+        className="v10-graph-view-fill"
+        rail={<GraphTrustLegend activeLayer={legendActiveLayer} />}
+        renderGraph={() => (
+          <div className="v10-layer-empty-shell">
+            <EmptyState
+              compact
+              tone={toneForLayer(layer)}
+              icon={LAYER_CONFIG[layer].icon}
+              title={`No triples in ${title}`}
+              description="The graph will appear when this layer has connected triples."
+            />
+          </div>
+        )}
+      />
+    );
+  }
+
+  if (swmAttributionPending) {
+    return (
+      <GraphSurface
+        title={graphTitle}
+        scopeLabel={resolvedScopeLabel}
+        tone="swm"
+        className="v10-graph-view-fill"
+        rail={<GraphTrustLegend activeLayer={legendActiveLayer} />}
+        renderGraph={() => (
+          <div className="v10-layer-empty-shell">
+            <EmptyState
+              compact
+              tone="swm"
+              icon={LAYER_CONFIG.swm.icon}
+              title="Loading Shared Working Memory attribution..."
+              description="Agent colors are being prepared before the graph renders."
+            />
+          </div>
+        )}
+      />
+    );
+  }
+
+  return (
+    <GraphSurface
+      title={graphTitle}
+      scopeLabel={resolvedScopeLabel}
+      tone={layer}
+      className="v10-graph-view-fill"
+      rail={rail}
+      singletonUris={singletonUris}
+      onSingletonClick={(uri) => onNodeClick?.({ id: uri })}
+      renderGraph={(expanded) => (
+        canvasTriples.length > 0 ? (
+          <Suspense fallback={<span className="v10-graph-placeholder">Loading graph...</span>}>
+            <RdfGraph
+              key={`${graphKey}:${expanded ? 'expanded' : 'inline'}:${canvasTriples.length}`}
+              data={canvasTriples}
+              format="triples"
+              options={graphOptions}
+              style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }}
+              onNodeClick={onNodeClick}
+              initialFit
+            />
+          </Suspense>
+        ) : (
+          <div className="v10-graph-placeholder v10-graph-placeholder-centered">
+            Connected graph appears when this layer has linked entities.
+          </div>
+        )
+      )}
+    />
   );
 }
 
-// ─── SWM attribution legend (floating overlay) ────────────
-// Pinned to the top-right of the Shared Working Memory graph, this swatch
-// maps each palette slot to the agent who promoted the corresponding KA
-// roots. Reads as "who said what" at a glance. When two or more agents
-// touch the same entity, a separate amber "review" badge appears listing
-// the conflict count — the mechanism works in the single-agent devnet
-// (shows 0) and lights up organically once a second agent joins.
+// ─── SWM attribution legend (docked rail) ────────────
+// Maps each palette slot to the agent who promoted the corresponding KA roots.
+// N3's broader multi-agent attribution remains gated, so this stays scoped to
+// the root attribution data already available today.
 export function SwmAttributionLegend({ palette, conflicts }: { palette: AgentPaletteEntry[]; conflicts: number }) {
   return (
     <div className="v10-swm-legend" aria-label="SWM attribution legend">
@@ -783,12 +1024,9 @@ export function SwmAttributionLegend({ palette, conflicts }: { palette: AgentPal
   );
 }
 
-// ─── Verifiable Memory graph legend (floating overlay) ─────────
-// Lives in the top-right of the VM graph view. Explains the two new glyphs
-// (gold anchor, lavender agent) introduced by `useVerifiedMemoryAnchors`
-// so viewers can decode the graph at a glance. Also doubles as an anchor
-// ledger: total anchors + distinct signers + latest publish time. This is
-// where the "DKG secret sauce" gets called out explicitly.
+// ─── Verifiable Memory graph legend (docked rail) ─────────
+// Explains the synthetic VM anchor and agent decoration triples produced by
+// `useVerifiedMemoryAnchors` without pulling in the later VM metadata work.
 export function VerifiedGraphLegend({ anchors }: { anchors: PublishAnchor[] }) {
   const signerCount = useMemo(() => {
     const s = new Set<string>();
@@ -2937,24 +3175,31 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
           )}
 
           {pane === 'graph' && (
-            <div style={{ height: 300, position: 'relative', marginTop: 8, borderRadius: 6, overflow: 'hidden', border: '1px solid var(--border-default)' }}>
-              {hoodTriples.length > 0 ? (
-                <Suspense fallback={<span className="v10-graph-placeholder">Loading graph...</span>}>
-                  <RdfGraph
-                    data={hoodTriples}
-                    format="triples"
-                    options={graphOptions}
-                    viewConfig={entityViewConfig}
-                    style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }}
-                    onNodeClick={(n: any) => n?.id && n.id !== entity.uri && onNavigate(n.id)}
-                    initialFit
-                    initialFocus={entity.uri}
-                  />
-                </Suspense>
-              ) : (
-                <div className="v10-graph-placeholder">No neighborhood data</div>
+            <GraphSurface
+              title={`${entity.label} graph`}
+              scopeLabel={`Entity detail graph: 1-hop neighborhood around ${entity.label}.`}
+              tone={layerBadge}
+              className="v10-ka-graph-shell"
+              renderGraph={(expanded) => (
+                hoodTriples.length > 0 ? (
+                  <Suspense fallback={<span className="v10-graph-placeholder">Loading graph...</span>}>
+                    <RdfGraph
+                      key={`${entity.uri}:${expanded ? 'expanded' : 'inline'}`}
+                      data={hoodTriples}
+                      format="triples"
+                      options={graphOptions}
+                      viewConfig={entityViewConfig}
+                      style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }}
+                      onNodeClick={(n: any) => n?.id && n.id !== entity.uri && onNavigate(n.id)}
+                      initialFit
+                      initialFocus={entity.uri}
+                    />
+                  </Suspense>
+                ) : (
+                  <div className="v10-graph-placeholder v10-graph-placeholder-centered">No neighborhood data</div>
+                )
               )}
-            </div>
+            />
           )}
         </div>
 
@@ -3914,6 +4159,9 @@ export function SubGraphDetailView({
               triples={filteredTriples}
               onNodeClick={onNodeClick}
               contextGraphId={contextGraphId}
+              title={title}
+              scopeLabel={`Subgraph graph: ${title} entities and entity-to-entity triples from loaded subgraph data.`}
+              trustLegendActiveLayer={null}
             />
           </div>
         )}

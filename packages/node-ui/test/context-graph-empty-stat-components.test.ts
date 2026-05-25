@@ -197,7 +197,7 @@ describe('Context Graph shared empty/stat patterns', () => {
       ),
     );
 
-    expect(container.querySelector('.v10-graph-view.v10-layer-empty-shell .v10-empty-state')).toBeTruthy();
+    expect(container.querySelector('.v10-graph-view .v10-layer-empty-shell .v10-empty-state')).toBeTruthy();
     expect(container.querySelector('.v10-layer-expand-body.entities-tab > .v10-vm-hero')).toBeTruthy();
     expect(container.textContent).toContain('No triples in Working Memory');
     expect(container.textContent).toContain('No Knowledge Assets yet.');

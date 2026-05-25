@@ -25,16 +25,25 @@ vi.mock('@origintrail-official/dkg-graph-viz/react', async () => {
         'data-testid': 'rdf-graph',
         'data-default-color': defaultColor,
         'data-node-colors': JSON.stringify(props.options?.style?.nodeColors ?? {}),
+        'data-triples': String(props.data?.length ?? 0),
+        'data-scale-with-degree': String(Boolean(props.options?.hexagon?.scaleWithDegree)),
       });
     },
   };
 });
 
-const triples = [{
-  subject: 'urn:test:root',
-  predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
-  object: 'http://schema.org/Thing',
-}];
+const triples = [
+  {
+    subject: 'urn:test:root',
+    predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+    object: 'http://schema.org/Thing',
+  },
+  {
+    subject: 'urn:test:root',
+    predicate: 'https://schema.org/mentions',
+    object: 'urn:test:target',
+  },
+];
 
 async function waitForAssertion(assertion: () => void): Promise<void> {
   const started = Date.now();
@@ -301,5 +310,142 @@ describe('LayerGraphPanel graph lifecycle', () => {
 
     expect(graphState.mounts).toEqual(['#64748b', '#f59e0b']);
     expect(graphState.unmounts).toEqual(['#64748b']);
+  });
+
+  it('renders graph scope, docked rail, degree sizing, and expand control', async () => {
+    vi.stubGlobal('fetch', vi.fn());
+    const { LayerGraphPanel } = await import('../src/ui/views/project/components.js');
+
+    await act(async () => {
+      root.render(React.createElement(LayerGraphPanel, {
+        layer: 'wm',
+        triples,
+      }));
+    });
+
+    await waitForAssertion(() => {
+      expect(container.querySelector('[data-testid="rdf-graph"]')).toBeTruthy();
+    });
+
+    expect(container.textContent).toContain('Working Memory graph:');
+    expect(container.textContent).toContain('Trust layers');
+    expect(container.textContent).toContain('Working Memory');
+
+    const graph = container.querySelector('[data-testid="rdf-graph"]') as HTMLElement;
+    expect(graph.getAttribute('data-scale-with-degree')).toBe('true');
+
+    const expand = container.querySelector('.v10-graph-expand-btn') as HTMLButtonElement;
+    expect(expand).toBeTruthy();
+    await act(async () => {
+      expand.click();
+    });
+
+    expect(document.body.querySelector('.v10-graph-expanded-panel')).toBeTruthy();
+    expect(document.body.querySelectorAll('[data-testid="rdf-graph"]').length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('moves disconnected singleton subjects into the shelf instead of the graph data', async () => {
+    const onNodeClick = vi.fn();
+    vi.stubGlobal('fetch', vi.fn());
+    const { LayerGraphPanel } = await import('../src/ui/views/project/components.js');
+    const singletonTriples = Array.from({ length: 18 }).flatMap((_, index) => [
+      {
+        subject: `urn:test:solo-${index}`,
+        predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+        object: 'http://schema.org/Thing',
+      },
+      {
+        subject: `urn:test:solo-${index}`,
+        predicate: 'http://schema.org/name',
+        object: `Solo document ${index}`,
+      },
+    ]);
+
+    await act(async () => {
+      root.render(React.createElement(LayerGraphPanel, {
+        layer: 'wm',
+        triples: [
+          ...triples,
+          ...singletonTriples,
+        ],
+        onNodeClick,
+      }));
+    });
+
+    await waitForAssertion(() => {
+      expect(container.querySelector('[data-testid="rdf-graph"]')).toBeTruthy();
+    });
+
+    const graph = container.querySelector('[data-testid="rdf-graph"]') as HTMLElement;
+    expect(graph.getAttribute('data-triples')).toBe('2');
+    expect(container.textContent).toContain('Singleton shelf');
+    expect(container.textContent).toContain('18');
+
+    const singletonItems = container.querySelectorAll('.v10-graph-singleton-item');
+    expect(singletonItems.length).toBe(18);
+    const singleton = singletonItems[17] as HTMLButtonElement;
+    await act(async () => {
+      singleton.click();
+    });
+    expect(onNodeClick).toHaveBeenCalledWith({ id: singleton.getAttribute('title') });
+  });
+
+  it('can render mixed-scope subgraph graphs without highlighting a single trust layer', async () => {
+    vi.stubGlobal('fetch', vi.fn());
+    const { LayerGraphPanel } = await import('../src/ui/views/project/components.js');
+
+    await act(async () => {
+      root.render(React.createElement(LayerGraphPanel, {
+        layer: 'wm',
+        title: 'Subgraph alpha',
+        triples,
+        scopeLabel: 'Subgraph graph: alpha entities and entity-to-entity triples from loaded subgraph data.',
+        trustLegendActiveLayer: null,
+      }));
+    });
+
+    await waitForAssertion(() => {
+      expect(container.querySelector('[data-testid="rdf-graph"]')).toBeTruthy();
+    });
+
+    expect(container.querySelector('.v10-graph-expand-btn')?.getAttribute('aria-label')).toBe('Expand Subgraph alpha graph');
+    expect(container.textContent).toContain('Trust layers');
+    expect(container.querySelector('.v10-graph-rail-row.active')).toBeNull();
+  });
+
+  it('keeps blank-node and angle-wrapped resource edges in the graph data', async () => {
+    vi.stubGlobal('fetch', vi.fn());
+    const { LayerGraphPanel } = await import('../src/ui/views/project/components.js');
+
+    await act(async () => {
+      root.render(React.createElement(LayerGraphPanel, {
+        layer: 'wm',
+        triples: [
+          {
+            subject: 'urn:test:root',
+            predicate: 'https://schema.org/mentions',
+            object: '_:blank-target',
+          },
+          {
+            subject: 'urn:test:angle-source',
+            predicate: 'https://schema.org/mentions',
+            object: '<urn:test:angle-target>',
+          },
+          {
+            subject: 'urn:test:angle-target',
+            predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+            object: 'http://schema.org/Thing',
+          },
+        ],
+      }));
+    });
+
+    await waitForAssertion(() => {
+      expect(container.querySelector('[data-testid="rdf-graph"]')).toBeTruthy();
+    });
+
+    const graph = container.querySelector('[data-testid="rdf-graph"]') as HTMLElement;
+    expect(graph.getAttribute('data-triples')).toBe('3');
+    expect(container.textContent).not.toContain('Singleton shelf');
   });
 });
