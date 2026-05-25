@@ -1121,16 +1121,22 @@ WHERE {
     }
 
     const { verifyMemberAttestation } = await import('@origintrail-official/dkg-agent');
-    // membershipResolver = a thin stub for Phase A — the chain-side
-    // historical-membership lookup is not in scope (curated CG
-    // allowlists are stored in `_meta` graphs maintained off-chain;
-    // a proper chain-side resolver lands in Phase B with the
-    // membership-at-epoch SPARQL query). Returning undefined here
-    // surfaces `membership: 'unknown'` to the caller.
+    // Codex PR #609 R2 #3 — only supply a membership resolver when
+    // the caller explicitly opted into `chainCheckMembership`.
+    // Previously we always passed a stub, which made every response
+    // carry `membership: "unknown"` and erased the distinction
+    // between "not checked" (caller didn't ask) and "checked but
+    // unavailable" (Phase B chain-side resolver missing). With the
+    // gate, omitting the flag returns no `membership` field (route
+    // contract preserved); passing `true` returns `unknown` until
+    // the Phase B resolver lands.
+    const chainCheckMembership = parsed.chainCheckMembership === true;
     const result = await verifyMemberAttestation({
       attestation: parsed.attestation,
       candidateLeaf,
-      membershipResolver: async () => undefined,
+      ...(chainCheckMembership
+        ? { membershipResolver: async () => undefined }
+        : {}),
     });
     return jsonResponse(res, 200, result);
   }

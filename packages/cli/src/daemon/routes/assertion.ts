@@ -3188,7 +3188,16 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
         author,
       });
     } catch (err: any) {
-      return jsonResponse(res, 500, { error: err?.message ?? String(err) });
+      // Codex PR #609 R2 #5 — mirror the unknown-kcId mapping the
+      // sibling `/api/kc/:id/author` route already does so callers
+      // can branch on "not published yet" (404) vs. server failure
+      // (500). KCS reverts on lookups for ids that don't exist;
+      // matching the same regex keeps the two routes in lockstep.
+      const msg = err?.message ?? String(err);
+      if (/unknown kcId|nonexistent|out-of-bounds/i.test(msg)) {
+        return jsonResponse(res, 404, { error: `Unknown kcId ${idStr}` });
+      }
+      return jsonResponse(res, 500, { error: msg });
     }
   }
 
