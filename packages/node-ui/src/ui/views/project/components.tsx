@@ -1589,8 +1589,8 @@ LIMIT 1000`;
 
 const CONTEXT_GRAPH_QUERY_SUBGRAPH = '__context_graph';
 const USER_QUERY_CATALOG_SLUG = 'ui-saved-queries';
-const USER_QUERY_CATALOG_NAME = 'Profile-saved queries';
-const USER_QUERY_CATALOG_DESCRIPTION = 'Queries saved from this page for this Context Graph profile.';
+const USER_QUERY_CATALOG_NAME = 'Saved queries';
+const USER_QUERY_CATALOG_DESCRIPTION = 'User-created SPARQL saved in this node profile for this Context Graph.';
 const PROFILE_NS = 'http://dkg.io/ontology/profile/';
 const SCHEMA_NS = 'http://schema.org/';
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
@@ -1629,7 +1629,7 @@ function contextGraphBuiltInCatalog(contextGraphId: string): QueryCatalog {
     subGraph,
     catalogSlug,
     catalogName,
-    catalogDescription: 'Included with the Node UI for common Context Graph inspections.',
+    catalogDescription: 'Ready-made SPARQL included with the Node UI for common Context Graph checks.',
     catalogRank,
     resultColumn: '',
     ...query,
@@ -1639,7 +1639,7 @@ function contextGraphBuiltInCatalog(contextGraphId: string): QueryCatalog {
     slug: catalogSlug,
     subGraph,
     name: catalogName,
-    description: 'Included with the Node UI for common Context Graph inspections.',
+    description: 'Ready-made SPARQL included with the Node UI for common Context Graph checks.',
     rank: catalogRank,
     queries: [
       withQueryDefaults({
@@ -1799,8 +1799,18 @@ function queryCatalogueGroupLabel(catalog: QueryCatalog, scope: 'context' | 'sub
   return `${subGraphLabel ?? catalog.subGraph}: ${catalog.name}`;
 }
 
+function queryCatalogueGroupDescription(catalog: QueryCatalog): string {
+  if (isBuiltInQueryCatalog(catalog)) {
+    return 'UI-provided SPARQL for common Context Graph checks.';
+  }
+  if (catalog.subGraph === CONTEXT_GRAPH_QUERY_SUBGRAPH && catalog.slug === USER_QUERY_CATALOG_SLUG) {
+    return USER_QUERY_CATALOG_DESCRIPTION;
+  }
+  return catalog.description ?? '';
+}
+
 function queryCatalogueGroupKind(catalog: QueryCatalog, scope: 'context' | 'subgraph'): string {
-  if (isBuiltInQueryCatalog(catalog)) return 'Built in';
+  if (isBuiltInQueryCatalog(catalog)) return 'Preset';
   return scope === 'context' ? 'Saved' : 'Subgraph';
 }
 
@@ -1963,7 +1973,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
         <div>
           <h2 className="v10-mlv-title">Query Catalogue</h2>
           <p className="v10-mlv-desc">
-            Reusable SPARQL for this Context Graph. Use built-in presets or save useful queries to this node profile.
+            Reusable SPARQL for this Context Graph. Use UI presets or save queries for people and local agents to reuse.
           </p>
         </div>
       </div>
@@ -1973,7 +1983,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
           <div>
             <span className="v10-cg-query-eyebrow">Query Library</span>
             <h3 id="query-catalogue-saved-title">Choose a query</h3>
-            <p>Selecting a query loads it into the editor below.</p>
+            <p>Load a preset or saved query into the editor below.</p>
           </div>
         </div>
 
@@ -1983,8 +1993,8 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
             inline
             tone="query"
             icon="?"
-            title="Loading saved query catalogue..."
-            description="Built-in queries are available while profile-backed saved queries load."
+            title="Loading saved queries..."
+            description="Built-in presets are available while saved queries load from this node profile."
           />
         )}
 
@@ -2006,6 +2016,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
               const binding = scope === 'context' ? undefined : profile?.forSubGraph(catalog.subGraph);
               const color = binding?.color ?? '#38bdf8';
               const label = queryCatalogueGroupLabel(catalog, scope, binding?.displayName);
+              const description = queryCatalogueGroupDescription(catalog);
               const kind = queryCatalogueGroupKind(catalog, scope);
               return (
                 <div
@@ -2019,18 +2030,21 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
                         <span className="v10-cg-query-catalog-kind">{kind}</span>
                         <h4>{label}</h4>
                       </div>
-                      {catalog.description && <p>{catalog.description}</p>}
+                      {description && <p>{description}</p>}
                     </div>
                   </div>
                   <div className="v10-cg-query-list">
                     {catalog.queries.map((q) => {
                       const key = `${q.subGraph}|${q.catalogSlug}|${q.slug}`;
                       const isActive = activeCatalogQueryKey === key && activeQuery === q.sparql;
+                      const chipLabel = q.description ? `${q.name}. ${q.description}` : q.name;
                       return (
                         <button
                           key={key}
                           type="button"
                           className={`v10-cg-query-chip${isActive ? ' active' : ''}`}
+                          title={chipLabel}
+                          aria-label={`Load query: ${chipLabel}`}
                           onClick={() => runCatalogQuery(key, q.sparql)}
                         >
                           <span className="v10-cg-query-chip-title">{q.name}</span>
@@ -2051,8 +2065,8 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
             inline
             tone="query"
             icon="?"
-            title="No profile-saved queries yet."
-            description="Use Save after editing SPARQL to add a reusable context-level query to this catalogue."
+            title="No saved queries yet."
+            description="Use Save after editing SPARQL to keep a reusable query for this Context Graph."
           />
         )}
       </section>

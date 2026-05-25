@@ -128,7 +128,7 @@ describe('ContextGraphQueryView', () => {
     expect(buttonLabels.some(label => label?.startsWith('Types'))).toBe(true);
     expect(buttonLabels).toEqual(expect.arrayContaining(['Run', 'Save', 'Reset']));
     expect(container.textContent).toContain('Reusable SPARQL for this Context Graph');
-    expect(container.textContent).toContain('Selecting a query loads it into the editor below.');
+    expect(container.textContent).toContain('Load a preset or saved query into the editor below.');
     expect(container.textContent).toContain('Built-in presets');
     expect(container.textContent).not.toContain('Catalogue scope');
     expect(container.textContent).not.toContain('Built-in context queries');
@@ -139,22 +139,41 @@ describe('ContextGraphQueryView', () => {
   it('groups saved queries and loads the selected query into the editor', async () => {
     const savedProfile = profile({
       queryCatalogs: [{
-        slug: 'personal',
+        slug: 'ui-saved-queries',
         subGraph: '__context_graph',
-        name: 'Personal research',
-        description: 'Context-level profile queries.',
+        name: 'Old saved-query title',
+        description: 'Queries saved from the Query tab.',
         rank: 1,
         queries: [{
           slug: 'entity-counts',
           subGraph: '__context_graph',
-          catalogSlug: 'personal',
-          catalogName: 'Personal research',
-          catalogDescription: 'Context-level profile queries.',
+          catalogSlug: 'ui-saved-queries',
+          catalogName: 'Old saved-query title',
+          catalogDescription: 'Queries saved from the Query tab.',
           catalogRank: 1,
           name: 'Entity counts',
-          description: 'Count reusable context entities.',
+          description: 'Count reusable context entities with a long enough description to need a tooltip.',
           sparql: 'SELECT (COUNT(?s) AS ?count) WHERE { GRAPH ?g { ?s ?p ?o } }',
           resultColumn: 'count',
+          rank: 1,
+        }],
+      }, {
+        slug: 'personal',
+        subGraph: '__context_graph',
+        name: 'Personal research',
+        description: 'Custom context-level query set.',
+        rank: 2,
+        queries: [{
+          slug: 'named-entities',
+          subGraph: '__context_graph',
+          catalogSlug: 'personal',
+          catalogName: 'Personal research',
+          catalogDescription: 'Custom context-level query set.',
+          catalogRank: 2,
+          name: 'Named entities',
+          description: 'Find entities that have names.',
+          sparql: 'SELECT ?s ?name WHERE { GRAPH ?g { ?s <http://schema.org/name> ?name } }',
+          resultColumn: 's',
           rank: 1,
         }],
       }, {
@@ -180,15 +199,23 @@ describe('ContextGraphQueryView', () => {
     });
     const { container, root } = await renderWithProfile(savedProfile);
 
-    await waitForText(container, 'Personal research');
-    expect(container.textContent).toContain('Context-level profile queries.');
-    expect(container.textContent).not.toContain('Saved profile queries');
-    expect(container.textContent).toContain('Built in');
+    await waitForText(container, 'Saved queries');
+    expect(container.textContent).toContain('User-created SPARQL saved in this node profile for this Context Graph.');
+    expect(container.textContent).not.toContain('Queries saved from the Query tab.');
+    expect(container.textContent).not.toContain('Profile-saved queries');
+    expect(container.textContent).toContain('Personal research');
+    expect(container.textContent).toContain('Custom context-level query set.');
+    expect(container.textContent).toContain('Preset');
     expect(container.textContent).toContain('Saved');
     await waitForText(container, 'Documents: Document research');
     expect(container.textContent).toContain('Subgraph');
     expect(container.textContent).toContain('Queries for document-backed entities.');
     expect(container.textContent).toContain('List markdown-backed document entities.');
+
+    const entityCountsButton = Array.from(container.querySelectorAll('button'))
+      .find(button => button.textContent?.includes('Entity counts'));
+    expect(entityCountsButton?.getAttribute('title')).toBe('Entity counts. Count reusable context entities with a long enough description to need a tooltip.');
+    expect(entityCountsButton?.getAttribute('aria-label')).toBe('Load query: Entity counts. Count reusable context entities with a long enough description to need a tooltip.');
 
     const findButton = Array.from(container.querySelectorAll('button'))
       .find(button => button.textContent?.includes('Find documents'));
@@ -207,16 +234,16 @@ describe('ContextGraphQueryView', () => {
   it('shows profile loading and saved-query empty catalogue states', async () => {
     const { container, root } = await renderWithProfile(profile({ loading: true }));
 
-    await waitForText(container, 'Loading saved query catalogue...');
+    await waitForText(container, 'Loading saved queries...');
     expect(container.textContent).toContain('All triples');
-    expect(container.textContent).not.toContain('No profile-saved queries yet.');
+    expect(container.textContent).not.toContain('No saved queries yet.');
 
     await act(async () => { root.unmount(); });
     document.body.innerHTML = '';
 
     const emptyRender = await renderWithProfile(profile());
     const { container: emptyContainer, root: emptyRoot } = emptyRender;
-    expect(emptyContainer.textContent).toContain('No profile-saved queries yet.');
+    expect(emptyContainer.textContent).toContain('No saved queries yet.');
 
     await act(async () => { emptyRoot.unmount(); });
   });
@@ -228,7 +255,7 @@ describe('ContextGraphQueryView', () => {
 
     expect(container.textContent).toContain('Profile query failed');
     expect(container.textContent).toContain('All triples');
-    expect(container.textContent).not.toContain('No profile-saved queries yet.');
+    expect(container.textContent).not.toContain('No saved queries yet.');
 
     await act(async () => { root.unmount(); });
   });
@@ -268,7 +295,7 @@ describe('ContextGraphQueryView', () => {
 
     await waitForText(container, 'Saved to catalogue.');
     expect(apiMocks.writeProfileQueryCatalog).toHaveBeenCalledWith('cg-test', expect.any(Array));
-    expect(container.textContent).toContain('Profile-saved queries');
+    expect(container.textContent).toContain('Saved queries');
     expect(container.textContent).toContain('Reusable triples');
     expect(container.textContent).toContain('A reusable triples query.');
 
@@ -293,7 +320,7 @@ describe('ContextGraphQueryView', () => {
   it('keeps local saves visible while profile queries are loading', async () => {
     const { container, root } = await renderWithProfile(profile({ loading: true }));
 
-    await waitForText(container, 'Loading saved query catalogue...');
+    await waitForText(container, 'Loading saved queries...');
 
     const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
     await act(async () => {
