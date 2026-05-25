@@ -162,9 +162,13 @@ for (const part of partitions) {
 ```
 
 Status events are append-only — each `markPartitionStatus` call writes a fresh
-`StatusEvent` triple with a timestamp **and promotes that event to SWM** so
-peers (or a resume on a different node) see the progress, not just the local
-WM. `loadImportManifest` resolves the "current" status as the latest event per
+`StatusEvent` triple with a timestamp **and promotes BOTH the partition root
+and the new event root to SWM** so peers (or a resume on a different node)
+see the progress, not just the local WM. (The promote root list is `[partIri,
+evIri]` because the new `partIri imp:statusEvent evIri` edge has subject
+`partIri`; promoting only `evIri` would leave that edge in WM and a peer-side
+`loadImportManifest` would never observe the new status.)
+`loadImportManifest` resolves the "current" status as the latest event per
 partition using a standard "max row" SPARQL pattern (`FILTER NOT EXISTS`
 against any later event), which avoids the classic `SAMPLE`+`MAX`
 decorrelation foot-gun. This append-only pattern also avoids needing SPARQL

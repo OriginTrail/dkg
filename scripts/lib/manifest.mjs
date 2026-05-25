@@ -102,22 +102,35 @@ function uri(s) {
 }
 
 /**
- * Strip enclosing double quotes from a SELECT-binding literal.
+ * Normalise a SELECT-binding term to a plain string value.
  *
- * NB: the daemon's `/api/query` route returns bindings as a flat object
- * of `{ varName: jsonEncodedTerm }` — literals come out as
- * `"\"some text\""` or `"\"42\"^^<xsd:integer>"`, URIs as bare
- * strings. This is **not** the SPARQL 1.1 results-JSON format (with
- * `{ value, type, datatype, ... }` cells). Other importer scripts in
- * this repo (`seed-dkg-code-project.mjs`, `drain-swm-duplicates.mjs`,
- * `redistribute-memory.mjs`) all rely on the same shape via their own
- * `bareIri()` / `unquote()` helpers; if you change one, update them
- * all together.
+ * The daemon's `/api/query` returns bindings in TWO shapes today,
+ * depending on which storage backend is configured:
+ *
+ *   1. Oxigraph (default, in-process): bindings are flat objects of
+ *      `{ varName: jsonEncodedTerm }` — literals come out as
+ *      `"\"some text\""` or `"\"42\"^^<xsd:integer>"`, URIs as bare
+ *      strings. Other importer scripts in this repo
+ *      (`seed-dkg-code-project.mjs`, `drain-swm-duplicates.mjs`,
+ *      `redistribute-memory.mjs`) all assume this shape.
+ *
+ *   2. SPARQL-HTTP adapter (external triplestore): bindings can come
+ *      back as SPARQL 1.1 results-JSON cells:
+ *      `{ value, type, datatype?, "xml:lang"? }`. The daemon's own
+ *      `bindingValue` helper (packages/cli/src/daemon/manifest.ts)
+ *      already handles both shapes; Codex flagged this library for
+ *      assuming only shape (1), so `unquote` now collapses cells to
+ *      their `.value` before applying literal-unquoting.
  */
-function unquote(s) {
-  if (typeof s !== 'string') return s;
-  if (s.startsWith('"')) {
-    const m = s.match(/^"((?:[^"\\]|\\.)*)"/);
+function unquote(v) {
+  // SPARQL 1.1 results-JSON cell — unwrap to .value first, then keep going.
+  if (v && typeof v === 'object' && !Array.isArray(v) && 'value' in v) {
+    const inner = /** @type {{value: unknown}} */ (v).value;
+    v = typeof inner === 'string' ? inner : String(inner ?? '');
+  }
+  if (typeof v !== 'string') return v;
+  if (v.startsWith('"')) {
+    const m = v.match(/^"((?:[^"\\]|\\.)*)"/);
     if (m) {
       return m[1]
         .replace(/\\"/g, '"')
@@ -126,7 +139,20 @@ function unquote(s) {
         .replace(/\\r/g, '\r');
     }
   }
-  return s;
+  return v;
+}
+
+/**
+ * Pull the raw IRI string out of a binding cell or flat string. Used
+ * for URI bindings (e.g. `?part`) where we want the bare IRI, not the
+ * literal-unquoted form.
+ */
+function bareUri(v) {
+  if (v && typeof v === 'object' && !Array.isArray(v) && 'value' in v) {
+    const inner = /** @type {{value: unknown}} */ (v).value;
+    return typeof inner === 'string' ? inner : String(inner ?? '');
+  }
+  return typeof v === 'string' ? v : String(v ?? '');
 }
 
 /**
@@ -274,16 +300,26 @@ export async function markPartitionStatus({
     subGraphName,
     triples,
   });
-  // Promote the new event so peers (and future resumes from any node)
-  // see the status update — otherwise the event sits in WM only and
-  // `loadImportManifest` against SWM still reports the prior status.
-  // The partition URI is already in SWM from `createImportManifest`, so
-  // we only need to promote the new event root here.
+  // Promote BOTH roots so peers see the status update:
+  //
+  //   - `evIri` carries the StatusEvent's own triples (rdf:type, status,
+  //     recordedAt).
+  //   - `partIri` is the subject of the NEW `partIri imp:statusEvent
+  //     evIri` triple we just wrote — `assertion.promote({entities})`
+  //     only moves quads whose SUBJECT is in `entities`. If we promoted
+  //     `evIri` alone, the partition→event edge would stay in WM and
+  //     `loadImportManifest` running against SWM (or on a peer node)
+  //     would never see this event, treating the partition as still on
+  //     its previous status.
+  //
+  // `partIri`'s prior triples (rdf:type, imp:key, imp:initialStatus)
+  // are already in SWM from `createImportManifest`; re-promoting it is
+  // idempotent for those and ships the new `imp:statusEvent` edge.
   await client.promote({
     contextGraphId: cgId,
     assertionName: assertion,
     subGraphName,
-    entities: [evIri],
+    entities: [partIri, evIri],
   });
 }
 
@@ -341,14 +377,14 @@ export async function loadImportManifest({ client, importId, subGraphName }) {
   const partitions = bindings.map((row) => {
     const key = unquote(row.key);
     const initial = unquote(row.initial);
-    const latestStatus = row.latestStatus ? unquote(row.latestStatus) : null;
-    const latestRecordedAt = row.latestRecordedAt
+    const latestStatus = row.latestStatus != null ? unquote(row.latestStatus) : null;
+    const latestRecordedAt = row.latestRecordedAt != null
       ? unquote(row.latestRecordedAt).replace(/\^\^.*$/, '')
       : null;
     return {
       key,
       status: latestStatus ?? initial ?? 'pending',
-      uri: row.part,
+      uri: bareUri(row.part),
       recordedAt: latestRecordedAt,
     };
   });
