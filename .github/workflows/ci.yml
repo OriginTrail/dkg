@@ -615,25 +615,21 @@ jobs:
             packages/evm-module/artifacts
             packages/evm-module/cache
             packages/evm-module/typechain
+          # NO restore-keys fallback. Previously a `hardhat-Linux-` fallback
+          # would grab a snapshot from a sibling branch with a different
+          # contract surface (e.g. integration's 8-arg `createContextGraph`
+          # vs PR #630's 9-arg). Hardhat then preserved the stale artifacts
+          # for unchanged-on-paper files, and `typechain` regenerated from
+          # those stale artifacts — yielding bindings with the wrong
+          # signature. Tests failed with `no matching fragment` even though
+          # the on-disk contract source matched the test call shape. A
+          # full cache miss + fresh compile (~90s for 97 contracts) is the
+          # right tradeoff over hours debugging cross-branch ghost failures.
           key: hardhat-${{ runner.os }}-${{ hashFiles('packages/evm-module/contracts/**/*.sol', 'packages/evm-module/hardhat.node.config.ts') }}
-          restore-keys: |
-            hardhat-${{ runner.os }}-
 
       - name: Compile contracts
         if: needs.changes.outputs.contracts == 'true'
-        # Belt-and-suspenders: when the cache restore-key fallback
-        # (`hardhat-Linux-`) grabs a snapshot from a sibling branch with a
-        # different contract surface, Hardhat's incremental compiler only
-        # regenerates artifacts + typechain for .sol files whose source
-        # hash changed. Typechain bindings for the UNCHANGED files keep
-        # whatever signature was in the restored cache — which can be a
-        # stale signature from the other branch. Symptom: tests fail with
-        # `Error: no matching fragment` even though the contract source on
-        # the current commit matches the test call shape. Delete typechain
-        # so it always regenerates from the current ABI artifacts.
-        run: |
-          rm -rf typechain
-          npx hardhat compile --config hardhat.node.config.ts
+        run: npx hardhat compile --config hardhat.node.config.ts
         working-directory: packages/evm-module
 
       - name: "Hardhat tests (shard ${{ matrix.shard }}/4)"
