@@ -632,6 +632,27 @@ jobs:
         run: npx hardhat compile --config hardhat.node.config.ts
         working-directory: packages/evm-module
 
+      - name: Regenerate TypeChain bindings
+        if: needs.changes.outputs.contracts == 'true'
+        # `hardhat.node.config.ts` doesn't load `@typechain/hardhat`
+        # (the test runner uses it deliberately — fewer plugins, faster
+        # boot). That means `hardhat compile` here does NOT regenerate
+        # typechain bindings. Without this step, the typechain dir is
+        # purely whatever the cache restored — which can be stale
+        # bindings written by a sibling branch (the cache path includes
+        # `packages/evm-module/typechain`). Symptom: tests fail with
+        # `Error: no matching fragment` even though the ABI artifact
+        # JSON on disk has the right signature.
+        #
+        # Switching to the full `hardhat.config.ts` here picks up the
+        # typechain plugin and regenerates bindings deterministically
+        # from the freshly compiled artifacts. ~10s cost; eliminates the
+        # entire class of stale-typechain CI ghosts.
+        run: |
+          rm -rf typechain
+          npx hardhat typechain
+        working-directory: packages/evm-module
+
       - name: "Hardhat tests (shard ${{ matrix.shard }}/4)"
         if: needs.changes.outputs.contracts == 'true'
         # Round-robin distribute the 48 .test.ts files across 4
