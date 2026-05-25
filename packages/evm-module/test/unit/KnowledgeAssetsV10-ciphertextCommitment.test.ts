@@ -566,7 +566,61 @@ describe('@unit KnowledgeAssetsV10 — RFC-39 ciphertext commitment', () => {
       };
     }
 
-    it('reverts IncompleteCiphertextCommitment when curated update omits the ciphertext pair', async () => {
+    it('accepts a zero-pair update on a legacy/pre-LU-11 curated KC (no prior commitment)', async () => {
+      // Publish curated baseline WITHOUT a ciphertext commitment (the
+      // legacy path that the publish branch still allows).
+      const creator = getDefaultKCCreator(accounts);
+      const { publisherIdentityId, receivingNodes, receiverIdentityIds } =
+        await setupNodes();
+      const cgId = await createCuratedCG(creator, creator.address);
+      const tokenAmount = ethers.parseEther('500');
+      const byteSize = 1000n;
+      const p = await buildPublishParams({
+        chainId,
+        kav10Address,
+        receivingNodes,
+        publisherIdentityId,
+        receiverIdentityIds,
+        author: creator,
+        contextGraphId: cgId,
+        merkleRoot: ethers.keccak256(ethers.toUtf8Bytes('curated-legacy-baseline')),
+        knowledgeAssetsAmount: 10,
+        byteSize: Number(byteSize),
+        epochs: 5,
+        tokenAmount,
+        isImmutable: false,
+        publishOperationId: 'curated-legacy-baseline-op',
+        // no ciphertext fields → defaults to zero pair
+      });
+      await TokenContract.connect(creator).approve(kav10Address, tokenAmount);
+      await KAV10.connect(creator).publish(p);
+      const kcId = await KCS.getLatestKnowledgeCollectionId();
+      expect(await KCS.getLatestCiphertextChunksRoot(kcId)).to.equal(ethers.ZeroHash);
+
+      const up = await buildUpdateParams({
+        chainId,
+        kav10Address,
+        receivingNodes,
+        publisherIdentityId,
+        receiverIdentityIds,
+        contextGraphId: cgId,
+        id: kcId,
+        preUpdateMerkleRootCount: 1n,
+        newMerkleRoot: ethers.keccak256(ethers.toUtf8Bytes('curated-legacy-update')),
+        newByteSize: byteSize,
+        newTokenAmount: tokenAmount,
+        mintKnowledgeAssetsAmount: 1n,
+        knowledgeAssetsToBurn: [],
+        updateOperationId: 'curated-legacy-update-op',
+      });
+
+      await expect(KAV10.connect(creator).update(up)).to.not.be.reverted;
+      // Still uncommitted afterwards — picker continues to skip in curated draw.
+      expect(await KCS.getLatestCiphertextChunksRoot(kcId)).to.equal(ethers.ZeroHash);
+      expect(await KCS.getCiphertextChunkCount(kcId)).to.equal(0);
+    });
+
+    it('reverts IncompleteCiphertextCommitment when a committed curated KC is updated with zero pair (stale-commitment guard)', async () => {
       const base = await publishCuratedBaseline();
       // Snapshot the pre-update commitment so we can assert it survived
       // the rejected call (defensive — `expect.to.be.revertedWith*` only
@@ -600,6 +654,34 @@ describe('@unit KnowledgeAssetsV10 — RFC-39 ciphertext commitment', () => {
       // Storage untouched.
       expect(await KCS.getLatestCiphertextChunksRoot(base.kcId)).to.equal(preRoot);
       expect(await KCS.getCiphertextChunkCount(base.kcId)).to.equal(preCount);
+    });
+
+    it('reverts IncompleteCiphertextCommitment when a curated update carries an asymmetric pair (root without count)', async () => {
+      const base = await publishCuratedBaseline();
+      const up = await buildUpdateParams({
+        chainId,
+        kav10Address,
+        receivingNodes: base.receivingNodes,
+        publisherIdentityId: base.publisherIdentityId,
+        receiverIdentityIds: base.receiverIdentityIds,
+        contextGraphId: base.cgId,
+        id: base.kcId,
+        preUpdateMerkleRootCount: 1n,
+        newMerkleRoot: ethers.keccak256(ethers.toUtf8Bytes('curated-update-asym')),
+        newByteSize: base.byteSize,
+        newTokenAmount: base.tokenAmount,
+        mintKnowledgeAssetsAmount: 1n,
+        knowledgeAssetsToBurn: [],
+        updateOperationId: 'curated-update-asym-op',
+      });
+      const upPartial = {
+        ...up,
+        newCiphertextChunksRoot: NEW_CT_ROOT,
+        newCiphertextChunkCount: 0, // asymmetric
+      };
+      await expect(
+        KAV10.connect(base.creator).update(upPartial),
+      ).to.be.revertedWithCustomError(KAV10, 'IncompleteCiphertextCommitment');
     });
 
     it('persists the new commitment and emits the event when curated update carries a paired non-zero ciphertext', async () => {

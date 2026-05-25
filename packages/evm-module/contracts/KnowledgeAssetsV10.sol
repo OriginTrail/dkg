@@ -1295,29 +1295,45 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         // stale ciphertext after the first update. Mirrors the same
         // validation contract as the publish branch:
         //   - Public CG + any non-zero ciphertext field → revert.
-        //   - Curated CG + both fields non-zero         → commitment
-        //     rotated to the new ciphertext root + count.
-        //   - Curated CG + any field zero               → revert
-        //     (Codex PR #630 R2 #1307). Previously a zero-pair on a
-        //     curated KC silently fell through as a "metadata-only"
-        //     update and left the OLD ciphertext commitment in storage.
-        //     With the plaintext merkle root + leaf count rotated to
-        //     the new batch, `RandomSampling`'s curated-proof check
-        //     would then verify against stale ciphertext that no
-        //     longer corresponds to the published leaves — sampling
-        //     proofs against the post-update KC are unprovable. A
-        //     curated update MUST rotate the ciphertext commitment in
-        //     lockstep with the plaintext one; callers that genuinely
-        //     don't change the payload should not call `update()`.
-        //   - Public CG + any non-zero ciphertext field → revert.
+        //   - Curated CG + KC has a prior commitment + zero pair → revert
+        //     (Codex PR #630 R2 #1307). Previously a zero-pair on an
+        //     already-committed curated KC silently fell through as a
+        //     "metadata-only" update and left the OLD ciphertext
+        //     commitment in storage. With the plaintext merkle root +
+        //     leaf count rotated to the new batch, `RandomSampling`'s
+        //     curated-proof check would then verify against stale
+        //     ciphertext that no longer corresponds to the published
+        //     leaves — sampling proofs against the post-update KC are
+        //     unprovable. Once a KC has been committed, every
+        //     subsequent update MUST rotate the commitment in lockstep
+        //     with the plaintext one.
+        //   - Curated CG + KC has no prior commitment + zero pair → no-op
+        //     (legacy / pre-LU-11 path; picker still skips this KC in
+        //     the curated draw until the first commitment lands).
+        //   - Curated CG + both fields non-zero → commitment rotated
+        //     (or set for the first time).
+        //   - Curated CG + exactly one field zero → revert
+        //     IncompleteCiphertextCommitment (partial commitment would
+        //     zero-divide the picker).
+        //   - Public CG + any non-zero ciphertext field → revert
+        //     PublicCGCannotHaveCiphertextCommitment.
         bool _isCurated = contextGraphStorage.getIsCurated(contextGraphId);
         bool _hasNewCiphertextCommitment =
             p.newCiphertextChunksRoot != bytes32(0) || p.newCiphertextChunkCount != 0;
         if (_isCurated) {
-            if (p.newCiphertextChunksRoot == bytes32(0) || p.newCiphertextChunkCount == 0) {
+            if (_hasNewCiphertextCommitment) {
+                if (p.newCiphertextChunksRoot == bytes32(0) || p.newCiphertextChunkCount == 0) {
+                    revert IncompleteCiphertextCommitment();
+                }
+                kcs.setCiphertextChunksCommitment(p.id, p.newCiphertextChunksRoot, p.newCiphertextChunkCount);
+            } else if (kcs.getLatestCiphertextChunksRoot(p.id) != bytes32(0)) {
+                // KC was previously committed; a zero-pair update would
+                // strand the stale commitment.
                 revert IncompleteCiphertextCommitment();
             }
-            kcs.setCiphertextChunksCommitment(p.id, p.newCiphertextChunksRoot, p.newCiphertextChunkCount);
+            // else: legacy / pre-LU-11 curated KC, no commitment yet —
+            // zero-pair update is permitted (mirrors the publish
+            // legacy-path behaviour).
         } else if (_hasNewCiphertextCommitment) {
             revert PublicCGCannotHaveCiphertextCommitment(contextGraphId);
         }
