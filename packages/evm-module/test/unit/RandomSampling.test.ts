@@ -845,23 +845,30 @@ describe('@unit RandomSampling', () => {
 
     /**
      * Create a Context Graph via the storage directly and return its id.
-     * Policy: 0 = curated (private for Phase 10), 1 = open.
+     * Policy arg: 0 = curated (private for Phase 10 / RFC-39), 1 = open.
+     *
+     * Codex PR #630 R1 #1325 (cherry-picked from C2): `getIsCurated()` was
+     * re-anchored from `publishPolicy == 0` to `accessPolicy != 0`. The
+     * Phase 10 picker (step 2 of `_pickWeightedChallenge`) calls
+     * `getIsCurated()` to decide whether to apply the per-KC ciphertext-
+     * commitment filter. So the arg this helper takes — semantically
+     * "should this CG be treated as curated?" — now drives `accessPolicy`
+     * and we keep `publishPolicy` open in both branches (the picker
+     * doesn't read `publishPolicy`; an open publish policy keeps the
+     * fixture simple and avoids needing an authority signature).
      */
-    async function createCG(publishPolicy: number): Promise<bigint> {
+    async function createCG(curatedPolicy: number): Promise<bigint> {
       const owner = accounts[1].address;
-      const authority =
-        publishPolicy === CURATED_POLICY
-          ? accounts[2].address
-          : ethers.ZeroAddress;
+      const accessPolicy = curatedPolicy === CURATED_POLICY ? 1 : 0;
       const tx = await ContextGraphStorage.connect(opSigner).createContextGraph(
         owner,
         [10n, 20n, 30n], // hosting nodes (sorted, non-zero, distinct)
         [], // no participant agents
         2, // requiredSignatures
         0, // metadataBatchId
-        0, // accessPolicy = public/discoverable
-        publishPolicy,
-        authority,
+        accessPolicy,
+        1, // publishPolicy = open (picker doesn't read this; keeps fixture simple)
+        ethers.ZeroAddress, // publishAuthority — unused with open publish policy
         0, // publishAuthorityAccountId
       );
       await tx.wait();
@@ -1004,17 +1011,23 @@ describe('@unit RandomSampling', () => {
     // Test 3 — Mixed-curation scenario: curated CG (no commitment) coexists
     // with a public CG.
     //
-    // RFC-39 Phase A.5 behaviour change: curated CGs participate in the
-    // CG-level lottery; the per-KC ciphertext-commitment gate is the filter
-    // that keeps legacy (pre-LU-11) curated KCs out of the curated draw.
-    // With the curated CG weighted 10× the public CG, the picker lands on
-    // the curated CG most of the time and reverts with
-    // `NoEligibleKnowledgeCollection` because the curated KC has no
-    // commitment; the minority of draws that land on the public CG succeed
-    // and always pick `openKc`. Both half-paths are asserted across the
-    // draw sweep so a future regression in either branch fails loudly.
+    // RFC-39 Phase A.5 behaviour: curated CGs participate in the CG-level
+    // lottery; the per-KC ciphertext-commitment gate is what keeps legacy
+    // (pre-LU-11) curated KCs out of the curated draw.
+    //
+    // Codex PR #630 R1 #3 added a bounded outer CG-retry to
+    // `_pickWeightedChallenge` so a single high-value legacy curated CG
+    // can't DoS the entire sampling tick. With this retry, the picker
+    // self-heals when it lands on a curated CG whose KCs are all
+    // uncommitted: it marks that CG exhausted, re-draws against the
+    // remaining eligible CGs, and falls through to the public CG. So
+    // even though the curated CG carries 10× the weight, all 25 draws
+    // succeed and EVERY successful draw must land on the public CG/KC
+    // (a success on the curated branch would mean the per-KC commitment
+    // filter is leaking and `setCiphertextChunksCommitment` is no longer
+    // a prerequisite for inclusion in the curated lottery).
     // -----------------------------------------------------------------------
-    it('skips curated KCs without ciphertext commitment; only public-CG draws yield a challenge', async () => {
+    it('skips curated KCs without ciphertext commitment; CG-retry fallback routes every draw to the public CG', async () => {
       const curatedCg = await createCG(CURATED_POLICY);
       const openCg = await createCG(OPEN_POLICY);
 
@@ -1022,42 +1035,26 @@ describe('@unit RandomSampling', () => {
       await createKC(curatedCg, endEpoch);
       const openKc = await createKC(openCg, endEpoch);
 
-      // Curated CG holds 10x the value of the public CG — naive weighting
-      // would prefer the curated one most of the time. Under RFC-39 the
-      // per-KC commitment filter is what protects the integrity of the
-      // curated draw, so curated-CG draws SHOULD fail at step 2.
+      // Curated CG holds 10x the value of the public CG. Pre-R1 the picker
+      // would have reverted on every curated-weighted draw; post-R1 the
+      // outer CG-retry exhausts the curated CG and falls back to the
+      // public one. The per-KC commitment filter is still what guarantees
+      // the curated KC never gets picked (only public KCs survive step 2).
       await seedCGValue(curatedCg, 10_000n);
       await seedCGValue(openCg, 1_000n);
 
       const currentEpoch = await Chronos.getCurrentEpoch();
-      let successCount = 0;
-      let revertCount = 0;
       for (let i = 0; i < 25; i++) {
-        try {
-          const preview = await RandomSampling.previewChallengeForSeed(
-            testSeed(i),
-            currentEpoch,
-          );
-          // Every successful draw MUST be the public CG / public KC. A
-          // success on the curated branch would mean the per-KC commitment
-          // filter is leaking.
-          expect(preview.cgId).to.equal(openCg);
-          expect(preview.kcId).to.equal(openKc);
-          successCount++;
-        } catch (e: unknown) {
-          const message = e instanceof Error ? e.message : String(e);
-          // Failed draws MUST be the curated-CG branch failing at step 2.
-          // Any other revert reason is a real regression.
-          expect(message).to.match(/NoEligibleKnowledgeCollection/);
-          revertCount++;
-        }
+        const preview = await RandomSampling.previewChallengeForSeed(
+          testSeed(i),
+          currentEpoch,
+        );
+        // Every successful draw MUST be the public CG / public KC. A
+        // success on the curated branch would mean the per-KC commitment
+        // filter is leaking.
+        expect(preview.cgId).to.equal(openCg);
+        expect(preview.kcId).to.equal(openKc);
       }
-      // 10:1 weighting almost certainly produces both branches across 25
-      // draws; if either count is zero we have either a stale weighting
-      // calculation or the per-KC filter is no longer working.
-      expect(successCount).to.be.greaterThan(0);
-      expect(revertCount).to.be.greaterThan(0);
-      expect(successCount + revertCount).to.equal(25);
     });
 
     // -----------------------------------------------------------------------

@@ -121,8 +121,20 @@ const PINNED_DIGESTS: Record<string, string> = {
   // The transient `PCAEpochsMismatch` error introduced earlier in this
   // PR was removed (it became unreachable). Update path uses `<=` for
   // `remainingEpochs` since update legitimately passes a delta.
-  KnowledgeAssetsV10:           '785311d19ce39743522bf1db501f41276fb22d715a2cc94cc67d96f8a22e519e',
-  KnowledgeCollectionStorage:   'e165cbddc6569602d1d5c05c15909fd0a9ff851f974357cf80297041b2a83fd2',
+  //
+  // Updated PR #630 (RFC-39 Phase A.5): `KnowledgeAssetsV10.publish` /
+  // `update` now thread a per-KC ciphertext commitment pair
+  // (`(bytes32 ciphertextChunksRoot, uint64 ciphertextChunkCount)`)
+  // through `V10PublishParams` / `V10UpdateParams`. The picker in
+  // `RandomSampling` (curated draw, step 2) reads these via
+  // `KnowledgeCollectionStorage.getLatestCiphertextChunksRoot` /
+  // `…ChunkCount` to filter pre-LU-11 curated KCs out of the curated
+  // lottery. The KCS hash drift here reflects the new storage getters
+  // + the `CiphertextChunksCommitmentSet` event surface that
+  // `KnowledgeAssetsV10._executeUpdateCore` emits when a non-zero pair
+  // rotates the commitment.
+  KnowledgeAssetsV10:           '6f186793993c18c40a212d2e2a663689b520cf96f351e86492a23a75416c417c',
+  KnowledgeCollectionStorage:   '8c0e6e3b19f072b15f6c54852ff0a58ffc0dffddb9676d221de78b8019d32bdd',
   // V8 `KnowledgeCollection` ABI was moved to `abi/archive/` in
   // `archive-non-v10-contracts`; the pin entry is intentionally dropped.
   ContextGraphs:                'ee69f0d50b54df966b8bfb3bf457fe6d2865393f51f8770b4185fafd324b9462',
