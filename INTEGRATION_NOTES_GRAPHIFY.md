@@ -176,3 +176,45 @@ Round 2 (after the round-1 fixes were pushed):
   up `failed_retrying` jobs whose `nextRetryAt <= now`; added a
   per-`(contextGraphId, assertionName)` lock so two concurrent
   `promote-async` calls against the same assertion can't both run.
+
+## What changed in round 3 (2026-05-25 evening)
+
+After running the integration on rc.10 against a real codebase
+graph (Graphify on this repo: 26,960 nodes / 63,003 edges) we
+folded the empirical findings back into the PRs:
+
+- **#641**: ADR 0002 grew a short "Empirical motivation" section
+  with headline numbers (~330 LOC hand-rolled importer; 4/17
+  partitions over the 10 MB gossip cap; ~15 min wall-clock in
+  halve-and-retry; ~200× write degradation past ~100k SWM
+  triples). Also: portable scanner reference (no author-local
+  absolute path) and the `dkg-importer/SKILL.md` /
+  `manifest.mjs` references reframed as future implementation
+  work to remove dead links until #642 lands together.
+
+- **#642**: `dkg-importer/SKILL.md` grew a §1.1 reference table
+  for the three daemon caps and the **verbatim error strings**
+  each one produces (`MAX_BODY_BYTES=10 MB` for `/write`,
+  `SMALL_BODY_BYTES=256 KB` for `/promote` request body,
+  10 MB gossip cap for `/promote` SWM output). §5 split into
+  three independent recovery recipes instead of one generic
+  "halve on 413". Plus three new `manifest.mjs` hardening
+  fixes: `createImportManifest` idempotent on "already exists",
+  same-millisecond status event tie-breaker, loud failure when
+  manifest bindings are empty (13/13 unit tests pass).
+
+- **#643**: RFC's §3.1 corrected from `MAX_BODY_BYTES` to
+  `SMALL_BODY_BYTES` (the actual cap on sync `/promote` today
+  — caught by both Codex and the rc.10 import). Uniqueness key
+  widened to the full `(contextGraphId, subGraphName,
+  assertionName)` assertion identity. Drain semantics rewritten
+  to use lease-expiry recovery instead of "mark running →
+  queued + exit" (the latter could double-execute multi-step
+  promotes). A new §10 appendix carries the per-partition
+  empirical data.
+
+The rc.10 import test artifacts (importer scripts + FINDINGS_v2.md
+A/B writeup) are kept local in
+`/Users/aleatoric/dev/dkg-graphify-rc10-test` — not committed to
+the integration branch since they're test scaffolding, not
+ship-worthy code.
