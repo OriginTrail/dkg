@@ -2922,8 +2922,8 @@ button:focus:not(:focus-visible) { outline: none; }
 .v10-memory-layer-view { max-width: 1000px; min-width: 0; }
 .v10-mlv-header { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; }
 .v10-mlv-icon { font-size: 20px; }
-.v10-mlv-title { font-size: 16px; font-weight: 600; color: var(--text-primary); margin-bottom: 2px; }
-.v10-mlv-desc { font-size: 12px; color: var(--text-secondary); }
+.v10-mlv-title { font-size: 16px; line-height: 1.25; font-weight: 600; color: var(--text-primary); margin: 0 0 2px; }
+.v10-mlv-desc { font-size: 12px; line-height: 1.4; color: var(--text-secondary); margin: 0; }
 .v10-vm-search-panel {
   border: 1px solid var(--border-default);
   border-radius: 10px;
