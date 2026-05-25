@@ -1316,15 +1316,19 @@ export class DKGAgent {
               // (chain adapter doesn't expose the getter; chain read
               // throws). The handler treats `null !== true` as
               // fail-closed, preserving the original auth-bypass guard.
-              isCgCurated: async (cgId: string, swmGraphId?: string) => {
-                const probes = swmGraphId && swmGraphId !== cgId
-                  ? [swmGraphId, cgId]
-                  : [swmGraphId ?? cgId];
-                for (const probe of probes) {
-                  try {
-                    if (await this.isPrivateContextGraph(probe)) return true;
-                  } catch { /* probe next form */ }
-                }
+              isCgCurated: async (cgId: string, _swmGraphId?: string) => {
+                // Codex PR #608 R3 #1325: only the TARGET cgId determines
+                // whether the published payload is encrypted. The source
+                // `swmGraphId` is the LOCAL SWM graph name and can't
+                // override chain truth — a remap from a private local
+                // staging graph onto a public on-chain CG must take the
+                // plaintext path the chain expects, not the opaque one.
+                // Previously this probed BOTH and returned true if either
+                // looked private, letting curated-shape envelopes ride a
+                // public-CG publish.
+                try {
+                  if (await this.isPrivateContextGraph(cgId)) return true;
+                } catch { /* fall through to chain probe */ }
                 const cached = this.onChainAccessPolicyCache.get(cgId);
                 if (cached !== undefined) {
                   return cached === 1;
@@ -7378,63 +7382,68 @@ export class DKGAgent {
     const senderAddress = authorAgentAddress
       ?? this.defaultAgentAddress
       ?? this.peerId;
+
+    // Codex PR #608 R3 #7: mirror the rotation contract from
+    // `encryptWorkspacePayloadWithSenderKey` — always load persisted
+    // state FIRST so a daemon restart reuses the existing epoch
+    // instead of minting a new one, and ALWAYS recompute the current
+    // membership hash so an allowlist change forces an epoch
+    // rotation. The prior implementation only entered the bootstrap
+    // branch when the in-memory map happened to be empty AND never
+    // compared the current membership against the cached state, so
+    // (a) every restart silently rotated and (b) revocations /
+    // additions kept reusing a stale epoch until the next manual
+    // SWM write through `share()`.
+    await this.loadSwmSenderKeyState();
+    const sender = this.getLocalSigningAgentForAddress(senderAddress);
+    if (!sender) {
+      throw new Error(
+        `LU-5: curated CG ${contextGraphId}: cannot bootstrap swm-sender-key — ` +
+        `no local custodial signing key for agent ${senderAddress}. ` +
+        `Refusing to publish curated CG payload via the plaintext-inline fallback.`,
+      );
+    }
+    const resolution = await resolveWorkspaceAgentRecipients(this.store, { contextGraphId });
+    if (!resolution.requiresEncryption) {
+      // Access policy lookup said curated, but the recipient resolver
+      // disagrees. Conservative: refuse rather than silently downgrade.
+      throw new Error(
+        `LU-5: curated CG ${contextGraphId}: access-policy says curated but recipient resolver ` +
+        `returned no agent recipients. Refusing to publish to avoid plaintext leak.`,
+      );
+    }
+    if (resolution.recipients.length === 0) {
+      throw new Error(
+        `LU-5: curated CG ${contextGraphId}: no DKG agent recipients available — ` +
+        `add at least one allowed agent before publishing.`,
+      );
+    }
+    const recipientSet = new Set(resolution.recipients.map((r) => r.agentAddress.toLowerCase()));
+    if (!recipientSet.has(ethers.getAddress(senderAddress).toLowerCase())) {
+      throw new Error(
+        `LU-5: curated CG ${contextGraphId}: sender ${senderAddress} is not in the recipient set — ` +
+        `add yourself to the allowedAgents before publishing.`,
+      );
+    }
+    const membershipHash = computeSwmSenderKeyMembershipHash({
+      contextGraphId,
+      subGraphName,
+      members: resolution.recipients.map((r) => ({
+        agentAddress: r.agentAddress,
+        recipientKeyId: r.recipientKeyId,
+      })),
+    });
+
     const stateKey = swmSenderStateKey(contextGraphId, subGraphName, senderAddress);
     let state = this.swmSenderKeySendStates.get(stateKey);
-    if (!state) {
-      // Codex PR #608 R2/R3: prior fail-closed behaviour threw here
-      // and required callers to manually `share()` first. That made
-      // the headline "edge curator creates + publishes" flow break
-      // on the very first publish for any freshly registered CG.
-      //
-      // Bootstrap the sender-key epoch inline using the SAME helper
-      // `share()` uses (`createAndDistributeSwmSenderKeyEpoch`). This
-      // gossips the bootstrap to all current recipients and persists
-      // the state, exactly as a prior SWM write would have. After
-      // this branch the closure below has a chainKey to encrypt with
-      // — no plaintext fallback, no manual workaround.
-      await this.loadSwmSenderKeyState();
-      const sender = this.getLocalSigningAgentForAddress(senderAddress);
-      if (!sender) {
-        throw new Error(
-          `LU-5: curated CG ${contextGraphId}: cannot bootstrap swm-sender-key — ` +
-          `no local custodial signing key for agent ${senderAddress}. ` +
-          `Refusing to publish curated CG payload via the plaintext-inline fallback.`,
-        );
-      }
-      const resolution = await resolveWorkspaceAgentRecipients(this.store, { contextGraphId });
-      if (!resolution.requiresEncryption) {
-        // Access policy lookup said curated, but the recipient resolver
-        // disagrees. Conservative: refuse rather than silently downgrade.
-        throw new Error(
-          `LU-5: curated CG ${contextGraphId}: access-policy says curated but recipient resolver ` +
-          `returned no agent recipients. Refusing to publish to avoid plaintext leak.`,
-        );
-      }
-      if (resolution.recipients.length === 0) {
-        throw new Error(
-          `LU-5: curated CG ${contextGraphId}: no DKG agent recipients available — ` +
-          `add at least one allowed agent before publishing.`,
-        );
-      }
-      const recipientSet = new Set(resolution.recipients.map((r) => r.agentAddress.toLowerCase()));
-      if (!recipientSet.has(ethers.getAddress(senderAddress).toLowerCase())) {
-        throw new Error(
-          `LU-5: curated CG ${contextGraphId}: sender ${senderAddress} is not in the recipient set — ` +
-          `add yourself to the allowedAgents before publishing.`,
-        );
-      }
-      const membershipHash = computeSwmSenderKeyMembershipHash({
-        contextGraphId,
-        subGraphName,
-        members: resolution.recipients.map((r) => ({
-          agentAddress: r.agentAddress,
-          recipientKeyId: r.recipientKeyId,
-        })),
-      });
+    if (!state || state.membershipHash !== membershipHash) {
+      const reason = !state
+        ? 'no persisted state'
+        : `membership changed (was=${state.membershipHash} now=${membershipHash})`;
       this.log.info(
         ctx,
-        `LU-5: bootstrapping swm-sender-key epoch for first-publish on curated CG ${contextGraphId} ` +
-        `(sender=${senderAddress}, recipients=${resolution.recipients.length})`,
+        `LU-5: bootstrapping/rotating swm-sender-key epoch for curated CG ${contextGraphId} ` +
+        `(sender=${senderAddress}, recipients=${resolution.recipients.length}, reason=${reason})`,
       );
       state = await this.createAndDistributeSwmSenderKeyEpoch({
         contextGraphId,
