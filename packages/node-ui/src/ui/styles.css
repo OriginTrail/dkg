@@ -5929,10 +5929,17 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
   position: relative;
   display: flex;
   background: var(--bg-surface);
+  /* Establish a clean stacking context so the singleton shelf
+     (position: absolute) always paints above the RdfGraph WebGL
+     canvas inside .v10-graph-view, regardless of how the embedded
+     3d-force-graph renderer composites its own layer. */
+  isolation: isolate;
 }
 .v10-graph-view {
   flex: 1 1 auto; min-width: 0; min-height: 0; position: relative; background: var(--bg-surface);
   display: flex; align-items: center; justify-content: center;
+  /* Below the shelf in the canvas stacking context. */
+  z-index: 0;
 }
 /* Fills the parent completely — used when the graph tab is active inside a
    flex-column body (both in the inline strip and the full LayerDetailView). */
@@ -6017,7 +6024,12 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
   position: absolute;
   left: 12px;
   bottom: 12px;
-  z-index: 5;
+  /* Bumped above the RdfGraph's WebGL canvas (which paints inside
+     .v10-graph-view). Without this the shelf rendered but the 3d
+     force-graph layer composited on top of it in the inline view —
+     only zooming the graph (which redraws the canvas) revealed the
+     shelf underneath. */
+  z-index: 20;
   width: min(280px, calc(100% - 24px));
   max-height: 28%;
   display: flex;
