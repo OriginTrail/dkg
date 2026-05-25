@@ -408,4 +408,155 @@ describe('SubGraphDetailView tabs', () => {
       expect(hasLabel).toBe(true);
     });
   });
+
+  // C18 regression: the C17 fix used `filteredUris`, which is built from
+  // `filteredEntities` (`trustLevel`-filtered) — wrong for a layer-narrowed
+  // view. A mixed-layer entity (present in WM and SWM) has trustLevel ===
+  // 'shared', so in a WM-only chip view the old gate excluded it and its
+  // WM rdf:type / label triples were dropped, leaving the entity as an
+  // unlabelled node disagreeing with the Entities tab. The fix derives
+  // the endpoint-presence URI set from `entity.layers.has(layerTrust)`
+  // instead.
+  it('keeps WM triples on a mixed-layer entity when narrowed to WM only', async () => {
+    // The same entity exists in both WM (with a knows edge + type + label)
+    // and SWM (promoted). Its single `trustLevel` is the highest: 'shared'.
+    const mixed = {
+      uri: 'urn:e:mixed',
+      label: 'Mixed entity',
+      types: ['http://schema.org/Thing'],
+      trustLevel: 'shared',
+      layers: new Set(['working', 'shared']),
+      subGraphs: new Set(['demo']),
+      properties: new Map(),
+      connections: [],
+    };
+    const wmNeighbour = {
+      uri: 'urn:e:wm-neighbour-2',
+      label: 'WM neighbour',
+      types: [],
+      trustLevel: 'working',
+      layers: new Set(['working']),
+      subGraphs: new Set(['demo']),
+      properties: new Map(),
+      connections: [],
+    };
+    const wmEdge = {
+      subject: 'urn:e:mixed',
+      predicate: 'http://schema.org/knows',
+      object: 'urn:e:wm-neighbour-2',
+      subGraph: 'demo',
+      layer: 'working' as const,
+    };
+    const wmType = {
+      subject: 'urn:e:mixed',
+      predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+      object: 'http://schema.org/Thing',
+      subGraph: 'demo',
+      layer: 'working' as const,
+    };
+    const wmLabel = {
+      subject: 'urn:e:mixed',
+      predicate: 'http://schema.org/name',
+      object: '"Mixed entity"',
+      subGraph: 'demo',
+      layer: 'working' as const,
+    };
+    const swmEdge = {
+      subject: 'urn:e:mixed',
+      predicate: 'http://schema.org/related',
+      object: 'urn:e:swm-only',
+      subGraph: undefined as string | undefined,
+      layer: 'shared' as const,
+    };
+    const mixedMemory = {
+      entities: new Map([
+        [mixed.uri, mixed],
+        [wmNeighbour.uri, wmNeighbour],
+      ]),
+      entityList: [mixed, wmNeighbour],
+      allTriples: [wmEdge, wmType, wmLabel, swmEdge],
+      graphTriples: [
+        { subject: wmEdge.subject, predicate: wmEdge.predicate, object: wmEdge.object, subGraph: 'demo' },
+        { subject: wmType.subject, predicate: wmType.predicate, object: wmType.object, subGraph: 'demo' },
+        { subject: wmLabel.subject, predicate: wmLabel.predicate, object: wmLabel.object, subGraph: 'demo' },
+        { subject: swmEdge.subject, predicate: swmEdge.predicate, object: swmEdge.object },
+      ],
+      trustMap: new Map(),
+      counts: { wm: 2, swm: 1, vm: 0, total: 2 },
+      loading: false,
+      error: null,
+      partial: false,
+      refresh: vi.fn(),
+    } as any;
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root!.render(
+        React.createElement(ProjectProfileContext.Provider, { value: profile },
+          React.createElement(SubGraphDetailView, {
+            slug: 'demo',
+            rawMemory: mixedMemory,
+            contextGraphId: 'cg-test',
+            onNodeClick: vi.fn(),
+            onSelectEntity: vi.fn(),
+            activeTab: 'graph',
+            onTabChange: vi.fn(),
+          })),
+      );
+    });
+
+    function readGraphTriples(): Array<{ s: string; p: string; o: string }> {
+      const el = container.querySelector('[data-testid="rdf-graph"]') as HTMLElement | null;
+      if (!el) return [];
+      try {
+        return JSON.parse(el.getAttribute('data-triples') ?? '[]');
+      } catch {
+        return [];
+      }
+    }
+
+    // Narrow to WM only by toggling off SWM + VM. The mixed entity has
+    // trustLevel === 'shared' so it would be filtered out of
+    // `filteredEntities` here — the pre-C18 gate would then drop its WM
+    // rdf:type / label triples even though its WM-layer membership is
+    // exactly what the narrowed view is asking for.
+    const chips = Array.from(container.querySelectorAll('button.v10-minipyr-chip')) as HTMLButtonElement[];
+    const swmChip = chips.find(b => (b.getAttribute('title') ?? '').startsWith('Shared Memory'));
+    const vmChip = chips.find(b => (b.getAttribute('title') ?? '').startsWith('Verified Memory'));
+    expect(swmChip).toBeTruthy();
+    expect(vmChip).toBeTruthy();
+
+    await act(async () => { swmChip!.click(); });
+    await act(async () => { vmChip!.click(); });
+
+    await waitForGraph(() => {
+      const triples = readGraphTriples();
+      const hasEdge = triples.some(
+        (t) => t.s === 'urn:e:mixed'
+          && t.p === 'http://schema.org/knows'
+          && t.o === 'urn:e:wm-neighbour-2',
+      );
+      const hasType = triples.some(
+        (t) => t.s === 'urn:e:mixed'
+          && t.p === 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type'
+          && t.o === 'http://schema.org/Thing',
+      );
+      const hasLabel = triples.some(
+        (t) => t.s === 'urn:e:mixed'
+          && t.p === 'http://schema.org/name'
+          && t.o === '"Mixed entity"',
+      );
+      // The SWM-only edge must NOT appear in the WM-narrowed view.
+      const hasSwmEdge = triples.some(
+        (t) => t.s === 'urn:e:mixed' && t.p === 'http://schema.org/related',
+      );
+      expect(hasEdge).toBe(true);
+      expect(hasType).toBe(true);
+      expect(hasLabel).toBe(true);
+      expect(hasSwmEdge).toBe(false);
+    });
+  });
 });

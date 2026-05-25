@@ -135,4 +135,33 @@ describe('useMemoryEntities readable labels', () => {
     expect([...entities.get('urn:test:source')!.subGraphs].sort()).toEqual(['alpha', 'beta']);
     expect([...entities.get('urn:test:target')!.subGraphs].sort()).toEqual(['alpha', 'beta']);
   });
+
+  // C19 regression: `isUnreadableDefaultUriLabel` (used by deriveEntityLabel
+  // when no name predicate is present) used to only treat http/https/urn/did
+  // as default URI schemes worth re-deriving, so other absolute IRIs such as
+  // `mailto:` or `ipfs://` were kept as raw URI labels. Now it routes through
+  // the same `isUri` check the rest of the surface uses.
+  it('derives a readable tail for non-allowlisted absolute IRIs (mailto, ipfs)', () => {
+    const entities = buildMemoryEntities([
+      // mailto: with no `/` or `#` — only the trailing colon path is left as
+      // the readable tail.
+      { subject: 'mailto:alice@example.com', predicate: RDF_TYPE, object: 'http://schema.org/Person', layer: 'working' },
+      // ipfs:// — the CID tail; if the tail is long hex the helper trims it.
+      { subject: 'ipfs://bafybeigdyrztktx5n2sx5hjcq6sj2nnmpu3qbtjvfg5pvqhxqfbq5zxq3a/object.json', predicate: RDF_TYPE, object: 'http://schema.org/MediaObject', layer: 'working' },
+    ]);
+
+    const mailto = entities.get('mailto:alice@example.com');
+    const ipfs = entities.get('ipfs://bafybeigdyrztktx5n2sx5hjcq6sj2nnmpu3qbtjvfg5pvqhxqfbq5zxq3a/object.json');
+    expect(mailto).toBeDefined();
+    expect(ipfs).toBeDefined();
+
+    // Both labels must be re-derived — neither should match the raw URI.
+    expect(mailto!.label).not.toBe('mailto:alice@example.com');
+    expect(ipfs!.label).not.toBe('ipfs://bafybeigdyrztktx5n2sx5hjcq6sj2nnmpu3qbtjvfg5pvqhxqfbq5zxq3a/object.json');
+    // The readable fallback prepends the (non-Thing/Entity) type and uses
+    // the URI tail — anchor the test on tail content rather than the full
+    // formatted string so future fallback tweaks don't churn this expectation.
+    expect(mailto!.label).toContain('alice@example.com');
+    expect(ipfs!.label).toContain('object.json');
+  });
 });

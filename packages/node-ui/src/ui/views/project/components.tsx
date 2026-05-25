@@ -3939,11 +3939,33 @@ export function SubGraphDetailView({
   // accidentally dropped subject-local triples whose object is a class IRI
   // or a literal, making isolated promoted entities lose their types /
   // labels in a narrowed single-layer view.
+  //
+  // Endpoint-presence gate (C18): the URI set for "at least one endpoint
+  // belongs to the narrowed view" must be built from `entity.layers.has(...)`
+  // rather than from `filteredEntities` — the latter is `trustLevel`-filtered
+  // (single highest-trust value per entity), which excludes mixed-layer
+  // entities from the URI set whenever their `trustLevel` doesn't match the
+  // single enabled layer. Chip + query filters still apply in addition.
   const graphPanelTriples = useMemo(() => {
     if (!singleLayer) return filteredTriples;
     const layerTrust: TrustLevel =
       singleLayer === 'vm' ? 'verified' :
       singleLayer === 'swm' ? 'shared' : 'working';
+    const panelEntities = scopedEntities.filter(e => {
+      if (!e.layers.has(layerTrust)) return false;
+      if (chipState.size > 0) {
+        for (const chip of chips) {
+          const selected = chipState.get(chip.slug);
+          if (!selected || selected.size === 0) continue;
+          const vals = e.properties.get(chip.predicate);
+          if (!vals || vals.length === 0) return false;
+          if (!vals.some(v => selected.has(v))) return false;
+        }
+      }
+      if (queryResults && !queryResults.has(e.uri)) return false;
+      return true;
+    });
+    const panelUris = new Set(panelEntities.map(e => e.uri));
     const seen = new Set<string>();
     const out: Triple[] = [];
     for (const t of rawMemory.allTriples) {
@@ -3952,14 +3974,14 @@ export function SubGraphDetailView({
         || scopedUris.has(t.subject)
         || (isResourceNode(t.object) && scopedUris.has(t.object));
       if (!inScope) continue;
-      if (!(filteredUris.has(t.subject) || filteredUris.has(t.object))) continue;
+      if (!(panelUris.has(t.subject) || panelUris.has(t.object))) continue;
       const key = `${t.subject}|${t.predicate}|${t.object}`;
       if (seen.has(key)) continue;
       seen.add(key);
       out.push({ subject: t.subject, predicate: t.predicate, object: t.object, subGraph: t.subGraph });
     }
     return out;
-  }, [singleLayer, filteredTriples, rawMemory.allTriples, scopedUris, slug, filteredUris]);
+  }, [singleLayer, filteredTriples, rawMemory.allTriples, scopedUris, slug, scopedEntities, chips, chipState, queryResults]);
 
   const timelineItems = useMemo(() => {
     if (!timelinePredicate) return [];

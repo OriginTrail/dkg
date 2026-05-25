@@ -70,10 +70,6 @@ function canonicalEntityUri(uri: string): string {
   return trimmed;
 }
 
-function isKnownUriScheme(s: string): boolean {
-  return s.startsWith('http://') || s.startsWith('https://') || s.startsWith('urn:') || s.startsWith('did:');
-}
-
 function shortLabel(uri: string): string {
   if (!uri) return '—';
   if (uri.startsWith('"')) return uri.replace(/^"|"$/g, '');
@@ -114,7 +110,12 @@ function isRawExtractionLabel(label: string, uri: string): boolean {
 }
 
 function isUnreadableDefaultUriLabel(label: string, uri: string): boolean {
-  return label === uri && isKnownUriScheme(uri);
+  // Use the same absolute-IRI check the rest of the surface uses — any
+  // `scheme:` URI (ipfs://, mailto:, ftp://, …) is treated the same way
+  // graph-model and the singleton-shelf treat it. Without this the helper
+  // missed schemes outside the original http/https/urn/did allowlist and
+  // left them with raw-URI labels in lists / details.
+  return label === uri && isUri(uri);
 }
 
 function readableFallbackLabel(entity: MemoryEntity): string {
