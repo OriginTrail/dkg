@@ -178,7 +178,15 @@ describe('DKGAgent SWM gossip signing', () => {
     }]);
 
     expect(gossip.messages).toHaveLength(1);
-    expect(gossip.messages[0]?.topic).toBe(contextGraphWorkspaceTopic(contextGraphId));
+    // OT-RFC-38 / LU-6 Phase B: gossip topic uses the wire-form
+    // (hash) id so hosting cores can auto-subscribe via the chain-
+    // event path without learning cleartext. Envelope itself still
+    // carries cleartext in `contextGraphId` (privacy compromise — see
+    // `publishWorkspaceGossip` comment).
+    const expectedTopic = contextGraphWorkspaceTopic(
+      ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase(),
+    );
+    expect(gossip.messages[0]?.topic).toBe(expectedTopic);
     const envelope = decodeGossipEnvelope(gossip.messages[0]!.data);
     expect(envelope.agentAddress).toBe(allowedRecord.agentAddress);
     let decodedAsPlainWorkspace = false;

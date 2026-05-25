@@ -860,7 +860,8 @@ describe('@unit RandomSampling', () => {
         0, // accessPolicy = public/discoverable
         publishPolicy,
         authority,
-        0, // publishAuthorityAccountId
+        0, // publishAuthorityAccountId,
+        ethers.ZeroHash,
       );
       await tx.wait();
       return ContextGraphStorage.getLatestContextGraphId();

@@ -476,7 +476,8 @@ describe('V10 E2E Conviction System', function () {
       expect(
         await KnowledgeCollectionStorage.getLatestMerkleRootAuthor(kcId),
       ).to.equal(creator.address);
-    });
-  });
+    });,
+        ethers.ZeroHash,
+  ));
 
 });

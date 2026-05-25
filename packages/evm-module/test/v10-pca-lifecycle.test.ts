@@ -283,6 +283,7 @@ describe('@integration V10 PCA lifecycle (DKGPublishingConvictionNFT)', function
       1,
       ethers.ZeroAddress,
       0,
+      ethers.ZeroHash,
     );
     const cgId = await CGS.getLatestContextGraphId();
     expect(await CGFacade.isAuthorizedPublisher(cgId, creator.address)).to.be

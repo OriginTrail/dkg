@@ -172,6 +172,18 @@ export const DKG_ONTOLOGY = {
   DKG_GOSSIP_TOPIC: `${DKG}gossipTopic`,
   DKG_REPLICATION_POLICY: `${DKG}replicationPolicy`,
   DKG_ACCESS_POLICY: `${DKG}accessPolicy`,
+  /**
+   * On-chain contribution-policy dial (SPEC_CG_MEMORY_MODEL).
+   *   "0" → curators-only (default; only allowedAgents may publish to VM)
+   *   "1" → open (any wallet may publish to VM)
+   * Persisted at create time so the deferred-registration path
+   * (auto-register-on-first-VM-publish) preserves the user's create-
+   * time choice. Without this triple, auto-register coerced
+   * publishPolicy back to the access-policy-derived default and
+   * silently broke valid combinations like curated-access + open-
+   * contribution (Codex PR #610 fd5b31f1).
+   */
+  DKG_PUBLISH_POLICY: `${DKG}publishPolicy`,
   DKG_PARTICIPANT_IDENTITY_ID: `${DKG}participantIdentityId`,
   DKG_PARTICIPANT_AGENT: `${DKG}participantAgent`,
   DKG_PUBLISH_AUTHORITY_ACCOUNT_ID: `${DKG}publishAuthorityAccountId`,

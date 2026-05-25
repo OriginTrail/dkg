@@ -50,8 +50,13 @@ function canonicalSignature(iface: Interface, eventName: string): string {
 
 describe('ContextGraphCreated — topic0 and signature pinning [CH-6]', () => {
   const iface = loadInterface('ContextGraphStorage');
+  // OT-RFC-38 / LU-6 Phase B: `bytes32 indexed nameHash` inserted as the
+  // 3rd field. Inserted (rather than appended) so the field rides the
+  // indexed-topics array — cores read it from `log.topics[3]` without
+  // ABI-decoding the data tail (keeps the chain-event-driven host-mode
+  // auto-subscribe path O(1) per event).
   const EXPECTED_SIG =
-    'ContextGraphCreated(uint256,address,address[],uint256,uint8,uint8,address,uint256)';
+    'ContextGraphCreated(uint256,address,bytes32,address[],uint256,uint8,uint8,address,uint256)';
 
   it('canonical signature matches the spec field ordering', () => {
     expect(canonicalSignature(iface, 'ContextGraphCreated')).toBe(EXPECTED_SIG);
@@ -63,28 +68,31 @@ describe('ContextGraphCreated — topic0 and signature pinning [CH-6]', () => {
     expect(ev!.topicHash.toLowerCase()).toBe(expectedTopic0.toLowerCase());
   });
 
-  it('parseLog round-trip preserves first indexed arg (contextGraphId)', () => {
+  it('parseLog round-trip preserves first indexed args (contextGraphId, owner, nameHash)', () => {
     const ev = iface.getEvent('ContextGraphCreated')!;
     const topic0 = ev.topicHash;
-    // Build a synthetic log with topic0 + indexed contextGraphId + owner,
-    // plus encoded non-indexed tail. ethers' AbiCoder does the heavy
-    // lifting; if we mis-order, parseLog throws.
-    const { AbiCoder, zeroPadValue } = require('ethers') as typeof import('ethers');
+    // Build a synthetic log with topic0 + indexed contextGraphId + owner
+    // + nameHash, plus encoded non-indexed tail. ethers' AbiCoder does
+    // the heavy lifting; if we mis-order, parseLog throws.
+    const { AbiCoder, zeroPadValue, keccak256, toUtf8Bytes } = require('ethers') as typeof import('ethers');
     const coder = new AbiCoder();
     const nonIndexed = coder.encode(
       ['address[]', 'uint256', 'uint8', 'uint8', 'address', 'uint256'],
       [[], 0n, 0, 1, '0x0000000000000000000000000000000000000000', 0n],
     );
+    const nameHash = keccak256(toUtf8Bytes('0xdeadbeef/sample-cg'));
     const parsed = iface.parseLog({
       topics: [
         topic0,
         zeroPadValue('0x2a', 32),                     // contextGraphId = 42
         zeroPadValue('0x000000000000000000000000000000000000000b', 32), // owner
+        nameHash,                                     // nameHash (indexed)
       ],
       data: nonIndexed,
     });
     expect(parsed).not.toBeNull();
     expect(parsed!.args.contextGraphId).toBe(42n);
+    expect(parsed!.args.nameHash.toLowerCase()).toBe(nameHash.toLowerCase());
     expect(Number(parsed!.args.accessPolicy)).toBe(0);
     expect(Number(parsed!.args.publishPolicy)).toBe(1);
   });

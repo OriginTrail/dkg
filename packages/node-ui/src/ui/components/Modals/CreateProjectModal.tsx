@@ -93,8 +93,17 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
     const cgId = `${agentAddress}/${finalSlug}`;
 
     try {
-      const slowTimer = setTimeout(() => setProgress('On-chain registration in progress — this can take up to 30s…'), 5000);
-
+      // OT-RFC-38 LU-6: project creation is LOCAL-ONLY (no chain
+      // interaction, no gas). On-chain registration is deferred to
+      // the first VM publish, which is what the user actually opts
+      // into when they choose to durabilify. SWM works immediately
+      // — cores opaquely buffer curated ciphertext via host-mode
+      // for the pre-registration TTL until either the CG is
+      // explicitly registered or the user publishes for the first
+      // time. We therefore no longer poll for an "on-chain
+      // registration in progress" timer here or treat
+      // `registered: false` as an error.
+      //
       // SPEC_CG_MEMORY_MODEL dials:
       //   Sharing      → accessPolicy   (0 = open, 1 = invite-only)
       //   Contribution → publishPolicy  (0 = curators-only, 1 = open)
@@ -107,21 +116,6 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
         : { accessPolicy, publishPolicy: publishPolicyWire };
 
       const result = await createContextGraph(cgId, trimmedName, description.trim() || undefined, opts);
-      clearTimeout(slowTimer);
-
-      // Daemon returns 200 with `{ created, registered: false, registerError }`
-      // when the local create succeeded but the on-chain registration
-      // leg failed. Without surfacing this, the user would land on a
-      // CG that looks fine in the UI but can never publish to VM
-      // (publish-to-VM requires an on-chain CG id). Fail loud with
-      // an actionable hint pointing at the retry endpoint.
-      if (result.registered === false) {
-        throw new Error(
-          `Context graph created locally but on-chain registration failed: ${result.registerError ?? 'unknown error'}. ` +
-          `Verified Memory publishing requires an on-chain CG — retry registration from the project's Settings, ` +
-          `or POST /api/context-graph/register with {"id":"${cgId}"}.`,
-        );
-      }
 
       // Phase 7: install the chosen ontology into meta/project-ontology so
       // the agent has the project's predicate vocabulary and URI patterns

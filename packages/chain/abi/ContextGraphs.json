@@ -163,6 +163,11 @@
         "internalType": "uint256",
         "name": "publishAuthorityAccountId",
         "type": "uint256"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "nameHash",
+        "type": "bytes32"
       }
     ],
     "name": "createContextGraph",

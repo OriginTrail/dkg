@@ -665,68 +665,312 @@ WHERE {
       });
     }
 
-    // Parallelize across peers — each peer's sync is independent
-    // and the per-peer dial+request takes 5-20s on devnet. Serial
-    // iteration over N peers would compound to N×20s, easily
-    // exceeding the daemon's default request timeout.
-    const settled = await Promise.allSettled(
-      candidatePeers.map(async (candidate) => {
-        let swm = 0;
-        let durable = 0;
-        let swmError: string | undefined;
-        let durableError: string | undefined;
-        try {
-          swm = await withTimeout(
-            agent.syncSharedMemoryFromPeer(candidate, cgIds),
-            PER_PEER_SWM_BUDGET_MS,
-            `SWM catchup from ${candidate}`,
-          );
-        } catch (err: any) {
-          swmError = err?.message ?? String(err);
-        }
-        if (includeDurable) {
+    // Per-CG × per-peer sync. The previous shape called
+    // `syncSharedMemoryFromPeer(peer, cgIds)` ONCE per peer with the
+    // full CG list, which only returned an aggregate count and made
+    // a per-CG LU-6 fallback decision impossible (Codex PR #610 R1
+    // comment 1: if one CG got triples from standard sync, fallback
+    // for the others got skipped on the aggregate gate).
+    //
+    // Now: iterate CGs serially (keeps wire load bounded across many
+    // peers × many CGs), and within each CG parallelize the per-peer
+    // sync exactly like before. Per-peer dial+request is 5-20s on
+    // devnet; serialising peers would compound to N×20s.
+    type PerPeerLeg = {
+      peerId: string;
+      insertedTriples: number;
+      durableInsertedTriples: number;
+      swmError?: string;
+      durableError?: string;
+      error?: string;
+    };
+    type PerCgLeg = {
+      contextGraphId: string;
+      perPeer: PerPeerLeg[];
+      insertedTriples: number;
+      durableInsertedTriples: number;
+    };
+    const perCgLegs: PerCgLeg[] = [];
+    for (const cgId of cgIds) {
+      const settled = await Promise.allSettled(
+        candidatePeers.map(async (candidate) => {
+          let swm = 0;
+          let durable = 0;
+          let swmError: string | undefined;
+          let durableError: string | undefined;
           try {
-            durable = await withTimeout(
-              (agent as any).syncFromPeer?.(candidate, cgIds) ?? Promise.resolve(0),
-              PER_PEER_DURABLE_BUDGET_MS,
-              `Durable catchup from ${candidate}`,
+            swm = await withTimeout(
+              agent.syncSharedMemoryFromPeer(candidate, [cgId]),
+              PER_PEER_SWM_BUDGET_MS,
+              `SWM catchup from ${candidate} for ${cgId}`,
             );
           } catch (err: any) {
-            durableError = err?.message ?? String(err);
+            swmError = err?.message ?? String(err);
           }
+          if (includeDurable) {
+            try {
+              durable = await withTimeout(
+                (agent as any).syncFromPeer?.(candidate, [cgId]) ?? Promise.resolve(0),
+                PER_PEER_DURABLE_BUDGET_MS,
+                `Durable catchup from ${candidate} for ${cgId}`,
+              );
+            } catch (err: any) {
+              durableError = err?.message ?? String(err);
+            }
+          }
+          return { peerId: candidate, insertedTriples: swm, durableInsertedTriples: durable, swmError, durableError } as PerPeerLeg;
+        }),
+      );
+      const perPeer: PerPeerLeg[] = settled.map((s, idx) => {
+        if (s.status === 'fulfilled') {
+          return {
+            peerId: candidatePeers[idx],
+            insertedTriples: s.value.insertedTriples,
+            durableInsertedTriples: s.value.durableInsertedTriples,
+            ...(s.value.swmError ? { swmError: s.value.swmError } : {}),
+            ...(s.value.durableError ? { durableError: s.value.durableError } : {}),
+          };
         }
-        return { peerId: candidate, insertedTriples: swm, durableInsertedTriples: durable, swmError, durableError };
-      }),
-    );
-
-    const results = settled.map((s, idx) => {
-      if (s.status === 'fulfilled') {
         return {
           peerId: candidatePeers[idx],
-          insertedTriples: s.value.insertedTriples,
-          durableInsertedTriples: s.value.durableInsertedTriples,
-          ...(s.value.swmError ? { swmError: s.value.swmError } : {}),
-          ...(s.value.durableError ? { durableError: s.value.durableError } : {}),
+          insertedTriples: 0,
+          durableInsertedTriples: 0,
+          error: s.reason?.message ?? String(s.reason),
         };
-      }
-      return {
-        peerId: candidatePeers[idx],
-        insertedTriples: 0,
-        durableInsertedTriples: 0,
-        error: s.reason?.message ?? String(s.reason),
-      };
-    });
+      });
+      perCgLegs.push({
+        contextGraphId: cgId,
+        perPeer,
+        insertedTriples: perPeer.reduce((sum, p) => sum + p.insertedTriples, 0),
+        durableInsertedTriples: perPeer.reduce((sum, p) => sum + (p.durableInsertedTriples ?? 0), 0),
+      });
+    }
 
-    const totalInserted = results.reduce((sum, r) => sum + r.insertedTriples, 0);
-    const totalDurable = results.reduce((sum, r) => sum + (r.durableInsertedTriples ?? 0), 0);
+    // OT-RFC-38 LU-6 — per-CG host-catchup fallback. For each CG
+    // whose standard sync inserted 0 triples, fall back to fetching
+    // opaque ciphertext envelopes from connected core hosts and
+    // re-applying them through the local sender-key decryptor.
+    // This is the "every member is offline; only cores still hold
+    // the substrate" recovery path.
+    //
+    // Behaviour:
+    //  - Default ON; opt out via { hostCatchupFallback: false }.
+    //  - Decision is per-CG: a multi-CG catchup where some CGs got
+    //    triples from standard sync and others didn't will still run
+    //    fallback for the empty ones (Codex PR #610 R1 fix).
+    //  - The host-catchup leg has its own internal time budget
+    //    (sendReliable + a few rounds per peer); CGs are processed
+    //    serially to keep wire load low.
+    const hostCatchupOpted = parsed.hostCatchupFallback !== false;
+    const hostCatchupSupported = typeof (agent as any).catchupSwmFromConnectedHosts === 'function';
+    type HostCatchupLeg = {
+      contextGraphId: string;
+      peers: Awaited<ReturnType<typeof agent.catchupSwmFromConnectedHosts>>;
+      /** Envelope-level counter from the replay path. NOT a triples count. */
+      appliedEnvelopes: number;
+      /** Triples (N-Quads) inserted by successful replays. Maps to the public `appliedTotal`. */
+      appliedTotal: number;
+      error?: string;
+    };
+    const hostCatchup: HostCatchupLeg[] = [];
+    if (hostCatchupOpted && hostCatchupSupported) {
+      for (const cg of perCgLegs) {
+        if (cg.insertedTriples > 0) continue;
+        try {
+          const peerResults = await (agent as any).catchupSwmFromConnectedHosts(cg.contextGraphId, {
+            peers: peerIdParam ? [peerIdParam] : undefined,
+            maxRounds: 8,
+          });
+          // Codex PR #610 R2: `r.applied` is the count of replayed
+          // envelopes (booleans), NOT inserted triples. One envelope
+          // can carry many quads, so summing `r.applied` here would
+          // undercount whenever a publisher batched > 1 triple per
+          // share. Use `r.appliedTriples` (threaded through
+          // `catchupSwmFromHost` / `SharedMemoryApplyOutcome`) for
+          // the triples total surfaced as `appliedTotal` and rolled
+          // into the top-level `totalInsertedTriples`.
+          const appliedTotal = peerResults.reduce((sum: number, r: any) => sum + (r.appliedTriples ?? 0), 0);
+          const appliedEnvelopes = peerResults.reduce((sum: number, r: any) => sum + (r.applied ?? 0), 0);
+          hostCatchup.push({ contextGraphId: cg.contextGraphId, peers: peerResults, appliedEnvelopes, appliedTotal });
+        } catch (err: any) {
+          hostCatchup.push({
+            contextGraphId: cg.contextGraphId,
+            peers: [],
+            appliedEnvelopes: 0,
+            appliedTotal: 0,
+            error: err?.message ?? String(err),
+          });
+        }
+      }
+    }
+    const hostCatchupAppliedTotal = hostCatchup.reduce((sum, h) => sum + h.appliedTotal, 0);
+    const hostCatchupEnvelopesTotal = hostCatchup.reduce((sum, h) => sum + h.appliedEnvelopes, 0);
+
+    // Codex PR #610 R1 comment 2: `totalInsertedTriples` must cover
+    // BOTH the standard sync leg and the LU-6 host-catchup leg so
+    // callers that read just this top-level field don't mistake a
+    // successful host-catchup recovery for a no-op.
+    const standardInserted = perCgLegs.reduce((sum, c) => sum + c.insertedTriples, 0);
+    const totalInserted = standardInserted + hostCatchupAppliedTotal;
+    const totalDurable = perCgLegs.reduce((sum, c) => sum + c.durableInsertedTriples, 0);
+
+    // Flatten per-peer into a `results` array for callers that
+    // only care about the aggregate peer view. The richer per-CG
+    // breakdown lives in `perContextGraph`.
+    //
+    // Codex PR #610 R4: preserve `swmError` and `durableError` as
+    // SEPARATE fields (legacy shape) instead of collapsing them
+    // into a single `errors[]` array. The two errors come from
+    // distinct legs of the catchup pipeline (live sync vs durable
+    // VM reconstruction) and operators / dashboards have always
+    // distinguished them. The first non-empty value per peer wins
+    // (multiple CGs against the same peer are rare and the leg
+    // identity is what matters, not which CG produced the
+    // specific message).
+    const perPeerAggregate = new Map<string, {
+      peerId: string;
+      insertedTriples: number;
+      durableInsertedTriples: number;
+      swmError?: string;
+      durableError?: string;
+      otherErrors?: string[];
+    }>();
+    for (const cg of perCgLegs) {
+      for (const p of cg.perPeer) {
+        const entry = perPeerAggregate.get(p.peerId) ?? { peerId: p.peerId, insertedTriples: 0, durableInsertedTriples: 0 };
+        entry.insertedTriples += p.insertedTriples;
+        entry.durableInsertedTriples += p.durableInsertedTriples;
+        if (p.swmError && !entry.swmError) entry.swmError = p.swmError;
+        if (p.durableError && !entry.durableError) entry.durableError = p.durableError;
+        if (p.error) entry.otherErrors = [...(entry.otherErrors ?? []), p.error];
+        perPeerAggregate.set(p.peerId, entry);
+      }
+    }
+    const results = [...perPeerAggregate.values()].map((r) => ({
+      peerId: r.peerId,
+      insertedTriples: r.insertedTriples,
+      durableInsertedTriples: r.durableInsertedTriples,
+      ...(r.swmError ? { swmError: r.swmError } : {}),
+      ...(r.durableError ? { durableError: r.durableError } : {}),
+      ...(r.otherErrors && r.otherErrors.length > 0 ? { errors: r.otherErrors } : {}),
+    }));
+
     return jsonResponse(res, 200, {
       contextGraphIds: cgIds,
       peersAttempted: candidatePeers.length,
       includeDurable,
       totalInsertedTriples: totalInserted,
       totalDurableInsertedTriples: totalDurable,
+      standardInsertedTriples: standardInserted,
       results,
+      perContextGraph: perCgLegs.map((cg) => ({
+        contextGraphId: cg.contextGraphId,
+        insertedTriples: cg.insertedTriples,
+        durableInsertedTriples: cg.durableInsertedTriples,
+        perPeer: cg.perPeer,
+      })),
+      hostCatchup: hostCatchupOpted ? {
+        ranFallback: hostCatchup.length > 0,
+        triggeredForContextGraphIds: hostCatchup.map((h) => h.contextGraphId),
+        // `appliedTotal` is triples (the user-facing unit); the
+        // separate `appliedEnvelopes` is exposed for operators who
+        // want to know how many discrete shares were replayed.
+        appliedTotal: hostCatchupAppliedTotal,
+        appliedEnvelopes: hostCatchupEnvelopesTotal,
+        perContextGraph: hostCatchup,
+      } : { ranFallback: false, triggeredForContextGraphIds: [], appliedTotal: 0, appliedEnvelopes: 0, perContextGraph: [] },
     });
+  }
+
+  // OT-RFC-38 LU-6 — dedicated host-catchup endpoint.
+  //
+  // POST /api/shared-memory/host-catchup
+  // Body: { contextGraphId: string, peerId?: string, sinceSeqno?: number, maxRounds?: number }
+  //
+  // Pulls opaque ciphertext envelopes from cores that have been
+  // hosting the curated CG's SWM substrate and re-applies each
+  // through the local agent so the existing Sender-Key decrypt
+  // path runs verbatim. Distinct from the "fallback" leg embedded
+  // in /catchup above — exposed so operators can debug host
+  // hosting independently (e.g. to confirm a specific core has
+  // stored ciphertext for a CG).
+  if (req.method === 'POST' && path === '/api/shared-memory/host-catchup') {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
+    if (typeof parsed.contextGraphId !== 'string' || !parsed.contextGraphId.trim()) {
+      return jsonResponse(res, 400, { error: 'Missing or invalid "contextGraphId"' });
+    }
+    const cgId = parsed.contextGraphId.trim();
+    const peerIdParam = typeof parsed.peerId === 'string' ? parsed.peerId.trim() : undefined;
+    const sinceSeqno = typeof parsed.sinceSeqno === 'number' && parsed.sinceSeqno >= 0 ? Math.floor(parsed.sinceSeqno) : 0;
+    const maxRounds = typeof parsed.maxRounds === 'number' && parsed.maxRounds > 0 ? Math.min(64, Math.floor(parsed.maxRounds)) : 8;
+    if (typeof (agent as any).catchupSwmFromConnectedHosts !== 'function') {
+      return jsonResponse(res, 501, { error: 'Host-catchup is not supported on this agent build' });
+    }
+    try {
+      const peerResults = await (agent as any).catchupSwmFromConnectedHosts(cgId, {
+        peers: peerIdParam ? [peerIdParam] : undefined,
+        sinceSeqno,
+        maxRounds,
+      });
+      // Codex PR #610 R2: report triples (`appliedTriples`) as the
+      // user-facing total; keep envelope count alongside as
+      // `appliedEnvelopes` for diagnostics. Same fix as the
+      // `/catchup` fallback leg above.
+      const appliedTotal = peerResults.reduce((sum: number, r: any) => sum + (r.appliedTriples ?? 0), 0);
+      const appliedEnvelopes = peerResults.reduce((sum: number, r: any) => sum + (r.applied ?? 0), 0);
+      const fetchedTotal = peerResults.reduce((sum: number, r: any) => sum + (r.fetched ?? 0), 0);
+      return jsonResponse(res, 200, {
+        contextGraphId: cgId,
+        peers: peerResults,
+        appliedTotal,
+        appliedEnvelopes,
+        fetchedTotal,
+      });
+    } catch (err: any) {
+      return jsonResponse(res, 500, { error: err?.message ?? String(err) });
+    }
+  }
+
+  // OT-RFC-38 LU-6 — host-mode store diagnostics.
+  // GET /api/shared-memory/host-mode/stats
+  // Returns { enabled, cgCount, totalBytes, totalEntries, subscribedCgIds }.
+  if (req.method === 'GET' && path === '/api/shared-memory/host-mode/stats') {
+    if (typeof (agent as any).getSwmHostModeStats !== 'function') {
+      return jsonResponse(res, 501, { error: 'Host-mode store is not supported on this agent build' });
+    }
+    try {
+      const stats = await (agent as any).getSwmHostModeStats();
+      return jsonResponse(res, 200, stats ?? { enabled: false });
+    } catch (err: any) {
+      return jsonResponse(res, 500, { error: err?.message ?? String(err) });
+    }
+  }
+
+  // OT-RFC-38 LU-6 — explicit host-mode subscribe.
+  // POST /api/shared-memory/host-mode/subscribe { contextGraphId }
+  // Tells a core to start hosting the curated CG's encrypted SWM
+  // substrate WITHOUT requiring the core to become a CG member.
+  // Used by operators in Phase A to designate per-core hosting
+  // assignments while the sharding-table-based auto-discovery
+  // matures. No-op on edges (host mode disabled).
+  if (req.method === 'POST' && path === '/api/shared-memory/host-mode/subscribe') {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
+    if (typeof parsed.contextGraphId !== 'string' || !parsed.contextGraphId.trim()) {
+      return jsonResponse(res, 400, { error: 'Missing or invalid "contextGraphId"' });
+    }
+    if (typeof (agent as any).enableSwmHostModeFor !== 'function') {
+      return jsonResponse(res, 501, { error: 'Host-mode subscribe is not supported on this agent build' });
+    }
+    try {
+      const result = await (agent as any).enableSwmHostModeFor(parsed.contextGraphId.trim());
+      return jsonResponse(res, 200, { contextGraphId: parsed.contextGraphId.trim(), ...result });
+    } catch (err: any) {
+      return jsonResponse(res, 500, { error: err?.message ?? String(err) });
+    }
   }
 
   // Tiny local helper — kept inline to avoid adding a new import for
@@ -1443,6 +1687,85 @@ WHERE {
       details: { source: "api", publishContextGraphId, subGraphName },
     });
     try {
+      // OT-RFC-38 LU-6 — transparent register-then-publish.
+      //
+      // Project creation is local-only by design (no chain
+      // interaction, no gas) so that SWM works immediately. The
+      // first time the user opts into VM publish IS the implicit
+      // moment they accept the chain cost — we auto-register
+      // here so the user experiences a single action (and a
+      // single spinner) rather than having to remember a
+      // separate `/api/context-graph/register` call first.
+      //
+      // Idempotent on the agent side: `registerContextGraph`
+      // short-circuits when an on-chain id already exists, so
+      // racing publishes / re-publishes don't double-mint.
+      //
+      // If the user already explicitly registered (e.g. from
+      // project Settings to upgrade SWM host-mode quotas), this
+      // is a cheap no-op probe.
+      try {
+        const existingOnChainId = await agent.getContextGraphOnChainId(contextGraphId);
+        if (!existingOnChainId) {
+          // OT-RFC-38 / LU-6 Phase B (Codex PR #610 round-2 #5):
+          // cheap preflight BEFORE spending gas on registration. If
+          // SWM is empty for this CG, the publish leg below would
+          // fail with `no entities to publish` anyway — register
+          // first and we'd burn gas on a doomed publish. Skip
+          // preflight when caller passed a `rootEntities` selection
+          // (the entity-presence check happens deeper in the publish
+          // path) or supplied a `publishContextGraphId` override
+          // (cross-CG attribution: SWM may live elsewhere).
+          if (
+            selection === undefined || selection === "all"
+          ) {
+            if (
+              publishContextGraphId == null
+              && !agent.hasPendingSharedMemoryWrites(contextGraphId)
+            ) {
+              tracker.fail(ctx, new Error('SWM empty for context graph'));
+              return jsonResponse(res, 400, {
+                error:
+                  `Context graph "${contextGraphId}" has no pending shared-memory writes — `
+                  + `nothing to publish to Verified Memory. Stage entities into SWM first, then retry publish.`,
+              });
+            }
+          }
+          // OT-RFC-38 / LU-6 Phase B (Codex PR #610 fd5b31f1 fix):
+          // load create-time `publishPolicy` and
+          // `publishAuthorityAccountId` so the deferred-registration
+          // call preserves the user's intent end-to-end. Pre-fix, this
+          // call forwarded only `callerAgentAddress` and silently
+          // coerced the policy back to the access-policy default —
+          // breaking curated-access + open-contribution and PCA-
+          // curated registrations.
+          const storedOpts = await agent.getStoredContextGraphRegistrationOptions(contextGraphId);
+          await tracker.trackPhase(ctx, "register-on-chain", () =>
+            agent.registerContextGraph(contextGraphId, {
+              ...(resolvedAuthorAgentAddress != null
+                ? { callerAgentAddress: resolvedAuthorAgentAddress }
+                : {}),
+              ...(storedOpts.publishPolicy !== undefined
+                ? { publishPolicy: storedOpts.publishPolicy }
+                : {}),
+              ...(storedOpts.publishAuthorityAccountId !== undefined
+                ? { publishAuthorityAccountId: storedOpts.publishAuthorityAccountId }
+                : {}),
+            }),
+          );
+        }
+      } catch (regErr: any) {
+        // Surface registration failures as a 400 with a clear
+        // breadcrumb so the UI can show the actionable message
+        // (insufficient TRAC, missing chain signer, etc.)
+        // instead of a generic 500 from the publish leg later.
+        tracker.fail(ctx, regErr);
+        return jsonResponse(res, 400, {
+          error:
+            `Context graph "${contextGraphId}" could not be auto-registered on-chain before publish: ` +
+            `${regErr?.message ?? String(regErr)}`,
+        });
+      }
       const sel: "all" | { rootEntities: string[] } = Array.isArray(selection)
         ? { rootEntities: selection }
         : selection || "all";

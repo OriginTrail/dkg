@@ -111,6 +111,22 @@ export type SharedMemoryApplyOutcome =
        * Caller addresses the PROTOCOL_SWM_SHARE_ACK to this peer.
        */
       publisherPeerId?: string;
+      /**
+       * Number of N-Quads that were inserted into the SWM graph
+       * by this apply (i.e., `quads.length` after decode + decrypt).
+       *
+       * Distinct from "envelope was applied" (the boolean
+       * `applied` flag): one envelope can carry many quads, so
+       * callers aggregating per-triple counts (e.g. the LU-6
+       * host-catchup endpoint that reports `totalInsertedTriples`)
+       * MUST consume this field rather than counting `applied`
+       * booleans. Codex PR #610 R2 caught the undercount when
+       * `hostCatchup.appliedTotal` was being summed from envelope
+       * counts. Optional only because the false variant cannot
+       * carry it; the true variant always sets it from the same
+       * `quads.length` used in the success-path log line.
+       */
+      insertedTriples?: number;
     }
   | { applied: false; reason: string; retryable: boolean };
 
@@ -152,6 +168,53 @@ export class SharedMemoryHandler {
   private readonly sharedMemoryOwnedEntities: Map<string, Map<string, string>> = new Map();
   private readonly writeLocks: Map<string, Promise<void>>;
   private readonly localAgentAddresses?: () => readonly string[] | Promise<readonly string[]>;
+  /**
+   * OT-RFC-38 / LU-6 Phase B — chain-backed fallback for the agent
+   * allowlist read. Returns the participant-agent EOA set for a
+   * given cleartext CG id (which the oracle implementation maps to
+   * the on-chain numeric id internally), or `null` when the chain
+   * has no answer (unregistered id / non-V10 adapter / lookup
+   * failure). Consulted only when the local meta-graph has no
+   * `DKG_ALLOWED_AGENT`/`DKG_PARTICIPANT_AGENT` triples (the host-
+   * mode ingest case on cores that are NOT CG members).
+   *
+   * The oracle SHOULD cache results (chain reads dominate ingest
+   * latency otherwise); this class is intentionally cache-free here
+   * because the wiring agent owns the (chainId, cgId) → agents map
+   * and can invalidate on chain events.
+   */
+  private readonly chainAgentGateOracle?: (
+    contextGraphId: string,
+  ) => Promise<string[] | null>;
+  /**
+   * OT-RFC-38 / LU-6 Phase B — beacon-curator fallback for the agent
+   * allowlist read. Returns the curator EOA pinned for `contextGraphId`
+   * via a previously-received discovery beacon (first-claim-wins),
+   * or `null` when no beacon has been observed.
+   *
+   * Consulted ONLY when both the local meta-graph and the chain
+   * oracle returned empty. Hits during two race windows that would
+   * otherwise drop legitimate ciphertext:
+   *
+   *   1. Pre-registration: the curator broadcast a beacon and is
+   *      already writing SWM, but hasn't sent the on-chain
+   *      `ContextGraphCreated` tx yet (or it's pending).
+   *   2. Chain-event race: the curator registered on chain N seconds
+   *      ago, but the core's `ChainEventPoller` hasn't observed the
+   *      event yet (poll cadence ~12s). The local CG-id → numeric-id
+   *      mapping in `resolveOnChainParticipantAgents` is therefore
+   *      cold, and the chain oracle returns null.
+   *
+   * Returning the curator EOA is safe: the beacon protocol verifies
+   * the curator's EIP-191 signature over `(nameHash, accessPolicy,
+   * curatorEoa, timestamp)` before recording the binding, so we
+   * KNOW the EOA controls the CG name. Restricting the allowlist
+   * to a single address (the curator) during the race window blocks
+   * any other signer until the chain truth catches up.
+   */
+  private readonly beaconCuratorOracle?: (
+    contextGraphId: string,
+  ) => Promise<string | null>;
   private readonly workspaceRecipientPrivateKeys?: (
     contextGraphId: string,
   ) => readonly WorkspaceRecipientEncryptionKey[] | Promise<readonly WorkspaceRecipientEncryptionKey[]>;
@@ -220,6 +283,24 @@ export class SharedMemoryHandler {
       sharedMemoryOwnedEntities?: Map<string, Map<string, string>>;
       writeLocks?: Map<string, Promise<void>>;
       localAgentAddresses?: () => readonly string[] | Promise<readonly string[]>;
+      /**
+       * OT-RFC-38 / LU-6 Phase B chain-backed agent-allowlist
+       * fallback. See {@link SharedMemoryHandler#chainAgentGateOracle}.
+       * Optional; omitted on test rigs and edge-only deployments
+       * that do not host curated CGs.
+       */
+      chainAgentGateOracle?: (
+        contextGraphId: string,
+      ) => Promise<string[] | null>;
+      /**
+       * OT-RFC-38 / LU-6 Phase B beacon-pinned curator fallback. See
+       * {@link SharedMemoryHandler#beaconCuratorOracle}. Optional;
+       * omitted on test rigs and edge-only deployments that don't run
+       * the discovery-beacon machinery.
+       */
+      beaconCuratorOracle?: (
+        contextGraphId: string,
+      ) => Promise<string | null>;
       workspaceRecipientPrivateKeys?: (
         contextGraphId: string,
       ) => readonly WorkspaceRecipientEncryptionKey[] | Promise<readonly WorkspaceRecipientEncryptionKey[]>;
@@ -257,6 +338,8 @@ export class SharedMemoryHandler {
     }
     this.writeLocks = options?.writeLocks ?? new Map();
     this.localAgentAddresses = options?.localAgentAddresses;
+    this.chainAgentGateOracle = options?.chainAgentGateOracle;
+    this.beaconCuratorOracle = options?.beaconCuratorOracle;
     this.workspaceRecipientPrivateKeys = options?.workspaceRecipientPrivateKeys;
     this.workspaceSenderKeyDecryptor = options?.workspaceSenderKeyDecryptor;
     this.now = options?.now ?? (() => Date.now());
@@ -637,7 +720,31 @@ export class SharedMemoryHandler {
    * inspects the outcome and throws on `retryable: true` so the
    * substrate's outbox keeps the share queued for retry.
    */
-  async handle(data: Uint8Array, fromPeerId: string, onPhase?: PhaseCallback): Promise<SharedMemoryApplyOutcome> {
+  /**
+   * Apply a wire-format SWM gossip message.
+   *
+   * `options.trustedReplay` (OT-RFC-38 LU-6): when true, the handler
+   * SKIPS the two pubsub-transport-layer peer assertions:
+   *   1. `publisherPeerId === fromPeerId` (gossipsub `from` matches
+   *       envelope-declared publisher)
+   *   2. `allowedPeers.includes(fromPeerId)` (peer allowlist gate)
+   *
+   * Used by LU-6 host-catchup, where the member replays opaque
+   * ciphertext envelopes it just fetched from a CORE host. The CORE
+   * is NOT the original publisher (its peerId won't match what the
+   * sender packaged), and it isn't necessarily in the curated peer
+   * allowlist. The cryptographic chain (gossip-envelope signature
+   * verification + sender-key AEAD decryption) is still enforced
+   * for every replayed envelope — so a host can't forge or tamper
+   * with what it stored opaquely, only relay it.
+   */
+  async handle(
+    data: Uint8Array,
+    fromPeerId: string,
+    onPhase?: PhaseCallback,
+    options?: { trustedReplay?: boolean },
+  ): Promise<SharedMemoryApplyOutcome> {
+    const trustedReplay = options?.trustedReplay === true;
     let ctx = createOperationContext('share');
     // PR-C codex R5 (dropped review comment): protobuf decode
     // failures are DETERMINISTIC — retrying the same wire bytes
@@ -693,7 +800,22 @@ export class SharedMemoryHandler {
       }
 
       if (agentGateAddresses !== null) {
-        const verified = await this.verifyAgentEnvelope(envelope, signedPayload, contextGraphId, agentGateAddresses, ctx);
+        const verified = await this.verifyAgentEnvelope(envelope, signedPayload, contextGraphId, agentGateAddresses, ctx, {
+          // LU-6 host-catchup replay (PR #610 Codex round-2 #1): the
+          // 5-minute `GOSSIP_ENVELOPE_FRESHNESS_MS` window protects
+          // live gossip against replay attacks, but it BREAKS the
+          // host-catchup recovery path — a member that comes online
+          // hours/days after a curator wrote to SWM legitimately
+          // needs to replay envelopes whose timestamps are far older
+          // than the freshness window. Skipping the freshness check
+          // on trusted replays is safe because the (cryptographic)
+          // signature + decryption chain still verifies, and `seqno`
+          // monotonicity in the host catalog prevents re-applying
+          // already-seen entries. Without this skip, every aged
+          // host-catchup envelope returned `stale or invalid gossip
+          // timestamp` and the off-line member could never catch up.
+          skipTimestampFreshness: trustedReplay,
+        });
         if (!verified) {
           // verifyAgentEnvelope already logged the specific reason
           // at WARN. Treated as permanent: a bad signature won't
@@ -787,7 +909,7 @@ export class SharedMemoryHandler {
         return { applied: false, reason, retryable: false };
       }
 
-      if (publisherPeerId !== fromPeerId) {
+      if (!trustedReplay && publisherPeerId !== fromPeerId) {
         const reason = `payload publisherPeerId "${publisherPeerId}" does not match sender "${fromPeerId}"`;
         this.log.warn(ctx, `SWM write rejected: ${reason}`);
         return { applied: false, reason, retryable: false };
@@ -800,8 +922,12 @@ export class SharedMemoryHandler {
       // gauge that the rc10 dedup decision relies on. Codex review on
       // PR #570 caught the earlier shape.
 
-      // Enforce peer allowlist for curated CGs
-      if (allowedPeers !== null && !allowedPeers.includes(fromPeerId)) {
+      // Enforce peer allowlist for curated CGs. Skipped under
+      // `trustedReplay` (LU-6 host-catchup): the relaying host
+      // need not be in the curated peer allowlist; the original
+      // publisher's identity is bound by the envelope signature
+      // and the sender-key AEAD chain.
+      if (!trustedReplay && allowedPeers !== null && !allowedPeers.includes(fromPeerId)) {
         const reason = `peer "${fromPeerId}" not in allowlist for context graph "${contextGraphId}"`;
         this.log.warn(ctx, `SWM write rejected: ${reason}`);
         return { applied: false, reason, retryable: false };
@@ -992,6 +1118,7 @@ export class SharedMemoryHandler {
           cgId: contextGraphId,
           shareOperationId,
           publisherPeerId,
+          insertedTriples: quads.length,
         };
       }
       // `applied === false` from the withWriteLocks closure. PR-C
@@ -1093,12 +1220,99 @@ export class SharedMemoryHandler {
     return decrypted.plaintext;
   }
 
+  /**
+   * Lightweight authority check for LU-6 host-mode ingest.
+   *
+   * Validates raw gossip bytes against the curated CG's agent
+   * allowlist + peer allowlist WITHOUT attempting decryption — the
+   * chain key lives on members, not on the hosting core. Returns
+   * `{ accepted: true }` only if:
+   *   - the bytes decode as an agent-signed `GossipEnvelopeMsg`
+   *     bound to `contextGraphId`,
+   *   - the envelope signature is valid and recovers to an
+   *     address present in the CG's agent gate
+   *     (DKG_ALLOWED_AGENT ∪ DKG_PARTICIPANT_AGENT),
+   *   - if a peer allowlist is set on the CG, `fromPeerId` is in
+   *     it.
+   *
+   * Codex PR #610 R4 (DoS): without this check, any peer that
+   * could reach the gossip topic could spam a core's
+   * `SwmHostModeStore` with structurally-valid-but-unauthorized
+   * envelopes and evict legitimate history once the per-CG FIFO
+   * cap kicked in.
+   *
+   * Returns `{ accepted: false, reason }` on every failure so
+   * the caller can log a single concise breadcrumb.
+   */
+  async verifyHostModeEnvelopeAuthority(
+    rawBytes: Uint8Array,
+    contextGraphId: string,
+    fromPeerId: string,
+  ): Promise<{ accepted: true } | { accepted: false; reason: string }> {
+    const ctx = createOperationContext('share');
+    let decoded: WorkspaceGossipDecodeResult;
+    try {
+      decoded = this.decodeWorkspaceGossipMessage(rawBytes);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      return { accepted: false, reason: `decode failed: ${reason}` };
+    }
+    const { envelope, signedPayload } = decoded;
+    if (!envelope) {
+      return { accepted: false, reason: 'unsigned envelope (host mode requires agent-signed gossip)' };
+    }
+    const agentGateAddresses = await this.getContextGraphAgentGateAddresses(contextGraphId);
+    const allowedPeers = await this.getContextGraphAllowedPeers(contextGraphId);
+    if (agentGateAddresses === null) {
+      // No agent gate → not curated → host mode shouldn't be
+      // active for this CG. Drop defensively.
+      return { accepted: false, reason: 'no agent allowlist on context graph' };
+    }
+    if (allowedPeers !== null && !allowedPeers.includes(fromPeerId)) {
+      return { accepted: false, reason: `peer ${fromPeerId} not in peer allowlist` };
+    }
+    const verified = await this.verifyAgentEnvelope(
+      envelope,
+      signedPayload,
+      contextGraphId,
+      agentGateAddresses,
+      ctx,
+      { requireLocalMembership: false },
+    );
+    if (!verified) {
+      return { accepted: false, reason: 'agent envelope verification failed (see preceding WARN log)' };
+    }
+    return { accepted: true };
+  }
+
   private async verifyAgentEnvelope(
     envelope: GossipEnvelopeMsg | undefined,
     payload: Uint8Array,
     contextGraphId: string,
     agentGateAddresses: string[],
     ctx: import('@origintrail-official/dkg-core').OperationContext,
+    options?: {
+      /**
+       * When false, skip the final "local node is a CG member"
+       * check. LU-6 host-mode ingest uses this — a core node
+       * relays/stores ciphertext for a CG it is NOT a member of,
+       * so requiring `localAgentAddresses` overlap with the
+       * allowlist would always fail and reject every host-mode
+       * envelope. The remaining (cryptographic) checks still run.
+       */
+      requireLocalMembership?: boolean;
+      /**
+       * When true, skip the `GOSSIP_ENVELOPE_FRESHNESS_MS` 5-minute
+       * timestamp window. LU-6 host-catchup replay uses this — a
+       * member replaying envelopes pulled from a host store hours/
+       * days after the original write would otherwise reject every
+       * aged envelope as `stale or invalid gossip timestamp`. Safe
+       * because the signature + sender-key AEAD chain still
+       * verifies, and host catalog `seqno` monotonicity prevents
+       * actual replay attacks. Codex PR #610 round-2 finding #1.
+       */
+      skipTimestampFreshness?: boolean;
+    },
   ): Promise<boolean> {
     if (!envelope) {
       this.log.warn(ctx, `SWM write rejected: unsigned workspace gossip for agent-gated context graph "${contextGraphId}"`);
@@ -1119,7 +1333,11 @@ export class SharedMemoryHandler {
     }
 
     const timestampMs = Date.parse(envelope.timestamp);
-    if (!Number.isFinite(timestampMs) || Math.abs(this.now() - timestampMs) > GOSSIP_ENVELOPE_FRESHNESS_MS) {
+    if (!Number.isFinite(timestampMs)) {
+      this.log.warn(ctx, `SWM write rejected: invalid gossip timestamp "${envelope.timestamp}"`);
+      return false;
+    }
+    if (!options?.skipTimestampFreshness && Math.abs(this.now() - timestampMs) > GOSSIP_ENVELOPE_FRESHNESS_MS) {
       this.log.warn(ctx, `SWM write rejected: stale or invalid gossip timestamp "${envelope.timestamp}"`);
       return false;
     }
@@ -1151,7 +1369,8 @@ export class SharedMemoryHandler {
       return false;
     }
 
-    if (this.localAgentAddresses) {
+    const requireLocalMembership = options?.requireLocalMembership !== false;
+    if (requireLocalMembership && this.localAgentAddresses) {
       const localAgents = await this.localAgentAddresses();
       const localAllowed = localAgents.some((agent) => agentGateSet.has(agent.toLowerCase()));
       if (!localAllowed) {
@@ -1197,16 +1416,70 @@ export class SharedMemoryHandler {
         { <${cgData}> <${DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT}> ?agent }
       } }`,
     );
-    if (result.type !== 'bindings' || result.bindings.length === 0) {
-      return null;
+    if (result.type === 'bindings' && result.bindings.length > 0) {
+      const agents = result.bindings
+        .map(row => row['agent'])
+        .filter((v): v is string => typeof v === 'string')
+        .map(stripRdfLiteral)
+        .filter((v) => ethers.isAddress(v))
+        .map((v) => ethers.getAddress(v));
+      return [...new Set(agents)];
     }
-    const agents = result.bindings
-      .map(row => row['agent'])
-      .filter((v): v is string => typeof v === 'string')
-      .map(stripRdfLiteral)
-      .filter((v) => ethers.isAddress(v))
-      .map((v) => ethers.getAddress(v));
-    return [...new Set(agents)];
+
+    // OT-RFC-38 / LU-6 Phase B: chain-backed fallback when the local
+    // meta-graph has no allowlist triples. Hits on hosting cores that
+    // are NOT CG members (so they never received the curator's meta
+    // gossip), letting them authoritatively verify gossip envelopes
+    // against the on-chain `ContextGraphStorage.getParticipantAgents`
+    // truth. Returns `null` when the chain has no answer either —
+    // the caller treats that as "not curated, reject defensively"
+    // (`verifyHostModeEnvelopeAuthority`) which is the correct
+    // failure mode.
+    if (this.chainAgentGateOracle) {
+      try {
+        const chainAgents = await this.chainAgentGateOracle(contextGraphId);
+        if (chainAgents && chainAgents.length > 0) {
+          const normalised = chainAgents
+            .filter((v) => ethers.isAddress(v))
+            .map((v) => ethers.getAddress(v));
+          if (normalised.length > 0) {
+            return [...new Set(normalised)];
+          }
+        }
+      } catch (err) {
+        this.log.warn(
+          createOperationContext('share'),
+          `chainAgentGateOracle threw for "${contextGraphId}": ${err instanceof Error ? err.message : String(err)} — treating as no allowlist`,
+        );
+      }
+    }
+
+    // OT-RFC-38 / LU-6 Phase B — final fallback: beacon-pinned curator
+    // EOA. Hits during the pre-registration and chain-event-race
+    // windows where the chain oracle has no answer but the curator has
+    // already broadcast (and we verified) a discovery beacon
+    // committing themselves as the curator for this CG. Returning
+    // `[curatorEoa]` admits envelopes signed by that one address only
+    // — sufficient to keep curator-side writes flowing until the
+    // chain truth catches up, and tight enough that no other signer
+    // can sneak ciphertext through during the race window.
+    //
+    // See `beaconCuratorOracle` jsdoc for why the curator signature on
+    // the beacon makes this safe.
+    if (this.beaconCuratorOracle) {
+      try {
+        const curatorEoa = await this.beaconCuratorOracle(contextGraphId);
+        if (curatorEoa && ethers.isAddress(curatorEoa)) {
+          return [ethers.getAddress(curatorEoa)];
+        }
+      } catch (err) {
+        this.log.warn(
+          createOperationContext('share'),
+          `beaconCuratorOracle threw for "${contextGraphId}": ${err instanceof Error ? err.message : String(err)} — treating as no allowlist`,
+        );
+      }
+    }
+    return null;
   }
 
   private async contextGraphHasPrivateAccessPolicy(contextGraphId: string): Promise<boolean> {

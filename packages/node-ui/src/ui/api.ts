@@ -221,12 +221,14 @@ export async function createContextGraph(
       headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: JSON.stringify({
         id, name, description,
-        // UI primary "Create project" always wants an on-chain CG —
-        // otherwise the user can't publish to Verified Memory (the
-        // publish path requires an on-chain CG id). The modal already
-        // tells the user "Registering context graph on the network…",
-        // so the combined create+register flow matches the UX promise.
-        register: true,
+        // OT-RFC-38 LU-6: project creation is LOCAL-ONLY. SWM works
+        // immediately (cores opaquely buffer ciphertext for curated
+        // CGs in host-mode for the pre-registration TTL); on-chain
+        // registration is deferred until the first VM publish, when
+        // `/api/shared-memory/publish` auto-registers transparently.
+        // This avoids requiring the user to hold TRAC / pay gas just
+        // to start a project.
+        register: false,
         ...(opts?.allowedAgents ? { allowedAgents: opts.allowedAgents } : {}),
         ...(opts?.accessPolicy !== undefined ? { accessPolicy: opts.accessPolicy } : {}),
         ...(opts?.publishPolicy !== undefined ? { publishPolicy: opts.publishPolicy } : {}),

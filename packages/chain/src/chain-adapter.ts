@@ -176,6 +176,24 @@ export interface CreateOnChainContextGraphParams {
   metadataBatchId?: bigint;
   publishAuthority?: string;
   publishAuthorityAccountId?: bigint;
+  /**
+   * OT-RFC-38 / LU-6 Phase B — opt-in stable wire identifier the
+   * curator commits to at create time. Intended to be
+   * `keccak256(bytes(cleartextId))` so the SWM gossip topic, envelope
+   * `contextGraphId`, signing payload, and host-mode store key are all
+   * chain-derivable AND privacy-preserving (cleartext never leaves
+   * the curator's local node). Hosting cores in the sharding table
+   * use this to auto-subscribe to the SWM topic on receipt of the
+   * `ContextGraphCreated` event — no off-chain discovery channel is
+   * required for registered CGs.
+   *
+   * Omit (or pass `'0x' + '0'.repeat(64)`) to opt out — host-mode
+   * discovery for that CG then relies on the gossip-beacon path
+   * (Option β) exclusively. We recommend always passing a non-zero
+   * hash; the opt-out branch exists only to keep the contract
+   * surface forward-compatible.
+   */
+  nameHash?: string;
 }
 
 export interface CreateOnChainContextGraphResult extends Omit<TxResult, 'contextGraphId'> {
@@ -996,6 +1014,43 @@ export interface ChainAdapter {
    * avoid one RPC per publish.
    */
   getContextGraphAccessPolicy?(contextGraphId: bigint): Promise<number>;
+
+  /**
+   * On-chain participant agent allowlist for `contextGraphId`. Read
+   * from `ContextGraphStorage.getParticipantAgents(uint256)`.
+   *
+   * OT-RFC-38 / LU-6 Phase B use case: a core node that hosts a
+   * curated CG without being a member of it (sharding-table-driven
+   * host-mode hosting) needs to authenticate incoming gossip envelopes
+   * against the curator's agent allowlist. The local triple-store
+   * oracle (`DKG_ALLOWED_AGENT` ∪ `DKG_PARTICIPANT_AGENT` in the CG
+   * meta graph) only works for CGs the local node CREATED or JOINED
+   * (i.e. is a member of); hosting cores have no such meta. Falling
+   * back to the chain is the authoritative path.
+   *
+   * Returns an empty array when the CG has no participant agents
+   * registered (unregistered ID, or non-agent-gated CG). Optional so
+   * non-V10 / no-chain adapters can stub the surface.
+   *
+   * Cheap (single eth_call). Hosting cores SHOULD cache the result
+   * per (chainId, cgId); the allowlist is mutable on chain but
+   * changes slowly, so a 5-minute TTL is a reasonable default.
+   */
+  getContextGraphParticipantAgents?(contextGraphId: bigint): Promise<string[]>;
+
+  /**
+   * OT-RFC-38 / LU-6 Phase B — chain-backed `getNameHash(uint256)`
+   * accessor. Returns the curator-committed wire id for `contextGraphId`,
+   * or `null` when (a) the id is unregistered, or (b) the curator
+   * opted out at create time. Used by hosting cores to derive the SWM
+   * gossip topic for CGs they didn't create or join, without an off-
+   * chain discovery channel.
+   *
+   * Adapters are free to cache the result indefinitely: the on-chain
+   * value is write-once at create time (no setter exists), so stale
+   * entries can't occur.
+   */
+  getContextGraphNameHash?(contextGraphId: bigint): Promise<string | null>;
 }
 
 // ----- Backward-compat deprecated aliases -----

@@ -67,6 +67,7 @@ describe('@unit ContextGraphStorage', () => {
         0,           // publishPolicy = curated
         authority,   // publishAuthority
         0,           // publishAuthorityAccountId = non-PCA
+        ethers.ZeroHash,
       );
       await tx.wait();
 
@@ -85,17 +86,30 @@ describe('@unit ContextGraphStorage', () => {
       expect(await StorageContract.getPublishAuthorityAccountId(cgId)).to.equal(0);
     });
 
-    it('emits ContextGraphCreated with split lists and accountId', async () => {
+    it('emits ContextGraphCreated with nameHash + split lists and accountId', async () => {
       const owner = accounts[1].address;
       const authority = accounts[2].address;
       const agents: string[] = [accounts[3].address, accounts[4].address];
+      const nameHash = ethers.keccak256(ethers.toUtf8Bytes('0xdeadbeef/cg-1'));
       await expect(
         StorageContract.connect(opSigner).createContextGraph(
           owner, agents, 7, 0, 0, authority, 99,
+          nameHash,
         ),
       )
         .to.emit(StorageContract, 'ContextGraphCreated')
-        .withArgs(1, owner, agents, 7, 0, 0, authority, 99);
+        .withArgs(1, owner, nameHash, agents, 7, 0, 0, authority, 99);
+      expect(await StorageContract.getNameHash(1)).to.equal(nameHash);
+    });
+
+    it('zero nameHash is allowed (curator opted out) and getNameHash returns zero', async () => {
+      const owner = accounts[1].address;
+      const authority = accounts[2].address;
+      await StorageContract.connect(opSigner).createContextGraph(
+        owner, [], 0, 0, 0, authority, 0,
+        ethers.ZeroHash,
+      );
+      expect(await StorageContract.getNameHash(1)).to.equal(ethers.ZeroHash);
     });
 
     it('stores publishAuthorityAccountId for PCA curator type', async () => {
@@ -103,6 +117,7 @@ describe('@unit ContextGraphStorage', () => {
       const authority = accounts[2].address;
       await StorageContract.connect(opSigner).createContextGraph(
         owner, baseAgents(), 0, 0, 0, authority, 555,
+        ethers.ZeroHash,
       );
       expect(await StorageContract.getPublishAuthorityAccountId(1)).to.equal(555);
     });
@@ -111,6 +126,7 @@ describe('@unit ContextGraphStorage', () => {
       await expect(
         StorageContract.connect(accounts[5]).createContextGraph(
           accounts[1].address, baseAgents(), 0, 0, 1, ethers.ZeroAddress, 0,
+          ethers.ZeroHash,
         ),
       ).to.be.revertedWithCustomError(HubContract, 'UnauthorizedAccess');
     });
@@ -119,6 +135,7 @@ describe('@unit ContextGraphStorage', () => {
       await expect(
         StorageContract.connect(opSigner).createContextGraph(
           ethers.ZeroAddress, baseAgents(), 0, 0, 1, ethers.ZeroAddress, 0,
+          ethers.ZeroHash,
         ),
       ).to.be.revertedWithCustomError(StorageContract, 'InvalidContextGraphConfig');
     });
@@ -129,6 +146,7 @@ describe('@unit ContextGraphStorage', () => {
           accounts[1].address,
           [accounts[3].address, ethers.ZeroAddress],
           0, 0, 1, ethers.ZeroAddress, 0,
+          ethers.ZeroHash,
         ),
       ).to.be.revertedWithCustomError(StorageContract, 'InvalidContextGraphConfig');
     });
@@ -139,6 +157,7 @@ describe('@unit ContextGraphStorage', () => {
           accounts[1].address,
           [accounts[3].address, accounts[3].address],
           0, 0, 1, ethers.ZeroAddress, 0,
+          ethers.ZeroHash,
         ),
       ).to.be.revertedWithCustomError(StorageContract, 'AgentParticipantAlreadyExists');
     });
@@ -147,6 +166,7 @@ describe('@unit ContextGraphStorage', () => {
       await expect(
         StorageContract.connect(opSigner).createContextGraph(
           accounts[1].address, baseAgents(), 0, 0, 2, accounts[2].address, 0,
+          ethers.ZeroHash,
         ),
       ).to.be.revertedWithCustomError(StorageContract, 'InvalidContextGraphConfig');
     });
@@ -155,6 +175,7 @@ describe('@unit ContextGraphStorage', () => {
       await expect(
         StorageContract.connect(opSigner).createContextGraph(
           accounts[1].address, baseAgents(), 0, 2, 1, ethers.ZeroAddress, 0,
+          ethers.ZeroHash,
         ),
       ).to.be.revertedWithCustomError(StorageContract, 'InvalidContextGraphConfig');
     });
@@ -163,6 +184,7 @@ describe('@unit ContextGraphStorage', () => {
       await expect(
         StorageContract.connect(opSigner).createContextGraph(
           accounts[1].address, baseAgents(), 0, 0, 0, ethers.ZeroAddress, 0,
+          ethers.ZeroHash,
         ),
       ).to.be.revertedWithCustomError(StorageContract, 'InvalidContextGraphConfig');
     });
@@ -172,6 +194,7 @@ describe('@unit ContextGraphStorage', () => {
       await expect(
         StorageContract.connect(opSigner).createContextGraph(
           accounts[1].address, baseAgents(), 0, 0, 1, ethers.ZeroAddress, 99,
+          ethers.ZeroHash,
         ),
       ).to.be.revertedWithCustomError(StorageContract, 'InvalidContextGraphConfig');
     });
@@ -180,6 +203,7 @@ describe('@unit ContextGraphStorage', () => {
       await expect(
         StorageContract.connect(opSigner).createContextGraph(
           accounts[1].address, baseAgents(), 0, 0, 1, accounts[2].address, 0,
+          ethers.ZeroHash,
         ),
       ).to.be.revertedWithCustomError(StorageContract, 'InvalidContextGraphConfig');
     });
@@ -187,6 +211,7 @@ describe('@unit ContextGraphStorage', () => {
     it('open policy with zero authority + zero accountId stores empty curator', async () => {
       await StorageContract.connect(opSigner).createContextGraph(
         accounts[1].address, baseAgents(), 0, 0, 1, ethers.ZeroAddress, 0,
+        ethers.ZeroHash,
       );
       expect(await StorageContract.getAccessPolicy(1)).to.equal(0);
       const policy = await StorageContract.getPublishPolicy(1);
@@ -207,6 +232,7 @@ describe('@unit ContextGraphStorage', () => {
     beforeEach(async () => {
       await StorageContract.connect(opSigner).createContextGraph(
         accounts[0].address, [], 0, 0, 1, ethers.ZeroAddress, 0,
+        ethers.ZeroHash,
       );
       agent1 = accounts[3].address;
       agent2 = accounts[4].address;
@@ -274,6 +300,7 @@ describe('@unit ContextGraphStorage', () => {
     beforeEach(async () => {
       await StorageContract.connect(opSigner).createContextGraph(
         accounts[0].address, [], 0, 0, 1, ethers.ZeroAddress, 0,
+        ethers.ZeroHash,
       );
     });
 
@@ -300,6 +327,7 @@ describe('@unit ContextGraphStorage', () => {
       // Create a second CG and try to register the same KC there
       await StorageContract.connect(opSigner).createContextGraph(
         accounts[0].address, [], 0, 0, 1, ethers.ZeroAddress, 0,
+        ethers.ZeroHash,
       );
       await expect(
         StorageContract.connect(opSigner).registerKCToContextGraph(2, 100),
@@ -339,6 +367,7 @@ describe('@unit ContextGraphStorage', () => {
     beforeEach(async () => {
       await StorageContract.connect(opSigner).createContextGraph(
         accounts[0].address, [], 0, 0, 1, ethers.ZeroAddress, 0,
+        ethers.ZeroHash,
       );
     });
 
@@ -378,6 +407,7 @@ describe('@unit ContextGraphStorage', () => {
     beforeEach(async () => {
       await StorageContract.connect(opSigner).createContextGraph(
         accounts[0].address, [], 0, 0, 0, accounts[1].address, 0,
+        ethers.ZeroHash,
       );
     });
 
@@ -431,6 +461,7 @@ describe('@unit ContextGraphStorage', () => {
     beforeEach(async () => {
       await StorageContract.connect(opSigner).createContextGraph(
         accounts[0].address, [], 0, 0, 1, ethers.ZeroAddress, 0,
+        ethers.ZeroHash,
       );
     });
 
@@ -475,6 +506,7 @@ describe('@unit ContextGraphStorage', () => {
       const newOwner = accounts[6];
       await StorageContract.connect(opSigner).createContextGraph(
         oldOwner.address, [], 0, 0, 0, oldOwner.address, 555,
+        ethers.ZeroHash,
       );
 
       await StorageContract.connect(oldOwner).transferFrom(oldOwner.address, newOwner.address, 1);
@@ -489,6 +521,7 @@ describe('@unit ContextGraphStorage', () => {
       const externalAuth = accounts[2];
       await StorageContract.connect(opSigner).createContextGraph(
         oldOwner.address, [], 0, 0, 0, externalAuth.address, 0,
+        ethers.ZeroHash,
       );
       await StorageContract.connect(oldOwner).transferFrom(oldOwner.address, accounts[6].address, 1);
 
@@ -520,6 +553,7 @@ describe('@unit ContextGraphStorage', () => {
         const agents = makeAgents(256);
         await StorageContract.connect(opSigner).createContextGraph(
           accounts[0].address, agents, 0, 0, 1, ethers.ZeroAddress, 0,
+          ethers.ZeroHash,
           { gasLimit: 29_000_000 },
         );
         expect(await StorageContract.getParticipantAgents(1)).to.deep.equal(agents);
@@ -531,6 +565,7 @@ describe('@unit ContextGraphStorage', () => {
       await expect(
         StorageContract.connect(opSigner).createContextGraph(
           accounts[0].address, agents, 0, 0, 1, ethers.ZeroAddress, 0,
+          ethers.ZeroHash,
         ),
       ).to.be.revertedWithCustomError(StorageContract, 'InvalidContextGraphConfig');
     });
@@ -541,6 +576,7 @@ describe('@unit ContextGraphStorage', () => {
         const agents = makeAgents(256);
         await StorageContract.connect(opSigner).createContextGraph(
           accounts[0].address, agents, 0, 0, 1, ethers.ZeroAddress, 0,
+          ethers.ZeroHash,
           { gasLimit: 29_000_000 },
         );
         const extra = ethers.getAddress('0x' + (257).toString(16).padStart(40, '0'));
@@ -617,6 +653,7 @@ describe('@unit ContextGraphStorage', () => {
     beforeEach(async () => {
       await StorageContract.connect(opSigner).createContextGraph(
         accounts[0].address, [], 0, 0, 1, ethers.ZeroAddress, 0,
+        ethers.ZeroHash,
       );
     });
 
@@ -658,6 +695,7 @@ describe('@unit ContextGraphStorage', () => {
       const externalAuth = accounts[2];
       await StorageContract.connect(opSigner).createContextGraph(
         oldOwner.address, [], 0, 0, 0, externalAuth.address, 777,
+        ethers.ZeroHash,
       );
       // Pre-state
       expect((await StorageContract.getPublishPolicy(1)).publishAuthority)
@@ -678,6 +716,7 @@ describe('@unit ContextGraphStorage', () => {
       const owner = accounts[0];
       await StorageContract.connect(opSigner).createContextGraph(
         owner.address, [], 0, 0, 0, owner.address, 777,
+        ethers.ZeroHash,
       );
       await StorageContract.connect(owner).transferFrom(owner.address, owner.address, 1);
 

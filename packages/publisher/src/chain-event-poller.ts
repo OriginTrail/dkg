@@ -9,6 +9,14 @@ export type OnContextGraphCreated = (info: {
   creator: string;
   accessPolicy: number;
   publishPolicy?: number;
+  /**
+   * OT-RFC-38 / LU-6 Phase B — curator-committed wire id (the
+   * `bytes32 indexed nameHash` field on `ContextGraphCreated`).
+   * `null` indicates the curator opted out at create time; cores then
+   * rely on the discovery-beacon path to learn the wire id. Lowercase
+   * 0x-prefixed 32-byte hex when set.
+   */
+  nameHash?: string | null;
   blockNumber: number;
 }) => Promise<void>;
 
@@ -271,13 +279,30 @@ export class ChainEventPoller {
     const creator = String(data['creator'] ?? data['owner'] ?? data['manager'] ?? '');
     const accessPolicy = Number(data['accessPolicy'] ?? 0);
     const publishPolicy = data['publishPolicy'] == null ? undefined : Number(data['publishPolicy']);
+    // OT-RFC-38 / LU-6 Phase B — surface the curator-committed wire id
+    // verbatim. The EVM/mock adapters already normalise to a lowercase
+    // 0x-prefixed hex string or `null` (opt-out path); the poller
+    // passes the value through so the agent's auto-subscribe handler
+    // can derive the SWM gossip topic without round-tripping back to
+    // chain. Field name on the adapter event surface is `nameHash`.
+    const rawNameHash = data['nameHash'];
+    const nameHash: string | null = typeof rawNameHash === 'string' && rawNameHash.length > 0
+      ? rawNameHash.toLowerCase()
+      : null;
 
     this.log.info(ctx,
-      `Chain event: ContextGraphCreated block=${event.blockNumber} id=${contextGraphId.slice(0, 16)}… creator=${creator.slice(0, 10)}…`,
+      `Chain event: ContextGraphCreated block=${event.blockNumber} id=${contextGraphId.slice(0, 16)}… creator=${creator.slice(0, 10)}… nameHash=${nameHash ? nameHash.slice(0, 10) + '…' : '(opt-out)'}`,
     );
 
     try {
-      await this.onContextGraphCreated({ contextGraphId, creator, accessPolicy, publishPolicy, blockNumber: event.blockNumber });
+      await this.onContextGraphCreated({
+        contextGraphId,
+        creator,
+        accessPolicy,
+        publishPolicy,
+        nameHash,
+        blockNumber: event.blockNumber,
+      });
     } catch (err) {
       this.log.warn(ctx, `onContextGraphCreated callback failed: ${err instanceof Error ? err.message : String(err)}`);
     }

@@ -291,6 +291,7 @@ async function _autoBridgeKCToDefaultCG(kcId: number): Promise<void> {
       1, // publishPolicy = open
       ethers.ZeroAddress,
       0,
+      ethers.ZeroHash, // OT-RFC-38 / LU-6 Phase B: opt-out of nameHash in helper default
     );
     await createTx.wait();
     const defaultCgId = await ContextGraphStorageCtr.getLatestContextGraphId();

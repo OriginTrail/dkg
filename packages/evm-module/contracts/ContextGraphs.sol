@@ -84,6 +84,13 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable {
      * @param publishPolicy             0 = curated, 1 = open
      * @param publishAuthority          Curator address (required when curated; ignored when open)
      * @param publishAuthorityAccountId Non-zero -> PCA curator type. Requires curated. Ignored when open.
+     * @param nameHash                  OT-RFC-38 / LU-6 Phase B — opt-in stable wire
+     *                                  identifier the curator commits to (intended to be
+     *                                  `keccak256(bytes(cleartextId))` so hosting cores
+     *                                  can auto-subscribe to the SWM gossip topic on
+     *                                  receipt of `ContextGraphCreated`). Pass
+     *                                  `bytes32(0)` to opt out (host-mode discovery for
+     *                                  that CG then runs through the beacon path only).
      * @return contextGraphId           Newly assigned context graph ID (= ERC-721 token ID)
      *
      * @dev Hosts and ACK quorum are network-level concerns: the sharding table
@@ -96,7 +103,8 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable {
         uint8 accessPolicy,
         uint8 publishPolicy,
         address publishAuthority,
-        uint256 publishAuthorityAccountId
+        uint256 publishAuthorityAccountId,
+        bytes32 nameHash
     ) external returns (uint256 contextGraphId) {
         // Storage validates sorting/dedup/zero-rejection, but a friendly
         // default for curated CGs: if caller passes zero authority and the
@@ -120,7 +128,8 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable {
             accessPolicy,
             publishPolicy,
             authority,
-            publishAuthorityAccountId
+            publishAuthorityAccountId,
+            nameHash
         );
     }
 

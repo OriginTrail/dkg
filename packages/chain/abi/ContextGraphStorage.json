@@ -383,6 +383,12 @@
         "type": "address"
       },
       {
+        "indexed": true,
+        "internalType": "bytes32",
+        "name": "nameHash",
+        "type": "bytes32"
+      },
+      {
         "indexed": false,
         "internalType": "address[]",
         "name": "participantAgents",
@@ -702,6 +708,11 @@
         "internalType": "uint256",
         "name": "publishAuthorityAccountId",
         "type": "uint256"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "nameHash",
+        "type": "bytes32"
       }
     ],
     "name": "createContextGraph",
@@ -933,6 +944,25 @@
         "internalType": "uint256",
         "name": "",
         "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "contextGraphId",
+        "type": "uint256"
+      }
+    ],
+    "name": "getNameHash",
+    "outputs": [
+      {
+        "internalType": "bytes32",
+        "name": "",
+        "type": "bytes32"
       }
     ],
     "stateMutability": "view",
