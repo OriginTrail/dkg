@@ -23,7 +23,7 @@ export type ReceiverSignatureProvider = (
 ) => Promise<ReceiverSignature[]>;
 
 /**
- * V10 core node ACK signature collected via /dkg/10.0.0/storage-ack.
+ * V10 core node ACK signature collected via /dkg/10.0.1/storage-ack.
  * Spec §9.0.3: ACK = EIP-191(computePublishACKDigest(chainId, kav10Address,
  *   contextGraphId, merkleRoot, kaCount, byteSize, epochs, tokenAmount))
  */

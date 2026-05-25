@@ -42,6 +42,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
   const [creating, setCreating] = useState(false);
   const [progress, setProgress] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [registrationWarning, setRegistrationWarning] = useState<string | null>(null);
   const [agentAddress, setAgentAddress] = useState<string | null>(null);
   // Phase 8: after CG + ontology + manifest publish, transition into a
   // wire-workspace step so the curator can populate their own workspace
@@ -72,7 +73,10 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
   };
 
   useEffect(() => {
-    if (open) loadAgentIdentity();
+    if (open) {
+      setRegistrationWarning(null);
+      loadAgentIdentity();
+    }
   }, [open]);
 
   if (!open) return null;
@@ -88,6 +92,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
 
     setCreating(true);
     setError(null);
+    setRegistrationWarning(null);
     setProgress('Registering context graph on the network…');
 
     const finalSlug = slugify(trimmedName);
@@ -137,14 +142,13 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
       // refresh and stranded the user with no obvious path forward.
       // The "retry from Settings" affordance below now picks up the
       // partial-success state via the refreshed list.
-      let registrationWarning: string | null = null;
       if (registerOnChain && result.registered === false) {
-        registrationWarning =
+        const registrationWarningMessage =
           `On-chain registration failed: ${result.registerError ?? 'unknown error'}. ` +
           `Project is created locally and usable for everything except Verified Memory publishing. ` +
           `Retry registration from the project's Settings when ready.`;
-        console.warn('[CreateProjectModal]', registrationWarning);
-        setProgress(registrationWarning);
+        console.warn('[CreateProjectModal]', registrationWarningMessage);
+        setRegistrationWarning(registrationWarningMessage);
       }
 
       // Phase 7: install the chosen ontology into meta/project-ontology so
@@ -234,6 +238,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
   function handleWireDone() {
     setWiredCgId(null);
     setWiredProjectName('');
+    setRegistrationWarning(null);
     setName('');
     setDescription('');
     onClose();
@@ -250,6 +255,11 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
             </div>
           </div>
           <div className="v10-modal-body">
+            {registrationWarning && (
+              <div className="v10-modal-warning">
+                {registrationWarning}
+              </div>
+            )}
             <WireWorkspacePanel
               contextGraphId={wiredCgId}
               projectName={wiredProjectName}
@@ -276,6 +286,12 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
           {error && (
             <div className="v10-modal-error">
               {error}
+            </div>
+          )}
+
+          {registrationWarning && (
+            <div className="v10-modal-warning">
+              {registrationWarning}
             </div>
           )}
 

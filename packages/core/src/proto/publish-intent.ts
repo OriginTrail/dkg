@@ -21,7 +21,7 @@ const { Type, Field } = protobuf;
  * publisher is about to submit a chain TX and needs 3 core node StorageACKs.
  *
  * Core nodes that have the data in SWM verify the merkle root and respond
- * with a StorageACK via direct P2P stream `/dkg/10.0.0/storage-ack`.
+ * with a StorageACK via direct P2P stream `/dkg/10.0.1/storage-ack`.
  */
 
 export const PublishIntentSchema = new Type('PublishIntent')
@@ -52,8 +52,10 @@ export const PublishIntentSchema = new Type('PublishIntent')
   // they sign the V10 digest based on the publisher's claimed merkle root
   // and ciphertext byte size; member post-decrypt verification (LU-8)
   // catches any mismatch between the on-chain root and the actual
-  // plaintext. Field number 14 to keep the proto strictly additive — old
-  // senders never set it (default `false`), old receivers ignore it.
+  // plaintext. Field number 14 keeps the proto strictly additive for
+  // encoders, but encrypted payloads are only sent over the bumped
+  // `/dkg/10.0.1/storage-ack` protocol so pre-LU-5 receivers never parse
+  // ciphertext as plaintext.
   .add(new Field('isEncryptedPayload', 14, 'bool'));
 
 type Long = { low: number; high: number; unsigned: boolean };

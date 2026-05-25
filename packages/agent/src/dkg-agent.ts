@@ -7742,16 +7742,16 @@ export class DKGAgent {
     // local store knows about), then chain access-policy fallback
     // for numeric on-chain ids (covers the C2 case where the target
     // is just the numeric `cgId` from the publish intent and the
-    // local store has no triple keyed by that id).
+    // local store has no triple keyed by that id). Numeric IDs are
+    // chain-owned; if chain truth is unavailable, return UNKNOWN and
+    // fail closed instead of silently publishing plaintext.
     const targetCgId = publishContextGraphId ?? contextGraphId;
-    const probeIsCurated = async (cgId: string): Promise<boolean> => {
+    const probeIsCurated = async (cgId: string): Promise<boolean | null> => {
       try {
         if (await this.isPrivateContextGraph(cgId)) return true;
       } catch { /* fall through to chain probe */ }
       const cached = this.onChainAccessPolicyCache.get(cgId);
       if (cached !== undefined) return cached === 1;
-      const getAccessPolicy = this.chain.getContextGraphAccessPolicy;
-      if (typeof getAccessPolicy !== 'function') return false;
       let numericId: bigint;
       try {
         numericId = BigInt(cgId);
@@ -7759,21 +7759,32 @@ export class DKGAgent {
         return false;
       }
       if (numericId <= 0n) return false;
+      const getAccessPolicy = this.chain.getContextGraphAccessPolicy;
+      if (typeof getAccessPolicy !== 'function') return null;
       try {
         const policy = await getAccessPolicy.call(this.chain, numericId);
         if (policy === 0 || policy === 1) {
           this.onChainAccessPolicyCache.set(cgId, policy);
           return policy === 1;
         }
+        return null;
       } catch (err) {
-        this.log.warn(ctx, `_resolveEncryptInlinePayload: chain.getContextGraphAccessPolicy(${cgId}) failed — treating as public: ${err instanceof Error ? err.message : String(err)}`);
+        this.log.warn(ctx, `_resolveEncryptInlinePayload: chain.getContextGraphAccessPolicy(${cgId}) failed — treating as UNKNOWN (fail-closed): ${err instanceof Error ? err.message : String(err)}`);
       }
-      return false;
+      return null;
     };
     const sourceIsCurated = await probeIsCurated(contextGraphId);
     const targetIsCurated = targetCgId === contextGraphId
       ? sourceIsCurated
       : await probeIsCurated(targetCgId);
+    if (targetIsCurated == null || (targetCgId !== contextGraphId && sourceIsCurated == null)) {
+      throw new Error(
+        `LU-5: publish access-policy is unknown — ` +
+        `source CG "${contextGraphId}" curated=${sourceIsCurated ?? 'unknown'}, ` +
+        `target CG "${targetCgId}" curated=${targetIsCurated ?? 'unknown'}. ` +
+        `Refusing to choose plaintext vs encrypted inline payload without chain-confirmed policy.`,
+      );
+    }
     if (targetCgId !== contextGraphId && sourceIsCurated !== targetIsCurated) {
       // Fail-closed: a remap publish that crosses the privacy
       // boundary in either direction is almost certainly an
@@ -17952,4 +17963,3 @@ export class DKGAgent {
   }
 
 }
-

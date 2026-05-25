@@ -185,7 +185,7 @@ export class StorageACKHandler {
   }
 
   /**
-   * Protocol stream handler for `/dkg/10.0.0/storage-ack`.
+   * Protocol stream handler for `/dkg/10.0.1/storage-ack`.
    * Receives PublishIntent, returns StorageACK.
    */
   handler = async (data: Uint8Array, _peerId: PeerId): Promise<Uint8Array> => {

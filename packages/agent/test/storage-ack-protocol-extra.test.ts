@@ -1,16 +1,16 @@
 /**
  * Storage-ACK transport pin: ACK collection MUST ride the libp2p direct
- * protocol `/dkg/10.0.0/storage-ack` — NOT GossipSub.
+ * protocol `/dkg/10.0.1/storage-ack` — NOT GossipSub.
  *
  * Audit findings covered:
  *   A-9 (HIGH) — pins that the agent package uses
- *        `PROTOCOL_STORAGE_ACK = '/dkg/10.0.0/storage-ack'` for ACK wiring
+ *        `PROTOCOL_STORAGE_ACK = '/dkg/10.0.1/storage-ack'` for ACK wiring
  *        and NEVER publishes ACKs over GossipSub.
  *
  * This is a static-scan test (no real libp2p dial needed). Spying on the
  * real dial inside a hermetic vitest run adds environment flakiness with
  * no additional guarantee — if the constant, the router registration, or
- * the dial site diverges from `'/dkg/10.0.0/storage-ack'`, this test
+ * the dial site diverges from `'/dkg/10.0.1/storage-ack'`, this test
  * flips RED. See also ack-eip191-agent-extra.test.ts for the constant
  * pin.
  */
@@ -53,7 +53,7 @@ describe('A-9: storage-ack protocol id (libp2p) pin', () => {
 
   it('agent source never publishes ACKs on GossipSub', () => {
     // A false-positive here would be any call like
-    // `publish('/dkg/10.0.0/storage-ack', ...)` or
+    // `publish('/dkg/10.0.1/storage-ack', ...)` or
     // `gossipsub.publish('...storage-ack...', ...)` through the gossipsub
     // manager. We scan all .ts files in src and make sure we never see
     // GossipSub coupling with the storage-ack string.

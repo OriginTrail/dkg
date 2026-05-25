@@ -12,20 +12,21 @@ function readTokenFile(path: string): string {
 }
 
 function readDkgConfig() {
-  // Devnet takes priority over ~/.dkg. By default we target node1 (matches
-  // pre-LU-5 behaviour). The `scripts/devnet.sh ui start` wrapper already
-  // exports DEVNET_NODE=$UI_NODE_ID, so set UI_NODE_ID=5 before invoking
-  // the script (or set DEVNET_NODE directly when running `pnpm dev:ui`
-  // standalone) to point the UI at a different daemon — required to test
-  // the edge-curator flow from the UI without hand-rolling curl against
-  // the edge node's daemon port.
-  const devnetNodeNum = process.env.DEVNET_NODE || '1';
-  const devnetDir = resolve(__dirname, '../../.devnet', `node${devnetNodeNum}`);
-  if (existsSync(join(devnetDir, 'api.port'))) {
-    const port = parseInt(readFileSync(join(devnetDir, 'api.port'), 'utf-8').trim(), 10) || 9201;
-    const token = readTokenFile(join(devnetDir, 'auth.token'));
-    console.log(`[vite] Using devnet node${devnetNodeNum} on port ${port}`);
-    return { port, token };
+  // Devnet takes priority over ~/.dkg only when explicitly requested.
+  // `scripts/devnet.sh ui start` exports DEVNET_NODE=$UI_NODE_ID, so
+  // operators can still point at node5 by setting UI_NODE_ID=5 before
+  // invoking the wrapper (or DEVNET_NODE directly for `pnpm dev:ui`).
+  // Without that explicit opt-in, stale `.devnet/node1` files must not
+  // shadow the real local node in ~/.dkg.
+  const devnetNodeNum = process.env.DEVNET_NODE || process.env.UI_NODE_ID;
+  if (devnetNodeNum) {
+    const devnetDir = resolve(__dirname, '../../.devnet', `node${devnetNodeNum}`);
+    if (existsSync(join(devnetDir, 'api.port'))) {
+      const port = parseInt(readFileSync(join(devnetDir, 'api.port'), 'utf-8').trim(), 10) || 9201;
+      const token = readTokenFile(join(devnetDir, 'auth.token'));
+      console.log(`[vite] Using devnet node${devnetNodeNum} on port ${port}`);
+      return { port, token };
+    }
   }
 
   // Fall back to ~/.dkg (testnet / production node)
