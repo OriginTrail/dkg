@@ -115,15 +115,20 @@ describe('ContextGraphQueryView', () => {
 
     await waitForText(container, 'Query Catalogue');
 
+    const buttonLabels = Array.from(container.querySelectorAll('button'))
+      .map(button => button.textContent?.trim())
+      .filter(Boolean);
+
+    expect(container.querySelector('h2.v10-mlv-title')?.textContent).toBe('Query Catalogue');
+    expect(container.querySelector('#query-catalogue-saved-title')?.textContent).toBe('Reusable query catalogue');
+    expect(container.querySelector('#query-catalogue-editor-title')?.textContent).toBe('Editor and results');
+    expect(container.querySelector('textarea')).toBeTruthy();
+    expect(buttonLabels.some(label => label?.startsWith('All triples'))).toBe(true);
+    expect(buttonLabels.some(label => label?.startsWith('Graphs'))).toBe(true);
+    expect(buttonLabels.some(label => label?.startsWith('Types'))).toBe(true);
+    expect(buttonLabels).toEqual(expect.arrayContaining(['Run', 'Save', 'Reset']));
     expect(container.textContent).toContain('Profile-backed reusable SPARQL queries for this Context Graph');
-    expect(container.textContent).toContain('Saved Queries');
-    expect(container.textContent).toContain('Reusable query catalogue');
-    expect(container.textContent).toContain('Save creates a reusable context-level query');
     expect(container.textContent).not.toContain('Catalogue scope');
-    expect(container.textContent).toContain('Ad-hoc SPARQL');
-    expect(container.textContent).toContain('Editor and results');
-    expect(container.textContent).toContain('available non-private graphs in this Context Graph');
-    expect(container.textContent).toContain('No saved profile queries yet.');
 
     await act(async () => { root.unmount(); });
   });

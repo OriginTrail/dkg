@@ -1987,15 +1987,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
           />
         )}
 
-        {queryCatalogs.length === 0 && !profile?.loading && !profile?.error ? (
-          <EmptyState
-            compact
-            tone="query"
-            icon="?"
-            title="No saved queries yet."
-            description="Saved queries will appear here once a profile or agent adds them."
-          />
-        ) : queryCatalogs.length > 0 ? (
+        {!profile?.loading && !profile?.error && (
           <div className="v10-cg-query-catalog-groups">
             {queryCatalogs.map((catalog) => {
               const scope = queryCatalogueScope(catalog);
@@ -2035,7 +2027,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
               );
             })}
           </div>
-        ) : null}
+        )}
 
         {!profile?.loading && !profile?.error && queryCatalogs.length > 0 && !hasSavedProfileQueries && (
           <EmptyState
