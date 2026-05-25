@@ -86,13 +86,23 @@ describe('SubGraphBar — layer-scoped chip counts (P4)', () => {
     return Number(countSpan?.textContent ?? 'NaN');
   }
 
-  it('without `layer`: falls back to daemon entityCount totals (Overview / Subgraphs path)', async () => {
-    // entities is provided but `layer` is omitted — chip counts come
-    // from the daemon's per-sub-graph entityCount (3 each here),
-    // regardless of how many entities are passed.
+  it('without `layer`: distinct-counts entities per sub-graph across all layers (Issue B — sub-graph page chip row)', async () => {
+    // Issue B: the daemon's `/api/sub-graph/list` `entityCount`
+    // double-counts entities that live in two or more sub-graphs
+    // (e.g. one entity in {alpha, beta} contributes 1 to alpha AND
+    // 1 to beta, so summing reports 2). On the sub-graph page the
+    // pyramid header sums across layers and matches the entity list;
+    // the chip row used to disagree because it surfaced the daemon
+    // total. Now SubGraphBar derives the count locally from the
+    // passed entities — distinct per (entity, sub-graph) membership.
     const entities = [
       mkEntity('urn:1', 'working', 'alpha'),
       mkEntity('urn:2', 'shared', 'alpha'),
+      // Note: daemon mock at the top of the file reports
+      // alpha.entityCount=3 / beta.entityCount=3, but only 2
+      // alpha entities and 0 beta entities are in the local list.
+      // The local distinct-count is the source of truth (matches the
+      // entity list below the chip row).
     ];
     await act(async () => {
       root.render(React.createElement(SubGraphBar, {
@@ -101,6 +111,22 @@ describe('SubGraphBar — layer-scoped chip counts (P4)', () => {
         selected: null,
         onSelect: vi.fn(),
         entities,
+      }));
+    });
+    await flushNet();
+    expect(chipCount('alpha')).toBe(2);
+    expect(chipCount('beta')).toBe(0);
+  });
+
+  it('without `layer` + no `entities`: falls back to daemon entityCount totals (defensive)', async () => {
+    // Defensive case: the standalone caller pattern that omits
+    // entities still falls back to the daemon's `entityCount`.
+    await act(async () => {
+      root.render(React.createElement(SubGraphBar, {
+        contextGraphId: 'cg',
+        profile,
+        selected: null,
+        onSelect: vi.fn(),
       }));
     });
     await flushNet();
@@ -196,5 +222,55 @@ describe('SubGraphBar — layer-scoped chip counts (P4)', () => {
       .find(b => b.textContent?.includes('All'));
     const allCount = Number(allChip?.querySelector('.v10-subgraph-chip-count')?.textContent ?? 'NaN');
     expect(allCount).toBe(1);
+  });
+
+  // Issue B regression — sub-graph page chip row in layer-agnostic mode.
+  // User repro: SWM tab + sub-graph 'ui-epcis' open → chip row shows
+  // "All 27 / ui-epcis 27" while the entity list shows 11. The "27"
+  // is the daemon's `/api/sub-graph/list` `entityCount`, which counts
+  // entities once per sub-graph membership (so a cross-sub-graph
+  // entity is double-counted). On the sub-graph page the pyramid
+  // header sums across layers and matches the entity list — the
+  // chip row should agree. Now SubGraphBar derives counts locally
+  // from the passed entities, distinct per (entity, sub-graph)
+  // membership.
+  it('without `layer`: per-sub-graph chip count matches the entity-list count (Issue B)', async () => {
+    // 11 distinct entities in 'alpha' (matching the user's 11). One
+    // of them ALSO belongs to 'beta'. The daemon mock at the top of
+    // the file says alpha.entityCount=3 / beta.entityCount=3 — those
+    // numbers no longer leak into chip counts when entities is given.
+    const entities: any[] = [];
+    for (let i = 0; i < 10; i++) {
+      entities.push(mkEntity(`urn:e:alpha-${i}`, i < 4 ? 'working' : i < 9 ? 'shared' : 'verified', 'alpha'));
+    }
+    entities.push({
+      uri: 'urn:e:cross',
+      label: 'cross',
+      types: [],
+      trustLevel: 'working' as const,
+      layers: new Set(['working']),
+      subGraphs: new Set(['alpha', 'beta']),
+      properties: new Map(),
+      connections: [],
+    });
+    await act(async () => {
+      root.render(React.createElement(SubGraphBar, {
+        contextGraphId: 'cg',
+        profile,
+        selected: 'alpha',
+        onSelect: vi.fn(),
+        entities,
+      }));
+    });
+    await flushNet();
+    expect(chipCount('alpha')).toBe(11); // matches what the entity list shows
+    expect(chipCount('beta')).toBe(1);
+    // The "All" total must be 11 distinct entities, not the
+    // double-counted sum (11 + 1 = 12) and not the daemon
+    // project-wide total (6 from the mock).
+    const allChip = Array.from(container.querySelectorAll('button.v10-subgraph-chip'))
+      .find(b => b.textContent?.includes('All'));
+    const allCount = Number(allChip?.querySelector('.v10-subgraph-chip-count')?.textContent ?? 'NaN');
+    expect(allCount).toBe(11);
   });
 });

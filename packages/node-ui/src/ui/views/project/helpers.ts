@@ -329,6 +329,19 @@ export function humanizeLabel(entity: MemoryEntity | undefined, uri: string): st
 
 // ─── Layer Switcher Bar ──────────────────────────────────────
 
+// Tight pure mirror of `components.tsx::isResourceNode` — kept here so
+// the residue filter below stays in one file and doesn't create a
+// circular import. Literal-valued triples (`"..."`, blank/whitespace,
+// non-IRI tokens) return false; resource-shaped values return true.
+function isResourceObject(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.startsWith('"')) return false;
+  if (trimmed.startsWith('_:')) return true;
+  if (trimmed.startsWith('<') && trimmed.endsWith('>')) return true;
+  if (/\s/.test(trimmed)) return false;
+  return /^[A-Za-z][A-Za-z0-9+.-]*:/.test(trimmed);
+}
+
 export function useLayerTriples(memory: ReturnType<typeof useMemoryEntities>, layer: 'wm' | 'swm' | 'vm'): Triple[] {
   const targetLayer = LAYER_CONFIG[layer].trustLevel;
   return useMemo(() => {
@@ -354,6 +367,18 @@ export function useLayerTriples(memory: ReturnType<typeof useMemoryEntities>, la
       // node returns. Canonicalise first.
       const subjectEntity = memory.entities.get(canonicalEntityUri(t.subject));
       if (subjectEntity && subjectEntity.trustLevel !== targetLayer) continue;
+      // Issue-A fix (object-side, asymmetric C17 form): a WM triple
+      // `wm-entity-A relatesTo swm-entity-B` (B promoted to SWM)
+      // passes the subject check but `RdfGraph` would render BOTH
+      // endpoints as canvas nodes — the promoted-entity URI leaks in
+      // as an object node. Drop resource→resource edges whose object
+      // has been promoted past the requested layer. Literal-valued
+      // triples (`rdf:type`, labels, `schema:name`, etc.) have a
+      // non-resource object so this check no-ops; they always pass.
+      if (isResourceObject(t.object)) {
+        const objectEntity = memory.entities.get(canonicalEntityUri(t.object));
+        if (objectEntity && objectEntity.trustLevel !== targetLayer) continue;
+      }
       const key = `${t.subject}|${t.predicate}|${t.object}`;
       if (seen.has(key)) continue;
       seen.add(key);

@@ -153,4 +153,48 @@ describe('useLayerTriples — promoted-entity residue filter (P1)', () => {
     expect(subjects).not.toContain('<urn:e:promoted-wrapped>');
     expect(subjects).not.toContain('urn:e:promoted-wrapped');
   });
+
+  // Issue A regression: a WM triple `wm-entity-A relatesTo swm-entity-B`
+  // passes the subject check (A is WM) but renders BOTH endpoints as
+  // canvas nodes — so the promoted-entity URI leaks in as an object.
+  // Asymmetric C17 form: subject-local (rdf:type / labels / literals)
+  // ALWAYS pass; resource→resource edges drop when the object has
+  // been promoted past the requested layer.
+  it('drops WM resource-to-resource edges whose object has been promoted to SWM/VM (Issue A object-side leak)', () => {
+    const triples: LayeredTriple[] = [
+      { subject: 'urn:e:wm-a',   predicate: RDF_TYPE, object: 'http://schema.org/Thing', layer: 'working' },
+      { subject: 'urn:e:wm-b',   predicate: RDF_TYPE, object: 'http://schema.org/Thing', layer: 'working' },
+      { subject: 'urn:e:promoted-b', predicate: RDF_TYPE, object: 'http://schema.org/Thing', layer: 'shared' },
+      // The leaky edge — WM-tagged, subject is WM, object has been
+      // promoted to SWM. Pre-Issue-A this passed the filter and the
+      // RdfGraph rendered urn:e:promoted-b as a phantom canvas node.
+      { subject: 'urn:e:wm-a', predicate: 'http://schema.org/knows', object: 'urn:e:promoted-b', layer: 'working' },
+      // A non-leaky edge for the same subject — both endpoints are WM.
+      { subject: 'urn:e:wm-a', predicate: 'http://schema.org/related', object: 'urn:e:wm-b', layer: 'working' },
+      // Subject-local triples on the WM subject — must always pass.
+      { subject: 'urn:e:wm-a', predicate: 'http://schema.org/name', object: '"A"', layer: 'working' },
+    ];
+    const memory = memoryFor(triples);
+    expect(memory.entities.get('urn:e:promoted-b')?.trustLevel).toBe('shared');
+
+    act(() => {
+      root.render(React.createElement(ProbeLayerTriples, { memory, layer: 'wm' }));
+    });
+
+    const probe = container.querySelector('#probe')!;
+    const subjects = (probe.getAttribute('data-subjects') ?? '').split('|');
+
+    // 3 WM-subject triples should pass: rdf:type on wm-a, knows wm-b, name "A".
+    // The rdf:type on wm-b also passes. The leaky `knows promoted-b`
+    // triple — same subject, same predicate, different object — used
+    // to slip through; with the object-side check it's now dropped.
+    // We assert by counting triples with `urn:e:wm-a` as subject.
+    const wmASubjectCount = subjects.filter(s => s === 'urn:e:wm-a').length;
+    // Expect 3 (rdf:type + knows wm-b + name) — NOT 4 (which would
+    // include the leaky promoted edge).
+    expect(wmASubjectCount).toBe(3);
+
+    // No triple at all whose subject is the leaked promoted entity.
+    expect(subjects).not.toContain('urn:e:promoted-b');
+  });
 });

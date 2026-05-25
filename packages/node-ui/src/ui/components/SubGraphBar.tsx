@@ -95,17 +95,22 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
   const badges = React.useMemo(() => computeBadges(entities), [entities]);
   const requestIdRef = React.useRef(0);
 
-  // When `layer` is set we recompute per-sub-graph entity counts from
-  // the passed entities filtered by canonical layer, so the chip count
-  // matches what the WM/SWM/VM entity list under it shows. Without
-  // this, the chip says (say) "12" while the WM list shows 3 because
-  // 9 of those entities are already promoted to SWM.
-  const layerScopedCounts = React.useMemo(() => {
-    if (!layer || !entities) return null;
-    const trust = LAYER_TRUST_LEVEL[layer];
+  // When `entities` is provided we derive per-sub-graph counts locally
+  // so the chip count matches what the entity list below it shows.
+  // Without `layer`, count every entity that belongs to the sub-graph
+  // (any layer) — used on the sub-graph page where the per-pyramid
+  // header sums across layers (Issue B: the daemon's
+  // `/api/sub-graph/list` `entityCount` counts entities once per
+  // sub-graph membership, double-counting cross-sub-graph entities,
+  // so the chip said "27" while the list said "11"). With `layer`
+  // set, scope to entities whose canonical `trustLevel` matches —
+  // used on the WM/SWM/VM page (post-P4).
+  const entityScopedCounts = React.useMemo(() => {
+    if (!entities) return null;
+    const trust = layer ? LAYER_TRUST_LEVEL[layer] : null;
     const counts = new Map<string, number>();
     for (const e of entities) {
-      if (e.trustLevel !== trust) continue;
+      if (trust !== null && e.trustLevel !== trust) continue;
       for (const sg of e.subGraphs) {
         counts.set(sg, (counts.get(sg) ?? 0) + 1);
       }
@@ -113,16 +118,19 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
     return counts;
   }, [layer, entities]);
 
-  // Distinct count of layer-canonical entities for the "All" chip.
-  // Summing per-sub-graph counts would double-count entities that
-  // belong to two or more sub-graphs (the WM/SWM/VM list under us is
-  // trustLevel-filtered without sub-graph multiplicity, so the sum
-  // would disagree with the list — undoing what P3/P4 aligned).
-  const layerScopedAllTotal = React.useMemo(() => {
-    if (!layer || !entities) return null;
-    const trust = LAYER_TRUST_LEVEL[layer];
+  // Distinct count of in-scope entities for the "All" chip. Summing
+  // per-sub-graph counts would double-count entities living in two or
+  // more sub-graphs (the entity list under us is layer-filtered
+  // without sub-graph multiplicity, so the sum disagrees with it).
+  const entityScopedAllTotal = React.useMemo(() => {
+    if (!entities) return null;
+    const trust = layer ? LAYER_TRUST_LEVEL[layer] : null;
     let n = 0;
-    for (const e of entities) if (e.trustLevel === trust) n++;
+    for (const e of entities) {
+      if (trust !== null && e.trustLevel !== trust) continue;
+      if (e.subGraphs.size === 0) continue; // entity has no sub-graph — not in any chip
+      n++;
+    }
     return n;
   }, [layer, entities]);
 
@@ -152,12 +160,12 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
       .filter(sg => sg.name !== 'meta')
       .map(sg => {
         const binding = profile.forSubGraph(sg.name);
-        // When in layer mode use the scoped count even if it's 0 — the
-        // sub-graph genuinely has no entities in the active layer.
-        // `Map.get(missing-key)` is undefined, which fell through to the
-        // daemon total under `??` and reported the project-wide number.
-        const layerScoped = layerScopedCounts !== null
-          ? (layerScopedCounts.get(sg.name) ?? 0)
+        // Prefer the locally-derived distinct count (matches the entity
+        // list below); preserve a 0 result instead of falling back to
+        // the daemon total when in entity-scoped mode (the sub-graph
+        // genuinely has no in-scope entities).
+        const entityScoped = entityScopedCounts !== null
+          ? (entityScopedCounts.get(sg.name) ?? 0)
           : sg.entityCount;
         return {
           slug: sg.name,
@@ -166,20 +174,20 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
           displayName: binding.displayName ?? sg.name,
           description: binding.description ?? sg.description,
           rank: binding.rank ?? 99,
-          entityCount: layerScoped,
+          entityCount: entityScoped,
           tripleCount: sg.tripleCount,
-          layerScoped: layerScopedCounts !== null,
+          layerScoped: entityScopedCounts !== null,
         };
       })
       .sort((a, b) => a.rank - b.rank);
-  }, [subGraphs, profile, layerScopedCounts]);
+  }, [subGraphs, profile, entityScopedCounts]);
 
   if (loading && merged.length === 0) return null;
   if (merged.length === 0) return null;
 
-  // In layer mode use the deduped distinct-entity total (R2-5); in
-  // project-wide mode keep the daemon-sum.
-  const totalEntities = layerScopedAllTotal ?? merged.reduce((a, b) => a + b.entityCount, 0);
+  // Prefer the distinct-entity total (R2-5 / Issue B); fall back to
+  // the daemon-sum only when no entities prop was passed.
+  const totalEntities = entityScopedAllTotal ?? merged.reduce((a, b) => a + b.entityCount, 0);
   const totalTriples = merged.reduce((a, b) => a + b.tripleCount, 0);
   // Tooltip suffix tells the user the count is layer-scoped on a
   // WM/SWM/VM page; on the Overview / Subgraphs page it stays implicit
