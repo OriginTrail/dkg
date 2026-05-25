@@ -1792,7 +1792,7 @@ function queryCatalogueScope(catalog: QueryCatalog): 'context' | 'subgraph' {
 
 function queryCatalogueGroupLabel(catalog: QueryCatalog, scope: 'context' | 'subgraph', subGraphLabel?: string): string {
   if (isBuiltInQueryCatalog(catalog)) return 'Built-in context queries';
-  if (scope === 'context') return 'Saved profile queries';
+  if (scope === 'context') return catalog.name;
   return `${subGraphLabel ?? catalog.subGraph}: ${catalog.name}`;
 }
 

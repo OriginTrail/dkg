@@ -131,6 +131,25 @@ describe('ContextGraphQueryView', () => {
   it('groups saved queries and loads the selected query into the editor', async () => {
     const savedProfile = profile({
       queryCatalogs: [{
+        slug: 'personal',
+        subGraph: '__context_graph',
+        name: 'Personal research',
+        description: 'Context-level profile queries.',
+        rank: 1,
+        queries: [{
+          slug: 'entity-counts',
+          subGraph: '__context_graph',
+          catalogSlug: 'personal',
+          catalogName: 'Personal research',
+          catalogDescription: 'Context-level profile queries.',
+          catalogRank: 1,
+          name: 'Entity counts',
+          description: 'Count reusable context entities.',
+          sparql: 'SELECT (COUNT(?s) AS ?count) WHERE { GRAPH ?g { ?s ?p ?o } }',
+          resultColumn: 'count',
+          rank: 1,
+        }],
+      }, {
         slug: 'research',
         subGraph: 'docs',
         name: 'Document research',
@@ -153,6 +172,9 @@ describe('ContextGraphQueryView', () => {
     });
     const { container, root } = await renderWithProfile(savedProfile);
 
+    await waitForText(container, 'Personal research');
+    expect(container.textContent).toContain('Context-level profile queries.');
+    expect(container.textContent).not.toContain('Saved profile queries');
     await waitForText(container, 'Documents: Document research');
     expect(container.textContent).toContain('Queries for document-backed entities.');
     expect(container.textContent).toContain('List markdown-backed document entities.');
