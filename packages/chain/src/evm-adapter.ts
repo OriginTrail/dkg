@@ -1712,6 +1712,14 @@ export class EVMChainAdapter implements ChainAdapter {
       tokenAmount: params.tokenAmount,
       isImmutable: params.isImmutable,
       merkleLeafCount: params.merkleLeafCount,
+      // RFC-39 Phase A.5 — ciphertext-commitment pair. Defaults to
+      // `bytes32(0)` / 0 (legacy/transitional, picker skips this KC in
+      // the curated draw). Callers that have an LU-11 commitment set
+      // both via `ciphertextChunksRoot` + `ciphertextChunkCount`.
+      ciphertextChunksRoot: params.ciphertextChunksRoot
+        ? ethers.hexlify(params.ciphertextChunksRoot)
+        : ethers.ZeroHash,
+      ciphertextChunkCount: params.ciphertextChunkCount ?? 0,
       publisherNodeIdentityId: params.publisherNodeIdentityId,
       authorAddress: params.author.address,
       authorR: ethers.hexlify(params.author.signature.r),

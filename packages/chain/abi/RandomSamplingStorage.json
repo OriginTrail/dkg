@@ -134,6 +134,37 @@
     "inputs": [
       {
         "indexed": true,
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint40",
+        "name": "timestamp",
+        "type": "uint40"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "scorePerStake36",
+        "type": "uint256"
+      }
+    ],
+    "name": "EpochCheckpointAppended",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
         "internalType": "uint256",
         "name": "epoch",
         "type": "uint256"
@@ -736,6 +767,34 @@
     "type": "function"
   },
   {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint40",
+        "name": "ts",
+        "type": "uint40"
+      },
+      {
+        "internalType": "uint256",
+        "name": "scorePerStake36",
+        "type": "uint256"
+      }
+    ],
+    "name": "appendCheckpoint",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
     "inputs": [],
     "name": "chronos",
     "outputs": [
@@ -831,6 +890,35 @@
     "type": "function"
   },
   {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint40",
+        "name": "ts",
+        "type": "uint40"
+      }
+    ],
+    "name": "findScorePerStakeAt",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
     "inputs": [],
     "name": "getActiveProofPeriodStartBlock",
     "outputs": [
@@ -881,6 +969,88 @@
       }
     ],
     "name": "getDelegatorLastSettledNodeEpochScorePerStake",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "index",
+        "type": "uint256"
+      }
+    ],
+    "name": "getEpochCheckpoint",
+    "outputs": [
+      {
+        "internalType": "uint40",
+        "name": "timestamp",
+        "type": "uint40"
+      },
+      {
+        "internalType": "uint256",
+        "name": "scorePerStake36",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
+      }
+    ],
+    "name": "getEpochCheckpointCount",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
+      }
+    ],
+    "name": "getEpochLastScorePerStake",
     "outputs": [
       {
         "internalType": "uint256",
@@ -1286,30 +1456,6 @@
       }
     ],
     "name": "nodeEpochScore",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint72",
-        "name": "",
-        "type": "uint72"
-      }
-    ],
-    "name": "nodeEpochScorePerStake",
     "outputs": [
       {
         "internalType": "uint256",

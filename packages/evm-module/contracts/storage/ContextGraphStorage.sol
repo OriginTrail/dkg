@@ -678,12 +678,21 @@ contract ContextGraphStorage is INamed, IVersioned, Guardian, ERC721Enumerable {
     }
 
     /**
-     * @notice Convenience helper: true iff the CG is curated (publishPolicy == 0).
+     * @notice True iff the CG carries curated (encrypted) payloads — i.e.,
+     *         the ACCESS policy is curated, regardless of publish policy.
+     *
+     * Originally this checked `publishPolicy == 0`, but that conflated two
+     * orthogonal axes: "who can read" (access) vs. "who can publish".
+     * The ciphertext-commitment branch on the KAv10 publish path needs
+     * to know whether the payload is ENCRYPTED, which is an access-policy
+     * question. The "curated access + open publish" combo (anyone in the
+     * allowlist may publish, but readers must still decrypt) is a valid
+     * configuration and must accept ciphertext commitments.
      */
     function getIsCurated(
         uint256 contextGraphId
     ) external view returns (bool) {
-        return _contextGraphs[contextGraphId].publishPolicy == 0;
+        return _contextGraphs[contextGraphId].accessPolicy != 0;
     }
 
     function getLatestContextGraphId() external view returns (uint256) {
