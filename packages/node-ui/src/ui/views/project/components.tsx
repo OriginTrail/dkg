@@ -1824,8 +1824,8 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
     [builtInCatalog, localSavedCatalogs, profile?.queryCatalogs],
   );
   const renderedQueryCatalogs = useMemo(
-    () => (profile?.loading || profile?.error ? [builtInCatalog] : queryCatalogs),
-    [builtInCatalog, profile?.error, profile?.loading, queryCatalogs],
+    () => (profile?.loading || profile?.error ? [builtInCatalog, ...localSavedCatalogs] : queryCatalogs),
+    [builtInCatalog, localSavedCatalogs, profile?.error, profile?.loading, queryCatalogs],
   );
 
   useEffect(() => {

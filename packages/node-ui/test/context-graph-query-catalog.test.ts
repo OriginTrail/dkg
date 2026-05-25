@@ -283,6 +283,47 @@ describe('ContextGraphQueryView', () => {
     await act(async () => { root.unmount(); });
   });
 
+  it('keeps local saves visible while profile queries are loading', async () => {
+    const { container, root } = await renderWithProfile(profile({ loading: true }));
+
+    await waitForText(container, 'Loading saved query catalogue...');
+
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+    await act(async () => {
+      setFieldValue(textarea, 'SELECT ?entity WHERE { ?entity ?p ?o } LIMIT 5');
+    });
+
+    const saveButton = Array.from(container.querySelectorAll('button'))
+      .find(button => button.textContent === 'Save');
+    expect(saveButton).toBeTruthy();
+
+    await act(async () => {
+      saveButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    const nameInput = container.querySelector('input[placeholder="Query name"]') as HTMLInputElement;
+    const descriptionInput = container.querySelector('input[placeholder="Optional"]') as HTMLInputElement;
+    await act(async () => {
+      setFieldValue(nameInput, 'Loading-safe query');
+      setFieldValue(descriptionInput, 'Visible before profile data returns.');
+    });
+
+    const submitButton = Array.from(container.querySelectorAll('button'))
+      .find(button => button.textContent === 'Save query');
+    expect(submitButton).toBeTruthy();
+
+    await act(async () => {
+      submitButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    await waitForText(container, 'Saved to catalogue.');
+    expect(container.textContent).toContain('All triples');
+    expect(container.textContent).toContain('Loading-safe query');
+    expect(container.textContent).toContain('Visible before profile data returns.');
+
+    await act(async () => { root.unmount(); });
+  });
+
   it('renders query failures as a friendly EmptyState', async () => {
     apiMocks.executeQuery.mockRejectedValueOnce(new Error('HTTP 500'));
     const { container, root } = await renderWithProfile(profile());
