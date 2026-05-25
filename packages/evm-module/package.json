@@ -24,8 +24,8 @@
     "slither:sarif": "slither . --config-file slither.config.json --sarif slither.sarif",
     "aderyn": "aderyn .",
     "aderyn:sarif": "aderyn . --output report.sarif",
-    "lint:sol": "solhint 'contracts/**/*.sol'",
-    "lint:sol:fix": "solhint 'contracts/**/*.sol' --fix"
+    "lint:sol": "solhint \"contracts/**/*.sol\"",
+    "lint:sol:fix": "solhint \"contracts/**/*.sol\" --fix"
   },
   "dependencies": {
     "@openzeppelin/contracts": "^5.1.0",
