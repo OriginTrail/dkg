@@ -232,6 +232,59 @@ describe('Route plugins — live daemon E2E', () => {
     expect(data).toEqual({ echoed: { hello: 'world' } });
   });
 
+  it('rejects an unauthenticated request to a plugin route (auth gate runs BEFORE plugin dispatch)', async () => {
+    // Locks the security boundary: route-plugins are an extension
+    // surface but they MUST NOT bypass the daemon's auth gate. A
+    // regression where plugin routes were dispatched first (and the
+    // bearer-token check ran only on built-in routes) would let a
+    // misconfigured plugin leak data without auth. Probe with no
+    // header, then with a wrong token, expecting both to fail.
+    const noAuth = await fetch(urlFor('/api/sample-fixture/echo'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hello: 'world' }),
+    });
+    expect([401, 403]).toContain(noAuth.status);
+
+    const wrongAuth = await fetch(urlFor('/api/sample-fixture/echo'), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer not-a-real-token-xyz',
+      },
+      body: JSON.stringify({ hello: 'world' }),
+    });
+    expect([401, 403]).toContain(wrongAuth.status);
+  });
+
+  it('two consecutive successful echo calls return independent responses (no plugin state leak)', async () => {
+    // Defends against plugin authors capturing the request context
+    // in a closure or holding it across requests. Two distinct bodies
+    // → two distinct echoed responses, never aliased.
+    const r1 = await fetch(urlFor('/api/sample-fixture/echo'), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${daemon!.token}`,
+      },
+      body: JSON.stringify({ pass: 1 }),
+    });
+    const r2 = await fetch(urlFor('/api/sample-fixture/echo'), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${daemon!.token}`,
+      },
+      body: JSON.stringify({ pass: 2 }),
+    });
+    expect(r1.status).toBe(200);
+    expect(r2.status).toBe(200);
+    const d1 = await r1.json();
+    const d2 = await r2.json();
+    expect(d1).toEqual({ echoed: { pass: 1 } });
+    expect(d2).toEqual({ echoed: { pass: 2 } });
+  });
+
   it('built-in /api/status still answers 200 in the same daemon (regression)', async () => {
     const res = await fetch(urlFor('/api/status'));
     expect(res.status).toBe(200);

@@ -291,12 +291,24 @@ export class DkgClient {
     );
   }
 
-  async query({ sparql, contextGraphId, subGraphName, assertionName }) {
+  // `/api/query` accepts both the legacy data-graph route
+  // (`contextGraphId` + optional `subGraphName`) AND explicit
+  // memory-tier routing via `graphSuffix` (e.g. `'_shared_memory'`) or
+  // `view` (e.g. `'shared-working-memory'`). Default routing reads the
+  // *bare* data graph, which is empty for data that only exists via the
+  // assertion API (write -> promote -> SWM). Callers that just promoted
+  // an assertion and want to read it back MUST pass either
+  // `graphSuffix: '_shared_memory'` or `view: 'shared-working-memory'`
+  // — see scripts/lib/manifest.mjs `loadImportManifest` for the
+  // canonical pattern.
+  async query({ sparql, contextGraphId, subGraphName, assertionName, graphSuffix, view }) {
     return this.request('POST', '/api/query', {
       sparql,
       contextGraphId,
       ...(subGraphName ? { subGraphName } : {}),
       ...(assertionName ? { assertionName } : {}),
+      ...(graphSuffix ? { graphSuffix } : {}),
+      ...(view ? { view } : {}),
     });
   }
 }

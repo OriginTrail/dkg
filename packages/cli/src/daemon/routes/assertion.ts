@@ -3154,6 +3154,53 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
     return;
   }
 
+  // GET /api/kc/:id — chain-confirmed metadata for a knowledge
+  // collection. Returns latest merkleRoot (hex) and the author tuple.
+  // Useful for LU-8 verification: members fetch the merkleRoot off-chain
+  // and feed it to verify-batch as `expectedMerkleRoot`.
+  if (req.method === 'GET' && /^\/api\/kc\/[^/]+$/.test(path)) {
+    const idStr = decodeURIComponent(path.split('/')[3] ?? '');
+    if (!/^\d+$/.test(idStr)) {
+      return jsonResponse(res, 400, {
+        error: 'Invalid kcId — must be a non-negative integer',
+      });
+    }
+    const kcId = BigInt(idStr);
+    try {
+      const chain: any = (agent as any).chain ?? (agent as any).chainAdapter;
+      if (!chain?.getLatestMerkleRoot) {
+        return jsonResponse(res, 503, {
+          error: 'Chain adapter does not expose getLatestMerkleRoot',
+        });
+      }
+      const rootBytes: Uint8Array = await chain.getLatestMerkleRoot(kcId);
+      const rootHex = '0x' + Array.from(rootBytes).map((b: number) => b.toString(16).padStart(2, '0')).join('');
+      let author: string | null = null;
+      try {
+        if (typeof agent.getKnowledgeCollectionAuthor === 'function') {
+          const a = await agent.getKnowledgeCollectionAuthor(kcId);
+          if (a && a !== '0x0000000000000000000000000000000000000000') author = a;
+        }
+      } catch { /* attestation lookup is optional */ }
+      return jsonResponse(res, 200, {
+        kcId: idStr,
+        merkleRoot: rootHex,
+        author,
+      });
+    } catch (err: any) {
+      // Codex PR #609 R2 #5 — mirror the unknown-kcId mapping the
+      // sibling `/api/kc/:id/author` route already does so callers
+      // can branch on "not published yet" (404) vs. server failure
+      // (500). KCS reverts on lookups for ids that don't exist;
+      // matching the same regex keeps the two routes in lockstep.
+      const msg = err?.message ?? String(err);
+      if (/unknown kcId|nonexistent|out-of-bounds/i.test(msg)) {
+        return jsonResponse(res, 404, { error: `Unknown kcId ${idStr}` });
+      }
+      return jsonResponse(res, 500, { error: msg });
+    }
+  }
+
   // GET /api/kc/:id/author — chain-confirmed author for a knowledge
   // collection's latest merkle-root entry.
   //

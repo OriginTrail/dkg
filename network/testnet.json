@@ -16,7 +16,7 @@
     "branch": "main",
     "checkIntervalMinutes": 5
   },
-  "chainResetMarker": "v10-profilestorage-paramstore-redeploy-2026-05-14",
+  "chainResetMarker": "v10-rc10-rfc38-mainnet-ready-2026-05-25",
   "chain": {
     "type": "evm",
     "rpcUrl": "https://sepolia.base.org",

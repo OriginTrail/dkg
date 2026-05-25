@@ -83,90 +83,54 @@ done
 
 log "Preconditions OK (hardhat pid=$HARDHAT_PID, node $NODE_NUM pid=$NODE_PID, api :$API_PORT)"
 
-# --- 2. Create V10 context graph ---------------------------------------------
+# --- 2. Create + register V10 context graph via the daemon -------------------
+#
+# Previous revision called `ContextGraphs.createContextGraph(...)` directly
+# from a hardhat signer. That mints an on-chain CG owned by a wallet the
+# daemon does not control, so the subsequent `dkg context-graph register
+# <id>` call (run against that numeric id) creates a SECOND on-chain CG
+# under the daemon's wallet rather than binding the existing one. The
+# publish then targets the orphan and fails with "not registered on-chain".
+#
+# The publish flow expects the daemon to OWN the CG it publishes to (the
+# author signature on the finalized assertion has to chain back to the
+# on-chain CG curator/creator). So we just use the daemon's own CLI:
+#   1. `context-graph create <slug>` creates a local CG name.
+#   2. `context-graph register <slug>` mints the on-chain CG under the
+#      daemon's EOA and binds the local name to the numeric id.
+# The RDF data graph URI is `did:dkg:context-graph:<slug>` (the publisher
+# resolves the slug → on-chain id internally before computing leaves).
+#
+# Slug is timestamped so reruns within the same devnet session don't
+# collide with prior CGs.
 
-log "Creating fresh V10 context graph via ContextGraphs.createContextGraph..."
+CG_SLUG="v10-publish-smoke-$(date +%s)"
+log "Creating local CG '$CG_SLUG' via daemon CLI..."
+# `context-graph create` auto-namespaces bare slugs to
+# `{agentAddress}/{slug}` (see cli.ts → contextGraphCmd.command('create')).
+# Capture the post-namespacing id from the "ID:" line so register and
+# publish use the fully-qualified form the daemon registry actually
+# stores.
+CREATE_OUT=$(DKG_HOME="$NODE_DIR" node "$CLI_JS" context-graph create "$CG_SLUG" \
+  --name "V10 publishDirect smoke" \
+  --description "Auto-created by scripts/devnet-test-publish.sh") \
+  || fail "context-graph create failed"
+CG_FQ_ID=$(printf '%s\n' "$CREATE_OUT" | sed -nE 's/^[[:space:]]*ID:[[:space:]]+(.+)$/\1/p' | head -n1)
+[ -n "$CG_FQ_ID" ] || fail "could not parse CG id from create output:\n$CREATE_OUT"
+log "Local CG id = $CG_FQ_ID"
 
-CG_ID=$(
-  cd "$REPO_ROOT/packages/evm-module" && \
-  RPC_URL="http://127.0.0.1:${HARDHAT_PORT}" \
-  CONTRACTS_JSON="$CONTRACTS_JSON" \
-  ABI_DIR="$EVM_ABI_DIR" \
-  node -e '
-const { ethers } = require("ethers");
-const fs = require("fs");
-const path = require("path");
-
-(async () => {
-  const rpc = process.env.RPC_URL;
-  const contractsPath = process.env.CONTRACTS_JSON;
-  const abiDir = process.env.ABI_DIR;
-
-  const provider = new ethers.JsonRpcProvider(rpc);
-  const deployer = await provider.getSigner(0);
-
-  const contracts = JSON.parse(fs.readFileSync(contractsPath, "utf8")).contracts;
-  const cgAddr        = contracts.ContextGraphs?.evmAddress;
-  const cgStorageAddr = contracts.ContextGraphStorage?.evmAddress;
-  if (!cgAddr)        throw new Error("ContextGraphs not deployed");
-  if (!cgStorageAddr) throw new Error("ContextGraphStorage not deployed");
-
-  const loadAbi = (name) => JSON.parse(fs.readFileSync(path.join(abiDir, name + ".json"), "utf8"));
-  const cgAbi        = loadAbi("ContextGraphs");
-  const cgStorageAbi = loadAbi("ContextGraphStorage");
-
-  const cg        = new ethers.Contract(cgAddr, cgAbi, deployer);
-  const cgStorage = new ethers.Contract(cgStorageAddr, cgStorageAbi, provider);
-
-  // Open policy: no participantAgents (open contribution), no metadata,
-  // no curator/PCA. Per SPEC_CG_MEMORY_MODEL the contract no longer takes
-  // hostingNodes or per-CG requiredSignatures — hosting + ACK quorum are
-  // network-level concerns (sharding table + parametersStorage.minimumRequiredSignatures()).
-  const args = [
-    [],                     // address[] participantAgents (open — no curator list)
-    0,                      // uint256 metadataBatchId  (none)
-    0,                      // uint8 accessPolicy       (0 = public/discoverable)
-    1,                      // uint8 publishPolicy      (1 = open)
-    ethers.ZeroAddress,     // address publishAuthority  (open rejects non-zero)
-    0,                      // uint256 publishAuthorityAccountId (open rejects non-zero)
-  ];
-
-  // Preview cgId via staticCall, fall back to event parsing if needed.
-  let previewId = null;
-  try {
-    previewId = await cg.createContextGraph.staticCall(...args);
-    console.error("staticCall preview: cgId=" + previewId);
-  } catch (e) {
-    console.error("staticCall preview failed: " + (e?.shortMessage || e?.message || e));
-  }
-
-  const tx = await cg.createContextGraph(...args);
-  const receipt = await tx.wait();
-
-  let cgId = previewId;
-  if (cgId == null) {
-    const topic = cgStorage.interface.getEvent("ContextGraphCreated").topicHash;
-    for (const lg of receipt.logs) {
-      if (lg.address.toLowerCase() !== cgStorageAddr.toLowerCase()) continue;
-      if (lg.topics[0] !== topic) continue;
-      const parsed = cgStorage.interface.parseLog(lg);
-      cgId = parsed.args.contextGraphId;
-      break;
-    }
-    if (cgId == null) throw new Error("ContextGraphCreated event not found on receipt");
-  }
-
-  console.error("createContextGraph tx=" + receipt.hash + " cgId=" + cgId);
-  console.log(cgId.toString());
-})().catch(e => {
-  console.error("[create-cg] " + (e?.shortMessage || e?.message || String(e)));
-  process.exit(1);
-});
-'
-) || fail "context graph creation failed"
-
-[ -n "$CG_ID" ] || fail "empty CG_ID captured"
-log "Created V10 context graph id=$CG_ID"
+log "Registering '$CG_FQ_ID' on-chain via daemon CLI..."
+REG_OUT=$(DKG_HOME="$NODE_DIR" node "$CLI_JS" context-graph register "$CG_FQ_ID") \
+  || fail "context-graph register failed (CG=$CG_FQ_ID)"
+CG_ONCHAIN_ID=$(printf '%s\n' "$REG_OUT" | sed -nE 's/.*On-chain:[[:space:]]+([0-9]+).*/\1/p' | head -n1)
+[ -n "$CG_ONCHAIN_ID" ] || fail "could not parse on-chain id from register output:\n$REG_OUT"
+# The slug is what `dkg publish` and the data-graph URI both consume;
+# CG_ONCHAIN_ID is only used in the post-publish KCS verification at
+# step 6 (kcsAddr.getKnowledgeCollectionMetadata takes a numeric KC id,
+# but the publish receipt gives us batchId directly so CG_ONCHAIN_ID is
+# only kept for logging / debug context).
+CG_ID="$CG_FQ_ID"
+log "CG ready: id=$CG_ID on-chain=$CG_ONCHAIN_ID"
 
 # --- 3. Build RDF fixture -----------------------------------------------------
 
@@ -181,7 +145,6 @@ log "Wrote RDF fixture to $TMP_RDF (subject=$SUBJECT)"
 
 # --- 4. CLI publish -----------------------------------------------------------
 
-# Remember where the daemon log currently ends so we can scan only new lines.
 if [ -s "$DAEMON_LOG" ]; then
   BASELINE_LINES=$(wc -l < "$DAEMON_LOG" | tr -d ' ')
 else

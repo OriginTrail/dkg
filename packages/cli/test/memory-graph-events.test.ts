@@ -292,6 +292,44 @@ describe('daemon memory_graph_changed route emissions', () => {
     expect(emitMemoryGraphChanged).not.toHaveBeenCalled();
   });
 
+  it('rejects verify-batch without explicit batch quads before reading local graphs', async () => {
+    const query = vi.fn();
+    const ctx = createContext('/api/shared-memory/verify-batch', {
+      contextGraphId: 'project-a',
+      expectedMerkleRoot: `0x${'11'.repeat(32)}`,
+    }, {
+      agent: { store: { query } } as unknown as RequestContext['agent'],
+    });
+
+    await handleMemoryRoutes(ctx);
+
+    expect((ctx.res as unknown as { statusCode: number }).statusCode).toBe(400);
+    expect(responseBody(ctx).error).toMatch(/requires explicit `quads`/);
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('accepts explicit verify-batch quads over the small request limit', async () => {
+    const largeLiteral = `"${'x'.repeat(270 * 1024)}"`;
+    const ctx = createContext('/api/shared-memory/verify-batch', {
+      contextGraphId: 'project-a',
+      expectedMerkleRoot: `0x${'11'.repeat(32)}`,
+      quads: [{
+        subject: 'urn:large-batch-root',
+        predicate: 'https://schema.org/text',
+        object: largeLiteral,
+        graph: 'urn:g',
+      }],
+    });
+
+    await handleMemoryRoutes(ctx);
+
+    expect((ctx.res as unknown as { statusCode: number }).statusCode).toBe(200);
+    expect(responseBody(ctx)).toMatchObject({
+      ok: false,
+      quadsConsidered: 1,
+    });
+  });
+
   it('threads callerAgentAddress into conditional shared-memory writes', async () => {
     const conditionalShare = vi.fn().mockResolvedValue({ shareOperationId: 'op-cas' });
     const ctx = createContext('/api/shared-memory/conditional-write', {
@@ -348,13 +386,14 @@ describe('daemon memory_graph_changed route emissions', () => {
         { subject: 'urn:root', predicate: 'urn:p2', object: 'urn:o2', graph: 'urn:g' },
       ],
     });
+    const getContextGraphOnChainId = vi.fn().mockResolvedValue('7');
     const ctx = createContext('/api/shared-memory/publish', {
       contextGraphId: 'project-a',
       subGraphName: 'notes',
       selection: ['urn:root'],
       clearAfter: false,
     }, {
-      agent: { publishFromSharedMemory } as unknown as RequestContext['agent'],
+      agent: { publishFromSharedMemory, getContextGraphOnChainId } as unknown as RequestContext['agent'],
       emitMemoryGraphChanged,
     });
 
@@ -397,7 +436,7 @@ describe('daemon memory_graph_changed route emissions', () => {
     await handleMemoryRoutes(ctx);
 
     expect((ctx.res as unknown as { statusCode: number }).statusCode).toBe(200);
-    expect(getContextGraphOnChainId).not.toHaveBeenCalled();
+    expect(getContextGraphOnChainId).toHaveBeenCalledWith('project-a');
     expect(publishFromSharedMemory.mock.calls[0][2]).not.toHaveProperty('contextGraphId');
   });
 
@@ -408,12 +447,13 @@ describe('daemon memory_graph_changed route emissions', () => {
       kaManifest: [{ tokenId: 1n, rootEntity: 'urn:root' }],
       publicQuads: [{ subject: 'urn:root', predicate: 'urn:p', object: 'urn:o', graph: 'urn:g' }],
     });
+    const getContextGraphOnChainId = vi.fn().mockResolvedValue('7');
     const ctx = createContext('/api/shared-memory/publish', {
       contextGraphId: 'project-a',
       publishContextGraphId: '7',
       selection: ['urn:root'],
     }, {
-      agent: { publishFromSharedMemory } as unknown as RequestContext['agent'],
+      agent: { publishFromSharedMemory, getContextGraphOnChainId } as unknown as RequestContext['agent'],
     });
 
     await handleMemoryRoutes(ctx);

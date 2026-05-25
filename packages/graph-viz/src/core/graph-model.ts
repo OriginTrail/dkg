@@ -11,25 +11,25 @@ const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 
 /**
  * Determine if an object value looks like a URI (named node) or blank node.
- * URIs start with http://, https://, urn:, or are wrapped in <>.
+ * URIs are absolute IRIs (`scheme:`) or are wrapped in <>.
  * Blank nodes start with _: prefix.
  */
 function isResourceObject(value: string): boolean {
-  return (
-    value.startsWith('http://') ||
-    value.startsWith('https://') ||
-    value.startsWith('urn:') ||
-    value.startsWith('_:') ||
-    (value.startsWith('<') && value.endsWith('>'))
-  );
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.startsWith('"')) return false;
+  if (trimmed.startsWith('_:')) return true;
+  if (trimmed.startsWith('<') && trimmed.endsWith('>')) return true;
+  if (/\s/.test(trimmed)) return false;
+  return /^[A-Za-z][A-Za-z0-9+.-]*:/.test(trimmed);
 }
 
 /** Strip angle brackets from a URI if present */
 function cleanUri(value: string): string {
-  if (value.startsWith('<') && value.endsWith('>')) {
-    return value.slice(1, -1);
+  const trimmed = value.trim();
+  if (trimmed.startsWith('<') && trimmed.endsWith('>')) {
+    return trimmed.slice(1, -1);
   }
-  return value;
+  return trimmed;
 }
 
 /** Generate a deterministic edge ID */

@@ -221,6 +221,56 @@ describe('createSwmAckQuorum: track idempotency / edge cases', () => {
     q.onAck('op-nan', 'p9');
     expect(q.stats().completed).toBe(1);
   });
+
+  it('falls back to default threshold for +Infinity (locks !Number.isFinite over Number.isNaN)', () => {
+    // Defends against a regression that swapped clamp01's
+    // `!Number.isFinite(n)` for `Number.isNaN(n)`. Both
+    // correctly handle NaN, but `Number.isNaN(Infinity)` is
+    // false → would reach `n > 1 → return 1` and silently
+    // change default-threshold behaviour to "wait for 100%".
+    // This test pins the DEFAULT (0.9) path: 8/10 = 80%
+    // does NOT complete; 9/10 = 90% does. Under the broken
+    // regression both would route through threshold=1.0
+    // and the 9/10 case would also fail to complete.
+    const q = makeQuorum();
+    q.track({
+      shareOperationId: 'op-pos-inf',
+      cgId: 'cg',
+      expectedMembers: ['p1','p2','p3','p4','p5','p6','p7','p8','p9','p10'],
+      payload: PAYLOAD,
+      enumerationSource: 'topic-subscribers',
+      quorumThreshold: Number.POSITIVE_INFINITY,
+    });
+    for (let i = 1; i <= 8; i++) q.onAck('op-pos-inf', `p${i}`);
+    expect(q.stats().completed).toBe(0);
+    q.onAck('op-pos-inf', 'p9');
+    expect(q.stats().completed).toBe(1);
+  });
+
+  it('falls back to default threshold for -Infinity (negative non-finite path)', () => {
+    // Mirror of the +Infinity test — `-Infinity` also hits
+    // `!Number.isFinite` and returns DEFAULT (NOT 0). A
+    // regression that handled negatives via `n < 0 → return
+    // 0` BEFORE the finite check would silently change this
+    // to threshold=0 (everything completes immediately on
+    // track), which the `expect(completed).toBe(0)` after
+    // track but before any ack would catch.
+    const q = makeQuorum();
+    q.track({
+      shareOperationId: 'op-neg-inf',
+      cgId: 'cg',
+      expectedMembers: ['p1','p2','p3','p4','p5','p6','p7','p8','p9','p10'],
+      payload: PAYLOAD,
+      enumerationSource: 'topic-subscribers',
+      quorumThreshold: Number.NEGATIVE_INFINITY,
+    });
+    // Default 0.9: 0/10 = 0 < 0.9, NOT completed. Under the
+    // pre-finite-check-clamp regression, -Inf would have
+    // routed to 0 and completed=1 here.
+    expect(q.stats().completed).toBe(0);
+    for (let i = 1; i <= 9; i++) q.onAck('op-neg-inf', `p${i}`);
+    expect(q.stats().completed).toBe(1);
+  });
 });
 
 describe('createSwmAckQuorum: onAck filtering / dedup', () => {
@@ -819,5 +869,193 @@ describe('createSwmAckQuorum: error isolation', () => {
     q.tick();
     await new Promise((r) => setTimeout(r, 10));
     expect(q.stats().watchdogFired).toBe(1);
+  });
+});
+
+describe('createSwmAckQuorum: time-bound boundary edge cases', () => {
+  it('watchdogMs = 0 fires the top-up on the very first tick (degenerate-zero allowed)', () => {
+    // Math.max(0, ...) allows zero watchdog. The SLO endpoint exposes
+    // this as a minimum; a regression that flipped to `> 0` would
+    // never fire the watchdog on a zero-window track.
+    let nowMs = 1_000_000;
+    const { calls, fn } = makeTopUp();
+    const q = makeQuorum({ now: () => nowMs, topUp: fn });
+    q.track({
+      shareOperationId: 'op-zero-watchdog',
+      cgId: 'cg',
+      expectedMembers: ['p1', 'p2'],
+      payload: PAYLOAD,
+      enumerationSource: 'allowlist',
+      watchdogMs: 0,
+      deadlineHardMs: 5 * 60_000,
+    });
+    q.tick(); // nowMs unchanged → watchdogAge = 0 ≥ 0 fires.
+    expect(calls).toHaveLength(1);
+    expect(q.stats().watchdogFired).toBe(1);
+  });
+
+  it('deadlineHardMs = 0 reaps the record on the very next tick', () => {
+    // Mirror of the watchdog zero-window: a zero hard deadline reaps
+    // on next tick. Defends operators from configuration footguns —
+    // the system must not crash and must not silently treat 0 as
+    // "default".
+    let nowMs = 1_000_000;
+    const onDeadlineExpired = vi.fn();
+    const q = makeQuorum({
+      now: () => nowMs,
+      observers: { onDeadlineExpired },
+    });
+    q.track({
+      shareOperationId: 'op-zero-deadline',
+      cgId: 'cg',
+      expectedMembers: ['p1'],
+      payload: PAYLOAD,
+      enumerationSource: 'allowlist',
+      deadlineHardMs: 0,
+    });
+    q.tick();
+    expect(q.stats().deadlineExpired).toBe(1);
+    expect(onDeadlineExpired).toHaveBeenCalledOnce();
+    expect(q.inspect('op-zero-deadline')).toBeUndefined();
+  });
+
+  it('negative watchdogMs / deadlineHardMs are clamped to 0 (Math.max guard)', () => {
+    let nowMs = 1_000_000;
+    const { calls, fn } = makeTopUp();
+    const q = makeQuorum({ now: () => nowMs, topUp: fn });
+    q.track({
+      shareOperationId: 'op-neg',
+      cgId: 'cg',
+      expectedMembers: ['p1'],
+      payload: PAYLOAD,
+      enumerationSource: 'allowlist',
+      watchdogMs: -1_000,
+      deadlineHardMs: -1_000,
+    });
+    // Tick first reaches the deadline branch (age 0 ≥ 0) — record
+    // expires before the watchdog can fire.
+    q.tick();
+    expect(q.stats().deadlineExpired).toBe(1);
+    expect(calls).toEqual([]);
+  });
+
+  it('tick(nowMs) explicit override drives state without consulting the now() injectable', () => {
+    // The signature `tick(nowMs?: number)` lets the caller pass an
+    // explicit timestamp. Locks that path; a regression that
+    // ignored the override would silently de-sync the SLO ticker
+    // from the wall clock the agent runs against.
+    let nowMs = 1_000_000;
+    const { calls, fn } = makeTopUp();
+    const q = makeQuorum({ now: () => nowMs, topUp: fn });
+    q.track({
+      shareOperationId: 'op-nowMs-override',
+      cgId: 'cg',
+      expectedMembers: ['p1', 'p2'],
+      payload: PAYLOAD,
+      enumerationSource: 'allowlist',
+      watchdogMs: 30_000,
+      deadlineHardMs: 5 * 60_000,
+    });
+    // Inject a future-now into tick directly, leaving the underlying
+    // `now()` at startedAtMs. The tick must still fire the watchdog.
+    q.tick(nowMs + 30_000);
+    expect(calls).toHaveLength(1);
+    expect(q.stats().watchdogFired).toBe(1);
+  });
+});
+
+describe('createSwmAckQuorum: snapshot immutability + ordering', () => {
+  it('inspect() returns arrays whose mutation does NOT corrupt internal state', () => {
+    // Defends the encapsulation contract: `inspect` is a debug
+    // helper, callers must not be able to mutate the live record
+    // by tampering with the returned snapshot.
+    const q = makeQuorum();
+    q.track({
+      shareOperationId: 'op-snap',
+      cgId: 'cg',
+      expectedMembers: ['p1', 'p2', 'p3'],
+      payload: PAYLOAD,
+      enumerationSource: 'allowlist',
+      quorumThreshold: 1.0,
+    });
+    const snap = q.inspect('op-snap')!;
+    // Cast off readonly to attempt the mutation we're guarding against.
+    (snap.expectedMembers as string[]).push('intruder');
+    (snap.acked as string[]).push('p1');
+    // After tampering, the live record must still expose the
+    // original 3-member expected set and zero acks.
+    const fresh = q.inspect('op-snap')!;
+    expect([...fresh.expectedMembers].sort()).toEqual(['p1', 'p2', 'p3']);
+    expect(fresh.acked).toEqual([]);
+    // And no acks were silently injected — quorum still pending.
+    expect(q.stats().pending).toBe(1);
+  });
+
+  it('dropPeer + rearmWatchdog combo: the next watchdog top-up excludes the dropped peer (no resurrection)', () => {
+    // Tests the documented PR-H bug 2 fix end-to-end: after a
+    // rejected peer is dropped AND we re-arm, the next watchdog
+    // fire's `missingPeers` must NOT include the rejected peer.
+    // A regression where rearmWatchdog re-derived missing peers
+    // from a stale set would re-include the rejection.
+    let nowMs = 1_000_000;
+    const { calls, fn } = makeTopUp();
+    const q = makeQuorum({ now: () => nowMs, topUp: fn });
+    q.track({
+      shareOperationId: 'op-drop-rearm-combo',
+      cgId: 'cg',
+      expectedMembers: ['p1', 'p2', 'p3'],
+      payload: PAYLOAD,
+      enumerationSource: 'allowlist',
+      watchdogMs: 30_000,
+      deadlineHardMs: 5 * 60_000,
+    });
+
+    nowMs += 30_001;
+    q.tick();
+    expect(calls).toHaveLength(1);
+    expect([...calls[0].missingPeers].sort()).toEqual(['p1', 'p2', 'p3']);
+
+    // p2 returned the rejected sentinel — caller drops + rearms.
+    q.dropPeer('op-drop-rearm-combo', 'p2');
+    q.rearmWatchdog('op-drop-rearm-combo');
+    expect(q.inspect('op-drop-rearm-combo')?.watchdogFired).toBe(false);
+
+    nowMs += 30_001;
+    q.tick();
+    expect(calls).toHaveLength(2);
+    // Crucial: the second top-up does NOT include p2.
+    expect([...calls[1].missingPeers].sort()).toEqual(['p1', 'p3']);
+    expect(calls[1].missingPeers).not.toContain('p2');
+  });
+
+  it('preAck + onAck combined exactly at threshold completes on the onAck (boundary semantic)', () => {
+    // Probes the equality branch in `ackPctOf >= quorumThreshold`.
+    // 4 expected, 3 pre-acked = 0.75 < 0.9, then onAck pushes to
+    // 4/4 = 1.0 ≥ 0.9 → complete. Locks the inclusive-equality
+    // semantic (not strict-greater-than which would block at
+    // exactly-0.9 thresholds).
+    const onQuorumCompleted = vi.fn();
+    const q = makeQuorum({ observers: { onQuorumCompleted } });
+    q.track({
+      shareOperationId: 'op-boundary',
+      cgId: 'cg',
+      expectedMembers: ['p1', 'p2', 'p3', 'p4'],
+      preAckedFromSubstrate: ['p1', 'p2', 'p3'],
+      payload: PAYLOAD,
+      enumerationSource: 'allowlist',
+      quorumThreshold: 0.9,
+    });
+    expect(q.stats().completed).toBe(0);
+    expect(q.inspect('op-boundary')?.ackPct).toBeCloseTo(0.75);
+
+    q.onAck('op-boundary', 'p4');
+    expect(q.stats().completed).toBe(1);
+    expect(onQuorumCompleted).toHaveBeenCalledOnce();
+    expect(onQuorumCompleted.mock.calls[0][0]).toMatchObject({
+      shareOperationId: 'op-boundary',
+      ackedCount: 4,
+      expectedCount: 4,
+      ackPct: 1,
+    });
   });
 });

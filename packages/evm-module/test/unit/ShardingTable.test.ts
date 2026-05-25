@@ -197,7 +197,44 @@ describe('@unit ShardingTable contract', function () {
     const version = await ShardingTable.version();
 
     expect(name).to.equal('ShardingTable');
-    expect(version).to.equal('1.0.0');
+    expect(version).to.equal('2.0.0');
+  });
+
+  // v2.0.0 — `migrationPeriodEnd` (V8→V9 carry-over) was removed along
+  // with its constructor parameter. This regression locks in three
+  // properties so a future reintroduction (e.g. accidental cherry-pick
+  // of the V8 contract over this one) trips the suite immediately:
+  //   1. The constructor takes exactly one argument (`hubAddress`) —
+  //      caught at deploy time inside `deployShardingTableFixture`,
+  //      which is what the broader test run already exercises.
+  //   2. The deployed contract does NOT expose `migrationPeriodEnd()`
+  //      (typechain types omit it; ethers `getFunction` rejects it
+  //      with `no matching fragment`).
+  //   3. The `_VERSION` semver tier reflects the ABI break: anything
+  //      below 2.0.0 means the version bump regressed back into a
+  //      patch / minor and downstream "wire-compatible" deploy tooling
+  //      would silently misclassify the rollout. (Codex review on
+  //      PR #651, comment r3298951085.)
+  it('does not expose `migrationPeriodEnd()` on the V10 ABI [regression: v2.0.0]', async () => {
+    const fns = ShardingTable.interface.fragments
+      .filter((f) => f.type === 'function')
+      .map((f) => ('name' in f ? f.name : ''));
+    expect(
+      fns,
+      "removed V8→V9 carry-over getter must not reappear",
+    ).to.not.include('migrationPeriodEnd');
+
+    const ctor = ShardingTable.interface.fragments.find(
+      (f) => f.type === 'constructor',
+    );
+    expect(ctor, 'constructor fragment present').to.not.be.undefined;
+    expect(
+      'inputs' in ctor! ? ctor.inputs.length : -1,
+      'constructor takes only `hubAddress`',
+    ).to.equal(1);
+
+    const major = Number((await ShardingTable.version()).split('.')[0]);
+    expect(major, 'semver major reflects ABI break').to.be.gte(2);
   });
 
   it('Insert 5 nodes, nodes are sorted expect to pass', async () => {

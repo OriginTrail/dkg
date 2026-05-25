@@ -538,11 +538,15 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
     expect(body.error).toMatch(/pcaAccountId|PCA account id/i);
   });
 
-  // Codex PR #502 round-5: pcaAccountId on a create-only request used
-  // to be silently accepted (and silently dropped because
-  // createContextGraph no longer persists it). The daemon now rejects
-  // the create-without-register combo at the API boundary.
-  it('rejects pcaAccountId on POST /api/context-graph/create when register is not true', async () => {
+  // OT-RFC-38 LU-6 Phase B (Codex PR #610): pcaAccountId on a create-only
+  // request used to be rejected at the API boundary (PR #502 round-5) because
+  // createContextGraph silently dropped it. PR #610 made createContextGraph
+  // persist `publishPolicy` / `publishAuthorityAccountId` via the
+  // DKG_PUBLISH_* triples so the deferred-register path on first VM publish
+  // re-loads the user's create-time choices. The create-only call is now
+  // accepted; the safety invariant is preserved by the persist+replay
+  // round-trip instead of the create-without-register reject.
+  it('accepts pcaAccountId on POST /api/context-graph/create and persists it for deferred register', async () => {
     const d = daemon!;
     const cgId = 'pca-create-only-' + Math.random().toString(36).slice(2, 8);
     const create = await fetch(urlFor(d, '/api/context-graph/create'), {
@@ -550,10 +554,10 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
       headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
       body: JSON.stringify({ id: cgId, name: cgId, pcaAccountId: '1' }),
     });
-    expect(create.status).toBe(400);
-    const body = (await create.json()) as { error?: string };
-    expect(body.error ?? '').toMatch(/register: true|register=true|register/i);
-    expect(body.error ?? '').toMatch(/pcaAccountId/);
+    expect(create.status).toBe(200);
+    const body = (await create.json()) as { created?: string; registered?: boolean };
+    expect(body.created).toBe(cgId);
+    expect(body.registered).toBeUndefined();
   });
 
   // Codex review #502 round-3: pcaAccountId is a register-time knob —

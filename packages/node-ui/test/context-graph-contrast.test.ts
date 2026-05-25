@@ -82,7 +82,6 @@ describe('Context Graph contrast tokens', () => {
       '.v10-item-count',
       '.v10-graph-placeholder',
       '.v10-docs-placeholder',
-      '.v10-provenance-bar',
       '.v10-ka-ual',
       '.v10-ka-section-title',
       '.v10-ka-meta',

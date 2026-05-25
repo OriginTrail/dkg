@@ -24,6 +24,12 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
   const [description, setDescription] = useState('');
   const [access, setAccess] = useState<'curated' | 'public'>('curated');
   const [publishPolicy, setPublishPolicy] = useState<'curator-only' | 'open'>('curator-only');
+  // Codex PR #608 R1/R2 #5/#8: registration is opt-in. Default OFF
+  // so unfunded / offline / no-RPC users can still create a project
+  // locally and register later from Settings when they have gas + a
+  // working RPC. Verified Memory publish requires this to be on
+  // (or registered later via the per-project Settings tab).
+  const [registerOnChain, setRegisterOnChain] = useState<boolean>(false);
   const [ontology, setOntology] = useState<'agent' | 'upload' | 'community'>('community');
   // Which starter to install when ontology mode is 'community' (or 'agent' v1 default).
   // Source: packages/mcp-dkg/templates/ontologies/<slug>/ — bundled by Vite.
@@ -36,6 +42,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
   const [creating, setCreating] = useState(false);
   const [progress, setProgress] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [registrationWarning, setRegistrationWarning] = useState<string | null>(null);
   const [agentAddress, setAgentAddress] = useState<string | null>(null);
   // Phase 8: after CG + ontology + manifest publish, transition into a
   // wire-workspace step so the curator can populate their own workspace
@@ -66,7 +73,10 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
   };
 
   useEffect(() => {
-    if (open) loadAgentIdentity();
+    if (open) {
+      setRegistrationWarning(null);
+      loadAgentIdentity();
+    }
   }, [open]);
 
   if (!open) return null;
@@ -82,6 +92,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
 
     setCreating(true);
     setError(null);
+    setRegistrationWarning(null);
     setProgress('Registering context graph on the network…');
 
     const finalSlug = slugify(trimmedName);
@@ -95,6 +106,17 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
     try {
       const slowTimer = setTimeout(() => setProgress('On-chain registration in progress — this can take up to 30s…'), 5000);
 
+      // OT-RFC-38 LU-6: project creation is LOCAL-ONLY (no chain
+      // interaction, no gas). On-chain registration is deferred to
+      // the first VM publish, which is what the user actually opts
+      // into when they choose to durabilify. SWM works immediately
+      // — cores opaquely buffer curated ciphertext via host-mode
+      // for the pre-registration TTL until either the CG is
+      // explicitly registered or the user publishes for the first
+      // time. We therefore no longer poll for an "on-chain
+      // registration in progress" timer here or treat
+      // `registered: false` as an error.
+      //
       // SPEC_CG_MEMORY_MODEL dials:
       //   Sharing      → accessPolicy   (0 = open, 1 = invite-only)
       //   Contribution → publishPolicy  (0 = curators-only, 1 = open)
@@ -102,12 +124,34 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
       // let the curator dial either side open explicitly.
       const accessPolicy = access === 'curated' ? 1 : 0;
       const publishPolicyWire = publishPolicy === 'curator-only' ? 0 : 1;
-      const opts = access === 'curated'
-        ? { accessPolicy, publishPolicy: publishPolicyWire, allowedAgents: agentAddress ? [agentAddress] : [] }
-        : { accessPolicy, publishPolicy: publishPolicyWire };
+      // Codex PR #608 R1/R2 #5/#6/#8/#9: registration is opt-in. The
+      // modal stays local-first; the user can opt into on-chain
+      // registration via the "Register on chain now" checkbox (default
+      // off). Registering later is a single click from the project's
+      // Settings tab. Forces the publish-to-VM flow to require registration
+      // explicitly, instead of pretending CG-create == on-chain CG.
+      const opts: Parameters<typeof createContextGraph>[3] = access === 'curated'
+        ? { accessPolicy, publishPolicy: publishPolicyWire, allowedAgents: agentAddress ? [agentAddress] : [], register: registerOnChain }
+        : { accessPolicy, publishPolicy: publishPolicyWire, register: registerOnChain };
 
       const result = await createContextGraph(cgId, trimmedName, description.trim() || undefined, opts);
       clearTimeout(slowTimer);
+
+      // Codex PR #608 R1/R2 #6/#9: partial-success path. If the user
+      // opted into registration but it failed, surface a warning AND
+      // proceed (fetchContextGraphs + setActiveProject below). Previously
+      // we threw, which left the just-created CG invisible until manual
+      // refresh and stranded the user with no obvious path forward.
+      // The "retry from Settings" affordance below now picks up the
+      // partial-success state via the refreshed list.
+      if (registerOnChain && result.registered === false) {
+        const registrationWarningMessage =
+          `On-chain registration failed: ${result.registerError ?? 'unknown error'}. ` +
+          `Project is created locally and usable for everything except Verified Memory publishing. ` +
+          `Retry registration from the project's Settings when ready.`;
+        console.warn('[CreateProjectModal]', registrationWarningMessage);
+        setRegistrationWarning(registrationWarningMessage);
+      }
 
       // Phase 7: install the chosen ontology into meta/project-ontology so
       // the agent has the project's predicate vocabulary and URI patterns
@@ -196,6 +240,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
   function handleWireDone() {
     setWiredCgId(null);
     setWiredProjectName('');
+    setRegistrationWarning(null);
     setName('');
     setDescription('');
     onClose();
@@ -212,6 +257,11 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
             </div>
           </div>
           <div className="v10-modal-body">
+            {registrationWarning && (
+              <div className="v10-modal-warning">
+                {registrationWarning}
+              </div>
+            )}
             <WireWorkspacePanel
               contextGraphId={wiredCgId}
               projectName={wiredProjectName}
@@ -238,6 +288,12 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
           {error && (
             <div className="v10-modal-error">
               {error}
+            </div>
+          )}
+
+          {registrationWarning && (
+            <div className="v10-modal-warning">
+              {registrationWarning}
             </div>
           )}
 
@@ -311,6 +367,25 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
                 See SPEC_CG_MEMORY_MODEL §2.5.
               </div>
             )}
+          </div>
+
+          <div className="v10-form-group">
+            <label className="v10-form-label">On-chain registration</label>
+            <label className="v10-form-radio" style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+              <input
+                type="checkbox"
+                checked={registerOnChain}
+                onChange={(e) => setRegisterOnChain(e.target.checked)}
+                style={{ marginTop: 3 }}
+              />
+              <span>
+                Register on chain now (required for Verified Memory publishing)
+                <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 4 }}>
+                  Off by default — the project is created locally and can be registered later
+                  from its Settings tab when your wallet is funded and a working RPC is configured.
+                </div>
+              </span>
+            </label>
           </div>
 
           <div className="v10-form-group">

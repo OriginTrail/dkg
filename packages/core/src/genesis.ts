@@ -172,6 +172,18 @@ export const DKG_ONTOLOGY = {
   DKG_GOSSIP_TOPIC: `${DKG}gossipTopic`,
   DKG_REPLICATION_POLICY: `${DKG}replicationPolicy`,
   DKG_ACCESS_POLICY: `${DKG}accessPolicy`,
+  /**
+   * On-chain contribution-policy dial (SPEC_CG_MEMORY_MODEL).
+   *   "0" → curators-only (default; only allowedAgents may publish to VM)
+   *   "1" → open (any wallet may publish to VM)
+   * Persisted at create time so the deferred-registration path
+   * (auto-register-on-first-VM-publish) preserves the user's create-
+   * time choice. Without this triple, auto-register coerced
+   * publishPolicy back to the access-policy-derived default and
+   * silently broke valid combinations like curated-access + open-
+   * contribution (Codex PR #610 fd5b31f1).
+   */
+  DKG_PUBLISH_POLICY: `${DKG}publishPolicy`,
   DKG_PARTICIPANT_IDENTITY_ID: `${DKG}participantIdentityId`,
   DKG_PARTICIPANT_AGENT: `${DKG}participantAgent`,
   DKG_PUBLISH_AUTHORITY_ACCOUNT_ID: `${DKG}publishAuthorityAccountId`,
@@ -245,6 +257,18 @@ export const DKG_ONTOLOGY = {
   DKG_CURATOR: `${DKG}curator`,
   DKG_ALLOWED_PEER: `${DKG}allowedPeer`,
   DKG_ALLOWED_AGENT: `${DKG}allowedAgent`,
+  // Local-only tombstone for an agent revoked from a curated CG.
+  // Subject = the CG URI; object = the revoked agent address literal
+  // (same shape as DKG_ALLOWED_AGENT). The recipient resolver subtracts
+  // this set from the union of allowed/participant agents so a curator
+  // can lock out a member even when peer sync has re-replicated the
+  // original `DKG_ALLOWED_AGENT` triple from another node's local copy
+  // of the CG metadata. Tombstone is intentionally NOT gossiped — the
+  // curator's local store is authoritative for sender-key membership
+  // on the curator's writes; remote nodes maintain their own tombstones
+  // independently (and learn about the revocation through the absence
+  // of future sender-key packages for the revoked agent).
+  DKG_REVOKED_AGENT: `${DKG}revokedAgent`,
   DKG_AGENT_ADDRESS: `${DKG}agentAddress`,
   DKG_AGENT_MODE: `${DKG}agentMode`,
   DKG_PUBLIC_ENCRYPTION_KEY: `${DKG}publicEncryptionKey`,

@@ -897,11 +897,18 @@ describe('SharedMemoryHandler.handle outcome (rc.9 PR-C codex R3)', () => {
     // (RFC-003 §4.2). Backward-compat: legacy callers using just
     // `outcome.applied` still see `true`; only assertions with
     // strict equality need the new fields.
+    // Codex PR #610 R2 added `insertedTriples` to the applied:true
+    // variant so LU-6 host-catchup can report a per-triple total
+    // (rather than per-envelope) in `totalInsertedTriples`. Same
+    // backward-compat note as before: legacy callers reading just
+    // `outcome.applied` are unaffected; only strict-equality
+    // assertions need the new field.
     expect(outcome).toEqual({
       applied: true,
       cgId: CONTEXT_GRAPH,
       shareOperationId: 'op-applied',
       publisherPeerId: '12D3KooWPeerR3',
+      insertedTriples: 1,
     });
   });
 

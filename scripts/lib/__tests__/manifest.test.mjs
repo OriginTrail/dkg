@@ -24,6 +24,7 @@ import {
   markPartitionStatus,
   loadImportManifest,
   pendingPartitions,
+  defaultManifestAssertionName,
 } from '../manifest.mjs';
 
 test('importUri encodes special characters', () => {
@@ -105,6 +106,48 @@ test('statusEventUri nests under partitionUri and is unique', () => {
   assert.notEqual(a, b, 'two events on the same partition should differ');
 });
 
+test('round-trip preserves literal escape sequences without double-unescape (regression for CodeQL L138)', async () => {
+  // The previous unquote() used four chained `.replace()` passes; the
+  // `\\` -> `\` pass running after `\"` -> `"` could re-interpret a `\`
+  // left behind by an earlier pass as the start of a new escape sequence.
+  // For instance the literal status string `\n` (backslash + n, two
+  // chars) round-trips through lit() as `"\\n"` in N-Quads. The faulty
+  // chain would turn that back into a newline character. The new
+  // single-pass replacer must give back the original `\n` two-char
+  // string, byte for byte.
+  const client = makeMockClient();
+  const importId = 'escape-corpus';
+  await createImportManifest({
+    client,
+    importId,
+    partitions: ['p1'],
+    subGraphName: 'meta',
+  });
+
+  // Each entry: the literal user-visible status string we want to round
+  // trip. These are the strings whose lit()->unquote() chain is the
+  // double-escape danger zone.
+  const samples = [
+    'backslash\\then-n',      // literal backslash + literal "n"
+    'crlf\\r\\nstuff',        // backslash + "r", backslash + "n"
+    'quote\\"inside',         // backslash + quote
+    'mixed \\\\ and \\n',     // escaped backslash + escaped \n
+    'plain done',             // baseline, no escapes
+  ];
+
+  for (const status of samples) {
+    await markPartitionStatus({
+      client, importId, partitionKey: 'p1', status, subGraphName: 'meta',
+    });
+    // Tiny delay so each event's recordedAt is strictly increasing.
+    await new Promise((r) => setTimeout(r, 2));
+  }
+
+  const state = await loadImportManifest({ client, importId, subGraphName: 'meta' });
+  assert.equal(state.partitions[0].status, samples[samples.length - 1],
+    'last status string must round-trip byte-for-byte through lit/unquote');
+});
+
 test('pendingPartitions filters out done', () => {
   const state = [
     { key: 'a', status: 'done' },
@@ -137,9 +180,11 @@ test('pendingPartitions filters out done', () => {
  *     resumes from another node).
  *   - `promote({entities})` moves all triples whose SUBJECT is in
  *     `entities` from wm to swm — exactly the daemon's contract.
- *   - `query()` runs against swm by default (the source-of-truth path
- *     for "what does another node see?") and returns Oxigraph-style
- *     flat-string bindings.
+ *   - `query()` runs against swm ONLY when the caller passes
+ *     `graphSuffix: '_shared_memory'` — matching the real daemon's
+ *     routing. Without that flag, the mock returns the bare data graph
+ *     (empty for assertion-API writes), which catches the codex bug
+ *     where `loadImportManifest` forgot to opt into SWM routing.
  *
  * `bindingShape` lets us also exercise the SPARQL 1.1 results-JSON
  * cell shape that the SPARQL-HTTP adapter returns.
@@ -184,17 +229,27 @@ function makeMockClient({ bindingShape = 'flat', createAlreadyExists = false } =
         }
       }
     },
-    async query({ sparql }) {
+    async query({ sparql, graphSuffix }) {
+      calls.push(`query:graphSuffix=${graphSuffix ?? ''}`);
       // We don't run a real SPARQL engine here — we pattern-match the
-      // exact two shapes loadImportManifest sends and serve from `swm`.
-      // That's enough to verify the promote-root semantics without
-      // pulling oxigraph into this test file.
+      // exact two shapes loadImportManifest sends and serve from the
+      // memory tier the caller asked for. The daemon's REAL routing for
+      // `subGraphName` alone hits the bare data graph (which is empty for
+      // assertion-API-written data); only `graphSuffix: '_shared_memory'`
+      // routes to SWM. Mirroring that here lets tests catch a regression
+      // where the manifest reader drops the SWM hint.
       const m = sparql.match(/<(urn:dkg:import:[^>]+)>\s+imp:partition\s+\?part/);
       if (!m) return { result: { bindings: [] } };
       const importIri = m[1];
 
-      // Reconstruct per-partition state from the swm set.
-      const triples = [...swm].map((k) => {
+      // Pick the source store. `_shared_memory` -> swm; anything else
+      // (including no graphSuffix at all) -> the bare data graph, which
+      // is always empty in this mock because assertion-API writes never
+      // land there.
+      const source = graphSuffix === '_shared_memory' ? swm : new Set();
+
+      // Reconstruct per-partition state from the chosen source set.
+      const triples = [...source].map((k) => {
         const [subject, predicate, object] = k.split('\u0001');
         return { subject, predicate, object };
       });
@@ -444,4 +499,124 @@ test('loadImportManifest fails loudly when the manifest is missing from SWM', as
     }),
     /No import manifest rows found/,
   );
+});
+
+test('loadImportManifest routes the query through SWM (regression for codex L391)', async () => {
+  // The daemon's `/api/query` default routing reads the bare data graph,
+  // not SWM. Manifest data only lives in SWM (via assertion API write +
+  // promote), so `loadImportManifest` MUST explicitly opt into SWM via
+  // `graphSuffix: '_shared_memory'`. Without that hint the read silently
+  // returns zero bindings even on a healthy import — which is exactly
+  // the bug Codex flagged after our last push. This test enforces the
+  // contract by making the mock client return SWM only when the SWM
+  // graphSuffix is supplied, and pinning the call shape.
+  const client = makeMockClient();
+  await createImportManifest({
+    client,
+    importId: 'swm-routed',
+    partitions: ['only.ts'],
+    subGraphName: 'meta',
+  });
+  client._state.calls.length = 0;
+
+  await loadImportManifest({ client, importId: 'swm-routed', subGraphName: 'meta' });
+
+  const queryCalls = client._state.calls.filter((c) => c.startsWith('query:'));
+  assert.equal(queryCalls.length, 1, 'should have made exactly one query');
+  assert.equal(
+    queryCalls[0],
+    'query:graphSuffix=_shared_memory',
+    'loadImportManifest must pass graphSuffix=_shared_memory so the daemon reads SWM',
+  );
+});
+
+test('statusEventUri produces strictly increasing suffixes for same-ms calls (regression for codex L84)', () => {
+  // Same-millisecond status updates land with identical `recordedAt`
+  // values. Without a monotonic in-process counter in the IRI, two writes
+  // in the same ms would tie on both timestamp AND a random suffix, so
+  // SPARQL's lexicographic tie-breaker would pick a non-deterministic
+  // winner. The implementation embeds a zero-padded counter BEFORE the
+  // random component, guaranteeing call-order ordering for same-process
+  // events.
+  const ids = [];
+  for (let i = 0; i < 50; i++) ids.push(statusEventUri('mono-test', 'p1'));
+  for (let i = 1; i < ids.length; i++) {
+    assert.ok(
+      ids[i] > ids[i - 1],
+      `event #${i} (${ids[i]}) should sort lexicographically after #${i - 1} (${ids[i - 1]})`,
+    );
+  }
+  // Suffix shape: <ts>-<12-digit counter>-<6-char random>
+  for (const id of ids) {
+    assert.match(
+      id,
+      /\/event\/\d+-\d{12}-[a-z0-9]{1,6}$/,
+      `statusEventUri should embed a zero-padded monotonic counter: ${id}`,
+    );
+  }
+});
+
+test('defaultManifestAssertionName sanitizes IRI-unsafe importIds (regression for codex L222)', () => {
+  // `validateAssertionName` in packages/core/src/constants.ts rejects
+  // `/`, whitespace, and `<>"{}|^\`\\`. `importUri`/`partitionUri` accept
+  // those characters via percent-encoding, so a caller can construct
+  // valid URIs from an importId that the default assertion-name path
+  // can't actually `create`. The sanitizer maps unsafe runs to `-`, and
+  // refuses outright if no valid characters remain.
+  assert.equal(defaultManifestAssertionName('plain-id'), 'import-manifest-plain-id');
+  assert.equal(defaultManifestAssertionName('with/slash'), 'import-manifest-with-slash');
+  assert.equal(defaultManifestAssertionName('  trim me  '), 'import-manifest-trim-me');
+  assert.equal(
+    defaultManifestAssertionName('with"quote<bracket>'),
+    'import-manifest-with-quote-bracket',
+  );
+  assert.equal(
+    defaultManifestAssertionName('mixed/slash and space'),
+    'import-manifest-mixed-slash-and-space',
+  );
+  assert.equal(
+    defaultManifestAssertionName('--leading-and-trailing--'),
+    'import-manifest-leading-and-trailing',
+  );
+
+  // Length cap: prefix is 16 chars, daemon limit is 256, so slug must be
+  // truncated to <=240 chars and the total result must stay <=256.
+  const longId = 'a'.repeat(500);
+  const longResult = defaultManifestAssertionName(longId);
+  assert.ok(longResult.length <= 256, `result should fit under 256 chars, got ${longResult.length}`);
+  assert.ok(longResult.startsWith('import-manifest-'));
+
+  // No valid characters -> throws with a descriptive error pointing at
+  // the explicit-assertionName workaround instead of a cryptic 400 later.
+  assert.throws(
+    () => defaultManifestAssertionName('///'),
+    /no characters valid for an assertion name/,
+  );
+  assert.throws(
+    () => defaultManifestAssertionName(''),
+    /must be a non-empty string/,
+  );
+});
+
+test('createImportManifest uses sanitized default name for unsafe importIds', async () => {
+  // End-to-end: passing an importId with `/` must NOT crash, and the
+  // assertion created on the daemon must use the sanitized name.
+  const client = makeMockClient();
+  await createImportManifest({
+    client,
+    importId: 'corpus/2026-q1',
+    partitions: ['only.ts'],
+    subGraphName: 'meta',
+  });
+  // The mock records all `request()` calls; the create call should have
+  // used the sanitized name embedded inside the path-encoded form is not
+  // available here, so we just verify it didn't throw and that a
+  // subsequent load (which constructs the same name) succeeds end-to-end.
+  const state = await loadImportManifest({
+    client,
+    importId: 'corpus/2026-q1',
+    subGraphName: 'meta',
+  });
+  assert.equal(state.partitions.length, 1);
+  assert.equal(state.partitions[0].key, 'only.ts');
 });

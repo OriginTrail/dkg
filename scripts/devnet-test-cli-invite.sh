@@ -22,9 +22,12 @@ PORT3=$((PORT1 + 2))
 HOME1="$DEVNET_DIR/node1"
 HOME2="$DEVNET_DIR/node2"
 HOME3="$DEVNET_DIR/node3"
-ADDR1="0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
-ADDR2="0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
-ADDR3="0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
+# Derive each node's primary agent address from its running daemon. Hard-
+# coding Anvil-default wallets (the original `0xf39Fd6...` / `0x709979...`
+# / `0x3C44Cd...`) breaks the moment devnet derives its wallets from a
+# mnemonic that's not the Hardhat default. Discovering at runtime makes
+# this script reusable against any devnet topology — same pattern as the
+# RFC-38 scripts (e.g. `devnet-test-rfc38-revocation.sh:107-109`).
 
 PASS=0
 FAIL=0
@@ -52,25 +55,47 @@ cli_node() {
   DKG_HOME="$home" DKG_API_PORT=$port $CLI "$@" 2>&1
 }
 
+# Discover each node's primary agent address from its running daemon.
+# Match the `/api/agent/identity` discovery pattern used by every
+# RFC-38 devnet script (see header note above ADDR comment).
+addr_of() {
+  api "$1" GET /api/agent/identity | python3 -c "import sys, json; print(json.load(sys.stdin).get('agentAddress',''))"
+}
+ADDR1=$(addr_of "$PORT1")
+ADDR2=$(addr_of "$PORT2")
+ADDR3=$(addr_of "$PORT3")
+if [ -z "$ADDR1" ] || [ -z "$ADDR2" ] || [ -z "$ADDR3" ]; then
+  echo "FATAL: Could not derive agent addresses from /api/agent/identity (got: '$ADDR1' '$ADDR2' '$ADDR3'). Is devnet running?" >&2
+  exit 1
+fi
+echo "Discovered agent addresses: Node1=$ADDR1  Node2=$ADDR2  Node3=$ADDR3"
+
 # ──────────────────────────────────────────────────────────
 h "PART 1: CLI Flow — Node 1 creates, Node 2 joins"
 # ──────────────────────────────────────────────────────────
 
 echo "1a. Node 1: Create curated project via CLI (bare slug auto-namespace)"
-CREATE_OUT=$(cli_node $PORT1 context-graph create cli-test-project --name "CLI Test Project" --access-policy 1)
+# Suffix the slug with a wall-clock stamp so re-runs against a long-lived
+# devnet don't trip the "already exists" guard. Matches the convention
+# used by every other devnet-test-rfc38-*.sh script.
+SLUG="cli-test-project-$(date +%s)"
+CREATE_OUT=$(cli_node $PORT1 context-graph create "$SLUG" --name "CLI Test Project" --access-policy 1)
 echo "$CREATE_OUT"
 CG_ID=$(echo "$CREATE_OUT" | grep "ID:" | head -1 | sed 's/.*ID:[ ]*//')
-if echo "$CG_ID" | grep -q "$ADDR1/cli-test-project"; then
+# Case-insensitive match — the CLI prints checksummed addresses
+# (`0xAa…Bb…`) while `/api/agent/identity` returns lowercase. Strict
+# `grep -q` would always miss.
+if echo "$CG_ID" | grep -qi "$ADDR1/$SLUG"; then
   pass "Auto-namespaced CG ID: $CG_ID"
 else
-  fail "Expected $ADDR1/cli-test-project, got: $CG_ID"
+  fail "Expected $ADDR1/$SLUG, got: $CG_ID"
 fi
 
 echo ""
 echo "1b. Node 1: List agents (should have creator auto-added)"
 AGENTS_OUT=$(cli_node $PORT1 context-graph agents "$CG_ID")
 echo "$AGENTS_OUT"
-if echo "$AGENTS_OUT" | grep -q "Allowed agents" && echo "$AGENTS_OUT" | grep -q "$ADDR1"; then
+if echo "$AGENTS_OUT" | grep -q "Allowed agents" && echo "$AGENTS_OUT" | grep -qi "$ADDR1"; then
   pass "Creator is in allowlist"
 else
   fail "Creator not in allowlist: $AGENTS_OUT"
@@ -101,7 +126,7 @@ GOT_REQUEST=0
 for i in $(seq 1 5); do
   sleep 2
   REQUESTS_OUT=$(cli_node $PORT1 context-graph join-requests "$CG_ID")
-  if echo "$REQUESTS_OUT" | grep -q "$ADDR2"; then
+  if echo "$REQUESTS_OUT" | grep -qi "$ADDR2"; then
     GOT_REQUEST=1
     break
   fi
@@ -170,7 +195,7 @@ echo ""
 echo "1j. Verify Node 3 removed"
 AGENTS_POST_REMOVE=$(cli_node $PORT1 context-graph agents "$CG_ID")
 echo "$AGENTS_POST_REMOVE"
-if echo "$AGENTS_POST_REMOVE" | grep -q "^  $ADDR3"; then
+if echo "$AGENTS_POST_REMOVE" | grep -qi "^  $ADDR3"; then
   fail "Node 3 still in allowlist after removal"
 else
   pass "Node 3 no longer in allowlist"
@@ -180,21 +205,34 @@ fi
 h "PART 2: API Flow (simulating UI) — Node 1 creates, Node 3 joins"
 # ──────────────────────────────────────────────────────────
 
-UI_CG_ID="$ADDR1/ui-test-project"
+UI_SLUG="ui-test-project-$(date +%s)"
+UI_CG_ID="$ADDR1/$UI_SLUG"
 
 echo "2a. Node 1: Create curated project via API (like UI would)"
 CREATE_API=$(api $PORT1 POST "/api/context-graph/create" -d "{\"id\":\"$UI_CG_ID\",\"name\":\"UI Test Project\",\"accessPolicy\":1,\"allowedAgents\":[\"$ADDR1\"]}")
 echo "$CREATE_API" | python3 -m json.tool 2>/dev/null || echo "$CREATE_API"
-if echo "$CREATE_API" | grep -q "ui-test-project"; then
+if echo "$CREATE_API" | grep -q "$UI_SLUG"; then
   pass "API: Project created with clean slug (no timestamp suffix)"
 else
   fail "API: Project creation failed: $CREATE_API"
 fi
 
 echo ""
-echo "2b. Node 3: Send join request via API"
+echo "2b. Node 3: Send join request via API (sign on N3 + forward to N1)"
 sleep 3
-JOIN_API=$(api $PORT3 POST "/api/context-graph/$(python3 -c "import urllib.parse; print(urllib.parse.quote('$UI_CG_ID', safe=''))")/sign-join" -d '{}')
+# PR #448 split sign-only from forward to avoid double-emit. UI/CLI chain
+# `/sign-join` → `/request-join`; replicate the same two-step call here.
+UI_ENC_ID=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$UI_CG_ID', safe=''))")
+SIGN_API=$(api $PORT3 POST "/api/context-graph/$UI_ENC_ID/sign-join" -d '{}')
+DELEGATION=$(echo "$SIGN_API" | python3 -c "import sys,json; print(json.dumps(json.load(sys.stdin).get('delegation',{})))")
+if [ -z "$DELEGATION" ] || [ "$DELEGATION" = "{}" ]; then
+  fail "API: sign-join did not return a delegation: $SIGN_API"
+  JOIN_API="$SIGN_API"
+else
+  # Forward over P2P with N1's peer id so the curator can authenticate the round-trip.
+  JOIN_API=$(api $PORT3 POST "/api/context-graph/$UI_ENC_ID/request-join" \
+    -d "{\"delegation\":$DELEGATION,\"curatorPeerId\":\"$PEER1\"}")
+fi
 echo "$JOIN_API" | python3 -m json.tool 2>/dev/null || echo "$JOIN_API"
 if echo "$JOIN_API" | grep -q '"ok"'; then
   pass "API: Join request sent from Node 3"
@@ -203,12 +241,19 @@ else
 fi
 
 echo ""
-echo "2c. Node 1: List join requests via API"
-sleep 2
+echo "2c. Node 1: List join requests via API (poll up to 15s for gossip)"
 ENC_ID=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$UI_CG_ID', safe=''))")
-REQUESTS_API=$(api $PORT1 GET "/api/context-graph/$ENC_ID/join-requests")
+GOT_API_REQUEST=0
+for i in $(seq 1 5); do
+  sleep 3
+  REQUESTS_API=$(api $PORT1 GET "/api/context-graph/$ENC_ID/join-requests")
+  if echo "$REQUESTS_API" | grep -qi "$ADDR3\|pending"; then
+    GOT_API_REQUEST=1
+    break
+  fi
+done
 echo "$REQUESTS_API" | python3 -m json.tool 2>/dev/null || echo "$REQUESTS_API"
-if echo "$REQUESTS_API" | grep -qi "$ADDR3\|pending"; then
+if [ "$GOT_API_REQUEST" -eq 1 ]; then
   pass "API: Join request from Node 3 visible"
 else
   fail "API: No join request found: $REQUESTS_API"
@@ -261,8 +306,8 @@ fi
 echo ""
 echo "3c. Both projects visible in context-graph list"
 LIST_OUT=$(cli_node $PORT1 context-graph list)
-CLI_PROJ=$(echo "$LIST_OUT" | grep -c "cli-test-project" || true)
-UI_PROJ=$(echo "$LIST_OUT" | grep -c "ui-test-project" || true)
+CLI_PROJ=$(echo "$LIST_OUT" | grep -c "$SLUG" || true)
+UI_PROJ=$(echo "$LIST_OUT" | grep -c "$UI_SLUG" || true)
 if [ "$CLI_PROJ" -ge 1 ] && [ "$UI_PROJ" -ge 1 ]; then
   pass "Both projects visible in list"
 else
@@ -274,7 +319,7 @@ h "PART 4: Edge cases"
 # ──────────────────────────────────────────────────────────
 
 echo "4a. Duplicate create should fail (409)"
-DUP_OUT=$(cli_node $PORT1 context-graph create cli-test-project --name "Duplicate" --access-policy 1 2>&1 || true)
+DUP_OUT=$(cli_node $PORT1 context-graph create "$SLUG" --name "Duplicate" --access-policy 1 2>&1 || true)
 echo "$DUP_OUT"
 if echo "$DUP_OUT" | grep -qi "already exists\|409\|conflict"; then
   pass "Duplicate create rejected"

@@ -394,11 +394,18 @@ export class RandomSamplingProver {
     } catch (err) {
       const reason = mapBuilderError(err);
       if (reason) {
+        const e = err as any;
         this.log.error('rs.tick.data-corrupted', {
           kcId: kcId.toString(),
           cgId: cgId.toString(),
           reason,
           err: (err as Error).name,
+          ...(typeof e?.computedLeafCount === 'number' ? { computedLeafCount: e.computedLeafCount } : {}),
+          ...(typeof e?.expectedLeafCount === 'number' ? { expectedLeafCount: e.expectedLeafCount } : {}),
+          ...(typeof e?.chunkId === 'number' ? { chunkId: e.chunkId } : {}),
+          ...(typeof e?.leafCount === 'number' ? { leafCount: e.leafCount } : {}),
+          extractedLeafCount: leaves.length,
+          chainExpectedLeafCount: Number(expectedLeafCount),
         });
         await this.wal.append(
           makeWalEntry(periodKey, 'failed', {

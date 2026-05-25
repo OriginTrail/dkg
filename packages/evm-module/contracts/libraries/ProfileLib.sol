@@ -33,6 +33,8 @@ library ProfileLib {
     error AskUpdateOnCooldown(uint72 identityId, uint256 cooldownEnd);
     error NoOperatorFees(uint72 identityId);
     error ProfileDoesntExist(uint72 identityId);
+    error ProfileAlreadyExists(uint72 identityId);
+    error NodeIdShardingMismatch(uint72 identityId, bytes expected, bytes provided);
     error NoPendingNodeAsk();
     error NoPendingOperatorFee();
     error InvalidOperatorFee();

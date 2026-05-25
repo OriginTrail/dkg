@@ -244,6 +244,92 @@ describe('handlePluginRoutes', () => {
     expect(calls).not.toContain('follow-on');
   });
 
+  it('stringifies a non-Error throw value (string, number, object) into the 500 message field', async () => {
+    // The dispatcher does `err instanceof Error ? err.message : String(err)`.
+    // A regression that called `.message` on a primitive would crash
+    // the dispatcher with `TypeError: cannot read property of` and
+    // hang the request without a response. Lock the contract that
+    // any throw value is renderable.
+    const stringThrower: RoutePlugin = {
+      name: 'string-thrower',
+      handle() { throw 'plain-string-throw' as unknown as Error; },
+    };
+    const { ctx, res } = makeCtx([stringThrower]);
+    await handlePluginRoutes(ctx);
+    expect(res.statusCode).toBe(500);
+    const parsed = JSON.parse(res.body);
+    expect(parsed).toEqual({
+      error: 'PluginError',
+      plugin: 'string-thrower',
+      message: 'plain-string-throw',
+    });
+  });
+
+  it('numeric throw renders to a stringified number in the 500 message', async () => {
+    const numberThrower: RoutePlugin = {
+      name: 'number-thrower',
+      handle() { throw 42 as unknown as Error; },
+    };
+    const { ctx, res } = makeCtx([numberThrower]);
+    await handlePluginRoutes(ctx);
+    expect(res.statusCode).toBe(500);
+    const parsed = JSON.parse(res.body);
+    expect(parsed.message).toBe('42');
+  });
+
+  it('does NOT destroy or overwrite a fully-completed response when a plugin throws after end()', async () => {
+    // writableEnded=true means the plugin already finalised the response
+    // (e.g. wrote, ended, then errored on a follow-up async cleanup).
+    // Calling res.destroy() at this point would either no-op (response
+    // socket already returned) or, in Node ≥18, log a warning. The
+    // dispatcher must NOT call destroy when writableEnded is true —
+    // the response is already on the wire.
+    const completedThenThrow: RoutePlugin = {
+      name: 'late-throw',
+      handle(c) {
+        c.res.writeHead(200, { 'Content-Type': 'application/json' });
+        c.res.end('{"ok":true}');
+        throw new Error('post-end cleanup error');
+      },
+    };
+    const { ctx, res } = makeCtx([completedThenThrow]);
+    await handlePluginRoutes(ctx);
+    // The response was completed: status / body / writableEnded all
+    // reflect the plugin's first writes. destroyed must remain false.
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toBe('{"ok":true}');
+    expect(res.writableEnded).toBe(true);
+    expect(res.destroyed).toBe(false);
+  });
+
+  it('skips remaining plugins when an earlier plugin already finalised the response (top-of-iteration check)', async () => {
+    // The `responseStarted` check at the TOP of the loop matters
+    // when a plugin completes the response in handle() and a later
+    // plugin would otherwise also try to write. Locks the
+    // never-double-respond contract for the writableEnded=true axis.
+    const calls: string[] = [];
+    const finished: RoutePlugin = {
+      name: 'finished',
+      handle(c) {
+        calls.push('finished');
+        c.res.writeHead(204);
+        c.res.end();
+      },
+    };
+    const wouldOverwrite: RoutePlugin = {
+      name: 'would-overwrite',
+      handle(c) {
+        calls.push('would-overwrite');
+        c.res.writeHead(500); // would throw ERR_HTTP_HEADERS_SENT in real Node
+      },
+    };
+    const { ctx, res } = makeCtx([finished, wouldOverwrite]);
+    await handlePluginRoutes(ctx);
+    expect(calls).toEqual(['finished']);
+    expect(res.statusCode).toBe(204);
+    expect(res.writableEnded).toBe(true);
+  });
+
   it('falls through to the next plugin when one returns without writing', async () => {
     const calls: string[] = [];
     const skip: RoutePlugin = {

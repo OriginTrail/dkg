@@ -39,13 +39,92 @@ function createEntities() {
       properties: new Map(),
       connections: [],
     }],
+    ['urn:entity:overlap', {
+      uri: 'urn:entity:overlap',
+      label: 'Shared overlap',
+      types: ['http://schema.org/Thing'],
+      trustLevel: 'shared',
+      layers: new Set(['working', 'shared']),
+      subGraphs: new Set(['demo']),
+      properties: new Map([['http://schema.org/name', ['Shared overlap']]]),
+      connections: [],
+    }],
   ]);
 }
+
+const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+const NAME = 'http://schema.org/name';
+
+function buildTestMemoryEntities(layered: any[]) {
+  const entities = new Map<string, any>();
+  const connectionKeys = new Map<string, Set<string>>();
+  const get = (uri: string) => {
+    let entity = entities.get(uri);
+    if (!entity) {
+      entity = {
+        uri,
+        label: uri,
+        types: [],
+        trustLevel: 'working',
+        layers: new Set(),
+        subGraphs: new Set(),
+        properties: new Map(),
+        connections: [],
+      };
+      entities.set(uri, entity);
+    }
+    return entity;
+  };
+  for (const triple of layered) {
+    const entity = get(triple.subject);
+    entity.layers.add(triple.layer);
+    if (triple.subGraph) entity.subGraphs.add(triple.subGraph);
+    if (triple.predicate === RDF_TYPE) {
+      entity.types.push(triple.object);
+    } else if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(triple.object)) {
+      const target = get(triple.object);
+      target.layers.add(triple.layer);
+      if (triple.subGraph) target.subGraphs.add(triple.subGraph);
+      const keys = connectionKeys.get(entity.uri) ?? new Set<string>();
+      const key = `${triple.predicate}\0${triple.object}`;
+      if (!keys.has(key)) {
+        keys.add(key);
+        connectionKeys.set(entity.uri, keys);
+        entity.connections.push({
+          predicate: triple.predicate,
+          targetUri: triple.object,
+          targetLabel: triple.object,
+        });
+      }
+    } else {
+      const vals = entity.properties.get(triple.predicate) ?? [];
+      vals.push(triple.object);
+      entity.properties.set(triple.predicate, vals);
+      if (triple.predicate === NAME) entity.label = triple.object;
+    }
+  }
+  for (const entity of entities.values()) {
+    if (entity.layers.has('verified')) entity.trustLevel = 'verified';
+    else if (entity.layers.has('shared')) entity.trustLevel = 'shared';
+  }
+  return entities;
+}
+
+const initialLayeredTriples = [
+  { subject: 'urn:entity:working', predicate: RDF_TYPE, object: 'http://schema.org/Thing', layer: 'working' },
+  { subject: 'urn:entity:working', predicate: NAME, object: 'Working entity', layer: 'working' },
+  { subject: 'urn:entity:overlap', predicate: RDF_TYPE, object: 'http://schema.org/Thing', layer: 'working' },
+  { subject: 'urn:entity:overlap', predicate: NAME, object: 'Working overlap', layer: 'working' },
+  { subject: 'urn:entity:overlap', predicate: RDF_TYPE, object: 'http://schema.org/Thing', layer: 'shared' },
+  { subject: 'urn:entity:overlap', predicate: NAME, object: 'Shared overlap', layer: 'shared' },
+  { subject: 'urn:entity:overlap', predicate: 'related', object: 'urn:entity:other', layer: 'shared', subGraph: 'demo' },
+  { subject: 'urn:entity:overlap', predicate: 'related', object: 'urn:entity:other', layer: 'shared', subGraph: 'other' },
+] as any[];
 
 const memory = {
   entities: createEntities(),
   entityList: [] as any[],
-  allTriples: [],
+  allTriples: [...initialLayeredTriples],
   graphTriples: [],
   trustMap: new Map(),
   counts: { wm: 2, swm: 0, vm: 0, total: 2 },
@@ -58,6 +137,7 @@ const memory = {
 function resetMemory() {
   memory.entities = createEntities();
   memory.entityList = [...memory.entities.values()];
+  memory.allTriples = [...initialLayeredTriples];
 }
 resetMemory();
 
@@ -94,6 +174,7 @@ vi.mock('../src/ui/api.js', () => ({
 
 vi.mock('../src/ui/hooks/useMemoryEntities.js', () => ({
   useMemoryEntities: () => memory,
+  buildMemoryEntities: buildTestMemoryEntities,
 }));
 
 vi.mock('../src/ui/hooks/useProjectProfile.js', () => ({
@@ -145,7 +226,7 @@ vi.mock('../src/ui/views/project/components.js', () => ({
       React.createElement('button', { 'data-testid': 'switch-swm', onClick: () => onSwitch('swm') }, 'SWM'),
       React.createElement('button', { 'data-testid': 'switch-subgraphs', onClick: () => onSwitch('graph-overview') }, 'Subgraphs')),
   KADetailView: ({ entity, onNavigate, onClose }: { entity: any; onNavigate: (uri: string) => void; onClose: () => void }) =>
-    React.createElement('section', { 'data-testid': 'entity-detail', 'data-entity': entity.uri },
+    React.createElement('section', { 'data-testid': 'entity-detail', 'data-entity': entity.uri, 'data-trust': entity.trustLevel, 'data-connections': String(entity.connections.length), 'data-subgraphs': [...entity.subGraphs].sort().join(',') },
       React.createElement('div', {}, entity.label),
       React.createElement('button', { 'data-testid': 'open-related-entity', onClick: () => onNavigate('urn:entity:other') }, 'Open related'),
       React.createElement('button', { 'data-testid': 'detail-back', onClick: onClose }, 'Back to Context Graph')),
@@ -209,17 +290,19 @@ vi.mock('../src/ui/views/project/components.js', () => ({
       onClick: () => onSelectSubGraph('demo'),
     }, 'Open demo subgraph'),
   ContextGraphQueryView: () => null,
-  LayerDetailView: ({ layer, activeTab, onTabChange, onSelectEntity }: {
+  LayerDetailView: ({ layer, activeTab, onTabChange, onSelectEntity, onNodeClick }: {
     layer: string;
     activeTab: string;
     onTabChange: (tab: string) => void;
     onSelectEntity: (uri: string) => void;
+    onNodeClick: (node: any) => void;
   }) =>
     React.createElement('section', { 'data-testid': 'layer-detail', 'data-layer': layer, 'data-tab': activeTab },
       React.createElement('button', { 'data-testid': 'layer-tab-graph', onClick: () => onTabChange('graph') }, 'Graph'),
       React.createElement('div', { 'data-testid': 'layer-scroll', 'data-cg-scroll-key': `layer:${layer}:${activeTab}` },
-        React.createElement('button', { 'data-testid': 'open-layer-entity', onClick: () => onSelectEntity('urn:entity:working') }, 'Open layer entity'))),
-  ProvenanceBar: () => null,
+        React.createElement('button', { 'data-testid': 'open-layer-entity', onClick: () => onSelectEntity('urn:entity:working') }, 'Open layer entity'),
+        React.createElement('button', { 'data-testid': 'open-layer-overlap-entity', onClick: () => onSelectEntity('urn:entity:overlap') }, 'Open overlap entity'),
+        React.createElement('button', { 'data-testid': 'open-layer-graph-node', onClick: () => onNodeClick({ id: 'urn:entity:overlap', trustLayer: layer }) }, 'Open graph node'))),
 }));
 
 const { ProjectView } = await import('../src/ui/views/ProjectView.js');
@@ -300,8 +383,8 @@ describe('ProjectView entity detail navigation', () => {
     const scroller = query('layer-scroll');
     scroller.scrollTop = 86;
 
-    await click('open-layer-entity');
-    expect(query('entity-detail').dataset.entity).toBe('urn:entity:working');
+    await click('open-layer-overlap-entity');
+    expect(query('entity-detail').dataset.entity).toBe('urn:entity:overlap');
 
     await click('detail-back');
     await flush();
@@ -325,6 +408,38 @@ describe('ProjectView entity detail navigation', () => {
 
     expect(query('active-layer').dataset.layer).toBe('overview');
     expect(scrollRoot('page').scrollTop).toBe(140);
+  });
+
+  it('opens graph nodes with the layer context they came from', async () => {
+    await click('switch-wm');
+    await click('layer-tab-graph');
+    await click('open-layer-graph-node');
+
+    expect(query('entity-detail').dataset.entity).toBe('urn:entity:overlap');
+    expect(query('entity-detail').dataset.trust).toBe('working');
+    expect(query('entity-detail').textContent).toContain('Working overlap');
+
+    await click('detail-back');
+    await flush();
+
+    await click('switch-swm');
+    await click('layer-tab-graph');
+    await click('open-layer-graph-node');
+
+    expect(query('entity-detail').dataset.entity).toBe('urn:entity:overlap');
+    expect(query('entity-detail').dataset.trust).toBe('shared');
+    expect(query('entity-detail').dataset.connections).toBe('1');
+    expect(query('entity-detail').dataset.subgraphs).toBe('demo,other');
+    expect(query('entity-detail').textContent).toContain('Shared overlap');
+  });
+
+  it('opens layer list selections with the active layer context', async () => {
+    await click('switch-wm');
+    await click('open-layer-overlap-entity');
+
+    expect(query('entity-detail').dataset.entity).toBe('urn:entity:overlap');
+    expect(query('entity-detail').dataset.trust).toBe('working');
+    expect(query('entity-detail').textContent).toContain('Working overlap');
   });
 
   it('opens the primer as a tab without mutating browser history', async () => {
@@ -402,11 +517,12 @@ describe('ProjectView entity detail navigation', () => {
 
   it('clears stale detail origin when the selected entity disappears', async () => {
     await click('switch-swm');
-    await click('open-layer-entity');
-    expect(query('entity-detail').dataset.entity).toBe('urn:entity:working');
+    await click('open-layer-overlap-entity');
+    expect(query('entity-detail').dataset.entity).toBe('urn:entity:overlap');
 
     await act(async () => {
-      memory.entities = new Map([...memory.entities].filter(([uri]) => uri !== 'urn:entity:working'));
+      memory.allTriples = memory.allTriples.filter((t: any) => t.subject !== 'urn:entity:overlap');
+      memory.entities = new Map([...memory.entities].filter(([uri]) => uri !== 'urn:entity:overlap'));
       memory.entityList = [...memory.entities.values()];
       root.render(React.createElement(ProjectView, { contextGraphId: 'cg-test' }));
     });

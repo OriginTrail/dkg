@@ -73,16 +73,69 @@ export function importUri(importId) {
   return `urn:dkg:import:${encodeURIComponent(importId)}`;
 }
 
+/**
+ * Derive the default manifest assertion name from an `importId`.
+ *
+ * `importUri()` / `partitionUri()` accept any string (they percent-encode it
+ * into the URI), so a caller can legitimately pass `importId="my corpus/v1"`
+ * and get a valid IRI back. But the daemon's `validateAssertionName`
+ * (`packages/core/src/constants.ts`) rejects `/`, whitespace, and other
+ * IRI-unsafe characters from assertion names — so the SAME `importId` would
+ * crash `/api/assertion/create` with a 400 if we passed it through verbatim.
+ *
+ * This helper:
+ *   - replaces any character outside `[A-Za-z0-9._-]` with `-`
+ *   - collapses runs of `-` and trims leading/trailing dashes
+ *   - prefixes with `import-manifest-` and truncates so the total length
+ *     stays under the daemon's 256-char limit
+ *   - throws a descriptive error if the `importId` reduces to an empty slug
+ *     (e.g. `importId = "///"`), so callers don't get a cryptic 400 later
+ *
+ * Exported for tests + callers who want the same sanitization rule.
+ */
+export function defaultManifestAssertionName(importId) {
+  if (typeof importId !== 'string' || importId.length === 0) {
+    throw new Error('defaultManifestAssertionName: `importId` must be a non-empty string.');
+  }
+  const prefix = 'import-manifest-';
+  const maxSlugLen = 256 - prefix.length;
+  const slug = importId
+    .replace(/[^A-Za-z0-9._-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, maxSlugLen);
+  if (slug.length === 0) {
+    throw new Error(
+      `defaultManifestAssertionName: importId '${importId}' contains no characters ` +
+      `valid for an assertion name (must include at least one of [A-Za-z0-9._-]). ` +
+      `Pass an explicit \`assertionName\` to createImportManifest, or pick a simpler importId.`,
+    );
+  }
+  return `${prefix}${slug}`;
+}
+
 /** Stable URI for a Partition within an Import. */
 export function partitionUri(importId, key) {
   return `${importUri(importId)}#part:${encodeURIComponent(key)}`;
 }
 
-/** Stable-ish URI for one StatusEvent. Exported so callers can promote it. */
+// Per-process monotonic counter for StatusEvent IRIs. Two events that land in
+// the same millisecond would otherwise tie on `recordedAt` AND tie on a random
+// suffix, leaving the SPARQL "latest event" lookup non-deterministic. Putting
+// a zero-padded counter BEFORE the random suffix in the IRI guarantees
+// lexicographic ordering matches call order for same-ms events within this
+// process. Across processes the millisecond timestamp + cross-process random
+// suffix remain the disambiguators; in practice two daemons promoting the same
+// manifest in the same ms is a pathological case the random suffix is already
+// the right answer for.
+let _statusEventCounter = 0;
+
+/** Stable URI for one StatusEvent. Exported so callers can promote it. */
 export function statusEventUri(importId, key) {
-  // Random-ish suffix keeps multiple events on the same partition unique.
-  const suffix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  return `${partitionUri(importId, key)}/event/${suffix}`;
+  const ts = Date.now();
+  const seq = String(++_statusEventCounter).padStart(12, '0');
+  const rand = Math.random().toString(36).slice(2, 8);
+  return `${partitionUri(importId, key)}/event/${ts}-${seq}-${rand}`;
 }
 
 function lit(value) {
@@ -133,11 +186,23 @@ function unquote(v) {
   if (v.startsWith('"')) {
     const m = v.match(/^"((?:[^"\\]|\\.)*)"/);
     if (m) {
-      return m[1]
-        .replace(/\\"/g, '"')
-        .replace(/\\\\/g, '\\')
-        .replace(/\\n/g, '\n')
-        .replace(/\\r/g, '\r');
+      // Single-pass escape-sequence decode. The previous version chained four
+      // `.replace()` calls, which CodeQL flagged as a double-unescape risk:
+      // running `.replace(/\\\\/g, '\\')` after `.replace(/\\"/g, '"')` can
+      // corrupt input like `\\\\n` (escaped backslash + literal `n`) into a
+      // newline because the second pass sees the `\` left behind by the first
+      // pass as the start of a new escape sequence. This regex matches each
+      // escape exactly once and dispatches via a replacer, so no byte is
+      // unescaped twice.
+      return m[1].replace(/\\(["\\nr])/g, (_, ch) => {
+        switch (ch) {
+          case '"': return '"';
+          case '\\': return '\\';
+          case 'n': return '\n';
+          case 'r': return '\r';
+          default: return ch;
+        }
+      });
     }
   }
   return v;
@@ -219,7 +284,7 @@ export async function createImportManifest({
     throw new Error('createImportManifest requires `subGraphName` (typically "meta").');
   }
   const cgId = client.cgId;
-  const assertion = assertionName ?? `import-manifest-${importId}`;
+  const assertion = assertionName ?? defaultManifestAssertionName(importId);
   try {
     await client.request('POST', '/api/assertion/create', {
       contextGraphId: cgId,
@@ -296,7 +361,7 @@ export async function markPartitionStatus({
   if (!subGraphName) throw new Error('markPartitionStatus requires `subGraphName`.');
 
   const cgId = client.cgId;
-  const assertion = assertionName ?? `import-manifest-${importId}`;
+  const assertion = assertionName ?? defaultManifestAssertionName(importId);
   const partIri = partitionUri(importId, partitionKey);
   const evIri = statusEventUri(importId, partitionKey);
   const nowIso = new Date().toISOString();
@@ -388,7 +453,22 @@ export async function loadImportManifest({ client, importId, subGraphName }) {
       }
     }
   `;
-  const res = await client.query({ sparql, contextGraphId: cgId, subGraphName });
+  // Query the SWM tier, not the bare data graph. The manifest is created via
+  // the assertion API (create -> write -> promote), so the only place a
+  // resume-from-restart or peer-side load will see it is the per-sub-graph
+  // SWM graph (`did:dkg:context-graph:<cg>/<subgraph>/_shared_memory`). The
+  // daemon's default `/api/query` routing for `subGraphName` alone hits the
+  // bare data graph (`did:dkg:context-graph:<cg>/<subgraph>`), which is
+  // empty for assertion-API-written data — so without `graphSuffix` this
+  // query would silently return zero bindings even on a healthy import.
+  // See AGENTS.md §7b query gotchas + the existing
+  // scripts/devnet-test-rfc38-*.sh scripts that use the same pattern.
+  const res = await client.query({
+    sparql,
+    contextGraphId: cgId,
+    subGraphName,
+    graphSuffix: '_shared_memory',
+  });
   const bindings = res?.result?.bindings ?? res?.bindings ?? [];
   if (bindings.length === 0) {
     throw new Error(

@@ -390,6 +390,7 @@ This RFC does not address:
 - **Marketplace-style host selection** (curator pays specific nodes for hosting). Bigger spec; not on the roadmap right now.
 - **Custom hosting committees** for high-assurance CGs that want a fixed M-of-N. The contract no longer supports per-CG hosting committees (see §6.1); a future high-assurance use case would need a separate spec and contract addition.
 - **Off-chain access enforcement for invite-only CGs at the libp2p layer** — see §7.5.
+- **Decoupled hosting and membership for curated CGs** — cores hosting encrypted bytes for CGs they're not member of, enabling edge curators to publish curated content to VM, outsiders to verify leaked / monetized triples, and edges to resync from always-on cores. Tracked as [SPEC_CG_HOSTING_MEMBERSHIP.md](./SPEC_CG_HOSTING_MEMBERSHIP.md).
 
 ---
 

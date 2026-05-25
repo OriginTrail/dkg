@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg-network-sim",
-  "version": "10.0.0-rc.9",
+  "version": "10.0.0-rc.10",
   "private": true,
   "type": "module",
   "scripts": {

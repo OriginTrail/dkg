@@ -3,6 +3,8 @@ import {
   contextGraphDataUri,
   contextGraphMetaUri,
   hashTripleV10,
+  TRUST_LEVEL_PREDICATE,
+  LEGACY_TRUST_LEVEL_PREDICATE,
 } from '@origintrail-official/dkg-core';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 
@@ -11,6 +13,23 @@ const XSD = 'http://www.w3.org/2001/XMLSchema#';
 const ONTOLOGY_GRAPH = 'did:dkg:context-graph:ontology';
 const CONTEXT_GRAPH_ON_CHAIN_ID = 'https://dkg.network/ontology#ContextGraphOnChainId';
 const CG_URI_PREFIX = 'did:dkg:context-graph:';
+
+/**
+ * Predicates that are stamped onto the data graph by the daemon AFTER a
+ * KC has been published (verify-quorum's `dkg:trustLevel` write being the
+ * canonical case). These are NOT part of the KC's commit-time leaf set
+ * and must be excluded from extraction so the recomputed leaf set stays
+ * bit-identical with the publisher's `merkleLeafCount`. Without this
+ * filter, every single-node publish (which falls into
+ * `stampBatchTrustLevel(..., SelfAttested)` because no remote ACK
+ * lands) corrupts the prover with `V10ProofLeafCountMismatchError`.
+ * The publisher already refuses user-authored trustLevel triples via
+ * `assertNoUserAuthoredTrustLevelQuads`, so excluding them here is safe.
+ */
+const POST_PUBLISH_PREDICATES_TO_SKIP: ReadonlySet<string> = new Set([
+  TRUST_LEVEL_PREDICATE,
+  LEGACY_TRUST_LEVEL_PREDICATE,
+]);
 
 /**
  * Quads pulled from the local triple store, post-publish, in the same
@@ -230,6 +249,7 @@ export async function extractV10KCFromStore(
     );
     if (result.type === 'quads') {
       for (const q of result.quads) {
+        if (POST_PUBLISH_PREDICATES_TO_SKIP.has(q.predicate)) continue;
         triples.push({ subject: q.subject, predicate: q.predicate, object: q.object });
       }
     }

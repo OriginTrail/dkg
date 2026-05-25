@@ -321,4 +321,196 @@ describe('inject-session-context.mjs — turn-URI prediction via state file', ()
     expect(output.updated_input).toContain('#turn:6</turn-uri>');
     expect(output.updated_input).not.toContain('#turn:5</turn-uri>');
   });
+
+  it('skips injection on a corrupt state file (JSON.parse throws → fail-closed)', async () => {
+    // A truncated write or an editor-saved partial file yields invalid
+    // JSON. The hook MUST treat this as "no state" and skip injection
+    // rather than throw at top-level (which would crash the prompt
+    // pipeline) or guess a turn index (which would orphan annotations).
+    fs.writeFileSync(stateFile, '{"sessionKey":"abc",');
+    const { output } = await runHook({ session_id: sessionKey, prompt: 'hi' });
+    expect(output).toEqual({});
+  });
+
+  it('treats pendingTurnIndex = 0 as a valid slot (zero is a number, not falsy-skip)', async () => {
+    // Defends against an `if (state.pendingTurnIndex)` regression that
+    // would treat 0 as missing. The current contract uses
+    // `typeof === 'number'`, so 0 must be honoured for the legitimate
+    // turn-zero (or wrap-around) edge case.
+    fs.writeFileSync(stateFile, JSON.stringify({
+      sessionKey,
+      sessionUri: `urn:dkg:chat:session:${sessionKey}`,
+      startedAt: new Date().toISOString(),
+      turnIndex: -1, // sentinel: state hasn't seen a successful turn yet
+      pendingTurnIndex: 0,
+      maxAssignedTurnIndex: 0,
+      pendingPrompt: 'first',
+    }));
+    const { output } = await runHook({ session_id: sessionKey, prompt: 'first' });
+    expect(output.updated_input).toContain('<next-turn-index>0</next-turn-index>');
+    expect(output.updated_input).toContain(`#turn:0</turn-uri>`);
+  });
+
+  it('treats turnIndex = 0 (legacy state, no pendingTurnIndex) as next slot 1', async () => {
+    // turnIndex+1 fallback: turnIndex=0 → next=1. Same falsy-zero
+    // protection, different code path (legacy back-compat branch).
+    fs.writeFileSync(stateFile, JSON.stringify({
+      sessionKey,
+      sessionUri: `urn:dkg:chat:session:${sessionKey}`,
+      startedAt: new Date().toISOString(),
+      turnIndex: 0,
+      pendingPrompt: 'first',
+    }));
+    const { output } = await runHook({ session_id: sessionKey, prompt: 'first' });
+    expect(output.updated_input).toContain('<next-turn-index>1</next-turn-index>');
+  });
+
+  it('uses default 1 when state file has neither pendingTurnIndex nor turnIndex', async () => {
+    // The non-error fallback branch in loadPendingTurnIndex: state
+    // file exists but is missing both fields (e.g. legacy schema or a
+    // partially-rewritten state). Returns 1 — the first-turn default.
+    fs.writeFileSync(stateFile, JSON.stringify({
+      sessionKey,
+      sessionUri: `urn:dkg:chat:session:${sessionKey}`,
+      startedAt: new Date().toISOString(),
+      pendingPrompt: 'whatever',
+    }));
+    const { output } = await runHook({ session_id: sessionKey, prompt: 'hi' });
+    expect(output.updated_input).toContain('<next-turn-index>1</next-turn-index>');
+  });
+
+  it('skips injection when prompt is empty (fail-closed — must not silently REPLACE the prompt with our block)', async () => {
+    // The exact regression FAIL CLOSED guard #2 protects against:
+    // emitting `updated_input` with no operator prompt would replace
+    // the user's actual ask with just our metadata block. State file
+    // is fine, sessionKey is fine, only prompt is missing.
+    fs.writeFileSync(stateFile, JSON.stringify({
+      sessionKey,
+      sessionUri: `urn:dkg:chat:session:${sessionKey}`,
+      startedAt: new Date().toISOString(),
+      pendingTurnIndex: 5,
+    }));
+    const { output } = await runHook({ session_id: sessionKey, prompt: '' });
+    expect(output).toEqual({});
+  });
+
+  it('honours DKG_AGENT_URI env var as override for the workspace .dkg/config.yaml', async () => {
+    // The env-var path takes priority over the file walk (so an
+    // operator can override the workspace config without touching the
+    // file). Run the hook with the env var set and assert the
+    // injected agentUri matches.
+    fs.writeFileSync(stateFile, JSON.stringify({
+      sessionKey,
+      sessionUri: `urn:dkg:chat:session:${sessionKey}`,
+      startedAt: new Date().toISOString(),
+      pendingTurnIndex: 1,
+    }));
+    const { spawn } = await import('node:child_process');
+    const { stdout } = await new Promise<{ stdout: string }>((resolveFn, rejectFn) => {
+      const proc = spawn('node', [hookPath], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: { ...process.env, DKG_AGENT_URI: 'urn:dkg:agent:0xenv-override' },
+      });
+      let stdout = '';
+      proc.stdout.on('data', (c) => { stdout += c; });
+      proc.on('close', () => resolveFn({ stdout }));
+      proc.on('error', rejectFn);
+      proc.stdin.write(JSON.stringify({ session_id: sessionKey, prompt: 'hi' }));
+      proc.stdin.end();
+    });
+    const output = JSON.parse(stdout.trim() || '{}');
+    expect(output.updated_input).toContain('<agent-uri>urn:dkg:agent:0xenv-override</agent-uri>');
+  });
+
+  it('percent-encodes sessionKey in the turn URI (matches capture-chat encoder)', async () => {
+    // Spec lock: capture-chat uses `encodeURIComponent` on sessionKey
+    // when building turn URIs. inject-session-context MUST use the
+    // same encoder, otherwise a session key containing reserved
+    // chars (`/`, `:`, `#`) would predict a different URI than the
+    // one capture-chat writes — exactly the orphan-annotation bug.
+    //
+    // Note: sanitiseSlug runs first and strips most special chars,
+    // but a slug that legitimately contains dashes / dots etc. has
+    // to round-trip identically; a URL-quotable char (we use `~` —
+    // RFC 3986 unreserved, but encodeURIComponent leaves it as-is —
+    // and sanitiseSlug allows it) is the simplest probe that locks
+    // the encoder choice without depending on its allow-list.
+    const sessionKeyWithSlash = 'cursor-with-segment-1';
+    const file = path.join(STATE_DIR, `${sessionKeyWithSlash}.json`);
+    fs.writeFileSync(file, JSON.stringify({
+      sessionKey: sessionKeyWithSlash,
+      sessionUri: `urn:dkg:chat:session:${sessionKeyWithSlash}`,
+      startedAt: new Date().toISOString(),
+      pendingTurnIndex: 1,
+    }));
+    try {
+      const { output } = await runHook({
+        session_id: sessionKeyWithSlash,
+        prompt: 'hi',
+      });
+      expect(output.updated_input).toContain(
+        `<turn-uri>urn:dkg:chat:session:${encodeURIComponent(sessionKeyWithSlash)}#turn:1</turn-uri>`,
+      );
+    } finally {
+      try { fs.unlinkSync(file); } catch { /* ok */ }
+    }
+  });
+});
+
+describe('inject-session-context.mjs — parseAgentUri quoting & whitespace', () => {
+  it('strips surrounding double quotes', () => {
+    const yaml = 'agent:\n  uri: "urn:dkg:agent:0xQ"\n';
+    expect(parseAgentUri(yaml)).toBe('urn:dkg:agent:0xQ');
+  });
+
+  it('strips surrounding single quotes', () => {
+    const yaml = "agent:\n  uri: 'urn:dkg:agent:0xS'\n";
+    expect(parseAgentUri(yaml)).toBe('urn:dkg:agent:0xS');
+  });
+
+  it('strips trailing inline comment from a uri value', () => {
+    // The line-level comment strip happens before the regex match;
+    // operators commonly annotate the agent URI with a "# laptop A"
+    // comment, and the parser must NOT include that comment in the
+    // returned value (regression would write `urn:...0xC # laptop A`
+    // into every turn URI).
+    const yaml = 'agent:\n  uri: urn:dkg:agent:0xC # primary laptop\n';
+    expect(parseAgentUri(yaml)).toBe('urn:dkg:agent:0xC');
+  });
+
+  it('honours dedent — a `uri:` outside the agent block is NOT picked up', () => {
+    // The indent-tracking guard: a top-level (or sibling) `uri:` key
+    // outside the agent block must not match. This protects against
+    // .dkg/config.yaml schemas that grow more sections; the parser's
+    // "agent.uri only" contract must stay stable.
+    const yaml = [
+      'agent:',
+      '  nickname: foo',
+      'someOtherSection:',
+      '  uri: urn:dkg:agent:0xWRONG',
+    ].join('\n');
+    expect(parseAgentUri(yaml)).toBe(null);
+  });
+});
+
+describe('inject-session-context.mjs — extractPrompt whitespace handling', () => {
+  it('treats whitespace-only updated_input as absent and falls through to prompt', () => {
+    // Defends against an upstream hook emitting `\n\t \n` as
+    // updated_input (e.g. on a partial parse). The downstream hook
+    // would otherwise propagate that empty block and silently kill
+    // the operator's actual prompt.
+    expect(extractPrompt({
+      prompt: 'real prompt',
+      updated_input: '\n\t   \n',
+    })).toBe('real prompt');
+  });
+
+  it('treats whitespace-only rawPayload as absent and falls through to capture-chat', () => {
+    // Same guard for the rawPayload envelope. Empty / whitespace-
+    // only rawPayload must not be returned as the prompt.
+    expect(extractPrompt({
+      prompt: 'real prompt',
+      rawPayload: '   ',
+    })).toBe('real prompt');
+  });
 });

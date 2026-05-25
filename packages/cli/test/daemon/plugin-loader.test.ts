@@ -373,6 +373,111 @@ describe('loadRoutePlugins', () => {
     }
   });
 
+  it('rejects a plugin whose name is an empty string (length>0 guard)', async () => {
+    // Defends against a regression that drops the `name.length > 0`
+    // check in isRoutePlugin. An empty-named plugin would otherwise
+    // pass the typeof-string check and be silently accepted, then
+    // shadow other plugins in the routing table by name collision.
+    const tempAbs = writeTempEsm(
+      'empty-name.mjs',
+      'export default { name: "", handle() {} };',
+    );
+    try {
+      const { log, warn } = makeLogger();
+      const plugins = await loadRoutePlugins([tempAbs], log);
+      expect(plugins).toEqual([]);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0][1])).toContain('route-plugin-load-failed');
+    } finally {
+      rmSync(dirname(tempAbs), { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a plugin whose handle is not a function', async () => {
+    // Defends against a regression that loosens the handle-type check
+    // (e.g. accepts an object or a string). Calling such a "plugin"
+    // would crash the daemon at request time; load-time rejection is
+    // the design contract.
+    const tempAbs = writeTempEsm(
+      'bad-handle.mjs',
+      'export default { name: "bad-handle", handle: "i am a string" };',
+    );
+    try {
+      const { log, warn } = makeLogger();
+      const plugins = await loadRoutePlugins([tempAbs], log);
+      expect(plugins).toEqual([]);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0][1])).toContain('route-plugin-load-failed');
+    } finally {
+      rmSync(dirname(tempAbs), { recursive: true, force: true });
+    }
+  });
+
+  it('prefers `plugin` over `default` when both are present and valid (pickCandidate priority lock)', async () => {
+    // Locks the priority order in pickCandidate. A regression that
+    // swapped these would silently route requests to the wrong
+    // plugin, which is virtually impossible to catch in production
+    // (both responses look correct; only the wrong telemetry name
+    // ever differs).
+    const tempAbs = writeTempEsm(
+      'both-exports.mjs',
+      [
+        'export const plugin = { name: "from-plugin-export", handle() {} };',
+        'export default { name: "from-default-export", handle() {} };',
+      ].join('\n'),
+    );
+    try {
+      const { log, warn } = makeLogger();
+      const plugins = await loadRoutePlugins([tempAbs], log);
+      expect(plugins).toHaveLength(1);
+      expect(plugins[0].name).toBe('from-plugin-export');
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      rmSync(dirname(tempAbs), { recursive: true, force: true });
+    }
+  });
+
+  it('preserves spec order in the returned plugin list (no reordering, no shuffling)', async () => {
+    // Routing precedence in the daemon is order-of-load. Operators
+    // express precedence by configuring `routePlugins` in a specific
+    // order. A regression that reordered (e.g. via Promise.all
+    // returning out-of-order) would silently swap precedence.
+    const a = writeTempEsm(
+      'order-a.mjs',
+      'export default { name: "alpha-plugin", handle() {} };',
+    );
+    const b = writeTempEsm(
+      'order-b.mjs',
+      'export default { name: "beta-plugin", handle() {} };',
+    );
+    try {
+      const { log } = makeLogger();
+      const plugins1 = await loadRoutePlugins([a, b], log);
+      const plugins2 = await loadRoutePlugins([b, a], log);
+      expect(plugins1.map((p) => p.name)).toEqual(['alpha-plugin', 'beta-plugin']);
+      expect(plugins2.map((p) => p.name)).toEqual(['beta-plugin', 'alpha-plugin']);
+    } finally {
+      rmSync(dirname(a), { recursive: true, force: true });
+      rmSync(dirname(b), { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a plugin whose name field is missing entirely (typeof undefined fails the string check)', async () => {
+    const tempAbs = writeTempEsm(
+      'no-name.mjs',
+      'export default { handle() {} };',
+    );
+    try {
+      const { log, warn } = makeLogger();
+      const plugins = await loadRoutePlugins([tempAbs], log);
+      expect(plugins).toEqual([]);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0][1])).toContain('route-plugin-load-failed');
+    } finally {
+      rmSync(dirname(tempAbs), { recursive: true, force: true });
+    }
+  });
+
   it('surfaces the real CJS error when the CJS fallback resolves but its entry is broken', async () => {
     // CJS-only package whose `require.resolve` succeeds but the resolved file has a syntax error.
     // Current code rethrows the unrelated ESM resolver error; the fix must let the SyntaxError bubble.

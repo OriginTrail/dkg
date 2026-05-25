@@ -38,6 +38,7 @@ import type { QueryAccessConfig } from '@origintrail-official/dkg-query';
 import type { SkillHandler } from './messaging.js';
 import type { CclFactResolutionMode } from './ccl-fact-resolution.js';
 import type { JsonLdContent } from './dkg-agent-utils.js';
+import type { SwmHostModeStoreLimits } from './swm/host-mode-store.js';
 import type { SyncPhase } from './sync/auth/request-build.js';
 
 // ── File-local structural types ─────────────────────────────────────
@@ -396,6 +397,30 @@ export interface ContextGraphSub {
   metaSynced?: boolean;
   /** On-chain context graph ID (keccak256 hash), if known. */
   onChainId?: string;
+  /**
+   * OT-RFC-38 / LU-6 Phase B — curator-committed wire identifier.
+   * `keccak256(bytes(cleartextId))` lowercase hex (0x-prefixed). Used as
+   * the SWM gossip topic key, envelope `contextGraphId`, signing-payload
+   * id, and host-mode store key — privacy-preserving (cleartext never
+   * leaves the local node) and chain-derivable (cores hosting CGs they
+   * didn't create or join read it from the `ContextGraphCreated.nameHash`
+   * event topic).
+   *
+   * For CGs the local node CREATED, this is set at create-time before
+   * the chain call (the agent commits to the hash and passes it as the
+   * `nameHash` param so the create transaction emits a consistent value
+   * — failure to do this opens a curator/host topic mismatch where
+   * members publish on topic-A and cores host on topic-B).
+   *
+   * For CGs the local node JOINED via curator invite, this is populated
+   * when the join-approved payload arrives. For CGs the local node
+   * HOSTS (core, not a member), this is set by the chain-event handler
+   * and IS the local id (the cleartext is never known).
+   *
+   * Undefined for pre-Phase-B CGs (legacy path; cleartext is still the
+   * wire form for those — they pre-date the contract change).
+   */
+  onChainHash?: string;
   /** Participant agent addresses (V10 agent identity model). */
   participantAgents?: string[];
   /**
@@ -420,6 +445,12 @@ export interface ContextGraphSubscriptionRecord {
   sharedMemorySynced?: boolean;
   metaSynced?: boolean;
   onChainId?: string;
+  /**
+   * OT-RFC-38 / LU-6 Phase B — persisted wire-id commitment. Persisted
+   * so cores recovering from a restart can resume host-mode subscription
+   * on the correct topic without needing a new chain-event read.
+   */
+  onChainHash?: string;
   syncScoped: boolean;
 }
 
@@ -600,6 +631,39 @@ export interface DKGAgentConfig {
   syncContextGraphs?: string[];
   /** TTL for shared memory data in milliseconds. Expired operations are periodically cleaned up. Default: 48 hours. Set to 0 to disable. */
   sharedMemoryTtlMs?: number;
+  /**
+   * OT-RFC-38 LU-6 — settings for the core-side host-mode SWM store.
+   * Only honoured when `nodeRole === 'core'`. Omit on edges (the
+   * store is never initialized there).
+   *
+   * Fields:
+   *  - `enabled`: when `false`, cores skip host-mode entirely and behave like edges. Default `true` for cores.
+   *  - `unregistered`: TTL/byte-cap for CGs the core knows about but that aren't on-chain registered yet.
+   *  - `registered`: TTL/byte-cap for on-chain registered CGs (typically larger).
+   *  - `pruneIntervalMs`: how often the TTL/cap sweep runs.
+   *  - `reconcileIntervalMs`: how often the host-mode subscription reconciler ensures cores are subscribed to all known curated CGs.
+   */
+  swmHostMode?: {
+    enabled?: boolean;
+    unregistered?: SwmHostModeStoreLimits;
+    registered?: SwmHostModeStoreLimits;
+    pruneIntervalMs?: number;
+    reconcileIntervalMs?: number;
+    /**
+     * OT-RFC-38 / LU-6 Phase B — discovery-beacon rate limits for
+     * pre-registration (freemium-tier) ciphertext writes. All three
+     * fields are optional; omit any to use the default from
+     * {@link DiscoveryRateLimit}.
+     *  - `perCuratorBytesPerMinute` — SPEC §1.2.4 default 1 MiB.
+     *  - `perCuratorBytesPerHour`   — SPEC §1.2.4 default 50 MiB.
+     *  - `coreAggregateBytes`       — across-all-wallets cap; default 4 GiB.
+     */
+    discoveryRateLimit?: {
+      perCuratorBytesPerMinute?: number;
+      perCuratorBytesPerHour?: number;
+      coreAggregateBytes?: number;
+    };
+  };
   /** Durable local store for subscribed context-graph runtime state. */
   contextGraphSubscriptionStore?: ContextGraphSubscriptionStore;
   /** Durable local cache for nodes/agents known to be members of a context graph. */

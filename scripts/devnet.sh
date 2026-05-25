@@ -20,6 +20,9 @@
 #   HARDHAT_PORT  Hardhat node port (default: 8545)
 #   UI_PORT       node-ui Vite port (default: 5173)
 #   UI_NODE_ID    Which devnet node the UI talks to (default: 1)
+#   NUM_CORE_NODES
+#                 How many of the first N nodes are core; the rest are edge
+#                 (default: 4). Useful for 3-core/2-edge etc. layouts.
 #   DEVNET_ENABLE_PUBLISHER=1
 #                 Enable the async publisher runtime on each node
 #   DEVNET_EPCIS_CONTEXT_GRAPH
@@ -33,6 +36,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEVNET_DIR="${DEVNET_DIR:-$REPO_ROOT/.devnet}"
 HARDHAT_PORT="${HARDHAT_PORT:-8545}"
 NUM_NODES="${2:-6}"
+NUM_CORE_NODES="${NUM_CORE_NODES:-4}"
 API_PORT_BASE="${API_PORT_BASE:-9201}"
 LIBP2P_PORT_BASE="${LIBP2P_PORT_BASE:-10001}"
 UI_PORT="${UI_PORT:-5173}"
@@ -380,9 +384,10 @@ create_node_config() {
   local hub_addr
   hub_addr=$(cat "$DEVNET_DIR/hardhat/hub_address" 2>/dev/null || echo "")
 
-  # Nodes 1-4 are core (V10 ACK quorum requires >= 3 core peers besides
-  # the publisher). Node 5+ are edge for heterogeneous testing.
-  if [ "$node_num" -le 4 ]; then
+  # First `NUM_CORE_NODES` nodes are core (V10 ACK quorum needs at least
+  # `minimumRequiredSignatures` sharding-table members reachable from the
+  # publisher). Remaining nodes are edge for heterogeneous testing.
+  if [ "$node_num" -le "$NUM_CORE_NODES" ]; then
     node_role="core"
   fi
   # `cmd_addnode` overrides the default role/index mapping so we can spawn a
@@ -1170,7 +1175,7 @@ cmd_start() {
   for i in $(seq 1 "$NUM_NODES"); do
     local api_port=$((API_PORT_BASE + i - 1))
     local role="edge"
-    [ "$i" -le 4 ] && role="core"
+    [ "$i" -le "$NUM_CORE_NODES" ] && role="core"
     local store_label="oxigraph-worker"
     if [ "$i" -ge 3 ] && [ "$i" -le 4 ]; then
       [ "$BLAZEGRAPH_AVAILABLE" = true ] && store_label="blazegraph" || store_label="oxigraph"
@@ -1336,14 +1341,50 @@ cmd_addnode() {
   log "Node $node_num up. On-chain wiring (createConviction/updateAsk) is the caller's responsibility."
 }
 
+# Restart a single already-existing devnet node. Preserves on-chain
+# state, wallets, store backends, and CG metadata — just bounces the
+# daemon process so it picks up newly-built code.
+#
+# Usage: devnet.sh restart-node <num>
+cmd_restart_node() {
+  local node_num="${2:-}"
+  if [ -z "$node_num" ]; then
+    echo "Usage: $0 restart-node <num>"
+    exit 1
+  fi
+  if [ ! -d "$DEVNET_DIR/node${node_num}" ]; then
+    echo "[devnet] node${node_num} does not exist at $DEVNET_DIR/node${node_num} — start the devnet first."
+    exit 1
+  fi
+  local pidf="$DEVNET_DIR/node${node_num}/devnet.pid"
+  if [ -f "$pidf" ]; then
+    local pid
+    pid=$(cat "$pidf")
+    if kill -0 "$pid" 2>/dev/null; then
+      log "Stopping node $node_num (pid=$pid)..."
+      kill "$pid" 2>/dev/null || true
+      for _ in 1 2 3 4 5 6 7 8 9 10; do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 1
+      done
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+    rm -f "$pidf"
+  fi
+  cd "$REPO_ROOT" || exit 1
+  start_node "$node_num"
+  log "Node $node_num restarted."
+}
+
 case "${1:-}" in
-  start)   cmd_start ;;
-  addnode) cmd_addnode "$@" ;;
-  stop)    cmd_stop ;;
-  status)  cmd_status ;;
-  logs)    cmd_logs "$@" ;;
-  clean)   cmd_clean ;;
-  ui)      cmd_ui "$@" ;;
+  start)        cmd_start ;;
+  addnode)      cmd_addnode "$@" ;;
+  restart-node) cmd_restart_node "$@" ;;
+  stop)         cmd_stop ;;
+  status)       cmd_status ;;
+  logs)         cmd_logs "$@" ;;
+  clean)        cmd_clean ;;
+  ui)           cmd_ui "$@" ;;
   *)
     echo "Usage: $0 {start|addnode|stop|status|logs|clean|ui} [args]"
     echo ""
@@ -1351,6 +1392,8 @@ case "${1:-}" in
     echo "  addnode <num> [core|edge]  Spawn one more node against the running"
     echo "                          devnet (mid-run sync test). Caller drives"
     echo "                          on-chain identity/stake/ask. (1 <= num <= 10)"
+    echo "  restart-node <num>      Restart a single already-existing devnet node"
+    echo "                          (pick up new code without rebuilding state)"
     echo "  stop                    Stop all devnet processes (incl. UI)"
     echo "  status                  Show running nodes (incl. UI) and their status"
     echo "  logs [N]                Tail logs for node N (default 1)"

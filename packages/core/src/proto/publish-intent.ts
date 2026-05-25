@@ -21,7 +21,7 @@ const { Type, Field } = protobuf;
  * publisher is about to submit a chain TX and needs 3 core node StorageACKs.
  *
  * Core nodes that have the data in SWM verify the merkle root and respond
- * with a StorageACK via direct P2P stream `/dkg/10.0.0/storage-ack`.
+ * with a StorageACK via direct P2P stream `/dkg/10.0.1/storage-ack`.
  */
 
 export const PublishIntentSchema = new Type('PublishIntent')
@@ -44,7 +44,19 @@ export const PublishIntentSchema = new Type('PublishIntent')
   .add(new Field('swmGraphId', 11, 'string'))
   .add(new Field('subGraphName', 12, 'string'))
   /** V10 flat-KC Merkle leaf count (sorted + deduped); must match ACK digest + on-chain KC. */
-  .add(new Field('merkleLeafCount', 13, 'uint32'));
+  .add(new Field('merkleLeafCount', 13, 'uint32'))
+  // OT-RFC-38 / LU-5: when `true`, `stagingQuads` carries opaque ciphertext
+  // bytes (AEAD-encrypted nquads keyed via the CG's swm-sender chain key)
+  // and the receiver MUST NOT attempt N-Quad parsing or merkle-root
+  // recomputation against it. Cores cannot decrypt curated payloads, so
+  // they sign the V10 digest based on the publisher's claimed merkle root
+  // and ciphertext byte size; member post-decrypt verification (LU-8)
+  // catches any mismatch between the on-chain root and the actual
+  // plaintext. Field number 14 keeps the proto strictly additive for
+  // encoders, but encrypted payloads are only sent over the bumped
+  // `/dkg/10.0.1/storage-ack` protocol so pre-LU-5 receivers never parse
+  // ciphertext as plaintext.
+  .add(new Field('isEncryptedPayload', 14, 'bool'));
 
 type Long = { low: number; high: number; unsigned: boolean };
 
@@ -77,6 +89,20 @@ export interface PublishIntentMsg {
   subGraphName?: string;
   /** V10 flat-KC Merkle leaf count after sort+dedupe (see `V10MerkleTree.leafCount`). */
   merkleLeafCount?: number;
+  /**
+   * OT-RFC-38 / LU-5. When `true`, `stagingQuads` is opaque ciphertext
+   * (AEAD-encrypted nquads keyed via the CG's swm-sender chain key) and
+   * the receiver MUST treat it as a binary blob: no N-Quad parsing, no
+   * merkle-root recompute, no rootEntities cross-check. Cores still
+   * verify the ciphertext byte count against `publicByteSize` (so a
+   * misreported size doesn't slip through pricing) and sign the V10
+   * digest the publisher claimed. Member post-decrypt verification
+   * (LU-8) catches plaintext-vs-on-chain-root mismatches.
+   *
+   * Defaults to `false`/undefined on the wire so the existing public-CG
+   * flow that ships plaintext nquads inline keeps working unchanged.
+   */
+  isEncryptedPayload?: boolean;
 }
 
 export function encodePublishIntent(msg: PublishIntentMsg): Uint8Array {

@@ -145,8 +145,15 @@ const PINNED_DIGESTS: Record<string, string> = {
   // `getContextGraphRequiredSignatures`, `HostingNodesSet`, `QuorumUpdated`,
   // and the `hostingNodes`+`requiredSignatures` fields on `createContextGraph`
   // / `ContextGraphCreated` / `getContextGraph` are all gone.
-  ContextGraphs:                'f29a059eac0edcfb06a77ef303a3929c450dc52ddfe7b7c1593047f92e59937c',
-  ContextGraphStorage:          'dc861b05580022225f36d6e593a9c23097b87fb43e4975936a54d34d9c3ffe31',
+  // Updated OT-RFC-38 / LU-6 Phase B: `bytes32 nameHash` added as the 8th
+  // arg to `createContextGraph` (+ matching `bytes32 indexed nameHash` in
+  // `ContextGraphCreated` event between `owner` and `participantAgents`),
+  // plus a new `getNameHash(uint256)` accessor. Curator-committed wire
+  // identifier so hosting cores can derive the SWM gossip topic directly
+  // from chain events — no off-chain discovery channel required for
+  // registered CGs.
+  ContextGraphs:                '052f2afe4dd7b95e1230c5ddaedd05db014e63d3ef9ca195f2f0f79433821bde',
+  ContextGraphStorage:          '295160a2bb171dae51fb791d2a8642b22196ede95f3308366589edaea40d22cb',
   // Identity / staking — consulted on every publish.
   Hub:                          '36976cc71bb87963b8b715791b32e4eb6b7bb85c712998afd6184221289a506b',
   Identity:                     '29d09dd97de53de69d5bf2282d2f3008044ab43fb86c812fc4912552c9288946',
@@ -229,7 +236,13 @@ describe('ABI content sanity — required event/error surfaces are present [CH-5
     expect(types).toEqual(['uint256', 'address', 'uint256', 'uint256']);
   });
 
-  it('ContextGraphStorage declares ContextGraphCreated with the post-SPEC_CG_MEMORY_MODEL shape (no per-CG hosting committee)', () => {
+  it('ContextGraphStorage declares ContextGraphCreated with the post-LU-6-Phase-B shape (nameHash inserted as 3rd field)', () => {
+    // OT-RFC-38 / LU-6 Phase B adds `bytes32 indexed nameHash` between
+    // `owner` and `participantAgents`. The field is INSERTED rather
+    // than appended so cores reading the event can pull it off the
+    // indexed topics array (topic[3] in the new layout) instead of
+    // ABI-decoding the data tail — keeps the chain-event-driven host-
+    // mode auto-subscribe path O(1) per event.
     const abi = JSON.parse(
       readFileSync(join(ABI_DIR, 'ContextGraphStorage.json'), 'utf8'),
     ) as AbiEntry[];
@@ -239,6 +252,7 @@ describe('ABI content sanity — required event/error surfaces are present [CH-5
     expect(types).toEqual([
       'uint256',   // contextGraphId
       'address',   // owner
+      'bytes32',   // nameHash (LU-6 Phase B)
       'address[]', // participantAgents
       'uint256',   // metadataBatchId
       'uint8',     // accessPolicy
@@ -246,6 +260,9 @@ describe('ABI content sanity — required event/error surfaces are present [CH-5
       'address',   // publishAuthority
       'uint256',   // publishAuthorityAccountId
     ]);
+    // Indexed: contextGraphId, owner, nameHash.
+    const indexed = (ev!.inputs ?? []).map((i) => Boolean(i.indexed));
+    expect(indexed.slice(0, 3)).toEqual([true, true, true]);
   });
 
   it('KnowledgeCollectionStorage declares KnowledgeCollectionUpdated (V10 update event)', () => {

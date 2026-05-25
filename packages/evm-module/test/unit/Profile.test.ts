@@ -9,6 +9,7 @@ import {
   ParametersStorage,
   Profile,
   ProfileStorage,
+  ShardingTableStorage,
   StakingStorage,
   Token,
   WhitelistStorage,
@@ -24,6 +25,7 @@ type ProfileFixture = {
   WhitelistStorage: WhitelistStorage;
   Token: Token;
   StakingStorage: StakingStorage;
+  ShardingTableStorage: ShardingTableStorage;
 };
 
 describe('@unit Profile contract', function () {
@@ -36,6 +38,7 @@ describe('@unit Profile contract', function () {
   let WhitelistStorage: WhitelistStorage;
   let Token: Token;
   let StakingStorage: StakingStorage;
+  let ShardingTableStorage: ShardingTableStorage;
 
   const nodeId1 =
     '0x07f38512786964d9e70453371e7c98975d284100d44bd68dab67fe00b525cb66';
@@ -55,6 +58,10 @@ describe('@unit Profile contract', function () {
     Token = await hre.ethers.getContract<Token>('Token');
     StakingStorage =
       await hre.ethers.getContract<StakingStorage>('StakingStorage');
+    ShardingTableStorage =
+      await hre.ethers.getContract<ShardingTableStorage>(
+        'ShardingTableStorage',
+      );
     accounts = await hre.ethers.getSigners();
     Hub = await hre.ethers.getContract<Hub>('Hub');
     await Hub.setContractAddress('HubOwner', accounts[0].address);
@@ -69,6 +76,7 @@ describe('@unit Profile contract', function () {
       WhitelistStorage,
       Token,
       StakingStorage,
+      ShardingTableStorage,
     };
   }
 
@@ -83,6 +91,7 @@ describe('@unit Profile contract', function () {
       WhitelistStorage,
       Token,
       StakingStorage,
+      ShardingTableStorage,
     } = await loadFixture(deployProfileFixture));
   });
 
@@ -90,8 +99,8 @@ describe('@unit Profile contract', function () {
     expect(await Profile.name()).to.equal('Profile');
   });
 
-  it('The contract is version "1.2.0"', async () => {
-    expect(await Profile.version()).to.equal('1.2.0');
+  it('The contract is version "1.3.0"', async () => {
+    expect(await Profile.version()).to.equal('1.3.0');
   });
 
   it('Create a profile with valid inputs, expect to pass', async () => {
@@ -324,6 +333,341 @@ describe('@unit Profile contract', function () {
       Profile,
       'OnlyWhitelistedAddressesFunction',
     );
+  });
+
+  // =====================================================================
+  // recreate-profile-recovery 0001 — re-attach a Profile to an existing
+  // Identity (testnet ProfileStorage-redeploy recovery). Admin-only; the
+  // identityId is reused so surviving staking/conviction/sharding state
+  // stays addressable. See docs/adr/0001-recreate-profile-admin-only.md.
+  // =====================================================================
+
+  describe('recreateProfile (testnet recovery)', () => {
+    // createProfile mints identity 1 (operational = accounts[0],
+    // admin = accounts[1]) then we wipe only the Profile — mirroring the
+    // testnet state where the Identity survived a ProfileStorage redeploy.
+    async function seedBrickedIdentity() {
+      await Profile.createProfile(
+        accounts[1].address,
+        [],
+        'Node 1',
+        nodeId1,
+        1000,
+      );
+      await ProfileStorage.deleteProfile(identityId1);
+    }
+
+    it('admin recreates by supplying the node operational wallet, not the numeric id', async () => {
+      await seedBrickedIdentity();
+      // accounts[0] is the operational wallet minted by createProfile;
+      // accounts[1] is the admin. The admin recovers WITHOUT knowing the
+      // numeric identityId — it passes the node operational wallet and the
+      // contract resolves the id (admin auth still enforced).
+      await expect(
+        Profile.connect(accounts[1]).recreateProfile(
+          accounts[0].address,
+          'Node 1',
+          nodeId1,
+          1000,
+        ),
+      ).to.not.be.reverted;
+
+      expect(await ProfileStorage.profileExists(identityId1)).to.equal(true);
+      expect(await ProfileStorage.getNodeId(identityId1)).to.equal(nodeId1);
+    });
+
+    it('admin recreates the Profile under the same identityId', async () => {
+      await seedBrickedIdentity();
+      expect(await ProfileStorage.profileExists(identityId1)).to.equal(false);
+
+      await expect(
+        Profile.connect(accounts[1]).recreateProfile(
+          accounts[0].address,
+          'Node 1',
+          nodeId1,
+          1000,
+        ),
+      ).to.not.be.reverted;
+
+      expect(await ProfileStorage.profileExists(identityId1)).to.equal(true);
+      expect(await ProfileStorage.getNodeId(identityId1)).to.equal(nodeId1);
+      expect(await ProfileStorage.getName(identityId1)).to.equal('Node 1');
+    });
+
+    it('does not mint a new identity (id counter and resolved id unchanged)', async () => {
+      await seedBrickedIdentity();
+      const lastIdBefore = await IdentityStorage.lastIdentityId();
+      const resolvedBefore = await IdentityStorage.getIdentityId(
+        accounts[0].address,
+      );
+
+      await Profile.connect(accounts[1]).recreateProfile(
+        accounts[0].address,
+        'Node 1',
+        nodeId1,
+        1000,
+      );
+
+      expect(await IdentityStorage.lastIdentityId()).to.equal(lastIdBefore);
+      expect(await IdentityStorage.getIdentityId(accounts[0].address)).to.equal(
+        resolvedBefore,
+      );
+      expect(await IdentityStorage.getIdentityId(accounts[0].address)).to.equal(
+        identityId1,
+      );
+    });
+
+    it('reverts ProfileAlreadyExists when the Identity still has a Profile', async () => {
+      await Profile.createProfile(
+        accounts[1].address,
+        [],
+        'Node 1',
+        nodeId1,
+        1000,
+      );
+
+      await expect(
+        Profile.connect(accounts[1]).recreateProfile(
+          accounts[0].address,
+          'Node 1',
+          nodeId1,
+          1000,
+        ),
+      )
+        .to.be.revertedWithCustomError(Profile, 'ProfileAlreadyExists')
+        .withArgs(identityId1);
+    });
+
+    it('reverts when caller is an operational key (not admin) of the Identity', async () => {
+      await seedBrickedIdentity();
+
+      // accounts[0] is the operational key minted by createProfile.
+      await expect(
+        Profile.connect(accounts[0]).recreateProfile(
+          accounts[0].address,
+          'Node 1',
+          nodeId1,
+          1000,
+        ),
+      ).to.be.revertedWithCustomError(Profile, 'OnlyProfileAdminFunction');
+    });
+
+    it('reverts when caller holds no admin key for the identityId', async () => {
+      await seedBrickedIdentity();
+
+      await expect(
+        Profile.connect(accounts[5]).recreateProfile(
+          accounts[0].address,
+          'Node 1',
+          nodeId1,
+          1000,
+        ),
+      ).to.be.revertedWithCustomError(Profile, 'OnlyProfileAdminFunction');
+    });
+
+    it('reverts when the operational wallet has no identity (resolves to id 0)', async () => {
+      await seedBrickedIdentity();
+      // accounts[6] has no identity → getIdentityId == 0 → _checkAdmin(0)
+      // reverts (id 0 is never assigned, has no admin key).
+      await expect(
+        Profile.connect(accounts[1]).recreateProfile(
+          accounts[6].address,
+          'Node 1',
+          nodeId1,
+          1000,
+        ),
+      ).to.be.revertedWithCustomError(Profile, 'OnlyProfileAdminFunction');
+    });
+
+    it('reverts when caller admins a different identity than the operational wallet resolves to', async () => {
+      await seedBrickedIdentity();
+      // identity 2: operational = accounts[3], admin = accounts[4].
+      await Profile.connect(accounts[3]).createProfile(
+        accounts[4].address,
+        [],
+        'Node 2',
+        '0x17f38512786964d9e70453371e7c98975d284100d44bd68dab67fe00b525cb66',
+        1000,
+      );
+      // admin of identity 2 passes identity 1's operational wallet →
+      // resolves to id 1 → _checkAdmin(1) for the wrong admin reverts.
+      await expect(
+        Profile.connect(accounts[4]).recreateProfile(
+          accounts[0].address,
+          'Node 1',
+          nodeId1,
+          1000,
+        ),
+      ).to.be.revertedWithCustomError(Profile, 'OnlyProfileAdminFunction');
+    });
+
+    it('reverts when the supplied nodeId diverges from a surviving sharding-table entry', async () => {
+      await seedBrickedIdentity();
+      // Node still in the sharding ring under its ORIGINAL nodeId — the
+      // testnet state (ShardingTableStorage survived; ProfileStorage did not).
+      await ShardingTableStorage.createNodeObject(1, nodeId1, identityId1, 1);
+      const differentNodeId =
+        '0x17f38512786964d9e70453371e7c98975d284100d44bd68dab67fe00b525cb66';
+
+      await expect(
+        Profile.connect(accounts[1]).recreateProfile(
+          accounts[0].address,
+          'Node 1',
+          differentNodeId,
+          1000,
+        ),
+      ).to.be.revertedWithCustomError(Profile, 'NodeIdShardingMismatch');
+    });
+
+    it('succeeds when the supplied nodeId matches the surviving sharding-table entry', async () => {
+      await seedBrickedIdentity();
+      await ShardingTableStorage.createNodeObject(1, nodeId1, identityId1, 1);
+
+      await expect(
+        Profile.connect(accounts[1]).recreateProfile(
+          accounts[0].address,
+          'Node 1',
+          nodeId1,
+          1000,
+        ),
+      ).to.not.be.reverted;
+      expect(await ProfileStorage.profileExists(identityId1)).to.equal(true);
+    });
+
+    it('reverts EmptyNodeName for an empty node name', async () => {
+      await seedBrickedIdentity();
+
+      await expect(
+        Profile.connect(accounts[1]).recreateProfile(
+          accounts[0].address,
+          '',
+          nodeId1,
+          1000,
+        ),
+      ).to.be.revertedWithCustomError(Profile, 'EmptyNodeName');
+    });
+
+    it('reverts EmptyNodeId for an empty node id', async () => {
+      await seedBrickedIdentity();
+
+      await expect(
+        Profile.connect(accounts[1]).recreateProfile(
+          accounts[0].address,
+          'Node 1',
+          '0x',
+          1000,
+        ),
+      ).to.be.revertedWithCustomError(Profile, 'EmptyNodeId');
+    });
+
+    it('reverts NodeIdAlreadyExists when the node id is taken by another node', async () => {
+      await seedBrickedIdentity();
+      await Profile.connect(accounts[3]).createProfile(
+        accounts[4].address,
+        [],
+        'Node 2',
+        nodeId1,
+        1000,
+      );
+
+      await expect(
+        Profile.connect(accounts[1]).recreateProfile(
+          accounts[0].address,
+          'Node 1',
+          nodeId1,
+          1000,
+        ),
+      ).to.be.revertedWithCustomError(Profile, 'NodeIdAlreadyExists');
+    });
+
+    // NOTE: a `NodeNameAlreadyExists` recreate test was removed here — it
+    // asserted an unreachable revert. `ProfileStorage.isNameTaken` is never
+    // written by any contract path, so the name-uniqueness guard (copied
+    // verbatim from createProfile) cannot fire in production; the old test
+    // only "passed" by faking it via a hardcoded storage slot. The dead
+    // mapping itself is tracked as separate pre-existing cleanup.
+
+    it('accepts initialOperatorFee equal to the max and rejects above it', async () => {
+      await seedBrickedIdentity();
+      const maxFee = await ParametersStorage.maxOperatorFee();
+
+      await expect(
+        Profile.connect(accounts[1]).recreateProfile(
+          accounts[0].address,
+          'Node 1',
+          nodeId1,
+          maxFee,
+        ),
+      ).to.not.be.reverted;
+    });
+
+    it('reverts OperatorFeeOutOfRange when initialOperatorFee exceeds the max', async () => {
+      await seedBrickedIdentity();
+      const maxFee = await ParametersStorage.maxOperatorFee();
+
+      await expect(
+        Profile.connect(accounts[1]).recreateProfile(
+          accounts[0].address,
+          'Node 1',
+          nodeId1,
+          maxFee + 1n,
+        ),
+      ).to.be.revertedWithCustomError(Profile, 'OperatorFeeOutOfRange');
+    });
+
+    it('is gated by the whitelist: reverts when enabled and admin not whitelisted', async () => {
+      await seedBrickedIdentity();
+      await WhitelistStorage.enableWhitelist();
+
+      await expect(
+        Profile.connect(accounts[1]).recreateProfile(
+          accounts[0].address,
+          'Node 1',
+          nodeId1,
+          1000,
+        ),
+      ).to.be.revertedWithCustomError(
+        Profile,
+        'OnlyWhitelistedAddressesFunction',
+      );
+    });
+
+    it('whitelist enabled and admin whitelisted -> succeeds', async () => {
+      await seedBrickedIdentity();
+      await WhitelistStorage.enableWhitelist();
+      await WhitelistStorage.whitelistAddress(accounts[1].address);
+
+      await expect(
+        Profile.connect(accounts[1]).recreateProfile(
+          accounts[0].address,
+          'Node 1',
+          nodeId1,
+          1000,
+        ),
+      ).to.not.be.reverted;
+    });
+
+    it('regression: a brand-new wallet can still createProfile after a recovery', async () => {
+      await seedBrickedIdentity();
+      await Profile.connect(accounts[1]).recreateProfile(
+        accounts[0].address,
+        'Node 1',
+        nodeId1,
+        1000,
+      );
+
+      const nodeId2 =
+        '0x17f38512786964d9e70453371e7c98975d284100d44bd68dab67fe00b525cb66';
+      await expect(
+        Profile.connect(accounts[3]).createProfile(
+          accounts[4].address,
+          [],
+          'Node 2',
+          nodeId2,
+          1000,
+        ),
+      ).to.not.be.reverted;
+    });
   });
 
   // =====================================================================

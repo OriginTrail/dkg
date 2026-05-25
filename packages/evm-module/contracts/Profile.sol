@@ -10,6 +10,8 @@ import {ProfileStorage} from "./storage/ProfileStorage.sol";
 import {WhitelistStorage} from "./storage/WhitelistStorage.sol";
 import {Chronos} from "./storage/Chronos.sol";
 import {ConvictionStakingStorage} from "./storage/ConvictionStakingStorage.sol";
+import {ShardingTableStorage} from "./storage/ShardingTableStorage.sol";
+import {ShardingTableLib} from "./libraries/ShardingTableLib.sol";
 import {ContractStatus} from "./abstract/ContractStatus.sol";
 import {IInitializable} from "./interfaces/IInitializable.sol";
 import {INamed} from "./interfaces/INamed.sol";
@@ -24,7 +26,12 @@ contract Profile is INamed, IVersioned, ContractStatus, IInitializable {
     // Network State Registry (RFC 04 v0.3 / Issue #461). Multiaddrs were
     // briefly added on a prior revision but are not stored on Profile —
     // they live in per-round attestation KCs instead (RFC 04 §5.2).
-    string private constant _VERSION = "1.2.0";
+    // Bumped 1.2.0 -> 1.3.0: adds recreateProfile, an admin-only recovery
+    // entry point that re-attaches a Profile to an existing identityId
+    // (testnet ProfileStorage-redeploy recovery). The id is reused so the
+    // surviving staking/conviction/sharding state stays addressable. See
+    // docs/adr/0001-recreate-profile-admin-only.md.
+    string private constant _VERSION = "1.3.0";
 
     Ask public askContract;
     Identity public identityContract;
@@ -39,6 +46,9 @@ contract Profile is INamed, IVersioned, ContractStatus, IInitializable {
     // Profile reads `isOperatorFeeClaimedForEpoch` in `updateOperatorFee`
     // to gate fee changes on prior-epoch fee claims being fully settled.
     ConvictionStakingStorage public convictionStakingStorage;
+    // recreate-profile-recovery 0001 — read-only: recreateProfile checks the
+    // recovered nodeId against any surviving sharding-table entry.
+    ShardingTableStorage public shardingTableStorage;
 
     // solhint-disable-next-line no-empty-blocks
     constructor(address hubAddress) ContractStatus(hubAddress) {}
@@ -72,6 +82,7 @@ contract Profile is INamed, IVersioned, ContractStatus, IInitializable {
         whitelistStorage = WhitelistStorage(hub.getContractAddress("WhitelistStorage"));
         chronos = Chronos(hub.getContractAddress("Chronos"));
         convictionStakingStorage = ConvictionStakingStorage(hub.getContractAddress("ConvictionStakingStorage"));
+        shardingTableStorage = ShardingTableStorage(hub.getContractAddress("ShardingTableStorage"));
     }
 
     function name() external pure virtual override returns (string memory) {
@@ -121,6 +132,74 @@ contract Profile is INamed, IVersioned, ContractStatus, IInitializable {
         id.addOperationalWallets(identityId, operationalWallets);
 
         ps.createProfile(identityId, nodeName, nodeId, initialOperatorFee);
+    }
+
+    // recreate-profile-recovery 0001 — re-attach a Profile to an Identity
+    // that survived a ProfileStorage redeploy. The caller passes the node
+    // operational wallet (operators know this; the numeric identityId is
+    // internal and often unknown), and the contract resolves the id via
+    // IdentityStorage. Admin-only (ADR 0001): unlike genesis createProfile,
+    // the resolved identityId may already carry third-party delegated
+    // stake, so an operational key must not be able to re-price the
+    // operator fee — _checkAdmin enforces the admin key after resolution
+    // (a zero/unknown wallet resolves to id 0, which has no admin and
+    // reverts). The identityId is reused — no new identity is minted — so
+    // id-keyed staking/conviction/sharding state stays addressable.
+    function recreateProfile(
+        address operationalWallet,
+        string calldata nodeName,
+        bytes calldata nodeId,
+        uint16 initialOperatorFee
+    ) external onlyWhitelisted {
+        uint72 identityId = identityStorage.getIdentityId(operationalWallet);
+        _checkAdmin(identityId);
+
+        // ShardingTableStorage survived the ProfileStorage redeploy and
+        // caches nodeId per identityId. If this node is still in the ring,
+        // the recovered nodeId MUST match the surviving entry — otherwise
+        // ProfileStorage and the sharding table would disagree about the
+        // same identityId (consumers would see a stale ring node). Read-only:
+        // ring state is not rewritten here (out of scope — ADR 0001).
+        ShardingTableStorage sts = shardingTableStorage;
+        if (sts.nodeExists(identityId)) {
+            bytes memory ringNodeId = sts.getNode(identityId).nodeId;
+            if (keccak256(nodeId) != keccak256(ringNodeId)) {
+                revert ProfileLib.NodeIdShardingMismatch(identityId, ringNodeId, nodeId);
+            }
+        }
+
+        ProfileStorage ps = profileStorage;
+
+        if (ps.profileExists(identityId)) {
+            revert ProfileLib.ProfileAlreadyExists(identityId);
+        }
+        if (bytes(nodeName).length == 0) {
+            revert ProfileLib.EmptyNodeName();
+        }
+        if (ps.isNameTaken(nodeName)) {
+            revert ProfileLib.NodeNameAlreadyExists(nodeName);
+        }
+        if (nodeId.length == 0) {
+            revert ProfileLib.EmptyNodeId();
+        }
+        if (ps.nodeIdsList(nodeId)) {
+            revert ProfileLib.NodeIdAlreadyExists(nodeId);
+        }
+        if (initialOperatorFee > parametersStorage.maxOperatorFee()) {
+            revert ProfileLib.OperatorFeeOutOfRange(initialOperatorFee);
+        }
+
+        ps.createProfile(identityId, nodeName, nodeId, initialOperatorFee);
+
+        // ShardingTable survived a ProfileStorage-only redeploy: if this
+        // node is already in the ring, Ask's active-set / pricing
+        // aggregates (recomputed from ProfileStorage.getAsk per ring node)
+        // are stale until something recomputes. Trigger it now so the
+        // recovered node's contribution is consistent. Genesis
+        // createProfile has no ring entry, so it never needs this.
+        if (sts.nodeExists(identityId)) {
+            askContract.recalculateActiveSet();
+        }
     }
 
     function addOperationalWallets(

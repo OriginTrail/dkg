@@ -257,7 +257,8 @@ describe('@unit KnowledgeAssetsV10', () => {
       0, // accessPolicy = public/discoverable
       1, // publishPolicy = open
       ethers.ZeroAddress,
-      0, // publishAuthorityAccountId
+      0, // publishAuthorityAccountId,
+      ethers.ZeroHash,
     );
     return CGStorageContract.getLatestContextGraphId();
   }
@@ -277,6 +278,7 @@ describe('@unit KnowledgeAssetsV10', () => {
       0, // publishPolicy = curated
       authority,
       accountId,
+      ethers.ZeroHash,
     );
     return CGStorageContract.getLatestContextGraphId();
   }
@@ -2050,6 +2052,7 @@ describe('@unit KnowledgeAssetsV10', () => {
           0, // publishPolicy = curated
           nftOwner.address,
           pcaAccountId,
+          ethers.ZeroHash,
         );
         const cgId = await CGStorageContract.getLatestContextGraphId();
 

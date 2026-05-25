@@ -144,7 +144,16 @@ describe('Phase-sequence contracts', () => {
 
   // -- Publish (adapter-backed signer, no identity — tentative) -----------
 
-  it('publish: adapter-backed signer without node identity returns tentative after local phases', async () => {
+  it('publish: adapter-backed signer without node identity attempts on-chain (OT-RFC-38 §1.1) but falls back to tentative when no ACKs are collected', async () => {
+    // Pre-RFC-38: an identity-less publisher short-circuited at `chain:start`
+    // and produced just `chain:start → chain:end`. Post-RFC-38: edge agents
+    // without an on-chain Profile still attempt the on-chain TX in
+    // no-attribution mode (the contract supports it). In this single-node
+    // test mode there's no v10ACKProvider AND self-ACK is gated on identity,
+    // so the publish reaches `chain:submit` then fails on
+    // "V10 ACKs required for on-chain publish — no ACKs collected" and falls
+    // back to tentative. The phase contract still pins the full chain prefix
+    // so regressions that re-introduce a silent short-circuit are caught.
     const store = new OxigraphStore();
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const keypair = await generateEd25519Keypair();
@@ -183,6 +192,10 @@ describe('Phase-sequence contracts', () => {
       'store:start',
       'store:end',
       'chain:start',
+      'chain:sign:start',
+      'chain:sign:end',
+      'chain:submit:start',
+      'chain:submit:end',
       'chain:end',
     ]);
   });

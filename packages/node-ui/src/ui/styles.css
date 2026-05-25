@@ -3677,6 +3677,17 @@ select.input {
   line-height: 1.5;
 }
 
+.v10-modal-warning {
+  padding: 10px 14px;
+  background: var(--amber-dim);
+  border: 1px solid rgba(245, 158, 11, 0.25);
+  border-radius: 8px;
+  margin-bottom: 16px;
+  font-size: 12px;
+  color: var(--text-warning);
+  line-height: 1.5;
+}
+
 .v10-modal-tip {
   padding: 12px 14px;
   background: var(--bg-surface);
@@ -4518,26 +4529,16 @@ body.light .v10-vm-hero {
    time without needing a detail pane. Kept small and lightly translucent so
    it never fights the graph behind it. */
 .v10-vm-legend {
-  position: absolute;
-  top: 12px;
-  right: 12px;
-  z-index: 10;
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 10px 12px;
-  min-width: 180px;
-  max-width: 240px;
-  background: color-mix(in srgb, var(--surface-0, #0b1020) 85%, transparent);
+  padding: 10px;
+  width: 100%;
+  background: rgba(34,197,94,0.05);
   border: 1px solid rgba(34,197,94,0.3);
-  border-radius: 10px;
-  box-shadow: 0 8px 24px -12px rgba(34,197,94,0.3),
-              0 0 0 1px rgba(34,197,94,0.12) inset;
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
+  border-radius: 8px;
   font-size: 11px;
   color: var(--text-secondary, #cbd5e1);
-  pointer-events: none;
 }
 .v10-vm-legend-row {
   display: flex;
@@ -4600,26 +4601,16 @@ body.light .v10-vm-hero {
    same entity. Amber accent instead of VM's green to reinforce the
    layer-palette convention (SWM = amber across the UI). */
 .v10-swm-legend {
-  position: absolute;
-  top: 12px;
-  right: 12px;
-  z-index: 10;
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 10px 12px;
-  min-width: 200px;
-  max-width: 260px;
-  background: color-mix(in srgb, var(--surface-0, #0b1020) 85%, transparent);
+  padding: 10px;
+  width: 100%;
+  background: rgba(245,158,11,0.05);
   border: 1px solid rgba(245,158,11,0.3);
-  border-radius: 10px;
-  box-shadow: 0 8px 24px -12px rgba(245,158,11,0.3),
-              0 0 0 1px rgba(245,158,11,0.12) inset;
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
+  border-radius: 8px;
   font-size: 11px;
   color: var(--text-secondary, #cbd5e1);
-  pointer-events: none;
 }
 .v10-swm-legend-row {
   display: flex;
@@ -5874,23 +5865,318 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
 .v10-canvas-empty-icon { font-size: 28px; opacity: 0.3; }
 .v10-canvas-empty-text { font-size: 11px; max-width: 240px; line-height: 1.6; }
 
-/* ── Provenance Bar ── */
-.v10-provenance-bar {
-  flex-shrink: 0; padding: 6px 14px; border-top: 1px solid var(--border-subtle);
-  background: var(--bg-panel); display: flex; align-items: center; gap: 8px;
-  font-size: 10px; color: var(--text-tertiary); font-family: var(--font-mono);
-}
-.v10-provenance-bar-dot { width: 4px; height: 4px; border-radius: 50%; background: #22c55e; }
-
 /* ── Graph view inside layer detail ── */
+.v10-graph-shell {
+  /* `flex-basis` carries the *preferred* tall height (62vh, clamped
+     420-720px) — when there's room in the column, the shell takes it.
+     `min-height: 0` lets the shell shrink below that preferred size
+     when the parent runs out of vertical room (e.g. the bottom panel
+     opens and pushes the center region up). Without `min-height: 0`,
+     the previous hard min-height: clamp(...) prevented the shell from
+     shrinking → it overflowed downward and the singleton shelf at the
+     canvas's bottom edge got clipped behind the bottom panel. */
+  flex: 1 1 clamp(420px, 62vh, 720px);
+  min-height: 0;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-subtle);
+}
+.v10-layer-expand-body.full-width > .v10-graph-shell {
+  /* Same shrink-friendly preferred-height pattern when the shell is
+     directly nested inside a full-width tab body. */
+  flex-basis: clamp(420px, 62vh, 720px);
+  min-height: 0;
+}
+.v10-graph-shell-wm { --graph-accent: #64748b; }
+.v10-graph-shell-swm { --graph-accent: #f59e0b; }
+.v10-graph-shell-vm { --graph-accent: #22c55e; }
+.v10-graph-shell-bar {
+  flex: 0 0 auto;
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px 7px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: color-mix(in srgb, var(--bg-surface) 80%, transparent);
+}
+.v10-graph-scope {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text-secondary);
+}
+.v10-graph-expand-btn {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-default);
+  border-radius: 5px;
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  cursor: pointer;
+  line-height: 1;
+}
+.v10-graph-expand-btn:hover {
+  border-color: var(--graph-accent);
+  color: var(--text-primary);
+}
+.v10-graph-expand-btn.in-canvas {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 8;
+  background: color-mix(in srgb, var(--bg-elevated) 92%, transparent);
+  box-shadow: 0 10px 24px -18px rgba(0,0,0,0.8);
+}
+.v10-graph-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+}
+.v10-graph-canvas {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  position: relative;
+  display: flex;
+  background: var(--bg-surface);
+  /* Establish a clean stacking context so the singleton shelf
+     (position: absolute) always paints above the RdfGraph WebGL
+     canvas inside .v10-graph-view, regardless of how the embedded
+     3d-force-graph renderer composites its own layer. */
+  isolation: isolate;
+}
 .v10-graph-view {
-  flex: 1; position: relative; background: var(--bg-surface);
-  display: flex; align-items: center; justify-content: center; min-height: 300px;
+  flex: 1 1 auto; min-width: 0; min-height: 0; position: relative; background: var(--bg-surface);
+  display: flex; align-items: center; justify-content: center;
+  /* Below the shelf in the canvas stacking context. */
+  z-index: 0;
 }
 /* Fills the parent completely — used when the graph tab is active inside a
    flex-column body (both in the inline strip and the full LayerDetailView). */
 .v10-graph-view-fill {
   flex: 1 1 auto; min-height: 0; width: 100%;
+}
+.v10-graph-overlay {
+  position: absolute;
+  top: 46px;
+  right: 12px;
+  z-index: 6;
+  width: min(250px, calc(100% - 24px));
+  pointer-events: none;
+}
+.v10-graph-overlay .v10-swm-legend,
+.v10-graph-overlay .v10-vm-legend {
+  box-shadow: 0 18px 36px -24px rgba(0,0,0,0.85);
+  backdrop-filter: blur(6px);
+}
+.v10-graph-rail {
+  flex: 0 0 230px;
+  width: 230px;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px;
+  border-left: 1px solid var(--border-subtle);
+  background: color-mix(in srgb, var(--bg-panel) 86%, transparent);
+}
+.v10-graph-rail-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: rgba(255,255,255,0.02);
+}
+.v10-graph-rail-title {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+.v10-graph-rail-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 22px;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+.v10-graph-rail-row.active {
+  color: var(--text-primary);
+  font-weight: 650;
+}
+.v10-graph-trust-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  flex: 0 0 auto;
+  box-shadow: 0 0 0 3px rgba(255,255,255,0.04);
+}
+.v10-graph-rail-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.v10-graph-placeholder-centered {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  text-align: center;
+  padding: 24px;
+}
+.v10-graph-singleton-shelf {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  /* Bumped above the RdfGraph's WebGL canvas (which paints inside
+     .v10-graph-view). Without this the shelf rendered but the 3d
+     force-graph layer composited on top of it in the inline view —
+     only zooming the graph (which redraws the canvas) revealed the
+     shelf underneath. */
+  z-index: 20;
+  width: min(280px, calc(100% - 24px));
+  max-height: 28%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-panel) 92%, transparent);
+  box-shadow: 0 14px 34px -20px rgba(0,0,0,0.8);
+}
+.v10-graph-singleton-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 9px;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+}
+.v10-graph-singleton-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  overflow: auto;
+  padding: 8px;
+}
+.v10-graph-singleton-item {
+  max-width: 120px;
+  min-height: 22px;
+  padding: 3px 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.v10-graph-singleton-item:hover {
+  border-color: var(--graph-accent);
+  color: var(--text-primary);
+}
+.v10-graph-singleton-more {
+  align-self: center;
+  color: var(--text-tertiary);
+  font-size: 10px;
+}
+.v10-graph-expanded-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  padding: 24px;
+  background: rgba(0,0,0,0.82);
+}
+.v10-graph-expanded-panel {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--border-default);
+  border-radius: 10px;
+  background: var(--bg-panel);
+  box-shadow: 0 24px 70px -28px rgba(0,0,0,0.9);
+}
+.v10-graph-expanded-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.v10-graph-expanded-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.v10-graph-expanded-subtitle {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.v10-graph-expanded-close {
+  width: 30px;
+  height: 28px;
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.v10-graph-expanded-close:hover {
+  border-color: var(--graph-accent);
+  color: var(--text-primary);
+}
+.v10-graph-expanded-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.v10-graph-expanded-body .v10-graph-shell-bar {
+  display: none;
+}
+.v10-graph-expanded-body .v10-graph-body {
+  flex: 1 1 auto;
+}
+.v10-ka-graph-shell {
+  margin-top: 8px;
+  min-height: clamp(380px, 55vh, 660px);
+  border-radius: 6px;
+}
+body.light .v10-ka-graph-shell,
+body.light .v10-ka-graph-shell .v10-graph-view,
+body.light .v10-ka-graph-shell .v10-graph-canvas {
+  background: #ffffff;
 }
 .v10-graph-placeholder {
   color: var(--text-tertiary); font-size: 12px; font-family: var(--font-mono);
@@ -7180,6 +7466,25 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
 }
 
 @media (max-width: 760px) {
+  .v10-graph-shell {
+    min-height: clamp(360px, 68vh, 620px);
+  }
+  .v10-graph-body {
+    flex-direction: column;
+  }
+  .v10-graph-rail {
+    flex: 0 0 auto;
+    width: 100%;
+    max-height: 180px;
+    border-left: 0;
+    border-top: 1px solid var(--border-subtle);
+  }
+  .v10-graph-expanded-backdrop {
+    padding: 10px;
+  }
+  .v10-graph-singleton-shelf {
+    max-height: 26%;
+  }
   .v10-primer-view { padding: 22px 18px; }
   .v10-primer-pipeline {
     grid-template-columns: 1fr;

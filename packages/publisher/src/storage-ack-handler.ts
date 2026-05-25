@@ -75,6 +75,58 @@ export interface StorageACKHandlerConfig {
    * registered on-chain at signing time.
    */
   onSignerRegistrationLookupFailed?: (err: unknown) => void | Promise<void>;
+  /**
+   * Codex PR #608: independent curation oracle. The handler MUST verify a
+   * publisher's `isEncryptedPayload=true` claim against the CG's real
+   * access policy before signing — without this, a malicious publisher
+   * could set the encrypted bit on a PUBLIC CG and have the core sign an
+   * ACK over whatever `merkleRoot`/`kaCount`/`merkleLeafCount` it claimed
+   * (cores skip plaintext verification on the encrypted path because they
+   * can't decrypt). Return `true` only when the CG is curated (private /
+   * invite-only / allowlisted). Return `false` for public CGs and `null`
+   * for "cannot determine locally" — the handler treats both as
+   * "publisher must use the non-encrypted path".
+   *
+   * When omitted, the handler defaults to fail-closed: encrypted-payload
+   * publishes are rejected wholesale (operators wiring a core without
+   * curated-CG support shouldn't be tricked into signing for them).
+   *
+   * Inputs:
+   *   - `cgId`: numeric on-chain id used in the V10 ACK digest
+   *   - `swmGraphId`: cleartext CG id (may equal `cgId`); the publisher
+   *     sends this for curated publishes so the core can resolve the
+   *     local access-policy record without a chain RPC.
+   */
+  isCgCurated?: (cgId: string, swmGraphId?: string) => Promise<boolean | null>;
+  /**
+   * Codex PR #608 R1 #2 — publish-finalization callback. Called immediately
+   * AFTER the handler has persisted the encrypted-payload staging graph
+   * and signed an ACK, with the `(stagingGraphUri, cgId, merkleRoot)`
+   * triple. The agent (which owns the chain-event subscriber) is expected
+   * to register the staging-graph URI against the (cgId, merkleRoot) key
+   * and drop it when the V10 publish finalizes (success or permanent
+   * failure).
+   *
+   * The handler ALSO arms a long-window safety-net timer (default 60 min)
+   * as a fallback for nodes without finalization hooks wired. The
+   * safety net is configurable via `encryptedStagingSafetyNetMs`; agents
+   * that wire a real finalization hook can set this to `Infinity` to
+   * disable the timer entirely.
+   *
+   * Optional: handlers without this hook continue to rely on the
+   * safety-net timer (current behaviour).
+   */
+  onEncryptedStagingPersisted?: (info: {
+    stagingGraphUri: string;
+    cgId: string;
+    merkleRoot: Uint8Array;
+  }) => void | Promise<void>;
+  /**
+   * Codex PR #608 R1 #2 — safety-net cleanup window for encrypted staging
+   * graphs (default 60 * 60 * 1000 = 60 min). Set to `Infinity` to disable
+   * timer-based cleanup entirely when a finalization hook is wired.
+   */
+  encryptedStagingSafetyNetMs?: number;
 }
 
 /**
@@ -133,7 +185,7 @@ export class StorageACKHandler {
   }
 
   /**
-   * Protocol stream handler for `/dkg/10.0.0/storage-ack`.
+   * Protocol stream handler for `/dkg/10.0.1/storage-ack`.
    * Receives PublishIntent, returns StorageACK.
    */
   handler = async (data: Uint8Array, _peerId: PeerId): Promise<Uint8Array> => {
@@ -160,6 +212,204 @@ export class StorageACKHandler {
     const swmGraphUri = this.config.contextGraphSharedMemoryUri(swmGraphId, subGraphName);
 
     let swmQuads: Quad[];
+
+    // OT-RFC-38 / LU-5 encrypted-payload path. For curated CGs the publisher
+    // ships AEAD-encrypted nquad bytes inline so cores can store the
+    // ciphertext (durably enough to ACK the V10 publish) without ever
+    // holding plaintext. Cores can't decrypt → can't recompute the
+    // plaintext merkle root → MUST trust the publisher's `merkleRoot` and
+    // `merkleLeafCount` claims for the V10 ACK signature. Member
+    // post-decrypt verification (LU-8) catches plaintext-vs-on-chain-root
+    // mismatches; outsider attestation tokens (LU-9) let third parties
+    // verify after the fact. Cores DO verify `stagingQuads.length` matches
+    // `publicByteSize` so a misreported size can't slip past pricing.
+    if (intent.isEncryptedPayload === true) {
+      // Codex PR #608: independently verify the CG is actually curated
+      // before honoring the encrypted-payload claim. Without this, a
+      // publisher could set `isEncryptedPayload=true` on a PUBLIC CG
+      // and bypass every root / KA / merkleLeafCount verification path
+      // below (the handler signs whatever the publisher claimed because
+      // cores can't decrypt to recompute). Fail closed when no oracle
+      // is wired or curation cannot be determined.
+      const swmGraphIdForCuration = intent.swmGraphId && intent.swmGraphId.length > 0
+        ? intent.swmGraphId
+        : undefined;
+      if (!this.config.isCgCurated) {
+        throw new Error(
+          `PublishIntent.isEncryptedPayload=true rejected: this core has no curation oracle wired, ` +
+          `so it cannot verify the CG is curated. Cores must independently confirm the access policy ` +
+          `before signing an opaque (un-verifiable) ACK payload.`,
+        );
+      }
+      const curationVerdict = await this.config.isCgCurated(cgId, swmGraphIdForCuration);
+      if (curationVerdict !== true) {
+        throw new Error(
+          `PublishIntent.isEncryptedPayload=true rejected for cg=${cgId}${swmGraphIdForCuration ? ` (swmGraph=${swmGraphIdForCuration})` : ''}: ` +
+          `local curation oracle reports ${curationVerdict === false ? 'PUBLIC (not curated)' : 'UNKNOWN'}. ` +
+          `The encrypted-payload ACK path is restricted to verifiably-curated CGs. Resubmit using the ` +
+          `plaintext-inline path so root + KA count + merkle leaf count can be verified.`,
+        );
+      }
+      if (!intent.stagingQuads || intent.stagingQuads.length === 0) {
+        throw new Error(
+          'PublishIntent.isEncryptedPayload=true but stagingQuads is empty — ' +
+          'curated-CG ACK requires the ciphertext bytes inline (no SWM fallback path for opaque blobs)',
+        );
+      }
+      const MAX_ENCRYPTED_BYTES = 4 * 1024 * 1024;
+      if (intent.stagingQuads.length > MAX_ENCRYPTED_BYTES) {
+        throw new Error(
+          `encrypted stagingQuads payload (${intent.stagingQuads.length} bytes) exceeds ` +
+          `${MAX_ENCRYPTED_BYTES} byte limit — rejecting request`,
+        );
+      }
+      const claimedByteSize = typeof intent.publicByteSize === 'number'
+        ? intent.publicByteSize
+        : Number(intent.publicByteSize);
+      if (intent.stagingQuads.length !== claimedByteSize) {
+        throw new Error(
+          `encrypted payload byteSize mismatch: stagingQuads.length=${intent.stagingQuads.length} ` +
+          `but publicByteSize=${claimedByteSize}. For curated CGs publicByteSize MUST equal the ` +
+          `ciphertext byte count (cores price the publish off this number).`,
+        );
+      }
+
+      // Persist the opaque ciphertext to a scoped staging graph as a
+      // single binary literal so it survives long enough for the
+      // V10 chain TX to land and for LU-7 catchup to pull it. Stored
+      // under a stable predicate so LU-7's wire handler can locate it
+      // by (cgId, merkleRoot) without needing a new store API.
+      const stagingGraphUri = `${swmGraphUri}/staging-encrypted/${ethers.hexlify(merkleRoot).slice(2, 18)}`;
+      const ciphertextSubject = `${stagingGraphUri}/ciphertext`;
+      const ciphertextPredicate = 'urn:dkg:swm:v10-publish-ciphertext';
+      // Base64 keeps the blob as a valid N3 literal without depending on
+      // the underlying triple-store accepting arbitrary binary. AES-GCM
+      // ciphertext is roughly the same size as plaintext + 16-byte tag,
+      // so the 33% base64 inflation stays well under the 4 MB cap above.
+      const ciphertextLiteral = `"${Buffer.from(intent.stagingQuads).toString('base64')}"`;
+      await this.store.dropGraph(stagingGraphUri);
+      await this.store.insert([{
+        subject: ciphertextSubject,
+        predicate: ciphertextPredicate,
+        object: ciphertextLiteral,
+        graph: stagingGraphUri,
+      }]);
+      // Codex PR #608 R1 #2: cleanup is now tied to publish-finalization
+      // bookkeeping. When the agent wires `onEncryptedStagingPersisted`
+      // it owns the cleanup — typically by listening to V10 chain events
+      // and calling `dropGraph(stagingGraphUri)` when the publish tx
+      // finalizes (success OR permanent failure). The safety-net timer
+      // below is a fallback for nodes without that hook wired.
+      //
+      // Without a hook, default safety net is 60 min — long enough to
+      // cover slow mainnet confirmation + at least one LU-7 catchup
+      // round-trip. With a hook, the agent can pass
+      // `encryptedStagingSafetyNetMs: Infinity` to disable the timer
+      // entirely.
+      if (this.config.onEncryptedStagingPersisted) {
+        try {
+          await this.config.onEncryptedStagingPersisted({
+            stagingGraphUri,
+            cgId,
+            merkleRoot,
+          });
+        } catch (err) {
+          // Best-effort: the hook is bookkeeping, not load-bearing.
+          // The safety net timer below still fires.
+          console.warn(
+            '[StorageACKHandler] onEncryptedStagingPersisted hook threw:',
+            err instanceof Error ? err.message : String(err),
+          );
+        }
+      }
+      const safetyNetMs = this.config.encryptedStagingSafetyNetMs ?? 60 * 60 * 1000;
+      if (Number.isFinite(safetyNetMs) && safetyNetMs > 0) {
+        setTimeout(async () => {
+          try { await this.store.dropGraph(stagingGraphUri); } catch { /* ignore */ }
+        }, safetyNetMs);
+      }
+
+      // Cores can't enumerate KAs from ciphertext — use the publisher's
+      // claimed counts for the V10 digest. Validate they're positive so
+      // an obviously malformed intent (kaCount=0) doesn't waste a sign.
+      if (!intent.kaCount || intent.kaCount <= 0) {
+        throw new Error(
+          `encrypted PublishIntent.kaCount must be positive; got ${intent.kaCount}`,
+        );
+      }
+      const claimedLeafCount = intent.merkleLeafCount == null ? 0 : Number(intent.merkleLeafCount);
+      if (claimedLeafCount < 1) {
+        throw new Error(
+          `encrypted PublishIntent.merkleLeafCount must be a positive integer; got ${claimedLeafCount}`,
+        );
+      }
+
+      const intentEpochs = (typeof intent.epochs === 'number' && intent.epochs > 0) ? intent.epochs : 1;
+      const intentTokenAmount = intent.tokenAmountStr ? BigInt(intent.tokenAmountStr) : 0n;
+
+      let contextGraphIdBigInt: bigint;
+      try {
+        contextGraphIdBigInt = BigInt(cgId);
+      } catch {
+        throw new Error(
+          `encrypted StorageACK: V10 publish requires a numeric on-chain context graph id; got '${cgId}'.`,
+        );
+      }
+      if (contextGraphIdBigInt <= 0n) {
+        throw new Error(
+          `encrypted StorageACK: V10 publish requires a positive on-chain context graph id; got ${contextGraphIdBigInt}.`,
+        );
+      }
+
+      const digest = computePublishACKDigest(
+        this.config.chainId,
+        this.config.kav10Address,
+        contextGraphIdBigInt,
+        merkleRoot,
+        BigInt(intent.kaCount),
+        BigInt(claimedByteSize),
+        BigInt(intentEpochs),
+        intentTokenAmount,
+        BigInt(claimedLeafCount),
+      );
+
+      if (this.config.isSignerRegistered) {
+        let signerRegistered: boolean | undefined;
+        try {
+          signerRegistered = await this.config.isSignerRegistered();
+        } catch (err) {
+          try { await this.config.onSignerRegistrationLookupFailed?.(err); } catch { /* swallow */ }
+          throw new Error('StorageACK signer registration lookup failed; refusing to sign');
+        }
+        if (signerRegistered === false) {
+          try { await this.config.onSignerUnregistered?.(); } catch { /* swallow */ }
+          return this.encodeDecline(
+            cgId,
+            STORAGE_ACK_DECLINE_CODES.SIGNER_NOT_REGISTERED,
+            'StorageACK signer is not confirmed on-chain as an operational wallet',
+          );
+        }
+      }
+
+      const signature = ethers.Signature.from(
+        await this.config.signerWallet.signMessage(digest),
+      );
+      const MAX_UINT64 = (1n << 64n) - 1n;
+      if (this.config.nodeIdentityId > MAX_UINT64) {
+        throw new Error(
+          `nodeIdentityId ${this.config.nodeIdentityId} exceeds uint64 wire format`,
+        );
+      }
+      return encodeStorageACK({
+        merkleRoot,
+        coreNodeSignatureR: ethers.getBytes(signature.r),
+        coreNodeSignatureVS: ethers.getBytes(signature.yParityAndS),
+        contextGraphId: cgId,
+        nodeIdentityId: this.config.nodeIdentityId <= BigInt(Number.MAX_SAFE_INTEGER)
+          ? Number(this.config.nodeIdentityId)
+          : { low: Number(this.config.nodeIdentityId & 0xFFFFFFFFn), high: Number((this.config.nodeIdentityId >> 32n) & 0xFFFFFFFFn), unsigned: true },
+      });
+    }
 
     if (intent.stagingQuads && intent.stagingQuads.length > 0) {
       // Size limit: reject payloads over 4 MB to prevent memory exhaustion

@@ -27,7 +27,21 @@ export interface SubGraphBarProps {
   onSelect: (slug: string | null) => void;
   /** Optional entity list for computing live badges (proposed / p0 / open PRs). */
   entities?: MemoryEntity[];
+  /**
+   * When set, the chip counts reflect entities whose canonical layer
+   * (`trustLevel`) matches this layer — so on the WM/SWM/VM pages the
+   * row reports a per-layer slice instead of the daemon's project-wide
+   * total. Without this prop the row falls back to daemon totals
+   * (used on the Overview / Subgraphs pages).
+   */
+  layer?: 'wm' | 'swm' | 'vm';
 }
+
+const LAYER_TRUST_LEVEL = {
+  wm: 'working',
+  swm: 'shared',
+  vm: 'verified',
+} as const;
 
 /**
  * Compute a small ambient badge per sub-graph:
@@ -75,11 +89,50 @@ function computeBadges(entities: MemoryEntity[] | undefined): Map<string, SubGra
   return out;
 }
 
-export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profile, selected, onSelect, entities }) => {
+export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profile, selected, onSelect, entities, layer }) => {
   const [subGraphs, setSubGraphs] = React.useState<SubGraphInfo[]>([]);
   const [loading, setLoading] = React.useState(true);
   const badges = React.useMemo(() => computeBadges(entities), [entities]);
   const requestIdRef = React.useRef(0);
+
+  // When `entities` is provided we derive per-sub-graph counts locally
+  // so the chip count matches what the entity list below it shows.
+  // Without `layer`, count every entity that belongs to the sub-graph
+  // (any layer) — used on the sub-graph page where the per-pyramid
+  // header sums across layers (Issue B: the daemon's
+  // `/api/sub-graph/list` `entityCount` counts entities once per
+  // sub-graph membership, double-counting cross-sub-graph entities,
+  // so the chip said "27" while the list said "11"). With `layer`
+  // set, scope to entities whose canonical `trustLevel` matches —
+  // used on the WM/SWM/VM page (post-P4).
+  const entityScopedCounts = React.useMemo(() => {
+    if (!entities) return null;
+    const trust = layer ? LAYER_TRUST_LEVEL[layer] : null;
+    const counts = new Map<string, number>();
+    for (const e of entities) {
+      if (trust !== null && e.trustLevel !== trust) continue;
+      for (const sg of e.subGraphs) {
+        counts.set(sg, (counts.get(sg) ?? 0) + 1);
+      }
+    }
+    return counts;
+  }, [layer, entities]);
+
+  // Distinct count of in-scope entities for the "All" chip. Summing
+  // per-sub-graph counts would double-count entities living in two or
+  // more sub-graphs (the entity list under us is layer-filtered
+  // without sub-graph multiplicity, so the sum disagrees with it).
+  const entityScopedAllTotal = React.useMemo(() => {
+    if (!entities) return null;
+    const trust = layer ? LAYER_TRUST_LEVEL[layer] : null;
+    let n = 0;
+    for (const e of entities) {
+      if (trust !== null && e.trustLevel !== trust) continue;
+      if (e.subGraphs.size === 0) continue; // entity has no sub-graph — not in any chip
+      n++;
+    }
+    return n;
+  }, [layer, entities]);
 
   const loadSubGraphs = React.useCallback(() => {
     const requestId = ++requestIdRef.current;
@@ -99,10 +152,21 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
   const merged = React.useMemo(() => {
     // Filter out the `meta` sub-graph since it holds the profile itself, not
     // user-facing entities. Merge daemon counts with profile display data.
+    // When `layerScopedCounts` is populated, the chip count is replaced
+    // with the per-layer slice (entities whose canonical layer matches);
+    // the daemon's `sg.entityCount` (project-wide total) is still used
+    // as the fallback for Overview / Subgraphs callers that omit `layer`.
     return subGraphs
       .filter(sg => sg.name !== 'meta')
       .map(sg => {
         const binding = profile.forSubGraph(sg.name);
+        // Prefer the locally-derived distinct count (matches the entity
+        // list below); preserve a 0 result instead of falling back to
+        // the daemon total when in entity-scoped mode (the sub-graph
+        // genuinely has no in-scope entities).
+        const entityScoped = entityScopedCounts !== null
+          ? (entityScopedCounts.get(sg.name) ?? 0)
+          : sg.entityCount;
         return {
           slug: sg.name,
           icon: binding.icon ?? '•',
@@ -110,18 +174,29 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
           displayName: binding.displayName ?? sg.name,
           description: binding.description ?? sg.description,
           rank: binding.rank ?? 99,
-          entityCount: sg.entityCount,
+          entityCount: entityScoped,
           tripleCount: sg.tripleCount,
+          layerScoped: entityScopedCounts !== null,
         };
       })
       .sort((a, b) => a.rank - b.rank);
-  }, [subGraphs, profile]);
+  }, [subGraphs, profile, entityScopedCounts]);
 
   if (loading && merged.length === 0) return null;
   if (merged.length === 0) return null;
 
-  const totalEntities = merged.reduce((a, b) => a + b.entityCount, 0);
+  // Prefer the distinct-entity total (R2-5 / Issue B); fall back to
+  // the daemon-sum only when no entities prop was passed.
+  const totalEntities = entityScopedAllTotal ?? merged.reduce((a, b) => a + b.entityCount, 0);
   const totalTriples = merged.reduce((a, b) => a + b.tripleCount, 0);
+  // Tooltip suffix tells the user the count is layer-scoped on a
+  // WM/SWM/VM page; on the Overview / Subgraphs page it stays implicit
+  // (project-wide totals match the daemon view).
+  const layerLabel = layer === 'wm' ? 'Working Memory'
+    : layer === 'swm' ? 'Shared Working Memory'
+    : layer === 'vm' ? 'Verifiable Memory'
+    : null;
+  const scopeSuffix = layerLabel ? ` in ${layerLabel}` : '';
 
   return (
     <div className="v10-subgraph-bar">
@@ -130,7 +205,7 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
         type="button"
         className={`v10-subgraph-chip${selected === null ? ' active' : ''}`}
         onClick={() => onSelect(null)}
-        title={`All sub-graphs · ${totalEntities} entities · ${totalTriples} triples`}
+        title={`All sub-graphs · ${totalEntities} entities${scopeSuffix}${layerLabel ? '' : ` · ${totalTriples} triples`}`}
       >
         <span className="v10-subgraph-chip-icon">⊚</span>
         <span className="v10-subgraph-chip-label">All</span>
@@ -144,7 +219,7 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
             type="button"
             className={`v10-subgraph-chip${selected === sg.slug ? ' active' : ''}${badge ? ' has-badge' : ''}`}
             onClick={() => onSelect(sg.slug)}
-            title={`${sg.displayName}${sg.description ? ' · ' + sg.description : ''} · ${sg.entityCount} entities · ${sg.tripleCount} triples${badge ? ' · ' + badge.label : ''}`}
+            title={`${sg.displayName}${sg.description ? ' · ' + sg.description : ''} · ${sg.entityCount} entities${scopeSuffix}${layerLabel ? '' : ` · ${sg.tripleCount} triples`}${badge ? ' · ' + badge.label : ''}`}
             style={{
               '--sg-color': sg.color,
             } as React.CSSProperties}

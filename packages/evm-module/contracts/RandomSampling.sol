@@ -621,6 +621,19 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
      *      check, not here.
      */
     function _isCGEligible(uint256 contextGraphId) internal view returns (bool) {
+        // RFC-39 Phase B (deferred): curated CG random sampling requires a
+        // ciphertext-aware prover. The contract-side picker (steps 2/3 below)
+        // is already wired to draw against `getCiphertextChunkCount`, but the
+        // off-chain prover at `packages/random-sampling/src/prover.ts` still
+        // queries `getMerkleLeafCount` and proves against plaintext leaves.
+        // Until the prover ciphertext path lands, curated CGs are skipped at
+        // CG-level eligibility so the picker never returns a curated KC and
+        // every draw stays decidable against the existing plaintext leaves.
+        //
+        // Re-enabling curated random sampling is a single-line revert here +
+        // the unskip in `RandomSampling-curated.test.ts`, contingent on the
+        // prover ciphertext path being green.
+        if (contextGraphStorage.getIsCurated(contextGraphId)) return false;
         return contextGraphStorage.isContextGraphActive(contextGraphId);
     }
 

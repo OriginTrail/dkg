@@ -56,6 +56,13 @@ jobs:
           # `fetch-depth: 0` so we can verify the tag's commit ancestry
           # against `main` below (origin/main must be locally walkable).
           fetch-depth: 0
+          # `fetch-tags: true` so the annotated tag OBJECT (not just the
+          # ref) is materialised on the runner. Without this,
+          # actions/checkout creates a synthetic lightweight ref pointing
+          # at the commit, and `git cat-file -t <tag>` returns `commit`
+          # instead of `tag` — defeating the structural signed-tag check
+          # below for legitimately signed annotated tags.
+          fetch-tags: true
           persist-credentials: false
       - name: Validate tag format
         run: |

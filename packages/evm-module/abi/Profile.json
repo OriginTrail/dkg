@@ -76,6 +76,27 @@
   {
     "inputs": [
       {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "internalType": "bytes",
+        "name": "expected",
+        "type": "bytes"
+      },
+      {
+        "internalType": "bytes",
+        "name": "provided",
+        "type": "bytes"
+      }
+    ],
+    "name": "NodeIdShardingMismatch",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "string",
         "name": "nodeName",
         "type": "string"
@@ -142,6 +163,17 @@
       }
     ],
     "name": "OperatorFeeOutOfRange",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      }
+    ],
+    "name": "ProfileAlreadyExists",
     "type": "error"
   },
   {
@@ -370,6 +402,34 @@
   {
     "inputs": [
       {
+        "internalType": "address",
+        "name": "operationalWallet",
+        "type": "address"
+      },
+      {
+        "internalType": "string",
+        "name": "nodeName",
+        "type": "string"
+      },
+      {
+        "internalType": "bytes",
+        "name": "nodeId",
+        "type": "bytes"
+      },
+      {
+        "internalType": "uint16",
+        "name": "initialOperatorFee",
+        "type": "uint16"
+      }
+    ],
+    "name": "recreateProfile",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "bool",
         "name": "_status",
         "type": "bool"
@@ -378,6 +438,19 @@
     "name": "setStatus",
     "outputs": [],
     "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "shardingTableStorage",
+    "outputs": [
+      {
+        "internalType": "contract ShardingTableStorage",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
     "type": "function"
   },
   {

@@ -19,6 +19,7 @@ export {
   computePublicRootV10,
   computePrivateRootV10,
   computeFlatKCRootV10,
+  computeFlatKCMerkleLeafCountV10,
   computeKARootV10,
   computeKCRootV10,
 } from './merkle.js';

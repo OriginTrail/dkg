@@ -76,13 +76,15 @@ async function getWorkspaceAccessMetadata(
   const ontologyGraph = contextGraphDataUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
   const swmGraph = contextGraphSharedMemoryUri(contextGraphId);
   const result = await store.query(
-    `SELECT ?agent ?policy WHERE {
+    `SELECT ?agent ?policy ?revoked WHERE {
       {
         GRAPH <${cgMeta}> {
           { <${cgData}> <${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}> ?agent }
           UNION
           { <${cgData}> <${DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT}> ?agent }
         }
+      } UNION {
+        GRAPH <${cgMeta}> { <${cgData}> <${DKG_ONTOLOGY.DKG_REVOKED_AGENT}> ?revoked }
       } UNION {
         GRAPH <${cgMeta}> { <${cgData}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?policy }
       } UNION {
@@ -98,6 +100,14 @@ async function getWorkspaceAccessMetadata(
 
   const seen = new Set<string>();
   const agentAddresses: string[] = [];
+  // Local tombstones for agents revoked from this CG. The recipient
+  // resolver MUST subtract these from the union of allowed/participant
+  // agents — otherwise a peer-sync round that re-replicates a removed
+  // agent's `dkg:allowedAgent` triple would silently re-include them
+  // in the next sender-key wrap, leaking post-revoke writes back to a
+  // kicked member. See `removeAgentFromContextGraph` for the write
+  // side and OT-RFC-38 LU-4 (sender-key rotation on membership change).
+  const revokedAddresses = new Set<string>();
   let hasPrivateAccessPolicy = false;
   for (const row of result.bindings) {
     const rawAgent = stringBinding(row['agent']);
@@ -114,10 +124,23 @@ async function getWorkspaceAccessMetadata(
       }
     }
 
+    const rawRevoked = stringBinding(row['revoked']);
+    if (rawRevoked) {
+      const value = stripRdfLiteral(rawRevoked);
+      if (ethers.isAddress(value)) {
+        revokedAddresses.add(value.toLowerCase());
+      }
+    }
+
     const rawPolicy = stringBinding(row['policy']);
     if (rawPolicy && stripRdfLiteral(rawPolicy) === 'private') {
       hasPrivateAccessPolicy = true;
     }
+  }
+
+  if (revokedAddresses.size > 0) {
+    const filtered = agentAddresses.filter((addr) => !revokedAddresses.has(addr.toLowerCase()));
+    return { hasPrivateAccessPolicy, agentAddresses: filtered };
   }
 
   return { hasPrivateAccessPolicy, agentAddresses };

@@ -1,6 +1,8 @@
 import { isSafeIri } from '@origintrail-official/dkg-core';
 import { LlmClient } from './llm/client.js';
 import type { LlmConfig } from './llm/types.js';
+import { decodeRdfStringLiteral } from './rdf-literal.js';
+export { decodeRdfStringLiteral } from './rdf-literal.js';
 
 export interface MemoryToolContext {
   query: (
@@ -210,45 +212,6 @@ function stripRdfLiteral(value: string): string {
   const typed = value.match(/^"([\s\S]*)"(?:\^\^<[^>]+>)?(?:@[a-z-]+)?$/);
   if (typed) return typed[1];
   return value;
-}
-
-/**
- * Like `stripRdfLiteral`, but ALSO reverses the write-side encoding so
- * the original string is recovered faithfully.
- *
- * Chat message text is persisted via `JSON.stringify(text)` (see the
- * `${SCHEMA}text` quads below) — a single level of JSON string
- * encoding, so a real newline is stored as the two-character escape
- * `\n` inside the RDF literal. `stripRdfLiteral` only removes the
- * surrounding `"..."` / `^^<type>` / `@lang` wrapper; it leaves the
- * escape sequences intact, so callers were getting literal backslash-n
- * back. On history reload that destroyed markdown rendering
- * (paragraphs ran together, code fences shown as `\n`+text, table
- * separators as text). Live-streamed content was unaffected because
- * that path goes through `JSON.parse` of SSE deltas.
- *
- * `JSON.parse` of the re-quoted inner body is the exact, deterministic
- * inverse of the write-side `JSON.stringify` — no heuristic, lossless,
- * spec-defined. It correctly distinguishes an encoded newline (`\n`)
- * from an intentional literal backslash-n (which the encoder wrote as
- * `\\n`), unlike the earlier UI-side regex attempts. The try/catch
- * falls back to the un-decoded inner body so a non-JSON-encoded
- * literal behaves exactly as `stripRdfLiteral` did before.
- *
- * Scoped intentionally to the chat-text read sites only — the shared
- * `stripRdfLiteral` is used by ~10 call sites including double-encoded
- * nested-JSON fields and simple scalars; widening the decode there
- * would risk that blast radius.
- */
-export function decodeRdfStringLiteral(value: string): string {
-  if (!value) return '';
-  const typed = value.match(/^"([\s\S]*)"(?:\^\^<[^>]+>)?(?:@[a-z-]+)?$/);
-  if (!typed) return value;
-  try {
-    return JSON.parse(`"${typed[1]}"`) as string;
-  } catch {
-    return typed[1];
-  }
 }
 
 function normalizePersistenceStatus(value: string): ChatTurnPersistenceDisplayState | undefined {

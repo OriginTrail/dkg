@@ -944,4 +944,174 @@ describe('DKGAgent SwmAckQuorum integration (rc.9 PR-D)', () => {
       wh.handle = origHandle;
     }
   });
+
+  /**
+   * Hardening — corrupt protobuf bytes arriving on the
+   * PROTOCOL_SWM_SHARE_ACK handler MUST NOT crash the handler
+   * or the agent. handleSwmShareAck wraps decodeSwmShareAck in
+   * a try/catch; this test locks that protection so a
+   * regression that removed the try/catch (DoS hazard — a
+   * malformed peer could repeatedly throw and stall the
+   * receive loop) would fail loudly. Asserts:
+   *   1. handler resolves (no throw) for arbitrary garbage
+   *   2. handler returns the documented empty-bytes ack
+   *   3. quorum state is untouched (no spurious onAck)
+   */
+  it('hardening: handleSwmShareAck does NOT crash on corrupt protobuf bytes (DoS guard)', async () => {
+    const agent = register(await createAgent('AckQuorumCorruptBytes'));
+    const gossip = new CapturingGossip();
+    gossip.subscribers = ['12D3KooWCorrupt1', '12D3KooWCorrupt2'];
+    (agent as unknown as { gossip: CapturingGossip }).gossip = gossip;
+
+    const { install } = stubMessengerSendReliable(() => ({
+      delivered: false, queued: true, attempts: 1, messageId: 'q-' + Math.random().toString(36).slice(2),
+      error: 'transient', nextAttemptAtMs: Date.now() + 1000,
+    }));
+    install(agent);
+
+    const { shareOperationId } = await agent.share('cg-corrupt-bytes', [{
+      subject: 'urn:test:corrupt', predicate: 'http://schema.org/name', object: '"corrupt"', graph: '',
+    }]);
+
+    const ackHandler = await agent.getOrCreateSwmShareAckHandlerForTests();
+
+    const garbageInputs: Array<{ name: string; bytes: Uint8Array }> = [
+      { name: 'empty bytes', bytes: new Uint8Array() },
+      { name: 'random noise', bytes: new Uint8Array([0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]) },
+      { name: 'truncated varint', bytes: new Uint8Array([0x0a]) },
+      { name: 'all zeros', bytes: new Uint8Array(64) },
+      { name: 'mid-message truncation', bytes: new Uint8Array([0x0a, 0x05, 0x68]) },
+    ];
+
+    for (const { bytes } of garbageInputs) {
+      const out = await ackHandler(bytes, '12D3KooWCorrupt1');
+      expect(out).toEqual(new Uint8Array());
+    }
+
+    // Quorum state remains untouched — none of the garbage
+    // inputs caused a spurious onAck against the live record.
+    const inspect = agent.getSwmAckQuorumRecordSnapshotForTests(shareOperationId);
+    expect(inspect?.acked).toEqual([]);
+    expect(agent.getSwmAckQuorumStats().completed).toBe(0);
+  });
+
+  /**
+   * Hardening — an ack arriving for a shareOperationId that
+   * was never tracked (or already reaped via deadline) MUST be
+   * silently dropped at the agent integration layer. The unit
+   * test for createSwmAckQuorum.onAck covers the no-op
+   * behaviour at the component level; this test locks that the
+   * agent's handler propagates the same behaviour through the
+   * full decode → onAck pipeline. A regression where
+   * handleSwmShareAck mutated some other state on
+   * unknown-id arrival would not be caught by the unit test
+   * alone.
+   */
+  it('hardening: handleSwmShareAck silently drops acks for unknown shareOperationId (no-op propagation)', async () => {
+    const agent = register(await createAgent('AckQuorumUnknownOpId'));
+    const gossip = new CapturingGossip();
+    gossip.subscribers = ['12D3KooWUnknown1'];
+    (agent as unknown as { gossip: CapturingGossip }).gossip = gossip;
+
+    const { install } = stubMessengerSendReliable(new Map());
+    install(agent);
+
+    const ackHandler = await agent.getOrCreateSwmShareAckHandlerForTests();
+
+    const beforeStats = agent.getSwmAckQuorumStats();
+    expect(beforeStats).toEqual({
+      tracked: 0, completed: 0, watchdogFired: 0, deadlineExpired: 0, pending: 0,
+    });
+
+    const out = await ackHandler(
+      encodeSwmShareAck({
+        shareOperationId: 'op-never-tracked-by-this-agent',
+        ackPeerId: '12D3KooWUnknown1',
+      }),
+      '12D3KooWUnknown1',
+    );
+    expect(out).toEqual(new Uint8Array());
+
+    const afterStats = agent.getSwmAckQuorumStats();
+    expect(afterStats).toEqual(beforeStats);
+  });
+
+  /**
+   * Hardening — concurrent shares to DIFFERENT context graphs
+   * track independently. Locks that the agent's quorum state
+   * is keyed strictly by shareOperationId (no Map collision,
+   * no shared state) and that completing one share does NOT
+   * affect the other's pending/acked/expectedMembers state.
+   *
+   * Failure modes this catches:
+   *   - Map keyed off cgId instead of shareOperationId (acks
+   *     from share A would land against share B)
+   *   - completeRecord side-effects leaking into sibling
+   *     records via a shared array reference
+   *   - stats.tracked/.completed/.pending double-counting or
+   *     under-counting when two records exist simultaneously
+   */
+  it('hardening: two concurrent shares to different cgs track independently (Map isolation)', async () => {
+    const agent = register(await createAgent('AckQuorumConcurrentShares'));
+    const gossip = new CapturingGossip();
+    gossip.subscribers = ['12D3KooWAlpha', '12D3KooWBeta'];
+    (agent as unknown as { gossip: CapturingGossip }).gossip = gossip;
+
+    const { install } = stubMessengerSendReliable(() => ({
+      delivered: false, queued: true, attempts: 1, messageId: 'q-' + Math.random().toString(36).slice(2),
+      error: 'transient', nextAttemptAtMs: Date.now() + 1000,
+    }));
+    install(agent);
+
+    // Drive two share() calls back-to-back to two different
+    // CGs. Both must register; both must reach `pending=1`
+    // independently for a brief window.
+    const shareA = await agent.share('cg-concurrent-A', [{
+      subject: 'urn:test:concA', predicate: 'http://schema.org/name', object: '"A"', graph: '',
+    }]);
+    const shareB = await agent.share('cg-concurrent-B', [{
+      subject: 'urn:test:concB', predicate: 'http://schema.org/name', object: '"B"', graph: '',
+    }]);
+    expect(shareA.shareOperationId).not.toBe(shareB.shareOperationId);
+
+    const stats0 = agent.getSwmAckQuorumStats();
+    expect(stats0.tracked).toBe(2);
+    expect(stats0.pending).toBe(2);
+    expect(stats0.completed).toBe(0);
+
+    // Snapshots must be independent — different
+    // shareOperationIds, distinct expectedMembers references
+    // (same set of peers in this test, but the snapshot's
+    // membership list is not aliased between records).
+    const snapA = agent.getSwmAckQuorumRecordSnapshotForTests(shareA.shareOperationId);
+    const snapB = agent.getSwmAckQuorumRecordSnapshotForTests(shareB.shareOperationId);
+    expect(snapA?.shareOperationId).toBe(shareA.shareOperationId);
+    expect(snapB?.shareOperationId).toBe(shareB.shareOperationId);
+    expect(snapA?.acked).toEqual([]);
+    expect(snapB?.acked).toEqual([]);
+
+    // Drive A to completion. B's state must remain pending +
+    // unacked.
+    const ackHandler = await agent.getOrCreateSwmShareAckHandlerForTests();
+    await ackHandler(
+      encodeSwmShareAck({ shareOperationId: shareA.shareOperationId, ackPeerId: '12D3KooWAlpha' }),
+      '12D3KooWAlpha',
+    );
+    await ackHandler(
+      encodeSwmShareAck({ shareOperationId: shareA.shareOperationId, ackPeerId: '12D3KooWBeta' }),
+      '12D3KooWBeta',
+    );
+
+    // A is reaped on completion; B is still pending with no
+    // acks (the Alpha+Beta acks did NOT bleed into B).
+    expect(agent.getSwmAckQuorumRecordSnapshotForTests(shareA.shareOperationId)).toBeUndefined();
+    const snapBAfter = agent.getSwmAckQuorumRecordSnapshotForTests(shareB.shareOperationId);
+    expect(snapBAfter).toBeDefined();
+    expect(snapBAfter?.acked).toEqual([]);
+
+    const statsAfter = agent.getSwmAckQuorumStats();
+    expect(statsAfter.tracked).toBe(2);
+    expect(statsAfter.completed).toBe(1);
+    expect(statsAfter.pending).toBe(1);
+  });
 });

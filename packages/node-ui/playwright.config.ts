@@ -5,6 +5,7 @@ import { dirname } from 'node:path';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CI = !!process.env.CI;
 const PORT = 5173;
+const DEVNET_NODE = process.env.DEVNET_NODE || process.env.UI_NODE_ID || '1';
 
 export default defineConfig({
   testDir: './e2e/specs',
@@ -30,7 +31,7 @@ export default defineConfig({
   ],
 
   webServer: {
-    command: 'pnpm dev:ui',
+    command: `cross-env DEVNET_NODE=${DEVNET_NODE} pnpm dev:ui`,
     cwd: __dirname,
     port: PORT,
     reuseExistingServer: !CI,

@@ -197,6 +197,57 @@ describe('extractV10KCFromStore — happy path / publisher round-trip parity', (
     expect(quads[0].graph).toBe(contextGraphDataUri(fixture.cgName!, fixture.cgId.toString()));
   });
 
+  // Regression: T2 (devnet-sweep triage). The daemon's verify-quorum
+  // path stamps `dkg:trustLevel = "N"` onto the dataGraph AFTER the
+  // publisher has computed `merkleLeafCount` and registered it on-chain
+  // (see `dkg-agent.stampTrustLevel` / `stampBatchTrustLevel`). For
+  // single-node publishes (no remote ACK lands) this happens within
+  // seconds of publish, polluting the dataGraph with one extra triple
+  // per root subject. Without the post-publish predicate skip, the
+  // extractor recomputes `merkleLeafCount + 1` and the prover dies with
+  // `V10ProofLeafCountMismatchError` for every challenge period.
+  it('skips post-publish dkg:trustLevel stamps so leaf count stays bit-identical with merkleLeafCount', async () => {
+    const fixture: KCFixture = {
+      cgId: 11n,
+      kcId: 17n,
+      ual: 'did:dkg:hardhat:31337/0xpub/17',
+      rootEntities: ['urn:entity:trust-target'],
+      publicTriples: [
+        { subject: 'urn:entity:trust-target', predicate: 'urn:p:k', object: '"v"' },
+      ],
+    };
+    await seedKC(store, fixture);
+
+    const cgName = `cg-${fixture.cgId.toString()}`;
+    const dataGraph = contextGraphDataUri(cgName, fixture.cgId.toString());
+    const TRUST_LEVEL_PREDICATE = 'http://dkg.io/ontology/trustLevel';
+    const LEGACY_TRUST_LEVEL_PREDICATE = 'https://dkg.network/ontology#trustLevel';
+    await store.insert([
+      {
+        subject: 'urn:entity:trust-target',
+        predicate: TRUST_LEVEL_PREDICATE,
+        object: '"0"',
+        graph: dataGraph,
+      },
+      {
+        subject: 'urn:entity:trust-target',
+        predicate: LEGACY_TRUST_LEVEL_PREDICATE,
+        object: '"0"',
+        graph: dataGraph,
+      },
+    ]);
+
+    const result = await extractV10KCFromStore(store, fixture.cgId, fixture.kcId);
+
+    expect(result.triples).toHaveLength(fixture.publicTriples.length);
+    expect(result.triples.map((t) => t.predicate)).not.toContain(TRUST_LEVEL_PREDICATE);
+    expect(result.triples.map((t) => t.predicate)).not.toContain(LEGACY_TRUST_LEVEL_PREDICATE);
+    expect(result.leaves).toHaveLength(fixture.publicTriples.length);
+
+    const fixtureLeaves = fixture.publicTriples.map((t) => hashTripleV10(t.subject, t.predicate, t.object));
+    expect(new V10MerkleTree(result.leaves).root).toEqual(new V10MerkleTree(fixtureLeaves).root);
+  });
+
   it('round-trips through buildV10ProofMaterial (extractor leaves accept on-chain commitment)', async () => {
     const fixture: KCFixture = {
       cgId: 1n,

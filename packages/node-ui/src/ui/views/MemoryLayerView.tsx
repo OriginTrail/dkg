@@ -636,27 +636,47 @@ function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: string;
         ))}
       </div>
 
-      {publishResult && (
-        <div className="v10-publish-result-card success">
-          <div className="v10-publish-result-title">Published to Verifiable Memory</div>
-          <div className="v10-publish-result-details">
-            <div><span className="v10-publish-result-label">Knowledge Collection:</span> {publishResult.kcId}</div>
-            <div><span className="v10-publish-result-label">Status:</span> {publishResult.status}</div>
-            {publishResult.kas?.length > 0 && (
-              <div><span className="v10-publish-result-label">Knowledge Assets:</span> {publishResult.kas.length}</div>
-            )}
-            {publishResult.txHash && (
-              <div className="v10-publish-result-tx">
-                <span className="v10-publish-result-label">Tx:</span>{' '}
-                <span className="mono">{publishResult.txHash.slice(0, 10)}...{publishResult.txHash.slice(-8)}</span>
-                {publishResult.blockNumber != null && (
-                  <span className="v10-publish-result-block"> (block {publishResult.blockNumber})</span>
-                )}
+      {publishResult && (() => {
+        const confirmed = publishResult.status === 'confirmed' && !!publishResult.txHash;
+        return (
+          <div className={`v10-publish-result-card ${confirmed ? 'success' : 'error'}`}>
+            <div className="v10-publish-result-title">
+              {confirmed
+                ? 'Published to Verified Memory'
+                : 'NOT published to Verified Memory'}
+            </div>
+            {!confirmed && (
+              <div className="v10-publish-result-details" style={{ marginBottom: 6 }}>
+                The data was prepared and stored locally as <code>{publishResult.status}</code>,
+                but the on-chain transaction did not land. Verified Memory requires a confirmed
+                <code> KCCreated </code> event. Check the node logs for the cause (typically a
+                missing publisher wallet, an unfunded signer, or a chain adapter that isn&apos;t V10-ready).
               </div>
             )}
+            <div className="v10-publish-result-details">
+              <div><span className="v10-publish-result-label">Knowledge Collection:</span> {publishResult.kcId}</div>
+              <div><span className="v10-publish-result-label">Status:</span> {publishResult.status}</div>
+              {publishResult.kas?.length > 0 && (
+                <div><span className="v10-publish-result-label">Knowledge Assets:</span> {publishResult.kas.length}</div>
+              )}
+              {publishResult.txHash ? (
+                <div className="v10-publish-result-tx">
+                  <span className="v10-publish-result-label">Tx hash:</span>{' '}
+                  <span className="mono" title={publishResult.txHash}>{publishResult.txHash}</span>
+                  {publishResult.blockNumber != null && (
+                    <span className="v10-publish-result-block"> (block {publishResult.blockNumber})</span>
+                  )}
+                </div>
+              ) : (
+                <div className="v10-publish-result-tx">
+                  <span className="v10-publish-result-label">Tx hash:</span>{' '}
+                  <span className="mono">(none — no on-chain transaction)</span>
+                </div>
+              )}
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {error && (
         <div className="v10-publish-result-card error">{error}</div>

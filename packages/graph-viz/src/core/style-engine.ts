@@ -28,10 +28,14 @@ export class StyleEngine {
   private _config: Required<StyleConfig>;
   private _prefixManager: PrefixManager;
   private _palette: ColorPalette;
+  private _hasExplicitDefaultNodeColor: boolean;
+  private _hasExplicitDefaultEdgeColor: boolean;
 
   constructor(config: StyleConfig | undefined, prefixManager: PrefixManager, palette?: ColorPalette) {
     this._prefixManager = prefixManager;
     this._palette = palette ?? PALETTE_DARK;
+    this._hasExplicitDefaultNodeColor = config?.defaultNodeColor !== undefined;
+    this._hasExplicitDefaultEdgeColor = config?.defaultEdgeColor !== undefined;
     this._config = {
       nodeColors: config?.nodeColors ?? {},
       classColors: config?.classColors ?? {},
@@ -59,8 +63,8 @@ export class StyleEngine {
     this._palette = palette;
     // Only override defaults that weren't explicitly set by the user
     this._config = { ...this._config };
-    this._config.defaultNodeColor = palette.primary;
-    this._config.defaultEdgeColor = palette.edgeColor;
+    if (!this._hasExplicitDefaultNodeColor) this._config.defaultNodeColor = palette.primary;
+    if (!this._hasExplicitDefaultEdgeColor) this._config.defaultEdgeColor = palette.edgeColor;
   }
 
   get config(): Readonly<Required<StyleConfig>> {

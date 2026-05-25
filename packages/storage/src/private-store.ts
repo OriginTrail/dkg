@@ -551,24 +551,27 @@ export class PrivateContentStore {
     // Blank nodes are node-local and carry no externally-meaningful
     // identity, so sealing them would only break dedup — leave as-is.
     if (serialized.startsWith('_:')) return serialized;
-    // Seal IRI objects in the SAME envelope as literals: an earlier
-    // revision had `encryptLiteral` only wrap values starting with
-    // `"` and pass IRI objects through unchanged, so the N-Quads
-    // dump of a private graph leaked every outgoing edge's target
-    // IRI (e.g. `ex:ssn`, `http://foo/creditCard`). We mark the
-    // wrapped term with
-    // an extra `TAG|` byte inside the ciphertext so the decrypt side
-    // can restore the original term shape (IRI vs literal vs blank).
+    // IRI objects pass through unsealed. An earlier revision
+    // (de341d88, 2026-04-22, PR-229 round-6 bot review finding) wrapped
+    // both literals and IRIs in the same AES-GCM envelope with an
+    // internal `L|` / `I|` tag, on the theory that the on-disk N-Quads
+    // dump of a private graph would otherwise leak outgoing-edge target
+    // IRIs. That sealed-IRI behaviour broke every SPARQL filter against
+    // the `_private` graph — most visibly the EPCIS read path, which
+    // pattern-matches `?event a <ObjectEvent>` and friends in the
+    // object position (see https://github.com/OriginTrail/dkg/issues/633
+    // and `dkgv10-spec/scratchpad/private-store-iri-seal-blast-radius.md`).
+    // We now seal LITERAL object terms only, matching the original ST-2
+    // finding ("the literal value lands on disk in plaintext"). IRI
+    // confidentiality across `_private` is a separate concern that
+    // needs a blind-index design, not a SPARQL-killing envelope.
     //
-    // Tag values:
-    //   L = original term was a literal (starts with `"`)
-    //   I = original term was an IRI (anything else non-blank)
-    //
-    // The outer envelope is always a valid N-Triples literal so the
-    // underlying TripleStore stays syntactically happy regardless of
-    // the original term kind.
-    const tag = serialized.startsWith('"') ? 'L' : 'I';
-    const plaintext = `${tag}|${serialized}`;
+    // Decrypt-side compatibility: `decryptLiteral` still strips the
+    // `L|` / `I|` prefix after decryption, so retroactive private
+    // triples sealed between 2026-05-05 (PR #379) and this commit
+    // remain readable via the safe API (`getPrivateTriples`).
+    if (!serialized.startsWith('"')) return serialized;
+    const plaintext = `L|${serialized}`;
     const iv = randomBytes(12);
     const cipher = createCipheriv('aes-256-gcm', this.encryptionKey, iv);
     const ct = Buffer.concat([
@@ -935,9 +938,13 @@ export class PrivateContentStore {
       subject: row['s'],
       predicate: row['p'],
       // Reverse the AES-GCM seal applied at write time so callers see
-      // the original literal value (. Non-encrypted
-      // values (legacy data, URIs, blank nodes) flow through unchanged.
-      object: this.decryptLiteral(row['o']),
+      // the original literal value. Non-encrypted values (legacy data,
+      // URIs, blank nodes) flow through unchanged, then get normalised
+      // back to N-Triples form below so the `Quad.object` contract is
+      // stable across sealed vs unsealed values (post-IRI-seal-revert,
+      // freshly-stored IRI objects come back as bare strings from the
+      // SPARQL binding layer — see #633).
+      object: normaliseTermToNTriples(this.decryptLiteral(row['o'])),
       graph: graphUri,
     }));
   }
@@ -998,4 +1005,26 @@ function parseLiteral(value: string | undefined): unknown {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Normalise an RDF term to the N-Triples lexical form the rest of the
+ * codebase passes around (`<iri>`, `"literal"`, `_:bnode`). The triple
+ * store adapters (`OxigraphStore`, `SparqlHttpStore`) emit IRI bindings
+ * as BARE strings (e.g. `https://example.org/foo`), while literal
+ * bindings come back already quoted. Before the IRI-seal revert, every
+ * object that round-tripped through `decryptLiteral` was implicitly
+ * normalised because the seal-payload embedded `I|<iri>` and decrypt
+ * stripped the tag — IRIs always came out wrapped. With IRI objects now
+ * stored in plaintext, `getPrivateTriples` needs to apply this
+ * normalisation explicitly so its `Quad.object` contract stays stable
+ * for consumers like `publisher/src/access-handler.ts` that interpolate
+ * the value verbatim into an N-Quads string.
+ */
+function normaliseTermToNTriples(term: string): string {
+  if (!term) return term;
+  if (term.startsWith('<') || term.startsWith('"') || term.startsWith('_:')) {
+    return term;
+  }
+  return `<${term}>`;
 }

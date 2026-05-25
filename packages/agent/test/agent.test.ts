@@ -2419,6 +2419,15 @@ decisions: []
       participantAgents: Array.from({ length: 257 }, (_, i) => `0x${(i + 1).toString(16).padStart(40, '0')}`),
       callerAgentAddress: ownerAgent,
     })).rejects.toThrow(/participantAgents cannot exceed/);
+    // OT-RFC-38 / LU-6 Phase B (Codex PR #610 fd5b31f1 round-2): on
+    // single-tenant edge nodes (the mainnet launch deployment shape),
+    // the previous strict "curator agent must equal chain signer"
+    // policy was needless friction — every user is also the node
+    // operator, so the chain signer IS the curator from the user's
+    // perspective. The new default auto-promotes the chain signer as
+    // the on-chain governance owner and persists the calling agent as
+    // a participantAgent. Multi-tenant cores can opt back into the
+    // legacy strict check via `{ strictEoaCuratorMatch: true }`.
     await agent.createContextGraph({
       id: 'register-non-default-curated-policy',
       name: 'Non-default Curated Policy',
@@ -2426,7 +2435,18 @@ decisions: []
       callerAgentAddress: nonDefaultOwnerAgent,
     });
     await expect(agent.registerContextGraph('register-non-default-curated-policy', { callerAgentAddress: nonDefaultOwnerAgent }))
-      .rejects.toThrow(/Per-agent chain signers are not supported/);
+      .resolves.toMatchObject({ onChainId: expect.any(String) });
+    // Strict mode preserves the legacy reject for multi-tenant cores.
+    await agent.createContextGraph({
+      id: 'register-non-default-curated-policy-strict',
+      name: 'Non-default Curated Policy (Strict)',
+      accessPolicy: 1,
+      callerAgentAddress: nonDefaultOwnerAgent,
+    });
+    await expect(agent.registerContextGraph('register-non-default-curated-policy-strict', {
+      callerAgentAddress: nonDefaultOwnerAgent,
+      strictEoaCuratorMatch: true,
+    })).rejects.toThrow(/strictEoaCuratorMatch was requested|Per-agent chain signers are not supported/);
 
     await agent.createContextGraph({ id: 'register-open-policy', name: 'Open Policy', callerAgentAddress: ownerAgent });
     await agent.registerContextGraph('register-open-policy', { callerAgentAddress: ownerAgent });
@@ -2458,22 +2478,37 @@ decisions: []
       publishPolicy: 0,
     });
 
-    expect(chain.createOnChainContextGraphCalls[0]).toMatchObject({
+    // OT-RFC-38 / LU-6 Phase B (Codex PR #610 fd5b31f1 round-2):
+    // chain calls are now indexed from `[1]` because the relaxed-default
+    // register at `register-non-default-curated-policy` (above) succeeds
+    // and produces chain call `[0]` ahead of the previously-first
+    // `register-open-policy`.
+    expect(chain.createOnChainContextGraphCalls[0]?.accessPolicy).toBe(1);
+    expect(chain.createOnChainContextGraphCalls[1]).toMatchObject({
       accessPolicy: 0,
       publishPolicy: 1,
       participantAgents: [],
     });
-    expect(chain.createOnChainContextGraphCalls[1]?.accessPolicy).toBe(1);
-    expect(chain.createOnChainContextGraphCalls[1]?.publishPolicy).toBe(0);
-    expect(chain.createOnChainContextGraphCalls[1]?.publishAuthority).toBe(ethers.getAddress(chain.signerAddress));
-    expect(chain.createOnChainContextGraphCalls[1]?.participantAgents).toContain(allowedAgent);
     expect(chain.createOnChainContextGraphCalls[2]?.accessPolicy).toBe(1);
     expect(chain.createOnChainContextGraphCalls[2]?.publishPolicy).toBe(0);
     expect(chain.createOnChainContextGraphCalls[2]?.publishAuthority).toBe(ethers.getAddress(chain.signerAddress));
-    expect(chain.createOnChainContextGraphCalls[2]?.participantAgents).toEqual([]);
-    expect(chain.createOnChainContextGraphCalls[3]?.accessPolicy).toBe(0);
+    expect(chain.createOnChainContextGraphCalls[2]?.participantAgents).toContain(allowedAgent);
+    expect(chain.createOnChainContextGraphCalls[3]?.accessPolicy).toBe(1);
     expect(chain.createOnChainContextGraphCalls[3]?.publishPolicy).toBe(0);
     expect(chain.createOnChainContextGraphCalls[3]?.publishAuthority).toBe(ethers.getAddress(chain.signerAddress));
+    // OT-RFC-38 / LU-6 Phase B — `getContextGraphParticipantAgentAddresses`
+    // now unions DKG_PARTICIPANT_AGENT with DKG_ALLOWED_AGENT so the
+    // on-chain participant list is a superset of the local allowlist.
+    // This CG was registered via `inviteAgentToContextGraph(... allowedAgent)`
+    // which writes a DKG_ALLOWED_AGENT triple; under Phase B the
+    // chain registration must forward that wallet so cores can
+    // authority-check its envelopes after auto-hosting. Pre-Phase-B
+    // expectation was `[]` (only explicit participantAgents flowed);
+    // updated to assert the new superset semantics.
+    expect(chain.createOnChainContextGraphCalls[3]?.participantAgents).toEqual([allowedAgent]);
+    expect(chain.createOnChainContextGraphCalls[4]?.accessPolicy).toBe(0);
+    expect(chain.createOnChainContextGraphCalls[4]?.publishPolicy).toBe(0);
+    expect(chain.createOnChainContextGraphCalls[4]?.publishAuthority).toBe(ethers.getAddress(chain.signerAddress));
 
     await agent.stop().catch(() => {});
   });
@@ -2674,17 +2709,17 @@ decisions: []
     await agent.stop().catch(() => {});
   });
 
-  // Codex PR #502 round-6/round-7:
-  //   - round-6: createContextGraph used to accept-then-drop
-  //     `publishAuthorityAccountId` silently. Now fails fast at the
-  //     boundary.
-  //   - round-7: the field was also removed from the public TS
-  //     signature, so typed callers get a compile-time
-  //     excess-property error before they ever hit the runtime guard.
-  //     This test exercises the runtime path via `as any` to simulate
-  //     untyped/JS callers (or typed callers casting around the
-  //     signature).
-  it('rejects publishAuthorityAccountId on createContextGraph() — PCA ids are register-time-only', async () => {
+  // OT-RFC-38 / LU-6 Phase B (Codex PR #610 fd5b31f1 fix):
+  // `publishPolicy` and `publishAuthorityAccountId` are now PERSISTED
+  // at create time so the deferred-registration path
+  // (memory.ts auto-register on first VM publish) preserves the
+  // user's create-time choice. Replaces the Codex PR #502 round-6/7
+  // "reject at create boundary" rule — the original concern (silent
+  // drop) is now solved by persistence + read-at-register rather than
+  // by forcing two-step flows. Boundary validation still rejects
+  // invalid combinations (PCA on open-publish, non-positive ids,
+  // non-{0,1} policies).
+  it('rejects publishAuthorityAccountId on createContextGraph() with publishPolicy=1 (open)', async () => {
     const chain = new PcaCuratedRegistrationChainAdapter(new Map([[7n, ethers.Wallet.createRandom().address]]));
     const agent = await DKGAgent.create({
       name: 'PcaOpenPolicyBot',
@@ -2694,25 +2729,68 @@ decisions: []
     });
     await agent.start();
 
-    // Both axes (curated AND open) reject — the param is no longer
-    // a "validate at create time" knob, it's just unsupported here.
-    // `as any` deliberately bypasses the (now-narrower) TS signature
-    // to reach the runtime guard.
     await expect(agent.createContextGraph({
       id: 'reject-pca-create-open',
       name: 'Reject PCA Create (Open)',
+      publishPolicy: 1,
       publishAuthorityAccountId: 7n,
       callerAgentAddress: ethers.getAddress(chain.signerAddress),
-    } as any)).rejects.toThrow(/not supported on createContextGraph|register-time-only/i);
+    })).rejects.toThrow(/PCA|publishAuthorityAccountId|curated publishPolicy/i);
 
     await expect(agent.createContextGraph({
-      id: 'reject-pca-create-curated',
-      name: 'Reject PCA Create (Curated)',
+      id: 'reject-pca-create-non-positive',
+      name: 'Reject PCA Create (non-positive)',
       accessPolicy: 1,
-      publishAuthorityAccountId: 7n,
+      publishAuthorityAccountId: 0n,
       callerAgentAddress: ethers.getAddress(chain.signerAddress),
-    } as any)).rejects.toThrow(/not supported on createContextGraph|register-time-only/i);
+    })).rejects.toThrow(/positive integer/i);
 
+    await agent.stop().catch(() => {});
+  });
+
+  it('persists publishPolicy + publishAuthorityAccountId at create time and propagates to registerContextGraph', async () => {
+    const pcaOwner = new ethers.Wallet(HARDHAT_KEYS.REC1_OP).address;
+    const pcaAccountId = 42n;
+    const chain = new PcaCuratedRegistrationChainAdapter(
+      new Map([[pcaAccountId, pcaOwner]]),
+      pcaOwner,
+    );
+    const agent = await DKGAgent.create({
+      name: 'PcaPersistedBot',
+      store: new OxigraphStore(),
+      chainAdapter: chain,
+      nodeRole: 'core',
+    });
+    await agent.start();
+
+    await agent.createContextGraph({
+      id: 'pca-persisted-create',
+      name: 'PCA Persisted Create',
+      accessPolicy: 1,
+      publishPolicy: 0,
+      publishAuthorityAccountId: pcaAccountId,
+      callerAgentAddress: pcaOwner,
+    });
+
+    const stored = await agent.getStoredContextGraphRegistrationOptions('pca-persisted-create');
+    expect(stored.publishPolicy).toBe(0);
+    expect(stored.publishAuthorityAccountId).toBe(pcaAccountId);
+
+    // Deferred-register path: pass NO publishPolicy/PCA at register
+    // time — the persisted create-time values must flow through.
+    // memory.ts's auto-register call reads them via
+    // `getStoredContextGraphRegistrationOptions` and forwards them.
+    await expect(agent.registerContextGraph('pca-persisted-create', {
+      callerAgentAddress: pcaOwner,
+      publishPolicy: stored.publishPolicy,
+      publishAuthorityAccountId: stored.publishAuthorityAccountId,
+    })).resolves.toMatchObject({ onChainId: expect.any(String) });
+
+    expect(chain.createOnChainContextGraphCalls[0]).toMatchObject({
+      publishPolicy: 0,
+      publishAuthority: pcaOwner,
+      publishAuthorityAccountId: pcaAccountId,
+    });
     await agent.stop().catch(() => {});
   });
 

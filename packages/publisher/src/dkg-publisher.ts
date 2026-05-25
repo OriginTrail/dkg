@@ -1148,6 +1148,13 @@ export class DKGPublisher implements Publisher {
        * on-chain publishes.
        */
       precomputedAttestation?: PublishOptions['precomputedAttestation'];
+      /**
+       * OT-RFC-38 / LU-5. When set, the inline ACK payload is AEAD-
+       * encrypted before being shipped to cores so curated-CG bytes
+       * are opaque on the wire. See `PublishOptions.encryptInlinePayload`
+       * for the full semantics.
+       */
+      encryptInlinePayload?: PublishOptions['encryptInlinePayload'];
     },
   ): Promise<PublishResult> {
     const ctx = options?.operationCtx ?? createOperationContext('publishFromSWM');
@@ -1264,6 +1271,7 @@ export class DKGPublisher implements Publisher {
       subGraphName: options?.subGraphName,
       publisherNodeIdentityIdOverride: options?.publisherNodeIdentityIdOverride,
       precomputedAttestation: options?.precomputedAttestation,
+      encryptInlinePayload: options?.encryptInlinePayload,
       [INTERNAL_ORIGIN_TOKEN]: true,
     };
     const publishResult = await this.publish(internalPublishOptions);
@@ -1615,18 +1623,23 @@ export class DKGPublisher implements Publisher {
       // Descriptive SWM graph names stay on the existing tentative/mock path.
     }
     // Per-publish attribution override (RFC-001 §4): see PublishOptions
-    // docstring. `hasAttributionOverride` must influence the EARLY on-chain
-    // attempt gate too — otherwise `publisherSigner` and `tokenAmount`
-    // never resolve when a daemon with persistent identity `0n` carries an
-    // explicit override (including `0n` for mode (d) no-attribution),
-    // and the late gate would then enter the chain branch with
-    // `publisherSigner === undefined` and throw `PublisherWalletRequiredError`.
-    // Self-ACK signing remains tied to `this.publisherNodeIdentityId > 0n`
-    // below — the override controls on-chain attribution, not who signs.
+    // docstring. `hasAttributionOverride` lets a caller force a specific
+    // attribution value (including `0n` for the contract's no-attribution
+    // mode); without an override we fall through to whatever this
+    // publisher's persistent V10 identity is (which is `0n` for daemons
+    // that never registered a Profile — e.g. edge nodes).
+    //
+    // OT-RFC-38 §1.1 — edge agents that haven't (and won't) register an
+    // on-chain Profile MUST still be able to publish curated CGs to VM.
+    // `attributionIdentityId === 0n` is the contract's no-attribution mode
+    // and `KnowledgeAssetsV10.publishKnowledgeCollections` accepts it, so
+    // we no longer gate the on-chain attempt on identity presence. The
+    // `publisherSigner` still resolves from the chain adapter regardless
+    // of profile state — see `inferAdapterPublisherAddress`. If no signer
+    // can be resolved at all, the on-chain branch throws
+    // `PublisherWalletRequiredError` instead of silently degrading.
     const hasAttributionOverride = options.publisherNodeIdentityIdOverride !== undefined;
-    const willAttemptOnChainPublish =
-      (this.publisherNodeIdentityId > 0n || hasAttributionOverride) &&
-      publisherContextGraphId !== undefined;
+    const willAttemptOnChainPublish = publisherContextGraphId !== undefined;
     const chainV10Ready = await this.refreshChainV10Readiness();
     const canResolveOnChainPublisher = willAttemptOnChainPublish && chainV10Ready;
     const resolvedPublisherAddress = canResolveOnChainPublisher
@@ -1770,9 +1783,31 @@ export class DKGPublisher implements Publisher {
     // recompute private merkle roots from SWM data alone.
     const hasPrivateData = privateRoots.length > 0;
     const isPublishFromSharedMemory = !!options.fromSharedMemory;
-    const stagingQuads = isPublishFromSharedMemory
-      ? undefined
-      : new TextEncoder().encode(nquadsStr);
+    // OT-RFC-38 / LU-5: when an encryptInlinePayload hook is wired (curated
+    // CGs only — DKGAgent resolves this from accessPolicy), ALWAYS send the
+    // payload inline as AEAD ciphertext, regardless of `fromSharedMemory`.
+    // Cores can't decrypt and they're not subscribed to curated SWM yet
+    // (substrate split lands in LU-6), so SWM-lookup would always decline
+    // with NO_DATA_IN_SWM — the exact bug §1.1 surfaces. Public CGs keep
+    // the existing behaviour: `fromSharedMemory` → cores look up SWM
+    // locally; otherwise plaintext inline.
+    const useEncryptedInline = typeof options.encryptInlinePayload === 'function';
+    let stagingQuads: Uint8Array | undefined;
+    let stagingByteSize = publicByteSize;
+    if (useEncryptedInline) {
+      const plaintextBytes = new TextEncoder().encode(nquadsStr);
+      const ciphertext = await options.encryptInlinePayload!(plaintextBytes);
+      stagingQuads = ciphertext instanceof Uint8Array ? ciphertext : new Uint8Array(ciphertext);
+      // For curated CGs the publisher PAYS for ciphertext bytes (cores
+      // sign that into the V10 digest). Override publicByteSize for the
+      // ACK collection branch below; the chain TX still uses the
+      // ciphertext byte size as `byteSize` since that's what's signed.
+      stagingByteSize = BigInt(stagingQuads.length);
+    } else {
+      stagingQuads = isPublishFromSharedMemory
+        ? undefined
+        : new TextEncoder().encode(nquadsStr);
+    }
 
     // Pre-compute tokenAmount and epochs so they can be included in the
     // H5-prefixed publish ACK digest (incl. merkleLeafCount) — matches
@@ -1823,12 +1858,17 @@ export class DKGPublisher implements Publisher {
         );
       }
     }
+    // LU-5: pricing follows the byteSize that gets signed into the V10
+    // digest. For curated (encrypted-inline) publishes that's the
+    // ciphertext byte count; for public publishes it stays as plaintext
+    // bytes. Single source of truth so ACK pricing == chain tx pricing.
+    const effectiveByteSize = useEncryptedInline ? stagingByteSize : publicByteSize;
     let precomputedTokenAmount = 0n;
     if (canAttemptOnChainPublish && typeof this.chain.getRequiredPublishTokenAmount === 'function') {
       try {
-        precomputedTokenAmount = await this.chain.getRequiredPublishTokenAmount(publicByteSize, publishEpochs);
+        precomputedTokenAmount = await this.chain.getRequiredPublishTokenAmount(effectiveByteSize, publishEpochs);
         if (precomputedTokenAmount <= 0n) {
-          this.log.warn(ctx, `getRequiredPublishTokenAmount returned ${precomputedTokenAmount} for byteSize=${publicByteSize} — using 1n as minimum`);
+          this.log.warn(ctx, `getRequiredPublishTokenAmount returned ${precomputedTokenAmount} for byteSize=${effectiveByteSize} — using 1n as minimum`);
           precomputedTokenAmount = 1n;
         }
       } catch (err) {
@@ -1895,11 +1935,16 @@ export class DKGPublisher implements Publisher {
       onPhase?.('collect_v10_acks', 'start');
       try {
         const rootEntities = manifestEntries.map(m => m.rootEntity);
+        // LU-5: for curated CGs the publisher pays / signs against the
+        // ciphertext byte size (`effectiveByteSize`). For public CGs
+        // nothing changed — `effectiveByteSize === publicByteSize`.
         v10ACKs = await options.v10ACKProvider(
-          kcMerkleRoot, v10CgDomain, kaCount, rootEntities, publicByteSize, stagingQuads,
+          kcMerkleRoot, v10CgDomain, kaCount, rootEntities,
+          effectiveByteSize, stagingQuads,
           publishEpochs, precomputedTokenAmount,
           swmGraphId, options.subGraphName,
           kcMerkleLeafCount,
+          useEncryptedInline,
         );
         this.log.info(ctx, `V10: Collected ${v10ACKs.length} core node ACKs`);
       } catch (err) {
@@ -1967,7 +2012,7 @@ export class DKGPublisher implements Publisher {
           v10CgId,
           kcMerkleRoot,
           BigInt(kaCount),
-          publicByteSize,
+          effectiveByteSize,
           BigInt(publishEpochs),
           precomputedTokenAmount,
           BigInt(kcMerkleLeafCount),
@@ -2017,13 +2062,12 @@ export class DKGPublisher implements Publisher {
       : this.publisherNodeIdentityId;
     let usedV10Path = false;
 
-    // Gate: skip on-chain only when there's no usable attribution AND no
-    // explicit override. With an explicit override (including `0n`), we
-    // proceed on-chain; the contract validates non-zero values name a
-    // real sharding-table node and accepts `0n` as no-attribution.
-    if (!hasAttributionOverride && this.publisherNodeIdentityId === 0n) {
-      this.log.warn(ctx, `Identity not set (0) — skipping on-chain publish`);
-    } else if (publisherContextGraphId === undefined) {
+    // Gate: skip on-chain only when we can't resolve a target CG id or
+    // the chain adapter doesn't advertise V10 readiness. The earlier
+    // identity-zero gate is gone (OT-RFC-38 §1.1) — edge agents without
+    // a Profile publish in no-attribution mode (`attributionIdentityId
+    // === 0n`), which the contract accepts.
+    if (publisherContextGraphId === undefined) {
       this.log.warn(ctx, `No positive on-chain context graph id resolved from "${v10CgDomain}" — skipping on-chain publish`);
     } else if (!chainV10Ready) {
       this.log.warn(ctx, 'Chain adapter is not V10-ready — skipping on-chain publish');
@@ -2133,7 +2177,7 @@ export class DKGPublisher implements Publisher {
         signStarted = false;
         onPhase?.('chain:submit', 'start');
         submitStarted = true;
-        this.log.info(ctx, `Submitting V10 on-chain publish tx (${kaCount} KAs, publicByteSize=${publicByteSize}, tokenAmount=${tokenAmount})`);
+        this.log.info(ctx, `Submitting V10 on-chain publish tx (${kaCount} KAs, byteSize=${effectiveByteSize}${useEncryptedInline ? ' [ciphertext]' : ''}, tokenAmount=${tokenAmount})`);
 
         if (!v10ACKs || v10ACKs.length === 0) {
           throw new Error('V10 ACKs required for on-chain publish — no ACKs collected');
@@ -2242,7 +2286,7 @@ export class DKGPublisher implements Publisher {
             publisherAddress: publisherSigner.address,
             merkleRoot: kcMerkleRoot,
             knowledgeAssetsAmount: kaCount,
-            byteSize: publicByteSize,
+            byteSize: effectiveByteSize,
             // PCA strict-equality: must match the value committed to the
             // ACK digest above (`computePublishACKDigest` at line ~1908)
             // so the on-chain ECDSA recovery yields the same operator

@@ -70,6 +70,20 @@ contract ContextGraphStorage is INamed, IVersioned, Guardian, ERC721Enumerable {
     // account ID whose registered agents are authorised to publish.
     mapping(uint256 contextGraphId => uint256) private _publishAuthorityAccountId;
 
+    // OT-RFC-38 / LU-6 Phase B — opt-in stable identifier the curator
+    // commits to at create time. Set to `keccak256(bytes(cleartextId))`
+    // by the agent layer so the wire form of SWM gossip (topic,
+    // envelope `contextGraphId`, signing payload, host-mode store key)
+    // is chain-derivable and privacy-preserving (cleartext never leaves
+    // the local node). Hosting cores that hear `ContextGraphCreated`
+    // read this and auto-subscribe to `dkg/context-graph/{nameHash}/
+    // shared-memory` in host mode — no off-chain discovery channel
+    // required for registered CGs. Zero indicates a CG that didn't
+    // commit to a name hash (curator chose not to opt in, or it pre-
+    // dates this surface); host-mode auto-subscribe is then governed
+    // by the discovery beacon path instead.
+    mapping(uint256 contextGraphId => bytes32) private _contextGraphNameHash;
+
     // KC -> CG reverse lookup (Phase 10 random sampling).
     // Public for convenience; zero means "not registered".
     mapping(uint256 kcId => uint256 contextGraphId) public kcToContextGraph;
@@ -84,6 +98,7 @@ contract ContextGraphStorage is INamed, IVersioned, Guardian, ERC721Enumerable {
     event ContextGraphCreated(
         uint256 indexed contextGraphId,
         address indexed owner,
+        bytes32 indexed nameHash,
         address[] participantAgents,
         uint256 metadataBatchId,
         uint8 accessPolicy,
@@ -151,6 +166,17 @@ contract ContextGraphStorage is INamed, IVersioned, Guardian, ERC721Enumerable {
      *                                     (and forced to address(0)) when open.
      * @param publishAuthorityAccountId    Non-zero for PCA curator type. Requires curated.
      *                                     Forced to 0 when open.
+     * @param nameHash                     OT-RFC-38 / LU-6 Phase B — opt-in stable wire
+     *                                     identifier the curator commits to (intended to
+     *                                     be `keccak256(bytes(cleartextId))`, but the
+     *                                     contract is agnostic to the derivation; ANY
+     *                                     unique non-zero `bytes32` works). Hosting
+     *                                     cores in the sharding table use this to
+     *                                     auto-subscribe to the SWM gossip topic on
+     *                                     receipt of the `ContextGraphCreated` event.
+     *                                     Pass `bytes32(0)` to opt out — host-mode
+     *                                     auto-discovery for the CG then relies on the
+     *                                     gossip-beacon path (Option β).
      *
      * @dev Hosts and ACK quorum are network-level concerns: the sharding table
      *      supplies hosts at publish time and `parametersStorage.minimumRequiredSignatures()`
@@ -163,7 +189,8 @@ contract ContextGraphStorage is INamed, IVersioned, Guardian, ERC721Enumerable {
         uint8 accessPolicy,
         uint8 publishPolicy,
         address publishAuthority,
-        uint256 publishAuthorityAccountId
+        uint256 publishAuthorityAccountId,
+        bytes32 nameHash
     ) external onlyContracts returns (uint256 contextGraphId) {
         if (owner_ == address(0)) {
             revert KnowledgeAssetsLib.InvalidContextGraphConfig("zero address owner");
@@ -231,9 +258,14 @@ contract ContextGraphStorage is INamed, IVersioned, Guardian, ERC721Enumerable {
             _publishAuthorityAccountId[contextGraphId] = normalizedAccountId;
         }
 
+        if (nameHash != bytes32(0)) {
+            _contextGraphNameHash[contextGraphId] = nameHash;
+        }
+
         emit ContextGraphCreated(
             contextGraphId,
             owner_,
+            nameHash,
             participantAgents,
             metadataBatchId,
             accessPolicy,
@@ -528,6 +560,19 @@ contract ContextGraphStorage is INamed, IVersioned, Guardian, ERC721Enumerable {
         uint256 contextGraphId
     ) external view returns (uint256) {
         return _publishAuthorityAccountId[contextGraphId];
+    }
+
+    /**
+     * @notice OT-RFC-38 / LU-6 Phase B — committed name hash for the CG.
+     *         Returns `bytes32(0)` when the curator opted out at create
+     *         time (rare; expected only for CGs that pre-date the
+     *         Phase B surface or want to rely on the discovery-beacon
+     *         path exclusively).
+     */
+    function getNameHash(
+        uint256 contextGraphId
+    ) external view returns (bytes32) {
+        return _contextGraphNameHash[contextGraphId];
     }
 
     /**

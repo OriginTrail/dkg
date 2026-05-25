@@ -211,8 +211,8 @@ export async function createContextGraph(
   id: string,
   name: string,
   description?: string,
-  opts?: { allowedAgents?: string[]; accessPolicy?: number; publishPolicy?: number },
-): Promise<{ created: string; uri: string }> {
+  opts?: { allowedAgents?: string[]; accessPolicy?: number; publishPolicy?: number; register?: boolean },
+): Promise<{ created: string; uri: string; registered?: boolean; onChainId?: string; registerError?: string }> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 30_000);
   try {
@@ -221,6 +221,16 @@ export async function createContextGraph(
       headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: JSON.stringify({
         id, name, description,
+        // Codex PR #608 R1/R2 #5/#8 + OT-RFC-38 LU-6 contract:
+        // project creation is LOCAL-ONLY by default. SWM works immediately
+        // (cores opaquely buffer ciphertext for curated CGs in host-mode
+        // for the pre-registration TTL); on-chain registration is deferred
+        // until either (a) the user opts in via `opts.register: true`
+        // (UI checkbox below), or (b) the first VM publish triggers
+        // `/api/shared-memory/publish` auto-register. Avoids requiring
+        // the user to hold TRAC / pay gas just to start a project, while
+        // still letting funded users register up-front.
+        ...(opts?.register ? { register: true } : {}),
         ...(opts?.allowedAgents ? { allowedAgents: opts.allowedAgents } : {}),
         ...(opts?.accessPolicy !== undefined ? { accessPolicy: opts.accessPolicy } : {}),
         ...(opts?.publishPolicy !== undefined ? { publishPolicy: opts.publishPolicy } : {}),
@@ -231,7 +241,7 @@ export async function createContextGraph(
       const errBody = await res.json().catch(() => ({}));
       throw new Error((errBody as { error?: string })?.error ?? `HTTP ${res.status}`);
     }
-    return res.json() as Promise<{ created: string; uri: string }>;
+    return res.json() as Promise<{ created: string; uri: string; registered?: boolean; onChainId?: string; registerError?: string }>;
   } catch (err: any) {
     if (err.name === 'AbortError') {
       throw new Error('Creating project is taking longer than expected — it may still complete in the background. Refresh the page in a moment.');

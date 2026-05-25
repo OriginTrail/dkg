@@ -123,10 +123,15 @@ for (const partition of partitions) {                       // one source artefa
 ### Python sketch
 
 ```python
+import os
 import requests
-token = open(os.path.expanduser('~/.dkg/auth.token')).read().strip()
+
+PORT = int(os.environ.get('DKG_PORT', '9200'))
+TOKEN_PATH = os.path.expanduser('~/.dkg/auth.token')
+with open(TOKEN_PATH) as f:
+    token = f.read().strip()
 H = {'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'}
-BASE = f'http://localhost:{port}/api'
+BASE = f'http://localhost:{PORT}/api'
 CHUNK = 5000
 ROOT_CHUNK = 1000
 

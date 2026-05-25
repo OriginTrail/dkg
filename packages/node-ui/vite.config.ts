@@ -12,12 +12,25 @@ function readTokenFile(path: string): string {
 }
 
 function readDkgConfig() {
-  // Devnet node 1 takes priority (local Hardhat chain with real contracts)
-  const devnetNode1 = resolve(__dirname, '../../.devnet/node1');
-  if (existsSync(join(devnetNode1, 'api.port'))) {
-    const port = parseInt(readFileSync(join(devnetNode1, 'api.port'), 'utf-8').trim(), 10) || 9201;
-    const token = readTokenFile(join(devnetNode1, 'auth.token'));
-    console.log(`[vite] Using devnet node 1 on port ${port}`);
+  // Devnet takes priority over ~/.dkg only when explicitly requested.
+  // `scripts/devnet.sh ui start` exports DEVNET_NODE=$UI_NODE_ID, so
+  // operators can still point at node5 by setting UI_NODE_ID=5 before
+  // invoking the wrapper (or DEVNET_NODE directly for `pnpm dev:ui`).
+  // Without that explicit opt-in, stale `.devnet/node1` files must not
+  // shadow the real local node in ~/.dkg.
+  const devnetNodeNum = process.env.DEVNET_NODE || process.env.UI_NODE_ID;
+  if (devnetNodeNum) {
+    const devnetDir = resolve(__dirname, '../../.devnet', `node${devnetNodeNum}`);
+    const portFile = join(devnetDir, 'api.port');
+    if (!existsSync(portFile)) {
+      throw new Error(
+        `[vite] DEVNET_NODE/UI_NODE_ID requested devnet node${devnetNodeNum}, ` +
+        `but ${portFile} does not exist. Start that devnet node or unset the env var to use ~/.dkg.`,
+      );
+    }
+    const port = parseInt(readFileSync(portFile, 'utf-8').trim(), 10) || 9201;
+    const token = readTokenFile(join(devnetDir, 'auth.token'));
+    console.log(`[vite] Using devnet node${devnetNodeNum} on port ${port}`);
     return { port, token };
   }
 

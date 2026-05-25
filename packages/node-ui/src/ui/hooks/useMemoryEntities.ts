@@ -58,7 +58,21 @@ function bv(v: unknown): string | undefined {
 }
 
 function isUri(s: string): boolean {
-  return s.startsWith('http://') || s.startsWith('https://') || s.startsWith('urn:') || s.startsWith('did:');
+  const value = canonicalEntityUri(s);
+  if (!value || value.startsWith('"') || /\s/.test(value)) return false;
+  if (value.startsWith('_:')) return true;
+  return /^[A-Za-z][A-Za-z0-9+.-]*:/.test(value);
+}
+
+// Exported so consumers that look entities up directly (e.g.
+// useLayerTriples' residue filter) can canonicalise raw triple
+// subjects the same way `buildEntities` does — daemon results
+// sometimes ship wrapped (`<urn:...>`) URIs and a raw lookup
+// would miss the entity record.
+export function canonicalEntityUri(uri: string): string {
+  const trimmed = uri.trim();
+  if (trimmed.startsWith('<') && trimmed.endsWith('>')) return trimmed.slice(1, -1);
+  return trimmed;
 }
 
 function shortLabel(uri: string): string {
@@ -101,7 +115,12 @@ function isRawExtractionLabel(label: string, uri: string): boolean {
 }
 
 function isUnreadableDefaultUriLabel(label: string, uri: string): boolean {
-  return label === uri && (uri.startsWith('urn:') || uri.startsWith('did:'));
+  // Use the same absolute-IRI check the rest of the surface uses — any
+  // `scheme:` URI (ipfs://, mailto:, ftp://, …) is treated the same way
+  // graph-model and the singleton-shelf treat it. Without this the helper
+  // missed schemes outside the original http/https/urn/did allowlist and
+  // left them with raw-URI labels in lists / details.
+  return label === uri && isUri(uri);
 }
 
 function readableFallbackLabel(entity: MemoryEntity): string {
@@ -292,15 +311,17 @@ async function queryLayer(
   }
 }
 
-function buildEntities(layered: LayeredTriple[]): Map<string, MemoryEntity> {
+export function buildEntities(layered: LayeredTriple[]): Map<string, MemoryEntity> {
   const entities = new Map<string, MemoryEntity>();
+  const connectionKeys = new Map<string, Set<string>>();
 
   function getOrCreate(uri: string): MemoryEntity {
-    let e = entities.get(uri);
+    const entityUri = canonicalEntityUri(uri);
+    let e = entities.get(entityUri);
     if (!e) {
       e = {
-        uri,
-        label: shortLabel(uri),
+        uri: entityUri,
+        label: shortLabel(entityUri),
         types: [],
         trustLevel: 'working',
         layers: new Set(),
@@ -308,7 +329,7 @@ function buildEntities(layered: LayeredTriple[]): Map<string, MemoryEntity> {
         properties: new Map(),
         connections: [],
       };
-      entities.set(uri, e);
+      entities.set(entityUri, e);
     }
     return e;
   }
@@ -319,18 +340,26 @@ function buildEntities(layered: LayeredTriple[]): Map<string, MemoryEntity> {
     if (t.subGraph) entity.subGraphs.add(t.subGraph);
 
     if (t.predicate === RDF_TYPE) {
-      if (!entity.types.includes(t.object)) {
-        entity.types.push(t.object);
+      const typeUri = canonicalEntityUri(t.object);
+      if (!entity.types.includes(typeUri)) {
+        entity.types.push(typeUri);
       }
     } else if (isUri(t.object)) {
-      const targetEntity = getOrCreate(t.object);
+      const targetUri = canonicalEntityUri(t.object);
+      const targetEntity = getOrCreate(targetUri);
       targetEntity.layers.add(t.layer);
       if (t.subGraph) targetEntity.subGraphs.add(t.subGraph);
-      entity.connections.push({
-        predicate: t.predicate,
-        targetUri: t.object,
-        targetLabel: shortLabel(t.object),
-      });
+      const keys = connectionKeys.get(entity.uri) ?? new Set<string>();
+      const connectionKey = `${t.predicate}\0${targetUri}`;
+      if (!keys.has(connectionKey)) {
+        keys.add(connectionKey);
+        connectionKeys.set(entity.uri, keys);
+        entity.connections.push({
+          predicate: t.predicate,
+          targetUri,
+          targetLabel: shortLabel(targetUri),
+        });
+      }
     } else {
       const existing = entity.properties.get(t.predicate) ?? [];
       const val = t.object.startsWith('"') ? t.object.replace(/^"|"$/g, '') : t.object;
@@ -357,6 +386,8 @@ function buildEntities(layered: LayeredTriple[]): Map<string, MemoryEntity> {
 
   return entities;
 }
+
+export const buildMemoryEntities = buildEntities;
 
 export function useMemoryEntities(
   contextGraphId: string,
@@ -431,7 +462,7 @@ export function useMemoryEntities(
 
   useEffect(() => { fetchAll(); }, [fetchAll]);
 
-  const entities = useMemo(() => buildEntities(layeredTriples), [layeredTriples]);
+  const entities = useMemo(() => buildMemoryEntities(layeredTriples), [layeredTriples]);
 
   const entityList = useMemo(() =>
     [...entities.values()]

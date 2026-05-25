@@ -76,6 +76,24 @@ export const PROTOCOL_SWM_UPDATE = '/dkg/10.0.1/swm-update';
 // peers. See RFC-003 §4.2 + §5.2 for the full ack-quorum policy.
 export const PROTOCOL_SWM_SHARE_ACK = '/dkg/10.0.1/swm-share-ack';
 
+// OT-RFC-38 LU-6 (cores host curated SWM substrate): NEW protocol.
+// Members fetch opaque ciphertext envelopes from a core that has
+// stored them on behalf of a CG (because the sharding-table — all-
+// cores in Phase A — assigned the CG to it). Request is a small JSON
+// envelope { contextGraphId, sinceSeqno }; response is a JSON envelope
+// carrying base64'd gossip envelopes that the requester re-feeds
+// through its local `SharedMemoryHandler.handle()` so the existing
+// Sender-Key decrypt-and-apply path runs verbatim. The wire format
+// is documented in `packages/agent/src/swm/host-catchup-wire.ts`.
+//
+// This protocol closes the late-joiner gap when every CG member is
+// offline simultaneously — without it, members are the sole authority
+// for SWM and a member-quorum outage leaves new joiners with no
+// substrate to read from. With it, cores act as ciphertext-only
+// custodians whose decryption authority is bounded by the chain key
+// (which they never see).
+export const PROTOCOL_SWM_HOST_CATCHUP = '/dkg/10.0.1/swm-host-catchup';
+
 // rc.9 PR-10: bumped from /dkg/10.0.0/join-request to opt into the
 // Universal Messenger substrate. The in-memory JoinApprovalRetryQueue
 // (rc.9 PR #510) is replaced by the substrate's durable SQLite outbox

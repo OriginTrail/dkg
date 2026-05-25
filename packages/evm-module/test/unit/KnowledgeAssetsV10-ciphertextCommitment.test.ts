@@ -174,15 +174,17 @@ describe('@unit KnowledgeAssetsV10 — RFC-39 ciphertext commitment', () => {
   }
 
   async function createPublicCG(creator: SignerWithAddress): Promise<bigint> {
+    // LU-1 dropped per-CG hosting committees and quorum overrides — the
+    // facade now takes 6 args: participantAgents, metadataBatchId,
+    // accessPolicy, publishPolicy, publishAuthority, publishAuthorityAccountId.
     await Facade.connect(creator).createContextGraph(
-      [10n, 20n, 30n], // hostingNodes (not validated against identity storage in unit tests)
       [], // participantAgents
-      2, // requiredSignatures
       0, // metadataBatchId
       0, // accessPolicy = public/discoverable
       1, // publishPolicy = open
       ethers.ZeroAddress,
       0, // publishAuthorityAccountId
+      ethers.ZeroHash, // nameHash
     );
     return CGStorageContract.getLatestContextGraphId();
   }
@@ -199,14 +201,13 @@ describe('@unit KnowledgeAssetsV10 — RFC-39 ciphertext commitment', () => {
     // stays exercised, but the ciphertext-commitment branch on the
     // publish path is gated by `accessPolicy != 0`.
     await Facade.connect(creator).createContextGraph(
-      [10n, 20n, 30n], // hostingNodes
       [], // participantAgents
-      2, // requiredSignatures
       0, // metadataBatchId
       1, // accessPolicy = curated (encrypted)
       0, // publishPolicy = curated (single-authority publish)
       authority,
       0, // publishAuthorityAccountId
+      ethers.ZeroHash, // nameHash
     );
     return CGStorageContract.getLatestContextGraphId();
   }
@@ -316,6 +317,86 @@ describe('@unit KnowledgeAssetsV10 — RFC-39 ciphertext commitment', () => {
         .to.be.revertedWithCustomError(KAV10, 'PublicCGCannotHaveCiphertextCommitment')
         .withArgs(cgId);
     });
+
+    it('reverts PublicCGCannotHaveCiphertextCommitment when BOTH fields are non-zero (no asymmetry escape)', async () => {
+      // Defends against a regression where the predicate became
+      // `(root != 0) ^ (count != 0)` (XOR — only-one-axis-set) instead
+      // of the current `(root != 0) || (count != 0)` (OR — any-axis-set).
+      // Without this case, a both-set publish on a public CG would
+      // slip past the current asymmetric-pair guards above.
+      const creator = getDefaultKCCreator(accounts);
+      const { publisherIdentityId, receivingNodes, receiverIdentityIds } =
+        await setupNodes();
+      const cgId = await createPublicCG(creator);
+      const tokenAmount = ethers.parseEther('100');
+
+      const p = await buildPublishParams({
+        chainId,
+        kav10Address,
+        receivingNodes,
+        publisherIdentityId,
+        receiverIdentityIds,
+        author: creator,
+        contextGraphId: cgId,
+        merkleRoot: ethers.keccak256(ethers.toUtf8Bytes('public-both-set')),
+        knowledgeAssetsAmount: 10,
+        byteSize: 1000,
+        epochs: 2,
+        tokenAmount,
+        isImmutable: false,
+        publishOperationId: 'public-both-set-op',
+        ciphertextChunksRoot: SAMPLE_CT_ROOT,
+        ciphertextChunkCount: SAMPLE_CT_COUNT,
+      });
+
+      await TokenContract.connect(creator).approve(kav10Address, tokenAmount);
+      await expect(KAV10.connect(creator).publish(p))
+        .to.be.revertedWithCustomError(KAV10, 'PublicCGCannotHaveCiphertextCommitment')
+        .withArgs(cgId);
+    });
+
+    it('storage is untouched after a PublicCGCannotHaveCiphertextCommitment revert (atomic)', async () => {
+      // Defensive: the publish path mints the KC counter inside a
+      // single transaction, but a partially-applied side effect (e.g.
+      // a setCiphertextChunksCommitment that fired before the policy
+      // gate) would corrupt curator/picker state. Confirm the latest
+      // KC counter and ciphertext getters all reflect the pre-publish
+      // state after the rejection.
+      const creator = getDefaultKCCreator(accounts);
+      const { publisherIdentityId, receivingNodes, receiverIdentityIds } =
+        await setupNodes();
+      const cgId = await createPublicCG(creator);
+      const tokenAmount = ethers.parseEther('100');
+      const preLatestKcId = await KCS.getLatestKnowledgeCollectionId();
+
+      const p = await buildPublishParams({
+        chainId,
+        kav10Address,
+        receivingNodes,
+        publisherIdentityId,
+        receiverIdentityIds,
+        author: creator,
+        contextGraphId: cgId,
+        merkleRoot: ethers.keccak256(ethers.toUtf8Bytes('public-atomic-revert')),
+        knowledgeAssetsAmount: 10,
+        byteSize: 1000,
+        epochs: 2,
+        tokenAmount,
+        isImmutable: false,
+        publishOperationId: 'public-atomic-revert-op',
+        ciphertextChunksRoot: SAMPLE_CT_ROOT,
+      });
+      await TokenContract.connect(creator).approve(kav10Address, tokenAmount);
+      await expect(KAV10.connect(creator).publish(p)).to.be.reverted;
+
+      // No counter advance, no commitment slot written for the
+      // never-minted next-id.
+      expect(await KCS.getLatestKnowledgeCollectionId()).to.equal(preLatestKcId);
+      expect(await KCS.getLatestCiphertextChunksRoot(preLatestKcId + 1n)).to.equal(
+        ethers.ZeroHash,
+      );
+      expect(await KCS.getCiphertextChunkCount(preLatestKcId + 1n)).to.equal(0);
+    });
   });
 
   describe('Curated CG path', () => {
@@ -423,6 +504,57 @@ describe('@unit KnowledgeAssetsV10 — RFC-39 ciphertext commitment', () => {
       await expect(
         KAV10.connect(creator).publish(p),
       ).to.be.revertedWithCustomError(KAV10, 'IncompleteCiphertextCommitment');
+    });
+
+    it('persists per-KC commitments independently when the same CG mints two curated KCs (no cross-contamination)', async () => {
+      // Two consecutive publishes on the same curated CG with DIFFERENT
+      // commitments must each write their own slot — a regression where
+      // the second publish overwrites the first KC's slot would silently
+      // alias every challenge in the picker. We probe with two distinct
+      // (root, count) pairs and assert each KC retains its own.
+      const creator = getDefaultKCCreator(accounts);
+      const { publisherIdentityId, receivingNodes, receiverIdentityIds } =
+        await setupNodes();
+      const cgId = await createCuratedCG(creator, creator.address);
+      const tokenAmount = ethers.parseEther('100');
+
+      const ROOT_1 = ethers.keccak256(ethers.toUtf8Bytes('per-kc-1'));
+      const COUNT_1 = 3;
+      const ROOT_2 = ethers.keccak256(ethers.toUtf8Bytes('per-kc-2'));
+      const COUNT_2 = 17;
+
+      const p1 = await buildPublishParams({
+        chainId, kav10Address, receivingNodes, publisherIdentityId,
+        receiverIdentityIds, author: creator, contextGraphId: cgId,
+        merkleRoot: ethers.keccak256(ethers.toUtf8Bytes('curated-multi-1')),
+        knowledgeAssetsAmount: 10, byteSize: 1000, epochs: 2,
+        tokenAmount, isImmutable: false,
+        publishOperationId: 'curated-multi-1-op',
+        ciphertextChunksRoot: ROOT_1, ciphertextChunkCount: COUNT_1,
+      });
+      await TokenContract.connect(creator).approve(kav10Address, tokenAmount);
+      await KAV10.connect(creator).publish(p1);
+      const kc1 = await KCS.getLatestKnowledgeCollectionId();
+
+      const p2 = await buildPublishParams({
+        chainId, kav10Address, receivingNodes, publisherIdentityId,
+        receiverIdentityIds, author: creator, contextGraphId: cgId,
+        merkleRoot: ethers.keccak256(ethers.toUtf8Bytes('curated-multi-2')),
+        knowledgeAssetsAmount: 10, byteSize: 1000, epochs: 2,
+        tokenAmount, isImmutable: false,
+        publishOperationId: 'curated-multi-2-op',
+        ciphertextChunksRoot: ROOT_2, ciphertextChunkCount: COUNT_2,
+      });
+      await TokenContract.connect(creator).approve(kav10Address, tokenAmount);
+      await KAV10.connect(creator).publish(p2);
+      const kc2 = await KCS.getLatestKnowledgeCollectionId();
+      expect(kc2).to.equal(kc1 + 1n);
+
+      // Each KC keeps its own commitment.
+      expect(await KCS.getLatestCiphertextChunksRoot(kc1)).to.equal(ROOT_1);
+      expect(await KCS.getCiphertextChunkCount(kc1)).to.equal(COUNT_1);
+      expect(await KCS.getLatestCiphertextChunksRoot(kc2)).to.equal(ROOT_2);
+      expect(await KCS.getCiphertextChunkCount(kc2)).to.equal(COUNT_2);
     });
 
     it('reverts IncompleteCiphertextCommitment when curated publish carries count without root', async () => {
@@ -682,6 +814,67 @@ describe('@unit KnowledgeAssetsV10 — RFC-39 ciphertext commitment', () => {
       await expect(
         KAV10.connect(base.creator).update(upPartial),
       ).to.be.revertedWithCustomError(KAV10, 'IncompleteCiphertextCommitment');
+    });
+
+    it('reverts IncompleteCiphertextCommitment when a curated update carries an asymmetric pair (count without root)', async () => {
+      // Symmetric to the earlier root-without-count case — locks both
+      // axes of the asymmetric-pair guard. A regression that only
+      // checked one axis (e.g. `root != 0 && count == 0`) would leak
+      // through here.
+      const base = await publishCuratedBaseline();
+      const up = await buildUpdateParams({
+        chainId, kav10Address,
+        receivingNodes: base.receivingNodes,
+        publisherIdentityId: base.publisherIdentityId,
+        receiverIdentityIds: base.receiverIdentityIds,
+        contextGraphId: base.cgId, id: base.kcId,
+        preUpdateMerkleRootCount: 1n,
+        newMerkleRoot: ethers.keccak256(ethers.toUtf8Bytes('curated-update-asym-count')),
+        newByteSize: base.byteSize,
+        newTokenAmount: base.tokenAmount,
+        mintKnowledgeAssetsAmount: 1n,
+        knowledgeAssetsToBurn: [],
+        updateOperationId: 'curated-update-asym-count-op',
+      });
+      const upPartial = {
+        ...up,
+        newCiphertextChunksRoot: ethers.ZeroHash,
+        newCiphertextChunkCount: NEW_CT_COUNT,
+      };
+      await expect(
+        KAV10.connect(base.creator).update(upPartial),
+      ).to.be.revertedWithCustomError(KAV10, 'IncompleteCiphertextCommitment');
+    });
+
+    it('re-update with the same (root, count) re-emits the event (no suppression on identical commitment)', async () => {
+      // The storage-level overwrite contract is "every successful write
+      // emits", regardless of value identity. This locks the same
+      // contract through the KAV10.update path. Off-chain indexers
+      // counting commitment events would silently undercount otherwise.
+      const base = await publishCuratedBaseline();
+
+      const up = await buildUpdateParams({
+        chainId, kav10Address,
+        receivingNodes: base.receivingNodes,
+        publisherIdentityId: base.publisherIdentityId,
+        receiverIdentityIds: base.receiverIdentityIds,
+        contextGraphId: base.cgId, id: base.kcId,
+        preUpdateMerkleRootCount: 1n,
+        newMerkleRoot: ethers.keccak256(ethers.toUtf8Bytes('curated-update-same')),
+        newByteSize: base.byteSize,
+        newTokenAmount: base.tokenAmount,
+        mintKnowledgeAssetsAmount: 1n,
+        knowledgeAssetsToBurn: [],
+        updateOperationId: 'curated-update-same-op',
+      });
+      const upSame = {
+        ...up,
+        newCiphertextChunksRoot: SAMPLE_CT_ROOT,
+        newCiphertextChunkCount: SAMPLE_CT_COUNT,
+      };
+      await expect(KAV10.connect(base.creator).update(upSame))
+        .to.emit(KCS, 'KnowledgeCollectionCiphertextCommitmentSet')
+        .withArgs(base.kcId, SAMPLE_CT_ROOT, SAMPLE_CT_COUNT);
     });
 
     it('persists the new commitment and emits the event when curated update carries a paired non-zero ciphertext', async () => {

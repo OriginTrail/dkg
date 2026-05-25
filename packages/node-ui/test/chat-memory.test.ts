@@ -102,6 +102,18 @@ describe('decodeRdfStringLiteral (history-text deserialization)', () => {
     expect(decodeRdfStringLiteral(`${asRdfLiteral('hola')}@es`)).toBe('hola');
   });
 
+  // BCP-47 language tags allow ASCII letters, digits, and hyphens with a
+  // leading letter — `@en-US`, `@zh-Hans-CN`, `@x-private1` are all valid.
+  // The old `@[a-z-]+` regex rejected them, causing non-English / regional
+  // labels to surface as raw `"Müller"@de-DE` text in the singleton shelf
+  // (R1 finding from local PR review on 444e0e77).
+  it('strips BCP-47 language tags with case, digits, and multiple subtags', () => {
+    expect(decodeRdfStringLiteral(`${asRdfLiteral('Müller')}@de-DE`)).toBe('Müller');
+    expect(decodeRdfStringLiteral(`${asRdfLiteral('hello')}@en-US`)).toBe('hello');
+    expect(decodeRdfStringLiteral(`${asRdfLiteral('你好')}@zh-Hans-CN`)).toBe('你好');
+    expect(decodeRdfStringLiteral(`${asRdfLiteral('private')}@x-private1`)).toBe('private');
+  });
+
   it('passes a bare / unquoted value through unchanged (parity with stripRdfLiteral)', () => {
     expect(decodeRdfStringLiteral('not-a-literal')).toBe('not-a-literal');
     expect(decodeRdfStringLiteral('')).toBe('');

@@ -868,6 +868,7 @@ describe('@unit RandomSampling', () => {
         1, // publishPolicy = open (picker doesn't read this; keeps fixture simple)
         ethers.ZeroAddress, // publishAuthority — unused with open publish policy
         0, // publishAuthorityAccountId
+        ethers.ZeroHash, // nameHash (integration branch post-PR #595)
       );
       await tx.wait();
       return ContextGraphStorage.getLatestContextGraphId();
@@ -981,16 +982,19 @@ describe('@unit RandomSampling', () => {
     // -----------------------------------------------------------------------
     // Test 2 — Edge: only-curated-CG-holds-value scenario.
     //
-    // RFC-39 Phase A.5 behaviour change: curated CGs are NO LONGER excluded
-    // at the CG-eligibility level. Instead, KCs inside a curated CG must
-    // each carry a `(ciphertextChunksRoot, ciphertextChunkCount)` commitment
-    // to participate in the curated draw. Without a commitment, every KC
-    // is skipped during step 2 of the picker — MAX_KC_RETRIES are exhausted
-    // and the call reverts with `NoEligibleKnowledgeCollection` (not the
-    // pre-RFC-39 `NoEligibleContextGraph`). The CG-level slot still resolves;
-    // it's the KC-level slot that has no candidates.
+    // RFC-39 Phase B (deferred): the curated-CG eligibility branch in
+    // `_isCGEligible` is currently a hard skip until the off-chain prover
+    // learns to fetch `getCiphertextChunkCount` + `getCiphertextChunksRoot`
+    // and build proofs against ciphertext chunks. With curated CGs filtered
+    // at the CG-level, the only-curated scenario falls through to
+    // `adjustedTotal == 0` on the first attempt and reverts
+    // `NoEligibleContextGraph` (the pre-RFC-39 behaviour). When the prover
+    // ciphertext path lands and the eligibility filter is removed, this
+    // test should be flipped back to expect `NoEligibleKnowledgeCollection`
+    // — see the corresponding `describe.skip` in
+    // `RandomSampling-curated.test.ts`.
     // -----------------------------------------------------------------------
-    it('reverts NoEligibleKnowledgeCollection when only curated CGs hold value and none have a ciphertext commitment', async () => {
+    it('reverts NoEligibleContextGraph when only curated CGs hold value (Phase B picker skip)', async () => {
       const curatedCgId = await createCG(CURATED_POLICY);
       const endEpoch = (await Chronos.getCurrentEpoch()) + 5n;
       await createKC(curatedCgId, endEpoch);
@@ -1001,7 +1005,7 @@ describe('@unit RandomSampling', () => {
         RandomSampling.previewChallengeForSeed(testSeed(0), currentEpoch),
       ).to.be.revertedWithCustomError(
         RandomSampling,
-        'NoEligibleKnowledgeCollection',
+        'NoEligibleContextGraph',
       );
     });
 
