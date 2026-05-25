@@ -467,7 +467,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
             title="Recent activity"
             limit={40}
             includeUndated={false}
-            emptyHint="Once agents start proposing decisions or tasks they'll show up here as a live feed."
+            emptyHint="Once you import knowledge or agents start proposing decisions or tasks they'll show up here as a live feed."
             className="v10-overview-activity"
           />
         </>

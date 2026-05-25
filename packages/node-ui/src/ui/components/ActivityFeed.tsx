@@ -134,12 +134,17 @@ function ActivityRow({
   onOpenAgent?: (uri: string) => void;
 }) {
   const author = item.authorUri ? agents?.get(item.authorUri) : null;
-  const typeBinding = profile?.forType(item.kindUri);
-  const typeLabel = typeBinding?.label
-    ?? item.kindUri.split(/[#/]/).pop()
-    ?? 'Entity';
-  const typeIcon = typeBinding?.icon ?? '◆';
-  const typeColor = typeBinding?.color ?? '#a855f7';
+  // For `'added'` events the entity has no typed-activity kind, so we
+  // fall back to a neutral "Added" presentation rather than peering
+  // into a non-existent type binding (N6 — entity imports now surface
+  // as activity rows, not just decisions / tasks / PRs / commits).
+  const isAdded = item.event === 'added';
+  const typeBinding = !isAdded && item.kindUri ? profile?.forType(item.kindUri) : null;
+  const typeLabel = isAdded
+    ? 'Added'
+    : (typeBinding?.label ?? (item.kindUri ? item.kindUri.split(/[#/]/).pop() : null) ?? 'Entity');
+  const typeIcon = isAdded ? '+' : (typeBinding?.icon ?? '◆');
+  const typeColor = typeBinding?.color ?? (isAdded ? '#64748b' : '#a855f7');
   const layerColor = LAYER_COLOR[item.layer];
 
   // Surface status when the entity has one — decisions.status / tasks.status /

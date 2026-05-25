@@ -15,6 +15,25 @@
  *
  * This is intentionally client-side: every memory triple is already in
  * the hook's cache, and the feed is a pure derivation. No extra SPARQL.
+ *
+ * **N6 — event classification.** Originally the feed allowlisted a small
+ * set of "interesting" types (Decision / Task / PR / Issue / Commit) and
+ * silently dropped every other entity, so a Context Graph full of
+ * imported knowledge displayed "No activity yet" even when many entities
+ * had been imported with `dcterms:created` timestamps. The feed now
+ * surfaces every entity with a parseable timestamp and tags each item
+ * with an `event` discriminator so the renderer can adapt the icon,
+ * copy and per-row chrome:
+ *
+ *   - `'typed'`   — entity matches one of the historical ACTIVITY_TYPES
+ *                    (preserved verbatim so AgentProfileView and the
+ *                    existing decision/task/PR feed shape unchanged).
+ *   - `'added'`   — pure import: the entity has a timestamp but isn't
+ *                    one of the typed-activity kinds.
+ *   - `'promoted'` / `'published'` — reserved for later commits in this
+ *                    series; surfaced from `_shared_memory_meta`
+ *                    WorkspaceOperation records (not derived from the
+ *                    entity-list pass below).
  */
 import { useMemo } from 'react';
 import type { MemoryEntity, TrustLevel } from './useMemoryEntities.js';
@@ -31,7 +50,12 @@ const TIMESTAMP_PREDICATES = [
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const PROV_WAS_ATTRIBUTED_TO = 'http://www.w3.org/ns/prov#wasAttributedTo';
 
-/** Entity types that make sense on the activity feed. */
+/**
+ * Entity types that surface as "typed" activity rows (the original feed
+ * shape — decision proposed, task done, PR merged, etc.). Imported
+ * entities whose `rdf:type` is not in this set become `'added'` rows
+ * instead (see `event` on `ActivityItem`).
+ */
 const ACTIVITY_TYPES = new Set([
   'http://dkg.io/ontology/decisions/Decision',
   'http://dkg.io/ontology/tasks/Task',
@@ -39,6 +63,17 @@ const ACTIVITY_TYPES = new Set([
   'http://dkg.io/ontology/github/Issue',
   'http://dkg.io/ontology/github/Commit',
 ]);
+
+/**
+ * Discriminator on every activity item. Drives the row icon / copy.
+ * `'typed'` preserves the legacy decision/task/PR feed shape; `'added'`
+ * is the N6 broadening — any entity with a timestamp that isn't one of
+ * the historical typed activities. `'promoted'` / `'published'` are
+ * threaded through in later commits in this series and originate from
+ * `_shared_memory_meta` WorkspaceOperation records, not the
+ * entity-list pass.
+ */
+export type ActivityEvent = 'added' | 'typed' | 'promoted' | 'published';
 
 export interface ActivityItem {
   entity: MemoryEntity;
@@ -51,12 +86,19 @@ export interface ActivityItem {
    */
   at: Date | null;
   authorUri: string | null;
-  /** Primary rdf:type of the entity (first match from ACTIVITY_TYPES). */
-  kindUri: string;
+  /**
+   * Primary rdf:type of the entity (first match from ACTIVITY_TYPES),
+   * or `null` for `'added'` rows whose entity doesn't have one of the
+   * historical typed-activity kinds. Renderers should fall back to a
+   * neutral "added" treatment when this is `null`.
+   */
+  kindUri: string | null;
   /** Which sub-graph this activity lives in. */
   subGraph: string | null;
   /** Trust layer — drives the coloured dot in the feed. */
   layer: TrustLevel;
+  /** N6 event-kind discriminator — see `ActivityEvent`. */
+  event: ActivityEvent;
 }
 
 function parseDateLike(s: string): Date | null {
@@ -134,14 +176,26 @@ export function useProjectActivity(
     const out: ActivityItem[] = [];
     for (const e of entityList) {
       const kindUri = primaryActivityType(e);
-      if (!kindUri) continue;
+      // typeIri filter pins the feed to a specific typed-activity kind
+      // (used by AgentProfileView's per-type stat chips). When set, the
+      // entity must have that exact `kindUri` — `'added'` rows are
+      // dropped from the slice. Without `typeIri` we keep both `typed`
+      // and `added` items.
       if (typeIri && kindUri !== typeIri) continue;
       const at = timestampOf(e);
-      if (!at && !includeUndated) continue;
+      // No-timestamp + includeUndated: only surface entities with a
+      // recognised type so the Undated bucket on AgentProfileView
+      // stays focused on authored work, not every random untyped
+      // entity in the project.
+      if (!at) {
+        if (!includeUndated) continue;
+        if (!kindUri) continue;
+      }
       const author = authorOf(e);
       if (agentUri && author !== agentUri) continue;
       const sg = primarySubGraph(e);
       if (subGraph && sg !== subGraph) continue;
+      const event: ActivityEvent = kindUri ? 'typed' : 'added';
       out.push({
         entity: e,
         at,
@@ -149,6 +203,7 @@ export function useProjectActivity(
         kindUri,
         subGraph: sg,
         layer: e.trustLevel,
+        event,
       });
     }
     // Dated items newest-first; undated items go last, ordered by label
