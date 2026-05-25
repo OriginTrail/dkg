@@ -118,7 +118,8 @@ describe('ContextGraphQueryView', () => {
     expect(container.textContent).toContain('Profile-backed reusable SPARQL queries for this Context Graph');
     expect(container.textContent).toContain('Saved Queries');
     expect(container.textContent).toContain('Reusable query catalogue');
-    expect(container.textContent).toContain('Catalogue scope');
+    expect(container.textContent).toContain('Save creates a reusable context-level query');
+    expect(container.textContent).not.toContain('Catalogue scope');
     expect(container.textContent).toContain('Ad-hoc SPARQL');
     expect(container.textContent).toContain('Editor and results');
     expect(container.textContent).toContain('available non-private graphs in this Context Graph');
@@ -167,51 +168,21 @@ describe('ContextGraphQueryView', () => {
     const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
     expect(textarea.value).toContain('schema.org/name');
 
-    const contextButton = Array.from(container.querySelectorAll('button'))
-      .find(button => button.textContent === 'Context graph');
-    expect(contextButton).toBeTruthy();
-
-    await act(async () => {
-      contextButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    });
-
-    expect(contextButton!.getAttribute('aria-pressed')).toBe('true');
-    expect(container.textContent).toContain('No saved context queries yet.');
-
     await act(async () => { root.unmount(); });
   });
 
-  it('shows profile loading and subgraph-empty catalogue states', async () => {
+  it('shows profile loading and saved-query empty catalogue states', async () => {
     const { container, root } = await renderWithProfile(profile({ loading: true }));
 
     await waitForText(container, 'Loading saved query catalogue...');
-
-    const subgraphButton = Array.from(container.querySelectorAll('button'))
-      .find(button => button.textContent === 'Subgraphs');
-    expect(subgraphButton).toBeTruthy();
-    expect(subgraphButton!.getAttribute('aria-pressed')).toBe('false');
-
-    await act(async () => {
-      subgraphButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    });
-
-    expect(subgraphButton!.getAttribute('aria-pressed')).toBe('true');
-    expect(container.textContent).not.toContain('No subgraph saved queries yet.');
+    expect(container.textContent).not.toContain('No saved profile queries yet.');
 
     await act(async () => { root.unmount(); });
     document.body.innerHTML = '';
 
     const emptyRender = await renderWithProfile(profile());
-    const emptySubgraphButton = Array.from(emptyRender.container.querySelectorAll('button'))
-      .find(button => button.textContent === 'Subgraphs');
-    expect(emptySubgraphButton).toBeTruthy();
-
-    await act(async () => {
-      emptySubgraphButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    });
-
     const { container: emptyContainer, root: emptyRoot } = emptyRender;
-    expect(emptyContainer.textContent).toContain('No subgraph saved queries yet.');
+    expect(emptyContainer.textContent).toContain('No saved profile queries yet.');
 
     await act(async () => { emptyRoot.unmount(); });
   });
@@ -237,14 +208,6 @@ describe('ContextGraphQueryView', () => {
       setFieldValue(textarea, 'SELECT ?s WHERE { ?s ?p ?o } LIMIT 10');
     });
 
-    const subgraphButton = Array.from(container.querySelectorAll('button'))
-      .find(button => button.textContent === 'Subgraphs');
-    expect(subgraphButton).toBeTruthy();
-    await act(async () => {
-      subgraphButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    });
-    expect(subgraphButton!.getAttribute('aria-pressed')).toBe('true');
-
     const saveButton = Array.from(container.querySelectorAll('button'))
       .find(button => button.textContent === 'Save');
     expect(saveButton).toBeTruthy();
@@ -268,13 +231,25 @@ describe('ContextGraphQueryView', () => {
       submitButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
 
-    await waitForText(container, 'Saved to catalog.');
+    await waitForText(container, 'Saved to catalogue.');
     expect(apiMocks.writeProfileQueryCatalog).toHaveBeenCalledWith('cg-test', expect.any(Array));
     expect(container.textContent).toContain('Reusable triples');
     expect(container.textContent).toContain('A reusable triples query.');
-    const contextButton = Array.from(container.querySelectorAll('button'))
-      .find(button => button.textContent === 'Context graph');
-    expect(contextButton?.getAttribute('aria-pressed')).toBe('true');
+
+    apiMocks.executeQuery.mockRejectedValueOnce(new Error('HTTP 400'));
+    await act(async () => {
+      setFieldValue(textarea, 'SELECT ?broken WHERE { ?broken ?p }');
+    });
+    const runButton = Array.from(container.querySelectorAll('button'))
+      .find(button => button.textContent === 'Run');
+    expect(runButton).toBeTruthy();
+
+    await act(async () => {
+      runButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    await waitForText(container, 'Query could not run.');
+    expect(container.textContent).not.toContain('Saved to catalogue.');
 
     await act(async () => { root.unmount(); });
   });
