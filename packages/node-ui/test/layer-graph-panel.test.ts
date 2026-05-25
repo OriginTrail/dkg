@@ -341,7 +341,7 @@ describe('LayerGraphPanel graph lifecycle', () => {
     });
 
     expect(document.body.querySelector('.v10-graph-expanded-panel')).toBeTruthy();
-    expect(document.body.querySelectorAll('[data-testid="rdf-graph"]').length).toBeGreaterThanOrEqual(2);
+    expect(document.body.querySelectorAll('[data-testid="rdf-graph"]').length).toBe(1);
 
     const backdrop = document.body.querySelector('.v10-graph-expanded-backdrop') as HTMLDivElement;
     await act(async () => {
@@ -427,6 +427,46 @@ describe('LayerGraphPanel graph lifecycle', () => {
       singleton.click();
     });
     expect(onNodeClick).toHaveBeenCalledWith({ id: singleton.getAttribute('title') });
+  });
+
+  it('uses decoded labels and canonical IDs for singleton shelf entries', async () => {
+    const onNodeClick = vi.fn();
+    vi.stubGlobal('fetch', vi.fn());
+    const { LayerGraphPanel } = await import('../src/ui/views/project/components.js');
+
+    await act(async () => {
+      root.render(React.createElement(LayerGraphPanel, {
+        layer: 'wm',
+        triples: [
+          ...triples,
+          {
+            subject: '<urn:test:wrapped-singleton>',
+            predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+            object: 'http://schema.org/Thing',
+          },
+          {
+            subject: 'urn:test:wrapped-singleton',
+            predicate: 'http://schema.org/name',
+            object: '"Line\\nLabel"',
+          },
+        ],
+        onNodeClick,
+      }));
+    });
+
+    await waitForAssertion(() => {
+      expect(container.querySelector('[data-testid="rdf-graph"]')).toBeTruthy();
+    });
+
+    const singletonItems = container.querySelectorAll('.v10-graph-singleton-item');
+    expect(singletonItems.length).toBe(1);
+    const singleton = singletonItems[0] as HTMLButtonElement;
+    expect(singleton.textContent).toBe('Line\nLabel');
+    expect(singleton.getAttribute('title')).toBe('urn:test:wrapped-singleton');
+    await act(async () => {
+      singleton.click();
+    });
+    expect(onNodeClick).toHaveBeenCalledWith({ id: 'urn:test:wrapped-singleton' });
   });
 
   it('can render mixed-scope subgraph graphs without highlighting a single trust layer', async () => {

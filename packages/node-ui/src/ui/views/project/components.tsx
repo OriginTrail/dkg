@@ -17,6 +17,7 @@ import {
   useMemoryEntities,
   type TrustLevel, type MemoryEntity, type Triple,
 } from '../../hooks/useMemoryEntities.js';
+import { decodeRdfStringLiteral } from '../../../rdf-literal.js';
 import {
   useProjectProfile, ProjectProfileContext, useProjectProfileContext,
   type QueryCatalog,
@@ -85,25 +86,16 @@ function graphNodeKey(value: string): string {
   return value.startsWith('<') && value.endsWith('>') ? value.slice(1, -1) : value;
 }
 
-function literalDisplayValue(value: string): string {
-  const trimmed = value.trim();
-  const quoted = /^"((?:\\.|[^"\\])*)"/.exec(trimmed);
-  if (!quoted) return trimmed;
-  return quoted[1].replace(/\\"/g, '"').replace(/\\\\/g, '\\');
-}
-
 function splitGraphTriplesForShelf(triples: Triple[]): { canvasTriples: Triple[]; singletonItems: SingletonShelfItem[] } {
-  const subjects = new Map<string, Set<string>>();
+  const subjects = new Set<string>();
   const degree = new Map<string, number>();
   const labels = new Map<string, string>();
 
   for (const triple of triples) {
     const subjectKey = graphNodeKey(triple.subject);
-    const rawSubjects = subjects.get(subjectKey) ?? new Set<string>();
-    rawSubjects.add(triple.subject);
-    subjects.set(subjectKey, rawSubjects);
+    subjects.add(subjectKey);
     if (LABEL_PREDICATE_SET.has(triple.predicate)) {
-      const label = literalDisplayValue(triple.object);
+      const label = decodeRdfStringLiteral(triple.object).trim();
       if (label && !labels.has(subjectKey)) labels.set(subjectKey, label);
     }
     if (triple.predicate === RDF_TYPE_URI || !isResourceNode(triple.object)) continue;
@@ -112,18 +104,18 @@ function splitGraphTriplesForShelf(triples: Triple[]): { canvasTriples: Triple[]
     degree.set(objectKey, (degree.get(objectKey) ?? 0) + 1);
   }
 
-  const singletonItems = [...subjects.entries()]
-    .filter(([key]) => (degree.get(key) ?? 0) === 0)
-    .flatMap(([key, rawSubjects]) => [...rawSubjects].map(uri => ({
-      uri,
-      label: labels.get(key) ?? humanizeLabel(undefined, uri),
-    })))
+  const singletonItems = [...subjects]
+    .filter(key => (degree.get(key) ?? 0) === 0)
+    .map(key => ({
+      uri: key,
+      label: labels.get(key) ?? humanizeLabel(undefined, key),
+    }))
     .sort((a, b) => a.label.localeCompare(b.label));
   if (singletonItems.length === 0) return { canvasTriples: triples, singletonItems };
 
   const singletonSet = new Set(singletonItems.map(item => item.uri));
   return {
-    canvasTriples: triples.filter(triple => !singletonSet.has(triple.subject)),
+    canvasTriples: triples.filter(triple => !singletonSet.has(graphNodeKey(triple.subject))),
     singletonItems,
   };
 }
@@ -245,7 +237,7 @@ function GraphSurface({
   return (
     <>
       <div className={`v10-graph-shell v10-graph-shell-${tone}${className ? ` ${className}` : ''}`}>
-        {body(false)}
+        {!expanded && body(false)}
       </div>
       {expanded && (
         <div
