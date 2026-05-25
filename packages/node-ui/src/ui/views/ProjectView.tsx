@@ -239,6 +239,16 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   // here rather than re-querying `_shared_memory_meta`. Hook is
   // already in production for the SWM Graph subtab so it's cached.
   const swmAttributionsResult = useSwmAttributions(contextGraphId);
+  // Codex Code7 (PR #656) — the hook returns its previous-graph
+  // result during the transition window between context-graph switch
+  // and the new SPARQL resolving. Gate `events` on the result being
+  // for the *current* graph so the Overview doesn't briefly show
+  // promotion rows from the previous project. The SWM graph itself
+  // tolerates the momentary stale tint (it re-renders cleanly once
+  // the new attribution lands), so we don't gate there.
+  const overviewSwmEvents = swmAttributionsResult.resultContextGraphId === contextGraphId
+    ? swmAttributionsResult.events
+    : undefined;
 
   const refreshParticipants = useCallback(() => {
     const targetId = cg?.id;
@@ -470,7 +480,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
           )}
           <ActivityFeed
             entities={rawMemory.entityList}
-            swmEvents={swmAttributionsResult.events}
+            swmEvents={overviewSwmEvents}
             onSelectEntity={handleOverviewActivityNavigate}
             title="Recent activity"
             limit={40}

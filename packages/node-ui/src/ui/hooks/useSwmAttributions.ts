@@ -71,6 +71,23 @@ export interface AgentPaletteEntry {
 }
 
 export interface SwmAttributionsResult {
+  /**
+   * Context graph id whose SPARQL response produced the rest of the
+   * fields in this result. `undefined` until the first query for the
+   * current `contextGraphId` resolves; lags behind the caller's
+   * `contextGraphId` during a project switch — the in-flight result is
+   * still for the *previous* graph until the new query lands.
+   *
+   * Codex Code7 (PR #656) — exposing this lets page-level consumers
+   * (e.g. `ProjectView` feeding the Overview activity feed) gate
+   * downstream rendering on `resultContextGraphId === contextGraphId`
+   * so users don't briefly see promotion rows from the previous
+   * project after switching context graphs. The SWM graph internally
+   * doesn't gate (momentary stale tints are less misleading than
+   * stale activity-feed rows, and it re-renders cleanly once the new
+   * attribution lands).
+   */
+  resultContextGraphId: string | undefined;
   /** Attribution map keyed by entity URI. Callers pass these into the
    *  graph engine via a derived `nodeColors` record. Deduplicated by
    *  `(root, agent)` — at most one entry per pair. */
@@ -337,5 +354,14 @@ export function useSwmAttributions(contextGraphId: string | undefined): SwmAttri
 
   const attributionPending = Boolean(contextGraphId && (loading || resolvedContextGraphId !== contextGraphId));
 
-  return { attributions, events, palette, nodeColors, conflicts, loading: attributionPending, error };
+  return {
+    resultContextGraphId: resolvedContextGraphId,
+    attributions,
+    events,
+    palette,
+    nodeColors,
+    conflicts,
+    loading: attributionPending,
+    error,
+  };
 }
