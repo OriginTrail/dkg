@@ -38,6 +38,32 @@ roughly 1.0-1.5 MB, well under the daemon's 10 MB `MAX_BODY_BYTES` cap. Going
 larger gives no throughput win and risks a 413 on URIs that serialise on the
 heavy end.
 
+### 1.1 Known daemon caps and the exact error strings they produce
+
+These are the three hard caps you will hit if you push past the constants
+above, with the verbatim error text the daemon emits. The cap source lives in
+[`packages/cli/src/daemon/http-utils.ts`](../../../../packages/cli/src/daemon/http-utils.ts).
+
+| Endpoint | Cap | Constant | Trigger | Error response |
+|---|---|---|---|---|
+| `POST /api/assertion/<name>/write` | **10 MB** request body | `MAX_BODY_BYTES` | N-Quads payload too large | `HTTP 413` "Request body too large (>10485760 bytes)" |
+| `POST /api/assertion/<name>/promote` | **256 KB** request body | `SMALL_BODY_BYTES` | `entities` array too long (~4,000+ URIs at 60-char average) | `HTTP 413` "Request body too large (>262144 bytes)" |
+| `POST /api/assertion/<name>/promote` | **10 MB** gossip message | hard-coded in gossipsub publish | Promoted assertion's N-Quads serialisation exceeds 10 MB | `HTTP 500` "Promoted assertion too large for gossip (XXXX KB, limit 10 MB). Promote fewer entities per call." |
+
+The two `/promote` caps are independent: the 256 KB body cap is on the
+**request** you send (URI count × URI length); the 10 MB gossip cap is on the
+**assertion** that ends up in SWM (triples × N-Quads length). It is possible
+to hit the gossip cap with a single-URI `entities` array, if the assertion
+under that root is large enough. `entities: "all"` triggers it most often
+because it asks the daemon to gossip every root in one message; for any
+assertion above ~30k triples, expect to split.
+
+In practice this means a robust importer needs **two independent halve-and-
+retry paths on `/promote`**: one for 413 (shrink the `entities` array) and
+one for 500 (shrink the per-root scope or switch from `"all"` to explicit
+batches of N ≤ 1000 root URIs). See [§5 Error handling](#5-error-handling)
+for the recipes.
+
 **Self-tune from `/api/status`.** Future versions of the daemon advertise their
 current per-call limits at `/api/status` under an `importLimits` block. If
 present, use those values — they reflect any operator-side tuning. If absent
@@ -218,10 +244,9 @@ rather than redeclaring class/property IRIs.
 
 ## 5. Error handling
 
-### HTTP 413 (`PayloadTooLargeError`)
+### HTTP 413 on `/write` (`MAX_BODY_BYTES` = 10 MB)
 
-You exceeded `MAX_BODY_BYTES` (10 MB) or, on a `/promote`, an entity-count
-budget. Recovery is identical to handling a transient network error:
+You exceeded the request-body cap with too many N-Quads. Halve and retry:
 
 ```ts
 try {
@@ -234,9 +259,73 @@ try {
 }
 ```
 
-If you hit 413 frequently, check `/api/status` for the daemon's current
-`importLimits` and tune your `CHUNK` constant down. Don't paper over it by
-bumping retries.
+If you hit 413 frequently on `/write`, check `/api/status` for the daemon's
+current `importLimits` and tune your `CHUNK` constant down. Don't paper over
+it by bumping retries.
+
+### HTTP 413 on `/promote` (`SMALL_BODY_BYTES` = 256 KB)
+
+This is a **different** 413 from the `/write` one: the promote route uses a
+smaller body limit because its requests should be small (just root URIs).
+You hit it by sending too many URIs in `entities` — roughly 4,000+ URIs at
+typical lengths. Recovery is to shrink the `entities` array, not the
+underlying assertion:
+
+```ts
+async function promoteRoots(assertion, roots, batchSize = 1000) {
+  for (let i = 0; i < roots.length; i += batchSize) {
+    const batch = roots.slice(i, i + batchSize);
+    try {
+      await client.request('POST', `/api/assertion/${assertion}/promote`, {
+        contextGraphId: client.cgId, subGraphName, entities: batch,
+      });
+    } catch (err) {
+      if (err.statusCode !== 413) throw err;
+      // Smaller batch and retry the same range.
+      i -= batchSize;
+      batchSize = Math.max(50, Math.floor(batchSize / 2));
+    }
+  }
+}
+```
+
+### HTTP 500 on `/promote` with "too large for gossip"
+
+The assertion you're promoting serialises to more than 10 MB of N-Quads.
+This is independent of how many root URIs you pass — even
+`entities: ["<one-uri>"]` can trip this if that one root's transitive
+triple set is bigger than 10 MB. The error message is verbatim:
+
+```
+HTTP 500 "Promoted assertion too large for gossip
+(XXXX KB, limit 10 MB). Promote fewer entities per call."
+```
+
+Recovery is to **shrink the per-promote scope**, which means: if you were
+promoting with `entities: "all"`, switch to an explicit URI batch sized so
+its transitive triples land under 10 MB. There is no formula because triple
+fan-out varies; in practice 500-1000 roots per call works for code graphs
+and 100-200 for prose corpora with long string literals.
+
+```ts
+async function promoteAllInBatches(assertion, allRoots) {
+  let batch = 1000;
+  for (let i = 0; i < allRoots.length; i += batch) {
+    try {
+      await promoteRoots(assertion, allRoots.slice(i, i + batch));
+    } catch (err) {
+      if (!/too large for gossip/.test(err.message)) throw err;
+      i -= batch;
+      batch = Math.max(50, Math.floor(batch / 2));
+    }
+  }
+}
+```
+
+If both 413 and 500-gossip fire on the same import, you need both recovery
+loops — they're orthogonal. PR #643's async promote queue removes both
+failure modes by promoting one root at a time in the background; until that
+lands, importers must implement both halve-and-retry paths.
 
 ### HTTP 401 / 403
 
