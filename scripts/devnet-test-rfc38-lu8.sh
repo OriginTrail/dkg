@@ -48,6 +48,16 @@ api_call() {
   curl "${curl_args[@]}"
 }
 
+api_call_with_status() {
+  local node="$1" method="$2" path="$3" data="${4:-}"
+  local port; port=$(node_port "$node")
+  local token; token=$(node_token "$node")
+  local -a curl_args=(-sS --max-time 120 -X "$method" -H "Authorization: Bearer $token" -H 'Content-Type: application/json')
+  [ -n "$data" ] && curl_args+=(-d "$data")
+  curl_args+=(-w $'\n%{http_code}' "http://127.0.0.1:${port}${path}")
+  curl "${curl_args[@]}"
+}
+
 parse_json() {
   printf '%s' "$1" | node -e "
     let d=''; process.stdin.on('data',c=>d+=c);
@@ -133,14 +143,17 @@ log "================================================================"
 # hashes a superset of leaves against a single-batch expected root. Keep the
 # route strict: callers must pass the exact plaintext quads they are verifying.
 log "Curator calls verify-batch without quads; endpoint should reject the ambiguous request..."
-VERIFY_MISSING_QUADS=$(api_call "$CURATOR_NODE" POST /api/shared-memory/verify-batch "$(cat <<EOF
+VERIFY_MISSING_QUADS_WITH_STATUS=$(api_call_with_status "$CURATOR_NODE" POST /api/shared-memory/verify-batch "$(cat <<EOF
 { "contextGraphId": "$PUB_CG", "expectedMerkleRoot": "$MERKLE_ROOT" }
 EOF
 )")
+VERIFY_MISSING_QUADS_STATUS=$(printf '%s\n' "$VERIFY_MISSING_QUADS_WITH_STATUS" | tail -n 1)
+VERIFY_MISSING_QUADS=$(printf '%s\n' "$VERIFY_MISSING_QUADS_WITH_STATUS" | sed '$d')
 log "verify-batch missing-quads response: $VERIFY_MISSING_QUADS"
+[ "$VERIFY_MISSING_QUADS_STATUS" = "400" ] || fail "verify-batch missing-quads status=$VERIFY_MISSING_QUADS_STATUS (expected 400): $VERIFY_MISSING_QUADS"
 MISSING_QUADS_ERROR=$(parse_json "$VERIFY_MISSING_QUADS" '.error')
 if printf '%s' "$MISSING_QUADS_ERROR" | grep -q 'requires explicit `quads`'; then
-  log "✓ Scenario 1: verify-batch rejects omitted quads before ambiguous reconstruction"
+  log "✓ Scenario 1: verify-batch rejects omitted quads with HTTP 400 before ambiguous reconstruction"
 else
   fail "verify-batch missing-quads response did not mention explicit quads requirement: $VERIFY_MISSING_QUADS"
 fi
