@@ -179,21 +179,25 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         uint32 newMerkleLeafCount;
         uint256 mintKnowledgeAssetsAmount;
         uint256[] knowledgeAssetsToBurn;
-        // Codex PR #630 R1 #2 — RFC-39 Phase A.5 commitment refresh.
-        // Update must rotate the ciphertext commitment in lockstep with
-        // the new merkle root; without these fields curated KCs left
-        // their commitment frozen to the initial publish and the
-        // random-sampling challenge surface would point at stale
-        // ciphertext after the first update. Same zero-or-paired
-        // contract as `PublishParams` (zero on metadata-only or
-        // public-CG updates; both non-zero on curated commitment
-        // rotation).
-        bytes32 newCiphertextChunksRoot;
-        uint32 newCiphertextChunkCount;
         uint72 publisherNodeIdentityId;
         uint72[] identityIds;
         bytes32[] r;
         bytes32[] vs;
+        // Codex PR #630 R1 #2 — RFC-39 Phase A.5 commitment refresh.
+        // Update must rotate the ciphertext commitment in lockstep
+        // with the new merkle root; without these fields curated KCs
+        // left their commitment frozen to the initial publish and the
+        // random-sampling challenge surface would point at stale
+        // ciphertext after the first update. Same zero-or-paired
+        // contract as `PublishParams` (zero on metadata-only or
+        // public-CG updates; both non-zero on curated commitment
+        // rotation). Appended at the END of the struct so the
+        // positional ABI for pre-existing 12-field callers stays
+        // intact — they encode the same prefix and ABI decoder
+        // zero-fills the trailing pair (Codex PR #630 R1 #1 on
+        // `PublishParams`, applied prospectively here).
+        bytes32 newCiphertextChunksRoot;
+        uint32 newCiphertextChunkCount;
     }
 
     // --- Hub-resolved dependencies ---

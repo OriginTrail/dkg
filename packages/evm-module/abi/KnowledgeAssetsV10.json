@@ -755,16 +755,6 @@
             "type": "uint256[]"
           },
           {
-            "internalType": "bytes32",
-            "name": "newCiphertextChunksRoot",
-            "type": "bytes32"
-          },
-          {
-            "internalType": "uint32",
-            "name": "newCiphertextChunkCount",
-            "type": "uint32"
-          },
-          {
             "internalType": "uint72",
             "name": "publisherNodeIdentityId",
             "type": "uint72"
@@ -783,6 +773,16 @@
             "internalType": "bytes32[]",
             "name": "vs",
             "type": "bytes32[]"
+          },
+          {
+            "internalType": "bytes32",
+            "name": "newCiphertextChunksRoot",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "uint32",
+            "name": "newCiphertextChunkCount",
+            "type": "uint32"
           }
         ],
         "internalType": "struct KnowledgeAssetsV10.UpdateParams",
