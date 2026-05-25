@@ -688,6 +688,10 @@ contract ContextGraphStorage is INamed, IVersioned, Guardian, ERC721Enumerable {
      * question. The "curated access + open publish" combo (anyone in the
      * allowlist may publish, but readers must still decrypt) is a valid
      * configuration and must accept ciphertext commitments.
+     *
+     * Used by `RandomSampling._pickWeightedChallenge` step 2 to decide
+     * whether the per-KC ciphertext-commitment filter applies (RFC-39
+     * Phase A.5). Both call sites converge on this access-policy check.
      */
     function getIsCurated(
         uint256 contextGraphId
