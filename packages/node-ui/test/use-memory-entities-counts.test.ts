@@ -121,5 +121,10 @@ describe('useMemoryEntities canonical layer counts', () => {
     expect(el.getAttribute('data-current-layers')).toContain('urn:test:promoted:shared');
     expect(el.getAttribute('data-current-layers')).toContain('urn:test:full-pipeline:verified');
     expect(el.getAttribute('data-current-layers')).not.toContain('urn:test:object-only');
+
+    const vmRequest = vi.mocked(fetch).mock.calls
+      .map(([, init]) => JSON.parse(String(init?.body ?? '{}')) as { sparql?: string })
+      .find(body => body.sparql?.includes('_verified_memory_meta'));
+    expect(vmRequest?.sparql).toContain('!CONTAINS(STR(?g), "/meta/")');
   });
 });
