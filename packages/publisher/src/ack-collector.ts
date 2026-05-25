@@ -49,7 +49,7 @@ function sanitizeDeclineField(value: string, maxChars: number): string {
  *
  * Flow:
  * 1. Broadcast PublishIntent via GossipSub (finalization topic)
- * 2. Concurrently dial each known core node on /dkg/10.0.0/storage-ack
+ * 2. Concurrently dial each known core node on PROTOCOL_STORAGE_ACK
  * 3. First 3 valid ACKs win; verify each signature via ecrecover
  */
 export class ACKCollector {
@@ -112,6 +112,10 @@ export class ACKCollector {
     }
 
     // P2P intent includes staging quads so core nodes can verify inline.
+    // Encrypted inline payloads are gated by this collector's exclusive
+    // use of PROTOCOL_STORAGE_ACK (`/dkg/10.0.1/storage-ack`): pre-LU-5
+    // cores that only speak `/dkg/10.0.0/storage-ack` never receive field
+    // 14 ciphertext and therefore cannot misparse it as plaintext.
     // `contextGraphId` on the wire is the TARGET numeric id peers will sign
     // the ACK against. `swmGraphId` (optional) is the SOURCE graph where
     // data lives in SWM — only set when the publisher is remapping a named

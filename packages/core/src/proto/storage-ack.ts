@@ -27,7 +27,7 @@ const { Type, Field } = protobuf;
  */
 
 /**
- * Declinable reasons a core node can return on `/dkg/10.0.0/storage-ack`
+ * Declinable reasons a core node can return on `/dkg/10.0.1/storage-ack`
  * instead of a signed ACK. These are situations where the core
  * legitimately cannot produce an ACK for THIS PEER right now — a
  * well-formed publish request that this specific core just can't

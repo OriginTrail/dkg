@@ -3360,6 +3360,17 @@ p { font-size: 13px; color: var(--text-secondary); line-height: 1.6; }
   line-height: 1.5;
 }
 
+.v10-modal-warning {
+  padding: 10px 14px;
+  background: var(--amber-dim);
+  border: 1px solid rgba(245, 158, 11, 0.25);
+  border-radius: 8px;
+  margin-bottom: 16px;
+  font-size: 12px;
+  color: var(--text-warning);
+  line-height: 1.5;
+}
+
 .v10-modal-tip {
   padding: 12px 14px;
   background: var(--bg-surface);
