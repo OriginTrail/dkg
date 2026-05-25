@@ -19,6 +19,13 @@ data/
 packages/evm-module/artifacts/
 packages/evm-module/cache/
 packages/evm-module/typechain/
+
+# Static analysis artifacts (Slither / Aderyn / solhint local runs).
+# CI uploads SARIF directly to Code Scanning and never commits these.
+packages/evm-module/slither.sarif
+packages/evm-module/aderyn.sarif
+packages/evm-module/solhint.sarif
+packages/evm-module/report.md
 # .devnet/ is a runtime workspace (Hardhat data dir, per-node DKG_HOME
 # state, daemon logs). Not checked in.
 .devnet/
