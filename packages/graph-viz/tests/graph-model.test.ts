@@ -48,6 +48,30 @@ describe('GraphModel', () => {
       expect(names![0].value).toBe('Alice');
     });
 
+    it('creates edges for absolute IRI schemes beyond http and urn', () => {
+      model.addTriple({
+        subject: 'did:dkg:entity:source',
+        predicate: 'https://schema.org/mentions',
+        object: 'ipfs://bafy-example-target',
+      });
+
+      expect(model.edges.size).toBe(1);
+      expect(model.nodes.has('did:dkg:entity:source')).toBe(true);
+      expect(model.nodes.has('ipfs://bafy-example-target')).toBe(true);
+    });
+
+    it('keeps quoted values with URI-like text as literals', () => {
+      model.addTriple({
+        subject: 'https://example.org/alice',
+        predicate: 'https://schema.org/identifier',
+        object: '"did:dkg:literal"',
+      });
+
+      expect(model.edges.size).toBe(0);
+      const node = model.nodes.get('https://example.org/alice')!;
+      expect(node.properties.get('https://schema.org/identifier')?.[0]?.value).toBe('"did:dkg:literal"');
+    });
+
     it('stores rdf:type in node.types, not as edge', () => {
       model.addTriple({
         subject: 'https://example.org/alice',

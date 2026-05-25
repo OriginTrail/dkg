@@ -307,6 +307,7 @@ async function queryLayer(
 
 export function buildEntities(layered: LayeredTriple[]): Map<string, MemoryEntity> {
   const entities = new Map<string, MemoryEntity>();
+  const connectionKeys = new Map<string, Set<string>>();
 
   function getOrCreate(uri: string): MemoryEntity {
     const entityUri = canonicalEntityUri(uri);
@@ -342,11 +343,17 @@ export function buildEntities(layered: LayeredTriple[]): Map<string, MemoryEntit
       const targetEntity = getOrCreate(targetUri);
       targetEntity.layers.add(t.layer);
       if (t.subGraph) targetEntity.subGraphs.add(t.subGraph);
-      entity.connections.push({
-        predicate: t.predicate,
-        targetUri,
-        targetLabel: shortLabel(targetUri),
-      });
+      const keys = connectionKeys.get(entity.uri) ?? new Set<string>();
+      const connectionKey = `${t.predicate}\0${targetUri}`;
+      if (!keys.has(connectionKey)) {
+        keys.add(connectionKey);
+        connectionKeys.set(entity.uri, keys);
+        entity.connections.push({
+          predicate: t.predicate,
+          targetUri,
+          targetLabel: shortLabel(targetUri),
+        });
+      }
     } else {
       const existing = entity.properties.get(t.predicate) ?? [];
       const val = t.object.startsWith('"') ? t.object.replace(/^"|"$/g, '') : t.object;

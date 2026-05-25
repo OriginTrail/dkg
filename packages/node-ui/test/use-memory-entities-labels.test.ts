@@ -124,4 +124,15 @@ describe('useMemoryEntities readable labels', () => {
     expect(entities.get('urn:test:source')?.connections[0]?.targetUri).toBe('urn:test:wrapped');
     expect(entities.get('urn:test:wrapped')?.label).toBe('Wrapped label');
   });
+
+  it('deduplicates repeated resource connections without dropping subgraph memberships', () => {
+    const entities = buildMemoryEntities([
+      { subject: 'urn:test:source', predicate: MENTIONS, object: 'urn:test:target', layer: 'shared', subGraph: 'alpha' },
+      { subject: 'urn:test:source', predicate: MENTIONS, object: 'urn:test:target', layer: 'shared', subGraph: 'beta' },
+    ]);
+
+    expect(entities.get('urn:test:source')?.connections).toHaveLength(1);
+    expect([...entities.get('urn:test:source')!.subGraphs].sort()).toEqual(['alpha', 'beta']);
+    expect([...entities.get('urn:test:target')!.subGraphs].sort()).toEqual(['alpha', 'beta']);
+  });
 });

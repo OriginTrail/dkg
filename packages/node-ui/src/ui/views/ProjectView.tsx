@@ -66,16 +66,6 @@ function isMemoryLayerView(layer: LayerView): layer is MemoryLayerView {
   return layer === 'wm' || layer === 'swm' || layer === 'vm';
 }
 
-function dedupeLayeredTriples(triples: LayeredTriple[]): LayeredTriple[] {
-  const seen = new Set<string>();
-  return triples.filter(t => {
-    const key = `${t.subject}|${t.predicate}|${t.object}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
 function scrollElementFor(key: string, fallback: HTMLElement | null): HTMLElement | null {
   if (typeof document === 'undefined') return fallback;
   const elements = document.querySelectorAll<HTMLElement>('[data-cg-scroll-key]');
@@ -239,7 +229,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   const selectedLayerTrust = selectedLayerContext ? TRUST_FOR_LAYER[selectedLayerContext] : null;
   const detailTriples = useMemo(
     () => selectedLayerTrust
-      ? dedupeLayeredTriples(rawMemory.allTriples.filter(t => t.layer === selectedLayerTrust))
+      ? rawMemory.allTriples.filter(t => t.layer === selectedLayerTrust)
       : rawMemory.graphTriples,
     [rawMemory.allTriples, rawMemory.graphTriples, selectedLayerTrust],
   );
