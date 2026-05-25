@@ -67,7 +67,9 @@ export const RdfGraph = lazy(() =>
 );
 
 const RDF_TYPE_URI = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
-const LABEL_PREDICATE_SET = new Set<string>(MEMORY_LABEL_PREDICATES);
+const LABEL_PREDICATE_PRIORITY = new Map<string, number>(
+  MEMORY_LABEL_PREDICATES.map((p, i) => [p, i]),
+);
 
 interface SingletonShelfItem {
   uri: string;
@@ -91,13 +93,24 @@ function splitGraphTriplesForShelf(triples: Triple[]): { canvasTriples: Triple[]
   const subjects = new Set<string>();
   const degree = new Map<string, number>();
   const labels = new Map<string, string>();
+  // Track which label predicate (by MEMORY_LABEL_PREDICATES index) supplied
+  // each label so a later, higher-priority predicate can win regardless of
+  // query order — matches the precedence used elsewhere in the UI.
+  const labelPriority = new Map<string, number>();
 
   for (const triple of triples) {
     const subjectKey = graphNodeKey(triple.subject);
     subjects.add(subjectKey);
-    if (LABEL_PREDICATE_SET.has(triple.predicate)) {
+    const priority = LABEL_PREDICATE_PRIORITY.get(triple.predicate);
+    if (priority !== undefined) {
       const label = decodeRdfStringLiteral(triple.object).trim();
-      if (label && !labels.has(subjectKey)) labels.set(subjectKey, label);
+      if (label) {
+        const existing = labelPriority.get(subjectKey);
+        if (existing === undefined || priority < existing) {
+          labels.set(subjectKey, label);
+          labelPriority.set(subjectKey, priority);
+        }
+      }
     }
     if (triple.predicate === RDF_TYPE_URI || !isResourceNode(triple.object)) continue;
     const objectKey = graphNodeKey(triple.object);
@@ -921,7 +934,7 @@ export function LayerGraphPanel({
   const graphTitle = `${title} graph`;
   const resolvedScopeLabel = scopeLabel ?? defaultGraphScopeLabel(layer);
   const showGraphScopeLabel = trustLegendActiveLayer === null && Boolean(scopeLabel);
-  const singletonLayerContext = trustLegendActiveLayer === null ? undefined : layer;
+  const nodeLayerContext = trustLegendActiveLayer === null ? undefined : trustLegendActiveLayer ?? layer;
   const hasOverlay = (layer === 'vm' && anchors.length > 0) || (layer === 'swm' && swmAttr.palette.length > 0);
   const overlay = hasOverlay ? (
     <>
@@ -993,7 +1006,7 @@ export function LayerGraphPanel({
       overlay={overlay}
       showScopeLabel={showGraphScopeLabel}
       singletonItems={singletonItems}
-      onSingletonClick={(uri) => onNodeClick?.(singletonLayerContext ? { id: uri, trustLayer: singletonLayerContext } : { id: uri })}
+      onSingletonClick={(uri) => onNodeClick?.(nodeLayerContext ? { id: uri, trustLayer: nodeLayerContext } : { id: uri })}
       renderGraph={(expanded) => (
         canvasTriples.length > 0 ? (
           <Suspense fallback={<span className="v10-graph-placeholder">Loading graph...</span>}>
@@ -1004,7 +1017,9 @@ export function LayerGraphPanel({
               options={graphOptions}
               viewConfig={graphViewConfig}
               style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }}
-              onNodeClick={onNodeClick}
+              onNodeClick={nodeLayerContext
+                ? (node: any) => onNodeClick?.({ ...node, trustLayer: nodeLayerContext })
+                : onNodeClick}
               initialFit
             />
           </Suspense>
@@ -3855,6 +3870,18 @@ export function SubGraphDetailView({
     return { wm, swm, vm, total: scopedEntities.length };
   }, [scopedEntities]);
 
+  // When the subgraph is filtered to exactly one trust layer, propagate
+  // that layer to the graph + detail navigation so clicking a node opens
+  // the layer-specific entity rather than the merged/highest-trust one.
+  const singleLayer = useMemo<'wm' | 'swm' | 'vm' | null>(() => {
+    if (enabledLayers.size !== 1) return null;
+    const only = enabledLayers.values().next().value as TrustLevel;
+    if (only === 'verified') return 'vm';
+    if (only === 'shared') return 'swm';
+    if (only === 'working') return 'wm';
+    return null;
+  }, [enabledLayers]);
+
   // Apply the three filter axes on top of the base scope.
   const filteredEntities = useMemo(() => {
     let out = scopedEntities;
@@ -4186,13 +4213,13 @@ export function SubGraphDetailView({
         {selectedTab === 'graph' && (
           <div className="v10-layer-expand-body full-width" data-cg-scroll-key={`subgraph:${slug}:graph`}>
             <LayerGraphPanel
-              layer="wm"
+              layer={singleLayer ?? 'wm'}
               triples={filteredTriples}
               onNodeClick={onNodeClick}
               contextGraphId={contextGraphId}
               title={title}
               scopeLabel={`Subgraph graph: ${title} entities and entity-to-entity triples from loaded subgraph data.`}
-              trustLegendActiveLayer={null}
+              trustLegendActiveLayer={singleLayer}
             />
           </div>
         )}

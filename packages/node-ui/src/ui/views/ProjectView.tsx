@@ -66,6 +66,16 @@ function isMemoryLayerView(layer: LayerView): layer is MemoryLayerView {
   return layer === 'wm' || layer === 'swm' || layer === 'vm';
 }
 
+function dedupeTriplesBySpo<T extends { subject: string; predicate: string; object: string }>(triples: T[]): T[] {
+  const seen = new Set<string>();
+  return triples.filter(t => {
+    const key = `${t.subject}|${t.predicate}|${t.object}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 function scrollElementFor(key: string, fallback: HTMLElement | null): HTMLElement | null {
   if (typeof document === 'undefined') return fallback;
   const elements = document.querySelectorAll<HTMLElement>('[data-cg-scroll-key]');
@@ -227,17 +237,21 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   useEffect(() => { refreshParticipants(); }, [refreshParticipants]);
 
   const selectedLayerTrust = selectedLayerContext ? TRUST_FOR_LAYER[selectedLayerContext] : null;
-  const detailTriples = useMemo(
+  const detailEntityTriples = useMemo(
     () => selectedLayerTrust
       ? rawMemory.allTriples.filter(t => t.layer === selectedLayerTrust)
       : rawMemory.graphTriples,
     [rawMemory.allTriples, rawMemory.graphTriples, selectedLayerTrust],
   );
+  const detailTriples = useMemo(
+    () => selectedLayerTrust ? dedupeTriplesBySpo(detailEntityTriples) : detailEntityTriples,
+    [detailEntityTriples, selectedLayerTrust],
+  );
   const detailEntities = useMemo(
     () => selectedLayerTrust
-      ? buildMemoryEntities(detailTriples as LayeredTriple[])
+      ? buildMemoryEntities(detailEntityTriples as LayeredTriple[])
       : rawMemory.entities,
-    [detailTriples, rawMemory.entities, selectedLayerTrust],
+    [detailEntityTriples, rawMemory.entities, selectedLayerTrust],
   );
   const selectedEntity = useMemo(
     () => selectedUri ? detailEntities.get(selectedUri) ?? null : null,
