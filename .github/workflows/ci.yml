@@ -607,14 +607,28 @@ jobs:
         if: needs.changes.outputs.contracts == 'true'
         run: pnpm install --frozen-lockfile
 
-      - name: Cache Hardhat artifacts
+      - name: Cache Hardhat artifacts (NOT typechain)
         if: needs.changes.outputs.contracts == 'true'
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
+          # `packages/evm-module/typechain` is INTENTIONALLY omitted.
+          # Caching typechain bindings caused ghost failures in CI:
+          # `rm -rf typechain && npx hardhat typechain` would run
+          # against a restored `cache/` (so hardhat-typechain thought
+          # the artifacts hadn't changed since the last typechain
+          # generation, even though we'd just wiped the output) and
+          # silently produce no bindings — or worse, bindings that
+          # didn't match the actual artifact ABIs. Shard 2 tests
+          # (`KnowledgeAssetsV10-ciphertextCommitment` /
+          # `RandomSampling-curated`) hit `Error: no matching fragment`
+          # on `createContextGraph` despite local runs being green on
+          # the same commit. Always regenerating from scratch (~10s
+          # overhead per shard, see Generate TypeChain step below)
+          # makes the binding-vs-ABI invariant non-cacheable and kills
+          # the entire failure class.
           path: |
             packages/evm-module/artifacts
             packages/evm-module/cache
-            packages/evm-module/typechain
           # NO restore-keys fallback. Previously a `hardhat-Linux-` fallback
           # would grab a snapshot from a sibling branch with a different
           # contract surface (e.g. integration's 8-arg `createContextGraph`
@@ -632,25 +646,36 @@ jobs:
         run: npx hardhat compile --config hardhat.node.config.ts
         working-directory: packages/evm-module
 
-      - name: Regenerate TypeChain bindings
+      - name: Generate TypeChain bindings (always fresh)
         if: needs.changes.outputs.contracts == 'true'
-        # `hardhat.node.config.ts` doesn't load `@typechain/hardhat`
-        # (the test runner uses it deliberately — fewer plugins, faster
-        # boot). That means `hardhat compile` here does NOT regenerate
-        # typechain bindings. Without this step, the typechain dir is
-        # purely whatever the cache restored — which can be stale
-        # bindings written by a sibling branch (the cache path includes
-        # `packages/evm-module/typechain`). Symptom: tests fail with
-        # `Error: no matching fragment` even though the ABI artifact
-        # JSON on disk has the right signature.
+        # Typechain is never cached (see Cache Hardhat artifacts step),
+        # so the output dir is always empty here on a cache hit and
+        # we generate from scratch against the artifacts that were
+        # either restored from cache or freshly compiled above.
         #
-        # Switching to the full `hardhat.config.ts` here picks up the
-        # typechain plugin and regenerates bindings deterministically
-        # from the freshly compiled artifacts. ~10s cost; eliminates the
-        # entire class of stale-typechain CI ghosts.
+        # `hardhat.node.config.ts` deliberately doesn't load
+        # `@typechain/hardhat` (the test runner uses it for faster
+        # boot). The default `hardhat.config.ts` does load it, which
+        # is why `npx hardhat typechain` here uses the default config.
+        # The `--show-stack-traces` flag is for debugging visibility
+        # if the silent-no-op recurrence ever happens again.
         run: |
+          set -euo pipefail
           rm -rf typechain
-          npx hardhat typechain
+          npx hardhat typechain --show-stack-traces
+          # Sanity check: bindings must include the `createContextGraph`
+          # function fragment from `ContextGraphs.sol`. If this grep
+          # fails, the typechain output is wrong and we want a loud
+          # failure here, not 20 lines down in mocha output.
+          if [ ! -f typechain/contracts/ContextGraphs.ts ]; then
+            echo "::error::typechain/contracts/ContextGraphs.ts missing after \`hardhat typechain\`"
+            exit 1
+          fi
+          if ! grep -q "createContextGraph: TypedContractMethod" typechain/contracts/ContextGraphs.ts; then
+            echo "::error::typechain ContextGraphs bindings missing createContextGraph method"
+            sed -n '1,40p' typechain/contracts/ContextGraphs.ts
+            exit 1
+          fi
         working-directory: packages/evm-module
 
       - name: "Hardhat tests (shard ${{ matrix.shard }}/4)"
