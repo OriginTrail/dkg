@@ -86,7 +86,12 @@ function isResourceNode(value: string): boolean {
 }
 
 function graphNodeKey(value: string): string {
-  return value.startsWith('<') && value.endsWith('>') ? value.slice(1, -1) : value;
+  // Match the trim+unwrap shape used by graph-model.cleanUri and
+  // useMemoryEntities.canonicalEntityUri so the shelf groups nodes the
+  // same way the renderer does (avoids `' <urn:x> '` and `'<urn:x>'`
+  // being treated as different keys).
+  const trimmed = value.trim();
+  return trimmed.startsWith('<') && trimmed.endsWith('>') ? trimmed.slice(1, -1) : trimmed;
 }
 
 function splitGraphTriplesForShelf(triples: Triple[]): { canvasTriples: Triple[]; singletonItems: SingletonShelfItem[] } {
@@ -3917,6 +3922,31 @@ export function SubGraphDetailView({
     );
   }, [scopedTriples, scopedEntities, filteredEntities, filteredUris]);
 
+  // Graph-tab triples — when the user has narrowed the trust filter to one
+  // layer (`singleLayer`), source from the layered triple stream and drop
+  // any triple whose origin layer doesn't match, so a WM-only / SWM-only /
+  // VM-only graph never renders edges that exist only in another layer.
+  // Without this, clicks were already layer-scoped (C14) but the rendered
+  // graph could show cross-layer edges (C15).
+  const graphPanelTriples = useMemo(() => {
+    if (!singleLayer) return filteredTriples;
+    const layerTrust: TrustLevel =
+      singleLayer === 'vm' ? 'verified' :
+      singleLayer === 'swm' ? 'shared' : 'working';
+    const seen = new Set<string>();
+    const out: Triple[] = [];
+    for (const t of rawMemory.allTriples) {
+      if (t.layer !== layerTrust) continue;
+      if (!(t.subGraph === slug || (scopedUris.has(t.subject) && scopedUris.has(t.object)))) continue;
+      if (!(filteredUris.has(t.subject) || filteredUris.has(t.object))) continue;
+      const key = `${t.subject}|${t.predicate}|${t.object}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ subject: t.subject, predicate: t.predicate, object: t.object, subGraph: t.subGraph });
+    }
+    return out;
+  }, [singleLayer, filteredTriples, rawMemory.allTriples, scopedUris, slug, filteredUris]);
+
   const timelineItems = useMemo(() => {
     if (!timelinePredicate) return [];
     const out: Array<{ entity: MemoryEntity; date: Date }> = [];
@@ -4214,7 +4244,7 @@ export function SubGraphDetailView({
           <div className="v10-layer-expand-body full-width" data-cg-scroll-key={`subgraph:${slug}:graph`}>
             <LayerGraphPanel
               layer={singleLayer ?? 'wm'}
-              triples={filteredTriples}
+              triples={graphPanelTriples}
               onNodeClick={onNodeClick}
               contextGraphId={contextGraphId}
               title={title}
