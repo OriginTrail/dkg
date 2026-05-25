@@ -292,7 +292,7 @@ async function queryLayer(
   }
 }
 
-function buildEntities(layered: LayeredTriple[]): Map<string, MemoryEntity> {
+export function buildMemoryEntities(layered: LayeredTriple[]): Map<string, MemoryEntity> {
   const entities = new Map<string, MemoryEntity>();
 
   function getOrCreate(uri: string): MemoryEntity {
@@ -431,7 +431,7 @@ export function useMemoryEntities(
 
   useEffect(() => { fetchAll(); }, [fetchAll]);
 
-  const entities = useMemo(() => buildEntities(layeredTriples), [layeredTriples]);
+  const entities = useMemo(() => buildMemoryEntities(layeredTriples), [layeredTriples]);
 
   const entityList = useMemo(() =>
     [...entities.values()]

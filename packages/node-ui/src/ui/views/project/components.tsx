@@ -33,6 +33,7 @@ import { SubGraphBar } from '../../components/SubGraphBar.js';
 import { GenUIEntityPanel } from '../../genui/index.js';
 import { MEMORY_LABEL_PREDICATES, memoryGraphLabels } from '../../lib/memoryLabels.js';
 import { canonicalAgentDid, normalizeAccessPolicy } from '../../lib/contextGraphSidebar.js';
+import { useLayoutStore } from '../../stores/layout.js';
 import { useTabsStore } from '../../stores/tabs.js';
 import {
   useVerifiedMemoryAnchors,
@@ -126,25 +127,6 @@ function defaultGraphScopeLabel(layer: 'wm' | 'swm' | 'vm'): string {
   return 'Verifiable Memory graph: published knowledge assets, provenance anchors, and connected entity-to-entity triples from loaded layer data.';
 }
 
-function GraphTrustLegend({ activeLayer }: { activeLayer?: 'wm' | 'swm' | 'vm' | null }) {
-  const items: Array<{ layer: 'wm' | 'swm' | 'vm'; label: string; color: string }> = [
-    { layer: 'wm', label: 'Working Memory', color: '#64748b' },
-    { layer: 'swm', label: 'Shared Working Memory', color: '#f59e0b' },
-    { layer: 'vm', label: 'Verifiable Memory', color: '#22c55e' },
-  ];
-  return (
-    <div className="v10-graph-rail-section" aria-label="Trust layer legend">
-      <div className="v10-graph-rail-title">Trust layers</div>
-      {items.map(item => (
-        <div key={item.layer} className={`v10-graph-rail-row${activeLayer === item.layer ? ' active' : ''}`}>
-          <span className="v10-graph-trust-swatch" style={{ background: item.color }} />
-          <span className="v10-graph-rail-label">{item.label}</span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
 function GraphSingletonShelf({
   items,
   onSelect,
@@ -154,9 +136,12 @@ function GraphSingletonShelf({
 }) {
   if (items.length === 0) return null;
   return (
-    <div className="v10-graph-singleton-shelf" aria-label="Disconnected singleton entities">
-      <div className="v10-graph-singleton-head">
-        <span>Singleton shelf</span>
+    <div className="v10-graph-singleton-shelf" aria-label="Standalone entities without visible links">
+      <div
+        className="v10-graph-singleton-head"
+        title="Entities with no visible links are grouped here to keep the graph readable."
+      >
+        <span>Standalone entities</span>
         <span>{items.length}</span>
       </div>
       <div className="v10-graph-singleton-list">
@@ -184,6 +169,8 @@ function GraphSurface({
   tone,
   className,
   rail,
+  overlay,
+  showScopeLabel = true,
   singletonItems = [],
   onSingletonClick,
   renderGraph,
@@ -193,6 +180,8 @@ function GraphSurface({
   tone: 'wm' | 'swm' | 'vm';
   className?: string;
   rail?: ReactNode;
+  overlay?: ReactNode;
+  showScopeLabel?: boolean;
   singletonItems?: SingletonShelfItem[];
   onSingletonClick?: (uri: string) => void;
   renderGraph: (expanded: boolean) => ReactNode;
@@ -208,25 +197,33 @@ function GraphSurface({
     return () => document.removeEventListener('keydown', onKeyDown);
   }, [expanded]);
 
+  const expandButton = (
+    <button
+      type="button"
+      className={`v10-graph-expand-btn${showScopeLabel ? '' : ' in-canvas'}`}
+      onClick={() => setExpanded(true)}
+      title={`Expand ${title}`}
+      aria-label={`Expand ${title}`}
+    >
+      &#10530;
+    </button>
+  );
+
   const body = (expandedView: boolean) => (
     <>
+      {showScopeLabel && (
       <div className="v10-graph-shell-bar">
         <div className="v10-graph-scope" title={scopeLabel}>{scopeLabel}</div>
-        <button
-          type="button"
-          className="v10-graph-expand-btn"
-          onClick={() => setExpanded(true)}
-          title={`Expand ${title}`}
-          aria-label={`Expand ${title}`}
-        >
-          ⤢
-        </button>
+        {expandButton}
       </div>
+      )}
       <div className="v10-graph-body">
         <div className="v10-graph-canvas">
+          {!showScopeLabel && !expandedView && expandButton}
           <div className="v10-graph-view">
             {renderGraph(expandedView)}
           </div>
+          {overlay && <div className="v10-graph-overlay">{overlay}</div>}
           <GraphSingletonShelf items={singletonItems} onSelect={onSingletonClick} />
         </div>
         {rail && <aside className="v10-graph-rail">{rail}</aside>}
@@ -863,6 +860,7 @@ export function LayerGraphPanel({
 }) {
   const { title: layerTitle } = LAYER_CONFIG[layer];
   const title = titleOverride ?? layerTitle;
+  const theme = useLayoutStore(s => s.theme);
 
   // All URIs that already appear as subject or object in the base VM triples.
   // We pass this into the anchor hook so synthetic anchor→entity edges only
@@ -922,10 +920,11 @@ export function LayerGraphPanel({
   const swmAttributionPending = layer === 'swm' && Boolean(contextGraphId) && swmAttr.loading;
   const graphTitle = `${title} graph`;
   const resolvedScopeLabel = scopeLabel ?? defaultGraphScopeLabel(layer);
-  const legendActiveLayer = trustLegendActiveLayer === undefined ? layer : trustLegendActiveLayer;
-  const rail = (
+  const showGraphScopeLabel = trustLegendActiveLayer === null && Boolean(scopeLabel);
+  const singletonLayerContext = trustLegendActiveLayer === null ? undefined : layer;
+  const hasOverlay = (layer === 'vm' && anchors.length > 0) || (layer === 'swm' && swmAttr.palette.length > 0);
+  const overlay = hasOverlay ? (
     <>
-      <GraphTrustLegend activeLayer={legendActiveLayer} />
       {layer === 'vm' && anchors.length > 0 && (
         <VerifiedGraphLegend anchors={anchors} />
       )}
@@ -933,7 +932,11 @@ export function LayerGraphPanel({
         <SwmAttributionLegend palette={swmAttr.palette} conflicts={swmAttr.conflicts.length} />
       )}
     </>
-  );
+  ) : null;
+  const graphViewConfig = useMemo(() => ({
+    name: `${graphKey}:${theme}`,
+    palette: theme,
+  }), [graphKey, theme]);
 
   if (uniqueTriples.length === 0) {
     return (
@@ -942,7 +945,7 @@ export function LayerGraphPanel({
         scopeLabel={resolvedScopeLabel}
         tone={layer}
         className="v10-graph-view-fill"
-        rail={<GraphTrustLegend activeLayer={legendActiveLayer} />}
+        showScopeLabel={showGraphScopeLabel}
         renderGraph={() => (
           <div className="v10-layer-empty-shell">
             <EmptyState
@@ -965,7 +968,7 @@ export function LayerGraphPanel({
         scopeLabel={resolvedScopeLabel}
         tone="swm"
         className="v10-graph-view-fill"
-        rail={<GraphTrustLegend activeLayer={legendActiveLayer} />}
+        showScopeLabel={showGraphScopeLabel}
         renderGraph={() => (
           <div className="v10-layer-empty-shell">
             <EmptyState
@@ -987,9 +990,10 @@ export function LayerGraphPanel({
       scopeLabel={resolvedScopeLabel}
       tone={layer}
       className="v10-graph-view-fill"
-      rail={rail}
+      overlay={overlay}
+      showScopeLabel={showGraphScopeLabel}
       singletonItems={singletonItems}
-      onSingletonClick={(uri) => onNodeClick?.({ id: uri })}
+      onSingletonClick={(uri) => onNodeClick?.(singletonLayerContext ? { id: uri, trustLayer: singletonLayerContext } : { id: uri })}
       renderGraph={(expanded) => (
         canvasTriples.length > 0 ? (
           <Suspense fallback={<span className="v10-graph-placeholder">Loading graph...</span>}>
@@ -998,6 +1002,7 @@ export function LayerGraphPanel({
               data={canvasTriples}
               format="triples"
               options={graphOptions}
+              viewConfig={graphViewConfig}
               style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }}
               onNodeClick={onNodeClick}
               initialFit
@@ -1257,6 +1262,9 @@ export function MemoryStripExpanded({
   onSwitchLayer: () => void;
 }) {
   const layerTriples = useLayerTriples(memory, layerKey);
+  const handleLayerNodeClick = useCallback((node: any) => {
+    onNodeClick?.({ ...node, trustLayer: layerKey });
+  }, [layerKey, onNodeClick]);
   return (
     <LayerContent
       layer={layerKey}
@@ -1268,7 +1276,7 @@ export function MemoryStripExpanded({
       activeTab={activeTab}
       onTabChange={onTabChange}
       onSelectEntity={onSelectEntity}
-      onNodeClick={onNodeClick}
+      onNodeClick={handleLayerNodeClick}
       footer={
         <div className="v10-layer-expand-footer">
           <button
@@ -2639,6 +2647,9 @@ export function LayerDetailView({
   onTabChange: (tab: LayerContentTab) => void;
 }) {
   const config = LAYER_CONFIG[layer];
+  const handleLayerNodeClick = useCallback((node: any) => {
+    onNodeClick({ ...node, trustLayer: layer });
+  }, [layer, onNodeClick]);
 
   const entities = useMemo(
     () => memory.entityList.filter(e => e.trustLevel === config.trustLevel),
@@ -2667,7 +2678,7 @@ export function LayerDetailView({
           activeTab={activeTab}
           onTabChange={onTabChange}
           onSelectEntity={onSelectEntity}
-          onNodeClick={onNodeClick}
+          onNodeClick={handleLayerNodeClick}
         />
       </div>
     </div>
@@ -2998,6 +3009,7 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
   onOpenAgent?: (uri: string) => void;
 }) {
   const [pane, setPane] = useState<KAPane>('content');
+  const theme = useLayoutStore(s => s.theme);
   const profile = useProjectProfileContext();
   const agents = useAgentsContext();
   const { icon, type } = entityMeta(entity, profile);
@@ -3054,9 +3066,10 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
   // re-applies the view when we switch entities without unmounting
   // the whole RdfGraph.
   const entityViewConfig = useMemo(() => ({
-    name: `entity-${entity.uri}`,
+    name: `entity-${entity.uri}-${theme}`,
+    palette: theme,
     focal: { uri: entity.uri, sizeMultiplier: 2.4 },
-  }), [entity.uri]);
+  }), [entity.uri, theme]);
 
   const tripleCount = entity.connections.length + entity.properties.size;
 

@@ -3,7 +3,12 @@ import { useFetch } from '../hooks.js';
 import { api } from '../api-wrapper.js';
 import { ImportFilesModal } from '../components/Modals/ImportFilesModal.js';
 import { ShareProjectModal } from '../components/Modals/ShareProjectModal.js';
-import { useMemoryEntities } from '../hooks/useMemoryEntities.js';
+import {
+  buildMemoryEntities,
+  useMemoryEntities,
+  type LayeredTriple,
+  type TrustLevel,
+} from '../hooks/useMemoryEntities.js';
 import { useProjectProfile, ProjectProfileContext } from '../hooks/useProjectProfile.js';
 import { useAgents, AgentsContext } from '../hooks/useAgents.js';
 import { useCurrentAgent } from '../hooks/useCurrentAgent.js';
@@ -51,6 +56,12 @@ const DEFAULT_LAYER_TABS: Record<MemoryLayerView, LayerContentTab> = {
   vm: 'items',
 };
 
+const TRUST_FOR_LAYER: Record<MemoryLayerView, TrustLevel> = {
+  wm: 'working',
+  swm: 'shared',
+  vm: 'verified',
+};
+
 function isMemoryLayerView(layer: LayerView): layer is MemoryLayerView {
   return layer === 'wm' || layer === 'swm' || layer === 'vm';
 }
@@ -80,6 +91,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   // a sibling of `activeLayer`, not a filter over it: sub-graphs are a peer
   // axis to layers, and each axis gets its own first-class page.
   const [activeSubGraph, setActiveSubGraph] = useState<string | null>(null);
+  const [selectedLayerContext, setSelectedLayerContext] = useState<MemoryLayerView | null>(null);
   const [layerContentTabs, setLayerContentTabs] = useState<Record<MemoryLayerView, LayerContentTab>>(
     DEFAULT_LAYER_TABS,
   );
@@ -214,14 +226,28 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
 
   useEffect(() => { refreshParticipants(); }, [refreshParticipants]);
 
+  const selectedLayerTrust = selectedLayerContext ? TRUST_FOR_LAYER[selectedLayerContext] : null;
+  const detailTriples = useMemo(
+    () => selectedLayerTrust
+      ? rawMemory.allTriples.filter(t => t.layer === selectedLayerTrust)
+      : rawMemory.graphTriples,
+    [rawMemory.allTriples, rawMemory.graphTriples, selectedLayerTrust],
+  );
+  const detailEntities = useMemo(
+    () => selectedLayerTrust
+      ? buildMemoryEntities(detailTriples as LayeredTriple[])
+      : rawMemory.entities,
+    [detailTriples, rawMemory.entities, selectedLayerTrust],
+  );
   const selectedEntity = useMemo(
-    () => selectedUri ? rawMemory.entities.get(selectedUri) ?? null : null,
-    [selectedUri, rawMemory.entities]
+    () => selectedUri ? detailEntities.get(selectedUri) ?? null : null,
+    [selectedUri, detailEntities]
   );
 
   useEffect(() => {
     if (!selectedUri || selectedEntity || rawMemory.loading) return;
     setSelectedUri(null);
+    setSelectedLayerContext(null);
     clearDetailOrigin();
   }, [selectedUri, selectedEntity, rawMemory.loading, clearDetailOrigin]);
 
@@ -232,12 +258,14 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     clearDetailOrigin();
     setActiveSubGraph(slug);
     setSelectedUri(null);
+    setSelectedLayerContext(null);
   }, [clearDetailOrigin]);
 
   const handleLayerSwitch = useCallback((layer: LayerView) => {
     clearDetailOrigin();
     setActiveLayer(layer);
     setSelectedUri(null);
+    setSelectedLayerContext(null);
     setActiveSubGraph(null);
   }, [clearDetailOrigin]);
 
@@ -252,14 +280,16 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   // M2 keeps the user's origin stable: linked entities open in the detail
   // pane, but the underlying layer/sub-graph page does not silently change
   // until S5 adds breadcrumbs that can make that movement visible.
-  const handleNavigate = useCallback((uri: string, originScrollKey?: string) => {
+  const handleNavigate = useCallback((uri: string, originScrollKey?: string, layerContext?: MemoryLayerView) => {
     openEntityDetail(uri, originScrollKey);
-  }, [openEntityDetail]);
+    setSelectedLayerContext(layerContext ?? (selectedUri ? selectedLayerContext : null));
+  }, [openEntityDetail, selectedLayerContext, selectedUri]);
 
   const handleDetailClose = useCallback(() => {
     const origin = detailOriginRef.current;
     detailOriginRef.current = null;
     setSelectedUri(null);
+    setSelectedLayerContext(null);
     if (!origin) return;
     setActiveLayer(origin.activeLayer);
     setActiveSubGraph(origin.activeSubGraph);
@@ -269,8 +299,15 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   }, []);
 
   const handleNodeClick = useCallback((node: any) => {
-    if (node?.id) handleNavigate(node.id);
+    if (!node?.id) return;
+    const layerContext = isMemoryLayerView(node.trustLayer) ? node.trustLayer : undefined;
+    handleNavigate(node.id, undefined, layerContext);
   }, [handleNavigate]);
+
+  const handleLayerSelectEntity = useCallback((uri: string) => {
+    const layerContext = isMemoryLayerView(activeLayer) ? activeLayer : undefined;
+    handleNavigate(uri, undefined, layerContext);
+  }, [activeLayer, handleNavigate]);
 
   const handleOverviewActivityNavigate = useCallback((uri: string) => {
     handleNavigate(uri, 'page');
@@ -334,8 +371,8 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
       {selectedEntity && (
         <KADetailView
           entity={selectedEntity}
-          allEntities={rawMemory.entities}
-          allTriples={rawMemory.graphTriples}
+          allEntities={detailEntities}
+          allTriples={detailTriples}
           onNavigate={handleNavigate}
           onClose={handleDetailClose}
           contextGraphId={contextGraphId}
@@ -425,7 +462,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
             layer={activeLayer}
             memory={rawMemory}
             onNodeClick={handleNodeClick}
-            onSelectEntity={handleNavigate}
+            onSelectEntity={handleLayerSelectEntity}
             contextGraphId={contextGraphId}
             activeTab={layerContentTabs[activeLayer]}
             onTabChange={tab => handleLayerTabChange(activeLayer, tab)}

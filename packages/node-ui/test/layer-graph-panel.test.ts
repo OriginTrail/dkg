@@ -312,7 +312,7 @@ describe('LayerGraphPanel graph lifecycle', () => {
     expect(graphState.unmounts).toEqual(['#64748b']);
   });
 
-  it('renders graph scope, docked rail, degree sizing, and expand control', async () => {
+  it('renders layer graph with degree sizing and in-canvas expand control', async () => {
     vi.stubGlobal('fetch', vi.fn());
     const { LayerGraphPanel } = await import('../src/ui/views/project/components.js');
 
@@ -327,14 +327,13 @@ describe('LayerGraphPanel graph lifecycle', () => {
       expect(container.querySelector('[data-testid="rdf-graph"]')).toBeTruthy();
     });
 
-    expect(container.textContent).toContain('Working Memory graph:');
-    expect(container.textContent).toContain('Trust layers');
-    expect(container.textContent).toContain('Working Memory');
+    expect(container.textContent).not.toContain('Working Memory graph:');
+    expect(container.textContent).not.toContain('Trust layers');
 
     const graph = container.querySelector('[data-testid="rdf-graph"]') as HTMLElement;
     expect(graph.getAttribute('data-scale-with-degree')).toBe('true');
 
-    const expand = container.querySelector('.v10-graph-expand-btn') as HTMLButtonElement;
+    const expand = container.querySelector('.v10-graph-expand-btn.in-canvas') as HTMLButtonElement;
     expect(expand).toBeTruthy();
     await act(async () => {
       expand.click();
@@ -415,7 +414,7 @@ describe('LayerGraphPanel graph lifecycle', () => {
 
     const graph = container.querySelector('[data-testid="rdf-graph"]') as HTMLElement;
     expect(graph.getAttribute('data-triples')).toBe('2');
-    expect(container.textContent).toContain('Singleton shelf');
+    expect(container.textContent).toContain('Standalone entities');
     expect(container.textContent).toContain('18');
 
     const singletonItems = container.querySelectorAll('.v10-graph-singleton-item');
@@ -426,7 +425,7 @@ describe('LayerGraphPanel graph lifecycle', () => {
     await act(async () => {
       singleton.click();
     });
-    expect(onNodeClick).toHaveBeenCalledWith({ id: singleton.getAttribute('title') });
+    expect(onNodeClick).toHaveBeenCalledWith({ id: singleton.getAttribute('title'), trustLayer: 'wm' });
   });
 
   it('uses decoded labels and canonical IDs for singleton shelf entries', async () => {
@@ -466,10 +465,11 @@ describe('LayerGraphPanel graph lifecycle', () => {
     await act(async () => {
       singleton.click();
     });
-    expect(onNodeClick).toHaveBeenCalledWith({ id: 'urn:test:wrapped-singleton' });
+    expect(onNodeClick).toHaveBeenCalledWith({ id: 'urn:test:wrapped-singleton', trustLayer: 'wm' });
   });
 
-  it('can render mixed-scope subgraph graphs without highlighting a single trust layer', async () => {
+  it('keeps mixed-scope subgraph graph scope visible without the generic trust rail', async () => {
+    const onNodeClick = vi.fn();
     vi.stubGlobal('fetch', vi.fn());
     const { LayerGraphPanel } = await import('../src/ui/views/project/components.js');
 
@@ -477,7 +477,15 @@ describe('LayerGraphPanel graph lifecycle', () => {
       root.render(React.createElement(LayerGraphPanel, {
         layer: 'wm',
         title: 'Subgraph alpha',
-        triples,
+        triples: [
+          ...triples,
+          {
+            subject: 'urn:test:mixed-scope-singleton',
+            predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+            object: 'http://schema.org/Thing',
+          },
+        ],
+        onNodeClick,
         scopeLabel: 'Subgraph graph: alpha entities and entity-to-entity triples from loaded subgraph data.',
         trustLegendActiveLayer: null,
       }));
@@ -488,8 +496,15 @@ describe('LayerGraphPanel graph lifecycle', () => {
     });
 
     expect(container.querySelector('.v10-graph-expand-btn')?.getAttribute('aria-label')).toBe('Expand Subgraph alpha graph');
-    expect(container.textContent).toContain('Trust layers');
-    expect(container.querySelector('.v10-graph-rail-row.active')).toBeNull();
+    expect(container.textContent).toContain('Subgraph graph: alpha entities and entity-to-entity triples from loaded subgraph data.');
+    expect(container.textContent).not.toContain('Trust layers');
+
+    const singleton = container.querySelector('.v10-graph-singleton-item') as HTMLButtonElement;
+    expect(singleton).toBeTruthy();
+    await act(async () => {
+      singleton.click();
+    });
+    expect(onNodeClick).toHaveBeenCalledWith({ id: 'urn:test:mixed-scope-singleton' });
   });
 
   it('keeps blank-node and angle-wrapped resource edges in the graph data', async () => {
