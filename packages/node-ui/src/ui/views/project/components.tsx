@@ -1175,15 +1175,21 @@ export function MemoryStrip({
     return { wm, swm, vm };
   }, [memory.entityList]);
 
-  const layerTripleCounts = useMemo(() => {
-    let wm = 0, swm = 0, vm = 0;
-    for (const t of memory.allTriples) {
-      if (t.layer === 'verified') vm++;
-      else if (t.layer === 'shared') swm++;
-      else wm++;
-    }
-    return { wm, swm, vm };
-  }, [memory.allTriples]);
+  // R2-6: per-layer triple counts must agree with the in-page count
+  // shown by the layer-detail tab on the same memory. The detail tab
+  // uses `useLayerTriples`, which residue-filters out triples whose
+  // subject is a promoted entity (post-P1). Summing `memory.allTriples`
+  // raw would double-count promoted residue and disagree with the
+  // badge under it. Source from `useLayerTriples` per layer so both
+  // surfaces stay in sync.
+  const wmLayerTriples = useLayerTriples(memory, 'wm');
+  const swmLayerTriples = useLayerTriples(memory, 'swm');
+  const vmLayerTriples = useLayerTriples(memory, 'vm');
+  const layerTripleCounts = useMemo(() => ({
+    wm: wmLayerTriples.length,
+    swm: swmLayerTriples.length,
+    vm: vmLayerTriples.length,
+  }), [wmLayerTriples.length, swmLayerTriples.length, vmLayerTriples.length]);
 
   const toggleExpand = (layer: MemoryStripLayer) => {
     const next = expanded === layer ? null : layer;

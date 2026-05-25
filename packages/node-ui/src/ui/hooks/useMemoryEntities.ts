@@ -64,7 +64,12 @@ function isUri(s: string): boolean {
   return /^[A-Za-z][A-Za-z0-9+.-]*:/.test(value);
 }
 
-function canonicalEntityUri(uri: string): string {
+// Exported so consumers that look entities up directly (e.g.
+// useLayerTriples' residue filter) can canonicalise raw triple
+// subjects the same way `buildEntities` does — daemon results
+// sometimes ship wrapped (`<urn:...>`) URIs and a raw lookup
+// would miss the entity record.
+export function canonicalEntityUri(uri: string): string {
   const trimmed = uri.trim();
   if (trimmed.startsWith('<') && trimmed.endsWith('>')) return trimmed.slice(1, -1);
   return trimmed;

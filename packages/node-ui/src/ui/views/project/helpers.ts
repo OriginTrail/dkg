@@ -1,6 +1,7 @@
 import { useMemo } from 'react';
 import {
   useMemoryEntities,
+  canonicalEntityUri,
   type TrustLevel,
   type MemoryEntity,
   type Triple,
@@ -345,7 +346,13 @@ export function useLayerTriples(memory: ReturnType<typeof useMemoryEntities>, la
       // node on the prior-layer Graph view. Triples whose subject has
       // no entity record (literal orphans / class IRIs that only ever
       // appear as objects) pass through unfiltered.
-      const subjectEntity = memory.entities.get(t.subject);
+      //
+      // R2-1 fix: `entities.get` is keyed by the canonical (trimmed,
+      // unwrapped) URI per `buildEntities`. The daemon sometimes ships
+      // subjects wrapped (`<urn:...>`) — looking them up raw misses the
+      // entity record, silently bypasses this filter, and the phantom
+      // node returns. Canonicalise first.
+      const subjectEntity = memory.entities.get(canonicalEntityUri(t.subject));
       if (subjectEntity && subjectEntity.trustLevel !== targetLayer) continue;
       const key = `${t.subject}|${t.predicate}|${t.object}`;
       if (seen.has(key)) continue;

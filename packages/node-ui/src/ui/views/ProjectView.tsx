@@ -160,12 +160,16 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     }
   }, []);
 
+  // Reads `selectedUri` via `selectedUriRef` so the callback identity
+  // stays stable across navigation — listing `selectedUri` here would
+  // recreate `openEntityDetail` on every entity click, which in turn
+  // recreates `handleNavigate` and the cross-tab listener effect (R2-2).
   const openEntityDetail = useCallback((uri: string, originScrollKey?: string) => {
-    if (!selectedUri || !detailOriginRef.current) {
+    if (!selectedUriRef.current || !detailOriginRef.current) {
       detailOriginRef.current = captureDetailOrigin(originScrollKey);
     }
     setSelectedUri(uri);
-  }, [captureDetailOrigin, selectedUri]);
+  }, [captureDetailOrigin]);
 
   const clearDetailOrigin = useCallback(() => {
     detailOriginRef.current = null;
@@ -182,13 +186,20 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   // Cross-tab entity open — e.g. the agent profile page in another tab
   // fires a CustomEvent("v10:open-entity", { contextGraphId, entityUri })
   // when the user clicks an activity row. We honour it when it's scoped
-  // to *this* project.
+  // to *this* project. R2-3 fix: clear `selectedLayerContext` before
+  // routing to `openEntityDetail`. Without this, an in-progress detail
+  // open (e.g. user opened a WM entity then alt-tabbed without closing)
+  // leaves `detailEntities` scoped to the prior layer, so a cross-tab
+  // open for a non-WM entity lands in a slice that doesn't contain it,
+  // `selectedEntity` resolves to null, and the cleanup effect silently
+  // clears the selection — the cross-tab open is dropped on the floor.
   useEffect(() => {
     const handler = (ev: Event) => {
       const detail = (ev as CustomEvent).detail;
       if (!detail) return;
       if (detail.contextGraphId !== contextGraphId) return;
       if (typeof detail.entityUri !== 'string') return;
+      setSelectedLayerContext(null);
       openEntityDetail(detail.entityUri);
     };
     window.addEventListener('v10:open-entity', handler);

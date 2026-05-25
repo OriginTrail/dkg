@@ -113,6 +113,19 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
     return counts;
   }, [layer, entities]);
 
+  // Distinct count of layer-canonical entities for the "All" chip.
+  // Summing per-sub-graph counts would double-count entities that
+  // belong to two or more sub-graphs (the WM/SWM/VM list under us is
+  // trustLevel-filtered without sub-graph multiplicity, so the sum
+  // would disagree with the list — undoing what P3/P4 aligned).
+  const layerScopedAllTotal = React.useMemo(() => {
+    if (!layer || !entities) return null;
+    const trust = LAYER_TRUST_LEVEL[layer];
+    let n = 0;
+    for (const e of entities) if (e.trustLevel === trust) n++;
+    return n;
+  }, [layer, entities]);
+
   const loadSubGraphs = React.useCallback(() => {
     const requestId = ++requestIdRef.current;
     setLoading(true);
@@ -164,7 +177,9 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
   if (loading && merged.length === 0) return null;
   if (merged.length === 0) return null;
 
-  const totalEntities = merged.reduce((a, b) => a + b.entityCount, 0);
+  // In layer mode use the deduped distinct-entity total (R2-5); in
+  // project-wide mode keep the daemon-sum.
+  const totalEntities = layerScopedAllTotal ?? merged.reduce((a, b) => a + b.entityCount, 0);
   const totalTriples = merged.reduce((a, b) => a + b.tripleCount, 0);
   // Tooltip suffix tells the user the count is layer-scoped on a
   // WM/SWM/VM page; on the Overview / Subgraphs page it stays implicit

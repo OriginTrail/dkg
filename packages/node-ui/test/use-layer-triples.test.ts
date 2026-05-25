@@ -116,4 +116,41 @@ describe('useLayerTriples — promoted-entity residue filter (P1)', () => {
     const probe = container.querySelector('#probe')!;
     expect(probe.getAttribute('data-subjects')).toBe('urn:e:wm-only');
   });
+
+  // R2-1 regression: the residue filter looks entities up by triple
+  // subject, but `buildEntities` canonicalises entity keys (drops <>
+  // wrappers and trims). The daemon's wmSparql/swmSparql/vmSparql
+  // sometimes ships subjects wrapped (`<urn:...>`) — a raw lookup
+  // misses the entity record, the filter silently bypasses, and the
+  // promoted entity's residual WM triples render as phantom nodes.
+  // Canonicalising first restores the filter.
+  it('canonicalises wrapped triple subjects when looking up the entity for the residue filter (R2-1)', () => {
+    // Two genuinely-WM and one promoted entity. The promoted entity's
+    // WM residue triple ships with a wrapped subject — the regression
+    // is that without canonicalisation, this slips past the filter.
+    const triples: LayeredTriple[] = [
+      { subject: 'urn:e:wm-only',   predicate: RDF_TYPE, object: 'http://schema.org/Thing', layer: 'working' },
+      { subject: '<urn:e:promoted-wrapped>',  predicate: RDF_TYPE, object: 'http://schema.org/Thing', layer: 'working' }, // residue, wrapped
+      { subject: 'urn:e:promoted-wrapped',  predicate: 'http://schema.org/name', object: '"Promoted (canon)"', layer: 'shared' },
+    ];
+    const memory = memoryFor(triples);
+    // `buildEntities` canonicalises both subjects to the same entity.
+    const promoted = memory.entities.get('urn:e:promoted-wrapped');
+    expect(promoted).toBeDefined();
+    expect(promoted!.trustLevel).toBe('shared');
+
+    act(() => {
+      root.render(React.createElement(ProbeLayerTriples, { memory, layer: 'wm' }));
+    });
+
+    const probe = container.querySelector('#probe')!;
+    const subjects = (probe.getAttribute('data-subjects') ?? '').split('|').filter(Boolean);
+    // WM view: only the genuinely-WM subject. The wrapped-subject
+    // residue triple for the promoted entity must be filtered out
+    // even though the lookup key (`<urn:e:promoted-wrapped>`) differs
+    // from the entity's canonical key (`urn:e:promoted-wrapped`).
+    expect(subjects).toContain('urn:e:wm-only');
+    expect(subjects).not.toContain('<urn:e:promoted-wrapped>');
+    expect(subjects).not.toContain('urn:e:promoted-wrapped');
+  });
 });

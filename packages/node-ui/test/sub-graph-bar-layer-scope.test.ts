@@ -156,4 +156,45 @@ describe('SubGraphBar — layer-scoped chip counts (P4)', () => {
     expect(chipCount('alpha')).toBe(1);
     expect(chipCount('beta')).toBe(1);
   });
+
+  // R2-5 regression: the "All" chip's `totalEntities` used to sum
+  // `merged[].entityCount`, which double-counted entities living in
+  // two or more sub-graphs (each sub-graph's `entityCount` includes
+  // them). The WM/SWM/VM list under us is trustLevel-filtered without
+  // sub-graph multiplicity, so the sum disagreed with the list —
+  // undoing what P3/P4 set out to align. Distinct-count by entity URI
+  // for the "All" total in layer mode.
+  it('with `layer`: the "All" chip total does not double-count entities living in multiple sub-graphs (R2-5)', async () => {
+    // One WM-only entity belongs to BOTH alpha AND beta. Per-sub-graph
+    // chips correctly count it in both (1 + 1 = 2 via summing). The
+    // "All" total must remain 1 (one distinct entity in the layer).
+    const crossSubGraph = {
+      uri: 'urn:e:cross',
+      label: 'cross',
+      types: [],
+      trustLevel: 'working' as const,
+      layers: new Set(['working']),
+      subGraphs: new Set(['alpha', 'beta']),
+      properties: new Map(),
+      connections: [],
+    };
+    await act(async () => {
+      root.render(React.createElement(SubGraphBar, {
+        contextGraphId: 'cg',
+        profile,
+        selected: null,
+        onSelect: vi.fn(),
+        entities: [crossSubGraph],
+        layer: 'wm',
+      }));
+    });
+    await flushNet();
+    expect(chipCount('alpha')).toBe(1);
+    expect(chipCount('beta')).toBe(1);
+    // Pre-R2-5 the "All" total summed per-sub-graph counts → 2.
+    const allChip = Array.from(container.querySelectorAll('button.v10-subgraph-chip'))
+      .find(b => b.textContent?.includes('All'));
+    const allCount = Number(allChip?.querySelector('.v10-subgraph-chip-count')?.textContent ?? 'NaN');
+    expect(allCount).toBe(1);
+  });
 });
