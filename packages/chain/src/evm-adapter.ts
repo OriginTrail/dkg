@@ -2949,4 +2949,19 @@ export class EVMChainAdapter implements ChainAdapter {
     const cgId: bigint = await cgs.kcToContextGraph(kcId);
     return BigInt(cgId);
   }
+
+  /**
+   * OT-RFC-38 / LU-5: chain-backed access-policy oracle for cores.
+   * `ContextGraphStorage.getAccessPolicy` returns the uint8 enum
+   * (`0`=public, `1`=curated). Unregistered ids return `0` (Solidity
+   * default-zero mapping); callers should treat that as "public /
+   * unknown" — for the encrypted-payload guard, `0` MUST NOT be
+   * interpreted as a positive curation signal.
+   */
+  async getContextGraphAccessPolicy(contextGraphId: bigint): Promise<number> {
+    await this.init();
+    const cgs = this.requireContextGraphStorage();
+    const raw: bigint = BigInt(await cgs.getAccessPolicy(contextGraphId));
+    return Number(raw);
+  }
 }

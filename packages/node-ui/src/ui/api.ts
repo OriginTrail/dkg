@@ -211,8 +211,8 @@ export async function createContextGraph(
   id: string,
   name: string,
   description?: string,
-  opts?: { allowedAgents?: string[]; accessPolicy?: number; publishPolicy?: number },
-): Promise<{ created: string; uri: string }> {
+  opts?: { allowedAgents?: string[]; accessPolicy?: number; publishPolicy?: number; register?: boolean },
+): Promise<{ created: string; uri: string; registered?: boolean; onChainId?: string; registerError?: string }> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 30_000);
   try {
@@ -221,6 +221,14 @@ export async function createContextGraph(
       headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: JSON.stringify({
         id, name, description,
+        // Codex PR #608 R1/R2 #5/#8: registration is opt-in (`opts.register`),
+        // not hard-coded. The previous always-`register: true` broke the
+        // local-first CG contract: unfunded / offline / no-RPC users got a
+        // hard create failure instead of a usable local project (matches
+        // what the user actually complained about: "wait, it will register
+        // on chain immediately, meaning I need tokens when I create a CG?").
+        // The modal explicitly passes `register: true` when the user opts in.
+        ...(opts?.register ? { register: true } : {}),
         ...(opts?.allowedAgents ? { allowedAgents: opts.allowedAgents } : {}),
         ...(opts?.accessPolicy !== undefined ? { accessPolicy: opts.accessPolicy } : {}),
         ...(opts?.publishPolicy !== undefined ? { publishPolicy: opts.publishPolicy } : {}),
@@ -231,7 +239,7 @@ export async function createContextGraph(
       const errBody = await res.json().catch(() => ({}));
       throw new Error((errBody as { error?: string })?.error ?? `HTTP ${res.status}`);
     }
-    return res.json() as Promise<{ created: string; uri: string }>;
+    return res.json() as Promise<{ created: string; uri: string; registered?: boolean; onChainId?: string; registerError?: string }>;
   } catch (err: any) {
     if (err.name === 'AbortError') {
       throw new Error('Creating project is taking longer than expected — it may still complete in the background. Refresh the page in a moment.');

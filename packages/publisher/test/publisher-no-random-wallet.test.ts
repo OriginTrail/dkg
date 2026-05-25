@@ -453,7 +453,14 @@ describe('DKGPublisher: no random publisher wallet without explicit key', () => 
     expect(result.ual).toMatch(/^did:dkg:evm:31337\/0x[0-9a-fA-F]{40}\/t/);
   });
 
-  it('does not reserve adapter publisher signers for identity-less tentative publishes', async () => {
+  it('reserves adapter publisher signers for identity-less publishes (OT-RFC-38 §1.1 — no-attribution path)', async () => {
+    // Pre-RFC-38: identity=0 short-circuited to tentative and skipped the
+    // adapter reservation. Post-RFC-38: edge agents without an on-chain
+    // Profile MUST be able to publish in no-attribution mode (the contract
+    // accepts attributionId=0n), so the publisher resolves and reserves a
+    // chain signer just like any other on-chain publish. The downstream
+    // result depends on the chain adapter — here `ReservingPublishChain`
+    // accepts any publisher and returns a confirmed result.
     const keypair = await generateEd25519Keypair();
     const chain = new ReservingPublishChain(new ethers.Wallet(TEST_KEY));
     const publisher = new DKGPublisher({
@@ -467,17 +474,20 @@ describe('DKGPublisher: no random publisher wallet without explicit key', () => 
     const result = await publisher.publish({
       contextGraphId: '1',
       quads: [{
-        subject: 'urn:test:evm-identityless-no-reserve',
+        subject: 'urn:test:evm-identityless-reserves',
         predicate: 'http://schema.org/name',
-        object: '"EvmIdentitylessNoReserve"',
+        object: '"EvmIdentitylessReserves"',
         graph: 'did:dkg:context-graph:1',
       }],
     });
 
-    expect(result.status).toBe('tentative');
-    expect(result.onChainResult).toBeUndefined();
-    expect(chain.reservations).toBe(0);
-    expect(chain.capturedPublisherAddress).toBeUndefined();
+    // The reservation is the load-bearing assertion — it proves the gate
+    // dropped and the publisher resolved a signer. The on-chain TX itself
+    // may still fall back to tentative in single-node mode (no v10ACKProvider
+    // + no self-ACK without identity → no ACKs → tx skipped), which is fine
+    // for this test: the gate change is what we're pinning.
+    expect(['confirmed', 'tentative']).toContain(result.status);
+    expect(chain.reservations).toBeGreaterThanOrEqual(1);
   });
 
   it('keeps descriptive-CG chain-backed publishes tentative without a publisher signer', async () => {

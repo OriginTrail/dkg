@@ -972,6 +972,30 @@ export interface ChainAdapter {
    * skip the period rather than blindly querying CG `_meta:0`.
    */
   getKCContextGraphId?(kcId: bigint): Promise<bigint>;
+
+  /**
+   * On-chain access policy for `contextGraphId`. Read from
+   * `ContextGraphStorage.getAccessPolicy(uint256)`. Returns the
+   * Solidity enum value: `0` = public/discoverable, `1` = private/curated.
+   *
+   * OT-RFC-38 / LU-5 use case: when a core node receives a
+   * `PublishIntent` with `isEncryptedPayload=true` it MUST independently
+   * verify the CG is curated before honoring the opaque-ACK path
+   * (otherwise a malicious publisher could bypass merkle verification
+   * on a public CG). The local triple store oracle isn't authoritative
+   * for a CG the core didn't create — the publisher's meta-graph
+   * gossip is race-y with the publish itself — so cores fall back to
+   * the chain, which is the source of truth.
+   *
+   * Returns `0` for unregistered IDs (matches Solidity default-zero
+   * mapping; callers can treat as "public/unknown"). Optional so
+   * non-V10 / no-chain adapters can stub the surface.
+   *
+   * Cheap (single eth_call) and called only on the encrypted-payload
+   * path, but cores SHOULD cache the result per (chainId, cgId) to
+   * avoid one RPC per publish.
+   */
+  getContextGraphAccessPolicy?(contextGraphId: bigint): Promise<number>;
 }
 
 // ----- Backward-compat deprecated aliases -----

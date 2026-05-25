@@ -12,12 +12,19 @@ function readTokenFile(path: string): string {
 }
 
 function readDkgConfig() {
-  // Devnet node 1 takes priority (local Hardhat chain with real contracts)
-  const devnetNode1 = resolve(__dirname, '../../.devnet/node1');
-  if (existsSync(join(devnetNode1, 'api.port'))) {
-    const port = parseInt(readFileSync(join(devnetNode1, 'api.port'), 'utf-8').trim(), 10) || 9201;
-    const token = readTokenFile(join(devnetNode1, 'auth.token'));
-    console.log(`[vite] Using devnet node 1 on port ${port}`);
+  // Devnet takes priority over ~/.dkg. By default we target node1 (matches
+  // pre-LU-5 behaviour). The `scripts/devnet.sh ui start` wrapper already
+  // exports DEVNET_NODE=$UI_NODE_ID, so set UI_NODE_ID=5 before invoking
+  // the script (or set DEVNET_NODE directly when running `pnpm dev:ui`
+  // standalone) to point the UI at a different daemon — required to test
+  // the edge-curator flow from the UI without hand-rolling curl against
+  // the edge node's daemon port.
+  const devnetNodeNum = process.env.DEVNET_NODE || '1';
+  const devnetDir = resolve(__dirname, '../../.devnet', `node${devnetNodeNum}`);
+  if (existsSync(join(devnetDir, 'api.port'))) {
+    const port = parseInt(readFileSync(join(devnetDir, 'api.port'), 'utf-8').trim(), 10) || 9201;
+    const token = readTokenFile(join(devnetDir, 'auth.token'));
+    console.log(`[vite] Using devnet node${devnetNodeNum} on port ${port}`);
     return { port, token };
   }
 

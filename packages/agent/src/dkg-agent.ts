@@ -65,6 +65,7 @@ import {
   type MessageIdempotencyStore,
   type ProtocolOutboxStore,
   type ProtocolOutboxEntry,
+  encryptV10PublishPayload,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
@@ -527,6 +528,23 @@ export class DKGAgent {
   private readonly gossipRegistered = new Set<string>();
   private readonly sharedMemoryGossipRegistered = new Set<string>();
   private readonly seenOnChainIds = new Set<string>();
+  /**
+   * OT-RFC-38 / LU-5: per-core cache of on-chain CG access policies,
+   * keyed by the on-chain numeric id (uint256). Populated by:
+   *   1. `onContextGraphCreated` chain-event handler (eager) — fills in
+   *      the access policy as soon as the core sees the `ContextGraphCreated`
+   *      / `NameClaimed` event from chain, BEFORE the publisher's
+   *      first publish intent arrives.
+   *   2. `isCgCurated` callback (lazy) — when local store has no
+   *      access-policy triple AND the cache is cold, the callback falls
+   *      back to a single `chain.getContextGraphAccessPolicy` RPC and
+   *      memoizes the answer here.
+   *
+   * `1` = curated/private, `0` = public, `undefined` = not yet
+   * resolved. Callers MUST NOT interpret missing-from-cache as a
+   * positive curation signal — fall through to the chain.
+   */
+  private readonly onChainAccessPolicyCache = new Map<string, number>();
   private readonly peerHealth = new Map<string, PeerHealth>();
   private readonly knownCorePeerIds = new Set<string>();
   private readonly syncingPeers = new Set<string>();
@@ -1270,6 +1288,80 @@ export class DKGAgent {
               contextGraphSharedMemoryUri,
               chainId: chainIdForHandler,
               kav10Address: kav10AddressForHandler,
+              // Codex PR #608: independently verify the publisher's
+              // `isEncryptedPayload=true` claim against this node's
+              // local view of the CG. `isPrivateContextGraph()` is the
+              // same predicate the SWM data-plane uses to gate
+              // sync / share auth, so the ACK path stays consistent
+              // for curators / members that have already synced the
+              // CG metadata locally.
+              //
+              // Chain fallback (regression fix, post-R5): for a CG that
+              // a non-curator core just learned about via on-chain
+              // event but whose meta-graph triples haven't been
+              // gossipped yet, the local-store probes both miss. The
+              // `ContextGraphCreated` event handler eagerly seeds
+              // `onChainAccessPolicyCache`, but for cores that started
+              // AFTER a CG's create-block (or missed the event), we
+              // also do a single lazy chain read via
+              // `chain.getContextGraphAccessPolicy`. The chain is the
+              // source of truth — Solidity stores the policy as a
+              // uint8 on `ContextGraphStorage`. `cgId` here is the
+              // PublishIntent's on-chain numeric id (see
+              // `core/proto/publish-intent.ts:62` — "TARGET on-chain
+              // numeric CG id"), so it maps directly to the contract
+              // call.
+              //
+              // Returns `null` when curation is genuinely indeterminate
+              // (chain adapter doesn't expose the getter; chain read
+              // throws). The handler treats `null !== true` as
+              // fail-closed, preserving the original auth-bypass guard.
+              isCgCurated: async (cgId: string, _swmGraphId?: string) => {
+                // Codex PR #608 R3 #1325: only the TARGET cgId determines
+                // whether the published payload is encrypted. The source
+                // `swmGraphId` is the LOCAL SWM graph name and can't
+                // override chain truth — a remap from a private local
+                // staging graph onto a public on-chain CG must take the
+                // plaintext path the chain expects, not the opaque one.
+                // Previously this probed BOTH and returned true if either
+                // looked private, letting curated-shape envelopes ride a
+                // public-CG publish.
+                try {
+                  if (await this.isPrivateContextGraph(cgId)) return true;
+                } catch { /* fall through to chain probe */ }
+                const cached = this.onChainAccessPolicyCache.get(cgId);
+                if (cached !== undefined) {
+                  return cached === 1;
+                }
+                const getAccessPolicy = this.chain.getContextGraphAccessPolicy;
+                if (typeof getAccessPolicy !== 'function') {
+                  return null;
+                }
+                let numericId: bigint;
+                try {
+                  numericId = BigInt(cgId);
+                } catch {
+                  return null;
+                }
+                if (numericId <= 0n) {
+                  return null;
+                }
+                try {
+                  const policy = await getAccessPolicy.call(this.chain, numericId);
+                  if (policy === 0 || policy === 1) {
+                    this.onChainAccessPolicyCache.set(cgId, policy);
+                    return policy === 1;
+                  }
+                  return null;
+                } catch (err) {
+                  this.log.warn(
+                    ctx,
+                    `isCgCurated: chain.getContextGraphAccessPolicy(${cgId}) failed — treating as UNKNOWN (fail-closed at handler): ` +
+                    (err instanceof Error ? err.message : String(err)),
+                  );
+                  return null;
+                }
+              },
               isSignerRegistered: async () => {
                 const isOperationalWalletRegistered = this.chain.isOperationalWalletRegistered;
                 if (typeof isOperationalWalletRegistered !== 'function') return false;
@@ -1450,6 +1542,18 @@ export class DKGAgent {
           if (!alreadyKnown) {
             this.seenOnChainIds.add(contextGraphId);
             this.log.info(ctx, `Noted on-chain context graph ${contextGraphId.slice(0, 16)}… — will subscribe once cleartext name is resolved`);
+          }
+
+          // OT-RFC-38 / LU-5: eagerly populate the on-chain access-policy
+          // cache so the StorageACK encrypted-payload guard can answer
+          // `isCgCurated` from local state without an extra RPC. The
+          // event itself carries the policy enum — no need to re-read.
+          // `contextGraphId` here is the on-chain numeric id (stringified
+          // bigint) for V10 `ContextGraphCreated` events, which is also
+          // what the publish-intent ships in `PublishIntent.contextGraphId`,
+          // so the keying matches the lazy-fallback lookup below.
+          if (accessPolicy === 0 || accessPolicy === 1) {
+            this.onChainAccessPolicyCache.set(contextGraphId, accessPolicy);
           }
         },
       });
@@ -6379,6 +6483,25 @@ export class DKGAgent {
       }
     }
 
+    // OT-RFC-38 / LU-5 — curated CG ACK payloads ship as AEAD ciphertext
+    // (see _resolveEncryptInlinePayload jsdoc for the chainKey resolution).
+    // Direct `publish()` (non-SWM path) needs the same protection — without
+    // it cores would still see plaintext for curated direct-publish, which
+    // defeats the point. PublishOpts here doesn't carry an explicit
+    // authorAgentAddress, so we let _resolveEncryptInlinePayload fall back
+    // to `defaultAgentAddress ?? peerId`.
+    //
+    // Codex PR #608 R2 #12: thread the target on-chain CG id through so
+    // the AEAD key derives from the canonical id consumers will use to
+    // verify/decrypt the published KC. Falls back to the source id when
+    // there's no remap, which is the common case.
+    const encryptInlinePayload = await this._resolveEncryptInlinePayload(
+      contextGraphId,
+      opts?.subGraphName,
+      undefined,
+      onChainId ?? undefined,
+    );
+
     const result = await this.publisher.publish({
       contextGraphId,
       quads,
@@ -6392,6 +6515,7 @@ export class DKGAgent {
       v10ACKProvider,
       publishContextGraphId: onChainId ?? undefined,
       precomputedAttestation,
+      encryptInlinePayload,
     });
 
     onPhase?.('broadcast', 'start');
@@ -7222,6 +7346,192 @@ export class DKGAgent {
    * publisher's `expectedMerkleRoot mismatch` error rather than a
    * silent wrong-content publish.
    */
+  /**
+   * OT-RFC-38 / LU-5 — produce an inline-payload AEAD callback for
+   * curated CGs so cores receive opaque ciphertext instead of
+   * plaintext nquads. Returns `undefined` for public CGs (the
+   * publisher then keeps its existing plaintext-inline behaviour).
+   *
+   * Keyed via the publisher's swm-sender-key send-state `chainKey`
+   * snapshot: every CG member who holds this key (delivered via
+   * setup packages + ratchet steps) can recompute the same payload
+   * key and decrypt later when LU-7 catchup / LU-8 verification
+   * lands. If the publisher hasn't bootstrapped a send-state yet
+   * (e.g. publish before any SWM write), we fall back to
+   * `undefined` and let the publisher's existing path apply — for
+   * a curated CG that means the cores will decline with
+   * NO_DATA_IN_SWM (same observable as today, the §1.1 bug). The
+   * agent surfaces a warn so operators see the configuration miss.
+   */
+  private async _resolveEncryptInlinePayload(
+    contextGraphId: string,
+    subGraphName?: string,
+    authorAgentAddress?: string,
+    publishContextGraphId?: string,
+  ): Promise<((plaintext: Uint8Array) => Promise<Uint8Array>) | undefined> {
+    const ctx = createOperationContext('publish');
+    // Codex PR #608 R4 #7375: the encryption decision must be keyed
+    // off the TARGET on-chain CG, not the source SWM graph. On remap
+    // publishes (`publishContextGraphId` differs from the local SWM
+    // `contextGraphId`), the prior source-only probe produced two
+    // distinct failure modes:
+    //
+    //   public source → curated target: skipped encryption → plaintext
+    //     leaked to the curated target's ACK peers (security).
+    //   private source → public target: applied encryption → core's
+    //     `isCgCurated` check (R3 #1325, now target-keyed) correctly
+    //     rejected the opaque ACK → publish blocked (correctness).
+    //
+    // The probe mirrors the SWM data-plane `isCgCurated` callback at
+    // line 1499: local meta-graph first (works for URL-style ids the
+    // local store knows about), then chain access-policy fallback
+    // for numeric on-chain ids (covers the C2 case where the target
+    // is just the numeric `cgId` from the publish intent and the
+    // local store has no triple keyed by that id).
+    const targetCgId = publishContextGraphId ?? contextGraphId;
+    const probeIsCurated = async (cgId: string): Promise<boolean> => {
+      try {
+        if (await this.isPrivateContextGraph(cgId)) return true;
+      } catch { /* fall through to chain probe */ }
+      const cached = this.onChainAccessPolicyCache.get(cgId);
+      if (cached !== undefined) return cached === 1;
+      const getAccessPolicy = this.chain.getContextGraphAccessPolicy;
+      if (typeof getAccessPolicy !== 'function') return false;
+      let numericId: bigint;
+      try {
+        numericId = BigInt(cgId);
+      } catch {
+        return false;
+      }
+      if (numericId <= 0n) return false;
+      try {
+        const policy = await getAccessPolicy.call(this.chain, numericId);
+        if (policy === 0 || policy === 1) {
+          this.onChainAccessPolicyCache.set(cgId, policy);
+          return policy === 1;
+        }
+      } catch (err) {
+        this.log.warn(ctx, `_resolveEncryptInlinePayload: chain.getContextGraphAccessPolicy(${cgId}) failed — treating as public: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      return false;
+    };
+    const sourceIsCurated = await probeIsCurated(contextGraphId);
+    const targetIsCurated = targetCgId === contextGraphId
+      ? sourceIsCurated
+      : await probeIsCurated(targetCgId);
+    if (targetCgId !== contextGraphId && sourceIsCurated !== targetIsCurated) {
+      // Fail-closed: a remap publish that crosses the privacy
+      // boundary in either direction is almost certainly an
+      // operator/caller mistake. Refuse rather than silently picking
+      // one side and producing the wrong wire shape.
+      throw new Error(
+        `LU-5: remap publish source/target access-policy mismatch — ` +
+        `source CG "${contextGraphId}" curated=${sourceIsCurated}, ` +
+        `target CG "${targetCgId}" curated=${targetIsCurated}. ` +
+        `Refusing to publish: encrypting against the wrong CG's policy ` +
+        `would either leak plaintext (curated→public) or be rejected by ` +
+        `cores (public→curated). Reconcile the source and target ` +
+        `access policies before retrying.`,
+      );
+    }
+    if (!targetIsCurated) return undefined;
+
+    const senderAddress = authorAgentAddress
+      ?? this.defaultAgentAddress
+      ?? this.peerId;
+
+    // Codex PR #608 R3 #7: mirror the rotation contract from
+    // `encryptWorkspacePayloadWithSenderKey` — always load persisted
+    // state FIRST so a daemon restart reuses the existing epoch
+    // instead of minting a new one, and ALWAYS recompute the current
+    // membership hash so an allowlist change forces an epoch
+    // rotation. The prior implementation only entered the bootstrap
+    // branch when the in-memory map happened to be empty AND never
+    // compared the current membership against the cached state, so
+    // (a) every restart silently rotated and (b) revocations /
+    // additions kept reusing a stale epoch until the next manual
+    // SWM write through `share()`.
+    await this.loadSwmSenderKeyState();
+    const sender = this.getLocalSigningAgentForAddress(senderAddress);
+    if (!sender) {
+      throw new Error(
+        `LU-5: curated CG ${contextGraphId}: cannot bootstrap swm-sender-key — ` +
+        `no local custodial signing key for agent ${senderAddress}. ` +
+        `Refusing to publish curated CG payload via the plaintext-inline fallback.`,
+      );
+    }
+    const resolution = await resolveWorkspaceAgentRecipients(this.store, { contextGraphId });
+    if (!resolution.requiresEncryption) {
+      // Access policy lookup said curated, but the recipient resolver
+      // disagrees. Conservative: refuse rather than silently downgrade.
+      throw new Error(
+        `LU-5: curated CG ${contextGraphId}: access-policy says curated but recipient resolver ` +
+        `returned no agent recipients. Refusing to publish to avoid plaintext leak.`,
+      );
+    }
+    if (resolution.recipients.length === 0) {
+      throw new Error(
+        `LU-5: curated CG ${contextGraphId}: no DKG agent recipients available — ` +
+        `add at least one allowed agent before publishing.`,
+      );
+    }
+    const recipientSet = new Set(resolution.recipients.map((r) => r.agentAddress.toLowerCase()));
+    if (!recipientSet.has(ethers.getAddress(senderAddress).toLowerCase())) {
+      throw new Error(
+        `LU-5: curated CG ${contextGraphId}: sender ${senderAddress} is not in the recipient set — ` +
+        `add yourself to the allowedAgents before publishing.`,
+      );
+    }
+    const membershipHash = computeSwmSenderKeyMembershipHash({
+      contextGraphId,
+      subGraphName,
+      members: resolution.recipients.map((r) => ({
+        agentAddress: r.agentAddress,
+        recipientKeyId: r.recipientKeyId,
+      })),
+    });
+
+    const stateKey = swmSenderStateKey(contextGraphId, subGraphName, senderAddress);
+    let state = this.swmSenderKeySendStates.get(stateKey);
+    if (!state || state.membershipHash !== membershipHash) {
+      const reason = !state
+        ? 'no persisted state'
+        : `membership changed (was=${state.membershipHash} now=${membershipHash})`;
+      this.log.info(
+        ctx,
+        `LU-5: bootstrapping/rotating swm-sender-key epoch for curated CG ${contextGraphId} ` +
+        `(sender=${senderAddress}, recipients=${resolution.recipients.length}, reason=${reason})`,
+      );
+      state = await this.createAndDistributeSwmSenderKeyEpoch({
+        contextGraphId,
+        subGraphName,
+        sender,
+        recipients: resolution.recipients,
+        membershipHash,
+        ctx,
+      });
+      this.swmSenderKeySendStates.set(stateKey, state);
+      await this.saveSwmSenderKeyState();
+    }
+
+    const chainKey = state.chainKey;
+    // Codex PR #608 R2 #12: the AEAD key must be derived from the
+    // *target* on-chain CG id (the one the published KC is bound to
+    // on chain) — not the source SWM CG id. On remap publishes
+    // (where the source `contextGraphId` differs from the target
+    // `publishContextGraphId`/`onChainId`), consumers verifying the
+    // KC use the canonical on-chain id; if we derive with the
+    // source id here, every consumer's decrypt fails.
+    const aeadCgId = publishContextGraphId ?? contextGraphId;
+    return async (plaintextNquads: Uint8Array): Promise<Uint8Array> => {
+      return encryptV10PublishPayload({
+        chainKey,
+        contextGraphId: aeadCgId,
+        plaintext: plaintextNquads,
+      });
+    };
+  }
+
   private async _loadSelectedSWMQuads(
     contextGraphId: string,
     selection: 'all' | { rootEntities: string[] },
@@ -7523,6 +7833,26 @@ export class DKGAgent {
       }
     }
 
+    // OT-RFC-38 / LU-5 — for curated CGs (any private flavour: peer
+    // allowlist OR agent allowlist), wrap the inline ACK payload with
+    // AEAD using the publisher's swm-sender-key chainKey so cores hold
+    // opaque bytes, not plaintext. Public CGs leave this undefined and
+    // continue with the existing plaintext-inline path.
+    //
+    // Codex PR #608 R2 #12: bind AEAD to the target on-chain CG id
+    // (`onChainId`) so consumers using the canonical chain id can
+    // decrypt — without this, remap publishes (source SWM cg != target
+    // chain cg) produced undecryptable payloads.
+    const encryptInlinePayload = await this._resolveEncryptInlinePayload(
+      contextGraphId,
+      options?.subGraphName,
+      options?.authorAgentAddress,
+      onChainId ?? undefined,
+    );
+    if (encryptInlinePayload) {
+      this.log.info(ctx, `LU-5: curated CG ${contextGraphId} — wrapping inline ACK payload with chain-key AEAD`);
+    }
+
     const result = await this.publisher.publishFromSharedMemory(contextGraphId, selection, {
       operationCtx: ctx,
       clearSharedMemoryAfter: options?.clearSharedMemoryAfter,
@@ -7534,6 +7864,7 @@ export class DKGAgent {
       subGraphName: options?.subGraphName,
       publisherNodeIdentityIdOverride: options?.publisherNodeIdentityIdOverride,
       precomputedAttestation: resolvedSeal,
+      encryptInlinePayload,
     });
 
     if (result.status === 'confirmed' && result.onChainResult) {
@@ -11757,16 +12088,6 @@ export class DKGAgent {
     const proposerEligible =
       this.identityId > 0n && await probeShardingTableMembership(this.identityId);
 
-    // CG-visible peer set for verify-proposal fan-out:
-    // SPEC_CG_MEMORY_MODEL §4.4 — the verify proposal payload includes
-    // contextGraphId, verifiedMemoryId, batchId, and root entities; for
-    // curated CGs that's metadata only allowlisted members may see. Run
-    // every recipient through `getOrCreateCGMemberEnumerator()` so
-    // unrelated peers don't receive the proposal. Public CGs fall
-    // through to the topic-subscribers set; legacy CGs with no member
-    // signal return an empty set (verify just degrades to no-quorum).
-    const cgMemberEnumerator = this.getOrCreateCGMemberEnumerator();
-
     const collector = new VerifyCollector({
       // rc.9 PR-11: route through messenger.sendReliable so
       // /dkg/10.0.1/verify-proposal gets envelope wrap + sender-side
@@ -11781,10 +12102,45 @@ export class DKGAgent {
         }
         return sendResult.response;
       },
-      getParticipantPeers: async (cgId?: string) => {
-        const targetCg = cgId ?? opts.contextGraphId;
-        const enumeration = await cgMemberEnumerator.enumerate(targetCg);
-        return enumeration.members;
+      // Codex PR #608: previously fanned out to ALL connected libp2p
+      // peers, which broadcast `rootEntities` (subject URIs of the
+      // batch) on EVERY verify proposal — a privacy regression for
+      // invite-only CGs where those URIs are part of the curated
+      // payload. The fix is two-tier:
+      //   1. Curated CGs (peer-allowlist OR agent-gated): only fan out
+      //      to peers in `cgMemberEnumerator.enumerate(cg).members`,
+      //      which mirrors the same authority the SWM data-plane uses.
+      //      For agent-gated CGs without a peer allowlist, that returns
+      //      `{ source: 'none', members: [] }` (fail-closed) — verify
+      //      then has no remote recipients and `allowPartial: true` lets
+      //      the proposer collect its own self-attestation as the only
+      //      vote, which is correct: only members can verify a curated
+      //      batch's plaintext root anyway.
+      //   2. Public CGs: fall back to the gossip-eligible member set
+      //      (live topic subscribers), which still narrows the broadcast
+      //      versus "every connected libp2p peer".
+      // Downstream `probeShardingTableMembership` continues to filter
+      // approvals by sharding-table membership before they count toward
+      // quorum, so this only changes WHO RECEIVES the proposal, not
+      // who can vote.
+      getParticipantPeers: async (contextGraphId: string) => {
+        try {
+          const enumeration = await this.getOrCreateCGMemberEnumerator().enumerate(contextGraphId);
+          return enumeration.members.filter((id) => id !== this.peerId);
+        } catch (err) {
+          // Degrade gracefully: if enumeration fails (e.g. SPARQL
+          // backend hiccup) we don't want to silently broadcast to
+          // every connected peer (the leak we just plugged). Log and
+          // return empty so `allowPartial: true` lets the proposer
+          // proceed with just its self-attestation rather than
+          // leaking via a fail-open fallback.
+          this.log.warn(
+            ctx,
+            `[verify] CG-member enumeration failed for ${contextGraphId} — broadcasting to no remote peers ` +
+            `(prevents fail-open leak of rootEntities). Error: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          return [];
+        }
       },
       log: (msg: string) => this.log.info(ctx, msg),
     });
@@ -14822,6 +15178,7 @@ export class DKGAgent {
       swmGraphId: string | undefined,
       subGraphName: string | undefined,
       merkleLeafCount: number,
+      isEncryptedPayload?: boolean,
     ) => {
       // Fail loud on non-numeric or non-positive CG ids: V10 publish requires
       // a real on-chain context graph and the contract rejects `cgId == 0`
@@ -14873,7 +15230,7 @@ export class DKGAgent {
         contextGraphIdStr: contextGraphId,
         publisherPeerId: this.peerId,
         publicByteSize,
-        isPrivate: false,
+        isPrivate: isEncryptedPayload === true,
         kaCount,
         rootEntities,
         chainId: chainIdBig,
@@ -14885,6 +15242,7 @@ export class DKGAgent {
         swmGraphId,
         subGraphName,
         merkleLeafCount,
+        isEncryptedPayload,
       });
       return result.acks;
     };

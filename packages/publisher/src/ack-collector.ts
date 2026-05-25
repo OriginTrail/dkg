@@ -88,6 +88,14 @@ export class ACKCollector {
     subGraphName?: string;
     /** V10 flat-KC Merkle leaf count (sorted + deduped); binds StorageACK to on-chain RandomSampling. */
     merkleLeafCount: number;
+    /**
+     * OT-RFC-38 / LU-5. When `true`, `stagingQuads` is opaque AEAD ciphertext
+     * (curated-CG payload). Cores skip N-Quad parsing and merkle-root
+     * recompute; verify only that `stagingQuads.length === publicByteSize`.
+     * Defaults to `false` so the existing public-CG inline-quads path is
+     * unchanged.
+     */
+    isEncryptedPayload?: boolean;
   }): Promise<ACKCollectionResult> {
     const {
       merkleRoot, contextGraphId, contextGraphIdStr,
@@ -124,6 +132,7 @@ export class ACKCollector {
         : undefined,
       subGraphName: params.subGraphName,
       merkleLeafCount: params.merkleLeafCount,
+      isEncryptedPayload: params.isEncryptedPayload === true ? true : undefined,
     };
     const intentBytes = encodePublishIntent(p2pMsg);
 

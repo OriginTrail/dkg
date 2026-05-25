@@ -60,6 +60,17 @@ export type V10ACKProvider = (
   subGraphName: string | undefined,
   /** V10 flat-KC Merkle leaf count (sorted + deduped); binds ACK + on-chain KC to RandomSampling. */
   merkleLeafCount: number,
+  /**
+   * OT-RFC-38 / LU-5 — when `true`, `stagingQuads` is opaque AEAD
+   * ciphertext (curated CG payload) and cores skip merkle-root
+   * recompute. The publisher's claimed `merkleRoot`, `kaCount`, and
+   * `merkleLeafCount` are signed verbatim into the V10 digest; member
+   * post-decrypt verification (LU-8) is what catches lies. Cores
+   * still verify `stagingQuads.length === publicByteSize` to keep
+   * pricing honest. Defaults to `false` so existing public-CG callers
+   * are unchanged.
+   */
+  isEncryptedPayload?: boolean,
 ) => Promise<V10CoreNodeACK[]>;
 
 /**
@@ -120,6 +131,25 @@ export interface PublishOptions {
    * verify against their local SWM copy (storage-attestation guarantee).
    */
   fromSharedMemory?: boolean;
+  /**
+   * OT-RFC-38 / LU-5. When set, the publisher routes the inline ACK
+   * payload through this hook to produce AEAD ciphertext bytes that
+   * cores hold opaquely. The publisher will then send `stagingQuads =
+   * ciphertext` with `isEncryptedPayload: true` so cores skip
+   * merkle-root recompute and just sign the V10 digest the publisher
+   * claimed. Member post-decrypt verification (LU-8) catches plaintext
+   * mismatches; outsider attestation tokens (LU-9) cover third parties.
+   *
+   * `fromSharedMemory` is forced `true` when this hook is set —
+   * encrypted-payload mode and the "data is in SWM already" semantic
+   * coexist (curated CGs always read from SWM, then encrypt for the
+   * ACK trip).
+   *
+   * Resolved by the caller (DKGAgent) based on the CG's access
+   * policy. Public CGs leave this `undefined` and continue to ship
+   * plaintext nquads inline.
+   */
+  encryptInlinePayload?: (plaintextNquads: Uint8Array) => Promise<Uint8Array> | Uint8Array;
   /** When true, the KC was created via V10 and updates should use the V10 path. */
   v10Origin?: boolean;
   /**

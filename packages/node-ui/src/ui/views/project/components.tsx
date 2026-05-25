@@ -2542,34 +2542,47 @@ export function VerifyOnDkgButton({
           </div>
         </div>
       )}
-      {result && resultKind === 'publish' && isPublishResult(result) && (
-        <div className="v10-ka-verify-ok">
-          <div className="v10-ka-verify-ok-row">
-            <span className="v10-ka-verify-ok-lbl">Status</span>
-            <span className="v10-ka-verify-ok-val">✓ {result.status}</span>
-          </div>
-          {result.txHash && (
+      {result && resultKind === 'publish' && isPublishResult(result) && (() => {
+        // OT-RFC-38 §1.1 — a publish without a TX hash never made it to chain.
+        // Treat that as failure, not success, so the curator knows the data
+        // is NOT in Verified Memory.
+        const confirmed = result.status === 'confirmed' && !!result.txHash;
+        return (
+          <div className={confirmed ? 'v10-ka-verify-ok' : 'v10-ka-verify-err'}>
             <div className="v10-ka-verify-ok-row">
-              <span className="v10-ka-verify-ok-lbl">TX hash</span>
-              <span className="v10-ka-verify-ok-val mono" title={result.txHash}>
-                {result.txHash.slice(0, 10)}…{result.txHash.slice(-6)}
+              <span className="v10-ka-verify-ok-lbl">Status</span>
+              <span className="v10-ka-verify-ok-val">
+                {confirmed ? '✓' : '✕'} {result.status}{confirmed ? '' : ' (NOT on-chain)'}
               </span>
             </div>
-          )}
-          {result.blockNumber != null && (
-            <div className="v10-ka-verify-ok-row">
-              <span className="v10-ka-verify-ok-lbl">Block</span>
-              <span className="v10-ka-verify-ok-val mono">#{result.blockNumber}</span>
-            </div>
-          )}
-          {result.kas?.[0]?.tokenId && (
-            <div className="v10-ka-verify-ok-row">
-              <span className="v10-ka-verify-ok-lbl">Token</span>
-              <span className="v10-ka-verify-ok-val mono">#{result.kas[0].tokenId}</span>
-            </div>
-          )}
-        </div>
-      )}
+            {result.txHash ? (
+              <div className="v10-ka-verify-ok-row">
+                <span className="v10-ka-verify-ok-lbl">TX hash</span>
+                <span className="v10-ka-verify-ok-val mono" title={result.txHash}>
+                  {result.txHash}
+                </span>
+              </div>
+            ) : (
+              <div className="v10-ka-verify-ok-row">
+                <span className="v10-ka-verify-ok-lbl">TX hash</span>
+                <span className="v10-ka-verify-ok-val">none — on-chain submission skipped</span>
+              </div>
+            )}
+            {result.blockNumber != null && (
+              <div className="v10-ka-verify-ok-row">
+                <span className="v10-ka-verify-ok-lbl">Block</span>
+                <span className="v10-ka-verify-ok-val mono">#{result.blockNumber}</span>
+              </div>
+            )}
+            {result.kas?.[0]?.tokenId && (
+              <div className="v10-ka-verify-ok-row">
+                <span className="v10-ka-verify-ok-lbl">Token</span>
+                <span className="v10-ka-verify-ok-val mono">#{result.kas[0].tokenId}</span>
+              </div>
+            )}
+          </div>
+        );
+      })()}
     </div>
   );
 }

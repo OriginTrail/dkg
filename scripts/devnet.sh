@@ -20,6 +20,9 @@
 #   HARDHAT_PORT  Hardhat node port (default: 8545)
 #   UI_PORT       node-ui Vite port (default: 5173)
 #   UI_NODE_ID    Which devnet node the UI talks to (default: 1)
+#   NUM_CORE_NODES
+#                 How many of the first N nodes are core; the rest are edge
+#                 (default: 4). Useful for 3-core/2-edge etc. layouts.
 #   DEVNET_ENABLE_PUBLISHER=1
 #                 Enable the async publisher runtime on each node
 #   DEVNET_EPCIS_CONTEXT_GRAPH
@@ -33,6 +36,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEVNET_DIR="${DEVNET_DIR:-$REPO_ROOT/.devnet}"
 HARDHAT_PORT="${HARDHAT_PORT:-8545}"
 NUM_NODES="${2:-6}"
+NUM_CORE_NODES="${NUM_CORE_NODES:-4}"
 API_PORT_BASE="${API_PORT_BASE:-9201}"
 LIBP2P_PORT_BASE="${LIBP2P_PORT_BASE:-10001}"
 UI_PORT="${UI_PORT:-5173}"
@@ -380,9 +384,10 @@ create_node_config() {
   local hub_addr
   hub_addr=$(cat "$DEVNET_DIR/hardhat/hub_address" 2>/dev/null || echo "")
 
-  # Nodes 1-4 are core (V10 ACK quorum requires >= 3 core peers besides
-  # the publisher). Node 5+ are edge for heterogeneous testing.
-  if [ "$node_num" -le 4 ]; then
+  # First `NUM_CORE_NODES` nodes are core (V10 ACK quorum needs at least
+  # `minimumRequiredSignatures` sharding-table members reachable from the
+  # publisher). Remaining nodes are edge for heterogeneous testing.
+  if [ "$node_num" -le "$NUM_CORE_NODES" ]; then
     node_role="core"
   fi
   # `cmd_addnode` overrides the default role/index mapping so we can spawn a
@@ -1170,7 +1175,7 @@ cmd_start() {
   for i in $(seq 1 "$NUM_NODES"); do
     local api_port=$((API_PORT_BASE + i - 1))
     local role="edge"
-    [ "$i" -le 4 ] && role="core"
+    [ "$i" -le "$NUM_CORE_NODES" ] && role="core"
     local store_label="oxigraph-worker"
     if [ "$i" -ge 3 ] && [ "$i" -le 4 ]; then
       [ "$BLAZEGRAPH_AVAILABLE" = true ] && store_label="blazegraph" || store_label="oxigraph"

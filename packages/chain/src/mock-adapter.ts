@@ -970,6 +970,19 @@ export class MockChainAdapter implements ChainAdapter {
     return this.contextGraphs.get(contextGraphId);
   }
 
+  /**
+   * OT-RFC-38 / LU-5: chain-backed access-policy oracle parity for the
+   * mock chain. Returns the same uint8 enum the EVM adapter does
+   * (`0`=public, `1`=curated). Unknown ids yield `0` to match the
+   * Solidity default-zero mapping.
+   */
+  async getContextGraphAccessPolicy(contextGraphId: bigint): Promise<number> {
+    const cg = this.contextGraphs.get(contextGraphId);
+    if (!cg) return 0;
+    const ap = (cg as { accessPolicy?: number }).accessPolicy;
+    return typeof ap === 'number' ? ap : 0;
+  }
+
   // --- V10 Publish (KnowledgeAssetsV10 → KnowledgeCollectionStorage) ---
 
   async getKnowledgeAssetsV10Address(): Promise<string> {
