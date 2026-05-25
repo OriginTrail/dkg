@@ -5856,8 +5856,16 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
 
 /* ── Graph view inside layer detail ── */
 .v10-graph-shell {
-  flex: 1 1 auto;
-  min-height: clamp(420px, 62vh, 720px);
+  /* `flex-basis` carries the *preferred* tall height (62vh, clamped
+     420-720px) — when there's room in the column, the shell takes it.
+     `min-height: 0` lets the shell shrink below that preferred size
+     when the parent runs out of vertical room (e.g. the bottom panel
+     opens and pushes the center region up). Without `min-height: 0`,
+     the previous hard min-height: clamp(...) prevented the shell from
+     shrinking → it overflowed downward and the singleton shelf at the
+     canvas's bottom edge got clipped behind the bottom panel. */
+  flex: 1 1 clamp(420px, 62vh, 720px);
+  min-height: 0;
   width: 100%;
   display: flex;
   flex-direction: column;
@@ -5866,7 +5874,10 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
   border: 1px solid var(--border-subtle);
 }
 .v10-layer-expand-body.full-width > .v10-graph-shell {
-  min-height: clamp(420px, 62vh, 720px);
+  /* Same shrink-friendly preferred-height pattern when the shell is
+     directly nested inside a full-width tab body. */
+  flex-basis: clamp(420px, 62vh, 720px);
+  min-height: 0;
 }
 .v10-graph-shell-wm { --graph-accent: #64748b; }
 .v10-graph-shell-swm { --graph-accent: #f59e0b; }
