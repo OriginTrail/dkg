@@ -7370,14 +7370,54 @@ export class DKGAgent {
     publishContextGraphId?: string,
   ): Promise<((plaintext: Uint8Array) => Promise<Uint8Array>) | undefined> {
     const ctx = createOperationContext('publish');
-    let isCurated = false;
+    // Codex PR #608 R4 #7375: the encryption decision must be keyed
+    // off the TARGET on-chain CG, not the source SWM graph. On remap
+    // publishes (`publishContextGraphId` differs from the local SWM
+    // `contextGraphId`), the prior source-only probe produced two
+    // distinct failure modes:
+    //
+    //   public source → curated target: skipped encryption → plaintext
+    //     leaked to the curated target's ACK peers (security).
+    //   private source → public target: applied encryption → core's
+    //     `isCgCurated` check (R3 #1325, now target-keyed) correctly
+    //     rejected the opaque ACK → publish blocked (correctness).
+    //
+    // We now probe BOTH the source AND the target, treat a mismatch
+    // as fail-closed (refuse to publish until the caller resolves the
+    // policy collision), and use the TARGET's classification when
+    // both agree. The chain is the source of truth at the publish
+    // boundary; the local SWM graph is just the staging substrate.
+    const targetCgId = publishContextGraphId ?? contextGraphId;
+    let sourceIsCurated = false;
+    let targetIsCurated = false;
     try {
-      isCurated = await this.isPrivateContextGraph(contextGraphId);
+      sourceIsCurated = await this.isPrivateContextGraph(contextGraphId);
     } catch (err) {
-      this.log.warn(ctx, `_resolveEncryptInlinePayload: isPrivateContextGraph(${contextGraphId}) failed — treating as public: ${err instanceof Error ? err.message : String(err)}`);
-      return undefined;
+      this.log.warn(ctx, `_resolveEncryptInlinePayload: isPrivateContextGraph(source=${contextGraphId}) failed — treating as public: ${err instanceof Error ? err.message : String(err)}`);
     }
-    if (!isCurated) return undefined;
+    try {
+      targetIsCurated = targetCgId === contextGraphId
+        ? sourceIsCurated
+        : await this.isPrivateContextGraph(targetCgId);
+    } catch (err) {
+      this.log.warn(ctx, `_resolveEncryptInlinePayload: isPrivateContextGraph(target=${targetCgId}) failed — treating as public: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    if (targetCgId !== contextGraphId && sourceIsCurated !== targetIsCurated) {
+      // Fail-closed: a remap publish that crosses the privacy
+      // boundary in either direction is almost certainly an
+      // operator/caller mistake. Refuse rather than silently picking
+      // one side and producing the wrong wire shape.
+      throw new Error(
+        `LU-5: remap publish source/target access-policy mismatch — ` +
+        `source CG "${contextGraphId}" curated=${sourceIsCurated}, ` +
+        `target CG "${targetCgId}" curated=${targetIsCurated}. ` +
+        `Refusing to publish: encrypting against the wrong CG's policy ` +
+        `would either leak plaintext (curated→public) or be rejected by ` +
+        `cores (public→curated). Reconcile the source and target ` +
+        `access policies before retrying.`,
+      );
+    }
+    if (!targetIsCurated) return undefined;
 
     const senderAddress = authorAgentAddress
       ?? this.defaultAgentAddress
