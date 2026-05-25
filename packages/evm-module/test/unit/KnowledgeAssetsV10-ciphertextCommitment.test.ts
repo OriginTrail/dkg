@@ -20,6 +20,7 @@ import type {
 } from '../../typechain';
 import {
   buildPublishParams,
+  buildUpdateParams,
   DEFAULT_CHAIN_ID,
 } from '../helpers/v10-kc-helpers';
 import { createProfile, createProfiles } from '../helpers/profile-helpers';
@@ -174,13 +175,14 @@ describe('@unit KnowledgeAssetsV10 — RFC-39 ciphertext commitment', () => {
 
   async function createPublicCG(creator: SignerWithAddress): Promise<bigint> {
     await Facade.connect(creator).createContextGraph(
-      [],
-      0,
+      [10n, 20n, 30n], // hostingNodes (not validated against identity storage in unit tests)
+      [], // participantAgents
+      2, // requiredSignatures
+      0, // metadataBatchId
       0, // accessPolicy = public/discoverable
       1, // publishPolicy = open
       ethers.ZeroAddress,
-      0,
-      ethers.ZeroHash,
+      0, // publishAuthorityAccountId
     );
     return CGStorageContract.getLatestContextGraphId();
   }
@@ -197,13 +199,14 @@ describe('@unit KnowledgeAssetsV10 — RFC-39 ciphertext commitment', () => {
     // stays exercised, but the ciphertext-commitment branch on the
     // publish path is gated by `accessPolicy != 0`.
     await Facade.connect(creator).createContextGraph(
-      [],
-      0,
+      [10n, 20n, 30n], // hostingNodes
+      [], // participantAgents
+      2, // requiredSignatures
+      0, // metadataBatchId
       1, // accessPolicy = curated (encrypted)
       0, // publishPolicy = curated (single-authority publish)
       authority,
-      0,
-      ethers.ZeroHash,
+      0, // publishAuthorityAccountId
     );
     return CGStorageContract.getLatestContextGraphId();
   }
@@ -452,6 +455,238 @@ describe('@unit KnowledgeAssetsV10 — RFC-39 ciphertext commitment', () => {
       await expect(
         KAV10.connect(creator).publish(p),
       ).to.be.revertedWithCustomError(KAV10, 'IncompleteCiphertextCommitment');
+    });
+  });
+
+  // ----------------------------------------------------------------------
+  // Codex PR #630 R2 #1307 — update() commitment-refresh strict mode.
+  //
+  // The publish path treats a zero ciphertext pair on a curated CG as the
+  // "legacy / pre-LU-11" path (no commitment). update() can't safely do
+  // the same: it rotates `latestMerkleRoot` + `latestMerkleLeafCount` to
+  // the NEW batch's leaves, so leaving the OLD ciphertext commitment in
+  // place would make `RandomSampling`'s curated proof check verify the
+  // new plaintext leaves against ciphertext that no longer corresponds
+  // to them (stale-commitment bug).
+  //
+  // Contract therefore requires a fresh (root, count) pair on every
+  // curated update; the public path is unchanged.
+  // ----------------------------------------------------------------------
+  describe('Update path — curated commitment refresh', () => {
+    const NEW_CT_ROOT = ethers.keccak256(ethers.toUtf8Bytes('ct-root-rotated'));
+    const NEW_CT_COUNT = 11;
+
+    async function publishCuratedBaseline(): Promise<{
+      creator: SignerWithAddress;
+      cgId: bigint;
+      kcId: bigint;
+      publisherIdentityId: number;
+      receivingNodes: NodeAccounts[];
+      receiverIdentityIds: number[];
+      tokenAmount: bigint;
+      byteSize: bigint;
+    }> {
+      const creator = getDefaultKCCreator(accounts);
+      const { publisherIdentityId, receivingNodes, receiverIdentityIds } =
+        await setupNodes();
+      const cgId = await createCuratedCG(creator, creator.address);
+      const tokenAmount = ethers.parseEther('500');
+      const byteSize = 1000n;
+
+      const p = await buildPublishParams({
+        chainId,
+        kav10Address,
+        receivingNodes,
+        publisherIdentityId,
+        receiverIdentityIds,
+        author: creator,
+        contextGraphId: cgId,
+        merkleRoot: ethers.keccak256(ethers.toUtf8Bytes('curated-baseline')),
+        knowledgeAssetsAmount: 10,
+        byteSize: Number(byteSize),
+        epochs: 5,
+        tokenAmount,
+        isImmutable: false,
+        publishOperationId: 'curated-baseline-op',
+        ciphertextChunksRoot: SAMPLE_CT_ROOT,
+        ciphertextChunkCount: SAMPLE_CT_COUNT,
+      });
+
+      await TokenContract.connect(creator).approve(kav10Address, tokenAmount);
+      await KAV10.connect(creator).publish(p);
+      const kcId = await KCS.getLatestKnowledgeCollectionId();
+
+      return {
+        creator, cgId, kcId, publisherIdentityId,
+        receivingNodes, receiverIdentityIds, tokenAmount, byteSize,
+      };
+    }
+
+    async function publishPublicBaseline(): Promise<{
+      creator: SignerWithAddress;
+      cgId: bigint;
+      kcId: bigint;
+      publisherIdentityId: number;
+      receivingNodes: NodeAccounts[];
+      receiverIdentityIds: number[];
+      tokenAmount: bigint;
+      byteSize: bigint;
+    }> {
+      const creator = getDefaultKCCreator(accounts);
+      const { publisherIdentityId, receivingNodes, receiverIdentityIds } =
+        await setupNodes();
+      const cgId = await createPublicCG(creator);
+      const tokenAmount = ethers.parseEther('500');
+      const byteSize = 1000n;
+
+      const p = await buildPublishParams({
+        chainId,
+        kav10Address,
+        receivingNodes,
+        publisherIdentityId,
+        receiverIdentityIds,
+        author: creator,
+        contextGraphId: cgId,
+        merkleRoot: ethers.keccak256(ethers.toUtf8Bytes('public-baseline')),
+        knowledgeAssetsAmount: 10,
+        byteSize: Number(byteSize),
+        epochs: 5,
+        tokenAmount,
+        isImmutable: false,
+        publishOperationId: 'public-baseline-op',
+      });
+
+      await TokenContract.connect(creator).approve(kav10Address, tokenAmount);
+      await KAV10.connect(creator).publish(p);
+      const kcId = await KCS.getLatestKnowledgeCollectionId();
+
+      return {
+        creator, cgId, kcId, publisherIdentityId,
+        receivingNodes, receiverIdentityIds, tokenAmount, byteSize,
+      };
+    }
+
+    it('reverts IncompleteCiphertextCommitment when curated update omits the ciphertext pair', async () => {
+      const base = await publishCuratedBaseline();
+      // Snapshot the pre-update commitment so we can assert it survived
+      // the rejected call (defensive — `expect.to.be.revertedWith*` only
+      // checks the revert, not that storage was untouched).
+      const preRoot = await KCS.getLatestCiphertextChunksRoot(base.kcId);
+      const preCount = await KCS.getCiphertextChunkCount(base.kcId);
+      expect(preRoot).to.equal(SAMPLE_CT_ROOT);
+      expect(preCount).to.equal(SAMPLE_CT_COUNT);
+
+      const up = await buildUpdateParams({
+        chainId,
+        kav10Address,
+        receivingNodes: base.receivingNodes,
+        publisherIdentityId: base.publisherIdentityId,
+        receiverIdentityIds: base.receiverIdentityIds,
+        contextGraphId: base.cgId,
+        id: base.kcId,
+        preUpdateMerkleRootCount: 1n,
+        newMerkleRoot: ethers.keccak256(ethers.toUtf8Bytes('curated-update-zero')),
+        newByteSize: base.byteSize,
+        newTokenAmount: base.tokenAmount, // delta == 0 so no approval/payment needed
+        mintKnowledgeAssetsAmount: 1n,
+        knowledgeAssetsToBurn: [],
+        updateOperationId: 'curated-update-zero-op',
+      });
+
+      await expect(
+        KAV10.connect(base.creator).update(up),
+      ).to.be.revertedWithCustomError(KAV10, 'IncompleteCiphertextCommitment');
+
+      // Storage untouched.
+      expect(await KCS.getLatestCiphertextChunksRoot(base.kcId)).to.equal(preRoot);
+      expect(await KCS.getCiphertextChunkCount(base.kcId)).to.equal(preCount);
+    });
+
+    it('persists the new commitment and emits the event when curated update carries a paired non-zero ciphertext', async () => {
+      const base = await publishCuratedBaseline();
+
+      const up = await buildUpdateParams({
+        chainId,
+        kav10Address,
+        receivingNodes: base.receivingNodes,
+        publisherIdentityId: base.publisherIdentityId,
+        receiverIdentityIds: base.receiverIdentityIds,
+        contextGraphId: base.cgId,
+        id: base.kcId,
+        preUpdateMerkleRootCount: 1n,
+        newMerkleRoot: ethers.keccak256(ethers.toUtf8Bytes('curated-update-full')),
+        newByteSize: base.byteSize,
+        newTokenAmount: base.tokenAmount, // delta == 0
+        mintKnowledgeAssetsAmount: 1n,
+        knowledgeAssetsToBurn: [],
+        updateOperationId: 'curated-update-full-op',
+      });
+      // Ciphertext-commitment fields live outside the ACK digest (RFC-38
+      // §5.4.2) so spreading them in here doesn't invalidate the
+      // receiver-quorum signatures already baked into `up`.
+      const upWithCt = {
+        ...up,
+        newCiphertextChunksRoot: NEW_CT_ROOT,
+        newCiphertextChunkCount: NEW_CT_COUNT,
+      };
+
+      await expect(KAV10.connect(base.creator).update(upWithCt))
+        .to.emit(KCS, 'KnowledgeCollectionCiphertextCommitmentSet')
+        .withArgs(base.kcId, NEW_CT_ROOT, NEW_CT_COUNT);
+
+      expect(await KCS.getLatestCiphertextChunksRoot(base.kcId)).to.equal(NEW_CT_ROOT);
+      expect(await KCS.getCiphertextChunkCount(base.kcId)).to.equal(NEW_CT_COUNT);
+    });
+
+    it('accepts a public update with zero ciphertext (no-op) and reverts when a stray non-zero field is supplied', async () => {
+      const base = await publishPublicBaseline();
+
+      // Path 1: legitimate public-CG update — zero pair, no rotation.
+      const up = await buildUpdateParams({
+        chainId,
+        kav10Address,
+        receivingNodes: base.receivingNodes,
+        publisherIdentityId: base.publisherIdentityId,
+        receiverIdentityIds: base.receiverIdentityIds,
+        contextGraphId: base.cgId,
+        id: base.kcId,
+        preUpdateMerkleRootCount: 1n,
+        newMerkleRoot: ethers.keccak256(ethers.toUtf8Bytes('public-update-zero')),
+        newByteSize: base.byteSize,
+        newTokenAmount: base.tokenAmount,
+        mintKnowledgeAssetsAmount: 1n,
+        knowledgeAssetsToBurn: [],
+        updateOperationId: 'public-update-zero-op',
+      });
+      await expect(KAV10.connect(base.creator).update(up)).to.not.be.reverted;
+      expect(await KCS.getLatestCiphertextChunksRoot(base.kcId)).to.equal(ethers.ZeroHash);
+      expect(await KCS.getCiphertextChunkCount(base.kcId)).to.equal(0);
+
+      // Path 2: same baseline, but caller tries to slip a non-zero
+      // ciphertext field into a public-CG update. Must revert so a
+      // misconfigured curated→public publish-policy migration can't
+      // silently leak ciphertext commitments onto public KCs.
+      const up2 = await buildUpdateParams({
+        chainId,
+        kav10Address,
+        receivingNodes: base.receivingNodes,
+        publisherIdentityId: base.publisherIdentityId,
+        receiverIdentityIds: base.receiverIdentityIds,
+        contextGraphId: base.cgId,
+        id: base.kcId,
+        preUpdateMerkleRootCount: 2n, // first update wrote root #2
+        newMerkleRoot: ethers.keccak256(ethers.toUtf8Bytes('public-update-stray')),
+        newByteSize: base.byteSize,
+        newTokenAmount: base.tokenAmount,
+        mintKnowledgeAssetsAmount: 1n,
+        knowledgeAssetsToBurn: [],
+        updateOperationId: 'public-update-stray-op',
+      });
+      const up2WithCt = { ...up2, newCiphertextChunksRoot: NEW_CT_ROOT };
+      await expect(
+        KAV10.connect(base.creator).update(up2WithCt),
+      ).to.be.revertedWithCustomError(KAV10, 'PublicCGCannotHaveCiphertextCommitment')
+        .withArgs(base.cgId);
     });
   });
 });
