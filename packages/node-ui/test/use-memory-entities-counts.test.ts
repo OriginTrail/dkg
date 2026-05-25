@@ -125,6 +125,7 @@ describe('useMemoryEntities canonical layer counts', () => {
     const vmRequest = vi.mocked(fetch).mock.calls
       .map(([, init]) => JSON.parse(String(init?.body ?? '{}')) as { sparql?: string })
       .find(body => body.sparql?.includes('_verified_memory_meta'));
+    expect(vmRequest?.sparql).toContain('STR(?g) != "did:dkg:context-graph:cg-counts/meta"');
     expect(vmRequest?.sparql).toContain('!CONTAINS(STR(?g), "/meta/")');
   });
 });

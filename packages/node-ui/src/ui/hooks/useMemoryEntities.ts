@@ -204,7 +204,7 @@ function vmSparql(cgId: string) {
   // We exclude:
   //   • `_shared_memory*`        — belongs to SWM
   //   • `assertion/*`            — belongs to WM
-  //   • `_meta`, `/meta/*`, `_private`, `_rules`, any `_verified_memory_meta`
+  //   • `_meta`, `/meta`, `/meta/*`, `_private`, `_rules`, any `_verified_memory_meta`
   //     — bookkeeping graphs, not user data.
   return `SELECT ?s ?p ?o ?g WHERE {
     GRAPH ?g { ?s ?p ?o }
@@ -214,6 +214,7 @@ function vmSparql(cgId: string) {
       !CONTAINS(STR(?g), "/_shared_memory") &&
       !CONTAINS(STR(?g), "_verified_memory_meta") &&
       !STRENDS(STR(?g), "/_meta") &&
+      STR(?g) != "${cgUri}/meta" &&
       !CONTAINS(STR(?g), "/meta/") &&
       !CONTAINS(STR(?g), "/_private") &&
       !CONTAINS(STR(?g), "/_rules")
