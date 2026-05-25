@@ -339,6 +339,28 @@ function isMissingManifestError(err) {
   return /No import manifest rows found/.test(String(err?.message ?? err ?? ''));
 }
 
+async function isPartitionDeclared(client, { cgId, importId, partitionKey, subGraphName }) {
+  const importIri = importUri(importId);
+  const partIri = partitionUri(importId, partitionKey);
+  const sparql = `
+    PREFIX imp: <${IMPORT_NS}>
+    SELECT ?part WHERE {
+      <${importIri}> imp:partition <${partIri}> .
+      <${partIri}> imp:key ${lit(partitionKey)} .
+      BIND(<${partIri}> AS ?part)
+    }
+    LIMIT 1
+  `;
+  const res = await client.query({
+    sparql,
+    contextGraphId: cgId,
+    subGraphName,
+    graphSuffix: '_shared_memory',
+  });
+  const bindings = res?.result?.bindings ?? res?.bindings ?? [];
+  return bindings.length > 0;
+}
+
 /**
  * Build the initial set of triples for a fresh Import manifest.
  *
@@ -507,8 +529,7 @@ export async function markPartitionStatus({
 
   const cgId = client.cgId;
   const assertion = assertionName ?? defaultManifestAssertionName(importId);
-  const manifest = await loadImportManifest({ client, importId, subGraphName });
-  if (!manifest.partitions.some((p) => p.key === partitionKey)) {
+  if (!(await isPartitionDeclared(client, { cgId, importId, partitionKey, subGraphName }))) {
     throw new Error(
       `markPartitionStatus: partition '${partitionKey}' is not declared in manifest '${importId}'. ` +
       `Call createImportManifest with the complete partition set before recording status events.`,

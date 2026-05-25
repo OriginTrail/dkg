@@ -204,9 +204,11 @@ function makeMockClient({
   const swm = new Set();
   /** @type {string[]} */
   const calls = [];
+  /** @type {string[]} */
+  const queryKinds = [];
   /** @type {Array<{method:string,path:string,body:unknown}>} */
   const requests = [];
-  const state = { wm, swm, calls, requests, createAlreadyExists, promoteBodyLimitBytes };
+  const state = { wm, swm, calls, queryKinds, requests, createAlreadyExists, promoteBodyLimitBytes };
 
   const tripleKey = (t) => `${t.subject}\u0001${t.predicate}\u0001${t.object}`;
 
@@ -250,6 +252,32 @@ function makeMockClient({
     },
     async query({ sparql, graphSuffix }) {
       calls.push(`query:graphSuffix=${graphSuffix ?? ''}`);
+      const source = graphSuffix === '_shared_memory' ? swm : new Set();
+      const triples = [...source].map((k) => {
+        const [subject, predicate, object] = k.split('\u0001');
+        return { subject, predicate, object };
+      });
+
+      const exact = sparql.match(
+        /<(urn:dkg:import:[^>]+)>\s+imp:partition\s+<(urn:dkg:import:[^>]+#part:[^>]+)>/,
+      );
+      if (exact) {
+        queryKinds.push('partition-exists');
+        const [, importIri, partIri] = exact;
+        const hasPartitionEdge = triples.some(
+          (t) => t.subject === importIri && t.predicate === IMPORT_P.partition && t.object === `<${partIri}>`,
+        );
+        const hasKey = triples.some(
+          (t) => t.subject === partIri && t.predicate === IMPORT_P.key,
+        );
+        return {
+          result: {
+            bindings: hasPartitionEdge && hasKey ? [{ part: partIri }] : [],
+          },
+        };
+      }
+
+      queryKinds.push('manifest-load');
       // We don't run a real SPARQL engine here — we pattern-match the
       // exact two shapes loadImportManifest sends and serve from the
       // memory tier the caller asked for. The daemon's REAL routing for
@@ -261,17 +289,7 @@ function makeMockClient({
       if (!m) return { result: { bindings: [] } };
       const importIri = m[1];
 
-      // Pick the source store. `_shared_memory` -> swm; anything else
-      // (including no graphSuffix at all) -> the bare data graph, which
-      // is always empty in this mock because assertion-API writes never
-      // land there.
-      const source = graphSuffix === '_shared_memory' ? swm : new Set();
-
       // Reconstruct per-partition state from the chosen source set.
-      const triples = [...source].map((k) => {
-        const [subject, predicate, object] = k.split('\u0001');
-        return { subject, predicate, object };
-      });
       // Build the rows the query would produce.
       const partitionRoots = triples
         .filter((t) => t.subject === importIri && t.predicate === IMPORT_P.partition)
@@ -483,6 +501,33 @@ test('markPartitionStatus rejects undeclared partition keys', async () => {
 
   const state = await loadImportManifest({ client, importId, subGraphName: 'meta' });
   assert.deepEqual(state.partitions.map((p) => [p.key, p.status]), [['src/a.ts', 'pending']]);
+});
+
+test('markPartitionStatus validates one declared partition without loading the whole manifest', async () => {
+  const client = makeMockClient();
+  const importId = 'single-partition-check';
+
+  await createImportManifest({
+    client,
+    importId,
+    partitions: ['src/a.ts', 'src/b.ts'],
+    subGraphName: 'meta',
+  });
+  client._state.queryKinds.length = 0;
+
+  await markPartitionStatus({
+    client,
+    importId,
+    partitionKey: 'src/a.ts',
+    status: 'done',
+    subGraphName: 'meta',
+  });
+
+  assert.deepEqual(
+    client._state.queryKinds,
+    ['partition-exists'],
+    'status updates should use a narrow membership query, not load/sort the full manifest',
+  );
 });
 
 test('round-trip works with SPARQL 1.1 results-JSON cell bindings too', async () => {
