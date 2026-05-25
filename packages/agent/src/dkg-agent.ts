@@ -14709,6 +14709,26 @@ export class DKGAgent {
       await this.syncVerifyWorker.close();
       this.syncVerifyWorker = undefined;
     }
+    // Flush WM to disk before exit so the debounced 50ms flush in the
+    // Oxigraph adapter can't lose the latest inserts when the process
+    // exits. See docs/bugs/wm-persistence-regression.md.
+    //
+    // `store.close()` now THROWS on durable-write failures (ENOSPC,
+    // EACCES, EROFS, etc.) — see oxigraph.ts. We log loudly but do not
+    // re-throw because shutdown is unwinding other state too; surfacing
+    // the failure to the operator (via stderr + ideally the exit code)
+    // is what matters here.
+    try {
+      await this.store.close();
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(
+        `[DKGAgent.stop] WM final flush FAILED on shutdown: ${(err as Error).message}. ` +
+          `The store on disk may be missing recent inserts — operator should investigate ` +
+          `(disk full, permission revoked, filesystem read-only, …). ` +
+          `See docs/bugs/wm-persistence-regression.md for the durability contract.`,
+      );
+    }
     this.started = false;
   }
 

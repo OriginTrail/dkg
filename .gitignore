@@ -27,6 +27,15 @@ packages/evm-module/typechain/
 .ai/
 .scratch/
 
+# WM persistence regression repro (Phase 1 of fix/graphify-import-issues).
+# Daemon state (.dkg-repro/) contains agent keystore, tokens, the Oxigraph
+# store, and the local node-ui DB — never check in. The matrix forensic
+# dumps stay local too; the actionable summary lives in
+# docs/bugs/wm-persistence-regression.md and the harness can regenerate
+# the matrix on demand.
+.dkg-repro/
+.dkg-repro-reports/
+
 packages/evm-module/deployments/hardhat_contracts.json
 packages/evm-module/deployments/localhost_contracts.json
 snapshots/_cache_phase1_neuroweb_epoch16.json
