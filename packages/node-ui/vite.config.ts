@@ -21,12 +21,17 @@ function readDkgConfig() {
   const devnetNodeNum = process.env.DEVNET_NODE || process.env.UI_NODE_ID;
   if (devnetNodeNum) {
     const devnetDir = resolve(__dirname, '../../.devnet', `node${devnetNodeNum}`);
-    if (existsSync(join(devnetDir, 'api.port'))) {
-      const port = parseInt(readFileSync(join(devnetDir, 'api.port'), 'utf-8').trim(), 10) || 9201;
-      const token = readTokenFile(join(devnetDir, 'auth.token'));
-      console.log(`[vite] Using devnet node${devnetNodeNum} on port ${port}`);
-      return { port, token };
+    const portFile = join(devnetDir, 'api.port');
+    if (!existsSync(portFile)) {
+      throw new Error(
+        `[vite] DEVNET_NODE/UI_NODE_ID requested devnet node${devnetNodeNum}, ` +
+        `but ${portFile} does not exist. Start that devnet node or unset the env var to use ~/.dkg.`,
+      );
     }
+    const port = parseInt(readFileSync(portFile, 'utf-8').trim(), 10) || 9201;
+    const token = readTokenFile(join(devnetDir, 'auth.token'));
+    console.log(`[vite] Using devnet node${devnetNodeNum} on port ${port}`);
+    return { port, token };
   }
 
   // Fall back to ~/.dkg (testnet / production node)

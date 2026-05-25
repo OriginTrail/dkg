@@ -1004,7 +1004,10 @@ WHERE {
   //
   // Returns: { ok, expectedRoot, actualRoot, leafCount, reason? }
   if (req.method === "POST" && path === "/api/shared-memory/verify-batch") {
-    const body = await readBody(req, SMALL_BODY_BYTES);
+    // `quads` is now mandatory so the caller supplies the exact plaintext
+    // batch. Use the data-heavy endpoint limit rather than the small settings
+    // limit; otherwise valid batches over 256 KB cannot be verified.
+    const body = await readBody(req, MAX_BODY_BYTES);
     const parsed = safeParseJson(body, res);
     if (!parsed) return;
     const contextGraphId = parsed.contextGraphId;

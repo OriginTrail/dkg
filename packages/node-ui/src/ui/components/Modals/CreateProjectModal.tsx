@@ -104,6 +104,8 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
     const cgId = `${agentAddress}/${finalSlug}`;
 
     try {
+      const slowTimer = setTimeout(() => setProgress('On-chain registration in progress — this can take up to 30s…'), 5000);
+
       // OT-RFC-38 LU-6: project creation is LOCAL-ONLY (no chain
       // interaction, no gas). On-chain registration is deferred to
       // the first VM publish, which is what the user actually opts

@@ -308,6 +308,28 @@ describe('daemon memory_graph_changed route emissions', () => {
     expect(query).not.toHaveBeenCalled();
   });
 
+  it('accepts explicit verify-batch quads over the small request limit', async () => {
+    const largeLiteral = `"${'x'.repeat(270 * 1024)}"`;
+    const ctx = createContext('/api/shared-memory/verify-batch', {
+      contextGraphId: 'project-a',
+      expectedMerkleRoot: `0x${'11'.repeat(32)}`,
+      quads: [{
+        subject: 'urn:large-batch-root',
+        predicate: 'https://schema.org/text',
+        object: largeLiteral,
+        graph: 'urn:g',
+      }],
+    });
+
+    await handleMemoryRoutes(ctx);
+
+    expect((ctx.res as unknown as { statusCode: number }).statusCode).toBe(200);
+    expect(responseBody(ctx)).toMatchObject({
+      ok: false,
+      quadsConsidered: 1,
+    });
+  });
+
   it('threads callerAgentAddress into conditional shared-memory writes', async () => {
     const conditionalShare = vi.fn().mockResolvedValue({ shareOperationId: 'op-cas' });
     const ctx = createContext('/api/shared-memory/conditional-write', {
