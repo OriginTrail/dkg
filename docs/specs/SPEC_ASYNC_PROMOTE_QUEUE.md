@@ -62,7 +62,8 @@ unpromoted assertions never reach SWM and stay invisible to teammates.
 
 The current escape hatch is "promote at the very end, as a single batch"
 (passing every root URI to one promote). But that doesn't scale either:
-the promote payload itself hits `MAX_BODY_BYTES`, and a single failed
+the promote payload itself hits the sync route's `SMALL_BODY_BYTES` budget,
+and a single failed
 promote at the end loses ALL of the import's intermediate progress (because
 the WM assertions are still there but no peer has seen them).
 
@@ -80,12 +81,15 @@ small / interactive use).
 - **Replace `POST /api/assertion/<name>/promote`.** The sync route stays.
   Small / interactive importers prefer the synchronous answer-or-error
   shape; this spec adds an alternative, not a replacement.
-- **Cross-CG batching.** Each enqueued promote targets one
-  `(contextGraphId, assertionName)`. Multi-CG bulk promotes are out of
-  scope (importers that want them can enqueue many jobs).
+- **Cross-CG batching.** Each enqueued promote targets one full assertion
+  identity: `(contextGraphId, subGraphName, assertionName)`. Multi-CG bulk
+  promotes are out of scope (importers that want them can enqueue many jobs).
 - **Promote-side validation changes.** The async path applies the same
-  validation as the sync path; no relaxation of "root URI must exist in
-  the assertion's WM body".
+  permissive root handling as the sync path: `entities: "all"` is accepted,
+  explicit URI arrays are filtered to whatever quads are present in WM, and
+  a missing requested root can produce `promotedCount: 0` rather than a hard
+  validation failure. Tightening that behaviour would be a separate breaking
+  API change, not part of this queue.
 
 ## 3. Proposal — surface
 
@@ -96,7 +100,7 @@ POST /api/assertion/<name>/promote-async
 {
   "contextGraphId": "<cg>",
   "subGraphName": "<sg>",
-  "entities": [ "<root-uri>", ... ]
+  "entities": [ "<root-uri>", ... ]  // or "all", matching sync /promote
 }
 ```
 
@@ -110,16 +114,14 @@ Response: `200 OK`
 }
 ```
 
-`entities` is bounded by the [ADR 0002 importer chunking
-contract](../adr/0002-importer-chunking-contract.md) — typically
-`ROOT_CHUNK ≤ 1000` — for symmetry with the sync route's request-size
-budget. Note that the **sync** `/promote` route does not currently
-enforce a per-call root cap server-side (it accepts `entities: "all"`
-and any explicit array that fits under `MAX_BODY_BYTES`); the async
-route adopts the same lenient acceptance. We deliberately do not raise
-the cap unilaterally for async: if sync grows a hard limit later (which
-the queue saturation behaviour in §4.3 will make easier), async should
-adopt it at the same time so the contracts stay aligned.
+`entities` follows the same request contract as sync `/promote`: callers may
+send `"all"` or an explicit URI array. The current daemon reads promote bodies
+with `SMALL_BODY_BYTES` (256 KB), so practical explicit arrays should stay near
+ADR 0002's `ROOT_CHUNK ≤ 1000` guidance even though the sync route does not
+currently enforce a URI-count cap server-side. Async must not silently widen
+that body budget or reject roots more strictly than sync; if sync later gains
+a hard root-count limit, async should adopt it at the same time so the
+contracts stay aligned.
 
 ### 3.2 Status
 
@@ -207,7 +209,7 @@ interface PromoteJob {
   contextGraphId: string;
   assertionName: string;
   subGraphName: string;
-  entities: string[];
+  entities: string[] | 'all';
   state: PromoteJobState;
   enqueuedAt: string;
   startedAt?: string;
@@ -217,6 +219,8 @@ interface PromoteJob {
   claimedBy?: string;          // worker id of the current lease holder
   claimToken?: string;         // opaque renew token (see §4.3)
   claimLeaseExpiresAt?: string; // ISO-8601 — lease wall-clock deadline
+  attemptOperationId?: string; // deterministic idempotency key for current attempt
+  attemptPhase?: 'pending' | 'applying' | 'committed';
   nextRetryAt?: string;
   lastError?: { code: string; message: string; retryable: boolean };
 }
@@ -274,10 +278,11 @@ separate worker thread — promote is not CPU-bound). It:
 2. **Claims** a job (atomic compare-and-swap on
    `state: queued|failed_retrying → running`, writes `claimedBy`,
    `claimToken`, `claimLeaseExpiresAt = now + leaseTtlMs`; see §4.3 for
-   the lease model). Calls the existing `assertion.promote(...)` logic
-   internally (the SAME code path the sync route uses — we share
-   implementation, not just shape), and writes `succeeded` or
-   transitions to `failed_retrying`/`failed` based on the result.
+   the lease model). It then calls the existing `assertion.promote(...)`
+   logic through the idempotency wrapper in §4.4 (the SAME promote code
+   path the sync route uses — we share implementation, not just shape),
+   and writes `succeeded` or transitions to `failed_retrying`/`failed`
+   based on the result.
 
 3. While the promote is running, the worker renews its lease every
    `leaseTtlMs / 2` (default 30s) so a long-running but healthy
@@ -297,18 +302,20 @@ separate worker thread — promote is not CPU-bound). It:
 6. **Concurrency caps**:
    - At most N (default 4) running jobs per daemon, matching ADR 0002's
      "max concurrent assertions" guidance.
-   - **At most 1 active job per `(contextGraphId, assertionName)` pair.**
-     This is the same guarantee the sync `/promote` route gives today,
+   - **At most 1 active job per full assertion identity
+     `(contextGraphId, subGraphName, assertionName)`.** This is the same
+     guarantee the sync `/promote` route gives today,
      and it's enforced in two places to be defence-in-depth:
      - **At enqueue** (`POST /api/assertion/promote-async`): if a job
-       with the same `(cgId, name)` is already in `queued` / `running`
-       / `failed_retrying` state, return `409 Conflict` with the
-       existing `jobId` in the body, so the importer can resume polling
-       that one. (Alternative: silently coalesce to the existing job;
-       the spec leaves this to implementation, but MUST NOT enqueue a
-       second concurrent job.)
+       with the same `(contextGraphId, subGraphName, assertionName)` is
+       already in `queued` / `running` / `failed_retrying` state, return
+       `409 Conflict` with the existing `jobId` in the body, so the
+       importer can resume polling that one. (Alternative: silently
+       coalesce to the existing job; the spec leaves this to implementation,
+       but MUST NOT enqueue a second concurrent job.)
      - **At claim** (the CAS in step 2): the runnable-job query MUST
-       exclude rows whose `(cgId, name)` already has a running sibling.
+       exclude rows whose full assertion identity already has a running
+       sibling.
        This catches the race where two enqueues arrive simultaneously
        and the enqueue-time check sees nothing on either side; whoever
        loses the CAS races stays `queued` and waits.
@@ -350,12 +357,47 @@ Instead, the queue uses a **renewable lease** (same pattern as
 
 ### 4.4 Failure modes + recovery
 
+Crash recovery is **lease expiry plus an idempotency / commit marker**, not a
+blind `running → queued` rewrite. The current sync promote flow performs
+multiple durable side effects (SWM insert, WM cleanup, assertion lifecycle
+metadata, workspace-operation metadata, gossip notification). A daemon can
+crash after some of those have happened and before others have. Re-running the
+whole promote blindly can duplicate control-plane metadata or gossip even when
+the RDF set insert itself is idempotent.
+
+Async promote therefore needs an attempt-level idempotency guard before it can
+reclaim lapsed `running` jobs:
+
+1. When a worker starts an attempt it writes
+   `attemptOperationId = "${jobId}:${attempts}"` and
+   `attemptPhase = "applying"` into the control graph before invoking the
+   shared promote code path.
+2. The shared promote implementation must either accept that operation id and
+   make every non-RDF side effect idempotent under it, **or** the async wrapper
+   must write a durable commit marker only after all promote side effects have
+   completed successfully.
+3. On success the worker sets `attemptPhase = "committed"` and then marks the
+   job `succeeded`.
+4. On startup / scheduler tick, a lapsed `running` job is reconciled:
+   - `attemptPhase = "committed"` → mark `succeeded`; do not rerun.
+   - `attemptPhase = "pending"` (no promote side effects started) → clear the
+     claim and let the scheduler retry.
+   - `attemptPhase = "applying"` with no durable commit marker → run an
+     implementation-specific reconciliation check. If the implementation cannot
+     prove the previous attempt is safe to resume/retry idempotently, park the
+     job as terminal `failed` with `code: "ambiguous_partial_promote"` and
+     surface operator recovery instructions instead of guessing.
+
+This is stricter than the initial draft, but it is the safe contract: the
+implementation PR must either make promote attempts idempotent under an
+operation id or explicitly park ambiguous partial attempts.
+
 - **Daemon crash mid-job**: the job's lease expires (because nothing
   is renewing it). On startup — or on the next scheduling tick of a
   peer daemon, if/when we support multi-daemon queues — the worker
-  scans for `running` jobs with `claimLeaseExpiresAt < now`, clears
-  the claim atomically, and the job becomes eligible for re-claim.
-  No fixed `runningTimeoutMs`; the lease is the source of truth.
+  scans for `running` jobs with `claimLeaseExpiresAt < now` and applies
+  the reconciliation rules above. No fixed `runningTimeoutMs`; the
+  lease plus commit marker is the source of truth.
 - **Permanent failure** (e.g. an assertion that was discarded between
   enqueue and run): mark `failed` with `retryable: false`. Surface
   through `GET /api/assertion/promote-async/<jobId>` with a structured
@@ -416,12 +458,20 @@ survive — the importer just keeps polling.
    classes (operator-set). FIFO is the right v1; the others wait for a
    problem report.
 
-2. **Drain semantics on shutdown.** Two options:
-   - **Wait for running jobs to finish.** Cleanest, but a 5-min running
-     job blocks `dkg stop` for 5 min. Bad for ops.
-   - **Mark running → queued + exit.** Some jobs run twice. The promote
-     operation is idempotent (writing the same triples to SWM twice is a
-     no-op), so this should be safe. Pick this.
+2. **Drain semantics on shutdown.** Recommended v1 behaviour:
+   - Stop accepting new async-promote requests.
+   - Stop claiming new queued / retryable jobs.
+   - Give currently running jobs a short graceful window to finish and write
+     their commit markers.
+   - On timeout, exit without rewriting `running` jobs to `queued`; their
+     leases expire and startup recovery follows §4.4.
+
+   Do **not** mark `running → queued` during shutdown. Promote is not a single
+   atomic set insert today; it mutates SWM, WM cleanup, lifecycle metadata, and
+   workspace-operation metadata in separate steps. Lease-expiry reconciliation
+   plus the attempt commit marker is the only safe automatic recovery story
+   until the implementation proves every side effect is idempotent under an
+   operation id.
 
 3. **Worker count tuning via `/api/status`.** The same `importLimits`
    hint added in ADR 0002 should grow a `promoteWorkerConcurrency` field
@@ -467,3 +517,90 @@ Implementation work is intentionally NOT part of this PR. Sign-off on
 the spec first; implementation follows in a subsequent PR sized to fit
 under [`packages/publisher/src/async-lift-publisher-impl.ts`](../../packages/publisher/src/async-lift-publisher-impl.ts) (~1000 lines) — likely
 a sibling `async-promote-queue-impl.ts` of similar size.
+
+## 10. Empirical motivation (rc.10 Graphify import)
+
+The numbers below come from importing a real codebase graph (Graphify
+output for this repository: 26,960 nodes / 63,003 edges, partitioned into
+17 sub-graph-scoped assertions) against an rc.10 sandbox daemon on a
+local SSD, single worker. Two importer variants were measured: a
+hand-rolled `fetch` client written from the `dkg-node` SKILL.md alone
+(~330 LOC, no library) and the same workload using the existing rc.10
+`scripts/lib/dkg-daemon.mjs` `DkgClient` library. Both ran the same
+write/promote pattern documented in ADR 0002.
+
+### 10.1 Cascading write degradation under SWM load
+
+The most visible signal that sync `/promote` competes with the same
+worker doing writes is how write latency itself degrades as SWM grows.
+Each row is a single `client.writeAssertion(...)` call:
+
+| Partition | Triples | Write ms | Promote ms | Notes |
+|---|---:|---:|---:|---|
+| `.codex` | 450 | 241 | 129 | first write; warm-up |
+| `.cursor` | 131 | **5** | 66 | steady state, small |
+| `bench` | 1,812 | **20** | 2,310 | still ~10 µs/triple |
+| `ccl_v0_1` | 3,232 | **41** | 3,562 | linear |
+| `devnet` | 4,095 | **597** | 10,707 | first slowdown signal |
+| `packages-adapter-hermes` | 12,991 | 127 | 8,555 | recovers briefly |
+| `packages-chain` | 12,762 | **230** | 39,395 | promote getting slow |
+| `packages-cli` | 72,079 | **178,801** | 290,150 | **3 min write alone** |
+| `packages-core` | 33,742 | **31,610** | 73,322 | 30 s for 33k triples |
+
+After ~100k SWM triples ingested cumulatively, write latency degrades
+roughly **200× from baseline** (5-7 ms/batch → 1.2 s/batch and worse)
+because the single worker thread is interleaving writes with the
+SWM-side gossip/lifecycle work from previous promotes. The async queue
+in this spec moves promote work to dedicated background workers, so
+foreground writes stay flat regardless of how much promote pressure is
+queued behind them — that's the §1 "lift one tier earlier" claim in
+concrete numbers.
+
+### 10.2 10 MB gossip cap failures under sync `/promote`
+
+Four of 17 partitions exceeded the 10 MB gossip-message cap when promoted
+with `entities: "all"` (the convenient default for resumable importers).
+Each failure costs an entire halve-and-retry cycle:
+
+| Partition | Triples | Assertion size | Wall-clock in retry |
+|---|---:|---:|---:|
+| `packages-adapter-openclaw` | 36,618 | 10,788 KB | ~2 min |
+| `packages-agent` | 41,724 | 11,993 KB | ~3.5 min |
+| `packages-cli` | 72,079 | 20,686 KB | ~5 min |
+| `docs` | 69,792 | 24,599 KB | ~4 min |
+
+Total wall-clock spent in adaptive halving across these four:
+**~15 minutes**. The daemon error message is
+
+```
+HTTP 500 "Promoted assertion too large for gossip
+(<size> KB, limit 10 MB). Promote fewer entities per call."
+```
+
+This is a sync-route problem the async queue solves trivially: a
+background worker can promote one root at a time without blocking the
+client; the importer just polls a job id. The 15 min retry cost
+collapses to "enqueue, get a job id back in <50 ms, poll until
+`succeeded`". The hand-rolled adaptive-halving logic the rc.10
+importer needs (256 KB body cap + 10 MB gossip cap, two separate
+discovery loops) ceases to be part of the importer's job.
+
+### 10.3 Production importer reliability
+
+The rc.10 importer crashed once with a generic `fetch failed` socket
+error during a multi-minute promote call. There is no retry
+classification in the sync path; the importer either implements one
+itself or loses progress. The §3.3 `failed_retrying` state and §4.4
+attempt commit marker move that responsibility into the daemon, where
+it has the lease information and persistence to do it correctly.
+
+### 10.4 Why "in front of" instead of "underneath"
+
+A counter-proposal during review was to make sync `/promote` itself
+internally async with a `batched` flag. The numbers above show why
+that's the wrong layer: the importer's pain is **wall-clock per
+partition**, not request shape. A 5-minute sync call that quietly
+chunks is still a 5-minute sync call from the importer's perspective —
+it can't pipeline the next partition's write, it can't show progress,
+and a transient TCP reset still kills the operation. The async queue
+addresses the actual cost, not the symptom.
