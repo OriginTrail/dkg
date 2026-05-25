@@ -292,6 +292,22 @@ describe('daemon memory_graph_changed route emissions', () => {
     expect(emitMemoryGraphChanged).not.toHaveBeenCalled();
   });
 
+  it('rejects verify-batch without explicit batch quads before reading local graphs', async () => {
+    const query = vi.fn();
+    const ctx = createContext('/api/shared-memory/verify-batch', {
+      contextGraphId: 'project-a',
+      expectedMerkleRoot: `0x${'11'.repeat(32)}`,
+    }, {
+      agent: { store: { query } } as unknown as RequestContext['agent'],
+    });
+
+    await handleMemoryRoutes(ctx);
+
+    expect((ctx.res as unknown as { statusCode: number }).statusCode).toBe(400);
+    expect(responseBody(ctx).error).toMatch(/requires explicit `quads`/);
+    expect(query).not.toHaveBeenCalled();
+  });
+
   it('threads callerAgentAddress into conditional shared-memory writes', async () => {
     const conditionalShare = vi.fn().mockResolvedValue({ shareOperationId: 'op-cas' });
     const ctx = createContext('/api/shared-memory/conditional-write', {

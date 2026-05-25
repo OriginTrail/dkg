@@ -5,10 +5,10 @@
 #
 # Scenarios:
 #
-#   1. HAPPY PATH — Curator publishes a public CG batch. Member fetches
-#      the on-chain merkleRoot via the chain API, calls
-#      POST /api/shared-memory/verify-batch with the local SWM quads
-#      → must return ok=true.
+#   1. REQUEST VALIDATION — verify-batch without explicit quads is
+#      rejected because local graph reconstruction is not batch-scoped.
+#      The happy path then calls verify-batch with exact caller-supplied
+#      plaintext quads and must return ok=true.
 #
 #   2. ROOT-MISMATCH — Member calls verify-batch with a forged set of
 #      quads (adds an injected triple) but the real expectedRoot.
@@ -120,37 +120,34 @@ log "✓ published txHash=$TX_HASH merkleRoot=$MERKLE_ROOT"
 sleep 5
 
 # ===========================================================================
-# SCENARIO 1 — Happy path on the member side.
+# SCENARIO 1 — Request validation + happy path on the member side.
 # ===========================================================================
 
 log ""
 log "================================================================"
-log "  SCENARIO 1: verify-batch HAPPY PATH (member, public CG)"
+log "  SCENARIO 1: verify-batch REQUEST VALIDATION + HAPPY PATH"
 log "================================================================"
 
-# The published quads on the curator side live in the CG's named data
-# graph after seal (the publisher moves them out of SWM). The verify-
-# batch endpoint falls back to the data graph if SWM is empty.
-log "Curator calls verify-batch against its own local data (after publish, plaintext lives in the CG data graph)..."
-VERIFY_OK=$(api_call "$CURATOR_NODE" POST /api/shared-memory/verify-batch "$(cat <<EOF
+# The daemon cannot safely infer a single published batch from a whole
+# context graph. Once a CG has multiple batches, local graph reconstruction
+# hashes a superset of leaves against a single-batch expected root. Keep the
+# route strict: callers must pass the exact plaintext quads they are verifying.
+log "Curator calls verify-batch without quads; endpoint should reject the ambiguous request..."
+VERIFY_MISSING_QUADS=$(api_call "$CURATOR_NODE" POST /api/shared-memory/verify-batch "$(cat <<EOF
 { "contextGraphId": "$PUB_CG", "expectedMerkleRoot": "$MERKLE_ROOT" }
 EOF
 )")
-log "verify-batch happy: $VERIFY_OK"
-OK_FLAG=$(parse_json "$VERIFY_OK" '.ok')
-QUADS_CONSIDERED=$(parse_json "$VERIFY_OK" '.quadsConsidered')
-if [ "$OK_FLAG" = "true" ]; then
-  log "✓ Scenario 1: verify-batch returned ok=true ($QUADS_CONSIDERED quads considered)"
+log "verify-batch missing-quads response: $VERIFY_MISSING_QUADS"
+MISSING_QUADS_ERROR=$(parse_json "$VERIFY_MISSING_QUADS" '.error')
+if printf '%s' "$MISSING_QUADS_ERROR" | grep -q 'requires explicit `quads`'; then
+  log "✓ Scenario 1: verify-batch rejects omitted quads before ambiguous reconstruction"
 else
-  warn "verify-batch returned ok=$OK_FLAG ($QUADS_CONSIDERED quads considered)"
-  warn "  The actual published root for KC #$KC_ID was $MERKLE_ROOT"
-  warn "  recomputed: $(parse_json "$VERIFY_OK" '.actualRoot')"
+  fail "verify-batch missing-quads response did not mention explicit quads requirement: $VERIFY_MISSING_QUADS"
 fi
 
-# Bonus: also exercise the explicit-quads path (caller-supplied
-# plaintext). This is the path a member uses after catchup once they've
-# decrypted ciphertext, and is the only path that's truly key-holder-
-# independent for the verifier API.
+# Exercise the explicit-quads path (caller-supplied plaintext). This is the
+# path a member uses after catchup once they've decrypted ciphertext, and is
+# the only path that's batch-scoped for the verifier API.
 log "Calling verify-batch with explicit caller-supplied quads (member-side simulation)..."
 EXPLICIT_QUADS=$(node -e "
   const quads = [];

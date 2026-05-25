@@ -57,7 +57,7 @@ const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, assertSafeRdfTerm, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, contextGraphDataUri, escapeDkgRdfLiteral } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, assertSafeRdfTerm, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, escapeDkgRdfLiteral } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri, type PublishOptions } from '@origintrail-official/dkg-publisher';
 import {
   DashboardDB,
@@ -752,8 +752,8 @@ WHERE {
   // Body: {
   //   contextGraphId: string,
   //   expectedMerkleRoot: hex32 string ("0x" + 64 hex chars),
-  //   quads?: Quad[],            // if omitted, fetched from local SWM
-  //   subGraphName?: string,     // narrows the SWM source slice
+  //   quads: Quad[],             // exact plaintext quads for this batch
+  //   subGraphName?: string,
   //   privateRoots?: hex32[],    // optional per-KA private sub-roots
   //   batchId?: string,          // round-tripped into rejection record
   // }
@@ -784,74 +784,24 @@ WHERE {
       }
       privateRoots.push(hexToBytes32(ph));
     }
-    let quads: Array<{ subject: string; predicate: string; object: string; graph: string }> = [];
-    if (Array.isArray(parsed.quads)) {
-      quads = parsed.quads.map((q: any) => ({
+    if (!Array.isArray(parsed.quads)) {
+      return jsonResponse(res, 400, {
+        error:
+          `verify-batch requires explicit \`quads\` in the request body. ` +
+          `The daemon cannot safely reconstruct a single batch from the local ` +
+          `SWM/data graph because that graph can contain triples from other ` +
+          `batches in the same context graph.`,
+      });
+    }
+
+    const quads: Array<{ subject: string; predicate: string; object: string; graph: string }> = parsed.quads.map(
+      (q: any) => ({
         subject: String(q.subject),
         predicate: String(q.predicate),
         object: String(q.object),
         graph: String(q.graph ?? ''),
-      }));
-    } else {
-      // Codex PR #609: when the caller passes `batchId`, they are
-      // asking us to verify ONE specific batch — but the SWM /
-      // data-graph reconstruction below loads EVERY triple in the
-      // context graph. For a CG with more than one published batch
-      // (i.e. nearly every real CG after the second publish), this
-      // deterministically false-positives `root-mismatch` because we
-      // hash a superset of leaves against a single-batch expected
-      // root. The local triple store has no per-batch label on the
-      // SWM data, so we can't safely scope the read here without
-      // additional metadata. Fail explicitly so the caller passes
-      // `quads` directly (which they typically already have from the
-      // member-side LU-7 catch-up that produced the batch).
-      if (parsed.batchId !== undefined && parsed.batchId !== null && String(parsed.batchId).length > 0) {
-        return jsonResponse(res, 400, {
-          error:
-            `verify-batch with \`batchId\` requires explicit \`quads\` in the request body. ` +
-            `Reconstruction from local SWM / data graph would include triples from OTHER ` +
-            `batches in the same CG and deterministically report \`root-mismatch\` against ` +
-            `the single-batch \`expectedMerkleRoot\`. Supply the exact batch quads (typically ` +
-            `from the LU-7 catch-up response) or omit \`batchId\` if you really do want to ` +
-            `verify the entire CG against a single root.`,
-        });
-      }
-      // No batchId — caller wants to verify the entire CG against a
-      // single root (legacy / single-batch use). Reconstruct from
-      // local store as before:
-      //   1. _shared_memory (live SWM, before promote-to-VM)
-      //   2. CG data graph (post-publish — selection moves quads from
-      //      SWM into the named-graph as part of the seal step)
-      const swmGraphUri = contextGraphSharedMemoryUri(contextGraphId, subGraphName);
-      // Codex PR #609 R2 — when `subGraphName` is set and the batch has
-      // already been published (i.e. SWM is empty post-promote), the
-      // finalized triples live under the sub-graph-specific data graph,
-      // not the root CG graph. Use the same sub-graph-aware helper the
-      // publisher uses so the fallback path actually finds them.
-      const dataGraphUri = contextGraphDataUri(contextGraphId, subGraphName);
-      try {
-        const swmResult = await (agent as any).store.query(
-          `SELECT ?s ?p ?o WHERE { GRAPH <${swmGraphUri}> { ?s ?p ?o } }`,
-        );
-        if (swmResult?.type === 'bindings') {
-          for (const b of swmResult.bindings) {
-            quads.push({ subject: b['s'], predicate: b['p'], object: b['o'], graph: '' });
-          }
-        }
-        if (quads.length === 0) {
-          const dataResult = await (agent as any).store.query(
-            `SELECT ?s ?p ?o WHERE { GRAPH <${dataGraphUri}> { ?s ?p ?o } }`,
-          );
-          if (dataResult?.type === 'bindings') {
-            for (const b of dataResult.bindings) {
-              quads.push({ subject: b['s'], predicate: b['p'], object: b['o'], graph: '' });
-            }
-          }
-        }
-      } catch (err: any) {
-        return jsonResponse(res, 500, { error: `Failed to read local SWM/workspace: ${err?.message ?? err}` });
-      }
-    }
+      }),
+    );
 
     const { verifyBatch } = await import('@origintrail-official/dkg-agent');
     const verifyResult = verifyBatch({ quads, privateRoots, expectedRoot });
