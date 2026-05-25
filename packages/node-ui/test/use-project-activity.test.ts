@@ -24,11 +24,13 @@ const TYPE_TASK = 'http://dkg.io/ontology/tasks/Task';
 const SCHEMA_NAME = 'http://schema.org/name';
 
 interface CapturedItem {
+  id: string;
   uri: string;
   event: ActivityEvent;
   kindUri: string | null;
   at: string | null;
   author: string | null;
+  clickable: boolean;
 }
 
 function Probe({
@@ -48,11 +50,13 @@ function Probe({
 
 function toCaptured(item: ActivityItem): CapturedItem {
   return {
+    id: item.id,
     uri: item.entity.uri,
     event: item.event,
     kindUri: item.kindUri,
     at: item.at?.toISOString() ?? null,
     author: item.authorUri,
+    clickable: item.clickable,
   };
 }
 
@@ -283,17 +287,16 @@ describe('useProjectActivityEvents — promotion events (N6 part 2)', () => {
       { subject: 'urn:doc:promoted', predicate: DC_CREATED, object: '"2026-05-20T08:00:00Z"', layer: 'working' },
       { subject: 'urn:doc:promoted', predicate: PROV_AUTHOR, object: 'did:dkg:agent:alice', layer: 'working' },
     ];
-    const attributions = new Map<string, PromotionAttribution[]>([
-      ['urn:doc:promoted', [{
-        agent: 'did:dkg:agent:bob',
-        opUri: 'urn:dkg:share:op-1',
-        publishedAt: '2026-05-22T10:00:00Z',
-      }]],
-    ]);
+    const events: PromotionAttribution[] = [{
+      rootUri: 'urn:doc:promoted',
+      agent: 'did:dkg:agent:bob',
+      opUri: 'urn:dkg:share:op-1',
+      publishedAt: '2026-05-22T10:00:00Z',
+    }];
     act(() => {
       root.render(React.createElement(ProbeEvents, {
         entities: entitiesFrom(triples),
-        opts: { swmAttributions: attributions },
+        opts: { swmEvents: events },
       }));
     });
     const items = readItems(container);
@@ -302,8 +305,13 @@ describe('useProjectActivityEvents — promotion events (N6 part 2)', () => {
     expect(items[0].author).toBe('did:dkg:agent:bob');
     expect(items[0].uri).toBe('urn:doc:promoted');
     expect(items[0].kindUri).toBe(null);
+    expect(items[0].clickable).toBe(true);
     // `'added'` row keeps its original-author attribution.
     expect(items[1].author).toBe('did:dkg:agent:alice');
+    expect(items[1].clickable).toBe(true);
+    // Code1 — every row has a stable per-event id; the promoted row
+    // and the added row (same entity URI) have distinct ids.
+    expect(items[0].id).not.toEqual(items[1].id);
   });
 
   // Two distinct agents promoting the same root → two `'promoted'`
@@ -313,59 +321,83 @@ describe('useProjectActivityEvents — promotion events (N6 part 2)', () => {
     const triples: LayeredTriple[] = [
       { subject: 'urn:e:contested', predicate: RDF_TYPE, object: 'http://schema.org/Article', layer: 'working' },
     ];
-    const attributions = new Map<string, PromotionAttribution[]>([
-      ['urn:e:contested', [
-        { agent: 'did:dkg:agent:alice', opUri: 'urn:dkg:share:op-a', publishedAt: '2026-05-22T10:00:00Z' },
-        { agent: 'did:dkg:agent:bob',   opUri: 'urn:dkg:share:op-b', publishedAt: '2026-05-23T10:00:00Z' },
-      ]],
-    ]);
+    const events: PromotionAttribution[] = [
+      { rootUri: 'urn:e:contested', agent: 'did:dkg:agent:alice', opUri: 'urn:dkg:share:op-a', publishedAt: '2026-05-22T10:00:00Z' },
+      { rootUri: 'urn:e:contested', agent: 'did:dkg:agent:bob',   opUri: 'urn:dkg:share:op-b', publishedAt: '2026-05-23T10:00:00Z' },
+    ];
     act(() => {
       root.render(React.createElement(ProbeEvents, {
         entities: entitiesFrom(triples),
-        opts: { swmAttributions: attributions },
+        opts: { swmEvents: events },
       }));
     });
     const items = readItems(container).filter(i => i.event === 'promoted');
     expect(items).toHaveLength(2);
     expect(items.map(i => i.author).sort()).toEqual(['did:dkg:agent:alice', 'did:dkg:agent:bob']);
+    // Code1 — two promotion rows for the same root have distinct ids.
+    expect(items[0].id).not.toEqual(items[1].id);
   });
 
-  // A promotion of a root that isn't (yet) in the entity list still
-  // produces a row — we synthesise an entity stub so the timeline
-  // never silently drops a transition.
-  it('still emits a row when the promoted root is missing from entitiesByUri', () => {
-    const triples: LayeredTriple[] = [];
-    const attributions = new Map<string, PromotionAttribution[]>([
-      ['urn:dkg:thing:orphan-root', [{
-        agent: 'did:dkg:agent:bob',
-        opUri: 'urn:dkg:share:op-1',
-        publishedAt: '2026-05-22T10:00:00Z',
-      }]],
-    ]);
+  // Codex Code2 regression — the same `(root, agent)` is promoted
+  // twice (different op id / timestamp). The previous wiring fed the
+  // deduped `attributions` map and silently lost the second event.
+  // The joiner now consumes the raw per-op event list and renders both.
+  it('emits two rows for re-promotion of the same (root, agent) — different op ids (Code2)', () => {
+    const events: PromotionAttribution[] = [
+      { rootUri: 'urn:e:repromoted', agent: 'did:dkg:agent:bob', opUri: 'urn:dkg:share:op-first',  publishedAt: '2026-05-22T10:00:00Z' },
+      { rootUri: 'urn:e:repromoted', agent: 'did:dkg:agent:bob', opUri: 'urn:dkg:share:op-second', publishedAt: '2026-05-24T10:00:00Z' },
+    ];
     act(() => {
       root.render(React.createElement(ProbeEvents, {
-        entities: entitiesFrom(triples),
-        opts: { swmAttributions: attributions },
+        entities: entitiesFrom([]),
+        opts: { swmEvents: events },
+      }));
+    });
+    const items = readItems(container).filter(i => i.event === 'promoted');
+    expect(items).toHaveLength(2);
+    // Distinct ids per event keep React's reconciliation honest.
+    expect(items[0].id).not.toEqual(items[1].id);
+    // Newest first.
+    expect(items[0].at).toBe('2026-05-24T10:00:00.000Z');
+    expect(items[1].at).toBe('2026-05-22T10:00:00.000Z');
+  });
+
+  // Codex Code3 — a promotion of a root that isn't in `entitiesByUri`
+  // still emits a row (the timeline doesn't drop transitions silently),
+  // but the row is marked `clickable: false` so the renderer can render
+  // it as static text rather than navigating to a detail view that
+  // ProjectView would immediately clear.
+  it('emits a non-clickable stub row when the promoted root is missing from entitiesByUri (Code3)', () => {
+    const events: PromotionAttribution[] = [{
+      rootUri: 'urn:dkg:thing:orphan-root',
+      agent: 'did:dkg:agent:bob',
+      opUri: 'urn:dkg:share:op-1',
+      publishedAt: '2026-05-22T10:00:00Z',
+    }];
+    act(() => {
+      root.render(React.createElement(ProbeEvents, {
+        entities: entitiesFrom([]),
+        opts: { swmEvents: events },
       }));
     });
     const items = readItems(container);
     expect(items).toHaveLength(1);
     expect(items[0].event).toBe('promoted');
     expect(items[0].uri).toBe('urn:dkg:thing:orphan-root');
+    expect(items[0].clickable).toBe(false);
   });
 
   // The agentUri filter narrows promotions to a single promoter; this
   // is how AgentProfileView would surface "what did Bob promote".
   it('agentUri filter applies to promotion rows (promoter, not original author)', () => {
-    const triples: LayeredTriple[] = [];
-    const attributions = new Map<string, PromotionAttribution[]>([
-      ['urn:e:1', [{ agent: 'did:dkg:agent:alice', opUri: 'urn:op:1', publishedAt: '2026-05-22T10:00:00Z' }]],
-      ['urn:e:2', [{ agent: 'did:dkg:agent:bob',   opUri: 'urn:op:2', publishedAt: '2026-05-23T10:00:00Z' }]],
-    ]);
+    const events: PromotionAttribution[] = [
+      { rootUri: 'urn:e:1', agent: 'did:dkg:agent:alice', opUri: 'urn:op:1', publishedAt: '2026-05-22T10:00:00Z' },
+      { rootUri: 'urn:e:2', agent: 'did:dkg:agent:bob',   opUri: 'urn:op:2', publishedAt: '2026-05-23T10:00:00Z' },
+    ];
     act(() => {
       root.render(React.createElement(ProbeEvents, {
-        entities: entitiesFrom(triples),
-        opts: { swmAttributions: attributions, agentUri: 'did:dkg:agent:bob' },
+        entities: entitiesFrom([]),
+        opts: { swmEvents: events, agentUri: 'did:dkg:agent:bob' },
       }));
     });
     const items = readItems(container);
@@ -381,22 +413,22 @@ describe('useProjectActivityEvents — promotion events (N6 part 2)', () => {
       { subject: 'urn:decision:1', predicate: RDF_TYPE, object: TYPE_DECISION, layer: 'working' },
       { subject: 'urn:decision:1', predicate: DC_CREATED, object: '"2026-05-20T08:00:00Z"', layer: 'working' },
     ];
-    const attributions = new Map<string, PromotionAttribution[]>([
-      ['urn:e:promoted', [{ agent: 'did:dkg:agent:bob', opUri: 'urn:op:1', publishedAt: '2026-05-22T10:00:00Z' }]],
-    ]);
+    const events: PromotionAttribution[] = [
+      { rootUri: 'urn:e:promoted', agent: 'did:dkg:agent:bob', opUri: 'urn:op:1', publishedAt: '2026-05-22T10:00:00Z' },
+    ];
     act(() => {
       root.render(React.createElement(ProbeEvents, {
         entities: entitiesFrom(triples),
-        opts: { swmAttributions: attributions, typeIri: TYPE_DECISION },
+        opts: { swmEvents: events, typeIri: TYPE_DECISION },
       }));
     });
     const items = readItems(container);
     expect(items.map(i => i.event)).toEqual(['typed']);
   });
 
-  // Omitting swmAttributions → joiner reduces to the entity-derived
+  // Omitting swmEvents → joiner reduces to the entity-derived
   // feed only. Keeps the AgentProfileView path noise-free.
-  it('without swmAttributions returns the same items as useProjectActivity', () => {
+  it('without swmEvents returns the same items as useProjectActivity', () => {
     const triples: LayeredTriple[] = [
       { subject: 'urn:doc:1', predicate: RDF_TYPE, object: 'http://schema.org/Article', layer: 'working' },
       { subject: 'urn:doc:1', predicate: DC_CREATED, object: '"2026-05-22T08:00:00Z"', layer: 'working' },
@@ -418,22 +450,23 @@ describe('useProjectActivityEvents — promotion events (N6 part 2)', () => {
 describe('buildPromotionEvents — pure joiner', () => {
   it('drops rows with unparseable timestamps rather than emitting Invalid Date', () => {
     const items = buildPromotionEvents(
-      new Map([['urn:e:1', [{
+      [{
+        rootUri: 'urn:e:1',
         agent: 'did:dkg:agent:bob',
         opUri: 'urn:op:1',
         publishedAt: 'not-a-date',
-      }]]]),
+      }],
       { entitiesByUri: new Map() },
     );
     expect(items).toHaveLength(0);
   });
 
-  it('sorts newest-first when fed an out-of-order map', () => {
+  it('sorts newest-first when fed an out-of-order array', () => {
     const items = buildPromotionEvents(
-      new Map([
-        ['urn:e:older', [{ agent: 'did:dkg:agent:alice', opUri: 'urn:op:a', publishedAt: '2026-05-20T00:00:00Z' }]],
-        ['urn:e:newer', [{ agent: 'did:dkg:agent:bob',   opUri: 'urn:op:b', publishedAt: '2026-05-22T00:00:00Z' }]],
-      ]),
+      [
+        { rootUri: 'urn:e:older', agent: 'did:dkg:agent:alice', opUri: 'urn:op:a', publishedAt: '2026-05-20T00:00:00Z' },
+        { rootUri: 'urn:e:newer', agent: 'did:dkg:agent:bob',   opUri: 'urn:op:b', publishedAt: '2026-05-22T00:00:00Z' },
+      ],
       { entitiesByUri: new Map() },
     );
     expect(items.map(i => i.entity.uri)).toEqual(['urn:e:newer', 'urn:e:older']);

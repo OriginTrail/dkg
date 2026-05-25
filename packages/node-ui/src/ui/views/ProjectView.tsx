@@ -470,7 +470,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
           )}
           <ActivityFeed
             entities={rawMemory.entityList}
-            swmAttributions={swmAttributionsResult.attributions}
+            swmEvents={swmAttributionsResult.events}
             onSelectEntity={handleOverviewActivityNavigate}
             title="Recent activity"
             limit={40}

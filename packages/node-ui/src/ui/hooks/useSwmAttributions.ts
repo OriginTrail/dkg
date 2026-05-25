@@ -40,6 +40,28 @@ export interface AgentAttribution {
   subGraph?: string;
 }
 
+/**
+ * Raw `dkg:WorkspaceOperation` row from `_shared_memory_meta`, *not*
+ * deduplicated by `(root, agent)`. One entry per SPARQL binding —
+ * preserves re-promotions (same agent promoting the same root twice
+ * with different op ids / timestamps) and is the substrate the activity
+ * feed needs for an accurate timeline.
+ *
+ * Codex Code2 (PR #656) caught the bug: the deduped `attributions` map
+ * is fine for the SWM-graph legend (where collapsing repeated
+ * promotions to a single agent per root is what you want) but wrong
+ * for the activity feed, where each promotion should be its own event.
+ * We compute both shapes from the same SPARQL response so callers pick
+ * the shape that matches their semantics.
+ */
+export interface WorkspaceOperationEvent {
+  opUri: string;
+  rootUri: string;
+  agent: string;
+  publishedAt: string;
+  subGraph?: string;
+}
+
 export interface AgentPaletteEntry {
   agent: string;
   color: string;
@@ -50,8 +72,18 @@ export interface AgentPaletteEntry {
 
 export interface SwmAttributionsResult {
   /** Attribution map keyed by entity URI. Callers pass these into the
-   *  graph engine via a derived `nodeColors` record. */
+   *  graph engine via a derived `nodeColors` record. Deduplicated by
+   *  `(root, agent)` — at most one entry per pair. */
   attributions: Map<string, AgentAttribution[]>;
+  /**
+   * Raw, undeduplicated per-operation event list. One entry per SPARQL
+   * binding so re-promotions (same agent promoting the same root again
+   * with a different op id / timestamp) are preserved. Sorted by
+   * `publishedAt` ASC — chronological order matches the source query's
+   * ORDER BY clause. Used by the project activity feed to surface every
+   * promotion as its own row.
+   */
+  events: WorkspaceOperationEvent[];
   /** Stable colour + label per agent, for legends and per-URI tinting. */
   palette: AgentPaletteEntry[];
   /** Per-URI override map ready to drop into RdfGraph's `style.nodeColors`. */
@@ -150,6 +182,7 @@ function paletteIndex(agent: string): number {
 
 export function useSwmAttributions(contextGraphId: string | undefined): SwmAttributionsResult {
   const [attributions, setAttributions] = useState<Map<string, AgentAttribution[]>>(new Map());
+  const [events, setEvents] = useState<WorkspaceOperationEvent[]>([]);
   const [palette, setPalette] = useState<AgentPaletteEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -160,6 +193,7 @@ export function useSwmAttributions(contextGraphId: string | undefined): SwmAttri
     if (!contextGraphId) {
       versionRef.current += 1;
       setAttributions(new Map());
+      setEvents([]);
       setPalette([]);
       setLoading(false);
       setResolvedContextGraphId(undefined);
@@ -202,6 +236,10 @@ export function useSwmAttributions(contextGraphId: string | undefined): SwmAttri
 
         const attrMap = new Map<string, AgentAttribution[]>();
         const agentTotals = new Map<string, Set<string>>();
+        // Raw per-op event log (no dedup) — separate from `attrMap`
+        // because the activity feed needs every promotion as its own
+        // row, while the legend wants one entry per `(root, agent)`.
+        const eventLog: WorkspaceOperationEvent[] = [];
 
         for (const row of rows) {
           const op = bv(row.op);
@@ -212,6 +250,10 @@ export function useSwmAttributions(contextGraphId: string | undefined): SwmAttri
           if (!op || !root || !agentRaw || !ts) continue;
           const agent = canonicaliseAgent(agentRaw);
           const subGraph = g ? subGraphFromMetaGraphUri(g, contextGraphId) : undefined;
+
+          // Raw event always recorded — preserves re-promotions
+          // (same `(root, agent)` with a different `opUri` or `ts`).
+          eventLog.push({ opUri: op, rootUri: root, agent, publishedAt: ts, subGraph });
 
           const entry: AgentAttribution = { agent, opUri: op, publishedAt: ts, subGraph };
           const list = attrMap.get(root);
@@ -240,12 +282,14 @@ export function useSwmAttributions(contextGraphId: string | undefined): SwmAttri
 
         if (!isCurrent()) return;
         setAttributions(attrMap);
+        setEvents(eventLog);
         setPalette(paletteEntries);
         setResolvedContextGraphId(contextGraphId);
       } catch (err: any) {
         if (!isCurrent()) return;
         setError(err?.message ?? 'Failed to load SWM attributions');
         setAttributions(new Map());
+        setEvents([]);
         setPalette([]);
         setResolvedContextGraphId(contextGraphId);
       } finally {
@@ -284,5 +328,5 @@ export function useSwmAttributions(contextGraphId: string | undefined): SwmAttri
 
   const attributionPending = Boolean(contextGraphId && (loading || resolvedContextGraphId !== contextGraphId));
 
-  return { attributions, palette, nodeColors, conflicts, loading: attributionPending, error };
+  return { attributions, events, palette, nodeColors, conflicts, loading: attributionPending, error };
 }

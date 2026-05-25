@@ -76,6 +76,15 @@ const ACTIVITY_TYPES = new Set([
 export type ActivityEvent = 'added' | 'typed' | 'promoted' | 'published';
 
 export interface ActivityItem {
+  /**
+   * Stable per-event identifier — `${event}|${opUri ?? entity.uri}|${atIso}`.
+   * Same entity URI can produce several rows in one feed (`added` +
+   * `promoted` for an entity that was both imported and promoted, or
+   * two `promoted` rows for two distinct promoters / re-promotions),
+   * so keying React's list by `entity.uri` would collide and
+   * reconcile the wrong row on updates. Renderers MUST key off `id`.
+   */
+  id: string;
   entity: MemoryEntity;
   /**
    * Primary activity timestamp — `null` means the entity is relevant
@@ -99,12 +108,38 @@ export interface ActivityItem {
   layer: TrustLevel;
   /** N6 event-kind discriminator — see `ActivityEvent`. */
   event: ActivityEvent;
+  /**
+   * Whether the row should navigate when clicked. `false` for stub
+   * promotion rows whose underlying root isn't in `rawMemory.entities`
+   * — `ProjectView.openEntityDetail` would clear the selection
+   * immediately because `selectedEntity` resolves to `null`, so we
+   * render those rows as static text (the event still appears in the
+   * timeline; only the navigation is suppressed). Defaults to `true`.
+   */
+  clickable: boolean;
 }
 
 function parseDateLike(s: string): Date | null {
   const stripped = s.replace(/^"|"$/g, '').replace(/^"(.+)"(?:@\w+|\^\^.+)?$/, '$1');
   const d = new Date(stripped);
   return Number.isFinite(d.getTime()) ? d : null;
+}
+
+/**
+ * Stable per-event id (Code1 fix). The same entity URI can appear in
+ * several rows (`added` from an import + `promoted` from a WM→SWM
+ * transition + a second `promoted` from a re-promotion by a different
+ * agent), so keying React's list by `entity.uri` would collide and
+ * reconcile the wrong row on updates. The id is event-discriminated
+ * + tied to either the operation URI (for transition events) or the
+ * entity URI (for entity-derived events), plus the row's timestamp.
+ */
+export function buildActivityId(
+  event: ActivityEvent,
+  subjectUri: string,
+  at: Date | null,
+): string {
+  return `${event}|${subjectUri}|${at ? at.toISOString() : 'no-ts'}`;
 }
 
 /**
@@ -196,7 +231,13 @@ export function useProjectActivity(
       const sg = primarySubGraph(e);
       if (subGraph && sg !== subGraph) continue;
       const event: ActivityEvent = kindUri ? 'typed' : 'added';
+      // Per-event id (Code1) — typed/added rows have at most one of
+      // each event-kind per entity, so `${event}|${uri}|${atIso}` is
+      // stable across re-renders even if the same URI later gains a
+      // `'promoted'` row from the joiner.
+      const id = buildActivityId(event, e.uri, at);
       out.push({
+        id,
         entity: e,
         at,
         authorUri: author,
@@ -204,6 +245,10 @@ export function useProjectActivity(
         subGraph: sg,
         layer: e.trustLevel,
         event,
+        // Entity-derived rows always have a resolvable entity in
+        // `rawMemory` (we iterated `entityList` to get here), so they
+        // can always navigate.
+        clickable: true,
       });
     }
     // Dated items newest-first; undated items go last, ordered by label
@@ -273,33 +318,51 @@ export function bucketActivity(items: ActivityItem[], now: Date = new Date()): A
 
 // ─── Promotion events (N6 part 2) ────────────────────────────────
 //
-// `useSwmAttributions` already queries the project's `_shared_memory_meta`
-// partitions and produces a `Map<rootUri, AgentAttribution[]>` carrying
-// `(agent, opUri, publishedAt, subGraph)` per (root, agent) pair. We
-// re-use that data here — no new SPARQL — and project each attribution
-// into a `'promoted'` activity row so the Overview feed shows who
-// promoted what when. Each `AgentAttribution` becomes one row; an
-// entity promoted by two distinct agents produces two rows (which
-// reads as the conflict signal the SWM legend already badges).
+// `useSwmAttributions` queries `_shared_memory_meta` for every
+// `dkg:WorkspaceOperation` row and exposes them in two shapes:
+//
+//   1. `attributions: Map<rootUri, AgentAttribution[]>` — deduplicated
+//      by `(root, agent)`. The SWM-graph legend wants this (one
+//      colour-slot per promoter regardless of how often they re-promoted).
+//
+//   2. `events: WorkspaceOperationEvent[]` — raw per-operation rows,
+//      no dedup. Re-promotions of the same `(root, agent)` produce
+//      two rows. This is the substrate the activity feed needs: every
+//      promotion is its own event in the timeline.
+//
+// Codex Code2 (PR #656) caught us wiring the deduped map into the
+// activity feed — that silently dropped re-promotions and could show
+// outdated timestamps. The joiner below now consumes the raw event
+// list. No new SPARQL — same `useSwmAttributions` query, two
+// projections.
 //
 // Kept as a small pure helper that takes data + an entity lookup so
 // the joiner is testable without a network query — the React hook
 // below just wires the live `useSwmAttributions` result in.
 
 /**
- * Minimal shape of a SWM agent-attribution entry, mirrored from
- * `useSwmAttributions.AgentAttribution`. Re-declared here as a
+ * Raw per-operation event shape, mirrored from
+ * `useSwmAttributions.WorkspaceOperationEvent`. Re-declared here as a
  * structural subset so this file doesn't have to import the SWM hook
  * type and can be exercised by tests with plain object literals.
+ *
+ * @deprecated Use `WorkspaceOperationEvent` directly when consuming
+ *   the live hook — this alias is retained for symmetry with the
+ *   pre-Code2 `PromotionAttribution` callers but is now a strict
+ *   superset (`rootUri` is required).
  */
 export interface PromotionAttribution {
   agent: string;
   opUri: string;
   publishedAt: string;
   subGraph?: string;
+  /** The root entity URI this promotion event applies to. Was
+   *  implicit in the previous Map key; now explicit so the row can
+   *  also surface multiple roots from one op id. */
+  rootUri: string;
 }
 
-export interface AppendPromotionEventsOptions {
+export interface BuildPromotionEventsOptions {
   /** Per-URI entity lookup. Used to recover entity label + trustLevel
    *  for the promoted root. URIs that don't resolve still produce a row
    *  with a `null`-ish entity stub so the feed never silently drops a
@@ -316,50 +379,61 @@ export interface AppendPromotionEventsOptions {
 }
 
 /**
- * Pure helper — turns a SWM attribution map into a flat list of
- * `'promoted'` activity items, ready to merge with the entity-derived
- * feed. Skips rows whose timestamp can't be parsed (the meta graph
- * encodes them as ISO strings — failures are not expected in practice
- * but we'd rather drop than render an "Invalid Date" row).
+ * Pure helper — turns a raw `_shared_memory_meta` event list into a
+ * flat list of `'promoted'` activity items, ready to merge with the
+ * entity-derived feed. Skips rows whose timestamp can't be parsed
+ * (the meta graph encodes them as ISO strings — failures are not
+ * expected in practice but we'd rather drop than render an "Invalid
+ * Date" row).
+ *
+ * Stub rows (root not in `entitiesByUri`) are emitted as
+ * `clickable: false` so the row stays in the timeline but doesn't
+ * navigate to a detail view that would immediately clear itself
+ * (Codex Code3, PR #656).
  */
 export function buildPromotionEvents(
-  attributions: Map<string, PromotionAttribution[]>,
-  opts: AppendPromotionEventsOptions,
+  events: ReadonlyArray<PromotionAttribution>,
+  opts: BuildPromotionEventsOptions,
 ): ActivityItem[] {
   const { entitiesByUri, agentUri, subGraph, limit = 200 } = opts;
   const out: ActivityItem[] = [];
-  for (const [rootUri, attrs] of attributions) {
-    const entity = entitiesByUri.get(rootUri);
-    for (const attr of attrs) {
-      if (agentUri && attr.agent !== agentUri) continue;
-      if (subGraph && attr.subGraph !== subGraph) continue;
-      const at = parseDateLike(attr.publishedAt);
-      if (!at) continue;
-      out.push({
-        // When the entity isn't in `entitiesByUri` (data race, or a
-        // promotion of a root that was already published past SWM
-        // before this hook ran), synthesise a stub so the row still
-        // renders cleanly. `humanizeLabel` would be ideal here but
-        // pulling that dep would couple this file to project helpers;
-        // a URI-tail label is good enough for the Overview row.
-        entity: entity ?? syntheticEntityStub(rootUri),
-        at,
-        // Author on a `'promoted'` row is the *promoter* (the agent
-        // who moved this entity into SWM), not the original `prov:
-        // wasAttributedTo` author. Different events, different agents.
-        authorUri: attr.agent,
-        // Promotion is intentionally not a "typed activity" — clears
-        // the `typeIri` filter contract: typed-only callers won't see
-        // promotion rows. Renderer leans on `event === 'promoted'`.
-        kindUri: null,
-        subGraph: attr.subGraph ?? null,
-        // Trust layer is `shared` by construction — the entity has
-        // just landed in SWM. Even if the entity object isn't loaded
-        // yet, the row is about the SWM transition.
-        layer: 'shared',
-        event: 'promoted',
-      });
-    }
+  for (const evt of events) {
+    if (agentUri && evt.agent !== agentUri) continue;
+    if (subGraph && evt.subGraph !== subGraph) continue;
+    const at = parseDateLike(evt.publishedAt);
+    if (!at) continue;
+    const entity = entitiesByUri.get(evt.rootUri);
+    const resolved = entity != null;
+    out.push({
+      // Per-op id (Code1) — keys off the operation URI so two
+      // re-promotions of the same (root, agent) produce two distinct
+      // keys (different opUri) and React reconciles them correctly.
+      id: buildActivityId('promoted', evt.opUri, at),
+      // When the entity isn't in `entitiesByUri` (data race, or a
+      // promotion of a root that was already published past SWM
+      // before this hook ran), synthesise a stub so the row still
+      // renders cleanly. A URI-tail label is good enough for the row.
+      entity: entity ?? syntheticEntityStub(evt.rootUri),
+      at,
+      // Author on a `'promoted'` row is the *promoter* (the agent
+      // who moved this entity into SWM), not the original `prov:
+      // wasAttributedTo` author. Different events, different agents.
+      authorUri: evt.agent,
+      // Promotion is intentionally not a "typed activity" — clears
+      // the `typeIri` filter contract: typed-only callers won't see
+      // promotion rows. Renderer leans on `event === 'promoted'`.
+      kindUri: null,
+      subGraph: evt.subGraph ?? null,
+      // Trust layer is `shared` by construction — the entity has
+      // just landed in SWM. Even if the entity object isn't loaded
+      // yet, the row is about the SWM transition.
+      layer: 'shared',
+      event: 'promoted',
+      // Code3 — stub rows can't navigate to a detail view that
+      // ProjectView would immediately clear. Render them as static
+      // text instead of an interactive button.
+      clickable: resolved,
+    });
   }
   out.sort((a, b) => {
     if (a.at && b.at) return b.at.getTime() - a.at.getTime();
@@ -387,9 +461,14 @@ function syntheticEntityStub(uri: string): MemoryEntity {
 }
 
 export interface UseProjectActivityEventsOptions extends UseProjectActivityOptions {
-  /** SWM attribution map from `useSwmAttributions`. When omitted the
-   *  joiner reduces to plain `useProjectActivity(entities, opts)`. */
-  swmAttributions?: Map<string, PromotionAttribution[]>;
+  /**
+   * Raw per-operation event log from `useSwmAttributions.events`.
+   * When omitted (or empty) the joiner reduces to plain
+   * `useProjectActivity(entities, opts)`. Code2 (PR #656) — we now
+   * consume the raw event list, not the deduped attribution map, so
+   * re-promotions surface as distinct rows.
+   */
+  swmEvents?: ReadonlyArray<PromotionAttribution>;
 }
 
 /**
@@ -397,23 +476,23 @@ export interface UseProjectActivityEventsOptions extends UseProjectActivityOptio
  * Existing callers (AgentProfileView) keep using `useProjectActivity`
  * directly when they don't want promotion rows polluting a per-agent
  * typed-activity slice. The Overview "Recent activity" feed swaps to
- * this one and feeds in the live `useSwmAttributions` result.
+ * this one and feeds in the live `useSwmAttributions().events` result.
  */
 export function useProjectActivityEvents(
   entityList: MemoryEntity[],
   opts: UseProjectActivityEventsOptions = {},
 ): ActivityItem[] {
-  const { swmAttributions, ...baseOpts } = opts;
+  const { swmEvents, ...baseOpts } = opts;
   const base = useProjectActivity(entityList, baseOpts);
   return useMemo(() => {
     // typeIri pins the feed to a typed-activity kind (Decision/Task/
     // PR/etc.) — promotion rows have no `kindUri` so they're dropped
     // wholesale, matching how the same filter drops `'added'` rows.
     if (opts.typeIri) return base;
-    if (!swmAttributions || swmAttributions.size === 0) return base;
+    if (!swmEvents || swmEvents.length === 0) return base;
     const entitiesByUri = new Map<string, MemoryEntity>();
     for (const e of entityList) entitiesByUri.set(e.uri, e);
-    const promotions = buildPromotionEvents(swmAttributions, {
+    const promotions = buildPromotionEvents(swmEvents, {
       entitiesByUri,
       agentUri: baseOpts.agentUri,
       subGraph: baseOpts.subGraph,
@@ -429,7 +508,7 @@ export function useProjectActivityEvents(
     });
     const cap = baseOpts.limit ?? 200;
     return merged.slice(0, cap);
-  }, [base, swmAttributions, entityList, baseOpts.agentUri, baseOpts.subGraph, baseOpts.limit, opts.typeIri]);
+  }, [base, swmEvents, entityList, baseOpts.agentUri, baseOpts.subGraph, baseOpts.limit, opts.typeIri]);
 }
 
 /** "2h ago" / "3d ago" / "Apr 18" — compact relative-time label. */
