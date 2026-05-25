@@ -117,7 +117,12 @@ function splitGraphTriplesForShelf(triples: Triple[]): { canvasTriples: Triple[]
         }
       }
     }
-    if (triple.predicate === RDF_TYPE_URI || !isResourceNode(triple.object)) continue;
+    // Normalise the predicate the same way subjects/objects are normalised
+    // — otherwise a wrapped (`<rdf:type>`) or whitespace-padded predicate
+    // slips past this guard, gets counted as a regular resource edge, and
+    // pulls its class IRI into the connected graph as a phantom node
+    // while inflating the subject's degree.
+    if (graphNodeKey(triple.predicate) === RDF_TYPE_URI || !isResourceNode(triple.object)) continue;
     const objectKey = graphNodeKey(triple.object);
     degree.set(subjectKey, (degree.get(subjectKey) ?? 0) + 1);
     degree.set(objectKey, (degree.get(objectKey) ?? 0) + 1);
@@ -134,7 +139,15 @@ function splitGraphTriplesForShelf(triples: Triple[]): { canvasTriples: Triple[]
 
   const singletonSet = new Set(singletonItems.map(item => item.uri));
   return {
-    canvasTriples: triples.filter(triple => !singletonSet.has(graphNodeKey(triple.subject))),
+    // Drop triples whose *subject* OR *object* is on the shelf. Filtering
+    // only by subject leaves a triple like `<urn:onCanvas> mentions <urn:shelved>`
+    // in the canvas, rendering `urn:shelved` as a connected node while a
+    // chip with the same URI also sits in the shelf — the user sees the
+    // same entity in two places, possibly with two different labels.
+    canvasTriples: triples.filter(triple =>
+      !singletonSet.has(graphNodeKey(triple.subject))
+      && !singletonSet.has(graphNodeKey(triple.object))
+    ),
     singletonItems,
   };
 }
@@ -229,7 +242,11 @@ function GraphSurface({
 
   const body = (expandedView: boolean) => (
     <>
-      {showScopeLabel && (
+      {/* Don't render the scope-bar + expand-button inside the expanded
+          modal — the modal has its own × close affordance and a dedicated
+          subtitle. The previous CSS-only hide (display:none) left the
+          duplicate expand button in the a11y tree. */}
+      {showScopeLabel && !expandedView && (
       <div className="v10-graph-shell-bar">
         <div className="v10-graph-scope" title={scopeLabel}>{scopeLabel}</div>
         {expandButton}
@@ -1282,9 +1299,11 @@ export function MemoryStripExpanded({
   onSwitchLayer: () => void;
 }) {
   const layerTriples = useLayerTriples(memory, layerKey);
-  const handleLayerNodeClick = useCallback((node: any) => {
-    onNodeClick?.({ ...node, trustLayer: layerKey });
-  }, [layerKey, onNodeClick]);
+  // No wrapper here: `LayerGraphPanel` already injects `trustLayer:
+  // nodeLayerContext` (which resolves to `layer === layerKey` in this
+  // path) on every node click, including the singleton-shelf path.
+  // Re-wrapping would double-inject the same value and mask any future
+  // intentional divergence between the panel's `layer` and ours.
   return (
     <LayerContent
       layer={layerKey}
@@ -1296,7 +1315,7 @@ export function MemoryStripExpanded({
       activeTab={activeTab}
       onTabChange={onTabChange}
       onSelectEntity={onSelectEntity}
-      onNodeClick={handleLayerNodeClick}
+      onNodeClick={onNodeClick}
       footer={
         <div className="v10-layer-expand-footer">
           <button
@@ -2667,9 +2686,9 @@ export function LayerDetailView({
   onTabChange: (tab: LayerContentTab) => void;
 }) {
   const config = LAYER_CONFIG[layer];
-  const handleLayerNodeClick = useCallback((node: any) => {
-    onNodeClick({ ...node, trustLayer: layer });
-  }, [layer, onNodeClick]);
+  // No wrapper here: `LayerGraphPanel` already injects `trustLayer:
+  // nodeLayerContext` (which resolves to `layer` in this path) on every
+  // node click. See sibling `MemoryStripExpanded` comment.
 
   const entities = useMemo(
     () => memory.entityList.filter(e => e.trustLevel === config.trustLevel),
@@ -2698,7 +2717,7 @@ export function LayerDetailView({
           activeTab={activeTab}
           onTabChange={onTabChange}
           onSelectEntity={onSelectEntity}
-          onNodeClick={handleLayerNodeClick}
+          onNodeClick={onNodeClick}
         />
       </div>
     </div>
@@ -3946,8 +3965,12 @@ export function SubGraphDetailView({
   // (single highest-trust value per entity), which excludes mixed-layer
   // entities from the URI set whenever their `trustLevel` doesn't match the
   // single enabled layer. Chip + query filters still apply in addition.
-  const graphPanelTriples = useMemo(() => {
-    if (!singleLayer) return filteredTriples;
+  // Split from the selector below so the heavy layer-scoped loop only
+  // re-runs when its real inputs change — chip/query toggles that move
+  // `filteredTriples` (the `!singleLayer` fallback) don't invalidate the
+  // single-layer computation.
+  const singleLayerPanelTriples = useMemo(() => {
+    if (!singleLayer) return null;
     const layerTrust: TrustLevel =
       singleLayer === 'vm' ? 'verified' :
       singleLayer === 'swm' ? 'shared' : 'working';
@@ -3981,7 +4004,9 @@ export function SubGraphDetailView({
       out.push({ subject: t.subject, predicate: t.predicate, object: t.object, subGraph: t.subGraph });
     }
     return out;
-  }, [singleLayer, filteredTriples, rawMemory.allTriples, scopedUris, slug, scopedEntities, chips, chipState, queryResults]);
+  }, [singleLayer, rawMemory.allTriples, scopedUris, slug, scopedEntities, chips, chipState, queryResults]);
+
+  const graphPanelTriples = singleLayerPanelTriples ?? filteredTriples;
 
   const timelineItems = useMemo(() => {
     if (!timelinePredicate) return [];

@@ -559,4 +559,96 @@ describe('SubGraphDetailView tabs', () => {
       expect(hasSwmEdge).toBe(false);
     });
   });
+
+  // R3 regression: `splitGraphTriplesForShelf` normalises subjects /
+  // objects via `graphNodeKey` but used to compare the *raw* predicate
+  // against RDF_TYPE_URI. A wrapped `<rdf:type>` predicate slipped past
+  // the type-skip, inflated the subject's degree (it no longer
+  // qualified as a singleton), and the type triple was kept on the
+  // canvas where its class IRI rendered as a phantom connected node.
+  // R6 (defensive) additionally filters canvas triples whose object
+  // is on the shelf, so a single-type-triple subject lands cleanly on
+  // the shelf instead of staying half on canvas.
+  it('skips wrapped <rdf:type> predicates so a type-only subject shelves cleanly', async () => {
+    const subject = {
+      uri: 'urn:e:r3-subject',
+      label: 'R3 subject',
+      types: ['http://schema.org/Thing'],
+      trustLevel: 'working',
+      layers: new Set(['working']),
+      subGraphs: new Set(['demo']),
+      properties: new Map(),
+      connections: [],
+    };
+    const wrappedTypeTriple = {
+      // Predicate arrives wrapped — the daemon sometimes hands triples
+      // back with angle-bracketed IRIs (e.g. when CONSTRUCT bindings come
+      // out of certain views). The pre-R3 code compared this verbatim
+      // against the unwrapped RDF_TYPE_URI constant and missed.
+      subject: 'urn:e:r3-subject',
+      predicate: '<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>',
+      object: 'http://schema.org/Thing',
+      subGraph: 'demo',
+      layer: 'working' as const,
+    };
+    const phantomMemory = {
+      entities: new Map([[subject.uri, subject]]),
+      entityList: [subject],
+      allTriples: [wrappedTypeTriple],
+      graphTriples: [
+        { subject: wrappedTypeTriple.subject, predicate: wrappedTypeTriple.predicate, object: wrappedTypeTriple.object, subGraph: 'demo' },
+      ],
+      trustMap: new Map(),
+      counts: { wm: 1, swm: 0, vm: 0, total: 1 },
+      loading: false,
+      error: null,
+      partial: false,
+      refresh: vi.fn(),
+    } as any;
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root!.render(
+        React.createElement(ProjectProfileContext.Provider, { value: profile },
+          React.createElement(SubGraphDetailView, {
+            slug: 'demo',
+            rawMemory: phantomMemory,
+            contextGraphId: 'cg-test',
+            onNodeClick: vi.fn(),
+            onSelectEntity: vi.fn(),
+            activeTab: 'graph',
+            onTabChange: vi.fn(),
+          })),
+      );
+    });
+
+    function readGraphTriples(): Array<{ s: string; p: string; o: string }> {
+      const el = container.querySelector('[data-testid="rdf-graph"]') as HTMLElement | null;
+      if (!el) return [];
+      try {
+        return JSON.parse(el.getAttribute('data-triples') ?? '[]');
+      } catch {
+        return [];
+      }
+    }
+
+    // With R3 the wrapped type predicate is recognised → the subject
+    // has degree 0 → it becomes a singleton → R6 then drops the type
+    // triple from canvas (its subject is on the shelf). The class IRI
+    // therefore never enters the rendered triple set. The subject
+    // surfaces as a singleton-shelf chip instead.
+    await waitForGraph(() => {
+      const triples = readGraphTriples();
+      const classIriOnCanvas = triples.some((t) => t.o === 'http://schema.org/Thing');
+      expect(classIriOnCanvas).toBe(false);
+      // Shelf chip for the type-only subject is the expected residue.
+      const shelfChip = container.querySelector(
+        '.v10-graph-singleton-item[title="urn:e:r3-subject"]',
+      );
+      expect(shelfChip).toBeTruthy();
+    });
+  });
 });

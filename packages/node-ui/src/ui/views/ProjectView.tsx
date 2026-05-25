@@ -102,6 +102,12 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   // axis to layers, and each axis gets its own first-class page.
   const [activeSubGraph, setActiveSubGraph] = useState<string | null>(null);
   const [selectedLayerContext, setSelectedLayerContext] = useState<MemoryLayerView | null>(null);
+  // Mirror `selectedUri` into a ref so `handleNavigate` can read the
+  // current value without listing it in deps — listing it caused the
+  // callback identity to churn on every entity click and re-ran every
+  // downstream memo that consumed `handleNavigate`.
+  const selectedUriRef = useRef<string | null>(null);
+  useEffect(() => { selectedUriRef.current = selectedUri; }, [selectedUri]);
   const [layerContentTabs, setLayerContentTabs] = useState<Record<MemoryLayerView, LayerContentTab>>(
     DEFAULT_LAYER_TABS,
   );
@@ -294,10 +300,19 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   // M2 keeps the user's origin stable: linked entities open in the detail
   // pane, but the underlying layer/sub-graph page does not silently change
   // until S5 adds breadcrumbs that can make that movement visible.
+  //
+  // Intent: a brand-new top-level open (no selected entity yet) resets
+  // the layer context; in-detail navigation (a click inside an open
+  // detail) keeps the prior layer context. We read both `selectedUri`
+  // (via ref) and the prior `selectedLayerContext` (via the setter
+  // `prev` argument) so the callback identity stays stable — listing
+  // them in deps would re-create `handleNavigate` on every navigation
+  // and rebuild every downstream memo / callback that consumes it.
   const handleNavigate = useCallback((uri: string, originScrollKey?: string, layerContext?: MemoryLayerView) => {
+    const hadSelection = selectedUriRef.current != null;
     openEntityDetail(uri, originScrollKey);
-    setSelectedLayerContext(layerContext ?? (selectedUri ? selectedLayerContext : null));
-  }, [openEntityDetail, selectedLayerContext, selectedUri]);
+    setSelectedLayerContext(prev => layerContext ?? (hadSelection ? prev : null));
+  }, [openEntityDetail]);
 
   const handleDetailClose = useCallback(() => {
     const origin = detailOriginRef.current;
