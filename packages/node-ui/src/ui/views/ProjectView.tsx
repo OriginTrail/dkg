@@ -12,6 +12,7 @@ import {
 import { useProjectProfile, ProjectProfileContext } from '../hooks/useProjectProfile.js';
 import { useAgents, AgentsContext } from '../hooks/useAgents.js';
 import { useCurrentAgent } from '../hooks/useCurrentAgent.js';
+import { useSwmAttributions } from '../hooks/useSwmAttributions.js';
 import { ActivityFeed } from '../components/ActivityFeed.js';
 import { SubGraphBar } from '../components/SubGraphBar.js';
 import { CONTEXT_GRAPH_PRIMER_TAB } from '../lib/contextGraphPrimer.js';
@@ -232,6 +233,12 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   );
 
   const rawMemory = useMemoryEntities(contextGraphId);
+  // N6 part 2 — feed promotion (WM→SWM) events into the Overview
+  // ActivityFeed. `useSwmAttributions` is the existing source for the
+  // SWM graph's agent-tint legend; we re-use its `attributions` map
+  // here rather than re-querying `_shared_memory_meta`. Hook is
+  // already in production for the SWM Graph subtab so it's cached.
+  const swmAttributionsResult = useSwmAttributions(contextGraphId);
 
   const refreshParticipants = useCallback(() => {
     const targetId = cg?.id;
@@ -463,6 +470,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
           )}
           <ActivityFeed
             entities={rawMemory.entityList}
+            swmAttributions={swmAttributionsResult.attributions}
             onSelectEntity={handleOverviewActivityNavigate}
             title="Recent activity"
             limit={40}

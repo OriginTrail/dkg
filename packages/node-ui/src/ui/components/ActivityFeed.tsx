@@ -17,10 +17,11 @@
 import React from 'react';
 import type { MemoryEntity, TrustLevel } from '../hooks/useMemoryEntities.js';
 import {
-  useProjectActivity,
+  useProjectActivityEvents,
   bucketActivity,
   relativeTime,
   type ActivityItem,
+  type PromotionAttribution,
 } from '../hooks/useProjectActivity.js';
 import { useAgentsContext } from '../hooks/useAgents.js';
 import { useProjectProfileContext } from '../hooks/useProjectProfile.js';
@@ -51,6 +52,14 @@ export interface ActivityFeedProps {
    * feed sets this to false.
    */
   includeUndated?: boolean;
+  /**
+   * N6 part 2 — when supplied, SWM promotion events are interleaved
+   * into the feed as `'promoted'` rows. The Overview wires this to
+   * `useSwmAttributions(...)` so a CG full of imported + promoted
+   * entities reads as a real timeline. AgentProfileView omits this
+   * (the per-agent typed-activity slice doesn't want promotion noise).
+   */
+  swmAttributions?: Map<string, PromotionAttribution[]>;
   title?: React.ReactNode;
   onSelectEntity: (uri: string) => void;
   /** Optional click handler for author chips (navigate to agent profile). */
@@ -67,14 +76,18 @@ export const ActivityFeed: React.FC<ActivityFeedProps> = ({
   subGraph,
   limit,
   includeUndated = true,
+  swmAttributions,
   title,
   onSelectEntity,
   onOpenAgent,
   emptyHint,
   className = '',
 }) => {
-  const items = useProjectActivity(entities, {
-    agentUri, typeIri, subGraph, limit, includeUndated,
+  // useProjectActivityEvents reduces to plain useProjectActivity when
+  // swmAttributions is undefined, so existing callers (AgentProfileView)
+  // get identical behaviour without passing the new prop.
+  const items = useProjectActivityEvents(entities, {
+    agentUri, typeIri, subGraph, limit, includeUndated, swmAttributions,
   });
   const buckets = React.useMemo(() => bucketActivity(items), [items]);
   const agents = useAgentsContext();
@@ -134,17 +147,32 @@ function ActivityRow({
   onOpenAgent?: (uri: string) => void;
 }) {
   const author = item.authorUri ? agents?.get(item.authorUri) : null;
-  // For `'added'` events the entity has no typed-activity kind, so we
-  // fall back to a neutral "Added" presentation rather than peering
-  // into a non-existent type binding (N6 — entity imports now surface
-  // as activity rows, not just decisions / tasks / PRs / commits).
-  const isAdded = item.event === 'added';
-  const typeBinding = !isAdded && item.kindUri ? profile?.forType(item.kindUri) : null;
-  const typeLabel = isAdded
-    ? 'Added'
-    : (typeBinding?.label ?? (item.kindUri ? item.kindUri.split(/[#/]/).pop() : null) ?? 'Entity');
-  const typeIcon = isAdded ? '+' : (typeBinding?.icon ?? '◆');
-  const typeColor = typeBinding?.color ?? (isAdded ? '#64748b' : '#a855f7');
+  // Event-specific presentation (N6). `'typed'` keeps the historical
+  // type-binding-driven look (Decision green check, Task cyan, etc.).
+  // `'added'` is a neutral import treatment. `'promoted'` (and the
+  // forthcoming `'published'`) are stage transitions, coloured to the
+  // *target* layer they advanced into so the row reads as "moved to
+  // Shared Working Memory".
+  const isTyped = item.event === 'typed';
+  const typeBinding = isTyped && item.kindUri ? profile?.forType(item.kindUri) : null;
+  const typeLabel = ((): string => {
+    if (item.event === 'added') return 'Added';
+    if (item.event === 'promoted') return 'Promoted to Shared Working Memory';
+    if (item.event === 'published') return 'Published to Verifiable Memory';
+    return typeBinding?.label ?? (item.kindUri ? item.kindUri.split(/[#/]/).pop() : null) ?? 'Entity';
+  })();
+  const typeIcon = ((): string => {
+    if (item.event === 'added') return '+';
+    if (item.event === 'promoted') return '⇡';
+    if (item.event === 'published') return '◉';
+    return typeBinding?.icon ?? '◆';
+  })();
+  const typeColor = ((): string => {
+    if (item.event === 'promoted') return LAYER_COLOR.shared;
+    if (item.event === 'published') return LAYER_COLOR.verified;
+    if (item.event === 'added') return '#64748b';
+    return typeBinding?.color ?? '#a855f7';
+  })();
   const layerColor = LAYER_COLOR[item.layer];
 
   // Surface status when the entity has one — decisions.status / tasks.status /
