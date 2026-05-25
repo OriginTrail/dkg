@@ -7382,26 +7382,43 @@ export class DKGAgent {
     //     `isCgCurated` check (R3 #1325, now target-keyed) correctly
     //     rejected the opaque ACK → publish blocked (correctness).
     //
-    // We now probe BOTH the source AND the target, treat a mismatch
-    // as fail-closed (refuse to publish until the caller resolves the
-    // policy collision), and use the TARGET's classification when
-    // both agree. The chain is the source of truth at the publish
-    // boundary; the local SWM graph is just the staging substrate.
+    // The probe mirrors the SWM data-plane `isCgCurated` callback at
+    // line 1499: local meta-graph first (works for URL-style ids the
+    // local store knows about), then chain access-policy fallback
+    // for numeric on-chain ids (covers the C2 case where the target
+    // is just the numeric `cgId` from the publish intent and the
+    // local store has no triple keyed by that id).
     const targetCgId = publishContextGraphId ?? contextGraphId;
-    let sourceIsCurated = false;
-    let targetIsCurated = false;
-    try {
-      sourceIsCurated = await this.isPrivateContextGraph(contextGraphId);
-    } catch (err) {
-      this.log.warn(ctx, `_resolveEncryptInlinePayload: isPrivateContextGraph(source=${contextGraphId}) failed — treating as public: ${err instanceof Error ? err.message : String(err)}`);
-    }
-    try {
-      targetIsCurated = targetCgId === contextGraphId
-        ? sourceIsCurated
-        : await this.isPrivateContextGraph(targetCgId);
-    } catch (err) {
-      this.log.warn(ctx, `_resolveEncryptInlinePayload: isPrivateContextGraph(target=${targetCgId}) failed — treating as public: ${err instanceof Error ? err.message : String(err)}`);
-    }
+    const probeIsCurated = async (cgId: string): Promise<boolean> => {
+      try {
+        if (await this.isPrivateContextGraph(cgId)) return true;
+      } catch { /* fall through to chain probe */ }
+      const cached = this.onChainAccessPolicyCache.get(cgId);
+      if (cached !== undefined) return cached === 1;
+      const getAccessPolicy = this.chain.getContextGraphAccessPolicy;
+      if (typeof getAccessPolicy !== 'function') return false;
+      let numericId: bigint;
+      try {
+        numericId = BigInt(cgId);
+      } catch {
+        return false;
+      }
+      if (numericId <= 0n) return false;
+      try {
+        const policy = await getAccessPolicy.call(this.chain, numericId);
+        if (policy === 0 || policy === 1) {
+          this.onChainAccessPolicyCache.set(cgId, policy);
+          return policy === 1;
+        }
+      } catch (err) {
+        this.log.warn(ctx, `_resolveEncryptInlinePayload: chain.getContextGraphAccessPolicy(${cgId}) failed — treating as public: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      return false;
+    };
+    const sourceIsCurated = await probeIsCurated(contextGraphId);
+    const targetIsCurated = targetCgId === contextGraphId
+      ? sourceIsCurated
+      : await probeIsCurated(targetCgId);
     if (targetCgId !== contextGraphId && sourceIsCurated !== targetIsCurated) {
       // Fail-closed: a remap publish that crosses the privacy
       // boundary in either direction is almost certainly an
