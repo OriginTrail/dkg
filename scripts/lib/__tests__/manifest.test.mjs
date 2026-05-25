@@ -18,6 +18,7 @@ import {
   IMPORT_P,
   importUri,
   partitionUri,
+  statusEventUri,
   buildInitialManifestTriples,
   pendingPartitions,
 } from '../manifest.mjs';
@@ -92,6 +93,13 @@ test('buildInitialManifestTriples is deterministic', () => {
   const t1 = buildInitialManifestTriples('id', ['a', 'b'], '2026-01-15T09:00:00.000Z');
   const t2 = buildInitialManifestTriples('id', ['a', 'b'], '2026-01-15T09:00:00.000Z');
   assert.deepEqual(t1, t2);
+});
+
+test('statusEventUri nests under partitionUri and is unique', () => {
+  const a = statusEventUri('my-corpus', 'src/foo.ts');
+  const b = statusEventUri('my-corpus', 'src/foo.ts');
+  assert.match(a, /^urn:dkg:import:my-corpus#part:src%2Ffoo\.ts\/event\//);
+  assert.notEqual(a, b, 'two events on the same partition should differ');
 });
 
 test('pendingPartitions filters out done', () => {

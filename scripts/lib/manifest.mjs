@@ -77,7 +77,8 @@ export function partitionUri(importId, key) {
   return `${importUri(importId)}#part:${encodeURIComponent(key)}`;
 }
 
-function eventUri(importId, key) {
+/** Stable-ish URI for one StatusEvent. Exported so callers can promote it. */
+export function statusEventUri(importId, key) {
   // Random-ish suffix keeps multiple events on the same partition unique.
   const suffix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   return `${partitionUri(importId, key)}/event/${suffix}`;
@@ -100,7 +101,19 @@ function uri(s) {
   return `<${s}>`;
 }
 
-/** Strip enclosing double quotes from a SELECT-binding literal. */
+/**
+ * Strip enclosing double quotes from a SELECT-binding literal.
+ *
+ * NB: the daemon's `/api/query` route returns bindings as a flat object
+ * of `{ varName: jsonEncodedTerm }` — literals come out as
+ * `"\"some text\""` or `"\"42\"^^<xsd:integer>"`, URIs as bare
+ * strings. This is **not** the SPARQL 1.1 results-JSON format (with
+ * `{ value, type, datatype, ... }` cells). Other importer scripts in
+ * this repo (`seed-dkg-code-project.mjs`, `drain-swm-duplicates.mjs`,
+ * `redistribute-memory.mjs`) all rely on the same shape via their own
+ * `bareIri()` / `unquote()` helpers; if you change one, update them
+ * all together.
+ */
 function unquote(s) {
   if (typeof s !== 'string') return s;
   if (s.startsWith('"')) {
@@ -192,12 +205,22 @@ export async function createImportManifest({
     subGraphName,
     triples,
   });
-  await client.promote({
-    contextGraphId: cgId,
-    assertionName: assertion,
-    subGraphName,
-    entities: [importUri(importId)],
-  });
+  // Promote the import root AND every partition URI. Promoting only the
+  // root leaves partition subjects in WM, which means `loadImportManifest`
+  // running against SWM on another node can't see `imp:key` /
+  // `imp:initialStatus` and resume can't recover. Chunk by `ROOT_CHUNK` so
+  // very-large imports stay within the daemon's body-size budget — see
+  // ADR 0002.
+  const ROOT_CHUNK = 1000;
+  const allRoots = [importUri(importId), ...partitions.map((k) => partitionUri(importId, k))];
+  for (let i = 0; i < allRoots.length; i += ROOT_CHUNK) {
+    await client.promote({
+      contextGraphId: cgId,
+      assertionName: assertion,
+      subGraphName,
+      entities: allRoots.slice(i, i + ROOT_CHUNK),
+    });
+  }
   return { assertionName: assertion, importUri: importUri(importId) };
 }
 
@@ -237,7 +260,7 @@ export async function markPartitionStatus({
   const cgId = client.cgId;
   const assertion = assertionName ?? `import-manifest-${importId}`;
   const partIri = partitionUri(importId, partitionKey);
-  const evIri = eventUri(importId, partitionKey);
+  const evIri = statusEventUri(importId, partitionKey);
   const nowIso = new Date().toISOString();
   const triples = [
     { subject: partIri, predicate: IMPORT_P.statusEvent, object: evIri },
@@ -250,6 +273,17 @@ export async function markPartitionStatus({
     assertionName: assertion,
     subGraphName,
     triples,
+  });
+  // Promote the new event so peers (and future resumes from any node)
+  // see the status update — otherwise the event sits in WM only and
+  // `loadImportManifest` against SWM still reports the prior status.
+  // The partition URI is already in SWM from `createImportManifest`, so
+  // we only need to promote the new event root here.
+  await client.promote({
+    contextGraphId: cgId,
+    assertionName: assertion,
+    subGraphName,
+    entities: [evIri],
   });
 }
 
@@ -277,9 +311,11 @@ export async function loadImportManifest({ client, importId, subGraphName }) {
   const cgId = client.cgId;
   const importIri = importUri(importId);
 
-  // One SPARQL fetches partition URIs + keys + their latest status in
-  // a single round-trip; the per-partition events sub-select keeps each
-  // row to one binding via DESC + LIMIT.
+  // Pick the latest StatusEvent per partition using the standard SPARQL
+  // "max row" idiom: bind the event whose recordedAt is greater than no
+  // other event's recordedAt. Avoids the SAMPLE+MAX decorrelation
+  // problem where SAMPLE can pick the status from one row and MAX the
+  // timestamp from another.
   const sparql = `
     PREFIX imp: <${IMPORT_NS}>
     PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
@@ -288,13 +324,13 @@ export async function loadImportManifest({ client, importId, subGraphName }) {
       ?part imp:key ?key ;
             imp:initialStatus ?initial .
       OPTIONAL {
-        {
-          SELECT ?part (SAMPLE(?status) AS ?latestStatus) (MAX(?recordedAt) AS ?latestRecordedAt) WHERE {
-            ?part imp:statusEvent ?ev .
-            ?ev imp:status ?status ;
-                imp:recordedAt ?recordedAt .
-          }
-          GROUP BY ?part
+        ?part imp:statusEvent ?ev .
+        ?ev imp:status ?latestStatus ;
+            imp:recordedAt ?latestRecordedAt .
+        FILTER NOT EXISTS {
+          ?part imp:statusEvent ?ev2 .
+          ?ev2 imp:recordedAt ?ts2 .
+          FILTER (?ts2 > ?latestRecordedAt)
         }
       }
     }
