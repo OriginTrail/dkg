@@ -732,4 +732,94 @@ describe('SubGraphDetailView tabs', () => {
       expect(shelfChip).toBeTruthy();
     });
   });
+
+  // Issue C regression: SubGraphDetailView Graph tab silently dropped
+  // scoped entities whose triples don't pass the `scopedTriples` filter
+  // (e.g. promoted SWM entities whose triples live in `_shared_memory`
+  // and have no `subGraph` tag — and whose object-side endpoints aren't
+  // in `scopedUris` either). Those entities exist in `scopedEntities`
+  // (via WM-era slug membership) but their triples never reach
+  // `splitGraphTriplesForShelf`, so they never enter `subjects`, never
+  // become singletons, and disappear from the Graph view entirely.
+  // Fix: `LayerGraphPanel` accepts a `scopeEntities` prop and unions
+  // entities not on canvas + not already shelved into the shelf.
+  it('shows scope entities with no rendered triples on the singleton shelf (Issue C)', async () => {
+    // A "ghost" entity — in the sub-graph's scope (via WM-era
+    // subGraphs.has('demo')) but its only triples are in SWM
+    // `_shared_memory` (subGraph undefined) with literal/class-IRI
+    // objects, so the sub-graph scope filter drops them all.
+    const ghost = {
+      uri: 'urn:e:ghost',
+      label: 'Ghost Entity',
+      types: ['http://schema.org/Thing'],
+      trustLevel: 'shared',
+      layers: new Set(['shared']),
+      subGraphs: new Set(['demo']),
+      properties: new Map(),
+      connections: [],
+    };
+    // A regular entity with a triple in the sub-graph so the Graph
+    // view isn't completely empty.
+    const visible = {
+      uri: 'urn:e:visible',
+      label: 'Visible',
+      types: ['http://schema.org/Thing'],
+      trustLevel: 'working',
+      layers: new Set(['working']),
+      subGraphs: new Set(['demo']),
+      properties: new Map(),
+      connections: [],
+    };
+    const visibleType = {
+      subject: 'urn:e:visible',
+      predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+      object: 'http://schema.org/Thing',
+      subGraph: 'demo',
+      layer: 'working' as const,
+    };
+    const ghostMemory = {
+      entities: new Map([[ghost.uri, ghost], [visible.uri, visible]]),
+      entityList: [ghost, visible],
+      // No triples for `ghost` in this set — that's the whole point.
+      allTriples: [visibleType],
+      graphTriples: [
+        { subject: visibleType.subject, predicate: visibleType.predicate, object: visibleType.object, subGraph: 'demo' },
+      ],
+      trustMap: new Map(),
+      counts: { wm: 1, swm: 1, vm: 0, total: 2 },
+      loading: false,
+      error: null,
+      partial: false,
+      refresh: vi.fn(),
+    } as any;
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root!.render(
+        React.createElement(ProjectProfileContext.Provider, { value: profile },
+          React.createElement(SubGraphDetailView, {
+            slug: 'demo',
+            rawMemory: ghostMemory,
+            contextGraphId: 'cg-test',
+            onNodeClick: vi.fn(),
+            onSelectEntity: vi.fn(),
+            activeTab: 'graph',
+            onTabChange: vi.fn(),
+          })),
+      );
+    });
+
+    // The ghost entity must surface on the singleton shelf — without
+    // the Issue C fix it disappeared silently. Title attribute on
+    // each shelf chip holds the URI.
+    await waitForGraph(() => {
+      const ghostChip = container.querySelector(
+        '.v10-graph-singleton-item[title="urn:e:ghost"]',
+      );
+      expect(ghostChip).toBeTruthy();
+    });
+  });
 });

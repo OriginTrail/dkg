@@ -884,6 +884,7 @@ export function LayerGraphPanel({
   scopeLabel,
   trustLegendActiveLayer,
   title: titleOverride,
+  scopeEntities,
 }: {
   layer: 'wm' | 'swm' | 'vm';
   triples: Triple[];
@@ -892,6 +893,14 @@ export function LayerGraphPanel({
   scopeLabel?: string;
   trustLegendActiveLayer?: 'wm' | 'swm' | 'vm' | null;
   title?: string;
+  // When provided, the panel guarantees every URI in this set appears
+  // either on the canvas or on the singleton shelf. Used by callers
+  // (e.g. SubGraphDetailView) whose entity scope can include entities
+  // that have no triples in the rendered triple set (e.g. promoted SWM
+  // entities whose triples live in `_shared_memory` and don't pass the
+  // sub-graph filter). Without this, those entities silently disappear
+  // from the Graph tab even though the Entities tab shows them.
+  scopeEntities?: ReadonlyArray<{ uri: string; label: string }>;
 }) {
   const { title: layerTitle } = LAYER_CONFIG[layer];
   const title = titleOverride ?? layerTitle;
@@ -951,6 +960,31 @@ export function LayerGraphPanel({
     () => splitGraphTriplesForShelf(uniqueTriples),
     [uniqueTriples],
   );
+
+  // Union `singletonItems` (URIs that are *subjects* of triples but have
+  // no resource→resource edges) with any caller-supplied scope entity
+  // that doesn't already appear on canvas or shelf. Without this, an
+  // entity that exists in the scope (e.g. `SubGraphDetailView`'s
+  // `scopedEntities`) but has no triples in the rendered triple set
+  // — say a promoted SWM entity whose triples live in `_shared_memory`
+  // and don't pass the sub-graph scope filter — silently disappears.
+  const shelfItems = useMemo(() => {
+    if (!scopeEntities || scopeEntities.length === 0) return singletonItems;
+    const known = new Set(singletonItems.map(item => graphNodeKey(item.uri)));
+    for (const t of canvasTriples) {
+      known.add(graphNodeKey(t.subject));
+      if (isResourceNode(t.object)) known.add(graphNodeKey(t.object));
+    }
+    const extra: SingletonShelfItem[] = [];
+    for (const entity of scopeEntities) {
+      const key = graphNodeKey(entity.uri);
+      if (known.has(key)) continue;
+      known.add(key);
+      extra.push({ uri: key, label: entity.label || humanizeLabel(undefined, key) });
+    }
+    if (extra.length === 0) return singletonItems;
+    return [...singletonItems, ...extra].sort((a, b) => a.label.localeCompare(b.label));
+  }, [singletonItems, canvasTriples, scopeEntities]);
   const graphKey = `${contextGraphId ?? 'context'}:${layer}`;
   const swmAttributionPending = layer === 'swm' && Boolean(contextGraphId) && swmAttr.loading;
   const graphTitle = `${title} graph`;
@@ -973,7 +1007,7 @@ export function LayerGraphPanel({
     palette: theme,
   }), [graphKey, theme]);
 
-  if (uniqueTriples.length === 0) {
+  if (uniqueTriples.length === 0 && shelfItems.length === 0) {
     return (
       <GraphSurface
         title={graphTitle}
@@ -1027,7 +1061,7 @@ export function LayerGraphPanel({
       className="v10-graph-view-fill"
       overlay={overlay}
       showScopeLabel={showGraphScopeLabel}
-      singletonItems={singletonItems}
+      singletonItems={shelfItems}
       onSingletonClick={(uri) => onNodeClick?.(nodeLayerContext ? { id: uri, trustLayer: nodeLayerContext } : { id: uri })}
       renderGraph={(expanded) => (
         canvasTriples.length > 0 ? (
@@ -4005,6 +4039,42 @@ export function SubGraphDetailView({
 
   const graphPanelTriples = singleLayerPanelTriples ?? filteredTriples;
 
+  // Entities that should be visible on the Graph tab — either as canvas
+  // nodes (subject/object of a rendered triple) or as singleton-shelf
+  // chips. Driven by the same filter axes as `graphPanelTriples`, so
+  // the Graph tab agrees with what the Entities tab below it shows
+  // (Issue C: an entity in scope with no triples in the rendered set
+  // — e.g. a promoted SWM entity whose triples live in `_shared_memory`
+  // and don't pass `scopedTriples` — used to silently disappear from
+  // the Graph view).
+  const graphPanelEntities = useMemo(() => {
+    if (singleLayer) {
+      const layerTrust: TrustLevel =
+        singleLayer === 'vm' ? 'verified' :
+        singleLayer === 'swm' ? 'shared' : 'working';
+      return scopedEntities.filter(e => {
+        if (!e.layers.has(layerTrust)) return false;
+        if (chipState.size > 0) {
+          for (const chip of chips) {
+            const selected = chipState.get(chip.slug);
+            if (!selected || selected.size === 0) continue;
+            const vals = e.properties.get(chip.predicate);
+            if (!vals || vals.length === 0) return false;
+            if (!vals.some(v => selected.has(v))) return false;
+          }
+        }
+        if (queryResults && !queryResults.has(e.uri)) return false;
+        return true;
+      });
+    }
+    return filteredEntities;
+  }, [singleLayer, scopedEntities, filteredEntities, chips, chipState, queryResults]);
+
+  const graphPanelScopeEntities = useMemo(
+    () => graphPanelEntities.map(e => ({ uri: e.uri, label: e.label })),
+    [graphPanelEntities],
+  );
+
   const timelineItems = useMemo(() => {
     if (!timelinePredicate) return [];
     const out: Array<{ entity: MemoryEntity; date: Date }> = [];
@@ -4308,6 +4378,7 @@ export function SubGraphDetailView({
               title={title}
               scopeLabel={`Subgraph graph: ${title} entities and entity-to-entity triples from loaded subgraph data.`}
               trustLegendActiveLayer={singleLayer}
+              scopeEntities={graphPanelScopeEntities}
             />
           </div>
         )}
