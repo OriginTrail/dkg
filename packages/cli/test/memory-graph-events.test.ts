@@ -364,13 +364,14 @@ describe('daemon memory_graph_changed route emissions', () => {
         { subject: 'urn:root', predicate: 'urn:p2', object: 'urn:o2', graph: 'urn:g' },
       ],
     });
+    const getContextGraphOnChainId = vi.fn().mockResolvedValue('7');
     const ctx = createContext('/api/shared-memory/publish', {
       contextGraphId: 'project-a',
       subGraphName: 'notes',
       selection: ['urn:root'],
       clearAfter: false,
     }, {
-      agent: { publishFromSharedMemory } as unknown as RequestContext['agent'],
+      agent: { publishFromSharedMemory, getContextGraphOnChainId } as unknown as RequestContext['agent'],
       emitMemoryGraphChanged,
     });
 
@@ -413,7 +414,7 @@ describe('daemon memory_graph_changed route emissions', () => {
     await handleMemoryRoutes(ctx);
 
     expect((ctx.res as unknown as { statusCode: number }).statusCode).toBe(200);
-    expect(getContextGraphOnChainId).not.toHaveBeenCalled();
+    expect(getContextGraphOnChainId).toHaveBeenCalledWith('project-a');
     expect(publishFromSharedMemory.mock.calls[0][2]).not.toHaveProperty('contextGraphId');
   });
 
@@ -424,12 +425,13 @@ describe('daemon memory_graph_changed route emissions', () => {
       kaManifest: [{ tokenId: 1n, rootEntity: 'urn:root' }],
       publicQuads: [{ subject: 'urn:root', predicate: 'urn:p', object: 'urn:o', graph: 'urn:g' }],
     });
+    const getContextGraphOnChainId = vi.fn().mockResolvedValue('7');
     const ctx = createContext('/api/shared-memory/publish', {
       contextGraphId: 'project-a',
       publishContextGraphId: '7',
       selection: ['urn:root'],
     }, {
-      agent: { publishFromSharedMemory } as unknown as RequestContext['agent'],
+      agent: { publishFromSharedMemory, getContextGraphOnChainId } as unknown as RequestContext['agent'],
     });
 
     await handleMemoryRoutes(ctx);
