@@ -825,6 +825,27 @@ Cores hosting may face abuse vectors:
 3. Member detects a malicious-publisher batch: publisher commits a root that doesn't match the SWM ciphertext members can decrypt. Member rejects the batch, alerts via SWM gossip, and the rejection propagates.
 4. Outsider with `(assertion, attestation)` from a member runs the attestation-verification flow against a target batch; verification succeeds for a real attestation, fails for a tampered one or one signed by a wallet that wasn't a CG member at the attested epoch.
 
+#### 7.1.1 Phase A — implementation status (as-shipped)
+
+The Phase A milestones above are mostly landed. Devnet validation lives in `scripts/devnet-test-rfc38-*.sh`; run `scripts/devnet-test-rfc38-all.sh` against a fresh 6-node devnet (4 cores + 2 edges) to exercise the full suite end-to-end. Current scope on this branch:
+
+| Sub-task | Source surface | Devnet test | Status |
+|---|---|---|---|
+| LU-5: edge curator → curated CG → VM publish (the §1.1 unblocker — `isEncryptedPayload` PublishIntent, AEAD wrap, no-attribution V10 publish) | `packages/core/src/crypto/v10-publish-payload.ts`, `packages/publisher/src/{storage-ack-handler,dkg-publisher}.ts`, `packages/agent/src/dkg-agent.ts` (`_resolveEncryptInlinePayload`) | `devnet-test-rfc38-lu5.sh` + `lu5-public.sh` | ✅ landed |
+| LU-7: `SWMCatchupRequest` catchup endpoint (anon for public CGs, member-attested for curated; outsider denial) | `packages/cli/src/daemon/routes/memory.ts` (`POST /api/shared-memory/catchup`) + the existing `PROTOCOL_SYNC` substrate | `devnet-test-rfc38-lu7.sh` | ✅ landed |
+| LU-8: member post-decrypt root recompute + `BatchRejected` SWM gossip | `packages/agent/src/swm/verify-batch.ts` + `POST /api/shared-memory/{verify-batch,report-batch-rejection}` | `devnet-test-rfc38-lu8.sh` | ✅ landed |
+| LU-9: member-attestation token mint + outsider verification (with optional `membershipResolver` chain hook) | `packages/agent/src/swm/member-attestation.ts` + `POST /api/attestation/{mint,verify}` | `devnet-test-rfc38-lu9.sh` | ✅ landed |
+| LU-10: public-CG regression sweep (publish + anonymous catchup + verify-batch + attestation, all on a public CG) | reuses LU-5/7/8/9 surfaces with `accessPolicy: 0` | `devnet-test-rfc38-lu10.sh` | ✅ landed |
+| Cross-CG isolation, multi-member (3-way), scale (50 triples / 25 KAs), late-joiner (member-from-member with curator offline) | scenario coverage on top of the landed surfaces | `devnet-test-rfc38-{cross-cg,multi-member,scale,late-joiner}.sh` | ✅ landed |
+| LU-6: sharding-table-driven SWM substrate subscription on cores + pre-registration staging (TTL, byte caps, ciphertext fanout to cores) so cores can serve catchup when the curator AND all live members are offline | (deferred) | `devnet-test-rfc38-late-joiner.sh` SCENARIO C documents the gap with a passing fail-soft assertion (cores-only catchup returns 0 triples cleanly, no crash) | ⚠️ deferred (see below) |
+
+**What "deferred LU-6" means in practice on this branch:**
+
+- A new member joining when the curator OR any other current member is online → catches up the full SWM history via `POST /api/shared-memory/catchup` against that peer. ✅ works.
+- A new member joining when the curator AND all current members are offline → catchup against cores returns 0 triples. The endpoint shape is correct (`peersAttempted > 0`, `totalInsertedTriples == 0`, no crash); the data simply isn't there because today's cores don't subscribe to curated CG SWM gossip topics outside the member allowlist. ⚠️ gap.
+
+This gap is acceptable for the Phase A user-visible surface (the §1.1 bug was about *publishing*, not about a specific late-joiner pattern), but is the next thing to land for the full "scenarios 1–4 of §2.4" promise to be honest. The substrate-subscription work itself is non-trivial: it touches the `SharedMemoryHandler` apply path (currently signature-checks the publisher and applies plaintext quads; needs a parallel "store opaque ciphertext under sharding-table assignment" path) and the SWM gossip wire format (Phase B in §7.2 will move it to AEAD per §5.2; Phase A could ship a transitional "cores subscribe but only persist for members" mode if needed sooner).
+
 ### 7.2 Phase B — Explicit key lifecycle + monetization model β
 
 **Scope**: formalise the curator's key-distribution lifecycle as explicit `KeyGrant` / `KeyRotate` messages (§5.5) and add the `PaidAccessGrant` protocol for per-assertion monetization (§5.7).

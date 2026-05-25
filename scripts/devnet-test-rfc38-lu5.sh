@@ -224,7 +224,19 @@ const path = require("path");
 
 EDGE_LOG=$(node_log "$EDGE_CURATOR_NODE")
 EDGE_BASELINE=$(cat "$LOG_BASELINE_DIR/$EDGE_CURATOR_NODE")
-EDGE_NEW=$(tail -n "+$((EDGE_BASELINE + 1))" "$EDGE_LOG")
+
+# Poll for the LU-5 breadcrumb — daemon log output can lag the
+# publish API response due to buffered writes, especially when the
+# devnet is under load (e.g. running as part of the integration
+# suite). Allow up to 60s.
+EDGE_NEW=""
+for _ in $(seq 1 60); do
+  EDGE_NEW=$(tail -n "+$((EDGE_BASELINE + 1))" "$EDGE_LOG")
+  if printf '%s' "$EDGE_NEW" | grep -qE 'LU-5: curated CG .* wrapping inline ACK payload with chain-key AEAD'; then
+    break
+  fi
+  sleep 1
+done
 
 # LU-5 breadcrumb: agent layer wraps the inline ACK payload with the
 # chain-key AEAD for curated CGs. Hard-pin the exact log line so a future

@@ -1341,14 +1341,50 @@ cmd_addnode() {
   log "Node $node_num up. On-chain wiring (createConviction/updateAsk) is the caller's responsibility."
 }
 
+# Restart a single already-existing devnet node. Preserves on-chain
+# state, wallets, store backends, and CG metadata — just bounces the
+# daemon process so it picks up newly-built code.
+#
+# Usage: devnet.sh restart-node <num>
+cmd_restart_node() {
+  local node_num="${2:-}"
+  if [ -z "$node_num" ]; then
+    echo "Usage: $0 restart-node <num>"
+    exit 1
+  fi
+  if [ ! -d "$DEVNET_DIR/node${node_num}" ]; then
+    echo "[devnet] node${node_num} does not exist at $DEVNET_DIR/node${node_num} — start the devnet first."
+    exit 1
+  fi
+  local pidf="$DEVNET_DIR/node${node_num}/devnet.pid"
+  if [ -f "$pidf" ]; then
+    local pid
+    pid=$(cat "$pidf")
+    if kill -0 "$pid" 2>/dev/null; then
+      log "Stopping node $node_num (pid=$pid)..."
+      kill "$pid" 2>/dev/null || true
+      for _ in 1 2 3 4 5 6 7 8 9 10; do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 1
+      done
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+    rm -f "$pidf"
+  fi
+  cd "$REPO_ROOT" || exit 1
+  start_node "$node_num"
+  log "Node $node_num restarted."
+}
+
 case "${1:-}" in
-  start)   cmd_start ;;
-  addnode) cmd_addnode "$@" ;;
-  stop)    cmd_stop ;;
-  status)  cmd_status ;;
-  logs)    cmd_logs "$@" ;;
-  clean)   cmd_clean ;;
-  ui)      cmd_ui "$@" ;;
+  start)        cmd_start ;;
+  addnode)      cmd_addnode "$@" ;;
+  restart-node) cmd_restart_node "$@" ;;
+  stop)         cmd_stop ;;
+  status)       cmd_status ;;
+  logs)         cmd_logs "$@" ;;
+  clean)        cmd_clean ;;
+  ui)           cmd_ui "$@" ;;
   *)
     echo "Usage: $0 {start|addnode|stop|status|logs|clean|ui} [args]"
     echo ""
@@ -1356,6 +1392,8 @@ case "${1:-}" in
     echo "  addnode <num> [core|edge]  Spawn one more node against the running"
     echo "                          devnet (mid-run sync test). Caller drives"
     echo "                          on-chain identity/stake/ask. (1 <= num <= 10)"
+    echo "  restart-node <num>      Restart a single already-existing devnet node"
+    echo "                          (pick up new code without rebuilding state)"
     echo "  stop                    Stop all devnet processes (incl. UI)"
     echo "  status                  Show running nodes (incl. UI) and their status"
     echo "  logs [N]                Tail logs for node N (default 1)"

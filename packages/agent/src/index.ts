@@ -71,6 +71,25 @@ export {
 } from './ccl-policy.js';
 export { DKGAgent } from './dkg-agent.js';
 export {
+  verifyBatch,
+  buildBatchRejectionRecord,
+  type VerifyBatchInput,
+  type VerifyBatchResult,
+  type BatchRejectionRecord,
+} from './swm/verify-batch.js';
+export { createCGHostEnumerator, type CGHostEnumerator, type CGHostEnumeratorDeps } from './swm/enumerate-cg-hosts.js';
+export {
+  mintMemberAttestation,
+  verifyMemberAttestation,
+  computeAttestationDigest,
+  validateAttestationPayload,
+  type MemberAttestation,
+  type MemberAttestationPayload,
+  type MintMemberAttestationInput,
+  type VerifyMemberAttestationInput,
+  type VerifyMemberAttestationResult,
+} from './swm/member-attestation.js';
+export {
   ContextGraphNotFoundError,
   InvalidContentError,
   type DKGAgentConfig,
