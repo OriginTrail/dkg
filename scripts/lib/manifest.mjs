@@ -13,9 +13,10 @@
  *
  * Status events are append-only: each `markPartitionStatus` call writes
  * a new `StatusEvent` triple with a timestamp; the "current" status of
- * a partition is the latest event by `recordedAt`. This avoids needing
- * SPARQL DELETE/INSERT (which the daemon doesn't expose) and gives a
- * complete history "for free".
+ * a partition is the latest event by `recordedAt`, with the event IRI as a
+ * deterministic tie-breaker when two writes land in the same millisecond.
+ * This avoids needing SPARQL DELETE/INSERT (which the daemon doesn't expose)
+ * and gives a complete history "for free".
  *
  * Usage (TypeScript / JS):
  *
@@ -219,11 +220,22 @@ export async function createImportManifest({
   }
   const cgId = client.cgId;
   const assertion = assertionName ?? `import-manifest-${importId}`;
-  await client.request('POST', '/api/assertion/create', {
-    contextGraphId: cgId,
-    name: assertion,
-    subGraphName,
-  });
+  try {
+    await client.request('POST', '/api/assertion/create', {
+      contextGraphId: cgId,
+      name: assertion,
+      subGraphName,
+    });
+  } catch (err) {
+    // `/api/assertion/create` is intentionally idempotent on the daemon
+    // side. A retry after a transient failure, or a second process resuming
+    // the same import, may find the manifest assertion already staged. Treat
+    // that as success and continue with the additive write/promote below so
+    // a partially-created manifest can be healed.
+    if (!String(err?.message ?? '').includes('already exists')) {
+      throw err;
+    }
+  }
   const triples = buildInitialManifestTriples(importId, partitions, new Date().toISOString());
   await client.writeAssertion({
     contextGraphId: cgId,
@@ -348,10 +360,12 @@ export async function loadImportManifest({ client, importId, subGraphName }) {
   const importIri = importUri(importId);
 
   // Pick the latest StatusEvent per partition using the standard SPARQL
-  // "max row" idiom: bind the event whose recordedAt is greater than no
-  // other event's recordedAt. Avoids the SAMPLE+MAX decorrelation
-  // problem where SAMPLE can pick the status from one row and MAX the
-  // timestamp from another.
+  // "max row" idiom: bind the event whose `(recordedAt, event IRI)` tuple is
+  // greater than no other event tuple. The event IRI tie-breaker matters
+  // because `recordedAt` is millisecond precision, so two status writes can
+  // legitimately share the same timestamp. Avoids the SAMPLE+MAX
+  // decorrelation problem where SAMPLE can pick the status from one row and
+  // MAX the timestamp from another.
   const sparql = `
     PREFIX imp: <${IMPORT_NS}>
     PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
@@ -366,13 +380,22 @@ export async function loadImportManifest({ client, importId, subGraphName }) {
         FILTER NOT EXISTS {
           ?part imp:statusEvent ?ev2 .
           ?ev2 imp:recordedAt ?ts2 .
-          FILTER (?ts2 > ?latestRecordedAt)
+          FILTER (
+            ?ts2 > ?latestRecordedAt ||
+            (?ts2 = ?latestRecordedAt && STR(?ev2) > STR(?ev))
+          )
         }
       }
     }
   `;
   const res = await client.query({ sparql, contextGraphId: cgId, subGraphName });
   const bindings = res?.result?.bindings ?? res?.bindings ?? [];
+  if (bindings.length === 0) {
+    throw new Error(
+      `No import manifest rows found for '${importId}' in context graph '${cgId}' ` +
+      `sub-graph '${subGraphName}'. The manifest is missing or not visible in shared memory.`,
+    );
+  }
 
   const partitions = bindings.map((row) => {
     const key = unquote(row.key);

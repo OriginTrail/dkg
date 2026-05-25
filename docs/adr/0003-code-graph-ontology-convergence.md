@@ -8,8 +8,8 @@
 
 ## Context
 
-Three things in the tree (and one in the next-door tree at
-`/Users/aleatoric/dev/.dkg/scripts/scan-code.mjs`) currently produce RDF
+Three things in this repository (and the shared workspace scanner that lives
+outside the repo at `.dkg/scripts/scan-code.mjs`) currently produce RDF
 triples about source files, packages, classes, and functions:
 
 | Producer | URI shape | Scope |
@@ -172,9 +172,9 @@ a single ROOT_CHUNK = 1000 URIs).
 
 **Will change** (in PRs that follow this ADR):
 
-- `packages/cli/skills/dkg-importer/SKILL.md` (created in the same PR series
-  as this ADR) — the agent-readable importer manual cites this ADR for the
-  canonical URI shape and the "no `graphify:*` URIs in new code" rule.
+- Future `packages/cli/skills/dkg-importer/SKILL.md` — the agent-readable
+  importer manual will cite this ADR for the canonical URI shape and the
+  "no `graphify:*` URIs in new code" rule.
 - The Graphify experiment (PR #602) — its importer migrates from
   `graphify:*` URIs to `urn:dkg:code:*` URIs in a follow-up PR. The
   experiment authors author a one-shot `owl:sameAs` reconciliation for

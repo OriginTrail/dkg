@@ -144,7 +144,7 @@ test('pendingPartitions filters out done', () => {
  * `bindingShape` lets us also exercise the SPARQL 1.1 results-JSON
  * cell shape that the SPARQL-HTTP adapter returns.
  */
-function makeMockClient({ bindingShape = 'flat' } = {}) {
+function makeMockClient({ bindingShape = 'flat', createAlreadyExists = false } = {}) {
   /** @type {Set<string>} */
   const wm = new Set();
   /** @type {Set<string>} */
@@ -157,8 +157,17 @@ function makeMockClient({ bindingShape = 'flat' } = {}) {
   return {
     cgId: 'urn:test:cg',
     _state: { wm, swm, calls },
+    insertSwmTriples(triples) {
+      for (const t of triples) swm.add(tripleKey(t));
+    },
     async request(method, path) {
       calls.push(`${method} ${path}`);
+      if (createAlreadyExists && method === 'POST' && path === '/api/assertion/create') {
+        const err = new Error('POST /api/assertion/create -> 409: {"error":"already exists"}');
+        err.status = 409;
+        err.body = { error: 'already exists' };
+        throw err;
+      }
       return { ok: true };
     },
     async writeAssertion({ triples }) {
@@ -216,8 +225,8 @@ function makeMockClient({ bindingShape = 'flat' } = {}) {
           );
           if (!statusT || !recT) continue;
           const rec = recT.object;
-          if (!latest || rec > latest.rec) {
-            latest = { status: statusT.object, rec };
+          if (!latest || rec > latest.rec || (rec === latest.rec && ev > latest.ev)) {
+            latest = { ev, status: statusT.object, rec };
           }
         }
         const wrap = (s) => (bindingShape === 'cell' ? { value: s, type: 'literal' } : s);
@@ -285,6 +294,30 @@ test('full round-trip: create, mark done, promote, reload — flat bindings', as
   const remaining = pendingPartitions(state.partitions);
   assert.equal(remaining.length, 2);
   assert.ok(remaining.every((p) => p.key !== 'src/bar.ts'));
+});
+
+test('createImportManifest reuses an existing manifest assertion idempotently', async () => {
+  const client = makeMockClient({ createAlreadyExists: true });
+
+  await createImportManifest({
+    client,
+    importId: 'existing-corpus',
+    partitions: ['src/foo.ts', 'src/bar.ts'],
+    subGraphName: 'meta',
+  });
+
+  const state = await loadImportManifest({
+    client,
+    importId: 'existing-corpus',
+    subGraphName: 'meta',
+  });
+  assert.deepEqual(
+    state.partitions.map((p) => [p.key, p.status]),
+    [['src/bar.ts', 'pending'], ['src/foo.ts', 'pending']],
+  );
+  assert.ok(client._state.calls.includes('POST /api/assertion/create'));
+  assert.ok(client._state.calls.some((c) => c.startsWith('write:')));
+  assert.ok(client._state.calls.some((c) => c.startsWith('promote:')));
 });
 
 test('round-trip works with SPARQL 1.1 results-JSON cell bindings too', async () => {
@@ -366,4 +399,49 @@ test('the latest status wins when a partition has multiple events', async () => 
     subGraphName: 'meta',
   });
   assert.equal(state.partitions[0].status, 'done');
+});
+
+test('same-millisecond status events resolve deterministically by event IRI', async () => {
+  const client = makeMockClient();
+  const importId = 'same-ms';
+  const key = 'only.ts';
+  const part = partitionUri(importId, key);
+  const olderByIri = `${part}/event/a`;
+  const newerByIri = `${part}/event/z`;
+  const timestamp = '"2026-01-15T09:00:00.000Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>';
+
+  await createImportManifest({
+    client,
+    importId,
+    partitions: [key],
+    subGraphName: 'meta',
+  });
+  client.insertSwmTriples([
+    { subject: part, predicate: IMPORT_P.statusEvent, object: `<${olderByIri}>` },
+    { subject: olderByIri, predicate: IMPORT_P.status, object: '"failed"' },
+    { subject: olderByIri, predicate: IMPORT_P.recordedAt, object: timestamp },
+    { subject: part, predicate: IMPORT_P.statusEvent, object: `<${newerByIri}>` },
+    { subject: newerByIri, predicate: IMPORT_P.status, object: '"done"' },
+    { subject: newerByIri, predicate: IMPORT_P.recordedAt, object: timestamp },
+  ]);
+
+  const state = await loadImportManifest({
+    client,
+    importId,
+    subGraphName: 'meta',
+  });
+  assert.equal(state.partitions[0].status, 'done');
+});
+
+test('loadImportManifest fails loudly when the manifest is missing from SWM', async () => {
+  const client = makeMockClient();
+
+  await assert.rejects(
+    () => loadImportManifest({
+      client,
+      importId: 'missing-corpus',
+      subGraphName: 'meta',
+    }),
+    /No import manifest rows found/,
+  );
 });
