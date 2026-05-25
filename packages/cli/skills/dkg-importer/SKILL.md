@@ -139,7 +139,10 @@ await createImportManifest({
 
 `createImportManifest` writes a single `urn:dkg:import:<id>` assertion to the
 `meta` sub-graph listing every partition with `initialStatus = "pending"`.
-Manifests follow the chunking contract automatically.
+Manifests follow the chunking contract automatically: the import root **and**
+every partition URI are promoted to SWM in chunks of `ROOT_CHUNK ≤ 1000` so a
+peer node (or this node after a restart) can read the manifest back from SWM
+to resume — promoting only the root would leave partition triples in WM only.
 
 ### Per-partition lifecycle
 
@@ -159,9 +162,13 @@ for (const part of partitions) {
 ```
 
 Status events are append-only — each `markPartitionStatus` call writes a fresh
-`StatusEvent` triple with a timestamp. `loadImportManifest` resolves the
-"current" status as the latest event per partition. This avoids needing
-SPARQL DELETE/INSERT and gives you a complete audit trail.
+`StatusEvent` triple with a timestamp **and promotes that event to SWM** so
+peers (or a resume on a different node) see the progress, not just the local
+WM. `loadImportManifest` resolves the "current" status as the latest event per
+partition using a standard "max row" SPARQL pattern (`FILTER NOT EXISTS`
+against any later event), which avoids the classic `SAMPLE`+`MAX`
+decorrelation foot-gun. This append-only pattern also avoids needing SPARQL
+DELETE/INSERT and gives you a complete audit trail for free.
 
 ### Resume
 
