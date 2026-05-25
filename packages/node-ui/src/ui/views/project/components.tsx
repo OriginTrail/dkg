@@ -1769,6 +1769,39 @@ function appendSavedQueryCatalog(catalogs: QueryCatalog[], query: SavedCatalogQu
   ];
 }
 
+function mergeQueryCatalogs(catalogs: QueryCatalog[]): QueryCatalog[] {
+  const byCatalog = new Map<string, QueryCatalog>();
+
+  for (const catalog of catalogs) {
+    const catalogKey = `${catalog.subGraph}|${catalog.slug}`;
+    const existing = byCatalog.get(catalogKey);
+    if (!existing) {
+      byCatalog.set(catalogKey, {
+        ...catalog,
+        queries: [...catalog.queries],
+      });
+      continue;
+    }
+
+    const byQuery = new Map(existing.queries.map(query => [
+      `${query.subGraph}|${query.catalogSlug}|${query.slug}`,
+      query,
+    ]));
+    for (const query of catalog.queries) {
+      const queryKey = `${query.subGraph}|${query.catalogSlug}|${query.slug}`;
+      if (!byQuery.has(queryKey)) byQuery.set(queryKey, query);
+    }
+    existing.queries = Array.from(byQuery.values())
+      .sort((a, b) => a.rank - b.rank || a.name.localeCompare(b.name));
+  }
+
+  return Array.from(byCatalog.values()).sort((a, b) =>
+    a.subGraph.localeCompare(b.subGraph)
+    || a.rank - b.rank
+    || a.name.localeCompare(b.name),
+  );
+}
+
 function bindingValue(v: unknown): string {
   if (v == null) return '';
   if (typeof v === 'string') return v;
@@ -1838,11 +1871,11 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
   const builtInCatalog = useMemo(() => contextGraphBuiltInCatalog(contextGraphId), [contextGraphId]);
   const queryCatalogs = useMemo(
-    () => [builtInCatalog, ...localSavedCatalogs, ...(profile?.queryCatalogs ?? [])],
+    () => mergeQueryCatalogs([builtInCatalog, ...localSavedCatalogs, ...(profile?.queryCatalogs ?? [])]),
     [builtInCatalog, localSavedCatalogs, profile?.queryCatalogs],
   );
   const renderedQueryCatalogs = useMemo(
-    () => (profile?.loading || profile?.error ? [builtInCatalog, ...localSavedCatalogs] : queryCatalogs),
+    () => (profile?.loading || profile?.error ? mergeQueryCatalogs([builtInCatalog, ...localSavedCatalogs]) : queryCatalogs),
     [builtInCatalog, localSavedCatalogs, profile?.error, profile?.loading, queryCatalogs],
   );
 

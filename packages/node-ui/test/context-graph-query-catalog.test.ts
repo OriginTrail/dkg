@@ -261,7 +261,28 @@ describe('ContextGraphQueryView', () => {
   });
 
   it('saves the draft query into the local catalogue', async () => {
-    const { container, root } = await renderWithProfile(profile());
+    const { container, root } = await renderWithProfile(profile({
+      queryCatalogs: [{
+        slug: 'ui-saved-queries',
+        subGraph: '__context_graph',
+        name: 'Saved queries',
+        description: 'User-created SPARQL saved in this node profile for this Context Graph.',
+        rank: 50,
+        queries: [{
+          slug: 'existing-query',
+          subGraph: '__context_graph',
+          catalogSlug: 'ui-saved-queries',
+          catalogName: 'Saved queries',
+          catalogDescription: 'User-created SPARQL saved in this node profile for this Context Graph.',
+          catalogRank: 50,
+          name: 'Existing saved query',
+          description: 'Already persisted.',
+          sparql: 'SELECT ?type WHERE { GRAPH ?g { ?s a ?type } }',
+          resultColumn: 'type',
+          rank: 1,
+        }],
+      }],
+    }));
 
     await waitForText(container, 'Query Catalogue');
 
@@ -295,7 +316,10 @@ describe('ContextGraphQueryView', () => {
 
     await waitForText(container, 'Saved to catalogue.');
     expect(apiMocks.writeProfileQueryCatalog).toHaveBeenCalledWith('cg-test', expect.any(Array));
-    expect(container.textContent).toContain('Saved queries');
+    const savedHeadings = Array.from(container.querySelectorAll('h4'))
+      .filter(heading => heading.textContent === 'Saved queries');
+    expect(savedHeadings).toHaveLength(1);
+    expect(container.textContent).toContain('Existing saved query');
     expect(container.textContent).toContain('Reusable triples');
     expect(container.textContent).toContain('A reusable triples query.');
 
