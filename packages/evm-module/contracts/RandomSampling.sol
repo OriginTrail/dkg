@@ -209,10 +209,34 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
 
     /**
      * @dev Submits proof for an active challenge to earn score used for later reward calculation
-     * Verifies a V10 flat-KC Merkle inclusion proof (dkg-core V10MerkleTree / spec §9.0.2):
-     * `leaf` is a `hashTripleV10` public leaf or a private sub-root leaf; `challenge.chunkId`
-     * stores the challenged **leaf index** in the sorted+deduped bottom layer; `merkleProof`
-     * is the sibling path produced by `V10MerkleTree.proof(leafIndex)`.
+     *
+     * Public CG path — verifies a V10 flat-KC Merkle inclusion proof
+     * (dkg-core `V10MerkleTree` / spec §9.0.2): `leaf` is a `hashTripleV10`
+     * public leaf or a private sub-root leaf; `challenge.chunkId` stores
+     * the challenged leaf index in the sorted+deduped bottom layer;
+     * `merkleProof` is the sibling path produced by
+     * `V10MerkleTree.proof(leafIndex)`.
+     *
+     * Curated CG path (RFC-39 Phase A.5) — same `_verifyV10MerkleProof`
+     * sibling-pair composition over a different leaf/root pair: `leaf` is
+     * `keccak256(ct_i)` (hash of the LU-11 ciphertext chunk at index
+     * `challenge.chunkId`), and the root is the per-KC
+     * `getLatestCiphertextChunksRoot` set at publish time. `_verifyV10MerkleProof`
+     * is unchanged — only the (root, leaf, count) triple changes between
+     * the two paths.
+     *
+     * Branch selection: lookup the owning CG via
+     * `ContextGraphStorage.kcToContextGraph(kcId)` (existing Phase 7
+     * atomic-bind invariant) and read `getIsCurated`. Same single SLOAD
+     * each, no struct change.
+     *
+     * Sharding-table check: `nodeExistsInShardingTable` is universal
+     * membership today. RFC-39 §5.2 calls for tightening to per-CG
+     * `isHostForCG(identityId, cgId)` once `ShardingTableStorage` ships
+     * that view (and once per-CG sub-sharding lands in the v2 of RFC-38).
+     * Under universal-hosting (Phase A.5), the universal check is
+     * functionally equivalent — every active core hosts every KC's
+     * substrate.
      */
     function submitProof(bytes32 leaf, bytes32[] calldata merkleProof)
         external
@@ -236,10 +260,24 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
             revert("This challenge is no longer active");
         }
 
-        // Get the expected merkle root for this challenge
-        bytes32 expectedMerkleRoot = knowledgeCollectionStorage.getLatestMerkleRoot(challenge.knowledgeCollectionId);
+        // RFC-39 Phase A.5: resolve curation status to pick the right
+        // (root, count) pair. `kcToContextGraph` is the Phase 7 atomic-bind
+        // invariant — non-zero for every V10 publish — so the lookup never
+        // returns zero on a freshly-created KC. A zero result indicates
+        // pre-Phase-7 legacy state and is treated as "public unsampleable"
+        // (defensive — should not occur in practice).
+        uint256 cgId = contextGraphStorage.kcToContextGraph(challenge.knowledgeCollectionId);
+        bool isCurated = cgId != 0 && contextGraphStorage.getIsCurated(cgId);
 
-        uint32 leafCount = knowledgeCollectionStorage.getMerkleLeafCount(challenge.knowledgeCollectionId);
+        // Get the expected merkle root + leaf count for this challenge.
+        bytes32 expectedMerkleRoot = isCurated
+            ? knowledgeCollectionStorage.getLatestCiphertextChunksRoot(challenge.knowledgeCollectionId)
+            : knowledgeCollectionStorage.getLatestMerkleRoot(challenge.knowledgeCollectionId);
+
+        uint32 leafCount = isCurated
+            ? knowledgeCollectionStorage.getCiphertextChunkCount(challenge.knowledgeCollectionId)
+            : knowledgeCollectionStorage.getMerkleLeafCount(challenge.knowledgeCollectionId);
+
         if (leafCount == 0 || challenge.chunkId >= uint256(leafCount)) {
             revert MerkleRootMismatchError(bytes32(0), expectedMerkleRoot);
         }
@@ -485,30 +523,65 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
         }
 
         // ---- Step 2: pick a KC inside the chosen CG with bounded retries. ----
+        //
+        // RFC-39 Phase A.5: the per-KC eligibility test is extended for
+        // curated CGs — a curated KC without a `(ciphertextChunksRoot,
+        // ciphertextChunkCount)` commitment is "legacy / pre-LU-11
+        // transitional" and skipped here the same way an expired KC is
+        // skipped. Forward-only adoption per RFC-39 §6.4 (Q4) — no
+        // migration path; legacy curated KCs simply don't participate in
+        // the curated sampling lottery.
+        //
+        // Caching `cgIsCurated` once outside the loop keeps the per-attempt
+        // cost at exactly 2 SLOADs (endEpoch + ciphertextChunkCount) on the
+        // curated path and 1 SLOAD on the public path (unchanged).
+        //
+        // Note on value-weighting drift: a curated CG's
+        // `ContextGraphValueStorage` weight still includes legacy KCs that
+        // can't be sampled, so during the transitional window such CGs are
+        // over-weighted relative to their effective sampleable surface. This
+        // is acceptable for v1 — the gap closes as legacy KCs expire and
+        // new publishes adopt the chunked path automatically. Closing the
+        // drift earlier would require a Phase 8 cross-cut to retroactively
+        // re-weight legacy-CG values, which is explicitly out of scope.
         uint256 kcCount = contextGraphStorage.getContextGraphKCCount(cgId);
         if (kcCount == 0) {
             // Eligible CG exists but holds no registered KCs; treat the same
             // as an all-expired CG (skip and retry next period).
             revert NoEligibleKnowledgeCollection();
         }
+        bool cgIsCurated = contextGraphStorage.getIsCurated(cgId);
         uint256 pickedKcId;
         bytes32 kcSeed = seed;
         for (uint8 attempt = 0; attempt < MAX_KC_RETRIES; attempt++) {
             kcSeed = keccak256(abi.encodePacked(kcSeed, attempt));
             uint256 idx = uint256(kcSeed) % kcCount;
             uint256 candidate = contextGraphStorage.getContextGraphKCAt(cgId, idx);
-            if (knowledgeCollectionStorage.getEndEpoch(candidate) >= currentEpoch) {
-                pickedKcId = candidate;
-                break;
+            if (knowledgeCollectionStorage.getEndEpoch(candidate) < currentEpoch) {
+                continue;
             }
+            if (cgIsCurated && knowledgeCollectionStorage.getCiphertextChunkCount(candidate) == 0) {
+                continue;
+            }
+            pickedKcId = candidate;
+            break;
         }
         if (pickedKcId == 0) {
             revert NoEligibleKnowledgeCollection();
         }
         kcId = pickedKcId;
 
-        // ---- Step 3: V10 flat-KC Merkle leaf index (stored in `Challenge.chunkId`). ----
-        uint32 leafCount = knowledgeCollectionStorage.getMerkleLeafCount(kcId);
+        // ---- Step 3: leaf index draw (curated vs public). ----
+        //
+        // RFC-39 Phase A.5: curated CGs draw against the LU-11
+        // `ciphertextChunkCount` (number of SWM-message ciphertext chunks)
+        // so the chunkId addresses a chunk the hosting cores actually
+        // persist. Public CGs unchanged — V10 flat-KC plaintext leaf count.
+        // `Challenge.chunkId`'s semantic is overloaded: same field, two
+        // leaf spaces (mirror of `submitProof`'s root/count branching).
+        uint32 leafCount = cgIsCurated
+            ? knowledgeCollectionStorage.getCiphertextChunkCount(kcId)
+            : knowledgeCollectionStorage.getMerkleLeafCount(kcId);
         if (leafCount == 0) {
             revert NoEligibleKnowledgeCollection();
         }
@@ -516,20 +589,21 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
     }
 
     /**
-     * @dev True iff the CG is active AND non-curated. Curated CGs are
-     *      treated as private for Phase 10 random sampling and excluded
-     *      from the weighted draw at read time. See `_generateChallenge`
-     *      NatSpec for the rationale (Phase 8 already ships unconditional
-     *      writes to `ContextGraphValueStorage`).
+     * @dev True iff the CG is active.
+     *
+     *      RFC-39 Phase A.5 change: curated CGs are NO LONGER filtered out
+     *      here. Under RFC-38 decoupled hosting, cores host curated CG
+     *      ciphertext exactly as they host public CG plaintext, and RFC-39
+     *      extends the random-sampling reward surface to that ciphertext via
+     *      the per-KC `(ciphertextChunksRoot, ciphertextChunkCount)`
+     *      commitment on `KnowledgeCollectionStorage`. The economic-parity
+     *      goal forbids any CG-wide curated exclusion; KC-level eligibility
+     *      (legacy/transitional curated KCs without a commitment) is handled
+     *      inside `_pickWeightedChallenge` step 2 via the per-KC commitment
+     *      check, not here.
      */
     function _isCGEligible(uint256 contextGraphId) internal view returns (bool) {
-        if (!contextGraphStorage.isContextGraphActive(contextGraphId)) {
-            return false;
-        }
-        if (contextGraphStorage.getIsCurated(contextGraphId)) {
-            return false;
-        }
-        return true;
+        return contextGraphStorage.isContextGraphActive(contextGraphId);
     }
 
     /**

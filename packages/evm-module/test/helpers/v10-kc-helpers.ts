@@ -289,6 +289,22 @@ export async function buildPublishParams(args: {
   authorSchemeVersion?: number;
   /** Allow injecting a pre-computed author signature (for negative-path tests). */
   authorSigOverride?: AuthorSig;
+  /**
+   * RFC-39 Phase A.5 curated-CG ciphertext commitment (optional).
+   * Defaults to `bytes32(0)` + `0` — the explicit "no commitment" sentinel
+   * the contract treats as: legal on public CGs (default behavior); legal
+   * on curated CGs (legacy / pre-LU-11 path — KC won't be sampleable in
+   * the curated draw). Curated-CG tests that exercise the sampleable path
+   * MUST set both to non-zero values; the contract enforces the
+   * paired-or-zero invariant via `IncompleteCiphertextCommitment`.
+   *
+   * Note: the on-chain ACK digest does NOT include these fields (RFC-38
+   * §5.4.2 — Phase A cosigned ACK is unchanged; the LU-11 ciphertext
+   * commitment is off-chain ACK material only). So the existing
+   * `buildPublishAckDigest` call below correctly omits them.
+   */
+  ciphertextChunksRoot?: string;
+  ciphertextChunkCount?: number | bigint;
 }): Promise<KnowledgeAssetsV10.PublishParamsStruct> {
   const merkleLeafCount = args.merkleLeafCount ?? 1;
   const ackDigest = buildPublishAckDigest(
@@ -332,6 +348,8 @@ export async function buildPublishParams(args: {
     tokenAmount: args.tokenAmount,
     isImmutable: args.isImmutable,
     merkleLeafCount,
+    ciphertextChunksRoot: args.ciphertextChunksRoot ?? ethers.ZeroHash,
+    ciphertextChunkCount: args.ciphertextChunkCount ?? 0,
     publisherNodeIdentityId: args.publisherIdentityId,
     authorAddress: args.author.address,
     authorR: authorSig.authorR,

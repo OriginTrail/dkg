@@ -1045,6 +1045,9 @@ describe('@unit KnowledgeAssetsV10', () => {
           tokenAmount,
           isImmutable: false,
           merkleLeafCount: 1,
+          // RFC-39 Phase A.5: open CG path, no ciphertext commitment.
+          ciphertextChunksRoot: ethers.ZeroHash,
+          ciphertextChunkCount: 0,
           publisherNodeIdentityId: publisherIdentityId,
           authorAddress: creator.address,
           authorR: authorSig.authorR,

@@ -60,6 +60,21 @@ contract KnowledgeCollectionStorage is
     event KnowledgeCollectionEndEpochUpdated(uint256 indexed id, uint256 endEpoch);
     event URIUpdate(string newURI);
 
+    /// @notice RFC-39 Phase A.5: a per-KC ciphertext commitment was set for
+    ///         curated random sampling. Emitted by
+    ///         `setCiphertextChunksCommitment`, called by `KnowledgeAssetsV10`
+    ///         immediately after `createKnowledgeCollection` when the publish
+    ///         input carries a non-zero `(ciphertextChunksRoot,
+    ///         ciphertextChunkCount)` pair AND the owning CG is curated.
+    ///         Off-chain indexers consume this to know which KCs participate
+    ///         in the curated-CG sampling lottery (the picker treats
+    ///         missing commitments as "skip this KC").
+    event KnowledgeCollectionCiphertextCommitmentSet(
+        uint256 indexed id,
+        bytes32 ciphertextChunksRoot,
+        uint32 ciphertextChunkCount
+    );
+
     string private constant _NAME = "KnowledgeCollectionStorage";
     string private constant _VERSION = "1.0.0";
 
@@ -92,6 +107,46 @@ contract KnowledgeCollectionStorage is
     /// events; this on-chain mapping is the canonical lookup for
     /// `/api/kc/:id/author` and SPARQL author-filter queries.
     mapping(uint256 => mapping(uint256 => address)) public merkleRootAuthors;
+
+    /// @notice RFC-39 Phase A.5: per-KC ciphertext-chunks Merkle root.
+    ///
+    /// Used by `RandomSampling._pickWeightedChallenge` and
+    /// `RandomSampling.submitProof` for curated CGs in place of the
+    /// `merkleRoots[].merkleRoot` chain (which commits to plaintext leaves
+    /// the cores cannot see). The root commits to the leaf sequence
+    /// `[keccak256(ct_i)]` in `swmMessageIndex` order for the latest publish
+    /// batch — exactly the ciphertext chunks the curated CG's hosting
+    /// cores persist via the LU-11 ACK envelope.
+    ///
+    /// Parallel-mapping (not a struct field on `KnowledgeCollection`) for
+    /// two reasons: (1) avoids slot-stride drift in the existing dynamic
+    /// `merkleRoots[]` array, identical reasoning to the
+    /// `merkleRootAuthors` design above; (2) decouples RFC-39 evolution
+    /// from `KnowledgeCollectionLib.KnowledgeCollection`, which is
+    /// concurrently being extended on other branches — keeping ciphertext
+    /// commitment in its own slot space avoids merge friction.
+    ///
+    /// Population is conditional, set by
+    /// `KnowledgeAssetsV10._executePublishCore`: populated for curated
+    /// CGs when the publish input carries a non-zero pair, NOT populated
+    /// for public CGs or for legacy/transitional curated publishes that
+    /// pre-date the LU-11 chunked-AEAD substrate. The default `bytes32(0)`
+    /// is the explicit "no curated commitment" sentinel that
+    /// `RandomSampling` uses to skip this KC in the curated draw — see
+    /// RFC-39 §3.4.1 for the feature-flag rationale.
+    mapping(uint256 => bytes32) public ciphertextChunksRoots;
+
+    /// @notice RFC-39 Phase A.5: per-KC count of ciphertext chunks.
+    ///
+    /// Equals the SWM message count of the publish batch and is the
+    /// leaf-count input for the `chunkId = uint256(seed) % count` draw
+    /// in `RandomSampling._pickWeightedChallenge` step 3 for curated
+    /// CGs. Stored separately from `merkleLeafCount` because the curated
+    /// commitment counts ciphertext chunks (LU-11 envelopes), not V10
+    /// flat-KC plaintext leaves — the two leaf-spaces are deliberately
+    /// distinct and a curated KC must not collide its random-sampling
+    /// granularity with its public-projection leaf count.
+    mapping(uint256 => uint32) public ciphertextChunkCounts;
 
     constructor(
         address hubAddress,
@@ -275,6 +330,50 @@ contract KnowledgeCollectionStorage is
     ///         (see `merkleLeafCount` on `KnowledgeCollection`).
     function getMerkleLeafCount(uint256 id) external view returns (uint32) {
         return knowledgeCollections[id].merkleLeafCount;
+    }
+
+    /// @notice RFC-39 Phase A.5: write the curated ciphertext commitment for
+    ///         a freshly-created KC. Caller must enforce the curated-CG
+    ///         gate — KCS does not look at `ContextGraphStorage` to keep the
+    ///         storage layer policy-free. The commitment is treated as
+    ///         immutable for v1 (no update path) per RFC-39 §3.4.1.
+    ///
+    ///         Both fields must be non-zero — partial commitments (a non-zero
+    ///         root with zero count, or vice versa) are forbidden because they
+    ///         would silently de-rail the picker (zero count → divide-by-zero
+    ///         in the chunk-index draw, zero root → proof verification against
+    ///         an empty tree). KAV10 normalises "no commitment" to a literal
+    ///         no-call (no event emitted, both slots stay at default zero).
+    function setCiphertextChunksCommitment(
+        uint256 id,
+        bytes32 ciphertextChunksRoot,
+        uint32 ciphertextChunkCount
+    ) external onlyContracts {
+        require(
+            ciphertextChunksRoot != bytes32(0) && ciphertextChunkCount > 0,
+            "Invalid ciphertext commitment"
+        );
+        ciphertextChunksRoots[id] = ciphertextChunksRoot;
+        ciphertextChunkCounts[id] = ciphertextChunkCount;
+
+        emit KnowledgeCollectionCiphertextCommitmentSet(id, ciphertextChunksRoot, ciphertextChunkCount);
+    }
+
+    /// @notice RFC-39 Phase A.5: latest ciphertext-chunks Merkle root for a
+    ///         curated KC, or `bytes32(0)` if no commitment was ever set
+    ///         (public KC, or legacy/transitional curated KC that pre-dates
+    ///         the LU-11 chunked-AEAD substrate). `RandomSampling` treats
+    ///         the zero sentinel as "skip this KC in the curated draw".
+    function getLatestCiphertextChunksRoot(uint256 id) external view returns (bytes32) {
+        return ciphertextChunksRoots[id];
+    }
+
+    /// @notice RFC-39 Phase A.5: number of ciphertext chunks for a curated
+    ///         KC, or `0` if no commitment was ever set. Used as the
+    ///         leaf-count input for the curated picker's `chunkId = seed %
+    ///         count` draw and as the bounds check in `submitProof`.
+    function getCiphertextChunkCount(uint256 id) external view returns (uint32) {
+        return ciphertextChunkCounts[id];
     }
 
     function getKnowledgeCollectionMetadata(
