@@ -514,6 +514,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
             contextGraphId={contextGraphId}
             activeTab={layerContentTabs[activeLayer]}
             onTabChange={tab => handleLayerTabChange(activeLayer, tab)}
+            swmAttribution={swmAttributionsResult}
           />
         </>
       )}

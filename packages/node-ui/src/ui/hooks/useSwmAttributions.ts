@@ -152,7 +152,7 @@ function subGraphFromMetaGraphUri(gUri: string, cgId: string): string | undefine
   return seg;
 }
 
-function buildAttributionsQuery(cgId: string): string {
+export function buildAttributionsQuery(cgId: string): string {
   const cgUri = `did:dkg:context-graph:${cgId}`;
   return `PREFIX dkg: <http://dkg.io/ontology/>
 PREFIX prov: <http://www.w3.org/ns/prov#>
@@ -167,7 +167,7 @@ SELECT ?op ?root ?agent ?publishedAt ?g WHERE {
     STRSTARTS(STR(?g), "${cgUri}") &&
     CONTAINS(STR(?g), "_shared_memory_meta")
   )
-} ORDER BY ?publishedAt LIMIT 5000`;
+} ORDER BY DESC(?publishedAt) LIMIT 5000`;
 }
 
 /** Stable hash → palette index so a given agent always keeps the same
@@ -232,7 +232,16 @@ export function useSwmAttributions(contextGraphId: string | undefined): SwmAttri
           return res.json();
         })();
         const data = await Promise.race([request, timeout]);
-        const rows: any[] = data?.result?.bindings ?? [];
+        // Codex Code5 (PR #656) — the SPARQL query orders DESC and
+        // caps at 5000 so a project with more than 5000 promotion ops
+        // returns the *newest* 5000 (the activity feed needs recent
+        // events). The downstream legend dedup is order-sensitive
+        // (first-seen wins), so we reverse here to ASC before folding
+        // — keeps the legend semantics (oldest promotion wins per
+        // (root, agent)) identical to the pre-DESC behaviour for
+        // projects with <5000 ops, and stays meaningful for larger ones.
+        const rawRows: any[] = data?.result?.bindings ?? [];
+        const rows = rawRows.slice().reverse();
 
         const attrMap = new Map<string, AgentAttribution[]>();
         const agentTotals = new Map<string, Set<string>>();

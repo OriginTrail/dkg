@@ -44,6 +44,7 @@ import {
 import {
   useSwmAttributions,
   type AgentPaletteEntry,
+  type SwmAttributionsResult,
 } from '../../hooks/useSwmAttributions.js';
 import {
   TRUST_COLORS, TYPE_LABELS,
@@ -885,6 +886,7 @@ export function LayerGraphPanel({
   trustLegendActiveLayer,
   title: titleOverride,
   scopeEntities,
+  swmAttribution,
 }: {
   layer: 'wm' | 'swm' | 'vm';
   triples: Triple[];
@@ -901,6 +903,17 @@ export function LayerGraphPanel({
   // sub-graph filter). Without this, those entities silently disappear
   // from the Graph tab even though the Entities tab shows them.
   scopeEntities?: ReadonlyArray<{ uri: string; label: string }>;
+  /**
+   * Codex Code6 (PR #656) — when the parent already calls
+   * `useSwmAttributions` (e.g. `ProjectView` shares one result between
+   * the Overview activity feed and the SWM graph), it can pass that
+   * result in here to suppress the internal hook call. Without this,
+   * the SPARQL fires twice on every SWM-tab render. When omitted, the
+   * panel falls back to the local hook (the long-standing behaviour
+   * preserved for all other callsites — `SubGraphDetailView`,
+   * `EntityDetailView`, tests).
+   */
+  swmAttribution?: SwmAttributionsResult;
 }) {
   const { title: layerTitle } = LAYER_CONFIG[layer];
   const title = titleOverride ?? layerTitle;
@@ -932,7 +945,16 @@ export function LayerGraphPanel({
   // promoted it, so the graph reads as "who proposed what". Also surfaces
   // conflict nodes (multi-agent disagreement) and an agent palette for the
   // legend. No-op on WM / VM.
-  const swmAttr = useSwmAttributions(layer === 'swm' && contextGraphId ? contextGraphId : undefined);
+  //
+  // Codex Code6 (PR #656) — when the parent passes `swmAttribution`
+  // it has already paid for the SPARQL (e.g. `ProjectView` shares the
+  // result with the Overview activity feed). Skip the internal hook's
+  // network call by passing `undefined`, then read from the prop. The
+  // hook still runs (rules of hooks) but short-circuits to empty state.
+  const localSwmAttr = useSwmAttributions(
+    layer === 'swm' && contextGraphId && !swmAttribution ? contextGraphId : undefined,
+  );
+  const swmAttr = swmAttribution ?? localSwmAttr;
 
   const uniqueTriples = useMemo(() => {
     const seen = new Set<string>();
@@ -1176,6 +1198,7 @@ export function MemoryStrip({
   onExpandedLayerChange,
   expandTabs,
   onExpandTabChange,
+  swmAttribution,
 }: {
   memory: ReturnType<typeof useMemoryEntities>;
   onSwitchLayer: (layer: LayerView) => void;
@@ -1186,6 +1209,9 @@ export function MemoryStrip({
   onExpandedLayerChange?: (layer: MemoryStripLayer | null) => void;
   expandTabs?: Record<MemoryStripLayer, LayerContentTab>;
   onExpandTabChange?: (layer: MemoryStripLayer, tab: LayerContentTab) => void;
+  /** Codex Code6 (PR #656) — pass-through of the parent's shared
+   *  SWM attribution result. */
+  swmAttribution?: SwmAttributionsResult;
 }) {
   const [localExpanded, setLocalExpanded] = useState<MemoryStripLayer | null>(null);
   const [localExpandTabs, setLocalExpandTabs] = useState<Record<MemoryStripLayer, LayerContentTab>>({
@@ -1304,6 +1330,7 @@ export function MemoryStrip({
                   onSelectEntity={onSelectEntity}
                   onNodeClick={onNodeClick}
                   onSwitchLayer={() => onSwitchLayer(layer.viewLayer)}
+                  swmAttribution={layer.key === 'swm' ? swmAttribution : undefined}
                 />
               )}
             </div>
@@ -1326,6 +1353,7 @@ export function MemoryStripExpanded({
   onSelectEntity,
   onNodeClick,
   onSwitchLayer,
+  swmAttribution,
 }: {
   layerKey: 'wm' | 'swm' | 'vm';
   entities: MemoryEntity[];
@@ -1337,6 +1365,10 @@ export function MemoryStripExpanded({
   onSelectEntity: (uri: string) => void;
   onNodeClick?: (node: any) => void;
   onSwitchLayer: () => void;
+  /** Codex Code6 (PR #656) — pass-through of the parent's shared
+   *  SWM attribution result so the SWM-tab graph reuses the network
+   *  call ProjectView already made for the Overview feed. */
+  swmAttribution?: SwmAttributionsResult;
 }) {
   const layerTriples = useLayerTriples(memory, layerKey);
   // No wrapper here: `LayerGraphPanel` already injects `trustLayer:
@@ -1356,6 +1388,7 @@ export function MemoryStripExpanded({
       onTabChange={onTabChange}
       onSelectEntity={onSelectEntity}
       onNodeClick={onNodeClick}
+      swmAttribution={swmAttribution}
       footer={
         <div className="v10-layer-expand-footer">
           <button
@@ -1707,6 +1740,7 @@ export function LayerContent({
   onSelectEntity,
   onNodeClick,
   footer,
+  swmAttribution,
 }: {
   layer: 'wm' | 'swm' | 'vm';
   entities: MemoryEntity[];
@@ -1719,6 +1753,11 @@ export function LayerContent({
   onSelectEntity: (uri: string) => void;
   onNodeClick?: (node: any) => void;
   footer?: React.ReactNode;
+  /** Codex Code6 (PR #656) — optional shared SWM attribution result
+   *  hoisted from a common parent (`ProjectView`). Passes straight
+   *  through to `LayerGraphPanel` to avoid a duplicate SPARQL query
+   *  when the same data is already loaded for the Overview feed. */
+  swmAttribution?: SwmAttributionsResult;
 }) {
   const config = LAYER_CONFIG[layer];
   const itemsLabel = layerNoun(layer, 2);
@@ -1825,6 +1864,7 @@ export function LayerContent({
             triples={layerTriples}
             onNodeClick={onNodeClick}
             contextGraphId={contextGraphId}
+            swmAttribution={layer === 'swm' ? swmAttribution : undefined}
           />
         </div>
       )}
@@ -2716,6 +2756,7 @@ export function LayerDetailView({
   contextGraphId,
   activeTab,
   onTabChange,
+  swmAttribution,
 }: {
   layer: 'wm' | 'swm' | 'vm';
   memory: ReturnType<typeof useMemoryEntities>;
@@ -2724,6 +2765,9 @@ export function LayerDetailView({
   contextGraphId: string;
   activeTab: LayerContentTab;
   onTabChange: (tab: LayerContentTab) => void;
+  /** Codex Code6 (PR #656) — pass-through of the parent's shared
+   *  SWM attribution result. */
+  swmAttribution?: SwmAttributionsResult;
 }) {
   const config = LAYER_CONFIG[layer];
   // No wrapper here: `LayerGraphPanel` already injects `trustLayer:
@@ -2758,6 +2802,7 @@ export function LayerDetailView({
           onTabChange={onTabChange}
           onSelectEntity={onSelectEntity}
           onNodeClick={onNodeClick}
+          swmAttribution={swmAttribution}
         />
       </div>
     </div>

@@ -133,13 +133,23 @@ function parseDateLike(s: string): Date | null {
  * reconcile the wrong row on updates. The id is event-discriminated
  * + tied to either the operation URI (for transition events) or the
  * entity URI (for entity-derived events), plus the row's timestamp.
+ *
+ * Codex Code4 (PR #656) — promotion rows additionally include the
+ * `rootUri` so a single `WorkspaceOperation` that promotes several
+ * roots produces a distinct id per root (one op URI + multiple roots
+ * at the same timestamp would otherwise collide on `${event}|${opUri}|${ts}`).
  */
 export function buildActivityId(
   event: ActivityEvent,
   subjectUri: string,
   at: Date | null,
+  rootUri?: string,
 ): string {
-  return `${event}|${subjectUri}|${at ? at.toISOString() : 'no-ts'}`;
+  const ts = at ? at.toISOString() : 'no-ts';
+  if (rootUri && rootUri !== subjectUri) {
+    return `${event}|${subjectUri}|${rootUri}|${ts}`;
+  }
+  return `${event}|${subjectUri}|${ts}`;
 }
 
 /**
@@ -405,10 +415,12 @@ export function buildPromotionEvents(
     const entity = entitiesByUri.get(evt.rootUri);
     const resolved = entity != null;
     out.push({
-      // Per-op id (Code1) — keys off the operation URI so two
-      // re-promotions of the same (root, agent) produce two distinct
-      // keys (different opUri) and React reconciles them correctly.
-      id: buildActivityId('promoted', evt.opUri, at),
+      // Per-op id (Code1 + Code4) — keys off the operation URI plus
+      // the root URI so (a) two re-promotions of the same (root, agent)
+      // with different `opUri`s reconcile as distinct rows, and (b) a
+      // single `WorkspaceOperation` that promotes multiple roots
+      // produces a distinct id per root (the opUri alone would collide).
+      id: buildActivityId('promoted', evt.opUri, at, evt.rootUri),
       // When the entity isn't in `entitiesByUri` (data race, or a
       // promotion of a root that was already published past SWM
       // before this hook ran), synthesise a stub so the row still

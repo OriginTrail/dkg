@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
 import {
   useProjectActivity,
+  buildActivityId,
   type ActivityItem,
   type ActivityEvent,
 } from '../src/ui/hooks/useProjectActivity.js';
@@ -470,5 +471,55 @@ describe('buildPromotionEvents — pure joiner', () => {
       { entitiesByUri: new Map() },
     );
     expect(items.map(i => i.entity.uri)).toEqual(['urn:e:newer', 'urn:e:older']);
+  });
+
+  // Codex Code4 (PR #656) — a single `WorkspaceOperation` that
+  // promotes multiple roots produces one event per root in the raw
+  // event log. The id keyed off `opUri` + `at` alone would collide
+  // between those rows, so `buildActivityId` now includes `rootUri`
+  // for promotion events. Without this fix React reconciliation would
+  // treat both as the same list child and one would silently disappear.
+  it('emits distinct ids for two roots promoted by the same workspace operation (Code4)', () => {
+    const items = buildPromotionEvents(
+      [
+        { rootUri: 'urn:e:root-a', agent: 'did:dkg:agent:bob', opUri: 'urn:op:multi', publishedAt: '2026-05-22T10:00:00Z' },
+        { rootUri: 'urn:e:root-b', agent: 'did:dkg:agent:bob', opUri: 'urn:op:multi', publishedAt: '2026-05-22T10:00:00Z' },
+      ],
+      { entitiesByUri: new Map() },
+    );
+    expect(items).toHaveLength(2);
+    expect(items[0].id).not.toEqual(items[1].id);
+    const uris = items.map(i => i.entity.uri).sort();
+    expect(uris).toEqual(['urn:e:root-a', 'urn:e:root-b']);
+  });
+});
+
+// `buildActivityId` is a pure helper exported alongside the joiner.
+// These unit tests pin its contract — id stability across renders,
+// per-event discrimination (Code1), and per-root distinctness for
+// promotion events (Code4).
+describe('buildActivityId — id contract', () => {
+  it('returns the same id for the same (event, subject, at) tuple', () => {
+    const at = new Date('2026-05-22T10:00:00Z');
+    expect(buildActivityId('added', 'urn:e:1', at)).toBe(buildActivityId('added', 'urn:e:1', at));
+  });
+
+  it('produces distinct ids for the same subject with different event kinds (Code1)', () => {
+    const at = new Date('2026-05-22T10:00:00Z');
+    expect(buildActivityId('added', 'urn:e:1', at)).not.toBe(buildActivityId('promoted', 'urn:e:1', at));
+  });
+
+  it('produces distinct ids for two roots from the same op + timestamp (Code4)', () => {
+    const at = new Date('2026-05-22T10:00:00Z');
+    const idA = buildActivityId('promoted', 'urn:op:multi', at, 'urn:e:root-a');
+    const idB = buildActivityId('promoted', 'urn:op:multi', at, 'urn:e:root-b');
+    expect(idA).not.toBe(idB);
+  });
+
+  it('omits the rootUri segment when it equals the subjectUri (entity-derived rows)', () => {
+    const at = new Date('2026-05-22T10:00:00Z');
+    const withRoot = buildActivityId('added', 'urn:e:1', at, 'urn:e:1');
+    const withoutRoot = buildActivityId('added', 'urn:e:1', at);
+    expect(withRoot).toBe(withoutRoot);
   });
 });
