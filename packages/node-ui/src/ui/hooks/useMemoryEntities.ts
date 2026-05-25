@@ -58,6 +58,19 @@ function bv(v: unknown): string | undefined {
 }
 
 function isUri(s: string): boolean {
+  const value = canonicalEntityUri(s);
+  if (!value || value.startsWith('"') || /\s/.test(value)) return false;
+  if (value.startsWith('_:')) return true;
+  return /^[A-Za-z][A-Za-z0-9+.-]*:/.test(value);
+}
+
+function canonicalEntityUri(uri: string): string {
+  const trimmed = uri.trim();
+  if (trimmed.startsWith('<') && trimmed.endsWith('>')) return trimmed.slice(1, -1);
+  return trimmed;
+}
+
+function isKnownUriScheme(s: string): boolean {
   return s.startsWith('http://') || s.startsWith('https://') || s.startsWith('urn:') || s.startsWith('did:');
 }
 
@@ -101,7 +114,7 @@ function isRawExtractionLabel(label: string, uri: string): boolean {
 }
 
 function isUnreadableDefaultUriLabel(label: string, uri: string): boolean {
-  return label === uri && (uri.startsWith('urn:') || uri.startsWith('did:'));
+  return label === uri && isKnownUriScheme(uri);
 }
 
 function readableFallbackLabel(entity: MemoryEntity): string {
@@ -292,15 +305,16 @@ async function queryLayer(
   }
 }
 
-export function buildMemoryEntities(layered: LayeredTriple[]): Map<string, MemoryEntity> {
+export function buildEntities(layered: LayeredTriple[]): Map<string, MemoryEntity> {
   const entities = new Map<string, MemoryEntity>();
 
   function getOrCreate(uri: string): MemoryEntity {
-    let e = entities.get(uri);
+    const entityUri = canonicalEntityUri(uri);
+    let e = entities.get(entityUri);
     if (!e) {
       e = {
-        uri,
-        label: shortLabel(uri),
+        uri: entityUri,
+        label: shortLabel(entityUri),
         types: [],
         trustLevel: 'working',
         layers: new Set(),
@@ -308,7 +322,7 @@ export function buildMemoryEntities(layered: LayeredTriple[]): Map<string, Memor
         properties: new Map(),
         connections: [],
       };
-      entities.set(uri, e);
+      entities.set(entityUri, e);
     }
     return e;
   }
@@ -319,17 +333,19 @@ export function buildMemoryEntities(layered: LayeredTriple[]): Map<string, Memor
     if (t.subGraph) entity.subGraphs.add(t.subGraph);
 
     if (t.predicate === RDF_TYPE) {
-      if (!entity.types.includes(t.object)) {
-        entity.types.push(t.object);
+      const typeUri = canonicalEntityUri(t.object);
+      if (!entity.types.includes(typeUri)) {
+        entity.types.push(typeUri);
       }
     } else if (isUri(t.object)) {
-      const targetEntity = getOrCreate(t.object);
+      const targetUri = canonicalEntityUri(t.object);
+      const targetEntity = getOrCreate(targetUri);
       targetEntity.layers.add(t.layer);
       if (t.subGraph) targetEntity.subGraphs.add(t.subGraph);
       entity.connections.push({
         predicate: t.predicate,
-        targetUri: t.object,
-        targetLabel: shortLabel(t.object),
+        targetUri,
+        targetLabel: shortLabel(targetUri),
       });
     } else {
       const existing = entity.properties.get(t.predicate) ?? [];
@@ -357,6 +373,8 @@ export function buildMemoryEntities(layered: LayeredTriple[]): Map<string, Memor
 
   return entities;
 }
+
+export const buildMemoryEntities = buildEntities;
 
 export function useMemoryEntities(
   contextGraphId: string,

@@ -3,7 +3,7 @@
 import React, { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
-import { useMemoryEntities } from '../src/ui/hooks/useMemoryEntities.js';
+import { buildMemoryEntities, useMemoryEntities } from '../src/ui/hooks/useMemoryEntities.js';
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const SCHEMA_NAME = 'http://schema.org/name';
@@ -110,5 +110,18 @@ describe('useMemoryEntities readable labels', () => {
     expect(labels).not.toContain('urn:dkg:code:file:demo/project/src/file.ts=File file.ts');
     expect(labels).not.toContain('did:dkg:agent:12D3KooWExample=did:dkg:agent:12D3KooWExample');
     expect(targets).toContain('urn:dkg:extraction:123e4567-e89b-12d3-a456-426614174000=Extraction 123e4567e89b');
+  });
+
+  it('canonicalizes angle-wrapped entity ids for detail navigation', () => {
+    const entities = buildMemoryEntities([
+      { subject: '<urn:test:source>', predicate: MENTIONS, object: '<urn:test:wrapped>', layer: 'working' },
+      { subject: '<urn:test:wrapped>', predicate: RDF_TYPE, object: 'http://schema.org/Thing', layer: 'working' },
+      { subject: '<urn:test:wrapped>', predicate: SCHEMA_NAME, object: 'Wrapped label', layer: 'working' },
+    ]);
+
+    expect(entities.has('urn:test:wrapped')).toBe(true);
+    expect(entities.has('<urn:test:wrapped>')).toBe(false);
+    expect(entities.get('urn:test:source')?.connections[0]?.targetUri).toBe('urn:test:wrapped');
+    expect(entities.get('urn:test:wrapped')?.label).toBe('Wrapped label');
   });
 });

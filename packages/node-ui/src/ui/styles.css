@@ -5953,7 +5953,7 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
   right: 12px;
   z-index: 6;
   width: min(250px, calc(100% - 24px));
-  pointer-events: auto;
+  pointer-events: none;
 }
 .v10-graph-overlay .v10-swm-legend,
 .v10-graph-overlay .v10-vm-legend {

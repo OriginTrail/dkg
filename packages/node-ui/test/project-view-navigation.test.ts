@@ -79,6 +79,14 @@ function buildTestMemoryEntities(layered: any[]) {
     entity.layers.add(triple.layer);
     if (triple.predicate === RDF_TYPE) {
       entity.types.push(triple.object);
+    } else if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(triple.object)) {
+      const target = get(triple.object);
+      target.layers.add(triple.layer);
+      entity.connections.push({
+        predicate: triple.predicate,
+        targetUri: triple.object,
+        targetLabel: triple.object,
+      });
     } else {
       const vals = entity.properties.get(triple.predicate) ?? [];
       vals.push(triple.object);
@@ -100,6 +108,8 @@ const initialLayeredTriples = [
   { subject: 'urn:entity:overlap', predicate: NAME, object: 'Working overlap', layer: 'working' },
   { subject: 'urn:entity:overlap', predicate: RDF_TYPE, object: 'http://schema.org/Thing', layer: 'shared' },
   { subject: 'urn:entity:overlap', predicate: NAME, object: 'Shared overlap', layer: 'shared' },
+  { subject: 'urn:entity:overlap', predicate: 'related', object: 'urn:entity:other', layer: 'shared' },
+  { subject: 'urn:entity:overlap', predicate: 'related', object: 'urn:entity:other', layer: 'shared' },
 ] as any[];
 
 const memory = {
@@ -207,7 +217,7 @@ vi.mock('../src/ui/views/project/components.js', () => ({
       React.createElement('button', { 'data-testid': 'switch-swm', onClick: () => onSwitch('swm') }, 'SWM'),
       React.createElement('button', { 'data-testid': 'switch-subgraphs', onClick: () => onSwitch('graph-overview') }, 'Subgraphs')),
   KADetailView: ({ entity, onNavigate, onClose }: { entity: any; onNavigate: (uri: string) => void; onClose: () => void }) =>
-    React.createElement('section', { 'data-testid': 'entity-detail', 'data-entity': entity.uri, 'data-trust': entity.trustLevel },
+    React.createElement('section', { 'data-testid': 'entity-detail', 'data-entity': entity.uri, 'data-trust': entity.trustLevel, 'data-connections': String(entity.connections.length) },
       React.createElement('div', {}, entity.label),
       React.createElement('button', { 'data-testid': 'open-related-entity', onClick: () => onNavigate('urn:entity:other') }, 'Open related'),
       React.createElement('button', { 'data-testid': 'detail-back', onClick: onClose }, 'Back to Context Graph')),
@@ -410,6 +420,7 @@ describe('ProjectView entity detail navigation', () => {
 
     expect(query('entity-detail').dataset.entity).toBe('urn:entity:overlap');
     expect(query('entity-detail').dataset.trust).toBe('shared');
+    expect(query('entity-detail').dataset.connections).toBe('1');
     expect(query('entity-detail').textContent).toContain('Shared overlap');
   });
 
