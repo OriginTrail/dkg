@@ -335,13 +335,25 @@ export function useLayerTriples(memory: ReturnType<typeof useMemoryEntities>, la
     const out: Triple[] = [];
     for (const t of memory.allTriples) {
       if (t.layer !== targetLayer) continue;
+      // Skip residual triples for a subject that has been promoted past
+      // this layer: post-promote the daemon currently leaves the WM
+      // `/assertion/<addr>/<name>` graphs on disk, so a promoted entity's
+      // WM triples keep coming back from `wmSparql` even though the
+      // entity has logically moved to SWM. The entity's canonical layer
+      // is `trustLevel` (its highest layer); a triple whose subject has
+      // moved past `targetLayer` would otherwise render as a phantom
+      // node on the prior-layer Graph view. Triples whose subject has
+      // no entity record (literal orphans / class IRIs that only ever
+      // appear as objects) pass through unfiltered.
+      const subjectEntity = memory.entities.get(t.subject);
+      if (subjectEntity && subjectEntity.trustLevel !== targetLayer) continue;
       const key = `${t.subject}|${t.predicate}|${t.object}`;
       if (seen.has(key)) continue;
       seen.add(key);
       out.push(t);
     }
     return out;
-  }, [memory.allTriples, targetLayer]);
+  }, [memory.allTriples, memory.entities, targetLayer]);
 }
 
 // ─── Assertions List (WM/SWM named graphs) ──────────────────

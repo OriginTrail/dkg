@@ -560,6 +560,87 @@ describe('SubGraphDetailView tabs', () => {
     });
   });
 
+  // P3 regression: the sub-graph pyramid pill counts must agree with
+  // the entity list under them. Pre-P3 the pyramid counted by
+  // `entity.layers.has(...)` so a mixed-layer entity (e.g. promoted
+  // to SWM with WM residue) was double-counted across two pills,
+  // disagreeing with the trustLevel-filtered Entities tab.
+  it('pyramid counts match Entities-list trustLevel filter (P3)', async () => {
+    // Two entities: one genuinely WM-only, one promoted to SWM (with
+    // residual WM-layer presence). With the M6 trustLevel convention
+    // the pyramid should read wm=1 / swm=1 (not wm=2 / swm=1).
+    const wmOnly = {
+      uri: 'urn:e:p3-wm-only',
+      label: 'WM-only',
+      types: ['http://schema.org/Thing'],
+      trustLevel: 'working',
+      layers: new Set(['working']),
+      subGraphs: new Set(['demo']),
+      properties: new Map(),
+      connections: [],
+    };
+    const promoted = {
+      uri: 'urn:e:p3-promoted',
+      label: 'Promoted',
+      types: ['http://schema.org/Thing'],
+      trustLevel: 'shared',
+      layers: new Set(['working', 'shared']),
+      subGraphs: new Set(['demo']),
+      properties: new Map(),
+      connections: [],
+    };
+    const fixture = {
+      entities: new Map([[wmOnly.uri, wmOnly], [promoted.uri, promoted]]),
+      entityList: [wmOnly, promoted],
+      allTriples: [],
+      graphTriples: [],
+      trustMap: new Map(),
+      counts: { wm: 1, swm: 1, vm: 0, total: 2 },
+      loading: false,
+      error: null,
+      partial: false,
+      refresh: vi.fn(),
+    } as any;
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root!.render(
+        React.createElement(ProjectProfileContext.Provider, { value: profile },
+          React.createElement(SubGraphDetailView, {
+            slug: 'demo',
+            rawMemory: fixture,
+            contextGraphId: 'cg-test',
+            onNodeClick: vi.fn(),
+            onSelectEntity: vi.fn(),
+            // Render the Graph tab — the pyramid is in the header so
+            // it shows on any tab; this avoids the Entities-tab card
+            // render which the fixture's stub `forType: () => undefined`
+            // doesn't support.
+            activeTab: 'graph',
+            onTabChange: vi.fn(),
+          })),
+      );
+    });
+    await flush();
+
+    // Chips are buttons with class `v10-minipyr-chip`; the count is the
+    // `.v10-minipyr-count` span. Title prefixes disambiguate them.
+    const chips = Array.from(container.querySelectorAll('button.v10-minipyr-chip')) as HTMLButtonElement[];
+    const countFor = (labelPrefix: string) => {
+      const chip = chips.find(b => (b.getAttribute('title') ?? '').startsWith(labelPrefix));
+      return Number(chip?.querySelector('.v10-minipyr-count')?.textContent ?? 'NaN');
+    };
+    // Trust convention: WM=1 (the WM-only entity), SWM=1 (the promoted
+    // entity, counted in its canonical layer only), VM=0. Pre-P3 this
+    // would have been WM=2 / SWM=1 / VM=0.
+    expect(countFor('Working Memory')).toBe(1);
+    expect(countFor('Shared Memory')).toBe(1);
+    expect(countFor('Verified Memory')).toBe(0);
+  });
+
   // R3 regression: `splitGraphTriplesForShelf` normalises subjects /
   // objects via `graphNodeKey` but used to compare the *raw* predicate
   // against RDF_TYPE_URI. A wrapped `<rdf:type>` predicate slipped past

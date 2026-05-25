@@ -27,7 +27,6 @@ import {
   SubGraphOverviewGrid,
   ContextGraphQueryView,
   LayerDetailView,
-  ProvenanceBar,
 } from './project/components.js';
 
 interface ProjectViewProps {
@@ -486,6 +485,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
             selected={activeSubGraph}
             entities={rawMemory.entityList}
             onSelect={handleSelectSubGraph}
+            layer={activeLayer}
           />
           <LayerDetailView
             layer={activeLayer}
@@ -500,9 +500,6 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
       )}
 
       </main>
-
-      {/* Provenance Bar */}
-      <ProvenanceBar memory={rawMemory} />
 
       <ImportFilesModal
         open={showImport}

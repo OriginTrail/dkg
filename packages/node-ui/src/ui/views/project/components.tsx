@@ -2810,22 +2810,6 @@ export function DocumentsList({
 
 // ─── Provenance Bar ──────────────────────────────────────────
 
-export function ProvenanceBar({ memory }: { memory: ReturnType<typeof useMemoryEntities> }) {
-  const latestEvent = useMemo(() => {
-    if (memory.counts.vm > 0) return `${memory.counts.vm} ${layerNoun('vm', memory.counts.vm).toLowerCase()} verified on-chain`;
-    if (memory.counts.swm > 0) return `${memory.counts.swm} ${layerNoun('swm', memory.counts.swm).toLowerCase()} in shared working memory`;
-    if (memory.counts.wm > 0) return `${memory.counts.wm} ${layerNoun('wm', memory.counts.wm).toLowerCase()} in working memory`;
-    return 'No activity yet';
-  }, [memory.counts]);
-
-  return (
-    <div className="v10-provenance-bar">
-      <span className="v10-provenance-bar-dot" />
-      <span>{latestEvent}</span>
-    </div>
-  );
-}
-
 // ─── KA Detail View (split-pane: content+triples+graph | provenance) ─────
 
 
@@ -3486,17 +3470,20 @@ export function SubGraphOverviewGrid({
 
   // Per-sub-graph layer counts — drives the mini pyramid on each card so
   // you can see at a glance which sub-graphs are mostly verified vs still
-  // in flight. Computed from rawMemory.entityList intersected with the
-  // entity's subGraphs bag.
+  // in flight. Each entity is counted in exactly one layer — its
+  // canonical `trustLevel` (its highest layer). This matches the
+  // post-M6 layer-switcher / Overview counts and the sub-graph entity
+  // list, so the pyramid agrees with what the list under it actually
+  // shows when narrowed to one layer chip.
   const layerCountsBySubGraph = useMemo(() => {
     const out = new Map<string, { wm: number; swm: number; vm: number }>();
     for (const e of memory.entityList) {
       for (const sg of e.subGraphs) {
         let counts = out.get(sg);
         if (!counts) { counts = { wm: 0, swm: 0, vm: 0 }; out.set(sg, counts); }
-        if (e.layers.has('working'))  counts.wm++;
-        if (e.layers.has('shared'))   counts.swm++;
-        if (e.layers.has('verified')) counts.vm++;
+        if (e.trustLevel === 'verified') counts.vm++;
+        else if (e.trustLevel === 'shared') counts.swm++;
+        else counts.wm++;
       }
     }
     return out;
@@ -3883,13 +3870,17 @@ export function SubGraphDetailView({
     [rawMemory.graphTriples, scopedUris, slug],
   );
 
-  // Layer counts for the pyramid header.
+  // Layer counts for the pyramid header. Each entity counted in exactly
+  // one layer — its canonical `trustLevel` (highest layer) — so the
+  // pyramid agrees with the Entities tab when narrowed to a single
+  // layer chip. Matches the post-M6 canonical-count convention used
+  // by the layer-switcher badges and Overview pipeline bar.
   const layerCounts = useMemo(() => {
     let wm = 0, swm = 0, vm = 0;
     for (const e of scopedEntities) {
-      if (e.layers.has('working'))  wm++;
-      if (e.layers.has('shared'))   swm++;
-      if (e.layers.has('verified')) vm++;
+      if (e.trustLevel === 'verified') vm++;
+      else if (e.trustLevel === 'shared') swm++;
+      else wm++;
     }
     return { wm, swm, vm, total: scopedEntities.length };
   }, [scopedEntities]);

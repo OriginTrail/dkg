@@ -5854,14 +5854,6 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
 .v10-canvas-empty-icon { font-size: 28px; opacity: 0.3; }
 .v10-canvas-empty-text { font-size: 11px; max-width: 240px; line-height: 1.6; }
 
-/* ── Provenance Bar ── */
-.v10-provenance-bar {
-  flex-shrink: 0; padding: 6px 14px; border-top: 1px solid var(--border-subtle);
-  background: var(--bg-panel); display: flex; align-items: center; gap: 8px;
-  font-size: 10px; color: var(--text-tertiary); font-family: var(--font-mono);
-}
-.v10-provenance-bar-dot { width: 4px; height: 4px; border-radius: 50%; background: #22c55e; }
-
 /* ── Graph view inside layer detail ── */
 .v10-graph-shell {
   flex: 1 1 auto;

@@ -1,0 +1,119 @@
+// @vitest-environment happy-dom
+
+import React, { act } from 'react';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { createRoot, type Root } from 'react-dom/client';
+import { useLayerTriples } from '../src/ui/views/project/helpers.js';
+import { buildMemoryEntities, type LayeredTriple, type MemoryData, type Triple } from '../src/ui/hooks/useMemoryEntities.js';
+
+(globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+
+const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+
+function memoryFor(triples: LayeredTriple[]): MemoryData {
+  const entities = buildMemoryEntities(triples);
+  return {
+    entities,
+    entityList: [...entities.values()],
+    allTriples: triples,
+    graphTriples: [],
+    trustMap: new Map(),
+    counts: { wm: 0, swm: 0, vm: 0, total: entities.size },
+    loading: false,
+    error: null,
+    partial: false,
+    layerStatus: { wm: 'ok', swm: 'ok', vm: 'ok' },
+    refresh: () => {},
+  } as unknown as MemoryData;
+}
+
+function ProbeLayerTriples({ memory, layer }: { memory: MemoryData; layer: 'wm' | 'swm' | 'vm' }) {
+  const triples = useLayerTriples(memory as any, layer);
+  const subjects = triples.map((t: Triple) => t.subject).join('|');
+  return React.createElement('div', { id: 'probe', 'data-subjects': subjects });
+}
+
+describe('useLayerTriples — promoted-entity residue filter (P1)', () => {
+  let root: Root;
+  let container: HTMLDivElement;
+
+  beforeEach(() => {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  // The daemon's `wmSparql` returns triples from every `/assertion/*`
+  // named graph, so a promoted entity's WM triples keep coming back
+  // even though the entity has logically moved to SWM (post-promote
+  // bug). The hook must drop those — the WM Graph view should only
+  // render triples whose subject is still genuinely in WM.
+  it('drops WM triples whose subject has been promoted (entity.trustLevel === shared)', () => {
+    // urn:e:wm-only is genuinely WM. urn:e:promoted has both WM
+    // residue and an SWM triple — its canonical layer is `shared`.
+    const triples: LayeredTriple[] = [
+      { subject: 'urn:e:wm-only',   predicate: RDF_TYPE, object: 'http://schema.org/Thing', layer: 'working' },
+      { subject: 'urn:e:promoted',  predicate: RDF_TYPE, object: 'http://schema.org/Thing', layer: 'working' }, // residue
+      { subject: 'urn:e:promoted',  predicate: 'http://schema.org/name', object: '"Promoted"', layer: 'shared' },
+    ];
+    const memory = memoryFor(triples);
+    expect(memory.entities.get('urn:e:wm-only')?.trustLevel).toBe('working');
+    expect(memory.entities.get('urn:e:promoted')?.trustLevel).toBe('shared');
+
+    act(() => {
+      root.render(React.createElement(ProbeLayerTriples, { memory, layer: 'wm' }));
+    });
+
+    const probe = container.querySelector('#probe')!;
+    const subjects = (probe.getAttribute('data-subjects') ?? '').split('|').filter(Boolean);
+
+    // WM view: only the genuinely-WM subject survives. The promoted
+    // entity's WM residue is filtered out.
+    expect(subjects).toContain('urn:e:wm-only');
+    expect(subjects).not.toContain('urn:e:promoted');
+  });
+
+  it('SWM view: keeps triples on subjects whose canonical layer is SWM, drops VM-promoted ones', () => {
+    const triples: LayeredTriple[] = [
+      { subject: 'urn:e:swm-only',  predicate: RDF_TYPE, object: 'http://schema.org/Thing', layer: 'shared' },
+      { subject: 'urn:e:vm-promoted', predicate: RDF_TYPE, object: 'http://schema.org/Thing', layer: 'shared' }, // residue
+      { subject: 'urn:e:vm-promoted', predicate: 'http://schema.org/name', object: '"Verified"', layer: 'verified' },
+    ];
+    const memory = memoryFor(triples);
+
+    act(() => {
+      root.render(React.createElement(ProbeLayerTriples, { memory, layer: 'swm' }));
+    });
+
+    const probe = container.querySelector('#probe')!;
+    const subjects = (probe.getAttribute('data-subjects') ?? '').split('|').filter(Boolean);
+    expect(subjects).toContain('urn:e:swm-only');
+    expect(subjects).not.toContain('urn:e:vm-promoted');
+  });
+
+  it('passes through triples whose subject has no entity record (literal orphans / class IRIs)', () => {
+    // No entity record means there's nothing to compare trustLevel
+    // against — the triple should not be filtered. The realistic case
+    // is a stray triple whose subject is an anonymous URI that never
+    // surfaces in the entity list.
+    const triples: LayeredTriple[] = [
+      { subject: 'urn:e:wm-only',  predicate: 'http://schema.org/name', object: '"WM"', layer: 'working' },
+    ];
+    const memory = memoryFor(triples);
+    // Force a subject that has no entity record by patching the entities
+    // map after the fact.
+    memory.entities.delete('urn:e:wm-only');
+    (memory as any).entityList = [];
+
+    act(() => {
+      root.render(React.createElement(ProbeLayerTriples, { memory, layer: 'wm' }));
+    });
+    const probe = container.querySelector('#probe')!;
+    expect(probe.getAttribute('data-subjects')).toBe('urn:e:wm-only');
+  });
+});

@@ -303,7 +303,6 @@ vi.mock('../src/ui/views/project/components.js', () => ({
         React.createElement('button', { 'data-testid': 'open-layer-entity', onClick: () => onSelectEntity('urn:entity:working') }, 'Open layer entity'),
         React.createElement('button', { 'data-testid': 'open-layer-overlap-entity', onClick: () => onSelectEntity('urn:entity:overlap') }, 'Open overlap entity'),
         React.createElement('button', { 'data-testid': 'open-layer-graph-node', onClick: () => onNodeClick({ id: 'urn:entity:overlap', trustLayer: layer }) }, 'Open graph node'))),
-  ProvenanceBar: () => null,
 }));
 
 const { ProjectView } = await import('../src/ui/views/ProjectView.js');
