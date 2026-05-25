@@ -120,15 +120,18 @@ describe('ContextGraphQueryView', () => {
       .filter(Boolean);
 
     expect(container.querySelector('h2.v10-mlv-title')?.textContent).toBe('Query Catalogue');
-    expect(container.querySelector('#query-catalogue-saved-title')?.textContent).toBe('Reusable query catalogue');
+    expect(container.querySelector('#query-catalogue-saved-title')?.textContent).toBe('Choose a query');
     expect(container.querySelector('#query-catalogue-editor-title')?.textContent).toBe('Editor and results');
     expect(container.querySelector('textarea')).toBeTruthy();
     expect(buttonLabels.some(label => label?.startsWith('All triples'))).toBe(true);
     expect(buttonLabels.some(label => label?.startsWith('Graphs'))).toBe(true);
     expect(buttonLabels.some(label => label?.startsWith('Types'))).toBe(true);
     expect(buttonLabels).toEqual(expect.arrayContaining(['Run', 'Save', 'Reset']));
-    expect(container.textContent).toContain('Profile-backed reusable SPARQL queries for this Context Graph');
+    expect(container.textContent).toContain('Reusable SPARQL for this Context Graph');
+    expect(container.textContent).toContain('Selecting a query loads it into the editor below.');
+    expect(container.textContent).toContain('Built-in presets');
     expect(container.textContent).not.toContain('Catalogue scope');
+    expect(container.textContent).not.toContain('Built-in context queries');
 
     await act(async () => { root.unmount(); });
   });
@@ -180,7 +183,10 @@ describe('ContextGraphQueryView', () => {
     await waitForText(container, 'Personal research');
     expect(container.textContent).toContain('Context-level profile queries.');
     expect(container.textContent).not.toContain('Saved profile queries');
+    expect(container.textContent).toContain('Built in');
+    expect(container.textContent).toContain('Saved');
     await waitForText(container, 'Documents: Document research');
+    expect(container.textContent).toContain('Subgraph');
     expect(container.textContent).toContain('Queries for document-backed entities.');
     expect(container.textContent).toContain('List markdown-backed document entities.');
 
@@ -203,14 +209,14 @@ describe('ContextGraphQueryView', () => {
 
     await waitForText(container, 'Loading saved query catalogue...');
     expect(container.textContent).toContain('All triples');
-    expect(container.textContent).not.toContain('No saved profile queries yet.');
+    expect(container.textContent).not.toContain('No profile-saved queries yet.');
 
     await act(async () => { root.unmount(); });
     document.body.innerHTML = '';
 
     const emptyRender = await renderWithProfile(profile());
     const { container: emptyContainer, root: emptyRoot } = emptyRender;
-    expect(emptyContainer.textContent).toContain('No saved profile queries yet.');
+    expect(emptyContainer.textContent).toContain('No profile-saved queries yet.');
 
     await act(async () => { emptyRoot.unmount(); });
   });
@@ -222,7 +228,7 @@ describe('ContextGraphQueryView', () => {
 
     expect(container.textContent).toContain('Profile query failed');
     expect(container.textContent).toContain('All triples');
-    expect(container.textContent).not.toContain('No saved profile queries yet.');
+    expect(container.textContent).not.toContain('No profile-saved queries yet.');
 
     await act(async () => { root.unmount(); });
   });
@@ -262,6 +268,7 @@ describe('ContextGraphQueryView', () => {
 
     await waitForText(container, 'Saved to catalogue.');
     expect(apiMocks.writeProfileQueryCatalog).toHaveBeenCalledWith('cg-test', expect.any(Array));
+    expect(container.textContent).toContain('Profile-saved queries');
     expect(container.textContent).toContain('Reusable triples');
     expect(container.textContent).toContain('A reusable triples query.');
 

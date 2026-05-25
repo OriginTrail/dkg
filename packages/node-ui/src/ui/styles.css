@@ -2994,7 +2994,7 @@ button:focus:not(:focus-visible) { outline: none; }
   border: 1px solid var(--border-subtle);
   border-radius: 8px;
   background: var(--bg-panel);
-  padding: 14px 16px;
+  padding: 16px;
 }
 .v10-cg-query-zone-editor {
   flex: 0 0 auto;
@@ -3006,7 +3006,7 @@ button:focus:not(:focus-visible) { outline: none; }
   justify-content: space-between;
   gap: 16px;
   align-items: flex-start;
-  margin-bottom: 10px;
+  margin-bottom: 14px;
 }
 .v10-cg-query-zone-header h3 {
   margin: 2px 0 4px;
@@ -3032,22 +3032,43 @@ button:focus:not(:focus-visible) { outline: none; }
 .v10-cg-query-catalog-groups {
   display: flex;
   flex-direction: column;
-  gap: 0;
+  gap: 12px;
 }
 .v10-cg-query-catalog-group {
-  padding: 9px 0;
-  border-top: 1px solid var(--border-subtle);
+  padding: 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-surface) 78%, transparent);
 }
-.v10-cg-query-catalog-group:first-child { border-top: 0; padding-top: 0; }
-.v10-cg-query-catalog-group:last-child { padding-bottom: 0; }
 .v10-cg-query-catalog-group-header {
   display: flex;
   align-items: flex-start;
   gap: 10px;
-  margin-bottom: 6px;
+  margin-bottom: 10px;
+}
+.v10-cg-query-catalog-title-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.v10-cg-query-catalog-kind {
+  display: inline-flex;
+  align-items: center;
+  min-height: 18px;
+  padding: 2px 7px;
+  border: 1px solid color-mix(in srgb, var(--sg-color) 38%, var(--border-subtle));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--sg-color) 12%, var(--bg-surface));
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  text-transform: uppercase;
 }
 .v10-cg-query-catalog-group-header h4 {
-  margin: 0 0 2px;
+  margin: 0;
   font-size: 13px;
   color: var(--text-primary);
 }
@@ -3086,6 +3107,10 @@ button:focus:not(:focus-visible) { outline: none; }
   color: inherit;
 }
 .v10-cg-query-chip-desc {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
   font-size: 11px;
   line-height: 1.35;
   color: var(--text-tertiary);

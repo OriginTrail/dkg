@@ -1589,8 +1589,8 @@ LIMIT 1000`;
 
 const CONTEXT_GRAPH_QUERY_SUBGRAPH = '__context_graph';
 const USER_QUERY_CATALOG_SLUG = 'ui-saved-queries';
-const USER_QUERY_CATALOG_NAME = 'Saved queries';
-const USER_QUERY_CATALOG_DESCRIPTION = 'Queries saved from the Query Catalogue.';
+const USER_QUERY_CATALOG_NAME = 'Profile-saved queries';
+const USER_QUERY_CATALOG_DESCRIPTION = 'Queries saved from this page for this Context Graph profile.';
 const PROFILE_NS = 'http://dkg.io/ontology/profile/';
 const SCHEMA_NS = 'http://schema.org/';
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
@@ -1629,7 +1629,7 @@ function contextGraphBuiltInCatalog(contextGraphId: string): QueryCatalog {
     subGraph,
     catalogSlug,
     catalogName,
-    catalogDescription: 'Built-in queries for available non-private graphs in this Context Graph.',
+    catalogDescription: 'Included with the Node UI for common Context Graph inspections.',
     catalogRank,
     resultColumn: '',
     ...query,
@@ -1639,7 +1639,7 @@ function contextGraphBuiltInCatalog(contextGraphId: string): QueryCatalog {
     slug: catalogSlug,
     subGraph,
     name: catalogName,
-    description: 'Built-in queries for available non-private graphs in this Context Graph.',
+    description: 'Included with the Node UI for common Context Graph inspections.',
     rank: catalogRank,
     queries: [
       withQueryDefaults({
@@ -1791,9 +1791,17 @@ function queryCatalogueScope(catalog: QueryCatalog): 'context' | 'subgraph' {
 }
 
 function queryCatalogueGroupLabel(catalog: QueryCatalog, scope: 'context' | 'subgraph', subGraphLabel?: string): string {
-  if (isBuiltInQueryCatalog(catalog)) return 'Built-in context queries';
+  if (isBuiltInQueryCatalog(catalog)) return 'Built-in presets';
+  if (catalog.subGraph === CONTEXT_GRAPH_QUERY_SUBGRAPH && catalog.slug === USER_QUERY_CATALOG_SLUG) {
+    return USER_QUERY_CATALOG_NAME;
+  }
   if (scope === 'context') return catalog.name;
   return `${subGraphLabel ?? catalog.subGraph}: ${catalog.name}`;
+}
+
+function queryCatalogueGroupKind(catalog: QueryCatalog, scope: 'context' | 'subgraph'): string {
+  if (isBuiltInQueryCatalog(catalog)) return 'Built in';
+  return scope === 'context' ? 'Saved' : 'Subgraph';
 }
 
 function queryErrorMessage(error: string | null): ReactNode {
@@ -1955,7 +1963,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
         <div>
           <h2 className="v10-mlv-title">Query Catalogue</h2>
           <p className="v10-mlv-desc">
-            Profile-backed reusable SPARQL queries for this Context Graph. Save queries here, then load them back into the editor.
+            Reusable SPARQL for this Context Graph. Use built-in presets or save useful queries to this node profile.
           </p>
         </div>
       </div>
@@ -1963,9 +1971,9 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
       <section className="v10-cg-query-zone v10-cg-query-zone-catalog" aria-labelledby="query-catalogue-saved-title">
         <div className="v10-cg-query-zone-header">
           <div>
-            <span className="v10-cg-query-eyebrow">Saved Queries</span>
-            <h3 id="query-catalogue-saved-title">Reusable query catalogue</h3>
-            <p>Built-in queries and saved profile queries. Save creates a reusable context-level query in this node profile.</p>
+            <span className="v10-cg-query-eyebrow">Query Library</span>
+            <h3 id="query-catalogue-saved-title">Choose a query</h3>
+            <p>Selecting a query loads it into the editor below.</p>
           </div>
         </div>
 
@@ -1998,6 +2006,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
               const binding = scope === 'context' ? undefined : profile?.forSubGraph(catalog.subGraph);
               const color = binding?.color ?? '#38bdf8';
               const label = queryCatalogueGroupLabel(catalog, scope, binding?.displayName);
+              const kind = queryCatalogueGroupKind(catalog, scope);
               return (
                 <div
                   key={`${catalog.subGraph}|${catalog.slug}`}
@@ -2006,7 +2015,10 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
                 >
                   <div className="v10-cg-query-catalog-group-header">
                     <div>
-                      <h4>{label}</h4>
+                      <div className="v10-cg-query-catalog-title-row">
+                        <span className="v10-cg-query-catalog-kind">{kind}</span>
+                        <h4>{label}</h4>
+                      </div>
                       {catalog.description && <p>{catalog.description}</p>}
                     </div>
                   </div>
@@ -2039,7 +2051,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
             inline
             tone="query"
             icon="?"
-            title="No saved profile queries yet."
+            title="No profile-saved queries yet."
             description="Use Save after editing SPARQL to add a reusable context-level query to this catalogue."
           />
         )}
