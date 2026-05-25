@@ -177,15 +177,26 @@ function ActivityRow({
 
   // Surface status when the entity has one — decisions.status / tasks.status /
   // github.state — because "rejected" / "blocked" / "merged" is often the
-  // most useful scan-while-browsing signal.
-  const status = findStatus(item.entity);
+  // most useful scan-while-browsing signal. Only meaningful on `'typed'`
+  // rows; `'promoted'` / `'added'` / `'published'` describe the transition
+  // itself and the status would read confusingly next to "Promoted to …".
+  const status = isTyped ? findStatus(item.entity) : null;
+  // Event-aware tooltip — promote/publish rows read better as
+  // "Promoted to Shared Working Memory · Foo" than just "Foo".
+  const tooltip = (() => {
+    const parts: string[] = [];
+    if (item.event !== 'typed') parts.push(typeLabel);
+    parts.push(item.entity.label);
+    if (item.at) parts.push(item.at.toISOString());
+    return parts.join('\n');
+  })();
 
   return (
     <button
       type="button"
       className="v10-activity-feed-row"
       onClick={() => onSelectEntity(item.entity.uri)}
-      title={item.at ? `${item.entity.label}\n${item.at.toISOString()}` : item.entity.label}
+      title={tooltip}
     >
       <span
         className="v10-activity-feed-layer"
