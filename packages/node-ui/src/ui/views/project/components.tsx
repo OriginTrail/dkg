@@ -1823,6 +1823,10 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
     () => [builtInCatalog, ...localSavedCatalogs, ...(profile?.queryCatalogs ?? [])],
     [builtInCatalog, localSavedCatalogs, profile?.queryCatalogs],
   );
+  const renderedQueryCatalogs = useMemo(
+    () => (profile?.loading || profile?.error ? [builtInCatalog] : queryCatalogs),
+    [builtInCatalog, profile?.error, profile?.loading, queryCatalogs],
+  );
 
   useEffect(() => {
     setDraftQuery(defaultQuery);
@@ -1987,9 +1991,9 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
           />
         )}
 
-        {!profile?.loading && !profile?.error && (
+        {renderedQueryCatalogs.length > 0 && (
           <div className="v10-cg-query-catalog-groups">
-            {queryCatalogs.map((catalog) => {
+            {renderedQueryCatalogs.map((catalog) => {
               const scope = queryCatalogueScope(catalog);
               const binding = scope === 'context' ? undefined : profile?.forSubGraph(catalog.subGraph);
               const color = binding?.color ?? '#38bdf8';

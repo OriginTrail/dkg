@@ -202,6 +202,7 @@ describe('ContextGraphQueryView', () => {
     const { container, root } = await renderWithProfile(profile({ loading: true }));
 
     await waitForText(container, 'Loading saved query catalogue...');
+    expect(container.textContent).toContain('All triples');
     expect(container.textContent).not.toContain('No saved profile queries yet.');
 
     await act(async () => { root.unmount(); });
@@ -220,6 +221,7 @@ describe('ContextGraphQueryView', () => {
     await waitForText(container, 'Saved query catalogue unavailable');
 
     expect(container.textContent).toContain('Profile query failed');
+    expect(container.textContent).toContain('All triples');
     expect(container.textContent).not.toContain('No saved profile queries yet.');
 
     await act(async () => { root.unmount(); });
