@@ -2061,6 +2061,14 @@ export class EVMChainAdapter implements ChainAdapter {
       newMerkleLeafCount: params.newMerkleLeafCount,
       mintKnowledgeAssetsAmount: params.mintAmount ?? 0,
       knowledgeAssetsToBurn: burnIds,
+      // Codex PR #630 R1 #2 — RFC-39 Phase A.5 commitment refresh.
+      // Defaults to `bytes32(0)` / 0 (metadata-only update or
+      // public-CG path; KC's existing commitment stays in place).
+      // Callers refreshing curated ciphertext set BOTH non-zero.
+      newCiphertextChunksRoot: params.newCiphertextChunksRoot
+        ? ethers.hexlify(params.newCiphertextChunksRoot)
+        : ethers.ZeroHash,
+      newCiphertextChunkCount: params.newCiphertextChunkCount ?? 0,
       publisherNodeIdentityId: identityId,
       identityIds: ackSigs.map(s => s.identityId),
       r: ackSigs.map(s => ethers.hexlify(s.r)),

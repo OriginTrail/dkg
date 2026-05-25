@@ -36,6 +36,14 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
     ///         next one (see {_pickWeightedChallenge}).
     uint8 public constant MAX_KC_RETRIES = 10;
 
+    /// @notice RFC-39 Phase A.5 — bounded retries at the CG selection layer
+    ///         when the picked CG has no challengeable KC (all legacy /
+    ///         uncommitted curated KCs, or every retry hit an expired KC).
+    ///         Falls through to a fresh weighted draw with the picked CG
+    ///         excluded, instead of reverting the whole sampling tick and
+    ///         letting one high-value legacy curated CG DoS the network.
+    uint8 public constant MAX_CG_RETRIES = 5;
+
     IdentityStorage public identityStorage;
     RandomSamplingStorage public randomSamplingStorage;
     KnowledgeCollectionStorage public knowledgeCollectionStorage;
@@ -487,105 +495,115 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
         bytes32 seed,
         uint256 currentEpoch
     ) internal view returns (uint256 cgId, uint256 kcId, uint256 chunkId) {
-        // ---- Step 1a: compute adjusted total over eligible CGs only. ----
         uint256 cgCount = contextGraphStorage.getLatestContextGraphId();
-        uint256 adjustedTotal;
-        for (uint256 i = 1; i <= cgCount; i++) {
-            if (!_isCGEligible(i)) {
-                continue;
+
+        // Codex PR #630 R1 #3 — outer retry: bounded fallback when the
+        // picked CG has no challengeable KC (all curated KCs uncommitted,
+        // or every inner retry hit an expired KC). Without this loop, one
+        // high-value legacy curated CG could DoS the entire sampling tick
+        // by being picked repeatedly under the weighted draw and reverting
+        // on every attempt. We track `exhaustedCgs` and re-draw with the
+        // failing CG excluded from the adjusted total until either a KC is
+        // found or the retry budget runs out.
+        uint256[] memory exhaustedCgs = new uint256[](MAX_CG_RETRIES);
+        uint8 exhaustedCount = 0;
+        bytes32 cgSeed = seed;
+
+        for (uint8 cgAttempt = 0; cgAttempt < MAX_CG_RETRIES; cgAttempt++) {
+            // ---- Step 1a: adjusted total over eligible + non-exhausted CGs. ----
+            uint256 adjustedTotal;
+            for (uint256 i = 1; i <= cgCount; i++) {
+                if (!_isCGEligible(i)) continue;
+                if (_isInExhaustedList(i, exhaustedCgs, exhaustedCount)) continue;
+                adjustedTotal += contextGraphValueStorage.getCGValueAtEpoch(i, currentEpoch);
             }
-            adjustedTotal += contextGraphValueStorage.getCGValueAtEpoch(i, currentEpoch);
-        }
-        if (adjustedTotal == 0) {
-            revert NoEligibleContextGraph();
+            if (adjustedTotal == 0) {
+                // First attempt with zero-total = genuinely no eligible CG.
+                // Subsequent attempts with zero-total = all eligible CGs
+                // exhausted; the next-period sampling tick will retry.
+                if (cgAttempt == 0) revert NoEligibleContextGraph();
+                revert NoEligibleKnowledgeCollection();
+            }
+
+            // ---- Step 1b: walk + pick the CG straddling r. ----
+            uint256 r = uint256(cgSeed) % adjustedTotal;
+            uint256 running;
+            uint256 chosenCg;
+            for (uint256 i = 1; i <= cgCount; i++) {
+                if (!_isCGEligible(i)) continue;
+                if (_isInExhaustedList(i, exhaustedCgs, exhaustedCount)) continue;
+                running += contextGraphValueStorage.getCGValueAtEpoch(i, currentEpoch);
+                if (running > r) { chosenCg = i; break; }
+            }
+            // Defensive: adjustedTotal > 0 guarantees at least one CG
+            // contributed a positive weight, so the loop above must have
+            // set chosenCg. Reaching this branch means the per-epoch read
+            // drifted between the two passes (impossible from `view`).
+            if (chosenCg == 0) revert NoEligibleContextGraph();
+
+            // ---- Step 2: pick a KC inside `chosenCg` with bounded retries. ----
+            //
+            // RFC-39 Phase A.5: the per-KC eligibility test is extended for
+            // curated CGs — a curated KC without a `(ciphertextChunksRoot,
+            // ciphertextChunkCount)` commitment is "legacy / pre-LU-11
+            // transitional" and skipped here the same way an expired KC is
+            // skipped. Forward-only adoption per RFC-39 §6.4 (Q4).
+            //
+            // Caching `cgIsCurated` once outside the loop keeps the per-
+            // attempt cost at exactly 2 SLOADs on the curated path and 1
+            // SLOAD on the public path (unchanged).
+            uint256 kcCount = contextGraphStorage.getContextGraphKCCount(chosenCg);
+            bool cgIsCurated = contextGraphStorage.getIsCurated(chosenCg);
+            uint256 pickedKcId;
+            bytes32 kcSeed = cgSeed;
+            if (kcCount > 0) {
+                for (uint8 attempt = 0; attempt < MAX_KC_RETRIES; attempt++) {
+                    kcSeed = keccak256(abi.encodePacked(kcSeed, attempt));
+                    uint256 idx = uint256(kcSeed) % kcCount;
+                    uint256 candidate = contextGraphStorage.getContextGraphKCAt(chosenCg, idx);
+                    if (knowledgeCollectionStorage.getEndEpoch(candidate) < currentEpoch) continue;
+                    if (cgIsCurated && knowledgeCollectionStorage.getCiphertextChunkCount(candidate) == 0) continue;
+                    pickedKcId = candidate;
+                    break;
+                }
+            }
+
+            if (pickedKcId != 0) {
+                // ---- Step 3: leaf index draw (curated vs public). ----
+                uint32 leafCount = cgIsCurated
+                    ? knowledgeCollectionStorage.getCiphertextChunkCount(pickedKcId)
+                    : knowledgeCollectionStorage.getMerkleLeafCount(pickedKcId);
+                if (leafCount == 0) revert NoEligibleKnowledgeCollection();
+                cgId = chosenCg;
+                kcId = pickedKcId;
+                chunkId = uint256(kcSeed) % uint256(leafCount);
+                return (cgId, kcId, chunkId);
+            }
+
+            // No eligible KC in `chosenCg` — mark it exhausted and re-draw.
+            exhaustedCgs[exhaustedCount] = chosenCg;
+            exhaustedCount += 1;
+            cgSeed = keccak256(abi.encodePacked(cgSeed, "cgRetry", cgAttempt));
         }
 
-        // ---- Step 1b: walk eligible CGs and pick the one straddling r. ----
-        uint256 r = uint256(seed) % adjustedTotal;
-        uint256 running;
-        for (uint256 i = 1; i <= cgCount; i++) {
-            if (!_isCGEligible(i)) {
-                continue;
-            }
-            running += contextGraphValueStorage.getCGValueAtEpoch(i, currentEpoch);
-            if (running > r) {
-                cgId = i;
-                break;
-            }
-        }
-        // Defensive: adjustedTotal > 0 guarantees at least one eligible CG
-        // contributed a positive weight, so the loop above must have set cgId.
-        // Reaching this branch means the per-epoch read drifted between
-        // the two passes (impossible from a `view` call — eligibility and
-        // values are deterministic for a fixed `currentEpoch`).
-        if (cgId == 0) {
-            revert NoEligibleContextGraph();
-        }
+        // All CG-retries exhausted — every picked CG was empty / had only
+        // legacy curated / expired KCs. Next sampling tick will retry with
+        // fresh entropy.
+        revert NoEligibleKnowledgeCollection();
+    }
 
-        // ---- Step 2: pick a KC inside the chosen CG with bounded retries. ----
-        //
-        // RFC-39 Phase A.5: the per-KC eligibility test is extended for
-        // curated CGs — a curated KC without a `(ciphertextChunksRoot,
-        // ciphertextChunkCount)` commitment is "legacy / pre-LU-11
-        // transitional" and skipped here the same way an expired KC is
-        // skipped. Forward-only adoption per RFC-39 §6.4 (Q4) — no
-        // migration path; legacy curated KCs simply don't participate in
-        // the curated sampling lottery.
-        //
-        // Caching `cgIsCurated` once outside the loop keeps the per-attempt
-        // cost at exactly 2 SLOADs (endEpoch + ciphertextChunkCount) on the
-        // curated path and 1 SLOAD on the public path (unchanged).
-        //
-        // Note on value-weighting drift: a curated CG's
-        // `ContextGraphValueStorage` weight still includes legacy KCs that
-        // can't be sampled, so during the transitional window such CGs are
-        // over-weighted relative to their effective sampleable surface. This
-        // is acceptable for v1 — the gap closes as legacy KCs expire and
-        // new publishes adopt the chunked path automatically. Closing the
-        // drift earlier would require a Phase 8 cross-cut to retroactively
-        // re-weight legacy-CG values, which is explicitly out of scope.
-        uint256 kcCount = contextGraphStorage.getContextGraphKCCount(cgId);
-        if (kcCount == 0) {
-            // Eligible CG exists but holds no registered KCs; treat the same
-            // as an all-expired CG (skip and retry next period).
-            revert NoEligibleKnowledgeCollection();
+    /// @dev O(n) membership check against the exhausted-CG list. `n` is bounded
+    ///      by `MAX_CG_RETRIES` (≤ 5), so this is a fixed sub-linear cost per
+    ///      eligibility test.
+    function _isInExhaustedList(
+        uint256 candidate,
+        uint256[] memory exhausted,
+        uint8 exhaustedCount
+    ) internal pure returns (bool) {
+        for (uint8 j = 0; j < exhaustedCount; j++) {
+            if (exhausted[j] == candidate) return true;
         }
-        bool cgIsCurated = contextGraphStorage.getIsCurated(cgId);
-        uint256 pickedKcId;
-        bytes32 kcSeed = seed;
-        for (uint8 attempt = 0; attempt < MAX_KC_RETRIES; attempt++) {
-            kcSeed = keccak256(abi.encodePacked(kcSeed, attempt));
-            uint256 idx = uint256(kcSeed) % kcCount;
-            uint256 candidate = contextGraphStorage.getContextGraphKCAt(cgId, idx);
-            if (knowledgeCollectionStorage.getEndEpoch(candidate) < currentEpoch) {
-                continue;
-            }
-            if (cgIsCurated && knowledgeCollectionStorage.getCiphertextChunkCount(candidate) == 0) {
-                continue;
-            }
-            pickedKcId = candidate;
-            break;
-        }
-        if (pickedKcId == 0) {
-            revert NoEligibleKnowledgeCollection();
-        }
-        kcId = pickedKcId;
-
-        // ---- Step 3: leaf index draw (curated vs public). ----
-        //
-        // RFC-39 Phase A.5: curated CGs draw against the LU-11
-        // `ciphertextChunkCount` (number of SWM-message ciphertext chunks)
-        // so the chunkId addresses a chunk the hosting cores actually
-        // persist. Public CGs unchanged — V10 flat-KC plaintext leaf count.
-        // `Challenge.chunkId`'s semantic is overloaded: same field, two
-        // leaf spaces (mirror of `submitProof`'s root/count branching).
-        uint32 leafCount = cgIsCurated
-            ? knowledgeCollectionStorage.getCiphertextChunkCount(kcId)
-            : knowledgeCollectionStorage.getMerkleLeafCount(kcId);
-        if (leafCount == 0) {
-            revert NoEligibleKnowledgeCollection();
-        }
-        chunkId = uint256(kcSeed) % uint256(leafCount);
+        return false;
     }
 
     /**

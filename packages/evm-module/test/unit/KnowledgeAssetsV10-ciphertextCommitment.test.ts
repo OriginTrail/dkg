@@ -189,11 +189,18 @@ describe('@unit KnowledgeAssetsV10 — RFC-39 ciphertext commitment', () => {
     creator: SignerWithAddress,
     authority: string,
   ): Promise<bigint> {
+    // Codex C2 fix — `getIsCurated` is anchored to `accessPolicy` (the
+    // encryption axis), NOT `publishPolicy` (the authority axis). A
+    // CG that carries ciphertext-committed payloads MUST have
+    // `accessPolicy = 1`. We keep `publishPolicy = 0` (curated /
+    // single-authority publish) so the existing `authority` plumbing
+    // stays exercised, but the ciphertext-commitment branch on the
+    // publish path is gated by `accessPolicy != 0`.
     await Facade.connect(creator).createContextGraph(
       [],
       0,
-      0, // accessPolicy
-      0, // publishPolicy = curated
+      1, // accessPolicy = curated (encrypted)
+      0, // publishPolicy = curated (single-authority publish)
       authority,
       0,
       ethers.ZeroHash,

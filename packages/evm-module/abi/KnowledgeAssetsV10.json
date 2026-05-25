@@ -755,6 +755,16 @@
             "type": "uint256[]"
           },
           {
+            "internalType": "bytes32",
+            "name": "newCiphertextChunksRoot",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "uint32",
+            "name": "newCiphertextChunkCount",
+            "type": "uint32"
+          },
+          {
             "internalType": "uint72",
             "name": "publisherNodeIdentityId",
             "type": "uint72"

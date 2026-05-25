@@ -121,11 +121,20 @@ describe('@unit RandomSampling — RFC-39 curated picker', () => {
     const owner = accounts[1].address;
     const authority =
       publishPolicy === CURATED_POLICY ? accounts[2].address : ethers.ZeroAddress;
+    // Codex C2 fix — `getIsCurated()` now reads `accessPolicy != 0`
+    // (not `publishPolicy == 0`). The RFC-39 picker treats a CG as
+    // "curated" via that getter, so the picker-eligibility tests need
+    // `accessPolicy = 1` to exercise the curated branch. The legacy
+    // `CURATED_POLICY`/`OPEN_POLICY` constants refer to publish policy
+    // and we keep them only to drive the authority-required gate at
+    // create time; encryption-axis is independently `accessPolicy`.
+    const accessPolicy =
+      publishPolicy === CURATED_POLICY ? 1 : 0;
     const tx = await CGStorageContract.connect(opSigner).createContextGraph(
       owner,
       [],
       0,
-      0,
+      accessPolicy,
       publishPolicy,
       authority,
       0,

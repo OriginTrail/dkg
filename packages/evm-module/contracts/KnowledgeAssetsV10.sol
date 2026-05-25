@@ -179,6 +179,17 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         uint32 newMerkleLeafCount;
         uint256 mintKnowledgeAssetsAmount;
         uint256[] knowledgeAssetsToBurn;
+        // Codex PR #630 R1 #2 — RFC-39 Phase A.5 commitment refresh.
+        // Update must rotate the ciphertext commitment in lockstep with
+        // the new merkle root; without these fields curated KCs left
+        // their commitment frozen to the initial publish and the
+        // random-sampling challenge surface would point at stale
+        // ciphertext after the first update. Same zero-or-paired
+        // contract as `PublishParams` (zero on metadata-only or
+        // public-CG updates; both non-zero on curated commitment
+        // rotation).
+        bytes32 newCiphertextChunksRoot;
+        uint32 newCiphertextChunkCount;
         uint72 publisherNodeIdentityId;
         uint72[] identityIds;
         bytes32[] r;
@@ -1270,6 +1281,35 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
             p.newTokenAmount,
             p.newMerkleLeafCount
         );
+
+        // --- 6b. RFC-39 Phase A.5: refresh the curated ciphertext commitment ---
+        //
+        // Codex PR #630 R1 #2 — without this, curated KCs kept the
+        // publish-time commitment forever and `RandomSampling`'s
+        // curated-proof check (which reads
+        // `getLatestCiphertextChunksRoot/Count`) would verify against
+        // stale ciphertext after the first update. Mirrors the same
+        // validation contract as the publish branch:
+        //   - Public CG + any non-zero ciphertext field → revert.
+        //   - Curated CG + both fields zero             → no-op
+        //     (legacy / metadata-only update; picker treats the KC
+        //     as "skip in curated draw" until the next commitment
+        //     rotation).
+        //   - Curated CG + both fields non-zero         → commitment
+        //     rotated to the new ciphertext root + count.
+        //   - Curated CG + exactly one field zero       → revert
+        //     (partial commitment would zero-divide the picker).
+        bool _hasNewCiphertextCommitment =
+            p.newCiphertextChunksRoot != bytes32(0) || p.newCiphertextChunkCount != 0;
+        if (_hasNewCiphertextCommitment) {
+            if (!contextGraphStorage.getIsCurated(contextGraphId)) {
+                revert PublicCGCannotHaveCiphertextCommitment(contextGraphId);
+            }
+            if (p.newCiphertextChunksRoot == bytes32(0) || p.newCiphertextChunkCount == 0) {
+                revert IncompleteCiphertextCommitment();
+            }
+            kcs.setCiphertextChunksCommitment(p.id, p.newCiphertextChunksRoot, p.newCiphertextChunkCount);
+        }
 
         // --- 7. CG value delta + per-node produced-value bookkeeping ---
 

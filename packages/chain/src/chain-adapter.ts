@@ -337,6 +337,20 @@ export interface V10UpdateKCParams {
   publisherNodeIdentityId?: bigint;
   ackSignatures?: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
   /**
+   * RFC-39 Phase A.5 — OPTIONAL refreshed Merkle root over the new
+   * batch's ciphertext chunks. Same zero-or-paired contract as
+   * {@link V10PublishParams.ciphertextChunksRoot}: zero on metadata-only
+   * updates and public CGs; both non-zero on curated commitment
+   * rotation. Defaults to `bytes32(0)`.
+   */
+  newCiphertextChunksRoot?: Uint8Array;
+  /**
+   * RFC-39 Phase A.5 — OPTIONAL refreshed ciphertext chunk count for the
+   * new batch. Defaults to `0`. Paired with
+   * {@link newCiphertextChunksRoot}.
+   */
+  newCiphertextChunkCount?: number;
+  /**
    * Write-ahead hook fired just before the concrete update tx is
    * broadcast, carrying the signed tx hash. See
    * {@link V10PublishParams.onBroadcast} for full semantics

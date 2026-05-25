@@ -410,6 +410,12 @@ export async function buildUpdateParams(args: {
     newMerkleLeafCount,
     mintKnowledgeAssetsAmount: args.mintKnowledgeAssetsAmount,
     knowledgeAssetsToBurn: args.knowledgeAssetsToBurn,
+    // Codex PR #630 R1 #2 — RFC-39 Phase A.5 commitment refresh. Default
+    // both to zero so the existing public-CG fixtures (which never
+    // touch curated ciphertext) stay green. Curated-rotation tests
+    // override these explicitly via the returned struct.
+    newCiphertextChunksRoot: ethers.ZeroHash,
+    newCiphertextChunkCount: 0,
     publisherNodeIdentityId: args.publisherIdentityId,
     identityIds: args.receiverIdentityIds,
     r: sig.receiverRs,

@@ -108,6 +108,19 @@
   },
   {
     "inputs": [],
+    "name": "MAX_CG_RETRIES",
+    "outputs": [
+      {
+        "internalType": "uint8",
+        "name": "",
+        "type": "uint8"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
     "name": "MAX_KC_RETRIES",
     "outputs": [
       {
