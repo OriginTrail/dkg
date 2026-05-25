@@ -3928,6 +3928,17 @@ export function SubGraphDetailView({
   // VM-only graph never renders edges that exist only in another layer.
   // Without this, clicks were already layer-scoped (C14) but the rendered
   // graph could show cross-layer edges (C15).
+  //
+  // Scope predicate is asymmetric (C17): a triple is in scope when
+  //   (a) it carries this sub-graph's origin tag,
+  //   (b) its subject is in `scopedUris` — covers `rdf:type`, labels and
+  //       literal-valued attribute triples on promoted entities whose
+  //       `subGraph` was lost on promotion, OR
+  //   (c) its object is a scoped *resource* (object-side recovery edges).
+  // The previous both-ends test (`scopedUris.has(subject) && scopedUris.has(object)`)
+  // accidentally dropped subject-local triples whose object is a class IRI
+  // or a literal, making isolated promoted entities lose their types /
+  // labels in a narrowed single-layer view.
   const graphPanelTriples = useMemo(() => {
     if (!singleLayer) return filteredTriples;
     const layerTrust: TrustLevel =
@@ -3937,7 +3948,10 @@ export function SubGraphDetailView({
     const out: Triple[] = [];
     for (const t of rawMemory.allTriples) {
       if (t.layer !== layerTrust) continue;
-      if (!(t.subGraph === slug || (scopedUris.has(t.subject) && scopedUris.has(t.object)))) continue;
+      const inScope = t.subGraph === slug
+        || scopedUris.has(t.subject)
+        || (isResourceNode(t.object) && scopedUris.has(t.object));
+      if (!inScope) continue;
       if (!(filteredUris.has(t.subject) || filteredUris.has(t.object))) continue;
       const key = `${t.subject}|${t.predicate}|${t.object}`;
       if (seen.has(key)) continue;
