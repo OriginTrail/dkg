@@ -120,6 +120,40 @@ describe('listAssertions (WM) — URI parse + cg-scoped filter', () => {
     expect(out).toEqual([]);
   });
 
+  it('drops bindings with 3+ segments before `assertion/` (left-side strict shape)', async () => {
+    // Reviewer-flagged case: a binding like `<cg>/foo/bar/assertion/<a>/<n>`
+    // doesn't match either accepted shape (root = 3 segs, sub-graph =
+    // 4 segs). The prior `indexOf('/assertion/')` branch admitted it
+    // as a `subGraph: undefined` row with a mis-derived name —
+    // promote/preview lookups would silently miss. Strict-shape parse
+    // drops it.
+    setBindings([
+      bRow('did:dkg:context-graph:cg-A/foo/bar/assertion/0xabc/baz', 9),
+      bRow('did:dkg:context-graph:cg-A/assertion/0xabc/keep', 1),
+    ]);
+    const out = await listAssertions('cg-A', 'wm');
+    expect(out).toHaveLength(1);
+    expect(out[0].name).toBe('keep');
+  });
+
+  it('drops bindings with extra segments after the name (right-side strict shape)', async () => {
+    // Pins the right-side strict-shape contract. The sub-graph branch
+    // expects exactly `<sg>/assertion/<agent>/<name>` — anything
+    // longer would mis-extract the name and orphan the row from
+    // promote/preview.
+    setBindings([
+      bRow('did:dkg:context-graph:cg-A/sg/assertion/0xabc/foo/extra', 2),
+      bRow('did:dkg:context-graph:cg-A/sg/assertion/0xabc/clean', 3),
+    ]);
+    const out = await listAssertions('cg-A', 'wm');
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({
+      name: 'clean',
+      subGraph: 'sg',
+      tripleCount: 3,
+    });
+  });
+
   it('scopes the /assertion/ discriminator to the tail when cgId itself contains "/assertion/"', async () => {
     // PR #710 reviewer guard — `validateContextGraphId` permits
     // slashes, so a cgId can literally contain `/assertion/` as a

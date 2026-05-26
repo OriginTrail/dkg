@@ -1,5 +1,3 @@
-import { subGraphFromAssertionGraphUri } from './lib/sub-graph-uri.js';
-
 const BASE = '';
 declare global {
   interface Window { __DKG_TOKEN__?: string; }
@@ -647,38 +645,33 @@ export async function listAssertions(
   // shape silently dropped sub-graph-scoped WM assertions, whose graph
   // URI is `did:dkg:context-graph:<cg>/<sg>/assertion/<agent>/<name>`
   // (the sub-graph segment sits between `<cg>/` and `/assertion/`).
-  // Mirror the daemon's `wmSparql` discriminator: any graph under the
-  // CG prefix that contains `/assertion/` is a WM assertion, root or
-  // sub-graph. Sub-graph slug is recovered via the same parser the
-  // lifecycle hook uses (`subGraphFromAssertionGraphUri`) — defensive
-  // on malformed input, returns undefined for root-bucket URIs.
+  // We accept exactly two shapes, post-cgPrefix:
+  //   root-bucket : ['assertion', <agent>, <name>]            (3 segs)
+  //   sub-graph   : [<subGraphName>, 'assertion', <agent>, <name>] (4 segs)
+  // Anything else (extra segments on either side, internal meta
+  // graphs sharing the prefix, etc.) is silently dropped. The parse
+  // is deliberately strict so a row never gets admitted with a
+  // mis-derived name — promote/preview lookups key on `name` and
+  // would silently miss otherwise. The cgId itself is treated as
+  // opaque (it may contain `/assertion/` as a literal substring,
+  // per `validateContextGraphId`).
   const cgPrefix = `did:dkg:context-graph:${contextGraphId}/`;
-  const ASSERTION_SEG = 'assertion/';
   const result: AssertionInfo[] = [];
   for (const b of bindings) {
     const g = typeof b.g === 'string' ? b.g : b.g?.value;
     if (!g || !g.startsWith(cgPrefix)) continue;
-    // Scope the `/assertion/` discriminator to the tail (post-cgPrefix)
-    // so a `contextGraphId` that itself happens to contain
-    // `/assertion/` can't fool the parser into slicing inside the
-    // cgId. Tail shape is one of:
-    //   `assertion/<agent>/<name>`               → root-bucket
-    //   `<subGraphName>/assertion/<agent>/<name>` → sub-graph-scoped
-    // Anything else (e.g. internal meta graphs sharing the prefix)
-    // is silently dropped — replaces the prior outer `.includes(
-    // '/assertion/')` filter.
-    const tail = g.slice(cgPrefix.length);
-    let afterAssertion: string;
-    if (tail.startsWith(ASSERTION_SEG)) {
-      afterAssertion = tail.slice(ASSERTION_SEG.length);
+    const segments = g.slice(cgPrefix.length).split('/');
+    let subGraph: string | undefined;
+    let name: string;
+    if (segments.length === 3 && segments[0] === 'assertion') {
+      subGraph = undefined;
+      name = segments[2];
+    } else if (segments.length === 4 && segments[1] === 'assertion') {
+      subGraph = segments[0];
+      name = segments[3];
     } else {
-      const idx = tail.indexOf('/' + ASSERTION_SEG);
-      if (idx === -1) continue;
-      afterAssertion = tail.slice(idx + ('/' + ASSERTION_SEG).length);
+      continue;
     }
-    const subGraph = subGraphFromAssertionGraphUri(g, contextGraphId);
-    const slash = afterAssertion.indexOf('/');
-    const name = slash >= 0 ? afterAssertion.slice(slash + 1) : afterAssertion;
     if (!name) continue;
     const cnt = typeof b.cnt === 'string' ? parseInt(b.cnt, 10) : (b.cnt?.value ? parseInt(b.cnt.value, 10) : undefined);
     result.push({ name, graphUri: g, tripleCount: Number.isFinite(cnt) ? cnt : undefined, subGraph });
