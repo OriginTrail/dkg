@@ -6,6 +6,13 @@ interface FilePreviewModalProps {
   onClose: () => void;
   assertionName: string;
   contextGraphId: string;
+  /**
+   * PR #710 Fix E — sub-graph slug for partition-scoped assertions.
+   * Omitted for root-bucket assertions. Threaded into
+   * `fetchExtractionStatus` so the daemon's
+   * `(cg, name, subGraphName)` lookup hits the right partition.
+   */
+  subGraphName?: string;
 }
 
 const PREVIEWABLE_TYPES: Record<string, 'pdf' | 'image' | 'text' | 'markdown'> = {
@@ -33,7 +40,7 @@ async function authenticatedBlobUrl(url: string): Promise<string> {
   return URL.createObjectURL(blob);
 }
 
-export function FilePreviewModal({ open, onClose, assertionName, contextGraphId }: FilePreviewModalProps) {
+export function FilePreviewModal({ open, onClose, assertionName, contextGraphId, subGraphName }: FilePreviewModalProps) {
   const [status, setStatus] = useState<ExtractionStatus | null>(null);
   const [textContent, setTextContent] = useState<string | null>(null);
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
@@ -48,7 +55,7 @@ export function FilePreviewModal({ open, onClose, assertionName, contextGraphId 
     setTextContent(null);
     setBlobUrl(null);
 
-    fetchExtractionStatus(assertionName, contextGraphId)
+    fetchExtractionStatus(assertionName, contextGraphId, subGraphName)
       .then(async (s) => {
         setStatus(s);
         const kind = previewKind(s.detectedContentType);
@@ -67,7 +74,7 @@ export function FilePreviewModal({ open, onClose, assertionName, contextGraphId 
     return () => {
       if (blobUrl) URL.revokeObjectURL(blobUrl);
     };
-  }, [open, assertionName, contextGraphId]);
+  }, [open, assertionName, contextGraphId, subGraphName]);
 
   useEffect(() => {
     return () => {

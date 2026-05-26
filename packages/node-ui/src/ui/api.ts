@@ -712,9 +712,26 @@ export interface ExtractionStatus {
   completedAt?: string;
 }
 
-/** Fetch extraction status for an assertion (includes fileHash + contentType). */
-export const fetchExtractionStatus = (assertionName: string, contextGraphId: string) =>
-  get<ExtractionStatus>(`/api/assertion/${encodeURIComponent(assertionName)}/extraction-status?contextGraphId=${encodeURIComponent(contextGraphId)}`);
+/**
+ * Fetch extraction status for an assertion (includes fileHash + contentType).
+ *
+ * PR #710 Fix E — `subGraphName` is the third part of the daemon's
+ * lookup key alongside `(contextGraphId, assertionName)`. The route
+ * already accepts the query param
+ * (`packages/cli/src/daemon/routes/assertion.ts:3364`); only set it
+ * when supplied so root-bucket calls keep the prior URL shape.
+ */
+export const fetchExtractionStatus = (
+  assertionName: string,
+  contextGraphId: string,
+  subGraphName?: string,
+) => {
+  const params = new URLSearchParams({ contextGraphId });
+  if (subGraphName) params.set('subGraphName', subGraphName);
+  return get<ExtractionStatus>(
+    `/api/assertion/${encodeURIComponent(assertionName)}/extraction-status?${params}`,
+  );
+};
 
 /** Build a URL to serve a stored file by its hash (sha256: or keccak256:). */
 export function fileUrl(hash: string, contentType?: string): string {

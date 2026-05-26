@@ -411,7 +411,9 @@ describe('Context Graph shared empty/stat patterns', () => {
 
   it('renders assertion rows when SWM assertions become listable', async () => {
     apiMocks.listAssertions.mockResolvedValueOnce([
-      { name: 'turn-anno-test', tripleCount: 3 },
+      // PR #710 Fix D — React key + busy state now use `graphUri`
+      // (unique per row); fixtures must include it.
+      { name: 'turn-anno-test', graphUri: 'urn:dkg:assertion:cg-test:0xabc:turn-anno-test', tripleCount: 3 },
     ]);
     const { container, unmount } = await render(
       React.createElement(AssertionsList, {
@@ -435,10 +437,10 @@ describe('Context Graph shared empty/stat patterns', () => {
   // assertion is scoped to a partition. Root rows render no chip.
   it('renders sub-graph chip on partitioned assertions and omits it on root rows (#706)', async () => {
     apiMocks.listAssertions.mockResolvedValueOnce([
-      { name: 'root-doc', tripleCount: 2 },
-      { name: 'scoped-doc', tripleCount: 5, subGraph: 'epcis-supply-chain' },
+      { name: 'root-doc', graphUri: 'did:dkg:context-graph:cg-test/assertion/0xabc/root-doc', tripleCount: 2 },
+      { name: 'scoped-doc', graphUri: 'did:dkg:context-graph:cg-test/epcis-supply-chain/assertion/0xabc/scoped-doc', tripleCount: 5, subGraph: 'epcis-supply-chain' },
       // Long slug to exercise the 18-char middle-ellipsis truncation.
-      { name: 'long-scoped-doc', tripleCount: 1, subGraph: 'pharmaceutical-derived-product-graph' },
+      { name: 'long-scoped-doc', graphUri: 'did:dkg:context-graph:cg-test/pharmaceutical-derived-product-graph/assertion/0xabc/long-scoped-doc', tripleCount: 1, subGraph: 'pharmaceutical-derived-product-graph' },
     ]);
     const { container, unmount } = await render(
       React.createElement(AssertionsList, {

@@ -391,21 +391,31 @@ function AssertionList({ contextGraphId, onPromoted }: { contextGraphId: string;
     0
   );
   useMemoryGraphEvents(contextGraphId, refresh, { layers: ['wm'] });
+  // PR #710 Fix D — busy state keyed on `graphUri` (unique per row,
+  // produced by the daemon). `name` is no longer unique once
+  // sub-graph + root partitions share names, so a name-keyed busy
+  // would highlight two rows on a single click. `'__all__'`
+  // sentinel stays — not collidable with any graphUri.
   const [promoting, setPromoting] = useState<string | null>(null);
   const [promoteResult, setPromoteResult] = useState<{ name: string; count: number } | null>(null);
   const [promoteError, setPromoteError] = useState<string | null>(null);
-  const [previewName, setPreviewName] = useState<string | null>(null);
+  // PR #710 Fix E — preview state carries the sub-graph slug too so
+  // `FilePreviewModal` can pass it through to the daemon's
+  // `/extraction-status` route. Pre-fix, clicking a sub-graph
+  // assertion's filename queried the root-bucket assertion → 404
+  // or wrong file.
+  const [preview, setPreview] = useState<{ name: string; subGraph?: string } | null>(null);
 
-  const handlePromote = useCallback(async (name: string, subGraph?: string) => {
-    setPromoting(name);
+  const handlePromote = useCallback(async (assertion: AssertionInfo) => {
+    setPromoting(assertion.graphUri);
     setPromoteResult(null);
     setPromoteError(null);
     try {
-      // PR #710 — thread `subGraph` so the daemon's
+      // PR #710 Fix A — thread `subGraph` so the daemon's
       // `(cg, name, subGraph)` lookup hits the right partition;
       // mirrors the AssertionsList fix in components.tsx.
-      const res = await promoteAssertion(contextGraphId, name, 'all', subGraph);
-      setPromoteResult({ name, count: res.promotedCount });
+      const res = await promoteAssertion(contextGraphId, assertion.name, 'all', assertion.subGraph);
+      setPromoteResult({ name: assertion.name, count: res.promotedCount });
       refresh();
       onPromoted();
     } catch (err: any) {
@@ -454,12 +464,12 @@ function AssertionList({ contextGraphId, onPromoted }: { contextGraphId: string;
       </div>
       <div className="v10-assertion-items">
         {assertions.map((a) => (
-          <div key={a.name} className="v10-assertion-item">
+          <div key={a.graphUri} className="v10-assertion-item">
             <div className="v10-assertion-item-info">
               <button
                 className="v10-assertion-item-name clickable"
                 title={a.graphUri}
-                onClick={() => setPreviewName(a.name)}
+                onClick={() => setPreview({ name: a.name, subGraph: a.subGraph })}
               >
                 {a.name}
               </button>
@@ -470,10 +480,10 @@ function AssertionList({ contextGraphId, onPromoted }: { contextGraphId: string;
             <button
               className="v10-btn-promote"
               disabled={promoting !== null}
-              onClick={() => handlePromote(a.name, a.subGraph)}
+              onClick={() => handlePromote(a)}
               title="Copy these triples to Shared Working Memory"
             >
-              {promoting === a.name ? 'Promoting...' : '→ SWM'}
+              {promoting === a.graphUri ? 'Promoting...' : '→ SWM'}
             </button>
           </div>
         ))}
@@ -489,11 +499,12 @@ function AssertionList({ contextGraphId, onPromoted }: { contextGraphId: string;
         </div>
       )}
 
-      {previewName && (
+      {preview && (
         <FilePreviewModal
           open
-          onClose={() => setPreviewName(null)}
-          assertionName={previewName}
+          onClose={() => setPreview(null)}
+          assertionName={preview.name}
+          subGraphName={preview.subGraph}
           contextGraphId={contextGraphId}
         />
       )}

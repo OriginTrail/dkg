@@ -9,7 +9,7 @@ import {
   publishSharedMemory, executeQuery,
   writeProfileQueryCatalog,
   fetchSubGraphs,
-  type AgentIdentity, type PendingJoinRequest, type PublishResult, type SubGraphInfo,
+  type AgentIdentity, type AssertionInfo, type PendingJoinRequest, type PublishResult, type SubGraphInfo,
 } from '../../api.js';
 import { ImportFilesModal } from '../../components/Modals/ImportFilesModal.js';
 import { ShareProjectModal } from '../../components/Modals/ShareProjectModal.js';
@@ -2688,16 +2688,21 @@ export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }:
   const [result, setResult] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const handlePromote = useCallback(async (name: string, subGraph?: string) => {
-    setBusy(name);
+  const handlePromote = useCallback(async (assertion: AssertionInfo) => {
+    // PR #710 Fix D — busy / React keys must use `graphUri`, not
+    // `name`. A root + sub-graph pair can share a name and would
+    // otherwise both highlight as busy on a single click. `graphUri`
+    // is produced by the daemon and uniquely identifies the row.
+    setBusy(assertion.graphUri);
     setResult(null);
     setError(null);
     try {
       if (layer === 'wm') {
-        // PR #710 — sub-graph slug threads into the daemon's lookup
-        // key so a row clicked from a sub-graph partition resolves
-        // to that partition's assertion, not a same-named root one.
-        const res = await promoteAssertion(contextGraphId, name, 'all', subGraph);
+        // PR #710 Fix A — sub-graph slug threads into the daemon's
+        // `(cg, name, subGraph)` lookup so a row clicked from a
+        // sub-graph partition resolves to that partition's
+        // assertion, not a same-named root one.
+        const res = await promoteAssertion(contextGraphId, assertion.name, 'all', assertion.subGraph);
         setResult(`Promoted ${res.promotedCount} triples to Shared Memory`);
       } else {
         await publishSharedMemory(contextGraphId);
@@ -2790,7 +2795,7 @@ export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }:
       {result && <div style={{ padding: '6px 16px', fontSize: 11, color: 'var(--text-success)' }}>✓ {result}</div>}
       {error && <div style={{ padding: '6px 16px', fontSize: 11, color: 'var(--text-danger)' }}>✕ {error}</div>}
       {assertions.map(a => (
-        <div key={a.name} className="v10-item-row">
+        <div key={a.graphUri} className="v10-item-row">
           <span className="v10-item-icon">▤</span>
           <div className="v10-item-info">
             <div className="v10-item-name" style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>{a.name}</div>
@@ -2809,10 +2814,10 @@ export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }:
           <button
             className={`v10-layer-expand-footer-btn ${layer === 'wm' ? 'promote' : 'publish'}`}
             disabled={busy !== null}
-            onClick={ev => { ev.stopPropagation(); handlePromote(a.name, a.subGraph); }}
-            style={{ opacity: busy === a.name ? 0.5 : 1, flexShrink: 0 }}
+            onClick={ev => { ev.stopPropagation(); handlePromote(a); }}
+            style={{ opacity: busy === a.graphUri ? 0.5 : 1, flexShrink: 0 }}
           >
-            {busy === a.name ? '...' : actionLabel}
+            {busy === a.graphUri ? '...' : actionLabel}
           </button>
         </div>
       ))}
