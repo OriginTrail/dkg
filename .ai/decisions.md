@@ -8,7 +8,7 @@ agent context packs begin from the same system map before routing into tasks and
 exact commands. Public navigation uses product/workflow labels and includes a
 visible top-level **For AI Agents** section.
 
-See `docs/adr/0004-docs-overview-led-ia.md`.
+See `.ai/adr/0004-docs-overview-led-ia.md`.
 
 ## 2026-05-26 — Non-V10 Docs Move To Versioned Archive
 
@@ -16,17 +16,15 @@ All non-V10 docs should be moved under versioned archive folders such as
 `docs/archive/v9/` or `docs/archive/v8/`. Current V10 docs should not link to
 old-version docs, and replacement V10 docs must be updated to current behavior.
 
-See `docs/adr/0005-versioned-docs-archive.md`.
+See `.ai/adr/0005-versioned-docs-archive.md`.
 
-## 2026-05-26 — Repo-Level ADRs Will Move To `.ai/adr/`
+## 2026-05-26 — Repo-Level ADRs Live In `.ai/adr/`
 
 Repo-level ADRs and implementation decision records are codebase memory for
-maintainers and coding agents. They should move from public `docs/adr/` paths to
+maintainers and coding agents. They live outside public docs under
 `.ai/adr/`, with public docs getting derived architecture explainers only when a
 decision is necessary for initial product understanding.
 
-Migration is deferred until the ADR set is moved together. For the docs refresh
-pass, leave `docs/adr/*` in place and keep public docs navigation and agent
-projections from exposing raw ADRs.
+Public docs navigation and generated agent projections must not expose raw ADRs.
 
 See `.ai/adr/0001-codebase-decision-records.md`.

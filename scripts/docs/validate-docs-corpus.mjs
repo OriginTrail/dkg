@@ -4,6 +4,13 @@ import fs from "node:fs";
 import path from "node:path";
 
 const REQUIRED_CURRENT_METADATA = ["status", "version", "audience", "doc_type"];
+const IGNORED_DIRS = new Set([
+  ".git",
+  ".worktrees",
+  ".orchestrator",
+  ".devnet",
+  "node_modules",
+]);
 const CURRENT_PUBLIC_PATHS = [
   "docs/overview.md",
   "docs/index.md",
@@ -70,6 +77,10 @@ function isArchiveVersionRoot(relativePath) {
   return /^docs\/archive\/v[0-9]+(?:\/|$)/.test(relativePath);
 }
 
+function isDocsAdrPath(relativePath) {
+  return /(^|\/)docs\/adr\/[^/]+\.mdx?$/.test(relativePath);
+}
+
 function isStaleDocPath(relativePath) {
   return STALE_DOC_PATHS.some((candidate) => {
     if (candidate.endsWith("/")) {
@@ -107,7 +118,7 @@ function walkFiles(rootDir) {
   const files = [];
 
   for (const entry of entries) {
-    if (entry.name === ".git" || entry.name === "node_modules") {
+    if (IGNORED_DIRS.has(entry.name)) {
       continue;
     }
 
@@ -274,6 +285,12 @@ function validateArchivePlacement(relativePath, errors) {
   }
 }
 
+function validateAdrPlacement(relativePath, errors) {
+  if (isDocsAdrPath(relativePath)) {
+    errors.push(`${relativePath}: ADRs must live under .ai/adr/`);
+  }
+}
+
 function validateAgentContext(relativePath, content, errors) {
   if (!isAgentContextPath(relativePath)) {
     return;
@@ -309,6 +326,7 @@ function main() {
 
   for (const file of files) {
     const relativePath = toPosix(path.relative(rootDir, file));
+    validateAdrPlacement(relativePath, errors);
     validateArchivePlacement(relativePath, errors);
     if (isArchivePath(relativePath)) {
       continue;

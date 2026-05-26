@@ -4,7 +4,7 @@
 **Date**: 2026-05-25
 **Scope**: A durable, retryable, fire-and-forget queue for `WM → SWM` promotions, modelled on the existing `AsyncLiftPublisher` (SWM → VM).
 **Related**:
-- [ADR 0002 — Importer chunking contract](../adr/0002-importer-chunking-contract.md)
+- [ADR 0002 — Importer chunking contract](../../.ai/adr/0002-importer-chunking-contract.md)
 - [`packages/publisher/src/async-lift-publisher.ts`](../../packages/publisher/src/async-lift-publisher.ts) — the existing SWM → VM async machinery this proposal mimics
 - [#596](https://github.com/OriginTrail/dkg/issues/596), [#602](https://github.com/OriginTrail/dkg/pull/602), [#642](https://github.com/OriginTrail/dkg/pull/642) — the Graphify-import experience that surfaced the need
 

@@ -22,7 +22,7 @@ restart and without fragmenting the graph against parallel producers**.
 
 The daemon's `/api/assertion/<name>/{create,write,promote}` loop **is** the
 chunked-write API. There is no `/api/import/bulk` and there will not be one
-(see [ADR 0002](../../../../docs/adr/0002-importer-chunking-contract.md) for
+(see [ADR 0002](../../../../.ai/adr/0002-importer-chunking-contract.md) for
 the rejected-alternative analysis). To push a large graph you call the loop
 many times, with each call staying under fixed budgets.
 
@@ -237,7 +237,7 @@ for (const part of pending) {
 If your import is producing nodes that other producers also produce — files,
 packages, GitHub PRs, etc. — **reuse their URIs**, don't fork a new namespace.
 
-Canonical patterns ([ADR 0003](../../../../docs/adr/0003-code-graph-ontology-convergence.md)):
+Canonical patterns ([ADR 0003](../../../../.ai/adr/0003-code-graph-ontology-convergence.md)):
 
 ```
 urn:dkg:code:package:<pkgName>                  Package (workspace name)
@@ -506,7 +506,7 @@ promote job is queued / running.
 - **Don't push a million-quad payload in one `/write` call.** It will hit 413
   and you'll learn the chunk size the slow way.
 - **Don't invent a new URI namespace for nodes that already exist** — fork the
-  schema and merge later with `owl:sameAs` ([ADR 0003 §Reconciliation](../../../../docs/adr/0003-code-graph-ontology-convergence.md#reconciliation))
+  schema and merge later with `owl:sameAs` ([ADR 0003 §Reconciliation](../../../../.ai/adr/0003-code-graph-ontology-convergence.md#reconciliation))
   is the recovery path, not the steady state.
 - **Don't promote URIs you haven't actually written triples for.** The daemon
   silently accepts ghost-promotes; the resulting SWM looks valid but contains
@@ -564,8 +564,8 @@ promote job is queued / running.
 
 ## References
 
-- [ADR 0002 — Importer chunking contract](../../../../docs/adr/0002-importer-chunking-contract.md)
-- [ADR 0003 — Code-graph ontology convergence](../../../../docs/adr/0003-code-graph-ontology-convergence.md)
+- [ADR 0002 — Importer chunking contract](../../../../.ai/adr/0002-importer-chunking-contract.md)
+- [ADR 0003 — Code-graph ontology convergence](../../../../.ai/adr/0003-code-graph-ontology-convergence.md)
 - [SPEC — Async promote queue (WM → SWM)](../../../../docs/specs/SPEC_ASYNC_PROMOTE_QUEUE.md)
 - [`scripts/lib/manifest.mjs`](../../../../scripts/lib/manifest.mjs) — reference manifest implementation
 - [`scripts/lib/dkg-daemon.mjs`](../../../../scripts/lib/dkg-daemon.mjs) — `DkgClient` with built-in chunking

@@ -598,7 +598,7 @@ condition pointing at the same `.js` files would put us in the "require
 ESM" mode that is unreliable across Node versions. Plugin authors who
 write CommonJS use the one-line `await import()` workaround above.
 
-See [`docs/adr/0001-daemon-route-plugins.md`](../../docs/adr/0001-daemon-route-plugins.md)
+See [`.ai/adr/0001-daemon-route-plugins.md`](../../.ai/adr/0001-daemon-route-plugins.md)
 for the design rationale, threat model, and stability guarantees.
 
 ## Internal Dependencies
