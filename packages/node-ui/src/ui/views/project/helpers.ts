@@ -378,17 +378,18 @@ export function useLayerTriples(memory: ReturnType<typeof useMemoryEntities>, la
   return useMemo(() => {
     const seen = new Set<string>();
     const out: Triple[] = [];
-    // Task #25 — first-class entity = URI that appears as a *subject*
-    // in this layer's triples. `buildEntities` synthesises a record
-    // for every URI mentioned including pure objects (so vocabulary
-    // URIs like `https://ref.gs1.org/cbv/BizStep-packing` end up in
-    // `memory.entities`), making the entity map useless for the
-    // "is this a real entity?" check. Scan once for the subject set.
-    const subjectsInLayer = new Set<string>();
-    for (const t of memory.allTriples) {
-      if (t.layer !== targetLayer) continue;
-      subjectsInLayer.add(canonicalEntityUri(t.subject));
-    }
+    // Task #25 — first-class entity = same membership rule the
+    // Entities tab uses (`useMemoryEntities.ts:467-469`): an entity is
+    // in `entityList` iff it has at least one of `types`, own
+    // `properties`, or outgoing `connections`. Pure-object URIs
+    // (`cbv:BizStep-packing`, `ipfs://Qm...` as `sourceFile` target,
+    // `did:...` as `wasAttributedTo` target) get a synthetic record
+    // from `buildEntities` but no own data — so they're not in
+    // `entityList` and not first-class entities. Mirror that
+    // membership rule here so the Graph view and the Entities tab
+    // stay in lockstep — single source of truth, no two-rule drift.
+    const entityUris = new Set<string>();
+    for (const e of memory.entityList) entityUris.add(canonicalEntityUri(e.uri));
     for (const t of memory.allTriples) {
       if (t.layer !== targetLayer) continue;
       // Skip residual triples for a subject that has been promoted past
@@ -418,24 +419,22 @@ export function useLayerTriples(memory: ReturnType<typeof useMemoryEntities>, la
       // triples (`rdf:type`, labels, `schema:name`, etc.) have a
       // non-resource object so this check no-ops; they always pass.
       //
-      // Task #25 — also drop resource→resource edges whose object is
-      // a **vocabulary value URI** (never appears as a subject in
-      // this layer): e.g. `<entity> epcis:bizstep <bizstep:packing>`
-      // would render `bizstep:packing` as a phantom canvas node
-      // tinted by `defaultNodeColor` while typed entities used
-      // `classColors` — the source of the user-reported "random
-      // different-coloured nodes" on the WM Graph. The graph should
-      // only show first-class entities until N1 ships an
-      // entity/+triples toggle. `rdf:type` is exempt — class IRIs
-      // never appear as subjects but the downstream
-      // `splitGraphTriplesForShelf` rdf:type guard ensures they
-      // don't become canvas nodes, and we need the triple itself
-      // for `classColors`.
+      // Task #25 — additionally drop resource→resource edges whose
+      // object isn't in the layer's `entityList` (same membership
+      // rule as the Entities tab). Covers all the cases that
+      // produced "random different-coloured nodes" on the WM Graph:
+      // vocabulary constants (`cbv:BizStep-packing`), IPFS file
+      // refs as `sourceFile` targets, DID identifiers as
+      // `wasAttributedTo` targets, blank-node compound-property
+      // anchors. `rdf:type` is exempt — class IRIs aren't entities
+      // but the triple is needed for `classColors`, and the
+      // downstream `splitGraphTriplesForShelf` rdf:type guard
+      // already prevents the class IRI from becoming a canvas node.
       if (isResourceObject(t.object)) {
         const canonicalObject = canonicalEntityUri(t.object);
         const objectEntity = memory.entities.get(canonicalObject);
         if (objectEntity && objectEntity.trustLevel !== targetLayer) continue;
-        if (!isRdfType(t.predicate) && !subjectsInLayer.has(canonicalObject)) continue;
+        if (!isRdfType(t.predicate) && !entityUris.has(canonicalObject)) continue;
       }
       const key = `${t.subject}|${t.predicate}|${t.object}`;
       if (seen.has(key)) continue;
@@ -443,7 +442,7 @@ export function useLayerTriples(memory: ReturnType<typeof useMemoryEntities>, la
       out.push(t);
     }
     return out;
-  }, [memory.allTriples, memory.entities, targetLayer]);
+  }, [memory.allTriples, memory.entities, memory.entityList, targetLayer]);
 }
 
 // ─── Assertions List (WM/SWM named graphs) ──────────────────
