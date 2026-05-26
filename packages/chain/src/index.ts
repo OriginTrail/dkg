@@ -6,4 +6,13 @@ export {
   HubResolutionCache,
   type HubResolutionCacheOptions,
 } from './hub-resolution-cache.js';
+export {
+  KCStorageRegistry,
+  deriveStorageTag,
+  type KCStorageEntry,
+  type KCStorageHubReader,
+  type KCStorageUriReader,
+  type KCStorageRegistryLogger,
+  type KCStorageRegistryOptions,
+} from './kc-storage-registry.js';
 export { PcaUnavailableError, isPcaUnavailableError } from './pca-errors.js';
