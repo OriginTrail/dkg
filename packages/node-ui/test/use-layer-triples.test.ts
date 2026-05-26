@@ -12,18 +12,9 @@ const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 
 function memoryFor(triples: LayeredTriple[]): MemoryData {
   const entities = buildMemoryEntities(triples);
-  // Mirror the real `useMemoryEntities` filter at src/ui/hooks/
-  // useMemoryEntities.ts:467-469 — the entity-tab membership rule that
-  // `useLayerTriples` now consults. Without applying it here the test
-  // shim would list every synthesised entity stub (including pure
-  // object URIs like `cbv:BizStep-packing`), defeating the purpose
-  // of the filter under test.
-  const entityList = [...entities.values()].filter(e =>
-    e.types.length > 0 || e.properties.size > 0 || e.connections.length > 0,
-  );
   return {
     entities,
-    entityList,
+    entityList: [...entities.values()],
     allTriples: triples,
     graphTriples: [],
     trustMap: new Map(),
@@ -39,12 +30,7 @@ function memoryFor(triples: LayeredTriple[]): MemoryData {
 function ProbeLayerTriples({ memory, layer }: { memory: MemoryData; layer: 'wm' | 'swm' | 'vm' }) {
   const triples = useLayerTriples(memory as any, layer);
   const subjects = triples.map((t: Triple) => t.subject).join('|');
-  const objects = triples.map((t: Triple) => t.object).join('|');
-  return React.createElement('div', {
-    id: 'probe',
-    'data-subjects': subjects,
-    'data-objects': objects,
-  });
+  return React.createElement('div', { id: 'probe', 'data-subjects': subjects });
 }
 
 describe('useLayerTriples — promoted-entity residue filter (P1)', () => {
@@ -210,129 +196,5 @@ describe('useLayerTriples — promoted-entity residue filter (P1)', () => {
 
     // No triple at all whose subject is the leaked promoted entity.
     expect(subjects).not.toContain('urn:e:promoted-b');
-  });
-});
-
-// Task #25 — the Graph view filters resource→resource edges using the
-// same `entityList` membership rule the Entities tab uses
-// (`useMemoryEntities.ts:467-469`): an entity has at least one of
-// `types`, own `properties`, or outgoing `connections`. URIs that
-// appear only as objects with no own data (vocabulary constants like
-// `cbv:BizStep-packing`, `ipfs://` file refs, `did:` identity refs,
-// blank-node compound-property anchors) are property values, not
-// entities, and are dropped from the graph. Single source of truth
-// across the Graph view and the Entities tab — no two-rule drift.
-describe('useLayerTriples — entityList membership filter (#25)', () => {
-  let root: Root;
-  let container: HTMLDivElement;
-
-  beforeEach(() => {
-    container = document.createElement('div');
-    document.body.appendChild(container);
-    root = createRoot(container);
-  });
-
-  afterEach(() => {
-    act(() => root.unmount());
-    container.remove();
-  });
-
-  it('drops vocabulary-constant objects (`cbv:BizStep-packing` — no own data)', () => {
-    // `urn:e:event` is a typed entity (Event). Its two object-side
-    // resources: `urn:e:other-entity` is also a real entity (has its
-    // own rdf:type triple), `https://ref.gs1.org/cbv/BizStep-packing`
-    // is a vocabulary constant with no own data. Entity-to-entity
-    // edge stays; entity-to-vocabulary edge is dropped.
-    const triples: LayeredTriple[] = [
-      { subject: 'urn:e:event',        predicate: RDF_TYPE, object: 'http://schema.org/Event', layer: 'working' },
-      { subject: 'urn:e:other-entity', predicate: RDF_TYPE, object: 'http://schema.org/Thing', layer: 'working' },
-      { subject: 'urn:e:event', predicate: 'http://schema.org/about', object: 'urn:e:other-entity', layer: 'working' },
-      { subject: 'urn:e:event', predicate: 'https://ref.gs1.org/cbv/bizStep', object: 'https://ref.gs1.org/cbv/BizStep-packing', layer: 'working' },
-      { subject: 'urn:e:event', predicate: 'http://schema.org/name', object: '"E"', layer: 'working' },
-    ];
-    const memory = memoryFor(triples);
-    act(() => {
-      root.render(React.createElement(ProbeLayerTriples, { memory, layer: 'wm' }));
-    });
-    const probe = container.querySelector('#probe')!;
-    const objects = (probe.getAttribute('data-objects') ?? '').split('|');
-    expect(objects).not.toContain('https://ref.gs1.org/cbv/BizStep-packing');
-    expect(objects).toContain('urn:e:other-entity');
-    // rdf:type still passes — class IRI exemption for `classColors`.
-    expect(objects).toContain('http://schema.org/Event');
-  });
-
-  it('drops `ipfs://` file-ref objects (sourceFile property value, no own data)', () => {
-    const triples: LayeredTriple[] = [
-      { subject: 'urn:e:doc', predicate: RDF_TYPE, object: 'http://schema.org/CreativeWork', layer: 'working' },
-      { subject: 'urn:e:doc', predicate: 'http://dkg.io/ontology/sourceFile', object: 'ipfs://QmExampleCidHash', layer: 'working' },
-    ];
-    const memory = memoryFor(triples);
-    act(() => {
-      root.render(React.createElement(ProbeLayerTriples, { memory, layer: 'wm' }));
-    });
-    const probe = container.querySelector('#probe')!;
-    const objects = (probe.getAttribute('data-objects') ?? '').split('|');
-    expect(objects).not.toContain('ipfs://QmExampleCidHash');
-  });
-
-  it('drops `did:` identity-ref objects (wasAttributedTo property value, no own data)', () => {
-    const triples: LayeredTriple[] = [
-      { subject: 'urn:e:doc', predicate: RDF_TYPE, object: 'http://schema.org/CreativeWork', layer: 'working' },
-      { subject: 'urn:e:doc', predicate: 'http://www.w3.org/ns/prov#wasAttributedTo', object: 'did:dkg:agent:0xabc123', layer: 'working' },
-    ];
-    const memory = memoryFor(triples);
-    act(() => {
-      root.render(React.createElement(ProbeLayerTriples, { memory, layer: 'wm' }));
-    });
-    const probe = container.querySelector('#probe')!;
-    const objects = (probe.getAttribute('data-objects') ?? '').split('|');
-    expect(objects).not.toContain('did:dkg:agent:0xabc123');
-  });
-
-  it('keeps `did:` objects when the DID has its own data in the layer (real agent entity)', () => {
-    // When a DID is a first-class entity (has its own rdf:type or
-    // properties), it IS in entityList and the edge to it stays.
-    // Mirrors how the Entities tab would list it.
-    const triples: LayeredTriple[] = [
-      { subject: 'urn:e:doc',          predicate: RDF_TYPE, object: 'http://schema.org/CreativeWork', layer: 'working' },
-      { subject: 'did:dkg:agent:alice', predicate: RDF_TYPE, object: 'http://schema.org/Person', layer: 'working' },
-      { subject: 'urn:e:doc', predicate: 'http://www.w3.org/ns/prov#wasAttributedTo', object: 'did:dkg:agent:alice', layer: 'working' },
-    ];
-    const memory = memoryFor(triples);
-    act(() => {
-      root.render(React.createElement(ProbeLayerTriples, { memory, layer: 'wm' }));
-    });
-    const probe = container.querySelector('#probe')!;
-    const objects = (probe.getAttribute('data-objects') ?? '').split('|');
-    expect(objects).toContain('did:dkg:agent:alice');
-  });
-
-  it('keeps rdf:type triples whose object is a class IRI (exemption for `classColors`)', () => {
-    const triples: LayeredTriple[] = [
-      { subject: 'urn:e:typed', predicate: RDF_TYPE, object: 'http://schema.org/Thing', layer: 'working' },
-    ];
-    const memory = memoryFor(triples);
-    act(() => {
-      root.render(React.createElement(ProbeLayerTriples, { memory, layer: 'wm' }));
-    });
-    const probe = container.querySelector('#probe')!;
-    const objects = (probe.getAttribute('data-objects') ?? '').split('|');
-    expect(objects).toContain('http://schema.org/Thing');
-  });
-
-  it('still drops cross-layer resource-to-resource edges (Issue A behaviour preserved)', () => {
-    const triples: LayeredTriple[] = [
-      { subject: 'urn:e:wm-a',        predicate: RDF_TYPE, object: 'http://schema.org/Thing', layer: 'working' },
-      { subject: 'urn:e:promoted-b',  predicate: RDF_TYPE, object: 'http://schema.org/Thing', layer: 'shared' },
-      { subject: 'urn:e:wm-a', predicate: 'http://schema.org/knows', object: 'urn:e:promoted-b', layer: 'working' },
-    ];
-    const memory = memoryFor(triples);
-    act(() => {
-      root.render(React.createElement(ProbeLayerTriples, { memory, layer: 'wm' }));
-    });
-    const probe = container.querySelector('#probe')!;
-    const objects = (probe.getAttribute('data-objects') ?? '').split('|');
-    expect(objects).not.toContain('urn:e:promoted-b');
   });
 });

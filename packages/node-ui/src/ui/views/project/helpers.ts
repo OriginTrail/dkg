@@ -361,6 +361,61 @@ function isResourceObject(value: string): boolean {
   return /^[A-Za-z][A-Za-z0-9+.-]*:/.test(trimmed);
 }
 
+export function useLayerTriples(memory: ReturnType<typeof useMemoryEntities>, layer: 'wm' | 'swm' | 'vm'): Triple[] {
+  const targetLayer = LAYER_CONFIG[layer].trustLevel;
+  return useMemo(() => {
+    const seen = new Set<string>();
+    const out: Triple[] = [];
+    for (const t of memory.allTriples) {
+      if (t.layer !== targetLayer) continue;
+      // Skip residual triples for a subject that has been promoted past
+      // this layer: post-promote the daemon currently leaves the WM
+      // `/assertion/<addr>/<name>` graphs on disk, so a promoted entity's
+      // WM triples keep coming back from `wmSparql` even though the
+      // entity has logically moved to SWM. The entity's canonical layer
+      // is `trustLevel` (its highest layer); a triple whose subject has
+      // moved past `targetLayer` would otherwise be counted on the
+      // prior layer's tally. Triples whose subject has no entity record
+      // (literal orphans / class IRIs that only ever appear as objects)
+      // pass through unfiltered.
+      //
+      // R2-1 fix: `entities.get` is keyed by the canonical (trimmed,
+      // unwrapped) URI per `buildEntities`. The daemon sometimes ships
+      // subjects wrapped (`<urn:...>`) — looking them up raw misses the
+      // entity record, silently bypasses this filter, and the phantom
+      // triple returns. Canonicalise first.
+      const subjectEntity = memory.entities.get(canonicalEntityUri(t.subject));
+      if (subjectEntity && subjectEntity.trustLevel !== targetLayer) continue;
+      // Issue-A fix (object-side, asymmetric C17 form): a WM triple
+      // `wm-entity-A relatesTo swm-entity-B` (B promoted to SWM) has
+      // a WM subject but its object has moved past WM. The triple is
+      // residue — counting it on WM would inflate the count and
+      // would leak the promoted-entity URI as an object in any
+      // downstream rendering. Drop resource→resource edges whose
+      // object has been promoted past the requested layer.
+      // Literal-valued triples (labels, names, etc.) have a
+      // non-resource object so this check no-ops; they always pass.
+      //
+      // This stays in `useLayerTriples` because it's a per-LAYER
+      // correctness rule (a triple shouldn't be tallied on a layer
+      // where neither endpoint canonically lives). Entity-filtering
+      // for the graph view happens downstream in `LayerGraphPanel`
+      // via `filterTriplesToEntities` — `useLayerTriples` is the
+      // honest layer source for triple counts and VM hero stats.
+      if (isResourceObject(t.object)) {
+        const canonicalObject = canonicalEntityUri(t.object);
+        const objectEntity = memory.entities.get(canonicalObject);
+        if (objectEntity && objectEntity.trustLevel !== targetLayer) continue;
+      }
+      const key = `${t.subject}|${t.predicate}|${t.object}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(t);
+    }
+    return out;
+  }, [memory.allTriples, memory.entities, targetLayer]);
+}
+
 const RDF_TYPE_URI = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 function isRdfType(predicate: string): boolean {
   // Match the wrapped/unwrapped + whitespace tolerance used elsewhere
@@ -373,76 +428,41 @@ function isRdfType(predicate: string): boolean {
   return unwrapped === RDF_TYPE_URI;
 }
 
-export function useLayerTriples(memory: ReturnType<typeof useMemoryEntities>, layer: 'wm' | 'swm' | 'vm'): Triple[] {
-  const targetLayer = LAYER_CONFIG[layer].trustLevel;
-  return useMemo(() => {
-    const seen = new Set<string>();
-    const out: Triple[] = [];
-    // Task #25 — first-class entity = same membership rule the
-    // Entities tab uses (`useMemoryEntities.ts:467-469`): an entity is
-    // in `entityList` iff it has at least one of `types`, own
-    // `properties`, or outgoing `connections`. Pure-object URIs
-    // (`cbv:BizStep-packing`, `ipfs://Qm...` as `sourceFile` target,
-    // `did:...` as `wasAttributedTo` target) get a synthetic record
-    // from `buildEntities` but no own data — so they're not in
-    // `entityList` and not first-class entities. Mirror that
-    // membership rule here so the Graph view and the Entities tab
-    // stay in lockstep — single source of truth, no two-rule drift.
-    const entityUris = new Set<string>();
-    for (const e of memory.entityList) entityUris.add(canonicalEntityUri(e.uri));
-    for (const t of memory.allTriples) {
-      if (t.layer !== targetLayer) continue;
-      // Skip residual triples for a subject that has been promoted past
-      // this layer: post-promote the daemon currently leaves the WM
-      // `/assertion/<addr>/<name>` graphs on disk, so a promoted entity's
-      // WM triples keep coming back from `wmSparql` even though the
-      // entity has logically moved to SWM. The entity's canonical layer
-      // is `trustLevel` (its highest layer); a triple whose subject has
-      // moved past `targetLayer` would otherwise render as a phantom
-      // node on the prior-layer Graph view. Triples whose subject has
-      // no entity record (literal orphans / class IRIs that only ever
-      // appear as objects) pass through unfiltered.
-      //
-      // R2-1 fix: `entities.get` is keyed by the canonical (trimmed,
-      // unwrapped) URI per `buildEntities`. The daemon sometimes ships
-      // subjects wrapped (`<urn:...>`) — looking them up raw misses the
-      // entity record, silently bypasses this filter, and the phantom
-      // node returns. Canonicalise first.
-      const subjectEntity = memory.entities.get(canonicalEntityUri(t.subject));
-      if (subjectEntity && subjectEntity.trustLevel !== targetLayer) continue;
-      // Issue-A fix (object-side, asymmetric C17 form): a WM triple
-      // `wm-entity-A relatesTo swm-entity-B` (B promoted to SWM)
-      // passes the subject check but `RdfGraph` would render BOTH
-      // endpoints as canvas nodes — the promoted-entity URI leaks in
-      // as an object node. Drop resource→resource edges whose object
-      // has been promoted past the requested layer. Literal-valued
-      // triples (`rdf:type`, labels, `schema:name`, etc.) have a
-      // non-resource object so this check no-ops; they always pass.
-      //
-      // Task #25 — additionally drop resource→resource edges whose
-      // object isn't in the layer's `entityList` (same membership
-      // rule as the Entities tab). Covers all the cases that
-      // produced "random different-coloured nodes" on the WM Graph:
-      // vocabulary constants (`cbv:BizStep-packing`), IPFS file
-      // refs as `sourceFile` targets, DID identifiers as
-      // `wasAttributedTo` targets, blank-node compound-property
-      // anchors. `rdf:type` is exempt — class IRIs aren't entities
-      // but the triple is needed for `classColors`, and the
-      // downstream `splitGraphTriplesForShelf` rdf:type guard
-      // already prevents the class IRI from becoming a canvas node.
-      if (isResourceObject(t.object)) {
-        const canonicalObject = canonicalEntityUri(t.object);
-        const objectEntity = memory.entities.get(canonicalObject);
-        if (objectEntity && objectEntity.trustLevel !== targetLayer) continue;
-        if (!isRdfType(t.predicate) && !entityUris.has(canonicalObject)) continue;
-      }
-      const key = `${t.subject}|${t.predicate}|${t.object}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push(t);
+/**
+ * Task #25 — graph-render-side entity filter. Used by `LayerGraphPanel`
+ * just before `RdfGraph`. Drops resource→resource edges whose object
+ * isn't in the layer's `entityList` membership (same rule the Entities
+ * tab uses: `e.types.length > 0 || e.properties.size > 0 || e.connections.length > 0`).
+ * Pure-object URIs — vocabulary constants (`cbv:BizStep-packing`),
+ * IPFS file refs (`ipfs://...`), DID identity refs (`did:...`),
+ * blank-node compound-property anchors — drop uniformly. If the
+ * object IS a first-class entity in the layer (e.g. a DID with its
+ * own rdf:type), the edge is kept.
+ *
+ * Lives in `helpers.ts` (not `components.tsx`) so it stays pure and
+ * unit-testable without rendering. `rdf:type` is exempt: class IRIs
+ * aren't entities but the triple is needed for `classColors`, and
+ * the downstream `splitGraphTriplesForShelf` rdf:type guard already
+ * prevents the class IRI from becoming a canvas node.
+ *
+ * `entityUris` is the set of canonical URIs of entities in the
+ * **layer's** entityList — i.e. callers should pass
+ * `memory.entityList.filter(e => e.trustLevel === layer.trustLevel)`
+ * mapped to canonical URIs. (`LayerGraphPanel` already has the layer
+ * to do that filtering with.)
+ */
+export function filterTriplesToEntities(
+  triples: Triple[],
+  entityUris: ReadonlySet<string>,
+): Triple[] {
+  const out: Triple[] = [];
+  for (const t of triples) {
+    if (isResourceObject(t.object)) {
+      if (!isRdfType(t.predicate) && !entityUris.has(canonicalEntityUri(t.object))) continue;
     }
-    return out;
-  }, [memory.allTriples, memory.entities, memory.entityList, targetLayer]);
+    out.push(t);
+  }
+  return out;
 }
 
 // ─── Assertions List (WM/SWM named graphs) ──────────────────

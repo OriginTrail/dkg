@@ -15,6 +15,7 @@ import { ImportFilesModal } from '../../components/Modals/ImportFilesModal.js';
 import { ShareProjectModal } from '../../components/Modals/ShareProjectModal.js';
 import {
   useMemoryEntities,
+  canonicalEntityUri,
   type TrustLevel, type MemoryEntity, type Triple,
 } from '../../hooks/useMemoryEntities.js';
 import { decodeRdfStringLiteral } from '../../../rdf-literal.js';
@@ -57,6 +58,7 @@ import {
   shortType, shortPred, entityMeta,
   buildLayerGraphOptions, getDescription, neighborhoodTriples,
   matchesSearch, humanizeLabel, layerNoun, useLayerTriples,
+  filterTriplesToEntities,
   entityTimestamp, formatRelativeTime, formatTimelineBucket, formatTrailTimestamp,
   type LayerView, type LayerContentTab, type KAPane,
   type SubGraphTab, type SubGraphEntitySort,
@@ -887,6 +889,7 @@ export function LayerGraphPanel({
   title: titleOverride,
   scopeEntities,
   swmAttribution,
+  layerEntities,
 }: {
   layer: 'wm' | 'swm' | 'vm';
   triples: Triple[];
@@ -914,6 +917,17 @@ export function LayerGraphPanel({
    * `EntityDetailView`, tests).
    */
   swmAttribution?: SwmAttributionsResult;
+  /**
+   * Task #25 (PR #677) — the layer's `entityList` (entities whose
+   * canonical layer matches this panel's `layer`). When supplied,
+   * the panel filters object-side resources against entity membership
+   * via `filterTriplesToEntities` so pure-object URIs (vocabulary
+   * constants, `ipfs://` file refs, `did:` identity refs, blank-node
+   * compound-property anchors) don't render as canvas nodes. Omit
+   * (or pass an empty array) to preserve the legacy behaviour where
+   * the panel renders every resource referenced in `triples`.
+   */
+  layerEntities?: ReadonlyArray<MemoryEntity>;
 }) {
   const { title: layerTitle } = LAYER_CONFIG[layer];
   const title = titleOverride ?? layerTitle;
@@ -972,6 +986,20 @@ export function LayerGraphPanel({
     return out;
   }, [triples, decorationTriples]);
 
+  // Task #25 (PR #677) — entity-only graph filter, render-path side.
+  // `useLayerTriples` stays the honest source of all layer triples
+  // (triple counts, VM hero stats depend on that). The graph view is
+  // the only surface that wants "@id-entities only" semantics, so the
+  // filter lives here. Callers that don't pass `layerEntities` (older
+  // callsites, tests) keep the legacy behaviour of rendering every
+  // resource referenced in `triples`.
+  const renderTriples = useMemo(() => {
+    if (!layerEntities || layerEntities.length === 0) return uniqueTriples;
+    const entityUris = new Set<string>();
+    for (const e of layerEntities) entityUris.add(canonicalEntityUri(e.uri));
+    return filterTriplesToEntities(uniqueTriples, entityUris);
+  }, [uniqueTriples, layerEntities]);
+
   // Only SWM layer uses per-URI node tints — for the rest, classColors rules
   // so code graphs stay legible (Package purple / File blue / etc).
   const graphOptions = useMemo(
@@ -979,8 +1007,8 @@ export function LayerGraphPanel({
     [layer, swmAttr.nodeColors],
   );
   const { canvasTriples, singletonItems } = useMemo(
-    () => splitGraphTriplesForShelf(uniqueTriples),
-    [uniqueTriples],
+    () => splitGraphTriplesForShelf(renderTriples),
+    [renderTriples],
   );
 
   // Union `singletonItems` (URIs that are *subjects* of triples but have
@@ -1865,6 +1893,7 @@ export function LayerContent({
             onNodeClick={onNodeClick}
             contextGraphId={contextGraphId}
             swmAttribution={layer === 'swm' ? swmAttribution : undefined}
+            layerEntities={entities}
           />
         </div>
       )}
