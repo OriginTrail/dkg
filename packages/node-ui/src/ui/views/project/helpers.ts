@@ -361,11 +361,34 @@ function isResourceObject(value: string): boolean {
   return /^[A-Za-z][A-Za-z0-9+.-]*:/.test(trimmed);
 }
 
+const RDF_TYPE_URI = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+function isRdfType(predicate: string): boolean {
+  // Match the wrapped/unwrapped + whitespace tolerance used elsewhere
+  // (see `splitGraphTriplesForShelf::graphNodeKey`); raw equality
+  // would let a `<rdf:type>` predicate slip past this guard.
+  const trimmed = predicate.trim();
+  const unwrapped = trimmed.startsWith('<') && trimmed.endsWith('>')
+    ? trimmed.slice(1, -1)
+    : trimmed;
+  return unwrapped === RDF_TYPE_URI;
+}
+
 export function useLayerTriples(memory: ReturnType<typeof useMemoryEntities>, layer: 'wm' | 'swm' | 'vm'): Triple[] {
   const targetLayer = LAYER_CONFIG[layer].trustLevel;
   return useMemo(() => {
     const seen = new Set<string>();
     const out: Triple[] = [];
+    // Task #25 — first-class entity = URI that appears as a *subject*
+    // in this layer's triples. `buildEntities` synthesises a record
+    // for every URI mentioned including pure objects (so vocabulary
+    // URIs like `https://ref.gs1.org/cbv/BizStep-packing` end up in
+    // `memory.entities`), making the entity map useless for the
+    // "is this a real entity?" check. Scan once for the subject set.
+    const subjectsInLayer = new Set<string>();
+    for (const t of memory.allTriples) {
+      if (t.layer !== targetLayer) continue;
+      subjectsInLayer.add(canonicalEntityUri(t.subject));
+    }
     for (const t of memory.allTriples) {
       if (t.layer !== targetLayer) continue;
       // Skip residual triples for a subject that has been promoted past
@@ -394,9 +417,25 @@ export function useLayerTriples(memory: ReturnType<typeof useMemoryEntities>, la
       // has been promoted past the requested layer. Literal-valued
       // triples (`rdf:type`, labels, `schema:name`, etc.) have a
       // non-resource object so this check no-ops; they always pass.
+      //
+      // Task #25 — also drop resource→resource edges whose object is
+      // a **vocabulary value URI** (never appears as a subject in
+      // this layer): e.g. `<entity> epcis:bizstep <bizstep:packing>`
+      // would render `bizstep:packing` as a phantom canvas node
+      // tinted by `defaultNodeColor` while typed entities used
+      // `classColors` — the source of the user-reported "random
+      // different-coloured nodes" on the WM Graph. The graph should
+      // only show first-class entities until N1 ships an
+      // entity/+triples toggle. `rdf:type` is exempt — class IRIs
+      // never appear as subjects but the downstream
+      // `splitGraphTriplesForShelf` rdf:type guard ensures they
+      // don't become canvas nodes, and we need the triple itself
+      // for `classColors`.
       if (isResourceObject(t.object)) {
-        const objectEntity = memory.entities.get(canonicalEntityUri(t.object));
+        const canonicalObject = canonicalEntityUri(t.object);
+        const objectEntity = memory.entities.get(canonicalObject);
         if (objectEntity && objectEntity.trustLevel !== targetLayer) continue;
+        if (!isRdfType(t.predicate) && !subjectsInLayer.has(canonicalObject)) continue;
       }
       const key = `${t.subject}|${t.predicate}|${t.object}`;
       if (seen.has(key)) continue;

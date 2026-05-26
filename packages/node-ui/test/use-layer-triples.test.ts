@@ -30,7 +30,12 @@ function memoryFor(triples: LayeredTriple[]): MemoryData {
 function ProbeLayerTriples({ memory, layer }: { memory: MemoryData; layer: 'wm' | 'swm' | 'vm' }) {
   const triples = useLayerTriples(memory as any, layer);
   const subjects = triples.map((t: Triple) => t.subject).join('|');
-  return React.createElement('div', { id: 'probe', 'data-subjects': subjects });
+  const objects = triples.map((t: Triple) => t.object).join('|');
+  return React.createElement('div', {
+    id: 'probe',
+    'data-subjects': subjects,
+    'data-objects': objects,
+  });
 }
 
 describe('useLayerTriples — promoted-entity residue filter (P1)', () => {
@@ -196,5 +201,99 @@ describe('useLayerTriples — promoted-entity residue filter (P1)', () => {
 
     // No triple at all whose subject is the leaked promoted entity.
     expect(subjects).not.toContain('urn:e:promoted-b');
+  });
+});
+
+// Task #25 — the Graph view should only render nodes for first-class
+// entities. Pre-fix, resource objects with no subject record in the
+// layer (vocabulary-value URIs like `bizstep:packing`) leaked through
+// and rendered as canvas nodes, falling back to `defaultNodeColor`
+// while typed entities used `classColors` — so the user saw "random
+// different-coloured nodes" along the edge of the WM graph.
+describe('useLayerTriples — vocabulary-value object filter (#25)', () => {
+  let root: Root;
+  let container: HTMLDivElement;
+
+  beforeEach(() => {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('drops resource→resource edges whose object is a vocabulary value (never a subject in the layer)', () => {
+    // `urn:e:event` is a typed entity (Event). It has two object-side
+    // resources: `urn:e:other-entity` (a real entity, appears as a
+    // subject) and `https://ref.gs1.org/cbv/BizStep-packing` (a
+    // vocabulary value with no subject-side triples — only used as
+    // an object). The vocabulary edge should be dropped; the
+    // entity-to-entity edge stays.
+    const triples: LayeredTriple[] = [
+      { subject: 'urn:e:event',        predicate: RDF_TYPE, object: 'http://schema.org/Event', layer: 'working' },
+      { subject: 'urn:e:other-entity', predicate: RDF_TYPE, object: 'http://schema.org/Thing', layer: 'working' },
+      // Entity-to-entity edge — must survive.
+      { subject: 'urn:e:event', predicate: 'http://schema.org/about', object: 'urn:e:other-entity', layer: 'working' },
+      // Entity-to-vocabulary edge — must be dropped (would render
+      // `BizStep-packing` as a phantom canvas node).
+      { subject: 'urn:e:event', predicate: 'https://ref.gs1.org/cbv/bizStep', object: 'https://ref.gs1.org/cbv/BizStep-packing', layer: 'working' },
+      // Literal subject-local triple — must always pass.
+      { subject: 'urn:e:event', predicate: 'http://schema.org/name', object: '"E"', layer: 'working' },
+    ];
+    const memory = memoryFor(triples);
+    expect(memory.entities.get('urn:e:event')).toBeDefined();
+    expect(memory.entities.get('urn:e:other-entity')).toBeDefined();
+    // `buildEntities` creates a record for every URI mentioned even
+    // as a pure object, so the vocabulary URI does end up in the
+    // map. The filter scans the layer's subjects directly instead.
+
+    act(() => {
+      root.render(React.createElement(ProbeLayerTriples, { memory, layer: 'wm' }));
+    });
+
+    const probe = container.querySelector('#probe')!;
+    const objects = (probe.getAttribute('data-objects') ?? '').split('|');
+    // The vocabulary URI never appears as a triple object after filtering.
+    expect(objects).not.toContain('https://ref.gs1.org/cbv/BizStep-packing');
+    // The real entity edge survives.
+    expect(objects).toContain('urn:e:other-entity');
+    // rdf:type is exempt — the class URI is allowed as an object
+    // (the downstream shelf-split rdf:type guard prevents it from
+    // becoming a canvas node).
+    expect(objects).toContain('http://schema.org/Event');
+  });
+
+  it('keeps rdf:type triples whose object is a class IRI (no subject-side appearance)', () => {
+    const triples: LayeredTriple[] = [
+      { subject: 'urn:e:typed', predicate: RDF_TYPE, object: 'http://schema.org/Thing', layer: 'working' },
+    ];
+    const memory = memoryFor(triples);
+    act(() => {
+      root.render(React.createElement(ProbeLayerTriples, { memory, layer: 'wm' }));
+    });
+    const probe = container.querySelector('#probe')!;
+    const objects = (probe.getAttribute('data-objects') ?? '').split('|');
+    expect(objects).toContain('http://schema.org/Thing');
+  });
+
+  it('still drops cross-layer resource-to-resource edges (Issue A behaviour preserved)', () => {
+    // Regression: the new vocabulary filter must not weaken the
+    // existing Issue-A check that drops edges to entities promoted
+    // past the layer.
+    const triples: LayeredTriple[] = [
+      { subject: 'urn:e:wm-a',        predicate: RDF_TYPE, object: 'http://schema.org/Thing', layer: 'working' },
+      { subject: 'urn:e:promoted-b',  predicate: RDF_TYPE, object: 'http://schema.org/Thing', layer: 'shared' },
+      { subject: 'urn:e:wm-a', predicate: 'http://schema.org/knows', object: 'urn:e:promoted-b', layer: 'working' },
+    ];
+    const memory = memoryFor(triples);
+    act(() => {
+      root.render(React.createElement(ProbeLayerTriples, { memory, layer: 'wm' }));
+    });
+    const probe = container.querySelector('#probe')!;
+    const objects = (probe.getAttribute('data-objects') ?? '').split('|');
+    expect(objects).not.toContain('urn:e:promoted-b');
   });
 });
