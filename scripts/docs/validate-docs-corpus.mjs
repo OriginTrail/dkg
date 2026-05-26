@@ -28,6 +28,10 @@ function isArchivePath(relativePath) {
   return relativePath === "docs/archive" || relativePath.startsWith("docs/archive/");
 }
 
+function isVersionedArchivePath(relativePath) {
+  return relativePath.startsWith("docs/archive/v8/") || relativePath.startsWith("docs/archive/v9/");
+}
+
 function isCurrentPublicPath(relativePath) {
   return CURRENT_PUBLIC_PATHS.some((candidate) => {
     if (candidate.endsWith("/")) {
@@ -87,8 +91,12 @@ function isCurrentMetadata(metadata) {
   return metadata?.status === "current" || metadata?.version === "v10";
 }
 
+function isCurrentDoc(relativePath, metadata) {
+  return isCurrentPublicPath(relativePath) || isCurrentMetadata(metadata);
+}
+
 function validateCurrentMetadata(relativePath, metadata, errors) {
-  if (!isCurrentPublicPath(relativePath) && !isCurrentMetadata(metadata)) {
+  if (!isCurrentDoc(relativePath, metadata)) {
     return;
   }
 
@@ -112,6 +120,57 @@ function validateCurrentMetadata(relativePath, metadata, errors) {
   }
 }
 
+function extractMarkdownLinks(content) {
+  const links = [];
+  const inlineLinkPattern = /!?\[[^\]]*\]\(([^)\s]+)(?:\s+["'][^"']*["'])?\)/g;
+  const referenceLinkPattern = /^\s*\[[^\]]+\]:\s+(\S+)/gm;
+
+  for (const match of content.matchAll(inlineLinkPattern)) {
+    links.push(match[1]);
+  }
+
+  for (const match of content.matchAll(referenceLinkPattern)) {
+    links.push(match[1]);
+  }
+
+  return links;
+}
+
+function normalizeDocLink(relativePath, linkTarget) {
+  const target = linkTarget.trim().replace(/^<|>$/g, "");
+  if (
+    !target ||
+    target.startsWith("#") ||
+    /^[a-z][a-z0-9+.-]*:/i.test(target)
+  ) {
+    return null;
+  }
+
+  const withoutFragment = target.split("#")[0].split("?")[0];
+  if (!withoutFragment) {
+    return null;
+  }
+
+  const normalized = withoutFragment.startsWith("/")
+    ? path.posix.normalize(withoutFragment.slice(1))
+    : path.posix.normalize(path.posix.join(path.posix.dirname(relativePath), withoutFragment));
+
+  return normalized;
+}
+
+function validateCurrentLinks(relativePath, content, metadata, errors) {
+  if (!isCurrentDoc(relativePath, metadata)) {
+    return;
+  }
+
+  for (const link of extractMarkdownLinks(content)) {
+    const normalized = normalizeDocLink(relativePath, link);
+    if (normalized && isVersionedArchivePath(normalized)) {
+      errors.push(`${relativePath}: current docs must not link to ${normalized}`);
+    }
+  }
+}
+
 function main() {
   const rootDir = process.env.DOCS_CORPUS_ROOT
     ? path.resolve(process.env.DOCS_CORPUS_ROOT)
@@ -126,7 +185,9 @@ function main() {
     }
 
     const content = fs.readFileSync(file, "utf8");
-    validateCurrentMetadata(relativePath, parseFrontMatter(content), errors);
+    const metadata = parseFrontMatter(content);
+    validateCurrentMetadata(relativePath, metadata, errors);
+    validateCurrentLinks(relativePath, content, metadata, errors);
   }
 
   if (errors.length > 0) {
