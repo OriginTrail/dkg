@@ -81,11 +81,23 @@ export function buildLifecycleEventsQuery(cgId: string): string {
   const metaGraph = `did:dkg:context-graph:${cgId}/_meta`;
   // Created events use `prov:generated` (the activity produced the
   // assertion); promoted events use `prov:used` (the activity acted
-  // on an existing assertion). UNION-bind ?assertion to the right
-  // predicate per kind. Aggregate the count of `dkg:rootEntity`
-  // bindings into ?entityCount — created events never have any
+  // on an existing assertion). Bind both as OPTIONAL and COALESCE
+  // into a single `?assertion` — the prior UNION-with-inner-FILTER
+  // shape silently returned zero rows in production (the FILTER on
+  // `?type` inside the UNION branch did not interact correctly with
+  // the outer `?event a ?type` binding once an event carried multiple
+  // `rdf:type` triples — every emitted event has both
+  // `rdf:type prov:Activity` AND `rdf:type dkg:Assertion{Created,
+  // Promoted}`). Pulling the type filter OUT of the UNION (or, as
+  // here, using OPTIONAL + COALESCE without UNION at all) restores
+  // the row stream. Pinned by `use-assertion-lifecycle-events.test.ts`
+  // against the actual `oxigraph` daemon shape.
+  //
+  // Aggregate the count of `dkg:rootEntity` bindings into
+  // `?entityCount` — created events never have any
   // (`generateAssertionCreatedMetadata` does not emit them) so they
-  // group to 0 cleanly; promoted events report one row per bundle.
+  // group to 0 cleanly; the consumer normalises 0 → undefined.
+  // Promoted events report one row per bundle.
   //
   // PR #694 review fix — the lifecycle metadata writers
   // (`generateAssertionCreatedMetadata` / `…PromotedMetadata`) do
@@ -103,9 +115,10 @@ SELECT ?event ?type ?assertion ?name ?agent ?ts ?assertionGraph (COUNT(?root) AS
     ?event a ?type ;
            prov:startedAtTime ?ts ;
            prov:wasAssociatedWith ?agent .
-    { ?event prov:generated ?assertion . FILTER(?type = dkg:AssertionCreated) }
-    UNION
-    { ?event prov:used ?assertion . FILTER(?type = dkg:AssertionPromoted) }
+    FILTER(?type IN (dkg:AssertionCreated, dkg:AssertionPromoted))
+    OPTIONAL { ?event prov:generated ?gen }
+    OPTIONAL { ?event prov:used ?used }
+    BIND(COALESCE(?gen, ?used) AS ?assertion)
     ?assertion dkg:assertionName ?name .
     OPTIONAL { ?assertion dkg:assertionGraph ?assertionGraph }
     OPTIONAL { ?event dkg:rootEntity ?root }

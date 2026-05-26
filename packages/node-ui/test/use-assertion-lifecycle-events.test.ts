@@ -29,12 +29,23 @@ describe('buildLifecycleEventsQuery — SPARQL shape', () => {
     expect(q).not.toContain('dkg:subGraphName');
   });
 
-  it('UNION-binds created→`prov:generated` and promoted→`prov:used`', () => {
+  it('COALESCEs created→`prov:generated` and promoted→`prov:used` (with a single outer type filter)', () => {
     const q = buildLifecycleEventsQuery('cg-1');
-    expect(q).toContain('prov:generated ?assertion');
-    expect(q).toContain('FILTER(?type = dkg:AssertionCreated)');
-    expect(q).toContain('prov:used ?assertion');
-    expect(q).toContain('FILTER(?type = dkg:AssertionPromoted)');
+    // Both predicates are projected as OPTIONAL → COALESCE; the type
+    // filter is applied ONCE on the outer pattern, not inside per-branch
+    // UNION clauses. The prior UNION-with-inner-FILTER shape silently
+    // returned zero rows against oxigraph in production (the filter on
+    // ?type didn't interact with the outer multi-rdf:type binding) —
+    // this guard locks the working shape.
+    expect(q).toContain('OPTIONAL { ?event prov:generated ?gen }');
+    expect(q).toContain('OPTIONAL { ?event prov:used ?used }');
+    expect(q).toContain('BIND(COALESCE(?gen, ?used) AS ?assertion)');
+    expect(q).toContain('FILTER(?type IN (dkg:AssertionCreated, dkg:AssertionPromoted))');
+    // Regression guard: the broken UNION-with-inner-FILTER pattern
+    // must not come back.
+    expect(q).not.toContain('FILTER(?type = dkg:AssertionCreated)');
+    expect(q).not.toContain('FILTER(?type = dkg:AssertionPromoted)');
+    expect(q).not.toMatch(/UNION\s*\{/);
   });
 
   it('scopes the query to the project `_meta` graph for the given context graph id', () => {
