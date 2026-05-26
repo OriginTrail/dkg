@@ -4,7 +4,8 @@ import React, { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ProjectProfileContext, type ProjectProfile } from '../src/ui/hooks/useProjectProfile.js';
-import { SubGraphDetailView } from '../src/ui/views/project/components.js';
+import { VIZ_PRED_ANCHORED_IN } from '../src/ui/hooks/useVerifiedMemoryAnchors.js';
+import { LayerGraphPanel, SubGraphDetailView } from '../src/ui/views/project/components.js';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -112,6 +113,7 @@ describe('SubGraphDetailView tabs', () => {
       root = null;
     }
     container.remove();
+    vi.unstubAllGlobals();
   });
 
   it('clamps an unsupported controlled timeline tab back to entities', async () => {
@@ -139,6 +141,70 @@ describe('SubGraphDetailView tabs', () => {
     expect(onTabChange).toHaveBeenCalledWith('items');
     expect(container.querySelector('[data-cg-scroll-key="subgraph:demo:items"]')).toBeTruthy();
     expect(container.querySelector('[data-cg-scroll-key="subgraph:demo:timeline"]')).toBeNull();
+  });
+
+  it('does not reintroduce filtered-out VM roots through anchor decorations', async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        result: {
+          bindings: [
+            {
+              op: { value: 'urn:dkg:share:cg-test:op-visible' },
+              root: { value: 'urn:entity:visible' },
+              agent: { value: 'agent-visible' },
+              publishedAt: { value: '2026-05-26T00:00:00.000Z' },
+              g: { value: 'did:dkg:context-graph:cg-test/demo/_shared_memory_meta' },
+            },
+            {
+              op: { value: 'urn:dkg:share:cg-test:op-hidden' },
+              root: { value: 'urn:entity:hidden' },
+              agent: { value: 'agent-hidden' },
+              publishedAt: { value: '2026-05-26T00:00:00.000Z' },
+              g: { value: 'did:dkg:context-graph:cg-test/demo/_shared_memory_meta' },
+            },
+          ],
+        },
+      }),
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    act(() => {
+      root!.render(
+        React.createElement(
+          ProjectProfileContext.Provider,
+          { value: profile },
+          React.createElement(LayerGraphPanel, {
+            layer: 'vm',
+            contextGraphId: 'cg-test',
+            triples: [
+              {
+                subject: 'urn:entity:visible',
+                predicate: 'urn:relatesTo',
+                object: 'urn:entity:hidden',
+              },
+            ],
+            scopeEntities: [{ uri: 'urn:entity:visible', label: 'Visible' }],
+          }),
+        ),
+      );
+    });
+
+    await waitForGraph(() => {
+      const graph = container.querySelector('[data-testid="rdf-graph"]') as HTMLElement | null;
+      expect(graph).not.toBeNull();
+      const triples = JSON.parse(graph!.getAttribute('data-triples') ?? '[]') as Array<{
+        s: string;
+        p: string;
+        o: string;
+      }>;
+      expect(triples.some(t => t.s === 'urn:entity:visible' && t.p === VIZ_PRED_ANCHORED_IN)).toBe(true);
+      expect(triples.some(t => t.s === 'urn:entity:hidden' && t.p === VIZ_PRED_ANCHORED_IN)).toBe(false);
+    });
   });
 
   // C15 regression: when the subgraph trust filter is narrowed to a single

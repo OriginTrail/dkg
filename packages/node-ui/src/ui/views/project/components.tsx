@@ -919,19 +919,29 @@ export function LayerGraphPanel({
   const title = titleOverride ?? layerTitle;
   const theme = useLayoutStore(s => s.theme);
 
-  // All URIs that already appear as subject or object in the base VM triples.
-  // We pass this into the anchor hook so synthetic anchor→entity edges only
-  // get emitted for entities that actually render, avoiding dangling anchors.
+  // All VM entity URIs that survived the caller's current graph filters.
+  // When SubGraphDetailView passes `scopeEntities`, prefer that filtered
+  // entity scope over endpoint recovery from triples: otherwise a filtered-out
+  // VM root that merely appears as the object of a surviving edge can be
+  // reintroduced by the synthetic `root -> anchoredIn -> anchor` decoration.
   const visibleEntityUris = useMemo(() => {
     if (layer !== 'vm') return undefined;
     const s = new Set<string>();
+    const add = (uri: string) => {
+      s.add(uri);
+      s.add(graphNodeKey(uri));
+    };
+    if (scopeEntities) {
+      for (const entity of scopeEntities) add(entity.uri);
+      return s;
+    }
     for (const t of triples) {
-      s.add(t.subject);
+      add(t.subject);
       // Literals (`"..."`) are never anchor roots; skip them.
-      if (isResourceNode(t.object)) s.add(t.object);
+      if (isResourceNode(t.object)) add(t.object);
     }
     return s;
-  }, [triples, layer]);
+  }, [triples, layer, scopeEntities]);
 
   // VM-only provenance decorations — synthetic anchor + agent identity
   // triples injected around every published KA root. Keeps the data on-disk

@@ -10,7 +10,7 @@ import {
   VIZ_ANCHOR_TYPE, VIZ_AGENT_TYPE,
   VIZ_PRED_ANCHORED_IN, VIZ_PRED_SIGNED_BY, VIZ_PRED_CONSENSUS,
 } from '../../hooks/useVerifiedMemoryAnchors.js';
-import { memoryGraphLabels } from '../../lib/memoryLabels.js';
+import { MEMORY_LABEL_PREDICATES, memoryGraphLabels } from '../../lib/memoryLabels.js';
 
 export type LayerView = 'overview' | 'graph-overview' | 'query' | 'wm' | 'swm' | 'vm';
 export type LayerContentTab = 'items' | 'assertions' | 'graph' | 'docs';
@@ -301,10 +301,11 @@ export function neighborhoodTriples(entityUri: string, allTriples: Triple[], hop
   for (let i = 0; i < hops; i++) {
     const nextFrontier = new Set<string>();
     for (const t of allTriples) {
-      if (frontier.has(t.subject) && !visited.has(t.object)) {
+      const objectIsResource = isResourceObject(t.object);
+      if (frontier.has(t.subject) && objectIsResource && !visited.has(t.object)) {
         nextFrontier.add(t.object);
       }
-      if (frontier.has(t.object) && !visited.has(t.subject)) {
+      if (objectIsResource && frontier.has(t.object) && !visited.has(t.subject)) {
         nextFrontier.add(t.subject);
       }
     }
@@ -313,7 +314,12 @@ export function neighborhoodTriples(entityUri: string, allTriples: Triple[], hop
     if (frontier.size === 0) break;
   }
 
-  return allTriples.filter(t => visited.has(t.subject) || visited.has(t.object));
+  return allTriples.filter(t => {
+    if (!visited.has(t.subject)) return false;
+    if (!isResourceObject(t.object)) return true;
+    if (visited.has(t.object)) return true;
+    return isNeighborhoodMetadataPredicate(t.predicate);
+  });
 }
 
 export function matchesSearch(e: MemoryEntity, q: string): boolean {
@@ -359,6 +365,18 @@ function isResourceObject(value: string): boolean {
   if (trimmed.startsWith('<') && trimmed.endsWith('>')) return true;
   if (/\s/.test(trimmed)) return false;
   return /^[A-Za-z][A-Za-z0-9+.-]*:/.test(trimmed);
+}
+
+const RDF_TYPE_URI = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+const NEIGHBORHOOD_METADATA_PREDICATES = new Set<string>([
+  RDF_TYPE_URI,
+  ...MEMORY_LABEL_PREDICATES,
+  'http://schema.org/description',
+  'http://schema.org/text',
+]);
+
+function isNeighborhoodMetadataPredicate(predicate: string): boolean {
+  return NEIGHBORHOOD_METADATA_PREDICATES.has(canonicalEntityUri(predicate));
 }
 
 export function useLayerTriples(memory: ReturnType<typeof useMemoryEntities>, layer: 'wm' | 'swm' | 'vm'): Triple[] {

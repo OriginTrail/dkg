@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { shouldFetchSwmAttribution } from '../src/ui/views/project/helpers.js';
+import { neighborhoodTriples, shouldFetchSwmAttribution } from '../src/ui/views/project/helpers.js';
 
 // R2-Local-1 (PR #656) — pins the predicate that ProjectView uses to
 // decide whether to feed `useSwmAttributions` a real `contextGraphId`
@@ -43,5 +43,28 @@ describe('shouldFetchSwmAttribution — ProjectView gate predicate', () => {
     expect(shouldFetchSwmAttribution(overview)).toBe(true);
     // Simulated detail-close: same args, same answer.
     expect(shouldFetchSwmAttribution(overview)).toBe(true);
+  });
+});
+
+describe('neighborhoodTriples', () => {
+  it('keeps metadata for visited neighbors without pulling resource edges beyond the hop limit', () => {
+    const triples = [
+      { subject: 'urn:root', predicate: 'urn:relatesTo', object: 'urn:neighbor' },
+      { subject: 'urn:neighbor', predicate: 'http://schema.org/name', object: '"Neighbor"' },
+      {
+        subject: 'urn:neighbor',
+        predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+        object: 'urn:Class',
+      },
+      { subject: 'urn:neighbor', predicate: 'urn:relatesTo', object: 'urn:beyond' },
+      { subject: 'urn:beyond', predicate: 'http://schema.org/name', object: '"Beyond"' },
+    ];
+
+    const out = neighborhoodTriples('urn:root', triples, 1);
+    expect(out).toContainEqual(triples[0]);
+    expect(out).toContainEqual(triples[1]);
+    expect(out).toContainEqual(triples[2]);
+    expect(out).not.toContainEqual(triples[3]);
+    expect(out).not.toContainEqual(triples[4]);
   });
 });
