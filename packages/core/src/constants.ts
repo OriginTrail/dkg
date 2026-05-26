@@ -156,6 +156,14 @@ export function networkPeersTopic(): string {
 // ── V10 Knowledge Collection UALs ──────────────────────────────────────
 
 /**
+ * Common URI prefix shared by every Knowledge Collection UAL produced
+ * by `kcUal()`. Exported so other parsers (e.g. `parseUal()` and the
+ * receiver-side range-consistency check in publish-handler) can match
+ * subjects without duplicating the literal across files.
+ */
+export const DID_DKG_PREFIX = 'did:dkg:';
+
+/**
  * Build a Knowledge Collection UAL.
  *
  * Two equivalent shapes are valid (both produced by this helper depending
@@ -189,7 +197,119 @@ export function kcUal(
   storageTag?: string,
 ): string {
   const tag = storageTag && storageTag.length > 0 ? `${storageTag}/` : '';
-  return `did:dkg:${tag}${chainId}/${publisherAddress}/${localId}`;
+  return `${DID_DKG_PREFIX}${tag}${chainId}/${publisherAddress}/${localId}`;
+}
+
+/**
+ * Storage-tag whitelist (RFC §5.2 rule 1). Lowercase ASCII letters,
+ * digits, and hyphens. Forbidding ":" prevents collision with the
+ * chainId segment which uses CAIP-2 form (e.g. `base:84532`).
+ *
+ * Exported so deployment scripts that set a storage `uriBase` can
+ * validate the tag with the exact same predicate the parser uses on
+ * the receive side.
+ */
+export const STORAGE_TAG_PATTERN = /^[a-z0-9-]+$/;
+
+/**
+ * Publisher-address shape used to disambiguate UALs from same-prefix
+ * URIs that share the 3-segment shape (notably CG data URIs of the
+ * form `did:dkg:context-graph:<id>/<sub-graph>/<assertion>`). Every
+ * UAL minted by `kcUal()` puts an `ethers.getAddress`-checksummed
+ * EOA in slot 1 (3-segment) or slot 2 (4-segment); CG URIs put a
+ * sub-graph name there, which is never `0x`-prefixed hex.
+ */
+const PUBLISHER_ADDRESS_PATTERN = /^0x[0-9a-fA-F]{40}$/;
+
+export interface ParsedUal {
+  /** CAIP-2-style chain identifier, e.g. `base:84532`. */
+  chainId: string;
+  /**
+   * Storage tag — empty string for the default V10 storage (3-segment
+   * UALs), otherwise a non-empty token like `v9` or `v11` matching
+   * `STORAGE_TAG_PATTERN`. Routes a UAL to the storage instance that
+   * minted it; see RFC §5.3.
+   */
+  storageTag: string;
+  /** Publisher address as it appeared in the UAL (NOT EIP-55 normalised). */
+  publisherAddress: string;
+  /**
+   * Third / fourth slot of the UAL parsed as a bigint — the chain-issued
+   * local ID (startKAId for publish UALs, kcId for the update branch's
+   * UAL). Returned as `null` when the slot is non-numeric (e.g. a
+   * tentative `t<publishOperationId>` placeholder), so callers that
+   * specifically want a confirmed-on-chain ID can branch on `null`.
+   */
+  startKAId: bigint | null;
+}
+
+/**
+ * Parse a Knowledge Collection UAL produced by `kcUal()`.
+ *
+ * Accepts both shapes the protocol mints today (RFC §5.2):
+ *
+ *   3-segment / default-storage:   did:dkg:{chainId}/{pub}/{localId}
+ *   4-segment / storage-tagged:    did:dkg:{chainId}/{tag}/{pub}/{localId}
+ *
+ * Returns `null` for any input that doesn't start with `did:dkg:` or
+ * whose segment count is not exactly 3 or 4 — callers (e.g. the
+ * publish-handler range check) treat `null` as "not a UAL we own,
+ * skip" rather than "validation error". Malformed inputs that happen
+ * to match the prefix-and-shape but carry a non-numeric local-id slot
+ * are returned with `startKAId: null` rather than rejected, because
+ * the tentative-publish path uses synthetic string IDs of the form
+ * `t<publishOperationId>` until the chain confirms.
+ *
+ * Validation of the storage tag against `STORAGE_TAG_PATTERN` IS
+ * enforced — a malformed tag (e.g. embedded `/` or `:`) is treated as
+ * "not a valid UAL" and returns `null`.
+ */
+export function parseUal(ual: string | undefined | null): ParsedUal | null {
+  if (typeof ual !== 'string') return null;
+  if (!ual.startsWith(DID_DKG_PREFIX)) return null;
+
+  const segments = ual.slice(DID_DKG_PREFIX.length).split('/');
+  let chainId: string;
+  let storageTag: string;
+  let publisherAddress: string;
+  let localIdSegment: string;
+
+  if (segments.length === 3) {
+    [chainId, publisherAddress, localIdSegment] = segments;
+    storageTag = '';
+  } else if (segments.length === 4) {
+    [storageTag, chainId, publisherAddress, localIdSegment] = segments;
+    if (!STORAGE_TAG_PATTERN.test(storageTag)) return null;
+  } else {
+    return null;
+  }
+
+  if (chainId.length === 0) return null;
+  if (localIdSegment.length === 0) return null;
+  if (!PUBLISHER_ADDRESS_PATTERN.test(publisherAddress)) return null;
+
+  let startKAId: bigint | null;
+  try {
+    startKAId = BigInt(localIdSegment);
+  } catch {
+    startKAId = null;
+  }
+
+  return { chainId, storageTag, publisherAddress, startKAId };
+}
+
+/**
+ * Extract the publisher-address segment from a UAL, without any
+ * EIP-55 / checksum normalisation (callers that need normalised form
+ * pipe through their own ethers `getAddress()`).
+ *
+ * Returns `undefined` for any input `parseUal()` rejects. This is the
+ * core-side replacement for the (now-removed) `publisherAddressFromUal`
+ * helper inside `dkg-publisher.ts`, which only handled 3-segment UALs.
+ */
+export function publisherAddressFromUal(ual: string | undefined | null): string | undefined {
+  const parsed = parseUal(ual);
+  return parsed === null ? undefined : parsed.publisherAddress;
 }
 
 // ── V10 Named Graph URIs ───────────────────────────────────────────────

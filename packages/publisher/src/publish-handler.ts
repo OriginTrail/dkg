@@ -9,6 +9,7 @@ import {
   createOperationContext,
   assertSafeIri,
   assertNoUserAuthoredTrustLevelQuads,
+  parseUal,
   type PublishRequestMsg,
 } from '@origintrail-official/dkg-core';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
@@ -571,12 +572,17 @@ export class PublishHandler {
 
 // ── Helpers ──
 
-const DID_DKG_PREFIX = 'did:dkg:';
-
 /**
  * Verify that any triple subjects using DKG UALs reference KA IDs
  * within the publisher's claimed range.
- * UAL format: did:dkg:{chainId}/{publisherAddress}/{localKAId}[/...]
+ *
+ * Accepts both the legacy 3-segment / default-storage form
+ * (`did:dkg:{chainId}/{publisherAddress}/{localKAId}`) and the
+ * 4-segment / storage-tagged form
+ * (`did:dkg:{tag}/{chainId}/{publisherAddress}/{localKAId}`) — see
+ * OT-RFC-40. Subjects whose shape isn't a UAL (e.g. CG data URIs that
+ * share the `did:dkg:` prefix) are skipped silently rather than
+ * flagged, matching the pre-RFC-40 behaviour.
  */
 function verifyUALConsistency(
   quads: Quad[],
@@ -586,21 +592,18 @@ function verifyUALConsistency(
   const errors: string[] = [];
 
   for (const q of quads) {
-    if (!q.subject.startsWith(DID_DKG_PREFIX)) continue;
+    const parsed = parseUal(q.subject);
+    if (parsed === null) continue;
+    // Tentative-publish placeholders (`t<publishOperationId>`) carry a
+    // non-numeric local-id slot that surfaces as `startKAId: null`.
+    // They never reach the receive-side range check (the receiver only
+    // sees confirmed UALs), but a defensive skip keeps the contract
+    // crisp: this function flags out-of-range numeric IDs only.
+    if (parsed.startKAId === null) continue;
 
-    const segments = q.subject.slice(DID_DKG_PREFIX.length).split('/');
-    if (segments.length < 3) continue;
-
-    let localKAId: bigint;
-    try {
-      localKAId = BigInt(segments[2]);
-    } catch {
-      continue;
-    }
-
-    if (localKAId < startKAId || localKAId > endKAId) {
+    if (parsed.startKAId < startKAId || parsed.startKAId > endKAId) {
       errors.push(
-        `UAL consistency: subject "${q.subject}" references KA ID ${localKAId} ` +
+        `UAL consistency: subject "${q.subject}" references KA ID ${parsed.startKAId} ` +
           `outside claimed range ${startKAId}..${endKAId}`,
       );
     }

@@ -2,7 +2,7 @@ import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@origintrail-official/dkg-chain';
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
-import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphMetaUri, contextGraphAssertionUri, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, kcUal, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, DKG_GOSSIP_MAX_MESSAGE_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad } from '@origintrail-official/dkg-core';
+import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphMetaUri, contextGraphAssertionUri, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, kcUal, parseUal, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, DKG_GOSSIP_MAX_MESSAGE_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import type { Publisher, PublishOptions, PublishResult, KAManifestEntry, PhaseCallback, V10CoreNodeACK } from './publisher.js';
 import { autoPartition } from './auto-partition.js';
@@ -120,11 +120,20 @@ function coercePublisherAddress(value: unknown): string | undefined {
   return normalized === ethers.ZeroAddress ? undefined : normalized;
 }
 
+/**
+ * Local helper combining core's UAL parser with the chain-side
+ * EIP-55 / zero-address normalisation. Core's `parseUal()` is
+ * ethers-free and returns the publisher segment as it appeared in
+ * the UAL; `coercePublisherAddress()` checksums and rejects the zero
+ * address. Result: a normalised EOA, or `undefined` for malformed /
+ * non-UAL input. OT-RFC-40 PR-2: now correctly handles both 3- and
+ * 4-segment UAL shapes (the previous implementation always read
+ * slot 1, returning the storage tag for V9-tagged UALs).
+ */
 function publisherAddressFromUal(ual: string | undefined): string | undefined {
-  const prefix = 'did:dkg:';
-  if (!ual?.startsWith(prefix)) return undefined;
-  const segments = ual.slice(prefix.length).split('/');
-  return coercePublisherAddress(segments[1]);
+  const parsed = parseUal(ual);
+  if (parsed === null) return undefined;
+  return coercePublisherAddress(parsed.publisherAddress);
 }
 
 function formatBytesAsKb(bytes: number): string {

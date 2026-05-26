@@ -8,6 +8,8 @@ import {
   contextGraphPublishTopic,
   contextGraphWorkspaceTopic,
   kcUal,
+  parseUal,
+  publisherAddressFromUal,
   validateContextGraphId,
   validateSubGraphName,
   validateAssertionName,
@@ -127,6 +129,151 @@ describe('kcUal (OT-RFC-40 §5.2)', () => {
     // passes in deliberately.
     expect(kcUal('chainId', 'pub', 0n)).toBe('did:dkg:chainId/pub/0');
     expect(kcUal('chainId', 'pub', 0n, 'tag')).toBe('did:dkg:tag/chainId/pub/0');
+  });
+});
+
+describe('parseUal (OT-RFC-40 §5.2 — handles both 3- and 4-segment forms)', () => {
+  // The parser must accept exactly the two shapes `kcUal()` produces
+  // and reject everything else. These tests pin both directions.
+
+  it('parses the legacy 3-segment / default-storage form', () => {
+    const parsed = parseUal(
+      'did:dkg:base:84532/0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1/12345',
+    );
+    expect(parsed).toEqual({
+      chainId: 'base:84532',
+      storageTag: '',
+      publisherAddress: '0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1',
+      startKAId: 12345n,
+    });
+  });
+
+  it('parses the 4-segment / storage-tagged form (V9 KAS today)', () => {
+    const parsed = parseUal(
+      'did:dkg:v9/base:84532/0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1/17',
+    );
+    expect(parsed).toEqual({
+      chainId: 'base:84532',
+      storageTag: 'v9',
+      publisherAddress: '0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1',
+      startKAId: 17n,
+    });
+  });
+
+  it('round-trips with kcUal for both forms', () => {
+    const cid = 'base:84532';
+    const pub = '0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1';
+    const id = 99n;
+    expect(parseUal(kcUal(cid, pub, id))).toEqual({
+      chainId: cid,
+      storageTag: '',
+      publisherAddress: pub,
+      startKAId: id,
+    });
+    expect(parseUal(kcUal(cid, pub, id, 'v9'))).toEqual({
+      chainId: cid,
+      storageTag: 'v9',
+      publisherAddress: pub,
+      startKAId: id,
+    });
+  });
+
+  it('returns null for inputs that do not start with did:dkg:', () => {
+    expect(parseUal('http://example.org/1')).toBeNull();
+    expect(parseUal('urn:dkg:agent:foo')).toBeNull();
+    expect(parseUal('')).toBeNull();
+  });
+
+  it('returns null for input segment counts other than 3 or 4', () => {
+    // 1 or 2 segments — covers CG/data URIs that share the prefix.
+    expect(parseUal('did:dkg:context-graph:agents')).toBeNull();
+    expect(parseUal('did:dkg:foo/bar')).toBeNull();
+    // 5+ segments — extension paths under a UAL.
+    expect(parseUal('did:dkg:base:84532/0xPub/123/sub/extra')).toBeNull();
+  });
+
+  it('returns null when any segment is empty', () => {
+    expect(parseUal('did:dkg://0xPub/123')).toBeNull();
+    expect(parseUal('did:dkg:base:84532//123')).toBeNull();
+    expect(parseUal('did:dkg:base:84532/0xPub/')).toBeNull();
+    expect(parseUal('did:dkg:v9//base:84532/0xPub/123')).toBeNull();
+  });
+
+  it('rejects malformed storage tags (uppercase, colon, special chars)', () => {
+    // STORAGE_TAG_PATTERN = /^[a-z0-9-]+$/
+    expect(parseUal('did:dkg:V9/base:84532/0xPub/123')).toBeNull();
+    expect(parseUal('did:dkg:v9.1/base:84532/0xPub/123')).toBeNull();
+    expect(parseUal('did:dkg:tag with space/base:84532/0xPub/123')).toBeNull();
+    // Even legitimate-looking V11+ candidates with colons are rejected
+    // because chainIds use ':' and parsing would be ambiguous.
+    expect(parseUal('did:dkg:base:special/base:84532/0xPub/123')).toBeNull();
+  });
+
+  it('returns startKAId: null for non-numeric local-id slot (tentative publish form)', () => {
+    // dkg-publisher.ts's tentative path uses `t${publishOperationId}`
+    // — the parser must not reject these since they are valid in-flight
+    // UALs that get rewritten to a chain-issued KAID on confirmation.
+    const parsed = parseUal(
+      'did:dkg:base:84532/0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1/tabcd-1',
+    );
+    expect(parsed).toEqual({
+      chainId: 'base:84532',
+      storageTag: '',
+      publisherAddress: '0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1',
+      startKAId: null,
+    });
+  });
+
+  it('handles undefined / null without throwing', () => {
+    expect(parseUal(undefined)).toBeNull();
+    expect(parseUal(null)).toBeNull();
+  });
+
+  it('preserves publisher address case (no EIP-55 normalisation in core)', () => {
+    // Caller decides whether to checksum-normalise; core stays
+    // ethers-free and returns the segment as-it-was.
+    const parsed = parseUal(
+      'did:dkg:base:84532/0xd46E77003d74df9aAdF011A5115A72405b084a88/1',
+    );
+    expect(parsed?.publisherAddress).toBe('0xd46E77003d74df9aAdF011A5115A72405b084a88');
+  });
+
+  it('accepts arbitrary non-UAL CG data URIs without confusion', () => {
+    // contextGraphDataUri('agents', 'sub') = "did:dkg:context-graph:agents/context/sub"
+    // → 2 segments after prefix → null. parseUal must not mistake CG
+    // URIs for UALs.
+    expect(parseUal('did:dkg:context-graph:agents/context/sub')).toBeNull();
+    expect(parseUal('did:dkg:context-graph:agents')).toBeNull();
+  });
+});
+
+describe('publisherAddressFromUal', () => {
+  it('returns the publisher segment for a 3-segment UAL', () => {
+    expect(
+      publisherAddressFromUal(
+        'did:dkg:base:84532/0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1/12345',
+      ),
+    ).toBe('0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1');
+  });
+
+  it('returns the publisher segment for a 4-segment / V9-tagged UAL', () => {
+    // The duplicated helper inside dkg-publisher.ts only handled the
+    // 3-segment form (it took segments[1]). Moving + generalising it
+    // to core fixes a latent bug where V9 UALs would have returned
+    // the storage tag instead of the publisher address.
+    expect(
+      publisherAddressFromUal(
+        'did:dkg:v9/base:84532/0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1/17',
+      ),
+    ).toBe('0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1');
+  });
+
+  it('returns undefined for malformed input', () => {
+    expect(publisherAddressFromUal(undefined)).toBeUndefined();
+    expect(publisherAddressFromUal(null)).toBeUndefined();
+    expect(publisherAddressFromUal('')).toBeUndefined();
+    expect(publisherAddressFromUal('not-a-ual')).toBeUndefined();
+    expect(publisherAddressFromUal('did:dkg:context-graph:agents')).toBeUndefined();
   });
 });
 
