@@ -1,3 +1,5 @@
+import { subGraphFromAssertionGraphUri } from './hooks/useAssertionLifecycleEvents.js';
+
 const BASE = '';
 declare global {
   interface Window { __DKG_TOKEN__?: string; }
@@ -524,6 +526,15 @@ export interface AssertionInfo {
   name: string;
   graphUri: string;
   tripleCount?: number;
+  /**
+   * Sub-graph slug when the assertion lives in a sub-graph
+   * partition, undefined for root-bucket assertions. Lets the UI
+   * surface the structural placement inline on each row without a
+   * separate lookup. Field is uniformly populated on both WM and
+   * SWM `AssertionInfo`s so consumers don't need a layer-aware
+   * branch.
+   */
+  subGraph?: string;
 }
 
 /**
@@ -623,7 +634,7 @@ export async function listAssertions(
 
       if (seen.has(lifecycle)) continue;
       seen.add(lifecycle);
-      result.push({ name, graphUri: lifecycle });
+      result.push({ name, graphUri: lifecycle, subGraph: subGraphName });
     }
     return result;
   }
@@ -632,16 +643,34 @@ export async function listAssertions(
   const sparql = `SELECT DISTINCT ?g (COUNT(?s) AS ?cnt) WHERE { GRAPH ?g { ?s ?p ?o } } GROUP BY ?g`;
   const data = await executeQuery(sparql, contextGraphId);
   const bindings: any[] = data?.result?.bindings ?? [];
-  const prefix = `did:dkg:context-graph:${contextGraphId}/assertion/`;
+  // #706 fix — the prior `startsWith('did:dkg:context-graph:<cg>/assertion/')`
+  // shape silently dropped sub-graph-scoped WM assertions, whose graph
+  // URI is `did:dkg:context-graph:<cg>/<sg>/assertion/<agent>/<name>`
+  // (the sub-graph segment sits between `<cg>/` and `/assertion/`).
+  // Mirror the daemon's `wmSparql` discriminator: any graph under the
+  // CG prefix that contains `/assertion/` is a WM assertion, root or
+  // sub-graph. Sub-graph slug is recovered via the same parser the
+  // lifecycle hook uses (`subGraphFromAssertionGraphUri`) — defensive
+  // on malformed input, returns undefined for root-bucket URIs.
+  const cgPrefix = `did:dkg:context-graph:${contextGraphId}/`;
   const result: AssertionInfo[] = [];
   for (const b of bindings) {
     const g = typeof b.g === 'string' ? b.g : b.g?.value;
-    if (!g || !g.startsWith(prefix)) continue;
-    const tail = g.slice(prefix.length);
-    const slash = tail.indexOf('/');
-    const name = slash >= 0 ? tail.slice(slash + 1) : tail;
+    if (!g || !g.startsWith(cgPrefix) || !g.includes('/assertion/')) continue;
+    // The tail after `cgPrefix` is one of:
+    //   `assertion/<agent>/<name>`            → root-bucket
+    //   `<subGraphName>/assertion/<agent>/<name>` → sub-graph-scoped
+    // Slice on `/assertion/` and take everything after the agent
+    // segment as the name. `<name>` is slash-free per the daemon's
+    // URI builder (`contextGraphAssertionUri`).
+    const subGraph = subGraphFromAssertionGraphUri(g, contextGraphId);
+    const idx = g.indexOf('/assertion/');
+    const afterAssertion = g.slice(idx + '/assertion/'.length);
+    const slash = afterAssertion.indexOf('/');
+    const name = slash >= 0 ? afterAssertion.slice(slash + 1) : afterAssertion;
+    if (!name) continue;
     const cnt = typeof b.cnt === 'string' ? parseInt(b.cnt, 10) : (b.cnt?.value ? parseInt(b.cnt.value, 10) : undefined);
-    result.push({ name, graphUri: g, tripleCount: Number.isFinite(cnt) ? cnt : undefined });
+    result.push({ name, graphUri: g, tripleCount: Number.isFinite(cnt) ? cnt : undefined, subGraph });
   }
   return result;
 }

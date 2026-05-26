@@ -2653,6 +2653,24 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
 
 // Small helper: compute unique triples for a given layer slice of memory.
 
+/**
+ * #706 sub-graph chip — middle-ellipsis truncation. Sub-graph slugs
+ * are commonly prefix-namespaced (`epcis-*`, `github-*`), so the
+ * discriminator lives at the end. Mid-truncation preserves both
+ * sides and keeps the chip compact. The full slug stays in the
+ * row's tooltip so power users can recover it.
+ */
+function truncateMiddle(s: string, max: number): string {
+  if (s.length <= max) return s;
+  // Reserve 1 char for the ellipsis; split the remaining budget
+  // weighted slightly toward the prefix (so namespace prefixes
+  // like `epcis-` survive in full on common slug widths).
+  const budget = max - 1;
+  const head = Math.ceil(budget / 2);
+  const tail = budget - head;
+  return `${s.slice(0, head)}…${s.slice(-tail)}`;
+}
+
 export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }: {
   contextGraphId: string;
   layer: 'wm' | 'swm';
@@ -2772,6 +2790,14 @@ export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }:
             <div className="v10-item-name" style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>{a.name}</div>
             <div className="v10-item-meta-row">
               {a.tripleCount != null && <span className="v10-item-count">{a.tripleCount} triples</span>}
+              {a.subGraph && (
+                <span
+                  className="v10-item-count v10-item-subgraph"
+                  title={`In sub-graph: ${a.subGraph}`}
+                >
+                  🗂 {truncateMiddle(a.subGraph, 18)}
+                </span>
+              )}
             </div>
           </div>
           <button

@@ -427,4 +427,61 @@ describe('Context Graph shared empty/stat patterns', () => {
 
     await unmount();
   });
+
+  // #706 — WM Assertions tab was silently dropping sub-graph-scoped
+  // assertions because the client-side filter only matched the root
+  // `did:dkg:context-graph:<cg>/assertion/…` shape. Fix surfaces both
+  // shapes and tags each row with an inline sub-graph chip when the
+  // assertion is scoped to a partition. Root rows render no chip.
+  it('renders sub-graph chip on partitioned assertions and omits it on root rows (#706)', async () => {
+    apiMocks.listAssertions.mockResolvedValueOnce([
+      { name: 'root-doc', tripleCount: 2 },
+      { name: 'scoped-doc', tripleCount: 5, subGraph: 'epcis-supply-chain' },
+      // Long slug to exercise the 18-char middle-ellipsis truncation.
+      { name: 'long-scoped-doc', tripleCount: 1, subGraph: 'pharmaceutical-derived-product-graph' },
+    ]);
+    const { container, unmount } = await render(
+      React.createElement(AssertionsList, {
+        contextGraphId: 'cg-test',
+        layer: 'wm',
+        onComplete: vi.fn(),
+      }),
+    );
+
+    await waitForText(container, 'root-doc');
+    await waitForText(container, 'scoped-doc');
+    await waitForText(container, 'long-scoped-doc');
+
+    // Three rows rendered (no silent drop on sub-graph rows).
+    const rows = container.querySelectorAll('.v10-item-row');
+    expect(rows.length).toBe(3);
+
+    // Locate each row by its name and verify chip presence/absence.
+    const rowFor = (name: string) =>
+      Array.from(rows).find(r => r.querySelector('.v10-item-name')?.textContent === name)!;
+
+    const rootRow = rowFor('root-doc');
+    const scopedRow = rowFor('scoped-doc');
+    const longRow = rowFor('long-scoped-doc');
+
+    // Root row has no sub-graph chip.
+    expect(rootRow.querySelector('.v10-item-subgraph')).toBeNull();
+
+    // Short slug renders verbatim (≤ 18 chars).
+    const scopedChip = scopedRow.querySelector('.v10-item-subgraph');
+    expect(scopedChip).toBeTruthy();
+    expect(scopedChip!.textContent).toContain('epcis-supply-chain');
+    // Tooltip carries the full slug regardless of truncation.
+    expect(scopedChip!.getAttribute('title')).toBe('In sub-graph: epcis-supply-chain');
+
+    // Long slug (>18 chars) gets middle-ellipsis truncated.
+    const longChip = longRow.querySelector('.v10-item-subgraph');
+    expect(longChip).toBeTruthy();
+    expect(longChip!.textContent).toContain('…');
+    expect(longChip!.textContent).not.toContain('pharmaceutical-derived-product-graph');
+    // Tooltip preserves the full slug for power users.
+    expect(longChip!.getAttribute('title')).toBe('In sub-graph: pharmaceutical-derived-product-graph');
+
+    await unmount();
+  });
 });
