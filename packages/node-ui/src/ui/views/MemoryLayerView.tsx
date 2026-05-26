@@ -396,12 +396,15 @@ function AssertionList({ contextGraphId, onPromoted }: { contextGraphId: string;
   const [promoteError, setPromoteError] = useState<string | null>(null);
   const [previewName, setPreviewName] = useState<string | null>(null);
 
-  const handlePromote = useCallback(async (name: string) => {
+  const handlePromote = useCallback(async (name: string, subGraph?: string) => {
     setPromoting(name);
     setPromoteResult(null);
     setPromoteError(null);
     try {
-      const res = await promoteAssertion(contextGraphId, name);
+      // PR #710 — thread `subGraph` so the daemon's
+      // `(cg, name, subGraph)` lookup hits the right partition;
+      // mirrors the AssertionsList fix in components.tsx.
+      const res = await promoteAssertion(contextGraphId, name, 'all', subGraph);
       setPromoteResult({ name, count: res.promotedCount });
       refresh();
       onPromoted();
@@ -420,7 +423,8 @@ function AssertionList({ contextGraphId, onPromoted }: { contextGraphId: string;
     let totalPromoted = 0;
     try {
       for (const a of assertions) {
-        const res = await promoteAssertion(contextGraphId, a.name);
+        // PR #710 — see comment on the single-row handler above.
+        const res = await promoteAssertion(contextGraphId, a.name, 'all', a.subGraph);
         totalPromoted += res.promotedCount;
       }
       setPromoteResult({ name: 'all assertions', count: totalPromoted });
@@ -466,7 +470,7 @@ function AssertionList({ contextGraphId, onPromoted }: { contextGraphId: string;
             <button
               className="v10-btn-promote"
               disabled={promoting !== null}
-              onClick={() => handlePromote(a.name)}
+              onClick={() => handlePromote(a.name, a.subGraph)}
               title="Copy these triples to Shared Working Memory"
             >
               {promoting === a.name ? 'Promoting...' : '→ SWM'}
