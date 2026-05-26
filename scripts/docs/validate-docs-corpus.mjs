@@ -15,6 +15,12 @@ const CURRENT_PUBLIC_PATHS = [
   "docs/for-ai-agents/",
   "docs/agents/",
 ];
+const AGENT_CONTEXT_PATHS = [
+  "llms.txt",
+  "llms-full.txt",
+  "docs/for-ai-agents/",
+  "docs/agents/",
+];
 
 function toPosix(filePath) {
   return filePath.split(path.sep).join("/");
@@ -30,6 +36,16 @@ function isArchivePath(relativePath) {
 
 function isVersionedArchivePath(relativePath) {
   return relativePath.startsWith("docs/archive/v8/") || relativePath.startsWith("docs/archive/v9/");
+}
+
+function isAgentContextPath(relativePath) {
+  return AGENT_CONTEXT_PATHS.some((candidate) => {
+    if (candidate.endsWith("/")) {
+      return relativePath.startsWith(candidate);
+    }
+
+    return relativePath === candidate;
+  });
 }
 
 function isCurrentPublicPath(relativePath) {
@@ -158,6 +174,19 @@ function normalizeDocLink(relativePath, linkTarget) {
   return normalized;
 }
 
+function normalizePathReference(relativePath, pathReference) {
+  const target = pathReference.trim().replace(/^<|>$/g, "");
+  if (!target) {
+    return null;
+  }
+
+  if (target.startsWith("/") || target.startsWith("docs/")) {
+    return path.posix.normalize(target.replace(/^\/+/, ""));
+  }
+
+  return path.posix.normalize(path.posix.join(path.posix.dirname(relativePath), target));
+}
+
 function validateCurrentLinks(relativePath, content, metadata, errors) {
   if (!isCurrentDoc(relativePath, metadata)) {
     return;
@@ -171,23 +200,56 @@ function validateCurrentLinks(relativePath, content, metadata, errors) {
   }
 }
 
+function validateAgentContext(relativePath, content, errors) {
+  if (!isAgentContextPath(relativePath)) {
+    return;
+  }
+
+  const archiveRefs = new Set();
+  for (const link of extractMarkdownLinks(content)) {
+    const normalized = normalizeDocLink(relativePath, link);
+    if (normalized && isVersionedArchivePath(normalized)) {
+      archiveRefs.add(normalized);
+    }
+  }
+
+  const archivePathPattern = /(?:^|[\s"'(<])((?:\.{1,2}\/)*(?:docs\/)?archive\/v[89]\/[^\s"')>]*)/g;
+  for (const match of content.matchAll(archivePathPattern)) {
+    const normalized = normalizePathReference(relativePath, match[1]);
+    if (isVersionedArchivePath(normalized)) {
+      archiveRefs.add(normalized);
+    }
+  }
+
+  for (const archiveRef of archiveRefs) {
+    errors.push(`${relativePath}: agent context must not reference ${archiveRef}`);
+  }
+}
+
 function main() {
   const rootDir = process.env.DOCS_CORPUS_ROOT
     ? path.resolve(process.env.DOCS_CORPUS_ROOT)
     : process.cwd();
   const errors = [];
-  const markdownFiles = walkFiles(rootDir).filter(isMarkdown);
+  const files = walkFiles(rootDir);
 
-  for (const file of markdownFiles) {
+  for (const file of files) {
     const relativePath = toPosix(path.relative(rootDir, file));
     if (isArchivePath(relativePath)) {
       continue;
     }
 
+    if (!isMarkdown(relativePath) && !isAgentContextPath(relativePath)) {
+      continue;
+    }
+
     const content = fs.readFileSync(file, "utf8");
     const metadata = parseFrontMatter(content);
-    validateCurrentMetadata(relativePath, metadata, errors);
-    validateCurrentLinks(relativePath, content, metadata, errors);
+    if (isMarkdown(relativePath)) {
+      validateCurrentMetadata(relativePath, metadata, errors);
+      validateCurrentLinks(relativePath, content, metadata, errors);
+    }
+    validateAgentContext(relativePath, content, errors);
   }
 
   if (errors.length > 0) {
