@@ -4,7 +4,12 @@ import { GraphManager } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
 import { TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
-import { DKGPublisher, generateSubGraphRegistration } from '../src/index.js';
+import {
+  DKGPublisher,
+  generateSubGraphRegistration,
+  getConfirmedStatusQuad,
+  getTentativeStatusQuad,
+} from '../src/index.js';
 import { validateLiftPublishPayload } from '../src/async-lift-validation.js';
 import { subtractFinalizedExactQuads } from '../src/async-lift-subtraction.js';
 import type { LiftValidationInput } from '../src/async-lift-validation.js';
@@ -91,6 +96,12 @@ describe('subtractFinalizedExactQuads', () => {
         publisherPeerId: 'peer-1',
       },
     };
+  }
+
+  async function markTentativePublishConfirmed(result: { readonly ual: string; readonly status: string }): Promise<void> {
+    expect(result.status).toBe('tentative');
+    await store.delete([getTentativeStatusQuad(result.ual, CONTEXT_GRAPH)]);
+    await store.insert([getConfirmedStatusQuad(result.ual, CONTEXT_GRAPH)]);
   }
 
   it('removes only the exact finalized public quads and keeps the remainder', async () => {
@@ -186,12 +197,13 @@ describe('subtractFinalizedExactQuads', () => {
     };
     const validated = validateLiftPublishPayload(input);
 
-    await publisher.publish({
+    const publishResult = await publisher.publish({
       contextGraphId: CONTEXT_GRAPH,
       quads: validated.resolved.quads,
       privateQuads: validated.resolved.privateQuads,
       publisherPeerId: 'peer-1',
     });
+    await markTentativePublishConfirmed(publishResult);
 
     const result = await subtractFinalizedExactQuads({
       store,
@@ -222,12 +234,13 @@ describe('subtractFinalizedExactQuads', () => {
     };
     const validated = validateLiftPublishPayload(input);
 
-    await publisher.publish({
+    const publishResult = await publisher.publish({
       contextGraphId: CONTEXT_GRAPH,
       quads: validated.resolved.quads,
       privateQuads: validated.resolved.privateQuads,
       publisherPeerId: 'peer-1',
     });
+    await markTentativePublishConfirmed(publishResult);
 
     const result = await subtractFinalizedExactQuads({
       store,
