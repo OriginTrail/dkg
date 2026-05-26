@@ -1,0 +1,41 @@
+# DKG V10 Docs
+
+Use these current V10 docs first:
+
+- docs/overview.md
+- docs/build/index.md
+- docs/build/install-node.md
+- docs/build/connect-mcp.md
+- docs/build/connect-hermes.md
+- docs/build/connect-openclaw.md
+- docs/build/publish.md
+- docs/build/query.md
+- docs/understand/index.md
+- docs/understand/dkg-node.md
+- docs/understand/context-graphs.md
+- docs/understand/memory-layers.md
+- docs/understand/knowledge-assets.md
+- docs/understand/agents-and-trust.md
+- docs/architecture/index.md
+- docs/architecture/node-components.md
+- docs/architecture/memory-lifecycle.md
+- docs/operate/index.md
+- docs/operate/daemon.md
+- docs/operate/funding.md
+- docs/operate/relays.md
+- docs/operate/updates-rollback.md
+- docs/operate/troubleshooting.md
+- docs/reference/index.md
+- docs/reference/cli.md
+- docs/reference/packages.md
+- docs/reference/node-skill.md
+- docs/for-ai-agents/index.md
+- docs/for-ai-agents/context-pack.md
+- docs/for-ai-agents/invariants.md
+- docs/for-ai-agents/tasks/install-connect.md
+- docs/for-ai-agents/tasks/publish-query.md
+- docs/for-ai-agents/tasks/operate-troubleshoot.md
+- docs/for-ai-agents/docs-update-playbook.md
+
+Exact agent operations live in packages/cli/skills/dkg-node/SKILL.md.
+

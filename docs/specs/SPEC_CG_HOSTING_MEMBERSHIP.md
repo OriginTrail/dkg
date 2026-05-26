@@ -926,7 +926,7 @@ This RFC does not address:
 
 ## 10. Economic context (deferred to tokenomics spec)
 
-This RFC's hosting-and-membership decoupling is a *mechanism* change. It enables — but does not specify — a richer economic surface than the network has today. The actual numbers (prices, reward shares, quota calibration) belong in [SPEC_PART2_ECONOMY.md](../SPEC_PART2_ECONOMY.md) or a successor tokenomics spec. This section names the dynamic the mechanism enables and identifies what a tokenomics spec needs to bind to.
+This RFC's hosting-and-membership decoupling is a *mechanism* change. It enables — but does not specify — a richer economic surface than the network has today. The actual numbers (prices, reward shares, quota calibration) belong in a current tokenomics spec. This section names the dynamic the mechanism enables and identifies what a tokenomics spec needs to bind to.
 
 ### 10.1 Two compatible dynamics
 

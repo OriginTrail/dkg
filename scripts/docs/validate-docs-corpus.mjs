@@ -1,0 +1,342 @@
+#!/usr/bin/env node
+
+import fs from "node:fs";
+import path from "node:path";
+
+const REQUIRED_CURRENT_METADATA = ["status", "version", "audience", "doc_type"];
+const CURRENT_PUBLIC_PATHS = [
+  "docs/overview.md",
+  "docs/index.md",
+  "docs/current/",
+  "docs/build/",
+  "docs/understand/",
+  "docs/operate/",
+  "docs/reference/",
+  "docs/for-ai-agents/",
+  "docs/agents/",
+];
+const AGENT_CONTEXT_PATHS = [
+  "llms.txt",
+  "llms-full.txt",
+  "docs/for-ai-agents/",
+  "docs/agents/",
+];
+const STALE_DOC_PATHS = [
+  "docs/onboarding/",
+  "docs/diagrams/",
+  "docs/future_ideas/",
+  "docs/use_cases/",
+  "docs/setup/DEPLOY_BASE_SEPOLIA.md",
+  "docs/setup/JOIN_TESTNET.md",
+  "docs/setup/SETUP_CUSTOM.md",
+  "docs/setup/SETUP_ELIZAOS.md",
+  "docs/setup/SETUP_OPENCLAW.md",
+  "docs/setup/TESTNET_FAUCET.md",
+  "docs/FEEDBACK.md",
+  "docs/RELEASE.md",
+  "docs/TWO-LAPTOP-DEMO.md",
+  "docs/PHASE2_ARCHITECTURE_PLAN.md",
+  "docs/v9-protocol-operations.md",
+  "docs/SPEC_ATTESTED_KNOWLEDGE_ASSETS.md",
+  "docs/SPEC_CAPACITY_AND_GAS.md",
+  "docs/SPEC_PART1_MARKETPLACE.md",
+  "docs/SPEC_PART2_ECONOMY.md",
+  "docs/SPEC_PART3_EXTENSIONS.md",
+  "docs/SPEC_TRUST_LAYER.md",
+  "docs/SPEC_VERIFIED_KAS.md",
+  "docs/specs/SPEC_CONTEXT_GRAPH_LIFECYCLE.md",
+  "docs/plans/00_IMPLEMENTATION_PLAN.md",
+  "docs/plans/DEPLOY_TESTNET.md",
+  "docs/plans/PLAN_TRUST_LAYER.md",
+];
+
+function toPosix(filePath) {
+  return filePath.split(path.sep).join("/");
+}
+
+function isMarkdown(filePath) {
+  return filePath.endsWith(".md") || filePath.endsWith(".mdx");
+}
+
+function isArchivePath(relativePath) {
+  return relativePath === "docs/archive" || relativePath.startsWith("docs/archive/");
+}
+
+function isVersionedArchivePath(relativePath) {
+  return relativePath.startsWith("docs/archive/v8/") || relativePath.startsWith("docs/archive/v9/");
+}
+
+function isArchiveVersionRoot(relativePath) {
+  return /^docs\/archive\/v[0-9]+(?:\/|$)/.test(relativePath);
+}
+
+function isStaleDocPath(relativePath) {
+  return STALE_DOC_PATHS.some((candidate) => {
+    if (candidate.endsWith("/")) {
+      return relativePath.startsWith(candidate);
+    }
+
+    return relativePath === candidate;
+  });
+}
+
+function isAgentContextPath(relativePath) {
+  return AGENT_CONTEXT_PATHS.some((candidate) => {
+    if (candidate.endsWith("/")) {
+      return relativePath.startsWith(candidate);
+    }
+
+    return relativePath === candidate;
+  });
+}
+
+function isCurrentPublicPath(relativePath) {
+  return CURRENT_PUBLIC_PATHS.some((candidate) => {
+    if (candidate.endsWith("/")) {
+      return relativePath.startsWith(candidate);
+    }
+
+    return relativePath === candidate;
+  });
+}
+
+function walkFiles(rootDir) {
+  const entries = fs.existsSync(rootDir)
+    ? fs.readdirSync(rootDir, { withFileTypes: true })
+    : [];
+  const files = [];
+
+  for (const entry of entries) {
+    if (entry.name === ".git" || entry.name === "node_modules") {
+      continue;
+    }
+
+    const entryPath = path.join(rootDir, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...walkFiles(entryPath));
+      continue;
+    }
+
+    files.push(entryPath);
+  }
+
+  return files;
+}
+
+function parseFrontMatter(content) {
+  if (!content.startsWith("---\n")) {
+    return null;
+  }
+
+  const end = content.indexOf("\n---", 4);
+  if (end === -1) {
+    return null;
+  }
+
+  const metadata = {};
+  const body = content.slice(4, end);
+  for (const line of body.split("\n")) {
+    const match = /^([A-Za-z0-9_-]+):\s*(.*)$/.exec(line.trim());
+    if (match) {
+      metadata[match[1]] = match[2].replace(/^["']|["']$/g, "").trim();
+    }
+  }
+
+  return metadata;
+}
+
+function isCurrentMetadata(metadata) {
+  return metadata?.status === "current" || metadata?.version === "v10";
+}
+
+function isCurrentDoc(relativePath, metadata) {
+  return isCurrentPublicPath(relativePath) || isCurrentMetadata(metadata);
+}
+
+function validateCurrentMetadata(relativePath, metadata, errors) {
+  if (!isCurrentDoc(relativePath, metadata)) {
+    return;
+  }
+
+  if (!metadata) {
+    errors.push(`${relativePath}: missing required front matter`);
+    return;
+  }
+
+  for (const key of REQUIRED_CURRENT_METADATA) {
+    if (!metadata[key]) {
+      errors.push(`${relativePath}: missing required metadata "${key}"`);
+    }
+  }
+
+  if (metadata.status && metadata.status !== "current") {
+    errors.push(`${relativePath}: current public docs must use status: current`);
+  }
+
+  if (metadata.version && metadata.version !== "v10") {
+    errors.push(`${relativePath}: current public docs must use version: v10`);
+  }
+}
+
+function extractMarkdownLinks(content) {
+  const links = [];
+  const inlineLinkPattern = /!?\[[^\]]*\]\(([^)\s]+)(?:\s+["'][^"']*["'])?\)/g;
+  const referenceLinkPattern = /^\s*\[[^\]]+\]:\s+(\S+)/gm;
+
+  for (const match of content.matchAll(inlineLinkPattern)) {
+    links.push(match[1]);
+  }
+
+  for (const match of content.matchAll(referenceLinkPattern)) {
+    links.push(match[1]);
+  }
+
+  return links;
+}
+
+function normalizeDocLink(relativePath, linkTarget) {
+  const target = linkTarget.trim().replace(/^<|>$/g, "");
+  if (
+    !target ||
+    target.startsWith("#") ||
+    /^[a-z][a-z0-9+.-]*:/i.test(target)
+  ) {
+    return null;
+  }
+
+  const withoutFragment = target.split("#")[0].split("?")[0];
+  if (!withoutFragment) {
+    return null;
+  }
+
+  const normalized = withoutFragment.startsWith("/")
+    ? path.posix.normalize(withoutFragment.slice(1))
+    : path.posix.normalize(path.posix.join(path.posix.dirname(relativePath), withoutFragment));
+
+  return normalized;
+}
+
+function normalizePathReference(relativePath, pathReference) {
+  const target = pathReference.trim().replace(/^<|>$/g, "");
+  if (!target) {
+    return null;
+  }
+
+  if (target.startsWith("/") || target.startsWith("docs/")) {
+    return path.posix.normalize(target.replace(/^\/+/, ""));
+  }
+
+  return path.posix.normalize(path.posix.join(path.posix.dirname(relativePath), target));
+}
+
+function validateCurrentLinks(relativePath, content, metadata, errors) {
+  if (!isCurrentDoc(relativePath, metadata)) {
+    return;
+  }
+
+  for (const link of extractMarkdownLinks(content)) {
+    const normalized = normalizeDocLink(relativePath, link);
+    if (normalized && isVersionedArchivePath(normalized)) {
+      errors.push(`${relativePath}: current docs must not link to ${normalized}`);
+    }
+  }
+}
+
+function validateRepoFacingLinks(relativePath, content, errors) {
+  if (!isMarkdown(relativePath)) {
+    return;
+  }
+
+  const staleRefs = new Set();
+  for (const link of extractMarkdownLinks(content)) {
+    const normalized = normalizeDocLink(relativePath, link);
+    if (!normalized) {
+      continue;
+    }
+
+    if (isVersionedArchivePath(normalized) || isStaleDocPath(normalized)) {
+      staleRefs.add(normalized);
+    }
+  }
+
+  for (const staleRef of staleRefs) {
+    errors.push(`${relativePath}: repo-facing docs must not reference stale docs path ${staleRef}`);
+  }
+}
+
+function validateArchivePlacement(relativePath, errors) {
+  if (!relativePath.startsWith("docs/archive/")) {
+    return;
+  }
+
+  if (!isArchiveVersionRoot(relativePath)) {
+    errors.push(`${relativePath}: archived docs must live under docs/archive/<version>/`);
+  }
+}
+
+function validateAgentContext(relativePath, content, errors) {
+  if (!isAgentContextPath(relativePath)) {
+    return;
+  }
+
+  const archiveRefs = new Set();
+  for (const link of extractMarkdownLinks(content)) {
+    const normalized = normalizeDocLink(relativePath, link);
+    if (normalized && isVersionedArchivePath(normalized)) {
+      archiveRefs.add(normalized);
+    }
+  }
+
+  const archivePathPattern = /(?:^|[\s"'(<])((?:\.{1,2}\/)*(?:docs\/)?archive\/v[89]\/[^\s"')>]*)/g;
+  for (const match of content.matchAll(archivePathPattern)) {
+    const normalized = normalizePathReference(relativePath, match[1]);
+    if (isVersionedArchivePath(normalized)) {
+      archiveRefs.add(normalized);
+    }
+  }
+
+  for (const archiveRef of archiveRefs) {
+    errors.push(`${relativePath}: agent context must not reference ${archiveRef}`);
+  }
+}
+
+function main() {
+  const rootDir = process.env.DOCS_CORPUS_ROOT
+    ? path.resolve(process.env.DOCS_CORPUS_ROOT)
+    : process.cwd();
+  const errors = [];
+  const files = walkFiles(rootDir);
+
+  for (const file of files) {
+    const relativePath = toPosix(path.relative(rootDir, file));
+    validateArchivePlacement(relativePath, errors);
+    if (isArchivePath(relativePath)) {
+      continue;
+    }
+
+    if (!isMarkdown(relativePath) && !isAgentContextPath(relativePath)) {
+      continue;
+    }
+
+    const content = fs.readFileSync(file, "utf8");
+    const metadata = parseFrontMatter(content);
+    if (isMarkdown(relativePath)) {
+      validateCurrentMetadata(relativePath, metadata, errors);
+      validateCurrentLinks(relativePath, content, metadata, errors);
+      validateRepoFacingLinks(relativePath, content, errors);
+    }
+    validateAgentContext(relativePath, content, errors);
+  }
+
+  if (errors.length > 0) {
+    for (const error of errors) {
+      console.error(error);
+    }
+    process.exitCode = 1;
+    return;
+  }
+
+  console.log("docs corpus validation passed");
+}
+
+main();

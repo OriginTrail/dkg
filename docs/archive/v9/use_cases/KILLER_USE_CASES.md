@@ -278,6 +278,6 @@ So:
 
 - [EVAL_ENTITY_EXCLUSIVITY.md](../EVAL_ENTITY_EXCLUSIVITY.md) — Rule 4, shared-subject alternatives, hybrid options.
 - [SPEC_CROSS_AGENT_QUERY.md](../specs/SPEC_CROSS_AGENT_QUERY.md) — Remote query protocol.
-- [SPEC_VERIFIED_KAS.md](../SPEC_VERIFIED_KAS.md) — Verified claims (draft).
+- [Knowledge Assets](../understand/knowledge-assets.md) — current Knowledge Asset model.
 - [SPEC_CONTEXT_GRAPH_LIFECYCLE.md](../specs/SPEC_CONTEXT_GRAPH_LIFECYCLE.md) — ContextGraph creation and discovery.
 - `packages/publisher/src/validation.ts` — Rule 4 implementation.

@@ -382,13 +382,13 @@ dkg query-remote <peer-name-or-id> --type <rdf-type> --context-graph <id>
 
 ```bash
 # Look up a specific knowledge asset on the relay node
-dkg query-remote v9-cobb --ual "did:dkg:base:84532/0x15e0.../1"
+dkg query-remote relay-node --ual "did:dkg:base:84532/0x15e0.../1"
 
 # Find all Person entities on a peer's "testing" contextGraph
-dkg query-remote v9-cobb --type "https://schema.org/Person" --context-graph testing
+dkg query-remote relay-node --type "https://schema.org/Person" --context-graph testing
 
 # Run a SPARQL query on a peer (if they allow it)
-dkg query-remote v9-cobb testing -q "SELECT ?s ?name WHERE { ?s <https://schema.org/name> ?name }"
+dkg query-remote relay-node testing -q "SELECT ?s ?name WHERE { ?s <https://schema.org/name> ?name }"
 ```
 
 ### Daemon API
@@ -482,4 +482,4 @@ For very large result sets, the response could switch from a single message to a
 | OQ2 | Should ENTITIES_BY_TYPE return full triples or just URIs? | URIs only (current design). Returning full triples for many entities could be huge. The two-step pattern (find URIs, then fetch interesting ones) is safer. |
 | OQ3 | Connection pooling? | Not needed initially — yamux multiplexing handles concurrent queries over a single TCP connection efficiently. Add explicit pooling only if benchmarks show overhead. |
 | OQ4 | Should the protocol support subscriptions (long-lived query streams)? | Not in v2.0.0. Request-response is simpler. Subscriptions (e.g., "notify me when new Person entities appear") could be a v3.0.0 feature or handled via gossipsub. |
-| OQ5 | Peer name resolution? | The CLI uses peer names (e.g., `v9-cobb`) from the agent discovery system. The daemon resolves name → peerId via the agents contextGraph. If the peer isn't known, the user provides the peer ID directly. |
+| OQ5 | Peer name resolution? | The CLI uses peer names (e.g., `relay-node`) from the agent discovery system. The daemon resolves name → peerId via the agents contextGraph. If the peer isn't known, the user provides the peer ID directly. |

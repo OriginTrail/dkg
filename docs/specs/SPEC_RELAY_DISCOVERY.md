@@ -1,7 +1,7 @@
 # Relay Auto-Discovery
 
 **Status**: Draft
-**Depends on**: [SPEC_CONTEXT_GRAPH_LIFECYCLE.md](./SPEC_CONTEXT_GRAPH_LIFECYCLE.md), [SPEC_TRUST_LAYER.md](../SPEC_TRUST_LAYER.md)
+**Depends on**: [Context Graphs](../understand/context-graphs.md), [Relays and Peers](../operate/relays.md)
 
 ---
 

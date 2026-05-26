@@ -13,7 +13,7 @@ third machine; it just calls each node's HTTP API.
 
 - Both laptops have **Node.js 22+** and **pnpm 10+**.
 - Both wallets are **already funded** on Base Sepolia (ETH + TRAC). If
-  not, see [the testnet faucet guide](../setup/TESTNET_FAUCET.md).
+  not, see [Funding](../operate/funding.md).
 - You can reach each node's API from wherever you'll run the script
   (see [reachability](#reachability) below).
 
@@ -175,5 +175,5 @@ strongly implies a green UI.
 | Step 4 `delivered = 0` | Curator's peer-id couldn't be dialed (no relay route) | Verify A's "Circuit reservation granted" line; restart A if missing |
 | Step 7 hits `APPROVED_TIMEOUT` | Catch-up multi-peer fan-out is unusually slow on testnet | Bump `APPROVED_TIMEOUT=300` and re-run from step 7 only by reusing the same `CG_ID` (TODO: not yet supported) |
 | Step 8 fails (B never sees SWM) | The encryption fix `43a9d25a` is missing — both nodes must be on `followup/436-ui-fixes` post-merge | `git log --oneline | head -5` on both nodes; rebuild + restart |
-| Step 9 register fails with "insufficient funds" | The agent wallet ran out of Base Sepolia ETH | Re-fund via [the testnet faucet](../setup/TESTNET_FAUCET.md) |
+| Step 9 register fails with "insufficient funds" | The agent wallet ran out of Base Sepolia ETH | Re-fund the wallet, then retry |
 | Auto-update kicked in mid-test | `autoUpdate.enabled` wasn't set to false | Edit `~/.dkg/config.json` per step 1, restart, re-run |

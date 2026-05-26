@@ -1,7 +1,7 @@
 # Sync Chain Verification (Tier 2)
 
 **Status**: Draft
-**Depends on**: [sync-flow.md](../diagrams/sync-flow.md), [SPEC_TRUST_LAYER.md](../SPEC_TRUST_LAYER.md)
+**Depends on**: [Memory Lifecycle](../architecture/memory-lifecycle.md)
 
 ---
 

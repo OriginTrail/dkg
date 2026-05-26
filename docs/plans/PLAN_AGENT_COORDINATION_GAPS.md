@@ -1,6 +1,6 @@
 # Plan: Addressing Agent Coordination Gaps
 
-This document maps each **key gap** from the [AI Agent Coordination Assessment](./00_IMPLEMENTATION_PLAN.md#key-gaps-for-agent-coordination) to concrete deliverables, phases, and dependencies. It is the single roadmap for “how we address those gaps.”
+This document maps each **key gap** from the historical AI Agent Coordination Assessment to concrete deliverables, phases, and dependencies. It is the single roadmap for “how we address those gaps.”
 
 **Last updated:** 2026-03-02
 
@@ -143,6 +143,6 @@ Optional / later: SPEC_PLUGGABLE_TRIPLE_STORE.md (Phase 1.3), SPEC_CRASH_RECOVER
 
 ## References
 
-- **Master plan:** [00_IMPLEMENTATION_PLAN.md](./00_IMPLEMENTATION_PLAN.md) — full task list, status, and section refs (§1.x, §4.x, §8.x).
-- **Economy:** [SPEC_PART2_ECONOMY.md](../SPEC_PART2_ECONOMY.md), [PLAN_TRUST_LAYER.md](./PLAN_TRUST_LAYER.md).
+- **Master plan:** historical implementation plan in the versioned archive — full task list, status, and section refs (§1.x, §4.x, §8.x).
+- **Economy:** historical economy and trust-layer plans in the versioned archive.
 - **Cross-agent query:** [SPEC_CROSS_AGENT_QUERY.md](../specs/SPEC_CROSS_AGENT_QUERY.md).

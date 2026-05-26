@@ -1,7 +1,7 @@
 # Profile Exchange on Connect
 
 **Status**: Draft
-**Depends on**: [sync-flow.md](../diagrams/sync-flow.md), [SPEC_PART1_MARKETPLACE.md](../SPEC_PART1_MARKETPLACE.md)
+**Depends on**: [Agents and Trust](../understand/agents-and-trust.md)
 
 ---
 

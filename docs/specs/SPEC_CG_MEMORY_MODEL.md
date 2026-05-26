@@ -3,7 +3,7 @@
 **Status**: IMPLEMENTED (v1.0)
 **Date**: 2026-05-20
 **Scope**: How agents should think about Context Graphs and Agent Networks, the three orthogonal access dials (sharing / contribution / per-fact privacy), and the role of edge vs core nodes.
-**Related**: [SPEC_V10_IDENTITY_AND_ACCESS.md](./SPEC_V10_IDENTITY_AND_ACCESS.md), [SPEC_CONTEXT_GRAPH_LIFECYCLE.md](./SPEC_CONTEXT_GRAPH_LIFECYCLE.md), [SPEC_VERIFIED_KAS.md](../SPEC_VERIFIED_KAS.md).
+**Related**: [SPEC_V10_IDENTITY_AND_ACCESS.md](./SPEC_V10_IDENTITY_AND_ACCESS.md), [Context Graphs](../understand/context-graphs.md), and [Knowledge Assets](../understand/knowledge-assets.md).
 
 ---
 

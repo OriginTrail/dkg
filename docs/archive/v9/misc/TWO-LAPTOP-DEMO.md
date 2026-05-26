@@ -10,7 +10,7 @@ On both laptops:
 
 - **Node.js 22+** and **pnpm 10+**
 - **Cursor** installed
-- **Base Sepolia ETH** for the daemon's identity registration. Use the [DKG testnet faucet guide](setup/TESTNET_FAUCET.md). You'll need a few cents worth of testnet ETH per node.
+- **Base Sepolia ETH** for the daemon's identity registration. See [Funding](operate/funding.md). You'll need a few cents worth of testnet ETH per node.
 
 ## 1. Bootstrap (both laptops)
 
@@ -149,7 +149,7 @@ Switch back to either Node UI's **Activity feed** to watch chat turns, annotatio
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `pnpm dkg start` says "identity not registered" | Agent address has no Base Sepolia ETH yet | Fund the address shown in `pnpm dkg show` from the [faucet](setup/TESTNET_FAUCET.md), restart |
+| `pnpm dkg start` says "identity not registered" | Agent address has no Base Sepolia ETH yet | Fund the address shown in `pnpm dkg show`, then restart |
 | `JoinProjectModal` shows "Access Restricted" | Curated CG, you're not on the allowlist | Click **Send Join Request**, ask the curator (Laptop A) to approve from their Participants view |
 | `WireWorkspacePanel` preview fails with "No manifest published" | Curator created the project before this branch landed, or manifest publish failed silently | Curator runs `pnpm exec node scripts/import-manifest.mjs --project=<cgId>` from a wired workspace |
 | Manifest install fails with "existing file is not valid JSON" | Operator already has a `.cursor/mcp.json` from another DKG project pointing at a different agent | Move the existing file aside, re-run install (the safety guard refuses to clobber an unparseable file) |

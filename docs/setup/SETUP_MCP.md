@@ -4,4 +4,4 @@ The full setup guide, supported clients, configuration reference, manual JSON sh
 
 **[packages/mcp-dkg/README.md](../../packages/mcp-dkg/README.md)**
 
-For the complete testnet walkthrough (including CLI and other adapters), see [JOIN_TESTNET.md](./JOIN_TESTNET.md).
+For the current V10 docs route, see [Connect MCP](../build/connect-mcp.md).

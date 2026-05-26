@@ -3,7 +3,7 @@
 **Status**: IMPLEMENTED (v10-rc)
 **Date**: 2026-04-07
 **Scope**: Agent identity model, context graph namespacing, access control, edge node requirements.
-**Supersedes**: Parts of SPEC_CONTEXT_GRAPH_LIFECYCLE §3–4, v9-protocol-operations §2.3 Phase 5b.
+**Supersedes**: Earlier lifecycle and identity/access notes.
 
 > **See also**: [SPEC_CG_MEMORY_MODEL.md](./SPEC_CG_MEMORY_MODEL.md) — the AI-dev-facing model for Context Graphs and Agent Networks. That RFC sits above this spec: this one defines the identity layer (node identity, agent identity, ID namespacing, token-based auth); the CG memory model defines the three orthogonal access dials (sharing / contribution / per-fact privacy) and the WM/SWM/VM memory tiers exposed to agents.
 

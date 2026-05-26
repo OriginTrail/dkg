@@ -261,7 +261,7 @@ Use the node APIs and packages to publish Knowledge Assets, query data, and coor
 
 ### 4. Integrate existing agent frameworks
 
-Use adapters for OpenClaw, ElizaOS, Hermes, or your own Node.js / TypeScript project.
+Use adapters for OpenClaw, Hermes, MCP-aware coding agents, or your own integration against the CLI, HTTP API, or package interfaces.
 
 ---
 
@@ -297,17 +297,17 @@ analysis reports are under `bench/results/profiles/`, including
 
 ---
 
-## Setup guides
+## Docs
 
 | Guide | Use it when |
 |---|---|
-| [MCP Setup](docs/setup/SETUP_MCP.md) | You want Cursor / Claude Code / Claude Desktop / Windsurf / VSCode + Copilot / Cline / Codex CLI to use DKG as memory |
-| [Join the Testnet](docs/setup/JOIN_TESTNET.md) | You want a full node setup and first publish/query flow |
-| [OpenClaw Setup](docs/setup/SETUP_OPENCLAW.md) | You want OpenClaw to use DKG as memory/tools |
-| [Hermes Setup](docs/setup/SETUP_HERMES.md) | You want Hermes Agent to use DKG as memory/tools |
-| [ElizaOS Setup](docs/setup/SETUP_ELIZAOS.md) | You want ElizaOS integration |
-| [Custom agent Setup](docs/setup/SETUP_CUSTOM.md) | You are wiring an agent framework not covered above |
-| [Testnet Faucet](docs/setup/TESTNET_FAUCET.md) | You need Base Sepolia ETH and TRAC |
+| [Overview](docs/overview.md) | You need the DKG V10 system map |
+| [Build with DKG](docs/build/index.md) | You want install, connect, publish, and query paths |
+| [MCP Setup](docs/build/connect-mcp.md) | You want Cursor / Claude Code / Claude Desktop / Windsurf / VSCode + Copilot / Cline / Codex CLI to use DKG as memory |
+| [OpenClaw Setup](docs/build/connect-openclaw.md) | You want OpenClaw to use DKG as memory/tools |
+| [Hermes Setup](docs/build/connect-hermes.md) | You want Hermes Agent to use DKG as memory/tools |
+| [Funding](docs/operate/funding.md) | You need to understand testnet ETH/TRAC requirements |
+| [For AI Agents](docs/for-ai-agents/index.md) | You want compact agent context and task packs |
 
 ---
 
@@ -319,11 +319,9 @@ Three entry points cover the common flows:
 
 - **Manual install (`dkg init`)** — on testnet, `dkg init` auto-funds the generated admin and operational wallets when `network.faucet.url` is set (the default for the bundled testnet config).
 - **OpenClaw, Hermes, and MCP setup (`dkg openclaw setup`, `dkg hermes setup`, `dkg mcp setup`)** — run the same funding step on first setup. Pass `--no-fund` to skip it (for pre-funded wallets, CI, or offline runs).
-- **Direct API / custom scripts** — the full request/response shape, idempotency semantics, and error codes live in [`docs/setup/TESTNET_FAUCET.md`](docs/setup/TESTNET_FAUCET.md).
+- **Direct API / custom scripts** — use the local daemon and CLI references in [Build with DKG](docs/build/index.md) and [Reference](docs/reference/index.md). The faucet call is an implementation detail of supported setup flows, not a separate current setup path.
 
-Faucet calls are best-effort: a failed call logs a ready-to-paste `curl` block and setup continues. The node is usable without funding — you just can't publish or stake until it's topped up. Rate limits and error codes are documented in the [faucet reference](docs/setup/TESTNET_FAUCET.md#rate-limits-and-cooldowns).
-
-If the faucet is unreachable and you need ETH only, [`docs/setup/JOIN_TESTNET.md`](docs/setup/JOIN_TESTNET.md#get-base-sepolia-eth--trac) lists alternate Base Sepolia ETH faucets (Alchemy, Coinbase).
+Faucet calls are best-effort: a failed call logs a ready-to-paste `curl` block and setup continues. The node is usable without funding for WM, SWM, local queries, and P2P operations. It needs funds only for Verified Memory and other on-chain actions.
 
 ---
 
@@ -455,17 +453,14 @@ This is a pnpm + Turborepo monorepo.
 
 ---
 
-## Specs
+## Specs and Current Docs
 
 | Document | Scope |
 |---|---|
-| [Part 1: Agent Marketplace](docs/SPEC_PART1_MARKETPLACE.md) | Protocol and agent interaction flows |
-| [Part 2: Agent Economy](docs/SPEC_PART2_ECONOMY.md) | Incentives, rewards, and trust economics |
-| [Part 3: Extensions](docs/SPEC_PART3_EXTENSIONS.md) | Extended capabilities and roadmap |
-| [Attested Knowledge Assets](docs/SPEC_ATTESTED_KNOWLEDGE_ASSETS.md) | Multi-party attestation model |
-| [Trust Layer](docs/SPEC_TRUST_LAYER.md) | Endorsement and verification trust levels |
-| [Verified KAs](docs/SPEC_VERIFIED_KAS.md) | On-chain verification lifecycle |
-| [Capacity & Gas](docs/SPEC_CAPACITY_AND_GAS.md) | Node capacity and gas accounting |
+| [Overview](docs/overview.md) | Current V10 system map |
+| [Architecture](docs/architecture/index.md) | Current V10 node and memory lifecycle architecture |
+| [For AI Agents](docs/for-ai-agents/index.md) | Current agent context, invariants, and task packs |
+| [Knowledge Assets](docs/understand/knowledge-assets.md) | Current Knowledge Asset model |
 
 ---
 

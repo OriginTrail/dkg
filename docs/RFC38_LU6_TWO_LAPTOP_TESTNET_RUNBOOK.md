@@ -61,8 +61,8 @@ You need:
   you operate (cores can NOT live on the same NAT as laptop A to test
   NAT-traversal honestly — different machine + different network is
   required for an honest C4)
-- some Base Sepolia ETH on each of the three wallets (faucet links in
-  `docs/setup/TESTNET_FAUCET.md`)
+- some Base Sepolia ETH on each of the three wallets; see
+  [Funding](operate/funding.md)
 
 ## 0. Pre-flight (both laptops + the core)
 

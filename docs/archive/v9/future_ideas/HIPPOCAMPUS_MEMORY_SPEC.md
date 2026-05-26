@@ -138,7 +138,7 @@
 
 - **Paper**: Hippocampus: An Efficient and Scalable Memory Module for Agentic AI (arXiv:2602.13594).
 - **DKG-V9**: `@origintrail-official/dkg-storage` (TripleStore, GraphManager), `@origintrail-official/dkg-agent` (DKGAgent, config), `@origintrail-official/dkg-query` (DKGQueryEngine); implementation plan §8.1 (pluggable triple store).
-- **Existing docs**: [query-flow.md](../diagrams/query-flow.md), [SPEC_CROSS_AGENT_QUERY.md](../specs/SPEC_CROSS_AGENT_QUERY.md), [00_IMPLEMENTATION_PLAN.md](../plans/00_IMPLEMENTATION_PLAN.md).
+- **Existing docs**: [query-flow.md](../diagrams/query-flow.md), [SPEC_CROSS_AGENT_QUERY.md](../specs/SPEC_CROSS_AGENT_QUERY.md), and the historical implementation plan in the versioned archive.
 
 ---
 

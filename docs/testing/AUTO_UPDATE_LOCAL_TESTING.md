@@ -26,7 +26,7 @@ DKG_HOME="$DKG_HOME" dkg init
 
 When prompted:
 - Enable auto-update: `y`
-- GitHub repo: your test repo (or `OriginTrail/dkg-v9`)
+- GitHub repo: your test repo (or `OriginTrail/dkg`)
 - Branch: `main` (stable cohort) or `pre-release` (canary cohort)
 - Allow pre-release versions: `n` for stable nodes, `y` for canary nodes
 

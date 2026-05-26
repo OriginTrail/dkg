@@ -23,8 +23,12 @@ packages/evm-module/typechain/
 # state, daemon logs). Not checked in.
 .devnet/
 
-# Agent scratch (project memory across orchestrator runs). Local only.
-.ai/
+# Agent scratch (project memory across orchestrator runs). Local by default.
+.ai/*
+!.ai/
+!.ai/decisions.md
+!.ai/adr/
+!.ai/adr/*.md
 .scratch/
 
 # WM persistence regression repro (Phase 1 of fix/graphify-import-issues).
@@ -40,3 +44,5 @@ packages/evm-module/deployments/hardhat_contracts.json
 packages/evm-module/deployments/localhost_contracts.json
 snapshots/_cache_phase1_neuroweb_epoch16.json
 .claude/
+.orchestrator/
+.worktrees/
