@@ -4496,6 +4496,7 @@ export function SubGraphDetailView({
               scopeLabel={`Subgraph graph: ${title} entities and entity-to-entity triples from loaded subgraph data.`}
               trustLegendActiveLayer={singleLayer}
               scopeEntities={graphPanelScopeEntities}
+              layerEntities={graphPanelEntities}
             />
           </div>
         )}
