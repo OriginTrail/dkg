@@ -242,6 +242,22 @@ export const CODE_PREDICATE_COLORS: Record<string, string> = {
   [VIZ_PRED_CONSENSUS]: '#22c55e',     // green (consensus literal edge)
 };
 
+// Built-in graph-viz auto-tints (schema.org → purple, prov → blue, etc) that
+// would otherwise override our layer default for any node with a matching
+// rdf:type. We neutralise them by mapping each to `defaultNodeColor` so the
+// layer color wins for non-attribution nodes. SWM agent attribution still
+// works because per-URI `nodeColors` sits ABOVE namespaceColors in the
+// style-engine priority stack. Future coloring rework can drop a richer
+// taxonomy in here without touching the rest of the wiring.
+export function neutraliseBuiltinNamespaces(defaultColor: string): Record<string, string> {
+  return {
+    'https://schema.org/': defaultColor,
+    'http://www.w3.org/ns/prov#': defaultColor,
+    'http://xmlns.com/foaf/0.1/': defaultColor,
+    'http://purl.org/dc/terms/': defaultColor,
+  };
+}
+
 export function buildLayerGraphOptions(
   layer: 'wm' | 'swm' | 'vm',
   nodeColors?: Record<string, string>,
@@ -259,6 +275,7 @@ export function buildLayerGraphOptions(
     style: {
       classColors: CODE_CLASS_COLORS,
       predicateColors: CODE_PREDICATE_COLORS,
+      namespaceColors: neutraliseBuiltinNamespaces(color),
       // Per-URI node tints (SWM attribution uses this to paint root KAs by
       // their proposing agent). Omitted for layers that don't use it, so
       // the style engine keeps falling back to classColors.
@@ -313,7 +330,12 @@ export function neighborhoodTriples(entityUri: string, allTriples: Triple[], hop
     if (frontier.size === 0) break;
   }
 
-  return allTriples.filter(t => visited.has(t.subject) || visited.has(t.object));
+  // Strict containment: both endpoints must be inside the N-hop ball.
+  // Using `||` here pulls in dangling edges from frontier nodes to nodes
+  // (N+1) hops away — those targets then render as nodes that look
+  // disconnected from the focal entity. AND keeps the rendered subgraph
+  // truly bounded by `hops`.
+  return allTriples.filter(t => visited.has(t.subject) && visited.has(t.object));
 }
 
 export function matchesSearch(e: MemoryEntity, q: string): boolean {

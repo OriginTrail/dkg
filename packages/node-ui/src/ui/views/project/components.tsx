@@ -56,7 +56,7 @@ import {
   SOURCE_CONTENT_TYPE, MARKDOWN_FORM, SOURCE_FILE, DKG_SIZE,
   entityAuthorUri, transitionAgentUri, transitionAtISO,
   shortType, shortPred, entityMeta,
-  buildLayerGraphOptions, getDescription, neighborhoodTriples,
+  buildLayerGraphOptions, getDescription, neighborhoodTriples, neutraliseBuiltinNamespaces,
   matchesSearch, humanizeLabel, layerNoun, useLayerTriples,
   filterTriplesToEntities,
   entityTimestamp, formatRelativeTime, formatTimelineBucket, formatTrailTimestamp,
@@ -3227,19 +3227,23 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
     return filterTriplesToEntities(hoodTriples, entityUris);
   }, [hoodTriples, allEntities, entity.uri]);
 
-  const graphOptions = useMemo(() => ({
-    labelMode: 'humanized' as const,
-    renderer: '2d' as const,
-    labels: memoryGraphLabels({ minZoomForLabels: 0.2 }),
-    style: {
-      defaultNodeColor: TRUST_COLORS[entity.trustLevel],
-      defaultEdgeColor: '#475569',
-      edgeWidth: 1.0,
-      fontSize: 11,
-    },
-    hexagon: { baseSize: 7, minSize: 4, maxSize: 10, scaleWithDegree: true },
-    focus: { maxNodes: 500, hops: 999 },
-  }), [entity.trustLevel]);
+  const graphOptions = useMemo(() => {
+    const focalColor = TRUST_COLORS[entity.trustLevel];
+    return {
+      labelMode: 'humanized' as const,
+      renderer: '2d' as const,
+      labels: memoryGraphLabels({ minZoomForLabels: 0.2 }),
+      style: {
+        namespaceColors: neutraliseBuiltinNamespaces(focalColor),
+        defaultNodeColor: focalColor,
+        defaultEdgeColor: '#475569',
+        edgeWidth: 1.0,
+        fontSize: 11,
+      },
+      hexagon: { baseSize: 7, minSize: 4, maxSize: 10, scaleWithDegree: true },
+      focus: { maxNodes: 500, hops: 999 },
+    };
+  }, [entity.trustLevel]);
 
   // ViewConfig makes the opened entity visually focal (bigger hexagon)
   // and drives the `<CenterOnEntity>` child to pan the camera to it
@@ -3682,7 +3686,14 @@ export function SubGraphOverviewGrid({
           displayName: binding.displayName ?? sg.name,
           description: binding.description,
           rank: binding.rank ?? 99,
-          entityCount: sg.entityCount,
+          // Use the client-canonicalised entity set size (the same one we
+          // use for the filter and that the Entities tab renders) so the
+          // mini-card count matches the detail page. The server-reported
+          // `sg.entityCount` is a liberal COUNT(DISTINCT ?s) per named
+          // graph and can include subjects that fail our entityList
+          // membership rule. Fall back to the server count if we have no
+          // client set for this sub-graph (e.g. nothing yet hydrated).
+          entityCount: cardEntityUris.size > 0 ? cardEntityUris.size : sg.entityCount,
           tripleCount: sg.tripleCount,
           triples: filterTriplesToEntities(rawTriples, cardEntityUris),
           layerCounts: layerCountsBySubGraph.get(sg.name) ?? { wm: 0, swm: 0, vm: 0 },
@@ -3758,6 +3769,7 @@ export function SubGraphMiniCard({
     style: {
       classColors: CODE_CLASS_COLORS,
       predicateColors: CODE_PREDICATE_COLORS,
+      namespaceColors: neutraliseBuiltinNamespaces(card.color),
       defaultNodeColor: card.color,
       defaultEdgeColor: '#475569',
       edgeWidth: 1.0,
