@@ -248,11 +248,26 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   // stays on `useSwmAttributions` which is the legend's source of
   // truth). Same `resultContextGraphId` discriminator as the SWM
   // stream so a project switch doesn't briefly show stale rows.
+  const overviewIsActive = !activeSubGraph && activeLayer === 'overview';
   const lifecycleEventsResult = useAssertionLifecycleEvents(
-    !activeSubGraph && activeLayer === 'overview' ? contextGraphId : undefined,
+    overviewIsActive ? contextGraphId : undefined,
   );
-  const overviewLifecycleEvents = lifecycleEventsResult.resultContextGraphId === contextGraphId
-    ? lifecycleEventsResult.events
+  // PR #694 review fix (Comment 6) — when the Overview is the
+  // active consumer, pass `[]` during the transition window (cold
+  // load, project switch, or post-leave-and-return) instead of
+  // `undefined`. The joiner contract is presence-keyed: `[]` opts
+  // INTO the lifecycle source (legacy `dcterms:created`-derived
+  // `'added'` rows are suppressed); `undefined` falls back to the
+  // legacy path. Passing `undefined` mid-transition let legacy
+  // rows render briefly before the fetch resolved, then flipped
+  // to lifecycle rows — exactly the shape-change Comment 4 was
+  // meant to prevent. Empty briefly is better than wrong-shape
+  // briefly. Off-Overview we still pass `undefined` so other
+  // callers (none today; future surfaces) get the legacy path.
+  const overviewLifecycleEvents = overviewIsActive
+    ? (lifecycleEventsResult.resultContextGraphId === contextGraphId
+        ? lifecycleEventsResult.events
+        : [])
     : undefined;
 
   const refreshParticipants = useCallback(() => {
