@@ -36,7 +36,7 @@
  *                    entity-list pass below).
  */
 import { useMemo } from 'react';
-import type { MemoryEntity, TrustLevel } from './useMemoryEntities.js';
+import { canonicalEntityUri, type MemoryEntity, type TrustLevel } from './useMemoryEntities.js';
 
 // Priority order — first predicate that has a parseable value wins.
 const TIMESTAMP_PREDICATES = [
@@ -412,20 +412,31 @@ export function buildPromotionEvents(
     if (subGraph && evt.subGraph !== subGraph) continue;
     const at = parseDateLike(evt.publishedAt);
     if (!at) continue;
-    const entity = entitiesByUri.get(evt.rootUri);
+    // Local-1 (PR #656) — `evt.rootUri` is the raw SPARQL binding
+    // value and can be wrapped (`<urn:...>`), while `entitiesByUri`
+    // is keyed by canonical URIs (the same canonicalisation
+    // `buildEntities` applies). Without this step every promotion of
+    // a wrapped-URI root would fall through to the stub branch and
+    // render as a non-clickable static row, even though the entity
+    // is loaded. Same C8 / R2-1 pattern as the earlier #639 fixes.
+    const canonicalRoot = canonicalEntityUri(evt.rootUri);
+    const entity = entitiesByUri.get(canonicalRoot);
     const resolved = entity != null;
     out.push({
       // Per-op id (Code1 + Code4) — keys off the operation URI plus
-      // the root URI so (a) two re-promotions of the same (root, agent)
-      // with different `opUri`s reconcile as distinct rows, and (b) a
-      // single `WorkspaceOperation` that promotes multiple roots
-      // produces a distinct id per root (the opUri alone would collide).
-      id: buildActivityId('promoted', evt.opUri, at, evt.rootUri),
+      // the (canonical) root URI so (a) two re-promotions of the
+      // same (root, agent) with different `opUri`s reconcile as
+      // distinct rows, and (b) a single `WorkspaceOperation` that
+      // promotes multiple roots produces a distinct id per root
+      // (the opUri alone would collide). Use the canonical form so
+      // a wrapped + unwrapped event for the same root don't render
+      // as two rows.
+      id: buildActivityId('promoted', evt.opUri, at, canonicalRoot),
       // When the entity isn't in `entitiesByUri` (data race, or a
       // promotion of a root that was already published past SWM
       // before this hook ran), synthesise a stub so the row still
       // renders cleanly. A URI-tail label is good enough for the row.
-      entity: entity ?? syntheticEntityStub(evt.rootUri),
+      entity: entity ?? syntheticEntityStub(canonicalRoot),
       at,
       // Author on a `'promoted'` row is the *promoter* (the agent
       // who moved this entity into SWM), not the original `prov:

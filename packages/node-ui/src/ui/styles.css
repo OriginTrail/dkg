@@ -6878,6 +6878,15 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
   border-top: 1px solid var(--border-subtle);
   border-radius: 0;
 }
+/* Local-2 (PR #656) — non-clickable stub rows for promotion events
+ * whose root isn't loaded in `rawMemory.entities`. Same row shell so
+ * the timeline stays visually coherent, but the affordance is honest:
+ * default cursor, no hover surface, slight opacity to read as inert. */
+.v10-activity-feed-row-static {
+  cursor: default;
+  opacity: 0.7;
+}
+.v10-activity-feed-row-static:hover { background: none; }
 .v10-activity-feed-layer {
   font-size: 14px; line-height: 1;
   justify-self: center;

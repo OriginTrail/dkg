@@ -238,7 +238,18 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   // SWM graph's agent-tint legend; we re-use its `attributions` map
   // here rather than re-querying `_shared_memory_meta`. Hook is
   // already in production for the SWM Graph subtab so it's cached.
-  const swmAttributionsResult = useSwmAttributions(contextGraphId);
+  //
+  // Local-3 (PR #656) — gate the hoist on a view that actually
+  // consumes the result. Pre-fix the page-level call fired
+  // unconditionally for every active view (graph-overview, query,
+  // WM/VM detail, sub-graph pages — none of which read it), running
+  // a 5000-row SPARQL for nothing. Active consumers today are
+  // (a) the Overview activity feed and (b) the SWM-tab layer graph.
+  // The hook already short-circuits cleanly on `undefined` (state
+  // resets, no fetch).
+  const swmAttributionNeeded =
+    !activeSubGraph && !selectedUri && (activeLayer === 'overview' || activeLayer === 'swm');
+  const swmAttributionsResult = useSwmAttributions(swmAttributionNeeded ? contextGraphId : undefined);
   // Codex Code7 (PR #656) — the hook returns its previous-graph
   // result during the transition window between context-graph switch
   // and the new SPARQL resolving. Gate `events` on the result being

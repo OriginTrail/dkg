@@ -492,6 +492,45 @@ describe('buildPromotionEvents — pure joiner', () => {
     const uris = items.map(i => i.entity.uri).sort();
     expect(uris).toEqual(['urn:e:root-a', 'urn:e:root-b']);
   });
+
+  // Local-1 (PR #656) — the daemon sometimes ships wrapped
+  // (`<urn:...>`) bindings in `_shared_memory_meta` rows, while
+  // `entitiesByUri` is canonicalised (`buildEntities` strips the
+  // angle brackets). Without canonicalising on lookup, every
+  // wrapped-URI promotion would fall through to the stub branch
+  // and render as a non-clickable static row, even when the
+  // entity is loaded. Same C8 / R2-1 canonicalisation pattern as
+  // the earlier #639 fixes.
+  it('resolves wrapped <urn:...> rootUri to a canonical entity, keeping the row clickable (Local-1)', () => {
+    const canonical = 'urn:e:wrapped';
+    const entity: MemoryEntity = {
+      uri: canonical,
+      label: 'Wrapped Entity',
+      types: [],
+      trustLevel: 'shared',
+      layers: new Set(['shared']),
+      subGraphs: new Set(),
+      properties: new Map(),
+      connections: [],
+    };
+    const items = buildPromotionEvents(
+      [{
+        rootUri: `<${canonical}>`,
+        agent: 'did:dkg:agent:bob',
+        opUri: 'urn:op:wrapped',
+        publishedAt: '2026-05-22T10:00:00Z',
+      }],
+      { entitiesByUri: new Map([[canonical, entity]]) },
+    );
+    expect(items).toHaveLength(1);
+    expect(items[0].clickable).toBe(true);
+    expect(items[0].entity.uri).toBe(canonical);
+    // Stable id keys off canonical so a mixed wrapped/unwrapped feed
+    // for the same root doesn't render two rows.
+    expect(items[0].id).toBe(
+      buildActivityId('promoted', 'urn:op:wrapped', new Date('2026-05-22T10:00:00Z'), canonical),
+    );
+  });
 });
 
 // `buildActivityId` is a pure helper exported alongside the joiner.
