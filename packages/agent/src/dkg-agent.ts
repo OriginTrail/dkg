@@ -84,8 +84,11 @@ import {
   validateLiftPublishPayload,
   subtractFinalizedExactQuads,
   TripleStoreAsyncLiftPublisher,
+  TripleStoreAsyncPromoteQueue,
   FileWorkspacePublicSnapshotStore,
   parseWorkspacePublicSnapshotNQuads,
+  type AsyncPromoteQueue, type AsyncPromoteQueueConfig,
+  type PromoteJob, type PromoteListFilter,
   type PublishOptions, type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
   type CollectedACK, type LiftAuthorityProof, type LiftTransitionType,
   type LiftRequest, type LiftRequestAuthorSeal,
@@ -360,6 +363,23 @@ export class DKGAgent {
   readonly queryEngine: DKGQueryEngine;
   readonly discovery: DiscoveryClient;
   readonly profileManager: ProfileManager;
+  /**
+   * Lazily-constructed WM→SWM async-promote queue (see
+   * `docs/specs/SPEC_ASYNC_PROMOTE_QUEUE.md`). Routes call into it via
+   * `agent.assertion.promoteAsync(...)`. PR #3 will wire an in-process
+   * worker loop that periodically calls `claimNext` + `succeed`/`fail`;
+   * for now, only the public enqueue/inspect surface is reachable. We
+   * stash the impl as `private` and expose it via the `promoteQueue`
+   * getter so the worker (a daemon-side concern) and tests can drive
+   * the queue directly without going through the assertion subsurface.
+   */
+  private _promoteQueue?: AsyncPromoteQueue;
+  /**
+   * Override for tests / future operator config. When set before
+   * `promoteQueue` is first accessed, the queue is constructed with
+   * these overrides folded into the defaults.
+   */
+  private _promoteQueueConfig?: Partial<AsyncPromoteQueueConfig>;
   gossip!: GossipSubManager;
   router!: ProtocolRouter;
   messenger!: Messenger;
@@ -17980,7 +18000,72 @@ export class DKGAgent {
           events: [...eventMap.values()],
         };
       },
+
+      // ── Async promote (RFC: docs/specs/SPEC_ASYNC_PROMOTE_QUEUE.md) ──
+      //
+      // These five methods are thin pass-throughs to the queue. The
+      // worker that actually drains the queue lives in the daemon (PR
+      // #3); on this surface we only enqueue, inspect, cancel, and
+      // recover. No memoryGraphChanged event is emitted at enqueue time
+      // — emission happens when the worker reports success.
+      async promoteAsync(
+        contextGraphId: string,
+        name: string,
+        opts?: { entities?: readonly string[] | 'all'; subGraphName?: string },
+      ): Promise<{ jobId: string }> {
+        const jobId = await agent.promoteQueue.enqueue({
+          contextGraphId,
+          assertionName: name,
+          subGraphName: opts?.subGraphName,
+          entities: opts?.entities ?? 'all',
+        });
+        return { jobId };
+      },
+      async getPromoteAsyncStatus(jobId: string): Promise<PromoteJob | null> {
+        return agent.promoteQueue.getStatus(jobId);
+      },
+      async listPromoteAsyncJobs(filter?: PromoteListFilter): Promise<PromoteJob[]> {
+        return agent.promoteQueue.list(filter);
+      },
+      async cancelPromoteAsync(jobId: string): Promise<void> {
+        return agent.promoteQueue.cancel(jobId);
+      },
+      async recoverPromoteAsync(jobId: string): Promise<void> {
+        return agent.promoteQueue.recover(jobId);
+      },
     };
+  }
+
+  /**
+   * Lazily-constructed async-promote queue. First access materialises
+   * the `TripleStoreAsyncPromoteQueue` against `this.store`; subsequent
+   * accesses return the same instance. The queue's control graph
+   * (`urn:dkg:promote-queue:control-plane`) lives in the same triple
+   * store as everything else, so it survives daemon restarts.
+   *
+   * Exposed publicly so PR #3's worker loop can drive the worker-side
+   * surface (`claimNext` / `heartbeat` / `succeed` / `fail` /
+   * `recordCommitMarker` / `recoverOnStartup`) without the assertion
+   * subsurface having to leak those methods to user-facing callers.
+   */
+  get promoteQueue(): AsyncPromoteQueue {
+    if (!this._promoteQueue) {
+      this._promoteQueue = new TripleStoreAsyncPromoteQueue(this.store, this._promoteQueueConfig ?? {});
+    }
+    return this._promoteQueue;
+  }
+
+  /**
+   * Override the promote-queue config (e.g. inject deterministic
+   * `now`/`idGenerator` for tests, or tune `maxRetries`/`leaseMs` from
+   * daemon config). Must be called BEFORE the first `promoteQueue`
+   * access; throws otherwise so the override doesn't silently no-op.
+   */
+  configurePromoteQueue(config: Partial<AsyncPromoteQueueConfig>): void {
+    if (this._promoteQueue) {
+      throw new Error('configurePromoteQueue must be called before the queue is first accessed');
+    }
+    this._promoteQueueConfig = config;
   }
 
 }

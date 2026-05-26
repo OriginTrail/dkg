@@ -99,6 +99,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue {
 
       const now = this.now();
       const jobId = this.idGenerator();
+      this.validateJobId(jobId);
       const job: PromoteJob = {
         jobId,
         request: this.normalizeRequest(request),
@@ -426,6 +427,18 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue {
           throw new Error('entities array must contain non-empty strings');
         }
       }
+    }
+  }
+
+  private validateJobId(jobId: string): void {
+    if (!jobId || typeof jobId !== 'string') {
+      throw new Error('idGenerator must return a non-empty string jobId');
+    }
+    if (jobId.length > 256) {
+      throw new Error('idGenerator returned a jobId that is too long');
+    }
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(jobId)) {
+      throw new Error("idGenerator returned an unsafe jobId; allowed characters are letters, numbers, '.', '_', ':', and '-'");
     }
   }
 

@@ -58,7 +58,7 @@ const execFileAsync = promisify(execFile);
 import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, assertSafeRdfTerm, escapeDkgRdfLiteral, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, assertionLifecycleUri } from '@origintrail-official/dkg-core';
-import { findReservedSubjectPrefix, isSkolemizedUri, type PublishOptions } from '@origintrail-official/dkg-publisher';
+import { findReservedSubjectPrefix, isSkolemizedUri, PROMOTE_JOB_STATES, PromoteJobConflictError, type PromoteJob, type PromoteJobState, type PublishOptions } from '@origintrail-official/dkg-publisher';
 import { validatePreSignedAuthorAttestation } from './memory.js';
 import {
   DashboardDB,
@@ -405,6 +405,139 @@ function hashFromFileUrn(value: string | undefined): string | undefined {
 
 function validateContentHash(hash: string): boolean {
   return /^(?:sha256:|keccak256:)?[0-9a-f]{64}$/i.test(hash);
+}
+
+function validatePromoteJobId(jobId: string): { valid: true } | { valid: false; reason: string } {
+  if (!jobId) return { valid: false, reason: "jobId is required" };
+  if (jobId.length > 256) return { valid: false, reason: "jobId is too long" };
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(jobId)) {
+    return {
+      valid: false,
+      reason: "jobId may only contain letters, numbers, '.', '_', ':', and '-'",
+    };
+  }
+  return { valid: true };
+}
+
+function decodePromoteJobId(encoded: string, res: ServerResponse): string | null {
+  const jobId = safeDecodeURIComponent(encoded, res);
+  if (jobId === null) return null;
+  const validation = validatePromoteJobId(jobId);
+  if (!validation.valid) {
+    jsonResponse(res, 400, { error: `Invalid promote jobId: ${validation.reason}` });
+    return null;
+  }
+  return jobId;
+}
+
+// ── Async-promote wire schema (RFC §3.2 + §3.3) ──────────────────────────────
+//
+// The internal `PromoteJob` shape persisted by the queue carries
+// implementation details the HTTP contract is not allowed to leak:
+//   - `lease.claimToken` (opaque worker-side capability),
+//   - `lease.workerId` / heartbeat metadata,
+//   - numeric epoch timestamps,
+//   - `commitMarker` (internal idempotency bookkeeping).
+//
+// `PromoteJobView` is the documented public shape per RFC §3.2; ISO-8601
+// timestamps, a flat top level for assertion identity, and a stable
+// `lastError.code` enum mapped from the queue's failure classification.
+// The list (§3.3) and status (§3.2) endpoints share `promoteJobToView()`
+// so both surfaces stay in lockstep.
+
+export interface PromoteJobErrorView {
+  code: string;
+  message: string;
+  retryable: boolean;
+}
+
+export interface PromoteJobView {
+  jobId: string;
+  state: PromoteJobState;
+  contextGraphId: string;
+  assertionName: string;
+  subGraphName?: string;
+  entities: readonly string[] | 'all';
+  enqueuedAt: string;
+  updatedAt: string;
+  startedAt?: string;
+  finishedAt?: string;
+  entitiesPromoted?: number;
+  attempts: number;
+  maxAttempts: number;
+  nextRetryAt?: string;
+  lastError?: PromoteJobErrorView;
+  reason?: string;
+}
+
+function isoFromEpochMs(ms: number | undefined): string | undefined {
+  if (ms === undefined || ms === null) return undefined;
+  if (!Number.isFinite(ms)) return undefined;
+  return new Date(ms).toISOString();
+}
+
+export function promoteJobToView(job: PromoteJob): PromoteJobView {
+  // `startedAt` reflects the current attempt's lease acquisition; while
+  // running the lease is present, after success/failure the queue clears
+  // it so the field naturally goes away. `finishedAt` is sourced from
+  // the terminal-state evidence the queue already records:
+  // `result.succeededAt` for success and `attempt.lastError.recordedAt`
+  // for failed / failed_retrying. Cancelled jobs (no lastError, no
+  // result) fall back to `updatedAt` because that's the only durable
+  // timestamp for that transition.
+  const startedAt = isoFromEpochMs(job.lease?.acquiredAt);
+  let finishedAt: string | undefined;
+  if (job.state === 'succeeded') {
+    finishedAt = isoFromEpochMs(job.result?.succeededAt) ?? isoFromEpochMs(job.updatedAt);
+  } else if (job.state === 'failed' || job.state === 'failed_retrying') {
+    finishedAt =
+      isoFromEpochMs(job.attempt.lastError?.recordedAt) ?? isoFromEpochMs(job.updatedAt);
+  }
+
+  const lastError: PromoteJobErrorView | undefined = job.attempt.lastError
+    ? {
+        code: job.attempt.lastError.classification,
+        message: job.attempt.lastError.message,
+        retryable: job.attempt.lastError.retryable,
+      }
+    : undefined;
+
+  const view: PromoteJobView = {
+    jobId: job.jobId,
+    state: job.state,
+    contextGraphId: job.request.contextGraphId,
+    assertionName: job.request.assertionName,
+    entities: job.request.entities,
+    enqueuedAt: new Date(job.enqueuedAt).toISOString(),
+    updatedAt: new Date(job.updatedAt).toISOString(),
+    attempts: job.attempt.count,
+    maxAttempts: job.attempt.maxRetries,
+  };
+  if (job.request.subGraphName !== undefined) view.subGraphName = job.request.subGraphName;
+  if (startedAt !== undefined) view.startedAt = startedAt;
+  if (finishedAt !== undefined) view.finishedAt = finishedAt;
+  if (job.result?.promotedCount !== undefined) view.entitiesPromoted = job.result.promotedCount;
+  const nextRetryAt = isoFromEpochMs(job.attempt.nextRetryAt);
+  if (nextRetryAt !== undefined) view.nextRetryAt = nextRetryAt;
+  if (lastError !== undefined) view.lastError = lastError;
+  if (job.reason !== undefined) view.reason = job.reason;
+  return view;
+}
+
+// Helper used by the five `/promote-async` routes below to refuse work
+// when no worker is actually draining the queue (RFC §3.1 — the
+// implementation plan parks the supervisor in a follow-up PR; until then
+// `daemonState.promoteWorkerAvailable` stays `false` and we return 503
+// rather than silently accept jobs that would sit in `queued` forever).
+function asyncPromoteUnavailable(res: ServerResponse): boolean {
+  if (daemonState.promoteWorkerAvailable) return false;
+  const reason = daemonState.promoteWorkerUnavailableReason;
+  jsonResponse(res, 503, {
+    error:
+      `async-promote worker is not available` +
+      (reason ? `: ${reason}` : ''),
+  });
+  return true;
 }
 
 function parseImportedAssertionUri(
@@ -1400,6 +1533,178 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
         err.message?.includes("Unsafe")
       ) {
         return jsonResponse(res, 400, { error: err.message });
+      }
+      throw err;
+    }
+  }
+
+  // ── Async-promote queue (RFC: docs/specs/SPEC_ASYNC_PROMOTE_QUEUE.md) ──
+  //
+  // Five routes that mirror the sync /promote contract but enqueue work
+  // for an in-process worker (PR #3) instead of running it inline. All
+  // routes share the SMALL_BODY_BYTES cap from sync /promote — see
+  // RFC §3.1.
+  //
+  // The list/status/cancel/recover routes are unambiguous because the
+  // jobId lives in the path; the enqueue route uses `/promote-async`
+  // as the trailing segment so it doesn't conflict with assertion
+  // names containing the word "promote".
+
+  // POST /api/assertion/:name/promote-async  { contextGraphId, entities?, subGraphName? }
+  if (
+    req.method === "POST" &&
+    path.startsWith("/api/assertion/") &&
+    path.endsWith("/promote-async")
+  ) {
+    const assertionName = safeDecodeURIComponent(
+      path.slice("/api/assertion/".length, -"/promote-async".length),
+      res,
+    );
+    if (assertionName === null) return;
+    const nameVal = validateAssertionName(assertionName);
+    if (!nameVal.valid)
+      return jsonResponse(res, 400, {
+        error: `Invalid assertion name: ${nameVal.reason}`,
+      });
+    if (asyncPromoteUnavailable(res)) return;
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
+    const { contextGraphId, entities, subGraphName } = parsed;
+    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
+    if (!validateEntities(entities, res)) return;
+    if (!validateOptionalSubGraphName(subGraphName, res)) return;
+    try {
+      const result = await agent.assertion.promoteAsync(
+        contextGraphId,
+        assertionName,
+        { entities: entities ?? "all", subGraphName },
+      );
+      return jsonResponse(res, 200, {
+        jobId: result.jobId,
+        state: "queued",
+      });
+    } catch (err: any) {
+      if (err instanceof PromoteJobConflictError) {
+        return jsonResponse(res, 409, {
+          error: err.message,
+          existingJobId: err.existingJobId,
+        });
+      }
+      if (
+        err.message?.includes("required") ||
+        err.message?.includes("Invalid") ||
+        err.message?.includes("must be")
+      ) {
+        return jsonResponse(res, 400, { error: err.message });
+      }
+      throw err;
+    }
+  }
+
+  // GET /api/assertion/promote-async  ?contextGraphId=<cg>&state=queued,running,...&limit=<n>
+  // List jobs filtered by contextGraphId / state. Must come BEFORE the
+  // `/:jobId` route below because Node URL routing here is by `startsWith`
+  // + `endsWith` rather than a real router; an exact-prefix GET to the
+  // collection URL would otherwise be claimed by the per-job handler.
+  if (
+    req.method === "GET" &&
+    path === "/api/assertion/promote-async"
+  ) {
+    if (asyncPromoteUnavailable(res)) return;
+    const stateParam = url.searchParams.get("state");
+    const requestedStates = stateParam ? stateParam.split(",").map((s) => s.trim()) : undefined;
+    if (
+      requestedStates &&
+      (requestedStates.length === 0 ||
+        requestedStates.some((s) => !(PROMOTE_JOB_STATES as readonly string[]).includes(s)))
+    ) {
+      return jsonResponse(res, 400, {
+        error: `Invalid state filter: ${stateParam}. Allowed: ${PROMOTE_JOB_STATES.join(",")}`,
+      });
+    }
+    const stateFilter = requestedStates as PromoteJobState[] | undefined;
+    const contextGraphId = url.searchParams.get("contextGraphId") ?? undefined;
+    const limitParam = url.searchParams.get("limit");
+    if (limitParam !== null && !/^[1-9]\d*$/.test(limitParam)) {
+      return jsonResponse(res, 400, {
+        error: "limit must be a positive integer ≤ 1000",
+      });
+    }
+    const limit = limitParam !== null ? Number.parseInt(limitParam, 10) : undefined;
+    if (limit !== undefined && (!Number.isFinite(limit) || limit <= 0 || limit > 1000)) {
+      return jsonResponse(res, 400, {
+        error: "limit must be a positive integer ≤ 1000",
+      });
+    }
+    const jobs = await agent.assertion.listPromoteAsyncJobs({
+      state: stateFilter,
+      contextGraphId,
+      limit,
+    });
+    return jsonResponse(res, 200, { jobs: jobs.map(promoteJobToView) });
+  }
+
+  // GET /api/assertion/promote-async/:jobId
+  if (
+    req.method === "GET" &&
+    path.startsWith("/api/assertion/promote-async/") &&
+    !path.endsWith("/recover")
+  ) {
+    if (asyncPromoteUnavailable(res)) return;
+    const jobId = decodePromoteJobId(path.slice("/api/assertion/promote-async/".length), res);
+    if (jobId === null) return;
+    const job = await agent.assertion.getPromoteAsyncStatus(jobId);
+    if (!job) {
+      return jsonResponse(res, 404, { error: `Promote job not found: ${jobId}` });
+    }
+    return jsonResponse(res, 200, promoteJobToView(job));
+  }
+
+  // DELETE /api/assertion/promote-async/:jobId   — cancel a queued/failed_retrying job
+  if (
+    req.method === "DELETE" &&
+    path.startsWith("/api/assertion/promote-async/")
+  ) {
+    const jobId = decodePromoteJobId(path.slice("/api/assertion/promote-async/".length), res);
+    if (jobId === null) return;
+    try {
+      await agent.assertion.cancelPromoteAsync(jobId);
+      const job = await agent.assertion.getPromoteAsyncStatus(jobId);
+      return jsonResponse(res, 200, { jobId, state: job?.state ?? "failed" });
+    } catch (err: any) {
+      if (err.message?.includes("not found")) {
+        return jsonResponse(res, 404, { error: err.message });
+      }
+      // "Cannot cancel job in state 'running'" etc.
+      if (err.message?.includes("Cannot cancel")) {
+        return jsonResponse(res, 409, { error: err.message });
+      }
+      throw err;
+    }
+  }
+
+  // POST /api/assertion/promote-async/:jobId/recover   — requeue a terminal-failed job
+  if (
+    req.method === "POST" &&
+    path.startsWith("/api/assertion/promote-async/") &&
+    path.endsWith("/recover")
+  ) {
+    const jobId = decodePromoteJobId(
+      path.slice("/api/assertion/promote-async/".length, -"/recover".length),
+      res,
+    );
+    if (jobId === null) return;
+    try {
+      await agent.assertion.recoverPromoteAsync(jobId);
+      const job = await agent.assertion.getPromoteAsyncStatus(jobId);
+      return jsonResponse(res, 200, { jobId, state: job?.state ?? "queued" });
+    } catch (err: any) {
+      if (err.message?.includes("not found")) {
+        return jsonResponse(res, 404, { error: err.message });
+      }
+      if (err.message?.includes("Cannot recover")) {
+        return jsonResponse(res, 409, { error: err.message });
       }
       throw err;
     }
