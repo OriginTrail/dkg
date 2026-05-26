@@ -243,15 +243,17 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   const swmAttributionsResult = useSwmAttributions(swmAttributionNeeded ? contextGraphId : undefined);
 
   // N6 polish (task #23) — bundle-keyed lifecycle events feed the
-  // Overview activity feed. Gated on the Overview tab only (the SWM
-  // graph doesn't consume this stream; SWM attribution coloring
-  // stays on `useSwmAttributions` which is the legend's source of
-  // truth). Same `resultContextGraphId` discriminator as the SWM
-  // stream so a project switch doesn't briefly show stale rows.
+  // Overview activity feed. The hook fires for the current
+  // `contextGraphId` regardless of active tab (PR #694 Comment 16) so
+  // the last successful lifecycle result stays cached across tab
+  // switches — gating the HOOK on `overviewIsActive` reset the cache
+  // every time the user left Overview, so returning rendered an
+  // empty feed briefly until the 5k-row SPARQL re-resolved. The
+  // consumer-side ternary below still hides events off-Overview.
+  // The SWM graph attribution coloring stays on `useSwmAttributions`
+  // (separate source of truth for the legend).
   const overviewIsActive = !activeSubGraph && activeLayer === 'overview';
-  const lifecycleEventsResult = useAssertionLifecycleEvents(
-    overviewIsActive ? contextGraphId : undefined,
-  );
+  const lifecycleEventsResult = useAssertionLifecycleEvents(contextGraphId);
   // PR #694 review fix (Comment 6) — when the Overview is the
   // active consumer, pass `[]` during the transition window (cold
   // load, project switch, or post-leave-and-return) instead of

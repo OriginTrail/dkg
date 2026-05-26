@@ -594,7 +594,15 @@ export function buildLifecycleActivityRows(
   return out.slice(0, limit);
 }
 
-export interface UseProjectActivityEventsOptions extends UseProjectActivityOptions {
+// PR #694 Comment 17 — `excludeEvents` is base-only. The joiner
+// applies it internally for the Comment 14 fix (push `'added'`
+// suppression down into base when lifecycle is the source) but
+// doesn't filter `promotions` against it, so exposing it on the
+// joiner's public option type would create a "filters base but not
+// joined rows" inconsistency. Omit it from the joiner-facing
+// options; callers who need a real cross-source filter should
+// surface a follow-up.
+export interface UseProjectActivityEventsOptions extends Omit<UseProjectActivityOptions, 'excludeEvents'> {
   /**
    * Raw per-operation event log from `useSwmAttributions.events`.
    * When omitted (or empty) the joiner reduces to plain
@@ -658,9 +666,11 @@ export function useProjectActivityEvents(
   // operates on the post-filter set, so typed Decision/Task/PR rows
   // can't be silently dropped by a flood of imports ranking above them.
   const useLifecycle = lifecycleEvents != null;
-  const baseExcludeEvents = useLifecycle
-    ? (baseOpts.excludeEvents ? [...baseOpts.excludeEvents, 'added' as const] : ['added' as const])
-    : baseOpts.excludeEvents;
+  // `excludeEvents` isn't on `UseProjectActivityEventsOptions` (Comment
+  // 17 — base-only), so callers can't pass it through; we set it here
+  // for the Comment 14 fix (push `'added'` suppression into base when
+  // lifecycle is the source).
+  const baseExcludeEvents = useLifecycle ? ['added' as const] : undefined;
   const baseResult = useProjectActivity(entityList, { ...baseOpts, excludeEvents: baseExcludeEvents });
   return useMemo(() => {
     const cap = baseOpts.limit ?? 200;
