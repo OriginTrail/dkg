@@ -148,3 +148,137 @@ describe('CreateProjectModal partial registration flow', () => {
     expect(container!.textContent).toContain('On-chain registration failed: rpc unavailable');
   });
 });
+
+describe('CreateProjectModal progress copy honesty', () => {
+  let root: Root | null = null;
+  let container: HTMLDivElement | null = null;
+  const agentAddress = '0x00000000000000000000000000000000000000b2';
+  const cgId = `${agentAddress}/local-only`;
+
+  // Defer-resolving createContextGraph so we can sample the in-flight
+  // progress copy on the Create button before the post-create branches
+  // (ontology install, manifest publish) overwrite it.
+  let resolveCreateContextGraph: ((value: unknown) => void) | null = null;
+
+  beforeEach(() => {
+    (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+    document.body.innerHTML = '';
+    vi.clearAllMocks();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    fetchCurrentAgentMock.mockResolvedValue({
+      agentAddress,
+      agentDid: `did:dkg:agent:${agentAddress}`,
+      name: 'Local Agent',
+      peerId: 'peer-local',
+    });
+    createContextGraphMock.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveCreateContextGraph = resolve as (value: unknown) => void;
+        }),
+    );
+    fetchContextGraphsMock.mockResolvedValue({
+      contextGraphs: [{ id: cgId, name: 'Local Only' }],
+    });
+    installOntologyMock.mockResolvedValue(undefined);
+    publishProjectManifestMock.mockResolvedValue(undefined);
+  });
+
+  afterEach(async () => {
+    if (resolveCreateContextGraph) {
+      resolveCreateContextGraph({ created: cgId, registered: true });
+      await flush();
+    }
+    resolveCreateContextGraph = null;
+    if (root) {
+      await act(async () => {
+        root?.unmount();
+      });
+    }
+    container?.remove();
+    root = null;
+    container = null;
+    vi.restoreAllMocks();
+  });
+
+  async function renderModal() {
+    const { CreateProjectModal } = await import('../src/ui/components/Modals/CreateProjectModal.js');
+    const { useProjectsStore } = await import('../src/ui/stores/projects.js');
+    const { useTabsStore } = await import('../src/ui/stores/tabs.js');
+    const { useJourneyStore } = await import('../src/ui/stores/journey.js');
+    act(() => {
+      useProjectsStore.setState({ contextGraphs: [], loading: false, activeProjectId: null });
+      useTabsStore.setState({
+        tabs: [{ id: 'dashboard', label: 'Dashboard', closable: false }],
+        activeTabId: 'dashboard',
+      });
+      useJourneyStore.setState({ stage: 0 });
+    });
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root!.render(React.createElement(CreateProjectModal, { open: true, onClose: vi.fn() }));
+    });
+    await flush();
+  }
+
+  function getCreateButton(): HTMLButtonElement {
+    const button = Array
+      .from(container!.querySelectorAll('button'))
+      .find((b) => b.textContent === 'Create Context Graph' || b.textContent?.includes('locally') || b.textContent?.includes('network'));
+    if (!button) throw new Error('Create button not found');
+    return button as HTMLButtonElement;
+  }
+
+  it('shows local-create progress copy when "Register on chain now" is left off (default)', async () => {
+    await renderModal();
+    const nameInput = container!.querySelector('input[type="text"]') as HTMLInputElement;
+    const registerCheckbox = container!.querySelector('input[type="checkbox"]') as HTMLInputElement;
+    expect(registerCheckbox.checked).toBe(false);
+
+    await act(async () => {
+      setInputValue(nameInput, 'Local Only');
+    });
+    await flush();
+
+    await act(async () => {
+      getCreateButton().dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flush();
+
+    expect(getCreateButton().textContent).toBe('Creating context graph locally…');
+    expect(createContextGraphMock).toHaveBeenCalledWith(
+      cgId,
+      'Local Only',
+      undefined,
+      expect.objectContaining({ register: false }),
+    );
+  });
+
+  it('shows on-chain registration progress copy when the operator opts in', async () => {
+    await renderModal();
+    const nameInput = container!.querySelector('input[type="text"]') as HTMLInputElement;
+    const registerCheckbox = container!.querySelector('input[type="checkbox"]') as HTMLInputElement;
+
+    await act(async () => {
+      setInputValue(nameInput, 'Local Only');
+      registerCheckbox.click();
+    });
+    await flush();
+    expect(registerCheckbox.checked).toBe(true);
+
+    await act(async () => {
+      getCreateButton().dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flush();
+
+    expect(getCreateButton().textContent).toBe('Registering context graph on the network…');
+    expect(createContextGraphMock).toHaveBeenCalledWith(
+      cgId,
+      'Local Only',
+      undefined,
+      expect.objectContaining({ register: true }),
+    );
+  });
+});

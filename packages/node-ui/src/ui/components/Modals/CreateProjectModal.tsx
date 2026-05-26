@@ -93,7 +93,18 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
     setCreating(true);
     setError(null);
     setRegistrationWarning(null);
-    setProgress('Registering context graph on the network…');
+    // UI label honesty: when the operator left the "Register on chain now"
+    // checkbox off (the local-first default), the create call sends
+    // `register: false` and the daemon performs zero on-chain work — see
+    // packages/cli/src/daemon/routes/context-graph.ts "Registration is
+    // opt-in". Saying "Registering context graph on the network…" in that
+    // path is misleading and was reported by operators as "why is it
+    // trying to register on chain when I didn't ask for that?" Branch the
+    // copy on the actual request shape instead. Same pattern as commit
+    // 6b5012fd ("UI label honesty + devnet-test.sh response shape").
+    setProgress(registerOnChain
+      ? 'Registering context graph on the network…'
+      : 'Creating context graph locally…');
 
     const finalSlug = slugify(trimmedName);
     if (!agentAddress) {
@@ -104,7 +115,12 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
     const cgId = `${agentAddress}/${finalSlug}`;
 
     try {
-      const slowTimer = setTimeout(() => setProgress('On-chain registration in progress — this can take up to 30s…'), 5000);
+      const slowTimer = setTimeout(
+        () => setProgress(registerOnChain
+          ? 'On-chain registration in progress — this can take up to 30s…'
+          : 'Setting up local context graph…'),
+        5000,
+      );
 
       // OT-RFC-38 LU-6: project creation is LOCAL-ONLY (no chain
       // interaction, no gas). On-chain registration is deferred to
