@@ -2081,7 +2081,7 @@ export class DKGPublisher implements Publisher {
     // confirmed states for this publish so the `dkg:Publication` subject
     // emitted in metadata stays the same after on-chain confirmation.
     const publishOperationId = `${this.sessionId}-${tentativeSeq}`;
-    let ual = kcUal(this.chain.chainId, publisherAddress, `t${publishOperationId}`);
+    let ual = kcUal(this.chain.chainId, publisherAddress, `t${publishOperationId}`, this.chain.mintingStorageTag);
 
     // Resolve the on-chain attribution target from the per-call override
     // (computed above) or fall back to the daemon's persistent identity.
@@ -2471,7 +2471,7 @@ export class DKGPublisher implements Publisher {
         // String(...) preserves the historical template-literal behaviour
         // around the typed-as-optional `startKAId` (in practice always
         // defined post-publish; absent only on the update OnChainPublishResult).
-        ual = kcUal(this.chain.chainId, onChainResult.publisherAddress, String(onChainResult.startKAId));
+        ual = kcUal(this.chain.chainId, onChainResult.publisherAddress, String(onChainResult.startKAId), this.chain.mintingStorageTag);
 
         for (const km of kaMetadata) {
           km.kcUal = ual;
@@ -2756,7 +2756,7 @@ export class DKGPublisher implements Publisher {
       // branch at line ~2670 always populates it via localTentativePublisherAddress()).
       const result: PublishResult = {
         kcId,
-        ual: kcUal(this.chain.chainId, String(publisherAddress), kcId),
+        ual: kcUal(this.chain.chainId, String(publisherAddress), kcId, this.chain.mintingStorageTag),
         merkleRoot: kcMerkleRoot,
         kaManifest: manifestEntries,
         status: 'tentative',
@@ -2832,7 +2832,7 @@ export class DKGPublisher implements Publisher {
             if (!rejectedPublisherAddress) throw v10Err;
             earlyReturn = {
               kcId,
-              ual: kcUal(this.chain.chainId, rejectedPublisherAddress, kcId),
+              ual: kcUal(this.chain.chainId, rejectedPublisherAddress, kcId, this.chain.mintingStorageTag),
               merkleRoot: kcMerkleRoot,
               kaManifest: manifestEntries,
               status: 'failed',
@@ -2887,7 +2887,7 @@ export class DKGPublisher implements Publisher {
       onPhase?.('chain', 'end');
       return {
         kcId,
-        ual: kcUal(this.chain.chainId, failedPublisherAddress, kcId),
+        ual: kcUal(this.chain.chainId, failedPublisherAddress, kcId, this.chain.mintingStorageTag),
         merkleRoot: kcMerkleRoot,
         kaManifest: manifestEntries,
         status: 'failed',
@@ -2919,7 +2919,7 @@ export class DKGPublisher implements Publisher {
       await storeUpdatedQuads();
       const result: PublishResult = {
         kcId,
-        ual: kcUal(this.chain.chainId, tentativePublisherAddress, kcId),
+        ual: kcUal(this.chain.chainId, tentativePublisherAddress, kcId, this.chain.mintingStorageTag),
         merkleRoot: kcMerkleRoot,
         kaManifest: manifestEntries,
         status: 'tentative',
@@ -2933,7 +2933,7 @@ export class DKGPublisher implements Publisher {
 
     const result: PublishResult = {
       kcId,
-      ual: kcUal(this.chain.chainId, effectivePublisherAddress, kcId),
+      ual: kcUal(this.chain.chainId, effectivePublisherAddress, kcId, this.chain.mintingStorageTag),
       merkleRoot: kcMerkleRoot,
       kaManifest: manifestEntries,
       status: 'confirmed',

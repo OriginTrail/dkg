@@ -40,6 +40,7 @@ import {
   ChallengeNoLongerActiveError,
 } from './chain-adapter.js';
 import { HubResolutionCache } from './hub-resolution-cache.js';
+import { deriveStorageTag } from './kc-storage-registry.js';
 import { PcaUnavailableError } from './pca-errors.js';
 import {
   buildAuthorAttestationTypedData,
@@ -298,6 +299,17 @@ export class EVMChainAdapter implements ChainAdapter {
   }
   readonly chainType = 'evm' as const;
   readonly chainId: string;
+  /**
+   * OT-RFC-40 §5.2 storage tag for the KC storage this adapter mints
+   * into. Populated during `init()` from `KnowledgeCollectionStorage.uri(0)`
+   * and frozen for the lifetime of the adapter — RC11 deployments
+   * rebuild the adapter on `chainResetMarker` change anyway, and
+   * mid-lifetime storage swaps under the same Hub name are not a
+   * supported operation. Defaults to "" so the legacy 3-segment UAL
+   * form is produced when the storage's `uriBase` is the canonical
+   * `did:dkg`. See `kcUal()` in `@origintrail-official/dkg-core`.
+   */
+  mintingStorageTag = '';
 
   private readonly provider: JsonRpcProvider;
   private readonly filterErrorSilencer: FilterErrorSilencer;
@@ -788,6 +800,33 @@ export class EVMChainAdapter implements ChainAdapter {
       // V8 KnowledgeCollection not deployed — legacy publish surface unavailable.
     }
     this.contracts.knowledgeCollectionStorage = await this.resolveAssetStorage('KnowledgeCollectionStorage');
+
+    // OT-RFC-40 §5.2 — bind this adapter to the storage tag of the
+    // `KnowledgeCollectionStorage` instance it is minting into. The
+    // tag is the suffix of the storage's `uri(0)` past the `did:dkg`
+    // prefix; empty for the canonical V10 default storage. Failure to
+    // read or parse the uriBase falls back to "" (the legacy 3-segment
+    // UAL form), which is the most-conservative behaviour: it preserves
+    // every bit of UAL output produced before this RFC.
+    try {
+      const uriBase: string = await this.contracts.knowledgeCollectionStorage.uri(0);
+      const tag = deriveStorageTag(uriBase);
+      if (tag === null) {
+        console.warn(
+          `[EVMChainAdapter] KC storage at ${await this.contracts.knowledgeCollectionStorage.getAddress()} ` +
+          `returned malformed uriBase "${uriBase}"; falling back to default storage tag (3-segment UALs)`,
+        );
+        this.mintingStorageTag = '';
+      } else {
+        this.mintingStorageTag = tag;
+      }
+    } catch (err) {
+      console.warn(
+        `[EVMChainAdapter] failed to read uri(0) from KC storage: ${err instanceof Error ? err.message : String(err)}; ` +
+        `falling back to default storage tag (3-segment UALs)`,
+      );
+      this.mintingStorageTag = '';
+    }
 
     // V9 contracts (KnowledgeAssets + KnowledgeAssetsStorage) are archived
     // (PRD §4.1, deploy scripts 040+041 moved under deploy/archive). Keep

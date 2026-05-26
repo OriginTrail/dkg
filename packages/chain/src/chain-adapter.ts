@@ -560,6 +560,20 @@ export interface ChainAdapter {
   chainType: 'evm' | 'solana';
   chainId: string;
   /**
+   * OT-RFC-40 §5.2 storage tag of the KC storage instance this adapter
+   * mints into. Empty string ("") means the default storage and produces
+   * the legacy 3-segment UAL form `did:dkg:{chainId}/{publisher}/{id}`.
+   * Tagged storages (e.g. V9 KAS at `did:dkg:v9`) produce the 4-segment
+   * form `did:dkg:{tag}/{chainId}/{publisher}/{id}` so the resolver can
+   * route to the correct storage instance.
+   *
+   * Optional on the adapter surface so adapters that pre-date the RFC
+   * default to "" (preserving the legacy form bit-for-bit). EVM adapters
+   * populate it during `init()` by reading the storage's `uri(0)` view;
+   * mock adapters expose a setter for tests.
+   */
+  mintingStorageTag?: string;
+  /**
    * Stable identifier for the SPECIFIC deployment this adapter is
    * bound to (not just the chain). `chainId` alone is too coarse —
    * every Hardhat instance shares `evm:31337`, and a single chain can

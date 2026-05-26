@@ -48,6 +48,19 @@ export class MockChainAdapter implements ChainAdapter {
   readonly chainType = 'evm' as const;
   readonly chainId: string;
   readonly signerAddress: string;
+  /**
+   * OT-RFC-40 §5.2 storage tag for the KC storage this mock adapter
+   * pretends to mint into. Defaults to "" (the legacy 3-segment UAL
+   * form, same shape every existing mock-backed test asserts on).
+   * Tests that exercise the multi-storage path call
+   * `setMintingStorageTag('v9')` etc. to flip into the 4-segment form.
+   */
+  mintingStorageTag = '';
+
+  /** Test helper: override the storage tag this adapter advertises. */
+  setMintingStorageTag(tag: string): void {
+    this.mintingStorageTag = tag;
+  }
 
   /** See `ChainAdapter.deploymentId`. Single in-memory deployment per process — chainId is enough. */
   get deploymentId(): string {
