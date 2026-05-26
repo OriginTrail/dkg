@@ -119,4 +119,24 @@ describe('listAssertions (WM) — URI parse + cg-scoped filter', () => {
     const out = await listAssertions('cg-A', 'wm');
     expect(out).toEqual([]);
   });
+
+  it('scopes the /assertion/ discriminator to the tail when cgId itself contains "/assertion/"', async () => {
+    // PR #710 reviewer guard — `validateContextGraphId` permits
+    // slashes, so a cgId can literally contain `/assertion/` as a
+    // substring. The prior `g.indexOf('/assertion/')` (full URI)
+    // would have hit the cgId's internal `/assertion/` and
+    // mis-sliced the name. After tail-scoping the parse, the cgId
+    // is treated as opaque and only the tail's `/assertion/`
+    // delimiter is consulted.
+    setBindings([
+      bRow('did:dkg:context-graph:weird/assertion/cg/assertion/0xabc/foo', 4),
+    ]);
+    const out = await listAssertions('weird/assertion/cg', 'wm');
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({
+      name: 'foo',
+      subGraph: undefined,
+      tripleCount: 4,
+    });
+  });
 });

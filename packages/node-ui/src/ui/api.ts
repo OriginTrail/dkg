@@ -653,19 +653,30 @@ export async function listAssertions(
   // lifecycle hook uses (`subGraphFromAssertionGraphUri`) — defensive
   // on malformed input, returns undefined for root-bucket URIs.
   const cgPrefix = `did:dkg:context-graph:${contextGraphId}/`;
+  const ASSERTION_SEG = 'assertion/';
   const result: AssertionInfo[] = [];
   for (const b of bindings) {
     const g = typeof b.g === 'string' ? b.g : b.g?.value;
-    if (!g || !g.startsWith(cgPrefix) || !g.includes('/assertion/')) continue;
-    // The tail after `cgPrefix` is one of:
-    //   `assertion/<agent>/<name>`            → root-bucket
+    if (!g || !g.startsWith(cgPrefix)) continue;
+    // Scope the `/assertion/` discriminator to the tail (post-cgPrefix)
+    // so a `contextGraphId` that itself happens to contain
+    // `/assertion/` can't fool the parser into slicing inside the
+    // cgId. Tail shape is one of:
+    //   `assertion/<agent>/<name>`               → root-bucket
     //   `<subGraphName>/assertion/<agent>/<name>` → sub-graph-scoped
-    // Slice on `/assertion/` and take everything after the agent
-    // segment as the name. `<name>` is slash-free per the daemon's
-    // URI builder (`contextGraphAssertionUri`).
+    // Anything else (e.g. internal meta graphs sharing the prefix)
+    // is silently dropped — replaces the prior outer `.includes(
+    // '/assertion/')` filter.
+    const tail = g.slice(cgPrefix.length);
+    let afterAssertion: string;
+    if (tail.startsWith(ASSERTION_SEG)) {
+      afterAssertion = tail.slice(ASSERTION_SEG.length);
+    } else {
+      const idx = tail.indexOf('/' + ASSERTION_SEG);
+      if (idx === -1) continue;
+      afterAssertion = tail.slice(idx + ('/' + ASSERTION_SEG).length);
+    }
     const subGraph = subGraphFromAssertionGraphUri(g, contextGraphId);
-    const idx = g.indexOf('/assertion/');
-    const afterAssertion = g.slice(idx + '/assertion/'.length);
     const slash = afterAssertion.indexOf('/');
     const name = slash >= 0 ? afterAssertion.slice(slash + 1) : afterAssertion;
     if (!name) continue;
