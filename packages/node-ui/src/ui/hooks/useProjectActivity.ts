@@ -598,6 +598,21 @@ export interface UseProjectActivityEventsOptions extends UseProjectActivityOptio
 }
 
 /**
+ * Joiner hook return shape — `items` plus the explicit `hasMore`
+ * signal so consumers can render an honest "saturated" indicator
+ * (e.g. ActivityFeed's title badge `${limit}+`). PR #694 Comment 13
+ * — the previous `items.length >= effectiveLimit` heuristic
+ * overstated at the boundary (a project with exactly `limit` rows
+ * would render `${limit}+` even though no rows were dropped).
+ * `hasMore` is computed pre-slice in the joiner, so callers don't
+ * have to guess.
+ */
+export interface ProjectActivityEventsResult {
+  items: ActivityItem[];
+  hasMore: boolean;
+}
+
+/**
  * Joiner hook — `useProjectActivity` plus the SWM promotion stream.
  * Existing callers (AgentProfileView) keep using `useProjectActivity`
  * directly when they don't want promotion rows polluting a per-agent
@@ -608,14 +623,19 @@ export interface UseProjectActivityEventsOptions extends UseProjectActivityOptio
 export function useProjectActivityEvents(
   entityList: MemoryEntity[],
   opts: UseProjectActivityEventsOptions = {},
-): ActivityItem[] {
+): ProjectActivityEventsResult {
   const { swmEvents, lifecycleEvents, ...baseOpts } = opts;
   const base = useProjectActivity(entityList, baseOpts);
   return useMemo(() => {
+    const cap = baseOpts.limit ?? 200;
     // typeIri pins the feed to a typed-activity kind (Decision/Task/
     // PR/etc.) — promotion rows have no `kindUri` so they're dropped
     // wholesale, matching how the same filter drops `'added'` rows.
-    if (opts.typeIri) return base;
+    // `base` is already capped by `useProjectActivity` at `cap`, so
+    // we can't recover an honest `hasMore` for this path without
+    // re-running the entity scan; report `false` (the typed slice
+    // doesn't surface a saturation badge today).
+    if (opts.typeIri) return { items: base, hasMore: false };
     // PR #694 review fix — presence-keyed, not size-keyed. The
     // `lifecycleEvents` prop is the contract: when supplied (even
     // as an empty array because the project has no AssertionCreated
@@ -628,7 +648,10 @@ export function useProjectActivityEvents(
     // Overview shape mid-project as soon as the first assertion
     // landed.
     const useLifecycle = lifecycleEvents != null;
-    if (!useLifecycle && (!swmEvents || swmEvents.length === 0)) return base;
+    if (!useLifecycle && (!swmEvents || swmEvents.length === 0)) {
+      // Same caveat as the typed path: `base` is already capped.
+      return { items: base, hasMore: false };
+    }
 
     // When the lifecycle stream is supplied it is the authoritative
     // source for `'added'` and `'promoted'` rows — drop those event
@@ -639,8 +662,6 @@ export function useProjectActivityEvents(
     const baseFiltered = useLifecycle
       ? base.filter(item => item.event !== 'added')
       : base;
-
-    const cap = baseOpts.limit ?? 200;
 
     let promotions: ActivityItem[];
     if (useLifecycle) {
@@ -668,7 +689,12 @@ export function useProjectActivityEvents(
       if (!a.at && b.at) return 1;
       return a.entity.label.localeCompare(b.entity.label);
     });
-    return merged.slice(0, cap);
+    // PR #694 Comment 13 — compute `hasMore` BEFORE the slice so
+    // the consumer can render `${cap}+` only when rows were
+    // actually dropped. A project with exactly `cap` rows now
+    // renders the exact count, not the saturation indicator.
+    const hasMore = merged.length > cap;
+    return { items: merged.slice(0, cap), hasMore };
   }, [base, swmEvents, lifecycleEvents, entityList, baseOpts.agentUri, baseOpts.subGraph, baseOpts.limit, opts.typeIri]);
 }
 

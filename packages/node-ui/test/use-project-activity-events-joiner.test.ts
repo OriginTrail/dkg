@@ -31,10 +31,14 @@ function Probe({
   entities: MemoryEntity[];
   opts: UseProjectActivityEventsOptions;
 }) {
-  const items = useProjectActivityEvents(entities, opts);
+  // PR #694 Comment 13 — the joiner returns `{ items, hasMore }`
+  // now. `data-has-more` lets the saturation badge be exercised
+  // alongside the row stream without a second probe.
+  const { items, hasMore } = useProjectActivityEvents(entities, opts);
   return React.createElement('div', {
     id: 'probe',
     'data-events': items.map(i => i.event).join('|'),
+    'data-has-more': hasMore ? '1' : '0',
   });
 }
 
@@ -43,6 +47,10 @@ function readEvents(container: HTMLElement): string[] {
   if (!probe) return [];
   const raw = probe.getAttribute('data-events') ?? '';
   return raw.split('|').filter(Boolean);
+}
+
+function readHasMore(container: HTMLElement): boolean {
+  return container.querySelector('#probe')?.getAttribute('data-has-more') === '1';
 }
 
 // PR #694 review fix — the `lifecycleEvents` prop is presence-keyed,
@@ -128,5 +136,81 @@ describe('useProjectActivityEvents — lifecycleEvents presence semantics (PR #6
     });
     const events = readEvents(container);
     expect(events).toEqual(['promoted']);
+  });
+});
+
+// PR #694 Comment 13 — `hasMore` is the pre-slice honest signal so
+// the title saturation badge doesn't lie at the boundary. The prior
+// `items.length >= effectiveLimit` heuristic in the consumer
+// rendered `${limit}+` for projects with *exactly* `limit` rows
+// (no rows dropped). The joiner now reports `hasMore = merged.length
+// > cap`, computed before the slice.
+describe('useProjectActivityEvents — hasMore signal (PR #694 Comment 13)', () => {
+  let root: Root;
+  let container: HTMLDivElement;
+
+  beforeEach(() => {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  function nLifecycleEvents(n: number): AssertionLifecycleEvent[] {
+    const out: AssertionLifecycleEvent[] = [];
+    for (let i = 0; i < n; i++) {
+      out.push({
+        eventUri: `urn:evt:promote-${i}`,
+        kind: 'promoted',
+        assertionUri: `urn:assert:doc-${i}`,
+        assertionName: `doc-${i}`,
+        agentUri: 'did:dkg:agent:bob',
+        // Distinct timestamps so the sort is deterministic.
+        publishedAt: `2026-05-${String((i % 28) + 1).padStart(2, '0')}T10:00:00Z`,
+      });
+    }
+    return out;
+  }
+
+  it('hasMore is FALSE at the exact boundary (merged.length === cap)', () => {
+    // Reviewer's named case: project with exactly `limit` rows. The
+    // saturation badge must NOT show `${limit}+`; the count is exact.
+    act(() => {
+      root.render(React.createElement(Probe, {
+        entities: [],
+        opts: { lifecycleEvents: nLifecycleEvents(10), limit: 10 },
+      }));
+    });
+    const events = readEvents(container);
+    expect(events).toHaveLength(10);
+    expect(readHasMore(container)).toBe(false);
+  });
+
+  it('hasMore is TRUE when merged.length > cap (rows dropped by the slice)', () => {
+    act(() => {
+      root.render(React.createElement(Probe, {
+        entities: [],
+        opts: { lifecycleEvents: nLifecycleEvents(15), limit: 10 },
+      }));
+    });
+    const events = readEvents(container);
+    expect(events).toHaveLength(10);
+    expect(readHasMore(container)).toBe(true);
+  });
+
+  it('hasMore is FALSE when below the cap', () => {
+    act(() => {
+      root.render(React.createElement(Probe, {
+        entities: [],
+        opts: { lifecycleEvents: nLifecycleEvents(3), limit: 10 },
+      }));
+    });
+    const events = readEvents(container);
+    expect(events).toHaveLength(3);
+    expect(readHasMore(container)).toBe(false);
   });
 });

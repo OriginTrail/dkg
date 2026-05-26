@@ -120,23 +120,22 @@ export const ActivityFeed: React.FC<ActivityFeedProps> = ({
   // useProjectActivityEvents reduces to plain useProjectActivity when
   // both swmEvents and lifecycleEvents are undefined, so existing
   // callers (AgentProfileView) get identical behaviour without
-  // passing the new props.
-  const items = useProjectActivityEvents(entities, {
+  // passing the new props. Returns `{ items, hasMore }` — `hasMore`
+  // is the pre-slice honest signal for the title saturation badge
+  // (PR #694 Comment 13).
+  const { items, hasMore } = useProjectActivityEvents(entities, {
     agentUri, typeIri, subGraph, limit, includeUndated, swmEvents, lifecycleEvents,
   });
   const buckets = React.useMemo(() => bucketActivity(items), [items]);
   const agents = useAgentsContext();
   const profile = useProjectProfileContext();
 
-  // PR #694 Comment 9 — render `${limit}+` when the feed is at-cap
-  // so the user can tell "saturated" apart from "this project happens
-  // to have exactly `limit` items". The joiner's default cap is
-  // `DEFAULT_ITEM_LIMIT` (200) when the caller passes no `limit`.
-  // Cheapest correct fix that doesn't change the joiner's API.
+  // PR #694 Comment 13 — render `${effectiveLimit}+` only when the
+  // joiner reports rows were dropped. Boundary case: a project with
+  // exactly `effectiveLimit` rows shows the exact count, not the
+  // saturation indicator (the prior `>=` heuristic overstated here).
   const effectiveLimit = limit ?? DEFAULT_ITEM_LIMIT;
-  const titleCount = items.length >= effectiveLimit
-    ? `${effectiveLimit}+`
-    : String(items.length);
+  const titleCount = hasMore ? `${effectiveLimit}+` : String(items.length);
 
   // N6 polish (item 3) — title row gets a total-feed count badge
   // mirroring the per-bucket chip; we render the same row in both
@@ -149,37 +148,41 @@ export const ActivityFeed: React.FC<ActivityFeedProps> = ({
     </div>
   ) : null;
 
-  // PR #694 Comment 8 — when the lifecycle SPARQL errored, surface
-  // an honest indicator instead of degrading to a normal empty feed.
-  // Quieter than the prior `EmptyState` primitive (same tertiary
-  // family as the empty hint) so we don't shout, but still
-  // distinguishable from the silent empty case.
-  if (lifecycleError) {
-    return (
-      <div className={`v10-activity-feed v10-activity-feed-empty ${className}`}>
-        {titleRow}
-        <div
-          className="v10-activity-feed-error"
-          role="status"
-          aria-live="polite"
-          title={lifecycleError}
-        >
-          Couldn't load recent activity. Retrying…
-        </div>
-      </div>
-    );
-  }
+  // PR #694 Comment 8 + 11 — when the lifecycle SPARQL errored,
+  // render a quiet inline error indicator. Comment 11 narrowed the
+  // Comment 8 fix: the indicator renders INLINE (above buckets,
+  // below the title), so typed Decision/Task/PR rows from the BASE
+  // entity-list path still render when present — a lifecycle
+  // failure shouldn't blank the whole feed. Only when `items.length
+  // === 0` does the indicator replace the empty hint. Copy is
+  // "Couldn't load recent activity." (qa-lead tweak — dropped
+  // "Retrying…" because the hook only re-fetches on cgId change,
+  // not on a timer).
+  const errorBanner = lifecycleError ? (
+    <div
+      className="v10-activity-feed-error"
+      role="status"
+      aria-live="polite"
+      title={lifecycleError}
+    >
+      Couldn't load recent activity.
+    </div>
+  ) : null;
 
   if (items.length === 0) {
     // N6 polish (item 2) — the centered bold `EmptyState` primitive
     // read as a load-bearing message; quieter inline tertiary text
     // recedes so the rest of the Overview stays the focal area.
+    // The error banner takes precedence over the empty hint here so
+    // the user doesn't see two contradictory states (Comment 8).
     return (
       <div className={`v10-activity-feed v10-activity-feed-empty ${className}`}>
         {titleRow}
-        <div className="v10-activity-feed-empty-hint">
-          {emptyHint ?? 'No activity with a timestamp yet.'}
-        </div>
+        {errorBanner ?? (
+          <div className="v10-activity-feed-empty-hint">
+            {emptyHint ?? 'No activity with a timestamp yet.'}
+          </div>
+        )}
       </div>
     );
   }
@@ -187,6 +190,7 @@ export const ActivityFeed: React.FC<ActivityFeedProps> = ({
   return (
     <div className={`v10-activity-feed ${className}`}>
       {titleRow}
+      {errorBanner}
       {buckets.map(bucket => (
         <div key={bucket.key} className="v10-activity-feed-bucket">
           <div className="v10-activity-feed-bucket-head">

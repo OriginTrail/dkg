@@ -254,7 +254,9 @@ function ProbeEvents({
   entities: MemoryEntity[];
   opts?: Parameters<typeof useProjectActivityEvents>[1];
 }) {
-  const items = useProjectActivityEvents(entities, opts);
+  // PR #694 Comment 13 — joiner returns `{ items, hasMore }` now;
+  // existing tests in this block read items only.
+  const { items } = useProjectActivityEvents(entities, opts);
   const dump: CapturedItem[] = items.map(toCaptured);
   return React.createElement('div', {
     id: 'probe',
