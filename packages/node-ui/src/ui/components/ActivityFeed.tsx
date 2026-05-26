@@ -72,6 +72,18 @@ export interface ActivityFeedProps {
    * AgentProfileView omits this; it stays on `swmEvents` for now.
    */
   lifecycleEvents?: ReadonlyArray<AssertionLifecycleEvent>;
+  /**
+   * PR #694 Comment 8 — when set, the lifecycle SPARQL failed for
+   * the current context graph. Surface a quiet inline error indicator
+   * in place of (or above) the empty hint so the consumer can
+   * distinguish "no local activity yet" from "the activity stream
+   * couldn't load". The hook clears `events` on failure but our
+   * Comment 3 fix advances `resultContextGraphId` to the current
+   * cgId in the catch path so consumers can no longer detect failure
+   * by `events.length === 0` alone — this prop is the explicit
+   * signal. Only the Overview supplies it; other callers omit.
+   */
+  lifecycleError?: string | null;
   title?: React.ReactNode;
   onSelectEntity: (uri: string) => void;
   /** Optional click handler for author chips (navigate to agent profile). */
@@ -80,6 +92,14 @@ export interface ActivityFeedProps {
   emptyHint?: React.ReactNode;
   className?: string;
 }
+
+// Mirror of `useProjectActivityEvents`'s default cap so the title-
+// badge "saturation indicator" stays in sync with the joiner's cap
+// without needing the joiner to return a `total` count alongside the
+// items. PR #694 Comment 9 — the badge previously rendered the
+// post-slice count, implying a project had exactly `limit` items
+// when it actually had more.
+const DEFAULT_ITEM_LIMIT = 200;
 
 export const ActivityFeed: React.FC<ActivityFeedProps> = ({
   entities,
@@ -90,6 +110,7 @@ export const ActivityFeed: React.FC<ActivityFeedProps> = ({
   includeUndated = true,
   swmEvents,
   lifecycleEvents,
+  lifecycleError,
   title,
   onSelectEntity,
   onOpenAgent,
@@ -107,6 +128,16 @@ export const ActivityFeed: React.FC<ActivityFeedProps> = ({
   const agents = useAgentsContext();
   const profile = useProjectProfileContext();
 
+  // PR #694 Comment 9 — render `${limit}+` when the feed is at-cap
+  // so the user can tell "saturated" apart from "this project happens
+  // to have exactly `limit` items". The joiner's default cap is
+  // `DEFAULT_ITEM_LIMIT` (200) when the caller passes no `limit`.
+  // Cheapest correct fix that doesn't change the joiner's API.
+  const effectiveLimit = limit ?? DEFAULT_ITEM_LIMIT;
+  const titleCount = items.length >= effectiveLimit
+    ? `${effectiveLimit}+`
+    : String(items.length);
+
   // N6 polish (item 3) — title row gets a total-feed count badge
   // mirroring the per-bucket chip; we render the same row in both
   // the empty and populated branches so the heading stays anchored
@@ -114,9 +145,30 @@ export const ActivityFeed: React.FC<ActivityFeedProps> = ({
   const titleRow = title ? (
     <div className="v10-activity-feed-title">
       <span className="v10-activity-feed-title-label">{title}</span>
-      <span className="v10-activity-feed-title-count">{items.length}</span>
+      <span className="v10-activity-feed-title-count">{titleCount}</span>
     </div>
   ) : null;
+
+  // PR #694 Comment 8 — when the lifecycle SPARQL errored, surface
+  // an honest indicator instead of degrading to a normal empty feed.
+  // Quieter than the prior `EmptyState` primitive (same tertiary
+  // family as the empty hint) so we don't shout, but still
+  // distinguishable from the silent empty case.
+  if (lifecycleError) {
+    return (
+      <div className={`v10-activity-feed v10-activity-feed-empty ${className}`}>
+        {titleRow}
+        <div
+          className="v10-activity-feed-error"
+          role="status"
+          aria-live="polite"
+          title={lifecycleError}
+        >
+          Couldn't load recent activity. Retrying…
+        </div>
+      </div>
+    );
+  }
 
   if (items.length === 0) {
     // N6 polish (item 2) — the centered bold `EmptyState` primitive

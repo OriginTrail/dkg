@@ -269,9 +269,37 @@ describe('useAssertionLifecycleEvents — bindings parse', () => {
       root.render(React.createElement(Probe, { id: 'cg-A' }));
     });
     await flush();
-    expect(latest!.error).toContain('503');
+    expect(latest!.error).toBe('SPARQL query failed: 503');
     expect(latest!.events).toHaveLength(0);
     // The discriminator now reads "cg-A errored", not "stale".
     expect(latest!.resultContextGraphId).toBe('cg-A');
+  });
+
+  // PR #694 Comment 8 — the Comment 3 catch-side fix made
+  // `resultContextGraphId === contextGraphId` true in BOTH success
+  // and error states, so consumers can no longer distinguish "loaded
+  // with zero rows" from "the query failed" via the discriminator
+  // alone. The hook's `error` field is the authoritative signal —
+  // consumers (ProjectView → ActivityFeed) plumb it through to
+  // render an error indicator. This test pins the hook contract:
+  // error message is exposed verbatim so the UI can surface it.
+  it('exposes the rejection message verbatim on error (Comment 8 distinguishability)', async () => {
+    let latest: AssertionLifecycleEventsResult | null = null;
+    function Probe({ id }: { id: string }) {
+      latest = useAssertionLifecycleEvents(id);
+      return null;
+    }
+    globalThis.fetch = vi.fn(async () => {
+      throw new Error('Custom upstream message');
+    }) as any;
+    await act(async () => {
+      root.render(React.createElement(Probe, { id: 'cg-A' }));
+    });
+    await flush();
+    // The exact message must reach the consumer so the title
+    // attribute on the inline error indicator surfaces it.
+    expect(latest!.error).toBe('Custom upstream message');
+    expect(latest!.resultContextGraphId).toBe('cg-A');
+    expect(latest!.events).toHaveLength(0);
   });
 });

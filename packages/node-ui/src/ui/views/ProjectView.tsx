@@ -269,6 +269,17 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
         ? lifecycleEventsResult.events
         : [])
     : undefined;
+  // PR #694 Comment 8 — plumb the lifecycle error so the feed can
+  // distinguish "loaded with zero rows" from "the query failed".
+  // After the Comment 3 fix, `resultContextGraphId` advances in
+  // both success and catch paths, so consumers can't infer failure
+  // from the events array alone. Only surface the error to the
+  // Overview consumer; off-Overview the prop stays undefined so
+  // legacy callers don't grow an error pathway they don't use.
+  const overviewLifecycleError = overviewIsActive
+    && lifecycleEventsResult.resultContextGraphId === contextGraphId
+    ? lifecycleEventsResult.error
+    : null;
 
   const refreshParticipants = useCallback(() => {
     const targetId = cg?.id;
@@ -501,6 +512,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
           <ActivityFeed
             entities={rawMemory.entityList}
             lifecycleEvents={overviewLifecycleEvents}
+            lifecycleError={overviewLifecycleError}
             onSelectEntity={handleOverviewActivityNavigate}
             title="Recent activity"
             limit={40}

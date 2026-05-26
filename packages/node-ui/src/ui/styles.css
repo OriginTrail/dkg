@@ -6859,6 +6859,16 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
   font-size: 12px; font-weight: 400; line-height: 1.5;
   color: var(--text-tertiary);
 }
+.v10-activity-feed-error {
+  /* PR #694 Comment 8 — distinguishable from `.v10-activity-feed-empty-hint`
+   * so the user can tell "couldn't load" apart from "no activity
+   * yet", but still quieter than the loud `EmptyState` primitive. */
+  margin-top: 8px;
+  padding: 6px 8px;
+  border-left: 2px solid var(--accent-warn, #f59e0b);
+  font-size: 12px; font-weight: 400; line-height: 1.5;
+  color: var(--text-tertiary);
+}
 .v10-activity-feed-bucket { display: flex; flex-direction: column; gap: 4px; }
 .v10-activity-feed-bucket-head {
   display: flex; align-items: center; gap: 8px;
