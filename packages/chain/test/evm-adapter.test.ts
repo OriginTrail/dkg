@@ -48,10 +48,39 @@ describe('EVMChainAdapter integration', () => {
     expect(bn).toBeGreaterThanOrEqual(0);
   }, 15_000);
 
-  it('verifyPublisherOwnsRange resolves KnowledgeAssetsStorage after init', async () => {
+  it('verifyPublisherOwnsRange("v9") resolves KnowledgeAssetsStorage after init', async () => {
+    // OT-RFC-40 §7.5: explicit `"v9"` tag routes to the V9 KAS
+    // publisher-range API. A freshly-deployed V9 KAS has no
+    // pre-reserved ranges for any address, so this returns false.
     const adapter = new EVMChainAdapter(makeAdapterConfig(ctx.rpcUrl, ctx.hubAddress, HARDHAT_KEYS.DEPLOYER));
     const deployer = adapter.getSignerAddress();
-    const owns = await adapter.verifyPublisherOwnsRange(deployer, 1n, 1n);
+    const owns = await adapter.verifyPublisherOwnsRange(deployer, 1n, 1n, 'v9');
+    expect(owns).toBe(false);
+  }, 30_000);
+
+  it('verifyPublisherOwnsRange (default tag) defers to V10 ACK auth → returns true', async () => {
+    // OT-RFC-40 §7.5: the V10 default storage does NOT pre-reserve
+    // publisher ranges; ownership is verified at the ACK-signature
+    // layer. The method returns true so V10 publishes on Hubs without
+    // a V9 KAS deployment aren't silently rejected — the bug PR-5
+    // calls out by name. Pre-RFC, this returned false unconditionally
+    // when V9 KAS was empty.
+    const adapter = new EVMChainAdapter(makeAdapterConfig(ctx.rpcUrl, ctx.hubAddress, HARDHAT_KEYS.DEPLOYER));
+    const deployer = adapter.getSignerAddress();
+    const ownsDefault = await adapter.verifyPublisherOwnsRange(deployer, 1n, 1n);
+    expect(ownsDefault).toBe(true);
+    const ownsExplicitDefault = await adapter.verifyPublisherOwnsRange(deployer, 1n, 1n, '');
+    expect(ownsExplicitDefault).toBe(true);
+  }, 30_000);
+
+  it('verifyPublisherOwnsRange returns false for an unknown storage tag', async () => {
+    // Conservative failure mode for a UAL minted under a tag the
+    // receiver's registry doesn't recognise (e.g. a V11 storage that
+    // the daemon hasn't refreshed against yet). RFC §7.5 — operators
+    // see the rejection and can refresh the registry.
+    const adapter = new EVMChainAdapter(makeAdapterConfig(ctx.rpcUrl, ctx.hubAddress, HARDHAT_KEYS.DEPLOYER));
+    const deployer = adapter.getSignerAddress();
+    const owns = await adapter.verifyPublisherOwnsRange(deployer, 1n, 1n, 'nonexistent-tag');
     expect(owns).toBe(false);
   }, 30_000);
 });

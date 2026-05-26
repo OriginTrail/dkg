@@ -263,7 +263,13 @@ export class MockChainAdapter implements ChainAdapter {
     publisherAddress: string,
     startKAId: bigint,
     endKAId: bigint,
+    _storageTag?: string,
   ): Promise<boolean> {
+    // RFC-40 PR-5: the mock keeps its existing single-storage range
+    // bookkeeping; the `storageTag` parameter is accepted for ABI
+    // compatibility with the EVM adapter but the mock's range ledger
+    // is shared across all simulated storages. Tests that need
+    // multi-storage behaviour use the EVM-adapter-level tests.
     const ranges = this.reservedRangesByPublisher.get(publisherAddress);
     if (!ranges?.length) return false;
     for (const r of ranges) {

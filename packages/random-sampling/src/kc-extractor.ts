@@ -3,6 +3,7 @@ import {
   contextGraphDataUri,
   contextGraphMetaUri,
   hashTripleV10,
+  parseUal,
   TRUST_LEVEL_PREDICATE,
   LEGACY_TRUST_LEVEL_PREDICATE,
 } from '@origintrail-official/dkg-core';
@@ -156,10 +157,33 @@ export class KCDataMissingError extends Error {
  * or {@link KCDataMissingError} on the named failure modes — each is a
  * skip-this-period signal for the prover, not a retry.
  */
+export interface ExtractV10KCOptions {
+  /**
+   * OT-RFC-40 §7.5: when supplied, the extractor only matches UALs
+   * whose storage tag equals this value. Empty string ("") matches
+   * default-storage / 3-segment UALs; "v9" matches V9-tagged UALs;
+   * any other tag matches its respective tagged storage.
+   *
+   * In a CG that holds KCs from multiple storage instances (e.g. a
+   * V9 + V10 coexistence scenario), batchId values can collide
+   * across storages — both V9 KAS kcId=5 and V10 KCS kcId=5 are
+   * valid, but they are DIFFERENT KCs. Without this filter the
+   * meta-graph lookup would return whichever match Oxigraph happens
+   * to enumerate first, producing the wrong leaves at proof time.
+   *
+   * Omit (or leave undefined) to preserve pre-RFC behaviour: take
+   * whichever UAL matches the batchId first. This is correct for
+   * single-storage CGs (the overwhelming majority) and is what the
+   * prover does on adapters whose `kcStorageRegistry` is undefined.
+   */
+  expectedStorageTag?: string;
+}
+
 export async function extractV10KCFromStore(
   store: TripleStore,
   cgId: bigint,
   kcId: bigint,
+  options: ExtractV10KCOptions = {},
 ): Promise<KCExtractionResult> {
   const cgIdStr = cgId.toString();
   // Map cgId (numeric) → local CG name via the ontology graph. The
@@ -180,17 +204,42 @@ export async function extractV10KCFromStore(
   // 1. Resolve UAL via dkg:batchId. Use a typed integer literal to
   //    avoid string-prefix collisions (kcId 1 vs 10) — same lookup
   //    discipline as the publisher's resolveUalByBatchId (P-18 lesson).
+  //    RFC-40 §7.5: pull every match (no LIMIT 1) so we can post-filter
+  //    by storage tag when one was requested. In single-storage CGs
+  //    the result set is always size 1 anyway.
   const ualResult = await store.query(
     `SELECT ?ual WHERE {
        GRAPH <${metaGraph}> {
          ?ual <${DKG}batchId> "${kcId}"^^<${XSD}integer> .
        }
-     } LIMIT 1`,
+     }`,
   );
   if (ualResult.type !== 'bindings' || ualResult.bindings.length === 0) {
     throw new KCNotFoundError(cgId, kcId);
   }
-  const ual = stripQuotes(ualResult.bindings[0]['ual'] ?? '');
+
+  // RFC-40 §7.5: when an expected storage tag is provided, drop
+  // bindings whose UAL doesn't match. Bindings whose UAL fails to
+  // parse (CG data URIs accidentally tagged with a batchId, etc.)
+  // are also dropped — the batchId triple is publisher-authored, so
+  // a non-UAL binding indicates store corruption that the prover
+  // should not attempt to recover from silently.
+  const candidateUals = ualResult.bindings
+    .map((b) => stripQuotes(b['ual'] ?? ''))
+    .filter((u) => u.length > 0);
+  let ual: string | undefined;
+  if (options.expectedStorageTag !== undefined) {
+    for (const candidate of candidateUals) {
+      const parsed = parseUal(candidate);
+      if (parsed === null) continue;
+      if (parsed.storageTag === options.expectedStorageTag) {
+        ual = candidate;
+        break;
+      }
+    }
+  } else {
+    ual = candidateUals[0];
+  }
   if (!ual) throw new KCNotFoundError(cgId, kcId);
   assertSafeIri(ual);
 
@@ -377,7 +426,8 @@ export async function extractV10KCQuads(
   store: TripleStore,
   cgId: bigint,
   kcId: bigint,
+  options: ExtractV10KCOptions = {},
 ): Promise<Quad[]> {
-  const result = await extractV10KCFromStore(store, cgId, kcId);
+  const result = await extractV10KCFromStore(store, cgId, kcId, options);
   return result.triples.map((t) => ({ ...t, graph: result.dataGraph }));
 }

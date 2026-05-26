@@ -333,9 +333,22 @@ export class RandomSamplingProver {
     const expectedRoot = await this.chain.getLatestMerkleRoot(kcId);
     const expectedLeafCount = await this.chain.getMerkleLeafCount(kcId);
 
+    // OT-RFC-40 §7.5: when the chain adapter exposes a KC storage
+    // registry, map `Challenge.knowledgeCollectionStorageContract`
+    // (an address) back to the storage's UAL tag. The extractor uses
+    // this to disambiguate batchId collisions in CGs that hold KCs
+    // from multiple storage versions (V9 + V10 today; arbitrary
+    // versions in the future). Adapters without a registry still
+    // produce a working prover by falling through to the legacy
+    // "match the first UAL" behaviour — bit-for-bit pre-RFC.
+    const expectedStorageTag = this.chain.kcStorageRegistry
+      ?.tagFor(challenge.knowledgeCollectionStorageContract);
+
     let leaves: Uint8Array[];
     try {
-      const extracted = await extractV10KCFromStore(this.store, cgId, kcId);
+      const extracted = await extractV10KCFromStore(this.store, cgId, kcId, {
+        expectedStorageTag,
+      });
       leaves = extracted.leaves;
     } catch (err) {
       if (err instanceof KCNotFoundError || err instanceof KCDataMissingError) {

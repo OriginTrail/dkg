@@ -40,7 +40,12 @@ import {
   ChallengeNoLongerActiveError,
 } from './chain-adapter.js';
 import { HubResolutionCache } from './hub-resolution-cache.js';
-import { deriveStorageTag } from './kc-storage-registry.js';
+import {
+  deriveStorageTag,
+  KCStorageRegistry,
+  type KCStorageHubReader,
+  type KCStorageUriReader,
+} from './kc-storage-registry.js';
 import { PcaUnavailableError } from './pca-errors.js';
 import {
   buildAuthorAttestationTypedData,
@@ -310,6 +315,15 @@ export class EVMChainAdapter implements ChainAdapter {
    * `did:dkg`. See `kcUal()` in `@origintrail-official/dkg-core`.
    */
   mintingStorageTag = '';
+
+  /**
+   * OT-RFC-40 §5.3 — registry of every KC-class storage on this
+   * adapter's Hub, keyed by storage tag and address. Populated lazily
+   * in `init()`; refreshed on `Hub.NewAssetStorage` /
+   * `Hub.AssetStorageChanged` so a V11 storage that gets registered
+   * after daemon boot becomes resolvable without a restart.
+   */
+  kcStorageRegistry?: KCStorageRegistry;
 
   private readonly provider: JsonRpcProvider;
   private readonly filterErrorSilencer: FilterErrorSilencer;
@@ -826,6 +840,23 @@ export class EVMChainAdapter implements ChainAdapter {
         `falling back to default storage tag (3-segment UALs)`,
       );
       this.mintingStorageTag = '';
+    }
+
+    // OT-RFC-40 §5.3 — build the cross-storage registry so consumers
+    // (random-sampling prover, async-lift verifier, replication ack
+    // verifier) can map a UAL or `Challenge.knowledgeCollectionStorageContract`
+    // address back to the storage that minted the data. Failure here is
+    // non-fatal; the registry just stays empty and resolution-time
+    // callers fall back to "treat as default storage" which is
+    // bit-for-bit pre-RFC behaviour.
+    try {
+      this.kcStorageRegistry = await this.buildKCStorageRegistry();
+    } catch (err) {
+      console.warn(
+        `[EVMChainAdapter] failed to build KC storage registry: ${err instanceof Error ? err.message : String(err)}; ` +
+        `multi-storage resolution paths will fall back to default-storage behaviour`,
+      );
+      this.kcStorageRegistry = undefined;
     }
 
     // V9 contracts (KnowledgeAssets + KnowledgeAssetsStorage) are archived
@@ -1432,17 +1463,59 @@ export class EVMChainAdapter implements ChainAdapter {
     publisherAddress: string,
     startKAId: bigint,
     endKAId: bigint,
+    storageTag?: string,
   ): Promise<boolean> {
     await this.init();
-    if (!this.contracts.knowledgeAssetsStorage) return false;
 
-    const storage = this.contracts.knowledgeAssetsStorage;
-    const count = await storage.getPublisherRangesCount(publisherAddress);
-    for (let i = 0; i < Number(count); i++) {
-      const [startId, endId] = await storage.getPublisherRange(publisherAddress, i);
-      if (startId <= startKAId && endId >= endKAId) return true;
+    // OT-RFC-40 §7.5: route the range query to the storage instance
+    // that minted the UAL. The publish-handler derives `storageTag`
+    // from `parseUal(request.ual).storageTag`; it is empty for V10
+    // default-storage UALs (3-segment form) and "v9" for V9 KAS UALs.
+    const tag = storageTag ?? '';
+
+    if (tag === 'v9') {
+      // V9 KAS is the only currently-deployed storage that pre-reserves
+      // per-publisher ID ranges. The query API
+      // (`getPublisherRangesCount`/`getPublisherRange`) is V9-specific.
+      if (!this.contracts.knowledgeAssetsStorage) return false;
+      const storage = this.contracts.knowledgeAssetsStorage;
+      const count = await storage.getPublisherRangesCount(publisherAddress);
+      for (let i = 0; i < Number(count); i++) {
+        const [startId, endId] = await storage.getPublisherRange(publisherAddress, i);
+        if (startId <= startKAId && endId >= endKAId) return true;
+      }
+      return false;
     }
-    return false;
+
+    if (tag === '') {
+      // V10 default storage. V10 does NOT pre-reserve ranges — KCs
+      // are minted directly with their token-bound publisher recorded
+      // on-chain at mint time. The publish-handler's existing publish
+      // ACK signature check (V10 ACKs collected from receiving nodes)
+      // is the authoritative ownership verification on this path; this
+      // method exists as a V9-era pre-flight, so for V10 we simply
+      // defer to that downstream check by returning `true`. NOT
+      // returning `true` here would silently reject every V10 publish
+      // on Hubs without a V9 KAS deployment — the bug RFC-40 PR-5
+      // calls out by name.
+      return true;
+    }
+
+    // Unknown tag: the registry has not seen this storage. Conservative
+    // failure: refuse to attest range ownership for an unknown storage
+    // instance. Operators see the rejection message and can either
+    // refresh the registry or investigate why a UAL was minted under
+    // a tag the receiver doesn't recognise.
+    if (!this.kcStorageRegistry?.getByTag(tag)) {
+      return false;
+    }
+
+    // Future tagged storages might re-introduce a V9-style range API.
+    // When that happens, this branch can switch on the storage's hubName
+    // to route to the appropriate query. Today, the conservative answer
+    // for any tag we DO recognise but don't have a range API for is
+    // identical to V10's: defer to the publish-handler's downstream auth.
+    return true;
   }
 
   // =====================================================================
@@ -2862,13 +2935,73 @@ export class EVMChainAdapter implements ChainAdapter {
         this.invalidateRandomSamplingPair();
       }
     };
+    // OT-RFC-40 §5.3 — refresh the KC storage registry on every
+    // `NewAssetStorage` / `AssetStorageChanged` event regardless of
+    // name (the registry's filter rule already restricts to KC-class
+    // names). Listening unconditionally avoids races where a future
+    // version naming convention is added but we forget to update this
+    // allowlist; the registry's filter is the single source of truth.
+    const onAssetStorageChange = (): void => {
+      if (this.kcStorageRegistry === undefined) return;
+      void this.kcStorageRegistry
+        .refresh()
+        .catch((err) => console.warn(
+          `[EVMChainAdapter] KC storage registry refresh failed after Hub event: ${err instanceof Error ? err.message : String(err)}`,
+        ));
+    };
     try {
       await this.contracts.hub.on('ContractChanged', onChange);
       await this.contracts.hub.on('NewContract', onChange);
+      await this.contracts.hub.on('NewAssetStorage', onAssetStorageChange);
+      await this.contracts.hub.on('AssetStorageChanged', onAssetStorageChange);
       this.hubRotationListenerStarted = true;
     } catch {
       /* provider doesn't support filter subscriptions — TTL refresh is the fallback */
     }
+  }
+
+  /**
+   * OT-RFC-40 §5.3 — construct the cross-storage registry by giving
+   * it ethers-backed implementations of the two readers it needs.
+   *
+   * The hub reader mirrors `Hub.getAllAssetStorages()` exactly. The
+   * URI reader instantiates a minimal ABI fragment for ERC-1155's
+   * `uri(uint256)` view rather than dragging in the full
+   * `KnowledgeCollectionStorage` ABI per call — this keeps the read
+   * working uniformly across V10 KCS, V9 KAS, and any future V11+
+   * storages without a per-version ABI plumbing detour.
+   */
+  private async buildKCStorageRegistry(): Promise<KCStorageRegistry> {
+    const hub = this.contracts.hub;
+    const hubReader: KCStorageHubReader = {
+      async getAllAssetStorages() {
+        const raw = await hub.getAllAssetStorages();
+        return Array.isArray(raw)
+          ? raw.map((entry: { name: string; addr: string } | { name: string; addr: string }[]) => {
+              const tuple = entry as { name?: string; addr?: string } & Array<unknown>;
+              return {
+                name: String(tuple.name ?? tuple[0]),
+                addr: String(tuple.addr ?? tuple[1]),
+              };
+            })
+          : [];
+      },
+    };
+    const uriAbi: ethers.InterfaceAbi = [
+      'function uri(uint256) view returns (string)',
+    ];
+    const provider = this.provider;
+    const uriReader: KCStorageUriReader = {
+      async readUriBase(storageAddress: string) {
+        const c = new Contract(storageAddress, uriAbi, provider);
+        return c.uri(0);
+      },
+    };
+    const registry = new KCStorageRegistry(hubReader, uriReader, {
+      log: { warn: (m: string) => console.warn(m) },
+    });
+    await registry.refresh();
+    return registry;
   }
 
   /**

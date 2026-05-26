@@ -473,7 +473,13 @@ describe('Tentative data and chain event confirmation', () => {
     expect(handler.hasPendingPublishes).toBe(false);
   });
 
-  it('rejects PublishRequest when publisher does not own UAL range (on-chain check)', async () => {
+  it('rejects v9-tagged PublishRequest when publisher does not own UAL range (on-chain check)', async () => {
+    // OT-RFC-40 §7.5: V10 default-storage publishes (3-segment UALs) defer
+    // ownership verification to the ACK layer — `verifyPublisherOwnsRange`
+    // returns true for them. The legacy V9 KAS pre-reservation API is still
+    // exercised when the UAL carries a `v9` storage tag, so this test
+    // anchors the V9 path: a publisher who never reserved a range gets
+    // rejected up front.
     const store = new OxigraphStore();
     const bus = new TypedEventBus();
     const chainAdapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
@@ -485,7 +491,7 @@ describe('Tentative data and chain event confirmation', () => {
       `<${t.subject}> <${t.predicate}> ${t.object} .`,
     ).join('\n');
 
-    const ual = `did:dkg:mock:31337/${publisherAddress}/1`;
+    const ual = `did:dkg:v9/mock:31337/${publisherAddress}/1`;
     const reqBytes = encodePublishRequest({
       ual,
       nquads: new TextEncoder().encode(ntriples),
@@ -505,6 +511,47 @@ describe('Tentative data and chain event confirmation', () => {
     expect(ack.accepted).toBe(false);
     expect(ack.rejectionReason).toContain('does not own');
     expect(ack.rejectionReason).toContain('1..1');
+  });
+
+  it('accepts default-tag PublishRequest without on-chain range check (V10 defers to ACK auth)', async () => {
+    // OT-RFC-40 §7.5: 3-segment / default-storage UALs are V10 publishes;
+    // the publisher never reserves a range and ownership is established by
+    // ACK signatures collected downstream. The handler should NOT reject
+    // such requests up front via `verifyPublisherOwnsRange`. (Other layers
+    // — Merkle, ACK collection, etc — still gate confirmation; this test
+    // only proves the range pre-flight no longer fires.)
+    const store = new OxigraphStore();
+    const bus = new TypedEventBus();
+    const chainAdapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const handler = new PublishHandler(store, bus, { chainAdapter });
+
+    const publisherAddress = TEST_WALLET.address;
+    const triples = [q('did:dkg:agent:QmV10NoRange', 'http://schema.org/name', '"V10Bot"')];
+    const ntriples = triples.map(t =>
+      `<${t.subject}> <${t.predicate}> ${t.object} .`,
+    ).join('\n');
+
+    const ual = `did:dkg:mock:31337/${publisherAddress}/1`;
+    const reqBytes = encodePublishRequest({
+      ual,
+      nquads: new TextEncoder().encode(ntriples),
+      contextGraphId: CONTEXT_GRAPH,
+      kas: [{ tokenId: 1, rootEntity: 'did:dkg:agent:QmV10NoRange', privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 }],
+      publisherIdentity: new Uint8Array(32),
+      publisherAddress,
+      startKAId: 1,
+      endKAId: 1,
+      chainId: 'mock:31337',
+      publisherSignatureR: new Uint8Array(0),
+      publisherSignatureVs: new Uint8Array(0),
+    });
+
+    const ackData = await handler.handler(reqBytes, 'test-peer' as any);
+    const ack = decodePublishAck(ackData);
+    expect(ack.accepted).toBe(true);
+    if (ack.rejectionReason) {
+      expect(ack.rejectionReason).not.toContain('does not own');
+    }
   });
 
   it('rejects confirmation with mismatched publisher address', async () => {

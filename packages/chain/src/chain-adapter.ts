@@ -1,4 +1,5 @@
 import type { ethers } from 'ethers';
+import type { KCStorageRegistry } from './kc-storage-registry.js';
 
 export interface IdentityProof {
   publicKey: Uint8Array;
@@ -573,6 +574,23 @@ export interface ChainAdapter {
    * mock adapters expose a setter for tests.
    */
   mintingStorageTag?: string;
+
+  /**
+   * OT-RFC-40 §5.3 — registry of every KC-class storage on the Hub
+   * this adapter is bound to, keyed by storage tag and address.
+   *
+   * Resolution-time consumers (random-sampling prover, async-lift
+   * verifier, replication ack verifier) use this to map a UAL or a
+   * `Challenge.knowledgeCollectionStorageContract` address to the
+   * storage instance that minted the data, instead of assuming a
+   * single named-`KnowledgeCollectionStorage` exists.
+   *
+   * Optional on the adapter surface: adapters that pre-date the RFC
+   * (or only support a single storage instance) leave it `undefined`,
+   * in which case callers fall back to "treat everything as the
+   * default storage" — bit-for-bit pre-RFC behaviour.
+   */
+  kcStorageRegistry?: KCStorageRegistry;
   /**
    * Stable identifier for the SPECIFIC deployment this adapter is
    * bound to (not just the chain). `chainId` alone is too coarse —
@@ -622,8 +640,26 @@ export interface ChainAdapter {
   /**
    * Verify that a publisher address owns the UAL range [startKAId, endKAId] on-chain.
    * Used by receiving nodes to reject PublishRequests with spoofed publisher/range.
+   *
+   * OT-RFC-40 §7.5: optional 4th `storageTag` argument routes the
+   * range query to the correct KC storage instance. Empty string /
+   * undefined means the V10 default storage (which does not pre-reserve
+   * publisher ranges; auth happens at the publish ACK layer, so this
+   * call returns `true` to defer to that). `"v9"` routes to V9 KAS,
+   * which does carry per-publisher reserved ranges. Unknown tags
+   * return `false` conservatively.
+   *
+   * Adapters that pre-date the RFC ignore the parameter and preserve
+   * their existing behaviour; mock adapters keep their test-fixture
+   * range bookkeeping. The publish-handler derives the tag from the
+   * incoming request's UAL via `parseUal(request.ual).storageTag`.
    */
-  verifyPublisherOwnsRange?(publisherAddress: string, startKAId: bigint, endKAId: bigint): Promise<boolean>;
+  verifyPublisherOwnsRange?(
+    publisherAddress: string,
+    startKAId: bigint,
+    endKAId: bigint,
+    storageTag?: string,
+  ): Promise<boolean>;
 
   // Block height (used by ChainEventPoller to seed the scan cursor)
   getBlockNumber?(): Promise<number>;

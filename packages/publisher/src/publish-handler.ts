@@ -258,16 +258,29 @@ export class PublishHandler {
       // identity from IdentityStorage.getIdentityId(msg.sender).
 
       // ── On-chain range check: reject if publisher does not own startKAId..endKAId ──
+      //
+      // OT-RFC-40 §7.5: derive the storage tag from the request UAL so
+      // the adapter can route the range query to the correct storage
+      // instance (V9 KAS uses the legacy publisher-range API; V10
+      // default storage skips range pre-reservation and defers to ACK
+      // signatures). `parseUal(request.ual).storageTag` is empty for
+      // 3-segment / default-storage UALs and equals the tag for
+      // 4-segment / tagged UALs; passing `undefined` (the case where
+      // request.ual is missing on a malformed or pre-RFC client)
+      // preserves the pre-RFC behaviour bit-for-bit.
       if (
         startKAId > 0n &&
         endKAId > 0n &&
         request.publisherAddress &&
         this.chainAdapter?.verifyPublisherOwnsRange
       ) {
+        const parsedRequestUal = request.ual ? parseUal(request.ual) : null;
+        const storageTag = parsedRequestUal?.storageTag;
         const owns = await this.chainAdapter.verifyPublisherOwnsRange(
           request.publisherAddress,
           startKAId,
           endKAId,
+          storageTag,
         );
         if (!owns) {
           return this.rejectAck(

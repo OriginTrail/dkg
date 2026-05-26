@@ -132,6 +132,12 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   // round-trips to cache in the first place; a no-op shim would just
   // pad parity for no behavioural reason.
   'invalidatePublishPreflightCache',
+  // OT-RFC-40 PR-5: TS-private helper that builds the KC storage
+  // registry from a live Hub. Mock adapter has no Hub-backed
+  // multi-storage discovery (its `mintingStorageTag` field is set
+  // directly via `setMintingStorageTag`), so there is no mock-side
+  // counterpart to mirror.
+  'buildKCStorageRegistry',
 ]);
 
 const NO_CHAIN_EXEMPT_FROM_EVM = new Set<string>([

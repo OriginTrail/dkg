@@ -28,6 +28,7 @@ export {
   KCDataMissingError,
   type KCTriple,
   type KCExtractionResult,
+  type ExtractV10KCOptions,
 } from './kc-extractor.js';
 
 export {
