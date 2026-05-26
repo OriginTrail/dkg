@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
 import {
   buildLifecycleEventsQuery,
+  subGraphFromAssertionGraphUri,
   useAssertionLifecycleEvents,
   type AssertionLifecycleEventsResult,
 } from '../src/ui/hooks/useAssertionLifecycleEvents.js';
@@ -17,8 +18,15 @@ describe('buildLifecycleEventsQuery — SPARQL shape', () => {
   // feed source.
   it('SELECTs the lifecycle binding set keyed by event + assertion + agent + ts + entityCount', () => {
     const q = buildLifecycleEventsQuery('cg-1');
-    expect(q).toContain('SELECT ?event ?type ?assertion ?name ?agent ?ts ?subGraph');
+    // PR #694 review fix — the projection swapped `?subGraph` for
+    // `?assertionGraph` since the lifecycle writers don't emit
+    // `dkg:subGraphName`; the slug is derived client-side from the
+    // assertion-graph URI shape.
+    expect(q).toContain('SELECT ?event ?type ?assertion ?name ?agent ?ts ?assertionGraph');
     expect(q).toContain('(COUNT(?root) AS ?entityCount)');
+    expect(q).toContain('OPTIONAL { ?assertion dkg:assertionGraph ?assertionGraph }');
+    // Guard: the dead `dkg:subGraphName` OPTIONAL must not regress.
+    expect(q).not.toContain('dkg:subGraphName');
   });
 
   it('UNION-binds created→`prov:generated` and promoted→`prov:used`', () => {
@@ -36,9 +44,36 @@ describe('buildLifecycleEventsQuery — SPARQL shape', () => {
 
   it('groups by all non-aggregated bindings and orders by ?ts DESC with LIMIT 5000', () => {
     const q = buildLifecycleEventsQuery('cg-1');
-    expect(q).toContain('GROUP BY ?event ?type ?assertion ?name ?agent ?ts ?subGraph');
+    expect(q).toContain('GROUP BY ?event ?type ?assertion ?name ?agent ?ts ?assertionGraph');
     expect(q).toContain('ORDER BY DESC(?ts)');
     expect(q).toContain('LIMIT 5000');
+  });
+});
+
+describe('subGraphFromAssertionGraphUri — slug parse', () => {
+  // PR #694 review fix — mirror of `contextGraphAssertionUri` in
+  // `packages/core/src/constants.ts`. The writer's URI shape is the
+  // authoritative source for the slug; the lifecycle metadata never
+  // emits `dkg:subGraphName` directly.
+  it('returns the slug for sub-graph-scoped assertions', () => {
+    const uri = 'did:dkg:context-graph:cg-1/research/assertion/0xabc/notes';
+    expect(subGraphFromAssertionGraphUri(uri, 'cg-1')).toBe('research');
+  });
+
+  it('returns undefined for root-bucket assertions', () => {
+    const uri = 'did:dkg:context-graph:cg-1/assertion/0xabc/notes';
+    expect(subGraphFromAssertionGraphUri(uri, 'cg-1')).toBeUndefined();
+  });
+
+  it('returns undefined when the prefix does not match the contextGraphId', () => {
+    const uri = 'did:dkg:context-graph:cg-2/research/assertion/0xabc/notes';
+    expect(subGraphFromAssertionGraphUri(uri, 'cg-1')).toBeUndefined();
+  });
+
+  it('returns undefined for malformed URIs that lack the assertion segment', () => {
+    expect(subGraphFromAssertionGraphUri('did:dkg:context-graph:cg-1/research', 'cg-1')).toBeUndefined();
+    expect(subGraphFromAssertionGraphUri('did:dkg:context-graph:cg-1/research/other/0xabc/notes', 'cg-1')).toBeUndefined();
+    expect(subGraphFromAssertionGraphUri('', 'cg-1')).toBeUndefined();
   });
 });
 
@@ -86,7 +121,7 @@ describe('useAssertionLifecycleEvents — bindings parse', () => {
     name: string;
     agent: string;
     ts: string;
-    subGraph?: string;
+    assertionGraph?: string;
     entityCount?: number;
   }) {
     const typeUri = opts.kind === 'created'
@@ -99,7 +134,7 @@ describe('useAssertionLifecycleEvents — bindings parse', () => {
       name: `"${opts.name}"`,
       agent: `"${opts.agent}"`,
       ts: `"${opts.ts}"`,
-      subGraph: opts.subGraph ? `"${opts.subGraph}"` : undefined,
+      assertionGraph: opts.assertionGraph ? `"${opts.assertionGraph}"` : undefined,
       entityCount: opts.entityCount !== undefined
         ? `"${opts.entityCount}"^^<http://www.w3.org/2001/XMLSchema#integer>`
         : undefined,
@@ -172,5 +207,71 @@ describe('useAssertionLifecycleEvents — bindings parse', () => {
     const promoted = latest!.events.find(e => e.kind === 'promoted');
     expect(created?.entityCount).toBeUndefined();
     expect(promoted?.entityCount).toBe(12);
+  });
+
+  // PR #694 review fix — the sub-graph slug is derived from
+  // `dkg:assertionGraph` (the URI shape mirrors
+  // `contextGraphAssertionUri`), not the never-emitted
+  // `dkg:subGraphName`. A sub-graph-scoped assertion URI carries
+  // the slug as its first path segment after the cgId; a
+  // root-bucket assertion has `assertion/` directly.
+  it('derives `subGraph` from `dkg:assertionGraph` for sub-graph-scoped assertions', async () => {
+    let latest: AssertionLifecycleEventsResult | null = null;
+    function Probe({ id }: { id: string }) {
+      latest = useAssertionLifecycleEvents(id);
+      return null;
+    }
+    await act(async () => {
+      root.render(React.createElement(Probe, { id: 'cg-A' }));
+    });
+    await flush();
+    pending.get('cg-A')!.resolve([
+      row({
+        event: 'urn:evt:c-1', kind: 'created',
+        assertion: 'urn:assert:scoped', name: 'scoped-doc',
+        agent: 'did:dkg:agent:alice', ts: '2026-05-20T10:00:00Z',
+        assertionGraph: 'did:dkg:context-graph:cg-A/research/assertion/0xabc/scoped-doc',
+      }),
+      row({
+        event: 'urn:evt:c-2', kind: 'created',
+        assertion: 'urn:assert:root', name: 'root-doc',
+        agent: 'did:dkg:agent:alice', ts: '2026-05-20T11:00:00Z',
+        assertionGraph: 'did:dkg:context-graph:cg-A/assertion/0xabc/root-doc',
+      }),
+    ]);
+    await flush();
+    const scoped = latest!.events.find(e => e.assertionUri === 'urn:assert:scoped');
+    const rootBucket = latest!.events.find(e => e.assertionUri === 'urn:assert:root');
+    expect(scoped?.subGraph).toBe('research');
+    expect(rootBucket?.subGraph).toBeUndefined();
+  });
+
+  // PR #694 review fix — on fetch failure, `resultContextGraphId`
+  // must advance to the requested `contextGraphId` so consumers
+  // gating on `resultContextGraphId === contextGraphId` (the Code7
+  // pattern shared with `useSwmAttributions`) can distinguish "still
+  // loading the new graph" from "the new graph errored — final
+  // answer". Pre-fix, the catch block cleared `events` but left
+  // `resultContextGraphId` stuck on the previous graph (or
+  // `undefined` on first load), holding consumers in the stale state
+  // until the hook re-ran.
+  it('advances `resultContextGraphId` on fetch failure (catch-side mirror of success path)', async () => {
+    let latest: AssertionLifecycleEventsResult | null = null;
+    function Probe({ id }: { id: string }) {
+      latest = useAssertionLifecycleEvents(id);
+      return null;
+    }
+    // Override the default deferred-success fetch with one that rejects.
+    globalThis.fetch = vi.fn(async () => {
+      throw new Error('SPARQL query failed: 503');
+    }) as any;
+    await act(async () => {
+      root.render(React.createElement(Probe, { id: 'cg-A' }));
+    });
+    await flush();
+    expect(latest!.error).toContain('503');
+    expect(latest!.events).toHaveLength(0);
+    // The discriminator now reads "cg-A errored", not "stale".
+    expect(latest!.resultContextGraphId).toBe('cg-A');
   });
 });

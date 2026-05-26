@@ -86,9 +86,19 @@ export function buildLifecycleEventsQuery(cgId: string): string {
   // bindings into ?entityCount — created events never have any
   // (`generateAssertionCreatedMetadata` does not emit them) so they
   // group to 0 cleanly; promoted events report one row per bundle.
+  //
+  // PR #694 review fix — the lifecycle metadata writers
+  // (`generateAssertionCreatedMetadata` / `…PromotedMetadata`) do
+  // NOT emit `dkg:subGraphName` on the assertion subject (only
+  // `generateShareMetadata` does, and that's the WorkspaceOperation
+  // source we collapsed away from). They DO emit
+  // `dkg:assertionGraph` — a stable triple set on creation
+  // (`metadata.ts:632`). Project the assertion-graph URI and parse
+  // the sub-graph slug client-side; the URI is shaped per
+  // `contextGraphAssertionUri` in `packages/core/src/constants.ts`.
   return `PREFIX dkg: <${DKG}>
 PREFIX prov: <http://www.w3.org/ns/prov#>
-SELECT ?event ?type ?assertion ?name ?agent ?ts ?subGraph (COUNT(?root) AS ?entityCount) WHERE {
+SELECT ?event ?type ?assertion ?name ?agent ?ts ?assertionGraph (COUNT(?root) AS ?entityCount) WHERE {
   GRAPH <${metaGraph}> {
     ?event a ?type ;
            prov:startedAtTime ?ts ;
@@ -97,11 +107,40 @@ SELECT ?event ?type ?assertion ?name ?agent ?ts ?subGraph (COUNT(?root) AS ?enti
     UNION
     { ?event prov:used ?assertion . FILTER(?type = dkg:AssertionPromoted) }
     ?assertion dkg:assertionName ?name .
-    OPTIONAL { ?assertion dkg:subGraphName ?subGraph }
+    OPTIONAL { ?assertion dkg:assertionGraph ?assertionGraph }
     OPTIONAL { ?event dkg:rootEntity ?root }
   }
-} GROUP BY ?event ?type ?assertion ?name ?agent ?ts ?subGraph
+} GROUP BY ?event ?type ?assertion ?name ?agent ?ts ?assertionGraph
   ORDER BY DESC(?ts) LIMIT 5000`;
+}
+
+/**
+ * Parse a sub-graph slug out of a `dkg:assertionGraph` URI. Mirror of
+ * `contextGraphAssertionUri` in `packages/core/src/constants.ts`:
+ *
+ *   root-bucket : `did:dkg:context-graph:<cgId>/assertion/<agent>/<name>`
+ *   sub-graph   : `did:dkg:context-graph:<cgId>/<subGraphName>/assertion/<agent>/<name>`
+ *
+ * Returns the slug when present, `undefined` for root-bucket
+ * assertions or any URI that doesn't match the expected shape (the
+ * latter shouldn't happen in practice — `dkg:assertionGraph` is set
+ * by the writer — but the parse stays defensive so a malformed URI
+ * just suppresses the sub-graph filter rather than throwing).
+ */
+export function subGraphFromAssertionGraphUri(
+  assertionGraphUri: string,
+  contextGraphId: string,
+): string | undefined {
+  const prefix = `did:dkg:context-graph:${contextGraphId}/`;
+  if (!assertionGraphUri.startsWith(prefix)) return undefined;
+  const tail = assertionGraphUri.slice(prefix.length);
+  const segments = tail.split('/');
+  // Root-bucket: tail starts with `assertion/…` (no sub-graph segment).
+  if (segments[0] === 'assertion') return undefined;
+  // Sub-graph: `<subGraphName>/assertion/…`. Require the assertion
+  // segment to actually be there so we don't misparse stray URIs.
+  if (segments.length >= 2 && segments[1] === 'assertion') return segments[0];
+  return undefined;
 }
 
 function bv(v: unknown): string | undefined {
@@ -196,6 +235,14 @@ export function useAssertionLifecycleEvents(
             const n = raw != null ? Number(raw) : NaN;
             if (Number.isFinite(n) && n >= 0) entityCount = n;
           }
+          // PR #694 review fix — derive the sub-graph slug from
+          // `dkg:assertionGraph` (which writers DO emit) instead of
+          // `dkg:subGraphName` (which the lifecycle writers don't).
+          // Falls back to undefined for root-bucket assertions.
+          const assertionGraphUri = bv(row.assertionGraph);
+          const subGraph = assertionGraphUri
+            ? subGraphFromAssertionGraphUri(assertionGraphUri, contextGraphId)
+            : undefined;
           out.push({
             eventUri,
             kind,
@@ -203,7 +250,7 @@ export function useAssertionLifecycleEvents(
             assertionName: assertionName ?? '',
             agentUri,
             publishedAt: ts,
-            subGraph: bv(row.subGraph),
+            subGraph,
             entityCount,
           });
         }
@@ -214,6 +261,15 @@ export function useAssertionLifecycleEvents(
         if (cancelled || (err as any)?.name === 'AbortError') return;
         setError((err as Error).message ?? String(err));
         setEvents([]);
+        // PR #694 review fix — advance `resultContextGraphId` on
+        // failure so consumers gating on
+        // `resultContextGraphId === contextGraphId` (the Code7 pattern
+        // shared with `useSwmAttributions`) can distinguish "still
+        // loading the new graph" from "the new graph errored and
+        // that's the answer for this graph". Without this, an early
+        // failure keeps consumers stuck in the previous-graph state
+        // until the hook re-runs.
+        setResultContextGraphId(contextGraphId);
       } finally {
         if (timeoutId) clearTimeout(timeoutId);
         if (!cancelled) setLoading(false);
