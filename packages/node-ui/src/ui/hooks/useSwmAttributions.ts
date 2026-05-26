@@ -117,9 +117,16 @@ export interface SwmAttributionsResult {
 
 /** Deliberately picked for contrast against the existing class palette
  *  (Package purple, Function amber, Decision red, Task cyan, etc.) — these
- *  sit in the gaps so agent identity reads as its own axis. */
+ *  sit in the gaps so agent identity reads as its own axis.
+ *
+ *  Also picked so no slot lives in the SWM-family amber range. The
+ *  SWM layer default is `#f59e0b` (`LAYER_CONFIG.swm.color`) and any
+ *  agent slot in the same hue is visually indistinguishable from a
+ *  non-attributed node — the "agent palette ≠ SWM amber" invariant.
+ *  Orange `#f97316` previously occupied slot 0 and broke this in
+ *  single-agent dev setups; replaced with indigo `#6366f1`. */
 const AGENT_PALETTE = [
-  '#f97316', // orange
+  '#6366f1', // indigo  (replaced orange — was too close to SWM amber)
   '#14b8a6', // teal
   '#f43f5e', // rose
   '#facc15', // yellow
