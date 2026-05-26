@@ -50,6 +50,20 @@
  * Per the runbook contract: keystore stays so the wallet identity is
  * constant across resets, and `ensureProfile` re-derives the on-chain
  * identityId on the new chain cleanly.
+ *
+ * Relationship to OT-RFC-40 (multi-storage KC URIs)
+ * --------------------------------------------------
+ * RFC-40 (`docs/RFC40_MULTI_STORAGE_KC_URI_SCHEME.md`,
+ * `docs/STORAGE_VERSION_TAGS.md`) makes a *storage* redeploy non-
+ * destructive: when V11/V12/etc KC storages are added alongside V10's
+ * default storage, every existing UAL keeps resolving to its original
+ * storage and no on-disk wipe is necessary. **For storage-only
+ * redeploys, do not bump `chainResetMarker`** — register the new
+ * storage with a fresh `uriBase` (e.g. `did:dkg:v11`) on the Hub
+ * instead. The auto-wipe hook below remains the right tool only for
+ * non-storage chain-identity changes (Hub redeploy, IdentityStorage
+ * redeploy, full testnet reset). See STORAGE_VERSION_TAGS.md "When to
+ * bump `chainResetMarker` after this RFC" for the full decision table.
  */
 import { existsSync, readFileSync, writeFileSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';

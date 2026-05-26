@@ -1,8 +1,8 @@
 # OT-RFC-40 — Multi-storage knowledge-collection URI scheme
 
-**Status:** Draft
+**Status:** Implemented (PRs 1-6 landed on `rfc40/multi-storage-kc-uri`)
 **Companion:** [GitHub issue #679 — chain-reset auto-wipe](https://github.com/OriginTrail/dkg/issues/679)
-**Related:** [`docs/TESTNET_RESET.md`](./TESTNET_RESET.md), [`packages/cli/src/daemon/chain-reset-wipe.ts`](../packages/cli/src/daemon/chain-reset-wipe.ts)
+**Related:** [`docs/STORAGE_VERSION_TAGS.md`](./STORAGE_VERSION_TAGS.md) (operator guide), [`docs/TESTNET_RESET.md`](./TESTNET_RESET.md), [`packages/cli/src/daemon/chain-reset-wipe.ts`](../packages/cli/src/daemon/chain-reset-wipe.ts)
 
 ## 1. Summary
 

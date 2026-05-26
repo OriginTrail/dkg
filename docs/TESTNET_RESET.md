@@ -6,6 +6,19 @@ contract layout shipped in PR #357. Covers the three roles involved
 actually has to do — most of the operator-facing pain is handled by the
 daemon's built-in auto-update + supervised-restart.
 
+> **Storage-only redeploys do NOT need this runbook.**
+> OT-RFC-40 (see [`docs/STORAGE_VERSION_TAGS.md`](./STORAGE_VERSION_TAGS.md)
+> and [`docs/RFC40_MULTI_STORAGE_KC_URI_SCHEME.md`](./RFC40_MULTI_STORAGE_KC_URI_SCHEME.md))
+> formalises the URI scheme that lets V9, V10, V11, … KC storages
+> coexist on the same Hub. Adding a new KC storage version is **not**
+> a chain reset: register the new storage with a fresh `uriBase` (e.g.
+> `did:dkg:v11`), keep the old one deployed, and existing data keeps
+> resolving without wiping anyone's `store.nq`. Use this runbook only
+> when actual chain entities (Hub, IdentityStorage, the V10 default
+> KC storage being abandoned) are being replaced. See
+> STORAGE_VERSION_TAGS.md "When to bump `chainResetMarker` after this
+> RFC" for the full decision table.
+
 The reset is the simplest cutover path because it lets us drop V8
 `Staking` + `DelegatorsInfo` + the dual-store coupling completely
 instead of running a wholesale state migration. Tradeoff: any node-side
@@ -295,3 +308,8 @@ staking + RS pipeline in under a minute.
 - `scripts/devnet-test-random-sampling.sh` — the smoke test invoked
   in Phase D (works against any RPC + auth token, not devnet-only).
 - `docs/RELEASE.md` — the npm + GitHub release process used in Phase A.
+- `docs/STORAGE_VERSION_TAGS.md` — operator-facing summary of the
+  multi-storage URI scheme that makes storage-only redeploys non-
+  destructive (and therefore non-runbook events).
+- `docs/RFC40_MULTI_STORAGE_KC_URI_SCHEME.md` — the design rationale
+  behind the URI scheme.
