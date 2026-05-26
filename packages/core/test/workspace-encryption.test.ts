@@ -8,8 +8,10 @@ import {
   WORKSPACE_ENCRYPTION_KEY_BYTES,
   WORKSPACE_RECIPIENT_ENCRYPTION_KEY_PURPOSE,
   assertSupportedEncryptedWorkspaceEnvelope,
+  decodeWorkspaceEncryptionKey,
   decryptWorkspacePayload,
   encryptWorkspacePayload,
+  encodeWorkspaceEncryptionKey,
   generateWorkspaceRecipientEncryptionKey,
   type EncryptWorkspacePayloadInput,
   type WorkspaceRecipientEncryptionKey,
@@ -158,5 +160,13 @@ describe('workspace encrypted payload helpers', () => {
     expect(key.recipientKeyId).toBe('alice-key-1');
     expect(key.publicKeyBytes).toHaveLength(WORKSPACE_ENCRYPTION_KEY_BYTES);
     expect(key.privateKeyBytes).toHaveLength(WORKSPACE_ENCRYPTION_KEY_BYTES);
+  });
+
+  it('decodes base64url keys that happen to start with 0x', () => {
+    const encoded = `0x${'A'.repeat(41)}`;
+    const bytes = decodeWorkspaceEncryptionKey(encoded);
+
+    expect(bytes).toHaveLength(WORKSPACE_ENCRYPTION_KEY_BYTES);
+    expect(encodeWorkspaceEncryptionKey(bytes)).toBe(encoded);
   });
 });
