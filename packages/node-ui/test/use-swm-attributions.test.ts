@@ -124,4 +124,32 @@ describe('useSwmAttributions — stale-on-switch protection', () => {
     expect(latest!.events).toHaveLength(1);
     expect(latest!.events[0].rootUri).toBe('urn:e:cg-B');
   });
+
+  it('folds only returned dkg:rootEntity metadata rows into attribution colors', async () => {
+    let latest: SwmAttributionsResult | null = null;
+    function Probe({ id }: { id: string }) {
+      latest = useSwmAttributions(id);
+      return null;
+    }
+
+    await act(async () => {
+      root.render(React.createElement(Probe, { id: 'cg-A' }));
+    });
+    await flushMicrotasks();
+
+    pending.get('cg-A')!.resolve([{
+      op:          '"urn:op:cg-A"',
+      root:        '"urn:e:root-subject"',
+      agent:       '"did:dkg:agent:alice"',
+      publishedAt: '"2026-05-22T10:00:00Z"',
+      g:           '"did:dkg:context-graph:cg-A/_shared_memory_meta"',
+    }]);
+    await flushMicrotasks();
+
+    expect(latest!.attributions.has('urn:e:root-subject')).toBe(true);
+    expect(latest!.nodeColors['urn:e:root-subject']).toBeTruthy();
+    expect([...latest!.attributions.keys()]).toEqual(['urn:e:root-subject']);
+    expect(Object.keys(latest!.nodeColors)).toEqual(['urn:e:root-subject']);
+    expect(latest!.events.map(event => event.rootUri)).toEqual(['urn:e:root-subject']);
+  });
 });

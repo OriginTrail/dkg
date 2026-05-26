@@ -120,16 +120,14 @@ export interface SwmAttributionsResult {
  *  sit in the gaps so agent identity reads as its own axis.
  *
  *  Also picked so no slot lives in the SWM-family amber range. The
- *  SWM layer default is `#f59e0b` (`LAYER_CONFIG.swm.color`) and any
- *  agent slot in the same hue is visually indistinguishable from a
- *  non-attributed node — the "agent palette ≠ SWM amber" invariant.
- *  Orange `#f97316` previously occupied slot 0 and broke this in
- *  single-agent dev setups; replaced with indigo `#6366f1`. */
+ *  SWM graph fallback for unattributed nodes is neutral, but the layer
+ *  identity and conflict states remain amber; agent slots should not
+ *  blur into either one. */
 const AGENT_PALETTE = [
   '#6366f1', // indigo  (replaced orange — was too close to SWM amber)
   '#14b8a6', // teal
   '#f43f5e', // rose
-  '#facc15', // yellow
+  '#84cc16', // lime
   '#8b5cf6', // violet
   '#10b981', // emerald
   '#0ea5e9', // sky
