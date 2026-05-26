@@ -4,6 +4,7 @@ import { executeQuery, listAssertions, promoteAssertion, publishSharedMemory, li
 import { FilePreviewModal } from '../components/Modals/FilePreviewModal.js';
 import { useMemoryGraphEvents } from '../hooks/useNodeEvents.js';
 import { memoryGraphLabels } from '../lib/memoryLabels.js';
+import { truncateMiddle } from '../lib/truncate.js';
 
 const RdfGraph = lazy(() =>
   import('@origintrail-official/dkg-graph-viz/react').then(m => ({ default: m.RdfGraph }))
@@ -397,7 +398,11 @@ function AssertionList({ contextGraphId, onPromoted }: { contextGraphId: string;
   // would highlight two rows on a single click. `'__all__'`
   // sentinel stays — not collidable with any graphUri.
   const [promoting, setPromoting] = useState<string | null>(null);
-  const [promoteResult, setPromoteResult] = useState<{ name: string; count: number } | null>(null);
+  // PR #710 — track `subGraph` on the success state so the result
+  // copy can disambiguate which partition was promoted. Two rows
+  // labeled `draft` (one root, one sub-graph) would otherwise emit
+  // the same message and leave the user guessing.
+  const [promoteResult, setPromoteResult] = useState<{ name: string; count: number; subGraph?: string } | null>(null);
   const [promoteError, setPromoteError] = useState<string | null>(null);
   // PR #710 Fix E — preview state carries the sub-graph slug too so
   // `FilePreviewModal` can pass it through to the daemon's
@@ -415,7 +420,7 @@ function AssertionList({ contextGraphId, onPromoted }: { contextGraphId: string;
       // `(cg, name, subGraph)` lookup hits the right partition;
       // mirrors the AssertionsList fix in components.tsx.
       const res = await promoteAssertion(contextGraphId, assertion.name, 'all', assertion.subGraph);
-      setPromoteResult({ name: assertion.name, count: res.promotedCount });
+      setPromoteResult({ name: assertion.name, count: res.promotedCount, subGraph: assertion.subGraph });
       refresh();
       onPromoted();
     } catch (err: any) {
@@ -476,6 +481,18 @@ function AssertionList({ contextGraphId, onPromoted }: { contextGraphId: string;
               {a.tripleCount != null && (
                 <span className="v10-assertion-item-count">{a.tripleCount} triples</span>
               )}
+              {a.subGraph && (
+                // PR #710 — mirror the AssertionsList chip pattern
+                // (components.tsx). Same class, same `›` glyph, same
+                // truncation, same tooltip — disambiguates rows that
+                // share a name across root/sub-graph partitions.
+                <span
+                  className="v10-item-count v10-item-subgraph"
+                  title={`In sub-graph: ${a.subGraph}`}
+                >
+                  › {truncateMiddle(a.subGraph, 18)}
+                </span>
+              )}
             </div>
             <button
               className="v10-btn-promote"
@@ -490,7 +507,8 @@ function AssertionList({ contextGraphId, onPromoted }: { contextGraphId: string;
       </div>
       {promoteResult && (
         <div className="v10-promote-result success">
-          Promoted {promoteResult.count} triples from {promoteResult.name} to Shared Working Memory.
+          Promoted {promoteResult.count} triples from {promoteResult.name}
+          {promoteResult.subGraph ? ` (in ${promoteResult.subGraph})` : ''} to Shared Working Memory.
         </div>
       )}
       {promoteError && (

@@ -3,6 +3,7 @@ import type { ReactNode } from 'react';
 import { useFetch } from '../../hooks.js';
 import { api } from '../../api-wrapper.js';
 import { encodeDocTabId, resolveDocRef } from '../../lib/doc-tab-id.js';
+import { truncateMiddle } from '../../lib/truncate.js';
 import {
   listJoinRequests, approveJoinRequest, rejectJoinRequest,
   listAssertions, promoteAssertion,
@@ -2654,24 +2655,6 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
 }
 
 // Small helper: compute unique triples for a given layer slice of memory.
-
-/**
- * #706 sub-graph chip — middle-ellipsis truncation. Sub-graph slugs
- * are commonly prefix-namespaced (`epcis-*`, `github-*`), so the
- * discriminator lives at the end. Mid-truncation preserves both
- * sides and keeps the chip compact. The full slug stays in the
- * row's tooltip so power users can recover it.
- */
-function truncateMiddle(s: string, max: number): string {
-  if (s.length <= max) return s;
-  // Reserve 1 char for the ellipsis; split the remaining budget
-  // weighted slightly toward the prefix (so namespace prefixes
-  // like `epcis-` survive in full on common slug widths).
-  const budget = max - 1;
-  const head = Math.ceil(budget / 2);
-  const tail = budget - head;
-  return `${s.slice(0, head)}…${s.slice(-tail)}`;
-}
 
 export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }: {
   contextGraphId: string;
