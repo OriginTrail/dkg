@@ -1560,7 +1560,9 @@ export function LayerActionsWidget({ layer, count, contextGraphId, onComplete }:
         const assertions = await listAssertions(contextGraphId, 'wm');
         let promoted = 0;
         for (const a of assertions) {
-          const res = await promoteAssertion(contextGraphId, a.name);
+          // PR #710 — thread `subGraph` so sub-graph-scoped assertions
+          // hit the correct daemon lookup key `(cg, name, subGraph)`.
+          const res = await promoteAssertion(contextGraphId, a.name, 'all', a.subGraph);
           promoted += res.promotedCount;
         }
         setResult(`Promoted ${promoted} triple${promoted !== 1 ? 's' : ''} to Shared Memory`);
@@ -2686,13 +2688,16 @@ export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }:
   const [result, setResult] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const handlePromote = useCallback(async (name: string) => {
+  const handlePromote = useCallback(async (name: string, subGraph?: string) => {
     setBusy(name);
     setResult(null);
     setError(null);
     try {
       if (layer === 'wm') {
-        const res = await promoteAssertion(contextGraphId, name);
+        // PR #710 — sub-graph slug threads into the daemon's lookup
+        // key so a row clicked from a sub-graph partition resolves
+        // to that partition's assertion, not a same-named root one.
+        const res = await promoteAssertion(contextGraphId, name, 'all', subGraph);
         setResult(`Promoted ${res.promotedCount} triples to Shared Memory`);
       } else {
         await publishSharedMemory(contextGraphId);
@@ -2716,7 +2721,8 @@ export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }:
       if (layer === 'wm') {
         let total = 0;
         for (const a of assertions) {
-          const res = await promoteAssertion(contextGraphId, a.name);
+          // PR #710 — see comment on the single-row handler above.
+          const res = await promoteAssertion(contextGraphId, a.name, 'all', a.subGraph);
           total += res.promotedCount;
         }
         setResult(`Promoted ${total} triples across ${assertions.length} assertion${assertions.length !== 1 ? 's' : ''}`);
@@ -2803,7 +2809,7 @@ export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }:
           <button
             className={`v10-layer-expand-footer-btn ${layer === 'wm' ? 'promote' : 'publish'}`}
             disabled={busy !== null}
-            onClick={ev => { ev.stopPropagation(); handlePromote(a.name); }}
+            onClick={ev => { ev.stopPropagation(); handlePromote(a.name, a.subGraph); }}
             style={{ opacity: busy === a.name ? 0.5 : 1, flexShrink: 0 }}
           >
             {busy === a.name ? '...' : actionLabel}
@@ -3046,12 +3052,16 @@ export function VerifyOnDkgButton({
     return null;
   }, [entity.types, profile, layer]);
 
+  // PR #710 — keep the matched sub-graph slug alongside the binding so
+  // the promote call below can pass it to the daemon (the source
+  // assertion is sub-graph-scoped; daemon lookup keys on
+  // `(cg, name, subGraph)`).
   const sgBinding = useMemo(() => {
     if (!profile) return null;
     for (const s of entity.subGraphs) {
       if (s === 'meta') continue;
       const b = profile.forSubGraph(s);
-      if (b?.sourceAssertion) return b;
+      if (b?.sourceAssertion) return { binding: b, subGraph: s };
     }
     return null;
   }, [entity.subGraphs, profile]);
@@ -3065,8 +3075,8 @@ export function VerifyOnDkgButton({
         label:    binding.promoteLabel ?? 'Promote to Shared Memory',
         hint:     binding.promoteHint  ?? 'Shares this entity with the team.',
         busyCopy: 'Sharing…',
-        disabled: !sgBinding?.sourceAssertion,
-        disabledReason: !sgBinding?.sourceAssertion
+        disabled: !sgBinding?.binding.sourceAssertion,
+        disabledReason: !sgBinding?.binding.sourceAssertion
           ? `No sourceAssertion declared on the sub-graph profile — add profile:sourceAssertion to the SubGraphBinding for "${[...entity.subGraphs].filter(s => s !== 'meta')[0] ?? '?'}".`
           : null,
       }
@@ -3087,10 +3097,17 @@ export function VerifyOnDkgButton({
     setResultKind(action.kind);
     try {
       if (action.kind === 'promote') {
+        // PR #710 — `sgBinding.sourceAssertion` is itself
+        // sub-graph-scoped (the binding came from a SubGraphBinding
+        // for slug `sgBinding.subGraph`), so we thread that slug as
+        // the 4th arg. Without it the daemon's `(cg, name, subGraph)`
+        // lookup falls back to the root-bucket assertion of the same
+        // name (404 or wrong-target).
         const r = await promoteAssertion(
           contextGraphId,
-          sgBinding!.sourceAssertion!,
+          sgBinding!.binding.sourceAssertion!,
           [entity.uri],
+          sgBinding!.subGraph,
         );
         setResult(r);
       } else {

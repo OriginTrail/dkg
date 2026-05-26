@@ -1,4 +1,4 @@
-import { subGraphFromAssertionGraphUri } from './hooks/useAssertionLifecycleEvents.js';
+import { subGraphFromAssertionGraphUri } from './lib/sub-graph-uri.js';
 
 const BASE = '';
 declare global {
@@ -675,9 +675,28 @@ export async function listAssertions(
   return result;
 }
 
-/** Promote an assertion from WM to SWM. */
-export const promoteAssertion = (contextGraphId: string, assertionName: string, entities: string | string[] = 'all') =>
-  post<{ promotedCount: number }>(`/api/assertion/${encodeURIComponent(assertionName)}/promote`, { contextGraphId, entities });
+/**
+ * Promote an assertion from WM to SWM.
+ *
+ * PR #710 fix — `subGraphName` is the third part of the daemon's
+ * lookup key alongside `(contextGraphId, assertionName)`. Without
+ * it, promoting a sub-graph-scoped assertion either 404s or
+ * silently promotes a same-named root-bucket assertion. The
+ * daemon route already accepts the field
+ * (`packages/cli/src/daemon/routes/assertion.ts:820-823`); only
+ * spread it when supplied so root-bucket promotes keep the prior
+ * wire shape.
+ */
+export const promoteAssertion = (
+  contextGraphId: string,
+  assertionName: string,
+  entities: string | string[] = 'all',
+  subGraphName?: string,
+) =>
+  post<{ promotedCount: number }>(
+    `/api/assertion/${encodeURIComponent(assertionName)}/promote`,
+    { contextGraphId, entities, ...(subGraphName ? { subGraphName } : {}) },
+  );
 
 // --- File preview ---
 
