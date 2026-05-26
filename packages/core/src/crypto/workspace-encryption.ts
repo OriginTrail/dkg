@@ -297,7 +297,7 @@ export function encodeWorkspaceEncryptionKey(bytes: Uint8Array): string {
 
 export function decodeWorkspaceEncryptionKey(value: string): Uint8Array {
   const raw = value.trim();
-  const bytes = raw.startsWith('0x')
+  const bytes = /^0x[0-9a-fA-F]{64}$/.test(raw)
     ? Buffer.from(raw.slice(2), 'hex')
     : Buffer.from(padBase64(raw.replace(/-/g, '+').replace(/_/g, '/')), 'base64');
   const out = new Uint8Array(bytes);
