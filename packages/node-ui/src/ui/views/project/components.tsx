@@ -3196,6 +3196,25 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
     [entity.uri, allTriples]
   );
 
+  // Task #25 (PR #677) — entity-only filter for the entity-detail
+  // graph. Mirrors the rule the Entities tab uses
+  // (`useMemoryEntities.ts:467-469`): an entity is in entityList iff
+  // it has at least one of `types`, own `properties`, or outgoing
+  // `connections`. `allEntities` includes synthesised stubs for
+  // pure-object URIs (vocab constants, IPFS refs, DID property
+  // values) so filter to the real entity set before computing
+  // entityUris. `entity.uri` (the detail focus) is always included
+  // so the focal node and its `initialFocus` highlight stay in sync.
+  const renderHoodTriples = useMemo(() => {
+    const entityUris = new Set<string>([canonicalEntityUri(entity.uri)]);
+    for (const e of allEntities.values()) {
+      if (e.types.length > 0 || e.properties.size > 0 || e.connections.length > 0) {
+        entityUris.add(canonicalEntityUri(e.uri));
+      }
+    }
+    return filterTriplesToEntities(hoodTriples, entityUris);
+  }, [hoodTriples, allEntities, entity.uri]);
+
   const graphOptions = useMemo(() => ({
     labelMode: 'humanized' as const,
     renderer: '2d' as const,
@@ -3362,11 +3381,11 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
               tone={layerBadge}
               className="v10-ka-graph-shell"
               renderGraph={(expanded) => (
-                hoodTriples.length > 0 ? (
+                renderHoodTriples.length > 0 ? (
                   <Suspense fallback={<span className="v10-graph-placeholder">Loading graph...</span>}>
                     <RdfGraph
                       key={`${entity.uri}:${expanded ? 'expanded' : 'inline'}`}
-                      data={hoodTriples}
+                      data={renderHoodTriples}
                       format="triples"
                       options={graphOptions}
                       viewConfig={entityViewConfig}
@@ -3616,6 +3635,16 @@ export function SubGraphOverviewGrid({
     return out;
   }, [memory.entityList]);
 
+  // Task #25 (PR #677) — entity-only filter for the mini-card
+  // thumbnails. Same rule the Entities tab uses; computed once across
+  // `memory.entityList` (already filtered to entries with own data)
+  // and reused per card.
+  const entityUris = useMemo(() => {
+    const s = new Set<string>();
+    for (const e of memory.entityList) s.add(canonicalEntityUri(e.uri));
+    return s;
+  }, [memory.entityList]);
+
   // Merge registered sub-graphs (minus `meta`) with profile bindings so
   // icon/color/label/rank all flow from the single source of truth.
   const cards = useMemo(() => {
@@ -3623,6 +3652,7 @@ export function SubGraphOverviewGrid({
       .filter(sg => sg.name !== 'meta')
       .map(sg => {
         const binding = profile?.forSubGraph(sg.name) ?? {};
+        const rawTriples = triplesBySubGraph.get(sg.name) ?? [];
         return {
           slug: sg.name,
           icon: binding.icon ?? '•',
@@ -3632,12 +3662,12 @@ export function SubGraphOverviewGrid({
           rank: binding.rank ?? 99,
           entityCount: sg.entityCount,
           tripleCount: sg.tripleCount,
-          triples: triplesBySubGraph.get(sg.name) ?? [],
+          triples: filterTriplesToEntities(rawTriples, entityUris),
           layerCounts: layerCountsBySubGraph.get(sg.name) ?? { wm: 0, swm: 0, vm: 0 },
         };
       })
       .sort((a, b) => a.rank - b.rank);
-  }, [subGraphs, profile, triplesBySubGraph, layerCountsBySubGraph]);
+  }, [subGraphs, profile, triplesBySubGraph, layerCountsBySubGraph, entityUris]);
 
   if (loading && cards.length === 0) {
     return (
