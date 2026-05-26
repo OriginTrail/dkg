@@ -454,9 +454,27 @@ function isRdfType(predicate: string): boolean {
 export function filterTriplesToEntities(
   triples: Triple[],
   entityUris: ReadonlySet<string>,
+  options?: { focalSubjects?: ReadonlySet<string> },
 ): Triple[] {
   const out: Triple[] = [];
+  const focal = options?.focalSubjects;
   for (const t of triples) {
+    // Subject-side check (Codex EwIbn): keep only triples whose subject
+    // is a real entity per the entityList membership rule. In practice
+    // every subject of a triple is in entityList (it has at least one
+    // type/property/connection), but a scoped entityUris (per-sub-graph,
+    // KADetailView with allEntities filtered down, etc.) can have
+    // subjects that aren't in the scope. Drop those. Callers can pass
+    // `focalSubjects` to exempt subjects that must always render (e.g.
+    // KADetailView's focal entity).
+    const subjectCanonical = canonicalEntityUri(t.subject);
+    if (!entityUris.has(subjectCanonical) && !focal?.has(subjectCanonical)) continue;
+    // Object-side check (the original gate): drop resource→resource
+    // edges where the object isn't a known entity. `rdf:type` is exempt
+    // because class IRIs aren't entities but the triple is needed for
+    // `classColors`; the downstream `splitGraphTriplesForShelf`
+    // `rdf:type` guard prevents the class IRI from becoming a canvas
+    // node anyway.
     if (isResourceObject(t.object)) {
       if (!isRdfType(t.predicate) && !entityUris.has(canonicalEntityUri(t.object))) continue;
     }

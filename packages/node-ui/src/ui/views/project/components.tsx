@@ -970,6 +970,27 @@ export function LayerGraphPanel({
   );
   const swmAttr = swmAttribution ?? localSwmAttr;
 
+  // Task #25 (PR #677) — entity-only graph filter, render-path side.
+  // `useLayerTriples` stays the honest source of all layer triples
+  // (triple counts, VM hero stats depend on that). The graph view is
+  // the only surface that wants "@id-entities only" semantics, so the
+  // filter lives here. Callers that don't pass `layerEntities` (older
+  // callsites, tests) keep the legacy behaviour of rendering every
+  // resource referenced in `triples`.
+  //
+  // Codex Ev_St/EwIbh: the filter must run on the BASE layer triples
+  // BEFORE `decorationTriples` are merged in. VM provenance overlay
+  // triples (`urn:dkg:viz:anchor:*`, `urn:dkg:viz:agent:*`) are
+  // synthetic, never present in `layerEntities`, and must always
+  // render. Filtering after the merge would strip the entire trust
+  // halo from published Knowledge Assets.
+  const filteredBaseTriples = useMemo(() => {
+    if (!layerEntities || layerEntities.length === 0) return triples;
+    const entityUris = new Set<string>();
+    for (const e of layerEntities) entityUris.add(canonicalEntityUri(e.uri));
+    return filterTriplesToEntities(triples, entityUris);
+  }, [triples, layerEntities]);
+
   const uniqueTriples = useMemo(() => {
     const seen = new Set<string>();
     const out: Triple[] = [];
@@ -979,26 +1000,17 @@ export function LayerGraphPanel({
       seen.add(key);
       out.push({ subject: t.subject, predicate: t.predicate, object: t.object } as Triple);
     };
-    for (const t of triples) push(t);
+    for (const t of filteredBaseTriples) push(t);
     // Decoration triples are only produced for VM; for other layers the
-    // hook returns an empty array so this loop is a no-op.
+    // hook returns an empty array so this loop is a no-op. They
+    // intentionally bypass `filterTriplesToEntities` — synthetic viz
+    // nodes aren't in `entityList` by design and must always show as
+    // the trust halo around published KAs.
     for (const t of decorationTriples) push(t);
     return out;
-  }, [triples, decorationTriples]);
+  }, [filteredBaseTriples, decorationTriples]);
 
-  // Task #25 (PR #677) — entity-only graph filter, render-path side.
-  // `useLayerTriples` stays the honest source of all layer triples
-  // (triple counts, VM hero stats depend on that). The graph view is
-  // the only surface that wants "@id-entities only" semantics, so the
-  // filter lives here. Callers that don't pass `layerEntities` (older
-  // callsites, tests) keep the legacy behaviour of rendering every
-  // resource referenced in `triples`.
-  const renderTriples = useMemo(() => {
-    if (!layerEntities || layerEntities.length === 0) return uniqueTriples;
-    const entityUris = new Set<string>();
-    for (const e of layerEntities) entityUris.add(canonicalEntityUri(e.uri));
-    return filterTriplesToEntities(uniqueTriples, entityUris);
-  }, [uniqueTriples, layerEntities]);
+  const renderTriples = uniqueTriples;
 
   // Only SWM layer uses per-URI node tints — for the rest, classColors rules
   // so code graphs stay legible (Package purple / File blue / etc).
@@ -3636,13 +3648,22 @@ export function SubGraphOverviewGrid({
   }, [memory.entityList]);
 
   // Task #25 (PR #677) — entity-only filter for the mini-card
-  // thumbnails. Same rule the Entities tab uses; computed once across
-  // `memory.entityList` (already filtered to entries with own data)
-  // and reused per card.
-  const entityUris = useMemo(() => {
-    const s = new Set<string>();
-    for (const e of memory.entityList) s.add(canonicalEntityUri(e.uri));
-    return s;
+  // thumbnails. Same rule the Entities tab uses; computed per card
+  // scoped to that card's sub-graph (Codex Ev_S2): an entity that's
+  // first-class in sub-graph B but only a value/provenance object in
+  // sub-graph A must not render on A's thumbnail. Per-sub-graph scope
+  // = `memory.entityList.filter(e => e.subGraphs.has(sg.name))`.
+  const entityUrisBySubGraph = useMemo(() => {
+    const out = new Map<string, Set<string>>();
+    for (const e of memory.entityList) {
+      const canonical = canonicalEntityUri(e.uri);
+      for (const sg of e.subGraphs) {
+        let s = out.get(sg);
+        if (!s) { s = new Set(); out.set(sg, s); }
+        s.add(canonical);
+      }
+    }
+    return out;
   }, [memory.entityList]);
 
   // Merge registered sub-graphs (minus `meta`) with profile bindings so
@@ -3653,6 +3674,7 @@ export function SubGraphOverviewGrid({
       .map(sg => {
         const binding = profile?.forSubGraph(sg.name) ?? {};
         const rawTriples = triplesBySubGraph.get(sg.name) ?? [];
+        const cardEntityUris = entityUrisBySubGraph.get(sg.name) ?? new Set<string>();
         return {
           slug: sg.name,
           icon: binding.icon ?? '•',
@@ -3662,12 +3684,12 @@ export function SubGraphOverviewGrid({
           rank: binding.rank ?? 99,
           entityCount: sg.entityCount,
           tripleCount: sg.tripleCount,
-          triples: filterTriplesToEntities(rawTriples, entityUris),
+          triples: filterTriplesToEntities(rawTriples, cardEntityUris),
           layerCounts: layerCountsBySubGraph.get(sg.name) ?? { wm: 0, swm: 0, vm: 0 },
         };
       })
       .sort((a, b) => a.rank - b.rank);
-  }, [subGraphs, profile, triplesBySubGraph, layerCountsBySubGraph, entityUris]);
+  }, [subGraphs, profile, triplesBySubGraph, layerCountsBySubGraph, entityUrisBySubGraph]);
 
   if (loading && cards.length === 0) {
     return (
