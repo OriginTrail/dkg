@@ -6936,7 +6936,14 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
 }
 .v10-activity-feed-type-icon { font-size: 11px; color: var(--type-color, #a855f7); }
 .v10-activity-feed-title-text {
-  font-size: 12px; font-weight: 600;
+  /* Entity / assertion name in each row (e.g.
+   * "pharmaceutical-derived-product-metadata"). Was `600` to
+   * compensate for the `.v10-activity-feed-row-static` opacity dim;
+   * with the dim gone (prior commit), `600` over-emphasised the row
+   * body relative to the surrounding chrome (`RECENT ACTIVITY · 7`
+   * title, `TODAY` bucket label, agent chips). Dropped one notch
+   * to `500` to bring it inline with the chrome's body weight. */
+  font-size: 12px; font-weight: 500;
   color: var(--text-primary);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   min-width: 0;
