@@ -370,7 +370,7 @@ idempotent success by treating an `already exists` response as reuse.
 
 ### Daemon restart mid-import
 
-WM survives restarts ([docs/bugs/wm-persistence-regression.md](../../../../docs/bugs/wm-persistence-regression.md)
+WM survives restarts ([.ai/bugs/wm-persistence-regression.md](../../../../.ai/bugs/wm-persistence-regression.md)
 characterises the bug fixed in OriginTrail/dkg#636-639). On resume,
 `loadImportManifest` gives you the "where was I?" answer; if a particular
 assertion's WM state is partial, you can either:
@@ -387,7 +387,7 @@ As of PR #4 in the async-promote-queue series the daemon ships an in-process
 queue that converts the synchronous `POST /api/assertion/<name>/promote`
 round-trip into a fire-and-forget enqueue. For bulk imports — where the
 synchronous promote round-trip is the bottleneck — this is the recommended
-path. See [`docs/specs/SPEC_ASYNC_PROMOTE_QUEUE.md`](../../../../docs/specs/SPEC_ASYNC_PROMOTE_QUEUE.md)
+path. See [`.ai/specs/SPEC_ASYNC_PROMOTE_QUEUE.md`](../../../../.ai/specs/SPEC_ASYNC_PROMOTE_QUEUE.md)
 for the design and `packages/cli/skills/dkg-node/SKILL.md` §8 for the
 in-daemon worker configuration.
 
@@ -566,7 +566,7 @@ promote job is queued / running.
 
 - [ADR 0002 — Importer chunking contract](../../../../.ai/adr/0002-importer-chunking-contract.md)
 - [ADR 0003 — Code-graph ontology convergence](../../../../.ai/adr/0003-code-graph-ontology-convergence.md)
-- [SPEC — Async promote queue (WM → SWM)](../../../../docs/specs/SPEC_ASYNC_PROMOTE_QUEUE.md)
+- [SPEC — Async promote queue (WM → SWM)](../../../../.ai/specs/SPEC_ASYNC_PROMOTE_QUEUE.md)
 - [`scripts/lib/manifest.mjs`](../../../../scripts/lib/manifest.mjs) — reference manifest implementation
 - [`scripts/lib/dkg-daemon.mjs`](../../../../scripts/lib/dkg-daemon.mjs) — `DkgClient` with built-in chunking
 - [`scripts/lib/ontology.mjs`](../../../../scripts/lib/ontology.mjs) — canonical `code:*` ontology constants

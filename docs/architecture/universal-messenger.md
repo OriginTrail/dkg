@@ -1,3 +1,10 @@
+---
+status: current
+version: v10
+audience: human+agent
+doc_type: architecture
+---
+
 # Universal Messenger
 
 > Status: shipping in `v10.0.0-rc.9`. All 8 short-message protocols now route through the substrate; per-message delivery + latency observable via `/api/slo`.
@@ -20,12 +27,8 @@ delivery guarantees:
   messageId }` so MCP / HTTP callers can surface "queued" vs "sent"
   to the operator.
 
-This page is the architecture reference. Two siblings live alongside it:
-
-- [`messenger-add-protocol.md`](./messenger-add-protocol.md) — recipe
-  for migrating an existing protocol onto the Messenger, or adding a
-  new short-message protocol.
-- [`messenger-operator.md`](./messenger-operator.md) — how to read
+This page is the architecture reference. Pair it with
+[`docs/operate/messenger.md`](../operate/messenger.md) for how to read
   `/api/slo`, what `--relay-preferred` does, and how to debug a peer
   that "should be" reachable but isn't.
 
@@ -151,7 +154,7 @@ Key topology facts:
 - Every agent daemon reserves on **2-4 relays simultaneously**
   (multi-reservation, rc.8 PR #526). The relay set today is the
   testnet core nodes; operators stand up their own via PR-7's
-  `--relay-preferred` (see [`messenger-operator.md`](./messenger-operator.md)).
+  `--relay-preferred` (see [`docs/operate/messenger.md`](../operate/messenger.md)).
 - The relay is a transparent libp2p hop: it forwards encrypted
   frames; the `ReliableEnvelope` is opaque to it.
 - Both daemons run the identical Messenger stack — including the
@@ -398,8 +401,8 @@ is idempotent at the app layer) or surface a terminal error.
 ## Per-protocol coverage
 
 All 8 short-message protocols ship on the substrate in `v10.0.0-rc.9`.
-The migration recipe (for adding a hypothetical 9th protocol later) is
-in [`messenger-add-protocol.md`](./messenger-add-protocol.md).
+Contributor migration notes for future protocol additions live in codebase-only
+agent context, outside the public docs tree.
 
 | Protocol                       | Migrated in | parallelPaths | Notes                                                                                                  |
 | ------------------------------ | ----------- | ------------- | ------------------------------------------------------------------------------------------------------ |
@@ -625,7 +628,7 @@ restarted idle daemon.
   — not needed today (one daemon per node) but the schema accommodates it.
 - Operator-relay infrastructure — code-side ships in PR-7
   (`--relay-preferred`); actual relay provisioning is an out-of-band
-  ops track. See [`messenger-operator.md`](./messenger-operator.md).
+  ops track. See [`docs/operate/messenger.md`](../operate/messenger.md).
 - `Messenger.sendToPeer` legacy pass-through: kept at rc.9 for any
   future incremental migration; may be deprecated in a later rc once
   the substrate has had enough operator-time to confirm no surprise

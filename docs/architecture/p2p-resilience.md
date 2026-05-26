@@ -1,3 +1,10 @@
+---
+status: current
+version: v10
+audience: human+agent
+doc_type: architecture
+---
+
 # P2P Resilience for NAT'd edge nodes
 
 Status: partial — this PR lands three hooks, the remaining items are tracked

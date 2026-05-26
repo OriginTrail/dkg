@@ -1,9 +1,16 @@
+---
+status: current
+version: v10
+audience: human+agent
+doc_type: how-to
+---
+
 # Universal Messenger — Operator Guide
 
 > Audience: node operators (running a DKG daemon as a service). For
-> the architecture-level reference, see [`messenger.md`](./messenger.md).
-> For the new-protocol migration recipe, see
-> [`messenger-add-protocol.md`](./messenger-add-protocol.md).
+> the architecture-level reference, see [`docs/architecture/universal-messenger.md`](../architecture/universal-messenger.md).
+> Contributor migration notes for future protocol additions live in codebase-only
+> agent context, outside the public docs tree.
 >
 > Status: shipping in `v10.0.0-rc.9`.
 
@@ -19,7 +26,7 @@ practice are:
 
 Most operators won't need either — defaults are safe, the public
 testnet relay set works, and the substrate self-heals through the
-recovery primitives documented in `messenger.md`. The surfaces below
+recovery primitives documented in `docs/architecture/universal-messenger.md`. The surfaces below
 exist for operators running custom infrastructure or chasing a
 specific reliability tail.
 
@@ -80,7 +87,7 @@ reservations the libp2p stack is currently holding.
 You'll get the most reliability lift from running 2-3 relays in
 geographically distinct regions. Each relay is a vanilla DKG node
 configured as a circuit-relay-v2 server. The full step-by-step lives
-in [`packages/cli/README.md`](../packages/cli/README.md#operator-relays-rc9-pr-7) — that's the
+in [`packages/cli/README.md`](../../packages/cli/README.md#operator-relays-rc9-pr-7) — that's the
 authoritative playbook with infra recommendations, port-forwarding
 rules, and monitoring.
 
@@ -256,7 +263,7 @@ overnight run; `/api/slo` is the source of truth for go/no-go on the
   failed first attempts — typically a brand-new peer where address
   resolution hasn't settled. Watch for `delivered` to start climbing
   as the outbox retries land; PR-5's DHT-walk-on-stall should kick
-  in after 5 failed attempts (see `messenger.md` § Recovery
+  in after 5 failed attempts (see `docs/architecture/universal-messenger.md` § Recovery
   primitives).
 - **Soak runs.** `scripts/libp2p-soak-test.sh` writes a per-cycle
   snapshot of `/api/slo` to `~/.dkg/soak-test-*/slo.jsonl` alongside

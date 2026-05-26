@@ -1,7 +1,7 @@
 # Relay Auto-Discovery
 
 **Status**: Draft
-**Depends on**: [Context Graphs](../understand/context-graphs.md), [Relays and Peers](../operate/relays.md)
+**Depends on**: [Context Graphs](../../docs/understand/context-graphs.md), [Relays and Peers](../../docs/operate/relays.md)
 
 ---
 

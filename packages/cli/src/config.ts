@@ -355,7 +355,7 @@ export interface DkgConfig {
    * `DKG_RELAY_PREFERRED` for the spawned daemon, comma-separated)
    * or write into `~/.dkg/config.json` for persistence.
    *
-   * See `docs/messenger-operator.md` for the relay-setup playbook
+   * See `docs/operate/messenger.md` for the relay-setup playbook
    * (standing up a relay VM, sharing multiaddrs, monitoring).
    */
   preferredRelays?: string[];
@@ -420,7 +420,7 @@ export interface DkgConfig {
    * enqueued via `POST /api/assertion/{name}/promote-async` sit in
    * `queued` forever. Set `enabled: false` to disable when running a
    * read-only / forensic node where you don't want the worker mutating
-   * SWM. See `docs/specs/SPEC_ASYNC_PROMOTE_QUEUE.md` and the
+   * SWM. See `.ai/specs/SPEC_ASYNC_PROMOTE_QUEUE.md` and the
    * `dkg-node` skill (§8 "Async promote queue") for the full contract.
    */
   promoteQueue?: {

@@ -62,7 +62,7 @@ You need:
   NAT-traversal honestly — different machine + different network is
   required for an honest C4)
 - some Base Sepolia ETH on each of the three wallets; see
-  [Funding](operate/funding.md)
+  [Funding](../../docs/operate/funding.md)
 
 ## 0. Pre-flight (both laptops + the core)
 
@@ -307,5 +307,5 @@ When you run this, capture:
 - Any deviation from the expected response shapes
 - Daemon log excerpts for any step that needed a retry
 
-File the report in this repo as a new doc under `docs/runbooks/`, or
+File the report in this repo as a new doc under `.ai/runbooks/`, or
 attach to the PR that bumps the next mainnet release.

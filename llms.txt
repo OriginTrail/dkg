@@ -19,11 +19,17 @@ Use these current V10 docs first:
 - docs/architecture/index.md
 - docs/architecture/node-components.md
 - docs/architecture/memory-lifecycle.md
+- docs/architecture/universal-messenger.md
+- docs/architecture/p2p-resilience.md
 - docs/operate/index.md
 - docs/operate/daemon.md
 - docs/operate/funding.md
 - docs/operate/relays.md
+- docs/operate/messenger.md
+- docs/operate/storage-sparql-http.md
+- docs/operate/host-mode-manual-subscribe.md
 - docs/operate/updates-rollback.md
+- docs/operate/migrate-to-npm.md
 - docs/operate/troubleshooting.md
 - docs/reference/index.md
 - docs/reference/cli.md
@@ -38,4 +44,3 @@ Use these current V10 docs first:
 - docs/for-ai-agents/docs-update-playbook.md
 
 Exact agent operations live in packages/cli/skills/dkg-node/SKILL.md.
-

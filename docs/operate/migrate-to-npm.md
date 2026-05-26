@@ -1,3 +1,10 @@
+---
+status: current
+version: v10
+audience: human+agent
+doc_type: how-to
+---
+
 # Migrate a git-checkout install to the npm-pinned auto-update path
 
 This guide is for operators currently running a DKG node from a `git clone`d checkout (typical layout: `~/dkg-v9/` with `.git`, `packages/`, `node_modules/`, `pnpm-lock.yaml`, `package.json`). It walks through converting that install to use the npm-pinned auto-update path without re-installing.

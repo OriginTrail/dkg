@@ -197,8 +197,8 @@ dkg assertion query <name> -c <cg>                   # read assertion quads from
 dkg assertion promote <name> -c <cg>                 # WM → SWM
 
 # Shared memory (team-visible) and publishing
-dkg shared-memory write <cg> ...         # write triples directly to SWM
-dkg shared-memory publish <cg>           # SWM → Verified Memory (costs TRAC)
+dkg shared-memory write <cg> --file <rdf-file> --name <name>  # stage RDF into WM
+dkg shared-memory publish <cg> --name <name>                  # finalize + publish to VM
 dkg publish <cg> -f <file>               # one-shot RDF publish to a context graph
 dkg verify <batchId> --context-graph <cg> --verified-graph <id>  # propose M-of-N verification
 dkg endorse <ual> --context-graph <cg> --agent <addr>  # endorse a published KA
@@ -496,7 +496,7 @@ pnpm test:coverage                               # tests + tier-based coverage g
 pnpm --filter @origintrail-official/dkg test     # run tests for a single package
 ```
 
-Tier-based thresholds (TORNADO / BURA / KOSAVA) and Solidity lcov checks are documented in [`docs/testing/COVERAGE.md`](docs/testing/COVERAGE.md).
+Tier-based thresholds (TORNADO / BURA / KOSAVA) and Solidity lcov checks are documented in [`.ai/testing/COVERAGE.md`](.ai/testing/COVERAGE.md).
 
 ---
 

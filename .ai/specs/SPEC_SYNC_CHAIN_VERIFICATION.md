@@ -1,7 +1,7 @@
 # Sync Chain Verification (Tier 2)
 
 **Status**: Draft
-**Depends on**: [Memory Lifecycle](../architecture/memory-lifecycle.md)
+**Depends on**: [Memory Lifecycle](../../docs/architecture/memory-lifecycle.md)
 
 ---
 

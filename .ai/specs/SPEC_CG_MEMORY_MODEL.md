@@ -3,7 +3,7 @@
 **Status**: IMPLEMENTED (v1.0)
 **Date**: 2026-05-20
 **Scope**: How agents should think about Context Graphs and Agent Networks, the three orthogonal access dials (sharing / contribution / per-fact privacy), and the role of edge vs core nodes.
-**Related**: [SPEC_V10_IDENTITY_AND_ACCESS.md](./SPEC_V10_IDENTITY_AND_ACCESS.md), [Context Graphs](../understand/context-graphs.md), and [Knowledge Assets](../understand/knowledge-assets.md).
+**Related**: [SPEC_V10_IDENTITY_AND_ACCESS.md](./SPEC_V10_IDENTITY_AND_ACCESS.md), [Context Graphs](../../docs/understand/context-graphs.md), and [Knowledge Assets](../../docs/understand/knowledge-assets.md).
 
 ---
 
@@ -373,7 +373,7 @@ This RFC (rewritten), `CHANGELOG.md` entry, and a forward pointer from [SPEC_V10
 
 To be resolved before this RFC is marked IMPLEMENTED.
 
-1. **Doc name + folder.** Proposed: `dkg/docs/specs/SPEC_CG_MEMORY_MODEL.md` (this file). Alternatives: `SPEC_AGENT_MEMORY_MODEL.md`, or move to a new `dkg/docs/rfcs/` folder.
+1. **Doc name + folder.** Proposed: `dkg/.ai/specs/SPEC_CG_MEMORY_MODEL.md` (this file). Alternatives: `SPEC_AGENT_MEMORY_MODEL.md`, or move to a new `dkg/docs/rfcs/` folder.
 2. **Rename the underlying TS field names?** The current `accessPolicy` / `publishPolicy` enum names are the contract-level wire format and propagate through the SDK. Renaming to `sharingPolicy` / `contributionPolicy` would be cleaner conceptually but has wide blast radius (every SDK consumer, every test, every adapter). **Recommendation**: translate only at user-facing layers (MCP tool, UI copy, RFC docs). Keep the wire format unchanged. Revisit later if confusion persists.
 3. **Relationship to [SPEC_V10_IDENTITY_AND_ACCESS.md](./SPEC_V10_IDENTITY_AND_ACCESS.md).** That spec is concerned with the identity layer (node identity vs agent identity, ID namespacing, token-based auth). This RFC sits above it and is concerned with the access model exposed to agents and AI devs. **Recommendation**: cross-link, not supersede. Add a forward pointer from §1.2 of the identity spec to this RFC's mental model.
 4. **Should the "Agent Network" framing get a dedicated entity in the project ontology** (e.g. `dkg:AgentNetwork` as a `skos:Concept` with `dkg:contextGraph` / `dkg:hasCurator` / `dkg:hasMember` predicates)? Useful for downstream tooling and DKG-graph annotations. Out of scope for this RFC, but worth filing as a follow-up if the framing sticks.

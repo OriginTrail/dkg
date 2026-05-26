@@ -24,4 +24,5 @@ Architecture routes:
 
 - [Node Components](node-components.md)
 - [Memory Lifecycle](memory-lifecycle.md)
-
+- [Universal Messenger](universal-messenger.md)
+- [P2P Resilience](p2p-resilience.md)

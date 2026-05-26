@@ -339,7 +339,7 @@ describe('@unit Profile contract', function () {
   // recreate-profile-recovery 0001 — re-attach a Profile to an existing
   // Identity (testnet ProfileStorage-redeploy recovery). Admin-only; the
   // identityId is reused so surviving staking/conviction/sharding state
-  // stays addressable. See docs/adr/0001-recreate-profile-admin-only.md.
+  // stays addressable. See .ai/adr/evm-module-0001-recreate-profile-admin-only.md.
   // =====================================================================
 
   describe('recreateProfile (testnet recovery)', () => {

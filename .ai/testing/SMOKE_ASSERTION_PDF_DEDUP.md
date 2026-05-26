@@ -37,8 +37,8 @@ The important part is that both documents resolve at least one identical RDF tri
 export CG_ID="smoke-pdf-dedup"
 export ASSERTION_A="reportA"
 export ASSERTION_B="reportB"
-export PDF_A="$PWD/docs/testing/test-files/report-a.pdf"
-export PDF_B="$PWD/docs/testing/test-files/report-b.pdf"
+export PDF_A="$PWD/.ai/testing/test-files/report-a.pdf"
+export PDF_B="$PWD/.ai/testing/test-files/report-b.pdf"
 ```
 
 Create the context graph if needed:

@@ -50,7 +50,7 @@ protocol implementation. For smart contract vulnerabilities in
 Operational details about how the repo and CI defend against supply-chain
 attacks (TeamPCP-class compromises, tag-poisoning, credential-stealer
 injection, etc.) live in
-[`docs/security/SUPPLY_CHAIN_HARDENING.md`](docs/security/SUPPLY_CHAIN_HARDENING.md).
+[`.ai/security/SUPPLY_CHAIN_HARDENING.md`](.ai/security/SUPPLY_CHAIN_HARDENING.md).
 That doc is the audit trail: it lists every control enforced by code in
 this repo and every admin-side control a maintainer must apply via the
 GitHub UI.

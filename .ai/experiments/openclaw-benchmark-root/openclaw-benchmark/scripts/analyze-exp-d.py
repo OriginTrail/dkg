@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import statistics
 
-BASE = Path("/Users/aleatoric/dev/dkg-v9/docs/experiments/openclaw-benchmark/results")
+BASE = Path(__file__).resolve().parents[1] / "results"
 
 
 def summarize(exp: str):

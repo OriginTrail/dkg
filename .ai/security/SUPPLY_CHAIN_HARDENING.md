@@ -283,7 +283,7 @@ changes to:
 - `scripts/` and `packages/cli/scripts/` — the release-asset build
   scripts that determine what `pnpm build` and the release workflow
   produce;
-- `docs/security/` and `SECURITY.md`.
+- `.ai/security/` and `SECURITY.md`.
 
 Each path lists at least two named owners. CODEOWNERS is **only a
 routing file** — it tells GitHub which accounts should be requested

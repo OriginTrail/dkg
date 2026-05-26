@@ -1,7 +1,7 @@
 # Profile Exchange on Connect
 
 **Status**: Draft
-**Depends on**: [Agents and Trust](../understand/agents-and-trust.md)
+**Depends on**: [Agents and Trust](../../docs/understand/agents-and-trust.md)
 
 ---
 

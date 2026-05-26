@@ -1,6 +1,6 @@
 /**
  * Regression tests for the durability contract documented in
- * docs/bugs/wm-persistence-regression.md.
+ * .ai/bugs/wm-persistence-regression.md.
  *
  * These cases exist because the original failure was a silent one — the
  * daemon happily reported a clean shutdown while torn writes / parse

@@ -160,7 +160,7 @@ The node emits Server-Sent Events on `GET /api/events` for:
 
 These events are also stored as notifications in the dashboard database. The
 Node UI subscribes to SSE for instant updates, falling back to 60-second
-polling. See [17_NODE_API.md `GET /api/events`](../../dkgv10-spec/17_NODE_API.md) for protocol details.
+polling. The event protocol details are maintained in the node API source and generated API references, not in this internal planning note.
 
 ---
 

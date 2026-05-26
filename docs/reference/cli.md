@@ -22,7 +22,7 @@ dkg context-graph list
 dkg assertion import-file <name> -f <file> -c <contextGraphId>
 dkg assertion query <name> -c <contextGraphId>
 dkg assertion promote <name> -c <contextGraphId>
-dkg shared-memory publish <contextGraphId>
+dkg shared-memory publish <contextGraphId> --name <assertionName>
 dkg query <contextGraphId> -q "<sparql>"
 dkg mcp setup
 dkg hermes setup
@@ -32,4 +32,3 @@ dkg rollback
 ```
 
 Run `dkg <command> --help` for the current option surface.
-

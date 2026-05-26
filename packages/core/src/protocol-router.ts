@@ -78,7 +78,7 @@ export interface SendOptions {
    * run multiple times for the same logical request — every caller
    * MUST satisfy this prefix invariant before enabling > 1. The
    * sender cannot inspect the receiver's substrate version; the
-   * protocol-prefix string IS the contract (see docs/messenger.md
+   * protocol-prefix string IS the contract (see docs/architecture/universal-messenger.md
    * "Versioning" and the rc.9 plan PR-4 invariant note).
    *
    * When fewer than 2 live connections exist for the peer, the

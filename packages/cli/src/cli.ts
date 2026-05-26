@@ -787,7 +787,7 @@ program
   .option('-f, --foreground', 'Run in the foreground (don\'t daemonize)')
   .option(
     '--relay-preferred <multiaddr>',
-    'Operator-preferred relay multiaddr to prioritise over the network relay set (repeatable; rc.9 PR-7). Multiple uses prepend in CLI-declaration order. See docs/messenger-operator.md for the relay-setup playbook.',
+    'Operator-preferred relay multiaddr to prioritise over the network relay set (repeatable; rc.9 PR-7). Multiple uses prepend in CLI-declaration order. See docs/operate/messenger.md for the relay-setup playbook.',
     (value: string, previous: string[] = []) => [...previous, value],
     [] as string[],
   )
@@ -2052,7 +2052,7 @@ assertionCmd
       if (Array.isArray(result.rootEntities) && result.rootEntities.length > 0) {
         console.log(`  Root entities:  ${result.rootEntities.join(', ')}`);
       }
-      console.log(`  Next:           dkg shared-memory publish ${opts.contextGraph}${opts.subGraphName ? ` --sub-graph-name ${opts.subGraphName}` : ''}`);
+      console.log(`  Next:           dkg shared-memory publish ${opts.contextGraph} --name ${name}${opts.subGraphName ? ` --sub-graph-name ${opts.subGraphName}` : ''}`);
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);

@@ -1,3 +1,10 @@
+---
+status: current
+version: v10
+audience: human+agent
+doc_type: runbook
+---
+
 # Runbook — Manual host-mode subscribe (`POST /api/shared-memory/host-mode/subscribe`)
 
 **Scope.** Operator playbook for the manual / fourth-resort path that asks
@@ -224,6 +231,3 @@ blocklist.
   automatic paths this runbook supplements.
 - `scripts/devnet-test-rfc38-late-joiner.sh` SCENARIO D — the
   end-to-end happy path this endpoint participates in.
-- `docs/RFC38_LU6_TWO_LAPTOP_TESTNET_RUNBOOK.md` — testnet
-  validation runbook that calls this endpoint as one of its
-  validation steps.

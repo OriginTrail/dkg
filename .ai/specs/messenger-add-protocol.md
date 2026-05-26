@@ -8,8 +8,8 @@
 > (chat + skill pilot migration).
 
 This is the recipe. Architecture rationale lives in
-[`messenger.md`](./messenger.md); per-operator surfaces live in
-[`messenger-operator.md`](./messenger-operator.md). When in doubt,
+[`docs/architecture/universal-messenger.md`](../../docs/architecture/universal-messenger.md); per-operator surfaces live in
+[`docs/operate/messenger.md`](../../docs/operate/messenger.md). When in doubt,
 follow what the chat migration did — it's the worked example.
 
 ## The pitch
@@ -62,7 +62,7 @@ export const PROTOCOL_FOO = '/dkg/10.0.1/foo';
 
 The prefix bump is the version contract. Two daemons on different
 prefixes don't talk on the migrated protocol until both reach
-rc.9 — see [`messenger.md` "Wire format"](./messenger.md#wire-format)
+rc.9 — see [`docs/architecture/universal-messenger.md` "Wire format"](../../docs/architecture/universal-messenger.md#wire-format)
 for why we chose a hard cutover over a negotiation layer.
 
 ### 2. Migrate the sender
@@ -168,7 +168,7 @@ you. New protocols don't need to touch the lifecycle plumbing.
 
 ### 5. Update the per-protocol coverage table
 
-Add a row to the table in [`messenger.md` § "Per-protocol coverage"](./messenger.md#per-protocol-coverage):
+Add a row to the table in [`docs/architecture/universal-messenger.md` § "Per-protocol coverage"](../../docs/architecture/universal-messenger.md#per-protocol-coverage):
 
 ```md
 | `/dkg/10.0.1/foo` | PR-### | 1 (or 2 if parallelPaths makes sense) | One-line note about migration risks. |
@@ -248,9 +248,9 @@ Files touched (search the PR for the actual diff):
   rewritten to the V13 substrate-owned contract (duplicate
   `(peer, direction, messageId)` inserts now persist as separate
   rows because dedup happens upstream).
-- `docs/messenger.md` — "Per-protocol coverage" row added /
+- `docs/architecture/universal-messenger.md` — "Per-protocol coverage" row added /
   refined.
-- This file (`docs/messenger-add-protocol.md`) — net-new.
+- This file (`.ai/specs/messenger-add-protocol.md`) — net-new.
 - `CHANGELOG.md` — entry under `v10.0.0-rc.9` noting the in-flight
   queue behaviour during operator upgrade (no message loss; in-flight
   rc.8 messages drain via legacy code paths still resident in rc.8

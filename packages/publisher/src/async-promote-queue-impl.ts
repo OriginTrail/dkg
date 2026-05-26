@@ -13,8 +13,8 @@
  *    `commitMarker.swmInserted` flags plus active-job conflict checks,
  *    not via on-chain lookups.
  *
- * See `docs/specs/SPEC_ASYNC_PROMOTE_QUEUE.md` (RFC) and
- * `docs/specs/SPEC_ASYNC_PROMOTE_QUEUE_IMPLEMENTATION_PLAN.md` (plan).
+ * See `.ai/specs/SPEC_ASYNC_PROMOTE_QUEUE.md` (RFC) and
+ * `.ai/specs/SPEC_ASYNC_PROMOTE_QUEUE_IMPLEMENTATION_PLAN.md` (plan).
  */
 
 import type { TripleStore } from '@origintrail-official/dkg-storage';

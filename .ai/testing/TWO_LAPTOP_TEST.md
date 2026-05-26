@@ -13,7 +13,7 @@ third machine; it just calls each node's HTTP API.
 
 - Both laptops have **Node.js 22+** and **pnpm 10+**.
 - Both wallets are **already funded** on Base Sepolia (ETH + TRAC). If
-  not, see [Funding](../operate/funding.md).
+  not, see [Funding](../../docs/operate/funding.md).
 - You can reach each node's API from wherever you'll run the script
   (see [reachability](#reachability) below).
 

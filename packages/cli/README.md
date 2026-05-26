@@ -177,7 +177,7 @@ prioritise their own relays via `--relay-preferred` (CLI) or the
   peer key (`~/.dkg/key`); back it up if you want the same multiaddr after a
   VM rebuild.
 
-See [`docs/messenger-operator.md`](../../docs/messenger-operator.md) for the
+See [`docs/operate/messenger.md`](../../docs/operate/messenger.md) for the
 full operator-side guide (debugging stuck outbox entries, reading `/api/slo`
 once it lands in rc.9 PR-12).
 

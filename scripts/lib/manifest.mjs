@@ -2,7 +2,7 @@
  * Resumable-import manifest helpers.
  *
  * Implements the manifest pattern from
- * `docs/adr/0002-importer-chunking-contract.md` against the daemon's
+ * `.ai/adr/0002-importer-chunking-contract.md` against the daemon's
  * own assertion API (via `DkgClient` from `./dkg-daemon.mjs`).
  *
  * An "Import" is a logical bulk-write operation that splits itself into

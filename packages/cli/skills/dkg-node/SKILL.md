@@ -177,7 +177,7 @@ before promoting it to SWM (team) or through to VM (chain-anchored).
   Body: `{ "contextGraphId": "...", "subGraphName"?: "..." }`
 - `POST /api/assertion/{name}/promote` — promote assertion triples to SWM (synchronous; returns once SWM insert + gossip complete)
   Body: `{ "contextGraphId": "...", "entities"?: [...] | "all", "subGraphName"?: "..." }`
-- `POST /api/assertion/{name}/promote-async` — enqueue the same promote for an in-daemon worker to handle in the background. Returns `202 { jobId, state: "queued" }` immediately. Use this for bulk importers where waiting for the synchronous round-trip is the bottleneck (the Graphify import RFC `docs/specs/SPEC_ASYNC_PROMOTE_QUEUE.md` explains the motivation). See §8 "Async promote queue" for the inspection routes.
+- `POST /api/assertion/{name}/promote-async` — enqueue the same promote for an in-daemon worker to handle in the background. Returns `202 { jobId, state: "queued" }` immediately. Use this for bulk importers where waiting for the synchronous round-trip is the bottleneck (the Graphify import RFC `.ai/specs/SPEC_ASYNC_PROMOTE_QUEUE.md` explains the motivation). See §8 "Async promote queue" for the inspection routes.
 - `POST /api/assertion/{name}/discard` — drop the assertion graph
   Body: `{ "contextGraphId": "...", "subGraphName"?: "..." }`
 - `POST /api/assertion/{name}/import-file` — import a document (multipart/form-data) — see §7

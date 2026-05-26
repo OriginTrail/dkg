@@ -279,7 +279,7 @@ export class MessageHandler {
       // safe thing is to treat the send as delivered (because the
       // recipient definitely processed it, we just don't have the
       // ACK body to introspect). Documented in
-      // docs/messenger.md "RESPONSE_GONE handling".
+      // docs/architecture/universal-messenger.md "RESPONSE_GONE handling".
       const responseBytes = sendResult.response;
       const responseText = new TextDecoder().decode(responseBytes);
       if (responseText === RESPONSE_GONE_MARKER) {

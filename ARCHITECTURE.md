@@ -389,14 +389,12 @@ overview-led, task-routed, and architecture-backed. Public navigation should
 prefer product/workflow labels, including a visible top-level **For AI Agents**
 section, while preserving Diataxis-style page categories as metadata for
 generation and retrieval. Current V10 facts are concentrated in `README.md`,
-`packages/cli/skills/dkg-node/SKILL.md`, `docs/messenger.md`,
-`docs/messenger-operator.md`, `docs/messenger-add-protocol.md`,
-`docs/setup/SETUP_MCP.md`, `docs/setup/SETUP_HERMES.md`, recent ADRs, and
-package READMEs. Stale or release-specific material is still discoverable from
-primary paths, especially `docs/onboarding/*`, `docs/setup/JOIN_TESTNET.md`,
-`docs/setup/SETUP_OPENCLAW.md`, `docs/setup/SETUP_ELIZAOS.md`,
-`docs/setup/SETUP_CUSTOM.md`, `docs/setup/DEPLOY_BASE_SEPOLIA.md`, top-level
-`docs/SPEC_*` V9 files, and `docs/plans/*`. A clean agent-first architecture
+`packages/cli/skills/dkg-node/SKILL.md`,
+`docs/architecture/universal-messenger.md`, `docs/operate/messenger.md`,
+`docs/build/connect-mcp.md`, `docs/build/connect-hermes.md`, `.ai/adr/*`, and
+package READMEs. Stale or release-specific material is kept behind explicit
+boundaries in `docs/archive/v9/`, while codebase-only plans, RFCs, reports,
+tests, and runbooks live under `.ai/`. A clean agent-first architecture
 needs explicit status metadata, archive/exclusion boundaries, and generated
 agent context from the current corpus before any optional retrieval layer is
 introduced. Non-V10 docs should move under versioned archive paths such as

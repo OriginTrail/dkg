@@ -33,4 +33,3 @@ Operational contract:
 - Publish to Verified Memory only with explicit finality intent and available funds.
 
 Do not use archived docs as current context.
-

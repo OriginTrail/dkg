@@ -10,8 +10,8 @@
     "packages/**/coverage/**",
     "packages/**/deployments/**",
     "ccl_v0_1/**",
-    "docs/plans/**/*.mjs",
-    "docs/experiments/**"
+    ".ai/plans/**/*.mjs",
+    ".ai/experiments/**"
   ],
   "ignoreDependencies": [
     "@openzeppelin/contracts",

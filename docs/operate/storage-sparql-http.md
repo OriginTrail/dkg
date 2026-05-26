@@ -1,3 +1,10 @@
+---
+status: current
+version: v10
+audience: human+agent
+doc_type: how-to
+---
+
 # Using an external SPARQL store (Oxigraph server, etc.)
 
 The DKG node can use any **SPARQL 1.1 Protocol**–compliant store instead of the built-in in-memory store. That gives you:
