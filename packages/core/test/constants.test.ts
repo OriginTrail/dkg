@@ -7,6 +7,7 @@ import {
   contextGraphSessionsTopic,
   contextGraphPublishTopic,
   contextGraphWorkspaceTopic,
+  kcUal,
   validateContextGraphId,
   validateSubGraphName,
   validateAssertionName,
@@ -59,6 +60,73 @@ describe('context graph topic helpers (V10)', () => {
     expect(contextGraphPublishTopic('my-contextGraph')).toBe(contextGraphFinalizationTopic('my-contextGraph'));
     expect(contextGraphPublishTopic('')).toBe(contextGraphFinalizationTopic(''));
     expect(contextGraphPublishTopic('a/b')).toBe(contextGraphFinalizationTopic('a/b'));
+  });
+});
+
+describe('kcUal (OT-RFC-40 §5.2)', () => {
+  // The default-storage 3-segment form MUST be preserved bit-for-bit
+  // forever — every UAL ever minted under V10 (which defaults to
+  // empty storage tag) keeps resolving without any rewrite. These
+  // tests pin that contract.
+
+  it('produces the legacy 3-segment form when no storage tag is supplied', () => {
+    expect(kcUal('base:84532', '0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1', 12345n)).toBe(
+      'did:dkg:base:84532/0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1/12345',
+    );
+  });
+
+  it('produces the legacy 3-segment form when storage tag is the empty string', () => {
+    expect(kcUal('base:84532', '0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1', 12345n, '')).toBe(
+      'did:dkg:base:84532/0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1/12345',
+    );
+  });
+
+  it('produces the 4-segment tagged form when a non-empty storage tag is supplied', () => {
+    // V9 KAS today uses uriBase did:dkg:v9, so its UALs are 4-segment.
+    // This is the format precedent the RFC standardises for V11+.
+    expect(kcUal('base:84532', '0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1', 17n, 'v9')).toBe(
+      'did:dkg:v9/base:84532/0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1/17',
+    );
+  });
+
+  it('accepts a string localId (tentative-publish path uses t<publishOperationId>)', () => {
+    // Pre-confirmation, dkg-publisher.ts mints a synthetic ID of the
+    // form `t<sessionId>-<seq>`. The helper must not coerce or reject
+    // it — same shape goes into store.nq as the tentative subject
+    // prefix and gets rewritten to the chain-issued KAID once
+    // confirmation lands.
+    expect(
+      kcUal(
+        'base:84532',
+        '0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1',
+        'tabcd1234-5',
+      ),
+    ).toBe(
+      'did:dkg:base:84532/0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1/tabcd1234-5',
+    );
+  });
+
+  it('preserves EIP-55 checksum case in publisher addresses', () => {
+    // Same rationale as deriveCuratorDidFromCgId — comparison sites
+    // lowercase, but logs/errors stay legible if the original case is
+    // preserved on the wire.
+    expect(
+      kcUal(
+        'base:84532',
+        '0xd46E77003d74df9aAdF011A5115A72405b084a88',
+        1n,
+      ),
+    ).toBe('did:dkg:base:84532/0xd46E77003d74df9aAdF011A5115A72405b084a88/1');
+  });
+
+  it('does not interpolate or validate any field — caller responsibility', () => {
+    // Mirror of contextGraphDataUri's "we don't sanitize slashes"
+    // contract: the helper is dumb concatenation. Validation lives at
+    // upload paths (validateContextGraphId etc.). This test pins that
+    // the helper does not silently mangle inputs that the caller
+    // passes in deliberately.
+    expect(kcUal('chainId', 'pub', 0n)).toBe('did:dkg:chainId/pub/0');
+    expect(kcUal('chainId', 'pub', 0n, 'tag')).toBe('did:dkg:tag/chainId/pub/0');
   });
 });
 

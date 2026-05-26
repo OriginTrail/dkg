@@ -2,7 +2,7 @@ import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@origintrail-official/dkg-chain';
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
-import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphMetaUri, contextGraphAssertionUri, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, DKG_GOSSIP_MAX_MESSAGE_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad } from '@origintrail-official/dkg-core';
+import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphMetaUri, contextGraphAssertionUri, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, kcUal, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, DKG_GOSSIP_MAX_MESSAGE_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import type { Publisher, PublishOptions, PublishResult, KAManifestEntry, PhaseCallback, V10CoreNodeACK } from './publisher.js';
 import { autoPartition } from './auto-partition.js';
@@ -2072,7 +2072,7 @@ export class DKGPublisher implements Publisher {
     // confirmed states for this publish so the `dkg:Publication` subject
     // emitted in metadata stays the same after on-chain confirmation.
     const publishOperationId = `${this.sessionId}-${tentativeSeq}`;
-    let ual = `did:dkg:${this.chain.chainId}/${publisherAddress}/t${publishOperationId}`;
+    let ual = kcUal(this.chain.chainId, publisherAddress, `t${publishOperationId}`);
 
     // Resolve the on-chain attribution target from the per-call override
     // (computed above) or fall back to the daemon's persistent identity.
@@ -2459,7 +2459,10 @@ export class DKGPublisher implements Publisher {
         onChainResult.tokenAmount = tokenAmount;
 
         // V9 UAL: did:dkg:{chainId}/{publisherAddress}/{firstKAId}
-        ual = `did:dkg:${this.chain.chainId}/${onChainResult.publisherAddress}/${onChainResult.startKAId}`;
+        // String(...) preserves the historical template-literal behaviour
+        // around the typed-as-optional `startKAId` (in practice always
+        // defined post-publish; absent only on the update OnChainPublishResult).
+        ual = kcUal(this.chain.chainId, onChainResult.publisherAddress, String(onChainResult.startKAId));
 
         for (const km of kaMetadata) {
           km.kcUal = ual;
@@ -2739,9 +2742,12 @@ export class DKGPublisher implements Publisher {
     if (localOnlyUpdate) {
       this.log.warn(ctx, 'No chain configured — applying update locally and returning tentative result');
       await storeUpdatedQuads();
+      // String(...) preserves the historical template-literal behaviour
+      // around the typed-as-optional `publisherAddress` (the localOnlyUpdate
+      // branch at line ~2670 always populates it via localTentativePublisherAddress()).
       const result: PublishResult = {
         kcId,
-        ual: `did:dkg:${this.chain.chainId}/${publisherAddress}/${kcId}`,
+        ual: kcUal(this.chain.chainId, String(publisherAddress), kcId),
         merkleRoot: kcMerkleRoot,
         kaManifest: manifestEntries,
         status: 'tentative',
@@ -2817,7 +2823,7 @@ export class DKGPublisher implements Publisher {
             if (!rejectedPublisherAddress) throw v10Err;
             earlyReturn = {
               kcId,
-              ual: `did:dkg:${this.chain.chainId}/${rejectedPublisherAddress}/${kcId}`,
+              ual: kcUal(this.chain.chainId, rejectedPublisherAddress, kcId),
               merkleRoot: kcMerkleRoot,
               kaManifest: manifestEntries,
               status: 'failed',
@@ -2872,7 +2878,7 @@ export class DKGPublisher implements Publisher {
       onPhase?.('chain', 'end');
       return {
         kcId,
-        ual: `did:dkg:${this.chain.chainId}/${failedPublisherAddress}/${kcId}`,
+        ual: kcUal(this.chain.chainId, failedPublisherAddress, kcId),
         merkleRoot: kcMerkleRoot,
         kaManifest: manifestEntries,
         status: 'failed',
@@ -2904,7 +2910,7 @@ export class DKGPublisher implements Publisher {
       await storeUpdatedQuads();
       const result: PublishResult = {
         kcId,
-        ual: `did:dkg:${this.chain.chainId}/${tentativePublisherAddress}/${kcId}`,
+        ual: kcUal(this.chain.chainId, tentativePublisherAddress, kcId),
         merkleRoot: kcMerkleRoot,
         kaManifest: manifestEntries,
         status: 'tentative',
@@ -2918,7 +2924,7 @@ export class DKGPublisher implements Publisher {
 
     const result: PublishResult = {
       kcId,
-      ual: `did:dkg:${this.chain.chainId}/${effectivePublisherAddress}/${kcId}`,
+      ual: kcUal(this.chain.chainId, effectivePublisherAddress, kcId),
       merkleRoot: kcMerkleRoot,
       kaManifest: manifestEntries,
       status: 'confirmed',

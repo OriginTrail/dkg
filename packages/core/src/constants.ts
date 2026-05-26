@@ -153,6 +153,45 @@ export function networkPeersTopic(): string {
   return 'dkg/network/peers';
 }
 
+// ── V10 Knowledge Collection UALs ──────────────────────────────────────
+
+/**
+ * Build a Knowledge Collection UAL.
+ *
+ * Two equivalent shapes are valid (both produced by this helper depending
+ * on whether `storageTag` is supplied):
+ *
+ * - Default-storage / 3-segment form (legacy V10):
+ *   `did:dkg:{chainId}/{publisherAddress}/{localId}`
+ *
+ * - Storage-tagged / 4-segment form (V9 KAS today, V11+ in future):
+ *   `did:dkg:{chainId}/{storageTag}/{publisherAddress}/{localId}`
+ *
+ * The default-storage form is preserved bit-for-bit forever so every UAL
+ * ever minted under V10 keeps resolving without any rewrite. The tagged
+ * form is the one V9 already uses (`uriBase: "did:dkg:v9"`); see
+ * docs/RFC40_MULTI_STORAGE_KC_URI_SCHEME.md for the full scheme.
+ *
+ * `localId` accepts both `bigint` (the typical chain-issued counter) and
+ * `string` for two existing reasons:
+ *   1. Tentative UALs use a synthetic `t${publishOperationId}` string ID
+ *      until the chain confirms (see dkg-publisher.ts publish path).
+ *   2. The publish and update paths inside dkg-publisher.ts pass two
+ *      different ID kinds in this slot today — startKAId for publishes,
+ *      kcId for updates. That divergence pre-dates this helper and is
+ *      tracked as a separate cleanup; the helper preserves the existing
+ *      behaviour at every call site.
+ */
+export function kcUal(
+  chainId: string,
+  publisherAddress: string,
+  localId: bigint | string,
+  storageTag?: string,
+): string {
+  const tag = storageTag && storageTag.length > 0 ? `${storageTag}/` : '';
+  return `did:dkg:${tag}${chainId}/${publisherAddress}/${localId}`;
+}
+
 // ── V10 Named Graph URIs ───────────────────────────────────────────────
 
 export function contextGraphDataUri(contextGraphId: string, subGraphId?: string): string {
