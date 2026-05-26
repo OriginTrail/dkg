@@ -90,7 +90,7 @@ function shortPredicate(uri: string): string {
   return s.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/_/g, ' ');
 }
 
-function uriTail(uri: string): string {
+export function uriTail(uri: string): string {
   const hash = uri.lastIndexOf('#');
   const slash = uri.lastIndexOf('/');
   const colon = uri.lastIndexOf(':');

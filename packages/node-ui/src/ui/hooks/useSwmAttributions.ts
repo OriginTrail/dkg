@@ -96,9 +96,12 @@ export interface SwmAttributionsResult {
    * Raw, undeduplicated per-operation event list. One entry per SPARQL
    * binding so re-promotions (same agent promoting the same root again
    * with a different op id / timestamp) are preserved. Sorted by
-   * `publishedAt` ASC — chronological order matches the source query's
-   * ORDER BY clause. Used by the project activity feed to surface every
-   * promotion as its own row.
+   * `publishedAt` ASC. R2-Local-3 (PR #656) — the source query is now
+   * `ORDER BY DESC` + `LIMIT 5000` (Code5; keeps the newest 5000 ops
+   * within the cap), but the hook reverses client-side before exposing
+   * this array so the legend dedup's first-seen-wins semantics still
+   * pick the oldest promotion per `(root, agent)`. The activity-feed
+   * consumer re-sorts newest-first, so it's order-agnostic on input.
    */
   events: WorkspaceOperationEvent[];
   /** Stable colour + label per agent, for legends and per-URI tinting. */

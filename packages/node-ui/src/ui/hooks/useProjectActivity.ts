@@ -36,7 +36,7 @@
  *                    entity-list pass below).
  */
 import { useMemo } from 'react';
-import { canonicalEntityUri, type MemoryEntity, type TrustLevel } from './useMemoryEntities.js';
+import { canonicalEntityUri, uriTail, type MemoryEntity, type TrustLevel } from './useMemoryEntities.js';
 
 // Priority order — first predicate that has a parseable value wins.
 const TIMESTAMP_PREDICATES = [
@@ -470,10 +470,13 @@ export function buildPromotionEvents(
 function syntheticEntityStub(uri: string): MemoryEntity {
   // URI-tail label so the row reads ("promoted <tail>") even when
   // the underlying entity hasn't loaded into `entitiesByUri` yet.
-  const tail = uri.split(/[#/]/).filter(Boolean).pop() ?? uri;
+  // R2-Local-2 (PR #656) — reuse `uriTail` from `useMemoryEntities`
+  // so stub labels match the rest of the surface; the previous
+  // `[#/]` split collapsed canonical `urn:dkg:thing:...` URIs to
+  // the entire URN.
   return {
     uri,
-    label: tail,
+    label: uriTail(uri),
     types: [],
     trustLevel: 'shared',
     layers: new Set(['shared']),

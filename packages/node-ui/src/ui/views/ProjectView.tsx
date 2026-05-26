@@ -17,7 +17,7 @@ import { ActivityFeed } from '../components/ActivityFeed.js';
 import { SubGraphBar } from '../components/SubGraphBar.js';
 import { CONTEXT_GRAPH_PRIMER_TAB } from '../lib/contextGraphPrimer.js';
 import { useTabsStore } from '../stores/tabs.js';
-import type { LayerView, LayerContentTab, SubGraphTab } from './project/helpers.js';
+import { shouldFetchSwmAttribution, type LayerView, type LayerContentTab, type SubGraphTab } from './project/helpers.js';
 import {
   ProjectHeaderStrip,
   LayerSwitcher,
@@ -247,8 +247,16 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   // (a) the Overview activity feed and (b) the SWM-tab layer graph.
   // The hook already short-circuits cleanly on `undefined` (state
   // resets, no fetch).
-  const swmAttributionNeeded =
-    !activeSubGraph && !selectedUri && (activeLayer === 'overview' || activeLayer === 'swm');
+  //
+  // R2-Local-1 (PR #656) — do NOT gate on `selectedUri`. Opening
+  // an entity detail overlays the same view; toggling `undefined`
+  // here would clear the hook's cached events, then on detail-close
+  // re-fetch the 5000-row SPARQL — during the re-fetch the Code7
+  // discriminator (`resultContextGraphId !== contextGraphId`) would
+  // suppress `overviewSwmEvents`, making promotion rows visibly
+  // flicker out on every detail round-trip. Sub-graph navigation is
+  // a real route change so we still gate on `!activeSubGraph`.
+  const swmAttributionNeeded = shouldFetchSwmAttribution({ activeLayer, activeSubGraph });
   const swmAttributionsResult = useSwmAttributions(swmAttributionNeeded ? contextGraphId : undefined);
   // Codex Code7 (PR #656) — the hook returns its previous-graph
   // result during the transition window between context-graph switch

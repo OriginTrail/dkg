@@ -14,6 +14,25 @@ import { memoryGraphLabels } from '../../lib/memoryLabels.js';
 
 export type LayerView = 'overview' | 'graph-overview' | 'query' | 'wm' | 'swm' | 'vm';
 export type LayerContentTab = 'items' | 'assertions' | 'graph' | 'docs';
+
+/**
+ * Whether the SWM attribution SPARQL is worth firing for the current
+ * `ProjectView` route state. True only on views that actually consume
+ * the result — the Overview activity feed and the SWM-layer graph.
+ *
+ * Notably *not* gated on `selectedUri`: opening an entity detail
+ * overlays the same view, and toggling the hook to `undefined` on
+ * detail-open would clear its cached events and force a re-fetch on
+ * detail-close, making promotion rows on the Overview visibly flicker
+ * out during every detail round-trip (R2-Local-1, PR #656).
+ */
+export function shouldFetchSwmAttribution(args: {
+  activeLayer: LayerView;
+  activeSubGraph: string | null;
+}): boolean {
+  if (args.activeSubGraph) return false;
+  return args.activeLayer === 'overview' || args.activeLayer === 'swm';
+}
 export const TRUST_COLORS: Record<TrustLevel, string> = {
   verified: '#22c55e',
   shared: '#f59e0b',
