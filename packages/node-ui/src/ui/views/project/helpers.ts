@@ -17,21 +17,32 @@ export type LayerContentTab = 'items' | 'assertions' | 'graph' | 'docs';
 
 /**
  * Whether the SWM attribution SPARQL is worth firing for the current
- * `ProjectView` route state. True only on views that actually consume
- * the result — the Overview activity feed and the SWM-layer graph.
+ * `ProjectView` route state. True only when the SWM-layer graph (the
+ * sole remaining consumer) is the active view.
+ *
+ * PR #694 review fix — the Overview was previously included here too
+ * because the activity feed read `useSwmAttributions(...).events`
+ * (the WorkspaceOperation source). After the lifecycle-source
+ * switch in task #23 (`useAssertionLifecycleEvents`) the Overview
+ * no longer consumes this stream; firing the 5k-row SWM SPARQL on
+ * every Overview render was pure waste. Trade-off: the SWM tab now
+ * incurs the cold-start fetch on click instead of being pre-warmed
+ * by Overview navigation. Bounded by the 10s query timeout and the
+ * tab has its own loading state, so the cold-start window is
+ * acceptable.
  *
  * Notably *not* gated on `selectedUri`: opening an entity detail
  * overlays the same view, and toggling the hook to `undefined` on
  * detail-open would clear its cached events and force a re-fetch on
- * detail-close, making promotion rows on the Overview visibly flicker
- * out during every detail round-trip (R2-Local-1, PR #656).
+ * detail-close, making the SWM graph's agent tints flicker out
+ * during every detail round-trip (R2-Local-1, PR #656).
  */
 export function shouldFetchSwmAttribution(args: {
   activeLayer: LayerView;
   activeSubGraph: string | null;
 }): boolean {
   if (args.activeSubGraph) return false;
-  return args.activeLayer === 'overview' || args.activeLayer === 'swm';
+  return args.activeLayer === 'swm';
 }
 export const TRUST_COLORS: Record<TrustLevel, string> = {
   verified: '#22c55e',

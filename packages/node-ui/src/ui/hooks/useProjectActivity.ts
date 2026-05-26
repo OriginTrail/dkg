@@ -616,7 +616,18 @@ export function useProjectActivityEvents(
     // PR/etc.) — promotion rows have no `kindUri` so they're dropped
     // wholesale, matching how the same filter drops `'added'` rows.
     if (opts.typeIri) return base;
-    const useLifecycle = lifecycleEvents && lifecycleEvents.length > 0;
+    // PR #694 review fix — presence-keyed, not size-keyed. The
+    // `lifecycleEvents` prop is the contract: when supplied (even
+    // as an empty array because the project has no AssertionCreated
+    // / AssertionPromoted records yet) it is the authoritative
+    // source for `'added'` + `'promoted'` rows, so the joiner
+    // suppresses the legacy `dcterms:created`-derived rows from
+    // `base` and emits zero promotion rows. The previous
+    // size-keyed test silently fell back to the legacy path when
+    // a project had no lifecycle events yet — changing the
+    // Overview shape mid-project as soon as the first assertion
+    // landed.
+    const useLifecycle = lifecycleEvents != null;
     if (!useLifecycle && (!swmEvents || swmEvents.length === 0)) return base;
 
     // When the lifecycle stream is supplied it is the authoritative

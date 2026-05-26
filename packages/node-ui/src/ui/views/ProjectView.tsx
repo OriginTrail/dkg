@@ -234,48 +234,20 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   );
 
   const rawMemory = useMemoryEntities(contextGraphId);
-  // N6 part 2 — feed promotion (WM→SWM) events into the Overview
-  // ActivityFeed. `useSwmAttributions` is the existing source for the
-  // SWM graph's agent-tint legend; we re-use its `attributions` map
-  // here rather than re-querying `_shared_memory_meta`. Hook is
-  // already in production for the SWM Graph subtab so it's cached.
-  //
-  // Local-3 (PR #656) — gate the hoist on a view that actually
-  // consumes the result. Pre-fix the page-level call fired
-  // unconditionally for every active view (graph-overview, query,
-  // WM/VM detail, sub-graph pages — none of which read it), running
-  // a 5000-row SPARQL for nothing. Active consumers today are
-  // (a) the Overview activity feed and (b) the SWM-tab layer graph.
-  // The hook already short-circuits cleanly on `undefined` (state
-  // resets, no fetch).
-  //
-  // R2-Local-1 (PR #656) — do NOT gate on `selectedUri`. Opening
-  // an entity detail overlays the same view; toggling `undefined`
-  // here would clear the hook's cached events, then on detail-close
-  // re-fetch the 5000-row SPARQL — during the re-fetch the Code7
-  // discriminator (`resultContextGraphId !== contextGraphId`) would
-  // suppress `overviewSwmEvents`, making promotion rows visibly
-  // flicker out on every detail round-trip. Sub-graph navigation is
-  // a real route change so we still gate on `!activeSubGraph`.
+  // SWM attribution drives the SWM graph's agent-tint legend (its
+  // sole remaining consumer). PR #694 review — the Overview no
+  // longer reads this stream (lifecycle source replaced it), so the
+  // gate is `'swm'`-only now (see `shouldFetchSwmAttribution`); the
+  // 5k-row SPARQL no longer fires on Overview renders.
   const swmAttributionNeeded = shouldFetchSwmAttribution({ activeLayer, activeSubGraph });
   const swmAttributionsResult = useSwmAttributions(swmAttributionNeeded ? contextGraphId : undefined);
-  // Codex Code7 (PR #656) — the hook returns its previous-graph
-  // result during the transition window between context-graph switch
-  // and the new SPARQL resolving. Gate `events` on the result being
-  // for the *current* graph so the Overview doesn't briefly show
-  // promotion rows from the previous project. The SWM graph itself
-  // tolerates the momentary stale tint (it re-renders cleanly once
-  // the new attribution lands), so we don't gate there.
-  const overviewSwmEvents = swmAttributionsResult.resultContextGraphId === contextGraphId
-    ? swmAttributionsResult.events
-    : undefined;
 
   // N6 polish (task #23) — bundle-keyed lifecycle events feed the
   // Overview activity feed. Gated on the Overview tab only (the SWM
   // graph doesn't consume this stream; SWM attribution coloring
   // stays on `useSwmAttributions` which is the legend's source of
-  // truth). Same `resultContextGraphId` guard as the SWM stream so
-  // a project switch doesn't briefly show stale rows.
+  // truth). Same `resultContextGraphId` discriminator as the SWM
+  // stream so a project switch doesn't briefly show stale rows.
   const lifecycleEventsResult = useAssertionLifecycleEvents(
     !activeSubGraph && activeLayer === 'overview' ? contextGraphId : undefined,
   );
