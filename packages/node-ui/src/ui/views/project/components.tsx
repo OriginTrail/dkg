@@ -2795,7 +2795,7 @@ export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }:
                   className="v10-item-count v10-item-subgraph"
                   title={`In sub-graph: ${a.subGraph}`}
                 >
-                  🗂 {truncateMiddle(a.subGraph, 18)}
+                  › {truncateMiddle(a.subGraph, 18)}
                 </span>
               )}
             </div>
