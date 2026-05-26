@@ -88,12 +88,16 @@ export {
 export {
   type StorageACKMsg,
   type StorageACKDeclineCode,
+  type SubscriptionSource,
   STORAGE_ACK_DECLINE_CODES,
   TRANSIENT_STORAGE_ACK_DECLINE_CODES,
+  SUBSCRIPTION_SOURCES,
+  SUBSCRIPTION_SOURCE_VALUES,
   encodeStorageACK,
   decodeStorageACK,
   isStorageACKDecline,
   isTransientStorageACKDeclineCode,
+  isSubscriptionSource,
 } from './storage-ack.js';
 
 export {

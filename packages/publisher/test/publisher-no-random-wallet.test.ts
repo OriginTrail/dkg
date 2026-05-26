@@ -38,6 +38,7 @@ import {
 } from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
 import { wrapPublisherForTest, mockSealCtx } from './_helpers/seal.js';
+import { mockChainStubACKProvider } from './_helpers/acks.js';
 
 // Phase C (commit `d353c6a5`) made `DKGPublisher.publish` reject on-chain
 // publishes that arrive without a `precomputedAttestation`. The mock-chain
@@ -62,6 +63,7 @@ async function sealForWallet(
   return wrapPublisherForTest(publisher, {
     author: wallet,
     ctx: mockSealCtx({ chainId, kav10Address }),
+    v10ACKProvider: mockChainStubACKProvider(),
   });
 }
 
@@ -462,14 +464,15 @@ describe('DKGPublisher: no random publisher wallet without explicit key', () => 
     // result depends on the chain adapter — here `ReservingPublishChain`
     // accepts any publisher and returns a confirmed result.
     const keypair = await generateEd25519Keypair();
-    const chain = new ReservingPublishChain(new ethers.Wallet(TEST_KEY));
-    const publisher = new DKGPublisher({
+    const wallet = new ethers.Wallet(TEST_KEY);
+    const chain = new ReservingPublishChain(wallet);
+    const publisher = await sealForWallet(new DKGPublisher({
       store: new OxigraphStore(),
       chain,
       eventBus: new TypedEventBus(),
       keypair,
       publisherNodeIdentityId: 0n,
-    });
+    }), wallet, chain);
 
     const result = await publisher.publish({
       contextGraphId: '1',
@@ -482,10 +485,12 @@ describe('DKGPublisher: no random publisher wallet without explicit key', () => 
     });
 
     // The reservation is the load-bearing assertion — it proves the gate
-    // dropped and the publisher resolved a signer. The on-chain TX itself
-    // may still fall back to tentative in single-node mode (no v10ACKProvider
-    // + no self-ACK without identity → no ACKs → tx skipped), which is fine
-    // for this test: the gate change is what we're pinning.
+    // dropped and the publisher resolved a signer. RC11 / PR3: pass a
+    // mock-chain stub V10ACKProvider so the publisher's
+    // "V10 ACKs required for on-chain publish" guard (which used to
+    // be silenced by the deleted self-ACK fallback) is satisfied
+    // structurally; the mock chain still doesn't verify ACK
+    // cryptography. The chain returns confirmed in either case.
     expect(['confirmed', 'tentative']).toContain(result.status);
     expect(chain.reservations).toBeGreaterThanOrEqual(1);
   });
@@ -791,42 +796,16 @@ describe('DKGPublisher: no random publisher wallet without explicit key', () => 
     expect(chain.capturedPublisherAddress?.toLowerCase()).toBe(wallet.address.toLowerCase());
   });
 
-  it('continues tentatively when adapter signer fails during self-ACK', async () => {
-    const keypair = await generateEd25519Keypair();
-    const store = new OxigraphStore();
-    const wallet = new ethers.Wallet(TEST_KEY);
-    const chain = new RejectingAdapterSignerChain(wallet);
-    const publisher = new DKGPublisher({
-      store,
-      chain,
-      eventBus: new TypedEventBus(),
-      keypair,
-      publisherNodeIdentityId: 1n,
-    });
-
-    const result = await publisher.publish({
-      contextGraphId: '1',
-      quads: [{
-        subject: 'urn:test:adapter-self-ack-failure',
-        predicate: 'http://schema.org/name',
-        object: '"AdapterSelfAckFailure"',
-        graph: 'did:dkg:context-graph:1',
-      }],
-    });
-
-    expect(result.status).toBe('tentative');
-    expect(chain.capturedPublisherAddress).toBeUndefined();
-
-    const stored = await store.query(`
-      SELECT ?p ?o WHERE {
-        GRAPH <did:dkg:context-graph:1> {
-          <urn:test:adapter-self-ack-failure> ?p ?o .
-        }
-      }
-    `);
-    expect(stored.type).toBe('bindings');
-    expect(stored.bindings).toHaveLength(1);
-  });
+  // RC11 / PR1 deleted the self-signed ACK fallback; "self-ACK" no
+  // longer exists as a publisher codepath, and the
+  // `RejectingAdapterSignerChain` regression it pinned (an adapter
+  // that fails to sign during self-ACK) is therefore unreachable.
+  // The honest replacement is the throw-on-no-ACKs assertion in
+  // `signature-collection.test.ts` ("publish() throws when no
+  // v10ACKProvider is wired"), so deleting this test does not lose
+  // coverage. Skipped (not removed) to preserve the historical
+  // context for anyone bisecting this file.
+  it.skip('continues tentatively when adapter signer fails during self-ACK', async () => {});
 
   it('binds context-graph-aware adapter signer resolution to the V10 tx publisher address', async () => {
     const keypair = await generateEd25519Keypair();

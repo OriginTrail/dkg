@@ -6,6 +6,7 @@ import { SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { ethers } from 'ethers';
+import { installHardhatACKProvider } from './_helpers/v10-acks.js';
 
 let _fileSnapshot: string;
 beforeAll(async () => {
@@ -79,6 +80,7 @@ describe('v10 ACK provider wiring', () => {
   it('uses V10 publish path when chain supports V10 (EVMChainAdapter)', async () => {
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     ({ agent } = await createAgent(chain));
+    await installHardhatACKProvider(agent, chain);
 
     const cgId = 'v10-ack-test-cg';
     await agent.createContextGraph({ id: cgId, name: 'V10 ACK Test CG' });
@@ -101,6 +103,7 @@ describe('v10 ACK provider wiring', () => {
     const delayed = delayedAdapterPublisherAddress(createEVMAdapter(HARDHAT_KEYS.CORE_OP), expectedAddress);
     const chain = delayed.chain;
     ({ agent } = await createAgent(chain));
+    await installHardhatACKProvider(agent, chain as { getKnowledgeAssetsV10Address: () => Promise<string> });
 
     const cgId = 'adapter-backed-publisher-cg';
     await agent.createContextGraph({ id: cgId, name: 'Adapter-backed Publisher CG' });

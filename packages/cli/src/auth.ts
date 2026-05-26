@@ -730,6 +730,7 @@ const PUBLIC_GET_PATHS = new Set([
   '/api/status',
   '/api/chain/rpc-health',
   '/.well-known/skill.md',
+  '/.well-known/skill-importer.md',
   // Exact match — `/ui-custom` etc. would otherwise bypass auth via a loose prefix.
   '/ui',
 ]);
@@ -747,6 +748,7 @@ const PUBLIC_HEAD_PATHS = new Set([
   '/api/status',
   '/api/chain/rpc-health',
   '/.well-known/skill.md',
+  '/.well-known/skill-importer.md',
 ]);
 
 function isPublicPath(method: string, pathname: string): boolean {

@@ -65,6 +65,7 @@ describe('E2E: DKGAgent with real blockchain', () => {
   it('creates agents with real EVMChainAdapter (no mocks)', async () => {
     const agentA = await DKGAgent.create({
       name: 'ChainNodeA',
+      nodeRole: 'core',
       listenPort: 0,
       skills: [],
       chainConfig: makeChainConfig(HARDHAT_KEYS.EXTRA1, HARDHAT_KEYS.EXTRA3),
@@ -73,6 +74,7 @@ describe('E2E: DKGAgent with real blockchain', () => {
 
     const agentB = await DKGAgent.create({
       name: 'ChainNodeB',
+      nodeRole: 'core',
       listenPort: 0,
       skills: [],
       chainConfig: makeChainConfig(HARDHAT_KEYS.EXTRA2, HARDHAT_KEYS.PUBLISHER2),

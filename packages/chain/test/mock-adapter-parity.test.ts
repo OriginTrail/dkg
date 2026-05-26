@@ -127,6 +127,11 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   // The seven V10 Publishing Conviction NFT methods (issue #519 /
   // TB-0002) are now mirrored on MockChainAdapter (in-memory account
   // map + agent reverse map + owner gating) — no longer exempt.
+  // PR3 (honest-ack cleanup): publish-preflight cache invalidator is
+  // EVM-only. The mock has no chainId/KAV10/minRequiredSignatures
+  // round-trips to cache in the first place; a no-op shim would just
+  // pad parity for no behavioural reason.
+  'invalidatePublishPreflightCache',
 ]);
 
 const NO_CHAIN_EXEMPT_FROM_EVM = new Set<string>([

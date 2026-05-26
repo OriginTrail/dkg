@@ -40,6 +40,28 @@ export interface AgentAttribution {
   subGraph?: string;
 }
 
+/**
+ * Raw `dkg:WorkspaceOperation` row from `_shared_memory_meta`, *not*
+ * deduplicated by `(root, agent)`. One entry per SPARQL binding —
+ * preserves re-promotions (same agent promoting the same root twice
+ * with different op ids / timestamps) and is the substrate the activity
+ * feed needs for an accurate timeline.
+ *
+ * Codex Code2 (PR #656) caught the bug: the deduped `attributions` map
+ * is fine for the SWM-graph legend (where collapsing repeated
+ * promotions to a single agent per root is what you want) but wrong
+ * for the activity feed, where each promotion should be its own event.
+ * We compute both shapes from the same SPARQL response so callers pick
+ * the shape that matches their semantics.
+ */
+export interface WorkspaceOperationEvent {
+  opUri: string;
+  rootUri: string;
+  agent: string;
+  publishedAt: string;
+  subGraph?: string;
+}
+
 export interface AgentPaletteEntry {
   agent: string;
   color: string;
@@ -49,9 +71,39 @@ export interface AgentPaletteEntry {
 }
 
 export interface SwmAttributionsResult {
+  /**
+   * Context graph id whose SPARQL response produced the rest of the
+   * fields in this result. `undefined` until the first query for the
+   * current `contextGraphId` resolves; lags behind the caller's
+   * `contextGraphId` during a project switch — the in-flight result is
+   * still for the *previous* graph until the new query lands.
+   *
+   * Codex Code7 (PR #656) — exposing this lets page-level consumers
+   * (e.g. `ProjectView` feeding the Overview activity feed) gate
+   * downstream rendering on `resultContextGraphId === contextGraphId`
+   * so users don't briefly see promotion rows from the previous
+   * project after switching context graphs. The SWM graph internally
+   * doesn't gate (momentary stale tints are less misleading than
+   * stale activity-feed rows, and it re-renders cleanly once the new
+   * attribution lands).
+   */
+  resultContextGraphId: string | undefined;
   /** Attribution map keyed by entity URI. Callers pass these into the
-   *  graph engine via a derived `nodeColors` record. */
+   *  graph engine via a derived `nodeColors` record. Deduplicated by
+   *  `(root, agent)` — at most one entry per pair. */
   attributions: Map<string, AgentAttribution[]>;
+  /**
+   * Raw, undeduplicated per-operation event list. One entry per SPARQL
+   * binding so re-promotions (same agent promoting the same root again
+   * with a different op id / timestamp) are preserved. Sorted by
+   * `publishedAt` ASC. R2-Local-3 (PR #656) — the source query is now
+   * `ORDER BY DESC` + `LIMIT 5000` (Code5; keeps the newest 5000 ops
+   * within the cap), but the hook reverses client-side before exposing
+   * this array so the legend dedup's first-seen-wins semantics still
+   * pick the oldest promotion per `(root, agent)`. The activity-feed
+   * consumer re-sorts newest-first, so it's order-agnostic on input.
+   */
+  events: WorkspaceOperationEvent[];
   /** Stable colour + label per agent, for legends and per-URI tinting. */
   palette: AgentPaletteEntry[];
   /** Per-URI override map ready to drop into RdfGraph's `style.nodeColors`. */
@@ -65,9 +117,16 @@ export interface SwmAttributionsResult {
 
 /** Deliberately picked for contrast against the existing class palette
  *  (Package purple, Function amber, Decision red, Task cyan, etc.) — these
- *  sit in the gaps so agent identity reads as its own axis. */
+ *  sit in the gaps so agent identity reads as its own axis.
+ *
+ *  Also picked so no slot lives in the SWM-family amber range. The
+ *  SWM layer default is `#f59e0b` (`LAYER_CONFIG.swm.color`) and any
+ *  agent slot in the same hue is visually indistinguishable from a
+ *  non-attributed node — the "agent palette ≠ SWM amber" invariant.
+ *  Orange `#f97316` previously occupied slot 0 and broke this in
+ *  single-agent dev setups; replaced with indigo `#6366f1`. */
 const AGENT_PALETTE = [
-  '#f97316', // orange
+  '#6366f1', // indigo  (replaced orange — was too close to SWM amber)
   '#14b8a6', // teal
   '#f43f5e', // rose
   '#facc15', // yellow
@@ -120,7 +179,7 @@ function subGraphFromMetaGraphUri(gUri: string, cgId: string): string | undefine
   return seg;
 }
 
-function buildAttributionsQuery(cgId: string): string {
+export function buildAttributionsQuery(cgId: string): string {
   const cgUri = `did:dkg:context-graph:${cgId}`;
   return `PREFIX dkg: <http://dkg.io/ontology/>
 PREFIX prov: <http://www.w3.org/ns/prov#>
@@ -135,7 +194,7 @@ SELECT ?op ?root ?agent ?publishedAt ?g WHERE {
     STRSTARTS(STR(?g), "${cgUri}") &&
     CONTAINS(STR(?g), "_shared_memory_meta")
   )
-} ORDER BY ?publishedAt LIMIT 5000`;
+} ORDER BY DESC(?publishedAt) LIMIT 5000`;
 }
 
 /** Stable hash → palette index so a given agent always keeps the same
@@ -150,6 +209,7 @@ function paletteIndex(agent: string): number {
 
 export function useSwmAttributions(contextGraphId: string | undefined): SwmAttributionsResult {
   const [attributions, setAttributions] = useState<Map<string, AgentAttribution[]>>(new Map());
+  const [events, setEvents] = useState<WorkspaceOperationEvent[]>([]);
   const [palette, setPalette] = useState<AgentPaletteEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -160,6 +220,7 @@ export function useSwmAttributions(contextGraphId: string | undefined): SwmAttri
     if (!contextGraphId) {
       versionRef.current += 1;
       setAttributions(new Map());
+      setEvents([]);
       setPalette([]);
       setLoading(false);
       setResolvedContextGraphId(undefined);
@@ -198,10 +259,23 @@ export function useSwmAttributions(contextGraphId: string | undefined): SwmAttri
           return res.json();
         })();
         const data = await Promise.race([request, timeout]);
-        const rows: any[] = data?.result?.bindings ?? [];
+        // Codex Code5 (PR #656) — the SPARQL query orders DESC and
+        // caps at 5000 so a project with more than 5000 promotion ops
+        // returns the *newest* 5000 (the activity feed needs recent
+        // events). The downstream legend dedup is order-sensitive
+        // (first-seen wins), so we reverse here to ASC before folding
+        // — keeps the legend semantics (oldest promotion wins per
+        // (root, agent)) identical to the pre-DESC behaviour for
+        // projects with <5000 ops, and stays meaningful for larger ones.
+        const rawRows: any[] = data?.result?.bindings ?? [];
+        const rows = rawRows.slice().reverse();
 
         const attrMap = new Map<string, AgentAttribution[]>();
         const agentTotals = new Map<string, Set<string>>();
+        // Raw per-op event log (no dedup) — separate from `attrMap`
+        // because the activity feed needs every promotion as its own
+        // row, while the legend wants one entry per `(root, agent)`.
+        const eventLog: WorkspaceOperationEvent[] = [];
 
         for (const row of rows) {
           const op = bv(row.op);
@@ -212,6 +286,10 @@ export function useSwmAttributions(contextGraphId: string | undefined): SwmAttri
           if (!op || !root || !agentRaw || !ts) continue;
           const agent = canonicaliseAgent(agentRaw);
           const subGraph = g ? subGraphFromMetaGraphUri(g, contextGraphId) : undefined;
+
+          // Raw event always recorded — preserves re-promotions
+          // (same `(root, agent)` with a different `opUri` or `ts`).
+          eventLog.push({ opUri: op, rootUri: root, agent, publishedAt: ts, subGraph });
 
           const entry: AgentAttribution = { agent, opUri: op, publishedAt: ts, subGraph };
           const list = attrMap.get(root);
@@ -240,12 +318,14 @@ export function useSwmAttributions(contextGraphId: string | undefined): SwmAttri
 
         if (!isCurrent()) return;
         setAttributions(attrMap);
+        setEvents(eventLog);
         setPalette(paletteEntries);
         setResolvedContextGraphId(contextGraphId);
       } catch (err: any) {
         if (!isCurrent()) return;
         setError(err?.message ?? 'Failed to load SWM attributions');
         setAttributions(new Map());
+        setEvents([]);
         setPalette([]);
         setResolvedContextGraphId(contextGraphId);
       } finally {
@@ -284,5 +364,14 @@ export function useSwmAttributions(contextGraphId: string | undefined): SwmAttri
 
   const attributionPending = Boolean(contextGraphId && (loading || resolvedContextGraphId !== contextGraphId));
 
-  return { attributions, palette, nodeColors, conflicts, loading: attributionPending, error };
+  return {
+    resultContextGraphId: resolvedContextGraphId,
+    attributions,
+    events,
+    palette,
+    nodeColors,
+    conflicts,
+    loading: attributionPending,
+    error,
+  };
 }

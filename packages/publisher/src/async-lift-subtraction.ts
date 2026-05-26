@@ -1,6 +1,6 @@
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { assertSafeRdfTerm } from '@origintrail-official/dkg-core';
-import { GraphManager, decryptPrivateLiteral } from '@origintrail-official/dkg-storage';
+import { GraphManager } from '@origintrail-official/dkg-storage';
 import type { LiftResolvedPublishSlice } from './async-lift-publish-options.js';
 import type { LiftJobValidationMetadata, LiftRequest } from './lift-job.js';
 
@@ -18,21 +18,6 @@ export async function subtractFinalizedExactQuads(params: {
   request: LiftRequest;
   validation: LiftJobValidationMetadata;
   resolved: LiftResolvedPublishSlice;
-  /**
-   * Explicit encryption key used when sealing private literals (same
-   * value the caller's `PrivateContentStore` was constructed with).
-   *
-   * without
-   * this, the subtraction called `decryptPrivateLiteral` with no
-   * override and resolved ONLY the env/default key. A deployment that
-   * uses a non-default key therefore never matched any plaintext input
-   * against the on-disk envelope — every private quad reappeared as
-   * "unseen" and got republished. Callers (DKGPublisher) thread the
-   * same key they passed to `PrivateContentStore` here. `undefined`
-   * keeps the legacy env/default resolution so tests with no explicit
-   * key keep working.
-   */
-  privateStoreEncryptionKey?: Uint8Array | string;
 }): Promise<ExactQuadSubtractionResult> {
   if (params.request.transitionType !== 'CREATE') {
     return {
@@ -54,17 +39,10 @@ export async function subtractFinalizedExactQuads(params: {
     publicGraphUri(params.graphManager, params.request.contextGraphId, params.request.subGraphName),
     confirmedRoots,
   );
-  // Private quads land on disk as AES-GCM-SIV ciphertext (
-  // ST-2). The deterministic IV guarantees identical plaintexts produce
-  // identical ciphertexts, but the authoritative-key set still has to
-  // be in plaintext form so callers can match against the
-  // user-supplied (plaintext) input quads. Decrypt as we read.
   const authoritativePrivate = await loadAuthoritativeQuadKeys(
     params.store,
     privateGraphUri(params.graphManager, params.request.contextGraphId, params.request.subGraphName),
     confirmedRoots,
-    /* decryptObjects */ true,
-    params.privateStoreEncryptionKey,
   );
 
   const publicResult = subtractGraphExactMatches(params.resolved.quads, confirmedRoots, authoritativePublic);
@@ -155,8 +133,6 @@ async function loadAuthoritativeQuadKeys(
   store: TripleStore,
   graph: string,
   confirmedRoots: Set<string>,
-  decryptObjects = false,
-  encryptionKey?: Uint8Array | string,
 ): Promise<Set<string>> {
   if (confirmedRoots.size === 0) {
     return new Set();
@@ -183,19 +159,7 @@ async function loadAuthoritativeQuadKeys(
   }
 
   return new Set(
-    result.quads.map((quad) => {
-      // forward the store's explicit `encryptionKey` (when the caller
-      // supplied one) so the decrypt here uses the SAME key the
-      // backing `PrivateContentStore` sealed under. Without this,
-      // `decryptPrivateLiteral` silently falls back to env/default
-      // and never round-trips a non-default-key seal — causing
-      // subtraction to miss every authoritative private quad on a
-      // retry and republish duplicates.
-      const object = decryptObjects
-        ? decryptPrivateLiteral(quad.object, { encryptionKey })
-        : quad.object;
-      return toQuadKey({ ...quad, object, graph: '' });
-    }),
+    result.quads.map((quad) => toQuadKey({ ...quad, graph: '' })),
   );
 }
 
@@ -226,8 +190,19 @@ function safeObject(value: string): string {
   return term;
 }
 
+function normaliseObjectTermToNTriples(object: string): string {
+  if (
+    object.startsWith('"') ||
+    object.startsWith('<') ||
+    object.startsWith('_:')
+  ) {
+    return object;
+  }
+  return safeIri(object);
+}
+
 function toQuadKey(quad: Quad): string {
-  return `${quad.subject} ${quad.predicate} ${quad.object}`;
+  return `${quad.subject} ${quad.predicate} ${normaliseObjectTermToNTriples(quad.object)}`;
 }
 
 function stripTerm(value: string | undefined): string | undefined {

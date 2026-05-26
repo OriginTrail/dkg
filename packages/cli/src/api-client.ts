@@ -31,6 +31,30 @@ export interface RandomSamplingStatusResponse {
   };
 }
 
+export interface RelayStatusResponse {
+  isCore: boolean;
+  reservationsHeld: number;
+  reservationCapacity: number | null;
+  activeCircuits: number | null;
+  bytesIn: string | null;
+  bytesOut: string | null;
+  natStatus: 'public' | 'private' | 'unknown';
+  advertisedAddresses: string[];
+  configuredAnnounceAddresses: string[];
+}
+
+export interface DaemonStatusResponse {
+  name: string;
+  peerId: string;
+  nodeRole?: string;
+  networkId?: string;
+  uptimeMs: number;
+  connectedPeers: number;
+  relayConnected: boolean;
+  multiaddrs: string[];
+  relay: RelayStatusResponse;
+}
+
 export class ApiClient {
   private baseUrl: string;
   private token?: string;
@@ -62,16 +86,7 @@ export class ApiClient {
     return new ApiClient(port, token);
   }
 
-  async status(): Promise<{
-    name: string;
-    peerId: string;
-    nodeRole?: string;
-    networkId?: string;
-    uptimeMs: number;
-    connectedPeers: number;
-    relayConnected: boolean;
-    multiaddrs: string[];
-  }> {
+  async status(): Promise<DaemonStatusResponse> {
     return this.get('/api/status');
   }
 

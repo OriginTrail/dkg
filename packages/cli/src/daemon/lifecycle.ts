@@ -36,6 +36,8 @@ import { existsSync, readdirSync, readFileSync, openSync, closeSync, writeFileSy
 // OpenClaw config helper (~line 2535) uses a bare `homedir()` — aliased
 // below so both sites coexist without a duplicate-module import.
 import * as osModule from 'node:os';
+import type { NetworkInterfaceInfo } from 'node:os';
+import { checkCoreRelayPrereqs } from './core-prereq-check.js';
 const { homedir } = osModule;
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
@@ -100,6 +102,7 @@ import {
   gitCommandEnv,
   gitCommandArgs,
   isStandaloneInstall,
+  resolveAutoUpdateSource,
   slotEntryPoint,
   CLI_NPM_PACKAGE,
 } from '../config.js';
@@ -145,6 +148,7 @@ import { DkgClient } from '@origintrail-official/dkg-mcp/client';
 // the project's tsconfig (`noUnusedLocals` is off).
 import {
   daemonState,
+  resolveStandaloneInstall,
   type CorsAllowlist,
 } from './state.js';
 import {
@@ -183,6 +187,11 @@ import {
   bindingValue,
   carryForwardBundledMarkItDownBinary,
 } from './manifest.js';
+import {
+  SHUTDOWN_HARD_TIMEOUT_MS,
+  encodeForcedShutdownExitCode,
+  raceShutdownWithTimeout,
+} from './shutdown.js';
 import {
   resolveNameToPeerId,
   isPublishQuad,
@@ -244,6 +253,7 @@ import {
   checkForUpdate,
 } from './auto-update.js';
 import { chainResetWipe } from './chain-reset-wipe.js';
+import { resetNatStatus, startNatStatusWatcher } from './nat-status.js';
 import {
   OPENCLAW_UI_CONNECT_TIMEOUT_MS,
   OPENCLAW_UI_CONNECT_POLL_MS,
@@ -328,6 +338,73 @@ import {
 import { handleRequest } from './handle-request.js';
 import { loadRoutePlugins, countConfiguredPluginSpecs } from './plugin-loader.js';
 import type { MemoryGraphChangedEvent, MemoryGraphLayer } from './routes/context.js';
+import {
+  createPromoteWorkerSupervisor,
+  type PromoteWorkerConfig,
+  type PromoteWorkerSupervisor,
+} from './worker/async-promote-worker.js';
+
+type MultiaddrLike = { toString: () => string };
+
+function stringifyMultiaddrList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((ma) => {
+      try {
+        return (ma as MultiaddrLike).toString();
+      } catch {
+        return '';
+      }
+    })
+    .filter((addr) => addr.length > 0);
+}
+
+function listenerMultiaddrs(listener: unknown): string[] {
+  const candidate = listener as {
+    getAddrs?: () => unknown;
+    getMultiaddrs?: () => unknown;
+    addrs?: unknown;
+    multiaddrs?: unknown;
+  };
+  if (typeof candidate?.getAddrs === 'function') {
+    const addrs = stringifyMultiaddrList(candidate.getAddrs());
+    if (addrs.length > 0) return addrs;
+  }
+  if (typeof candidate?.getMultiaddrs === 'function') {
+    const addrs = stringifyMultiaddrList(candidate.getMultiaddrs());
+    if (addrs.length > 0) return addrs;
+  }
+  const addrs = stringifyMultiaddrList(candidate?.addrs);
+  if (addrs.length > 0) return addrs;
+  return stringifyMultiaddrList(candidate?.multiaddrs);
+}
+
+function getBoundListenMultiaddrs(libp2p: unknown): string[] | null {
+  const node = libp2p as {
+    components?: { transportManager?: unknown };
+    services?: { transportManager?: unknown };
+    transportManager?: unknown;
+    getMultiaddrs?: () => unknown;
+  };
+  const managers = [
+    node.components?.transportManager,
+    node.services?.transportManager,
+    node.transportManager,
+  ];
+  for (const manager of managers) {
+    const getListeners = (manager as { getListeners?: () => unknown } | undefined)?.getListeners;
+    if (typeof getListeners !== 'function') continue;
+    const listeners = getListeners.call(manager);
+    if (!Array.isArray(listeners)) continue;
+    const addrs = listeners.flatMap((listener) => listenerMultiaddrs(listener));
+    if (addrs.length > 0) return Array.from(new Set(addrs));
+  }
+
+  // If this libp2p shape does not expose transport listeners, prefer an
+  // indeterminate result over treating advertised self-addresses as bound
+  // listener evidence.
+  return null;
+}
 
 /**
  * Resolve the WM agentAddress the daemon hands to `ChatMemoryManager`.
@@ -374,6 +451,67 @@ export function resolveMemoryAgentAddress(agent: {
  * relays. Counts (`envCount`, `configCount`, `preferredCount`) are
  * reported back for the operator-visible startup log line.
  */
+/**
+ * PR3 / RC11 — known-public JSON-RPC hostnames that emit a startup
+ * WARN when the daemon inherits them from `network/<env>.json#chain.rpcUrl`
+ * without an explicit operator override. The list is intentionally
+ * conservative: only well-known free public endpoints make the cut, so
+ * a private RPC behind a load balancer never trips it. Match against
+ * the parsed URL's hostname (lowercased) so a private proxy URL that
+ * happens to embed a public hostname in its PATH (e.g.
+ * `https://rpc.my-company.example/proxy?url=https://sepolia.base.org/`)
+ * is never misclassified as public. The trigger is purely
+ * informational — it does NOT block startup, it only gives the
+ * operator a single prominent log line so the dzudza failure mode
+ * (silent RPC rate-limit during ACK pre-flight) becomes self-diagnostic.
+ *
+ * If the list grows out of sync with reality the cost is a noisy
+ * WARN for a private RPC whose hostname is literally one of the entries
+ * (over-warn) or a quiet false-negative on a new public endpoint
+ * (under-warn). Both are recoverable by editing this list — and an
+ * operator who reads the WARN can always suppress it by setting
+ * `chain.rpcUrl` in their config.json. The default behaviour stays
+ * correct either way.
+ */
+const KNOWN_PUBLIC_RPC_HOSTS = [
+  'sepolia.base.org',
+  'mainnet.base.org',
+  'rpc.sepolia.org',
+  'ethereum-sepolia.publicnode.com',
+  'rpc.ankr.com',
+  'eth-sepolia.public.blastapi.io',
+  'sepolia.gateway.tenderly.co',
+];
+
+export function isLikelyPublicRpc(url: string): boolean {
+  // PR3 (review fix #2): parse the URL and match against `hostname`
+  // only. The previous implementation did a `lower.includes(host)`
+  // against the full URL string, which would flag a private proxy
+  // URL like `https://rpc.my-company.example/upstream/sepolia.base.org`
+  // as public — the host substring appears in the PATH, not the host.
+  //
+  // Endpoint suffix match (`===` OR `.endsWith('.' + host)`) is the
+  // standard way to match a hostname against a known list while still
+  // matching well-known subdomains (e.g. `eu.rpc.ankr.com` for
+  // `rpc.ankr.com`). Falls back to the old substring scan if the URL
+  // is unparseable (e.g. a bare host without a scheme), so the
+  // diagnostic surface stays the same for malformed inputs an operator
+  // might still want flagged.
+  let hostname: string | undefined;
+  try {
+    hostname = new URL(url).hostname.toLowerCase();
+  } catch {
+    hostname = undefined;
+  }
+  if (hostname !== undefined) {
+    return KNOWN_PUBLIC_RPC_HOSTS.some(
+      (host) => hostname === host || hostname!.endsWith(`.${host}`),
+    );
+  }
+  const lower = url.toLowerCase();
+  return KNOWN_PUBLIC_RPC_HOSTS.some((host) => lower.includes(host));
+}
+
 export function mergePreferredRelays(input: {
   envValue: string | undefined;
   configPreferred: unknown;
@@ -413,6 +551,127 @@ export function mergePreferredRelays(input: {
     envCount: envParsed.length,
     configCount: configParsed.length,
     preferredCount: preferredInResult.length,
+  };
+}
+
+export interface PromoteWorkerDaemonLifecycle {
+  waitForStartup(): Promise<void>;
+  stop(reason?: string | null): Promise<void>;
+  getSupervisor(): PromoteWorkerSupervisor | null;
+}
+
+export function startPromoteWorkerDaemonLifecycle(input: {
+  agent: PromoteWorkerConfig['agent'];
+  log: (msg: string) => void;
+  emitMemoryGraphChanged: (event: MemoryGraphChangedEvent) => void;
+  enabled?: boolean;
+  isShuttingDown?: () => boolean;
+  workerConfig?: Omit<PromoteWorkerConfig, 'agent' | 'log' | 'emitMemoryGraphChanged'>;
+}): PromoteWorkerDaemonLifecycle {
+  let promoteWorkerSupervisor: PromoteWorkerSupervisor | null = null;
+  let promoteWorkerStartup: Promise<void> | null = null;
+  let promoteWorkerTimer: ReturnType<typeof setTimeout> | null = null;
+
+  if (input.enabled === false) {
+    daemonState.promoteWorkerAvailable = false;
+    daemonState.promoteWorkerUnavailableReason = 'disabled via config.promoteQueue.enabled=false';
+    input.log("Async promote worker disabled via config.promoteQueue.enabled=false");
+    return {
+      waitForStartup: async () => {},
+      stop: async (reason: string | null = 'disabled via config.promoteQueue.enabled=false') => {
+        daemonState.promoteWorkerAvailable = false;
+        daemonState.promoteWorkerUnavailableReason = reason;
+      },
+      getSupervisor: () => null,
+    };
+  }
+
+  promoteWorkerTimer = setTimeout(() => {
+    promoteWorkerTimer = null;
+    void (async () => {
+      if (input.isShuttingDown?.()) return;
+      // Async-promote queue worker (PR #3) — drains the queue introduced
+      // in PR #1 + #2. It is intentionally independent from async-publisher
+      // bootstrap: `/promote-async` jobs only need the agent assertion API,
+      // and should not sit queued forever if publisher wallet/chain recovery
+      // hangs.
+      const supervisor = createPromoteWorkerSupervisor({
+        ...input.workerConfig,
+        agent: input.agent,
+        log: (msg) => input.log(`[promote-worker] ${msg}`),
+        emitMemoryGraphChanged: input.emitMemoryGraphChanged,
+      });
+      promoteWorkerSupervisor = supervisor;
+      let startup!: Promise<void>;
+      startup = (async () => {
+        try {
+          await supervisor.start();
+          if (!input.isShuttingDown?.() && promoteWorkerSupervisor === supervisor) {
+            daemonState.promoteWorkerAvailable = true;
+            daemonState.promoteWorkerUnavailableReason = null;
+            input.log("[async-promote-worker] supervisor started; /promote-async accepting jobs");
+          }
+        } catch (err: any) {
+          // Codex PR #665 review (id=3300423547): a single startup
+          // failure here used to leave the queue silently dead. The
+          // route layer now gates `/promote-async` on
+          // `promoteWorkerAvailable`, so enqueue / list / status all
+          // 503 until something explicitly restarts the supervisor.
+          // The structured `[async-promote-worker]` tag makes the
+          // failure trivially greppable in operator logs alongside
+          // the daemon's other startup banners.
+          const message = err?.message ?? String(err);
+          daemonState.promoteWorkerAvailable = false;
+          daemonState.promoteWorkerUnavailableReason = message;
+          if (!input.isShuttingDown?.()) {
+            input.log(
+              `[async-promote-worker] startup failed; queue is read-only until daemon restart: ${message}`,
+            );
+          }
+          if (promoteWorkerSupervisor === supervisor) {
+            promoteWorkerSupervisor = null;
+          }
+        } finally {
+          if (promoteWorkerStartup === startup) {
+            promoteWorkerStartup = null;
+          }
+        }
+      })();
+      promoteWorkerStartup = startup;
+      await startup;
+    })();
+  }, 0);
+  if (promoteWorkerTimer.unref) promoteWorkerTimer.unref();
+
+  async function waitForStartup(): Promise<void> {
+    if (promoteWorkerTimer) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    }
+    await promoteWorkerStartup;
+  }
+
+  async function stop(reason: string | null = null): Promise<void> {
+    if (promoteWorkerTimer) {
+      clearTimeout(promoteWorkerTimer);
+      promoteWorkerTimer = null;
+    }
+    daemonState.promoteWorkerAvailable = false;
+    daemonState.promoteWorkerUnavailableReason = reason;
+    await promoteWorkerSupervisor
+      ?.stop()
+      .catch((err: any) =>
+        input.log(`Promote worker stop error: ${err?.message ?? String(err)}`),
+      );
+    await promoteWorkerStartup
+      ?.catch((err: any) =>
+        input.log(`Promote worker startup wait error: ${err?.message ?? String(err)}`),
+      );
+  }
+
+  return {
+    waitForStartup,
+    stop,
+    getSupervisor: () => promoteWorkerSupervisor,
   };
 }
 
@@ -577,6 +836,35 @@ export async function runDaemonInner(
   // restating the rest; missing fields fall back to the network defaults.
   const chainBase = resolveChainConfig(config, network);
 
+  // PR3 / RC11 — operator-visible WARN when the node is going to talk
+  // to the chain through a known-public, rate-limited JSON-RPC
+  // endpoint that it inherited from the network defaults. The dzudza
+  // failure (Sun 20:42 UTC) traced to a `-32016 over rate limit`
+  // error on the public Base Sepolia RPC during the V10 ACK
+  // pre-flight; without an explicit `chain.rpcUrl` override the
+  // operator never noticed they were sharing a budget with the rest
+  // of the internet. A startup WARN gives them a single, prominent
+  // line in the daemon log instead of waiting for a publish to
+  // silently fail. Skip the WARN entirely in mock mode.
+  //
+  // The "operator overrode it" detection is purposely structural —
+  // only an explicit `config.chain.rpcUrl` entry suppresses the
+  // warning; an empty `chain` block in config that inherits rpcUrl
+  // from network defaults still trips the WARN. That matches the
+  // intent: the operator knows about the rpcUrl iff they set it
+  // themselves.
+  if (chainBase?.type !== 'mock' && chainBase?.rpcUrl) {
+    const operatorSetRpc = config.chain?.rpcUrl !== undefined;
+    if (!operatorSetRpc && isLikelyPublicRpc(chainBase.rpcUrl)) {
+      log(
+        `[warn] chain.rpcUrl is using the network-default public endpoint (${chainBase.rpcUrl}). ` +
+        `Publishing nodes share a global rate-limit budget on public RPCs and may see ` +
+        `ACK pre-flight failures (RpcPreconditionError on eth_chainId, etc.). ` +
+        `Set chain.rpcUrl in ~/.dkg/config.json to a private endpoint to avoid this.`,
+      );
+    }
+  }
+
   // Relay: prefer config.relay, fall back to network testnet.json relays so
   // local nodes connect without having run init or set relay manually.
   // "none" disables relay entirely (used by devnet relay nodes to prevent
@@ -637,6 +925,36 @@ export async function runDaemonInner(
 
   const dashDb = new DashboardDB({ dataDir: dkgDir() });
 
+  if (role === 'core' && config.core?.allowDegradedRelay === false) {
+    const hostInterfaces = Object.values(osModule.networkInterfaces())
+      .flat()
+      .filter((i): i is NetworkInterfaceInfo => i !== undefined);
+    const prereq = checkCoreRelayPrereqs({
+      listenAddresses: [`/ip4/0.0.0.0/tcp/${config.listenPort ?? 0}`],
+      hostInterfaces,
+      announceAddresses: config.announceAddresses ?? [],
+      nodeRole: 'core',
+    });
+    if (prereq.looksDegraded) {
+      log(
+        `[CORE-PREREQ] FATAL before libp2p start: this Core node looks degraded as a relay. ` +
+          `reasons: ${prereq.reasons.join('; ')}. ` +
+          `non-routable addresses: ${prereq.nonRoutableAddresses
+            .map((a) => `${a.addr} (${a.class})`)
+            .join(', ')}. ` +
+          `Set core.allowDegradedRelay: true to downgrade this to a warning.`,
+      );
+      try {
+        dashDb.close();
+      } catch (err: any) {
+        log(`Core prereq fatal DB close error: ${err?.message ?? String(err)}`);
+      }
+      await removePid().catch(() => {});
+      process.exit(1);
+      return;
+    }
+  }
+
   // Universal Messenger substrate stores (rc.9 PR-2). Wired into the
   // DKGAgent's Messenger so any caller that opts into
   // `messenger.sendReliable` gets durable receiver-side idempotency
@@ -666,6 +984,12 @@ export async function runDaemonInner(
     nodeRole: role,
     relayServerCapacity: config.relayServerCapacity,
     relayReservationCount: config.relayReservationCount,
+    // `dkg/<semver>` convention: broadcast our release on every libp2p
+    // identify exchange so remote operators can answer "which DKG
+    // release is each peer running?" via /api/peer-info instead of
+    // having to guess from contract registrations. Travels the wire
+    // as libp2p's `AgentVersion` PB field (their naming, not ours).
+    nodeVersion: `dkg/${nodeVersion}`,
     syncContextGraphs: syncContextGraphs,
     storeConfig: config.store ? {
       backend: config.store.backend,
@@ -745,6 +1069,13 @@ export async function runDaemonInner(
   });
 
   let publisherRuntime: PublisherRuntime | null = null;
+  // Holds the running async-promote worker lifecycle (PR #3 of the
+  // async-promote-queue series). Initialised in `startPostApiPublishing`
+  // after the API is up so a recoverOnStartup hiccup never blocks boot;
+  // torn down in `shutdown` before `agent.stop()` so the queue store is
+  // still open when we wait for in-flight promotes to drain.
+  let promoteWorkerLifecycle: PromoteWorkerDaemonLifecycle | null = null;
+  let shuttingDown = false;
 
   const networkId = await computeNetworkId();
   const publisherControl = createPublisherControlFromStore(
@@ -857,6 +1188,108 @@ export async function runDaemonInner(
 
   await agent.start();
 
+  // Core-only post-start checks (PR-5 NAT-status watcher + PR-3 relay
+  // prereq sanity check). Edge nodes skip both — they don't need to be
+  // publicly reachable, and reset any stale NAT-status state.
+  //
+  // PR-5 (#668): AutoNAT-driven boot self-probe. Subscribes to libp2p's
+  // self:peer:update event and updates the module-level NAT-status
+  // cache that PR-4's /api/status relay block reads. Returns a stop()
+  // handle that the shutdown closure MUST call to remove the listener;
+  // otherwise a respawn leaks listeners (eventually libp2p logs
+  // max-listener warnings).
+  //
+  // PR-3 (#661): Core-relay capability sanity check. Runs post-start so
+  // libp2p has already expanded `0.0.0.0` to per-interface bindings.
+  // Strict `allowDegradedRelay: false` operators also get a pre-start
+  // pass above so we can refuse before binding sockets. If the node
+  // declares itself as a Core (`nodeRole: "core"`) but its
+  // actually-bound multiaddrs can't serve inbound traffic (all
+  // loopback / RFC1918 / CGNAT / IPv6 ULA — beacon-01 was the
+  // canonical Tailscale-only case), surface a structured
+  // `[CORE-PREREQ]` log so the operator sees it before any
+  // peer-discovery noise scrolls past. Behaviour gated by
+  // `config.core.allowDegradedRelay`: `true` (default) is warn-only,
+  // `false` is refuse-to-boot. Uses transport listener addresses
+  // (`getBoundListenMultiaddrs`) not `libp2p.getMultiaddrs()`: the
+  // latter is the advertised self-address set and can include public
+  // announce addrs or `/p2p-circuit` reservations.
+  let natStatusWatcherStop: (() => void) | null = null;
+  if (role === 'core') {
+    const watcher = startNatStatusWatcher({
+      node: agent.node.libp2p as unknown as {
+        addEventListener(event: 'self:peer:update', h: () => void): void;
+        removeEventListener(event: 'self:peer:update', h: () => void): void;
+        getMultiaddrs(): Array<{ toString(): string }>;
+      },
+      onClassification: (status, previous) => {
+        log(`[CORE-PREREQ] AutoNAT status transition: ${previous} → ${status}`);
+      },
+    });
+    natStatusWatcherStop = watcher.stop;
+
+    try {
+      const resolvedMultiaddrs = getBoundListenMultiaddrs(agent.node.libp2p);
+      if (resolvedMultiaddrs === null) {
+        log(
+          `[CORE-PREREQ] WARNING: could not inspect bound libp2p listener addresses; ` +
+            `skipping post-start relay prerequisite verdict.`,
+        );
+      } else {
+        const hostInterfaces = Object.values(osModule.networkInterfaces())
+          .flat()
+          .filter((i): i is NetworkInterfaceInfo => i !== undefined);
+        const prereq = checkCoreRelayPrereqs({
+          listenAddresses: resolvedMultiaddrs,
+          hostInterfaces,
+          announceAddresses: config.announceAddresses ?? [],
+          nodeRole: 'core',
+        });
+        if (prereq.looksDegraded) {
+          const allowDegraded = config.core?.allowDegradedRelay !== false;
+          const verb = allowDegraded ? 'WARNING' : 'FATAL';
+          log(
+            `[CORE-PREREQ] ${verb}: this Core node looks degraded as a relay. ` +
+              `reasons: ${prereq.reasons.join('; ')}. ` +
+              `non-routable addresses: ${prereq.nonRoutableAddresses
+                .map((a) => `${a.addr} (${a.class})`)
+                .join(', ')}. ` +
+              (allowDegraded
+                ? `Set core.allowDegradedRelay: false in ~/.dkg/config.json to refuse-to-boot on this state. ` +
+                  `See docs/specs/SPEC_RELAY_DISCOVERY.md for the full rationale.`
+                : `Refusing to boot. Set core.allowDegradedRelay: true to downgrade this to a warning.`),
+          );
+          if (!allowDegraded) {
+            natStatusWatcherStop?.();
+            resetNatStatus();
+            await agent.stop().catch((err: any) =>
+              log(`Core prereq fatal-stop error: ${err?.message ?? String(err)}`),
+            );
+            try {
+              dashDb.close();
+            } catch (err: any) {
+              log(`Core prereq fatal DB close error: ${err?.message ?? String(err)}`);
+            }
+            await removePid().catch(() => {});
+            process.exit(1);
+            return;
+          }
+        } else {
+          log(
+            `[CORE-PREREQ] OK: ${prereq.publicListenAddresses.length} ` +
+              `public-class listen address${prereq.publicListenAddresses.length === 1 ? '' : 'es'} bound.`,
+          );
+        }
+      }
+    } catch (err) {
+      log(
+        `[CORE-PREREQ] check failed (continuing boot): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  } else {
+    resetNatStatus();
+  }
+
   const publisherChainBase = chainBase?.rpcUrl && chainBase?.hubAddress
     ? {
         rpcUrl: chainBase.rpcUrl,
@@ -872,72 +1305,88 @@ export async function runDaemonInner(
     }, 0);
     if (profileTimer.unref) profileTimer.unref();
 
+    const promoteWorkerConfig = config.promoteQueue;
+    promoteWorkerLifecycle = startPromoteWorkerDaemonLifecycle({
+      agent,
+      log,
+      emitMemoryGraphChanged,
+      isShuttingDown: () => shuttingDown,
+      enabled: promoteWorkerConfig?.enabled !== false,
+      workerConfig: {
+        workerConcurrency: promoteWorkerConfig?.workerConcurrency,
+        pollIntervalMs: promoteWorkerConfig?.pollIntervalMs,
+        heartbeatIntervalMs: promoteWorkerConfig?.heartbeatIntervalMs,
+        shutdownTimeoutMs: promoteWorkerConfig?.shutdownTimeoutMs,
+      },
+    });
+
     const publisherTimer = setTimeout(() => {
-      void startPublisherRuntimeIfEnabled({
-        dataDir: dkgDir(),
-        config,
-        store: agent.store,
-        keypair: agent.wallet.keypair,
-        chainBase: publisherChainBase,
-        ackTransportFactory: () => ({
-          publisherPeerId: agent.peerId,
-          gossipPublish: async (topic: string, data: Uint8Array) => {
-            await agent.gossip.publish(topic, data);
-          },
-          // Route storage-ack + verify-proposal outbound sends through
-          // the Messenger rather than directly through ProtocolRouter
-          // (rc.9 PR-2 wiring). Today this is semantically identical
-          // to the prior `agent.router.send` path — `/dkg/10.0.0/*`
-          // protocols travel `Messenger.sendToPeer` (legacy pass-
-          // through) → `ProtocolRouter.send`. The wiring matters at
-          // Milestone C PR-11 when `/storage-ack` + `/verify-proposal`
-          // migrate to `/dkg/10.0.1/*` and start using
-          // `messenger.sendReliable`, picking up the substrate's
-          // durable outbox + sender-side idempotency without
-          // touching this factory again.
-          //
-          // HIGH RISK gate (rc.9 plan): Milestone C migration of
-          // these protocols MUST include an explicit publishing-flow
-          // integration test covering ACK quorum collection + the
-          // ackTransportFactory hot path before the prefix bump
-          // lands.
-          // rc.9 PR-11: /storage-ack + /verify-proposal migrated to
-          // /dkg/10.0.1/* and now route through messenger.sendReliable
-          // (envelope wrap + sender-side idempotency + durable
-          // outbox). queued surfaces as a thrown transport error so
-          // ACKCollector's MAX_RETRIES loop + per-peer skip semantics
-          // kick in unchanged.
-          sendP2P: async (peerId: string, protocol: string, data: Uint8Array) => {
-            const sendResult = await agent.messenger.sendReliable(peerId, protocol, data);
-            if (!sendResult.delivered) {
-              throw new Error(`substrate queued (transport): ${sendResult.error}`);
-            }
-            return sendResult.response;
-          },
-          getConnectedCorePeers: () => {
-            const allPeers = agent.node.libp2p
-              .getPeers()
-              .map((p) => p.toString())
-              .filter((id) => id !== agent.peerId);
-            const knownCorePeerIds = (agent as any).knownCorePeerIds as
-              | Set<string>
-              | undefined;
-            if (knownCorePeerIds && knownCorePeerIds.size > 0) {
-              const filtered = allPeers.filter((id) => knownCorePeerIds.has(id));
-              if (filtered.length > 0) return filtered;
-            }
-            return allPeers;
-          },
-          log,
-        }),
-        log,
-      })
-        .then((runtime) => {
+      void (async () => {
+        try {
+          const runtime = await startPublisherRuntimeIfEnabled({
+            dataDir: dkgDir(),
+            config,
+            store: agent.store,
+            keypair: agent.wallet.keypair,
+            chainBase: publisherChainBase,
+            ackTransportFactory: () => ({
+              publisherPeerId: agent.peerId,
+              gossipPublish: async (topic: string, data: Uint8Array) => {
+                await agent.gossip.publish(topic, data);
+              },
+              // Route storage-ack + verify-proposal outbound sends through
+              // the Messenger rather than directly through ProtocolRouter
+              // (rc.9 PR-2 wiring). Today this is semantically identical
+              // to the prior `agent.router.send` path — `/dkg/10.0.0/*`
+              // protocols travel `Messenger.sendToPeer` (legacy pass-
+              // through) → `ProtocolRouter.send`. The wiring matters at
+              // Milestone C PR-11 when `/storage-ack` + `/verify-proposal`
+              // migrate to `/dkg/10.0.1/*` and start using
+              // `messenger.sendReliable`, picking up the substrate's
+              // durable outbox + sender-side idempotency without
+              // touching this factory again.
+              //
+              // HIGH RISK gate (rc.9 plan): Milestone C migration of
+              // these protocols MUST include an explicit publishing-flow
+              // integration test covering ACK quorum collection + the
+              // ackTransportFactory hot path before the prefix bump
+              // lands.
+              // rc.9 PR-11: /storage-ack + /verify-proposal migrated to
+              // /dkg/10.0.1/* and now route through messenger.sendReliable
+              // (envelope wrap + sender-side idempotency + durable
+              // outbox). queued surfaces as a thrown transport error so
+              // ACKCollector's MAX_RETRIES loop + per-peer skip semantics
+              // kick in unchanged.
+              sendP2P: async (peerId: string, protocol: string, data: Uint8Array) => {
+                const sendResult = await agent.messenger.sendReliable(peerId, protocol, data);
+                if (!sendResult.delivered) {
+                  throw new Error(`substrate queued (transport): ${sendResult.error}`);
+                }
+                return sendResult.response;
+              },
+              getConnectedCorePeers: () => {
+                const allPeers = agent.node.libp2p
+                  .getPeers()
+                  .map((p) => p.toString())
+                  .filter((id) => id !== agent.peerId);
+                const knownCorePeerIds = (agent as any).knownCorePeerIds as
+                  | Set<string>
+                  | undefined;
+                if (knownCorePeerIds && knownCorePeerIds.size > 0) {
+                  const filtered = allPeers.filter((id) => knownCorePeerIds.has(id));
+                  if (filtered.length > 0) return filtered;
+                }
+                return allPeers;
+              },
+              log,
+            }),
+            log,
+          });
           publisherRuntime = runtime;
-        })
-        .catch((err: any) => {
+        } catch (err: any) {
           log(`Async publisher startup failed: ${err?.message ?? String(err)}`);
-        });
+        }
+      })();
     }, 0);
     if (publisherTimer.unref) publisherTimer.unref();
   };
@@ -1054,7 +1503,12 @@ export async function runDaemonInner(
   // omits the field (the common case after `dkg init` with default answers).
   let updateInterval: ReturnType<typeof setInterval> | null = null;
   const au = resolveAutoUpdateConfig(config, network);
-  const standalone = isStandaloneInstall();
+  // Honour `autoUpdate.source` override (config.ts) — explicit "npm" / "git"
+  // wins over the filesystem probe (`isStandaloneInstall()`); "auto" or omitted
+  // falls through to today's behaviour. Resolve source even when `au` is null
+  // (auto-update disabled) so local/network install-mode policy still seeds the
+  // cache for anyone else who reads `daemonState.standaloneCache` later in boot.
+  const standalone = resolveStandaloneInstall(au?.source ?? resolveAutoUpdateSource(config, network));
   const hasGitConfig = !!au;
 
   if (standalone || hasGitConfig) {
@@ -2084,35 +2538,77 @@ export async function runDaemonInner(
   log('Node is running. Use "dkg status" or "dkg peers" to interact.');
   startPostApiPublishing();
 
-  // Graceful shutdown
-  let shuttingDown = false;
+  // Graceful shutdown — wrapped with a hard wall-clock timeout so a deadlock in
+  // any of the cleanup awaits below (notably `agent.stop()` when in-flight sync
+  // work holds libp2p reads open) cannot leave the worker process a zombie. See
+  // `./shutdown.ts` for the offset-exit-code convention used to signal forced
+  // exits to the supervisor + external monitoring. (`shuttingDown` is hoisted
+  // up next to `promoteWorkerLifecycle` above so the worker-stop call inside
+  // the cleanup IIFE can read it.)
   async function shutdown(exitCode = 0) {
     if (shuttingDown) return;
     shuttingDown = true;
     log("Shutting down...");
-    if (updateInterval) clearInterval(updateInterval);
-    clearInterval(chainScanTimer);
-    clearInterval(pingTimer);
-    clearInterval(pruneTimer);
-    rateLimiter.destroy();
-    metricsCollector.stop();
-    await publisherRuntime
-      ?.stop()
-      .catch((err: any) =>
-        log(`Publisher runtime stop error: ${err?.message ?? String(err)}`),
+    // Tell the supervisor's liveness watcher (PR #664) that this is a graceful
+    // shutdown before any slow cleanup runs. The watcher reads `api.port`'s
+    // absence as "worker is intentionally going down — don't SIGKILL me
+    // mid-teardown." Idempotent with the second `removeApiPort()` below in
+    // cleanupStateFiles; if shutdown crashes here we'd be in the same state as
+    // if the late removeApiPort had failed.
+    await removeApiPort().catch((err: any) =>
+      log(`Early api.port cleanup error: ${err?.message ?? String(err)}`),
+    );
+    const cleanupStateFiles = async () => {
+      await removePid().catch((err: any) =>
+        log(`PID cleanup error: ${err?.message ?? String(err)}`),
       );
-    await daemonState.catchupRunner
-      ?.close()
-      .catch((err: any) =>
-        log(`Catch-up runner stop error: ${err?.message ?? String(err)}`),
+      await removeApiPort().catch((err: any) =>
+        log(`API port cleanup error: ${err?.message ?? String(err)}`),
       );
-    server.close();
-    await agent.stop();
-    dashDb.close();
-    await removePid();
-    await removeApiPort();
-    log("Stopped.");
-    process.exit(exitCode);
+    };
+    const cleanup = (async () => {
+      try {
+        if (updateInterval) clearInterval(updateInterval);
+        clearInterval(chainScanTimer);
+        clearInterval(pingTimer);
+        clearInterval(pruneTimer);
+        rateLimiter.destroy();
+        metricsCollector.stop();
+        natStatusWatcherStop?.();
+        resetNatStatus();
+        await publisherRuntime
+          ?.stop()
+          .catch((err: any) =>
+            log(`Publisher runtime stop error: ${err?.message ?? String(err)}`),
+          );
+        // Drain the async-promote worker before closing the agent — once
+        // `agent.stop()` runs the queue's underlying triple store goes
+        // away. We let in-flight promotes complete (or hit
+        // `shutdownTimeoutMs`); RFC §6.2 forbids marking `running →
+        // queued` here so the next boot's `recoverOnStartup()` decides.
+        await promoteWorkerLifecycle?.stop(shuttingDown ? 'daemon shutting down' : null);
+        await daemonState.catchupRunner
+          ?.close()
+          .catch((err: any) =>
+            log(`Catch-up runner stop error: ${err?.message ?? String(err)}`),
+          );
+        server.close();
+        await agent.stop();
+        dashDb.close();
+        log("Stopped.");
+      } finally {
+        await cleanupStateFiles();
+      }
+    })().catch((err: any) => {
+      log(`Shutdown cleanup error: ${err?.message ?? String(err)}`);
+    });
+    const { forced } = await raceShutdownWithTimeout(
+      cleanup,
+      SHUTDOWN_HARD_TIMEOUT_MS,
+      log,
+      cleanupStateFiles,
+    );
+    process.exit(forced ? encodeForcedShutdownExitCode(exitCode) : exitCode);
   }
 
   process.on("SIGINT", () => shutdown(0));

@@ -78,6 +78,14 @@ describe('DKGAgent._resolveEncryptInlinePayload policy lookup', () => {
     );
   });
 
+  it('fails closed when numeric target CG policy getter is missing', async () => {
+    const agentLike = makeAgentLike({ exposeAccessPolicy: false });
+
+    await expect(resolveEncryptInlinePayload(agentLike, '42')).rejects.toThrow(
+      /publish access-policy is unknown/,
+    );
+  });
+
   it('fails closed when a remap target numeric CG policy cannot be resolved', async () => {
     const agentLike = makeAgentLike({
       accessPolicyError: new Error('rpc unavailable'),

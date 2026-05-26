@@ -53,6 +53,36 @@ export interface AutoUpdateConfig {
   checkIntervalMinutes?: number;
   /** Optional per-step build timeout overrides for the git-based update path. */
   buildTimeoutMs?: AutoUpdateBuildTimeouts;
+  /**
+   * Override how the daemon resolves "am I a standalone (npm-global) install
+   * or a git checkout?" — the question that decides whether auto-update goes
+   * through `performNpmUpdate` (npm install into a blue/green slot) or
+   * `performUpdate` (git pull + build from source).
+   *
+   *   `'auto'` (default): probe the filesystem (`repoDir() === null`).
+   *     Preserves today's behaviour. Operators who set up the daemon via
+   *     `npm install -g` get the npm path; operators who cloned the
+   *     monorepo for development get the git path.
+   *
+   *   `'npm'`: force the npm path regardless of `.git` presence. The fix for
+   *     Core nodes that were originally cloned but should now track npm
+   *     releases — beacon-01 is the canonical case (its `~/dkg-v9/.git`
+   *     directory caused the auto-update path to build from `main`'s HEAD
+   *     during the v10.0.0-rc.10 rollout, which then hit the shutdown
+   *     deadlock that left the worker a zombie). Next polling cycle wipes
+   *     the inactive slot, runs `npm install @origintrail-official/dkg@<version>`,
+   *     and swaps — no filesystem prep required.
+   *
+   *   `'git'`: force the git path regardless of `.git` presence. Opt-in for
+   *     dev nodes that want to keep tracking a branch even after running
+   *     from a globally-installed CLI.
+   *
+   * Implementation: read once at boot via `resolveStandaloneInstall(source)`
+   * in `daemon/state.ts`, which writes the result into the shared
+   * `daemonState.standaloneCache` memo so every later caller (status route,
+   * `dkg update` CLI subcommand, …) sees the same answer.
+   */
+  source?: 'auto' | 'npm' | 'git';
 }
 
 /**
@@ -85,6 +115,14 @@ export interface NetworkConfig {
     sshCommand?: string;
     checkIntervalMinutes: number;
     buildTimeoutMs?: AutoUpdateBuildTimeouts;
+    /**
+     * Network-level default for `AutoUpdateConfig.source` — see the
+     * matching doc comment on that field. Lets `network/<env>.json` set the
+     * recommended source policy (e.g. testnet defaulting to `'npm'` so new
+     * Core operators don't have to know about the override). Local config
+     * still wins per field.
+     */
+    source?: 'auto' | 'npm' | 'git';
   };
   chain?: {
     type: 'evm';
@@ -255,6 +293,28 @@ export interface DkgConfig {
   listenPort: number;
   nodeRole: 'core' | 'edge';
   /**
+   * Core-Node-specific operator tuning. Today only `allowDegradedRelay`;
+   * future Core-only knobs (e.g. relay-target prioritisation) belong here
+   * rather than at the top level so they stay grouped.
+   */
+  core?: {
+    /**
+     * Gate for the boot-time core-relay sanity check (`core-prereq-check.ts`).
+     *
+     *   - `true` (default): the daemon logs `[CORE-PREREQ] looks degraded`
+     *     with a structured reason if its bound multiaddrs can't serve
+     *     inbound traffic, but boots normally. Backwards-compatible — no
+     *     behaviour change for any existing operator on this PR.
+     *   - `false`: the daemon refuses to boot if the sanity check says
+     *     degraded. Opt-in for operators who want fail-loud semantics
+     *     instead of warn-and-continue.
+     *
+     * Edge nodes ignore this field — the prereq check skips the degraded
+     * verdict for `nodeRole: 'edge'`.
+     */
+    allowDegradedRelay?: boolean;
+  };
+  /**
    * Core Node relay-server capacity tuning. Forwarded into the libp2p
    * relay configuration via `DKGNodeConfig.relayServerCapacity`. Sets
    * the maximum number of simultaneous circuit-relay v2 reservations
@@ -353,6 +413,27 @@ export interface DkgConfig {
     pollIntervalMs?: number;
     errorBackoffMs?: number;
     maxRetries?: number;
+  };
+  /**
+   * Async promote queue worker (WM → SWM). Unlike `publisher` which is
+   * opt-in, the promote worker is **on by default** — without it, jobs
+   * enqueued via `POST /api/assertion/{name}/promote-async` sit in
+   * `queued` forever. Set `enabled: false` to disable when running a
+   * read-only / forensic node where you don't want the worker mutating
+   * SWM. See `docs/specs/SPEC_ASYNC_PROMOTE_QUEUE.md` and the
+   * `dkg-node` skill (§8 "Async promote queue") for the full contract.
+   */
+  promoteQueue?: {
+    /** Default `true`. Set `false` to disable the in-daemon worker. */
+    enabled?: boolean;
+    /** Default 4. Number of concurrent worker slots polling the queue. */
+    workerConcurrency?: number;
+    /** Default 100ms. Polling interval per slot. */
+    pollIntervalMs?: number;
+    /** Default 60_000ms (1 min). Must be >0 and shorter than the queue's 5-min lease when enabled. */
+    heartbeatIntervalMs?: number;
+    /** Default 30_000ms. Max time `stop()` waits for in-flight promotes to drain on shutdown. */
+    shutdownTimeoutMs?: number;
   };
   /** Allowed CORS origins. Defaults to '*' when apiHost is '127.0.0.1', otherwise restrictive. */
   corsOrigins?: string | string[];
@@ -596,6 +677,7 @@ export function resolveAutoUpdateConfig(
   const sshKeyPath = cfg?.sshKeyPath ?? net?.sshKeyPath;
   const sshCommand = cfg?.sshCommand ?? net?.sshCommand;
   const checkIntervalMinutes = cfg?.checkIntervalMinutes ?? net?.checkIntervalMinutes ?? 30;
+  const source = cfg?.source ?? net?.source;
 
   // Merge build timeouts per-key so operators can override one step (e.g.
   // `contracts` on slow ARM hosts) without re-specifying the rest.
@@ -620,7 +702,15 @@ export function resolveAutoUpdateConfig(
     ...(sshCommand ? { sshCommand } : {}),
     checkIntervalMinutes,
     ...(buildTimeoutMs ? { buildTimeoutMs } : {}),
+    ...(source ? { source } : {}),
   };
+}
+
+export function resolveAutoUpdateSource(
+  config: Pick<DkgConfig, 'autoUpdate'> | null | undefined,
+  network: Pick<NetworkConfig, 'autoUpdate'> | null | undefined,
+): AutoUpdateConfig['source'] {
+  return config?.autoUpdate?.source ?? network?.autoUpdate?.source;
 }
 
 /**

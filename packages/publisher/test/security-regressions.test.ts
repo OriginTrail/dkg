@@ -20,6 +20,7 @@ import { ethers } from 'ethers';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, createTestContextGraph, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { wrapPublisherForTest } from './_helpers/seal.js';
+import { hardhatACKProvider } from './_helpers/acks.js';
 
 let CONTEXT_GRAPH: string;
 let _kav10Address: string;
@@ -30,6 +31,7 @@ function makeTestPublisher(opts: ConstructorParameters<typeof DKGPublisher>[0]):
   return wrapPublisherForTest(new DKGPublisher(opts), {
     author: _author,
     ctx: { provider: _provider, kav10Address: _kav10Address },
+    v10ACKProvider: hardhatACKProvider(_kav10Address),
   });
 }
 let DATA_GRAPH: string;

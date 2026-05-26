@@ -1,5 +1,5 @@
 import type { TripleStore, Quad } from '@origintrail-official/dkg-storage';
-import type { EventBus, StorageACKDeclineCode } from '@origintrail-official/dkg-core';
+import type { EventBus, StorageACKDeclineCode, SubscriptionSource } from '@origintrail-official/dkg-core';
 import {
   decodePublishIntent,
   encodeStorageACK,
@@ -127,6 +127,32 @@ export interface StorageACKHandlerConfig {
    * timer-based cleanup entirely when a finalization hook is wired.
    */
   encryptedStagingSafetyNetMs?: number;
+  /**
+   * PR5 — ACK-provenance hook. When wired, called immediately before
+   * signing a StorageACK to look up which of the four LU-6 Phase B
+   * discovery paths (chain-event / beacon / reconciler / manual) or
+   * member-mode caused this core to be hosting the CG. The returned
+   * value is populated into `StorageACKMsg.subscriptionSource` so the
+   * publisher can emit a per-publish ACK-provenance summary line and
+   * surface the same data through `QuorumUnmetError.peerOutcomes`
+   * when ACK collection fails.
+   *
+   * Returning `undefined` is honest and additive — the wire field
+   * stays absent and consumers render "source unknown". Callers
+   * SHOULD bind this to `DKGAgent.getSwmSubscriptionSource` (which
+   * accepts multiple candidate ids and is path-shape aware) rather
+   * than implementing it ad-hoc. Optional: handlers that don't wire
+   * this just emit ACKs without the provenance field (legacy shape).
+   *
+   * The candidate ids are: numeric on-chain `cgId`, cleartext
+   * `swmGraphId`, and the SWM gossip topic the publisher derived
+   * for the ACK request. Resolvers should try each in turn.
+   */
+  getSubscriptionSourceForCg?: (
+    cgId: string,
+    swmGraphId?: string,
+    gossipTopic?: string,
+  ) => SubscriptionSource | undefined;
 }
 
 /**
@@ -400,6 +426,10 @@ export class StorageACKHandler {
           `nodeIdentityId ${this.config.nodeIdentityId} exceeds uint64 wire format`,
         );
       }
+      const encryptedSubscriptionSource = this.config.getSubscriptionSourceForCg?.(
+        cgId,
+        swmGraphId !== cgId ? swmGraphId : undefined,
+      );
       return encodeStorageACK({
         merkleRoot,
         coreNodeSignatureR: ethers.getBytes(signature.r),
@@ -408,6 +438,7 @@ export class StorageACKHandler {
         nodeIdentityId: this.config.nodeIdentityId <= BigInt(Number.MAX_SAFE_INTEGER)
           ? Number(this.config.nodeIdentityId)
           : { low: Number(this.config.nodeIdentityId & 0xFFFFFFFFn), high: Number((this.config.nodeIdentityId >> 32n) & 0xFFFFFFFFn), unsigned: true },
+        ...(encryptedSubscriptionSource ? { subscriptionSource: encryptedSubscriptionSource } : {}),
       });
     }
 
@@ -624,6 +655,10 @@ export class StorageACKHandler {
       );
     }
 
+    const subscriptionSource = this.config.getSubscriptionSourceForCg?.(
+      cgId,
+      swmGraphId !== cgId ? swmGraphId : undefined,
+    );
     return encodeStorageACK({
       merkleRoot,
       coreNodeSignatureR: ethers.getBytes(signature.r),
@@ -632,6 +667,7 @@ export class StorageACKHandler {
       nodeIdentityId: this.config.nodeIdentityId <= BigInt(Number.MAX_SAFE_INTEGER)
         ? Number(this.config.nodeIdentityId)
         : { low: Number(this.config.nodeIdentityId & 0xFFFFFFFFn), high: Number((this.config.nodeIdentityId >> 32n) & 0xFFFFFFFFn), unsigned: true },
+      ...(subscriptionSource ? { subscriptionSource } : {}),
     });
   };
 

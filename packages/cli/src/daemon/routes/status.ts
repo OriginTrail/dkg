@@ -105,6 +105,7 @@ import {
   CLI_NPM_PACKAGE,
 } from '../../config.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../../publisher-runner.js';
+import { buildRelayStatusBlock } from '../relay-status-block.js';
 import { fetchAllEntries, resolveRegistryConfig } from '../../integrations/registry-client.js';
 import type { IntegrationEntry, TrustTier } from '../../integrations/schema.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
@@ -179,6 +180,7 @@ import {
   getNodeVersion,
   getCurrentCommitShort,
   loadSkillTemplate,
+  loadImporterSkillTemplate,
   buildSkillMd,
   skillEtag,
   DAEMON_EXIT_CODE_RESTART,
@@ -446,6 +448,33 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     return;
   }
 
+  // Second agent-readable manual: the bulk-import / chunking / manifest /
+  // async-promote-queue contract. Mirrors the `/.well-known/skill.md`
+  // route exactly — public, GET/HEAD, ETag-cacheable, no dynamic
+  // substitution because the importer skill doesn't carry node-state
+  // placeholders today. See Codex PR #642 follow-up: until this endpoint
+  // landed, the cross-link in dkg-node/SKILL.md was unreachable for
+  // agents installed via setup flows.
+  if (
+    (req.method === "GET" || req.method === "HEAD") &&
+    path === "/.well-known/skill-importer.md"
+  ) {
+    const importerContent = loadImporterSkillTemplate();
+    const importerEtag = skillEtag(importerContent);
+    if (req.headers["if-none-match"] === importerEtag) {
+      res.writeHead(304).end();
+      return;
+    }
+    res.writeHead(200, {
+      "Content-Type": "text/markdown; charset=utf-8",
+      ETag: importerEtag,
+      "Cache-Control": "public, max-age=300",
+      Vary: "Host, X-Forwarded-Host, X-Forwarded-Proto",
+    });
+    res.end(req.method === "HEAD" ? undefined : importerContent);
+    return;
+  }
+
   // GET /api/context-graph/{id}/members — local SQL membership cache.
   // Kept in this early route group so the cache has a lightweight read path.
   const contextGraphMembersMatch = path.match(/^\/api\/context-graph\/([^/]+)\/members$/);
@@ -482,6 +511,22 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       config.blockExplorerUrl ?? deriveBlockExplorerUrl(chainConf?.chainId);
     const identityId = agent.publisher.getIdentityId();
     const localAgentIntegrations = listLocalAgentIntegrations(config);
+    // Relay capability + capacity snapshot. Shape built by `buildRelayStatusBlock`
+    // (../relay-status-block.ts) — same shape on edge and core (role-irrelevant
+    // fields null) so consumers parse one schema. Common alerts:
+    //   relay.isCore && reservationsHeld === reservationCapacity
+    //     → Core at saturation, grow the fleet
+    //   relay.isCore && relay.natStatus === 'private'
+    //     → Core boots but the network can't reach it
+    const isCore = (config.nodeRole ?? 'edge') === 'core';
+    const relayStats = isCore ? agent.node.getRelayStats() : null;
+    const relayBlock = buildRelayStatusBlock({
+      isCore,
+      relayStats,
+      natStatus: daemonState.natStatus,
+      advertisedAddresses: agent.multiaddrs,
+      configuredAnnounceAddresses: config.announceAddresses ?? [],
+    });
     return jsonResponse(res, 200, {
       name: config.name,
       version: nodeVersion,
@@ -500,6 +545,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       },
       relayConnected: circuitAddrs.length > 0,
       multiaddrs: agent.multiaddrs,
+      relay: relayBlock,
       blockExplorerUrl,
       identityId: String(identityId),
       hasIdentity: identityId > 0n,

@@ -821,7 +821,8 @@ export function isLoopbackRateLimitExemptPath(pathname: string): boolean {
   return pathname === '/ui'
     || pathname.startsWith('/ui/')
     || pathname.startsWith('/api/')
-    || pathname === '/.well-known/skill.md';
+    || pathname === '/.well-known/skill.md'
+    || pathname === '/.well-known/skill-importer.md';
 }
 
 export function shouldBypassRateLimitForLoopbackTraffic(ip: string, pathname: string): boolean {

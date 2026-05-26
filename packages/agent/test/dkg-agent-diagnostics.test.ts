@@ -88,7 +88,20 @@ function makeAgentLike({
   keyedConnectionsByPeer?: Map<string, StubConnection[]>;
   peerStoreEntries?: Map<
     string,
-    { addresses: Array<{ multiaddr: { toString: () => string } }>; protocols?: string[] }
+    {
+      addresses: Array<{ multiaddr: { toString: () => string } }>;
+      protocols?: string[];
+      // rc.11: libp2p's identify protocol populates Peer.metadata
+      // with utf8-encoded AgentVersion / ProtocolVersion entries
+      // after the first successful exchange. The diagnostics surface
+      // reads these to answer "which DKG release is this peer
+      // running?" — see `peerStore: { nodeVersion, protocolVersion }`
+      // on PeerDiagnostics (libp2p's `AgentVersion` is renamed to
+      // `nodeVersion` to avoid colliding with `DKGAgent`). Map<string,
+      // Uint8Array> matches the libp2p >=2.x shape; a plain object
+      // (other code path) is also handled by the production reader.
+      metadata?: Map<string, Uint8Array> | Record<string, Uint8Array>;
+    }
   >;
   outboxEntries?: StubOutboxEntry[];
   health?: Map<string, any>;
@@ -272,9 +285,75 @@ describe('DKGAgent.getPeerDiagnostics', () => {
         knownMultiaddrCount: 2,
         multiaddrs: ['/ip4/1.2.3.4/tcp/4001', `/ip4/5.6.7.8/tcp/4001/p2p/${PEER_A}`],
         protocols: ['/dkg/10.0.1/sync', '/dkg/10.0.1/message'],
+        // No `metadata` provided in the stub → identify hasn't run
+        // → both version fields null (rc.11 follow-up).
+        nodeVersion: null,
+        protocolVersion: null,
       });
       expect(diag.protocols).toEqual(['/dkg/10.0.1/sync', '/dkg/10.0.1/message']);
       expect(diag.syncCapable).toBe(true);
+    });
+
+    // rc.11 follow-up to the "version on the wire" gap surfaced during
+    // the v10.0.0-rc.10 network rollout: before this PR, /api/peer-info
+    // could tell operators *which* protocols a peer spoke, but not
+    // *which DKG release* they were running — leaving "did the network
+    // pick up the upgrade?" answerable only by guessing from on-chain
+    // contract registrations. The fix wires
+    // `DKGNodeConfig.nodeVersion` → libp2p `nodeInfo.userAgent`, so
+    // remote peers see `dkg/<semver>` in their peerStore as
+    // `Peer.metadata.AgentVersion` (libp2p's wire name). The reader
+    // decodes that back to a UTF-8 string surfaced as `nodeVersion` on
+    // the diagnostics object — kept distinct from libp2p's name to
+    // avoid colliding with `DKGAgent`.
+    it('surfaces nodeVersion (libp2p AgentVersion) + protocolVersion from peer.metadata (Map shape, libp2p >=2.x)', async () => {
+      const enc = new TextEncoder();
+      const agentLike = makeAgentLike({
+        rawConnections: [],
+        peerStoreEntries: new Map([
+          [
+            PEER_A,
+            {
+              addresses: [{ multiaddr: { toString: () => '/ip4/1.2.3.4/tcp/4001' } }],
+              protocols: ['/dkg/10.0.1/message'],
+              metadata: new Map<string, Uint8Array>([
+                ['AgentVersion', enc.encode('dkg/10.0.0-rc.11')],
+                ['ProtocolVersion', enc.encode('ipfs/0.1.0')],
+              ]),
+            },
+          ],
+        ]),
+      });
+      const diag = await callDiagnostics(agentLike, PEER_A);
+      expect(diag.peerStore?.nodeVersion).toBe('dkg/10.0.0-rc.11');
+      expect(diag.peerStore?.protocolVersion).toBe('ipfs/0.1.0');
+    });
+
+    // Defensive path: some libp2p serialisation surfaces (and certain
+    // peerStore re-hydration code paths) return `metadata` as a plain
+    // object instead of a Map. The production reader handles both —
+    // this test locks that in so a future "always-Map" assumption
+    // doesn't silently degrade the version surface to null.
+    it('also reads AgentVersion when peer.metadata is a plain object (defensive shape)', async () => {
+      const enc = new TextEncoder();
+      const agentLike = makeAgentLike({
+        rawConnections: [],
+        peerStoreEntries: new Map([
+          [
+            PEER_A,
+            {
+              addresses: [],
+              protocols: [],
+              metadata: {
+                AgentVersion: enc.encode('dkg/10.0.0-rc.12'),
+              },
+            },
+          ],
+        ]),
+      });
+      const diag = await callDiagnostics(agentLike, PEER_A);
+      expect(diag.peerStore?.nodeVersion).toBe('dkg/10.0.0-rc.12');
+      expect(diag.peerStore?.protocolVersion).toBeNull();
     });
 
     // Regression for the rc.9 PR-E hard cutover: a peer that still

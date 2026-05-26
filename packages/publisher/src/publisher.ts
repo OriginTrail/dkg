@@ -32,6 +32,15 @@ export interface V10CoreNodeACK {
   signatureR: Uint8Array;
   signatureVS: Uint8Array;
   nodeIdentityId: bigint;
+  /**
+   * PR5 ACK-provenance: which of the four LU-6 Phase B discovery
+   * paths (chain-event / beacon / reconciler / manual) or member-mode
+   * the responding core reported was its reason for hosting this CG
+   * at ACK time. `undefined` for legacy / pre-PR5 cores that don't
+   * yet populate the wire field. Surfaced through the publisher's
+   * per-publish ACK-provenance summary line on success.
+   */
+  subscriptionSource?: import('@origintrail-official/dkg-core').SubscriptionSource;
 }
 
 /**

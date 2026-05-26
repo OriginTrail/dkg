@@ -25,6 +25,7 @@ import {
   loadImportManifest,
   pendingPartitions,
   defaultManifestAssertionName,
+  partitionDeclared,
 } from '../manifest.mjs';
 
 test('importUri encodes special characters', () => {
@@ -251,27 +252,47 @@ function makeMockClient({
     async query({ sparql, graphSuffix }) {
       calls.push(`query:graphSuffix=${graphSuffix ?? ''}`);
       // We don't run a real SPARQL engine here — we pattern-match the
-      // exact two shapes loadImportManifest sends and serve from the
+      // exact shapes the manifest library sends and serve from the
       // memory tier the caller asked for. The daemon's REAL routing for
       // `subGraphName` alone hits the bare data graph (which is empty for
       // assertion-API-written data); only `graphSuffix: '_shared_memory'`
       // routes to SWM. Mirroring that here lets tests catch a regression
       // where the manifest reader drops the SWM hint.
+      const source = graphSuffix === '_shared_memory' ? swm : new Set();
+      const sourceTriples = [...source].map((k) => {
+        const [subject, predicate, object] = k.split('\u0001');
+        return { subject, predicate, object };
+      });
+
+      // Shape 1: `partitionDeclared`'s ASK with two literal IRIs — one
+      // round-trip Boolean instead of materialising the full manifest.
+      // `markPartitionStatus` uses this on every status write, so the mock
+      // has to honour the same semantics as the real daemon's ASK route.
+      const askMatch = sparql.match(
+        /ASK\s*\{\s*<(urn:dkg:import:[^>]+)>\s+imp:partition\s+<([^>]+)>/,
+      );
+      if (askMatch) {
+        const [, importIri, partIri] = askMatch;
+        const present = sourceTriples.some(
+          (t) =>
+            t.subject === importIri &&
+            t.predicate === IMPORT_P.partition &&
+            // Object stored as a bare URI (the manifest library doesn't
+            // bracket-wrap partition objects). Tolerate both shapes in
+            // case a future mock variation does wrap.
+            (t.object === partIri || t.object === `<${partIri}>`),
+        );
+        return { boolean: present };
+      }
+
       const m = sparql.match(/<(urn:dkg:import:[^>]+)>\s+imp:partition\s+\?part/);
       if (!m) return { result: { bindings: [] } };
       const importIri = m[1];
 
-      // Pick the source store. `_shared_memory` -> swm; anything else
-      // (including no graphSuffix at all) -> the bare data graph, which
-      // is always empty in this mock because assertion-API writes never
-      // land there.
-      const source = graphSuffix === '_shared_memory' ? swm : new Set();
-
-      // Reconstruct per-partition state from the chosen source set.
-      const triples = [...source].map((k) => {
-        const [subject, predicate, object] = k.split('\u0001');
-        return { subject, predicate, object };
-      });
+      // Reuse the SWM/empty store + triple set already prepared above
+      // for the ASK path so both query shapes route through the same
+      // mock storage semantics.
+      const triples = sourceTriples;
       // Build the rows the query would produce.
       const partitionRoots = triples
         .filter((t) => t.subject === importIri && t.predicate === IMPORT_P.partition)
@@ -797,5 +818,113 @@ test('manifest helpers reject custom assertionName overrides', async () => {
       assertionName: 'custom-assertion',
     }),
     /no longer accepts `assertionName`/,
+  );
+});
+
+test('partitionDeclared returns true for declared partitions, false otherwise', async () => {
+  const client = makeMockClient();
+  await createImportManifest({
+    client,
+    importId: 'pq-test',
+    partitions: ['a.ts', 'b.ts'],
+    subGraphName: 'meta',
+  });
+  assert.equal(
+    await partitionDeclared({
+      client,
+      importId: 'pq-test',
+      partitionKey: 'a.ts',
+      subGraphName: 'meta',
+    }),
+    true,
+  );
+  assert.equal(
+    await partitionDeclared({
+      client,
+      importId: 'pq-test',
+      partitionKey: 'not-declared.ts',
+      subGraphName: 'meta',
+    }),
+    false,
+  );
+});
+
+test('partitionDeclared targets the SWM tier (graphSuffix=_shared_memory)', async () => {
+  const client = makeMockClient();
+  await createImportManifest({
+    client,
+    importId: 'pq-graphsuffix',
+    partitions: ['only.ts'],
+    subGraphName: 'meta',
+  });
+  client._state.calls.length = 0;
+  await partitionDeclared({
+    client,
+    importId: 'pq-graphsuffix',
+    partitionKey: 'only.ts',
+    subGraphName: 'meta',
+  });
+  const queryCalls = client._state.calls.filter((c) => c.startsWith('query:'));
+  // Exactly one query, and it must carry graphSuffix=_shared_memory — without
+  // the SWM hint the daemon would route to the empty bare data graph and a
+  // healthy manifest would look undeclared.
+  assert.equal(queryCalls.length, 1, 'expected exactly one query for ASK');
+  assert.equal(queryCalls[0], 'query:graphSuffix=_shared_memory');
+});
+
+test('markPartitionStatus uses single-row ASK, not full loadImportManifest (was Codex PR #642 quadratic)', async () => {
+  // Regression test for the quadratic-validation finding: previously,
+  // markPartitionStatus loaded the entire manifest via loadImportManifest
+  // on every status write. For bulk imports with N partitions and 2
+  // status writes each, that meant 2N full SWM materialisations. The
+  // ASK rewrite must do exactly one query of one row instead.
+  const client = makeMockClient();
+  await createImportManifest({
+    client,
+    importId: 'pq-no-full-load',
+    partitions: ['a.ts', 'b.ts', 'c.ts', 'd.ts', 'e.ts'],
+    subGraphName: 'meta',
+  });
+  client._state.calls.length = 0;
+  await markPartitionStatus({
+    client,
+    importId: 'pq-no-full-load',
+    partitionKey: 'c.ts',
+    status: 'done',
+    subGraphName: 'meta',
+  });
+  const queryCalls = client._state.calls.filter((c) => c.startsWith('query:'));
+  // Pre-fix: markPartitionStatus would have invoked the SELECT-shaped
+  // loadImportManifest query. Post-fix: only the ASK-shape goes out, and
+  // we never materialise the full partition list during a status write.
+  assert.equal(queryCalls.length, 1, `expected exactly one query, got ${queryCalls.length}: ${JSON.stringify(queryCalls)}`);
+  // Verify the status was actually applied so we know the helper didn't
+  // short-circuit on a malformed check.
+  const state = await loadImportManifest({
+    client,
+    importId: 'pq-no-full-load',
+    subGraphName: 'meta',
+  });
+  const part = state.partitions.find((p) => p.key === 'c.ts');
+  assert.equal(part.status, 'done');
+});
+
+test('markPartitionStatus still rejects undeclared partitions via ASK', async () => {
+  const client = makeMockClient();
+  await createImportManifest({
+    client,
+    importId: 'pq-reject',
+    partitions: ['a.ts'],
+    subGraphName: 'meta',
+  });
+  await assert.rejects(
+    () => markPartitionStatus({
+      client,
+      importId: 'pq-reject',
+      partitionKey: 'never-declared.ts',
+      status: 'done',
+      subGraphName: 'meta',
+    }),
+    /not declared in manifest 'pq-reject'/,
   );
 });

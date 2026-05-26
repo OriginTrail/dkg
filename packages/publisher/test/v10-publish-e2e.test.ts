@@ -16,7 +16,7 @@ import {
 import { ethers } from 'ethers';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
-import { mintTokens, setMinimumRequiredSignatures, stakeAndSetAsk } from '../../chain/test/hardhat-harness.js';
+import { mintTokens, setMinimumRequiredSignatures } from '../../chain/test/hardhat-harness.js';
 
 const TEST_CHAIN_ID = 31337n;
 const TEST_KAV10_ADDR = '0x000000000000000000000000000000000000c10a';
@@ -56,10 +56,8 @@ describe('V10 Publish E2E', () => {
     const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
     await mintTokens(provider, ctx.hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
 
-    for (let i = 0; i < ctx.receiverIds.length; i++) {
-      const recOpKey = [HARDHAT_KEYS.REC1_OP, HARDHAT_KEYS.REC2_OP, HARDHAT_KEYS.REC3_OP][i]!;
-      await stakeAndSetAsk(provider, ctx.hubAddress, HARDHAT_KEYS.DEPLOYER, recOpKey, ctx.receiverIds[i]!);
-    }
+    // REC1..REC3 are staked by the shared Hardhat harness. Re-staking here
+    // double-spends the setup path and reverts before the skipped shard tests run.
 
     const adapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const cgResult = await adapter.createOnChainContextGraph({

@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile, readdir } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { SwmHostModeStore } from '../../src/swm/host-mode-store.js';
+import { SwmHostModeStore, type SwmHostModeStartupReconcileReport } from '../../src/swm/host-mode-store.js';
 
 function cgKey(contextGraphId: string): string {
   return createHash('sha256').update(contextGraphId).digest('base64url');
@@ -244,7 +244,10 @@ describe('SwmHostModeStore', () => {
       const before = await readdir(dir);
       expect(before).toContain(`${orphanKey}.log`);
 
-      let reportSeen: { orphanLogsRemoved: number; orphanBytesRemoved: number } | null = null;
+      // Codex PR #619 follow-up: `corruptMetasRemoved` is optional
+      // drill-down only. The legacy orphan* fields stay the aggregate
+      // report contract, and orphan-only fixtures keep the old shape.
+      let reportSeen: SwmHostModeStartupReconcileReport | null = null;
       const store = new SwmHostModeStore({
         dataDir: dir,
         unregisteredLimits: limits,
@@ -312,7 +315,7 @@ describe('SwmHostModeStore', () => {
       await writeFile(path.join(dir, `${orphanKey1}.log`), Buffer.from('garbage-1'));
       await writeFile(path.join(dir, `${orphanKey2}.log`), Buffer.from('garbage-22'));
 
-      let reportSeen: { orphanLogsRemoved: number; orphanBytesRemoved: number } | null = null;
+      let reportSeen: SwmHostModeStartupReconcileReport | null = null;
       const reincarnated = new SwmHostModeStore({
         dataDir: dir,
         unregisteredLimits: limits,
@@ -320,6 +323,7 @@ describe('SwmHostModeStore', () => {
         onStartupReconcile: (r) => { reportSeen = r; },
       });
       await reincarnated.init();
+      // Two lonely .log files reaped; no corrupt-meta field in this fixture.
       expect(reportSeen).toEqual({ orphanLogsRemoved: 2, orphanBytesRemoved: 9 + 10 });
 
       const after = await readdir(dir);
@@ -384,11 +388,14 @@ describe('SwmHostModeStore', () => {
         // `listKnownCgs()` already treat that as unusable, so the
         // matching .log is still unservable + unprunable. The
         // reconcile pass must reap both.
+        //
+        // The legacy aggregate orphan* fields still count both files,
+        // while corruptMetasRemoved gives operators the split.
         const corruptKey = cgKey('curator/half-persisted');
         await writeFile(path.join(dir, `${corruptKey}.meta`), Buffer.from('{"seqno":3,"reg'));
         await writeFile(path.join(dir, `${corruptKey}.log`), Buffer.from('xxxxxxxxxx'));
 
-        let reportSeen: { orphanLogsRemoved: number; orphanBytesRemoved: number } | null = null;
+        let reportSeen: SwmHostModeStartupReconcileReport | null = null;
         const store = new SwmHostModeStore({
           dataDir: dir,
           unregisteredLimits: limits,
@@ -398,6 +405,7 @@ describe('SwmHostModeStore', () => {
         await store.init();
         expect(reportSeen).not.toBeNull();
         expect(reportSeen!.orphanLogsRemoved).toBe(2);
+        expect(reportSeen!.corruptMetasRemoved ?? 0).toBe(1);
 
         const after = await readdir(dir);
         expect(after).not.toContain(`${corruptKey}.log`);
@@ -465,6 +473,26 @@ describe('SwmHostModeStore', () => {
       // Seqno bookkeeping also survives — append picks up at 3.
       const s3 = await second.append('curator/cg-active', new Uint8Array([7]));
       expect(s3).toBe(3);
+    });
+
+    it('serializes concurrent hostModeSubscribed and registered metadata mutations', async () => {
+      // Regression for the lost-update window where the subscribe path
+      // and register path both loaded the same .meta, mutated different
+      // fields, and whichever persist won last could drop the other flag.
+      for (let i = 0; i < 25; i += 1) {
+        const cgId = `curator/cg-concurrent-${i}`;
+        const store = new SwmHostModeStore({ dataDir: dir, unregisteredLimits: limits, registeredLimits: limits });
+        await store.init();
+
+        await Promise.all([
+          store.markHostModeSubscribed(cgId),
+          store.markRegistered(cgId),
+        ]);
+
+        const fresh = new SwmHostModeStore({ dataDir: dir, unregisteredLimits: limits, registeredLimits: limits });
+        expect(await fresh.isRegistered(cgId)).toBe(true);
+        expect(await fresh.listHostModeSubscribedCgs()).toContain(cgId);
+      }
     });
 
     it('mark + unmark are idempotent', async () => {

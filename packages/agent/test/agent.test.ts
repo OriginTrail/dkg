@@ -36,6 +36,7 @@ import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { wrapPublisherForTest, mockSealCtx } from '../../publisher/test/_helpers/seal.js';
+import { mockChainStubACKProvider } from '../../publisher/test/_helpers/acks.js';
 
 const require = createRequire(import.meta.url);
 const { Evaluator: ReferenceEvaluator, loadYaml } = require(fileURLToPath(new URL('../../../ccl_v0_1/evaluator/reference_evaluator.js', import.meta.url)));
@@ -69,6 +70,7 @@ async function _wrapAgentPublisherForSeal(agent: DKGAgent): Promise<void> {
   const wrapped = wrapPublisherForTest(agent.publisher, {
     author: ethers.Wallet.createRandom(),
     ctx: mockSealCtx({ chainId, kav10Address }),
+    v10ACKProvider: mockChainStubACKProvider(),
   });
   Object.defineProperty(agent, 'publisher', { value: wrapped, writable: true, configurable: true });
 }

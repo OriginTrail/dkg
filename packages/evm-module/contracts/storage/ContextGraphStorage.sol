@@ -229,8 +229,13 @@ contract ContextGraphStorage is INamed, IVersioned, Guardian, ERC721Enumerable {
 
         contextGraphId = ++_contextGraphCounter;
 
-        _mint(owner_, contextGraphId);
-
+        // CEI ordering: populate ALL CG state below first; `_mint` happens
+        // last so the wrapper never observes a half-built (NFT-without-
+        // metadata-or-participants) state. `_mint` (not `_safeMint`) is
+        // intentional: `owner_` is forwarded from `ContextGraphs.create
+        // ContextGraph` as the upstream `msg.sender`, and contract owners
+        // without `IERC721Receiver` (DAO timelocks, custom multisigs,
+        // factory wrappers) are part of the supported caller set.
         KnowledgeAssetsLib.ContextGraph storage cg = _contextGraphs[contextGraphId];
         cg.metadataBatchId = metadataBatchId;
         cg.active = true;
@@ -261,6 +266,8 @@ contract ContextGraphStorage is INamed, IVersioned, Guardian, ERC721Enumerable {
         if (nameHash != bytes32(0)) {
             _contextGraphNameHash[contextGraphId] = nameHash;
         }
+
+        _mint(owner_, contextGraphId);
 
         emit ContextGraphCreated(
             contextGraphId,

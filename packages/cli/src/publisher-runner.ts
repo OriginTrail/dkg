@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import { DKGAgentWallet } from '@origintrail-official/dkg-agent';
 import { EVMChainAdapter, NoChainAdapter } from '@origintrail-official/dkg-chain';
 import { TypedEventBus, type Ed25519Keypair } from '@origintrail-official/dkg-core';
-import { ACKCollector, AsyncLiftRunner, DKGPublisher, FileWorkspacePublicSnapshotStore, TripleStoreAsyncLiftPublisher, type AsyncLiftPublishExecutionInput, type AsyncLiftPublisher, type AsyncLiftPublisherRecoveryResult, type LiftJobBroadcast, type LiftJobIncluded, type PublishOptions, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
+import { ACKCollector, AsyncLiftRunner, DKGPublisher, FileWorkspacePublicSnapshotStore, TripleStoreAsyncLiftPublisher, wrapAsRpcPreconditionIfApplicable, type AsyncLiftPublishExecutionInput, type AsyncLiftPublisher, type AsyncLiftPublisherRecoveryResult, type LiftJobBroadcast, type LiftJobIncluded, type PublishOptions, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
 import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import { loadNetworkConfig, resolveChainConfig, type DkgConfig } from './config.js';
 import { loadPublisherWallets } from './publisher-wallets.js';
@@ -375,14 +375,34 @@ function createV10ACKProviderForPublisher(
         'Publishers must pass the V10 flat-KC leaf count computed by V10MerkleTree.',
       );
     }
-    const requiredACKs = typeof chain.getMinimumRequiredSignatures === 'function'
-      ? await chain.getMinimumRequiredSignatures()
-      : undefined;
-    // Both values are guaranteed present here by the adapter-capability
-    // check at the top of this factory — re-resolving on every publish
-    // keeps the provider agnostic to hot adapter swaps.
-    const chainIdBig = await chain.getEvmChainId!();
-    const kav10Address = await chain.getKnowledgeAssetsV10Address!();
+    // PR3 / RC11: wrap each chain pre-flight read in its own try/catch
+    // so a failure is promoted to the typed `RpcPreconditionError`
+    // (rather than the opaque "V10 ACK collection failed" string).
+    // Mirrors the agent-side V10 ACK provider in
+    // `dkg-agent.ts:createV10ACKProvider` so the daemon log surfaces
+    // the same shape regardless of which entry point produced the
+    // publish. `wrapAsRpcPreconditionIfApplicable` is a no-op when
+    // the error is already typed.
+    let requiredACKs: number | undefined;
+    if (typeof chain.getMinimumRequiredSignatures === 'function') {
+      try {
+        requiredACKs = await chain.getMinimumRequiredSignatures();
+      } catch (err) {
+        throw wrapAsRpcPreconditionIfApplicable(err, 'getMinimumRequiredSignatures');
+      }
+    }
+    let chainIdBig: bigint;
+    try {
+      chainIdBig = await chain.getEvmChainId!();
+    } catch (err) {
+      throw wrapAsRpcPreconditionIfApplicable(err, 'getEvmChainId');
+    }
+    let kav10Address: string;
+    try {
+      kav10Address = await chain.getKnowledgeAssetsV10Address!();
+    } catch (err) {
+      throw wrapAsRpcPreconditionIfApplicable(err, 'getKnowledgeAssetsV10Address');
+    }
     const result = await collector.collect({
       merkleRoot,
       contextGraphId: cgIdBigInt,

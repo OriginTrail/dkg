@@ -744,7 +744,27 @@ export class MockChainAdapter implements ChainAdapter {
     };
   }
 
+  /**
+   * Codex PR #618 follow-up: when a test has installed a real
+   * `mockACKSigner` wallet (via `setMockACKSigner` / the agent-key
+   * helpers that wire one up at construction), delegate to it so the
+   * returned `{r, vs}` actually verifies on the responder. Without
+   * this, `mintSignedCatchupRequest` + `verifySignedCatchupRequest`
+   * recover a garbage signer from the zero-bytes signature and host
+   * catchup is dead in every test that runs against an unmodified
+   * `MockChainAdapter`. Tests that don't exercise signed catchup keep
+   * working unchanged — when no wallet is configured we fall back to
+   * the historical zero-byte stub so we don't accidentally bind a
+   * signer identity that test setup didn't ask for.
+   */
   async signMessage(messageHash: Uint8Array): Promise<{ r: Uint8Array; vs: Uint8Array }> {
+    if (this.mockACKSigner) {
+      const sig = ethers.Signature.from(await this.mockACKSigner.signMessage(messageHash));
+      return {
+        r: ethers.getBytes(sig.r),
+        vs: ethers.getBytes(sig.yParityAndS),
+      };
+    }
     return { r: new Uint8Array(32), vs: new Uint8Array(32) };
   }
 

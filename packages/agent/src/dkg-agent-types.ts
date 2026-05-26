@@ -337,6 +337,27 @@ export interface PeerDiagnostics {
     knownMultiaddrCount: number;
     multiaddrs: string[];
     protocols: string[];
+    /**
+     * DKG node-release string the remote peer advertised via libp2p's
+     * `identify`. DKG nodes from rc.11+ set this to `dkg/<semver>` —
+     * see `DKGNodeConfig.nodeVersion`. Pre-rc.11 peers fall through to
+     * libp2p's default (`js-libp2p/<version>`), which is itself a
+     * useful "peer hasn't adopted the version-advertisement convention
+     * yet" signal. `null` when identify hasn't completed (cold cache,
+     * never dialed).
+     *
+     * Sourced from libp2p's `Peer.metadata.AgentVersion` (their wire
+     * name); renamed here because in the DKG context "agent" already
+     * means `DKGAgent`.
+     */
+    nodeVersion: string | null;
+    /**
+     * libp2p protocol-version string from `identify` (`ProtocolVersion`
+     * on the wire). Default `ipfs/0.1.0`. Unrelated to DKG protocol
+     * versions — kept under its libp2p name because that's what it is.
+     * `null` when identify hasn't completed.
+     */
+    protocolVersion: string | null;
   } | null;
   /**
    * Pending substrate-outbox entries for this peer.
@@ -609,6 +630,22 @@ export interface DKGAgentConfig {
    * rationale.
    */
   relayReservationCount?: number;
+  /**
+   * DKG node-release identifier the underlying libp2p node advertises
+   * to peers via the `identify` protocol. Forwarded straight into
+   * `DKGNodeConfig.nodeVersion`. Convention `dkg/<semver>` (set by
+   * `packages/cli/src/daemon/lifecycle.ts`). Surfaced back to operators
+   * via `peerStore.nodeVersion` on the `PeerDiagnostics` object
+   * returned by `/api/peer-info` and MCP `dkg_peer_info`. When omitted,
+   * libp2p's default (`js-libp2p/<version>`) is broadcast.
+   *
+   * Naming note: on the wire libp2p calls this field `AgentVersion`,
+   * but inside DKG that name collides with `DKGAgent`. We carry it as
+   * `nodeVersion` everywhere we control, and only touch the libp2p
+   * name (`Peer.metadata.AgentVersion`) at the read boundary in
+   * `getPeerDiagnostics()`.
+   */
+  nodeVersion?: string;
   /**
    * Path to the V10 Random Sampling prover write-ahead log. Core
    * nodes only; ignored on edge. When omitted, an in-memory WAL is

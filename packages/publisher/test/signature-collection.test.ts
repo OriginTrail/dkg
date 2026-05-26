@@ -16,12 +16,34 @@ import { ethers } from 'ethers';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, createTestContextGraph, seedContextGraphRegistration, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { wrapPublisherForTest, buildSeal } from './_helpers/seal.js';
+import { makeHardhatReceiverACKProvider } from './_helpers/acks.js';
+import type { V10ACKProvider } from '../src/publisher.js';
 
 let CONTEXT_GRAPH: string;
 let _kav10Address: string;
 let _provider: ethers.JsonRpcProvider;
 const _author = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
 const ENTITY = 'urn:test:sigcollect:entity:1';
+
+// RC11 / PR1: in-memory 3-of-N ACK provider that signs the V10 ACK
+// digest with the staked Hardhat receiver wallets (REC1..REC3). Replaces
+// the deleted self-signed ACK fallback so every Hardhat publish below
+// goes through the real ACK quorum code path. Lazy because
+// `_kav10Address` is set in each describe's `beforeAll`.
+let _ackProvider: V10ACKProvider | undefined;
+function getAckProvider(): V10ACKProvider {
+  if (!_ackProvider) {
+    if (!_kav10Address) {
+      throw new Error('getAckProvider() called before _kav10Address was initialized in beforeAll');
+    }
+    _ackProvider = makeHardhatReceiverACKProvider(
+      getSharedContext(),
+      _kav10Address,
+      [HARDHAT_KEYS.REC1_OP, HARDHAT_KEYS.REC2_OP, HARDHAT_KEYS.REC3_OP],
+    );
+  }
+  return _ackProvider;
+}
 
 function q(s: string, p: string, o: string, g = ''): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
@@ -313,10 +335,11 @@ describe('Reordered Publish Flow (replicate-then-publish)', () => {
     publisher = wrapPublisherForTest(publisher, {
       author: _author,
       ctx: { provider: _provider, kav10Address: _kav10Address },
+      v10ACKProvider: getAckProvider(),
     });
   });
 
-  it('publish() follows prepare → store → chain order with self-signed V10 ACK', async () => {
+  it('publish() follows prepare → store → chain order with 3-of-N V10 ACK quorum', async () => {
     const phases: string[] = [];
 
     const quads: Quad[] = [
@@ -356,50 +379,118 @@ describe('Reordered Publish Flow (replicate-then-publish)', () => {
     expect(result.onChainResult!.batchId).toBeGreaterThan(0n);
   });
 
-  it('publish() self-signs ACK when no v10ACKProvider (single-node mode)', async () => {
-    const quads: Quad[] = [
-      q(ENTITY, 'http://schema.org/name', '"Self-sign ACK Test"'),
-    ];
+  it('publish() throws when no v10ACKProvider is wired (no self-sign fallback — RC11 / PR1+PR2)', async () => {
+    // Inverse of the deleted self-sign test: build a publisher WITHOUT
+    // the in-memory ACK provider injection so the publish hits the
+    // chain-submit branch with `v10ACKs === undefined`. Previously the
+    // self-signed ACK fallback at `dkg-publisher.ts:1995-2040` produced
+    // a single ACK with `peerId: 'self'` and the publish confirmed on
+    // the harness (`minimumRequiredSignatures` was 1). After PR1 the
+    // fallback is deleted and the chain branch throws "V10 ACKs
+    // required for on-chain publish — no ACKs collected"; after PR2
+    // the surrounding catch re-throws verbatim instead of downgrading
+    // to a silent tentative. Pin the throw so a regression that
+    // re-introduces either the self-sign fallback OR the tentative
+    // downgrade fails loudly here.
+    const noAckPublisher = wrapPublisherForTest(
+      new DKGPublisher({
+        store,
+        chain,
+        eventBus,
+        keypair: await generateEd25519Keypair(),
+        publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+        publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
+      }),
+      {
+        author: _author,
+        ctx: { provider: _provider, kav10Address: _kav10Address },
+        // v10ACKProvider intentionally omitted — no self-sign fallback after PR1
+      },
+    );
 
-    const result = await publisher.publish({
-      contextGraphId: CONTEXT_GRAPH,
-      quads,
-    });
-
-    expect(result.status).toBe('confirmed');
-    expect(result.onChainResult).toBeDefined();
-    expect(result.onChainResult!.batchId).toBeGreaterThan(0n);
+    await expect(
+      noAckPublisher.publish({
+        contextGraphId: CONTEXT_GRAPH,
+        quads: [q(ENTITY, 'http://schema.org/name', '"No-ACK Test"')],
+      }),
+    ).rejects.toThrow(/V10 ACKs required for on-chain publish/);
   });
 
-  it('publish() emits PUBLISH_FAILED event when V10 chain call fails', async () => {
-    const events: any[] = [];
-    eventBus.on(DKGEvent.PUBLISH_FAILED, (data) => events.push(data));
+  it('publish() throws when V10 chain call fails (no silent tentative downgrade)', async () => {
+    // RC11 / PR2: pre-PR2 the publisher caught V10 chain failures
+    // (e.g. publisher has no tokens / stake), wrote the unconfirmed
+    // quads into the root data graph as tentative metadata, and
+    // returned `status: 'tentative'`. The PUBLISH_FAILED event was
+    // not emitted because the publisher never re-threw — making it
+    // structurally impossible for the daemon /api/publish route or
+    // the CLI to surface an actionable error.
+    //
+    // Post-PR2: the catch path re-throws, nothing is written
+    // locally, and the caller observes the underlying chain error.
+    // This test pins the new behaviour by asserting `rejects.toThrow`
+    // instead of green-checking a tentative downgrade.
+    eventBus.on(DKGEvent.PUBLISH_FAILED, () => {});
 
-    // With the real EVMChainAdapter we cannot monkey-patch createKnowledgeAssetsV10.
-    // Instead, we publish with an invalid/insufficient token amount to trigger a chain rejection.
-    // The publisher should catch the error and return tentative status.
     const quads: Quad[] = [
       q(ENTITY, 'http://schema.org/name', '"Fail Test"'),
     ];
 
-    // Use an adapter with a key that has no tokens/stake to provoke chain failure
     const failChain = createEVMAdapter(HARDHAT_KEYS.EXTRA1);
     const keypair = await generateEd25519Keypair();
-    const failPublisher = new DKGPublisher({
-      store,
-      chain: failChain,
-      eventBus,
-      keypair,
-      publisherPrivateKey: HARDHAT_KEYS.EXTRA1,
-      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
-    });
+    // RC11 / PR1+PR2 (review fix): wire the Hardhat receiver-ACK
+    // provider so the publish actually reaches the chain-submit branch
+    // before it throws. Without an injected `v10ACKProvider`, the
+    // submit branch's pre-flight guard ("V10 ACKs required for on-chain
+    // publish — no ACKs collected") fires first and the resulting
+    // `rejects.toThrow()` would accept the wrong-cause rejection.
+    // That would silently re-pass even after a future regression
+    // restores the catch-then-tentative behaviour on the chain branch
+    // — defeating the test's actual purpose. With the ACK provider
+    // wired in, ACK collection succeeds (REC1..REC3 sign), the chain
+    // branch is entered, and the publish fails because EXTRA1 has no
+    // tokens to satisfy the publisher-stake / fee precondition on the
+    // V10 contract — which is the path PR2's "no silent tentative
+    // downgrade on chain failure" actually guards.
+    const failPublisher = wrapPublisherForTest(
+      new DKGPublisher({
+        store,
+        chain: failChain,
+        eventBus,
+        keypair,
+        publisherPrivateKey: HARDHAT_KEYS.EXTRA1,
+        publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
+      }),
+      {
+        author: _author,
+        ctx: { provider: _provider, kav10Address: _kav10Address },
+        v10ACKProvider: getAckProvider(),
+      },
+    );
 
-    const result = await failPublisher.publish({
-      contextGraphId: CONTEXT_GRAPH,
-      quads,
-    });
-
-    expect(result.status).toBe('tentative');
+    // The intent is "publish() does NOT silently downgrade on a
+    // chain-branch failure". Capture the rejection once and check two
+    // things on the same error: (a) the publish rejected at all, and
+    // (b) it didn't reject with the ACK-pre-flight message — otherwise
+    // we'd be exercising the wrong branch and a future regression that
+    // restores the catch-then-tentative behaviour on the chain branch
+    // could slip past undetected.
+    let err: unknown;
+    try {
+      await failPublisher.publish({
+        contextGraphId: CONTEXT_GRAPH,
+        quads,
+      });
+    } catch (e) {
+      err = e;
+    }
+    expect(err, 'publish() must reject — no silent tentative downgrade on chain failure').toBeDefined();
+    const msg = err instanceof Error ? err.message : String(err);
+    expect(
+      msg,
+      `publish() must reject AT the chain-submit branch, not at the ` +
+      `V10-ACKs-required pre-flight guard; otherwise the test does not ` +
+      `exercise the PR2 catch-block-removal contract. Got: "${msg}"`,
+    ).not.toMatch(/V10 ACKs required for on-chain publish/);
   });
 });
 
@@ -443,6 +534,7 @@ describe('Context Graph Enshrinement with Signatures', () => {
     publisher = wrapPublisherForTest(publisher, {
       author: _author,
       ctx: { provider: _provider, kav10Address: _kav10Address },
+      v10ACKProvider: getAckProvider(),
     });
 
     const cgResult = await chain.createOnChainContextGraph({
@@ -527,6 +619,7 @@ describe('PublishToContextGraph chain adapter method', () => {
     const publisher = wrapPublisherForTest(_publisherRaw, {
       author: _author,
       ctx: { provider: _provider, kav10Address: _kav10Address },
+      v10ACKProvider: getAckProvider(),
     });
 
     const { contextGraphId } = await chain.createOnChainContextGraph({
@@ -585,6 +678,7 @@ describe('Regression: sorted and deduplicated participant signatures', () => {
     publisher = wrapPublisherForTest(publisher, {
       author: _author,
       ctx: { provider: _provider, kav10Address: _kav10Address },
+      v10ACKProvider: getAckProvider(),
     });
     const cgResult = await chain.createOnChainContextGraph({
       accessPolicy: 0,
@@ -693,6 +787,7 @@ describe('Regression: complete publish result fields', () => {
     const publisher = wrapPublisherForTest(_publisherRaw, {
       author: _author,
       ctx: { provider: _provider, kav10Address: _kav10Address },
+      v10ACKProvider: getAckProvider(),
     });
 
     const result = await publisher.publish({
@@ -723,9 +818,22 @@ describe('Regression: fail-fast when chain rejects', () => {
     await revertSnapshot(snapshotId);
   });
 
-  it('publish returns tentative (not crash) when V10 chain call rejects', async () => {
+  it('publish throws (no silent tentative downgrade) when V10 chain call rejects', async () => {
+    // RC11 / PR2: pre-PR2 a chain-side rejection (e.g. publisher has
+    // no tokens / profile) was caught inside the publisher's chain
+    // try-block, downgraded to a `status: tentative` result, and the
+    // unconfirmed quads were written to the root data graph as if
+    // they had landed on-chain. That silent downgrade was the
+    // tentative-VM defect the dzudza incident exposed: failed
+    // publishes appeared in `verified-memory` queries as confirmed
+    // data, and the daemon log only ever said "On-chain tx failed".
+    //
+    // Post-PR2 the catch path re-throws the underlying chain error
+    // verbatim and writes NOTHING to the local store. Operators
+    // (and the daemon publish route) see the actual chain error and
+    // can route on `instanceof Error` / `err.name` to surface a
+    // proper 4xx / 5xx, instead of a misleading 200 OK.
     const store = new OxigraphStore();
-    // Use a key with no tokens/profile to provoke a real chain rejection
     const chain = createEVMAdapter(HARDHAT_KEYS.EXTRA1);
     const eventBus = new TypedEventBus();
     const keypair = await generateEd25519Keypair();
@@ -743,18 +851,25 @@ describe('Regression: fail-fast when chain rejects', () => {
       ctx: { provider: _provider, kav10Address: _kav10Address },
     });
 
-    const result = await publisher.publish({
-      contextGraphId: CONTEXT_GRAPH,
-      quads: [q('urn:test:failfast:1', 'http://schema.org/name', '"FailFast"')],
-    });
-
-    expect(result.status).toBe('tentative');
-    expect(result.onChainResult).toBeUndefined();
+    await expect(
+      publisher.publish({
+        contextGraphId: CONTEXT_GRAPH,
+        quads: [q('urn:test:failfast:1', 'http://schema.org/name', '"FailFast"')],
+      }),
+    ).rejects.toThrow();
   });
 
-  it('publish stores data locally even when chain tx fails', async () => {
+  it('publish writes NOTHING to the local store when chain tx fails', async () => {
+    // RC11 / PR2: the inverse assertion to the legacy "publish stores
+    // data locally even when chain tx fails" test. Pre-PR2 the
+    // tentative downgrade always wrote the assertion quads into the
+    // root data graph regardless of chain outcome. Post-PR2 the
+    // root data graph is only ever populated by a confirmed publish
+    // (or one of the two intentional non-chain skip branches —
+    // missing CG id / non-V10 adapter). A failed on-chain publish
+    // must leave the local store untouched so the `verified-memory`
+    // view in `dkg-query-engine.ts` cannot surface ghost rows.
     const store = new OxigraphStore();
-    // Use a key with no tokens/profile to provoke a real chain rejection
     const chain = createEVMAdapter(HARDHAT_KEYS.EXTRA2);
     const eventBus = new TypedEventBus();
     const keypair = await generateEd25519Keypair();
@@ -772,18 +887,19 @@ describe('Regression: fail-fast when chain rejects', () => {
       ctx: { provider: _provider, kav10Address: _kav10Address },
     });
 
-    await publisher.publish({
-      contextGraphId: CONTEXT_GRAPH,
-      quads: [q('urn:test:localstore:1', 'http://schema.org/name', '"LocalStore"')],
-    });
+    await expect(
+      publisher.publish({
+        contextGraphId: CONTEXT_GRAPH,
+        quads: [q('urn:test:localstore:1', 'http://schema.org/name', '"LocalStore"')],
+      }),
+    ).rejects.toThrow();
 
     const queryResult = await store.query(
       `SELECT ?o WHERE { GRAPH <did:dkg:context-graph:${CONTEXT_GRAPH}> { <urn:test:localstore:1> <http://schema.org/name> ?o } }`,
     );
     expect(queryResult.type).toBe('bindings');
     if (queryResult.type === 'bindings') {
-      expect(queryResult.bindings.length).toBe(1);
-      expect(queryResult.bindings[0]['o']).toBe('"LocalStore"');
+      expect(queryResult.bindings.length).toBe(0);
     }
   });
 });

@@ -132,17 +132,28 @@ ON_CHAIN_ID=$(parse_json "$CREATE_CUR" '.onChainId')
 [ -n "$ON_CHAIN_ID" ] || fail "create+register failed: $CREATE_CUR"
 log "✓ curated CG onChainId=$ON_CHAIN_ID"
 
-api_call "$M1_NODE" POST /api/context-graph/create "$(cat <<EOF
-{ "id": "$CG_ID", "name": "revocation ${STAMP} (M1)",
+# Codex PR #621 follow-up: don't swallow EVERY error with `|| true`.
+# Capture the response and tolerate only the idempotent "already
+# exists" signal — a real failure (wrong auth, malformed body, etc.)
+# now aborts the script instead of surfacing later as an opaque
+# catchup timeout with the actual setup error lost.
+member_pre_create() {
+  local node="$1" tag="$2"
+  local resp
+  resp=$(api_call "$node" POST /api/context-graph/create "$(cat <<EOF
+{ "id": "$CG_ID", "name": "revocation ${STAMP} ($tag)",
   "accessPolicy": 1, "publishPolicy": 0, "allowedAgents": $ALLOWED }
 EOF
-)" >/dev/null || true
-
-api_call "$M2_NODE" POST /api/context-graph/create "$(cat <<EOF
-{ "id": "$CG_ID", "name": "revocation ${STAMP} (M2)",
-  "accessPolicy": 1, "publishPolicy": 0, "allowedAgents": $ALLOWED }
-EOF
-)" >/dev/null || true
+)") || true
+  case "$resp" in
+    *'"created"'*|*'"uri"'*) log "✓ $tag pre-created CG locally" ;;
+    *'already'*|*'duplicate'*|*'exists'*) log "✓ $tag CG already locally known (idempotent)" ;;
+    '') fail "$tag pre-create returned empty response — daemon unreachable?" ;;
+    *) fail "$tag pre-create FAILED with non-idempotent error: $resp" ;;
+  esac
+}
+member_pre_create "$M1_NODE" "M1"
+member_pre_create "$M2_NODE" "M2"
 sleep 3
 
 # ===========================================================================
@@ -268,35 +279,60 @@ sleep 8
 # ===========================================================================
 act "5. Assert M1 sees all 6, M2 sees ≤ 3"
 # ===========================================================================
-# Force a catchup on both members
-api_call "$M1_NODE" POST /api/shared-memory/catchup "$(cat <<EOF
-{ "contextGraphId": "$CG_ID" }
-EOF
-)" >/dev/null 2>&1 || true
-api_call "$M2_NODE" POST /api/shared-memory/catchup "$(cat <<EOF
-{ "contextGraphId": "$CG_ID" }
-EOF
-)" >/dev/null 2>&1 || true
-sleep 3
+# Codex PR #621 follow-up: replace the single "sleep 3 + one shot
+# read" with a bounded retry. Gossip / catchup latency between the
+# curator's write and a member's final triple count is variable
+# (especially under devnet load), and a one-shot snapshot reports
+# the M1 partial state as a regression even though M1 would have
+# caught up a second later. The retry collapses to a single read
+# once M1 hits target and is cheap on the happy path.
+wait_for_count_or_steady() {
+  local node="$1" who="$2" target="$3"
+  local last_read=""
+  for _ in $(seq 1 30); do
+    # `count_triples` is idempotent: it triggers a catchup and then
+    # reads the SPARQL count. Re-invoking it is the retry loop.
+    last_read=$(count_triples "$node")
+    if [ -n "$last_read" ] && [ "$last_read" -ge "$target" ] 2>/dev/null; then
+      printf '%s\n' "$last_read"
+      return 0
+    fi
+    sleep 1
+  done
+  # Steady but-not-at-target — caller decides whether that's a
+  # failure (M1 must reach target) or expected (M2 stuck at PRE
+  # count is the headline revocation outcome).
+  printf '%s\n' "${last_read:-}"
+}
+
+log "Polling for post-revocation steady state (up to 30s per peer)…"
+M1_FINAL=$(wait_for_count_or_steady "$M1_NODE" "M1" 6)
+M2_FINAL=$(wait_for_count_or_steady "$M2_NODE" "M2" 6)
+CURATOR_FINAL=$(count_triples "$CURATOR_NODE")
 
 # Codex PR #621 R4: a read failure on M2 must NOT be silently treated
 # as "M2 only sees the first batch". Distinguish read errors (empty
 # string from count_triples) from real zero / low counts, and fail
 # the script if we can't actually measure M2's post-revocation state.
-M1_FINAL=$(count_triples "$M1_NODE")
-M2_FINAL=$(count_triples "$M2_NODE")
-CURATOR_FINAL=$(count_triples "$CURATOR_NODE")
-
 [ -n "$M1_FINAL" ]      || fail "M1 final read failed — can't measure post-revocation state"
 [ -n "$M2_FINAL" ]      || fail "M2 final read failed — can't measure post-revocation state"
 [ -n "$CURATOR_FINAL" ] || fail "Curator final read failed — can't sanity-check the writer's own view"
 
 log "Curator sees:  $CURATOR_FINAL triples"
 log "M1 sees:       $M1_FINAL triples"
-log "M2 sees:       $M2_FINAL triples"
+log "M2 sees:       $M2_FINAL triples (pre=$M2_PRE)"
 
 [ "$CURATOR_FINAL" -ge 6 ] || fail "curator final count=$CURATOR_FINAL expected ≥6 (own writes)"
 [ "$M1_FINAL" -ge 6 ] || fail "REGRESSION: M1 sees $M1_FINAL triples post-revocation, expected 6 (M1 was NOT revoked — must continue receiving)"
+
+# Codex PR #621 follow-up: ≤3 alone passes if revocation also wiped
+# M2's previously-decryptable triples. The forward-only rotation
+# contract in the script header requires the kicked member RETAINS
+# what they could already decrypt; they just don't learn anything
+# new. Pin a lower bound (`>= M2_PRE`) so a backwards leak (e.g.
+# M2 lost the pre-revoke batch via some pruning bug) shows up as
+# a hard failure here.
+[ "$M2_FINAL" -ge "$M2_PRE" ] || fail "FORWARD-ONLY ROTATION VIOLATED: M2 had $M2_PRE pre-revoke triples, now has $M2_FINAL post-revoke. Revocation removed history it should have left alone."
 
 # ===========================================================================
 act "6. Encryption-side rotation: M2 must reject the new sender-key epoch"

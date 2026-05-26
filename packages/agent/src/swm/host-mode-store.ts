@@ -76,6 +76,15 @@ export interface SwmHostModeStoreOptions {
 export interface SwmHostModeStartupReconcileReport {
   orphanLogsRemoved: number;
   orphanBytesRemoved: number;
+  /**
+   * Codex PR #619 follow-up: split out so operators can tell the
+   * difference between "log without meta" reaping (data already lost
+   * before reconcile ran) and "meta failed to parse" reaping
+   * (meta itself was the casualty; paired log was already reaped via
+   * the orphan-logs pass). Optional for backwards compat with the
+   * pre-fix report shape.
+   */
+  corruptMetasRemoved?: number;
 }
 
 export interface SwmHostModeStats {
@@ -170,7 +179,7 @@ export class SwmHostModeStore {
     const report = await this.reconcileOrphanLogs();
     this.lastStartupReconcileReport = report;
     this.initialized = true;
-    if (this.onStartupReconcile && (report.orphanLogsRemoved > 0 || report.orphanBytesRemoved > 0)) {
+    if (this.onStartupReconcile && (report.orphanLogsRemoved > 0 || report.orphanBytesRemoved > 0 || (report.corruptMetasRemoved ?? 0) > 0)) {
       try {
         this.onStartupReconcile(report);
       } catch {
@@ -230,14 +239,28 @@ export class SwmHostModeStore {
     // and must be reaped here too.
     const validMetaKeys = new Set<string>();
     const corruptMetaNames: string[] = [];
+    // Codex PR #619 follow-up: transient fs errors (EACCES, EMFILE,
+    // EBUSY, etc.) on the meta read MUST NOT be reaped as corruption;
+    // doing so deletes a healthy `.meta` + `.log` pair and loses
+    // hosted ciphertext on startup. Track keys whose meta we could not
+    // read so the paired `.log` is also retained for a later retry.
+    const ioSkippedMetaKeys = new Set<string>();
     const logFiles: { key: string; name: string }[] = [];
     for (const e of entries) {
       if (!e.isFile()) continue;
       if (e.name.endsWith('.meta')) {
         const metaPath = path.join(this.dataDir, e.name);
+        const metaKey = e.name.slice(0, -'.meta'.length);
+        let raw: string;
+        try {
+          raw = await fs.readFile(metaPath, 'utf-8');
+        } catch {
+          ioSkippedMetaKeys.add(metaKey);
+          continue;
+        }
         let parsed: unknown;
         try {
-          parsed = JSON.parse(await fs.readFile(metaPath, 'utf-8'));
+          parsed = JSON.parse(raw);
         } catch {
           corruptMetaNames.push(e.name);
           continue;
@@ -247,7 +270,7 @@ export class SwmHostModeStore {
           && typeof (parsed as { contextGraphId?: unknown }).contextGraphId === 'string'
           && (parsed as { contextGraphId: string }).contextGraphId.length > 0
         ) {
-          validMetaKeys.add(e.name.slice(0, -'.meta'.length));
+          validMetaKeys.add(metaKey);
         } else {
           corruptMetaNames.push(e.name);
         }
@@ -257,8 +280,11 @@ export class SwmHostModeStore {
     }
     let orphanLogsRemoved = 0;
     let orphanBytesRemoved = 0;
+    let corruptMetasRemoved = 0;
+    let corruptMetaBytesRemoved = 0;
     for (const { key, name } of logFiles) {
       if (validMetaKeys.has(key)) continue;
+      if (ioSkippedMetaKeys.has(key)) continue;
       const fullPath = path.join(this.dataDir, name);
       try {
         const stat = await fs.stat(fullPath);
@@ -269,21 +295,27 @@ export class SwmHostModeStore {
         // best-effort; another process may have removed the file
       }
     }
-    // Also reap corrupt .meta files themselves so subsequent inits
-    // don't keep tripping over them. Their footprint is tiny (counted
-    // in orphanBytesRemoved for observability).
     for (const name of corruptMetaNames) {
       const fullPath = path.join(this.dataDir, name);
       try {
         const stat = await fs.stat(fullPath);
-        orphanBytesRemoved += stat.size;
+        corruptMetaBytesRemoved += stat.size;
         await fs.rm(fullPath, { force: true });
-        orphanLogsRemoved += 1;
+        corruptMetasRemoved += 1;
       } catch {
         // best-effort
       }
     }
-    return { orphanLogsRemoved, orphanBytesRemoved };
+    const report: SwmHostModeStartupReconcileReport = {
+      // Backwards-compatible aggregate: older callers treat these as
+      // "files/bytes reaped by startup reconcile", including corrupt
+      // .meta files. Keep that contract and expose the split counter
+      // only as an optional drill-down.
+      orphanLogsRemoved: orphanLogsRemoved + corruptMetasRemoved,
+      orphanBytesRemoved: orphanBytesRemoved + corruptMetaBytesRemoved,
+    };
+    if (corruptMetasRemoved > 0) report.corruptMetasRemoved = corruptMetasRemoved;
+    return report;
   }
 
   /**
@@ -295,6 +327,24 @@ export class SwmHostModeStore {
    * `inflightWrites` so the file-level seqno stays monotonic.
    */
   async append(contextGraphId: string, envelopeBytes: Uint8Array): Promise<number> {
+    return this.withCgWriteLock(contextGraphId, () => this.appendUnlocked(contextGraphId, envelopeBytes));
+  }
+
+  /**
+   * Codex PR #620 follow-up: per-CG serialization for ALL meta mutations.
+   * `markHostModeSubscribed/Unsubscribed`, `markRegistered/Unregistered`
+   * used to call `loadMeta` → `persistMeta` outside the inflight-writes
+   * lock that `append()` and `pruneCg()` already use, so a
+   * `wireSwmHostModeHandler() → markHostModeSubscribed()` followed
+   * immediately by `maybeMarkRegisteredForHostMode() → markRegistered()`
+   * could see their `persistMeta` writes interleave and drop the
+   * `hostModeSubscribed` flag. Routing every mutator through this helper
+   * keeps the `.meta` file consistent.
+   */
+  private async withCgWriteLock<T>(
+    contextGraphId: string,
+    fn: () => Promise<T>,
+  ): Promise<T> {
     await this.init();
     const cgKey = this.cgKey(contextGraphId);
     const previous = this.inflightWrites.get(cgKey);
@@ -303,7 +353,7 @@ export class SwmHostModeStore {
     this.inflightWrites.set(cgKey, previous ? previous.then(() => next) : next);
     try {
       if (previous) await previous;
-      return await this.appendUnlocked(contextGraphId, envelopeBytes);
+      return await fn();
     } finally {
       resolveOuter();
       if (this.inflightWrites.get(cgKey) === next) this.inflightWrites.delete(cgKey);
@@ -375,11 +425,12 @@ export class SwmHostModeStore {
    * before the chain-event poller catches up. Idempotent.
    */
   async markHostModeSubscribed(contextGraphId: string): Promise<void> {
-    await this.init();
-    const meta = await this.loadMeta(contextGraphId);
-    if (meta.hostModeSubscribed === true) return;
-    meta.hostModeSubscribed = true;
-    await this.persistMeta(contextGraphId, meta);
+    await this.withCgWriteLock(contextGraphId, async () => {
+      const meta = await this.loadMeta(contextGraphId);
+      if (meta.hostModeSubscribed === true) return;
+      meta.hostModeSubscribed = true;
+      await this.persistMeta(contextGraphId, meta);
+    });
   }
 
   /**
@@ -389,11 +440,12 @@ export class SwmHostModeStore {
    * Persisted so a restart does NOT re-engage.
    */
   async markHostModeUnsubscribed(contextGraphId: string): Promise<void> {
-    await this.init();
-    const meta = await this.loadMeta(contextGraphId);
-    if (meta.hostModeSubscribed !== true) return;
-    meta.hostModeSubscribed = false;
-    await this.persistMeta(contextGraphId, meta);
+    await this.withCgWriteLock(contextGraphId, async () => {
+      const meta = await this.loadMeta(contextGraphId);
+      if (meta.hostModeSubscribed !== true) return;
+      meta.hostModeSubscribed = false;
+      await this.persistMeta(contextGraphId, meta);
+    });
   }
 
   /**
@@ -414,20 +466,22 @@ export class SwmHostModeStore {
 
   /** Mark a CG as on-chain registered. Switches it to the larger limits. */
   async markRegistered(contextGraphId: string): Promise<void> {
-    await this.init();
-    const meta = await this.loadMeta(contextGraphId);
-    if (meta.registered) return;
-    meta.registered = true;
-    await this.persistMeta(contextGraphId, meta);
+    await this.withCgWriteLock(contextGraphId, async () => {
+      const meta = await this.loadMeta(contextGraphId);
+      if (meta.registered) return;
+      meta.registered = true;
+      await this.persistMeta(contextGraphId, meta);
+    });
   }
 
   /** Mark a CG as no-longer-registered. Useful for revoke flows. */
   async markUnregistered(contextGraphId: string): Promise<void> {
-    await this.init();
-    const meta = await this.loadMeta(contextGraphId);
-    if (!meta.registered) return;
-    meta.registered = false;
-    await this.persistMeta(contextGraphId, meta);
+    await this.withCgWriteLock(contextGraphId, async () => {
+      const meta = await this.loadMeta(contextGraphId);
+      if (!meta.registered) return;
+      meta.registered = false;
+      await this.persistMeta(contextGraphId, meta);
+    });
   }
 
   /** Returns `true` if at least one stored entry exists for the CG. */

@@ -17,7 +17,7 @@ This document describes how to cut a new release of the DKG V9 node so that user
 1. **From GitHub Releases**  
    Go to [Releases](https://github.com/OriginTrail/dkg-v9/releases), pick a version (e.g. v9.0.0), download "Source code (zip)" or "Source code (tar.gz)".
 
-2. **From git**  
+2. **From git** *(recommended only for development; production cores should use npm-pinned auto-updates — see [operator/MIGRATE_TO_NPM.md](operator/MIGRATE_TO_NPM.md) to convert an existing git checkout)*  
    ```bash
    git clone --depth 1 --branch v9.0.0 https://github.com/OriginTrail/dkg-v9.git
    cd dkg-v9

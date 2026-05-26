@@ -227,6 +227,7 @@ describe('E2E: workspace-first publish with real blockchain', () => {
     const nodeA = await DKGAgent.create({
       name: 'FinChainA',
       listenPort: 0,
+      nodeRole: 'core',
       skills: [],
       chainConfig: makeChainConfig(NODE_A_KEY),
     });
@@ -235,6 +236,7 @@ describe('E2E: workspace-first publish with real blockchain', () => {
     const nodeB = await DKGAgent.create({
       name: 'FinChainB',
       listenPort: 0,
+      nodeRole: 'core',
       skills: [],
       chainConfig: makeChainConfig(NODE_B_KEY),
     });

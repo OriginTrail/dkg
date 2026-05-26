@@ -59,6 +59,7 @@ import {
   setMinimumRequiredSignatures,
 } from '../../chain/test/hardhat-harness.js';
 import { withSeal as _withSeal } from './_helpers/seal.js';
+import { hardhatACKProvider } from './_helpers/acks.js';
 
 type WithProvider = { provider: ethers.JsonRpcProvider };
 
@@ -69,9 +70,12 @@ let _provider: ethers.JsonRpcProvider;
 const _author = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
 
 async function pubS(p: DKGPublisher, args: Parameters<DKGPublisher['publish']>[0]) {
-  return p.publish(
-    await _withSeal(args, _author, { provider: _provider, kav10Address: _kav10Address }),
-  );
+  const sealed = await _withSeal(args, _author, { provider: _provider, kav10Address: _kav10Address });
+  // RC11 / PR1: real 3-of-N ACK quorum (self-signed ACK fallback gone)
+  return p.publish({
+    ...sealed,
+    v10ACKProvider: sealed.v10ACKProvider ?? hardhatACKProvider(_kav10Address),
+  } as Parameters<DKGPublisher['publish']>[0]);
 }
 
 function q(s: string, p: string, o: string): Quad {
@@ -172,15 +176,24 @@ describe('Publish ordering & RPC spy — P-1 / P-6 / P-7', () => {
       expect(rpcCalls.length).toBeGreaterThan(0);
       expect(storeInserts.length).toBeGreaterThan(0);
 
-      // SPEC axiom 4: first store insert for the KC data must have
-      // completed BEFORE the first eth_sendRawTransaction was issued.
+      // RC11 / PR2 inverted the original spec-axiom-4 invariant:
+      // the KC-data-graph insert is now deferred to AFTER the
+      // `KCCreated` event so failed publishes can't leave "tentative
+      // VM" quads visible to /api/query. Earlier metadata /
+      // lifecycle inserts (CG ensure, private-store etc.) still run
+      // pre-chain, so a `storeInserts[0]` may legitimately precede
+      // the first RPC. The load-bearing assertion now is "the LAST
+      // store insert — which carries the public KC data quads —
+      // must complete AFTER the first eth_sendRawTransaction".
       const firstSend = rpcCalls[0].at;
-      const firstInsert = storeInserts[0].at;
-      expect(firstInsert).toBeLessThan(firstSend);
+      const lastInsert = storeInserts[storeInserts.length - 1].at;
+      expect(firstSend).toBeLessThan(lastInsert);
 
-      // Additional structural check: the phase log at the moment the
-      // RPC fired must already contain `store:end`.
-      expect(rpcCalls[0].phaseLogSnapshot).toContain('store:end');
+      // Structural counterpart: at the moment the chain RPC fires,
+      // `chain:submit:start` must already be in the phase log so
+      // listeners can correlate the wire event back to the chain
+      // phase they're checkpointing.
+      expect(rpcCalls[0].phaseLogSnapshot).toContain('chain:submit:start');
     } finally {
       ourProvider.send = origSend;
     }

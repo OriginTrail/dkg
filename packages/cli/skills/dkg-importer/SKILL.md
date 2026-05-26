@@ -345,9 +345,12 @@ async function promoteAllInBatches(assertion, allRoots) {
 ```
 
 If both 413 and 500-gossip fire on the same import, you need both recovery
-loops — they're orthogonal. PR #643's async promote queue removes both
-failure modes by promoting one root at a time in the background; until that
-lands, importers must implement both halve-and-retry paths.
+loops — they're orthogonal. **As of PR #4 the daemon ships an
+in-process async promote queue** (`POST /api/assertion/<name>/promote-async`)
+that removes both failure modes by promoting one classifying-and-retrying
+job at a time in the background. See [§6 Async promote queue](#6-async-promote-queue)
+for the new contract — for a fresh importer, prefer the async path and skip
+both halve-and-retry loops above.
 
 ### HTTP 401 / 403
 
@@ -378,7 +381,127 @@ assertion's WM state is partial, you can either:
 - **Discard the partial assertion** with `POST /api/assertion/<name>/discard`
   and start over from your last `done` partition.
 
-## 6. Anti-patterns (don't do this)
+## 6. Async promote queue
+
+As of PR #4 in the async-promote-queue series the daemon ships an in-process
+queue that converts the synchronous `POST /api/assertion/<name>/promote`
+round-trip into a fire-and-forget enqueue. For bulk imports — where the
+synchronous promote round-trip is the bottleneck — this is the recommended
+path. See [`docs/specs/SPEC_ASYNC_PROMOTE_QUEUE.md`](../../../../docs/specs/SPEC_ASYNC_PROMOTE_QUEUE.md)
+for the design and `packages/cli/skills/dkg-node/SKILL.md` §8 for the
+in-daemon worker configuration.
+
+### Why use it
+
+The synchronous `/promote` route blocks on SWM insert + gossip publish. For a
+multi-thousand-partition import that's the single biggest source of wall-clock
+time: tens of minutes spent in the 413 / 500-gossip halve-and-retry recipes in
+[§5](#5-error-handling). The async route returns `HTTP 202 { jobId, state:
+"queued" }` immediately; an in-daemon worker dequeues, runs the same promote
+logic, and writes the result back into a Control Graph for inspection.
+
+You still need to chunk **writes** at `CHUNK=5,000` per §1 — that cap hasn't
+changed. The async queue specifically targets the **promote** half of the
+loop.
+
+### Route inventory
+
+| Method | Route | Purpose |
+|---|---|---|
+| `POST` | `/api/assertion/<name>/promote-async` | Enqueue. Body: `{ contextGraphId, entities?: [...] \| "all", subGraphName? }`. Returns `202 { jobId, state: "queued", enqueuedAt }`. Returns `409 { existingJobId }` if there is already an active job for the same `(contextGraphId, subGraphName, name)`. |
+| `GET`  | `/api/assertion/promote-async` | List jobs. Query: `state=queued,running,failed_retrying,succeeded,failed` (comma-separated), `contextGraphId=...`, `limit=N`. Returns `{ jobs: [...] }`. |
+| `GET`  | `/api/assertion/promote-async/<jobId>` | Read one job: `state`, `attempt.count`, `commitMarker`, `result`, `attempt.lastError` with `classification: transient\|cap_exceeded\|fatal`. |
+| `DELETE` | `/api/assertion/promote-async/<jobId>` | Cancel a `queued` / `failed_retrying` job. `409` if the job is `running` (let the lease expire). |
+| `POST` | `/api/assertion/promote-async/<jobId>/recover` | Re-queue a `failed` job after fixing whatever was wrong (subdivide an over-large entity set, restart an upstream, etc.). |
+
+### The async write loop
+
+Identical to §2 right up to the promote step, then swap the synchronous
+call for the enqueue + poll-or-fire-and-forget pattern:
+
+```ts
+for (const part of partitions) {
+  await markPartitionStatus({ client, importId, partitionKey: part.key, status: 'in_progress', subGraphName: 'meta' });
+
+  // CREATE + WRITE — unchanged from §2.
+  await client.request('POST', '/api/assertion/create', { name: part.assertion, subGraphName: part.subGraphName, contextGraphId: client.cgId });
+  for (const slice of chunks(part.quads, 5000)) {
+    await client.writeAssertion({ contextGraphId: client.cgId, assertionName: part.assertion, subGraphName: part.subGraphName, triples: slice });
+  }
+
+  // PROMOTE — async path. Returns immediately; the worker takes over.
+  const { jobId } = await client.request(
+    'POST',
+    `/api/assertion/${encodeURIComponent(part.assertion)}/promote-async`,
+    { contextGraphId: client.cgId, subGraphName: part.subGraphName, entities: part.roots },
+  );
+
+  // For a typical importer: track the jobId in your own state and move on.
+  // Mark partition `done` only after the job reaches state="succeeded".
+  await trackAsyncPromote({ client, jobId, partitionKey: part.key });
+}
+```
+
+`trackAsyncPromote` can either:
+
+- **Poll** `GET /api/assertion/promote-async/<jobId>` on a backoff until
+  `state === "succeeded"` (call `markPartitionStatus(..., 'done')` then) or
+  `state === "failed"` (recover or escalate per §6 below). Use a 250-1000ms
+  interval — the worker polls the queue at ~100ms by default.
+- **Fire-and-forget**: keep the `jobId` in the manifest as a `partitionStatus`
+  metadata field and let a separate reconciliation pass at the end of the
+  import walk all in-flight jobs to a terminal state.
+
+### Failure classification (`attempt.lastError.classification`)
+
+The worker classifies every failure into one of three buckets. Read it from
+`GET /api/assertion/promote-async/<jobId>`:
+
+| Classification | Retry? | Typical cause | Importer action |
+|---|---|---|---|
+| `transient` | yes (until `maxRetries=5` reached) | `fetch failed` / `ECONNRESET` / `timeout` | Wait — the worker auto-retries with backoff. No-op for the importer until the job leaves `failed_retrying`. |
+| `cap_exceeded` | no | `Promoted assertion too large for gossip` (10 MB) or `Request body too large` (256 KB) | Re-enqueue with a smaller `entities` slice (the queue can't subdivide on its own — that's a future enhancement). Same halve-and-retry shape as the synchronous recipe, just applied at the queue layer. |
+| `fatal` | no | Bad request, missing assertion, etc. | Inspect the error message, fix the cause, then `POST /api/assertion/promote-async/<jobId>/recover` to re-queue. |
+
+Note that `cap_exceeded` jobs reach `state: "failed"`, not `failed_retrying`,
+because retrying the same payload would just hit the cap again. The importer
+is on the hook for subdivision — see [§5](#5-error-handling) for the same
+halve-and-retry recipe, except you re-enqueue rather than retry inline.
+
+### Migration from synchronous `/promote`
+
+The synchronous route is **not** deprecated. Use it when:
+
+- You're doing a small interactive import (single assertion, single promote)
+  and the round-trip cost is below your latency budget.
+- Your client doesn't want to track job IDs or implement polling.
+- You explicitly need the SWM-insert-and-gossip-complete signal in-band.
+
+Otherwise, prefer `/promote-async`. The contract is identical (same body
+shape, same chunking budgets, same per-root semantics) — the only difference
+is **when** the SWM insert lands.
+
+### Inspecting the queue in-flight
+
+A running import can be inspected without interrupting it:
+
+```bash
+# Everything still queued for this context graph
+curl -H "Authorization: Bearer $DKG_TOKEN" \
+  "http://localhost:9200/api/assertion/promote-async?contextGraphId=$CG_ID&state=queued,running"
+
+# Anything that failed and is waiting on operator action
+curl -H "Authorization: Bearer $DKG_TOKEN" \
+  "http://localhost:9200/api/assertion/promote-async?state=failed&contextGraphId=$CG_ID"
+```
+
+This is the queue-level view; per-partition state still lives in the
+manifest in §3. The two are complementary: the manifest tracks logical
+progress (`pending` → `in_progress` → `done`); the queue tracks the
+mechanical promote step. A partition stays `in_progress` while its
+promote job is queued / running.
+
+## 7. Anti-patterns (don't do this)
 
 - **Don't push a million-quad payload in one `/write` call.** It will hit 413
   and you'll learn the chunk size the slow way.
@@ -400,7 +523,9 @@ assertion's WM state is partial, you can either:
   `assertion/promote` step. Confusing the two is the most common
   "where did my money go?" mistake.
 
-## 7. Cheat sheet
+## 8. Cheat sheet
+
+### Synchronous loop (small / interactive imports)
 
 ```
 1. Decide your import id and partition keys (one per source artefact).
@@ -416,11 +541,33 @@ assertion's WM state is partial, you can either:
 6. (Optional, human-gated) /api/shared-memory/publish promotes SWM → VM.
 ```
 
+### Async loop (bulk imports — recommended for >100 partitions)
+
+```
+1. Decide your import id and partition keys.
+2. createImportManifest({ client, importId, partitions, subGraphName: 'meta' })
+3. For each partition (≤ 4 concurrent):
+   a. markPartitionStatus(..., 'in_progress')
+   b. POST /api/assertion/create   { name, subGraphName, contextGraphId }
+   c. POST /api/assertion/<name>/write   { quads }      // chunks of ≤ 5000
+   d. POST /api/assertion/<name>/promote-async { entities }   // returns 202 { jobId }
+   e. Persist jobId; do NOT mark partition done yet.
+4. Reconciliation pass: for each in-flight jobId,
+     GET /api/assertion/promote-async/<jobId> until state ∈ {succeeded, failed}.
+     - succeeded → markPartitionStatus(..., 'done')
+     - failed + classification=cap_exceeded → subdivide entities + re-enqueue
+     - failed + classification=fatal → fix root cause + POST .../recover
+     - failed_retrying → wait; worker will auto-retry transient errors
+5. On crash: loadImportManifest → pendingPartitions → resume from step 3.
+6. (Optional, human-gated) /api/shared-memory/publish promotes SWM → VM.
+```
+
 ## References
 
 - [ADR 0002 — Importer chunking contract](../../../../docs/adr/0002-importer-chunking-contract.md)
 - [ADR 0003 — Code-graph ontology convergence](../../../../docs/adr/0003-code-graph-ontology-convergence.md)
+- [SPEC — Async promote queue (WM → SWM)](../../../../docs/specs/SPEC_ASYNC_PROMOTE_QUEUE.md)
 - [`scripts/lib/manifest.mjs`](../../../../scripts/lib/manifest.mjs) — reference manifest implementation
 - [`scripts/lib/dkg-daemon.mjs`](../../../../scripts/lib/dkg-daemon.mjs) — `DkgClient` with built-in chunking
 - [`scripts/lib/ontology.mjs`](../../../../scripts/lib/ontology.mjs) — canonical `code:*` ontology constants
-- [`packages/cli/skills/dkg-node/SKILL.md`](../dkg-node/SKILL.md) — node API surface (auth, CGs, SWM/VM, SPARQL)
+- [`packages/cli/skills/dkg-node/SKILL.md`](../dkg-node/SKILL.md) — node API surface (auth, CGs, SWM/VM, SPARQL), incl. §8 async promote queue worker config

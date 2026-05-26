@@ -17,10 +17,11 @@
 import React from 'react';
 import type { MemoryEntity, TrustLevel } from '../hooks/useMemoryEntities.js';
 import {
-  useProjectActivity,
+  useProjectActivityEvents,
   bucketActivity,
   relativeTime,
   type ActivityItem,
+  type PromotionAttribution as ActivityFeedEvent,
 } from '../hooks/useProjectActivity.js';
 import { useAgentsContext } from '../hooks/useAgents.js';
 import { useProjectProfileContext } from '../hooks/useProjectProfile.js';
@@ -51,6 +52,16 @@ export interface ActivityFeedProps {
    * feed sets this to false.
    */
   includeUndated?: boolean;
+  /**
+   * N6 part 2 — when supplied, SWM promotion events are interleaved
+   * into the feed as `'promoted'` rows. The Overview wires this to
+   * `useSwmAttributions(...).events` (raw per-operation event log)
+   * so re-promotions surface as distinct rows. AgentProfileView omits
+   * this (the per-agent typed-activity slice doesn't want promotion
+   * noise). Codex Code2 (PR #656) — switched from the deduped
+   * `attributions` map to the raw event list.
+   */
+  swmEvents?: ReadonlyArray<ActivityFeedEvent>;
   title?: React.ReactNode;
   onSelectEntity: (uri: string) => void;
   /** Optional click handler for author chips (navigate to agent profile). */
@@ -67,14 +78,18 @@ export const ActivityFeed: React.FC<ActivityFeedProps> = ({
   subGraph,
   limit,
   includeUndated = true,
+  swmEvents,
   title,
   onSelectEntity,
   onOpenAgent,
   emptyHint,
   className = '',
 }) => {
-  const items = useProjectActivity(entities, {
-    agentUri, typeIri, subGraph, limit, includeUndated,
+  // useProjectActivityEvents reduces to plain useProjectActivity when
+  // swmEvents is undefined, so existing callers (AgentProfileView)
+  // get identical behaviour without passing the new prop.
+  const items = useProjectActivityEvents(entities, {
+    agentUri, typeIri, subGraph, limit, includeUndated, swmEvents,
   });
   const buckets = React.useMemo(() => bucketActivity(items), [items]);
   const agents = useAgentsContext();
@@ -105,7 +120,7 @@ export const ActivityFeed: React.FC<ActivityFeedProps> = ({
           <div className="v10-activity-feed-items">
             {bucket.items.map(item => (
               <ActivityRow
-                key={item.entity.uri}
+                key={item.id}
                 item={item}
                 agents={agents}
                 profile={profile}
@@ -134,26 +149,57 @@ function ActivityRow({
   onOpenAgent?: (uri: string) => void;
 }) {
   const author = item.authorUri ? agents?.get(item.authorUri) : null;
-  const typeBinding = profile?.forType(item.kindUri);
-  const typeLabel = typeBinding?.label
-    ?? item.kindUri.split(/[#/]/).pop()
-    ?? 'Entity';
-  const typeIcon = typeBinding?.icon ?? '◆';
-  const typeColor = typeBinding?.color ?? '#a855f7';
+  // Event-specific presentation (N6). `'typed'` keeps the historical
+  // type-binding-driven look (Decision green check, Task cyan, etc.).
+  // `'added'` is a neutral import treatment. `'promoted'` (and the
+  // forthcoming `'published'`) are stage transitions, coloured to the
+  // *target* layer they advanced into so the row reads as "moved to
+  // Shared Working Memory".
+  const isTyped = item.event === 'typed';
+  const typeBinding = isTyped && item.kindUri ? profile?.forType(item.kindUri) : null;
+  const typeLabel = ((): string => {
+    if (item.event === 'added') return 'Added';
+    if (item.event === 'promoted') return 'Promoted to Shared Working Memory';
+    if (item.event === 'published') return 'Published to Verifiable Memory';
+    return typeBinding?.label ?? (item.kindUri ? item.kindUri.split(/[#/]/).pop() : null) ?? 'Entity';
+  })();
+  const typeIcon = ((): string => {
+    if (item.event === 'added') return '+';
+    if (item.event === 'promoted') return '⇡';
+    if (item.event === 'published') return '◉';
+    return typeBinding?.icon ?? '◆';
+  })();
+  const typeColor = ((): string => {
+    if (item.event === 'promoted') return LAYER_COLOR.shared;
+    if (item.event === 'published') return LAYER_COLOR.verified;
+    if (item.event === 'added') return '#64748b';
+    return typeBinding?.color ?? '#a855f7';
+  })();
   const layerColor = LAYER_COLOR[item.layer];
 
   // Surface status when the entity has one — decisions.status / tasks.status /
   // github.state — because "rejected" / "blocked" / "merged" is often the
-  // most useful scan-while-browsing signal.
-  const status = findStatus(item.entity);
+  // most useful scan-while-browsing signal. Only meaningful on `'typed'`
+  // rows; `'promoted'` / `'added'` / `'published'` describe the transition
+  // itself and the status would read confusingly next to "Promoted to …".
+  const status = isTyped ? findStatus(item.entity) : null;
+  // Event-aware tooltip — promote/publish rows read better as
+  // "Promoted to Shared Working Memory · Foo" than just "Foo".
+  const tooltip = (() => {
+    const parts: string[] = [];
+    if (item.event !== 'typed') parts.push(typeLabel);
+    parts.push(item.entity.label);
+    if (item.at) parts.push(item.at.toISOString());
+    return parts.join('\n');
+  })();
 
-  return (
-    <button
-      type="button"
-      className="v10-activity-feed-row"
-      onClick={() => onSelectEntity(item.entity.uri)}
-      title={item.at ? `${item.entity.label}\n${item.at.toISOString()}` : item.entity.label}
-    >
+  // Codex Code3 (PR #656) — stub promotion rows for roots that aren't
+  // in `rawMemory.entities` are non-clickable. The detail navigation
+  // would otherwise resolve `selectedEntity` to null and clear the
+  // selection on the next render. Render as static text instead of
+  // an interactive button; the event still appears in the timeline.
+  const rowBody = (
+    <>
       <span
         className="v10-activity-feed-layer"
         style={{ color: layerColor }}
@@ -187,6 +233,29 @@ function ActivityRow({
       <span className="v10-activity-feed-time" title={item.at ? item.at.toLocaleString() : 'no timestamp'}>
         {relativeTime(item.at)}
       </span>
+    </>
+  );
+
+  if (!item.clickable) {
+    return (
+      <div
+        className="v10-activity-feed-row v10-activity-feed-row-static"
+        title={tooltip}
+        aria-disabled="true"
+      >
+        {rowBody}
+      </div>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      className="v10-activity-feed-row"
+      onClick={() => onSelectEntity(item.entity.uri)}
+      title={tooltip}
+    >
+      {rowBody}
     </button>
   );
 }

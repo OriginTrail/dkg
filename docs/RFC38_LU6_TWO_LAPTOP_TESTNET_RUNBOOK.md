@@ -83,11 +83,14 @@ SWM host-mode store initialized at … (role=core)   # on the core only
 SWM host-mode store initialized at … (role=edge)   # on each laptop
 ```
 
-Capture the three agent addresses + libp2p peer IDs:
+Capture the three agent addresses + libp2p peer IDs (`dkg show` was
+never a real top-level command — use the actual CLI / API surface):
 ```bash
-dkg show
-# → wallet:  0x…
-# → peerId:  12D3KooW…
+dkg status                         # name, version, peerId, nodeRole, multiaddrs
+dkg auth show                      # bearer token (strips comments)
+# Agent EOA via HTTP API:
+curl -sH "Authorization: Bearer $(dkg auth show)" \
+  http://localhost:9200/api/agent/identity | jq '{ agentAddress, peerId }'
 ```
 
 ## 1. Curator (laptop A) creates a curated CG without on-chain registration
@@ -103,10 +106,18 @@ From laptop A's Node UI:
 Click **Create Project**. The modal completes without a blockchain
 transaction. The CG is in the "freemium / pre-registration" tier.
 
-Verify on laptop A:
+Verify on laptop A. The CLI helper strips comments + blank lines
+from `~/.dkg/auth.token` (a literal `cat` of that file would inject
+the commented header into your `Authorization` header and 401 even
+on a healthy node), and `/api/context-graph/list` returns an envelope
+object — not a bare array — with `accessPolicy` (numeric: `0`=public,
+`1`=curated), not `access`:
+
 ```bash
-curl -sH "Authorization: Bearer $(cat ~/.dkg/auth.token)" \
-  http://localhost:9200/api/context-graph/list | jq '.[] | select(.access=="curated")'
+TOKEN=$(dkg auth show)
+curl -sH "Authorization: Bearer $TOKEN" \
+  http://localhost:9200/api/context-graph/list \
+  | jq '.contextGraphs[] | select(.accessPolicy == 1)'
 ```
 
 You should see the new CG with `registered: false`.
@@ -123,20 +134,27 @@ On the core, after 5–15s:
 grep "Beacon-driven auto-host engaged" ~/.dkg/daemon.log | tail
 ```
 should show one or more lines with the wire id matching the curator's
-CG (translate via `dkg show-cg <id>` on laptop A).
+CG. The cleartext → wire-id translation is `keccak256(<cgId>)`; you
+can compute it locally (e.g. `node -e 'console.log(require("ethers").keccak256(new TextEncoder().encode("<cg-id>")))'`)
+since there is no `dkg show-cg` subcommand.
 
 If the beacon never arrives at the core, the gossip topic isn't
 propagating. Check:
 - Both nodes subscribed to `dkg/cg-discovery` (grep the topic in logs)
 - DHT bootstrap completed on the core (`peerStore size > 0`)
-- Curator's wallet appears in the core's `beaconCuratorByWireId` cache
-  (no direct API; check via `dkg shared-memory host-mode stats`)
+- Core's host-mode store reports the CG (no direct curator-cache API; inspect via the host-mode stats endpoint):
+  ```bash
+  curl -sH "Authorization: Bearer $(dkg auth show)" \
+    http://localhost:9200/api/shared-memory/host-mode/stats | jq
+  ```
 
 ## 3. Curator writes triples → core hosts opaque ciphertext
 
-Laptop A:
+Laptop A (use `dkg auth show` everywhere — `cat ~/.dkg/auth.token`
+includes the file's comment header which 401s):
 ```bash
-curl -sH "Authorization: Bearer $(cat ~/.dkg/auth.token)" \
+TOKEN=$(dkg auth show)
+curl -sH "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{ "contextGraphId": "<cg-id>", "quads": [
     { "subject": "urn:c4/alpha", "predicate": "http://schema.org/name", "object": "\"alpha\"", "graph": "" },
@@ -147,7 +165,7 @@ curl -sH "Authorization: Bearer $(cat ~/.dkg/auth.token)" \
 
 Wait 10–30s for gossip propagation over the public mesh. On the core:
 ```bash
-curl -sH "Authorization: Bearer $(cat ~/.dkg/auth.token)" \
+curl -sH "Authorization: Bearer $(dkg auth show)" \
   http://localhost:9200/api/shared-memory/host-mode/stats | jq
 ```
 You should see `perCg[<cg-id>].entries: 1` (one envelope = one write
@@ -159,7 +177,8 @@ size, NOT the cleartext (cores can't decrypt).
 On laptop B (pre-create the CG locally with matching allowedAgents so
 the sender-key handshake completes):
 ```bash
-curl -sH "Authorization: Bearer $(cat ~/.dkg/auth.token)" \
+TOKEN=$(dkg auth show)
+curl -sH "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{ "id": "<cg-id>", "name": "c4-test (member view)",
         "accessPolicy": 1, "publishPolicy": 0,
@@ -167,18 +186,36 @@ curl -sH "Authorization: Bearer $(cat ~/.dkg/auth.token)" \
   http://localhost:9200/api/context-graph/create
 ```
 
-Trigger an explicit catchup:
+Trigger an explicit catchup. **Pin to the core's `peerId`** —
+omitting it fans out to whatever peers happen to be connected,
+which in this topology might hit laptop A directly or no peer at
+all and won't reliably validate the "via the core" path the test
+is supposed to exercise. Get the core's peerId from its
+`/api/status` endpoint before triggering catchup:
 ```bash
-curl -sH "Authorization: Bearer $(cat ~/.dkg/auth.token)" \
+# Run this against the CORE'S http endpoint (e.g. via SSH), not against laptop B.
+CORE_PEER_ID=$(curl -sH "Authorization: Bearer <core-token>" \
+  http://<core-host>:9200/api/status | jq -r .peerId)
+
+# Then on laptop B:
+curl -sH "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{ "contextGraphId": "<cg-id>" }' \
+  -d '{ "contextGraphId": "<cg-id>", "peerId": "'"$CORE_PEER_ID"'" }' \
   http://localhost:9200/api/shared-memory/catchup
+# The response includes `totalInsertedTriples`, `results[]` (per-peer
+# leg counts), and optional `hostCatchup[]` (LU-6 ciphertext recovery
+# leg). All three are useful for verifying recovery success.
 ```
 
-List the local triples:
+Count the locally-readable triples. `/api/shared-memory/list` is
+not a daemon route — use SPARQL via `/api/query` against the CG's
+`_shared_memory` graph instead:
 ```bash
-curl -sH "Authorization: Bearer $(cat ~/.dkg/auth.token)" \
-  "http://localhost:9200/api/shared-memory/list?contextGraphId=$(printf %s '<cg-id>' | jq -sRr @uri)" | jq '.triples | length'
+curl -sH "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{ "contextGraphId": "<cg-id>", "graphSuffix": "_shared_memory",
+        "sparql": "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o }" }' \
+  http://localhost:9200/api/query | jq '.result.bindings[0].n.value'
 ```
 Expected: ≥ 2.
 
@@ -192,7 +229,8 @@ specifically (step 2).
 
 Still on laptop A:
 ```bash
-curl -sH "Authorization: Bearer $(cat ~/.dkg/auth.token)" \
+TOKEN=$(dkg auth show)
+curl -sH "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{ "id": "<cg-id>" }' \
   http://localhost:9200/api/context-graph/register
@@ -200,7 +238,7 @@ curl -sH "Authorization: Bearer $(cat ~/.dkg/auth.token)" \
 
 Wait for the tx receipt (10–60s on Sepolia). Then publish:
 ```bash
-curl -sH "Authorization: Bearer $(cat ~/.dkg/auth.token)" \
+curl -sH "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{ "contextGraphId": "<cg-id>", "selection": "all" }' \
   http://localhost:9200/api/shared-memory/publish
@@ -212,7 +250,8 @@ Capture `kcId` + `txHash` + `merkleRoot` from the response.
 
 From any third party (or just laptop B):
 ```bash
-curl -sH "Authorization: Bearer $(cat ~/.dkg/auth.token)" \
+TOKEN=$(dkg auth show)
+curl -sH "Authorization: Bearer $TOKEN" \
   "http://localhost:9200/api/kc/<kcId>" | jq '.merkleRoot'
 ```
 
@@ -220,7 +259,7 @@ The merkleRoot must match what laptop A's publish reported.
 
 Cross-verify the attestation:
 ```bash
-curl -sH "Authorization: Bearer $(cat ~/.dkg/auth.token)" \
+curl -sH "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{ "contextGraphId": "<cg-id>", "batchId": "<kcId>", "merkleRoot": "<merkleRoot>", "plaintextLeafHash": "<leaf>" }' \
   http://localhost:9200/api/attestation/mint

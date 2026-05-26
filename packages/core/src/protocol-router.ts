@@ -8,6 +8,8 @@ import {
   type MessageStreamPoolOptions,
 } from './message-stream-pool.js';
 
+type AbortableByteStream = Stream | (AsyncIterable<Uint8Array> & { abort(reason?: unknown): void });
+
 /** Default max bytes readAll will buffer before aborting (10 MB). */
 export const DEFAULT_MAX_READ_BYTES = 10 * 1024 * 1024;
 
@@ -350,7 +352,7 @@ export class ProtocolRouter {
     const limit = this.maxReadBytes;
     libp2p.handle(protocolId, async (stream: Stream, connection) => {
       try {
-        const requestData = await readAll(stream, limit);
+        const requestData = await readAllWithSignal(stream, limit, this.node.stopSignal);
         const peerId = {
           toString: () => connection.remotePeer.toString(),
           toBytes: () => connection.remotePeer.toMultihash().bytes,
@@ -359,6 +361,14 @@ export class ProtocolRouter {
         stream.send(responseData);
         await stream.close();
       } catch (err) {
+        if (this.node.stopSignal?.aborted) {
+          try {
+            stream.abort(asAbortError(this.node.stopSignal.reason));
+          } catch {
+            // stream already closed
+          }
+          return;
+        }
         console.error(`[ProtocolRouter] handler error on ${protocolId} from ${connection.remotePeer.toString().slice(-8)}:`, err instanceof Error ? err.message : err);
         try {
           stream.abort(new Error('handler error'));
@@ -450,6 +460,8 @@ export class ProtocolRouter {
     // is exhausted.
     const overallStartedAt = Date.now();
     const overallDeadline = AbortSignal.timeout(timeoutMs);
+    const stopSignal = this.node.stopSignal;
+    const overallSignal = composeAbortSignals(overallDeadline, stopSignal) ?? overallDeadline;
 
     const overlay = this.pooledByLogical.get(protocolId);
     const memoizedVariant = this.peerWireVariantFor(peerIdStr, protocolId);
@@ -459,7 +471,7 @@ export class ProtocolRouter {
         const response = await overlay.pool.send(peerIdStr, data, {
           // Share the OVERALL deadline so a fall-through to one-shot
           // doesn't get a fresh budget. Codex PR #560 round 4.
-          signal: overallDeadline,
+          signal: overallSignal,
           // Thread the remaining wall-clock into the pool's own
           // request timer so it lines up with the shared deadline.
           timeoutMs: remainingForPool,
@@ -467,6 +479,13 @@ export class ProtocolRouter {
         this.memoizePeerWire(peerIdStr, protocolId, 'pooled');
         return response;
       } catch (err) {
+        if (
+          overallSignal.aborted ||
+          overallDeadline.aborted ||
+          stopSignal?.aborted
+        ) {
+          throw err;
+        }
         if (isProtocolUnsupportedError(err)) {
           // Definitive: peer doesn't advertise the pooled wire
           // variant. Pin to one-shot for future sends; fall through
@@ -520,6 +539,7 @@ export class ProtocolRouter {
       // Reuse the overall budget rather than starting a fresh one
       // — see comment above. Codex PR #560 round 4.
       const multipathSignal = overallDeadline;
+      const multipathSignalWithStop = composeAbortSignals(multipathSignal, stopSignal) ?? multipathSignal;
       // Multi-path pre-attempt — race up to N live connections.
       // Returns the response on a winning path, or null if there
       // weren't enough live candidates (or all candidates failed).
@@ -532,7 +552,7 @@ export class ProtocolRouter {
         protocolId,
         data,
         parallelPaths,
-        signal: multipathSignal,
+        signal: multipathSignalWithStop,
         maxReadBytes: this.maxReadBytes,
       });
       if (multipathResult !== null) {
@@ -592,7 +612,8 @@ export class ProtocolRouter {
         lastErr = new Error('send timeout elapsed');
         throw lastErr;
       }
-      const attemptSignal = AbortSignal.timeout(remaining);
+      const attemptDeadline = AbortSignal.timeout(remaining);
+      const attemptSignal = composeAbortSignals(attemptDeadline, stopSignal) ?? attemptDeadline;
       // Track which connection (if any) the fast path picked this
       // attempt so the catch block can blacklist it on failure
       // without needing to inspect stream/connection internals from
@@ -744,7 +765,11 @@ export class ProtocolRouter {
         const sendDurationMs = Date.now() - sendStartedAt;
 
         const readStartedAt = Date.now();
-        const response = await readAll(stream, this.maxReadBytes);
+        // PR-6: attemptSignal composes the per-attempt deadline with
+        // node.stopSignal, so shutdown aborts the resolver, dial,
+        // stream close, and final read consistently.
+        const readResponse = await readAllWithSignal(stream, this.maxReadBytes, attemptSignal);
+        const response = readResponse;
         const readDurationMs = Date.now() - readStartedAt;
         const totalDurationMs = Date.now() - startedAt;
         if (totalDurationMs > 100) {
@@ -766,6 +791,7 @@ export class ProtocolRouter {
         if (pickedConnection) {
           triedConnections.add(pickedConnection);
         }
+        if (stopSignal?.aborted || attemptDeadline.aborted || overallDeadline.aborted) throw err;
         if (!isRecoverableSendError(err) || attempt >= 2) throw err;
         const backoff = (attempt + 1) * 500;
         // Make the backoff abortable so the overall deadline is
@@ -779,13 +805,17 @@ export class ProtocolRouter {
           const t = setTimeout(resolve, backoff);
           const onAbort = (): void => {
             clearTimeout(t);
+            if (stopSignal?.aborted) {
+              reject(asAbortError(stopSignal.reason));
+              return;
+            }
             reject(new Error(`send timeout: backoff aborted by overall deadline (${timeoutMs}ms)`));
           };
-          if (overallDeadline.aborted) {
+          if (overallSignal.aborted) {
             onAbort();
             return;
           }
-          overallDeadline.addEventListener('abort', onAbort, { once: true });
+          overallSignal.addEventListener('abort', onAbort, { once: true });
         });
       }
     }
@@ -1049,10 +1079,10 @@ export interface MultiPathResult {
  * selection is a follow-up if Gate B shows duplicate-relay
  * amplification matters.
  *
- * Returns `null` (not `throw`) on every failure mode so the caller
- * can fall through to single-path within the same logical `send()`
- * call. Throwing here would short-circuit the cold-peer recovery
- * path that the single-path resolver + retry loop is built for.
+ * Returns `null` (not `throw`) on path failures so the caller can fall
+ * through to single-path within the same logical `send()` call. AbortSignal
+ * cancellation is different: shutdown/deadline aborts propagate so the caller
+ * does not start a fresh fallback attempt after stop has begun.
  *
  * SAFETY: caller is responsible for the `/dkg/10.0.1/*` prefix
  * invariant (see {@link SendOptions.parallelPaths}). The receiver
@@ -1069,6 +1099,7 @@ export async function raceMultiPath(args: {
   maxReadBytes: number;
 }): Promise<MultiPathResult | null> {
   const { protocolId, data, parallelPaths, signal, maxReadBytes } = args;
+  if (signal.aborted) throw asAbortError(signal.reason);
   const candidates = args.getConnections().filter((c) => !c.status || c.status === 'open');
   if (candidates.length < 2) {
     // Single (or zero) live candidates — multi-path adds no value;
@@ -1121,7 +1152,7 @@ export async function raceMultiPath(args: {
     }
     stream.send(data);
     await stream.close({ signal });
-    return await readAll(stream, maxReadBytes);
+    return await readAllWithSignal(stream, maxReadBytes, signal);
   });
 
   let winnerResponse: Uint8Array | null = null;
@@ -1150,8 +1181,9 @@ export async function raceMultiPath(args: {
     });
   } catch {
     // All N attempts failed — return null so caller falls through
-    // to single-path. At this point every attempt rejected, so any
-    // streams that opened can be aborted synchronously.
+    // to single-path, unless the shared signal was aborted. At that point the
+    // caller is stopping or out of budget, so starting a fresh fallback attempt
+    // would violate the abort contract.
     for (const s of streams) {
       if (s && !s.aborted) {
         s.aborted = true;
@@ -1162,10 +1194,117 @@ export async function raceMultiPath(args: {
         }
       }
     }
+    if (signal.aborted) throw asAbortError(signal.reason);
     return null;
   }
 
   return { response: winnerResponse, attemptedPaths: picked.length };
+}
+
+/**
+ * PR-6: AbortSignal-aware exported wrapper. Tests + future call sites
+ * use this signature; the internal `readAll` keeps the original
+ * (no-signal) shape for callers that don't have a signal handy yet.
+ *
+ * When `signal` is provided and fires while the for-await is parked
+ * waiting for the next chunk, this function aborts the underlying
+ * stream and throws an `AbortError`. Without this, a silent peer (e.g.
+ * a relay that died mid-transfer) wedges the read forever — which is
+ * the root cause of the beacon-01 shutdown deadlock that PR-1 (#655)
+ * papers over with a hard timeout.
+ *
+ * Implementation note: we can't pass `signal` to the for-await
+ * directly — JavaScript's async iteration protocol has no abort hook.
+ * Instead we race the for-await against an abort-listener promise that
+ * rejects on signal; on rejection, we call `stream.abort()` which
+ * causes the iterator to throw on its next `.next()` call, which
+ * propagates the abort error out of the for-await loop naturally.
+ */
+export async function readAllWithSignal(
+  stream: AbortableByteStream,
+  maxBytes: number,
+  signal?: AbortSignal,
+): Promise<Uint8Array> {
+  if (!signal) return readAll(stream, maxBytes);
+  if (signal.aborted) {
+    abortStream(stream, signal.reason);
+    throw asAbortError(signal.reason);
+  }
+  let abortListener: (() => void) | undefined;
+  const onAbortPromise = new Promise<never>((_resolve, reject) => {
+    abortListener = () => {
+      abortStream(stream, signal.reason);
+      reject(asAbortError(signal.reason));
+    };
+    signal.addEventListener('abort', abortListener, { once: true });
+  });
+  try {
+    return await Promise.race([readAll(stream, maxBytes), onAbortPromise]);
+  } finally {
+    if (abortListener) signal.removeEventListener('abort', abortListener);
+  }
+}
+
+/**
+ * Compose two `AbortSignal`s into a single derived signal that aborts
+ * when EITHER input aborts. Used by PR-6 to compose per-attempt
+ * deadlines with the node-wide stopSignal so callers don't have to
+ * pick which one wins.
+ *
+ * Uses Node's `AbortSignal.any` when available (Node 20.3+, current
+ * production target). Falls back to a manual composer for older Node
+ * — keeps tests / older sandboxes working.
+ */
+export function composeAbortSignals(
+  primary: AbortSignal | undefined,
+  secondary: AbortSignal | undefined,
+): AbortSignal | undefined {
+  if (!primary) return secondary;
+  if (!secondary) return primary;
+  const AnyImpl = (AbortSignal as unknown as { any?: (signals: AbortSignal[]) => AbortSignal }).any;
+  if (AnyImpl) return AnyImpl([primary, secondary]);
+  const combined = new AbortController();
+  let settled = false;
+  const cleanup = () => {
+    primary.removeEventListener('abort', forwardPrimary);
+    secondary.removeEventListener('abort', forwardSecondary);
+  };
+  const forwardPrimary = () => {
+    if (settled) return;
+    settled = true;
+    cleanup();
+    combined.abort(primary.reason);
+  };
+  const forwardSecondary = () => {
+    if (settled) return;
+    settled = true;
+    cleanup();
+    combined.abort(secondary.reason);
+  };
+  if (primary.aborted) combined.abort(primary.reason);
+  else if (secondary.aborted) combined.abort(secondary.reason);
+  else {
+    primary.addEventListener('abort', forwardPrimary, { once: true });
+    secondary.addEventListener('abort', forwardSecondary, { once: true });
+  }
+  return combined.signal;
+}
+
+function abortStream(stream: AbortableByteStream, reason: unknown): void {
+  if ('abort' in stream && typeof stream.abort === 'function') {
+    try {
+      stream.abort(reason instanceof Error ? reason : new Error(String(reason ?? 'aborted')));
+    } catch {
+      /* stream may already be torn down */
+    }
+  }
+}
+
+function asAbortError(reason: unknown): Error {
+  if (reason instanceof Error) return reason;
+  const err = new Error(typeof reason === 'string' ? reason : 'aborted');
+  (err as Error & { name: string }).name = 'AbortError';
+  return err;
 }
 
 async function readAll(

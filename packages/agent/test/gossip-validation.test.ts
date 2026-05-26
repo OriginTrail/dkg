@@ -28,6 +28,7 @@ import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, rever
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { ethers } from 'ethers';
 import { DKGAgent } from '../src/index.js';
+import { installHardhatACKProvider } from './_helpers/v10-acks.js';
 
 const CONTEXT_GRAPH = 'test-gossip';
 
@@ -202,6 +203,7 @@ describe('I-002: Gossip ingestion should not trust self-reported on-chain status
       nodeRole: 'core',
     });
     await agent.start();
+    await installHardhatACKProvider(agent, chain);
 
     try {
       await agent.createContextGraph({ id: 'event-test', name: 'Event Test' });
@@ -287,6 +289,7 @@ describe('I-002: Gossip ingestion should not trust self-reported on-chain status
       nodeRole: 'core',
     });
     await agent.start();
+    await installHardhatACKProvider(agent, chain);
 
     try {
       await agent.createContextGraph({ id: 'event-filter', name: 'Event Filter' });

@@ -105,6 +105,30 @@ export interface DKGNodeConfig {
    * fall back to the default with a warning.
    */
   relayReservationCount?: number;
+  /**
+   * DKG node-release identifier broadcast to peers via libp2p's
+   * `identify` (`/ipfs/id/1.0.0`) handshake. When set, every peer that
+   * dials or accepts a connection from this node learns the value.
+   *
+   * Wire mapping: this is forwarded into `createLibp2p({ nodeInfo:
+   * { userAgent } })`, which libp2p's identify protocol then ships as
+   * the `agentVersion` PB field and remote peers store under
+   * `Peer.metadata.AgentVersion` (note: libp2p's chosen names — they're
+   * unfortunately collision-prone with the DKG "agent" concept, hence
+   * the rename to `nodeVersion` at every layer we control).
+   *
+   * Without this, libp2p falls back to its own default
+   * (`js-libp2p/<version>`), which discriminates the libp2p toolkit
+   * version but tells a remote operator nothing about which DKG node
+   * release is running — leaving "what version is each peer running?"
+   * unanswerable from the wire.
+   *
+   * Convention (set by `packages/cli/src/daemon/lifecycle.ts`):
+   * `dkg/<semver>` — e.g. `dkg/10.0.0-rc.11`. Surfaced back to operators
+   * via `/api/peer-info` and MCP `dkg_peer_info` under
+   * `peerStore.nodeVersion`.
+   */
+  nodeVersion?: string;
 }
 
 export type ConnectionTransport = 'direct' | 'relayed';

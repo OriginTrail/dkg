@@ -288,6 +288,14 @@ describe('Route plugins — live daemon E2E', () => {
   it('built-in /api/status still answers 200 in the same daemon (regression)', async () => {
     const res = await fetch(urlFor('/api/status'));
     expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.relay).toMatchObject({
+      isCore: expect.any(Boolean),
+      reservationsHeld: expect.any(Number),
+      natStatus: expect.stringMatching(/^(public|private|unknown)$/),
+      advertisedAddresses: expect.any(Array),
+      configuredAnnounceAddresses: expect.any(Array),
+    });
   });
 
   it('throwing plugin yields a 500 PluginError with the plugin name', async () => {

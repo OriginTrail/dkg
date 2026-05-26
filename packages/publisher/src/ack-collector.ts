@@ -5,10 +5,13 @@ import {
   computePublishACKDigest,
   isStorageACKDecline,
   isTransientStorageACKDeclineCode,
+  isSubscriptionSource,
   type PublishIntentMsg,
   type StorageACKMsg,
+  type SubscriptionSource,
 } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
+import { QuorumUnmetError, type PeerOutcome } from './ack-errors.js';
 
 export interface ACKCollectorDeps {
   gossipPublish: (topic: string, data: Uint8Array) => Promise<void>;
@@ -23,6 +26,15 @@ export interface CollectedACK {
   signatureR: Uint8Array;
   signatureVS: Uint8Array;
   nodeIdentityId: bigint;
+  /**
+   * PR5 ACK-provenance: which of the four LU-6 Phase B discovery
+   * paths the responding core reported caused it to be hosting the
+   * curated CG at ACK time. `undefined` for legacy / pre-PR5 peers
+   * (the wire field is optional). Surfaced through the publisher's
+   * per-publish ACK-provenance summary line on success and through
+   * `QuorumUnmetError.peerOutcomes` on failure.
+   */
+  subscriptionSource?: SubscriptionSource;
 }
 
 export interface ACKCollectionResult {
@@ -147,12 +159,26 @@ export class ACKCollector {
 
     const corePeers = this.deps.getConnectedCorePeers();
     if (corePeers.length === 0) {
-      throw new Error('ACK collection failed: no connected core peers');
+      // Pre-dial impossibility — wrap in the typed surface but preserve
+      // the legacy `ACK collection failed: no connected core peers` text
+      // so log greps + existing tests keep matching.
+      throw new QuorumUnmetError({
+        collected: 0,
+        required: REQUIRED_ACKS,
+        dialled: 0,
+        peerOutcomes: [],
+        legacyMessage: 'ACK collection failed: no connected core peers',
+      });
     }
     if (corePeers.length < REQUIRED_ACKS) {
-      throw new Error(
-        `ACK collection failed: need ${REQUIRED_ACKS} ACKs but only ${corePeers.length} core peers connected — quorum impossible`,
-      );
+      throw new QuorumUnmetError({
+        collected: 0,
+        required: REQUIRED_ACKS,
+        dialled: corePeers.length,
+        peerOutcomes: corePeers.map((peerId) => ({ peerId, reason: 'pool_below_quorum' })),
+        legacyMessage:
+          `ACK collection failed: need ${REQUIRED_ACKS} ACKs but only ${corePeers.length} core peers connected — quorum impossible`,
+      });
     }
     log(`[ACKCollector] Requesting ACKs from ${corePeers.length} core peers (need ${REQUIRED_ACKS})`);
 
@@ -190,6 +216,57 @@ export class ACKCollector {
         })
         .join('; ');
       return ` Declines: ${formatted}.`;
+    };
+
+    // Build the per-peer outcome list `QuorumUnmetError` carries
+    // through to PR5 telemetry. Snapshots the collector's bookkeeping at
+    // throw time so the surface stays consistent regardless of which of
+    // the three quorum-fail throw sites fires (impossible-pool, timeout,
+    // insufficient).
+    //
+    // The `reason` field carries only the typed code (e.g.
+    // `STORAGE_ACK_DECLINE:NO_DATA_IN_SWM`) — NOT the peer-controlled
+    // human message. The legacy `Declines:` substring on the embedded
+    // `legacyMessage` already carries the operator-readable detail in
+    // its existing sanitized form, and the test
+    // `sanitizes and truncates peer-controlled decline messages` pins
+    // a per-error length bound that double-rendering would blow past.
+    const snapshotPeerOutcomes = (): PeerOutcome[] => {
+      const ackedById = new Map(collected.map(a => [a.peerId, a] as const));
+      return corePeers.map((peerId): PeerOutcome => {
+        const ack = ackedById.get(peerId);
+        if (ack) {
+          // PR5: an ACK from a peer with `source=member` or any of
+          // the four host-mode sources is, by construction, advertising
+          // host-mode (or the stronger "I'm a member, decrypt+apply
+          // handler is authoritative") for this CG. Peers that ACKed
+          // without a source field are pre-PR5; we leave
+          // `swmHostModeAdvertised` undefined rather than asserting
+          // either way.
+          const advertised = ack.subscriptionSource !== undefined ? true : undefined;
+          return {
+            peerId,
+            dialOk: true,
+            protocolSupported: true,
+            ...(advertised !== undefined ? { swmHostModeAdvertised: advertised } : {}),
+            reason: ack.subscriptionSource ? `ACK:${ack.subscriptionSource}` : 'ACK',
+          };
+        }
+        const decline = declines.get(peerId);
+        if (decline) {
+          const code = decline.code;
+          const reason = code === 'TRANSPORT_ERROR'
+            ? 'TRANSPORT_ERROR'
+            : `STORAGE_ACK_DECLINE:${code}`;
+          return {
+            peerId,
+            dialOk: code !== 'TRANSPORT_ERROR',
+            protocolSupported: code !== 'TRANSPORT_ERROR' ? true : undefined,
+            reason,
+          };
+        }
+        return { peerId, reason: 'no_response' };
+      });
     };
 
     const requestACK = async (peerId: string): Promise<CollectedACK | null> => {
@@ -267,13 +344,23 @@ export class ACKCollector {
           // if quorum fails for unrelated reasons.
           declines.delete(peerId);
 
-          log(`[ACKCollector] Valid ACK from ${peerId.slice(-8)} (identity=${identityId}, signer=${recoveredAddress.slice(0, 10)}...)`);
+          // PR5: capture the peer-reported ACK-provenance source if
+          // present. Pre-PR5 cores never set the field; treat any
+          // unknown / off-enum value as `undefined` (strict additive
+          // wire — only documented enum members are honoured).
+          const subscriptionSource = isSubscriptionSource(ack.subscriptionSource)
+            ? ack.subscriptionSource
+            : undefined;
+
+          const sourceTag = subscriptionSource ? ` source=${subscriptionSource}` : '';
+          log(`[ACKCollector] Valid ACK from ${peerId.slice(-8)} (identity=${identityId}, signer=${recoveredAddress.slice(0, 10)}...${sourceTag})`);
 
           return {
             peerId,
             signatureR: ack.coreNodeSignatureR,
             signatureVS: ack.coreNodeSignatureVS,
             nodeIdentityId: identityId,
+            ...(subscriptionSource ? { subscriptionSource } : {}),
           };
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -322,10 +409,15 @@ export class ACKCollector {
       if (collected.length >= REQUIRED_ACKS) return;
       const stillPending = corePeers.length - peersSettled;
       if (collected.length + stillPending < REQUIRED_ACKS) {
-        impossibleReject?.(new Error(
-          `storage_ack_insufficient: got ${collected.length}/${REQUIRED_ACKS} valid ACKs after ` +
-          `${peersSettled}/${corePeers.length} core peer(s) settled — quorum no longer reachable.${formatDeclineDetail()}`,
-        ));
+        impossibleReject?.(new QuorumUnmetError({
+          collected: collected.length,
+          required: REQUIRED_ACKS,
+          dialled: corePeers.length,
+          peerOutcomes: snapshotPeerOutcomes(),
+          legacyMessage:
+            `storage_ack_insufficient: got ${collected.length}/${REQUIRED_ACKS} valid ACKs after ` +
+            `${peersSettled}/${corePeers.length} core peer(s) settled — quorum no longer reachable.${formatDeclineDetail()}`,
+        }));
       }
     };
 
@@ -354,17 +446,29 @@ export class ACKCollector {
       })(),
       impossiblePromise,
       new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error(`storage_ack_timeout: only ${collected.length}/${REQUIRED_ACKS} ACKs received within ${ACK_TIMEOUT_MS}ms.${formatDeclineDetail()}`)),
+        setTimeout(() => reject(new QuorumUnmetError({
+          collected: collected.length,
+          required: REQUIRED_ACKS,
+          dialled: corePeers.length,
+          peerOutcomes: snapshotPeerOutcomes(),
+          legacyMessage:
+            `storage_ack_timeout: only ${collected.length}/${REQUIRED_ACKS} ACKs received within ${ACK_TIMEOUT_MS}ms.${formatDeclineDetail()}`,
+        })),
           ACK_TIMEOUT_MS,
         ),
       ),
     ]);
 
     if (collected.length < REQUIRED_ACKS) {
-      throw new Error(
-        `storage_ack_insufficient: got ${collected.length}/${REQUIRED_ACKS} valid ACKs. ` +
-        `Tried ${corePeers.length} core peers.${formatDeclineDetail()}`,
-      );
+      throw new QuorumUnmetError({
+        collected: collected.length,
+        required: REQUIRED_ACKS,
+        dialled: corePeers.length,
+        peerOutcomes: snapshotPeerOutcomes(),
+        legacyMessage:
+          `storage_ack_insufficient: got ${collected.length}/${REQUIRED_ACKS} valid ACKs. ` +
+          `Tried ${corePeers.length} core peers.${formatDeclineDetail()}`,
+      });
     }
 
     log(`[ACKCollector] Collected ${collected.length} ACKs successfully`);

@@ -19,6 +19,7 @@ import {
   isDkgMonorepo,
   dkgDir,
   repoDir,
+  resolveAutoUpdateSource,
   resolveChainConfig,
 } from '../src/config.js';
 
@@ -283,6 +284,29 @@ describe('localAgentIntegrations config round-trip', () => {
     const loaded = await loadConfig();
     expect(loaded.nodeRole).toBe('core');
     expect(loaded.relayServerCapacity).toBeUndefined();
+  });
+});
+
+describe('resolveAutoUpdateSource', () => {
+  it('resolves local source independently of auto-update enabled state', () => {
+    expect(resolveAutoUpdateSource(
+      { autoUpdate: { enabled: false, source: 'npm' } },
+      { autoUpdate: { enabled: true, source: 'git' } as any },
+    )).toBe('npm');
+  });
+
+  it('falls back to the network source when local config disables polling without a source override', () => {
+    expect(resolveAutoUpdateSource(
+      { autoUpdate: { enabled: false } },
+      { autoUpdate: { enabled: false, source: 'npm' } as any },
+    )).toBe('npm');
+  });
+
+  it('returns undefined when neither source supplies an install-mode override', () => {
+    expect(resolveAutoUpdateSource(
+      { autoUpdate: { enabled: false } },
+      { autoUpdate: { enabled: false } as any },
+    )).toBeUndefined();
   });
 });
 

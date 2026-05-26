@@ -31,6 +31,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStore {
   private readonly inner: TripleStore;
   private readonly blobDir: string;
   private readonly thresholdBytes: number;
+  private readonly pendingBlobWrites = new Map<string, Promise<void>>();
 
   constructor(inner: TripleStore, options: SharedMemoryLiteralBlobStoreOptions) {
     if (!options.blobDir?.trim()) {
@@ -202,6 +203,23 @@ export class SharedMemoryLiteralBlobStore implements TripleStore {
 
   private async writeBlob(hash: string, term: string): Promise<void> {
     assertSha256Hex(hash);
+    const pending = this.pendingBlobWrites.get(hash);
+    if (pending) {
+      await pending;
+      await this.readBlob(hash);
+      return;
+    }
+
+    const write = this.writeBlobFile(hash, term);
+    this.pendingBlobWrites.set(hash, write);
+    try {
+      await write;
+    } finally {
+      this.pendingBlobWrites.delete(hash);
+    }
+  }
+
+  private async writeBlobFile(hash: string, term: string): Promise<void> {
     await mkdir(this.blobDir, { recursive: true });
     const path = this.blobPath(hash);
 

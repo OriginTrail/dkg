@@ -26,6 +26,27 @@ import { ethers } from 'ethers';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, createTestContextGraph, seedContextGraphRegistration, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { wrapPublisherForTest, buildSeal } from './_helpers/seal.js';
+import { makeHardhatReceiverACKProvider } from './_helpers/acks.js';
+import type { V10ACKProvider } from '../src/publisher.js';
+
+// RC11 / PR1: in-memory 3-of-N ACK provider that signs the V10 ACK
+// digest with the staked Hardhat receiver wallets (REC1..REC3). Replaces
+// the deleted self-signed ACK fallback so every Hardhat publish below
+// goes through the real ACK quorum code path.
+let _ackProvider: V10ACKProvider | undefined;
+function getAckProvider(): V10ACKProvider {
+  if (!_ackProvider) {
+    if (!_kav10Address) {
+      throw new Error('getAckProvider() called before _kav10Address was initialized in beforeAll');
+    }
+    _ackProvider = makeHardhatReceiverACKProvider(
+      getSharedContext(),
+      _kav10Address,
+      [HARDHAT_KEYS.REC1_OP, HARDHAT_KEYS.REC2_OP, HARDHAT_KEYS.REC3_OP],
+    );
+  }
+  return _ackProvider;
+}
 
 let CONTEXT_GRAPH = 'test-workspace';
 let DATA_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
@@ -143,6 +164,7 @@ describe('Workspace: share', () => {
     publisher = wrapPublisherForTest(publisher, {
       author: _author,
       ctx: { provider: _provider, kav10Address: _kav10Address },
+      v10ACKProvider: getAckProvider(),
     });
   });
   afterEach(async () => {
@@ -284,6 +306,7 @@ describe('Workspace: publishFromSharedMemory', () => {
     publisher = wrapPublisherForTest(publisher, {
       author: _author,
       ctx: { provider: _provider, kav10Address: _kav10Address },
+      v10ACKProvider: getAckProvider(),
     });
     await seedContextGraphRegistration(store, CONTEXT_GRAPH);
   });
@@ -324,8 +347,19 @@ describe('Workspace: publishFromSharedMemory', () => {
       q(entity2, 'http://schema.org/name', '"Two"'),
     ], { publisherPeerId: 'peer1' });
 
+    // RC11 / PR2: on-chain publishes require a precomputedAttestation.
+    // Build one over the exact public-data-graph quads
+    // `publishFromSharedMemory` will select for `entity1`.
+    const selectedQuads = [{
+      subject: entity1,
+      predicate: 'http://schema.org/name',
+      object: '"One"',
+      graph: DATA_GRAPH,
+    }];
     const result = await publisher.publishFromSharedMemory(CONTEXT_GRAPH, {
       rootEntities: [entity1],
+    }, {
+      precomputedAttestation: await sealForQuads(selectedQuads, CONTEXT_GRAPH),
     });
 
     expect(result.kaManifest.length).toBe(1);
@@ -472,6 +506,7 @@ describe('Workspace: ownership persistence and reconstruction', () => {
     publisher = wrapPublisherForTest(publisher, {
       author: _author,
       ctx: { provider: _provider, kav10Address: _kav10Address },
+      v10ACKProvider: getAckProvider(),
     });
     await seedContextGraphRegistration(store, CONTEXT_GRAPH);
   });
@@ -1893,6 +1928,7 @@ describe('Workspace: conditionalShare (CAS)', () => {
     publisher = wrapPublisherForTest(publisher, {
       author: _author,
       ctx: { provider: _provider, kav10Address: _kav10Address },
+      v10ACKProvider: getAckProvider(),
     });
   });
 

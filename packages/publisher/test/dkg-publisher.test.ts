@@ -12,13 +12,33 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, createTestContextGraph, seedContextGraphRegistration, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
-import { buildSeal } from './_helpers/seal.js';
+import { buildSeal, wrapPublisherForTest } from './_helpers/seal.js';
+import { makeHardhatReceiverACKProvider } from './_helpers/acks.js';
+import type { V10ACKProvider } from '../src/publisher.js';
 
 let CONTEXT_GRAPH: string;
 let GRAPH: string;
 let _kav10Address: string;
 let _provider: ethers.JsonRpcProvider;
 const _author = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+
+// RC11 / PR1: in-memory 3-of-N ACK provider for Hardhat publishes. Threaded
+// into the publishWS/updateWS helpers below since this test file builds
+// its publisher directly (no wrapPublisherForTest).
+let _ackProvider: V10ACKProvider | undefined;
+function getAckProvider(): V10ACKProvider {
+  if (!_ackProvider) {
+    if (!_kav10Address) {
+      throw new Error('getAckProvider() called before _kav10Address was initialized');
+    }
+    _ackProvider = makeHardhatReceiverACKProvider(
+      getSharedContext(),
+      _kav10Address,
+      [HARDHAT_KEYS.REC1_OP, HARDHAT_KEYS.REC2_OP, HARDHAT_KEYS.REC3_OP],
+    );
+  }
+  return _ackProvider;
+}
 const ENTITY = 'did:dkg:agent:QmImageBot';
 const ENTITY2 = 'did:dkg:agent:QmTextBot';
 const TEST_PUBLISHER_ADDRESS = new ethers.Wallet(HARDHAT_KEYS.CORE_OP).address;
@@ -60,7 +80,11 @@ describe('DKGPublisher', () => {
       contextGraphId: args.contextGraphId,
       ctx: { provider: _provider, kav10Address: _kav10Address },
     });
-    return publisher.publish({ ...args, precomputedAttestation: seal });
+    return publisher.publish({
+      ...args,
+      precomputedAttestation: seal,
+      v10ACKProvider: args.v10ACKProvider ?? getAckProvider(),
+    });
   }
   async function updateWS(kcId: bigint, args: Parameters<DKGPublisher['update']>[1]) {
     const seal = await buildSeal({
@@ -70,7 +94,11 @@ describe('DKGPublisher', () => {
       contextGraphId: args.contextGraphId,
       ctx: { provider: _provider, kav10Address: _kav10Address },
     });
-    return publisher.update(kcId, { ...args, precomputedAttestation: seal });
+    return publisher.update(kcId, {
+      ...args,
+      precomputedAttestation: seal,
+      v10ACKProvider: args.v10ACKProvider ?? getAckProvider(),
+    });
   }
   afterAll(async () => {
     await revertSnapshot(_fileSnapshot);
@@ -90,6 +118,16 @@ describe('DKGPublisher', () => {
       keypair,
       publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
       publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
+    });
+    // RC11 / PR3: wrap so any direct `publisher.publishFromSharedMemory`
+    // call (e.g. the Round 12 Bug 34 internal-promote test) also gets a
+    // v10ACKProvider injected — the publish/update paths already mint
+    // their own ACK provider via `publishWS`/`updateWS`, but
+    // publishFromSharedMemory only flows through the wrapper.
+    publisher = wrapPublisherForTest(publisher, {
+      author: _author,
+      ctx: { provider: _provider, kav10Address: _kav10Address },
+      v10ACKProvider: getAckProvider(),
     });
   });
   afterEach(async () => {
@@ -170,7 +208,7 @@ describe('DKGPublisher', () => {
     }
   });
 
-  it('publishes with private triples', async () => {
+  it('publishes with private triples (tentative under RC11 / PR1)', async () => {
     const result = await publishWS({
       contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY, 'http://schema.org/name', '"ImageBot"')],
@@ -181,7 +219,15 @@ describe('DKGPublisher', () => {
     expect(result.kaManifest[0].privateTripleCount).toBe(1);
     expect(result.kaManifest[0].privateMerkleRoot).toBeDefined();
     expect(result.kaManifest[0].privateMerkleRoot!).toHaveLength(32);
-    expect(result.status).toBe('confirmed');
+    // RC11 / PR1: the publisher intentionally skips peer ACK collection
+    // when the publish carries private quads (StorageACKHandler cannot
+    // recompute private merkle roots from SWM data alone, see
+    // `dkg-publisher.ts:1785-1786`). With the self-signed ACK fallback
+    // deleted, private-data publishes now correctly downgrade to
+    // `tentative` instead of confirming via a single bogus
+    // `peerId: 'self'` ACK. The private merkle/manifest accounting we
+    // actually care about above is unaffected.
+    expect(result.status).toBe('tentative');
   });
 
   it('rejects duplicate entity (exclusivity)', async () => {
@@ -448,14 +494,24 @@ describe('DKGPublisher', () => {
         { publisherPeerId: 'peer-internal', localOnly: true },
       );
       await seedContextGraphRegistration(store, CONTEXT_GRAPH);
-      // Tighten from `.resolves.toBeDefined()` (which would pass even on a
-      // silent-tentative result with zero manifest entries) to a real shape
-      // check: the internal publish must land in a valid terminal state AND
-      // surface the ENTITY we shared via at least one KA manifest entry.
-      // If the internal token bypass regresses, the reserved-namespace guard
-      // would reject publishFromSharedMemory and we'd get a throw here —
-      // still caught, but with an actual error instead of a silent pass.
-      const result = await publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all');
+      // RC11 / PR2: on-chain publishes via publishFromSharedMemory
+      // need a precomputedAttestation over the exact public-data-graph
+      // quads the publisher will select. Mint one matching the share()
+      // above.
+      const selectedQuads = [{
+        subject: ENTITY,
+        predicate: 'http://schema.org/name',
+        object: '"internal-path-test"',
+        graph: GRAPH,
+      }];
+      const result = await publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all', {
+        precomputedAttestation: await buildSeal({
+          quads: selectedQuads,
+          author: _author,
+          contextGraphId: CONTEXT_GRAPH,
+          ctx: { provider: _provider, kav10Address: _kav10Address },
+        }),
+      });
       expect(result).toBeDefined();
       expect(['tentative', 'confirmed']).toContain(result.status);
       expect(result.kaManifest.length).toBeGreaterThan(0);

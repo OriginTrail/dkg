@@ -1,4 +1,9 @@
 import { ethers, JsonRpcProvider, Wallet, Contract, Interface } from 'ethers';
+import {
+  createFilterErrorSilencer,
+  formatProviderError,
+  type FilterErrorSilencer,
+} from './filter-error-silencer.js';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
@@ -271,6 +276,17 @@ interface ContractCache {
   randomSamplingStorage?: Contract;
 }
 
+function formatProviderContext(config: Pick<EVMAdapterConfig, 'chainId' | 'rpcUrl'>): string {
+  let rpcHost: string;
+  try {
+    const parsed = new URL(config.rpcUrl);
+    rpcHost = parsed.host || parsed.protocol || 'unknown-rpc';
+  } catch {
+    rpcHost = 'unparseable-rpc';
+  }
+  return `chainId=${config.chainId ?? 'unknown'} rpc=${rpcHost}`;
+}
+
 /**
  * EVM chain adapter implementing the V9 ChainAdapter interface.
  * Resolves contract addresses dynamically from the Hub.
@@ -284,6 +300,7 @@ export class EVMChainAdapter implements ChainAdapter {
   readonly chainId: string;
 
   private readonly provider: JsonRpcProvider;
+  private readonly filterErrorSilencer: FilterErrorSilencer;
   /** Primary signer — used for identity/profile/staking operations. */
   private readonly signer: Wallet;
   /** All operational signers (includes primary). Used round-robin for publish TXs. */
@@ -357,8 +374,96 @@ export class EVMChainAdapter implements ChainAdapter {
   private inflightDurationProbeContract: Contract | undefined;
   private inflightDurationProbeStartedAt = 0;
 
+  /**
+   * PR3 / RC11 — TTL cache for the three "publish pre-flight" reads the
+   * V10 ACK provider needs on every publish:
+   *
+   *   - `getEvmChainId()`           (chain id, never changes after
+   *                                  the JSON-RPC endpoint is configured)
+   *   - `getKnowledgeAssetsV10Address()` (KAV10 contract address —
+   *                                  changes only on contract redeploy)
+   *   - `getMinimumRequiredSignatures()` (governance parameter — changes
+   *                                  only on a `ParametersStorage` write)
+   *
+   * Pre-PR3 every publish issued three serial JSON-RPC calls before
+   * even dialling peers for ACKs. The dzudza incident (Sun 20:42 UTC,
+   * `eth_chainId` rate-limited on the public Base Sepolia RPC) is the
+   * canonical symptom: a single rate-limited pre-flight call killed
+   * the entire publish path even though the chain values themselves
+   * had never changed for the daemon's lifetime.
+   *
+   * The TTL is conservative (1h) because all three values are
+   * structurally stable. A `ParametersStorage` governance vote that
+   * changed `minimumRequiredSignatures` mid-cycle would take up to 1h
+   * to propagate to the ACK collector — acceptable, since the contract
+   * itself rejects mismatched-quorum publishes and the publisher
+   * retries on the next attempt. Chain-id and KAV10 address never
+   * change without a daemon restart in practice.
+   *
+   * Cache is keyed implicitly on `this` (per-adapter instance); a
+   * second adapter pointed at a different chain has its own cache
+   * with no cross-talk.
+   */
+  private static readonly PREFLIGHT_TTL_MS = 60 * 60 * 1000;
+  private cachedChainId: { value: bigint; cachedAt: number } | undefined;
+  private cachedKav10Address: { value: string; cachedAt: number } | undefined;
+  private cachedMinRequiredSignatures: { value: number; cachedAt: number } | undefined;
+
+  /**
+   * Reset the PR3 publish-preflight cache. Public so daemon code that
+   * knows about an external chain reconfiguration (e.g. a hot-reload
+   * of `chainRpcUrl` or a deliberate governance-vote test fixture)
+   * can flush the cache without waiting out the TTL. Tests use this
+   * to reset state between cases.
+   */
+  invalidatePublishPreflightCache(): void {
+    this.cachedChainId = undefined;
+    this.cachedKav10Address = undefined;
+    this.cachedMinRequiredSignatures = undefined;
+  }
+
+  private static preflightCacheFresh(
+    entry: { cachedAt: number } | undefined,
+    now: number,
+  ): boolean {
+    if (!entry) return false;
+    return now - entry.cachedAt < EVMChainAdapter.PREFLIGHT_TTL_MS;
+  }
+
   constructor(config: EVMAdapterConfig) {
     this.provider = new JsonRpcProvider(config.rpcUrl, undefined, { cacheTimeout: -1 });
+    const providerContext = formatProviderContext(config);
+    // PR-8: install the filter-not-found silencer. Without this, RPC
+    // nodes that GC filters faster than ethers' polling cadence
+    // (observed: 134 MB of daemon.log spam in 24h on beacon-01) spam
+    // the operator's logs with per-tick "filter not found" errors.
+    // The silencer dedupe-logs once per DEDUP_WINDOW_MS and lets every
+    // other provider error propagate normally. It does not recreate
+    // filters or guarantee every Hub-resolved contract handle stays
+    // fresh; only the RandomSampling pair has a TTL self-heal path.
+    // The warning text keeps the wider event-polling degradation visible.
+    this.filterErrorSilencer = createFilterErrorSilencer({
+      log: (msg) => console.warn(`${msg} (${providerContext})`),
+    });
+    const providerErrorHandler = (err: unknown) => {
+      if (this.filterErrorSilencer.handle(err)) return;
+      // Non-filter provider errors fall through to the error
+      // path so they remain visible. Operators grepping their logs
+      // for chain-provider issues still see everything they used to
+      // EXCEPT the filter-spam class.
+      console.error(`[chain] provider error (${providerContext}): ${formatProviderError(err)}`);
+    };
+    try {
+      void Promise.resolve(this.provider.on('error', providerErrorHandler)).catch((err: unknown) => {
+        console.error(
+          `[chain] provider error listener registration failed (${providerContext}): ${formatProviderError(err)}`,
+        );
+      });
+    } catch (err) {
+      console.error(
+        `[chain] provider error listener registration failed (${providerContext}): ${formatProviderError(err)}`,
+      );
+    }
     this.signer = new Wallet(config.privateKey, this.provider);
     this.signerPool = [this.signer];
     for (const key of config.additionalKeys ?? []) {
@@ -1621,15 +1726,35 @@ export class EVMChainAdapter implements ChainAdapter {
   // =====================================================================
 
   async getKnowledgeAssetsV10Address(): Promise<string> {
+    // PR3 / RC11: TTL-cached. KAV10 address only changes on a contract
+    // redeploy + Hub-rotation event; 1h staleness is harmless and the
+    // ACK digest mismatch the contract would surface on actually-stale
+    // input is loud enough that operators would notice immediately.
+    const now = Date.now();
+    if (EVMChainAdapter.preflightCacheFresh(this.cachedKav10Address, now)) {
+      return this.cachedKav10Address!.value;
+    }
     await this.init();
     if (!this.contracts.knowledgeAssetsV10) {
       throw new Error('KnowledgeAssetsV10 contract not deployed on this chain.');
     }
-    return await this.contracts.knowledgeAssetsV10.getAddress();
+    const addr = await this.contracts.knowledgeAssetsV10.getAddress();
+    this.cachedKav10Address = { value: addr, cachedAt: now };
+    return addr;
   }
 
   async getEvmChainId(): Promise<bigint> {
+    // PR3 / RC11: TTL-cached so an `eth_chainId` rate-limit on the
+    // public RPC (the dzudza failure mode) cannot kill steady-state
+    // publish traffic. Chain id is structurally immutable for a given
+    // provider — once we've read it successfully we know it can't
+    // change without a daemon restart.
+    const now = Date.now();
+    if (EVMChainAdapter.preflightCacheFresh(this.cachedChainId, now)) {
+      return this.cachedChainId!.value;
+    }
     const network = await this.provider.getNetwork();
+    this.cachedChainId = { value: network.chainId, cachedAt: now };
     return network.chainId;
   }
 
@@ -2375,6 +2500,15 @@ export class EVMChainAdapter implements ChainAdapter {
   }
 
   async getMinimumRequiredSignatures(): Promise<number> {
+    // PR3 / RC11: TTL-cached. Governance vote that changes
+    // `minimumRequiredSignatures` propagates within 1h to the ACK
+    // collector; on-chain validation in `KnowledgeAssetsV10` would
+    // reject a publish that used the stale quorum so a single
+    // mis-routed retry past the boundary is the worst-case symptom.
+    const now = Date.now();
+    if (EVMChainAdapter.preflightCacheFresh(this.cachedMinRequiredSignatures, now)) {
+      return this.cachedMinRequiredSignatures!.value;
+    }
     await this.init();
     // FAIL-CLOSED (Codex PR #595 round-5): the agent + publisher
     // verify paths trust whatever this method returns. A silent
@@ -2387,7 +2521,9 @@ export class EVMChainAdapter implements ChainAdapter {
         'Verify cannot enforce ACK quorum without a real chain read — fix the adapter wiring or pass an explicit override.',
       );
     }
-    return Number(await this.contracts.parametersStorage.minimumRequiredSignatures());
+    const value = Number(await this.contracts.parametersStorage.minimumRequiredSignatures());
+    this.cachedMinRequiredSignatures = { value, cachedAt: now };
+    return value;
   }
 
   async isShardingTableMember(identityId: bigint): Promise<boolean> {
@@ -2676,7 +2812,8 @@ export class EVMChainAdapter implements ChainAdapter {
    * rejection. We `await` both subscriptions and only set
    * `hubRotationListenerStarted` after both succeed, so a failed
    * provider can be retried by a future call site if we ever need to
-   * — and meanwhile the TTL refresh path still keeps the pair fresh.
+   * — and meanwhile the TTL refresh path still keeps the RandomSampling
+   * pair fresh.
    */
   private async startHubRotationListener(): Promise<void> {
     if (this.hubRotationListenerStarted) return;

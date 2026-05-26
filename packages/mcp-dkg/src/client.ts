@@ -771,6 +771,38 @@ export class DkgClient {
   }
 
   /**
+   * OT-RFC-38 / LU-6 Phase B path 4 — operator-driven host-mode
+   * subscribe. Asks the connected daemon (must be a core with
+   * `swmHostMode` enabled) to start hosting the curated CG's opaque
+   * SWM ciphertext substrate without joining as a member.
+   *
+   * Last-resort fallback for when none of the three automatic
+   * discovery paths apply: chain-event (curator hasn't registered
+   * on-chain), beacon (curator doesn't run the discovery beacon), or
+   * reconciler (the local node doesn't yet know about the CG). See
+   * `docs/runbooks/RUNBOOK_HOST_MODE_MANUAL_SUBSCRIBE.md` for full
+   * guidance on when to reach for this.
+   *
+   * Idempotent: the daemon returns `{ alreadySubscribed: true }` when
+   * the CG is already host-subscribed via any path. Refuses
+   * (returning `memberMode: true`) when the local node is already a
+   * CG member — member-mode handler takes precedence.
+   */
+  async requestHostMode(args: {
+    contextGraphId: string;
+  }): Promise<{
+    contextGraphId: string;
+    subscribed: boolean;
+    alreadySubscribed: boolean;
+    hostingEnabled: boolean;
+    memberMode?: boolean;
+  }> {
+    return this.request('POST', '/api/shared-memory/host-mode/subscribe', {
+      contextGraphId: args.contextGraphId,
+    });
+  }
+
+  /**
    * Create a new context graph on the DKG node. The `id` is the slug; if
    * omitted at the tool layer it should be derived from `name` before
    * being passed through. Wraps `POST /api/context-graph/create`.

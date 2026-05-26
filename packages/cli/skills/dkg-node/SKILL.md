@@ -146,7 +146,7 @@ Drop to HTTP when the operation isn't in the table — participant self-service 
 
 P2P tools fail gracefully when the peer is offline. `dkg_publish` (fresh quads + write + publish, two HTTP calls) and `dkg_shared_memory_publish` (publish existing SWM, one HTTP call) differ in intent: use the two-call helper for "I have quads, publish now"; use the canonical finalizer as step 4 of the stepwise write → promote → publish flow. `dkg_share` is a direct SWM convenience helper for quick team-visible notes, not a replacement for assertion lifecycle tracking.
 
-**Bulk imports (>5,000 quads in one logical operation):** the per-call `dkg_assertion_*` loop IS the chunked-write API; there is no `/api/import/bulk`. Keep `/api/assertion/<name>/write` payloads under the 10 MB body cap, keep `/api/assertion/<name>/promote` payloads under the 256 KB body cap, and remember that promotion can still fail at the 10 MB gossip-message cap even when the HTTP body is small. For multi-part imports, write a resumable manifest in the `meta` sub-graph (`scripts/lib/manifest.mjs` is the canonical helper), promote import roots in size-aware batches, and halve/retry on 413 rather than restarting the whole import. Source checkouts also include the expanded guide at `packages/cli/skills/dkg-importer/SKILL.md`; installed agents should treat this paragraph as the portable minimum contract.
+**Bulk imports (>5,000 quads in one logical operation):** the per-call `dkg_assertion_*` loop IS the chunked-write API; there is no `/api/import/bulk`. Keep `/api/assertion/<name>/write` payloads under the 10 MB body cap, keep `/api/assertion/<name>/promote` payloads under the 256 KB body cap, and remember that promotion can still fail at the 10 MB gossip-message cap even when the HTTP body is small. For multi-part imports, write a resumable manifest in the `meta` sub-graph (`scripts/lib/manifest.mjs` is the canonical helper), promote import roots in size-aware batches, and halve/retry on 413 rather than restarting the whole import. The expanded contract — chunking budgets, manifest pattern, HTTP 413 recipes, async-promote queue (`/api/assertion/<name>/promote-async`) — is served at `GET /.well-known/skill-importer.md` (the daemon's second canonical skill endpoint, same auth-public + ETag-cacheable shape as `/.well-known/skill.md`). Source checkouts also have the same file at `packages/cli/skills/dkg-importer/SKILL.md`.
 
 ### HTTP-only operations (no tool wrapper)
 
@@ -175,8 +175,9 @@ before promoting it to SWM (team) or through to VM (chain-anchored).
   Body: `{ "contextGraphId": "...", "quads": [...], "subGraphName"?: "..." }`
 - `POST /api/assertion/{name}/query` — read assertion contents as quads
   Body: `{ "contextGraphId": "...", "subGraphName"?: "..." }`
-- `POST /api/assertion/{name}/promote` — promote assertion triples to SWM
+- `POST /api/assertion/{name}/promote` — promote assertion triples to SWM (synchronous; returns once SWM insert + gossip complete)
   Body: `{ "contextGraphId": "...", "entities"?: [...] | "all", "subGraphName"?: "..." }`
+- `POST /api/assertion/{name}/promote-async` — enqueue the same promote for an in-daemon worker to handle in the background. Returns `202 { jobId, state: "queued" }` immediately. Use this for bulk importers where waiting for the synchronous round-trip is the bottleneck (the Graphify import RFC `docs/specs/SPEC_ASYNC_PROMOTE_QUEUE.md` explains the motivation). See §8 "Async promote queue" for the inspection routes.
 - `POST /api/assertion/{name}/discard` — drop the assertion graph
   Body: `{ "contextGraphId": "...", "subGraphName"?: "..." }`
 - `POST /api/assertion/{name}/import-file` — import a document (multipart/form-data) — see §7
@@ -613,6 +614,28 @@ Use the job queue for bulk or long-running publishes, publishes that must surviv
 | `POST` | `/api/publisher/cancel` | Cancel a job. Body: `{ jobId }`. |
 | `POST` | `/api/publisher/retry` | Retry a failed job. Body: `{ jobId }`. |
 | `POST` | `/api/publisher/clear` | Clear completed/failed jobs. |
+
+### Async promote queue (WM → SWM)
+
+Sibling to the publisher queue, but for the WM→SWM transition that a synchronous `POST /api/assertion/{name}/promote` would otherwise perform inline. Use it when the importer is producing assertions faster than the daemon can promote them (bulk Graphify imports, EPCIS batch loads, etc.); the synchronous route stays available for small interactive cases.
+
+The worker runs in-daemon and is **on by default**. Disable per node with `config.promoteQueue.enabled: false`; tune throughput with `workerConcurrency` (default 4), `pollIntervalMs` (default 100), `heartbeatIntervalMs` (default 60_000), `shutdownTimeoutMs` (default 30_000).
+
+| Method | Route | Purpose |
+|---|---|---|
+| `POST` | `/api/assertion/{name}/promote-async` | Enqueue a promote. Body: `{ contextGraphId, entities?: [...] \| "all", subGraphName? }`. Returns `202 { jobId, state: "queued", enqueuedAt }`. Returns `409 { existingJobId }` if there is already an active job for the same `(contextGraphId, subGraphName, name)`. |
+| `GET`  | `/api/assertion/promote-async` | List jobs. Query: `state=queued,running,failed_retrying,succeeded,failed` (comma-separated), `contextGraphId=...`, `limit=N`. Returns `{ jobs: [...] }`. |
+| `GET`  | `/api/assertion/promote-async/{jobId}` | Read one job (`state`, `attempt.count`, `commitMarker`, `result`, `attempt.lastError` with `classification: transient\|cap_exceeded\|fatal`). |
+| `DELETE` | `/api/assertion/promote-async/{jobId}` | Cancel a `queued` / `failed_retrying` job. `409` if the job is `running` (let the lease expire). |
+| `POST` | `/api/assertion/promote-async/{jobId}/recover` | Re-queue a `failed` job after the operator has fixed whatever was wrong (subdivided an over-large entity set, restarted an upstream, etc.). |
+
+Failure classifications you'll see in `attempt.lastError.classification`:
+
+| Classification | Retry? | Typical cause | Operator action |
+|---|---|---|---|
+| `transient` | yes (until `maxRetries=5` reached) | `fetch failed` / `ECONNRESET` / `timeout` | Wait — the worker will pick it up after backoff. |
+| `cap_exceeded` | no | `Promoted assertion too large for gossip` (10 MB) or `Request body too large` (256 KB) | Re-enqueue with a smaller `entities` slice — the queue can't subdivide on its own. |
+| `fatal` | no | Bad request, missing assertion, etc. | Inspect the error message, fix the cause, then `POST /api/assertion/promote-async/{jobId}/recover`. |
 
 ## 9. Error Reference
 

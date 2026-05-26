@@ -9,6 +9,7 @@ export default defineConfig({
       'test/verify-collector.test.ts',
       'test/verify-proposal-handler.test.ts',
       'test/views-min-trust-extra.test.ts',
+      'test/async-promote-queue.test.ts',
     ],
     testTimeout: 60_000,
     maxWorkers: 1,

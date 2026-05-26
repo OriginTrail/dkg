@@ -533,6 +533,11 @@ class SharedMemoryHandler {
   +contextGraphHasPrivateAccessPolicy()
   +getContextGraphAllowedPeers()
 }
+class PrivateContentStore {
+  +storePrivateTriples()
+  +getPrivateTriples()
+  +storePrivateTriplesForOperation()
+}
 class AsyncPublisher {
   +enqueue()
   +processNext()
@@ -566,6 +571,8 @@ EncryptedWorkspacePayload --> GossipEnvelope : nests as payload bytes
 GossipEnvelope --> SharedMemoryHandler : delivered on SWM topic
 SharedMemoryHandler --> ContextGraphAccessMetadata : reads access policy and gates
 SharedMemoryHandler --> SharedWorkingMemory : stores accepted writes
+PrivateContentStore --> WorkingMemory : stages async private lift payloads
+PrivateContentStore --> StorageAdapters : writes plaintext private RDF terms
 AsyncPublisher --> SharedWorkingMemory : reads source data
 AsyncPublisher --> VerifiedMemory : publishes
 ```
@@ -669,6 +676,16 @@ or metadata tampering fail closed. Open public graphs keep the legacy plaintext
 path for backward compatibility, while private graph integration rejects
 plaintext fallback.
 
+This encryption boundary is a transport boundary. `DKGAgent.share()`,
+`conditionalShare()`, and assertion promotion commit accepted quads to the local
+triple store as normal SWM rows, then replicate the `WorkspacePublishRequest`
+over GossipSub and/or the Universal Messenger substrate. For private or
+agent-gated context graphs, the request bytes are sender-key encrypted when the
+sender-key path is configured, or wrapped in `EncryptedWorkspacePayload` as the
+legacy encrypted workspace fallback. Receivers decrypt the wire payload first,
+run the same authorization and validation checks, and only then insert normal
+quads into the local `_shared_memory` graph.
+
 ```mermaid
 sequenceDiagram
   actor Writer as Local Writer
@@ -702,6 +719,69 @@ sequenceDiagram
     Gossip->>Handler: decode envelope or legacy raw payload
   end
 ```
+
+## Private and SWM Triple-Store Encryption Boundary
+
+Current repository state separates triple-store persistence from peer-to-peer
+message confidentiality. See
+[ADR 0004](./docs/adr/0004-private-store-plaintext-rdf.md) for the accepted
+decision to keep private-store RDF plaintext after message decryption.
+
+- **WM assertions** live in assertion named graphs such as
+  `did:dkg:context-graph:<cg>/assertion/<agent>/<name>`. `assertion.write`
+  inserts caller quads into that graph unchanged. `assertion.promote` filters
+  daemon-reserved metadata, partitions root entities, inserts the promoted quads
+  into `_shared_memory`, removes the promoted rows from the assertion graph, and
+  updates lifecycle metadata in `_meta`.
+- **SWM writes** from `/api/shared-memory/write`,
+  `/api/shared-memory/conditional-write`, and assertion promotion persist
+  normalized quads directly in `did:dkg:context-graph:<cg>/_shared_memory` or
+  the sub-graph equivalent. SWM operation metadata and ownership live in
+  `_shared_memory_meta`; the public snapshot store records the same public quads
+  for replay and catch-up. The store rows are not `enc:gcm:v1` envelopes.
+- **Private content** lives in `_private` graphs through `PrivateContentStore`.
+  `storePrivateTriples()` writes accepted RDF object terms unchanged into the
+  private graph: literals stay literals, IRI objects stay IRIs, and blank nodes
+  stay blank nodes. This is separate from Sender Key SWM and
+  `EncryptedWorkspacePayload`, which protect node-to-node messages before the
+  receiving node decrypts and stores the payload.
+  `storePrivateTriplesForOperation()` remains the async-lift staging path: it
+  stores a JSON literal payload in a private staging graph keyed by
+  `shareOperationId`, then the async publisher later moves those quads into
+  `_private`.
+- **Encrypted ACK staging** is a scoped publish-finalization exception, not the
+  #633 queryability surface. Curated/private publishes may ask core nodes that
+  are not context-graph members to ACK storage without seeing plaintext. In that
+  path `StorageACKHandler` stores a temporary base64 ciphertext blob under
+  `_shared_memory/staging-encrypted/<merkle-prefix>` and
+  `urn:dkg:swm:v10-publish-ciphertext`; those rows are opaque transport escrow,
+  not queryable KA triples.
+
+The removed triple-store-level encryption surface was narrow: the
+`PrivateContentStore` `enc:gcm:v1` literal seal, `DKG_PRIVATE_STORE_KEY*`
+at-rest encryption configuration, exported private-literal decrypt helper, and
+publisher exact-dedup decrypt call. Graph routing, private staging, ownership
+metadata, assertion lifecycle, SWM persistence, and publisher replay semantics
+remain intact. Do not remove the peer-to-peer encryption surfaces: Sender Key
+SWM, legacy `EncryptedWorkspacePayload`, or encrypted sender-key setup packages.
+The Universal Messenger `sendReliable` / `register` reliability substrate
+continues to carry those opaque application payload bytes on the wire. Encrypted
+ACK staging also stays out of the #633 fix; if that exception needs to move out
+of RDF storage later, handle it as a separate publish-finalization design.
+
+No automatic migration is planned for already-written `_private`
+`enc:gcm:v1` rows. They can remain as legacy data and may be overwritten or
+recaptured in devnet environments. The scoped fix is forward-looking: new private
+triple writes land as plaintext RDF terms so normal SPARQL filters work;
+legacy decrypt compatibility is not required for this test/devnet-phase data.
+Regression coverage should prove the generic private-store contract, not only
+the EPCIS symptom: private writes containing literal objects, IRI objects, blank
+nodes, and realistic query predicates must be visible as plaintext RDF terms in
+the raw `_private` graph and round-trip through `getPrivateTriples()` without a
+decrypt step. EPCIS fixture readback remains useful as manual/devnet validation,
+but the core automated regression can live at the storage or publisher layer.
+Replace the PR #644 repro narrative that documented literal filters as still
+broken; the new regression should assert the intended final contract instead.
 
 ## Source Worker Workflow
 

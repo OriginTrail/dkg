@@ -106,14 +106,22 @@ describe('[Q-1] DKGQueryEngine minTrust uses writer-side trust metadata', () => 
     const store = new OxigraphStore();
     const engine = new DKGQueryEngine(store);
 
-    const subGraph = contextGraphVerifiedMemoryUri(CG, 'no-trust-metadata-quorum');
-    const rootGraph = contextGraphDataUri(CG);
+    // RC11 / PR2: VM view sources only `_verified_memory/*` named
+    // graphs now (root data graph is no longer aliased into VM). The
+    // assertion this test was originally pinning — "trust is decided
+    // by writer-side `dkg:trustLevel` metadata, NOT by which graph
+    // the quad lives in" — is preserved by placing the tagged datum
+    // into a different verified-memory sub-graph than the untagged
+    // quorum, so the test still proves graph-scope alone doesn't
+    // grant trust.
+    const untaggedQuorumGraph = contextGraphVerifiedMemoryUri(CG, 'no-trust-metadata-quorum');
+    const taggedQuorumGraph = contextGraphVerifiedMemoryUri(CG, 'endorsed-trust-tagged');
 
     await store.insert([
-      quad('urn:prod1', 'http://schema.org/name', '"Production1"', subGraph),
-      quad('urn:prod2', 'http://schema.org/name', '"Production2"', subGraph),
-      quad('urn:root', 'http://schema.org/name', '"RootDataGraph"', rootGraph),
-      quad('urn:root', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.Endorsed}"`, rootGraph),
+      quad('urn:prod1', 'http://schema.org/name', '"Production1"', untaggedQuorumGraph),
+      quad('urn:prod2', 'http://schema.org/name', '"Production2"', untaggedQuorumGraph),
+      quad('urn:tagged', 'http://schema.org/name', '"TaggedEndorsed"', taggedQuorumGraph),
+      quad('urn:tagged', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.Endorsed}"`, taggedQuorumGraph),
     ]);
 
     const result = await engine.query(
@@ -126,7 +134,7 @@ describe('[Q-1] DKGQueryEngine minTrust uses writer-side trust metadata', () => 
     );
 
     const names = result.bindings.map((b) => b['name']).sort();
-    expect(names).toEqual(['"RootDataGraph"']);
+    expect(names).toEqual(['"TaggedEndorsed"']);
   });
 
   // pin that ConsensusVerified
@@ -733,9 +741,15 @@ describe('[Q-5] Context Oracle proof params → correct graph targets', () => {
     expect(res.graphPrefixes).toEqual([]);
   });
 
-  it('verified-memory without verifiedGraph targets root + `_verified_memory/` prefix (§16.1)', () => {
+  it('verified-memory without verifiedGraph unions root content graph + `_verified_memory/` prefix (RC11 / PR-A: Codex #671)', () => {
     const res = resolveViewGraphs('verified-memory', CG, {});
-    expect(res.graphs).toEqual([contextGraphDataUri(CG)]);
+    // RC11 / PR-A (Codex review fix on #671, comment 3302058969):
+    // the root content graph is re-included so a successful publish
+    // shows up in VM immediately (memory-search flows depend on this).
+    // The tentative-VM leak the PR2 first cut was guarding against is
+    // now plugged at the publisher (root-graph insert deferred to the
+    // chain-success branch in `DKGPublisher.publish`).
+    expect(res.graphs).toEqual([`did:dkg:context-graph:${CG}`]);
     expect(res.graphPrefixes).toEqual([`did:dkg:context-graph:${CG}/_verified_memory/`]);
   });
 

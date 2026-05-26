@@ -4,9 +4,9 @@
  *
  * Findings covered (see .test-audit/
  *
- *   ST-2  PROD-BUG — PrivateContentStore is documented as encrypted private
- *          storage but src/private-store.ts only remaps the graph URI. The
- *          literal value lands on disk in plaintext.
+ *   ST-2  PrivateContentStore stores accepted private RDF as plaintext terms
+ *          in the _private graph. Peer messages are encrypted before they
+ *          reach this store; local triple-store rows stay queryable.
  *
  *   ST-3  Named-graph isolation using REAL V10 URIs
  *          (contextGraphSharedMemoryUri / contextGraphVerifiedMemoryUri /
@@ -41,16 +41,9 @@ const CONTEXT_GRAPH = 'agent-registry';
 const ROOT = 'did:dkg:agent:QmSecretHolder';
 
 // =======================================================================
-// ST-2 — "encrypted private storage" is a lie.
+// ST-2 — Private graph RDF terms are plaintext and queryable.
 // =======================================================================
-describe('PrivateContentStore — at-rest confidentiality [ST-2]', () => {
-  // PROD-BUG: PrivateContentStore does NOT encrypt. src/private-store.ts
-  // only remaps the quad's graph URI to the <cg>/_private named graph.
-  // The literal object is persisted verbatim by Oxigraph. Any operator
-  // with read access to the on-disk N-Quads file or the SPARQL endpoint
-  // can recover the plaintext. README claims otherwise — see
-  // . Leaving this test RED is the evidence.
-
+describe('PrivateContentStore — plaintext private RDF terms [ST-2]', () => {
   const SECRET = 'SECRET_PLAINTEXT_AAAA';
   let tempDir: string;
 
@@ -58,7 +51,7 @@ describe('PrivateContentStore — at-rest confidentiality [ST-2]', () => {
     tempDir = mkdtempSync(join(tmpdir(), 'dkg-private-store-'));
   });
 
-  it('on-disk N-Quads dump must not contain the plaintext literal', async () => {
+  it('on-disk N-Quads dump contains the plaintext literal, not a local encryption envelope', async () => {
     const persistPath = join(tempDir, 'store.nq');
     const store = new OxigraphStore(persistPath);
     const gm = new ContextGraphManager(store);
@@ -77,19 +70,14 @@ describe('PrivateContentStore — at-rest confidentiality [ST-2]', () => {
 
     const onDisk = readFileSync(persistPath, 'utf-8');
     try {
-      expect(onDisk).not.toContain(SECRET);
+      expect(onDisk).toContain(SECRET);
+      expect(onDisk).not.toContain('enc:gcm:v1');
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
   });
 
-  it('a second, unrelated SPARQL client must NOT see the plaintext literal', async () => {
-    // FIXED (ST-2): PrivateContentStore now seals the literal `object`
-    // with AES-256-GCM before handing the quad to the TripleStore. A
-    // raw SPARQL caller (no PrivateContentStore decrypt) sees only the
-    // `enc:gcm:v1:<base64>` envelope. PrivateContentStore.getPrivateTriples
-    // reverses the seal and returns the original literal — exercised
-    // by the "round-trip" assertion below.
+  it('a second raw SPARQL client sees the same plaintext RDF term', async () => {
     const store = new OxigraphStore();
     const gm = new ContextGraphManager(store);
     const ps = new PrivateContentStore(store, gm);
@@ -105,20 +93,15 @@ describe('PrivateContentStore — at-rest confidentiality [ST-2]', () => {
     expect(raw.type).toBe('bindings');
     if (raw.type !== 'bindings') return;
     const rawObjects = raw.bindings.map((b) => b['o']);
-    // Raw SPARQL view: only the AES-GCM envelope is observable.
-    expect(rawObjects.join(' ')).not.toContain(SECRET);
-    expect(rawObjects.some((o) => o.startsWith('"enc:gcm:v1:'))).toBe(true);
+    expect(rawObjects).toContain(`"${SECRET}"`);
+    expect(rawObjects.some((o) => o.startsWith('"enc:gcm:v1:'))).toBe(false);
 
-    // Authorised path round-trips: getPrivateTriples decrypts.
-    const decrypted = await ps.getPrivateTriples(CONTEXT_GRAPH, ROOT);
-    expect(decrypted.map((q) => q.object)).toContain(`"${SECRET}"`);
+    const roundTripped = await ps.getPrivateTriples(CONTEXT_GRAPH, ROOT);
+    expect(roundTripped.map((q) => q.object)).toContain(`"${SECRET}"`);
   });
 
-  // Random IV is
-  // required, but
-  // the write path MUST stay idempotent on plaintext identity — otherwise
-  // every replay / retry of the same private KA stacks another
-  // ciphertext row and `getPrivateTriples` starts returning duplicates.
+  // The write path MUST stay idempotent on RDF term identity. Every replay /
+  // retry of the same private KA should keep one row per distinct quad.
   it('storePrivateTriples is idempotent on plaintext (no dup rows on replay)', async () => {
     const store = new OxigraphStore();
     const gm = new ContextGraphManager(store);
@@ -139,7 +122,7 @@ describe('PrivateContentStore — at-rest confidentiality [ST-2]', () => {
     );
     expect(raw.type).toBe('bindings');
     if (raw.type !== 'bindings') return;
-    // Exactly two ciphertext rows survive, one per distinct (s,p,plaintext).
+    // Exactly two rows survive, one per distinct (s,p,o).
     expect(raw.bindings.length).toBe(2);
 
     const roundTripped = (await ps.getPrivateTriples(CONTEXT_GRAPH, ROOT))
@@ -152,15 +135,9 @@ describe('PrivateContentStore — at-rest confidentiality [ST-2]', () => {
   });
 
   it('concurrent storePrivateTriples for the same (s,p,o) cannot bypass dedup (read-then-insert race)', async () => {
-    // Pre-fix: `storePrivateTriples` snapshotted existing plaintext keys
-    // BEFORE inserting, with no mutual exclusion. Two concurrent writers
-    // for the same (s,p,o) plaintext would both observe an empty key
-    // set, then each insert their own random-IV ciphertext — and the
-    // store kept both because the underlying triple store dedups by
-    // byte-identical terms only. Post-fix: the per-graph mutex makes
-    // the read-and-insert pair atomic so only the FIRST writer's
-    // ciphertext lands; the SECOND sees the freshly inserted key and
-    // skips.
+    // The per-graph mutex makes the read-and-insert pair atomic so only
+    // the first writer inserts; later writers see the freshly inserted key
+    // and skip.
     const store = new OxigraphStore();
     const gm = new ContextGraphManager(store);
     const ps = new PrivateContentStore(store, gm);
@@ -187,9 +164,9 @@ describe('PrivateContentStore — at-rest confidentiality [ST-2]', () => {
     if (raw.type !== 'bindings') return;
     expect(raw.bindings.length).toBe(1);
 
-    const decrypted = await ps.getPrivateTriples(CONTEXT_GRAPH, ROOT);
-    expect(decrypted.length).toBe(1);
-    expect(decrypted[0].object).toBe(`"${SECRET}"`);
+    const roundTripped = await ps.getPrivateTriples(CONTEXT_GRAPH, ROOT);
+    expect(roundTripped.length).toBe(1);
+    expect(roundTripped[0].object).toBe(`"${SECRET}"`);
   });
 
   // — private-store.ts:553). Pre-fix
@@ -216,7 +193,7 @@ describe('PrivateContentStore — at-rest confidentiality [ST-2]', () => {
       ps.storePrivateTriples(CONTEXT_GRAPH, ROOT, quads),
     ).resolves.not.toThrow();
 
-    // The two private rows actually landed (encrypted at rest).
+    // The two private rows actually landed.
     const privateGraph = contextGraphPrivateUri(CONTEXT_GRAPH);
     const raw = await store.query(
       `SELECT ?s ?p ?o WHERE { GRAPH <${privateGraph}> { ?s ?p ?o } }`,
@@ -852,5 +829,18 @@ describe('PrivateContentStore — SPARQL injection defence [ST-7]', () => {
         { subject: 'urn:safe:s', predicate: 'http://ex.org/p', object: '"v"', graph: '' },
       ]),
     ).rejects.toThrow(/Unsafe or empty IRI/);
+  });
+
+  it('storePrivateTriples rejects unsafe object RDF terms before adapter insertion', async () => {
+    await expect(
+      ps.storePrivateTriples(CONTEXT_GRAPH, ROOT, [
+        {
+          subject: ROOT,
+          predicate: 'http://ex.org/p',
+          object: '"x" <urn:graph> . <urn:evil> <http://ex.org/p> "y"',
+          graph: '',
+        },
+      ]),
+    ).rejects.toThrow(/Unsafe RDF term|Unsafe or empty IRI/);
   });
 });

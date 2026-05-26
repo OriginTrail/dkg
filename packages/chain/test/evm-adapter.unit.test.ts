@@ -642,3 +642,107 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     expect(ttlOf(aDefault)).toBe(DEFAULT_TTL_MS);
   });
 });
+
+describe('PR3 / RC11 — publish-preflight TTL cache', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('getEvmChainId issues exactly one provider.getNetwork call across repeat reads', async () => {
+    const a = new EVMChainAdapter(minimalConfig());
+    const getNetwork = vi.fn(async () => ({ chainId: 31337n }));
+    (a as unknown as { provider: { getNetwork: () => Promise<{ chainId: bigint }> } }).provider = {
+      getNetwork: getNetwork as unknown as () => Promise<{ chainId: bigint }>,
+    };
+
+    expect(await a.getEvmChainId()).toBe(31337n);
+    expect(await a.getEvmChainId()).toBe(31337n);
+    expect(await a.getEvmChainId()).toBe(31337n);
+    expect(getNetwork).toHaveBeenCalledTimes(1);
+  });
+
+  it('getKnowledgeAssetsV10Address caches the contract address across repeat reads', async () => {
+    const a = new EVMChainAdapter(minimalConfig());
+    const getAddress = vi.fn(async () => '0xCONTRACT');
+    (a as unknown as { init: () => Promise<void> }).init = async () => undefined;
+    (a as unknown as { contracts: { knowledgeAssetsV10: { getAddress: () => Promise<string> } } }).contracts = {
+      knowledgeAssetsV10: { getAddress: getAddress as unknown as () => Promise<string> },
+    };
+
+    expect(await a.getKnowledgeAssetsV10Address()).toBe('0xCONTRACT');
+    expect(await a.getKnowledgeAssetsV10Address()).toBe('0xCONTRACT');
+    expect(getAddress).toHaveBeenCalledTimes(1);
+  });
+
+  it('getMinimumRequiredSignatures caches across repeat reads', async () => {
+    const a = new EVMChainAdapter(minimalConfig());
+    const minimumRequiredSignatures = vi.fn(async () => 3n);
+    (a as unknown as { init: () => Promise<void> }).init = async () => undefined;
+    (a as unknown as { contracts: { parametersStorage: { minimumRequiredSignatures: () => Promise<bigint> } } }).contracts = {
+      parametersStorage: {
+        minimumRequiredSignatures: minimumRequiredSignatures as unknown as () => Promise<bigint>,
+      },
+    };
+
+    expect(await a.getMinimumRequiredSignatures()).toBe(3);
+    expect(await a.getMinimumRequiredSignatures()).toBe(3);
+    expect(await a.getMinimumRequiredSignatures()).toBe(3);
+    expect(minimumRequiredSignatures).toHaveBeenCalledTimes(1);
+  });
+
+  it('refreshes after the 1h TTL expires', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const a = new EVMChainAdapter(minimalConfig());
+    let returned = 31337n;
+    const getNetwork = vi.fn(async () => ({ chainId: returned }));
+    (a as unknown as { provider: { getNetwork: () => Promise<{ chainId: bigint }> } }).provider = {
+      getNetwork: getNetwork as unknown as () => Promise<{ chainId: bigint }>,
+    };
+
+    expect(await a.getEvmChainId()).toBe(31337n);
+    expect(getNetwork).toHaveBeenCalledTimes(1);
+
+    vi.setSystemTime(60 * 60 * 1000 - 1);
+    expect(await a.getEvmChainId()).toBe(31337n);
+    expect(getNetwork).toHaveBeenCalledTimes(1);
+
+    vi.setSystemTime(60 * 60 * 1000 + 1);
+    returned = 84532n;
+    expect(await a.getEvmChainId()).toBe(84532n);
+    expect(getNetwork).toHaveBeenCalledTimes(2);
+  });
+
+  it('invalidatePublishPreflightCache forces a fresh read on next call', async () => {
+    const a = new EVMChainAdapter(minimalConfig());
+    const getNetwork = vi.fn(async () => ({ chainId: 31337n }));
+    (a as unknown as { provider: { getNetwork: () => Promise<{ chainId: bigint }> } }).provider = {
+      getNetwork: getNetwork as unknown as () => Promise<{ chainId: bigint }>,
+    };
+
+    await a.getEvmChainId();
+    await a.getEvmChainId();
+    expect(getNetwork).toHaveBeenCalledTimes(1);
+    a.invalidatePublishPreflightCache();
+    await a.getEvmChainId();
+    expect(getNetwork).toHaveBeenCalledTimes(2);
+  });
+
+  it('does NOT cache failures (next call retries the underlying read)', async () => {
+    const a = new EVMChainAdapter(minimalConfig());
+    let attempts = 0;
+    const getNetwork = vi.fn(async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error('rate limited');
+      return { chainId: 31337n };
+    });
+    (a as unknown as { provider: { getNetwork: () => Promise<{ chainId: bigint }> } }).provider = {
+      getNetwork: getNetwork as unknown as () => Promise<{ chainId: bigint }>,
+    };
+
+    await expect(a.getEvmChainId()).rejects.toThrow('rate limited');
+    // Second call should retry — failure was not memoised.
+    expect(await a.getEvmChainId()).toBe(31337n);
+    expect(getNetwork).toHaveBeenCalledTimes(2);
+  });
+});
+

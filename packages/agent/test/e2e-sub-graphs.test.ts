@@ -15,6 +15,7 @@ import { DKGAgent } from '../src/index.js';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { ethers } from 'ethers';
+import { installHardhatACKProvider } from './_helpers/v10-acks.js';
 
 const agents: DKGAgent[] = [];
 
@@ -253,6 +254,7 @@ describe('Sub-graph publish + query (single agent)', () => {
     });
     agents.push(agent);
     await agent.start();
+    await installHardhatACKProvider(agent);
 
     await agent.createContextGraph({ id: 'sg-swm', name: 'SWM', description: '' });
     await agent.registerContextGraph('sg-swm');
@@ -505,6 +507,7 @@ describe('Sub-graph across memory layers (single agent)', () => {
     });
     agents.push(agent);
     await agent.start();
+    await installHardhatACKProvider(agent);
 
     await agent.createContextGraph({ id: 'sg-pipeline', name: 'Pipeline', description: '' });
     await agent.registerContextGraph('sg-pipeline');

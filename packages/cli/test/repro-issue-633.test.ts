@@ -1,72 +1,144 @@
 /**
- * Regression test for OriginTrail/dkg#633
- * "EPCIS private queries cannot filter encrypted object values"
+ * Regression test for OriginTrail/dkg#633.
  *
- * History:
- *   - 2026-04-22 (PR #229 round-6 bot escalation, commit de341d88): the
- *     IRI half of `encryptLiteral` started AES-sealing every object
- *     term in `_private` — both literals and IRIs — under a single
- *     envelope with an internal `L|` / `I|` tag.
- *   - 2026-05-05 (PR #379): the round-6 squash landed on `main`, which
- *     silently broke every SPARQL filter against the private graph.
- *     The most visible victim was the EPCIS read path (#633).
- *   - This commit: reverts the IRI half of the seal in
- *     `PrivateContentStore.encryptLiteral`. IRI-position object terms
- *     now pass through plaintext, restoring SPARQL filterability for
- *     `eventType`, `bizStep`, `bizLocation`, `readPoint`, `disposition`.
- *     The literal half stays sealed (literals are the ST-2 finding),
- *     so `epc`, `action`, `eventTime` range filters still need a
- *     blind-index or in-app post-decrypt pass — tracked separately.
- *
- * Sets up an in-memory OxigraphStore wired to a real
- * ContextGraphManager + PrivateContentStore, writes one ObjectEvent
- * into the private graph the way the publisher does on capture, plus
- * the public anchor triple, then runs the SPARQL built by
- * `buildEpcisQuery()` and asserts the IRI-side is fixed and documents
- * the literal-side gap.
- *
- * Lives in `packages/cli/test` because cli is the only package that
- * already has BOTH `@origintrail-official/dkg-storage` and
- * `@origintrail-official/dkg-epcis` as workspace deps.
+ * Private payloads are encrypted between nodes, but once an authorised
+ * receiving node decrypts a payload it must insert normal plaintext RDF into
+ * its local private graph. The triple store must not wrap literals in a second
+ * `enc:gcm:v1` layer, because that breaks SPARQL filters and leaks ciphertext
+ * through query results.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { describe, it, expect } from 'vitest';
 import {
-  OxigraphStore,
   ContextGraphManager,
+  OxigraphStore,
   PrivateContentStore,
 } from '@origintrail-official/dkg-storage';
 import {
-  contextGraphSharedMemoryUri,
   contextGraphPrivateUri,
+  contextGraphSharedMemoryUri,
 } from '@origintrail-official/dkg-core';
 import { buildEpcisQuery } from '@origintrail-official/dkg-epcis';
 
 const CG = 'repro-633';
-const EVENT = 'urn:uuid:event-A';
-const EPC = 'urn:epc:id:sgtin:4012345.011111.1001';
-const SWM_GRAPH = contextGraphSharedMemoryUri(CG);
+const ROOT = 'urn:example:asset:123';
+const DETAIL = `${ROOT}/.well-known/genid/detail`;
 const PRIVATE_GRAPH = contextGraphPrivateUri(CG);
+const SWM_GRAPH = contextGraphSharedMemoryUri(CG);
+const EVENT = 'urn:uuid:repro-633-epcis-event';
+const EPC = 'urn:acme:bike:item:BIKE-2026-W18-0001';
 
-describe('OriginTrail/dkg#633 — EPCIS private queries cannot filter encrypted object values', () => {
-  let tempDir: string;
-  let store: OxigraphStore;
-  let gm: ContextGraphManager;
-  let ps: PrivateContentStore;
+describe('OriginTrail/dkg#633 — private graph stores plaintext RDF terms', () => {
+  it('keeps literals, IRIs, and blank nodes queryable in the raw private graph', async () => {
+    const store = new OxigraphStore();
+    const gm = new ContextGraphManager(store);
+    const ps = new PrivateContentStore(store, gm);
 
-  beforeEach(async () => {
-    tempDir = mkdtempSync(join(tmpdir(), 'repro-633-'));
-    process.env.DKG_PRIVATE_STORE_KEY_FILE = join(tempDir, 'private-store.key');
+    const quads = [
+      {
+        subject: ROOT,
+        predicate: 'http://example.com/ns/status',
+        object: '<http://example.com/status/Ready>',
+        graph: '',
+      },
+      {
+        subject: ROOT,
+        predicate: 'http://example.com/ns/temperature',
+        object: '"7.5"^^<http://www.w3.org/2001/XMLSchema#decimal>',
+        graph: '',
+      },
+      {
+        subject: ROOT,
+        predicate: 'http://example.com/ns/batch',
+        object: '"batch-42"',
+        graph: '',
+      },
+      {
+        subject: ROOT,
+        predicate: 'http://example.com/ns/detail',
+        object: '_:detail',
+        graph: '',
+      },
+      {
+        subject: DETAIL,
+        predicate: 'http://example.com/ns/note',
+        object: '"blank-node-shaped private data"',
+        graph: '',
+      },
+    ];
 
-    store = new OxigraphStore();
-    gm = new ContextGraphManager(store);
-    ps = new PrivateContentStore(store, gm);
+    await ps.storePrivateTriples(CG, ROOT, quads);
+    await ps.storePrivateTriples(
+      CG,
+      ROOT,
+      quads.filter((q) => q.object !== '_:detail'),
+    );
 
-    // 1) Public anchor — async-lift-publisher-impl.ts:142-147 emits this
-    // for every private root so EPCIS queries can locate the matching
-    // private payload at query time.
+    const raw = await store.query(`
+      SELECT ?p ?o WHERE {
+        GRAPH <${PRIVATE_GRAPH}> { <${ROOT}> ?p ?o . }
+      }
+      ORDER BY ?p ?o
+    `);
+    expect(raw.type).toBe('bindings');
+    if (raw.type !== 'bindings') return;
+
+    const rawObjects = raw.bindings.map((row) => row['o']);
+    expect(rawObjects.some((o) => o?.startsWith('"enc:gcm:v1:'))).toBe(false);
+    expect(rawObjects).toContain('http://example.com/status/Ready');
+    expect(rawObjects).toContain('"7.5"^^<http://www.w3.org/2001/XMLSchema#decimal>');
+    expect(rawObjects).toContain('"batch-42"');
+    expect(rawObjects.some((o) => o?.startsWith('_:'))).toBe(true);
+    expect(raw.bindings).toHaveLength(4);
+
+    const filteredLiteral = await store.query(`
+      SELECT ?s WHERE {
+        GRAPH <${PRIVATE_GRAPH}> {
+          ?s <http://example.com/ns/batch> "batch-42" .
+        }
+      }
+    `);
+    expect(filteredLiteral.type).toBe('bindings');
+    if (filteredLiteral.type !== 'bindings') return;
+    expect(filteredLiteral.bindings.map((row) => row['s'])).toEqual([ROOT]);
+
+    const filteredTypedLiteral = await store.query(`
+      SELECT ?s WHERE {
+        GRAPH <${PRIVATE_GRAPH}> {
+          ?s <http://example.com/ns/temperature> ?temperature .
+          FILTER(?temperature >= "7.0"^^<http://www.w3.org/2001/XMLSchema#decimal>)
+        }
+      }
+    `);
+    expect(filteredTypedLiteral.type).toBe('bindings');
+    if (filteredTypedLiteral.type !== 'bindings') return;
+    expect(filteredTypedLiteral.bindings.map((row) => row['s'])).toEqual([ROOT]);
+
+    const filteredIri = await store.query(`
+      SELECT ?s WHERE {
+        GRAPH <${PRIVATE_GRAPH}> {
+          ?s <http://example.com/ns/status> <http://example.com/status/Ready> .
+        }
+      }
+    `);
+    expect(filteredIri.type).toBe('bindings');
+    if (filteredIri.type !== 'bindings') return;
+    expect(filteredIri.bindings.map((row) => row['s'])).toEqual([ROOT]);
+
+    const roundTrippedObjects = (await ps.getPrivateTriples(CG, ROOT)).map(
+      (q) => q.object,
+    );
+    expect(roundTrippedObjects).toContain('<http://example.com/status/Ready>');
+    expect(roundTrippedObjects).toContain('"7.5"^^<http://www.w3.org/2001/XMLSchema#decimal>');
+    expect(roundTrippedObjects).toContain('"batch-42"');
+    expect(roundTrippedObjects).toContain('"blank-node-shaped private data"');
+    expect(roundTrippedObjects.some((o) => o.startsWith('_:'))).toBe(true);
+  });
+
+  it('keeps EPCIS private event filters working through buildEpcisQuery', async () => {
+    const store = new OxigraphStore();
+    const gm = new ContextGraphManager(store);
+    const ps = new PrivateContentStore(store, gm);
+
     await store.insert([
       {
         subject: EVENT,
@@ -75,11 +147,6 @@ describe('OriginTrail/dkg#633 — EPCIS private queries cannot filter encrypted 
         graph: SWM_GRAPH,
       },
     ]);
-
-    // 2) Private EPCIS event triples — same shape the publisher writes
-    // through PrivateContentStore.storePrivateTriples for a private
-    // ObjectEvent. Every `object` field gets AES-GCM sealed before the
-    // triplestore sees it (private-store.ts:550-581).
     await ps.storePrivateTriples(CG, EVENT, [
       {
         subject: EVENT,
@@ -90,13 +157,7 @@ describe('OriginTrail/dkg#633 — EPCIS private queries cannot filter encrypted 
       {
         subject: EVENT,
         predicate: 'https://gs1.github.io/EPCIS/eventTime',
-        object: '"2026-05-25T08:00:00.000Z"',
-        graph: '',
-      },
-      {
-        subject: EVENT,
-        predicate: 'https://gs1.github.io/EPCIS/bizStep',
-        object: '<https://ref.gs1.org/cbv/BizStep-shipping>',
+        object: '"2026-05-12T10:00:00.000Z"',
         graph: '',
       },
       {
@@ -107,109 +168,72 @@ describe('OriginTrail/dkg#633 — EPCIS private queries cannot filter encrypted 
       },
       {
         subject: EVENT,
+        predicate: 'https://gs1.github.io/EPCIS/bizStep',
+        object: '<https://ref.gs1.org/cbv/BizStep-inspecting>',
+        graph: '',
+      },
+      {
+        subject: EVENT,
+        predicate: 'https://gs1.github.io/EPCIS/disposition',
+        object: '<https://ref.gs1.org/cbv/Disp-in_progress>',
+        graph: '',
+      },
+      {
+        subject: EVENT,
         predicate: 'https://gs1.github.io/EPCIS/epcList',
         object: `"${EPC}"`,
         graph: '',
       },
+      {
+        subject: EVENT,
+        predicate: 'https://gs1.github.io/EPCIS/readPoint',
+        object: '<urn:acme:bike:station:FunctionalTest>',
+        graph: '',
+      },
+      {
+        subject: EVENT,
+        predicate: 'https://gs1.github.io/EPCIS/bizLocation',
+        object: '<urn:acme:bike:station:FunctionalTest>',
+        graph: '',
+      },
     ]);
-  });
 
-  afterEach(async () => {
-    await store.close();
-    rmSync(tempDir, { recursive: true, force: true });
-    delete process.env.DKG_PRIVATE_STORE_KEY_FILE;
-  });
-
-  it('[shape] post-revert: IRI-object terms pass through plaintext, literal-object terms stay sealed', async () => {
-    // Asserts the post-revert envelope shape: literals are still
-    // wrapped in `"enc:gcm:v1:..."`, but IRIs land in the store
-    // verbatim. This is the new contract — see the comment block on
-    // `PrivateContentStore.encryptLiteral`.
-    const raw = await store.query(`
-      SELECT ?p ?o WHERE {
-        GRAPH <${PRIVATE_GRAPH}> { <${EVENT}> ?p ?o . }
-      }
-    `);
-    expect(raw.type).toBe('bindings');
-    if (raw.type !== 'bindings') return;
-    expect(raw.bindings).toHaveLength(5);
-
-    const sealedByPredicate = Object.fromEntries(
-      raw.bindings.map((r) => [r['p'], r['o']?.startsWith('"enc:gcm:v1:')]),
-    );
-    expect(sealedByPredicate['http://www.w3.org/1999/02/22-rdf-syntax-ns#type']).toBe(false);
-    expect(sealedByPredicate['https://gs1.github.io/EPCIS/bizStep']).toBe(false);
-    expect(sealedByPredicate['https://gs1.github.io/EPCIS/eventTime']).toBe(true);
-    expect(sealedByPredicate['https://gs1.github.io/EPCIS/action']).toBe(true);
-    expect(sealedByPredicate['https://gs1.github.io/EPCIS/epcList']).toBe(true);
-  });
-
-  it('[shape] PrivateContentStore.getPrivateTriples returns N-Triples-form terms for both sealed and unsealed objects', async () => {
-    const quads = await ps.getPrivateTriples(CG, EVENT);
-    expect(quads).toHaveLength(5);
-    const byPred = Object.fromEntries(quads.map((q) => [q.predicate, q.object]));
-    expect(byPred['http://www.w3.org/1999/02/22-rdf-syntax-ns#type']).toBe(
-      '<https://gs1.github.io/EPCIS/ObjectEvent>',
-    );
-    expect(byPred['https://gs1.github.io/EPCIS/bizStep']).toBe(
-      '<https://ref.gs1.org/cbv/BizStep-shipping>',
-    );
-    expect(byPred['https://gs1.github.io/EPCIS/action']).toBe('"OBSERVE"');
-    expect(byPred['https://gs1.github.io/EPCIS/epcList']).toBe(`"${EPC}"`);
-  });
-
-  it('[#633 IRI fix] buildEpcisQuery with no filters returns the private event (was: 0 rows)', async () => {
-    const sparql = buildEpcisQuery({ finalized: false }, CG);
-    expect(sparql).toContain('STRSTARTS(STR(?eventType), "https://gs1.github.io/EPCIS/")');
-    const res = await store.query(sparql);
-    expect(res.type).toBe('bindings');
-    if (res.type !== 'bindings') return;
-    expect(res.bindings).toHaveLength(1);
-    expect(res.bindings[0]?.['event']).toBe(EVENT);
-    expect(res.bindings[0]?.['eventType']).toBe(
-      'https://gs1.github.io/EPCIS/ObjectEvent',
-    );
-  });
-
-  it('[#633 IRI fix] IRI-position object filters now match against the private branch', async () => {
-    const iriPositionCases: Array<[string, Parameters<typeof buildEpcisQuery>[0]]> = [
+    const cases: Array<[string, Parameters<typeof buildEpcisQuery>[0]]> = [
+      ['no filters', { finalized: false }],
       ['eventType=ObjectEvent', { finalized: false, eventType: 'ObjectEvent' }],
-      ['bizStep=shipping', { finalized: false, bizStep: 'shipping' }],
-    ];
-    for (const [label, params] of iriPositionCases) {
-      const sparql = buildEpcisQuery(params, CG);
-      const res = await store.query(sparql);
-      expect(res.type, label).toBe('bindings');
-      if (res.type !== 'bindings') continue;
-      expect(res.bindings, label).toHaveLength(1);
-    }
-  });
-
-  it('[#633 follow-up] literal-position object filters still return empty (literals stay sealed; needs blind-index work)', async () => {
-    // The literal half of the seal is intentionally retained — it
-    // addresses the original ST-2 audit finding ("private literal
-    // values must not land on disk in plaintext"). The trade-off is
-    // that SPARQL `FILTER(?epcList = "...")`-style matches against
-    // sealed literals still bind to ciphertext.
-    //
-    // The proper fix is either (a) a blind-index sidecar that lets
-    // SPARQL match without revealing plaintext, or (b) an in-app
-    // post-decrypt pass in the EPCIS handler. Both are out of scope
-    // for the IRI-seal revert. Tracked as a follow-up on #633.
-    const literalPositionCases: Array<[string, Parameters<typeof buildEpcisQuery>[0]]> = [
-      ['epc=' + EPC, { finalized: false, epc: EPC }],
       ['action=OBSERVE', { finalized: false, action: 'OBSERVE' }],
+      ['bizStep=inspecting', { finalized: false, bizStep: 'inspecting' }],
+      ['disposition=in_progress', { finalized: false, disposition: 'in_progress' }],
+      ['epc filter', { finalized: false, epc: EPC }],
       [
-        'eventTime range',
-        { finalized: false, from: '2026-05-25T00:00:00Z', to: '2026-05-26T00:00:00Z' },
+        'time range',
+        {
+          finalized: false,
+          from: '2026-05-12T09:59:00.000Z',
+          to: '2026-05-12T10:01:00.000Z',
+        },
+      ],
+      [
+        'readPoint=FunctionalTest',
+        {
+          finalized: false,
+          readPoint: 'urn:acme:bike:station:FunctionalTest',
+        },
+      ],
+      [
+        'bizLocation=FunctionalTest',
+        {
+          finalized: false,
+          bizLocation: 'urn:acme:bike:station:FunctionalTest',
+        },
       ],
     ];
-    for (const [label, params] of literalPositionCases) {
-      const sparql = buildEpcisQuery(params, CG);
-      const res = await store.query(sparql);
-      expect(res.type, label).toBe('bindings');
-      if (res.type !== 'bindings') continue;
-      expect(res.bindings, `${label} — currently empty pending follow-up`).toHaveLength(0);
+
+    for (const [label, params] of cases) {
+      const result = await store.query(buildEpcisQuery(params, CG));
+      expect(result.type, label).toBe('bindings');
+      if (result.type !== 'bindings') continue;
+      expect(result.bindings.map((row) => row['event']), label).toEqual([EVENT]);
     }
   });
 });

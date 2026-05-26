@@ -639,6 +639,22 @@ export function loadSkillTemplate(): string {
   return content;
 }
 
+// Second canonical agent-readable manual: the bulk-import skill that the
+// dkg-node skill cross-references for chunked writes, manifest resume,
+// HTTP 413 recovery, and (with PR #4 of the async-promote-queue series)
+// the async promote queue. Served at `/.well-known/skill-importer.md`
+// alongside `/.well-known/skill.md` so the cross-link in dkg-node/SKILL.md
+// is reachable for agents installed via setup flows (Codex PR #642 follow-up).
+let cachedImporterSkillMd: string | null = null;
+
+export function loadImporterSkillTemplate(): string {
+  if (cachedImporterSkillMd) return cachedImporterSkillMd;
+  const skillPath = new URL("../../skills/dkg-importer/SKILL.md", import.meta.url);
+  const content = readFileSync(skillPath, "utf-8");
+  cachedImporterSkillMd = content;
+  return content;
+}
+
 export function buildSkillMd(opts: {
   version: string;
   baseUrl: string;

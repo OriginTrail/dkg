@@ -86,10 +86,10 @@ small / interactive use).
   promotes are out of scope (importers that want them can enqueue many jobs).
 - **Promote-side validation changes.** The async path applies the same
   permissive root handling as the sync path: `entities: "all"` is accepted,
-  explicit URI arrays are filtered to whatever quads are present in WM, and
-  a missing requested root can produce `promotedCount: 0` rather than a hard
-  validation failure. Tightening that behaviour would be a separate breaking
-  API change, not part of this queue.
+  non-empty explicit URI arrays are filtered to whatever quads are present in
+  WM, and a missing requested root can produce `promotedCount: 0` rather than a
+  hard validation failure. `entities: []` is rejected, matching the existing
+  promote contract; callers that want every root must send `"all"`.
 
 ## 3. Proposal — surface
 
@@ -115,13 +115,13 @@ Response: `200 OK`
 ```
 
 `entities` follows the same request contract as sync `/promote`: callers may
-send `"all"` or an explicit URI array. The current daemon reads promote bodies
-with `SMALL_BODY_BYTES` (256 KB), so practical explicit arrays should stay near
-ADR 0002's `ROOT_CHUNK ≤ 1000` guidance even though the sync route does not
-currently enforce a URI-count cap server-side. Async must not silently widen
-that body budget or reject roots more strictly than sync; if sync later gains
-a hard root-count limit, async should adopt it at the same time so the
-contracts stay aligned.
+send `"all"` or a non-empty explicit URI array. The current daemon reads
+promote bodies with `SMALL_BODY_BYTES` (256 KB), so practical explicit arrays
+should stay near ADR 0002's `ROOT_CHUNK ≤ 1000` guidance even though the sync
+route does not currently enforce a URI-count cap server-side. Async must not
+silently widen that body budget or reject roots more strictly than sync; if
+sync later gains a hard root-count limit, async should adopt it at the same
+time so the contracts stay aligned.
 
 ### 3.2 Status
 

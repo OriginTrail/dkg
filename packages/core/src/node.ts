@@ -405,6 +405,34 @@ export class DKGNode {
    * the config.
    */
   private relayCapacity: number | null = null;
+  /**
+   * AbortController whose signal is wired into long-await sites
+   * (currently: `ProtocolRouter.readAll` via `stopSignal` below). PR-6:
+   * `stop()` aborts this controller as its FIRST action, before
+   * `libp2p.stop()`, so any in-flight stream read can bail out
+   * immediately rather than wedge on a silent peer / dead relay.
+   *
+   * `null` before `start()` and after `stop()` finishes, so callers
+   * must always read via the `stopSignal` getter (returns `undefined`
+   * when the node isn't started, which downstream code treats as
+   * "no abort wiring available — fall back to whatever per-call
+   * timeout was supplied").
+   */
+  private stopAbortController: AbortController | null = null;
+
+  /**
+   * Public AbortSignal that fires as the first step of `stop()`.
+   * Consumers (notably `ProtocolRouter`) compose this with their own
+   * per-call signals via AbortSignal.any so a graceful shutdown
+   * cancels every in-flight network read.
+   *
+   * Returns `undefined` before `start()` and after `stop()` completes
+   * — guard for "node-stopped" cases at the call site rather than
+   * fabricating a never-aborts signal here.
+   */
+  get stopSignal(): AbortSignal | undefined {
+    return this.stopAbortController?.signal;
+  }
 
   constructor(config: DKGNodeConfig = {}) {
     this.config = config;
@@ -412,6 +440,11 @@ export class DKGNode {
 
   async start(): Promise<void> {
     if (this.node) return;
+    // PR-6: fresh AbortController per completed start cycle. Create it
+    // locally and publish it only after libp2p exists; otherwise a startup
+    // failure before `this.node` is set would leave callers composing against
+    // a stale stopSignal that stop() cannot clear.
+    const startStopAbortController = new AbortController();
 
     // Reset sticky relay state so a node restarted with a different
     // role / capacity doesn't leak the previous run's adapter or
@@ -887,6 +920,18 @@ export class DKGNode {
 
     this.node = await createLibp2p<DKGServices>({
       privateKey,
+      // `nodeInfo.userAgent` is libp2p's only knob for the identify
+      // protocol's `agentVersion` PB field — every remote peer reads
+      // it back as `Peer.metadata.AgentVersion`. Without it, libp2p
+      // defaults to `js-libp2p/<version>`, a libp2p-toolkit version
+      // that tells a remote operator nothing about which DKG release
+      // this peer is running. The daemon (see
+      // packages/cli/src/daemon/lifecycle.ts) sets `nodeVersion` to
+      // `dkg/<semver>` so /api/peer-info can answer "which DKG release
+      // is each peer running?" from the wire.
+      ...(this.config.nodeVersion
+        ? { nodeInfo: { userAgent: this.config.nodeVersion } }
+        : {}),
       addresses: {
         listen: listenAddrs,
         ...(this.config.announceAddresses?.length
@@ -911,6 +956,7 @@ export class DKGNode {
       // no-op metrics; the adapter is purely additive.
       ...(this.relayMetrics ? { metrics: () => this.relayMetrics! } : {}),
     } as any);
+    this.stopAbortController = startStopAbortController;
 
     this.setupConnectionObservability();
 
@@ -1336,6 +1382,14 @@ export class DKGNode {
 
   async stop(): Promise<void> {
     if (!this.node) return;
+    // PR-6: signal abort FIRST, before any cleanup. The point of
+    // the controller is to unblock long-await sites (notably the
+    // for-await loop in `protocol-router.ts:readAll`) so that
+    // libp2p's own internal teardown — which depends on streams
+    // closing — doesn't deadlock waiting for those reads to finish.
+    // Aborting + then awaiting libp2p.stop() is the graceful
+    // counterpart to PR-1's hard-timeout safety net (#655).
+    this.stopAbortController?.abort();
     if (this.relayWatchdogTimer) {
       clearTimeout(this.relayWatchdogTimer);
       this.relayWatchdogTimer = null;
@@ -1347,8 +1401,15 @@ export class DKGNode {
     this.relayMetrics = null;
     this.relayCapacity = null;
     this.relayReservationCountTarget = 1;
-    await this.node.stop();
-    this.node = null;
+    const node = this.node;
+    try {
+      await node.stop();
+    } finally {
+      if (this.node === node) {
+        this.node = null;
+      }
+      this.stopAbortController = null;
+    }
   }
 
   get peerId(): string {

@@ -159,3 +159,81 @@ describe('SKILL.md file', () => {
     expect(lines).toBeLessThan(800);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Auth: /.well-known/skill-importer.md is a public path
+// (PR #4 + Codex PR #642 follow-up — the bulk-import skill was previously
+//  unreachable for setup-flow-installed agents because only dkg-node/SKILL.md
+//  was served. This test pins the public-path allowlist for the new endpoint.)
+// ---------------------------------------------------------------------------
+
+describe('httpAuthGuard — /.well-known/skill-importer.md', () => {
+  const VALID_TOKEN = 'secret';
+  const validTokens = new Set([VALID_TOKEN]);
+  let server: Server;
+  let baseUrl: string;
+
+  beforeEach(async () => {
+    server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+      if (!(await httpAuthGuard(req, res, true, validTokens))) return;
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end('ok');
+    });
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const addr = server.address() as { port: number };
+    baseUrl = `http://127.0.0.1:${addr.port}`;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  });
+
+  it('allows /.well-known/skill-importer.md without a token (public endpoint)', async () => {
+    const res = await fetch(`${baseUrl}/.well-known/skill-importer.md`);
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toBe('ok');
+  });
+
+  it('allows HEAD /.well-known/skill-importer.md without a token', async () => {
+    const res = await fetch(`${baseUrl}/.well-known/skill-importer.md`, { method: 'HEAD' });
+    expect(res.status).toBe(200);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// dkg-importer/SKILL.md file content
+// ---------------------------------------------------------------------------
+
+describe('dkg-importer/SKILL.md file', () => {
+  let importerContent: string;
+
+  beforeEach(() => {
+    const skillPath = new URL('../skills/dkg-importer/SKILL.md', import.meta.url);
+    importerContent = readFileSync(skillPath, 'utf-8');
+  });
+
+  it('starts with Agent Skills YAML frontmatter', () => {
+    expect(importerContent).toMatch(/^---\r?\n/);
+    expect(importerContent).toContain('name: dkg-importer');
+    expect(importerContent).toContain('description:');
+    expect(importerContent).toMatch(/---\r?\n\r?\n/);
+  });
+
+  it('documents the chunking contract from ADR 0002', () => {
+    expect(importerContent).toContain('CHUNK');
+    expect(importerContent).toContain('ROOT_CHUNK');
+  });
+
+  it('documents the manifest pattern', () => {
+    expect(importerContent).toContain('createImportManifest');
+    expect(importerContent).toContain('markPartitionStatus');
+    expect(importerContent).toContain('loadImportManifest');
+  });
+
+  it('documents the three known daemon caps with verbatim error strings', () => {
+    expect(importerContent).toContain('MAX_BODY_BYTES');
+    expect(importerContent).toContain('SMALL_BODY_BYTES');
+    expect(importerContent).toContain('Promoted assertion too large for gossip');
+  });
+});

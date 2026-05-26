@@ -20,6 +20,7 @@ import {
   type HardhatContext,
 } from '../../chain/test/hardhat-harness.js';
 import { wrapPublisherForTest } from './_helpers/seal.js';
+import { makeHardhatReceiverACKProvider } from './_helpers/acks.js';
 
 const HARDHAT_PORT = 8548;
 let CONTEXT_GRAPH: string;
@@ -65,6 +66,7 @@ describe('Publisher EVM E2E: DKGPublisher with real contracts', () => {
     const bus = new TypedEventBus();
     const keypair = await generateEd25519Keypair();
 
+    const kav10Address = await adapter.getKnowledgeAssetsV10Address();
     publisher = wrapPublisherForTest(
       new DKGPublisher({
         store,
@@ -79,8 +81,15 @@ describe('Publisher EVM E2E: DKGPublisher with real contracts', () => {
         author: new Wallet(HARDHAT_KEYS.CORE_OP),
         ctx: {
           provider: ctx.provider,
-          kav10Address: await adapter.getKnowledgeAssetsV10Address(),
+          kav10Address,
         },
+        // RC11 / PR1: real 3-of-N ACK quorum from the harness's staked
+        // REC1..REC3 receivers — the self-signed ACK fallback is gone.
+        v10ACKProvider: makeHardhatReceiverACKProvider(
+          ctx,
+          kav10Address,
+          [HARDHAT_KEYS.REC1_OP, HARDHAT_KEYS.REC2_OP, HARDHAT_KEYS.REC3_OP],
+        ),
       },
     );
   }, 120_000);
@@ -95,7 +104,7 @@ describe('Publisher EVM E2E: DKGPublisher with real contracts', () => {
 
   let firstPublishResult: Awaited<ReturnType<typeof publisher.publish>>;
 
-  it('V10 CREATE: publishes knowledge to chain with self-signed ACK', async () => {
+  it('V10 CREATE: publishes knowledge to chain with 3-of-N ACK quorum', async () => {
 
     firstPublishResult = await publisher.publish({
       contextGraphId: CONTEXT_GRAPH,

@@ -22,6 +22,9 @@ packages/evm-module/typechain/
 # .devnet/ is a runtime workspace (Hardhat data dir, per-node DKG_HOME
 # state, daemon logs). Not checked in.
 .devnet/
+# .dkg-testnet-node/ is a default DKG_HOME a daemon writes into when
+# started without --data-dir against a testnet. Runtime state only.
+.dkg-testnet-node/
 
 # Agent scratch (project memory across orchestrator runs). Local by default.
 .ai/*

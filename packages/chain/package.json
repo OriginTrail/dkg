@@ -1,12 +1,13 @@
 {
   "name": "@origintrail-official/dkg-chain",
-  "version": "10.0.0-rc.10",
+  "version": "10.0.0-rc.11",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
+    "test:unit": "vitest run --config vitest.unit.config.ts",
     "test:coverage": "vitest run --coverage",
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },

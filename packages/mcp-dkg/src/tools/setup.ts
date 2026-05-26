@@ -244,4 +244,26 @@ export function registerSetupTools(
       }
     },
   );
+
+  // ── dkg_request_hosting (intentionally NOT registered) ──────────
+  // OT-RFC-38 / LU-6 Phase B — `POST /api/shared-memory/host-mode/
+  // subscribe` is the operator-driven manual path (#4 of the four
+  // LU-6 discovery mechanisms). It changes WHICH NODE hosts a
+  // curated CG's opaque ciphertext, which is a trust-boundary
+  // decision the curator owns — the agent must not invoke it
+  // autonomously through an MCP tool.
+  //
+  // Codex review #672 (id=3302086584): the previous `dkg_request_
+  // hosting` MCP tool let any connected agent flip its core into a
+  // host for any curated CG by name. Removed entirely here; the
+  // route stays in place for operators who invoke it directly via
+  // `curl` or the `dkg` CLI (see
+  // `docs/runbooks/RUNBOOK_HOST_MODE_MANUAL_SUBSCRIBE.md`).
+  //
+  // The `requestHostMode` client method (`packages/mcp-dkg/src/
+  // client.ts`) stays — it's still useful inside operator scripts
+  // that wrap the daemon API for their own internal tooling, just
+  // not exposed as an MCP-discoverable tool. The drop-sweep guard
+  // in `packages/mcp-dkg/test/drop-sweep.test.ts` blocks silent
+  // re-registration.
 }

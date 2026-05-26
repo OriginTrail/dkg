@@ -139,6 +139,61 @@ export function partitionUri(importId, key) {
   return `${importUri(importId)}#part:${encodeURIComponent(key)}`;
 }
 
+/**
+ * Single-round-trip existence check: does the manifest for `importId` declare
+ * `partitionKey` as one of its partitions?
+ *
+ * `markPartitionStatus` used to validate the partition by loading the entire
+ * manifest, but that turns status-tracking quadratic for bulk imports: a
+ * 10k-partition import marking each one twice (in_progress + done) ran 20k
+ * full SWM materialisations, each several round-trips. This helper replaces
+ * that with a SPARQL `ASK` against the SWM tier — one row, one network call.
+ *
+ * Resolves Codex comment on PR #642 (quadratic validation).
+ *
+ * @param {object} opts
+ * @param {import('./dkg-daemon.mjs').DkgClient} opts.client
+ * @param {string} opts.importId
+ * @param {string} opts.partitionKey
+ * @param {string} opts.subGraphName
+ * @returns {Promise<boolean>}
+ */
+export async function partitionDeclared({
+  client,
+  importId,
+  partitionKey,
+  subGraphName,
+}) {
+  if (!client?.cgId) {
+    throw new Error('partitionDeclared requires a DkgClient with `cgId` set.');
+  }
+  if (!partitionKey) throw new Error('partitionDeclared requires `partitionKey`.');
+  if (!subGraphName) throw new Error('partitionDeclared requires `subGraphName`.');
+  const importIri = importUri(importId);
+  const partIri = partitionUri(importId, partitionKey);
+  const sparql = `
+    PREFIX imp: <${IMPORT_NS}>
+    ASK {
+      <${importIri}> imp:partition <${partIri}> .
+    }
+  `;
+  const res = await client.query({
+    sparql,
+    contextGraphId: client.cgId,
+    subGraphName,
+    graphSuffix: '_shared_memory',
+  });
+  // The daemon's ASK response shape is the same as `/api/query`: either
+  // `{boolean: true}` (Oxigraph) or `{result: {boolean: true}}` (SPARQL HTTP).
+  // Tolerate both.
+  if (typeof res?.boolean === 'boolean') return res.boolean;
+  if (typeof res?.result?.boolean === 'boolean') return res.result.boolean;
+  // Belt-and-braces fallback: some test mocks return bindings even for an
+  // ASK-shaped query. Treat any non-empty binding set as `true`.
+  const bindings = res?.result?.bindings ?? res?.bindings ?? [];
+  return bindings.length > 0;
+}
+
 // Per-process monotonic counter for StatusEvent IRIs. Two events that land in
 // the same millisecond would otherwise tie on `recordedAt` AND tie on a random
 // suffix, leaving the SPARQL "latest event" lookup non-deterministic. Putting
@@ -507,8 +562,19 @@ export async function markPartitionStatus({
 
   const cgId = client.cgId;
   const assertion = assertionName ?? defaultManifestAssertionName(importId);
-  const manifest = await loadImportManifest({ client, importId, subGraphName });
-  if (!manifest.partitions.some((p) => p.key === partitionKey)) {
+  // Single-row existence check via SPARQL ASK rather than a full
+  // `loadImportManifest` load. For a 10k-partition import marking each
+  // partition twice (in_progress + done) the former approach ran 20k
+  // full-manifest SWM materialisations — quadratic in the partition
+  // count. ASK is one round-trip with one Boolean row. Resolves Codex
+  // PR #642 quadratic-validation finding.
+  const declared = await partitionDeclared({
+    client,
+    importId,
+    partitionKey,
+    subGraphName,
+  });
+  if (!declared) {
     throw new Error(
       `markPartitionStatus: partition '${partitionKey}' is not declared in manifest '${importId}'. ` +
       `Call createImportManifest with the complete partition set before recording status events.`,

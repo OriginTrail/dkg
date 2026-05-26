@@ -183,16 +183,25 @@ describe('DKGQueryEngine', () => {
     ).rejects.toThrow('SPARQL rejected');
   });
 
-  it('view=verified-memory queries the root content graph (§16.1)', async () => {
+  it('view=verified-memory includes the root content graph (RC11 / PR-A: Codex #671)', async () => {
+    // RC11 / PR-A (Codex review fix on #671, comment 3302058969):
+    // re-includes the root context-graph alongside `_verified_memory/*`
+    // so a successful `/api/shared-memory/publish` is immediately
+    // observable via `view: 'verified-memory'` (the pre-PR2 behaviour
+    // existing callers, including memory-search, rely on). The
+    // tentative-VM leak that PR2 was meant to plug is now fixed at the
+    // publisher (root-graph insert deferred to the chain-success
+    // branch); see the comment in `dkg-query-engine.ts` for the full
+    // rationale.
     const result = await engine.query(
       'SELECT ?name WHERE { ?s <http://schema.org/name> ?name }',
       { contextGraphId: CONTEXT_GRAPH, view: 'verified-memory' },
     );
-    expect(result.bindings).toHaveLength(1);
-    expect(result.bindings[0]['name']).toBe('"ImageBot"');
+    const names = result.bindings.map(r => r['name']);
+    expect(names).toContain('"ImageBot"');
   });
 
-  it('view=verified-memory unions root content graph with _verified_memory/ graphs', async () => {
+  it('view=verified-memory unions root content graph + _verified_memory/ sub-graphs (RC11 / PR-A)', async () => {
     const vmGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_verified_memory/quorum-1`;
     await store.insert([
       q('urn:vm:entity:1', 'http://schema.org/name', '"Quorum Verified"', vmGraph),
@@ -202,6 +211,9 @@ describe('DKGQueryEngine', () => {
       { contextGraphId: CONTEXT_GRAPH, view: 'verified-memory' },
     );
     const names = result.bindings.map(r => r['name']);
+    // Both the publisher's confirmed root-graph data AND post-`verify`
+    // `_verified_memory/*` data must surface — VM is the union of both
+    // (Codex #671 review fix).
     expect(names).toContain('"ImageBot"');
     expect(names).toContain('"Quorum Verified"');
   });

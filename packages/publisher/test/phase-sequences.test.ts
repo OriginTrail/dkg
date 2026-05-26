@@ -22,16 +22,25 @@ import type { PhaseCallback } from '../src/publisher.js';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, createTestContextGraph, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { wrapPublisherForTest } from './_helpers/seal.js';
+import { hardhatACKProvider } from './_helpers/acks.js';
 
 let CONTEXT_GRAPH: string;
 let _kav10Address: string;
 let _provider: ethers.JsonRpcProvider;
 const _author = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
 
-function makeTestPublisher(opts: ConstructorParameters<typeof DKGPublisher>[0]): DKGPublisher {
+function makeTestPublisher(
+  opts: ConstructorParameters<typeof DKGPublisher>[0],
+  testOpts: { withACKs?: boolean } = {},
+): DKGPublisher {
+  const withACKs = testOpts.withACKs !== false;
   return wrapPublisherForTest(new DKGPublisher(opts), {
     author: _author,
     ctx: { provider: _provider, kav10Address: _kav10Address },
+    // RC11 / PR1: real 3-of-N ACK quorum (self-signed ACK fallback gone).
+    // Tests that exercise the "no ACK provider" path explicitly opt
+    // out with `withACKs: false`.
+    ...(withACKs ? { v10ACKProvider: hardhatACKProvider(_kav10Address) } : {}),
   });
 }
 const ENTITY = 'did:dkg:agent:QmPhaseSeq';
@@ -111,6 +120,13 @@ describe('Phase-sequence contracts', () => {
 
     const phases = stripTxSigned(calls).map(([p, s]) => `${p}:${s}`);
 
+    // RC11 / PR1: the publisher now wires a real v10ACKProvider in
+    // Hardhat tests (the self-signed ACK fallback is deleted), so
+    // every on-chain publish emits a `collect_v10_acks` phase pair
+    // between `store:end` and `chain:start`. The golden sequence
+    // pins both that this phase fires AND that it sits exactly
+    // between store and chain — listeners (e.g. operations journal)
+    // depend on the ordering.
     expect(phases).toEqual([
       'prepare:start',
       'prepare:ensureContextGraph:start',
@@ -126,6 +142,8 @@ describe('Phase-sequence contracts', () => {
       'prepare:end',
       'store:start',
       'store:end',
+      'collect_v10_acks:start',
+      'collect_v10_acks:end',
       'chain:start',
       'chain:sign:start',
       'chain:sign:end',
@@ -142,18 +160,23 @@ describe('Phase-sequence contracts', () => {
     ]);
   });
 
-  // -- Publish (adapter-backed signer, no identity — tentative) -----------
+  // -- Publish (adapter-backed signer, no identity, no ACK provider — throws after RC11 / PR1) ---
 
-  it('publish: adapter-backed signer without node identity attempts on-chain (OT-RFC-38 §1.1) but falls back to tentative when no ACKs are collected', async () => {
-    // Pre-RFC-38: an identity-less publisher short-circuited at `chain:start`
-    // and produced just `chain:start → chain:end`. Post-RFC-38: edge agents
-    // without an on-chain Profile still attempt the on-chain TX in
-    // no-attribution mode (the contract supports it). In this single-node
-    // test mode there's no v10ACKProvider AND self-ACK is gated on identity,
-    // so the publish reaches `chain:submit` then fails on
-    // "V10 ACKs required for on-chain publish — no ACKs collected" and falls
-    // back to tentative. The phase contract still pins the full chain prefix
-    // so regressions that re-introduce a silent short-circuit are caught.
+  it('publish: adapter-backed signer without node identity attempts on-chain and THROWS when no ACKs are collected (RC11 / PR1: no silent fallback)', async () => {
+    // Pre-RFC-38: an identity-less publisher short-circuited at `chain:start`.
+    // Post-RFC-38: edge agents without an on-chain Profile still attempt
+    // the on-chain TX in no-attribution mode. Pre-RC11: with no
+    // v10ACKProvider AND no identity, the self-ACK fallback at
+    // dkg-publisher.ts:1995-2040 produced one ACK and the publish either
+    // confirmed or downgraded silently. Post-RC11 / PR1 + PR2: the self-
+    // ACK is deleted, the chain-submit branch fails loud, and any
+    // configuration that reaches it with zero ACKs throws verbatim with
+    // "V10 ACKs required for on-chain publish — no ACKs collected".
+    // PR3 keeps that throw — the "no v10ACKProvider" case is a
+    // configuration error in a publishing node and must NOT silently
+    // downgrade. Pin the throw so a regression that re-introduces
+    // either the self-ACK fallback OR the tentative downgrade fails
+    // loudly here.
     const store = new OxigraphStore();
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const keypair = await generateEd25519Keypair();
@@ -163,41 +186,27 @@ describe('Phase-sequence contracts', () => {
       chain,
       eventBus: new TypedEventBus(),
       keypair,
-      // EVM adapter but no publisherPrivateKey / adapter-backed signer.
-    });
+    }, { withACKs: false });
 
-    const quads = [q(ENTITY, 'http://schema.org/name', '"Tentative"')];
+    const quads = [q(ENTITY, 'http://schema.org/name', '"NoAck"')];
     const { calls, fn } = recorder();
-    const result = await publisher.publish({ contextGraphId: CONTEXT_GRAPH, quads, onPhase: fn });
-    const adapterAddress = new ethers.Wallet(HARDHAT_KEYS.CORE_OP).address;
+    await expect(
+      publisher.publish({ contextGraphId: CONTEXT_GRAPH, quads, onPhase: fn }),
+    ).rejects.toThrow(/V10 ACKs required for on-chain publish/);
 
-    expect(result.status).toBe('tentative');
-    expect(result.ual).toContain(`/${adapterAddress}/`);
-    expect(result.ual).not.toContain(`/${ethers.ZeroAddress}/`);
-
-    const phases = stripTxSigned(calls).map(([p, s]) => `${p}:${s}`);
-    expect(phases).toEqual([
-      'prepare:start',
-      'prepare:ensureContextGraph:start',
-      'prepare:ensureContextGraph:end',
-      'prepare:partition:start',
-      'prepare:partition:end',
-      'prepare:manifest:start',
-      'prepare:manifest:end',
-      'prepare:validate:start',
-      'prepare:validate:end',
-      'prepare:merkle:start',
-      'prepare:merkle:end',
-      'prepare:end',
-      'store:start',
-      'store:end',
-      'chain:start',
-      'chain:sign:start',
-      'chain:sign:end',
-      'chain:submit:start',
-      'chain:submit:end',
-      'chain:end',
-    ]);
+    // The phase contract still pins the prefix up to the throw site
+    // (everything BEFORE `chain:submit` should still have fired
+    // pairwise). We only assert presence of the early-phase pairs
+    // rather than the full sequence because the throw aborts mid-
+    // chain-branch.
+    const startedPhases = calls.filter(([, s]) => s === 'start').map(([p]) => p);
+    for (const expected of [
+      'prepare', 'prepare:ensureContextGraph', 'prepare:partition',
+      'prepare:manifest', 'prepare:validate', 'prepare:merkle',
+      'store',
+    ]) {
+      expect(startedPhases).toContain(expected);
+    }
   });
 
   // -- Update (happy path) -----------------------------------------------
@@ -348,10 +357,17 @@ describe('Phase-sequence contracts', () => {
           throw new Error('simulated preflight failure (before broadcast)');
         };
 
+      // RC11 / PR2: the publisher now re-throws chain failures
+      // verbatim instead of downgrading to a silent tentative. The
+      // P-1 invariant pinned by this test (no `chain:writeahead`
+      // phase pair when the adapter throws *before* `onBroadcast`)
+      // is orthogonal to the success/throw outcome — assert it on
+      // the failure path the same way.
       const quads = [q(ENTITY, 'http://schema.org/name', '"Throws"')];
       const { calls, fn } = recorder();
-      const result = await publisher.publish({ contextGraphId: CONTEXT_GRAPH, quads, onPhase: fn });
-      expect(result.status).toBe('tentative');
+      await expect(
+        publisher.publish({ contextGraphId: CONTEXT_GRAPH, quads, onPhase: fn }),
+      ).rejects.toThrow(/simulated preflight failure/);
 
       expect(calls.filter(([p]) => p === 'chain:writeahead').length).toBe(0);
     },
@@ -376,10 +392,12 @@ describe('Phase-sequence contracts', () => {
           throw new Error('simulated publish broadcast failure');
         };
 
+      // Same RC11 / PR2 throw-instead-of-tentative adjustment.
       const quads = [q(ENTITY, 'http://schema.org/name', '"Throws"')];
       const { calls, fn } = recorder();
-      const result = await publisher.publish({ contextGraphId: CONTEXT_GRAPH, quads, onPhase: fn });
-      expect(result.status).toBe('tentative');
+      await expect(
+        publisher.publish({ contextGraphId: CONTEXT_GRAPH, quads, onPhase: fn }),
+      ).rejects.toThrow(/simulated publish broadcast failure/);
 
       const startIdx = calls.findIndex(([p, s]) => p === 'chain:writeahead' && s === 'start');
       const endIdx = calls.findIndex(([p, s]) => p === 'chain:writeahead' && s === 'end');

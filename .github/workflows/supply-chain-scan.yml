@@ -41,6 +41,17 @@ on:
       - 'pnpm-lock.yaml'
       - '**/package.json'
       - '.npmrc'
+      # The deny-list scanner's inputs: changes to the JSON list or
+      # the scanner script itself MUST re-trigger this workflow, or a
+      # PR that adds a new deny-list entry would not be exercised
+      # until the next unrelated lockfile change.
+      - '.github/dependency-deny-list.json'
+      - 'scripts/check-dependency-deny-list.mjs'
+      # Recursive filename deny-list entries that are themselves IoCs.
+      # Keep this in sync with denied_filenames[] so an IoC-only PR
+      # cannot avoid the scanner by touching no package metadata.
+      - '.cursorrules'
+      - '**/.cursorrules'
   push:
     branches: [main, v10-rc]
     paths:
@@ -51,6 +62,10 @@ on:
       - 'pnpm-lock.yaml'
       - '**/package.json'
       - '.npmrc'
+      - '.github/dependency-deny-list.json'
+      - 'scripts/check-dependency-deny-list.mjs'
+      - '.cursorrules'
+      - '**/.cursorrules'
   schedule:
     # Mondays 06:30 Europe/Belgrade ≈ 04:30 UTC. Same window as Dependabot
     # so any week-over-week drift surfaces in a single review pass.
@@ -220,6 +235,64 @@ jobs:
           set -euo pipefail
           read -r -a TARGETS <<< "$(echo "$ZIZMOR_TARGETS" | tr '\n' ' ')"
           zizmor --persona auditor --min-severity low --config .github/zizmor.yml --format plain "${TARGETS[@]}"
+
+  dependency-deny-list:
+    name: Dependency deny-list (named-package blocklist)
+    # Hard gate. Scans `pnpm-lock.yaml` + every `package.json` in the
+    # workspace against a curated list of package names that public
+    # security research has linked to active supply-chain attacks
+    # (currently: the TrapDoor crypto stealer wave — Socket.dev, May 2026).
+    # Also fails if any path in `denied_files[]` exists at an exact
+    # repo-root-relative location, or if any file whose basename is in
+    # `denied_filenames[]` (e.g. `.cursorrules`) exists ANYWHERE in
+    # the workspace tree — the right scope for AI-injection
+    # persistence files that an attacker could plant at any depth.
+    #
+    # Why a name-based blocklist on top of the cooldown + advisory gate
+    # in `dependabot-advisory.yml`:
+    #
+    #   * The advisory gate fires when a Dependabot PR proposes a bump
+    #     to an already-flagged version. This scanner fires on EVERY
+    #     PR (including a human-authored one that adds a direct dep)
+    #     and catches the package even before the lockfile resolves.
+    #   * The cooldown delays Dependabot from proposing a fresh version
+    #     by 7 days. A name-based blocklist is the right defence for
+    #     attacks that are NOT version-specific — i.e. the package
+    #     itself is the attack surface, regardless of which version.
+    #
+    # Maintenance: add new entries to `.github/dependency-deny-list.json`
+    # with full provenance (campaign label + source URL + added date).
+    # The scanner self-validates via a lockfile sanity-check and exits 2
+    # if the scan path is broken (rather than 0 / clean) so a future
+    # refactor cannot silently turn this into a no-op.
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .nvmrc
+          # No `cache: pnpm` here — the scanner uses vanilla node:fs
+          # only, no dependency install runs, so a cache restore is
+          # pure overhead and would re-introduce a (small) cache-poison
+          # surface inside an otherwise hermetic step.
+      - name: Run dependency deny-list scanner
+        # Vanilla Node, no `pnpm install` step. The scanner reads
+        # `.github/dependency-deny-list.json` and asserts that no
+        # `denied_package_names[]` entry appears in pnpm-lock.yaml or
+        # any package.json, no `denied_files[]` path exists, and no
+        # file whose basename is in `denied_filenames[]` exists
+        # anywhere in the tree. Exit codes:
+        #   0 = clean
+        #   1 = at least one denied entry matched
+        #   2 = scanner broken (deny-list file missing / malformed
+        #       / schema-mismatched, or none of the sanity-check
+        #       anchors found in the lockfile)
+        run: node scripts/check-dependency-deny-list.mjs
 
   npm-audit:
     name: pnpm audit (informational)

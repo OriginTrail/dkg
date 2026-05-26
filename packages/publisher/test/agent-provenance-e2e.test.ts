@@ -37,7 +37,7 @@ import {
   createTestContextGraph,
   HARDHAT_KEYS,
 } from '../../chain/test/evm-test-context.js';
-import { mintTokens, stakeAndSetAsk } from '../../chain/test/hardhat-harness.js';
+import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import type { Quad } from '@origintrail-official/dkg-storage';
 
 // ---- shared fixture ---------------------------------------------------------
@@ -80,11 +80,11 @@ beforeAll(async () => {
 
   // Stake the receiver nodes so they're in the sharding table — required
   // for mode (e) attribution validation (`shardingTable.nodeExists`) and
-  // for ACK quorum on multi-node publishes. Mirrors `v10-publish-e2e.test.ts`.
-  for (let i = 0; i < ctx.receiverIds.length; i++) {
-    const recOpKey = [HARDHAT_KEYS.REC1_OP, HARDHAT_KEYS.REC2_OP, HARDHAT_KEYS.REC3_OP][i]!;
-    await stakeAndSetAsk(provider, ctx.hubAddress, HARDHAT_KEYS.DEPLOYER, recOpKey, ctx.receiverIds[i]!);
-  }
+  // for ACK quorum on multi-node publishes. RC11 / PR1: the Hardhat
+  // harness now stakes REC1..REC3 at `spawnHardhatEnv` time (so the
+  // in-memory V10ACKProvider can collect a 3-of-N quorum), so the
+  // per-test loop below would double-stake and revert. Skip it now
+  // that the harness owns this.
 
   const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
   const cgId = await createTestContextGraph(chain);
@@ -181,6 +181,7 @@ function token() {
 // throughout this file (CORE_OP author by default; `cgId` defaults to
 // the file-scope `CONTEXT_GRAPH`).
 import { buildSeal as buildSealCore, publishSealed as publishSealedCore } from './_helpers/seal.js';
+import { hardhatACKProvider } from './_helpers/acks.js';
 
 async function buildSeal(
   quads: Quad[],
@@ -204,11 +205,14 @@ async function publishSealed(
   },
   authorKey: string = HARDHAT_KEYS.CORE_OP,
 ) {
+  // RC11 / PR1: every Hardhat publish needs the in-memory 3-of-N ACK
+  // quorum now that the self-signed ACK fallback is gone.
   return publishSealedCore(
     publisher,
     args,
     new ethers.Wallet(authorKey),
     { provider, kav10Address },
+    { v10ACKProvider: hardhatACKProvider(kav10Address) },
   );
 }
 
@@ -518,35 +522,62 @@ describe('Diagram 6 — attribution modes via per-publish override', () => {
   });
 
   it('validation revert — fake non-existent identity id reverts on chain', async () => {
-    const fakeId = 999999n; // way beyond any deployed identity counter
+    const fakeId = 999999n;
 
     const publisher = makePublisher();
-    const result = await publishSealed(publisher, {
-      contextGraphId: CONTEXT_GRAPH,
-      quads: [q(`${ENTITY}/D6revert`, 'http://schema.org/name', '"FakeId"')],
-      publisherNodeIdentityIdOverride: fakeId,
-    });
-
-    // Publisher's chain branch catches the contract revert and falls back
-    // to tentative; the on-chain submit is what reverts (T-VAL).
-    expect(result.status).toBe('tentative');
-    expect(result.onChainResult).toBeUndefined();
+    // RC11 / PR2: the publisher now re-throws chain reverts verbatim
+    // (no silent tentative downgrade). The T-VAL contract revert
+    // surfaces directly to the caller as a CALL_EXCEPTION.
+    await expect(
+      publishSealed(publisher, {
+        contextGraphId: CONTEXT_GRAPH,
+        quads: [q(`${ENTITY}/D6revert`, 'http://schema.org/name', '"FakeId"')],
+        publisherNodeIdentityIdOverride: fakeId,
+      }),
+    ).rejects.toThrow();
   });
 });
 
 // =============================================================================
-// Diagram 7 — Tentative fallback (daemon=0, no override)
+// Diagram 7 — no-attribution publish and intentional local fallback
 //
-// Already covered exhaustively in `publish-lifecycle.test.ts` T-OVERRIDE.
-// Reference test below is a single-line sanity check.
+// The legacy tentative fallback was removed in RC11 / PR-A: when a daemon
+// has no node identity but does have a funded publisher wallet, it should
+// publish on-chain with `publisherNodeIdentityId = 0` instead of downgrading.
+// PR-B keeps explicit coverage for the only remaining tentative path here:
+// structurally-local publishes whose context graph cannot map to a V10
+// on-chain id.
 // =============================================================================
 
-describe('Diagram 7 — tentative fallback when daemon has no identity and no override', () => {
-  it('returns tentative status with a /t-prefixed UAL', async () => {
+describe('Diagram 7 — no-attribution publish when daemon has no identity and no override', () => {
+  it('confirms numeric on-chain publishes with publisherNodeIdentityId=0', async () => {
+    const publisher = makePublisher({ daemonId: 0n });
+    const result = await publishSealed(publisher, {
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [q(`${ENTITY}/D7`, 'http://schema.org/name', '"NoAttribution"')],
+    });
+
+    expect(result.status).toBe('confirmed');
+    expect(result.onChainResult).toBeDefined();
+  });
+
+  it('returns tentative status for structurally-local non-numeric context graphs', async () => {
+    // RC11 / PR3: tentative is now reached via the structurally-
+    // impossible-to-chain branches only (non-numeric CG, hasPrivateData,
+    // !chainV10Ready). Use a non-numeric SWM CG label so the publish
+    // is routed through `finalizeIntentionalLocalPublish` via
+    // `publisherContextGraphId === undefined`. (Previously
+    // `daemonId: 0n` was enough because the self-signed ACK fallback
+    // gated on it; that fallback is gone after PR1.)
     const publisher = makePublisher({ daemonId: 0n });
     const result = await publisher.publish({
-      contextGraphId: CONTEXT_GRAPH,
-      quads: [q(`${ENTITY}/D7`, 'http://schema.org/name', '"Tentative"')],
+      contextGraphId: 'd7-tentative',
+      quads: [{
+        subject: `${ENTITY}/D7`,
+        predicate: 'http://schema.org/name',
+        object: '"Tentative"',
+        graph: 'did:dkg:context-graph:d7-tentative',
+      }],
     });
     expect(result.status).toBe('tentative');
     expect(result.ual).toContain('/t');
@@ -627,10 +658,9 @@ describe('Diagram 8 — multi-update author array stays consistent with the cano
 //     its merkle/signer doesn't match, this is a hard error rather
 //     than a silent downgrade).
 //   - Missing seal: a publish() call without precomputedAttestation
-//     falls through to tentative because the publisher refuses to
-//     broadcast without a finalize-time seal (RFC-001 §9.x Phase C).
-//     This is the no-seal contract — production call sites mint a
-//     seal at the agent layer; tests can opt out by omitting it.
+//     fails before chain submit because RC11 / PR-A removed the
+//     chain-failure → tentative downgrade. Production call sites mint a
+//     seal at the agent layer, so this is a caller-contract guard.
 //
 // The agent-layer wrapper (`agent.assertion.finalize` →
 // `publishFromFinalizedAssertion`) is exercised separately by the
@@ -668,6 +698,9 @@ describe('Diagram 11 — Phase 5 precomputedAttestation (sign-at-creation)', () 
       await author.signTypedData(td.domain, td.types, td.message),
     );
 
+    // RC11 / PR1: thread the in-memory 3-of-N ACK provider since the
+    // self-signed ACK fallback is deleted — without this, the on-chain
+    // submit fires the loud "V10 ACKs required" guard.
     const result = await publisher.publish({
       contextGraphId: CONTEXT_GRAPH,
       quads,
@@ -680,6 +713,7 @@ describe('Diagram 11 — Phase 5 precomputedAttestation (sign-at-creation)', () 
         },
         schemeVersion: AUTHOR_SCHEME_VERSION_V1,
       },
+      v10ACKProvider: hardhatACKProvider(kav10Address),
     });
 
     expect(result.status).toBe('confirmed');
@@ -687,9 +721,6 @@ describe('Diagram 11 — Phase 5 precomputedAttestation (sign-at-creation)', () 
     const onChainAuthor: string = await kcs().getLatestMerkleRootAuthor(kcId);
     expect(onChainAuthor.toLowerCase()).toBe(author.address.toLowerCase());
 
-    // The on-chain merkleRoot is what the publisher computed from `quads`
-    // — assert it equals the seal's expected root, proving no
-    // re-derivation drift between sign-time and publish-time.
     const onChainRootObj = await kcs().getLatestMerkleRootObject(kcId);
     expect(onChainRootObj.merkleRoot.toLowerCase()).toBe(
       ethers.hexlify(merkleRoot).toLowerCase(),
@@ -741,6 +772,7 @@ describe('Diagram 11 — Phase 5 precomputedAttestation (sign-at-creation)', () 
           },
           schemeVersion: AUTHOR_SCHEME_VERSION_V1,
         },
+        v10ACKProvider: hardhatACKProvider(kav10Address),
       }),
     ).rejects.toThrow(/expectedMerkleRoot mismatch/);
   });
@@ -816,6 +848,7 @@ describe('Diagram 11 — Phase 5 precomputedAttestation (sign-at-creation)', () 
           },
           schemeVersion: AUTHOR_SCHEME_VERSION_V1,
         },
+        v10ACKProvider: hardhatACKProvider(kav10Address),
       });
     } catch (e) {
       threw = e;
@@ -827,19 +860,19 @@ describe('Diagram 11 — Phase 5 precomputedAttestation (sign-at-creation)', () 
 
   it('rejects on-chain publish without precomputedAttestation', async () => {
     // RFC-001 §9.x — Phase C — the publisher refuses to broadcast when
-    // the seal is missing. Falls through to tentative because the
-    // publisher catches signing-path errors instead of re-throwing —
-    // this preserves backward compat for direct `publisher.publish`
-    // unit tests that don't care about author attribution. Production
-    // call sites (agent.publish, /api/shared-memory/publish) always
-    // supply a seal, so they cannot land in this branch.
+    // the seal is missing. RC11 / PR2: the publisher no longer catches
+    // and downgrades; missing-seal on an on-chain publish now throws
+    // verbatim. Production call sites (agent.publish,
+    // /api/shared-memory/publish) always supply a seal, so they cannot
+    // land in this branch.
     const publisher = makePublisher();
-    const result = await publisher.publish({
-      contextGraphId: CONTEXT_GRAPH,
-      quads: [q(`${ENTITY}/D11-no-seal`, 'http://schema.org/name', '"X"')],
-    });
-    expect(result.status).toBe('tentative');
-    expect(result.onChainResult).toBeUndefined();
+    await expect(
+      publisher.publish({
+        contextGraphId: CONTEXT_GRAPH,
+        quads: [q(`${ENTITY}/D11-no-seal`, 'http://schema.org/name', '"X"')],
+        v10ACKProvider: hardhatACKProvider(kav10Address),
+      }),
+    ).rejects.toThrow(/on-chain publish requires precomputedAttestation/);
   });
 });
 

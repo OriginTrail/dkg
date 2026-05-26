@@ -295,14 +295,19 @@ export class CatchupReplayGuard {
   }
 
   private evictStale(nowMs: number): void {
+    // Codex PR #618 follow-up: we cannot early-break on the first
+    // non-stale entry. Insertion order is not strictly ascending in
+    // `issuedAtMs` because `recordIfFresh` accepts future-skewed
+    // timestamps within `CATCHUP_REQUEST_MAX_AGE_MS`; a future-dated
+    // nonce inserted first would then make a `break` skip later
+    // genuinely-stale entries, eventually surfacing as false
+    // "replayed catchup nonce" rejections after those entries should
+    // have expired. The LRU bound on `seen.size` keeps the worst-case
+    // O(n) sweep cheap.
     const threshold = nowMs - CATCHUP_REQUEST_MAX_AGE_MS;
     for (const [key, issuedAtMs] of this.seen) {
       if (issuedAtMs < threshold) {
         this.seen.delete(key);
-      } else {
-        // Insertion order = ascending issuedAtMs (approximately),
-        // so first non-stale entry means rest are also fresh.
-        break;
       }
     }
   }

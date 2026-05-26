@@ -11,6 +11,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { DKGPublisher, canonicalPublishPayload } from '../src/index.js';
+import { mockChainStubACKProvider } from './_helpers/acks.js';
 
 function quad(subject: string, predicate = 'http://schema.org/name', object = '"Root"'): Quad {
   return { subject, predicate, object, graph: '' };
@@ -102,6 +103,7 @@ describe('publisher trust metadata', () => {
       contextGraphId: String(contextGraphId),
       quads,
       precomputedAttestation: await buildSeal(chain, contextGraphId, quads, wallet),
+      v10ACKProvider: mockChainStubACKProvider({ identityId: 1n }),
     });
 
     expect(result.status).toBe('confirmed');

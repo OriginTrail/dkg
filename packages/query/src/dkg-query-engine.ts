@@ -111,15 +111,40 @@ export function resolveViewGraphs(
           graphPrefixes: [],
         };
       }
-      // §16.1: the root content graph `did:dkg:context-graph:{id}` IS the
-      // Verified Memory content layer (chain-confirmed data lands here after
-      // finalization).  Any quorum-specific verified-memory sub-graphs live
-      // under `_verified_memory/` and are unioned in as well.
+      // RC11 / PR-A (Codex review fix on #671, comment 3302058969):
+      // re-include the root content graph
+      // `did:dkg:context-graph:{id}` alongside the `_verified_memory/*`
+      // post-`verify` named graphs.
       //
-      // Keep all verified-memory candidate graphs in scope. Trust is
-      // determined only by explicit metadata joined into the query below.
+      // The PR2 first cut dropped the root from VM to plug the
+      // "tentative VM" leak (failed publishes used to leave triples in
+      // the root graph and surfaced via `view: 'verified-memory'`).
+      // That leak is now fixed at the publisher: the root-graph
+      // `store.insert(normalizedQuads)` was moved INSIDE the
+      // chain-success branch of `DKGPublisher.publish` (see
+      // `packages/publisher/src/dkg-publisher.ts` "RC11 / PR2: write
+      // the published public quads into the root data graph ONLY after
+      // the chain has confirmed"), so a failed on-chain publish writes
+      // nothing to the root graph. The three intentional-local
+      // branches (`no on-chain CG id`, `chain not V10-ready`,
+      // `private data — no ACKs collectable`) write through
+      // `finalizeIntentionalLocalPublish` — these are deliberate
+      // local-only publishes, not failed chain publishes, and were
+      // already part of VM pre-PR2.
+      //
+      // Dropping the root graph here was a behavioural break for
+      // existing callers (memory-search flows, the daemon's
+      // `/api/query?view=verified-memory` route after
+      // `/api/shared-memory/publish`): a successful publish would
+      // silently disappear from VM until a separate `verify()` wrote
+      // into `_verified_memory/{vmId}`. Restoring the root graph keeps
+      // confirmed publisher-side data immediately queryable via VM
+      // while `_verified_memory/*` remains the source of truth for
+      // cross-node consensus-verified data (still stamped with
+      // `dkg:trustLevel` ConsensusVerified by
+      // `DKGAgent.promoteToVerifiedMemory`).
       return {
-        graphs: [contextGraphDataUri(contextGraphId)],
+        graphs: [`did:dkg:context-graph:${contextGraphId}`],
         graphPrefixes: [`did:dkg:context-graph:${contextGraphId}/_verified_memory/`],
       };
     }

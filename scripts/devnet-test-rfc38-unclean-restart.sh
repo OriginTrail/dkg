@@ -92,6 +92,24 @@ parse_json() {
   "
 }
 
+catchup_peer_error() {
+  printf '%s' "$1" | node -e '
+    let d = "";
+    process.stdin.on("data", c => { d += c; });
+    process.stdin.on("end", () => {
+      try {
+        const j = JSON.parse(d);
+        const results = Array.isArray(j.results) ? j.results : [];
+        const hit = results.find((r) => r && (r.swmError || r.durableError || r.error));
+        const value = hit ? (hit.swmError || hit.durableError || hit.error || "") : "";
+        console.log(value && typeof value === "object" ? JSON.stringify(value) : (value || ""));
+      } catch {
+        process.exit(1);
+      }
+    });
+  '
+}
+
 wait_for_port_open() {
   local node="$1" max="${2:-30}"
   local port; port=$(node_port "$node")
@@ -118,12 +136,23 @@ wait_for_port_closed() {
 CURATOR_AGENT=$(api_call "$CURATOR_NODE" GET /api/agent/identity | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>console.log(JSON.parse(d).agentAddress))')
 M1_AGENT=$(api_call "$M1_NODE" GET /api/agent/identity | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>console.log(JSON.parse(d).agentAddress))')
 
+# Codex PR #624 follow-up: resolve the CORE's peerId BEFORE we kill
+# it. The post-restart catchup calls below will pin to this peerId
+# so we're explicitly exercising recovery from the killed core,
+# not silently succeeding by pulling data from the curator or
+# another connected host. /api/status returns `peerId` as the
+# libp2p identity. We grab it from the running daemon now while
+# it's still up.
+CORE_PEER_ID=$(api_call "$CORE_NODE" GET /api/status \
+  | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{try{const j=JSON.parse(d);console.log(j.peerId||"")}catch{console.log("")}})')
+[ -n "$CORE_PEER_ID" ] || fail "core /api/status did not return a peerId — can't pin post-restart catchup to the node we're killing"
+
 STAMP=$(date +%s)
 CG_ID="${CURATOR_AGENT}/urr-${STAMP}"
 
 log "Curator: $CURATOR_AGENT (node $CURATOR_NODE)"
 log "M1:      $M1_AGENT (node $M1_NODE)"
-log "Core:    node $CORE_NODE [will be SIGKILLed mid-serve]"
+log "Core:    node $CORE_NODE peerId=$CORE_PEER_ID [will be SIGKILLed mid-serve]"
 log "CG:      $CG_ID"
 log "Stress:  $WRITES_COUNT writes × ${WRITE_PAYLOAD_BYTES} bytes"
 
@@ -205,15 +234,41 @@ EOF
 }
 
 # ===========================================================================
-act "3. M1 first catchup (may or may not finish in one round)"
+act "3. M1 first catchup — must catch M1 mid-batch before killing the core"
 # ===========================================================================
+# Codex PR #624 follow-up: previously this took a single snapshot
+# after a 2s sleep, accepting ANY count including 0 or already-
+# complete. If M1 had finished the catchup OR never even started
+# it, the kill in phase 4 didn't exercise the `lastHostCatchupSeqno`
+# resume path this test was supposed to cover — the post-restart
+# count check would still pass via gossip / a later round. Now:
+# we wait for the strict mid-batch state (0 < partial < target),
+# then kill. Fail loudly if catchup is either too fast (insufficient
+# data — increase WRITES_COUNT / WRITE_PAYLOAD_BYTES) or too slow
+# (catchup never engaged within 25s — gossip/auth regression).
 api_call "$M1_NODE" POST /api/shared-memory/catchup "$(cat <<EOF
-{ "contextGraphId": "$CG_ID" }
+{ "contextGraphId": "$CG_ID", "peerId": "$CORE_PEER_ID" }
 EOF
 )" >/dev/null 2>&1 || true
-sleep 2
-M1_PARTIAL=$(count_triples "$M1_NODE")
-log "M1 partial catchup count: $M1_PARTIAL (target: $WRITES_COUNT)"
+
+M1_PARTIAL=0
+for _ in $(seq 1 25); do
+  M1_PARTIAL=$(count_triples "$M1_NODE")
+  M1_PARTIAL=${M1_PARTIAL:-0}
+  if [ "$M1_PARTIAL" -gt 0 ] && [ "$M1_PARTIAL" -lt "$WRITES_COUNT" ] 2>/dev/null; then
+    break
+  fi
+  sleep 1
+done
+log "M1 partial catchup count: $M1_PARTIAL (target mid-batch: 0 < partial < $WRITES_COUNT)"
+if [ "$M1_PARTIAL" -le 0 ]; then
+  fail "M1 catchup never progressed past 0 triples within 25s — auth / gossip / host-catchup is broken, the kill below would test the wrong path."
+fi
+if [ "$M1_PARTIAL" -ge "$WRITES_COUNT" ]; then
+  fail "M1 catchup completed too quickly (count=$M1_PARTIAL ≥ $WRITES_COUNT). " \
+       "This test must kill the core MID-CATCHUP to exercise the lastHostCatchupSeqno resume path. " \
+       "Bump WRITES_COUNT and/or WRITE_PAYLOAD_BYTES so catchup paginates and the kill window opens."
+fi
 
 # ===========================================================================
 act "4. SIGKILL the core (unclean shutdown — no graceful close)"
@@ -256,16 +311,50 @@ log "✓ core restarted (port open)"
 # ===========================================================================
 act "6. M1 re-catchup, expect ≥$WRITES_COUNT triples (no loss across kill)"
 # ===========================================================================
-# Two passes: gossip alone may not refire, host-catchup explicitly will.
-api_call "$M1_NODE" POST /api/shared-memory/catchup "$(cat <<EOF
-{ "contextGraphId": "$CG_ID" }
+# Codex PR #624 follow-up: TWO things were wrong before:
+#   (a) `/api/shared-memory/catchup` without `peerId` fanned out to
+#       whatever peers happened to be connected — M1 could be served
+#       by the curator (still online) and the test would PASS without
+#       ever validating the killed-core's post-restart recovery path.
+#   (b) Catchup responses were piped to `/dev/null`, so HTTP 500s,
+#       auth denials, host-catchup failures, etc. were all invisible
+#       and the final triple-count check would go green if data
+#       happened to arrive via background gossip. Now we pin to
+#       $CORE_PEER_ID (the restarted node) AND capture the response
+#       so we can assert no `swmError` / `error` field at the top
+#       level.
+assert_catchup_clean() {
+  local label="$1" resp="$2"
+  if [ -z "$resp" ]; then
+    fail "$label catchup returned empty body — daemon unreachable or aborted mid-request"
+  fi
+  local err; err=$(parse_json "$resp" '.error' 2>/dev/null || echo "")
+  if [ -n "$err" ] && [ "$err" != "null" ]; then
+    fail "$label catchup top-level error: $err — host-catchup path is NOT recovering after unclean restart. Response: $resp"
+  fi
+  # `results[].swmError` / `.durableError` — first non-empty fail.
+  local swm_err; swm_err=$(catchup_peer_error "$resp" 2>/dev/null || echo "")
+  if [ -n "$swm_err" ] && [ "$swm_err" != "null" ]; then
+    fail "$label catchup per-peer swmError: $swm_err — restarted core is rejecting requests. Response: $resp"
+  fi
+}
+
+# Two passes: the first round drives gossip + host-catchup against
+# the SPECIFIC restarted node; the second is a belt-and-braces
+# retry for any first-round flakes. Both pin to $CORE_PEER_ID so
+# we cannot accidentally cover for a broken restart with a
+# curator-served replay.
+RECATCH_1=$(api_call "$M1_NODE" POST /api/shared-memory/catchup "$(cat <<EOF
+{ "contextGraphId": "$CG_ID", "peerId": "$CORE_PEER_ID" }
 EOF
-)" >/dev/null 2>&1 || true
+)")
+assert_catchup_clean "first" "$RECATCH_1"
 sleep 6
-api_call "$M1_NODE" POST /api/shared-memory/catchup "$(cat <<EOF
-{ "contextGraphId": "$CG_ID" }
+RECATCH_2=$(api_call "$M1_NODE" POST /api/shared-memory/catchup "$(cat <<EOF
+{ "contextGraphId": "$CG_ID", "peerId": "$CORE_PEER_ID" }
 EOF
-)" >/dev/null 2>&1 || true
+)")
+assert_catchup_clean "second" "$RECATCH_2"
 sleep 4
 
 M1_FINAL=$(count_triples "$M1_NODE")

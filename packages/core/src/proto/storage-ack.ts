@@ -93,12 +93,69 @@ export function isTransientStorageACKDeclineCode(code: string | undefined): bool
 }
 
 /**
+ * RC11 / PR5 — ACK-provenance telemetry: which of the four LU-6
+ * Phase B discovery paths caused this core to be hosting the
+ * curated CG's SWM substrate at ACK time. Populated by the
+ * StorageACK handler from its host-mode-source resolver hook;
+ * surfaced through the publisher's per-publish ACK-provenance
+ * summary log + `QuorumUnmetError.peerOutcomes`.
+ *
+ * Source values:
+ *   - `chain-event`: core auto-subscribed off a `ContextGraphCreated`
+ *      chain event (PR4 path 1). Steady-state default for registered
+ *      curated CGs on rc.10 cores.
+ *   - `beacon`: core picked up the CG off the global discovery
+ *      beacon topic (path 2). Used for pre-registration / off-chain-
+ *      only CGs.
+ *   - `reconciler`: periodic `hostModeReconcilerTimer` healed a
+ *      subscription the first two paths missed (path 3). Indicates
+ *      the chain event was lost / a beacon was missed / state was
+ *      restored on restart.
+ *   - `manual`: operator-driven `POST /api/shared-memory/host-mode/
+ *      subscribe` enrolled this core for this CG (path 4). Indicates
+ *      the operator deliberately bypassed automatic discovery.
+ *   - `member`: local node is a CG MEMBER (not just a host); the
+ *      member-mode SWM handler is authoritative. Differentiated from
+ *      the host-mode sources because members can decrypt and member
+ *      ACKs come with full plaintext verification.
+ *
+ * Strictly additive wire change: old senders never set field 8; old
+ * receivers ignore it. New receivers treat an unset value as "source
+ * unknown" (legacy peer, or pre-PR5 build) rather than promoting any
+ * default — provenance-driven UI should render the empty case
+ * explicitly.
+ */
+export const SUBSCRIPTION_SOURCES = {
+  CHAIN_EVENT: 'chain-event',
+  BEACON: 'beacon',
+  RECONCILER: 'reconciler',
+  MANUAL: 'manual',
+  MEMBER: 'member',
+} as const;
+
+export type SubscriptionSource =
+  (typeof SUBSCRIPTION_SOURCES)[keyof typeof SUBSCRIPTION_SOURCES];
+
+/** Closed set of valid `subscriptionSource` strings. */
+export const SUBSCRIPTION_SOURCE_VALUES: ReadonlySet<string> = new Set<string>(
+  Object.values(SUBSCRIPTION_SOURCES),
+);
+
+/** True iff `value` is one of the documented `SubscriptionSource` strings. */
+export function isSubscriptionSource(value: unknown): value is SubscriptionSource {
+  return typeof value === 'string' && SUBSCRIPTION_SOURCE_VALUES.has(value);
+}
+
+/**
  * Wire schema. Fields 1–5 are the original ACK shape; fields 6–7 carry
- * a decline payload. Two optional strings (rather than a `oneof`) keep
- * the change strictly additive: old encoders never set the new fields,
- * old decoders silently ignore them, so cross-version traffic is
+ * a decline payload; field 8 carries PR5 ACK-provenance telemetry.
+ * Optional string fields (rather than a `oneof`) keep every addition
+ * strictly additive: old encoders never set the new fields, old
+ * decoders silently ignore them, so cross-version traffic is
  * unchanged. New decoders inspect `declineCode` first — when it is
- * non-empty the message is a decline and the ACK fields are unset.
+ * non-empty the message is a decline and the ACK fields are unset;
+ * `subscriptionSource` is only meaningful on a signed ACK and is
+ * blank / absent on a decline.
  */
 export const StorageACKSchema = new Type('StorageACK')
   .add(new Field('merkleRoot', 1, 'bytes'))
@@ -107,7 +164,8 @@ export const StorageACKSchema = new Type('StorageACK')
   .add(new Field('contextGraphId', 4, 'string'))
   .add(new Field('nodeIdentityId', 5, 'uint64'))
   .add(new Field('declineCode', 6, 'string'))
-  .add(new Field('declineMessage', 7, 'string'));
+  .add(new Field('declineMessage', 7, 'string'))
+  .add(new Field('subscriptionSource', 8, 'string'));
 
 type Long = { low: number; high: number; unsigned: boolean };
 
@@ -132,6 +190,15 @@ export interface StorageACKMsg {
    * to ssh into individual cores.
    */
   declineMessage?: string;
+  /**
+   * RC11 / PR5 ACK-provenance — which of the four LU-6 Phase B paths
+   * caused this core to be hosting the curated CG's SWM substrate at
+   * ACK time. See {@link SUBSCRIPTION_SOURCES} for the closed set of
+   * values. Optional: empty / unset means "source unknown" (legacy
+   * peer, public CG that has no host-mode subscription concept, or a
+   * pre-PR5 core build). Only meaningful on a signed ACK.
+   */
+  subscriptionSource?: string;
 }
 
 /**

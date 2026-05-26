@@ -176,7 +176,24 @@ for i in $(seq 1 "$WRITES_COUNT"); do
   fi
 done
 [ "$SUCCESSFUL_WRITES" -gt 0 ] || fail "no SWM writes succeeded — can't validate cap enforcement (precondition broken)"
-log "✓ burst complete: $SUCCESSFUL_WRITES / $WRITES_COUNT writes succeeded; waiting 3s for envelopes to settle on core"
+
+# Codex PR #623 follow-up: `> 0 writes` alone is vacuous as a cap
+# precondition. With the default 80 KiB payload size, anything up
+# to 12 writes stays UNDER the 1 MiB cap, so the byte-clamp check
+# in phase 4 wouldn't exercise anything if the actual submitted
+# total never exceeded the cap. Compute the actual submitted bytes
+# and fail if it can't possibly trigger clamping — a misconfigured
+# burst is a TEST bug, not a daemon bug, and silently passing it
+# masks real regressions.
+SUBMITTED_BYTES=$((SUCCESSFUL_WRITES * WRITE_PAYLOAD_BYTES))
+log "✓ burst complete: $SUCCESSFUL_WRITES / $WRITES_COUNT writes succeeded; submitted ≈$SUBMITTED_BYTES bytes"
+if [ "$SUBMITTED_BYTES" -le "$EXPECTED_CAP_BYTES" ]; then
+  fail "TEST CONFIGURATION ERROR: submitted ${SUBMITTED_BYTES} bytes ≤ cap ${EXPECTED_CAP_BYTES}. " \
+       "The burst must exceed the cap for phase 4's clamp assertion to mean anything. " \
+       "Increase WRITES_COUNT or WRITE_PAYLOAD_BYTES, or lower EXPECTED_CAP_BYTES to match a smaller configured cap."
+fi
+log "✓ submitted ${SUBMITTED_BYTES} bytes > cap ${EXPECTED_CAP_BYTES} → phase 4's clamp assertion is meaningful"
+log "waiting 3s for envelopes to settle on core"
 sleep 3
 
 # ===========================================================================
@@ -234,13 +251,35 @@ fi
 # ===========================================================================
 act "6. Confirm the core process is still alive"
 # ===========================================================================
+# Codex PR #623 follow-up: missing/empty pidfile MUST NOT be a free
+# pass. Previously the `if [ -f $CORE_PIDFILE ]` branch silently
+# skipped the liveness check on a stale or never-written pidfile,
+# turning a real crash into a false PASS (the script printed
+# "Core process: still alive after burst" in the summary regardless).
+# Hard-fail on missing/empty pidfile, falling back to an HTTP
+# liveness probe via /api/status so test environments that don't
+# write pidfiles (containerised devnets, kubectl-managed pods, etc.)
+# still get a meaningful check.
 CORE_PIDFILE=$(node_pidfile "$CORE_NODE")
-if [ -f "$CORE_PIDFILE" ]; then
+if [ -f "$CORE_PIDFILE" ] && [ -s "$CORE_PIDFILE" ]; then
   CORE_PID=$(tr -d '[:space:]' < "$CORE_PIDFILE")
+  if [ -z "$CORE_PID" ]; then
+    fail "core pidfile $CORE_PIDFILE exists but is empty — cannot validate liveness"
+  fi
   if kill -0 "$CORE_PID" 2>/dev/null; then
     log "✓ core pid=$CORE_PID still running"
   else
     fail "core process pid=$CORE_PID died under stress — daemon crash regression"
+  fi
+else
+  # No pidfile: fall back to HTTP liveness. `/api/status` is the
+  # standard daemon health surface and a 2xx response proves the
+  # process is alive AND serving requests.
+  warn "core pidfile $CORE_PIDFILE missing or empty — falling back to /api/status liveness probe"
+  if curl -sf --max-time 5 "http://127.0.0.1:$(node_port "$CORE_NODE")/api/status" >/dev/null 2>&1; then
+    log "✓ core /api/status responsive — daemon alive (pidfile-less liveness confirmed)"
+  else
+    fail "core has no pidfile AND /api/status is unreachable — daemon crashed under stress."
   fi
 fi
 

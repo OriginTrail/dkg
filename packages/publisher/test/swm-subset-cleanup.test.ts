@@ -8,6 +8,7 @@ import { ethers } from 'ethers';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, createTestContextGraph, seedContextGraphRegistration, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { buildSeal } from './_helpers/seal.js';
+import { hardhatACKProvider } from './_helpers/acks.js';
 
 let CONTEXT_GRAPH = 'test-swm-cleanup';
 let WORKSPACE_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory`;
@@ -118,6 +119,7 @@ describe('SWM subset publish cleanup', () => {
     }, {
       clearSharedMemoryAfter: false,
       precomputedAttestation: await sealForRoots(allQuads, [alice]),
+      v10ACKProvider: hardhatACKProvider(_kav10Address),
     });
 
     expect(result.status).toBe('confirmed');
@@ -147,6 +149,7 @@ describe('SWM subset publish cleanup', () => {
     await publisher.publishFromSharedMemory(CONTEXT_GRAPH, { rootEntities: [alice] }, {
       clearSharedMemoryAfter: false,
       precomputedAttestation: await sealForRoots(allQuads, [alice]),
+      v10ACKProvider: hardhatACKProvider(_kav10Address),
     });
 
     // Publish remaining (Bob + Carol) — should not fail with "already exists"
@@ -154,6 +157,7 @@ describe('SWM subset publish cleanup', () => {
     const result = await publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all', {
       clearSharedMemoryAfter: true,
       precomputedAttestation: await sealForAll(remainingQuads),
+      v10ACKProvider: hardhatACKProvider(_kav10Address),
     });
 
     expect(result.status).toBe('confirmed');
@@ -180,6 +184,7 @@ describe('SWM subset publish cleanup', () => {
     await publisher.publishFromSharedMemory(CONTEXT_GRAPH, { rootEntities: [alice] }, {
       clearSharedMemoryAfter: true,
       precomputedAttestation: await sealForRoots(allQuads, [alice]),
+      v10ACKProvider: hardhatACKProvider(_kav10Address),
     });
 
     expect(await countInGraph(store, WORKSPACE_GRAPH)).toBe(0);
@@ -194,6 +199,7 @@ describe('SWM subset publish cleanup', () => {
 
     await publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all', {
       precomputedAttestation: await sealForAll(allQuads),
+      v10ACKProvider: hardhatACKProvider(_kav10Address),
     });
 
     const subjects = await subjectsInGraph(store, DATA_GRAPH);
@@ -214,6 +220,7 @@ describe('SWM subset publish cleanup', () => {
     await publisher.publishFromSharedMemory(CONTEXT_GRAPH, { rootEntities: [alice] }, {
       clearSharedMemoryAfter: false,
       precomputedAttestation: await sealForRoots(allQuads, [alice]),
+      v10ACKProvider: hardhatACKProvider(_kav10Address),
     });
 
     // Alice ownership metadata should be removed

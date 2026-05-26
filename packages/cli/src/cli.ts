@@ -6,24 +6,27 @@ import { createInterface } from 'node:readline';
 import { spawn, execSync } from 'node:child_process';
 import { createReadStream } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { join } from 'node:path';
-import { writeFile, unlink } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
+import { homedir } from 'node:os';
+import { readFile, writeFile, unlink, appendFile } from 'node:fs/promises';
 import { ethers } from 'ethers';
 import {
   dkgAuthTokenPath,
   FAUCET_WALLETS_PER_REQUEST,
   getFundableWalletAddresses,
   requestFaucetFunding,
+  resolveDkgConfigHome,
   toErrorMessage,
   hasErrorCode,
 } from '@origintrail-official/dkg-core';
 import yaml from 'js-yaml';
 import {
   loadConfig, saveConfig, configExists, configPath,
-  readPid, readApiPort, isProcessRunning, dkgDir, logPath, ensureDkgDir,
-  loadNetworkConfig, loadProjectConfig, resolveAutoUpdateConfig, resolveChainConfig,
+  readPid, readApiPort, isProcessRunning, dkgDir, logPath, ensureDkgDir, removeApiPort,
+  apiPortPath,
+  loadNetworkConfig, loadProjectConfig, resolveAutoUpdateConfig, resolveAutoUpdateSource, resolveChainConfig,
   releasesDir, activeSlot, swapSlot,
-  slotEntryPoint, isStandaloneInstall,
+  slotEntryPoint, isStandaloneInstall, repoDir,
   resolveContextGraphs, resolveNetworkDefaultContextGraphs,
   type AutoUpdateConfig,
 } from './config.js';
@@ -59,7 +62,14 @@ import {
   checkForNpmVersionUpdate,
   performNpmUpdate,
   DAEMON_EXIT_CODE_RESTART,
+  resolveStandaloneInstall,
+  decodeForcedExitCode,
 } from './daemon.js';
+import {
+  isLivenessProbeEnabled,
+  startLivenessWatcher,
+  LIVENESS_CONSECUTIVE_FAILURES_TO_KILL,
+} from './daemon/supervisor-liveness.js';
 import { migrateToBlueGreen } from './migration.js';
 import { ensureRollbackNodeUiBundle } from './rollback-node-ui.js';
 import { registerIntegrationCommands } from './integrations/commands.js';
@@ -68,6 +78,16 @@ import { registerIntegrationCommands } from './integrations/commands.js';
 type ActionOpts = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 const VERIFY_COLLECTION_TIMEOUT_MIN_MS = 1_000;
 const VERIFY_COLLECTION_TIMEOUT_MAX_MS = 30 * 60 * 1000;
+
+async function appendSupervisorLog(message: string): Promise<void> {
+  await ensureDkgDir();
+  await appendFile(logPath(), `${new Date().toISOString()} ${message}\n`, 'utf-8');
+}
+
+function supervisorWarn(message: string): void {
+  console.warn(message);
+  void appendSupervisorLog(message).catch(() => {});
+}
 
 const STARTUP_BANNER = `
 \x1b[36m██████╗ ██╗  ██╗ ██████╗     ██╗   ██╗ ██╗ ██████╗
@@ -175,11 +195,88 @@ function resolveDaemonEntryPoint(): string {
   return fileURLToPath(import.meta.url);
 }
 
+function probeHostForApiHost(apiHost: string | undefined): string {
+  if (!apiHost || apiHost === '0.0.0.0') return '127.0.0.1';
+  if (apiHost === '::') return '::1';
+  return apiHost;
+}
+
+/**
+ * Wire up the supervisor-liveness watchdog for a spawned worker child.
+ *
+ * Returns a `stop()` function the supervisor must call when the child
+ * exits (cleanly or via SIGKILL). Returns a no-op if:
+ *   - The env gate is disabled (`DKG_SUPERVISOR_LIVENESS_PROBE=off`).
+ *
+ * Wraps the apiPort-read in a polling loop because the worker writes the
+ * port file midway through boot, AFTER spawn returns. The loop stays alive
+ * until the supervisor stops it; slow boots must still get liveness
+ * protection once their HTTP listener is ready.
+ */
+async function maybeStartSupervisorLivenessWatcher(
+  child: { kill(signal: 'SIGKILL'): boolean },
+): Promise<() => void> {
+  if (!isLivenessProbeEnabled(process.env.DKG_SUPERVISOR_LIVENESS_PROBE)) {
+    return () => {};
+  }
+
+  // Defer-start: keep waiting for the worker to write api.port. Some normal
+  // boots do heavy initialization before binding HTTP; a fixed cutoff would
+  // permanently disable the watchdog for those processes.
+  let cancelled = false;
+  let watcher: { stop(): void } | null = null;
+  void (async () => {
+    while (!cancelled) {
+      const port = await readApiPort().catch(() => null);
+      if (port) {
+        if (cancelled) return;
+        const config = await loadConfig().catch(() => ({ apiHost: undefined }));
+        if (cancelled) return;
+        watcher = startLivenessWatcher({
+          port,
+          host: probeHostForApiHost(config.apiHost),
+          // Graceful-shutdown disarm: the worker's `shutdown()` removes
+          // `api.port` BEFORE the slow cleanup tail (`agent.stop()`,
+          // `dashDb.close()`, …), so its absence is the unambiguous "I'm
+          // intentionally shutting down" signal. Without this the watcher
+          // would race a slow teardown and SIGKILL mid-cleanup.
+          isShuttingDown: () => !existsSync(apiPortPath()),
+          onUnresponsive: () => {
+            supervisorWarn(
+              `[supervisor] worker unresponsive after ${LIVENESS_CONSECUTIVE_FAILURES_TO_KILL} consecutive liveness probes; SIGKILL + respawn.`,
+            );
+            try {
+              child.kill('SIGKILL');
+            } catch {
+              /* child may already be exiting; ignore */
+            }
+          },
+          onFailure: (consecutive: number) => {
+            supervisorWarn(`[supervisor] liveness probe failed (${consecutive} in a row).`);
+          },
+        });
+        return;
+      }
+      await sleep(500);
+    }
+  })();
+
+  return () => {
+    cancelled = true;
+    watcher?.stop();
+  };
+}
+
 async function runDaemonSupervisor(): Promise<void> {
   const maxCrashRestarts = 5;
   let crashRestartCount = 0;
 
   while (true) {
+    await removeApiPort().catch((err: any) => {
+      supervisorWarn(
+        `[supervisor] could not clear stale api.port before spawn: ${err?.message ?? String(err)}`,
+      );
+    });
     const child = spawn(
       process.execPath,
       [...process.execArgv, resolveDaemonEntryPoint(), 'daemon-worker'],
@@ -189,17 +286,33 @@ async function runDaemonSupervisor(): Promise<void> {
       },
     );
 
-    const exitCode = await new Promise<number | null>((resolve) => {
+    // Positive-liveness watchdog. Catches the generic zombie shape (HTTP
+    // listener dead but process still alive) that the exit-watcher can't
+    // see. SIGKILL forces the child's exit, the existing respawn logic
+    // takes it from there. Gated by DKG_SUPERVISOR_LIVENESS_PROBE so
+    // tests + headless-worker scenarios can opt out. See
+    // packages/cli/src/daemon/supervisor-liveness.ts for the full rationale.
+    const stopWatcher = await maybeStartSupervisorLivenessWatcher(child);
+
+    const rawExitCode = await new Promise<number | null>((resolve) => {
       child.once('exit', (code) => resolve(code));
     });
+    stopWatcher();
+    const { forced, originalExitCode } = decodeForcedExitCode(rawExitCode);
+    if (forced) {
+      console.warn(
+        `[supervisor] previous worker forced-exited (code ${rawExitCode}; original intent ${originalExitCode}). ` +
+          `Shutdown cleanup deadlocked — see worker logs for [shutdown-timeout].`,
+      );
+    }
 
-    if (exitCode === DAEMON_EXIT_CODE_RESTART) {
+    if (originalExitCode === DAEMON_EXIT_CODE_RESTART) {
       crashRestartCount = 0;
       await sleep(250);
       continue;
     }
 
-    if (exitCode === 0) return;
+    if (originalExitCode === 0) return;
 
     crashRestartCount += 1;
     if (crashRestartCount >= maxCrashRestarts) return;
@@ -223,6 +336,12 @@ async function runForegroundSupervisor(childEnv: NodeJS.ProcessEnv = process.env
   while (true) {
     if (signalled) process.exit(0);
 
+    await removeApiPort().catch((err: any) => {
+      supervisorWarn(
+        `[supervisor] could not clear stale api.port before foreground spawn: ${err?.message ?? String(err)}`,
+      );
+    });
+
     currentChild = spawn(
       process.execPath,
       [...process.execArgv, resolveDaemonEntryPoint(), 'daemon-foreground-worker'],
@@ -232,25 +351,35 @@ async function runForegroundSupervisor(childEnv: NodeJS.ProcessEnv = process.env
       },
     );
 
-    const exitCode = await new Promise<number | null>((resolve) => {
+    const stopWatcher = await maybeStartSupervisorLivenessWatcher(currentChild);
+
+    const rawExitCode = await new Promise<number | null>((resolve) => {
       currentChild!.once('exit', (code) => resolve(code));
       currentChild!.once('error', () => resolve(1));
     });
+    stopWatcher();
     currentChild = null;
+    const { forced, originalExitCode } = decodeForcedExitCode(rawExitCode);
+    if (forced) {
+      console.warn(
+        `[supervisor] previous worker forced-exited (code ${rawExitCode}; original intent ${originalExitCode}). ` +
+          `Shutdown cleanup deadlocked — see worker logs for [shutdown-timeout].`,
+      );
+    }
 
-    if (signalled) process.exit(exitCode ?? 0);
+    if (signalled) process.exit(originalExitCode ?? 0);
 
-    if (exitCode === DAEMON_EXIT_CODE_RESTART) {
+    if (originalExitCode === DAEMON_EXIT_CODE_RESTART) {
       crashRestartCount = 0;
       await sleep(250);
       if (signalled) process.exit(0);
       continue;
     }
 
-    if (exitCode === 0) process.exit(0);
+    if (originalExitCode === 0) process.exit(0);
 
     crashRestartCount += 1;
-    if (crashRestartCount >= maxCrashRestarts) process.exit(exitCode ?? 1);
+    if (crashRestartCount >= maxCrashRestarts) process.exit(originalExitCode ?? 1);
     await sleep(1000);
     if (signalled) process.exit(0);
   }
@@ -3883,6 +4012,128 @@ async function stopDaemonIfRunning(): Promise<boolean> {
   return false;
 }
 
+async function readPidFromHome(dkgHome: string): Promise<number | null> {
+  try {
+    const raw = await readFile(join(dkgHome, 'daemon.pid'), 'utf-8');
+    const pid = Number.parseInt(raw.trim(), 10);
+    return Number.isFinite(pid) ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+async function readAutoUpdateSourceFromHome(
+  dkgHome: string,
+): Promise<'npm' | 'git' | 'auto' | undefined> {
+  const normalize = (parsed: unknown): 'npm' | 'git' | 'auto' | undefined => {
+    const source = (parsed as { autoUpdate?: { source?: unknown } } | null)?.autoUpdate?.source;
+    return source === 'npm' || source === 'git' || source === 'auto' ? source : undefined;
+  };
+  try {
+    const raw = await readFile(join(dkgHome, 'config.json'), 'utf-8');
+    const source = normalize(JSON.parse(raw));
+    if (source) return source;
+  } catch {
+    // Fall through to config.yaml below.
+  }
+  try {
+    const raw = await readFile(join(dkgHome, 'config.yaml'), 'utf-8');
+    return normalize(yaml.load(raw));
+  } catch {
+    return undefined;
+  }
+}
+
+// ─── dkg migrate-to-npm ──────────────────────────────────────────────
+
+program
+  .command('migrate-to-npm')
+  .description('Convert a git-checkout install into an npm-style install in place (renames source-tree markers + pins autoUpdate.source = "npm")')
+  .option('--apply', 'Mutate the filesystem. Without this flag, prints the plan and exits.', false)
+  .option('--force', 'Bypass the daemon-alive safety check. Operator must SIGKILL the worker first; in-flight writes may be lost.', false)
+  .action(async (opts: ActionOpts) => {
+    const quoteForShell = (value: string) => `'${value.replace(/'/g, "'\\''")}'`;
+    const {
+      buildMigrationPlan,
+      applyPlan,
+      renderPlan,
+      findDkgMonorepoRootFromCwd,
+      resolveMigrationDkgHome,
+    } = await import('./migrate-to-npm.js');
+    const detectedRepoRoot = repoDir();
+    const cwdRepoRoot = findDkgMonorepoRootFromCwd(process.cwd());
+    const repoRoot = detectedRepoRoot ?? cwdRepoRoot;
+    if (!repoRoot) {
+      console.error('Refusing to run: current directory is not inside a DKG monorepo checkout.');
+      console.error('Run this command from the git-checkout install you want to migrate.');
+      process.exitCode = 1;
+      return;
+    }
+    if (!detectedRepoRoot) {
+      console.log('No active git-checkout marker detected at this location (repoDir() === null).');
+      console.log(`Continuing from ${repoRoot} so a partial migration can still repair config pins.`);
+    }
+    // Codex review (3302171976): base the home on the LIVE CLI's install
+    // mode (detectedRepoRoot !== null) rather than the structural markers
+    // at repoRoot. The structural markers stay true after the load-bearing
+    // package.json rename, so a rerun from a partially-migrated checkout
+    // would otherwise still target ~/.dkg-dev while the standalone CLI
+    // already reads ~/.dkg.
+    const dkgHomeNow = resolveMigrationDkgHome({
+      detectedRepoRoot,
+      homeDir: homedir(),
+    });
+    const dkgHomePostMigration = resolveMigrationDkgHome({
+      detectedRepoRoot: null,
+      homeDir: homedir(),
+    });
+    const pid = await readPidFromHome(dkgHomeNow);
+    const daemonAlive = pid !== null && isProcessRunning(pid);
+    const currentAutoUpdateSource = await readAutoUpdateSourceFromHome(dkgHomeNow);
+    const backupSuffix = new Date()
+      .toISOString()
+      .replace(/[:.]/g, '-')
+      .replace(/T/, '_')
+      .replace(/Z$/, '');
+    const plan = buildMigrationPlan({
+      repoRoot,
+      backupSuffix,
+      dkgHomeNow,
+      dkgHomePostMigration,
+      daemonAlive,
+      forceAliveBypass: Boolean(opts.force),
+      currentAutoUpdateSource,
+    });
+    process.stdout.write(renderPlan(plan));
+    if (plan.alreadyMigrated) return;
+    if (!opts.apply) {
+      console.log('Re-run with --apply to execute.');
+      return;
+    }
+    if (plan.blockers.length > 0) {
+      console.error('Refusing to apply: resolve the blocker(s) above and re-run.');
+      process.exit(1);
+    }
+    await applyPlan(plan, (msg) => console.log(`  ${msg}`));
+    console.log('');
+    console.log('Done. Next steps:');
+    console.log('  1. Verify the renames:');
+    for (const action of plan.actions) {
+      if (action.kind === 'rename') console.log(`     ls -ld ${action.to}`);
+    }
+    console.log('  2. Restart the daemon:');
+    console.log('     dkg start');
+    console.log('  3. (Optional) globally install the npm package so `dkg` no longer depends on this tree:');
+    console.log('     npm install -g @origintrail-official/dkg');
+    console.log(
+      `     After that, this cleanup is safe: rm -rf ${[
+        join(repoRoot, 'packages'),
+        join(repoRoot, 'node_modules'),
+        join(repoRoot, 'pnpm-lock.yaml'),
+      ].map(quoteForShell).join(' ')}`,
+    );
+  });
+
 // ─── dkg update ──────────────────────────────────────────────────────
 
 // ─── dkg query-catalog ───────────────────────────────────────────────
@@ -3964,9 +4215,14 @@ program
         branch: proj.defaultBranch,
         allowPrerelease: true,
         checkIntervalMinutes: 30,
+        source: undefined as 'auto' | 'npm' | 'git' | undefined,
       };
     })();
-    const standalone = isStandaloneInstall();
+    // Honour `autoUpdate.source` override so `dkg update` from a beacon-01
+    // operator with `source: "npm"` configured goes through the npm install
+    // path even if .git is still present in the working tree. See
+    // `AutoUpdateConfig.source` (config.ts) for the rationale.
+    const standalone = resolveStandaloneInstall(au.source ?? resolveAutoUpdateSource(config, net));
     const allowPre = opts.allowPrerelease === true ? true : (au.allowPrerelease ?? true);
 
     if (standalone) {

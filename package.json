@@ -1,6 +1,6 @@
 {
   "name": "dkg-v10",
-  "version": "10.0.0-rc.10",
+  "version": "10.0.0-rc.11",
   "private": true,
   "packageManager": "pnpm@10.28.1",
   "dkgBuild": {
@@ -36,6 +36,7 @@
     "sim:build": "pnpm --filter @origintrail-official/dkg-network-sim build",
     "mcp": "node packages/cli/dist/cli.js mcp serve",
     "check:npm-metadata": "node scripts/check-npm-metadata.mjs",
+    "check:deny-list": "node scripts/check-dependency-deny-list.mjs",
     "index": "node packages/cli/dist/cli.js index",
     "test:evm-integration": "./scripts/test-evm-integration.sh",
     "test:evm": "./scripts/test-evm-integration.sh all",

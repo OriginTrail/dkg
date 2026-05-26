@@ -12,11 +12,12 @@ import {
 import { useProjectProfile, ProjectProfileContext } from '../hooks/useProjectProfile.js';
 import { useAgents, AgentsContext } from '../hooks/useAgents.js';
 import { useCurrentAgent } from '../hooks/useCurrentAgent.js';
+import { useSwmAttributions } from '../hooks/useSwmAttributions.js';
 import { ActivityFeed } from '../components/ActivityFeed.js';
 import { SubGraphBar } from '../components/SubGraphBar.js';
 import { CONTEXT_GRAPH_PRIMER_TAB } from '../lib/contextGraphPrimer.js';
 import { useTabsStore } from '../stores/tabs.js';
-import type { LayerView, LayerContentTab, SubGraphTab } from './project/helpers.js';
+import { shouldFetchSwmAttribution, type LayerView, type LayerContentTab, type SubGraphTab } from './project/helpers.js';
 import {
   ProjectHeaderStrip,
   LayerSwitcher,
@@ -232,6 +233,41 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   );
 
   const rawMemory = useMemoryEntities(contextGraphId);
+  // N6 part 2 — feed promotion (WM→SWM) events into the Overview
+  // ActivityFeed. `useSwmAttributions` is the existing source for the
+  // SWM graph's agent-tint legend; we re-use its `attributions` map
+  // here rather than re-querying `_shared_memory_meta`. Hook is
+  // already in production for the SWM Graph subtab so it's cached.
+  //
+  // Local-3 (PR #656) — gate the hoist on a view that actually
+  // consumes the result. Pre-fix the page-level call fired
+  // unconditionally for every active view (graph-overview, query,
+  // WM/VM detail, sub-graph pages — none of which read it), running
+  // a 5000-row SPARQL for nothing. Active consumers today are
+  // (a) the Overview activity feed and (b) the SWM-tab layer graph.
+  // The hook already short-circuits cleanly on `undefined` (state
+  // resets, no fetch).
+  //
+  // R2-Local-1 (PR #656) — do NOT gate on `selectedUri`. Opening
+  // an entity detail overlays the same view; toggling `undefined`
+  // here would clear the hook's cached events, then on detail-close
+  // re-fetch the 5000-row SPARQL — during the re-fetch the Code7
+  // discriminator (`resultContextGraphId !== contextGraphId`) would
+  // suppress `overviewSwmEvents`, making promotion rows visibly
+  // flicker out on every detail round-trip. Sub-graph navigation is
+  // a real route change so we still gate on `!activeSubGraph`.
+  const swmAttributionNeeded = shouldFetchSwmAttribution({ activeLayer, activeSubGraph });
+  const swmAttributionsResult = useSwmAttributions(swmAttributionNeeded ? contextGraphId : undefined);
+  // Codex Code7 (PR #656) — the hook returns its previous-graph
+  // result during the transition window between context-graph switch
+  // and the new SPARQL resolving. Gate `events` on the result being
+  // for the *current* graph so the Overview doesn't briefly show
+  // promotion rows from the previous project. The SWM graph itself
+  // tolerates the momentary stale tint (it re-renders cleanly once
+  // the new attribution lands), so we don't gate there.
+  const overviewSwmEvents = swmAttributionsResult.resultContextGraphId === contextGraphId
+    ? swmAttributionsResult.events
+    : undefined;
 
   const refreshParticipants = useCallback(() => {
     const targetId = cg?.id;
@@ -463,11 +499,12 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
           )}
           <ActivityFeed
             entities={rawMemory.entityList}
+            swmEvents={overviewSwmEvents}
             onSelectEntity={handleOverviewActivityNavigate}
             title="Recent activity"
             limit={40}
             includeUndated={false}
-            emptyHint="Once agents start proposing decisions or tasks they'll show up here as a live feed."
+            emptyHint="Once you import knowledge or agents start proposing decisions or tasks they'll show up here as a live feed."
             className="v10-overview-activity"
           />
         </>
@@ -506,6 +543,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
             contextGraphId={contextGraphId}
             activeTab={layerContentTabs[activeLayer]}
             onTabChange={tab => handleLayerTabChange(activeLayer, tab)}
+            swmAttribution={swmAttributionsResult}
           />
         </>
       )}

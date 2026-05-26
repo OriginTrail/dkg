@@ -396,7 +396,39 @@ export async function spawnHardhatEnv(port: number): Promise<HardhatContext> {
     coreProfileId,
   );
 
-  // Lower minimumRequiredSignatures to 1 so single-node self-signed ACK works.
+  // RC11 / PR1: stake all three receiver nodes so they enter the sharding
+  // table. `KnowledgeAssetsV10._verifySignature` (contracts:777-783)
+  // requires every ACK signer to be in the sharding table — the legacy
+  // harness only staked CORE_OP and relied on the publisher's
+  // (now-deleted) self-signed ACK fallback to satisfy a 1-of-1 quorum.
+  // With the fallback gone, tests collect real 3-of-N ACKs via
+  // `makeInMemoryV10ACKProvider`, which requires REC1..REC3 to be
+  // valid sharding-table signers. Funded from DEPLOYER like CORE_OP.
+  for (const [opKey, identityId] of [
+    [HARDHAT_KEYS.REC1_OP, rec1Id],
+    [HARDHAT_KEYS.REC2_OP, rec2Id],
+    [HARDHAT_KEYS.REC3_OP, rec3Id],
+  ] as const) {
+    await stakeAndSetAsk(
+      provider, hubAddress,
+      HARDHAT_KEYS.DEPLOYER, opKey,
+      identityId,
+    );
+  }
+
+  // RC11 / PR1: keep the global `minimumRequiredSignatures` at 1.
+  // Publisher tests inject `makeInMemoryV10ACKProvider` with three
+  // distinct receiver signers (REC1..REC3) — every ACK still recovers
+  // to a real sharding-table identity, so the multi-signer code path
+  // is fully exercised, but the contract only enforces ≥1. This keeps
+  // single-node agent E2E tests (1-of-1 publishes from a lone core
+  // with no peer ACK collectors) honest: pre-PR1 they confirmed via
+  // the self-signed fallback; post-PR1, with self-sign deleted, they
+  // simply have 0 collected ACKs and the publisher correctly downgrades
+  // to `tentative`. Tests that need to validate the >=N quorum gate
+  // (e.g. `e2e-publish-protocol.test.ts §4`) override this in their
+  // own `beforeAll`. Production stays at 3 via the deployer script,
+  // independently of this harness default.
   await setMinimumRequiredSignatures(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, 1);
 
   return {
