@@ -101,4 +101,53 @@ describe('filterTriplesToEntities — graph-render entity filter', () => {
     const result = filterTriplesToEntities(triples, new Set(['urn:e:event', 'urn:e:other-entity']));
     expect(result.map(t => t.object)).toEqual(['<urn:e:other-entity>']);
   });
+
+  it('drops triples whose subject is not in entityUris (subject-side gate)', () => {
+    // PR #677 Codex EwIbn — without the subject check, a non-entity
+    // subject (synthesised stub or filtered-out URI) whose object
+    // happens to be a real entity would still emit a phantom edge.
+    const triples: Triple[] = [
+      { subject: 'urn:e:non-entity-stub', predicate: 'http://schema.org/about', object: 'urn:e:real-entity' },
+      { subject: 'urn:e:real-entity', predicate: 'http://schema.org/name', object: '"Real"' },
+    ];
+    const result = filterTriplesToEntities(triples, new Set(['urn:e:real-entity']));
+    // The phantom edge from the stub is dropped; the real entity's
+    // own literal property survives.
+    expect(result).toHaveLength(1);
+    expect(result[0].subject).toBe('urn:e:real-entity');
+  });
+
+  it('keeps triples whose subject is only in focalSubjects (KADetailView focal exemption)', () => {
+    // `focalSubjects` allowlists the entity-detail focus so it
+    // survives the subject-side gate even when the layer's
+    // `entityList` wouldn't otherwise include it (e.g. cross-layer
+    // navigation where the focal entity lives in a different layer).
+    const triples: Triple[] = [
+      { subject: 'urn:e:focal', predicate: 'http://schema.org/name', object: '"Focal"' },
+      { subject: 'urn:e:focal', predicate: 'http://schema.org/about', object: 'urn:e:neighbor' },
+    ];
+    const result = filterTriplesToEntities(
+      triples,
+      new Set(['urn:e:neighbor']),
+      { focalSubjects: new Set(['urn:e:focal']) },
+    );
+    expect(result).toHaveLength(2);
+    expect(result.map(t => t.subject)).toEqual(['urn:e:focal', 'urn:e:focal']);
+  });
+
+  it('focalSubjects without entityUris membership still drops object-side non-entities', () => {
+    // Focal exemption only bypasses the subject-side gate. The
+    // object side still has to be a real entity (or an rdf:type
+    // target) — otherwise focusing on a focal would silently re-
+    // introduce vocab-value nodes via the focal's properties.
+    const triples: Triple[] = [
+      { subject: 'urn:e:focal', predicate: 'https://ref.gs1.org/cbv/bizStep', object: 'https://ref.gs1.org/cbv/BizStep-packing' },
+    ];
+    const result = filterTriplesToEntities(
+      triples,
+      new Set<string>(),
+      { focalSubjects: new Set(['urn:e:focal']) },
+    );
+    expect(result).toHaveLength(0);
+  });
 });

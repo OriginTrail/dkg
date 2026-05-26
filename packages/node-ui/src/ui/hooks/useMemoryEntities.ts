@@ -389,6 +389,21 @@ export function buildEntities(layered: LayeredTriple[]): Map<string, MemoryEntit
 
 export const buildMemoryEntities = buildEntities;
 
+/**
+ * Canonical "first-class entity" predicate — an entity belongs in the
+ * Entities tab list (and therefore the graph node set) iff it has at
+ * least one own type, property, or outgoing connection. The Map built
+ * by `buildEntities` also contains synthesised stubs for pure-object
+ * URIs (vocab constants, IPFS refs, DID property values); those fail
+ * this predicate and are filtered out. Single source of truth — any
+ * place that needs to ask "is this a real entity vs an object stub"
+ * MUST go through this helper so the rule stays in lockstep across
+ * the Entities tab, the graph filter, etc.
+ */
+export function isFirstClassEntity(e: MemoryEntity): boolean {
+  return e.types.length > 0 || e.properties.size > 0 || e.connections.length > 0;
+}
+
 export function useMemoryEntities(
   contextGraphId: string,
   opts?: { signalErrors?: boolean },
@@ -466,7 +481,7 @@ export function useMemoryEntities(
 
   const entityList = useMemo(() =>
     [...entities.values()]
-      .filter(e => e.types.length > 0 || e.properties.size > 0 || e.connections.length > 0)
+      .filter(isFirstClassEntity)
       .sort((a, b) => {
         const trustOrder = { verified: 0, shared: 1, working: 2 };
         const td = trustOrder[a.trustLevel] - trustOrder[b.trustLevel];

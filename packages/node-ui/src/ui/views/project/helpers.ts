@@ -311,6 +311,17 @@ export function getDescription(e: MemoryEntity): string | null {
   return null;
 }
 
+/**
+ * Returns the strict N-hop neighbourhood around `entityUri`: every triple
+ * whose subject AND object both sit inside the visited set after `hops`
+ * BFS expansions from the focal entity. Edges that would dangle from a
+ * frontier node to a node (N+1) hops out are deliberately excluded —
+ * otherwise rendering pulls in nodes that have no visible path back to
+ * the focal entity, producing visually disconnected components in the
+ * detail graph. If you need the loose "edge cut" semantics (frontier
+ * node ↔ outside node), don't reuse this — define a separate helper
+ * with clear name + JSDoc so the two semantics stay distinguishable.
+ */
 export function neighborhoodTriples(entityUri: string, allTriples: Triple[], hops: number = 2): Triple[] {
   const visited = new Set<string>([entityUri]);
   let frontier = new Set<string>([entityUri]);
@@ -330,11 +341,6 @@ export function neighborhoodTriples(entityUri: string, allTriples: Triple[], hop
     if (frontier.size === 0) break;
   }
 
-  // Strict containment: both endpoints must be inside the N-hop ball.
-  // Using `||` here pulls in dangling edges from frontier nodes to nodes
-  // (N+1) hops away — those targets then render as nodes that look
-  // disconnected from the focal entity. AND keeps the rendered subgraph
-  // truly bounded by `hops`.
   return allTriples.filter(t => visited.has(t.subject) && visited.has(t.object));
 }
 

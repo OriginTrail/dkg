@@ -16,6 +16,7 @@ import { ShareProjectModal } from '../../components/Modals/ShareProjectModal.js'
 import {
   useMemoryEntities,
   canonicalEntityUri,
+  isFirstClassEntity,
   type TrustLevel, type MemoryEntity, type Triple,
 } from '../../hooks/useMemoryEntities.js';
 import { decodeRdfStringLiteral } from '../../../rdf-literal.js';
@@ -3209,23 +3210,35 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
   );
 
   // Task #25 (PR #677) — entity-only filter for the entity-detail
-  // graph. Mirrors the rule the Entities tab uses
-  // (`useMemoryEntities.ts:467-469`): an entity is in entityList iff
-  // it has at least one of `types`, own `properties`, or outgoing
-  // `connections`. `allEntities` includes synthesised stubs for
-  // pure-object URIs (vocab constants, IPFS refs, DID property
-  // values) so filter to the real entity set before computing
-  // entityUris. `entity.uri` (the detail focus) is always included
-  // so the focal node and its `initialFocus` highlight stay in sync.
-  const renderHoodTriples = useMemo(() => {
-    const entityUris = new Set<string>([canonicalEntityUri(entity.uri)]);
+  // graph. Mirrors the rule the Entities tab uses via the shared
+  // `isFirstClassEntity` predicate exported from `useMemoryEntities`
+  // (single source of truth for the membership rule). `allEntities`
+  // includes synthesised stubs for pure-object URIs (vocab constants,
+  // IPFS refs, DID property values), so we filter to the real entity
+  // set before passing it to the graph filter. The focal entity is
+  // passed via the helper's `focalSubjects` allowlist so it survives
+  // the gate even when the layer's entityList wouldn't otherwise
+  // include it — keeps the focal node and its `initialFocus`
+  // highlight in sync.
+  //
+  // The set rebuild is intentionally split from the filter call so
+  // navigating between KAs (which changes `entity.uri`/`hoodTriples`
+  // but not `allEntities`) doesn't re-iterate the entity map.
+  const renderHoodEntityUris = useMemo(() => {
+    const set = new Set<string>();
     for (const e of allEntities.values()) {
-      if (e.types.length > 0 || e.properties.size > 0 || e.connections.length > 0) {
-        entityUris.add(canonicalEntityUri(e.uri));
-      }
+      if (isFirstClassEntity(e)) set.add(canonicalEntityUri(e.uri));
     }
-    return filterTriplesToEntities(hoodTriples, entityUris);
-  }, [hoodTriples, allEntities, entity.uri]);
+    return set;
+  }, [allEntities]);
+  const focalSubjects = useMemo(
+    () => new Set<string>([canonicalEntityUri(entity.uri)]),
+    [entity.uri],
+  );
+  const renderHoodTriples = useMemo(
+    () => filterTriplesToEntities(hoodTriples, renderHoodEntityUris, { focalSubjects }),
+    [hoodTriples, renderHoodEntityUris, focalSubjects],
+  );
 
   const graphOptions = useMemo(() => {
     const focalColor = TRUST_COLORS[entity.trustLevel];
