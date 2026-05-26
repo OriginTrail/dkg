@@ -173,12 +173,25 @@ export function useAssertionLifecycleEvents(
 
   useEffect(() => {
     if (!contextGraphId) {
-      setEvents([]);
+      // PR #694 Comment 20 — when the caller gates the hook off (e.g.
+      // user switched away from Overview), STOP fetching but preserve
+      // the last successful result so returning to the gated state
+      // doesn't render an empty feed during the re-fetch window. The
+      // `resultContextGraphId === contextGraphId` discriminator in
+      // consumers still correctly identifies "stale prev-project
+      // result" when the user later switches to a different cgId,
+      // because that new cgId will trigger a fresh fetch.
       setLoading(false);
+      return;
+    }
+    // Stale cache from a DIFFERENT cgId — clear so the consumer's
+    // discriminator doesn't accidentally accept prev-project events
+    // during the new fetch window. Compared via the ref so this
+    // effect can stay keyed only on `contextGraphId`.
+    if (lastRequestedCg.current != null && lastRequestedCg.current !== contextGraphId) {
+      setEvents([]);
       setError(null);
       setResultContextGraphId(undefined);
-      lastRequestedCg.current = undefined;
-      return;
     }
     let cancelled = false;
     const controller = new AbortController();
