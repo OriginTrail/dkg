@@ -213,20 +213,47 @@ export interface UseProjectActivityOptions {
    * project-home "recent" feed where we strictly want temporal data.
    */
   includeUndated?: boolean;
+  /**
+   * Skip rows whose `event` is in this set during the row loop —
+   * BEFORE sort+slice. The joiner sets this to `['added']` when the
+   * lifecycle source is supplying its own bundle-level created rows,
+   * so a flood of imports doesn't push older typed Decision/Task/PR
+   * rows out of the `limit` window before the joiner gets to suppress
+   * the imports (PR #694 Comment 14 — silent data loss).
+   */
+  excludeEvents?: ReadonlyArray<ActivityEvent>;
+}
+
+/**
+ * Base hook return shape — `items` plus an explicit `hasMore` signal
+ * so the joiner (and indirectly the ActivityFeed saturation badge)
+ * can render an honest "more than `limit` rows existed" indicator on
+ * non-lifecycle paths too (PR #694 Comment 15). `hasMore` is computed
+ * from the post-filter, pre-slice count — surfaces overflow even
+ * when `excludeEvents` was active.
+ */
+export interface ProjectActivityResult {
+  items: ActivityItem[];
+  hasMore: boolean;
 }
 
 export function useProjectActivity(
   entityList: MemoryEntity[],
   opts: UseProjectActivityOptions = {},
-): ActivityItem[] {
+): ProjectActivityResult {
   const {
     limit = 200,
     agentUri,
     typeIri,
     subGraph,
     includeUndated = true,
+    excludeEvents,
   } = opts;
+  const excludeKey = excludeEvents ? [...excludeEvents].sort().join(',') : '';
   return useMemo(() => {
+    const excludeSet = excludeEvents && excludeEvents.length > 0
+      ? new Set<ActivityEvent>(excludeEvents)
+      : null;
     const out: ActivityItem[] = [];
     for (const e of entityList) {
       const kindUri = primaryActivityType(e);
@@ -250,6 +277,7 @@ export function useProjectActivity(
       const sg = primarySubGraph(e);
       if (subGraph && sg !== subGraph) continue;
       const event: ActivityEvent = kindUri ? 'typed' : 'added';
+      if (excludeSet && excludeSet.has(event)) continue;
       // Per-event id (Code1) — typed/added rows have at most one of
       // each event-kind per entity, so `${event}|${uri}|${atIso}` is
       // stable across re-renders even if the same URI later gains a
@@ -278,8 +306,8 @@ export function useProjectActivity(
       if (!a.at && b.at) return 1;
       return a.entity.label.localeCompare(b.entity.label);
     });
-    return out.slice(0, limit);
-  }, [entityList, limit, agentUri, typeIri, subGraph, includeUndated]);
+    return { items: out.slice(0, limit), hasMore: out.length > limit };
+  }, [entityList, limit, agentUri, typeIri, subGraph, includeUndated, excludeKey]);
 }
 
 /** Bucket items into "Today / Yesterday / Earlier this week / <month>" groups. */
@@ -625,43 +653,29 @@ export function useProjectActivityEvents(
   opts: UseProjectActivityEventsOptions = {},
 ): ProjectActivityEventsResult {
   const { swmEvents, lifecycleEvents, ...baseOpts } = opts;
-  const base = useProjectActivity(entityList, baseOpts);
+  // PR #694 Comment 14 — push the `'added'` suppression DOWN into base
+  // when lifecycle is supplied. Filtering at source means base's slice
+  // operates on the post-filter set, so typed Decision/Task/PR rows
+  // can't be silently dropped by a flood of imports ranking above them.
+  const useLifecycle = lifecycleEvents != null;
+  const baseExcludeEvents = useLifecycle
+    ? (baseOpts.excludeEvents ? [...baseOpts.excludeEvents, 'added' as const] : ['added' as const])
+    : baseOpts.excludeEvents;
+  const baseResult = useProjectActivity(entityList, { ...baseOpts, excludeEvents: baseExcludeEvents });
   return useMemo(() => {
     const cap = baseOpts.limit ?? 200;
     // typeIri pins the feed to a typed-activity kind (Decision/Task/
     // PR/etc.) — promotion rows have no `kindUri` so they're dropped
     // wholesale, matching how the same filter drops `'added'` rows.
-    // `base` is already capped by `useProjectActivity` at `cap`, so
-    // we can't recover an honest `hasMore` for this path without
-    // re-running the entity scan; report `false` (the typed slice
-    // doesn't surface a saturation badge today).
-    if (opts.typeIri) return { items: base, hasMore: false };
-    // PR #694 review fix — presence-keyed, not size-keyed. The
-    // `lifecycleEvents` prop is the contract: when supplied (even
-    // as an empty array because the project has no AssertionCreated
-    // / AssertionPromoted records yet) it is the authoritative
-    // source for `'added'` + `'promoted'` rows, so the joiner
-    // suppresses the legacy `dcterms:created`-derived rows from
-    // `base` and emits zero promotion rows. The previous
-    // size-keyed test silently fell back to the legacy path when
-    // a project had no lifecycle events yet — changing the
-    // Overview shape mid-project as soon as the first assertion
-    // landed.
-    const useLifecycle = lifecycleEvents != null;
+    // PR #694 Comment 15 — `hasMore` from base is now honest (computed
+    // from the post-filter, pre-slice count) so we can propagate it
+    // instead of hard-coding `false`.
+    if (opts.typeIri) return { items: baseResult.items, hasMore: baseResult.hasMore };
     if (!useLifecycle && (!swmEvents || swmEvents.length === 0)) {
-      // Same caveat as the typed path: `base` is already capped.
-      return { items: base, hasMore: false };
+      // Legacy path (no lifecycle, no SWM) — base is the only source;
+      // its `hasMore` is the honest signal.
+      return { items: baseResult.items, hasMore: baseResult.hasMore };
     }
-
-    // When the lifecycle stream is supplied it is the authoritative
-    // source for `'added'` and `'promoted'` rows — drop those event
-    // kinds from `base` so an entity that was both imported (with a
-    // `dcterms:created` triple) and recorded by `dkg:AssertionCreated`
-    // doesn't show up twice. Other event kinds in `base` (typed
-    // activity, etc.) pass through.
-    const baseFiltered = useLifecycle
-      ? base.filter(item => item.event !== 'added')
-      : base;
 
     let promotions: ActivityItem[];
     if (useLifecycle) {
@@ -682,20 +696,20 @@ export function useProjectActivityEvents(
       });
     }
 
-    const merged = [...baseFiltered, ...promotions];
+    const merged = [...baseResult.items, ...promotions];
     merged.sort((a, b) => {
       if (a.at && b.at) return b.at.getTime() - a.at.getTime();
       if (a.at && !b.at) return -1;
       if (!a.at && b.at) return 1;
       return a.entity.label.localeCompare(b.entity.label);
     });
-    // PR #694 Comment 13 — compute `hasMore` BEFORE the slice so
-    // the consumer can render `${cap}+` only when rows were
-    // actually dropped. A project with exactly `cap` rows now
-    // renders the exact count, not the saturation indicator.
-    const hasMore = merged.length > cap;
+    // Combined overflow: either base overflowed its own cap (some
+    // typed/added rows didn't fit) OR the merge with promotions
+    // overflowed (cap is shared across all streams). Either means
+    // there's more activity than the badge total represents.
+    const hasMore = baseResult.hasMore || merged.length > cap;
     return { items: merged.slice(0, cap), hasMore };
-  }, [base, swmEvents, lifecycleEvents, entityList, baseOpts.agentUri, baseOpts.subGraph, baseOpts.limit, opts.typeIri]);
+  }, [baseResult, swmEvents, lifecycleEvents, useLifecycle, entityList, baseOpts.agentUri, baseOpts.subGraph, baseOpts.limit, opts.typeIri]);
 }
 
 /** "2h ago" / "3d ago" / "Apr 18" — compact relative-time label. */

@@ -213,4 +213,81 @@ describe('useProjectActivityEvents — hasMore signal (PR #694 Comment 13)', () 
     expect(events).toHaveLength(3);
     expect(readHasMore(container)).toBe(false);
   });
+
+  // PR #694 Comment 14 — the typed/decision rows must survive even
+  // when a flood of imports ranks above them. Pre-fix, the base hook
+  // sliced first and the joiner filtered second, so the typed rows
+  // below the 200-cap would be silently dropped. Post-fix, the
+  // joiner pushes `excludeEvents: ['added']` into base, so the slice
+  // operates on the post-filter set.
+  it('typed rows survive when imports outrank them within the cap (Comment 14)', () => {
+    const TYPE_DECISION = 'http://dkg.io/ontology/decisions/Decision';
+    const triples: LayeredTriple[] = [];
+    // 50 imports, newest first — these would have filled the cap pre-fix.
+    for (let i = 0; i < 50; i++) {
+      const ts = new Date(Date.UTC(2026, 4, 25 - Math.floor(i / 2), 12, i % 60, 0)).toISOString();
+      triples.push(
+        { subject: `urn:doc:${i}`, predicate: RDF_TYPE, object: 'http://schema.org/Article', layer: 'working' },
+        { subject: `urn:doc:${i}`, predicate: DC_CREATED, object: `"${ts}"`, layer: 'working' },
+      );
+    }
+    // 5 typed Decision rows ranked OLDER than the imports — would be
+    // pushed out of a 10-cap window pre-fix.
+    for (let i = 0; i < 5; i++) {
+      const ts = new Date(Date.UTC(2026, 3, 5 - i, 12, 0, 0)).toISOString();
+      triples.push(
+        { subject: `urn:decision:${i}`, predicate: RDF_TYPE, object: TYPE_DECISION, layer: 'working' },
+        { subject: `urn:decision:${i}`, predicate: DC_CREATED, object: `"${ts}"`, layer: 'working' },
+      );
+    }
+    const lifecycle: AssertionLifecycleEvent[] = [
+      {
+        eventUri: 'urn:evt:promote-bundle',
+        kind: 'promoted',
+        assertionUri: 'urn:assert:bundle',
+        assertionName: 'bundle',
+        agentUri: 'did:dkg:agent:bob',
+        publishedAt: '2026-05-30T10:00:00Z',
+        entityCount: 50,
+      },
+    ];
+    act(() => {
+      root.render(React.createElement(Probe, {
+        entities: entitiesFrom(triples),
+        opts: { lifecycleEvents: lifecycle, limit: 10 },
+      }));
+    });
+    const events = readEvents(container);
+    // 5 typed rows + 1 lifecycle promoted; NO `'added'` rows because
+    // lifecycle is the authoritative source.
+    expect(events.filter(e => e === 'added')).toHaveLength(0);
+    expect(events.filter(e => e === 'typed')).toHaveLength(5);
+    expect(events.filter(e => e === 'promoted')).toHaveLength(1);
+  });
+
+  // PR #694 Comment 15 — the saturation badge must be honest on the
+  // legacy (non-lifecycle, non-swm) path too. Pre-fix, the joiner
+  // hard-coded `hasMore: false` for that path; the title badge then
+  // displayed `200` on an over-capped AgentProfileView feed instead
+  // of `200+`. Post-fix, the base hook surfaces its own `hasMore`
+  // and the joiner propagates it.
+  it('hasMore propagates from base on the legacy path (Comment 15)', () => {
+    const triples: LayeredTriple[] = [];
+    for (let i = 0; i < 15; i++) {
+      const ts = new Date(Date.UTC(2026, 4, 1, 12, i, 0)).toISOString();
+      triples.push(
+        { subject: `urn:doc:${i}`, predicate: RDF_TYPE, object: 'http://schema.org/Article', layer: 'working' },
+        { subject: `urn:doc:${i}`, predicate: DC_CREATED, object: `"${ts}"`, layer: 'working' },
+      );
+    }
+    act(() => {
+      root.render(React.createElement(Probe, {
+        entities: entitiesFrom(triples),
+        // No lifecycleEvents, no swmEvents — pure legacy path.
+        opts: { limit: 10 },
+      }));
+    });
+    expect(readEvents(container)).toHaveLength(10);
+    expect(readHasMore(container)).toBe(true);
+  });
 });
