@@ -145,7 +145,12 @@ describe('Context Graph shared empty/stat patterns', () => {
     await unmount();
   });
 
-  it('uses the shared empty pattern for empty activity feeds', async () => {
+  it('uses the quieter inline empty pattern for empty activity feeds (N6 polish #23)', async () => {
+    // The Overview activity feed switched off the shared centered/bold
+    // `EmptyState` primitive — that read as a load-bearing message on
+    // an otherwise calm Overview. Quieter inline tertiary hint receeds
+    // so the surface stays the focal area. Empty-state copy is still
+    // surfaced (the hint is the user-facing payload).
     const { container, unmount } = await render(
       React.createElement(ActivityFeed, {
         entities: [],
@@ -154,7 +159,12 @@ describe('Context Graph shared empty/stat patterns', () => {
       }),
     );
 
-    expect(container.querySelector('.v10-activity-feed-empty .v10-empty-state')).toBeTruthy();
+    const empty = container.querySelector('.v10-activity-feed-empty');
+    expect(empty).toBeTruthy();
+    // Quieter inline class replaces the shared `EmptyState` shell.
+    expect(empty?.querySelector('.v10-activity-feed-empty-hint')).toBeTruthy();
+    // The shared EmptyState primitive is no longer used here.
+    expect(empty?.querySelector('.v10-empty-state')).toBeNull();
     expect(container.textContent).toContain('No recent updates yet.');
 
     await unmount();

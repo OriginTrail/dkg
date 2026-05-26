@@ -37,6 +37,7 @@
  */
 import { useMemo } from 'react';
 import { canonicalEntityUri, uriTail, type MemoryEntity, type TrustLevel } from './useMemoryEntities.js';
+import type { AssertionLifecycleEvent } from './useAssertionLifecycleEvents.js';
 
 // Priority order — first predicate that has a parseable value wins.
 const TIMESTAMP_PREDICATES = [
@@ -85,6 +86,14 @@ export interface ActivityItem {
    * reconcile the wrong row on updates. Renderers MUST key off `id`.
    */
   id: string;
+  /**
+   * N6 polish — number of root entities included in a promoted
+   * assertion bundle. Sourced from `dkg:rootEntity` triples emitted
+   * by `generateAssertionPromotedMetadata`. Undefined for non-
+   * lifecycle rows and for created rows (the creator metadata does
+   * not emit `dkg:rootEntity`).
+   */
+  entityCount?: number;
   entity: MemoryEntity;
   /**
    * Primary activity timestamp — `null` means the entity is relevant
@@ -486,6 +495,77 @@ function syntheticEntityStub(uri: string): MemoryEntity {
   };
 }
 
+// N6 polish (task #23) — bundle-keyed activity rows sourced from
+// `dkg:AssertionCreated` / `dkg:AssertionPromoted` events
+// (`useAssertionLifecycleEvents`). One row per event (a single
+// promote action with N root entities renders as ONE row, not N),
+// agent-DID-keyed for clean attribution (no `12D3…` peer ids in
+// the author column).
+//
+// Rows are intentionally non-interactive in this PR: clicking lands
+// on an assertion-detail view that S4 will introduce; until then
+// surfacing the entity-detail click would resolve to nothing useful.
+// Renderer reads `clickable: false` and emits a static row.
+export interface BuildLifecycleActivityRowsOptions {
+  agentUri?: string;
+  subGraph?: string;
+  limit?: number;
+}
+
+export function buildLifecycleActivityRows(
+  events: ReadonlyArray<AssertionLifecycleEvent>,
+  opts: BuildLifecycleActivityRowsOptions = {},
+): ActivityItem[] {
+  const { agentUri, subGraph, limit = 200 } = opts;
+  const out: ActivityItem[] = [];
+  for (const evt of events) {
+    if (agentUri && evt.agentUri !== agentUri) continue;
+    if (subGraph && evt.subGraph !== subGraph) continue;
+    const at = parseDateLike(evt.publishedAt);
+    if (!at) continue;
+    const event: ActivityEvent = evt.kind === 'promoted' ? 'promoted' : 'added';
+    const layer: TrustLevel = evt.kind === 'promoted' ? 'shared' : 'working';
+    // The assertion bundle URI is the "subject" the row is about.
+    // We carry it as the entity URI so React keys + tooltip share a
+    // stable identity even before S4's assertion-detail view exists.
+    const canonicalAssertion = canonicalEntityUri(evt.assertionUri);
+    out.push({
+      id: buildActivityId(event, evt.eventUri, at, canonicalAssertion),
+      entity: {
+        uri: canonicalAssertion,
+        label: evt.assertionName || uriTail(canonicalAssertion),
+        types: [],
+        trustLevel: layer,
+        layers: new Set([layer]),
+        subGraphs: evt.subGraph ? new Set([evt.subGraph]) : new Set(),
+        properties: new Map(),
+        connections: [],
+      },
+      at,
+      authorUri: evt.agentUri,
+      kindUri: null,
+      subGraph: evt.subGraph ?? null,
+      layer,
+      event,
+      // Per-bundle root count from `dkg:AssertionPromoted`; undefined
+      // for created rows (creator metadata doesn't emit `dkg:rootEntity`).
+      entityCount: evt.entityCount,
+      // Pre-S4: no assertion-detail surface yet. Rows render as
+      // static text instead of navigating to a `selectedEntity` that
+      // ProjectView would immediately clear (same shape as Code3
+      // stub-row handling on PR #656).
+      clickable: false,
+    });
+  }
+  out.sort((a, b) => {
+    if (a.at && b.at) return b.at.getTime() - a.at.getTime();
+    if (a.at && !b.at) return -1;
+    if (!a.at && b.at) return 1;
+    return a.entity.label.localeCompare(b.entity.label);
+  });
+  return out.slice(0, limit);
+}
+
 export interface UseProjectActivityEventsOptions extends UseProjectActivityOptions {
   /**
    * Raw per-operation event log from `useSwmAttributions.events`.
@@ -493,8 +573,28 @@ export interface UseProjectActivityEventsOptions extends UseProjectActivityOptio
    * `useProjectActivity(entities, opts)`. Code2 (PR #656) — we now
    * consume the raw event list, not the deduped attribution map, so
    * re-promotions surface as distinct rows.
+   *
+   * N6 polish (task #23) — superseded by `lifecycleEvents` on the
+   * Overview feed (which prefers the agent-DID-keyed lifecycle
+   * source). Kept on the option for AgentProfileView and other
+   * legacy callers that still want the peer-id-keyed SWM stream.
+   * When BOTH are supplied, `lifecycleEvents` wins for created+promoted
+   * rows and `swmEvents`-derived promotion rows are dropped so we
+   * don't render the same WM→SWM transition twice.
    */
   swmEvents?: ReadonlyArray<PromotionAttribution>;
+  /**
+   * N6 polish (task #23) — bundle-keyed lifecycle events from
+   * `useAssertionLifecycleEvents`. One row per `dkg:AssertionCreated`
+   * / `dkg:AssertionPromoted` event, with the per-bundle root-entity
+   * count surfaced inline so a single promote of N entities reads as
+   * ONE row. Agent attribution is DID-keyed (no `12D3…` peer ids).
+   * When supplied, this is the source of `'added'` (from created)
+   * and `'promoted'` rows on the feed; the legacy entity-list
+   * `dcterms:created` and `swmEvents` promotion rows are suppressed
+   * to avoid double-counting the same transition.
+   */
+  lifecycleEvents?: ReadonlyArray<AssertionLifecycleEvent>;
 }
 
 /**
@@ -502,39 +602,63 @@ export interface UseProjectActivityEventsOptions extends UseProjectActivityOptio
  * Existing callers (AgentProfileView) keep using `useProjectActivity`
  * directly when they don't want promotion rows polluting a per-agent
  * typed-activity slice. The Overview "Recent activity" feed swaps to
- * this one and feeds in the live `useSwmAttributions().events` result.
+ * this one and feeds in the live `useAssertionLifecycleEvents().events`
+ * result (preferred) or `useSwmAttributions().events` (legacy).
  */
 export function useProjectActivityEvents(
   entityList: MemoryEntity[],
   opts: UseProjectActivityEventsOptions = {},
 ): ActivityItem[] {
-  const { swmEvents, ...baseOpts } = opts;
+  const { swmEvents, lifecycleEvents, ...baseOpts } = opts;
   const base = useProjectActivity(entityList, baseOpts);
   return useMemo(() => {
     // typeIri pins the feed to a typed-activity kind (Decision/Task/
     // PR/etc.) — promotion rows have no `kindUri` so they're dropped
     // wholesale, matching how the same filter drops `'added'` rows.
     if (opts.typeIri) return base;
-    if (!swmEvents || swmEvents.length === 0) return base;
-    const entitiesByUri = new Map<string, MemoryEntity>();
-    for (const e of entityList) entitiesByUri.set(e.uri, e);
-    const promotions = buildPromotionEvents(swmEvents, {
-      entitiesByUri,
-      agentUri: baseOpts.agentUri,
-      subGraph: baseOpts.subGraph,
-      // No per-stream limit — apply the combined cap below.
-      limit: Number.POSITIVE_INFINITY,
-    });
-    const merged = [...base, ...promotions];
+    const useLifecycle = lifecycleEvents && lifecycleEvents.length > 0;
+    if (!useLifecycle && (!swmEvents || swmEvents.length === 0)) return base;
+
+    // When the lifecycle stream is supplied it is the authoritative
+    // source for `'added'` and `'promoted'` rows — drop those event
+    // kinds from `base` so an entity that was both imported (with a
+    // `dcterms:created` triple) and recorded by `dkg:AssertionCreated`
+    // doesn't show up twice. Other event kinds in `base` (typed
+    // activity, etc.) pass through.
+    const baseFiltered = useLifecycle
+      ? base.filter(item => item.event !== 'added')
+      : base;
+
+    const cap = baseOpts.limit ?? 200;
+
+    let promotions: ActivityItem[];
+    if (useLifecycle) {
+      promotions = buildLifecycleActivityRows(lifecycleEvents!, {
+        agentUri: baseOpts.agentUri,
+        subGraph: baseOpts.subGraph,
+        limit: Number.POSITIVE_INFINITY,
+      });
+    } else {
+      const entitiesByUri = new Map<string, MemoryEntity>();
+      for (const e of entityList) entitiesByUri.set(e.uri, e);
+      promotions = buildPromotionEvents(swmEvents!, {
+        entitiesByUri,
+        agentUri: baseOpts.agentUri,
+        subGraph: baseOpts.subGraph,
+        // No per-stream limit — apply the combined cap below.
+        limit: Number.POSITIVE_INFINITY,
+      });
+    }
+
+    const merged = [...baseFiltered, ...promotions];
     merged.sort((a, b) => {
       if (a.at && b.at) return b.at.getTime() - a.at.getTime();
       if (a.at && !b.at) return -1;
       if (!a.at && b.at) return 1;
       return a.entity.label.localeCompare(b.entity.label);
     });
-    const cap = baseOpts.limit ?? 200;
     return merged.slice(0, cap);
-  }, [base, swmEvents, entityList, baseOpts.agentUri, baseOpts.subGraph, baseOpts.limit, opts.typeIri]);
+  }, [base, swmEvents, lifecycleEvents, entityList, baseOpts.agentUri, baseOpts.subGraph, baseOpts.limit, opts.typeIri]);
 }
 
 /** "2h ago" / "3d ago" / "Apr 18" — compact relative-time label. */

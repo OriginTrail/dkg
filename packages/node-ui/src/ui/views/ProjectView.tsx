@@ -13,6 +13,7 @@ import { useProjectProfile, ProjectProfileContext } from '../hooks/useProjectPro
 import { useAgents, AgentsContext } from '../hooks/useAgents.js';
 import { useCurrentAgent } from '../hooks/useCurrentAgent.js';
 import { useSwmAttributions } from '../hooks/useSwmAttributions.js';
+import { useAssertionLifecycleEvents } from '../hooks/useAssertionLifecycleEvents.js';
 import { ActivityFeed } from '../components/ActivityFeed.js';
 import { SubGraphBar } from '../components/SubGraphBar.js';
 import { CONTEXT_GRAPH_PRIMER_TAB } from '../lib/contextGraphPrimer.js';
@@ -269,6 +270,19 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     ? swmAttributionsResult.events
     : undefined;
 
+  // N6 polish (task #23) — bundle-keyed lifecycle events feed the
+  // Overview activity feed. Gated on the Overview tab only (the SWM
+  // graph doesn't consume this stream; SWM attribution coloring
+  // stays on `useSwmAttributions` which is the legend's source of
+  // truth). Same `resultContextGraphId` guard as the SWM stream so
+  // a project switch doesn't briefly show stale rows.
+  const lifecycleEventsResult = useAssertionLifecycleEvents(
+    !activeSubGraph && activeLayer === 'overview' ? contextGraphId : undefined,
+  );
+  const overviewLifecycleEvents = lifecycleEventsResult.resultContextGraphId === contextGraphId
+    ? lifecycleEventsResult.events
+    : undefined;
+
   const refreshParticipants = useCallback(() => {
     const targetId = cg?.id;
     if (!targetId) return;
@@ -499,12 +513,12 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
           )}
           <ActivityFeed
             entities={rawMemory.entityList}
-            swmEvents={overviewSwmEvents}
+            lifecycleEvents={overviewLifecycleEvents}
             onSelectEntity={handleOverviewActivityNavigate}
             title="Recent activity"
             limit={40}
             includeUndated={false}
-            emptyHint="Once you import knowledge or agents start proposing decisions or tasks they'll show up here as a live feed."
+            emptyHint="Once knowledge starts being added and managed in this context graph, activities will show up here as a live feed."
             className="v10-overview-activity"
           />
         </>

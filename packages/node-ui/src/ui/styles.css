@@ -6833,13 +6833,31 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
   background: rgba(255, 255, 255, 0.015);
 }
 .v10-activity-feed-title {
+  display: flex; align-items: baseline; gap: 8px;
   font-size: 12px; font-weight: 700;
   text-transform: uppercase; letter-spacing: 0.06em;
   color: var(--text-tertiary);
 }
-.v10-empty-state.v10-activity-feed-empty-state { min-height: 96px; }
+.v10-activity-feed-title-label { flex: 0 1 auto; }
+.v10-activity-feed-title-count {
+  /* N6 polish (item 3) — total-feed count next to the heading.
+   * Same mono+tertiary treatment as `.v10-activity-feed-bucket-count`
+   * so the two read as the same kind of signal at different scopes. */
+  font-family: var(--font-mono); font-weight: 400;
+  font-size: 10px; letter-spacing: 0;
+  text-transform: none;
+  color: var(--text-tertiary);
+}
 .v10-overview-activity.v10-activity-feed-empty {
   min-height: 140px;
+}
+.v10-activity-feed-empty-hint {
+  /* N6 polish (item 2) — quieter than the prior centered/bold
+   * EmptyState primitive; recedes so the rest of the Overview
+   * stays the focal area. */
+  margin-top: 8px;
+  font-size: 12px; font-weight: 400; line-height: 1.5;
+  color: var(--text-tertiary);
 }
 .v10-activity-feed-bucket { display: flex; flex-direction: column; gap: 4px; }
 .v10-activity-feed-bucket-head {

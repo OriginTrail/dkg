@@ -48,6 +48,21 @@ function initials(name: string): string {
   return (parts[0][0] + (parts[1][0] ?? '')).toUpperCase();
 }
 
+/**
+ * N6 polish (item 4) — when we fall back to a raw identifier (no
+ * resolved agent profile available), truncate so libp2p peer ids
+ * (`12D3K…b9a3`) and eth addresses (`0xaaaa…bbbb`) don't blow the
+ * pill layout. Pattern matches plan S13 (`agent-docs/context-graph-
+ * implementation-plan.md`): head 6 + ellipsis + tail 4. Short
+ * identifiers (<= head+tail+1) render unchanged so we never insert
+ * an ellipsis that hides nothing.
+ */
+function truncateFallbackId(raw: string): string {
+  const trimmed = raw.trim();
+  if (trimmed.length <= 11) return trimmed;
+  return `${trimmed.slice(0, 6)}…${trimmed.slice(-4)}`;
+}
+
 export const AgentChip: React.FC<AgentChipProps> = ({
   agent,
   fallbackUri,
@@ -65,7 +80,11 @@ export const AgentChip: React.FC<AgentChipProps> = ({
   const resolvedOpen = onOpenAgent ?? ctxAgents?.openAgent;
 
   const uri  = agent?.uri ?? fallbackUri!;
-  const name = agent?.name ?? (fallbackUri?.split(':').pop() ?? 'unknown');
+  // N6 polish (item 4) — only truncate the FALLBACK path. Resolved
+  // agents already have a human-readable `name`; truncating that
+  // would hide useful display info.
+  const name = agent?.name
+    ?? (fallbackUri ? truncateFallbackId(fallbackUri.split(':').pop() ?? fallbackUri) : 'unknown');
   const kind = agent?.kind ?? 'ai';
   const framework = agent?.framework;
   const glyph = framedGlyph(framework, kind);

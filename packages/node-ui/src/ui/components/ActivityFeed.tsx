@@ -23,9 +23,9 @@ import {
   type ActivityItem,
   type PromotionAttribution as ActivityFeedEvent,
 } from '../hooks/useProjectActivity.js';
+import type { AssertionLifecycleEvent } from '../hooks/useAssertionLifecycleEvents.js';
 import { useAgentsContext } from '../hooks/useAgents.js';
 import { useProjectProfileContext } from '../hooks/useProjectProfile.js';
-import { EmptyState } from './ContextGraphPrimitives.js';
 import { AgentChip } from './AgentChip.js';
 
 const LAYER_COLOR: Record<TrustLevel, string> = {
@@ -62,6 +62,16 @@ export interface ActivityFeedProps {
    * `attributions` map to the raw event list.
    */
   swmEvents?: ReadonlyArray<ActivityFeedEvent>;
+  /**
+   * N6 polish (task #23) — bundle-keyed lifecycle events from
+   * `useAssertionLifecycleEvents`. When supplied, this is the
+   * authoritative source for `'added'` (from `dkg:AssertionCreated`)
+   * and `'promoted'` (from `dkg:AssertionPromoted`) rows. The
+   * entity-list `dcterms:created` rows and `swmEvents` promotions
+   * are suppressed so we don't render the same transition twice.
+   * AgentProfileView omits this; it stays on `swmEvents` for now.
+   */
+  lifecycleEvents?: ReadonlyArray<AssertionLifecycleEvent>;
   title?: React.ReactNode;
   onSelectEntity: (uri: string) => void;
   /** Optional click handler for author chips (navigate to agent profile). */
@@ -79,6 +89,7 @@ export const ActivityFeed: React.FC<ActivityFeedProps> = ({
   limit,
   includeUndated = true,
   swmEvents,
+  lifecycleEvents,
   title,
   onSelectEntity,
   onOpenAgent,
@@ -86,31 +97,44 @@ export const ActivityFeed: React.FC<ActivityFeedProps> = ({
   className = '',
 }) => {
   // useProjectActivityEvents reduces to plain useProjectActivity when
-  // swmEvents is undefined, so existing callers (AgentProfileView)
-  // get identical behaviour without passing the new prop.
+  // both swmEvents and lifecycleEvents are undefined, so existing
+  // callers (AgentProfileView) get identical behaviour without
+  // passing the new props.
   const items = useProjectActivityEvents(entities, {
-    agentUri, typeIri, subGraph, limit, includeUndated, swmEvents,
+    agentUri, typeIri, subGraph, limit, includeUndated, swmEvents, lifecycleEvents,
   });
   const buckets = React.useMemo(() => bucketActivity(items), [items]);
   const agents = useAgentsContext();
   const profile = useProjectProfileContext();
 
+  // N6 polish (item 3) — title row gets a total-feed count badge
+  // mirroring the per-bucket chip; we render the same row in both
+  // the empty and populated branches so the heading stays anchored
+  // (showing "0" rather than vanishing into the empty state).
+  const titleRow = title ? (
+    <div className="v10-activity-feed-title">
+      <span className="v10-activity-feed-title-label">{title}</span>
+      <span className="v10-activity-feed-title-count">{items.length}</span>
+    </div>
+  ) : null;
+
   if (items.length === 0) {
+    // N6 polish (item 2) — the centered bold `EmptyState` primitive
+    // read as a load-bearing message; quieter inline tertiary text
+    // recedes so the rest of the Overview stays the focal area.
     return (
       <div className={`v10-activity-feed v10-activity-feed-empty ${className}`}>
-        {title && <div className="v10-activity-feed-title">{title}</div>}
-        <EmptyState
-          compact
-          title={emptyHint ?? 'No activity with a timestamp yet.'}
-          className="v10-activity-feed-empty-state"
-        />
+        {titleRow}
+        <div className="v10-activity-feed-empty-hint">
+          {emptyHint ?? 'No activity with a timestamp yet.'}
+        </div>
       </div>
     );
   }
 
   return (
     <div className={`v10-activity-feed ${className}`}>
-      {title && <div className="v10-activity-feed-title">{title}</div>}
+      {titleRow}
       {buckets.map(bucket => (
         <div key={bucket.key} className="v10-activity-feed-bucket">
           <div className="v10-activity-feed-bucket-head">
@@ -159,8 +183,17 @@ function ActivityRow({
   const typeBinding = isTyped && item.kindUri ? profile?.forType(item.kindUri) : null;
   const typeLabel = ((): string => {
     if (item.event === 'added') return 'Added';
-    if (item.event === 'promoted') return 'Promoted to Shared Working Memory';
-    if (item.event === 'published') return 'Published to Verifiable Memory';
+    if (item.event === 'promoted') {
+      // Promote rows from `dkg:AssertionPromoted` carry the per-bundle
+      // root-entity count; surface it inline so a single row reads as
+      // "one promote action of N entities" instead of needing N
+      // separate rows. Hidden when missing (legacy WorkspaceOperation
+      // fallback rows) or zero.
+      return item.entityCount != null && item.entityCount > 0
+        ? `Promoted to SWM · ${item.entityCount} ${item.entityCount === 1 ? 'entity' : 'entities'}`
+        : 'Promoted to SWM';
+    }
+    if (item.event === 'published') return 'Published to VM';
     return typeBinding?.label ?? (item.kindUri ? item.kindUri.split(/[#/]/).pop() : null) ?? 'Entity';
   })();
   const typeIcon = ((): string => {
