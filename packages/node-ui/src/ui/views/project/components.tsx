@@ -1689,8 +1689,8 @@ export function EntityList({
     if (externallySorted) return entities;
     const copy = [...entities];
     copy.sort((a, b) => {
-      const aCount = a.connections.length + a.properties.size;
-      const bCount = b.connections.length + b.properties.size;
+      const aCount = a.tripleCount;
+      const bCount = b.tripleCount;
       return bCount - aCount;
     });
     return copy;
@@ -1723,7 +1723,7 @@ export function EntityList({
       </div>
       {sorted.map(e => {
         const { icon, type } = entityMeta(e, profile);
-        const tripleCount = e.connections.length + e.properties.size;
+        const tripleCount = e.tripleCount;
         const authorUri = entityAuthorUri(e);
         const author = authorUri ? agents?.get(authorUri) : null;
         const ts = timestampPredicate ? entityTimestamp(e, timestampPredicate) : null;
@@ -3300,7 +3300,7 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
     focal: { uri: entity.uri, sizeMultiplier: 2.4 },
   }), [entity.uri, theme]);
 
-  const tripleCount = entity.connections.length + entity.properties.size;
+  const tripleCount = entity.tripleCount;
 
   return (
     <div className="v10-ka-detail">
@@ -4305,8 +4305,8 @@ export function SubGraphDetailView({
     }
     // 'triples' (default fallback)
     copy.sort((a, b) => {
-      const aCount = a.connections.length + a.properties.size;
-      const bCount = b.connections.length + b.properties.size;
+      const aCount = a.tripleCount;
+      const bCount = b.tripleCount;
       return bCount - aCount;
     });
     return copy;

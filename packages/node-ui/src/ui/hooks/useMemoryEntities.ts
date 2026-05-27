@@ -17,6 +17,18 @@ export interface MemoryEntity {
   subGraphs: Set<string>;
   properties: Map<string, string[]>;
   connections: Array<{ predicate: string; targetUri: string; targetLabel: string }>;
+  /**
+   * Number of triple rows that reference this entity as subject or object —
+   * matches the row count the entity-detail Triples tab shows. Used by the
+   * entity-row badge and the entity-detail header/sidebar/footer.
+   *
+   * PER-ENTITY METRIC ONLY. An IRI-object triple `(A, p, B)` bumps BOTH
+   * `A.tripleCount` and `B.tripleCount`, so `sum(e.tripleCount)` across
+   * a layer is NOT the layer's triple total. Layer totals belong to
+   * `mem.allTriples.length` (DashboardView); CG/sub-graph totals to the
+   * daemon's `/api/sub-graph/list` `tripleCount` (SubGraphBar).
+   */
+  tripleCount: number;
 }
 
 export interface Triple {
@@ -328,6 +340,7 @@ export function buildEntities(layered: LayeredTriple[]): Map<string, MemoryEntit
         subGraphs: new Set(),
         properties: new Map(),
         connections: [],
+        tripleCount: 0,
       };
       entities.set(entityUri, e);
     }
@@ -338,6 +351,12 @@ export function buildEntities(layered: LayeredTriple[]): Map<string, MemoryEntit
     const entity = getOrCreate(t.subject);
     entity.layers.add(t.layer);
     if (t.subGraph) entity.subGraphs.add(t.subGraph);
+    // Every observed triple bumps subject-side count — type, literal,
+    // and connection alike. Counted BEFORE the connection-dedup below
+    // so the badge matches the Triples-tab raw row count (same triple
+    // appearing in two sub-graphs shows twice in the tab and counts
+    // twice here).
+    entity.tripleCount++;
 
     if (t.predicate === RDF_TYPE) {
       const typeUri = canonicalEntityUri(t.object);
@@ -349,6 +368,10 @@ export function buildEntities(layered: LayeredTriple[]): Map<string, MemoryEntit
       const targetEntity = getOrCreate(targetUri);
       targetEntity.layers.add(t.layer);
       if (t.subGraph) targetEntity.subGraphs.add(t.subGraph);
+      // Object-side bump — entity appearing as the object of someone
+      // else's triple shows up in its own Triples tab too, so its
+      // tripleCount must include it.
+      targetEntity.tripleCount++;
       const keys = connectionKeys.get(entity.uri) ?? new Set<string>();
       const connectionKey = `${t.predicate}\0${targetUri}`;
       if (!keys.has(connectionKey)) {
@@ -486,8 +509,8 @@ export function useMemoryEntities(
         const trustOrder = { verified: 0, shared: 1, working: 2 };
         const td = trustOrder[a.trustLevel] - trustOrder[b.trustLevel];
         if (td !== 0) return td;
-        const ca = a.connections.length + a.properties.size;
-        const cb = b.connections.length + b.properties.size;
+        const ca = a.tripleCount;
+        const cb = b.tripleCount;
         if (cb !== ca) return cb - ca;
         return a.label.localeCompare(b.label);
       }),
