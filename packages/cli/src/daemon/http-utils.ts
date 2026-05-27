@@ -590,7 +590,7 @@ export async function resolveRequiredWriteContextGraphId(
     return id === candidateId || uri === raw;
   });
   let exactWritable = false;
-  if (requireLocalWritable && exact?.id && typeof exact.id === "string") {
+  if (exact?.id && typeof exact.id === "string") {
     try {
       exactWritable = await contextGraphRowIsWritable(agent, exact);
     } catch (err) {
@@ -607,6 +607,9 @@ export async function resolveRequiredWriteContextGraphId(
         isWalletScopedContextGraphId(id) && id.endsWith(`/${candidateId}`),
       ),
     );
+    if (exact?.id && typeof exact.id === "string" && suffixMatches.length > 0 && exactWritable) {
+      return exact.id;
+    }
     if (
       exact?.id &&
       typeof exact.id === "string" &&

@@ -391,6 +391,30 @@ describe('context graph write-path validation', () => {
     expect(agent.calls.create).toHaveBeenCalledWith('local-content-cg', 'draft', undefined);
   });
 
+  it('accepts an exact bare context graph with local content when a curated suffix also exists', async () => {
+    const agent = makeAgent([
+      { id: CANONICAL_CG, uri: CANONICAL_URI, subscribed: true, synced: true },
+      {
+        id: BARE_CG,
+        uri: BARE_URI,
+        name: BARE_CG,
+        subscribed: false,
+        synced: false,
+        hasLocalContent: true,
+      },
+    ]);
+    await startRoutes(agent);
+
+    const result = await post('/api/assertion/create', {
+      contextGraphId: BARE_CG,
+      name: 'draft',
+    });
+
+    expect(result.status).toBe(200);
+    expect(agent.contextGraphHasLocalContent).toHaveBeenCalledWith(BARE_CG);
+    expect(agent.calls.create).toHaveBeenCalledWith(BARE_CG, 'draft', undefined);
+  });
+
   it('rejects unknown assertion write targets before mutation', async () => {
     const agent = makeAgent();
     await startRoutes(agent);
