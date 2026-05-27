@@ -154,6 +154,33 @@ describe('generateKCMetadata', () => {
     expect(attribution!.object).toBe(`did:dkg:agent:${ADDR.toLowerCase()}`);
   });
 
+  it('GH #748 Codex round 7: zero-address authorAddress is treated as unattributed (no fake agent DID)', () => {
+    // `publisherNodeIdentityIdOverride = 0` writes `authorAddress = 0x0…0`
+    // as the sentinel for "no author". The fallback chain must NOT mint a
+    // real-looking `did:dkg:agent:0x000…000` URI — fall through to the
+    // peer-ID literal so downstream provenance correctly reflects the
+    // unattributed publish.
+    const ZERO = '0x0000000000000000000000000000000000000000';
+    const quads = generateKCMetadata(
+      makeMeta({ authorAddress: ZERO, publishOperationId: 'op-x' }),
+      [makeKA()],
+    );
+    const attribution = quads.find(q => q.subject === UAL && q.predicate === `${PROV}wasAttributedTo`);
+    expect(attribution).toBeDefined();
+    // Must NOT be the synthesised zero-address agent DID.
+    expect(attribution!.object).not.toBe(`did:dkg:agent:${ZERO}`);
+    // Falls back to peer-ID literal — preserves the pre-fix unattributed shape.
+    expect(attribution!.object).toBe('"12D3KooWTestPeer"');
+  });
+
+  it('GH #748 Codex round 7: zero-address with mixed casing also treated as unattributed', () => {
+    // Sanity: case-insensitive zero-address detection.
+    const ZERO_MIXED = '0x0000000000000000000000000000000000000000';
+    const quads = generateKCMetadata(makeMeta({ agentAddress: ZERO_MIXED }), [makeKA()]);
+    const attribution = quads.find(q => q.subject === UAL && q.predicate === `${PROV}wasAttributedTo`);
+    expect(attribution!.object).toBe('"12D3KooWTestPeer"');
+  });
+
   it('GH #748: explicit agentAddress takes precedence over authorAddress', () => {
     const AGENT = '0xaF7E932F79263f1A303790Bd6C01b096f5334BBB';
     const AUTHOR = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8';

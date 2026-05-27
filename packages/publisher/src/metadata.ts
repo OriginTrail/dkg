@@ -115,9 +115,17 @@ export function generateKCMetadata(
       // so prefer that when `agentAddress` wasn't explicitly threaded.
       // Falls back to the peer-ID literal only for legacy/tentative
       // callers with neither identity available.
-      (meta.agentAddress ?? meta.authorAddress)
-        ? agentDid((meta.agentAddress ?? meta.authorAddress)!)
-        : lit(meta.publisherPeerId || 'unknown'),
+      // GH #748 Codex round 7: treat `0x0000…0000` as the no-author sentinel
+      // (used when `publisherNodeIdentityIdOverride = 0`). Without this guard
+      // an unattributed publish would mint `did:dkg:agent:0x000…000`, making
+      // the provenance look like a real agent authored the KC.
+      ((): string => {
+        const candidate = meta.agentAddress ?? meta.authorAddress;
+        if (candidate && !isZeroEthAddress(candidate)) {
+          return agentDid(candidate);
+        }
+        return lit(meta.publisherPeerId || 'unknown');
+      })(),
       metaGraph,
     ),
     mq(
@@ -296,6 +304,15 @@ function intLit(val: number | bigint): string {
 
 function dateLit(d: Date): string {
   return `"${d.toISOString()}"^^<${XSD}dateTime>`;
+}
+
+/**
+ * Returns true for the EVM zero address sentinel `0x0000…0000` (any casing).
+ * Used to detect "unattributed publish" intent (`publisherNodeIdentityIdOverride = 0`)
+ * so callers don't mint a fake `did:dkg:agent:0x000…000` URI for it.
+ */
+export function isZeroEthAddress(address: string): boolean {
+  return /^0x0{40}$/i.test(address);
 }
 
 export function agentDid(address: string): string {

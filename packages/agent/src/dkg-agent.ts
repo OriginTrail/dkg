@@ -1079,7 +1079,7 @@ export class DKGAgent {
         const log = new Logger('DKGAgent');
         log.info(
           createOperationContext('init'),
-          `Migrated SWM attribution across ${migrated.cgs} CG(s): rewrote ${migrated.rewritten} literal(s) to agent DID, ${migrated.skipped} unresolved`,
+          `Migrated SWM attribution across ${migrated.swmMetaGraphs} SWM meta graph(s): rewrote ${migrated.rewritten} literal(s) to agent DID, ${migrated.skipped} unresolved`,
         );
       }
     } catch (err) {

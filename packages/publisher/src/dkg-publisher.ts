@@ -3097,7 +3097,7 @@ export class DKGPublisher implements Publisher {
    * marked CGs. Best-effort: rows whose peer ID can't be resolved
    * against the AGENTS system graph are left in place.
    */
-  async migrateSwmAttributionToAgentDid(): Promise<{ rewritten: number; skipped: number; cgs: number }> {
+  async migrateSwmAttributionToAgentDid(): Promise<{ rewritten: number; skipped: number; swmMetaGraphs: number }> {
     // GH #748 Codex round 3: the AGENTS registry vocabulary is the spec-aligned
     // `https://dkg.network/ontology#` namespace (see `buildAgentProfile` and
     // `discovery.ts:findAgentByPeerId`), distinct from the internal
@@ -3123,7 +3123,11 @@ export class DKGPublisher implements Publisher {
 
     let totalRewritten = 0;
     let totalSkipped = 0;
-    let cgsProcessed = 0;
+    // GH #748 Codex round 7: counts SWM-meta graphs processed (root + any
+    // sub-graph-scoped ones), not distinct context graphs — the migration
+    // operates per SWM-meta graph after the round-6 enumeration fix. Field
+    // name kept honest so the startup log doesn't over-report "CG(s)".
+    let swmMetaGraphsProcessed = 0;
 
     try {
       const peerToAddress = new Map<string, string | null>();
@@ -3258,7 +3262,7 @@ export class DKGPublisher implements Publisher {
         const swmSkipped = swmRetriableSkipped + swmPermanentSkipped;
         totalRewritten += swmRewritten;
         totalSkipped += swmSkipped;
-        cgsProcessed++;
+        swmMetaGraphsProcessed++;
 
         if (swmRewritten > 0 || swmSkipped > 0) {
           const retryNote = swmRetriableSkipped > 0
@@ -3273,13 +3277,13 @@ export class DKGPublisher implements Publisher {
         }
       }
 
-      return { rewritten: totalRewritten, skipped: totalSkipped, cgs: cgsProcessed };
+      return { rewritten: totalRewritten, skipped: totalSkipped, swmMetaGraphs: swmMetaGraphsProcessed };
     } catch (err) {
       this.log.warn(
         ctx,
         `migrateSwmAttributionToAgentDid failed: ${err instanceof Error ? err.message : String(err)}`,
       );
-      return { rewritten: totalRewritten, skipped: totalSkipped, cgs: cgsProcessed };
+      return { rewritten: totalRewritten, skipped: totalSkipped, swmMetaGraphs: swmMetaGraphsProcessed };
     }
   }
 
