@@ -41,11 +41,12 @@ function Probe({
   entities: MemoryEntity[];
   opts?: Parameters<typeof useProjectActivity>[1];
 }) {
-  const items = useProjectActivity(entities, opts);
+  const { items, hasMore } = useProjectActivity(entities, opts);
   const dump: CapturedItem[] = items.map(toCaptured);
   return React.createElement('div', {
     id: 'probe',
     'data-items': JSON.stringify(dump),
+    'data-has-more': hasMore ? 'true' : 'false',
   });
 }
 
@@ -237,6 +238,83 @@ describe('useProjectActivity — N6 event classification', () => {
     expect(items.map(i => i.uri)).toEqual(['urn:doc:1']);
     expect(items[0].author).toBe('did:dkg:agent:alice');
   });
+
+  // PR #694 Comment 14 — the joiner pushes `excludeEvents: ['added']`
+  // down into base when lifecycle is supplying its own bundle-level
+  // created rows. Verify base honours the filter at source (during the
+  // loop, before sort+slice) so older typed rows survive a flood of
+  // imports ranking above them.
+  it('excludeEvents drops matching rows during the loop, leaving the slice for the rest', () => {
+    const triples: LayeredTriple[] = [];
+    // 50 imports, newest first.
+    for (let i = 0; i < 50; i++) {
+      const ts = new Date(Date.UTC(2026, 4, 25 - i, 12, 0, 0)).toISOString();
+      triples.push(
+        { subject: `urn:doc:${i}`, predicate: RDF_TYPE, object: 'http://schema.org/Article', layer: 'working' },
+        { subject: `urn:doc:${i}`, predicate: DC_CREATED, object: `"${ts}"`, layer: 'working' },
+      );
+    }
+    // 5 typed Decision rows, older than all imports.
+    for (let i = 0; i < 5; i++) {
+      const ts = new Date(Date.UTC(2026, 3, 5 - i, 12, 0, 0)).toISOString();
+      triples.push(
+        { subject: `urn:decision:${i}`, predicate: RDF_TYPE, object: TYPE_DECISION, layer: 'working' },
+        { subject: `urn:decision:${i}`, predicate: DC_CREATED, object: `"${ts}"`, layer: 'working' },
+      );
+    }
+    act(() => {
+      root.render(React.createElement(Probe, {
+        entities: entitiesFrom(triples),
+        opts: { limit: 10, excludeEvents: ['added'] },
+      }));
+    });
+    const items = readItems(container);
+    // Without excludeEvents, the 10-cap window would have been all
+    // imports. With the filter at source, the 5 typed rows are kept
+    // and there's no `'added'` row in the slice.
+    expect(items).toHaveLength(5);
+    expect(items.every(i => i.event === 'typed')).toBe(true);
+    expect(items.map(i => i.uri).sort()).toEqual([
+      'urn:decision:0',
+      'urn:decision:1',
+      'urn:decision:2',
+      'urn:decision:3',
+      'urn:decision:4',
+    ]);
+  });
+
+  // PR #694 Comment 15 — `hasMore` from the base hook is the pre-slice,
+  // post-filter overflow signal so the joiner can propagate an honest
+  // saturation indicator on non-lifecycle paths too.
+  it('hasMore is true when the post-filter row count exceeds limit, false otherwise', () => {
+    const triples: LayeredTriple[] = [];
+    for (let i = 0; i < 12; i++) {
+      const ts = new Date(Date.UTC(2026, 4, 1, 12, i, 0)).toISOString();
+      triples.push(
+        { subject: `urn:doc:${i}`, predicate: RDF_TYPE, object: 'http://schema.org/Article', layer: 'working' },
+        { subject: `urn:doc:${i}`, predicate: DC_CREATED, object: `"${ts}"`, layer: 'working' },
+      );
+    }
+    const entities = entitiesFrom(triples);
+
+    // limit < count → hasMore true
+    act(() => {
+      root.render(React.createElement(Probe, { entities, opts: { limit: 10 } }));
+    });
+    expect(container.querySelector('#probe')?.getAttribute('data-has-more')).toBe('true');
+
+    // limit === count → hasMore false (boundary)
+    act(() => {
+      root.render(React.createElement(Probe, { entities, opts: { limit: 12 } }));
+    });
+    expect(container.querySelector('#probe')?.getAttribute('data-has-more')).toBe('false');
+
+    // limit > count → hasMore false
+    act(() => {
+      root.render(React.createElement(Probe, { entities, opts: { limit: 100 } }));
+    });
+    expect(container.querySelector('#probe')?.getAttribute('data-has-more')).toBe('false');
+  });
 });
 
 // ─── N6 part 2 — promotion events ───────────────────────────────
@@ -254,7 +332,9 @@ function ProbeEvents({
   entities: MemoryEntity[];
   opts?: Parameters<typeof useProjectActivityEvents>[1];
 }) {
-  const items = useProjectActivityEvents(entities, opts);
+  // PR #694 Comment 13 — joiner returns `{ items, hasMore }` now;
+  // existing tests in this block read items only.
+  const { items } = useProjectActivityEvents(entities, opts);
   const dump: CapturedItem[] = items.map(toCaptured);
   return React.createElement('div', {
     id: 'probe',

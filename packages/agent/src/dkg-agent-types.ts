@@ -647,14 +647,6 @@ export interface DKGAgentConfig {
    */
   nodeVersion?: string;
   /**
-   * Cadence at which the daemon re-publishes its own agent profile
-   * (PR feat/chain-agents-cg-phonebook). Forwarded straight from
-   * `DkgConfig.network.agentProfileHeartbeatMs`. Defaults to
-   * `AGENT_PROFILE_HEARTBEAT_MS` (5 min) when omitted; `0` disables
-   * the timer (the one-shot startup publish still fires).
-   */
-  agentProfileHeartbeatMs?: number;
-  /**
    * Path to the V10 Random Sampling prover write-ahead log. Core
    * nodes only; ignored on edge. When omitted, an in-memory WAL is
    * used (loses crash-recovery context on restart). Production

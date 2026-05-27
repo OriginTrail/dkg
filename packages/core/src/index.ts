@@ -29,11 +29,6 @@ export {
   MAX_RELAY_RESERVATION_COUNT,
   validateRelayReservationCount,
   type RelayReservationCountValidation,
-  // Public-address classifier (used by profile.ts to filter what we
-  // advertise as `dkg:multiaddr` so peers don't learn RFC1918/CGNAT
-  // entries from the phonebook).
-  isPublicLikeAddress,
-  isLocalOrInternalHostname,
 } from './node.js';
 export {
   type Network,

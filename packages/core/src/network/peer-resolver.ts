@@ -67,53 +67,6 @@ export interface AgentDirectoryLookup {
     peerId: NodeIdentity,
     opts?: { signal?: AbortSignal },
   ): Promise<Address | null>;
-  /**
-   * Optional richer lookup (PR feat/chain-agents-cg-phonebook).
-   * When present, the resolver prefers this over `findRelayForPeer`
-   * so it can pick up direct multiaddrs + freshness metadata. The
-   * resolver falls back to `findRelayForPeer` if this returns null
-   * or the implementation omits the method (older directories).
-   *
-   * Returns:
-   *   - `null` if the peer is unknown to the directory.
-   *   - `{ multiaddrs, relayAddress?, lastSeenMs? }` otherwise.
-   *     `multiaddrs` may be empty if the agent only published a
-   *     relay address; the resolver still uses the relay form in
-   *     that case.
-   *
-   * Staleness filtering: the resolver only uses `multiaddrs` when
-   * `lastSeenMs` is present AND within a two-sided window:
-   *   - lower bound: `now - lastSeenMs <= staleThresholdMs`
-   *     (default 24h) — old profiles drop their direct addresses.
-   *   - upper bound: `lastSeenMs <= now + skewAllowance` (5min) —
-   *     profiles with a future timestamp (clock skew or malicious)
-   *     also drop their direct addresses. Without this gate a
-   *     negative `now - lastSeenMs` trivially passes the lower
-   *     bound, so dead multiaddrs would stay eligible forever
-   *     (Codex PR #700 round 3).
-   *
-   * When `lastSeenMs` is missing (older agent profile, manual /
-   * partial agents-CG entry without a heartbeat) the multiaddrs are
-   * ignored — unknown freshness is treated as stale to keep the
-   * phonebook conservative (Codex PR #700 round 2).
-   *
-   * `relayAddress` is still tried regardless, because even an old
-   * relay address dialled via a circuit usually still works (the
-   * relay itself is more long-lived than a NATed peer).
-   */
-  findAgentDialAddresses?(
-    peerId: NodeIdentity,
-    opts?: { signal?: AbortSignal },
-  ): Promise<AgentDirectoryDialAddresses | null>;
-}
-
-export interface AgentDirectoryDialAddresses {
-  /** Direct multiaddrs the agent has published via `dkg:multiaddr`. May be empty. */
-  multiaddrs: Address[];
-  /** Relay address (legacy `dkg:relayAddress`), if any. */
-  relayAddress?: Address;
-  /** Epoch ms of the agent's `dkg:lastSeen`. Undefined if the agent didn't publish one. */
-  lastSeenMs?: number;
 }
 
 export interface PeerResolverDeps {
@@ -122,14 +75,6 @@ export interface PeerResolverDeps {
   agentDirectory: AgentDirectoryLookup;
   /** Optional logger; defaults to silent except for serious errors. */
   logger?: PeerResolverLogger;
-  /**
-   * Max age (ms) of an agent's `dkg:lastSeen` before its published
-   * direct multiaddrs are ignored during step-4 resolution. Defaults
-   * to 24h. Only applies to the richer `findAgentDialAddresses` code
-   * path — when present, `relayAddress` is still tried regardless
-   * (relays themselves outlive individual peer NAT bindings).
-   */
-  agentDirectoryStaleThresholdMs?: number;
 }
 
 export interface PeerResolverLogger {
@@ -153,18 +98,6 @@ export interface ResolveOpts {
 }
 
 const DEFAULT_PER_STEP_TIMEOUT_MS = 5_000;
-const DEFAULT_AGENT_DIRECTORY_STALE_THRESHOLD_MS = 24 * 60 * 60 * 1000;
-/**
- * Maximum acceptable clock-skew between this node and an agent
- * publishing its `dkg:lastSeen`. Anything more than this far in the
- * future is treated as malicious / broken and the multiaddrs are
- * dropped. Bounds the round-3 Codex finding where a future timestamp
- * (`Date.now() - futureTs < 0`) would silently pass the
- * "is less-than-or-equal-to threshold" gate and keep dead direct
- * addresses eligible indefinitely. 5 minutes covers reasonable NTP
- * drift between independent hosts without admitting attacks.
- */
-const AGENT_DIRECTORY_CLOCK_SKEW_ALLOWANCE_MS = 5 * 60 * 1000;
 
 const SILENT_LOGGER: PeerResolverLogger = {
   warn: () => undefined,
@@ -175,21 +108,12 @@ export class PeerResolver {
   private readonly registry: NetworkStateRegistry;
   private readonly agentDirectory: AgentDirectoryLookup;
   private readonly logger: PeerResolverLogger;
-  private readonly agentDirectoryStaleThresholdMs: number;
 
   constructor(deps: PeerResolverDeps) {
     this.network = deps.network;
     this.registry = deps.registry;
     this.agentDirectory = deps.agentDirectory;
     this.logger = deps.logger ?? SILENT_LOGGER;
-    const stale = deps.agentDirectoryStaleThresholdMs;
-    this.agentDirectoryStaleThresholdMs =
-      typeof stale === 'number' &&
-      Number.isFinite(stale) &&
-      Number.isInteger(stale) &&
-      stale > 0
-        ? stale
-        : DEFAULT_AGENT_DIRECTORY_STALE_THRESHOLD_MS;
   }
 
   /**
@@ -283,24 +207,9 @@ export class PeerResolver {
         await this.network.addKnownAddresses(peerId, addrs);
         append(addrs);
       } catch (err) {
-        // Codex review of PR #700: a single malformed address (e.g.
-        // a `dkg:multiaddr` literal pulled from an untrusted profile
-        // in step 4) makes the whole batch `multiaddr()` conversion
-        // throw, poisoning every otherwise-valid sibling. Retry
-        // per-address so the bad entry is dropped in isolation.
         this.logger.debug?.(
-          `peerStore batch merge during ${stepLabel} for ${peerId} failed (${errMsg(err)}); retrying per-address`,
+          `peerStore merge during ${stepLabel} for ${peerId} failed: ${errMsg(err)}`,
         );
-        for (const addr of addrs) {
-          try {
-            await this.network.addKnownAddresses(peerId, [addr]);
-            append([addr]);
-          } catch (innerErr) {
-            this.logger.debug?.(
-              `peerStore per-addr merge during ${stepLabel} for ${peerId}/${addr} failed: ${errMsg(innerErr)}`,
-            );
-          }
-        }
       }
     };
 
@@ -340,62 +249,14 @@ export class PeerResolver {
     // Messenger.ensureCircuitRelayAddress path. Pass `opts.signal`
     // through so an in-flight SPARQL query honours the outer deadline
     // (Codex review feedback on PR #496 round 4).
-    //
-    // PR feat/chain-agents-cg-phonebook: prefer the richer
-    // `findAgentDialAddresses` when the directory implementation
-    // supports it — that returns direct multiaddrs + relay + lastSeen
-    // for staleness filtering. Falls back to `findRelayForPeer` for
-    // older directories.
     if (aborted()) return accumulated;
     try {
-      let handledByRicher = false;
-      if (typeof this.agentDirectory.findAgentDialAddresses === 'function') {
-        const dial = await this.agentDirectory.findAgentDialAddresses(peerId, {
-          signal: opts?.signal,
-        });
-        if (dial) {
-          handledByRicher = true;
-          // Codex review of PR #700 round 2: only use direct multiaddrs
-          // when `lastSeenMs` is present AND within the freshness
-          // window. Missing freshness = treat as stale (fall back to
-          // relay only), so a profile without a `dkg:lastSeen`
-          // heartbeat doesn't bypass the stale-data guard.
-          //
-          // Round 3: also require `lastSeenMs <= now + skewAllowance`.
-          // Without the upper bound, a future timestamp (clock skew
-          // OR malicious profile) makes `Date.now() - lastSeenMs`
-          // negative, which trivially passes the lower-bound `<=
-          // threshold` check, so a dead direct multiaddr stays
-          // eligible indefinitely and forces repeated bad dials.
-          const now = Date.now();
-          const ls = dial.lastSeenMs;
-          const isFresh =
-            ls !== undefined &&
-            ls <= now + AGENT_DIRECTORY_CLOCK_SKEW_ALLOWANCE_MS &&
-            now - ls <= this.agentDirectoryStaleThresholdMs;
-          if (isFresh && dial.multiaddrs.length > 0) {
-            await primeAndAppend(dial.multiaddrs, 'agents-CG');
-          }
-          if (dial.relayAddress) {
-            const circuitAddr = `${dial.relayAddress}/p2p-circuit/p2p/${peerId}`;
-            await primeAndAppend([circuitAddr], 'agents-CG');
-          }
-        }
-        // dial === null intentionally falls through to findRelayForPeer:
-        // the interface contract documents that the resolver falls back
-        // to the legacy lookup when the richer one returns null, so a
-        // peer with only a legacy relay entry (e.g. profile pre-dates
-        // the phonebook schema, or operator hasn't restarted onto the
-        // PR yet) still resolves. Codex review of PR #700 caught this.
-      }
-      if (!handledByRicher) {
-        const relay = await this.agentDirectory.findRelayForPeer(peerId, {
-          signal: opts?.signal,
-        });
-        if (relay) {
-          const circuitAddr = `${relay}/p2p-circuit/p2p/${peerId}`;
-          await primeAndAppend([circuitAddr], 'agents-CG');
-        }
+      const relay = await this.agentDirectory.findRelayForPeer(peerId, {
+        signal: opts?.signal,
+      });
+      if (relay) {
+        const circuitAddr = `${relay}/p2p-circuit/p2p/${peerId}`;
+        await primeAndAppend([circuitAddr], 'agents-CG');
       }
     } catch (err) {
       this.logger.debug?.(`agents-CG lookup for ${peerId} failed: ${errMsg(err)}`);

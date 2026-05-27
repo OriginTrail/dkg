@@ -15,6 +15,8 @@ import { ImportFilesModal } from '../../components/Modals/ImportFilesModal.js';
 import { ShareProjectModal } from '../../components/Modals/ShareProjectModal.js';
 import {
   useMemoryEntities,
+  canonicalEntityUri,
+  isFirstClassEntity,
   type TrustLevel, type MemoryEntity, type Triple,
 } from '../../hooks/useMemoryEntities.js';
 import { decodeRdfStringLiteral } from '../../../rdf-literal.js';
@@ -55,8 +57,9 @@ import {
   SOURCE_CONTENT_TYPE, MARKDOWN_FORM, SOURCE_FILE, DKG_SIZE,
   entityAuthorUri, transitionAgentUri, transitionAtISO,
   shortType, shortPred, entityMeta,
-  buildLayerGraphOptions, getDescription, neighborhoodTriples,
+  buildLayerGraphOptions, getDescription, neighborhoodTriples, neutraliseBuiltinNamespaces,
   matchesSearch, humanizeLabel, layerNoun, useLayerTriples,
+  filterTriplesToEntities,
   entityTimestamp, formatRelativeTime, formatTimelineBucket, formatTrailTimestamp,
   type LayerView, type LayerContentTab, type KAPane,
   type SubGraphTab, type SubGraphEntitySort,
@@ -887,6 +890,7 @@ export function LayerGraphPanel({
   title: titleOverride,
   scopeEntities,
   swmAttribution,
+  layerEntities,
 }: {
   layer: 'wm' | 'swm' | 'vm';
   triples: Triple[];
@@ -914,6 +918,17 @@ export function LayerGraphPanel({
    * `EntityDetailView`, tests).
    */
   swmAttribution?: SwmAttributionsResult;
+  /**
+   * Task #25 (PR #677) — the layer's `entityList` (entities whose
+   * canonical layer matches this panel's `layer`). When supplied,
+   * the panel filters object-side resources against entity membership
+   * via `filterTriplesToEntities` so pure-object URIs (vocabulary
+   * constants, `ipfs://` file refs, `did:` identity refs, blank-node
+   * compound-property anchors) don't render as canvas nodes. Omit
+   * (or pass an empty array) to preserve the legacy behaviour where
+   * the panel renders every resource referenced in `triples`.
+   */
+  layerEntities?: ReadonlyArray<MemoryEntity>;
 }) {
   const { title: layerTitle } = LAYER_CONFIG[layer];
   const title = titleOverride ?? layerTitle;
@@ -956,6 +971,27 @@ export function LayerGraphPanel({
   );
   const swmAttr = swmAttribution ?? localSwmAttr;
 
+  // Task #25 (PR #677) — entity-only graph filter, render-path side.
+  // `useLayerTriples` stays the honest source of all layer triples
+  // (triple counts, VM hero stats depend on that). The graph view is
+  // the only surface that wants "@id-entities only" semantics, so the
+  // filter lives here. Callers that don't pass `layerEntities` (older
+  // callsites, tests) keep the legacy behaviour of rendering every
+  // resource referenced in `triples`.
+  //
+  // Codex Ev_St/EwIbh: the filter must run on the BASE layer triples
+  // BEFORE `decorationTriples` are merged in. VM provenance overlay
+  // triples (`urn:dkg:viz:anchor:*`, `urn:dkg:viz:agent:*`) are
+  // synthetic, never present in `layerEntities`, and must always
+  // render. Filtering after the merge would strip the entire trust
+  // halo from published Knowledge Assets.
+  const filteredBaseTriples = useMemo(() => {
+    if (!layerEntities || layerEntities.length === 0) return triples;
+    const entityUris = new Set<string>();
+    for (const e of layerEntities) entityUris.add(canonicalEntityUri(e.uri));
+    return filterTriplesToEntities(triples, entityUris);
+  }, [triples, layerEntities]);
+
   const uniqueTriples = useMemo(() => {
     const seen = new Set<string>();
     const out: Triple[] = [];
@@ -965,12 +1001,17 @@ export function LayerGraphPanel({
       seen.add(key);
       out.push({ subject: t.subject, predicate: t.predicate, object: t.object } as Triple);
     };
-    for (const t of triples) push(t);
+    for (const t of filteredBaseTriples) push(t);
     // Decoration triples are only produced for VM; for other layers the
-    // hook returns an empty array so this loop is a no-op.
+    // hook returns an empty array so this loop is a no-op. They
+    // intentionally bypass `filterTriplesToEntities` — synthetic viz
+    // nodes aren't in `entityList` by design and must always show as
+    // the trust halo around published KAs.
     for (const t of decorationTriples) push(t);
     return out;
-  }, [triples, decorationTriples]);
+  }, [filteredBaseTriples, decorationTriples]);
+
+  const renderTriples = uniqueTriples;
 
   // Only SWM layer uses per-URI node tints — for the rest, classColors rules
   // so code graphs stay legible (Package purple / File blue / etc).
@@ -979,8 +1020,8 @@ export function LayerGraphPanel({
     [layer, swmAttr.nodeColors],
   );
   const { canvasTriples, singletonItems } = useMemo(
-    () => splitGraphTriplesForShelf(uniqueTriples),
-    [uniqueTriples],
+    () => splitGraphTriplesForShelf(renderTriples),
+    [renderTriples],
   );
 
   // Union `singletonItems` (URIs that are *subjects* of triples but have
@@ -1865,6 +1906,7 @@ export function LayerContent({
             onNodeClick={onNodeClick}
             contextGraphId={contextGraphId}
             swmAttribution={layer === 'swm' ? swmAttribution : undefined}
+            layerEntities={entities}
           />
         </div>
       )}
@@ -3167,19 +3209,54 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
     [entity.uri, allTriples]
   );
 
-  const graphOptions = useMemo(() => ({
-    labelMode: 'humanized' as const,
-    renderer: '2d' as const,
-    labels: memoryGraphLabels({ minZoomForLabels: 0.2 }),
-    style: {
-      defaultNodeColor: TRUST_COLORS[entity.trustLevel],
-      defaultEdgeColor: '#475569',
-      edgeWidth: 1.0,
-      fontSize: 11,
-    },
-    hexagon: { baseSize: 7, minSize: 4, maxSize: 10, scaleWithDegree: true },
-    focus: { maxNodes: 500, hops: 999 },
-  }), [entity.trustLevel]);
+  // Task #25 (PR #677) — entity-only filter for the entity-detail
+  // graph. Mirrors the rule the Entities tab uses via the shared
+  // `isFirstClassEntity` predicate exported from `useMemoryEntities`
+  // (single source of truth for the membership rule). `allEntities`
+  // includes synthesised stubs for pure-object URIs (vocab constants,
+  // IPFS refs, DID property values), so we filter to the real entity
+  // set before passing it to the graph filter. The focal entity is
+  // passed via the helper's `focalSubjects` allowlist so it survives
+  // the gate even when the layer's entityList wouldn't otherwise
+  // include it — keeps the focal node and its `initialFocus`
+  // highlight in sync.
+  //
+  // The set rebuild is intentionally split from the filter call so
+  // navigating between KAs (which changes `entity.uri`/`hoodTriples`
+  // but not `allEntities`) doesn't re-iterate the entity map.
+  const renderHoodEntityUris = useMemo(() => {
+    const set = new Set<string>();
+    for (const e of allEntities.values()) {
+      if (isFirstClassEntity(e)) set.add(canonicalEntityUri(e.uri));
+    }
+    return set;
+  }, [allEntities]);
+  const focalSubjects = useMemo(
+    () => new Set<string>([canonicalEntityUri(entity.uri)]),
+    [entity.uri],
+  );
+  const renderHoodTriples = useMemo(
+    () => filterTriplesToEntities(hoodTriples, renderHoodEntityUris, { focalSubjects }),
+    [hoodTriples, renderHoodEntityUris, focalSubjects],
+  );
+
+  const graphOptions = useMemo(() => {
+    const focalColor = TRUST_COLORS[entity.trustLevel];
+    return {
+      labelMode: 'humanized' as const,
+      renderer: '2d' as const,
+      labels: memoryGraphLabels({ minZoomForLabels: 0.2 }),
+      style: {
+        namespaceColors: neutraliseBuiltinNamespaces(focalColor),
+        defaultNodeColor: focalColor,
+        defaultEdgeColor: '#475569',
+        edgeWidth: 1.0,
+        fontSize: 11,
+      },
+      hexagon: { baseSize: 7, minSize: 4, maxSize: 10, scaleWithDegree: true },
+      focus: { maxNodes: 500, hops: 999 },
+    };
+  }, [entity.trustLevel]);
 
   // ViewConfig makes the opened entity visually focal (bigger hexagon)
   // and drives the `<CenterOnEntity>` child to pan the camera to it
@@ -3333,11 +3410,11 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
               tone={layerBadge}
               className="v10-ka-graph-shell"
               renderGraph={(expanded) => (
-                hoodTriples.length > 0 ? (
+                renderHoodTriples.length > 0 ? (
                   <Suspense fallback={<span className="v10-graph-placeholder">Loading graph...</span>}>
                     <RdfGraph
                       key={`${entity.uri}:${expanded ? 'expanded' : 'inline'}`}
-                      data={hoodTriples}
+                      data={renderHoodTriples}
                       format="triples"
                       options={graphOptions}
                       viewConfig={entityViewConfig}
@@ -3587,6 +3664,25 @@ export function SubGraphOverviewGrid({
     return out;
   }, [memory.entityList]);
 
+  // Task #25 (PR #677) — entity-only filter for the mini-card
+  // thumbnails. Same rule the Entities tab uses; computed per card
+  // scoped to that card's sub-graph (Codex Ev_S2): an entity that's
+  // first-class in sub-graph B but only a value/provenance object in
+  // sub-graph A must not render on A's thumbnail. Per-sub-graph scope
+  // = `memory.entityList.filter(e => e.subGraphs.has(sg.name))`.
+  const entityUrisBySubGraph = useMemo(() => {
+    const out = new Map<string, Set<string>>();
+    for (const e of memory.entityList) {
+      const canonical = canonicalEntityUri(e.uri);
+      for (const sg of e.subGraphs) {
+        let s = out.get(sg);
+        if (!s) { s = new Set(); out.set(sg, s); }
+        s.add(canonical);
+      }
+    }
+    return out;
+  }, [memory.entityList]);
+
   // Merge registered sub-graphs (minus `meta`) with profile bindings so
   // icon/color/label/rank all flow from the single source of truth.
   const cards = useMemo(() => {
@@ -3594,6 +3690,8 @@ export function SubGraphOverviewGrid({
       .filter(sg => sg.name !== 'meta')
       .map(sg => {
         const binding = profile?.forSubGraph(sg.name) ?? {};
+        const rawTriples = triplesBySubGraph.get(sg.name) ?? [];
+        const cardEntityUris = entityUrisBySubGraph.get(sg.name) ?? new Set<string>();
         return {
           slug: sg.name,
           icon: binding.icon ?? '•',
@@ -3601,14 +3699,21 @@ export function SubGraphOverviewGrid({
           displayName: binding.displayName ?? sg.name,
           description: binding.description,
           rank: binding.rank ?? 99,
-          entityCount: sg.entityCount,
+          // Use the client-canonicalised entity set size (the same one we
+          // use for the filter and that the Entities tab renders) so the
+          // mini-card count matches the detail page. The server-reported
+          // `sg.entityCount` is a liberal COUNT(DISTINCT ?s) per named
+          // graph and can include subjects that fail our entityList
+          // membership rule. Fall back to the server count if we have no
+          // client set for this sub-graph (e.g. nothing yet hydrated).
+          entityCount: cardEntityUris.size > 0 ? cardEntityUris.size : sg.entityCount,
           tripleCount: sg.tripleCount,
-          triples: triplesBySubGraph.get(sg.name) ?? [],
+          triples: filterTriplesToEntities(rawTriples, cardEntityUris),
           layerCounts: layerCountsBySubGraph.get(sg.name) ?? { wm: 0, swm: 0, vm: 0 },
         };
       })
       .sort((a, b) => a.rank - b.rank);
-  }, [subGraphs, profile, triplesBySubGraph, layerCountsBySubGraph]);
+  }, [subGraphs, profile, triplesBySubGraph, layerCountsBySubGraph, entityUrisBySubGraph]);
 
   if (loading && cards.length === 0) {
     return (
@@ -3677,6 +3782,7 @@ export function SubGraphMiniCard({
     style: {
       classColors: CODE_CLASS_COLORS,
       predicateColors: CODE_PREDICATE_COLORS,
+      namespaceColors: neutraliseBuiltinNamespaces(card.color),
       defaultNodeColor: card.color,
       defaultEdgeColor: '#475569',
       edgeWidth: 1.0,
@@ -4437,6 +4543,7 @@ export function SubGraphDetailView({
               scopeLabel={`Subgraph graph: ${title} entities and entity-to-entity triples from loaded subgraph data.`}
               trustLegendActiveLayer={singleLayer}
               scopeEntities={graphPanelScopeEntities}
+              layerEntities={graphPanelEntities}
             />
           </div>
         )}

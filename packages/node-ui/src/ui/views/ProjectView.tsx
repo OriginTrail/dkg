@@ -13,6 +13,7 @@ import { useProjectProfile, ProjectProfileContext } from '../hooks/useProjectPro
 import { useAgents, AgentsContext } from '../hooks/useAgents.js';
 import { useCurrentAgent } from '../hooks/useCurrentAgent.js';
 import { useSwmAttributions } from '../hooks/useSwmAttributions.js';
+import { useAssertionLifecycleEvents } from '../hooks/useAssertionLifecycleEvents.js';
 import { ActivityFeed } from '../components/ActivityFeed.js';
 import { SubGraphBar } from '../components/SubGraphBar.js';
 import { CONTEXT_GRAPH_PRIMER_TAB } from '../lib/contextGraphPrimer.js';
@@ -233,41 +234,55 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   );
 
   const rawMemory = useMemoryEntities(contextGraphId);
-  // N6 part 2 — feed promotion (WM→SWM) events into the Overview
-  // ActivityFeed. `useSwmAttributions` is the existing source for the
-  // SWM graph's agent-tint legend; we re-use its `attributions` map
-  // here rather than re-querying `_shared_memory_meta`. Hook is
-  // already in production for the SWM Graph subtab so it's cached.
-  //
-  // Local-3 (PR #656) — gate the hoist on a view that actually
-  // consumes the result. Pre-fix the page-level call fired
-  // unconditionally for every active view (graph-overview, query,
-  // WM/VM detail, sub-graph pages — none of which read it), running
-  // a 5000-row SPARQL for nothing. Active consumers today are
-  // (a) the Overview activity feed and (b) the SWM-tab layer graph.
-  // The hook already short-circuits cleanly on `undefined` (state
-  // resets, no fetch).
-  //
-  // R2-Local-1 (PR #656) — do NOT gate on `selectedUri`. Opening
-  // an entity detail overlays the same view; toggling `undefined`
-  // here would clear the hook's cached events, then on detail-close
-  // re-fetch the 5000-row SPARQL — during the re-fetch the Code7
-  // discriminator (`resultContextGraphId !== contextGraphId`) would
-  // suppress `overviewSwmEvents`, making promotion rows visibly
-  // flicker out on every detail round-trip. Sub-graph navigation is
-  // a real route change so we still gate on `!activeSubGraph`.
+  // SWM attribution drives the SWM graph's agent-tint legend (its
+  // sole remaining consumer). PR #694 review — the Overview no
+  // longer reads this stream (lifecycle source replaced it), so the
+  // gate is `'swm'`-only now (see `shouldFetchSwmAttribution`); the
+  // 5k-row SPARQL no longer fires on Overview renders.
   const swmAttributionNeeded = shouldFetchSwmAttribution({ activeLayer, activeSubGraph });
   const swmAttributionsResult = useSwmAttributions(swmAttributionNeeded ? contextGraphId : undefined);
-  // Codex Code7 (PR #656) — the hook returns its previous-graph
-  // result during the transition window between context-graph switch
-  // and the new SPARQL resolving. Gate `events` on the result being
-  // for the *current* graph so the Overview doesn't briefly show
-  // promotion rows from the previous project. The SWM graph itself
-  // tolerates the momentary stale tint (it re-renders cleanly once
-  // the new attribution lands), so we don't gate there.
-  const overviewSwmEvents = swmAttributionsResult.resultContextGraphId === contextGraphId
-    ? swmAttributionsResult.events
+
+  // N6 polish (task #23) — bundle-keyed lifecycle events feed the
+  // Overview activity feed. Gated to Overview only (PR #694 Comment
+  // 20 — we don't fire the 5k-row SPARQL on WM/SWM/VM/Query tabs
+  // where nothing consumes it). The hook now PRESERVES its last
+  // successful result when the gate flips off (PR #694 Comment 16),
+  // so returning to Overview shows the cached events immediately
+  // while a background refresh runs — no empty-feed flicker. SWM
+  // graph attribution coloring stays on `useSwmAttributions`
+  // (separate source of truth for the legend).
+  const overviewIsActive = !activeSubGraph && activeLayer === 'overview';
+  const lifecycleEventsResult = useAssertionLifecycleEvents(
+    overviewIsActive ? contextGraphId : undefined,
+  );
+  // PR #694 review fix (Comment 6) — when the Overview is the
+  // active consumer, pass `[]` during the transition window (cold
+  // load, project switch, or post-leave-and-return) instead of
+  // `undefined`. The joiner contract is presence-keyed: `[]` opts
+  // INTO the lifecycle source (legacy `dcterms:created`-derived
+  // `'added'` rows are suppressed); `undefined` falls back to the
+  // legacy path. Passing `undefined` mid-transition let legacy
+  // rows render briefly before the fetch resolved, then flipped
+  // to lifecycle rows — exactly the shape-change Comment 4 was
+  // meant to prevent. Empty briefly is better than wrong-shape
+  // briefly. Off-Overview we still pass `undefined` so other
+  // callers (none today; future surfaces) get the legacy path.
+  const overviewLifecycleEvents = overviewIsActive
+    ? (lifecycleEventsResult.resultContextGraphId === contextGraphId
+        ? lifecycleEventsResult.events
+        : [])
     : undefined;
+  // PR #694 Comment 8 — plumb the lifecycle error so the feed can
+  // distinguish "loaded with zero rows" from "the query failed".
+  // After the Comment 3 fix, `resultContextGraphId` advances in
+  // both success and catch paths, so consumers can't infer failure
+  // from the events array alone. Only surface the error to the
+  // Overview consumer; off-Overview the prop stays undefined so
+  // legacy callers don't grow an error pathway they don't use.
+  const overviewLifecycleError = overviewIsActive
+    && lifecycleEventsResult.resultContextGraphId === contextGraphId
+    ? lifecycleEventsResult.error
+    : null;
 
   const refreshParticipants = useCallback(() => {
     const targetId = cg?.id;
@@ -499,12 +514,13 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
           )}
           <ActivityFeed
             entities={rawMemory.entityList}
-            swmEvents={overviewSwmEvents}
+            lifecycleEvents={overviewLifecycleEvents}
+            lifecycleError={overviewLifecycleError}
             onSelectEntity={handleOverviewActivityNavigate}
             title="Recent activity"
             limit={40}
             includeUndated={false}
-            emptyHint="Once you import knowledge or agents start proposing decisions or tasks they'll show up here as a live feed."
+            emptyHint="Once knowledge starts being added and managed in this context graph, activities will show up here as a live feed."
             className="v10-overview-activity"
           />
         </>

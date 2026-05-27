@@ -1,9 +1,5 @@
 import type { Quad } from '@origintrail-official/dkg-storage';
-import {
-  DKG_ONTOLOGY,
-  SYSTEM_CONTEXT_GRAPHS,
-  isPublicLikeAddress,
-} from '@origintrail-official/dkg-core';
+import { DKG_ONTOLOGY, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 
 /**
  * Canonicalise the DID subject for an agent.
@@ -26,50 +22,6 @@ export function canonicalAgentDidSubject(raw: string): string {
     return raw.toLowerCase();
   }
   return raw;
-}
-
-/**
- * Filter a node's live libp2p multiaddrs down to the set worth
- * publishing in the agent profile.
- *
- * Reuses the shared `isPublicLikeAddress` classifier from `dkg-core`
- * (the same one `share-project-modal.test.ts` and the daemon's
- * "node is remotely-dialable" check pin to). That classifier rejects:
- *   - loopback (127.0.0.0/8, ::1)
- *   - unspecified bind (0.0.0.0, ::)
- *   - link-local (169.254.0.0/16, fe80::/10)
- *   - RFC1918 (10/8, 172.16/12, 192.168/16)
- *   - CGNAT (100.64/10)
- *   - multicast / reserved (224.0.0.0+)
- *   - IPv6 ULA (fc00::/7) and multicast (ff00::/8)
- *   - `/dns4/` / `/dns6/` / `/dnsaddr/` hostnames that resolve to
- *     localhost-y / `.local` / etc.
- *
- * The classifier evaluates the LEADING address segment, which is
- * exactly what we want for `/p2p-circuit` entries — those are encoded
- * as `/ip4/<relay-ip>/.../p2p-circuit/p2p/<peer-id>` and only the
- * public-relay form should be advertised.
- *
- * Codex review of PR #700 round 2 flagged that the round-1 regex
- * filter still leaked RFC1918 / CGNAT / ULA into the agent profile, so
- * peers learnt self-referential or private multiaddrs from the
- * phonebook and wasted dial attempts before falling back to the relay.
- *
- * Exported separately so it can be unit-tested without standing up a
- * full agent.
- */
-export function collectPublishableMultiaddrs(
-  raw: readonly string[],
-): string[] {
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const ma of raw) {
-    if (!ma || seen.has(ma)) continue;
-    if (!isPublicLikeAddress(ma)) continue;
-    seen.add(ma);
-    out.push(ma);
-  }
-  return out;
 }
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
@@ -110,28 +62,6 @@ export interface AgentProfileConfig {
   publicKey?: string;
   relayAddress?: string;
   agentAddress?: string;
-  /**
-   * Live libp2p multiaddrs other peers should use to dial this node.
-   * Should be the publicly-reachable / circuit-relayed forms (filtered
-   * to exclude loopback + link-local). Empty/undefined leaves the
-   * `dkg:multiaddr` triples unset — older agents may publish profiles
-   * without these and the discovery path falls back to
-   * `dkg:relayAddress` alone.
-   *
-   * Caller is responsible for filtering; this function emits whatever
-   * it receives. See `DKGAgent.publishProfile` for the production
-   * filter (drops loopback / link-local / unspecified).
-   */
-  multiaddrs?: readonly string[];
-  /**
-   * ISO-8601 timestamp of when this profile was generated. Consumers
-   * use this as a freshness signal: profiles older than the
-   * application's staleness threshold (typically 24h) are skipped
-   * during dial fallback so we don't try addresses from a node that
-   * has been offline for days. Defaults to `new Date().toISOString()`
-   * when omitted.
-   */
-  lastSeen?: string;
   /**
    * Every workspace encryption key registered to this agent, including retired
    * ones (so the registry can publish their wallet-signed revocations and
@@ -203,25 +133,6 @@ export function buildAgentProfile(config: AgentProfileConfig): {
   if (config.agentAddress) {
     q(entity, `${DKG}agentAddress`, `"${canonicalAgentDidSubject(config.agentAddress)}"`);
   }
-  // Distributed phonebook (PR feat/chain-agents-cg-phonebook).
-  // Note: properties `dkg:multiaddr` and `dkg:lastSeen` are emitted on
-  // the agent entity without a matching genesis ontology declaration.
-  // Adding them to genesis would change the hashed `networkId`
-  // (`computeNetworkId` hashes all genesis quads), breaking any node
-  // still on rc.11. RDF doesn't require properties to be declared —
-  // they're usable as-is. Ontology declarations can land in a
-  // coordinated genesis bump later.
-  if (config.multiaddrs && config.multiaddrs.length > 0) {
-    for (const ma of config.multiaddrs) {
-      // Defensive: skip entries containing a `"` which would break
-      // the N-Quad literal encoding. Real libp2p multiaddrs never
-      // contain quote characters; this guard is purely against
-      // malformed callers.
-      if (!ma || ma.includes('"')) continue;
-      q(entity, `${DKG}multiaddr`, `"${ma}"`);
-    }
-  }
-  q(entity, `${DKG}lastSeen`, `"${config.lastSeen ?? new Date().toISOString()}"`);
   // Encryption keys: prefer the multi-key array; fall back to the deprecated
   // singular fields only when the array isn't supplied (legacy callers /
   // test fixtures). Retired keys still get published so peers learn their

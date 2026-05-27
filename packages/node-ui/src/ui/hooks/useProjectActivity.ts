@@ -37,6 +37,7 @@
  */
 import { useMemo } from 'react';
 import { canonicalEntityUri, uriTail, type MemoryEntity, type TrustLevel } from './useMemoryEntities.js';
+import type { AssertionLifecycleEvent } from './useAssertionLifecycleEvents.js';
 
 // Priority order — first predicate that has a parseable value wins.
 const TIMESTAMP_PREDICATES = [
@@ -85,6 +86,14 @@ export interface ActivityItem {
    * reconcile the wrong row on updates. Renderers MUST key off `id`.
    */
   id: string;
+  /**
+   * N6 polish — number of root entities included in a promoted
+   * assertion bundle. Sourced from `dkg:rootEntity` triples emitted
+   * by `generateAssertionPromotedMetadata`. Undefined for non-
+   * lifecycle rows and for created rows (the creator metadata does
+   * not emit `dkg:rootEntity`).
+   */
+  entityCount?: number;
   entity: MemoryEntity;
   /**
    * Primary activity timestamp — `null` means the entity is relevant
@@ -204,20 +213,47 @@ export interface UseProjectActivityOptions {
    * project-home "recent" feed where we strictly want temporal data.
    */
   includeUndated?: boolean;
+  /**
+   * Skip rows whose `event` is in this set during the row loop —
+   * BEFORE sort+slice. The joiner sets this to `['added']` when the
+   * lifecycle source is supplying its own bundle-level created rows,
+   * so a flood of imports doesn't push older typed Decision/Task/PR
+   * rows out of the `limit` window before the joiner gets to suppress
+   * the imports (PR #694 Comment 14 — silent data loss).
+   */
+  excludeEvents?: ReadonlyArray<ActivityEvent>;
+}
+
+/**
+ * Base hook return shape — `items` plus an explicit `hasMore` signal
+ * so the joiner (and indirectly the ActivityFeed saturation badge)
+ * can render an honest "more than `limit` rows existed" indicator on
+ * non-lifecycle paths too (PR #694 Comment 15). `hasMore` is computed
+ * from the post-filter, pre-slice count — surfaces overflow even
+ * when `excludeEvents` was active.
+ */
+export interface ProjectActivityResult {
+  items: ActivityItem[];
+  hasMore: boolean;
 }
 
 export function useProjectActivity(
   entityList: MemoryEntity[],
   opts: UseProjectActivityOptions = {},
-): ActivityItem[] {
+): ProjectActivityResult {
   const {
     limit = 200,
     agentUri,
     typeIri,
     subGraph,
     includeUndated = true,
+    excludeEvents,
   } = opts;
+  const excludeKey = excludeEvents ? [...excludeEvents].sort().join(',') : '';
   return useMemo(() => {
+    const excludeSet = excludeEvents && excludeEvents.length > 0
+      ? new Set<ActivityEvent>(excludeEvents)
+      : null;
     const out: ActivityItem[] = [];
     for (const e of entityList) {
       const kindUri = primaryActivityType(e);
@@ -241,6 +277,7 @@ export function useProjectActivity(
       const sg = primarySubGraph(e);
       if (subGraph && sg !== subGraph) continue;
       const event: ActivityEvent = kindUri ? 'typed' : 'added';
+      if (excludeSet && excludeSet.has(event)) continue;
       // Per-event id (Code1) — typed/added rows have at most one of
       // each event-kind per entity, so `${event}|${uri}|${atIso}` is
       // stable across re-renders even if the same URI later gains a
@@ -269,8 +306,8 @@ export function useProjectActivity(
       if (!a.at && b.at) return 1;
       return a.entity.label.localeCompare(b.entity.label);
     });
-    return out.slice(0, limit);
-  }, [entityList, limit, agentUri, typeIri, subGraph, includeUndated]);
+    return { items: out.slice(0, limit), hasMore: out.length > limit };
+  }, [entityList, limit, agentUri, typeIri, subGraph, includeUndated, excludeKey]);
 }
 
 /** Bucket items into "Today / Yesterday / Earlier this week / <month>" groups. */
@@ -486,15 +523,129 @@ function syntheticEntityStub(uri: string): MemoryEntity {
   };
 }
 
-export interface UseProjectActivityEventsOptions extends UseProjectActivityOptions {
+// N6 polish (task #23) — bundle-keyed activity rows sourced from
+// `dkg:AssertionCreated` / `dkg:AssertionPromoted` events
+// (`useAssertionLifecycleEvents`). One row per event (a single
+// promote action with N root entities renders as ONE row, not N),
+// agent-DID-keyed for clean attribution (no `12D3…` peer ids in
+// the author column).
+//
+// Rows are intentionally non-interactive in this PR: clicking lands
+// on an assertion-detail view that S4 will introduce; until then
+// surfacing the entity-detail click would resolve to nothing useful.
+// Renderer reads `clickable: false` and emits a static row.
+export interface BuildLifecycleActivityRowsOptions {
+  agentUri?: string;
+  subGraph?: string;
+  limit?: number;
+}
+
+export function buildLifecycleActivityRows(
+  events: ReadonlyArray<AssertionLifecycleEvent>,
+  opts: BuildLifecycleActivityRowsOptions = {},
+): ActivityItem[] {
+  const { agentUri, subGraph, limit = 200 } = opts;
+  const out: ActivityItem[] = [];
+  for (const evt of events) {
+    if (agentUri && evt.agentUri !== agentUri) continue;
+    if (subGraph && evt.subGraph !== subGraph) continue;
+    const at = parseDateLike(evt.publishedAt);
+    if (!at) continue;
+    const event: ActivityEvent = evt.kind === 'promoted' ? 'promoted' : 'added';
+    const layer: TrustLevel = evt.kind === 'promoted' ? 'shared' : 'working';
+    // The assertion bundle URI is the "subject" the row is about.
+    // We carry it as the entity URI so React keys + tooltip share a
+    // stable identity even before S4's assertion-detail view exists.
+    const canonicalAssertion = canonicalEntityUri(evt.assertionUri);
+    out.push({
+      id: buildActivityId(event, evt.eventUri, at, canonicalAssertion),
+      entity: {
+        uri: canonicalAssertion,
+        label: evt.assertionName || uriTail(canonicalAssertion),
+        types: [],
+        trustLevel: layer,
+        layers: new Set([layer]),
+        subGraphs: evt.subGraph ? new Set([evt.subGraph]) : new Set(),
+        properties: new Map(),
+        connections: [],
+      },
+      at,
+      authorUri: evt.agentUri,
+      kindUri: null,
+      subGraph: evt.subGraph ?? null,
+      layer,
+      event,
+      // Per-bundle root count from `dkg:AssertionPromoted`; undefined
+      // for created rows (creator metadata doesn't emit `dkg:rootEntity`).
+      entityCount: evt.entityCount,
+      // Pre-S4: no assertion-detail surface yet. Rows render as
+      // static text instead of navigating to a `selectedEntity` that
+      // ProjectView would immediately clear (same shape as Code3
+      // stub-row handling on PR #656).
+      clickable: false,
+    });
+  }
+  out.sort((a, b) => {
+    if (a.at && b.at) return b.at.getTime() - a.at.getTime();
+    if (a.at && !b.at) return -1;
+    if (!a.at && b.at) return 1;
+    return a.entity.label.localeCompare(b.entity.label);
+  });
+  return out.slice(0, limit);
+}
+
+// PR #694 Comment 17 — `excludeEvents` is base-only. The joiner
+// applies it internally for the Comment 14 fix (push `'added'`
+// suppression down into base when lifecycle is the source) but
+// doesn't filter `promotions` against it, so exposing it on the
+// joiner's public option type would create a "filters base but not
+// joined rows" inconsistency. Omit it from the joiner-facing
+// options; callers who need a real cross-source filter should
+// surface a follow-up.
+export interface UseProjectActivityEventsOptions extends Omit<UseProjectActivityOptions, 'excludeEvents'> {
   /**
    * Raw per-operation event log from `useSwmAttributions.events`.
    * When omitted (or empty) the joiner reduces to plain
    * `useProjectActivity(entities, opts)`. Code2 (PR #656) — we now
    * consume the raw event list, not the deduped attribution map, so
    * re-promotions surface as distinct rows.
+   *
+   * N6 polish (task #23) — superseded by `lifecycleEvents` on the
+   * Overview feed (which prefers the agent-DID-keyed lifecycle
+   * source). Kept on the option for AgentProfileView and other
+   * legacy callers that still want the peer-id-keyed SWM stream.
+   * When BOTH are supplied, `lifecycleEvents` wins for created+promoted
+   * rows and `swmEvents`-derived promotion rows are dropped so we
+   * don't render the same WM→SWM transition twice.
    */
   swmEvents?: ReadonlyArray<PromotionAttribution>;
+  /**
+   * N6 polish (task #23) — bundle-keyed lifecycle events from
+   * `useAssertionLifecycleEvents`. One row per `dkg:AssertionCreated`
+   * / `dkg:AssertionPromoted` event, with the per-bundle root-entity
+   * count surfaced inline so a single promote of N entities reads as
+   * ONE row. Agent attribution is DID-keyed (no `12D3…` peer ids).
+   * When supplied, this is the source of `'added'` (from created)
+   * and `'promoted'` rows on the feed; the legacy entity-list
+   * `dcterms:created` and `swmEvents` promotion rows are suppressed
+   * to avoid double-counting the same transition.
+   */
+  lifecycleEvents?: ReadonlyArray<AssertionLifecycleEvent>;
+}
+
+/**
+ * Joiner hook return shape — `items` plus the explicit `hasMore`
+ * signal so consumers can render an honest "saturated" indicator
+ * (e.g. ActivityFeed's title badge `${limit}+`). PR #694 Comment 13
+ * — the previous `items.length >= effectiveLimit` heuristic
+ * overstated at the boundary (a project with exactly `limit` rows
+ * would render `${limit}+` even though no rows were dropped).
+ * `hasMore` is computed pre-slice in the joiner, so callers don't
+ * have to guess.
+ */
+export interface ProjectActivityEventsResult {
+  items: ActivityItem[];
+  hasMore: boolean;
 }
 
 /**
@@ -502,39 +653,73 @@ export interface UseProjectActivityEventsOptions extends UseProjectActivityOptio
  * Existing callers (AgentProfileView) keep using `useProjectActivity`
  * directly when they don't want promotion rows polluting a per-agent
  * typed-activity slice. The Overview "Recent activity" feed swaps to
- * this one and feeds in the live `useSwmAttributions().events` result.
+ * this one and feeds in the live `useAssertionLifecycleEvents().events`
+ * result (preferred) or `useSwmAttributions().events` (legacy).
  */
 export function useProjectActivityEvents(
   entityList: MemoryEntity[],
   opts: UseProjectActivityEventsOptions = {},
-): ActivityItem[] {
-  const { swmEvents, ...baseOpts } = opts;
-  const base = useProjectActivity(entityList, baseOpts);
+): ProjectActivityEventsResult {
+  const { swmEvents, lifecycleEvents, ...baseOpts } = opts;
+  // PR #694 Comment 14 — push the `'added'` suppression DOWN into base
+  // when lifecycle is supplied. Filtering at source means base's slice
+  // operates on the post-filter set, so typed Decision/Task/PR rows
+  // can't be silently dropped by a flood of imports ranking above them.
+  const useLifecycle = lifecycleEvents != null;
+  // `excludeEvents` isn't on `UseProjectActivityEventsOptions` (Comment
+  // 17 — base-only), so callers can't pass it through; we set it here
+  // for the Comment 14 fix (push `'added'` suppression into base when
+  // lifecycle is the source).
+  const baseExcludeEvents = useLifecycle ? ['added' as const] : undefined;
+  const baseResult = useProjectActivity(entityList, { ...baseOpts, excludeEvents: baseExcludeEvents });
   return useMemo(() => {
+    const cap = baseOpts.limit ?? 200;
     // typeIri pins the feed to a typed-activity kind (Decision/Task/
     // PR/etc.) — promotion rows have no `kindUri` so they're dropped
     // wholesale, matching how the same filter drops `'added'` rows.
-    if (opts.typeIri) return base;
-    if (!swmEvents || swmEvents.length === 0) return base;
-    const entitiesByUri = new Map<string, MemoryEntity>();
-    for (const e of entityList) entitiesByUri.set(e.uri, e);
-    const promotions = buildPromotionEvents(swmEvents, {
-      entitiesByUri,
-      agentUri: baseOpts.agentUri,
-      subGraph: baseOpts.subGraph,
-      // No per-stream limit — apply the combined cap below.
-      limit: Number.POSITIVE_INFINITY,
-    });
-    const merged = [...base, ...promotions];
+    // PR #694 Comment 15 — `hasMore` from base is now honest (computed
+    // from the post-filter, pre-slice count) so we can propagate it
+    // instead of hard-coding `false`.
+    if (opts.typeIri) return { items: baseResult.items, hasMore: baseResult.hasMore };
+    if (!useLifecycle && (!swmEvents || swmEvents.length === 0)) {
+      // Legacy path (no lifecycle, no SWM) — base is the only source;
+      // its `hasMore` is the honest signal.
+      return { items: baseResult.items, hasMore: baseResult.hasMore };
+    }
+
+    let promotions: ActivityItem[];
+    if (useLifecycle) {
+      promotions = buildLifecycleActivityRows(lifecycleEvents!, {
+        agentUri: baseOpts.agentUri,
+        subGraph: baseOpts.subGraph,
+        limit: Number.POSITIVE_INFINITY,
+      });
+    } else {
+      const entitiesByUri = new Map<string, MemoryEntity>();
+      for (const e of entityList) entitiesByUri.set(e.uri, e);
+      promotions = buildPromotionEvents(swmEvents!, {
+        entitiesByUri,
+        agentUri: baseOpts.agentUri,
+        subGraph: baseOpts.subGraph,
+        // No per-stream limit — apply the combined cap below.
+        limit: Number.POSITIVE_INFINITY,
+      });
+    }
+
+    const merged = [...baseResult.items, ...promotions];
     merged.sort((a, b) => {
       if (a.at && b.at) return b.at.getTime() - a.at.getTime();
       if (a.at && !b.at) return -1;
       if (!a.at && b.at) return 1;
       return a.entity.label.localeCompare(b.entity.label);
     });
-    const cap = baseOpts.limit ?? 200;
-    return merged.slice(0, cap);
-  }, [base, swmEvents, entityList, baseOpts.agentUri, baseOpts.subGraph, baseOpts.limit, opts.typeIri]);
+    // Combined overflow: either base overflowed its own cap (some
+    // typed/added rows didn't fit) OR the merge with promotions
+    // overflowed (cap is shared across all streams). Either means
+    // there's more activity than the badge total represents.
+    const hasMore = baseResult.hasMore || merged.length > cap;
+    return { items: merged.slice(0, cap), hasMore };
+  }, [baseResult, swmEvents, lifecycleEvents, useLifecycle, entityList, baseOpts.agentUri, baseOpts.subGraph, baseOpts.limit, opts.typeIri]);
 }
 
 /** "2h ago" / "3d ago" / "Apr 18" — compact relative-time label. */

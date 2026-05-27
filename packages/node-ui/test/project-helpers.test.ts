@@ -1,19 +1,25 @@
 import { describe, expect, it } from 'vitest';
 import { shouldFetchSwmAttribution } from '../src/ui/views/project/helpers.js';
 
-// R2-Local-1 (PR #656) — pins the predicate that ProjectView uses to
-// decide whether to feed `useSwmAttributions` a real `contextGraphId`
-// or `undefined`. Critical that opening an entity detail does NOT
-// flip the predicate to `false` — the hook would clear its cached
-// events and force a 5000-row re-fetch on detail-close, making the
-// Overview activity feed visibly flicker.
+// Pins the predicate that ProjectView uses to decide whether to feed
+// `useSwmAttributions` a real `contextGraphId` or `undefined`.
+//
+// PR #694 review fix — the Overview is no longer a consumer (the
+// activity feed switched to `useAssertionLifecycleEvents` for the
+// agent-DID-keyed bundle stream). Only the SWM-layer graph reads
+// this hook now; the gate tightened to `'swm'`-only so the 5k-row
+// SPARQL doesn't fire on Overview renders and throw the result away.
+//
+// Still no `selectedUri` arg: opening an entity detail on the SWM
+// tab must keep the gate true so the hook's cached events survive
+// the detail round-trip (R2-Local-1 flicker concern, PR #656).
 describe('shouldFetchSwmAttribution — ProjectView gate predicate', () => {
-  it('is true on the Overview tab (activity feed consumer)', () => {
-    expect(shouldFetchSwmAttribution({ activeLayer: 'overview', activeSubGraph: null })).toBe(true);
+  it('is true ONLY on the SWM tab (its sole remaining consumer)', () => {
+    expect(shouldFetchSwmAttribution({ activeLayer: 'swm', activeSubGraph: null })).toBe(true);
   });
 
-  it('is true on the SWM tab (layer graph consumer)', () => {
-    expect(shouldFetchSwmAttribution({ activeLayer: 'swm', activeSubGraph: null })).toBe(true);
+  it('is false on the Overview tab (PR #694 fix — Overview switched to lifecycle source)', () => {
+    expect(shouldFetchSwmAttribution({ activeLayer: 'overview', activeSubGraph: null })).toBe(false);
   });
 
   it('is false on WM / VM / graph-overview / query (no consumer)', () => {
@@ -32,16 +38,17 @@ describe('shouldFetchSwmAttribution — ProjectView gate predicate', () => {
   // gate `true` on consumer views so the hook's cached events stay
   // populated through the detail-open/close round-trip. The predicate
   // intentionally takes no `selectedUri` arg; this test pins that
-  // omission as an invariant rather than an oversight.
-  it('round-tripping a flicker scenario (Overview → detail → Overview) keeps the gate true (R2-Local-1)', () => {
+  // omission as an invariant rather than an oversight (now exercised
+  // on the SWM tab, the sole consumer).
+  it('round-tripping a flicker scenario (SWM → detail → SWM) keeps the gate true (R2-Local-1)', () => {
     // The caller passes `{ activeLayer, activeSubGraph }` only; the
     // detail overlay is orthogonal to both. So the predicate cannot
     // observe a transient `selectedUri` and therefore cannot flip.
-    const overview = { activeLayer: 'overview' as const, activeSubGraph: null };
-    expect(shouldFetchSwmAttribution(overview)).toBe(true);
+    const swm = { activeLayer: 'swm' as const, activeSubGraph: null };
+    expect(shouldFetchSwmAttribution(swm)).toBe(true);
     // Simulated detail-open: same args, same answer.
-    expect(shouldFetchSwmAttribution(overview)).toBe(true);
+    expect(shouldFetchSwmAttribution(swm)).toBe(true);
     // Simulated detail-close: same args, same answer.
-    expect(shouldFetchSwmAttribution(overview)).toBe(true);
+    expect(shouldFetchSwmAttribution(swm)).toBe(true);
   });
 });

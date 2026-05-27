@@ -17,21 +17,32 @@ export type LayerContentTab = 'items' | 'assertions' | 'graph' | 'docs';
 
 /**
  * Whether the SWM attribution SPARQL is worth firing for the current
- * `ProjectView` route state. True only on views that actually consume
- * the result — the Overview activity feed and the SWM-layer graph.
+ * `ProjectView` route state. True only when the SWM-layer graph (the
+ * sole remaining consumer) is the active view.
+ *
+ * PR #694 review fix — the Overview was previously included here too
+ * because the activity feed read `useSwmAttributions(...).events`
+ * (the WorkspaceOperation source). After the lifecycle-source
+ * switch in task #23 (`useAssertionLifecycleEvents`) the Overview
+ * no longer consumes this stream; firing the 5k-row SWM SPARQL on
+ * every Overview render was pure waste. Trade-off: the SWM tab now
+ * incurs the cold-start fetch on click instead of being pre-warmed
+ * by Overview navigation. Bounded by the 10s query timeout and the
+ * tab has its own loading state, so the cold-start window is
+ * acceptable.
  *
  * Notably *not* gated on `selectedUri`: opening an entity detail
  * overlays the same view, and toggling the hook to `undefined` on
  * detail-open would clear its cached events and force a re-fetch on
- * detail-close, making promotion rows on the Overview visibly flicker
- * out during every detail round-trip (R2-Local-1, PR #656).
+ * detail-close, making the SWM graph's agent tints flicker out
+ * during every detail round-trip (R2-Local-1, PR #656).
  */
 export function shouldFetchSwmAttribution(args: {
   activeLayer: LayerView;
   activeSubGraph: string | null;
 }): boolean {
   if (args.activeSubGraph) return false;
-  return args.activeLayer === 'overview' || args.activeLayer === 'swm';
+  return args.activeLayer === 'swm';
 }
 export const TRUST_COLORS: Record<TrustLevel, string> = {
   verified: '#22c55e',
@@ -242,6 +253,22 @@ export const CODE_PREDICATE_COLORS: Record<string, string> = {
   [VIZ_PRED_CONSENSUS]: '#22c55e',     // green (consensus literal edge)
 };
 
+// Built-in graph-viz auto-tints (schema.org → purple, prov → blue, etc) that
+// would otherwise override our layer default for any node with a matching
+// rdf:type. We neutralise them by mapping each to `defaultNodeColor` so the
+// layer color wins for non-attribution nodes. SWM agent attribution still
+// works because per-URI `nodeColors` sits ABOVE namespaceColors in the
+// style-engine priority stack. Future coloring rework can drop a richer
+// taxonomy in here without touching the rest of the wiring.
+export function neutraliseBuiltinNamespaces(defaultColor: string): Record<string, string> {
+  return {
+    'https://schema.org/': defaultColor,
+    'http://www.w3.org/ns/prov#': defaultColor,
+    'http://xmlns.com/foaf/0.1/': defaultColor,
+    'http://purl.org/dc/terms/': defaultColor,
+  };
+}
+
 export function buildLayerGraphOptions(
   layer: 'wm' | 'swm' | 'vm',
   nodeColors?: Record<string, string>,
@@ -259,6 +286,7 @@ export function buildLayerGraphOptions(
     style: {
       classColors: CODE_CLASS_COLORS,
       predicateColors: CODE_PREDICATE_COLORS,
+      namespaceColors: neutraliseBuiltinNamespaces(color),
       // Per-URI node tints (SWM attribution uses this to paint root KAs by
       // their proposing agent). Omitted for layers that don't use it, so
       // the style engine keeps falling back to classColors.
@@ -294,6 +322,17 @@ export function getDescription(e: MemoryEntity): string | null {
   return null;
 }
 
+/**
+ * Returns the strict N-hop neighbourhood around `entityUri`: every triple
+ * whose subject AND object both sit inside the visited set after `hops`
+ * BFS expansions from the focal entity. Edges that would dangle from a
+ * frontier node to a node (N+1) hops out are deliberately excluded —
+ * otherwise rendering pulls in nodes that have no visible path back to
+ * the focal entity, producing visually disconnected components in the
+ * detail graph. If you need the loose "edge cut" semantics (frontier
+ * node ↔ outside node), don't reuse this — define a separate helper
+ * with clear name + JSDoc so the two semantics stay distinguishable.
+ */
 export function neighborhoodTriples(entityUri: string, allTriples: Triple[], hops: number = 2): Triple[] {
   const visited = new Set<string>([entityUri]);
   let frontier = new Set<string>([entityUri]);
@@ -313,7 +352,7 @@ export function neighborhoodTriples(entityUri: string, allTriples: Triple[], hop
     if (frontier.size === 0) break;
   }
 
-  return allTriples.filter(t => visited.has(t.subject) || visited.has(t.object));
+  return allTriples.filter(t => visited.has(t.subject) && visited.has(t.object));
 }
 
 export function matchesSearch(e: MemoryEntity, q: string): boolean {
@@ -374,28 +413,37 @@ export function useLayerTriples(memory: ReturnType<typeof useMemoryEntities>, la
       // WM triples keep coming back from `wmSparql` even though the
       // entity has logically moved to SWM. The entity's canonical layer
       // is `trustLevel` (its highest layer); a triple whose subject has
-      // moved past `targetLayer` would otherwise render as a phantom
-      // node on the prior-layer Graph view. Triples whose subject has
-      // no entity record (literal orphans / class IRIs that only ever
-      // appear as objects) pass through unfiltered.
+      // moved past `targetLayer` would otherwise be counted on the
+      // prior layer's tally. Triples whose subject has no entity record
+      // (literal orphans / class IRIs that only ever appear as objects)
+      // pass through unfiltered.
       //
       // R2-1 fix: `entities.get` is keyed by the canonical (trimmed,
       // unwrapped) URI per `buildEntities`. The daemon sometimes ships
       // subjects wrapped (`<urn:...>`) — looking them up raw misses the
       // entity record, silently bypasses this filter, and the phantom
-      // node returns. Canonicalise first.
+      // triple returns. Canonicalise first.
       const subjectEntity = memory.entities.get(canonicalEntityUri(t.subject));
       if (subjectEntity && subjectEntity.trustLevel !== targetLayer) continue;
       // Issue-A fix (object-side, asymmetric C17 form): a WM triple
-      // `wm-entity-A relatesTo swm-entity-B` (B promoted to SWM)
-      // passes the subject check but `RdfGraph` would render BOTH
-      // endpoints as canvas nodes — the promoted-entity URI leaks in
-      // as an object node. Drop resource→resource edges whose object
-      // has been promoted past the requested layer. Literal-valued
-      // triples (`rdf:type`, labels, `schema:name`, etc.) have a
+      // `wm-entity-A relatesTo swm-entity-B` (B promoted to SWM) has
+      // a WM subject but its object has moved past WM. The triple is
+      // residue — counting it on WM would inflate the count and
+      // would leak the promoted-entity URI as an object in any
+      // downstream rendering. Drop resource→resource edges whose
+      // object has been promoted past the requested layer.
+      // Literal-valued triples (labels, names, etc.) have a
       // non-resource object so this check no-ops; they always pass.
+      //
+      // This stays in `useLayerTriples` because it's a per-LAYER
+      // correctness rule (a triple shouldn't be tallied on a layer
+      // where neither endpoint canonically lives). Entity-filtering
+      // for the graph view happens downstream in `LayerGraphPanel`
+      // via `filterTriplesToEntities` — `useLayerTriples` is the
+      // honest layer source for triple counts and VM hero stats.
       if (isResourceObject(t.object)) {
-        const objectEntity = memory.entities.get(canonicalEntityUri(t.object));
+        const canonicalObject = canonicalEntityUri(t.object);
+        const objectEntity = memory.entities.get(canonicalObject);
         if (objectEntity && objectEntity.trustLevel !== targetLayer) continue;
       }
       const key = `${t.subject}|${t.predicate}|${t.object}`;
@@ -405,6 +453,73 @@ export function useLayerTriples(memory: ReturnType<typeof useMemoryEntities>, la
     }
     return out;
   }, [memory.allTriples, memory.entities, targetLayer]);
+}
+
+const RDF_TYPE_URI = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+function isRdfType(predicate: string): boolean {
+  // Match the wrapped/unwrapped + whitespace tolerance used elsewhere
+  // (see `splitGraphTriplesForShelf::graphNodeKey`); raw equality
+  // would let a `<rdf:type>` predicate slip past this guard.
+  const trimmed = predicate.trim();
+  const unwrapped = trimmed.startsWith('<') && trimmed.endsWith('>')
+    ? trimmed.slice(1, -1)
+    : trimmed;
+  return unwrapped === RDF_TYPE_URI;
+}
+
+/**
+ * Task #25 — graph-render-side entity filter. Used by `LayerGraphPanel`
+ * just before `RdfGraph`. Drops resource→resource edges whose object
+ * isn't in the layer's `entityList` membership (same rule the Entities
+ * tab uses: `e.types.length > 0 || e.properties.size > 0 || e.connections.length > 0`).
+ * Pure-object URIs — vocabulary constants (`cbv:BizStep-packing`),
+ * IPFS file refs (`ipfs://...`), DID identity refs (`did:...`),
+ * blank-node compound-property anchors — drop uniformly. If the
+ * object IS a first-class entity in the layer (e.g. a DID with its
+ * own rdf:type), the edge is kept.
+ *
+ * Lives in `helpers.ts` (not `components.tsx`) so it stays pure and
+ * unit-testable without rendering. `rdf:type` is exempt: class IRIs
+ * aren't entities but the triple is needed for `classColors`, and
+ * the downstream `splitGraphTriplesForShelf` rdf:type guard already
+ * prevents the class IRI from becoming a canvas node.
+ *
+ * `entityUris` is the set of canonical URIs of entities in the
+ * **layer's** entityList — i.e. callers should pass
+ * `memory.entityList.filter(e => e.trustLevel === layer.trustLevel)`
+ * mapped to canonical URIs. (`LayerGraphPanel` already has the layer
+ * to do that filtering with.)
+ */
+export function filterTriplesToEntities(
+  triples: Triple[],
+  entityUris: ReadonlySet<string>,
+  options?: { focalSubjects?: ReadonlySet<string> },
+): Triple[] {
+  const out: Triple[] = [];
+  const focal = options?.focalSubjects;
+  for (const t of triples) {
+    // Subject-side check (Codex EwIbn): keep only triples whose subject
+    // is a real entity per the entityList membership rule. In practice
+    // every subject of a triple is in entityList (it has at least one
+    // type/property/connection), but a scoped entityUris (per-sub-graph,
+    // KADetailView with allEntities filtered down, etc.) can have
+    // subjects that aren't in the scope. Drop those. Callers can pass
+    // `focalSubjects` to exempt subjects that must always render (e.g.
+    // KADetailView's focal entity).
+    const subjectCanonical = canonicalEntityUri(t.subject);
+    if (!entityUris.has(subjectCanonical) && !focal?.has(subjectCanonical)) continue;
+    // Object-side check (the original gate): drop resource→resource
+    // edges where the object isn't a known entity. `rdf:type` is exempt
+    // because class IRIs aren't entities but the triple is needed for
+    // `classColors`; the downstream `splitGraphTriplesForShelf`
+    // `rdf:type` guard prevents the class IRI from becoming a canvas
+    // node anyway.
+    if (isResourceObject(t.object)) {
+      if (!isRdfType(t.predicate) && !entityUris.has(canonicalEntityUri(t.object))) continue;
+    }
+    out.push(t);
+  }
+  return out;
 }
 
 // ─── Assertions List (WM/SWM named graphs) ──────────────────

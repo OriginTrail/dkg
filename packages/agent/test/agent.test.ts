@@ -2,7 +2,6 @@ import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import {
   DKGAgentWallet,
   buildAgentProfile,
-  collectPublishableMultiaddrs,
   CclEvaluator,
   DiscoveryClient,
   ProfileManager,
@@ -597,110 +596,6 @@ describe('Profile Builder', () => {
     for (const q of quads) {
       expect(q.graph).toBe('did:dkg:context-graph:agents');
     }
-  });
-
-  it('emits dkg:multiaddr triples (one per published address) and dkg:lastSeen (phonebook)', () => {
-    // PR feat/chain-agents-cg-phonebook: profile now publishes the
-    // node's dialable multiaddrs and a freshness timestamp so other
-    // peers' dial fallback can find direct addrs even after their
-    // peerStore entries age out.
-    const { quads } = buildAgentProfile({
-      peerId: 'QmPhonebook',
-      name: 'PhonebookBot',
-      skills: [],
-      multiaddrs: [
-        '/ip4/203.0.113.10/tcp/9090/p2p/QmPhonebook',
-        '/ip4/198.51.100.20/tcp/9090/p2p-circuit/p2p/QmPhonebook',
-      ],
-      lastSeen: '2026-05-26T15:00:00.000Z',
-    });
-
-    const multiQuads = quads.filter(
-      (q) => q.predicate === 'https://dkg.network/ontology#multiaddr',
-    );
-    expect(multiQuads).toHaveLength(2);
-    expect(multiQuads.map((q) => q.object)).toEqual([
-      '"/ip4/203.0.113.10/tcp/9090/p2p/QmPhonebook"',
-      '"/ip4/198.51.100.20/tcp/9090/p2p-circuit/p2p/QmPhonebook"',
-    ]);
-
-    const lastSeenQuad = quads.find(
-      (q) => q.predicate === 'https://dkg.network/ontology#lastSeen',
-    );
-    expect(lastSeenQuad?.object).toBe('"2026-05-26T15:00:00.000Z"');
-  });
-
-  it('lastSeen defaults to the current ISO timestamp when omitted', () => {
-    const before = new Date().toISOString();
-    const { quads } = buildAgentProfile({
-      peerId: 'QmDefault',
-      name: 'DefaultBot',
-      skills: [],
-    });
-    const after = new Date().toISOString();
-    const lastSeen = quads.find(
-      (q) => q.predicate === 'https://dkg.network/ontology#lastSeen',
-    )?.object.replace(/"/g, '');
-    expect(lastSeen).toBeDefined();
-    expect(lastSeen! >= before && lastSeen! <= after).toBe(true);
-  });
-
-  it('collectPublishableMultiaddrs drops non-public addresses + dedups (uses core isPublicLikeAddress)', () => {
-    // Filter must drop addresses that no remote peer could plausibly
-    // dial — loopback, link-local, unspecified bind, RFC1918, CGNAT,
-    // ULA, and DNS hostnames that resolve to local-only names.
-    // Real production addrs (public IPs + circuit forms anchored on a
-    // public relay) pass through. Duplicates from libp2p's listen /
-    // announce dedup are collapsed.
-    //
-    // Codex review of PR #700 round 2 flagged that the previous regex
-    // filter still leaked RFC1918 / CGNAT / ULA / `/dns*/localhost`
-    // into the agent profile. The fence below pins the wider drop set
-    // we now reuse from `core/src/node.ts:isPublicLikeAddress`.
-    const out = collectPublishableMultiaddrs([
-      '/ip4/127.0.0.1/tcp/9090/p2p/QmA',           // loopback
-      '/ip4/0.0.0.0/tcp/9090/p2p/QmA',             // unspecified bind
-      '/ip4/169.254.0.5/tcp/9090/p2p/QmA',         // link-local
-      '/ip4/10.0.0.5/tcp/9090/p2p/QmA',            // RFC1918 (10/8)
-      '/ip4/172.16.0.5/tcp/9090/p2p/QmA',          // RFC1918 (172.16/12)
-      '/ip4/172.31.255.255/tcp/9090/p2p/QmA',      // RFC1918 boundary
-      '/ip4/192.168.1.5/tcp/9090/p2p/QmA',         // RFC1918 (192.168/16)
-      '/ip4/100.105.212.110/tcp/9090/p2p/QmA',     // CGNAT (100.64/10)
-      '/ip6/::1/tcp/9090/p2p/QmA',                 // loopback
-      '/ip6/::/tcp/9090/p2p/QmA',                  // unspecified
-      '/ip6/fe80::1/tcp/9090/p2p/QmA',             // link-local
-      '/ip6/fc00::1/tcp/9090/p2p/QmA',             // ULA
-      '/ip6/fd12::1/tcp/9090/p2p/QmA',             // ULA
-      '/dns4/localhost/tcp/9090/p2p/QmA',          // DNS localhost
-      '/dns4/host.local/tcp/9090/p2p/QmA',         // mDNS .local
-      '/ip4/203.0.113.10/tcp/9090/p2p/QmA',        // public, keep
-      '/ip4/203.0.113.10/tcp/9090/p2p/QmA',        // duplicate of above, drop
-      '/ip4/198.51.100.20/tcp/9090/p2p-circuit/p2p/QmA', // circuit on public relay, keep
-      '/dns4/relay.origintrail.network/tcp/443/p2p/QmA', // public DNS, keep
-    ]);
-    expect(out).toEqual([
-      '/ip4/203.0.113.10/tcp/9090/p2p/QmA',
-      '/ip4/198.51.100.20/tcp/9090/p2p-circuit/p2p/QmA',
-      '/dns4/relay.origintrail.network/tcp/443/p2p/QmA',
-    ]);
-  });
-
-  it('skips malformed multiaddrs containing a literal quote (defensive)', () => {
-    // Quote characters would break the raw template-literal RDF
-    // emission and inject extra triples. Production libp2p multiaddrs
-    // never contain `"`; the guard exists for malformed test fixtures
-    // or untrusted upstream input.
-    const { quads } = buildAgentProfile({
-      peerId: 'QmGuard',
-      name: 'GuardBot',
-      skills: [],
-      multiaddrs: ['/ip4/1.2.3.4/tcp/9090', '/ip4/bad"injected/tcp/0'],
-    });
-    const multiQuads = quads.filter(
-      (q) => q.predicate === 'https://dkg.network/ontology#multiaddr',
-    );
-    expect(multiQuads).toHaveLength(1);
-    expect(multiQuads[0].object).toBe('"/ip4/1.2.3.4/tcp/9090"');
   });
 
   it('includes hosting profile when contextGraphsServed is set', () => {

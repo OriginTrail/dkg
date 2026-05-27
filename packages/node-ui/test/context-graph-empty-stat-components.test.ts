@@ -145,7 +145,12 @@ describe('Context Graph shared empty/stat patterns', () => {
     await unmount();
   });
 
-  it('uses the shared empty pattern for empty activity feeds', async () => {
+  it('uses the quieter inline empty pattern for empty activity feeds (N6 polish #23)', async () => {
+    // The Overview activity feed switched off the shared centered/bold
+    // `EmptyState` primitive — that read as a load-bearing message on
+    // an otherwise calm Overview. Quieter inline tertiary hint receeds
+    // so the surface stays the focal area. Empty-state copy is still
+    // surfaced (the hint is the user-facing payload).
     const { container, unmount } = await render(
       React.createElement(ActivityFeed, {
         entities: [],
@@ -154,8 +159,190 @@ describe('Context Graph shared empty/stat patterns', () => {
       }),
     );
 
-    expect(container.querySelector('.v10-activity-feed-empty .v10-empty-state')).toBeTruthy();
+    const empty = container.querySelector('.v10-activity-feed-empty');
+    expect(empty).toBeTruthy();
+    // Quieter inline class replaces the shared `EmptyState` shell.
+    expect(empty?.querySelector('.v10-activity-feed-empty-hint')).toBeTruthy();
+    // The shared EmptyState primitive is no longer used here.
+    expect(empty?.querySelector('.v10-empty-state')).toBeNull();
     expect(container.textContent).toContain('No recent updates yet.');
+
+    await unmount();
+  });
+
+  // PR #694 Comment 8 — when the lifecycle SPARQL errors, the feed
+  // must render a distinguishable indicator instead of degrading to
+  // a normal empty state. The Comment 3 catch-side fix made
+  // `events.length === 0` true in both success-empty and error
+  // states, so the explicit `lifecycleError` prop is the signal.
+  //
+  // qa-lead copy tweak (also folded into the Comment 11 commit) —
+  // dropped "Retrying…" because the hook only re-fetches on cgId
+  // change, not on a timer. Test asserts the exact (shorter) copy.
+  it('renders the lifecycle error indicator, distinct from the empty hint', async () => {
+    const { container, unmount } = await render(
+      React.createElement(ActivityFeed, {
+        entities: [],
+        onSelectEntity: vi.fn(),
+        emptyHint: 'No recent updates yet.',
+        lifecycleError: 'SPARQL query failed: 503',
+      }),
+    );
+
+    const empty = container.querySelector('.v10-activity-feed-empty');
+    expect(empty).toBeTruthy();
+    // Error indicator present.
+    const err = empty?.querySelector('.v10-activity-feed-error');
+    expect(err).toBeTruthy();
+    // qa-lead copy tweak — exact text (no "Retrying…").
+    expect(err?.textContent?.trim()).toBe("Couldn't load recent activity.");
+    // Empty hint is replaced by the error indicator — we don't show
+    // both, so the user isn't given two contradictory states.
+    expect(empty?.querySelector('.v10-activity-feed-empty-hint')).toBeNull();
+    // The underlying error message is exposed via the title attribute
+    // for power users / diagnostics.
+    expect(err?.getAttribute('title')).toBe('SPARQL query failed: 503');
+
+    await unmount();
+  });
+
+  // PR #694 Comment 11 — the prior Comment 8 fix did an early-return
+  // on `lifecycleError`, which blanked typed Decision/Task/PR rows
+  // sourced from the BASE entity-list path even though they have
+  // nothing to do with the lifecycle stream. The error indicator
+  // now renders inline (above the buckets, below the title) and
+  // only replaces the empty hint when there are no rows at all.
+  it('renders the error indicator inline AND keeps typed base-path rows when both are present', async () => {
+    // Construct a typed Decision row in the entity-list path. The
+    // lifecycle stream errored independently — the indicator must
+    // not blank the typed row.
+    const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+    const TYPE_DECISION = 'http://dkg.io/ontology/decisions/Decision';
+    const DC_CREATED = 'http://purl.org/dc/terms/created';
+    const triples = [
+      { subject: 'urn:decision:1', predicate: RDF_TYPE, object: TYPE_DECISION, layer: 'working' as const },
+      { subject: 'urn:decision:1', predicate: DC_CREATED, object: '"2026-05-22T10:00:00Z"', layer: 'working' as const },
+    ];
+    const { buildMemoryEntities } = await import('../src/ui/hooks/useMemoryEntities.js');
+    const entityList = [...buildMemoryEntities(triples).values()];
+
+    const { container, unmount } = await render(
+      React.createElement(ActivityFeed, {
+        entities: entityList,
+        onSelectEntity: vi.fn(),
+        title: 'Recent activity',
+        // Lifecycle stream errored: pass [] for events (consumer
+        // would do this mid-error per the Comment 6 fix) AND the
+        // error string. Without Comment 11 the early-return would
+        // hide the typed row even though it doesn't come from the
+        // lifecycle stream.
+        lifecycleEvents: [],
+        lifecycleError: 'SPARQL query failed: 503',
+      }),
+    );
+
+    // Typed row renders.
+    const rows = container.querySelectorAll('.v10-activity-feed-row');
+    expect(rows.length).toBeGreaterThan(0);
+    // Error banner ALSO renders.
+    const err = container.querySelector('.v10-activity-feed-error');
+    expect(err).toBeTruthy();
+    expect(err?.textContent?.trim()).toBe("Couldn't load recent activity.");
+    // The populated-feed path does NOT render the empty hint.
+    expect(container.querySelector('.v10-activity-feed-empty-hint')).toBeNull();
+
+    await unmount();
+  });
+
+  // PR #694 Comment 13 — the saturation badge must read `${limit}+`
+  // ONLY when the joiner reports rows were actually dropped
+  // (`hasMore = merged.length > cap`, computed pre-slice). The
+  // prior `items.length >= effectiveLimit` heuristic lied at the
+  // boundary (exactly `limit` rows rendered as `${limit}+`).
+  //
+  // Drive the saturation through the lifecycle path: that's the
+  // joiner path where the new `hasMore` is honest (the legacy
+  // entity-list path returns the already-capped `base` and reports
+  // `hasMore: false` by construction — no consumer surface today).
+  it('renders `${limit}+` on the title badge only when joiner reports hasMore=true', async () => {
+    const { ActivityFeed } = await import('../src/ui/components/ActivityFeed.js');
+    const events = [];
+    for (let i = 0; i < 15; i++) {
+      events.push({
+        eventUri: `urn:evt:promote-${i}`,
+        kind: 'promoted' as const,
+        assertionUri: `urn:assert:doc-${i}`,
+        assertionName: `doc-${i}`,
+        agentUri: 'did:dkg:agent:bob',
+        publishedAt: `2026-05-${String((i % 28) + 1).padStart(2, '0')}T10:00:00Z`,
+      });
+    }
+    const { container, unmount } = await render(
+      React.createElement(ActivityFeed, {
+        entities: [],
+        onSelectEntity: vi.fn(),
+        title: 'Recent activity',
+        limit: 10,
+        lifecycleEvents: events,
+      }),
+    );
+    expect(container.querySelector('.v10-activity-feed-title-count')?.textContent).toBe('10+');
+    await unmount();
+  });
+
+  it('renders the EXACT count on the title badge when at the boundary (merged.length === cap)', async () => {
+    // Reviewer's named case: exactly `limit` rows. Pre-fix the
+    // `items.length >= effectiveLimit` heuristic rendered `'10+'`
+    // here, lying about a project that had exactly 10 rows. The
+    // joiner now reports `hasMore: false` at the boundary.
+    const events = [];
+    for (let i = 0; i < 10; i++) {
+      events.push({
+        eventUri: `urn:evt:promote-${i}`,
+        kind: 'promoted' as const,
+        assertionUri: `urn:assert:doc-${i}`,
+        assertionName: `doc-${i}`,
+        agentUri: 'did:dkg:agent:bob',
+        publishedAt: `2026-05-${String((i % 28) + 1).padStart(2, '0')}T10:00:00Z`,
+      });
+    }
+    const { container, unmount } = await render(
+      React.createElement(ActivityFeed, {
+        entities: [],
+        onSelectEntity: vi.fn(),
+        title: 'Recent activity',
+        limit: 10,
+        lifecycleEvents: events,
+      }),
+    );
+    expect(container.querySelector('.v10-activity-feed-title-count')?.textContent).toBe('10');
+    await unmount();
+  });
+
+  it('renders the exact count on the title badge below the cap', async () => {
+    const events = [];
+    for (let i = 0; i < 3; i++) {
+      events.push({
+        eventUri: `urn:evt:promote-${i}`,
+        kind: 'promoted' as const,
+        assertionUri: `urn:assert:doc-${i}`,
+        assertionName: `doc-${i}`,
+        agentUri: 'did:dkg:agent:bob',
+        publishedAt: `2026-05-${String((i % 28) + 1).padStart(2, '0')}T10:00:00Z`,
+      });
+    }
+    const { container, unmount } = await render(
+      React.createElement(ActivityFeed, {
+        entities: [],
+        onSelectEntity: vi.fn(),
+        title: 'Recent activity',
+        limit: 10,
+        lifecycleEvents: events,
+      }),
+    );
+
+    const badge = container.querySelector('.v10-activity-feed-title-count');
+    expect(badge?.textContent).toBe('3');
 
     await unmount();
   });

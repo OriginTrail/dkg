@@ -503,25 +503,6 @@ export interface DkgConfig {
   chat?: ChatConfig;
   /** Route-plugin specs (absolute paths / package names) loaded at daemon startup. ADR 0001. */
   routePlugins?: string[];
-  /**
-   * libp2p / discovery network tunables for small / sparse meshes.
-   * All fields optional; omission preserves built-in defaults. See
-   * companion knobs in `packages/core/src/types.ts` (libp2p side) +
-   * `packages/agent/src/dkg-agent-constants.ts` (agent side).
-   */
-  network?: {
-    /**
-     * Cadence at which the daemon re-publishes its own profile to the
-     * `agents` Context Graph (default 5min — see
-     * `AGENT_PROFILE_HEARTBEAT_MS`). Set to `0` to disable; the
-     * one-shot startup publish still fires.
-     *
-     * Each heartbeat refreshes `dkg:multiaddr` + `dkg:lastSeen` so
-     * other peers' dial fallback can find fresh phonebook entries
-     * even when direct connections have aged out of the peerStore.
-     */
-    agentProfileHeartbeatMs?: number;
-  };
 }
 
 /**

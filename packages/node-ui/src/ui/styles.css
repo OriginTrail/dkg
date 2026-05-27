@@ -6833,13 +6833,41 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
   background: rgba(255, 255, 255, 0.015);
 }
 .v10-activity-feed-title {
+  display: flex; align-items: baseline; gap: 8px;
   font-size: 12px; font-weight: 700;
   text-transform: uppercase; letter-spacing: 0.06em;
   color: var(--text-tertiary);
 }
-.v10-empty-state.v10-activity-feed-empty-state { min-height: 96px; }
+.v10-activity-feed-title-label { flex: 0 1 auto; }
+.v10-activity-feed-title-count {
+  /* N6 polish (item 3) — total-feed count next to the heading.
+   * Same mono+tertiary treatment as `.v10-activity-feed-bucket-count`
+   * so the two read as the same kind of signal at different scopes. */
+  font-family: var(--font-mono); font-weight: 400;
+  font-size: 10px; letter-spacing: 0;
+  text-transform: none;
+  color: var(--text-tertiary);
+}
 .v10-overview-activity.v10-activity-feed-empty {
   min-height: 140px;
+}
+.v10-activity-feed-empty-hint {
+  /* N6 polish (item 2) — quieter than the prior centered/bold
+   * EmptyState primitive; recedes so the rest of the Overview
+   * stays the focal area. */
+  margin-top: 8px;
+  font-size: 12px; font-weight: 400; line-height: 1.5;
+  color: var(--text-tertiary);
+}
+.v10-activity-feed-error {
+  /* PR #694 Comment 8 — distinguishable from `.v10-activity-feed-empty-hint`
+   * so the user can tell "couldn't load" apart from "no activity
+   * yet", but still quieter than the loud `EmptyState` primitive. */
+  margin-top: 8px;
+  padding: 6px 8px;
+  border-left: 2px solid var(--accent-warn, #f59e0b);
+  font-size: 12px; font-weight: 400; line-height: 1.5;
+  color: var(--text-tertiary);
 }
 .v10-activity-feed-bucket { display: flex; flex-direction: column; gap: 4px; }
 .v10-activity-feed-bucket-head {
@@ -6878,13 +6906,17 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
   border-top: 1px solid var(--border-subtle);
   border-radius: 0;
 }
-/* Local-2 (PR #656) — non-clickable stub rows for promotion events
- * whose root isn't loaded in `rawMemory.entities`. Same row shell so
- * the timeline stays visually coherent, but the affordance is honest:
- * default cursor, no hover surface, slight opacity to read as inert. */
+/* Non-clickable rows — both PR #656-era stub rows (promotion of a
+ * root not in `rawMemory.entities`) and the lifecycle rows that are
+ * non-interactive by design (PR #694 Comment 12 (A) — assertion
+ * click-through lands in the S4 PR). Disabledness is signalled by
+ * `cursor: default` + `aria-disabled="true"` + the missing hover
+ * surface; the prior `opacity: 0.7` was redundant and dimmed the
+ * bulk of the feed once lifecycle rows became the dominant
+ * non-clickable kind, making the whole feed read muted vs the rest
+ * of the Overview chrome. */
 .v10-activity-feed-row-static {
   cursor: default;
-  opacity: 0.7;
 }
 .v10-activity-feed-row-static:hover { background: none; }
 .v10-activity-feed-layer {
@@ -6904,7 +6936,14 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
 }
 .v10-activity-feed-type-icon { font-size: 11px; color: var(--type-color, #a855f7); }
 .v10-activity-feed-title-text {
-  font-size: 12px; font-weight: 600;
+  /* Entity / assertion name in each row (e.g.
+   * "pharmaceutical-derived-product-metadata"). Was `600` to
+   * compensate for the `.v10-activity-feed-row-static` opacity dim;
+   * with the dim gone (prior commit), `600` over-emphasised the row
+   * body relative to the surrounding chrome (`RECENT ACTIVITY · 7`
+   * title, `TODAY` bucket label, agent chips). Dropped one notch
+   * to `500` to bring it inline with the chrome's body weight. */
+  font-size: 12px; font-weight: 500;
   color: var(--text-primary);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   min-width: 0;
