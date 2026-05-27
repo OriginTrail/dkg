@@ -21,6 +21,14 @@ export interface KCMetadata {
   merkleRoot: Uint8Array;
   kaCount: number;
   publisherPeerId: string;
+  /**
+   * Durable on-chain agent identifier (EVM address, bare `0x…`). When
+   * supplied, `prov:wasAttributedTo` is emitted as `<did:dkg:agent:0x…>`.
+   * When omitted, falls back to `lit(publisherPeerId)` for backwards
+   * compatibility with callers that don't yet have the agent address.
+   * See GH #748.
+   */
+  agentAddress?: string;
   accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
   allowedPeers?: string[];
   timestamp: Date;
@@ -103,7 +111,13 @@ export function generateKCMetadata(
     mq(
       meta.ual,
       `${PROV}wasAttributedTo`,
-      lit(meta.publisherPeerId || 'unknown'),
+      // KC publishes always know their author on-chain (`authorAddress`),
+      // so prefer that when `agentAddress` wasn't explicitly threaded.
+      // Falls back to the peer-ID literal only for legacy/tentative
+      // callers with neither identity available.
+      (meta.agentAddress ?? meta.authorAddress)
+        ? agentDid((meta.agentAddress ?? meta.authorAddress)!)
+        : lit(meta.publisherPeerId || 'unknown'),
       metaGraph,
     ),
     mq(
@@ -284,6 +298,10 @@ function dateLit(d: Date): string {
   return `"${d.toISOString()}"^^<${XSD}dateTime>`;
 }
 
+export function agentDid(address: string): string {
+  return `did:dkg:agent:${address}`;
+}
+
 function hexLit(hex: string): string {
   // `xsd:hexBinary` lexical space is hex digits ONLY — no `0x` prefix
   // (per XML Schema Part 2: Datatypes, §3.2.16). A typed literal
@@ -313,7 +331,7 @@ export function generateAuthorshipProof(proof: AuthorshipProof): Quad[] {
   return [
     mq(proof.kcUal, `${DKG}authoredBy`, blankNode, metaGraph),
     mq(blankNode, `${RDF}type`, `${DKG}AuthorshipProof`, metaGraph),
-    mq(blankNode, `${DKG}agent`, `did:dkg:agent:${proof.agentAddress}`, metaGraph),
+    mq(blankNode, `${DKG}agent`, agentDid(proof.agentAddress), metaGraph),
     mq(blankNode, `${DKG}signature`, lit(proof.signature), metaGraph),
     mq(blankNode, `${DKG}signedHash`, lit(proof.signedHash), metaGraph),
   ];
@@ -338,7 +356,7 @@ export function generateShareTransitionMetadata(meta: ShareTransitionMetadata): 
   const quads: Quad[] = [
     mq(subject, `${RDF}type`, `${DKG}ShareTransition`, metaGraph),
     mq(subject, `${DKG}source`, lit(`assertion/${meta.agentAddress}/${meta.assertionName}`), metaGraph),
-    mq(subject, `${DKG}agent`, `did:dkg:agent:${meta.agentAddress}`, metaGraph),
+    mq(subject, `${DKG}agent`, agentDid(meta.agentAddress), metaGraph),
     mq(subject, `${DKG}timestamp`, dateLit(meta.timestamp), metaGraph),
   ];
   for (const entity of meta.entities) {
@@ -353,6 +371,14 @@ export interface ShareMetadata {
   contextGraphId: string;
   rootEntities: string[];
   publisherPeerId: string;
+  /**
+   * Durable on-chain agent identifier (EVM address, bare `0x…`). When
+   * supplied, `prov:wasAttributedTo` is emitted as `<did:dkg:agent:0x…>`.
+   * When omitted, falls back to `lit(publisherPeerId)` so legacy callers
+   * (notably the gossip-received `SharedMemoryHandler` path) continue to
+   * work until the peer-ID → agent-address lookup is wired in. See GH #748.
+   */
+  agentAddress?: string;
   timestamp: Date;
   subGraphName?: string;
 }
@@ -379,7 +405,7 @@ export function generateShareMetadata(
     mq(
       subject,
       `${PROV}wasAttributedTo`,
-      lit(meta.publisherPeerId),
+      meta.agentAddress ? agentDid(meta.agentAddress) : lit(meta.publisherPeerId),
       swmMetaGraph,
     ),
     mq(
@@ -519,7 +545,7 @@ export function generateSubGraphRegistration(reg: SubGraphRegistration): Quad[] 
     mq(subGraphUri, `${RDF}type`, `${DKG}SubGraph`, metaGraph),
     mq(subGraphUri, `${DKG}parentContextGraph`, parentUri, metaGraph),
     mq(subGraphUri, `${SCHEMA}name`, lit(reg.subGraphName), metaGraph),
-    mq(subGraphUri, `${DKG}createdBy`, `did:dkg:agent:${reg.createdBy}`, metaGraph),
+    mq(subGraphUri, `${DKG}createdBy`, agentDid(reg.createdBy), metaGraph),
     mq(subGraphUri, `${DKG}createdAt`, dateLit(reg.timestamp), metaGraph),
   ];
 
@@ -529,7 +555,7 @@ export function generateSubGraphRegistration(reg: SubGraphRegistration): Quad[] 
 
   if (reg.authorizedWriters && reg.authorizedWriters.length > 0) {
     for (const writer of reg.authorizedWriters) {
-      const writerUri = `did:dkg:agent:${writer}`;
+      const writerUri = agentDid(writer);
       if (!isSafeIri(writerUri)) continue;
       quads.push(mq(subGraphUri, `${DKG}authorizedWriter`, writerUri, metaGraph));
     }
@@ -618,7 +644,7 @@ export function generateAssertionCreatedMetadata(meta: AssertionCreatedMeta): Qu
   const metaGraph = `did:dkg:context-graph:${meta.contextGraphId}/_meta`;
   const subject = assertionLifecycleUri(meta.contextGraphId, meta.agentAddress, meta.assertionName, meta.subGraphName);
   const graphUri = contextGraphAssertionUri(meta.contextGraphId, meta.agentAddress, meta.assertionName, meta.subGraphName);
-  const agentUri = `did:dkg:agent:${meta.agentAddress}`;
+  const agentUri = agentDid(meta.agentAddress);
   const eventUri = `${subject}/event/${nextEventId()}`;
 
   return [
@@ -656,7 +682,7 @@ export interface AssertionPromotedMeta {
 export function generateAssertionPromotedMetadata(meta: AssertionPromotedMeta): { insert: Quad[]; delete: Quad[] } {
   const metaGraph = `did:dkg:context-graph:${meta.contextGraphId}/_meta`;
   const subject = assertionLifecycleUri(meta.contextGraphId, meta.agentAddress, meta.assertionName, meta.subGraphName);
-  const agentUri = `did:dkg:agent:${meta.agentAddress}`;
+  const agentUri = agentDid(meta.agentAddress);
   const eventUri = `${subject}/event/${nextEventId()}`;
 
   const del = [
@@ -695,7 +721,7 @@ export interface AssertionPublishedMeta {
 export function generateAssertionPublishedMetadata(meta: AssertionPublishedMeta): { insert: Quad[]; delete: Quad[] } {
   const metaGraph = `did:dkg:context-graph:${meta.contextGraphId}/_meta`;
   const subject = assertionLifecycleUri(meta.contextGraphId, meta.agentAddress, meta.assertionName, meta.subGraphName);
-  const agentUri = `did:dkg:agent:${meta.agentAddress}`;
+  const agentUri = agentDid(meta.agentAddress);
   const eventUri = `${subject}/event/${nextEventId()}`;
   return {
     insert: [
@@ -728,7 +754,7 @@ export interface AssertionDiscardedMeta {
 export function generateAssertionDiscardedMetadata(meta: AssertionDiscardedMeta): { insert: Quad[]; delete: Quad[] } {
   const metaGraph = `did:dkg:context-graph:${meta.contextGraphId}/_meta`;
   const subject = assertionLifecycleUri(meta.contextGraphId, meta.agentAddress, meta.assertionName, meta.subGraphName);
-  const agentUri = `did:dkg:agent:${meta.agentAddress}`;
+  const agentUri = agentDid(meta.agentAddress);
   const eventUri = `${subject}/event/${nextEventId()}`;
   return {
     insert: [

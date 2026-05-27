@@ -948,6 +948,7 @@ export class DKGPublisher implements Publisher {
       rootEntities,
       quads: normalized,
       publisherPeerId: options.publisherPeerId,
+      agentAddress: options.senderAgentAddress,
       subGraphName: options.subGraphName,
       timestamp: operationTimestamp,
       publicSnapshotStore: this.publicSnapshotStore,
@@ -3075,6 +3076,163 @@ export class DKGPublisher implements Publisher {
     return this.reconstructSharedMemoryOwnership();
   }
 
+  /**
+   * One-shot startup migration for GH #748: rewrite SWM
+   * `prov:wasAttributedTo` from peer-ID string literals to agent DID
+   * URIs (`<did:dkg:agent:0x…>`). Idempotent — each CG carries a
+   * `<urn:dkg:migration:swm-attr-agent-did> dkg:appliedAt "<ts>"`
+   * marker in `_meta` after a successful pass; subsequent boots skip
+   * marked CGs. Best-effort: rows whose peer ID can't be resolved
+   * against the AGENTS system graph are left in place.
+   */
+  async migrateSwmAttributionToAgentDid(): Promise<{ rewritten: number; skipped: number; cgs: number }> {
+    const DKG = 'http://dkg.io/ontology/';
+    const PROV = 'http://www.w3.org/ns/prov#';
+    const RDF = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#';
+    const XSD = 'http://www.w3.org/2001/XMLSchema#';
+    const SWM_META_SUFFIX = '/_shared_memory_meta';
+    const CG_PREFIX = 'did:dkg:context-graph:';
+    const MIGRATION_MARKER_SUBJECT = 'urn:dkg:migration:swm-attr-agent-did';
+    const AGENTS_GRAPH = `${CG_PREFIX}agents/_data`;
+    const ctx = createOperationContext('migrate-swm-attr');
+
+    let totalRewritten = 0;
+    let totalSkipped = 0;
+    let cgsProcessed = 0;
+
+    try {
+      const contextGraphs = await this.graphManager.listContextGraphs();
+      const peerToAddress = new Map<string, string | null>();
+      const allGraphs = await this.store.listGraphs();
+
+      for (const cgId of contextGraphs) {
+        if (cgId === 'agents' || cgId === 'ontology') continue; // system graphs hold no SWM
+        const cgMetaGraph = `${CG_PREFIX}${cgId}/_meta`;
+
+        // Skip if migration marker already present for this CG.
+        const markerResult = await this.store.query(
+          `SELECT ?ts WHERE { GRAPH <${cgMetaGraph}> { <${MIGRATION_MARKER_SUBJECT}> <${DKG}appliedAt> ?ts } } LIMIT 1`,
+        );
+        if (markerResult.type === 'bindings' && markerResult.bindings.length > 0) {
+          continue;
+        }
+
+        // Collect root SWM-meta graph plus any sub-graph-scoped ones for this CG.
+        const swmMetaGraphs: string[] = [this.graphManager.sharedMemoryMetaUri(cgId)];
+        const sgPrefix = `${CG_PREFIX}${cgId}/`;
+        for (const g of allGraphs) {
+          if (g.startsWith(sgPrefix) && g.endsWith(SWM_META_SUFFIX)) {
+            const middle = g.slice(sgPrefix.length, g.length - SWM_META_SUFFIX.length);
+            if (middle && !middle.includes('/')) {
+              swmMetaGraphs.push(g);
+            }
+          }
+        }
+
+        let cgRewritten = 0;
+        let cgSkipped = 0;
+
+        for (const swmMetaGraph of swmMetaGraphs) {
+          const sparql = `SELECT ?s ?o WHERE { GRAPH <${swmMetaGraph}> { ?s <${PROV}wasAttributedTo> ?o . FILTER(isLiteral(?o)) } }`;
+          const result = await this.store.query(sparql);
+          if (result.type !== 'bindings') continue;
+
+          for (const row of result.bindings) {
+            const subject = row['s'];
+            const objectLit = row['o'];
+            if (!subject || !objectLit) continue;
+
+            const peerId = objectLit.startsWith('"')
+              ? objectLit.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '')
+              : objectLit;
+            // Don't migrate the literal sentinel `"unknown"` (legacy
+            // `generateKCMetadata` placeholder when peer ID wasn't supplied).
+            if (!peerId || peerId === 'unknown') {
+              cgSkipped++;
+              continue;
+            }
+
+            let address: string | null;
+            if (peerToAddress.has(peerId)) {
+              address = peerToAddress.get(peerId)!;
+            } else {
+              address = await this.resolveAgentAddressForPeer(peerId, AGENTS_GRAPH, DKG, RDF);
+              peerToAddress.set(peerId, address);
+            }
+
+            if (!address) {
+              cgSkipped++;
+              continue;
+            }
+
+            await this.store.delete([{
+              subject,
+              predicate: `${PROV}wasAttributedTo`,
+              object: objectLit,
+              graph: swmMetaGraph,
+            }]);
+            await this.store.insert([{
+              subject,
+              predicate: `${PROV}wasAttributedTo`,
+              object: `did:dkg:agent:${address}`,
+              graph: swmMetaGraph,
+            }]);
+            cgRewritten++;
+          }
+        }
+
+        // Drop a marker so the next boot skips this CG. Use the CG `_meta`
+        // graph rather than `_shared_memory_meta` so a SWM graph wipe
+        // doesn't accidentally re-arm the migration.
+        await this.store.insert([{
+          subject: MIGRATION_MARKER_SUBJECT,
+          predicate: `${DKG}appliedAt`,
+          object: `"${new Date().toISOString()}"^^<${XSD}dateTime>`,
+          graph: cgMetaGraph,
+        }]);
+
+        totalRewritten += cgRewritten;
+        totalSkipped += cgSkipped;
+        cgsProcessed++;
+
+        if (cgRewritten > 0 || cgSkipped > 0) {
+          this.log.info(
+            ctx,
+            `CG ${cgId}: rewrote ${cgRewritten} attribution literal(s) to agent DID, left ${cgSkipped} unresolved`,
+          );
+        }
+      }
+
+      return { rewritten: totalRewritten, skipped: totalSkipped, cgs: cgsProcessed };
+    } catch (err) {
+      this.log.warn(
+        ctx,
+        `migrateSwmAttributionToAgentDid failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return { rewritten: totalRewritten, skipped: totalSkipped, cgs: cgsProcessed };
+    }
+  }
+
+  private async resolveAgentAddressForPeer(
+    peerId: string, agentsGraph: string, DKG: string, RDF: string,
+  ): Promise<string | null> {
+    // SPARQL string-literal escape: only `"` and `\` are special inside `"..."`.
+    const escaped = peerId.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    const sparql = `SELECT ?agent WHERE {
+      GRAPH <${agentsGraph}> {
+        ?agent <${RDF}type> <${DKG}Agent> ;
+               <${DKG}peerId> "${escaped}" .
+      }
+    } LIMIT 1`;
+    const result = await this.store.query(sparql);
+    if (result.type !== 'bindings' || result.bindings.length === 0) return null;
+    const agentUri = result.bindings[0]['agent'];
+    if (!agentUri || !agentUri.startsWith('did:dkg:agent:')) return null;
+    const address = agentUri.slice('did:dkg:agent:'.length);
+    if (!/^0x[0-9a-fA-F]{40}$/.test(address)) return null;
+    return address;
+  }
+
   private async deleteMetaForRoot(metaGraph: string, rootEntity: string): Promise<void> {
     const DKG = 'http://dkg.io/ontology/';
     const result = await this.store.query(
@@ -3487,6 +3645,7 @@ export class DKGPublisher implements Publisher {
         rootEntities: effectiveRoots,
         quads: swmQuads,
         publisherPeerId: opts.publisherPeerId,
+        agentAddress,
         subGraphName: opts.subGraphName,
         timestamp: operationTimestamp,
         publicSnapshotStore: this.publicSnapshotStore,

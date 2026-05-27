@@ -3,7 +3,7 @@ import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-sto
 import { assertSafeIri, isSafeIri, validateSubGraphName } from '@origintrail-official/dkg-core';
 import type { LiftRequest } from './lift-job.js';
 import type { LiftResolvedPublishSlice } from './async-lift-publish-options.js';
-import { generateShareMetadata } from './metadata.js';
+import { agentDid, generateShareMetadata } from './metadata.js';
 import { workspacePublicQuadsDigest, type WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
 
 const DKG = 'http://dkg.io/ontology/';
@@ -64,6 +64,16 @@ export async function storeWorkspaceOperationPublicQuads(params: {
   // Retained for API compatibility; new metadata stores roots, not serialized payloads.
   quads: readonly Quad[];
   publisherPeerId?: string;
+  /**
+   * Durable on-chain agent identifier (EVM address, bare `0x…`). When
+   * supplied, both the share-operation `prov:wasAttributedTo` (via
+   * `generateShareMetadata`) and the per-root attribution emit
+   * `<did:dkg:agent:0x…>` URIs. When omitted, attribution falls back to
+   * `lit(publisherPeerId)` — preserves behaviour for the gossip-received
+   * `SharedMemoryHandler` path until peer-ID → agent-address resolution
+   * is wired in there. See GH #748.
+   */
+  agentAddress?: string;
   subGraphName?: string;
   timestamp?: Date;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
@@ -75,6 +85,7 @@ export async function storeWorkspaceOperationPublicQuads(params: {
   const workspaceMetaGraph = params.graphManager.sharedMemoryMetaUri(params.contextGraphId, subGraphName);
   const operationSubject = workspaceOperationSubject(params.contextGraphId, params.shareOperationId);
   const publisherPeerId = params.publisherPeerId?.trim() || 'unknown';
+  const agentAddress = params.agentAddress?.trim() || undefined;
   const timestamp = params.timestamp ?? new Date();
 
   for (const root of roots) {
@@ -94,6 +105,7 @@ export async function storeWorkspaceOperationPublicQuads(params: {
       contextGraphId: params.contextGraphId,
       rootEntities: roots,
       publisherPeerId,
+      agentAddress,
       timestamp,
       subGraphName,
     },
@@ -133,7 +145,7 @@ export async function storeWorkspaceOperationPublicQuads(params: {
       { subject, predicate: `${DKG}publicSliceRootEntity`, object: root, graph: workspaceMetaGraph },
       { subject, predicate: `${DKG}publicQuadsDigest`, object: lit(digest), graph: workspaceMetaGraph },
       { subject, predicate: `${DKG}publicQuadsCount`, object: intLit(rootQuads.length), graph: workspaceMetaGraph },
-      { subject, predicate: `${PROV}wasAttributedTo`, object: lit(publisherPeerId), graph: workspaceMetaGraph },
+      { subject, predicate: `${PROV}wasAttributedTo`, object: agentAddress ? agentDid(agentAddress) : lit(publisherPeerId), graph: workspaceMetaGraph },
       { subject, predicate: `${DKG}publishedAt`, object: dateLit(timestamp), graph: workspaceMetaGraph },
     );
     if (snapshotRef) {

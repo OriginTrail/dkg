@@ -1070,6 +1070,23 @@ export class DKGAgent {
       log.warn(createOperationContext('init'), `Failed to reconstruct shared memory ownership, continuing without: ${err instanceof Error ? err.message : String(err)}`);
     }
 
+    // GH #748: one-shot migration of SWM `prov:wasAttributedTo` from
+    // peer-ID string literals to agent DID URIs. Idempotent via a
+    // per-CG marker; non-fatal on failure (match the pattern above).
+    try {
+      const migrated = await publisher.migrateSwmAttributionToAgentDid();
+      if (migrated.rewritten > 0 || migrated.skipped > 0) {
+        const log = new Logger('DKGAgent');
+        log.info(
+          createOperationContext('init'),
+          `Migrated SWM attribution across ${migrated.cgs} CG(s): rewrote ${migrated.rewritten} literal(s) to agent DID, ${migrated.skipped} unresolved`,
+        );
+      }
+    } catch (err) {
+      const log = new Logger('DKGAgent');
+      log.warn(createOperationContext('init'), `Failed to migrate SWM attribution to agent DID, continuing without: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
     const queryEngine = new DKGQueryEngine(store);
 
     return new DKGAgent(

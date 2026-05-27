@@ -121,6 +121,43 @@ describe('generateKCMetadata', () => {
     const kaSubjects = new Set(quads.filter(q => q.predicate === RDF_TYPE && q.object === `${DKG}KnowledgeAsset`).map(q => q.subject));
     expect(kaSubjects.size).toBe(2);
   });
+
+  it('GH #748 fallback: attribution is the peer-ID literal when neither agentAddress nor authorAddress is supplied', () => {
+    const quads = generateKCMetadata(makeMeta(), [makeKA()]);
+    const attribution = quads.find(q => q.subject === UAL && q.predicate === `${PROV}wasAttributedTo`);
+    expect(attribution).toBeDefined();
+    expect(attribution!.object).toBe('"12D3KooWTestPeer"');
+  });
+
+  it('GH #748: attribution is the agent DID URI when agentAddress is supplied', () => {
+    const ADDR = '0xaF7E932F79263f1A303790Bd6C01b096f5334BBB';
+    const quads = generateKCMetadata(makeMeta({ agentAddress: ADDR }), [makeKA()]);
+    const attribution = quads.find(q => q.subject === UAL && q.predicate === `${PROV}wasAttributedTo`);
+    expect(attribution).toBeDefined();
+    expect(attribution!.object).toBe(`did:dkg:agent:${ADDR}`);
+  });
+
+  it('GH #748: attribution falls back to authorAddress when agentAddress is omitted but publication provenance is set', () => {
+    const ADDR = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8';
+    const quads = generateKCMetadata(
+      makeMeta({ authorAddress: ADDR, publishOperationId: 'op-x' }),
+      [makeKA()],
+    );
+    const attribution = quads.find(q => q.subject === UAL && q.predicate === `${PROV}wasAttributedTo`);
+    expect(attribution).toBeDefined();
+    expect(attribution!.object).toBe(`did:dkg:agent:${ADDR}`);
+  });
+
+  it('GH #748: explicit agentAddress takes precedence over authorAddress', () => {
+    const AGENT = '0xaF7E932F79263f1A303790Bd6C01b096f5334BBB';
+    const AUTHOR = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8';
+    const quads = generateKCMetadata(
+      makeMeta({ agentAddress: AGENT, authorAddress: AUTHOR, publishOperationId: 'op-x' }),
+      [makeKA()],
+    );
+    const attribution = quads.find(q => q.subject === UAL && q.predicate === `${PROV}wasAttributedTo`);
+    expect(attribution!.object).toBe(`did:dkg:agent:${AGENT}`);
+  });
 });
 
 describe('generateKCMetadata — RFC-001 §3.5 publication provenance', () => {
@@ -322,6 +359,26 @@ describe('generateShareMetadata', () => {
     const preds = quads.map(q => q.predicate);
     expect(preds).toContain(`${DKG}publishedAt`);
     expect(preds).toContain('http://www.w3.org/ns/prov#wasAttributedTo');
+  });
+
+  it('GH #748 fallback: attribution is the peer-ID literal when agentAddress is omitted', () => {
+    const quads = generateShareMetadata(wsMeta, wsGraph);
+    const attribution = quads.find(q => q.predicate === 'http://www.w3.org/ns/prov#wasAttributedTo');
+    expect(attribution).toBeDefined();
+    expect(attribution!.object).toBe('"12D3KooWTestPeer"');
+  });
+
+  it('GH #748: attribution is the agent DID URI when agentAddress is supplied', () => {
+    const quads = generateShareMetadata(
+      { ...wsMeta, agentAddress: '0xaF7E932F79263f1A303790Bd6C01b096f5334BBB' },
+      wsGraph,
+    );
+    const attribution = quads.find(q => q.predicate === 'http://www.w3.org/ns/prov#wasAttributedTo');
+    expect(attribution).toBeDefined();
+    expect(attribution!.object).toBe('did:dkg:agent:0xaF7E932F79263f1A303790Bd6C01b096f5334BBB');
+    // The peer ID is still recorded separately for transport-layer audit.
+    const peerIdQuad = quads.find(q => q.predicate === `${DKG}publisherPeerId`);
+    expect(peerIdQuad!.object).toBe('"12D3KooWTestPeer"');
   });
 
   it('includes compact operation reference fields', () => {

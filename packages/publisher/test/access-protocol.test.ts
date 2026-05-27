@@ -310,8 +310,16 @@ describe('Access Protocol', () => {
     await storeA.delete([
       { subject: kcUal, predicate: 'http://dkg.io/ontology/accessPolicy', object: '"ownerOnly"', graph: metaGraph },
       { subject: kcUal, predicate: 'http://dkg.io/ontology/publisherPeerId', object: `"${nodeA.peerId}"`, graph: metaGraph },
-      { subject: kcUal, predicate: 'http://www.w3.org/ns/prov#wasAttributedTo', object: `"${nodeA.peerId}"`, graph: metaGraph },
     ]);
+    // GH #748: `wasAttributedTo` may be either a peer-ID literal (legacy)
+    // or a `did:dkg:agent:0x…` URI (post-fix when authorAddress is known).
+    // Drop the quad by pattern to cover both shapes for this "owner identity
+    // missing" simulation.
+    await storeA.deleteByPattern({
+      graph: metaGraph,
+      subject: kcUal,
+      predicate: 'http://www.w3.org/ns/prov#wasAttributedTo',
+    });
 
     const accessHandler = new AccessHandler(storeA, bus);
     const routerA = new ProtocolRouter(nodeA);
@@ -349,8 +357,15 @@ describe('Access Protocol', () => {
     const metaGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
     await storeA.delete([
       { subject: kcUal, predicate: 'http://dkg.io/ontology/publisherPeerId', object: `"${nodeA.peerId}"`, graph: metaGraph },
-      { subject: kcUal, predicate: 'http://www.w3.org/ns/prov#wasAttributedTo', object: `"${nodeA.peerId}"`, graph: metaGraph },
     ]);
+    // GH #748: `wasAttributedTo` may be either a peer-ID literal or an
+    // agent DID URI; drop by pattern to simulate the "owner identity missing"
+    // case regardless of which shape is stored.
+    await storeA.deleteByPattern({
+      graph: metaGraph,
+      subject: kcUal,
+      predicate: 'http://www.w3.org/ns/prov#wasAttributedTo',
+    });
 
     const kaUal = `${result.ual}/1`;
     const accessResult = await accessClient.requestAccess(nodeA.peerId, kaUal);

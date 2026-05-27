@@ -232,6 +232,73 @@ describe('Working Memory Assertion Lifecycle', () => {
     }
   });
 
+  it('GH #748 migration: rewrites peer-ID literal wasAttributedTo → agent DID URI when AGENTS lookup hits, leaves miss as-is, skips marked CGs on re-run', async () => {
+    const AGENTS_GRAPH = 'did:dkg:context-graph:agents/_data';
+    const CG_META = `did:dkg:context-graph:${CG_ID}/_meta`;
+    const SWM_META = `did:dkg:context-graph:${CG_ID}/_shared_memory_meta`;
+    const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+    const DKG = 'http://dkg.io/ontology/';
+    const PROV = 'http://www.w3.org/ns/prov#';
+
+    // Seed AGENTS registry: one peer with a known agent address, one without.
+    const PEER_KNOWN = '12D3KooWKnownPeer';
+    const PEER_UNKNOWN = '12D3KooWUnknownPeer';
+    const ADDR_KNOWN = '0xaF7E932F79263f1A303790Bd6C01b096f5334BBB';
+
+    await store.insert([
+      { subject: `did:dkg:agent:${ADDR_KNOWN}`, predicate: RDF_TYPE, object: `${DKG}Agent`, graph: AGENTS_GRAPH },
+      { subject: `did:dkg:agent:${ADDR_KNOWN}`, predicate: `${DKG}peerId`, object: `"${PEER_KNOWN}"`, graph: AGENTS_GRAPH },
+    ]);
+
+    // Seed CG with one SWM WorkspaceOperation per peer, with literal-form
+    // wasAttributedTo (the legacy/buggy shape).
+    const OP_KNOWN = `urn:dkg:share:${CG_ID}:op-known`;
+    const OP_UNKNOWN = `urn:dkg:share:${CG_ID}:op-unknown`;
+    await store.insert([
+      { subject: OP_KNOWN, predicate: RDF_TYPE, object: `${DKG}WorkspaceOperation`, graph: SWM_META },
+      { subject: OP_KNOWN, predicate: `${DKG}publisherPeerId`, object: `"${PEER_KNOWN}"`, graph: SWM_META },
+      { subject: OP_KNOWN, predicate: `${PROV}wasAttributedTo`, object: `"${PEER_KNOWN}"`, graph: SWM_META },
+      { subject: OP_UNKNOWN, predicate: RDF_TYPE, object: `${DKG}WorkspaceOperation`, graph: SWM_META },
+      { subject: OP_UNKNOWN, predicate: `${DKG}publisherPeerId`, object: `"${PEER_UNKNOWN}"`, graph: SWM_META },
+      { subject: OP_UNKNOWN, predicate: `${PROV}wasAttributedTo`, object: `"${PEER_UNKNOWN}"`, graph: SWM_META },
+    ]);
+    // Ensure the CG itself appears in `listContextGraphs` so the migration
+    // visits its meta graph (the bare `_meta` graph plus any data is enough).
+    await store.insert([
+      { subject: `did:dkg:context-graph:${CG_ID}`, predicate: RDF_TYPE, object: `${DKG}ContextGraph`, graph: CG_META },
+    ]);
+
+    // First pass: should rewrite the resolvable row, leave the unresolved
+    // one, and drop a marker.
+    const r1 = await publisher.migrateSwmAttributionToAgentDid();
+    expect(r1.rewritten).toBe(1);
+    expect(r1.skipped).toBe(1);
+
+    const rowsAfter = await store.query(
+      `SELECT ?s ?o WHERE { GRAPH <${SWM_META}> { ?s <${PROV}wasAttributedTo> ?o } }`,
+    );
+    expect(rowsAfter.type).toBe('bindings');
+    if (rowsAfter.type === 'bindings') {
+      const known = rowsAfter.bindings.find((b) => b['s'] === OP_KNOWN);
+      const unknown = rowsAfter.bindings.find((b) => b['s'] === OP_UNKNOWN);
+      // Known peer → rewritten to URI form (no surrounding quotes).
+      expect(known!['o']).toBe(`did:dkg:agent:${ADDR_KNOWN}`);
+      // Unknown peer → still a literal.
+      expect(unknown!['o']).toBe(`"${PEER_UNKNOWN}"`);
+    }
+
+    const markerAfter = await store.query(
+      `SELECT ?ts WHERE { GRAPH <${CG_META}> { <urn:dkg:migration:swm-attr-agent-did> <${DKG}appliedAt> ?ts } }`,
+    );
+    expect(markerAfter.type).toBe('bindings');
+    if (markerAfter.type === 'bindings') expect(markerAfter.bindings.length).toBe(1);
+
+    // Second pass: marker present → no work done.
+    const r2 = await publisher.migrateSwmAttributionToAgentDid();
+    expect(r2.rewritten).toBe(0);
+    expect(r2.skipped).toBe(0);
+  });
+
   it('full lifecycle: create → write → promote → verify SWM → discard', async () => {
     await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
     await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
