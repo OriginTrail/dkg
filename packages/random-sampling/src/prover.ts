@@ -311,41 +311,42 @@ export class RandomSamplingProver {
     const kcId = challenge.knowledgeCollectionId;
     const chunkId = challenge.chunkId;
 
-    // OT-RFC-40 §7.5 + Codex review on PR #718 (Comment 1 of round 3):
-    // the storage-tag resolution MUST happen before any storage-bound
-    // chain read. `getKCContextGraphId`, `getLatestMerkleRoot`, and
-    // `getMerkleLeafCount` in the EVM adapter all hardcode the V10
-    // default `KnowledgeCollectionStorage`; calling them for a tagged
-    // challenge would either return the wrong CG/root/leafCount or
-    // throw, both of which would land before this fail-closed branch
-    // could fire. Resolve the tag now — and skip the period — if the
-    // adapter's registry says the challenge belongs to anything other
-    // than the V10 default.
+    // OT-RFC-40 §7.5 + Codex review on PR #718:
+    //
+    //   Round 3 Comment 1: storage-tag resolution MUST happen before
+    //   any storage-bound chain read so a tagged challenge can't
+    //   reach `getLatestMerkleRoot` / `getMerkleLeafCount` against
+    //   the wrong contract.
+    //
+    //   Round 4 Comment 1: tagged challenges MUST NOT be permanently
+    //   unprovable. Future `kcs-ack-based` storages (V11+ extending
+    //   the V10 family) share the V10 method shapes and ABI, so we
+    //   route the chain reads to the challenge's specific storage
+    //   address via `opts.storageContract`. Pre-reserved-range V9
+    //   KAS challenges remain fail-closed (its method shapes diverge
+    //   from V10's; full V9 RS support is a follow-up RFC).
     //
     // Adapters without a registry at all (`kcStorageRegistry` is
-    // `undefined`) still get the legacy unfiltered behaviour because
-    // they explicitly opted out of tag-aware proving by not exposing
-    // a registry.
+    // `undefined`) get the legacy unfiltered behaviour because they
+    // explicitly opted out of tag-aware proving.
     let expectedStorageTag: string | undefined;
+    let storageContractForReads: string | undefined;
     if (this.chain.kcStorageRegistry) {
-      expectedStorageTag = this.chain.kcStorageRegistry.tagFor(
-        challenge.knowledgeCollectionStorageContract,
-      );
-      if (expectedStorageTag === undefined) {
+      const registry = this.chain.kcStorageRegistry;
+      let entry = registry.getByAddress(challenge.knowledgeCollectionStorageContract);
+      if (entry === undefined) {
         // Stale cache / Hub event race / partial init failure — try a
         // single refresh before fail-closing.
         try {
-          await this.chain.kcStorageRegistry.refresh();
+          await registry.refresh();
         } catch (err) {
           this.log.warn('rs.tick.kcs-registry-refresh-failed', {
             err: err instanceof Error ? err.message : String(err),
           });
         }
-        expectedStorageTag = this.chain.kcStorageRegistry.tagFor(
-          challenge.knowledgeCollectionStorageContract,
-        );
+        entry = registry.getByAddress(challenge.knowledgeCollectionStorageContract);
       }
-      if (expectedStorageTag === undefined) {
+      if (entry === undefined) {
         const storageAddress = challenge.knowledgeCollectionStorageContract;
         this.log.warn('rs.tick.kcs-registry-miss', {
           kcId: kcId.toString(),
@@ -363,40 +364,69 @@ export class RandomSamplingProver {
             },
           }),
         );
-        // No reliable cgId yet (existing-challenge branch hasn't
-        // queried it because the read is storage-bound). Use the chain-
-        // side cgId from the createChallenge path when available,
-        // otherwise 0 to signal "unknown CG".
         return { kind: 'kc-not-synced', kcId, cgId: cgIdFromCreate ?? 0n };
       }
-      if (expectedStorageTag !== '') {
-        // The chain reads below are bound to the V10 default KC
-        // storage. Tagged-storage RS routing requires those reads to
-        // grow a tag/address parameter — tracked as a follow-up to
-        // RFC-40. Until then, a non-empty tag is a hard fail-closed.
-        this.log.warn('rs.tick.tagged-storage-rs-unsupported', {
-          kcId: kcId.toString(),
-          storageContract: challenge.knowledgeCollectionStorageContract,
-          expectedStorageTag,
-        });
-        await this.wal.append(
-          makeWalEntry(periodKey, 'failed', {
+      expectedStorageTag = entry.tag;
+      // Route chain reads explicitly only when the storage isn't the
+      // adapter's bound default. The default-tag path keeps using the
+      // implicit (no-opts) read so existing tests + adapters that
+      // don't model the opts argument continue to work bit-for-bit.
+      if (entry.tag !== '') {
+        if (entry.authMode === 'kcs-ack-based') {
+          // V10 family: stable method shapes across versions, route by
+          // the challenge's concrete storage address.
+          storageContractForReads = entry.address;
+        } else if (entry.authMode === 'kas-pre-reserved-range') {
+          // V9 KAS: read-side method shapes (publishCount + per-batch
+          // root) differ from V10. RS support tracked as a follow-up.
+          this.log.warn('rs.tick.kas-rs-unsupported', {
             kcId: kcId.toString(),
-            chunkId: chunkId.toString(),
-            error: {
-              code: 'tagged-storage-rs-unsupported',
-              message:
-                `Random-sampling chain reads are bound to the V10 default KC storage; ` +
-                `challenge storage tag "${expectedStorageTag}" is not yet routed end-to-end`,
-            },
-          }),
-        );
-        return { kind: 'kc-not-synced', kcId, cgId: cgIdFromCreate ?? 0n };
+            storageContract: challenge.knowledgeCollectionStorageContract,
+            expectedStorageTag,
+          });
+          await this.wal.append(
+            makeWalEntry(periodKey, 'failed', {
+              kcId: kcId.toString(),
+              chunkId: chunkId.toString(),
+              error: {
+                code: 'kas-rs-unsupported',
+                message:
+                  `V9 KnowledgeAssetsStorage random-sampling reads are not yet supported; ` +
+                  `challenge storage tag "${expectedStorageTag}" deferred to a follow-up RFC`,
+              },
+            }),
+          );
+          return { kind: 'kc-not-synced', kcId, cgId: cgIdFromCreate ?? 0n };
+        } else {
+          // unknown authMode: fail closed.
+          this.log.warn('rs.tick.tagged-storage-unknown-auth', {
+            kcId: kcId.toString(),
+            storageContract: challenge.knowledgeCollectionStorageContract,
+            expectedStorageTag,
+            hubName: entry.hubName,
+          });
+          await this.wal.append(
+            makeWalEntry(periodKey, 'failed', {
+              kcId: kcId.toString(),
+              chunkId: chunkId.toString(),
+              error: {
+                code: 'tagged-storage-unknown-auth',
+                message:
+                  `KC storage "${entry.hubName}" at ${entry.address} has an unknown auth ` +
+                  `mode; refusing to prove without an explicit policy`,
+              },
+            }),
+          );
+          return { kind: 'kc-not-synced', kcId, cgId: cgIdFromCreate ?? 0n };
+        }
       }
     }
 
-    // Storage tag is the default V10 (or registry isn't present). The
-    // existing chain reads are now safe to use.
+    // Storage tag is either the default V10 or a `kcs-ack-based`
+    // future extension (which shares the V10 read API). Either way the
+    // chain reads below are safe — the optional storageContract arg is
+    // undefined for the default path and the resolved entry address
+    // for the tagged path.
     cgId = cgIdFromCreate ?? (await this.chain.getKCContextGraphId(kcId));
 
     await this.wal.append(
@@ -404,6 +434,7 @@ export class RandomSamplingProver {
         kcId: kcId.toString(),
         cgId: cgId.toString(),
         chunkId: chunkId.toString(),
+        storageTag: expectedStorageTag ?? '',
       }),
     );
 
@@ -418,8 +449,12 @@ export class RandomSamplingProver {
       return { kind: 'cg-not-found', kcId };
     }
 
-    const expectedRoot = await this.chain.getLatestMerkleRoot(kcId);
-    const expectedLeafCount = await this.chain.getMerkleLeafCount(kcId);
+    const expectedRoot = await this.chain.getLatestMerkleRoot(kcId, {
+      storageContract: storageContractForReads,
+    });
+    const expectedLeafCount = await this.chain.getMerkleLeafCount(kcId, {
+      storageContract: storageContractForReads,
+    });
 
     let leaves: Uint8Array[];
     try {

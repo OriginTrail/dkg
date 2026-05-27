@@ -54,6 +54,14 @@ interface FakeChainState {
    *  "registry-less" mode where `expectedStorageTag` is undefined and
    *  the extractor falls back to its legacy unfiltered behaviour. */
   kcStorageRegistry?: ChainAdapter['kcStorageRegistry'];
+  /** OT-RFC-40 §7.5 (Codex review on PR #718, round 4): optional
+   *  override hooks for the chain reads that take the new optional
+   *  `opts.storageContract` argument. Tests that need to assert the
+   *  routing parameter is passed correctly inject custom spies; tests
+   *  that don't care use the default `state.expectedRoot` /
+   *  `state.expectedLeafCount` constant returns. */
+  getLatestMerkleRoot?: ChainAdapter['getLatestMerkleRoot'];
+  getMerkleLeafCount?: ChainAdapter['getMerkleLeafCount'];
 }
 
 function makeChain(state: FakeChainState): ChainAdapter {
@@ -64,8 +72,8 @@ function makeChain(state: FakeChainState): ChainAdapter {
     getActiveProofPeriodStatus: vi.fn(async () => state.status),
     getNodeChallenge: vi.fn(async () => state.challengeForNode),
     createChallenge: vi.fn(state.createChallenge),
-    getLatestMerkleRoot: vi.fn(async () => state.expectedRoot),
-    getMerkleLeafCount: vi.fn(async () => state.expectedLeafCount),
+    getLatestMerkleRoot: state.getLatestMerkleRoot ?? vi.fn(async () => state.expectedRoot),
+    getMerkleLeafCount: state.getMerkleLeafCount ?? vi.fn(async () => state.expectedLeafCount),
     getKCContextGraphId: vi.fn(async () => state.cgIdForKc),
     submitProof: vi.fn(state.submitProof),
   };
@@ -738,8 +746,8 @@ describe('RandomSamplingProver — multi-storage routing (OT-RFC-40, Codex revie
       // The "stale cache" recovery attempt fails to discover the
       // challenged storage. The prover must escalate to fail-closed.
     });
-    const tagFor = vi.fn(() => undefined);
-    const fakeRegistry = { refresh, tagFor } as unknown as NonNullable<ChainAdapter['kcStorageRegistry']>;
+    const getByAddress = vi.fn(() => undefined);
+    const fakeRegistry = { refresh, getByAddress } as unknown as NonNullable<ChainAdapter['kcStorageRegistry']>;
 
     const challengeStorage = '0x000000000000000000000000000000000000beef';
     const submitProof = vi.fn(async () => ({ hash: '0xunused', blockNumber: 1, success: true }));
@@ -768,9 +776,9 @@ describe('RandomSamplingProver — multi-storage routing (OT-RFC-40, Codex revie
     expect(outcome).toEqual({ kind: 'kc-not-synced', kcId: fixture.kcId, cgId: fixture.cgId });
     // Refresh was attempted exactly once before fail-closing.
     expect(refresh).toHaveBeenCalledTimes(1);
-    // tagFor consulted twice: once before refresh, once after.
-    expect(tagFor).toHaveBeenCalledTimes(2);
-    expect(tagFor).toHaveBeenCalledWith(challengeStorage);
+    // getByAddress consulted twice: once before refresh, once after.
+    expect(getByAddress).toHaveBeenCalledTimes(2);
+    expect(getByAddress).toHaveBeenCalledWith(challengeStorage);
     expect(submitProof).not.toHaveBeenCalled();
     const failed = (await wal.readAll()).find((e) => e.status === 'failed');
     expect(failed?.error?.code).toBe('kcs-registry-miss');
@@ -795,14 +803,26 @@ describe('RandomSamplingProver — multi-storage routing (OT-RFC-40, Codex revie
     const { root, leafCount } = await seedKC(store, fixture);
 
     const refresh = vi.fn(async () => {});
+    const challengeStorage = '0x000000000000000000000000000000000000face';
     // The default-storage tag round-trip confirms the registry path
     // is wired without changing observable behaviour vs the
     // registry-less mode (legacy 3-segment UALs end up filtered by
-    // `expectedStorageTag === ''`, which matches the seed UAL).
-    const tagFor = vi.fn(() => '');
-    const fakeRegistry = { refresh, tagFor } as unknown as NonNullable<ChainAdapter['kcStorageRegistry']>;
+    // `expectedStorageTag === ''`, which matches the seed UAL). The
+    // registry returns a full entry now that the prover routes by
+    // authMode (Codex review on PR #718, round 4).
+    const defaultEntry = {
+      hubName: 'KnowledgeCollectionStorage',
+      address: challengeStorage,
+      uriBase: 'did:dkg',
+      tag: '',
+      authMode: 'kcs-ack-based' as const,
+    };
+    const getByAddress = vi.fn(() => defaultEntry);
+    const fakeRegistry = { refresh, getByAddress } as unknown as NonNullable<ChainAdapter['kcStorageRegistry']>;
 
     const submitProof = vi.fn(async () => ({ hash: '0xresolved', blockNumber: 1, success: true }));
+    const getLatestMerkleRoot = vi.fn(async () => root);
+    const getMerkleLeafCount = vi.fn(async () => leafCount);
     const chain = makeChain({
       status: { activeProofPeriodStartBlock: 1000n, isValid: true },
       challengeForNode: null,
@@ -810,7 +830,7 @@ describe('RandomSamplingProver — multi-storage routing (OT-RFC-40, Codex revie
         challenge: makeChallenge({
           knowledgeCollectionId: fixture.kcId,
           chunkId: 0n,
-          knowledgeCollectionStorageContract: '0x000000000000000000000000000000000000face',
+          knowledgeCollectionStorageContract: challengeStorage,
         }),
         contextGraphId: fixture.cgId,
         hash: '0x', blockNumber: 1, success: true,
@@ -820,43 +840,119 @@ describe('RandomSamplingProver — multi-storage routing (OT-RFC-40, Codex revie
       cgIdForKc: fixture.cgId,
       submitProof: submitProof as never,
       kcStorageRegistry: fakeRegistry,
+      getLatestMerkleRoot: getLatestMerkleRoot as never,
+      getMerkleLeafCount: getMerkleLeafCount as never,
     });
 
     const prover = new RandomSamplingProver({ chain, store, identityId: IDENTITY_ID });
     const outcome = await prover.tick();
     expect(outcome.kind).toBe('submitted');
-    // Registry was hit once (no refresh needed because tagFor returned
-    // a defined value on the first call).
-    expect(tagFor).toHaveBeenCalledTimes(1);
+    // Registry was hit once (no refresh needed because getByAddress
+    // returned a defined entry on the first call).
+    expect(getByAddress).toHaveBeenCalledTimes(1);
     expect(refresh).not.toHaveBeenCalled();
     expect(submitProof).toHaveBeenCalledTimes(1);
+    // Default-tag path: chain reads called WITHOUT a storageContract
+    // routing arg (i.e. opts.storageContract === undefined), so the
+    // adapter uses its bound default. Round 4 rule: only tagged
+    // storages override the implicit default-read path.
+    expect(getLatestMerkleRoot).toHaveBeenCalledWith(fixture.kcId, { storageContract: undefined });
+    expect(getMerkleLeafCount).toHaveBeenCalledWith(fixture.kcId, { storageContract: undefined });
     await prover.close();
   });
 
-  it('skips period when the registry resolves a non-default-storage tag (Codex review on PR #718, Comment 1 of round 2)', async () => {
-    // The chain reads `getKCContextGraphId`, `getLatestMerkleRoot`,
-    // `getMerkleLeafCount` are all bound to the V10 default KC
-    // storage in the EVM adapter today — they don't accept a storage
-    // tag/address argument. Filtering the local-store extractor by a
-    // non-empty tag would only close the disambiguation gap on the
-    // read side; the chain reads above would still query V10 KCS,
-    // verifying our local data against the WRONG contract's expected
-    // root and leaf count. Fail-closed with an explicit
-    // `tagged-storage-rs-unsupported` reason until those reads grow
-    // a tag/address parameter (tracked as RFC-40 follow-up).
+  it('routes chain reads through opts.storageContract for kcs-ack-based tagged challenges (V11+) (Codex review on PR #718, Comment 1 of round 4)', async () => {
+    // The PR's promise: future KC storage versions go live without
+    // operator action. For random sampling specifically, that means a
+    // V11 (or any future `kcs-ack-based`) storage's KC must be
+    // provable end-to-end — the prover routes `getLatestMerkleRoot`
+    // and `getMerkleLeafCount` to the challenge's specific storage
+    // address via the new `opts.storageContract` parameter, instead
+    // of querying the adapter's bound default contract (which would
+    // return root/leafCount for a different KC, mismatching local
+    // data and slashing the node).
     const store = new OxigraphStore();
     const fixture: KCFixture = {
       cgId: 11n,
       kcId: 7n,
-      ual: 'did:dkg:hardhat:31337/0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1/7',
+      ual: 'did:dkg:v11-future/hardhat:31337/0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1/7',
+      rootEntities: ['urn:e:1'],
+      publicTriples: [{ subject: 'urn:e:1', predicate: 'urn:p:k', object: '"a"' }],
+    };
+    const { root, leafCount } = await seedKC(store, fixture);
+
+    const v11Address = '0x00000000000000000000000000000000000000b1';
+    const refresh = vi.fn(async () => {});
+    const v11Entry = {
+      hubName: 'KnowledgeCollectionStorageV11',
+      address: v11Address,
+      uriBase: 'did:dkg:v11-future',
+      tag: 'v11-future',
+      authMode: 'kcs-ack-based' as const,
+    };
+    const getByAddress = vi.fn(() => v11Entry);
+    const fakeRegistry = { refresh, getByAddress } as unknown as NonNullable<ChainAdapter['kcStorageRegistry']>;
+
+    const submitProof = vi.fn(async () => ({ hash: '0xv11-proven', blockNumber: 1, success: true }));
+    const getLatestMerkleRoot = vi.fn(async (_kcId: bigint, _opts?: { storageContract?: string }) => root);
+    const getMerkleLeafCount = vi.fn(async (_kcId: bigint, _opts?: { storageContract?: string }) => leafCount);
+    const chain = makeChain({
+      status: { activeProofPeriodStartBlock: 1000n, isValid: true },
+      challengeForNode: null,
+      createChallenge: async () => ({
+        challenge: makeChallenge({
+          knowledgeCollectionId: fixture.kcId,
+          chunkId: 0n,
+          knowledgeCollectionStorageContract: v11Address,
+        }),
+        contextGraphId: fixture.cgId,
+        hash: '0x', blockNumber: 1, success: true,
+      }),
+      expectedRoot: root,
+      expectedLeafCount: leafCount,
+      cgIdForKc: fixture.cgId,
+      submitProof: submitProof as never,
+      kcStorageRegistry: fakeRegistry,
+      getLatestMerkleRoot: getLatestMerkleRoot as never,
+      getMerkleLeafCount: getMerkleLeafCount as never,
+    });
+
+    const prover = new RandomSamplingProver({ chain, store, identityId: IDENTITY_ID });
+    const outcome = await prover.tick();
+    expect(outcome.kind).toBe('submitted');
+    expect(submitProof).toHaveBeenCalledTimes(1);
+    // Critical assertion: the routing arg was passed through to the
+    // chain reads as the V11 storage's address, not the bound default.
+    expect(getLatestMerkleRoot).toHaveBeenCalledWith(fixture.kcId, { storageContract: v11Address });
+    expect(getMerkleLeafCount).toHaveBeenCalledWith(fixture.kcId, { storageContract: v11Address });
+    await prover.close();
+  });
+
+  it('skips period as kas-rs-unsupported when the challenge resolves to a V9 KAS (kas-pre-reserved-range) tagged storage', async () => {
+    // V9 KAS read APIs (publishCount + per-batch root) diverge from
+    // V10's, so we don't yet route the chain reads against KAS.
+    // Fail-closed with `kas-rs-unsupported` until a follow-up RFC
+    // adds explicit V9 RS support.
+    const store = new OxigraphStore();
+    const fixture: KCFixture = {
+      cgId: 11n,
+      kcId: 7n,
+      ual: 'did:dkg:v9/hardhat:31337/0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1/7',
       rootEntities: ['urn:e:1'],
       publicTriples: [{ subject: 'urn:e:1', predicate: 'urn:p:k', object: '"a"' }],
     };
     const { root, leafCount } = await seedKC(store, fixture);
 
     const refresh = vi.fn(async () => {});
-    const tagFor = vi.fn(() => 'v9');
-    const fakeRegistry = { refresh, tagFor } as unknown as NonNullable<ChainAdapter['kcStorageRegistry']>;
+    const v9Entry = {
+      hubName: 'KnowledgeAssetsStorage',
+      address: '0x00000000000000000000000000000000000000a9',
+      uriBase: 'did:dkg:v9',
+      tag: 'v9',
+      authMode: 'kas-pre-reserved-range' as const,
+    };
+    const getByAddress = vi.fn(() => v9Entry);
+    const fakeRegistry = { refresh, getByAddress } as unknown as NonNullable<ChainAdapter['kcStorageRegistry']>;
 
     const submitProof = vi.fn(async () => ({ hash: '0xunused', blockNumber: 1, success: true }));
     const chain = makeChain({
@@ -866,7 +962,7 @@ describe('RandomSamplingProver — multi-storage routing (OT-RFC-40, Codex revie
         challenge: makeChallenge({
           knowledgeCollectionId: fixture.kcId,
           chunkId: 0n,
-          knowledgeCollectionStorageContract: '0x00000000000000000000000000000000000000a9',
+          knowledgeCollectionStorageContract: v9Entry.address,
         }),
         contextGraphId: fixture.cgId,
         hash: '0x', blockNumber: 1, success: true,
@@ -884,7 +980,63 @@ describe('RandomSamplingProver — multi-storage routing (OT-RFC-40, Codex revie
     expect(outcome).toEqual({ kind: 'kc-not-synced', kcId: fixture.kcId, cgId: fixture.cgId });
     expect(submitProof).not.toHaveBeenCalled();
     const failed = (await wal.readAll()).find((e) => e.status === 'failed');
-    expect(failed?.error?.code).toBe('tagged-storage-rs-unsupported');
+    expect(failed?.error?.code).toBe('kas-rs-unsupported');
+    await prover.close();
+  });
+
+  it('skips period as tagged-storage-unknown-auth when authMode is unknown', async () => {
+    // Defence-in-depth: if a future Hub registers a KC-class storage
+    // under a name pattern the registry doesn't have a policy for,
+    // the prover MUST refuse to attest a proof rather than implicit-
+    // routing to the V10 reader.
+    const store = new OxigraphStore();
+    const fixture: KCFixture = {
+      cgId: 11n,
+      kcId: 7n,
+      ual: 'did:dkg:experimental/hardhat:31337/0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1/7',
+      rootEntities: ['urn:e:1'],
+      publicTriples: [{ subject: 'urn:e:1', predicate: 'urn:p:k', object: '"a"' }],
+    };
+    const { root, leafCount } = await seedKC(store, fixture);
+
+    const refresh = vi.fn(async () => {});
+    const unknownEntry = {
+      hubName: 'ExperimentalStorage',
+      address: '0x00000000000000000000000000000000000000ee',
+      uriBase: 'did:dkg:experimental',
+      tag: 'experimental',
+      authMode: 'unknown' as const,
+    };
+    const getByAddress = vi.fn(() => unknownEntry);
+    const fakeRegistry = { refresh, getByAddress } as unknown as NonNullable<ChainAdapter['kcStorageRegistry']>;
+
+    const submitProof = vi.fn(async () => ({ hash: '0xunused', blockNumber: 1, success: true }));
+    const chain = makeChain({
+      status: { activeProofPeriodStartBlock: 1000n, isValid: true },
+      challengeForNode: null,
+      createChallenge: async () => ({
+        challenge: makeChallenge({
+          knowledgeCollectionId: fixture.kcId,
+          chunkId: 0n,
+          knowledgeCollectionStorageContract: unknownEntry.address,
+        }),
+        contextGraphId: fixture.cgId,
+        hash: '0x', blockNumber: 1, success: true,
+      }),
+      expectedRoot: root,
+      expectedLeafCount: leafCount,
+      cgIdForKc: fixture.cgId,
+      submitProof: submitProof as never,
+      kcStorageRegistry: fakeRegistry,
+    });
+
+    const wal = new InMemoryProverWal();
+    const prover = new RandomSamplingProver({ chain, store, identityId: IDENTITY_ID, wal });
+    const outcome = await prover.tick();
+    expect(outcome).toEqual({ kind: 'kc-not-synced', kcId: fixture.kcId, cgId: fixture.cgId });
+    expect(submitProof).not.toHaveBeenCalled();
+    const failed = (await wal.readAll()).find((e) => e.status === 'failed');
+    expect(failed?.error?.code).toBe('tagged-storage-unknown-auth');
     await prover.close();
   });
 });

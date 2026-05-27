@@ -145,6 +145,14 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   // already covers the equivalent affordance for tests, so no
   // mock-side parity is needed.
   'refreshMintingKCStorage',
+  // OT-RFC-40 round-4 review fix: TS-private helper used by
+  // `getLatestMerkleRoot` / `getMerkleLeafCount` to instantiate a
+  // one-shot Contract bound to a caller-supplied storage address
+  // (kcs-ack-based future versions). Mock adapter doesn't model
+  // multiple storage instances at all — its in-memory `collections`
+  // map is single-storage, so the equivalent affordance is just
+  // ignoring the optional `opts.storageContract` argument.
+  'kcStorageForRead',
 ]);
 
 const NO_CHAIN_EXEMPT_FROM_EVM = new Set<string>([

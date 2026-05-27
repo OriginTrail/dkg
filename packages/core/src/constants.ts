@@ -259,15 +259,26 @@ export interface ParsedUal {
  * checks keep firing on those suffixed subjects instead of silently
  * skipping (Codex review on PR #718).
  *
- * Disambiguation between the 3- and 4-segment forms when more than 3
- * segments are present:
+ * Disambiguation when more than 3 segments are present (the trick is
+ * that real CAIP-2 chainIds always contain a `:` — e.g. `base:84532`,
+ * `eip155:1` — so they NEVER match `STORAGE_TAG_PATTERN`. Conversely,
+ * a real storage tag like `v9` or `v11` MUST match
+ * `STORAGE_TAG_PATTERN` and CANNOT contain `:`. That's why we can
+ * disambiguate without ambiguity by inspecting `segments[0]` first):
  *
- *   - If `segments[0]` matches `STORAGE_TAG_PATTERN` AND `segments[2]`
- *     matches `PUBLISHER_ADDRESS_PATTERN` → tagged form (and
- *     `segments[3]` is the local id).
- *   - Else if `segments[1]` matches `PUBLISHER_ADDRESS_PATTERN` →
- *     default-storage form (`segments[0]` chainId, `segments[2]`
- *     local id, anything beyond that is the per-KA suffix).
+ *   - If `segments[0]` matches `STORAGE_TAG_PATTERN` (i.e. it looks
+ *     like a tag, not a chainId), the input MUST be the 4-segment
+ *     tagged form. We require `segments[2]` to match
+ *     `PUBLISHER_ADDRESS_PATTERN`. If it doesn't, the input is a
+ *     malformed tagged UAL and we return `null` rather than silently
+ *     falling back to the default-storage interpretation, because
+ *     misclassifying a malformed `did:dkg:v9/0xPub/123/1` as a
+ *     default-storage UAL (chainId="v9") would skip the V9 range
+ *     check in publish-handler (Codex review on PR #718, round 4).
+ *   - Else if `segments[1]` matches `PUBLISHER_ADDRESS_PATTERN`,
+ *     it's the default-storage form (`segments[0]` chainId,
+ *     `segments[2]` local id, anything beyond that is the per-KA
+ *     suffix and is discarded).
  *   - Else → null (unrecognised shape).
  *
  * The `PUBLISHER_ADDRESS_PATTERN` check is what disambiguates real
@@ -294,21 +305,29 @@ export function parseUal(ual: string | undefined | null): ParsedUal | null {
   let publisherAddress: string;
   let localIdSegment: string;
 
-  // Disambiguation order: tagged form is checked first because its
-  // detector is strictly stronger (requires segments[0] to match
-  // STORAGE_TAG_PATTERN, which CAIP-2 chainIds like `base:84532` fail
-  // because they contain ':'). Default-storage detection is the
-  // fallback.
-  if (
-    segments.length >= 4 &&
-    STORAGE_TAG_PATTERN.test(segments[0]) &&
-    PUBLISHER_ADDRESS_PATTERN.test(segments[2])
-  ) {
+  // Inspect segments[0] first: real CAIP-2 chainIds contain `:` and
+  // thus NEVER match STORAGE_TAG_PATTERN, while real storage tags
+  // ALWAYS match it. This makes the choice unambiguous and lets us
+  // reject malformed tagged UALs hard rather than silently demoting
+  // them to default-storage form (Codex review on PR #718, round 4).
+  if (STORAGE_TAG_PATTERN.test(segments[0])) {
+    // Tagged form. Require segments[2] to be a publisher address.
+    // If it isn't, the input is malformed (e.g.
+    // `did:dkg:v9/0xPub/123/1` is missing the chainId between the
+    // tag and publisher) — return null rather than fall back to the
+    // default-storage path, which would parse chainId="v9" and bypass
+    // the V9 range check downstream.
+    if (segments.length < 4 || !PUBLISHER_ADDRESS_PATTERN.test(segments[2])) {
+      return null;
+    }
     storageTag = segments[0];
     chainId = segments[1];
     publisherAddress = segments[2];
     localIdSegment = segments[3];
   } else if (PUBLISHER_ADDRESS_PATTERN.test(segments[1])) {
+    // Default-storage form. segments[0] is the chainId (must contain
+    // `:` per CAIP-2; that's why STORAGE_TAG_PATTERN.test rejected it
+    // above).
     storageTag = '';
     chainId = segments[0];
     publisherAddress = segments[1];

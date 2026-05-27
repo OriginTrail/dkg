@@ -1503,13 +1503,18 @@ export class MockChainAdapter implements ChainAdapter {
   // `createKnowledgeAssetsV10` and `__registerKC`.
   // =====================================================================
 
-  async getLatestMerkleRoot(kcId: bigint): Promise<Uint8Array> {
+  async getLatestMerkleRoot(kcId: bigint, _opts?: { storageContract?: string }): Promise<Uint8Array> {
+    // OT-RFC-40 §7.5: mock adapter doesn't model multiple storage
+    // instances (in-memory `collections` map is single-storage). The
+    // optional `storageContract` arg is accepted for ChainAdapter API
+    // parity but ignored — tests that need multi-storage behaviour
+    // use the EVM adapter against a hardhat fork.
     const entry = this.collections.get(kcId);
     if (!entry) throw new Error(`Mock: unknown kcId ${kcId}`);
     return entry.merkleRoot;
   }
 
-  async getMerkleLeafCount(kcId: bigint): Promise<number> {
+  async getMerkleLeafCount(kcId: bigint, _opts?: { storageContract?: string }): Promise<number> {
     const entry = this.collections.get(kcId);
     if (!entry) throw new Error(`Mock: unknown kcId ${kcId}`);
     return entry.merkleLeafCount;

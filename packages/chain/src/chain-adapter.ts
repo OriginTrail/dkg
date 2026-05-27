@@ -1017,16 +1017,32 @@ export interface ChainAdapter {
    * `kcId` is unknown to the chain or the V10 storage contract is not
    * deployed on this Hub. Optional so non-V10 / no-chain adapters can
    * stub the prover surface.
+   *
+   * OT-RFC-40 §7.5 (Codex review on PR #718, round 4): the optional
+   * `opts.storageContract` argument routes the read to a specific KC
+   * storage address. Used by the random-sampling prover when a
+   * challenge resolves to a `kcs-ack-based` tagged storage (V10
+   * default + future V11+ extensions) so the verification reads run
+   * against the contract that minted the data, not against the
+   * adapter's bound default. When omitted, the adapter MUST query the
+   * default storage as before. V9 KAS (`kas-pre-reserved-range`) is
+   * intentionally NOT supported via this routing — V9 RS is tracked
+   * as a follow-up and prover callers fail-closed before reaching
+   * here.
    */
-  getLatestMerkleRoot?(kcId: bigint): Promise<Uint8Array>;
+  getLatestMerkleRoot?(kcId: bigint, opts?: { storageContract?: string }): Promise<Uint8Array>;
 
   /**
    * V10 flat-KC merkle leaf count (sorted + deduped) recorded on-chain
    * for `kcId`. Used by the prover to (a) validate the local extraction
    * matches the published shape before building a proof, and (b) sanity
    * check the on-chain `chunkId = leafIndex` falls within the tree.
+   *
+   * OT-RFC-40 §7.5 (Codex review on PR #718, round 4): see
+   * `getLatestMerkleRoot` for the `opts.storageContract` routing
+   * rationale.
    */
-  getMerkleLeafCount?(kcId: bigint): Promise<number>;
+  getMerkleLeafCount?(kcId: bigint, opts?: { storageContract?: string }): Promise<number>;
 
   /**
    * Address that signed the latest merkle root for `kcId` (the EOA that

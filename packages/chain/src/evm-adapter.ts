@@ -813,8 +813,6 @@ export class EVMChainAdapter implements ChainAdapter {
     } catch {
       // V8 KnowledgeCollection not deployed — legacy publish surface unavailable.
     }
-    await this.refreshMintingKCStorage();
-
     // OT-RFC-40 §5.3 — build the cross-storage registry so consumers
     // (random-sampling prover, async-lift verifier, replication ack
     // verifier) can map a UAL or `Challenge.knowledgeCollectionStorageContract`
@@ -822,6 +820,15 @@ export class EVMChainAdapter implements ChainAdapter {
     // non-fatal; the registry just stays empty and resolution-time
     // callers fall back to "treat as default storage" which is
     // bit-for-bit pre-RFC behaviour.
+    //
+    // Codex review on PR #718 round 4 (Comment 4): the registry build
+    // MUST run before `refreshMintingKCStorage` because the latter
+    // prefers `kcStorageRegistry.getDefault()` (the storage whose
+    // `uriBase === "did:dkg"` — the RFC's authoritative source of
+    // truth for "the canonical default KC storage") over the legacy
+    // `Hub.getAssetStorageAddress("KnowledgeCollectionStorage")`
+    // resolve, which only matches by Hub registration name and could
+    // miss a future deploy that renames the canonical storage.
     try {
       this.kcStorageRegistry = await this.buildKCStorageRegistry();
     } catch (err) {
@@ -831,6 +838,8 @@ export class EVMChainAdapter implements ChainAdapter {
       );
       this.kcStorageRegistry = undefined;
     }
+
+    await this.refreshMintingKCStorage();
 
     // V9 contracts (KnowledgeAssets + KnowledgeAssetsStorage) are archived
     // (PRD §4.1, deploy scripts 040+041 moved under deploy/archive). Keep
@@ -2942,25 +2951,31 @@ export class EVMChainAdapter implements ChainAdapter {
     // immediately propagates to mint UAL construction and to the
     // ad-hoc reads that still go through the `knowledgeCollectionStorage`
     // contract handle.
+    // The registry refresh MUST complete before refreshMintingKCStorage
+    // runs, because the latter prefers `kcStorageRegistry.getDefault()`
+    // as its source of truth for the canonical default storage.
+    // Sequencing them here avoids a race where the mint helper picks up
+    // the pre-rotation registry entry and rebinds the cached handle to
+    // the old contract for a few milliseconds (Codex round 4).
     const onAssetStorageChange = (): void => {
-      if (this.kcStorageRegistry === undefined) {
-        void this.buildKCStorageRegistry()
-          .then((registry) => {
-            this.kcStorageRegistry = registry;
-          })
-          .catch((err) => console.warn(
-            `[EVMChainAdapter] KC storage registry rebuild after Hub event failed: ${err instanceof Error ? err.message : String(err)}`,
-          ));
-      } else {
-        void this.kcStorageRegistry
-          .refresh()
-          .catch((err) => console.warn(
-            `[EVMChainAdapter] KC storage registry refresh failed after Hub event: ${err instanceof Error ? err.message : String(err)}`,
-          ));
-      }
-      void this.refreshMintingKCStorage().catch((err) => console.warn(
-        `[EVMChainAdapter] minting KC storage refresh after Hub event failed: ${err instanceof Error ? err.message : String(err)}`,
-      ));
+      const registryStep = this.kcStorageRegistry === undefined
+        ? this.buildKCStorageRegistry()
+            .then((registry) => {
+              this.kcStorageRegistry = registry;
+            })
+            .catch((err) => console.warn(
+              `[EVMChainAdapter] KC storage registry rebuild after Hub event failed: ${err instanceof Error ? err.message : String(err)}`,
+            ))
+        : this.kcStorageRegistry
+            .refresh()
+            .catch((err) => console.warn(
+              `[EVMChainAdapter] KC storage registry refresh failed after Hub event: ${err instanceof Error ? err.message : String(err)}`,
+            ));
+      void registryStep.then(() =>
+        this.refreshMintingKCStorage().catch((err) => console.warn(
+          `[EVMChainAdapter] minting KC storage refresh after Hub event failed: ${err instanceof Error ? err.message : String(err)}`,
+        )),
+      );
     };
     try {
       await this.contracts.hub.on('ContractChanged', onChange);
@@ -2974,51 +2989,95 @@ export class EVMChainAdapter implements ChainAdapter {
   }
 
   /**
-   * OT-RFC-40 §5.2 + Codex review on PR #718 (Comment 2 of round 3) —
-   * (re-)bind this adapter to the active `KnowledgeCollectionStorage`
-   * instance and recompute `mintingStorageTag` from its `uri(0)`. Run
-   * once at `init()` and again whenever Hub fires a
-   * `NewAssetStorage`/`AssetStorageChanged` event so a runtime KC
-   * storage rotation doesn't leave the adapter parsing/minting
-   * against the stale contract.
+   * OT-RFC-40 §5.2 — (re-)bind this adapter to the active
+   * `KnowledgeCollectionStorage` instance and recompute
+   * `mintingStorageTag` from its `uri(0)`. Run once at `init()`
+   * (after the registry builds — see init ordering note) and again
+   * whenever Hub fires a `NewAssetStorage`/`AssetStorageChanged`
+   * event (Codex round 3, Comment 2), so a runtime KC storage
+   * rotation doesn't leave the adapter parsing/minting against the
+   * stale contract.
    *
-   * The tag is the suffix of `uri(0)` past the `did:dkg` prefix;
-   * empty for the canonical V10 default storage. Failure to read or
-   * parse the uriBase falls back to "" (the legacy 3-segment UAL
-   * form), which is the most-conservative behaviour: it preserves
-   * every bit of UAL output produced before this RFC.
+   * Source of truth (Codex round 4, Comment 4):
+   *   - PREFERRED: `kcStorageRegistry.getDefault()` — the storage
+   *     whose `uriBase === "did:dkg"`. By RFC §5.2 there is exactly
+   *     one default per Hub, and its `uriBase` is the protocol-
+   *     authoritative way to identify the canonical KC storage. A
+   *     future deploy that registers V11+ as the new default (under
+   *     ANY Hub name) will be picked up correctly.
+   *   - FALLBACK: `Hub.getAssetStorageAddress("KnowledgeCollectionStorage")` —
+   *     legacy Hub-name resolve. Used only when the registry hasn't
+   *     been built yet (init bootstrap before `buildKCStorageRegistry()`
+   *     completes) or when the registry build itself failed/found no
+   *     default storage. Preserves pre-RFC-40 behaviour for clean
+   *     upgrades from a working V10 deploy.
+   *
+   * Atomicity (Codex round 4, Comment 3): the cached
+   * `this.contracts.knowledgeCollectionStorage` handle and
+   * `mintingStorageTag` MUST update as a unit. Any failure during
+   * resolution preserves the previous pair rather than silently
+   * downgrading the tag to `''` while leaving the handle pointed at
+   * a different contract — that combination would stamp default-
+   * storage UALs against data minted on some other contract and
+   * permanently mis-route the collection on chain. On first init,
+   * "previous pair" is the class-default `(undefined, '')`, and the
+   * adapter is expected to fail at mint time rather than silently
+   * legacy-mint.
    */
   private async refreshMintingKCStorage(): Promise<void> {
-    let storage: Contract;
-    try {
-      storage = await this.resolveAssetStorage('KnowledgeCollectionStorage');
-    } catch (err) {
-      console.warn(
-        `[EVMChainAdapter] failed to resolve KnowledgeCollectionStorage from Hub: ${err instanceof Error ? err.message : String(err)}; ` +
-        `keeping previously-bound storage handle (mintingStorageTag="${this.mintingStorageTag}")`,
+    let nextStorage: Contract;
+    let nextTag: string;
+
+    const defaultEntry = this.kcStorageRegistry?.getDefault();
+    if (defaultEntry) {
+      // Registry view: address is already validated via uri(0) read
+      // and the tag is already derived. Trust both and build a
+      // contract handle bound to this signer for write paths.
+      nextStorage = new Contract(
+        defaultEntry.address,
+        loadAbi('KnowledgeCollectionStorage'),
+        this.signer,
       );
-      return;
-    }
-    this.contracts.knowledgeCollectionStorage = storage;
-    try {
-      const uriBase: string = await storage.uri(0);
+      nextTag = defaultEntry.tag;
+    } else {
+      // Legacy fallback: Hub-name resolve + uri(0) read +
+      // deriveStorageTag. Preserve previous {handle, tag} pair on
+      // ANY error here rather than silently downgrading.
+      let storage: Contract;
+      try {
+        storage = await this.resolveAssetStorage('KnowledgeCollectionStorage');
+      } catch (err) {
+        console.warn(
+          `[EVMChainAdapter] failed to resolve KnowledgeCollectionStorage from Hub: ${err instanceof Error ? err.message : String(err)}; ` +
+          `keeping previously-bound {handle, tag} pair (mintingStorageTag="${this.mintingStorageTag}")`,
+        );
+        return;
+      }
+      let uriBase: string;
+      try {
+        uriBase = await storage.uri(0);
+      } catch (err) {
+        console.warn(
+          `[EVMChainAdapter] failed to read uri(0) from KC storage at ${await storage.getAddress()}: ${err instanceof Error ? err.message : String(err)}; ` +
+          `keeping previously-bound {handle, tag} pair (mintingStorageTag="${this.mintingStorageTag}")`,
+        );
+        return;
+      }
       const tag = deriveStorageTag(uriBase);
       if (tag === null) {
         console.warn(
           `[EVMChainAdapter] KC storage at ${await storage.getAddress()} ` +
-          `returned malformed uriBase "${uriBase}"; falling back to default storage tag (3-segment UALs)`,
+          `returned malformed uriBase "${uriBase}"; keeping previously-bound {handle, tag} pair (mintingStorageTag="${this.mintingStorageTag}")`,
         );
-        this.mintingStorageTag = '';
-      } else {
-        this.mintingStorageTag = tag;
+        return;
       }
-    } catch (err) {
-      console.warn(
-        `[EVMChainAdapter] failed to read uri(0) from KC storage: ${err instanceof Error ? err.message : String(err)}; ` +
-        `falling back to default storage tag (3-segment UALs)`,
-      );
-      this.mintingStorageTag = '';
+      nextStorage = storage;
+      nextTag = tag;
     }
+
+    // Atomic commit: both fields update together or neither does.
+    this.contracts.knowledgeCollectionStorage = nextStorage;
+    this.mintingStorageTag = nextTag;
   }
 
   /**
@@ -3344,18 +3403,43 @@ export class EVMChainAdapter implements ChainAdapter {
     return cgs;
   }
 
-  async getLatestMerkleRoot(kcId: bigint): Promise<Uint8Array> {
+  async getLatestMerkleRoot(kcId: bigint, opts?: { storageContract?: string }): Promise<Uint8Array> {
     await this.init();
-    const kcs = this.requireKCStorage();
+    const kcs = this.kcStorageForRead(opts?.storageContract);
     const rootHex: string = await kcs.getLatestMerkleRoot(kcId);
     return ethers.getBytes(rootHex);
   }
 
-  async getMerkleLeafCount(kcId: bigint): Promise<number> {
+  async getMerkleLeafCount(kcId: bigint, opts?: { storageContract?: string }): Promise<number> {
     await this.init();
-    const kcs = this.requireKCStorage();
+    const kcs = this.kcStorageForRead(opts?.storageContract);
     const count: bigint = BigInt(await kcs.getMerkleLeafCount(kcId));
     return Number(count);
+  }
+
+  /**
+   * OT-RFC-40 §7.5 (Codex review on PR #718, round 4) — return either
+   * the adapter's bound default `KnowledgeCollectionStorage` or a
+   * one-shot Contract handle bound to a caller-supplied storage
+   * address. Used by the prover to dispatch reads to the specific
+   * `kcs-ack-based` storage that minted a challenged KC, so a V11+
+   * tagged storage gets its root/leafCount read against its own
+   * contract rather than the (possibly stale-default) bound handle.
+   *
+   * Caller is responsible for ensuring `storageContract` belongs to
+   * a `kcs-ack-based` family (V10 default + future extensions); the
+   * adapter does NOT re-validate the auth mode here, that gating
+   * lives in the prover and in `verifyPublisherOwnsRange`.
+   */
+  private kcStorageForRead(storageContract: string | undefined): Contract {
+    if (storageContract === undefined) {
+      return this.requireKCStorage();
+    }
+    return new Contract(
+      storageContract,
+      loadAbi('KnowledgeCollectionStorage'),
+      this.signer,
+    );
   }
 
   async getLatestMerkleRootPublisher(kcId: bigint): Promise<string> {

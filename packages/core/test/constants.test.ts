@@ -241,6 +241,30 @@ describe('parseUal (OT-RFC-40 §5.2 — handles both 3- and 4-segment forms)', (
     expect(parseUal('did:dkg:base:special/base:84532/0xPub/123')).toBeNull();
   });
 
+  it('rejects malformed tagged UALs without silently demoting to default form (Codex review on PR #718, round 4)', () => {
+    // `did:dkg:v9/<publisher>/<id>` LOOKS like a tagged form because
+    // segments[0]="v9" matches STORAGE_TAG_PATTERN, but it's missing
+    // the chainId between the tag and the publisher. Pre-fix, this
+    // would silently fall back to the default-storage path and parse
+    // as `{chainId: "v9", storageTag: "", ...}`, which the publisher
+    // would then route through the V10 default range check instead
+    // of the V9 KAS pre-reserved-range check. Reject hard instead.
+    expect(
+      parseUal(
+        'did:dkg:v9/0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1/123',
+      ),
+    ).toBeNull();
+    expect(
+      parseUal(
+        'did:dkg:v9/0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1/123/1',
+      ),
+    ).toBeNull();
+    // Also rejects 4-segment shapes where segments[2] is plainly not
+    // a publisher address (random number, random string).
+    expect(parseUal('did:dkg:v11/base:84532/notapublisher/1')).toBeNull();
+    expect(parseUal('did:dkg:v11/base:84532/12345/1')).toBeNull();
+  });
+
   it('returns startKAId: null for non-numeric local-id slot (tentative publish form)', () => {
     // dkg-publisher.ts's tentative path uses `t${publishOperationId}`
     // — the parser must not reject these since they are valid in-flight

@@ -121,6 +121,51 @@ describe('EVMChainAdapter integration', () => {
     expect(owns).toBe(true);
   }, 30_000);
 
+  it('refreshMintingKCStorage prefers kcStorageRegistry.getDefault() as the mint target (Codex review on PR #718, Comment 4 of round 4)', async () => {
+    // The legacy `Hub.getAssetStorageAddress("KnowledgeCollectionStorage")`
+    // resolve only matches by exact Hub registration name. RFC §5.2's
+    // source of truth for "the canonical default storage" is the
+    // storage's `uriBase === "did:dkg"`, not its Hub name. A future
+    // V11 deploy registered under a different name (e.g.
+    // `KnowledgeCollectionStorageV11`) but with `uriBase === "did:dkg"`
+    // is the new default by RFC, even though the legacy Hub-name
+    // resolve would still return whatever is bound to the original
+    // `KnowledgeCollectionStorage` slot. Pin that
+    // `refreshMintingKCStorage` consults the registry first so the
+    // PR's promised additive cutover actually delivers.
+    const adapter = new EVMChainAdapter(makeAdapterConfig(ctx.rpcUrl, ctx.hubAddress, HARDHAT_KEYS.DEPLOYER));
+    await adapter.verifyPublisherOwnsRange(adapter.getSignerAddress(), 1n, 1n);
+    const realLegacyAddr = await (adapter as unknown as {
+      contracts: { knowledgeCollectionStorage: { getAddress(): Promise<string> } };
+    }).contracts.knowledgeCollectionStorage.getAddress();
+    // Simulate a future deploy: V11 sits at a different address but
+    // claims the canonical `did:dkg` uriBase (i.e. it IS the new
+    // default per RFC §5.2 rule 3). The registry surfaces it; the
+    // legacy slot still points at V10's address.
+    const v11Addr = '0x0000000000000000000000000000000000004444';
+    adapter.kcStorageRegistry = new KCStorageRegistry(
+      {
+        getAllAssetStorages: async () => [
+          { name: 'KnowledgeCollectionStorageV11', addr: v11Addr },
+        ],
+      },
+      {
+        readUriBase: async () => 'did:dkg',
+      },
+    );
+    await adapter.kcStorageRegistry.refresh();
+    const internals = adapter as unknown as {
+      refreshMintingKCStorage(): Promise<void>;
+      contracts: { knowledgeCollectionStorage: { getAddress(): Promise<string> } };
+    };
+    await internals.refreshMintingKCStorage();
+    expect(adapter.mintingStorageTag).toBe('');
+    const addrAfter = await internals.contracts.knowledgeCollectionStorage.getAddress();
+    // ethers normalises addresses to checksummed form; compare lowercase.
+    expect(addrAfter.toLowerCase()).toBe(v11Addr.toLowerCase());
+    expect(addrAfter.toLowerCase()).not.toBe(realLegacyAddr.toLowerCase());
+  }, 30_000);
+
   it('refreshMintingKCStorage re-resolves the storage handle and tag (Codex review on PR #718, Comment 2 of round 3)', async () => {
     // The Hub event listener calls `refreshMintingKCStorage` on every
     // `NewAssetStorage`/`AssetStorageChanged` event so a runtime
