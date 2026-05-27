@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useId, useState } from 'react';
+import React, { useCallback, useId, useState } from 'react';
 import { ChevronRight } from 'lucide-react';
 import { useLayoutStore } from '../../stores/layout.js';
 import { useTabsStore } from '../../stores/tabs.js';
@@ -8,11 +8,10 @@ import { api } from '../../api-wrapper.js';
 import { CreateProjectModal } from '../Modals/CreateProjectModal.js';
 import { JoinProjectModal } from '../Modals/JoinProjectModal.js';
 import { useNodeEvents } from '../../hooks/useNodeEvents.js';
+import { useVisibilityPolling } from '../../hooks/useVisibilityPolling.js';
 import { useHiddenContextGraphIds as useHiddenProjectIds } from '../../hooks/useHiddenContextGraphIds.js';
 import {
-  fetchCurrentAgent,
   fetchLocalAgentIntegrations,
-  type AgentIdentity,
   type LocalAgentIntegration,
   type LocalAgentIntegrationStatus,
 } from '../../api.js';
@@ -22,6 +21,7 @@ import {
   toSidebarIdentity,
   type AgentSidebarIdentity,
 } from '../../lib/contextGraphSidebar.js';
+import { useCurrentAgent } from '../../hooks/useCurrentAgent.js';
 
 // Project tree row: a flat, clickable header that opens the project tab.
 // Memory-layer expansion was removed by request — layers are surfaced inside
@@ -94,17 +94,17 @@ function IntegrationsSectionBody() {
   const [localAgents, setLocalAgents] = useState<LocalAgentIntegration[]>([]);
   const [localAgentsError, setLocalAgentsError] = useState<string | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
-    const loadLocal = () => {
-      fetchLocalAgentIntegrations()
-        .then((r) => { if (!cancelled) { setLocalAgents(r.integrations); setLocalAgentsError(null); } })
-        .catch((e: Error) => { if (!cancelled) setLocalAgentsError(e.message); });
-    };
-    loadLocal();
-    const iv = setInterval(loadLocal, 30_000);
-    return () => { cancelled = true; clearInterval(iv); };
+  // BUG-007: 30 s poll now pauses while the tab is hidden via the
+  // shared `useVisibilityPolling` hook (was a raw `setInterval` that
+  // burned 2 calls/min while the user was off-tab). The cancelled
+  // guard is no longer needed because the hook owns its own
+  // tear-down lifecycle.
+  const loadLocal = useCallback(() => {
+    fetchLocalAgentIntegrations()
+      .then((r) => { setLocalAgents(r.integrations); setLocalAgentsError(null); })
+      .catch((e: Error) => setLocalAgentsError(e.message));
   }, []);
+  useVisibilityPolling(loadLocal, 30_000);
 
   return (
     <div className="v10-tree-items" style={{ display: 'block' }}>
@@ -164,7 +164,8 @@ export function PanelLeft() {
   const [treeMode, setTreeMode] = useState<TreeMode>('explorer');
 
   const { hidden: hiddenIds, hide: hideProject, unhideAll } = useHiddenProjectIds();
-  const [agentIdentity, setAgentIdentity] = useState<AgentSidebarIdentity | null>(null);
+  const sharedAgent = useCurrentAgent().data;
+  const agentIdentity: AgentSidebarIdentity | null = sharedAgent ? toSidebarIdentity(sharedAgent) : null;
 
   const visibleContextGraphs = contextGraphs.filter((cg) => !hiddenIds.has(cg.id));
   const myProjects = visibleContextGraphs.filter((cg) =>
@@ -178,18 +179,18 @@ export function PanelLeft() {
 
   const loadCGs = useCallback(() => {
     setLoading(true);
-    fetchCurrentAgent().then((a: AgentIdentity) => setAgentIdentity(toSidebarIdentity(a))).catch(() => {});
+    // Identity is now sourced from the shared `useCurrentAgent` hook
+    // — see `agentIdentity` above. This effect only refreshes the CG
+    // list, which is what the user actually expects from a poll.
     api.fetchContextGraphs()
       .then(({ contextGraphs: cgs }: any) => setContextGraphs(cgs ?? []))
       .catch(() => {})
       .finally(() => setLoading(false));
   }, [setContextGraphs, setLoading]);
-
-  useEffect(() => {
-    loadCGs();
-    const iv = setInterval(loadCGs, 60_000);
-    return () => clearInterval(iv);
-  }, [loadCGs]);
+  // BUG-007: 60 s sidebar refresh runs through the shared
+  // visibility-aware hook so the daemon stops absorbing list calls
+  // when the tab is hidden.
+  useVisibilityPolling(loadCGs, 60_000);
 
   useNodeEvents(useCallback((event) => {
     if (event.type === 'join_approved' || event.type === 'project_synced') {

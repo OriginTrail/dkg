@@ -96,7 +96,13 @@
 /* ══════════════════════════════════════════
    LIGHT THEME
    ══════════════════════════════════════════ */
-body.light {
+/* BUG-004: the variable overrides have to apply at the html element
+   level too, otherwise the `html { background: var(--bg-root) }` rule
+   keeps reading the dark `:root` definition and macOS rubber-band
+   overscroll flashes the dark colour in light mode. The matching
+   class is set on both html and body in App.tsx so existing
+   `body.light .foo` selectors below still work unchanged. */
+:root.light, body.light {
   --bg-root: #fafafa;
   --bg-panel: #f5f5f5;
   --bg-surface: #ffffff;
@@ -4853,32 +4859,6 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
 }
 .v10-ph-agent-tool { font-size: 9px; font-weight: 500; color: var(--text-tertiary); background: var(--bg-elevated); padding: 0 5px; border-radius: 3px; }
 
-.v10-ph-join-requests { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border-subtle); }
-.v10-ph-join-badge {
-  display: inline-flex; align-items: center; justify-content: center;
-  min-width: 16px; height: 16px; border-radius: 8px; font-size: 9px; font-weight: 700;
-  background: #f59e0b; color: #000; margin-left: 6px; padding: 0 4px;
-}
-.v10-ph-join-list { display: flex; flex-direction: column; gap: 6px; }
-.v10-ph-join-item {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 6px 10px; border-radius: 8px; background: var(--bg-surface);
-  border: 1px solid #f59e0b44;
-}
-.v10-ph-join-info { display: flex; flex-direction: column; gap: 1px; }
-.v10-ph-join-name { font-size: 11px; font-weight: 600; color: var(--text-primary); }
-.v10-ph-join-addr { font-size: 9px; font-family: var(--font-mono); color: var(--text-tertiary); }
-.v10-ph-join-actions { display: flex; gap: 4px; }
-.v10-ph-join-btn {
-  border: none; border-radius: 6px; font-size: 10px; font-weight: 600; cursor: pointer;
-  padding: 4px 10px; transition: background 0.15s;
-}
-.v10-ph-join-btn.approve { background: #22c55e22; color: var(--text-success); border: 1px solid #22c55e44; }
-.v10-ph-join-btn.approve:hover { background: #22c55e44; }
-.v10-ph-join-btn.reject { background: #ef444422; color: var(--text-danger); border: 1px solid #ef444444; padding: 4px 8px; }
-.v10-ph-join-btn.reject:hover { background: #ef444444; }
-.v10-ph-join-btn:disabled { opacity: 0.5; cursor: default; }
-
 /* Lazy route spinner */
 .lazy-spinner{display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-tertiary);font-size:13px}
 
@@ -5096,6 +5076,16 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
   border: 1px solid color-mix(in srgb, var(--v10-stat-accent) 18%, var(--border-default));
   border-radius: 8px;
   background: color-mix(in srgb, var(--v10-stat-accent) 5%, var(--bg-surface));
+  /* ui-lead item 7 — Dashboard-style hover: border tints toward
+     the layer accent (falls back to --border-strong on vanilla
+     cells) and a soft shadow rises. The M4 VM-hero gate still
+     binds — DO NOT modify cell padding, border radius, or value
+     size; only the hover-state border-color and box-shadow. */
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.v10-stat-strip-cell:hover {
+  border-color: color-mix(in srgb, var(--v10-stat-accent) 35%, var(--border-strong));
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
 }
 .v10-stat-strip-value {
   display: block;
@@ -5159,78 +5149,252 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
 }
 
 /* ── Project Overview Card ── */
-.v10-po { flex-shrink: 0; padding: 16px; border-bottom: 1px solid var(--border-subtle); background: var(--bg-panel); }
-.v10-po-top { display: flex; align-items: flex-start; gap: 14px; margin-bottom: 14px; }
-.v10-po-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--text-primary); flex-shrink: 0; margin-top: 4px; }
-.v10-po-heading { flex: 1 1 auto; min-width: 0; }
-.v10-po-title { font-size: 15px; font-weight: 600; color: var(--text-primary); }
-.v10-po-desc { font-size: 11px; color: var(--text-tertiary); margin-top: 2px; line-height: 1.5; }
-.v10-po-stat-strip { margin-bottom: 12px; }
-.v10-po-stats { display: flex; gap: 20px; margin-bottom: 12px; flex-wrap: wrap; }
-.v10-po-stat { display: flex; flex-direction: column; align-items: center; gap: 1px; min-width: 50px; }
-.v10-po-stat-val { font-size: 20px; font-weight: 700; color: var(--text-primary); font-family: var(--font-mono); }
-.v10-po-stat-label { font-size: 9px; text-transform: uppercase; letter-spacing: 0.8px; color: var(--text-tertiary); font-weight: 600; }
-.v10-po-participants { margin-bottom: 12px; }
-.v10-po-participants-label { font-size: 9px; font-weight: 700; text-transform: uppercase; color: var(--text-tertiary); margin-bottom: 6px; }
-.v10-po-participants-list { display: flex; flex-wrap: wrap; gap: 6px; }
-.v10-po-participant {
-  display: inline-flex; align-items: center; gap: 5px;
-  padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 600;
-  background: var(--bg-surface); border: 1px solid var(--border-default); color: var(--text-primary);
-}
-.v10-po-participant-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
-.v10-po-progress { margin-bottom: 0; }
-.v10-po-progress-label { display: flex; justify-content: space-between; font-size: 10px; color: var(--text-tertiary); margin-bottom: 4px; }
-.v10-po-progress-bar { display: flex; height: 6px; border-radius: 3px; overflow: hidden; background: var(--bg-elevated); }
-.v10-po-progress-seg { min-width: 3px; transition: width 0.3s ease; }
-.v10-po-progress-seg.wm { background: #64748b; }
-.v10-po-progress-seg.swm { background: #f59e0b; }
-.v10-po-progress-seg.vm { background: #22c55e; }
-.v10-po-progress-legend { display: flex; gap: 14px; margin-top: 6px; font-size: 9px; font-family: var(--font-mono); color: var(--text-tertiary); }
-.v10-po-legend-item { display: flex; align-items: center; gap: 4px; }
-.v10-po-legend-dot { width: 6px; height: 6px; border-radius: 50%; }
-.v10-po-badges {
+.v10-po { flex-shrink: 0; padding: 16px; border-bottom: 1px solid var(--border-subtle); background: var(--bg-surface); }
+/* Identity row (S2 finalize §4.2.1) — label-pill pairs left, primer
+   link right. Name + description live in the persistent
+   ProjectHeaderStrip. The role glyph (◆) is applied here in CSS via
+   `data-role` so the data string stays semantic-free; same for the
+   curator marker on a participant row. */
+.v10-po-identity {
   display: flex;
-  flex: 0 0 auto;
   flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 6px;
-  max-width: 45%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  margin: 0 0 14px;
+  padding: 0 0 14px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.v10-po-identity-pairs {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 18px;
+}
+.v10-po-identity-pair {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.v10-po-identity-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
 }
 .v10-po-badge {
   display: inline-flex;
   align-items: center;
+  gap: 4px;
   min-height: 22px;
-  padding: 0 9px;
+  padding: 2px 10px;
   border-radius: 999px;
   border: 1px solid var(--border-default);
   background: var(--bg-surface);
-  color: var(--text-secondary);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
-  text-transform: uppercase;
+  color: var(--text-primary);
+  letter-spacing: 0.01em;
 }
-.v10-po-badge.curator,
-.v10-po-badge.public {
-  border-color: rgba(34, 197, 94, 0.38);
-  background: rgba(34, 197, 94, 0.11);
+.v10-po-badge[data-role="curator"]::before {
+  content: "◆";
+  margin-right: 4px;
+  font-weight: 700;
   color: var(--text-success);
 }
-.v10-po-badge.participant,
-.v10-po-badge.curated {
+.v10-po-badge[data-role="curator"] {
+  border-color: rgba(34, 197, 94, 0.4);
+  background: rgba(34, 197, 94, 0.1);
+  color: var(--text-success);
+}
+.v10-po-badge[data-role="participant"] {
+  border-color: rgba(59, 130, 246, 0.4);
+  background: rgba(59, 130, 246, 0.1);
+  color: var(--text-primary);
+}
+.v10-po-badge[data-role="viewer"],
+.v10-po-badge[data-role="unknown"] {
+  color: var(--text-secondary);
+}
+.v10-po-badge[data-cg-type="public"] {
+  border-color: rgba(34, 197, 94, 0.4);
+  background: rgba(34, 197, 94, 0.1);
+  color: var(--text-success);
+}
+.v10-po-badge[data-cg-type="curated"] {
   border-color: rgba(245, 158, 11, 0.4);
-  background: rgba(245, 158, 11, 0.12);
+  background: rgba(245, 158, 11, 0.1);
   color: var(--text-warning);
 }
-.v10-po-badge.viewer,
-.v10-po-badge.unknown {
-  color: var(--text-tertiary);
+.v10-po-badge[data-cg-type="unknown"] {
+  color: var(--text-secondary);
 }
+.v10-po-identity-primer {
+  flex: 0 0 auto;
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 600;
+  min-height: 28px;
+  padding: 0 12px;
+}
+.v10-po-identity-primer:hover {
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+.v10-po-stat-strip { margin-bottom: 12px; }
+/* ui-lead item 3 — section title above the At-a-glance grid so it
+   matches the structure of the other peer regions (Knowledge
+   Pipeline, Participant agents, Pending join requests). */
+.v10-po-stat-block { margin-bottom: 12px; }
+.v10-po-stat-block > .v10-po-section-title { margin-bottom: 8px; }
+/* Participant agents list */
+.v10-po-people { margin: 12px 0 0; padding-top: 12px; border-top: 1px solid var(--border-subtle); }
+.v10-po-people > .v10-po-section-title { margin-bottom: 8px; }
+.v10-po-people-empty {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  font-style: italic;
+}
+.v10-po-participants-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.v10-po-participant {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 600;
+  background: var(--bg-surface); border: 1px solid var(--border-default); color: var(--text-primary);
+}
+/* Glyph is rendered in CSS so the data string the test reads stays
+   unambiguous (just the suffix). Default participants get the
+   hollow ◯ glyph in `--text-secondary`. */
+.v10-po-participant::before {
+  content: "◯ ";
+  font-size: 12px;
+  line-height: 1;
+  color: var(--text-secondary);
+}
+/* §4.2.1 Delta 1 (locked) — `.is-self` carries TWO signals only:
+   weight (you-ness, paired with the ` · you` suffix in the data
+   string) + the filled ◆ glyph in `--text-info`. No border or
+   background override — three signals for one fact would be the
+   M4 VM-hero regression pattern. */
+.v10-po-participant.is-self { font-weight: 700; }
+.v10-po-participant.is-self::before {
+  content: "◆ ";
+  color: var(--text-info);
+}
+/* A non-self curator also carries the filled ◆ glyph (canonical
+   role glyph), tinted with the verified-trust color. No bold, no
+   chip-level tint — the glyph + ` · curator` suffix carry the
+   meaning. */
+.v10-po-participant.is-curator:not(.is-self)::before {
+  content: "◆ ";
+  color: var(--text-success);
+}
+/* When the current user IS the curator, success color wins over
+   info so curator role reads first. The .is-self bold is retained. */
+.v10-po-participant.is-self.is-curator::before {
+  color: var(--text-success);
+}
+.v10-po-participant-name {
+  white-space: nowrap;
+}
+/* ui-lead item 2 — suffix tags render as separate spans with a
+   CSS-driven `·` separator. Keeps the data string semantic-free
+   (the tag text is just "you" / "curator" — no glyphs or
+   punctuation in the DOM textContent). */
+.v10-po-participant-tag {
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+.v10-po-participant-tag::before {
+  content: "·";
+  margin: 0 6px;
+  color: var(--text-ghost);
+  font-weight: 400;
+}
+/* Pending join requests — peer section under Participant agents,
+   curator-only. */
+.v10-po-join { margin: 12px 0 0; padding: 12px 16px 0; border-top: 1px solid var(--border-subtle); }
+.v10-po-join-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.v10-po-join-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  background: rgba(245, 158, 11, 0.16);
+  color: var(--text-warning);
+  border: 1px solid rgba(245, 158, 11, 0.4);
+}
+.v10-po-join-count[data-empty="true"] {
+  background: var(--bg-elevated);
+  color: var(--text-tertiary);
+  border-color: var(--border-default);
+}
+.v10-po-join-empty {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  font-style: italic;
+}
+.v10-po-join-list { display: flex; flex-direction: column; gap: 6px; }
+.v10-po-join-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+}
+.v10-po-join-info { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.v10-po-join-name { font-size: 12px; font-weight: 600; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; }
+.v10-po-join-addr { font-size: 10px; font-family: var(--font-mono); color: var(--text-tertiary); }
+.v10-po-join-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.v10-po-join-btn {
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.v10-po-join-btn.approve { background: rgba(34, 197, 94, 0.12); color: var(--text-success); border: 1px solid rgba(34, 197, 94, 0.32); }
+.v10-po-join-btn.approve:hover { background: rgba(34, 197, 94, 0.2); }
+.v10-po-join-btn.reject { background: rgba(239, 68, 68, 0.12); color: var(--text-danger); border: 1px solid rgba(239, 68, 68, 0.32); padding: 4px 8px; }
+.v10-po-join-btn.reject:hover { background: rgba(239, 68, 68, 0.2); }
+.v10-po-join-btn:disabled { opacity: 0.5; cursor: default; }
 .v10-po-pipeline {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  margin: 4px 0 12px;
+  margin: 12px 0 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-subtle);
+}
+/* §4.2.1 ui-lead review finding #1 — even divider rhythm across all
+   7 peer regions. The two boundaries that were previously missing
+   borders (at-a-glance ↔ pipeline above; join-requests ↔ activity
+   below) get them via `[data-section]` attribute selectors, which
+   are the stable hook regardless of inner wrapper class. */
+[data-section="activity"] {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-subtle);
 }
 .v10-po-pipeline-head {
   display: flex;
@@ -5249,24 +5413,6 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
   color: var(--text-secondary);
   font-size: 12px;
   line-height: 1.45;
-}
-.v10-po-primer-link {
-  flex: 0 0 auto;
-  border: 1px solid var(--border-default);
-  border-radius: 6px;
-  background: var(--bg-surface);
-  color: var(--text-secondary);
-  cursor: pointer;
-  font-family: var(--font-sans);
-  font-size: 11px;
-  font-weight: 700;
-  min-height: 30px;
-  padding: 0 12px;
-}
-.v10-po-primer-link:hover {
-  border-color: var(--border-strong);
-  color: var(--text-primary);
-  background: var(--bg-hover);
 }
 .v10-po-pipeline-track {
   display: flex;
@@ -5351,6 +5497,47 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
   text-align: right;
 }
 
+/* Primer footer (§4.2.1) — quiet last-row escape hatch. No card
+   chrome; sits flush in the Overview's panel padding. */
+.v10-po-primer-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  padding: 14px 16px;
+  margin-top: 12px;
+  border-top: 1px solid var(--border-subtle);
+  color: var(--text-tertiary);
+}
+.v10-po-primer-footer-lede {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+.v10-po-primer-footer-arrow {
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.v10-po-primer-footer-link {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: var(--text-link);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 650;
+}
+.v10-po-primer-footer-link:hover { text-decoration: underline; }
+.v10-po-primer-footer-sub {
+  flex: 1 0 100%;
+  margin-top: 2px;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-tertiary);
+}
+
 @media (max-width: 1500px) {
   .v10-layer-switch-label-full { display: none; }
   .v10-layer-switch-label-compact { display: inline; }
@@ -5395,74 +5582,25 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
 }
 
 @media (max-width: 900px) {
-  .v10-po-top,
+  .v10-po-identity,
   .v10-po-pipeline-head {
     flex-direction: column;
     align-items: stretch;
   }
-  .v10-po-badges {
-    max-width: none;
-    justify-content: flex-start;
+  .v10-po-identity-pairs {
+    flex-wrap: wrap;
+  }
+  .v10-po-identity-primer {
+    align-self: flex-start;
   }
   .v10-po-pipeline-steps {
     grid-template-columns: 1fr;
   }
-  .v10-po-primer-link {
-    align-self: flex-start;
+  .v10-po-primer-footer {
+    flex-direction: row;
+    flex-wrap: wrap;
   }
 }
-
-/* ── Memory Strip ── */
-.v10-memory-strip { flex-shrink: 0; border-bottom: 1px solid var(--border-subtle); background: var(--bg-panel); }
-.v10-memory-layer {
-  display: flex; align-items: stretch; border-bottom: 1px solid var(--border-subtle); min-height: 0; cursor: pointer;
-}
-.v10-memory-layer:last-child { border-bottom: none; }
-.v10-layer-label {
-  width: 160px; flex-shrink: 0; display: flex; align-items: center;
-  gap: 8px; padding: 8px 12px;
-  border-right: 1px solid var(--border-subtle); cursor: pointer;
-  transition: background 0.15s;
-}
-.v10-layer-label:hover { background: var(--bg-hover); }
-.v10-layer-abbr { font-family: var(--font-sans); font-size: 12px; font-weight: 600; white-space: nowrap; }
-.v10-layer-count { font-family: var(--font-mono); font-size: 10px; color: var(--text-tertiary); margin-left: auto; }
-.v10-layer-items {
-  flex: 1; display: flex; align-items: center; gap: 6px;
-  padding: 5px 10px; overflow-x: auto; min-width: 0;
-}
-.v10-layer-chip {
-  flex-shrink: 0; display: flex; align-items: center; gap: 6px;
-  padding: 4px 10px; border-radius: 6px; font-size: 11px;
-  border: 1px solid var(--border-default); background: var(--bg-surface);
-  cursor: pointer; transition: all 0.15s; max-width: 260px;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
-.v10-layer-chip:hover { border-color: var(--border-strong); background: var(--bg-elevated); }
-.v10-chip-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
-.v10-chip-text { color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; }
-.v10-chip-meta { font-family: var(--font-mono); font-size: 9px; color: var(--text-tertiary); flex-shrink: 0; }
-@keyframes v10-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
-.v10-chip-activity { animation: v10-pulse 2s ease-in-out infinite; }
-.v10-memory-layer.wm { background: rgba(100,116,139,0.03); }
-.v10-memory-layer.wm .v10-layer-chip { border-style: dashed; opacity: 0.8; }
-.v10-memory-layer.wm .v10-layer-chip:hover { opacity: 1; }
-.v10-memory-layer.swm { background: rgba(245,158,11,0.02); }
-.v10-memory-layer.vm { background: rgba(34,197,94,0.02); }
-.v10-memory-layer.vm .v10-layer-chip { border-color: rgba(34,197,94,0.2); }
-.v10-layer-chevron {
-  font-size: 10px; color: var(--text-ghost); transition: transform 0.2s; margin-right: 2px;
-  flex-shrink: 0; width: 14px; text-align: center;
-}
-.v10-memory-layer.expanded .v10-layer-chevron { transform: rotate(90deg); }
-
-/* ── Expandable layer in overview ── */
-.v10-layer-expand-content {
-  max-height: 0; overflow: hidden; transition: max-height 0.3s ease;
-  background: var(--bg-root); border-bottom: 1px solid var(--border-subtle);
-  display: flex; flex-direction: column;
-}
-.v10-layer-expand-content.open { max-height: 70vh; height: 70vh; }
 
 /* Tab body fills the remaining space below the tabs strip */
 .v10-layer-expand-body {
@@ -5660,12 +5798,6 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
 }
 .v10-layer-expand-items .v10-item-row { padding: 6px 16px; }
 .v10-layer-expand-items .v10-item-row:last-child { border-bottom: none; }
-.v10-layer-expand-footer {
-  padding: 6px 16px 8px; display: flex; gap: 8px;
-  flex-shrink: 0;
-  border-top: 1px solid var(--border-subtle);
-  background: var(--bg-root);
-}
 .v10-layer-expand-footer-btn {
   font-size: 10px; font-weight: 600; color: var(--text-tertiary);
   padding: 4px 10px; border-radius: 5px; border: 1px solid var(--border-default);
@@ -5677,7 +5809,7 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
 .v10-layer-expand-footer-btn.publish { color: var(--text-success); border-color: rgba(34,197,94,0.25); }
 .v10-layer-expand-footer-btn.publish:hover { background: rgba(34,197,94,0.08); }
 
-/* ── Item rows (shared by strip and layer views) ── */
+/* ── Item rows (shared by layer views) ── */
 .v10-item-row {
   display: flex; align-items: center; gap: 10px; padding: 8px 16px;
   border-bottom: 1px solid var(--border-subtle); cursor: pointer; transition: background 0.1s;
@@ -7413,11 +7545,12 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
 }
 .v10-project-strip-sg-icon { font-size: 13px; line-height: 1; }
 .v10-project-strip-desc {
-  font-size: 11px; color: var(--text-tertiary);
+  font-size: 12px; color: var(--text-secondary);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  margin-left: auto;
-  max-width: 560px;
-  padding-left: 12px;
+  margin-left: 14px;
+  max-width: 720px;
+  padding-left: 0;
+  flex: 0 1 auto;
 }
 
 /* Context Graph primer */

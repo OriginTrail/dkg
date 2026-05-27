@@ -162,6 +162,9 @@ const apiWrapperMock = vi.hoisted(() => ({
   fetchContextGraphs: vi.fn(),
   fetchCurrentAgent: vi.fn(),
   listParticipants: vi.fn(),
+  // Codex review bug F — ProjectView now routes through api-wrapper
+  // so the Subgraphs stat resolves in mock mode. Default to empty.
+  fetchSubGraphs: vi.fn(async (id: string) => ({ contextGraphId: id, subGraphs: [] })),
 }));
 
 vi.mock('../src/ui/api-wrapper.js', () => ({
@@ -170,6 +173,11 @@ vi.mock('../src/ui/api-wrapper.js', () => ({
 
 vi.mock('../src/ui/api.js', () => ({
   listParticipants: vi.fn(async () => ({ allowedAgents: [] })),
+}));
+
+vi.mock('../src/ui/hooks/useNodeEvents.js', () => ({
+  useNodeEvents: () => {},
+  useMemoryGraphEvents: () => {},
 }));
 
 vi.mock('../src/ui/hooks/useMemoryEntities.js', () => ({
@@ -247,50 +255,27 @@ vi.mock('../src/ui/views/project/components.js', () => ({
       React.createElement('button', { 'data-testid': 'subgraph-tab-graph', onClick: () => onTabChange('graph') }, 'Graph'),
       React.createElement('div', { 'data-testid': 'subgraph-scroll', 'data-cg-scroll-key': `subgraph:${slug}:${activeTab}` },
         React.createElement('button', { 'data-testid': 'open-subgraph-entity', onClick: () => onSelectEntity('urn:entity:demo') }, 'Open demo entity'))),
-  ProjectOverviewCard: ({ onOpenPrimer, participants, participantsStatus }: {
+  ProjectOverviewCard: ({ onOpenPrimer, participants, participantsStatus, subGraphCount, subGraphFetchFailed }: {
     onOpenPrimer: () => void;
     participants: string[];
     participantsStatus: string;
+    subGraphCount?: number | null;
+    subGraphFetchFailed?: boolean;
   }) =>
     React.createElement('div', {
       'data-testid': 'overview-card',
       'data-participants': participants.join(','),
       'data-participants-status': participantsStatus,
+      'data-sub-graph-count': subGraphCount == null ? '' : String(subGraphCount),
+      'data-sub-graph-fetch-failed': subGraphFetchFailed ? 'true' : 'false',
     },
       'Overview',
       React.createElement('button', { 'data-testid': 'open-primer', onClick: onOpenPrimer }, 'What is a Context Graph?')),
-  PendingJoinRequestsBar: () => null,
-  MemoryStrip: ({ expandedLayer, onExpandedLayerChange, expandTabs, onExpandTabChange, onSelectEntity }: {
-    expandedLayer: 'wm' | 'swm' | 'vm' | null;
-    onExpandedLayerChange: (layer: 'wm' | 'swm' | 'vm' | null) => void;
-    expandTabs: Record<'wm' | 'swm' | 'vm', string>;
-    onExpandTabChange: (layer: 'wm' | 'swm' | 'vm', tab: string) => void;
-    onSelectEntity: (uri: string) => void;
-  }) => {
-    const activeTab = expandedLayer ? expandTabs[expandedLayer] : 'items';
-    return React.createElement('section', {
-      'data-testid': 'memory-strip',
-      'data-expanded': expandedLayer ?? '',
-      'data-tab': activeTab,
-    },
-      React.createElement('button', {
-        'data-testid': 'expand-strip-swm',
-        onClick: () => onExpandedLayerChange(expandedLayer === 'swm' ? null : 'swm'),
-      }, 'Expand SWM'),
-      expandedLayer && React.createElement(React.Fragment, {},
-        React.createElement('button', {
-          'data-testid': 'strip-tab-graph',
-          onClick: () => onExpandTabChange(expandedLayer, 'graph'),
-        }, 'Graph'),
-        React.createElement('div', {
-          'data-testid': 'strip-scroll',
-          'data-cg-scroll-key': `layer:${expandedLayer}:${activeTab}`,
-        },
-          React.createElement('button', {
-            'data-testid': 'open-strip-entity',
-            onClick: () => onSelectEntity('urn:entity:working'),
-          }, 'Open strip entity'))));
-  },
+  PendingJoinRequestsSection: () => null,
+  OverviewPrimerEntry: ({ onOpenPrimer }: { onOpenPrimer: () => void }) =>
+    React.createElement('div', { 'data-testid': 'primer-footer' },
+      React.createElement('button', { 'data-testid': 'open-primer-footer', onClick: onOpenPrimer }, 'What is a Context Graph?')),
+  curatorStatusForOverview: () => 'not-curator',
   SubGraphOverviewGrid: ({ onSelectSubGraph }: { onSelectSubGraph: (slug: string) => void }) =>
     React.createElement('button', {
       'data-testid': 'select-subgraph-demo',
@@ -353,6 +338,7 @@ describe('ProjectView entity detail navigation', () => {
       peerId: 'peer-1',
     });
     apiWrapperMock.listParticipants.mockResolvedValue({ allowedAgents: [] });
+    apiWrapperMock.fetchSubGraphs.mockResolvedValue({ contextGraphId: 'cg-test', subGraphs: [] });
     document.body.innerHTML = '<div id="root"></div>';
     originalRaf = window.requestAnimationFrame;
     Object.defineProperty(window, 'requestAnimationFrame', {
@@ -415,6 +401,48 @@ describe('ProjectView entity detail navigation', () => {
 
     expect(query('active-layer').dataset.layer).toBe('overview');
     expect(scrollRoot('page').scrollTop).toBe(140);
+  });
+
+  it('routes the Overview Subgraphs lift through api-wrapper so mock-mode resolves (Codex bug F)', async () => {
+    // ProjectView should fire its sub-graph fetch via the wrapped
+    // `api.fetchSubGraphs`, NOT via a direct `../api.js` import that
+    // would bypass mock/offline fallback. Asserting the wrapper was
+    // called proves the route — `apiWrapperMock.fetchSubGraphs`
+    // only resolves when the wrapper is actually used.
+    expect(apiWrapperMock.fetchSubGraphs).toHaveBeenCalledWith('cg-test');
+  });
+
+  it('Overview Subgraphs count filters the `meta` slug', async () => {
+    // Same filter as SubGraphBar (chips) and SubGraphOverviewGrid
+    // (cards) — only `meta` is excluded. The daemon's
+    // `listSubGraphs` returns only registered `dkg:SubGraph` rows;
+    // `meta` is the auto-registered profile slug.
+    apiWrapperMock.fetchSubGraphs.mockResolvedValue({
+      contextGraphId: 'cg-test',
+      subGraphs: [
+        { name: 'meta', uri: 'urn:meta', entityCount: 0, tripleCount: 0 },
+        { name: 'recipes', uri: 'urn:recipes', entityCount: 3, tripleCount: 12 },
+        { name: 'reviews', uri: 'urn:reviews', entityCount: 5, tripleCount: 18 },
+        { name: 'docs', uri: 'urn:docs', entityCount: 2, tripleCount: 7 },
+      ],
+    });
+
+    // Remount ProjectView so the updated mockResolvedValue takes
+    // effect (the global beforeEach() resolved an empty list).
+    await act(async () => {
+      root.unmount();
+    });
+    document.body.innerHTML = '<div id="root"></div>';
+    const container = document.getElementById('root');
+    if (!container) throw new Error('Missing root');
+    root = createRoot(container);
+    await act(async () => {
+      root.render(React.createElement(ProjectView, { contextGraphId: 'cg-test' }));
+    });
+    await flush();
+
+    // Expect 3 = 4 total - 1 (meta filtered).
+    expect(query('overview-card').dataset.subGraphCount).toBe('3');
   });
 
   it('opens graph nodes with the layer context they came from', async () => {

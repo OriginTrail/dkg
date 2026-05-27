@@ -12,6 +12,7 @@ import {
   normalizeAccessPolicy,
   type AgentSidebarIdentity,
 } from '../lib/contextGraphSidebar.js';
+import { formatEth, formatEthTooltip } from '../lib/formatEth.js';
 
 // Single user-facing description shown inside the My Context Graphs
 // card (one line, no separate footnote — round-2 feedback: the split
@@ -782,7 +783,12 @@ export function DashboardView() {
                 <div key={b.address} className="v10-ws-wrow">
                   <span className="v10-ws-addr" title={b.address}>{shortAddr(b.address)}</span>
                   <span className="v10-ws-bal">{fmtTrac(b.trac)}</span>
-                  <span className="v10-ws-bal-sec">{b.eth}</span>
+                  {/* Route gas balance through formatEth — raw `b.eth`
+                      from the daemon is e.g. "0.040583524997839496",
+                      which crowds the column and is unreadable. The
+                      tooltip surfaces the full-precision value for
+                      anyone who actually wants the exact wei (BUG-006/009). */}
+                  <span className="v10-ws-bal-sec" title={formatEthTooltip(b.eth)}>{formatEth(b.eth)}</span>
                 </div>
               ))}
             </div>

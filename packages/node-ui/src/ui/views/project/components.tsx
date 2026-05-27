@@ -66,6 +66,8 @@ import {
   type SubGraphTab, type SubGraphEntitySort,
 } from './helpers.js';
 import { EmptyState, StatStrip, toneForLayer } from '../../components/ContextGraphPrimitives.js';
+import { isUserFacingSubGraph } from '../../lib/subGraphs.js';
+import { useNodeEvents } from '../../hooks/useNodeEvents.js';
 
 export const RdfGraph = lazy(() =>
   import('@origintrail-official/dkg-graph-viz/react').then(m => ({ default: m.RdfGraph }))
@@ -538,13 +540,19 @@ function overviewRoleState(
   participantsStatus: OverviewParticipantsStatus,
 ): OverviewRoleState {
   const curator = typeof cg?.curator === 'string' ? cg.curator.trim() : '';
-  const agentDid = currentAgent?.agentDid?.trim() ?? '';
+  // Codex review issue P — match the address-or-did predicate
+  // `curatorStatusForOverview` uses (bug G), so the role pill and
+  // the join-requests gate can't disagree on older daemons that
+  // only surface `agentAddress`. `canonicalAgentDid` already
+  // normalises bare EVM addresses to the prefixed DID form, so
+  // any-of-the-two-matches resolves correctly.
   const agentIds = new Set(
     [currentAgent?.agentDid, currentAgent?.agentAddress]
       .filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
       .map(canonicalAgentDid),
   );
-  if (curator && agentDid && canonicalAgentDid(curator) === canonicalAgentDid(agentDid)) {
+  const hasIdentity = agentIds.size > 0;
+  if (curator && hasIdentity && agentIds.has(canonicalAgentDid(curator))) {
     return {
       label: 'Curator',
       title: 'This agent is the curator for this Context Graph.',
@@ -552,14 +560,14 @@ function overviewRoleState(
     };
   }
   if (cg?.callerInvolved === true) {
-    if (curator && !agentDid && currentAgentStatus === 'loading') {
+    if (curator && !hasIdentity && currentAgentStatus === 'loading') {
       return {
         label: 'Role checking',
         title: 'This agent is involved in this Context Graph; curator status is still loading.',
         tone: 'unknown',
       };
     }
-    if (curator && !agentDid && currentAgentStatus === 'error') {
+    if (curator && !hasIdentity && currentAgentStatus === 'error') {
       return {
         label: 'Role unknown',
         title: 'This agent is involved in this Context Graph, but curator status could not be confirmed.',
@@ -608,7 +616,7 @@ function overviewAccessAgentStat(
       id: 'participants',
       value: 'Open',
       label: 'Public access',
-      hint: 'Public Context Graphs do not have an authoritative allowlist count.',
+      tooltip: 'Public Context Graphs do not have an authoritative allowlist count.',
     };
   }
   if (participantsStatus === 'loading') {
@@ -616,7 +624,7 @@ function overviewAccessAgentStat(
       id: 'participants',
       value: '...',
       label: 'Agents with access',
-      hint: 'Participant list is loading.',
+      tooltip: 'Participant list is loading.',
     };
   }
   if (participantsStatus === 'error') {
@@ -624,7 +632,7 @@ function overviewAccessAgentStat(
       id: 'participants',
       value: 'Unavailable',
       label: 'Agents with access',
-      hint: 'Participant list unavailable; access count is unknown.',
+      tooltip: 'Participant list unavailable; access count is unknown.',
     };
   }
 
@@ -641,7 +649,7 @@ function overviewAccessAgentStat(
     id: 'participants',
     value: agents.size.toLocaleString(),
     label: 'Agents with access',
-    hint: 'Includes the curator plus allowlisted participants reported by the node.',
+    tooltip: 'Includes the curator plus allowlisted participants reported by the node.',
   };
 }
 
@@ -668,9 +676,72 @@ function overviewAccessState(raw?: string): { label: string; title: string; tone
   };
 }
 
+// S2 finalize (§4.2.1) — true if the current agent owns the curator
+// role on this CG. Lifted out of overviewRoleState so the Pending
+// Join Requests section can gate on the same predicate without
+// re-deriving it.
+// Codex review bug C — tri-state replaces the prior boolean
+// predicate so a curator's join-requests section isn't hidden
+// while `/api/agent/identity` is still resolving or after a
+// transient error. Consumers decide how to render the `'unknown'`
+// state (we show a 'Verifying access…' loading panel).
+export type CuratorStatus = 'curator' | 'not-curator' | 'unknown';
+
+export function curatorStatusForOverview({
+  cg,
+  currentAgent,
+  currentAgentStatus = 'ok',
+}: {
+  cg: any;
+  currentAgent: OverviewAgentIdentity | null;
+  currentAgentStatus?: OverviewAgentStatus;
+}): CuratorStatus {
+  const curator = typeof cg?.curator === 'string' ? cg.curator.trim() : '';
+  if (!curator) {
+    // Codex review bug I — older / partial CG payloads may omit
+    // `curator` entirely. Returning `'not-curator'` here hard-hides
+    // PendingJoinRequestsSection from real curators whose daemon
+    // simply didn't surface the field (pre-PR boolean predicate
+    // still let /join-requests gate authorisation). `'unknown'`
+    // routes through the "Verifying access…" panel, which is the
+    // right state when we genuinely can't decide.
+    return 'unknown';
+  }
+  // Codex review bug G — older daemons / transient identity errors
+  // may surface `agentAddress` without `agentDid`. `canonicalAgentDid`
+  // already accepts both forms (it normalises bare EVM addresses to
+  // the prefixed DID), so prefer ANY identity material we have over
+  // falling closed. `'unknown'` is reserved for the case where we
+  // truly have nothing to compare against.
+  const did = currentAgent?.agentDid?.trim() ?? '';
+  const addr = currentAgent?.agentAddress?.trim() ?? '';
+  const identity = did || addr;
+  if (!identity) {
+    if (currentAgentStatus === 'loading' || currentAgentStatus === 'error') {
+      return 'unknown';
+    }
+    // Status reports OK but neither agentDid nor agentAddress
+    // materialised — treat as unknown rather than fail-closed.
+    return 'unknown';
+  }
+  return canonicalAgentDid(curator) === canonicalAgentDid(identity)
+    ? 'curator'
+    : 'not-curator';
+}
+
+function overviewIdentitySet(currentAgent: OverviewAgentIdentity | null): Set<string> {
+  return new Set(
+    [currentAgent?.agentDid, currentAgent?.agentAddress]
+      .filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
+      .map(canonicalAgentDid),
+  );
+}
+
 export function ProjectOverviewCard({
   cg,
   memory,
+  subGraphCount,
+  subGraphFetchFailed = false,
   participants,
   participantsStatus = 'ok',
   currentAgent,
@@ -680,6 +751,13 @@ export function ProjectOverviewCard({
 }: {
   cg: any;
   memory: ReturnType<typeof useMemoryEntities>;
+  /** Count of user-facing sub-graphs (excludes the reserved `meta`
+   *  slug). `null` while loading or on fetch error. */
+  subGraphCount?: number | null;
+  /** True if the last `/sub-graph/list` fetch errored. Lets the
+   *  stat strip distinguish "still loading" from "permanently
+   *  unavailable" (Codex review bug D). */
+  subGraphFetchFailed?: boolean;
   participants: string[];
   participantsStatus?: OverviewParticipantsStatus;
   currentAgent?: OverviewAgentIdentity | null;
@@ -691,8 +769,11 @@ export function ProjectOverviewCard({
   const layerSum = working + shared + verified;
   const role = overviewRoleState(cg, currentAgent ?? null, currentAgentStatus, participants, participantsStatus);
   const access = overviewAccessState(cg?.accessPolicy);
-  const isPublicAccess = normalizeAccessPolicy(cg?.accessPolicy) === 'public';
   const accessAgentStat = overviewAccessAgentStat(cg, participants, participantsStatus);
+  const curator = typeof cg?.curator === 'string' ? cg.curator.trim() : '';
+  const curatorCanonical = curator ? canonicalAgentDid(curator) : '';
+  const isPublicAccess = normalizeAccessPolicy(cg?.accessPolicy) === 'public';
+  const selfIds = overviewIdentitySet(currentAgent ?? null);
   const layerStatuses = Object.values(memory.layerStatus ?? {});
   const unavailableLayerCount = layerStatuses.filter(status => status === 'error').length;
   const allLayerCountsUnavailable =
@@ -706,6 +787,44 @@ export function ProjectOverviewCard({
           ? 'One or more layer counts are currently a lower bound.'
           : 'Canonical current-layer entity counts.';
   const totalEntitiesValue = allLayerCountsUnavailable ? 'Unavailable' : layerSum.toLocaleString();
+  // Triples: canonical layer-correct total exposed by the hook
+  // (§4.2.1 trap — do NOT sum per-entity tripleCount, do NOT borrow
+  // SubGraphBar's `totalTriples` which excludes the root bucket).
+  //
+  // Codex review bug B — `useMemoryEntities` preserves partial
+  // results when one layer query fails, so `allTriples.length` is
+  // only a LOWER BOUND in that case. Mirror the Entities cell
+  // logic: 'Unavailable' if every layer errored, '<n>+' when
+  // partial, the plain number otherwise. The tooltip carries the
+  // explanation (consistent with the Delta-2 tooltip-only hint
+  // pattern).
+  const triplesCount = memory.allTriples?.length ?? 0;
+  const triplesIsPartial = !memory.loading && (memory.partial || hasUnavailableLayer);
+  const triplesValue = allLayerCountsUnavailable
+    ? 'Unavailable'
+    : memory.loading && triplesCount === 0
+      ? '...'
+      : triplesIsPartial
+        ? `${triplesCount.toLocaleString()}+`
+        : triplesCount.toLocaleString();
+  const triplesTooltip = allLayerCountsUnavailable
+    ? 'Live triple counts are unavailable.'
+    : triplesIsPartial
+      ? 'One or more layer triple counts are currently a lower bound.'
+      : 'Canonical triple total across all layers.';
+  // Codex review bug D — distinguish "still fetching" from
+  // "fetch failed" for the Subgraphs cell so we don't show a
+  // perpetual ellipsis after a failed `/sub-graph/list` call. A
+  // failure renders the same `Unavailable` affordance the Entities
+  // outage cell uses (so the four cells share one failure idiom).
+  const subGraphsValue = subGraphCount == null
+    ? subGraphFetchFailed ? 'Unavailable' : '...'
+    : subGraphCount.toLocaleString();
+  const subGraphsTooltip = subGraphCount == null
+    ? subGraphFetchFailed
+      ? 'Sub-graph list is currently unavailable.'
+      : 'Sub-graph count is loading.'
+    : 'Topical partitions inside this Context Graph.';
   const pipeline = [
     {
       key: 'wm' as const,
@@ -736,35 +855,66 @@ export function ProjectOverviewCard({
 
   return (
     <div className="v10-po">
-      <div className="v10-po-top">
-        <span className="v10-po-dot" />
-        <div className="v10-po-heading">
-          <div className="v10-po-title">{cg.name || cg.id}</div>
-          {cg.description && <div className="v10-po-desc">{cg.description}</div>}
+      {/* Identity row (§4.2.1 — locked spec) — label-pill pairs on
+          the left, inline primer link on the right. Name + description
+          live in the persistent `ProjectHeaderStrip`; the role glyph
+          (◆) is applied in CSS via `data-role`/`data-tone`, never in
+          the data string itself. */}
+      <div className="v10-po-identity" data-section="identity">
+        <div className="v10-po-identity-pairs">
+          <div className="v10-po-identity-pair">
+            <span className="v10-po-identity-label">Your role:</span>
+            <span
+              className="v10-po-badge"
+              data-role={role.tone}
+              title={role.title}
+            >
+              {role.label}
+            </span>
+          </div>
+          <div className="v10-po-identity-pair">
+            <span className="v10-po-identity-label">Context Graph:</span>
+            <span
+              className="v10-po-badge"
+              data-cg-type={access.tone}
+              title={access.title}
+            >
+              {access.label}
+            </span>
+          </div>
         </div>
-        <div className="v10-po-badges">
-          <span className={`v10-po-badge ${role.tone}`} title={role.title}>{role.label}</span>
-          <span className={`v10-po-badge ${access.tone}`} title={access.title}>{access.label}</span>
-        </div>
+        {onOpenPrimer && (
+          <button
+            type="button"
+            className="v10-po-identity-primer"
+            onClick={onOpenPrimer}
+            title="Open the Context Graph primer"
+          >
+            What is a Context Graph?
+          </button>
+        )}
       </div>
-      <StatStrip
-        className="v10-po-stat-strip"
-        items={[
-          { id: 'total', value: totalEntitiesValue, label: 'Total entities', hint: statusHint },
-          accessAgentStat,
-        ]}
-      />
-      <div className="v10-po-pipeline" aria-label="Knowledge Pipeline">
+      {/* §4.2.1 Delta 2 (locked) — M6 layer-availability status copy
+          renders as a `title` tooltip on the Entities cell, not as
+          an inline `hint:`, to keep the 4-card grid clean. */}
+      <div data-section="at-a-glance" className="v10-po-stat-block">
+        <div className="v10-po-section-title">At a glance</div>
+        <StatStrip
+          className="v10-po-stat-strip"
+          items={[
+            { id: 'entities', value: totalEntitiesValue, label: 'Entities', tooltip: statusHint },
+            { id: 'triples', value: triplesValue, label: 'Triples', tooltip: triplesTooltip },
+            { id: 'subgraphs', value: subGraphsValue, label: 'Subgraphs', tooltip: subGraphsTooltip },
+            accessAgentStat,
+          ]}
+        />
+      </div>
+      <div className="v10-po-pipeline" data-section="pipeline" aria-label="Knowledge Pipeline">
         <div className="v10-po-pipeline-head">
           <div>
             <div className="v10-po-section-title">Knowledge Pipeline</div>
             <div className="v10-po-section-desc">Entities move from private staging to shared review; published assertion bundles become Knowledge Assets with on-chain provenance.</div>
           </div>
-          {onOpenPrimer && (
-            <button type="button" className="v10-po-primer-link" onClick={onOpenPrimer}>
-              What is a Context Graph?
-            </button>
-          )}
         </div>
         <div className="v10-po-pipeline-track" aria-hidden="true">
           {!pipelineHasUnavailableLayer && layerSum > 0
@@ -803,38 +953,212 @@ export function ProjectOverviewCard({
           ))}
         </div>
       </div>
-      {participants.length > 0 && (
-        <div className="v10-po-participants">
-          <div className="v10-po-participants-label">
-            {isPublicAccess ? 'Known participants' : 'Allowlisted participants'}
-          </div>
-          <div className="v10-po-participants-list">
-            {participants.map(addr => (
-              <span key={addr} className="v10-po-participant" title={addr}>
-                <span className="v10-po-participant-dot" style={{ background: '#3b82f6' }} />
-                {addr.slice(0, 6)}…{addr.slice(-4)}
-              </span>
-            ))}
-          </div>
-        </div>
-      )}
+      {/* Participant agents (§4.2.1) — uniform "Participant agents"
+          heading regardless of access policy. The current user's
+          row carries the `· you` suffix; the curator (whether the
+          current user or someone else) gets `· curator`. Glyphs are
+          applied in CSS via `.is-self` / `.is-curator` — never in the
+          data string. */}
+      <div className="v10-po-people" data-section="participants">
+        <div className="v10-po-section-title">Participant agents</div>
+        {(() => {
+          // Codex review bug A — `/participants` returns `allowedAgents`
+          // and does NOT include the curator on a private CG. Render
+          // the de-duplicated UNION so the curator's own row is always
+          // present (and so the ` · curator` / ` · you · curator`
+          // markers actually have a row to attach to). On a public CG
+          // where the curator may already be in `allowedAgents`, the
+          // dedup makes this a no-op.
+          // Codex review bug H — `cg.curator` arrives as a
+          // `did:dkg:agent:0x…` URI; the rest of the roster comes
+          // from `/participants` as bare EVM addresses. The row
+          // renderer truncates with `slice(0, 6) + … + slice(-4)`,
+          // which would print `did:dk…1234` for the curator row.
+          // Strip the prefix so every row reads in the same
+          // address shape; preserve the full string in the row's
+          // hover `title` so the DID origin is recoverable.
+          const DID_PREFIX = 'did:dkg:agent:';
+          const displayOf = (raw: string): string =>
+            raw.toLowerCase().startsWith(DID_PREFIX)
+              ? raw.slice(DID_PREFIX.length)
+              : raw;
+          // Codex review issue J — only seed the curator row when
+          // the participants list is authoritative. While
+          // `/participants` is loading or has errored, showing
+          // "[◆ curator (you)]" alone would imply a complete roster
+          // on a CG that may actually have other allowlisted members
+          // we can't yet see. Loading / error branches fall through
+          // to the empty-state path which renders the appropriate
+          // status copy.
+          const seen = new Set<string>();
+          const rows: { display: string; full: string; canonical: string }[] = [];
+          if (curator && participantsStatus === 'ok') {
+            const c = canonicalAgentDid(curator);
+            seen.add(c);
+            rows.push({ display: displayOf(curator), full: curator, canonical: c });
+          }
+          if (participantsStatus === 'ok') {
+            for (const addr of participants) {
+              const c = canonicalAgentDid(addr);
+              if (seen.has(c)) continue;
+              seen.add(c);
+              rows.push({ display: displayOf(addr), full: addr, canonical: c });
+            }
+          }
+          if (rows.length === 0) {
+            // Codex review bug E + issue S — access policy is
+            // local-only state from `cg.accessPolicy` and is known
+            // regardless of whether `/participants` succeeded.
+            // Issue S — re-ordered so `isPublicAccess` takes
+            // precedence over the loading/error branches: a public
+            // CG whose `/participants` errored should still tell
+            // the user access is open, not parrot the unavailable
+            // copy. Only curated CGs fall through to the loading /
+            // error / "no participants" sequence.
+            const emptyCopy = isPublicAccess
+              ? 'This Context Graph is public — anyone can subscribe.'
+              : participantsStatus === 'loading'
+                ? 'Loading participant agents...'
+                : participantsStatus === 'error'
+                  ? 'Participant list unavailable.'
+                  : 'No participant agents recorded yet.';
+            return <div className="v10-po-people-empty">{emptyCopy}</div>;
+          }
+          return (
+            <div className="v10-po-participants-list">
+              {rows.map(({ display, full, canonical }) => {
+                const isSelf = selfIds.has(canonical);
+                const isCurator = !!curatorCanonical && canonical === curatorCanonical;
+                // ui-lead item 2 — suffixes render as separate
+                // `.v10-po-participant-tag` spans so the spacing
+                // (the `·` separator) lives in CSS `::before`
+                // pseudo-content instead of the data string.
+                // `aria-label` preserves a screen-reader-friendly
+                // form, since the visible separators aren't in the
+                // accessible name.
+                const shortAddress = `${display.slice(0, 6)}…${display.slice(-4)}`;
+                const ariaLabelParts = [shortAddress];
+                if (isSelf) ariaLabelParts.push('you');
+                if (isCurator) ariaLabelParts.push('curator');
+                return (
+                  <span
+                    key={canonical}
+                    className={`v10-po-participant${isSelf ? ' is-self' : ''}${isCurator ? ' is-curator' : ''}`}
+                    title={full}
+                    aria-label={ariaLabelParts.join(' ')}
+                  >
+                    <span className="v10-po-participant-name">{shortAddress}</span>
+                    {isSelf && <span className="v10-po-participant-tag">you</span>}
+                    {isCurator && <span className="v10-po-participant-tag">curator</span>}
+                  </span>
+                );
+              })}
+            </div>
+          );
+        })()}
+      </div>
     </div>
   );
 }
 
 // ─── Pending Join Requests ───────────────────────────────────
 
-export function PendingJoinRequestsBar({ contextGraphId, onParticipantsChanged }: { contextGraphId: string; onParticipantsChanged?: () => void }) {
+// S2 finalize (§4.2.1) — Pending Join Requests is a peer section
+// under Participant agents. Visible to curators ALWAYS (with a
+// graceful empty state); hidden from definitive non-curators;
+// shown with a 'Verifying access…' state when curator status is
+// still unknown (Codex review bug C — don't fail closed during
+// identity loading / error).
+export function PendingJoinRequestsSection({
+  contextGraphId,
+  curatorStatus,
+  onParticipantsChanged,
+}: {
+  contextGraphId: string;
+  curatorStatus: CuratorStatus;
+  onParticipantsChanged?: () => void;
+}) {
   const [requests, setRequests] = useState<PendingJoinRequest[]>([]);
   const [processing, setProcessing] = useState<string | null>(null);
+  const [status, setStatus] = useState<'idle' | 'loading' | 'error'>('loading');
+  // Mirror `cancelled` across the effect via a ref so the
+  // event-driven refetch path can share it with the mount-effect
+  // path without re-creating the closure on every render.
+  const fetchRequestIdRef = useRef(0);
+
+  // Codex review bug N (reverts the optimistic-fetch logic from
+  // bug L). The daemon's `/join-requests` route does NOT gate
+  // on curator identity — see `packages/cli/src/daemon/routes/
+  // context-graph.ts:898-909` which calls
+  // `agent.listPendingJoinRequests`, whose body is a raw SPARQL
+  // read of the meta graph (`packages/agent/src/dkg-agent.ts:
+  // 13126-13152`) with no caller authentication. Until that
+  // gating lands server-side, firing the request in `'unknown'`
+  // status would leak pending-moderation metadata to any caller
+  // whose `/api/agent/identity` lookup is mid-resolution / errored.
+  // Fail closed at the UI: only fetch when we have positive
+  // local proof of curator status. The "Verifying access…"
+  // panel below stays as the safe gate for `'unknown'`.
+  const refresh = useCallback(() => {
+    if (curatorStatus !== 'curator') {
+      setRequests([]);
+      setStatus('idle');
+      return;
+    }
+    const requestId = ++fetchRequestIdRef.current;
+    setStatus('loading');
+    listJoinRequests(contextGraphId)
+      .then(data => {
+        if (fetchRequestIdRef.current !== requestId) return;
+        setRequests(data.requests.filter(r => r.status === 'pending'));
+        setStatus('idle');
+      })
+      .catch(() => {
+        if (fetchRequestIdRef.current !== requestId) return;
+        setRequests([]);
+        setStatus('error');
+      });
+  }, [contextGraphId, curatorStatus]);
 
   useEffect(() => {
-    listJoinRequests(contextGraphId)
-      .then(data => setRequests(data.requests.filter(r => r.status === 'pending')))
-      .catch(() => setRequests([]));
-  }, [contextGraphId]);
+    refresh();
+    return () => { fetchRequestIdRef.current++; };
+  }, [refresh]);
 
-  if (requests.length === 0) return null;
+  // Auto-refresh on SSE events scoped to this CG. The daemon
+  // emits `join_request` when a new request arrives
+  // (cli/src/daemon/lifecycle.ts:1899-1921), and
+  // `join_approved` / `join_rejected` when a moderation action
+  // resolves — refetching on all three keeps the list live
+  // across browser tabs, multi-curator nodes, and concurrent
+  // sessions without polling.
+  useNodeEvents(useCallback((event) => {
+    if (
+      event.type !== 'join_request'
+      && event.type !== 'join_approved'
+      && event.type !== 'join_rejected'
+    ) return;
+    if (event.data?.contextGraphId !== contextGraphId) return;
+    refresh();
+  }, [contextGraphId, refresh]));
+
+  // Definitive non-curator — section is dead UI and stays hidden.
+  if (curatorStatus === 'not-curator') return null;
+
+  // Unknown — render a quiet "verifying access" panel so the user
+  // sees something is in progress (no actionable controls; the
+  // request fetch is gated until we know they're the curator).
+  // See effect comment above for why we fail closed here.
+  if (curatorStatus === 'unknown') {
+    return (
+      <section className="v10-po-join" data-section="join-requests">
+        <header className="v10-po-join-head">
+          <span className="v10-po-section-title">Pending join requests</span>
+        </header>
+        <div className="v10-po-join-empty">Verifying access…</div>
+      </section>
+    );
+  }
 
   const handleApprove = async (addr: string) => {
     setProcessing(addr);
@@ -855,25 +1179,73 @@ export function PendingJoinRequestsBar({ contextGraphId, onParticipantsChanged }
   };
 
   return (
-    <div className="v10-ph-join-requests" style={{ margin: '0 16px 8px', padding: '8px 12px', borderRadius: 8, background: 'var(--bg-surface)', border: '1px solid #f59e0b44' }}>
-      <span style={{ fontSize: 9, fontWeight: 700, textTransform: 'uppercase' as const, letterSpacing: '0.8px', color: 'var(--text-tertiary)', marginBottom: 6, display: 'block' }}>
-        Pending Join Requests <span className="v10-ph-join-badge">{requests.length}</span>
-      </span>
-      <div className="v10-ph-join-list">
-        {requests.map(req => (
-          <div key={req.agentAddress} className="v10-ph-join-item">
-            <div className="v10-ph-join-info">
-              <span className="v10-ph-join-name">{req.name || `${req.agentAddress.slice(0, 6)}…${req.agentAddress.slice(-4)}`}</span>
-              <span className="v10-ph-join-addr" title={req.agentAddress}>{req.agentAddress.slice(0, 10)}…</span>
-            </div>
-            <div className="v10-ph-join-actions">
-              <button className="v10-ph-join-btn approve" onClick={() => handleApprove(req.agentAddress)} disabled={processing === req.agentAddress}>
-                {processing === req.agentAddress ? '…' : '✓ Approve'}
-              </button>
-              <button className="v10-ph-join-btn reject" onClick={() => handleReject(req.agentAddress)} disabled={processing === req.agentAddress}>✕</button>
-            </div>
-          </div>
-        ))}
+    <section className="v10-po-join" data-section="join-requests">
+      <header className="v10-po-join-head">
+        <span className="v10-po-section-title">Pending join requests</span>
+        <span className="v10-po-join-count" data-empty={requests.length === 0 ? 'true' : 'false'}>
+          {requests.length}
+        </span>
+      </header>
+      {status === 'loading'
+        ? <div className="v10-po-join-empty">Loading join requests...</div>
+        : status === 'error'
+          ? <div className="v10-po-join-empty">Join requests are currently unavailable.</div>
+          : requests.length === 0
+            ? <div className="v10-po-join-empty">No pending join requests.</div>
+            : <div className="v10-po-join-list">
+                {requests.map(req => (
+                  <div key={req.agentAddress} className="v10-po-join-item">
+                    <div className="v10-po-join-info">
+                      <span className="v10-po-join-name">{req.name || `${req.agentAddress.slice(0, 6)}…${req.agentAddress.slice(-4)}`}</span>
+                      <span className="v10-po-join-addr" title={req.agentAddress}>{req.agentAddress.slice(0, 10)}…</span>
+                    </div>
+                    <div className="v10-po-join-actions">
+                      <button
+                        className="v10-po-join-btn approve"
+                        onClick={() => handleApprove(req.agentAddress)}
+                        disabled={processing === req.agentAddress}
+                      >
+                        {processing === req.agentAddress ? '…' : '✓ Approve'}
+                      </button>
+                      <button
+                        className="v10-po-join-btn reject"
+                        onClick={() => handleReject(req.agentAddress)}
+                        disabled={processing === req.agentAddress}
+                        aria-label="Reject join request"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>}
+    </section>
+  );
+}
+
+// ─── Overview primer footer (§4.2.1 — last row before the bottom of
+//     the Overview, deliberately quieter than the identity-row primer
+//     link so first-time users still have a visible escape hatch
+//     even if they scrolled past the identity row).
+//
+// "New here?  →  What is a Context Graph?" plus a one-line sub-copy.
+// Re-uses the same `onOpenPrimer` handler the identity-row link
+// fires, so wiring is one call site in ProjectView. ────────────
+
+export function OverviewPrimerEntry({ onOpenPrimer }: { onOpenPrimer: () => void }) {
+  return (
+    <div className="v10-po-primer-footer" data-section="primer">
+      <span className="v10-po-primer-footer-lede">New here?</span>
+      <span className="v10-po-primer-footer-arrow" aria-hidden="true">→</span>
+      <button
+        type="button"
+        className="v10-po-primer-footer-link"
+        onClick={onOpenPrimer}
+      >
+        What is a Context Graph?
+      </button>
+      <div className="v10-po-primer-footer-sub">
+        A short primer on context graphs, the WM → SWM → VM pipeline, and how participant agents collaborate.
       </div>
     </div>
   );
@@ -1226,227 +1598,11 @@ export function VerifiedGraphLegend({ anchors }: { anchors: PublishAnchor[] }) {
   );
 }
 
-// ─── Memory Strip (expandable layer rows) ────────────────────
-
-type MemoryStripLayer = 'wm' | 'swm' | 'vm';
-
-export function MemoryStrip({
-  memory,
-  onSwitchLayer,
-  onSelectEntity,
-  contextGraphId,
-  onNodeClick,
-  expandedLayer,
-  onExpandedLayerChange,
-  expandTabs,
-  onExpandTabChange,
-  swmAttribution,
-}: {
-  memory: ReturnType<typeof useMemoryEntities>;
-  onSwitchLayer: (layer: LayerView) => void;
-  onSelectEntity: (uri: string) => void;
-  contextGraphId: string;
-  onNodeClick?: (node: any) => void;
-  expandedLayer?: MemoryStripLayer | null;
-  onExpandedLayerChange?: (layer: MemoryStripLayer | null) => void;
-  expandTabs?: Record<MemoryStripLayer, LayerContentTab>;
-  onExpandTabChange?: (layer: MemoryStripLayer, tab: LayerContentTab) => void;
-  /** Codex Code6 (PR #656) — pass-through of the parent's shared
-   *  SWM attribution result. */
-  swmAttribution?: SwmAttributionsResult;
-}) {
-  const [localExpanded, setLocalExpanded] = useState<MemoryStripLayer | null>(null);
-  const [localExpandTabs, setLocalExpandTabs] = useState<Record<MemoryStripLayer, LayerContentTab>>({
-    wm: 'items',
-    swm: 'items',
-    vm: 'items',
-  });
-  const expanded = expandedLayer !== undefined ? expandedLayer : localExpanded;
-  const activeExpandTabs = expandTabs ?? localExpandTabs;
-  const profile = useProjectProfileContext();
-
-  const layerEntities = useMemo(() => {
-    const wm: MemoryEntity[] = [];
-    const swm: MemoryEntity[] = [];
-    const vm: MemoryEntity[] = [];
-    for (const e of memory.entityList) {
-      if (e.trustLevel === 'verified') vm.push(e);
-      else if (e.trustLevel === 'shared') swm.push(e);
-      else wm.push(e);
-    }
-    return { wm, swm, vm };
-  }, [memory.entityList]);
-
-  // R2-6: per-layer triple counts must agree with the in-page count
-  // shown by the layer-detail tab on the same memory. The detail tab
-  // uses `useLayerTriples`, which residue-filters out triples whose
-  // subject is a promoted entity (post-P1). Summing `memory.allTriples`
-  // raw would double-count promoted residue and disagree with the
-  // badge under it. Source from `useLayerTriples` per layer so both
-  // surfaces stay in sync.
-  const wmLayerTriples = useLayerTriples(memory, 'wm');
-  const swmLayerTriples = useLayerTriples(memory, 'swm');
-  const vmLayerTriples = useLayerTriples(memory, 'vm');
-  const layerTripleCounts = useMemo(() => ({
-    wm: wmLayerTriples.length,
-    swm: swmLayerTriples.length,
-    vm: vmLayerTriples.length,
-  }), [wmLayerTriples.length, swmLayerTriples.length, vmLayerTriples.length]);
-
-  const toggleExpand = (layer: MemoryStripLayer) => {
-    const next = expanded === layer ? null : layer;
-    if (onExpandedLayerChange) onExpandedLayerChange(next);
-    else setLocalExpanded(next);
-  };
-
-  const handleExpandTab = (layer: MemoryStripLayer, tab: LayerContentTab) => {
-    if (onExpandTabChange) onExpandTabChange(layer, tab);
-    else setLocalExpandTabs(prev => ({ ...prev, [layer]: tab }));
-  };
-
-  const layers: Array<{
-    key: MemoryStripLayer;
-    label: string;
-    color: string;
-    icon: string;
-    entities: MemoryEntity[];
-    count: number;
-    promoteLabel: string | null;
-    viewLayer: LayerView;
-  }> = [
-    { key: 'wm', label: 'Working Memory', color: '#64748b', icon: '◇', entities: layerEntities.wm, count: memory.counts.wm, promoteLabel: 'Promote All → Shared', viewLayer: 'wm' },
-    { key: 'swm', label: 'Shared Working Memory', color: '#f59e0b', icon: '◈', entities: layerEntities.swm, count: memory.counts.swm, promoteLabel: 'Publish to Verifiable Memory', viewLayer: 'swm' },
-    { key: 'vm', label: 'Verifiable Memory', color: '#22c55e', icon: '◉', entities: layerEntities.vm, count: memory.counts.vm, promoteLabel: null, viewLayer: 'vm' },
-  ];
-
-  return (
-    <div className="v10-memory-strip">
-      {layers.map(layer => {
-        const isExpanded = expanded === layer.key;
-        const activeTab = activeExpandTabs[layer.key] ?? 'items';
-        return (
-          <React.Fragment key={layer.key}>
-            <div
-              className={`v10-memory-layer ${layer.key} ${isExpanded ? 'expanded' : ''}`}
-              onClick={() => toggleExpand(layer.key)}
-            >
-              <div className="v10-layer-label">
-                <span className="v10-layer-abbr">{layer.label}</span>
-                <span className="v10-layer-count">{layer.count}</span>
-              </div>
-              <div className="v10-layer-items">
-                <span className="v10-layer-chevron">▸</span>
-                {layer.entities.length === 0 && (
-                  <EmptyState
-                    inline
-                    tone={toneForLayer(layer.key)}
-                    icon={layer.icon}
-                    title={`No ${layerNoun(layer.key, 2).toLowerCase()} yet`}
-                  />
-                )}
-                {layer.entities.slice(0, 6).map(e => {
-                  const { icon } = entityMeta(e, profile);
-                  return (
-                    <div key={e.uri} className="v10-layer-chip" style={{ borderColor: `${layer.color}40` }}>
-                      <span className="v10-chip-dot" style={{ background: layer.color }} />
-                      <span className="v10-chip-text">{e.label}</span>
-                      <span className="v10-chip-meta">{icon}</span>
-                    </div>
-                  );
-                })}
-                {layer.entities.length > 6 && (
-                  <span className="v10-chip-meta">+{layer.entities.length - 6} more</span>
-                )}
-              </div>
-            </div>
-            <div className={`v10-layer-expand-content ${isExpanded ? 'open' : ''}`}>
-              {isExpanded && (
-                <MemoryStripExpanded
-                  layerKey={layer.key as 'wm' | 'swm' | 'vm'}
-                  entities={layer.entities}
-                  tripleCount={layerTripleCounts[layer.key as 'wm' | 'swm' | 'vm']}
-                  contextGraphId={contextGraphId}
-                  memory={memory}
-                  activeTab={activeTab as LayerContentTab}
-                  onTabChange={tab => handleExpandTab(layer.key, tab)}
-                  onSelectEntity={onSelectEntity}
-                  onNodeClick={onNodeClick}
-                  onSwitchLayer={() => onSwitchLayer(layer.viewLayer)}
-                  swmAttribution={layer.key === 'swm' ? swmAttribution : undefined}
-                />
-              )}
-            </div>
-          </React.Fragment>
-        );
-      })}
-    </div>
-  );
-}
-
-// Thin wrapper that computes the layer's triples once and renders LayerContent with a footer.
-export function MemoryStripExpanded({
-  layerKey,
-  entities,
-  tripleCount,
-  contextGraphId,
-  memory,
-  activeTab,
-  onTabChange,
-  onSelectEntity,
-  onNodeClick,
-  onSwitchLayer,
-  swmAttribution,
-}: {
-  layerKey: 'wm' | 'swm' | 'vm';
-  entities: MemoryEntity[];
-  tripleCount: number;
-  contextGraphId: string;
-  memory: ReturnType<typeof useMemoryEntities>;
-  activeTab: LayerContentTab;
-  onTabChange: (tab: LayerContentTab) => void;
-  onSelectEntity: (uri: string) => void;
-  onNodeClick?: (node: any) => void;
-  onSwitchLayer: () => void;
-  /** Codex Code6 (PR #656) — pass-through of the parent's shared
-   *  SWM attribution result so the SWM-tab graph reuses the network
-   *  call ProjectView already made for the Overview feed. */
-  swmAttribution?: SwmAttributionsResult;
-}) {
-  const layerTriples = useLayerTriples(memory, layerKey);
-  // No wrapper here: `LayerGraphPanel` already injects `trustLayer:
-  // nodeLayerContext` (which resolves to `layer === layerKey` in this
-  // path) on every node click, including the singleton-shelf path.
-  // Re-wrapping would double-inject the same value and mask any future
-  // intentional divergence between the panel's `layer` and ours.
-  return (
-    <LayerContent
-      layer={layerKey}
-      entities={entities}
-      tripleCount={tripleCount}
-      layerTriples={layerTriples}
-      contextGraphId={contextGraphId}
-      memory={memory}
-      activeTab={activeTab}
-      onTabChange={onTabChange}
-      onSelectEntity={onSelectEntity}
-      onNodeClick={onNodeClick}
-      swmAttribution={swmAttribution}
-      footer={
-        <div className="v10-layer-expand-footer">
-          <button
-            className="v10-layer-expand-footer-btn"
-            onClick={e => {
-              e.stopPropagation();
-              onSwitchLayer();
-            }}
-          >
-            View full layer →
-          </button>
-        </div>
-      }
-    />
-  );
-}
+// S2 finalize: the expandable WM/SWM/VM `MemoryStrip` /
+// `MemoryStripExpanded` duplicated the layer tabs and was removed
+// from the Overview branch in PR #615. The exports lingered with
+// no production caller. Removed here per "no backwards-compat
+// shims" (initial release).
 
 // ─── Generative Widget Components ─────────────────────────────
 
@@ -2834,7 +2990,7 @@ export function LayerDetailView({
   const config = LAYER_CONFIG[layer];
   // No wrapper here: `LayerGraphPanel` already injects `trustLayer:
   // nodeLayerContext` (which resolves to `layer` in this path) on every
-  // node click. See sibling `MemoryStripExpanded` comment.
+  // node click; re-wrapping would double-inject the same value.
 
   const entities = useMemo(
     () => memory.entityList.filter(e => e.trustLevel === config.trustLevel),
@@ -3730,11 +3886,14 @@ export function SubGraphOverviewGrid({
     return out;
   }, [memory.entityList]);
 
-  // Merge registered sub-graphs (minus `meta`) with profile bindings so
+  // Merge registered user-facing sub-graphs with profile bindings so
   // icon/color/label/rank all flow from the single source of truth.
+  // `isUserFacingSubGraph` centralises the reserved-slug rule
+  // (Codex review issue M) — same filter as SubGraphBar + the
+  // Overview Subgraphs stat.
   const cards = useMemo(() => {
     return subGraphs
-      .filter(sg => sg.name !== 'meta')
+      .filter(isUserFacingSubGraph)
       .map(sg => {
         const binding = profile?.forSubGraph(sg.name) ?? {};
         const rawTriples = triplesBySubGraph.get(sg.name) ?? [];

@@ -6,6 +6,8 @@ import { useJourneyStore } from '../../stores/journey.js';
 import { installOntology, listStarters } from '../../lib/ontologyInstall.js';
 import { publishProjectManifest } from '../../lib/projectManifest.js';
 import { WireWorkspacePanel } from '../Workspace/WireWorkspacePanel.js';
+import { useModalDismiss } from './useModalDismiss.js';
+import { CG_NAME_MAX_LENGTH, sanitiseCgName, validateCgName } from './cgNameValidation.js';
 
 function slugify(str: string): string {
   return str
@@ -79,16 +81,35 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
     }
   }, [open]);
 
+  const wireDismiss = useModalDismiss(open && !wiredCgId, onClose);
+  const wiredDismiss = useModalDismiss(open && !!wiredCgId, () => {
+    setWiredCgId(null);
+    setWiredProjectName('');
+    setRegistrationWarning(null);
+    setName('');
+    setDescription('');
+    onClose();
+  });
+
   if (!open) return null;
 
-  const slug = slugify(name);
+  // Store the raw user input verbatim so `validateCgName(name)` can
+  // see and surface every warning the helper emits (stripped HTML
+  // tags, over-length, slug-empty). The cleaned form is derived for
+  // the submit path and the slug preview only.
+  const cleanedName = sanitiseCgName(name);
+  const slug = slugify(cleanedName);
   const cgIdPreview = agentAddress && slug
     ? `${agentAddress}/${slug}`
     : slug ? `<agent-address>/${slug}` : '';
+  const nameValidationError = name ? validateCgName(name) : null;
+  const onNameChange = (raw: string) => {
+    setName(raw);
+  };
 
   const handleCreate = async () => {
-    const trimmedName = name.trim();
-    if (!trimmedName) return;
+    const trimmedName = cleanedName;
+    if (!trimmedName || nameValidationError) return;
 
     setCreating(true);
     setError(null);
@@ -248,10 +269,30 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
 
   if (wiredCgId) {
     return (
-      <div className="v10-modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) handleWireDone(); }}>
-        <div className="v10-modal-box">
+      <div
+        className="v10-modal-overlay"
+        onClick={wiredDismiss.onBackdropClick}
+        role="presentation"
+      >
+        <div
+          className="v10-modal-box"
+          ref={wiredDismiss.dialogRef}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="dkg-wire-modal-title"
+        >
+          <button
+            type="button"
+            className="v10-modal-close"
+            onClick={handleWireDone}
+            aria-label="Close wire workspace dialog"
+            title="Close (Esc)"
+            style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 18, lineHeight: 1, padding: 4 }}
+          >
+            ×
+          </button>
           <div className="v10-modal-header">
-            <div className="v10-modal-title">Wire workspace for {wiredProjectName}</div>
+            <div id="dkg-wire-modal-title" className="v10-modal-title">Wire workspace for {wiredProjectName}</div>
             <div className="v10-modal-subtitle">
               Context graph created. Now wire a local workspace so you can plan it from your own Cursor.
             </div>
@@ -275,11 +316,32 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
   }
 
   return (
-    <div className="v10-modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="v10-modal-box">
+    <div
+      className="v10-modal-overlay"
+      onClick={wireDismiss.onBackdropClick}
+      role="presentation"
+    >
+      <div
+        className="v10-modal-box"
+        ref={wireDismiss.dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="dkg-create-cg-title"
+        aria-describedby="dkg-create-cg-subtitle"
+      >
+        <button
+          type="button"
+          className="v10-modal-close"
+          onClick={onClose}
+          aria-label="Close create context graph dialog"
+          title="Close (Esc)"
+          style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 18, lineHeight: 1, padding: 4, zIndex: 1 }}
+        >
+          ×
+        </button>
         <div className="v10-modal-header">
-          <div className="v10-modal-title">Create New Context Graph</div>
-          <div className="v10-modal-subtitle">
+          <div id="dkg-create-cg-title" className="v10-modal-title">Create New Context Graph</div>
+          <div id="dkg-create-cg-subtitle" className="v10-modal-subtitle">
             A context graph gives your agent structured memory — a place to draft, share, and publish knowledge.
           </div>
         </div>
@@ -306,29 +368,44 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
           )}
 
           <div className="v10-form-group">
-            <label className="v10-form-label">Context Graph Name</label>
+            <label className="v10-form-label" htmlFor="dkg-cg-name">Context Graph Name</label>
             <input
+              id="dkg-cg-name"
+              name="dkg-cg-name"
               className="v10-form-input"
               type="text"
               placeholder="e.g. Pharma Drug Interactions"
               value={name}
-              onChange={(e) => setName(e.target.value)}
+              onChange={(e) => onNameChange(e.target.value)}
               autoFocus
+              maxLength={CG_NAME_MAX_LENGTH}
+              aria-invalid={nameValidationError ? 'true' : 'false'}
+              aria-describedby="dkg-cg-name-help"
+              autoComplete="off"
+              spellCheck={true}
             />
-            {cgIdPreview && (
-              <div style={{ marginTop: 4, fontSize: 11, color: 'var(--text-tertiary)', fontFamily: 'var(--font-mono)' }}>
-                ID: did:dkg:context-graph:{cgIdPreview}
-              </div>
-            )}
+            <div
+              id="dkg-cg-name-help"
+              style={{ marginTop: 4, fontSize: 11, color: nameValidationError ? 'var(--red, #f87171)' : 'var(--text-tertiary)', fontFamily: 'var(--font-mono)' }}
+            >
+              {nameValidationError
+                ? nameValidationError
+                : cgIdPreview
+                  ? `ID: did:dkg:context-graph:${cgIdPreview}`
+                  : `${name.length}/${CG_NAME_MAX_LENGTH} characters`}
+            </div>
           </div>
 
           <div className="v10-form-group">
-            <label className="v10-form-label">Description</label>
+            <label className="v10-form-label" htmlFor="dkg-cg-description">Description</label>
             <textarea
+              id="dkg-cg-description"
+              name="dkg-cg-description"
               className="v10-form-textarea"
               placeholder="What should your agent remember? Describe the domain, goals, or context..."
               value={description}
               onChange={(e) => setDescription(e.target.value)}
+              aria-label="Context graph description"
             />
           </div>
 
@@ -477,7 +554,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
           <button
             className="v10-modal-btn primary"
             onClick={handleCreate}
-            disabled={!name.trim() || creating || !agentAddress || identityLoading}
+            disabled={!name.trim() || !!validateCgName(name) || creating || !agentAddress || identityLoading}
           >
             {creating ? progress || 'Creating…' : identityLoading ? 'Loading agent…' : !agentAddress ? 'Agent unavailable' : 'Create Context Graph'}
           </button>

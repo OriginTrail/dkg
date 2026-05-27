@@ -504,7 +504,16 @@ export async function handleNodeUIRequest(
         ...(parsedLimit != null ? { limit: parsedLimit } : {}),
         order: rawOrder,
       });
-      if (!session) return json(res, 404, { error: 'Session not found' });
+      // Returning 404 for "no history yet" was a bad UX/observability
+      // contract: the OpenClaw chat panel hits this endpoint on every
+      // page load, so a fresh node showed a red 404 line in DevTools
+      // even though the panel was working correctly. Return 200 with
+      // an empty `messages: []` envelope instead — semantically
+      // accurate (the session simply has no turns yet) and matches the
+      // shape `fetchLocalAgentHistoryBySessionId` expects (BUG-001).
+      if (!session) {
+        return json(res, 200, { session: sessionId, messages: [] });
+      }
       return json(res, 200, session);
     } catch (err: any) {
       return json(res, 500, { error: err.message ?? 'Failed to fetch session' });

@@ -98,6 +98,11 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'getBlockTimestamp',
   'parseV10PublishReceipt',
   'parseV9PublishReceipt',
+  // Lazy-cache helpers for frequently-resolved contracts — TS-private,
+  // not part of the ChainAdapter interface.
+  'getIdentityStorage',
+  'getConvictionStakingStorage',
+  'getStakingStorage',
   // Random Sampling (Slice 1) — TS-private helpers that survive into
   // the runtime prototype. The five public methods (createChallenge,
   // submitProof, getActiveProofPeriodStatus, getNodeChallenge,

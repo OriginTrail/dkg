@@ -44,12 +44,32 @@ export function useFetch<T>(
     setLoading(true);
     load();
     let timer: ReturnType<typeof setInterval> | null = null;
-    if (intervalMs > 0) {
+    const startTimer = () => {
+      if (intervalMs <= 0 || timer) return;
       timer = setInterval(load, intervalMs);
-    }
+    };
+    const stopTimer = () => {
+      if (!timer) return;
+      clearInterval(timer);
+      timer = null;
+    };
+    // Pause polling while the tab is hidden (BUG-007). On the dashboard
+    // alone, ~14 components polled `/api/wallets/balances` and friends
+    // every 10–60s independently of tab visibility — when the user
+    // switches away the daemon kept absorbing all of them. The
+    // visibility listener stops the timer when hidden and fires one
+    // immediate refresh on resume so stale data is replaced fast.
+    const onVisibility = () => {
+      if (typeof document === 'undefined') return;
+      if (document.hidden) stopTimer();
+      else { load(); startTimer(); }
+    };
+    if (typeof document === 'undefined' || !document.hidden) startTimer();
+    if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisibility);
     return () => {
       mountedRef.current = false;
-      if (timer) clearInterval(timer);
+      stopTimer();
+      if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibility);
     };
   }, [load, intervalMs]);
 
@@ -77,9 +97,35 @@ export function formatDuration(ms: number | null | undefined): string {
 }
 
 /** Format a unix timestamp to local time string. */
-export function formatTime(ts: number | null | undefined): string {
-  if (!ts) return '—';
-  return new Date(ts).toLocaleTimeString();
+/**
+ * Render a timestamp as a date-aware short label (BUG-003).
+ *
+ * Same-day events show only `H:MM:SS` (the dense form historical
+ * callers depend on for the realtime-tailing log views), entries from
+ * earlier in the same week show `Wed 14:02`, and anything older shows
+ * `Mar 11 14:02`. The previous implementation used
+ * `toLocaleTimeString()` unconditionally, so a column showing 100 ops
+ * displayed every entry as a clock — three days vs three minutes was
+ * indistinguishable. Hovering still surfaces the full date+time via
+ * the caller's `title` attribute when set.
+ */
+export function formatTime(ts: number | string | Date | null | undefined, now: Date = new Date()): string {
+  if (ts == null || ts === '') return '—';
+  const d = ts instanceof Date ? ts : new Date(ts);
+  if (Number.isNaN(d.getTime())) return '—';
+  if (d.toDateString() === now.toDateString()) {
+    return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  }
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  if (d.toDateString() === yesterday.toDateString()) {
+    return `Yesterday ${d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}`;
+  }
+  const diffMs = now.getTime() - d.getTime();
+  if (diffMs >= 0 && diffMs < 7 * 24 * 60 * 60 * 1000) {
+    return `${d.toLocaleDateString(undefined, { weekday: 'short' })} ${d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}`;
+  }
+  return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
 /** Shorten a UUID or peer ID. */

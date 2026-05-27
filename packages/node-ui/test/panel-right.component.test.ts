@@ -44,6 +44,11 @@ vi.mock('../src/ui/api.js', async () => {
 vi.mock('../src/ui/api-wrapper.js', () => ({
   api: {
     fetchMemorySessions: apiFetchMemorySessionsMock,
+    // BUG-007: PanelRight's currentAgent is now sourced from the
+    // shared `useCurrentAgent` hook, which calls `api.fetchCurrentAgent`
+    // through the wrapper (not the named import). Wire the same mock
+    // through the wrapper so the hook resolves under test.
+    fetchCurrentAgent: fetchCurrentAgentMock,
   },
 }));
 

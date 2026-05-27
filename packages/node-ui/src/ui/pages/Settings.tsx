@@ -17,6 +17,9 @@ import {
   type CatchupStatusResponse,
 } from '../api.js';
 import { ObservabilitySection } from './Operations.js';
+import { formatEth, formatEthTooltip } from '../lib/formatEth.js';
+import { formatTracSymbol } from '../lib/formatTrac.js';
+import { redactRpcUrl } from '../lib/redactRpcUrl.js';
 
 function Field({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
   return (
@@ -27,31 +30,84 @@ function Field({ label, value, mono = false }: { label: string; value: string; m
   );
 }
 
-function Toggle({ label, desc, on, disabled }: { label: string; desc: string; on: boolean; disabled?: boolean }) {
+function Toggle({ label, desc, on, disabled, disabledReason }: { label: string; desc: string; on: boolean; disabled?: boolean; disabledReason?: string }) {
   const [active, setActive] = useState(on);
   useEffect(() => { setActive(on); }, [on]);
+  // Visual contrast fix (BUG-010): disabled toggles previously rendered
+  // at opacity 0.5 with the green "on" track. At a glance that looks
+  // identical to a real enabled control, especially the white knob
+  // which still pops against the green pill. Push opacity lower, swap
+  // the track to a neutral colour even when `on=true`, and grey out the
+  // knob so the user sees "this is read-only".
+  const visuallyDisabled = !!disabled;
+  const trackBg = visuallyDisabled
+    ? 'var(--border)'
+    : (active ? 'var(--green)' : 'var(--border)');
+  const knobBg = visuallyDisabled ? 'var(--text-dim)' : '#fff';
   return (
-    <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', padding: '10px 0', borderBottom: '1px solid var(--border)', opacity: disabled ? 0.5 : 1 }}>
+    <div
+      style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', padding: '10px 0', borderBottom: '1px solid var(--border)', opacity: visuallyDisabled ? 0.45 : 1 }}
+      title={visuallyDisabled ? (disabledReason ?? 'Read-only — managed via configuration file') : undefined}
+    >
       <div>
-        <div style={{ fontSize: 12, fontWeight: 600 }}>{label}</div>
+        <div style={{ fontSize: 12, fontWeight: 600 }}>
+          {label}
+          {visuallyDisabled && (
+            <span
+              style={{ marginLeft: 8, padding: '1px 6px', borderRadius: 4, fontSize: 10, fontWeight: 600, color: 'var(--text-dim)', background: 'var(--border)', textTransform: 'uppercase', letterSpacing: '.04em' }}
+              aria-label="Read-only"
+            >
+              read-only
+            </span>
+          )}
+        </div>
         <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2, lineHeight: 1.5 }}>{desc}</div>
       </div>
       <button
-        onClick={() => !disabled && setActive(a => !a)}
-        disabled={disabled}
+        type="button"
+        onClick={() => !visuallyDisabled && setActive(a => !a)}
+        disabled={visuallyDisabled}
+        aria-disabled={visuallyDisabled}
+        aria-label={`${label} (read-only, currently ${on ? 'enabled' : 'disabled'})`}
         style={{
           width: 38, height: 22, borderRadius: 11, border: 'none', flexShrink: 0,
-          background: active ? 'var(--green)' : 'var(--border)',
+          background: trackBg,
           transition: 'background .2s', position: 'relative', marginLeft: 16,
-          cursor: disabled ? 'not-allowed' : 'pointer',
+          cursor: visuallyDisabled ? 'not-allowed' : 'pointer',
         }}
       >
         <span style={{
           position: 'absolute', top: 3, left: active ? 19 : 3,
-          width: 16, height: 16, borderRadius: '50%', background: '#fff',
+          width: 16, height: 16, borderRadius: '50%', background: knobBg,
           transition: 'left .2s', display: 'block',
         }} />
       </button>
+    </div>
+  );
+}
+
+function RpcUrlField({ rpcUrl }: { rpcUrl: string }) {
+  const [reveal, setReveal] = useState(false);
+  // Always redact on first render — operators frequently screen-share
+  // Settings without realising the path-token segment is a tenant
+  // secret (BUG-012). Exposing the full URL requires an explicit click,
+  // and we never persist that choice across renders.
+  const display = reveal ? rpcUrl : redactRpcUrl(rpcUrl);
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <div className="prov-field-label" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span>RPC</span>
+        <button
+          type="button"
+          onClick={() => setReveal((v) => !v)}
+          style={{ background: 'none', border: '1px solid var(--border)', color: 'var(--text-dim)', cursor: 'pointer', fontSize: 9, fontWeight: 600, padding: '1px 6px', borderRadius: 4 }}
+          aria-label={reveal ? 'Redact RPC URL' : 'Reveal RPC URL'}
+          title={reveal ? 'Hide the path-token (recommended for screen-shares)' : 'Show full URL — careful, may contain a tenant secret'}
+        >
+          {reveal ? 'Redact' : 'Reveal'}
+        </button>
+      </div>
+      <div className="prov-field-value mono" style={{ wordBreak: 'break-all' }}>{display}</div>
     </div>
   );
 }
@@ -135,38 +191,58 @@ function LlmSection() {
         <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', display: 'block', marginBottom: 5 }}>API Key</label>
         <div style={{ position: 'relative' }}>
           <input
+            id="dkg-llm-api-key"
+            name="dkg-llm-api-key"
             type={showKey ? 'text' : 'password'}
             value={apiKey}
             onChange={e => setApiKey(e.target.value)}
             placeholder={llm?.configured ? '••••••••  (key saved — paste new to replace)' : 'sk-...'}
             style={inputStyle}
+            aria-label="LLM API key"
+            autoComplete="off"
+            spellCheck={false}
           />
-          <button
-            onClick={() => setShowKey(v => !v)}
-            style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', color: 'var(--text-dim)', cursor: 'pointer', fontSize: 10, fontWeight: 600 }}
-          >
-            {showKey ? 'Hide' : 'Show'}
-          </button>
+          {/* Show/Hide toggles `type=password` ↔ `type=text` for the
+              currently typed value. The saved key never leaves the
+              daemon (placeholder is just a hint), so revealing an empty
+              input is a no-op visual lie — hide the button when the
+              field is empty (BUG-015). */}
+          {apiKey.length > 0 && (
+            <button
+              type="button"
+              onClick={() => setShowKey(v => !v)}
+              style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', color: 'var(--text-dim)', cursor: 'pointer', fontSize: 10, fontWeight: 600 }}
+              aria-label={showKey ? 'Hide API key' : 'Show API key'}
+            >
+              {showKey ? 'Hide' : 'Show'}
+            </button>
+          )}
         </div>
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
         <div>
-          <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', display: 'block', marginBottom: 5 }}>Model</label>
+          <label htmlFor="dkg-llm-model" style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', display: 'block', marginBottom: 5 }}>Model</label>
           <input
+            id="dkg-llm-model"
+            name="dkg-llm-model"
             value={model}
             onChange={e => setModel(e.target.value)}
             placeholder="gpt-4o-mini"
             style={inputStyle}
+            aria-label="LLM model"
           />
         </div>
         <div>
-          <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', display: 'block', marginBottom: 5 }}>Base URL</label>
+          <label htmlFor="dkg-llm-base-url" style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', display: 'block', marginBottom: 5 }}>Base URL</label>
           <input
+            id="dkg-llm-base-url"
+            name="dkg-llm-base-url"
             value={baseURL}
             onChange={e => setBaseURL(e.target.value)}
             placeholder="https://api.openai.com/v1"
             style={inputStyle}
+            aria-label="LLM base URL"
           />
         </div>
       </div>
@@ -515,7 +591,11 @@ function DevModeToggle() {
         <div>
           <div style={{ fontSize: 12, fontWeight: 600 }}>Developer Mode</div>
           <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2, lineHeight: 1.5 }}>
-            Unlock the Observability tab on this page with detailed metrics, phase timelines, system stats, and the full daemon log.
+            Reveal advanced developer affordances: the per-operation phase
+            timeline drill-down, raw structured-log viewer, and a verbose
+            daemon log surface inside Observability. The Observability
+            tab itself is now always visible — Developer Mode unlocks the
+            deep-dive views inside it.
           </div>
         </div>
         <button
@@ -554,6 +634,19 @@ function CatchupStatusSection() {
   const { data: contextGraphData } = useFetch(fetchContextGraphs, [], 30_000);
   const contextGraphs = ((contextGraphData as any)?.contextGraphs ?? []).filter((p: any) => p?.id);
   const [selectedContextGraph, setSelectedContextGraph] = useState('');
+  // 200+ context-graph IDs in a `<select>` is an unusable wall of
+  // entries (BUG-014). We expose a `<datalist>` paired with an `<input
+  // type="search">` so the user can type any substring and pick from a
+  // filtered list — the browser handles the filtering, no extra
+  // JS-side state.
+  const [filterText, setFilterText] = useState('');
+  const [showOnlyMine, setShowOnlyMine] = useState(false);
+  const filteredContextGraphs = contextGraphs.filter((p: any) => {
+    if (showOnlyMine && p.isSystem) return false;
+    if (!filterText) return true;
+    const q = filterText.toLowerCase();
+    return String(p.id).toLowerCase().includes(q) || String(p.name ?? '').toLowerCase().includes(q);
+  });
 
   useEffect(() => {
     if (selectedContextGraph) return;
@@ -598,15 +691,61 @@ function CatchupStatusSection() {
         Shows the latest catch-up job for the selected context graph (triggered by subscribe).
       </div>
 
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8, flexWrap: 'wrap' }}>
+        <input
+          id="dkg-bg-sync-filter"
+          name="dkg-bg-sync-filter"
+          type="search"
+          className="input"
+          style={{ flex: '2 1 200px' }}
+          placeholder={`Filter ${contextGraphs.length} context graph${contextGraphs.length === 1 ? '' : 's'}…`}
+          value={filterText}
+          onChange={(e) => setFilterText(e.target.value)}
+          aria-label="Filter context graphs"
+        />
+        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--text-muted)', cursor: 'pointer', whiteSpace: 'nowrap' }}>
+          <input
+            type="checkbox"
+            checked={showOnlyMine}
+            onChange={(e) => setShowOnlyMine(e.target.checked)}
+            aria-label="Hide system context graphs"
+          />
+          Hide system CGs
+        </label>
+      </div>
+      {/* If the user filters such that the previously-selected CG is
+          no longer in the visible list, the status panel below still
+          shows that CG's data — which is confusing. Surface a small
+          hint with a one-click "show full list" reset so the user
+          isn't left wondering why their search returned nothing. */}
+      {selectedContextGraph &&
+       filteredContextGraphs.length > 0 &&
+       !filteredContextGraphs.some((p: any) => p.id === selectedContextGraph) && (
+        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>
+          Selection hidden by current filter.{' '}
+          <button
+            type="button"
+            onClick={() => { setFilterText(''); setShowOnlyMine(false); }}
+            className="btn btn-ghost btn-xs"
+            style={{ padding: '0 6px' }}
+          >
+            Clear filter
+          </button>
+        </div>
+      )}
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 12 }}>
         <select
+          id="dkg-bg-sync-graph"
+          name="dkg-bg-sync-graph"
           className="input"
           style={{ flex: 1, backgroundImage: 'none', paddingRight: 12 }}
           value={selectedContextGraph}
           onChange={(e) => setSelectedContextGraph(e.target.value)}
+          size={Math.min(8, Math.max(1, filteredContextGraphs.length))}
+          aria-label="Context graph"
         >
-          {contextGraphs.length === 0 && <option value="">No context graphs available</option>}
-          {contextGraphs.map((p: any) => (
+          {filteredContextGraphs.length === 0 && <option value="">{contextGraphs.length === 0 ? 'No context graphs available' : 'No matches'}</option>}
+          {filteredContextGraphs.map((p: any) => (
             <option key={p.id} value={p.id}>{p.id}{p.isSystem ? ' (system)' : ''}</option>
           ))}
         </select>
@@ -754,9 +893,12 @@ function GeneralSettingsTab() {
           <div className="mono" style={{ fontSize: 10, color: isOnline ? 'var(--green)' : 'var(--red)', fontWeight: 700 }}>
             {isOnline ? '● ONLINE' : '● OFFLINE'}
           </div>
-          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+          <div
+            style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}
+            title="Peers = unique remote nodes. Direct + Relayed counts are libp2p connections — a single peer can hold both a direct and a relayed link, so they sum to ≥ Peers, not exactly equal to it."
+          >
             {isOnline
-              ? `${peerCount} peer${peerCount !== 1 ? 's' : ''} · ${s?.connections?.direct ?? 0} direct, ${s?.connections?.relayed ?? 0} relayed · up ${formatUptime(s?.uptimeMs ?? 0)}`
+              ? `${peerCount} peer${peerCount !== 1 ? 's' : ''} · ${s?.connections?.direct ?? 0} direct, ${s?.connections?.relayed ?? 0} relayed link${(s?.connections?.relayed ?? 0) === 1 ? '' : 's'} · up ${formatUptime(s?.uptimeMs ?? 0)}`
               : 'Node is not responding'}
           </div>
         </div>
@@ -771,8 +913,16 @@ function GeneralSettingsTab() {
             <div key={b.address} style={{ marginBottom: 10 }}>
               <Field label={w.balances.length > 1 ? `Wallet ${i + 1}` : 'Operational Wallet'} value={b.address} mono />
               <div style={{ display: 'flex', gap: 16, marginTop: -6 }}>
-                <span className="mono" style={{ fontSize: 11, color: 'var(--text-muted)' }}>{parseFloat(b.eth).toFixed(6)} ETH</span>
-                <span className="mono" style={{ fontSize: 11, color: 'var(--text-muted)' }}>{parseFloat(b.trac).toFixed(2)} {b.symbol}</span>
+                <span
+                  className="mono"
+                  style={{ fontSize: 11, color: 'var(--text-muted)' }}
+                  title={formatEthTooltip(b.eth)}
+                >
+                  {formatEth(b.eth)} ETH
+                </span>
+                <span className="mono" style={{ fontSize: 11, color: 'var(--text-muted)' }} title={`Exact: ${b.trac}`}>
+                  {parseFloat(b.trac).toFixed(2)} {formatTracSymbol(b.symbol, w?.chainId)}
+                </span>
               </div>
             </div>
           ))
@@ -780,7 +930,7 @@ function GeneralSettingsTab() {
           <Field label="Operational Wallet" value={w?.wallets?.[0] ? truncateAddress(w.wallets[0]) : '—'} mono />
         )}
         {w?.rpcUrl && (
-          <Field label="RPC" value={w.rpcUrl} mono />
+          <RpcUrlField rpcUrl={w.rpcUrl} />
         )}
         {w?.error ? (
           <div style={{ padding: '8px 12px', borderRadius: 8, background: 'rgba(248,113,113,.05)', border: '1px solid rgba(248,113,113,.2)' }}>
@@ -808,10 +958,22 @@ function GeneralSettingsTab() {
       <div className="settings-card">
         <div className="settings-title">Privacy & Memory</div>
         <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 12, lineHeight: 1.5 }}>
-          These settings are not yet configurable via the UI. Edit <span className="mono" style={{ fontSize: 10 }}>~/.dkg/config.json</span> directly.
+          These settings are configured at startup. Edit <span className="mono" style={{ fontSize: 10 }}>~/.dkg/config.json</span> and restart the node to change them.
         </div>
-        <Toggle label="Publish by Default" desc="Automatically push new Knowledge Assets to the DKG upon creation." on={true} disabled />
-        <Toggle label="Analytics" desc="Share anonymous usage stats to help improve DKG V10." on={false} disabled />
+        <Toggle
+          label="Publish by Default"
+          desc="Automatically push new Knowledge Assets to the DKG upon creation."
+          on={true}
+          disabled
+          disabledReason="Set via config.publishByDefault in ~/.dkg/config.json"
+        />
+        <Toggle
+          label="Analytics"
+          desc="Share anonymous usage stats to help improve DKG V10."
+          on={false}
+          disabled
+          disabledReason="Set via config.telemetry in ~/.dkg/config.json"
+        />
       </div>
 
       {/* Danger zone */}

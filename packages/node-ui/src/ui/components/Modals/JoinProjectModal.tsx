@@ -9,6 +9,7 @@ import { useProjectsStore } from '../../stores/projects.js';
 import { useTabsStore } from '../../stores/tabs.js';
 import { useNodeEvents } from '../../hooks/useNodeEvents.js';
 import { WireWorkspacePanel } from '../Workspace/WireWorkspacePanel.js';
+import { useModalDismiss } from './useModalDismiss.js';
 
 interface JoinProjectModalProps {
   open: boolean;
@@ -320,6 +321,13 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
   }, [pendingCgId, transitionToApproved]);
   useNodeEvents(onNodeEvent);
 
+  const inviteDismiss = useModalDismiss(open && !wiredCgId, onClose);
+  const wireDismiss = useModalDismiss(open && !!wiredCgId, () => {
+    setWiredCgId(null);
+    setWiredProjectName('');
+    onClose();
+  });
+
   if (!open) return null;
 
   const handleRequestJoin = async () => {
@@ -403,10 +411,30 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
 
   if (wiredCgId) {
     return (
-      <div className="v10-modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) handleWireDone(); }}>
-        <div className="v10-modal-box">
+      <div
+        className="v10-modal-overlay"
+        onClick={wireDismiss.onBackdropClick}
+        role="presentation"
+      >
+        <div
+          className="v10-modal-box"
+          ref={wireDismiss.dialogRef}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="dkg-join-wire-title"
+        >
+          <button
+            type="button"
+            className="v10-modal-close"
+            onClick={handleWireDone}
+            aria-label="Close wire workspace dialog"
+            title="Close (Esc)"
+            style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 18, lineHeight: 1, padding: 4, zIndex: 1 }}
+          >
+            ×
+          </button>
           <div className="v10-modal-header">
-            <div className="v10-modal-title">Wire workspace for {wiredProjectName}</div>
+            <div id="dkg-join-wire-title" className="v10-modal-title">Wire workspace for {wiredProjectName}</div>
             <div className="v10-modal-subtitle">
               Curator approved. Now wire a local workspace so this Cursor can collaborate on the context graph.
             </div>
@@ -430,11 +458,32 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
   const rejected = phase === 'rejected';
 
   return (
-    <div className="v10-modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="v10-modal-box">
+    <div
+      className="v10-modal-overlay"
+      onClick={inviteDismiss.onBackdropClick}
+      role="presentation"
+    >
+      <div
+        className="v10-modal-box"
+        ref={inviteDismiss.dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="dkg-join-cg-title"
+        aria-describedby="dkg-join-cg-subtitle"
+      >
+        <button
+          type="button"
+          className="v10-modal-close"
+          onClick={onClose}
+          aria-label="Close join context graph dialog"
+          title="Close (Esc)"
+          style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 18, lineHeight: 1, padding: 4, zIndex: 1 }}
+        >
+          ×
+        </button>
         <div className="v10-modal-header">
-          <div className="v10-modal-title">Join a Context Graph</div>
-          <div className="v10-modal-subtitle">
+          <div id="dkg-join-cg-title" className="v10-modal-title">Join a Context Graph</div>
+          <div id="dkg-join-cg-subtitle" className="v10-modal-subtitle">
             Paste the invite from the curator. Your node will send a signed join request and wait for approval.
           </div>
         </div>
@@ -473,8 +522,10 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
           )}
 
           <div className="v10-form-group">
-            <label className="v10-form-label">Invite Code</label>
+            <label className="v10-form-label" htmlFor="dkg-cg-invite">Invite Code</label>
             <textarea
+              id="dkg-cg-invite"
+              name="dkg-cg-invite"
               className="v10-form-textarea"
               placeholder={"Paste the invite code from the context graph curator.\n\ne.g.\nmy-context-graph-abc123\n12D3KooW..."}
               value={inviteCode}
@@ -483,6 +534,9 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
               rows={3}
               disabled={sending || pending || approved}
               style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}
+              aria-label="Context graph invite code"
+              autoComplete="off"
+              spellCheck={false}
             />
           </div>
         </div>

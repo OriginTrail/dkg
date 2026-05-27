@@ -10,33 +10,19 @@ import { useAgentsStore } from './stores/agents.js';
 import { useTabsStore } from './stores/tabs.js';
 import { api } from './api-wrapper.js';
 import { CONTEXT_GRAPH_PRIMER_TAB } from './lib/contextGraphPrimer.js';
+import { useVisibilityPolling } from './hooks/useVisibilityPolling.js';
+import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts.js';
+import { useShellRouting } from './hooks/useShellRouting.js';
 
 function useLiveStatus() {
   const setNodeStatus = useAgentsStore((s) => s.setNodeStatus);
-  useEffect(() => {
-    let mounted = true;
-    const poll = () => {
-      api.fetchStatus().then((s) => { if (mounted) setNodeStatus(s); }).catch(() => {});
-    };
-    poll();
-    const iv = setInterval(poll, 10_000);
-    return () => { mounted = false; clearInterval(iv); };
-  }, [setNodeStatus]);
-}
-
-function useKeyboardShortcuts() {
-  const { toggleLeft, toggleRight, toggleBottom } = useLayoutStore();
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
-      const mod = e.metaKey || e.ctrlKey;
-      if (mod && e.key === 'b') { e.preventDefault(); toggleLeft(); }
-      if (mod && e.key === 'j') { e.preventDefault(); toggleBottom(); }
-      if (mod && e.shiftKey && e.key === 'b') { e.preventDefault(); toggleRight(); }
-    };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, [toggleLeft, toggleRight, toggleBottom]);
+  // Status was previously polled every 10s with a raw `setInterval`,
+  // even when the tab was hidden — burning ~6 requests/minute against
+  // the daemon for nothing. Route through the visibility-aware
+  // helper so a backgrounded tab stops polling entirely (BUG-007).
+  useVisibilityPolling(() => {
+    api.fetchStatus().then(setNodeStatus).catch(() => {});
+  }, 10_000);
 }
 
 function useDragResize(onDrag: (delta: number) => void) {
@@ -144,10 +130,21 @@ function useDragResizeV(onDrag: (delta: number) => void) {
 function AppShell() {
   useLiveStatus();
   useKeyboardShortcuts();
+  useShellRouting();
   const { leftCollapsed, rightCollapsed, bottomCollapsed, theme, leftWidth, rightWidth, setLeftWidth, setRightWidth, setBottomHeight } = useLayoutStore();
   const [, setVpTick] = useState(0);
 
   useEffect(() => {
+    // Toggle the class on `<html>` (documentElement) — not `<body>` —
+    // because `:root` defines `--bg-root: #000000` and the
+    // `html, body, #root { background: var(--bg-root) }` rule applies
+    // that variable to the `<html>` element first. Putting the override
+    // class on `<body>` only re-cascaded the variable to the body, so
+    // the html element kept rendering the dark colour and rubber-band
+    // overscroll on macOS showed a black strip in light mode. Keep the
+    // body class as well for any selectors authored against `body.light`
+    // historically.
+    document.documentElement.classList.toggle('light', theme === 'light');
     document.body.classList.toggle('light', theme === 'light');
   }, [theme]);
 
@@ -253,7 +250,6 @@ export function App() {
       <Route path="/context-graph-primer" element={<ContextGraphPrimerRoute />} />
       <Route path="/agent" element={<Navigate to="/" replace />} />
       <Route path="/explorer" element={<Navigate to="/" replace />} />
-      <Route path="/settings" element={<Navigate to="/" replace />} />
       <Route path="/messages" element={<Navigate to="/" replace />} />
       {/* V9 installable apps framework was retired in V10 (see daemon 410 handler).
           Redirect stale bookmarks for /ui/apps/... back to the dashboard so upgraded

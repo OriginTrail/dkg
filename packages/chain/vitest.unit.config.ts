@@ -12,6 +12,7 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     include: [
+      'test/filter-error-console-suppressor.test.ts',
       'test/filter-error-silencer.test.ts',
       'test/evm-adapter.unit.test.ts',
     ],

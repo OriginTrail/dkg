@@ -30,6 +30,18 @@ import { ArrowDown, ArrowUp, Ban, ChevronDown, ChevronRight, Folder, Loader2, Mo
 import { Select } from '../common/Select.js';
 import { MarkdownMessage } from '../chat/MarkdownMessage.js';
 import { computeSelectableProjects, toSidebarIdentity } from '../../lib/contextGraphSidebar.js';
+import { useCurrentAgent as useSharedCurrentAgentRaw } from '../../hooks/useCurrentAgent.js';
+import { useVisibilityPolling } from '../../hooks/useVisibilityPolling.js';
+
+/**
+ * Shared-hook wrapper that returns just the `data` slice — the rest of
+ * `PanelRight` only needs the identity object (or null), and routing
+ * everything through the shared hook fixes the dashboard fan-out poll
+ * storm (BUG-007).
+ */
+function useSharedCurrentAgent(): AgentIdentity | null {
+  return useSharedCurrentAgentRaw().data;
+}
 
 export interface LocalAgentMessage {
   id: string;
@@ -2123,7 +2135,11 @@ export function PanelRight() {
   const [peerAgents, setPeerAgents] = useState<AgentInfo[]>([]);
   const [connections, setConnections] = useState<{ total: number; direct: number; relayed: number; rows: ConnectionRow[] }>({ total: 0, direct: 0, relayed: 0, rows: [] });
   const [peerLoading, setPeerLoading] = useState(true);
-  const [currentAgent, setCurrentAgent] = useState<AgentIdentity | null>(null);
+  // Mirror Header — use the dedup'd shared hook so the panel doesn't
+  // race-fetch its own copy of the current agent on every mount
+  // (BUG-007). The boolean `loading` flag is intentionally ignored;
+  // callers below already null-check `currentAgent`.
+  const currentAgent = useSharedCurrentAgent();
 
   const [integrations, setIntegrations] = useState<LocalAgentIntegration[]>([]);
   const [selectedIntegrationId, setSelectedIntegrationId] = useState('openclaw');
@@ -2475,17 +2491,16 @@ export function PanelRight() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  useEffect(() => {
-    fetchCurrentAgent().then(setCurrentAgent).catch(() => {});
-  }, []);
-
-  useEffect(() => {
-    const intervalId = setInterval(() => {
-      loadSessions();
-      refreshPeers();
-    }, 15_000);
-    return () => clearInterval(intervalId);
+  // BUG-007: sessions + peers refresh now goes through the shared
+  // visibility-aware poller (was a hand-rolled visibilitychange loop
+  // with the same intent). Skip the immediate fire-on-mount because
+  // both loadSessions and refreshPeers already ran in the mount-time
+  // effect above; otherwise we'd duplicate the network call.
+  const refreshChatPanelLive = useCallback(() => {
+    loadSessions();
+    refreshPeers();
   }, [loadSessions, refreshPeers]);
+  useVisibilityPolling(refreshChatPanelLive, 15_000, { runImmediately: false });
 
   const localIntegrationRefreshMs = integrations.some((integration) =>
     integration.persistentChat && (!integration.chatReady || integration.status === 'connecting'),

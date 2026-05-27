@@ -137,7 +137,11 @@ describe('clickable notifications', () => {
   it('notification items show message and timestamp', () => {
     expect(header).toContain('n.message');
     expect(header).toContain('n.ts');
-    expect(header).toContain('toLocaleTimeString');
+    // BUG-003: timestamp is now rendered through the date-aware
+    // `formatNotificationTimestamp` helper so a 2-month-old notification
+    // doesn't masquerade as fresh — `toLocaleTimeString` alone would
+    // hide the day. Asserting the helper is wired in.
+    expect(header).toContain('formatNotificationTimestamp');
   });
 
   it('empty state shown when no notifications', () => {
@@ -191,7 +195,11 @@ describe('right-rail agent shell replaces Agent Hub', () => {
 describe('backward-compatible URL redirects (V10 consolidation)', () => {
   const app = readFile('App.tsx');
 
-  for (const path of ['/agent', '/explorer', '/settings', '/messages', '/apps/*']) {
+  // BUG-018: `/settings` and `/observability` are now deep-linkable —
+  // they fall through to AppShell where `useShellRouting` opens the
+  // matching centre tab. The remaining stale routes (V9 surfaces with
+  // no V10 home) still hard-redirect.
+  for (const path of ['/agent', '/explorer', '/messages', '/apps/*']) {
     it(`redirects ${path} to /`, () => {
       expect(app).toContain(`path="${path}"`);
       const pattern = new RegExp(`path="${path.replace('*', '\\*')}".*element=\\{<Navigate to="/"`);
@@ -202,6 +210,22 @@ describe('backward-compatible URL redirects (V10 consolidation)', () => {
   it('uses replace to avoid pushing redirect onto history', () => {
     const redirectSection = app.slice(app.indexOf('path="/agent"'), app.indexOf('path="*"'));
     expect(redirectSection).toContain('replace');
+  });
+
+  it('does NOT redirect /settings — it must open the Settings tab via the shell router (BUG-018)', () => {
+    expect(app).not.toMatch(/path="\/settings".*element=\{<Navigate to="\/"/);
+    expect(app).toContain('useShellRouting');
+  });
+
+  it('exposes /observability as a deep-linkable path (BUG-018)', () => {
+    // The mapping table now lives in `hooks/useShellRouting.ts`; the
+    // companion behavioural tests in `use-shell-routing.test.ts`
+    // exercise the deep-link / unmapped-tab reset semantics directly.
+    const shellRouting = readFileSync(
+      resolve(__dirname, '../src/ui/hooks/useShellRouting.ts'),
+      'utf-8',
+    );
+    expect(shellRouting).toContain("'/observability'");
   });
 });
 
@@ -255,7 +279,10 @@ describe('notification items are non-interactive until peer chat exists', () => 
   it('renders notification text and timestamp', () => {
     expect(header).toContain('v10-header-notif-item-text');
     expect(header).toContain('v10-header-notif-item-time');
-    expect(header).toContain('toLocaleTimeString');
+    // BUG-003: same date-aware helper as the dropdown above; raw
+    // `toLocaleTimeString` is no longer the source of truth for the
+    // notification timestamp.
+    expect(header).toContain('formatNotificationTimestamp');
   });
 });
 

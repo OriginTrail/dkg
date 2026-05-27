@@ -1,11 +1,14 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
-import { type Notification, fetchCurrentAgent, type AgentIdentity } from '../../api.js';
+import { type Notification } from '../../api.js';
 import { api } from '../../api-wrapper.js';
 import { useLayoutStore } from '../../stores/layout.js';
 import { useAgentsStore } from '../../stores/agents.js';
 import { useProjectsStore } from '../../stores/projects.js';
 import { useTabsStore } from '../../stores/tabs.js';
 import { useNodeEvents } from '../../hooks/useNodeEvents.js';
+import { useCurrentAgent } from '../../hooks/useCurrentAgent.js';
+import { useVisibilityPolling } from '../../hooks/useVisibilityPolling.js';
+import { compareNotificationByTsDesc, formatNotificationTimestamp } from '../../lib/formatTimestamp.js';
 
 /** OriginTrail wordmark — same paths as `v9-stable` packages/node-ui App.tsx sidebar. */
 const ORIGINTRAIL_WORDMARK = (
@@ -74,6 +77,38 @@ const OBSERVABILITY_ICON = (
   </svg>
 );
 
+/** Build the tooltip string surfaced on the status pill so the user can
+ *  see the direct/relayed connection breakdown and uptime without
+ *  jumping to Settings. Returns a string suitable for the `title`
+ *  attribute (newline-separated lines render as separate lines in
+ *  Chrome's tooltip). */
+export function formatPeerStatusTooltip(
+  synced: boolean,
+  peers: number,
+  direct: number,
+  relayed: number,
+  uptimeMs: number,
+): string {
+  const lines = [
+    synced ? 'Synced with the network' : 'Syncing with the network',
+    `${peers} peer${peers === 1 ? '' : 's'} (${direct} direct, ${relayed} relayed)`,
+  ];
+  if (uptimeMs > 0) lines.push(`Uptime ${formatUptimeShort(uptimeMs)}`);
+  return lines.join('\n');
+}
+
+function formatUptimeShort(ms: number): string {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const d = Math.floor(totalSeconds / 86400);
+  const h = Math.floor((totalSeconds % 86400) / 3600);
+  const m = Math.floor((totalSeconds % 3600) / 60);
+  const parts: string[] = [];
+  if (d > 0) parts.push(`${d}d`);
+  if (h > 0 || d > 0) parts.push(`${h}h`);
+  parts.push(`${m}m`);
+  return parts.join(' ');
+}
+
 export function Header() {
   const { theme, setTheme, leftCollapsed, toggleLeft, rightCollapsed, toggleRight } = useLayoutStore();
   const nodeStatus = useAgentsStore((s) => s.nodeStatus);
@@ -81,7 +116,14 @@ export function Header() {
   const [unread, setUnread] = useState(0);
   const [showNotifs, setShowNotifs] = useState(false);
   const notifRef = useRef<HTMLDivElement>(null);
-  const [currentAgent, setCurrentAgent] = useState<AgentIdentity | null>(null);
+  // Use the deduplicating shared hook (BUG-007): every other consumer
+  // (Header, PanelRight, PanelLeft, modals, Dashboard's
+  // useMyContextGraphs) used to fire its own `fetchCurrentAgent` on
+  // mount AND poll independently. The shared hook coalesces all
+  // mounts under a single in-flight promise + 60s polling cadence,
+  // so the dashboard fan-out drops from ~14 calls in the first
+  // second to one.
+  const currentAgent = useCurrentAgent().data;
   const setActiveProject = useProjectsStore((s) => s.setActiveProject);
   const { openTab } = useTabsStore();
 
@@ -92,11 +134,7 @@ export function Header() {
     }).catch(() => {});
   }, []);
 
-  useEffect(() => {
-    loadNotifs();
-    const iv = setInterval(loadNotifs, 60_000);
-    return () => clearInterval(iv);
-  }, [loadNotifs]);
+  useVisibilityPolling(loadNotifs, 60_000);
 
   useNodeEvents(useCallback((event) => {
     if (
@@ -116,13 +154,25 @@ export function Header() {
     return () => document.removeEventListener('mousedown', handler);
   }, []);
 
-  useEffect(() => {
-    fetchCurrentAgent().then(setCurrentAgent).catch(() => {});
-  }, []);
-
   const connectedPeers = nodeStatus?.connectedPeers ?? nodeStatus?.peerCount ?? 0;
+  const directConns = nodeStatus?.connections?.direct ?? 0;
+  const relayedConns = nodeStatus?.connections?.relayed ?? 0;
+  const uptimeMs = nodeStatus?.uptimeMs ?? 0;
   const statusLoaded = nodeStatus != null;
   const synced = statusLoaded && nodeStatus?.synced !== false;
+  const peerStatusLabel = formatPeerStatusTooltip(synced, connectedPeers, directConns, relayedConns, uptimeMs);
+  const sortedNotifications = [...notifications].sort(compareNotificationByTsDesc);
+  // The /api/notifications/read endpoint flips the `read` flag on
+  // existing rows; it does not delete them. We therefore drop the
+  // unread badge but keep the dropdown contents in place — clearing
+  // local state would lie to the user and the same items would come
+  // back on the next poll.
+  const onMarkAllRead = () => {
+    api.markNotificationsRead().then(() => {
+      setNotifications((prev) => prev.map((n) => ({ ...n, read: 1 })));
+      setUnread(0);
+    }).catch(() => {});
+  };
 
   return (
     <header className="v10-header">
@@ -158,7 +208,7 @@ export function Header() {
 
       <div className="v10-header-spacer" />
 
-      <div className="v10-header-meta">
+      <div className="v10-header-meta" title={peerStatusLabel}>
         <span className={`v10-header-status-dot ${synced ? 'online' : 'offline'}`} />
         <span>{synced ? 'synced' : 'syncing'}</span>
         <span className="v10-header-meta-sep">·</span>
@@ -173,16 +223,30 @@ export function Header() {
               setShowNotifs((v) => !v);
               if (unread > 0) api.markNotificationsRead().then(() => setUnread(0)).catch(() => {});
             }}
+            title={unread > 0 ? `Notifications (${unread} unread)` : 'Notifications'}
+            aria-label={unread > 0 ? `Notifications, ${unread} unread` : 'Notifications'}
           >
             {BELL_ICON}
             {unread > 0 && <span className="v10-header-notif-badge">{unread}</span>}
           </button>
           {showNotifs && (
-            <div className="v10-header-notif-dropdown">
-              <div className="v10-header-notif-title">Notifications</div>
-              {notifications.length === 0 ? (
+            <div className="v10-header-notif-dropdown" role="region" aria-label="Notifications">
+              <div className="v10-header-notif-titlebar">
+                <div className="v10-header-notif-title">Notifications</div>
+                {unread > 0 && (
+                  <button
+                    type="button"
+                    className="v10-header-notif-clear"
+                    onClick={onMarkAllRead}
+                    title="Mark all notifications as read"
+                  >
+                    Mark all read
+                  </button>
+                )}
+              </div>
+              {sortedNotifications.length === 0 ? (
                 <div className="v10-header-notif-empty">No notifications</div>
-              ) : notifications.slice(0, 12).map((n, i) => {
+              ) : sortedNotifications.slice(0, 12).map((n, i) => {
                 const meta = n.meta ? (() => { try { return JSON.parse(n.meta); } catch { return null; } })() : null;
                 const isJoinReq = n.type === 'join_request';
                 const isJoinApproved = n.type === 'join_approved';
@@ -205,7 +269,14 @@ export function Header() {
                     {isJoinApproved && <span className="v10-notif-join-icon">✓</span>}
                     {isJoinRejected && <span className="v10-notif-join-icon">✕</span>}
                     <div className="v10-header-notif-item-text">{n.message ?? n.title ?? 'Notification'}</div>
-                    {n.ts && <div className="v10-header-notif-item-time">{new Date(n.ts).toLocaleTimeString()}</div>}
+                    {n.ts && (
+                      <div
+                        className="v10-header-notif-item-time"
+                        title={new Date(n.ts).toLocaleString()}
+                      >
+                        {formatNotificationTimestamp(n.ts)}
+                      </div>
+                    )}
                   </div>
                 );
               })}

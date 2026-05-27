@@ -879,7 +879,7 @@ function OperationsTab() {
                   onClick={() => setSelectedOp(op.operation_id)}
                   style={{ cursor: 'pointer', background: selectedOp === op.operation_id ? 'rgba(59,130,246,.1)' : undefined }}
                 >
-                  <td>{formatTime(op.started_at)}</td>
+                  <td title={op.started_at ? new Date(op.started_at).toLocaleString() : undefined}>{formatTime(op.started_at)}</td>
                   <td><span className="badge" title={OP_TYPE_DESCRIPTIONS[op.operation_name] ?? ''} style={{ background: `${OP_TYPE_COLORS[op.operation_name] ?? 'var(--text-muted)'}22`, color: OP_TYPE_COLORS[op.operation_name] ?? 'var(--text-muted)' }}>{op.operation_name}</span></td>
                   <td><StatusBadge status={op.status} /></td>
                   <td><MiniGantt phases={op.phases} totalMs={op.duration_ms} /></td>
@@ -1145,8 +1145,11 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
                     <StatusBadge status={p.status} />
                     <span style={{ fontSize: 11, color: 'var(--text-dim)', fontFamily: "'JetBrains Mono', monospace" }}>{formatDuration(p.duration_ms)}</span>
                     {desc && <span style={{ fontSize: 10, color: 'var(--text-dim)', fontStyle: 'italic', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{desc}</span>}
-                    <span style={{ fontSize: 10, color: 'var(--text-dim)', marginLeft: 'auto', flexShrink: 0 }}>
-                      {p.started_at ? new Date(p.started_at).toLocaleTimeString() : ''}
+                    <span
+                      style={{ fontSize: 10, color: 'var(--text-dim)', marginLeft: 'auto', flexShrink: 0 }}
+                      title={p.started_at ? new Date(p.started_at).toLocaleString() : undefined}
+                    >
+                      {p.started_at ? formatTime(p.started_at) : ''}
                     </span>
                     {p.status === 'error' && p.details && (
                       <span style={{ fontSize: 10, color: 'var(--red)', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={p.details}>

@@ -3009,78 +3009,158 @@ export class DKGPublisher implements Publisher {
   private async reconstructOwnershipFromGraph(
     ownershipKey: string, swmMetaGraph: string, DKG: string, PROV: string,
   ): Promise<number> {
-    const result = await this.store.query(
-      `SELECT ?entity ?creator WHERE { GRAPH <${swmMetaGraph}> { ?entity <${DKG}workspaceOwner> ?creator } }`,
+    const durableOwners = await this.loadValidatedSharedMemoryOwners(
+      swmMetaGraph,
+      DKG,
+      PROV,
+      undefined,
+      'reconstruct',
     );
-    if (result.type !== 'bindings' || result.bindings.length === 0) return 0;
-
-    const opsResult = await this.store.query(
-      // GH #748: prefer the dedicated `dkg:publisherPeerId` literal; fall
-      // back to a literal-form `prov:wasAttributedTo` for legacy rows
-      // (which only carry the peer ID in attribution). Skip post-fix URI
-      // attribution — `workspaceOwner` is always a peer-ID literal and a
-      // URI peer would never match, breaking ownership validation.
-      `SELECT ?op ?peer ?root WHERE {
-        GRAPH <${swmMetaGraph}> {
-          ?op <${DKG}rootEntity> ?root .
-          OPTIONAL { ?op <${DKG}publisherPeerId> ?pidField }
-          OPTIONAL { ?op <${PROV}wasAttributedTo> ?attrField . FILTER(isLiteral(?attrField)) }
-          BIND(COALESCE(?pidField, ?attrField) AS ?peer)
-        }
-      }`,
-    );
-    const validatedOwners = new Map<string, Set<string>>();
-    if (opsResult.type === 'bindings') {
-      for (const row of opsResult.bindings) {
-        const root = row['root'];
-        const peer = row['peer'];
-        if (!root || !peer) continue;
-        const peerStr = peer.startsWith('"')
-          ? peer.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '')
-          : peer;
-        if (!validatedOwners.has(root)) validatedOwners.set(root, new Set());
-        validatedOwners.get(root)!.add(peerStr);
-      }
-    }
+    if (durableOwners.size === 0) return 0;
 
     if (!this.sharedMemoryOwnedEntities.has(ownershipKey)) {
       this.sharedMemoryOwnedEntities.set(ownershipKey, new Map());
     }
     const ownedMap = this.sharedMemoryOwnedEntities.get(ownershipKey)!;
     let count = 0;
-    for (const row of result.bindings) {
-      const entity = row['entity'];
-      const creator = row['creator'];
-      if (!entity || !creator) continue;
-      const creatorStr = creator.startsWith('"')
-        ? creator.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '')
-        : creator;
-
-      const validPeers = validatedOwners.get(entity);
-      if (!validPeers || !validPeers.has(creatorStr)) {
-        this.log.warn(
-          createOperationContext('reconstruct'),
-          `Skipping unvalidated ownership: entity=${entity} creator=${creatorStr}`,
-        );
-        continue;
-      }
-
+    for (const [entity, creator] of durableOwners) {
       if (ownedMap.has(entity)) {
         const existing = ownedMap.get(entity)!;
-        if (existing !== creatorStr) {
+        if (existing !== creator) {
           this.log.warn(
             createOperationContext('reconstruct'),
-            `Conflicting ownership for ${entity}: "${existing}" vs "${creatorStr}"; keeping alphabetically first`,
+            `Conflicting ownership for ${entity}: "${existing}" vs "${creator}"; keeping alphabetically first`,
           );
-          if (creatorStr < existing) ownedMap.set(entity, creatorStr);
+          setEffectiveOwner(ownedMap, entity, creator);
         }
         continue;
       }
 
-      ownedMap.set(entity, creatorStr);
+      ownedMap.set(entity, creator);
       count++;
     }
     return count;
+  }
+
+  private async loadValidatedSharedMemoryOwners(
+    swmMetaGraph: string,
+    DKG: string,
+    PROV: string,
+    rootEntities: readonly string[] | undefined,
+    logOperation: 'reconstruct' | 'share',
+  ): Promise<Map<string, string>> {
+    const valuesClause = rootEntities?.length
+      ? `VALUES ?entity { ${rootEntities.map((root) => `<${assertSafeIri(root)}>`).join(' ')} }`
+      : '';
+
+    const ownershipResult = await this.store.query(
+      `SELECT DISTINCT ?entity ?creator WHERE {
+        GRAPH <${assertSafeIri(swmMetaGraph)}> {
+          ${valuesClause}
+          ?entity <${DKG}workspaceOwner> ?creator .
+        }
+      }`,
+    );
+    if (ownershipResult.type !== 'bindings' || ownershipResult.bindings.length === 0) {
+      return new Map();
+    }
+
+    // GH #748: prefer the dedicated `dkg:publisherPeerId` literal; fall
+    // back to a literal-form `prov:wasAttributedTo` for legacy un-migrated
+    // rows. Skip post-fix URI attribution — `workspaceOwner` (queried
+    // above) is always a peer-ID literal, so a URI `?creator` from
+    // `wasAttributedTo` would never match and every ownership row would
+    // be rejected as unvalidated. `FILTER(BOUND(?creator))` guards against
+    // an op having `rootEntity` but neither peer-ID source.
+    const operationResult = await this.store.query(
+      `SELECT DISTINCT ?entity ?creator WHERE {
+        GRAPH <${assertSafeIri(swmMetaGraph)}> {
+          ${valuesClause}
+          ?op <${DKG}rootEntity> ?entity .
+          OPTIONAL { ?op <${DKG}publisherPeerId> ?pidField }
+          OPTIONAL { ?op <${PROV}wasAttributedTo> ?attrField . FILTER(isLiteral(?attrField)) }
+          BIND(COALESCE(?pidField, ?attrField) AS ?creator)
+          FILTER(BOUND(?creator))
+        }
+      }`,
+    );
+
+    const validatedOwners = new Map<string, Set<string>>();
+    if (operationResult.type === 'bindings') {
+      for (const row of operationResult.bindings) {
+        const entity = row['entity'];
+        const creator = stripSparqlLiteral(row['creator']);
+        if (!entity || !creator) continue;
+        addOwner(validatedOwners, entity, creator);
+      }
+    }
+
+    const durableOwners = new Map<string, string>();
+    for (const row of ownershipResult.bindings) {
+      const entity = row['entity'];
+      const creator = stripSparqlLiteral(row['creator']);
+      if (!entity || !creator) continue;
+      const validPeers = validatedOwners.get(entity);
+      if (!validPeers?.has(creator)) {
+        this.log.warn(
+          createOperationContext(logOperation),
+          `Skipping unvalidated ownership: entity=${entity} creator=${creator}`,
+        );
+        continue;
+      }
+
+      const existing = durableOwners.get(entity);
+      if (existing && existing !== creator) {
+        this.log.warn(
+          createOperationContext(logOperation),
+          `Conflicting ownership for ${entity}: "${existing}" vs "${creator}"; keeping alphabetically first`,
+        );
+      }
+      setEffectiveOwner(durableOwners, entity, creator);
+    }
+
+    return durableOwners;
+  }
+
+  private async sharedMemoryOwnersForPromotion(
+    contextGraphId: string,
+    subGraphName: string | undefined,
+    ownershipKey: string,
+    rootEntities: readonly string[],
+  ): Promise<Map<string, string>> {
+    const owners = new Map<string, string>();
+    const liveOwned = this.sharedMemoryOwnedEntities.get(ownershipKey);
+    if (liveOwned) {
+      for (const [root, owner] of liveOwned) {
+        setEffectiveOwner(owners, root, owner);
+      }
+    }
+
+    if (rootEntities.length === 0) return owners;
+
+    const DKG = 'http://dkg.io/ontology/';
+    const PROV = 'http://www.w3.org/ns/prov#';
+    const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId, subGraphName);
+    const durableOwners = await this.loadValidatedSharedMemoryOwners(
+      swmMetaGraph,
+      DKG,
+      PROV,
+      rootEntities,
+      'share',
+    );
+    if (durableOwners.size === 0) return owners;
+
+    if (!this.sharedMemoryOwnedEntities.has(ownershipKey)) {
+      this.sharedMemoryOwnedEntities.set(ownershipKey, new Map());
+    }
+    const hydratedOwned = this.sharedMemoryOwnedEntities.get(ownershipKey)!;
+
+    for (const [entity, creator] of durableOwners) {
+      setEffectiveOwner(owners, entity, creator);
+      setEffectiveOwner(hydratedOwned, entity, creator);
+    }
+
+    return owners;
   }
 
   /** @deprecated Use reconstructSharedMemoryOwnership */
@@ -3636,6 +3716,12 @@ export class DKGPublisher implements Publisher {
 
     const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId, opts?.subGraphName);
     const ownershipKey = opts?.subGraphName ? `${contextGraphId}\0${opts.subGraphName}` : contextGraphId;
+    const swmOwners = await this.sharedMemoryOwnersForPromotion(
+      contextGraphId,
+      opts?.subGraphName,
+      ownershipKey,
+      rootEntities,
+    );
     const swmOwned = this.sharedMemoryOwnedEntities.get(ownershipKey) ?? new Map<string, string>();
 
     // Pre-encode gossip message and enforce size limit BEFORE any destructive
@@ -3700,7 +3786,7 @@ export class DKGPublisher implements Publisher {
     // Rule 4: reject roots owned by a different peer before any mutations.
     const skippedRoots = new Set<string>();
     for (const root of rootEntities) {
-      const owner = swmOwned.get(root);
+      const owner = swmOwners.get(root);
       if (!owner) continue;
       if (opts?.publisherPeerId) {
         if (owner !== opts.publisherPeerId) {
@@ -3888,4 +3974,22 @@ function parseCountLiteral(val: string | false | undefined): number {
   const stripped = val.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '');
   const n = Number(stripped);
   return Number.isFinite(n) ? n : NaN;
+}
+
+function stripSparqlLiteral(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  if (!value.startsWith('"')) return value;
+  return value.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '');
+}
+
+function addOwner(owners: Map<string, Set<string>>, root: string, owner: string): void {
+  if (!owners.has(root)) owners.set(root, new Set());
+  owners.get(root)!.add(owner);
+}
+
+function setEffectiveOwner(owners: Map<string, string>, root: string, owner: string): void {
+  const existing = owners.get(root);
+  if (!existing || owner < existing) {
+    owners.set(root, owner);
+  }
 }

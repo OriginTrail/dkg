@@ -96,16 +96,22 @@ function NodeLogContent() {
     <div className="v10-log-container">
       <div className="v10-log-toolbar">
         <input
+          id="dkg-node-log-filter"
+          name="dkg-node-log-filter"
           type="text"
           placeholder="Filter logs..."
           className="v10-log-filter"
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
+          aria-label="Filter node log lines"
         />
         <select
+          id="dkg-node-log-level"
+          name="dkg-node-log-level"
           className="v10-log-level-select"
           value={level}
           onChange={e => setLevel(e.target.value as typeof level)}
+          aria-label="Filter node log level"
         >
           <option value="all">All</option>
           <option value="error">Error</option>
@@ -294,11 +300,14 @@ function GossipContent() {
     <div className="v10-log-container">
       <div className="v10-log-toolbar">
         <input
+          id="dkg-gossip-log-filter"
+          name="dkg-gossip-log-filter"
           type="text"
           placeholder="Filter libp2p / gossip events..."
           className="v10-log-filter"
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
+          aria-label="Filter gossip log lines"
         />
       </div>
       <div className="v10-log-output" ref={scrollRef}>

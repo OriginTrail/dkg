@@ -772,22 +772,20 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
         );
         tokenSymbol = await token.symbol().catch(() => "TRAC");
       }
-      const balances: Array<{
-        address: string;
-        eth: string;
-        trac: string;
-        symbol: string;
-      }> = [];
-      for (const w of opWallets.wallets) {
-        const ethBal = await provider.getBalance(w.address);
-        const tracBal = token ? await token.balanceOf(w.address) : 0n;
-        balances.push({
-          address: w.address,
-          eth: ethers.formatEther(ethBal),
-          trac: ethers.formatEther(tracBal),
-          symbol: tokenSymbol,
-        });
-      }
+      const balances = await Promise.all(
+        opWallets.wallets.map(async (w) => {
+          const [ethBal, tracBal] = await Promise.all([
+            provider.getBalance(w.address),
+            token ? token.balanceOf(w.address) : Promise.resolve(0n),
+          ]);
+          return {
+            address: w.address,
+            eth: ethers.formatEther(ethBal),
+            trac: ethers.formatEther(tracBal),
+            symbol: tokenSymbol,
+          };
+        }),
+      );
       return jsonResponse(res, 200, {
         wallets: opWallets.wallets.map((w) => w.address),
         balances,

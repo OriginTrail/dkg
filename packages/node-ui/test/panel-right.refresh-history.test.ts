@@ -16,6 +16,7 @@ const streamLocalAgentChatMock = vi.fn();
 const connectLocalAgentIntegrationMock = vi.fn();
 const disconnectLocalAgentIntegrationMock = vi.fn();
 const apiFetchMemorySessionsMock = vi.fn();
+const fetchCurrentAgentMock = vi.fn().mockResolvedValue(null);
 
 vi.mock('../src/ui/api.js', async () => {
   const actual = await vi.importActual<any>('../src/ui/api.js');
@@ -23,6 +24,7 @@ vi.mock('../src/ui/api.js', async () => {
     ...actual,
     fetchAgents: fetchAgentsMock,
     fetchConnections: fetchConnectionsMock,
+    fetchCurrentAgent: fetchCurrentAgentMock,
     fetchLocalAgentIntegrations: fetchLocalAgentIntegrationsMock,
     fetchLocalAgentHistory: fetchLocalAgentHistoryMock,
     streamLocalAgentChat: streamLocalAgentChatMock,
@@ -34,6 +36,7 @@ vi.mock('../src/ui/api.js', async () => {
 vi.mock('../src/ui/api-wrapper.js', () => ({
   api: {
     fetchMemorySessions: apiFetchMemorySessionsMock,
+    fetchCurrentAgent: fetchCurrentAgentMock,
   },
 }));
 

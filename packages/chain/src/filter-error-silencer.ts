@@ -219,3 +219,66 @@ export function createFilterErrorSilencer(opts: FilterErrorSilencerOpts = {}): F
     },
   };
 }
+
+/**
+ * BUG-022 — ethers v6 swallows the `eth_getFilterChanges` "filter not
+ * found" error inside `subscriber-filterid.js#poll()` with a literal
+ * `console.log("@TODO", error)` (see ethers v6.16.0). That code path
+ * NEVER fires the `provider.on('error', ...)` event we hook in
+ * `evm-adapter.ts`, so the per-provider `FilterErrorSilencer` only
+ * catches the (rare) errors that surface through real `_perform`
+ * exceptions. Operators kept seeing a hot stream of `@TODO Error:
+ * could not coalesce error … filter not found` entries in
+ * `daemon.log` even after the rc.11 silencer landed.
+ *
+ * Fix: wrap `console.log` once per process. When a `@TODO`-prefixed
+ * call carries a filter-not-found error, route it through a dedicated
+ * dedup'd silencer instead of writing it to the log. Every other
+ * `console.log` call is forwarded untouched. Idempotent — subsequent
+ * adapter constructions skip the wrap.
+ *
+ * Returns the silencer so callers can read its stats (`/api/status`
+ * surfaces filter-error counts).
+ */
+let consoleSuppressorInstalled = false;
+let consoleSuppressorSilencer: FilterErrorSilencer | null = null;
+let consoleSuppressorOriginalLog: typeof console.log | null = null;
+
+export function installFilterNotFoundConsoleSuppressor(opts: FilterErrorSilencerOpts = {}): FilterErrorSilencer {
+  if (consoleSuppressorInstalled && consoleSuppressorSilencer) return consoleSuppressorSilencer;
+  // Capture `console.warn` BEFORE wrapping `console.log`. The
+  // dedup-emit path uses `console.warn` so operators still see one
+  // line per dedup window (with a count of suppressed repeats),
+  // matching the per-provider silencer's UX.
+  const originalConsoleWarn = console.warn.bind(console);
+  const silencer = createFilterErrorSilencer({
+    ...opts,
+    log: opts.log ?? ((msg: string) => originalConsoleWarn(msg)),
+  });
+  const originalConsoleLog = console.log;
+  consoleSuppressorOriginalLog = originalConsoleLog;
+  console.log = (...args: unknown[]) => {
+    // ethers v6 emits `console.log("@TODO", error)` from
+    // subscriber-filterid.js. Intercept exactly that two-arg shape so
+    // we don't accidentally swallow legitimate "@TODO" log lines that
+    // happen to start with the same string.
+    if (args.length === 2 && args[0] === '@TODO' && silencer.handle(args[1])) return;
+    originalConsoleLog.apply(console, args);
+  };
+  consoleSuppressorInstalled = true;
+  consoleSuppressorSilencer = silencer;
+  return silencer;
+}
+
+/** Test-only — restore the original `console.log` so subsequent tests
+ *  see real output. Not exported as part of the public surface in
+ *  production, but vitest specs need a way to undo the wrap between
+ *  cases. */
+export function _uninstallFilterNotFoundConsoleSuppressorForTest(): void {
+  if (consoleSuppressorOriginalLog) {
+    console.log = consoleSuppressorOriginalLog;
+  }
+  consoleSuppressorInstalled = false;
+  consoleSuppressorSilencer = null;
+  consoleSuppressorOriginalLog = null;
+}

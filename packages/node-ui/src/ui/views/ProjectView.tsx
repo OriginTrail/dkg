@@ -1,6 +1,8 @@
 import { useMemo, useState, useCallback, useEffect, useRef } from 'react';
 import { useFetch } from '../hooks.js';
 import { api } from '../api-wrapper.js';
+import { useMemoryGraphEvents } from '../hooks/useNodeEvents.js';
+import { isUserFacingSubGraph } from '../lib/subGraphs.js';
 import { ImportFilesModal } from '../components/Modals/ImportFilesModal.js';
 import { ShareProjectModal } from '../components/Modals/ShareProjectModal.js';
 import {
@@ -26,7 +28,9 @@ import {
   KADetailView,
   SubGraphDetailView,
   ProjectOverviewCard,
-  PendingJoinRequestsBar,
+  PendingJoinRequestsSection,
+  OverviewPrimerEntry,
+  curatorStatusForOverview,
   SubGraphOverviewGrid,
   ContextGraphQueryView,
   LayerDetailView,
@@ -105,6 +109,16 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     list: [],
     status: 'loading',
   });
+  // S2 finalize — Overview "At a glance" needs a subgraph count.
+  // Lifted from SubGraphBar's identical fetch so we don't sneak a
+  // peer hook into useMemoryEntities. `null` = not yet known; the
+  // stat strip then suppresses the cell rather than rendering "0".
+  // The reserved `meta` slug never counts (see `lib/subGraphs.ts`).
+  // `subGraphFetchFailed` distinguishes "still loading" from
+  // "permanently unavailable" (Codex review bug D).
+  const [subGraphCount, setSubGraphCount] = useState<number | null>(null);
+  const [subGraphFetchFailed, setSubGraphFetchFailed] = useState(false);
+  const subGraphRequestRef = useRef(0);
   // Active sub-graph *page* — when set, the middle pane renders the sub-graph
   // detail view instead of the overview / layer views. This is structurally
   // a sibling of `activeLayer`, not a filter over it: sub-graphs are a peer
@@ -311,6 +325,42 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
 
   useEffect(() => { refreshParticipants(); }, [refreshParticipants]);
 
+  const refreshSubGraphCount = useCallback(() => {
+    const requestId = ++subGraphRequestRef.current;
+    // Codex review bug F — route through api-wrapper so the
+    // Subgraphs stat resolves in mock mode (the direct
+    // `../api.js` import bypassed the mock/offline fallback and
+    // left the cell stuck in the loading state forever).
+    api.fetchSubGraphs(contextGraphId)
+      .then(res => {
+        if (subGraphRequestRef.current !== requestId) return;
+        // Codex review issue M — single source of truth for the
+        // reserved-slug rule. Used by SubGraphBar (chips),
+        // SubGraphOverviewGrid (cards), and this Overview stat.
+        // Previously diverged between sites; centralising avoids
+        // future drift.
+        const count = (res.subGraphs ?? []).filter(isUserFacingSubGraph).length;
+        setSubGraphCount(count);
+        setSubGraphFetchFailed(false);
+      })
+      .catch(() => {
+        if (subGraphRequestRef.current !== requestId) return;
+        // Codex review bug D — distinguish "still loading" (count
+        // null + failed=false) from "permanently unavailable"
+        // (count null + failed=true) so the stat strip can render
+        // 'Unavailable' instead of a perpetual ellipsis.
+        setSubGraphCount(null);
+        setSubGraphFetchFailed(true);
+      });
+  }, [contextGraphId]);
+
+  useEffect(() => {
+    setSubGraphCount(null);
+    setSubGraphFetchFailed(false);
+    refreshSubGraphCount();
+  }, [refreshSubGraphCount]);
+  useMemoryGraphEvents(contextGraphId, refreshSubGraphCount);
+
   const selectedLayerTrust = selectedLayerContext ? TRUST_FOR_LAYER[selectedLayerContext] : null;
   const detailEntityTriples = useMemo(
     () => selectedLayerTrust
@@ -500,12 +550,19 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
         </>
       )}
 
-      {/* Overview View */}
+      {/* Overview View — S2 finalize section order (§4.2.1):
+          identity row + At a glance + Knowledge Pipeline + Participant
+          agents live inside ProjectOverviewCard. Pending join requests
+          is a peer section below it (curator-only). Recent activity
+          moves to the last content row before the primer escape hatch
+          which lives inside the card's footer. */}
       {!activeSubGraph && activeLayer === 'overview' && !selectedEntity && (
         <>
           <ProjectOverviewCard
             cg={cg}
             memory={rawMemory}
+            subGraphCount={subGraphCount}
+            subGraphFetchFailed={subGraphFetchFailed}
             participants={participantsForCurrentGraph}
             participantsStatus={participantsStatusForCurrentGraph}
             currentAgent={currentAgent ?? null}
@@ -513,24 +570,35 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
             onSwitchLayer={handleLayerSwitch}
             onOpenPrimer={handleOpenPrimer}
           />
-          <PendingJoinRequestsBar contextGraphId={contextGraphId} onParticipantsChanged={refreshParticipants} />
+          <PendingJoinRequestsSection
+            contextGraphId={contextGraphId}
+            curatorStatus={curatorStatusForOverview({
+              cg,
+              currentAgent: currentAgent ?? null,
+              currentAgentStatus: currentAgentLoading ? 'loading' : currentAgentError ? 'error' : 'ok',
+            })}
+            onParticipantsChanged={refreshParticipants}
+          />
           {rawMemory.loading && (
             <div className="v10-me-loading"><div className="v10-me-loading-text">Loading memory...</div></div>
           )}
           {rawMemory.error && (
             <div className="v10-me-error">Error: {rawMemory.error}</div>
           )}
-          <ActivityFeed
-            entities={rawMemory.entityList}
-            lifecycleEvents={overviewLifecycleEvents}
-            lifecycleError={overviewLifecycleError}
-            onSelectEntity={handleOverviewActivityNavigate}
-            title="Recent activity"
-            limit={40}
-            includeUndated={false}
-            emptyHint="Once knowledge starts being added and managed in this context graph, activities will show up here as a live feed."
-            className="v10-overview-activity"
-          />
+          <div data-section="activity">
+            <ActivityFeed
+              entities={rawMemory.entityList}
+              lifecycleEvents={overviewLifecycleEvents}
+              lifecycleError={overviewLifecycleError}
+              onSelectEntity={handleOverviewActivityNavigate}
+              title="Recent activity"
+              limit={40}
+              includeUndated={false}
+              emptyHint="Once knowledge starts being added and managed in this context graph, activities will show up here as a live feed."
+              className="v10-overview-activity"
+            />
+          </div>
+          <OverviewPrimerEntry onOpenPrimer={handleOpenPrimer} />
         </>
       )}
 

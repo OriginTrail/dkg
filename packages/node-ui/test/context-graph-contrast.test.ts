@@ -73,8 +73,6 @@ describe('Context Graph contrast tokens', () => {
   it('keeps readable Context Graph text off the decoration-only ghost token', () => {
     const readableSelectors = [
       '.v10-layer-switch-count',
-      '.v10-po-stat-label',
-      '.v10-po-progress-legend',
       '.v10-entity-list-empty',
       '.v10-entity-list-header',
       '.v10-entity-card-triples',
@@ -98,6 +96,18 @@ describe('Context Graph contrast tokens', () => {
       '.v10-empty-state-desc',
       '.v10-stat-strip-label',
       '.v10-entity-list-sort-select',
+      // S2 Overview finalize (§4.2.1) — readable chrome rendered
+      // via `--text-*` tokens. Registered here so a future
+      // regression on any of these is caught explicitly.
+      '.v10-po-identity-label',
+      '.v10-po-section-title',
+      '.v10-po-pipeline-step-desc',
+      '.v10-po-people-empty',
+      '.v10-po-participant-name',
+      '.v10-po-join-empty',
+      '.v10-po-join-addr',
+      '.v10-po-primer-footer-lede',
+      '.v10-po-primer-footer-sub',
     ];
 
     for (const selector of readableSelectors) {
@@ -135,8 +145,8 @@ describe('Context Graph contrast tokens', () => {
       '.v10-activity-feed-status.status-good',
       '.v10-activity-feed-status.status-warn',
       '.v10-activity-feed-status.status-bad',
-      '.v10-ph-join-btn.approve',
-      '.v10-ph-join-btn.reject',
+      '.v10-po-join-btn.approve',
+      '.v10-po-join-btn.reject',
     ];
 
     for (const selector of selectorsOnSurface) {

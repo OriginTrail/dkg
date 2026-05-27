@@ -26,6 +26,11 @@ vi.mock('../src/ui/api.js', async () => {
 vi.mock('../src/ui/api-wrapper.js', () => ({
   api: {
     fetchContextGraphs: apiFetchContextGraphsMock,
+    // BUG-007: PanelLeft now reads its agent identity from the shared
+    // `useCurrentAgent` hook, which goes through `api.fetchCurrentAgent`
+    // (not the named import). Wire the mock here so the hook can
+    // resolve in tests without a live daemon.
+    fetchCurrentAgent: fetchCurrentAgentMock,
   },
 }));
 
