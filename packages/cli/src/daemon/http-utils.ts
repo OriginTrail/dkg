@@ -505,6 +505,7 @@ function isShadowLikeBareContextGraphRow(row: ExistingContextGraphRow): boolean 
 async function contextGraphRowIsWritable(
   agent: {
     contextGraphHasLocalContent?: (contextGraphId: string) => Promise<boolean>;
+    contextGraphExists?: (contextGraphId: string) => Promise<boolean>;
   },
   row: ExistingContextGraphRow,
 ): Promise<boolean> {
@@ -512,8 +513,18 @@ async function contextGraphRowIsWritable(
     return true;
   }
   const id = typeof row.id === "string" ? row.id : "";
-  if (!id || !agent.contextGraphHasLocalContent) return false;
-  return agent.contextGraphHasLocalContent(id);
+  if (!id) return false;
+  if (agent.contextGraphHasLocalContent && await agent.contextGraphHasLocalContent(id)) {
+    return true;
+  }
+  if (
+    row.subscribed !== true &&
+    !isShadowLikeBareContextGraphRow(row) &&
+    agent.contextGraphExists
+  ) {
+    return agent.contextGraphExists(id);
+  }
+  return false;
 }
 
 function rejectKnownNonWritableContextGraph(
@@ -543,6 +554,7 @@ export async function resolveRequiredWriteContextGraphId(
     }): Promise<ExistingContextGraphRow[]>;
     getDefaultAgentAddress?: () => string | undefined;
     contextGraphHasLocalContent?: (contextGraphId: string) => Promise<boolean>;
+    contextGraphExists?: (contextGraphId: string) => Promise<boolean>;
   },
   contextGraphId: unknown,
   res: ServerResponse,

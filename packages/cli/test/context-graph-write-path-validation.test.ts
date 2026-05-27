@@ -19,6 +19,7 @@ type ContextGraphRow = {
   subscribed?: boolean;
   synced?: boolean;
   hasLocalContent?: boolean;
+  exists?: boolean;
 };
 
 describe('context graph write-path validation', () => {
@@ -104,7 +105,10 @@ describe('context graph write-path validation', () => {
       rejectJoinRequest,
       assertContextGraphOwner,
       contextGraphExists: vi.fn(async (contextGraphId: string) =>
-        rows.some((row) => row.id === contextGraphId || row.uri === `did:dkg:context-graph:${contextGraphId}`),
+        rows.some((row) =>
+          row.exists !== false &&
+          (row.id === contextGraphId || row.uri === `did:dkg:context-graph:${contextGraphId}`),
+        ),
       ),
       createSubGraph,
       store: {
@@ -369,6 +373,30 @@ describe('context graph write-path validation', () => {
     expect(result.body).toMatchObject({ code: 'CONTEXT_GRAPH_NOT_WRITABLE' });
     expect(agent.contextGraphHasLocalContent).toHaveBeenCalledWith('definition-only-cg');
     expect(agent.calls.create).not.toHaveBeenCalled();
+  });
+
+  it('accepts exact locally defined context graphs before their first content write', async () => {
+    const agent = makeAgent([
+      {
+        id: 'fresh-local-cg',
+        uri: 'did:dkg:context-graph:fresh-local-cg',
+        name: 'Fresh Local CG',
+        accessPolicy: 'public',
+        subscribed: false,
+        synced: false,
+      },
+    ]);
+    await startRoutes(agent);
+
+    const result = await post('/api/assertion/create', {
+      contextGraphId: 'fresh-local-cg',
+      name: 'draft',
+    });
+
+    expect(result.status).toBe(200);
+    expect(agent.contextGraphHasLocalContent).toHaveBeenCalledWith('fresh-local-cg');
+    expect(agent.contextGraphExists).toHaveBeenCalledWith('fresh-local-cg');
+    expect(agent.calls.create).toHaveBeenCalledWith('fresh-local-cg', 'draft', undefined);
   });
 
   it('accepts exact visible context graphs with local content even when not subscribed', async () => {
