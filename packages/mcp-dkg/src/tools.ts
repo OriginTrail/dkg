@@ -26,6 +26,7 @@ import {
   escapeSparqlLiteral,
   prettyTerm,
 } from './sparql.js';
+import { EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION } from './tools/context-graph-description.js';
 
 type ToolResult = {
   content: Array<{ type: 'text'; text: string }>;
@@ -115,7 +116,10 @@ export function registerReadTools(
         'to figure out what kind of knowledge the context graph exposes ' +
         'before querying.',
       inputSchema: {
-        projectId: z.string().optional().describe('contextGraphId; defaults to .dkg/config.yaml'),
+        projectId: z
+          .string()
+          .optional()
+          .describe(`${EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION} Defaults to .dkg/config.yaml.`),
       },
     },
     async ({ projectId }): Promise<ToolResult> => {
@@ -167,7 +171,10 @@ export function registerReadTools(
         'to query WM ∪ SWM in one call.',
       inputSchema: {
         sparql: z.string().describe('SPARQL query body. Prefixes are auto-injected.'),
-        projectId: z.string().optional().describe('contextGraphId; defaults to .dkg/config.yaml'),
+        projectId: z
+          .string()
+          .optional()
+          .describe(`${EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION} Defaults to .dkg/config.yaml.`),
         subGraphName: z.string().optional().describe('Limit the query to a single sub-graph'),
         view: z
           .enum(['working-memory', 'shared-working-memory', 'verified-memory'])
@@ -214,7 +221,10 @@ export function registerReadTools(
         'task, file, or PR end-to-end.',
       inputSchema: {
         uri: z.string().describe('Entity URI (e.g. urn:dkg:decision:shacl-on-vm-promotion)'),
-        projectId: z.string().optional().describe('contextGraphId; defaults to .dkg/config.yaml'),
+        projectId: z
+          .string()
+          .optional()
+          .describe(`${EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION} Defaults to .dkg/config.yaml.`),
         view: z
           .enum(['working-memory', 'shared-working-memory', 'verified-memory'])
           .optional()

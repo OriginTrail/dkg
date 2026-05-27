@@ -20,6 +20,23 @@ This skill teaches you the full node API surface so you can operate autonomously
 
 To see which context graphs (projects) are currently subscribed, call `GET /api/context-graph/list` — this returns a live list that stays current as projects are created or subscribed during the session.
 
+### Context Graph IDs
+
+For write or mutation routes, always pass the exact existing context graph id
+returned by `GET /api/context-graph/list` / `dkg_list_context_graphs`, or pass
+its full `did:dkg:context-graph:<id>` URI.
+
+- A context graph created locally can have a bare canonical id, for example
+  `ui-refresh`, with full URI `did:dkg:context-graph:ui-refresh`.
+- A joined or curated context graph can have a curator-scoped canonical id, for
+  example `0xE5B88968Ed464F4e3f5354C54DFAB9e39dfEAfBd/tuesday-cg`, with full
+  URI `did:dkg:context-graph:0xE5B88968Ed464F4e3f5354C54DFAB9e39dfEAfBd/tuesday-cg`.
+
+Do not guess from the display name, shorten a curator-scoped id, or pass only a
+suffix slug such as `tuesday-cg` when the listed id is
+`0x.../tuesday-cg`. Write routes reject unknown, ambiguous, or non-canonical
+targets before writing so they cannot accidentally create shadow context graphs.
+
 ## 2. Capabilities Overview
 
 > **Note:** This skill describes the full DKG V10 API surface. Some endpoints
@@ -512,7 +529,7 @@ through the same path as `POST /api/assertion/{name}/write`.
 | Field | Required | Description |
 |---|---|---|
 | `file` | yes | Document bytes |
-| `contextGraphId` | yes | Target context graph |
+| `contextGraphId` | yes | Exact existing target context graph id, or full `did:dkg:context-graph:<id>` URI |
 | `contentType` | no | Override the file part's Content-Type |
 | `ontologyRef` | no | CG `_ontology` URI for guided extraction |
 | `subGraphName` | no | Target sub-graph, already registered |

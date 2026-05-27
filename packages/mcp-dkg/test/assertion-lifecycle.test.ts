@@ -42,9 +42,10 @@ describe('assertion CRUD quintet — round-trip with @en literal preservation', 
       'dkg_assertion_query',
     ]) {
       const projectId = server.get(name).config.inputSchema?.projectId;
-      expect(projectId?.description).toContain('<curatorAddress>/<slug>');
-      expect(projectId?.description).toContain('Do not pass bare slugs');
       expect(projectId?.description).toContain('dkg_list_context_graphs');
+      expect(projectId?.description).toContain('ui-refresh');
+      expect(projectId?.description).toContain('<curatorAddress>/<slug>');
+      expect(projectId?.description).toContain('Do not guess');
     }
   });
 

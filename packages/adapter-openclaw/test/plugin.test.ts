@@ -791,6 +791,24 @@ describe('DkgNodePlugin', () => {
     expectRequired('dkg_sub_graph_list', ['context_graph_id']);
     expectRequired('dkg_shared_memory_publish', ['context_graph_id']);
 
+    for (const name of [
+      'dkg_assertion_create',
+      'dkg_assertion_write',
+      'dkg_assertion_promote',
+      'dkg_assertion_discard',
+      'dkg_assertion_import_file',
+      'dkg_assertion_query',
+      'dkg_shared_memory_publish',
+      'dkg_share',
+      'dkg_sub_graph_create',
+    ]) {
+      const description = byName.get(name)!.parameters.properties.context_graph_id.description;
+      expect(description).toContain('dkg_list_context_graphs');
+      expect(description).toContain('ui-refresh');
+      expect(description).toContain('<curatorAddress>/<slug>');
+      expect(description).toContain('Do not guess');
+    }
+
     // dkg_shared_memory_publish must declare `sub_graph_name` so agents that
     // create/write/promote into a sub-graph can publish the promoted data
     // through the same sub-graph instead of hitting the root SWM graph.
@@ -848,6 +866,10 @@ describe('DkgNodePlugin', () => {
 
     const addParticipantTool = byName.get('dkg_participant_add')!;
     expect(addParticipantTool.description).toMatch(/allowlisting alone is not the full UI join flow/i);
+
+    const createIdDescription = byName.get('dkg_context_graph_create')!.parameters.properties.id.description;
+    expect(createIdDescription).toContain('create-only');
+    expect(createIdDescription).toContain('dkg_list_context_graphs');
   });
 
   // ---------------------------------------------------------------------------

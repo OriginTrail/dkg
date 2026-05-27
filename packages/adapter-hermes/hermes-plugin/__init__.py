@@ -36,6 +36,20 @@ logger = logging.getLogger(__name__)
 _ENTRY_SEP = "\n\xA7\n"  # §
 
 
+# Existing-target context graph wording is intentionally shared across Hermes
+# tool schemas so agents see the same rule as MCP/OpenClaw.
+EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION = (
+    "Exact existing context graph id returned by dkg_list_context_graphs, "
+    "or its full did:dkg:context-graph:<id> URI. Locally-created context graphs "
+    "may have ids like 'ui-refresh'; joined/curated context graphs use "
+    "<curatorAddress>/<slug> ids like '0x.../tuesday-cg'. Do not guess, "
+    "shorten, or pass only the suffix slug for curator-scoped graphs."
+)
+TARGET_CONTEXT_GRAPH_DESCRIPTION = (
+    "Target context graph. " + EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION
+)
+
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -229,7 +243,10 @@ DKG_QUERY_SCHEMA = {
             },
             "context_graph_id": {
                 "type": "string",
-                "description": "Context graph ID. Required when view is set.",
+                "description": (
+                    "CG scope. Use the exact existing id from dkg_list_context_graphs "
+                    "or the full did:dkg:context-graph:<id> URI. Required when view is set."
+                ),
             },
             "view": {
                 "type": "string",
@@ -266,7 +283,7 @@ DKG_SHARE_SCHEMA = {
             },
             "context_graph_id": {
                 "type": "string",
-                "description": "Target Context Graph ID.",
+                "description": TARGET_CONTEXT_GRAPH_DESCRIPTION,
             },
             "sub_graph_name": {
                 "type": "string",
@@ -291,7 +308,7 @@ DKG_PUBLISH_SCHEMA = {
         "properties": {
             "context_graph_id": {
                 "type": "string",
-                "description": "Target context graph ID.",
+                "description": TARGET_CONTEXT_GRAPH_DESCRIPTION,
             },
             "quads": {
                 "type": "array",
@@ -441,7 +458,7 @@ DKG_SUBSCRIBE_SCHEMA = {
         "properties": {
             "context_graph_id": {
                 "type": "string",
-                "description": "Context Graph ID to subscribe to (e.g. 'pharma-research').",
+                "description": "Context graph to subscribe to. " + EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION,
             },
             "include_shared_memory": {
                 "type": "boolean",
@@ -463,7 +480,8 @@ DKG_CREATE_CONTEXT_GRAPH_SCHEMA = {
         "auto-included in the allowlist and can immediately write to working "
         "and shared memory. Pass `public: true` for an open/discoverable "
         "context graph, or `allowed_agents` to invite collaborators "
-        "atomically with creation."
+        "atomically with creation. For later writes, use the exact returned "
+        "id or full did:dkg:context-graph:<id> URI."
     ),
     "parameters": {
         "type": "object",
@@ -478,7 +496,12 @@ DKG_CREATE_CONTEXT_GRAPH_SCHEMA = {
             },
             "id": {
                 "type": "string",
-                "description": "Optional context graph ID. Auto-generated from name when omitted.",
+                "description": (
+                    "Optional create-only context graph id slug. Auto-generated "
+                    "from name when omitted. For later writes, call "
+                    "dkg_list_context_graphs and use the exact returned id or "
+                    "full did:dkg:context-graph:<id> URI."
+                ),
             },
             "public": {
                 "type": "boolean",
@@ -536,7 +559,7 @@ DKG_ASSERTION_CREATE_SCHEMA = {
     "parameters": {
         "type": "object",
         "properties": {
-            "context_graph_id": {"type": "string", "description": "Target context graph ID."},
+            "context_graph_id": {"type": "string", "description": TARGET_CONTEXT_GRAPH_DESCRIPTION},
             "name": {"type": "string", "description": "Assertion name."},
             "sub_graph_name": {"type": "string", "description": "Optional sub-graph name."},
         },
@@ -550,7 +573,7 @@ DKG_ASSERTION_WRITE_SCHEMA = {
     "parameters": {
         "type": "object",
         "properties": {
-            "context_graph_id": {"type": "string", "description": "Target context graph ID."},
+            "context_graph_id": {"type": "string", "description": TARGET_CONTEXT_GRAPH_DESCRIPTION},
             "name": {"type": "string", "description": "Assertion name."},
             "quads": {"type": "array", "items": QUAD_SCHEMA, "description": "RDF triples/quads to write."},
             "sub_graph_name": {"type": "string", "description": "Optional sub-graph name."},
@@ -565,7 +588,7 @@ DKG_ASSERTION_PROMOTE_SCHEMA = {
     "parameters": {
         "type": "object",
         "properties": {
-            "context_graph_id": {"type": "string", "description": "Target context graph ID."},
+            "context_graph_id": {"type": "string", "description": TARGET_CONTEXT_GRAPH_DESCRIPTION},
             "name": {"type": "string", "description": "Assertion name."},
             "entities": {"type": "array", "items": {"type": "string"}, "description": "Optional root entity URI list."},
             "sub_graph_name": {"type": "string", "description": "Optional sub-graph name."},
@@ -580,7 +603,7 @@ DKG_ASSERTION_DISCARD_SCHEMA = {
     "parameters": {
         "type": "object",
         "properties": {
-            "context_graph_id": {"type": "string", "description": "Target context graph ID."},
+            "context_graph_id": {"type": "string", "description": TARGET_CONTEXT_GRAPH_DESCRIPTION},
             "name": {"type": "string", "description": "Assertion name."},
             "sub_graph_name": {"type": "string", "description": "Optional sub-graph name."},
         },
@@ -594,7 +617,7 @@ DKG_ASSERTION_IMPORT_FILE_SCHEMA = {
     "parameters": {
         "type": "object",
         "properties": {
-            "context_graph_id": {"type": "string", "description": "Target context graph ID."},
+            "context_graph_id": {"type": "string", "description": TARGET_CONTEXT_GRAPH_DESCRIPTION},
             "name": {"type": "string", "description": "Assertion name."},
             "file_path": {"type": "string", "description": "Local file path to upload. Must be under DKG_HERMES_IMPORT_ROOTS or adapter import_roots."},
             "content_type": {"type": "string", "description": "Optional MIME type override."},
@@ -611,7 +634,7 @@ DKG_ASSERTION_QUERY_SCHEMA = {
     "parameters": {
         "type": "object",
         "properties": {
-            "context_graph_id": {"type": "string", "description": "Target context graph ID."},
+            "context_graph_id": {"type": "string", "description": TARGET_CONTEXT_GRAPH_DESCRIPTION},
             "name": {"type": "string", "description": "Assertion name."},
             "sub_graph_name": {"type": "string", "description": "Optional sub-graph name."},
         },
@@ -625,7 +648,7 @@ DKG_IMPORT_ARTIFACT_RESOLVE_SCHEMA = {
     "parameters": {
         "type": "object",
         "properties": {
-            "context_graph_id": {"type": "string", "description": "Context graph ID from the attachment ref."},
+            "context_graph_id": {"type": "string", "description": "Context graph id from the attachment ref. " + EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION},
             "assertion_uri": {"type": "string", "description": "Completed imported assertion URI."},
             "assertion_name": {"type": "string", "description": "Optional source assertion name to cross-check against assertion_uri."},
             "file_hash": {"type": "string", "description": "Optional source file hash to verify."},
@@ -641,7 +664,7 @@ DKG_IMPORT_ARTIFACT_READ_MARKDOWN_SCHEMA = {
     "parameters": {
         "type": "object",
         "properties": {
-            "context_graph_id": {"type": "string", "description": "Context graph ID from the attachment ref."},
+            "context_graph_id": {"type": "string", "description": "Context graph id from the attachment ref. " + EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION},
             "assertion_uri": {"type": "string", "description": "Completed imported assertion URI."},
             "assertion_name": {"type": "string", "description": "Optional source assertion name to cross-check against assertion_uri."},
             "file_hash": {"type": "string", "description": "Optional source file hash to verify."},
@@ -658,7 +681,7 @@ DKG_SEMANTIC_ENRICHMENT_WRITE_SCHEMA = {
     "parameters": {
         "type": "object",
         "properties": {
-            "context_graph_id": {"type": "string", "description": "Context graph ID from the attachment ref."},
+            "context_graph_id": {"type": "string", "description": "Context graph id from the attachment ref. " + EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION},
             "assertion_uri": {"type": "string", "description": "Source imported assertion URI from the attachment ref."},
             "assertion_name": {"type": "string", "description": "Optional source assertion name to cross-check against assertion_uri."},
             "file_hash": {"type": "string", "description": "Optional source file hash to verify."},
@@ -678,7 +701,7 @@ DKG_ASSERTION_HISTORY_SCHEMA = {
     "parameters": {
         "type": "object",
         "properties": {
-            "context_graph_id": {"type": "string", "description": "Target context graph ID."},
+            "context_graph_id": {"type": "string", "description": TARGET_CONTEXT_GRAPH_DESCRIPTION},
             "name": {"type": "string", "description": "Assertion name."},
             "agent_address": {"type": "string", "description": "Optional agent address for WM owner."},
             "sub_graph_name": {"type": "string", "description": "Optional sub-graph name."},
@@ -696,7 +719,7 @@ DKG_SHARED_MEMORY_PUBLISH_SCHEMA = {
     "parameters": {
         "type": "object",
         "properties": {
-            "context_graph_id": {"type": "string", "description": "Target context graph ID."},
+            "context_graph_id": {"type": "string", "description": TARGET_CONTEXT_GRAPH_DESCRIPTION},
             "root_entities": {"type": "array", "items": {"type": "string"}, "description": "Optional subset of root entity URIs."},
             "clear_after": {"type": "boolean", "description": "Clear published SWM after publish."},
             "sub_graph_name": {"type": "string", "description": "Optional sub-graph name."},
@@ -713,7 +736,7 @@ DKG_SUB_GRAPH_CREATE_SCHEMA = {
     "parameters": {
         "type": "object",
         "properties": {
-            "context_graph_id": {"type": "string", "description": "Target context graph ID."},
+            "context_graph_id": {"type": "string", "description": TARGET_CONTEXT_GRAPH_DESCRIPTION},
             "sub_graph_name": {"type": "string", "description": "Sub-graph name."},
         },
         "required": ["context_graph_id", "sub_graph_name"],
@@ -726,7 +749,7 @@ DKG_SUB_GRAPH_LIST_SCHEMA = {
     "parameters": {
         "type": "object",
         "properties": {
-            "context_graph_id": {"type": "string", "description": "Target context graph ID."},
+            "context_graph_id": {"type": "string", "description": TARGET_CONTEXT_GRAPH_DESCRIPTION},
         },
         "required": ["context_graph_id"],
     },
@@ -743,7 +766,7 @@ MEMORY_SEARCH_SCHEMA = {
         "properties": {
             "query": {"type": "string", "description": "Free-text search query."},
             "limit": {"type": "integer", "description": "Max results, default 20, capped at 100."},
-            "context_graph_id": {"type": "string", "description": "Optional context graph override."},
+            "context_graph_id": {"type": "string", "description": "Optional context graph override. " + EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION},
         },
         "required": ["query"],
     },
@@ -755,7 +778,7 @@ DKG_CONTEXT_GRAPH_INVITE_SCHEMA = {
     "parameters": {
         "type": "object",
         "properties": {
-            "context_graph_id": {"type": "string", "description": "Context graph ID."},
+            "context_graph_id": {"type": "string", "description": TARGET_CONTEXT_GRAPH_DESCRIPTION},
             "peer_id": {"type": "string", "description": "Peer ID to invite."},
         },
         "required": ["context_graph_id", "peer_id"],
@@ -768,7 +791,7 @@ DKG_PARTICIPANT_ADD_SCHEMA = {
     "parameters": {
         "type": "object",
         "properties": {
-            "context_graph_id": {"type": "string", "description": "Context graph ID."},
+            "context_graph_id": {"type": "string", "description": TARGET_CONTEXT_GRAPH_DESCRIPTION},
             "agent_address": {"type": "string", "description": "Agent address to add."},
         },
         "required": ["context_graph_id", "agent_address"],
@@ -781,7 +804,7 @@ DKG_PARTICIPANT_REMOVE_SCHEMA = {
     "parameters": {
         "type": "object",
         "properties": {
-            "context_graph_id": {"type": "string", "description": "Context graph ID."},
+            "context_graph_id": {"type": "string", "description": TARGET_CONTEXT_GRAPH_DESCRIPTION},
             "agent_address": {"type": "string", "description": "Agent address to remove."},
         },
         "required": ["context_graph_id", "agent_address"],
@@ -794,7 +817,7 @@ DKG_PARTICIPANT_LIST_SCHEMA = {
     "parameters": {
         "type": "object",
         "properties": {
-            "context_graph_id": {"type": "string", "description": "Context graph ID."},
+            "context_graph_id": {"type": "string", "description": TARGET_CONTEXT_GRAPH_DESCRIPTION},
         },
         "required": ["context_graph_id"],
     },
@@ -806,7 +829,7 @@ DKG_JOIN_REQUEST_LIST_SCHEMA = {
     "parameters": {
         "type": "object",
         "properties": {
-            "context_graph_id": {"type": "string", "description": "Context graph ID."},
+            "context_graph_id": {"type": "string", "description": TARGET_CONTEXT_GRAPH_DESCRIPTION},
         },
         "required": ["context_graph_id"],
     },
@@ -818,7 +841,7 @@ DKG_JOIN_REQUEST_APPROVE_SCHEMA = {
     "parameters": {
         "type": "object",
         "properties": {
-            "context_graph_id": {"type": "string", "description": "Context graph ID."},
+            "context_graph_id": {"type": "string", "description": TARGET_CONTEXT_GRAPH_DESCRIPTION},
             "agent_address": {"type": "string", "description": "Agent address to approve."},
         },
         "required": ["context_graph_id", "agent_address"],
@@ -831,7 +854,7 @@ DKG_JOIN_REQUEST_REJECT_SCHEMA = {
     "parameters": {
         "type": "object",
         "properties": {
-            "context_graph_id": {"type": "string", "description": "Context graph ID."},
+            "context_graph_id": {"type": "string", "description": TARGET_CONTEXT_GRAPH_DESCRIPTION},
             "agent_address": {"type": "string", "description": "Agent address to reject."},
         },
         "required": ["context_graph_id", "agent_address"],
