@@ -3309,7 +3309,14 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
     focal: { uri: entity.uri, sizeMultiplier: 2.4 },
   }), [entity.uri, theme]);
 
-  const tripleCount = entity.tripleCount;
+  // Derive from the actual triples this view renders, NOT from
+  // `entity.tripleCount`. The KADetailView is opened with either
+  // the raw `allTriples` (overview scope) or the SPO-deduped slice
+  // (layer scope, see `ProjectView.dedupeTriplesBySpo`). Reading
+  // the precomputed field would freeze on the deduped semantic and
+  // disagree with the tab on overview-scoped opens. `entityTriples`
+  // is already the filtered set the Triples tab counts rows from.
+  const tripleCount = entityTriples.length;
 
   return (
     <div className="v10-ka-detail">

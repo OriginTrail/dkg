@@ -18,15 +18,26 @@ export interface MemoryEntity {
   properties: Map<string, string[]>;
   connections: Array<{ predicate: string; targetUri: string; targetLabel: string }>;
   /**
-   * Number of triple rows that reference this entity as subject or object —
-   * matches the row count the entity-detail Triples tab shows. Used by the
-   * entity-row badge and the entity-detail header/sidebar/footer.
+   * Number of *distinct* (subject, predicate, object) triples that
+   * reference this entity as subject or object — matches the row
+   * count the entity-detail Triples tab shows on a layer page
+   * (which `dedupeTriplesBySpo`s before render, see
+   * `ProjectView.tsx`). Drives the entity-row badge and is the
+   * sort key for entity lists.
    *
-   * PER-ENTITY METRIC ONLY. An IRI-object triple `(A, p, B)` bumps BOTH
-   * `A.tripleCount` and `B.tripleCount`, so `sum(e.tripleCount)` across
-   * a layer is NOT the layer's triple total. Layer totals belong to
-   * `mem.allTriples.length` (DashboardView); CG/sub-graph totals to the
-   * daemon's `/api/sub-graph/list` `tripleCount` (SubGraphBar).
+   * NOT used by the KADetailView header / sidebar / footer — those
+   * derive directly from `entityTriples.length` so they always
+   * mirror whichever scope the user opened the detail page from
+   * (layer-page = deduped, overview = raw). This split avoids a
+   * mismatch when the same `(s,p,o)` lives in multiple sub-graph
+   * named graphs (the layer view dedupes, the overview view doesn't).
+   *
+   * PER-ENTITY METRIC ONLY. An IRI-object triple `(A, p, B)` bumps
+   * BOTH `A.tripleCount` and `B.tripleCount`, so
+   * `sum(e.tripleCount)` across a layer is NOT the layer's triple
+   * total. Layer totals belong to `mem.allTriples.length`
+   * (DashboardView); CG/sub-graph totals to the daemon's
+   * `/api/sub-graph/list` `tripleCount` (SubGraphBar).
    */
   tripleCount: number;
 }
@@ -326,6 +337,27 @@ async function queryLayer(
 export function buildEntities(layered: LayeredTriple[]): Map<string, MemoryEntity> {
   const entities = new Map<string, MemoryEntity>();
   const connectionKeys = new Map<string, Set<string>>();
+  // Per-entity SPO-dedup keys for `tripleCount`. Mirrors
+  // `dedupeTriplesBySpo` (`ProjectView.tsx`) so the precomputed
+  // count agrees with the layer-page Triples tab even when the
+  // same `(s,p,o)` appears in multiple named graphs (e.g. once in
+  // `<cg>/_shared_memory` and once in `<cg>/<sg>/_shared_memory`).
+  const tripleSeen = new Map<string, Set<string>>();
+  function bumpTriple(entityUri: string, key: string): boolean {
+    let seen = tripleSeen.get(entityUri);
+    if (!seen) {
+      seen = new Set<string>();
+      tripleSeen.set(entityUri, seen);
+    }
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }
+  // Deferred bumps for class-entity object sides on rdf:type triples.
+  // Applied after the main loop, only for class entities that already
+  // exist (i.e. have their own triples). See the inline note in the
+  // rdf:type branch for why we cannot bump these eagerly.
+  const deferredTypeBumps: Array<{ typeUri: string; spoKey: string }> = [];
 
   function getOrCreate(uri: string): MemoryEntity {
     const entityUri = canonicalEntityUri(uri);
@@ -351,32 +383,49 @@ export function buildEntities(layered: LayeredTriple[]): Map<string, MemoryEntit
     const entity = getOrCreate(t.subject);
     entity.layers.add(t.layer);
     if (t.subGraph) entity.subGraphs.add(t.subGraph);
-    // Every observed triple bumps subject-side count — type, literal,
-    // and connection alike. Counted BEFORE the connection-dedup below
-    // so the badge matches the Triples-tab raw row count (same triple
-    // appearing in two sub-graphs shows twice in the tab and counts
-    // twice here).
-    entity.tripleCount++;
+    // Build the SPO key from canonicalised subject/object so cross-
+    // graph copies that differ only in `<>` wrapping still dedupe.
+    const canonicalObject = isUri(t.object) ? canonicalEntityUri(t.object) : t.object;
+    const spoKey = `${entity.uri}\0${t.predicate}\0${canonicalObject}`;
+    // Subject-side bump — every distinct `(s,p,o)` triple referencing
+    // this entity contributes 1, matching the layer-page Triples tab
+    // (which SPO-dedupes via `dedupeTriplesBySpo` before render).
+    if (bumpTriple(entity.uri, spoKey)) entity.tripleCount++;
 
     if (t.predicate === RDF_TYPE) {
       const typeUri = canonicalEntityUri(t.object);
       if (!entity.types.includes(typeUri)) {
         entity.types.push(typeUri);
       }
+      // DEFERRED type-class object-side bump: queue, don't getOrCreate.
+      // Opening a class entity (e.g. `urn:type:ObjectEvent`) that has
+      // its own triples shows incoming `rdf:type` rows in its Triples
+      // tab, so its `tripleCount` must include them — but we must
+      // only bump classes that already exist as first-class entities.
+      // Calling `getOrCreate` here would inject schema URIs like
+      // `schema:Thing` into the entity map with `trustLevel = 'working'`
+      // (no layers), which trips `useLayerTriples`' residue filter at
+      // helpers.ts:444-448 (`objectEntity.trustLevel !== targetLayer`
+      // ⇒ drops the rdf:type row from SWM/VM views). The deferred
+      // pass after the loop bumps only entities that already exist
+      // by virtue of their own triples — matches Codex's "if the type
+      // node has its own triples" condition. Self-link guard same
+      // as the IRI branch.
+      if (typeUri !== entity.uri) {
+        deferredTypeBumps.push({ typeUri, spoKey });
+      }
     } else if (isUri(t.object)) {
-      const targetUri = canonicalEntityUri(t.object);
+      const targetUri = canonicalObject;
       const targetEntity = getOrCreate(targetUri);
       targetEntity.layers.add(t.layer);
       if (t.subGraph) targetEntity.subGraphs.add(t.subGraph);
       // Object-side bump — entity appearing as the object of someone
-      // else's triple shows up in its own Triples tab too, so its
-      // tripleCount must include it. Skip when self-referential
-      // (`(A, p, A)`): the Triples-tab filter is `s===uri || o===uri`
-      // which yields one row for a self-link, so counting both sides
-      // here would disagree by one. Subject-side bump already happened
-      // above, so the self-link is still counted once.
+      // else's triple shows up in its own Triples tab too. Skip when
+      // self-referential (`(A, p, A)`): the Triples-tab filter is
+      // `s===uri || o===uri` which yields one row for a self-link,
+      // and the subject-side bump above already counted it once.
       if (targetUri !== entity.uri) {
-        targetEntity.tripleCount++;
+        if (bumpTriple(targetEntity.uri, spoKey)) targetEntity.tripleCount++;
       }
       const keys = connectionKeys.get(entity.uri) ?? new Set<string>();
       const connectionKey = `${t.predicate}\0${targetUri}`;
@@ -397,6 +446,16 @@ export function buildEntities(layered: LayeredTriple[]): Map<string, MemoryEntit
         entity.properties.set(t.predicate, existing);
       }
     }
+  }
+
+  // Apply deferred type-target bumps for class entities that already
+  // exist (i.e. have their own triples in `entities`). We never
+  // `getOrCreate` here — adding `schema:Thing`-style schema URIs as
+  // entities would break `useLayerTriples`' residue filter.
+  for (const { typeUri, spoKey } of deferredTypeBumps) {
+    const typeEntity = entities.get(typeUri);
+    if (!typeEntity) continue;
+    if (bumpTriple(typeEntity.uri, spoKey)) typeEntity.tripleCount++;
   }
 
   for (const entity of entities.values()) {
