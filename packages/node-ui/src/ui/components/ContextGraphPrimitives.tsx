@@ -120,6 +120,7 @@ export function StatStrip({
         <div
           key={item.id ?? index}
           className="v10-stat-strip-cell"
+          data-stat-id={item.id}
           title={item.tooltip}
         >
           <span className="v10-stat-strip-label">{item.label}</span>

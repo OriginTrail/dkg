@@ -273,21 +273,21 @@ describe('Context Graph IA and Overview', () => {
       }),
     );
 
-    const cells = Array.from(container.querySelectorAll<HTMLElement>('.v10-stat-strip-cell'));
-    expect(cells).toHaveLength(4);
-
-    // Every cell carries a non-empty `title` attribute. None of the
-    // hint strings should appear in the rendered textContent — they
-    // belong to the tooltip surface only.
-    for (const cell of cells) {
-      expect(cell.title?.trim().length ?? 0).toBeGreaterThan(0);
+    // Each of the four cells is addressable via `[data-stat-id]`
+    // and carries a non-empty `title`. The hint copy never leaks
+    // into rendered text; `.v10-stat-strip-hint` is never rendered
+    // (the inline-hint surface is intentionally unused by the
+    // Overview — qa-engineer's defensive check).
+    const ids = ['entities', 'triples', 'subgraphs', 'participants'] as const;
+    for (const id of ids) {
+      const cell = container.querySelector<HTMLElement>(`[data-stat-id="${id}"]`);
+      expect(cell, `missing [data-stat-id="${id}"]`).toBeTruthy();
+      expect(cell!.title?.trim().length ?? 0).toBeGreaterThan(0);
+      expect(cell!.querySelector('.v10-stat-strip-hint')).toBeNull();
     }
     expect(container.textContent).not.toContain('Topical partitions inside this Context Graph.');
     expect(container.textContent).not.toContain('Canonical triple total across all layers.');
     expect(container.textContent).not.toContain('Canonical current-layer entity counts.');
-
-    // No inline `v10-stat-strip-hint` text leak (the prop is unused
-    // by the Overview).
     expect(container.querySelectorAll('.v10-stat-strip-hint')).toHaveLength(0);
 
     await act(async () => root.unmount());
@@ -304,10 +304,7 @@ describe('Context Graph IA and Overview', () => {
       }),
     );
 
-    const cells = Array.from(container.querySelectorAll('.v10-stat-strip-cell'));
-    const subgraphsCell = cells.find(cell =>
-      cell.querySelector('.v10-stat-strip-label')?.textContent?.trim() === 'Subgraphs',
-    );
+    const subgraphsCell = container.querySelector<HTMLElement>('[data-stat-id="subgraphs"]');
     expect(subgraphsCell).toBeTruthy();
     expect(subgraphsCell!.querySelector('.v10-stat-strip-value')?.textContent?.trim())
       .toBe('Loading...');
@@ -522,12 +519,14 @@ describe('Context Graph IA and Overview', () => {
 
     // §4.2.1 Delta 2 — the M6 status sentence now lives on the
     // Entities cell as a `title` tooltip, not inline text. Read it
-    // from the cell's attribute, not from container.textContent.
+    // from the cell's attribute via the stable `[data-stat-id]`
+    // hook (qa-engineer's selector convention). Defensive check
+    // confirms no inline `.v10-stat-strip-hint` was rendered alongside.
     expect(container.textContent).toContain('Unavailable');
-    const entitiesCell = Array.from(container.querySelectorAll('.v10-stat-strip-cell'))
-      .find(cell => cell.querySelector('.v10-stat-strip-label')?.textContent?.trim() === 'Entities');
+    const entitiesCell = container.querySelector<HTMLElement>('[data-stat-id="entities"]');
+    expect(entitiesCell).toBeTruthy();
     expect(entitiesCell?.getAttribute('title')).toBe('Live memory counts are unavailable.');
-    expect(entitiesCell?.getAttribute('title')).not.toBe('Canonical current-layer entity counts.');
+    expect(entitiesCell?.querySelector('.v10-stat-strip-hint')).toBeNull();
 
     await act(async () => root.unmount());
   });
@@ -555,12 +554,14 @@ describe('Context Graph IA and Overview', () => {
     );
 
     // §4.2.1 Delta 2 — the partial-bound hint now lives on the
-    // Entities cell as a `title` tooltip; the pipeline rendering
-    // assertions are unchanged.
-    const entitiesCell = Array.from(container.querySelectorAll('.v10-stat-strip-cell'))
-      .find(cell => cell.querySelector('.v10-stat-strip-label')?.textContent?.trim() === 'Entities');
+    // Entities cell as a `title` tooltip via the stable
+    // `[data-stat-id]` hook. Pipeline rendering assertions
+    // unchanged.
+    const entitiesCell = container.querySelector<HTMLElement>('[data-stat-id="entities"]');
+    expect(entitiesCell).toBeTruthy();
     expect(entitiesCell?.getAttribute('title'))
       .toBe('One or more layer counts are currently a lower bound.');
+    expect(entitiesCell?.querySelector('.v10-stat-strip-hint')).toBeNull();
     expect(container.querySelector('.v10-po-pipeline-step.vm .v10-po-pipeline-step-count')?.textContent)
       .toBe('Unavailable');
     expect(container.querySelectorAll('.v10-po-pipeline-seg')).toHaveLength(0);
