@@ -373,8 +373,11 @@ describe('Context Graph IA and Overview', () => {
 
     const subgraphsCell = container.querySelector<HTMLElement>('[data-stat-id="subgraphs"]');
     expect(subgraphsCell).toBeTruthy();
+    // ui-lead review finding #4 — loading state collapses to '...'
+    // (mono ellipsis convention used everywhere else in the file)
+    // instead of 'Loading...'.
     expect(subgraphsCell!.querySelector('.v10-stat-strip-value')?.textContent?.trim())
-      .toBe('Loading...');
+      .toBe('...');
 
     await act(async () => root.unmount());
   });

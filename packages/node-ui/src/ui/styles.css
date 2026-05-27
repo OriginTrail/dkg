@@ -5347,7 +5347,19 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
   display: flex;
   flex-direction: column;
   gap: 10px;
-  margin: 4px 0 12px;
+  margin: 12px 0 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-subtle);
+}
+/* §4.2.1 ui-lead review finding #1 — even divider rhythm across all
+   7 peer regions. The two boundaries that were previously missing
+   borders (at-a-glance ↔ pipeline above; join-requests ↔ activity
+   below) get them via `[data-section]` attribute selectors, which
+   are the stable hook regardless of inner wrapper class. */
+[data-section="activity"] {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-subtle);
 }
 .v10-po-pipeline-head {
   display: flex;

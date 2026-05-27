@@ -747,7 +747,7 @@ export function ProjectOverviewCard({
       ? '...'
       : triplesCount.toLocaleString();
   const subGraphsValue = subGraphCount == null
-    ? 'Loading...'
+    ? '...'
     : subGraphCount.toLocaleString();
   const pipeline = [
     {

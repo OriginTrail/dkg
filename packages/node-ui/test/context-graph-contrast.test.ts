@@ -103,7 +103,9 @@ describe('Context Graph contrast tokens', () => {
       '.v10-po-section-title',
       '.v10-po-pipeline-step-desc',
       '.v10-po-people-empty',
+      '.v10-po-participant-name',
       '.v10-po-join-empty',
+      '.v10-po-join-addr',
       '.v10-po-primer-footer-lede',
       '.v10-po-primer-footer-sub',
     ];
