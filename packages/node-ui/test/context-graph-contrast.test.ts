@@ -96,6 +96,16 @@ describe('Context Graph contrast tokens', () => {
       '.v10-empty-state-desc',
       '.v10-stat-strip-label',
       '.v10-entity-list-sort-select',
+      // S2 Overview finalize (§4.2.1) — readable chrome rendered
+      // via `--text-*` tokens. Registered here so a future
+      // regression on any of these is caught explicitly.
+      '.v10-po-identity-label',
+      '.v10-po-section-title',
+      '.v10-po-pipeline-step-desc',
+      '.v10-po-people-empty',
+      '.v10-po-join-empty',
+      '.v10-po-primer-footer-lede',
+      '.v10-po-primer-footer-sub',
     ];
 
     for (const selector of readableSelectors) {
