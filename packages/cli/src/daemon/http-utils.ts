@@ -476,9 +476,10 @@ function normalizeContextGraphCallerAddress(
 ): string | null {
   if (!callerAgentAddress) return null;
   const didPrefix = "did:dkg:agent:";
-  return callerAgentAddress.startsWith(didPrefix)
+  const address = callerAgentAddress.startsWith(didPrefix)
     ? callerAgentAddress.slice(didPrefix.length)
     : callerAgentAddress;
+  return /^0x[0-9a-fA-F]{40}$/.test(address) ? address : null;
 }
 
 function uniqueStrings(values: Iterable<string>): string[] {

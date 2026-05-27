@@ -135,7 +135,10 @@ describe('context graph write-path validation', () => {
     };
   }
 
-  async function startRoutes(agent: ReturnType<typeof makeAgent>) {
+  async function startRoutes(
+    agent: ReturnType<typeof makeAgent>,
+    requestAgentAddress = CALLER,
+  ) {
     server = createServer(async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://127.0.0.1');
       const tracker = {
@@ -176,7 +179,7 @@ describe('context graph write-path validation', () => {
         url,
         path: url.pathname,
         requestToken: undefined,
-        requestAgentAddress: CALLER,
+        requestAgentAddress,
         emitMemoryGraphChanged: vi.fn(),
       } as any;
 
@@ -389,6 +392,26 @@ describe('context graph write-path validation', () => {
 
     expect(result.status).toBe(200);
     expect(agent.calls.create).toHaveBeenCalledWith('local-content-cg', 'draft', undefined);
+  });
+
+  it('does not pass legacy peer ids as callerAgentAddress when listing write targets', async () => {
+    const agent = makeAgent([{
+      id: 'legacy-cg',
+      uri: 'did:dkg:context-graph:legacy-cg',
+      name: 'Legacy CG',
+      subscribed: true,
+      synced: true,
+    }]);
+    await startRoutes(agent, '12D3KooWLegacyPeer');
+
+    const result = await post('/api/assertion/create', {
+      contextGraphId: 'legacy-cg',
+      name: 'draft',
+    });
+
+    expect(result.status).toBe(200);
+    expect(agent.listContextGraphs).toHaveBeenCalledWith({ callerAgentAddress: null });
+    expect(agent.calls.create).toHaveBeenCalledWith('legacy-cg', 'draft', undefined);
   });
 
   it('accepts an exact bare context graph with local content when a curated suffix also exists', async () => {
