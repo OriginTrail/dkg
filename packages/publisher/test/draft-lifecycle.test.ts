@@ -318,16 +318,84 @@ describe('Working Memory Assertion Lifecycle', () => {
       expect(opKnownPids.length).toBe(1);
     }
 
+    // Codex round 2 Finding 6: marker is NOT written when cgSkipped > 0 (one
+    // unresolved row remained). Future boots must retry as AGENTS data syncs.
     const markerAfter = await store.query(
       `SELECT ?ts WHERE { GRAPH <${CG_META}> { <urn:dkg:migration:swm-attr-agent-did> <${DKG}appliedAt> ?ts } }`,
     );
     expect(markerAfter.type).toBe('bindings');
-    if (markerAfter.type === 'bindings') expect(markerAfter.bindings.length).toBe(1);
+    if (markerAfter.type === 'bindings') expect(markerAfter.bindings.length).toBe(0);
 
-    // Second pass: marker present → no work done.
+    // Second pass with no AGENTS changes: nothing new to resolve, marker
+    // still not written, no churn — the literal-only filter eliminates the
+    // already-rewritten URI rows so we only retry the genuine unresolved one.
     const r2 = await publisher.migrateSwmAttributionToAgentDid();
     expect(r2.rewritten).toBe(0);
-    expect(r2.skipped).toBe(0);
+    expect(r2.skipped).toBe(1);
+
+    // Add the previously-missing AGENTS record for the unresolved peer.
+    const ADDR_LATE = '0xbA7E932F79263F1a303790Bd6C01B096F5334Bba';
+    await store.insert([
+      { subject: `did:dkg:agent:${ADDR_LATE}`, predicate: RDF_TYPE, object: `${DKG}Agent`, graph: AGENTS_GRAPH },
+      { subject: `did:dkg:agent:${ADDR_LATE}`, predicate: `${DKG}peerId`, object: `"${PEER_UNKNOWN}"`, graph: AGENTS_GRAPH },
+    ]);
+    // Third pass: the previously-unresolved row now resolves, and since
+    // cgSkipped reaches 0 the marker finally gets written.
+    const r3 = await publisher.migrateSwmAttributionToAgentDid();
+    expect(r3.rewritten).toBe(1);
+    expect(r3.skipped).toBe(0);
+    const markerFinal = await store.query(
+      `SELECT ?ts WHERE { GRAPH <${CG_META}> { <urn:dkg:migration:swm-attr-agent-did> <${DKG}appliedAt> ?ts } }`,
+    );
+    if (markerFinal.type === 'bindings') expect(markerFinal.bindings.length).toBe(1);
+
+    // Fourth pass: marker present → fast-path skip; no SPARQL work.
+    const r4 = await publisher.migrateSwmAttributionToAgentDid();
+    expect(r4.rewritten).toBe(0);
+    expect(r4.skipped).toBe(0);
+  });
+
+  it('GH #748 Codex round 2: ambiguous peer→agent mapping (multi-agent-per-node) leaves literal in place', async () => {
+    // Two agents share the same libp2p peer ID (multi-agent-per-node, e.g.
+    // via `DKGAgent.registerAgent`). The resolver must NOT pick one
+    // arbitrarily — the migration leaves the legacy literal alone.
+    const AGENTS_GRAPH = 'did:dkg:context-graph:agents';
+    const CG_META = `did:dkg:context-graph:${CG_ID}/_meta`;
+    const SWM_META = `did:dkg:context-graph:${CG_ID}/_shared_memory_meta`;
+    const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+    const DKG = 'http://dkg.io/ontology/';
+    const PROV = 'http://www.w3.org/ns/prov#';
+    const PEER_SHARED = '12D3KooWMultiAgentNode';
+    const ADDR_A = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    const ADDR_B = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+
+    await store.insert([
+      { subject: `did:dkg:agent:${ADDR_A}`, predicate: RDF_TYPE, object: `${DKG}Agent`, graph: AGENTS_GRAPH },
+      { subject: `did:dkg:agent:${ADDR_A}`, predicate: `${DKG}peerId`, object: `"${PEER_SHARED}"`, graph: AGENTS_GRAPH },
+      { subject: `did:dkg:agent:${ADDR_B}`, predicate: RDF_TYPE, object: `${DKG}Agent`, graph: AGENTS_GRAPH },
+      { subject: `did:dkg:agent:${ADDR_B}`, predicate: `${DKG}peerId`, object: `"${PEER_SHARED}"`, graph: AGENTS_GRAPH },
+    ]);
+
+    const OP = `urn:dkg:share:${CG_ID}:op-ambiguous`;
+    await store.insert([
+      { subject: OP, predicate: RDF_TYPE, object: `${DKG}WorkspaceOperation`, graph: SWM_META },
+      { subject: OP, predicate: `${DKG}publisherPeerId`, object: `"${PEER_SHARED}"`, graph: SWM_META },
+      { subject: OP, predicate: `${PROV}wasAttributedTo`, object: `"${PEER_SHARED}"`, graph: SWM_META },
+      { subject: `did:dkg:context-graph:${CG_ID}`, predicate: RDF_TYPE, object: `${DKG}ContextGraph`, graph: CG_META },
+    ]);
+
+    const r = await publisher.migrateSwmAttributionToAgentDid();
+    expect(r.rewritten).toBe(0);
+    expect(r.skipped).toBe(1);
+
+    // The row stays as a literal — no arbitrary attribution.
+    const after = await store.query(
+      `SELECT ?o WHERE { GRAPH <${SWM_META}> { <${OP}> <${PROV}wasAttributedTo> ?o } }`,
+    );
+    if (after.type === 'bindings') {
+      expect(after.bindings.length).toBe(1);
+      expect(after.bindings[0]['o']).toBe(`"${PEER_SHARED}"`);
+    }
   });
 
   it('full lifecycle: create → write → promote → verify SWM → discard', async () => {

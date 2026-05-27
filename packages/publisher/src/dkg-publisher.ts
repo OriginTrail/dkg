@@ -3216,15 +3216,22 @@ export class DKGPublisher implements Publisher {
           }
         }
 
-        // Drop a marker so the next boot skips this CG. Use the CG `_meta`
-        // graph rather than `_shared_memory_meta` so a SWM graph wipe
-        // doesn't accidentally re-arm the migration.
-        await this.store.insert([{
-          subject: MIGRATION_MARKER_SUBJECT,
-          predicate: `${DKG}appliedAt`,
-          object: `"${new Date().toISOString()}"^^<${XSD}dateTime>`,
-          graph: cgMetaGraph,
-        }]);
+        // GH #748 Codex round 2: only write the per-CG marker when this pass
+        // resolved every literal-form row. If anything was skipped (peer→agent
+        // mapping missing, ambiguous, or unknown), leave the marker off so
+        // future boots retry as the AGENTS graph syncs more records. The
+        // re-run cost is bounded by the residual literal count — already-
+        // rewritten rows fail the `isLiteral(?o)` filter and contribute zero
+        // work. Use the CG `_meta` graph rather than `_shared_memory_meta`
+        // so a SWM graph wipe doesn't accidentally re-arm the migration.
+        if (cgSkipped === 0) {
+          await this.store.insert([{
+            subject: MIGRATION_MARKER_SUBJECT,
+            predicate: `${DKG}appliedAt`,
+            object: `"${new Date().toISOString()}"^^<${XSD}dateTime>`,
+            graph: cgMetaGraph,
+          }]);
+        }
 
         totalRewritten += cgRewritten;
         totalSkipped += cgSkipped;
@@ -3233,7 +3240,7 @@ export class DKGPublisher implements Publisher {
         if (cgRewritten > 0 || cgSkipped > 0) {
           this.log.info(
             ctx,
-            `CG ${cgId}: rewrote ${cgRewritten} attribution literal(s) to agent DID, left ${cgSkipped} unresolved`,
+            `CG ${cgId}: rewrote ${cgRewritten} attribution literal(s) to agent DID, left ${cgSkipped} unresolved${cgSkipped > 0 ? ' (will retry on next boot)' : ''}`,
           );
         }
       }
@@ -3253,14 +3260,21 @@ export class DKGPublisher implements Publisher {
   ): Promise<string | null> {
     // SPARQL string-literal escape: only `"` and `\` are special inside `"..."`.
     const escaped = peerId.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    // GH #748 Codex round 2: a single libp2p PeerId can be shared across
+    // multiple registered agents on the same node (multi-agent-per-node via
+    // `DKGAgent.registerAgent`). Resolve only when exactly one AGENTS record
+    // matches — `LIMIT 2` + length-check is the cheapest way to detect
+    // ambiguity. On 0 or >1 matches, return null so the migration preserves
+    // the literal-form attribution rather than silently mis-attributing it
+    // to whichever agent happens to come first.
     const sparql = `SELECT ?agent WHERE {
       GRAPH <${agentsGraph}> {
         ?agent <${RDF}type> <${DKG}Agent> ;
                <${DKG}peerId> "${escaped}" .
       }
-    } LIMIT 1`;
+    } LIMIT 2`;
     const result = await this.store.query(sparql);
-    if (result.type !== 'bindings' || result.bindings.length === 0) return null;
+    if (result.type !== 'bindings' || result.bindings.length !== 1) return null;
     const agentUri = result.bindings[0]['agent'];
     if (!agentUri || !agentUri.startsWith('did:dkg:agent:')) return null;
     const address = agentUri.slice('did:dkg:agent:'.length);
