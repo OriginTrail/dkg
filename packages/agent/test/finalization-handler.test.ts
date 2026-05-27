@@ -207,11 +207,14 @@ describe('FinalizationHandler', () => {
       subGraphName,
     );
 
+    // GH #748: agent DID subjects are lowercased per `canonicalAgentDidSubject`
+    // so the same wallet doesn't split into multiple RDF subjects (see
+    // `agentDid()` in packages/publisher/src/metadata.ts).
     const registration = await store.query(
       `ASK { GRAPH <${metaGraph}> {
         <${subGraphUri}> a <http://dkg.io/ontology/SubGraph> ;
           <http://schema.org/name> "code" ;
-          <http://dkg.io/ontology/createdBy> <did:dkg:agent:${publisherAddress}> .
+          <http://dkg.io/ontology/createdBy> <did:dkg:agent:${publisherAddress.toLowerCase()}> .
       } }`,
     );
     expect(registration.type).toBe('boolean');
