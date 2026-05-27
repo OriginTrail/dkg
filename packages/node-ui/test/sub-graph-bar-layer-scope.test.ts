@@ -431,4 +431,58 @@ describe('SubGraphBar — layer-scoped chip counts (P4)', () => {
     await act(async () => { rootChip.click(); });
     expect(onSelect).toHaveBeenCalledWith(ROOT_SLUG_SENTINEL);
   });
+
+  // S3 Codex follow-up (Issue B on PR #772). The Root chip must stay
+  // visible whenever Root is the selected scope, even after a live
+  // refresh drops the root-bucket count to 0 (e.g. the last root
+  // entity got scoped to a sub-graph). Pre-fix the chip vanished and
+  // the detail body kept Root scope with no matching active chip in
+  // the row — a confusing UI state.
+  it('keeps the Root chip visible (and active) when ROOT_SLUG_SENTINEL is selected even after the root count drops to 0', async () => {
+    const { ROOT_SLUG_SENTINEL } = await import('../src/ui/lib/subGraphs.js');
+    const rootEntity = {
+      uri: 'urn:e:root', label: 'Root', types: [],
+      trustLevel: 'working' as const,
+      layers: new Set(['working']),
+      subGraphs: new Set<string>(),
+      properties: new Map(),
+      connections: [],
+    };
+    // Initial render: one root entity, Root selected.
+    await act(async () => {
+      root.render(React.createElement(SubGraphBar, {
+        contextGraphId: 'cg',
+        profile,
+        selected: ROOT_SLUG_SENTINEL,
+        onSelect: vi.fn(),
+        entities: [rootEntity, mkEntity('urn:e:named', 'shared', 'alpha')],
+      }));
+    });
+    await flushNet();
+    {
+      const chip = container.querySelector('.v10-subgraph-chip-root') as HTMLElement | null;
+      expect(chip).toBeTruthy();
+      expect(chip!.getAttribute('data-active')).toBe('true');
+      expect(chip!.getAttribute('data-count')).toBe('1');
+    }
+    // Live-refresh: the previously-root entity has been scoped to
+    // `alpha`. The root-bucket count drops to 0, but the user is
+    // still in Root scope (selected stays ROOT_SLUG_SENTINEL).
+    const movedEntity = { ...rootEntity, subGraphs: new Set(['alpha']) };
+    await act(async () => {
+      root.render(React.createElement(SubGraphBar, {
+        contextGraphId: 'cg',
+        profile,
+        selected: ROOT_SLUG_SENTINEL,
+        onSelect: vi.fn(),
+        entities: [movedEntity, mkEntity('urn:e:named', 'shared', 'alpha')],
+      }));
+    });
+    await flushNet();
+    const chip = container.querySelector('.v10-subgraph-chip-root') as HTMLElement | null;
+    expect(chip).toBeTruthy();
+    // Still active (selected hasn't changed) and now reads 0.
+    expect(chip!.getAttribute('data-active')).toBe('true');
+    expect(chip!.getAttribute('data-count')).toBe('0');
+  });
 });

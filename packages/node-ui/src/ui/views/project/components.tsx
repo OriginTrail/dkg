@@ -4360,24 +4360,31 @@ export function SubGraphDetailView({
     [scopedEntities],
   );
 
-  // Triples visible in the Graph tab.
-  //  • Named branch: anything tagged with this sub-graph's origin, plus
-  //    any triple admissible under the asymmetric subject+object
-  //    scope rule used by the layer-tab path — subject-scoped is the
-  //    primary admission gate (covers rdf:type / labels / literal-valued
-  //    properties on promoted entities whose `subGraph` was erased on
-  //    promotion); object-scoped resources are admitted as a recovery
-  //    edge so promoted SWM/VM endpoints don't silently disappear
-  //    (fold-in #7, supersedes the over-strict `both ends in scopedUris`
-  //    branch that dropped legitimate cross-layer edges).
-  //  • Root branch: triples whose subject is root-scoped, with the same
-  //    object-side recovery.
+  // Triples visible in the Graph tab. Routing is *exact-tag-first*,
+  // erased-tag recovery second:
+  //   1. Triples carrying an explicit `subGraph` tag are routed to
+  //      that exact slug (named branch only — the Root bucket has no
+  //      tagged triples by definition). A triple tagged for "other"
+  //      must never leak into the current view just because one of
+  //      its endpoints happens to be a scoped entity (an entity in
+  //      multiple sub-graphs is shared territory, not a broadcast
+  //      channel).
+  //   2. Triples with NO `subGraph` tag are admitted if either
+  //      endpoint is in scope. This is the post-promotion recovery
+  //      path — promoting an assertion erases the `subGraph` origin
+  //      tag from the resulting SWM/VM triples; without this branch
+  //      promoted entities lose their rdf:type / labels / literal
+  //      properties and their cross-layer edges in this view.
+  // Root branch: rule (1) can never fire (the Root bucket carries
+  // no tagged triples); only the untagged-recovery path admits.
   const scopedTriples = useMemo(
     () => rawMemory.graphTriples.filter(t => {
       if (!isRoot && t.subGraph === slug) return true;
-      if (scopedUris.has(t.subject)) return true;
-      if (scopedUris.has(t.object)) return true;
-      return false;
+      // Exact-tag-routing: a triple with a non-matching subGraph tag
+      // belongs to that other slug's view, not this one — even if an
+      // endpoint is shared.
+      if (t.subGraph) return false;
+      return scopedUris.has(t.subject) || scopedUris.has(t.object);
     }),
     [rawMemory.graphTriples, scopedUris, slug, isRoot],
   );

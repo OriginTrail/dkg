@@ -1232,4 +1232,195 @@ describe('SubGraphDetailView tabs', () => {
       expect(hasEdge).toBe(true);
     });
   });
+
+  // S3 Codex follow-up (Bug A on PR #772). The fold-in #7 recovery
+  // branch must NOT admit triples that carry an explicit non-matching
+  // `subGraph` tag — those belong to the tagged slug's view, even
+  // when an endpoint happens to be in the current scope (an entity
+  // in multiple sub-graphs is shared territory, not a broadcast).
+  // Exact-tag-routing wins; the recovery branch is for `subGraph`
+  // erased by promotion only.
+  it('does NOT admit a triple with an explicit non-matching subGraph tag even when an endpoint is in scope', async () => {
+    // `cross` belongs to BOTH `demo` (current view) and `other`. A
+    // triple tagged `subGraph: 'other'` whose subject is `cross`
+    // must NOT leak into the `demo` view.
+    const cross = {
+      uri: 'urn:e:cross', label: 'Cross-membership entity',
+      types: ['http://schema.org/Thing'],
+      trustLevel: 'working',
+      layers: new Set(['working']),
+      subGraphs: new Set(['demo', 'other']),
+      properties: new Map(),
+      connections: [],
+    };
+    const demoOnly = {
+      uri: 'urn:e:demo-only', label: 'Demo-only entity',
+      types: ['http://schema.org/Thing'],
+      trustLevel: 'working',
+      layers: new Set(['working']),
+      subGraphs: new Set(['demo']),
+      properties: new Map(),
+      connections: [],
+    };
+    const demoEdge = {
+      subject: 'urn:e:demo-only',
+      predicate: 'http://schema.org/knows',
+      object: 'urn:e:cross',
+      subGraph: 'demo',
+      layer: 'working' as const,
+    };
+    const otherEdge = {
+      subject: 'urn:e:cross',
+      predicate: 'http://schema.org/knows',
+      object: 'urn:e:demo-only',
+      subGraph: 'other',
+      layer: 'working' as const,
+    };
+    const fixture = {
+      entities: new Map([[cross.uri, cross], [demoOnly.uri, demoOnly]]),
+      entityList: [cross, demoOnly],
+      allTriples: [demoEdge, otherEdge],
+      graphTriples: [
+        { subject: demoEdge.subject, predicate: demoEdge.predicate, object: demoEdge.object, subGraph: 'demo' },
+        { subject: otherEdge.subject, predicate: otherEdge.predicate, object: otherEdge.object, subGraph: 'other' },
+      ],
+      trustMap: new Map(),
+      counts: { wm: 2, swm: 0, vm: 0, total: 2 },
+      loading: false, error: null, partial: false,
+      refresh: vi.fn(),
+    } as any;
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root!.render(
+        React.createElement(ProjectProfileContext.Provider, { value: profile },
+          React.createElement(SubGraphDetailView, {
+            slug: 'demo',
+            rawMemory: fixture,
+            contextGraphId: 'cg-test',
+            onNodeClick: vi.fn(),
+            onSelectEntity: vi.fn(),
+            activeTab: 'graph',
+            onTabChange: vi.fn(),
+          })),
+      );
+    });
+
+    await waitForGraph(() => {
+      const el = container.querySelector('[data-testid="rdf-graph"]') as HTMLElement | null;
+      expect(el).toBeTruthy();
+      const triples = JSON.parse(el!.getAttribute('data-triples') ?? '[]');
+      // The `demo`-tagged edge is admitted via exact-tag routing.
+      const hasDemoEdge = triples.some(
+        (t: { s: string; p: string; o: string }) =>
+          t.s === 'urn:e:demo-only' && t.p === 'http://schema.org/knows' && t.o === 'urn:e:cross',
+      );
+      // The `other`-tagged edge must NOT leak in — even though its
+      // subject (`cross`) is in the `demo` scope. Pre-fix the
+      // subject-scoped fallback admitted it.
+      const hasOtherEdge = triples.some(
+        (t: { s: string; p: string; o: string }) =>
+          t.s === 'urn:e:cross' && t.p === 'http://schema.org/knows' && t.o === 'urn:e:demo-only',
+      );
+      expect(hasDemoEdge).toBe(true);
+      expect(hasOtherEdge).toBe(false);
+    });
+  });
+
+  // S3 Codex follow-up (Bug A on PR #772 — Root branch). Root scope
+  // is "root-bucket entities + root-bucket edges". A `recipes`-tagged
+  // edge whose object happens to be a root entity must NOT show up
+  // in the Root view — that edge belongs to the `recipes` view.
+  it('Root scope rejects named-subgraph edges that merely point at a root entity', async () => {
+    const rootEntity = {
+      uri: 'urn:e:root', label: 'Root entity',
+      types: ['http://schema.org/Thing'],
+      trustLevel: 'working',
+      layers: new Set(['working']),
+      subGraphs: new Set<string>(),
+      properties: new Map(),
+      connections: [],
+    };
+    const recipeEntity = {
+      uri: 'urn:e:in-recipes', label: 'In recipes',
+      types: ['http://schema.org/Thing'],
+      trustLevel: 'working',
+      layers: new Set(['working']),
+      subGraphs: new Set(['recipes']),
+      properties: new Map(),
+      connections: [],
+    };
+    const recipesEdge = {
+      subject: 'urn:e:in-recipes',
+      predicate: 'http://schema.org/about',
+      object: 'urn:e:root',
+      subGraph: 'recipes',
+      layer: 'working' as const,
+    };
+    const fixture = {
+      entities: new Map([[rootEntity.uri, rootEntity], [recipeEntity.uri, recipeEntity]]),
+      entityList: [rootEntity, recipeEntity],
+      allTriples: [recipesEdge],
+      graphTriples: [
+        { subject: recipesEdge.subject, predicate: recipesEdge.predicate, object: recipesEdge.object, subGraph: 'recipes' },
+      ],
+      trustMap: new Map(),
+      counts: { wm: 2, swm: 0, vm: 0, total: 2 },
+      loading: false, error: null, partial: false,
+      refresh: vi.fn(),
+    } as any;
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root!.render(
+        React.createElement(ProjectProfileContext.Provider, { value: profile },
+          React.createElement(SubGraphDetailView, {
+            slug: ROOT_SLUG_SENTINEL,
+            rawMemory: fixture,
+            contextGraphId: 'cg-test',
+            onNodeClick: vi.fn(),
+            onSelectEntity: vi.fn(),
+            activeTab: 'graph',
+            onTabChange: vi.fn(),
+          })),
+      );
+    });
+
+    // The rejected edge means scopedTriples for Root is empty, so
+    // the canvas falls through to the placeholder. We assert two
+    // things: (1) RdfGraph never received the recipes-tagged
+    // triple (it didn't render at all OR rendered without it),
+    // and (2) the root entity surfaces on the singleton shelf
+    // instead — the entity is in scope even though no admissible
+    // triple references it.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    });
+    const el = container.querySelector('[data-testid="rdf-graph"]') as HTMLElement | null;
+    if (el) {
+      const triples = JSON.parse(el.getAttribute('data-triples') ?? '[]');
+      const hasRecipesEdge = triples.some(
+        (t: { s: string; p: string; o: string }) =>
+          t.s === 'urn:e:in-recipes' && t.o === 'urn:e:root',
+      );
+      expect(hasRecipesEdge).toBe(false);
+    } else {
+      // No canvas at all — even better, since canvasTriples was
+      // empty (the recipes edge was rightly rejected and nothing
+      // else admitted).
+      const placeholder = container.querySelector('.v10-graph-placeholder-centered');
+      expect(placeholder).toBeTruthy();
+    }
+    // The root entity surfaces on the singleton shelf via the
+    // scopeEntities fallback — it's in scope but has no
+    // admissible triple to anchor it on canvas.
+    const rootShelfChip = container.querySelector('.v10-graph-singleton-item[title="urn:e:root"]');
+    expect(rootShelfChip).toBeTruthy();
+  });
 });

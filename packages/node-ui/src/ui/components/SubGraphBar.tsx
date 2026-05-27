@@ -214,7 +214,13 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
   // Show the Root chip when the consumer derives root from entities
   // and at least one entity is in the root bucket. Without entities
   // (Overview / Subgraphs page) we'd be guessing — keep it hidden.
-  const showRootChip = rootEntityCount !== null && rootEntityCount > 0;
+  // Also keep it visible whenever Root is the currently selected
+  // chip — otherwise a live refresh (or the "View root" empty-state
+  // action) that drops the count to 0 hides the chip while the
+  // detail body remains in Root scope, leaving no active chip.
+  // The count still renders honestly (0 if no root entities).
+  const hasRootEntities = rootEntityCount !== null && rootEntityCount > 0;
+  const showRootChip = hasRootEntities || selected === ROOT_SLUG_SENTINEL;
 
   if (loading && merged.length === 0 && !showRootChip) return null;
   if (merged.length === 0 && !showRootChip) return null;
@@ -270,19 +276,25 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
           </button>
         );
       })}
-      {showRootChip && (
-        <button
-          type="button"
-          className={`v10-subgraph-chip v10-subgraph-chip-root${selected === ROOT_SLUG_SENTINEL ? ' active' : ''}`}
-          onClick={() => onSelect(ROOT_SLUG_SENTINEL)}
-          title={`Entities not in any subgraph (Context Graph root) · ${rootEntityCount} entities${scopeSuffix}`}
-          aria-label="Entities not in any subgraph (Context Graph root)"
-        >
-          <span className="v10-subgraph-chip-icon">⊘</span>
-          <span className="v10-subgraph-chip-label">Root</span>
-          <span className="v10-subgraph-chip-count">{rootEntityCount}</span>
-        </button>
-      )}
+      {showRootChip && (() => {
+        const displayCount = rootEntityCount ?? 0;
+        const isActive = selected === ROOT_SLUG_SENTINEL;
+        return (
+          <button
+            type="button"
+            className={`v10-subgraph-chip v10-subgraph-chip-root${isActive ? ' active' : ''}`}
+            data-active={isActive}
+            data-count={displayCount}
+            onClick={() => onSelect(ROOT_SLUG_SENTINEL)}
+            title={`Entities not in any subgraph (Context Graph root) · ${displayCount} entities${scopeSuffix}`}
+            aria-label="Entities not in any subgraph (Context Graph root)"
+          >
+            <span className="v10-subgraph-chip-icon">⊘</span>
+            <span className="v10-subgraph-chip-label">Root</span>
+            <span className="v10-subgraph-chip-count">{displayCount}</span>
+          </button>
+        );
+      })()}
     </div>
   );
 };
