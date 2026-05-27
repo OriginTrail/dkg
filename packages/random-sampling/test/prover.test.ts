@@ -777,7 +777,7 @@ describe('RandomSamplingProver — multi-storage routing (OT-RFC-40, Codex revie
     await prover.close();
   });
 
-  it('uses the resolved tag when the registry recognises the challenge storage', async () => {
+  it('proves successfully when the registry resolves the default-storage tag', async () => {
     const store = new OxigraphStore();
     // The fixture's UAL must round-trip through parseUal so the
     // storage-tag filter can match it — i.e. the publisher slot has
@@ -830,6 +830,61 @@ describe('RandomSamplingProver — multi-storage routing (OT-RFC-40, Codex revie
     expect(tagFor).toHaveBeenCalledTimes(1);
     expect(refresh).not.toHaveBeenCalled();
     expect(submitProof).toHaveBeenCalledTimes(1);
+    await prover.close();
+  });
+
+  it('skips period when the registry resolves a non-default-storage tag (Codex review on PR #718, Comment 1 of round 2)', async () => {
+    // The chain reads `getKCContextGraphId`, `getLatestMerkleRoot`,
+    // `getMerkleLeafCount` are all bound to the V10 default KC
+    // storage in the EVM adapter today — they don't accept a storage
+    // tag/address argument. Filtering the local-store extractor by a
+    // non-empty tag would only close the disambiguation gap on the
+    // read side; the chain reads above would still query V10 KCS,
+    // verifying our local data against the WRONG contract's expected
+    // root and leaf count. Fail-closed with an explicit
+    // `tagged-storage-rs-unsupported` reason until those reads grow
+    // a tag/address parameter (tracked as RFC-40 follow-up).
+    const store = new OxigraphStore();
+    const fixture: KCFixture = {
+      cgId: 11n,
+      kcId: 7n,
+      ual: 'did:dkg:hardhat:31337/0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1/7',
+      rootEntities: ['urn:e:1'],
+      publicTriples: [{ subject: 'urn:e:1', predicate: 'urn:p:k', object: '"a"' }],
+    };
+    const { root, leafCount } = await seedKC(store, fixture);
+
+    const refresh = vi.fn(async () => {});
+    const tagFor = vi.fn(() => 'v9');
+    const fakeRegistry = { refresh, tagFor } as unknown as NonNullable<ChainAdapter['kcStorageRegistry']>;
+
+    const submitProof = vi.fn(async () => ({ hash: '0xunused', blockNumber: 1, success: true }));
+    const chain = makeChain({
+      status: { activeProofPeriodStartBlock: 1000n, isValid: true },
+      challengeForNode: null,
+      createChallenge: async () => ({
+        challenge: makeChallenge({
+          knowledgeCollectionId: fixture.kcId,
+          chunkId: 0n,
+          knowledgeCollectionStorageContract: '0x00000000000000000000000000000000000000a9',
+        }),
+        contextGraphId: fixture.cgId,
+        hash: '0x', blockNumber: 1, success: true,
+      }),
+      expectedRoot: root,
+      expectedLeafCount: leafCount,
+      cgIdForKc: fixture.cgId,
+      submitProof: submitProof as never,
+      kcStorageRegistry: fakeRegistry,
+    });
+
+    const wal = new InMemoryProverWal();
+    const prover = new RandomSamplingProver({ chain, store, identityId: IDENTITY_ID, wal });
+    const outcome = await prover.tick();
+    expect(outcome).toEqual({ kind: 'kc-not-synced', kcId: fixture.kcId, cgId: fixture.cgId });
+    expect(submitProof).not.toHaveBeenCalled();
+    const failed = (await wal.readAll()).find((e) => e.status === 'failed');
+    expect(failed?.error?.code).toBe('tagged-storage-rs-unsupported');
     await prover.close();
   });
 });

@@ -265,22 +265,33 @@ export class PublishHandler {
       // default storage skips range pre-reservation and defers to ACK
       // signatures). `parseUal(request.ual).storageTag` is empty for
       // 3-segment / default-storage UALs and equals the tag for
-      // 4-segment / tagged UALs; passing `undefined` (the case where
-      // request.ual is missing on a malformed or pre-RFC client)
-      // preserves the pre-RFC behaviour bit-for-bit.
+      // 4-segment / tagged UALs.
+      //
+      // Codex review on PR #718 (Comment 3 of round 2): a missing or
+      // malformed `request.ual` previously made `parseUal()` return
+      // null, `storageTag` collapse to `undefined`, and the adapter's
+      // default-tag pass-through accept the request without any range
+      // check at all. That regressed the pre-RFC defence (V9 KAS would
+      // have rejected an unowned range). Reject the request explicitly
+      // when a range check is mandated but the UAL isn't usable.
       if (
         startKAId > 0n &&
         endKAId > 0n &&
         request.publisherAddress &&
         this.chainAdapter?.verifyPublisherOwnsRange
       ) {
-        const parsedRequestUal = request.ual ? parseUal(request.ual) : null;
-        const storageTag = parsedRequestUal?.storageTag;
+        const parsedRequestUal = parseUal(request.ual);
+        if (parsedRequestUal === null) {
+          return this.rejectAck(
+            `PublishRequest with startKAId/endKAId set requires a parseable UAL ` +
+              `(${request.ual ? `got "${request.ual}"` : 'request.ual was missing'})`,
+          );
+        }
         const owns = await this.chainAdapter.verifyPublisherOwnsRange(
           request.publisherAddress,
           startKAId,
           endKAId,
-          storageTag,
+          parsedRequestUal.storageTag,
         );
         if (!owns) {
           return this.rejectAck(

@@ -513,6 +513,46 @@ describe('Tentative data and chain event confirmation', () => {
     expect(ack.rejectionReason).toContain('1..1');
   });
 
+  it('rejects PublishRequest with malformed UAL when range check is mandated (Codex review on PR #718, Comment 3 of round 2)', async () => {
+    // A request that carries startKAId/endKAId/publisherAddress
+    // requires a parseable UAL — without it, the handler can't derive
+    // the storage tag to route the on-chain range query, and a silent
+    // pass-through would let malformed requests skip the ownership
+    // preflight. Pin the rejection so that regression is loud.
+    const store = new OxigraphStore();
+    const bus = new TypedEventBus();
+    const chainAdapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const handler = new PublishHandler(store, bus, { chainAdapter });
+
+    const publisherAddress = TEST_WALLET.address;
+    const triples = [q('did:dkg:agent:QmMalformed', 'http://schema.org/name', '"MalBot"')];
+    const ntriples = triples.map(t =>
+      `<${t.subject}> <${t.predicate}> ${t.object} .`,
+    ).join('\n');
+
+    // Malformed UAL: 5 segments after `did:dkg:` with bogus shape —
+    // parseUal cannot recover a 3- or 4-segment KC UAL prefix from this.
+    const ual = 'did:dkg:not-a-real-ual';
+    const reqBytes = encodePublishRequest({
+      ual,
+      nquads: new TextEncoder().encode(ntriples),
+      contextGraphId: CONTEXT_GRAPH,
+      kas: [{ tokenId: 1, rootEntity: 'did:dkg:agent:QmMalformed', privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 }],
+      publisherIdentity: new Uint8Array(32),
+      publisherAddress,
+      startKAId: 1,
+      endKAId: 1,
+      chainId: 'mock:31337',
+      publisherSignatureR: new Uint8Array(0),
+      publisherSignatureVs: new Uint8Array(0),
+    });
+
+    const ackData = await handler.handler(reqBytes, 'test-peer' as any);
+    const ack = decodePublishAck(ackData);
+    expect(ack.accepted).toBe(false);
+    expect(ack.rejectionReason).toContain('parseable UAL');
+  });
+
   it('accepts default-tag PublishRequest without on-chain range check (V10 defers to ACK auth)', async () => {
     // OT-RFC-40 §7.5: 3-segment / default-storage UALs are V10 publishes;
     // the publisher never reserves a range and ownership is established by

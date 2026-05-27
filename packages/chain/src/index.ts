@@ -9,7 +9,9 @@ export {
 export {
   KCStorageRegistry,
   deriveStorageTag,
+  deriveAuthMode,
   type KCStorageEntry,
+  type KCStorageAuthMode,
   type KCStorageHubReader,
   type KCStorageUriReader,
   type KCStorageRegistryLogger,

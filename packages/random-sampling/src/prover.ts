@@ -391,6 +391,41 @@ export class RandomSamplingProver {
         );
         return { kind: 'kc-not-synced', kcId, cgId };
       }
+
+      // Codex review on PR #718 (Comment 1 of round 2): the chain
+      // reads on this code path — `getKCContextGraphId`,
+      // `getLatestMerkleRoot`, `getMerkleLeafCount` — are bound to the
+      // V10 default KC storage in the EVM adapter. Filtering the
+      // local-store extractor by a non-empty `expectedStorageTag`
+      // closes the disambiguation gap on the read side, but the chain
+      // reads above are still default-storage-only, so a challenge
+      // from a tagged storage would be verified against the wrong
+      // contract's root/leafCount even when local data is correct.
+      // Fail-closed here with an explicit reason until the chain reads
+      // accept a storage tag/address argument; tagged-storage RS
+      // support is tracked as a follow-up to RFC-40.
+      if (expectedStorageTag !== '') {
+        this.log.warn('rs.tick.tagged-storage-rs-unsupported', {
+          kcId: kcId.toString(),
+          cgId: cgId.toString(),
+          storageContract: challenge.knowledgeCollectionStorageContract,
+          expectedStorageTag,
+        });
+        await this.wal.append(
+          makeWalEntry(periodKey, 'failed', {
+            kcId: kcId.toString(),
+            cgId: cgId.toString(),
+            chunkId: chunkId.toString(),
+            error: {
+              code: 'tagged-storage-rs-unsupported',
+              message:
+                `Random-sampling chain reads are bound to the V10 default KC storage; ` +
+                `challenge storage tag "${expectedStorageTag}" is not yet routed end-to-end`,
+            },
+          }),
+        );
+        return { kind: 'kc-not-synced', kcId, cgId };
+      }
     }
 
     let leaves: Uint8Array[];

@@ -9,6 +9,7 @@ import { describe, it, expect } from 'vitest';
 import {
   KCStorageRegistry,
   deriveStorageTag,
+  deriveAuthMode,
   type KCStorageEntry,
   type KCStorageHubReader,
   type KCStorageUriReader,
@@ -111,7 +112,29 @@ describe('KCStorageRegistry.refresh', () => {
       address: V9_KAS.address,
       uriBase: 'did:dkg:v9',
       tag: 'v9',
+      authMode: 'kas-pre-reserved-range',
     });
+  });
+
+  it('derives authMode from hubName so V11+ KCS extensions inherit V10 semantics', async () => {
+    // Codex review on PR #718 (Comment 2 of round 2): a fail-closed
+    // policy that hardcoded `tag === ''` would block every V11+ KC
+    // storage from publishing, contradicting RFC §1's "additive
+    // future versions" promise. The registry derives `authMode` from
+    // `hubName` so the EVM adapter can route by policy: V11 KCS
+    // (whose hubName starts with `KnowledgeCollectionStorage*`)
+    // inherits V10 ACK-based auth automatically.
+    const v11 = {
+      hubName: 'KnowledgeCollectionStorageV11',
+      address: '0xD11D11D11D11D11D11D11D11D11D11D11D11D11D',
+      uriBase: 'did:dkg:v11',
+    };
+    const { registry } = buildRegistry([V10_KCS, V9_KAS, v11]);
+    await registry.refresh();
+
+    expect(registry.getByTag('')?.authMode).toBe('kcs-ack-based');
+    expect(registry.getByTag('v9')?.authMode).toBe('kas-pre-reserved-range');
+    expect(registry.getByTag('v11')?.authMode).toBe('kcs-ack-based');
   });
 
   it('ignores Hub entries that are not KC-class storages', async () => {
@@ -237,6 +260,34 @@ describe('KCStorageRegistry.refresh', () => {
     await registry.refresh();
     const all = registry.getAll();
     expect(all.map(e => e.tag).sort()).toEqual(['', 'v9']);
+  });
+});
+
+describe('deriveAuthMode (OT-RFC-40, Codex review on PR #718 round 2)', () => {
+  // The mapping pins the registry's policy contract: any future Hub
+  // name pattern that doesn't fit the two known KC-class families
+  // returns `unknown`, forcing per-storage explicit policy in the
+  // consumer (rather than silently inheriting V10 ACK auth).
+
+  it('routes V10 default + future V11/V12 to kcs-ack-based', () => {
+    expect(deriveAuthMode('KnowledgeCollectionStorage')).toBe('kcs-ack-based');
+    expect(deriveAuthMode('KnowledgeCollectionStorageV2')).toBe('kcs-ack-based');
+    expect(deriveAuthMode('KnowledgeCollectionStorageV11')).toBe('kcs-ack-based');
+    expect(deriveAuthMode('KnowledgeCollectionStorageLite')).toBe('kcs-ack-based');
+  });
+
+  it('routes V9 KAS family to kas-pre-reserved-range', () => {
+    expect(deriveAuthMode('KnowledgeAssetsStorage')).toBe('kas-pre-reserved-range');
+    expect(deriveAuthMode('KnowledgeAssetsStorageV1')).toBe('kas-pre-reserved-range');
+  });
+
+  it('returns unknown for hub names outside the two KC families', () => {
+    // The registry's filter rejects these before they reach an entry,
+    // but a future expansion of `KC_STORAGE_NAME_PREFIXES` could let
+    // them through, so the defensive `unknown` arm matters.
+    expect(deriveAuthMode('ContextGraphStorage')).toBe('unknown');
+    expect(deriveAuthMode('AskStorage')).toBe('unknown');
+    expect(deriveAuthMode('SomethingElseEntirely')).toBe('unknown');
   });
 });
 

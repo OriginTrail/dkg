@@ -85,15 +85,15 @@ describe('EVMChainAdapter integration', () => {
     expect(owns).toBe(false);
   }, 30_000);
 
-  it('verifyPublisherOwnsRange fails closed for a registered-but-unrecognised tag (Codex review on PR #718, Comment 3)', async () => {
-    // Even when the registry KNOWS a tag (e.g. a hypothetical V11 KC
-    // storage was registered on the Hub and the registry refreshed),
-    // verifyPublisherOwnsRange must NOT silently attest range
-    // ownership unless this adapter has an explicit per-tag policy
-    // (today: empty tag → V10 ACK auth, "v9" → V9 KAS pre-reservation
-    // API). A blanket "registered → true" fallback would let a future
-    // V11 deploy whose ownership API differs from V10 silently accept
-    // spoofed ranges. Pin the fail-closed contract here.
+  it('verifyPublisherOwnsRange auto-routes a V11 KCS extension to ACK auth (Codex review on PR #718, Comment 2 of round 2)', async () => {
+    // RFC §1 promises that future KC storage versions go live without
+    // operator action. The registry derives `authMode` from `hubName`,
+    // so a hypothetical `KnowledgeCollectionStorageV11` registered on
+    // the Hub correctly inherits V10's `kcs-ack-based` policy and
+    // returns `true` (defer to ACK gate downstream) — even though
+    // there is no `tag === 'v11-future'` branch hardcoded in the EVM
+    // adapter. This is the test that pins the additive-versions
+    // contract.
     const adapter = new EVMChainAdapter(makeAdapterConfig(ctx.rpcUrl, ctx.hubAddress, HARDHAT_KEYS.DEPLOYER));
     const deployer = adapter.getSignerAddress();
     // Force adapter init so the registry is populated from the live Hub.
@@ -101,9 +101,7 @@ describe('EVMChainAdapter integration', () => {
     // Swap the live registry for a fake that surfaces a hypothetical
     // V11 storage. Replacing the whole registry (vs reaching into
     // private fields) is the public-API path: ChainAdapter exposes
-    // `kcStorageRegistry` as a writeable field for exactly this reason
-    // — adapters can plug in custom registries (mocks, multi-Hub,
-    // etc) without subclassing.
+    // `kcStorageRegistry` as a writeable field for exactly this reason.
     const fakeAddress = '0x0000000000000000000000000000000000001111';
     adapter.kcStorageRegistry = new KCStorageRegistry(
       {
@@ -116,8 +114,55 @@ describe('EVMChainAdapter integration', () => {
       },
     );
     await adapter.kcStorageRegistry.refresh();
-    expect(adapter.kcStorageRegistry.getByTag('v11-future')?.address).toBe(fakeAddress);
+    const v11Entry = adapter.kcStorageRegistry.getByTag('v11-future');
+    expect(v11Entry?.address).toBe(fakeAddress);
+    expect(v11Entry?.authMode).toBe('kcs-ack-based');
     const owns = await adapter.verifyPublisherOwnsRange(deployer, 1n, 1n, 'v11-future');
+    expect(owns).toBe(true);
+  }, 30_000);
+
+  it('verifyPublisherOwnsRange fails closed for a registered tag whose authMode is unknown', async () => {
+    // The registry filters incoming Hub entries by KC-class name
+    // prefixes today, so an `unknown` authMode is unreachable through
+    // the normal refresh path. The fallback exists to defend the
+    // contract: if `KC_STORAGE_NAME_PREFIXES` ever broadens (or a
+    // custom registry seeds an unknown-named entry directly), the
+    // adapter must NOT silently attest range ownership. Construct
+    // such a registry directly and pin the fail-closed answer.
+    const adapter = new EVMChainAdapter(makeAdapterConfig(ctx.rpcUrl, ctx.hubAddress, HARDHAT_KEYS.DEPLOYER));
+    const deployer = adapter.getSignerAddress();
+    await adapter.verifyPublisherOwnsRange(deployer, 1n, 1n);
+
+    // Bypass the registry's name-prefix filter by building one whose
+    // hubReader emits an entry with an unrecognised hubName. The
+    // registry's filter rejects it; we then mutate the entry into
+    // place via a second registry that recognises the name. To keep
+    // it simple, expose a custom registry-like object that returns
+    // an entry with `authMode: 'unknown'` directly.
+    adapter.kcStorageRegistry = {
+      // Cast to satisfy the field type without going through the real
+      // refresh machinery — this is the synthetic "registry seeded
+      // out-of-band" path the unknown arm exists for.
+      getByTag(tag: string) {
+        if (tag === 'weird') {
+          return {
+            hubName: 'SomethingElseEntirely',
+            address: '0x0000000000000000000000000000000000002222',
+            uriBase: 'did:dkg:weird',
+            tag: 'weird',
+            authMode: 'unknown' as const,
+          };
+        }
+        return undefined;
+      },
+      tagFor: () => undefined,
+      getByAddress: () => undefined,
+      getDefault: () => undefined,
+      getDefaultAddress: () => undefined,
+      getAll: () => [],
+      refresh: async () => {},
+    } as unknown as NonNullable<typeof adapter.kcStorageRegistry>;
+    const owns = await adapter.verifyPublisherOwnsRange(deployer, 1n, 1n, 'weird');
     expect(owns).toBe(false);
   }, 30_000);
 });

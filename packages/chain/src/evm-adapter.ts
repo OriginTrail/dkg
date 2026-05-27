@@ -1467,52 +1467,66 @@ export class EVMChainAdapter implements ChainAdapter {
   ): Promise<boolean> {
     await this.init();
 
-    // OT-RFC-40 §7.5: route the range query to the storage instance
-    // that minted the UAL. The publish-handler derives `storageTag`
-    // from `parseUal(request.ual).storageTag`; it is empty for V10
-    // default-storage UALs (3-segment form) and "v9" for V9 KAS UALs.
+    // OT-RFC-40 §7.5: route the range query by the storage's auth
+    // mode rather than by hardcoded tag string. The registry derives
+    // `authMode` from each storage's `hubName` (`KnowledgeAssetsStorage*`
+    // → `kas-pre-reserved-range`, `KnowledgeCollectionStorage*` →
+    // `kcs-ack-based`, anything else → `unknown`). This way a future
+    // V11+ KC storage that extends the V10 family inherits the V10
+    // ACK-auth semantics for free — the RFC's "additive future
+    // versions, no agent change required" promise — while a brand-new
+    // auth contract under an unrecognised name fails closed.
+    //
+    // Codex review on PR #718 fix (Comments 2+3 of round 2):
+    //   - hardcoding `tag === ''` would block V11+ KCS publishes.
+    //   - hardcoding "any registered tag → true" would silently
+    //     accept spoofed ranges on a future custom-auth storage.
+    //   The registry's authMode strikes the right balance.
     const tag = storageTag ?? '';
 
-    if (tag === 'v9') {
-      // V9 KAS is the only currently-deployed storage that pre-reserves
-      // per-publisher ID ranges. The query API
-      // (`getPublisherRangesCount`/`getPublisherRange`) is V9-specific.
-      if (!this.contracts.knowledgeAssetsStorage) return false;
-      const storage = this.contracts.knowledgeAssetsStorage;
-      const count = await storage.getPublisherRangesCount(publisherAddress);
-      for (let i = 0; i < Number(count); i++) {
-        const [startId, endId] = await storage.getPublisherRange(publisherAddress, i);
-        if (startId <= startKAId && endId >= endKAId) return true;
-      }
-      return false;
-    }
-
+    // Path 1 — explicit V10 default. Special-cased so adapters bound
+    // to a Hub without any KC storage registered still accept publishes
+    // (the registry would be empty in that case; we never want a
+    // missing-registry condition to silently reject every publish).
     if (tag === '') {
-      // V10 default storage. V10 does NOT pre-reserve ranges — KCs
-      // are minted directly with their token-bound publisher recorded
-      // on-chain at mint time. The publish-handler's existing publish
-      // ACK signature check (V10 ACKs collected from receiving nodes)
-      // is the authoritative ownership verification on this path; this
-      // method exists as a V9-era pre-flight, so for V10 we simply
-      // defer to that downstream check by returning `true`. NOT
-      // returning `true` here would silently reject every V10 publish
-      // on Hubs without a V9 KAS deployment — the bug RFC-40 PR-5
-      // calls out by name.
+      // V10 default storage does NOT pre-reserve ranges; defer to the
+      // ACK-signature gate downstream. Bit-for-bit pre-RFC behaviour
+      // for the only path that mattered before RFC-40.
       return true;
     }
 
-    // Codex review on PR #718 (Comment 3): every other tag — whether
-    // the registry recognises it or not — fails closed. The previous
-    // implementation returned `true` for any tag the registry knew
-    // about, which silently assumed every future storage authenticates
-    // publishes via ACK signatures. If V11+ ships a different
-    // ownership API, that fallback would let receivers accept spoofed
-    // ranges as soon as the new storage is registered. We refuse to
-    // attest range ownership without an explicit per-tag policy here:
-    // when V11+ lands, add an `if (tag === 'v11') { ... }` branch
-    // (or carry an `authMode` field on KCStorageEntry and switch on
-    // it) before this fallthrough.
-    return false;
+    // Path 2 — tagged storage. Look up the registry entry; if the
+    // registry isn't populated or doesn't know this tag, fail closed.
+    const entry = this.kcStorageRegistry?.getByTag(tag);
+    if (!entry) return false;
+
+    switch (entry.authMode) {
+      case 'kas-pre-reserved-range': {
+        // V9 KAS publisher-range API. Bind to the registry-discovered
+        // address rather than `this.contracts.knowledgeAssetsStorage`
+        // so a Hub with multiple KAS-class storages routes correctly.
+        const storage = new Contract(
+          entry.address,
+          loadAbi('KnowledgeAssetsStorage'),
+          this.signer,
+        );
+        const count = await storage.getPublisherRangesCount(publisherAddress);
+        for (let i = 0; i < Number(count); i++) {
+          const [startId, endId] = await storage.getPublisherRange(publisherAddress, i);
+          if (startId <= startKAId && endId >= endKAId) return true;
+        }
+        return false;
+      }
+      case 'kcs-ack-based':
+        // V10/V11+ KC storage family — defer to ACK-signature gate.
+        return true;
+      case 'unknown':
+        // Storage registered under a Hub name the registry doesn't
+        // recognise (none of the known KC-family prefixes). Refuse to
+        // attest range ownership without an explicit authMode policy
+        // (Codex Comment 3 of round 1).
+        return false;
+    }
   }
 
   // =====================================================================

@@ -56,6 +56,45 @@ const KC_STORAGE_NAME_PREFIXES: readonly string[] = [
   'KnowledgeAssetsStorage',
 ];
 
+/**
+ * Authentication contract a KC-class storage uses for publish range
+ * ownership. Threaded through `KCStorageEntry.authMode` so consumers
+ * (e.g. `verifyPublisherOwnsRange` in the EVM adapter) can route by
+ * the storage's auth semantics rather than by hard-coded tag string.
+ *
+ *   - `kas-pre-reserved-range`: V9 `KnowledgeAssetsStorage`. Caller
+ *     must look up the publisher's pre-allocated ID range via
+ *     `getPublisherRangesCount` / `getPublisherRange`.
+ *   - `kcs-ack-based`: V10 `KnowledgeCollectionStorage` (and any V11+
+ *     that extends the same family). Ownership is asserted by the
+ *     ACK signatures that hosting nodes return on a PublishRequest;
+ *     no on-chain pre-reservation exists. The range pre-flight should
+ *     accept (i.e. defer to the ACK gate downstream).
+ *   - `unknown`: storage was registered under a Hub name the registry
+ *     doesn't have a policy for. Conservative consumers fail closed.
+ *
+ * Derived from `hubName` at refresh time. A future Hub name pattern
+ * for a storage with a brand-new auth contract would land here as
+ * `unknown` and require an explicit registry override to publish
+ * against — that's by design (Codex review on PR #718, Comment 3).
+ */
+export type KCStorageAuthMode = 'kas-pre-reserved-range' | 'kcs-ack-based' | 'unknown';
+
+/**
+ * Map a Hub registry name to its auth mode. Exported so deployment
+ * scripts and tests can validate against the same predicate the
+ * registry uses internally.
+ */
+export function deriveAuthMode(hubName: string): KCStorageAuthMode {
+  // Order matters: KnowledgeCollectionStorage is checked first because
+  // some V9 names like KnowledgeCollectionStorageLite (hypothetical)
+  // would still belong to the V10 family. KnowledgeAssetsStorage is
+  // V9-only; any future hubName with that prefix inherits V9 semantics.
+  if (hubName.startsWith('KnowledgeCollectionStorage')) return 'kcs-ack-based';
+  if (hubName.startsWith('KnowledgeAssetsStorage')) return 'kas-pre-reserved-range';
+  return 'unknown';
+}
+
 export interface KCStorageEntry {
   /**
    * Hub registry name as returned by `Hub.getAllAssetStorages()`,
@@ -78,6 +117,12 @@ export interface KCStorageEntry {
    * matching `STORAGE_TAG_PATTERN`.
    */
   tag: string;
+  /**
+   * Auth mode derived from `hubName`. Allows consumers to route by
+   * policy (range API vs ACK signatures) without re-deriving from the
+   * tag string each time. See `deriveAuthMode` for the mapping rule.
+   */
+  authMode: KCStorageAuthMode;
 }
 
 /**
@@ -182,7 +227,13 @@ export class KCStorageRegistry {
         continue;
       }
 
-      const entry: KCStorageEntry = { hubName: name, address: addr, uriBase, tag };
+      const entry: KCStorageEntry = {
+        hubName: name,
+        address: addr,
+        uriBase,
+        tag,
+        authMode: deriveAuthMode(name),
+      };
 
       const existingByTag = nextByTag.get(tag);
       if (existingByTag) {
