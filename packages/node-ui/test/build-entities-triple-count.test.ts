@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildEntities, type LayeredTriple } from '../src/ui/hooks/useMemoryEntities.js';
+import { buildEntities, type LayeredTriple, type TrustLevel } from '../src/ui/hooks/useMemoryEntities.js';
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 
@@ -7,7 +7,8 @@ const triple = (
   subject: string,
   predicate: string,
   object: string,
-): LayeredTriple => ({ subject, predicate, object, layer: 'working' });
+  layer: TrustLevel = 'working',
+): LayeredTriple => ({ subject, predicate, object, layer });
 
 describe('buildEntities — MemoryEntity.tripleCount', () => {
   // `tripleCount` must match the entity-row badge ↔ layer-page Triples
@@ -159,6 +160,49 @@ describe('buildEntities — MemoryEntity.tripleCount', () => {
     expect(a.tripleCount).toBe(1);
     expect(b.tripleCount).toBe(1);
     // Sum (2) > input triples (1) — per-entity metric, not a layer aggregate.
-    expect(a.tripleCount + b.tripleCount).toBeGreaterThan(1);
+    expect((a.tripleCount ?? 0) + (b.tripleCount ?? 0)).toBeGreaterThan(1);
+  });
+
+  it('promoted-entity residue: tripleCount reflects canonical-layer count only, not cross-layer total', () => {
+    // Codex regression: a promoted SWM entity with WM-only draft residue
+    // would have a badge that includes the WM rows, but the SWM-tab
+    // detail view filters those out via `useLayerTriples`. Per-layer
+    // SPO-deduped count finalised to canonical-layer slice fixes this.
+    //
+    // Scenario: `urn:e:promoted` has been promoted to SWM. Its current
+    // SWM triples are 2 distinct rows; the daemon also leaves 1 WM
+    // draft-residue triple on disk that the SWM tab would never show.
+    const entities = buildEntities([
+      // WM residue (pre-promote draft) — shows on no tab for the
+      // promoted entity (`useLayerTriples` drops via residue filter).
+      triple('urn:e:promoted', 'urn:p:draft', '"draft content"', 'working'),
+      // Current SWM triples — what the SWM tab actually shows.
+      triple('urn:e:promoted', 'urn:p:label', '"Promoted"', 'shared'),
+      triple('urn:e:promoted', 'urn:p:status', '"published"', 'shared'),
+    ]);
+    const promoted = entities.get('urn:e:promoted')!;
+    expect(promoted.trustLevel).toBe('shared');
+    // Pre-fix this would be 3 (sum across layers). With per-layer
+    // dedup + canonical-layer finalisation, it's 2 — what the SWM
+    // tab actually shows.
+    expect(promoted.tripleCount).toBe(2);
+  });
+
+  it('cross-layer same-SPO does NOT collapse (each layer is its own dedup scope)', () => {
+    // Edge of the dedup design: if the same (s,p,o) appears in two
+    // DIFFERENT layers (e.g. as residue + current), each layer's count
+    // includes it once. They contribute independently to per-layer
+    // tabs and therefore must NOT cross-collapse.
+    const entities = buildEntities([
+      triple('urn:e:dual', 'urn:p:label', '"X"', 'working'),
+      triple('urn:e:dual', 'urn:p:label', '"X"', 'shared'),
+    ]);
+    const dual = entities.get('urn:e:dual')!;
+    expect(dual.trustLevel).toBe('shared');
+    // Canonical-layer = 'shared' has 1 distinct triple. WM residue
+    // is the same (s,p,o) but lives in its own per-layer count
+    // (which we don't surface via `tripleCount` for an SWM-canonical
+    // entity).
+    expect(dual.tripleCount).toBe(1);
   });
 });

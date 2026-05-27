@@ -1689,8 +1689,8 @@ export function EntityList({
     if (externallySorted) return entities;
     const copy = [...entities];
     copy.sort((a, b) => {
-      const aCount = a.tripleCount;
-      const bCount = b.tripleCount;
+      const aCount = a.tripleCount ?? 0;
+      const bCount = b.tripleCount ?? 0;
       return bCount - aCount;
     });
     return copy;
@@ -1723,7 +1723,7 @@ export function EntityList({
       </div>
       {sorted.map(e => {
         const { icon, type } = entityMeta(e, profile);
-        const tripleCount = e.tripleCount;
+        const tripleCount = e.tripleCount ?? 0;
         const authorUri = entityAuthorUri(e);
         const author = authorUri ? agents?.get(authorUri) : null;
         const ts = timestampPredicate ? entityTimestamp(e, timestampPredicate) : null;
@@ -4321,8 +4321,8 @@ export function SubGraphDetailView({
     }
     // 'triples' (default fallback)
     copy.sort((a, b) => {
-      const aCount = a.tripleCount;
-      const bCount = b.tripleCount;
+      const aCount = a.tripleCount ?? 0;
+      const bCount = b.tripleCount ?? 0;
       return bCount - aCount;
     });
     return copy;
