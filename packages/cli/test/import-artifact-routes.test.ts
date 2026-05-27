@@ -153,6 +153,7 @@ describe('import artifact daemon routes', () => {
           id: args.contextGraphId,
           uri: `did:dkg:context-graph:${args.contextGraphId}`,
           name: args.contextGraphId,
+          subscribed: true,
         }];
       },
       async contextGraphExists(contextGraphId: string) {

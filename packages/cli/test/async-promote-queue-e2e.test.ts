@@ -106,6 +106,7 @@ describe('async-promote queue — end-to-end (routes + worker + queue)', () => {
           id,
           uri: `did:dkg:context-graph:${id}`,
           name: id,
+          subscribed: true,
         }));
       },
       async contextGraphExists(contextGraphId: string) {

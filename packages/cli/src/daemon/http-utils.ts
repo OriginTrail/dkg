@@ -466,6 +466,7 @@ type ExistingContextGraphRow = {
   curator?: unknown;
   accessPolicy?: unknown;
   onChainId?: unknown;
+  isSystem?: unknown;
   subscribed?: unknown;
 };
 
@@ -499,6 +500,31 @@ function isShadowLikeBareContextGraphRow(row: ExistingContextGraphRow): boolean 
   );
 }
 
+async function contextGraphRowIsWritable(
+  agent: {
+    contextGraphHasLocalContent?: (contextGraphId: string) => Promise<boolean>;
+  },
+  row: ExistingContextGraphRow,
+): Promise<boolean> {
+  if (row.subscribed === true || row.isSystem === true) return true;
+  const id = typeof row.id === "string" ? row.id : "";
+  if (!id || !agent.contextGraphHasLocalContent) return false;
+  return agent.contextGraphHasLocalContent(id);
+}
+
+function rejectKnownNonWritableContextGraph(
+  res: ServerResponse,
+  raw: string,
+): null {
+  jsonResponse(res, 400, {
+    code: "CONTEXT_GRAPH_NOT_WRITABLE",
+    error:
+      `Context graph "${raw}" is known but is not locally subscribed or synced for writes. ` +
+      `Subscribe/sync the context graph first, then retry the write.`,
+  });
+  return null;
+}
+
 /**
  * Resolve a write target to a known, canonical context graph id.
  *
@@ -512,6 +538,7 @@ export async function resolveRequiredWriteContextGraphId(
       callerAgentAddress?: string | null;
     }): Promise<ExistingContextGraphRow[]>;
     getDefaultAgentAddress?: () => string | undefined;
+    contextGraphHasLocalContent?: (contextGraphId: string) => Promise<boolean>;
   },
   contextGraphId: unknown,
   res: ServerResponse,
@@ -555,6 +582,18 @@ export async function resolveRequiredWriteContextGraphId(
     const uri = typeof row.uri === "string" ? row.uri : "";
     return id === candidateId || uri === raw;
   });
+  let exactWritable = false;
+  if (exact?.id && typeof exact.id === "string") {
+    try {
+      exactWritable = await contextGraphRowIsWritable(agent, exact);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      jsonResponse(res, 500, {
+        error: `Failed to validate contextGraphId local writability: ${message}`,
+      });
+      return null;
+    }
+  }
   if (isBareCandidateId) {
     const suffixMatches = uniqueStrings(
       knownIds.filter((id) =>
@@ -567,6 +606,7 @@ export async function resolveRequiredWriteContextGraphId(
       suffixMatches.length > 0 &&
       !isShadowLikeBareContextGraphRow(exact)
     ) {
+      if (!exactWritable) return rejectKnownNonWritableContextGraph(res, raw);
       return exact.id;
     }
     if (suffixMatches.length === 1) {
@@ -590,10 +630,16 @@ export async function resolveRequiredWriteContextGraphId(
       });
       return null;
     }
-    if (exact?.id && typeof exact.id === "string") return exact.id;
+    if (exact?.id && typeof exact.id === "string") {
+      if (!exactWritable) return rejectKnownNonWritableContextGraph(res, raw);
+      return exact.id;
+    }
   }
 
-  if (exact?.id && typeof exact.id === "string") return exact.id;
+  if (exact?.id && typeof exact.id === "string") {
+    if (!exactWritable) return rejectKnownNonWritableContextGraph(res, raw);
+    return exact.id;
+  }
 
   jsonResponse(res, 400, {
     code: "CONTEXT_GRAPH_NOT_FOUND",

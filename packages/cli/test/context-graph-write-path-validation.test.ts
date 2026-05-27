@@ -11,7 +11,14 @@ const BARE_CG = 'tuesday-cg';
 const BARE_URI = `did:dkg:context-graph:${BARE_CG}`;
 const CALLER = '0x0000000000000000000000000000000000000001';
 
-type ContextGraphRow = { id: string; uri: string; name?: string; accessPolicy?: string };
+type ContextGraphRow = {
+  id: string;
+  uri: string;
+  name?: string;
+  accessPolicy?: string;
+  subscribed?: boolean;
+  hasLocalContent?: boolean;
+};
 
 describe('context graph write-path validation', () => {
   let server: Server | undefined;
@@ -28,7 +35,7 @@ describe('context graph write-path validation', () => {
     daemonState.promoteWorkerUnavailableReason = null;
   });
 
-  function makeAgent(rows: ContextGraphRow[] = [{ id: CANONICAL_CG, uri: CANONICAL_URI }]) {
+  function makeAgent(rows: ContextGraphRow[] = [{ id: CANONICAL_CG, uri: CANONICAL_URI, subscribed: true }]) {
     const create = vi.fn(async (contextGraphId: string, name: string) =>
       `did:dkg:context-graph:${contextGraphId}/assertion/${CALLER}/${name}`);
     const write = vi.fn(async () => undefined);
@@ -67,6 +74,9 @@ describe('context graph write-path validation', () => {
     return {
       listContextGraphs: vi.fn(async () => rows),
       getDefaultAgentAddress: vi.fn(() => undefined),
+      contextGraphHasLocalContent: vi.fn(async (contextGraphId: string) =>
+        rows.some((row) => row.id === contextGraphId && row.hasLocalContent === true),
+      ),
       resolveAgentByToken: vi.fn(() => undefined),
       peerId: 'peer-test',
       assertion: {
@@ -232,12 +242,13 @@ describe('context graph write-path validation', () => {
 
   it('accepts an exact full DID for an existing bare id instead of treating it as a suffix-only slug', async () => {
     const agent = makeAgent([
-      { id: CANONICAL_CG, uri: CANONICAL_URI },
+      { id: CANONICAL_CG, uri: CANONICAL_URI, subscribed: true },
       {
         id: BARE_CG,
         uri: BARE_URI,
         name: 'Tuesday public CG',
         accessPolicy: 'public',
+        subscribed: true,
       },
     ]);
     await startRoutes(agent);
@@ -258,7 +269,7 @@ describe('context graph write-path validation', () => {
 
   it('rejects a full DID for a shadow-like bare id when a curated suffix match exists', async () => {
     const agent = makeAgent([
-      { id: CANONICAL_CG, uri: CANONICAL_URI },
+      { id: CANONICAL_CG, uri: CANONICAL_URI, subscribed: true },
       { id: BARE_CG, uri: BARE_URI },
     ]);
     await startRoutes(agent);
@@ -278,12 +289,13 @@ describe('context graph write-path validation', () => {
 
   it('accepts an exact legitimate bare id even when a curated suffix match exists', async () => {
     const agent = makeAgent([
-      { id: CANONICAL_CG, uri: CANONICAL_URI },
+      { id: CANONICAL_CG, uri: CANONICAL_URI, subscribed: true },
       {
         id: BARE_CG,
         uri: BARE_URI,
         name: 'Tuesday public CG',
         accessPolicy: 'public',
+        subscribed: true,
       },
     ]);
     await startRoutes(agent);
@@ -311,7 +323,7 @@ describe('context graph write-path validation', () => {
 
   it('rejects a bare suffix match before assertion create and returns the canonical id', async () => {
     const agent = makeAgent([
-      { id: CANONICAL_CG, uri: CANONICAL_URI },
+      { id: CANONICAL_CG, uri: CANONICAL_URI, subscribed: true },
       { id: 'tuesday-cg', uri: 'did:dkg:context-graph:tuesday-cg' },
     ]);
     await startRoutes(agent);
@@ -327,6 +339,51 @@ describe('context graph write-path validation', () => {
       canonicalContextGraphId: CANONICAL_CG,
     });
     expect(agent.calls.create).not.toHaveBeenCalled();
+  });
+
+  it('rejects exact context graphs that are visible but not locally writable', async () => {
+    const agent = makeAgent([
+      {
+        id: 'definition-only-cg',
+        uri: 'did:dkg:context-graph:definition-only-cg',
+        name: 'Definition Only CG',
+        accessPolicy: 'public',
+        subscribed: false,
+      },
+    ]);
+    await startRoutes(agent);
+
+    const result = await post('/api/assertion/create', {
+      contextGraphId: 'definition-only-cg',
+      name: 'draft',
+    });
+
+    expect(result.status).toBe(400);
+    expect(result.body).toMatchObject({ code: 'CONTEXT_GRAPH_NOT_WRITABLE' });
+    expect(agent.contextGraphHasLocalContent).toHaveBeenCalledWith('definition-only-cg');
+    expect(agent.calls.create).not.toHaveBeenCalled();
+  });
+
+  it('accepts exact visible context graphs with local content even when not subscribed', async () => {
+    const agent = makeAgent([
+      {
+        id: 'local-content-cg',
+        uri: 'did:dkg:context-graph:local-content-cg',
+        name: 'Local Content CG',
+        accessPolicy: 'public',
+        subscribed: false,
+        hasLocalContent: true,
+      },
+    ]);
+    await startRoutes(agent);
+
+    const result = await post('/api/assertion/create', {
+      contextGraphId: 'local-content-cg',
+      name: 'draft',
+    });
+
+    expect(result.status).toBe(200);
+    expect(agent.calls.create).toHaveBeenCalledWith('local-content-cg', 'draft', undefined);
   });
 
   it('rejects unknown assertion write targets before mutation', async () => {
@@ -391,7 +448,7 @@ describe('context graph write-path validation', () => {
 
   it('rejects context graph invite bare suffixes before mutation', async () => {
     const agent = makeAgent([
-      { id: CANONICAL_CG, uri: CANONICAL_URI },
+      { id: CANONICAL_CG, uri: CANONICAL_URI, subscribed: true },
       { id: 'tuesday-cg', uri: 'did:dkg:context-graph:tuesday-cg' },
     ]);
     await startRoutes(agent);

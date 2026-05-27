@@ -53,7 +53,7 @@ function createContext(path: string, body: unknown, overrides: Partial<RequestCo
   const defaultAgent = {
     peerId: 'peer-test',
     listContextGraphs: vi.fn(async () => [
-      { id: 'project-a', uri: 'did:dkg:context-graph:project-a', name: 'Project A' },
+      { id: 'project-a', uri: 'did:dkg:context-graph:project-a', name: 'Project A', subscribed: true },
     ]),
     contextGraphExists: vi.fn(async (contextGraphId: string) => contextGraphId === 'project-a'),
   };
@@ -471,6 +471,70 @@ describe('daemon memory_graph_changed route emissions', () => {
       contextGraphId: '7',
     });
     expect(responseBody(ctx)).toMatchObject({ publishContextGraphId: '7' });
+  });
+
+  it('normalizes full publishContextGraphId DIDs to a positive on-chain remap id', async () => {
+    const publishFromSharedMemory = vi.fn().mockResolvedValue({
+      kcId: 'kc-1',
+      status: 'confirmed',
+      kaManifest: [{ tokenId: 1n, rootEntity: 'urn:root' }],
+      publicQuads: [{ subject: 'urn:root', predicate: 'urn:p', object: 'urn:o', graph: 'urn:g' }],
+    });
+    const getContextGraphOnChainId = vi.fn(async (contextGraphId: string) =>
+      contextGraphId === 'target-cg' ? '42' : '7',
+    );
+    const listContextGraphs = vi.fn(async () => [
+      { id: 'project-a', uri: 'did:dkg:context-graph:project-a', name: 'Project A', subscribed: true },
+      { id: 'target-cg', uri: 'did:dkg:context-graph:target-cg', name: 'Target CG', subscribed: true },
+    ]);
+    const ctx = createContext('/api/shared-memory/publish', {
+      contextGraphId: 'project-a',
+      publishContextGraphId: 'did:dkg:context-graph:target-cg',
+      selection: ['urn:root'],
+    }, {
+      agent: {
+        publishFromSharedMemory,
+        getContextGraphOnChainId,
+        listContextGraphs,
+      } as unknown as RequestContext['agent'],
+    });
+
+    await handleMemoryRoutes(ctx);
+
+    expect((ctx.res as unknown as { statusCode: number }).statusCode).toBe(200);
+    expect(getContextGraphOnChainId).toHaveBeenCalledWith('target-cg');
+    expect(publishFromSharedMemory.mock.calls[0][2]).toMatchObject({
+      contextGraphId: '42',
+    });
+    expect(responseBody(ctx)).toMatchObject({ publishContextGraphId: '42' });
+  });
+
+  it('rejects non-numeric publishContextGraphId overrides without an on-chain id', async () => {
+    const publishFromSharedMemory = vi.fn();
+    const getContextGraphOnChainId = vi.fn(async (contextGraphId: string) =>
+      contextGraphId === 'project-a' ? '7' : null,
+    );
+    const listContextGraphs = vi.fn(async () => [
+      { id: 'project-a', uri: 'did:dkg:context-graph:project-a', name: 'Project A', subscribed: true },
+      { id: 'target-cg', uri: 'did:dkg:context-graph:target-cg', name: 'Target CG', subscribed: true },
+    ]);
+    const ctx = createContext('/api/shared-memory/publish', {
+      contextGraphId: 'project-a',
+      publishContextGraphId: 'target-cg',
+      selection: ['urn:root'],
+    }, {
+      agent: {
+        publishFromSharedMemory,
+        getContextGraphOnChainId,
+        listContextGraphs,
+      } as unknown as RequestContext['agent'],
+    });
+
+    await handleMemoryRoutes(ctx);
+
+    expect((ctx.res as unknown as { statusCode: number }).statusCode).toBe(400);
+    expect(responseBody(ctx)).toMatchObject({ code: 'CONTEXT_GRAPH_NOT_REGISTERED' });
+    expect(publishFromSharedMemory).not.toHaveBeenCalled();
   });
 
   it('emits VM refresh events after verified-memory verification', async () => {

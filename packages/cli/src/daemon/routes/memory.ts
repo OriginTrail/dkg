@@ -1754,7 +1754,36 @@ WHERE {
         : selection || "all";
       let resolvedPublishContextGraphId: string | null = null;
       if (publishContextGraphId != null) {
-        resolvedPublishContextGraphId = String(publishContextGraphId);
+        const rawPublishContextGraphId = String(publishContextGraphId).trim();
+        if (/^\d+$/.test(rawPublishContextGraphId)) {
+          const numericPublishContextGraphId = BigInt(rawPublishContextGraphId);
+          if (numericPublishContextGraphId <= 0n) {
+            return jsonResponse(res, 400, {
+              error:
+                '"publishContextGraphId" must be a positive integer, canonical context graph id, or full context graph URI',
+            });
+          }
+          resolvedPublishContextGraphId = rawPublishContextGraphId;
+        } else {
+          const resolvedPublishTargetId = await resolveRequiredWriteContextGraphId(
+            agent,
+            rawPublishContextGraphId,
+            res,
+            { callerAgentAddress: requestAgentAddress },
+          );
+          if (!resolvedPublishTargetId) return;
+          const onChainId = await agent.getContextGraphOnChainId(resolvedPublishTargetId);
+          if (!onChainId || !/^\d+$/.test(String(onChainId)) || BigInt(String(onChainId)) <= 0n) {
+            return jsonResponse(res, 400, {
+              code: "CONTEXT_GRAPH_NOT_REGISTERED",
+              error:
+                `publishContextGraphId "${rawPublishContextGraphId}" resolved to context graph ` +
+                `"${resolvedPublishTargetId}", but that graph has no positive on-chain id. ` +
+                `Pass a positive numeric context graph id or register the target first.`,
+            });
+          }
+          resolvedPublishContextGraphId = String(onChainId);
+        }
       }
       const result = await tracker.trackPhase(ctx, "read-shared-memory", () =>
         agent.publishFromSharedMemory(resolvedContextGraphId, sel, {
