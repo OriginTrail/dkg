@@ -347,6 +347,52 @@ describe('Context Graph shared empty/stat patterns', () => {
     await unmount();
   });
 
+  it('replaces the title-count number with an em-dash when lifecycleError is set (PR #694 polish carry-over b)', async () => {
+    // Title row would otherwise show "0" next to "Recent activity"
+    // while the inline error indicator below reads "Couldn't load
+    // recent activity." — contradicting itself (precise count vs
+    // not-loaded). The em-dash placeholder keeps the row anchored
+    // without claiming a specific number.
+    const { container, unmount } = await render(
+      React.createElement(ActivityFeed, {
+        entities: [],
+        onSelectEntity: vi.fn(),
+        title: 'Recent activity',
+        lifecycleEvents: [],
+        lifecycleError: 'SPARQL query failed: 503',
+      }),
+    );
+
+    const badge = container.querySelector('.v10-activity-feed-title-count');
+    expect(badge).toBeTruthy();
+    expect(badge?.textContent).toBe('—');
+    expect(badge?.getAttribute('data-state')).toBe('error');
+    // The title row still renders (anchored heading).
+    expect(container.querySelector('.v10-activity-feed-title-label')?.textContent).toBe('Recent activity');
+
+    await unmount();
+  });
+
+  it('keeps the title-count number when error is null even with empty events', async () => {
+    // Regression guard for the carry-over fix — the em-dash only
+    // fires on a lifecycle ERROR, not on an empty-but-healthy feed.
+    const { container, unmount } = await render(
+      React.createElement(ActivityFeed, {
+        entities: [],
+        onSelectEntity: vi.fn(),
+        title: 'Recent activity',
+        lifecycleEvents: [],
+        lifecycleError: null,
+      }),
+    );
+
+    const badge = container.querySelector('.v10-activity-feed-title-count');
+    expect(badge?.textContent).toBe('0');
+    expect(badge?.getAttribute('data-state')).toBeNull();
+
+    await unmount();
+  });
+
   it('shows the explained interim empty state for SWM assertions', async () => {
     apiMocks.listAssertions.mockResolvedValueOnce([]);
     const { container, unmount } = await render(

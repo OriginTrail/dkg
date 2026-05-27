@@ -266,6 +266,86 @@ describe('useAssertionLifecycleEvents — bindings parse', () => {
   // consumers (ProjectView → ActivityFeed) plumb it through to
   // render an error indicator. This test pins the hook contract:
   // error message is exposed verbatim so the UI can surface it.
+  it('preserves the last-known-good `events` cache when a same-graph refresh fails (PR #694 polish carry-over a)', async () => {
+    let latest: AssertionLifecycleEventsResult | null = null;
+    function Probe({ id }: { id: string | undefined }) {
+      latest = useAssertionLifecycleEvents(id);
+      return null;
+    }
+    // First mount on `cg-A`. Resolve with one row so the hook has a
+    // populated cache + `resultContextGraphId === 'cg-A'`.
+    await act(async () => {
+      root.render(React.createElement(Probe, { id: 'cg-A' }));
+    });
+    await flush();
+    pending.get('cg-A')!.resolve([
+      row({
+        event: 'urn:event:1',
+        kind: 'created',
+        assertion: 'urn:assertion:1',
+        name: 'a1',
+        agent: 'urn:agent:1',
+        ts: '2026-05-27T12:00:00Z',
+      }),
+    ]);
+    await flush();
+    expect(latest!.events).toHaveLength(1);
+    expect(latest!.resultContextGraphId).toBe('cg-A');
+    expect(latest!.error).toBeNull();
+
+    // User navigates away from Overview — Probe receives `id={undefined}`.
+    // Per PR #694 Comment 20 the hook PRESERVES `events` /
+    // `resultContextGraphId` in this gated-off state.
+    await act(async () => {
+      root.render(React.createElement(Probe, { id: undefined }));
+    });
+    await flush();
+    expect(latest!.events).toHaveLength(1);
+    expect(latest!.resultContextGraphId).toBe('cg-A');
+
+    // User returns to Overview — Probe receives `id='cg-A'` again,
+    // which re-fires the effect. This time the daemon errors
+    // (transient 503).
+    globalThis.fetch = vi.fn(async () => {
+      throw new Error('SPARQL query failed: 503');
+    }) as any;
+    await act(async () => {
+      root.render(React.createElement(Probe, { id: 'cg-A' }));
+    });
+    await flush();
+
+    // The carry-over fix — the cached row from the earlier success
+    // must NOT be clobbered to `[]`. The error message surfaces
+    // alongside.
+    expect(latest!.error).toBe('SPARQL query failed: 503');
+    expect(latest!.events).toHaveLength(1);
+    expect(latest!.events[0].assertionUri).toBe('urn:assertion:1');
+    // The discriminator still points at the current graph.
+    expect(latest!.resultContextGraphId).toBe('cg-A');
+  });
+
+  it('clears `events` when a fetch errors on a graph with no prior cached result', async () => {
+    // Regression guard for the fix: the cache-preservation only
+    // applies when `resultContextGraphId === contextGraphId` (i.e.,
+    // we had a prior success on THIS graph). A first-mount error on
+    // a fresh graph still produces an empty list.
+    let latest: AssertionLifecycleEventsResult | null = null;
+    function Probe({ id }: { id: string }) {
+      latest = useAssertionLifecycleEvents(id);
+      return null;
+    }
+    globalThis.fetch = vi.fn(async () => {
+      throw new Error('SPARQL query failed: 503');
+    }) as any;
+    await act(async () => {
+      root.render(React.createElement(Probe, { id: 'cg-fresh' }));
+    });
+    await flush();
+    expect(latest!.error).toBe('SPARQL query failed: 503');
+    expect(latest!.events).toHaveLength(0);
+    expect(latest!.resultContextGraphId).toBe('cg-fresh');
+  });
+
   it('exposes the rejection message verbatim on error (Comment 8 distinguishability)', async () => {
     let latest: AssertionLifecycleEventsResult | null = null;
     function Probe({ id }: { id: string }) {

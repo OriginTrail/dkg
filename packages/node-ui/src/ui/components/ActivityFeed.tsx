@@ -141,10 +141,22 @@ export const ActivityFeed: React.FC<ActivityFeedProps> = ({
   // mirroring the per-bucket chip; we render the same row in both
   // the empty and populated branches so the heading stays anchored
   // (showing "0" rather than vanishing into the empty state).
+  //
+  // PR #694 polish carry-over (b) — when the lifecycle SPARQL
+  // errored, suppress the exact count and render `—` instead.
+  // Showing "0" next to "RECENT ACTIVITY" while the error indicator
+  // below says "Couldn't load recent activity." contradicts itself
+  // (precise count vs not-loaded). The em-dash keeps the row
+  // anchored without claiming a specific number.
   const titleRow = title ? (
     <div className="v10-activity-feed-title">
       <span className="v10-activity-feed-title-label">{title}</span>
-      <span className="v10-activity-feed-title-count">{titleCount}</span>
+      <span
+        className="v10-activity-feed-title-count"
+        data-state={lifecycleError ? 'error' : undefined}
+      >
+        {lifecycleError ? '—' : titleCount}
+      </span>
     </div>
   ) : null;
 

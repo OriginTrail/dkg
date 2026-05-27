@@ -258,16 +258,34 @@ export function useAssertionLifecycleEvents(
       } catch (err) {
         if (cancelled || (err as any)?.name === 'AbortError') return;
         setError((err as Error).message ?? String(err));
-        setEvents([]);
-        // PR #694 review fix — advance `resultContextGraphId` on
-        // failure so consumers gating on
-        // `resultContextGraphId === contextGraphId` (the Code7 pattern
-        // shared with `useSwmAttributions`) can distinguish "still
-        // loading the new graph" from "the new graph errored and
-        // that's the answer for this graph". Without this, an early
-        // failure keeps consumers stuck in the previous-graph state
-        // until the hook re-runs.
-        setResultContextGraphId(contextGraphId);
+        // PR #694 polish carry-over (a) — preserve the last-known-
+        // good feed on a same-graph refresh failure (transient
+        // 503 / timeout / network blip). Different-graph stale
+        // cache was already cleared at the top of the effect
+        // (lines ~176-180) before the fetch fired, so by the time
+        // we reach this catch `resultContextGraphId` is EITHER
+        // undefined (first fetch on this graph — nothing cached
+        // for us to keep) OR === contextGraphId (a prior fetch on
+        // THIS graph succeeded — keep those rows so the UI doesn't
+        // collapse to empty while the error indicator surfaces
+        // alongside). Functional-setter pattern reads the latest
+        // resultContextGraphId without needing it in effect deps.
+        setResultContextGraphId(prevResultCg => {
+          if (prevResultCg !== contextGraphId) {
+            // No cached rows for this graph — clear the (likely
+            // stale or never-set) events array.
+            setEvents([]);
+          }
+          // PR #694 review fix — advance `resultContextGraphId` on
+          // failure so consumers gating on
+          // `resultContextGraphId === contextGraphId` (the Code7 pattern
+          // shared with `useSwmAttributions`) can distinguish "still
+          // loading the new graph" from "the new graph errored and
+          // that's the answer for this graph". Without this, an early
+          // failure keeps consumers stuck in the previous-graph state
+          // until the hook re-runs.
+          return contextGraphId;
+        });
       } finally {
         if (timeoutId) clearTimeout(timeoutId);
         if (!cancelled) setLoading(false);
