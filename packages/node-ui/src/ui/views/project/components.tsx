@@ -690,8 +690,14 @@ export function curatorStatusForOverview({
 }): CuratorStatus {
   const curator = typeof cg?.curator === 'string' ? cg.curator.trim() : '';
   if (!curator) {
-    // No curator metadata on this CG — definitively not curator.
-    return 'not-curator';
+    // Codex review bug I — older / partial CG payloads may omit
+    // `curator` entirely. Returning `'not-curator'` here hard-hides
+    // PendingJoinRequestsSection from real curators whose daemon
+    // simply didn't surface the field (pre-PR boolean predicate
+    // still let /join-requests gate authorisation). `'unknown'`
+    // routes through the "Verifying access…" panel, which is the
+    // right state when we genuinely can't decide.
+    return 'unknown';
   }
   // Codex review bug G — older daemons / transient identity errors
   // may surface `agentAddress` without `agentDid`. `canonicalAgentDid`
@@ -967,18 +973,28 @@ export function ProjectOverviewCard({
             raw.toLowerCase().startsWith(DID_PREFIX)
               ? raw.slice(DID_PREFIX.length)
               : raw;
+          // Codex review issue J — only seed the curator row when
+          // the participants list is authoritative. While
+          // `/participants` is loading or has errored, showing
+          // "[◆ curator (you)]" alone would imply a complete roster
+          // on a CG that may actually have other allowlisted members
+          // we can't yet see. Loading / error branches fall through
+          // to the empty-state path which renders the appropriate
+          // status copy.
           const seen = new Set<string>();
           const rows: { display: string; full: string; canonical: string }[] = [];
-          if (curator) {
+          if (curator && participantsStatus === 'ok') {
             const c = canonicalAgentDid(curator);
             seen.add(c);
             rows.push({ display: displayOf(curator), full: curator, canonical: c });
           }
-          for (const addr of participants) {
-            const c = canonicalAgentDid(addr);
-            if (seen.has(c)) continue;
-            seen.add(c);
-            rows.push({ display: displayOf(addr), full: addr, canonical: c });
+          if (participantsStatus === 'ok') {
+            for (const addr of participants) {
+              const c = canonicalAgentDid(addr);
+              if (seen.has(c)) continue;
+              seen.add(c);
+              rows.push({ display: displayOf(addr), full: addr, canonical: c });
+            }
           }
           if (rows.length === 0) {
             // Codex review bug E — `/participants` returns

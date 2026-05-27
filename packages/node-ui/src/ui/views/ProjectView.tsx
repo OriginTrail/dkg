@@ -333,8 +333,13 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     api.fetchSubGraphs(contextGraphId)
       .then(res => {
         if (subGraphRequestRef.current !== requestId) return;
+        // Codex review issue K — only filter `meta` here, matching
+        // SubGraphBar (chip row) and SubGraphOverviewGrid (Subgraphs
+        // tab grid). Filtering `assertion` too would undercount vs
+        // the views the user can actually click into. S3 will
+        // revisit the reserved-slug story globally.
         const count = (res.subGraphs ?? []).filter(
-          sg => sg.name !== 'meta' && sg.name !== 'assertion',
+          sg => sg.name !== 'meta',
         ).length;
         setSubGraphCount(count);
         setSubGraphFetchFailed(false);

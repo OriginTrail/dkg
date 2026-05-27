@@ -255,15 +255,19 @@ vi.mock('../src/ui/views/project/components.js', () => ({
       React.createElement('button', { 'data-testid': 'subgraph-tab-graph', onClick: () => onTabChange('graph') }, 'Graph'),
       React.createElement('div', { 'data-testid': 'subgraph-scroll', 'data-cg-scroll-key': `subgraph:${slug}:${activeTab}` },
         React.createElement('button', { 'data-testid': 'open-subgraph-entity', onClick: () => onSelectEntity('urn:entity:demo') }, 'Open demo entity'))),
-  ProjectOverviewCard: ({ onOpenPrimer, participants, participantsStatus }: {
+  ProjectOverviewCard: ({ onOpenPrimer, participants, participantsStatus, subGraphCount, subGraphFetchFailed }: {
     onOpenPrimer: () => void;
     participants: string[];
     participantsStatus: string;
+    subGraphCount?: number | null;
+    subGraphFetchFailed?: boolean;
   }) =>
     React.createElement('div', {
       'data-testid': 'overview-card',
       'data-participants': participants.join(','),
       'data-participants-status': participantsStatus,
+      'data-sub-graph-count': subGraphCount == null ? '' : String(subGraphCount),
+      'data-sub-graph-fetch-failed': subGraphFetchFailed ? 'true' : 'false',
     },
       'Overview',
       React.createElement('button', { 'data-testid': 'open-primer', onClick: onOpenPrimer }, 'What is a Context Graph?')),
@@ -406,6 +410,39 @@ describe('ProjectView entity detail navigation', () => {
     // called proves the route — `apiWrapperMock.fetchSubGraphs`
     // only resolves when the wrapper is actually used.
     expect(apiWrapperMock.fetchSubGraphs).toHaveBeenCalledWith('cg-test');
+  });
+
+  it('Overview Subgraphs count filters only the `meta` slug — `assertion` stays counted (Codex issue K)', async () => {
+    // SubGraphBar (chips) and SubGraphOverviewGrid (cards) only
+    // exclude `meta`. The Overview stat must match — otherwise
+    // it undercounts vs the views the user clicks into.
+    apiWrapperMock.fetchSubGraphs.mockResolvedValue({
+      contextGraphId: 'cg-test',
+      subGraphs: [
+        { name: 'meta', uri: 'urn:meta', entityCount: 0, tripleCount: 0 },
+        { name: 'assertion', uri: 'urn:assertion', entityCount: 10, tripleCount: 50 },
+        { name: 'recipes', uri: 'urn:recipes', entityCount: 3, tripleCount: 12 },
+        { name: 'reviews', uri: 'urn:reviews', entityCount: 5, tripleCount: 18 },
+        { name: 'docs', uri: 'urn:docs', entityCount: 2, tripleCount: 7 },
+      ],
+    });
+
+    // Remount ProjectView so the updated mockResolvedValue takes
+    // effect (the global beforeEach() resolved an empty list).
+    await act(async () => {
+      root.unmount();
+    });
+    document.body.innerHTML = '<div id="root"></div>';
+    const container = document.getElementById('root');
+    if (!container) throw new Error('Missing root');
+    root = createRoot(container);
+    await act(async () => {
+      root.render(React.createElement(ProjectView, { contextGraphId: 'cg-test' }));
+    });
+    await flush();
+
+    // Expect 4 = 5 total - 1 (meta filtered). `assertion` stays.
+    expect(query('overview-card').dataset.subGraphCount).toBe('4');
   });
 
   it('opens graph nodes with the layer context they came from', async () => {

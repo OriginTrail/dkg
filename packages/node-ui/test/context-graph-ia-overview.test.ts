@@ -238,6 +238,54 @@ describe('Context Graph IA and Overview', () => {
     await act(async () => root.unmount());
   });
 
+  it('does NOT seed the curator row while participants are loading, even with a curator field set (Codex bug J)', async () => {
+    const curatorAddress = '0xCAFE0000000000000000000000000000000000A4';
+    const { container, root } = await render(
+      React.createElement(ProjectOverviewCard, {
+        cg: {
+          id: 'cg-loading-with-curator',
+          name: 'Loading',
+          accessPolicy: 'private',
+          curator: `did:dkg:agent:${curatorAddress}`,
+        },
+        memory: baseMemory,
+        participants: [],
+        participantsStatus: 'loading',
+        currentAgent: { agentDid: `did:dkg:agent:${curatorAddress}` },
+      }),
+    );
+
+    // Loading copy renders; curator row does NOT (would imply a
+    // complete roster while the allowlist is still resolving).
+    expect(container.textContent).toContain('Loading participant agents');
+    expect(container.querySelectorAll('.v10-po-participant')).toHaveLength(0);
+
+    await act(async () => root.unmount());
+  });
+
+  it('does NOT seed the curator row when participants errored, even with a curator field set (Codex bug J)', async () => {
+    const curatorAddress = '0xCAFE0000000000000000000000000000000000A5';
+    const { container, root } = await render(
+      React.createElement(ProjectOverviewCard, {
+        cg: {
+          id: 'cg-errored-with-curator',
+          name: 'Errored',
+          accessPolicy: 'private',
+          curator: `did:dkg:agent:${curatorAddress}`,
+        },
+        memory: baseMemory,
+        participants: [],
+        participantsStatus: 'error',
+        currentAgent: { agentDid: `did:dkg:agent:${curatorAddress}` },
+      }),
+    );
+
+    expect(container.textContent).toContain('Participant list unavailable');
+    expect(container.querySelectorAll('.v10-po-participant')).toHaveLength(0);
+
+    await act(async () => root.unmount());
+  });
+
   it('renders the curator row in the bare-address shape, not the raw DID (Codex bug H)', async () => {
     const curatorAddress = '0x1234567890ABCDEF1234567890ABCDEF12345678';
     const { container, root } = await render(
@@ -579,7 +627,7 @@ describe('Context Graph IA and Overview', () => {
     })).toBe('curator');
   });
 
-  it('curatorStatusForOverview returns "unknown" only when there is literally no identity material', () => {
+  it('curatorStatusForOverview returns "unknown" when curator is set but no identity material is present', () => {
     expect(curatorStatusForOverview({
       cg: { curator: 'did:dkg:agent:0xABC', accessPolicy: 'private' },
       currentAgent: null,
@@ -590,6 +638,26 @@ describe('Context Graph IA and Overview', () => {
       cg: { curator: 'did:dkg:agent:0xABC', accessPolicy: 'private' },
       currentAgent: null,
       currentAgentStatus: 'error',
+    })).toBe('unknown');
+  });
+
+  it('curatorStatusForOverview returns "unknown" when cg.curator is missing entirely (Codex bug I)', () => {
+    // Older / partial CG payloads may omit `curator`. Returning
+    // `'not-curator'` here hard-hides PendingJoinRequestsSection
+    // from a real curator whose daemon simply didn't surface the
+    // field; route through the `'unknown'` verifying-access state
+    // instead. The eventual server-side authorisation in
+    // /join-requests still gates real actions.
+    expect(curatorStatusForOverview({
+      cg: { accessPolicy: 'private' }, // no `curator` field
+      currentAgent: { agentDid: 'did:dkg:agent:0xdef' },
+      currentAgentStatus: 'ok',
+    })).toBe('unknown');
+
+    expect(curatorStatusForOverview({
+      cg: { curator: '', accessPolicy: 'private' }, // empty string
+      currentAgent: { agentDid: 'did:dkg:agent:0xdef' },
+      currentAgentStatus: 'ok',
     })).toBe('unknown');
   });
 
