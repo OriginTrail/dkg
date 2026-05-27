@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { EVMChainAdapter } from '../src/evm-adapter.js';
+import { KCStorageRegistry } from '../src/kc-storage-registry.js';
 import {
   spawnHardhatEnv,
   killHardhat,
@@ -81,6 +82,42 @@ describe('EVMChainAdapter integration', () => {
     const adapter = new EVMChainAdapter(makeAdapterConfig(ctx.rpcUrl, ctx.hubAddress, HARDHAT_KEYS.DEPLOYER));
     const deployer = adapter.getSignerAddress();
     const owns = await adapter.verifyPublisherOwnsRange(deployer, 1n, 1n, 'nonexistent-tag');
+    expect(owns).toBe(false);
+  }, 30_000);
+
+  it('verifyPublisherOwnsRange fails closed for a registered-but-unrecognised tag (Codex review on PR #718, Comment 3)', async () => {
+    // Even when the registry KNOWS a tag (e.g. a hypothetical V11 KC
+    // storage was registered on the Hub and the registry refreshed),
+    // verifyPublisherOwnsRange must NOT silently attest range
+    // ownership unless this adapter has an explicit per-tag policy
+    // (today: empty tag → V10 ACK auth, "v9" → V9 KAS pre-reservation
+    // API). A blanket "registered → true" fallback would let a future
+    // V11 deploy whose ownership API differs from V10 silently accept
+    // spoofed ranges. Pin the fail-closed contract here.
+    const adapter = new EVMChainAdapter(makeAdapterConfig(ctx.rpcUrl, ctx.hubAddress, HARDHAT_KEYS.DEPLOYER));
+    const deployer = adapter.getSignerAddress();
+    // Force adapter init so the registry is populated from the live Hub.
+    await adapter.verifyPublisherOwnsRange(deployer, 1n, 1n);
+    // Swap the live registry for a fake that surfaces a hypothetical
+    // V11 storage. Replacing the whole registry (vs reaching into
+    // private fields) is the public-API path: ChainAdapter exposes
+    // `kcStorageRegistry` as a writeable field for exactly this reason
+    // — adapters can plug in custom registries (mocks, multi-Hub,
+    // etc) without subclassing.
+    const fakeAddress = '0x0000000000000000000000000000000000001111';
+    adapter.kcStorageRegistry = new KCStorageRegistry(
+      {
+        getAllAssetStorages: async () => [
+          { name: 'KnowledgeCollectionStorageV11', addr: fakeAddress },
+        ],
+      },
+      {
+        readUriBase: async () => 'did:dkg:v11-future',
+      },
+    );
+    await adapter.kcStorageRegistry.refresh();
+    expect(adapter.kcStorageRegistry.getByTag('v11-future')?.address).toBe(fakeAddress);
+    const owns = await adapter.verifyPublisherOwnsRange(deployer, 1n, 1n, 'v11-future');
     expect(owns).toBe(false);
   }, 30_000);
 });

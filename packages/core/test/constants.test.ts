@@ -184,19 +184,51 @@ describe('parseUal (OT-RFC-40 §5.2 — handles both 3- and 4-segment forms)', (
     expect(parseUal('')).toBeNull();
   });
 
-  it('returns null for input segment counts other than 3 or 4', () => {
+  it('returns null when fewer than 3 segments follow did:dkg:', () => {
     // 1 or 2 segments — covers CG/data URIs that share the prefix.
     expect(parseUal('did:dkg:context-graph:agents')).toBeNull();
     expect(parseUal('did:dkg:foo/bar')).toBeNull();
-    // 5+ segments — extension paths under a UAL.
-    expect(parseUal('did:dkg:base:84532/0xPub/123/sub/extra')).toBeNull();
+  });
+
+  it('tolerates trailing per-KA suffix segments (default-storage form)', () => {
+    // store.nq subjects sometimes carry a per-KA index after the kcId
+    // (e.g. `did:dkg:base:84532/0xPub/123/7` ≡ KA #7 inside KC #123).
+    // The pre-RFC-40 verifyUALConsistency indexed segments[2] directly,
+    // so it kept range-checking those subjects. parseUal must preserve
+    // that behaviour or it would silently skip the check (Codex review
+    // on PR #718).
+    const parsed = parseUal(
+      'did:dkg:base:84532/0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1/123/7',
+    );
+    expect(parsed).toEqual({
+      chainId: 'base:84532',
+      storageTag: '',
+      publisherAddress: '0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1',
+      startKAId: 123n,
+    });
+  });
+
+  it('tolerates trailing per-KA suffix segments (tagged form)', () => {
+    const parsed = parseUal(
+      'did:dkg:v9/base:84532/0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1/17/3/extra',
+    );
+    expect(parsed).toEqual({
+      chainId: 'base:84532',
+      storageTag: 'v9',
+      publisherAddress: '0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1',
+      startKAId: 17n,
+    });
   });
 
   it('returns null when any segment is empty', () => {
-    expect(parseUal('did:dkg://0xPub/123')).toBeNull();
+    expect(parseUal('did:dkg://0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1/123')).toBeNull();
     expect(parseUal('did:dkg:base:84532//123')).toBeNull();
-    expect(parseUal('did:dkg:base:84532/0xPub/')).toBeNull();
-    expect(parseUal('did:dkg:v9//base:84532/0xPub/123')).toBeNull();
+    expect(parseUal('did:dkg:base:84532/0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1/')).toBeNull();
+    expect(
+      parseUal(
+        'did:dkg:v9//base:84532/0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1/123',
+      ),
+    ).toBeNull();
   });
 
   it('rejects malformed storage tags (uppercase, colon, special chars)', () => {

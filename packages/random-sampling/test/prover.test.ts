@@ -48,6 +48,12 @@ interface FakeChainState {
    *  check inside the prover engages. Tests that omit this fall back
    *  to "stale check always false" (the production-safe default). */
   blockNumber?: number;
+  /** OT-RFC-40 §7.5: optional fake KC storage registry. Tests that
+   *  exercise the multi-storage prover paths (Codex review on PR #718,
+   *  Comment 2) seed this; tests that omit it leave the prover in
+   *  "registry-less" mode where `expectedStorageTag` is undefined and
+   *  the extractor falls back to its legacy unfiltered behaviour. */
+  kcStorageRegistry?: ChainAdapter['kcStorageRegistry'];
 }
 
 function makeChain(state: FakeChainState): ChainAdapter {
@@ -65,6 +71,9 @@ function makeChain(state: FakeChainState): ChainAdapter {
   };
   if (state.blockNumber !== undefined) {
     partial.getBlockNumber = vi.fn(async () => state.blockNumber!);
+  }
+  if (state.kcStorageRegistry !== undefined) {
+    partial.kcStorageRegistry = state.kcStorageRegistry;
   }
   return partial as ChainAdapter;
 }
@@ -702,6 +711,125 @@ describe('RandomSamplingProver — short-circuits', () => {
     expect(submitProof).toHaveBeenCalledTimes(1);
     const trail = (await wal.readAll()).map((e) => e.status);
     expect(trail).toEqual(['challenge', 'extracted', 'built', 'failed']);
+    await prover.close();
+  });
+});
+
+describe('RandomSamplingProver — multi-storage routing (OT-RFC-40, Codex review on PR #718)', () => {
+  // Codex Comment 2: when the chain adapter exposes a kcStorageRegistry
+  // but `tagFor(challenge.knowledgeCollectionStorageContract)` returns
+  // undefined (registry stale, init failure, race vs Hub event), the
+  // prover MUST NOT silently fall through to unfiltered extraction —
+  // a same-`kcId` collision across storages would prove the wrong KC.
+  // Pin the fail-closed contract: refresh the registry once, and if
+  // it still doesn't know the storage, skip the period as kc-not-synced
+  // with an explicit `kcs-registry-miss` WAL entry.
+
+  it('skips period as kc-not-synced when registry exists but the challenge storage is unknown (refresh does not recover)', async () => {
+    const store = new OxigraphStore();
+    const fixture: KCFixture = {
+      cgId: 11n, kcId: 7n, ual: 'did:dkg:hardhat:31337/0xpub/7',
+      rootEntities: ['urn:e:1'],
+      publicTriples: [{ subject: 'urn:e:1', predicate: 'urn:p:k', object: '"a"' }],
+    };
+    const { root, leafCount } = await seedKC(store, fixture);
+
+    const refresh = vi.fn(async () => {
+      // The "stale cache" recovery attempt fails to discover the
+      // challenged storage. The prover must escalate to fail-closed.
+    });
+    const tagFor = vi.fn(() => undefined);
+    const fakeRegistry = { refresh, tagFor } as unknown as NonNullable<ChainAdapter['kcStorageRegistry']>;
+
+    const challengeStorage = '0x000000000000000000000000000000000000beef';
+    const submitProof = vi.fn(async () => ({ hash: '0xunused', blockNumber: 1, success: true }));
+    const chain = makeChain({
+      status: { activeProofPeriodStartBlock: 1000n, isValid: true },
+      challengeForNode: null,
+      createChallenge: async () => ({
+        challenge: makeChallenge({
+          knowledgeCollectionId: fixture.kcId,
+          chunkId: 0n,
+          knowledgeCollectionStorageContract: challengeStorage,
+        }),
+        contextGraphId: fixture.cgId,
+        hash: '0x', blockNumber: 1, success: true,
+      }),
+      expectedRoot: root,
+      expectedLeafCount: leafCount,
+      cgIdForKc: fixture.cgId,
+      submitProof: submitProof as never,
+      kcStorageRegistry: fakeRegistry,
+    });
+
+    const wal = new InMemoryProverWal();
+    const prover = new RandomSamplingProver({ chain, store, identityId: IDENTITY_ID, wal });
+    const outcome = await prover.tick();
+    expect(outcome).toEqual({ kind: 'kc-not-synced', kcId: fixture.kcId, cgId: fixture.cgId });
+    // Refresh was attempted exactly once before fail-closing.
+    expect(refresh).toHaveBeenCalledTimes(1);
+    // tagFor consulted twice: once before refresh, once after.
+    expect(tagFor).toHaveBeenCalledTimes(2);
+    expect(tagFor).toHaveBeenCalledWith(challengeStorage);
+    expect(submitProof).not.toHaveBeenCalled();
+    const failed = (await wal.readAll()).find((e) => e.status === 'failed');
+    expect(failed?.error?.code).toBe('kcs-registry-miss');
+    await prover.close();
+  });
+
+  it('uses the resolved tag when the registry recognises the challenge storage', async () => {
+    const store = new OxigraphStore();
+    // The fixture's UAL must round-trip through parseUal so the
+    // storage-tag filter can match it — i.e. the publisher slot has
+    // to satisfy `^0x[0-9a-fA-F]{40}$`. The other prover tests in
+    // this file use the legacy `0xpub` placeholder because their
+    // chain has no kcStorageRegistry, so the filter is skipped
+    // entirely. Multi-storage tests can't take that shortcut.
+    const fixture: KCFixture = {
+      cgId: 11n,
+      kcId: 7n,
+      ual: 'did:dkg:hardhat:31337/0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1/7',
+      rootEntities: ['urn:e:1'],
+      publicTriples: [{ subject: 'urn:e:1', predicate: 'urn:p:k', object: '"a"' }],
+    };
+    const { root, leafCount } = await seedKC(store, fixture);
+
+    const refresh = vi.fn(async () => {});
+    // The default-storage tag round-trip confirms the registry path
+    // is wired without changing observable behaviour vs the
+    // registry-less mode (legacy 3-segment UALs end up filtered by
+    // `expectedStorageTag === ''`, which matches the seed UAL).
+    const tagFor = vi.fn(() => '');
+    const fakeRegistry = { refresh, tagFor } as unknown as NonNullable<ChainAdapter['kcStorageRegistry']>;
+
+    const submitProof = vi.fn(async () => ({ hash: '0xresolved', blockNumber: 1, success: true }));
+    const chain = makeChain({
+      status: { activeProofPeriodStartBlock: 1000n, isValid: true },
+      challengeForNode: null,
+      createChallenge: async () => ({
+        challenge: makeChallenge({
+          knowledgeCollectionId: fixture.kcId,
+          chunkId: 0n,
+          knowledgeCollectionStorageContract: '0x000000000000000000000000000000000000face',
+        }),
+        contextGraphId: fixture.cgId,
+        hash: '0x', blockNumber: 1, success: true,
+      }),
+      expectedRoot: root,
+      expectedLeafCount: leafCount,
+      cgIdForKc: fixture.cgId,
+      submitProof: submitProof as never,
+      kcStorageRegistry: fakeRegistry,
+    });
+
+    const prover = new RandomSamplingProver({ chain, store, identityId: IDENTITY_ID });
+    const outcome = await prover.tick();
+    expect(outcome.kind).toBe('submitted');
+    // Registry was hit once (no refresh needed because tagFor returned
+    // a defined value on the first call).
+    expect(tagFor).toHaveBeenCalledTimes(1);
+    expect(refresh).not.toHaveBeenCalled();
+    expect(submitProof).toHaveBeenCalledTimes(1);
     await prover.close();
   });
 });

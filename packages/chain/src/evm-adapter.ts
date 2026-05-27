@@ -1501,21 +1501,18 @@ export class EVMChainAdapter implements ChainAdapter {
       return true;
     }
 
-    // Unknown tag: the registry has not seen this storage. Conservative
-    // failure: refuse to attest range ownership for an unknown storage
-    // instance. Operators see the rejection message and can either
-    // refresh the registry or investigate why a UAL was minted under
-    // a tag the receiver doesn't recognise.
-    if (!this.kcStorageRegistry?.getByTag(tag)) {
-      return false;
-    }
-
-    // Future tagged storages might re-introduce a V9-style range API.
-    // When that happens, this branch can switch on the storage's hubName
-    // to route to the appropriate query. Today, the conservative answer
-    // for any tag we DO recognise but don't have a range API for is
-    // identical to V10's: defer to the publish-handler's downstream auth.
-    return true;
+    // Codex review on PR #718 (Comment 3): every other tag — whether
+    // the registry recognises it or not — fails closed. The previous
+    // implementation returned `true` for any tag the registry knew
+    // about, which silently assumed every future storage authenticates
+    // publishes via ACK signatures. If V11+ ships a different
+    // ownership API, that fallback would let receivers accept spoofed
+    // ranges as soon as the new storage is registered. We refuse to
+    // attest range ownership without an explicit per-tag policy here:
+    // when V11+ lands, add an `if (tag === 'v11') { ... }` branch
+    // (or carry an `authMode` field on KCStorageEntry and switch on
+    // it) before this fallthrough.
+    return false;
   }
 
   // =====================================================================
@@ -2941,8 +2938,26 @@ export class EVMChainAdapter implements ChainAdapter {
     // names). Listening unconditionally avoids races where a future
     // version naming convention is added but we forget to update this
     // allowlist; the registry's filter is the single source of truth.
+    //
+    // Codex review on PR #718 (Comment 4): if the initial
+    // `buildKCStorageRegistry()` call in `init()` failed (e.g.
+    // transient RPC error during boot), `kcStorageRegistry` stays
+    // `undefined` and a plain refresh would silently no-op forever.
+    // Use the first asset-storage event as a recovery trigger: if
+    // there is no registry yet, build one from scratch; otherwise
+    // refresh the existing instance. Either path picks up the new
+    // storage immediately.
     const onAssetStorageChange = (): void => {
-      if (this.kcStorageRegistry === undefined) return;
+      if (this.kcStorageRegistry === undefined) {
+        void this.buildKCStorageRegistry()
+          .then((registry) => {
+            this.kcStorageRegistry = registry;
+          })
+          .catch((err) => console.warn(
+            `[EVMChainAdapter] KC storage registry rebuild after Hub event failed: ${err instanceof Error ? err.message : String(err)}`,
+          ));
+        return;
+      }
       void this.kcStorageRegistry
         .refresh()
         .catch((err) => console.warn(

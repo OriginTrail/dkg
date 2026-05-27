@@ -249,44 +249,76 @@ export interface ParsedUal {
  * Accepts both shapes the protocol mints today (RFC §5.2):
  *
  *   3-segment / default-storage:   did:dkg:{chainId}/{pub}/{localId}
- *   4-segment / storage-tagged:    did:dkg:{chainId}/{tag}/{pub}/{localId}
+ *   4-segment / storage-tagged:    did:dkg:{tag}/{chainId}/{pub}/{localId}
+ *
+ * Trailing path segments after the UAL prefix are tolerated and
+ * discarded — KC subjects in store.nq sometimes carry per-KA suffixes
+ * (e.g. `did:dkg:base:84532/0xPub/123/7` to denote KA #7 inside KC
+ * #123). The pre-RFC-40 `verifyUALConsistency` did this implicitly by
+ * indexing `segments[2]`; preserving the behaviour here means range
+ * checks keep firing on those suffixed subjects instead of silently
+ * skipping (Codex review on PR #718).
+ *
+ * Disambiguation between the 3- and 4-segment forms when more than 3
+ * segments are present:
+ *
+ *   - If `segments[0]` matches `STORAGE_TAG_PATTERN` AND `segments[2]`
+ *     matches `PUBLISHER_ADDRESS_PATTERN` → tagged form (and
+ *     `segments[3]` is the local id).
+ *   - Else if `segments[1]` matches `PUBLISHER_ADDRESS_PATTERN` →
+ *     default-storage form (`segments[0]` chainId, `segments[2]`
+ *     local id, anything beyond that is the per-KA suffix).
+ *   - Else → null (unrecognised shape).
+ *
+ * The `PUBLISHER_ADDRESS_PATTERN` check is what disambiguates real
+ * UALs from same-prefix CG data URIs (`did:dkg:context-graph:...`).
  *
  * Returns `null` for any input that doesn't start with `did:dkg:` or
- * whose segment count is not exactly 3 or 4 — callers (e.g. the
+ * whose shape doesn't match either form above — callers (e.g. the
  * publish-handler range check) treat `null` as "not a UAL we own,
  * skip" rather than "validation error". Malformed inputs that happen
  * to match the prefix-and-shape but carry a non-numeric local-id slot
  * are returned with `startKAId: null` rather than rejected, because
  * the tentative-publish path uses synthetic string IDs of the form
  * `t<publishOperationId>` until the chain confirms.
- *
- * Validation of the storage tag against `STORAGE_TAG_PATTERN` IS
- * enforced — a malformed tag (e.g. embedded `/` or `:`) is treated as
- * "not a valid UAL" and returns `null`.
  */
 export function parseUal(ual: string | undefined | null): ParsedUal | null {
   if (typeof ual !== 'string') return null;
   if (!ual.startsWith(DID_DKG_PREFIX)) return null;
 
   const segments = ual.slice(DID_DKG_PREFIX.length).split('/');
+  if (segments.length < 3) return null;
+
   let chainId: string;
   let storageTag: string;
   let publisherAddress: string;
   let localIdSegment: string;
 
-  if (segments.length === 3) {
-    [chainId, publisherAddress, localIdSegment] = segments;
+  // Disambiguation order: tagged form is checked first because its
+  // detector is strictly stronger (requires segments[0] to match
+  // STORAGE_TAG_PATTERN, which CAIP-2 chainIds like `base:84532` fail
+  // because they contain ':'). Default-storage detection is the
+  // fallback.
+  if (
+    segments.length >= 4 &&
+    STORAGE_TAG_PATTERN.test(segments[0]) &&
+    PUBLISHER_ADDRESS_PATTERN.test(segments[2])
+  ) {
+    storageTag = segments[0];
+    chainId = segments[1];
+    publisherAddress = segments[2];
+    localIdSegment = segments[3];
+  } else if (PUBLISHER_ADDRESS_PATTERN.test(segments[1])) {
     storageTag = '';
-  } else if (segments.length === 4) {
-    [storageTag, chainId, publisherAddress, localIdSegment] = segments;
-    if (!STORAGE_TAG_PATTERN.test(storageTag)) return null;
+    chainId = segments[0];
+    publisherAddress = segments[1];
+    localIdSegment = segments[2];
   } else {
     return null;
   }
 
   if (chainId.length === 0) return null;
   if (localIdSegment.length === 0) return null;
-  if (!PUBLISHER_ADDRESS_PATTERN.test(publisherAddress)) return null;
 
   let startKAId: bigint | null;
   try {

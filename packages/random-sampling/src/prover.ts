@@ -338,11 +338,60 @@ export class RandomSamplingProver {
     // (an address) back to the storage's UAL tag. The extractor uses
     // this to disambiguate batchId collisions in CGs that hold KCs
     // from multiple storage versions (V9 + V10 today; arbitrary
-    // versions in the future). Adapters without a registry still
-    // produce a working prover by falling through to the legacy
-    // "match the first UAL" behaviour — bit-for-bit pre-RFC.
-    const expectedStorageTag = this.chain.kcStorageRegistry
-      ?.tagFor(challenge.knowledgeCollectionStorageContract);
+    // versions in the future).
+    //
+    // Codex review on PR #718 (Comment 2): if the registry exists but
+    // does not yet know the challenged storage address (stale cache,
+    // race between Hub.NewAssetStorage emission and our event listener,
+    // partial init failure), tagFor returns undefined. Falling through
+    // to the legacy "first UAL match wins" path can prove the WRONG KC
+    // in mixed-storage CGs. Try a single registry refresh — that
+    // covers the legitimate stale-cache case — and fail-closed
+    // (skip-period as a kc-not-synced miss) if the storage stays
+    // unknown afterwards. Adapters without a registry at all
+    // (`kcStorageRegistry` is `undefined`) still get the legacy
+    // unfiltered behaviour because they explicitly opted out of
+    // tag-aware proving by not exposing a registry.
+    let expectedStorageTag: string | undefined;
+    if (this.chain.kcStorageRegistry) {
+      expectedStorageTag = this.chain.kcStorageRegistry.tagFor(
+        challenge.knowledgeCollectionStorageContract,
+      );
+      if (expectedStorageTag === undefined) {
+        try {
+          await this.chain.kcStorageRegistry.refresh();
+        } catch (err) {
+          this.log.warn('rs.tick.kcs-registry-refresh-failed', {
+            err: err instanceof Error ? err.message : String(err),
+          });
+        }
+        expectedStorageTag = this.chain.kcStorageRegistry.tagFor(
+          challenge.knowledgeCollectionStorageContract,
+        );
+      }
+      if (expectedStorageTag === undefined) {
+        const storageAddress = challenge.knowledgeCollectionStorageContract;
+        this.log.warn('rs.tick.kcs-registry-miss', {
+          kcId: kcId.toString(),
+          cgId: cgId.toString(),
+          storageContract: storageAddress,
+        });
+        await this.wal.append(
+          makeWalEntry(periodKey, 'failed', {
+            kcId: kcId.toString(),
+            cgId: cgId.toString(),
+            chunkId: chunkId.toString(),
+            error: {
+              code: 'kcs-registry-miss',
+              message:
+                `KC storage registry has no entry for challenge storage ${storageAddress}; ` +
+                `refusing to prove against the wrong KC`,
+            },
+          }),
+        );
+        return { kind: 'kc-not-synced', kcId, cgId };
+      }
+    }
 
     let leaves: Uint8Array[];
     try {
