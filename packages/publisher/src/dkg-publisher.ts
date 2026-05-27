@@ -3126,47 +3126,52 @@ export class DKGPublisher implements Publisher {
     let cgsProcessed = 0;
 
     try {
-      const contextGraphs = await this.graphManager.listContextGraphs();
       const peerToAddress = new Map<string, string | null>();
       const allGraphs = await this.store.listGraphs();
+      // GH #748 Codex round 6 (user report): enumerate `_shared_memory_meta`
+      // graphs directly via `store.listGraphs()`. The earlier approach used
+      // `graphManager.listContextGraphs()`, but that helper filters out CG
+      // IDs containing a slash (storage/graph-manager.ts:104) to dedupe
+      // sub-graph paths — which also excludes legitimate curated CGs of the
+      // `<addr>/<slug>` shape (the on-chain-anchored ones a user is NOT the
+      // curator of). On a real node, that meant the migration silently
+      // skipped every curated CG and only touched bare-slug shadows.
+      // Iterating the SWM-meta graphs directly catches both forms (curated
+      // root + sub-graph-scoped) naturally — each graph is processed once,
+      // marker stored adjacent at `<...>/_meta`.
+      const swmMetaGraphs = allGraphs.filter(
+        g => g.startsWith(CG_PREFIX) && g.endsWith(SWM_META_SUFFIX),
+      );
 
-      for (const cgId of contextGraphs) {
-        if (cgId === 'agents' || cgId === 'ontology') continue; // system graphs hold no SWM
-        const cgMetaGraph = `${CG_PREFIX}${cgId}/_meta`;
+      for (const swmMetaGraph of swmMetaGraphs) {
+        // Defensive: skip system graphs even though they shouldn't carry SWM.
+        const cgPath = swmMetaGraph.slice(CG_PREFIX.length, swmMetaGraph.length - SWM_META_SUFFIX.length);
+        if (cgPath === 'agents' || cgPath === 'ontology') continue;
 
-        // Skip if migration marker already present for this CG.
+        // Derive marker graph by swapping the suffix — works for root CG
+        // and sub-graph-scoped SWMs alike. Marker lives in the adjacent
+        // `_meta` graph so a SWM graph wipe doesn't accidentally re-arm
+        // the migration.
+        const markerGraph = `${CG_PREFIX}${cgPath}/_meta`;
+
         const markerResult = await this.store.query(
-          `SELECT ?ts WHERE { GRAPH <${cgMetaGraph}> { <${MIGRATION_MARKER_SUBJECT}> <${DKG}appliedAt> ?ts } } LIMIT 1`,
+          `SELECT ?ts WHERE { GRAPH <${markerGraph}> { <${MIGRATION_MARKER_SUBJECT}> <${DKG}appliedAt> ?ts } } LIMIT 1`,
         );
         if (markerResult.type === 'bindings' && markerResult.bindings.length > 0) {
           continue;
         }
 
-        // Collect root SWM-meta graph plus any sub-graph-scoped ones for this CG.
-        const swmMetaGraphs: string[] = [this.graphManager.sharedMemoryMetaUri(cgId)];
-        const sgPrefix = `${CG_PREFIX}${cgId}/`;
-        for (const g of allGraphs) {
-          if (g.startsWith(sgPrefix) && g.endsWith(SWM_META_SUFFIX)) {
-            const middle = g.slice(sgPrefix.length, g.length - SWM_META_SUFFIX.length);
-            if (middle && !middle.includes('/')) {
-              swmMetaGraphs.push(g);
-            }
-          }
-        }
-
-        let cgRewritten = 0;
+        let swmRewritten = 0;
         // GH #748 Codex round 4: track retriable vs permanent skips
         // separately. Marker-block decision uses retriable only — permanent
         // misses (sentinel `"unknown"`, empty string) can never be resolved,
         // so they must not keep the migration hot on every boot.
-        let cgRetriableSkipped = 0;
-        let cgPermanentSkipped = 0;
+        let swmRetriableSkipped = 0;
+        let swmPermanentSkipped = 0;
 
-        for (const swmMetaGraph of swmMetaGraphs) {
-          const sparql = `SELECT ?s ?o WHERE { GRAPH <${swmMetaGraph}> { ?s <${PROV}wasAttributedTo> ?o . FILTER(isLiteral(?o)) } }`;
-          const result = await this.store.query(sparql);
-          if (result.type !== 'bindings') continue;
-
+        const sparql = `SELECT ?s ?o WHERE { GRAPH <${swmMetaGraph}> { ?s <${PROV}wasAttributedTo> ?o . FILTER(isLiteral(?o)) } }`;
+        const result = await this.store.query(sparql);
+        if (result.type === 'bindings') {
           for (const row of result.bindings) {
             const subject = row['s'];
             const objectLit = row['o'];
@@ -3179,7 +3184,7 @@ export class DKGPublisher implements Publisher {
             // `generateKCMetadata` placeholder when peer ID wasn't supplied)
             // or empty — neither can ever resolve to an agent address.
             if (!peerId || peerId === 'unknown') {
-              cgPermanentSkipped++;
+              swmPermanentSkipped++;
               continue;
             }
 
@@ -3193,7 +3198,7 @@ export class DKGPublisher implements Publisher {
 
             if (!address) {
               // Retriable: AGENTS record might sync on a future boot.
-              cgRetriableSkipped++;
+              swmRetriableSkipped++;
               continue;
             }
 
@@ -3229,43 +3234,41 @@ export class DKGPublisher implements Publisher {
               object: `did:dkg:agent:${address}`,
               graph: swmMetaGraph,
             }]);
-            cgRewritten++;
+            swmRewritten++;
           }
         }
 
-        // GH #748 Codex rounds 2 + 4: write the per-CG marker when there are
-        // no RETRIABLE misses left. Permanent placeholders (sentinel
+        // GH #748 Codex rounds 2 + 4: write the marker when there are no
+        // RETRIABLE misses left. Permanent placeholders (sentinel
         // `"unknown"`) are never resolvable, so blocking the marker on them
         // would keep the migration hot on every boot forever. Retriable
         // misses (AGENTS record not yet synced) still suppress the marker so
         // future boots retry. The re-run cost is bounded by the residual
         // literal count — already-rewritten rows fail the `isLiteral(?o)`
-        // filter and contribute zero work. Use the CG `_meta` graph rather
-        // than `_shared_memory_meta` so a SWM graph wipe doesn't accidentally
-        // re-arm the migration.
-        if (cgRetriableSkipped === 0) {
+        // filter and contribute zero work.
+        if (swmRetriableSkipped === 0) {
           await this.store.insert([{
             subject: MIGRATION_MARKER_SUBJECT,
             predicate: `${DKG}appliedAt`,
             object: `"${new Date().toISOString()}"^^<${XSD}dateTime>`,
-            graph: cgMetaGraph,
+            graph: markerGraph,
           }]);
         }
 
-        const cgSkipped = cgRetriableSkipped + cgPermanentSkipped;
-        totalRewritten += cgRewritten;
-        totalSkipped += cgSkipped;
+        const swmSkipped = swmRetriableSkipped + swmPermanentSkipped;
+        totalRewritten += swmRewritten;
+        totalSkipped += swmSkipped;
         cgsProcessed++;
 
-        if (cgRewritten > 0 || cgSkipped > 0) {
-          const retryNote = cgRetriableSkipped > 0
-            ? ` (${cgRetriableSkipped} will retry on next boot, ${cgPermanentSkipped} permanent placeholders)`
-            : cgPermanentSkipped > 0
-              ? ` (${cgPermanentSkipped} permanent placeholders)`
+        if (swmRewritten > 0 || swmSkipped > 0) {
+          const retryNote = swmRetriableSkipped > 0
+            ? ` (${swmRetriableSkipped} will retry on next boot, ${swmPermanentSkipped} permanent placeholders)`
+            : swmPermanentSkipped > 0
+              ? ` (${swmPermanentSkipped} permanent placeholders)`
               : '';
           this.log.info(
             ctx,
-            `CG ${cgId}: rewrote ${cgRewritten} attribution literal(s) to agent DID, left ${cgSkipped} unresolved${retryNote}`,
+            `SWM ${cgPath}: rewrote ${swmRewritten} attribution literal(s) to agent DID, left ${swmSkipped} unresolved${retryNote}`,
           );
         }
       }

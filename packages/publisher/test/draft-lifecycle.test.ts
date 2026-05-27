@@ -362,6 +362,61 @@ describe('Working Memory Assertion Lifecycle', () => {
     expect(r4.skipped).toBe(0);
   });
 
+  it('GH #748 Codex round 6: curated CG (<addr>/<slug> form) is migrated, not silently skipped', async () => {
+    // Regression for a user-reported bug: the previous version iterated
+    // `graphManager.listContextGraphs()`, which filters out IDs containing
+    // a slash — silently skipping every curated `<addr>/<slug>` CG (the
+    // ones a user is NOT the curator of). The migration now enumerates
+    // `_shared_memory_meta` graphs directly so both bare-slug and curated
+    // CGs are processed.
+    const CURATOR = '0xE5B88968Ed464F4e3f5354C54DFAB9e39dfEAfBd';
+    const CURATED_CG = `${CURATOR}/tuesday-cg-curated`;
+    const AGENTS_GRAPH = 'did:dkg:context-graph:agents';
+    const CURATED_META = `did:dkg:context-graph:${CURATED_CG}/_meta`;
+    const CURATED_SWM_META = `did:dkg:context-graph:${CURATED_CG}/_shared_memory_meta`;
+    const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+    const DKG = 'http://dkg.io/ontology/';
+    const DKG_REGISTRY = 'https://dkg.network/ontology#';
+    const PROV = 'http://www.w3.org/ns/prov#';
+    const PEER = '12D3KooWCuratedAgent';
+    const ADDR = '0xc7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7';
+
+    await store.insert([
+      { subject: `did:dkg:agent:${ADDR}`, predicate: RDF_TYPE, object: `${DKG_REGISTRY}Agent`, graph: AGENTS_GRAPH },
+      { subject: `did:dkg:agent:${ADDR}`, predicate: `${DKG_REGISTRY}peerId`, object: `"${PEER}"`, graph: AGENTS_GRAPH },
+      { subject: `did:dkg:agent:${ADDR}`, predicate: `${DKG_REGISTRY}agentAddress`, object: `"${ADDR}"`, graph: AGENTS_GRAPH },
+    ]);
+
+    // Seed a SWM op in the curated CG with the legacy literal shape.
+    const OP = `urn:dkg:share:${CURATED_CG}:op-curated`;
+    await store.insert([
+      { subject: OP, predicate: RDF_TYPE, object: `${DKG}WorkspaceOperation`, graph: CURATED_SWM_META },
+      { subject: OP, predicate: `${DKG}publisherPeerId`, object: `"${PEER}"`, graph: CURATED_SWM_META },
+      { subject: OP, predicate: `${PROV}wasAttributedTo`, object: `"${PEER}"`, graph: CURATED_SWM_META },
+      // No CG existence triple — the migration must find the SWM-meta
+      // graph by direct enumeration, not via `listContextGraphs()`.
+    ]);
+
+    const r = await publisher.migrateSwmAttributionToAgentDid();
+    expect(r.rewritten).toBeGreaterThanOrEqual(1);
+
+    // Curated CG's SWM-meta row was rewritten to URI form.
+    const after = await store.query(
+      `SELECT ?o WHERE { GRAPH <${CURATED_SWM_META}> { <${OP}> <${PROV}wasAttributedTo> ?o } }`,
+    );
+    if (after.type === 'bindings') {
+      expect(after.bindings.length).toBe(1);
+      expect(after.bindings[0]['o']).toBe(`did:dkg:agent:${ADDR}`);
+    }
+
+    // Marker landed in the adjacent CG `_meta` for the curated form (note
+    // the `<addr>/<slug>` segment is preserved verbatim in the marker path).
+    const marker = await store.query(
+      `SELECT ?ts WHERE { GRAPH <${CURATED_META}> { <urn:dkg:migration:swm-attr-agent-did> <${DKG}appliedAt> ?ts } }`,
+    );
+    if (marker.type === 'bindings') expect(marker.bindings.length).toBe(1);
+  });
+
   it('GH #748 Codex round 4: permanent "unknown" sentinel does not block the marker', async () => {
     // Legacy `generateKCMetadata` wrote `prov:wasAttributedTo "unknown"`
     // when no peer ID was supplied. That value can never resolve to an
