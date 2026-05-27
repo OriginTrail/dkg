@@ -10,7 +10,6 @@ import {
   publishSharedMemory, executeQuery,
   writeProfileQueryCatalog,
   fetchSubGraphs,
-  HttpError,
   type AgentIdentity, type AssertionInfo, type PendingJoinRequest, type PublishResult, type SubGraphInfo,
 } from '../../api.js';
 import { ImportFilesModal } from '../../components/Modals/ImportFilesModal.js';
@@ -540,13 +539,19 @@ function overviewRoleState(
   participantsStatus: OverviewParticipantsStatus,
 ): OverviewRoleState {
   const curator = typeof cg?.curator === 'string' ? cg.curator.trim() : '';
-  const agentDid = currentAgent?.agentDid?.trim() ?? '';
+  // Codex review issue P — match the address-or-did predicate
+  // `curatorStatusForOverview` uses (bug G), so the role pill and
+  // the join-requests gate can't disagree on older daemons that
+  // only surface `agentAddress`. `canonicalAgentDid` already
+  // normalises bare EVM addresses to the prefixed DID form, so
+  // any-of-the-two-matches resolves correctly.
   const agentIds = new Set(
     [currentAgent?.agentDid, currentAgent?.agentAddress]
       .filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
       .map(canonicalAgentDid),
   );
-  if (curator && agentDid && canonicalAgentDid(curator) === canonicalAgentDid(agentDid)) {
+  const hasIdentity = agentIds.size > 0;
+  if (curator && hasIdentity && agentIds.has(canonicalAgentDid(curator))) {
     return {
       label: 'Curator',
       title: 'This agent is the curator for this Context Graph.',
@@ -554,14 +559,14 @@ function overviewRoleState(
     };
   }
   if (cg?.callerInvolved === true) {
-    if (curator && !agentDid && currentAgentStatus === 'loading') {
+    if (curator && !hasIdentity && currentAgentStatus === 'loading') {
       return {
         label: 'Role checking',
         title: 'This agent is involved in this Context Graph; curator status is still loading.',
         tone: 'unknown',
       };
     }
-    if (curator && !agentDid && currentAgentStatus === 'error') {
+    if (curator && !hasIdentity && currentAgentStatus === 'error') {
       return {
         label: 'Role unknown',
         title: 'This agent is involved in this Context Graph, but curator status could not be confirmed.',
@@ -1063,21 +1068,22 @@ export function PendingJoinRequestsSection({
   const [requests, setRequests] = useState<PendingJoinRequest[]>([]);
   const [processing, setProcessing] = useState<string | null>(null);
   const [status, setStatus] = useState<'idle' | 'loading' | 'error'>('loading');
-  // Codex review bug L — the backend `/join-requests` endpoint is
-  // the authoritative auth check. Fail OPEN at the UI: attempt the
-  // fetch in `'unknown'` state too, and only hide the section if
-  // the server returns 401/403. Other errors (5xx, network) keep
-  // the section visible with the standard error copy so the user
-  // sees that something is wrong rather than silently losing the
-  // moderation surface.
-  const [serverDeniedAuth, setServerDeniedAuth] = useState(false);
 
   useEffect(() => {
-    // Reset the server-denied flag whenever the CG or curator
-    // status changes — a fresh fetch deserves a fresh verdict.
-    setServerDeniedAuth(false);
-    if (curatorStatus === 'not-curator') {
-      // Definitive non-curator — no fetch, no UI.
+    // Codex review bug N (reverts the optimistic-fetch logic from
+    // bug L). The daemon's `/join-requests` route does NOT gate
+    // on curator identity — see `packages/cli/src/daemon/routes/
+    // context-graph.ts:898-909` which calls
+    // `agent.listPendingJoinRequests`, whose body is a raw SPARQL
+    // read of the meta graph (`packages/agent/src/dkg-agent.ts:
+    // 13126-13152`) with no caller authentication. Until that
+    // gating lands server-side, firing the request in `'unknown'`
+    // status would leak pending-moderation metadata to any caller
+    // whose `/api/agent/identity` lookup is mid-resolution / errored.
+    // Fail closed at the UI: only fetch when we have positive
+    // local proof of curator status. The "Verifying access…"
+    // panel below stays as the safe gate for `'unknown'`.
+    if (curatorStatus !== 'curator') {
       setRequests([]);
       setStatus('idle');
       return;
@@ -1090,25 +1096,31 @@ export function PendingJoinRequestsSection({
         setRequests(data.requests.filter(r => r.status === 'pending'));
         setStatus('idle');
       })
-      .catch((err: unknown) => {
+      .catch(() => {
         if (cancelled) return;
         setRequests([]);
-        // 401/403 from the backend is the authoritative "you are
-        // not the curator" signal. Hide the section instead of
-        // showing the verifying / error panel.
-        if (err instanceof HttpError && (err.status === 401 || err.status === 403)) {
-          setServerDeniedAuth(true);
-          setStatus('idle');
-          return;
-        }
         setStatus('error');
       });
     return () => { cancelled = true; };
   }, [contextGraphId, curatorStatus]);
 
-  // Definitive non-curator OR server denied the moderation
-  // endpoint — section is dead UI and stays hidden.
-  if (curatorStatus === 'not-curator' || serverDeniedAuth) return null;
+  // Definitive non-curator — section is dead UI and stays hidden.
+  if (curatorStatus === 'not-curator') return null;
+
+  // Unknown — render a quiet "verifying access" panel so the user
+  // sees something is in progress (no actionable controls; the
+  // request fetch is gated until we know they're the curator).
+  // See effect comment above for why we fail closed here.
+  if (curatorStatus === 'unknown') {
+    return (
+      <section className="v10-po-join" data-section="join-requests">
+        <header className="v10-po-join-head">
+          <span className="v10-po-section-title">Pending join requests</span>
+        </header>
+        <div className="v10-po-join-empty">Verifying access…</div>
+      </section>
+    );
+  }
 
   const handleApprove = async (addr: string) => {
     setProcessing(addr);
@@ -1128,26 +1140,16 @@ export function PendingJoinRequestsSection({
     } catch { /* noop */ } finally { setProcessing(null); }
   };
 
-  // Codex bug L — when curator status is 'unknown' we're firing
-  // the request optimistically; the loading copy reads
-  // "Verifying access…" to signal that BOTH access AND the
-  // request list are resolving. The count badge stays hidden
-  // until we have an authoritative answer.
-  const isVerifying = curatorStatus === 'unknown' && status === 'loading';
-  const showCountBadge = status !== 'loading' || curatorStatus === 'curator';
-
   return (
     <section className="v10-po-join" data-section="join-requests">
       <header className="v10-po-join-head">
         <span className="v10-po-section-title">Pending join requests</span>
-        {showCountBadge && (
-          <span className="v10-po-join-count" data-empty={requests.length === 0 ? 'true' : 'false'}>
-            {requests.length}
-          </span>
-        )}
+        <span className="v10-po-join-count" data-empty={requests.length === 0 ? 'true' : 'false'}>
+          {requests.length}
+        </span>
       </header>
       {status === 'loading'
-        ? <div className="v10-po-join-empty">{isVerifying ? 'Verifying access…' : 'Loading join requests...'}</div>
+        ? <div className="v10-po-join-empty">Loading join requests...</div>
         : status === 'error'
           ? <div className="v10-po-join-empty">Join requests are currently unavailable.</div>
           : requests.length === 0

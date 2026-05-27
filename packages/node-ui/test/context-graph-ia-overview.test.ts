@@ -616,10 +616,14 @@ describe('Context Graph IA and Overview', () => {
     await act(async () => root.unmount());
   });
 
-  it('PendingJoinRequestsSection renders a verifying-access panel during the optimistic fetch when curatorStatus is "unknown" (Codex bug C + L)', async () => {
-    // Hold the fetch open so the section stays in the "verifying"
-    // loading window — that's the panel we want to inspect.
-    apiMock.listJoinRequests.mockReturnValue(new Promise(() => { /* never resolves */ }));
+  it('PendingJoinRequestsSection renders the verifying-access panel for curatorStatus "unknown" WITHOUT firing listJoinRequests (Codex bug N — reverts bug L)', async () => {
+    // The daemon `/join-requests` route is NOT curator-gated
+    // (cli/src/daemon/routes/context-graph.ts:898; agent.ts:13126
+    // calls a raw SPARQL read with no caller auth). Firing it in
+    // the 'unknown' state would leak pending-moderation metadata
+    // to any caller whose `/api/agent/identity` is mid-resolution
+    // or errored. Fail closed: render the quiet verifying panel,
+    // skip the fetch.
     const { container, root } = await render(
       React.createElement(PendingJoinRequestsSection, {
         contextGraphId: 'cg-join',
@@ -629,72 +633,62 @@ describe('Context Graph IA and Overview', () => {
     const section = container.querySelector('[data-section="join-requests"]');
     expect(section).toBeTruthy();
     expect(section?.textContent).toContain('Verifying access');
-    // No approve/reject controls during the loading window.
     expect(container.querySelector('.v10-po-join-btn')).toBeNull();
-    // The count badge stays hidden while we're still verifying.
-    expect(container.querySelector('.v10-po-join-count')).toBeNull();
-    // Codex bug L — the fetch DID fire even though status is
-    // 'unknown'; the backend is the authoritative auth check.
+    // Codex bug N regression — `listJoinRequests` MUST NOT fire.
+    expect(apiMock.listJoinRequests).not.toHaveBeenCalled();
+    await act(async () => root.unmount());
+  });
+
+  it('PendingJoinRequestsSection does not fire listJoinRequests for definitive non-curators (Codex bug N)', async () => {
+    const { container, root } = await render(
+      React.createElement(PendingJoinRequestsSection, {
+        contextGraphId: 'cg-join',
+        curatorStatus: 'not-curator' as const,
+      }),
+    );
+    expect(container.querySelector('[data-section="join-requests"]')).toBeNull();
+    expect(apiMock.listJoinRequests).not.toHaveBeenCalled();
+    await act(async () => root.unmount());
+  });
+
+  it('PendingJoinRequestsSection fires listJoinRequests only when curatorStatus is positively "curator"', async () => {
+    apiMock.listJoinRequests.mockResolvedValue({ requests: [] });
+    const { container, root } = await render(
+      React.createElement(PendingJoinRequestsSection, {
+        contextGraphId: 'cg-join',
+        curatorStatus: 'curator' as const,
+      }),
+    );
+    expect(container.querySelector('[data-section="join-requests"]')).toBeTruthy();
     expect(apiMock.listJoinRequests).toHaveBeenCalledWith('cg-join');
     await act(async () => root.unmount());
   });
 
-  it('PendingJoinRequestsSection renders the request list when curatorStatus is "unknown" and listJoinRequests succeeds (Codex bug L)', async () => {
-    apiMock.listJoinRequests.mockResolvedValue({
-      requests: [
-        { agentAddress: '0xabc1230000000000000000000000000000000123', status: 'pending', name: 'Pending Alice' },
-      ],
-    });
+  it('Overview role badge reads "Curator" when only agentAddress matches cg.curator (Codex issue P — shared predicate with curatorStatusForOverview)', async () => {
+    const address = '0xcafe000000000000000000000000000000000a0e';
     const { container, root } = await render(
-      React.createElement(PendingJoinRequestsSection, {
-        contextGraphId: 'cg-join',
-        curatorStatus: 'unknown' as const,
+      React.createElement(ProjectOverviewCard, {
+        cg: {
+          id: 'cg-issue-p',
+          name: 'Issue P',
+          accessPolicy: 'private',
+          curator: `did:dkg:agent:${address}`,
+          callerInvolved: true,
+        },
+        memory: baseMemory,
+        participants: [],
+        currentAgent: { agentAddress: address } as any,
+        currentAgentStatus: 'ok',
       }),
     );
-    expect(container.querySelector('[data-section="join-requests"]')).toBeTruthy();
-    expect(container.textContent).toContain('Pending Alice');
-    expect(container.querySelector('.v10-po-join-btn.approve')).toBeTruthy();
-    expect(container.querySelector('.v10-po-join-btn.reject')).toBeTruthy();
-    expect(container.textContent).not.toContain('Verifying access');
-    await act(async () => root.unmount());
-  });
-
-  it('PendingJoinRequestsSection hides the section when curatorStatus is "unknown" and listJoinRequests returns 403 (Codex bug L)', async () => {
-    apiMock.listJoinRequests.mockRejectedValue(new apiMock.HttpError(403, 'forbidden'));
-    const { container, root } = await render(
-      React.createElement(PendingJoinRequestsSection, {
-        contextGraphId: 'cg-join',
-        curatorStatus: 'unknown' as const,
-      }),
-    );
-    // 403 from the server is the authoritative non-curator signal.
-    expect(container.querySelector('[data-section="join-requests"]')).toBeNull();
-    await act(async () => root.unmount());
-  });
-
-  it('PendingJoinRequestsSection hides the section when curatorStatus is "unknown" and listJoinRequests returns 401 (Codex bug L)', async () => {
-    apiMock.listJoinRequests.mockRejectedValue(new apiMock.HttpError(401, 'unauthorized'));
-    const { container, root } = await render(
-      React.createElement(PendingJoinRequestsSection, {
-        contextGraphId: 'cg-join',
-        curatorStatus: 'unknown' as const,
-      }),
-    );
-    expect(container.querySelector('[data-section="join-requests"]')).toBeNull();
-    await act(async () => root.unmount());
-  });
-
-  it('PendingJoinRequestsSection shows error copy when curatorStatus is "unknown" and listJoinRequests fails with a non-auth error (Codex bug L)', async () => {
-    apiMock.listJoinRequests.mockRejectedValue(new apiMock.HttpError(500, 'server error'));
-    const { container, root } = await render(
-      React.createElement(PendingJoinRequestsSection, {
-        contextGraphId: 'cg-join',
-        curatorStatus: 'unknown' as const,
-      }),
-    );
-    expect(container.querySelector('[data-section="join-requests"]')).toBeTruthy();
-    expect(container.textContent).toContain('Join requests are currently unavailable.');
-    expect(container.textContent).not.toContain('Verifying access');
+    // Role badge must match `curatorStatusForOverview`'s verdict.
+    // Pre-fix, this read 'Joined' (the role helper only matched
+    // agentDid); the curator predicate now consults both.
+    const roleBadge = container.querySelector('.v10-po-badge[data-role]');
+    expect(roleBadge?.getAttribute('data-role')).toBe('curator');
+    expect(roleBadge?.textContent?.trim()).toBe('Curator');
+    expect(container.textContent).not.toContain('Joined');
+    expect(container.textContent).not.toContain('Role unknown');
     await act(async () => root.unmount());
   });
 
