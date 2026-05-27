@@ -113,7 +113,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   // Lifted from SubGraphBar's identical fetch so we don't sneak a
   // peer hook into useMemoryEntities. `null` = not yet known; the
   // stat strip then suppresses the cell rather than rendering "0".
-  // Reserved bookkeeping slugs ('meta', 'assertion') never count.
+  // The reserved `meta` slug never counts (see `lib/subGraphs.ts`).
   // `subGraphFetchFailed` distinguishes "still loading" from
   // "permanently unavailable" (Codex review bug D).
   const [subGraphCount, setSubGraphCount] = useState<number | null>(null);

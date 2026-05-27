@@ -750,8 +750,8 @@ export function ProjectOverviewCard({
 }: {
   cg: any;
   memory: ReturnType<typeof useMemoryEntities>;
-  /** Count of user-facing sub-graphs (excludes reserved `meta` /
-   *  `assertion` slugs). `null` while loading or on fetch error. */
+  /** Count of user-facing sub-graphs (excludes the reserved `meta`
+   *  slug). `null` while loading or on fetch error. */
   subGraphCount?: number | null;
   /** True if the last `/sub-graph/list` fetch errored. Lets the
    *  stat strip distinguish "still loading" from "permanently

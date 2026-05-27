@@ -412,15 +412,15 @@ describe('ProjectView entity detail navigation', () => {
     expect(apiWrapperMock.fetchSubGraphs).toHaveBeenCalledWith('cg-test');
   });
 
-  it('Overview Subgraphs count filters only the `meta` slug — `assertion` stays counted (Codex issue K)', async () => {
-    // SubGraphBar (chips) and SubGraphOverviewGrid (cards) only
-    // exclude `meta`. The Overview stat must match — otherwise
-    // it undercounts vs the views the user clicks into.
+  it('Overview Subgraphs count filters the `meta` slug', async () => {
+    // Same filter as SubGraphBar (chips) and SubGraphOverviewGrid
+    // (cards) — only `meta` is excluded. The daemon's
+    // `listSubGraphs` returns only registered `dkg:SubGraph` rows;
+    // `meta` is the auto-registered profile slug.
     apiWrapperMock.fetchSubGraphs.mockResolvedValue({
       contextGraphId: 'cg-test',
       subGraphs: [
         { name: 'meta', uri: 'urn:meta', entityCount: 0, tripleCount: 0 },
-        { name: 'assertion', uri: 'urn:assertion', entityCount: 10, tripleCount: 50 },
         { name: 'recipes', uri: 'urn:recipes', entityCount: 3, tripleCount: 12 },
         { name: 'reviews', uri: 'urn:reviews', entityCount: 5, tripleCount: 18 },
         { name: 'docs', uri: 'urn:docs', entityCount: 2, tripleCount: 7 },
@@ -441,8 +441,8 @@ describe('ProjectView entity detail navigation', () => {
     });
     await flush();
 
-    // Expect 4 = 5 total - 1 (meta filtered). `assertion` stays.
-    expect(query('overview-card').dataset.subGraphCount).toBe('4');
+    // Expect 3 = 4 total - 1 (meta filtered).
+    expect(query('overview-card').dataset.subGraphCount).toBe('3');
   });
 
   it('opens graph nodes with the layer context they came from', async () => {
