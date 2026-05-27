@@ -126,16 +126,33 @@ describe('Context Graph IA and Overview', () => {
           callerInvolved: true,
         },
         memory: baseMemory,
-        participants: ['0x1234567890abcdef', '0xabcdef1234567890'],
+        subGraphCount: 3,
+        participants: [
+          '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd',
+          '0x1234567890abcdef1234567890abcdef12345678',
+        ],
         currentAgent: { agentDid: 'did:dkg:agent:0xABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD' },
         onSwitchLayer,
         onOpenPrimer,
       }),
     );
 
-    expect(container.textContent).toContain('Curator');
-    expect(container.textContent).toContain('Curated');
+    // Labelled-prefix identity row (S2 finalize §4.2.1):
+    // "Context Graph: Curated · Your role: ◆ Curator" — naked
+    // pills are gone.
+    const badges = Array.from(container.querySelectorAll('.v10-po-id-badge'));
+    expect(badges.map(b => b.textContent?.replace(/\s+/g, ' ').trim())).toEqual([
+      'Context Graph: Curated',
+      'Your role: ◆ Curator',
+    ]);
     expect(container.textContent).toContain('Agents with access');
+
+    // At a glance — 4 stats (§4.2.1): Entities · Triples · Subgraphs
+    // · Agents with access. Subgraph count is passed in by ProjectView.
+    const statLabels = Array.from(container.querySelectorAll('.v10-stat-strip-label'))
+      .map(node => node.textContent?.trim());
+    expect(statLabels).toEqual(['Entities', 'Triples', 'Subgraphs', 'Agents with access']);
+
     expect(container.textContent).toContain('Knowledge Pipeline');
     expect(container.textContent).toContain('published assertion bundles become Knowledge Assets');
     expect(container.querySelector('.v10-memory-strip')).toBeNull();
@@ -153,11 +170,67 @@ describe('Context Graph IA and Overview', () => {
     }
     expect(onSwitchLayer.mock.calls.map(call => call[0])).toEqual(['wm', 'swm', 'vm']);
 
-    const primer = container.querySelector<HTMLButtonElement>('.v10-po-primer-link');
+    // Participant agents section — renamed from "Allowlisted/Known
+    // participants" (§4.2.1). The current agent's matching row is
+    // marked with `(you · curator)` and a filled diamond glyph.
+    expect(container.textContent).toContain('Participant agents');
+    const participantRows = Array.from(container.querySelectorAll('.v10-po-participant'));
+    expect(participantRows).toHaveLength(2);
+    const self = participantRows[0];
+    expect(self.classList.contains('self')).toBe(true);
+    expect(self.classList.contains('curator')).toBe(true);
+    expect(self.textContent).toContain('(you · curator)');
+    expect(self.querySelector('.v10-po-participant-glyph')?.textContent).toBe('◆');
+    const other = participantRows[1];
+    expect(other.classList.contains('self')).toBe(false);
+    expect(other.classList.contains('curator')).toBe(false);
+    expect(other.querySelector('.v10-po-participant-glyph')?.textContent).toBe('◯');
+
+    const primer = container.querySelector<HTMLButtonElement>('.v10-po-identity-primer');
+    expect(primer).toBeTruthy();
     await act(async () => {
       primer!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     expect(onOpenPrimer).toHaveBeenCalledTimes(1);
+
+    await act(async () => root.unmount());
+  });
+
+  it('shows a graceful Participant agents empty state when none are recorded', async () => {
+    const { container, root } = await render(
+      React.createElement(ProjectOverviewCard, {
+        cg: { id: 'cg-empty', name: 'Empty', accessPolicy: 'private' },
+        memory: baseMemory,
+        participants: [],
+        currentAgent: { agentDid: 'did:dkg:agent:0xdef' },
+      }),
+    );
+
+    expect(container.textContent).toContain('Participant agents');
+    expect(container.textContent).toContain('No participant agents recorded yet.');
+    expect(container.querySelectorAll('.v10-po-participant')).toHaveLength(0);
+
+    await act(async () => root.unmount());
+  });
+
+  it('renders an unknown subgraph count while subGraphCount is loading', async () => {
+    const { container, root } = await render(
+      React.createElement(ProjectOverviewCard, {
+        cg: { id: 'cg-loading-sg', name: 'Loading', accessPolicy: 'private' },
+        memory: baseMemory,
+        // subGraphCount intentionally omitted — caller has not resolved yet.
+        participants: [],
+        currentAgent: { agentDid: 'did:dkg:agent:0xdef' },
+      }),
+    );
+
+    const cells = Array.from(container.querySelectorAll('.v10-stat-strip-cell'));
+    const subgraphsCell = cells.find(cell =>
+      cell.querySelector('.v10-stat-strip-label')?.textContent?.trim() === 'Subgraphs',
+    );
+    expect(subgraphsCell).toBeTruthy();
+    expect(subgraphsCell!.querySelector('.v10-stat-strip-value')?.textContent?.trim())
+      .toBe('Loading...');
 
     await act(async () => root.unmount());
   });
@@ -319,7 +392,7 @@ describe('Context Graph IA and Overview', () => {
     await act(async () => root.unmount());
   });
 
-  it('labels public graph participant lists as known, not allowlisted', async () => {
+  it('renders the participants section under the canonical "Participant agents" heading regardless of access policy', async () => {
     const { container, root } = await render(
       React.createElement(ProjectOverviewCard, {
         cg: {
@@ -329,13 +402,18 @@ describe('Context Graph IA and Overview', () => {
           callerInvolved: true,
         },
         memory: baseMemory,
-        participants: ['0x1234567890abcdef'],
+        participants: ['0x1234567890abcdef1234567890abcdef12345678'],
         currentAgent: { agentDid: 'did:dkg:agent:0xdef' },
       }),
     );
 
-    expect(container.textContent).toContain('Known participants');
+    // S2 finalize §4.2.1 — the section is "Participant agents"
+    // everywhere. Public-vs-curated semantics live on the CG-type
+    // badge and the access stat hint, not the participants heading.
+    expect(container.textContent).toContain('Participant agents');
+    expect(container.textContent).not.toContain('Known participants');
     expect(container.textContent).not.toContain('Allowlisted participants');
+    expect(container.querySelectorAll('.v10-po-participant')).toHaveLength(1);
 
     await act(async () => root.unmount());
   });

@@ -1,6 +1,7 @@
 /**
- * Compact horizontal strip of sub-graph chips. Sits above MemoryStrip and
- * scopes the whole project view to the selected sub-graph (or "All").
+ * Compact horizontal strip of sub-graph chips. Sits above the layer
+ * detail view and scopes the whole project view to the selected
+ * sub-graph (or "All").
  *
  * Visual styling is fully driven by the project profile: each SubGraphBinding
  * contributes its icon/color/label. Per-sub-graph entity/triple counts come

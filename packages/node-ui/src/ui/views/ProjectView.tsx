@@ -1,6 +1,8 @@
 import { useMemo, useState, useCallback, useEffect, useRef } from 'react';
 import { useFetch } from '../hooks.js';
 import { api } from '../api-wrapper.js';
+import { fetchSubGraphs } from '../api.js';
+import { useMemoryGraphEvents } from '../hooks/useNodeEvents.js';
 import { ImportFilesModal } from '../components/Modals/ImportFilesModal.js';
 import { ShareProjectModal } from '../components/Modals/ShareProjectModal.js';
 import {
@@ -26,7 +28,8 @@ import {
   KADetailView,
   SubGraphDetailView,
   ProjectOverviewCard,
-  PendingJoinRequestsBar,
+  PendingJoinRequestsSection,
+  isCuratorForOverview,
   SubGraphOverviewGrid,
   ContextGraphQueryView,
   LayerDetailView,
@@ -105,6 +108,13 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     list: [],
     status: 'loading',
   });
+  // S2 finalize — Overview "At a glance" needs a subgraph count.
+  // Lifted from SubGraphBar's identical fetch so we don't sneak a
+  // peer hook into useMemoryEntities. `null` = not yet known; the
+  // stat strip then suppresses the cell rather than rendering "0".
+  // Reserved bookkeeping slugs ('meta', 'assertion') never count.
+  const [subGraphCount, setSubGraphCount] = useState<number | null>(null);
+  const subGraphRequestRef = useRef(0);
   // Active sub-graph *page* — when set, the middle pane renders the sub-graph
   // detail view instead of the overview / layer views. This is structurally
   // a sibling of `activeLayer`, not a filter over it: sub-graphs are a peer
@@ -311,6 +321,28 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
 
   useEffect(() => { refreshParticipants(); }, [refreshParticipants]);
 
+  const refreshSubGraphCount = useCallback(() => {
+    const requestId = ++subGraphRequestRef.current;
+    fetchSubGraphs(contextGraphId)
+      .then(res => {
+        if (subGraphRequestRef.current !== requestId) return;
+        const count = (res.subGraphs ?? []).filter(
+          sg => sg.name !== 'meta' && sg.name !== 'assertion',
+        ).length;
+        setSubGraphCount(count);
+      })
+      .catch(() => {
+        if (subGraphRequestRef.current !== requestId) return;
+        setSubGraphCount(null);
+      });
+  }, [contextGraphId]);
+
+  useEffect(() => {
+    setSubGraphCount(null);
+    refreshSubGraphCount();
+  }, [refreshSubGraphCount]);
+  useMemoryGraphEvents(contextGraphId, refreshSubGraphCount);
+
   const selectedLayerTrust = selectedLayerContext ? TRUST_FOR_LAYER[selectedLayerContext] : null;
   const detailEntityTriples = useMemo(
     () => selectedLayerTrust
@@ -500,12 +532,18 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
         </>
       )}
 
-      {/* Overview View */}
+      {/* Overview View — S2 finalize section order (§4.2.1):
+          identity row + At a glance + Knowledge Pipeline + Participant
+          agents live inside ProjectOverviewCard. Pending join requests
+          is a peer section below it (curator-only). Recent activity
+          moves to the last content row before the primer escape hatch
+          which lives inside the card's footer. */}
       {!activeSubGraph && activeLayer === 'overview' && !selectedEntity && (
         <>
           <ProjectOverviewCard
             cg={cg}
             memory={rawMemory}
+            subGraphCount={subGraphCount}
             participants={participantsForCurrentGraph}
             participantsStatus={participantsStatusForCurrentGraph}
             currentAgent={currentAgent ?? null}
@@ -513,7 +551,11 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
             onSwitchLayer={handleLayerSwitch}
             onOpenPrimer={handleOpenPrimer}
           />
-          <PendingJoinRequestsBar contextGraphId={contextGraphId} onParticipantsChanged={refreshParticipants} />
+          <PendingJoinRequestsSection
+            contextGraphId={contextGraphId}
+            isCurator={isCuratorForOverview({ cg, currentAgent: currentAgent ?? null })}
+            onParticipantsChanged={refreshParticipants}
+          />
           {rawMemory.loading && (
             <div className="v10-me-loading"><div className="v10-me-loading-text">Loading memory...</div></div>
           )}

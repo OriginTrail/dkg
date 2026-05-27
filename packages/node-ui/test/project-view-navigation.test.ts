@@ -170,6 +170,12 @@ vi.mock('../src/ui/api-wrapper.js', () => ({
 
 vi.mock('../src/ui/api.js', () => ({
   listParticipants: vi.fn(async () => ({ allowedAgents: [] })),
+  fetchSubGraphs: vi.fn(async () => ({ contextGraphId: 'cg-test', subGraphs: [] })),
+}));
+
+vi.mock('../src/ui/hooks/useNodeEvents.js', () => ({
+  useNodeEvents: () => {},
+  useMemoryGraphEvents: () => {},
 }));
 
 vi.mock('../src/ui/hooks/useMemoryEntities.js', () => ({
@@ -259,38 +265,8 @@ vi.mock('../src/ui/views/project/components.js', () => ({
     },
       'Overview',
       React.createElement('button', { 'data-testid': 'open-primer', onClick: onOpenPrimer }, 'What is a Context Graph?')),
-  PendingJoinRequestsBar: () => null,
-  MemoryStrip: ({ expandedLayer, onExpandedLayerChange, expandTabs, onExpandTabChange, onSelectEntity }: {
-    expandedLayer: 'wm' | 'swm' | 'vm' | null;
-    onExpandedLayerChange: (layer: 'wm' | 'swm' | 'vm' | null) => void;
-    expandTabs: Record<'wm' | 'swm' | 'vm', string>;
-    onExpandTabChange: (layer: 'wm' | 'swm' | 'vm', tab: string) => void;
-    onSelectEntity: (uri: string) => void;
-  }) => {
-    const activeTab = expandedLayer ? expandTabs[expandedLayer] : 'items';
-    return React.createElement('section', {
-      'data-testid': 'memory-strip',
-      'data-expanded': expandedLayer ?? '',
-      'data-tab': activeTab,
-    },
-      React.createElement('button', {
-        'data-testid': 'expand-strip-swm',
-        onClick: () => onExpandedLayerChange(expandedLayer === 'swm' ? null : 'swm'),
-      }, 'Expand SWM'),
-      expandedLayer && React.createElement(React.Fragment, {},
-        React.createElement('button', {
-          'data-testid': 'strip-tab-graph',
-          onClick: () => onExpandTabChange(expandedLayer, 'graph'),
-        }, 'Graph'),
-        React.createElement('div', {
-          'data-testid': 'strip-scroll',
-          'data-cg-scroll-key': `layer:${expandedLayer}:${activeTab}`,
-        },
-          React.createElement('button', {
-            'data-testid': 'open-strip-entity',
-            onClick: () => onSelectEntity('urn:entity:working'),
-          }, 'Open strip entity'))));
-  },
+  PendingJoinRequestsSection: () => null,
+  isCuratorForOverview: () => false,
   SubGraphOverviewGrid: ({ onSelectSubGraph }: { onSelectSubGraph: (slug: string) => void }) =>
     React.createElement('button', {
       'data-testid': 'select-subgraph-demo',

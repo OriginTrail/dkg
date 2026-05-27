@@ -668,9 +668,35 @@ function overviewAccessState(raw?: string): { label: string; title: string; tone
   };
 }
 
+// S2 finalize (§4.2.1) — true if the current agent owns the curator
+// role on this CG. Lifted out of overviewRoleState so the Pending
+// Join Requests section can gate on the same predicate without
+// re-deriving it.
+export function isCuratorForOverview({
+  cg,
+  currentAgent,
+}: {
+  cg: any;
+  currentAgent: OverviewAgentIdentity | null;
+}): boolean {
+  const curator = typeof cg?.curator === 'string' ? cg.curator.trim() : '';
+  const agentDid = currentAgent?.agentDid?.trim() ?? '';
+  if (!curator || !agentDid) return false;
+  return canonicalAgentDid(curator) === canonicalAgentDid(agentDid);
+}
+
+function overviewIdentitySet(currentAgent: OverviewAgentIdentity | null): Set<string> {
+  return new Set(
+    [currentAgent?.agentDid, currentAgent?.agentAddress]
+      .filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
+      .map(canonicalAgentDid),
+  );
+}
+
 export function ProjectOverviewCard({
   cg,
   memory,
+  subGraphCount,
   participants,
   participantsStatus = 'ok',
   currentAgent,
@@ -680,6 +706,9 @@ export function ProjectOverviewCard({
 }: {
   cg: any;
   memory: ReturnType<typeof useMemoryEntities>;
+  /** Count of user-facing sub-graphs (excludes reserved `meta` /
+   *  `assertion` slugs). `null` while loading or on fetch error. */
+  subGraphCount?: number | null;
   participants: string[];
   participantsStatus?: OverviewParticipantsStatus;
   currentAgent?: OverviewAgentIdentity | null;
@@ -691,8 +720,10 @@ export function ProjectOverviewCard({
   const layerSum = working + shared + verified;
   const role = overviewRoleState(cg, currentAgent ?? null, currentAgentStatus, participants, participantsStatus);
   const access = overviewAccessState(cg?.accessPolicy);
-  const isPublicAccess = normalizeAccessPolicy(cg?.accessPolicy) === 'public';
   const accessAgentStat = overviewAccessAgentStat(cg, participants, participantsStatus);
+  const curator = typeof cg?.curator === 'string' ? cg.curator.trim() : '';
+  const curatorCanonical = curator ? canonicalAgentDid(curator) : '';
+  const selfIds = overviewIdentitySet(currentAgent ?? null);
   const layerStatuses = Object.values(memory.layerStatus ?? {});
   const unavailableLayerCount = layerStatuses.filter(status => status === 'error').length;
   const allLayerCountsUnavailable =
@@ -706,6 +737,18 @@ export function ProjectOverviewCard({
           ? 'One or more layer counts are currently a lower bound.'
           : 'Canonical current-layer entity counts.';
   const totalEntitiesValue = allLayerCountsUnavailable ? 'Unavailable' : layerSum.toLocaleString();
+  // Triples: canonical layer-correct total exposed by the hook
+  // (§4.2.1 trap — do NOT sum per-entity tripleCount, do NOT borrow
+  // SubGraphBar's `totalTriples` which excludes the root bucket).
+  const triplesCount = memory.allTriples?.length ?? 0;
+  const triplesValue = allLayerCountsUnavailable
+    ? 'Unavailable'
+    : memory.loading && triplesCount === 0
+      ? '...'
+      : triplesCount.toLocaleString();
+  const subGraphsValue = subGraphCount == null
+    ? 'Loading...'
+    : subGraphCount.toLocaleString();
   const pipeline = [
     {
       key: 'wm' as const,
@@ -736,21 +779,51 @@ export function ProjectOverviewCard({
 
   return (
     <div className="v10-po">
-      <div className="v10-po-top">
-        <span className="v10-po-dot" />
-        <div className="v10-po-heading">
-          <div className="v10-po-title">{cg.name || cg.id}</div>
-          {cg.description && <div className="v10-po-desc">{cg.description}</div>}
+      {/* Identity row — name/description live in the persistent
+          ProjectHeaderStrip above; this row leads with role + CG-type
+          (§4.2.1). */}
+      <div className="v10-po-identity">
+        <div className="v10-po-identity-badges">
+          <span
+            className={`v10-po-id-badge cg-type ${access.tone}`}
+            title={access.title}
+          >
+            <span className="v10-po-id-badge-key">Context Graph:</span>
+            {' '}
+            <span className="v10-po-id-badge-val">{access.label}</span>
+          </span>
+          <span
+            className={`v10-po-id-badge role ${role.tone}`}
+            title={role.title}
+          >
+            <span className="v10-po-id-badge-key">Your role:</span>
+            {' '}
+            <span className="v10-po-id-badge-val">
+              <span className="v10-po-role-glyph" aria-hidden="true">
+                {role.tone === 'curator' ? '◆' : role.tone === 'participant' ? '◯' : '○'}
+              </span>
+              {' '}
+              {role.label}
+            </span>
+          </span>
         </div>
-        <div className="v10-po-badges">
-          <span className={`v10-po-badge ${role.tone}`} title={role.title}>{role.label}</span>
-          <span className={`v10-po-badge ${access.tone}`} title={access.title}>{access.label}</span>
-        </div>
+        {onOpenPrimer && (
+          <button
+            type="button"
+            className="v10-po-identity-primer"
+            onClick={onOpenPrimer}
+            title="Open the Context Graph primer"
+          >
+            What is a Context Graph?
+          </button>
+        )}
       </div>
       <StatStrip
         className="v10-po-stat-strip"
         items={[
-          { id: 'total', value: totalEntitiesValue, label: 'Total entities', hint: statusHint },
+          { id: 'entities', value: totalEntitiesValue, label: 'Entities', hint: statusHint },
+          { id: 'triples', value: triplesValue, label: 'Triples', hint: 'Canonical triple total across all layers.' },
+          { id: 'subgraphs', value: subGraphsValue, label: 'Subgraphs', hint: 'Topical partitions inside this Context Graph.' },
           accessAgentStat,
         ]}
       />
@@ -760,11 +833,6 @@ export function ProjectOverviewCard({
             <div className="v10-po-section-title">Knowledge Pipeline</div>
             <div className="v10-po-section-desc">Entities move from private staging to shared review; published assertion bundles become Knowledge Assets with on-chain provenance.</div>
           </div>
-          {onOpenPrimer && (
-            <button type="button" className="v10-po-primer-link" onClick={onOpenPrimer}>
-              What is a Context Graph?
-            </button>
-          )}
         </div>
         <div className="v10-po-pipeline-track" aria-hidden="true">
           {!pipelineHasUnavailableLayer && layerSum > 0
@@ -803,38 +871,92 @@ export function ProjectOverviewCard({
           ))}
         </div>
       </div>
-      {participants.length > 0 && (
-        <div className="v10-po-participants">
-          <div className="v10-po-participants-label">
-            {isPublicAccess ? 'Known participants' : 'Allowlisted participants'}
-          </div>
-          <div className="v10-po-participants-list">
-            {participants.map(addr => (
-              <span key={addr} className="v10-po-participant" title={addr}>
-                <span className="v10-po-participant-dot" style={{ background: '#3b82f6' }} />
-                {addr.slice(0, 6)}…{addr.slice(-4)}
-              </span>
-            ))}
-          </div>
-        </div>
-      )}
+      {/* Participant agents — §4.2.1: renamed from
+          "Allowlisted/Known participants"; marks the current user's
+          rows with `(you)` / `(you · curator)` and others' curator
+          rows with `· curator`. */}
+      <div className="v10-po-people">
+        <div className="v10-po-section-title">Participant agents</div>
+        {participants.length === 0
+          ? <div className="v10-po-people-empty">
+              {participantsStatus === 'loading'
+                ? 'Loading participant agents...'
+                : participantsStatus === 'error'
+                  ? 'Participant list unavailable.'
+                  : 'No participant agents recorded yet.'}
+            </div>
+          : <div className="v10-po-participants-list">
+              {participants.map(addr => {
+                const canonical = canonicalAgentDid(addr);
+                const isSelf = selfIds.has(canonical);
+                const isCurator = !!curatorCanonical && canonical === curatorCanonical;
+                let suffix = '';
+                if (isSelf && isCurator) suffix = ' (you · curator)';
+                else if (isSelf) suffix = ' (you)';
+                else if (isCurator) suffix = ' · curator';
+                const glyph = isSelf ? '◆' : '◯';
+                return (
+                  <span
+                    key={addr}
+                    className={`v10-po-participant${isSelf ? ' self' : ''}${isCurator ? ' curator' : ''}`}
+                    title={addr}
+                  >
+                    <span className="v10-po-participant-glyph" aria-hidden="true">{glyph}</span>
+                    <span className="v10-po-participant-name">
+                      {addr.slice(0, 6)}…{addr.slice(-4)}{suffix}
+                    </span>
+                  </span>
+                );
+              })}
+            </div>}
+      </div>
     </div>
   );
 }
 
 // ─── Pending Join Requests ───────────────────────────────────
 
-export function PendingJoinRequestsBar({ contextGraphId, onParticipantsChanged }: { contextGraphId: string; onParticipantsChanged?: () => void }) {
+// S2 finalize (§4.2.1) — Pending Join Requests is a peer section
+// under Participant agents, visible to curators ALWAYS (with a
+// graceful empty state) and hidden from non-curators. The earlier
+// `PendingJoinRequestsBar` returned null on empty and never rendered
+// for non-curators; we now gate on `isCurator` from the caller.
+export function PendingJoinRequestsSection({
+  contextGraphId,
+  isCurator,
+  onParticipantsChanged,
+}: {
+  contextGraphId: string;
+  isCurator: boolean;
+  onParticipantsChanged?: () => void;
+}) {
   const [requests, setRequests] = useState<PendingJoinRequest[]>([]);
   const [processing, setProcessing] = useState<string | null>(null);
+  const [status, setStatus] = useState<'idle' | 'loading' | 'error'>('loading');
 
   useEffect(() => {
+    if (!isCurator) {
+      setRequests([]);
+      setStatus('idle');
+      return;
+    }
+    let cancelled = false;
+    setStatus('loading');
     listJoinRequests(contextGraphId)
-      .then(data => setRequests(data.requests.filter(r => r.status === 'pending')))
-      .catch(() => setRequests([]));
-  }, [contextGraphId]);
+      .then(data => {
+        if (cancelled) return;
+        setRequests(data.requests.filter(r => r.status === 'pending'));
+        setStatus('idle');
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setRequests([]);
+        setStatus('error');
+      });
+    return () => { cancelled = true; };
+  }, [contextGraphId, isCurator]);
 
-  if (requests.length === 0) return null;
+  if (!isCurator) return null;
 
   const handleApprove = async (addr: string) => {
     setProcessing(addr);
@@ -855,27 +977,47 @@ export function PendingJoinRequestsBar({ contextGraphId, onParticipantsChanged }
   };
 
   return (
-    <div className="v10-ph-join-requests" style={{ margin: '0 16px 8px', padding: '8px 12px', borderRadius: 8, background: 'var(--bg-surface)', border: '1px solid #f59e0b44' }}>
-      <span style={{ fontSize: 9, fontWeight: 700, textTransform: 'uppercase' as const, letterSpacing: '0.8px', color: 'var(--text-tertiary)', marginBottom: 6, display: 'block' }}>
-        Pending Join Requests <span className="v10-ph-join-badge">{requests.length}</span>
-      </span>
-      <div className="v10-ph-join-list">
-        {requests.map(req => (
-          <div key={req.agentAddress} className="v10-ph-join-item">
-            <div className="v10-ph-join-info">
-              <span className="v10-ph-join-name">{req.name || `${req.agentAddress.slice(0, 6)}…${req.agentAddress.slice(-4)}`}</span>
-              <span className="v10-ph-join-addr" title={req.agentAddress}>{req.agentAddress.slice(0, 10)}…</span>
-            </div>
-            <div className="v10-ph-join-actions">
-              <button className="v10-ph-join-btn approve" onClick={() => handleApprove(req.agentAddress)} disabled={processing === req.agentAddress}>
-                {processing === req.agentAddress ? '…' : '✓ Approve'}
-              </button>
-              <button className="v10-ph-join-btn reject" onClick={() => handleReject(req.agentAddress)} disabled={processing === req.agentAddress}>✕</button>
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
+    <section className="v10-po-join">
+      <header className="v10-po-join-head">
+        <span className="v10-po-section-title">Pending join requests</span>
+        <span className="v10-po-join-count" data-empty={requests.length === 0 ? 'true' : 'false'}>
+          {requests.length}
+        </span>
+      </header>
+      {status === 'loading'
+        ? <div className="v10-po-join-empty">Loading join requests...</div>
+        : status === 'error'
+          ? <div className="v10-po-join-empty">Join requests are currently unavailable.</div>
+          : requests.length === 0
+            ? <div className="v10-po-join-empty">No pending join requests.</div>
+            : <div className="v10-po-join-list">
+                {requests.map(req => (
+                  <div key={req.agentAddress} className="v10-po-join-item">
+                    <div className="v10-po-join-info">
+                      <span className="v10-po-join-name">{req.name || `${req.agentAddress.slice(0, 6)}…${req.agentAddress.slice(-4)}`}</span>
+                      <span className="v10-po-join-addr" title={req.agentAddress}>{req.agentAddress.slice(0, 10)}…</span>
+                    </div>
+                    <div className="v10-po-join-actions">
+                      <button
+                        className="v10-po-join-btn approve"
+                        onClick={() => handleApprove(req.agentAddress)}
+                        disabled={processing === req.agentAddress}
+                      >
+                        {processing === req.agentAddress ? '…' : '✓ Approve'}
+                      </button>
+                      <button
+                        className="v10-po-join-btn reject"
+                        onClick={() => handleReject(req.agentAddress)}
+                        disabled={processing === req.agentAddress}
+                        aria-label="Reject join request"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>}
+    </section>
   );
 }
 
@@ -1226,227 +1368,11 @@ export function VerifiedGraphLegend({ anchors }: { anchors: PublishAnchor[] }) {
   );
 }
 
-// ─── Memory Strip (expandable layer rows) ────────────────────
-
-type MemoryStripLayer = 'wm' | 'swm' | 'vm';
-
-export function MemoryStrip({
-  memory,
-  onSwitchLayer,
-  onSelectEntity,
-  contextGraphId,
-  onNodeClick,
-  expandedLayer,
-  onExpandedLayerChange,
-  expandTabs,
-  onExpandTabChange,
-  swmAttribution,
-}: {
-  memory: ReturnType<typeof useMemoryEntities>;
-  onSwitchLayer: (layer: LayerView) => void;
-  onSelectEntity: (uri: string) => void;
-  contextGraphId: string;
-  onNodeClick?: (node: any) => void;
-  expandedLayer?: MemoryStripLayer | null;
-  onExpandedLayerChange?: (layer: MemoryStripLayer | null) => void;
-  expandTabs?: Record<MemoryStripLayer, LayerContentTab>;
-  onExpandTabChange?: (layer: MemoryStripLayer, tab: LayerContentTab) => void;
-  /** Codex Code6 (PR #656) — pass-through of the parent's shared
-   *  SWM attribution result. */
-  swmAttribution?: SwmAttributionsResult;
-}) {
-  const [localExpanded, setLocalExpanded] = useState<MemoryStripLayer | null>(null);
-  const [localExpandTabs, setLocalExpandTabs] = useState<Record<MemoryStripLayer, LayerContentTab>>({
-    wm: 'items',
-    swm: 'items',
-    vm: 'items',
-  });
-  const expanded = expandedLayer !== undefined ? expandedLayer : localExpanded;
-  const activeExpandTabs = expandTabs ?? localExpandTabs;
-  const profile = useProjectProfileContext();
-
-  const layerEntities = useMemo(() => {
-    const wm: MemoryEntity[] = [];
-    const swm: MemoryEntity[] = [];
-    const vm: MemoryEntity[] = [];
-    for (const e of memory.entityList) {
-      if (e.trustLevel === 'verified') vm.push(e);
-      else if (e.trustLevel === 'shared') swm.push(e);
-      else wm.push(e);
-    }
-    return { wm, swm, vm };
-  }, [memory.entityList]);
-
-  // R2-6: per-layer triple counts must agree with the in-page count
-  // shown by the layer-detail tab on the same memory. The detail tab
-  // uses `useLayerTriples`, which residue-filters out triples whose
-  // subject is a promoted entity (post-P1). Summing `memory.allTriples`
-  // raw would double-count promoted residue and disagree with the
-  // badge under it. Source from `useLayerTriples` per layer so both
-  // surfaces stay in sync.
-  const wmLayerTriples = useLayerTriples(memory, 'wm');
-  const swmLayerTriples = useLayerTriples(memory, 'swm');
-  const vmLayerTriples = useLayerTriples(memory, 'vm');
-  const layerTripleCounts = useMemo(() => ({
-    wm: wmLayerTriples.length,
-    swm: swmLayerTriples.length,
-    vm: vmLayerTriples.length,
-  }), [wmLayerTriples.length, swmLayerTriples.length, vmLayerTriples.length]);
-
-  const toggleExpand = (layer: MemoryStripLayer) => {
-    const next = expanded === layer ? null : layer;
-    if (onExpandedLayerChange) onExpandedLayerChange(next);
-    else setLocalExpanded(next);
-  };
-
-  const handleExpandTab = (layer: MemoryStripLayer, tab: LayerContentTab) => {
-    if (onExpandTabChange) onExpandTabChange(layer, tab);
-    else setLocalExpandTabs(prev => ({ ...prev, [layer]: tab }));
-  };
-
-  const layers: Array<{
-    key: MemoryStripLayer;
-    label: string;
-    color: string;
-    icon: string;
-    entities: MemoryEntity[];
-    count: number;
-    promoteLabel: string | null;
-    viewLayer: LayerView;
-  }> = [
-    { key: 'wm', label: 'Working Memory', color: '#64748b', icon: '◇', entities: layerEntities.wm, count: memory.counts.wm, promoteLabel: 'Promote All → Shared', viewLayer: 'wm' },
-    { key: 'swm', label: 'Shared Working Memory', color: '#f59e0b', icon: '◈', entities: layerEntities.swm, count: memory.counts.swm, promoteLabel: 'Publish to Verifiable Memory', viewLayer: 'swm' },
-    { key: 'vm', label: 'Verifiable Memory', color: '#22c55e', icon: '◉', entities: layerEntities.vm, count: memory.counts.vm, promoteLabel: null, viewLayer: 'vm' },
-  ];
-
-  return (
-    <div className="v10-memory-strip">
-      {layers.map(layer => {
-        const isExpanded = expanded === layer.key;
-        const activeTab = activeExpandTabs[layer.key] ?? 'items';
-        return (
-          <React.Fragment key={layer.key}>
-            <div
-              className={`v10-memory-layer ${layer.key} ${isExpanded ? 'expanded' : ''}`}
-              onClick={() => toggleExpand(layer.key)}
-            >
-              <div className="v10-layer-label">
-                <span className="v10-layer-abbr">{layer.label}</span>
-                <span className="v10-layer-count">{layer.count}</span>
-              </div>
-              <div className="v10-layer-items">
-                <span className="v10-layer-chevron">▸</span>
-                {layer.entities.length === 0 && (
-                  <EmptyState
-                    inline
-                    tone={toneForLayer(layer.key)}
-                    icon={layer.icon}
-                    title={`No ${layerNoun(layer.key, 2).toLowerCase()} yet`}
-                  />
-                )}
-                {layer.entities.slice(0, 6).map(e => {
-                  const { icon } = entityMeta(e, profile);
-                  return (
-                    <div key={e.uri} className="v10-layer-chip" style={{ borderColor: `${layer.color}40` }}>
-                      <span className="v10-chip-dot" style={{ background: layer.color }} />
-                      <span className="v10-chip-text">{e.label}</span>
-                      <span className="v10-chip-meta">{icon}</span>
-                    </div>
-                  );
-                })}
-                {layer.entities.length > 6 && (
-                  <span className="v10-chip-meta">+{layer.entities.length - 6} more</span>
-                )}
-              </div>
-            </div>
-            <div className={`v10-layer-expand-content ${isExpanded ? 'open' : ''}`}>
-              {isExpanded && (
-                <MemoryStripExpanded
-                  layerKey={layer.key as 'wm' | 'swm' | 'vm'}
-                  entities={layer.entities}
-                  tripleCount={layerTripleCounts[layer.key as 'wm' | 'swm' | 'vm']}
-                  contextGraphId={contextGraphId}
-                  memory={memory}
-                  activeTab={activeTab as LayerContentTab}
-                  onTabChange={tab => handleExpandTab(layer.key, tab)}
-                  onSelectEntity={onSelectEntity}
-                  onNodeClick={onNodeClick}
-                  onSwitchLayer={() => onSwitchLayer(layer.viewLayer)}
-                  swmAttribution={layer.key === 'swm' ? swmAttribution : undefined}
-                />
-              )}
-            </div>
-          </React.Fragment>
-        );
-      })}
-    </div>
-  );
-}
-
-// Thin wrapper that computes the layer's triples once and renders LayerContent with a footer.
-export function MemoryStripExpanded({
-  layerKey,
-  entities,
-  tripleCount,
-  contextGraphId,
-  memory,
-  activeTab,
-  onTabChange,
-  onSelectEntity,
-  onNodeClick,
-  onSwitchLayer,
-  swmAttribution,
-}: {
-  layerKey: 'wm' | 'swm' | 'vm';
-  entities: MemoryEntity[];
-  tripleCount: number;
-  contextGraphId: string;
-  memory: ReturnType<typeof useMemoryEntities>;
-  activeTab: LayerContentTab;
-  onTabChange: (tab: LayerContentTab) => void;
-  onSelectEntity: (uri: string) => void;
-  onNodeClick?: (node: any) => void;
-  onSwitchLayer: () => void;
-  /** Codex Code6 (PR #656) — pass-through of the parent's shared
-   *  SWM attribution result so the SWM-tab graph reuses the network
-   *  call ProjectView already made for the Overview feed. */
-  swmAttribution?: SwmAttributionsResult;
-}) {
-  const layerTriples = useLayerTriples(memory, layerKey);
-  // No wrapper here: `LayerGraphPanel` already injects `trustLayer:
-  // nodeLayerContext` (which resolves to `layer === layerKey` in this
-  // path) on every node click, including the singleton-shelf path.
-  // Re-wrapping would double-inject the same value and mask any future
-  // intentional divergence between the panel's `layer` and ours.
-  return (
-    <LayerContent
-      layer={layerKey}
-      entities={entities}
-      tripleCount={tripleCount}
-      layerTriples={layerTriples}
-      contextGraphId={contextGraphId}
-      memory={memory}
-      activeTab={activeTab}
-      onTabChange={onTabChange}
-      onSelectEntity={onSelectEntity}
-      onNodeClick={onNodeClick}
-      swmAttribution={swmAttribution}
-      footer={
-        <div className="v10-layer-expand-footer">
-          <button
-            className="v10-layer-expand-footer-btn"
-            onClick={e => {
-              e.stopPropagation();
-              onSwitchLayer();
-            }}
-          >
-            View full layer →
-          </button>
-        </div>
-      }
-    />
-  );
-}
+// S2 finalize: the expandable WM/SWM/VM `MemoryStrip` /
+// `MemoryStripExpanded` duplicated the layer tabs and was removed
+// from the Overview branch in PR #615. The exports lingered with
+// no production caller. Removed here per "no backwards-compat
+// shims" (initial release).
 
 // ─── Generative Widget Components ─────────────────────────────
 
@@ -2834,7 +2760,7 @@ export function LayerDetailView({
   const config = LAYER_CONFIG[layer];
   // No wrapper here: `LayerGraphPanel` already injects `trustLayer:
   // nodeLayerContext` (which resolves to `layer` in this path) on every
-  // node click. See sibling `MemoryStripExpanded` comment.
+  // node click; re-wrapping would double-inject the same value.
 
   const entities = useMemo(
     () => memory.entityList.filter(e => e.trustLevel === config.trustLevel),
