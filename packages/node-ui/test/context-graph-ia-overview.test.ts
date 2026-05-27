@@ -7,6 +7,7 @@ import {
   LayerSwitcher,
   ProjectOverviewCard,
   OverviewPrimerEntry,
+  PendingJoinRequestsSection,
 } from '../src/ui/views/project/components.js';
 import { ContextGraphPrimerView } from '../src/ui/views/ContextGraphPrimerView.js';
 
@@ -259,6 +260,72 @@ describe('Context Graph IA and Overview', () => {
     expect(container.textContent).toContain('No participant agents recorded yet.');
     expect(container.querySelectorAll('.v10-po-participant')).toHaveLength(0);
 
+    await act(async () => root.unmount());
+  });
+
+  it('Overview sections render in the locked §4.2.1 order with stable `data-section` hooks', async () => {
+    // The four card-internal sections (identity → at-a-glance →
+    // pipeline → participants) live inside ProjectOverviewCard;
+    // the next three (join-requests → activity → primer) are
+    // siblings in ProjectView's Overview branch and verified
+    // separately (PendingJoinRequestsSection + OverviewPrimerEntry
+    // assertions below + the ProjectView mount order).
+    const { container, root } = await render(
+      React.createElement(ProjectOverviewCard, {
+        cg: {
+          id: 'cg-order',
+          name: 'Order',
+          accessPolicy: 'private',
+          callerInvolved: false,
+        },
+        memory: baseMemory,
+        subGraphCount: 1,
+        participants: [],
+        currentAgent: { agentDid: 'did:dkg:agent:0xdef' },
+        onSwitchLayer: vi.fn(),
+        onOpenPrimer: vi.fn(),
+      }),
+    );
+
+    const sections = Array.from(container.querySelectorAll('[data-section]'))
+      .map(node => node.getAttribute('data-section'));
+    expect(sections).toEqual([
+      'identity',
+      'at-a-glance',
+      'pipeline',
+      'participants',
+    ]);
+
+    await act(async () => root.unmount());
+  });
+
+  it('OverviewPrimerEntry tags itself with data-section="primer"', async () => {
+    const { container, root } = await render(
+      React.createElement(OverviewPrimerEntry, { onOpenPrimer: vi.fn() }),
+    );
+    expect(container.querySelector('[data-section="primer"]')).toBeTruthy();
+    await act(async () => root.unmount());
+  });
+
+  it('PendingJoinRequestsSection tags itself with data-section="join-requests" (curator only)', async () => {
+    const { container, root } = await render(
+      React.createElement(PendingJoinRequestsSection, {
+        contextGraphId: 'cg-join',
+        isCurator: true,
+      }),
+    );
+    expect(container.querySelector('[data-section="join-requests"]')).toBeTruthy();
+    await act(async () => root.unmount());
+  });
+
+  it('PendingJoinRequestsSection renders nothing for non-curators', async () => {
+    const { container, root } = await render(
+      React.createElement(PendingJoinRequestsSection, {
+        contextGraphId: 'cg-join',
+        isCurator: false,
+      }),
+    );
+    expect(container.querySelector('[data-section="join-requests"]')).toBeNull();
     await act(async () => root.unmount());
   });
 

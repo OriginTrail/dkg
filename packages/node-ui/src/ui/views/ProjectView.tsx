@@ -563,17 +563,19 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
           {rawMemory.error && (
             <div className="v10-me-error">Error: {rawMemory.error}</div>
           )}
-          <ActivityFeed
-            entities={rawMemory.entityList}
-            lifecycleEvents={overviewLifecycleEvents}
-            lifecycleError={overviewLifecycleError}
-            onSelectEntity={handleOverviewActivityNavigate}
-            title="Recent activity"
-            limit={40}
-            includeUndated={false}
-            emptyHint="Once knowledge starts being added and managed in this context graph, activities will show up here as a live feed."
-            className="v10-overview-activity"
-          />
+          <div data-section="activity">
+            <ActivityFeed
+              entities={rawMemory.entityList}
+              lifecycleEvents={overviewLifecycleEvents}
+              lifecycleError={overviewLifecycleError}
+              onSelectEntity={handleOverviewActivityNavigate}
+              title="Recent activity"
+              limit={40}
+              includeUndated={false}
+              emptyHint="Once knowledge starts being added and managed in this context graph, activities will show up here as a live feed."
+              className="v10-overview-activity"
+            />
+          </div>
           <OverviewPrimerEntry onOpenPrimer={handleOpenPrimer} />
         </>
       )}

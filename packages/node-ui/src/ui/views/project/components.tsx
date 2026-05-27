@@ -784,7 +784,7 @@ export function ProjectOverviewCard({
           live in the persistent `ProjectHeaderStrip`; the role glyph
           (◆) is applied in CSS via `data-role`/`data-tone`, never in
           the data string itself. */}
-      <div className="v10-po-identity">
+      <div className="v10-po-identity" data-section="identity">
         <div className="v10-po-identity-pairs">
           <div className="v10-po-identity-pair">
             <span className="v10-po-identity-label">Your role:</span>
@@ -821,16 +821,18 @@ export function ProjectOverviewCard({
       {/* §4.2.1 Delta 2 (locked) — M6 layer-availability status copy
           renders as a `title` tooltip on the Entities cell, not as
           an inline `hint:`, to keep the 4-card grid clean. */}
-      <StatStrip
-        className="v10-po-stat-strip"
-        items={[
-          { id: 'entities', value: totalEntitiesValue, label: 'Entities', tooltip: statusHint },
-          { id: 'triples', value: triplesValue, label: 'Triples', tooltip: 'Canonical triple total across all layers.' },
-          { id: 'subgraphs', value: subGraphsValue, label: 'Subgraphs', tooltip: 'Topical partitions inside this Context Graph.' },
-          accessAgentStat,
-        ]}
-      />
-      <div className="v10-po-pipeline" aria-label="Knowledge Pipeline">
+      <div data-section="at-a-glance">
+        <StatStrip
+          className="v10-po-stat-strip"
+          items={[
+            { id: 'entities', value: totalEntitiesValue, label: 'Entities', tooltip: statusHint },
+            { id: 'triples', value: triplesValue, label: 'Triples', tooltip: 'Canonical triple total across all layers.' },
+            { id: 'subgraphs', value: subGraphsValue, label: 'Subgraphs', tooltip: 'Topical partitions inside this Context Graph.' },
+            accessAgentStat,
+          ]}
+        />
+      </div>
+      <div className="v10-po-pipeline" data-section="pipeline" aria-label="Knowledge Pipeline">
         <div className="v10-po-pipeline-head">
           <div>
             <div className="v10-po-section-title">Knowledge Pipeline</div>
@@ -880,7 +882,7 @@ export function ProjectOverviewCard({
           current user or someone else) gets `· curator`. Glyphs are
           applied in CSS via `.is-self` / `.is-curator` — never in the
           data string. */}
-      <div className="v10-po-people">
+      <div className="v10-po-people" data-section="participants">
         <div className="v10-po-section-title">Participant agents</div>
         {participants.length === 0
           ? <div className="v10-po-people-empty">
@@ -980,7 +982,7 @@ export function PendingJoinRequestsSection({
   };
 
   return (
-    <section className="v10-po-join">
+    <section className="v10-po-join" data-section="join-requests">
       <header className="v10-po-join-head">
         <span className="v10-po-section-title">Pending join requests</span>
         <span className="v10-po-join-count" data-empty={requests.length === 0 ? 'true' : 'false'}>
@@ -1035,7 +1037,7 @@ export function PendingJoinRequestsSection({
 
 export function OverviewPrimerEntry({ onOpenPrimer }: { onOpenPrimer: () => void }) {
   return (
-    <div className="v10-po-primer-footer">
+    <div className="v10-po-primer-footer" data-section="primer">
       <span className="v10-po-primer-footer-lede">New here?</span>
       <span className="v10-po-primer-footer-arrow" aria-hidden="true">→</span>
       <button
