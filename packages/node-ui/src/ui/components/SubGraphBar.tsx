@@ -13,7 +13,7 @@ import { fetchSubGraphs, type SubGraphInfo } from '../api.js';
 import type { ProjectProfile } from '../hooks/useProjectProfile.js';
 import type { MemoryEntity } from '../hooks/useMemoryEntities.js';
 import { useMemoryGraphEvents } from '../hooks/useNodeEvents.js';
-import { isUserFacingSubGraph } from '../lib/subGraphs.js';
+import { isUserFacingSubGraph, ROOT_SLUG_SENTINEL } from '../lib/subGraphs.js';
 
 export interface SubGraphBadge {
   /** Short label shown inline on the chip, e.g. "2 proposed" */
@@ -148,6 +148,21 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
     return n;
   }, [layer, entities]);
 
+  // S3 fold-in: the synthesized "Root" bucket is "all entities minus
+  // those in any named sub-graph". Computed from the same entity list
+  // the named chips use so the counts agree row-by-row.
+  const rootEntityCount = React.useMemo(() => {
+    if (!entities) return null;
+    const trust = layer ? LAYER_TRUST_LEVEL[layer] : null;
+    let n = 0;
+    for (const e of entities) {
+      if (trust !== null && e.trustLevel !== trust) continue;
+      if (e.subGraphs.size > 0) continue;
+      n++;
+    }
+    return n;
+  }, [layer, entities]);
+
   const loadSubGraphs = React.useCallback(() => {
     const requestId = ++requestIdRef.current;
     setLoading(true);
@@ -196,8 +211,13 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
       .sort((a, b) => a.rank - b.rank);
   }, [subGraphs, profile, entityScopedCounts]);
 
-  if (loading && merged.length === 0) return null;
-  if (merged.length === 0) return null;
+  // Show the Root chip when the consumer derives root from entities
+  // and at least one entity is in the root bucket. Without entities
+  // (Overview / Subgraphs page) we'd be guessing — keep it hidden.
+  const showRootChip = rootEntityCount !== null && rootEntityCount > 0;
+
+  if (loading && merged.length === 0 && !showRootChip) return null;
+  if (merged.length === 0 && !showRootChip) return null;
 
   // Prefer the distinct-entity total (R2-5 / Issue B); fall back to
   // the daemon-sum only when no entities prop was passed.
@@ -214,12 +234,12 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
 
   return (
     <div className="v10-subgraph-bar">
-      <div className="v10-subgraph-bar-label">Sub-graphs</div>
+      <div className="v10-subgraph-bar-label">Subgraphs</div>
       <button
         type="button"
         className={`v10-subgraph-chip${selected === null ? ' active' : ''}`}
         onClick={() => onSelect(null)}
-        title={`All sub-graphs · ${totalEntities} entities${scopeSuffix}${layerLabel ? '' : ` · ${totalTriples} triples`}`}
+        title={`All subgraphs · ${totalEntities} entities${scopeSuffix}${layerLabel ? '' : ` · ${totalTriples} triples`}`}
       >
         <span className="v10-subgraph-chip-icon">⊚</span>
         <span className="v10-subgraph-chip-label">All</span>
@@ -250,6 +270,19 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
           </button>
         );
       })}
+      {showRootChip && (
+        <button
+          type="button"
+          className={`v10-subgraph-chip v10-subgraph-chip-root${selected === ROOT_SLUG_SENTINEL ? ' active' : ''}`}
+          onClick={() => onSelect(ROOT_SLUG_SENTINEL)}
+          title={`Entities not in any subgraph (Context Graph root) · ${rootEntityCount} entities${scopeSuffix}`}
+          aria-label="Entities not in any subgraph (Context Graph root)"
+        >
+          <span className="v10-subgraph-chip-icon">⊘</span>
+          <span className="v10-subgraph-chip-label">Root</span>
+          <span className="v10-subgraph-chip-count">{rootEntityCount}</span>
+        </button>
+      )}
     </div>
   );
 };

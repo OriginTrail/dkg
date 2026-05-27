@@ -281,6 +281,8 @@ vi.mock('../src/ui/views/project/components.js', () => ({
       'data-testid': 'select-subgraph-demo',
       onClick: () => onSelectSubGraph('demo'),
     }, 'Open demo subgraph'),
+  SubGraphExplorerHeader: () =>
+    React.createElement('div', { 'data-testid': 'subgraph-explorer-header' }, 'Subgraph Explorer'),
   ContextGraphQueryView: () => null,
   LayerDetailView: ({ layer, activeTab, onTabChange, onSelectEntity, onNodeClick }: {
     layer: string;

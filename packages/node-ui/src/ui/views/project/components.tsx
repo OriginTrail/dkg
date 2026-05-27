@@ -66,7 +66,7 @@ import {
   type SubGraphTab, type SubGraphEntitySort,
 } from './helpers.js';
 import { EmptyState, StatStrip, toneForLayer } from '../../components/ContextGraphPrimitives.js';
-import { isUserFacingSubGraph } from '../../lib/subGraphs.js';
+import { isUserFacingSubGraph, ROOT_SLUG_SENTINEL } from '../../lib/subGraphs.js';
 import { useNodeEvents } from '../../hooks/useNodeEvents.js';
 
 export const RdfGraph = lazy(() =>
@@ -1264,6 +1264,7 @@ export function LayerGraphPanel({
   scopeEntities,
   swmAttribution,
   layerEntities,
+  nodeColorsOverride,
 }: {
   layer: 'wm' | 'swm' | 'vm';
   triples: Triple[];
@@ -1272,6 +1273,19 @@ export function LayerGraphPanel({
   scopeLabel?: string;
   trustLegendActiveLayer?: 'wm' | 'swm' | 'vm' | null;
   title?: string;
+  /**
+   * Per-URI colour override passed straight into the graph style's
+   * `nodeColors` slot. Sits ABOVE `classColors` / `namespaceColors`
+   * in the style-engine priority stack, so the caller wins for
+   * specified URIs while unspecified nodes still inherit the
+   * existing class/namespace palette and layer defaults. Used by
+   * `SubGraphDetailView` (multi-layer view) to paint per-entity
+   * trust colour (TRUST_COLORS keyed by `entity.trustLevel`) on
+   * top of the WM-default-layer fallback (fold-in #6, PR #677
+   * follow-up). Omit on the WM/SWM/VM layer tabs — SWM's own
+   * attribution palette via `swmAttribution` still runs.
+   */
+  nodeColorsOverride?: Record<string, string>;
   // When provided, the panel guarantees every URI in this set appears
   // either on the canvas or on the singleton shelf. Used by callers
   // (e.g. SubGraphDetailView) whose entity scope can include entities
@@ -1386,11 +1400,26 @@ export function LayerGraphPanel({
 
   const renderTriples = uniqueTriples;
 
-  // Only SWM layer uses per-URI node tints — for the rest, classColors rules
-  // so code graphs stay legible (Package purple / File blue / etc).
+  // Per-URI node tints by layer:
+  //   • SWM uses `swmAttr.nodeColors` (agent attribution).
+  //   • Multi-layer sub-graph callers pass `nodeColorsOverride`
+  //     keyed by `entity.trustLevel` so the canvas matches the
+  //     entity's canonical layer (fold-in #6).
+  //   • WM / VM layer tabs use neither — classColors rules.
+  // When both are supplied (SWM sub-graph view), merge with the
+  // caller's override taking precedence — it's the more specific
+  // intent. The style engine still falls back to classColors /
+  // namespaceColors / `defaultNodeColor` for unspecified URIs.
+  const mergedNodeColors = useMemo(() => {
+    const swm = layer === 'swm' ? swmAttr.nodeColors : undefined;
+    if (!swm && !nodeColorsOverride) return undefined;
+    if (!swm) return nodeColorsOverride;
+    if (!nodeColorsOverride) return swm;
+    return { ...swm, ...nodeColorsOverride };
+  }, [layer, swmAttr.nodeColors, nodeColorsOverride]);
   const graphOptions = useMemo(
-    () => buildLayerGraphOptions(layer, layer === 'swm' ? swmAttr.nodeColors : undefined),
-    [layer, swmAttr.nodeColors],
+    () => buildLayerGraphOptions(layer, mergedNodeColors),
+    [layer, mergedNodeColors],
   );
   const { canvasTriples, singletonItems } = useMemo(
     () => splitGraphTriplesForShelf(renderTriples),
@@ -1809,6 +1838,12 @@ export function LayerWidgetStrip({ layer, entities, entityCount, tripleCount, co
 
 // ─── Enhanced Entity list (sorted by triple count, with type pill) ──────
 
+const TRUST_BADGE_CONFIG: Record<TrustLevel, { layerKey: 'wm' | 'swm' | 'vm'; icon: string; label: string }> = {
+  working:  { layerKey: 'wm',  icon: '◇', label: 'Working'  },
+  shared:   { layerKey: 'swm', icon: '◈', label: 'Shared'   },
+  verified: { layerKey: 'vm',  icon: '◉', label: 'Verified' },
+};
+
 export function EntityList({
   entities,
   layerKey,
@@ -1819,6 +1854,7 @@ export function EntityList({
   sortLabel,
   headerExtra,
   timestampPredicate,
+  perEntityTrustBadge = false,
 }: {
   entities: MemoryEntity[];
   layerKey: 'wm' | 'swm' | 'vm';
@@ -1837,6 +1873,11 @@ export function EntityList({
    *  as a relative timestamp on each entity card. Pass `binding.timelinePredicate`
    *  for sub-graphs that have one. */
   timestampPredicate?: string;
+  /** When true, render the trailing trust badge from each entity's own
+   *  `trustLevel` (cross-layer view — e.g. Subgraph Explorer detail).
+   *  When false (default), every row uses `layerKey`/`layerIcon` (the
+   *  WM/SWM/VM layer-tab convention). */
+  perEntityTrustBadge?: boolean;
 }) {
   const profile = useProjectProfileContext();
   const agents = useAgentsContext();
@@ -1915,9 +1956,18 @@ export function EntityList({
                 <span className="v10-entity-card-triples">{tripleCount} triples</span>
               </div>
             </div>
-            <span className={`v10-trust-badge ${layerKey}`}>
-              {layerIcon} {trustLabel}
-            </span>
+            {perEntityTrustBadge ? (() => {
+              const badge = TRUST_BADGE_CONFIG[e.trustLevel];
+              return (
+                <span className={`v10-trust-badge ${badge.layerKey}`} title={`${badge.label} Memory`}>
+                  {badge.icon} {badge.label}
+                </span>
+              );
+            })() : (
+              <span className={`v10-trust-badge ${layerKey}`}>
+                {layerIcon} {trustLabel}
+              </span>
+            )}
           </div>
         );
       })}
@@ -3775,6 +3825,25 @@ export function TrailEvent({
 }
 
 
+// ─── Subgraph Explorer header (page identity + permanent intro) ────
+// Shared between the All / Subgraphs-overview state and every chip
+// detail (named or Root). The three-sentence intro is non-dismissible —
+// the subgraph concept is unfamiliar and needs a tangible always-present
+// definition (UX §4.4.1). Wording is locked in §4.4.1 and must stay in
+// sync with the empty-state copy below in SubGraphOverviewGrid.
+export function SubGraphExplorerHeader() {
+  return (
+    <div className="v10-subgraph-explorer-header">
+      <div className="v10-subgraph-explorer-title">Subgraph Explorer</div>
+      <p className="v10-subgraph-explorer-intro">
+        Subgraphs are optional topical partitions inside this Context Graph.
+        An entity belongs to one memory layer and, optionally, one subgraph.
+        Entities in no subgraph live in the context graph root.
+      </p>
+    </div>
+  );
+}
+
 export function SubGraphOverviewGrid({
   contextGraphId,
   memory,
@@ -3926,17 +3995,31 @@ export function SubGraphOverviewGrid({
       <EmptyState
         compact
         icon="#"
-        title="Loading sub-graphs..."
+        title="Loading subgraphs..."
         className="v10-sgov-state"
       />
     );
   }
   if (cards.length === 0) {
+    // Teaching empty state (UX §4.4.1). Replaces the previous bare
+    // "No sub-graphs registered yet." — explains what a subgraph is,
+    // how one comes into being, and offers a one-click jump to the
+    // Root bucket so the user can still see their actual data.
     return (
       <EmptyState
         icon="#"
-        title="No sub-graphs registered yet."
-        description="This Context Graph currently only has the root memory view."
+        title="No subgraphs in this Context Graph yet."
+        description={
+          <>
+            A subgraph is a named topical slice of this Context Graph
+            (e.g. <code>recipes</code>, <code>decisions</code>). Agents
+            create one when they scope an assertion to a subgraph. All
+            current entities live in the Context Graph root.
+          </>
+        }
+        actions={[
+          { label: 'View root', onClick: () => onSelectSubGraph(ROOT_SLUG_SENTINEL), variant: 'primary' },
+        ]}
         className="v10-sgov-state"
       />
     );
@@ -3945,9 +4028,9 @@ export function SubGraphOverviewGrid({
   return (
     <div className="v10-sgov">
       <div className="v10-sgov-header">
-        <div className="v10-sgov-title">Sub-graph Overview</div>
+        <div className="v10-sgov-title">Subgraphs</div>
         <div className="v10-sgov-sub">
-          {cards.length} sub-graphs · {cards.reduce((a, b) => a + b.entityCount, 0)} entities · {cards.reduce((a, b) => a + b.tripleCount, 0)} triples
+          {cards.length} subgraphs · {cards.reduce((a, b) => a + b.entityCount, 0)} entities · {cards.reduce((a, b) => a + b.tripleCount, 0)} triples
         </div>
       </div>
       <div className="v10-sgov-grid">
@@ -4253,31 +4336,50 @@ export function SubGraphDetailView({
   const [queryLoading, setQueryLoading] = useState(false);
   const [queryError, setQueryError] = useState<string | null>(null);
 
-  // Base slice: every entity that has at least one WM triple in this sub-graph.
-  // SWM/VM triples don't carry sub-graph origin, so we additionally pull in
-  // any SWM/VM entity whose URI matches a scoped one (preserving the promoted
-  // slices of the same entity across layers).
+  // The synthesized Root bucket — "entities not in any named sub-graph" —
+  // and the named-sub-graph branch share this body. They differ only in
+  // their scope predicate (no-membership vs. has-this-slug) and chrome
+  // (icon/title/binding).
+  const isRoot = slug === ROOT_SLUG_SENTINEL;
+
+  // Base slice: every entity scoped to this subgraph.
+  //  • Named branch: at least one WM triple tagged with the slug, plus
+  //    cross-layer slices (an entity promoted to SWM/VM whose WM-era
+  //    membership still pins it here).
+  //  • Root branch: no sub-graph membership at all.
   const scopedEntities = useMemo(() => {
     const scoped: MemoryEntity[] = [];
     for (const e of rawMemory.entityList) {
-      if (e.subGraphs.has(slug)) scoped.push(e);
+      if (isRoot ? e.subGraphs.size === 0 : e.subGraphs.has(slug)) scoped.push(e);
     }
     return scoped;
-  }, [rawMemory.entityList, slug]);
+  }, [rawMemory.entityList, slug, isRoot]);
 
   const scopedUris = useMemo(
     () => new Set(scopedEntities.map(e => e.uri)),
     [scopedEntities],
   );
 
-  // Triples visible in the Graph tab: anything tagged with this sub-graph's
-  // origin, plus any triple whose endpoints are both scoped entities (this
-  // carries promoted SWM/VM edges whose origin was erased on promotion).
+  // Triples visible in the Graph tab.
+  //  • Named branch: anything tagged with this sub-graph's origin, plus
+  //    any triple admissible under the asymmetric subject+object
+  //    scope rule used by the layer-tab path — subject-scoped is the
+  //    primary admission gate (covers rdf:type / labels / literal-valued
+  //    properties on promoted entities whose `subGraph` was erased on
+  //    promotion); object-scoped resources are admitted as a recovery
+  //    edge so promoted SWM/VM endpoints don't silently disappear
+  //    (fold-in #7, supersedes the over-strict `both ends in scopedUris`
+  //    branch that dropped legitimate cross-layer edges).
+  //  • Root branch: triples whose subject is root-scoped, with the same
+  //    object-side recovery.
   const scopedTriples = useMemo(
-    () => rawMemory.graphTriples.filter(t =>
-      t.subGraph === slug || (scopedUris.has(t.subject) && scopedUris.has(t.object)),
-    ),
-    [rawMemory.graphTriples, scopedUris, slug],
+    () => rawMemory.graphTriples.filter(t => {
+      if (!isRoot && t.subGraph === slug) return true;
+      if (scopedUris.has(t.subject)) return true;
+      if (scopedUris.has(t.object)) return true;
+      return false;
+    }),
+    [rawMemory.graphTriples, scopedUris, slug, isRoot],
   );
 
   // Layer counts for the pyramid header. Each entity counted in exactly
@@ -4445,6 +4547,38 @@ export function SubGraphDetailView({
     [graphPanelEntities],
   );
 
+  // Fold-in #6 (PR #677 follow-up). Per-URI trust colouring on the
+  // multi-layer Graph pane. Pre-fix `LayerGraphPanel` received
+  // `layer={singleLayer ?? 'wm'}` and painted every node WM-gray
+  // when no single layer was active — even in a sub-graph spanning
+  // SWM and VM. Build a `nodeColors` map keyed by entity URI using
+  // the canonical `TRUST_COLORS` palette (same hex values as the
+  // layer chips and the Knowledge Pipeline bar). When a single
+  // layer is active, every panel entity belongs to that layer by
+  // construction, so the per-URI map collapses to the layer default
+  // and we can skip the override (saves a copy on the common path).
+  const trustNodeColors = useMemo(() => {
+    if (singleLayer) return undefined;
+    const out: Record<string, string> = {};
+    for (const e of graphPanelEntities) {
+      out[e.uri] = TRUST_COLORS[e.trustLevel];
+      const canonical = canonicalEntityUri(e.uri);
+      if (canonical !== e.uri) out[canonical] = TRUST_COLORS[e.trustLevel];
+    }
+    return out;
+  }, [singleLayer, graphPanelEntities]);
+
+  // Locked active-layer chip pill copy (UX §4.4.1). "All layers"
+  // when every layer is enabled; otherwise the single enabled
+  // layer's title — visible whenever scope is narrower than the
+  // canonical "all three" so the user can never lose sight of
+  // which layer the count strip is reporting on.
+  const activeLayerLabel = enabledLayers.size === 3
+    ? 'All layers'
+    : singleLayer
+      ? LAYER_CONFIG[singleLayer].title
+      : Array.from(enabledLayers).map(l => LAYER_CONFIG[l === 'verified' ? 'vm' : l === 'shared' ? 'swm' : 'wm'].trustLabel).join(' + ');
+
   const timelineItems = useMemo(() => {
     if (!timelinePredicate) return [];
     const out: Array<{ entity: MemoryEntity; date: Date }> = [];
@@ -4551,10 +4685,16 @@ export function SubGraphDetailView({
     }
   }, [contextGraphId]);
 
-  const color = binding?.color ?? '#64748b';
-  const icon = binding?.icon ?? '•';
-  const title = binding?.displayName ?? slug;
-  const desc = binding?.description;
+  // Root branch carries no profile binding (it's a client-side
+  // sentinel slug) — synthesize the chrome. The neutral colour token
+  // and `⊘` glyph match the SubGraphBar chip so the page identity
+  // stays coherent when the user transitions from chip to body.
+  const color = isRoot ? 'var(--text-tertiary)' : (binding?.color ?? '#64748b');
+  const icon = isRoot ? '⊘' : (binding?.icon ?? '•');
+  const title = isRoot ? 'Root' : (binding?.displayName ?? slug);
+  const desc = isRoot
+    ? 'Entities not in any subgraph (Context Graph root).'
+    : binding?.description;
 
   // Reset filters when the sub-graph changes — otherwise chips from
   // `tasks` would linger when the user jumps to `decisions` and silently
@@ -4596,6 +4736,55 @@ export function SubGraphDetailView({
           activeLayers={enabledLayers}
           onClickLayer={toggleLayer}
         />
+      </div>
+
+      {/* Cross-layer count strip + active-layer chip pill (UX §4.4.1).
+          The count strip is the page's whole point — every subgraph
+          (and the Root bucket) is *cross-layer* and the user must
+          never lose sight of that. The active-layer chip pill below
+          the strip surfaces the current scope (M2 / S5 strand —
+          "scope must never silently change semantics across a
+          navigation transition" — the chip makes the change
+          visible). */}
+      <div className="v10-subgraph-cross-layer">
+        <div className="v10-subgraph-cross-layer-lede">
+          {isRoot
+            ? 'Root entities, across the three memory layers:'
+            : 'This subgraph, across the three memory layers:'}
+        </div>
+        <div className="v10-subgraph-cross-layer-strip" data-testid="cross-layer-strip">
+          <span className="v10-subgraph-cross-layer-cell" data-layer="wm">
+            <span className="v10-subgraph-cross-layer-cell-icon" style={{ color: TRUST_COLORS.working }}>◇</span>
+            <span className="v10-subgraph-cross-layer-cell-label">Working</span>
+            <span className="v10-subgraph-cross-layer-cell-count">{layerCounts.wm}</span>
+          </span>
+          <span className="v10-subgraph-cross-layer-arrow" aria-hidden="true">→</span>
+          <span className="v10-subgraph-cross-layer-cell" data-layer="swm">
+            <span className="v10-subgraph-cross-layer-cell-icon" style={{ color: TRUST_COLORS.shared }}>◈</span>
+            <span className="v10-subgraph-cross-layer-cell-label">Shared</span>
+            <span className="v10-subgraph-cross-layer-cell-count">{layerCounts.swm}</span>
+          </span>
+          <span className="v10-subgraph-cross-layer-arrow" aria-hidden="true">→</span>
+          <span className="v10-subgraph-cross-layer-cell" data-layer="vm">
+            <span className="v10-subgraph-cross-layer-cell-icon" style={{ color: TRUST_COLORS.verified }}>◉</span>
+            <span className="v10-subgraph-cross-layer-cell-label">Verified</span>
+            <span className="v10-subgraph-cross-layer-cell-count">{layerCounts.vm}</span>
+          </span>
+        </div>
+        <button
+          type="button"
+          className={`v10-subgraph-active-layer-pill${enabledLayers.size === 3 ? ' all-layers' : ''}`}
+          onClick={() => setEnabledLayers(new Set<TrustLevel>(['working', 'shared', 'verified']))}
+          disabled={enabledLayers.size === 3}
+          data-testid="active-layer-pill"
+          aria-label={`Active layer scope: ${activeLayerLabel}${enabledLayers.size === 3 ? '' : ' — click to reset to all layers'}`}
+          title={enabledLayers.size === 3
+            ? 'Active layer scope: all three memory layers'
+            : 'Click to reset to all layers'}
+        >
+          <span className="v10-subgraph-active-layer-pill-label">Active layer:</span>
+          <span className="v10-subgraph-active-layer-pill-value">{activeLayerLabel}</span>
+        </button>
       </div>
 
       {queryCatalogs.length > 0 && (
@@ -4714,6 +4903,8 @@ export function SubGraphDetailView({
               externallySorted
               sortLabel={sortLabel}
               timestampPredicate={timelinePredicate}
+              perEntityTrustBadge
+
               headerExtra={
                 <label className="v10-entity-list-sort">
                   <span className="v10-entity-list-sort-label">Sort</span>
@@ -4750,6 +4941,7 @@ export function SubGraphDetailView({
               trustLegendActiveLayer={singleLayer}
               scopeEntities={graphPanelScopeEntities}
               layerEntities={graphPanelEntities}
+              nodeColorsOverride={trustNodeColors}
             />
           </div>
         )}

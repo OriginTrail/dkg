@@ -5,22 +5,32 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ProjectProfileContext, type ProjectProfile } from '../src/ui/hooks/useProjectProfile.js';
 import { SubGraphDetailView } from '../src/ui/views/project/components.js';
+import { ROOT_SLUG_SENTINEL } from '../src/ui/lib/subGraphs.js';
+import { TRUST_COLORS } from '../src/ui/views/project/helpers.js';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
 vi.mock('@origintrail-official/dkg-graph-viz/react', async () => {
   const React = await import('react');
   return {
-    RdfGraph(props: { data: ReadonlyArray<{ subject: string; predicate: string; object: string }> | undefined }) {
+    RdfGraph(props: {
+      data: ReadonlyArray<{ subject: string; predicate: string; object: string }> | undefined;
+      options?: { style?: { nodeColors?: Record<string, string> } };
+    }) {
       // Surface the triples this render received as a DOM attribute so
       // tests can assert on it; the production component never reads
       // these attributes.
       const triples = (props.data ?? []).map((t) => ({ s: t.subject, p: t.predicate, o: t.object }));
       const objects = triples.map((t) => t.o);
+      // Surface the `nodeColors` style override so tests can assert
+      // S3's per-URI trust colouring (fold-in #6) without reaching
+      // into the canvas internals.
+      const nodeColors = props.options?.style?.nodeColors ?? {};
       return React.createElement('div', {
         'data-testid': 'rdf-graph',
         'data-triple-objects': JSON.stringify(objects),
         'data-triples': JSON.stringify(triples),
+        'data-node-colors': JSON.stringify(nodeColors),
       });
     },
   };
@@ -69,7 +79,10 @@ const profile: ProjectProfile = {
     icon: '#',
     rank: 0,
   }),
-  forType: () => undefined,
+  // Tests historically returned undefined; entityMeta reads
+  // `b.label` so a safe no-op fixture must return at least `{}`.
+  // Bucket tests that mount the Entities tab depend on this.
+  forType: () => ({}) as any,
   view: () => undefined,
   chipsFor: () => [],
   savedQueryCatalogsFor: () => [],
@@ -820,6 +833,403 @@ describe('SubGraphDetailView tabs', () => {
         '.v10-graph-singleton-item[title="urn:e:ghost"]',
       );
       expect(ghostChip).toBeTruthy();
+    });
+  });
+
+  // S3 — Root bucket (synthesized `__root__` slug). Scope is "no
+  // sub-graph membership" — entity.subGraphs.size === 0. The detail
+  // body shape matches a named subgraph (header / count strip /
+  // tabs); only the chrome (icon ⊘ / title "Root") and scope
+  // predicate differ.
+  it('renders the Root bucket (slug=ROOT_SLUG_SENTINEL) with the no-membership scope', async () => {
+    const rootEntity = {
+      uri: 'urn:e:rooted',
+      label: 'Rooted',
+      types: ['http://schema.org/Thing'],
+      trustLevel: 'working',
+      layers: new Set(['working']),
+      subGraphs: new Set<string>(),
+      properties: new Map(),
+      connections: [],
+    };
+    const namedEntity = {
+      uri: 'urn:e:in-named',
+      label: 'In named subgraph',
+      types: ['http://schema.org/Thing'],
+      trustLevel: 'shared',
+      layers: new Set(['shared']),
+      subGraphs: new Set(['recipes']),
+      properties: new Map(),
+      connections: [],
+    };
+    const memory = {
+      entities: new Map([[rootEntity.uri, rootEntity], [namedEntity.uri, namedEntity]]),
+      entityList: [rootEntity, namedEntity],
+      allTriples: [],
+      graphTriples: [],
+      trustMap: new Map(),
+      counts: { wm: 1, swm: 1, vm: 0, total: 2 },
+      loading: false,
+      error: null,
+      partial: false,
+      refresh: vi.fn(),
+    } as any;
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root!.render(
+        React.createElement(ProjectProfileContext.Provider, { value: profile },
+          React.createElement(SubGraphDetailView, {
+            slug: ROOT_SLUG_SENTINEL,
+            rawMemory: memory,
+            contextGraphId: 'cg-test',
+            onNodeClick: vi.fn(),
+            onSelectEntity: vi.fn(),
+            activeTab: 'items',
+            onTabChange: vi.fn(),
+          })),
+      );
+    });
+    await flush();
+
+    // Header carries the Root identity (locked literals from §4.4.1).
+    expect(container.querySelector('.v10-subgraph-detail-title')?.textContent).toBe('Root');
+    // Cross-layer count strip exists and reports the root-scoped
+    // entity at WM only — `namedEntity` (recipes-scoped) must not
+    // count toward Root.
+    const strip = container.querySelector('[data-testid="cross-layer-strip"]');
+    expect(strip).toBeTruthy();
+    const cells = strip!.querySelectorAll('.v10-subgraph-cross-layer-cell-count');
+    expect(cells[0]?.textContent).toBe('1'); // wm — rootEntity
+    expect(cells[1]?.textContent).toBe('0'); // swm — namedEntity excluded
+    expect(cells[2]?.textContent).toBe('0'); // vm
+
+    // The Entities tab must show the root-scoped entity only.
+    const entityCards = container.querySelectorAll('.v10-entity-card');
+    expect(entityCards.length).toBe(1);
+    expect(entityCards[0]?.textContent).toContain('Rooted');
+  });
+
+  // S3 — cross-layer count strip + active-layer chip pill (UX §4.4.1).
+  // The pill must be visible whenever scope is narrower than "all
+  // three", and clicking it must reset to All layers.
+  it('renders the active-layer pill and resets to "All layers" on click', async () => {
+    const wmOnly = {
+      uri: 'urn:e:wm', label: 'WM only', types: [],
+      trustLevel: 'working',
+      layers: new Set(['working']),
+      subGraphs: new Set(['demo']),
+      properties: new Map(),
+      connections: [],
+    };
+    const swmOnly = {
+      uri: 'urn:e:swm', label: 'SWM only', types: [],
+      trustLevel: 'shared',
+      layers: new Set(['shared']),
+      subGraphs: new Set(['demo']),
+      properties: new Map(),
+      connections: [],
+    };
+    const fixture = {
+      entities: new Map([[wmOnly.uri, wmOnly], [swmOnly.uri, swmOnly]]),
+      entityList: [wmOnly, swmOnly],
+      allTriples: [],
+      graphTriples: [],
+      trustMap: new Map(),
+      counts: { wm: 1, swm: 1, vm: 0, total: 2 },
+      loading: false, error: null, partial: false,
+      refresh: vi.fn(),
+    } as any;
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root!.render(
+        React.createElement(ProjectProfileContext.Provider, { value: profile },
+          React.createElement(SubGraphDetailView, {
+            slug: 'demo',
+            rawMemory: fixture,
+            contextGraphId: 'cg-test',
+            onNodeClick: vi.fn(),
+            onSelectEntity: vi.fn(),
+            activeTab: 'graph',
+            onTabChange: vi.fn(),
+          })),
+      );
+    });
+    await flush();
+
+    const pill = container.querySelector('[data-testid="active-layer-pill"]') as HTMLButtonElement | null;
+    expect(pill).toBeTruthy();
+    // Default: all three layers — pill reads "All layers" and is disabled.
+    expect(pill!.textContent).toContain('All layers');
+    expect(pill!.disabled).toBe(true);
+
+    // Narrow to WM only via the mini-pyramid chips.
+    const chips = Array.from(container.querySelectorAll('button.v10-minipyr-chip')) as HTMLButtonElement[];
+    const swmChip = chips.find(b => (b.getAttribute('title') ?? '').startsWith('Shared Memory'));
+    const vmChip = chips.find(b => (b.getAttribute('title') ?? '').startsWith('Verified Memory'));
+    await act(async () => { swmChip!.click(); });
+    await act(async () => { vmChip!.click(); });
+    await flush();
+
+    // Pill now surfaces the narrowed scope and becomes clickable.
+    expect(pill!.textContent).toContain('Working Memory');
+    expect(pill!.disabled).toBe(false);
+
+    // Clicking resets to all layers.
+    await act(async () => { pill!.click(); });
+    await flush();
+    expect(pill!.textContent).toContain('All layers');
+    expect(pill!.disabled).toBe(true);
+  });
+
+  // S3 fold-in #6 (PR #677 follow-up). Multi-layer sub-graph Graph
+  // tab paints per-entity by `trustLevel` via `nodeColorsOverride`,
+  // not the WM-default fallback. Pre-fix every node painted gray.
+  it('passes per-URI trust nodeColors to the Graph pane on a multi-layer subgraph', async () => {
+    const wmEntity = {
+      uri: 'urn:e:wm-node', label: 'WM node', types: [],
+      trustLevel: 'working',
+      layers: new Set(['working']),
+      subGraphs: new Set(['demo']),
+      properties: new Map(),
+      connections: [],
+    };
+    const swmEntity = {
+      uri: 'urn:e:swm-node', label: 'SWM node', types: [],
+      trustLevel: 'shared',
+      layers: new Set(['shared']),
+      subGraphs: new Set(['demo']),
+      properties: new Map(),
+      connections: [],
+    };
+    const vmEntity = {
+      uri: 'urn:e:vm-node', label: 'VM node', types: [],
+      trustLevel: 'verified',
+      layers: new Set(['verified']),
+      subGraphs: new Set(['demo']),
+      properties: new Map(),
+      connections: [],
+    };
+    const edgeAB = {
+      subject: 'urn:e:wm-node',
+      predicate: 'urn:rel:r',
+      object: 'urn:e:swm-node',
+      subGraph: 'demo',
+      layer: 'working' as const,
+    };
+    const fixture = {
+      entities: new Map([
+        [wmEntity.uri, wmEntity],
+        [swmEntity.uri, swmEntity],
+        [vmEntity.uri, vmEntity],
+      ]),
+      entityList: [wmEntity, swmEntity, vmEntity],
+      allTriples: [edgeAB],
+      graphTriples: [
+        { subject: edgeAB.subject, predicate: edgeAB.predicate, object: edgeAB.object, subGraph: 'demo' },
+      ],
+      trustMap: new Map(),
+      counts: { wm: 1, swm: 1, vm: 1, total: 3 },
+      loading: false, error: null, partial: false,
+      refresh: vi.fn(),
+    } as any;
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root!.render(
+        React.createElement(ProjectProfileContext.Provider, { value: profile },
+          React.createElement(SubGraphDetailView, {
+            slug: 'demo',
+            rawMemory: fixture,
+            contextGraphId: 'cg-test',
+            onNodeClick: vi.fn(),
+            onSelectEntity: vi.fn(),
+            activeTab: 'graph',
+            onTabChange: vi.fn(),
+          })),
+      );
+    });
+
+    await waitForGraph(() => {
+      const el = container.querySelector('[data-testid="rdf-graph"]') as HTMLElement | null;
+      expect(el).toBeTruthy();
+      const colors = JSON.parse(el!.getAttribute('data-node-colors') ?? '{}');
+      // Each entity URI keyed to its TRUST_COLORS palette value —
+      // canonical hex, NOT a `var(--text-*)` lookup (the canvas
+      // pipeline reads raw color strings).
+      expect(colors['urn:e:wm-node']).toBe(TRUST_COLORS.working);
+      expect(colors['urn:e:swm-node']).toBe(TRUST_COLORS.shared);
+      expect(colors['urn:e:vm-node']).toBe(TRUST_COLORS.verified);
+    });
+  });
+
+  // S3 — per-row trust badge keyed to e.trustLevel (not the fixed
+  // `layerKey` SubGraphDetailView passes to EntityList). Pre-fix
+  // every row read "Working" even on SWM/VM entities.
+  it('renders the per-row trust badge from entity.trustLevel on the Entities tab', async () => {
+    const wmRow = {
+      uri: 'urn:e:wm-row', label: 'WM row', types: ['http://schema.org/Thing'],
+      trustLevel: 'working',
+      layers: new Set(['working']),
+      subGraphs: new Set(['demo']),
+      properties: new Map(),
+      connections: [],
+    };
+    const swmRow = {
+      uri: 'urn:e:swm-row', label: 'SWM row', types: ['http://schema.org/Thing'],
+      trustLevel: 'shared',
+      layers: new Set(['shared']),
+      subGraphs: new Set(['demo']),
+      properties: new Map(),
+      connections: [],
+    };
+    const vmRow = {
+      uri: 'urn:e:vm-row', label: 'VM row', types: ['http://schema.org/Thing'],
+      trustLevel: 'verified',
+      layers: new Set(['verified']),
+      subGraphs: new Set(['demo']),
+      properties: new Map(),
+      connections: [],
+    };
+    const fixture = {
+      entities: new Map([
+        [wmRow.uri, wmRow], [swmRow.uri, swmRow], [vmRow.uri, vmRow],
+      ]),
+      entityList: [wmRow, swmRow, vmRow],
+      allTriples: [],
+      graphTriples: [],
+      trustMap: new Map(),
+      counts: { wm: 1, swm: 1, vm: 1, total: 3 },
+      loading: false, error: null, partial: false,
+      refresh: vi.fn(),
+    } as any;
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root!.render(
+        React.createElement(ProjectProfileContext.Provider, { value: profile },
+          React.createElement(SubGraphDetailView, {
+            slug: 'demo',
+            rawMemory: fixture,
+            contextGraphId: 'cg-test',
+            onNodeClick: vi.fn(),
+            onSelectEntity: vi.fn(),
+            activeTab: 'items',
+            onTabChange: vi.fn(),
+          })),
+      );
+    });
+    await flush();
+
+    // Each row carries its OWN trust-level badge — class is keyed
+    // by layer (`.wm` / `.swm` / `.vm`), text is the trust label.
+    const cards = Array.from(container.querySelectorAll('.v10-entity-card')) as HTMLElement[];
+    const byLabel = new Map<string, HTMLElement>();
+    for (const card of cards) {
+      const label = card.querySelector('.v10-entity-card-title')?.textContent ?? '';
+      byLabel.set(label, card);
+    }
+    expect(byLabel.get('WM row')?.querySelector('.v10-trust-badge.wm')?.textContent).toContain('Working');
+    expect(byLabel.get('SWM row')?.querySelector('.v10-trust-badge.swm')?.textContent).toContain('Shared');
+    expect(byLabel.get('VM row')?.querySelector('.v10-trust-badge.vm')?.textContent).toContain('Verified');
+  });
+
+  // S3 fold-in #7 — multi-layer `scopedTriples` predicate admits
+  // edges whose `subGraph` tag was erased on promotion. Pre-fix
+  // (`subGraph === slug || (scopedUris.has(s) && scopedUris.has(o))`)
+  // the both-ends test ALREADY caught this specific case, but the
+  // subject-scoped rule extends admission to edges where the object
+  // is in scope but the subject's `subGraph` tag is missing. The
+  // post-fix predicate keeps the both-ends and adds the asymmetric
+  // recovery so promoted SWM/VM endpoints don't silently drop out
+  // of the multi-layer Graph view.
+  it('admits cross-layer edges whose subGraph tag was erased on promotion (fold-in #7)', async () => {
+    // Two entities both scoped to `demo`. One is WM-only, the other
+    // was promoted to SWM and its triples lost their `subGraph`
+    // origin tag on promotion. The edge has `subGraph: undefined`.
+    const wmEnd = {
+      uri: 'urn:e:wm-end', label: 'WM endpoint',
+      types: ['http://schema.org/Thing'],
+      trustLevel: 'working',
+      layers: new Set(['working']),
+      subGraphs: new Set(['demo']),
+      properties: new Map(),
+      connections: [],
+    };
+    const swmEnd = {
+      uri: 'urn:e:swm-end', label: 'SWM endpoint',
+      types: ['http://schema.org/Thing'],
+      trustLevel: 'shared',
+      layers: new Set(['shared']),
+      subGraphs: new Set(['demo']),
+      properties: new Map(),
+      connections: [],
+    };
+    const promotedEdge = {
+      subject: 'urn:e:swm-end',
+      predicate: 'http://schema.org/relatesTo',
+      object: 'urn:e:wm-end',
+      subGraph: undefined as string | undefined,
+      layer: 'shared' as const,
+    };
+    const fixture = {
+      entities: new Map([
+        [wmEnd.uri, wmEnd], [swmEnd.uri, swmEnd],
+      ]),
+      entityList: [wmEnd, swmEnd],
+      allTriples: [promotedEdge],
+      graphTriples: [
+        { subject: promotedEdge.subject, predicate: promotedEdge.predicate, object: promotedEdge.object },
+      ],
+      trustMap: new Map(),
+      counts: { wm: 1, swm: 1, vm: 0, total: 2 },
+      loading: false, error: null, partial: false,
+      refresh: vi.fn(),
+    } as any;
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root!.render(
+        React.createElement(ProjectProfileContext.Provider, { value: profile },
+          React.createElement(SubGraphDetailView, {
+            slug: 'demo',
+            rawMemory: fixture,
+            contextGraphId: 'cg-test',
+            onNodeClick: vi.fn(),
+            onSelectEntity: vi.fn(),
+            activeTab: 'graph',
+            onTabChange: vi.fn(),
+          })),
+      );
+    });
+
+    await waitForGraph(() => {
+      const el = container.querySelector('[data-testid="rdf-graph"]') as HTMLElement | null;
+      expect(el).toBeTruthy();
+      const triples = JSON.parse(el!.getAttribute('data-triples') ?? '[]');
+      const hasEdge = triples.some(
+        (t: { s: string; p: string; o: string }) =>
+          t.s === 'urn:e:swm-end'
+          && t.p === 'http://schema.org/relatesTo'
+          && t.o === 'urn:e:wm-end',
+      );
+      expect(hasEdge).toBe(true);
     });
   });
 });

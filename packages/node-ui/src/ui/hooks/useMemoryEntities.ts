@@ -278,13 +278,18 @@ function vmSparql(cgId: string) {
  * Returns undefined for graph URIs outside the expected project scope
  * (e.g. _meta, _shared_memory) so those triples stay un-bucketed.
  */
-function subGraphOf(gUri: string, cgId: string): string | undefined {
+export function subGraphOf(gUri: string, cgId: string): string | undefined {
   const prefix = `did:dkg:context-graph:${cgId}/`;
   if (!gUri.startsWith(prefix)) return undefined;
   const tail = gUri.slice(prefix.length);
   const slash = tail.indexOf('/');
   const seg = slash >= 0 ? tail.slice(0, slash) : tail;
-  if (!seg || seg.startsWith('_')) return undefined;
+  // `assertion` is the WM assertion-graph segment
+  // (`<cg>/assertion/<addr>/<name>`), not a user-facing sub-graph; leaking
+  // it as a slug surfaces a phantom "Assertion" sub-graph chip on entity
+  // detail pages. Filter alongside underscore-prefixed bookkeeping
+  // segments so `entity.subGraphs` stays semantically pure.
+  if (!seg || seg.startsWith('_') || seg === 'assertion') return undefined;
   return seg;
 }
 

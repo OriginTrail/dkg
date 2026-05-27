@@ -14,6 +14,16 @@
 
 export const RESERVED_SUB_GRAPH_SLUGS: ReadonlySet<string> = new Set(['meta']);
 
+// Client-side sentinel for the synthesized "Root" bucket (entities
+// not in any named sub-graph). The double-underscore prefix marks it
+// as a synthesized slug — the daemon's slug guard rejects underscore-
+// prefixed segments, so this can never collide with a real sub-graph.
+// Lives next to RESERVED_SUB_GRAPH_SLUGS so the Root bucket has one
+// source of truth shared by SubGraphBar (chip selection state),
+// SubGraphOverviewGrid (empty-state action), and SubGraphDetailView
+// (scope derivation).
+export const ROOT_SLUG_SENTINEL = '__root__';
+
 /**
  * Returns true if a sub-graph descriptor should be surfaced to
  * users (chip row, card grid, Overview count). False for reserved

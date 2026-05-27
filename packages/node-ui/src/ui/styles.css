@@ -6780,6 +6780,138 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
 .v10-subgraph-badge-icon { font-size: 10px; line-height: 1; }
 .v10-subgraph-badge-label { text-transform: capitalize; }
 
+/* ── Subgraph Explorer page header (S3) ── */
+/* Persistent page identity + 3-sentence intro. Rendered above the
+   SubGraphBar both in the All / overview state and inside every
+   detail body so the explanatory text never disappears. */
+.v10-subgraph-explorer-header {
+  padding: 12px 16px 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.v10-subgraph-explorer-title {
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  color: var(--text-primary);
+}
+.v10-subgraph-explorer-intro {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+  max-width: 760px;
+}
+
+/* ── Subgraph Explorer Root chip (S3) ── */
+/* Quieter than named chips — it's a fallback bucket. The ⊘ glyph
+   signals "no subgraph". Sits at the end of the chip row, after
+   any named chips. */
+.v10-subgraph-chip.v10-subgraph-chip-root {
+  color: var(--text-tertiary);
+}
+.v10-subgraph-chip.v10-subgraph-chip-root .v10-subgraph-chip-icon {
+  color: var(--text-tertiary);
+}
+.v10-subgraph-chip.v10-subgraph-chip-root.active {
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+  background: rgba(255,255,255,0.05);
+}
+
+/* ── Cross-layer count strip + active-layer pill (S3) ── */
+/* The count strip is the page's whole point — every subgraph is
+   cross-layer. The pill below it surfaces the active-layer scope
+   so it never silently changes meaning across a navigation
+   transition (M2 / S5 strand). */
+.v10-subgraph-cross-layer {
+  padding: 10px 16px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: rgba(255,255,255,0.01);
+}
+.v10-subgraph-cross-layer-lede {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  letter-spacing: 0.01em;
+}
+.v10-subgraph-cross-layer-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.v10-subgraph-cross-layer-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 14px;
+  font-size: 12px;
+  color: var(--text-primary);
+  background: var(--bg-elevated);
+}
+.v10-subgraph-cross-layer-cell-icon {
+  font-size: 13px;
+  line-height: 1;
+}
+.v10-subgraph-cross-layer-cell-label {
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+.v10-subgraph-cross-layer-cell-count {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.v10-subgraph-cross-layer-arrow {
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+.v10-subgraph-active-layer-pill {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+  background: rgba(255,255,255,0.02);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.v10-subgraph-active-layer-pill:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+.v10-subgraph-active-layer-pill:disabled {
+  cursor: default;
+  opacity: 0.85;
+}
+.v10-subgraph-active-layer-pill.all-layers {
+  color: var(--text-tertiary);
+}
+.v10-subgraph-active-layer-pill-label {
+  text-transform: uppercase;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--text-tertiary);
+}
+.v10-subgraph-active-layer-pill-value {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
 /* ── Verify on DKG CTA (in KA detail right pane) ── */
 /* Two variants: .promote (WM -> SWM, amber) and .publish (SWM -> VM, green).
    The layer-transition icon (◈ / ◉) matches LAYER_CONFIG so the CTA

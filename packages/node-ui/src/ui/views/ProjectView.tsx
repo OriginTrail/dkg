@@ -2,7 +2,7 @@ import { useMemo, useState, useCallback, useEffect, useRef } from 'react';
 import { useFetch } from '../hooks.js';
 import { api } from '../api-wrapper.js';
 import { useMemoryGraphEvents } from '../hooks/useNodeEvents.js';
-import { isUserFacingSubGraph } from '../lib/subGraphs.js';
+import { isUserFacingSubGraph, ROOT_SLUG_SENTINEL } from '../lib/subGraphs.js';
 import { ImportFilesModal } from '../components/Modals/ImportFilesModal.js';
 import { ShareProjectModal } from '../components/Modals/ShareProjectModal.js';
 import {
@@ -32,6 +32,7 @@ import {
   OverviewPrimerEntry,
   curatorStatusForOverview,
   SubGraphOverviewGrid,
+  SubGraphExplorerHeader,
   ContextGraphQueryView,
   LayerDetailView,
 } from './project/components.js';
@@ -528,9 +529,13 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
         />
       )}
 
-      {/* Sub-graph page mode — first-class peer of the layer views */}
+      {/* Subgraph Explorer — page mode (specific chip or Root selected).
+          First-class peer of the layer views; the page identity, intro
+          and chip row are shared with the All / Subgraphs-overview state
+          (rendered below in the graph-overview branch). */}
       {activeSubGraph && !selectedEntity && (
         <>
+          <SubGraphExplorerHeader />
           <SubGraphBar
             contextGraphId={contextGraphId}
             profile={profile}
@@ -602,14 +607,26 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
         </>
       )}
 
-      {/* Subgraphs — one mini graph per sub-graph, side-by-side */}
+      {/* Subgraph Explorer — All state (page heading + intro + chip row
+          + card-wall body). Selecting a chip transitions to the detail
+          body via `activeSubGraph` (branch above). */}
       {!activeSubGraph && activeLayer === 'graph-overview' && !selectedEntity && (
-        <SubGraphOverviewGrid
-          contextGraphId={contextGraphId}
-          memory={rawMemory}
-          onNodeClick={handleNodeClick}
-          onSelectSubGraph={handleSelectSubGraph}
-        />
+        <>
+          <SubGraphExplorerHeader />
+          <SubGraphBar
+            contextGraphId={contextGraphId}
+            profile={profile}
+            selected={null}
+            entities={rawMemory.entityList}
+            onSelect={handleSelectSubGraph}
+          />
+          <SubGraphOverviewGrid
+            contextGraphId={contextGraphId}
+            memory={rawMemory}
+            onNodeClick={handleNodeClick}
+            onSelectSubGraph={handleSelectSubGraph}
+          />
+        </>
       )}
 
       {!activeSubGraph && activeLayer === 'query' && !selectedEntity && (
