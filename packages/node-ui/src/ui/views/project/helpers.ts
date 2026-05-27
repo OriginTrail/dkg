@@ -334,17 +334,27 @@ export function getDescription(e: MemoryEntity): string | null {
  * with clear name + JSDoc so the two semantics stay distinguishable.
  */
 export function neighborhoodTriples(entityUri: string, allTriples: Triple[], hops: number = 2): Triple[] {
+  // Canonicalise both sides of the comparison: `entityUri` is the
+  // canonical form (`MemoryEntity.uri`) but `allTriples` keeps raw
+  // daemon strings, which can ship wrapped as `<urn:...>`. A bare
+  // entity URI would miss wrapped-IRI rows that the entity-detail
+  // Triples tab + KADetailView header (now canonicalised) include —
+  // the graph pane right below would silently drop them.
+  const canonicalSubject = (t: Triple) => canonicalEntityUri(t.subject);
+  const canonicalObject = (t: Triple) => canonicalEntityUri(t.object);
   const visited = new Set<string>([entityUri]);
   let frontier = new Set<string>([entityUri]);
 
   for (let i = 0; i < hops; i++) {
     const nextFrontier = new Set<string>();
     for (const t of allTriples) {
-      if (frontier.has(t.subject) && !visited.has(t.object)) {
-        nextFrontier.add(t.object);
+      const s = canonicalSubject(t);
+      const o = canonicalObject(t);
+      if (frontier.has(s) && !visited.has(o)) {
+        nextFrontier.add(o);
       }
-      if (frontier.has(t.object) && !visited.has(t.subject)) {
-        nextFrontier.add(t.subject);
+      if (frontier.has(o) && !visited.has(s)) {
+        nextFrontier.add(s);
       }
     }
     for (const u of nextFrontier) visited.add(u);
@@ -352,7 +362,7 @@ export function neighborhoodTriples(entityUri: string, allTriples: Triple[], hop
     if (frontier.size === 0) break;
   }
 
-  return allTriples.filter(t => visited.has(t.subject) && visited.has(t.object));
+  return allTriples.filter(t => visited.has(canonicalSubject(t)) && visited.has(canonicalObject(t)));
 }
 
 export function matchesSearch(e: MemoryEntity, q: string): boolean {
@@ -446,7 +456,13 @@ export function useLayerTriples(memory: ReturnType<typeof useMemoryEntities>, la
         const objectEntity = memory.entities.get(canonicalObject);
         if (objectEntity && objectEntity.trustLevel !== targetLayer) continue;
       }
-      const key = `${t.subject}|${t.predicate}|${t.object}`;
+      // Canonicalise the dedup key so wrapped/bare duplicates of the
+      // same `(s,p,o)` collapse — mirrors `dedupeTriplesBySpo` in
+      // `ProjectView.tsx` and `buildEntities`' per-entity SPO key.
+      // Without this the layer header / graph counts a wrapped-IRI
+      // duplicate row twice while the KADetailView Triples tab
+      // (canonicalised) shows it once.
+      const key = `${canonicalEntityUri(t.subject)}|${t.predicate}|${canonicalEntityUri(t.object)}`;
       if (seen.has(key)) continue;
       seen.add(key);
       out.push(t);
