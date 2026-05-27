@@ -3285,30 +3285,63 @@ export class DKGPublisher implements Publisher {
   ): Promise<string | null> {
     // SPARQL string-literal escape: only `"` and `\` are special inside `"..."`.
     const escaped = peerId.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-    // GH #748 Codex round 2: a single libp2p PeerId can be shared across
-    // multiple registered agents on the same node (multi-agent-per-node via
-    // `DKGAgent.registerAgent`). Resolve only when exactly one AGENTS record
-    // matches — `LIMIT 2` + length-check is the cheapest way to detect
-    // ambiguity. On 0 or >1 matches, return null so the migration preserves
-    // the literal-form attribution rather than silently mis-attributing it
-    // to whichever agent happens to come first.
-    // GH #748 Codex round 3: vocabulary is `https://dkg.network/ontology#`
-    // (the registry namespace `buildAgentProfile` writes), NOT the internal
-    // `http://dkg.io/ontology/` namespace — the latter would match zero rows
-    // against a real node's AGENTS graph and silently skip every literal.
-    const sparql = `SELECT ?agent WHERE {
+    // GH #748 Codex rounds 2, 3, 5: resolve the agent address for a peer ID.
+    // - Round 3: vocabulary is `https://dkg.network/ontology#` (the registry
+    //   namespace `buildAgentProfile` writes), NOT the internal
+    //   `http://dkg.io/ontology/` one — the latter matches zero rows.
+    // - Round 2: a libp2p PeerId can be shared across multiple registered
+    //   agents on the same node (multi-agent-per-node via
+    //   `DKGAgent.registerAgent`). Reject genuine cross-agent ambiguity.
+    // - Round 5: an upgraded store can legitimately have multiple AGENTS
+    //   records for the SAME agent — e.g. the legacy
+    //   `did:dkg:agent:<peerId>` subject (profile.ts fallback) plus the
+    //   canonical `did:dkg:agent:<address>` subject. Prefer the explicit
+    //   `dkg:agentAddress` literal as the source of truth, and dedup by
+    //   normalised address before deciding the mapping is ambiguous.
+    // - The fallback subject-URI parse handles records that pre-date the
+    //   `dkg:agentAddress` field and still encode the address only in the
+    //   subject (`did:dkg:agent:0x<40hex>`).
+    const sparql = `SELECT ?agent ?addr WHERE {
       GRAPH <${agentsGraph}> {
         ?agent <${RDF}type> <${dkgRegistry}Agent> ;
                <${dkgRegistry}peerId> "${escaped}" .
+        OPTIONAL { ?agent <${dkgRegistry}agentAddress> ?addr }
       }
-    } LIMIT 2`;
+    }`;
     const result = await this.store.query(sparql);
-    if (result.type !== 'bindings' || result.bindings.length !== 1) return null;
-    const agentUri = result.bindings[0]['agent'];
-    if (!agentUri || !agentUri.startsWith('did:dkg:agent:')) return null;
-    const address = agentUri.slice('did:dkg:agent:'.length);
-    if (!/^0x[0-9a-fA-F]{40}$/.test(address)) return null;
-    return address;
+    if (result.type !== 'bindings' || result.bindings.length === 0) return null;
+
+    const addresses = new Set<string>();
+    for (const row of result.bindings) {
+      const explicit = row['addr'];
+      if (explicit) {
+        // `dkg:agentAddress` is a literal — strip surrounding quotes.
+        const raw = explicit.startsWith('"')
+          ? explicit.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '')
+          : explicit;
+        if (/^0x[0-9a-fA-F]{40}$/.test(raw)) {
+          addresses.add(raw.toLowerCase());
+          continue;
+        }
+      }
+      // Fallback: parse the subject URI for records without an explicit
+      // `agentAddress` field. Only accept the canonical wallet-DID shape
+      // — a legacy `did:dkg:agent:<peerId>` subject is NOT an address and
+      // contributes nothing useful here.
+      const agentUri = row['agent'];
+      if (agentUri && agentUri.startsWith('did:dkg:agent:')) {
+        const tail = agentUri.slice('did:dkg:agent:'.length);
+        if (/^0x[0-9a-fA-F]{40}$/.test(tail)) {
+          addresses.add(tail.toLowerCase());
+        }
+      }
+    }
+
+    // 0 distinct addresses → no resolvable mapping.
+    // 1 → unambiguous: same agent (possibly across multiple profile records).
+    // 2+ → genuinely multiple agents on this peer; refuse to mis-attribute.
+    if (addresses.size !== 1) return null;
+    return [...addresses][0];
   }
 
   private async deleteMetaForRoot(metaGraph: string, rootEntity: string): Promise<void> {

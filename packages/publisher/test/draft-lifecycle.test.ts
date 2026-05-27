@@ -408,6 +408,54 @@ describe('Working Memory Assertion Lifecycle', () => {
     expect(r2.skipped).toBe(0);
   });
 
+  it('GH #748 Codex round 5: legacy + canonical AGENTS records for the same agent resolve unambiguously', async () => {
+    // Upgraded stores can carry two profile records for the same wallet:
+    // - the legacy `did:dkg:agent:<peerId>` subject (profile.ts fallback)
+    // - the canonical `did:dkg:agent:<address>` subject
+    // The resolver must dedupe by normalised address (preferring the
+    // explicit `dkg:agentAddress` literal) and treat them as one agent
+    // rather than rejecting as ambiguous.
+    const AGENTS_GRAPH = 'did:dkg:context-graph:agents';
+    const CG_META = `did:dkg:context-graph:${CG_ID}/_meta`;
+    const SWM_META = `did:dkg:context-graph:${CG_ID}/_shared_memory_meta`;
+    const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+    const DKG = 'http://dkg.io/ontology/';
+    const DKG_REGISTRY = 'https://dkg.network/ontology#';
+    const PROV = 'http://www.w3.org/ns/prov#';
+    const PEER = '12D3KooWUpgradedNode';
+    const ADDR = '0xaf7e932f79263f1a303790bd6c01b096f5334bbb';
+
+    await store.insert([
+      // Legacy profile: subject is the peer ID, no explicit agentAddress.
+      { subject: `did:dkg:agent:${PEER}`, predicate: RDF_TYPE, object: `${DKG_REGISTRY}Agent`, graph: AGENTS_GRAPH },
+      { subject: `did:dkg:agent:${PEER}`, predicate: `${DKG_REGISTRY}peerId`, object: `"${PEER}"`, graph: AGENTS_GRAPH },
+      // Canonical profile: subject is the wallet DID, explicit agentAddress literal.
+      { subject: `did:dkg:agent:${ADDR}`, predicate: RDF_TYPE, object: `${DKG_REGISTRY}Agent`, graph: AGENTS_GRAPH },
+      { subject: `did:dkg:agent:${ADDR}`, predicate: `${DKG_REGISTRY}peerId`, object: `"${PEER}"`, graph: AGENTS_GRAPH },
+      { subject: `did:dkg:agent:${ADDR}`, predicate: `${DKG_REGISTRY}agentAddress`, object: `"${ADDR}"`, graph: AGENTS_GRAPH },
+    ]);
+
+    const OP = `urn:dkg:share:${CG_ID}:op-legacy-canonical`;
+    await store.insert([
+      { subject: OP, predicate: RDF_TYPE, object: `${DKG}WorkspaceOperation`, graph: SWM_META },
+      { subject: OP, predicate: `${DKG}publisherPeerId`, object: `"${PEER}"`, graph: SWM_META },
+      { subject: OP, predicate: `${PROV}wasAttributedTo`, object: `"${PEER}"`, graph: SWM_META },
+      { subject: `did:dkg:context-graph:${CG_ID}`, predicate: RDF_TYPE, object: `${DKG}ContextGraph`, graph: CG_META },
+    ]);
+
+    const r = await publisher.migrateSwmAttributionToAgentDid();
+    expect(r.rewritten).toBe(1);
+    expect(r.skipped).toBe(0);
+
+    const after = await store.query(
+      `SELECT ?o WHERE { GRAPH <${SWM_META}> { <${OP}> <${PROV}wasAttributedTo> ?o } }`,
+    );
+    if (after.type === 'bindings') {
+      expect(after.bindings.length).toBe(1);
+      expect(after.bindings[0]['o']).toBe(`did:dkg:agent:${ADDR}`);
+    }
+  });
+
   it('GH #748 Codex round 2: ambiguous peer→agent mapping (multi-agent-per-node) leaves literal in place', async () => {
     // Two agents share the same libp2p peer ID (multi-agent-per-node, e.g.
     // via `DKGAgent.registerAgent`). The resolver must NOT pick one
