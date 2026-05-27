@@ -377,12 +377,6 @@ export function buildEntities(layered: LayeredTriple[]): Map<string, MemoryEntit
     counts[layer]++;
     return true;
   }
-  // Deferred bumps for class-entity object sides on rdf:type triples.
-  // Applied after the main loop, only for class entities that already
-  // exist (i.e. have their own triples). See the inline note in the
-  // rdf:type branch for why we cannot bump these eagerly.
-  const deferredTypeBumps: Array<{ typeUri: string; layer: TrustLevel; spoKey: string }> = [];
-
   function getOrCreate(uri: string): MemoryEntity {
     const entityUri = canonicalEntityUri(uri);
     let e = entities.get(entityUri);
@@ -403,55 +397,36 @@ export function buildEntities(layered: LayeredTriple[]): Map<string, MemoryEntit
     return e;
   }
 
+  // PASS 1 — populate entities, types, connections, properties, layers.
+  // Triple counts are intentionally NOT bumped here: they need to be
+  // gated by the same residue filter `useLayerTriples` applies (subject
+  // and object trustLevel must equal the layer), and trustLevels are
+  // only known after this pass. Pass 3 below redoes the walk with
+  // residue-filter-aware counting.
   for (const t of layered) {
     const entity = getOrCreate(t.subject);
     entity.layers.add(t.layer);
     if (t.subGraph) entity.subGraphs.add(t.subGraph);
-    // Build the SPO key from canonicalised subject/object so cross-
-    // graph copies that differ only in `<>` wrapping still dedupe.
-    const canonicalObject = isUri(t.object) ? canonicalEntityUri(t.object) : t.object;
-    const spoKey = `${entity.uri}\0${t.predicate}\0${canonicalObject}`;
-    // Subject-side bump — every distinct `(s,p,o)` triple referencing
-    // this entity in `t.layer` contributes 1, matching the layer-page
-    // Triples tab (which filters by layer via `useLayerTriples` and
-    // SPO-dedupes via `dedupeTriplesBySpo` before render).
-    bumpTriple(entity.uri, t.layer, spoKey);
 
     if (t.predicate === RDF_TYPE) {
       const typeUri = canonicalEntityUri(t.object);
       if (!entity.types.includes(typeUri)) {
         entity.types.push(typeUri);
       }
-      // DEFERRED type-class object-side bump: queue, don't getOrCreate.
-      // Opening a class entity (e.g. `urn:type:ObjectEvent`) that has
-      // its own triples shows incoming `rdf:type` rows in its Triples
-      // tab, so its `tripleCount` must include them — but we must
-      // only bump classes that already exist as first-class entities.
-      // Calling `getOrCreate` here would inject schema URIs like
+      // Class targets (e.g. `urn:type:ObjectEvent`) are NOT created via
+      // getOrCreate here — that would inject schema URIs like
       // `schema:Thing` into the entity map with `trustLevel = 'working'`
-      // (no layers), which trips `useLayerTriples`' residue filter at
-      // helpers.ts:444-448 (`objectEntity.trustLevel !== targetLayer`
-      // ⇒ drops the rdf:type row from SWM/VM views). The deferred
-      // pass after the loop bumps only entities that already exist
-      // by virtue of their own triples — matches Codex's "if the type
-      // node has its own triples" condition. Self-link guard same
-      // as the IRI branch.
-      if (typeUri !== entity.uri) {
-        deferredTypeBumps.push({ typeUri, layer: t.layer, spoKey });
-      }
+      // (no layers), breaking `useLayerTriples`' residue filter
+      // (`helpers.ts:444-448`: `objectEntity.trustLevel !== targetLayer`
+      // ⇒ drops the rdf:type row from SWM/VM views). Pass 3 bumps
+      // class-entity counts only for classes that already exist by
+      // virtue of their own triples — matches Codex's "if the type
+      // node has its own triples" condition.
     } else if (isUri(t.object)) {
-      const targetUri = canonicalObject;
+      const targetUri = canonicalEntityUri(t.object);
       const targetEntity = getOrCreate(targetUri);
       targetEntity.layers.add(t.layer);
       if (t.subGraph) targetEntity.subGraphs.add(t.subGraph);
-      // Object-side bump — entity appearing as the object of someone
-      // else's triple shows up in its own Triples tab too. Skip when
-      // self-referential (`(A, p, A)`): the Triples-tab filter is
-      // `s===uri || o===uri` which yields one row for a self-link,
-      // and the subject-side bump above already counted it once.
-      if (targetUri !== entity.uri) {
-        bumpTriple(targetEntity.uri, t.layer, spoKey);
-      }
       const keys = connectionKeys.get(entity.uri) ?? new Set<string>();
       const connectionKey = `${t.predicate}\0${targetUri}`;
       if (!keys.has(connectionKey)) {
@@ -473,27 +448,68 @@ export function buildEntities(layered: LayeredTriple[]): Map<string, MemoryEntit
     }
   }
 
-  // Apply deferred type-target bumps for class entities that already
-  // exist (i.e. have their own triples in `entities`). We never
-  // `getOrCreate` here — adding `schema:Thing`-style schema URIs as
-  // entities would break `useLayerTriples`' residue filter.
-  for (const { typeUri, layer, spoKey } of deferredTypeBumps) {
-    const typeEntity = entities.get(typeUri);
-    if (!typeEntity) continue;
-    bumpTriple(typeEntity.uri, layer, spoKey);
-  }
-
+  // PASS 2 — finalise label + trustLevel so Pass 3's residue filter
+  // sees authoritative per-entity layer.
   for (const entity of entities.values()) {
     entity.label = deriveEntityLabel(entity);
 
     if (entity.layers.has('verified')) entity.trustLevel = 'verified';
     else if (entity.layers.has('shared')) entity.trustLevel = 'shared';
     else entity.trustLevel = 'working';
+  }
 
-    // Finalise `tripleCount` to the canonical-layer count — what the
-    // entity-row badge on this entity's layer page shows after
-    // useLayerTriples + dedupeTriplesBySpo. Cross-layer residue (e.g.
-    // a promoted SWM entity's WM-only drafts) does not inflate it.
+  // PASS 3 — count triples per (entity, layer) under the same residue
+  // filter `useLayerTriples` uses (`helpers.ts:444-448`). A cross-layer
+  // edge `wm:A → swm:B` is dropped from the WM tab because the object
+  // has been promoted past WM, so it must not bump A's WM count either
+  // — otherwise badge over-counts vs tab.
+  for (const t of layered) {
+    const subjectUri = canonicalEntityUri(t.subject);
+    const subjectEntity = entities.get(subjectUri);
+    // Mirror `useLayerTriples` line 426-427: if the subject entity
+    // exists and its canonical layer differs from this triple's layer,
+    // it's residue — drop. Subjects that don't resolve to a tracked
+    // entity (literal orphans / class IRIs) pass through.
+    if (subjectEntity && subjectEntity.trustLevel !== t.layer) continue;
+
+    const canonicalObject = isUri(t.object) ? canonicalEntityUri(t.object) : t.object;
+    const objectIsResource = isUri(t.object);
+    if (objectIsResource) {
+      const objectEntity = entities.get(canonicalObject);
+      // Mirror `useLayerTriples` line 444-448: object-side trust
+      // check. Cross-layer resource→resource edges are dropped on
+      // the source layer's tab; they must not bump either endpoint's
+      // count for that layer.
+      if (objectEntity && objectEntity.trustLevel !== t.layer) continue;
+    }
+
+    const spoKey = `${subjectUri}\0${t.predicate}\0${canonicalObject}`;
+    if (subjectEntity) bumpTriple(subjectEntity.uri, t.layer, spoKey);
+
+    if (t.predicate === RDF_TYPE) {
+      // Class-target bump only when the class is a first-class entity
+      // (created by its own triples in Pass 1). Self-link guard same
+      // as the IRI branch below.
+      if (canonicalObject !== subjectUri) {
+        const typeEntity = entities.get(canonicalObject);
+        if (typeEntity) bumpTriple(typeEntity.uri, t.layer, spoKey);
+      }
+    } else if (objectIsResource) {
+      // Self-link guard: `(A, p, A)` is one row in the Triples tab
+      // (`s===uri || o===uri` matches once); subject-side bump above
+      // already counted it.
+      if (canonicalObject !== subjectUri) {
+        const targetEntity = entities.get(canonicalObject);
+        if (targetEntity) bumpTriple(targetEntity.uri, t.layer, spoKey);
+      }
+    }
+  }
+
+  // PASS 4 — finalise `tripleCount` to the canonical-layer count.
+  // What the entity-row badge on this entity's layer page shows after
+  // useLayerTriples + dedupeTriplesBySpo. Cross-layer residue (e.g. a
+  // promoted SWM entity's WM-only drafts) does not inflate it.
+  for (const entity of entities.values()) {
     const counts = tripleCountByLayer.get(entity.uri);
     entity.tripleCount = counts ? counts[entity.trustLevel] : 0;
   }

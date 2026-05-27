@@ -188,6 +188,45 @@ describe('buildEntities — MemoryEntity.tripleCount', () => {
     expect(promoted.tripleCount).toBe(2);
   });
 
+  it('cross-layer resource→resource edges are dropped from per-layer count (matches useLayerTriples residue filter)', () => {
+    // Codex regression: a WM-layer triple `(wm-a, p, swm-b)` is shown
+    // on the WM Triples tab only if both endpoints are in WM
+    // (`helpers.ts:444-448`). Since swm-b's canonical layer is `shared`,
+    // useLayerTriples drops the row from WM view. The per-layer count
+    // for wm-a must mirror this — otherwise badge over-counts vs tab.
+    const entities = buildEntities([
+      // Establish swm-b's canonical layer as `shared` via its own SWM triple.
+      triple('urn:e:swm-b', 'urn:p:label', '"B"', 'shared'),
+      // The cross-layer edge in WM — should NOT bump wm-a's WM count.
+      triple('urn:e:wm-a', 'urn:p:references', 'urn:e:swm-b', 'working'),
+      // A same-layer WM edge for comparison — SHOULD bump wm-a's WM count.
+      triple('urn:e:wm-a', 'urn:p:knows', 'urn:e:wm-c', 'working'),
+    ]);
+    const wmA = entities.get('urn:e:wm-a')!;
+    expect(wmA.trustLevel).toBe('working');
+    // Only the wm-a→wm-c edge counts; the cross-layer edge is dropped.
+    expect(wmA.tripleCount).toBe(1);
+    // swm-b's canonical-layer count includes its own label only — the
+    // cross-layer incoming edge from wm-a does NOT bump swm-b in WM
+    // (it would, pre-fix, contribute to swm-b.counts.working, but
+    // tripleCount = counts.shared which excludes WM bumps).
+    expect(entities.get('urn:e:swm-b')?.tripleCount).toBe(1);
+  });
+
+  it('residue-filter does not over-drop: literal-object triples on a residue-layer pass', () => {
+    // Subtle complement of the cross-layer-drop case. `useLayerTriples`
+    // only checks subject.trustLevel for residue (line 426-427) and
+    // ONLY checks the object trust level if the object is a resource
+    // (line 444). A WM-layer LITERAL triple on a promoted SWM entity
+    // still gets dropped by the subject-check, but the object-check
+    // doesn't apply to literals — so for a SAME-layer literal edge on
+    // a same-layer entity, nothing drops.
+    const entities = buildEntities([
+      triple('urn:e:e', 'urn:p:label', '"L"', 'working'),
+    ]);
+    expect(entities.get('urn:e:e')?.tripleCount).toBe(1);
+  });
+
   it('cross-layer same-SPO does NOT collapse (each layer is its own dedup scope)', () => {
     // Edge of the dedup design: if the same (s,p,o) appears in two
     // DIFFERENT layers (e.g. as residue + current), each layer's count
