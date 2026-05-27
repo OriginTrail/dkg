@@ -362,6 +362,65 @@ describe('Working Memory Assertion Lifecycle', () => {
     expect(r4.skipped).toBe(0);
   });
 
+  it('GH #748 user-reported: stale literal duplicates from a broken previous pass are cleaned up despite marker present', async () => {
+    // Regression: round-1 → round-6 `store.delete([{ object: literalString }])`
+    // silently no-op'd against `xsd:string`-typed literals on a persistent
+    // store. The URI insert succeeded, leaving BOTH forms behind. The
+    // user's daemon ended up with 52 literals + 52 URIs after a single
+    // migration pass, with the marker set so subsequent boots wouldn't
+    // self-heal.
+    //
+    // This test seeds that exact end state — marker present + both literal
+    // AND URI form `wasAttributedTo` on the same subject — and asserts the
+    // next migration pass overrides the marker, deletes the literal via
+    // `deleteByPattern`, and writes a fresh marker.
+    const CG_META_LOCAL = `did:dkg:context-graph:${CG_ID}/_meta`;
+    const SWM_META_LOCAL = `did:dkg:context-graph:${CG_ID}/_shared_memory_meta`;
+    const AGENTS_GRAPH = 'did:dkg:context-graph:agents';
+    const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+    const DKG = 'http://dkg.io/ontology/';
+    const DKG_REGISTRY = 'https://dkg.network/ontology#';
+    const PROV = 'http://www.w3.org/ns/prov#';
+    const PEER = '12D3KooWStaleLiteralPeer';
+    const ADDR = '0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef';
+
+    await store.insert([
+      { subject: `did:dkg:agent:${ADDR}`, predicate: RDF_TYPE, object: `${DKG_REGISTRY}Agent`, graph: AGENTS_GRAPH },
+      { subject: `did:dkg:agent:${ADDR}`, predicate: `${DKG_REGISTRY}peerId`, object: `"${PEER}"`, graph: AGENTS_GRAPH },
+      { subject: `did:dkg:agent:${ADDR}`, predicate: `${DKG_REGISTRY}agentAddress`, object: `"${ADDR}"`, graph: AGENTS_GRAPH },
+    ]);
+
+    // Seed inconsistent state: WorkspaceOperation with BOTH literal and URI
+    // form `wasAttributedTo`, marker present from the broken previous pass.
+    const OP = `urn:dkg:share:${CG_ID}:op-stale-dup`;
+    await store.insert([
+      { subject: OP, predicate: RDF_TYPE, object: `${DKG}WorkspaceOperation`, graph: SWM_META_LOCAL },
+      { subject: OP, predicate: `${DKG}publisherPeerId`, object: `"${PEER}"`, graph: SWM_META_LOCAL },
+      { subject: OP, predicate: `${PROV}wasAttributedTo`, object: `"${PEER}"`, graph: SWM_META_LOCAL },
+      { subject: OP, predicate: `${PROV}wasAttributedTo`, object: `did:dkg:agent:${ADDR}`, graph: SWM_META_LOCAL },
+      { subject: 'urn:dkg:migration:swm-attr-agent-did', predicate: `${DKG}appliedAt`, object: `"2026-05-26T00:00:00.000Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>`, graph: CG_META_LOCAL },
+    ]);
+
+    const r = await publisher.migrateSwmAttributionToAgentDid();
+    expect(r.rewritten).toBeGreaterThanOrEqual(1);
+
+    // After cleanup, exactly ONE wasAttributedTo (the URI form) remains.
+    const after = await store.query(
+      `SELECT ?o WHERE { GRAPH <${SWM_META_LOCAL}> { <${OP}> <${PROV}wasAttributedTo> ?o } }`,
+    );
+    if (after.type === 'bindings') {
+      expect(after.bindings.length).toBe(1);
+      expect(after.bindings[0]['o']).toBe(`did:dkg:agent:${ADDR}`);
+    }
+
+    // Marker still present, refreshed with a new timestamp (we deleted the
+    // stale one before re-running). Just assert presence.
+    const marker = await store.query(
+      `SELECT ?ts WHERE { GRAPH <${CG_META_LOCAL}> { <urn:dkg:migration:swm-attr-agent-did> <${DKG}appliedAt> ?ts } }`,
+    );
+    if (marker.type === 'bindings') expect(marker.bindings.length).toBe(1);
+  });
+
   it('GH #748 Codex round 6: curated CG (<addr>/<slug> form) is migrated, not silently skipped', async () => {
     // Regression for a user-reported bug: the previous version iterated
     // `graphManager.listContextGraphs()`, which filters out IDs containing

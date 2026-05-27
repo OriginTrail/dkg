@@ -3161,8 +3161,36 @@ export class DKGPublisher implements Publisher {
         const markerResult = await this.store.query(
           `SELECT ?ts WHERE { GRAPH <${markerGraph}> { <${MIGRATION_MARKER_SUBJECT}> <${DKG}appliedAt> ?ts } } LIMIT 1`,
         );
-        if (markerResult.type === 'bindings' && markerResult.bindings.length > 0) {
-          continue;
+        const markerPresent =
+          markerResult.type === 'bindings' && markerResult.bindings.length > 0;
+
+        // GH #748 (user-reported regression): the round-1 → round-6 delete
+        // logic used `store.delete([{ object: literalString }])` which
+        // silently no-op'd against `xsd:string`-typed literals on a
+        // persistent oxigraph store — the URI insert succeeded but the
+        // literal stayed. Affected stores end up with BOTH forms for the
+        // same subject. If a marker is present BUT subjects exist with
+        // BOTH a literal AND a URI `wasAttributedTo`, the previous pass
+        // was broken — override the marker so we re-process and clean up.
+        // Only this exact broken state triggers re-run; legitimate
+        // remaining literals (e.g. `"unknown"` permanent placeholders) do
+        // not, because they don't also have a URI counterpart.
+        if (markerPresent) {
+          const staleCheck = await this.store.query(
+            `ASK { GRAPH <${swmMetaGraph}> {
+              ?s <${PROV}wasAttributedTo> ?lit . FILTER(isLiteral(?lit))
+              ?s <${PROV}wasAttributedTo> ?uri . FILTER(isURI(?uri))
+            } }`,
+          );
+          const hasBrokenDuplicates = staleCheck.type === 'boolean' && staleCheck.value;
+          if (!hasBrokenDuplicates) continue;
+          // Drop the stale marker so we record a fresh `appliedAt`
+          // timestamp when the (now-fixed) pass completes.
+          await this.store.deleteByPattern({
+            graph: markerGraph,
+            subject: MIGRATION_MARKER_SUBJECT,
+            predicate: `${DKG}appliedAt`,
+          });
         }
 
         let swmRewritten = 0;
@@ -3226,12 +3254,20 @@ export class DKGPublisher implements Publisher {
               }]);
             }
 
-            await this.store.delete([{
+            // GH #748 (user-reported regression): use `deleteByPattern` rather
+            // than `store.delete([{ object: literalString }])`. Exact-match
+            // delete silently no-op'd against `xsd:string`-typed literals on
+            // a persistent oxigraph store — the literal stayed alongside the
+            // newly-inserted URI, leaving the legend with duplicate
+            // peer-ID + agent-DID attribution for every migrated row.
+            // Pattern-based delete is form-agnostic; safe to wipe all
+            // wasAttributedTo for this subject because writers only ever
+            // emit one (we're about to insert the canonical URI).
+            await this.store.deleteByPattern({
+              graph: swmMetaGraph,
               subject,
               predicate: `${PROV}wasAttributedTo`,
-              object: objectLit,
-              graph: swmMetaGraph,
-            }]);
+            });
             await this.store.insert([{
               subject,
               predicate: `${PROV}wasAttributedTo`,
