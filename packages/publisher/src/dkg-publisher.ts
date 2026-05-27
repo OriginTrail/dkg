@@ -3075,12 +3075,12 @@ export class DKGPublisher implements Publisher {
     subGraphName: string | undefined,
     ownershipKey: string,
     rootEntities: readonly string[],
-  ): Promise<Map<string, Set<string>>> {
-    const owners = new Map<string, Set<string>>();
+  ): Promise<Map<string, string>> {
+    const owners = new Map<string, string>();
     const liveOwned = this.sharedMemoryOwnedEntities.get(ownershipKey);
     if (liveOwned) {
       for (const [root, owner] of liveOwned) {
-        addOwner(owners, root, owner);
+        setEffectiveOwner(owners, root, owner);
       }
     }
 
@@ -3123,6 +3123,7 @@ export class DKGPublisher implements Publisher {
       }
     }
 
+    const durableOwners = new Map<string, string>();
     if (!this.sharedMemoryOwnedEntities.has(ownershipKey)) {
       this.sharedMemoryOwnedEntities.set(ownershipKey, new Map());
     }
@@ -3134,10 +3135,12 @@ export class DKGPublisher implements Publisher {
       if (!entity || !creator) continue;
       const validPeers = validatedOwners.get(entity);
       if (!validPeers?.has(creator)) continue;
-      addOwner(owners, entity, creator);
-      if (!hydratedOwned.has(entity)) {
-        hydratedOwned.set(entity, creator);
-      }
+      setEffectiveOwner(durableOwners, entity, creator);
+    }
+
+    for (const [entity, creator] of durableOwners) {
+      owners.set(entity, creator);
+      hydratedOwned.set(entity, creator);
     }
 
     return owners;
@@ -3467,17 +3470,15 @@ export class DKGPublisher implements Publisher {
     // Rule 4: reject roots owned by a different peer before any mutations.
     const skippedRoots = new Set<string>();
     for (const root of rootEntities) {
-      const owners = swmOwners.get(root);
-      if (!owners || owners.size === 0) continue;
+      const owner = swmOwners.get(root);
+      if (!owner) continue;
       if (opts?.publisherPeerId) {
-        const foreignOwner = [...owners].find((owner) => owner !== opts.publisherPeerId);
-        if (foreignOwner) {
+        if (owner !== opts.publisherPeerId) {
           throw new Error(
-            `Cannot promote entity <${root}>: owned by peer ${foreignOwner}, not by caller ${opts.publisherPeerId}.`,
+            `Cannot promote entity <${root}>: owned by peer ${owner}, not by caller ${opts.publisherPeerId}.`,
           );
         }
       } else {
-        const owner = [...owners][0];
         this.log.warn(createOperationContext('share'), `Skipping entity <${root}>: owned by peer ${owner} in SWM but no publisherPeerId provided to verify ownership.`);
         skippedRoots.add(root);
       }
@@ -3667,4 +3668,11 @@ function stripSparqlLiteral(value: string | undefined): string | undefined {
 function addOwner(owners: Map<string, Set<string>>, root: string, owner: string): void {
   if (!owners.has(root)) owners.set(root, new Set());
   owners.get(root)!.add(owner);
+}
+
+function setEffectiveOwner(owners: Map<string, string>, root: string, owner: string): void {
+  const existing = owners.get(root);
+  if (!existing || owner < existing) {
+    owners.set(root, owner);
+  }
 }
