@@ -24,6 +24,7 @@ SCRIPTS=(
   "rfc38-unclean-restart"
   "publish"
   "sharing"
+  "swm-ownership-restart"
   "invite-flow"
   "cli-invite"
   "reject-flow"
