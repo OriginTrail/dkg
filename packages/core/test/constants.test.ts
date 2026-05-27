@@ -241,28 +241,52 @@ describe('parseUal (OT-RFC-40 §5.2 — handles both 3- and 4-segment forms)', (
     expect(parseUal('did:dkg:base:special/base:84532/0xPub/123')).toBeNull();
   });
 
-  it('rejects malformed tagged UALs without silently demoting to default form (Codex review on PR #718, round 4)', () => {
-    // `did:dkg:v9/<publisher>/<id>` LOOKS like a tagged form because
-    // segments[0]="v9" matches STORAGE_TAG_PATTERN, but it's missing
-    // the chainId between the tag and the publisher. Pre-fix, this
-    // would silently fall back to the default-storage path and parse
-    // as `{chainId: "v9", storageTag: "", ...}`, which the publisher
-    // would then route through the V10 default range check instead
-    // of the V9 KAS pre-reserved-range check. Reject hard instead.
-    expect(
-      parseUal(
-        'did:dkg:v9/0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1/123',
-      ),
-    ).toBeNull();
+  it('rejects malformed 4+-segment tagged UALs without silently demoting to default form (Codex review on PR #718, round 4)', () => {
+    // `did:dkg:v9/0xPub/123/1` is the canonical malformed tagged
+    // shape: segments[0]="v9" looks tag-shaped, but the chainId
+    // between tag and publisher is missing, so segments[2]="123" is
+    // not a publisher address. Pre-fix, this would silently fall
+    // back to the default-storage path with chainId="v9" and bypass
+    // the V9 KAS range check. Reject instead.
     expect(
       parseUal(
         'did:dkg:v9/0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1/123/1',
       ),
     ).toBeNull();
-    // Also rejects 4-segment shapes where segments[2] is plainly not
-    // a publisher address (random number, random string).
+    // Other malformed 4-segment shapes where segments[2] is plainly
+    // not a publisher address.
     expect(parseUal('did:dkg:v11/base:84532/notapublisher/1')).toBeNull();
     expect(parseUal('did:dkg:v11/base:84532/12345/1')).toBeNull();
+  });
+
+  it('preserves no-chain `did:dkg:none/<pub>/<id>` round-tripping (Codex review on PR #718, round 5)', () => {
+    // DKGPublisher emits `did:dkg:none/<pub>/<id>` in no-chain mode
+    // (`chain.chainId === 'none'`). Despite "none" matching
+    // STORAGE_TAG_PATTERN, a 3-segment UAL is unambiguously the
+    // default-storage form per RFC §5.2 — the tag-vs-chainId
+    // disambiguation only kicks in for 4+ segments. The previous
+    // round-4 fix was too aggressive and broke this round-trip.
+    const parsed = parseUal(
+      'did:dkg:none/0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1/12345',
+    );
+    expect(parsed).toEqual({
+      chainId: 'none',
+      storageTag: '',
+      publisherAddress: '0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1',
+      startKAId: 12345n,
+    });
+    // Tentative no-chain UALs (synthetic `t<opId>` local id) also
+    // round-trip — DKGPublisher's no-random-wallet test pins this
+    // exact shape via regex.
+    const tentative = parseUal(
+      'did:dkg:none/0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1/tabcd-1',
+    );
+    expect(tentative).toEqual({
+      chainId: 'none',
+      storageTag: '',
+      publisherAddress: '0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1',
+      startKAId: null,
+    });
   });
 
   it('returns startKAId: null for non-numeric local-id slot (tentative publish form)', () => {

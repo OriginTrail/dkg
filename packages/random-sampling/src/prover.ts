@@ -434,7 +434,6 @@ export class RandomSamplingProver {
         kcId: kcId.toString(),
         cgId: cgId.toString(),
         chunkId: chunkId.toString(),
-        storageTag: expectedStorageTag ?? '',
       }),
     );
 
