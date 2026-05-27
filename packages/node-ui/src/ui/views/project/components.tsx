@@ -3227,7 +3227,16 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
   }, [entity.uri, allEntities]);
 
   const entityTriples = useMemo(
-    () => allTriples.filter(t => t.subject === entity.uri || t.object === entity.uri),
+    // Canonicalise raw triple sides before comparing — `entity.uri`
+    // was canonicalised by `getOrCreate` in `buildEntities`, but
+    // `allTriples` keeps the raw daemon strings (which can ship
+    // wrapped as `<urn:...>`). Without this both surfaces disagree
+    // for wrapped-IRI rows: the entity-row badge counts them (it
+    // uses the canonicalised entity key) while this filter would
+    // drop them. Idempotent + no-op for already-bare URIs.
+    () => allTriples.filter(t =>
+      canonicalEntityUri(t.subject) === entity.uri ||
+      canonicalEntityUri(t.object) === entity.uri),
     [entity.uri, allTriples]
   );
 

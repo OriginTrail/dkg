@@ -77,6 +77,17 @@ describe('buildEntities — MemoryEntity.tripleCount', () => {
     expect(entities.get(sub)?.tripleCount).toBe(9);
   });
 
+  it('self-referential triples count once, not twice (`(A, p, A)`)', () => {
+    // Regression: subject-side + object-side bumps are both `A`, so
+    // a naive double-bump would yield 2 — but the Triples-tab filter
+    // `s===uri || o===uri` matches the row once and shows 1. The
+    // object-side bump must skip when `targetUri === entity.uri`.
+    const entities = buildEntities([
+      triple('urn:e:loop', 'urn:p:knows', 'urn:e:loop'),
+    ]);
+    expect(entities.get('urn:e:loop')?.tripleCount).toBe(1);
+  });
+
   it('an IRI-object triple bumps BOTH endpoints (per-entity metric, summing overcounts)', () => {
     // Guardrail: this is the invariant that makes the field safe for
     // per-entity questions but unsafe for layer totals. Calling it out

@@ -370,8 +370,14 @@ export function buildEntities(layered: LayeredTriple[]): Map<string, MemoryEntit
       if (t.subGraph) targetEntity.subGraphs.add(t.subGraph);
       // Object-side bump — entity appearing as the object of someone
       // else's triple shows up in its own Triples tab too, so its
-      // tripleCount must include it.
-      targetEntity.tripleCount++;
+      // tripleCount must include it. Skip when self-referential
+      // (`(A, p, A)`): the Triples-tab filter is `s===uri || o===uri`
+      // which yields one row for a self-link, so counting both sides
+      // here would disagree by one. Subject-side bump already happened
+      // above, so the self-link is still counted once.
+      if (targetUri !== entity.uri) {
+        targetEntity.tripleCount++;
+      }
       const keys = connectionKeys.get(entity.uri) ?? new Set<string>();
       const connectionKey = `${t.predicate}\0${targetUri}`;
       if (!keys.has(connectionKey)) {
