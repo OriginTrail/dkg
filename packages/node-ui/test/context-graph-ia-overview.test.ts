@@ -199,6 +199,11 @@ describe('Context Graph IA and Overview', () => {
 
     // At a glance — 4 stats (§4.2.1): Entities · Triples · Subgraphs
     // · Agents with access. Subgraph count is passed in by ProjectView.
+    // ui-lead item 3 — the section block carries an "At a glance"
+    // title so it matches the structure of the other peer sections.
+    const atAGlance = container.querySelector('[data-section="at-a-glance"]');
+    expect(atAGlance).toBeTruthy();
+    expect(atAGlance?.querySelector('.v10-po-section-title')?.textContent?.trim()).toBe('At a glance');
     const statLabels = Array.from(container.querySelectorAll('.v10-stat-strip-label'))
       .map(node => node.textContent?.trim());
     expect(statLabels).toEqual(['Entities', 'Triples', 'Subgraphs', 'Agents with access']);
@@ -224,19 +229,22 @@ describe('Context Graph IA and Overview', () => {
     // access policy. Self row carries ` · you · curator` suffix +
     // `.is-self.is-curator` for the CSS-driven ◆ glyph; the other
     // row stays bare with the default ◯ glyph supplied by CSS.
+    // ui-lead item 2 — `you` / `curator` render as separate
+    // `.v10-po-participant-tag` spans with a CSS `::before` `·`
+    // separator; the DOM text reads the tag content only.
     expect(container.textContent).toContain('Participant agents');
     const participantRows = Array.from(container.querySelectorAll('.v10-po-participant'));
     expect(participantRows).toHaveLength(2);
     const self = participantRows[0];
     expect(self.classList.contains('is-self')).toBe(true);
     expect(self.classList.contains('is-curator')).toBe(true);
-    expect(self.textContent).toContain(' · you · curator');
-    expect(self.textContent).not.toContain('(you');
+    const selfTags = Array.from(self.querySelectorAll('.v10-po-participant-tag')).map(n => n.textContent);
+    expect(selfTags).toEqual(['you', 'curator']);
+    expect(self.getAttribute('aria-label')).toMatch(/ you curator$/);
     const other = participantRows[1];
     expect(other.classList.contains('is-self')).toBe(false);
     expect(other.classList.contains('is-curator')).toBe(false);
-    expect(other.textContent).not.toContain(' · you');
-    expect(other.textContent).not.toContain(' · curator');
+    expect(other.querySelectorAll('.v10-po-participant-tag')).toHaveLength(0);
 
     const primer = container.querySelector<HTMLButtonElement>('.v10-po-identity-primer');
     expect(primer).toBeTruthy();
@@ -270,7 +278,8 @@ describe('Context Graph IA and Overview', () => {
     const rows = Array.from(container.querySelectorAll('.v10-po-participant'));
     expect(rows).toHaveLength(1);
     expect(rows[0].classList.contains('is-curator')).toBe(true);
-    expect(rows[0].textContent).toContain(' · curator');
+    expect(Array.from(rows[0].querySelectorAll('.v10-po-participant-tag')).map(n => n.textContent))
+      .toEqual(['curator']);
 
     await act(async () => root.unmount());
   });
@@ -475,14 +484,14 @@ describe('Context Graph IA and Overview', () => {
     const curatorRow = rows[0];
     expect(curatorRow.classList.contains('is-curator')).toBe(true);
     expect(curatorRow.classList.contains('is-self')).toBe(false);
-    expect(curatorRow.textContent).toContain(' · curator');
-    expect(curatorRow.textContent).not.toContain(' · you');
+    expect(Array.from(curatorRow.querySelectorAll('.v10-po-participant-tag')).map(n => n.textContent))
+      .toEqual(['curator']);
 
     const selfRow = rows[1];
     expect(selfRow.classList.contains('is-self')).toBe(true);
     expect(selfRow.classList.contains('is-curator')).toBe(false);
-    expect(selfRow.textContent).toContain(' · you');
-    expect(selfRow.textContent).not.toContain(' · curator');
+    expect(Array.from(selfRow.querySelectorAll('.v10-po-participant-tag')).map(n => n.textContent))
+      .toEqual(['you']);
 
     await act(async () => root.unmount());
   });

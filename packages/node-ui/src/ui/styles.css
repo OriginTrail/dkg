@@ -5070,6 +5070,16 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
   border: 1px solid color-mix(in srgb, var(--v10-stat-accent) 18%, var(--border-default));
   border-radius: 8px;
   background: color-mix(in srgb, var(--v10-stat-accent) 5%, var(--bg-surface));
+  /* ui-lead item 7 — Dashboard-style hover: border tints toward
+     the layer accent (falls back to --border-strong on vanilla
+     cells) and a soft shadow rises. The M4 VM-hero gate still
+     binds — DO NOT modify cell padding, border radius, or value
+     size; only the hover-state border-color and box-shadow. */
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.v10-stat-strip-cell:hover {
+  border-color: color-mix(in srgb, var(--v10-stat-accent) 35%, var(--border-strong));
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
 }
 .v10-stat-strip-value {
   display: block;
@@ -5232,6 +5242,11 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
   background: var(--bg-hover);
 }
 .v10-po-stat-strip { margin-bottom: 12px; }
+/* ui-lead item 3 — section title above the At-a-glance grid so it
+   matches the structure of the other peer regions (Knowledge
+   Pipeline, Participant agents, Pending join requests). */
+.v10-po-stat-block { margin-bottom: 12px; }
+.v10-po-stat-block > .v10-po-section-title { margin-bottom: 8px; }
 /* Participant agents list */
 .v10-po-people { margin: 12px 0 0; padding-top: 12px; border-top: 1px solid var(--border-subtle); }
 .v10-po-people > .v10-po-section-title { margin-bottom: 8px; }
@@ -5281,9 +5296,23 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
 .v10-po-participant-name {
   white-space: nowrap;
 }
+/* ui-lead item 2 — suffix tags render as separate spans with a
+   CSS-driven `·` separator. Keeps the data string semantic-free
+   (the tag text is just "you" / "curator" — no glyphs or
+   punctuation in the DOM textContent). */
+.v10-po-participant-tag {
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+.v10-po-participant-tag::before {
+  content: "·";
+  margin: 0 6px;
+  color: var(--text-ghost);
+  font-weight: 400;
+}
 /* Pending join requests — peer section under Participant agents,
    curator-only. */
-.v10-po-join { margin: 12px 0 0; padding-top: 12px; border-top: 1px solid var(--border-subtle); }
+.v10-po-join { margin: 12px 0 0; padding: 12px 16px 0; border-top: 1px solid var(--border-subtle); }
 .v10-po-join-head {
   display: flex;
   align-items: center;
@@ -7510,11 +7539,12 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
 }
 .v10-project-strip-sg-icon { font-size: 13px; line-height: 1; }
 .v10-project-strip-desc {
-  font-size: 11px; color: var(--text-tertiary);
+  font-size: 12px; color: var(--text-secondary);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  margin-left: auto;
-  max-width: 560px;
-  padding-left: 12px;
+  margin-left: 14px;
+  max-width: 720px;
+  padding-left: 0;
+  flex: 0 1 auto;
 }
 
 /* Context Graph primer */

@@ -896,7 +896,8 @@ export function ProjectOverviewCard({
       {/* §4.2.1 Delta 2 (locked) — M6 layer-availability status copy
           renders as a `title` tooltip on the Entities cell, not as
           an inline `hint:`, to keep the 4-card grid clean. */}
-      <div data-section="at-a-glance">
+      <div data-section="at-a-glance" className="v10-po-stat-block">
+        <div className="v10-po-section-title">At a glance</div>
         <StatStrip
           className="v10-po-stat-strip"
           items={[
@@ -1027,19 +1028,27 @@ export function ProjectOverviewCard({
               {rows.map(({ display, full, canonical }) => {
                 const isSelf = selfIds.has(canonical);
                 const isCurator = !!curatorCanonical && canonical === curatorCanonical;
-                let suffix = '';
-                if (isSelf && isCurator) suffix = ' · you · curator';
-                else if (isSelf) suffix = ' · you';
-                else if (isCurator) suffix = ' · curator';
+                // ui-lead item 2 — suffixes render as separate
+                // `.v10-po-participant-tag` spans so the spacing
+                // (the `·` separator) lives in CSS `::before`
+                // pseudo-content instead of the data string.
+                // `aria-label` preserves a screen-reader-friendly
+                // form, since the visible separators aren't in the
+                // accessible name.
+                const shortAddress = `${display.slice(0, 6)}…${display.slice(-4)}`;
+                const ariaLabelParts = [shortAddress];
+                if (isSelf) ariaLabelParts.push('you');
+                if (isCurator) ariaLabelParts.push('curator');
                 return (
                   <span
                     key={canonical}
                     className={`v10-po-participant${isSelf ? ' is-self' : ''}${isCurator ? ' is-curator' : ''}`}
                     title={full}
+                    aria-label={ariaLabelParts.join(' ')}
                   >
-                    <span className="v10-po-participant-name">
-                      {display.slice(0, 6)}…{display.slice(-4)}{suffix}
-                    </span>
+                    <span className="v10-po-participant-name">{shortAddress}</span>
+                    {isSelf && <span className="v10-po-participant-tag">you</span>}
+                    {isCurator && <span className="v10-po-participant-tag">curator</span>}
                   </span>
                 );
               })}
