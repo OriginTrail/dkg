@@ -143,19 +143,27 @@ export const ActivityFeed: React.FC<ActivityFeedProps> = ({
   // (showing "0" rather than vanishing into the empty state).
   //
   // PR #694 polish carry-over (b) — when the lifecycle SPARQL
-  // errored, suppress the exact count and render `—` instead.
-  // Showing "0" next to "RECENT ACTIVITY" while the error indicator
-  // below says "Couldn't load recent activity." contradicts itself
-  // (precise count vs not-loaded). The em-dash keeps the row
-  // anchored without claiming a specific number.
+  // errored AND no rows are visible (`items.length === 0`), render
+  // `—` instead of "0". Showing "0" next to "RECENT ACTIVITY" while
+  // the error indicator below says "Couldn't load recent activity."
+  // contradicts itself (precise count vs not-loaded). The em-dash
+  // keeps the row anchored without claiming a specific number.
+  //
+  // Codex review on PR #769 — when carry-over (a)'s cached rows
+  // remain after a same-graph refresh failure, we DO have a real
+  // list visible below. Falling back to `—` in that path would
+  // make the badge disagree with the rendered count. Tighten the
+  // condition: only render `—` when there are genuinely no rows
+  // to count.
+  const showErrorPlaceholder = lifecycleError != null && items.length === 0;
   const titleRow = title ? (
     <div className="v10-activity-feed-title">
       <span className="v10-activity-feed-title-label">{title}</span>
       <span
         className="v10-activity-feed-title-count"
-        data-state={lifecycleError ? 'error' : undefined}
+        data-state={showErrorPlaceholder ? 'error' : undefined}
       >
-        {lifecycleError ? '—' : titleCount}
+        {showErrorPlaceholder ? '—' : titleCount}
       </span>
     </div>
   ) : null;
