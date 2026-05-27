@@ -142,6 +142,7 @@ describe('context graph write-path validation', () => {
   async function startRoutes(
     agent: ReturnType<typeof makeAgent>,
     requestAgentAddress = CALLER,
+    requestToken: string | undefined = undefined,
   ) {
     server = createServer(async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://127.0.0.1');
@@ -182,7 +183,7 @@ describe('context graph write-path validation', () => {
         routePlugins: [],
         url,
         path: url.pathname,
-        requestToken: undefined,
+        requestToken,
         requestAgentAddress,
         emitMemoryGraphChanged: vi.fn(),
       } as any;
@@ -438,8 +439,74 @@ describe('context graph write-path validation', () => {
     });
 
     expect(result.status).toBe(200);
-    expect(agent.listContextGraphs).toHaveBeenCalledWith({ callerAgentAddress: null });
+    expect(agent.listContextGraphs).toHaveBeenCalledWith();
     expect(agent.calls.create).toHaveBeenCalledWith('legacy-cg', 'draft', undefined);
+  });
+
+  it('does not fall back to the default agent when listing write targets without an explicit caller', async () => {
+    const agent = makeAgent([{
+      id: 'admin-cg',
+      uri: 'did:dkg:context-graph:admin-cg',
+      name: 'Admin CG',
+      subscribed: true,
+      synced: true,
+    }]);
+    agent.getDefaultAgentAddress.mockReturnValue(CALLER);
+    await startRoutes(agent, CALLER);
+
+    const result = await post('/api/assertion/create', {
+      contextGraphId: 'admin-cg',
+      name: 'draft',
+    });
+
+    expect(result.status).toBe(200);
+    expect(agent.getDefaultAgentAddress).not.toHaveBeenCalled();
+    expect(agent.listContextGraphs).toHaveBeenCalledWith();
+    expect(agent.calls.create).toHaveBeenCalledWith('admin-cg', 'draft', undefined);
+  });
+
+  it('does not scope write-target listing for node-level tokens that resolve to no agent', async () => {
+    const agent = makeAgent([{
+      id: 'node-token-cg',
+      uri: 'did:dkg:context-graph:node-token-cg',
+      name: 'Node Token CG',
+      subscribed: true,
+      synced: true,
+    }]);
+    agent.resolveAgentByToken.mockReturnValue(undefined);
+    await startRoutes(agent, CALLER, 'node-token');
+
+    const result = await post('/api/assertion/create', {
+      contextGraphId: 'node-token-cg',
+      name: 'draft',
+    });
+
+    expect(result.status).toBe(200);
+    expect(agent.resolveAgentByToken).toHaveBeenCalledWith('node-token');
+    expect(agent.listContextGraphs).toHaveBeenCalledWith();
+    expect(agent.calls.create).toHaveBeenCalledWith('node-token-cg', 'draft', undefined);
+  });
+
+  it('scopes write-target listing when an explicit agent token resolves to an EVM address', async () => {
+    const agent = makeAgent([{
+      id: 'agent-scoped-cg',
+      uri: 'did:dkg:context-graph:agent-scoped-cg',
+      name: 'Agent Scoped CG',
+      subscribed: true,
+      synced: true,
+    }]);
+    agent.resolveAgentByToken.mockReturnValue(CALLER);
+    await startRoutes(agent, CALLER, 'agent-token');
+
+    const result = await post('/api/assertion/create', {
+      contextGraphId: 'agent-scoped-cg',
+      name: 'draft',
+    });
+
+    expect(result.status).toBe(200);
+    expect(agent.resolveAgentByToken).toHaveBeenCalledWith('agent-token');
+    expect(agent.listContextGraphs).toHaveBeenCalledWith({ callerAgentAddress: CALLER });
+    expect(agent.calls.create).toHaveBeenCalledWith('agent-scoped-cg', 'draft', undefined);
   });
 
   it('accepts an exact bare context graph with local content when a curated suffix also exists', async () => {

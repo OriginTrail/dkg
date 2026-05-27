@@ -422,6 +422,9 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     requestAgentAddress,
     emitMemoryGraphChanged,
   } = ctx;
+  const writePreflightCallerAgentAddress = requestToken
+    ? agent.resolveAgentByToken(requestToken)
+    : undefined;
 
 
   // POST /api/context-graph/create — context graph definition create.
@@ -609,7 +612,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       agent,
       id,
       res,
-      { callerAgentAddress: requestAgentAddress },
+      { callerAgentAddress: writePreflightCallerAgentAddress },
     );
     if (!resolvedContextGraphId) return;
     if (accessPolicy !== undefined && (accessPolicy !== 0 && accessPolicy !== 1)) {
@@ -672,7 +675,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       agent,
       contextGraphId,
       res,
-      { callerAgentAddress: requestAgentAddress },
+      { callerAgentAddress: writePreflightCallerAgentAddress },
     );
     if (!resolvedContextGraphId) return;
     try {
@@ -708,7 +711,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       agent,
       contextGraphId,
       res,
-      { callerAgentAddress: requestAgentAddress },
+      { callerAgentAddress: writePreflightCallerAgentAddress },
     );
     if (!resolvedContextGraphId) return;
     if (typeof subGraphName !== "string")
@@ -815,7 +818,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       agent,
       contextGraphId,
       res,
-      { callerAgentAddress: requestAgentAddress },
+      { callerAgentAddress: writePreflightCallerAgentAddress },
     );
     if (!resolvedContextGraphId) return;
     const body = await readBody(req);
@@ -840,7 +843,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       agent,
       contextGraphId,
       res,
-      { callerAgentAddress: requestAgentAddress },
+      { callerAgentAddress: writePreflightCallerAgentAddress },
     );
     if (!resolvedContextGraphId) return;
     const body = await readBody(req);
@@ -949,7 +952,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       agent,
       contextGraphId,
       res,
-      { callerAgentAddress: requestAgentAddress },
+      { callerAgentAddress: writePreflightCallerAgentAddress },
     );
     if (!resolvedContextGraphId) return;
     const body = await readBody(req);
@@ -1025,7 +1028,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       agent,
       contextGraphId,
       res,
-      { callerAgentAddress: requestAgentAddress },
+      { callerAgentAddress: writePreflightCallerAgentAddress },
     );
     if (!resolvedContextGraphId) return;
     const body = await readBody(req);
@@ -1103,7 +1106,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       agent,
       contextGraphId,
       res,
-      { callerAgentAddress: requestAgentAddress },
+      { callerAgentAddress: writePreflightCallerAgentAddress },
     );
     if (!resolvedContextGraphId) return;
     let body: any = {};
@@ -1593,7 +1596,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       agent,
       id,
       res,
-      { callerAgentAddress: requestAgentAddress },
+      { callerAgentAddress: writePreflightCallerAgentAddress },
     );
     if (!resolvedContextGraphId) return;
     try {

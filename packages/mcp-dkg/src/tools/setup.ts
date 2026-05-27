@@ -18,6 +18,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { DkgClient } from '../client.js';
 import type { DkgConfig } from '../config.js';
+import { EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION } from './context-graph-description.js';
 
 type ToolResult = {
   content: Array<{ type: 'text'; text: string }>;
@@ -32,11 +33,6 @@ const errResult = (text: string): ToolResult => ({
 
 const formatError = (e: unknown): string =>
   e instanceof Error ? e.message : String(e);
-
-const CONTEXT_GRAPH_ID_DESCRIPTION =
-  'Canonical context graph id. Use <curatorAddress>/<slug> or ' +
-  'did:dkg:context-graph:<curatorAddress>/<slug>. Do not pass bare slugs; ' +
-  'use dkg_list_context_graphs to copy an existing id.';
 
 /**
  * Slugify a human-readable CG name into a URL-safe id (e.g. "My
@@ -179,7 +175,7 @@ export function registerSetupTools(
         'pass `includeSharedMemory: false` to skip SWM sync (saves ' +
         'bandwidth when you only need on-chain data).',
       inputSchema: {
-        contextGraphId: z.string().min(1).describe(CONTEXT_GRAPH_ID_DESCRIPTION),
+        contextGraphId: z.string().min(1).describe(EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION),
         includeSharedMemory: z
           .boolean()
           .optional()
@@ -232,7 +228,7 @@ export function registerSetupTools(
         'silently reused, no error. Names must be lowercase letters, ' +
         'digits, and hyphens, and must not start with `_`.',
       inputSchema: {
-        contextGraphId: z.string().min(1).describe(`Parent context graph id. ${CONTEXT_GRAPH_ID_DESCRIPTION}`),
+        contextGraphId: z.string().min(1).describe(`Parent context graph id. ${EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION}`),
         subGraphName: z
           .string()
           .min(1)

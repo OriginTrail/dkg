@@ -428,6 +428,9 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
     requestAgentAddress,
     emitMemoryGraphChanged,
   } = ctx;
+  const writePreflightCallerAgentAddress = requestToken
+    ? agent.resolveAgentByToken(requestToken)
+    : undefined;
 
 
   // POST /api/profile/query-catalog/write
@@ -446,7 +449,7 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
       agent,
       contextGraphId,
       res,
-      { callerAgentAddress: requestAgentAddress },
+      { callerAgentAddress: writePreflightCallerAgentAddress },
     );
     if (!resolvedContextGraphId) return;
 
@@ -1096,7 +1099,7 @@ WHERE {
       agent,
       contextGraphId,
       res,
-      { callerAgentAddress: requestAgentAddress },
+      { callerAgentAddress: writePreflightCallerAgentAddress },
     );
     if (!resolvedContextGraphId) return;
     const verifyResult = parsed.verifyResult;
@@ -1391,7 +1394,7 @@ WHERE {
       agent,
       contextGraphId,
       res,
-      { callerAgentAddress: requestAgentAddress },
+      { callerAgentAddress: writePreflightCallerAgentAddress },
     );
     if (!resolvedContextGraphId) return;
     if (!validateOptionalSubGraphName(subGraphName, res)) return;
@@ -1474,7 +1477,7 @@ WHERE {
       agent,
       contextGraphId,
       res,
-      { callerAgentAddress: requestAgentAddress },
+      { callerAgentAddress: writePreflightCallerAgentAddress },
     );
     if (!resolvedContextGraphId) return;
     if (!validateOptionalSubGraphName(subGraphName, res)) return;
@@ -1770,7 +1773,7 @@ WHERE {
             rawPublishContextGraphId,
             res,
             {
-              callerAgentAddress: requestAgentAddress,
+              callerAgentAddress: writePreflightCallerAgentAddress,
               requireLocalWritable: false,
             },
           );
@@ -1877,7 +1880,7 @@ WHERE {
       agent,
       contextGraphId,
       res,
-      { callerAgentAddress: requestAgentAddress },
+      { callerAgentAddress: writePreflightCallerAgentAddress },
     );
     if (!resolvedContextGraphId) return;
     if (!validateConditions(conditions, res)) return;
@@ -1940,7 +1943,7 @@ WHERE {
       agent,
       contextGraphId,
       res,
-      { callerAgentAddress: requestAgentAddress },
+      { callerAgentAddress: writePreflightCallerAgentAddress },
     );
     if (!resolvedContextGraphId) return;
     if (!validateOptionalSubGraphName(subGraphName, res)) return;

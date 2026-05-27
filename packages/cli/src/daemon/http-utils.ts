@@ -552,7 +552,6 @@ export async function resolveRequiredWriteContextGraphId(
     listContextGraphs(opts?: {
       callerAgentAddress?: string | null;
     }): Promise<ExistingContextGraphRow[]>;
-    getDefaultAgentAddress?: () => string | undefined;
     contextGraphHasLocalContent?: (contextGraphId: string) => Promise<boolean>;
     contextGraphExists?: (contextGraphId: string) => Promise<boolean>;
   },
@@ -578,12 +577,12 @@ export async function resolveRequiredWriteContextGraphId(
 
   let contextGraphs: ExistingContextGraphRow[];
   try {
-    const callerAgentAddress =
-      normalizeContextGraphCallerAddress(opts.callerAgentAddress) ??
-      normalizeContextGraphCallerAddress(agent.getDefaultAgentAddress?.());
-    contextGraphs = await agent.listContextGraphs({
-      callerAgentAddress,
-    });
+    const callerAgentAddress = normalizeContextGraphCallerAddress(
+      opts.callerAgentAddress,
+    );
+    contextGraphs = callerAgentAddress
+      ? await agent.listContextGraphs({ callerAgentAddress })
+      : await agent.listContextGraphs();
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     jsonResponse(res, 500, {
