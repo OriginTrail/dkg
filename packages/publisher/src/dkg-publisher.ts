@@ -3070,6 +3070,79 @@ export class DKGPublisher implements Publisher {
     return count;
   }
 
+  private async sharedMemoryOwnersForPromotion(
+    contextGraphId: string,
+    subGraphName: string | undefined,
+    ownershipKey: string,
+    rootEntities: readonly string[],
+  ): Promise<Map<string, Set<string>>> {
+    const owners = new Map<string, Set<string>>();
+    const liveOwned = this.sharedMemoryOwnedEntities.get(ownershipKey);
+    if (liveOwned) {
+      for (const [root, owner] of liveOwned) {
+        addOwner(owners, root, owner);
+      }
+    }
+
+    if (rootEntities.length === 0) return owners;
+
+    const DKG = 'http://dkg.io/ontology/';
+    const PROV = 'http://www.w3.org/ns/prov#';
+    const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId, subGraphName);
+    const entityValues = rootEntities
+      .map((root) => `<${assertSafeIri(root)}>`)
+      .join(' ');
+
+    const ownershipResult = await this.store.query(
+      `SELECT DISTINCT ?entity ?creator WHERE {
+        GRAPH <${assertSafeIri(swmMetaGraph)}> {
+          VALUES ?entity { ${entityValues} }
+          ?entity <${DKG}workspaceOwner> ?creator .
+        }
+      }`,
+    );
+
+    if (ownershipResult.type !== 'bindings' || ownershipResult.bindings.length === 0) return owners;
+
+    const operationResult = await this.store.query(
+      `SELECT DISTINCT ?entity ?creator WHERE {
+        GRAPH <${assertSafeIri(swmMetaGraph)}> {
+          VALUES ?entity { ${entityValues} }
+          ?op <${DKG}rootEntity> ?entity ;
+              <${PROV}wasAttributedTo> ?creator .
+        }
+      }`,
+    );
+    const validatedOwners = new Map<string, Set<string>>();
+    if (operationResult.type === 'bindings') {
+      for (const row of operationResult.bindings) {
+        const entity = row['entity'];
+        const creator = stripSparqlLiteral(row['creator']);
+        if (!entity || !creator) continue;
+        addOwner(validatedOwners, entity, creator);
+      }
+    }
+
+    if (!this.sharedMemoryOwnedEntities.has(ownershipKey)) {
+      this.sharedMemoryOwnedEntities.set(ownershipKey, new Map());
+    }
+    const hydratedOwned = this.sharedMemoryOwnedEntities.get(ownershipKey)!;
+
+    for (const row of ownershipResult.bindings) {
+      const entity = row['entity'];
+      const creator = stripSparqlLiteral(row['creator']);
+      if (!entity || !creator) continue;
+      const validPeers = validatedOwners.get(entity);
+      if (!validPeers?.has(creator)) continue;
+      addOwner(owners, entity, creator);
+      if (!hydratedOwned.has(entity)) {
+        hydratedOwned.set(entity, creator);
+      }
+    }
+
+    return owners;
+  }
+
   /** @deprecated Use reconstructSharedMemoryOwnership */
   async reconstructWorkspaceOwnership(): Promise<number> {
     return this.reconstructSharedMemoryOwnership();
@@ -3324,6 +3397,12 @@ export class DKGPublisher implements Publisher {
 
     const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId, opts?.subGraphName);
     const ownershipKey = opts?.subGraphName ? `${contextGraphId}\0${opts.subGraphName}` : contextGraphId;
+    const swmOwners = await this.sharedMemoryOwnersForPromotion(
+      contextGraphId,
+      opts?.subGraphName,
+      ownershipKey,
+      rootEntities,
+    );
     const swmOwned = this.sharedMemoryOwnedEntities.get(ownershipKey) ?? new Map<string, string>();
 
     // Pre-encode gossip message and enforce size limit BEFORE any destructive
@@ -3388,15 +3467,17 @@ export class DKGPublisher implements Publisher {
     // Rule 4: reject roots owned by a different peer before any mutations.
     const skippedRoots = new Set<string>();
     for (const root of rootEntities) {
-      const owner = swmOwned.get(root);
-      if (!owner) continue;
+      const owners = swmOwners.get(root);
+      if (!owners || owners.size === 0) continue;
       if (opts?.publisherPeerId) {
-        if (owner !== opts.publisherPeerId) {
+        const foreignOwner = [...owners].find((owner) => owner !== opts.publisherPeerId);
+        if (foreignOwner) {
           throw new Error(
-            `Cannot promote entity <${root}>: owned by peer ${owner}, not by caller ${opts.publisherPeerId}.`,
+            `Cannot promote entity <${root}>: owned by peer ${foreignOwner}, not by caller ${opts.publisherPeerId}.`,
           );
         }
       } else {
+        const owner = [...owners][0];
         this.log.warn(createOperationContext('share'), `Skipping entity <${root}>: owned by peer ${owner} in SWM but no publisherPeerId provided to verify ownership.`);
         skippedRoots.add(root);
       }
@@ -3575,4 +3656,15 @@ function parseCountLiteral(val: string | false | undefined): number {
   const stripped = val.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '');
   const n = Number(stripped);
   return Number.isFinite(n) ? n : NaN;
+}
+
+function stripSparqlLiteral(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  if (!value.startsWith('"')) return value;
+  return value.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '');
+}
+
+function addOwner(owners: Map<string, Set<string>>, root: string, owner: string): void {
+  if (!owners.has(root)) owners.set(root, new Set());
+  owners.get(root)!.add(owner);
 }

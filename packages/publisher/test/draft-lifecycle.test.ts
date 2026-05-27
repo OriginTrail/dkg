@@ -15,9 +15,11 @@ import { createEVMAdapter, getSharedContext, HARDHAT_KEYS } from '../../chain/te
 
 const CG_ID = 'test-assertion-cg';
 const SWM_GRAPH = `did:dkg:context-graph:${CG_ID}/_shared_memory`;
+const SWM_META_GRAPH = `did:dkg:context-graph:${CG_ID}/_shared_memory_meta`;
 const AGENT = '0x1234567890abcdef1234567890abcdef12345678';
 const AGENT_B = '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd';
 const PEER = '12D3KooWPromoteBoundary';
+const PEER_B = '12D3KooWPromoteBoundaryB';
 const ASSERTION_NAME = 'my-assertion';
 
 const TRIPLES = [
@@ -111,6 +113,68 @@ describe('Working Memory Assertion Lifecycle', () => {
     expect(swmResult.type).toBe('bindings');
     if (swmResult.type === 'bindings') {
       expect(swmResult.bindings.length).toBe(3);
+    }
+  });
+
+  it('durable SWM ownership blocks cross-author promote after publisher restart with empty map', async () => {
+    const root = 'urn:test:entity:restart-owned';
+    const firstAssertion = 'restart-owner-a';
+    const secondAssertion = 'restart-owner-b';
+
+    await publisher.assertionCreate(CG_ID, firstAssertion, AGENT);
+    await publisher.assertionWrite(CG_ID, firstAssertion, AGENT, [
+      { subject: root, predicate: 'http://schema.org/name', object: '"Original"' },
+    ]);
+    await publisher.assertionPromote(CG_ID, firstAssertion, AGENT, { publisherPeerId: PEER });
+
+    const ownerBefore = await store.query(
+      `SELECT ?creator WHERE { GRAPH <${SWM_META_GRAPH}> { <${root}> <http://dkg.io/ontology/workspaceOwner> ?creator } }`,
+    );
+    expect(ownerBefore.type).toBe('bindings');
+    if (ownerBefore.type === 'bindings') {
+      expect(ownerBefore.bindings.map((row) => row['creator'])).toEqual([`"${PEER}"`]);
+    }
+
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const keypair = await generateEd25519Keypair();
+    const restartedPublisher = new DKGPublisher({
+      store,
+      chain,
+      eventBus: new TypedEventBus(),
+      keypair,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
+      sharedMemoryOwnedEntities: new Map(),
+    });
+
+    await restartedPublisher.assertionCreate(CG_ID, secondAssertion, AGENT_B);
+    await restartedPublisher.assertionWrite(CG_ID, secondAssertion, AGENT_B, [
+      { subject: root, predicate: 'http://schema.org/name', object: '"Overwritten"' },
+    ]);
+
+    await expect(
+      restartedPublisher.assertionPromote(CG_ID, secondAssertion, AGENT_B, { publisherPeerId: PEER_B }),
+    ).rejects.toThrow(
+      `Cannot promote entity <${root}>: owned by peer ${PEER}, not by caller ${PEER_B}.`,
+    );
+
+    const remaining = await restartedPublisher.assertionQuery(CG_ID, secondAssertion, AGENT_B);
+    expect(remaining).toHaveLength(1);
+
+    const swmAfter = await store.query(
+      `SELECT ?o WHERE { GRAPH <${SWM_GRAPH}> { <${root}> <http://schema.org/name> ?o } }`,
+    );
+    expect(swmAfter.type).toBe('bindings');
+    if (swmAfter.type === 'bindings') {
+      expect(swmAfter.bindings.map((row) => row['o'])).toEqual(['"Original"']);
+    }
+
+    const ownerAfter = await store.query(
+      `SELECT ?creator WHERE { GRAPH <${SWM_META_GRAPH}> { <${root}> <http://dkg.io/ontology/workspaceOwner> ?creator } }`,
+    );
+    expect(ownerAfter.type).toBe('bindings');
+    if (ownerAfter.type === 'bindings') {
+      expect(ownerAfter.bindings.map((row) => row['creator'])).toEqual([`"${PEER}"`]);
     }
   });
 
