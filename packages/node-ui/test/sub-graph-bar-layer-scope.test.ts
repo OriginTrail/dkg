@@ -224,6 +224,48 @@ describe('SubGraphBar — layer-scoped chip counts (P4)', () => {
     expect(allCount).toBe(1);
   });
 
+  // Root-bucket regression: SWM entities whose graph URI is
+  // `<cg>/_shared_memory` (the root SWM bucket) surface with an empty
+  // `subGraphs` set — `subGraphOf` in useMemoryEntities.ts filters
+  // underscore-prefixed segments, leaving no slug. Pre-fix the "All"
+  // chip excluded those entities via a `subGraphs.size === 0` skip,
+  // so it undercounted vs the layer tab badge (e.g. tab 27 / All 25
+  // when 2 root-bucket SWM entities existed). They still belong to
+  // the layer and must count toward the umbrella.
+  it('with `layer`: the "All" chip total includes entities with no named sub-graph membership (matches layer tab badge)', async () => {
+    const rootEntity = (uri: string): any => ({
+      uri, label: uri, types: [],
+      trustLevel: 'shared' as const,
+      layers: new Set(['shared']),
+      subGraphs: new Set<string>(),
+      properties: new Map(),
+      connections: [],
+    });
+    const entities = [
+      mkEntity('urn:swm-alpha', 'shared', 'alpha'),
+      rootEntity('urn:swm-root-1'),
+      rootEntity('urn:swm-root-2'),
+    ];
+    await act(async () => {
+      root.render(React.createElement(SubGraphBar, {
+        contextGraphId: 'cg',
+        profile,
+        selected: null,
+        onSelect: vi.fn(),
+        entities,
+        layer: 'swm',
+      }));
+    });
+    await flushNet();
+    expect(chipCount('alpha')).toBe(1);  // per-sub-graph unchanged
+    // All counts every SWM entity, including the two root-bucket
+    // entities with no named sub-graph membership. Pre-fix: 1.
+    const allChip = Array.from(container.querySelectorAll('button.v10-subgraph-chip'))
+      .find(b => b.textContent?.includes('All'));
+    const allCount = Number(allChip?.querySelector('.v10-subgraph-chip-count')?.textContent ?? 'NaN');
+    expect(allCount).toBe(3);
+  });
+
   // Issue B regression — sub-graph page chip row in layer-agnostic mode.
   // User repro: SWM tab + sub-graph 'ui-epcis' open → chip row shows
   // "All 27 / ui-epcis 27" while the entity list shows 11. The "27"
