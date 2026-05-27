@@ -10,6 +10,7 @@ import {
   publishSharedMemory, executeQuery,
   writeProfileQueryCatalog,
   fetchSubGraphs,
+  HttpError,
   type AgentIdentity, type AssertionInfo, type PendingJoinRequest, type PublishResult, type SubGraphInfo,
 } from '../../api.js';
 import { ImportFilesModal } from '../../components/Modals/ImportFilesModal.js';
@@ -66,6 +67,7 @@ import {
   type SubGraphTab, type SubGraphEntitySort,
 } from './helpers.js';
 import { EmptyState, StatStrip, toneForLayer } from '../../components/ContextGraphPrimitives.js';
+import { isUserFacingSubGraph } from '../../lib/subGraphs.js';
 
 export const RdfGraph = lazy(() =>
   import('@origintrail-official/dkg-graph-viz/react').then(m => ({ default: m.RdfGraph }))
@@ -1061,12 +1063,21 @@ export function PendingJoinRequestsSection({
   const [requests, setRequests] = useState<PendingJoinRequest[]>([]);
   const [processing, setProcessing] = useState<string | null>(null);
   const [status, setStatus] = useState<'idle' | 'loading' | 'error'>('loading');
+  // Codex review bug L — the backend `/join-requests` endpoint is
+  // the authoritative auth check. Fail OPEN at the UI: attempt the
+  // fetch in `'unknown'` state too, and only hide the section if
+  // the server returns 401/403. Other errors (5xx, network) keep
+  // the section visible with the standard error copy so the user
+  // sees that something is wrong rather than silently losing the
+  // moderation surface.
+  const [serverDeniedAuth, setServerDeniedAuth] = useState(false);
 
   useEffect(() => {
-    if (curatorStatus !== 'curator') {
-      // Either definitively-not-curator OR unknown — don't fire the
-      // API call yet. The 'unknown' branch renders a verifying
-      // state instead of hiding the section.
+    // Reset the server-denied flag whenever the CG or curator
+    // status changes — a fresh fetch deserves a fresh verdict.
+    setServerDeniedAuth(false);
+    if (curatorStatus === 'not-curator') {
+      // Definitive non-curator — no fetch, no UI.
       setRequests([]);
       setStatus('idle');
       return;
@@ -1079,30 +1090,25 @@ export function PendingJoinRequestsSection({
         setRequests(data.requests.filter(r => r.status === 'pending'));
         setStatus('idle');
       })
-      .catch(() => {
+      .catch((err: unknown) => {
         if (cancelled) return;
         setRequests([]);
+        // 401/403 from the backend is the authoritative "you are
+        // not the curator" signal. Hide the section instead of
+        // showing the verifying / error panel.
+        if (err instanceof HttpError && (err.status === 401 || err.status === 403)) {
+          setServerDeniedAuth(true);
+          setStatus('idle');
+          return;
+        }
         setStatus('error');
       });
     return () => { cancelled = true; };
   }, [contextGraphId, curatorStatus]);
 
-  // Definitive non-curator — section is dead UI and stays hidden.
-  if (curatorStatus === 'not-curator') return null;
-
-  // Unknown — render a quiet "verifying access" panel so the user
-  // sees something is in progress (no actionable controls; the
-  // request fetch is gated until we know they're the curator).
-  if (curatorStatus === 'unknown') {
-    return (
-      <section className="v10-po-join" data-section="join-requests">
-        <header className="v10-po-join-head">
-          <span className="v10-po-section-title">Pending join requests</span>
-        </header>
-        <div className="v10-po-join-empty">Verifying access…</div>
-      </section>
-    );
-  }
+  // Definitive non-curator OR server denied the moderation
+  // endpoint — section is dead UI and stays hidden.
+  if (curatorStatus === 'not-curator' || serverDeniedAuth) return null;
 
   const handleApprove = async (addr: string) => {
     setProcessing(addr);
@@ -1122,16 +1128,26 @@ export function PendingJoinRequestsSection({
     } catch { /* noop */ } finally { setProcessing(null); }
   };
 
+  // Codex bug L — when curator status is 'unknown' we're firing
+  // the request optimistically; the loading copy reads
+  // "Verifying access…" to signal that BOTH access AND the
+  // request list are resolving. The count badge stays hidden
+  // until we have an authoritative answer.
+  const isVerifying = curatorStatus === 'unknown' && status === 'loading';
+  const showCountBadge = status !== 'loading' || curatorStatus === 'curator';
+
   return (
     <section className="v10-po-join" data-section="join-requests">
       <header className="v10-po-join-head">
         <span className="v10-po-section-title">Pending join requests</span>
-        <span className="v10-po-join-count" data-empty={requests.length === 0 ? 'true' : 'false'}>
-          {requests.length}
-        </span>
+        {showCountBadge && (
+          <span className="v10-po-join-count" data-empty={requests.length === 0 ? 'true' : 'false'}>
+            {requests.length}
+          </span>
+        )}
       </header>
       {status === 'loading'
-        ? <div className="v10-po-join-empty">Loading join requests...</div>
+        ? <div className="v10-po-join-empty">{isVerifying ? 'Verifying access…' : 'Loading join requests...'}</div>
         : status === 'error'
           ? <div className="v10-po-join-empty">Join requests are currently unavailable.</div>
           : requests.length === 0
@@ -3830,11 +3846,14 @@ export function SubGraphOverviewGrid({
     return out;
   }, [memory.entityList]);
 
-  // Merge registered sub-graphs (minus `meta`) with profile bindings so
+  // Merge registered user-facing sub-graphs with profile bindings so
   // icon/color/label/rank all flow from the single source of truth.
+  // `isUserFacingSubGraph` centralises the reserved-slug rule
+  // (Codex review issue M) — same filter as SubGraphBar + the
+  // Overview Subgraphs stat.
   const cards = useMemo(() => {
     return subGraphs
-      .filter(sg => sg.name !== 'meta')
+      .filter(isUserFacingSubGraph)
       .map(sg => {
         const binding = profile?.forSubGraph(sg.name) ?? {};
         const rawTriples = triplesBySubGraph.get(sg.name) ?? [];

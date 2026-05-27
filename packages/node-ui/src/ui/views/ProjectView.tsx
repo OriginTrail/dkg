@@ -2,6 +2,7 @@ import { useMemo, useState, useCallback, useEffect, useRef } from 'react';
 import { useFetch } from '../hooks.js';
 import { api } from '../api-wrapper.js';
 import { useMemoryGraphEvents } from '../hooks/useNodeEvents.js';
+import { isUserFacingSubGraph } from '../lib/subGraphs.js';
 import { ImportFilesModal } from '../components/Modals/ImportFilesModal.js';
 import { ShareProjectModal } from '../components/Modals/ShareProjectModal.js';
 import {
@@ -333,14 +334,12 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     api.fetchSubGraphs(contextGraphId)
       .then(res => {
         if (subGraphRequestRef.current !== requestId) return;
-        // Codex review issue K — only filter `meta` here, matching
-        // SubGraphBar (chip row) and SubGraphOverviewGrid (Subgraphs
-        // tab grid). Filtering `assertion` too would undercount vs
-        // the views the user can actually click into. S3 will
-        // revisit the reserved-slug story globally.
-        const count = (res.subGraphs ?? []).filter(
-          sg => sg.name !== 'meta',
-        ).length;
+        // Codex review issue M — single source of truth for the
+        // reserved-slug rule. Used by SubGraphBar (chips),
+        // SubGraphOverviewGrid (cards), and this Overview stat.
+        // Previously diverged between sites; centralising avoids
+        // future drift.
+        const count = (res.subGraphs ?? []).filter(isUserFacingSubGraph).length;
         setSubGraphCount(count);
         setSubGraphFetchFailed(false);
       })

@@ -13,6 +13,7 @@ import { fetchSubGraphs, type SubGraphInfo } from '../api.js';
 import type { ProjectProfile } from '../hooks/useProjectProfile.js';
 import type { MemoryEntity } from '../hooks/useMemoryEntities.js';
 import { useMemoryGraphEvents } from '../hooks/useNodeEvents.js';
+import { isUserFacingSubGraph } from '../lib/subGraphs.js';
 
 export interface SubGraphBadge {
   /** Short label shown inline on the chip, e.g. "2 proposed" */
@@ -170,7 +171,7 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
     // the daemon's `sg.entityCount` (project-wide total) is still used
     // as the fallback for Overview / Subgraphs callers that omit `layer`.
     return subGraphs
-      .filter(sg => sg.name !== 'meta')
+      .filter(isUserFacingSubGraph)
       .map(sg => {
         const binding = profile.forSubGraph(sg.name);
         // Prefer the locally-derived distinct count (matches the entity

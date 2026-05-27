@@ -3,6 +3,36 @@
 import React, { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+// Codex bug L — the `'unknown'` branch of PendingJoinRequestsSection
+// now optimistically fires `listJoinRequests`. Mock the API module so
+// tests can drive the response (success / 401 / 403 / generic error).
+const apiMock = vi.hoisted(() => ({
+  listJoinRequests: vi.fn(async () => ({ requests: [] })),
+  approveJoinRequest: vi.fn(async () => ({ ok: true })),
+  rejectJoinRequest: vi.fn(async () => ({ ok: true })),
+  HttpError: class HttpError extends Error {
+    status: number;
+    body?: unknown;
+    constructor(status: number, message?: string, body?: unknown) {
+      super(message ?? `HTTP ${status}`);
+      this.status = status;
+      this.body = body;
+    }
+  },
+}));
+
+vi.mock('../src/ui/api.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/ui/api.js')>();
+  return {
+    ...actual,
+    listJoinRequests: apiMock.listJoinRequests,
+    approveJoinRequest: apiMock.approveJoinRequest,
+    rejectJoinRequest: apiMock.rejectJoinRequest,
+    HttpError: apiMock.HttpError,
+  };
+});
+
 import {
   LayerSwitcher,
   ProjectOverviewCard,
@@ -41,6 +71,13 @@ async function render(element: React.ReactElement): Promise<{ container: HTMLDiv
 describe('Context Graph IA and Overview', () => {
   beforeEach(() => {
     document.body.innerHTML = '';
+    // Reset the listJoinRequests mock back to a benign empty
+    // response so tests that don't touch the join-requests path
+    // don't trip Bug L's new optimistic fetch.
+    apiMock.listJoinRequests.mockReset();
+    apiMock.listJoinRequests.mockResolvedValue({ requests: [] });
+    apiMock.approveJoinRequest.mockReset();
+    apiMock.rejectJoinRequest.mockReset();
   });
 
   afterEach(() => {
@@ -579,7 +616,10 @@ describe('Context Graph IA and Overview', () => {
     await act(async () => root.unmount());
   });
 
-  it('PendingJoinRequestsSection renders a verifying-access panel when curatorStatus is "unknown" (Codex bug C)', async () => {
+  it('PendingJoinRequestsSection renders a verifying-access panel during the optimistic fetch when curatorStatus is "unknown" (Codex bug C + L)', async () => {
+    // Hold the fetch open so the section stays in the "verifying"
+    // loading window — that's the panel we want to inspect.
+    apiMock.listJoinRequests.mockReturnValue(new Promise(() => { /* never resolves */ }));
     const { container, root } = await render(
       React.createElement(PendingJoinRequestsSection, {
         contextGraphId: 'cg-join',
@@ -589,9 +629,72 @@ describe('Context Graph IA and Overview', () => {
     const section = container.querySelector('[data-section="join-requests"]');
     expect(section).toBeTruthy();
     expect(section?.textContent).toContain('Verifying access');
-    // The section must NOT be hidden, and must NOT render any approve/reject controls
-    // (the fetch is gated until curator status resolves).
+    // No approve/reject controls during the loading window.
     expect(container.querySelector('.v10-po-join-btn')).toBeNull();
+    // The count badge stays hidden while we're still verifying.
+    expect(container.querySelector('.v10-po-join-count')).toBeNull();
+    // Codex bug L — the fetch DID fire even though status is
+    // 'unknown'; the backend is the authoritative auth check.
+    expect(apiMock.listJoinRequests).toHaveBeenCalledWith('cg-join');
+    await act(async () => root.unmount());
+  });
+
+  it('PendingJoinRequestsSection renders the request list when curatorStatus is "unknown" and listJoinRequests succeeds (Codex bug L)', async () => {
+    apiMock.listJoinRequests.mockResolvedValue({
+      requests: [
+        { agentAddress: '0xabc1230000000000000000000000000000000123', status: 'pending', name: 'Pending Alice' },
+      ],
+    });
+    const { container, root } = await render(
+      React.createElement(PendingJoinRequestsSection, {
+        contextGraphId: 'cg-join',
+        curatorStatus: 'unknown' as const,
+      }),
+    );
+    expect(container.querySelector('[data-section="join-requests"]')).toBeTruthy();
+    expect(container.textContent).toContain('Pending Alice');
+    expect(container.querySelector('.v10-po-join-btn.approve')).toBeTruthy();
+    expect(container.querySelector('.v10-po-join-btn.reject')).toBeTruthy();
+    expect(container.textContent).not.toContain('Verifying access');
+    await act(async () => root.unmount());
+  });
+
+  it('PendingJoinRequestsSection hides the section when curatorStatus is "unknown" and listJoinRequests returns 403 (Codex bug L)', async () => {
+    apiMock.listJoinRequests.mockRejectedValue(new apiMock.HttpError(403, 'forbidden'));
+    const { container, root } = await render(
+      React.createElement(PendingJoinRequestsSection, {
+        contextGraphId: 'cg-join',
+        curatorStatus: 'unknown' as const,
+      }),
+    );
+    // 403 from the server is the authoritative non-curator signal.
+    expect(container.querySelector('[data-section="join-requests"]')).toBeNull();
+    await act(async () => root.unmount());
+  });
+
+  it('PendingJoinRequestsSection hides the section when curatorStatus is "unknown" and listJoinRequests returns 401 (Codex bug L)', async () => {
+    apiMock.listJoinRequests.mockRejectedValue(new apiMock.HttpError(401, 'unauthorized'));
+    const { container, root } = await render(
+      React.createElement(PendingJoinRequestsSection, {
+        contextGraphId: 'cg-join',
+        curatorStatus: 'unknown' as const,
+      }),
+    );
+    expect(container.querySelector('[data-section="join-requests"]')).toBeNull();
+    await act(async () => root.unmount());
+  });
+
+  it('PendingJoinRequestsSection shows error copy when curatorStatus is "unknown" and listJoinRequests fails with a non-auth error (Codex bug L)', async () => {
+    apiMock.listJoinRequests.mockRejectedValue(new apiMock.HttpError(500, 'server error'));
+    const { container, root } = await render(
+      React.createElement(PendingJoinRequestsSection, {
+        contextGraphId: 'cg-join',
+        curatorStatus: 'unknown' as const,
+      }),
+    );
+    expect(container.querySelector('[data-section="join-requests"]')).toBeTruthy();
+    expect(container.textContent).toContain('Join requests are currently unavailable.');
+    expect(container.textContent).not.toContain('Verifying access');
     await act(async () => root.unmount());
   });
 
