@@ -210,6 +210,133 @@ describe('Context Graph IA and Overview', () => {
     await act(async () => root.unmount());
   });
 
+  it('always renders the curator row in Participant agents, even when `allowedAgents` omits them (Codex bug A)', async () => {
+    const curatorAddress = '0xCAFE0000000000000000000000000000000000A1';
+    const { container, root } = await render(
+      React.createElement(ProjectOverviewCard, {
+        cg: {
+          id: 'cg-curator-omitted',
+          name: 'Curator Omitted',
+          accessPolicy: 'private',
+          curator: `did:dkg:agent:${curatorAddress}`,
+          callerInvolved: false,
+        },
+        memory: baseMemory,
+        // `allowedAgents` from /participants does NOT contain the curator
+        // on a normal private CG — Codex bug A pre-fix dropped the row.
+        participants: [],
+        currentAgent: { agentDid: 'did:dkg:agent:0xDEADBEEF' },
+      }),
+    );
+
+    const rows = Array.from(container.querySelectorAll('.v10-po-participant'));
+    expect(rows).toHaveLength(1);
+    expect(rows[0].classList.contains('is-curator')).toBe(true);
+    expect(rows[0].textContent).toContain(' · curator');
+
+    await act(async () => root.unmount());
+  });
+
+  it('does not duplicate the curator row when `allowedAgents` already contains them (Codex bug A dedup)', async () => {
+    const curatorAddress = '0xCAFE0000000000000000000000000000000000B2';
+    const { container, root } = await render(
+      React.createElement(ProjectOverviewCard, {
+        cg: {
+          id: 'cg-curator-dup',
+          name: 'Curator Already Allowed',
+          accessPolicy: 'public',
+          curator: `did:dkg:agent:${curatorAddress}`,
+          callerInvolved: true,
+        },
+        memory: baseMemory,
+        participants: [curatorAddress],
+        currentAgent: { agentDid: 'did:dkg:agent:0xDEADBEEF' },
+      }),
+    );
+
+    const rows = Array.from(container.querySelectorAll('.v10-po-participant'));
+    expect(rows).toHaveLength(1);
+    expect(rows[0].classList.contains('is-curator')).toBe(true);
+
+    await act(async () => root.unmount());
+  });
+
+  it('renders Triples as a lower bound when a layer query is partial (Codex bug B)', async () => {
+    const partialMemory = {
+      ...baseMemory,
+      counts: { wm: 4, swm: 2, vm: 0, total: 6 },
+      layerStatus: { wm: 'ok', swm: 'ok', vm: 'error' },
+      partial: true,
+      allTriples: new Array(120).fill({ subject: 's', predicate: 'p', object: 'o', layer: 'working' }),
+      error: null,
+    };
+    const { container, root } = await render(
+      React.createElement(ProjectOverviewCard, {
+        cg: { id: 'cg-triples-partial', name: 'Partial', accessPolicy: 'public' },
+        memory: partialMemory,
+        subGraphCount: 1,
+        participants: [],
+        currentAgent: { agentDid: 'did:dkg:agent:0xdef' },
+      }),
+    );
+
+    const triplesCell = container.querySelector<HTMLElement>('[data-stat-id="triples"]');
+    expect(triplesCell).toBeTruthy();
+    expect(triplesCell!.querySelector('.v10-stat-strip-value')?.textContent?.trim())
+      .toBe('120+');
+    expect(triplesCell!.getAttribute('title'))
+      .toBe('One or more layer triple counts are currently a lower bound.');
+
+    await act(async () => root.unmount());
+  });
+
+  it('renders Triples as Unavailable when every layer query failed (Codex bug B all-error)', async () => {
+    const outageMemory = {
+      ...baseMemory,
+      counts: { wm: 0, swm: 0, vm: 0, total: 0 },
+      layerStatus: { wm: 'error', swm: 'error', vm: 'error' },
+      partial: false,
+      allTriples: [],
+      error: null,
+    };
+    const { container, root } = await render(
+      React.createElement(ProjectOverviewCard, {
+        cg: { id: 'cg-triples-outage', name: 'Outage', accessPolicy: 'public' },
+        memory: outageMemory,
+        subGraphCount: 0,
+        participants: [],
+        currentAgent: { agentDid: 'did:dkg:agent:0xdef' },
+      }),
+    );
+
+    const triplesCell = container.querySelector<HTMLElement>('[data-stat-id="triples"]');
+    expect(triplesCell?.querySelector('.v10-stat-strip-value')?.textContent?.trim())
+      .toBe('Unavailable');
+    expect(triplesCell?.getAttribute('title')).toBe('Live triple counts are unavailable.');
+
+    await act(async () => root.unmount());
+  });
+
+  it('renders Subgraphs as Unavailable when subGraphFetchFailed is true (Codex bug D)', async () => {
+    const { container, root } = await render(
+      React.createElement(ProjectOverviewCard, {
+        cg: { id: 'cg-sg-failed', name: 'SG Failed', accessPolicy: 'public' },
+        memory: baseMemory,
+        subGraphCount: null,
+        subGraphFetchFailed: true,
+        participants: [],
+        currentAgent: { agentDid: 'did:dkg:agent:0xdef' },
+      }),
+    );
+
+    const subgraphsCell = container.querySelector<HTMLElement>('[data-stat-id="subgraphs"]');
+    expect(subgraphsCell?.querySelector('.v10-stat-strip-value')?.textContent?.trim())
+      .toBe('Unavailable');
+    expect(subgraphsCell?.getAttribute('title')).toBe('Sub-graph list is currently unavailable.');
+
+    await act(async () => root.unmount());
+  });
+
   it('marks a non-self curator with the curator suffix only — no `you` leakage', async () => {
     const curatorAddress = '0xCAFE000000000000000000000000000000000001';
     const otherAddress = '0xCAFE000000000000000000000000000000000002';
@@ -307,25 +434,41 @@ describe('Context Graph IA and Overview', () => {
     await act(async () => root.unmount());
   });
 
-  it('PendingJoinRequestsSection tags itself with data-section="join-requests" (curator only)', async () => {
+  it('PendingJoinRequestsSection tags itself with data-section="join-requests" when curatorStatus is "curator"', async () => {
     const { container, root } = await render(
       React.createElement(PendingJoinRequestsSection, {
         contextGraphId: 'cg-join',
-        isCurator: true,
+        curatorStatus: 'curator' as const,
       }),
     );
     expect(container.querySelector('[data-section="join-requests"]')).toBeTruthy();
     await act(async () => root.unmount());
   });
 
-  it('PendingJoinRequestsSection renders nothing for non-curators', async () => {
+  it('PendingJoinRequestsSection renders nothing when curatorStatus is "not-curator"', async () => {
     const { container, root } = await render(
       React.createElement(PendingJoinRequestsSection, {
         contextGraphId: 'cg-join',
-        isCurator: false,
+        curatorStatus: 'not-curator' as const,
       }),
     );
     expect(container.querySelector('[data-section="join-requests"]')).toBeNull();
+    await act(async () => root.unmount());
+  });
+
+  it('PendingJoinRequestsSection renders a verifying-access panel when curatorStatus is "unknown" (Codex bug C)', async () => {
+    const { container, root } = await render(
+      React.createElement(PendingJoinRequestsSection, {
+        contextGraphId: 'cg-join',
+        curatorStatus: 'unknown' as const,
+      }),
+    );
+    const section = container.querySelector('[data-section="join-requests"]');
+    expect(section).toBeTruthy();
+    expect(section?.textContent).toContain('Verifying access');
+    // The section must NOT be hidden, and must NOT render any approve/reject controls
+    // (the fetch is gated until curator status resolves).
+    expect(container.querySelector('.v10-po-join-btn')).toBeNull();
     await act(async () => root.unmount());
   });
 

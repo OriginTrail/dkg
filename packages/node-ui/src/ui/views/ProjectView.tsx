@@ -30,7 +30,7 @@ import {
   ProjectOverviewCard,
   PendingJoinRequestsSection,
   OverviewPrimerEntry,
-  isCuratorForOverview,
+  curatorStatusForOverview,
   SubGraphOverviewGrid,
   ContextGraphQueryView,
   LayerDetailView,
@@ -114,7 +114,10 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   // peer hook into useMemoryEntities. `null` = not yet known; the
   // stat strip then suppresses the cell rather than rendering "0".
   // Reserved bookkeeping slugs ('meta', 'assertion') never count.
+  // `subGraphFetchFailed` distinguishes "still loading" from
+  // "permanently unavailable" (Codex review bug D).
   const [subGraphCount, setSubGraphCount] = useState<number | null>(null);
+  const [subGraphFetchFailed, setSubGraphFetchFailed] = useState(false);
   const subGraphRequestRef = useRef(0);
   // Active sub-graph *page* — when set, the middle pane renders the sub-graph
   // detail view instead of the overview / layer views. This is structurally
@@ -331,15 +334,22 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
           sg => sg.name !== 'meta' && sg.name !== 'assertion',
         ).length;
         setSubGraphCount(count);
+        setSubGraphFetchFailed(false);
       })
       .catch(() => {
         if (subGraphRequestRef.current !== requestId) return;
+        // Codex review bug D — distinguish "still loading" (count
+        // null + failed=false) from "permanently unavailable"
+        // (count null + failed=true) so the stat strip can render
+        // 'Unavailable' instead of a perpetual ellipsis.
         setSubGraphCount(null);
+        setSubGraphFetchFailed(true);
       });
   }, [contextGraphId]);
 
   useEffect(() => {
     setSubGraphCount(null);
+    setSubGraphFetchFailed(false);
     refreshSubGraphCount();
   }, [refreshSubGraphCount]);
   useMemoryGraphEvents(contextGraphId, refreshSubGraphCount);
@@ -545,6 +555,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
             cg={cg}
             memory={rawMemory}
             subGraphCount={subGraphCount}
+            subGraphFetchFailed={subGraphFetchFailed}
             participants={participantsForCurrentGraph}
             participantsStatus={participantsStatusForCurrentGraph}
             currentAgent={currentAgent ?? null}
@@ -554,7 +565,11 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
           />
           <PendingJoinRequestsSection
             contextGraphId={contextGraphId}
-            isCurator={isCuratorForOverview({ cg, currentAgent: currentAgent ?? null })}
+            curatorStatus={curatorStatusForOverview({
+              cg,
+              currentAgent: currentAgent ?? null,
+              currentAgentStatus: currentAgentLoading ? 'loading' : currentAgentError ? 'error' : 'ok',
+            })}
             onParticipantsChanged={refreshParticipants}
           />
           {rawMemory.loading && (

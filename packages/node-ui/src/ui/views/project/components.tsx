@@ -672,17 +672,40 @@ function overviewAccessState(raw?: string): { label: string; title: string; tone
 // role on this CG. Lifted out of overviewRoleState so the Pending
 // Join Requests section can gate on the same predicate without
 // re-deriving it.
-export function isCuratorForOverview({
+// Codex review bug C — tri-state replaces the prior boolean
+// predicate so a curator's join-requests section isn't hidden
+// while `/api/agent/identity` is still resolving or after a
+// transient error. Consumers decide how to render the `'unknown'`
+// state (we show a 'Verifying access…' loading panel).
+export type CuratorStatus = 'curator' | 'not-curator' | 'unknown';
+
+export function curatorStatusForOverview({
   cg,
   currentAgent,
+  currentAgentStatus = 'ok',
 }: {
   cg: any;
   currentAgent: OverviewAgentIdentity | null;
-}): boolean {
+  currentAgentStatus?: OverviewAgentStatus;
+}): CuratorStatus {
   const curator = typeof cg?.curator === 'string' ? cg.curator.trim() : '';
+  if (!curator) {
+    // No curator metadata on this CG — definitively not curator.
+    return 'not-curator';
+  }
+  if (currentAgentStatus === 'loading' || currentAgentStatus === 'error') {
+    return 'unknown';
+  }
   const agentDid = currentAgent?.agentDid?.trim() ?? '';
-  if (!curator || !agentDid) return false;
-  return canonicalAgentDid(curator) === canonicalAgentDid(agentDid);
+  if (!agentDid) {
+    // Status reports OK but identity didn't materialise — treat as
+    // unknown rather than fail-closed. (Codex's scenario: an older
+    // daemon that omits `agentDid` but returns OK.)
+    return 'unknown';
+  }
+  return canonicalAgentDid(curator) === canonicalAgentDid(agentDid)
+    ? 'curator'
+    : 'not-curator';
 }
 
 function overviewIdentitySet(currentAgent: OverviewAgentIdentity | null): Set<string> {
@@ -697,6 +720,7 @@ export function ProjectOverviewCard({
   cg,
   memory,
   subGraphCount,
+  subGraphFetchFailed = false,
   participants,
   participantsStatus = 'ok',
   currentAgent,
@@ -709,6 +733,10 @@ export function ProjectOverviewCard({
   /** Count of user-facing sub-graphs (excludes reserved `meta` /
    *  `assertion` slugs). `null` while loading or on fetch error. */
   subGraphCount?: number | null;
+  /** True if the last `/sub-graph/list` fetch errored. Lets the
+   *  stat strip distinguish "still loading" from "permanently
+   *  unavailable" (Codex review bug D). */
+  subGraphFetchFailed?: boolean;
   participants: string[];
   participantsStatus?: OverviewParticipantsStatus;
   currentAgent?: OverviewAgentIdentity | null;
@@ -740,15 +768,41 @@ export function ProjectOverviewCard({
   // Triples: canonical layer-correct total exposed by the hook
   // (§4.2.1 trap — do NOT sum per-entity tripleCount, do NOT borrow
   // SubGraphBar's `totalTriples` which excludes the root bucket).
+  //
+  // Codex review bug B — `useMemoryEntities` preserves partial
+  // results when one layer query fails, so `allTriples.length` is
+  // only a LOWER BOUND in that case. Mirror the Entities cell
+  // logic: 'Unavailable' if every layer errored, '<n>+' when
+  // partial, the plain number otherwise. The tooltip carries the
+  // explanation (consistent with the Delta-2 tooltip-only hint
+  // pattern).
   const triplesCount = memory.allTriples?.length ?? 0;
+  const triplesIsPartial = !memory.loading && (memory.partial || hasUnavailableLayer);
   const triplesValue = allLayerCountsUnavailable
     ? 'Unavailable'
     : memory.loading && triplesCount === 0
       ? '...'
-      : triplesCount.toLocaleString();
+      : triplesIsPartial
+        ? `${triplesCount.toLocaleString()}+`
+        : triplesCount.toLocaleString();
+  const triplesTooltip = allLayerCountsUnavailable
+    ? 'Live triple counts are unavailable.'
+    : triplesIsPartial
+      ? 'One or more layer triple counts are currently a lower bound.'
+      : 'Canonical triple total across all layers.';
+  // Codex review bug D — distinguish "still fetching" from
+  // "fetch failed" for the Subgraphs cell so we don't show a
+  // perpetual ellipsis after a failed `/sub-graph/list` call. A
+  // failure renders the same `Unavailable` affordance the Entities
+  // outage cell uses (so the four cells share one failure idiom).
   const subGraphsValue = subGraphCount == null
-    ? '...'
+    ? subGraphFetchFailed ? 'Unavailable' : '...'
     : subGraphCount.toLocaleString();
+  const subGraphsTooltip = subGraphCount == null
+    ? subGraphFetchFailed
+      ? 'Sub-graph list is currently unavailable.'
+      : 'Sub-graph count is loading.'
+    : 'Topical partitions inside this Context Graph.';
   const pipeline = [
     {
       key: 'wm' as const,
@@ -826,8 +880,8 @@ export function ProjectOverviewCard({
           className="v10-po-stat-strip"
           items={[
             { id: 'entities', value: totalEntitiesValue, label: 'Entities', tooltip: statusHint },
-            { id: 'triples', value: triplesValue, label: 'Triples', tooltip: 'Canonical triple total across all layers.' },
-            { id: 'subgraphs', value: subGraphsValue, label: 'Subgraphs', tooltip: 'Topical partitions inside this Context Graph.' },
+            { id: 'triples', value: triplesValue, label: 'Triples', tooltip: triplesTooltip },
+            { id: 'subgraphs', value: subGraphsValue, label: 'Subgraphs', tooltip: subGraphsTooltip },
             accessAgentStat,
           ]}
         />
@@ -884,17 +938,41 @@ export function ProjectOverviewCard({
           data string. */}
       <div className="v10-po-people" data-section="participants">
         <div className="v10-po-section-title">Participant agents</div>
-        {participants.length === 0
-          ? <div className="v10-po-people-empty">
-              {participantsStatus === 'loading'
-                ? 'Loading participant agents...'
-                : participantsStatus === 'error'
-                  ? 'Participant list unavailable.'
-                  : 'No participant agents recorded yet.'}
-            </div>
-          : <div className="v10-po-participants-list">
-              {participants.map(addr => {
-                const canonical = canonicalAgentDid(addr);
+        {(() => {
+          // Codex review bug A — `/participants` returns `allowedAgents`
+          // and does NOT include the curator on a private CG. Render
+          // the de-duplicated UNION so the curator's own row is always
+          // present (and so the ` · curator` / ` · you · curator`
+          // markers actually have a row to attach to). On a public CG
+          // where the curator may already be in `allowedAgents`, the
+          // dedup makes this a no-op.
+          const seen = new Set<string>();
+          const rows: { addr: string; canonical: string }[] = [];
+          if (curator) {
+            const c = canonicalAgentDid(curator);
+            seen.add(c);
+            rows.push({ addr: curator, canonical: c });
+          }
+          for (const addr of participants) {
+            const c = canonicalAgentDid(addr);
+            if (seen.has(c)) continue;
+            seen.add(c);
+            rows.push({ addr, canonical: c });
+          }
+          if (rows.length === 0) {
+            return (
+              <div className="v10-po-people-empty">
+                {participantsStatus === 'loading'
+                  ? 'Loading participant agents...'
+                  : participantsStatus === 'error'
+                    ? 'Participant list unavailable.'
+                    : 'No participant agents recorded yet.'}
+              </div>
+            );
+          }
+          return (
+            <div className="v10-po-participants-list">
+              {rows.map(({ addr, canonical }) => {
                 const isSelf = selfIds.has(canonical);
                 const isCurator = !!curatorCanonical && canonical === curatorCanonical;
                 let suffix = '';
@@ -913,7 +991,9 @@ export function ProjectOverviewCard({
                   </span>
                 );
               })}
-            </div>}
+            </div>
+          );
+        })()}
       </div>
     </div>
   );
@@ -922,17 +1002,18 @@ export function ProjectOverviewCard({
 // ─── Pending Join Requests ───────────────────────────────────
 
 // S2 finalize (§4.2.1) — Pending Join Requests is a peer section
-// under Participant agents, visible to curators ALWAYS (with a
-// graceful empty state) and hidden from non-curators. The earlier
-// `PendingJoinRequestsBar` returned null on empty and never rendered
-// for non-curators; we now gate on `isCurator` from the caller.
+// under Participant agents. Visible to curators ALWAYS (with a
+// graceful empty state); hidden from definitive non-curators;
+// shown with a 'Verifying access…' state when curator status is
+// still unknown (Codex review bug C — don't fail closed during
+// identity loading / error).
 export function PendingJoinRequestsSection({
   contextGraphId,
-  isCurator,
+  curatorStatus,
   onParticipantsChanged,
 }: {
   contextGraphId: string;
-  isCurator: boolean;
+  curatorStatus: CuratorStatus;
   onParticipantsChanged?: () => void;
 }) {
   const [requests, setRequests] = useState<PendingJoinRequest[]>([]);
@@ -940,7 +1021,10 @@ export function PendingJoinRequestsSection({
   const [status, setStatus] = useState<'idle' | 'loading' | 'error'>('loading');
 
   useEffect(() => {
-    if (!isCurator) {
+    if (curatorStatus !== 'curator') {
+      // Either definitively-not-curator OR unknown — don't fire the
+      // API call yet. The 'unknown' branch renders a verifying
+      // state instead of hiding the section.
       setRequests([]);
       setStatus('idle');
       return;
@@ -959,9 +1043,24 @@ export function PendingJoinRequestsSection({
         setStatus('error');
       });
     return () => { cancelled = true; };
-  }, [contextGraphId, isCurator]);
+  }, [contextGraphId, curatorStatus]);
 
-  if (!isCurator) return null;
+  // Definitive non-curator — section is dead UI and stays hidden.
+  if (curatorStatus === 'not-curator') return null;
+
+  // Unknown — render a quiet "verifying access" panel so the user
+  // sees something is in progress (no actionable controls; the
+  // request fetch is gated until we know they're the curator).
+  if (curatorStatus === 'unknown') {
+    return (
+      <section className="v10-po-join" data-section="join-requests">
+        <header className="v10-po-join-head">
+          <span className="v10-po-section-title">Pending join requests</span>
+        </header>
+        <div className="v10-po-join-empty">Verifying access…</div>
+      </section>
+    );
+  }
 
   const handleApprove = async (addr: string) => {
     setProcessing(addr);

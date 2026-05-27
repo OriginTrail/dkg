@@ -269,7 +269,7 @@ vi.mock('../src/ui/views/project/components.js', () => ({
   OverviewPrimerEntry: ({ onOpenPrimer }: { onOpenPrimer: () => void }) =>
     React.createElement('div', { 'data-testid': 'primer-footer' },
       React.createElement('button', { 'data-testid': 'open-primer-footer', onClick: onOpenPrimer }, 'What is a Context Graph?')),
-  isCuratorForOverview: () => false,
+  curatorStatusForOverview: () => 'not-curator',
   SubGraphOverviewGrid: ({ onSelectSubGraph }: { onSelectSubGraph: (slug: string) => void }) =>
     React.createElement('button', {
       'data-testid': 'select-subgraph-demo',
