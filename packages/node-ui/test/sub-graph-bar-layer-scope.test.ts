@@ -266,6 +266,47 @@ describe('SubGraphBar — layer-scoped chip counts (P4)', () => {
     expect(allCount).toBe(3);
   });
 
+  // Layer-agnostic counterpart of the previous case: on the sub-graph
+  // page `ProjectView` passes `entities` without `layer`, and "All"
+  // represents the umbrella over named-sub-graph chips. Entities with
+  // no chip membership (root-bucket SWM entities, empty `subGraphs`)
+  // must STAY excluded here — including them would inflate the total
+  // past anything the user can reach by clicking a chip.
+  it('without `layer`: the "All" chip total excludes entities with no named sub-graph membership (umbrella over chips)', async () => {
+    const rootEntity = (uri: string, trust: 'working' | 'shared' | 'verified'): any => ({
+      uri, label: uri, types: [],
+      trustLevel: trust,
+      layers: new Set([trust]),
+      subGraphs: new Set<string>(),
+      properties: new Map(),
+      connections: [],
+    });
+    const entities = [
+      mkEntity('urn:e:alpha', 'shared', 'alpha'),
+      mkEntity('urn:e:beta', 'shared', 'beta'),
+      rootEntity('urn:e:root-1', 'shared'),
+      rootEntity('urn:e:root-2', 'working'),
+    ];
+    await act(async () => {
+      root.render(React.createElement(SubGraphBar, {
+        contextGraphId: 'cg',
+        profile,
+        selected: null,
+        onSelect: vi.fn(),
+        entities,
+        // intentionally no `layer` — sub-graph page semantic
+      }));
+    });
+    await flushNet();
+    expect(chipCount('alpha')).toBe(1);
+    expect(chipCount('beta')).toBe(1);
+    const allChip = Array.from(container.querySelectorAll('button.v10-subgraph-chip'))
+      .find(b => b.textContent?.includes('All'));
+    const allCount = Number(allChip?.querySelector('.v10-subgraph-chip-count')?.textContent ?? 'NaN');
+    // 2 chip-reachable entities (alpha, beta). Root entities excluded.
+    expect(allCount).toBe(2);
+  });
+
   // Issue B regression — sub-graph page chip row in layer-agnostic mode.
   // User repro: SWM tab + sub-graph 'ui-epcis' open → chip row shows
   // "All 27 / ui-epcis 27" while the entity list shows 11. The "27"

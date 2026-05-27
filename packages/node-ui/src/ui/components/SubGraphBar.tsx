@@ -122,17 +122,25 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
   // per-sub-graph counts would double-count entities living in two or
   // more sub-graphs (the entity list under us is layer-filtered
   // without sub-graph multiplicity, so the sum disagrees with it).
-  // Entities with NO named-sub-graph membership (root-bucket SWM
-  // entities whose graph URI is `<cg>/_shared_memory` — `subGraphOf`
-  // filters underscore-prefixed segments, leaving an empty set) still
-  // belong to the layer and count toward the umbrella; otherwise "All"
-  // would undercount the layer tab badge and confuse the user.
+  //
+  // Layer-scoped semantic differs from layer-agnostic semantic:
+  //   • Layer mode (WM/SWM/VM page): "All" should match the layer tab
+  //     badge — every distinct entity at that layer, including
+  //     root-bucket SWM entities whose graph URI is
+  //     `<cg>/_shared_memory` (subGraphOf filters underscore-prefixed
+  //     segments, leaving an empty `subGraphs` set). Without them
+  //     "All" undercut the badge (e.g. 25 vs 27) and confused users.
+  //   • Layer-agnostic mode (sub-graph page): "All" is the umbrella
+  //     over named-sub-graph chips, so entities with no chip
+  //     membership stay excluded — including them would inflate the
+  //     total past anything the user can drill into by clicking a chip.
   const entityScopedAllTotal = React.useMemo(() => {
     if (!entities) return null;
     const trust = layer ? LAYER_TRUST_LEVEL[layer] : null;
     let n = 0;
     for (const e of entities) {
       if (trust !== null && e.trustLevel !== trust) continue;
+      if (layer === undefined && e.subGraphs.size === 0) continue;
       n++;
     }
     return n;
