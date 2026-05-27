@@ -134,7 +134,10 @@ describe('generateKCMetadata', () => {
     const quads = generateKCMetadata(makeMeta({ agentAddress: ADDR }), [makeKA()]);
     const attribution = quads.find(q => q.subject === UAL && q.predicate === `${PROV}wasAttributedTo`);
     expect(attribution).toBeDefined();
-    expect(attribution!.object).toBe(`did:dkg:agent:${ADDR}`);
+    // GH #748 Codex round 3: EVM-shape addresses lowercased so the same
+    // wallet doesn't split into multiple RDF subjects (see `agentDid()`
+    // and `canonicalAgentDidSubject` in agent/profile.ts:20).
+    expect(attribution!.object).toBe(`did:dkg:agent:${ADDR.toLowerCase()}`);
   });
 
   it('GH #748: attribution falls back to authorAddress when agentAddress is omitted but publication provenance is set', () => {
@@ -145,7 +148,10 @@ describe('generateKCMetadata', () => {
     );
     const attribution = quads.find(q => q.subject === UAL && q.predicate === `${PROV}wasAttributedTo`);
     expect(attribution).toBeDefined();
-    expect(attribution!.object).toBe(`did:dkg:agent:${ADDR}`);
+    // GH #748 Codex round 3: EVM-shape addresses lowercased so the same
+    // wallet doesn't split into multiple RDF subjects (see `agentDid()`
+    // and `canonicalAgentDidSubject` in agent/profile.ts:20).
+    expect(attribution!.object).toBe(`did:dkg:agent:${ADDR.toLowerCase()}`);
   });
 
   it('GH #748: explicit agentAddress takes precedence over authorAddress', () => {
@@ -156,7 +162,7 @@ describe('generateKCMetadata', () => {
       [makeKA()],
     );
     const attribution = quads.find(q => q.subject === UAL && q.predicate === `${PROV}wasAttributedTo`);
-    expect(attribution!.object).toBe(`did:dkg:agent:${AGENT}`);
+    expect(attribution!.object).toBe(`did:dkg:agent:${AGENT.toLowerCase()}`);
   });
 });
 
@@ -369,16 +375,35 @@ describe('generateShareMetadata', () => {
   });
 
   it('GH #748: attribution is the agent DID URI when agentAddress is supplied', () => {
+    const ADDR = '0xaF7E932F79263f1A303790Bd6C01b096f5334BBB';
     const quads = generateShareMetadata(
-      { ...wsMeta, agentAddress: '0xaF7E932F79263f1A303790Bd6C01b096f5334BBB' },
+      { ...wsMeta, agentAddress: ADDR },
       wsGraph,
     );
     const attribution = quads.find(q => q.predicate === 'http://www.w3.org/ns/prov#wasAttributedTo');
     expect(attribution).toBeDefined();
-    expect(attribution!.object).toBe('did:dkg:agent:0xaF7E932F79263f1A303790Bd6C01b096f5334BBB');
+    // GH #748 Codex round 3: EVM-shape addresses lowercased to converge with
+    // `canonicalAgentDidSubject` in agent/profile.ts:20.
+    expect(attribution!.object).toBe(`did:dkg:agent:${ADDR.toLowerCase()}`);
     // The peer ID is still recorded separately for transport-layer audit.
     const peerIdQuad = quads.find(q => q.predicate === `${DKG}publisherPeerId`);
     expect(peerIdQuad!.object).toBe('"12D3KooWTestPeer"');
+  });
+
+  it('GH #748 Codex round 3: agentDid lowercases EVM-shape addresses, passes through non-EVM', () => {
+    // EVM checksummed → lowercased (test via the share writer which calls agentDid)
+    const checksummedAddr = '0xaF7E932F79263f1A303790Bd6C01b096f5334BBB';
+    const lowerQuads = generateShareMetadata(
+      { ...wsMeta, agentAddress: checksummedAddr.toLowerCase() }, wsGraph,
+    );
+    const upperQuads = generateShareMetadata(
+      { ...wsMeta, agentAddress: checksummedAddr }, wsGraph,
+    );
+    const lowerAttr = lowerQuads.find(q => q.predicate === 'http://www.w3.org/ns/prov#wasAttributedTo');
+    const upperAttr = upperQuads.find(q => q.predicate === 'http://www.w3.org/ns/prov#wasAttributedTo');
+    // Same wallet, two casings, must converge on one DID.
+    expect(lowerAttr!.object).toBe(upperAttr!.object);
+    expect(lowerAttr!.object).toBe('did:dkg:agent:0xaf7e932f79263f1a303790bd6c01b096f5334bbb');
   });
 
   it('includes compact operation reference fields', () => {

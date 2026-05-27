@@ -240,16 +240,23 @@ describe('Working Memory Assertion Lifecycle', () => {
     const SWM_META = `did:dkg:context-graph:${CG_ID}/_shared_memory_meta`;
     const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
     const DKG = 'http://dkg.io/ontology/';
+    // GH #748 Codex round 3: AGENTS registry uses the spec-aligned
+    // `https://dkg.network/ontology#` namespace (same as `buildAgentProfile`
+    // in agent/profile.ts), not the internal `http://dkg.io/ontology/` one
+    // used by SWM meta predicates.
+    const DKG_REGISTRY = 'https://dkg.network/ontology#';
     const PROV = 'http://www.w3.org/ns/prov#';
 
     // Seed AGENTS registry: one peer with a known agent address, one without.
     const PEER_KNOWN = '12D3KooWKnownPeer';
     const PEER_UNKNOWN = '12D3KooWUnknownPeer';
-    const ADDR_KNOWN = '0xaF7E932F79263f1A303790Bd6C01b096f5334BBB';
+    // Lowercased per `canonicalAgentDidSubject` — matches what
+    // `buildAgentProfile` writes when registering an agent.
+    const ADDR_KNOWN = '0xaf7e932f79263f1a303790bd6c01b096f5334bbb';
 
     await store.insert([
-      { subject: `did:dkg:agent:${ADDR_KNOWN}`, predicate: RDF_TYPE, object: `${DKG}Agent`, graph: AGENTS_GRAPH },
-      { subject: `did:dkg:agent:${ADDR_KNOWN}`, predicate: `${DKG}peerId`, object: `"${PEER_KNOWN}"`, graph: AGENTS_GRAPH },
+      { subject: `did:dkg:agent:${ADDR_KNOWN}`, predicate: RDF_TYPE, object: `${DKG_REGISTRY}Agent`, graph: AGENTS_GRAPH },
+      { subject: `did:dkg:agent:${ADDR_KNOWN}`, predicate: `${DKG_REGISTRY}peerId`, object: `"${PEER_KNOWN}"`, graph: AGENTS_GRAPH },
     ]);
 
     // Seed SWM meta with three legacy rows that mirror real shapes:
@@ -334,10 +341,10 @@ describe('Working Memory Assertion Lifecycle', () => {
     expect(r2.skipped).toBe(1);
 
     // Add the previously-missing AGENTS record for the unresolved peer.
-    const ADDR_LATE = '0xbA7E932F79263F1a303790Bd6C01B096F5334Bba';
+    const ADDR_LATE = '0xba7e932f79263f1a303790bd6c01b096f5334bba';
     await store.insert([
-      { subject: `did:dkg:agent:${ADDR_LATE}`, predicate: RDF_TYPE, object: `${DKG}Agent`, graph: AGENTS_GRAPH },
-      { subject: `did:dkg:agent:${ADDR_LATE}`, predicate: `${DKG}peerId`, object: `"${PEER_UNKNOWN}"`, graph: AGENTS_GRAPH },
+      { subject: `did:dkg:agent:${ADDR_LATE}`, predicate: RDF_TYPE, object: `${DKG_REGISTRY}Agent`, graph: AGENTS_GRAPH },
+      { subject: `did:dkg:agent:${ADDR_LATE}`, predicate: `${DKG_REGISTRY}peerId`, object: `"${PEER_UNKNOWN}"`, graph: AGENTS_GRAPH },
     ]);
     // Third pass: the previously-unresolved row now resolves, and since
     // cgSkipped reaches 0 the marker finally gets written.
@@ -368,12 +375,14 @@ describe('Working Memory Assertion Lifecycle', () => {
     const PEER_SHARED = '12D3KooWMultiAgentNode';
     const ADDR_A = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
     const ADDR_B = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+    // GH #748 Codex round 3: registry namespace is `https://dkg.network/ontology#`.
+    const DKG_REGISTRY = 'https://dkg.network/ontology#';
 
     await store.insert([
-      { subject: `did:dkg:agent:${ADDR_A}`, predicate: RDF_TYPE, object: `${DKG}Agent`, graph: AGENTS_GRAPH },
-      { subject: `did:dkg:agent:${ADDR_A}`, predicate: `${DKG}peerId`, object: `"${PEER_SHARED}"`, graph: AGENTS_GRAPH },
-      { subject: `did:dkg:agent:${ADDR_B}`, predicate: RDF_TYPE, object: `${DKG}Agent`, graph: AGENTS_GRAPH },
-      { subject: `did:dkg:agent:${ADDR_B}`, predicate: `${DKG}peerId`, object: `"${PEER_SHARED}"`, graph: AGENTS_GRAPH },
+      { subject: `did:dkg:agent:${ADDR_A}`, predicate: RDF_TYPE, object: `${DKG_REGISTRY}Agent`, graph: AGENTS_GRAPH },
+      { subject: `did:dkg:agent:${ADDR_A}`, predicate: `${DKG_REGISTRY}peerId`, object: `"${PEER_SHARED}"`, graph: AGENTS_GRAPH },
+      { subject: `did:dkg:agent:${ADDR_B}`, predicate: RDF_TYPE, object: `${DKG_REGISTRY}Agent`, graph: AGENTS_GRAPH },
+      { subject: `did:dkg:agent:${ADDR_B}`, predicate: `${DKG_REGISTRY}peerId`, object: `"${PEER_SHARED}"`, graph: AGENTS_GRAPH },
     ]);
 
     const OP = `urn:dkg:share:${CG_ID}:op-ambiguous`;

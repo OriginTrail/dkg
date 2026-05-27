@@ -3098,7 +3098,17 @@ export class DKGPublisher implements Publisher {
    * against the AGENTS system graph are left in place.
    */
   async migrateSwmAttributionToAgentDid(): Promise<{ rewritten: number; skipped: number; cgs: number }> {
+    // GH #748 Codex round 3: the AGENTS registry vocabulary is the spec-aligned
+    // `https://dkg.network/ontology#` namespace (see `buildAgentProfile` and
+    // `discovery.ts:findAgentByPeerId`), distinct from the internal
+    // `http://dkg.io/ontology/` namespace used by SWM meta predicates
+    // (`dkg:rootEntity`, `dkg:publisherPeerId`, `dkg:workspaceOwner`, etc.).
+    // The migration touches both: SWM meta predicates use DKG_INTERNAL; the
+    // AGENTS registry lookup uses DKG_REGISTRY. Confirmed against live data:
+    // a real node's `did:dkg:context-graph:agents` graph carries
+    // `https://dkg.network/ontology#peerId`, not `http://dkg.io/ontology/peerId`.
     const DKG = 'http://dkg.io/ontology/';
+    const DKG_REGISTRY = 'https://dkg.network/ontology#';
     const PROV = 'http://www.w3.org/ns/prov#';
     const RDF = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#';
     const XSD = 'http://www.w3.org/2001/XMLSchema#';
@@ -3171,7 +3181,7 @@ export class DKGPublisher implements Publisher {
             if (peerToAddress.has(peerId)) {
               address = peerToAddress.get(peerId)!;
             } else {
-              address = await this.resolveAgentAddressForPeer(peerId, AGENTS_GRAPH, DKG, RDF);
+              address = await this.resolveAgentAddressForPeer(peerId, AGENTS_GRAPH, DKG_REGISTRY, RDF);
               peerToAddress.set(peerId, address);
             }
 
@@ -3256,7 +3266,7 @@ export class DKGPublisher implements Publisher {
   }
 
   private async resolveAgentAddressForPeer(
-    peerId: string, agentsGraph: string, DKG: string, RDF: string,
+    peerId: string, agentsGraph: string, dkgRegistry: string, RDF: string,
   ): Promise<string | null> {
     // SPARQL string-literal escape: only `"` and `\` are special inside `"..."`.
     const escaped = peerId.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
@@ -3267,10 +3277,14 @@ export class DKGPublisher implements Publisher {
     // ambiguity. On 0 or >1 matches, return null so the migration preserves
     // the literal-form attribution rather than silently mis-attributing it
     // to whichever agent happens to come first.
+    // GH #748 Codex round 3: vocabulary is `https://dkg.network/ontology#`
+    // (the registry namespace `buildAgentProfile` writes), NOT the internal
+    // `http://dkg.io/ontology/` namespace — the latter would match zero rows
+    // against a real node's AGENTS graph and silently skip every literal.
     const sparql = `SELECT ?agent WHERE {
       GRAPH <${agentsGraph}> {
-        ?agent <${RDF}type> <${DKG}Agent> ;
-               <${DKG}peerId> "${escaped}" .
+        ?agent <${RDF}type> <${dkgRegistry}Agent> ;
+               <${dkgRegistry}peerId> "${escaped}" .
       }
     } LIMIT 2`;
     const result = await this.store.query(sparql);
