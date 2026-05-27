@@ -3145,8 +3145,8 @@ export class DKGPublisher implements Publisher {
     const hydratedOwned = this.sharedMemoryOwnedEntities.get(ownershipKey)!;
 
     for (const [entity, creator] of durableOwners) {
-      owners.set(entity, creator);
-      hydratedOwned.set(entity, creator);
+      setEffectiveOwner(owners, entity, creator);
+      setEffectiveOwner(hydratedOwned, entity, creator);
     }
 
     return owners;
