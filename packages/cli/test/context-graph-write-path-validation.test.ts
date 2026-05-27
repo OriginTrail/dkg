@@ -547,10 +547,28 @@ describe('context graph write-path validation', () => {
     expect(agent.calls.write).not.toHaveBeenCalled();
   });
 
-  it('does not accept context graphs hidden from the caller-visible list through an existence fallback', async () => {
-    const agent = makeAgent();
+  it('allows node-level write preflight to exact local context graphs hidden from unscoped lists', async () => {
+    const agent = makeAgent([]);
     agent.contextGraphExists.mockResolvedValueOnce(true);
-    await startRoutes(agent);
+    await startRoutes(agent, CALLER, 'node-token');
+
+    const result = await post('/api/assertion/create', {
+      contextGraphId: 'private-local-cg',
+      name: 'draft',
+    });
+
+    expect(result.status).toBe(200);
+    expect(agent.resolveAgentByToken).toHaveBeenCalledWith('node-token');
+    expect(agent.listContextGraphs).toHaveBeenCalledWith();
+    expect(agent.contextGraphExists).toHaveBeenCalledWith('private-local-cg');
+    expect(agent.calls.create).toHaveBeenCalledWith('private-local-cg', 'draft', undefined);
+  });
+
+  it('does not accept context graphs hidden from an explicit caller-visible list through an existence fallback', async () => {
+    const agent = makeAgent([]);
+    agent.resolveAgentByToken.mockReturnValue(CALLER);
+    agent.contextGraphExists.mockResolvedValueOnce(true);
+    await startRoutes(agent, CALLER, 'agent-token');
 
     const result = await post('/api/shared-memory/write', {
       contextGraphId: 'private-hidden-cg',
@@ -559,6 +577,7 @@ describe('context graph write-path validation', () => {
 
     expect(result.status).toBe(400);
     expect(result.body).toMatchObject({ code: 'CONTEXT_GRAPH_NOT_FOUND' });
+    expect(agent.listContextGraphs).toHaveBeenCalledWith({ callerAgentAddress: CALLER });
     expect(agent.contextGraphExists).not.toHaveBeenCalled();
     expect(agent.calls.share).not.toHaveBeenCalled();
   });

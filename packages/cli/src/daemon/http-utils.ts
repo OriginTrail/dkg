@@ -560,6 +560,7 @@ export async function resolveRequiredWriteContextGraphId(
   opts: {
     callerAgentAddress?: string | null;
     requireLocalWritable?: boolean;
+    allowLocalExactFallback?: boolean;
   } = {},
 ): Promise<string | null> {
   if (!validateRequiredContextGraphId(contextGraphId, res)) return null;
@@ -667,6 +668,20 @@ export async function resolveRequiredWriteContextGraphId(
       return rejectKnownNonWritableContextGraph(res, raw);
     }
     return exact.id;
+  }
+
+  if (opts.allowLocalExactFallback && agent.contextGraphExists) {
+    try {
+      if (await agent.contextGraphExists(candidateId)) {
+        return candidateId;
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      jsonResponse(res, 500, {
+        error: `Failed to validate contextGraphId local existence: ${message}`,
+      });
+      return null;
+    }
   }
 
   jsonResponse(res, 400, {

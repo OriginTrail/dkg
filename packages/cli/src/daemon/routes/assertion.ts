@@ -1035,6 +1035,10 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
   const writePreflightCallerAgentAddress = requestToken
     ? agent.resolveAgentByToken(requestToken)
     : undefined;
+  const writePreflightContextGraphOpts = {
+    callerAgentAddress: writePreflightCallerAgentAddress,
+    allowLocalExactFallback: !writePreflightCallerAgentAddress,
+  };
 
   // POST /api/assertion/import-artifact/resolve
   // Resolve a completed deterministic import artifact from graph metadata.
@@ -1121,7 +1125,7 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
         agent,
         record.contextGraphId,
         res,
-        { callerAgentAddress: writePreflightCallerAgentAddress },
+        writePreflightContextGraphOpts,
       );
       if (!resolvedContextGraphId) return;
       record.contextGraphId = resolvedContextGraphId;
@@ -1230,7 +1234,7 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
       agent,
       contextGraphId,
       res,
-      { callerAgentAddress: writePreflightCallerAgentAddress },
+      writePreflightContextGraphOpts,
     );
     if (!resolvedContextGraphId) return;
     if (typeof name !== "string")
@@ -1434,7 +1438,7 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
       agent,
       contextGraphId,
       res,
-      { callerAgentAddress: writePreflightCallerAgentAddress },
+      writePreflightContextGraphOpts,
     );
     if (!resolvedContextGraphId) return;
     if (!validateOptionalSubGraphName(subGraphName, res)) return;
@@ -1536,7 +1540,7 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
       agent,
       contextGraphId,
       res,
-      { callerAgentAddress: writePreflightCallerAgentAddress },
+      writePreflightContextGraphOpts,
     );
     if (!resolvedContextGraphId) return;
     if (!validateEntities(entities, res)) return;
@@ -1608,7 +1612,7 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
       agent,
       contextGraphId,
       res,
-      { callerAgentAddress: writePreflightCallerAgentAddress },
+      writePreflightContextGraphOpts,
     );
     if (!resolvedContextGraphId) return;
     if (!validateEntities(entities, res)) return;
@@ -1792,7 +1796,7 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
       agent,
       contextGraphId,
       res,
-      { callerAgentAddress: writePreflightCallerAgentAddress },
+      writePreflightContextGraphOpts,
     );
     if (!resolvedContextGraphId) return;
     if (!validateOptionalSubGraphName(subGraphName, res)) return;
@@ -1926,7 +1930,7 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
       agent,
       contextGraphId,
       res,
-      { callerAgentAddress: writePreflightCallerAgentAddress },
+      writePreflightContextGraphOpts,
     );
     if (!resolvedContextGraphId) return;
     if (!validateOptionalSubGraphName(subGraphName, res)) return;
@@ -2103,7 +2107,7 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
       agent,
       contextGraphId,
       res,
-      { callerAgentAddress: writePreflightCallerAgentAddress },
+      writePreflightContextGraphOpts,
     );
     if (!resolvedContextGraphId) return;
     contextGraphId = resolvedContextGraphId;
