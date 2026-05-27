@@ -751,6 +751,7 @@ export function ProjectOverviewCard({
   const accessAgentStat = overviewAccessAgentStat(cg, participants, participantsStatus);
   const curator = typeof cg?.curator === 'string' ? cg.curator.trim() : '';
   const curatorCanonical = curator ? canonicalAgentDid(curator) : '';
+  const isPublicAccess = normalizeAccessPolicy(cg?.accessPolicy) === 'public';
   const selfIds = overviewIdentitySet(currentAgent ?? null);
   const layerStatuses = Object.values(memory.layerStatus ?? {});
   const unavailableLayerCount = layerStatuses.filter(status => status === 'error').length;
@@ -960,15 +961,20 @@ export function ProjectOverviewCard({
             rows.push({ addr, canonical: c });
           }
           if (rows.length === 0) {
-            return (
-              <div className="v10-po-people-empty">
-                {participantsStatus === 'loading'
-                  ? 'Loading participant agents...'
-                  : participantsStatus === 'error'
-                    ? 'Participant list unavailable.'
-                    : 'No participant agents recorded yet.'}
-              </div>
-            );
+            // Codex review bug E — `/participants` returns
+            // `allowedAgents` which is empty on a fully public CG.
+            // Saying "No participant agents recorded yet." in that
+            // case is misleading because access is open. Public CGs
+            // with no listed roster show the open-access copy; only
+            // curated CGs get the literal "no participants" copy.
+            const emptyCopy = participantsStatus === 'loading'
+              ? 'Loading participant agents...'
+              : participantsStatus === 'error'
+                ? 'Participant list unavailable.'
+                : isPublicAccess
+                  ? 'This Context Graph is public — anyone can subscribe.'
+                  : 'No participant agents recorded yet.';
+            return <div className="v10-po-people-empty">{emptyCopy}</div>;
           }
           return (
             <div className="v10-po-participants-list">

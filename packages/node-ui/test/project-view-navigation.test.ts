@@ -162,6 +162,9 @@ const apiWrapperMock = vi.hoisted(() => ({
   fetchContextGraphs: vi.fn(),
   fetchCurrentAgent: vi.fn(),
   listParticipants: vi.fn(),
+  // Codex review bug F — ProjectView now routes through api-wrapper
+  // so the Subgraphs stat resolves in mock mode. Default to empty.
+  fetchSubGraphs: vi.fn(async (id: string) => ({ contextGraphId: id, subGraphs: [] })),
 }));
 
 vi.mock('../src/ui/api-wrapper.js', () => ({
@@ -170,7 +173,6 @@ vi.mock('../src/ui/api-wrapper.js', () => ({
 
 vi.mock('../src/ui/api.js', () => ({
   listParticipants: vi.fn(async () => ({ allowedAgents: [] })),
-  fetchSubGraphs: vi.fn(async () => ({ contextGraphId: 'cg-test', subGraphs: [] })),
 }));
 
 vi.mock('../src/ui/hooks/useNodeEvents.js', () => ({
@@ -332,6 +334,7 @@ describe('ProjectView entity detail navigation', () => {
       peerId: 'peer-1',
     });
     apiWrapperMock.listParticipants.mockResolvedValue({ allowedAgents: [] });
+    apiWrapperMock.fetchSubGraphs.mockResolvedValue({ contextGraphId: 'cg-test', subGraphs: [] });
     document.body.innerHTML = '<div id="root"></div>';
     originalRaf = window.requestAnimationFrame;
     Object.defineProperty(window, 'requestAnimationFrame', {
@@ -394,6 +397,15 @@ describe('ProjectView entity detail navigation', () => {
 
     expect(query('active-layer').dataset.layer).toBe('overview');
     expect(scrollRoot('page').scrollTop).toBe(140);
+  });
+
+  it('routes the Overview Subgraphs lift through api-wrapper so mock-mode resolves (Codex bug F)', async () => {
+    // ProjectView should fire its sub-graph fetch via the wrapped
+    // `api.fetchSubGraphs`, NOT via a direct `../api.js` import that
+    // would bypass mock/offline fallback. Asserting the wrapper was
+    // called proves the route — `apiWrapperMock.fetchSubGraphs`
+    // only resolves when the wrapper is actually used.
+    expect(apiWrapperMock.fetchSubGraphs).toHaveBeenCalledWith('cg-test');
   });
 
   it('opens graph nodes with the layer context they came from', async () => {

@@ -1,7 +1,6 @@
 import { useMemo, useState, useCallback, useEffect, useRef } from 'react';
 import { useFetch } from '../hooks.js';
 import { api } from '../api-wrapper.js';
-import { fetchSubGraphs } from '../api.js';
 import { useMemoryGraphEvents } from '../hooks/useNodeEvents.js';
 import { ImportFilesModal } from '../components/Modals/ImportFilesModal.js';
 import { ShareProjectModal } from '../components/Modals/ShareProjectModal.js';
@@ -327,7 +326,11 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
 
   const refreshSubGraphCount = useCallback(() => {
     const requestId = ++subGraphRequestRef.current;
-    fetchSubGraphs(contextGraphId)
+    // Codex review bug F — route through api-wrapper so the
+    // Subgraphs stat resolves in mock mode (the direct
+    // `../api.js` import bypassed the mock/offline fallback and
+    // left the cell stuck in the loading state forever).
+    api.fetchSubGraphs(contextGraphId)
       .then(res => {
         if (subGraphRequestRef.current !== requestId) return;
         const count = (res.subGraphs ?? []).filter(

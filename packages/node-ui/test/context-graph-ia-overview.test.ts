@@ -373,7 +373,7 @@ describe('Context Graph IA and Overview', () => {
     await act(async () => root.unmount());
   });
 
-  it('shows a graceful Participant agents empty state when none are recorded', async () => {
+  it('shows a graceful Participant agents empty state when none are recorded on a curated CG', async () => {
     const { container, root } = await render(
       React.createElement(ProjectOverviewCard, {
         cg: { id: 'cg-empty', name: 'Empty', accessPolicy: 'private' },
@@ -385,7 +385,53 @@ describe('Context Graph IA and Overview', () => {
 
     expect(container.textContent).toContain('Participant agents');
     expect(container.textContent).toContain('No participant agents recorded yet.');
+    expect(container.textContent).not.toContain('public — anyone can subscribe');
     expect(container.querySelectorAll('.v10-po-participant')).toHaveLength(0);
+
+    await act(async () => root.unmount());
+  });
+
+  it('renders open-access copy on a public CG when allowedAgents is empty AND no curator (Codex bug E)', async () => {
+    const { container, root } = await render(
+      React.createElement(ProjectOverviewCard, {
+        cg: { id: 'cg-public-open', name: 'Open', accessPolicy: 'public' },
+        memory: baseMemory,
+        participants: [],
+        currentAgent: { agentDid: 'did:dkg:agent:0xdef' },
+      }),
+    );
+
+    expect(container.textContent).toContain('Participant agents');
+    expect(container.textContent).toContain('This Context Graph is public — anyone can subscribe.');
+    expect(container.textContent).not.toContain('No participant agents recorded yet.');
+    expect(container.querySelectorAll('.v10-po-participant')).toHaveLength(0);
+
+    await act(async () => root.unmount());
+  });
+
+  it('still shows the curator row on a public CG that has a curator + empty allowedAgents (Codex bug E + A together)', async () => {
+    const curatorAddress = '0xCAFE0000000000000000000000000000000000E5';
+    const { container, root } = await render(
+      React.createElement(ProjectOverviewCard, {
+        cg: {
+          id: 'cg-public-with-curator',
+          name: 'Open with curator',
+          accessPolicy: 'public',
+          curator: `did:dkg:agent:${curatorAddress}`,
+        },
+        memory: baseMemory,
+        participants: [],
+        currentAgent: { agentDid: 'did:dkg:agent:0xdef' },
+      }),
+    );
+
+    // Curator row must still render (Bug A) — open-access copy is
+    // the EMPTY-state, not a hard override.
+    const rows = Array.from(container.querySelectorAll('.v10-po-participant'));
+    expect(rows).toHaveLength(1);
+    expect(rows[0].classList.contains('is-curator')).toBe(true);
+    expect(container.textContent).not.toContain('public — anyone can subscribe');
+    expect(container.textContent).not.toContain('No participant agents recorded yet.');
 
     await act(async () => root.unmount());
   });
