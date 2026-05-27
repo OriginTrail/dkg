@@ -101,6 +101,16 @@ describe('async-promote queue — end-to-end (routes + worker + queue)', () => {
     let inFlight = 0;
     return {
       promoteQueue: queue,
+      async listContextGraphs() {
+        return ['team-graph', 'graphify', 'cg'].map((id) => ({
+          id,
+          uri: `did:dkg:context-graph:${id}`,
+          name: id,
+        }));
+      },
+      async contextGraphExists(contextGraphId: string) {
+        return ['team-graph', 'graphify', 'cg'].includes(contextGraphId);
+      },
       assertion: {
         async promote(
           contextGraphId: string,

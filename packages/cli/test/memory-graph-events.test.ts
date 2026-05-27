@@ -49,10 +49,18 @@ function createTracker(): RequestContext['tracker'] {
 
 function createContext(path: string, body: unknown, overrides: Partial<RequestContext> = {}): RequestContext {
   const url = new URL(`http://127.0.0.1${path}`);
+  const { agent: overrideAgent, ...restOverrides } = overrides;
+  const defaultAgent = {
+    peerId: 'peer-test',
+    listContextGraphs: vi.fn(async () => [
+      { id: 'project-a', uri: 'did:dkg:context-graph:project-a', name: 'Project A' },
+    ]),
+    contextGraphExists: vi.fn(async (contextGraphId: string) => contextGraphId === 'project-a'),
+  };
   return {
     req: createPostRequest(path, body),
     res: createResponse() as unknown as ServerResponse,
-    agent: {} as RequestContext['agent'],
+    agent: { ...defaultAgent, ...(overrideAgent as Record<string, unknown> | undefined) } as RequestContext['agent'],
     publisherControl: {} as RequestContext['publisherControl'],
     publisherRuntime: null,
     config: {} as RequestContext['config'],
@@ -79,7 +87,7 @@ function createContext(path: string, body: unknown, overrides: Partial<RequestCo
     path: url.pathname,
     requestToken: undefined,
     requestAgentAddress: '0x0000000000000000000000000000000000000001',
-    ...overrides,
+    ...restOverrides,
   };
 }
 

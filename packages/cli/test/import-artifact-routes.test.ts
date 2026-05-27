@@ -148,6 +148,16 @@ describe('import artifact daemon routes', () => {
       { subject: 'urn:a', predicate: 'urn:p', object: '"A"' },
     ];
     const agent = {
+      async listContextGraphs() {
+        return [{
+          id: args.contextGraphId,
+          uri: `did:dkg:context-graph:${args.contextGraphId}`,
+          name: args.contextGraphId,
+        }];
+      },
+      async contextGraphExists(contextGraphId: string) {
+        return contextGraphId === args.contextGraphId;
+      },
       assertion: {
         async create(contextGraphId: string, name: string, opts?: unknown) {
           created.push({ contextGraphId, name, opts });

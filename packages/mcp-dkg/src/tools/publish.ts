@@ -39,6 +39,11 @@ const errResult = (text: string): ToolResult => ({
 const formatError = (e: unknown): string =>
   e instanceof Error ? e.message : String(e);
 
+const CONTEXT_GRAPH_ID_DESCRIPTION =
+  'Canonical context graph id. Use <curatorAddress>/<slug> or ' +
+  'did:dkg:context-graph:<curatorAddress>/<slug>. Do not pass bare slugs; ' +
+  'use dkg_list_context_graphs to copy an existing id.';
+
 /**
  * F3+F13: resolve the daemon's configured chainId for the success
  * summary. The daemon's `/api/shared-memory/publish` response does
@@ -123,7 +128,7 @@ export function registerPublishTools(
         '`dkg_publish` only when you have fresh quads to anchor ' +
         'immediately.',
       inputSchema: {
-        contextGraphId: z.string().min(1).describe('Target context graph id'),
+        contextGraphId: z.string().min(1).describe(`Target context graph id. ${CONTEXT_GRAPH_ID_DESCRIPTION}`),
         quads: z
           .array(QuadSchema)
           .min(1)
@@ -201,7 +206,7 @@ export function registerPublishTools(
         'to on-chain registration before publishing — note this MAY spend ' +
         'gas/TRAC; opt-in only.',
       inputSchema: {
-        contextGraphId: z.string().min(1).describe('Target context graph id'),
+        contextGraphId: z.string().min(1).describe(`Target context graph id. ${CONTEXT_GRAPH_ID_DESCRIPTION}`),
         rootEntities: z
           .array(z.string())
           .optional()

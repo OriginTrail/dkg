@@ -451,6 +451,161 @@ export function validateRequiredContextGraphId(
   return true;
 }
 
+const CONTEXT_GRAPH_URI_PREFIX = "did:dkg:context-graph:";
+
+export function normalizeContextGraphIdOrUri(contextGraphId: string): string {
+  return contextGraphId.startsWith(CONTEXT_GRAPH_URI_PREFIX)
+    ? contextGraphId.slice(CONTEXT_GRAPH_URI_PREFIX.length)
+    : contextGraphId;
+}
+
+type ExistingContextGraphRow = {
+  id?: unknown;
+  uri?: unknown;
+  creator?: unknown;
+  curator?: unknown;
+  accessPolicy?: unknown;
+  onChainId?: unknown;
+  subscribed?: unknown;
+};
+
+function normalizeContextGraphCallerAddress(
+  callerAgentAddress?: string | null,
+): string | null {
+  if (!callerAgentAddress) return null;
+  const didPrefix = "did:dkg:agent:";
+  return callerAgentAddress.startsWith(didPrefix)
+    ? callerAgentAddress.slice(didPrefix.length)
+    : callerAgentAddress;
+}
+
+function uniqueStrings(values: Iterable<string>): string[] {
+  return [...new Set(values)];
+}
+
+function isWalletScopedContextGraphId(id: string): boolean {
+  return /^0x[0-9a-fA-F]{40}\//.test(id);
+}
+
+function isShadowLikeBareContextGraphRow(row: ExistingContextGraphRow): boolean {
+  const id = typeof row.id === "string" ? row.id : "";
+  if (!id || id.includes("/")) return false;
+  return (
+    typeof row.creator !== "string" &&
+    typeof row.curator !== "string" &&
+    typeof row.accessPolicy !== "string" &&
+    typeof row.onChainId !== "string" &&
+    row.subscribed !== true
+  );
+}
+
+/**
+ * Resolve a write target to a known, canonical context graph id.
+ *
+ * The storage layer auto-materializes named graphs on first insert, so syntax
+ * validation is not enough for mutation routes. This helper fail-closes before
+ * callers reach agent/publisher/storage code that would create a shadow CG.
+ */
+export async function resolveRequiredWriteContextGraphId(
+  agent: {
+    listContextGraphs(opts?: {
+      callerAgentAddress?: string | null;
+    }): Promise<ExistingContextGraphRow[]>;
+    getDefaultAgentAddress?: () => string | undefined;
+  },
+  contextGraphId: unknown,
+  res: ServerResponse,
+  opts: { callerAgentAddress?: string | null } = {},
+): Promise<string | null> {
+  if (!validateRequiredContextGraphId(contextGraphId, res)) return null;
+
+  const raw = (contextGraphId as string).trim();
+  const candidateId = normalizeContextGraphIdOrUri(raw);
+  const candidateValidation = validateContextGraphId(candidateId);
+  if (!candidateValidation.valid) {
+    jsonResponse(res, 400, {
+      error: `Invalid "contextGraphId": ${candidateValidation.reason}`,
+    });
+    return null;
+  }
+
+  let contextGraphs: ExistingContextGraphRow[];
+  try {
+    const callerAgentAddress =
+      normalizeContextGraphCallerAddress(opts.callerAgentAddress) ??
+      normalizeContextGraphCallerAddress(agent.getDefaultAgentAddress?.());
+    contextGraphs = await agent.listContextGraphs({
+      callerAgentAddress,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    jsonResponse(res, 500, {
+      error: `Failed to validate contextGraphId against known context graphs: ${message}`,
+    });
+    return null;
+  }
+
+  const knownIds = contextGraphs
+    .map((row) => (typeof row.id === "string" ? row.id : ""))
+    .filter((id) => id.length > 0);
+
+  const isBareCandidateId = !candidateId.includes("/");
+  const exact = contextGraphs.find((row) => {
+    const id = typeof row.id === "string" ? row.id : "";
+    const uri = typeof row.uri === "string" ? row.uri : "";
+    return id === candidateId || uri === raw;
+  });
+  if (isBareCandidateId) {
+    const suffixMatches = uniqueStrings(
+      knownIds.filter((id) =>
+        isWalletScopedContextGraphId(id) && id.endsWith(`/${candidateId}`),
+      ),
+    );
+    if (
+      exact?.id &&
+      typeof exact.id === "string" &&
+      suffixMatches.length > 0 &&
+      !isShadowLikeBareContextGraphRow(exact)
+    ) {
+      return exact.id;
+    }
+    if (suffixMatches.length === 1) {
+      const canonicalContextGraphId = suffixMatches[0];
+      jsonResponse(res, 400, {
+        code: "CONTEXT_GRAPH_ID_NOT_CANONICAL",
+        error:
+          `Context graph id "${candidateId}" matches a curated context graph. ` +
+          `Use canonical contextGraphId "${canonicalContextGraphId}".`,
+        canonicalContextGraphId,
+      });
+      return null;
+    }
+    if (suffixMatches.length > 1) {
+      jsonResponse(res, 400, {
+        code: "CONTEXT_GRAPH_ID_AMBIGUOUS",
+        error:
+          `Context graph id "${candidateId}" matches multiple context graphs. ` +
+          `Use one of the canonical contextGraphIds from canonicalContextGraphIds.`,
+        canonicalContextGraphIds: suffixMatches,
+      });
+      return null;
+    }
+    if (exact?.id && typeof exact.id === "string") return exact.id;
+  }
+
+  if (exact?.id && typeof exact.id === "string") return exact.id;
+
+  jsonResponse(res, 400, {
+    code: "CONTEXT_GRAPH_NOT_FOUND",
+    error:
+      `Unknown contextGraphId "${raw}". Write operations must target an existing ` +
+      `context graph. Use /api/context-graph/list or dkg_list_context_graphs and ` +
+      `pass the canonical id (for curated graphs, "<curatorAddress>/<slug>") ` +
+      `or full did:dkg:context-graph:... URI.`,
+  });
+  return null;
+}
+
 export function validateEntities(entities: unknown, res: ServerResponse): boolean {
   if (entities === undefined || entities === null || entities === "all")
     return true;

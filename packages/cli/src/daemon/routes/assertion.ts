@@ -195,6 +195,8 @@ import {
   safeParseJson,
   validateOptionalSubGraphName,
   validateRequiredContextGraphId,
+  normalizeContextGraphIdOrUri,
+  resolveRequiredWriteContextGraphId,
   validateEntities,
   validateConditions,
   MAX_BODY_BYTES,
@@ -809,7 +811,8 @@ async function resolveImportedArtifact(
     message: string;
   },
 ): Promise<ImportedArtifactResolution> {
-  const contextGraphId = typeof raw.contextGraphId === 'string' ? raw.contextGraphId.trim() : '';
+  const rawContextGraphId = typeof raw.contextGraphId === 'string' ? raw.contextGraphId.trim() : '';
+  const contextGraphId = rawContextGraphId ? normalizeContextGraphIdOrUri(rawContextGraphId) : '';
   if (!contextGraphId) {
     throw new ImportArtifactRouteError(400, '"contextGraphId" is required');
   }
@@ -1100,7 +1103,7 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
     const parsed = safeParseJson(body, res);
     if (!parsed) return;
     try {
-      const record = parsed as Record<string, unknown>;
+      const record = { ...(parsed as Record<string, unknown>) };
       if (
         record.name !== undefined ||
         record.semanticAssertionName !== undefined ||
@@ -1111,6 +1114,14 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
           'Semantic enrichment is written into the source import assertion; target assertion names are not supported',
         );
       }
+      const resolvedContextGraphId = await resolveRequiredWriteContextGraphId(
+        agent,
+        record.contextGraphId,
+        res,
+        { callerAgentAddress: requestAgentAddress },
+      );
+      if (!resolvedContextGraphId) return;
+      record.contextGraphId = resolvedContextGraphId;
       const artifact = await resolveImportedArtifact(ctx, record, {
         requestAgentAddress,
         message: 'Semantic enrichment can only modify imported assertions owned by the requesting agent',
@@ -1212,7 +1223,13 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
       schemeVersion,
     } = parsed;
     if (!name) return jsonResponse(res, 400, { error: 'Missing "name"' });
-    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
+    const resolvedContextGraphId = await resolveRequiredWriteContextGraphId(
+      agent,
+      contextGraphId,
+      res,
+      { callerAgentAddress: requestAgentAddress },
+    );
+    if (!resolvedContextGraphId) return;
     if (typeof name !== "string")
       return jsonResponse(res, 400, { error: '"name" must be a string' });
     const nameVal = validateAssertionName(name);
@@ -1290,12 +1307,12 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
     }
     try {
       const assertionUri = await agent.assertion.create(
-        contextGraphId,
+        resolvedContextGraphId,
         name,
         subGraphName ? { subGraphName } : undefined,
       );
       emitMemoryGraphChanged?.({
-        contextGraphId,
+        contextGraphId: resolvedContextGraphId,
         layers: ["wm"],
         subGraphName,
         operation: "assertion_created",
@@ -1305,13 +1322,13 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
       const response: Record<string, unknown> = { assertionUri };
       if (Array.isArray(quads) && quads.length > 0) {
         await agent.assertion.write(
-          contextGraphId,
+          resolvedContextGraphId,
           name,
           quads,
           subGraphName ? { subGraphName } : undefined,
         );
         emitMemoryGraphChanged?.({
-          contextGraphId,
+          contextGraphId: resolvedContextGraphId,
           layers: ["wm"],
           subGraphName,
           operation: "assertion_written",
@@ -1321,7 +1338,7 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
         response.written = quads.length;
       }
       if (shouldFinalize === true) {
-        const seal = await agent.assertion.finalize(contextGraphId, name, {
+        const seal = await agent.assertion.finalize(resolvedContextGraphId, name, {
           ...(subGraphName ? { subGraphName } : {}),
           ...(resolvedAuthorAgentAddress
             ? { authorAgentAddress: resolvedAuthorAgentAddress }
@@ -1332,7 +1349,7 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
           ...(schemeVersion != null ? { schemeVersion } : {}),
         });
         emitMemoryGraphChanged?.({
-          contextGraphId,
+          contextGraphId: resolvedContextGraphId,
           layers: ["wm"],
           subGraphName,
           operation: "assertion_finalized",
@@ -1349,13 +1366,13 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
       }
       if (shouldPromote === true) {
         const promoteResult = await agent.assertion.promote(
-          contextGraphId,
+          resolvedContextGraphId,
           name,
           subGraphName ? { subGraphName } : undefined,
         );
         if (promoteResult.promotedCount !== 0) {
           emitMemoryGraphChanged?.({
-            contextGraphId,
+            contextGraphId: resolvedContextGraphId,
             layers: ["wm", "swm"],
             subGraphName,
             operation: "assertion_promoted",
@@ -1410,17 +1427,23 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
     const { contextGraphId, quads, subGraphName } = parsed;
     if (!quads?.length)
       return jsonResponse(res, 400, { error: 'Missing "quads"' });
-    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
+    const resolvedContextGraphId = await resolveRequiredWriteContextGraphId(
+      agent,
+      contextGraphId,
+      res,
+      { callerAgentAddress: requestAgentAddress },
+    );
+    if (!resolvedContextGraphId) return;
     if (!validateOptionalSubGraphName(subGraphName, res)) return;
     try {
       await agent.assertion.write(
-        contextGraphId,
+        resolvedContextGraphId,
         assertionName,
         quads,
         subGraphName ? { subGraphName } : undefined,
       );
       emitMemoryGraphChanged?.({
-        contextGraphId,
+        contextGraphId: resolvedContextGraphId,
         layers: ["wm"],
         subGraphName,
         operation: "assertion_written",
@@ -1464,10 +1487,11 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
     if (!parsed) return;
     const { contextGraphId, subGraphName } = parsed;
     if (!validateRequiredContextGraphId(contextGraphId, res)) return;
+    const normalizedContextGraphId = normalizeContextGraphIdOrUri(contextGraphId);
     if (!validateOptionalSubGraphName(subGraphName, res)) return;
     try {
       const quads = await agent.assertion.query(
-        contextGraphId,
+        normalizedContextGraphId,
         assertionName,
         subGraphName ? { subGraphName } : undefined,
       );
@@ -1505,19 +1529,25 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
     const parsed = safeParseJson(body, res);
     if (!parsed) return;
     const { contextGraphId, entities, subGraphName } = parsed;
-    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
+    const resolvedContextGraphId = await resolveRequiredWriteContextGraphId(
+      agent,
+      contextGraphId,
+      res,
+      { callerAgentAddress: requestAgentAddress },
+    );
+    if (!resolvedContextGraphId) return;
     if (!validateEntities(entities, res)) return;
     if (!validateOptionalSubGraphName(subGraphName, res)) return;
     try {
       const result = await agent.assertion.promote(
-        contextGraphId,
+        resolvedContextGraphId,
         assertionName,
         { entities: entities ?? "all", subGraphName },
       );
       const promotedCount = typeof result?.promotedCount === "number" ? result.promotedCount : undefined;
       if (promotedCount !== 0) {
         emitMemoryGraphChanged?.({
-          contextGraphId,
+          contextGraphId: resolvedContextGraphId,
           layers: ["wm", "swm"],
           subGraphName,
           operation: "assertion_promoted",
@@ -1571,12 +1601,18 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
     const parsed = safeParseJson(body, res);
     if (!parsed) return;
     const { contextGraphId, entities, subGraphName } = parsed;
-    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
+    const resolvedContextGraphId = await resolveRequiredWriteContextGraphId(
+      agent,
+      contextGraphId,
+      res,
+      { callerAgentAddress: requestAgentAddress },
+    );
+    if (!resolvedContextGraphId) return;
     if (!validateEntities(entities, res)) return;
     if (!validateOptionalSubGraphName(subGraphName, res)) return;
     try {
       const result = await agent.assertion.promoteAsync(
-        contextGraphId,
+        resolvedContextGraphId,
         assertionName,
         { entities: entities ?? "all", subGraphName },
       );
@@ -1749,7 +1785,13 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
       preSignedAuthorAttestation: bodyPreSignedAttestation,
       schemeVersion,
     } = parsed;
-    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
+    const resolvedContextGraphId = await resolveRequiredWriteContextGraphId(
+      agent,
+      contextGraphId,
+      res,
+      { callerAgentAddress: requestAgentAddress },
+    );
+    if (!resolvedContextGraphId) return;
     if (!validateOptionalSubGraphName(subGraphName, res)) return;
     if (
       bodyAuthorAgentAddress != null &&
@@ -1805,7 +1847,7 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
       });
     }
     try {
-      const seal = await agent.assertion.finalize(contextGraphId, assertionName, {
+      const seal = await agent.assertion.finalize(resolvedContextGraphId, assertionName, {
         ...(subGraphName ? { subGraphName } : {}),
         ...(resolvedAuthorAgentAddress
           ? { authorAgentAddress: resolvedAuthorAgentAddress }
@@ -1822,7 +1864,7 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
       // the standalone routes must each emit their own — otherwise a client
       // composing the chain by hand would miss the `assertion_finalized` step.
       emitMemoryGraphChanged?.({
-        contextGraphId,
+        contextGraphId: resolvedContextGraphId,
         layers: ["wm"],
         subGraphName,
         operation: "assertion_finalized",
@@ -1877,23 +1919,29 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
     const parsed = safeParseJson(body, res);
     if (!parsed) return;
     const { contextGraphId, subGraphName } = parsed;
-    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
+    const resolvedContextGraphId = await resolveRequiredWriteContextGraphId(
+      agent,
+      contextGraphId,
+      res,
+      { callerAgentAddress: requestAgentAddress },
+    );
+    if (!resolvedContextGraphId) return;
     if (!validateOptionalSubGraphName(subGraphName, res)) return;
     try {
       await agent.assertion.discard(
-        contextGraphId,
+        resolvedContextGraphId,
         assertionName,
         subGraphName ? { subGraphName } : undefined,
       );
       const assertionUri = contextGraphAssertionUri(
-        contextGraphId,
+        resolvedContextGraphId,
         requestAgentAddress,
         assertionName,
         subGraphName,
       );
       extractionStatus.delete(assertionUri);
       emitMemoryGraphChanged?.({
-        contextGraphId,
+        contextGraphId: resolvedContextGraphId,
         layers: ["wm"],
         subGraphName,
         operation: "assertion_discarded",
@@ -1931,6 +1979,7 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
     const qs = new URL(req.url ?? "", "http://localhost").searchParams;
     const contextGraphId = qs.get("contextGraphId");
     if (!validateRequiredContextGraphId(contextGraphId, res)) return;
+    const normalizedContextGraphId = normalizeContextGraphIdOrUri(contextGraphId!);
     const rawAgentAddress = qs.get("agentAddress") ?? undefined;
     if (rawAgentAddress && !/^[\w:.\-]+$/.test(rawAgentAddress)) {
       return jsonResponse(res, 400, { error: "Invalid agentAddress format" });
@@ -1938,7 +1987,7 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
     const subGraphName = qs.get("subGraphName") ?? undefined;
     try {
       const descriptor = await agent.assertion.history(
-        contextGraphId!,
+        normalizedContextGraphId,
         assertionName,
         { ...(rawAgentAddress ? { agentAddress: rawAgentAddress } : {}), ...(subGraphName ? { subGraphName } : {}) },
       );
@@ -2034,7 +2083,7 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
       const f = fields.find((x) => x.name === name && x.filename === undefined);
       return f ? f.content.toString("utf-8") : undefined;
     };
-    const contextGraphId = textField("contextGraphId");
+    let contextGraphId = textField("contextGraphId");
     const contentTypeOverrideRaw = textField("contentType");
     // Treat blank (`contentType=` with empty/whitespace value) as absent so we
     // fall through to the file part's own Content-Type header instead of
@@ -2047,7 +2096,14 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
     const ontologyRef = textField("ontologyRef");
     const subGraphName = textField("subGraphName");
 
-    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
+    const resolvedContextGraphId = await resolveRequiredWriteContextGraphId(
+      agent,
+      contextGraphId,
+      res,
+      { callerAgentAddress: requestAgentAddress },
+    );
+    if (!resolvedContextGraphId) return;
+    contextGraphId = resolvedContextGraphId;
     if (!validateOptionalSubGraphName(subGraphName, res)) return;
 
     const detectedContentType = normalizeDetectedContentType(
@@ -3386,11 +3442,12 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
       url.searchParams.get("contextGraphId") ??
       url.searchParams.get("contextGraphId");
     if (!validateRequiredContextGraphId(contextGraphId, res)) return;
+    const normalizedContextGraphId = normalizeContextGraphIdOrUri(contextGraphId!);
     const subGraphName = url.searchParams.get("subGraphName") ?? undefined;
     if (!validateOptionalSubGraphName(subGraphName, res)) return;
 
     const assertionUri = contextGraphAssertionUri(
-      contextGraphId!,
+      normalizedContextGraphId,
       requestAgentAddress,
       assertionName,
       subGraphName,
@@ -3398,7 +3455,7 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
     const record = getExtractionStatusRecord(extractionStatus, assertionUri);
     if (!record) {
       return jsonResponse(res, 404, {
-        error: `No extraction record found for assertion "${assertionName}" in context graph "${contextGraphId}"`,
+        error: `No extraction record found for assertion "${assertionName}" in context graph "${normalizedContextGraphId}"`,
       });
     }
     return jsonResponse(res, 200, {

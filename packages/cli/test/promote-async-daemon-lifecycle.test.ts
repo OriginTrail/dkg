@@ -76,6 +76,16 @@ describe('promote-async daemon lifecycle wiring', () => {
   function makeAgent(promoteImpl: (contextGraphId: string, name: string, opts?: any) => Promise<{ promotedCount: number }>) {
     return {
       promoteQueue: queue,
+      async listContextGraphs() {
+        return ['graphify', 'cg'].map((id) => ({
+          id,
+          uri: `did:dkg:context-graph:${id}`,
+          name: id,
+        }));
+      },
+      async contextGraphExists(contextGraphId: string) {
+        return ['graphify', 'cg'].includes(contextGraphId);
+      },
       assertion: {
         async promoteAsync(
           contextGraphId: string,

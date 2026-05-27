@@ -49,6 +49,14 @@ export interface DkgClientOptions {
   fetcher?: typeof fetch;
 }
 
+const CONTEXT_GRAPH_URI_PREFIX = 'did:dkg:context-graph:';
+
+function toContextGraphUri(contextGraphIdOrUri: string): string {
+  return contextGraphIdOrUri.startsWith(CONTEXT_GRAPH_URI_PREFIX)
+    ? contextGraphIdOrUri
+    : `${CONTEXT_GRAPH_URI_PREFIX}${contextGraphIdOrUri}`;
+}
+
 /**
  * Per-peer diagnostic snapshot returned by `GET /api/peer-info`. Shape
  * mirrors the daemon-side `PeerDiagnostics` interface plus the legacy
@@ -908,7 +916,7 @@ export class DkgClient {
       subject: q.subject,
       predicate: q.predicate,
       object: q.object,
-      graph: q.graph ?? `did:dkg:context-graph:${args.contextGraphId}`,
+      graph: q.graph ?? toContextGraphUri(args.contextGraphId),
     }));
     const created = await this.request<{ assertionUri?: string; seal?: Record<string, unknown> }>(
       'POST',

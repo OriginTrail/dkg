@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { registerSetupTools } from '../src/tools/setup.js';
 import { registerPublishTools } from '../src/tools/publish.js';
 import { registerHealthTools } from '../src/tools/health.js';
+import { DkgClient } from '../src/client.js';
 import { FakeServer, FakeClient, makeConfig } from './harness.js';
 
 describe('setup tools — context graph + sub-graph + subscribe', () => {
@@ -104,6 +105,15 @@ describe('setup tools — context graph + sub-graph + subscribe', () => {
     expect(r2.isError).toBeFalsy();
   });
 
+  it('documents canonical context graph ids for existing-target setup tools', () => {
+    for (const name of ['dkg_subscribe', 'dkg_sub_graph_create']) {
+      const contextGraphId = server.get(name).config.inputSchema?.contextGraphId;
+      expect(contextGraphId?.description).toContain('<curatorAddress>/<slug>');
+      expect(contextGraphId?.description).toContain('Do not pass bare slugs');
+      expect(contextGraphId?.description).toContain('dkg_list_context_graphs');
+    }
+  });
+
   it('dkg_subscribe defaults includeSharedMemory to true', async () => {
     const result = await server.call('dkg_subscribe', { contextGraphId: 'remote-cg' });
     expect(result.isError).toBeFalsy();
@@ -142,6 +152,41 @@ describe('publish tools — write+publish helper + canonical SWM finalizer', () 
   it('registers both publish tools', () => {
     expect(server.tools.has('dkg_publish')).toBe(true);
     expect(server.tools.has('dkg_shared_memory_publish')).toBe(true);
+  });
+
+  it('documents canonical context graph ids for publish tools', () => {
+    for (const name of ['dkg_publish', 'dkg_shared_memory_publish']) {
+      const contextGraphId = server.get(name).config.inputSchema?.contextGraphId;
+      expect(contextGraphId?.description).toContain('<curatorAddress>/<slug>');
+      expect(contextGraphId?.description).toContain('Do not pass bare slugs');
+      expect(contextGraphId?.description).toContain('dkg_list_context_graphs');
+    }
+  });
+
+  it('DkgClient.publishQuads does not double-prefix full context graph DIDs', async () => {
+    const bodies: Array<Record<string, any>> = [];
+    const httpClient = new DkgClient({
+      config: makeConfig(),
+      fetcher: (async (_url, init) => {
+        bodies.push(JSON.parse(String(init?.body ?? '{}')));
+        const responseBody = bodies.length === 1
+          ? { assertionUri: 'did:dkg:context-graph:0xabc/my-cg/assertion/peer/a' }
+          : { kcId: 'kc-1', kas: [], txHash: '0x1' };
+        return new Response(JSON.stringify(responseBody), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }) as typeof fetch,
+    });
+    const fullDid = 'did:dkg:context-graph:0xabc/my-cg';
+
+    await httpClient.publishQuads({
+      contextGraphId: fullDid,
+      quads: [{ subject: 'urn:s', predicate: 'urn:p', object: 'urn:o' }],
+    });
+
+    expect(bodies[0].contextGraphId).toBe(fullDid);
+    expect(bodies[0].quads[0].graph).toBe(fullDid);
   });
 
   it('dkg_publish auto-types objects: URI passes through, literal gets quoted', async () => {

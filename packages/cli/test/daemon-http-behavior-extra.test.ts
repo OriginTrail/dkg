@@ -779,8 +779,8 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
   });
 });
 
-describe('DKG-419 — lazy context graph metadata from SWM writes', () => {
-  it('POST /api/shared-memory/write makes a fresh context graph visible in /api/context-graph/list', async () => {
+describe('context graph write-target validation', () => {
+  it('POST /api/shared-memory/write rejects unknown context graphs instead of creating them lazily', async () => {
     const d = daemon!;
     const contextGraphId = 'lazy-swm-http-' + Math.random().toString(36).slice(2, 8);
     const write = await fetch(urlFor(d, '/api/shared-memory/write'), {
@@ -798,7 +798,10 @@ describe('DKG-419 — lazy context graph metadata from SWM writes', () => {
         ],
       }),
     });
-    expect(write.status).toBe(200);
+    expect(write.status).toBe(400);
+    const writeBody = await write.json() as { code?: string; error?: string };
+    expect(writeBody.code).toBe('CONTEXT_GRAPH_NOT_FOUND');
+    expect(writeBody.error).toMatch(/Unknown contextGraphId/);
 
     const list = await fetch(urlFor(d, '/api/context-graph/list'), {
       headers: authHeaders(d),
@@ -806,17 +809,7 @@ describe('DKG-419 — lazy context graph metadata from SWM writes', () => {
     expect(list.status).toBe(200);
     const body = await list.json() as { contextGraphs?: Array<Record<string, unknown>> };
     const entry = body.contextGraphs?.find((row) => row.id === contextGraphId);
-    expect(entry).toBeDefined();
-    expect(entry).toMatchObject({
-      id: contextGraphId,
-      name: contextGraphId,
-      accessPolicy: 'public',
-      subscribed: true,
-      synced: true,
-    });
-    expect(entry?.creator).toEqual(expect.stringMatching(/^did:dkg:agent:/));
-    expect(entry?.curator).toEqual(expect.stringMatching(/^did:dkg:agent:/));
-    expect(Date.parse(String(entry?.createdAt))).not.toBeNaN();
+    expect(entry).toBeUndefined();
   }, 30_000);
 });
 
