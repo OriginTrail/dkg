@@ -3155,7 +3155,12 @@ export class DKGPublisher implements Publisher {
         }
 
         let cgRewritten = 0;
-        let cgSkipped = 0;
+        // GH #748 Codex round 4: track retriable vs permanent skips
+        // separately. Marker-block decision uses retriable only — permanent
+        // misses (sentinel `"unknown"`, empty string) can never be resolved,
+        // so they must not keep the migration hot on every boot.
+        let cgRetriableSkipped = 0;
+        let cgPermanentSkipped = 0;
 
         for (const swmMetaGraph of swmMetaGraphs) {
           const sparql = `SELECT ?s ?o WHERE { GRAPH <${swmMetaGraph}> { ?s <${PROV}wasAttributedTo> ?o . FILTER(isLiteral(?o)) } }`;
@@ -3170,10 +3175,11 @@ export class DKGPublisher implements Publisher {
             const peerId = objectLit.startsWith('"')
               ? objectLit.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '')
               : objectLit;
-            // Don't migrate the literal sentinel `"unknown"` (legacy
-            // `generateKCMetadata` placeholder when peer ID wasn't supplied).
+            // Permanent skip: the literal sentinel `"unknown"` (legacy
+            // `generateKCMetadata` placeholder when peer ID wasn't supplied)
+            // or empty — neither can ever resolve to an agent address.
             if (!peerId || peerId === 'unknown') {
-              cgSkipped++;
+              cgPermanentSkipped++;
               continue;
             }
 
@@ -3186,7 +3192,8 @@ export class DKGPublisher implements Publisher {
             }
 
             if (!address) {
-              cgSkipped++;
+              // Retriable: AGENTS record might sync on a future boot.
+              cgRetriableSkipped++;
               continue;
             }
 
@@ -3226,15 +3233,17 @@ export class DKGPublisher implements Publisher {
           }
         }
 
-        // GH #748 Codex round 2: only write the per-CG marker when this pass
-        // resolved every literal-form row. If anything was skipped (peer→agent
-        // mapping missing, ambiguous, or unknown), leave the marker off so
-        // future boots retry as the AGENTS graph syncs more records. The
-        // re-run cost is bounded by the residual literal count — already-
-        // rewritten rows fail the `isLiteral(?o)` filter and contribute zero
-        // work. Use the CG `_meta` graph rather than `_shared_memory_meta`
-        // so a SWM graph wipe doesn't accidentally re-arm the migration.
-        if (cgSkipped === 0) {
+        // GH #748 Codex rounds 2 + 4: write the per-CG marker when there are
+        // no RETRIABLE misses left. Permanent placeholders (sentinel
+        // `"unknown"`) are never resolvable, so blocking the marker on them
+        // would keep the migration hot on every boot forever. Retriable
+        // misses (AGENTS record not yet synced) still suppress the marker so
+        // future boots retry. The re-run cost is bounded by the residual
+        // literal count — already-rewritten rows fail the `isLiteral(?o)`
+        // filter and contribute zero work. Use the CG `_meta` graph rather
+        // than `_shared_memory_meta` so a SWM graph wipe doesn't accidentally
+        // re-arm the migration.
+        if (cgRetriableSkipped === 0) {
           await this.store.insert([{
             subject: MIGRATION_MARKER_SUBJECT,
             predicate: `${DKG}appliedAt`,
@@ -3243,14 +3252,20 @@ export class DKGPublisher implements Publisher {
           }]);
         }
 
+        const cgSkipped = cgRetriableSkipped + cgPermanentSkipped;
         totalRewritten += cgRewritten;
         totalSkipped += cgSkipped;
         cgsProcessed++;
 
         if (cgRewritten > 0 || cgSkipped > 0) {
+          const retryNote = cgRetriableSkipped > 0
+            ? ` (${cgRetriableSkipped} will retry on next boot, ${cgPermanentSkipped} permanent placeholders)`
+            : cgPermanentSkipped > 0
+              ? ` (${cgPermanentSkipped} permanent placeholders)`
+              : '';
           this.log.info(
             ctx,
-            `CG ${cgId}: rewrote ${cgRewritten} attribution literal(s) to agent DID, left ${cgSkipped} unresolved${cgSkipped > 0 ? ' (will retry on next boot)' : ''}`,
+            `CG ${cgId}: rewrote ${cgRewritten} attribution literal(s) to agent DID, left ${cgSkipped} unresolved${retryNote}`,
           );
         }
       }

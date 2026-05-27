@@ -204,6 +204,7 @@ function processSharedMemory(wsDataQuads: Quad[], wsMetaQuads: Quad[]): SharedMe
   const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
   const DKG_WORKSPACE_OP = 'http://dkg.io/ontology/WorkspaceOperation';
   const DKG_PUBLISHED_AT = 'http://dkg.io/ontology/publishedAt';
+  const DKG_PUBLISHER_PEER_ID = 'http://dkg.io/ontology/publisherPeerId';
   const PROV_ATTRIBUTED_TO = 'http://www.w3.org/ns/prov#wasAttributedTo';
   const SKOLEM_PREFIX = '/.well-known/genid/';
 
@@ -231,11 +232,27 @@ function processSharedMemory(wsDataQuads: Quad[], wsMetaQuads: Quad[]): SharedMe
     return false;
   });
 
-  const opCreators = new Map<string, string>();
+  // GH #748 Codex round 4: prefer the dedicated `dkg:publisherPeerId` literal
+  // for ownership-cache hydration; only fall back to `prov:wasAttributedTo`
+  // when it's a literal (the legacy shape). Post-fix `wasAttributedTo`
+  // carries an agent DID URI, and caching that as the peer-ID owner here
+  // would break first-writer/upsert recognition for follow-up writes from
+  // the same peer (the check at `_shareImpl` compares against the live
+  // `publisherPeerId` of the new write).
+  const opPeerIdField = new Map<string, string>();
+  const opAttrLiteralFallback = new Map<string, string>();
   for (const q of wsMetaQuads) {
-    if (q.predicate === PROV_ATTRIBUTED_TO && validOps.has(q.subject)) {
-      opCreators.set(q.subject, q.object.startsWith('"') ? stripLiteral(q.object) : q.object);
+    if (!validOps.has(q.subject)) continue;
+    if (q.predicate === DKG_PUBLISHER_PEER_ID) {
+      opPeerIdField.set(q.subject, q.object.startsWith('"') ? stripLiteral(q.object) : q.object);
+    } else if (q.predicate === PROV_ATTRIBUTED_TO && q.object.startsWith('"')) {
+      opAttrLiteralFallback.set(q.subject, stripLiteral(q.object));
     }
+  }
+  const opCreators = new Map<string, string>();
+  for (const op of validOps) {
+    const peer = opPeerIdField.get(op) ?? opAttrLiteralFallback.get(op);
+    if (peer) opCreators.set(op, peer);
   }
 
   const entityCreators = new Map<string, string>();

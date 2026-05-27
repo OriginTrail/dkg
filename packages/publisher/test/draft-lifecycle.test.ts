@@ -362,6 +362,52 @@ describe('Working Memory Assertion Lifecycle', () => {
     expect(r4.skipped).toBe(0);
   });
 
+  it('GH #748 Codex round 4: permanent "unknown" sentinel does not block the marker', async () => {
+    // Legacy `generateKCMetadata` wrote `prov:wasAttributedTo "unknown"`
+    // when no peer ID was supplied. That value can never resolve to an
+    // agent address — it's permanent, not retriable. The migration must
+    // still write the per-CG marker so subsequent boots fast-path skip
+    // instead of re-scanning every time.
+    const AGENTS_GRAPH = 'did:dkg:context-graph:agents';
+    const CG_META = `did:dkg:context-graph:${CG_ID}/_meta`;
+    const SWM_META = `did:dkg:context-graph:${CG_ID}/_shared_memory_meta`;
+    const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+    const DKG = 'http://dkg.io/ontology/';
+    const PROV = 'http://www.w3.org/ns/prov#';
+
+    const OP = `urn:dkg:share:${CG_ID}:op-unknown-sentinel`;
+    await store.insert([
+      { subject: OP, predicate: RDF_TYPE, object: `${DKG}WorkspaceOperation`, graph: SWM_META },
+      { subject: OP, predicate: `${PROV}wasAttributedTo`, object: '"unknown"', graph: SWM_META },
+      { subject: `did:dkg:context-graph:${CG_ID}`, predicate: RDF_TYPE, object: `${DKG}ContextGraph`, graph: CG_META },
+    ]);
+
+    const r1 = await publisher.migrateSwmAttributionToAgentDid();
+    expect(r1.rewritten).toBe(0);
+    expect(r1.skipped).toBe(1); // counted as permanent skip
+
+    // Marker IS written even though one row was skipped (permanent).
+    const marker = await store.query(
+      `SELECT ?ts WHERE { GRAPH <${CG_META}> { <urn:dkg:migration:swm-attr-agent-did> <${DKG}appliedAt> ?ts } }`,
+    );
+    if (marker.type === 'bindings') expect(marker.bindings.length).toBe(1);
+
+    // The "unknown" literal is left in place — there's no real attribution
+    // to migrate to.
+    const after = await store.query(
+      `SELECT ?o WHERE { GRAPH <${SWM_META}> { <${OP}> <${PROV}wasAttributedTo> ?o } }`,
+    );
+    if (after.type === 'bindings') {
+      expect(after.bindings.length).toBe(1);
+      expect(after.bindings[0]['o']).toBe('"unknown"');
+    }
+
+    // Second pass: marker present → fast-path skip, no work.
+    const r2 = await publisher.migrateSwmAttributionToAgentDid();
+    expect(r2.rewritten).toBe(0);
+    expect(r2.skipped).toBe(0);
+  });
+
   it('GH #748 Codex round 2: ambiguous peer→agent mapping (multi-agent-per-node) leaves literal in place', async () => {
     // Two agents share the same libp2p peer ID (multi-agent-per-node, e.g.
     // via `DKGAgent.registerAgent`). The resolver must NOT pick one
