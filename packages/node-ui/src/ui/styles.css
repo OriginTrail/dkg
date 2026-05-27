@@ -5143,7 +5143,7 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
 }
 
 /* ── Project Overview Card ── */
-.v10-po { flex-shrink: 0; padding: 16px; border-bottom: 1px solid var(--border-subtle); background: var(--bg-panel); }
+.v10-po { flex-shrink: 0; padding: 16px; border-bottom: 1px solid var(--border-subtle); background: var(--bg-surface); }
 /* Identity row (S2 finalize §4.2.1) — label-pill pairs left, primer
    link right. Name + description live in the persistent
    ProjectHeaderStrip. The role glyph (◆) is applied here in CSS via
