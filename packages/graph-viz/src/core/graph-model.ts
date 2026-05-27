@@ -55,7 +55,14 @@ export class GraphModel {
   readonly edges = new Map<string, GraphEdge>();
   prefixes: PrefixMap = {};
 
-  /** All raw triples stored for reification processing and export */
+  /**
+   * Stores triples in canonical form — subject, predicate, and (when the
+   * object is a resource) object are `cleanUri`-normalised at ingress so
+   * downstream consumers and lookup paths (e.g. `removeTriples`,
+   * reification mirrors, diff exporters) all operate on a single
+   * representation. Literal objects are kept verbatim so quoting,
+   * datatypes, and language tags survive the round-trip.
+   */
   private _triples: RdfTriple[] = [];
 
   /** Set of predicate URIs treated as metadata (not rendered as edges) */
@@ -118,11 +125,17 @@ export class GraphModel {
 
   /** Add a single triple to the model */
   addTriple(triple: RdfTriple): void {
-    this._triples.push(triple);
-
     const subj = cleanUri(triple.subject);
     const pred = cleanUri(triple.predicate);
-    const obj = cleanUri(triple.object);
+    const objectIsResource = isResourceObject(triple.object);
+    const obj = objectIsResource ? cleanUri(triple.object) : triple.object;
+
+    this._triples.push({
+      ...triple,
+      subject: subj,
+      predicate: pred,
+      object: obj,
+    });
 
     const subjectNode = this.ensureNode(subj);
 
@@ -133,9 +146,6 @@ export class GraphModel {
       }
       return;
     }
-
-    // Check if object is a resource (URI/bnode) or a literal
-    const objectIsResource = isResourceObject(triple.object);
 
     if (objectIsResource) {
       // Metadata predicates → store as metadata properties, not edges
@@ -255,11 +265,12 @@ export class GraphModel {
     for (const triple of triples) {
       const subj = cleanUri(triple.subject);
       const pred = cleanUri(triple.predicate);
-      const obj = cleanUri(triple.object);
+      const objectIsResource = isResourceObject(triple.object);
+      const obj = objectIsResource ? cleanUri(triple.object) : triple.object;
 
-      // Remove from raw triples
+      // Match against the canonical form `_triples` stores (see field doc).
       const idx = this._triples.findIndex(
-        (t) => t.subject === triple.subject && t.predicate === triple.predicate && t.object === triple.object
+        (t) => t.subject === subj && t.predicate === pred && t.object === obj
       );
       if (idx !== -1) this._triples.splice(idx, 1);
 
@@ -271,8 +282,6 @@ export class GraphModel {
         }
         continue;
       }
-
-      const objectIsResource = isResourceObject(triple.object);
 
       if (objectIsResource && !this._metadataPredicates.has(pred)) {
         const eid = edgeId(subj, pred, obj);
@@ -298,7 +307,7 @@ export class GraphModel {
           const store = this._metadataPredicates.has(pred) ? node.metadata : node.properties;
           const vals = store.get(pred);
           if (vals) {
-            const filtered = vals.filter((v) => v.value !== triple.object);
+            const filtered = vals.filter((v) => v.value !== obj);
             if (filtered.length === 0) {
               store.delete(pred);
             } else {
