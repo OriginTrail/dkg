@@ -266,6 +266,9 @@ vi.mock('../src/ui/views/project/components.js', () => ({
       'Overview',
       React.createElement('button', { 'data-testid': 'open-primer', onClick: onOpenPrimer }, 'What is a Context Graph?')),
   PendingJoinRequestsSection: () => null,
+  OverviewPrimerEntry: ({ onOpenPrimer }: { onOpenPrimer: () => void }) =>
+    React.createElement('div', { 'data-testid': 'primer-footer' },
+      React.createElement('button', { 'data-testid': 'open-primer-footer', onClick: onOpenPrimer }, 'What is a Context Graph?')),
   isCuratorForOverview: () => false,
   SubGraphOverviewGrid: ({ onSelectSubGraph }: { onSelectSubGraph: (slug: string) => void }) =>
     React.createElement('button', {

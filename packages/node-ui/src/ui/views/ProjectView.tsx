@@ -29,6 +29,7 @@ import {
   SubGraphDetailView,
   ProjectOverviewCard,
   PendingJoinRequestsSection,
+  OverviewPrimerEntry,
   isCuratorForOverview,
   SubGraphOverviewGrid,
   ContextGraphQueryView,
@@ -573,6 +574,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
             emptyHint="Once knowledge starts being added and managed in this context graph, activities will show up here as a live feed."
             className="v10-overview-activity"
           />
+          <OverviewPrimerEntry onOpenPrimer={handleOpenPrimer} />
         </>
       )}
 

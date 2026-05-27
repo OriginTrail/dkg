@@ -5134,75 +5134,84 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
 
 /* ── Project Overview Card ── */
 .v10-po { flex-shrink: 0; padding: 16px; border-bottom: 1px solid var(--border-subtle); background: var(--bg-panel); }
-/* Identity row (S2 finalize §4.2.1) — name/description live in the
-   persistent ProjectHeaderStrip; this row leads with role + CG-type. */
+/* Identity row (S2 finalize §4.2.1) — label-pill pairs left, primer
+   link right. Name + description live in the persistent
+   ProjectHeaderStrip. The role glyph (◆) is applied here in CSS via
+   `data-role` so the data string stays semantic-free; same for the
+   curator marker on a participant row. */
 .v10-po-identity {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
-  margin-bottom: 14px;
+  gap: 18px;
+  margin: 0 0 14px;
+  padding: 0 0 14px;
+  border-bottom: 1px solid var(--border-subtle);
 }
-.v10-po-identity-badges {
+.v10-po-identity-pairs {
   display: inline-flex;
   flex-wrap: wrap;
+  gap: 18px;
+}
+.v10-po-identity-pair {
+  display: inline-flex;
+  align-items: center;
   gap: 8px;
 }
-.v10-po-id-badge {
+.v10-po-identity-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+.v10-po-badge {
   display: inline-flex;
-  align-items: baseline;
-  gap: 6px;
+  align-items: center;
+  gap: 4px;
   min-height: 22px;
-  padding: 3px 10px;
+  padding: 2px 10px;
   border-radius: 999px;
   border: 1px solid var(--border-default);
   background: var(--bg-surface);
   font-size: 11px;
-  font-weight: 600;
-  color: var(--text-primary);
-}
-.v10-po-id-badge-key {
-  color: var(--text-tertiary);
-  font-weight: 600;
-  text-transform: none;
-  letter-spacing: 0;
-}
-.v10-po-id-badge-val {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 4px;
-  color: var(--text-primary);
   font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: 0.01em;
 }
-.v10-po-id-badge.role.curator {
+.v10-po-badge[data-role="curator"]::before {
+  content: "◆";
+  margin-right: 4px;
+  font-weight: 700;
+  color: var(--text-success);
+}
+.v10-po-badge[data-role="curator"] {
   border-color: rgba(34, 197, 94, 0.4);
   background: rgba(34, 197, 94, 0.1);
+  color: var(--text-success);
 }
-.v10-po-id-badge.role.curator .v10-po-id-badge-val { color: var(--text-success); }
-.v10-po-id-badge.role.participant {
+.v10-po-badge[data-role="participant"] {
   border-color: rgba(59, 130, 246, 0.4);
   background: rgba(59, 130, 246, 0.1);
+  color: var(--text-primary);
 }
-.v10-po-id-badge.role.participant .v10-po-id-badge-val { color: var(--text-primary); }
-.v10-po-id-badge.role.viewer,
-.v10-po-id-badge.role.unknown {
+.v10-po-badge[data-role="viewer"],
+.v10-po-badge[data-role="unknown"] {
   color: var(--text-secondary);
 }
-.v10-po-id-badge.cg-type.public {
+.v10-po-badge[data-cg-type="public"] {
   border-color: rgba(34, 197, 94, 0.4);
   background: rgba(34, 197, 94, 0.1);
+  color: var(--text-success);
 }
-.v10-po-id-badge.cg-type.public .v10-po-id-badge-val { color: var(--text-success); }
-.v10-po-id-badge.cg-type.curated {
+.v10-po-badge[data-cg-type="curated"] {
   border-color: rgba(245, 158, 11, 0.4);
   background: rgba(245, 158, 11, 0.1);
+  color: var(--text-warning);
 }
-.v10-po-id-badge.cg-type.curated .v10-po-id-badge-val { color: var(--text-warning); }
-.v10-po-id-badge.cg-type.unknown { color: var(--text-secondary); }
-.v10-po-role-glyph {
-  font-size: 11px;
-  line-height: 1;
+.v10-po-badge[data-cg-type="unknown"] {
+  color: var(--text-secondary);
 }
 .v10-po-identity-primer {
   flex: 0 0 auto;
@@ -5237,24 +5246,39 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
   padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 600;
   background: var(--bg-surface); border: 1px solid var(--border-default); color: var(--text-primary);
 }
-.v10-po-participant.self {
+/* Glyph is rendered in CSS so the data string the test reads
+   stays unambiguous (just the suffix). */
+.v10-po-participant::before {
+  content: "◯";
+  font-size: 12px;
+  line-height: 1;
+  color: var(--text-secondary);
+}
+.v10-po-participant.is-self {
+  font-weight: 700;
   border-color: rgba(59, 130, 246, 0.6);
   background: rgba(59, 130, 246, 0.1);
-  font-weight: 700;
 }
-.v10-po-participant.curator {
+.v10-po-participant.is-self::before {
+  content: "◆";
+  color: var(--text-primary);
+}
+/* A non-self curator also carries the ◆ glyph (per ux-lead lock),
+   but without the bold/self-tint. */
+.v10-po-participant.is-curator:not(.is-self)::before {
+  content: "◆";
+  color: var(--text-success);
+}
+.v10-po-participant.is-curator:not(.is-self) {
   border-color: rgba(34, 197, 94, 0.4);
 }
-.v10-po-participant.self.curator {
+.v10-po-participant.is-self.is-curator {
   border-color: rgba(34, 197, 94, 0.6);
   background: rgba(34, 197, 94, 0.12);
 }
-.v10-po-participant-glyph {
-  font-size: 12px;
-  color: var(--text-secondary);
+.v10-po-participant.is-self.is-curator::before {
+  color: var(--text-success);
 }
-.v10-po-participant.self .v10-po-participant-glyph { color: var(--text-primary); }
-.v10-po-participant.curator .v10-po-participant-glyph { color: var(--text-success); }
 .v10-po-participant-name {
   white-space: nowrap;
 }
@@ -5427,6 +5451,47 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
   text-align: right;
 }
 
+/* Primer footer (§4.2.1) — quiet last-row escape hatch. No card
+   chrome; sits flush in the Overview's panel padding. */
+.v10-po-primer-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  padding: 14px 16px;
+  margin-top: 12px;
+  border-top: 1px solid var(--border-subtle);
+  color: var(--text-tertiary);
+}
+.v10-po-primer-footer-lede {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+.v10-po-primer-footer-arrow {
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.v10-po-primer-footer-link {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: var(--text-link);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 650;
+}
+.v10-po-primer-footer-link:hover { text-decoration: underline; }
+.v10-po-primer-footer-sub {
+  flex: 1 0 100%;
+  margin-top: 2px;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-tertiary);
+}
+
 @media (max-width: 1500px) {
   .v10-layer-switch-label-full { display: none; }
   .v10-layer-switch-label-compact { display: inline; }
@@ -5476,7 +5541,7 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
     flex-direction: column;
     align-items: stretch;
   }
-  .v10-po-identity-badges {
+  .v10-po-identity-pairs {
     flex-wrap: wrap;
   }
   .v10-po-identity-primer {
@@ -5484,6 +5549,10 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
   }
   .v10-po-pipeline-steps {
     grid-template-columns: 1fr;
+  }
+  .v10-po-primer-footer {
+    flex-direction: row;
+    flex-wrap: wrap;
   }
 }
 

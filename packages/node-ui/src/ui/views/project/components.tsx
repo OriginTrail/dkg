@@ -779,33 +779,33 @@ export function ProjectOverviewCard({
 
   return (
     <div className="v10-po">
-      {/* Identity row — name/description live in the persistent
-          ProjectHeaderStrip above; this row leads with role + CG-type
-          (§4.2.1). */}
+      {/* Identity row (§4.2.1 — locked spec) — label-pill pairs on
+          the left, inline primer link on the right. Name + description
+          live in the persistent `ProjectHeaderStrip`; the role glyph
+          (◆) is applied in CSS via `data-role`/`data-tone`, never in
+          the data string itself. */}
       <div className="v10-po-identity">
-        <div className="v10-po-identity-badges">
-          <span
-            className={`v10-po-id-badge cg-type ${access.tone}`}
-            title={access.title}
-          >
-            <span className="v10-po-id-badge-key">Context Graph:</span>
-            {' '}
-            <span className="v10-po-id-badge-val">{access.label}</span>
-          </span>
-          <span
-            className={`v10-po-id-badge role ${role.tone}`}
-            title={role.title}
-          >
-            <span className="v10-po-id-badge-key">Your role:</span>
-            {' '}
-            <span className="v10-po-id-badge-val">
-              <span className="v10-po-role-glyph" aria-hidden="true">
-                {role.tone === 'curator' ? '◆' : role.tone === 'participant' ? '◯' : '○'}
-              </span>
-              {' '}
+        <div className="v10-po-identity-pairs">
+          <div className="v10-po-identity-pair">
+            <span className="v10-po-identity-label">Your role:</span>
+            <span
+              className="v10-po-badge"
+              data-role={role.tone}
+              title={role.title}
+            >
               {role.label}
             </span>
-          </span>
+          </div>
+          <div className="v10-po-identity-pair">
+            <span className="v10-po-identity-label">Context Graph:</span>
+            <span
+              className="v10-po-badge"
+              data-cg-type={access.tone}
+              title={access.title}
+            >
+              {access.label}
+            </span>
+          </div>
         </div>
         {onOpenPrimer && (
           <button
@@ -871,10 +871,12 @@ export function ProjectOverviewCard({
           ))}
         </div>
       </div>
-      {/* Participant agents — §4.2.1: renamed from
-          "Allowlisted/Known participants"; marks the current user's
-          rows with `(you)` / `(you · curator)` and others' curator
-          rows with `· curator`. */}
+      {/* Participant agents (§4.2.1) — uniform "Participant agents"
+          heading regardless of access policy. The current user's
+          row carries the `· you` suffix; the curator (whether the
+          current user or someone else) gets `· curator`. Glyphs are
+          applied in CSS via `.is-self` / `.is-curator` — never in the
+          data string. */}
       <div className="v10-po-people">
         <div className="v10-po-section-title">Participant agents</div>
         {participants.length === 0
@@ -891,17 +893,15 @@ export function ProjectOverviewCard({
                 const isSelf = selfIds.has(canonical);
                 const isCurator = !!curatorCanonical && canonical === curatorCanonical;
                 let suffix = '';
-                if (isSelf && isCurator) suffix = ' (you · curator)';
-                else if (isSelf) suffix = ' (you)';
+                if (isSelf && isCurator) suffix = ' · you · curator';
+                else if (isSelf) suffix = ' · you';
                 else if (isCurator) suffix = ' · curator';
-                const glyph = isSelf ? '◆' : '◯';
                 return (
                   <span
                     key={addr}
-                    className={`v10-po-participant${isSelf ? ' self' : ''}${isCurator ? ' curator' : ''}`}
+                    className={`v10-po-participant${isSelf ? ' is-self' : ''}${isCurator ? ' is-curator' : ''}`}
                     title={addr}
                   >
-                    <span className="v10-po-participant-glyph" aria-hidden="true">{glyph}</span>
                     <span className="v10-po-participant-name">
                       {addr.slice(0, 6)}…{addr.slice(-4)}{suffix}
                     </span>
@@ -1018,6 +1018,34 @@ export function PendingJoinRequestsSection({
                 ))}
               </div>}
     </section>
+  );
+}
+
+// ─── Overview primer footer (§4.2.1 — last row before the bottom of
+//     the Overview, deliberately quieter than the identity-row primer
+//     link so first-time users still have a visible escape hatch
+//     even if they scrolled past the identity row).
+//
+// "New here?  →  What is a Context Graph?" plus a one-line sub-copy.
+// Re-uses the same `onOpenPrimer` handler the identity-row link
+// fires, so wiring is one call site in ProjectView. ────────────
+
+export function OverviewPrimerEntry({ onOpenPrimer }: { onOpenPrimer: () => void }) {
+  return (
+    <div className="v10-po-primer-footer">
+      <span className="v10-po-primer-footer-lede">New here?</span>
+      <span className="v10-po-primer-footer-arrow" aria-hidden="true">→</span>
+      <button
+        type="button"
+        className="v10-po-primer-footer-link"
+        onClick={onOpenPrimer}
+      >
+        What is a Context Graph?
+      </button>
+      <div className="v10-po-primer-footer-sub">
+        A short primer on context graphs, the WM → SWM → VM pipeline, and how participant agents collaborate.
+      </div>
+    </div>
   );
 }
 

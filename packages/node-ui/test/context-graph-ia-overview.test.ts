@@ -3,7 +3,11 @@
 import React, { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { LayerSwitcher, ProjectOverviewCard } from '../src/ui/views/project/components.js';
+import {
+  LayerSwitcher,
+  ProjectOverviewCard,
+  OverviewPrimerEntry,
+} from '../src/ui/views/project/components.js';
 import { ContextGraphPrimerView } from '../src/ui/views/ContextGraphPrimerView.js';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -137,14 +141,21 @@ describe('Context Graph IA and Overview', () => {
       }),
     );
 
-    // Labelled-prefix identity row (S2 finalize §4.2.1):
-    // "Context Graph: Curated · Your role: ◆ Curator" — naked
-    // pills are gone.
-    const badges = Array.from(container.querySelectorAll('.v10-po-id-badge'));
-    expect(badges.map(b => b.textContent?.replace(/\s+/g, ' ').trim())).toEqual([
-      'Context Graph: Curated',
-      'Your role: ◆ Curator',
-    ]);
+    // Identity row (S2 finalize §4.2.1) — label-pill pairs in
+    // locked order: role first, then CG-type. The role glyph (◆) is
+    // applied in CSS via `data-role`, NOT in the data string.
+    const pairs = Array.from(container.querySelectorAll('.v10-po-identity-pair'));
+    expect(pairs).toHaveLength(2);
+    const roleLabel = pairs[0].querySelector('.v10-po-identity-label');
+    const roleBadge = pairs[0].querySelector('.v10-po-badge');
+    expect(roleLabel?.textContent?.trim()).toBe('Your role:');
+    expect(roleBadge?.textContent?.trim()).toBe('Curator');
+    expect(roleBadge?.getAttribute('data-role')).toBe('curator');
+    const typeLabel = pairs[1].querySelector('.v10-po-identity-label');
+    const typeBadge = pairs[1].querySelector('.v10-po-badge');
+    expect(typeLabel?.textContent?.trim()).toBe('Context Graph:');
+    expect(typeBadge?.textContent?.trim()).toBe('Curated');
+    expect(typeBadge?.getAttribute('data-cg-type')).toBe('curated');
     expect(container.textContent).toContain('Agents with access');
 
     // At a glance — 4 stats (§4.2.1): Entities · Triples · Subgraphs
@@ -170,21 +181,23 @@ describe('Context Graph IA and Overview', () => {
     }
     expect(onSwitchLayer.mock.calls.map(call => call[0])).toEqual(['wm', 'swm', 'vm']);
 
-    // Participant agents section — renamed from "Allowlisted/Known
-    // participants" (§4.2.1). The current agent's matching row is
-    // marked with `(you · curator)` and a filled diamond glyph.
+    // Participant agents section (§4.2.1) — heading uniform across
+    // access policy. Self row carries ` · you · curator` suffix +
+    // `.is-self.is-curator` for the CSS-driven ◆ glyph; the other
+    // row stays bare with the default ◯ glyph supplied by CSS.
     expect(container.textContent).toContain('Participant agents');
     const participantRows = Array.from(container.querySelectorAll('.v10-po-participant'));
     expect(participantRows).toHaveLength(2);
     const self = participantRows[0];
-    expect(self.classList.contains('self')).toBe(true);
-    expect(self.classList.contains('curator')).toBe(true);
-    expect(self.textContent).toContain('(you · curator)');
-    expect(self.querySelector('.v10-po-participant-glyph')?.textContent).toBe('◆');
+    expect(self.classList.contains('is-self')).toBe(true);
+    expect(self.classList.contains('is-curator')).toBe(true);
+    expect(self.textContent).toContain(' · you · curator');
+    expect(self.textContent).not.toContain('(you');
     const other = participantRows[1];
-    expect(other.classList.contains('self')).toBe(false);
-    expect(other.classList.contains('curator')).toBe(false);
-    expect(other.querySelector('.v10-po-participant-glyph')?.textContent).toBe('◯');
+    expect(other.classList.contains('is-self')).toBe(false);
+    expect(other.classList.contains('is-curator')).toBe(false);
+    expect(other.textContent).not.toContain(' · you');
+    expect(other.textContent).not.toContain(' · curator');
 
     const primer = container.querySelector<HTMLButtonElement>('.v10-po-identity-primer');
     expect(primer).toBeTruthy();
@@ -192,6 +205,42 @@ describe('Context Graph IA and Overview', () => {
       primer!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     expect(onOpenPrimer).toHaveBeenCalledTimes(1);
+
+    await act(async () => root.unmount());
+  });
+
+  it('marks a non-self curator with the curator suffix only — no `you` leakage', async () => {
+    const curatorAddress = '0xCAFE000000000000000000000000000000000001';
+    const otherAddress = '0xCAFE000000000000000000000000000000000002';
+    const { container, root } = await render(
+      React.createElement(ProjectOverviewCard, {
+        cg: {
+          id: 'cg-other-curator',
+          name: 'Other Curator Graph',
+          accessPolicy: 'private',
+          curator: `did:dkg:agent:${curatorAddress}`,
+          callerInvolved: true,
+        },
+        memory: baseMemory,
+        participants: [curatorAddress, otherAddress],
+        currentAgent: { agentDid: `did:dkg:agent:${otherAddress}`, agentAddress: otherAddress },
+      }),
+    );
+
+    const rows = Array.from(container.querySelectorAll('.v10-po-participant'));
+    expect(rows).toHaveLength(2);
+
+    const curatorRow = rows[0];
+    expect(curatorRow.classList.contains('is-curator')).toBe(true);
+    expect(curatorRow.classList.contains('is-self')).toBe(false);
+    expect(curatorRow.textContent).toContain(' · curator');
+    expect(curatorRow.textContent).not.toContain(' · you');
+
+    const selfRow = rows[1];
+    expect(selfRow.classList.contains('is-self')).toBe(true);
+    expect(selfRow.classList.contains('is-curator')).toBe(false);
+    expect(selfRow.textContent).toContain(' · you');
+    expect(selfRow.textContent).not.toContain(' · curator');
 
     await act(async () => root.unmount());
   });
@@ -498,6 +547,28 @@ describe('Context Graph IA and Overview', () => {
     expect(container.textContent).toContain('Agents with access');
     expect(container.textContent).toContain('Unavailable');
     expect(container.textContent).not.toContain('Allowlisted agents');
+
+    await act(async () => root.unmount());
+  });
+
+  it('renders the OverviewPrimerEntry footer with locked copy + clickable primer link', async () => {
+    const onOpenPrimer = vi.fn();
+    const { container, root } = await render(
+      React.createElement(OverviewPrimerEntry, { onOpenPrimer }),
+    );
+
+    const footer = container.querySelector('.v10-po-primer-footer');
+    expect(footer).toBeTruthy();
+    expect(footer!.textContent).toContain('New here?');
+    expect(footer!.textContent).toContain('What is a Context Graph?');
+    expect(footer!.textContent).toContain('A short primer on context graphs, the WM → SWM → VM pipeline');
+
+    const link = container.querySelector<HTMLButtonElement>('.v10-po-primer-footer-link');
+    expect(link).toBeTruthy();
+    await act(async () => {
+      link!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(onOpenPrimer).toHaveBeenCalledTimes(1);
 
     await act(async () => root.unmount());
   });
