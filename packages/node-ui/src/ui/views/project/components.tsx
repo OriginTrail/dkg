@@ -1004,18 +1004,21 @@ export function ProjectOverviewCard({
             }
           }
           if (rows.length === 0) {
-            // Codex review bug E — `/participants` returns
-            // `allowedAgents` which is empty on a fully public CG.
-            // Saying "No participant agents recorded yet." in that
-            // case is misleading because access is open. Public CGs
-            // with no listed roster show the open-access copy; only
-            // curated CGs get the literal "no participants" copy.
-            const emptyCopy = participantsStatus === 'loading'
-              ? 'Loading participant agents...'
-              : participantsStatus === 'error'
-                ? 'Participant list unavailable.'
-                : isPublicAccess
-                  ? 'This Context Graph is public — anyone can subscribe.'
+            // Codex review bug E + issue S — access policy is
+            // local-only state from `cg.accessPolicy` and is known
+            // regardless of whether `/participants` succeeded.
+            // Issue S — re-ordered so `isPublicAccess` takes
+            // precedence over the loading/error branches: a public
+            // CG whose `/participants` errored should still tell
+            // the user access is open, not parrot the unavailable
+            // copy. Only curated CGs fall through to the loading /
+            // error / "no participants" sequence.
+            const emptyCopy = isPublicAccess
+              ? 'This Context Graph is public — anyone can subscribe.'
+              : participantsStatus === 'loading'
+                ? 'Loading participant agents...'
+                : participantsStatus === 'error'
+                  ? 'Participant list unavailable.'
                   : 'No participant agents recorded yet.';
             return <div className="v10-po-people-empty">{emptyCopy}</div>;
           }

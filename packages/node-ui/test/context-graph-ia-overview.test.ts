@@ -523,6 +523,65 @@ describe('Context Graph IA and Overview', () => {
     await act(async () => root.unmount());
   });
 
+  it('renders the public-access copy on a public CG even when participantsStatus is "error" (Codex issue S)', async () => {
+    // Access policy is local-only state from `cg.accessPolicy`;
+    // it's known regardless of whether `/participants` succeeded.
+    // The open-access copy must take precedence over the "list
+    // unavailable" copy on a public CG.
+    const { container, root } = await render(
+      React.createElement(ProjectOverviewCard, {
+        cg: { id: 'cg-public-errored', name: 'Open Errored', accessPolicy: 'public' },
+        memory: baseMemory,
+        participants: [],
+        participantsStatus: 'error',
+        currentAgent: { agentDid: 'did:dkg:agent:0xdef' },
+      }),
+    );
+
+    expect(container.textContent).toContain('This Context Graph is public — anyone can subscribe.');
+    expect(container.textContent).not.toContain('Participant list unavailable.');
+    expect(container.textContent).not.toContain('Loading participant agents');
+    expect(container.querySelectorAll('.v10-po-participant')).toHaveLength(0);
+
+    await act(async () => root.unmount());
+  });
+
+  it('renders the public-access copy on a public CG even when participantsStatus is "loading" (Codex issue S)', async () => {
+    const { container, root } = await render(
+      React.createElement(ProjectOverviewCard, {
+        cg: { id: 'cg-public-loading', name: 'Open Loading', accessPolicy: 'public' },
+        memory: baseMemory,
+        participants: [],
+        participantsStatus: 'loading',
+        currentAgent: { agentDid: 'did:dkg:agent:0xdef' },
+      }),
+    );
+
+    expect(container.textContent).toContain('This Context Graph is public — anyone can subscribe.');
+    expect(container.textContent).not.toContain('Loading participant agents');
+    expect(container.textContent).not.toContain('Participant list unavailable.');
+
+    await act(async () => root.unmount());
+  });
+
+  it('renders the loading copy on a curated CG when participantsStatus is "loading" (Codex issue S — curated path unchanged)', async () => {
+    const { container, root } = await render(
+      React.createElement(ProjectOverviewCard, {
+        cg: { id: 'cg-curated-loading', name: 'Curated Loading', accessPolicy: 'private' },
+        memory: baseMemory,
+        participants: [],
+        participantsStatus: 'loading',
+        currentAgent: { agentDid: 'did:dkg:agent:0xdef' },
+      }),
+    );
+
+    expect(container.textContent).toContain('Loading participant agents');
+    expect(container.textContent).not.toContain('public — anyone can subscribe');
+    expect(container.textContent).not.toContain('Participant list unavailable.');
+
+    await act(async () => root.unmount());
+  });
+
   it('still shows the curator row on a public CG that has a curator + empty allowedAgents (Codex bug E + A together)', async () => {
     const curatorAddress = '0xCAFE0000000000000000000000000000000000E5';
     const { container, root } = await render(
