@@ -5246,36 +5246,35 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
   padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 600;
   background: var(--bg-surface); border: 1px solid var(--border-default); color: var(--text-primary);
 }
-/* Glyph is rendered in CSS so the data string the test reads
-   stays unambiguous (just the suffix). */
+/* Glyph is rendered in CSS so the data string the test reads stays
+   unambiguous (just the suffix). Default participants get the
+   hollow ◯ glyph in `--text-secondary`. */
 .v10-po-participant::before {
-  content: "◯";
+  content: "◯ ";
   font-size: 12px;
   line-height: 1;
   color: var(--text-secondary);
 }
-.v10-po-participant.is-self {
-  font-weight: 700;
-  border-color: rgba(59, 130, 246, 0.6);
-  background: rgba(59, 130, 246, 0.1);
-}
+/* §4.2.1 Delta 1 (locked) — `.is-self` carries TWO signals only:
+   weight (you-ness, paired with the ` · you` suffix in the data
+   string) + the filled ◆ glyph in `--text-info`. No border or
+   background override — three signals for one fact would be the
+   M4 VM-hero regression pattern. */
+.v10-po-participant.is-self { font-weight: 700; }
 .v10-po-participant.is-self::before {
-  content: "◆";
-  color: var(--text-primary);
+  content: "◆ ";
+  color: var(--text-info);
 }
-/* A non-self curator also carries the ◆ glyph (per ux-lead lock),
-   but without the bold/self-tint. */
+/* A non-self curator also carries the filled ◆ glyph (canonical
+   role glyph), tinted with the verified-trust color. No bold, no
+   chip-level tint — the glyph + ` · curator` suffix carry the
+   meaning. */
 .v10-po-participant.is-curator:not(.is-self)::before {
-  content: "◆";
+  content: "◆ ";
   color: var(--text-success);
 }
-.v10-po-participant.is-curator:not(.is-self) {
-  border-color: rgba(34, 197, 94, 0.4);
-}
-.v10-po-participant.is-self.is-curator {
-  border-color: rgba(34, 197, 94, 0.6);
-  background: rgba(34, 197, 94, 0.12);
-}
+/* When the current user IS the curator, success color wins over
+   info so curator role reads first. The .is-self bold is retained. */
 .v10-po-participant.is-self.is-curator::before {
   color: var(--text-success);
 }

@@ -608,7 +608,7 @@ function overviewAccessAgentStat(
       id: 'participants',
       value: 'Open',
       label: 'Public access',
-      hint: 'Public Context Graphs do not have an authoritative allowlist count.',
+      tooltip: 'Public Context Graphs do not have an authoritative allowlist count.',
     };
   }
   if (participantsStatus === 'loading') {
@@ -616,7 +616,7 @@ function overviewAccessAgentStat(
       id: 'participants',
       value: '...',
       label: 'Agents with access',
-      hint: 'Participant list is loading.',
+      tooltip: 'Participant list is loading.',
     };
   }
   if (participantsStatus === 'error') {
@@ -624,7 +624,7 @@ function overviewAccessAgentStat(
       id: 'participants',
       value: 'Unavailable',
       label: 'Agents with access',
-      hint: 'Participant list unavailable; access count is unknown.',
+      tooltip: 'Participant list unavailable; access count is unknown.',
     };
   }
 
@@ -641,7 +641,7 @@ function overviewAccessAgentStat(
     id: 'participants',
     value: agents.size.toLocaleString(),
     label: 'Agents with access',
-    hint: 'Includes the curator plus allowlisted participants reported by the node.',
+    tooltip: 'Includes the curator plus allowlisted participants reported by the node.',
   };
 }
 
@@ -818,12 +818,15 @@ export function ProjectOverviewCard({
           </button>
         )}
       </div>
+      {/* §4.2.1 Delta 2 (locked) — M6 layer-availability status copy
+          renders as a `title` tooltip on the Entities cell, not as
+          an inline `hint:`, to keep the 4-card grid clean. */}
       <StatStrip
         className="v10-po-stat-strip"
         items={[
-          { id: 'entities', value: totalEntitiesValue, label: 'Entities', hint: statusHint },
-          { id: 'triples', value: triplesValue, label: 'Triples', hint: 'Canonical triple total across all layers.' },
-          { id: 'subgraphs', value: subGraphsValue, label: 'Subgraphs', hint: 'Topical partitions inside this Context Graph.' },
+          { id: 'entities', value: totalEntitiesValue, label: 'Entities', tooltip: statusHint },
+          { id: 'triples', value: triplesValue, label: 'Triples', tooltip: 'Canonical triple total across all layers.' },
+          { id: 'subgraphs', value: subGraphsValue, label: 'Subgraphs', tooltip: 'Topical partitions inside this Context Graph.' },
           accessAgentStat,
         ]}
       />

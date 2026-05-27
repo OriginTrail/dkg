@@ -262,6 +262,37 @@ describe('Context Graph IA and Overview', () => {
     await act(async () => root.unmount());
   });
 
+  it('renders At a glance status hints as title tooltips, not inline (§4.2.1 Delta 2)', async () => {
+    const { container, root } = await render(
+      React.createElement(ProjectOverviewCard, {
+        cg: { id: 'cg-tooltip', name: 'Tooltip', accessPolicy: 'public', callerInvolved: true },
+        memory: baseMemory,
+        subGraphCount: 2,
+        participants: [],
+        currentAgent: { agentDid: 'did:dkg:agent:0xdef' },
+      }),
+    );
+
+    const cells = Array.from(container.querySelectorAll<HTMLElement>('.v10-stat-strip-cell'));
+    expect(cells).toHaveLength(4);
+
+    // Every cell carries a non-empty `title` attribute. None of the
+    // hint strings should appear in the rendered textContent — they
+    // belong to the tooltip surface only.
+    for (const cell of cells) {
+      expect(cell.title?.trim().length ?? 0).toBeGreaterThan(0);
+    }
+    expect(container.textContent).not.toContain('Topical partitions inside this Context Graph.');
+    expect(container.textContent).not.toContain('Canonical triple total across all layers.');
+    expect(container.textContent).not.toContain('Canonical current-layer entity counts.');
+
+    // No inline `v10-stat-strip-hint` text leak (the prop is unused
+    // by the Overview).
+    expect(container.querySelectorAll('.v10-stat-strip-hint')).toHaveLength(0);
+
+    await act(async () => root.unmount());
+  });
+
   it('renders an unknown subgraph count while subGraphCount is loading', async () => {
     const { container, root } = await render(
       React.createElement(ProjectOverviewCard, {
@@ -489,9 +520,14 @@ describe('Context Graph IA and Overview', () => {
       }),
     );
 
+    // §4.2.1 Delta 2 — the M6 status sentence now lives on the
+    // Entities cell as a `title` tooltip, not inline text. Read it
+    // from the cell's attribute, not from container.textContent.
     expect(container.textContent).toContain('Unavailable');
-    expect(container.textContent).toContain('Live memory counts are unavailable.');
-    expect(container.textContent).not.toContain('Canonical current-layer entity counts.');
+    const entitiesCell = Array.from(container.querySelectorAll('.v10-stat-strip-cell'))
+      .find(cell => cell.querySelector('.v10-stat-strip-label')?.textContent?.trim() === 'Entities');
+    expect(entitiesCell?.getAttribute('title')).toBe('Live memory counts are unavailable.');
+    expect(entitiesCell?.getAttribute('title')).not.toBe('Canonical current-layer entity counts.');
 
     await act(async () => root.unmount());
   });
@@ -518,7 +554,13 @@ describe('Context Graph IA and Overview', () => {
       }),
     );
 
-    expect(container.textContent).toContain('One or more layer counts are currently a lower bound.');
+    // §4.2.1 Delta 2 — the partial-bound hint now lives on the
+    // Entities cell as a `title` tooltip; the pipeline rendering
+    // assertions are unchanged.
+    const entitiesCell = Array.from(container.querySelectorAll('.v10-stat-strip-cell'))
+      .find(cell => cell.querySelector('.v10-stat-strip-label')?.textContent?.trim() === 'Entities');
+    expect(entitiesCell?.getAttribute('title'))
+      .toBe('One or more layer counts are currently a lower bound.');
     expect(container.querySelector('.v10-po-pipeline-step.vm .v10-po-pipeline-step-count')?.textContent)
       .toBe('Unavailable');
     expect(container.querySelectorAll('.v10-po-pipeline-seg')).toHaveLength(0);

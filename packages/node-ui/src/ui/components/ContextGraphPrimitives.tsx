@@ -86,6 +86,13 @@ export type StatStripItem = {
   label: ReactNode;
   value: ReactNode;
   hint?: ReactNode;
+  /** Advisory text rendered as a native `title` tooltip on the
+   *  cell. Use this for contextual/status copy that would clutter
+   *  the grid if rendered inline (e.g. M6 layer-availability hints
+   *  on the Overview Entities cell). `hint` and `tooltip` are
+   *  independent — `hint` still renders inline; `tooltip` only
+   *  appears on hover. */
+  tooltip?: string;
 };
 
 export function StatStrip({
@@ -110,7 +117,11 @@ export function StatStrip({
       style={style}
     >
       {items.map((item, index) => (
-        <div key={item.id ?? index} className="v10-stat-strip-cell">
+        <div
+          key={item.id ?? index}
+          className="v10-stat-strip-cell"
+          title={item.tooltip}
+        >
           <span className="v10-stat-strip-label">{item.label}</span>
           <span className="v10-stat-strip-value">{item.value}</span>
           {item.hint && <span className="v10-stat-strip-hint">{item.hint}</span>}
