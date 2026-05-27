@@ -813,34 +813,7 @@ export class EVMChainAdapter implements ChainAdapter {
     } catch {
       // V8 KnowledgeCollection not deployed — legacy publish surface unavailable.
     }
-    this.contracts.knowledgeCollectionStorage = await this.resolveAssetStorage('KnowledgeCollectionStorage');
-
-    // OT-RFC-40 §5.2 — bind this adapter to the storage tag of the
-    // `KnowledgeCollectionStorage` instance it is minting into. The
-    // tag is the suffix of the storage's `uri(0)` past the `did:dkg`
-    // prefix; empty for the canonical V10 default storage. Failure to
-    // read or parse the uriBase falls back to "" (the legacy 3-segment
-    // UAL form), which is the most-conservative behaviour: it preserves
-    // every bit of UAL output produced before this RFC.
-    try {
-      const uriBase: string = await this.contracts.knowledgeCollectionStorage.uri(0);
-      const tag = deriveStorageTag(uriBase);
-      if (tag === null) {
-        console.warn(
-          `[EVMChainAdapter] KC storage at ${await this.contracts.knowledgeCollectionStorage.getAddress()} ` +
-          `returned malformed uriBase "${uriBase}"; falling back to default storage tag (3-segment UALs)`,
-        );
-        this.mintingStorageTag = '';
-      } else {
-        this.mintingStorageTag = tag;
-      }
-    } catch (err) {
-      console.warn(
-        `[EVMChainAdapter] failed to read uri(0) from KC storage: ${err instanceof Error ? err.message : String(err)}; ` +
-        `falling back to default storage tag (3-segment UALs)`,
-      );
-      this.mintingStorageTag = '';
-    }
+    await this.refreshMintingKCStorage();
 
     // OT-RFC-40 §5.3 — build the cross-storage registry so consumers
     // (random-sampling prover, async-lift verifier, replication ack
@@ -2946,21 +2919,29 @@ export class EVMChainAdapter implements ChainAdapter {
         this.invalidateRandomSamplingPair();
       }
     };
-    // OT-RFC-40 §5.3 — refresh the KC storage registry on every
-    // `NewAssetStorage` / `AssetStorageChanged` event regardless of
-    // name (the registry's filter rule already restricts to KC-class
-    // names). Listening unconditionally avoids races where a future
-    // version naming convention is added but we forget to update this
-    // allowlist; the registry's filter is the single source of truth.
+    // OT-RFC-40 §5.3 — refresh the KC storage registry AND the
+    // adapter's own `KnowledgeCollectionStorage` binding on every
+    // `NewAssetStorage` / `AssetStorageChanged` event. Listening
+    // unconditionally (rather than gating on a known name allowlist)
+    // avoids races where a future version naming convention is added
+    // but we forget to update the allowlist; the registry's filter is
+    // the single source of truth for what counts as a KC-class
+    // storage.
     //
-    // Codex review on PR #718 (Comment 4): if the initial
-    // `buildKCStorageRegistry()` call in `init()` failed (e.g.
-    // transient RPC error during boot), `kcStorageRegistry` stays
-    // `undefined` and a plain refresh would silently no-op forever.
-    // Use the first asset-storage event as a recovery trigger: if
-    // there is no registry yet, build one from scratch; otherwise
-    // refresh the existing instance. Either path picks up the new
-    // storage immediately.
+    // Codex review on PR #718 (Comment 4 round 1): if the initial
+    // `buildKCStorageRegistry()` call in `init()` failed, the registry
+    // stays `undefined` and a plain refresh would silently no-op
+    // forever. Use the first asset-storage event as a recovery
+    // trigger: build from scratch if absent, otherwise refresh.
+    //
+    // Codex review on PR #718 (Comment 2 round 3): the cached
+    // `this.contracts.knowledgeCollectionStorage` handle and the
+    // `mintingStorageTag` derived from its `uri(0)` are themselves
+    // bound at init and would otherwise survive a Hub-mediated
+    // KC-storage rotation. Re-resolve them here so a rotation
+    // immediately propagates to mint UAL construction and to the
+    // ad-hoc reads that still go through the `knowledgeCollectionStorage`
+    // contract handle.
     const onAssetStorageChange = (): void => {
       if (this.kcStorageRegistry === undefined) {
         void this.buildKCStorageRegistry()
@@ -2970,13 +2951,16 @@ export class EVMChainAdapter implements ChainAdapter {
           .catch((err) => console.warn(
             `[EVMChainAdapter] KC storage registry rebuild after Hub event failed: ${err instanceof Error ? err.message : String(err)}`,
           ));
-        return;
+      } else {
+        void this.kcStorageRegistry
+          .refresh()
+          .catch((err) => console.warn(
+            `[EVMChainAdapter] KC storage registry refresh failed after Hub event: ${err instanceof Error ? err.message : String(err)}`,
+          ));
       }
-      void this.kcStorageRegistry
-        .refresh()
-        .catch((err) => console.warn(
-          `[EVMChainAdapter] KC storage registry refresh failed after Hub event: ${err instanceof Error ? err.message : String(err)}`,
-        ));
+      void this.refreshMintingKCStorage().catch((err) => console.warn(
+        `[EVMChainAdapter] minting KC storage refresh after Hub event failed: ${err instanceof Error ? err.message : String(err)}`,
+      ));
     };
     try {
       await this.contracts.hub.on('ContractChanged', onChange);
@@ -2986,6 +2970,54 @@ export class EVMChainAdapter implements ChainAdapter {
       this.hubRotationListenerStarted = true;
     } catch {
       /* provider doesn't support filter subscriptions — TTL refresh is the fallback */
+    }
+  }
+
+  /**
+   * OT-RFC-40 §5.2 + Codex review on PR #718 (Comment 2 of round 3) —
+   * (re-)bind this adapter to the active `KnowledgeCollectionStorage`
+   * instance and recompute `mintingStorageTag` from its `uri(0)`. Run
+   * once at `init()` and again whenever Hub fires a
+   * `NewAssetStorage`/`AssetStorageChanged` event so a runtime KC
+   * storage rotation doesn't leave the adapter parsing/minting
+   * against the stale contract.
+   *
+   * The tag is the suffix of `uri(0)` past the `did:dkg` prefix;
+   * empty for the canonical V10 default storage. Failure to read or
+   * parse the uriBase falls back to "" (the legacy 3-segment UAL
+   * form), which is the most-conservative behaviour: it preserves
+   * every bit of UAL output produced before this RFC.
+   */
+  private async refreshMintingKCStorage(): Promise<void> {
+    let storage: Contract;
+    try {
+      storage = await this.resolveAssetStorage('KnowledgeCollectionStorage');
+    } catch (err) {
+      console.warn(
+        `[EVMChainAdapter] failed to resolve KnowledgeCollectionStorage from Hub: ${err instanceof Error ? err.message : String(err)}; ` +
+        `keeping previously-bound storage handle (mintingStorageTag="${this.mintingStorageTag}")`,
+      );
+      return;
+    }
+    this.contracts.knowledgeCollectionStorage = storage;
+    try {
+      const uriBase: string = await storage.uri(0);
+      const tag = deriveStorageTag(uriBase);
+      if (tag === null) {
+        console.warn(
+          `[EVMChainAdapter] KC storage at ${await storage.getAddress()} ` +
+          `returned malformed uriBase "${uriBase}"; falling back to default storage tag (3-segment UALs)`,
+        );
+        this.mintingStorageTag = '';
+      } else {
+        this.mintingStorageTag = tag;
+      }
+    } catch (err) {
+      console.warn(
+        `[EVMChainAdapter] failed to read uri(0) from KC storage: ${err instanceof Error ? err.message : String(err)}; ` +
+        `falling back to default storage tag (3-segment UALs)`,
+      );
+      this.mintingStorageTag = '';
     }
   }
 

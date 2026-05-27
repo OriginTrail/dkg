@@ -285,14 +285,14 @@ export class RandomSamplingProver {
         reason: 'unsolved-stale',
       });
     }
+    let cgIdFromCreate: bigint | null = null;
     if (existingIsCurrent && !existing.solved && !unsolvedStale) {
       challenge = existing;
-      cgId = await this.chain.getKCContextGraphId(challenge.knowledgeCollectionId);
     } else {
       try {
         const created = await this.chain.createChallenge();
         challenge = created.challenge;
-        cgId = created.contextGraphId;
+        cgIdFromCreate = created.contextGraphId;
       } catch (err) {
         if (err instanceof NoEligibleContextGraphError) {
           this.log.info('rs.tick.no-eligible-cg', {});
@@ -310,6 +310,94 @@ export class RandomSamplingProver {
     periodKey.periodStartBlock = challenge.activeProofPeriodStartBlock;
     const kcId = challenge.knowledgeCollectionId;
     const chunkId = challenge.chunkId;
+
+    // OT-RFC-40 §7.5 + Codex review on PR #718 (Comment 1 of round 3):
+    // the storage-tag resolution MUST happen before any storage-bound
+    // chain read. `getKCContextGraphId`, `getLatestMerkleRoot`, and
+    // `getMerkleLeafCount` in the EVM adapter all hardcode the V10
+    // default `KnowledgeCollectionStorage`; calling them for a tagged
+    // challenge would either return the wrong CG/root/leafCount or
+    // throw, both of which would land before this fail-closed branch
+    // could fire. Resolve the tag now — and skip the period — if the
+    // adapter's registry says the challenge belongs to anything other
+    // than the V10 default.
+    //
+    // Adapters without a registry at all (`kcStorageRegistry` is
+    // `undefined`) still get the legacy unfiltered behaviour because
+    // they explicitly opted out of tag-aware proving by not exposing
+    // a registry.
+    let expectedStorageTag: string | undefined;
+    if (this.chain.kcStorageRegistry) {
+      expectedStorageTag = this.chain.kcStorageRegistry.tagFor(
+        challenge.knowledgeCollectionStorageContract,
+      );
+      if (expectedStorageTag === undefined) {
+        // Stale cache / Hub event race / partial init failure — try a
+        // single refresh before fail-closing.
+        try {
+          await this.chain.kcStorageRegistry.refresh();
+        } catch (err) {
+          this.log.warn('rs.tick.kcs-registry-refresh-failed', {
+            err: err instanceof Error ? err.message : String(err),
+          });
+        }
+        expectedStorageTag = this.chain.kcStorageRegistry.tagFor(
+          challenge.knowledgeCollectionStorageContract,
+        );
+      }
+      if (expectedStorageTag === undefined) {
+        const storageAddress = challenge.knowledgeCollectionStorageContract;
+        this.log.warn('rs.tick.kcs-registry-miss', {
+          kcId: kcId.toString(),
+          storageContract: storageAddress,
+        });
+        await this.wal.append(
+          makeWalEntry(periodKey, 'failed', {
+            kcId: kcId.toString(),
+            chunkId: chunkId.toString(),
+            error: {
+              code: 'kcs-registry-miss',
+              message:
+                `KC storage registry has no entry for challenge storage ${storageAddress}; ` +
+                `refusing to prove against the wrong KC`,
+            },
+          }),
+        );
+        // No reliable cgId yet (existing-challenge branch hasn't
+        // queried it because the read is storage-bound). Use the chain-
+        // side cgId from the createChallenge path when available,
+        // otherwise 0 to signal "unknown CG".
+        return { kind: 'kc-not-synced', kcId, cgId: cgIdFromCreate ?? 0n };
+      }
+      if (expectedStorageTag !== '') {
+        // The chain reads below are bound to the V10 default KC
+        // storage. Tagged-storage RS routing requires those reads to
+        // grow a tag/address parameter — tracked as a follow-up to
+        // RFC-40. Until then, a non-empty tag is a hard fail-closed.
+        this.log.warn('rs.tick.tagged-storage-rs-unsupported', {
+          kcId: kcId.toString(),
+          storageContract: challenge.knowledgeCollectionStorageContract,
+          expectedStorageTag,
+        });
+        await this.wal.append(
+          makeWalEntry(periodKey, 'failed', {
+            kcId: kcId.toString(),
+            chunkId: chunkId.toString(),
+            error: {
+              code: 'tagged-storage-rs-unsupported',
+              message:
+                `Random-sampling chain reads are bound to the V10 default KC storage; ` +
+                `challenge storage tag "${expectedStorageTag}" is not yet routed end-to-end`,
+            },
+          }),
+        );
+        return { kind: 'kc-not-synced', kcId, cgId: cgIdFromCreate ?? 0n };
+      }
+    }
+
+    // Storage tag is the default V10 (or registry isn't present). The
+    // existing chain reads are now safe to use.
+    cgId = cgIdFromCreate ?? (await this.chain.getKCContextGraphId(kcId));
 
     await this.wal.append(
       makeWalEntry(periodKey, 'challenge', {
@@ -332,101 +420,6 @@ export class RandomSamplingProver {
 
     const expectedRoot = await this.chain.getLatestMerkleRoot(kcId);
     const expectedLeafCount = await this.chain.getMerkleLeafCount(kcId);
-
-    // OT-RFC-40 §7.5: when the chain adapter exposes a KC storage
-    // registry, map `Challenge.knowledgeCollectionStorageContract`
-    // (an address) back to the storage's UAL tag. The extractor uses
-    // this to disambiguate batchId collisions in CGs that hold KCs
-    // from multiple storage versions (V9 + V10 today; arbitrary
-    // versions in the future).
-    //
-    // Codex review on PR #718 (Comment 2): if the registry exists but
-    // does not yet know the challenged storage address (stale cache,
-    // race between Hub.NewAssetStorage emission and our event listener,
-    // partial init failure), tagFor returns undefined. Falling through
-    // to the legacy "first UAL match wins" path can prove the WRONG KC
-    // in mixed-storage CGs. Try a single registry refresh — that
-    // covers the legitimate stale-cache case — and fail-closed
-    // (skip-period as a kc-not-synced miss) if the storage stays
-    // unknown afterwards. Adapters without a registry at all
-    // (`kcStorageRegistry` is `undefined`) still get the legacy
-    // unfiltered behaviour because they explicitly opted out of
-    // tag-aware proving by not exposing a registry.
-    let expectedStorageTag: string | undefined;
-    if (this.chain.kcStorageRegistry) {
-      expectedStorageTag = this.chain.kcStorageRegistry.tagFor(
-        challenge.knowledgeCollectionStorageContract,
-      );
-      if (expectedStorageTag === undefined) {
-        try {
-          await this.chain.kcStorageRegistry.refresh();
-        } catch (err) {
-          this.log.warn('rs.tick.kcs-registry-refresh-failed', {
-            err: err instanceof Error ? err.message : String(err),
-          });
-        }
-        expectedStorageTag = this.chain.kcStorageRegistry.tagFor(
-          challenge.knowledgeCollectionStorageContract,
-        );
-      }
-      if (expectedStorageTag === undefined) {
-        const storageAddress = challenge.knowledgeCollectionStorageContract;
-        this.log.warn('rs.tick.kcs-registry-miss', {
-          kcId: kcId.toString(),
-          cgId: cgId.toString(),
-          storageContract: storageAddress,
-        });
-        await this.wal.append(
-          makeWalEntry(periodKey, 'failed', {
-            kcId: kcId.toString(),
-            cgId: cgId.toString(),
-            chunkId: chunkId.toString(),
-            error: {
-              code: 'kcs-registry-miss',
-              message:
-                `KC storage registry has no entry for challenge storage ${storageAddress}; ` +
-                `refusing to prove against the wrong KC`,
-            },
-          }),
-        );
-        return { kind: 'kc-not-synced', kcId, cgId };
-      }
-
-      // Codex review on PR #718 (Comment 1 of round 2): the chain
-      // reads on this code path — `getKCContextGraphId`,
-      // `getLatestMerkleRoot`, `getMerkleLeafCount` — are bound to the
-      // V10 default KC storage in the EVM adapter. Filtering the
-      // local-store extractor by a non-empty `expectedStorageTag`
-      // closes the disambiguation gap on the read side, but the chain
-      // reads above are still default-storage-only, so a challenge
-      // from a tagged storage would be verified against the wrong
-      // contract's root/leafCount even when local data is correct.
-      // Fail-closed here with an explicit reason until the chain reads
-      // accept a storage tag/address argument; tagged-storage RS
-      // support is tracked as a follow-up to RFC-40.
-      if (expectedStorageTag !== '') {
-        this.log.warn('rs.tick.tagged-storage-rs-unsupported', {
-          kcId: kcId.toString(),
-          cgId: cgId.toString(),
-          storageContract: challenge.knowledgeCollectionStorageContract,
-          expectedStorageTag,
-        });
-        await this.wal.append(
-          makeWalEntry(periodKey, 'failed', {
-            kcId: kcId.toString(),
-            cgId: cgId.toString(),
-            chunkId: chunkId.toString(),
-            error: {
-              code: 'tagged-storage-rs-unsupported',
-              message:
-                `Random-sampling chain reads are bound to the V10 default KC storage; ` +
-                `challenge storage tag "${expectedStorageTag}" is not yet routed end-to-end`,
-            },
-          }),
-        );
-        return { kind: 'kc-not-synced', kcId, cgId };
-      }
-    }
 
     let leaves: Uint8Array[];
     try {

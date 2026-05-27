@@ -138,6 +138,13 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   // directly via `setMintingStorageTag`), so there is no mock-side
   // counterpart to mirror.
   'buildKCStorageRegistry',
+  // OT-RFC-40 round-3 review fix: TS-private helper that re-binds
+  // the adapter's `KnowledgeCollectionStorage` handle and recomputes
+  // `mintingStorageTag` after a Hub `AssetStorageChanged` event.
+  // Mock adapter has no Hub event surface and `setMintingStorageTag`
+  // already covers the equivalent affordance for tests, so no
+  // mock-side parity is needed.
+  'refreshMintingKCStorage',
 ]);
 
 const NO_CHAIN_EXEMPT_FROM_EVM = new Set<string>([

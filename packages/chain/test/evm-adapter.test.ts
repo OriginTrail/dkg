@@ -121,6 +121,32 @@ describe('EVMChainAdapter integration', () => {
     expect(owns).toBe(true);
   }, 30_000);
 
+  it('refreshMintingKCStorage re-resolves the storage handle and tag (Codex review on PR #718, Comment 2 of round 3)', async () => {
+    // The Hub event listener calls `refreshMintingKCStorage` on every
+    // `NewAssetStorage`/`AssetStorageChanged` event so a runtime
+    // KC storage rotation propagates to both `mintingStorageTag` and
+    // the cached contract handle. We can't trigger a real rotation
+    // from this test (would require a contract redeploy), but we can
+    // pin that the helper itself works: invoking it after init keeps
+    // the adapter in a consistent state (idempotent re-resolve), and
+    // the resolved tag matches what the live Hub reports.
+    const adapter = new EVMChainAdapter(makeAdapterConfig(ctx.rpcUrl, ctx.hubAddress, HARDHAT_KEYS.DEPLOYER));
+    // Force adapter init (which calls refreshMintingKCStorage once).
+    await adapter.verifyPublisherOwnsRange(adapter.getSignerAddress(), 1n, 1n);
+    const tagBefore = adapter.mintingStorageTag;
+    const internals = adapter as unknown as {
+      refreshMintingKCStorage(): Promise<void>;
+      contracts: { knowledgeCollectionStorage?: { getAddress(): Promise<string> } };
+    };
+    const addressBefore = await internals.contracts.knowledgeCollectionStorage!.getAddress();
+    // Re-invoke the helper directly — this mirrors the Hub-event
+    // call path the listener takes.
+    await internals.refreshMintingKCStorage();
+    expect(adapter.mintingStorageTag).toBe(tagBefore);
+    const addressAfter = await internals.contracts.knowledgeCollectionStorage!.getAddress();
+    expect(addressAfter).toBe(addressBefore);
+  }, 30_000);
+
   it('verifyPublisherOwnsRange fails closed for a registered tag whose authMode is unknown', async () => {
     // The registry filters incoming Hub entries by KC-class name
     // prefixes today, so an `unknown` authMode is unreachable through
