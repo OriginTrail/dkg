@@ -145,6 +145,10 @@ export async function storeWorkspaceOperationPublicQuads(params: {
       { subject, predicate: `${DKG}publicSliceRootEntity`, object: root, graph: workspaceMetaGraph },
       { subject, predicate: `${DKG}publicQuadsDigest`, object: lit(digest), graph: workspaceMetaGraph },
       { subject, predicate: `${DKG}publicQuadsCount`, object: intLit(rootQuads.length), graph: workspaceMetaGraph },
+      // GH #748: dedicated `dkg:publisherPeerId` field for peer-ID-bound reads
+      // (resolveCompactWorkspaceOperationPublicQuads / Legacy variant + finalization);
+      // `prov:wasAttributedTo` carries the durable agent DID URI when known.
+      { subject, predicate: `${DKG}publisherPeerId`, object: lit(publisherPeerId), graph: workspaceMetaGraph },
       { subject, predicate: `${PROV}wasAttributedTo`, object: agentAddress ? agentDid(agentAddress) : lit(publisherPeerId), graph: workspaceMetaGraph },
       { subject, predicate: `${DKG}publishedAt`, object: dateLit(timestamp), graph: workspaceMetaGraph },
     );
@@ -178,10 +182,18 @@ export async function resolveWorkspaceOperation(params: {
   const workspaceMetaGraph = params.graphManager.sharedMemoryMetaUri(params.contextGraphId, subGraphName);
   const subject = workspaceOperationSubject(params.contextGraphId, params.shareOperationId);
   const result = await params.store.query(
+    // GH #748: prefer the dedicated `dkg:publisherPeerId` literal; fall back
+    // to a literal-form `prov:wasAttributedTo` for legacy/un-migrated rows
+    // that only have the deprecated peer-ID-in-attribution shape. The
+    // `FILTER(isLiteral(...))` guard skips post-fix rows where
+    // `wasAttributedTo` carries an agent DID URI (which downstream contact
+    // code would mis-interpret as a libp2p peer ID).
     `SELECT ?root ?publisherPeerId WHERE {
       GRAPH <${workspaceMetaGraph}> {
         OPTIONAL { <${subject}> <${DKG}rootEntity> ?root }
-        OPTIONAL { <${subject}> <${PROV}wasAttributedTo> ?publisherPeerId }
+        OPTIONAL { <${subject}> <${DKG}publisherPeerId> ?pidField }
+        OPTIONAL { <${subject}> <${PROV}wasAttributedTo> ?attrField . FILTER(isLiteral(?attrField)) }
+        BIND(COALESCE(?pidField, ?attrField) AS ?publisherPeerId)
       }
     }`,
   );
@@ -365,7 +377,12 @@ async function resolveCompactWorkspaceOperationPublicQuads(params: {
             <${DKG}publicQuadsCount> ?count .
           OPTIONAL { <${assertSafeIri(subject)}> <${DKG}publicSnapshotRef> ?snapshotRef }
           OPTIONAL { <${assertSafeIri(subject)}> <${DKG}publicSnapshotGraph> ?snapshotGraph }
-          OPTIONAL { <${assertSafeIri(subject)}> <${PROV}wasAttributedTo> ?publisherPeerId }
+          # GH #748: prefer dedicated peer-ID field; fall back to a literal
+          # wasAttributedTo for legacy/un-migrated snapshots. Skip URI form
+          # (agent DID) — that's not a peer ID.
+          OPTIONAL { <${assertSafeIri(subject)}> <${DKG}publisherPeerId> ?pidField }
+          OPTIONAL { <${assertSafeIri(subject)}> <${PROV}wasAttributedTo> ?attrField . FILTER(isLiteral(?attrField)) }
+          BIND(COALESCE(?pidField, ?attrField) AS ?publisherPeerId)
         }
       } LIMIT 1`,
     );
@@ -443,7 +460,11 @@ async function resolveLegacyWorkspaceOperationPublicQuads(params: {
       `SELECT ?payload ?publisherPeerId WHERE {
         GRAPH <${assertSafeIri(workspaceMetaGraph)}> {
           <${assertSafeIri(subject)}> <${DKG}publicStagedQuads> ?payload .
-          OPTIONAL { <${assertSafeIri(subject)}> <${PROV}wasAttributedTo> ?publisherPeerId }
+          # GH #748: prefer dedicated peer-ID field; fall back to literal
+          # wasAttributedTo for legacy snapshots. Skip URI form (agent DID).
+          OPTIONAL { <${assertSafeIri(subject)}> <${DKG}publisherPeerId> ?pidField }
+          OPTIONAL { <${assertSafeIri(subject)}> <${PROV}wasAttributedTo> ?attrField . FILTER(isLiteral(?attrField)) }
+          BIND(COALESCE(?pidField, ?attrField) AS ?publisherPeerId)
         }
       } LIMIT 1`,
     );

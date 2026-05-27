@@ -2,7 +2,7 @@ import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@origintrail-official/dkg-chain';
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
-import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphMetaUri, contextGraphAssertionUri, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, DKG_GOSSIP_MAX_MESSAGE_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad } from '@origintrail-official/dkg-core';
+import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphAssertionUri, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, DKG_GOSSIP_MAX_MESSAGE_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import type { Publisher, PublishOptions, PublishResult, KAManifestEntry, PhaseCallback, V10CoreNodeACK } from './publisher.js';
 import { autoPartition } from './auto-partition.js';
@@ -3015,7 +3015,19 @@ export class DKGPublisher implements Publisher {
     if (result.type !== 'bindings' || result.bindings.length === 0) return 0;
 
     const opsResult = await this.store.query(
-      `SELECT ?op ?peer ?root WHERE { GRAPH <${swmMetaGraph}> { ?op <${PROV}wasAttributedTo> ?peer . ?op <${DKG}rootEntity> ?root } }`,
+      // GH #748: prefer the dedicated `dkg:publisherPeerId` literal; fall
+      // back to a literal-form `prov:wasAttributedTo` for legacy rows
+      // (which only carry the peer ID in attribution). Skip post-fix URI
+      // attribution — `workspaceOwner` is always a peer-ID literal and a
+      // URI peer would never match, breaking ownership validation.
+      `SELECT ?op ?peer ?root WHERE {
+        GRAPH <${swmMetaGraph}> {
+          ?op <${DKG}rootEntity> ?root .
+          OPTIONAL { ?op <${DKG}publisherPeerId> ?pidField }
+          OPTIONAL { ?op <${PROV}wasAttributedTo> ?attrField . FILTER(isLiteral(?attrField)) }
+          BIND(COALESCE(?pidField, ?attrField) AS ?peer)
+        }
+      }`,
     );
     const validatedOwners = new Map<string, Set<string>>();
     if (opsResult.type === 'bindings') {
@@ -3093,7 +3105,10 @@ export class DKGPublisher implements Publisher {
     const SWM_META_SUFFIX = '/_shared_memory_meta';
     const CG_PREFIX = 'did:dkg:context-graph:';
     const MIGRATION_MARKER_SUBJECT = 'urn:dkg:migration:swm-attr-agent-did';
-    const AGENTS_GRAPH = `${CG_PREFIX}agents/_data`;
+    // Use the canonical AGENTS system-graph URI helper rather than hardcoding;
+    // `contextGraphDataGraphUri('agents')` yields `did:dkg:context-graph:agents`
+    // (no `/_data` suffix), which is where `registerAgent()` actually writes.
+    const AGENTS_GRAPH = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS);
     const ctx = createOperationContext('migrate-swm-attr');
 
     let totalRewritten = 0;
@@ -3163,6 +3178,26 @@ export class DKGPublisher implements Publisher {
             if (!address) {
               cgSkipped++;
               continue;
+            }
+
+            // Backward-compat: per-root snapshot rows historically stored the
+            // peer ID only via `wasAttributedTo`. If this subject has no
+            // `dkg:publisherPeerId` quad yet, materialise one from the literal
+            // we're about to rewrite — otherwise the post-fix readers (which
+            // now query `dkg:publisherPeerId` rather than `wasAttributedTo`)
+            // would lose the peer ID entirely for migrated rows.
+            const hasPeerIdField = await this.store.query(
+              `ASK { GRAPH <${swmMetaGraph}> { <${subject}> <${DKG}publisherPeerId> ?x } }`,
+            );
+            const peerIdFieldPresent =
+              hasPeerIdField.type === 'boolean' ? hasPeerIdField.value : false;
+            if (!peerIdFieldPresent) {
+              await this.store.insert([{
+                subject,
+                predicate: `${DKG}publisherPeerId`,
+                object: objectLit,
+                graph: swmMetaGraph,
+              }]);
             }
 
             await this.store.delete([{

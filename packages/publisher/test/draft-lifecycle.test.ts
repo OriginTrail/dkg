@@ -232,8 +232,10 @@ describe('Working Memory Assertion Lifecycle', () => {
     }
   });
 
-  it('GH #748 migration: rewrites peer-ID literal wasAttributedTo → agent DID URI when AGENTS lookup hits, leaves miss as-is, skips marked CGs on re-run', async () => {
-    const AGENTS_GRAPH = 'did:dkg:context-graph:agents/_data';
+  it('GH #748 migration: rewrites peer-ID literal wasAttributedTo → agent DID URI when AGENTS lookup hits, leaves miss as-is, backfills dkg:publisherPeerId on legacy per-root snapshots, skips marked CGs on re-run', async () => {
+    // Canonical AGENTS graph URI — `did:dkg:context-graph:agents` (no /_data
+    // suffix) per `contextGraphDataGraphUri('agents')` in @origintrail-official/dkg-core.
+    const AGENTS_GRAPH = 'did:dkg:context-graph:agents';
     const CG_META = `did:dkg:context-graph:${CG_ID}/_meta`;
     const SWM_META = `did:dkg:context-graph:${CG_ID}/_shared_memory_meta`;
     const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
@@ -250,10 +252,17 @@ describe('Working Memory Assertion Lifecycle', () => {
       { subject: `did:dkg:agent:${ADDR_KNOWN}`, predicate: `${DKG}peerId`, object: `"${PEER_KNOWN}"`, graph: AGENTS_GRAPH },
     ]);
 
-    // Seed CG with one SWM WorkspaceOperation per peer, with literal-form
-    // wasAttributedTo (the legacy/buggy shape).
+    // Seed SWM meta with three legacy rows that mirror real shapes:
+    //   - WorkspaceOperation (resolvable peer) — already has both
+    //     `dkg:publisherPeerId` and `prov:wasAttributedTo` (the new field
+    //     should NOT be re-inserted by the backfill).
+    //   - WorkspaceOperation (unresolved peer) — same two fields.
+    //   - Per-root snapshot (resolvable peer) — only `prov:wasAttributedTo`
+    //     literal, NO `dkg:publisherPeerId`. The migration must materialise
+    //     the peer-ID field from the literal before rewriting.
     const OP_KNOWN = `urn:dkg:share:${CG_ID}:op-known`;
     const OP_UNKNOWN = `urn:dkg:share:${CG_ID}:op-unknown`;
+    const SNAPSHOT_LEGACY = `urn:dkg:share:${CG_ID}:op-known:snapshot/urn:test:root`;
     await store.insert([
       { subject: OP_KNOWN, predicate: RDF_TYPE, object: `${DKG}WorkspaceOperation`, graph: SWM_META },
       { subject: OP_KNOWN, predicate: `${DKG}publisherPeerId`, object: `"${PEER_KNOWN}"`, graph: SWM_META },
@@ -261,6 +270,8 @@ describe('Working Memory Assertion Lifecycle', () => {
       { subject: OP_UNKNOWN, predicate: RDF_TYPE, object: `${DKG}WorkspaceOperation`, graph: SWM_META },
       { subject: OP_UNKNOWN, predicate: `${DKG}publisherPeerId`, object: `"${PEER_UNKNOWN}"`, graph: SWM_META },
       { subject: OP_UNKNOWN, predicate: `${PROV}wasAttributedTo`, object: `"${PEER_UNKNOWN}"`, graph: SWM_META },
+      // Legacy per-root snapshot row — wasAttributedTo only, no dkg:publisherPeerId
+      { subject: SNAPSHOT_LEGACY, predicate: `${PROV}wasAttributedTo`, object: `"${PEER_KNOWN}"`, graph: SWM_META },
     ]);
     // Ensure the CG itself appears in `listContextGraphs` so the migration
     // visits its meta graph (the bare `_meta` graph plus any data is enough).
@@ -268,10 +279,10 @@ describe('Working Memory Assertion Lifecycle', () => {
       { subject: `did:dkg:context-graph:${CG_ID}`, predicate: RDF_TYPE, object: `${DKG}ContextGraph`, graph: CG_META },
     ]);
 
-    // First pass: should rewrite the resolvable row, leave the unresolved
-    // one, and drop a marker.
+    // First pass: rewrite resolvable rows (OP_KNOWN + SNAPSHOT_LEGACY = 2),
+    // leave the unresolved one, drop a marker.
     const r1 = await publisher.migrateSwmAttributionToAgentDid();
-    expect(r1.rewritten).toBe(1);
+    expect(r1.rewritten).toBe(2);
     expect(r1.skipped).toBe(1);
 
     const rowsAfter = await store.query(
@@ -281,10 +292,30 @@ describe('Working Memory Assertion Lifecycle', () => {
     if (rowsAfter.type === 'bindings') {
       const known = rowsAfter.bindings.find((b) => b['s'] === OP_KNOWN);
       const unknown = rowsAfter.bindings.find((b) => b['s'] === OP_UNKNOWN);
-      // Known peer → rewritten to URI form (no surrounding quotes).
+      const snapshot = rowsAfter.bindings.find((b) => b['s'] === SNAPSHOT_LEGACY);
+      // Resolvable rows → URI form (no surrounding quotes).
       expect(known!['o']).toBe(`did:dkg:agent:${ADDR_KNOWN}`);
-      // Unknown peer → still a literal.
+      expect(snapshot!['o']).toBe(`did:dkg:agent:${ADDR_KNOWN}`);
+      // Unresolved peer → still a literal.
       expect(unknown!['o']).toBe(`"${PEER_UNKNOWN}"`);
+    }
+
+    // Backward-compat backfill: SNAPSHOT_LEGACY had no `dkg:publisherPeerId`
+    // before the migration. After migration, it MUST carry the peer-ID
+    // literal materialised from the old `wasAttributedTo` value, so the
+    // post-fix readers (which now query `dkg:publisherPeerId`) still find it.
+    const peerIdAfter = await store.query(
+      `SELECT ?s ?o WHERE { GRAPH <${SWM_META}> { ?s <${DKG}publisherPeerId> ?o } }`,
+    );
+    expect(peerIdAfter.type).toBe('bindings');
+    if (peerIdAfter.type === 'bindings') {
+      const snapshotPid = peerIdAfter.bindings.find((b) => b['s'] === SNAPSHOT_LEGACY);
+      expect(snapshotPid).toBeDefined();
+      expect(snapshotPid!['o']).toBe(`"${PEER_KNOWN}"`);
+      // OP_KNOWN already had a dkg:publisherPeerId — the migration must NOT
+      // have duplicated it.
+      const opKnownPids = peerIdAfter.bindings.filter((b) => b['s'] === OP_KNOWN);
+      expect(opKnownPids.length).toBe(1);
     }
 
     const markerAfter = await store.query(

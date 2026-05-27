@@ -221,11 +221,17 @@ export class FinalizationHandler {
 
     const values = safeRoots.map(r => `<${r}>`).join(' ');
     const PROV = 'http://www.w3.org/ns/prov#';
+    // GH #748: prefer the dedicated `dkg:publisherPeerId` field (peer-ID
+    // literal); fall back to literal-form `prov:wasAttributedTo` for legacy
+    // un-migrated SWM rows. Skip URI form — that's an agent DID, not a
+    // peer ID, and downstream dials a libp2p peer with this value.
     const sparql = `SELECT ?peerId WHERE {
       GRAPH <${wsMetaGraph}> {
         VALUES ?root { ${values} }
         ?op <${DKG_NS}rootEntity> ?root .
-        ?op <${PROV}wasAttributedTo> ?peerId .
+        OPTIONAL { ?op <${DKG_NS}publisherPeerId> ?pidField }
+        OPTIONAL { ?op <${PROV}wasAttributedTo> ?attrField . FILTER(isLiteral(?attrField)) }
+        BIND(COALESCE(?pidField, ?attrField) AS ?peerId)
       }
     } LIMIT 1`;
 
