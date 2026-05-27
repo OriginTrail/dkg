@@ -82,6 +82,7 @@ describe('promote-async daemon lifecycle wiring', () => {
           uri: `did:dkg:context-graph:${id}`,
           name: id,
           subscribed: true,
+          synced: true,
         }));
       },
       async contextGraphExists(contextGraphId: string) {

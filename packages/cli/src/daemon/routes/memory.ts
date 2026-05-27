@@ -1769,7 +1769,10 @@ WHERE {
             agent,
             rawPublishContextGraphId,
             res,
-            { callerAgentAddress: requestAgentAddress },
+            {
+              callerAgentAddress: requestAgentAddress,
+              requireLocalWritable: false,
+            },
           );
           if (!resolvedPublishTargetId) return;
           const onChainId = await agent.getContextGraphOnChainId(resolvedPublishTargetId);

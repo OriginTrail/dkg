@@ -53,7 +53,7 @@ function createContext(path: string, body: unknown, overrides: Partial<RequestCo
   const defaultAgent = {
     peerId: 'peer-test',
     listContextGraphs: vi.fn(async () => [
-      { id: 'project-a', uri: 'did:dkg:context-graph:project-a', name: 'Project A', subscribed: true },
+      { id: 'project-a', uri: 'did:dkg:context-graph:project-a', name: 'Project A', subscribed: true, synced: true },
     ]),
     contextGraphExists: vi.fn(async (contextGraphId: string) => contextGraphId === 'project-a'),
   };
@@ -484,8 +484,8 @@ describe('daemon memory_graph_changed route emissions', () => {
       contextGraphId === 'target-cg' ? '42' : '7',
     );
     const listContextGraphs = vi.fn(async () => [
-      { id: 'project-a', uri: 'did:dkg:context-graph:project-a', name: 'Project A', subscribed: true },
-      { id: 'target-cg', uri: 'did:dkg:context-graph:target-cg', name: 'Target CG', subscribed: true },
+      { id: 'project-a', uri: 'did:dkg:context-graph:project-a', name: 'Project A', subscribed: true, synced: true },
+      { id: 'target-cg', uri: 'did:dkg:context-graph:target-cg', name: 'Target CG', subscribed: true, synced: false },
     ]);
     const ctx = createContext('/api/shared-memory/publish', {
       contextGraphId: 'project-a',
@@ -515,8 +515,8 @@ describe('daemon memory_graph_changed route emissions', () => {
       contextGraphId === 'project-a' ? '7' : null,
     );
     const listContextGraphs = vi.fn(async () => [
-      { id: 'project-a', uri: 'did:dkg:context-graph:project-a', name: 'Project A', subscribed: true },
-      { id: 'target-cg', uri: 'did:dkg:context-graph:target-cg', name: 'Target CG', subscribed: true },
+      { id: 'project-a', uri: 'did:dkg:context-graph:project-a', name: 'Project A', subscribed: true, synced: true },
+      { id: 'target-cg', uri: 'did:dkg:context-graph:target-cg', name: 'Target CG', subscribed: true, synced: false },
     ]);
     const ctx = createContext('/api/shared-memory/publish', {
       contextGraphId: 'project-a',

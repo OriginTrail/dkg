@@ -17,6 +17,7 @@ type ContextGraphRow = {
   name?: string;
   accessPolicy?: string;
   subscribed?: boolean;
+  synced?: boolean;
   hasLocalContent?: boolean;
 };
 
@@ -35,7 +36,7 @@ describe('context graph write-path validation', () => {
     daemonState.promoteWorkerUnavailableReason = null;
   });
 
-  function makeAgent(rows: ContextGraphRow[] = [{ id: CANONICAL_CG, uri: CANONICAL_URI, subscribed: true }]) {
+  function makeAgent(rows: ContextGraphRow[] = [{ id: CANONICAL_CG, uri: CANONICAL_URI, subscribed: true, synced: true }]) {
     const create = vi.fn(async (contextGraphId: string, name: string) =>
       `did:dkg:context-graph:${contextGraphId}/assertion/${CALLER}/${name}`);
     const write = vi.fn(async () => undefined);
@@ -242,13 +243,14 @@ describe('context graph write-path validation', () => {
 
   it('accepts an exact full DID for an existing bare id instead of treating it as a suffix-only slug', async () => {
     const agent = makeAgent([
-      { id: CANONICAL_CG, uri: CANONICAL_URI, subscribed: true },
+      { id: CANONICAL_CG, uri: CANONICAL_URI, subscribed: true, synced: true },
       {
         id: BARE_CG,
         uri: BARE_URI,
         name: 'Tuesday public CG',
         accessPolicy: 'public',
         subscribed: true,
+        synced: true,
       },
     ]);
     await startRoutes(agent);
@@ -269,7 +271,7 @@ describe('context graph write-path validation', () => {
 
   it('rejects a full DID for a shadow-like bare id when a curated suffix match exists', async () => {
     const agent = makeAgent([
-      { id: CANONICAL_CG, uri: CANONICAL_URI, subscribed: true },
+      { id: CANONICAL_CG, uri: CANONICAL_URI, subscribed: true, synced: true },
       { id: BARE_CG, uri: BARE_URI },
     ]);
     await startRoutes(agent);
@@ -289,13 +291,14 @@ describe('context graph write-path validation', () => {
 
   it('accepts an exact legitimate bare id even when a curated suffix match exists', async () => {
     const agent = makeAgent([
-      { id: CANONICAL_CG, uri: CANONICAL_URI, subscribed: true },
+      { id: CANONICAL_CG, uri: CANONICAL_URI, subscribed: true, synced: true },
       {
         id: BARE_CG,
         uri: BARE_URI,
         name: 'Tuesday public CG',
         accessPolicy: 'public',
         subscribed: true,
+        synced: true,
       },
     ]);
     await startRoutes(agent);
@@ -323,7 +326,7 @@ describe('context graph write-path validation', () => {
 
   it('rejects a bare suffix match before assertion create and returns the canonical id', async () => {
     const agent = makeAgent([
-      { id: CANONICAL_CG, uri: CANONICAL_URI, subscribed: true },
+      { id: CANONICAL_CG, uri: CANONICAL_URI, subscribed: true, synced: true },
       { id: 'tuesday-cg', uri: 'did:dkg:context-graph:tuesday-cg' },
     ]);
     await startRoutes(agent);
@@ -341,14 +344,15 @@ describe('context graph write-path validation', () => {
     expect(agent.calls.create).not.toHaveBeenCalled();
   });
 
-  it('rejects exact context graphs that are visible but not locally writable', async () => {
+  it('rejects exact context graphs that are visible but not locally synced', async () => {
     const agent = makeAgent([
       {
         id: 'definition-only-cg',
         uri: 'did:dkg:context-graph:definition-only-cg',
         name: 'Definition Only CG',
         accessPolicy: 'public',
-        subscribed: false,
+        subscribed: true,
+        synced: false,
       },
     ]);
     await startRoutes(agent);
@@ -372,6 +376,7 @@ describe('context graph write-path validation', () => {
         name: 'Local Content CG',
         accessPolicy: 'public',
         subscribed: false,
+        synced: false,
         hasLocalContent: true,
       },
     ]);
@@ -448,7 +453,7 @@ describe('context graph write-path validation', () => {
 
   it('rejects context graph invite bare suffixes before mutation', async () => {
     const agent = makeAgent([
-      { id: CANONICAL_CG, uri: CANONICAL_URI, subscribed: true },
+      { id: CANONICAL_CG, uri: CANONICAL_URI, subscribed: true, synced: true },
       { id: 'tuesday-cg', uri: 'did:dkg:context-graph:tuesday-cg' },
     ]);
     await startRoutes(agent);

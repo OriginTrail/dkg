@@ -71,6 +71,7 @@ describe('promote-async daemon routes', () => {
           uri: `did:dkg:context-graph:${id}`,
           name: id,
           subscribed: true,
+          synced: true,
         }));
       },
       async contextGraphExists(contextGraphId: string) {

@@ -468,6 +468,7 @@ type ExistingContextGraphRow = {
   onChainId?: unknown;
   isSystem?: unknown;
   subscribed?: unknown;
+  synced?: unknown;
 };
 
 function normalizeContextGraphCallerAddress(
@@ -506,7 +507,9 @@ async function contextGraphRowIsWritable(
   },
   row: ExistingContextGraphRow,
 ): Promise<boolean> {
-  if (row.subscribed === true || row.isSystem === true) return true;
+  if (row.isSystem === true || (row.subscribed === true && row.synced === true)) {
+    return true;
+  }
   const id = typeof row.id === "string" ? row.id : "";
   if (!id || !agent.contextGraphHasLocalContent) return false;
   return agent.contextGraphHasLocalContent(id);
@@ -519,7 +522,7 @@ function rejectKnownNonWritableContextGraph(
   jsonResponse(res, 400, {
     code: "CONTEXT_GRAPH_NOT_WRITABLE",
     error:
-      `Context graph "${raw}" is known but is not locally subscribed or synced for writes. ` +
+      `Context graph "${raw}" is known but is not locally synced for writes. ` +
       `Subscribe/sync the context graph first, then retry the write.`,
   });
   return null;
@@ -542,12 +545,16 @@ export async function resolveRequiredWriteContextGraphId(
   },
   contextGraphId: unknown,
   res: ServerResponse,
-  opts: { callerAgentAddress?: string | null } = {},
+  opts: {
+    callerAgentAddress?: string | null;
+    requireLocalWritable?: boolean;
+  } = {},
 ): Promise<string | null> {
   if (!validateRequiredContextGraphId(contextGraphId, res)) return null;
 
   const raw = (contextGraphId as string).trim();
   const candidateId = normalizeContextGraphIdOrUri(raw);
+  const requireLocalWritable = opts.requireLocalWritable !== false;
   const candidateValidation = validateContextGraphId(candidateId);
   if (!candidateValidation.valid) {
     jsonResponse(res, 400, {
@@ -583,7 +590,7 @@ export async function resolveRequiredWriteContextGraphId(
     return id === candidateId || uri === raw;
   });
   let exactWritable = false;
-  if (exact?.id && typeof exact.id === "string") {
+  if (requireLocalWritable && exact?.id && typeof exact.id === "string") {
     try {
       exactWritable = await contextGraphRowIsWritable(agent, exact);
     } catch (err) {
@@ -606,7 +613,9 @@ export async function resolveRequiredWriteContextGraphId(
       suffixMatches.length > 0 &&
       !isShadowLikeBareContextGraphRow(exact)
     ) {
-      if (!exactWritable) return rejectKnownNonWritableContextGraph(res, raw);
+      if (requireLocalWritable && !exactWritable) {
+        return rejectKnownNonWritableContextGraph(res, raw);
+      }
       return exact.id;
     }
     if (suffixMatches.length === 1) {
@@ -631,13 +640,17 @@ export async function resolveRequiredWriteContextGraphId(
       return null;
     }
     if (exact?.id && typeof exact.id === "string") {
-      if (!exactWritable) return rejectKnownNonWritableContextGraph(res, raw);
+      if (requireLocalWritable && !exactWritable) {
+        return rejectKnownNonWritableContextGraph(res, raw);
+      }
       return exact.id;
     }
   }
 
   if (exact?.id && typeof exact.id === "string") {
-    if (!exactWritable) return rejectKnownNonWritableContextGraph(res, raw);
+    if (requireLocalWritable && !exactWritable) {
+      return rejectKnownNonWritableContextGraph(res, raw);
+    }
     return exact.id;
   }
 
