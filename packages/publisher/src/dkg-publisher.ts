@@ -3008,66 +3008,107 @@ export class DKGPublisher implements Publisher {
   private async reconstructOwnershipFromGraph(
     ownershipKey: string, swmMetaGraph: string, DKG: string, PROV: string,
   ): Promise<number> {
-    const result = await this.store.query(
-      `SELECT ?entity ?creator WHERE { GRAPH <${swmMetaGraph}> { ?entity <${DKG}workspaceOwner> ?creator } }`,
+    const durableOwners = await this.loadValidatedSharedMemoryOwners(
+      swmMetaGraph,
+      DKG,
+      PROV,
+      undefined,
+      'reconstruct',
     );
-    if (result.type !== 'bindings' || result.bindings.length === 0) return 0;
-
-    const opsResult = await this.store.query(
-      `SELECT ?op ?peer ?root WHERE { GRAPH <${swmMetaGraph}> { ?op <${PROV}wasAttributedTo> ?peer . ?op <${DKG}rootEntity> ?root } }`,
-    );
-    const validatedOwners = new Map<string, Set<string>>();
-    if (opsResult.type === 'bindings') {
-      for (const row of opsResult.bindings) {
-        const root = row['root'];
-        const peer = row['peer'];
-        if (!root || !peer) continue;
-        const peerStr = peer.startsWith('"')
-          ? peer.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '')
-          : peer;
-        if (!validatedOwners.has(root)) validatedOwners.set(root, new Set());
-        validatedOwners.get(root)!.add(peerStr);
-      }
-    }
+    if (durableOwners.size === 0) return 0;
 
     if (!this.sharedMemoryOwnedEntities.has(ownershipKey)) {
       this.sharedMemoryOwnedEntities.set(ownershipKey, new Map());
     }
     const ownedMap = this.sharedMemoryOwnedEntities.get(ownershipKey)!;
     let count = 0;
-    for (const row of result.bindings) {
-      const entity = row['entity'];
-      const creator = row['creator'];
-      if (!entity || !creator) continue;
-      const creatorStr = creator.startsWith('"')
-        ? creator.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '')
-        : creator;
-
-      const validPeers = validatedOwners.get(entity);
-      if (!validPeers || !validPeers.has(creatorStr)) {
-        this.log.warn(
-          createOperationContext('reconstruct'),
-          `Skipping unvalidated ownership: entity=${entity} creator=${creatorStr}`,
-        );
-        continue;
-      }
-
+    for (const [entity, creator] of durableOwners) {
       if (ownedMap.has(entity)) {
         const existing = ownedMap.get(entity)!;
-        if (existing !== creatorStr) {
+        if (existing !== creator) {
           this.log.warn(
             createOperationContext('reconstruct'),
-            `Conflicting ownership for ${entity}: "${existing}" vs "${creatorStr}"; keeping alphabetically first`,
+            `Conflicting ownership for ${entity}: "${existing}" vs "${creator}"; keeping alphabetically first`,
           );
-          if (creatorStr < existing) ownedMap.set(entity, creatorStr);
+          setEffectiveOwner(ownedMap, entity, creator);
         }
         continue;
       }
 
-      ownedMap.set(entity, creatorStr);
+      ownedMap.set(entity, creator);
       count++;
     }
     return count;
+  }
+
+  private async loadValidatedSharedMemoryOwners(
+    swmMetaGraph: string,
+    DKG: string,
+    PROV: string,
+    rootEntities: readonly string[] | undefined,
+    logOperation: 'reconstruct' | 'share',
+  ): Promise<Map<string, string>> {
+    const valuesClause = rootEntities?.length
+      ? `VALUES ?entity { ${rootEntities.map((root) => `<${assertSafeIri(root)}>`).join(' ')} }`
+      : '';
+
+    const ownershipResult = await this.store.query(
+      `SELECT DISTINCT ?entity ?creator WHERE {
+        GRAPH <${assertSafeIri(swmMetaGraph)}> {
+          ${valuesClause}
+          ?entity <${DKG}workspaceOwner> ?creator .
+        }
+      }`,
+    );
+    if (ownershipResult.type !== 'bindings' || ownershipResult.bindings.length === 0) {
+      return new Map();
+    }
+
+    const operationResult = await this.store.query(
+      `SELECT DISTINCT ?entity ?creator WHERE {
+        GRAPH <${assertSafeIri(swmMetaGraph)}> {
+          ${valuesClause}
+          ?op <${DKG}rootEntity> ?entity ;
+              <${PROV}wasAttributedTo> ?creator .
+        }
+      }`,
+    );
+
+    const validatedOwners = new Map<string, Set<string>>();
+    if (operationResult.type === 'bindings') {
+      for (const row of operationResult.bindings) {
+        const entity = row['entity'];
+        const creator = stripSparqlLiteral(row['creator']);
+        if (!entity || !creator) continue;
+        addOwner(validatedOwners, entity, creator);
+      }
+    }
+
+    const durableOwners = new Map<string, string>();
+    for (const row of ownershipResult.bindings) {
+      const entity = row['entity'];
+      const creator = stripSparqlLiteral(row['creator']);
+      if (!entity || !creator) continue;
+      const validPeers = validatedOwners.get(entity);
+      if (!validPeers?.has(creator)) {
+        this.log.warn(
+          createOperationContext(logOperation),
+          `Skipping unvalidated ownership: entity=${entity} creator=${creator}`,
+        );
+        continue;
+      }
+
+      const existing = durableOwners.get(entity);
+      if (existing && existing !== creator) {
+        this.log.warn(
+          createOperationContext(logOperation),
+          `Conflicting ownership for ${entity}: "${existing}" vs "${creator}"; keeping alphabetically first`,
+        );
+      }
+      setEffectiveOwner(durableOwners, entity, creator);
+    }
+
+    return durableOwners;
   }
 
   private async sharedMemoryOwnersForPromotion(
@@ -3089,54 +3130,19 @@ export class DKGPublisher implements Publisher {
     const DKG = 'http://dkg.io/ontology/';
     const PROV = 'http://www.w3.org/ns/prov#';
     const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId, subGraphName);
-    const entityValues = rootEntities
-      .map((root) => `<${assertSafeIri(root)}>`)
-      .join(' ');
-
-    const ownershipResult = await this.store.query(
-      `SELECT DISTINCT ?entity ?creator WHERE {
-        GRAPH <${assertSafeIri(swmMetaGraph)}> {
-          VALUES ?entity { ${entityValues} }
-          ?entity <${DKG}workspaceOwner> ?creator .
-        }
-      }`,
+    const durableOwners = await this.loadValidatedSharedMemoryOwners(
+      swmMetaGraph,
+      DKG,
+      PROV,
+      rootEntities,
+      'share',
     );
+    if (durableOwners.size === 0) return owners;
 
-    if (ownershipResult.type !== 'bindings' || ownershipResult.bindings.length === 0) return owners;
-
-    const operationResult = await this.store.query(
-      `SELECT DISTINCT ?entity ?creator WHERE {
-        GRAPH <${assertSafeIri(swmMetaGraph)}> {
-          VALUES ?entity { ${entityValues} }
-          ?op <${DKG}rootEntity> ?entity ;
-              <${PROV}wasAttributedTo> ?creator .
-        }
-      }`,
-    );
-    const validatedOwners = new Map<string, Set<string>>();
-    if (operationResult.type === 'bindings') {
-      for (const row of operationResult.bindings) {
-        const entity = row['entity'];
-        const creator = stripSparqlLiteral(row['creator']);
-        if (!entity || !creator) continue;
-        addOwner(validatedOwners, entity, creator);
-      }
-    }
-
-    const durableOwners = new Map<string, string>();
     if (!this.sharedMemoryOwnedEntities.has(ownershipKey)) {
       this.sharedMemoryOwnedEntities.set(ownershipKey, new Map());
     }
     const hydratedOwned = this.sharedMemoryOwnedEntities.get(ownershipKey)!;
-
-    for (const row of ownershipResult.bindings) {
-      const entity = row['entity'];
-      const creator = stripSparqlLiteral(row['creator']);
-      if (!entity || !creator) continue;
-      const validPeers = validatedOwners.get(entity);
-      if (!validPeers?.has(creator)) continue;
-      setEffectiveOwner(durableOwners, entity, creator);
-    }
 
     for (const [entity, creator] of durableOwners) {
       owners.set(entity, creator);
