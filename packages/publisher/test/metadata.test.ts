@@ -551,6 +551,22 @@ describe('generateAssertionCreatedMetadata', () => {
       expect(q.graph).toBe(META_GRAPH);
     }
   });
+
+  it('emits dkg:subGraphName on the assertion subject when scoped to a sub-graph', () => {
+    const scopedLifecycleUri = assertionLifecycleUri(CONTEXT_GRAPH, AGENT_ADDR, ASSERTION, 'players');
+    const quads = generateAssertionCreatedMetadata({ ...meta, subGraphName: 'players' });
+    expect(quads).toContainEqual(expect.objectContaining({
+      subject: scopedLifecycleUri,
+      predicate: `${DKG}subGraphName`,
+      object: '"players"',
+      graph: META_GRAPH,
+    }));
+  });
+
+  it('omits dkg:subGraphName when assertion is in the root bucket', () => {
+    const quads = generateAssertionCreatedMetadata(meta);
+    expect(quads.find(q => q.predicate === `${DKG}subGraphName`)).toBeUndefined();
+  });
 });
 
 describe('generateAssertionPromotedMetadata', () => {
@@ -602,6 +618,22 @@ describe('generateAssertionPromotedMetadata', () => {
     expect(entities.map(q => q.object)).toContain('urn:test:alice');
     expect(entities.map(q => q.object)).toContain('urn:test:bob');
   });
+
+  it('emits dkg:subGraphName on the assertion subject when scoped to a sub-graph', () => {
+    const scopedLifecycleUri = assertionLifecycleUri(CONTEXT_GRAPH, AGENT_ADDR, ASSERTION, 'players');
+    const { insert } = generateAssertionPromotedMetadata({ ...meta, subGraphName: 'players' });
+    expect(insert).toContainEqual(expect.objectContaining({
+      subject: scopedLifecycleUri,
+      predicate: `${DKG}subGraphName`,
+      object: '"players"',
+      graph: META_GRAPH,
+    }));
+  });
+
+  it('omits dkg:subGraphName when assertion is in the root bucket', () => {
+    const { insert } = generateAssertionPromotedMetadata(meta);
+    expect(insert.find(q => q.predicate === `${DKG}subGraphName`)).toBeUndefined();
+  });
 });
 
 describe('generateAssertionPublishedMetadata', () => {
@@ -625,6 +657,22 @@ describe('generateAssertionPublishedMetadata', () => {
     const { insert } = generateAssertionPublishedMetadata(meta);
     const eventUri = findEventUriFromInsert(insert);
     expect(insert.find(q => q.subject === eventUri && q.predicate === `${DKG}kcUal`)!.object).toBe('did:dkg:kc:test-kc-001');
+  });
+
+  it('emits dkg:subGraphName on the assertion subject when scoped to a sub-graph', () => {
+    const scopedLifecycleUri = assertionLifecycleUri(CONTEXT_GRAPH, AGENT_ADDR, ASSERTION, 'players');
+    const { insert } = generateAssertionPublishedMetadata({ ...meta, subGraphName: 'players' });
+    expect(insert).toContainEqual(expect.objectContaining({
+      subject: scopedLifecycleUri,
+      predicate: `${DKG}subGraphName`,
+      object: '"players"',
+      graph: META_GRAPH,
+    }));
+  });
+
+  it('omits dkg:subGraphName when assertion is in the root bucket', () => {
+    const { insert } = generateAssertionPublishedMetadata(meta);
+    expect(insert.find(q => q.predicate === `${DKG}subGraphName`)).toBeUndefined();
   });
 });
 
@@ -654,6 +702,22 @@ describe('generateAssertionDiscardedMetadata', () => {
     const eventUri = findEventUriFromInsert(insert);
     expect(insert.find(q => q.subject === eventUri && q.predicate === `${DKG}fromLayer`)!.object).toBe(`"${MemoryLayer.WorkingMemory}"`);
     expect(insert.find(q => q.subject === eventUri && q.predicate === `${DKG}toLayer`)!.object).toBe('"none"');
+  });
+
+  it('emits dkg:subGraphName on the assertion subject when scoped to a sub-graph', () => {
+    const scopedLifecycleUri = assertionLifecycleUri(CONTEXT_GRAPH, AGENT_ADDR, ASSERTION, 'players');
+    const { insert } = generateAssertionDiscardedMetadata({ ...meta, subGraphName: 'players' });
+    expect(insert).toContainEqual(expect.objectContaining({
+      subject: scopedLifecycleUri,
+      predicate: `${DKG}subGraphName`,
+      object: '"players"',
+      graph: META_GRAPH,
+    }));
+  });
+
+  it('omits dkg:subGraphName when assertion is in the root bucket', () => {
+    const { insert } = generateAssertionDiscardedMetadata(meta);
+    expect(insert.find(q => q.predicate === `${DKG}subGraphName`)).toBeUndefined();
   });
 });
 

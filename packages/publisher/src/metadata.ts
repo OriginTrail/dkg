@@ -621,7 +621,7 @@ export function generateAssertionCreatedMetadata(meta: AssertionCreatedMeta): Qu
   const agentUri = `did:dkg:agent:${meta.agentAddress}`;
   const eventUri = `${subject}/event/${nextEventId()}`;
 
-  return [
+  const quads: Quad[] = [
     // Assertion entity (prov:Entity + DKG identity)
     mq(subject, `${RDF}type`, `${PROV}Entity`, metaGraph),
     mq(subject, `${RDF}type`, `${DKG}Assertion`, metaGraph),
@@ -641,6 +641,12 @@ export function generateAssertionCreatedMetadata(meta: AssertionCreatedMeta): Qu
     mq(eventUri, `${DKG}fromLayer`, lit('none'), metaGraph),
     mq(eventUri, `${DKG}toLayer`, lit(MemoryLayer.WorkingMemory), metaGraph),
   ];
+
+  if (meta.subGraphName) {
+    quads.push(mq(subject, `${DKG}subGraphName`, lit(meta.subGraphName), metaGraph));
+  }
+
+  return quads;
 }
 
 export interface AssertionPromotedMeta {
@@ -680,6 +686,9 @@ export function generateAssertionPromotedMetadata(meta: AssertionPromotedMeta): 
   for (const entity of meta.rootEntities) {
     ins.push(mq(eventUri, `${DKG}rootEntity`, entity, metaGraph));
   }
+  if (meta.subGraphName) {
+    ins.push(mq(subject, `${DKG}subGraphName`, lit(meta.subGraphName), metaGraph));
+  }
   return { insert: ins, delete: del };
 }
 
@@ -697,19 +706,23 @@ export function generateAssertionPublishedMetadata(meta: AssertionPublishedMeta)
   const subject = assertionLifecycleUri(meta.contextGraphId, meta.agentAddress, meta.assertionName, meta.subGraphName);
   const agentUri = `did:dkg:agent:${meta.agentAddress}`;
   const eventUri = `${subject}/event/${nextEventId()}`;
+  const ins: Quad[] = [
+    mq(subject, `${DKG}state`, lit('published'), metaGraph),
+    mq(subject, `${DKG}memoryLayer`, lit(MemoryLayer.VerifiedMemory), metaGraph),
+    mq(eventUri, `${RDF}type`, `${PROV}Activity`, metaGraph),
+    mq(eventUri, `${RDF}type`, `${DKG}AssertionPublished`, metaGraph),
+    mq(eventUri, `${PROV}startedAtTime`, dateLit(meta.timestamp), metaGraph),
+    mq(eventUri, `${PROV}wasAssociatedWith`, agentUri, metaGraph),
+    mq(eventUri, `${PROV}used`, subject, metaGraph),
+    mq(eventUri, `${DKG}fromLayer`, lit(MemoryLayer.SharedWorkingMemory), metaGraph),
+    mq(eventUri, `${DKG}toLayer`, lit(MemoryLayer.VerifiedMemory), metaGraph),
+    mq(eventUri, `${DKG}kcUal`, meta.kcUal, metaGraph),
+  ];
+  if (meta.subGraphName) {
+    ins.push(mq(subject, `${DKG}subGraphName`, lit(meta.subGraphName), metaGraph));
+  }
   return {
-    insert: [
-      mq(subject, `${DKG}state`, lit('published'), metaGraph),
-      mq(subject, `${DKG}memoryLayer`, lit(MemoryLayer.VerifiedMemory), metaGraph),
-      mq(eventUri, `${RDF}type`, `${PROV}Activity`, metaGraph),
-      mq(eventUri, `${RDF}type`, `${DKG}AssertionPublished`, metaGraph),
-      mq(eventUri, `${PROV}startedAtTime`, dateLit(meta.timestamp), metaGraph),
-      mq(eventUri, `${PROV}wasAssociatedWith`, agentUri, metaGraph),
-      mq(eventUri, `${PROV}used`, subject, metaGraph),
-      mq(eventUri, `${DKG}fromLayer`, lit(MemoryLayer.SharedWorkingMemory), metaGraph),
-      mq(eventUri, `${DKG}toLayer`, lit(MemoryLayer.VerifiedMemory), metaGraph),
-      mq(eventUri, `${DKG}kcUal`, meta.kcUal, metaGraph),
-    ],
+    insert: ins,
     delete: [
       assertionStateQuad(subject, 'promoted', metaGraph),
       assertionLayerQuad(subject, MemoryLayer.SharedWorkingMemory, metaGraph),
@@ -730,18 +743,22 @@ export function generateAssertionDiscardedMetadata(meta: AssertionDiscardedMeta)
   const subject = assertionLifecycleUri(meta.contextGraphId, meta.agentAddress, meta.assertionName, meta.subGraphName);
   const agentUri = `did:dkg:agent:${meta.agentAddress}`;
   const eventUri = `${subject}/event/${nextEventId()}`;
+  const ins: Quad[] = [
+    mq(subject, `${DKG}state`, lit('discarded'), metaGraph),
+    mq(subject, `${PROV}wasInvalidatedBy`, eventUri, metaGraph),
+    mq(eventUri, `${RDF}type`, `${PROV}Activity`, metaGraph),
+    mq(eventUri, `${RDF}type`, `${DKG}AssertionDiscarded`, metaGraph),
+    mq(eventUri, `${PROV}startedAtTime`, dateLit(meta.timestamp), metaGraph),
+    mq(eventUri, `${PROV}wasAssociatedWith`, agentUri, metaGraph),
+    mq(eventUri, `${PROV}used`, subject, metaGraph),
+    mq(eventUri, `${DKG}fromLayer`, lit(MemoryLayer.WorkingMemory), metaGraph),
+    mq(eventUri, `${DKG}toLayer`, lit('none'), metaGraph),
+  ];
+  if (meta.subGraphName) {
+    ins.push(mq(subject, `${DKG}subGraphName`, lit(meta.subGraphName), metaGraph));
+  }
   return {
-    insert: [
-      mq(subject, `${DKG}state`, lit('discarded'), metaGraph),
-      mq(subject, `${PROV}wasInvalidatedBy`, eventUri, metaGraph),
-      mq(eventUri, `${RDF}type`, `${PROV}Activity`, metaGraph),
-      mq(eventUri, `${RDF}type`, `${DKG}AssertionDiscarded`, metaGraph),
-      mq(eventUri, `${PROV}startedAtTime`, dateLit(meta.timestamp), metaGraph),
-      mq(eventUri, `${PROV}wasAssociatedWith`, agentUri, metaGraph),
-      mq(eventUri, `${PROV}used`, subject, metaGraph),
-      mq(eventUri, `${DKG}fromLayer`, lit(MemoryLayer.WorkingMemory), metaGraph),
-      mq(eventUri, `${DKG}toLayer`, lit('none'), metaGraph),
-    ],
+    insert: ins,
     delete: [
       assertionStateQuad(subject, 'created', metaGraph),
       assertionLayerQuad(subject, MemoryLayer.WorkingMemory, metaGraph),
