@@ -175,6 +175,13 @@ vi.mock('../src/ui/api.js', () => ({
 vi.mock('../src/ui/hooks/useMemoryEntities.js', () => ({
   useMemoryEntities: () => memory,
   buildMemoryEntities: buildTestMemoryEntities,
+  // ProjectView imports `canonicalEntityUri` for `dedupeTriplesBySpo`.
+  // Idempotent strip of `<...>` wrappers mirrors the real impl.
+  canonicalEntityUri: (uri: string) => {
+    const trimmed = uri.trim();
+    if (trimmed.startsWith('<') && trimmed.endsWith('>')) return trimmed.slice(1, -1);
+    return trimmed;
+  },
 }));
 
 vi.mock('../src/ui/hooks/useProjectProfile.js', () => ({

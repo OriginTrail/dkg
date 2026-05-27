@@ -5,6 +5,7 @@ import { ImportFilesModal } from '../components/Modals/ImportFilesModal.js';
 import { ShareProjectModal } from '../components/Modals/ShareProjectModal.js';
 import {
   buildMemoryEntities,
+  canonicalEntityUri,
   useMemoryEntities,
   type LayeredTriple,
   type TrustLevel,
@@ -70,7 +71,14 @@ function isMemoryLayerView(layer: LayerView): layer is MemoryLayerView {
 function dedupeTriplesBySpo<T extends { subject: string; predicate: string; object: string }>(triples: T[]): T[] {
   const seen = new Set<string>();
   return triples.filter(t => {
-    const key = `${t.subject}|${t.predicate}|${t.object}`;
+    // Canonicalise wrapped/bare IRIs so this dedup agrees with
+    // `buildEntities`' per-entity `tripleCount` dedup
+    // (`useMemoryEntities.ts` builds its SPO key from canonical
+    // subject/object). Daemon sometimes ships wrapped `<urn:...>`
+    // for the same triple it returns bare elsewhere; without
+    // canonicalisation here the detail-page Triples tab would show
+    // two rows for what the badge counts as one.
+    const key = `${canonicalEntityUri(t.subject)}|${t.predicate}|${canonicalEntityUri(t.object)}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
