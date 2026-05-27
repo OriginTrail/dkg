@@ -693,17 +693,24 @@ export function curatorStatusForOverview({
     // No curator metadata on this CG — definitively not curator.
     return 'not-curator';
   }
-  if (currentAgentStatus === 'loading' || currentAgentStatus === 'error') {
+  // Codex review bug G — older daemons / transient identity errors
+  // may surface `agentAddress` without `agentDid`. `canonicalAgentDid`
+  // already accepts both forms (it normalises bare EVM addresses to
+  // the prefixed DID), so prefer ANY identity material we have over
+  // falling closed. `'unknown'` is reserved for the case where we
+  // truly have nothing to compare against.
+  const did = currentAgent?.agentDid?.trim() ?? '';
+  const addr = currentAgent?.agentAddress?.trim() ?? '';
+  const identity = did || addr;
+  if (!identity) {
+    if (currentAgentStatus === 'loading' || currentAgentStatus === 'error') {
+      return 'unknown';
+    }
+    // Status reports OK but neither agentDid nor agentAddress
+    // materialised — treat as unknown rather than fail-closed.
     return 'unknown';
   }
-  const agentDid = currentAgent?.agentDid?.trim() ?? '';
-  if (!agentDid) {
-    // Status reports OK but identity didn't materialise — treat as
-    // unknown rather than fail-closed. (Codex's scenario: an older
-    // daemon that omits `agentDid` but returns OK.)
-    return 'unknown';
-  }
-  return canonicalAgentDid(curator) === canonicalAgentDid(agentDid)
+  return canonicalAgentDid(curator) === canonicalAgentDid(identity)
     ? 'curator'
     : 'not-curator';
 }
@@ -947,18 +954,31 @@ export function ProjectOverviewCard({
           // markers actually have a row to attach to). On a public CG
           // where the curator may already be in `allowedAgents`, the
           // dedup makes this a no-op.
+          // Codex review bug H — `cg.curator` arrives as a
+          // `did:dkg:agent:0x…` URI; the rest of the roster comes
+          // from `/participants` as bare EVM addresses. The row
+          // renderer truncates with `slice(0, 6) + … + slice(-4)`,
+          // which would print `did:dk…1234` for the curator row.
+          // Strip the prefix so every row reads in the same
+          // address shape; preserve the full string in the row's
+          // hover `title` so the DID origin is recoverable.
+          const DID_PREFIX = 'did:dkg:agent:';
+          const displayOf = (raw: string): string =>
+            raw.toLowerCase().startsWith(DID_PREFIX)
+              ? raw.slice(DID_PREFIX.length)
+              : raw;
           const seen = new Set<string>();
-          const rows: { addr: string; canonical: string }[] = [];
+          const rows: { display: string; full: string; canonical: string }[] = [];
           if (curator) {
             const c = canonicalAgentDid(curator);
             seen.add(c);
-            rows.push({ addr: curator, canonical: c });
+            rows.push({ display: displayOf(curator), full: curator, canonical: c });
           }
           for (const addr of participants) {
             const c = canonicalAgentDid(addr);
             if (seen.has(c)) continue;
             seen.add(c);
-            rows.push({ addr, canonical: c });
+            rows.push({ display: displayOf(addr), full: addr, canonical: c });
           }
           if (rows.length === 0) {
             // Codex review bug E — `/participants` returns
@@ -978,7 +998,7 @@ export function ProjectOverviewCard({
           }
           return (
             <div className="v10-po-participants-list">
-              {rows.map(({ addr, canonical }) => {
+              {rows.map(({ display, full, canonical }) => {
                 const isSelf = selfIds.has(canonical);
                 const isCurator = !!curatorCanonical && canonical === curatorCanonical;
                 let suffix = '';
@@ -987,12 +1007,12 @@ export function ProjectOverviewCard({
                 else if (isCurator) suffix = ' · curator';
                 return (
                   <span
-                    key={addr}
+                    key={canonical}
                     className={`v10-po-participant${isSelf ? ' is-self' : ''}${isCurator ? ' is-curator' : ''}`}
-                    title={addr}
+                    title={full}
                   >
                     <span className="v10-po-participant-name">
-                      {addr.slice(0, 6)}…{addr.slice(-4)}{suffix}
+                      {display.slice(0, 6)}…{display.slice(-4)}{suffix}
                     </span>
                   </span>
                 );

@@ -8,6 +8,7 @@ import {
   ProjectOverviewCard,
   OverviewPrimerEntry,
   PendingJoinRequestsSection,
+  curatorStatusForOverview,
 } from '../src/ui/views/project/components.js';
 import { ContextGraphPrimerView } from '../src/ui/views/ContextGraphPrimerView.js';
 
@@ -233,6 +234,34 @@ describe('Context Graph IA and Overview', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].classList.contains('is-curator')).toBe(true);
     expect(rows[0].textContent).toContain(' · curator');
+
+    await act(async () => root.unmount());
+  });
+
+  it('renders the curator row in the bare-address shape, not the raw DID (Codex bug H)', async () => {
+    const curatorAddress = '0x1234567890ABCDEF1234567890ABCDEF12345678';
+    const { container, root } = await render(
+      React.createElement(ProjectOverviewCard, {
+        cg: {
+          id: 'cg-curator-display',
+          name: 'Display',
+          accessPolicy: 'private',
+          curator: `did:dkg:agent:${curatorAddress}`,
+        },
+        memory: baseMemory,
+        participants: [],
+        currentAgent: { agentDid: 'did:dkg:agent:0xDEADBEEF' },
+      }),
+    );
+
+    const rows = Array.from(container.querySelectorAll('.v10-po-participant'));
+    expect(rows).toHaveLength(1);
+    // Display reads in address shape (0x… …last4), NOT `did:dk…last4`.
+    expect(rows[0].textContent).not.toContain('did:dk');
+    expect(rows[0].textContent).toContain('0x1234');
+    expect(rows[0].textContent).toContain('5678');
+    // Hover title preserves the full DID for traceability.
+    expect(rows[0].getAttribute('title')).toBe(`did:dkg:agent:${curatorAddress}`);
 
     await act(async () => root.unmount());
   });
@@ -516,6 +545,52 @@ describe('Context Graph IA and Overview', () => {
     // (the fetch is gated until curator status resolves).
     expect(container.querySelector('.v10-po-join-btn')).toBeNull();
     await act(async () => root.unmount());
+  });
+
+  it('curatorStatusForOverview returns "curator" when only agentAddress is available and matches cg.curator (Codex bug G)', () => {
+    const address = '0xcafe000000000000000000000000000000000a01';
+    expect(curatorStatusForOverview({
+      cg: { curator: `did:dkg:agent:${address}`, accessPolicy: 'private' },
+      currentAgent: { agentAddress: address } as any,
+      currentAgentStatus: 'ok',
+    })).toBe('curator');
+  });
+
+  it('curatorStatusForOverview returns "curator" when agentAddress matches even on currentAgentStatus error (Codex bug G — fall-back identity)', () => {
+    const address = '0xcafe000000000000000000000000000000000a02';
+    // Real-world scenario: `/api/agent/identity` errored, but we still have a
+    // cached `agentAddress` from a prior load. Should NOT fail closed.
+    expect(curatorStatusForOverview({
+      cg: { curator: `did:dkg:agent:${address}`, accessPolicy: 'private' },
+      currentAgent: { agentAddress: address } as any,
+      currentAgentStatus: 'error',
+    })).toBe('curator');
+  });
+
+  it('curatorStatusForOverview tolerates case differences between curator DID and agentAddress (Codex bug G)', () => {
+    // EVM addresses are case-insensitive; `canonicalAgentDid` already
+    // lowercases bare EVM addresses, so this should equate.
+    const upper = '0xCAFE000000000000000000000000000000000A03';
+    const lower = '0xcafe000000000000000000000000000000000a03';
+    expect(curatorStatusForOverview({
+      cg: { curator: `did:dkg:agent:${upper}`, accessPolicy: 'private' },
+      currentAgent: { agentAddress: lower } as any,
+      currentAgentStatus: 'ok',
+    })).toBe('curator');
+  });
+
+  it('curatorStatusForOverview returns "unknown" only when there is literally no identity material', () => {
+    expect(curatorStatusForOverview({
+      cg: { curator: 'did:dkg:agent:0xABC', accessPolicy: 'private' },
+      currentAgent: null,
+      currentAgentStatus: 'loading',
+    })).toBe('unknown');
+
+    expect(curatorStatusForOverview({
+      cg: { curator: 'did:dkg:agent:0xABC', accessPolicy: 'private' },
+      currentAgent: null,
+      currentAgentStatus: 'error',
+    })).toBe('unknown');
   });
 
   it('renders At a glance status hints as title tooltips, not inline (§4.2.1 Delta 2)', async () => {
