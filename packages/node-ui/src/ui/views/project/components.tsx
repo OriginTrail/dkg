@@ -67,6 +67,7 @@ import {
 } from './helpers.js';
 import { EmptyState, StatStrip, toneForLayer } from '../../components/ContextGraphPrimitives.js';
 import { isUserFacingSubGraph } from '../../lib/subGraphs.js';
+import { useNodeEvents } from '../../hooks/useNodeEvents.js';
 
 export const RdfGraph = lazy(() =>
   import('@origintrail-official/dkg-graph-viz/react').then(m => ({ default: m.RdfGraph }))
@@ -1080,41 +1081,66 @@ export function PendingJoinRequestsSection({
   const [requests, setRequests] = useState<PendingJoinRequest[]>([]);
   const [processing, setProcessing] = useState<string | null>(null);
   const [status, setStatus] = useState<'idle' | 'loading' | 'error'>('loading');
+  // Mirror `cancelled` across the effect via a ref so the
+  // event-driven refetch path can share it with the mount-effect
+  // path without re-creating the closure on every render.
+  const fetchRequestIdRef = useRef(0);
 
-  useEffect(() => {
-    // Codex review bug N (reverts the optimistic-fetch logic from
-    // bug L). The daemon's `/join-requests` route does NOT gate
-    // on curator identity — see `packages/cli/src/daemon/routes/
-    // context-graph.ts:898-909` which calls
-    // `agent.listPendingJoinRequests`, whose body is a raw SPARQL
-    // read of the meta graph (`packages/agent/src/dkg-agent.ts:
-    // 13126-13152`) with no caller authentication. Until that
-    // gating lands server-side, firing the request in `'unknown'`
-    // status would leak pending-moderation metadata to any caller
-    // whose `/api/agent/identity` lookup is mid-resolution / errored.
-    // Fail closed at the UI: only fetch when we have positive
-    // local proof of curator status. The "Verifying access…"
-    // panel below stays as the safe gate for `'unknown'`.
+  // Codex review bug N (reverts the optimistic-fetch logic from
+  // bug L). The daemon's `/join-requests` route does NOT gate
+  // on curator identity — see `packages/cli/src/daemon/routes/
+  // context-graph.ts:898-909` which calls
+  // `agent.listPendingJoinRequests`, whose body is a raw SPARQL
+  // read of the meta graph (`packages/agent/src/dkg-agent.ts:
+  // 13126-13152`) with no caller authentication. Until that
+  // gating lands server-side, firing the request in `'unknown'`
+  // status would leak pending-moderation metadata to any caller
+  // whose `/api/agent/identity` lookup is mid-resolution / errored.
+  // Fail closed at the UI: only fetch when we have positive
+  // local proof of curator status. The "Verifying access…"
+  // panel below stays as the safe gate for `'unknown'`.
+  const refresh = useCallback(() => {
     if (curatorStatus !== 'curator') {
       setRequests([]);
       setStatus('idle');
       return;
     }
-    let cancelled = false;
+    const requestId = ++fetchRequestIdRef.current;
     setStatus('loading');
     listJoinRequests(contextGraphId)
       .then(data => {
-        if (cancelled) return;
+        if (fetchRequestIdRef.current !== requestId) return;
         setRequests(data.requests.filter(r => r.status === 'pending'));
         setStatus('idle');
       })
       .catch(() => {
-        if (cancelled) return;
+        if (fetchRequestIdRef.current !== requestId) return;
         setRequests([]);
         setStatus('error');
       });
-    return () => { cancelled = true; };
   }, [contextGraphId, curatorStatus]);
+
+  useEffect(() => {
+    refresh();
+    return () => { fetchRequestIdRef.current++; };
+  }, [refresh]);
+
+  // Auto-refresh on SSE events scoped to this CG. The daemon
+  // emits `join_request` when a new request arrives
+  // (cli/src/daemon/lifecycle.ts:1899-1921), and
+  // `join_approved` / `join_rejected` when a moderation action
+  // resolves — refetching on all three keeps the list live
+  // across browser tabs, multi-curator nodes, and concurrent
+  // sessions without polling.
+  useNodeEvents(useCallback((event) => {
+    if (
+      event.type !== 'join_request'
+      && event.type !== 'join_approved'
+      && event.type !== 'join_rejected'
+    ) return;
+    if (event.data?.contextGraphId !== contextGraphId) return;
+    refresh();
+  }, [contextGraphId, refresh]));
 
   // Definitive non-curator — section is dead UI and stays hidden.
   if (curatorStatus === 'not-curator') return null;

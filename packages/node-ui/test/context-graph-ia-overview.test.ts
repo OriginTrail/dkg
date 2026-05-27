@@ -33,6 +33,26 @@ vi.mock('../src/ui/api.js', async (importOriginal) => {
   };
 });
 
+// SSE-driven auto-refresh path (`PendingJoinRequestsSection` now
+// subscribes via `useNodeEvents`). Capture the registered handler
+// so tests can drive a fake `join_request` event without standing
+// up an EventSource.
+const nodeEventsMock = vi.hoisted(() => {
+  const handlers = new Set<(event: { type: string; data: Record<string, unknown> }) => void>();
+  return {
+    useNodeEvents: (handler: (event: { type: string; data: Record<string, unknown> }) => void) => {
+      handlers.add(handler);
+    },
+    emit(event: { type: string; data: Record<string, unknown> }) {
+      handlers.forEach(h => h(event));
+    },
+    reset() { handlers.clear(); },
+  };
+});
+vi.mock('../src/ui/hooks/useNodeEvents.js', () => ({
+  useNodeEvents: nodeEventsMock.useNodeEvents,
+}));
+
 import {
   LayerSwitcher,
   ProjectOverviewCard,
@@ -78,6 +98,7 @@ describe('Context Graph IA and Overview', () => {
     apiMock.listJoinRequests.mockResolvedValue({ requests: [] });
     apiMock.approveJoinRequest.mockReset();
     apiMock.rejectJoinRequest.mockReset();
+    nodeEventsMock.reset();
   });
 
   afterEach(() => {
@@ -729,6 +750,78 @@ describe('Context Graph IA and Overview', () => {
     );
     expect(container.querySelector('[data-section="join-requests"]')).toBeTruthy();
     expect(apiMock.listJoinRequests).toHaveBeenCalledWith('cg-join');
+    await act(async () => root.unmount());
+  });
+
+  it('PendingJoinRequestsSection refetches when an SSE `join_request` event arrives for this CG', async () => {
+    // Initial fetch returns an empty list (mount-time call).
+    apiMock.listJoinRequests.mockResolvedValueOnce({ requests: [] });
+    const { container, root } = await render(
+      React.createElement(PendingJoinRequestsSection, {
+        contextGraphId: 'cg-join',
+        curatorStatus: 'curator' as const,
+      }),
+    );
+    expect(apiMock.listJoinRequests).toHaveBeenCalledTimes(1);
+    // No row yet.
+    expect(container.querySelector('.v10-po-join-item')).toBeNull();
+
+    // Next fetch resolves with a row — simulating the daemon
+    // having recorded a new join request just before the SSE
+    // `join_request` event fires.
+    apiMock.listJoinRequests.mockResolvedValueOnce({
+      requests: [
+        { agentAddress: '0xabc1230000000000000000000000000000000123', status: 'pending', name: 'Pending Bob' },
+      ],
+    });
+    await act(async () => {
+      nodeEventsMock.emit({ type: 'join_request', data: { contextGraphId: 'cg-join' } });
+    });
+    expect(apiMock.listJoinRequests).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain('Pending Bob');
+
+    await act(async () => root.unmount());
+  });
+
+  it('PendingJoinRequestsSection ignores SSE `join_request` events scoped to a different CG', async () => {
+    apiMock.listJoinRequests.mockResolvedValue({ requests: [] });
+    const { root } = await render(
+      React.createElement(PendingJoinRequestsSection, {
+        contextGraphId: 'cg-join',
+        curatorStatus: 'curator' as const,
+      }),
+    );
+    expect(apiMock.listJoinRequests).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      nodeEventsMock.emit({ type: 'join_request', data: { contextGraphId: 'cg-other' } });
+    });
+    // Different CG — no refetch.
+    expect(apiMock.listJoinRequests).toHaveBeenCalledTimes(1);
+
+    await act(async () => root.unmount());
+  });
+
+  it('PendingJoinRequestsSection refetches on `join_approved` and `join_rejected` events too', async () => {
+    apiMock.listJoinRequests.mockResolvedValue({ requests: [] });
+    const { root } = await render(
+      React.createElement(PendingJoinRequestsSection, {
+        contextGraphId: 'cg-join',
+        curatorStatus: 'curator' as const,
+      }),
+    );
+    expect(apiMock.listJoinRequests).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      nodeEventsMock.emit({ type: 'join_approved', data: { contextGraphId: 'cg-join' } });
+    });
+    expect(apiMock.listJoinRequests).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      nodeEventsMock.emit({ type: 'join_rejected', data: { contextGraphId: 'cg-join' } });
+    });
+    expect(apiMock.listJoinRequests).toHaveBeenCalledTimes(3);
+
     await act(async () => root.unmount());
   });
 
