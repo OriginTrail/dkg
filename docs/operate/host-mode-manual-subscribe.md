@@ -42,10 +42,10 @@ runbook covers.
 
 | # | Path | Wired at | Triggers when |
 |---|------|----------|---------------|
-| 1 | **Chain-event auto-subscribe** | `packages/agent/src/dkg-agent.ts:1737-1803` (`ContextGraphCreated` event listener inside the chain poller) | Curator registers an `accessPolicy=1` CG on-chain with a `nameHash` commitment. Cores in the sharding table with `swmHostMode` enabled subscribe immediately on event arrival. |
-| 2 | **Discovery beacon** | `packages/agent/src/dkg-agent.ts:1810-1838` (global `DKG_CG_DISCOVERY_TOPIC` gossip subscribe + `BEACON_REANNOUNCE_INTERVAL_MS` re-announce timer) | Curator pre-registers a CG (before any on-chain transaction) and starts re-announcing it on the discovery topic. Cores hear the beacon and subscribe. Used for pre-reg / off-chain-only CGs. |
-| 3 | **Periodic reconciler** | `packages/agent/src/dkg-agent.ts:9347-9376` (`hostModeReconcilerTimer`, default 30s) | Catches anything the first two paths missed (chain event lost in a re-org, beacon missed during a restart, etc.). Sweeps every locally-known CG and ensures host-mode subscription state is in sync. Idempotent. |
-| 4 | **Operator-driven manual subscribe** *(this runbook)* | `packages/cli/src/daemon/routes/memory.ts:960-977` (`POST /api/shared-memory/host-mode/subscribe`) | Operator explicitly POSTs a `contextGraphId`. The daemon enables host-mode for it the same way the reconciler would. |
+| 1 | **Chain-event auto-subscribe** | `packages/agent/src/dkg-agent.ts` (`ContextGraphCreated` handler inside the chain poller) | Curator registers an `accessPolicy=1` CG on-chain with a `nameHash` commitment. Cores in the sharding table with `swmHostMode` enabled subscribe immediately on event arrival. |
+| 2 | **Discovery beacon** | `packages/agent/src/dkg-agent.ts` (`DKG_CG_DISCOVERY_TOPIC` gossip subscription + `BEACON_REANNOUNCE_INTERVAL_MS` re-announce timer) | Curator pre-registers a CG (before any on-chain transaction) and starts re-announcing it on the discovery topic. Cores hear the beacon and subscribe. Used for pre-reg / off-chain-only CGs. |
+| 3 | **Periodic reconciler** | `packages/agent/src/dkg-agent.ts` (`hostModeReconcilerTimer`, `sweepSwmHostModeSubscriptions`) | Catches anything the first two paths missed (chain event lost in a re-org, beacon missed during a restart, etc.). Sweeps every locally-known CG and ensures host-mode subscription state is in sync. Idempotent. |
+| 4 | **Operator-driven manual subscribe** *(this runbook)* | `packages/cli/src/daemon/routes/memory.ts` (`POST /api/shared-memory/host-mode/subscribe`) | Operator explicitly POSTs a `contextGraphId`. The daemon enables host-mode for it the same way the reconciler would. |
 
 Paths 1–3 cover the documented Phase B happy path: a curator registers
 a CG, cores see it, cores host it. Path 4 exists for the gaps those
@@ -61,10 +61,10 @@ of:
    curated CG used inside an organization that lives entirely off-chain).
    Paths 1 and 2 cannot fire; path 3 only reconciles CGs the local node
    already knows about, so a fresh core needs to be told the id.
-2. **Coverage gap during rc.10 rollout.** Fewer than `minimumRequired-
-   Signatures` rc.10 cores are connected to the curator, and you (the
+2. **Coverage gap during rollout.** Fewer than `minimumRequired-
+   Signatures` capable cores are connected to the curator, and you (the
    operator) want to deliberately enroll a specific core as an opaque
-   host. This is a transitional tool while the rc.10 testnet capacity
+   host. This is a transitional tool while testnet core capacity
    ramps; once enough cores are auto-subscribed via paths 1–3, this
    case goes away.
 3. **Late-joining member catchup is failing** AND the failure log shows
@@ -148,7 +148,7 @@ After a successful POST:
    `subscribedCgIds` array (alongside `enabled`, `cgCount`,
    `totalBytes`, `totalEntries`). This is the host-mode store
    diagnostics endpoint, served by
-   `packages/cli/src/daemon/routes/memory.ts:947-957` and backed by
+   `packages/cli/src/daemon/routes/memory.ts` and backed by
    `DKGAgent.getSwmHostModeStats()`. Entries in `subscribedCgIds`
    are always the **canonical wire-form** id (the curator-committed
    `nameHash`, lowercase 0x-prefixed 32-byte hex) regardless of
@@ -181,24 +181,16 @@ After a successful POST:
    member holds the AEAD chain key — see SCENARIO D in
    `scripts/devnet-test-rfc38-late-joiner.sh`).
 
-## How to undo it
+## How to stop hosting
 
-```bash
-curl -X POST \
-  -H "Authorization: Bearer $AUTH" \
-  -d '{ "contextGraphId": "<id>" }' \
-  http://127.0.0.1:9201/api/shared-memory/host-mode/unsubscribe
-```
-
-Idempotent. Tears down the gossip handler, removes the persistence
-record, and the periodic reconciler will NOT re-add it on the next
-sweep (the unmark is persisted).
-
-Note that if path 1, 2, or 3 still match for this CG (e.g. a chain
-event re-fires because the CG was re-registered), the auto-subscribe
-will resurrect host-mode for this CG. The manual unsubscribe is an
-explicit "I don't want to host this right now"; it isn't a permanent
-blocklist.
+The current daemon exposes a manual subscribe route and a stats route;
+it does **not** expose a `POST /api/shared-memory/host-mode/unsubscribe`
+route. If you need to stop hosting before a supported per-CG unsubscribe
+API exists, use an operator maintenance path outside this endpoint:
+disable `swmHostMode` for the daemon and restart to stop host-mode
+handlers, or perform a reviewed cleanup of the persisted host-mode store
+record and restart. Do not script a manual unsubscribe curl against this
+daemon version.
 
 ## Anti-patterns
 
@@ -222,12 +214,12 @@ blocklist.
 
 ## Related
 
-- `packages/cli/src/daemon/routes/memory.ts:960-977` — endpoint
+- `packages/cli/src/daemon/routes/memory.ts` — endpoint
   implementation.
-- `packages/agent/src/dkg-agent.ts:10371-…` — `enableSwmHostModeFor`,
+- `packages/agent/src/dkg-agent.ts` — `enableSwmHostModeFor`,
   the agent-side handler the endpoint delegates to.
-- `packages/agent/src/dkg-agent.ts:1737-1803` (chain-event),
-  `1810-1838` (beacon), `9347-9376` (reconciler) — the three
+- `packages/agent/src/dkg-agent.ts` — `ContextGraphCreated` handler,
+  discovery beacon, and host-mode reconciler — the three
   automatic paths this runbook supplements.
 - `scripts/devnet-test-rfc38-late-joiner.sh` SCENARIO D — the
   end-to-end happy path this endpoint participates in.

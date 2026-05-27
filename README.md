@@ -132,7 +132,7 @@ Skip the framework wiring — run the daemon directly and use the CLI or HTTP AP
 
 ```bash
 npm install -g @origintrail-official/dkg
-dkg init      # creates ~/.dkg/config.yaml (auto-funds wallets on testnet if faucet reachable)
+dkg init      # creates ~/.dkg/config.json (auto-funds wallets on testnet if faucet reachable)
 dkg start     # starts the node daemon on http://127.0.0.1:9200
 ```
 

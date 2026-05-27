@@ -12,7 +12,9 @@ doc_type: how-to
 > Contributor migration notes for future protocol additions live in codebase-only
 > agent context, outside the public docs tree.
 >
-> Status: shipping in `v10.0.0-rc.9`.
+> Status: active in the current V10 code. Current substrate-routed
+> protocols use `/dkg/10.0.1/*`; a small set of legacy bare protocols
+> still uses `/dkg/10.0.0/*`.
 
 This is the operator-facing manual for running a DKG node on top of
 the Universal Messenger substrate. The two surfaces you'll touch in
@@ -136,7 +138,8 @@ curl -s http://127.0.0.1:9200/api/slo \
       "delivered": 1602,     // monotonic counter (since daemon start)
       "queued": 14           // monotonic; "queued" = first send failed → outbox
     },
-    "/dkg/10.0.1/storage-ack": { ... }
+    "/dkg/10.0.1/storage-ack": { ... },
+    "/dkg/10.0.1/swm-update": { ... }
   },
   // rc.9 PR-A (SWM reliable fan-out, Step 0): two new sections,
   // additive — soak tooling and operators that only parse `protocols`
@@ -175,7 +178,31 @@ curl -s http://127.0.0.1:9200/api/slo \
     // Sticky boolean — true once the per-cgId cap eviction has fired.
     // Means the `redundantApplies` breakdown is partial; the grand
     // total is still `sum(redundantApplies) + redundantAppliesOverflow`.
-    "redundantAppliesTruncated": false
+    "redundantAppliesTruncated": false,
+    "substrateFanout": {
+      "delivered": { "did:dkg:context-graph:lex/playground": 8 },
+      "rejected": {},
+      "retryable": {},
+      "queued": {},
+      "inFlight": {},
+      "failed": {},
+      "overflow": {
+        "delivered": 0,
+        "rejected": 0,
+        "retryable": 0,
+        "queued": 0,
+        "inFlight": 0,
+        "failed": 0
+      },
+      "truncated": false
+    },
+    "shareAckQuorum": {
+      "tracked": 10,
+      "completed": 10,
+      "watchdogFired": 0,
+      "deadlineExpired": 0,
+      "pending": 0
+    }
   }
 }
 ```
@@ -201,8 +228,7 @@ flowed and no SWM share has either failed at gossip or been applied
   the grand total is still accurate.
 - **`swm.redundantApplies[cgId] > 0`** → a (cgId, shareOpId) was
   re-delivered within the TTL window and applied a second time.
-  Pure measurement: behaviour is unchanged. Used to inform the rc10
-  dedup decision (RFC-003 Concern-2).
+  Pure measurement: behaviour is unchanged.
 - **`swm.redundantAppliesLowerBound = true`** → the receiver-side
   `seenShareOps` cap eviction had to trim a still-live entry to
   stay bounded. `redundantApplies` is now a lower bound for the
@@ -214,6 +240,12 @@ flowed and no SWM share has either failed at gossip or been applied
   total is still accurate via
   `sum(redundantApplies) + redundantAppliesOverflow`. If `Truncated`
   flips in normal operation (no hostile peer), raise the cap.
+- **`swm.substrateFanout`** → per-CG outcome counters for the
+  point-to-point SWM delivery path. A healthy run has `delivered`
+  growing, low or empty `queued`, and no sustained `failed` growth.
+- **`swm.shareAckQuorum`** → ack-quorum overlay counters. `completed`
+  should grow with `tracked`; sustained `deadlineExpired` means peers
+  missed the delivery window and will need reconnect sync to catch up.
 
 ### Clock definition
 
@@ -231,20 +263,21 @@ attempt (initial send or any background outbox retry) resolves to
 - Receiver-side dedup hits are recorded as delivered with zero
   latency (the caller's effective "perceived" RTT).
 
-This is the operator-visible "I clicked send → it arrived" time, which
-is what the ship-gate SLO targets measure.
+This is the operator-visible "I clicked send → it arrived" time.
 
 ### SLO targets
 
-| Protocol family                                                                  | SLO         |
-| -------------------------------------------------------------------------------- | ----------- |
-| chat / skill_request / query-remote                                              | ≥ 99%/15s   |
-| swm-sender-key / private-access / join-request / storage-ack / verify-proposal   | ≥ 99.5%/15s |
+The runtime exposes measurements, not a pass/fail policy. Historical
+rc.9 soak runs used 15-second p99 thresholds; current operators should
+evaluate each protocol family against the workflow they are testing.
 
-The ship-gate runs the soak script
-(`scripts/libp2p-soak-test.sh`) across both Lex and Miles for an
-overnight run; `/api/slo` is the source of truth for go/no-go on the
-`v10.0.0-rc.9` tag.
+| Protocol family | Historical soak target |
+| --- | --- |
+| chat / skill_request / query-remote / sync | >= 99% within 15s |
+| swm-sender-key / swm-update / swm-share-ack / swm-host-catchup / private-access / join-request / storage-ack / verify-proposal | >= 99.5% within 15s |
+
+Use the soak script (`scripts/libp2p-soak-test.sh`) for long-running
+evidence and `/api/slo` for the local node's current in-memory view.
 
 ### Reading guide
 
@@ -270,6 +303,11 @@ overnight run; `/api/slo` is the source of truth for go/no-go on the
   the existing `preflight.jsonl`, `sends.jsonl`, `inbox.jsonl`. The
   human-readable summary line in `main.log` reads e.g.
   `slo: message=d12/q0 p99=145ms, query-remote=d3/q0 p99=890ms, ...`.
+- **SWM fan-out.** `swm.substrateFanout` is the per-CG outcome counter
+  for point-to-point SWM delivery. `shareAckQuorum` tracks the
+  ack-quorum overlay: `completed` should grow with `tracked`; sustained
+  `deadlineExpired` means recipients missed the delivery window and
+  will need reconnect sync to catch up.
 
 ### Caveats
 
@@ -277,8 +315,8 @@ overnight run; `/api/slo` is the source of truth for go/no-go on the
   counters and samples. The SQLite outbox itself survives restart;
   the SLO view does not.
 - Samples are recorded only for protocols routed through the
-  substrate. Anything still on `/dkg/10.0.0/*` (none at rc.9 ship;
-  the surface remains for future incremental migrations) is
+  substrate. Current bare `/dkg/10.0.0/*` examples include
+  `publish`, `query`, `discover`, and `verify-approval`; they are
   invisible to `/api/slo`.
 
 ## Debugging a stuck outbox entry
@@ -322,24 +360,10 @@ will not retry deleted entries, and the receiver-side idempotency
 table still absorbs duplicates if the same `messageId` ever shows up
 on a re-issue path.
 
-## Upgrade from rc.8 to rc.9
+## Mixed-version protocol note
 
-Wire-format break: all 8 short-message protocols moved from
-`/dkg/10.0.0/*` to `/dkg/10.0.1/*`. Both daemons in a pair must be on
-rc.9 for chat / skill / query / etc. to work between them. Mixed-pair
-deploys (one node rc.8, one node rc.9) will fail negotiation on the
-substrate-bumped protocols and surface as `delivered: false, queued:
-true` outbox entries that drain once both sides upgrade.
-
-Upgrade order recommendation:
-
-1. Drain the rc.8 chat outbox on each node (let the daemon idle for
-   one tick cycle — typically 30s).
-2. Stop the rc.8 daemon.
-3. Pull rc.9, start the rc.9 daemon. The V12 + V13 SQLite migrations
-   run automatically.
-4. Repeat on the paired node.
-
-`chat_messages.message_id` column is preserved (nullable + unwritten
-by rc.9) for hot-rollback safety; rc.8 finds a column it recognises
-if you have to fall back.
+Substrate-routed protocols use `/dkg/10.0.1/*` and require both peers
+to advertise the same protocol ID. Older peers that only advertise the
+pre-substrate `/dkg/10.0.0/*` IDs will fail negotiation for chat,
+query-remote, sync, SWM fan-out, and the other substrate-routed
+protocols. Upgrade both sides before relying on those workflows.

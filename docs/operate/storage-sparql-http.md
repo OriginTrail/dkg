@@ -15,7 +15,7 @@ The DKG node can use any **SPARQL 1.1 Protocol**–compliant store instead of th
 
 ## Backend: `sparql-http`
 
-Configure the node to use the **`sparql-http`** backend with a **query endpoint** and an **update endpoint**. If your server uses a single URL for both (e.g. Blazegraph), set both options to the same URL.
+Configure the node to use the **`sparql-http`** backend with a **query endpoint**. `updateEndpoint` is optional and defaults to `queryEndpoint`, which covers stores that use one URL for both query and update.
 
 ### Config (CLI / config.json)
 
@@ -38,6 +38,7 @@ In `~/.dkg/config.json` (or your `DKG_HOME` config):
 
 Optional:
 
+- **`updateEndpoint`** — SPARQL update endpoint. Defaults to `queryEndpoint` when omitted.
 - **`timeout`** — request timeout in ms (default `30000`).
 - **`auth`** — `Authorization` header value, e.g. `"Bearer <token>"` or `"Basic <base64>"`.
 
@@ -58,7 +59,7 @@ Optional:
 
 ### Other stores
 
-- **Blazegraph:** One URL for both query and update. Set `queryEndpoint` and `updateEndpoint` to the same URL (e.g. `http://127.0.0.1:9999/blazegraph/namespace/kb/sparql`).
+- **Blazegraph:** One URL for both query and update. Set only `queryEndpoint` or set both options to the same URL (e.g. `http://127.0.0.1:9999/blazegraph/namespace/kb/sparql`).
 - **Apache Jena Fuseki:** Typically `http://host:3030/dataset/query` and `http://host:3030/dataset/update`.
 - **GraphDB, Neptune, Stardog:** Use the vendor’s SPARQL query and update URLs; add `auth` if required.
 

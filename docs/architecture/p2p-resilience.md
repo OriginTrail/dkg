@@ -7,8 +7,8 @@ doc_type: architecture
 
 # P2P Resilience for NAT'd edge nodes
 
-Status: partial — this PR lands three hooks, the remaining items are tracked
-as TODOs near the end.
+Status: implemented in the current V10 code. The remaining-work section
+tracks follow-ups that are not required for the shipped hooks.
 
 ## Context
 
@@ -51,7 +51,7 @@ In practice we were seeing one or more of the following failure modes:
   `peer:connect`; if that attempt failed over a lossy relay, no further
   attempt was made until the daemon was restarted.
 
-## What this PR adds
+## Implemented hooks
 
 ### 1. Relay reservation renewal (primary fix)
 
@@ -124,7 +124,7 @@ which fires its own `connection:open`).
 
 ## Remaining work
 
-These are the follow-ups that didn't fit into this PR.
+These are known follow-ups that are not required for the current shipped hooks.
 
 ### DCUtR upgrade verification
 

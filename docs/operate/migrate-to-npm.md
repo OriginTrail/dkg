@@ -7,7 +7,7 @@ doc_type: how-to
 
 # Migrate a git-checkout install to the npm-pinned auto-update path
 
-This guide is for operators currently running a DKG node from a `git clone`d checkout (typical layout: `~/dkg-v9/` with `.git`, `packages/`, `node_modules/`, `pnpm-lock.yaml`, `package.json`). It walks through converting that install to use the npm-pinned auto-update path without re-installing.
+This guide is for operators currently running a DKG node from a `git clone`d checkout (typical layout: `~/dkg/` with `.git`, `packages/`, `node_modules/`, `pnpm-lock.yaml`, `package.json`). It walks through converting that install to use the npm-pinned auto-update path without re-installing.
 
 The end-state: the daemon's auto-updater fetches pre-built artifacts of a specific `@origintrail-official/dkg` version from npm into `~/.dkg/releases/{a,b}/`, instead of building from source against the tracked git branch on every update cycle.
 
@@ -15,8 +15,8 @@ The end-state: the daemon's auto-updater fetches pre-built artifacts of a specif
 
 The build-from-source auto-update path (active when the CLI detects a monorepo checkout) is fragile for long-running production daemons:
 
-- **It runs `tsc` + dependent build steps on every update**, exposing the daemon to any regression that lands on the tracked branch between two polling cycles. The rc.10 release retrospective for beacon-01 traced a shutdown deadlock to exactly this pattern: PR #639 merged to main, the next auto-update cycle built it, and the deadlock fired on the worker's first SIGTERM.
-- **It is harder to pin to a known-good version.** With the npm path, the operator can set `autoUpdate.npmVersion = "10.0.0-rc.10"` (or just track `latest`) and know exactly what they'll get. With the git path, "latest" means "whatever `main` happens to look like at polling time".
+- **It runs `tsc` + dependent build steps on every update**, exposing the daemon to any regression that lands on the tracked branch between two polling cycles. A previous release retrospective for beacon-01 traced a shutdown deadlock to exactly this pattern: a regression merged to `main`, the next auto-update cycle built it, and the deadlock fired on the worker's first SIGTERM.
+- **It is harder to pin to a known-good version.** With the npm path, the operator can set `autoUpdate.npmVersion = "10.0.0-rc.11"` (or just track `latest`) and know exactly what they'll get. With the git path, "latest" means "whatever `main` happens to look like at polling time".
 - **It pulls a much larger dependency surface.** `pnpm install --frozen-lockfile` for the full monorepo runs hardhat, the EVM module's solidity tooling, and all dev dependencies. The npm path installs only the `production` dependency set.
 
 ## What the migration actually does
@@ -95,8 +95,8 @@ If something goes wrong before the first auto-update cycle has swapped slots:
 
 ```bash
 dkg stop
-mv ~/dkg-v9/package.json.pre-npm-migration-<timestamp> ~/dkg-v9/package.json
-mv ~/dkg-v9/.git.pre-npm-migration-<timestamp> ~/dkg-v9/.git
+mv ~/dkg/package.json.pre-npm-migration-<timestamp> ~/dkg/package.json
+mv ~/dkg/.git.pre-npm-migration-<timestamp> ~/dkg/.git
 # Remove or revert autoUpdate.source in ~/.dkg/config.json:
 cp ~/.dkg/config.json.pre-migration ~/.dkg/config.json
 dkg start
@@ -143,7 +143,7 @@ dkg migrate-to-npm --apply
 
 The migration script refuses to mutate the source tree while the daemon is alive, because:
 
-- The worker process holds file descriptors open against `~/dkg-v9/packages/cli/dist/`. A rename mid-flight on POSIX systems is generally safe (the inode survives), but any in-flight write to `package.json` (highly unlikely but possible from a worker auto-update routine) would be lost.
+- The worker process holds file descriptors open against `~/dkg/packages/cli/dist/`. A rename mid-flight on POSIX systems is generally safe (the inode survives), but any in-flight write to `package.json` (highly unlikely but possible from a worker auto-update routine) would be lost.
 - The next worker spawn would see the renamed tree and behave unexpectedly — the supervisor would either crash or boot from a half-migrated state.
 
 If the daemon is wedged and `dkg stop` doesn't work:
@@ -164,17 +164,17 @@ npm install -g @origintrail-official/dkg
 which dkg                              # should now point at the npm-installed binary
 dkg --version                          # confirm it matches what's in your blue-green slot
 dkg stop
-rm -rf ~/dkg-v9/packages ~/dkg-v9/node_modules ~/dkg-v9/pnpm-lock.yaml
+rm -rf ~/dkg/packages ~/dkg/node_modules ~/dkg/pnpm-lock.yaml
 dkg start
 ```
 
-At that point `~/dkg-v9/` contains only the renamed backup files (`.git.pre-npm-migration-...`, `package.json.pre-npm-migration-...`) and is safe to delete entirely.
+At that point `~/dkg/` contains only the renamed backup files (`.git.pre-npm-migration-...`, `package.json.pre-npm-migration-...`) and is safe to delete entirely.
 
 ## Log rotation (cross-cutting recommendation)
 
-Unrelated to this migration but discovered by the same incident retrospective: beacon-01 accumulated **134 MB of `daemon.log` in 24 hours** during the rc.10 deadlock, dominated by chain-provider polling spam. Independent of whether you migrate, set up log rotation:
+Unrelated to this migration but discovered by the same incident retrospective: beacon-01 accumulated **134 MB of `daemon.log` in 24 hours** during a shutdown deadlock, dominated by chain-provider polling spam. Independent of whether you migrate, set up log rotation:
 
-`/etc/logrotate.d/dkg-v9`:
+`/etc/logrotate.d/dkg`:
 
 ```
 /home/<your-user>/.dkg/daemon.log {
@@ -188,4 +188,4 @@ Unrelated to this migration but discovered by the same incident retrospective: b
 }
 ```
 
-`copytruncate` is required — the daemon does not respond to SIGHUP for log reopening, and renaming the file out from under it would silently lose subsequent writes. A future PR (planned PR-8 in the core-stability workstream) will fix the chain-provider log spam at the source.
+`copytruncate` is required — the daemon does not respond to SIGHUP for log reopening, and renaming the file out from under it would silently lose subsequent writes. A future core-stability fix should reduce chain-provider log spam at the source.

@@ -7,15 +7,16 @@ doc_type: architecture
 
 # Universal Messenger
 
-> Status: shipping in `v10.0.0-rc.9`. All 8 short-message protocols now route through the substrate; per-message delivery + latency observable via `/api/slo`.
+> Status: active in the current V10 code. The original rc.9 migration moved the first short-message protocols onto this substrate; current code also routes sync and SWM delivery/catchup protocols through `Messenger`.
 
 The Universal Messenger is the reliability substrate every short
 peer-to-peer DKG protocol travels through. It generalises the chat-
 specific outbox + receiver-dedup work from rc.8 (PRs #533, #534, #536,
 #537, #538) into a single layer that wraps `ProtocolRouter.send` and
-gives every caller — chat, skill request, query-remote, swm-sender-key,
-private-access, join-request, storage-ack, verify-proposal — the same
-delivery guarantees:
+gives every caller — chat, skill request, query-remote, sync,
+swm-sender-key, SWM update/share-ack/host-catchup, private-access,
+join-request, storage-ack, verify-proposal — the same delivery
+guarantees:
 
 - **At-least-once delivery** with sender-side durable retry (survives
   daemon crash mid-retry).
@@ -88,9 +89,10 @@ The substrate is composed of:
 4. **`Messenger`** class (`packages/agent/src/p2p/messenger.ts`) — wires
    the above together around `ProtocolRouter`. Provides `sendReliable`
    + `register` as the only public surface every protocol needs.
-   Legacy `sendToPeer` is retained as a bare pass-through for any
-   `/dkg/10.0.0/*` caller that hasn't migrated yet (none remain at
-   rc.9 ship; the surface exists for future incremental migrations).
+   Legacy `sendToPeer` is retained as a bare pass-through for protocol
+   IDs that intentionally remain outside the substrate or for
+   compatibility wrappers. Current bare `/dkg/10.0.0/*` constants
+   include `publish`, `query`, `discover`, and `verify-approval`.
 
 ## Topology + sequence flows
 
@@ -168,7 +170,8 @@ Key topology facts:
 
 ### Flow 1 — Happy path
 
-Applies to all 8 protocols. The relay forwards bytes opaquely.
+Applies to protocols registered through `Messenger.register`. The relay
+forwards bytes opaquely.
 
 ```mermaid
 sequenceDiagram
@@ -400,15 +403,24 @@ is idempotent at the app layer) or surface a terminal error.
 
 ## Per-protocol coverage
 
-All 8 short-message protocols ship on the substrate in `v10.0.0-rc.9`.
-Contributor migration notes for future protocol additions live in codebase-only
-agent context, outside the public docs tree.
+Current code routes the following `/dkg/10.0.1/*` protocols through
+`Messenger.register` / `Messenger.sendReliable`. The legacy
+`/dkg/10.0.0/publish`, `/dkg/10.0.0/query`,
+`/dkg/10.0.0/discover`, and `/dkg/10.0.0/verify-approval`
+constants remain bare protocol-router callers and are not included in
+`/api/slo` substrate histograms. Contributor migration notes for future
+protocol additions live in codebase-only agent context, outside the
+public docs tree.
 
 | Protocol                       | Migrated in | parallelPaths | Notes                                                                                                  |
 | ------------------------------ | ----------- | ------------- | ------------------------------------------------------------------------------------------------------ |
 | `/dkg/10.0.1/message` (chat)   | PR-3        | 2 (default)   | Pilot. Wire-format break replaces `chat_messages.message_id` index uniqueness.                         |
 | `/dkg/10.0.1/skill_request`    | PR-3        | 1             | Migrated alongside chat (shares `agent.sendMessage` path).                                             |
+| `/dkg/10.0.1/sync`             | PR-E        | 1             | Authenticated sync pages route through `Messenger`; queued sends fail the synchronous page attempt and the sync layer retries later. |
 | `/dkg/10.0.1/swm-sender-key`   | PR-8        | 1             | Synchronous: SWM-key send treats `queued` as a hard failure (epoch setup blocks).                      |
+| `/dkg/10.0.1/swm-update`       | PR-C        | 1             | Reliable point-to-point SWM share fan-out. Receiver reuses the same `SharedMemoryHandler` apply path as gossip. |
+| `/dkg/10.0.1/swm-share-ack`    | PR-D        | 1             | Per-recipient acknowledgement for gossip-applied shares. Substrate-delivered shares ACK via the substrate response instead. |
+| `/dkg/10.0.1/swm-host-catchup` | LU-6        | 1             | Core serves opaque curated-SWM ciphertext catchup envelopes to authorized members.                     |
 | `/dkg/10.0.1/private-access`   | PR-8        | 1             | Synchronous: `AccessClient.requestAccess` surfaces `queued` as a rejected request via `AccessSendSurface`. |
 | `/dkg/10.0.1/query-remote`     | PR-9        | 1             | Synchronous; `sendQueryReliable()` retries up to 2× on `RESPONSE_GONE` with a fresh `messageId` (SPARQL is app-layer idempotent). |
 | `/dkg/10.0.1/join-request`     | PR-10       | 1             | Synchronous; `JoinApprovalRetryQueue` deleted. Substrate outbox now drives retries on the same 30s tick + on-connect flush — and SQLite-backed so they survive daemon restart. Operator diagnostic `GET /api/context-graphs/pending-redeliveries` returns `[]` until a substrate-backed view ships. |
@@ -502,19 +514,21 @@ attempt (initial send or any background outbox retry) resolves to
 - Receiver-side dedup hits (`sentBefore.seen`) are recorded as
   delivered with zero latency (the caller's effective "perceived" RTT).
 
-This is the operator-visible "I clicked send → it arrived" time, which
-is what the 99.9%/15s ship-gate target measures.
+This is the operator-visible "I clicked send → it arrived" time.
 
-### Target
+### Operational targets
 
-| Protocol family                                                          | SLO       |
-| ------------------------------------------------------------------------ | --------- |
-| chat / skill_request / query-remote                                      | ≥ 99%/15s |
-| swm-sender-key / private-access / join-request / storage-ack / verify-proposal | ≥ 99.5%/15s |
+The runtime exposes measurements, not a pass/fail policy. Historical
+rc.9 soak runs used 15-second p99 thresholds; current operators should
+evaluate each protocol family against the workflow they are testing.
 
-The ship-gate runs the soak script (`scripts/libp2p-soak-test.sh`)
-across both Lex and Miles for an overnight run; the `/api/slo`
-endpoint is the source of truth for go/no-go on `v10.0.0-rc.9` tag.
+| Protocol family | Historical soak target |
+| --- | --- |
+| chat / skill_request / query-remote / sync | >= 99% within 15s |
+| swm-sender-key / swm-update / swm-share-ack / swm-host-catchup / private-access / join-request / storage-ack / verify-proposal | >= 99.5% within 15s |
+
+Use the soak script (`scripts/libp2p-soak-test.sh`) for long-running
+evidence and `/api/slo` for the local node's current in-memory view.
 
 ### `/api/slo` endpoint (PR-12)
 
@@ -539,7 +553,8 @@ Authorization: Bearer <token from ~/.dkg/auth.token>
       "delivered": 1602,     // monotonic counter (since daemon start)
       "queued": 14           // monotonic counter; "queued" = first send failed → outbox
     },
-    "/dkg/10.0.1/storage-ack": { ... }
+    "/dkg/10.0.1/storage-ack": { ... },
+    "/dkg/10.0.1/swm-update": { ... }
   },
   // rc.9 PR-A (SWM reliable fan-out, Step 0): two new sections,
   // additive — existing consumers that only parse `protocols` still
@@ -577,7 +592,31 @@ Authorization: Bearer <token from ~/.dkg/auth.token>
     // Sticky boolean — true once the per-cgId cap eviction has fired.
     // Means the `redundantApplies` breakdown is partial; the grand
     // total is still `sum(redundantApplies) + redundantAppliesOverflow`.
-    "redundantAppliesTruncated": false
+    "redundantAppliesTruncated": false,
+    "substrateFanout": {
+      "delivered": { "did:dkg:context-graph:lex/playground": 8 },
+      "rejected": {},
+      "retryable": {},
+      "queued": {},
+      "inFlight": {},
+      "failed": {},
+      "overflow": {
+        "delivered": 0,
+        "rejected": 0,
+        "retryable": 0,
+        "queued": 0,
+        "inFlight": 0,
+        "failed": 0
+      },
+      "truncated": false
+    },
+    "shareAckQuorum": {
+      "tracked": 10,
+      "completed": 10,
+      "watchdogFired": 0,
+      "deadlineExpired": 0,
+      "pending": 0
+    }
   }
 }
 ```
@@ -610,6 +649,11 @@ restarted idle daemon.
   the existing `preflight.jsonl`, `sends.jsonl`, `inbox.jsonl`. The
   human-readable summary line in `main.log` reads e.g.
   `slo: message=d12/q0 p99=145ms, query-remote=d3/q0 p99=890ms, ...`.
+- **SWM fan-out.** `swm.substrateFanout` is the per-CG outcome counter
+  for point-to-point SWM delivery. `shareAckQuorum` tracks the
+  ack-quorum overlay: `completed` should grow with `tracked`; sustained
+  `deadlineExpired` means recipients missed the delivery window and
+  will need reconnect sync to catch up.
 
 ### Caveats
 
@@ -617,22 +661,22 @@ restarted idle daemon.
   counters and samples. The SQLite outbox itself survives restart;
   the SLO view does not.
 - Samples are recorded only for protocols routed through the
-  substrate. Protocols still on `/dkg/10.0.0/*` (any not in the
-  per-protocol coverage table above) are invisible to `/api/slo`.
+  substrate. Current bare `/dkg/10.0.0/*` examples include
+  `publish`, `query`, `discover`, and `verify-approval`; they are
+  invisible to `/api/slo`.
 
 ## Open questions / future work
 
 - Multi-recipient fan-out (broadcast to N peers with single
-  `messageId`) — out of scope for rc.9; explored in a follow-up RFC.
+  `messageId`) — explored in a follow-up RFC.
 - Cross-process idempotency (multiple daemons sharing the same store)
   — not needed today (one daemon per node) but the schema accommodates it.
 - Operator-relay infrastructure — code-side ships in PR-7
   (`--relay-preferred`); actual relay provisioning is an out-of-band
   ops track. See [`docs/operate/messenger.md`](../operate/messenger.md).
-- `Messenger.sendToPeer` legacy pass-through: kept at rc.9 for any
-  future incremental migration; may be deprecated in a later rc once
-  the substrate has had enough operator-time to confirm no surprise
-  caller emerges.
+- `Messenger.sendToPeer` legacy pass-through: kept for bare
+  protocol-router calls and compatibility wrappers. New short-message
+  protocols should use `sendReliable` and `register`.
 - Persistent SLO histogram: today the histogram is in-memory only
   (resets on daemon restart). If operators report that they need
   multi-day rolling SLO views, a follow-up RFC would persist the
