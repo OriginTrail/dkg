@@ -2533,6 +2533,53 @@ provider_existing.initialize("session-1")
 assert provider_existing._assertion_id == "memory", provider_existing._assertion_id
 assert created_assertions == [("cg:test", "memory")], created_assertions
 
+agent_context_calls = []
+
+class MissingAgentContextClient:
+    def __init__(self, base_url, **kwargs):
+        self.base_url = base_url
+        self.create_attempts = 0
+
+    def health_check(self):
+        return True
+
+    def create_assertion(self, context_graph_id, name):
+        self.create_attempts += 1
+        agent_context_calls.append(("create_assertion", context_graph_id, name))
+        if self.create_attempts == 1:
+            return {
+                "success": False,
+                "code": "CONTEXT_GRAPH_NOT_FOUND",
+                "error": 'Unknown contextGraphId "agent-context"',
+            }
+        return {"success": True, "alreadyExists": True}
+
+    def create_context_graph(self, name, description="", cg_id=None, **kwargs):
+        agent_context_calls.append(("create_context_graph", name, description, cg_id, kwargs))
+        return {"created": cg_id}
+
+provider_agent_context = module.DKGMemoryProvider()
+module._load_config = lambda: {
+    "daemon_url": "http://127.0.0.1:9200",
+    "context_graph": "agent-context",
+    "agent_name": "HermesAgent",
+}
+client_module.DKGClient = MissingAgentContextClient
+provider_agent_context._backlog_import_if_needed = lambda hermes_home: None
+provider_agent_context.initialize("session-2")
+assert provider_agent_context._assertion_id == "memory", provider_agent_context._assertion_id
+assert agent_context_calls == [
+    ("create_assertion", "agent-context", "memory"),
+    (
+        "create_context_graph",
+        "Agent Context",
+        "Chat-turn working memory for local agent integrations.",
+        "agent-context",
+        {"access_policy": 1},
+    ),
+    ("create_assertion", "agent-context", "memory"),
+], agent_context_calls
+
 class QueryClient:
     def __init__(self):
         self.queries = []

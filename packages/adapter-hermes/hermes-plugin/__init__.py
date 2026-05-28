@@ -49,6 +49,9 @@ EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION = (
 TARGET_CONTEXT_GRAPH_DESCRIPTION = (
     "Target context graph. " + EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION
 )
+AGENT_CONTEXT_GRAPH_ID = "agent-context"
+AGENT_CONTEXT_GRAPH_NAME = "Agent Context"
+AGENT_CONTEXT_GRAPH_DESCRIPTION = "Chat-turn working memory for local agent integrations."
 
 
 # ---------------------------------------------------------------------------
@@ -122,6 +125,21 @@ def _load_config() -> dict:
         config["import_roots"] = []
 
     return config
+
+
+def _looks_missing_context_graph(result: Any) -> bool:
+    if not isinstance(result, dict) or result.get("success") is not False:
+        return False
+    code = str(result.get("code") or "")
+    error = str(result.get("error") or result.get("message") or "").lower()
+    return code == "CONTEXT_GRAPH_NOT_FOUND" or "unknown contextgraphid" in error
+
+
+def _looks_already_exists(result: Any) -> bool:
+    if not isinstance(result, dict):
+        return False
+    error = str(result.get("error") or result.get("message") or "").lower()
+    return "already exists" in error or "already exist" in error
 
 
 def _cache_path(agent_name: str = "") -> Path:
@@ -943,6 +961,25 @@ class DKGMemoryProvider(MemoryProvider):
         result = self._client.create_assertion(
             self._context_graph, memory_assertion,
         )
+        if self._context_graph == AGENT_CONTEXT_GRAPH_ID and _looks_missing_context_graph(result):
+            create_result = self._client.create_context_graph(
+                AGENT_CONTEXT_GRAPH_NAME,
+                AGENT_CONTEXT_GRAPH_DESCRIPTION,
+                AGENT_CONTEXT_GRAPH_ID,
+                access_policy=1,
+            )
+            if (
+                isinstance(create_result, dict)
+                and (create_result.get("success") is not False or _looks_already_exists(create_result))
+            ):
+                result = self._client.create_assertion(
+                    self._context_graph, memory_assertion,
+                )
+            else:
+                logger.warning(
+                    "[dkg] Agent context graph creation failed: "
+                    f"{create_result.get('error') if isinstance(create_result, dict) else create_result}"
+                )
         assertion_uri = result.get("assertionUri")
         if assertion_uri or result.get("alreadyExists") is True:
             self._assertion_id = memory_assertion
