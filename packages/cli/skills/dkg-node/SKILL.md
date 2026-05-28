@@ -18,13 +18,13 @@ This skill teaches you the full node API surface so you can operate autonomously
 - **Node role:** (dynamic — `core` or `edge`)
 - **Available extraction pipelines:** (dynamic)
 
-To see which context graphs (projects) are currently subscribed, call `GET /api/context-graph/list` — this returns a live list that stays current as projects are created or subscribed during the session.
+If the Node UI injects a target context graph for the turn, use that target directly. If no target is injected or configured, call `GET /api/context-graph/list` / `dkg_list_context_graphs`; agent tool surfaces default that list to the caller's created/joined context graphs, with `scope: "all"` for every graph the node knows about.
 
 ### Context Graph IDs
 
-For write or mutation routes, always pass the exact existing context graph id
-returned by `GET /api/context-graph/list` / `dkg_list_context_graphs`, or pass
-its full `did:dkg:context-graph:<id>` URI.
+For write or mutation routes, always pass the injected target context graph id,
+an exact existing context graph id from `GET /api/context-graph/list` /
+`dkg_list_context_graphs`, or the full `did:dkg:context-graph:<id>` URI.
 
 - A context graph created locally can have a bare canonical id, for example
   `ui-refresh`, with full URI `did:dkg:context-graph:ui-refresh`.
@@ -127,7 +127,7 @@ Drop to HTTP when the operation isn't in the table — participant self-service 
 |---|---|---|
 | `dkg_status` | `GET /api/status` | Node health and subscribed CGs |
 | `dkg_wallet_balances` | `GET /api/wallets/balances` | TRAC / ETH balances |
-| `dkg_list_context_graphs` | `GET /api/context-graph/list` | List all context graphs the node knows about — each entry carries `subscribed` and `synced` flags (discovered-but-not-subscribed entries are present too) |
+| `dkg_list_context_graphs` | `GET /api/context-graph/list` | List context graphs. Tool surfaces default to caller-created/joined graphs; pass `scope: "all"` for every known graph. Entries carry `subscribed`, `synced`, and caller involvement when available |
 | `dkg_context_graph_create` | `POST /api/context-graph/create` | Create a simple context graph (tool schema accepts only `name` / `description` / `id` — no multi-sig inputs). On chain-enabled nodes the daemon may auto-register on-chain as a best-effort side-effect — see §6 for the register semantics. Multi-sig CGs are HTTP-only |
 | `dkg_subscribe` | `POST /api/context-graph/subscribe` | Subscribe + catch up an existing CG |
 | `dkg_context_graph_invite` | `POST /api/context-graph/invite` | Create a ready-to-share invite for another peer to join a context graph |
@@ -408,7 +408,7 @@ Context Graphs are scoped knowledge domains with configurable access and governa
 
 ### Routing: Turn Context Override
 
-When the chat turn includes injected context with `target_context_graph`, treat that value as BOTH:
+When the chat turn includes injected context with `target_context_graph`, treat that value as the canonical context graph id. If present, `target_context_graph_uri` is the same target as a full DID URI, and `target_context_graph_name` is display-only. Treat the target id as BOTH:
 
 1. **The authoritative target context graph for tool routing on this turn** — default all DKG reads, writes, imports, promotions, publishes, and queries in that turn to this value unless the user explicitly overrides it in the same message.
 2. **The user's currently-selected project in the UI** — when the user asks introspective questions like "which project am I on?", "what is currently selected?", "do you see that I have X selected?", answer directly from this field. Do not claim you cannot see the UI state. The field IS the UI state: the right-side panel project dropdown stamps it onto every turn envelope before the turn reaches you, so its presence means the user has that project selected and its absence means they have nothing selected.
@@ -448,11 +448,11 @@ Minimum behavior:
 
 Implications:
 
-- If `target_context_graph` is present, the user is on that project. State this explicitly when asked.
-- If it is absent, the user has no project selected. Try to deduce the target project from the conversation context (e.g., "add this to my research project" → look up "research" via `GET /api/context-graph/list`). If the project is ambiguous or you are not confident, ask the user which project to use. Only suggest the right-side panel project dropdown if the user is chatting through the DKG UI — users on other channels (Telegram, API, etc.) do not have a panel to select from. When no project can be determined, route reads and writes to `agent-context` only.
+- If `target_context_graph` is present, its value is the canonical context graph id for the turn. `target_context_graph_uri` is the same target in full DID form; `target_context_graph_name` is display-only. State the selected project explicitly when asked.
+- If it is absent, the user has no project selected. Try to deduce the target project from the conversation context (e.g., "add this to my research project" → look up "research" via `GET /api/context-graph/list` / `dkg_list_context_graphs`, whose tool surfaces default to created/joined graphs). If the project is ambiguous or you are not confident, ask the user which project to use. Only suggest the right-side panel project dropdown if the user is chatting through the DKG UI — users on other channels (Telegram, API, etc.) do not have a panel to select from. When no project can be determined, route reads and writes to `agent-context` only.
 - Default all DKG reads, writes, imports, promotions, publishes, and queries in that turn to the injected target context graph.
 - Do not keep using an older conversational context graph when a newer injected `target_context_graph` is present.
-- If the injected value includes both display name and ID, prefer the ID when calling tools or APIs, and reference the display name when answering the user.
+- Older UI versions may inject one value containing both display name and ID. If so, prefer the ID inside parentheses when calling tools or APIs, and reference the display name when answering the user.
 - If the user explicitly says to use a different context graph in the same turn, follow the user's explicit instruction instead.
 
 ### Core CG routes
@@ -486,7 +486,7 @@ Implications:
 - `POST /api/context-graph/register` — register a previously-created local CG on-chain (two-phase creation). Body: `{ id, accessPolicy?, publishPolicy? }`, where `accessPolicy` controls public/private discovery and `publishPolicy` controls open/curated publishing. Use this to promote a free CG to an on-chain identity before publishing to Verified Memory. `revealOnChain` is deprecated and ignored on the V10 ContextGraphs path.
 - `POST /api/context-graph/rename` — rename a CG (human-readable name only; the ID is immutable). Body: `{ contextGraphId, name }`.
 - `POST /api/context-graph/subscribe` — subscribe to a context graph
-- `GET /api/context-graph/list` — list subscribed context graphs
+- `GET /api/context-graph/list` — list known context graphs; tool wrappers default to the caller's created/joined graphs and can expose all known graphs with `scope: "all"`
 - `GET /api/context-graph/exists` — check if a context graph exists
 - `GET /api/sync/catchup-status?contextGraphId=...` — poll CG sync progress after subscribing
 - 🚧 `GET /api/context-graph/{id}` — CG details *(planned)*

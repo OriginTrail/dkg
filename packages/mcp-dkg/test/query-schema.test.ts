@@ -262,6 +262,25 @@ describe('dkg_list_context_graphs — rename + UX-note pair', () => {
     expect(result.content[0].text).toMatch(/\*\*foo\*\*/);
     expect(result.content[0].text).toMatch(/\*\*bar\*\*/);
   });
+
+  it('defaults to created/joined context graphs and supports scope all', async () => {
+    client = new FakeClient({
+      listProjects: async () => [
+        { id: 'mine', name: 'Mine', callerInvolved: true },
+        { id: 'public-noise', name: 'Public Noise', callerInvolved: false },
+      ],
+    });
+    server = new FakeServer();
+    registerReadTools(server.asMcpServer(), client.asDkgClient(), makeConfig({ defaultProject: null }));
+
+    const mine = await server.call('dkg_list_context_graphs', {});
+    const all = await server.call('dkg_list_context_graphs', { scope: 'all' });
+
+    expect(mine.content[0].text).toMatch(/\*\*mine\*\*/);
+    expect(mine.content[0].text).not.toMatch(/public-noise/);
+    expect(all.content[0].text).toMatch(/\*\*mine\*\*/);
+    expect(all.content[0].text).toMatch(/\*\*public-noise\*\*/);
+  });
 });
 
 describe('dkg_sub_graph_list — wave-2 rename guard', () => {

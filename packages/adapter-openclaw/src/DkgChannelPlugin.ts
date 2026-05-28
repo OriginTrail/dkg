@@ -239,7 +239,8 @@ function formatChatContext(entries: ChatContextEntry[]): string {
   const lines = entries.map((entry) => `- ${sanitizeAttachmentPromptField(entry.label, entry.key)}: ${sanitizeAttachmentPromptField(entry.value, 'unknown')}`);
   return [
     'Context for this chat turn:',
-    'If "target_context_graph" is present below, treat it as authoritative for this turn unless the user explicitly overrides it in the same message.',
+    'If "target_context_graph" is present below, its value is the canonical context graph id for this turn; use it exactly unless the user explicitly overrides it in the same message.',
+    'A paired "target_context_graph_uri" is the same target in did:dkg:context-graph:<id> form. "target_context_graph_name" is display-only.',
     'If "current_agent_address" is present below, use it as the primary `agent_address` for `view: "working-memory"` reads.',
     'Do not assume the peer ID is the right working-memory identity unless the tool result or graph naming proves it.',
     ...lines,

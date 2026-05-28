@@ -670,7 +670,7 @@ export function buildSkillMd(opts: {
     `- **Node role:** ${opts.nodeRole}`,
     `- **Available extraction pipelines:** ${opts.extractionPipelines.length > 0 ? opts.extractionPipelines.join(", ") : "none (install markitdown to enable document conversion)"}`,
     '',
-    'To see which context graphs (projects) are currently subscribed, call `GET /api/context-graph/list` — this returns a live list that stays current as projects are created or subscribed during the session.',
+    'If the Node UI injects a target context graph for the turn, use that target directly. If no target is injected or configured, call `GET /api/context-graph/list` / `dkg_list_context_graphs`; agent tool surfaces default that list to the caller\'s created/joined context graphs, with `scope: "all"` for every graph the node knows about.',
   ].join("\n");
 
   const staticPlaceholder =
@@ -681,7 +681,7 @@ export function buildSkillMd(opts: {
     "- **Node role:** (dynamic — `core` or `edge`)\n" +
     "- **Available extraction pipelines:** (dynamic)\n" +
     "\n" +
-    "To see which context graphs (projects) are currently subscribed, call `GET /api/context-graph/list` — this returns a live list that stays current as projects are created or subscribed during the session.";
+    "If the Node UI injects a target context graph for the turn, use that target directly. If no target is injected or configured, call `GET /api/context-graph/list` / `dkg_list_context_graphs`; agent tool surfaces default that list to the caller's created/joined context graphs, with `scope: \"all\"` for every graph the node knows about.";
 
   return template.replace(staticPlaceholder, dynamicSection);
 }

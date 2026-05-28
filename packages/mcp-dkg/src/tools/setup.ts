@@ -79,8 +79,8 @@ export function registerSetupTools(
         '"My Research" → "my-research"); slugs must match ' +
         '/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/. ' +
         'This create-only slug is not the same contract as existing-CG write targets: ' +
-        'after creation, call `dkg_list_context_graphs` and pass the returned canonical `id` ' +
-        'or full `did:dkg:context-graph:...` URI to assertion, sub-graph, publish, and other write tools. ' +
+        'after creation, pass the returned canonical `id` or full `did:dkg:context-graph:...` ' +
+        'URI to assertion, sub-graph, publish, and other write tools. ' +
         'Defaults to safe `sharing="invite-only"` + `contribution="curators-only"`; ' +
         'switch to `"open"` to make the CG publicly discoverable or to allow ' +
         'anyone to publish to Verified Memory respectively.',
@@ -92,7 +92,7 @@ export function registerSetupTools(
           .optional()
           .describe(
             'Optional explicit slug for creating a new CG. Auto-derived from `name` when omitted. ' +
-              'Must match /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/. Do not use this field as a model for write-tool contextGraphId values; use `dkg_list_context_graphs` after creation.',
+              'Must match /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/. Do not use this field as a model for existing-CG write targets; use the returned canonical id after creation.',
           ),
         sharing: z
           .enum(['open', 'invite-only'])

@@ -27,6 +27,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   DkgDaemonClient,
+  normalizeContextGraphId,
   type LocalAgentIntegrationRecord,
   type LocalAgentIntegrationTransport,
 } from './dkg-client.js';
@@ -70,8 +71,9 @@ const USER_QUERY_CATALOG_SLUG = 'ui-saved-queries';
 const USER_QUERY_CATALOG_NAME = 'Saved queries';
 const USER_QUERY_CATALOG_DESCRIPTION = 'Queries saved from the Query tab.';
 const EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION =
-  'Exact existing context graph id returned by dkg_list_context_graphs, ' +
-  'or its full did:dkg:context-graph:<id> URI. Locally-created context graphs ' +
+  'Use the injected target context graph id/URI when present; otherwise use ' +
+  'an exact existing context graph id from dkg_list_context_graphs, or its ' +
+  'full did:dkg:context-graph:<id> URI. Locally-created context graphs ' +
   'may have ids like "ui-refresh"; joined/curated context graphs use ' +
   '<curatorAddress>/<slug> ids like "0x.../tuesday-cg". Do not guess, ' +
   'shorten, or pass only the suffix slug for curator-scoped graphs.';
@@ -233,6 +235,23 @@ function queryCatalogIntLiteral(value: number): string {
 
 function optionalString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function contextGraphBelongsToCaller(row: Record<string, unknown>): boolean {
+  if (row.isSystem === true) return false;
+  if (row.callerInvolved === true) return true;
+  if (row.callerInvolved === false) return false;
+  const role = typeof row.role === 'string' ? row.role.trim().toLowerCase() : '';
+  if (['curator', 'creator', 'owner', 'participant', 'member'].includes(role)) return true;
+  // Older daemons did not include callerInvolved. Preserve compatibility by
+  // leaving those unscoped rows visible instead of hiding everything.
+  return true;
+}
+
+function filterContextGraphsForScope(graphs: unknown[], scope: string | undefined): unknown[] {
+  return scope === 'all'
+    ? graphs
+    : graphs.filter((graph) => graph && typeof graph === 'object' && contextGraphBelongsToCaller(graph as Record<string, unknown>));
 }
 
 function readOnlySparqlOperation(sparql: string): string | null {
@@ -2697,17 +2716,27 @@ export class DkgNodePlugin {
       {
         name: 'dkg_list_context_graphs',
         description:
-          'List all contextGraphs this node knows about. Returns context graph IDs, names, subscription status, ' +
-          'and sync status. Use this to discover available contextGraphs before publishing or querying.',
-        parameters: { type: 'object', properties: {}, required: [] },
-        execute: async (_toolCallId, _params) => this.handleListContextGraphs(),
+          'List contextGraphs known to this node. Defaults to this caller\'s created/joined context graphs ' +
+          'to avoid noisy discovered graphs; pass scope="all" to inspect every known graph. Use this only ' +
+          'when no target context graph is injected or configured and the agent needs to choose one.',
+        parameters: {
+          type: 'object',
+          properties: {
+            scope: {
+              type: 'string',
+              enum: ['mine', 'all'],
+              description: 'Defaults to "mine" (created/joined context graphs for this caller). Use "all" for every known graph.',
+            },
+          },
+          required: [],
+        },
+        execute: async (_toolCallId, params) => this.handleListContextGraphs(params ?? {}),
       },
       {
         name: 'dkg_context_graph_create',
         description:
           'Create a new context graph on the DKG node. A context graph is a scoped knowledge domain ' +
-          'that organizes published knowledge. Use dkg_list_context_graphs first to check if the ' +
-          'context graph already exists. Returns the context graph ID and URI (did:dkg:context-graph:<id>). ' +
+          'that organizes published knowledge. Returns the context graph ID and URI (did:dkg:context-graph:<id>). ' +
           'The ID is auto-generated from the name if not provided. ' +
           'Defaults to a curated/private context graph — the creator is auto-included in the allowlist ' +
           'and can immediately write to working/shared memory. Pass `public: true` for an open/discoverable ' +
@@ -2728,8 +2757,8 @@ export class DkgNodePlugin {
               type: 'string',
               description:
                 'Optional create-only context graph id slug. Auto-generated from name if omitted ' +
-                '(e.g. "My Research" -> "my-research"). For later writes, call dkg_list_context_graphs ' +
-                'and use the exact returned id or full did:dkg:context-graph:<id> URI.',
+                '(e.g. "My Research" -> "my-research"). For later writes, use the exact returned id ' +
+                'or full did:dkg:context-graph:<id> URI.',
             },
             public: {
               type: 'boolean',
@@ -2917,7 +2946,7 @@ export class DkgNodePlugin {
             context_graph_id: {
               type: 'string',
               description:
-                'CG scope. Use the exact existing id from dkg_list_context_graphs or the full ' +
+                'CG scope. Use the injected target id when present, an exact existing id from dkg_list_context_graphs, or the full ' +
                 'did:dkg:context-graph:<id> URI. Optional when `view` is omitted (unscoped cross-graph query); required ' +
                 'when `view` is set (view-based routing always targets a single CG).',
             },
@@ -3681,11 +3710,15 @@ export class DkgNodePlugin {
     }
   }
 
-  private async handleListContextGraphs(): Promise<OpenClawToolResult> {
+  private async handleListContextGraphs(args: Record<string, unknown>): Promise<OpenClawToolResult> {
     try {
+      const scope = typeof args.scope === 'string' && args.scope.trim() ? args.scope.trim() : 'mine';
+      if (scope !== 'mine' && scope !== 'all') {
+        return this.error('"scope" must be "mine" or "all".');
+      }
       const result = await this.client.listContextGraphs();
-      const graphs = result.contextGraphs;
-      return this.json({ contextGraphs: graphs, count: graphs.length });
+      const graphs = filterContextGraphsForScope(result.contextGraphs ?? [], scope);
+      return this.json({ contextGraphs: graphs, count: graphs.length, scope });
     } catch (err: any) {
       return this.daemonError(err);
     }
@@ -3857,7 +3890,7 @@ export class DkgNodePlugin {
 
   private async handleQueryCatalogList(args: Record<string, unknown>): Promise<OpenClawToolResult> {
     try {
-      const contextGraphId = String(args.context_graph_id ?? '').trim();
+      const contextGraphId = normalizeContextGraphId(String(args.context_graph_id ?? ''));
       if (!contextGraphId) return this.error('"context_graph_id" is required.');
       const response = await this.client.readQueryCatalog(contextGraphId);
       const items = normalizeQueryCatalogItems(response);
@@ -3873,7 +3906,7 @@ export class DkgNodePlugin {
 
   private async handleQueryCatalogRun(args: Record<string, unknown>): Promise<OpenClawToolResult> {
     try {
-      const contextGraphId = String(args.context_graph_id ?? '').trim();
+      const contextGraphId = normalizeContextGraphId(String(args.context_graph_id ?? ''));
       const selector = String(args.query ?? '').trim();
       if (!contextGraphId) return this.error('"context_graph_id" is required.');
       if (!selector) return this.error('"query" is required.');
@@ -3917,7 +3950,7 @@ export class DkgNodePlugin {
 
   private async handleQueryCatalogSave(args: Record<string, unknown>): Promise<OpenClawToolResult> {
     try {
-      const contextGraphId = String(args.context_graph_id ?? '').trim();
+      const contextGraphId = normalizeContextGraphId(String(args.context_graph_id ?? ''));
       const name = String(args.name ?? '').trim();
       const sparql = String(args.sparql ?? '').trim();
       if (!contextGraphId) return this.error('"context_graph_id" is required.');

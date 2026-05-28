@@ -165,7 +165,7 @@ describe('publish tools — write+publish helper + canonical SWM finalizer', () 
     }
   });
 
-  it('DkgClient.publishQuads does not double-prefix full context graph DIDs', async () => {
+  it('DkgClient.publishQuads accepts full context graph DIDs without double-prefixing graph', async () => {
     const bodies: Array<Record<string, any>> = [];
     const httpClient = new DkgClient({
       config: makeConfig(),
@@ -187,8 +187,42 @@ describe('publish tools — write+publish helper + canonical SWM finalizer', () 
       quads: [{ subject: 'urn:s', predicate: 'urn:p', object: 'urn:o' }],
     });
 
-    expect(bodies[0].contextGraphId).toBe(fullDid);
+    expect(bodies[0].contextGraphId).toBe('0xabc/my-cg');
     expect(bodies[0].quads[0].graph).toBe(fullDid);
+    expect(bodies[1].contextGraphId).toBe('0xabc/my-cg');
+  });
+
+  it('DkgClient normalizes full context graph DIDs on read/setup routes', async () => {
+    const calls: Array<{ url: string; body?: any }> = [];
+    const httpClient = new DkgClient({
+      config: makeConfig(),
+      fetcher: (async (url, init) => {
+        calls.push({
+          url: String(url),
+          body: init?.body ? JSON.parse(String(init.body)) : undefined,
+        });
+        let responseBody: unknown = {};
+        if (String(url).includes('/api/query')) responseBody = { result: { bindings: [] } };
+        if (String(url).includes('/api/sub-graph/list')) responseBody = { subGraphs: [] };
+        if (String(url).includes('/api/subscribe')) responseBody = { subscribed: 'ui-refresh' };
+        return new Response(JSON.stringify(responseBody), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }) as typeof fetch,
+    });
+
+    await httpClient.query({
+      sparql: 'ASK {}',
+      contextGraphId: 'did:dkg:context-graph:ui-refresh',
+      view: 'shared-working-memory',
+    });
+    await httpClient.listSubGraphs('did:dkg:context-graph:0xabc/tuesday-cg');
+    await httpClient.subscribe({ contextGraphId: 'did:dkg:context-graph:ui-refresh' });
+
+    expect(calls[0].body.contextGraphId).toBe('ui-refresh');
+    expect(calls[1].url).toContain('/api/sub-graph/list?contextGraphId=0xabc%2Ftuesday-cg');
+    expect(calls[2].body.contextGraphId).toBe('ui-refresh');
   });
 
   it('dkg_publish auto-types objects: URI passes through, literal gets quoted', async () => {

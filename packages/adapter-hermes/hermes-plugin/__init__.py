@@ -39,8 +39,9 @@ _ENTRY_SEP = "\n\xA7\n"  # §
 # Existing-target context graph wording is intentionally shared across Hermes
 # tool schemas so agents see the same rule as MCP/OpenClaw.
 EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION = (
-    "Exact existing context graph id returned by dkg_list_context_graphs, "
-    "or its full did:dkg:context-graph:<id> URI. Locally-created context graphs "
+    "Use the injected target context graph id/URI when present; otherwise use "
+    "an exact existing context graph id from dkg_list_context_graphs, or its "
+    "full did:dkg:context-graph:<id> URI. Locally-created context graphs "
     "may have ids like 'ui-refresh'; joined/curated context graphs use "
     "<curatorAddress>/<slug> ids like '0x.../tuesday-cg'. Do not guess, "
     "shorten, or pass only the suffix slug for curator-scoped graphs."
@@ -244,8 +245,9 @@ DKG_QUERY_SCHEMA = {
             "context_graph_id": {
                 "type": "string",
                 "description": (
-                    "CG scope. Use the exact existing id from dkg_list_context_graphs "
-                    "or the full did:dkg:context-graph:<id> URI. Required when view is set."
+                    "CG scope. Use the injected target id when present, an exact existing "
+                    "id from dkg_list_context_graphs, or the full did:dkg:context-graph:<id> "
+                    "URI. Required when view is set."
                 ),
             },
             "view": {
@@ -498,9 +500,8 @@ DKG_CREATE_CONTEXT_GRAPH_SCHEMA = {
                 "type": "string",
                 "description": (
                     "Optional create-only context graph id slug. Auto-generated "
-                    "from name when omitted. For later writes, call "
-                    "dkg_list_context_graphs and use the exact returned id or "
-                    "full did:dkg:context-graph:<id> URI."
+                    "from name when omitted. For later writes, use the exact "
+                    "returned id or full did:dkg:context-graph:<id> URI."
                 ),
             },
             "public": {
@@ -528,8 +529,26 @@ DKG_CREATE_CONTEXT_GRAPH_SCHEMA = {
 
 DKG_LIST_CONTEXT_GRAPHS_SCHEMA = {
     "name": "dkg_list_context_graphs",
-    "description": "List all context graphs known to the node, including subscription and sync state.",
-    "parameters": {"type": "object", "properties": {}, "required": []},
+    "description": (
+        "List context graphs known to this node. Defaults to this caller's "
+        "created/joined context graphs to avoid noisy discovered graphs; pass "
+        "scope='all' to inspect every known graph. Use this only when no target "
+        "context graph is injected or configured and the agent needs to choose one."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "scope": {
+                "type": "string",
+                "enum": ["mine", "all"],
+                "description": (
+                    "Defaults to 'mine' (created/joined context graphs for this caller). "
+                    "Use 'all' for every known graph."
+                ),
+            },
+        },
+        "required": [],
+    },
 }
 
 QUAD_SCHEMA = {
@@ -1007,7 +1026,7 @@ class DKGMemoryProvider(MemoryProvider):
             "  dkg_invoke_skill — Call a remote agent's skill\n"
             "\n"
             "PROJECT MANAGEMENT:\n"
-            "  dkg_list_context_graphs — List known projects/knowledge spaces\n"
+            "  dkg_list_context_graphs — List caller-created/joined projects by default; pass scope='all' for every known graph\n"
             "  dkg_context_graph_create — Create a new project/knowledge space\n"
             "  dkg_subscribe — Join an existing project on the network\n"
             "  dkg_sub_graph_create/list — Manage project sub-graphs\n"
@@ -1637,7 +1656,15 @@ class DKGMemoryProvider(MemoryProvider):
     def _handle_list_context_graphs(self, args: Dict[str, Any]) -> str:
         if self._offline:
             return tool_error("DKG daemon is offline.")
-        return json.dumps(self._client.list_context_graphs())
+        scope = _first_text(args, "scope") or "mine"
+        if scope not in ("mine", "all"):
+            return tool_error("scope must be 'mine' or 'all'.")
+        result = self._client.list_context_graphs()
+        graphs = result.get("contextGraphs", []) if isinstance(result, dict) else []
+        filtered = _filter_context_graphs_for_scope(graphs, scope)
+        if isinstance(result, dict):
+            return json.dumps({**result, "contextGraphs": filtered, "count": len(filtered), "scope": scope})
+        return json.dumps({"contextGraphs": filtered, "count": len(filtered), "scope": scope})
 
     def _handle_find_agents(self, args: Dict[str, Any]) -> str:
         if self._offline:
@@ -2310,6 +2337,37 @@ def _first_text(args: Dict[str, Any], *keys: str) -> str:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return ""
+
+
+def _context_graph_belongs_to_caller(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    if row.get("isSystem") is True:
+        return False
+    if row.get("callerInvolved") is True:
+        return True
+    if row.get("callerInvolved") is False:
+        return False
+    role = row.get("role")
+    if isinstance(role, str) and role.strip().lower() in {
+        "curator",
+        "creator",
+        "owner",
+        "participant",
+        "member",
+    }:
+        return True
+    # Older daemons did not include callerInvolved. Preserve compatibility by
+    # leaving those unscoped rows visible instead of hiding everything.
+    return True
+
+
+def _filter_context_graphs_for_scope(graphs: Any, scope: str) -> List[Any]:
+    if not isinstance(graphs, list):
+        return []
+    if scope == "all":
+        return graphs
+    return [graph for graph in graphs if _context_graph_belongs_to_caller(graph)]
 
 
 _ETH_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")

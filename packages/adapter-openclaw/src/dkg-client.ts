@@ -154,9 +154,33 @@ export interface AgentIdentity {
 
 const CHAT_TURNS_CONTEXT_GRAPH_ID = 'agent-context';
 const CHAT_TURNS_ASSERTION_NAME = 'chat-turns';
+const CONTEXT_GRAPH_URI_PREFIX = 'did:dkg:context-graph:';
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const SCHEMA = 'http://schema.org/';
 const DKG_ONT = 'http://dkg.io/ontology/';
+
+export function normalizeContextGraphId(value: string): string {
+  const trimmed = value.trim();
+  return trimmed.startsWith(CONTEXT_GRAPH_URI_PREFIX)
+    ? trimmed.slice(CONTEXT_GRAPH_URI_PREFIX.length)
+    : trimmed;
+}
+
+function optionalContextGraphId(value: string | undefined): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  return normalizeContextGraphId(value) || undefined;
+}
+
+function toContextGraphUri(value: string): string {
+  return `${CONTEXT_GRAPH_URI_PREFIX}${normalizeContextGraphId(value)}`;
+}
+
+function normalizeContextGraphRequest<T extends { contextGraphId: string }>(request: T): T {
+  return {
+    ...request,
+    contextGraphId: normalizeContextGraphId(request.contextGraphId),
+  };
+}
 
 function queryBindings(result: any): Array<Record<string, unknown>> {
   const candidates = [
@@ -313,9 +337,10 @@ export class DkgDaemonClient {
       minTrust?: 'SelfAttested' | 'Endorsed' | 0 | 1;
     },
   ): Promise<any> {
+    const contextGraphId = optionalContextGraphId(opts?.contextGraphId);
     return this.post('/api/query', {
       sparql,
-      contextGraphId: opts?.contextGraphId,
+      contextGraphId,
       graphSuffix: opts?.graphSuffix,
       includeSharedMemory: opts?.includeSharedMemory,
       view: opts?.view,
@@ -339,7 +364,7 @@ export class DkgDaemonClient {
    * returned `prof:sparqlQuery` text through `query()`.
    */
   async readQueryCatalog(contextGraphId: string): Promise<Record<string, unknown>> {
-    return this.post('/api/profile/query-catalog/read', { contextGraphId });
+    return this.post('/api/profile/query-catalog/read', { contextGraphId: normalizeContextGraphId(contextGraphId) });
   }
 
   /**
@@ -352,7 +377,7 @@ export class DkgDaemonClient {
     contextGraphId: string,
     quads: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
   ): Promise<Record<string, unknown>> {
-    return this.post('/api/profile/query-catalog/write', { contextGraphId, quads });
+    return this.post('/api/profile/query-catalog/write', { contextGraphId: normalizeContextGraphId(contextGraphId), quads });
   }
 
   // ---------------------------------------------------------------------------
@@ -371,6 +396,7 @@ export class DkgDaemonClient {
     quads: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
     opts?: { localOnly?: boolean; subGraphName?: string },
   ): Promise<{ shareOperationId: string }> {
+    const cgId = normalizeContextGraphId(contextGraphId);
     // SWM data gossips to peers in the context graph's allowlist by default.
     // Privacy is governed by the CG's curation policy (curated CGs gate
     // gossip to allowed peers; public CGs gossip to all subscribers).
@@ -380,7 +406,7 @@ export class DkgDaemonClient {
     // field and relies on the daemon's `false` default at
     // `packages/cli/src/daemon/routes/memory.ts:490`.
     return this.post('/api/shared-memory/write', {
-      contextGraphId,
+      contextGraphId: cgId,
       quads,
       localOnly: opts?.localOnly ?? false,
       subGraphName: opts?.subGraphName,
@@ -402,10 +428,11 @@ export class DkgDaemonClient {
     name: string,
     opts?: { subGraphName?: string },
   ): Promise<{ assertionUri: string | null; alreadyExists: boolean }> {
+    const cgId = normalizeContextGraphId(contextGraphId);
     try {
       const response = await this.post<{ assertionUri: string }>(
         '/api/assertion/create',
-        { contextGraphId, name, subGraphName: opts?.subGraphName },
+        { contextGraphId: cgId, name, subGraphName: opts?.subGraphName },
       );
       return { assertionUri: response.assertionUri, alreadyExists: false };
     } catch (err) {
@@ -430,7 +457,7 @@ export class DkgDaemonClient {
     opts?: { subGraphName?: string },
   ): Promise<{ written: number }> {
     return this.post(`/api/assertion/${encodeURIComponent(name)}/write`, {
-      contextGraphId,
+      contextGraphId: normalizeContextGraphId(contextGraphId),
       quads,
       subGraphName: opts?.subGraphName,
     });
@@ -447,7 +474,7 @@ export class DkgDaemonClient {
     opts?: { entities?: string[] | 'all'; subGraphName?: string },
   ): Promise<Record<string, unknown>> {
     return this.post(`/api/assertion/${encodeURIComponent(name)}/promote`, {
-      contextGraphId,
+      contextGraphId: normalizeContextGraphId(contextGraphId),
       entities: opts?.entities,
       subGraphName: opts?.subGraphName,
     });
@@ -464,7 +491,7 @@ export class DkgDaemonClient {
     opts?: { subGraphName?: string },
   ): Promise<{ discarded: boolean }> {
     return this.post(`/api/assertion/${encodeURIComponent(name)}/discard`, {
-      contextGraphId,
+      contextGraphId: normalizeContextGraphId(contextGraphId),
       subGraphName: opts?.subGraphName,
     });
   }
@@ -481,7 +508,7 @@ export class DkgDaemonClient {
     opts?: { subGraphName?: string },
   ): Promise<{ quads: unknown[]; count: number }> {
     return this.post(`/api/assertion/${encodeURIComponent(name)}/query`, {
-      contextGraphId,
+      contextGraphId: normalizeContextGraphId(contextGraphId),
       subGraphName: opts?.subGraphName,
     });
   }
@@ -494,7 +521,7 @@ export class DkgDaemonClient {
   async resolveImportArtifact(
     request: ImportedArtifactRequest,
   ): Promise<{ artifact: ImportedArtifactResolution }> {
-    return this.post('/api/assertion/import-artifact/resolve', request);
+    return this.post('/api/assertion/import-artifact/resolve', normalizeContextGraphRequest(request));
   }
 
   /**
@@ -511,7 +538,7 @@ export class DkgDaemonClient {
     bytes: number;
     markdown: string;
   }> {
-    return this.post('/api/assertion/import-artifact/read-markdown', request);
+    return this.post('/api/assertion/import-artifact/read-markdown', normalizeContextGraphRequest(request));
   }
 
   /**
@@ -521,7 +548,7 @@ export class DkgDaemonClient {
   async writeSemanticEnrichment(
     request: SemanticEnrichmentWriteRequest,
   ): Promise<Record<string, unknown>> {
-    return this.post('/api/assertion/semantic-enrichment/write', request);
+    return this.post('/api/assertion/semantic-enrichment/write', normalizeContextGraphRequest(request));
   }
 
   /**
@@ -534,7 +561,7 @@ export class DkgDaemonClient {
     name: string,
     opts?: { agentAddress?: string; subGraphName?: string },
   ): Promise<Record<string, unknown>> {
-    const params = new URLSearchParams({ contextGraphId });
+    const params = new URLSearchParams({ contextGraphId: normalizeContextGraphId(contextGraphId) });
     if (opts?.agentAddress) params.set('agentAddress', opts.agentAddress);
     if (opts?.subGraphName) params.set('subGraphName', opts.subGraphName);
     return this.get(
@@ -561,13 +588,14 @@ export class DkgDaemonClient {
     fileName: string,
     opts?: { contentType?: string; ontologyRef?: string; subGraphName?: string },
   ): Promise<Record<string, unknown>> {
+    const cgId = normalizeContextGraphId(contextGraphId);
     const form = new FormData();
     // Copy into a fresh Uint8Array to satisfy TS's BlobPart union across Node Buffer / SharedArrayBuffer.
     const bytes = new Uint8Array(fileBuffer.byteLength);
     bytes.set(fileBuffer);
     const blob = new Blob([bytes], { type: opts?.contentType ?? 'application/octet-stream' });
     form.append('file', blob, fileName);
-    form.append('contextGraphId', contextGraphId);
+    form.append('contextGraphId', cgId);
     if (opts?.contentType) form.append('contentType', opts.contentType);
     if (opts?.ontologyRef) form.append('ontologyRef', opts.ontologyRef);
     if (opts?.subGraphName) form.append('subGraphName', opts.subGraphName);
@@ -603,7 +631,7 @@ export class DkgDaemonClient {
     contextGraphId: string,
     subGraphName: string,
   ): Promise<{ created: string; contextGraphId: string }> {
-    return this.post('/api/sub-graph/create', { contextGraphId, subGraphName });
+    return this.post('/api/sub-graph/create', { contextGraphId: normalizeContextGraphId(contextGraphId), subGraphName });
   }
 
   /**
@@ -624,7 +652,7 @@ export class DkgDaemonClient {
       tripleCount: number;
     }>;
   }> {
-    const params = new URLSearchParams({ contextGraphId });
+    const params = new URLSearchParams({ contextGraphId: normalizeContextGraphId(contextGraphId) });
     return this.get(`/api/sub-graph/list?${params.toString()}`);
   }
 
@@ -773,27 +801,30 @@ export class DkgDaemonClient {
     contextGraphId: string,
     peerId: string,
   ): Promise<{ invited: string; contextGraphId: string }> {
-    return this.post('/api/context-graph/invite', { contextGraphId, peerId });
+    return this.post('/api/context-graph/invite', { contextGraphId: normalizeContextGraphId(contextGraphId), peerId });
   }
 
   async addParticipant(
     contextGraphId: string,
     agentAddress: string,
   ): Promise<{ ok: boolean; contextGraphId: string; agentAddress: string }> {
-    return this.post(`/api/context-graph/${encodeURIComponent(contextGraphId)}/add-participant`, { agentAddress });
+    const cgId = normalizeContextGraphId(contextGraphId);
+    return this.post(`/api/context-graph/${encodeURIComponent(cgId)}/add-participant`, { agentAddress });
   }
 
   async removeParticipant(
     contextGraphId: string,
     agentAddress: string,
   ): Promise<{ ok: boolean; contextGraphId: string; agentAddress: string }> {
-    return this.post(`/api/context-graph/${encodeURIComponent(contextGraphId)}/remove-participant`, { agentAddress });
+    const cgId = normalizeContextGraphId(contextGraphId);
+    return this.post(`/api/context-graph/${encodeURIComponent(cgId)}/remove-participant`, { agentAddress });
   }
 
   async listParticipants(
     contextGraphId: string,
   ): Promise<{ contextGraphId: string; allowedAgents: string[] }> {
-    return this.get(`/api/context-graph/${encodeURIComponent(contextGraphId)}/participants`);
+    const cgId = normalizeContextGraphId(contextGraphId);
+    return this.get(`/api/context-graph/${encodeURIComponent(cgId)}/participants`);
   }
 
   async listJoinRequests(
@@ -807,21 +838,24 @@ export class DkgDaemonClient {
       agentName?: string;
     }>;
   }> {
-    return this.get(`/api/context-graph/${encodeURIComponent(contextGraphId)}/join-requests`);
+    const cgId = normalizeContextGraphId(contextGraphId);
+    return this.get(`/api/context-graph/${encodeURIComponent(cgId)}/join-requests`);
   }
 
   async approveJoinRequest(
     contextGraphId: string,
     agentAddress: string,
   ): Promise<{ ok: boolean; status: string; agentAddress: string }> {
-    return this.post(`/api/context-graph/${encodeURIComponent(contextGraphId)}/approve-join`, { agentAddress });
+    const cgId = normalizeContextGraphId(contextGraphId);
+    return this.post(`/api/context-graph/${encodeURIComponent(cgId)}/approve-join`, { agentAddress });
   }
 
   async rejectJoinRequest(
     contextGraphId: string,
     agentAddress: string,
   ): Promise<{ ok: boolean; status: string; agentAddress: string }> {
-    return this.post(`/api/context-graph/${encodeURIComponent(contextGraphId)}/reject-join`, { agentAddress });
+    const cgId = normalizeContextGraphId(contextGraphId);
+    return this.post(`/api/context-graph/${encodeURIComponent(cgId)}/reject-join`, { agentAddress });
   }
 
   // ---------------------------------------------------------------------------
@@ -878,6 +912,7 @@ export class DkgDaemonClient {
     privateQuads?: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
     opts?: { accessPolicy?: 'public' | 'ownerOnly' | 'allowList'; allowedPeers?: string[] },
   ): Promise<any> {
+    const cgId = normalizeContextGraphId(contextGraphId);
     if (privateQuads?.length || opts?.accessPolicy || opts?.allowedPeers?.length) {
       throw new Error(
         'privateQuads, accessPolicy, and allowedPeers are not supported in the V10 ' +
@@ -890,17 +925,17 @@ export class DkgDaemonClient {
       subject: q.subject,
       predicate: q.predicate,
       object: q.object,
-      graph: q.graph ?? `did:dkg:context-graph:${contextGraphId}`,
+      graph: q.graph || toContextGraphUri(cgId),
     }));
     const created: any = await this.post('/api/assertion/create', {
-      contextGraphId,
+      contextGraphId: cgId,
       name: assertionName,
       quads: quadsWithGraph,
       finalize: true,
       promote: true,
     });
     const published = await this.post('/api/shared-memory/publish', {
-      contextGraphId,
+      contextGraphId: cgId,
       assertionName,
     });
     return {
@@ -924,6 +959,7 @@ export class DkgDaemonClient {
     contextGraphId: string,
     opts?: { rootEntities?: string[]; clearAfter?: boolean; subGraphName?: string },
   ): Promise<Record<string, unknown>> {
+    const cgId = normalizeContextGraphId(contextGraphId);
     // Default `clearAfter` to `false` for subset publishes so unpublished root
     // entities aren't dropped from SWM as a side-effect of publishing a few.
     // Full-publish callers (rootEntities omitted) keep the "publish + clear"
@@ -931,7 +967,7 @@ export class DkgDaemonClient {
     const hasSubset = Array.isArray(opts?.rootEntities) && opts!.rootEntities!.length > 0;
     const clearAfter = opts?.clearAfter ?? !hasSubset;
     return this.post('/api/shared-memory/publish', {
-      contextGraphId,
+      contextGraphId: cgId,
       selection: opts?.rootEntities ?? 'all',
       clearAfter,
       subGraphName: opts?.subGraphName,
@@ -966,7 +1002,7 @@ export class DkgDaemonClient {
     id: string,
     opts?: { accessPolicy?: number },
   ): Promise<{ registered: string; onChainId: string; txHash?: string; hint?: string }> {
-    return this.post('/api/context-graph/register', { id, ...opts });
+    return this.post('/api/context-graph/register', { id: normalizeContextGraphId(id), ...opts });
   }
 
   // ---------------------------------------------------------------------------
@@ -978,7 +1014,7 @@ export class DkgDaemonClient {
     opts?: { includeSharedMemory?: boolean },
   ): Promise<{ subscribed: string; catchup: { jobId: string; status: string; includeSharedMemory: boolean } }> {
     return this.post('/api/subscribe', {
-      contextGraphId,
+      contextGraphId: normalizeContextGraphId(contextGraphId),
       includeSharedMemory: opts?.includeSharedMemory,
     });
   }

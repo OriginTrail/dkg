@@ -7,6 +7,11 @@ const SAMPLE_CONTEXT_GRAPHS = [
   { id: 'contextGraph-2', name: 'Testing', subscribed: false, synced: false },
 ];
 
+const SCOPED_CONTEXT_GRAPHS = [
+  { id: 'mine', name: 'Mine', callerInvolved: true, subscribed: true, synced: true },
+  { id: 'public-noise', name: 'Public Noise', callerInvolved: false, subscribed: false, synced: false },
+];
+
 function collectTools(plugin: DkgNodePlugin): OpenClawTool[] {
   const tools: OpenClawTool[] = [];
   const mockApi: OpenClawPluginApi = {
@@ -58,6 +63,7 @@ describe('dkg_list_context_graphs tool', () => {
     const tool = tools.find(t => t.name === 'dkg_list_context_graphs');
     expect(tool).toBeDefined();
     expect(tool!.description).toContain('contextGraphs');
+    expect(tool!.parameters.properties.scope.enum).toEqual(['mine', 'all']);
     expect(tool!.parameters.required).toEqual([]);
   });
 
@@ -72,7 +78,24 @@ describe('dkg_list_context_graphs tool', () => {
 
     expect(parsed.contextGraphs).toEqual(SAMPLE_CONTEXT_GRAPHS);
     expect(parsed.count).toBe(2);
+    expect(parsed.scope).toBe('mine');
     expect(ft.calls[0][0]).toBe('http://localhost:9200/api/context-graph/list');
+  });
+
+  it('defaults to caller-created/joined context graphs and supports scope=all', async () => {
+    ft.addResponses(
+      new Response(JSON.stringify({ contextGraphs: SCOPED_CONTEXT_GRAPHS }), { status: 200 }),
+      new Response(JSON.stringify({ contextGraphs: SCOPED_CONTEXT_GRAPHS }), { status: 200 }),
+    );
+
+    const tool = findTool('dkg_list_context_graphs');
+    const mine = JSON.parse((await tool.execute('call-mine', {})).content[0].text);
+    const all = JSON.parse((await tool.execute('call-all', { scope: 'all' })).content[0].text);
+
+    expect(mine.contextGraphs.map((cg: any) => cg.id)).toEqual(['mine']);
+    expect(mine.scope).toBe('mine');
+    expect(all.contextGraphs.map((cg: any) => cg.id)).toEqual(['mine', 'public-noise']);
+    expect(all.scope).toBe('all');
   });
 
   it('returns error when daemon request fails', async () => {
@@ -188,6 +211,25 @@ describe('dkg_publish tool', () => {
 
     const writeBody = JSON.parse(ft.calls[0][1]?.body as string);
     expect(writeBody.quads[0].object).toBe('https://schema.org/Product');
+  });
+
+  it('accepts a full context graph DID without double-prefixing the publish graph', async () => {
+    ft.addResponses(
+      new Response(JSON.stringify({ assertionUri: 'urn:assertion:test' }), { status: 200 }),
+      new Response(JSON.stringify({ kcId: 'kc-did', kas: [] }), { status: 200 }),
+    );
+
+    const tool = findTool('dkg_publish');
+    await tool.execute('call-did', {
+      context_graph_id: 'did:dkg:context-graph:0xabc/tuesday-cg',
+      quads: [{ subject: 'urn:a', predicate: 'urn:b', object: 'hello' }],
+    });
+
+    const createBody = JSON.parse(ft.calls[0][1]?.body as string);
+    expect(createBody.contextGraphId).toBe('0xabc/tuesday-cg');
+    expect(createBody.quads[0].graph).toBe('did:dkg:context-graph:0xabc/tuesday-cg');
+    const publishBody = JSON.parse(ft.calls[1][1]?.body as string);
+    expect(publishBody.contextGraphId).toBe('0xabc/tuesday-cg');
   });
 
   it('handles mixed URI and literal objects', async () => {
@@ -314,6 +356,22 @@ describe('dkg_query tool', () => {
     expect(body.contextGraphId).toBe('my-cg');
   });
 
+  it('normalizes full context graph DIDs before forwarding query scope', async () => {
+    ft.addResponses(
+      new Response(JSON.stringify({ result: { bindings: [] } }), { status: 200 }),
+    );
+
+    const tool = findTool('dkg_query');
+    await tool.execute('call-did-query', {
+      sparql: 'SELECT * WHERE { ?s ?p ?o }',
+      context_graph_id: 'did:dkg:context-graph:ui-refresh',
+      view: 'shared-working-memory',
+    });
+
+    const body = JSON.parse(ft.calls[0][1]?.body as string);
+    expect(body.contextGraphId).toBe('ui-refresh');
+  });
+
   it('omits view on the wire when not set (daemon then routes via the legacy data-graph path)', async () => {
     // When `view` is absent, the daemon's DKGQueryEngine.query takes the
     // "Legacy routing (V9 compat)" branch (see the `if (options?.view)`
@@ -329,6 +387,26 @@ describe('dkg_query tool', () => {
 
     const body = JSON.parse(ft.calls[0][1]?.body as string);
     expect(body.view).toBeUndefined();
+  });
+});
+
+describe('dkg_sub_graph_list tool', () => {
+  let ft: ReturnType<typeof setupFetchOverride>;
+
+  beforeEach(() => { ft = setupFetchOverride(); });
+  afterEach(() => { ft.restore(); });
+
+  it('normalizes full context graph DIDs before forwarding list scope', async () => {
+    ft.addResponses(
+      new Response(JSON.stringify({ contextGraphId: '0xabc/tuesday-cg', subGraphs: [] }), { status: 200 }),
+    );
+
+    const tool = findTool('dkg_sub_graph_list');
+    await tool.execute('call-subgraphs', {
+      context_graph_id: 'did:dkg:context-graph:0xabc/tuesday-cg',
+    });
+
+    expect(ft.calls[0][0]).toBe('http://localhost:9200/api/sub-graph/list?contextGraphId=0xabc%2Ftuesday-cg');
   });
 });
 

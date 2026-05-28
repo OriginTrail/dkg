@@ -246,8 +246,18 @@ describe('PanelRight component', () => {
       contextEntries: [
         {
           key: 'target_context_graph',
-          label: 'Target context graph',
-          value: 'Testing (testing)',
+          label: 'Target context graph id',
+          value: 'testing',
+        },
+        {
+          key: 'target_context_graph_uri',
+          label: 'Target context graph URI',
+          value: 'did:dkg:context-graph:testing',
+        },
+        {
+          key: 'target_context_graph_name',
+          label: 'Target context graph name',
+          value: 'Testing',
         },
         {
           key: 'current_agent_address',

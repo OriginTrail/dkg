@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 _DEFAULT_URL = "http://127.0.0.1:9200"
 _TIMEOUT = 5  # seconds
 _MAX_IMPORT_FILE_BYTES = 25 * 1024 * 1024
+_CONTEXT_GRAPH_URI_PREFIX = "did:dkg:context-graph:"
 _CG_ID_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
 _BLOCKED_IMPORT_NAMES = {
     ".env",
@@ -142,6 +143,13 @@ def _is_blocked_import_path(path: Path) -> bool:
 
 def _slugify_context_graph_id(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+
+
+def _normalize_context_graph_id(value: str) -> str:
+    text = str(value or "").strip()
+    if text.startswith(_CONTEXT_GRAPH_URI_PREFIX):
+        return text[len(_CONTEXT_GRAPH_URI_PREFIX):]
+    return text
 
 
 def _resolve_dkg_home(dkg_home: Optional[str] = None) -> Path:
@@ -296,7 +304,7 @@ class DKGClient:
         """POST /api/query — run SPARQL on local triple store."""
         payload: Dict[str, Any] = {"sparql": sparql}
         if context_graph_id:
-            payload["contextGraphId"] = context_graph_id
+            payload["contextGraphId"] = _normalize_context_graph_id(context_graph_id)
         if graph_suffix:
             payload["graphSuffix"] = graph_suffix
         if view:
@@ -318,7 +326,7 @@ class DKGClient:
     def create_assertion(self, context_graph_id: str, name: str, sub_graph_name: Optional[str] = None) -> Dict[str, Any]:
         """POST /api/assertion/create — create a WM assertion. Returns { assertionUri }."""
         payload: Dict[str, Any] = {
-            "contextGraphId": context_graph_id,
+            "contextGraphId": _normalize_context_graph_id(context_graph_id),
             "name": name,
         }
         if sub_graph_name:
@@ -328,7 +336,7 @@ class DKGClient:
             return {
                 "success": True,
                 "alreadyExists": True,
-                "contextGraphId": context_graph_id,
+                "contextGraphId": _normalize_context_graph_id(context_graph_id),
                 "name": name,
             }
         return result
@@ -337,7 +345,7 @@ class DKGClient:
                         sub_graph_name: Optional[str] = None) -> Dict[str, Any]:
         """POST /api/assertion/{name}/write — write quads to the assertion graph."""
         payload: Dict[str, Any] = {
-            "contextGraphId": context_graph_id,
+            "contextGraphId": _normalize_context_graph_id(context_graph_id),
             "quads": quads,
         }
         if sub_graph_name:
@@ -354,7 +362,7 @@ class DKGClient:
         from current daemons.
         """
         payload: Dict[str, Any] = {
-            "contextGraphId": context_graph_id,
+            "contextGraphId": _normalize_context_graph_id(context_graph_id),
         }
         if sub_graph_name:
             payload["subGraphName"] = sub_graph_name
@@ -371,7 +379,7 @@ class DKGClient:
         sub_graph_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Resolve deterministic metadata for a completed imported attachment/assertion."""
-        payload: Dict[str, Any] = {"contextGraphId": context_graph_id}
+        payload: Dict[str, Any] = {"contextGraphId": _normalize_context_graph_id(context_graph_id)}
         if assertion_uri:
             payload["assertionUri"] = assertion_uri
         if assertion_name:
@@ -392,7 +400,7 @@ class DKGClient:
         max_bytes: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Read Markdown for a completed imported attachment via daemon content-addressed storage."""
-        payload: Dict[str, Any] = {"contextGraphId": context_graph_id}
+        payload: Dict[str, Any] = {"contextGraphId": _normalize_context_graph_id(context_graph_id)}
         if assertion_uri:
             payload["assertionUri"] = assertion_uri
         if assertion_name:
@@ -419,7 +427,7 @@ class DKGClient:
     ) -> Dict[str, Any]:
         """Append model-derived triples to a completed imported assertion with provenance."""
         payload: Dict[str, Any] = {
-            "contextGraphId": context_graph_id,
+            "contextGraphId": _normalize_context_graph_id(context_graph_id),
             "semanticQuads": semantic_quads,
         }
         if assertion_uri:
@@ -443,7 +451,7 @@ class DKGClient:
                           sub_graph_name: Optional[str] = None) -> Dict[str, Any]:
         """POST /api/assertion/{name}/promote — promote assertion to SWM."""
         payload: Dict[str, Any] = {
-            "contextGraphId": context_graph_id,
+            "contextGraphId": _normalize_context_graph_id(context_graph_id),
         }
         if entities is not None:
             payload["entities"] = entities
@@ -454,7 +462,7 @@ class DKGClient:
     def discard_assertion(self, assertion_name: str, context_graph_id: str,
                           sub_graph_name: Optional[str] = None) -> Dict[str, Any]:
         """POST /api/assertion/{name}/discard — discard a WM assertion."""
-        payload: Dict[str, Any] = {"contextGraphId": context_graph_id}
+        payload: Dict[str, Any] = {"contextGraphId": _normalize_context_graph_id(context_graph_id)}
         if sub_graph_name:
             payload["subGraphName"] = sub_graph_name
         return self._post(f"/api/assertion/{quote(assertion_name, safe='')}/discard", payload)
@@ -463,7 +471,7 @@ class DKGClient:
                           agent_address: Optional[str] = None,
                           sub_graph_name: Optional[str] = None) -> Dict[str, Any]:
         """GET /api/assertion/{name}/history — read assertion lifecycle metadata."""
-        params: Dict[str, str] = {"contextGraphId": context_graph_id}
+        params: Dict[str, str] = {"contextGraphId": _normalize_context_graph_id(context_graph_id)}
         if agent_address:
             params["agentAddress"] = agent_address
         if sub_graph_name:
@@ -500,7 +508,7 @@ class DKGClient:
             if path.stat().st_size > _MAX_IMPORT_FILE_BYTES:
                 return {"success": False, "error": "File is too large to import through the Hermes DKG tool."}
             guessed_type = content_type or mimetypes.guess_type(str(path))[0] or "application/octet-stream"
-            data = {"contextGraphId": context_graph_id}
+            data = {"contextGraphId": _normalize_context_graph_id(context_graph_id)}
             if ontology_ref:
                 data["ontologyRef"] = ontology_ref
             if sub_graph_name:
@@ -534,7 +542,7 @@ class DKGClient:
               sub_graph_name: Optional[str] = None) -> Dict[str, Any]:
         """POST /api/shared-memory/write — write quads to SWM (team-visible)."""
         payload: Dict[str, Any] = {
-            "contextGraphId": context_graph_id,
+            "contextGraphId": _normalize_context_graph_id(context_graph_id),
             "quads": quads,
         }
         if sub_graph_name:
@@ -546,7 +554,7 @@ class DKGClient:
                 sub_graph_name: Optional[str] = None) -> Dict[str, Any]:
         """POST /api/shared-memory/publish — publish SWM to Verified Memory (costs TRAC)."""
         payload: Dict[str, Any] = {
-            "contextGraphId": context_graph_id,
+            "contextGraphId": _normalize_context_graph_id(context_graph_id),
             "selection": selection,
             "clearAfter": clear_after,
         }
@@ -557,7 +565,7 @@ class DKGClient:
     # -- Context Graphs --------------------------------------------------------
 
     def list_context_graphs(self) -> Dict[str, Any]:
-        """GET /api/context-graph/list — list subscribed context graphs."""
+        """GET /api/context-graph/list — list known context graphs."""
         return self._get("/api/context-graph/list")
 
     def create_context_graph(
@@ -614,14 +622,14 @@ class DKGClient:
 
     def register_context_graph(self, context_graph_id: str, access_policy: Optional[int] = None) -> Dict[str, Any]:
         """POST /api/context-graph/register — register a local CG on-chain."""
-        payload: Dict[str, Any] = {"id": context_graph_id}
+        payload: Dict[str, Any] = {"id": _normalize_context_graph_id(context_graph_id)}
         if access_policy is not None:
             payload["accessPolicy"] = access_policy
         return self._post("/api/context-graph/register", payload)
 
     def subscribe(self, context_graph_id: str, include_shared_memory: Optional[bool] = None) -> Dict[str, Any]:
         """POST /api/context-graph/subscribe — subscribe to a context graph."""
-        payload: Dict[str, Any] = {"contextGraphId": context_graph_id}
+        payload: Dict[str, Any] = {"contextGraphId": _normalize_context_graph_id(context_graph_id)}
         if include_shared_memory is not None:
             payload["includeSharedMemory"] = include_shared_memory
         return self._post("/api/context-graph/subscribe", payload)
@@ -631,45 +639,51 @@ class DKGClient:
     def create_sub_graph(self, context_graph_id: str, sub_graph_name: str) -> Dict[str, Any]:
         """POST /api/sub-graph/create — create a named sub-graph."""
         return self._post("/api/sub-graph/create", {
-            "contextGraphId": context_graph_id,
+            "contextGraphId": _normalize_context_graph_id(context_graph_id),
             "subGraphName": sub_graph_name,
         })
 
     def list_sub_graphs(self, context_graph_id: str) -> Dict[str, Any]:
         """GET /api/sub-graph/list — list named sub-graphs for a CG."""
-        return self._get(f"/api/sub-graph/list?{urlencode({'contextGraphId': context_graph_id})}")
+        return self._get(f"/api/sub-graph/list?{urlencode({'contextGraphId': _normalize_context_graph_id(context_graph_id)})}")
 
     # -- Context graph participants -------------------------------------------
 
     def invite_to_context_graph(self, context_graph_id: str, peer_id: str) -> Dict[str, Any]:
         return self._post("/api/context-graph/invite", {
-            "contextGraphId": context_graph_id,
+            "contextGraphId": _normalize_context_graph_id(context_graph_id),
             "peerId": peer_id,
         })
 
     def add_participant(self, context_graph_id: str, agent_address: str) -> Dict[str, Any]:
-        return self._post(f"/api/context-graph/{quote(context_graph_id, safe='')}/add-participant", {
+        cg_id = _normalize_context_graph_id(context_graph_id)
+        return self._post(f"/api/context-graph/{quote(cg_id, safe='')}/add-participant", {
             "agentAddress": agent_address,
         })
 
     def remove_participant(self, context_graph_id: str, agent_address: str) -> Dict[str, Any]:
-        return self._post(f"/api/context-graph/{quote(context_graph_id, safe='')}/remove-participant", {
+        cg_id = _normalize_context_graph_id(context_graph_id)
+        return self._post(f"/api/context-graph/{quote(cg_id, safe='')}/remove-participant", {
             "agentAddress": agent_address,
         })
 
     def list_participants(self, context_graph_id: str) -> Dict[str, Any]:
-        return self._get(f"/api/context-graph/{quote(context_graph_id, safe='')}/participants")
+        cg_id = _normalize_context_graph_id(context_graph_id)
+        return self._get(f"/api/context-graph/{quote(cg_id, safe='')}/participants")
 
     def list_join_requests(self, context_graph_id: str) -> Dict[str, Any]:
-        return self._get(f"/api/context-graph/{quote(context_graph_id, safe='')}/join-requests")
+        cg_id = _normalize_context_graph_id(context_graph_id)
+        return self._get(f"/api/context-graph/{quote(cg_id, safe='')}/join-requests")
 
     def approve_join_request(self, context_graph_id: str, agent_address: str) -> Dict[str, Any]:
-        return self._post(f"/api/context-graph/{quote(context_graph_id, safe='')}/approve-join", {
+        cg_id = _normalize_context_graph_id(context_graph_id)
+        return self._post(f"/api/context-graph/{quote(cg_id, safe='')}/approve-join", {
             "agentAddress": agent_address,
         })
 
     def reject_join_request(self, context_graph_id: str, agent_address: str) -> Dict[str, Any]:
-        return self._post(f"/api/context-graph/{quote(context_graph_id, safe='')}/reject-join", {
+        cg_id = _normalize_context_graph_id(context_graph_id)
+        return self._post(f"/api/context-graph/{quote(cg_id, safe='')}/reject-join", {
             "agentAddress": agent_address,
         })
 

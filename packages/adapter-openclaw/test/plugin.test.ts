@@ -869,7 +869,7 @@ describe('DkgNodePlugin', () => {
 
     const createIdDescription = byName.get('dkg_context_graph_create')!.parameters.properties.id.description;
     expect(createIdDescription).toContain('create-only');
-    expect(createIdDescription).toContain('dkg_list_context_graphs');
+    expect(createIdDescription).toContain('returned id');
   });
 
   // ---------------------------------------------------------------------------
