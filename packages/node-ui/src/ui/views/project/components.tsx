@@ -4839,9 +4839,25 @@ export function SubGraphDetailView({
     if (rawSelectedTab !== selectedTab) setSelectedTab(selectedTab);
   }, [rawSelectedTab, selectedTab, setSelectedTab]);
 
-  const hasAnyFilter = enabledLayers.size < 3 || chipState.size > 0 || !!queryResults;
+  // PR #793 Codex sweep 2 (Bug I) — derive the "are we at the
+  // seeded state?" predicate against `initialEnabledLayers`,
+  // NOT the hard-coded all-three set. Pre-fix the seeded
+  // single-layer scope was indistinguishable from a user-applied
+  // filter, so:
+  //   • `Reset filters` was visible immediately on a WM-seeded
+  //     entry — clicking it widened to all-three instead of
+  //     restoring WM.
+  //   • The active-layer pill was clickable at the seeded scope —
+  //     it would widen the same way.
+  // Comparing against `initialEnabledLayers` makes both
+  // affordances honest: hidden / disabled when the user is at
+  // their entry scope; visible / enabled only after they've
+  // actually narrowed or widened.
+  const isAtSeededScope = enabledLayers.size === initialEnabledLayers.size
+    && [...enabledLayers].every(l => initialEnabledLayers.has(l));
+  const hasAnyFilter = !isAtSeededScope || chipState.size > 0 || !!queryResults;
   const resetFilters = () => {
-    setEnabledLayers(new Set<TrustLevel>(['working', 'shared', 'verified']));
+    setEnabledLayers(new Set<TrustLevel>(initialEnabledLayers));
     setChipState(new Map());
     clearQuery();
   };
@@ -4930,16 +4946,26 @@ export function SubGraphDetailView({
             <span className="v10-subgraph-cross-layer-cell-count">{layerCounts.vm}</span>
           </button>
         </div>
+        {/* Bug I — pill restores `initialEnabledLayers`, NOT
+            hard-coded all-three. Disabled at the seeded scope so
+            the affordance doesn't lie. Copy branches on whether
+            the seeded scope is all-three (the Overview / Subgraphs
+            fresh-entry default) or a single layer (entered via
+            WM/SWM/VM tab). */}
         <button
           type="button"
           className={`v10-subgraph-active-layer-pill${enabledLayers.size === 3 ? ' all-layers' : ''}`}
-          onClick={() => setEnabledLayers(new Set<TrustLevel>(['working', 'shared', 'verified']))}
-          disabled={enabledLayers.size === 3}
+          onClick={() => setEnabledLayers(new Set<TrustLevel>(initialEnabledLayers))}
+          disabled={isAtSeededScope}
           data-testid="active-layer-pill"
-          aria-label={`Active layer scope: ${activeLayerLabel}${enabledLayers.size === 3 ? '' : ' — click to reset to all layers'}`}
-          title={enabledLayers.size === 3
-            ? 'Active layer scope: all three memory layers'
-            : 'Click to reset to all layers'}
+          aria-label={`Active layer scope: ${activeLayerLabel}${isAtSeededScope ? '' : (initialEnabledLayers.size === 3 ? ' — click to reset to all layers' : ' — click to restore originating scope')}`}
+          title={isAtSeededScope
+            ? (initialEnabledLayers.size === 3
+                ? 'Active layer scope: all three memory layers'
+                : 'Active layer scope: originating layer from prior navigation')
+            : (initialEnabledLayers.size === 3
+                ? 'Click to reset to all layers'
+                : 'Click to restore originating scope')}
         >
           <span className="v10-subgraph-active-layer-pill-label">Active layer:</span>
           <span className="v10-subgraph-active-layer-pill-value">{activeLayerLabel}</span>

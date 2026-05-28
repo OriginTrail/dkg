@@ -1796,11 +1796,14 @@ describe('SubGraphDetailView tabs', () => {
     expect(cellFor('swm').getAttribute('aria-pressed')).toBe('false');
     expect(cellFor('vm').getAttribute('aria-pressed')).toBe('false');
 
-    // Active-layer pill surfaces the scope.
+    // Active-layer pill surfaces the scope. Post-Bug-I (PR #793
+    // sweep 2) the pill is DISABLED at the seeded scope — it
+    // would just no-op a "click to restore" affordance — so the
+    // assertion now reflects the honest affordance.
     const pill = container.querySelector('[data-testid="active-layer-pill"]') as HTMLButtonElement;
     expect(pill).toBeTruthy();
     expect(pill.textContent).toContain('Working Memory');
-    expect(pill.disabled).toBe(false);
+    expect(pill.disabled).toBe(true);
   });
 
   it('seeds enabledLayers to all three when initialLayer is omitted (default)', async () => {
@@ -1847,5 +1850,245 @@ describe('SubGraphDetailView tabs', () => {
     expect(cellFor('wm').getAttribute('aria-pressed')).toBe('true');
     expect(cellFor('swm').getAttribute('aria-pressed')).toBe('true');
     expect(cellFor('vm').getAttribute('aria-pressed')).toBe('true');
+  });
+
+  // S3 polish PR #793 Codex sweep 2 (Bug I) — `resetFilters` and
+  // the active-layer pill must restore `initialEnabledLayers`,
+  // NOT a hard-coded all-three set. Pre-fix entering a sub-graph
+  // from a WM tab (initialEnabledLayers === Set(['working'])) and
+  // then clicking Reset would widen scope to all-three instead of
+  // restoring WM. Same shape on the pill click.
+  it('active-layer pill click restores initialEnabledLayers when seeded to a single layer (Bug I)', async () => {
+    const wmEntity = {
+      uri: 'urn:e:wm', label: 'WM', types: [],
+      trustLevel: 'working',
+      layers: new Set(['working']),
+      subGraphs: new Set(['demo']),
+      properties: new Map(), connections: [],
+    };
+    const swmEntity = {
+      uri: 'urn:e:swm', label: 'SWM', types: [],
+      trustLevel: 'shared',
+      layers: new Set(['shared']),
+      subGraphs: new Set(['demo']),
+      properties: new Map(), connections: [],
+    };
+    const fixture = {
+      entities: new Map([[wmEntity.uri, wmEntity], [swmEntity.uri, swmEntity]]),
+      entityList: [wmEntity, swmEntity],
+      allTriples: [], graphTriples: [],
+      trustMap: new Map(),
+      counts: { wm: 1, swm: 1, vm: 0, total: 2 },
+      loading: false, error: null, partial: false,
+      refresh: vi.fn(),
+    } as any;
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root!.render(
+        React.createElement(ProjectProfileContext.Provider, { value: profile },
+          React.createElement(SubGraphDetailView, {
+            slug: 'demo',
+            rawMemory: fixture,
+            contextGraphId: 'cg-test',
+            onNodeClick: vi.fn(),
+            onSelectEntity: vi.fn(),
+            activeTab: 'items',
+            onTabChange: vi.fn(),
+            initialLayer: 'wm',
+          })),
+      );
+    });
+    await flush();
+
+    function cellFor(layer: 'wm' | 'swm' | 'vm'): HTMLButtonElement {
+      return container.querySelector(`button.v10-subgraph-cross-layer-cell[data-layer="${layer}"]`) as HTMLButtonElement;
+    }
+    const pill = container.querySelector('[data-testid="active-layer-pill"]') as HTMLButtonElement;
+
+    // Seeded state: WM only, pill disabled (no-op affordance).
+    expect(pill.disabled).toBe(true);
+    expect(cellFor('wm').getAttribute('aria-pressed')).toBe('true');
+    expect(cellFor('swm').getAttribute('aria-pressed')).toBe('false');
+
+    // User widens scope by clicking the SWM cell → pill enables.
+    await act(async () => { cellFor('swm').click(); });
+    await flush();
+    expect(pill.disabled).toBe(false);
+
+    // Click pill — restores the seeded WM scope, NOT all-three.
+    await act(async () => { pill.click(); });
+    await flush();
+    expect(cellFor('wm').getAttribute('aria-pressed')).toBe('true');
+    expect(cellFor('swm').getAttribute('aria-pressed')).toBe('false');
+    expect(cellFor('vm').getAttribute('aria-pressed')).toBe('false');
+    expect(pill.disabled).toBe(true);
+  });
+
+  it('Reset filters restores initialEnabledLayers when seeded AND when chip filters exist (Bug I)', async () => {
+    // Profile carries a filter chip so the `Reset filters` button
+    // actually mounts. The chip itself isn't toggled — we just
+    // need the chip row to render so the Reset button surfaces.
+    const chipProfile: typeof profile = {
+      ...profile,
+      chipsFor: () => [
+        { slug: 'status', predicate: 'http://example.org/status', label: 'Status', values: ['open', 'done'] },
+      ],
+    };
+    const wmEntity = {
+      uri: 'urn:e:wm', label: 'WM', types: [],
+      trustLevel: 'working',
+      layers: new Set(['working']),
+      subGraphs: new Set(['demo']),
+      properties: new Map(), connections: [],
+    };
+    const swmEntity = {
+      uri: 'urn:e:swm', label: 'SWM', types: [],
+      trustLevel: 'shared',
+      layers: new Set(['shared']),
+      subGraphs: new Set(['demo']),
+      properties: new Map(), connections: [],
+    };
+    const fixture = {
+      entities: new Map([[wmEntity.uri, wmEntity], [swmEntity.uri, swmEntity]]),
+      entityList: [wmEntity, swmEntity],
+      allTriples: [], graphTriples: [],
+      trustMap: new Map(),
+      counts: { wm: 1, swm: 1, vm: 0, total: 2 },
+      loading: false, error: null, partial: false,
+      refresh: vi.fn(),
+    } as any;
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root!.render(
+        React.createElement(ProjectProfileContext.Provider, { value: chipProfile },
+          React.createElement(SubGraphDetailView, {
+            slug: 'demo',
+            rawMemory: fixture,
+            contextGraphId: 'cg-test',
+            onNodeClick: vi.fn(),
+            onSelectEntity: vi.fn(),
+            activeTab: 'items',
+            onTabChange: vi.fn(),
+            initialLayer: 'wm',
+          })),
+      );
+    });
+    await flush();
+
+    function cellFor(layer: 'wm' | 'swm' | 'vm'): HTMLButtonElement {
+      return container.querySelector(`button.v10-subgraph-cross-layer-cell[data-layer="${layer}"]`) as HTMLButtonElement;
+    }
+    const resetSelector = '.v10-subgraph-filter-reset';
+
+    // Seeded scope + no chip filters → hasAnyFilter === false →
+    // Reset button hidden. Pre-Bug-I fix this was VISIBLE even
+    // at the seeded state because the predicate was
+    // `enabledLayers.size < 3`.
+    expect(container.querySelector(resetSelector)).toBeNull();
+
+    // Widen scope to WM + SWM → hasAnyFilter flips → Reset
+    // surfaces.
+    await act(async () => { cellFor('swm').click(); });
+    await flush();
+    const resetBtn = container.querySelector(resetSelector) as HTMLButtonElement | null;
+    expect(resetBtn).toBeTruthy();
+
+    // Click Reset — restores the seeded WM scope, not all-three.
+    await act(async () => { resetBtn!.click(); });
+    await flush();
+    expect(cellFor('wm').getAttribute('aria-pressed')).toBe('true');
+    expect(cellFor('swm').getAttribute('aria-pressed')).toBe('false');
+    expect(cellFor('vm').getAttribute('aria-pressed')).toBe('false');
+    // Reset button hidden again post-restore.
+    expect(container.querySelector(resetSelector)).toBeNull();
+  });
+
+  it('Reset filters and pill restore all-three when initialEnabledLayers is the default (regression guard)', async () => {
+    // Without `initialLayer`, the seeded scope IS all-three — the
+    // pre-existing behaviour. Reset and pill should still work
+    // exactly as before for this path.
+    const chipProfile: typeof profile = {
+      ...profile,
+      chipsFor: () => [
+        { slug: 'status', predicate: 'http://example.org/status', label: 'Status', values: ['open', 'done'] },
+      ],
+    };
+    const wmEntity = {
+      uri: 'urn:e:wm', label: 'WM', types: [],
+      trustLevel: 'working',
+      layers: new Set(['working']),
+      subGraphs: new Set(['demo']),
+      properties: new Map(), connections: [],
+    };
+    const swmEntity = {
+      uri: 'urn:e:swm', label: 'SWM', types: [],
+      trustLevel: 'shared',
+      layers: new Set(['shared']),
+      subGraphs: new Set(['demo']),
+      properties: new Map(), connections: [],
+    };
+    const fixture = {
+      entities: new Map([[wmEntity.uri, wmEntity], [swmEntity.uri, swmEntity]]),
+      entityList: [wmEntity, swmEntity],
+      allTriples: [], graphTriples: [],
+      trustMap: new Map(),
+      counts: { wm: 1, swm: 1, vm: 0, total: 2 },
+      loading: false, error: null, partial: false,
+      refresh: vi.fn(),
+    } as any;
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root!.render(
+        React.createElement(ProjectProfileContext.Provider, { value: chipProfile },
+          React.createElement(SubGraphDetailView, {
+            slug: 'demo',
+            rawMemory: fixture,
+            contextGraphId: 'cg-test',
+            onNodeClick: vi.fn(),
+            onSelectEntity: vi.fn(),
+            activeTab: 'items',
+            onTabChange: vi.fn(),
+            /* no initialLayer → default all-three */
+          })),
+      );
+    });
+    await flush();
+
+    function cellFor(layer: 'wm' | 'swm' | 'vm'): HTMLButtonElement {
+      return container.querySelector(`button.v10-subgraph-cross-layer-cell[data-layer="${layer}"]`) as HTMLButtonElement;
+    }
+    const pill = container.querySelector('[data-testid="active-layer-pill"]') as HTMLButtonElement;
+
+    // Default state: all three pressed, pill disabled, no Reset.
+    expect(pill.disabled).toBe(true);
+    expect(container.querySelector('.v10-subgraph-filter-reset')).toBeNull();
+
+    // Narrow to WM → Reset + pill enable.
+    await act(async () => { cellFor('swm').click(); });
+    await act(async () => { cellFor('vm').click(); });
+    await flush();
+    expect(pill.disabled).toBe(false);
+    const reset = container.querySelector('.v10-subgraph-filter-reset') as HTMLButtonElement;
+    expect(reset).toBeTruthy();
+
+    // Click Reset → restores all-three.
+    await act(async () => { reset.click(); });
+    await flush();
+    expect(cellFor('wm').getAttribute('aria-pressed')).toBe('true');
+    expect(cellFor('swm').getAttribute('aria-pressed')).toBe('true');
+    expect(cellFor('vm').getAttribute('aria-pressed')).toBe('true');
+    expect(pill.disabled).toBe(true);
   });
 });
