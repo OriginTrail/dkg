@@ -3,6 +3,7 @@ import { readFileSync, statSync } from 'node:fs';
 import { isIP } from 'node:net';
 import { join } from 'node:path';
 
+import { resolveHermesProfile } from '@origintrail-official/dkg-adapter-hermes';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import { parseDotenvValue } from '@origintrail-official/dkg-core';
 import type { ChatMemoryManager } from '@origintrail-official/dkg-node-ui';
@@ -280,12 +281,31 @@ export function resolveHermesApiServerKey(config: DkgConfig): string | undefined
   // local profile here would forward a stale, unrelated key and make remote
   // chat fail — those setups must use DKG_HERMES_API_SERVER_KEY (handled above).
   if (!hasLoopbackHermesOpenAiTarget(config)) return undefined;
-  const integration = getLocalAgentIntegration(config, 'hermes');
-  const hermesHome = optionalTrimmedString(
-    (integration?.metadata as Record<string, unknown> | undefined)?.hermesHome,
-  );
+  const hermesHome = resolveHermesHomeForKey(config);
   if (!hermesHome) return undefined;
   return readApiServerKeyFromEnv(join(hermesHome, '.env'));
+}
+
+/**
+ * Locate the Hermes profile home whose `.env` carries the key. Prefer the
+ * `hermesHome` stored on the integration record, but fall back to the resolved
+ * default/named profile (the same resolver `dkg hermes setup` uses) so
+ * integration records that predate that metadata — or where connect was
+ * skipped — can still find the `.env` setup wrote, instead of staying stuck in
+ * missing-key/401 until the user reconnects.
+ */
+function resolveHermesHomeForKey(config: DkgConfig): string | undefined {
+  const metadata = getLocalAgentIntegration(config, 'hermes')?.metadata as
+    | Record<string, unknown>
+    | undefined;
+  const fromMetadata = optionalTrimmedString(metadata?.hermesHome);
+  if (fromMetadata) return fromMetadata;
+  try {
+    const profileName = optionalTrimmedString(metadata?.profileName);
+    return resolveHermesProfile(profileName ? { profileName } : {}).hermesHome;
+  } catch {
+    return undefined;
+  }
 }
 
 /** True when the active hermes-openai target is a loopback api_server. */

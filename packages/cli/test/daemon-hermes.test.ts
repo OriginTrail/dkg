@@ -574,6 +574,25 @@ describe('Hermes channel helpers', () => {
     }))).toBeUndefined();
   });
 
+  it('falls back to the resolved Hermes profile when metadata.hermesHome is absent', () => {
+    const home = mkdtempSync(join(tmpdir(), 'hermes-fallback-'));
+    cleanupDirs.push(home);
+    writeFileSync(join(home, '.env'), 'API_SERVER_KEY=fallback-key\n');
+    // Integration record predates hermesHome metadata (or connect was skipped):
+    // resolution falls back to the default profile the same way setup does.
+    resolveHermesProfileMock.mockReturnValue({
+      profileName: undefined,
+      hermesHome: home,
+      memoryMode: 'provider',
+    });
+
+    expect(resolveHermesApiServerKey(makeConfig({
+      localAgentIntegrations: {
+        hermes: { enabled: true, transport: { kind: 'hermes-openai' } },
+      },
+    }))).toBe('fallback-key');
+  });
+
   it('annotates an unreachable hermes-openai health probe with the missing-key hint', async () => {
     const home = mkdtempSync(join(tmpdir(), 'hermes-nokey-'));
     cleanupDirs.push(home);
@@ -1421,6 +1440,33 @@ describe('Hermes daemon routes', () => {
       code: 'INTEGRATION_DISABLED',
     });
   });
+
+  it.each(['/api/hermes-channel/send', '/api/hermes-channel/stream'])(
+    'returns HERMES_API_KEY_REJECTED when the hermes-openai api_server replies 401 (%s)',
+    async (path) => {
+      const { ctx, res } = makeHermesRouteContext({
+        text: 'hello',
+        correlationId: 'corr-1',
+      }, {
+        hasChatTurn: vi.fn(async () => false),
+        storeChatExchange: vi.fn(async () => {}),
+      }, {
+        localAgentIntegrations: {
+          hermes: {
+            enabled: true,
+            capabilities: { localChat: true },
+            transport: { kind: 'hermes-openai', gatewayUrl: 'http://127.0.0.1:8642' },
+          },
+        },
+      }, path);
+      vi.stubGlobal('fetch', vi.fn(async () => new Response('unauthorized', { status: 401 })));
+
+      await handleHermesRoutes(ctx);
+
+      expect(res.statusCode).toBe(502);
+      expect(JSON.parse(res.body)).toMatchObject({ code: 'HERMES_API_KEY_REJECTED' });
+    },
+  );
 
   it('forwards attachment refs, import context, and contextGraphId to Hermes channel send', async () => {
     const attachmentRef = {
