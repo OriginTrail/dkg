@@ -11,7 +11,7 @@
 import React from 'react';
 import { fetchSubGraphs, type SubGraphInfo } from '../api.js';
 import type { ProjectProfile } from '../hooks/useProjectProfile.js';
-import type { MemoryEntity } from '../hooks/useMemoryEntities.js';
+import type { MemoryEntity, TrustLevel } from '../hooks/useMemoryEntities.js';
 import { useMemoryGraphEvents } from '../hooks/useNodeEvents.js';
 import { isUserFacingSubGraph, ROOT_SLUG_SENTINEL } from '../lib/subGraphs.js';
 
@@ -37,15 +37,38 @@ export interface SubGraphBarProps {
   /** Optional entity list for computing live badges (proposed / p0 / open PRs). */
   entities?: MemoryEntity[];
   /**
-   * When set, the chip counts reflect entities whose canonical layer
-   * (`trustLevel`) matches this layer — so on the WM/SWM/VM pages the
-   * row reports a per-layer slice instead of the daemon's project-wide
-   * total. Without this prop the row falls back to daemon totals
-   * (used on the Overview / Subgraphs pages). Also used as the
-   * `originatingLayer` argument forwarded to `onSelect` when a chip
-   * is clicked (#9 polish).
+   * Single-layer scope (back-compat). When set, the chip counts
+   * reflect entities whose canonical layer (`trustLevel`) matches
+   * this layer — so on the WM/SWM/VM pages the row reports a
+   * per-layer slice instead of the daemon's project-wide total.
+   * Without this prop the row falls back to daemon totals (used
+   * on the Overview / Subgraphs pages). Also used as the
+   * `originatingLayer` argument forwarded to `onSelect` when a
+   * chip is clicked (#9 polish).
+   *
+   * Superseded by `enabledScope` when both are set. New callers
+   * (PR #793 sweep 6 Bug O onward) should use `enabledScope`.
    */
   layer?: 'wm' | 'swm' | 'vm';
+  /**
+   * Multi-layer scope (PR #793 sweep 6 Bug O). Carries the
+   * user's current detail-view `enabledLayers` Set so the
+   * sibling bar's chip counts agree with the detail pane's
+   * filtered slice. Pre-Bug-O the bar mounted alongside a
+   * scoped detail was layer-agnostic, showing all-three chip
+   * counts above a filtered detail body — same-screen
+   * disagreement. The Set is interpreted as:
+   *   • size 0 or undefined → layer-agnostic (Overview / Subgraphs)
+   *   • size 1 → single-layer slice (matches the legacy `layer`)
+   *   • size 2 → narrowed across 2 layers
+   *   • size 3 → semantically all-three, treated as layer-agnostic
+   *     for the `inLayerMode` discriminant (the #7 hint / Bug K
+   *     rephrase / tooltip-branch logic stays at "no narrowing")
+   *
+   * Always trumps `layer` when both are non-empty. Forwarded as
+   * a fresh Set on chip click via `originatingScope` — see below.
+   */
+  enabledScope?: ReadonlySet<TrustLevel>;
 }
 
 const LAYER_TRUST_LEVEL = {
@@ -100,34 +123,57 @@ function computeBadges(entities: MemoryEntity[] | undefined): Map<string, SubGra
   return out;
 }
 
-export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profile, selected, onSelect, entities, layer }) => {
+export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profile, selected, onSelect, entities, layer, enabledScope }) => {
   const [subGraphs, setSubGraphs] = React.useState<SubGraphInfo[]>([]);
   const [loading, setLoading] = React.useState(true);
   const badges = React.useMemo(() => computeBadges(entities), [entities]);
   const requestIdRef = React.useRef(0);
 
+  // PR #793 sweep 6 Bug O — resolve a single "allowed trust
+  // levels" Set from the (preferred) `enabledScope` Set carrier or
+  // the legacy `layer` single-layer prop. A Set of size 3 collapses
+  // to null (no narrowing — same semantic as undefined). The legacy
+  // `layer` path maps through `LAYER_TRUST_LEVEL` into a size-1
+  // Set. Once a Set or null is in hand, every derivation below
+  // reads it the same way and the multi-layer case round-trips
+  // cleanly. When the carrier collapses to null we're in layer-
+  // agnostic mode.
+  const allowedTrustLevels = React.useMemo<ReadonlySet<TrustLevel> | null>(() => {
+    if (enabledScope && enabledScope.size > 0 && enabledScope.size < 3) {
+      return new Set(enabledScope);
+    }
+    if (enabledScope && enabledScope.size >= 3) return null;
+    if (layer) return new Set<TrustLevel>([LAYER_TRUST_LEVEL[layer]]);
+    return null;
+  }, [enabledScope, layer]);
+  // `isNarrowed` is true when the bar reports a sliced view (any
+  // non-null `allowedTrustLevels`). Pre-Bug-O this was just
+  // `layer !== undefined`; the Set carrier generalises it for the
+  // multi-layer cases. Drives the #7 / Bug K layer-mode tooltip
+  // branching and the All chip Root-inclusion rule.
+  const isNarrowed = allowedTrustLevels !== null;
+
   // When `entities` is provided we derive per-sub-graph counts locally
   // so the chip count matches what the entity list below it shows.
-  // Without `layer`, count every entity that belongs to the sub-graph
-  // (any layer) — used on the sub-graph page where the per-pyramid
-  // header sums across layers (Issue B: the daemon's
+  // Without narrowing, count every entity that belongs to the
+  // sub-graph (any layer) — used on the sub-graph page where the
+  // per-pyramid header sums across layers (Issue B: the daemon's
   // `/api/sub-graph/list` `entityCount` counts entities once per
   // sub-graph membership, double-counting cross-sub-graph entities,
-  // so the chip said "27" while the list said "11"). With `layer`
-  // set, scope to entities whose canonical `trustLevel` matches —
-  // used on the WM/SWM/VM page (post-P4).
+  // so the chip said "27" while the list said "11"). With
+  // narrowing, scope to entities whose canonical `trustLevel` is
+  // in the allowed set.
   const entityScopedCounts = React.useMemo(() => {
     if (!entities) return null;
-    const trust = layer ? LAYER_TRUST_LEVEL[layer] : null;
     const counts = new Map<string, number>();
     for (const e of entities) {
-      if (trust !== null && e.trustLevel !== trust) continue;
+      if (allowedTrustLevels && !allowedTrustLevels.has(e.trustLevel)) continue;
       for (const sg of e.subGraphs) {
         counts.set(sg, (counts.get(sg) ?? 0) + 1);
       }
     }
     return counts;
-  }, [layer, entities]);
+  }, [allowedTrustLevels, entities]);
 
   // Distinct count of in-scope entities for the "All" chip. Summing
   // per-sub-graph counts would double-count entities living in two or
@@ -147,30 +193,32 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
   //     total past anything the user can drill into by clicking a chip.
   const entityScopedAllTotal = React.useMemo(() => {
     if (!entities) return null;
-    const trust = layer ? LAYER_TRUST_LEVEL[layer] : null;
     let n = 0;
     for (const e of entities) {
-      if (trust !== null && e.trustLevel !== trust) continue;
-      if (layer === undefined && e.subGraphs.size === 0) continue;
+      if (allowedTrustLevels && !allowedTrustLevels.has(e.trustLevel)) continue;
+      // Layer-agnostic mode (no narrowing) excludes root entities
+      // by design — `All` is the umbrella over named-sub-graph
+      // chips. In layer / narrowed mode root entities are
+      // included so the total matches the layer-tab badge.
+      if (!isNarrowed && e.subGraphs.size === 0) continue;
       n++;
     }
     return n;
-  }, [layer, entities]);
+  }, [allowedTrustLevels, isNarrowed, entities]);
 
   // S3 fold-in: the synthesized "Root" bucket is "all entities minus
   // those in any named sub-graph". Computed from the same entity list
   // the named chips use so the counts agree row-by-row.
   const rootEntityCount = React.useMemo(() => {
     if (!entities) return null;
-    const trust = layer ? LAYER_TRUST_LEVEL[layer] : null;
     let n = 0;
     for (const e of entities) {
-      if (trust !== null && e.trustLevel !== trust) continue;
+      if (allowedTrustLevels && !allowedTrustLevels.has(e.trustLevel)) continue;
       if (e.subGraphs.size > 0) continue;
       n++;
     }
     return n;
-  }, [layer, entities]);
+  }, [allowedTrustLevels, entities]);
 
   const loadSubGraphs = React.useCallback(() => {
     const requestId = ++requestIdRef.current;
@@ -238,20 +286,27 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
   // the daemon-sum only when no entities prop was passed.
   const totalEntities = entityScopedAllTotal ?? merged.reduce((a, b) => a + b.entityCount, 0);
   const totalTriples = merged.reduce((a, b) => a + b.tripleCount, 0);
-  // Tooltip suffix tells the user the count is layer-scoped on a
-  // WM/SWM/VM page; on the Overview / Subgraphs page it stays implicit
-  // (project-wide totals match the daemon view).
-  const layerLabel = layer === 'wm' ? 'Working Memory'
-    : layer === 'swm' ? 'Shared Working Memory'
-    : layer === 'vm' ? 'Verifiable Memory'
+  // Tooltip suffix tells the user the count is narrowed on a
+  // WM/SWM/VM (or multi-layer) page; on the Overview / Subgraphs
+  // page it stays implicit (project-wide totals match the daemon
+  // view). For a single-layer scope the suffix reads as the
+  // layer's full canonical title; for a multi-layer narrowing
+  // it concatenates the present layer labels.
+  const TRUST_LAYER_TITLE: Record<TrustLevel, string> = {
+    working: 'Working Memory',
+    shared: 'Shared Working Memory',
+    verified: 'Verifiable Memory',
+  };
+  const layerLabel = allowedTrustLevels
+    ? [...allowedTrustLevels].map(t => TRUST_LAYER_TITLE[t]).join(' + ')
     : null;
   const scopeSuffix = layerLabel ? ` in ${layerLabel}` : '';
 
-  // S3 polish #7 — the `All` semantic differs between layer mode
-  // and layer-agnostic mode (see `entityScopedAllTotal` at :139
-  // for the locked rule):
-  //   • Layer mode (WM/SWM/VM): All includes root-bucket entities
-  //     so it matches the layer-tab badge.
+  // S3 polish #7 — the `All` semantic differs between narrowed
+  // and layer-agnostic mode (see `entityScopedAllTotal` for the
+  // locked rule):
+  //   • Narrowed (WM/SWM/VM or a multi-layer slice): All includes
+  //     root-bucket entities so it matches the layer-tab badge.
   //   • Layer-agnostic mode (Subgraph Explorer overview): All
   //     EXCLUDES root by design — it's the umbrella over named
   //     sub-graph chips; including root would inflate the total
@@ -259,7 +314,7 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
   // Surface different tooltip / aria-label / inline hint copy on
   // each mode so the math reads consistently with the chip count.
   // (PR #793 Codex sweep 1 — gating fix.)
-  const inLayerMode = layer !== undefined;
+  const inLayerMode = isNarrowed;
   const allTooltipCopy = inLayerMode
     ? `Total entities — includes those in named subgraphs (some may belong to more than one), plus Root entities not in any subgraph · ${totalEntities} entities${scopeSuffix}${layerLabel ? '' : ` · ${totalTriples} triples`}`
     : `Total entities in named subgraphs (some may belong to more than one). Root entities are counted separately on the Root chip · ${totalEntities} entities · ${totalTriples} triples`;

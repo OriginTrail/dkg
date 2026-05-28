@@ -704,4 +704,108 @@ describe('SubGraphBar — layer-scoped chip counts (P4)', () => {
     await act(async () => { allChip.click(); });
     expect(onSelect).toHaveBeenCalledWith(null);
   });
+
+  // S3 polish PR #793 Codex sweep 6 (Bug O) — the `enabledScope`
+  // Set carrier supersedes the legacy single-layer `layer` prop
+  // so a detail view's multi-layer scope can flow into the
+  // sibling bar's chip counts. Pre-Bug-O the bar mounted next to
+  // a filtered detail body was layer-agnostic, showing all-three
+  // chip counts above the filtered slice — same-screen
+  // disagreement.
+  it('with `enabledScope=Set([working])`: chip counts match a WM-only slice (Bug O single-layer)', async () => {
+    const entities = [
+      mkEntity('urn:wm-a', 'working', 'alpha'),
+      mkEntity('urn:promoted-a', 'shared', 'alpha'),
+      mkEntity('urn:swm-b', 'shared', 'beta'),
+    ];
+    await act(async () => {
+      root.render(React.createElement(SubGraphBar, {
+        contextGraphId: 'cg',
+        profile,
+        selected: 'alpha',
+        onSelect: vi.fn(),
+        entities,
+        enabledScope: new Set<'working' | 'shared' | 'verified'>(['working']),
+      }));
+    });
+    await flushNet();
+    expect(chipCount('alpha')).toBe(1);
+    expect(chipCount('beta')).toBe(0);
+  });
+
+  it('with `enabledScope=Set([working, shared])`: chip counts include entities at either layer (Bug O multi-layer)', async () => {
+    // Pre-Bug-O the bar could only express single-layer scope via
+    // `layer`. Multi-layer detail scope (e.g. the user widened
+    // WM-only entry to WM+SWM) had no carrier — the bar reverted
+    // to layer-agnostic. Post-fix the Set carrier maps cleanly.
+    const entities = [
+      mkEntity('urn:wm-a', 'working', 'alpha'),
+      mkEntity('urn:promoted-a', 'shared', 'alpha'),
+      mkEntity('urn:vm-a', 'verified', 'alpha'),
+      mkEntity('urn:swm-b', 'shared', 'beta'),
+    ];
+    await act(async () => {
+      root.render(React.createElement(SubGraphBar, {
+        contextGraphId: 'cg',
+        profile,
+        selected: 'alpha',
+        onSelect: vi.fn(),
+        entities,
+        enabledScope: new Set<'working' | 'shared' | 'verified'>(['working', 'shared']),
+      }));
+    });
+    await flushNet();
+    // alpha: 1 WM + 1 promoted-SWM ∈ scope → 2; VM excluded.
+    expect(chipCount('alpha')).toBe(2);
+    // beta: 1 SWM ∈ scope → 1.
+    expect(chipCount('beta')).toBe(1);
+  });
+
+  it('with `enabledScope=Set([all-three])`: collapses to layer-agnostic (Bug O size-3 sentinel)', async () => {
+    // A size-3 Set is semantically equivalent to undefined —
+    // nothing is being narrowed, so the bar should behave as
+    // layer-agnostic (per-sub-graph distinct counts across all
+    // layers, Root chip excluded from All total).
+    const entities = [
+      mkEntity('urn:wm-a', 'working', 'alpha'),
+      mkEntity('urn:swm-a', 'shared', 'alpha'),
+      mkEntity('urn:vm-b', 'verified', 'beta'),
+    ];
+    await act(async () => {
+      root.render(React.createElement(SubGraphBar, {
+        contextGraphId: 'cg',
+        profile,
+        selected: null,
+        onSelect: vi.fn(),
+        entities,
+        enabledScope: new Set<'working' | 'shared' | 'verified'>(['working', 'shared', 'verified']),
+      }));
+    });
+    await flushNet();
+    expect(chipCount('alpha')).toBe(2);
+    expect(chipCount('beta')).toBe(1);
+  });
+
+  it('`enabledScope` wins over `layer` when both are set (Bug O precedence)', async () => {
+    // Defensive — if a caller passes both (shouldn't, but),
+    // `enabledScope` is the multi-layer carrier and takes
+    // precedence.
+    const entities = [
+      mkEntity('urn:wm-a', 'working', 'alpha'),
+      mkEntity('urn:swm-a', 'shared', 'alpha'),
+    ];
+    await act(async () => {
+      root.render(React.createElement(SubGraphBar, {
+        contextGraphId: 'cg',
+        profile,
+        selected: 'alpha',
+        onSelect: vi.fn(),
+        entities,
+        layer: 'wm',                                                              // would mean WM-only
+        enabledScope: new Set<'working' | 'shared' | 'verified'>(['shared']),     // but Set wins → SWM-only
+      }));
+    });
+    await flushNet();
+    expect(chipCount('alpha')).toBe(1);                                           // only the SWM entity
+  });
 });

@@ -139,9 +139,20 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   // `handleSelectSubGraph`'s layer-agnostic branch when the user
   // hops between subgraphs from the detail-view internal bar —
   // we route the current scope through, NOT the stale seed.
+  //
+  // PR #793 sweep 6 Bug O — also stored as React state so the
+  // sibling `SubGraphBar` mounted next to the detail view can
+  // pass it through as `enabledScope`. The bar's chip counts
+  // were pre-Bug-O layer-agnostic above a filtered detail body,
+  // causing on-screen number disagreement. Ref + state stay in
+  // lockstep — the ref carries the SYNC value for race-window
+  // discriminators (Bug L); the state drives the bar's re-render
+  // when the user widens/narrows inside the detail view.
   const detailScopeRef = useRef<ReadonlySet<TrustLevel> | null>(null);
+  const [currentDetailScope, setCurrentDetailScope] = useState<ReadonlySet<TrustLevel> | null>(null);
   const handleDetailEnabledLayersChange = useCallback((layers: ReadonlySet<TrustLevel>) => {
     detailScopeRef.current = layers;
+    setCurrentDetailScope(layers);
   }, []);
   // PR #793 sweep 4 Bug L — `activeSubGraph` from the useCallback
   // closure can be stale during a fast chip-to-chip burst (the
@@ -175,7 +186,10 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     if (slug === null) {
       // Exit always clears the scope mirror so the next chip
       // click from a fresh route doesn't see a stale carry-over.
+      // Both the ref (sync read path) and the state (bar
+      // re-render path) clear in lockstep.
       detailScopeRef.current = null;
+      setCurrentDetailScope(null);
     }
     setActiveSubGraph(slug);
   }, []);
@@ -508,12 +522,19 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     setActiveSubGraphSync(slug);
     if (slug === null) {
       setSubGraphInitialEnabledLayers(null);
-      // detailScopeRef.current already cleared by the helper.
+      // detailScopeRef.current and currentDetailScope already
+      // cleared by the helper.
     } else if (originatingLayer !== undefined) {
       // Single-layer seed (layer-tab entry).
       const seed = new Set<TrustLevel>([TRUST_FOR_LAYER[originatingLayer]]);
       setSubGraphInitialEnabledLayers(seed);
       detailScopeRef.current = seed;
+      // Bar's `enabledScope` prop needs the current scope state
+      // immediately so the chip counts agree with the detail
+      // view's seed on first render (Bug O — same-screen
+      // disagreement at the moment of entry, before the detail
+      // view's mirror effect has fired).
+      setCurrentDetailScope(seed);
     } else {
       // Layer-agnostic — preserve user's CURRENT scope on
       // detail→detail hops (Bug J); clear on fresh entry from the
@@ -530,9 +551,11 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
         const snapshot = new Set<TrustLevel>(detailScopeRef.current);
         setSubGraphInitialEnabledLayers(snapshot);
         detailScopeRef.current = snapshot;
+        setCurrentDetailScope(snapshot);
       } else {
         setSubGraphInitialEnabledLayers(null);
         detailScopeRef.current = null;
+        setCurrentDetailScope(null);
       }
     }
     setSelectedUri(null);
@@ -709,6 +732,13 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
             selected={activeSubGraph}
             entities={chipBarEntities}
             onSelect={handleSelectSubGraph}
+            /* Bug O — chip counts now reflect the detail's
+               current scope so the bar and the body show
+               consistent numbers (no all-three counts above
+               a filtered detail). The state is updated
+               synchronously by `handleSelectSubGraph` on entry
+               + on user toggles via the mirror callback. */
+            enabledScope={currentDetailScope ?? undefined}
           />
           <SubGraphDetailView
             slug={activeSubGraph}

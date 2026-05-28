@@ -231,15 +231,21 @@ vi.mock('../src/ui/components/SubGraphBar.js', () => ({
     onSelect,
     entities,
     layer,
+    enabledScope,
   }: {
     selected: string | null;
     onSelect: (slug: string | null, originatingLayer?: 'wm' | 'swm' | 'vm') => void;
     entities?: ReadonlyArray<unknown>;
     layer?: 'wm' | 'swm' | 'vm';
+    enabledScope?: ReadonlySet<'working' | 'shared' | 'verified'>;
   }) =>
     React.createElement('div', {
       'data-testid': 'subgraph-bar',
       'data-selected': selected ?? '',
+      // PR #793 sweep 6 Bug O — comma-joined sorted trust
+      // levels in `enabledScope`, `-` when absent. Lets Bug O
+      // tests assert the bar's scope mirrors the detail view.
+      'data-enabled-scope': enabledScope ? [...enabledScope].sort().join(',') : '-',
       // S3 Codex Bug C — surface the `entities` prop's
       // resolution so tests can assert ProjectView gates it on
       // a fully-loaded memory snapshot. `defined` while
@@ -1095,6 +1101,72 @@ describe('ProjectView entity detail navigation', () => {
     await click('select-subgraph-demo');
     await flush();
     expect(query('subgraph-detail').dataset.initialEnabledLayers).toBe('-');
+  });
+
+  // S3 polish PR #793 Codex sweep 6 (Bug O) — the SubGraphBar
+  // mounted alongside an active subgraph detail must receive the
+  // detail's current `enabledLayers` scope so its chip counts
+  // reflect the same filtered slice. Pre-fix the bar was
+  // layer-agnostic (showing all-three counts) above a layer-
+  // filtered detail body — same-screen disagreement.
+  it('detail-view sibling SubGraphBar receives the detail scope as enabledScope (Bug O load-bearing — single-layer entry)', async () => {
+    // WM-tab entry → seeds Set(['working']) on both the detail
+    // AND the sibling bar.
+    await click('switch-wm');
+    await click('select-subgraph-alpha-with-layer');
+    await flush();
+    expect(query('subgraph-detail').dataset.initialEnabledLayers).toBe('working');
+    // The detail-view sibling bar mounts on this branch — assert
+    // its enabledScope matches.
+    expect(query('subgraph-bar').dataset.enabledScope).toBe('working');
+  });
+
+  it('detail-view sibling SubGraphBar updates when the user widens detail scope (Bug O multi-layer)', async () => {
+    await click('switch-wm');
+    await click('select-subgraph-alpha-with-layer');
+    await flush();
+    // Baseline: WM only.
+    expect(query('subgraph-bar').dataset.enabledScope).toBe('working');
+
+    // User widens the detail's scope to WM+SWM. The mirror
+    // callback updates the parent state → bar re-renders.
+    await click('detail-widen-wm-swm');
+    await flush();
+
+    expect(query('subgraph-bar').dataset.enabledScope).toBe('shared,working');
+  });
+
+  it('detail-view sibling SubGraphBar reflects all-three scope on overview-entry (Bug O regression guard)', async () => {
+    // Fresh-entry from Subgraphs overview: detail seeds at
+    // all-three; bar's enabledScope should reflect the same
+    // (or fall through to layer-agnostic, which the mock
+    // surfaces identically when scope is the full set).
+    await click('switch-subgraphs');
+    await click('select-subgraph-demo');
+    await flush();
+    expect(query('subgraph-detail').dataset.initialEnabledLayers).toBe('-');
+    // The mirror effect fires on mount with all-three. The bar
+    // receives that Set; per the bar's collapse rule (sweep 6
+    // Bug O — size 3 is treated as layer-agnostic in display
+    // logic but the carrier still flows through) the mock
+    // surfaces the comma-joined string.
+    expect(query('subgraph-bar').dataset.enabledScope).toBe('shared,verified,working');
+  });
+
+  it('exit from detail clears the sibling SubGraphBar scope state (Bug O exit invariant)', async () => {
+    await click('switch-wm');
+    await click('select-subgraph-alpha-with-layer');
+    await flush();
+    expect(query('subgraph-bar').dataset.enabledScope).toBe('working');
+
+    // Exit to the WM tab — sync helper's null-clear branch
+    // wipes both the ref and the bar's scope state.
+    await click('clear-subgraph');
+    await flush();
+    // Detail view unmounted; the WM-tab branch's bar (a different
+    // mount) has no enabledScope by design (it's the layer-tab
+    // mount, which uses the legacy `layer={activeLayer}` path).
+    expect(query('subgraph-bar').dataset.enabledScope).toBe('-');
   });
 
 });
