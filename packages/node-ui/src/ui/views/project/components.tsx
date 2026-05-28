@@ -3859,13 +3859,36 @@ export function SubGraphOverviewGrid({
   const profile = useProjectProfileContext();
   const [subGraphs, setSubGraphs] = useState<SubGraphInfo[]>([]);
   const [loading, setLoading] = useState(true);
+  // Track fetch failure separately from "the daemon returned no
+  // sub-graphs". Issue G — the teaching empty state explains the
+  // subgraph concept and offers `View root`, which is helpful when
+  // the CG genuinely has no sub-graphs yet, but reads as
+  // authoritative "all clear" when the cards endpoint actually
+  // failed mid-flight. The error branch below renders only when
+  // we got nothing from the daemon AND the request failed; a
+  // transient failure during refresh (where prior cards are still
+  // populated) keeps showing the last good grid.
+  const [fetchError, setFetchError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
+    setFetchError(null);
     fetchSubGraphs(contextGraphId)
-      .then(r => { if (!cancelled) setSubGraphs(r.subGraphs ?? []); })
-      .catch(() => { /* silent */ })
+      .then(r => {
+        if (!cancelled) {
+          setSubGraphs(r.subGraphs ?? []);
+        }
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          setFetchError(err instanceof Error ? err.message : 'Failed to load subgraphs');
+          // Don't blow away prior `subGraphs` on a refresh failure —
+          // the error branch below gates on `cards.length === 0` so
+          // last-good cards stay rendered with a stale-but-readable
+          // state instead of vanishing.
+        }
+      })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [contextGraphId]);
@@ -3997,6 +4020,22 @@ export function SubGraphOverviewGrid({
         compact
         icon="#"
         title="Loading subgraphs..."
+        className="v10-sgov-state"
+      />
+    );
+  }
+  // Issue G — distinguish "fetch failed" from "no sub-graphs". A
+  // cold-start failure plus the success-empty branch's `View root`
+  // CTA reads as authoritative "no subgraphs exist", but it's
+  // actually a transient API error. Only render this when the
+  // request failed AND we have no last-good cards.
+  if (fetchError && cards.length === 0) {
+    return (
+      <EmptyState
+        icon="!"
+        title="Couldn't load subgraphs."
+        description="Refresh the page to try again."
+        tone="danger"
         className="v10-sgov-state"
       />
     );
