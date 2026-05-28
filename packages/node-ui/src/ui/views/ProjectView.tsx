@@ -125,13 +125,24 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   // a sibling of `activeLayer`, not a filter over it: sub-graphs are a peer
   // axis to layers, and each axis gets its own first-class page.
   const [activeSubGraph, setActiveSubGraph] = useState<string | null>(null);
-  // S3 polish #9 — when a chip click on a WM/SWM/VM page transitions
-  // into the sub-graph detail, carry the originating layer through
-  // so the detail view's `enabledLayers` seeds to that layer
-  // (instead of the default all-three) — UX §4.4.1 fold-in #4
-  // ("scope must never silently change semantics across a
-  // navigation transition"). null = no narrowing (default).
-  const [subGraphInitialLayer, setSubGraphInitialLayer] = useState<MemoryLayerView | null>(null);
+  // S3 polish #9 + PR #793 Bug J — multi-layer carry-over for the
+  // subgraph detail view's `enabledLayers` seed. Storing the Set
+  // (rather than the single-layer alias #9 originally used) lets
+  // the user's exact scope survive across detail→detail hops
+  // even when they've widened past one layer (e.g. WM seeded
+  // entry → user widens to WM+SWM → hops to bakers → bakers
+  // detail seeds WM+SWM, not WM-only). null = no narrowing
+  // (default — fresh entries land at all-three).
+  const [subGraphInitialEnabledLayers, setSubGraphInitialEnabledLayers] = useState<ReadonlySet<TrustLevel> | null>(null);
+  // Mirror of the detail view's current `enabledLayers` state,
+  // pushed up via `onEnabledLayersChange` (Bug J). Read by
+  // `handleSelectSubGraph`'s layer-agnostic branch when the user
+  // hops between subgraphs from the detail-view internal bar —
+  // we route the current scope through, NOT the stale seed.
+  const detailScopeRef = useRef<ReadonlySet<TrustLevel> | null>(null);
+  const handleDetailEnabledLayersChange = useCallback((layers: ReadonlySet<TrustLevel>) => {
+    detailScopeRef.current = layers;
+  }, []);
   const [selectedLayerContext, setSelectedLayerContext] = useState<MemoryLayerView | null>(null);
   // Mirror `selectedUri` into a ref so `handleNavigate` can read the
   // current value without listing it in deps — listing it caused the
@@ -415,36 +426,43 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   // existing layer scope follows them across the navigation (#9
   // polish, fold-in #4).
   //
-  // PR #793 Codex sweep 2 (Bug H) — three distinct call patterns must
-  // route differently:
+  // Three distinct call patterns route differently (PR #793 sweeps 2-3):
   //   1. Exit (slug === null) → clear scope.
   //   2. Layer-mode entry (originatingLayer is set, fired from the bar
-  //      mounted on a WM/SWM/VM tab) → set scope to that layer.
+  //      mounted on a WM/SWM/VM tab) → seed scope to that single layer.
   //   3. Layer-agnostic entry (originatingLayer === undefined):
   //        a. From the Subgraph Explorer overview (no activeSubGraph
-  //           before the click) → keep null (fresh entry lands at
+  //           before the click) → clear (fresh entry lands at
   //           all-layers).
   //        b. From an already-scoped detail (activeSubGraph != null
   //           before the click — detail→detail hop on the layer-
-  //           agnostic bar inside the detail view) → PRESERVE the
-  //           prior `subGraphInitialLayer` instead of dropping back
-  //           to null. Pre-fix this silently widened scope on every
-  //           hop ≥ 2 (e.g. WM → recipes → bakers reverted to
-  //           all-three).
-  // Capturing `activeSubGraph` in the deps keeps the discriminator
-  // fresh across renders; the functional `setSubGraphInitialLayer`
-  // setter reads the latest scope state at the time the click fires.
+  //           agnostic bar inside the detail view) → carry the
+  //           DETAIL VIEW'S CURRENT scope through, NOT the stale
+  //           seed. Pre-Bug-J this preserved the original seed
+  //           (e.g. user enters from WM, widens to WM+SWM in detail,
+  //           hops to another subgraph → next detail silently
+  //           narrowed back to WM-only). Reading `detailScopeRef`
+  //           gives us the user's actual current scope at click time.
   const handleSelectSubGraph = useCallback((slug: string | null, originatingLayer?: MemoryLayerView) => {
     clearDetailOrigin();
     setActiveSubGraph(slug);
     if (slug === null) {
-      setSubGraphInitialLayer(null);
+      setSubGraphInitialEnabledLayers(null);
     } else if (originatingLayer !== undefined) {
-      setSubGraphInitialLayer(originatingLayer);
+      // Single-layer seed (layer-tab entry).
+      setSubGraphInitialEnabledLayers(new Set<TrustLevel>([TRUST_FOR_LAYER[originatingLayer]]));
     } else {
-      // Layer-agnostic — preserve existing scope on detail→detail
-      // hops, fall to null on fresh entry from the overview.
-      setSubGraphInitialLayer(prev => (activeSubGraph !== null ? prev : null));
+      // Layer-agnostic — preserve user's CURRENT scope on
+      // detail→detail hops (Bug J); clear on fresh entry from the
+      // overview.
+      if (activeSubGraph !== null && detailScopeRef.current) {
+        // Snapshot the current scope into a fresh Set so the
+        // unmounting detail view's state mutation (via the next
+        // mirror tick) doesn't share the reference.
+        setSubGraphInitialEnabledLayers(new Set<TrustLevel>(detailScopeRef.current));
+      } else {
+        setSubGraphInitialEnabledLayers(null);
+      }
     }
     setSelectedUri(null);
     setSelectedLayerContext(null);
@@ -614,7 +632,8 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
             onSelectEntity={handleNavigate}
             activeTab={subGraphTabs[activeSubGraph] ?? 'items'}
             onTabChange={tab => handleSubGraphTabChange(activeSubGraph, tab)}
-            initialLayer={subGraphInitialLayer ?? undefined}
+            initialEnabledLayers={subGraphInitialEnabledLayers ?? undefined}
+            onEnabledLayersChange={handleDetailEnabledLayersChange}
           />
         </>
       )}

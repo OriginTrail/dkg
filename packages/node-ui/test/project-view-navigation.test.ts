@@ -282,7 +282,7 @@ vi.mock('../src/ui/views/project/components.js', () => ({
       React.createElement('div', {}, entity.label),
       React.createElement('button', { 'data-testid': 'open-related-entity', onClick: () => onNavigate('urn:entity:other') }, 'Open related'),
       React.createElement('button', { 'data-testid': 'detail-back', onClick: onClose }, 'Back to Context Graph')),
-  SubGraphDetailView: ({ slug, activeTab = 'items', onTabChange, onSelectEntity, initialLayer }: {
+  SubGraphDetailView: ({ slug, activeTab = 'items', onTabChange, onSelectEntity, initialLayer, initialEnabledLayers, onEnabledLayersChange }: {
     slug: string;
     activeTab?: string;
     onTabChange: (tab: string) => void;
@@ -293,16 +293,82 @@ vi.mock('../src/ui/views/project/components.js', () => ({
        sentinel for undefined so the data attr is always a
        string (cleaner DOM assertions). */
     initialLayer?: 'wm' | 'swm' | 'vm';
-  }) =>
-    React.createElement('section', {
+    /* PR #793 sweep 3 Bug J — multi-layer seed prop. Mock
+       surfaces both `data-initial-layer` (single-layer back-compat
+       derived from initialEnabledLayers when size === 1) AND
+       `data-initial-enabled-layers` (comma-joined trust levels,
+       e.g. "working,shared"; '-' when absent). Existing Bug H
+       assertions on data-initial-layer continue to pass via the
+       derivation. */
+    initialEnabledLayers?: ReadonlySet<'working' | 'shared' | 'verified'>;
+    /* The detail view normally pushes its enabledLayers up via
+       this callback so ProjectView can route the user's CURRENT
+       scope through chip clicks (Bug J). Mock exposes buttons
+       per layer combo so tests can simulate widening / narrowing
+       inside the detail view. */
+    onEnabledLayersChange?: (layers: ReadonlySet<'working' | 'shared' | 'verified'>) => void;
+  }) => {
+    const derivedSingleLayer =
+      initialEnabledLayers && initialEnabledLayers.size === 1
+        ? (() => {
+            const only = initialEnabledLayers.values().next().value as string;
+            if (only === 'working') return 'wm';
+            if (only === 'shared') return 'swm';
+            if (only === 'verified') return 'vm';
+            return '-';
+          })()
+        : (initialLayer ?? '-');
+    const enabledSummary = initialEnabledLayers
+      ? [...initialEnabledLayers].sort().join(',')
+      : (initialLayer === 'wm' ? 'working'
+        : initialLayer === 'swm' ? 'shared'
+        : initialLayer === 'vm' ? 'verified'
+        : '-');
+    // Bug J — the real SubGraphDetailView mirrors its
+    // `enabledLayers` state up via `onEnabledLayersChange` so
+    // ProjectView can route the current scope through chip
+    // clicks. The mock needs to honour the same contract or
+    // detail→detail tests see an empty mirror and fall to the
+    // null branch.
+    React.useEffect(() => {
+      if (!onEnabledLayersChange) return;
+      if (initialEnabledLayers && initialEnabledLayers.size > 0) {
+        onEnabledLayersChange(new Set(initialEnabledLayers));
+      } else if (initialLayer) {
+        const only = initialLayer === 'wm' ? 'working'
+          : initialLayer === 'swm' ? 'shared' : 'verified';
+        onEnabledLayersChange(new Set([only as 'working' | 'shared' | 'verified']));
+      } else {
+        onEnabledLayersChange(new Set(['working', 'shared', 'verified']));
+      }
+    }, [initialEnabledLayers, initialLayer, onEnabledLayersChange]);
+    return React.createElement('section', {
       'data-testid': 'subgraph-detail',
       'data-slug': slug,
       'data-tab': activeTab,
-      'data-initial-layer': initialLayer ?? '-',
+      'data-initial-layer': derivedSingleLayer,
+      'data-initial-enabled-layers': enabledSummary,
     },
       React.createElement('button', { 'data-testid': 'subgraph-tab-graph', onClick: () => onTabChange('graph') }, 'Graph'),
+      // Bug J — buttons to simulate the user widening / narrowing
+      // inside the detail view; each fires the mirror callback so
+      // ProjectView captures the current scope ahead of any
+      // chip-hop click.
+      React.createElement('button', {
+        'data-testid': 'detail-widen-wm-swm',
+        onClick: () => onEnabledLayersChange?.(new Set(['working', 'shared'])),
+      }, 'widen WM+SWM'),
+      React.createElement('button', {
+        'data-testid': 'detail-set-vm-only',
+        onClick: () => onEnabledLayersChange?.(new Set(['verified'])),
+      }, 'narrow to VM'),
+      React.createElement('button', {
+        'data-testid': 'detail-set-all-three',
+        onClick: () => onEnabledLayersChange?.(new Set(['working', 'shared', 'verified'])),
+      }, 'all three'),
       React.createElement('div', { 'data-testid': 'subgraph-scroll', 'data-cg-scroll-key': `subgraph:${slug}:${activeTab}` },
-        React.createElement('button', { 'data-testid': 'open-subgraph-entity', onClick: () => onSelectEntity('urn:entity:demo') }, 'Open demo entity'))),
+        React.createElement('button', { 'data-testid': 'open-subgraph-entity', onClick: () => onSelectEntity('urn:entity:demo') }, 'Open demo entity')));
+  },
   ProjectOverviewCard: ({ onOpenPrimer, participants, participantsStatus, subGraphCount, subGraphFetchFailed }: {
     onOpenPrimer: () => void;
     participants: string[];
@@ -794,6 +860,78 @@ describe('ProjectView entity detail navigation', () => {
     await click('select-subgraph-demo');
     await flush();
     expect(query('subgraph-detail').dataset.initialLayer).toBe('-');
+  });
+
+  // S3 polish PR #793 Codex sweep 3 (Bug J) — `handleSelectSubGraph`
+  // was preserving the STALE seed across detail→detail hops, not
+  // the user's current scope. A WM-tab entry that widens to
+  // WM+SWM in the detail view then hops to another subgraph
+  // silently snapped back to WM-only. Fix: ProjectView reads
+  // the detail view's current scope from a mirror ref (populated
+  // via `onEnabledLayersChange`) and routes it through.
+  it('detail→detail nav preserves USER\'S CURRENT scope after widening, not the stale seed (Bug J load-bearing)', async () => {
+    // 1. WM tab → alpha-with-layer → detail seeds Set(['working']).
+    await click('switch-wm');
+    await click('select-subgraph-alpha-with-layer');
+    await flush();
+    expect(query('subgraph-detail').dataset.initialEnabledLayers).toBe('working');
+
+    // 2. User widens to WM+SWM inside the detail view (mock
+    //    button drives the mirror callback directly).
+    await click('detail-widen-wm-swm');
+    await flush();
+
+    // 3. Hop to a different subgraph via the detail-view internal
+    //    bar (layer-agnostic click). Pre-fix this re-seeded to WM
+    //    only (the stale seed); post-fix it carries WM+SWM.
+    await click('select-subgraph-demo');
+    await flush();
+    expect(query('subgraph-detail').dataset.slug).toBe('demo');
+    expect(query('subgraph-detail').dataset.initialEnabledLayers).toBe('shared,working');
+  });
+
+  it('detail→detail nav carries narrowed-to-VM scope through the hop (Bug J symmetric)', async () => {
+    // 1. WM tab → alpha-with-layer → detail seeds Set(['working']).
+    await click('switch-wm');
+    await click('select-subgraph-alpha-with-layer');
+    await flush();
+
+    // 2. User switches focus entirely to VM (a different single
+    //    layer from the seed).
+    await click('detail-set-vm-only');
+    await flush();
+
+    // 3. Hop — next detail seeds Set(['verified']), not the
+    //    stale 'working' seed.
+    await click('select-subgraph-demo');
+    await flush();
+    expect(query('subgraph-detail').dataset.initialEnabledLayers).toBe('verified');
+  });
+
+  it('detail→detail nav when current scope === seed still preserves correctly (Bug J / Bug H regression guard)', async () => {
+    // The Bug H case must continue to work — the user hasn't
+    // touched the seed, so the hop should carry it through.
+    await click('switch-wm');
+    await click('select-subgraph-alpha-with-layer');
+    await flush();
+    // (no widen/narrow click — current scope === seed)
+    await click('select-subgraph-demo');
+    await flush();
+    expect(query('subgraph-detail').dataset.initialEnabledLayers).toBe('working');
+  });
+
+  it('detail→detail nav when user widens to all-three carries multi-layer scope through (Bug J)', async () => {
+    // Edge case: user reverts to all-three inside the detail
+    // view, then hops. Next detail should land at all-three, not
+    // the WM seed.
+    await click('switch-wm');
+    await click('select-subgraph-alpha-with-layer');
+    await flush();
+    await click('detail-set-all-three');
+    await flush();
+    await click('select-subgraph-demo');
+    await flush();
+    expect(query('subgraph-detail').dataset.initialEnabledLayers).toBe('shared,verified,working');
   });
 
 });

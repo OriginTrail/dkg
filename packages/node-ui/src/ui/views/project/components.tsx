@@ -4394,6 +4394,8 @@ export function SubGraphDetailView({
   activeTab,
   onTabChange,
   initialLayer,
+  initialEnabledLayers: initialEnabledLayersProp,
+  onEnabledLayersChange,
 }: {
   slug: string;
   rawMemory: ReturnType<typeof useMemoryEntities>;
@@ -4402,15 +4404,33 @@ export function SubGraphDetailView({
   onSelectEntity: (uri: string) => void;
   activeTab?: SubGraphTab;
   onTabChange?: (tab: SubGraphTab) => void;
-  /** S3 polish #9 — when the chip click came from a layer page
+  /** S3 polish #9 — single-layer seed for the common chip-click
+   *  case. When the chip click came from a layer page
    *  (WM/SWM/VM) the originating layer is forwarded here so
    *  `enabledLayers` seeds to that layer instead of the
    *  default all-three. Fold-in #4 from §4.4.1: scope must
    *  never silently change semantics across a navigation
-   *  transition. Omitting (or `undefined`) restores the
-   *  default all-three semantic for chip clicks from Overview
-   *  or the Subgraphs page. */
+   *  transition. Superseded by `initialEnabledLayers` when both
+   *  are set. */
   initialLayer?: 'wm' | 'swm' | 'vm';
+  /** S3 polish PR #793 Bug J — multi-layer seed for
+   *  detail→detail navigation. Pre-fix the chip-click handler
+   *  preserved the STALE seed across hops, dropping any
+   *  user-applied widening (e.g. WM-seeded entry → user widens
+   *  to WM+SWM → hops to another subgraph → next detail
+   *  silently narrowed back to WM-only). Routing the current
+   *  scope through this prop lets the user's exact narrow OR
+   *  widen survive the hop. Single-layer current scope can also
+   *  route through `initialLayer` for callers that prefer the
+   *  simpler shape; multi-layer must use this prop. Wins over
+   *  `initialLayer` when both are set. */
+  initialEnabledLayers?: ReadonlySet<TrustLevel>;
+  /** S3 polish PR #793 Bug J — mirrors the detail view's
+   *  `enabledLayers` state up to the parent so it can route the
+   *  current scope through chip clicks. Optional — without it
+   *  the detail view stays uncontrolled and chip-hop navigation
+   *  reverts to the stale seed shape. */
+  onEnabledLayersChange?: (layers: ReadonlySet<TrustLevel>) => void;
 }) {
   const profile = useProjectProfileContext();
   const binding = profile?.forSubGraph(slug);
@@ -4435,19 +4455,29 @@ export function SubGraphDetailView({
   useEffect(() => {
     setEntitySort(binding?.timelinePredicate ? 'created-desc' : 'triples');
   }, [slug, binding?.timelinePredicate]);
-  // #9 polish — `initialLayer` (when supplied by the chip-row
-  // click) seeds `enabledLayers` to that single layer instead of
-  // the default all-three. Carrying the originating scope
-  // across the navigation transition is the §4.4.1 fold-in #4
-  // contract. The chip click's `originatingLayer` arg flows from
-  // SubGraphBar → ProjectView.handleSelectSubGraph → here.
+  // #9 polish + PR #793 Bug J — derive the seeded scope from
+  // `initialEnabledLayers` (multi-layer Set form, Bug J) or
+  // `initialLayer` (single-layer convenience, #9), in that
+  // precedence. Carrying the user's scope across the navigation
+  // transition is the §4.4.1 fold-in #4 contract.
   const initialEnabledLayers = useMemo(() => {
+    if (initialEnabledLayersProp && initialEnabledLayersProp.size > 0) {
+      return new Set<TrustLevel>(initialEnabledLayersProp);
+    }
     if (initialLayer === 'wm') return new Set<TrustLevel>(['working']);
     if (initialLayer === 'swm') return new Set<TrustLevel>(['shared']);
     if (initialLayer === 'vm') return new Set<TrustLevel>(['verified']);
     return new Set<TrustLevel>(['working', 'shared', 'verified']);
-  }, [initialLayer]);
+  }, [initialLayer, initialEnabledLayersProp]);
   const [enabledLayers, setEnabledLayers] = useState<Set<TrustLevel>>(initialEnabledLayers);
+  // Mirror current scope up to the parent so chip-hop navigation
+  // routes the user's actual current scope (not the stale seed)
+  // through the layer-agnostic chip-click handler. Stable callback
+  // identity from the parent is assumed; the deps capture the Set
+  // identity so widening/narrowing pushes a fresh value through.
+  useEffect(() => {
+    onEnabledLayersChange?.(enabledLayers);
+  }, [enabledLayers, onEnabledLayersChange]);
   const [chipState, setChipState] = useState<Map<string, Set<string>>>(new Map());
   const [activeQuerySlug, setActiveQuerySlug] = useState<string | null>(null);
   const [queryResults, setQueryResults] = useState<Set<string> | null>(null);

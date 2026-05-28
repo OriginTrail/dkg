@@ -2091,4 +2091,197 @@ describe('SubGraphDetailView tabs', () => {
     expect(cellFor('vm').getAttribute('aria-pressed')).toBe('true');
     expect(pill.disabled).toBe(true);
   });
+
+  // S3 polish PR #793 Codex sweep 3 Bug J — `initialEnabledLayers`
+  // is the multi-layer carrier that lets the user's exact scope
+  // round-trip through detail→detail hops. Verify the new prop
+  // seeds correctly at the SubGraphDetailView boundary.
+  it('seeds enabledLayers from `initialEnabledLayers` prop (multi-layer, Bug J)', async () => {
+    const wmEntity = {
+      uri: 'urn:e:wm', label: 'WM', types: [],
+      trustLevel: 'working',
+      layers: new Set(['working']),
+      subGraphs: new Set(['demo']),
+      properties: new Map(), connections: [],
+    };
+    const swmEntity = {
+      uri: 'urn:e:swm', label: 'SWM', types: [],
+      trustLevel: 'shared',
+      layers: new Set(['shared']),
+      subGraphs: new Set(['demo']),
+      properties: new Map(), connections: [],
+    };
+    const vmEntity = {
+      uri: 'urn:e:vm', label: 'VM', types: [],
+      trustLevel: 'verified',
+      layers: new Set(['verified']),
+      subGraphs: new Set(['demo']),
+      properties: new Map(), connections: [],
+    };
+    const fixture = {
+      entities: new Map([[wmEntity.uri, wmEntity], [swmEntity.uri, swmEntity], [vmEntity.uri, vmEntity]]),
+      entityList: [wmEntity, swmEntity, vmEntity],
+      allTriples: [], graphTriples: [],
+      trustMap: new Map(),
+      counts: { wm: 1, swm: 1, vm: 1, total: 3 },
+      loading: false, error: null, partial: false,
+      refresh: vi.fn(),
+    } as any;
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root!.render(
+        React.createElement(ProjectProfileContext.Provider, { value: profile },
+          React.createElement(SubGraphDetailView, {
+            slug: 'demo',
+            rawMemory: fixture,
+            contextGraphId: 'cg-test',
+            onNodeClick: vi.fn(),
+            onSelectEntity: vi.fn(),
+            activeTab: 'items',
+            onTabChange: vi.fn(),
+            initialEnabledLayers: new Set(['working', 'shared']),
+          })),
+      );
+    });
+    await flush();
+
+    function cellFor(layer: 'wm' | 'swm' | 'vm'): HTMLButtonElement {
+      return container.querySelector(`button.v10-subgraph-cross-layer-cell[data-layer="${layer}"]`) as HTMLButtonElement;
+    }
+    expect(cellFor('wm').getAttribute('aria-pressed')).toBe('true');
+    expect(cellFor('swm').getAttribute('aria-pressed')).toBe('true');
+    expect(cellFor('vm').getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('`initialEnabledLayers` wins over `initialLayer` when both are set (Bug J precedence)', async () => {
+    // Defensive: callers shouldn't pass both, but if they do the
+    // multi-layer prop carries strictly more info — wins.
+    const wmEntity = {
+      uri: 'urn:e:wm', label: 'WM', types: [],
+      trustLevel: 'working',
+      layers: new Set(['working']),
+      subGraphs: new Set(['demo']),
+      properties: new Map(), connections: [],
+    };
+    const swmEntity = {
+      uri: 'urn:e:swm', label: 'SWM', types: [],
+      trustLevel: 'shared',
+      layers: new Set(['shared']),
+      subGraphs: new Set(['demo']),
+      properties: new Map(), connections: [],
+    };
+    const fixture = {
+      entities: new Map([[wmEntity.uri, wmEntity], [swmEntity.uri, swmEntity]]),
+      entityList: [wmEntity, swmEntity],
+      allTriples: [], graphTriples: [],
+      trustMap: new Map(),
+      counts: { wm: 1, swm: 1, vm: 0, total: 2 },
+      loading: false, error: null, partial: false,
+      refresh: vi.fn(),
+    } as any;
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root!.render(
+        React.createElement(ProjectProfileContext.Provider, { value: profile },
+          React.createElement(SubGraphDetailView, {
+            slug: 'demo',
+            rawMemory: fixture,
+            contextGraphId: 'cg-test',
+            onNodeClick: vi.fn(),
+            onSelectEntity: vi.fn(),
+            activeTab: 'items',
+            onTabChange: vi.fn(),
+            initialLayer: 'wm',                                // would seed WM only
+            initialEnabledLayers: new Set(['shared']),          // but this wins
+          })),
+      );
+    });
+    await flush();
+
+    function cellFor(layer: 'wm' | 'swm' | 'vm'): HTMLButtonElement {
+      return container.querySelector(`button.v10-subgraph-cross-layer-cell[data-layer="${layer}"]`) as HTMLButtonElement;
+    }
+    expect(cellFor('wm').getAttribute('aria-pressed')).toBe('false');
+    expect(cellFor('swm').getAttribute('aria-pressed')).toBe('true');
+    expect(cellFor('vm').getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('mirrors enabledLayers up via `onEnabledLayersChange` on mount and on user toggles (Bug J)', async () => {
+    // Bug J's structural piece — the detail view must publish its
+    // current scope to the parent so chip clicks can route the
+    // user's exact scope through. Verify the callback fires on
+    // initial seed AND when the user toggles a cross-layer cell.
+    const wmEntity = {
+      uri: 'urn:e:wm', label: 'WM', types: [],
+      trustLevel: 'working',
+      layers: new Set(['working']),
+      subGraphs: new Set(['demo']),
+      properties: new Map(), connections: [],
+    };
+    const swmEntity = {
+      uri: 'urn:e:swm', label: 'SWM', types: [],
+      trustLevel: 'shared',
+      layers: new Set(['shared']),
+      subGraphs: new Set(['demo']),
+      properties: new Map(), connections: [],
+    };
+    const fixture = {
+      entities: new Map([[wmEntity.uri, wmEntity], [swmEntity.uri, swmEntity]]),
+      entityList: [wmEntity, swmEntity],
+      allTriples: [], graphTriples: [],
+      trustMap: new Map(),
+      counts: { wm: 1, swm: 1, vm: 0, total: 2 },
+      loading: false, error: null, partial: false,
+      refresh: vi.fn(),
+    } as any;
+
+    const onEnabledLayersChange = vi.fn();
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root!.render(
+        React.createElement(ProjectProfileContext.Provider, { value: profile },
+          React.createElement(SubGraphDetailView, {
+            slug: 'demo',
+            rawMemory: fixture,
+            contextGraphId: 'cg-test',
+            onNodeClick: vi.fn(),
+            onSelectEntity: vi.fn(),
+            activeTab: 'items',
+            onTabChange: vi.fn(),
+            initialEnabledLayers: new Set(['working']),
+            onEnabledLayersChange,
+          })),
+      );
+    });
+    await flush();
+
+    // Initial mirror — Set(['working']) emitted at least once.
+    // Snapshot the count (not the array reference — `mock.calls`
+    // is live).
+    const initialCount = onEnabledLayersChange.mock.calls.length;
+    expect(initialCount).toBeGreaterThanOrEqual(1);
+    const initialLast = onEnabledLayersChange.mock.calls[initialCount - 1][0] as Set<string>;
+    expect([...initialLast].sort()).toEqual(['working']);
+
+    // User clicks the SWM cell → mirror fires again with WM+SWM.
+    const swmCell = container.querySelector('button.v10-subgraph-cross-layer-cell[data-layer="swm"]') as HTMLButtonElement;
+    await act(async () => { swmCell.click(); });
+    await flush();
+
+    const afterCount = onEnabledLayersChange.mock.calls.length;
+    expect(afterCount).toBeGreaterThan(initialCount);
+    const last = onEnabledLayersChange.mock.calls[afterCount - 1][0] as Set<string>;
+    expect([...last].sort()).toEqual(['shared', 'working']);
+  });
 });
