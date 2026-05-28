@@ -1841,7 +1841,7 @@ export function LayerWidgetStrip({ layer, entities, entityCount, tripleCount, co
 const TRUST_BADGE_CONFIG: Record<TrustLevel, { layerKey: 'wm' | 'swm' | 'vm'; icon: string; label: string }> = {
   working:  { layerKey: 'wm',  icon: '◇', label: 'Working'  },
   shared:   { layerKey: 'swm', icon: '◈', label: 'Shared'   },
-  verified: { layerKey: 'vm',  icon: '◉', label: 'Verified' },
+  verified: { layerKey: 'vm',  icon: '◉', label: 'Verifiable' },
 };
 
 export function EntityList({
@@ -1893,7 +1893,7 @@ export function EntityList({
     return copy;
   }, [entities, externallySorted]);
 
-  const trustLabel = layerKey === 'vm' ? 'Verified' : layerKey === 'swm' ? 'Shared' : 'Working';
+  const trustLabel = layerKey === 'vm' ? 'Verifiable' : layerKey === 'swm' ? 'Shared' : 'Working';
 
   if (entities.length === 0) {
     return (
@@ -2187,7 +2187,7 @@ export function VerifiedMemoryHeroBanner({ entities, tripleCount, contextGraphId
         layer="vm"
         items={[
           { id: 'assets', value: totalAssets, label: 'Knowledge Assets' },
-          { id: 'triples', value: tripleCount.toLocaleString(), label: 'Verified Triples' },
+          { id: 'triples', value: tripleCount.toLocaleString(), label: 'Verifiable Triples' },
           { id: 'types', value: typeCount, label: 'Entity Types' },
         ]}
       />
@@ -4192,7 +4192,7 @@ export function MiniLayerBar({
     return compact ? null : <div className="v10-minibar v10-minibar-empty">No data</div>;
   }
   const rows: Array<{ key: TrustLevel; short: string; count: number; color: string; label: string }> = [
-    { key: 'verified', short: 'VM',  count: counts.vm,  color: '#22c55e', label: 'Verified' },
+    { key: 'verified', short: 'VM',  count: counts.vm,  color: '#22c55e', label: 'Verifiable' },
     { key: 'shared',   short: 'SWM', count: counts.swm, color: '#f59e0b', label: 'Shared' },
     { key: 'working',  short: 'WM',  count: counts.wm,  color: '#64748b', label: 'Working' },
   ];
@@ -4814,7 +4814,7 @@ export function SubGraphDetailView({
           <span className="v10-subgraph-cross-layer-arrow" aria-hidden="true">→</span>
           <span className="v10-subgraph-cross-layer-cell" data-layer="vm">
             <span className="v10-subgraph-cross-layer-cell-icon" style={{ color: TRUST_COLORS.verified }}>◉</span>
-            <span className="v10-subgraph-cross-layer-cell-label">Verified</span>
+            <span className="v10-subgraph-cross-layer-cell-label">Verifiable</span>
             <span className="v10-subgraph-cross-layer-cell-count">{layerCounts.vm}</span>
           </span>
         </div>

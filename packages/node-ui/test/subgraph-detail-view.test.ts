@@ -278,7 +278,7 @@ describe('SubGraphDetailView tabs', () => {
     // MiniLayerBar chips (their title text disambiguates which is which).
     const chips = Array.from(container.querySelectorAll('button.v10-minibar-chip')) as HTMLButtonElement[];
     const swmChip = chips.find(b => (b.getAttribute('title') ?? '').startsWith('Shared Memory'));
-    const vmChip = chips.find(b => (b.getAttribute('title') ?? '').startsWith('Verified Memory'));
+    const vmChip = chips.find(b => (b.getAttribute('title') ?? '').startsWith('Verifiable Memory'));
     expect(swmChip).toBeTruthy();
     expect(vmChip).toBeTruthy();
 
@@ -399,7 +399,7 @@ describe('SubGraphDetailView tabs', () => {
     // Narrow to SWM only by toggling off WM + VM.
     const chips = Array.from(container.querySelectorAll('button.v10-minibar-chip')) as HTMLButtonElement[];
     const wmChip = chips.find(b => (b.getAttribute('title') ?? '').startsWith('Working Memory'));
-    const vmChip = chips.find(b => (b.getAttribute('title') ?? '').startsWith('Verified Memory'));
+    const vmChip = chips.find(b => (b.getAttribute('title') ?? '').startsWith('Verifiable Memory'));
     expect(wmChip).toBeTruthy();
     expect(vmChip).toBeTruthy();
 
@@ -553,7 +553,7 @@ describe('SubGraphDetailView tabs', () => {
     // exactly what the narrowed view is asking for.
     const chips = Array.from(container.querySelectorAll('button.v10-minibar-chip')) as HTMLButtonElement[];
     const swmChip = chips.find(b => (b.getAttribute('title') ?? '').startsWith('Shared Memory'));
-    const vmChip = chips.find(b => (b.getAttribute('title') ?? '').startsWith('Verified Memory'));
+    const vmChip = chips.find(b => (b.getAttribute('title') ?? '').startsWith('Verifiable Memory'));
     expect(swmChip).toBeTruthy();
     expect(vmChip).toBeTruthy();
 
@@ -666,7 +666,7 @@ describe('SubGraphDetailView tabs', () => {
     // would have been WM=2 / SWM=1 / VM=0.
     expect(countFor('Working Memory')).toBe(1);
     expect(countFor('Shared Memory')).toBe(1);
-    expect(countFor('Verified Memory')).toBe(0);
+    expect(countFor('Verifiable Memory')).toBe(0);
   });
 
   // R3 regression: `splitGraphTriplesForShelf` normalises subjects /
@@ -988,7 +988,7 @@ describe('SubGraphDetailView tabs', () => {
     // Narrow to WM only via the mini-pyramid chips.
     const chips = Array.from(container.querySelectorAll('button.v10-minibar-chip')) as HTMLButtonElement[];
     const swmChip = chips.find(b => (b.getAttribute('title') ?? '').startsWith('Shared Memory'));
-    const vmChip = chips.find(b => (b.getAttribute('title') ?? '').startsWith('Verified Memory'));
+    const vmChip = chips.find(b => (b.getAttribute('title') ?? '').startsWith('Verifiable Memory'));
     await act(async () => { swmChip!.click(); });
     await act(async () => { vmChip!.click(); });
     await flush();
@@ -1159,7 +1159,7 @@ describe('SubGraphDetailView tabs', () => {
     }
     expect(byLabel.get('WM row')?.querySelector('.v10-trust-badge.wm')?.textContent).toContain('Working');
     expect(byLabel.get('SWM row')?.querySelector('.v10-trust-badge.swm')?.textContent).toContain('Shared');
-    expect(byLabel.get('VM row')?.querySelector('.v10-trust-badge.vm')?.textContent).toContain('Verified');
+    expect(byLabel.get('VM row')?.querySelector('.v10-trust-badge.vm')?.textContent).toContain('Verifiable');
   });
 
   // S3 fold-in #7 — multi-layer `scopedTriples` predicate admits

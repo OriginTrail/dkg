@@ -621,10 +621,10 @@ describe.skip('ProjectView as Memory Explorer', () => {
     expect(pv).toContain('isConversationTurn(e)) continue');
   });
 
-  it('has TrustStatusBox component showing Verified/Shared/Private label', () => {
+  it('has TrustStatusBox component showing Verifiable/Shared/Private label', () => {
     expect(pv).toContain('TrustStatusBox');
     expect(pv).toContain('TRUST_LABELS');
-    expect(pv).toContain("verified: 'Verified'");
+    expect(pv).toContain("verified: 'Verifiable'");
     expect(pv).toContain("shared: 'Shared'");
     expect(pv).toContain("working: 'Private'");
     expect(pv).toContain('v10-trust-status-box');

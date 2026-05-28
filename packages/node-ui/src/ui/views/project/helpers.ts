@@ -196,7 +196,7 @@ export const LAYER_CONFIG: Record<'wm' | 'swm' | 'vm', {
     color: '#22c55e',
     title: 'Verifiable Memory',
     desc: 'Endorsed, published, on-chain knowledge',
-    trustLabel: 'Verified',
+    trustLabel: 'Verifiable',
     trustLevel: 'verified',
   },
 };
