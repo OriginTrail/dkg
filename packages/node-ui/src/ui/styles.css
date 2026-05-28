@@ -4302,6 +4302,18 @@ body.light .v10-import-dropzone.drag-over { border-color: #b0b0b0; background: #
 .v10-me-loading-text { font-size: 12px; color: var(--text-tertiary); }
 
 /* ── Sub-graph Bar ── */
+/* PR #793 round 2 (ui-locked option a) — capsule chrome dropped.
+   The bar previously had a tinted background + 10px border-radius
+   that made it read as a separate widget hovering above the
+   content; on the Subgraph Explorer page where the strip sits
+   inside the page chrome, that pill-island look broke the
+   continuous strip semantics. Reduced to a single-edge bottom
+   border so the row terminates cleanly without claiming
+   container chrome.
+
+   This also kills the stale `--surface-1` and `--border-subtle`
+   rgba fallbacks that were S2 sweep regressions (undefined token
+   + dead rgba), closing the loop while in here. */
 .v10-subgraph-bar {
   display: flex;
   align-items: center;
@@ -4310,9 +4322,10 @@ body.light .v10-import-dropzone.drag-over { border-color: #b0b0b0; background: #
   flex-wrap: wrap;
   padding: 8px 12px;
   margin-bottom: 8px;
-  background: var(--surface-1, rgba(255,255,255,0.02));
-  border: 1px solid var(--border-subtle, rgba(255,255,255,0.06));
-  border-radius: 10px;
+  background: transparent;                          /* was: var(--surface-1, rgba(255,255,255,0.02)) */
+  border: 0;                                        /* was: 1px solid var(--border-subtle, ...) */
+  border-bottom: 1px solid var(--border-subtle);    /* single-edge termination */
+  border-radius: 0;                                 /* was: 10px */
 }
 .v10-subgraph-bar-label {
   font-size: 11px;
