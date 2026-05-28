@@ -109,7 +109,7 @@ describe('setup tools — context graph + sub-graph + subscribe', () => {
     for (const name of ['dkg_subscribe', 'dkg_sub_graph_create']) {
       const contextGraphId = server.get(name).config.inputSchema?.contextGraphId;
       expect(contextGraphId?.description).toContain('dkg_list_context_graphs');
-      expect(contextGraphId?.description).toContain('ui-refresh');
+      expect(contextGraphId?.description).toContain('local-notes');
       expect(contextGraphId?.description).toContain('<curatorAddress>/<slug>');
       expect(contextGraphId?.description).toContain('Do not guess');
     }
@@ -159,7 +159,7 @@ describe('publish tools — write+publish helper + canonical SWM finalizer', () 
     for (const name of ['dkg_publish', 'dkg_shared_memory_publish']) {
       const contextGraphId = server.get(name).config.inputSchema?.contextGraphId;
       expect(contextGraphId?.description).toContain('dkg_list_context_graphs');
-      expect(contextGraphId?.description).toContain('ui-refresh');
+      expect(contextGraphId?.description).toContain('local-notes');
       expect(contextGraphId?.description).toContain('<curatorAddress>/<slug>');
       expect(contextGraphId?.description).toContain('Do not guess');
     }

@@ -804,7 +804,7 @@ describe('DkgNodePlugin', () => {
     ]) {
       const description = byName.get(name)!.parameters.properties.context_graph_id.description;
       expect(description).toContain('dkg_list_context_graphs');
-      expect(description).toContain('ui-refresh');
+      expect(description).toContain('local-notes');
       expect(description).toContain('<curatorAddress>/<slug>');
       expect(description).toContain('Do not guess');
     }

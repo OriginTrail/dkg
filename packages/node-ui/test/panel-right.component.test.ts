@@ -123,6 +123,32 @@ describe('PanelRight component', () => {
     apiFetchMemorySessionsMock.mockResolvedValue({ sessions: [] });
   });
 
+  it('always injects target context graph name alongside id and URI', async () => {
+    const { buildChatContextEntries } = await import('../src/ui/components/Shell/PanelRight.js');
+
+    expect(buildChatContextEntries(
+      [{ id: 'local-notes', name: 'local-notes' } as any],
+      'local-notes',
+      null,
+    )).toEqual([
+      {
+        key: 'target_context_graph',
+        label: 'Target context graph id',
+        value: 'local-notes',
+      },
+      {
+        key: 'target_context_graph_uri',
+        label: 'Target context graph URI',
+        value: 'did:dkg:context-graph:local-notes',
+      },
+      {
+        key: 'target_context_graph_name',
+        label: 'Target context graph name',
+        value: 'local-notes',
+      },
+    ]);
+  }, 10_000);
+
   it('renders, loads agent state, and sends chat with injected context entries', async () => {
     const { PanelRight } = await import('../src/ui/components/Shell/PanelRight.js');
     const { useProjectsStore } = await import('../src/ui/stores/projects.js');

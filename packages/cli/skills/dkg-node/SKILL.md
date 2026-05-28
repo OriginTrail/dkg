@@ -27,14 +27,14 @@ an exact existing context graph id from `GET /api/context-graph/list` /
 `dkg_list_context_graphs`, or the full `did:dkg:context-graph:<id>` URI.
 
 - A context graph created locally can have a bare canonical id, for example
-  `ui-refresh`, with full URI `did:dkg:context-graph:ui-refresh`.
+  `local-notes`, with full URI `did:dkg:context-graph:local-notes`.
 - A joined or curated context graph can have a curator-scoped canonical id, for
-  example `0xE5B88968Ed464F4e3f5354C54DFAB9e39dfEAfBd/tuesday-cg`, with full
-  URI `did:dkg:context-graph:0xE5B88968Ed464F4e3f5354C54DFAB9e39dfEAfBd/tuesday-cg`.
+  example `0x1234567890abcdef1234567890abcdef12345678/team-notes`, with full
+  URI `did:dkg:context-graph:0x1234567890abcdef1234567890abcdef12345678/team-notes`.
 
 Do not guess from the display name, shorten a curator-scoped id, or pass only a
-suffix slug such as `tuesday-cg` when the listed id is
-`0x.../tuesday-cg`. Write routes reject unknown, ambiguous, or non-canonical
+suffix slug such as `team-notes` when the listed id is
+`0x.../team-notes`. Write routes reject unknown, ambiguous, or non-canonical
 targets before writing so they cannot accidentally create shadow context graphs.
 
 ## 2. Capabilities Overview

@@ -451,7 +451,7 @@ function buildAttachmentTurnSummary(
   return parts.length ? `${parts.join('; ')}.` : '';
 }
 
-function buildChatContextEntries(
+export function buildChatContextEntries(
   projects: ContextGraph[],
   activeProjectId: string | null,
   currentAgent: AgentIdentity | null,
@@ -469,13 +469,11 @@ function buildChatContextEntries(
       label: 'Target context graph URI',
       value: toContextGraphUri(activeProjectId),
     });
-    if (displayName !== activeProjectId) {
-      entries.push({
-        key: 'target_context_graph_name',
-        label: 'Target context graph name',
-        value: displayName,
-      });
-    }
+    entries.push({
+      key: 'target_context_graph_name',
+      label: 'Target context graph name',
+      value: displayName,
+    });
   }
   if (currentAgent?.agentAddress) {
     entries.push({
