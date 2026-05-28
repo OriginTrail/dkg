@@ -3837,8 +3837,9 @@ export function SubGraphExplorerHeader() {
       <div className="v10-subgraph-explorer-title">Subgraph Explorer</div>
       <p className="v10-subgraph-explorer-intro">
         Subgraphs are optional topical partitions inside this Context Graph.
-        An entity belongs to one memory layer and, optionally, one subgraph.
-        Entities in no subgraph live in the context graph root.
+        An entity belongs to one or more memory layers and, optionally,
+        to one or more subgraphs. Entities in no subgraph live in the
+        context graph root.
       </p>
     </div>
   );
