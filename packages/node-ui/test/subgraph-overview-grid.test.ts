@@ -389,4 +389,126 @@ describe('SubGraphMiniCard — per-trust nodeColors (S3 polish #3, ui-locked pri
     const graph = container.querySelector('[data-testid="rdf-graph"]');
     expect(graph).toBeNull();
   });
+
+  // S3 polish PR #793 Codex sweep 4 (Bug M) — `entityTrustByUri`
+  // upstream loop now writes BOTH canonical AND raw URI forms so
+  // the mini-graph `nodeColors` override resolves either form
+  // the triple set may carry. Pre-fix a wrapped `<urn:...>`
+  // subject/object missed the canonical-only key and fell back
+  // to `card.color` (chrome), defeating #3's per-trust signal
+  // exactly in the cases (wrapped URIs from a daemon query path)
+  // where it matters most.
+  it('mini-graph nodeColors maps both raw <urn:...> and canonical urn:... forms to TRUST_COLORS (Bug M load-bearing)', async () => {
+    fetchSubGraphsMock.mockResolvedValueOnce({
+      subGraphs: [{ name: 'recipes', entityCount: 1, tripleCount: 1, description: '' }],
+    });
+    // Entity carries the raw wrapped form on its `.uri`.
+    const wrappedEntity = {
+      uri: '<urn:e:wrapped>',
+      label: 'Wrapped', types: [],
+      trustLevel: 'shared',
+      layers: new Set(['shared']),
+      subGraphs: new Set(['recipes']),
+      properties: new Map(), connections: [],
+    };
+    // A triple anchoring the entity to the card's render set so
+    // the mini-graph mounts.
+    const edge = {
+      subject: '<urn:e:wrapped>',
+      predicate: 'http://schema.org/name',
+      object: '<urn:e:other>',
+      subGraph: 'recipes',
+      layer: 'shared' as const,
+    };
+    const otherEntity = {
+      uri: 'urn:e:other',
+      label: 'Other', types: [],
+      trustLevel: 'working',
+      layers: new Set(['working']),
+      subGraphs: new Set(['recipes']),
+      properties: new Map(), connections: [],
+    };
+
+    await renderWith({
+      ...memory,
+      entityList: [wrappedEntity, otherEntity],
+      entities: new Map([
+        [wrappedEntity.uri, wrappedEntity],
+        [otherEntity.uri, otherEntity],
+      ]),
+      allTriples: [edge],
+    });
+    await flush();
+
+    async function waitForGraph(maxMs = 1000): Promise<HTMLElement | null> {
+      const start = Date.now();
+      while (Date.now() - start < maxMs) {
+        const el = container.querySelector('[data-testid="rdf-graph"]') as HTMLElement | null;
+        if (el) return el;
+        await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+      }
+      return container.querySelector('[data-testid="rdf-graph"]');
+    }
+    const graph = await waitForGraph();
+    expect(graph).toBeTruthy();
+    const nodeColors = JSON.parse(graph!.getAttribute('data-node-colors') ?? '{}');
+
+    // BOTH forms must resolve to TRUST_COLORS.shared — the
+    // override has to win for whichever form the rendered
+    // triple carries (`<urn:e:wrapped>` here).
+    expect(nodeColors['<urn:e:wrapped>']).toBe(TRUST_COLORS.shared);
+    expect(nodeColors['urn:e:wrapped']).toBe(TRUST_COLORS.shared);
+    // The unwrapped sibling still resolves correctly (regression
+    // guard against the upstream change accidentally inverting
+    // the canonical-vs-raw write order).
+    expect(nodeColors['urn:e:other']).toBe(TRUST_COLORS.working);
+  });
+
+  it('mini-graph nodeColors keeps the canonical mapping for unwrapped entities (Bug M regression guard)', async () => {
+    // Defensive — when all URIs are already canonical, the dual
+    // write collapses to a single key and the map size is just
+    // the entity count.
+    fetchSubGraphsMock.mockResolvedValueOnce({
+      subGraphs: [{ name: 'recipes', entityCount: 1, tripleCount: 1, description: '' }],
+    });
+    const e = {
+      uri: 'urn:e:plain',
+      label: 'Plain', types: [],
+      trustLevel: 'verified',
+      layers: new Set(['verified']),
+      subGraphs: new Set(['recipes']),
+      properties: new Map(), connections: [],
+    };
+    const edge = {
+      subject: 'urn:e:plain',
+      predicate: 'http://schema.org/name',
+      object: '"Plain"',
+      subGraph: 'recipes',
+      layer: 'verified' as const,
+    };
+    await renderWith({
+      ...memory,
+      entityList: [e],
+      entities: new Map([[e.uri, e]]),
+      allTriples: [edge],
+    });
+    await flush();
+
+    async function waitForGraph(maxMs = 1000): Promise<HTMLElement | null> {
+      const start = Date.now();
+      while (Date.now() - start < maxMs) {
+        const el = container.querySelector('[data-testid="rdf-graph"]') as HTMLElement | null;
+        if (el) return el;
+        await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+      }
+      return container.querySelector('[data-testid="rdf-graph"]');
+    }
+    const graph = await waitForGraph();
+    expect(graph).toBeTruthy();
+    const nodeColors = JSON.parse(graph!.getAttribute('data-node-colors') ?? '{}');
+    expect(nodeColors['urn:e:plain']).toBe(TRUST_COLORS.verified);
+    // The dual-key shape MUST NOT introduce a phantom wrapped
+    // form when the entity didn't have one.
+    expect(nodeColors['<urn:e:plain>']).toBeUndefined();
+  });
 });

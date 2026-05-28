@@ -3993,7 +3993,16 @@ export function SubGraphOverviewGrid({
       for (const sg of e.subGraphs) {
         let m = out.get(sg);
         if (!m) { m = new Map<string, TrustLevel>(); out.set(sg, m); }
+        // PR #793 Codex sweep 4 (Bug M) — store BOTH raw and
+        // canonical URI forms. Triples in the mini-graph may
+        // carry the raw `<urn:...>` form even when entity
+        // membership is keyed canonically; the consumer
+        // `nodeColors` map needs to resolve both forms or the
+        // override falls through to `card.color` and the per-
+        // trust signal is lost. Mirrors the dual-key pattern in
+        // `trustNodeColors` further down this file.
         m.set(canonical, e.trustLevel);
+        if (canonical !== e.uri) m.set(e.uri, e.trustLevel);
       }
     }
     return out;
@@ -4135,9 +4144,13 @@ export function SubGraphMiniCard({
   //      to `card.color` so cross-cutting namespaces don't drown
   //      the per-trust signal.
   // Build at the card scope from `card.entityTrustByUri` (attached
-  // by the parent `cards` derivation; same canonical key the
-  // entity-only filter uses, so a coloured node here matches the
-  // node the entity-only filter admitted on the canvas).
+  // by the parent `cards` derivation). The upstream map carries
+  // BOTH canonical AND raw URI forms (PR #793 sweep 4 Bug M), so
+  // this loop produces a `nodeColors` map that resolves either
+  // form the rendered triple set may carry — wrapped `<urn:...>`
+  // subjects/objects survive promotion without falling through to
+  // `card.color`. Mirrors the dual-key shape in `trustNodeColors`
+  // further down this file.
   const nodeColors = useMemo(() => {
     const out: Record<string, string> = {};
     for (const [uri, trustLevel] of card.entityTrustByUri) {
