@@ -129,7 +129,7 @@ const memory = {
   trustMap: new Map(),
   counts: { wm: 2, swm: 0, vm: 0, total: 2 },
   loading: false,
-  error: null,
+  error: null as string | null,
   partial: false,
   refresh: vi.fn(),
 };
@@ -645,6 +645,36 @@ describe('ProjectView entity detail navigation', () => {
     await flush();
 
     expect(query('subgraph-bar').dataset.entities).toBe('defined');
+  });
+
+  // S3 Codex sweep 3 Bug F — follow-on to Bug C. When all three
+  // layer queries fail, `useMemoryEntities` historically left
+  // `error: null` and `partial: false` (`partial` triggers only on
+  // PARTIAL failure), so the `memoryReady` gate misclassed total
+  // failure as "ready" and passed an empty entityList through.
+  // ProjectView now opts into `signalErrors: true`, so a total
+  // failure surfaces `error: 'Failed to load memory data'` and
+  // the gate fires correctly. The mock here uses a non-null
+  // `error` to simulate the post-fix behavior — the
+  // `signalErrors` opt-in is verified at the hook unit level;
+  // here we lock the downstream gate against any future "treat
+  // total failure as ready" regression.
+  it('does NOT pass rawMemory.entityList to SubGraphBar when all three layer queries failed (signalErrors)', async () => {
+    memory.loading = false;
+    memory.partial = false;
+    memory.error = 'Failed to load memory data';
+    memory.entityList = [];
+    await act(async () => {
+      root.render(React.createElement(ProjectView, { contextGraphId: 'cg-test' }));
+    });
+    await flush();
+    await click('switch-swm');
+    await flush();
+
+    expect(query('subgraph-bar').dataset.entities).toBe('undefined');
+
+    memory.error = null;
+    resetMemory();
   });
 
 });

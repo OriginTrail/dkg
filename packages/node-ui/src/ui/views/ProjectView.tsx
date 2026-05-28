@@ -256,7 +256,17 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     [cgData, contextGraphId]
   );
 
-  const rawMemory = useMemoryEntities(contextGraphId);
+  // `signalErrors: true` flips `rawMemory.error` to a real string
+  // when all three layer queries fail. Without it the hook treats
+  // "every layer failed" as `error: null, partial: false` (since
+  // `partial` only triggers on a PARTIAL failure), and the Bug C
+  // `memoryReady` gate below incorrectly classes that state as
+  // ready — passing an empty entityList into SubGraphBar while the
+  // daemon-backed `sg.entityCount` totals stay non-zero (the same
+  // contradiction Bug C set out to prevent). Mirrors the
+  // DashboardView caller, which already opts in for the same
+  // failed-vs-empty-distinct reason.
+  const rawMemory = useMemoryEntities(contextGraphId, { signalErrors: true });
   // SWM attribution drives the SWM graph's agent-tint legend (its
   // sole remaining consumer). PR #694 review — the Overview no
   // longer reads this stream (lifecycle source replaced it), so the
