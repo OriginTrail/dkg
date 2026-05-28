@@ -1616,4 +1616,124 @@ describe('SubGraphDetailView tabs', () => {
     await flush();
     expect(cellFor('wm').getAttribute('aria-pressed')).toBe('true');
   });
+
+  // S3 polish #8 — SWM-attribution discoverability. When the
+  // Graph pane has narrowed to SWM-only the existing
+  // SwmAttributionLegend explains the coloring rule, but there's
+  // no explicit "this canvas is currently colored by agent" cue
+  // above the graph. Add an inline badge that surfaces alongside
+  // the legend so the rule isn't buried in the side rail.
+  it('renders the "Colored by contributing agent" badge when narrowed to SWM-only on the Graph tab', async () => {
+    const swmOnly = {
+      uri: 'urn:e:swm', label: 'SWM', types: [],
+      trustLevel: 'shared',
+      layers: new Set(['shared']),
+      subGraphs: new Set(['demo']),
+      properties: new Map(), connections: [],
+    };
+    const wmOnly = {
+      uri: 'urn:e:wm', label: 'WM', types: [],
+      trustLevel: 'working',
+      layers: new Set(['working']),
+      subGraphs: new Set(['demo']),
+      properties: new Map(), connections: [],
+    };
+    const fixture = {
+      entities: new Map([[swmOnly.uri, swmOnly], [wmOnly.uri, wmOnly]]),
+      entityList: [swmOnly, wmOnly],
+      allTriples: [], graphTriples: [],
+      trustMap: new Map(),
+      counts: { wm: 1, swm: 1, vm: 0, total: 2 },
+      loading: false, error: null, partial: false,
+      refresh: vi.fn(),
+    } as any;
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root!.render(
+        React.createElement(ProjectProfileContext.Provider, { value: profile },
+          React.createElement(SubGraphDetailView, {
+            slug: 'demo',
+            rawMemory: fixture,
+            contextGraphId: 'cg-test',
+            onNodeClick: vi.fn(),
+            onSelectEntity: vi.fn(),
+            activeTab: 'graph',
+            onTabChange: vi.fn(),
+          })),
+      );
+    });
+    await flush();
+
+    // Baseline (all three enabled) — no badge.
+    expect(container.querySelector('[data-testid="swm-attribution-badge"]')).toBeNull();
+
+    // Narrow to SWM-only via the cross-layer cells.
+    function cellFor(layer: 'wm' | 'swm' | 'vm'): HTMLButtonElement {
+      return container.querySelector(`button.v10-subgraph-cross-layer-cell[data-layer="${layer}"]`) as HTMLButtonElement;
+    }
+    await act(async () => { cellFor('wm').click(); });
+    await act(async () => { cellFor('vm').click(); });
+    await flush();
+
+    const badge = container.querySelector('[data-testid="swm-attribution-badge"]');
+    expect(badge).toBeTruthy();
+    expect(badge!.textContent).toContain('Colored by contributing agent');
+    // The SWM cell carries the context-sensitive tooltip per #8 (c).
+    expect(cellFor('swm').getAttribute('title')).toContain('colored by contributing agent');
+  });
+
+  it('does NOT render the SWM-attribution badge when WM is the only enabled layer', async () => {
+    const wmOnly = {
+      uri: 'urn:e:wm', label: 'WM', types: [],
+      trustLevel: 'working',
+      layers: new Set(['working']),
+      subGraphs: new Set(['demo']),
+      properties: new Map(), connections: [],
+    };
+    const fixture = {
+      entities: new Map([[wmOnly.uri, wmOnly]]),
+      entityList: [wmOnly],
+      allTriples: [], graphTriples: [],
+      trustMap: new Map(),
+      counts: { wm: 1, swm: 0, vm: 0, total: 1 },
+      loading: false, error: null, partial: false,
+      refresh: vi.fn(),
+    } as any;
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root!.render(
+        React.createElement(ProjectProfileContext.Provider, { value: profile },
+          React.createElement(SubGraphDetailView, {
+            slug: 'demo',
+            rawMemory: fixture,
+            contextGraphId: 'cg-test',
+            onNodeClick: vi.fn(),
+            onSelectEntity: vi.fn(),
+            activeTab: 'graph',
+            onTabChange: vi.fn(),
+          })),
+      );
+    });
+    await flush();
+
+    function cellFor(layer: 'wm' | 'swm' | 'vm'): HTMLButtonElement {
+      return container.querySelector(`button.v10-subgraph-cross-layer-cell[data-layer="${layer}"]`) as HTMLButtonElement;
+    }
+    await act(async () => { cellFor('swm').click(); });
+    await act(async () => { cellFor('vm').click(); });
+    await flush();
+
+    // singleLayer === 'wm' — badge should NOT render.
+    expect(container.querySelector('[data-testid="swm-attribution-badge"]')).toBeNull();
+    // SWM cell carries no SWM-attribution tooltip in this state.
+    expect(cellFor('swm').getAttribute('title')).toBeNull();
+  });
 });

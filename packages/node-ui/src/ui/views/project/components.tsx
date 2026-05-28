@@ -4884,6 +4884,13 @@ export function SubGraphDetailView({
             data-layer="swm"
             aria-pressed={enabledLayers.has('shared')}
             onClick={() => toggleLayer('shared')}
+            /* #8 polish (c) — when SWM is the only enabled layer
+               the Graph pane swaps to agent-attribution coloring;
+               the tooltip surfaces that context-sensitive
+               behaviour so the user understands the colour change. */
+            title={singleLayer === 'swm'
+              ? 'Showing Shared Working Memory only — graph is colored by contributing agent (see legend).'
+              : undefined}
           >
             <span className="v10-subgraph-cross-layer-cell-icon" style={{ color: TRUST_COLORS.shared }}>◈</span>
             <span className="v10-subgraph-cross-layer-cell-label">Shared</span>
@@ -5062,6 +5069,24 @@ export function SubGraphDetailView({
 
         {selectedTab === 'graph' && (
           <div className="v10-layer-expand-body full-width" data-cg-scroll-key={`subgraph:${slug}:graph`}>
+            {/* #8 polish (ux-locked (a)) — discoverability badge
+                surfaces the SWM-attribution coloring rule when the
+                user has narrowed the Graph pane to SWM-only. Pairs
+                with the existing SwmAttributionLegend (which lives
+                inside LayerGraphPanel for the swm layer). */}
+            {singleLayer === 'swm' && (
+              <div
+                className="v10-subgraph-swm-attribution-badge"
+                data-testid="swm-attribution-badge"
+                role="status"
+                aria-label="Graph is colored by contributing agent"
+              >
+                <span className="v10-subgraph-swm-attribution-badge-dot" aria-hidden="true" />
+                <span className="v10-subgraph-swm-attribution-badge-text">
+                  Colored by contributing agent
+                </span>
+              </div>
+            )}
             <LayerGraphPanel
               layer={singleLayer ?? 'wm'}
               triples={graphPanelTriples}

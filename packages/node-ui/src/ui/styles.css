@@ -6943,6 +6943,37 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
   font-weight: 600;
 }
 
+/* #8 polish — SWM-attribution discoverability badge. Renders
+   above LayerGraphPanel when the Graph tab is narrowed to
+   SWM-only, surfacing the agent-attribution coloring rule
+   that the existing legend documents. SWM amber dot matches
+   the layer's canonical hex (TRUST_COLORS.shared #f59e0b). */
+.v10-subgraph-swm-attribution-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 8px;
+  padding: 4px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  background: var(--bg-elevated);
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.v10-subgraph-swm-attribution-badge-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  /* Reuse the canonical SWM layer token (existing precedent at
+     styles.css:3330) instead of hardcoding the hex. Matches
+     TRUST_COLORS.shared in helpers.ts. */
+  background: var(--layer-shared, #f59e0b);
+}
+.v10-subgraph-swm-attribution-badge-text {
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
 /* ── Verify on DKG CTA (in KA detail right pane) ── */
 /* Two variants: .promote (WM -> SWM, amber) and .publish (SWM -> VM, green).
    The layer-transition icon (◈ / ◉) matches LAYER_CONFIG so the CTA
