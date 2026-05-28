@@ -275,8 +275,8 @@ describe('SubGraphDetailView tabs', () => {
     });
 
     // Narrow the trust filter to WM only by toggling off SWM and VM via
-    // MiniLayerPyramid chips (their title text disambiguates which is which).
-    const chips = Array.from(container.querySelectorAll('button.v10-minipyr-chip')) as HTMLButtonElement[];
+    // MiniLayerBar chips (their title text disambiguates which is which).
+    const chips = Array.from(container.querySelectorAll('button.v10-minibar-chip')) as HTMLButtonElement[];
     const swmChip = chips.find(b => (b.getAttribute('title') ?? '').startsWith('Shared Memory'));
     const vmChip = chips.find(b => (b.getAttribute('title') ?? '').startsWith('Verified Memory'));
     expect(swmChip).toBeTruthy();
@@ -397,7 +397,7 @@ describe('SubGraphDetailView tabs', () => {
     }
 
     // Narrow to SWM only by toggling off WM + VM.
-    const chips = Array.from(container.querySelectorAll('button.v10-minipyr-chip')) as HTMLButtonElement[];
+    const chips = Array.from(container.querySelectorAll('button.v10-minibar-chip')) as HTMLButtonElement[];
     const wmChip = chips.find(b => (b.getAttribute('title') ?? '').startsWith('Working Memory'));
     const vmChip = chips.find(b => (b.getAttribute('title') ?? '').startsWith('Verified Memory'));
     expect(wmChip).toBeTruthy();
@@ -551,7 +551,7 @@ describe('SubGraphDetailView tabs', () => {
     // `filteredEntities` here — the pre-C18 gate would then drop its WM
     // rdf:type / label triples even though its WM-layer membership is
     // exactly what the narrowed view is asking for.
-    const chips = Array.from(container.querySelectorAll('button.v10-minipyr-chip')) as HTMLButtonElement[];
+    const chips = Array.from(container.querySelectorAll('button.v10-minibar-chip')) as HTMLButtonElement[];
     const swmChip = chips.find(b => (b.getAttribute('title') ?? '').startsWith('Shared Memory'));
     const vmChip = chips.find(b => (b.getAttribute('title') ?? '').startsWith('Verified Memory'));
     expect(swmChip).toBeTruthy();
@@ -654,12 +654,12 @@ describe('SubGraphDetailView tabs', () => {
     });
     await flush();
 
-    // Chips are buttons with class `v10-minipyr-chip`; the count is the
-    // `.v10-minipyr-count` span. Title prefixes disambiguate them.
-    const chips = Array.from(container.querySelectorAll('button.v10-minipyr-chip')) as HTMLButtonElement[];
+    // Chips are buttons with class `v10-minibar-chip`; the count is the
+    // `.v10-minibar-count` span. Title prefixes disambiguate them.
+    const chips = Array.from(container.querySelectorAll('button.v10-minibar-chip')) as HTMLButtonElement[];
     const countFor = (labelPrefix: string) => {
       const chip = chips.find(b => (b.getAttribute('title') ?? '').startsWith(labelPrefix));
-      return Number(chip?.querySelector('.v10-minipyr-count')?.textContent ?? 'NaN');
+      return Number(chip?.querySelector('.v10-minibar-count')?.textContent ?? 'NaN');
     };
     // Trust convention: WM=1 (the WM-only entity), SWM=1 (the promoted
     // entity, counted in its canonical layer only), VM=0. Pre-P3 this
@@ -986,7 +986,7 @@ describe('SubGraphDetailView tabs', () => {
     expect(pill!.disabled).toBe(true);
 
     // Narrow to WM only via the mini-pyramid chips.
-    const chips = Array.from(container.querySelectorAll('button.v10-minipyr-chip')) as HTMLButtonElement[];
+    const chips = Array.from(container.querySelectorAll('button.v10-minibar-chip')) as HTMLButtonElement[];
     const swmChip = chips.find(b => (b.getAttribute('title') ?? '').startsWith('Shared Memory'));
     const vmChip = chips.find(b => (b.getAttribute('title') ?? '').startsWith('Verified Memory'));
     await act(async () => { swmChip!.click(); });

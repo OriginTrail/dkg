@@ -4148,7 +4148,7 @@ export function SubGraphMiniCard({
         <span className="v10-sgov-card-stat"><b>{card.tripleCount}</b> triples</span>
       </div>
       <div className="v10-sgov-card-pyramid">
-        <MiniLayerPyramid counts={card.layerCounts} />
+        <MiniLayerBar counts={card.layerCounts} />
       </div>
       <div className="v10-sgov-card-graph">
         {card.triples.length === 0 ? (
@@ -4172,11 +4172,11 @@ export function SubGraphMiniCard({
   );
 }
 
-// ─── MiniLayerPyramid ────────────────────────────────────────
+// ─── MiniLayerBar ────────────────────────────────────────
 // Three-segment WM/SWM/VM bar. Used as a header widget in the sub-graph
 // page (clickable — toggles which layers contribute entities) and as a
 // compact badge on SubGraphOverviewGrid cards (read-only).
-export function MiniLayerPyramid({
+export function MiniLayerBar({
   counts,
   activeLayers,
   onClickLayer,
@@ -4189,7 +4189,7 @@ export function MiniLayerPyramid({
 }) {
   const total = counts.wm + counts.swm + counts.vm;
   if (total === 0) {
-    return compact ? null : <div className="v10-minipyr v10-minipyr-empty">No data</div>;
+    return compact ? null : <div className="v10-minibar v10-minibar-empty">No data</div>;
   }
   const rows: Array<{ key: TrustLevel; short: string; count: number; color: string; label: string }> = [
     { key: 'verified', short: 'VM',  count: counts.vm,  color: '#22c55e', label: 'Verified' },
@@ -4198,16 +4198,16 @@ export function MiniLayerPyramid({
   ];
   const interactive = !!onClickLayer;
   return (
-    <div className={`v10-minipyr${compact ? ' compact' : ''}`}>
+    <div className={`v10-minibar${compact ? ' compact' : ''}`}>
       {!compact && (
-        <div className="v10-minipyr-bar">
+        <div className="v10-minibar-bar">
           {rows.filter(r => r.count > 0).map(r => {
             const pct = (r.count / total) * 100;
             const active = activeLayers ? activeLayers.has(r.key) : true;
             return (
               <div
                 key={r.key}
-                className={`v10-minipyr-seg${active ? '' : ' dim'}`}
+                className={`v10-minibar-seg${active ? '' : ' dim'}`}
                 style={{ width: `${pct}%`, background: r.color }}
                 title={`${r.label}: ${r.count}`}
               />
@@ -4215,21 +4215,21 @@ export function MiniLayerPyramid({
           })}
         </div>
       )}
-      <div className="v10-minipyr-legend">
+      <div className="v10-minibar-legend">
         {rows.map(r => {
           const active = activeLayers ? activeLayers.has(r.key) : true;
           return (
             <button
               key={r.key}
               type="button"
-              className={`v10-minipyr-chip${active ? '' : ' dim'}${interactive ? ' interactive' : ''}`}
+              className={`v10-minibar-chip${active ? '' : ' dim'}${interactive ? ' interactive' : ''}`}
               onClick={interactive ? () => onClickLayer!(r.key) : undefined}
               disabled={!interactive}
               title={`${r.label} Memory — ${r.count} entities${interactive ? ' (click to toggle)' : ''}`}
             >
-              <span className="v10-minipyr-dot" style={{ background: r.color }} />
-              <span className="v10-minipyr-short">{r.short}</span>
-              <span className="v10-minipyr-count">{r.count}</span>
+              <span className="v10-minibar-dot" style={{ background: r.color }} />
+              <span className="v10-minibar-short">{r.short}</span>
+              <span className="v10-minibar-count">{r.count}</span>
             </button>
           );
         })}
@@ -4778,7 +4778,7 @@ export function SubGraphDetailView({
           <div className="v10-subgraph-detail-title">{title}</div>
           {desc && <div className="v10-subgraph-detail-desc">{desc}</div>}
         </div>
-        <MiniLayerPyramid
+        <MiniLayerBar
           counts={{ wm: layerCounts.wm, swm: layerCounts.swm, vm: layerCounts.vm }}
           activeLayers={enabledLayers}
           onClickLayer={toggleLayer}

@@ -6491,29 +6491,29 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
 }
 
 /* ── Mini layer pyramid (WM/SWM/VM segmented bar + legend) ── */
-.v10-minipyr {
+.v10-minibar {
   display: flex; flex-direction: column; gap: 4px;
   min-width: 0;
 }
-.v10-minipyr.compact { flex-direction: row; align-items: center; gap: 6px; }
-.v10-minipyr-empty {
+.v10-minibar.compact { flex-direction: row; align-items: center; gap: 6px; }
+.v10-minibar-empty {
   font-size: 10px; color: var(--text-tertiary); font-style: italic;
 }
-.v10-minipyr-bar {
+.v10-minibar-bar {
   display: flex; height: 6px; width: 100%;
   border-radius: 3px; overflow: hidden;
   background: rgba(255,255,255,0.04);
 }
-.v10-minipyr-seg {
+.v10-minibar-seg {
   height: 100%;
   transition: opacity 0.15s ease, filter 0.15s ease;
 }
-.v10-minipyr-seg.dim { opacity: 0.3; filter: grayscale(0.6); }
-.v10-minipyr-legend {
+.v10-minibar-seg.dim { opacity: 0.3; filter: grayscale(0.6); }
+.v10-minibar-legend {
   display: flex; gap: 4px; flex-wrap: wrap;
   align-items: center;
 }
-.v10-minipyr-chip {
+.v10-minibar-chip {
   display: inline-flex; align-items: center; gap: 4px;
   padding: 2px 7px;
   background: none;
@@ -6525,14 +6525,14 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
   cursor: default;
   transition: border-color 0.15s, color 0.15s, opacity 0.15s;
 }
-.v10-minipyr-chip.interactive { cursor: pointer; }
-.v10-minipyr-chip.interactive:hover { border-color: var(--border-strong); color: var(--text-primary); }
-.v10-minipyr-chip.dim { opacity: 0.4; }
-.v10-minipyr-dot {
+.v10-minibar-chip.interactive { cursor: pointer; }
+.v10-minibar-chip.interactive:hover { border-color: var(--border-strong); color: var(--text-primary); }
+.v10-minibar-chip.dim { opacity: 0.4; }
+.v10-minibar-dot {
   display: inline-block; width: 6px; height: 6px; border-radius: 50%;
 }
-.v10-minipyr-short { letter-spacing: 0.04em; }
-.v10-minipyr-count { font-variant-numeric: tabular-nums; color: var(--text-tertiary); }
+.v10-minibar-short { letter-spacing: 0.04em; }
+.v10-minibar-count { font-variant-numeric: tabular-nums; color: var(--text-tertiary); }
 
 /* ── Sub-graph detail view header + filters ── */
 .v10-subgraph-detail {
