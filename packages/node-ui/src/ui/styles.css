@@ -6918,35 +6918,35 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
   color: var(--text-tertiary);
   font-size: 12px;
 }
+/* PR #793 round 2 (ui-locked option c) — demoted from
+   clickable pill chrome to inline caption-style metadata. The
+   pill used to be dressed as a chip but didn't go anywhere;
+   the `Reset filters` button is the canonical "restore scope"
+   affordance. Reduced to a transparent text label so it reads
+   as caption metadata, not a control. */
 .v10-subgraph-active-layer-pill {
-  /* #11 polish (ui-locked) — +14px above the pill so the
-     count strip / pill cluster reads as a single breathing
-     three-tier band instead of stacked rows. */
-  margin-top: 14px;
-  align-self: flex-start;
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 3px 10px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 12px;
+  margin-top: 8px;              /* was: 14px */
+  padding: 0;
+  border: 0;
+  background: transparent;
+  border-radius: 0;
+  font-family: var(--font-sans); /* was: --font-mono */
   font-size: 11px;
-  font-family: var(--font-mono);
-  color: var(--text-secondary);
-  background: rgba(255,255,255,0.02);
-  cursor: pointer;
-  transition: all 0.15s;
+  color: var(--text-tertiary);
+  cursor: default;               /* not a clickable widget */
+  transition: color 0.15s;
 }
 .v10-subgraph-active-layer-pill:hover:not(:disabled) {
-  border-color: var(--border-strong);
-  color: var(--text-primary);
+  color: var(--text-secondary);
+  border-color: transparent;
 }
-.v10-subgraph-active-layer-pill:disabled {
-  cursor: default;
-  opacity: 0.85;
-}
+.v10-subgraph-active-layer-pill:disabled,
 .v10-subgraph-active-layer-pill.all-layers {
   color: var(--text-tertiary);
+  opacity: 1;
 }
 .v10-subgraph-active-layer-pill-label {
   text-transform: uppercase;
@@ -6956,7 +6956,7 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
   color: var(--text-tertiary);
 }
 .v10-subgraph-active-layer-pill-value {
-  color: var(--text-primary);
+  color: var(--text-secondary); /* was: --text-primary */
   font-weight: 600;
 }
 

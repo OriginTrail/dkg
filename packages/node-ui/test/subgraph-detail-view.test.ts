@@ -928,10 +928,15 @@ describe('SubGraphDetailView tabs', () => {
     expect(entityCards[0]?.textContent).toContain('Rooted');
   });
 
-  // S3 — cross-layer count strip + active-layer chip pill (UX §4.4.1).
-  // The pill must be visible whenever scope is narrower than "all
-  // three", and clicking it must reset to All layers.
-  it('renders the active-layer pill and resets to "All layers" on click', async () => {
+  // S3 — cross-layer count strip + active-layer pill caption
+  // (UX §4.4.1). Post round 2 the pill was demoted from a
+  // clickable button to an inline caption label (ui-lead
+  // option c). It still surfaces the active layer scope but
+  // is no longer interactive — the `Reset filters` button is
+  // the canonical "restore scope" affordance when chip filters
+  // exist. The pill renders as a `<span>` so `disabled` /
+  // `click` are no longer meaningful.
+  it('renders the active-layer pill caption (non-interactive after round 2 demotion)', async () => {
     const wmOnly = {
       uri: 'urn:e:wm', label: 'WM only', types: [],
       trustLevel: 'working',
@@ -979,29 +984,26 @@ describe('SubGraphDetailView tabs', () => {
     });
     await flush();
 
-    const pill = container.querySelector('[data-testid="active-layer-pill"]') as HTMLButtonElement | null;
+    const pill = container.querySelector('[data-testid="active-layer-pill"]') as HTMLElement | null;
     expect(pill).toBeTruthy();
-    // Default: all three layers — pill reads "All layers" and is disabled.
+    // Default: all three layers — pill reads "All layers".
     expect(pill!.textContent).toContain('All layers');
-    expect(pill!.disabled).toBe(true);
+    // Round 2 — element is a <span>, NOT a button. No `disabled`
+    // semantic; no `onClick` to fire.
+    expect(pill!.tagName.toLowerCase()).toBe('span');
 
-    // Narrow to WM only via the mini-pyramid chips.
+    // Narrow to WM only via the mini-pyramid chips. Pill caption
+    // updates to reflect the active scope but stays
+    // non-interactive — the `Reset filters` button is the
+    // canonical restore affordance.
     const chips = Array.from(container.querySelectorAll('button.v10-minibar-chip')) as HTMLButtonElement[];
     const swmChip = chips.find(b => (b.getAttribute('title') ?? '').startsWith('Shared Memory'));
     const vmChip = chips.find(b => (b.getAttribute('title') ?? '').startsWith('Verifiable Memory'));
     await act(async () => { swmChip!.click(); });
     await act(async () => { vmChip!.click(); });
     await flush();
-
-    // Pill now surfaces the narrowed scope and becomes clickable.
     expect(pill!.textContent).toContain('Working Memory');
-    expect(pill!.disabled).toBe(false);
-
-    // Clicking resets to all layers.
-    await act(async () => { pill!.click(); });
-    await flush();
-    expect(pill!.textContent).toContain('All layers');
-    expect(pill!.disabled).toBe(true);
+    expect(pill!.tagName.toLowerCase()).toBe('span');
   });
 
   // S3 fold-in #6 (PR #677 follow-up). Multi-layer sub-graph Graph
@@ -1799,14 +1801,14 @@ describe('SubGraphDetailView tabs', () => {
     expect(cellFor('swm').getAttribute('aria-pressed')).toBe('false');
     expect(cellFor('vm').getAttribute('aria-pressed')).toBe('false');
 
-    // Active-layer pill surfaces the scope. Post-Bug-I (PR #793
-    // sweep 2) the pill is DISABLED at the seeded scope — it
-    // would just no-op a "click to restore" affordance — so the
-    // assertion now reflects the honest affordance.
-    const pill = container.querySelector('[data-testid="active-layer-pill"]') as HTMLButtonElement;
+    // Active-layer pill caption surfaces the scope. Post round
+    // 2 (ui-lead option c) the pill is a non-interactive
+    // `<span>`; the `Reset filters` button is the canonical
+    // restore affordance.
+    const pill = container.querySelector('[data-testid="active-layer-pill"]') as HTMLElement;
     expect(pill).toBeTruthy();
     expect(pill.textContent).toContain('Working Memory');
-    expect(pill.disabled).toBe(true);
+    expect(pill.tagName.toLowerCase()).toBe('span');
   });
 
   it('seeds enabledLayers to all three when initialLayer is omitted (default)', async () => {
@@ -1855,81 +1857,12 @@ describe('SubGraphDetailView tabs', () => {
     expect(cellFor('vm').getAttribute('aria-pressed')).toBe('true');
   });
 
-  // S3 polish PR #793 Codex sweep 2 (Bug I) — `resetFilters` and
-  // the active-layer pill must restore `initialEnabledLayers`,
-  // NOT a hard-coded all-three set. Pre-fix entering a sub-graph
-  // from a WM tab (initialEnabledLayers === Set(['working'])) and
-  // then clicking Reset would widen scope to all-three instead of
-  // restoring WM. Same shape on the pill click.
-  it('active-layer pill click restores initialEnabledLayers when seeded to a single layer (Bug I)', async () => {
-    const wmEntity = {
-      uri: 'urn:e:wm', label: 'WM', types: [],
-      trustLevel: 'working',
-      layers: new Set(['working']),
-      subGraphs: new Set(['demo']),
-      properties: new Map(), connections: [],
-    };
-    const swmEntity = {
-      uri: 'urn:e:swm', label: 'SWM', types: [],
-      trustLevel: 'shared',
-      layers: new Set(['shared']),
-      subGraphs: new Set(['demo']),
-      properties: new Map(), connections: [],
-    };
-    const fixture = {
-      entities: new Map([[wmEntity.uri, wmEntity], [swmEntity.uri, swmEntity]]),
-      entityList: [wmEntity, swmEntity],
-      allTriples: [], graphTriples: [],
-      trustMap: new Map(),
-      counts: { wm: 1, swm: 1, vm: 0, total: 2 },
-      loading: false, error: null, partial: false,
-      refresh: vi.fn(),
-    } as any;
-
-    container = document.createElement('div');
-    document.body.appendChild(container);
-    root = createRoot(container);
-
-    await act(async () => {
-      root!.render(
-        React.createElement(ProjectProfileContext.Provider, { value: profile },
-          React.createElement(SubGraphDetailView, {
-            slug: 'demo',
-            rawMemory: fixture,
-            contextGraphId: 'cg-test',
-            onNodeClick: vi.fn(),
-            onSelectEntity: vi.fn(),
-            activeTab: 'items',
-            onTabChange: vi.fn(),
-            initialLayer: 'wm',
-          })),
-      );
-    });
-    await flush();
-
-    function cellFor(layer: 'wm' | 'swm' | 'vm'): HTMLButtonElement {
-      return container.querySelector(`button.v10-subgraph-cross-layer-cell[data-layer="${layer}"]`) as HTMLButtonElement;
-    }
-    const pill = container.querySelector('[data-testid="active-layer-pill"]') as HTMLButtonElement;
-
-    // Seeded state: WM only, pill disabled (no-op affordance).
-    expect(pill.disabled).toBe(true);
-    expect(cellFor('wm').getAttribute('aria-pressed')).toBe('true');
-    expect(cellFor('swm').getAttribute('aria-pressed')).toBe('false');
-
-    // User widens scope by clicking the SWM cell → pill enables.
-    await act(async () => { cellFor('swm').click(); });
-    await flush();
-    expect(pill.disabled).toBe(false);
-
-    // Click pill — restores the seeded WM scope, NOT all-three.
-    await act(async () => { pill.click(); });
-    await flush();
-    expect(cellFor('wm').getAttribute('aria-pressed')).toBe('true');
-    expect(cellFor('swm').getAttribute('aria-pressed')).toBe('false');
-    expect(cellFor('vm').getAttribute('aria-pressed')).toBe('false');
-    expect(pill.disabled).toBe(true);
-  });
+  // PR #793 round 2 — Bug I's `active-layer pill click restores
+  // initialEnabledLayers when seeded to a single layer` test was
+  // removed alongside the pill demotion (ui-lead option c). The
+  // pill is no longer a clickable widget; `Reset filters` is the
+  // sole "restore scope" affordance. The companion Reset test
+  // below survives because the Reset button itself is unchanged.
 
   it('Reset filters restores initialEnabledLayers when seeded AND when chip filters exist (Bug I)', async () => {
     // Profile carries a filter chip so the `Reset filters` button
@@ -2072,17 +2005,17 @@ describe('SubGraphDetailView tabs', () => {
     function cellFor(layer: 'wm' | 'swm' | 'vm'): HTMLButtonElement {
       return container.querySelector(`button.v10-subgraph-cross-layer-cell[data-layer="${layer}"]`) as HTMLButtonElement;
     }
-    const pill = container.querySelector('[data-testid="active-layer-pill"]') as HTMLButtonElement;
+    // Pill is now a caption-style `<span>` (round 2 demotion);
+    // assertions track the Reset button's visibility, not the
+    // pill's `disabled` semantic.
 
-    // Default state: all three pressed, pill disabled, no Reset.
-    expect(pill.disabled).toBe(true);
+    // Default state: all three pressed, no Reset button.
     expect(container.querySelector('.v10-subgraph-filter-reset')).toBeNull();
 
-    // Narrow to WM → Reset + pill enable.
+    // Narrow to WM → Reset surfaces.
     await act(async () => { cellFor('swm').click(); });
     await act(async () => { cellFor('vm').click(); });
     await flush();
-    expect(pill.disabled).toBe(false);
     const reset = container.querySelector('.v10-subgraph-filter-reset') as HTMLButtonElement;
     expect(reset).toBeTruthy();
 
@@ -2092,7 +2025,8 @@ describe('SubGraphDetailView tabs', () => {
     expect(cellFor('wm').getAttribute('aria-pressed')).toBe('true');
     expect(cellFor('swm').getAttribute('aria-pressed')).toBe('true');
     expect(cellFor('vm').getAttribute('aria-pressed')).toBe('true');
-    expect(pill.disabled).toBe(true);
+    // Reset button hides again post-restore.
+    expect(container.querySelector('.v10-subgraph-filter-reset')).toBeNull();
   });
 
   // S3 polish PR #793 Codex sweep 3 Bug J — `initialEnabledLayers`

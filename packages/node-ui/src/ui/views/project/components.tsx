@@ -5000,30 +5000,23 @@ export function SubGraphDetailView({
             <span className="v10-subgraph-cross-layer-cell-count">{layerCounts.vm}</span>
           </button>
         </div>
-        {/* Bug I — pill restores `initialEnabledLayers`, NOT
-            hard-coded all-three. Disabled at the seeded scope so
-            the affordance doesn't lie. Copy branches on whether
-            the seeded scope is all-three (the Overview / Subgraphs
-            fresh-entry default) or a single layer (entered via
-            WM/SWM/VM tab). */}
-        <button
-          type="button"
+        {/* PR #793 round 2 — demoted from clickable pill to
+            inline caption per ui-lead (option c). The
+            "restore" affordance the button used to claim was
+            confusing (it looked dressable but didn't go
+            anywhere); the `Reset filters` button covers the
+            same semantic when chip filters exist. `Bug I`'s
+            `isAtSeededScope` predicate stays — it still gates
+            the Reset button's visibility — but no longer
+            affects this element. Rendered as a `<span>` with
+            metadata role. */}
+        <span
           className={`v10-subgraph-active-layer-pill${enabledLayers.size === 3 ? ' all-layers' : ''}`}
-          onClick={() => setEnabledLayers(new Set<TrustLevel>(initialEnabledLayers))}
-          disabled={isAtSeededScope}
           data-testid="active-layer-pill"
-          aria-label={`Active layer scope: ${activeLayerLabel}${isAtSeededScope ? '' : (initialEnabledLayers.size === 3 ? ' — click to reset to all layers' : ' — click to restore originating scope')}`}
-          title={isAtSeededScope
-            ? (initialEnabledLayers.size === 3
-                ? 'Active layer scope: all three memory layers'
-                : 'Active layer scope: originating layer from prior navigation')
-            : (initialEnabledLayers.size === 3
-                ? 'Click to reset to all layers'
-                : 'Click to restore originating scope')}
         >
           <span className="v10-subgraph-active-layer-pill-label">Active layer:</span>
           <span className="v10-subgraph-active-layer-pill-value">{activeLayerLabel}</span>
-        </button>
+        </span>
       </div>
 
       {queryCatalogs.length > 0 && (
