@@ -4321,25 +4321,12 @@ body.light .v10-import-dropzone.drag-over { border-color: #b0b0b0; background: #
   color: var(--text-tertiary, #94a3b8);
   padding-right: 4px;
 }
-/* #7 polish (literal updated at sweep 3 Bug K) — inline
-   legend-style hint trailing the chip row. Reads as "this row
-   includes Root and the subgraph chips" via the locked literal
-   `+ Root, subgraphs`, NOT as arithmetic — the original
-   `All = Root + subgraphs` form was a false equation when
-   entities have cross-membership in 2+ subgraphs. Cross-
-   membership disclosure lives in the long-form All-chip
-   tooltip; this hint is the at-a-glance visual cue. Muted tone
-   (same `--text-tertiary` token used by the row label) so it
-   doesn't compete with the chip counts. `white-space: nowrap`
-   keeps the phrase readable as a single line even on narrow
-   viewports — the chip row already wraps independently. */
-.v10-subgraph-bar-hint {
-  font-size: 11px;
-  color: var(--text-tertiary);
-  white-space: nowrap;
-  padding-left: 8px;
-  font-variant-numeric: tabular-nums;
-}
+/* PR #793 round 2 — the `.v10-subgraph-bar-hint` rule (sweep 3
+   Bug K's locked literal `+ Root, subgraphs`) was removed
+   alongside the corresponding render in SubGraphBar.tsx. Users
+   asked what the literal meant on manual test; the inline hint
+   was demoted entirely. The long-form tooltip on the All chip's
+   count badge still carries the cross-membership disclosure. */
 .v10-subgraph-chip {
   display: inline-flex;
   align-items: center;

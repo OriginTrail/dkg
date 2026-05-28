@@ -391,24 +391,17 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
           </button>
         );
       })()}
-      {showRootChip && inLayerMode && (
-        /* #7 polish — inline legend-style hint after the Root
-           chip. Reads as "this row includes Root and the
-           subgraph chips", NOT as arithmetic — `MemoryEntity.subGraphs`
-           is a Set, so cross-membership entities count once in
-           the All total while potentially appearing under
-           multiple chip totals. Leading `+` mirrors set
-           membership ("plus these things"); the comma list
-           avoids a second `+` that would read as a sum.
-           Cross-membership disclosure lives in the long-form
-           All-chip tooltip — two-tier: hint = visual cue,
-           tooltip = explanation. ux-locked at PR #793 Codex
-           sweep 3 Bug K. Gated on `inLayerMode` (sweep 1 — the
-           layer-agnostic All total excludes Root by design). */
-        <span className="v10-subgraph-bar-hint" aria-hidden="true">
-          + Root, subgraphs
-        </span>
-      )}
+      {/* PR #793 round 2 — the inline "+ Root, subgraphs" legend
+          hint (sweep 3 Bug K's locked replacement for the
+          rejected arithmetic form) was removed after manual test:
+          users saw the literal and asked what it meant, so the
+          two-tier "hint = visual cue, tooltip = explanation"
+          design failed to communicate. Cross-membership
+          disclosure now lives ONLY in the long-form All-chip
+          tooltip (hover-only, low-cost, right disclosure for
+          users who investigate). The `inLayerMode` discriminator
+          above stays — it still drives the mode-tagged tooltip /
+          aria branching from sweep 1. */}
     </div>
   );
 };

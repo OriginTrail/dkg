@@ -488,15 +488,17 @@ describe('SubGraphBar — layer-scoped chip counts (P4)', () => {
     expect(chip!.getAttribute('data-count')).toBe('0');
   });
 
-  // S3 polish #7 (literal updated at sweep 3 Bug K) — inline
-  // legend-style hint after the Root chip. Reads as
-  // "this row includes Root and the subgraph chips"; the earlier
-  // arithmetic literal `All = Root + subgraphs` was a false
-  // equation when entities have cross-membership in 2+ subgraphs.
-  // ux-lead-locked replacement: `+ Root, subgraphs`. The hint is
-  // the at-a-glance cue; cross-membership disclosure lives in
-  // the long-form All-chip tooltip.
-  it('renders the "+ Root, subgraphs" inline hint when Root is visible AND in layer mode', async () => {
+  // PR #793 round 2 — the inline `+ Root, subgraphs` hint
+  // (sweep 3 Bug K's locked literal, which itself replaced
+  // sweep 1's `All = Root + subgraphs` arithmetic form) was
+  // dropped entirely after manual-test feedback. Users asked
+  // what the literal meant; the in-row hint failed to
+  // communicate even at its second iteration. Cross-membership
+  // disclosure now lives ONLY in the long-form tooltip on the
+  // All chip (hover-only). This regression guard locks the
+  // deletion against any accidental re-introduction in either
+  // layer mode or layer-agnostic mode.
+  it('does NOT render any inline hint after the Root chip (round 2 deletion — applies in BOTH layer + layer-agnostic modes)', async () => {
     const rootEntity = {
       uri: 'urn:e:root', label: 'Root', types: [],
       trustLevel: 'working' as const,
@@ -505,6 +507,8 @@ describe('SubGraphBar — layer-scoped chip counts (P4)', () => {
       properties: new Map(),
       connections: [],
     };
+
+    // Layer mode — pre-sweep-3 the hint was visible here.
     await act(async () => {
       root.render(React.createElement(SubGraphBar, {
         contextGraphId: 'cg',
@@ -516,53 +520,9 @@ describe('SubGraphBar — layer-scoped chip counts (P4)', () => {
       }));
     });
     await flushNet();
-
-    const hint = container.querySelector('.v10-subgraph-bar-hint');
-    expect(hint).toBeTruthy();
-    expect(hint!.textContent).toContain('+ Root, subgraphs');
-    // The earlier arithmetic literal must NOT leak back in (regression
-    // guard against any accidental copy revert).
-    expect(hint!.textContent).not.toContain('All =');
-  });
-
-  it('does NOT render the "+ Root, subgraphs" hint when there is no Root chip', async () => {
-    // No root-bucket entities — Root chip is hidden, and so is
-    // the hint (since the hint references a chip that's not on
-    // screen).
-    const a = mkEntity('urn:a', 'working', 'alpha');
-    await act(async () => {
-      root.render(React.createElement(SubGraphBar, {
-        contextGraphId: 'cg',
-        profile,
-        selected: null,
-        onSelect: vi.fn(),
-        entities: [a],
-        layer: 'wm',
-      }));
-    });
-    await flushNet();
-
     expect(container.querySelector('.v10-subgraph-bar-hint')).toBeNull();
-  });
 
-  // PR #793 Codex sweep 1 — the `entityScopedAllTotal` math at
-  // SubGraphBar.tsx:139 EXCLUDES root-bucket entities in layer-
-  // agnostic mode (the Subgraph Explorer overview). The All-chip
-  // tooltip / aria-label and the "+ Root, subgraphs" hint
-  // would silently contradict that math; both must mode-branch.
-  it('does NOT render the "+ Root, subgraphs" hint in layer-agnostic mode (Codex sweep 1)', async () => {
-    // Root entity present (would normally show the chip + hint
-    // in layer mode), but the bar is mounted WITHOUT a `layer`
-    // prop — Subgraph Explorer overview shape. All excludes
-    // Root by design; the hint must hide.
-    const rootEntity = {
-      uri: 'urn:e:root', label: 'Root', types: [],
-      trustLevel: 'working' as const,
-      layers: new Set(['working']),
-      subGraphs: new Set<string>(),
-      properties: new Map(),
-      connections: [],
-    };
+    // Layer-agnostic — Root chip stays, hint is gone.
     await act(async () => {
       root.render(React.createElement(SubGraphBar, {
         contextGraphId: 'cg',
@@ -574,9 +534,6 @@ describe('SubGraphBar — layer-scoped chip counts (P4)', () => {
       }));
     });
     await flushNet();
-
-    // Root chip itself stays visible (the chip-visibility gate
-    // doesn't depend on layer mode); only the hint is gated.
     expect(container.querySelector('.v10-subgraph-chip-root')).toBeTruthy();
     expect(container.querySelector('.v10-subgraph-bar-hint')).toBeNull();
   });
