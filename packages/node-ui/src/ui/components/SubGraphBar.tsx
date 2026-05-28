@@ -247,6 +247,26 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
     : null;
   const scopeSuffix = layerLabel ? ` in ${layerLabel}` : '';
 
+  // S3 polish #7 — the `All` semantic differs between layer mode
+  // and layer-agnostic mode (see `entityScopedAllTotal` at :139
+  // for the locked rule):
+  //   • Layer mode (WM/SWM/VM): All includes root-bucket entities
+  //     so it matches the layer-tab badge.
+  //   • Layer-agnostic mode (Subgraph Explorer overview): All
+  //     EXCLUDES root by design — it's the umbrella over named
+  //     sub-graph chips; including root would inflate the total
+  //     past anything the user can drill into.
+  // Surface different tooltip / aria-label / inline hint copy on
+  // each mode so the math reads consistently with the chip count.
+  // (PR #793 Codex sweep 1 — gating fix.)
+  const inLayerMode = layer !== undefined;
+  const allTooltipCopy = inLayerMode
+    ? `Total entities — includes those in named subgraphs (some may belong to more than one), plus Root entities not in any subgraph · ${totalEntities} entities${scopeSuffix}${layerLabel ? '' : ` · ${totalTriples} triples`}`
+    : `Total entities in named subgraphs (some may belong to more than one). Root entities are counted separately on the Root chip · ${totalEntities} entities · ${totalTriples} triples`;
+  const allAriaCopy = inLayerMode
+    ? `All — total entities. Includes those in named subgraphs (some may belong to more than one), plus Root entities not in any subgraph. ${totalEntities} entities${scopeSuffix}.`
+    : `All — total entities in named subgraphs (some may belong to more than one). Root entities are counted separately on the Root chip. ${totalEntities} entities.`;
+
   return (
     <div className="v10-subgraph-bar">
       <div className="v10-subgraph-bar-label">Subgraphs</div>
@@ -256,15 +276,8 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
         /* All chip clears the selection — no originatingLayer
            seed because the All view shows daemon-wide totals. */
         onClick={() => onSelect(null)}
-        /* #7 polish (ux-locked option ii) — long-form tooltip
-           clarifies the All math because `MemoryEntity.subGraphs`
-           is a Set: cross-membership entities count once in `All`
-           but may also appear under multiple chip totals, and
-           Root holds entities in no sub-graph at all. The shorter
-           inline hint after the Root chip carries the same
-           semantic at a glance. */
-        title={`Total entities — includes those in named subgraphs (some may belong to more than one), plus Root entities not in any subgraph · ${totalEntities} entities${scopeSuffix}${layerLabel ? '' : ` · ${totalTriples} triples`}`}
-        aria-label={`All — total entities. Includes those in named subgraphs (some may belong to more than one), plus Root entities not in any subgraph. ${totalEntities} entities${scopeSuffix}.`}
+        title={allTooltipCopy}
+        aria-label={allAriaCopy}
       >
         <span className="v10-subgraph-chip-icon">⊚</span>
         <span className="v10-subgraph-chip-label">All</span>
@@ -323,11 +336,14 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
           </button>
         );
       })()}
-      {showRootChip && (
+      {showRootChip && inLayerMode && (
         /* #7 polish (ux-locked). Inline arithmetic-style hint
            after the Root chip — explains the All math at a
            glance. Muted tone so it doesn't compete with the
-           chip row; single line, never wraps (CSS). */
+           chip row; single line, never wraps (CSS).
+           Gated on `inLayerMode` (PR #793 Codex sweep 1 — the
+           layer-agnostic All total excludes Root by design, so
+           the equation only holds on WM/SWM/VM pages). */
         <span className="v10-subgraph-bar-hint" aria-hidden="true">
           All = Root + subgraphs
         </span>

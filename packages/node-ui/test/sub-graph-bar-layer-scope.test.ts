@@ -495,7 +495,7 @@ describe('SubGraphBar — layer-scoped chip counts (P4)', () => {
   // All but may appear under multiple chip totals. The hint
   // surfaces that math without changing the canonical All
   // semantics.
-  it('renders the "All = Root + subgraphs" inline hint when the Root chip is visible', async () => {
+  it('renders the "All = Root + subgraphs" inline hint when Root is visible AND in layer mode', async () => {
     const rootEntity = {
       uri: 'urn:e:root', label: 'Root', types: [],
       trustLevel: 'working' as const,
@@ -510,7 +510,8 @@ describe('SubGraphBar — layer-scoped chip counts (P4)', () => {
         profile,
         selected: null,
         onSelect: vi.fn(),
-        entities: [rootEntity, mkEntity('urn:e:named', 'shared', 'alpha')],
+        entities: [rootEntity, mkEntity('urn:e:named', 'working', 'alpha')],
+        layer: 'wm',
       }));
     });
     await flushNet();
@@ -532,6 +533,7 @@ describe('SubGraphBar — layer-scoped chip counts (P4)', () => {
         selected: null,
         onSelect: vi.fn(),
         entities: [a],
+        layer: 'wm',
       }));
     });
     await flushNet();
@@ -539,13 +541,50 @@ describe('SubGraphBar — layer-scoped chip counts (P4)', () => {
     expect(container.querySelector('.v10-subgraph-bar-hint')).toBeNull();
   });
 
-  it('extends the All chip tooltip with the cross-membership clarification', async () => {
+  // PR #793 Codex sweep 1 — the `entityScopedAllTotal` math at
+  // SubGraphBar.tsx:139 EXCLUDES root-bucket entities in layer-
+  // agnostic mode (the Subgraph Explorer overview). The All-chip
+  // tooltip / aria-label and the "All = Root + subgraphs" hint
+  // would silently contradict that math; both must mode-branch.
+  it('does NOT render the "All = Root + subgraphs" hint in layer-agnostic mode (Codex sweep 1)', async () => {
+    // Root entity present (would normally show the chip + hint
+    // in layer mode), but the bar is mounted WITHOUT a `layer`
+    // prop — Subgraph Explorer overview shape. All excludes
+    // Root by design; the hint must hide.
+    const rootEntity = {
+      uri: 'urn:e:root', label: 'Root', types: [],
+      trustLevel: 'working' as const,
+      layers: new Set(['working']),
+      subGraphs: new Set<string>(),
+      properties: new Map(),
+      connections: [],
+    };
     await act(async () => {
       root.render(React.createElement(SubGraphBar, {
         contextGraphId: 'cg',
         profile,
         selected: null,
         onSelect: vi.fn(),
+        entities: [rootEntity, mkEntity('urn:e:named', 'shared', 'alpha')],
+        /* no layer prop → layer-agnostic */
+      }));
+    });
+    await flushNet();
+
+    // Root chip itself stays visible (the chip-visibility gate
+    // doesn't depend on layer mode); only the hint is gated.
+    expect(container.querySelector('.v10-subgraph-chip-root')).toBeTruthy();
+    expect(container.querySelector('.v10-subgraph-bar-hint')).toBeNull();
+  });
+
+  it('extends the All chip tooltip in layer mode with the cross-membership clarification (includes Root)', async () => {
+    await act(async () => {
+      root.render(React.createElement(SubGraphBar, {
+        contextGraphId: 'cg',
+        profile,
+        selected: null,
+        onSelect: vi.fn(),
+        layer: 'wm',
       }));
     });
     await flushNet();
@@ -553,9 +592,36 @@ describe('SubGraphBar — layer-scoped chip counts (P4)', () => {
       .find(b => b.textContent?.includes('All')) as HTMLButtonElement;
     expect(allChip).toBeTruthy();
     const title = allChip.getAttribute('title') ?? '';
+    const aria = allChip.getAttribute('aria-label') ?? '';
     expect(title).toContain('Total entities');
     expect(title).toContain('some may belong to more than one');
-    expect(title).toContain('Root entities not in any subgraph');
+    expect(title).toContain('plus Root entities not in any subgraph');
+    expect(aria).toContain('plus Root entities not in any subgraph');
+    // Must NOT carry the layer-agnostic phrasing.
+    expect(title).not.toContain('counted separately');
+  });
+
+  it('uses the layer-agnostic All chip tooltip in overview mode (Codex sweep 1 — Root counted separately)', async () => {
+    await act(async () => {
+      root.render(React.createElement(SubGraphBar, {
+        contextGraphId: 'cg',
+        profile,
+        selected: null,
+        onSelect: vi.fn(),
+        /* no layer prop → layer-agnostic */
+      }));
+    });
+    await flushNet();
+    const allChip = Array.from(container.querySelectorAll('button.v10-subgraph-chip'))
+      .find(b => b.textContent?.includes('All')) as HTMLButtonElement;
+    expect(allChip).toBeTruthy();
+    const title = allChip.getAttribute('title') ?? '';
+    const aria = allChip.getAttribute('aria-label') ?? '';
+    expect(title).toContain('Total entities in named subgraphs');
+    expect(title).toContain('counted separately on the Root chip');
+    expect(aria).toContain('counted separately on the Root chip');
+    // Must NOT carry the layer-mode phrasing that includes Root.
+    expect(title).not.toContain('plus Root entities not in any subgraph');
   });
 
   // S3 polish #9 — when SubGraphBar is mounted on a WM/SWM/VM
