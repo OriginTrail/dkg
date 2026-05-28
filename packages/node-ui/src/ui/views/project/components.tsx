@@ -4859,23 +4859,48 @@ export function SubGraphDetailView({
             : 'This subgraph, across the three memory layers:'}
         </div>
         <div className="v10-subgraph-cross-layer-strip" data-testid="cross-layer-strip">
-          <span className="v10-subgraph-cross-layer-cell" data-layer="wm">
+          {/* Cells are interactive buttons wired to `toggleLayer`
+              (#6, ui-locked). The `→` arrows stay inert span
+              separators — they shouldn't grow click targets. The
+              "refuse last enabled" safeguard at `toggleLayer:4683`
+              already prevents the all-empty state; the
+              `aria-pressed="false"` cells render at 0.5 opacity
+              (CSS) to signal the dimmed state. */}
+          <button
+            type="button"
+            className="v10-subgraph-cross-layer-cell"
+            data-layer="wm"
+            aria-pressed={enabledLayers.has('working')}
+            onClick={() => toggleLayer('working')}
+          >
             <span className="v10-subgraph-cross-layer-cell-icon" style={{ color: TRUST_COLORS.working }}>◇</span>
             <span className="v10-subgraph-cross-layer-cell-label">Working</span>
             <span className="v10-subgraph-cross-layer-cell-count">{layerCounts.wm}</span>
-          </span>
+          </button>
           <span className="v10-subgraph-cross-layer-arrow" aria-hidden="true">→</span>
-          <span className="v10-subgraph-cross-layer-cell" data-layer="swm">
+          <button
+            type="button"
+            className="v10-subgraph-cross-layer-cell"
+            data-layer="swm"
+            aria-pressed={enabledLayers.has('shared')}
+            onClick={() => toggleLayer('shared')}
+          >
             <span className="v10-subgraph-cross-layer-cell-icon" style={{ color: TRUST_COLORS.shared }}>◈</span>
             <span className="v10-subgraph-cross-layer-cell-label">Shared</span>
             <span className="v10-subgraph-cross-layer-cell-count">{layerCounts.swm}</span>
-          </span>
+          </button>
           <span className="v10-subgraph-cross-layer-arrow" aria-hidden="true">→</span>
-          <span className="v10-subgraph-cross-layer-cell" data-layer="vm">
+          <button
+            type="button"
+            className="v10-subgraph-cross-layer-cell"
+            data-layer="vm"
+            aria-pressed={enabledLayers.has('verified')}
+            onClick={() => toggleLayer('verified')}
+          >
             <span className="v10-subgraph-cross-layer-cell-icon" style={{ color: TRUST_COLORS.verified }}>◉</span>
             <span className="v10-subgraph-cross-layer-cell-label">Verifiable</span>
             <span className="v10-subgraph-cross-layer-cell-count">{layerCounts.vm}</span>
-          </span>
+          </button>
         </div>
         <button
           type="button"

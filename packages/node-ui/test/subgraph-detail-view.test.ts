@@ -1486,4 +1486,134 @@ describe('SubGraphDetailView tabs', () => {
     // the legacy "No data" copy either.
     expect(container.textContent).not.toContain('No data\n');
   });
+
+  // S3 polish #6 — cross-layer strip cells are interactive
+  // buttons wired to `toggleLayer`. Pre-polish they were inert
+  // span elements; the user had to use the (smaller) header
+  // MiniLayerBar chips to narrow the layer scope. Same handler,
+  // same "refuse last enabled" safeguard, broader hit target.
+  it('toggles a layer when the WM cross-layer cell is clicked', async () => {
+    const wmOnly = {
+      uri: 'urn:e:wm', label: 'WM', types: [],
+      trustLevel: 'working',
+      layers: new Set(['working']),
+      subGraphs: new Set(['demo']),
+      properties: new Map(), connections: [],
+    };
+    const swmOnly = {
+      uri: 'urn:e:swm', label: 'SWM', types: [],
+      trustLevel: 'shared',
+      layers: new Set(['shared']),
+      subGraphs: new Set(['demo']),
+      properties: new Map(), connections: [],
+    };
+    const fixture = {
+      entities: new Map([[wmOnly.uri, wmOnly], [swmOnly.uri, swmOnly]]),
+      entityList: [wmOnly, swmOnly],
+      allTriples: [], graphTriples: [],
+      trustMap: new Map(),
+      counts: { wm: 1, swm: 1, vm: 0, total: 2 },
+      loading: false, error: null, partial: false,
+      refresh: vi.fn(),
+    } as any;
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root!.render(
+        React.createElement(ProjectProfileContext.Provider, { value: profile },
+          React.createElement(SubGraphDetailView, {
+            slug: 'demo',
+            rawMemory: fixture,
+            contextGraphId: 'cg-test',
+            onNodeClick: vi.fn(),
+            onSelectEntity: vi.fn(),
+            activeTab: 'items',
+            onTabChange: vi.fn(),
+          })),
+      );
+    });
+    await flush();
+
+    function cellFor(layer: 'wm' | 'swm' | 'vm'): HTMLButtonElement {
+      const el = container.querySelector(`button.v10-subgraph-cross-layer-cell[data-layer="${layer}"]`);
+      if (!el) throw new Error(`Missing cell for ${layer}`);
+      return el as HTMLButtonElement;
+    }
+
+    // Default: all three layers enabled — every cell is pressed.
+    expect(cellFor('wm').getAttribute('aria-pressed')).toBe('true');
+    expect(cellFor('swm').getAttribute('aria-pressed')).toBe('true');
+    expect(cellFor('vm').getAttribute('aria-pressed')).toBe('true');
+
+    // Click the WM cell — narrows scope to {swm, vm}.
+    await act(async () => { cellFor('wm').click(); });
+    await flush();
+    expect(cellFor('wm').getAttribute('aria-pressed')).toBe('false');
+    expect(cellFor('swm').getAttribute('aria-pressed')).toBe('true');
+    expect(cellFor('vm').getAttribute('aria-pressed')).toBe('true');
+
+    // Click WM again — re-adds it.
+    await act(async () => { cellFor('wm').click(); });
+    await flush();
+    expect(cellFor('wm').getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('does NOT allow the last-enabled cell to be toggled off (safeguard inherited from toggleLayer)', async () => {
+    const wmOnly = {
+      uri: 'urn:e:wm', label: 'WM', types: [],
+      trustLevel: 'working',
+      layers: new Set(['working']),
+      subGraphs: new Set(['demo']),
+      properties: new Map(), connections: [],
+    };
+    const fixture = {
+      entities: new Map([[wmOnly.uri, wmOnly]]),
+      entityList: [wmOnly],
+      allTriples: [], graphTriples: [],
+      trustMap: new Map(),
+      counts: { wm: 1, swm: 0, vm: 0, total: 1 },
+      loading: false, error: null, partial: false,
+      refresh: vi.fn(),
+    } as any;
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root!.render(
+        React.createElement(ProjectProfileContext.Provider, { value: profile },
+          React.createElement(SubGraphDetailView, {
+            slug: 'demo',
+            rawMemory: fixture,
+            contextGraphId: 'cg-test',
+            onNodeClick: vi.fn(),
+            onSelectEntity: vi.fn(),
+            activeTab: 'items',
+            onTabChange: vi.fn(),
+          })),
+      );
+    });
+    await flush();
+
+    function cellFor(layer: 'wm' | 'swm' | 'vm'): HTMLButtonElement {
+      return container.querySelector(`button.v10-subgraph-cross-layer-cell[data-layer="${layer}"]`) as HTMLButtonElement;
+    }
+
+    // Narrow down to WM only.
+    await act(async () => { cellFor('swm').click(); });
+    await act(async () => { cellFor('vm').click(); });
+    await flush();
+    expect(cellFor('wm').getAttribute('aria-pressed')).toBe('true');
+    expect(cellFor('swm').getAttribute('aria-pressed')).toBe('false');
+    expect(cellFor('vm').getAttribute('aria-pressed')).toBe('false');
+
+    // Clicking WM (the last enabled) MUST NOT disable it.
+    await act(async () => { cellFor('wm').click(); });
+    await flush();
+    expect(cellFor('wm').getAttribute('aria-pressed')).toBe('true');
+  });
 });

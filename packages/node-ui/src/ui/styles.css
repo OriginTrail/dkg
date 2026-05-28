@@ -6848,12 +6848,30 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 12px;
   border: 1px solid var(--border-subtle);
-  border-radius: 14px;
   font-size: 12px;
   color: var(--text-primary);
   background: var(--bg-elevated);
+  /* #6 polish — cells become interactive buttons (ui-locked).
+     The padding + negative margin pair enlarges the hit target
+     for click affordance while keeping the visual rhythm stable
+     (the negative margin negates the added padding so neighbours
+     don't shift). */
+  cursor: pointer;
+  border-radius: 6px;
+  padding: 4px 8px;
+  margin: -4px -8px;
+  transition: background 0.15s, color 0.15s, opacity 0.15s;
+  /* Native button reset so the cell inherits the rest of the
+     strip's typography rather than the UA <button> defaults. */
+  font-family: inherit;
+  text-align: left;
+}
+.v10-subgraph-cross-layer-cell:hover {
+  background: var(--bg-hover);
+}
+.v10-subgraph-cross-layer-cell[aria-pressed="false"] {
+  opacity: 0.5;
 }
 .v10-subgraph-cross-layer-cell-icon {
   font-size: 13px;
