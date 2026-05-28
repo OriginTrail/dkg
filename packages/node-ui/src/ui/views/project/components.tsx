@@ -5170,24 +5170,17 @@ export function SubGraphDetailView({
 
         {selectedTab === 'graph' && (
           <div className="v10-layer-expand-body full-width" data-cg-scroll-key={`subgraph:${slug}:graph`}>
-            {/* #8 polish (ux-locked (a)) — discoverability badge
-                surfaces the SWM-attribution coloring rule when the
-                user has narrowed the Graph pane to SWM-only. Pairs
-                with the existing SwmAttributionLegend (which lives
-                inside LayerGraphPanel for the swm layer). */}
-            {singleLayer === 'swm' && (
-              <div
-                className="v10-subgraph-swm-attribution-badge"
-                data-testid="swm-attribution-badge"
-                role="status"
-                aria-label="Graph is colored by contributing agent"
-              >
-                <span className="v10-subgraph-swm-attribution-badge-dot" aria-hidden="true" />
-                <span className="v10-subgraph-swm-attribution-badge-text">
-                  Colored by contributing agent
-                </span>
-              </div>
-            )}
+            {/* PR #793 round 2 — the inline "Colored by
+                contributing agent" badge (sweep 0 Bug #8's
+                ux-locked (a) discoverability surface) was removed
+                after manual-test feedback from the original
+                requester. The `SwmAttributionLegend` inside
+                LayerGraphPanel already carries the load-bearing
+                disclosure; the badge above the canvas added
+                visual noise without adding signal. The
+                context-sensitive tooltip on the SWM cross-layer
+                cell (`title` when `singleLayer === 'swm'`) is
+                hover-only insurance and stays. */}
             <LayerGraphPanel
               layer={singleLayer ?? 'wm'}
               triples={graphPanelTriples}

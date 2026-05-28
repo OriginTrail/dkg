@@ -1617,13 +1617,13 @@ describe('SubGraphDetailView tabs', () => {
     expect(cellFor('wm').getAttribute('aria-pressed')).toBe('true');
   });
 
-  // S3 polish #8 — SWM-attribution discoverability. When the
-  // Graph pane has narrowed to SWM-only the existing
-  // SwmAttributionLegend explains the coloring rule, but there's
-  // no explicit "this canvas is currently colored by agent" cue
-  // above the graph. Add an inline badge that surfaces alongside
-  // the legend so the rule isn't buried in the side rail.
-  it('renders the "Colored by contributing agent" badge when narrowed to SWM-only on the Graph tab', async () => {
+  // PR #793 round 2 — the inline "Colored by contributing agent"
+  // badge (sweep 0 Bug #8's discoverability surface) was dropped
+  // after manual-test feedback. Verify the badge is gone in the
+  // SWM-only state (its previous trigger condition), while the
+  // SWM cell's context-sensitive tooltip stays as hover-only
+  // insurance.
+  it('does NOT render the "Colored by contributing agent" badge when narrowed to SWM-only — tooltip stays (round 2 deletion)', async () => {
     const swmOnly = {
       uri: 'urn:e:swm', label: 'SWM', types: [],
       trustLevel: 'shared',
@@ -1668,21 +1668,24 @@ describe('SubGraphDetailView tabs', () => {
     });
     await flush();
 
-    // Baseline (all three enabled) — no badge.
-    expect(container.querySelector('[data-testid="swm-attribution-badge"]')).toBeNull();
-
-    // Narrow to SWM-only via the cross-layer cells.
     function cellFor(layer: 'wm' | 'swm' | 'vm'): HTMLButtonElement {
       return container.querySelector(`button.v10-subgraph-cross-layer-cell[data-layer="${layer}"]`) as HTMLButtonElement;
     }
+
+    // Baseline (all three enabled) — no badge, no SWM tooltip.
+    expect(container.querySelector('[data-testid="swm-attribution-badge"]')).toBeNull();
+
+    // Narrow to SWM-only via the cross-layer cells — the prior
+    // trigger condition for the (now-deleted) badge.
     await act(async () => { cellFor('wm').click(); });
     await act(async () => { cellFor('vm').click(); });
     await flush();
 
-    const badge = container.querySelector('[data-testid="swm-attribution-badge"]');
-    expect(badge).toBeTruthy();
-    expect(badge!.textContent).toContain('Colored by contributing agent');
-    // The SWM cell carries the context-sensitive tooltip per #8 (c).
+    // Badge MUST stay absent — the round 2 deletion is the
+    // load-bearing assertion here.
+    expect(container.querySelector('[data-testid="swm-attribution-badge"]')).toBeNull();
+    // The SWM cell's context-sensitive tooltip stays as the
+    // hover-only insurance per the round 2 brief.
     expect(cellFor('swm').getAttribute('title')).toContain('colored by contributing agent');
   });
 
