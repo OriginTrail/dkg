@@ -243,11 +243,13 @@ export function buildHermesChannelHeaders(
   apiServerKey?: string,
 ): Record<string, string> {
   // Hermes' OpenAI-compatible api_server requires `Authorization: Bearer
-  // <API_SERVER_KEY>` on `/v1/chat/completions` since v0.15.0. We only add it
-  // when a key is resolved, so older key-less Hermes installs and the
-  // unauthenticated `/health` probe keep their current behavior.
+  // <API_SERVER_KEY>` on `/v1/chat/completions` since v0.15.0. We add it only
+  // when a key is resolved AND the request is not the health probe: `/health`
+  // is unauthenticated upstream, so sending the bearer there is pointless and
+  // would risk leaking it to health-endpoint/proxy logs. Key-less older Hermes
+  // installs keep their current (no-auth) behavior.
   if (target.protocol === 'hermes-openai') {
-    return apiServerKey
+    return apiServerKey && requestUrl !== target.healthUrl
       ? { ...baseHeaders, Authorization: `Bearer ${apiServerKey}` }
       : baseHeaders;
   }

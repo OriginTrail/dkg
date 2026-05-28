@@ -466,7 +466,17 @@ describe('Hermes channel helpers', () => {
       name: 'gateway' as const,
       protocol: 'hermes-openai' as const,
       inboundUrl: 'http://127.0.0.1:8642/v1/chat/completions',
+      healthUrl: 'http://127.0.0.1:8642/health',
     };
+    // The unauthenticated /health probe never receives the bearer, even when a
+    // key is available, so it cannot leak to health-endpoint/proxy logs.
+    expect(buildHermesChannelHeaders(
+      target,
+      'bridge-token',
+      { Accept: 'application/json' },
+      target.healthUrl,
+      'api-key-123',
+    )).toEqual({ Accept: 'application/json' });
     // Key present → bearer added; the loopback bridge token is NOT added.
     expect(buildHermesChannelHeaders(
       target,
