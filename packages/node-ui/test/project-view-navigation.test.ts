@@ -265,6 +265,10 @@ vi.mock('../src/ui/components/SubGraphBar.js', () => ({
       // (which is mounted without `layer`).
       React.createElement('button', { 'data-testid': 'select-subgraph-demo', onClick: () => onSelect('demo') }, 'demo'),
       React.createElement('button', { 'data-testid': 'select-subgraph-other', onClick: () => onSelect('other') }, 'other'),
+      // Layer-agnostic alpha click — simulates the detail-view
+      // internal bar clicking the active chip (a same-chip
+      // click). Used by Bug Q to assert the no-op invariant.
+      React.createElement('button', { 'data-testid': 'select-subgraph-alpha', onClick: () => onSelect('alpha') }, 'alpha'),
       // Layer-mode chip click — fires onSelect with the bar's
       // own `layer` prop forwarded as originatingLayer. Used to
       // simulate the WM/SWM/VM-tab bar's behaviour in tests.
@@ -1247,6 +1251,41 @@ describe('ProjectView entity detail navigation', () => {
     // path, not enabledScope, so `data-enabled-scope` is '-'
     // (the mock returns '-' when enabledScope is undefined).
     expect(query('subgraph-bar').dataset.enabledScope).toBe('-');
+  });
+
+  // S3 polish PR #793 local-reviewer sweep 7 (Bug Q) — same-chip
+  // click was overwriting the entry seed with the user's
+  // current (post-widening) scope, silently breaking Bug I's
+  // `isAtSeededScope` semantic so the active-layer pill's
+  // "restore originating scope" affordance disappeared. The
+  // natural pre-PR semantic is "same-chip click is a no-op".
+  it('same-chip click preserves the entry seed when user has widened (Bug Q load-bearing)', async () => {
+    // 1. WM tab → alpha (seeds Set(['working'])).
+    await click('switch-wm');
+    await click('select-subgraph-alpha-with-layer');
+    await flush();
+    expect(query('subgraph-detail').getAttribute('data-initial-enabled-layers')).toBe('working');
+
+    // 2. User widens to WM+SWM via the mirror callback.
+    await click('detail-widen-wm-swm');
+    await flush();
+    expect(query('subgraph-bar').dataset.enabledScope).toBe('shared,working');
+
+    // 3. User clicks the alpha chip again from the detail-view
+    //    internal bar (layer-agnostic). Pre-Bug-Q this would
+    //    snapshot the widened scope into the seed; post-fix the
+    //    seed stays at the original WM-only entry baseline.
+    await click('select-subgraph-alpha');
+    await flush();
+
+    // Detail view still on alpha — but more importantly the seed
+    // was NOT overwritten.
+    expect(query('subgraph-detail').dataset.slug).toBe('alpha');
+    expect(query('subgraph-detail').getAttribute('data-initial-enabled-layers')).toBe('working');
+    // Current scope mirror should also stay at the user's
+    // widened scope (the no-op invariant means no mirror writes
+    // occur; previously-set widened scope persists).
+    expect(query('subgraph-bar').dataset.enabledScope).toBe('shared,working');
   });
 
 });

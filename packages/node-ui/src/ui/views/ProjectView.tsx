@@ -556,13 +556,26 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
       // disagreement at the moment of entry, before the detail
       // view's mirror effect has fired).
       setCurrentDetailScope(seed);
+    } else if (priorActiveSubGraph !== null && slug === priorActiveSubGraph) {
+      // PR #793 sweep 7 Bug Q — same-chip click. Pre-fix this
+      // fell through the detail→detail branch and snapshotted
+      // the live `detailScopeRef.current` (which may have
+      // widened past the entry seed) into
+      // `subGraphInitialEnabledLayers`. Result: the user's
+      // entry baseline silently became their current scope; the
+      // Bug I `isAtSeededScope` predicate then flipped true so
+      // the active-layer pill's "restore originating scope"
+      // affordance disappeared. The natural user expectation —
+      // pre-PR semantic — is that clicking the chip you're
+      // already on is a no-op. Honour that: leave seed and
+      // current-scope mirrors untouched.
+      return;
     } else {
-      // Layer-agnostic — preserve user's CURRENT scope on
-      // detail→detail hops (Bug J); clear on fresh entry from the
-      // overview. Discriminator read from the prior-ref snapshot
-      // (not stale closure state) so a fast hop right after
-      // another chip click sees the prior detail context
-      // correctly.
+      // Layer-agnostic detail→detail hop (different chip) OR
+      // fresh entry from the overview. Discriminator read from
+      // the prior-ref snapshot (not stale closure state) so a
+      // fast hop right after another chip click sees the prior
+      // detail context correctly.
       if (priorActiveSubGraph !== null && detailScopeRef.current) {
         // Snapshot the current scope into a fresh Set so the
         // unmounting detail view's state mutation (via the next
