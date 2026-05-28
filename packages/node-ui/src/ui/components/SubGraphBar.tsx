@@ -337,15 +337,21 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
         );
       })()}
       {showRootChip && inLayerMode && (
-        /* #7 polish (ux-locked). Inline arithmetic-style hint
-           after the Root chip — explains the All math at a
-           glance. Muted tone so it doesn't compete with the
-           chip row; single line, never wraps (CSS).
-           Gated on `inLayerMode` (PR #793 Codex sweep 1 — the
-           layer-agnostic All total excludes Root by design, so
-           the equation only holds on WM/SWM/VM pages). */
+        /* #7 polish — inline legend-style hint after the Root
+           chip. Reads as "this row includes Root and the
+           subgraph chips", NOT as arithmetic — `MemoryEntity.subGraphs`
+           is a Set, so cross-membership entities count once in
+           the All total while potentially appearing under
+           multiple chip totals. Leading `+` mirrors set
+           membership ("plus these things"); the comma list
+           avoids a second `+` that would read as a sum.
+           Cross-membership disclosure lives in the long-form
+           All-chip tooltip — two-tier: hint = visual cue,
+           tooltip = explanation. ux-locked at PR #793 Codex
+           sweep 3 Bug K. Gated on `inLayerMode` (sweep 1 — the
+           layer-agnostic All total excludes Root by design). */
         <span className="v10-subgraph-bar-hint" aria-hidden="true">
-          All = Root + subgraphs
+          + Root, subgraphs
         </span>
       )}
     </div>

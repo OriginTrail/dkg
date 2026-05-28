@@ -488,14 +488,15 @@ describe('SubGraphBar — layer-scoped chip counts (P4)', () => {
     expect(chip!.getAttribute('data-count')).toBe('0');
   });
 
-  // S3 polish #7 — `All = Root + subgraphs` inline arithmetic
-  // hint + extended tooltip on the All chip (ux-locked).
-  // `MemoryEntity.subGraphs` is a Set, so the All count is a
-  // distinct total — cross-membership entities count once in
-  // All but may appear under multiple chip totals. The hint
-  // surfaces that math without changing the canonical All
-  // semantics.
-  it('renders the "All = Root + subgraphs" inline hint when Root is visible AND in layer mode', async () => {
+  // S3 polish #7 (literal updated at sweep 3 Bug K) — inline
+  // legend-style hint after the Root chip. Reads as
+  // "this row includes Root and the subgraph chips"; the earlier
+  // arithmetic literal `All = Root + subgraphs` was a false
+  // equation when entities have cross-membership in 2+ subgraphs.
+  // ux-lead-locked replacement: `+ Root, subgraphs`. The hint is
+  // the at-a-glance cue; cross-membership disclosure lives in
+  // the long-form All-chip tooltip.
+  it('renders the "+ Root, subgraphs" inline hint when Root is visible AND in layer mode', async () => {
     const rootEntity = {
       uri: 'urn:e:root', label: 'Root', types: [],
       trustLevel: 'working' as const,
@@ -518,10 +519,13 @@ describe('SubGraphBar — layer-scoped chip counts (P4)', () => {
 
     const hint = container.querySelector('.v10-subgraph-bar-hint');
     expect(hint).toBeTruthy();
-    expect(hint!.textContent).toContain('All = Root + subgraphs');
+    expect(hint!.textContent).toContain('+ Root, subgraphs');
+    // The earlier arithmetic literal must NOT leak back in (regression
+    // guard against any accidental copy revert).
+    expect(hint!.textContent).not.toContain('All =');
   });
 
-  it('does NOT render the "All = Root + subgraphs" hint when there is no Root chip', async () => {
+  it('does NOT render the "+ Root, subgraphs" hint when there is no Root chip', async () => {
     // No root-bucket entities — Root chip is hidden, and so is
     // the hint (since the hint references a chip that's not on
     // screen).
@@ -544,9 +548,9 @@ describe('SubGraphBar — layer-scoped chip counts (P4)', () => {
   // PR #793 Codex sweep 1 — the `entityScopedAllTotal` math at
   // SubGraphBar.tsx:139 EXCLUDES root-bucket entities in layer-
   // agnostic mode (the Subgraph Explorer overview). The All-chip
-  // tooltip / aria-label and the "All = Root + subgraphs" hint
+  // tooltip / aria-label and the "+ Root, subgraphs" hint
   // would silently contradict that math; both must mode-branch.
-  it('does NOT render the "All = Root + subgraphs" hint in layer-agnostic mode (Codex sweep 1)', async () => {
+  it('does NOT render the "+ Root, subgraphs" hint in layer-agnostic mode (Codex sweep 1)', async () => {
     // Root entity present (would normally show the chip + hint
     // in layer mode), but the bar is mounted WITHOUT a `layer`
     // prop — Subgraph Explorer overview shape. All excludes
