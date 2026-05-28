@@ -4692,16 +4692,16 @@ export function SubGraphDetailView({
     }
   }, [contextGraphId]);
 
-  // Root branch carries no profile binding (it's a client-side
-  // sentinel slug) — synthesize the chrome. The neutral colour token
-  // and `⊘` glyph match the SubGraphBar chip so the page identity
-  // stays coherent when the user transitions from chip to body.
-  const color = isRoot ? 'var(--text-tertiary)' : (binding?.color ?? '#64748b');
-  const icon = isRoot ? '⊘' : (binding?.icon ?? '•');
-  const title = isRoot ? 'Root' : (binding?.displayName ?? slug);
-  const desc = isRoot
-    ? 'Entities not in any subgraph (Context Graph root).'
-    : binding?.description;
+  // `profile.forSubGraph` short-circuits ROOT_SLUG_SENTINEL to the
+  // synthesized Root binding (icon ⊘ / displayName "Root" /
+  // description) so every Subgraph Explorer surface — chip, this
+  // detail header, the project breadcrumb strip — reads the same
+  // identity. Root's color is left unset so the CSS neutral
+  // (--text-tertiary via the `--sg-color` fallback) wins.
+  const color = binding?.color ?? (isRoot ? 'var(--text-tertiary)' : '#64748b');
+  const icon = binding?.icon ?? '•';
+  const title = binding?.displayName ?? slug;
+  const desc = binding?.description;
 
   // Reset filters when the sub-graph changes — otherwise chips from
   // `tasks` would linger when the user jumps to `decisions` and silently

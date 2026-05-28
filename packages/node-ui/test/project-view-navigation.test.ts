@@ -226,8 +226,18 @@ vi.mock('../src/ui/components/ActivityFeed.js', () => ({
 }));
 
 vi.mock('../src/ui/components/SubGraphBar.js', () => ({
-  SubGraphBar: ({ selected, onSelect }: { selected: string | null; onSelect: (slug: string | null) => void }) =>
-    React.createElement('div', { 'data-testid': 'subgraph-bar', 'data-selected': selected ?? '' },
+  SubGraphBar: ({ selected, onSelect, entities }: { selected: string | null; onSelect: (slug: string | null) => void; entities?: ReadonlyArray<unknown> }) =>
+    React.createElement('div', {
+      'data-testid': 'subgraph-bar',
+      'data-selected': selected ?? '',
+      // S3 Codex Bug C — surface the `entities` prop's
+      // resolution so tests can assert ProjectView gates it on
+      // a fully-loaded memory snapshot. `defined` while
+      // hydration is mid-flight would put the chip row in
+      // client-scoped counting (count contradiction with the
+      // grid's daemon-side fallback).
+      'data-entities': entities === undefined ? 'undefined' : 'defined',
+    },
       React.createElement('button', { 'data-testid': 'select-subgraph-demo', onClick: () => onSelect('demo') }, 'demo'),
       React.createElement('button', { 'data-testid': 'clear-subgraph', onClick: () => onSelect(null) }, 'all')),
 }));
@@ -577,6 +587,64 @@ describe('ProjectView entity detail navigation', () => {
 
     expect(query('subgraph-detail').dataset.slug).toBe('demo');
     expect(query('subgraph-detail').dataset.tab).toBe('graph');
+  });
+
+  // S3 Codex Bug C — SubGraphBar's `entities` prop drives client-
+  // scoped chip counts. While useMemoryEntities is still hydrating
+  // (`loading: true`) or has surfaced a partial-fetch failure
+  // (`partial: true` / `error: !== null`), entityList is incomplete
+  // and the chip counts disagree with SubGraphOverviewGrid's
+  // daemon-side `sg.entityCount` fallback — same screen, two
+  // numbers. ProjectView must withhold the entities prop until the
+  // memory snapshot is fully loaded.
+  //
+  // SubGraphBar mounts only on the WM/SWM/VM layers, the
+  // Subgraphs tab (graph-overview), and the in-subgraph detail
+  // route. Switch to SWM before asserting on `data-entities`.
+  it('does NOT pass rawMemory.entityList to SubGraphBar while memory is still loading', async () => {
+    memory.loading = true;
+    memory.entityList = [];
+    await act(async () => {
+      root.render(React.createElement(ProjectView, { contextGraphId: 'cg-test' }));
+    });
+    await flush();
+    await click('switch-swm');
+    await flush();
+
+    expect(query('subgraph-bar').dataset.entities).toBe('undefined');
+
+    memory.loading = false;
+    resetMemory();
+  });
+
+  it('does NOT pass rawMemory.entityList to SubGraphBar while memory is in a partial-failure state', async () => {
+    memory.loading = false;
+    memory.partial = true;
+    await act(async () => {
+      root.render(React.createElement(ProjectView, { contextGraphId: 'cg-test' }));
+    });
+    await flush();
+    await click('switch-swm');
+    await flush();
+
+    expect(query('subgraph-bar').dataset.entities).toBe('undefined');
+
+    memory.partial = false;
+    resetMemory();
+  });
+
+  it('passes rawMemory.entityList to SubGraphBar once memory is fully loaded', async () => {
+    memory.loading = false;
+    memory.partial = false;
+    memory.error = null;
+    await act(async () => {
+      root.render(React.createElement(ProjectView, { contextGraphId: 'cg-test' }));
+    });
+    await flush();
+    await click('switch-swm');
+    await flush();
+
+    expect(query('subgraph-bar').dataset.entities).toBe('defined');
   });
 
 });

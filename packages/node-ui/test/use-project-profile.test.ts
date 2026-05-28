@@ -1,6 +1,20 @@
-import { describe, expect, it } from 'vitest';
+// @vitest-environment happy-dom
 
-import { buildQueryCatalogState } from '../src/ui/hooks/useProjectProfile.js';
+import React, { act } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import { buildQueryCatalogState, useProjectProfile, type ProjectProfile } from '../src/ui/hooks/useProjectProfile.js';
+import { ROOT_SLUG_SENTINEL } from '../src/ui/lib/subGraphs.js';
+
+(globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+
+vi.mock('../src/ui/api.js', () => ({
+  // The hook fires four SPARQL queries on mount; every one resolves to
+  // empty so the profile falls back to defaults (which is all we need
+  // for the resolver-level Root assertion).
+  executeQuery: vi.fn(async () => ({ result: { bindings: [] } })),
+}));
 
 describe('buildQueryCatalogState', () => {
   it('groups saved queries into explicit catalogs and sorts them by rank', () => {
@@ -87,5 +101,66 @@ describe('buildQueryCatalogState', () => {
       catalogSlug: 'default:github',
       catalogName: 'Queries',
     });
+  });
+});
+
+describe('useProjectProfile — forSubGraph Root binding (S3, Codex Bug E)', () => {
+  let root: Root;
+  let container: HTMLDivElement;
+  let captured: ProjectProfile | null = null;
+
+  beforeEach(() => {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    captured = null;
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  function Probe({ contextGraphId }: { contextGraphId: string }) {
+    const profile = useProjectProfile(contextGraphId);
+    captured = profile;
+    return null;
+  }
+
+  // The breadcrumb strip (S2) and every other consumer that resolves
+  // the active sub-graph identity via `profile.forSubGraph(slug)`
+  // would have rendered the raw sentinel `__root__` plus the
+  // generic `•` fallback icon before this fix. Centralising the
+  // Root binding at the resolver level ensures every consumer
+  // reads the same icon/label/description.
+  it('returns the synthesized Root binding for ROOT_SLUG_SENTINEL', async () => {
+    await act(async () => {
+      root.render(React.createElement(Probe, { contextGraphId: 'cg-test' }));
+    });
+    // SPARQL mock resolves on the microtask queue.
+    await act(async () => { await Promise.resolve(); });
+
+    expect(captured).toBeTruthy();
+    const binding = captured!.forSubGraph(ROOT_SLUG_SENTINEL);
+    expect(binding).toBeTruthy();
+    expect(binding!.slug).toBe(ROOT_SLUG_SENTINEL);
+    expect(binding!.displayName).toBe('Root');
+    expect(binding!.icon).toBe('⊘');
+    expect(binding!.description).toBe('Entities not in any subgraph (Context Graph root)');
+  });
+
+  it('keeps the daemon-resolved binding path intact for non-Root slugs', async () => {
+    await act(async () => {
+      root.render(React.createElement(Probe, { contextGraphId: 'cg-test' }));
+    });
+    await act(async () => { await Promise.resolve(); });
+
+    // Daemon mock returns no bindings → falls back to the default
+    // shape. The point of this case is the Root short-circuit
+    // didn't accidentally hijack other slugs.
+    const binding = captured!.forSubGraph('recipes');
+    expect(binding!.slug).toBe('recipes');
+    expect(binding!.displayName).toBe('recipes');
+    expect(binding!.icon).toBe('•');
   });
 });

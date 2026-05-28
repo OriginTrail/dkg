@@ -72,13 +72,28 @@ const profile: ProjectProfile = {
   queryCatalogs: [],
   savedQueries: [],
   loading: false,
-  forSubGraph: (slug: string) => ({
-    slug,
-    displayName: slug,
-    color: '#38bdf8',
-    icon: '#',
-    rank: 0,
-  }),
+  forSubGraph: (slug: string) => {
+    // Mirror the real resolver's ROOT_SLUG_SENTINEL short-circuit so
+    // tests that exercise the Root bucket see the same synthesized
+    // binding the production code path produces (chip + detail
+    // header + breadcrumb all read from this).
+    if (slug === ROOT_SLUG_SENTINEL) {
+      return {
+        slug: ROOT_SLUG_SENTINEL,
+        displayName: 'Root',
+        description: 'Entities not in any subgraph (Context Graph root)',
+        icon: '⊘',
+        rank: 99,
+      };
+    }
+    return {
+      slug,
+      displayName: slug,
+      color: '#38bdf8',
+      icon: '#',
+      rank: 0,
+    };
+  },
   // Tests historically returned undefined; entityMeta reads
   // `b.label` so a safe no-op fixture must return at least `{}`.
   // Bucket tests that mount the Entities tab depend on this.

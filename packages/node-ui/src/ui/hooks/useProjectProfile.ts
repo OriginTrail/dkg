@@ -12,6 +12,7 @@
  */
 import React, { useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { executeQuery } from '../api.js';
+import { ROOT_SLUG_SENTINEL } from '../lib/subGraphs.js';
 
 async function runProjectQuery(
   sparql: string,
@@ -148,6 +149,25 @@ const DEFAULT_SUBGRAPH_FALLBACK = (slug: string): SubGraphBinding => ({
   color: '#64748b',
   rank: 99,
 });
+
+// S3 — synthesized binding for the client-only Root bucket. The
+// daemon never emits a binding for ROOT_SLUG_SENTINEL (it's a
+// pure client construct — "entities not in any named sub-graph"),
+// so `forSubGraph` would otherwise hand back the default
+// `__root__`/`•` fallback to consumers like ProjectHeaderStrip.
+// Centralising the Root identity here means every `forSubGraph`
+// call site (breadcrumb, chip, detail header, badge) agrees on
+// the same icon + label + tone.
+const ROOT_SUBGRAPH_BINDING: SubGraphBinding = {
+  slug: ROOT_SLUG_SENTINEL,
+  displayName: 'Root',
+  description: 'Entities not in any subgraph (Context Graph root)',
+  icon: '⊘',
+  // color is left unset so consumers fall through to their own
+  // neutral default (CSS var --text-tertiary on the chip / detail
+  // header, --border-strong on the empty-state accent).
+  rank: 99,
+};
 
 const DEFAULT_TYPE_FALLBACK = (typeIri: string): EntityTypeBinding => ({
   typeIri,
@@ -593,7 +613,15 @@ export function useProjectProfile(contextGraphId: string | undefined): ProjectPr
   }, [contextGraphId]);
 
   const forSubGraph = useCallback(
-    (slug: string) => subIndexRef.current.get(slug) ?? DEFAULT_SUBGRAPH_FALLBACK(slug),
+    (slug: string) => {
+      // S3 — Root bucket has a canonical synthesized binding. Short-
+      // circuit before the daemon-bindings lookup so every consumer
+      // (chip, detail header, breadcrumb, badge) reads the same
+      // identity and the project header strip never displays the
+      // raw sentinel as a breadcrumb label.
+      if (slug === ROOT_SLUG_SENTINEL) return ROOT_SUBGRAPH_BINDING;
+      return subIndexRef.current.get(slug) ?? DEFAULT_SUBGRAPH_FALLBACK(slug);
+    },
     [],
   );
   const forType = useCallback(

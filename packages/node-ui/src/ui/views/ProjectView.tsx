@@ -477,6 +477,20 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   // Active sub-graph binding (for the breadcrumb strip) — stays in scope
   // across sub-graph / layer / overview routes.
   const activeSubGraphBinding = activeSubGraph ? profile.forSubGraph(activeSubGraph) : null;
+
+  // Codex Bug C — gate the `entities`-driven chip-count path on a
+  // fully-loaded memory snapshot. While `useMemoryEntities` is mid-
+  // hydration or a layer query is in-flight, `entityList` is partial
+  // (often empty) and the chip counts derived from it disagree with
+  // the daemon-side `sg.entityCount` fallback used by
+  // SubGraphOverviewGrid — same screen, two numbers for the same
+  // subgraph. Passing `undefined` keeps SubGraphBar on the daemon
+  // total path until both readiness conditions hold; the `partial`
+  // flag covers individual-layer fetch failures (counts incomplete
+  // but not absent), which is also a contradiction we don't want
+  // surfacing on the chip row.
+  const memoryReady = !rawMemory.loading && !rawMemory.error && !rawMemory.partial;
+  const chipBarEntities = memoryReady ? rawMemory.entityList : undefined;
   const activePage = selectedEntity
     ? 'entity'
     : activeSubGraph
@@ -540,7 +554,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
             contextGraphId={contextGraphId}
             profile={profile}
             selected={activeSubGraph}
-            entities={rawMemory.entityList}
+            entities={chipBarEntities}
             onSelect={handleSelectSubGraph}
           />
           <SubGraphDetailView
@@ -617,7 +631,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
             contextGraphId={contextGraphId}
             profile={profile}
             selected={null}
-            entities={rawMemory.entityList}
+            entities={chipBarEntities}
             onSelect={handleSelectSubGraph}
           />
           <SubGraphOverviewGrid
@@ -640,7 +654,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
             contextGraphId={contextGraphId}
             profile={profile}
             selected={activeSubGraph}
-            entities={rawMemory.entityList}
+            entities={chipBarEntities}
             onSelect={handleSelectSubGraph}
             layer={activeLayer}
           />
