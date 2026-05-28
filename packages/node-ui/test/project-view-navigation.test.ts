@@ -934,4 +934,84 @@ describe('ProjectView entity detail navigation', () => {
     expect(query('subgraph-detail').dataset.initialEnabledLayers).toBe('shared,verified,working');
   });
 
+  // S3 polish PR #793 Codex sweep 4 (Bug L) — `detailScopeRef.current`
+  // was only refreshed by SubGraphDetailView's mirror effect, which
+  // fires AFTER React paints. A fast chip-to-chip hop that fires
+  // before the mirror effect would read a stale ref → seeds lost.
+  // The fix writes the ref synchronously in every branch of
+  // handleSelectSubGraph that updates the seed state.
+  //
+  // Testing approach: pack both clicks into a single act() block
+  // without flushing between them. The mirror useEffect's setState
+  // batches into the act() boundary, so when the second click fires
+  // mid-batch the ref is the only sync state available — exactly the
+  // race window Bug L closes.
+  it('WM-tab → A → B fast hop synchronously preserves the WM seed (Bug L load-bearing)', async () => {
+    await click('switch-wm');
+    await flush();
+
+    // Two clicks in a single act() block — mimics a user-input
+    // burst that completes before React's effect schedule runs the
+    // mirror useEffect for the A detail mount. Pre-Bug-L the second
+    // click would read ref=null and route through the layer-agnostic
+    // overview branch, losing the WM seed.
+    await act(async () => {
+      query('select-subgraph-alpha-with-layer').click();
+      query('select-subgraph-demo').click();
+    });
+    await flush();
+
+    expect(query('subgraph-detail').dataset.slug).toBe('demo');
+    expect(query('subgraph-detail').dataset.initialEnabledLayers).toBe('working');
+  });
+
+  it('exit-then-immediate-entry clears scope synchronously (Bug L exit-branch guard)', async () => {
+    // 1. WM tab → alpha (seeds WM, ref=Set(['working'])).
+    await click('switch-wm');
+    await click('select-subgraph-alpha-with-layer');
+    await flush();
+    expect(query('subgraph-detail').dataset.initialEnabledLayers).toBe('working');
+
+    // 2. Exit → Subgraphs → demo in a single batch. The exit
+    //    branch's sync ref clear is load-bearing: pre-fix, the
+    //    Subgraphs → demo hop would read the stale Set(['working'])
+    //    ref and silently narrow scope to WM-only.
+    await act(async () => {
+      query('clear-subgraph').click();
+    });
+    await flush();
+    await act(async () => {
+      query('switch-subgraphs').click();
+      query('select-subgraph-demo').click();
+    });
+    await flush();
+
+    expect(query('subgraph-detail').dataset.slug).toBe('demo');
+    expect(query('subgraph-detail').dataset.initialEnabledLayers).toBe('-');
+  });
+
+  it('overview → A → B fast hop reads non-null ref on the layer-agnostic path (Bug L cold-start)', async () => {
+    // Overview path: A click sets ref=null (fresh entry). Before
+    // A's mirror effect runs (which would push Set(['working',
+    // 'shared', 'verified']) — the default — into the ref), B
+    // click fires. The B click's layer-agnostic branch reads
+    // `activeSubGraph !== null && detailScopeRef.current` — Bug L
+    // ensures `detailScopeRef.current` was nulled SYNCHRONOUSLY
+    // by A's click, so B correctly falls to the fresh-entry path
+    // (initialEnabledLayers === undefined → all-three default).
+    // Pre-fix this race could leave a STALE seed from a prior
+    // detail visit in the ref, contaminating the new chip click.
+    await click('switch-subgraphs');
+    await flush();
+
+    await act(async () => {
+      query('select-subgraph-demo').click();
+      query('select-subgraph-other').click();
+    });
+    await flush();
+
+    expect(query('subgraph-detail').dataset.slug).toBe('other');
+    expect(query('subgraph-detail').dataset.initialEnabledLayers).toBe('-');
+  });
+
 });

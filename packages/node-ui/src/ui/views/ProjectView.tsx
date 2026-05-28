@@ -143,6 +143,15 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   const handleDetailEnabledLayersChange = useCallback((layers: ReadonlySet<TrustLevel>) => {
     detailScopeRef.current = layers;
   }, []);
+  // PR #793 sweep 4 Bug L — `activeSubGraph` from the useCallback
+  // closure can be stale during a fast chip-to-chip burst (the
+  // state update from click 1 hasn't re-rendered before click 2
+  // fires). A ref kept in sync at the top of every
+  // handleSelectSubGraph call captures the latest active-subgraph
+  // identity synchronously so the layer-agnostic branch's
+  // "overview-vs-detail" discriminator stays fresh across the
+  // race window.
+  const activeSubGraphRef = useRef<string | null>(null);
   const [selectedLayerContext, setSelectedLayerContext] = useState<MemoryLayerView | null>(null);
   // Mirror `selectedUri` into a ref so `handleNavigate` can read the
   // current value without listing it in deps — listing it caused the
@@ -443,30 +452,61 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   //           hops to another subgraph → next detail silently
   //           narrowed back to WM-only). Reading `detailScopeRef`
   //           gives us the user's actual current scope at click time.
+  // PR #793 Codex sweep 4 (Bug L) — every branch that updates the
+  // `subGraphInitialEnabledLayers` state also writes
+  // `detailScopeRef.current` synchronously to the same value. The
+  // mirror effect inside SubGraphDetailView only fires after React
+  // paints, so without a sync ref write a fast chip-to-chip hop
+  // (overview → A → B before A's mount effect runs, or any
+  // hop-faster-than-effect-schedule) would read a stale ref and
+  // silently lose the intended seed.
+  //
+  // The new detail view's mirror effect still overwrites
+  // `ref.current` once it mounts — usually with the same value —
+  // and subsequently with the user's scope changes inside the
+  // detail view (which is what Bug J's fix is supposed to
+  // capture). The sync write here just closes the pre-mount
+  // timing window.
   const handleSelectSubGraph = useCallback((slug: string | null, originatingLayer?: MemoryLayerView) => {
+    // Read the prior `activeSubGraph` identity from the ref so
+    // the overview-vs-detail discriminator survives a fast
+    // chip-to-chip burst that fires before React re-renders
+    // (Bug L). Then commit the new slug to the ref + state.
+    const priorActiveSubGraph = activeSubGraphRef.current;
+    activeSubGraphRef.current = slug;
     clearDetailOrigin();
     setActiveSubGraph(slug);
     if (slug === null) {
       setSubGraphInitialEnabledLayers(null);
+      detailScopeRef.current = null;
     } else if (originatingLayer !== undefined) {
       // Single-layer seed (layer-tab entry).
-      setSubGraphInitialEnabledLayers(new Set<TrustLevel>([TRUST_FOR_LAYER[originatingLayer]]));
+      const seed = new Set<TrustLevel>([TRUST_FOR_LAYER[originatingLayer]]);
+      setSubGraphInitialEnabledLayers(seed);
+      detailScopeRef.current = seed;
     } else {
       // Layer-agnostic — preserve user's CURRENT scope on
       // detail→detail hops (Bug J); clear on fresh entry from the
-      // overview.
-      if (activeSubGraph !== null && detailScopeRef.current) {
+      // overview. Discriminator read from the ref (not stale
+      // closure state) so a fast hop right after another chip
+      // click sees the prior detail context correctly.
+      if (priorActiveSubGraph !== null && detailScopeRef.current) {
         // Snapshot the current scope into a fresh Set so the
         // unmounting detail view's state mutation (via the next
-        // mirror tick) doesn't share the reference.
-        setSubGraphInitialEnabledLayers(new Set<TrustLevel>(detailScopeRef.current));
+        // mirror tick) doesn't share the reference. Subsequent
+        // fast hops read this snapshot, not the about-to-unmount
+        // detail's mutating Set.
+        const snapshot = new Set<TrustLevel>(detailScopeRef.current);
+        setSubGraphInitialEnabledLayers(snapshot);
+        detailScopeRef.current = snapshot;
       } else {
         setSubGraphInitialEnabledLayers(null);
+        detailScopeRef.current = null;
       }
     }
     setSelectedUri(null);
     setSelectedLayerContext(null);
-  }, [activeSubGraph, clearDetailOrigin]);
+  }, [clearDetailOrigin]);
 
   const handleLayerSwitch = useCallback((layer: LayerView) => {
     clearDetailOrigin();
