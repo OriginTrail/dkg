@@ -18,13 +18,13 @@ This skill teaches you the full node API surface so you can operate autonomously
 - **Node role:** (dynamic — `core` or `edge`)
 - **Available extraction pipelines:** (dynamic)
 
-If the Node UI injects a target context graph for the turn, use that target directly. If no target is injected or configured, call `GET /api/context-graph/list` / `dkg_list_context_graphs`; agent tool surfaces default that list to the caller's created/joined context graphs, with `scope: "all"` for every graph the node knows about.
+If the Node UI injects a target context graph for the turn, use that target directly. If no target is injected or configured, call `dkg_list_context_graphs` / `GET /api/context-graph/list`; agent tool surfaces default that list to the caller's created/joined context graphs, with `scope: "all"` for every graph the node knows about.
 
 ### Context Graph IDs
 
 For write or mutation routes, always pass the injected target context graph id,
-an exact existing context graph id from `GET /api/context-graph/list` /
-`dkg_list_context_graphs`, or the full `did:dkg:context-graph:<id>` URI.
+an exact existing context graph id from `dkg_list_context_graphs` /
+`GET /api/context-graph/list`, or the full `did:dkg:context-graph:<id>` URI.
 
 - A context graph created locally can have a bare canonical id, for example
   `local-notes`, with full URI `did:dkg:context-graph:local-notes`.
@@ -449,7 +449,7 @@ Minimum behavior:
 Implications:
 
 - If `target_context_graph` is present, its value is the canonical context graph id for the turn. `target_context_graph_uri` is the same target in full DID form; `target_context_graph_name` is display-only. State the selected project explicitly when asked.
-- If it is absent, the user has no project selected. Try to deduce the target project from the conversation context (e.g., "add this to my research project" → look up "research" via `GET /api/context-graph/list` / `dkg_list_context_graphs`, whose tool surfaces default to created/joined graphs). If the project is ambiguous or you are not confident, ask the user which project to use. Only suggest the right-side panel project dropdown if the user is chatting through the DKG UI — users on other channels (Telegram, API, etc.) do not have a panel to select from. When no project can be determined, route reads and writes to `agent-context` only.
+- If it is absent, the user has no project selected. Try to deduce the target project from the conversation context (e.g., "add this to my research project" -> look up "research" via `dkg_list_context_graphs` / `GET /api/context-graph/list`, whose tool surfaces default to created/joined graphs). If the project is ambiguous or you are not confident, ask the user which project to use. Only suggest the right-side panel project dropdown if the user is chatting through the DKG UI — users on other channels (Telegram, API, etc.) do not have a panel to select from. When no project can be determined, route reads and writes to `agent-context` only.
 - Default all DKG reads, writes, imports, promotions, publishes, and queries in that turn to the injected target context graph.
 - Do not keep using an older conversational context graph when a newer injected `target_context_graph` is present.
 - Older UI versions may inject one value containing both display name and ID. If so, prefer the ID inside parentheses when calling tools or APIs, and reference the display name when answering the user.
