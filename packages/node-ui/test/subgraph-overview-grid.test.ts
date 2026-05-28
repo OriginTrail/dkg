@@ -149,3 +149,113 @@ describe('SubGraphOverviewGrid — fetch failure state (S3 Codex sweep 3 Issue G
     expect(empty!.getAttribute('data-tone')).toBe('neutral');
   });
 });
+
+describe('SubGraphMiniCard — empty-card-body two-branch copy (S3 polish #2, ux-locked)', () => {
+  // The card-body fallback is rendered when card.triples.length === 0.
+  // Two branches the user can land on:
+  //   `entityCount === 0` (sub-graph has nothing yet) → "No data yet"
+  //   `entityCount > 0`  (sub-graph has SWM/VM entities promoted out of
+  //                       the WM origin and no WM triples this card can
+  //                       render) → "Promoted — open to view"
+  // The previous power-user copy ("No WM triples · promoted data only")
+  // assumed familiarity with WM/SWM mechanics the typical user doesn't
+  // share. Pair the new literal with the existing ↗ open button so the
+  // implied action is obvious.
+  let root: Root;
+  let container: HTMLDivElement;
+
+  beforeEach(() => {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    fetchSubGraphsMock.mockReset();
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  function renderWith(memoryOverride: any) {
+    return act(async () => {
+      root.render(
+        React.createElement(ProjectProfileContext.Provider, { value: profile },
+          React.createElement(SubGraphOverviewGrid, {
+            contextGraphId: 'cg-test',
+            memory: memoryOverride,
+            onNodeClick: vi.fn(),
+            onSelectSubGraph: vi.fn(),
+          })),
+      );
+    });
+  }
+
+  it('renders "No data yet" on a sub-graph with no entities and no triples (entityCount === 0)', async () => {
+    fetchSubGraphsMock.mockResolvedValueOnce({
+      subGraphs: [{ name: 'team-notes', entityCount: 0, tripleCount: 0, description: '' }],
+    });
+    // memory.entityList is also empty — entityUrisBySubGraph yields
+    // an empty Set, so `cardEntityUris.size === 0` falls back to the
+    // server entityCount of 0 → "No data yet" branch.
+    await renderWith({ ...memory, entityList: [], allTriples: [] });
+    await flush();
+
+    const cardEmpty = container.querySelector('.v10-sgov-card-empty');
+    expect(cardEmpty).toBeTruthy();
+    expect(cardEmpty!.textContent).toContain('No data yet');
+    // The other branch must NOT also fire.
+    expect(cardEmpty!.textContent).not.toContain('Promoted — open to view');
+  });
+
+  it('renders "Promoted — open to view" when the sub-graph has entities but no WM triples', async () => {
+    fetchSubGraphsMock.mockResolvedValueOnce({
+      subGraphs: [{ name: 'team-notes', entityCount: 3, tripleCount: 0, description: '' }],
+    });
+    // Entities scoped to `team-notes` exist (canonical entityList view
+    // — cardEntityUris.size > 0), but no triples carry the sub-graph
+    // origin tag, so card.triples is empty → "Promoted" branch.
+    const promotedEntity = {
+      uri: 'urn:e:promoted',
+      label: 'Promoted',
+      types: [],
+      trustLevel: 'shared',
+      layers: new Set(['shared']),
+      subGraphs: new Set(['team-notes']),
+      properties: new Map(),
+      connections: [],
+    };
+    await renderWith({
+      ...memory,
+      entityList: [promotedEntity],
+      entities: new Map([[promotedEntity.uri, promotedEntity]]),
+      allTriples: [],
+    });
+    await flush();
+
+    const cardEmpty = container.querySelector('.v10-sgov-card-empty');
+    expect(cardEmpty).toBeTruthy();
+    expect(cardEmpty!.textContent).toContain('Promoted — open to view');
+    expect(cardEmpty!.textContent).not.toContain('No data yet');
+    expect(cardEmpty!.textContent).not.toContain('No WM triples');
+  });
+
+  // #2 / #10b — the duplicate "No data" label that appeared next to
+  // the card-body fallback came from MiniLayerBar's own non-compact
+  // empty branch. Pass `compact={true}` and that branch returns null.
+  it('does NOT render a duplicate "No data" pyramid label on an empty card', async () => {
+    fetchSubGraphsMock.mockResolvedValueOnce({
+      subGraphs: [{ name: 'team-notes', entityCount: 0, tripleCount: 0, description: '' }],
+    });
+    await renderWith({ ...memory, entityList: [], allTriples: [] });
+    await flush();
+
+    // The pyramid wrapper exists but MiniLayerBar in compact mode
+    // returns null when total === 0, so the legend strip is empty.
+    const pyramid = container.querySelector('.v10-sgov-card-pyramid');
+    expect(pyramid).toBeTruthy();
+    expect(pyramid!.querySelector('.v10-minibar')).toBeNull();
+    // Only the card-body literal remains.
+    const cardBody = container.querySelector('.v10-sgov-card-empty');
+    expect(cardBody?.textContent).toBe('No data yet');
+  });
+});

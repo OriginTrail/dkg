@@ -1438,4 +1438,52 @@ describe('SubGraphDetailView tabs', () => {
     const rootShelfChip = container.querySelector('.v10-graph-singleton-item[title="urn:e:root"]');
     expect(rootShelfChip).toBeTruthy();
   });
+
+  // S3 polish #10b — the detail-view header used to render a
+  // duplicate "No data" badge in its top-right corner whenever the
+  // sub-graph had no entities to populate the MiniLayerBar with.
+  // The fix passes `compact={true}` so the empty branch returns
+  // null. No badge on either the empty-named or empty-Root case.
+  it('does NOT render a "No data" header badge when the sub-graph is empty', async () => {
+    const empty = {
+      entities: new Map(),
+      entityList: [],
+      allTriples: [],
+      graphTriples: [],
+      trustMap: new Map(),
+      counts: { wm: 0, swm: 0, vm: 0, total: 0 },
+      loading: false, error: null, partial: false,
+      refresh: vi.fn(),
+    } as any;
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root!.render(
+        React.createElement(ProjectProfileContext.Provider, { value: profile },
+          React.createElement(SubGraphDetailView, {
+            slug: 'team-notes',
+            rawMemory: empty,
+            contextGraphId: 'cg-test',
+            onNodeClick: vi.fn(),
+            onSelectEntity: vi.fn(),
+            activeTab: 'graph',
+            onTabChange: vi.fn(),
+          })),
+      );
+    });
+    await flush();
+
+    // The detail header wraps a MiniLayerBar in compact mode. The
+    // compact-empty branch returns null, so the `.v10-minibar`
+    // element should be absent.
+    const header = container.querySelector('.v10-subgraph-detail-header');
+    expect(header).toBeTruthy();
+    expect(header!.querySelector('.v10-minibar')).toBeNull();
+    // The card-body / detail-body fallback path must NOT carry
+    // the legacy "No data" copy either.
+    expect(container.textContent).not.toContain('No data\n');
+  });
 });

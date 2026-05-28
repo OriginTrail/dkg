@@ -4148,12 +4148,21 @@ export function SubGraphMiniCard({
         <span className="v10-sgov-card-stat"><b>{card.tripleCount}</b> triples</span>
       </div>
       <div className="v10-sgov-card-pyramid">
-        <MiniLayerBar counts={card.layerCounts} />
+        {/* compact mode collapses the empty-counts branch to `null`
+            inside MiniLayerBar, eliminating the duplicate "No data"
+            label that sat next to the card-body fallback. Populated
+            cards render identically. (#2 — ui-locked) */}
+        <MiniLayerBar counts={card.layerCounts} compact />
       </div>
       <div className="v10-sgov-card-graph">
         {card.triples.length === 0 ? (
           <div className="v10-sgov-card-empty">
-            {card.entityCount > 0 ? 'No WM triples · promoted data only' : 'No data yet'}
+            {/* Two-branch wording locked by ux-lead in the #2 amendment.
+                `entityCount > 0` AND mini-graph empty means the
+                sub-graph has content but no WM-shaped data this card
+                can render — pair the literal with the existing ↗ open
+                button so the next action is obvious. */}
+            {card.entityCount > 0 ? 'Promoted — open to view' : 'No data yet'}
           </div>
         ) : (
           <Suspense fallback={<div className="v10-sgov-card-empty">Loading…</div>}>
@@ -4782,6 +4791,7 @@ export function SubGraphDetailView({
           counts={{ wm: layerCounts.wm, swm: layerCounts.swm, vm: layerCounts.vm }}
           activeLayers={enabledLayers}
           onClickLayer={toggleLayer}
+          compact
         />
       </div>
 
