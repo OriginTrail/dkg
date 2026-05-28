@@ -3979,6 +3979,26 @@ export function SubGraphOverviewGrid({
     return out;
   }, [memory.entityList]);
 
+  // Per-sub-graph URI → trust-level map. Drives the mini-graph
+  // per-node trust colouring (#3 polish, ui-locked priority chain).
+  // Keyed by canonical URI to match the entity-only filter
+  // (`filterTriplesToEntities`) that gates the rendered triple set.
+  // Same `entityList` loop as `entityUrisBySubGraph` so the two
+  // collections stay aligned (every entity in `entityUrisBySubGraph`
+  // has a corresponding `entityTrustByUri` entry).
+  const entityTrustByUriBySubGraph = useMemo(() => {
+    const out = new Map<string, Map<string, TrustLevel>>();
+    for (const e of memory.entityList) {
+      const canonical = canonicalEntityUri(e.uri);
+      for (const sg of e.subGraphs) {
+        let m = out.get(sg);
+        if (!m) { m = new Map<string, TrustLevel>(); out.set(sg, m); }
+        m.set(canonical, e.trustLevel);
+      }
+    }
+    return out;
+  }, [memory.entityList]);
+
   // Merge registered user-facing sub-graphs with profile bindings so
   // icon/color/label/rank all flow from the single source of truth.
   // `isUserFacingSubGraph` centralises the reserved-slug rule
@@ -3991,6 +4011,7 @@ export function SubGraphOverviewGrid({
         const binding = profile?.forSubGraph(sg.name) ?? {};
         const rawTriples = triplesBySubGraph.get(sg.name) ?? [];
         const cardEntityUris = entityUrisBySubGraph.get(sg.name) ?? new Set<string>();
+        const cardEntityTrust = entityTrustByUriBySubGraph.get(sg.name) ?? new Map<string, TrustLevel>();
         return {
           slug: sg.name,
           icon: binding.icon ?? '•',
@@ -4009,10 +4030,11 @@ export function SubGraphOverviewGrid({
           tripleCount: sg.tripleCount,
           triples: filterTriplesToEntities(rawTriples, cardEntityUris),
           layerCounts: layerCountsBySubGraph.get(sg.name) ?? { wm: 0, swm: 0, vm: 0 },
+          entityTrustByUri: cardEntityTrust,
         };
       })
       .sort((a, b) => a.rank - b.rank);
-  }, [subGraphs, profile, triplesBySubGraph, layerCountsBySubGraph, entityUrisBySubGraph]);
+  }, [subGraphs, profile, triplesBySubGraph, layerCountsBySubGraph, entityUrisBySubGraph, entityTrustByUriBySubGraph]);
 
   if (loading && cards.length === 0) {
     return (
@@ -4097,10 +4119,33 @@ export function SubGraphMiniCard({
     description?: string; entityCount: number; tripleCount: number;
     triples: Triple[];
     layerCounts: { wm: number; swm: number; vm: number };
+    entityTrustByUri: Map<string, TrustLevel>;
   };
   onNodeClick?: (node: any) => void;
   onOpen: () => void;
 }) {
+  // Per-URI trust palette for the mini-graph (#3 polish).
+  // ui-locked priority chain (graph-viz style engine):
+  //   1. `nodeColors[uri]` — wins for any entity carrying a
+  //      canonical trust level (TRUST_COLORS[e.trustLevel]).
+  //   2. `defaultNodeColor: card.color` — fallback for non-entity
+  //      URIs (vocabulary IRIs, blank-node anchors) preserves the
+  //      card's chrome identity.
+  //   3. `namespaceColors` — built-in graph-viz tints, neutralised
+  //      to `card.color` so cross-cutting namespaces don't drown
+  //      the per-trust signal.
+  // Build at the card scope from `card.entityTrustByUri` (attached
+  // by the parent `cards` derivation; same canonical key the
+  // entity-only filter uses, so a coloured node here matches the
+  // node the entity-only filter admitted on the canvas).
+  const nodeColors = useMemo(() => {
+    const out: Record<string, string> = {};
+    for (const [uri, trustLevel] of card.entityTrustByUri) {
+      out[uri] = TRUST_COLORS[trustLevel];
+    }
+    return out;
+  }, [card.entityTrustByUri]);
+
   // A compact-mode graph options block — pared-down labels, smaller nodes,
   // brighter default color (driven by the sub-graph's profile color) so each
   // card reads as a distinct "island" at a glance.
@@ -4112,6 +4157,10 @@ export function SubGraphMiniCard({
       classColors: CODE_CLASS_COLORS,
       predicateColors: CODE_PREDICATE_COLORS,
       namespaceColors: neutraliseBuiltinNamespaces(card.color),
+      // Per-URI tints sit ABOVE classColors / namespaceColors in
+      // the style-engine priority stack — TRUST_COLORS wins for
+      // every entity in the card's scope (#3 polish).
+      ...(Object.keys(nodeColors).length > 0 ? { nodeColors } : {}),
       defaultNodeColor: card.color,
       defaultEdgeColor: '#475569',
       edgeWidth: 1.0,
@@ -4121,7 +4170,7 @@ export function SubGraphMiniCard({
     },
     hexagon: { baseSize: 6, minSize: 3, maxSize: 16, scaleWithDegree: true },
     focus: { maxNodes: 5000, hops: 999 },
-  }), [card.color]);
+  }), [card.color, nodeColors]);
 
   return (
     <div

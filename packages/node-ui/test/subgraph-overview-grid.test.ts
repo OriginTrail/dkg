@@ -24,13 +24,24 @@ vi.mock('../src/ui/api.js', () => ({
 vi.mock('@origintrail-official/dkg-graph-viz/react', async () => {
   const React = await import('react');
   return {
-    RdfGraph() {
-      return React.createElement('div', { 'data-testid': 'rdf-graph' });
+    RdfGraph(props: {
+      data?: ReadonlyArray<{ subject: string; predicate: string; object: string }>;
+      options?: { style?: { nodeColors?: Record<string, string> } };
+    }) {
+      // Surface the nodeColors style override so #3 polish tests
+      // can assert per-URI trust-color plumbing without reaching
+      // into the canvas internals.
+      const nodeColors = props.options?.style?.nodeColors ?? {};
+      return React.createElement('div', {
+        'data-testid': 'rdf-graph',
+        'data-node-colors': JSON.stringify(nodeColors),
+      });
     },
   };
 });
 
 import { SubGraphOverviewGrid } from '../src/ui/views/project/components.js';
+import { TRUST_COLORS } from '../src/ui/views/project/helpers.js';
 
 const profile: ProjectProfile = {
   contextGraphId: 'cg-test',
@@ -257,5 +268,125 @@ describe('SubGraphMiniCard — empty-card-body two-branch copy (S3 polish #2, ux
     // Only the card-body literal remains.
     const cardBody = container.querySelector('.v10-sgov-card-empty');
     expect(cardBody?.textContent).toBe('No data yet');
+  });
+});
+
+describe('SubGraphMiniCard — per-trust nodeColors (S3 polish #3, ui-locked priority chain)', () => {
+  // The mini-graph previously rendered every node in the card's
+  // chrome color (`card.color`), losing the trust signal that the
+  // detail-view Graph pane already preserves. Build a per-URI
+  // `nodeColors` override from TRUST_COLORS[trustLevel] so each
+  // mini-graph reads the same per-trust palette the detail view
+  // does. Chrome color (border, header icon, namespace fallback)
+  // stays unchanged.
+  let root: Root;
+  let container: HTMLDivElement;
+
+  beforeEach(() => {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    fetchSubGraphsMock.mockReset();
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  function renderWith(memoryOverride: any) {
+    return act(async () => {
+      root.render(
+        React.createElement(ProjectProfileContext.Provider, { value: profile },
+          React.createElement(SubGraphOverviewGrid, {
+            contextGraphId: 'cg-test',
+            memory: memoryOverride,
+            onNodeClick: vi.fn(),
+            onSelectSubGraph: vi.fn(),
+          })),
+      );
+    });
+  }
+
+  it('passes per-URI nodeColors keyed by TRUST_COLORS[trustLevel] for every card entity', async () => {
+    fetchSubGraphsMock.mockResolvedValueOnce({
+      subGraphs: [{ name: 'recipes', entityCount: 3, tripleCount: 3, description: '' }],
+    });
+    const wmEntity = {
+      uri: 'urn:e:wm', label: 'WM', types: [],
+      trustLevel: 'working',
+      layers: new Set(['working']),
+      subGraphs: new Set(['recipes']),
+      properties: new Map(), connections: [],
+    };
+    const swmEntity = {
+      uri: 'urn:e:swm', label: 'SWM', types: [],
+      trustLevel: 'shared',
+      layers: new Set(['shared']),
+      subGraphs: new Set(['recipes']),
+      properties: new Map(), connections: [],
+    };
+    const vmEntity = {
+      uri: 'urn:e:vm', label: 'VM', types: [],
+      trustLevel: 'verified',
+      layers: new Set(['verified']),
+      subGraphs: new Set(['recipes']),
+      properties: new Map(), connections: [],
+    };
+    // A triple between the WM and SWM entities so the mini-graph
+    // actually renders (canvas-empty branch is the other path).
+    const edge = {
+      subject: 'urn:e:wm',
+      predicate: 'http://schema.org/relatedTo',
+      object: 'urn:e:swm',
+      subGraph: 'recipes',
+      layer: 'working' as const,
+    };
+
+    await renderWith({
+      ...memory,
+      entityList: [wmEntity, swmEntity, vmEntity],
+      entities: new Map([
+        [wmEntity.uri, wmEntity],
+        [swmEntity.uri, swmEntity],
+        [vmEntity.uri, vmEntity],
+      ]),
+      allTriples: [edge],
+    });
+    await flush();
+
+    // RdfGraph is React.lazy'd — pump microtasks until the Suspense
+    // boundary resolves and our mock renders.
+    async function waitForGraph(maxMs = 1000): Promise<HTMLElement | null> {
+      const start = Date.now();
+      while (Date.now() - start < maxMs) {
+        const el = container.querySelector('[data-testid="rdf-graph"]') as HTMLElement | null;
+        if (el) return el;
+        await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+      }
+      return container.querySelector('[data-testid="rdf-graph"]');
+    }
+    const graph = await waitForGraph();
+    expect(graph).toBeTruthy();
+    const nodeColors = JSON.parse(graph!.getAttribute('data-node-colors') ?? '{}');
+    // Each entity URI keys to its canonical trust hex — same
+    // palette as the detail-view Graph pane (TRUST_COLORS in
+    // helpers.ts:47).
+    expect(nodeColors['urn:e:wm']).toBe(TRUST_COLORS.working);
+    expect(nodeColors['urn:e:swm']).toBe(TRUST_COLORS.shared);
+    expect(nodeColors['urn:e:vm']).toBe(TRUST_COLORS.verified);
+  });
+
+  it('omits nodeColors entirely when the card has no entities (chrome-color fallback wins)', async () => {
+    fetchSubGraphsMock.mockResolvedValueOnce({
+      subGraphs: [{ name: 'recipes', entityCount: 0, tripleCount: 0, description: '' }],
+    });
+    await renderWith({ ...memory, entityList: [], allTriples: [] });
+    await flush();
+
+    // Empty entity set + no triples → card-body falls through to
+    // the empty placeholder, no RdfGraph mount.
+    const graph = container.querySelector('[data-testid="rdf-graph"]');
+    expect(graph).toBeNull();
   });
 });
