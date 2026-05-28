@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi, afterEach } from 'vitest';
@@ -13,6 +13,7 @@ import {
   normalizeHermesChatPayload,
   normalizeHermesPersistTurnPayload,
   probeHermesChannelHealth,
+  resolveHermesApiServerKey,
 } from '../src/daemon/hermes.js';
 import {
   connectLocalAgentIntegrationFromUi,
@@ -162,8 +163,13 @@ function makeHermesRouteContext(
   };
 }
 
+const cleanupDirs: string[] = [];
+
 afterEach(() => {
   vi.unstubAllGlobals();
+  while (cleanupDirs.length) {
+    rmSync(cleanupDirs.pop()!, { recursive: true, force: true });
+  }
   disconnectHermesProfileMock.mockReset();
   resolveHermesProfileMock.mockReset();
   resolveHermesProfileMock.mockReturnValue({
@@ -453,6 +459,103 @@ describe('Hermes channel helpers', () => {
       { Accept: 'application/json' },
       'https://hermes.example.com/health',
     )).toEqual({ Accept: 'application/json' });
+  });
+
+  it('forwards Authorization: Bearer to hermes-openai targets only when a key is resolved', () => {
+    const target = {
+      name: 'gateway' as const,
+      protocol: 'hermes-openai' as const,
+      inboundUrl: 'http://127.0.0.1:8642/v1/chat/completions',
+    };
+    // Key present → bearer added; the loopback bridge token is NOT added.
+    expect(buildHermesChannelHeaders(
+      target,
+      'bridge-token',
+      { 'Content-Type': 'application/json' },
+      target.inboundUrl,
+      'api-key-123',
+    )).toEqual({
+      'Content-Type': 'application/json',
+      Authorization: 'Bearer api-key-123',
+    });
+    // No key → behavior identical to today (no auth header), so key-less
+    // older Hermes installs keep working.
+    expect(buildHermesChannelHeaders(
+      target,
+      'bridge-token',
+      { 'Content-Type': 'application/json' },
+      target.inboundUrl,
+    )).toEqual({ 'Content-Type': 'application/json' });
+    // The api server key never leaks onto the loopback bridge transport.
+    expect(buildHermesChannelHeaders(
+      { name: 'bridge', inboundUrl: 'http://127.0.0.1:9202/send' },
+      'bridge-token',
+      { 'Content-Type': 'application/json' },
+      'http://127.0.0.1:9202/send',
+      'api-key-123',
+    )).toEqual({
+      'Content-Type': 'application/json',
+      'x-dkg-bridge-token': 'bridge-token',
+    });
+  });
+
+  it('resolves the Hermes API server key from the profile .env and DKG_HERMES_API_SERVER_KEY override', () => {
+    const home = mkdtempSync(join(tmpdir(), 'hermes-env-'));
+    cleanupDirs.push(home);
+    writeFileSync(
+      join(home, '.env'),
+      '# managed by user\nAPI_SERVER_ENABLED=true\nAPI_SERVER_KEY=from-env-file\nOTHER=keep\n',
+    );
+    const config = makeConfig({
+      localAgentIntegrations: {
+        hermes: {
+          enabled: true,
+          transport: { kind: 'hermes-openai', gatewayUrl: 'http://127.0.0.1:8642' },
+          metadata: { hermesHome: home },
+        },
+      },
+    });
+
+    expect(resolveHermesApiServerKey(config)).toBe('from-env-file');
+
+    // Explicit daemon override (remote/WSL Hermes) wins over the local .env.
+    process.env.DKG_HERMES_API_SERVER_KEY = 'override-key';
+    try {
+      expect(resolveHermesApiServerKey(config)).toBe('override-key');
+    } finally {
+      delete process.env.DKG_HERMES_API_SERVER_KEY;
+    }
+
+    // No hermesHome / no .env → undefined (older key-less Hermes: no bearer).
+    expect(resolveHermesApiServerKey(makeConfig({
+      localAgentIntegrations: {
+        hermes: { enabled: true, transport: { kind: 'hermes-openai' } },
+      },
+    }))).toBeUndefined();
+  });
+
+  it('annotates an unreachable hermes-openai health probe with the missing-key hint', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'hermes-nokey-'));
+    cleanupDirs.push(home);
+    // .env exists but has no active API_SERVER_KEY (issue #794 shape).
+    writeFileSync(join(home, '.env'), 'API_SERVER_ENABLED=true\n# API_SERVER_KEY=disabled\n');
+    const config = makeConfig({
+      localAgentIntegrations: {
+        hermes: {
+          enabled: true,
+          transport: { kind: 'hermes-openai', gatewayUrl: 'http://127.0.0.1:8642' },
+          metadata: { hermesHome: home },
+        },
+      },
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      throw new Error('fetch failed');
+    }));
+
+    const report = await probeHermesChannelHealth(config, undefined, { timeoutMs: 50 });
+    expect(report.ok).toBe(false);
+    expect(report.error).toContain('API_SERVER_KEY');
+    expect(report.error).toContain('dkg hermes setup');
   });
 
   it('normalizes profile for send and persist payloads', () => {

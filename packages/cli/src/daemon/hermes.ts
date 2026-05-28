@@ -1,5 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { readFileSync, statSync } from 'node:fs';
 import { isIP } from 'node:net';
+import { join } from 'node:path';
 
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import type { ChatMemoryManager } from '@origintrail-official/dkg-node-ui';
@@ -237,7 +239,17 @@ export function buildHermesChannelHeaders(
   bridgeAuthToken: string | undefined,
   baseHeaders: Record<string, string> = {},
   requestUrl = target.inboundUrl,
+  apiServerKey?: string,
 ): Record<string, string> {
+  // Hermes' OpenAI-compatible api_server requires `Authorization: Bearer
+  // <API_SERVER_KEY>` on `/v1/chat/completions` since v0.15.0. We only add it
+  // when a key is resolved, so older key-less Hermes installs and the
+  // unauthenticated `/health` probe keep their current behavior.
+  if (target.protocol === 'hermes-openai') {
+    return apiServerKey
+      ? { ...baseHeaders, Authorization: `Bearer ${apiServerKey}` }
+      : baseHeaders;
+  }
   if (
     target.name !== 'bridge' ||
     !bridgeAuthToken ||
@@ -246,6 +258,59 @@ export function buildHermesChannelHeaders(
     return baseHeaders;
   }
   return { ...baseHeaders, 'x-dkg-bridge-token': bridgeAuthToken };
+}
+
+/**
+ * Resolve the Hermes API server key for the `hermes-openai` UI-chat
+ * transport. `.env` (in the stored profile's `hermesHome`) is the source of
+ * truth — the same file `dkg hermes setup` provisions and the one Hermes
+ * itself reads. Reads are cached by path+mtime so we don't touch disk on
+ * every chat request. `DKG_HERMES_API_SERVER_KEY` overrides for remote/WSL
+ * gateways whose `.env` is not on the daemon's filesystem. Returns undefined
+ * when no key is available (older key-less Hermes → no bearer is sent).
+ */
+export function resolveHermesApiServerKey(config: DkgConfig): string | undefined {
+  const override = optionalTrimmedString(process.env.DKG_HERMES_API_SERVER_KEY);
+  if (override) return override;
+  const integration = getLocalAgentIntegration(config, 'hermes');
+  const hermesHome = optionalTrimmedString(
+    (integration?.metadata as Record<string, unknown> | undefined)?.hermesHome,
+  );
+  if (!hermesHome) return undefined;
+  return readApiServerKeyFromEnv(join(hermesHome, '.env'));
+}
+
+const apiServerKeyCache = new Map<string, { mtimeMs: number; key: string | undefined }>();
+
+function readApiServerKeyFromEnv(envPath: string): string | undefined {
+  let mtimeMs: number;
+  try {
+    mtimeMs = statSync(envPath).mtimeMs;
+  } catch {
+    apiServerKeyCache.delete(envPath);
+    return undefined;
+  }
+  const cached = apiServerKeyCache.get(envPath);
+  if (cached && cached.mtimeMs === mtimeMs) return cached.key;
+  let key: string | undefined;
+  try {
+    for (const line of readFileSync(envPath, 'utf-8').split(/\r?\n/)) {
+      const match = line.match(/^\s*(?:export\s+)?API_SERVER_KEY\s*=\s*(.*?)\s*$/);
+      if (!match) continue;
+      let value = match[1];
+      if (
+        (value.startsWith('"') && value.endsWith('"'))
+        || (value.startsWith("'") && value.endsWith("'"))
+      ) {
+        value = value.slice(1, -1);
+      }
+      if (value) key = value; // last uncommented assignment wins (dotenv)
+    }
+  } catch {
+    key = undefined;
+  }
+  apiServerKeyCache.set(envPath, { mtimeMs, key });
+  return key;
 }
 
 export function transportPatchFromHermesTarget(
@@ -351,6 +416,17 @@ export async function probeHermesChannelHealth(
       else gateway = result;
       lastError = err.message;
     }
+  }
+
+  // The api_server has refused to start without API_SERVER_KEY since Hermes
+  // v0.15.0, so an unreachable hermes-openai target with no key resolvable is
+  // overwhelmingly a missing-key problem — surface that instead of a bare
+  // "fetch failed" in the Node UI's degraded status.
+  if (
+    targets.some((t) => t.protocol === 'hermes-openai')
+    && !resolveHermesApiServerKey(config)
+  ) {
+    lastError = `${lastError} — Hermes api_server requires API_SERVER_KEY (Hermes v0.15.0+); run "dkg hermes setup" then restart "hermes gateway run --replace -v".`;
   }
 
   return { ok: false, bridge, gateway, error: lastError };

@@ -58,6 +58,15 @@ export interface HermesSetupState {
   updatedAt: string;
   managedFiles: string[];
   /**
+   * `true` when setup ensured a non-empty `API_SERVER_KEY` (and
+   * `API_SERVER_ENABLED=true`) in the Hermes profile `.env` for the
+   * loopback `hermes-openai` UI-chat transport. Hermes' api_server has
+   * refused to start without a key since v0.15.0; the daemon forwards
+   * `Authorization: Bearer <key>` to `/v1/chat/completions`. Never carries
+   * the secret itself (the key lives only in `<hermesHome>/.env`).
+   */
+  apiServerKeyConfigured?: boolean;
+  /**
    * Captured at the first install that replaced a non-DKG memory.provider
    * in `<hermesHome>/config.yaml`. First-wins: re-runs do NOT overwrite
    * this snapshot. `restoreHermesProfile` consumes it to put the user

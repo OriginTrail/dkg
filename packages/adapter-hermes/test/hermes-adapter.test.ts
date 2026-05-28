@@ -340,6 +340,51 @@ describe('Hermes profile setup helpers', () => {
     expect(readFileSync(join(hermesHome, 'plugins', 'dkg', '.dkg-adapter-hermes-owner.json'), 'utf-8')).toContain('@origintrail-official/dkg-adapter-hermes');
   });
 
+  it('provisions API_SERVER_KEY and API_SERVER_ENABLED in .env for the loopback hermes-openai transport', () => {
+    const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
+    const result = setupHermesProfile({ hermesHome });
+    const envPath = join(hermesHome, '.env');
+
+    expect(existsSync(envPath)).toBe(true);
+    const env = readFileSync(envPath, 'utf-8');
+    const keyMatch = env.match(/^API_SERVER_KEY=(.+)$/m);
+    expect(keyMatch?.[1] && keyMatch[1].length).toBeGreaterThan(0);
+    expect(env).toMatch(/^API_SERVER_ENABLED=true$/m);
+    expect(result.state.apiServerKeyConfigured).toBe(true);
+
+    // Re-run is idempotent: the generated key is never regenerated/overwritten.
+    const generatedKey = keyMatch![1];
+    setupHermesProfile({ hermesHome });
+    expect(readFileSync(envPath, 'utf-8')).toContain(`API_SERVER_KEY=${generatedKey}`);
+  });
+
+  it('preserves an existing user API_SERVER_KEY and unrelated .env lines', () => {
+    const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
+    writeFileSync(join(hermesHome, '.env'), 'FOO=bar\nAPI_SERVER_KEY=user-secret\n');
+
+    setupHermesProfile({ hermesHome });
+
+    const env = readFileSync(join(hermesHome, '.env'), 'utf-8');
+    expect(env).toContain('API_SERVER_KEY=user-secret');
+    expect(env).toContain('FOO=bar');
+    expect(env).toMatch(/^API_SERVER_ENABLED=true$/m);
+  });
+
+  it('does not write .env in dry-run but reports the provisioning action', () => {
+    const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
+    const plan = planHermesSetup({ hermesHome, dryRun: true });
+
+    expect(existsSync(join(hermesHome, '.env'))).toBe(false);
+    expect(plan.actions.some((action) => action.path.endsWith('.env'))).toBe(true);
+  });
+
+  it('does not provision .env for a remote (non-loopback) gateway transport', () => {
+    const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
+    setupHermesProfile({ hermesHome, gatewayUrl: 'https://hermes.example.com:8642' });
+
+    expect(existsSync(join(hermesHome, '.env'))).toBe(false);
+  });
+
   it('loads the installed provider from Hermes user plugin discovery path', () => {
     const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
     setupHermesProfile({
