@@ -7714,7 +7714,15 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
     color-mix(in srgb, var(--sg-color, #a855f7) 8%, transparent) 0%,
     transparent 40%
   );
-  min-height: 34px;
+  /* PR #793 round 2 — `min-height: 44px` reserves space for the
+     fully-populated breadcrumb state (project name + `›`
+     separator + subgraph chip + description). Pre-fix the row
+     was 34px when only the project name showed (e.g. on the
+     Subgraphs / WM / SWM / VM tabs without an active subgraph)
+     and grew to ~42-44px when the breadcrumb expanded, pushing
+     the body content down on transition. Reserving the
+     expanded height at all times eliminates the layout shift. */
+  min-height: 44px;
 }
 .v10-project-strip-dot {
   width: 9px; height: 9px; border-radius: 50%;
