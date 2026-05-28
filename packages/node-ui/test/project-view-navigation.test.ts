@@ -1014,4 +1014,87 @@ describe('ProjectView entity detail navigation', () => {
     expect(query('subgraph-detail').dataset.initialEnabledLayers).toBe('-');
   });
 
+  // S3 polish PR #793 Codex sweep 5 (Bug N) — `activeSubGraphRef`
+  // and `detailScopeRef` go stale on any state-mutation path
+  // that bypasses the sync helper. Pre-Bug-N the layer-switcher
+  // and detail-close paths called `setActiveSubGraph` directly,
+  // so the next layer-agnostic chip click would misclassify
+  // itself as a detail→detail hop and reuse stale scope.
+  it('subgraph A (WM-seeded) → layer switch → overview → click B is a FRESH overview entry (Bug N load-bearing)', async () => {
+    // 1. WM tab → alpha-with-layer → seeds Set(['working']).
+    await click('switch-wm');
+    await click('select-subgraph-alpha-with-layer');
+    await flush();
+    expect(query('subgraph-detail').dataset.initialEnabledLayers).toBe('working');
+
+    // 2. Switch to WM tab again (layer-switch path). Pre-fix
+    //    this called setActiveSubGraph(null) directly, leaving
+    //    activeSubGraphRef='alpha' AND detailScopeRef=Set(['working']).
+    await click('switch-wm');
+    await flush();
+    // Detail view unmounts; we're back on the WM layer page.
+    expect(document.querySelector('[data-testid="subgraph-detail"]')).toBeNull();
+
+    // 3. Go to the Subgraphs overview, click `demo`. The chip
+    //    click is layer-agnostic. Pre-Bug-N the stale refs would
+    //    misroute this through the detail→detail branch and
+    //    re-seed Set(['working']). Post-fix the helper clears
+    //    both refs so demo lands at all-three.
+    await click('switch-subgraphs');
+    await click('select-subgraph-demo');
+    await flush();
+    expect(query('subgraph-detail').dataset.slug).toBe('demo');
+    expect(query('subgraph-detail').dataset.initialEnabledLayers).toBe('-');
+  });
+
+  it('subgraph A → layer switch → layer-mode chip click still seeds the new layer (Bug N regression guard)', async () => {
+    // Layer-mode entry path must remain correct after a
+    // layer-switch reset — proves the helper's null-clear didn't
+    // accidentally break the originating-layer carry-over for
+    // the next chip click.
+    await click('switch-wm');
+    await click('select-subgraph-alpha-with-layer');
+    await flush();
+    expect(query('subgraph-detail').dataset.initialEnabledLayers).toBe('working');
+
+    // Switch to SWM tab (this clears scope via the helper).
+    await click('switch-swm');
+    await flush();
+
+    // Click the layer-mode chip from SWM — should seed Set(['shared']).
+    await click('select-subgraph-alpha-with-layer');
+    await flush();
+    expect(query('subgraph-detail').dataset.initialEnabledLayers).toBe('shared');
+  });
+
+  it('subgraph A → open entity → detail-close → click B is a FRESH layer-tab entry (Bug N close-path)', async () => {
+    // The detail-close path restores M2 origin. Pre-Bug-N this
+    // called setActiveSubGraph(origin.activeSubGraph) directly,
+    // leaving refs stale across the round-trip. Verify the close
+    // path goes through the helper and the next chip click sees
+    // a clean state matching the restored origin.
+
+    // 1. WM tab → open an entity directly from the layer list
+    //    (no sub-graph in scope). detail.activeSubGraph in
+    //    origin is null.
+    await click('switch-wm');
+    await click('open-layer-overlap-entity');
+    await flush();
+    expect(query('entity-detail').dataset.entity).toBe('urn:entity:overlap');
+
+    // 2. detail-back → handleDetailClose restores origin
+    //    (activeSubGraph=null since we opened from a layer tab).
+    //    Helper must clear refs.
+    await click('detail-back');
+    await flush();
+    expect(document.querySelector('[data-testid="entity-detail"]')).toBeNull();
+
+    // 3. Navigate to Subgraphs overview → click `demo`. Must
+    //    land at all-three (fresh overview entry).
+    await click('switch-subgraphs');
+    await click('select-subgraph-demo');
+    await flush();
+    expect(query('subgraph-detail').dataset.initialEnabledLayers).toBe('-');
+  });
+
 });

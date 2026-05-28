@@ -152,6 +152,33 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   // "overview-vs-detail" discriminator stays fresh across the
   // race window.
   const activeSubGraphRef = useRef<string | null>(null);
+  // PR #793 sweep 5 Bug N — `activeSubGraph` is mutated by THREE
+  // paths in ProjectView: handleSelectSubGraph (chip click),
+  // handleLayerSwitch (layer tab click), handleDetailClose (M2
+  // origin restore). Each must keep both `activeSubGraphRef` and
+  // `detailScopeRef` in sync or the next chip click's
+  // discriminator misfires (Bug N: subgraph A → WM tab → overview
+  // → click B misclassified as detail→detail hop because
+  // activeSubGraphRef still held 'A' from a path that bypassed
+  // the ref sync). This helper makes both refs invariant: refs
+  // always equal the state they model, regardless of mutation
+  // path. Any future caller that mutates `activeSubGraph` MUST
+  // go through this helper.
+  //
+  // The seed scope (`subGraphInitialEnabledLayers`) is NOT mirrored
+  // here because callers route it explicitly — chip clicks read
+  // the live scope via `detailScopeRef`; layer-switch and
+  // detail-close paths clear it via the slug === null branch
+  // below or directly when needed.
+  const setActiveSubGraphSync = useCallback((slug: string | null) => {
+    activeSubGraphRef.current = slug;
+    if (slug === null) {
+      // Exit always clears the scope mirror so the next chip
+      // click from a fresh route doesn't see a stale carry-over.
+      detailScopeRef.current = null;
+    }
+    setActiveSubGraph(slug);
+  }, []);
   const [selectedLayerContext, setSelectedLayerContext] = useState<MemoryLayerView | null>(null);
   // Mirror `selectedUri` into a ref so `handleNavigate` can read the
   // current value without listing it in deps — listing it caused the
@@ -468,17 +495,20 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   // capture). The sync write here just closes the pre-mount
   // timing window.
   const handleSelectSubGraph = useCallback((slug: string | null, originatingLayer?: MemoryLayerView) => {
-    // Read the prior `activeSubGraph` identity from the ref so
-    // the overview-vs-detail discriminator survives a fast
-    // chip-to-chip burst that fires before React re-renders
-    // (Bug L). Then commit the new slug to the ref + state.
+    // Snapshot the prior subgraph identity BEFORE
+    // `setActiveSubGraphSync` overwrites it — the layer-agnostic
+    // branch's overview-vs-detail discriminator needs the value
+    // that was current at click time.
     const priorActiveSubGraph = activeSubGraphRef.current;
-    activeSubGraphRef.current = slug;
     clearDetailOrigin();
-    setActiveSubGraph(slug);
+    // Commit the new slug — the helper writes both the ref and
+    // (for slug === null) the scope-mirror ref, so any
+    // sub-branch below that needs to write `detailScopeRef`
+    // overrides the helper's clear with a fresh value.
+    setActiveSubGraphSync(slug);
     if (slug === null) {
       setSubGraphInitialEnabledLayers(null);
-      detailScopeRef.current = null;
+      // detailScopeRef.current already cleared by the helper.
     } else if (originatingLayer !== undefined) {
       // Single-layer seed (layer-tab entry).
       const seed = new Set<TrustLevel>([TRUST_FOR_LAYER[originatingLayer]]);
@@ -487,9 +517,10 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     } else {
       // Layer-agnostic — preserve user's CURRENT scope on
       // detail→detail hops (Bug J); clear on fresh entry from the
-      // overview. Discriminator read from the ref (not stale
-      // closure state) so a fast hop right after another chip
-      // click sees the prior detail context correctly.
+      // overview. Discriminator read from the prior-ref snapshot
+      // (not stale closure state) so a fast hop right after
+      // another chip click sees the prior detail context
+      // correctly.
       if (priorActiveSubGraph !== null && detailScopeRef.current) {
         // Snapshot the current scope into a fresh Set so the
         // unmounting detail view's state mutation (via the next
@@ -506,15 +537,24 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     }
     setSelectedUri(null);
     setSelectedLayerContext(null);
-  }, [clearDetailOrigin]);
+  }, [clearDetailOrigin, setActiveSubGraphSync]);
 
   const handleLayerSwitch = useCallback((layer: LayerView) => {
     clearDetailOrigin();
     setActiveLayer(layer);
     setSelectedUri(null);
     setSelectedLayerContext(null);
-    setActiveSubGraph(null);
-  }, [clearDetailOrigin]);
+    // PR #793 sweep 5 Bug N — go through the sync helper so the
+    // refs stay invariant with state. Pre-fix this path bypassed
+    // the refs entirely, leaving `activeSubGraphRef` holding the
+    // prior subgraph slug. A subsequent layer-agnostic chip
+    // click would then misclassify itself as a detail→detail
+    // hop and reuse the stale scope.
+    setActiveSubGraphSync(null);
+    // The seed-state must also clear so the next chip click
+    // starts fresh.
+    setSubGraphInitialEnabledLayers(null);
+  }, [clearDetailOrigin, setActiveSubGraphSync]);
 
   const handleLayerTabChange = useCallback((layer: MemoryLayerView, tab: LayerContentTab) => {
     setLayerContentTabs(prev => prev[layer] === tab ? prev : { ...prev, [layer]: tab });
@@ -548,11 +588,17 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     setSelectedLayerContext(null);
     if (!origin) return;
     setActiveLayer(origin.activeLayer);
-    setActiveSubGraph(origin.activeSubGraph);
+    // PR #793 sweep 5 Bug N — restoring the M2 origin's
+    // activeSubGraph must go through the sync helper so the refs
+    // mirror the restored state. When origin.activeSubGraph is
+    // null (entity opened from a layer-tab origin), the helper's
+    // null branch also clears detailScopeRef so the next chip
+    // click sees a clean overview-entry context.
+    setActiveSubGraphSync(origin.activeSubGraph);
     setLayerContentTabs(origin.layerTabs);
     setSubGraphTabs(origin.subGraphTabs);
     pendingScrollRestoreRef.current = origin.scroll;
-  }, []);
+  }, [setActiveSubGraphSync]);
 
   const handleNodeClick = useCallback((node: any) => {
     if (!node?.id) return;
