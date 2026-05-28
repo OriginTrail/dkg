@@ -6564,7 +6564,18 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
 .v10-subgraph-detail-icon {
   font-size: 20px; line-height: 1;
 }
-.v10-subgraph-detail-title-wrap { flex: 1; min-width: 0; }
+.v10-subgraph-detail-title-wrap {
+  flex: 1;
+  min-width: 0;
+  /* #10a polish — reserve a consistent vertical slot for the
+     title block so 1-line and 2-line titles occupy the same
+     space. No layout shift navigating between subgraphs whose
+     descriptions differ in length. */
+  min-height: 44px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
 .v10-subgraph-detail-title {
   font-size: 15px; font-weight: 600; color: var(--text-primary);
 }
@@ -6839,7 +6850,9 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
    so it never silently changes meaning across a navigation
    transition (M2 / S5 strand). */
 .v10-subgraph-cross-layer {
-  padding: 10px 16px 12px;
+  /* #11 polish (ui-locked) — +4px top padding, lede/pill carry
+     their own +2px / +14px margins for the layered breathing room. */
+  padding: 16px 16px 0;
   border-bottom: 1px solid var(--border-subtle);
   display: flex;
   flex-direction: column;
@@ -6850,6 +6863,9 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
   font-size: 11px;
   color: var(--text-tertiary);
   letter-spacing: 0.01em;
+  /* #11 polish (ui-locked) — +2px below the lede so the count
+     strip sits cleanly beneath. */
+  margin-bottom: 10px;
 }
 .v10-subgraph-cross-layer-strip {
   display: flex;
@@ -6906,6 +6922,10 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
   font-size: 12px;
 }
 .v10-subgraph-active-layer-pill {
+  /* #11 polish (ui-locked) — +14px above the pill so the
+     count strip / pill cluster reads as a single breathing
+     three-tier band instead of stacked rows. */
+  margin-top: 14px;
   align-self: flex-start;
   display: inline-flex;
   align-items: center;
