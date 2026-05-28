@@ -85,7 +85,7 @@ describe('DKGAgent.enrichPeerStoreFromInboundCircuit — reverse-path peerStore 
   // the dial happen, so re-merging the same address is pointless.
   // More importantly: if we DID merge on outbound, we'd race the
   // libp2p stream-negotiation issue documented at
-  // docs/archive/UPSTREAM_ISSUE_DRAFT.md (peerStore.merge during a
+  // docs/archive/v9/misc/UPSTREAM_ISSUE_DRAFT.md (peerStore.merge during a
   // newStream call closes the connection mid-negotiation). Outbound
   // is the case where that race matters most.
   it('is a no-op for outbound connections (regardless of circuit-ness)', async () => {

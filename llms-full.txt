@@ -1,0 +1,33 @@
+# DKG V10 Agent Context
+
+DKG V10 is a decentralized knowledge network and protocol for verifiable agent memory. A DKG node is the local gateway into that network.
+
+Core model:
+
+- DKG Node: daemon, API, auth, wallets, storage, networking, UI, and integrations.
+- Context Graph: scoped knowledge domain, also shown as project in the Node UI.
+- Working Memory: private drafts.
+- Shared Working Memory: peer-visible shared knowledge.
+- Verified Memory: on-chain finalized knowledge.
+- Knowledge Asset: published graph data with provenance and integrity.
+
+Current docs:
+
+- Start at docs/README.md.
+- Workflow routes live under docs/use-dkg/.
+- System model and architecture routes live under docs/how-dkg-works/.
+- Reference routes live under docs/reference/.
+- Agent context projections live under docs/agent-context/.
+
+Operational contract:
+
+- Use packages/cli/skills/dkg-node/SKILL.md for exact tool names, HTTP routes, and payload rules.
+- Prefer runtime tools over raw HTTP when the runtime exposes them.
+- Use memory search for free-text recall.
+- Use SPARQL query for exact graph patterns.
+- Use named graph patterns when querying sub-graph-routed data.
+- Write first to Working Memory.
+- Promote to Shared Working Memory before peers can rely on it.
+- Publish to Verified Memory only with explicit finality intent and available funds.
+
+Do not use archived docs as current context.

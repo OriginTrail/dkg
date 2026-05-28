@@ -352,10 +352,9 @@ returns a `HermesSetupResult` with:
 
 `restoreHermesProfile({ profile, hermesHome, signal? })` returns
 `{ ok, path: 'surgical' | 'backup-file' | 'noop' | 'failed', restoredFrom?,
-restoredProvider?, restoreError? }`. See
-[`agent-docs/hermes-parity/setup-entrypoint-contract.md`](../../agent-docs/hermes-parity/setup-entrypoint-contract.md)
-for the full shape, including `dryRun: true` strict side-effect-freeness and
-the `AbortSignal` cancellation semantics.
+restoredProvider?, restoreError? }`. The full setup contract includes
+`dryRun: true` strict side-effect-freeness and `AbortSignal` cancellation
+semantics.
 
 ### SIGINT-safe intent semantics
 
@@ -379,7 +378,7 @@ python -m py_compile packages/adapter-hermes/hermes-plugin/__init__.py packages/
 
 ## More Setup Detail
 
-See [Hermes setup](../../docs/setup/SETUP_HERMES.md).
+See [Hermes setup](../../docs/use-dkg/connect-agent.md).
 
 ## License
 

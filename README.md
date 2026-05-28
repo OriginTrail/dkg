@@ -132,7 +132,7 @@ Skip the framework wiring — run the daemon directly and use the CLI or HTTP AP
 
 ```bash
 npm install -g @origintrail-official/dkg
-dkg init      # creates ~/.dkg/config.yaml (auto-funds wallets on testnet if faucet reachable)
+dkg init      # creates ~/.dkg/config.json (auto-funds wallets on testnet if faucet reachable)
 dkg start     # starts the node daemon on http://127.0.0.1:9200
 ```
 
@@ -197,8 +197,8 @@ dkg assertion query <name> -c <cg>                   # read assertion quads from
 dkg assertion promote <name> -c <cg>                 # WM → SWM
 
 # Shared memory (team-visible) and publishing
-dkg shared-memory write <cg> ...         # write triples directly to SWM
-dkg shared-memory publish <cg>           # SWM → Verified Memory (costs TRAC)
+dkg shared-memory write <cg> --file <rdf-file> --name <name>  # stage RDF into WM
+dkg shared-memory publish <cg> --name <name>                  # finalize + publish to VM
 dkg publish <cg> -f <file>               # one-shot RDF publish to a context graph
 dkg verify <batchId> --context-graph <cg> --verified-graph <id>  # propose M-of-N verification
 dkg endorse <ual> --context-graph <cg> --agent <addr>  # endorse a published KA
@@ -261,7 +261,7 @@ Use the node APIs and packages to publish Knowledge Assets, query data, and coor
 
 ### 4. Integrate existing agent frameworks
 
-Use adapters for OpenClaw, ElizaOS, Hermes, or your own Node.js / TypeScript project.
+Use adapters for OpenClaw, Hermes, MCP-aware coding agents, or your own integration against the CLI, HTTP API, or package interfaces.
 
 ---
 
@@ -297,17 +297,15 @@ analysis reports are under `bench/results/profiles/`, including
 
 ---
 
-## Setup guides
+## Docs
 
 | Guide | Use it when |
 |---|---|
-| [MCP Setup](docs/setup/SETUP_MCP.md) | You want Cursor / Claude Code / Claude Desktop / Windsurf / VSCode + Copilot / Cline / Codex CLI to use DKG as memory |
-| [Join the Testnet](docs/setup/JOIN_TESTNET.md) | You want a full node setup and first publish/query flow |
-| [OpenClaw Setup](docs/setup/SETUP_OPENCLAW.md) | You want OpenClaw to use DKG as memory/tools |
-| [Hermes Setup](docs/setup/SETUP_HERMES.md) | You want Hermes Agent to use DKG as memory/tools |
-| [ElizaOS Setup](docs/setup/SETUP_ELIZAOS.md) | You want ElizaOS integration |
-| [Custom agent Setup](docs/setup/SETUP_CUSTOM.md) | You are wiring an agent framework not covered above |
-| [Testnet Faucet](docs/setup/TESTNET_FAUCET.md) | You need Base Sepolia ETH and TRAC |
+| [DKG V10](docs/README.md) | You need the public entry point and system map |
+| [Use DKG](docs/use-dkg/README.md) | You want install, connect, publish, query, and operator paths |
+| [Connect an Agent](docs/use-dkg/connect-agent.md) | You want MCP, OpenClaw, or Hermes to use DKG as memory/tools |
+| [Funding](docs/use-dkg/funding.md) | You need to understand testnet ETH/TRAC requirements |
+| [Agent Context](docs/agent-context/README.md) | You want compact agent context and task packs |
 
 ---
 
@@ -319,11 +317,9 @@ Three entry points cover the common flows:
 
 - **Manual install (`dkg init`)** — on testnet, `dkg init` auto-funds the generated admin and operational wallets when `network.faucet.url` is set (the default for the bundled testnet config).
 - **OpenClaw, Hermes, and MCP setup (`dkg openclaw setup`, `dkg hermes setup`, `dkg mcp setup`)** — run the same funding step on first setup. Pass `--no-fund` to skip it (for pre-funded wallets, CI, or offline runs).
-- **Direct API / custom scripts** — the full request/response shape, idempotency semantics, and error codes live in [`docs/setup/TESTNET_FAUCET.md`](docs/setup/TESTNET_FAUCET.md).
+- **Direct API / custom scripts** — use the local daemon and CLI references in [Use DKG](docs/use-dkg/README.md) and [Reference](docs/reference/README.md). The faucet call is an implementation detail of supported setup flows, not a separate current setup path.
 
-Faucet calls are best-effort: a failed call logs a ready-to-paste `curl` block and setup continues. The node is usable without funding — you just can't publish or stake until it's topped up. Rate limits and error codes are documented in the [faucet reference](docs/setup/TESTNET_FAUCET.md#rate-limits-and-cooldowns).
-
-If the faucet is unreachable and you need ETH only, [`docs/setup/JOIN_TESTNET.md`](docs/setup/JOIN_TESTNET.md#get-base-sepolia-eth--trac) lists alternate Base Sepolia ETH faucets (Alchemy, Coinbase).
+Faucet calls are best-effort: a failed call logs a ready-to-paste `curl` block and setup continues. The node is usable without funding for WM, SWM, local queries, and P2P operations. It needs funds only for Verified Memory and other on-chain actions.
 
 ---
 
@@ -455,17 +451,14 @@ This is a pnpm + Turborepo monorepo.
 
 ---
 
-## Specs
+## Specs and Current Docs
 
 | Document | Scope |
 |---|---|
-| [Part 1: Agent Marketplace](docs/SPEC_PART1_MARKETPLACE.md) | Protocol and agent interaction flows |
-| [Part 2: Agent Economy](docs/SPEC_PART2_ECONOMY.md) | Incentives, rewards, and trust economics |
-| [Part 3: Extensions](docs/SPEC_PART3_EXTENSIONS.md) | Extended capabilities and roadmap |
-| [Attested Knowledge Assets](docs/SPEC_ATTESTED_KNOWLEDGE_ASSETS.md) | Multi-party attestation model |
-| [Trust Layer](docs/SPEC_TRUST_LAYER.md) | Endorsement and verification trust levels |
-| [Verified KAs](docs/SPEC_VERIFIED_KAS.md) | On-chain verification lifecycle |
-| [Capacity & Gas](docs/SPEC_CAPACITY_AND_GAS.md) | Node capacity and gas accounting |
+| [DKG V10](docs/README.md) | Current V10 system map |
+| [How DKG Works](docs/how-dkg-works/README.md) | Current V10 model and architecture |
+| [Agent Context](docs/agent-context/README.md) | Current agent context, invariants, and task packs |
+| [Knowledge Assets](docs/how-dkg-works/knowledge-assets.md) | Current Knowledge Asset model |
 
 ---
 
@@ -501,7 +494,7 @@ pnpm test:coverage                               # tests + tier-based coverage g
 pnpm --filter @origintrail-official/dkg test     # run tests for a single package
 ```
 
-Tier-based thresholds (TORNADO / BURA / KOSAVA) and Solidity lcov checks are documented in [`docs/testing/COVERAGE.md`](docs/testing/COVERAGE.md).
+Tier-based thresholds (TORNADO / BURA / KOSAVA) and Solidity lcov checks are documented in [`.ai/testing/COVERAGE.md`](.ai/testing/COVERAGE.md).
 
 ---
 

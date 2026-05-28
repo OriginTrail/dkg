@@ -55,7 +55,8 @@ curl -X POST $BASE_URL/api/context-graph/create -H "Authorization: Bearer $TOKEN
 curl -X POST $BASE_URL/api/assertion/create -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"contextGraphId":"my-project","name":"notes"}'
 curl -X POST $BASE_URL/api/assertion/notes/write -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"contextGraphId":"my-project","quads":[{"subject":"https://example.org/alice","predicate":"https://schema.org/name","object":"\"Alice\"","graph":""}]}'
 curl -X POST $BASE_URL/api/assertion/notes/promote -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"contextGraphId":"my-project","entities":"all"}'
-curl -X POST $BASE_URL/api/shared-memory/publish -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"contextGraphId":"my-project"}'
+curl -X POST $BASE_URL/api/context-graph/register -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"id":"my-project"}'
+curl -X POST $BASE_URL/api/shared-memory/publish -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"contextGraphId":"my-project","assertionName":"notes"}'
 curl -X POST $BASE_URL/api/query -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"sparql":"SELECT * WHERE { ?s ?p ?o } LIMIT 10","contextGraphId":"my-project","view":"working-memory","agentAddress":"YOUR_PEER_ID"}'
 ```
 
@@ -130,8 +131,8 @@ Drop to HTTP when the operation isn't in the table — participant self-service 
 | `dkg_import_artifact_read_markdown` | `POST /api/assertion/import-artifact/read-markdown` | Safely read Markdown for a completed imported attachment by content-addressed hash |
 | `dkg_import_artifact_resolve` | `POST /api/assertion/import-artifact/resolve` | Optional metadata re-check for completed imported attachments |
 | `dkg_semantic_enrichment_write` | `POST /api/assertion/semantic-enrichment/write` | Append model-derived semantic triples and provenance to the imported assertion |
-| `dkg_publish` | `POST /api/shared-memory/write` + `POST /api/shared-memory/publish` | **Two-call helper**: first writes supplied quads to SWM via `/write`, then publishes all SWM → VM (TRAC). Calling only the `/publish` route skips the write — if dropping to raw HTTP, use both calls in order |
-| `dkg_shared_memory_publish` | `POST /api/shared-memory/publish` | **Canonical finalizer** after `dkg_assertion_promote`: publish SWM → VM, no fresh quads |
+| `dkg_publish` | `POST /api/assertion/create` + `POST /api/shared-memory/publish` | **One-shot helper**: creates an assertion with supplied quads, finalizes it, promotes it to SWM, then publishes that assertion to VM (TRAC). Use for immediate publish flows, not iterative drafting |
+| `dkg_shared_memory_publish` | `POST /api/shared-memory/publish` | **Canonical finalizer** after `dkg_assertion_promote`: publish promoted assertion data to VM, no fresh quads |
 | `dkg_share` | `POST /api/shared-memory/write` | Directly write concise team-visible knowledge to SWM without staging a WM assertion. Prefer the WM assertion → promote flow for durable/canonical work. Both Hermes and OpenClaw expose the same tool schema (required `content` and `context_graph_id`, optional `sub_graph_name`), so MCP-discovered call signatures are portable. The OpenClaw implementation additionally validates content as non-whitespace, mints a unique subject per share (returned in the response), and N-Triples-quotes content; Hermes is currently looser on those points — the parallel hardening is tracked in OriginTrail/dkg#414. |
 | `dkg_sub_graph_create` | `POST /api/sub-graph/create` | Register a sub-graph inside a CG |
 | `dkg_sub_graph_list` | `GET /api/sub-graph/list` | List sub-graphs in a CG |
@@ -144,7 +145,7 @@ Drop to HTTP when the operation isn't in the table — participant self-service 
 | `dkg_read_messages` | `GET /api/messages` | Read inbound messages |
 | `dkg_invoke_skill` | `POST /api/invoke-skill` | Call another agent's skill (best-effort P2P) |
 
-P2P tools fail gracefully when the peer is offline. `dkg_publish` (fresh quads + write + publish, two HTTP calls) and `dkg_shared_memory_publish` (publish existing SWM, one HTTP call) differ in intent: use the two-call helper for "I have quads, publish now"; use the canonical finalizer as step 4 of the stepwise write → promote → publish flow. `dkg_share` is a direct SWM convenience helper for quick team-visible notes, not a replacement for assertion lifecycle tracking.
+P2P tools fail gracefully when the peer is offline. `dkg_publish` (fresh quads → assertion lifecycle → publish) and `dkg_shared_memory_publish` (publish an existing promoted assertion, one HTTP call) differ in intent: use the one-shot helper for "I have quads, publish now"; use the canonical finalizer as step 4 of the stepwise write → promote → publish flow. `dkg_share` is a direct SWM convenience helper for quick team-visible notes, not a replacement for assertion lifecycle tracking.
 
 **Bulk imports (>5,000 quads in one logical operation):** the per-call `dkg_assertion_*` loop IS the chunked-write API; there is no `/api/import/bulk`. Keep `/api/assertion/<name>/write` payloads under the 10 MB body cap, keep `/api/assertion/<name>/promote` payloads under the 256 KB body cap, and remember that promotion can still fail at the 10 MB gossip-message cap even when the HTTP body is small. For multi-part imports, write a resumable manifest in the `meta` sub-graph (`scripts/lib/manifest.mjs` is the canonical helper), promote import roots in size-aware batches, and halve/retry on 413 rather than restarting the whole import. The expanded contract — chunking budgets, manifest pattern, HTTP 413 recipes, async-promote queue (`/api/assertion/<name>/promote-async`) — is served at `GET /.well-known/skill-importer.md` (the daemon's second canonical skill endpoint, same auth-public + ETag-cacheable shape as `/.well-known/skill.md`). Source checkouts also have the same file at `packages/cli/skills/dkg-importer/SKILL.md`.
 
@@ -177,7 +178,7 @@ before promoting it to SWM (team) or through to VM (chain-anchored).
   Body: `{ "contextGraphId": "...", "subGraphName"?: "..." }`
 - `POST /api/assertion/{name}/promote` — promote assertion triples to SWM (synchronous; returns once SWM insert + gossip complete)
   Body: `{ "contextGraphId": "...", "entities"?: [...] | "all", "subGraphName"?: "..." }`
-- `POST /api/assertion/{name}/promote-async` — enqueue the same promote for an in-daemon worker to handle in the background. Returns `202 { jobId, state: "queued" }` immediately. Use this for bulk importers where waiting for the synchronous round-trip is the bottleneck (the Graphify import RFC `docs/specs/SPEC_ASYNC_PROMOTE_QUEUE.md` explains the motivation). See §8 "Async promote queue" for the inspection routes.
+- `POST /api/assertion/{name}/promote-async` — enqueue the same promote for an in-daemon worker to handle in the background. Returns `202 { jobId, state: "queued" }` immediately. Use this for bulk importers where waiting for the synchronous round-trip is the bottleneck (the Graphify import RFC `.ai/specs/SPEC_ASYNC_PROMOTE_QUEUE.md` explains the motivation). See §8 "Async promote queue" for the inspection routes.
 - `POST /api/assertion/{name}/discard` — drop the assertion graph
   Body: `{ "contextGraphId": "...", "subGraphName"?: "..." }`
 - `POST /api/assertion/{name}/import-file` — import a document (multipart/form-data) — see §7

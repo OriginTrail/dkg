@@ -1,0 +1,25 @@
+---
+status: current
+version: v10
+audience: human+agent
+doc_type: concept
+---
+
+# How DKG Works
+
+These pages explain the system model and implementation architecture behind the commands. Model pages cover the external concepts; internals pages explain why the node, memory lifecycle, messenger, and peer-to-peer behavior work the way they do.
+
+| Topic | Route |
+| --- | --- |
+| Network and protocol overview | [DKG Network](dkg-network.md) |
+| Node responsibilities | [DKG Node](dkg-node.md) |
+| Scoped knowledge domains | [Context Graphs](context-graphs.md) |
+| WM, SWM, and VM | [Memory Layers](memory-layers.md) |
+| Published graph records | [Knowledge Assets](knowledge-assets.md) |
+| Agent identity and trust | [Agents and Trust](agents-and-trust.md) |
+| Runtime components | [Node Architecture](node-architecture.md) |
+| Assertion and memory transitions | [Memory Lifecycle](memory-lifecycle.md) |
+| Reliable short-message substrate | [Universal Messenger](universal-messenger.md) |
+| Peer-to-peer resilience | [P2P Resilience](p2p-resilience.md) |
+
+Read this section before building automation that writes or publishes data. Agents need this model to avoid mixing private drafts, peer-visible memory, and permanent on-chain finality.

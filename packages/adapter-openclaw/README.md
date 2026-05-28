@@ -48,7 +48,7 @@ openclaw gateway restart
 | `--no-verify` | off | Skip the post-setup verification pass. |
 | `--dry-run` | off | Preview the setup actions without writing anything. |
 
-Faucet funding is best-effort: a failed call logs a manual `curl` block and setup continues. See the main repo's [Testnet Funding](../../README.md#testnet-funding) section and [`docs/setup/TESTNET_FAUCET.md`](../../docs/setup/TESTNET_FAUCET.md) for request/response semantics, rate limits, and error codes.
+Faucet funding is best-effort: a failed call logs a manual `curl` block and setup continues. See the main repo's [Testnet Funding](../../README.md#testnet-funding) section and [Funding](../../docs/use-dkg/funding.md) for the current operational guidance.
 
 ## Verification
 

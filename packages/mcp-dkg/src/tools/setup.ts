@@ -258,7 +258,7 @@ export function registerSetupTools(
   // host for any curated CG by name. Removed entirely here; the
   // route stays in place for operators who invoke it directly via
   // `curl` or the `dkg` CLI (see
-  // `docs/runbooks/RUNBOOK_HOST_MODE_MANUAL_SUBSCRIBE.md`).
+  // `docs/use-dkg/host-mode-manual-subscribe.md`).
   //
   // The `requestHostMode` client method (`packages/mcp-dkg/src/
   // client.ts`) stays — it's still useful inside operator scripts

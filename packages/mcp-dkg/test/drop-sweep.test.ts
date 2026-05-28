@@ -67,7 +67,7 @@ const DROPPED_TOOLS = [
   // a curated CG's opaque ciphertext, bypassing the curator's
   // authority. Operators still drive the manual path via the daemon's
   // `POST /api/shared-memory/host-mode/subscribe` route directly (see
-  // `docs/runbooks/RUNBOOK_HOST_MODE_MANUAL_SUBSCRIBE.md`).
+  // `docs/use-dkg/host-mode-manual-subscribe.md`).
   'dkg_request_hosting',
 ] as const;
 
@@ -97,7 +97,7 @@ describe('drop-sweep — none of the 10 W2-dropped tools reappear in tools/list'
   // cleanup that added `dkg_request_hosting` under registerSetupTools
   // (the LU-6 Phase B operator UX sugar for
   // `POST /api/shared-memory/host-mode/subscribe`; see
-  // `docs/runbooks/RUNBOOK_HOST_MODE_MANUAL_SUBSCRIBE.md`). Dropped
+  // `docs/use-dkg/host-mode-manual-subscribe.md`). Dropped
   // back to 25 in the PR-B Codex review fix (id=3302086584) — the
   // host-mode subscribe is operator-only and must not have an
   // agent-facing MCP entrypoint; see the `dkg_request_hosting` entry

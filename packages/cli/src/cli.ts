@@ -787,7 +787,7 @@ program
   .option('-f, --foreground', 'Run in the foreground (don\'t daemonize)')
   .option(
     '--relay-preferred <multiaddr>',
-    'Operator-preferred relay multiaddr to prioritise over the network relay set (repeatable; rc.9 PR-7). Multiple uses prepend in CLI-declaration order. See docs/messenger-operator.md for the relay-setup playbook.',
+    'Operator-preferred relay multiaddr to prioritise over the network relay set (repeatable; rc.9 PR-7). Multiple uses prepend in CLI-declaration order. See docs/use-dkg/relays-and-peers.md for the relay-setup playbook.',
     (value: string, previous: string[] = []) => [...previous, value],
     [] as string[],
   )

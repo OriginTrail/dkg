@@ -801,7 +801,7 @@ export async function runDaemonInner(
   // reset commit, daemon auto-update brings it within ≤ 5 min, this hook
   // detects the change and wipes the now-orphaned chain state.
   // Operator's keystore + dashboard DB + uploaded files are preserved.
-  // See docs/TESTNET_RESET.md and packages/cli/src/daemon/chain-reset-wipe.ts.
+  // See .ai/runbooks/TESTNET_RESET.md and packages/cli/src/daemon/chain-reset-wipe.ts.
   const wipeResult = chainResetWipe({
     dataDir: dkgDir(),
     currentMarker: network?.chainResetMarker,
@@ -1256,7 +1256,7 @@ export async function runDaemonInner(
                 .join(', ')}. ` +
               (allowDegraded
                 ? `Set core.allowDegradedRelay: false in ~/.dkg/config.json to refuse-to-boot on this state. ` +
-                  `See docs/specs/SPEC_RELAY_DISCOVERY.md for the full rationale.`
+                  `See .ai/specs/SPEC_RELAY_DISCOVERY.md for the full rationale.`
                 : `Refusing to boot. Set core.allowDegradedRelay: true to downgrade this to a warning.`),
           );
           if (!allowDegraded) {

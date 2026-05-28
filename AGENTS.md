@@ -94,10 +94,11 @@ dkg_assertion_write({
 });
 
 // Step 3 — promote WM → SWM so teammates see it.
-// IMPORTANT: the MCP wrapper rejects entities:"all" (Zod expects array)
-// and the daemon REST also rejects empty arrays. Pass the explicit list
-// of root subject URIs you minted (turn URI + every Decision/Finding/Task
-// URI). Forgetting an entity here means it stays in WM, invisible to peers.
+// IMPORTANT: per-turn annotations must pass the explicit list of root
+// subject URIs you minted (turn URI + every Decision/Finding/Task URI).
+// Omitting entities promotes every root in the assertion; do not rely on
+// that broad form for turn annotations. Forgetting an entity here means it
+// stays in WM, invisible to peers.
 dkg_assertion_promote({
   projectId,                              // MCP uses projectId, not contextGraphId
   name: `turn-anno-${sessionKey}-${N}`,
@@ -180,7 +181,7 @@ The full schema lives in each tool's MCP descriptor; this is the working map.
 
 - `dkg_assertion_create` — stage a new WM assertion.
 - `dkg_assertion_write` — append RDF quads to it.
-- `dkg_assertion_promote` — WM → SWM. See §7b(3) for the explicit-array requirement.
+- `dkg_assertion_promote` — WM → SWM. See §7b(3) for when to pass explicit roots.
 - `dkg_assertion_discard` — drop a WM assertion.
 - `dkg_share` — direct SWM write (skips WM staging). Prefer the assertion flow for durable work; use `dkg_share` for quick team-visible notes.
 - `dkg_sub_graph_create` — register a new sub-graph in a CG.
@@ -231,7 +232,7 @@ This applies to every sub-graph other than the bare CG default — `chat`, `code
 - For scoped queries: **omit `view`** entirely and pass `subGraphName: "<name>"` — that's the legacy data-path query and it routes correctly.
 - For cross-subgraph views: pass `view: "shared-working-memory"` without `subGraphName`, then filter by named graph in your SPARQL: `GRAPH <did:dkg:context-graph:<cg>/code/_shared_memory> { ?s ?p ?o }`.
 
-**(3) `dkg_assertion_promote` requires an explicit array of root URIs via MCP.** The MCP wrapper rejects `entities: "all"` (Zod expects array) and the daemon REST rejects empty arrays with `"entities" must be "all" or a non-empty array of non-empty strings`. Pass the explicit list of every root subject URI you minted (turn URI + every `Decision`/`Finding`/`Task`/`Question`/file URI). Anything not listed stays in WM, invisible to peers. (The shell scanner can hit the daemon REST directly with `entities: "all"`; only the MCP-side has the array constraint.)
+**(3) `dkg_assertion_promote` can promote all roots when `entities` is omitted, but turn annotations should pass explicit roots.** The MCP wrapper rejects `entities: "all"` (Zod expects an array or omission) and rejects empty arrays before calling the daemon. For per-turn annotations, pass the explicit list of every root subject URI you minted (turn URI + every `Decision`/`Finding`/`Task`/`Question`/file URI). Anything not listed stays in WM, invisible to peers. Use omit-only promote-all for broad operator workflows where the whole assertion is intentionally ready.
 
 **(4) Path segments in `code:` URIs are percent-encoded.** Files with spaces, parens, `+`, `@`, etc. would otherwise produce IRIs that Oxigraph rejects with `Invalid IRI code point`. The scanner encodes each path segment with `encodeURIComponent` and joins with `/`. So `@origintrail-official/dkg-core` becomes `%40origintrail-official/dkg-core` inside the URI. When minting a file URI by hand, apply the same encoding.
 
@@ -268,9 +269,9 @@ For any other error (peer not found, timeout, network), retry once before bother
 
 ## 9. Universal Messenger (v10.0.0-rc.9)
 
-DKG's short peer-to-peer protocols (chat, skill request, query-remote, swm-sender-key, private-access, join-request, storage-ack, verify-proposal) all route through a single reliability substrate called the **Universal Messenger**. Architecture: [`docs/messenger.md`](./docs/messenger.md). Operator-facing surfaces: [`docs/messenger-operator.md`](./docs/messenger-operator.md). Migration recipe for a hypothetical 9th protocol: [`docs/messenger-add-protocol.md`](./docs/messenger-add-protocol.md).
+DKG's short peer-to-peer protocols (chat, skill request, query-remote, swm-sender-key, private-access, join-request, storage-ack, verify-proposal) all route through a single reliability substrate called the **Universal Messenger**. Architecture: [`docs/how-dkg-works/universal-messenger.md`](./docs/how-dkg-works/universal-messenger.md). Operator-facing relay and API surfaces: [`docs/use-dkg/relays-and-peers.md`](./docs/use-dkg/relays-and-peers.md) and [`docs/reference/api.md`](./docs/reference/api.md). Migration recipe for a hypothetical 9th protocol: [`.ai/specs/messenger-add-protocol.md`](./.ai/specs/messenger-add-protocol.md).
 
-**Convergence rule for agents working on this codebase**: route any new short-message protocol through `Messenger.sendReliable` and register handlers via `Messenger.register` — never `ProtocolRouter.send` / `ProtocolRouter.register` directly. The substrate gives you sender-side durable retry (SQLite outbox surviving daemon restart), receiver-side dedup keyed by `messageId`, sender-side response cache, stale-snapshot-safe retries, opportunistic flush on `connection:open`, DHT-walk-on-stall, and observability via `/api/slo`. Bypassing it loses every one of those properties. The migration recipe lives at `docs/messenger-add-protocol.md` and includes the worked example from PR-3 (chat).
+**Convergence rule for agents working on this codebase**: route any new short-message protocol through `Messenger.sendReliable` and register handlers via `Messenger.register` — never `ProtocolRouter.send` / `ProtocolRouter.register` directly. The substrate gives you sender-side durable retry (SQLite outbox surviving daemon restart), receiver-side dedup keyed by `messageId`, sender-side response cache, stale-snapshot-safe retries, opportunistic flush on `connection:open`, DHT-walk-on-stall, and observability via `/api/slo`. Bypassing it loses every one of those properties. The migration recipe lives at `.ai/specs/messenger-add-protocol.md` and includes the worked example from PR-3 (chat).
 
 ## 10. Things to NOT do
 

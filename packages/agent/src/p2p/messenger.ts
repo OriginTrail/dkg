@@ -287,7 +287,7 @@ export type ReliableHandler = (
  *   - PR-3 wires the SQLite-backed stores in `cli/src/daemon/
  *     lifecycle.ts` so every chat send picks them up.
  *
- * See `docs/messenger.md` for the architecture overview and per-
+ * See `docs/how-dkg-works/universal-messenger.md` for the architecture overview and per-
  * protocol coverage table.
  */
 /**
@@ -739,7 +739,7 @@ export class Messenger {
         // table (a "bare bytes" handler call would store the
         // application response under a fabricated/missing messageId).
         // Hard cutover on the protocol-prefix bump is the rc.9
-        // design decision — see docs/messenger.md.
+        // design decision — see docs/how-dkg-works/universal-messenger.md.
         const msg = err instanceof Error ? err.message : String(err);
         throw new Error(
           `[Messenger] failed to decode ReliableEnvelope on ${protocolId} from ${peerKey.slice(-8)}: ${msg}`,
@@ -1014,7 +1014,7 @@ export class MessengerNotConfiguredError extends Error {
       `[Messenger] ${method} requires idempotencyStore + outboxStore, ` +
         `but the Messenger was constructed without them. Pass both at ` +
         `construction (lifecycle.ts wires Sqlite-backed stores from the ` +
-        `DashboardDB; see docs/messenger.md).`,
+        `DashboardDB; see docs/how-dkg-works/universal-messenger.md).`,
     );
     this.name = 'MessengerNotConfiguredError';
   }

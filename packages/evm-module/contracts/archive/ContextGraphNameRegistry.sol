@@ -22,7 +22,7 @@ pragma solidity ^0.8.20;
  * which is the authoritative V10 CG contract stack. A future on-chain
  * name-ownership model (NFT-backed, transferable, with economics) is tracked
  * as a separate design task; see
- * `docs/plans/DKG_RESOLVER_AND_NAME_REGISTRY_PROPOSAL.md`.
+ * `.ai/plans/DKG_RESOLVER_AND_NAME_REGISTRY_PROPOSAL.md`.
  */
 contract ContextGraphNameRegistry {
     uint8 public constant ACCESS_OPEN = 0;

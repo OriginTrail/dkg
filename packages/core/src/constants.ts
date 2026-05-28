@@ -20,7 +20,7 @@ export const PROTOCOL_SYNC = '/dkg/10.0.1/sync';
 // reliability substrate (ReliableEnvelope wrapper, sender +
 // receiver idempotency, durable SQLite outbox). Hard cutover —
 // nodes on rc.8 cannot chat with nodes on rc.9; both daemons MUST
-// be on the same prefix (see docs/messenger.md "Versioning" + the
+// be on the same prefix (see docs/how-dkg-works/universal-messenger.md "Versioning" + the
 // rc.9 plan note "Safe by /dkg/10.0.1/* prefix-version invariant").
 // PR-8+ migrate the remaining short-message protocols onto the
 // same 10.0.1 minor.
@@ -41,7 +41,7 @@ export const PROTOCOL_ACCESS = '/dkg/10.0.1/private-access';
 // returns RESPONSE_GONE. queryRemote() handles RESPONSE_GONE by
 // re-issuing the query with a fresh messageId — SPARQL is idempotent
 // at the app layer so this is semantically safe (see
-// docs/messenger.md "Response caching policy").
+// docs/how-dkg-works/universal-messenger.md "Response caching policy").
 export const PROTOCOL_QUERY_REMOTE = '/dkg/10.0.1/query-remote';
 // rc.9 PR-8: bumped from /dkg/10.0.0/swm-sender-key to opt into the
 // Universal Messenger substrate (same rationale as PROTOCOL_ACCESS).

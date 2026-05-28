@@ -177,7 +177,7 @@ prioritise their own relays via `--relay-preferred` (CLI) or the
   peer key (`~/.dkg/key`); back it up if you want the same multiaddr after a
   VM rebuild.
 
-See [`docs/messenger-operator.md`](../../docs/messenger-operator.md) for the
+See [Relays and Peers](../../docs/use-dkg/relays-and-peers.md) for the
 full operator-side guide (debugging stuck outbox entries, reading `/api/slo`
 once it lands in rc.9 PR-12).
 
@@ -598,7 +598,7 @@ condition pointing at the same `.js` files would put us in the "require
 ESM" mode that is unreliable across Node versions. Plugin authors who
 write CommonJS use the one-line `await import()` workaround above.
 
-See [`docs/adr/0001-daemon-route-plugins.md`](../../docs/adr/0001-daemon-route-plugins.md)
+See [`.ai/adr/0001-daemon-route-plugins.md`](../../.ai/adr/0001-daemon-route-plugins.md)
 for the design rationale, threat model, and stability guarantees.
 
 ## Internal Dependencies

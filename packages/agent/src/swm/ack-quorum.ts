@@ -70,7 +70,7 @@
  *   6. **Caller owns ack-emission policy.** This component does
  *      NOT send `SwmShareAck` itself — the receiver-side wiring
  *      in `SharedMemoryHandler` is what calls
- *      `messenger.sendReliable(authorPeer, PROTOCOL_SWM_SHARE_ACK, ...)`
+ *      `messenger.sendToPeer(authorPeer, PROTOCOL_SWM_SHARE_ACK, ...)`
  *      after a successful gossip apply. Decoupled because the
  *      receiver doesn't have an `SwmAckQuorum` instance — it's a
  *      sender-side concept.

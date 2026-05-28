@@ -510,12 +510,12 @@ export class DkgClient {
     contextGraphId: string;
     assertionName: string;
     subGraphName?: string;
-    entities: string[];
+    entities?: string[];
   }): Promise<void> {
     const body: Record<string, unknown> = {
       contextGraphId: args.contextGraphId,
-      entities: args.entities,
     };
+    if (args.entities !== undefined) body.entities = args.entities;
     if (args.subGraphName) body.subGraphName = args.subGraphName;
     await this.request(
       'POST',
@@ -780,7 +780,7 @@ export class DkgClient {
    * discovery paths apply: chain-event (curator hasn't registered
    * on-chain), beacon (curator doesn't run the discovery beacon), or
    * reconciler (the local node doesn't yet know about the CG). See
-   * `docs/runbooks/RUNBOOK_HOST_MODE_MANUAL_SUBSCRIBE.md` for full
+   * `docs/use-dkg/host-mode-manual-subscribe.md` for full
    * guidance on when to reach for this.
    *
    * Idempotent: the daemon returns `{ alreadySubscribed: true }` when

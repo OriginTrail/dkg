@@ -2,8 +2,8 @@
  * Async Promote Queue — public types.
  *
  * Companion to the merged RFC at
- * `docs/specs/SPEC_ASYNC_PROMOTE_QUEUE.md` and the implementation plan at
- * `docs/specs/SPEC_ASYNC_PROMOTE_QUEUE_IMPLEMENTATION_PLAN.md`. This file
+ * `.ai/specs/SPEC_ASYNC_PROMOTE_QUEUE.md` and the implementation plan at
+ * `.ai/specs/SPEC_ASYNC_PROMOTE_QUEUE_IMPLEMENTATION_PLAN.md`. This file
  * contains only the public interface + types so callers can depend on it
  * without pulling in the impl (and SPARQL surface area) of the
  * `TripleStoreAsyncPromoteQueue`.

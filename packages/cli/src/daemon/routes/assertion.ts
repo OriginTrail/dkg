@@ -1538,7 +1538,7 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
     }
   }
 
-  // ── Async-promote queue (RFC: docs/specs/SPEC_ASYNC_PROMOTE_QUEUE.md) ──
+  // ── Async-promote queue (RFC: .ai/specs/SPEC_ASYNC_PROMOTE_QUEUE.md) ──
   //
   // Five routes that mirror the sync /promote contract but enqueue work
   // for an in-process worker (PR #3) instead of running it inline. All

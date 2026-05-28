@@ -369,7 +369,7 @@ export class DKGAgent {
   readonly profileManager: ProfileManager;
   /**
    * Lazily-constructed WM→SWM async-promote queue (see
-   * `docs/specs/SPEC_ASYNC_PROMOTE_QUEUE.md`). Routes call into it via
+   * `.ai/specs/SPEC_ASYNC_PROMOTE_QUEUE.md`). Routes call into it via
    * `agent.assertion.promoteAsync(...)`. PR #3 will wire an in-process
    * worker loop that periodically calls `claimNext` + `succeed`/`fail`;
    * for now, only the public enqueue/inspect surface is reachable. We
@@ -13456,7 +13456,7 @@ export class DKGAgent {
    * - Merging an address libp2p already knows about is a no-op
    *   (`peerStore.merge` dedupes internally).
    *
-   * Trade-off (referenced from `docs/archive/UPSTREAM_ISSUE_DRAFT.md`):
+   * Trade-off (referenced from `docs/archive/v9/misc/UPSTREAM_ISSUE_DRAFT.md`):
    * `peerStore.merge` can wake the connection manager to dial direct,
    * which has been observed to disrupt streams mid-negotiation. We're
    * NOT in mid-negotiation here (the call runs from
@@ -17867,7 +17867,7 @@ export class DKGAgent {
     }
     // Flush WM to disk before exit so the debounced 50ms flush in the
     // Oxigraph adapter can't lose the latest inserts when the process
-    // exits. See docs/bugs/wm-persistence-regression.md.
+    // exits. See .ai/bugs/wm-persistence-regression.md.
     //
     // `store.close()` now THROWS on durable-write failures (ENOSPC,
     // EACCES, EROFS, etc.) — see oxigraph.ts. We log loudly but do not
@@ -17882,7 +17882,7 @@ export class DKGAgent {
         `[DKGAgent.stop] WM final flush FAILED on shutdown: ${(err as Error).message}. ` +
           `The store on disk may be missing recent inserts — operator should investigate ` +
           `(disk full, permission revoked, filesystem read-only, …). ` +
-          `See docs/bugs/wm-persistence-regression.md for the durability contract.`,
+          `See .ai/bugs/wm-persistence-regression.md for the durability contract.`,
       );
     }
     this.started = false;
@@ -18334,7 +18334,7 @@ export class DKGAgent {
         };
       },
 
-      // ── Async promote (RFC: docs/specs/SPEC_ASYNC_PROMOTE_QUEUE.md) ──
+      // ── Async promote (RFC: .ai/specs/SPEC_ASYNC_PROMOTE_QUEUE.md) ──
       //
       // These five methods are thin pass-throughs to the queue. The
       // worker that actually drains the queue lives in the daemon (PR

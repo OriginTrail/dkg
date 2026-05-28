@@ -2,7 +2,7 @@
 
 **Status**: implemented in PR #240 (branch `v10-pr97-spec-impl`).
 **Code-review follow-ups**: all H/M/L findings from [`CODE_REVIEW_V10_D26.md`](./CODE_REVIEW_V10_D26.md) have been applied in the same PR (contract versions bumped accordingly).
-**Spec**: [`/Users/aleatoric/.cursor/plans/v10_time-accurate_staking_accounting_801da0cd.plan.md`](../../../.cursor/plans/v10_time-accurate_staking_accounting_801da0cd.plan.md)
+**Spec**: v10 time-accurate staking accounting planning note.
 **Scope**: `ConvictionStakingStorage.sol` (v3.1.0), `RandomSamplingStorage.sol` (v3.0.0), `RandomSampling.submitProof`, `StakingV10.sol` (v2.3.0) — `_claim` / `_prepareForStakeChangeV10`, `DKGStakingConvictionNFT.sol` (v1.2.0).
 
 ---

@@ -1,6 +1,6 @@
 /**
  * @origintrail-official/dkg-adapter-elizaos — ElizaOS plugin that turns any ElizaOS agent
- * into a DKG V9 node.
+ * into a DKG V10 node.
  *
  * Usage in a character config:
  *

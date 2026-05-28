@@ -18,7 +18,7 @@ A fork-supplied npm package (or absolute-path module) that exports a
 shape as the module's default export, a named `plugin` export, or
 `module.exports` (CJS). Loaded at daemon startup and dispatched as the
 last step in the route group chain. Lets forks add HTTP endpoints without
-editing `handle-request.ts`. See `docs/adr/0001-daemon-route-plugins.md`.
+editing `handle-request.ts`. See `.ai/adr/0001-daemon-route-plugins.md`.
 _Distinct from_: **Agent plugin** (ElizaOS-style), **Integration**.
 
 **Integration**:

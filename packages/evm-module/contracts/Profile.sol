@@ -30,7 +30,7 @@ contract Profile is INamed, IVersioned, ContractStatus, IInitializable {
     // entry point that re-attaches a Profile to an existing identityId
     // (testnet ProfileStorage-redeploy recovery). The id is reused so the
     // surviving staking/conviction/sharding state stays addressable. See
-    // docs/adr/0001-recreate-profile-admin-only.md.
+    // .ai/adr/evm-module-0001-recreate-profile-admin-only.md.
     string private constant _VERSION = "1.3.0";
 
     Ask public askContract;

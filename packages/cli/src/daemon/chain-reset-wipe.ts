@@ -10,7 +10,7 @@
  * sampling WAL because those files reference chain entities (KC ids,
  * merkle roots, challenge periods) that no longer exist after the chain
  * is redeployed. Without this auto-wipe, every operator has to do it by
- * hand — see docs/TESTNET_RESET.md Phase C for the manual drill.
+ * hand — see .ai/runbooks/TESTNET_RESET.md Phase C for the manual drill.
  *
  * With this hook, the maintainer simply bumps
  * `network/testnet.json#chainResetMarker` to a fresh value as part of the

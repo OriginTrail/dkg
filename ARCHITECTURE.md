@@ -337,6 +337,70 @@ sequenceDiagram
   Docs-->>Planner: report documentation outcome
 ```
 
+## Docs Refresh Architecture Context
+
+The docs refresh is a repository-information-architecture change, not a runtime
+architecture change. The current repository already has several doc-producing
+and doc-consuming surfaces that must be mapped before any stale-doc cleanup:
+
+- `README.md` is the primary human entry point and is already V10-oriented:
+  multi-agent memory positioning, WM/SWM/VM concepts, quick starts for Hermes,
+  OpenClaw, MCP, standalone node operation, package layout, and links into
+  setup guides.
+- `packages/cli/skills/dkg-node/SKILL.md` is the strongest agent-facing
+  contract. It documents the live DKG V10 API/tool surface, memory layers,
+  authentication, context-graph routing, assertion lifecycle, query behavior,
+  and agent-to-agent operations. Public agent docs should either cite it as the
+  source of truth or generate from it; duplicating it by hand risks drift.
+- `AGENTS.md` is the repository-local agent operating protocol for coding
+  agents. It is project-memory guidance, not public product docs, but it
+  captures important invariants such as V10-only tool names, sub-graph routing,
+  code-graph URI rules, Universal Messenger usage, and VM-publish gating.
+- Package READMEs under `packages/` are the best homes for package-specific
+  setup and adapter details. The central docs tree already delegates some
+  setup pages to those READMEs, for example MCP and Hermes.
+- The `docs/` tree currently mixes current guides, V9-era specs and setup
+  pages, future ideas, experiments, reports, plans, diagrams, ADRs, security
+  docs, testing runbooks, and partial archives. This weakens retrieval
+  boundaries for both humans and agents.
+
+```mermaid
+flowchart TD
+  Readme[README.md<br/>human entry + V10 overview]
+  CentralDocs[docs/<br/>mixed central corpus]
+  AgentSkill[packages/cli/skills/dkg-node/SKILL.md<br/>canonical agent API contract]
+  AgentProtocol[AGENTS.md<br/>repo-local agent protocol]
+  PackageReadmes[packages/*/README.md<br/>package and adapter references]
+  Archive[docs/archive/<br/>explicitly historical subset]
+  AgentContext[generated agent context<br/>llms map / task packs / invariants]
+
+  Readme --> CentralDocs
+  Readme --> PackageReadmes
+  CentralDocs --> Archive
+  PackageReadmes --> AgentSkill
+  AgentProtocol -. internal invariants .-> AgentContext
+  AgentSkill --> AgentContext
+  CentralDocs --> AgentContext
+```
+
+For the first docs refresh design run, treat "current" and "retrievable" as
+separate gates, and make the visible information architecture
+overview-led, task-routed, and architecture-backed. Public navigation should
+prefer product/workflow labels, including a visible top-level **For AI Agents**
+section, while preserving Diataxis-style page categories as metadata for
+generation and retrieval. Current V10 facts are concentrated in `README.md`,
+`packages/cli/skills/dkg-node/SKILL.md`,
+`docs/architecture/universal-messenger.md`, `docs/operate/messenger.md`,
+`docs/build/connect-mcp.md`, `docs/build/connect-hermes.md`, `.ai/adr/*`, and
+package READMEs. Stale or release-specific material is kept behind explicit
+boundaries in `docs/archive/v9/`, while codebase-only plans, RFCs, reports,
+tests, and runbooks live under `.ai/`. A clean agent-first architecture
+needs explicit status metadata, archive/exclusion boundaries, and generated
+agent context from the current corpus before any optional retrieval layer is
+introduced. Non-V10 docs should move under versioned archive paths such as
+`docs/archive/v9/` or `docs/archive/v8/`; current V10 docs and generated agent
+packs should not link to old-version docs.
+
 # DKG V10 Architecture
 
 This document captures the top-level runtime boundaries for the node, CLI, and
@@ -658,7 +722,7 @@ sequenceDiagram
 
 Current repository state separates triple-store persistence from peer-to-peer
 message confidentiality. See
-[ADR 0004](./docs/adr/0004-private-store-plaintext-rdf.md) for the accepted
+[ADR 0004](./.ai/adr/0004-private-store-plaintext-rdf.md) for the accepted
 decision to keep private-store RDF plaintext after message decryption.
 
 - **WM assertions** live in assertion named graphs such as
@@ -1013,7 +1077,7 @@ authors can ship route plugins without a registry review cycle.
 
 ### Route plugin mechanism (ADR 0001)
 
-Approved 2026-05-20 (`docs/adr/0001-daemon-route-plugins.md`, design
+Approved 2026-05-20 (`.ai/adr/0001-daemon-route-plugins.md`, design
 `docs/superpowers/specs/2026-05-20-daemon-route-plugins-design.md`):
 
 - **Public contract.** `plugin-api.ts` re-exports `RequestContext` and

@@ -1,6 +1,6 @@
 # @origintrail-official/dkg-evm-module
 
-DKG V9 smart contracts and deployment scripts. Forked from the V8 `dkg-evm-module` and adapted for the V9 architecture. This is a Hardhat project — it compiles Solidity, runs tests, and deploys to EVM chains.
+DKG smart contracts and deployment scripts for the current V10 node. This is a Hardhat project — it compiles Solidity, runs tests, and deploys to EVM chains.
 
 ## Features
 

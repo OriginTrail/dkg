@@ -1,8 +1,8 @@
 /**
  * Async Promote Queue — unit tests.
  *
- * Pin every behaviour the RFC (`docs/specs/SPEC_ASYNC_PROMOTE_QUEUE.md`)
- * and the implementation plan (`docs/specs/SPEC_ASYNC_PROMOTE_QUEUE_IMPLEMENTATION_PLAN.md`)
+ * Pin every behaviour the RFC (`.ai/specs/SPEC_ASYNC_PROMOTE_QUEUE.md`)
+ * and the implementation plan (`.ai/specs/SPEC_ASYNC_PROMOTE_QUEUE_IMPLEMENTATION_PLAN.md`)
  * declare. Each `it` names the RFC section / behaviour it pins so reviewers
  * can map test → spec.
  *

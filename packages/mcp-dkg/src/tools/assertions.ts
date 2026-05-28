@@ -201,8 +201,6 @@ export function registerAssertionTools(
     async ({ name, entities, projectId, subGraphName }): Promise<ToolResult> => {
       const pid = resolveProject(projectId, config);
       if (!pid) return projectErr();
-      // Provided entities must be a non-empty array of URIs; omitted means
-      // "promote all roots" (daemon-side default).
       if (entities !== undefined && entities.length === 0) {
         return errResult(
           '"entities" must be omitted or a non-empty array of root entity URIs.',
@@ -213,13 +211,7 @@ export function registerAssertionTools(
           contextGraphId: pid,
           assertionName: name,
           subGraphName,
-          // The tool blocks empty-array from callers (validated above)
-          // because the schema's intent is unambiguous: omit means
-          // promote-all. The empty-array IS the daemon's "promote all"
-          // sentinel internally — `promoteAssertion` requires an array
-          // shape — but we hide that wire detail from the public surface
-          // so the API has one canonical "promote all" form (omit).
-          entities: entities ?? [],
+          entities,
         });
         const scope = entities && entities.length > 0
           ? `${entities.length} entit${entities.length === 1 ? 'y' : 'ies'}`

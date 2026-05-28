@@ -43,9 +43,9 @@ The canonical entry written into each client's config (paths shown POSIX-style; 
 }
 ```
 
-The `command` is the absolute path to the Node binary running this CLI (`process.execPath` at setup time); the first arg is the absolute path to the installed CLI's `cli.js` (resolved from `process.argv[1]` via `realpathSync`, which canonicalises symlinks across `npm relink` / version-manager rotations). GUI MCP clients (Claude Desktop, Windsurf, VSCode + Copilot) often don't inherit the shell PATH that includes `node` or the `dkg` shim, so writing the resolved absolute paths makes the registration robust against that gap. The `env.DKG_HOME` field propagates the resolved bootstrap home so spawned MCP servers (which don't inherit shell env in GUI clients) read the same `config.yaml` / `auth.token` that setup just bootstrapped — important under `DKG_HOME=/custom` or `--monorepo` where the home is `~/.dkg-dev`. `dkg mcp setup` resolves and writes all three automatically — you only need this manual shape when configuring by hand. For VSCode + Copilot Chat, swap the outer `mcpServers` key for `servers` while keeping the same inner block.
+The `command` is the absolute path to the Node binary running this CLI (`process.execPath` at setup time); the first arg is the absolute path to the installed CLI's `cli.js` (resolved from `process.argv[1]` via `realpathSync`, which canonicalises symlinks across `npm relink` / version-manager rotations). GUI MCP clients (Claude Desktop, Windsurf, VSCode + Copilot) often don't inherit the shell PATH that includes `node` or the `dkg` shim, so writing the resolved absolute paths makes the registration robust against that gap. The `env.DKG_HOME` field propagates the resolved bootstrap home so spawned MCP servers (which don't inherit shell env in GUI clients) read the same `config.json` / `auth.token` that setup just bootstrapped — important under `DKG_HOME=/custom` or `--monorepo` where the home is `~/.dkg-dev`. `dkg mcp setup` resolves and writes all three automatically — you only need this manual shape when configuring by hand. For VSCode + Copilot Chat, swap the outer `mcpServers` key for `servers` while keeping the same inner block.
 
-No tokens or URLs in the JSON — those live in `~/.dkg/config.yaml` and the daemon-written `~/.dkg/auth.token`. If no client is detected, run `dkg mcp setup --print-only` to emit the JSON for manual paste.
+No tokens or URLs in the JSON — those live in `~/.dkg/config.json` and the daemon-written `~/.dkg/auth.token`. If no client is detected, run `dkg mcp setup --print-only` to emit the JSON for manual paste.
 
 After `dkg mcp setup` runs, restart your client so it discovers the MCP. Verify by asking the agent: *"What tools does dkg expose?"* The `tools/list` response must include `dkg_assertion_create`, `dkg_assertion_write`, and `dkg_memory_search`.
 
@@ -187,8 +187,8 @@ Two distinct surfaces (both documented in `SKILL.md §4a`):
 
 | Tool | When to use |
 |---|---|
-| `dkg_publish` | "I have fresh quads, publish them now." Two-call helper: writes the supplied quads to SWM, then publishes the entire SWM in the CG to Verified Memory and clears SWM. Skip the WM staging area. |
-| `dkg_shared_memory_publish` | Canonical step-4 finalizer for the stepwise flow (`assertion_create + write + promote` → this). Publishes existing SWM (filterable by `rootEntities`), clears SWM. Pass `registerIfNeeded: true` to upgrade a local-only CG to on-chain registration in the same call (may spend gas/TRAC). |
+| `dkg_publish` | "I have fresh quads, publish them now." One-shot helper that creates an assertion, finalizes it, promotes it to SWM, then publishes that assertion to Verified Memory. Use it for immediate publish flows, not iterative drafting. |
+| `dkg_shared_memory_publish` | Canonical finalizer for the stepwise flow (`assertion_create + write + promote` → this). Publishes promoted assertion data to Verified Memory. Pass `registerIfNeeded: true` to upgrade a local-only CG to on-chain registration in the same call (may spend gas/TRAC). |
 
 Both ship ungated — no `agent.canPublishToVm` flag — to mirror the OpenClaw adapter exactly.
 
@@ -209,7 +209,7 @@ Lifted from the repo-root README's [DKG V10 as agent memory quickstart](../../RE
 4. *(optional)* `dkg_assertion_promote` to advance the lifecycle to SWM and gossip to peers.
 5. *(optional)* `dkg_shared_memory_publish` to finalize on-chain (costs TRAC + gas, clears SWM).
 
-For ad-hoc filtering or non-text-search queries, `dkg_query` is the lower-level SPARQL surface. For one-shot fresh-quads-to-VM writes that skip the WM staging area, use `dkg_publish` instead of the assertion lifecycle — but prefer the lifecycle for anything an agent will iterate on.
+For ad-hoc filtering or non-text-search queries, `dkg_query` is the lower-level SPARQL surface. For one-shot fresh-quads-to-VM writes, use `dkg_publish` instead of the stepwise assertion lifecycle — but prefer the lifecycle for anything an agent will iterate on.
 
 ## View semantics
 
@@ -271,7 +271,7 @@ Per-turn state is kept in `~/.cache/dkg-mcp/sessions/*.json`; safe to delete at 
 - **`tools/list` is missing tools after `dkg mcp setup`** → the client's MCP config still points at a prior install. Re-run `dkg mcp setup --force` to refresh stale entries.
 - **Daemon unreachable** → `dkg status`; if it errors, `dkg logs` and `cat ~/.dkg/daemon.log`. Stale pid → `cat ~/.dkg/daemon.pid` and kill it, then `dkg start` again.
 - **Port 9200 already in use** → another node is running. `dkg stop` once, or override via `dkg init` and pick a different API port.
-- **WSL2: daemon dies when the terminal closes** → wrap in `tmux` or install as a systemd user service. See the [WSL2 section in JOIN_TESTNET.md](../../docs/setup/JOIN_TESTNET.md) for the systemd unit file.
+- **WSL2: daemon dies when the terminal closes** → wrap in `tmux` or install as a systemd user service. The current operator docs cover daemon lifecycle at [Daemon Lifecycle](../../docs/use-dkg/run-node.md).
 - **WSL2: Windows-side MCP clients (Claude Desktop, Cursor, VSCode + Copilot, Cline, Windsurf)** → run `dkg mcp setup` from **PowerShell**, not from inside WSL. Setup invoked from WSL detects the Windows-side configs and writes entries into them, but the registered `command` is the Linux-side `node` binary path; Win32 clients can't spawn Linux executables, so the entries fail at MCP startup. For **Linux-side** clients (Linux Cursor, Linux Claude Code), run setup from inside WSL as normal. End-to-end Windows-side support from a WSL invocation is tracked separately (will use a `wsl.exe`-wrapper command form once shipped).
 
 ## Package layout
@@ -292,4 +292,4 @@ Per-turn state is kept in `~/.cache/dkg-mcp/sessions/*.json`; safe to delete at 
 
 ## Historical recovery
 
-Ten V9-era and coding-project tools were dropped from the V10 surface during consolidation. The annotated git tag `pre-v10-tool-drop` preserves them — recover any individual handler with `git show pre-v10-tool-drop:packages/mcp-dkg/src/tools/<file>`. Design rationale and reintroduction-pointers for each drop are in [`agent-docs/dkg-v10-mcp-consolidation/v9-design-archive.md`](../../agent-docs/dkg-v10-mcp-consolidation/v9-design-archive.md).
+Ten pre-V10 and coding-project tools were dropped from the V10 surface during consolidation. The annotated git tag `pre-v10-tool-drop` preserves them — recover any individual handler with `git show pre-v10-tool-drop:packages/mcp-dkg/src/tools/<file>`.

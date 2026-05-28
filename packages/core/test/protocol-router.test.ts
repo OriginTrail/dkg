@@ -518,7 +518,7 @@ describe('ProtocolRouter', () => {
             status: 'open',
             newStream: async () => ({
               // The known mid-stream-negotiation race documented at
-              // docs/archive/UPSTREAM_ISSUE_DRAFT.md — `newStream`
+              // docs/archive/v9/misc/UPSTREAM_ISSUE_DRAFT.md — `newStream`
               // returns a stream that's already in a closed state
               // because the CM tore down the connection between
               // negotiation and return. We must NOT send on it.

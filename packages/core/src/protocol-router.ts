@@ -78,7 +78,7 @@ export interface SendOptions {
    * run multiple times for the same logical request — every caller
    * MUST satisfy this prefix invariant before enabling > 1. The
    * sender cannot inspect the receiver's substrate version; the
-   * protocol-prefix string IS the contract (see docs/messenger.md
+   * protocol-prefix string IS the contract (see docs/how-dkg-works/universal-messenger.md
    * "Versioning" and the rc.9 plan PR-4 invariant note).
    *
    * When fewer than 2 live connections exist for the peer, the
@@ -664,7 +664,7 @@ export class ProtocolRouter {
         // Crucially: when peerStore is empty for P (the Window D
         // shape), the connection-manager-auto-dial side effect of
         // `peerStore.merge` documented at
-        // docs/archive/UPSTREAM_ISSUE_DRAFT.md does NOT fire — there
+        // docs/archive/v9/misc/UPSTREAM_ISSUE_DRAFT.md does NOT fire — there
         // are no direct addresses to upgrade to. So this fast path
         // does not introduce the mid-stream-negotiation race the doc
         // warns about; it benefits exactly the case where the doc's
@@ -857,7 +857,7 @@ interface ReusableConnection {
    * Present (truthy) when libp2p marks this connection as limited
    * (circuit-relay-v2). Limited connections trigger the CM-auto-
    * upgrade race documented in
-   * `docs/archive/UPSTREAM_ISSUE_DRAFT.md` if peerStore has direct
+   * `docs/archive/v9/misc/UPSTREAM_ISSUE_DRAFT.md` if peerStore has direct
    * addresses for the peer; the fast path uses this hint plus the
    * `peerHasDirectAddrs` probe to skip them safely.
    */
@@ -936,7 +936,7 @@ export async function tryReuseExistingConnection(
   // We only need this when we're about to fast-path through a LIMITED
   // (circuit-relay-v2) connection — limited connections trigger
   // libp2p's connection-manager auto-upgrade race documented in
-  // `docs/archive/UPSTREAM_ISSUE_DRAFT.md`: opening a stream on a
+  // `docs/archive/v9/misc/UPSTREAM_ISSUE_DRAFT.md`: opening a stream on a
   // limited connection calls into the protocol negotiator which
   // calls `peerStore.merge` for the peer's protocols, which causes
   // CM to attempt a direct dial to any direct addresses already in
@@ -990,7 +990,7 @@ export async function tryReuseExistingConnection(
       });
       if (s.writeStatus === 'closed' || s.writeStatus === 'closing') {
         // The known mid-stream-negotiation race
-        // (docs/archive/UPSTREAM_ISSUE_DRAFT.md): newStream came
+        // (docs/archive/v9/misc/UPSTREAM_ISSUE_DRAFT.md): newStream came
         // back already-dead because peerStore.merge triggered the
         // connection manager to prune our connection. Abort the
         // dead stream and try the NEXT candidate connection

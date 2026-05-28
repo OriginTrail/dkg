@@ -5,8 +5,8 @@
  * documented in SKILL.md §4a:
  *
  *   - `dkg_publish` — "I have fresh quads, publish them now" one-shot.
- *     Two-call helper: writes the quads to SWM, then publishes the
- *     entire SWM to Verified Memory and clears SWM.
+ *     Creates an assertion, finalizes it, promotes it to SWM, then
+ *     publishes that assertion to Verified Memory.
  *
  *   - `dkg_shared_memory_publish` — canonical Step 5 finalizer for the
  *     stepwise flow (`assertion_create + write + promote` then this).
@@ -14,11 +14,10 @@
  *     `agent.canPublishToVm` flag; matches the OpenClaw adapter shape
  *     exactly.
  *
- * Both call the same daemon endpoints
- * (`POST /api/shared-memory/{write,publish}`); the difference is in
- * the input shape — `dkg_publish` accepts fresh quads, while
- * `dkg_shared_memory_publish` consumes existing SWM (filterable by
- * `rootEntities`) and clears as a side-effect.
+ * Both end at `POST /api/shared-memory/publish`; the difference is in
+ * the input shape — `dkg_publish` accepts fresh quads and stages them
+ * through the assertion lifecycle, while `dkg_shared_memory_publish`
+ * consumes an existing promoted assertion.
  */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
@@ -113,10 +112,10 @@ export function registerPublishTools(
     {
       title: 'Publish Fresh Quads',
       description:
-        '"I have fresh quads, write+publish now." Two-call helper: ' +
-        'writes the supplied quads to Shared Working Memory, then ' +
-        'publishes the entire SWM in the CG to Verified Memory ' +
-        '(on-chain) and clears SWM. For the canonical step-wise flow ' +
+        '"I have fresh quads, publish now." One-shot helper: ' +
+        'creates an assertion with the supplied quads, finalizes it, ' +
+        'promotes it to Shared Working Memory, then publishes that ' +
+        'assertion to Verified Memory (on-chain). For the canonical step-wise flow ' +
         '(write → promote → publish) use `dkg_assertion_create / write ' +
         '/ promote` followed by `dkg_shared_memory_publish` — that ' +
         'path keeps WM as a draft staging area before SWM. Use ' +
