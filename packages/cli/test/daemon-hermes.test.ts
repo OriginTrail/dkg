@@ -548,6 +548,20 @@ describe('Hermes channel helpers', () => {
         hermes: { enabled: true, transport: { kind: 'hermes-openai' } },
       },
     }))).toBeUndefined();
+
+    // Remote (non-loopback) gateway must NOT read the local .env, even when a
+    // stale local profile key exists — that key belongs to a different Hermes
+    // and would make the remote reject with 401 (Codex review). Such setups
+    // rely solely on DKG_HERMES_API_SERVER_KEY.
+    expect(resolveHermesApiServerKey(makeConfig({
+      localAgentIntegrations: {
+        hermes: {
+          enabled: true,
+          transport: { kind: 'hermes-openai', gatewayUrl: 'https://hermes.example.com:8642' },
+          metadata: { hermesHome: home },
+        },
+      },
+    }))).toBeUndefined();
   });
 
   it('annotates an unreachable hermes-openai health probe with the missing-key hint', async () => {

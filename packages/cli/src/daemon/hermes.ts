@@ -272,12 +272,35 @@ export function buildHermesChannelHeaders(
 export function resolveHermesApiServerKey(config: DkgConfig): string | undefined {
   const override = optionalTrimmedString(process.env.DKG_HERMES_API_SERVER_KEY);
   if (override) return override;
+  // Only the LOOPBACK api_server reads a key from a local `.env`. A remote/WSL
+  // `--gateway-url` Hermes keeps its `.env` on another host, so reading the
+  // local profile here would forward a stale, unrelated key and make remote
+  // chat fail — those setups must use DKG_HERMES_API_SERVER_KEY (handled above).
+  if (!hasLoopbackHermesOpenAiTarget(config)) return undefined;
   const integration = getLocalAgentIntegration(config, 'hermes');
   const hermesHome = optionalTrimmedString(
     (integration?.metadata as Record<string, unknown> | undefined)?.hermesHome,
   );
   if (!hermesHome) return undefined;
   return readApiServerKeyFromEnv(join(hermesHome, '.env'));
+}
+
+/** True when the active hermes-openai target is a loopback api_server. */
+function hasLoopbackHermesOpenAiTarget(config: DkgConfig): boolean {
+  const target = getHermesChannelTargets(config).find((t) => t.protocol === 'hermes-openai');
+  return !!target && isHermesLoopbackUrl(target.inboundUrl);
+}
+
+/**
+ * Actionable remediation for a Hermes api_server auth failure, branched on
+ * transport: a loopback gateway is fixed by `dkg hermes setup` (which writes
+ * the local `.env`); a remote/WSL gateway is fixed by the daemon-side
+ * DKG_HERMES_API_SERVER_KEY override, since setup never touches a remote `.env`.
+ */
+export function hermesApiServerKeyRemediation(config: DkgConfig): string {
+  return hasLoopbackHermesOpenAiTarget(config)
+    ? 'run "dkg hermes setup" to provision API_SERVER_KEY, then restart "hermes gateway run --replace -v"'
+    : 'set DKG_HERMES_API_SERVER_KEY in the daemon environment to the remote Hermes API_SERVER_KEY (setup does not modify a remote .env), then restart the daemon';
 }
 
 const apiServerKeyCache = new Map<string, { mtimeMs: number; key: string | undefined }>();
@@ -437,7 +460,7 @@ export async function probeHermesChannelHealth(
     targets.some((t) => t.protocol === 'hermes-openai')
     && !resolveHermesApiServerKey(config)
   ) {
-    lastError = `${lastError} — Hermes api_server requires API_SERVER_KEY (Hermes v0.15.0+); run "dkg hermes setup" then restart "hermes gateway run --replace -v".`;
+    lastError = `${lastError} — Hermes api_server requires API_SERVER_KEY (Hermes v0.15.0+); ${hermesApiServerKeyRemediation(config)}.`;
   }
 
   return { ok: false, bridge, gateway, error: lastError };
