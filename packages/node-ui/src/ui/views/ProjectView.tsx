@@ -55,6 +55,17 @@ interface DetailOrigin {
   layerTabs: Record<MemoryLayerView, LayerContentTab>;
   subGraphTabs: Record<string, SubGraphTab>;
   scroll: { key: string; top: number };
+  /** PR #793 sweep 6 Bug P — snapshot of the detail view's
+   *  `enabledLayers` at the moment the entity was opened. Pre-Bug-P
+   *  the user could enter subgraph A from a WM tab, widen scope
+   *  to WM+SWM in the detail, open an entity, then close back —
+   *  and `SubGraphDetailView` would remount from the STALE
+   *  `subGraphInitialEnabledLayers` seed (still WM-only) and
+   *  silently snap back. Capturing the current scope here and
+   *  restoring it in `handleDetailClose` preserves the user's
+   *  widening/narrowing across the round-trip. `null` when the
+   *  entity was opened from a layer-tab (no subgraph context). */
+  subGraphEnabledLayers: ReadonlySet<TrustLevel> | null;
 }
 
 const DEFAULT_LAYER_TABS: Record<MemoryLayerView, LayerContentTab> = {
@@ -232,6 +243,16 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
       layerTabs: { ...layerContentTabs },
       subGraphTabs: { ...subGraphTabs },
       scroll: { key, top: scrollEl?.scrollTop ?? 0 },
+      // Bug P — snapshot the current detail scope into a fresh
+      // Set so the unmounting SubGraphDetailView's state mutation
+      // can't share the reference. `null` when there's no
+      // subgraph in scope (origin is a layer tab → no scope to
+      // preserve). Read from the ref (sync source of truth) so
+      // the snapshot reflects the user's exact scope at the
+      // moment the entity opened.
+      subGraphEnabledLayers: activeSubGraph !== null && detailScopeRef.current
+        ? new Set<TrustLevel>(detailScopeRef.current)
+        : null,
     };
   }, [
     activeLayer,
@@ -618,6 +639,18 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     // null branch also clears detailScopeRef so the next chip
     // click sees a clean overview-entry context.
     setActiveSubGraphSync(origin.activeSubGraph);
+    // PR #793 sweep 6 Bug P — restore the subgraph scope the
+    // user had at entity-open time. Without this the remounted
+    // SubGraphDetailView would seed from the stale
+    // `subGraphInitialEnabledLayers` (the original entry seed)
+    // and silently snap back to it, losing any widening or
+    // narrowing the user did inside the detail.
+    if (origin.activeSubGraph !== null && origin.subGraphEnabledLayers) {
+      const restored = new Set<TrustLevel>(origin.subGraphEnabledLayers);
+      setSubGraphInitialEnabledLayers(restored);
+      detailScopeRef.current = restored;
+      setCurrentDetailScope(restored);
+    }
     setLayerContentTabs(origin.layerTabs);
     setSubGraphTabs(origin.subGraphTabs);
     pendingScrollRestoreRef.current = origin.scroll;

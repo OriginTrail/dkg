@@ -1169,4 +1169,84 @@ describe('ProjectView entity detail navigation', () => {
     expect(query('subgraph-bar').dataset.enabledScope).toBe('-');
   });
 
+  // S3 polish PR #793 Codex sweep 6 (Bug P) — handleDetailClose
+  // restored activeSubGraph but never restored the user's
+  // current `enabledLayers` scope, so the SubGraphDetailView
+  // would remount from the stale `subGraphInitialEnabledLayers`
+  // seed and snap back to the original scope. Fix: DetailOrigin
+  // captures `subGraphEnabledLayers` at entity-open; close-path
+  // restores from the snapshot.
+  it('subgraph A widened to WM+SWM → open entity → close-back → scope stays at WM+SWM (Bug P load-bearing)', async () => {
+    // 1. WM tab → alpha (seeds Set(['working'])).
+    await click('switch-wm');
+    await click('select-subgraph-alpha-with-layer');
+    await flush();
+    expect(query('subgraph-detail').dataset.initialEnabledLayers).toBe('working');
+
+    // 2. User widens to WM+SWM in the detail view. Mirror
+    //    callback updates currentDetailScope.
+    await click('detail-widen-wm-swm');
+    await flush();
+    expect(query('subgraph-bar').dataset.enabledScope).toBe('shared,working');
+
+    // 3. Open an entity from inside the subgraph detail. This
+    //    captures the DetailOrigin including the current scope.
+    await click('open-subgraph-entity');
+    await flush();
+    expect(query('entity-detail').dataset.entity).toBe('urn:entity:demo');
+    expect(document.querySelector('[data-testid="subgraph-detail"]')).toBeNull();
+
+    // 4. Close the entity → handleDetailClose restores from
+    //    origin. Pre-Bug-P this would snap back to WM-only
+    //    (stale seed); post-fix preserves WM+SWM.
+    await click('detail-back');
+    await flush();
+    expect(query('subgraph-detail').dataset.slug).toBe('alpha');
+    // `data-initial-enabled-layers` is the Set carrier; assert
+    // both layers survive the round-trip.
+    expect(query('subgraph-detail').getAttribute('data-initial-enabled-layers')).toBe('shared,working');
+    // Single-layer alias collapses to '-' for size > 1 (the
+    // mock's derivation only resolves a layer abbreviation when
+    // scope size === 1).
+    expect(query('subgraph-detail').dataset.initialLayer).toBe('-');
+    // The sibling bar receives the restored scope.
+    expect(query('subgraph-bar').dataset.enabledScope).toBe('shared,working');
+  });
+
+  it('subgraph A at seed scope → open entity → close-back → scope still at seed (Bug P regression guard)', async () => {
+    // No-op case — user didn't widen/narrow, the restored scope
+    // equals the seed.
+    await click('switch-wm');
+    await click('select-subgraph-alpha-with-layer');
+    await flush();
+    expect(query('subgraph-detail').getAttribute('data-initial-enabled-layers')).toBe('working');
+
+    await click('open-subgraph-entity');
+    await flush();
+    await click('detail-back');
+    await flush();
+    expect(query('subgraph-detail').dataset.slug).toBe('alpha');
+    expect(query('subgraph-detail').getAttribute('data-initial-enabled-layers')).toBe('working');
+  });
+
+  it('entity opened from a layer-tab origin → close-back → no scope restoration (Bug P origin-shape guard)', async () => {
+    // When the entity opens from a layer-tab page (no subgraph
+    // in scope), origin.activeSubGraph is null. The restore
+    // branch must NOT touch the scope mirrors — there was no
+    // scope to preserve. Proves Bug P's null guard.
+    await click('switch-wm');
+    await click('open-layer-overlap-entity');
+    await flush();
+    expect(query('entity-detail').dataset.entity).toBe('urn:entity:overlap');
+
+    await click('detail-back');
+    await flush();
+    // Back on the WM tab — no subgraph-detail mount.
+    expect(document.querySelector('[data-testid="subgraph-detail"]')).toBeNull();
+    // The WM-tab bar mount uses the legacy `layer={activeLayer}`
+    // path, not enabledScope, so `data-enabled-scope` is '-'
+    // (the mock returns '-' when enabledScope is undefined).
+    expect(query('subgraph-bar').dataset.enabledScope).toBe('-');
+  });
+
 });
