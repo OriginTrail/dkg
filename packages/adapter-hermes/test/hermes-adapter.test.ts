@@ -358,16 +358,21 @@ describe('Hermes profile setup helpers', () => {
     expect(readFileSync(envPath, 'utf-8')).toContain(`API_SERVER_KEY=${generatedKey}`);
   });
 
-  it('preserves an existing user API_SERVER_KEY and unrelated .env lines', () => {
+  it('preserves an existing user API_SERVER_KEY (incl. inline comments) and unrelated .env lines', () => {
     const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
-    writeFileSync(join(hermesHome, '.env'), 'FOO=bar\nAPI_SERVER_KEY=user-secret\n');
+    // Inline comments must be parsed (dotenv) so the existing key is detected
+    // (not overwritten) and an already-true API_SERVER_ENABLED is not duplicated.
+    writeFileSync(
+      join(hermesHome, '.env'),
+      'FOO=bar\nAPI_SERVER_ENABLED=true # on\nAPI_SERVER_KEY=user-secret # mine\n',
+    );
 
     setupHermesProfile({ hermesHome });
 
     const env = readFileSync(join(hermesHome, '.env'), 'utf-8');
-    expect(env).toContain('API_SERVER_KEY=user-secret');
+    expect(env).toContain('API_SERVER_KEY=user-secret # mine');
     expect(env).toContain('FOO=bar');
-    expect(env).toMatch(/^API_SERVER_ENABLED=true$/m);
+    expect((env.match(/^API_SERVER_ENABLED=/gm) ?? []).length).toBe(1);
   });
 
   it('does not write .env in dry-run but reports the provisioning action', () => {

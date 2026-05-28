@@ -1563,16 +1563,26 @@ function readActiveEnvVar(filePath: string, key: string): string | undefined {
 }
 
 function parseEnvLine(line: string): { key: string; value: string } | null {
-  const match = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/);
+  const match = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/);
   if (!match) return null; // comments, blanks, malformed lines
-  let value = match[2];
-  if (
-    (value.startsWith('"') && value.endsWith('"'))
-    || (value.startsWith("'") && value.endsWith("'"))
-  ) {
-    value = value.slice(1, -1);
+  return { key: match[1], value: parseDotenvValue(match[2]) };
+}
+
+/**
+ * Extract a `.env` value the way Hermes (python-dotenv) does: a quoted value
+ * keeps everything between the quotes (inline `#` included); an unquoted value
+ * is truncated at the first whitespace-preceded `#` (an inline comment) and
+ * trimmed. Matching this is what keeps DKG's forwarded key identical to the
+ * one Hermes loads.
+ */
+function parseDotenvValue(raw: string): string {
+  const value = raw.replace(/^\s+/, '');
+  if (value[0] === '"' || value[0] === "'") {
+    const end = value.indexOf(value[0], 1);
+    if (end > 0) return value.slice(1, end);
   }
-  return { key: match[1], value };
+  const comment = value.match(/\s#/);
+  return (comment?.index !== undefined ? value.slice(0, comment.index) : value).trim();
 }
 
 /**

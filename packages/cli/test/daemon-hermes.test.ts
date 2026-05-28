@@ -502,9 +502,11 @@ describe('Hermes channel helpers', () => {
   it('resolves the Hermes API server key from the profile .env and DKG_HERMES_API_SERVER_KEY override', () => {
     const home = mkdtempSync(join(tmpdir(), 'hermes-env-'));
     cleanupDirs.push(home);
+    // Inline `#` comment on an unquoted value must be stripped (dotenv
+    // semantics) so the forwarded bearer matches the key Hermes loads.
     writeFileSync(
       join(home, '.env'),
-      '# managed by user\nAPI_SERVER_ENABLED=true\nAPI_SERVER_KEY=from-env-file\nOTHER=keep\n',
+      '# managed by user\nAPI_SERVER_ENABLED=true\nAPI_SERVER_KEY=from-env-file # local dev\nOTHER=keep\n',
     );
     const config = makeConfig({
       localAgentIntegrations: {
@@ -517,6 +519,20 @@ describe('Hermes channel helpers', () => {
     });
 
     expect(resolveHermesApiServerKey(config)).toBe('from-env-file');
+
+    // A quoted value keeps an inner `#`; the last assignment wins.
+    const quotedHome = mkdtempSync(join(tmpdir(), 'hermes-env-q-'));
+    cleanupDirs.push(quotedHome);
+    writeFileSync(join(quotedHome, '.env'), 'API_SERVER_KEY="se#cret value"\n');
+    expect(resolveHermesApiServerKey(makeConfig({
+      localAgentIntegrations: {
+        hermes: {
+          enabled: true,
+          transport: { kind: 'hermes-openai', gatewayUrl: 'http://127.0.0.1:8642' },
+          metadata: { hermesHome: quotedHome },
+        },
+      },
+    }))).toBe('se#cret value');
 
     // Explicit daemon override (remote/WSL Hermes) wins over the local .env.
     process.env.DKG_HERMES_API_SERVER_KEY = 'override-key';
