@@ -662,6 +662,17 @@ assert config["allow_context_graph_admin_tools"] is False, config
       .toThrow('memory.provider: mem0');
   });
 
+  it('does not provision .env when setup aborts (no side effect on failure)', () => {
+    const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
+    writeFileSync(join(hermesHome, 'config.yaml'), 'memory: # existing provider\n  provider: mem0\n');
+
+    // preserveProvider throws on the existing non-DKG provider BEFORE the
+    // (now last) .env provisioning step, so no API_SERVER_KEY is written.
+    expect(() => setupHermesProfile({ hermesHome, memoryMode: 'provider', preserveProvider: true }))
+      .toThrow('memory.provider: mem0');
+    expect(existsSync(join(hermesHome, '.env'))).toBe(false);
+  });
+
   it('ignores nested memory provider blocks when managing Hermes provider config', () => {
     const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
     writeFileSync(join(hermesHome, 'config.yaml'), [

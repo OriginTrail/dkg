@@ -4,6 +4,7 @@ import { isIP } from 'node:net';
 import { join } from 'node:path';
 
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
+import { parseDotenvValue } from '@origintrail-official/dkg-core';
 import type { ChatMemoryManager } from '@origintrail-official/dkg-node-ui';
 import type {
   DkgConfig,
@@ -328,23 +329,6 @@ function readApiServerKeyFromEnv(envPath: string): string | undefined {
   }
   apiServerKeyCache.set(envPath, { mtimeMs, key });
   return key;
-}
-
-/**
- * Extract a `.env` value the way Hermes (python-dotenv) does: a quoted value
- * keeps everything between the quotes (inline `#` included); an unquoted value
- * is truncated at the first whitespace-preceded `#` (inline comment) and
- * trimmed. Matching this keeps the bearer DKG forwards identical to the key
- * Hermes loads (`API_SERVER_KEY=secret # dev` → `secret`, not `secret # dev`).
- */
-function parseDotenvValue(raw: string): string {
-  const value = raw.replace(/^\s+/, '');
-  if (value[0] === '"' || value[0] === "'") {
-    const end = value.indexOf(value[0], 1);
-    if (end > 0) return value.slice(1, end);
-  }
-  const comment = value.match(/\s#/);
-  return (comment?.index !== undefined ? value.slice(0, comment.index) : value).trim();
 }
 
 export function transportPatchFromHermesTarget(

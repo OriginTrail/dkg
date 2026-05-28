@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { isIP } from 'node:net';
 import {
   fundWalletsBestEffort,
+  parseDotenvValue,
   resolveDkgConfigHome,
   resolveDkgHome,
   startDaemon,
@@ -243,12 +244,6 @@ export function setupHermesProfile(options: HermesSetupOptions = {}): HermesSetu
 
   installHermesProviderPlugin(plan.profile);
 
-  // Provision API_SERVER_KEY (+ API_SERVER_ENABLED) into the Hermes profile
-  // `.env` for the loopback hermes-openai UI-chat transport. The user's
-  // existing `hermes gateway run --replace` restart picks it up; the daemon
-  // forwards the bearer. No-op for the loopback bridge / remote gateways.
-  const apiServerKeyConfigured = maybeProvisionHermesApiServerEnv(plan.profile, plan.state.bridge);
-
   // S4 vector-6 fix (adversarial-findings.md §6): peek the
   // provider-swap intent BEFORE the destructive `config.yaml` rewrite,
   // and persist `setup-state.json` with `priorMemoryProvider` set to
@@ -302,6 +297,14 @@ export function setupHermesProfile(options: HermesSetupOptions = {}): HermesSetu
     const skillPath = join(plan.profile.hermesHome, 'skills', 'dkg-node', 'SKILL.md');
     writeOwnedText(skillPath, options.nodeSkillContent);
   }
+
+  // Provision API_SERVER_KEY (+ API_SERVER_ENABLED) into the Hermes profile
+  // `.env` LAST — after every step that can throw (the provider-block rewrite,
+  // skill write) — so an aborted setup never leaves a new key behind as a
+  // side effect. The user's existing `hermes gateway run --replace` restart
+  // picks it up; the daemon forwards the bearer. No-op for the loopback bridge
+  // and remote gateways.
+  const apiServerKeyConfigured = maybeProvisionHermesApiServerEnv(plan.profile, plan.state.bridge);
 
   // Re-write setup-state.json post-rewrite with the freshest
   // `updatedAt`. The `priorMemoryProvider` slot is still first-wins
@@ -1565,24 +1568,9 @@ function readActiveEnvVar(filePath: string, key: string): string | undefined {
 function parseEnvLine(line: string): { key: string; value: string } | null {
   const match = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/);
   if (!match) return null; // comments, blanks, malformed lines
+  // parseDotenvValue (shared with the daemon via dkg-core) matches
+  // python-dotenv so the key we read here is identical to the one Hermes loads.
   return { key: match[1], value: parseDotenvValue(match[2]) };
-}
-
-/**
- * Extract a `.env` value the way Hermes (python-dotenv) does: a quoted value
- * keeps everything between the quotes (inline `#` included); an unquoted value
- * is truncated at the first whitespace-preceded `#` (an inline comment) and
- * trimmed. Matching this is what keeps DKG's forwarded key identical to the
- * one Hermes loads.
- */
-function parseDotenvValue(raw: string): string {
-  const value = raw.replace(/^\s+/, '');
-  if (value[0] === '"' || value[0] === "'") {
-    const end = value.indexOf(value[0], 1);
-    if (end > 0) return value.slice(1, end);
-  }
-  const comment = value.match(/\s#/);
-  return (comment?.index !== undefined ? value.slice(0, comment.index) : value).trim();
 }
 
 /**
