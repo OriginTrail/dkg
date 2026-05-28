@@ -4393,6 +4393,7 @@ export function SubGraphDetailView({
   onSelectEntity,
   activeTab,
   onTabChange,
+  initialLayer,
 }: {
   slug: string;
   rawMemory: ReturnType<typeof useMemoryEntities>;
@@ -4401,6 +4402,15 @@ export function SubGraphDetailView({
   onSelectEntity: (uri: string) => void;
   activeTab?: SubGraphTab;
   onTabChange?: (tab: SubGraphTab) => void;
+  /** S3 polish #9 — when the chip click came from a layer page
+   *  (WM/SWM/VM) the originating layer is forwarded here so
+   *  `enabledLayers` seeds to that layer instead of the
+   *  default all-three. Fold-in #4 from §4.4.1: scope must
+   *  never silently change semantics across a navigation
+   *  transition. Omitting (or `undefined`) restores the
+   *  default all-three semantic for chip clicks from Overview
+   *  or the Subgraphs page. */
+  initialLayer?: 'wm' | 'swm' | 'vm';
 }) {
   const profile = useProjectProfileContext();
   const binding = profile?.forSubGraph(slug);
@@ -4425,9 +4435,19 @@ export function SubGraphDetailView({
   useEffect(() => {
     setEntitySort(binding?.timelinePredicate ? 'created-desc' : 'triples');
   }, [slug, binding?.timelinePredicate]);
-  const [enabledLayers, setEnabledLayers] = useState<Set<TrustLevel>>(
-    () => new Set<TrustLevel>(['working', 'shared', 'verified']),
-  );
+  // #9 polish — `initialLayer` (when supplied by the chip-row
+  // click) seeds `enabledLayers` to that single layer instead of
+  // the default all-three. Carrying the originating scope
+  // across the navigation transition is the §4.4.1 fold-in #4
+  // contract. The chip click's `originatingLayer` arg flows from
+  // SubGraphBar → ProjectView.handleSelectSubGraph → here.
+  const initialEnabledLayers = useMemo(() => {
+    if (initialLayer === 'wm') return new Set<TrustLevel>(['working']);
+    if (initialLayer === 'swm') return new Set<TrustLevel>(['shared']);
+    if (initialLayer === 'vm') return new Set<TrustLevel>(['verified']);
+    return new Set<TrustLevel>(['working', 'shared', 'verified']);
+  }, [initialLayer]);
+  const [enabledLayers, setEnabledLayers] = useState<Set<TrustLevel>>(initialEnabledLayers);
   const [chipState, setChipState] = useState<Map<string, Set<string>>>(new Map());
   const [activeQuerySlug, setActiveQuerySlug] = useState<string | null>(null);
   const [queryResults, setQueryResults] = useState<Set<string> | null>(null);
@@ -4803,12 +4823,13 @@ export function SubGraphDetailView({
 
   // Reset filters when the sub-graph changes — otherwise chips from
   // `tasks` would linger when the user jumps to `decisions` and silently
-  // zero out the list.
+  // zero out the list. `enabledLayers` re-seeds to `initialEnabledLayers`
+  // (default all-three OR the originating-layer scope per #9 polish).
   useEffect(() => {
-    setEnabledLayers(new Set<TrustLevel>(['working', 'shared', 'verified']));
+    setEnabledLayers(initialEnabledLayers);
     setChipState(new Map());
     clearQuery();
-  }, [slug, clearQuery]);
+  }, [slug, clearQuery, initialEnabledLayers]);
 
   useEffect(() => {
     if (!activeTab) setLocalActiveTab('items');

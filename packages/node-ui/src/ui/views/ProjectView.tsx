@@ -125,6 +125,13 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   // a sibling of `activeLayer`, not a filter over it: sub-graphs are a peer
   // axis to layers, and each axis gets its own first-class page.
   const [activeSubGraph, setActiveSubGraph] = useState<string | null>(null);
+  // S3 polish #9 — when a chip click on a WM/SWM/VM page transitions
+  // into the sub-graph detail, carry the originating layer through
+  // so the detail view's `enabledLayers` seeds to that layer
+  // (instead of the default all-three) — UX §4.4.1 fold-in #4
+  // ("scope must never silently change semantics across a
+  // navigation transition"). null = no narrowing (default).
+  const [subGraphInitialLayer, setSubGraphInitialLayer] = useState<MemoryLayerView | null>(null);
   const [selectedLayerContext, setSelectedLayerContext] = useState<MemoryLayerView | null>(null);
   // Mirror `selectedUri` into a ref so `handleNavigate` can read the
   // current value without listing it in deps — listing it caused the
@@ -403,10 +410,14 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
 
   // Route a sub-graph chip click to the sub-graph page. Selecting "All"
   // (null) exits the page back to the current layer view, or overview if
-  // we were already on one.
-  const handleSelectSubGraph = useCallback((slug: string | null) => {
+  // we were already on one. The optional `originatingLayer` carries the
+  // bar's `layer` prop through to the detail view so the user's
+  // existing layer scope follows them across the navigation (#9
+  // polish, fold-in #4).
+  const handleSelectSubGraph = useCallback((slug: string | null, originatingLayer?: MemoryLayerView) => {
     clearDetailOrigin();
     setActiveSubGraph(slug);
+    setSubGraphInitialLayer(slug ? (originatingLayer ?? null) : null);
     setSelectedUri(null);
     setSelectedLayerContext(null);
   }, [clearDetailOrigin]);
@@ -575,6 +586,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
             onSelectEntity={handleNavigate}
             activeTab={subGraphTabs[activeSubGraph] ?? 'items'}
             onTabChange={tab => handleSubGraphTabChange(activeSubGraph, tab)}
+            initialLayer={subGraphInitialLayer ?? undefined}
           />
         </>
       )}

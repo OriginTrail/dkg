@@ -1736,4 +1736,116 @@ describe('SubGraphDetailView tabs', () => {
     // SWM cell carries no SWM-attribution tooltip in this state.
     expect(cellFor('swm').getAttribute('title')).toBeNull();
   });
+
+  // S3 polish #9 — when SubGraphDetailView mounts with
+  // `initialLayer="wm"` the enabledLayers seed to `Set(['working'])`
+  // instead of all three. Active-layer pill reads "Working Memory"
+  // and the WM cross-layer cell is the only one pressed. The user
+  // sees the same scope they had on the WM page; no silent change.
+  it('seeds enabledLayers to the originating layer when initialLayer is provided (#9)', async () => {
+    const wmEntity = {
+      uri: 'urn:e:wm', label: 'WM', types: [],
+      trustLevel: 'working',
+      layers: new Set(['working']),
+      subGraphs: new Set(['demo']),
+      properties: new Map(), connections: [],
+    };
+    const swmEntity = {
+      uri: 'urn:e:swm', label: 'SWM', types: [],
+      trustLevel: 'shared',
+      layers: new Set(['shared']),
+      subGraphs: new Set(['demo']),
+      properties: new Map(), connections: [],
+    };
+    const fixture = {
+      entities: new Map([[wmEntity.uri, wmEntity], [swmEntity.uri, swmEntity]]),
+      entityList: [wmEntity, swmEntity],
+      allTriples: [], graphTriples: [],
+      trustMap: new Map(),
+      counts: { wm: 1, swm: 1, vm: 0, total: 2 },
+      loading: false, error: null, partial: false,
+      refresh: vi.fn(),
+    } as any;
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root!.render(
+        React.createElement(ProjectProfileContext.Provider, { value: profile },
+          React.createElement(SubGraphDetailView, {
+            slug: 'demo',
+            rawMemory: fixture,
+            contextGraphId: 'cg-test',
+            onNodeClick: vi.fn(),
+            onSelectEntity: vi.fn(),
+            activeTab: 'items',
+            onTabChange: vi.fn(),
+            initialLayer: 'wm',
+          })),
+      );
+    });
+    await flush();
+
+    function cellFor(layer: 'wm' | 'swm' | 'vm'): HTMLButtonElement {
+      return container.querySelector(`button.v10-subgraph-cross-layer-cell[data-layer="${layer}"]`) as HTMLButtonElement;
+    }
+    // Only WM is pressed.
+    expect(cellFor('wm').getAttribute('aria-pressed')).toBe('true');
+    expect(cellFor('swm').getAttribute('aria-pressed')).toBe('false');
+    expect(cellFor('vm').getAttribute('aria-pressed')).toBe('false');
+
+    // Active-layer pill surfaces the scope.
+    const pill = container.querySelector('[data-testid="active-layer-pill"]') as HTMLButtonElement;
+    expect(pill).toBeTruthy();
+    expect(pill.textContent).toContain('Working Memory');
+    expect(pill.disabled).toBe(false);
+  });
+
+  it('seeds enabledLayers to all three when initialLayer is omitted (default)', async () => {
+    const wmEntity = {
+      uri: 'urn:e:wm', label: 'WM', types: [],
+      trustLevel: 'working',
+      layers: new Set(['working']),
+      subGraphs: new Set(['demo']),
+      properties: new Map(), connections: [],
+    };
+    const fixture = {
+      entities: new Map([[wmEntity.uri, wmEntity]]),
+      entityList: [wmEntity],
+      allTriples: [], graphTriples: [],
+      trustMap: new Map(),
+      counts: { wm: 1, swm: 0, vm: 0, total: 1 },
+      loading: false, error: null, partial: false,
+      refresh: vi.fn(),
+    } as any;
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root!.render(
+        React.createElement(ProjectProfileContext.Provider, { value: profile },
+          React.createElement(SubGraphDetailView, {
+            slug: 'demo',
+            rawMemory: fixture,
+            contextGraphId: 'cg-test',
+            onNodeClick: vi.fn(),
+            onSelectEntity: vi.fn(),
+            activeTab: 'items',
+            onTabChange: vi.fn(),
+          })),
+      );
+    });
+    await flush();
+
+    function cellFor(layer: 'wm' | 'swm' | 'vm'): HTMLButtonElement {
+      return container.querySelector(`button.v10-subgraph-cross-layer-cell[data-layer="${layer}"]`) as HTMLButtonElement;
+    }
+    expect(cellFor('wm').getAttribute('aria-pressed')).toBe('true');
+    expect(cellFor('swm').getAttribute('aria-pressed')).toBe('true');
+    expect(cellFor('vm').getAttribute('aria-pressed')).toBe('true');
+  });
 });

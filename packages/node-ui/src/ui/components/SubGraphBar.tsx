@@ -26,7 +26,14 @@ export interface SubGraphBarProps {
   contextGraphId: string;
   profile: ProjectProfile;
   selected: string | null;   // null === "All"
-  onSelect: (slug: string | null) => void;
+  /** Second arg `originatingLayer` carries the active layer
+   *  context when the bar is mounted on a WM/SWM/VM page so the
+   *  detail view can seed its `enabledLayers` to match what the
+   *  user was scoped to (§4.4.1 fold-in #4 — "scope must never
+   *  silently change semantics across a navigation transition").
+   *  Optional and only meaningful when transitioning INTO a chip
+   *  detail; clearing back to All passes undefined. */
+  onSelect: (slug: string | null, originatingLayer?: 'wm' | 'swm' | 'vm') => void;
   /** Optional entity list for computing live badges (proposed / p0 / open PRs). */
   entities?: MemoryEntity[];
   /**
@@ -34,7 +41,9 @@ export interface SubGraphBarProps {
    * (`trustLevel`) matches this layer — so on the WM/SWM/VM pages the
    * row reports a per-layer slice instead of the daemon's project-wide
    * total. Without this prop the row falls back to daemon totals
-   * (used on the Overview / Subgraphs pages).
+   * (used on the Overview / Subgraphs pages). Also used as the
+   * `originatingLayer` argument forwarded to `onSelect` when a chip
+   * is clicked (#9 polish).
    */
   layer?: 'wm' | 'swm' | 'vm';
 }
@@ -244,6 +253,8 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
       <button
         type="button"
         className={`v10-subgraph-chip${selected === null ? ' active' : ''}`}
+        /* All chip clears the selection — no originatingLayer
+           seed because the All view shows daemon-wide totals. */
         onClick={() => onSelect(null)}
         /* #7 polish (ux-locked option ii) — long-form tooltip
            clarifies the All math because `MemoryEntity.subGraphs`
@@ -266,7 +277,13 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
             key={sg.slug}
             type="button"
             className={`v10-subgraph-chip${selected === sg.slug ? ' active' : ''}${badge ? ' has-badge' : ''}`}
-            onClick={() => onSelect(sg.slug)}
+            /* #9 polish — forward the bar's `layer` prop as the
+               originating layer so the detail view's
+               `enabledLayers` is seeded to match the scope the
+               user was already in. Clicking from Overview or
+               the Subgraphs page leaves `layer` undefined → no
+               narrowing, default to all three. */
+            onClick={() => onSelect(sg.slug, layer)}
             title={`${sg.displayName}${sg.description ? ' · ' + sg.description : ''} · ${sg.entityCount} entities${scopeSuffix}${layerLabel ? '' : ` · ${sg.tripleCount} triples`}${badge ? ' · ' + badge.label : ''}`}
             style={{
               '--sg-color': sg.color,
@@ -293,7 +310,10 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
             className={`v10-subgraph-chip v10-subgraph-chip-root${isActive ? ' active' : ''}`}
             data-active={isActive}
             data-count={displayCount}
-            onClick={() => onSelect(ROOT_SLUG_SENTINEL)}
+            /* #9 polish — Root chip carries the originating layer
+               just like the named chips so a click from a layer
+               page keeps the layer scope when entering Root. */
+            onClick={() => onSelect(ROOT_SLUG_SENTINEL, layer)}
             title={`Entities not in any subgraph (Context Graph root) · ${displayCount} entities${scopeSuffix}`}
             aria-label="Entities not in any subgraph (Context Graph root)"
           >

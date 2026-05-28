@@ -429,7 +429,9 @@ describe('SubGraphBar — layer-scoped chip counts (P4)', () => {
     const { ROOT_SLUG_SENTINEL } = await import('../src/ui/lib/subGraphs.js');
     const rootChip = container.querySelector('.v10-subgraph-chip-root') as HTMLButtonElement;
     await act(async () => { rootChip.click(); });
-    expect(onSelect).toHaveBeenCalledWith(ROOT_SLUG_SENTINEL);
+    // #9 polish — the second arg carries the originating layer; on
+    // this Overview-shaped mount (no `layer` prop) it's undefined.
+    expect(onSelect).toHaveBeenCalledWith(ROOT_SLUG_SENTINEL, undefined);
   });
 
   // S3 Codex follow-up (Issue B on PR #772). The Root chip must stay
@@ -554,5 +556,82 @@ describe('SubGraphBar — layer-scoped chip counts (P4)', () => {
     expect(title).toContain('Total entities');
     expect(title).toContain('some may belong to more than one');
     expect(title).toContain('Root entities not in any subgraph');
+  });
+
+  // S3 polish #9 — when SubGraphBar is mounted on a WM/SWM/VM
+  // page (the `layer` prop is set) and the user clicks a chip,
+  // `onSelect` carries the originating layer as the second arg
+  // so the detail view can seed `enabledLayers` to that layer
+  // (§4.4.1 fold-in #4). On the Subgraphs / Overview mount the
+  // bar has no `layer` prop and the second arg stays undefined.
+  it('forwards the bar `layer` prop as originatingLayer when a named chip is clicked', async () => {
+    const onSelect = vi.fn();
+    const wmEntity = mkEntity('urn:e:wm-a', 'working', 'alpha');
+    await act(async () => {
+      root.render(React.createElement(SubGraphBar, {
+        contextGraphId: 'cg',
+        profile,
+        selected: null,
+        onSelect,
+        entities: [wmEntity],
+        layer: 'wm',
+      }));
+    });
+    await flushNet();
+
+    const alphaChip = Array.from(container.querySelectorAll('button.v10-subgraph-chip'))
+      .find(b => b.textContent?.includes('alpha')) as HTMLButtonElement;
+    expect(alphaChip).toBeTruthy();
+    await act(async () => { alphaChip.click(); });
+    expect(onSelect).toHaveBeenCalledWith('alpha', 'wm');
+  });
+
+  it('forwards the bar `layer` prop as originatingLayer when the Root chip is clicked', async () => {
+    const onSelect = vi.fn();
+    const rootEntity = {
+      uri: 'urn:e:root', label: 'Root', types: [],
+      trustLevel: 'shared' as const,
+      layers: new Set(['shared']),
+      subGraphs: new Set<string>(),
+      properties: new Map(),
+      connections: [],
+    };
+    await act(async () => {
+      root.render(React.createElement(SubGraphBar, {
+        contextGraphId: 'cg',
+        profile,
+        selected: null,
+        onSelect,
+        entities: [rootEntity, mkEntity('urn:e:named', 'shared', 'alpha')],
+        layer: 'swm',
+      }));
+    });
+    await flushNet();
+
+    const { ROOT_SLUG_SENTINEL } = await import('../src/ui/lib/subGraphs.js');
+    const rootChip = container.querySelector('.v10-subgraph-chip-root') as HTMLButtonElement;
+    await act(async () => { rootChip.click(); });
+    expect(onSelect).toHaveBeenCalledWith(ROOT_SLUG_SENTINEL, 'swm');
+  });
+
+  it('All chip click clears the originating-layer carry (passes undefined)', async () => {
+    // Selecting "All" exits the sub-graph page entirely — the
+    // bar passes undefined so any prior originating-layer scope
+    // is cleared.
+    const onSelect = vi.fn();
+    await act(async () => {
+      root.render(React.createElement(SubGraphBar, {
+        contextGraphId: 'cg',
+        profile,
+        selected: 'alpha',
+        onSelect,
+        layer: 'wm',
+      }));
+    });
+    await flushNet();
+    const allChip = Array.from(container.querySelectorAll('button.v10-subgraph-chip'))
+      .find(b => b.textContent?.includes('All')) as HTMLButtonElement;
+    await act(async () => { allChip.click(); });
+    expect(onSelect).toHaveBeenCalledWith(null);
   });
 });
