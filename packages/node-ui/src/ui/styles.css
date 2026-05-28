@@ -4321,12 +4321,18 @@ body.light .v10-import-dropzone.drag-over { border-color: #b0b0b0; background: #
   color: var(--text-tertiary, #94a3b8);
   padding-right: 4px;
 }
-/* #7 polish — inline "All = Root + subgraphs" arithmetic hint
-   trailing the chip row. Muted tone (same `--text-tertiary`
-   token used by the row label) so it doesn't compete with the
-   chip counts. `white-space: nowrap` keeps the equation
-   readable as a single phrase even on narrow viewports — the
-   chip row already wraps independently. */
+/* #7 polish (literal updated at sweep 3 Bug K) — inline
+   legend-style hint trailing the chip row. Reads as "this row
+   includes Root and the subgraph chips" via the locked literal
+   `+ Root, subgraphs`, NOT as arithmetic — the original
+   `All = Root + subgraphs` form was a false equation when
+   entities have cross-membership in 2+ subgraphs. Cross-
+   membership disclosure lives in the long-form All-chip
+   tooltip; this hint is the at-a-glance visual cue. Muted tone
+   (same `--text-tertiary` token used by the row label) so it
+   doesn't compete with the chip counts. `white-space: nowrap`
+   keeps the phrase readable as a single line even on narrow
+   viewports — the chip row already wraps independently. */
 .v10-subgraph-bar-hint {
   font-size: 11px;
   color: var(--text-tertiary);
@@ -6850,8 +6856,12 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
    so it never silently changes meaning across a navigation
    transition (M2 / S5 strand). */
 .v10-subgraph-cross-layer {
-  /* #11 polish (ui-locked) — +4px top padding, lede/pill carry
-     their own +2px / +14px margins for the layered breathing room. */
+  /* #11 polish (ui-locked) — `padding: 16px 16px 0` is +6px top
+     and -12px bottom vs. the prior `10px 16px 12px`. The bottom
+     padding moves into the active-layer-pill's `margin-top: 14px`,
+     so the cluster reads as a single layered breathing band (lede
+     +2px / count strip / pill +14px) instead of stacked rows with
+     bottom container padding. */
   padding: 16px 16px 0;
   border-bottom: 1px solid var(--border-subtle);
   display: flex;

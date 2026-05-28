@@ -3993,14 +3993,25 @@ export function SubGraphOverviewGrid({
       for (const sg of e.subGraphs) {
         let m = out.get(sg);
         if (!m) { m = new Map<string, TrustLevel>(); out.set(sg, m); }
-        // PR #793 Codex sweep 4 (Bug M) — store BOTH raw and
-        // canonical URI forms. Triples in the mini-graph may
-        // carry the raw `<urn:...>` form even when entity
-        // membership is keyed canonically; the consumer
-        // `nodeColors` map needs to resolve both forms or the
-        // override falls through to `card.color` and the per-
-        // trust signal is lost. Mirrors the dual-key pattern in
-        // `trustNodeColors` further down this file.
+        // PR #793 Codex sweep 4 (Bug M) — defensive dual-key
+        // write. Mirrors the dual-key shape in `trustNodeColors`
+        // further down this file so consumers can resolve both
+        // raw and canonical URI forms.
+        //
+        // Important: as of HEAD, `useMemoryEntities.ts` calls
+        // `canonicalEntityUri(uri)` at entity-storage time
+        // (`getOrCreate` ~:386) AND graph-viz's `addTriple`
+        // applies `cleanUri()` at ingestion (~core/graph-model.ts:128).
+        // Both pipelines therefore canonicalize, so
+        // `canonical !== e.uri` is currently unreachable and the
+        // raw-key write never fires. Codex sweep 7 (local
+        // reviewer) flagged Bug M's fix as dead code under the
+        // current architecture — keep this as defence-in-depth
+        // against future de-canonicalisation in either pipeline,
+        // but DO NOT trust this branch as the active fix for any
+        // current wrapped-URI lookup failure. If you remove
+        // either canonicalisation, this branch becomes load-
+        // bearing again.
         m.set(canonical, e.trustLevel);
         if (canonical !== e.uri) m.set(e.uri, e.trustLevel);
       }
