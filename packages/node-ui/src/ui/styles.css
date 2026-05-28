@@ -4321,6 +4321,19 @@ body.light .v10-import-dropzone.drag-over { border-color: #b0b0b0; background: #
   color: var(--text-tertiary, #94a3b8);
   padding-right: 4px;
 }
+/* #7 polish — inline "All = Root + subgraphs" arithmetic hint
+   trailing the chip row. Muted tone (same `--text-tertiary`
+   token used by the row label) so it doesn't compete with the
+   chip counts. `white-space: nowrap` keeps the equation
+   readable as a single phrase even on narrow viewports — the
+   chip row already wraps independently. */
+.v10-subgraph-bar-hint {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  padding-left: 8px;
+  font-variant-numeric: tabular-nums;
+}
 .v10-subgraph-chip {
   display: inline-flex;
   align-items: center;

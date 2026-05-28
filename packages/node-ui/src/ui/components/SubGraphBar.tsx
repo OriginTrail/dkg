@@ -245,7 +245,15 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
         type="button"
         className={`v10-subgraph-chip${selected === null ? ' active' : ''}`}
         onClick={() => onSelect(null)}
-        title={`All subgraphs · ${totalEntities} entities${scopeSuffix}${layerLabel ? '' : ` · ${totalTriples} triples`}`}
+        /* #7 polish (ux-locked option ii) — long-form tooltip
+           clarifies the All math because `MemoryEntity.subGraphs`
+           is a Set: cross-membership entities count once in `All`
+           but may also appear under multiple chip totals, and
+           Root holds entities in no sub-graph at all. The shorter
+           inline hint after the Root chip carries the same
+           semantic at a glance. */
+        title={`Total entities — includes those in named subgraphs (some may belong to more than one), plus Root entities not in any subgraph · ${totalEntities} entities${scopeSuffix}${layerLabel ? '' : ` · ${totalTriples} triples`}`}
+        aria-label={`All — total entities. Includes those in named subgraphs (some may belong to more than one), plus Root entities not in any subgraph. ${totalEntities} entities${scopeSuffix}.`}
       >
         <span className="v10-subgraph-chip-icon">⊚</span>
         <span className="v10-subgraph-chip-label">All</span>
@@ -295,6 +303,15 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
           </button>
         );
       })()}
+      {showRootChip && (
+        /* #7 polish (ux-locked). Inline arithmetic-style hint
+           after the Root chip — explains the All math at a
+           glance. Muted tone so it doesn't compete with the
+           chip row; single line, never wraps (CSS). */
+        <span className="v10-subgraph-bar-hint" aria-hidden="true">
+          All = Root + subgraphs
+        </span>
+      )}
     </div>
   );
 };

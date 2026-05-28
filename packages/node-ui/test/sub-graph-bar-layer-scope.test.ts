@@ -485,4 +485,74 @@ describe('SubGraphBar — layer-scoped chip counts (P4)', () => {
     expect(chip!.getAttribute('data-active')).toBe('true');
     expect(chip!.getAttribute('data-count')).toBe('0');
   });
+
+  // S3 polish #7 — `All = Root + subgraphs` inline arithmetic
+  // hint + extended tooltip on the All chip (ux-locked).
+  // `MemoryEntity.subGraphs` is a Set, so the All count is a
+  // distinct total — cross-membership entities count once in
+  // All but may appear under multiple chip totals. The hint
+  // surfaces that math without changing the canonical All
+  // semantics.
+  it('renders the "All = Root + subgraphs" inline hint when the Root chip is visible', async () => {
+    const rootEntity = {
+      uri: 'urn:e:root', label: 'Root', types: [],
+      trustLevel: 'working' as const,
+      layers: new Set(['working']),
+      subGraphs: new Set<string>(),
+      properties: new Map(),
+      connections: [],
+    };
+    await act(async () => {
+      root.render(React.createElement(SubGraphBar, {
+        contextGraphId: 'cg',
+        profile,
+        selected: null,
+        onSelect: vi.fn(),
+        entities: [rootEntity, mkEntity('urn:e:named', 'shared', 'alpha')],
+      }));
+    });
+    await flushNet();
+
+    const hint = container.querySelector('.v10-subgraph-bar-hint');
+    expect(hint).toBeTruthy();
+    expect(hint!.textContent).toContain('All = Root + subgraphs');
+  });
+
+  it('does NOT render the "All = Root + subgraphs" hint when there is no Root chip', async () => {
+    // No root-bucket entities — Root chip is hidden, and so is
+    // the hint (since the hint references a chip that's not on
+    // screen).
+    const a = mkEntity('urn:a', 'working', 'alpha');
+    await act(async () => {
+      root.render(React.createElement(SubGraphBar, {
+        contextGraphId: 'cg',
+        profile,
+        selected: null,
+        onSelect: vi.fn(),
+        entities: [a],
+      }));
+    });
+    await flushNet();
+
+    expect(container.querySelector('.v10-subgraph-bar-hint')).toBeNull();
+  });
+
+  it('extends the All chip tooltip with the cross-membership clarification', async () => {
+    await act(async () => {
+      root.render(React.createElement(SubGraphBar, {
+        contextGraphId: 'cg',
+        profile,
+        selected: null,
+        onSelect: vi.fn(),
+      }));
+    });
+    await flushNet();
+    const allChip = Array.from(container.querySelectorAll('button.v10-subgraph-chip'))
+      .find(b => b.textContent?.includes('All')) as HTMLButtonElement;
+    expect(allChip).toBeTruthy();
+    const title = allChip.getAttribute('title') ?? '';
+    expect(title).toContain('Total entities');
+    expect(title).toContain('some may belong to more than one');
+    expect(title).toContain('Root entities not in any subgraph');
+  });
 });
