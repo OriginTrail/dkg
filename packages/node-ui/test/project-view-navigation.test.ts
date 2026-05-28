@@ -226,7 +226,17 @@ vi.mock('../src/ui/components/ActivityFeed.js', () => ({
 }));
 
 vi.mock('../src/ui/components/SubGraphBar.js', () => ({
-  SubGraphBar: ({ selected, onSelect, entities }: { selected: string | null; onSelect: (slug: string | null) => void; entities?: ReadonlyArray<unknown> }) =>
+  SubGraphBar: ({
+    selected,
+    onSelect,
+    entities,
+    layer,
+  }: {
+    selected: string | null;
+    onSelect: (slug: string | null, originatingLayer?: 'wm' | 'swm' | 'vm') => void;
+    entities?: ReadonlyArray<unknown>;
+    layer?: 'wm' | 'swm' | 'vm';
+  }) =>
     React.createElement('div', {
       'data-testid': 'subgraph-bar',
       'data-selected': selected ?? '',
@@ -237,8 +247,25 @@ vi.mock('../src/ui/components/SubGraphBar.js', () => ({
       // client-scoped counting (count contradiction with the
       // grid's daemon-side fallback).
       'data-entities': entities === undefined ? 'undefined' : 'defined',
+      // PR #793 Codex sweep 2 (Bug H) — surface the bar's `layer`
+      // prop so the test can distinguish layer-mode mounts (the
+      // WM/SWM/VM tab path) from layer-agnostic mounts (Subgraph
+      // Explorer overview + the detail-view internal bar).
+      'data-layer': layer ?? '-',
     },
+      // Layer-agnostic chip click — fires onSelect with no
+      // originating layer. Used by the existing tests AND by
+      // Bug H tests to simulate the detail-view internal bar
+      // (which is mounted without `layer`).
       React.createElement('button', { 'data-testid': 'select-subgraph-demo', onClick: () => onSelect('demo') }, 'demo'),
+      React.createElement('button', { 'data-testid': 'select-subgraph-other', onClick: () => onSelect('other') }, 'other'),
+      // Layer-mode chip click — fires onSelect with the bar's
+      // own `layer` prop forwarded as originatingLayer. Used to
+      // simulate the WM/SWM/VM-tab bar's behaviour in tests.
+      React.createElement('button', {
+        'data-testid': 'select-subgraph-alpha-with-layer',
+        onClick: () => onSelect('alpha', layer),
+      }, 'alpha (with layer)'),
       React.createElement('button', { 'data-testid': 'clear-subgraph', onClick: () => onSelect(null) }, 'all')),
 }));
 
@@ -255,13 +282,24 @@ vi.mock('../src/ui/views/project/components.js', () => ({
       React.createElement('div', {}, entity.label),
       React.createElement('button', { 'data-testid': 'open-related-entity', onClick: () => onNavigate('urn:entity:other') }, 'Open related'),
       React.createElement('button', { 'data-testid': 'detail-back', onClick: onClose }, 'Back to Context Graph')),
-  SubGraphDetailView: ({ slug, activeTab = 'items', onTabChange, onSelectEntity }: {
+  SubGraphDetailView: ({ slug, activeTab = 'items', onTabChange, onSelectEntity, initialLayer }: {
     slug: string;
     activeTab?: string;
     onTabChange: (tab: string) => void;
     onSelectEntity: (uri: string) => void;
+    /* PR #793 Codex sweep 2 — surface the `initialLayer` prop so
+       Bug H tests can assert that detail→detail navigation
+       preserves the originating layer scope. `'-'` is the
+       sentinel for undefined so the data attr is always a
+       string (cleaner DOM assertions). */
+    initialLayer?: 'wm' | 'swm' | 'vm';
   }) =>
-    React.createElement('section', { 'data-testid': 'subgraph-detail', 'data-slug': slug, 'data-tab': activeTab },
+    React.createElement('section', {
+      'data-testid': 'subgraph-detail',
+      'data-slug': slug,
+      'data-tab': activeTab,
+      'data-initial-layer': initialLayer ?? '-',
+    },
       React.createElement('button', { 'data-testid': 'subgraph-tab-graph', onClick: () => onTabChange('graph') }, 'Graph'),
       React.createElement('div', { 'data-testid': 'subgraph-scroll', 'data-cg-scroll-key': `subgraph:${slug}:${activeTab}` },
         React.createElement('button', { 'data-testid': 'open-subgraph-entity', onClick: () => onSelectEntity('urn:entity:demo') }, 'Open demo entity'))),
@@ -675,6 +713,87 @@ describe('ProjectView entity detail navigation', () => {
 
     memory.error = null;
     resetMemory();
+  });
+
+  // S3 polish PR #793 Codex sweep 2 (Bug H) — `handleSelectSubGraph`
+  // was unconditionally writing `null` to `subGraphInitialLayer`
+  // whenever `originatingLayer === undefined`. The detail-view
+  // internal SubGraphBar is mounted without a `layer` prop (it's
+  // layer-agnostic by design), so a WM → recipes → bakers nav
+  // silently widened scope back to all three layers on hop 2.
+  // Three call patterns must route differently — see the new
+  // discriminator in handleSelectSubGraph.
+  it('preserves subGraphInitialLayer on detail→detail navigation (Bug H load-bearing)', async () => {
+    // 1. Land on WM tab.
+    await click('switch-wm');
+    await flush();
+    // The WM tab's SubGraphBar mount carries `layer="wm"`.
+    expect(query('subgraph-bar').dataset.layer).toBe('wm');
+
+    // 2. Click `alpha (with layer)` — layer-mode click → enters
+    //    subgraph detail with initialLayer === 'wm'.
+    await click('select-subgraph-alpha-with-layer');
+    await flush();
+    expect(query('subgraph-detail').dataset.slug).toBe('alpha');
+    expect(query('subgraph-detail').dataset.initialLayer).toBe('wm');
+    // The detail-view internal bar is layer-agnostic.
+    expect(query('subgraph-bar').dataset.layer).toBe('-');
+
+    // 3. Click `demo` — layer-agnostic click from inside an
+    //    already-scoped detail. Pre-fix this silently widened to
+    //    all-three; post-fix it preserves WM.
+    await click('select-subgraph-demo');
+    await flush();
+    expect(query('subgraph-detail').dataset.slug).toBe('demo');
+    expect(query('subgraph-detail').dataset.initialLayer).toBe('wm');
+
+    // 4. One more hop — `other` chip; scope still preserved.
+    await click('select-subgraph-other');
+    await flush();
+    expect(query('subgraph-detail').dataset.slug).toBe('other');
+    expect(query('subgraph-detail').dataset.initialLayer).toBe('wm');
+  });
+
+  it('keeps initialLayer === undefined on fresh entry from Subgraph Explorer overview (Bug H regression guard)', async () => {
+    // 1. Land on the Subgraphs tab — no activeSubGraph yet, the
+    //    bar mounts layer-agnostic.
+    await click('switch-subgraphs');
+    await flush();
+    expect(query('subgraph-bar').dataset.layer).toBe('-');
+
+    // 2. Click `demo` from the overview — layer-agnostic but
+    //    activeSubGraph was null before the click → fresh entry
+    //    path → initialLayer stays undefined (detail lands at
+    //    all-three).
+    await click('select-subgraph-demo');
+    await flush();
+    expect(query('subgraph-detail').dataset.slug).toBe('demo');
+    expect(query('subgraph-detail').dataset.initialLayer).toBe('-');
+  });
+
+  it('exit (slug === null) clears any prior initialLayer scope (Bug H regression guard)', async () => {
+    // 1. WM tab → alpha with layer → scope is WM.
+    await click('switch-wm');
+    await click('select-subgraph-alpha-with-layer');
+    await flush();
+    expect(query('subgraph-detail').dataset.initialLayer).toBe('wm');
+
+    // 2. Click clear (the All chip — layer-agnostic, slug === null).
+    //    The detail view unmounts; we re-enter via Subgraphs tab
+    //    overview to confirm scope was cleared.
+    await click('clear-subgraph');
+    await flush();
+    // No detail view at this point — we should be back on WM tab.
+    expect(document.querySelector('[data-testid="subgraph-detail"]')).toBeNull();
+
+    // 3. Switch to Subgraphs tab and enter detail fresh — must
+    //    land at all-three (initialLayer === undefined),
+    //    confirming the exit cleared the prior WM scope rather
+    //    than preserving it across the round-trip.
+    await click('switch-subgraphs');
+    await click('select-subgraph-demo');
+    await flush();
+    expect(query('subgraph-detail').dataset.initialLayer).toBe('-');
   });
 
 });

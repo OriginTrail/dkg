@@ -414,13 +414,41 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   // bar's `layer` prop through to the detail view so the user's
   // existing layer scope follows them across the navigation (#9
   // polish, fold-in #4).
+  //
+  // PR #793 Codex sweep 2 (Bug H) — three distinct call patterns must
+  // route differently:
+  //   1. Exit (slug === null) → clear scope.
+  //   2. Layer-mode entry (originatingLayer is set, fired from the bar
+  //      mounted on a WM/SWM/VM tab) → set scope to that layer.
+  //   3. Layer-agnostic entry (originatingLayer === undefined):
+  //        a. From the Subgraph Explorer overview (no activeSubGraph
+  //           before the click) → keep null (fresh entry lands at
+  //           all-layers).
+  //        b. From an already-scoped detail (activeSubGraph != null
+  //           before the click — detail→detail hop on the layer-
+  //           agnostic bar inside the detail view) → PRESERVE the
+  //           prior `subGraphInitialLayer` instead of dropping back
+  //           to null. Pre-fix this silently widened scope on every
+  //           hop ≥ 2 (e.g. WM → recipes → bakers reverted to
+  //           all-three).
+  // Capturing `activeSubGraph` in the deps keeps the discriminator
+  // fresh across renders; the functional `setSubGraphInitialLayer`
+  // setter reads the latest scope state at the time the click fires.
   const handleSelectSubGraph = useCallback((slug: string | null, originatingLayer?: MemoryLayerView) => {
     clearDetailOrigin();
     setActiveSubGraph(slug);
-    setSubGraphInitialLayer(slug ? (originatingLayer ?? null) : null);
+    if (slug === null) {
+      setSubGraphInitialLayer(null);
+    } else if (originatingLayer !== undefined) {
+      setSubGraphInitialLayer(originatingLayer);
+    } else {
+      // Layer-agnostic — preserve existing scope on detail→detail
+      // hops, fall to null on fresh entry from the overview.
+      setSubGraphInitialLayer(prev => (activeSubGraph !== null ? prev : null));
+    }
     setSelectedUri(null);
     setSelectedLayerContext(null);
-  }, [clearDetailOrigin]);
+  }, [activeSubGraph, clearDetailOrigin]);
 
   const handleLayerSwitch = useCallback((layer: LayerView) => {
     clearDetailOrigin();
