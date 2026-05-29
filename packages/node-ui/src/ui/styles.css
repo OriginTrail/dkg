@@ -6455,18 +6455,28 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
   transform: translateY(-1px);
   box-shadow: 0 8px 24px -12px var(--sg-color, rgba(100,116,139,0.6));
 }
-/* GH #813 — Root mini-card chrome. Dashed outer border reads as
-   "synthesized bucket" vs the solid borders of daemon-emitted
-   named-subgraph cards, mirroring the SubGraphBar Root chip's
-   neutral chrome. Per-card `--sg-color` injection is suppressed
-   in the JSX so the gradient + hover-shadow fall through to the
-   neutral fallback (--border-strong / rgba(100,116,139,…)), and
-   the icon picks up its color from the inherited tertiary token
-   instead of a per-slug accent. Position: rendered last in the
-   grid (mirrors Root chip's rightmost chip-row position). */
+/* GH #813 — Root mini-card chrome. Solid `--border-subtle` reads
+   as a quieter daemon-emitted card vs the tinted named-subgraph
+   cards' `card.color + '55'` accent; the synthesized bucket stays
+   visually present without competing with the named cards for
+   attention.
+   Per-card `--sg-color` injection is suppressed in the JSX so the
+   gradient + hover-shadow fall through to the neutral fallback
+   (rgba(100,116,139,…)), and the icon picks up its color from
+   the inherited tertiary token instead of a per-slug accent.
+   Position: rendered last in the grid (mirrors Root chip's
+   rightmost chip-row position).
+   Round 1 visual revision (ui-lead): the original dashed +
+   `--border-strong` treatment was rejected — in this codebase
+   dashed reads as broken/disabled/drop-zone, `--border-strong`
+   is the loud active/hover token (so the Root card became the
+   LOUDEST card in the grid, opposite of intent), and dashed
+   truncates into irregular dot artifacts on the 12px
+   border-radius corners. Solid + subtle is the locked
+   treatment; base `.v10-sgov-card` rule's `border: 1px solid …`
+   cascades, so only the color token swaps here. */
 .v10-sgov-card.root {
-  border-style: dashed;
-  border-color: var(--border-strong);
+  border-color: var(--border-subtle);
 }
 .v10-sgov-card.root .v10-sgov-card-icon {
   color: var(--text-tertiary);

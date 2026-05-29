@@ -4275,10 +4275,10 @@ export function SubGraphMiniCard({
   };
   onNodeClick?: (node: any) => void;
   onOpen: () => void;
-  // GH #813 — `root` opts into the dashed-border, neutral-color
-  // chrome that distinguishes the synthesized Root bucket from
-  // daemon-emitted named sub-graphs. Same render shape, different
-  // chrome modifier.
+  // GH #813 — `root` opts into the quieter neutral-border chrome
+  // that distinguishes the synthesized Root bucket from daemon-
+  // emitted named sub-graphs (which carry per-card `--sg-color`
+  // tinted borders). Same render shape, different chrome modifier.
   variant?: 'root';
 }) {
   // Per-URI trust palette for the mini-graph (#3 polish).
