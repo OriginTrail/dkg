@@ -269,21 +269,23 @@ export function buildHermesChannelHeaders(
  * transport. `.env` (in the stored profile's `hermesHome`) is the source of
  * truth — the same file `dkg hermes setup` provisions and the one Hermes
  * itself reads. Reads are cached by path+mtime so we don't touch disk on
- * every chat request. `DKG_HERMES_API_SERVER_KEY` overrides for remote/WSL
- * gateways whose `.env` is not on the daemon's filesystem. Returns undefined
- * when no key is available (older key-less Hermes → no bearer is sent).
+ * every chat request. `DKG_HERMES_API_SERVER_KEY` is the source for remote/WSL
+ * gateways whose `.env` is not on the daemon's filesystem, and a fallback for
+ * loopback. Returns undefined when no key is available (older key-less Hermes →
+ * no bearer is sent).
  */
 export function resolveHermesApiServerKey(config: DkgConfig): string | undefined {
   const override = optionalTrimmedString(process.env.DKG_HERMES_API_SERVER_KEY);
-  if (override) return override;
-  // Only the LOOPBACK api_server reads a key from a local `.env`. A remote/WSL
-  // `--gateway-url` Hermes keeps its `.env` on another host, so reading the
-  // local profile here would forward a stale, unrelated key and make remote
-  // chat fail — those setups must use DKG_HERMES_API_SERVER_KEY (handled above).
-  if (!hasLoopbackHermesOpenAiTarget(config)) return undefined;
+  // Remote/WSL `--gateway-url` Hermes keeps its `.env` on another host, so the
+  // explicit override is the only source there.
+  if (!hasLoopbackHermesOpenAiTarget(config)) return override;
+  // Loopback: the profile `.env` is the source of truth and MUST win over the
+  // override — otherwise a stale `DKG_HERMES_API_SERVER_KEY` (left set after a
+  // former remote setup) would shadow the correct local key and 401 forever.
+  // The override stays only as a last-resort fallback (e.g. an unreadable .env).
   const hermesHome = resolveHermesHomeForKey(config);
-  if (!hermesHome) return undefined;
-  return readApiServerKeyFromEnv(join(hermesHome, '.env'));
+  const fromEnv = hermesHome ? readApiServerKeyFromEnv(join(hermesHome, '.env')) : undefined;
+  return fromEnv ?? override;
 }
 
 /**
@@ -347,8 +349,10 @@ function readApiServerKeyFromEnv(envPath: string): string | undefined {
     for (const line of readFileSync(envPath, 'utf-8').split(/\r?\n/)) {
       const match = line.match(/^\s*(?:export\s+)?API_SERVER_KEY\s*=(.*)$/);
       if (!match) continue;
-      const value = parseDotenvValue(match[1]);
-      if (value) key = value; // last uncommented assignment wins (dotenv)
+      // dotenv "last assignment wins" — including a blank/cleared final
+      // assignment (`API_SERVER_KEY=` or `=""`), which must reset an earlier
+      // value so a rotated/blanked key isn't forwarded stale.
+      key = parseDotenvValue(match[1]) || undefined;
     }
   } catch {
     key = undefined;

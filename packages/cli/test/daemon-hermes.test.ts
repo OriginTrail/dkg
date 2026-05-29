@@ -544,13 +544,35 @@ describe('Hermes channel helpers', () => {
       },
     }))).toBe('se#cret value');
 
-    // Explicit daemon override (remote/WSL Hermes) wins over the local .env.
-    process.env.DKG_HERMES_API_SERVER_KEY = 'override-key';
+    // Loopback: the profile .env wins over a stale DKG_HERMES_API_SERVER_KEY
+    // (e.g. left set from a former remote setup) so it can't shadow the correct
+    // local key (Codex review).
+    process.env.DKG_HERMES_API_SERVER_KEY = 'stale-override';
     try {
-      expect(resolveHermesApiServerKey(config)).toBe('override-key');
+      expect(resolveHermesApiServerKey(config)).toBe('from-env-file');
     } finally {
       delete process.env.DKG_HERMES_API_SERVER_KEY;
     }
+
+    // Remote (non-loopback) gateway: the .env is on another host, so the
+    // explicit override is the only source and the local .env is never read.
+    const remoteConfig = makeConfig({
+      localAgentIntegrations: {
+        hermes: {
+          enabled: true,
+          transport: { kind: 'hermes-openai', gatewayUrl: 'https://hermes.example.com:8642' },
+          metadata: { hermesHome: home },
+        },
+      },
+    });
+    process.env.DKG_HERMES_API_SERVER_KEY = 'remote-override';
+    try {
+      expect(resolveHermesApiServerKey(remoteConfig)).toBe('remote-override');
+    } finally {
+      delete process.env.DKG_HERMES_API_SERVER_KEY;
+    }
+    // Remote with no override → undefined (local .env never read).
+    expect(resolveHermesApiServerKey(remoteConfig)).toBeUndefined();
 
     // No hermesHome / no .env → undefined (older key-less Hermes: no bearer).
     expect(resolveHermesApiServerKey(makeConfig({
@@ -558,16 +580,20 @@ describe('Hermes channel helpers', () => {
         hermes: { enabled: true, transport: { kind: 'hermes-openai' } },
       },
     }))).toBeUndefined();
+  });
 
-    // Remote (non-loopback) gateway must NOT read the local .env, even when a
-    // stale local profile key exists — that key belongs to a different Hermes
-    // and would make the remote reject with 401 (Codex review). Such setups
-    // rely solely on DKG_HERMES_API_SERVER_KEY.
+  it('clears the key when the last .env assignment is blank (dotenv last-wins)', () => {
+    const home = mkdtempSync(join(tmpdir(), 'hermes-blank-'));
+    cleanupDirs.push(home);
+    // A later blank assignment must reset an earlier value, matching how Hermes
+    // (python-dotenv) reads it — otherwise DKG forwards a rotated-away key.
+    writeFileSync(join(home, '.env'), 'API_SERVER_KEY=old-key\nAPI_SERVER_KEY=\n');
+
     expect(resolveHermesApiServerKey(makeConfig({
       localAgentIntegrations: {
         hermes: {
           enabled: true,
-          transport: { kind: 'hermes-openai', gatewayUrl: 'https://hermes.example.com:8642' },
+          transport: { kind: 'hermes-openai', gatewayUrl: 'http://127.0.0.1:8642' },
           metadata: { hermesHome: home },
         },
       },
