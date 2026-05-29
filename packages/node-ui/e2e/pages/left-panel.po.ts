@@ -83,8 +83,12 @@ export class LeftPanelPage {
 
   async clickLayer(projectName: string, layer: 'wm' | 'swm' | 'vm' | 'import') {
     await this.expandProject(projectName);
-    await this.page.locator(sel.center.tab).filter({ hasText: projectName }).click();
-    const root = this.page.locator('.v10-center-content .v10-memory-explorer').last();
+    const tab = this.page.locator(sel.center.tab).filter({ hasText: projectName });
+    await tab.click();
+    await tab.waitFor({ state: 'visible' });
+    const root = this.page.locator('.v10-center-content .v10-memory-explorer').filter({
+      has: this.page.getByRole('button', { name: projectName }),
+    });
     if (layer === 'import') {
       await root.locator(sel.layer.actionBtn).filter({ hasText: /Import/i }).click();
       return;

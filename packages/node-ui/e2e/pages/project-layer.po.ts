@@ -1,4 +1,5 @@
 import { type Page, type Locator } from '@playwright/test';
+import { expect } from '@playwright/test';
 import { sel } from '../helpers/selectors.js';
 
 export class ProjectLayerPage {
@@ -9,10 +10,21 @@ export class ProjectLayerPage {
   }
 
   /** Scope layer controls to the active (or named) project view tab. */
-  private projectView(projectName?: string): Locator {
+  private async projectView(projectName?: string): Promise<Locator> {
     if (projectName) {
       const tab = this.page.locator(sel.center.tab).filter({ hasText: projectName });
-      tab.click().catch(() => {});
+      await tab.click();
+      await expect(tab).toHaveClass(/active/);
+      return this.page.locator('.v10-center-content .v10-memory-explorer').filter({
+        has: this.page.getByRole('button', { name: projectName }),
+      });
+    }
+    const activeTab = this.page.locator(`${sel.center.tab}.active`);
+    const label = (await activeTab.locator(sel.center.tabLabel).textContent())?.trim();
+    if (label && !label.includes('Dashboard')) {
+      return this.page.locator('.v10-center-content .v10-memory-explorer').filter({
+        has: this.page.getByRole('button', { name: label }),
+      });
     }
     return this.page.locator('.v10-center-content .v10-memory-explorer').last();
   }
@@ -23,14 +35,15 @@ export class ProjectLayerPage {
       .locator(sel.leftPanel.sectionHeader)
       .filter({ hasText: name })
       .click();
-    await this.projectView(name).waitFor({ state: 'visible', timeout: 15_000 });
+    const view = await this.projectView(name);
+    await view.waitFor({ state: 'visible', timeout: 15_000 });
   }
 
   async switchLayer(
     layer: 'Overview' | 'Working Memory' | 'Shared Working Memory' | 'Verifiable Memory' | 'Subgraphs',
     projectName?: string,
   ) {
-    const root = this.projectView(projectName);
+    const root = await this.projectView(projectName);
     const layerAttr: Record<string, string | null> = {
       Overview: null,
       'Working Memory': 'wm',
@@ -46,15 +59,17 @@ export class ProjectLayerPage {
   }
 
   async clickShare(projectName?: string) {
-    await this.projectView(projectName).locator(sel.layer.actionBtn).filter({ hasText: /Share/i }).click();
+    const root = await this.projectView(projectName);
+    await root.locator(sel.layer.actionBtn).filter({ hasText: /Share/i }).click();
   }
 
   async clickImport(projectName?: string) {
-    await this.projectView(projectName).locator(sel.layer.actionBtn).filter({ hasText: /Import/i }).click();
+    const root = await this.projectView(projectName);
+    await root.locator(sel.layer.actionBtn).filter({ hasText: /Import/i }).click();
   }
 
   async getStatStripCells(projectName?: string): Promise<Array<{ label: string; value: string }>> {
-    const root = this.projectView(projectName).locator(sel.statStrip.root).first();
+    const root = (await this.projectView(projectName)).locator(sel.statStrip.root).first();
     await root.waitFor({ state: 'visible', timeout: 15_000 });
     const cells = root.locator(sel.statStrip.cell);
     const count = await cells.count();

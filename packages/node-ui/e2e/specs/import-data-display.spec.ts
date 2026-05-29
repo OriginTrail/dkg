@@ -1,10 +1,10 @@
 import { test, expect } from '../fixtures/rich.js';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 
 const __dir = dirname(fileURLToPath(import.meta.url));
-const FIXTURE_DIR = join(__dir, '..', 'fixtures', 'files');
 
 test.describe('Import data display', () => {
   test.beforeEach(async ({ shell, leftPanel }) => {
@@ -27,8 +27,8 @@ test.describe('Import data display', () => {
   });
 
   test('adding markdown file shows filename in import list', async ({ page, importFilesModal }) => {
-    mkdirSync(FIXTURE_DIR, { recursive: true });
-    const samplePath = join(FIXTURE_DIR, 'e2e-sample.md');
+    const dir = mkdtempSync(join(tmpdir(), 'e2e-import-'));
+    const samplePath = join(dir, 'e2e-sample.md');
     writeFileSync(samplePath, '# E2E Sample\n\nWarfarin interacts with aspirin.\n');
 
     await page.locator('button[title*="Import"], button[aria-label*="Import"]').first().click();

@@ -32,15 +32,6 @@ type Fixtures = {
 };
 
 export const test = base.extend<Fixtures>({
-  page: async ({ page }, use) => {
-    // mock-ui runs without a live daemon — force api-wrapper into mock fallback.
-    if (process.env.PWTEST_DEVNET !== '1') {
-      await page.route('**/api/status', (route) =>
-        route.fulfill({ status: 503, contentType: 'application/json', body: '{}' }),
-      );
-    }
-    await use(page);
-  },
   shell: async ({ page }, use) => {
     await use(new AppShellPage(page));
   },

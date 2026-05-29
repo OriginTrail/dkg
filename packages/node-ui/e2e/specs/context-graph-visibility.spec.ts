@@ -27,11 +27,13 @@ test.describe('Context graph visibility', () => {
     await expect(card).toContainText('3');
   });
 
-  test('each context graph opens its own center tab', async ({ leftPanel, centerPanel }) => {
+  test('each context graph opens its own center tab', async ({ leftPanel, centerPanel, page }) => {
     for (const name of ['Pharma Drug Interactions', 'Climate Science', 'EU Supply Chain']) {
       await leftPanel.expandProject(name);
+      const needle = name.split(' ')[0]!;
+      await expect(page.locator(sel.center.tab).filter({ hasText: needle })).toBeVisible();
       const tabs = await centerPanel.getTabNames();
-      expect(tabs.some((t) => t.includes(name.split(' ')[0]!))).toBe(true);
+      expect(tabs.some((t) => t.includes(needle))).toBe(true);
     }
   });
 
@@ -44,8 +46,8 @@ test.describe('Context graph visibility', () => {
 
   test('edge-style CG (EU Supply Chain) owned by different curator is visible', async ({ leftPanel, page }) => {
     await leftPanel.expandProject('EU Supply Chain');
-    const heading = page.getByRole('button', { name: 'EU Supply Chain', disabled: true });
-    await expect(heading).toBeVisible();
+    await expect(page.locator(sel.center.tab).filter({ hasText: 'EU Supply Chain' })).toBeVisible();
+    await expect(page.locator('.v10-project-strip-name').filter({ hasText: 'EU Supply Chain' })).toBeVisible();
   });
 
   test('core-style CG (Climate Science) is listed and openable', async ({ leftPanel, centerPanel }) => {
