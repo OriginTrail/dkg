@@ -18,6 +18,10 @@ export class LeftPanelPage {
     return this.root.locator(sel.myContextGraphs.peerGroupBody).locator(sel.leftPanel.section);
   }
 
+  private memoryStackControl() {
+    return this.root.locator(sel.leftPanel.dashboard).filter({ hasText: 'Memory Stack' });
+  }
+
   async isVisible() {
     return this.root.isVisible();
   }
@@ -27,15 +31,22 @@ export class LeftPanelPage {
   }
 
   async clickMemoryStack() {
+    const sidebar = this.memoryStackControl();
+    if (await sidebar.isVisible().catch(() => false)) {
+      await sidebar.click();
+      return;
+    }
     const quick = this.page.locator('.v10-quick-action').filter({ hasText: /Memory Stack/i });
     if (await quick.isVisible().catch(() => false)) {
       await quick.click();
+      return;
     }
+    throw new Error('Memory Stack navigation control not found (expected .v10-tree-dashboard or .v10-quick-action)');
   }
 
   async isMemoryStackVisible() {
-    const quick = this.page.locator('.v10-quick-action').filter({ hasText: /Memory Stack/i });
-    return quick.isVisible().catch(() => false);
+    if (await this.memoryStackControl().isVisible().catch(() => false)) return true;
+    return this.page.locator('.v10-quick-action').filter({ hasText: /Memory Stack/i }).isVisible().catch(() => false);
   }
 
   async switchToMode(mode: 'explorer' | 'oracle') {
@@ -52,7 +63,12 @@ export class LeftPanelPage {
     await this.newProjectBtn.first().click();
   }
 
+  async waitForProjectsLoaded() {
+    await this.myCgSections().locator(sel.leftPanel.sectionLabel).first().waitFor({ state: 'visible', timeout: 15_000 });
+  }
+
   async getProjectNames() {
+    await this.waitForProjectsLoaded();
     const labels = this.myCgSections().locator(sel.leftPanel.sectionLabel);
     const count = await labels.count();
     const names: string[] = [];
@@ -64,13 +80,15 @@ export class LeftPanelPage {
   }
 
   async expandProject(name: string) {
+    await this.waitForProjectsLoaded();
     await this.myCgSections()
       .locator(sel.leftPanel.sectionHeader)
       .filter({ hasText: name })
       .click();
   }
 
-  async clickLayer(_projectName: string, layer: 'wm' | 'swm' | 'vm' | 'import') {
+  async clickLayer(projectName: string, layer: 'wm' | 'swm' | 'vm' | 'import') {
+    await this.expandProject(projectName);
     if (layer === 'import') {
       await this.page.locator(sel.layer.actionBtn).filter({ hasText: /Import/i }).click();
       return;

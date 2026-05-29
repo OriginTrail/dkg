@@ -14,6 +14,7 @@ test.describe('Context graph visibility', () => {
   });
 
   test('left panel lists all mock context graphs under My Context Graphs', async ({ leftPanel }) => {
+    await leftPanel.waitForProjectsLoaded();
     const names = await leftPanel.getProjectNames();
     expect(names).toContain('Pharma Drug Interactions');
     expect(names).toContain('Climate Science');
