@@ -27,7 +27,7 @@ function uri(v: string) {
 }
 
 function lit(v: string) {
-  return { value: `"${v}"`, type: 'literal' as const };
+  return { value: v, type: 'literal' as const };
 }
 
 function binding(
@@ -90,7 +90,21 @@ export function vmBindings(cgId: string): SparqlBinding[] {
   ];
 }
 
-/** Profile meta sub-graph bindings for SubGraphBar chip labels */
+/** Profile SELECT bindings for `useProjectProfile` sub-graph query */
+export function profileSubGraphSelectBindings(_cgId: string): Array<Record<string, { value: string; type: string }>> {
+  return [
+    {
+      slug: { value: 'entities', type: 'literal' },
+      displayName: { value: 'Entities', type: 'literal' },
+      description: { value: 'Core drug entities', type: 'literal' },
+      icon: { value: '⬡', type: 'literal' },
+      color: { value: '#38bdf8', type: 'literal' },
+      rank: { value: '1', type: 'literal' },
+    },
+  ];
+}
+
+/** Legacy triple-shaped meta bindings (SELECT ?s ?p ?o paths) */
 export function profileMetaBindings(cgId: string): SparqlBinding[] {
   const base = `did:dkg:context-graph:${cgId}`;
   const metaGraph = `${base}/_meta`;

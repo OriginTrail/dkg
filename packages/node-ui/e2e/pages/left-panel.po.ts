@@ -36,17 +36,11 @@ export class LeftPanelPage {
       await sidebar.click();
       return;
     }
-    const quick = this.page.locator('.v10-quick-action').filter({ hasText: /Memory Stack/i });
-    if (await quick.isVisible().catch(() => false)) {
-      await quick.click();
-      return;
-    }
-    throw new Error('Memory Stack navigation control not found (expected .v10-tree-dashboard or .v10-quick-action)');
+    throw new Error('Memory Stack navigation control not found (expected .v10-tree-dashboard with "Memory Stack" label)');
   }
 
   async isMemoryStackVisible() {
-    if (await this.memoryStackControl().isVisible().catch(() => false)) return true;
-    return this.page.locator('.v10-quick-action').filter({ hasText: /Memory Stack/i }).isVisible().catch(() => false);
+    return this.memoryStackControl().isVisible().catch(() => false);
   }
 
   async switchToMode(mode: 'explorer' | 'oracle') {
@@ -89,11 +83,13 @@ export class LeftPanelPage {
 
   async clickLayer(projectName: string, layer: 'wm' | 'swm' | 'vm' | 'import') {
     await this.expandProject(projectName);
+    await this.page.locator(sel.center.tab).filter({ hasText: projectName }).click();
+    const root = this.page.locator('.v10-center-content .v10-memory-explorer').last();
     if (layer === 'import') {
-      await this.page.locator(sel.layer.actionBtn).filter({ hasText: /Import/i }).click();
+      await root.locator(sel.layer.actionBtn).filter({ hasText: /Import/i }).click();
       return;
     }
-    await this.page.locator(`${sel.layer.switchBtn}[data-layer="${layer}"]`).click();
+    await root.locator(`${sel.layer.switchBtn}[data-layer="${layer}"]`).click();
   }
 
   async expandIntegrations() {

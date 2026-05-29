@@ -5,7 +5,7 @@ import { dirname } from 'node:path';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CI = !!process.env.CI;
 const PORT = 5173;
-/** Set via `pnpm test:e2e:devnet` — never inherit accidentally from the shell. */
+/** Only true when launched via `pnpm test:e2e:devnet` (never inherit from shell). */
 const DEVNET_UI = process.env.PWTEST_DEVNET === '1';
 const DEVNET_NODE = process.env.DEVNET_NODE || process.env.UI_NODE_ID || '1';
 
