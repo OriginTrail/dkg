@@ -310,7 +310,21 @@ export class QueryHandler {
       return errorResponse(opId, 'ERROR', `SPARQL rejected: ${guard.reason}`);
     }
 
-    // Execute with timeout
+    // Execute with timeout.
+    //
+    // KNOWN LIMITATION (tracked follow-up to #764): this `Promise.race`
+    // bounds the *response* latency but does not cancel the underlying
+    // SPARQL execution — the engine has no cancellation hook, so an
+    // expensive remote query keeps consuming CPU/memory in the background
+    // until it completes naturally. Likewise `limit` below is applied as a
+    // post-materialization `.slice()`, so a high-cardinality query is fully
+    // materialized before being truncated. Genuinely enforcing either bound
+    // requires threading an `AbortSignal` + result cap through
+    // `QueryEngine.query()` → storage → the oxigraph worker. Injecting a
+    // `LIMIT` into the user query here is NOT a safe shortcut: for scoped
+    // queries it would push the statement into the multi-graph
+    // solution-set-modifier rejection path (see #789), so it is
+    // deliberately left to the engine-level follow-up.
     let timer: ReturnType<typeof setTimeout> | undefined;
     const result = await Promise.race([
       this.queryEngine.query(sparql, { contextGraphId }),

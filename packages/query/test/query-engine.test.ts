@@ -1040,4 +1040,28 @@ describe('validateReadOnlySparql', () => {
     `);
     expect(result.safe).toBe(true);
   });
+
+  // #764 follow-up: the previous `[A-Za-z][A-Za-z0-9_-]*` label charset was
+  // stricter than SPARQL's PN_PREFIX grammar and rejected valid read-only
+  // queries whose PREFIX label contained a dot or non-ASCII characters.
+  it('allows PREFIX labels containing dots (PN_PREFIX)', () => {
+    const result = validateReadOnlySparql(
+      'PREFIX foaf.core: <http://xmlns.com/foaf/0.1/> SELECT ?s WHERE { ?s foaf.core:name ?n }',
+    );
+    expect(result.safe).toBe(true);
+  });
+
+  it('allows PREFIX labels containing non-ASCII characters', () => {
+    const result = validateReadOnlySparql(
+      'PREFIX naïve: <http://example.org/> SELECT ?s WHERE { ?s naïve:p ?o }',
+    );
+    expect(result.safe).toBe(true);
+  });
+
+  it('still rejects mutations even with an exotic PREFIX label', () => {
+    const result = validateReadOnlySparql(
+      'PREFIX foaf.core: <http://xmlns.com/foaf/0.1/> INSERT DATA { <s> <p> <o> }',
+    );
+    expect(result.safe).toBe(false);
+  });
 });

@@ -27,9 +27,19 @@ const MUTATING_PATTERN = new RegExp(
 );
 
 // Matches the query form keyword after optional PREFIX/BASE preamble.
-// `stripLiteralsAndComments` blanks IRI bodies first, so this accepts both
-// newline-separated and inline declarations, e.g. `PREFIX ex: <...> SELECT`.
-const READ_ONLY_FORMS = /^\s*(?:(?:PREFIX\s+(?:[A-Za-z][A-Za-z0-9_-]*)?:\s*)|(?:BASE\s+))*\s*(SELECT|CONSTRUCT|ASK|DESCRIBE)\b/i;
+// `stripLiteralsAndComments` blanks IRI bodies (and the surrounding `<>`)
+// to spaces first, so this accepts both newline-separated and inline
+// declarations, e.g. `PREFIX ex: <...> SELECT`.
+//
+// The prefix LABEL is matched permissively (`[^\s:]*` — any run of
+// non-whitespace, non-colon chars, including the empty default prefix
+// `PREFIX : <...>`). The previous `[A-Za-z][A-Za-z0-9_-]*` charset was
+// stricter than SPARQL's `PN_PREFIX` grammar and rejected legal labels
+// containing dots (`foaf.core:`) or non-ASCII characters, even on
+// otherwise read-only queries. The label charset is irrelevant to the
+// read-only safety decision — that is enforced separately by anchoring on
+// the SELECT/CONSTRUCT/ASK/DESCRIBE form keyword and by `MUTATING_PATTERN`.
+const READ_ONLY_FORMS = /^\s*(?:(?:PREFIX\s+[^\s:]*:\s*)|(?:BASE\s+))*\s*(SELECT|CONSTRUCT|ASK|DESCRIBE)\b/i;
 
 /** SPARQL query form — enough to shape a `QueryResult` correctly. */
 export type SparqlQueryForm = 'SELECT' | 'CONSTRUCT' | 'ASK' | 'DESCRIBE' | 'UNKNOWN';
