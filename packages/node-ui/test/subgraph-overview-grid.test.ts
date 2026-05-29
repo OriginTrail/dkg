@@ -319,15 +319,17 @@ describe('SubGraphOverviewGrid — header subtitle anchors (PR #793 round 4.1, G
       ],
     });
     const triples = [
-      // alpha sub-graph triples
-      { subject: 'urn:e:a1', predicate: 'p', object: 'o1', subGraph: 'alpha' },
-      { subject: 'urn:e:a2', predicate: 'p', object: 'o2', subGraph: 'alpha' },
+      // alpha sub-graph triples. GH #805 — fixture now tags
+      // `layer: 'working'` so the `useLayerTriples` sum
+      // (which the subtitle now reads) admits them.
+      { subject: 'urn:e:a1', predicate: 'p', object: 'o1', subGraph: 'alpha', layer: 'working' },
+      { subject: 'urn:e:a2', predicate: 'p', object: 'o2', subGraph: 'alpha', layer: 'working' },
       // beta sub-graph triples
-      { subject: 'urn:e:b1', predicate: 'p', object: 'o3', subGraph: 'beta' },
-      { subject: 'urn:e:b2', predicate: 'p', object: 'o4', subGraph: 'beta' },
+      { subject: 'urn:e:b1', predicate: 'p', object: 'o3', subGraph: 'beta', layer: 'working' },
+      { subject: 'urn:e:b2', predicate: 'p', object: 'o4', subGraph: 'beta', layer: 'working' },
       // a root-bucket triple (no sub-graph origin) — counted by the
       // hook total but never reaches a card aggregate.
-      { subject: 'urn:e:root', predicate: 'p', object: 'o5' },
+      { subject: 'urn:e:root', predicate: 'p', object: 'o5', layer: 'working' },
     ];
     const entityList = [
       { uri: 'urn:e:a1', label: 'a1', types: [], trustLevel: 'working', layers: new Set(['working']), subGraphs: new Set(['alpha']), properties: new Map(), connections: [] },
@@ -376,13 +378,15 @@ describe('SubGraphOverviewGrid — header subtitle anchors (PR #793 round 4.1, G
       { uri: 'urn:e:cross', label: 'c', types: [], trustLevel: 'working', layers: new Set(['working']), subGraphs: new Set(['alpha', 'beta']), properties: new Map(), connections: [] },
     ];
     const triples = [
-      // 4 raw triple rows even though the cross-graph SPO duplicate
-      // means distinct triples are fewer — exactly the GH #805
-      // family the subtitle now defers to.
-      { subject: 'urn:e:alpha-only', predicate: 'p', object: 'o', subGraph: 'alpha' },
-      { subject: 'urn:e:beta-only', predicate: 'p', object: 'o', subGraph: 'beta' },
-      { subject: 'urn:e:cross', predicate: 'p', object: 'o', subGraph: 'alpha' },
-      { subject: 'urn:e:cross', predicate: 'p', object: 'o', subGraph: 'beta' },
+      // 4 raw triple rows; the (urn:e:cross, p, o) SPO appears in
+      // both alpha and beta named graphs — exactly the SWM
+      // cross-graph duplication GH #805 fixes. After
+      // `useLayerTriples` SPO-dedup the layer slice carries 3
+      // distinct triples, not 4.
+      { subject: 'urn:e:alpha-only', predicate: 'p', object: 'o', subGraph: 'alpha', layer: 'working' },
+      { subject: 'urn:e:beta-only', predicate: 'p', object: 'o', subGraph: 'beta', layer: 'working' },
+      { subject: 'urn:e:cross', predicate: 'p', object: 'o', subGraph: 'alpha', layer: 'working' },
+      { subject: 'urn:e:cross', predicate: 'p', object: 'o', subGraph: 'beta', layer: 'working' },
     ];
     await renderWith({
       ...memory,
@@ -398,9 +402,56 @@ describe('SubGraphOverviewGrid — header subtitle anchors (PR #793 round 4.1, G
     // Subtitle anchors to hook total (3), NOT sum-of-cards (4).
     expect(sub!.textContent).toContain('3 entities');
     expect(sub!.textContent).not.toContain('4 entities');
-    // Subtitle anchors to allTriples.length (4), matching what the
-    // SubGraphBar `All` chip tooltip surfaces.
-    expect(sub!.textContent).toContain('4 triples');
+    // Subtitle triples now sums `useLayerTriples` per layer
+    // (GH #805): the (urn:e:cross, p, o) SPO row that appeared
+    // in both alpha and beta named graphs collapses to 1 after
+    // canonical-SPO dedup, so the 4 raw rows project down to 3
+    // distinct triples in the WM layer slice.
+    expect(sub!.textContent).toContain('3 triples');
+    // The raw `allTriples.length` (4) must NOT appear — that's
+    // the bug GH #805 fixed.
+    expect(sub!.textContent).not.toContain('4 triples');
+  });
+
+  it('subtitle drops WM residue triples whose subject has been promoted to SWM (GH #805 layer-correctness)', async () => {
+    // The other half of GH #805 — WM residue. The daemon leaves
+    // `/assertion/<addr>/<name>` graphs on disk after promote, so a
+    // promoted entity's WM-origin triples keep coming back from
+    // `wmSparql`. The entity's canonical `trustLevel` has moved to
+    // `shared`, so `useLayerTriples('wm')` drops those residue
+    // rows. Pre-#805 `allTriples.length` counted them and the
+    // subtitle disagreed with the per-layer LayerStats.
+    fetchSubGraphsMock.mockResolvedValueOnce({
+      subGraphs: [{ name: 'alpha', entityCount: 1, tripleCount: 0, description: '' }],
+    });
+    const entityList = [
+      // 1 alpha entity, canonical layer SWM (promoted out of WM).
+      { uri: 'urn:e:promoted', label: 'p', types: [], trustLevel: 'shared', layers: new Set(['working', 'shared']), subGraphs: new Set(['alpha']), properties: new Map(), connections: [] },
+    ];
+    const triples = [
+      // Honest SWM triple — kept.
+      { subject: 'urn:e:promoted', predicate: 'p', object: 'o-swm', layer: 'shared' },
+      // WM residue — same subject, but its canonical trustLevel is
+      // 'shared', so `useLayerTriples('wm')` drops this row.
+      // Pre-#805 it would have inflated the subtitle by 1.
+      { subject: 'urn:e:promoted', predicate: 'p', object: 'o-wm-residue', layer: 'working' },
+    ];
+    await renderWith({
+      ...memory,
+      entities: new Map(entityList.map(e => [e.uri, e])),
+      entityList,
+      allTriples: triples,
+      counts: { wm: 0, swm: 1, vm: 0, total: 1 },
+    });
+    await flush();
+
+    const sub = container.querySelector('.v10-sgov-sub');
+    expect(sub).toBeTruthy();
+    // Only the honest SWM triple survives — WM residue dropped by
+    // the per-layer trustLevel filter.
+    expect(sub!.textContent).toContain('1 triples');
+    // Pre-#805 raw `allTriples.length` would have shown 2.
+    expect(sub!.textContent).not.toContain('2 triples');
   });
 });
 

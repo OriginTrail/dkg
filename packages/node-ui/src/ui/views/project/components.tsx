@@ -787,18 +787,30 @@ export function ProjectOverviewCard({
           ? 'One or more layer counts are currently a lower bound.'
           : 'Canonical current-layer entity counts.';
   const totalEntitiesValue = allLayerCountsUnavailable ? 'Unavailable' : layerSum.toLocaleString();
-  // Triples: canonical layer-correct total exposed by the hook
-  // (§4.2.1 trap — do NOT sum per-entity tripleCount, do NOT borrow
-  // SubGraphBar's `totalTriples` which excludes the root bucket).
+  // Triples: canonical layer-correct total via `useLayerTriples`
+  // summed across all three layers (§4.2.1 trap — do NOT sum
+  // per-entity tripleCount, do NOT borrow SubGraphBar's
+  // `totalTriples` which excludes the root bucket, and do NOT
+  // read `allTriples.length` directly because it skips neither
+  // SWM cross-graph SPO duplication nor WM residue from promoted
+  // entities, both of which `useLayerTriples` correctly filters).
   //
-  // Codex review bug B — `useMemoryEntities` preserves partial
-  // results when one layer query fails, so `allTriples.length` is
-  // only a LOWER BOUND in that case. Mirror the Entities cell
-  // logic: 'Unavailable' if every layer errored, '<n>+' when
-  // partial, the plain number otherwise. The tooltip carries the
-  // explanation (consistent with the Delta-2 tooltip-only hint
-  // pattern).
-  const triplesCount = memory.allTriples?.length ?? 0;
+  // GH #805 fix: prior shape `memory.allTriples?.length ?? 0`
+  // surfaced an inflated total on any CG with published SWM (the
+  // same SPO row appears in both `<cg>/_shared_memory` and per-
+  // sub-graph `<cg>/<sg>/_shared_memory` graphs) or post-promote
+  // WM residue (assertion graphs left on disk). Summing the
+  // layer-correct slices makes the Overview "Triples" match the
+  // per-layer LayerStats by construction.
+  //
+  // Codex review bug B (still applies — partial-result preserving
+  // behaviour is unchanged): when a layer query fails the slice
+  // is empty; sum stays a lower bound and the '+' suffix renders
+  // via `triplesIsPartial`.
+  const wmLayerTriples = useLayerTriples(memory, 'wm');
+  const swmLayerTriples = useLayerTriples(memory, 'swm');
+  const vmLayerTriples = useLayerTriples(memory, 'vm');
+  const triplesCount = wmLayerTriples.length + swmLayerTriples.length + vmLayerTriples.length;
   const triplesIsPartial = !memory.loading && (memory.partial || hasUnavailableLayer);
   const triplesValue = allLayerCountsUnavailable
     ? 'Unavailable'
@@ -4056,6 +4068,23 @@ export function SubGraphOverviewGrid({
       .sort((a, b) => a.rank - b.rank);
   }, [subGraphs, profile, triplesBySubGraph, layerCountsBySubGraph, entityUrisBySubGraph, entityTrustByUriBySubGraph]);
 
+  // GH #805 — subtitle triple total swapped to the same
+  // `useLayerTriples` layer-sum derivation now used by the
+  // Overview Triples stat (`:801`). Pre-GH-#805 the subtitle
+  // read `memory.allTriples.length` directly (canonical-source
+  // discipline established by round 4.1's chip-row anchor); that
+  // anchor was correct *given* the upstream value was honest, but
+  // `allTriples` lifts SWM cross-graph SPO duplicates + WM residue,
+  // so even the chip-row-anchored value was over-counting on CGs
+  // with published SWM or promoted entities. Summing per-layer
+  // slices restores the "subtitle agrees with LayerStats" invariant
+  // round 4.1 was actually after.
+  const wmSubtitleTriples = useLayerTriples(memory, 'wm');
+  const swmSubtitleTriples = useLayerTriples(memory, 'swm');
+  const vmSubtitleTriples = useLayerTriples(memory, 'vm');
+  const subtitleTripleCount =
+    wmSubtitleTriples.length + swmSubtitleTriples.length + vmSubtitleTriples.length;
+
   // GH #813 — Root mini-card. Synthesizes a card for the
   // "entities not in any named sub-graph" bucket so the grid
   // mirrors the SubGraphBar chip row (which already exposes Root
@@ -4186,20 +4215,22 @@ export function SubGraphOverviewGrid({
     <div className="v10-sgov">
       <div className="v10-sgov-header">
         <div className="v10-sgov-title">Subgraphs</div>
-        {/* Round 4.1 (ux-lead, GH #812) — subtitle anchors to the
+        {/* Round 4.1 (ux-lead, GH #812) — subtitle anchors to
             canonical hook surfaces (`memory.counts.total` for
-            entities, `memory.allTriples.length` for triples) so it
-            matches the SubGraphBar `All` chip by construction.
-            Pre-round-4.1 the subtitle derived from card-level
-            aggregates (sum-of-`entityCount` double-counted
-            cross-membership entities; sum-of-`tripleCount` excluded
-            the root bucket). After round 4's `All`-includes-Root
-            reversal the right anchor is the same source the chip
-            row reads from — single source of truth, and when GH
-            #805 fixes the triple total upstream both surfaces fix
-            together. */}
+            entities, layer-sum via `useLayerTriples` for triples)
+            so it matches both the SubGraphBar `All` chip AND the
+            per-layer LayerStats by construction.
+            Pre-round-4.1: derived from card-level aggregates
+            (sum-of-`entityCount` double-counted cross-membership
+            entities; sum-of-`tripleCount` excluded the root bucket).
+            Round 4.1 swapped to `memory.counts.total` + raw
+            `memory.allTriples.length` — entity anchor was correct,
+            triple anchor was still inflated by SWM cross-graph SPO
+            duplicates + WM residue (GH #805). This commit lands the
+            #805 layer-sum fix on the same surface so subtitle ==
+            Overview Triples == per-layer LayerStats. */}
         <div className="v10-sgov-sub">
-          {cards.length} subgraphs · {memory.counts.total} entities · {memory.allTriples.length} triples
+          {cards.length} subgraphs · {memory.counts.total} entities · {subtitleTripleCount} triples
         </div>
       </div>
       <div className="v10-sgov-grid">
