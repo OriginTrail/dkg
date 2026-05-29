@@ -853,7 +853,10 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
     // was brittle (Suspense fallback shares the empty class) AND
     // would have missed the single-dominant-subject defect Codex
     // surfaced in sweep 2 — assert against the cap directly now.
-    const graphEl = rootCardEl.querySelector('[data-testid="rdf-graph"]') as HTMLElement | null;
+    // PR #818 sweep 3 — wait for Suspense resolution before
+    // reading the data attribute so isolated runs don't race
+    // the lazy import.
+    const graphEl = await waitForGraph(container, { scope: rootCardEl });
     expect(graphEl).toBeTruthy();
     const renderedTripleCount = Number(graphEl!.getAttribute('data-triple-count') ?? 'NaN');
     expect(renderedTripleCount).toBeLessThanOrEqual(2500); // MAX_PER_CARD
@@ -1043,7 +1046,10 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
 
     const cards = container.querySelectorAll('.v10-sgov-card');
     const rootCardEl = cards[cards.length - 1];
-    const graphEl = rootCardEl.querySelector('[data-testid="rdf-graph"]') as HTMLElement | null;
+    // PR #818 sweep 3 — wait for Suspense resolution before
+    // reading the data attribute so isolated runs don't race
+    // the lazy import.
+    const graphEl = await waitForGraph(container, { scope: rootCardEl });
     expect(graphEl).toBeTruthy();
     const renderedTripleCount = Number(graphEl!.getAttribute('data-triple-count') ?? 'NaN');
     // Pre-sweep this would have rendered 5000 (the dominant
@@ -1102,7 +1108,10 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
     // First card is the named alpha card; Root card is last.
     const cards = container.querySelectorAll('.v10-sgov-card');
     const alphaCardEl = cards[0];
-    const graphEl = alphaCardEl.querySelector('[data-testid="rdf-graph"]') as HTMLElement | null;
+    // PR #818 sweep 3 — wait for Suspense resolution before
+    // reading the data attribute so isolated runs don't race
+    // the lazy import.
+    const graphEl = await waitForGraph(container, { scope: alphaCardEl });
     expect(graphEl).toBeTruthy();
     const renderedTripleCount = Number(graphEl!.getAttribute('data-triple-count') ?? 'NaN');
     // Pre-sweep: 5000 rows leaked through. Post-sweep: cap is
