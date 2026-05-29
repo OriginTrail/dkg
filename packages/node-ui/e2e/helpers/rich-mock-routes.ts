@@ -11,7 +11,14 @@ import {
 
 /** Inline mock payloads (mirror `src/ui/mocks/data.ts` for Playwright isolation). */
 const MOCK_API = {
-  status: { name: 'my-dkg-node', networkName: 'DKG Mainnet', connectedPeers: 12, synced: true, version: '10.0.0-rc' },
+  status: {
+    name: 'my-dkg-node',
+    networkName: 'DKG Mainnet',
+    connectedPeers: 12,
+    synced: true,
+    version: '10.0.0-rc',
+    peerId: 'QmMockNodeAgentPeer000000000000000000000000',
+  },
   agent: {
     agentAddress: '0x1111111111111111111111111111111111111111',
     agentDid: 'did:dkg:agent:0x1111111111111111111111111111111111111111',
@@ -98,7 +105,12 @@ export async function installRichMemoryRoutes(
     if (path === '/api/economics') return fulfillJson(route, MOCK_API.economics);
     if (path === '/api/wallets/balances') return fulfillJson(route, MOCK_API.wallets);
     if (path === '/api/notifications') return fulfillJson(route, MOCK_API.notifications);
-    if (path === '/api/operations') return fulfillJson(route, { operations: [], total: 0 });
+    if (path === '/api/operations' || path.startsWith('/api/operations/')) {
+      return fulfillJson(route, { operations: [], total: 0 });
+    }
+    if (path.startsWith('/api/memory/sessions')) {
+      return fulfillJson(route, { sessions: [] });
+    }
     if (path.startsWith('/api/sub-graph/list')) {
       const cgId = new URL(url).searchParams.get('contextGraphId') ?? primaryCgId;
       return fulfillJson(route, subGraphList(cgId));
@@ -118,15 +130,19 @@ export async function installRichMemoryRoutes(
       return fulfillJson(route, queryResponse(bindingsForQuery(body.sparql ?? '', cgId)));
     }
     if (path.startsWith('/api/events')) {
-      return fulfillJson(route, {});
+      return route.fulfill({
+        status: 200,
+        contentType: 'text/event-stream',
+        body: ': mock sse\n\n',
+      });
     }
 
-    // SSE and unhandled endpoints: abort quietly so the UI keeps running.
-    if (path.startsWith('/api/events') || path.includes('stream')) {
-      return route.abort();
-    }
-
-    await route.continue();
+    // Fail fast — do not leak to a live daemon when an endpoint is missing.
+    await route.fulfill({
+      status: 404,
+      contentType: 'application/json',
+      body: JSON.stringify({ error: `rich-mock: unstubbed ${method} ${path}` }),
+    });
   });
 }
 

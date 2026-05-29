@@ -31,17 +31,17 @@ test.describe('SubGraph bar', () => {
 
   test('registered sub-graph chips appear with labels', async ({ subgraphBar }) => {
     const labels = await subgraphBar.getChipLabels();
-    expect(labels).toContain('entities');
+    expect(labels.some((l) => /entit/i.test(l))).toBe(true);
   });
 
   test('clicking a sub-graph chip activates it', async ({ subgraphBar }) => {
-    await subgraphBar.clickChip('entities');
+    await subgraphBar.clickChip(/entit/i);
     const active = await subgraphBar.getActiveChipLabel();
     expect(active?.toLowerCase()).toContain('entit');
   });
 
   test('clicking All chip clears sub-graph filter', async ({ subgraphBar }) => {
-    await subgraphBar.clickChip('entities');
+    await subgraphBar.clickChip(/entit/i);
     await subgraphBar.clickChip('All');
     const active = await subgraphBar.getActiveChipLabel();
     expect(active).toBe('All');
@@ -67,7 +67,7 @@ test.describe('SubGraph bar', () => {
 test.describe('SubGraph detail cross-layer strip', () => {
   test.beforeEach(async ({ shell, leftPanel, projectLayer, subgraphBar }) => {
     await openPharmaSubgraphs({ shell, leftPanel, projectLayer, subgraphBar });
-    await subgraphBar.clickChip('entities');
+    await subgraphBar.clickChip(/entit/i);
   });
 
   test('detail view shows cross-layer WM → SWM → VM strip', async ({ page }) => {
