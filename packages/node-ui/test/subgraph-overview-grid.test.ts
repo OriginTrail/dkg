@@ -903,15 +903,23 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
     expect(rootCardEl.querySelector('[data-testid="rdf-graph"]')).toBeTruthy();
   });
 
-  it('Root card drops WM residue triples whose subject has been promoted to SWM (Codex sweep 2, GH #805 family)', async () => {
-    // PR #818 sweep 2 — the Root card previously iterated raw
-    // `memory.allTriples`, reintroducing the residue + cross-
-    // graph bug GH #805 just fixed for the Overview/subtitle
-    // surface. Promoted-entity WM residue (the daemon leaves
-    // `/assertion/<addr>/<name>` graphs on disk after promote)
-    // would inflate `rootCard.tripleCount`. Fix: scope into the
-    // union of the per-layer `useLayerTriples` slices, which
-    // apply the subject-trust-level residue filter.
+  it('Root card admits WM residue alongside honest SWM rows (Codex sweep 4 revert — consistent-wrong vs named cards, fix-side scoped for GH #819)', async () => {
+    // PR #818 sweep 4 (ux-lead Finding 1 verdict A — revert).
+    // Sweep 2 added a `useLayerTriples` layer-correctness filter
+    // that dropped WM-residue rows for a promoted entity. That
+    // filter introduced two regressions of its own at the next
+    // consumer downstream (per-slice SPO-dedup race + mixed-layer
+    // edge drop) — moving the symptom rather than fixing the
+    // source. ux-lead's verdict (A): revert to the symmetric
+    // `memory.allTriples` filtered by `!t.subGraph` shape so the
+    // Root card uses the same machinery as the named cards.
+    //
+    // Post-revert: the WM residue row admits alongside the honest
+    // SWM row. Inflation is consistent across Root AND named
+    // cards (consistent-wrong is easier to reason about and to
+    // fix in one render-side follow-up than divergent-wrong).
+    // GH #819 owns the shared render-correct derivation for both
+    // surfaces.
     fetchSubGraphsMock.mockResolvedValueOnce({
       subGraphs: [{ name: 'alpha', entityCount: 1, tripleCount: 0, description: '' }],
     });
@@ -943,25 +951,33 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
     const cards = container.querySelectorAll('.v10-sgov-card');
     const rootCardEl = cards[cards.length - 1];
     const stats = rootCardEl.querySelector('.v10-sgov-card-stats')?.textContent ?? '';
-    // Only the honest SWM triple survives — WM residue dropped.
-    expect(stats).toContain('1 triples');
-    expect(stats).not.toContain('2 triples');
+    // PR #818 sweep 4 (ux-lead Finding 1 verdict A — revert): the
+    // sweep-2 layer-correctness filter has been removed; Root now
+    // mirrors the named-card pattern over `memory.allTriples`. The
+    // WM residue row admits alongside the honest SWM row — same
+    // inflation behavior as named cards (consistent-wrong rather
+    // than divergent-wrong; render-side fix is GH #819).
+    expect(stats).toContain('2 triples');
   });
 
-  it('Root card collapses SWM cross-graph SPO duplicates (Codex sweep 2, GH #805 family)', async () => {
-    // PR #818 sweep 2 — same family, different mechanism. SWM
-    // content published into a named sub-graph appears in both
-    // `<cg>/_shared_memory` (root SWM graph) AND
-    // `<cg>/<sg>/_shared_memory` (per-sub-graph SWM graph). Raw
-    // `memory.allTriples` counts both rows; `useLayerTriples`
-    // SPO-deduplicates them to 1. The Root card now scopes into
-    // that deduped universe.
+  it('Root card admits SWM cross-graph SPO collision via the untagged variant (Codex sweep 4 regression — under-count prevented)', async () => {
+    // PR #818 sweep 4 (ux-lead Finding 1 verdict A — revert).
+    // The sweep-2 `useLayerTriples` derivation had a per-slice
+    // dedup race: when the SAME `(s, p, o)` shipped under BOTH
+    // the root SWM graph (untagged) AND a per-sub-graph SWM graph
+    // (tagged), the SWM layer slice's canonical-SPO dedup
+    // collapsed both rows into the one that arrived first. If
+    // the tagged row won, the Root card's `if (t.subGraph)
+    // continue` guard then dropped it — and the untagged variant
+    // never got a second chance to admit. Outcome: Root card
+    // under-counted the SPO to ZERO on the cross-graph collision
+    // shape.
     //
-    // The crucial test: a root-bucket entity whose `rdfs:label`
-    // ships under both the root SWM graph AND a named-sub-graph
-    // SWM graph (one of its OTHER assertions targeted a sub-graph,
-    // promoting the label via lifecycle metadata). Pre-sweep the
-    // Root card would count 2; post-sweep it counts 1.
+    // Post-revert: `memory.allTriples` is the input, so both the
+    // tagged and untagged variants reach the Root loop. The
+    // `!t.subGraph` filter drops the tagged row; the untagged row
+    // admits and renders. Regression-prevent: the row admits at
+    // least once — not the sweep-2 outcome of 0.
     fetchSubGraphsMock.mockResolvedValueOnce({
       subGraphs: [{ name: 'alpha', entityCount: 0, tripleCount: 0, description: '' }],
     });
@@ -970,26 +986,13 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
       { uri: 'urn:e:root-swm', label: 'rsm', types: [], trustLevel: 'shared', layers: new Set(['shared']), subGraphs: new Set<string>(), properties: new Map(), connections: [] },
     ];
     const triples = [
-      // Same SPO emitted twice with different subGraph tags
-      // (root SWM vs named-sub-graph SWM cross-graph duplicate).
-      // Both share `layer: 'shared'` so the layer slice picks up
-      // both rows; the layer slice's canonical-SPO dedup
-      // (helpers.ts:465-466) collapses them to 1 before the Root
-      // card's untagged-recovery branch even sees the universe.
-      //
-      // Note: both rows ALSO carry `subGraph` tags, so the Root
-      // card's `if (t.subGraph) continue;` guard would also drop
-      // them — but the union of per-layer slices is the
-      // load-bearing fix here, because untagged variants (the
-      // common shape post-promote) would still reach the loop
-      // and could re-duplicate without it.
-      { subject: 'urn:e:root-swm', predicate: 'rdfs:label', object: '"r"', subGraph: 'meta', layer: 'shared' },
+      // The crucial cross-graph collision: the SAME SPO ships
+      // under both an untagged variant (root SWM graph) AND a
+      // tagged variant (per-sub-graph SWM graph). Sweep 2's per-
+      // layer dedup collapsed them and could drop the survivor.
+      // Post-revert the untagged row admits.
+      { subject: 'urn:e:root-swm', predicate: 'rdfs:label', object: '"r"', layer: 'shared' },
       { subject: 'urn:e:root-swm', predicate: 'rdfs:label', object: '"r"', subGraph: 'alpha', layer: 'shared' },
-      // The untagged variant — what survives to the Root card's
-      // loop. Counts ONCE because the upstream per-layer SPO-
-      // dedup ran on the layer slice.
-      { subject: 'urn:e:root-swm', predicate: 'rdfs:comment', object: '"c"', layer: 'shared' },
-      { subject: 'urn:e:root-swm', predicate: 'rdfs:comment', object: '"c"', layer: 'shared' },
     ];
     await renderWith({
       ...memory,
@@ -1003,12 +1006,64 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
     const cards = container.querySelectorAll('.v10-sgov-card');
     const rootCardEl = cards[cards.length - 1];
     const stats = rootCardEl.querySelector('.v10-sgov-card-stats')?.textContent ?? '';
-    // 1 distinct untagged SPO after upstream dedup; the tagged
-    // rows are dropped by the Root card's `if (t.subGraph)
-    // continue` guard. Pre-sweep the duplicate rdfs:comment
-    // would have counted 2.
+    // Lock-test: the cross-graph SPO admits via the untagged row.
+    // Pre-revert (sweep 2) this fixture rendered `0 triples` when
+    // the tagged row won the per-slice dedup race. Loose lower-
+    // bound rather than strict equality because the render-side
+    // inflation behavior is left for GH #819 to lock precisely;
+    // the regression-prevent contract here is "not zero".
+    expect(stats).toContain('1 entities');
+    expect(stats).not.toContain('0 triples');
+  });
+
+  it('Root card admits mixed-layer resource edges (Codex sweep 4 regression — WM→SWM cross-layer drop prevented)', async () => {
+    // PR #818 sweep 4 (ux-lead Finding 2 verdict A — revert).
+    // Sweep 2's `useLayerTriples` derivation applied a subject-
+    // trust-level residue filter inside each layer slice. For a
+    // WM root entity pointing at an SWM entity, the row's
+    // `t.layer === 'shared'` sent it to the SWM slice — but the
+    // SWM slice's residue filter drops rows whose subject's
+    // canonical trustLevel doesn't match the slice (subject is
+    // WM, slice is SWM → dropped). The row never entered any
+    // layer slice and never reached the Root card.
+    //
+    // Post-revert: `memory.allTriples` carries the row, the Root
+    // loop sees it, the untagged check passes (no subGraph), and
+    // canonical-URI membership admits because the WM subject IS
+    // in `rootEntityUris`. Lock-test: the cross-layer edge
+    // renders on the Root card.
+    fetchSubGraphsMock.mockResolvedValueOnce({
+      subGraphs: [{ name: 'alpha', entityCount: 0, tripleCount: 0, description: '' }],
+    });
+    const entityList = [
+      // WM root entity (subject of the cross-layer edge).
+      { uri: 'urn:e:wm-root', label: 'w', types: [], trustLevel: 'working', layers: new Set(['working']), subGraphs: new Set<string>(), properties: new Map(), connections: [] },
+      // SWM root entity (object of the cross-layer edge).
+      { uri: 'urn:e:swm-root', label: 's', types: [], trustLevel: 'shared', layers: new Set(['shared']), subGraphs: new Set<string>(), properties: new Map(), connections: [] },
+    ];
+    const triples = [
+      // The crucial cross-layer edge: WM subject → SWM object,
+      // row layer matches the object's (SWM). Sweep 2 dropped
+      // it; post-revert it admits.
+      { subject: 'urn:e:wm-root', predicate: 'rel', object: 'urn:e:swm-root', layer: 'shared' },
+    ];
+    await renderWith({
+      ...memory,
+      entities: new Map(entityList.map(e => [e.uri, e])),
+      entityList,
+      allTriples: triples,
+      counts: { wm: 1, swm: 1, vm: 0, total: 2 },
+    });
+    await flush();
+
+    const cards = container.querySelectorAll('.v10-sgov-card');
+    const rootCardEl = cards[cards.length - 1];
+    const stats = rootCardEl.querySelector('.v10-sgov-card-stats')?.textContent ?? '';
+    // Both endpoints are root entities; the cross-layer edge
+    // admits. Pre-revert (sweep 2) the residue filter dropped it
+    // → Root card showed `0 triples`. Post-revert it shows `1`.
+    expect(stats).toContain('2 entities');
     expect(stats).toContain('1 triples');
-    expect(stats).not.toContain('2 triples');
   });
 
   it('Root card cap honors MAX_PER_CARD even with a single dominant subject (Codex sweep 2)', async () => {

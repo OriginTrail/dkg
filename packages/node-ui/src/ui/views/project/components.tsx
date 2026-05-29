@@ -4157,40 +4157,43 @@ export function SubGraphOverviewGrid({
     // fires for Root"). A triple admitted here must have NO
     // subGraph tag AND an endpoint in scope.
     //
-    // PR #818 Codex sweep 2 — GH #805 family on this new surface.
-    // Iterating `memory.allTriples` directly (the original shape)
-    // reintroduces the WM-residue + SWM cross-graph duplication
-    // GH #805 just fixed for the Overview/subtitle totals: the
-    // daemon's raw triples include `<assertion>` residue from
-    // promoted entities (the entity's canonical trustLevel has
-    // moved past WM but its WM-origin row keeps returning from
-    // `wmSparql`) and per-sub-graph SWM duplicates (the same SPO
-    // shipped under both `<cg>/_shared_memory` and
-    // `<cg>/<sg>/_shared_memory`). Both inflate `tripleCount` AND
-    // the rendered mini-graph slice.
-    //
-    // Fix: iterate the union of the per-layer slices the same
-    // surface above (`subtitleTripleCount`) already reads from.
-    // `useLayerTriples` applies the canonical-SPO dedup AND the
-    // subject-trust-level residue filter, so the resulting union
-    // is the layer-correct triple universe the Root card should
-    // scope into. Card-level seenSpo still runs (per-layer slices
-    // dedup within each layer, but a triple legitimately appearing
-    // in multiple layers — e.g. an `rdfs:label` published under
-    // both WM and SWM via lifecycle metadata — would survive as
-    // distinct entries before the card-level dedup).
+    // PR #818 Codex sweep 4 (ux-lead Finding 1+2 verdict A) —
+    // reverted from sweep-2's `useLayerTriples` union back to
+    // `memory.allTriples` filtered by `!t.subGraph`. Sweep 2's
+    // layer-correct universe was a fix at the symptom (Root
+    // inflation) that introduced two regressions of its own at
+    // the next consumer downstream:
+    //   • Per-slice SPO-dedup race — `useLayerTriples` dedupes
+    //     within each layer independently, so the same SPO under
+    //     both root and per-sub-graph SWM graphs collapsed to one
+    //     ENTRY in the swm slice. Joining the slices then admitted
+    //     it once. Outcome: a cross-graph triple involving a root
+    //     entity could under-count to zero on the Root mini-card.
+    //   • Mixed-layer edge drop — `useLayerTriples` applies a
+    //     subject-trust-level residue filter (drops triples whose
+    //     subject's canonical trustLevel doesn't match the slice's
+    //     layer). For a WM root entity pointing at an SWM entity,
+    //     the row enters the wm slice (subject is WM), passes the
+    //     subject check, but the row's `layer: 'shared'` means it
+    //     was never in the wm slice. The same row enters the swm
+    //     slice but fails the subject-trust check (subject is WM,
+    //     slice is SWM). The mixed-layer edge falls through every
+    //     slice and never reaches the Root card.
+    // ux-lead's call: restoring symmetry with the named-card path
+    // (`memory.allTriples` filtered by `!t.subGraph` vs
+    // `t.subGraph === slug`) gives both cards the same machinery
+    // and the same edge cases. Inflation (WM residue + SWM cross-
+    // graph) is consistent across Root AND named cards — easier
+    // to reason about and easier to fix in one render-side follow-
+    // up (GH #819) than a Root-specific divergence between
+    // under-count and inflation.
     //
     // PR #818 Codex sweep 1 — Bug M family (preserved). The
     // canonical-URI membership check + canonical SPO-dedup key
-    // still apply on the layer-filtered universe.
+    // still apply on the symmetric-with-named universe.
     const rootTriples: Triple[] = [];
     const seenSpo = new Set<string>();
-    const layerCorrectUniverse: Triple[] = [
-      ...wmSubtitleTriples,
-      ...swmSubtitleTriples,
-      ...vmSubtitleTriples,
-    ];
-    for (const t of layerCorrectUniverse) {
+    for (const t of memory.allTriples) {
       if (t.subGraph) continue;
       const subjCanon = canonicalEntityUri(t.subject);
       const objCanon = canonicalEntityUri(t.object);
@@ -4200,47 +4203,11 @@ export function SubGraphOverviewGrid({
       seenSpo.add(key);
       rootTriples.push({ subject: t.subject, predicate: t.predicate, object: t.object });
     }
-    // PR #818 Codex sweep 1 — apply the same `MAX_PER_CARD`
-    // heaviest-subjects sampling the named-card path uses at
-    // `:3935-3949`. The earlier comment waved this off on the
-    // theory that the root entity set is small, but Codex flagged
-    // the counterexample: large initial seeds + agents writing
-    // without sub-graph tags can produce thousands of untagged
-    // triples whose endpoints touch root entities — same
-    // RdfGraph layout lock the named-card cap was added to
-    // prevent. Same sampling preserves cluster topology better
-    // than a random first-N truncation.
-    // PR #818 Codex sweep 2 — pre-check `kept + subjectDegree >
-    // MAX_PER_CARD` BEFORE adding (instead of `kept >= MAX_PER_CARD`
-    // AFTER) so a single dominant subject can't smuggle the whole
-    // heavy cluster through. When the heaviest subject's degree
-    // alone exceeds the cap the pre-check exits with an empty
-    // `keep` — fall back to admitting that one subject so the
-    // card shows the dominant hub instead of an empty body; the
-    // post-filter `slice(0, MAX_PER_CARD)` trims its long tail.
-    // PR #818 Codex sweep 3 — `continue` (was `break`) so the loop
-    // scans further for smaller satellites that still fit. Same
-    // dense-pack rationale as the named-card path above; see the
-    // sweep-3 comment block at `:3935-3953` for the full trade-off.
-    // Same fix applied at the named-card path above (`:3935-3953`).
-    let cappedRootTriples = rootTriples;
-    if (rootTriples.length > MAX_PER_CARD) {
-      const degree = new Map<string, number>();
-      for (const t of rootTriples) degree.set(t.subject, (degree.get(t.subject) ?? 0) + 1);
-      const order = [...degree.entries()]
-        .sort((a, b) => b[1] - a[1])
-        .map(([uri]) => uri);
-      const keep = new Set<string>();
-      let kept = 0;
-      for (const uri of order) {
-        const subjectDegree = degree.get(uri) ?? 0;
-        if (kept + subjectDegree > MAX_PER_CARD) continue;
-        keep.add(uri);
-        kept += subjectDegree;
-      }
-      if (keep.size === 0 && order.length > 0) keep.add(order[0]);
-      cappedRootTriples = rootTriples.filter(t => keep.has(t.subject)).slice(0, MAX_PER_CARD);
-    }
+    // PR #818 Codex sweep 4 (finding 3) — shared cap helper. The
+    // earlier inline copy duplicated the named-card sampling shape
+    // verbatim; refactored to call `applyHeaviestSubjectsCap` so
+    // both paths stay in lockstep when the sampling rule evolves.
+    const cappedRootTriples = applyHeaviestSubjectsCap(rootTriples);
     const binding = profile?.forSubGraph(ROOT_SLUG_SENTINEL) ?? {};
     return {
       slug: ROOT_SLUG_SENTINEL,
@@ -4265,7 +4232,7 @@ export function SubGraphOverviewGrid({
       layerCounts: { wm, swm, vm },
       entityTrustByUri: rootEntityTrust,
     };
-  }, [memory.entityList, wmSubtitleTriples, swmSubtitleTriples, vmSubtitleTriples, profile]);
+  }, [memory.entityList, memory.allTriples, profile]);
 
   if (loading && cards.length === 0) {
     return (
