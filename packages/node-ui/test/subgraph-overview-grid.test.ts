@@ -619,13 +619,16 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
     const triples = [
       // Tagged triple — root entity but tagged to a different
       // sub-graph. Must NOT appear in Root's slice.
-      { subject: 'urn:e:root1', predicate: 'p', object: 'urn:e:alpha', subGraph: 'alpha' },
+      // PR #818 sweep 2 — fixtures tagged `layer: 'working'` so
+      // `useLayerTriples` admits them into the layer-correct
+      // universe the Root card now scopes into (GH #805 family).
+      { subject: 'urn:e:root1', predicate: 'p', object: 'urn:e:alpha', subGraph: 'alpha', layer: 'working' },
       // Untagged triple between two root entities — admitted by
       // the untagged-recovery branch.
-      { subject: 'urn:e:root1', predicate: 'p', object: 'urn:e:root2' },
+      { subject: 'urn:e:root1', predicate: 'p', object: 'urn:e:root2', layer: 'working' },
       // Untagged triple with no endpoint in scope — must NOT
       // appear in Root's slice.
-      { subject: 'urn:e:alpha', predicate: 'p', object: 'urn:e:somewhere-else' },
+      { subject: 'urn:e:alpha', predicate: 'p', object: 'urn:e:somewhere-else', layer: 'working' },
     ];
     await renderWith({
       ...memory,
@@ -672,13 +675,15 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
     const triples = [
       // Subject wrapped — pre-sweep the membership check (against
       // the unwrapped set) failed and this triple was dropped.
-      { subject: '<urn:e:root1>', predicate: 'p', object: 'urn:e:o-bare' },
+      // PR #818 sweep 2 — fixtures tagged `layer: 'working'` so
+      // `useLayerTriples` admits them (GH #805 family).
+      { subject: '<urn:e:root1>', predicate: 'p', object: 'urn:e:o-bare', layer: 'working' },
       // Same SPO emitted twice — once wrapped, once bare. Pre-
       // sweep these had distinct seenSpo keys and counted as 2.
       // Post-sweep both map to the same canonical key and dedup
       // to 1.
-      { subject: 'urn:e:root1', predicate: 'p', object: '<urn:e:o-other>' },
-      { subject: 'urn:e:root1', predicate: 'p', object: 'urn:e:o-other' },
+      { subject: 'urn:e:root1', predicate: 'p', object: '<urn:e:o-other>', layer: 'working' },
+      { subject: 'urn:e:root1', predicate: 'p', object: 'urn:e:o-other', layer: 'working' },
     ];
     await renderWith({
       ...memory,
@@ -783,7 +788,10 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
     ];
     const triples = [];
     for (let i = 0; i < 3000; i++) {
-      triples.push({ subject: 'urn:e:heavy-root', predicate: 'p', object: `urn:e:obj-${i}` });
+      // PR #818 sweep 2 — tag `layer: 'working'` so the layer-correct
+      // universe `useLayerTriples` produces (GH #805 family) admits
+      // these rows for the Root card to scope over.
+      triples.push({ subject: 'urn:e:heavy-root', predicate: 'p', object: `urn:e:obj-${i}`, layer: 'working' });
     }
     await renderWith({
       ...memory,
@@ -827,11 +835,13 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
       { uri: 'urn:e:r1', label: 'r1', types: [], trustLevel: 'working', layers: new Set(['working']), subGraphs: new Set<string>(), properties: new Map(), connections: [] },
     ];
     const triples = [
-      { subject: 'urn:e:r1', predicate: 'p', object: 'urn:e:o1' },
-      { subject: 'urn:e:r1', predicate: 'p', object: 'urn:e:o2' },
-      { subject: 'urn:e:r1', predicate: 'p', object: 'urn:e:o3' },
-      { subject: 'urn:e:r1', predicate: 'p', object: 'urn:e:o4' },
-      { subject: 'urn:e:r1', predicate: 'p', object: 'urn:e:o5' },
+      // PR #818 sweep 2 — `layer: 'working'` so the layer-correct
+      // universe (GH #805) admits the rows.
+      { subject: 'urn:e:r1', predicate: 'p', object: 'urn:e:o1', layer: 'working' },
+      { subject: 'urn:e:r1', predicate: 'p', object: 'urn:e:o2', layer: 'working' },
+      { subject: 'urn:e:r1', predicate: 'p', object: 'urn:e:o3', layer: 'working' },
+      { subject: 'urn:e:r1', predicate: 'p', object: 'urn:e:o4', layer: 'working' },
+      { subject: 'urn:e:r1', predicate: 'p', object: 'urn:e:o5', layer: 'working' },
     ];
     await renderWith({
       ...memory,
@@ -849,6 +859,114 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
     // RdfGraph renders (not the empty branch), confirming all 5
     // triples survived to the mini-graph slice.
     expect(rootCardEl.querySelector('[data-testid="rdf-graph"]')).toBeTruthy();
+  });
+
+  it('Root card drops WM residue triples whose subject has been promoted to SWM (Codex sweep 2, GH #805 family)', async () => {
+    // PR #818 sweep 2 — the Root card previously iterated raw
+    // `memory.allTriples`, reintroducing the residue + cross-
+    // graph bug GH #805 just fixed for the Overview/subtitle
+    // surface. Promoted-entity WM residue (the daemon leaves
+    // `/assertion/<addr>/<name>` graphs on disk after promote)
+    // would inflate `rootCard.tripleCount`. Fix: scope into the
+    // union of the per-layer `useLayerTriples` slices, which
+    // apply the subject-trust-level residue filter.
+    fetchSubGraphsMock.mockResolvedValueOnce({
+      subGraphs: [{ name: 'alpha', entityCount: 1, tripleCount: 0, description: '' }],
+    });
+    const entityList = [
+      { uri: 'urn:e:alpha', label: 'a', types: [], trustLevel: 'working', layers: new Set(['working']), subGraphs: new Set(['alpha']), properties: new Map(), connections: [] },
+      // Root-bucket entity, canonical trustLevel is SWM (promoted
+      // past WM, but `subGraphs.size === 0` keeps it in the Root
+      // bucket).
+      { uri: 'urn:e:promoted', label: 'p', types: [], trustLevel: 'shared', layers: new Set(['working', 'shared']), subGraphs: new Set<string>(), properties: new Map(), connections: [] },
+    ];
+    const triples = [
+      // Honest SWM triple — admitted into the SWM layer slice.
+      { subject: 'urn:e:promoted', predicate: 'p', object: 'urn:e:o-swm', layer: 'shared' },
+      // WM residue — same subject, but canonical trustLevel is
+      // 'shared', so `useLayerTriples('wm')` drops this row via
+      // the subject-trust-level filter at helpers.ts:436-437.
+      // Pre-sweep this would have inflated the Root card stat by 1.
+      { subject: 'urn:e:promoted', predicate: 'p', object: 'urn:e:o-wm-residue', layer: 'working' },
+    ];
+    await renderWith({
+      ...memory,
+      entities: new Map(entityList.map(e => [e.uri, e])),
+      entityList,
+      allTriples: triples,
+      counts: { wm: 0, swm: 1, vm: 0, total: 1 },
+    });
+    await flush();
+
+    const cards = container.querySelectorAll('.v10-sgov-card');
+    const rootCardEl = cards[cards.length - 1];
+    const stats = rootCardEl.querySelector('.v10-sgov-card-stats')?.textContent ?? '';
+    // Only the honest SWM triple survives — WM residue dropped.
+    expect(stats).toContain('1 triples');
+    expect(stats).not.toContain('2 triples');
+  });
+
+  it('Root card collapses SWM cross-graph SPO duplicates (Codex sweep 2, GH #805 family)', async () => {
+    // PR #818 sweep 2 — same family, different mechanism. SWM
+    // content published into a named sub-graph appears in both
+    // `<cg>/_shared_memory` (root SWM graph) AND
+    // `<cg>/<sg>/_shared_memory` (per-sub-graph SWM graph). Raw
+    // `memory.allTriples` counts both rows; `useLayerTriples`
+    // SPO-deduplicates them to 1. The Root card now scopes into
+    // that deduped universe.
+    //
+    // The crucial test: a root-bucket entity whose `rdfs:label`
+    // ships under both the root SWM graph AND a named-sub-graph
+    // SWM graph (one of its OTHER assertions targeted a sub-graph,
+    // promoting the label via lifecycle metadata). Pre-sweep the
+    // Root card would count 2; post-sweep it counts 1.
+    fetchSubGraphsMock.mockResolvedValueOnce({
+      subGraphs: [{ name: 'alpha', entityCount: 0, tripleCount: 0, description: '' }],
+    });
+    const entityList = [
+      // Single root-bucket entity at SWM.
+      { uri: 'urn:e:root-swm', label: 'rsm', types: [], trustLevel: 'shared', layers: new Set(['shared']), subGraphs: new Set<string>(), properties: new Map(), connections: [] },
+    ];
+    const triples = [
+      // Same SPO emitted twice with different subGraph tags
+      // (root SWM vs named-sub-graph SWM cross-graph duplicate).
+      // Both share `layer: 'shared'` so the layer slice picks up
+      // both rows; the layer slice's canonical-SPO dedup
+      // (helpers.ts:465-466) collapses them to 1 before the Root
+      // card's untagged-recovery branch even sees the universe.
+      //
+      // Note: both rows ALSO carry `subGraph` tags, so the Root
+      // card's `if (t.subGraph) continue;` guard would also drop
+      // them — but the union of per-layer slices is the
+      // load-bearing fix here, because untagged variants (the
+      // common shape post-promote) would still reach the loop
+      // and could re-duplicate without it.
+      { subject: 'urn:e:root-swm', predicate: 'rdfs:label', object: '"r"', subGraph: 'meta', layer: 'shared' },
+      { subject: 'urn:e:root-swm', predicate: 'rdfs:label', object: '"r"', subGraph: 'alpha', layer: 'shared' },
+      // The untagged variant — what survives to the Root card's
+      // loop. Counts ONCE because the upstream per-layer SPO-
+      // dedup ran on the layer slice.
+      { subject: 'urn:e:root-swm', predicate: 'rdfs:comment', object: '"c"', layer: 'shared' },
+      { subject: 'urn:e:root-swm', predicate: 'rdfs:comment', object: '"c"', layer: 'shared' },
+    ];
+    await renderWith({
+      ...memory,
+      entities: new Map(entityList.map(e => [e.uri, e])),
+      entityList,
+      allTriples: triples,
+      counts: { wm: 0, swm: 1, vm: 0, total: 1 },
+    });
+    await flush();
+
+    const cards = container.querySelectorAll('.v10-sgov-card');
+    const rootCardEl = cards[cards.length - 1];
+    const stats = rootCardEl.querySelector('.v10-sgov-card-stats')?.textContent ?? '';
+    // 1 distinct untagged SPO after upstream dedup; the tagged
+    // rows are dropped by the Root card's `if (t.subGraph)
+    // continue` guard. Pre-sweep the duplicate rdfs:comment
+    // would have counted 2.
+    expect(stats).toContain('1 triples');
+    expect(stats).not.toContain('2 triples');
   });
 });
 

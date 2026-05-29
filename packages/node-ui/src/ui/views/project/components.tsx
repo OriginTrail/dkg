@@ -4129,20 +4129,40 @@ export function SubGraphOverviewGrid({
     // fires for Root"). A triple admitted here must have NO
     // subGraph tag AND an endpoint in scope.
     //
-    // PR #818 Codex sweep 1 — Bug M family. `rootEntityUris` is
-    // built from `canonicalEntityUri(e.uri)` above, but triples
-    // from `memory.allTriples` carry the daemon-emitted raw forms
-    // (often wrapped `<urn:...>`). The membership check needs the
-    // canonical form on the triple endpoints to match the set, and
-    // the SPO-dedup key needs the canonical form too — otherwise
-    // wrapped/bare variants of the same `(s,p,o)` enter as two
-    // distinct rows. Same shape as the upstream Bug M fix at the
-    // `entityTrustByUriBySubGraph` producer; canonicalising on the
-    // consumer side here keeps the rootEntityUris set single-form
-    // and fixes the dedup key in the same pass.
+    // PR #818 Codex sweep 2 — GH #805 family on this new surface.
+    // Iterating `memory.allTriples` directly (the original shape)
+    // reintroduces the WM-residue + SWM cross-graph duplication
+    // GH #805 just fixed for the Overview/subtitle totals: the
+    // daemon's raw triples include `<assertion>` residue from
+    // promoted entities (the entity's canonical trustLevel has
+    // moved past WM but its WM-origin row keeps returning from
+    // `wmSparql`) and per-sub-graph SWM duplicates (the same SPO
+    // shipped under both `<cg>/_shared_memory` and
+    // `<cg>/<sg>/_shared_memory`). Both inflate `tripleCount` AND
+    // the rendered mini-graph slice.
+    //
+    // Fix: iterate the union of the per-layer slices the same
+    // surface above (`subtitleTripleCount`) already reads from.
+    // `useLayerTriples` applies the canonical-SPO dedup AND the
+    // subject-trust-level residue filter, so the resulting union
+    // is the layer-correct triple universe the Root card should
+    // scope into. Card-level seenSpo still runs (per-layer slices
+    // dedup within each layer, but a triple legitimately appearing
+    // in multiple layers — e.g. an `rdfs:label` published under
+    // both WM and SWM via lifecycle metadata — would survive as
+    // distinct entries before the card-level dedup).
+    //
+    // PR #818 Codex sweep 1 — Bug M family (preserved). The
+    // canonical-URI membership check + canonical SPO-dedup key
+    // still apply on the layer-filtered universe.
     const rootTriples: Triple[] = [];
     const seenSpo = new Set<string>();
-    for (const t of memory.allTriples) {
+    const layerCorrectUniverse: Triple[] = [
+      ...wmSubtitleTriples,
+      ...swmSubtitleTriples,
+      ...vmSubtitleTriples,
+    ];
+    for (const t of layerCorrectUniverse) {
       if (t.subGraph) continue;
       const subjCanon = canonicalEntityUri(t.subject);
       const objCanon = canonicalEntityUri(t.object);
@@ -4202,7 +4222,7 @@ export function SubGraphOverviewGrid({
       layerCounts: { wm, swm, vm },
       entityTrustByUri: rootEntityTrust,
     };
-  }, [memory.entityList, memory.allTriples, profile]);
+  }, [memory.entityList, wmSubtitleTriples, swmSubtitleTriples, vmSubtitleTriples, profile]);
 
   if (loading && cards.length === 0) {
     return (
