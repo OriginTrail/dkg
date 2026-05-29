@@ -128,14 +128,23 @@ export async function promptStoreBackend(
     ?? (existingBackend === 'blazegraph' || existingBackend === 'sparql-http' ? existingBackend : 'oxigraph');
 
   const backendChoices = ['oxigraph', 'blazegraph'] as const;
-  const defaultIdx = Math.max(0, backendChoices.indexOf(defaultBackend as typeof backendChoices[number]));
+  // `sparql-http` is intentionally not listed (advanced bring-your-own-server
+  // option) but is still accepted when typed or inherited from an existing
+  // config / `--store` flag. Resolve the default *answer* by name for unlisted
+  // backends so pressing Enter on a node already configured for `sparql-http`
+  // preserves it instead of silently downgrading to oxigraph (option 1).
+  const defaultIsListed = (backendChoices as readonly string[]).includes(defaultBackend);
+  const defaultIdx = defaultIsListed
+    ? backendChoices.indexOf(defaultBackend as typeof backendChoices[number])
+    : 0;
+  const defaultAnswer = defaultIsListed ? String(defaultIdx + 1) : defaultBackend;
   log('  Triple store backend:');
   for (let i = 0; i < backendChoices.length; i++) {
     log(`    ${i + 1}) ${backendChoices[i]}`);
   }
   const backendInput = (await opts.ask(
     `Choose (1-${backendChoices.length})`,
-    String(defaultIdx + 1),
+    defaultAnswer,
   )).trim();
 
   // Accept both the number ("1", "2") and the name ("blazegraph")
@@ -197,9 +206,9 @@ export async function promptStoreBackend(
           }
         } else {
           log('');
-          log('  Docker is not installed on this system.');
-          log('  Install Docker to auto-provision Blazegraph, or start it manually');
-          log('  and enter its SPARQL endpoint URL below.');
+          log('  Docker not detected on this system.');
+          log('  Install or start Docker to auto-provision Blazegraph, or start it');
+          log('  manually and enter its SPARQL endpoint URL below.');
           log('');
         }
       }

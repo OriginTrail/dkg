@@ -302,6 +302,43 @@ describe('promptStoreBackend', () => {
     expect(result.storeBlock).toBeNull();
   });
 
+  it('preserves an existing sparql-http backend when operator presses Enter (no silent downgrade)', async () => {
+    // sparql-http is not a listed numeric choice, but a node already
+    // configured for it must not be silently downgraded to oxigraph when
+    // the operator accepts the default. First '' = accept backend default
+    // (must resolve to sparql-http, NOT option 1); second '' = accept the
+    // pre-filled existing endpoint URL.
+    const { fn } = mockFetch(
+      () => new Response(JSON.stringify({ boolean: true }), { status: 200 }),
+    );
+    const result = await promptStoreBackend({
+      ask: mockAsk(['', '']),
+      existingStore: {
+        backend: 'sparql-http',
+        options: { url: 'http://byo.test/sparql' },
+      } as unknown as DkgConfig['store'],
+      fetch: fn,
+      log: () => {},
+    });
+    expect(result.storeBlock?.backend).toBe('sparql-http');
+    expect(result.storeBlock?.options).toMatchObject({
+      queryEndpoint: 'http://byo.test/sparql',
+    });
+  });
+
+  it('preserves a --store sparql-http flag when operator presses Enter', async () => {
+    const { fn } = mockFetch(
+      () => new Response(JSON.stringify({ boolean: true }), { status: 200 }),
+    );
+    const result = await promptStoreBackend({
+      ask: mockAsk(['', 'http://flag.test/sparql']),
+      flagBackend: 'sparql-http',
+      fetch: fn,
+      log: () => {},
+    });
+    expect(result.storeBlock?.backend).toBe('sparql-http');
+  });
+
   it('pre-fills URL prompt from --store-url flag', async () => {
     const { fn, calls } = mockFetch(
       () => new Response(JSON.stringify({ boolean: true }), { status: 200 }),
