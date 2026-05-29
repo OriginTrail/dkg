@@ -45,12 +45,39 @@ snapshot_v8_eligibility.ts  →  simple CSV  →  upload_v8_eligibility.ts
 
 From `packages/evm-module/`:
 
+> **IMPORTANT — version bumps do NOT auto-redeploy.** `hre.helpers.deploy()`
+> short-circuits on any contract already marked `"deployed": true` in
+> `deployments/<network>_contracts.json` (`isDeployed()` reads that flag and
+> never compares the on-disk `version`). On the existing Base Sepolia V10
+> deployment `ConvictionStakingStorage` (4.0.0) and `StakingV10` (3.0.0) are
+> already `deployed: true`, so a plain `npx hardhat deploy` would **reuse the
+> old bytecode** and silently skip the 4.1.0 / 3.1.0 bumps. You must flip
+> their `deployed` flag to `false` first so the helper redeploys the new
+> bytecode and re-registers it in the Hub. `V8MigrationEligibility` is a brand
+> new contract (absent from the JSON), so it deploys fresh with no edit.
+
 ```bash
 # 1. Compile with the abi exporter so deploy can read abi/V8MigrationEligibility.json
 npx hardhat compile
 
-# 2. Deploy. hardhat-deploy detects the version bumps and reinitializes
-#    StakingV10/ConvictionStakingStorage; V8MigrationEligibility is fresh.
+# 2. Force-redeploy the two version-bumped contracts: set their `deployed`
+#    flag to false in deployments/base_sepolia_v10_contracts.json. The helper
+#    only redeploys contracts whose flag is false (or that are absent).
+node -e '
+  const fs = require("fs");
+  const p = "deployments/base_sepolia_v10_contracts.json";
+  const j = JSON.parse(fs.readFileSync(p, "utf8"));
+  for (const name of ["ConvictionStakingStorage", "StakingV10"]) {
+    if (!j.contracts[name]) throw new Error(`${name} missing from ${p}`);
+    j.contracts[name].deployed = false;
+  }
+  fs.writeFileSync(p, JSON.stringify(j, null, 4) + "\n");
+  console.log("Marked ConvictionStakingStorage + StakingV10 for redeploy.");
+'
+
+# 3. Deploy. With the flags cleared, the helper deploys 4.1.0 / 3.1.0,
+#    re-registers them in the Hub, and queues reinitialization;
+#    V8MigrationEligibility is deployed fresh.
 npx hardhat deploy --network base_sepolia_v10
 ```
 
@@ -220,6 +247,11 @@ pipeline against the new address).
 
 When testnet passes end-to-end, mirror Phases 1–5 on mainnet:
 
+- Phase 1: the same "version bumps do NOT auto-redeploy" caveat applies —
+  flip `deployed` to `false` for `ConvictionStakingStorage` and `StakingV10`
+  in `deployments/base_mainnet_contracts.json` (not the `*_v10` file) before
+  `npx hardhat deploy --network base_mainnet`, otherwise the bumped bytecode
+  is skipped.
 - Phase 2 default window = 60 days = `5,184,000` seconds (omit
   `--window-seconds`; literal is independent of the target network's
   `epochLength`).
