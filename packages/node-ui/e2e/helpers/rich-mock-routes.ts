@@ -2,11 +2,11 @@ import type { Page, Route } from '@playwright/test';
 import {
   PHARMA_CG_ID,
   profileMetaBindings,
+  profileSubGraphSelectBindings,
   subGraphList,
   swmBindings,
   vmBindings,
   wmBindings,
-  type SparqlBinding,
 } from './rich-mock-data.js';
 
 /** Inline mock payloads (mirror `src/ui/mocks/data.ts` for Playwright isolation). */
@@ -45,20 +45,35 @@ const MOCK_API = {
   joinRequests: { requests: [] },
 };
 
-function queryResponse(bindings: SparqlBinding[]) {
+function queryResponse(bindings: unknown[]) {
   return { result: { bindings } };
+}
+
+function isProfileSelectQuery(sparql: string): boolean {
+  return sparql.includes('SELECT') && (
+    sparql.includes('SubGraphBinding')
+    || sparql.includes('EntityTypeBinding')
+    || sparql.includes('prof:Profile')
+    || sparql.includes('FilterChip')
+    || sparql.includes('QueryCatalog')
+    || sparql.includes('SavedQuery')
+    || sparql.includes('ViewConfig')
+  );
 }
 
 function classifySparql(sparql: string): 'wm' | 'swm' | 'vm' | 'meta' | 'other' {
   if (sparql.includes('/assertion/')) return 'wm';
   if (sparql.includes('_shared_memory')) return 'swm';
   if (sparql.includes('/meta') || sparql.includes('_meta')) return 'meta';
-  if (sparql.includes('SubGraphBinding') || sparql.includes('EntityTypeBinding')) return 'meta';
   if (sparql.includes('did:dkg:context-graph:')) return 'vm';
   return 'other';
 }
 
-function bindingsForQuery(sparql: string, cgId: string): SparqlBinding[] {
+function bindingsForQuery(sparql: string, cgId: string): unknown[] {
+  if (isProfileSelectQuery(sparql)) {
+    if (sparql.includes('SubGraphBinding')) return profileSubGraphSelectBindings(cgId);
+    return [];
+  }
   switch (classifySparql(sparql)) {
     case 'wm': return wmBindings(cgId);
     case 'swm': return swmBindings(cgId);
