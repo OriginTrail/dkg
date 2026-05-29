@@ -98,6 +98,7 @@ function externalStoreBlock(
   backend: 'blazegraph' | 'sparql-http',
   url: string,
   managedByDkg: boolean,
+  updateUrl?: string,
 ): ExternalStoreBlock {
   if (backend === 'blazegraph') {
     return { backend, options: { url, managedByDkg } };
@@ -106,7 +107,10 @@ function externalStoreBlock(
     backend,
     options: {
       queryEndpoint: url,
-      updateEndpoint: url,
+      // Default the update endpoint to the query endpoint, but allow callers
+      // to preserve a distinct existing `updateEndpoint` (sparql-http nodes
+      // can point query/update at different URLs).
+      updateEndpoint: updateUrl ?? url,
       managedByDkg,
     },
   };
@@ -123,6 +127,13 @@ export async function promptStoreBackend(
       : typeof opts.existingStore?.options?.queryEndpoint === 'string'
         ? (opts.existingStore?.options?.queryEndpoint as string)
         : undefined;
+  // sparql-http nodes can point query/update at different URLs. Capture the
+  // existing update endpoint so an Enter-through (reuse) of the current
+  // config doesn't silently collapse it onto the query endpoint.
+  const existingUpdateUrl =
+    typeof opts.existingStore?.options?.updateEndpoint === 'string'
+      ? (opts.existingStore?.options?.updateEndpoint as string)
+      : undefined;
 
   const defaultBackend = opts.flagBackend
     ?? (existingBackend === 'blazegraph' || existingBackend === 'sparql-http' ? existingBackend : 'oxigraph');
@@ -236,8 +247,15 @@ export async function promptStoreBackend(
 
     if (health.ok) {
       log(`  Store endpoint reachable: ${backend} ${url}`);
+      // When the operator kept the existing sparql-http query URL
+      // (Enter-through), preserve a distinct existing `updateEndpoint`
+      // instead of collapsing it onto the query URL. If they typed a new
+      // query URL we have no matching update URL, so fall back to the
+      // query URL for both.
+      const preservedUpdateUrl =
+        backend === 'sparql-http' && url === existingUrl ? existingUpdateUrl : undefined;
       return {
-        storeBlock: externalStoreBlock(backend, url, false),
+        storeBlock: externalStoreBlock(backend, url, false, preservedUpdateUrl),
       };
     }
 

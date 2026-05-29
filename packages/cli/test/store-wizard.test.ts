@@ -332,6 +332,31 @@ describe('promptStoreBackend', () => {
     });
   });
 
+  it('preserves a DISTINCT updateEndpoint when reusing an existing sparql-http store (no silent collapse)', async () => {
+    // A node can point query/update at different URLs. Pressing Enter through
+    // the wizard must not overwrite updateEndpoint with the query endpoint.
+    const { fn } = mockFetch(
+      () => new Response(JSON.stringify({ boolean: true }), { status: 200 }),
+    );
+    const result = await promptStoreBackend({
+      ask: mockAsk(['', '']),
+      existingStore: {
+        backend: 'sparql-http',
+        options: {
+          queryEndpoint: 'http://byo.test/query',
+          updateEndpoint: 'http://byo.test/update',
+        },
+      } as unknown as DkgConfig['store'],
+      fetch: fn,
+      log: () => {},
+    });
+    expect(result.storeBlock?.backend).toBe('sparql-http');
+    expect(result.storeBlock?.options).toMatchObject({
+      queryEndpoint: 'http://byo.test/query',
+      updateEndpoint: 'http://byo.test/update',
+    });
+  });
+
   it('preserves a --store sparql-http flag when operator presses Enter', async () => {
     const { fn } = mockFetch(
       () => new Response(JSON.stringify({ boolean: true }), { status: 200 }),
