@@ -144,29 +144,48 @@ export async function runInstallLayoutCheck(
     // A freshly-upgraded Edge node can still be *running* from
     // `~/.dkg/releases/current` until the next restart materializes the
     // npm-global entry point. In that state `rm -rf ~/.dkg/releases/`
-    // would delete the live runtime, so only advise deletion when the
-    // daemon's resolved entry point is NOT inside the releases tree.
-    const runningFromReleases =
-      !!state.daemon.entryPoint && isPathInside(state.daemon.entryPoint, releasesDir);
+    // would delete the live runtime, so we only advise deletion when we
+    // have POSITIVELY proven the daemon's entry point is outside the
+    // releases tree.
+    //
+    // Three cases, because `state.daemon.entryPoint` can be unknown
+    // (`null`) — e.g. `collectStateSummary()` cannot resolve the entry
+    // point on `win32`. Treating "unknown" as "outside" would re-introduce
+    // the dangerous delete advice on exactly the platforms where we can't
+    // prove it's safe, so unknown gets its own cautious advisory.
+    const entryPoint = state.daemon.entryPoint;
+    const runningFromReleases = !!entryPoint && isPathInside(entryPoint, releasesDir);
+    const provenOutsideReleases = !!entryPoint && !runningFromReleases;
     findings.push(
       runningFromReleases
         ? {
             check: 'install-layout',
             severity: 'warning',
-            message: `Edge daemon is still running from a legacy slot under the releases tree (${releasesDir}): ${state.daemon.entryPoint}`,
+            message: `Edge daemon is still running from a legacy slot under the releases tree (${releasesDir}): ${entryPoint}`,
             advisory:
               `Edge nodes do not use blue-green slots under RFC-41, but this daemon is currently running from the legacy releases tree. Do NOT delete ${releasesDir} yet — that is the live runtime. Run 'dkg restart' (or re-install) so the daemon runs from the npm-global install, re-run 'dkg doctor' to confirm, and only then 'rm -rf ${releasesDir}'.`,
             subject: releasesDir,
-            details: { entryPoint: state.daemon.entryPoint },
+            details: { entryPoint },
           }
-        : {
-            check: 'install-layout',
-            severity: 'warning',
-            message: `Legacy releases directory detected on an Edge node: ${releasesDir}`,
-            advisory:
-              `Edge nodes do not use blue-green slots under RFC-41. Safe to delete: 'rm -rf ${releasesDir}'. The daemon runs directly from the npm-global install.`,
-            subject: releasesDir,
-          },
+        : provenOutsideReleases
+          ? {
+              check: 'install-layout',
+              severity: 'warning',
+              message: `Legacy releases directory detected on an Edge node: ${releasesDir}`,
+              advisory:
+                `Edge nodes do not use blue-green slots under RFC-41. Safe to delete: 'rm -rf ${releasesDir}'. The daemon runs directly from the npm-global install.`,
+              subject: releasesDir,
+              details: { entryPoint },
+            }
+          : {
+              check: 'install-layout',
+              severity: 'warning',
+              message: `Legacy releases directory detected on an Edge node: ${releasesDir} (could not resolve the running daemon's entry point on this platform)`,
+              advisory:
+                `Edge nodes do not use blue-green slots under RFC-41, so ${releasesDir} is normally safe to delete — but the daemon's entry point could not be resolved here, so it cannot be confirmed that the daemon is not currently running from this tree. Verify via 'dkg status' / the process list that no daemon is running from ${releasesDir}, then 'rm -rf ${releasesDir}'.`,
+              subject: releasesDir,
+              details: { entryPoint: null },
+            },
     );
   }
 

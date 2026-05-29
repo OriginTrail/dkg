@@ -427,7 +427,7 @@ describe('config-sanity check (§4.7.2)', () => {
 // ---------------------------------------------------------------------------
 
 describe('install-layout check (§4.7.3)', () => {
-  it('Edge: warns on legacy ~/.dkg/releases/ directory', async () => {
+  it('Edge: advises deleting releases/ when the daemon is proven to run from outside it', async () => {
     const deps = makeDeps({
       fs: {
         '/test/.dkg/config.json': JSON.stringify({ nodeRole: 'edge' }),
@@ -435,11 +435,35 @@ describe('install-layout check (§4.7.3)', () => {
       },
     });
     const state = await collectStateSummary(deps);
+    // Daemon resolved to the npm-global install, i.e. positively outside releases/.
+    state.daemon.entryPoint = '/usr/local/lib/node_modules/@origintrail-official/dkg/dist/cli.js';
     const findings = await runInstallLayoutCheck(deps, state);
     const m = findings.find((f) => f.subject === '/test/.dkg/releases');
     expect(m).toBeDefined();
     expect(m!.severity).toBe('warning');
+    expect(m!.advisory).toMatch(/Safe to delete/);
     expect(m!.advisory).toMatch(/rm -rf \/test\/\.dkg\/releases/);
+  });
+
+  it('Edge: does NOT promise "Safe to delete" releases/ when the daemon entry point is unknown (e.g. win32)', async () => {
+    // #750 follow-up: collectStateSummary() can return a null entryPoint
+    // (notably on win32). We must not fall back to the unconditional
+    // "Safe to delete" advisory there, because we cannot prove the daemon
+    // isn't running from the releases tree.
+    const deps = makeDeps({
+      fs: {
+        '/test/.dkg/config.json': JSON.stringify({ nodeRole: 'edge' }),
+        '/test/.dkg/releases/a/dist/cli.js': '// possibly live slot',
+      },
+    });
+    const state = await collectStateSummary(deps);
+    state.daemon.entryPoint = null;
+    const findings = await runInstallLayoutCheck(deps, state);
+    const m = findings.find((f) => f.subject === '/test/.dkg/releases');
+    expect(m).toBeDefined();
+    expect(m!.advisory).not.toMatch(/Safe to delete/);
+    expect(m!.advisory).toMatch(/could not be resolved|Verify/);
+    expect(m!.message).toMatch(/could not resolve/);
   });
 
   it('Edge: does NOT advise deleting releases/ while the daemon is running from it', async () => {
