@@ -142,6 +142,13 @@ export async function promptStoreBackend(
   for (let i = 0; i < backendChoices.length; i++) {
     log(`    ${i + 1}) ${backendChoices[i]}`);
   }
+  // When the inherited/flagged backend isn't one of the numbered choices
+  // (e.g. `sparql-http`), spell out that pressing Enter keeps it and that a
+  // literal backend name is accepted — otherwise the `(sparql-http)` default
+  // on a `Choose (1-2)` prompt reads as a contradiction.
+  if (!defaultIsListed) {
+    log(`    (current: ${defaultBackend} — press Enter to keep it, or type a number / backend name)`);
+  }
   const backendInput = (await opts.ask(
     `Choose (1-${backendChoices.length})`,
     defaultAnswer,

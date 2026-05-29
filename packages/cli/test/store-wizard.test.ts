@@ -313,9 +313,15 @@ describe('promptStoreBackend', () => {
     );
     const result = await promptStoreBackend({
       ask: mockAsk(['', '']),
+      // Use the canonical persisted shape the CLI actually writes for
+      // sparql-http stores (queryEndpoint/updateEndpoint), so this regression
+      // catches breakage of re-runs over real on-disk configs.
       existingStore: {
         backend: 'sparql-http',
-        options: { url: 'http://byo.test/sparql' },
+        options: {
+          queryEndpoint: 'http://byo.test/sparql',
+          updateEndpoint: 'http://byo.test/sparql',
+        },
       } as unknown as DkgConfig['store'],
       fetch: fn,
       log: () => {},
