@@ -404,6 +404,198 @@ describe('SubGraphOverviewGrid — header subtitle anchors (PR #793 round 4.1, G
   });
 });
 
+describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
+  // The Root mini-card mirrors SubGraphBar's Root chip on the
+  // overview surface. Synthesizes a card for the bucket of
+  // entities not in any named sub-graph; rendered LAST in the
+  // grid (mirrors the Root chip's rightmost chip-row position);
+  // carries the dashed-border `.root` chrome modifier so it
+  // reads as a synthesized bucket vs daemon-emitted cards.
+  let root: Root;
+  let container: HTMLDivElement;
+
+  // Profile fixture that mirrors useProjectProfile's
+  // ROOT_SUBGRAPH_BINDING short-circuit at `:622` so the Root card
+  // resolves to the same `⊘` / `Root` identity production renders.
+  const rootAwareProfile = {
+    ...profile,
+    forSubGraph: (slug: string) => {
+      if (slug === '__root__') {
+        return { slug: '__root__', displayName: 'Root', description: 'Entities not in any subgraph (Context Graph root)', icon: '⊘', rank: 999 };
+      }
+      return { slug, displayName: slug, color: '#38bdf8', icon: '#', rank: 0 };
+    },
+  } as any;
+
+  beforeEach(() => {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    fetchSubGraphsMock.mockReset();
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  function renderWith(memoryOverride: any) {
+    return act(async () => {
+      root.render(
+        React.createElement(ProjectProfileContext.Provider, { value: rootAwareProfile },
+          React.createElement(SubGraphOverviewGrid, {
+            contextGraphId: 'cg-test',
+            memory: memoryOverride,
+            onNodeClick: vi.fn(),
+            onSelectSubGraph: vi.fn(),
+          })),
+      );
+    });
+  }
+
+  it('renders a Root mini-card with the dashed `.root` chrome modifier', async () => {
+    fetchSubGraphsMock.mockResolvedValueOnce({
+      subGraphs: [{ name: 'alpha', entityCount: 1, tripleCount: 0, description: '' }],
+    });
+    const entityList = [
+      // 1 entity in a named sub-graph (alpha) + 1 root-bucket entity.
+      { uri: 'urn:e:alpha', label: 'a', types: [], trustLevel: 'working', layers: new Set(['working']), subGraphs: new Set(['alpha']), properties: new Map(), connections: [] },
+      { uri: 'urn:e:root', label: 'r', types: [], trustLevel: 'working', layers: new Set(['working']), subGraphs: new Set<string>(), properties: new Map(), connections: [] },
+    ];
+    await renderWith({
+      ...memory,
+      entities: new Map(entityList.map(e => [e.uri, e])),
+      entityList,
+      allTriples: [],
+      counts: { wm: 2, swm: 0, vm: 0, total: 2 },
+    });
+    await flush();
+
+    const cards = container.querySelectorAll('.v10-sgov-card');
+    // 1 named card + 1 Root card = 2 cards rendered.
+    expect(cards.length).toBe(2);
+    // Root card is LAST (mirrors chip-row position).
+    const rootCardEl = cards[cards.length - 1];
+    expect(rootCardEl.classList.contains('root')).toBe(true);
+    // Root card renders the canonical `Root` identity (icon + label).
+    expect(rootCardEl.querySelector('.v10-sgov-card-title')?.textContent).toBe('Root');
+    expect(rootCardEl.querySelector('.v10-sgov-card-icon')?.textContent).toBe('⊘');
+    // Stats reflect the 1 root-bucket entity.
+    const stats = rootCardEl.querySelector('.v10-sgov-card-stats')?.textContent ?? '';
+    expect(stats).toContain('1');
+    expect(stats).toContain('entities');
+  });
+
+  it('renders the Root mini-card even at 0 root entities (consistency with named-card empty branch)', async () => {
+    fetchSubGraphsMock.mockResolvedValueOnce({
+      subGraphs: [{ name: 'alpha', entityCount: 1, tripleCount: 0, description: '' }],
+    });
+    const entityList = [
+      // Every entity belongs to a named sub-graph — root bucket is
+      // empty. Per option (b) the card still renders, matching how
+      // named subgraphs with 0 entities render the empty branch.
+      { uri: 'urn:e:alpha', label: 'a', types: [], trustLevel: 'working', layers: new Set(['working']), subGraphs: new Set(['alpha']), properties: new Map(), connections: [] },
+    ];
+    await renderWith({
+      ...memory,
+      entities: new Map(entityList.map(e => [e.uri, e])),
+      entityList,
+      allTriples: [],
+      counts: { wm: 1, swm: 0, vm: 0, total: 1 },
+    });
+    await flush();
+
+    const cards = container.querySelectorAll('.v10-sgov-card');
+    expect(cards.length).toBe(2);
+    const rootCardEl = cards[cards.length - 1];
+    expect(rootCardEl.classList.contains('root')).toBe(true);
+    // Empty branch literal — same one named cards use.
+    expect(rootCardEl.querySelector('.v10-sgov-card-empty')?.textContent).toBe('No data yet');
+  });
+
+  it('Root card open button calls onSelectSubGraph with ROOT_SLUG_SENTINEL', async () => {
+    fetchSubGraphsMock.mockResolvedValueOnce({
+      subGraphs: [{ name: 'alpha', entityCount: 1, tripleCount: 0, description: '' }],
+    });
+    const entityList = [
+      { uri: 'urn:e:alpha', label: 'a', types: [], trustLevel: 'working', layers: new Set(['working']), subGraphs: new Set(['alpha']), properties: new Map(), connections: [] },
+      { uri: 'urn:e:root', label: 'r', types: [], trustLevel: 'working', layers: new Set(['working']), subGraphs: new Set<string>(), properties: new Map(), connections: [] },
+    ];
+    const onSelectSubGraph = vi.fn();
+    await act(async () => {
+      root.render(
+        React.createElement(ProjectProfileContext.Provider, { value: rootAwareProfile },
+          React.createElement(SubGraphOverviewGrid, {
+            contextGraphId: 'cg-test',
+            memory: {
+              ...memory,
+              entities: new Map(entityList.map(e => [e.uri, e])),
+              entityList,
+              allTriples: [],
+              counts: { wm: 2, swm: 0, vm: 0, total: 2 },
+            },
+            onNodeClick: vi.fn(),
+            onSelectSubGraph,
+          })),
+      );
+    });
+    await flush();
+
+    const cards = container.querySelectorAll('.v10-sgov-card');
+    const rootCardEl = cards[cards.length - 1];
+    const openBtn = rootCardEl.querySelector('.v10-sgov-card-open') as HTMLButtonElement;
+    expect(openBtn).toBeTruthy();
+    await act(async () => { openBtn.click(); });
+    expect(onSelectSubGraph).toHaveBeenCalledWith('__root__');
+  });
+
+  it('Root card scopes triples to untagged-recovery-only (mirrors SubGraphDetailView Root rule)', async () => {
+    // SubGraphDetailView Root branch: rule 1 "exact-tag-routing"
+    // never fires for Root (the bucket carries no tagged triples
+    // by definition); only untagged triples with an in-scope
+    // endpoint are admitted. Mini-card must mirror that — a
+    // tagged triple between two root entities must NOT appear in
+    // the Root card's graph slice (lives on the tagged
+    // sub-graph's card instead).
+    fetchSubGraphsMock.mockResolvedValueOnce({
+      subGraphs: [{ name: 'alpha', entityCount: 1, tripleCount: 1, description: '' }],
+    });
+    const entityList = [
+      { uri: 'urn:e:alpha', label: 'a', types: [], trustLevel: 'working', layers: new Set(['working']), subGraphs: new Set(['alpha']), properties: new Map(), connections: [] },
+      { uri: 'urn:e:root1', label: 'r1', types: [], trustLevel: 'working', layers: new Set(['working']), subGraphs: new Set<string>(), properties: new Map(), connections: [] },
+      { uri: 'urn:e:root2', label: 'r2', types: [], trustLevel: 'working', layers: new Set(['working']), subGraphs: new Set<string>(), properties: new Map(), connections: [] },
+    ];
+    const triples = [
+      // Tagged triple — root entity but tagged to a different
+      // sub-graph. Must NOT appear in Root's slice.
+      { subject: 'urn:e:root1', predicate: 'p', object: 'urn:e:alpha', subGraph: 'alpha' },
+      // Untagged triple between two root entities — admitted by
+      // the untagged-recovery branch.
+      { subject: 'urn:e:root1', predicate: 'p', object: 'urn:e:root2' },
+      // Untagged triple with no endpoint in scope — must NOT
+      // appear in Root's slice.
+      { subject: 'urn:e:alpha', predicate: 'p', object: 'urn:e:somewhere-else' },
+    ];
+    await renderWith({
+      ...memory,
+      entities: new Map(entityList.map(e => [e.uri, e])),
+      entityList,
+      allTriples: triples,
+      counts: { wm: 3, swm: 0, vm: 0, total: 3 },
+    });
+    await flush();
+
+    const cards = container.querySelectorAll('.v10-sgov-card');
+    const rootCardEl = cards[cards.length - 1];
+    // Root card stats: 2 root entities, 1 admitted triple (the
+    // untagged root↔root edge). Tagged + non-scoped triples
+    // dropped.
+    const stats = rootCardEl.querySelector('.v10-sgov-card-stats')?.textContent ?? '';
+    expect(stats).toContain('2 entities');
+    expect(stats).toContain('1 triples');
+  });
+});
+
 describe('SubGraphMiniCard — per-trust nodeColors (S3 polish #3, ui-locked priority chain)', () => {
   // The mini-graph previously rendered every node in the card's
   // chrome color (`card.color`), losing the trust signal that the

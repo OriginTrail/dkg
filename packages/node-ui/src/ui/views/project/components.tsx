@@ -4056,6 +4056,81 @@ export function SubGraphOverviewGrid({
       .sort((a, b) => a.rank - b.rank);
   }, [subGraphs, profile, triplesBySubGraph, layerCountsBySubGraph, entityUrisBySubGraph, entityTrustByUriBySubGraph]);
 
+  // GH #813 — Root mini-card. Synthesizes a card for the
+  // "entities not in any named sub-graph" bucket so the grid
+  // mirrors the SubGraphBar chip row (which already exposes Root
+  // as a peer of the named chips). Renders LAST, after named
+  // cards, mirroring the Root chip's rightmost chip-row position.
+  //
+  // The derivations below mirror SubGraphDetailView's Root branch
+  // (`isRoot = slug === ROOT_SLUG_SENTINEL` at `:4527`):
+  //   • scoped entities: `subGraphs.size === 0` (same rule as
+  //     SubGraphBar.rootEntityCount).
+  //   • scoped triples: rule (1) "exact-tag-routing" can never
+  //     fire for Root (the Root bucket carries no tagged triples
+  //     by definition) — only the untagged-recovery branch admits
+  //     triples whose subject OR resource-object is in scope.
+  // Same canonical-source discipline as round 4.1's subtitle
+  // anchor; what you click maps to the same scope the Root
+  // detail view shows.
+  //
+  // Edge case — CG with zero root entities: we still render the
+  // card (option b per team-lead lean). Named subgraphs with 0
+  // entities render the same "No data yet" empty-state branch;
+  // hiding Root only would create inconsistency (and a missing
+  // affordance for the user wondering whether the bucket exists).
+  const rootCard = useMemo(() => {
+    const rootEntities: typeof memory.entityList = [];
+    const rootEntityUris = new Set<string>();
+    const rootEntityTrust = new Map<string, TrustLevel>();
+    let wm = 0, swm = 0, vm = 0;
+    for (const e of memory.entityList) {
+      if (e.subGraphs.size > 0) continue;
+      rootEntities.push(e);
+      const canonical = canonicalEntityUri(e.uri);
+      rootEntityUris.add(canonical);
+      rootEntityTrust.set(canonical, e.trustLevel);
+      if (canonical !== e.uri) rootEntityTrust.set(e.uri, e.trustLevel);
+      if (e.trustLevel === 'verified') vm++;
+      else if (e.trustLevel === 'shared') swm++;
+      else wm++;
+    }
+    // Untagged-recovery only — Root bucket has no tagged triples
+    // by definition (see SubGraphDetailView's rule 1 → "never
+    // fires for Root"). A triple admitted here must have NO
+    // subGraph tag AND an endpoint in scope; the same
+    // `MAX_PER_CARD` sampling the named branch applies isn't
+    // needed at the mini-card scale because the recovery slice
+    // is bounded by the root entity set.
+    const rootTriples: Triple[] = [];
+    const seenSpo = new Set<string>();
+    for (const t of memory.allTriples) {
+      if (t.subGraph) continue;
+      if (!rootEntityUris.has(t.subject) && !rootEntityUris.has(t.object)) continue;
+      const key = `${t.subject}|${t.predicate}|${t.object}`;
+      if (seenSpo.has(key)) continue;
+      seenSpo.add(key);
+      rootTriples.push({ subject: t.subject, predicate: t.predicate, object: t.object });
+    }
+    const binding = profile?.forSubGraph(ROOT_SLUG_SENTINEL) ?? {};
+    return {
+      slug: ROOT_SLUG_SENTINEL,
+      icon: binding.icon ?? '⊘',
+      // Color left unset — the chrome falls through to neutral
+      // tokens via the `.v10-sgov-card.root` modifier (mirrors
+      // the chip's `--text-tertiary` neutral fallback).
+      color: binding.color ?? '#64748b',
+      displayName: binding.displayName ?? 'Root',
+      description: binding.description,
+      rank: 999,
+      entityCount: rootEntities.length,
+      tripleCount: rootTriples.length,
+      triples: rootTriples,
+      layerCounts: { wm, swm, vm },
+      entityTrustByUri: rootEntityTrust,
+    };
+  }, [memory.entityList, memory.allTriples, profile]);
+
   if (loading && cards.length === 0) {
     return (
       <EmptyState
@@ -4136,6 +4211,19 @@ export function SubGraphOverviewGrid({
             onOpen={() => onSelectSubGraph(card.slug)}
           />
         ))}
+        {/* GH #813 — Root mini-card. Last position mirrors the
+            Root chip's rightmost chip-row position. Rendered even
+            at 0 entities (consistency with named cards' empty
+            branches; option b per team-lead lean). The `root`
+            modifier on the card chrome reads as "synthesized
+            bucket" vs the solid borders of daemon-emitted cards. */}
+        <SubGraphMiniCard
+          key={ROOT_SLUG_SENTINEL}
+          card={rootCard}
+          onNodeClick={onNodeClick}
+          onOpen={() => onSelectSubGraph(ROOT_SLUG_SENTINEL)}
+          variant="root"
+        />
       </div>
     </div>
   );
@@ -4145,6 +4233,7 @@ export function SubGraphMiniCard({
   card,
   onNodeClick,
   onOpen,
+  variant,
 }: {
   card: {
     slug: string; icon: string; color: string; displayName: string;
@@ -4155,6 +4244,11 @@ export function SubGraphMiniCard({
   };
   onNodeClick?: (node: any) => void;
   onOpen: () => void;
+  // GH #813 — `root` opts into the dashed-border, neutral-color
+  // chrome that distinguishes the synthesized Root bucket from
+  // daemon-emitted named sub-graphs. Same render shape, different
+  // chrome modifier.
+  variant?: 'root';
 }) {
   // Per-URI trust palette for the mini-graph (#3 polish).
   // ui-locked priority chain (graph-viz style engine):
@@ -4208,16 +4302,21 @@ export function SubGraphMiniCard({
     focus: { maxNodes: 5000, hops: 999 },
   }), [card.color, nodeColors]);
 
+  const isRoot = variant === 'root';
   return (
     <div
-      className="v10-sgov-card"
-      style={{
-        '--sg-color': card.color,
-        borderColor: card.color + '55',
-      } as React.CSSProperties}
+      className={`v10-sgov-card${isRoot ? ' root' : ''}`}
+      style={isRoot
+        // Root card: chrome falls through to neutral tokens via
+        // the `.root` modifier — no per-card color injection.
+        ? undefined
+        : {
+            '--sg-color': card.color,
+            borderColor: card.color + '55',
+          } as React.CSSProperties}
     >
       <div className="v10-sgov-card-head">
-        <span className="v10-sgov-card-icon" style={{ color: card.color }}>{card.icon}</span>
+        <span className="v10-sgov-card-icon" style={isRoot ? undefined : { color: card.color }}>{card.icon}</span>
         <div className="v10-sgov-card-title-wrap">
           <div className="v10-sgov-card-title">{card.displayName}</div>
           {card.description && (
