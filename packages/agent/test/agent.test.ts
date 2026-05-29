@@ -2538,6 +2538,45 @@ decisions: []
     await expect(node.inviteToContextGraph('ops-multi-agent', invitePeerId, nonDefaultAddr))
       .resolves.toBeUndefined();
 
+    // --- rejectJoinRequest (G1 security fix, notifications-pane redesign) ---
+    // Before the fix, rejectJoinRequest had NO owner check while approve was
+    // gated — any local-token caller could reject a pending request. It now
+    // mirrors the same `assertContextGraphOwner` gate. Seed a pending request,
+    // then prove the same three-way owner gating + that rejected attempts do
+    // not mutate state (the authz throw happens before the store write).
+    const joinRequester = new ethers.Wallet(HARDHAT_KEYS.REC2_OP).address;
+    const requestUri = `did:dkg:join-request:ops-multi-agent:${joinRequester.toLowerCase()}`;
+    const reqStatus = async () => {
+      const r = await store.query(
+        `SELECT ?s WHERE { GRAPH <${contextGraphMetaUri('ops-multi-agent')}> { <${requestUri}> <https://dkg.network/ontology#requestStatus> ?s } }`,
+      );
+      return r.type === 'bindings' && r.bindings.length > 0
+        ? String((r.bindings[0] as Record<string, string>)['s']).replace(/^"|"(\^\^.*)?$/g, '')
+        : null;
+    };
+    await node.storePendingJoinRequest('ops-multi-agent', {
+      agentAddress: joinRequester,
+      scope: 'test-scope',
+      issuedAtMs: Date.now(),
+      delegateePeerId: invitePeerId,
+      signature: `0x${'a'.repeat(130)}`,
+    } as any, 'Requester');
+    expect(await reqStatus()).toBe('pending');
+
+    // Default-agent token (no explicit caller) — the owner is the non-default
+    // wallet, so this is NOT authorised.
+    await expect(node.rejectJoinRequest('ops-multi-agent', joinRequester))
+      .rejects.toThrow(/Only the context graph curator/);
+    // Sibling agent wallet on the same node — not the owner.
+    await expect(node.rejectJoinRequest('ops-multi-agent', joinRequester, siblingAddr))
+      .rejects.toThrow(/Only the context graph curator/);
+    // Neither rejected attempt mutated the request status.
+    expect(await reqStatus()).toBe('pending');
+    // The owning curator wallet — authorised; flips the request to rejected.
+    await expect(node.rejectJoinRequest('ops-multi-agent', joinRequester, nonDefaultAddr))
+      .resolves.toBeUndefined();
+    expect(await reqStatus()).toBe('rejected');
+
     await node.stop().catch(() => {});
   });
 
