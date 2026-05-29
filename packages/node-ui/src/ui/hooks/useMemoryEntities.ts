@@ -287,9 +287,15 @@ export function subGraphOf(gUri: string, cgId: string): string | undefined {
   // `assertion` is the WM assertion-graph segment
   // (`<cg>/assertion/<addr>/<name>`), not a user-facing sub-graph; leaking
   // it as a slug surfaces a phantom "Assertion" sub-graph chip on entity
-  // detail pages. Filter alongside underscore-prefixed bookkeeping
+  // detail pages. `meta` is the profile / bookkeeping graph
+  // (`<cg>/meta/_shared_memory`); it's filtered downstream by
+  // `RESERVED_SUB_GRAPH_SLUGS` so it never gets a chip, but pre-filter
+  // it here too so entities with ONLY a `meta` membership don't end up
+  // with `subGraphs = Set{'meta'}` — that produced the GH #806 SWM
+  // layer-mode gap where `All N · Root M` disagreed by the count of
+  // such entities. Filter alongside underscore-prefixed bookkeeping
   // segments so `entity.subGraphs` stays semantically pure.
-  if (!seg || seg.startsWith('_') || seg === 'assertion') return undefined;
+  if (!seg || seg.startsWith('_') || seg === 'assertion' || seg === 'meta') return undefined;
   return seg;
 }
 
