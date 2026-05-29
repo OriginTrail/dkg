@@ -266,13 +266,17 @@ describe('SubGraphBar — layer-scoped chip counts (P4)', () => {
     expect(allCount).toBe(3);
   });
 
-  // Layer-agnostic counterpart of the previous case: on the sub-graph
-  // page `ProjectView` passes `entities` without `layer`, and "All"
-  // represents the umbrella over named-sub-graph chips. Entities with
-  // no chip membership (root-bucket SWM entities, empty `subGraphs`)
-  // must STAY excluded here — including them would inflate the total
-  // past anything the user can reach by clicking a chip.
-  it('without `layer`: the "All" chip total excludes entities with no named sub-graph membership (umbrella over chips)', async () => {
+  // Layer-agnostic counterpart of the previous case. Round 4 reversal
+  // of §4.4.1 (ux-lead): `All` now INCLUDES Root in BOTH layer and
+  // layer-agnostic modes. Pre-round-4 lock excluded root-bucket
+  // entities here on the rationale that `All` should be the umbrella
+  // over drillable named-sub-graph chips. That rationale didn't
+  // survive S3 #772 shipping the Root chip — once Root became
+  // drillable too, excluding it from `All` reintroduced the same
+  // "All ≠ chip-row union" contradiction the bar was meant to fix.
+  // User manual-test on round 3 surfaced it; ux-lead locked option
+  // (A): unify both modes to "every distinct entity in scope".
+  it('without `layer`: the "All" chip total INCLUDES root-bucket entities (round 4 §4.4.1 reversal)', async () => {
     const rootEntity = (uri: string, trust: 'working' | 'shared' | 'verified'): any => ({
       uri, label: uri, types: [],
       trustLevel: trust,
@@ -303,8 +307,65 @@ describe('SubGraphBar — layer-scoped chip counts (P4)', () => {
     const allChip = Array.from(container.querySelectorAll('button.v10-subgraph-chip'))
       .find(b => b.textContent?.includes('All'));
     const allCount = Number(allChip?.querySelector('.v10-subgraph-chip-count')?.textContent ?? 'NaN');
-    // 2 chip-reachable entities (alpha, beta). Root entities excluded.
-    expect(allCount).toBe(2);
+    // 4 distinct entities (alpha, beta, root-1, root-2). Root
+    // bucket included alongside named-sub-graph members.
+    expect(allCount).toBe(4);
+  });
+
+  // Round 4 regression guard — cross-membership entities must NOT be
+  // double-counted when `All` includes root in layer-agnostic mode.
+  // Fixture: 1 entity in both 'alpha' AND 'beta' (chip row would show
+  // alpha=2, beta=2 if anything else were in each); 1 entity in only
+  // 'alpha'; 1 entity in only 'beta'; 1 root entity. Naive
+  // sum-of-chips would give alpha(2)+beta(2)+root(1)=5 (double-counts
+  // the cross entity); distinct count is 4. The `All` chip must show
+  // the distinct count.
+  it('without `layer`: the "All" chip distinct-counts cross-membership entities + root (round 4 regression)', async () => {
+    const rootEntity = (uri: string, trust: 'working' | 'shared' | 'verified'): any => ({
+      uri, label: uri, types: [],
+      trustLevel: trust,
+      layers: new Set([trust]),
+      subGraphs: new Set<string>(),
+      properties: new Map(),
+      connections: [],
+    });
+    const entities: any[] = [
+      mkEntity('urn:e:alpha-only', 'working', 'alpha'),
+      mkEntity('urn:e:beta-only', 'working', 'beta'),
+      {
+        uri: 'urn:e:cross',
+        label: 'cross',
+        types: [],
+        trustLevel: 'working' as const,
+        layers: new Set(['working']),
+        subGraphs: new Set(['alpha', 'beta']),
+        properties: new Map(),
+        connections: [],
+      },
+      rootEntity('urn:e:root-only', 'working'),
+    ];
+    await act(async () => {
+      root.render(React.createElement(SubGraphBar, {
+        contextGraphId: 'cg',
+        profile,
+        selected: null,
+        onSelect: vi.fn(),
+        entities,
+        // intentionally no `layer` — exercises the path that round 4
+        // unified (was the carve-out that excluded root).
+      }));
+    });
+    await flushNet();
+    // Chip row: alpha includes the cross entity, beta includes the
+    // cross entity → 2 each.
+    expect(chipCount('alpha')).toBe(2);
+    expect(chipCount('beta')).toBe(2);
+    const allChip = Array.from(container.querySelectorAll('button.v10-subgraph-chip'))
+      .find(b => b.textContent?.includes('All'));
+    const allCount = Number(allChip?.querySelector('.v10-subgraph-chip-count')?.textContent ?? 'NaN');
+    // Distinct: alpha-only + beta-only + cross + root-only = 4.
+    // NOT sum-of-chips (5) which double-counts the cross entity.
+    expect(allCount).toBe(4);
   });
 
   // Issue B regression — sub-graph page chip row in layer-agnostic mode.
@@ -538,7 +599,13 @@ describe('SubGraphBar — layer-scoped chip counts (P4)', () => {
     expect(container.querySelector('.v10-subgraph-bar-hint')).toBeNull();
   });
 
-  it('extends the All chip tooltip in layer mode with the cross-membership clarification (includes Root)', async () => {
+  // Round 4 (ux-lead reversal of §4.4.1): `All` semantic is now
+  // unified across layer + layer-agnostic modes (both include Root),
+  // so the tooltip / aria prose is a single literal in BOTH modes.
+  // Sweep-1 / round-3 mode-tagged branching is gone. The two tests
+  // below assert the SAME prose under each mode, locking the
+  // collapsed single-literal shape.
+  it('All chip tooltip in layer mode reads the unified Root-inclusion prose (round 4 §4.4.1 reversal)', async () => {
     await act(async () => {
       root.render(React.createElement(SubGraphBar, {
         contextGraphId: 'cg',
@@ -554,21 +621,22 @@ describe('SubGraphBar — layer-scoped chip counts (P4)', () => {
     expect(allChip).toBeTruthy();
     const title = allChip.getAttribute('title') ?? '';
     const aria = allChip.getAttribute('aria-label') ?? '';
-    // Round 3 (ux-lead lock): "distinct entities" prefix added
-    // to both tooltip modes — lock the new phrasing so it can't
-    // regress. Title leads with "Total", aria with "All — total"
-    // (sentence-cased like the rest of the aria label); the
-    // load-bearing token is `distinct entities`.
-    expect(title).toContain('Total distinct entities');
-    expect(aria).toContain('distinct entities');
+    // Locked prose (title): leads with "Total distinct entities",
+    // discloses cross-membership + Root inclusion.
+    expect(title).toContain('Total distinct entities — includes those in named subgraphs');
     expect(title).toContain('some may belong to more than one');
     expect(title).toContain('plus Root entities not in any subgraph');
+    // Locked prose (aria): sentence-cased per existing aria pattern,
+    // same disclosure of cross-membership + Root inclusion.
+    expect(aria).toContain('All — total distinct entities');
     expect(aria).toContain('plus Root entities not in any subgraph');
-    // Must NOT carry the layer-agnostic phrasing.
+    // The layer-agnostic-only phrasing from sweep 1 / round 3 must
+    // NOT appear in EITHER mode after round 4.
     expect(title).not.toContain('counted separately');
+    expect(aria).not.toContain('counted separately');
   });
 
-  it('uses the layer-agnostic All chip tooltip in overview mode (Codex sweep 1 — Root counted separately)', async () => {
+  it('All chip tooltip in layer-agnostic mode reads the SAME unified prose (round 4 §4.4.1 reversal)', async () => {
     await act(async () => {
       root.render(React.createElement(SubGraphBar, {
         contextGraphId: 'cg',
@@ -584,17 +652,16 @@ describe('SubGraphBar — layer-scoped chip counts (P4)', () => {
     expect(allChip).toBeTruthy();
     const title = allChip.getAttribute('title') ?? '';
     const aria = allChip.getAttribute('aria-label') ?? '';
-    // Round 3 (ux-lead lock): "distinct entities" prefix added
-    // to both tooltip modes — lock the new phrasing so it can't
-    // regress. Title leads with "Total", aria with "All — total"
-    // (sentence-cased like the rest of the aria label); the
-    // load-bearing token is `distinct entities in named subgraphs`.
-    expect(title).toContain('Total distinct entities in named subgraphs');
-    expect(aria).toContain('distinct entities in named subgraphs');
-    expect(title).toContain('counted separately on the Root chip');
-    expect(aria).toContain('counted separately on the Root chip');
-    // Must NOT carry the layer-mode phrasing that includes Root.
-    expect(title).not.toContain('plus Root entities not in any subgraph');
+    // Same locked prose as the layer-mode test above — the
+    // mode-tagged branching from sweep 1 / round 3 is gone.
+    expect(title).toContain('Total distinct entities — includes those in named subgraphs');
+    expect(title).toContain('some may belong to more than one');
+    expect(title).toContain('plus Root entities not in any subgraph');
+    expect(aria).toContain('All — total distinct entities');
+    expect(aria).toContain('plus Root entities not in any subgraph');
+    // Round 4 deletion guards:
+    expect(title).not.toContain('counted separately');
+    expect(aria).not.toContain('counted separately');
   });
 
   // S3 polish #9 — when SubGraphBar is mounted on a WM/SWM/VM

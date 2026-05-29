@@ -4047,6 +4047,15 @@ export function SubGraphOverviewGrid({
           // membership rule. Fall back to the server count if we have no
           // client set for this sub-graph (e.g. nothing yet hydrated).
           entityCount: cardEntityUris.size > 0 ? cardEntityUris.size : sg.entityCount,
+          // Round 4 (GH #812) — carry the canonical URI set out so
+          // the header subtitle can dedupe distinct entities across
+          // cards. `cards.reduce((a, b) => a + b.entityCount, 0)`
+          // double-counts cross-membership entities (an entity in 2
+          // sub-graphs appears in both cards' count); summing
+          // `entityUris.size` doesn't dedupe across cards either.
+          // The header instead unions the URI sets — see
+          // `distinctEntitiesAcrossCards` below.
+          entityUris: cardEntityUris,
           tripleCount: sg.tripleCount,
           triples: filterTriplesToEntities(rawTriples, cardEntityUris),
           layerCounts: layerCountsBySubGraph.get(sg.name) ?? { wm: 0, swm: 0, vm: 0 },
@@ -4055,6 +4064,26 @@ export function SubGraphOverviewGrid({
       })
       .sort((a, b) => a.rank - b.rank);
   }, [subGraphs, profile, triplesBySubGraph, layerCountsBySubGraph, entityUrisBySubGraph, entityTrustByUriBySubGraph]);
+
+  // Round 4 (GH #812) — header subtitle previously did
+  // `cards.reduce((a, b) => a + b.entityCount, 0)` which sums per-card
+  // entity counts. An entity living in 2 sub-graphs is counted twice
+  // (once per card), so the subtitle double-counted cross-membership
+  // entities and disagreed with the SubGraphBar `All` chip count.
+  // Union the canonical URI sets across user-facing cards instead, so
+  // the subtitle reads as "distinct entities across all sub-graphs"
+  // (matches what `All` shows when the bar is mounted on this page).
+  // Triple double-counting from cross-graph SPO duplicates is the
+  // same family as GH #805 and deferred to that fix.
+  const distinctEntitiesAcrossCards = useMemo(() => {
+    const seen = new Set<string>();
+    for (const card of cards) {
+      const uris = card.entityUris;
+      if (!uris) continue;
+      for (const uri of uris) seen.add(uri);
+    }
+    return seen.size;
+  }, [cards]);
 
   if (loading && cards.length === 0) {
     return (
@@ -4112,7 +4141,7 @@ export function SubGraphOverviewGrid({
       <div className="v10-sgov-header">
         <div className="v10-sgov-title">Subgraphs</div>
         <div className="v10-sgov-sub">
-          {cards.length} subgraphs · {cards.reduce((a, b) => a + b.entityCount, 0)} entities · {cards.reduce((a, b) => a + b.tripleCount, 0)} triples
+          {cards.length} subgraphs · {distinctEntitiesAcrossCards} entities · {cards.reduce((a, b) => a + b.tripleCount, 0)} triples
         </div>
       </div>
       <div className="v10-sgov-grid">
@@ -4140,6 +4169,10 @@ export function SubGraphMiniCard({
     triples: Triple[];
     layerCounts: { wm: number; swm: number; vm: number };
     entityTrustByUri: Map<string, TrustLevel>;
+    // Round 4 (GH #812) — surfaces the canonical entity-URI set so
+    // the parent header can dedupe distinct entities across cards
+    // for the subtitle count. Not consumed inside the mini-card.
+    entityUris?: Set<string>;
   };
   onNodeClick?: (node: any) => void;
   onOpen: () => void;

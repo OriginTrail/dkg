@@ -62,8 +62,7 @@ export interface SubGraphBarProps {
    *   • size 1 → single-layer slice (matches the legacy `layer`)
    *   • size 2 → narrowed across 2 layers
    *   • size 3 → semantically all-three, treated as layer-agnostic
-   *     for the `inLayerMode` discriminant (the #7 hint / Bug K
-   *     rephrase / tooltip-branch logic stays at "no narrowing")
+   *     (no narrowing — `allowedTrustLevels` collapses to null)
    *
    * Always trumps `layer` when both are non-empty. Forwarded as
    * a fresh Set on chip click via `originatingScope` — see below.
@@ -146,13 +145,6 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
     if (layer) return new Set<TrustLevel>([LAYER_TRUST_LEVEL[layer]]);
     return null;
   }, [enabledScope, layer]);
-  // `isNarrowed` is true when the bar reports a sliced view (any
-  // non-null `allowedTrustLevels`). Pre-Bug-O this was just
-  // `layer !== undefined`; the Set carrier generalises it for the
-  // multi-layer cases. Drives the #7 / Bug K layer-mode tooltip
-  // branching and the All chip Root-inclusion rule.
-  const isNarrowed = allowedTrustLevels !== null;
-
   // When `entities` is provided we derive per-sub-graph counts locally
   // so the chip count matches what the entity list below it shows.
   // Without narrowing, count every entity that belongs to the
@@ -180,31 +172,25 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
   // more sub-graphs (the entity list under us is layer-filtered
   // without sub-graph multiplicity, so the sum disagrees with it).
   //
-  // Layer-scoped semantic differs from layer-agnostic semantic:
-  //   • Layer mode (WM/SWM/VM page): "All" should match the layer tab
-  //     badge — every distinct entity at that layer, including
-  //     root-bucket SWM entities whose graph URI is
-  //     `<cg>/_shared_memory` (subGraphOf filters underscore-prefixed
-  //     segments, leaving an empty `subGraphs` set). Without them
-  //     "All" undercut the badge (e.g. 25 vs 27) and confused users.
-  //   • Layer-agnostic mode (sub-graph page): "All" is the umbrella
-  //     over named-sub-graph chips, so entities with no chip
-  //     membership stay excluded — including them would inflate the
-  //     total past anything the user can drill into by clicking a chip.
+  // Round 4 (ux-lead reversal of §4.4.1): every distinct entity in
+  // scope is counted — including root-bucket entities — in BOTH
+  // layer and layer-agnostic modes. The earlier "All is the umbrella
+  // over drillable chips" carve-out was a pre-Root-chip hypothesis;
+  // once the Root chip shipped (S3 #772) it became drillable too, so
+  // excluding root from `All` in layer-agnostic mode no longer
+  // reflected the chip row. User manual-test on round 3 surfaced the
+  // contradiction; ux-lead locked option (A) — unify to "always
+  // includes Root" so `All` matches the layer-tab badge in narrowed
+  // mode AND the Root + named-chip union in layer-agnostic mode.
   const entityScopedAllTotal = React.useMemo(() => {
     if (!entities) return null;
     let n = 0;
     for (const e of entities) {
       if (allowedTrustLevels && !allowedTrustLevels.has(e.trustLevel)) continue;
-      // Layer-agnostic mode (no narrowing) excludes root entities
-      // by design — `All` is the umbrella over named-sub-graph
-      // chips. In layer / narrowed mode root entities are
-      // included so the total matches the layer-tab badge.
-      if (!isNarrowed && e.subGraphs.size === 0) continue;
       n++;
     }
     return n;
-  }, [allowedTrustLevels, isNarrowed, entities]);
+  }, [allowedTrustLevels, entities]);
 
   // S3 fold-in: the synthesized "Root" bucket is "all entities minus
   // those in any named sub-graph". Computed from the same entity list
@@ -302,29 +288,15 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
     : null;
   const scopeSuffix = layerLabel ? ` in ${layerLabel}` : '';
 
-  // S3 polish #7 — the `All` semantic differs between narrowed
-  // and layer-agnostic mode (see `entityScopedAllTotal` for the
-  // locked rule):
-  //   • Narrowed (WM/SWM/VM or a multi-layer slice): All includes
-  //     root-bucket entities so it matches the layer-tab badge.
-  //   • Layer-agnostic mode (Subgraph Explorer overview): All
-  //     EXCLUDES root by design — it's the umbrella over named
-  //     sub-graph chips; including root would inflate the total
-  //     past anything the user can drill into.
-  // Surface different tooltip / aria-label / inline hint copy on
-  // each mode so the math reads consistently with the chip count.
-  // (PR #793 Codex sweep 1 — gating fix.)
-  const inLayerMode = isNarrowed;
-  // Round 3 (ux-lead lock): "distinct" prefix added to both mode
-  // tooltips to disambiguate that the count reflects unique
-  // entities, not chip-row sum (entities may belong to more than
-  // one named subgraph and would otherwise appear double-counted).
-  const allTooltipCopy = inLayerMode
-    ? `Total distinct entities — includes those in named subgraphs (some may belong to more than one), plus Root entities not in any subgraph · ${totalEntities} entities${scopeSuffix}${layerLabel ? '' : ` · ${totalTriples} triples`}`
-    : `Total distinct entities in named subgraphs (some may belong to more than one). Root entities are counted separately on the Root chip · ${totalEntities} entities · ${totalTriples} triples`;
-  const allAriaCopy = inLayerMode
-    ? `All — total distinct entities. Includes those in named subgraphs (some may belong to more than one), plus Root entities not in any subgraph. ${totalEntities} entities${scopeSuffix}.`
-    : `All — total distinct entities in named subgraphs (some may belong to more than one). Root entities are counted separately on the Root chip. ${totalEntities} entities.`;
+  // Round 4 (ux-lead reversal of §4.4.1): `All` now always includes
+  // Root — same semantic in narrowed AND layer-agnostic mode — so
+  // the tooltip prose collapses to a single literal. The mode-tagged
+  // branching from sweep 1 / round 3 is gone because the underlying
+  // semantic split is gone. The dynamic suffix still narrows the
+  // count display (`scopeSuffix` for narrowed mode, conditional
+  // triples for layer-agnostic), but the prose stays one shape.
+  const allTooltipCopy = `Total distinct entities — includes those in named subgraphs (some may belong to more than one), plus Root entities not in any subgraph · ${totalEntities} entities${scopeSuffix}${layerLabel ? '' : ` · ${totalTriples} triples`}`;
+  const allAriaCopy = `All — total distinct entities. Includes those in named subgraphs (some may belong to more than one), plus Root entities not in any subgraph. ${totalEntities} entities${scopeSuffix}.`;
 
   return (
     <div className="v10-subgraph-bar">
@@ -403,9 +375,9 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
           design failed to communicate. Cross-membership
           disclosure now lives ONLY in the long-form All-chip
           tooltip (hover-only, low-cost, right disclosure for
-          users who investigate). The `inLayerMode` discriminator
-          above stays — it still drives the mode-tagged tooltip /
-          aria branching from sweep 1. */}
+          users who investigate). Round 4 collapsed the tooltip
+          to a single literal — the mode discriminator that used
+          to drive sweep-1 / round-3 branching is also gone. */}
     </div>
   );
 };
