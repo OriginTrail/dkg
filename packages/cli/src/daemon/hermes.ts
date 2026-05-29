@@ -275,6 +275,17 @@ export function buildHermesChannelHeaders(
  * no bearer is sent).
  */
 export function resolveHermesApiServerKey(config: DkgConfig): string | undefined {
+  const key = resolveRawHermesApiServerKey(config);
+  // A bearer can't contain CR/LF or other control characters: `fetch`/`Headers`
+  // throw on them, and Hermes' own HTTP api_server could never receive such a
+  // token either. parseDotenvValue faithfully decodes `\n`/`\t`/`\r`, so a
+  // quoted key like `"abc\n123"` would otherwise crash the request — treat a
+  // control-char key as unusable so callers surface the missing-key hint.
+  if (key && /[\u0000-\u001f\u007f]/.test(key)) return undefined;
+  return key;
+}
+
+function resolveRawHermesApiServerKey(config: DkgConfig): string | undefined {
   const override = optionalTrimmedString(process.env.DKG_HERMES_API_SERVER_KEY);
   // Remote/WSL `--gateway-url` Hermes keeps its `.env` on another host, so the
   // explicit override is the only source there.

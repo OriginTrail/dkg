@@ -609,6 +609,25 @@ describe('Hermes channel helpers', () => {
     }
   });
 
+  it('drops a key containing control characters (unusable as an HTTP bearer)', () => {
+    const home = mkdtempSync(join(tmpdir(), 'hermes-ctrl-'));
+    cleanupDirs.push(home);
+    // A double-quoted `\n` decodes to a real newline (python-dotenv parity), but
+    // CR/LF are illegal in HTTP header values and would crash fetch — so the
+    // resolver must drop it rather than forward an unusable bearer (Codex review).
+    writeFileSync(join(home, '.env'), 'API_SERVER_KEY="abc\\n123"\n');
+
+    expect(resolveHermesApiServerKey(makeConfig({
+      localAgentIntegrations: {
+        hermes: {
+          enabled: true,
+          transport: { kind: 'hermes-openai', gatewayUrl: 'http://127.0.0.1:8642' },
+          metadata: { hermesHome: home },
+        },
+      },
+    }))).toBeUndefined();
+  });
+
   it('falls back to the override only when loopback .env has no API_SERVER_KEY line', () => {
     const home = mkdtempSync(join(tmpdir(), 'hermes-nokeyline-'));
     cleanupDirs.push(home);
@@ -1524,8 +1543,12 @@ describe('Hermes daemon routes', () => {
   });
 
   it.each(['/api/hermes-channel/send', '/api/hermes-channel/stream'])(
-    'returns HERMES_API_KEY_REJECTED when the hermes-openai api_server replies 401 (%s)',
+    'returns HERMES_API_KEY_REJECTED with realign guidance when a forwarded key is rejected (%s)',
     async (path) => {
+      // A key IS resolved (present in the profile .env) → 401 means it's wrong.
+      const home = mkdtempSync(join(tmpdir(), 'hermes-401-'));
+      cleanupDirs.push(home);
+      writeFileSync(join(home, '.env'), 'API_SERVER_KEY=present-but-wrong\n');
       const { ctx, res } = makeHermesRouteContext({
         text: 'hello',
         correlationId: 'corr-1',
@@ -1538,6 +1561,7 @@ describe('Hermes daemon routes', () => {
             enabled: true,
             capabilities: { localChat: true },
             transport: { kind: 'hermes-openai', gatewayUrl: 'http://127.0.0.1:8642' },
+            metadata: { hermesHome: home },
           },
         },
       }, path);
@@ -1549,12 +1573,40 @@ describe('Hermes daemon routes', () => {
       expect(res.statusCode).toBe(502);
       const body = JSON.parse(res.body);
       expect(body).toMatchObject({ code: 'HERMES_API_KEY_REJECTED' });
-      // Rejected (key present but wrong) → realign/rotate guidance, NOT the
-      // missing-key "provision" path (setup never overwrites an existing key).
+      // Key present but wrong → realign/rotate guidance, NOT the missing-key
+      // "provision" path (setup never overwrites an existing key).
       expect(body.details).toContain('does not match');
       expect(body.details).not.toContain('provision API_SERVER_KEY');
     },
   );
+
+  it('returns missing-key guidance on 401 when no key was resolved/forwarded', async () => {
+    // No metadata / no resolvable key → DKG sent no bearer → 401 means MISSING,
+    // so the remediation must point to provisioning, not realigning.
+    const { ctx, res } = makeHermesRouteContext({
+      text: 'hello',
+      correlationId: 'corr-1',
+    }, {
+      hasChatTurn: vi.fn(async () => false),
+      storeChatExchange: vi.fn(async () => {}),
+    }, {
+      localAgentIntegrations: {
+        hermes: {
+          enabled: true,
+          capabilities: { localChat: true },
+          transport: { kind: 'hermes-openai', gatewayUrl: 'http://127.0.0.1:8642' },
+        },
+      },
+    }, '/api/hermes-channel/send');
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 401 })));
+
+    await handleHermesRoutes(ctx);
+
+    expect(res.statusCode).toBe(502);
+    const body = JSON.parse(res.body);
+    expect(body.details).toContain('provision API_SERVER_KEY');
+    expect(body.details).not.toContain('does not match');
+  });
 
   it('forwards attachment refs, import context, and contextGraphId to Hermes channel send', async () => {
     const attachmentRef = {

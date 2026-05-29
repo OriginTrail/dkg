@@ -65,8 +65,15 @@ function isHermesApiKeyRejection(target: { protocol?: string }, status: number):
   return target.protocol === 'hermes-openai' && (status === 401 || status === 403);
 }
 
-function hermesApiKeyRejectedDetails(config: RequestContext['config']): string {
-  return `Hermes API server rejected the API_SERVER_KEY — ${hermesApiServerKeyRejectionRemediation(config)}.`;
+function hermesApiKeyRejectedDetails(
+  config: RequestContext['config'],
+  apiServerKey: string | undefined,
+): string {
+  // A 401/403 with a key forwarded means the key is wrong (realign/rotate); with
+  // no key forwarded it means one is missing/unresolved (provision + reconnect).
+  return apiServerKey
+    ? `Hermes API server rejected the API_SERVER_KEY — ${hermesApiServerKeyRejectionRemediation(config)}.`
+    : `Hermes API server requires an API_SERVER_KEY but none was resolved — ${hermesApiServerKeyRemediation(config)}.`;
 }
 
 /**
@@ -161,7 +168,7 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
             return jsonResponse(res, 502, {
               error: 'Hermes API server rejected the API_SERVER_KEY',
               code: 'HERMES_API_KEY_REJECTED',
-              details: details || hermesApiKeyRejectedDetails(config),
+              details: details || hermesApiKeyRejectedDetails(config, apiServerKey),
             });
           }
           if (shouldTryNextHermesTarget(forwardRes.status)) {
@@ -279,7 +286,7 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
             return jsonResponse(res, 502, {
               error: 'Hermes API server rejected the API_SERVER_KEY',
               code: 'HERMES_API_KEY_REJECTED',
-              details: details || hermesApiKeyRejectedDetails(config),
+              details: details || hermesApiKeyRejectedDetails(config, apiServerKey),
             });
           }
           if (shouldTryNextHermesTarget(transportRes.status)) {
