@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { compareNotificationByTsDesc, formatNotificationTimestamp } from '../src/ui/lib/formatTimestamp.js';
+import { formatNotificationTimestamp } from '../src/ui/lib/formatTimestamp.js';
 
 const NOW = new Date('2026-05-26T14:00:00Z');
 
@@ -37,44 +37,12 @@ describe('formatNotificationTimestamp (BUG-003)', () => {
     const old = new Date(NOW);
     old.setMonth(NOW.getMonth() - 2);
     const out = formatNotificationTimestamp(old, NOW);
-    expect(out).toMatch(/^[A-Z][a-z]{2}/);
+    // Locale-robust: the older-date form must surface a month abbreviation
+    // AND the year somewhere — not a specific token order. `toLocaleString`
+    // renders month-first in en-US ("Mar 26, 2026, …") but day-first in many
+    // locales ("26 Mar 2026, …"); both are correct and both must pass. The
+    // intent is only that an old notification reads as dated, not fresh.
+    expect(out).toMatch(/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b/);
     expect(out).toMatch(/202\d/);
-  });
-});
-
-describe('compareNotificationByTsDesc (BUG-019)', () => {
-  it('sorts numeric epoch timestamps newest-first (the production shape)', () => {
-    // Reproducer for the regression we just fixed: the previous
-    // comparator did `Date.parse(String(<epoch>))` which always
-    // returned NaN for numeric timestamps, leaving the dropdown in
-    // arbitrary insertion order.
-    const items = [
-      { id: 'a', ts: 1_716_700_000_000 },
-      { id: 'b', ts: 1_716_900_000_000 },
-      { id: 'c', ts: 1_716_800_000_000 },
-    ];
-    const sorted = [...items].sort(compareNotificationByTsDesc);
-    expect(sorted.map((n) => n.id)).toEqual(['b', 'c', 'a']);
-  });
-
-  it('handles missing / non-finite timestamps without poisoning the comparator (returns 0 for them)', () => {
-    const items = [
-      { id: 'has-ts', ts: 2000 },
-      { id: 'no-ts' },
-      { id: 'nan-ts', ts: Number.NaN },
-      { id: 'null-ts', ts: null as unknown as number },
-    ];
-    const sorted = [...items].sort(compareNotificationByTsDesc);
-    expect(sorted[0].id).toBe('has-ts');
-  });
-
-  it('preserves insertion order for equal timestamps (stable-comparator contract)', () => {
-    const items = [
-      { id: 'first', ts: 1000 },
-      { id: 'second', ts: 1000 },
-      { id: 'third', ts: 1000 },
-    ];
-    const sorted = [...items].sort(compareNotificationByTsDesc);
-    expect(sorted.map((n) => n.id)).toEqual(['first', 'second', 'third']);
   });
 });

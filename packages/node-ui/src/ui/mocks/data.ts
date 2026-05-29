@@ -1,3 +1,5 @@
+import type { NotificationsFeedResponse } from '../api.js';
+
 export const MOCK_STATUS = {
   name: 'my-dkg-node',
   networkName: 'DKG Mainnet',
@@ -127,14 +129,37 @@ export const MOCK_WALLETS = {
   symbol: 'TRAC',
 };
 
-export const MOCK_NOTIFICATIONS = {
+// Scoped pane wire contract (implementation-plan §3 / api.ts NotificationsFeedResponse):
+// one actionable join request, one activity digest, one outbound confirmation.
+export const MOCK_NOTIFICATIONS_FEED = {
   notifications: [
-    { id: 1, ts: Date.now() - 60000, type: 'publish', title: 'Publish complete', message: 'warfarin-aspirin-001 published to Verifiable Memory', source: null, peer: null, read: 0, meta: null },
-    { id: 2, ts: Date.now() - 300000, type: 'agent', title: 'Agent connected', message: 'research-agent joined Pharma Drug Interactions', source: null, peer: 'QmResearch456', read: 0, meta: null },
-    { id: 3, ts: Date.now() - 900000, type: 'sync', title: 'Sync complete', message: '12 new triples synced from data-curator', source: null, peer: 'QmCurator789', read: 1, meta: null },
+    {
+      type: 'join_request',
+      id: 101,
+      ts: Date.now() - 120000,
+      read: 0,
+      contextGraphId: 'cg:pharma-drug-interactions',
+      meta: { contextGraphName: 'Pharma Drug Interactions', agentAddress: '0xab12cd34ef56ab78cd90ab12cd34ef56ab78cd90', agentName: 'research-agent' },
+    },
+    {
+      type: 'assertion_activity',
+      id: 'activity:cg:pharma-drug-interactions:promoted:29812',
+      ts: Date.now() - 300000,
+      read: 0,
+      contextGraphId: 'cg:pharma-drug-interactions',
+      meta: { contextGraphName: 'Pharma Drug Interactions', kind: 'promoted', count: 3, actorAgentDid: 'did:dkg:agent:0xdana00000000000000000000000000000000dana', actorAgentName: 'Dana', soleAuthor: true },
+    },
+    {
+      type: 'join_approved',
+      id: 102,
+      ts: Date.now() - 900000,
+      read: 1,
+      contextGraphId: 'cg:climate-arctic',
+      meta: { contextGraphName: 'Arctic Climate', agentAddress: '0x0000000000000000000000000000000000000001' },
+    },
   ],
-  unreadCount: 2,
-};
+  badgeCount: 2,
+} satisfies NotificationsFeedResponse;
 
 export const MOCK_NODE_LOG = {
   lines: [

@@ -42,7 +42,10 @@ describe('formatTime (BUG-003 — Operations table column)', () => {
   it('shows month/day for older events (older than 7d)', () => {
     const old = new Date(NOW);
     old.setMonth(NOW.getMonth() - 2);
-    expect(formatTime(old, NOW)).toMatch(/^[A-Z][a-z]{2}/);
+    // Locale-robust: assert a month abbreviation is present, not that it
+    // leads. `toLocaleDateString` is month-first in en-US ("Mar 26") but
+    // day-first elsewhere ("26 Mar"); both convey month/day for an old event.
+    expect(formatTime(old, NOW)).toMatch(/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b/);
   });
 
   it('type-checks every accepted input shape (number | string | Date)', () => {

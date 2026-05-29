@@ -357,12 +357,21 @@ button:focus:not(:focus-visible) { outline: none; }
   justify-content: center;
   padding: 0 3px;
 }
-.v10-header-notif-dropdown {
+/* ── Notifications pane (redesign) ─────────────────────────────────────────
+   Bell dropdown surface + the two sections (pinned "Needs your action" +
+   "Activity") + the three row kinds. Reuses design tokens for dark/light,
+   the .v10-po-join-* accent palette for actions, and the activity glyph
+   colours from the per-CG feed. ~380px (wider than the old 320px to fit the
+   two-column join rows + the activity pill). */
+.v10-notif-pane {
   position: absolute;
   top: 100%;
   right: 0;
   margin-top: 8px;
-  width: 320px;
+  width: 380px;
+  max-height: min(70vh, 560px);
+  display: flex;
+  flex-direction: column;
   background: var(--bg-elevated);
   border: 1px solid var(--border-default);
   border-radius: 8px;
@@ -370,37 +379,184 @@ button:focus:not(:focus-visible) { outline: none; }
   z-index: 200;
   overflow: hidden;
 }
-.v10-header-notif-title {
+.v10-notif-pane:focus { outline: none; }
+.v10-notif-pane-titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   padding: 10px 14px;
+  border-bottom: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+.v10-notif-pane-title {
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.5px;
   text-transform: uppercase;
   color: var(--text-tertiary);
-  border-bottom: 1px solid var(--border-subtle);
 }
-.v10-header-notif-empty {
-  padding: 24px 14px;
-  text-align: center;
-  color: var(--text-tertiary);
-  font-size: 12px;
-}
-.v10-header-notif-item {
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--border-subtle);
+.v10-notif-pane-markread {
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  background: none;
+  border: none;
   cursor: pointer;
-  transition: background 0.1s;
+  padding: 0;
 }
-.v10-header-notif-item:hover { background: var(--bg-hover); }
-.v10-header-notif-item:last-child { border-bottom: none; }
-.v10-header-notif-item-text { font-size: 12px; color: var(--text-primary); }
-.v10-header-notif-item-time { font-size: 11px; color: var(--text-tertiary); margin-top: 2px; font-family: var(--font-mono); }
-.v10-notif-join { border-left: 3px solid #f59e0b; padding-left: 9px; }
-.v10-notif-approved { border-left: 3px solid #10b981; padding-left: 9px; }
-.v10-notif-rejected { border-left: 3px solid #ef4444; padding-left: 9px; }
-.v10-notif-join-icon { margin-right: 4px; }
-.v10-notif-clickable { cursor: pointer; }
-.v10-notif-clickable:hover { background: var(--bg-hover); }
+.v10-notif-pane-markread:hover { color: var(--text-primary); }
+/* Body scrolls under the sticky titlebar; the pinned action section sits
+   first in the same scroll container (never a nested scrollbar). */
+.v10-notif-pane-body { overflow-y: auto; padding: 6px 0; }
+
+/* States */
+.v10-notif-pane-state,
+.v10-notif-pane-error {
+  padding: 18px 14px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+.v10-notif-pane-error { color: var(--text-secondary); }
+.v10-notif-pane-error-inline {
+  padding: 8px 14px;
+  text-align: left;
+  font-size: 11px;
+}
+.v10-notif-pane-empty { padding: 24px 16px; text-align: center; }
+.v10-notif-pane-empty-lead { font-size: 13px; color: var(--text-secondary); margin-bottom: 4px; }
+.v10-notif-pane-empty-sub { font-size: 11px; color: var(--text-tertiary); line-height: 1.4; }
+.v10-notif-retry {
+  font-family: var(--font-sans);
+  font-size: inherit;
+  font-weight: 600;
+  color: var(--text-secondary);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  text-decoration: underline;
+}
+.v10-notif-retry:hover { color: var(--text-primary); }
+
+/* Sections */
+.v10-notif-section { padding: 4px 0; }
+.v10-notif-section + .v10-notif-section { border-top: 1px solid var(--border-subtle); }
+.v10-notif-section-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px 4px;
+}
+.v10-notif-section-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+.v10-notif-section-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  background: rgba(245, 158, 11, 0.16);
+  color: var(--text-warning);
+  border: 1px solid rgba(245, 158, 11, 0.4);
+}
+.v10-notif-section-rows { display: flex; flex-direction: column; }
+.v10-notif-section-empty { padding: 6px 14px 10px; font-size: 11px; color: var(--text-tertiary); font-style: italic; }
+
+/* Rows (shared) */
+.v10-notif-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  padding: 9px 14px;
+  font-family: var(--font-sans);
+  background: none;
+  border: none;
+  border-radius: 0;
+  color: var(--text-primary);
+}
+button.v10-notif-row { cursor: pointer; transition: background 0.1s; }
+button.v10-notif-row:hover { background: var(--bg-hover); }
+.v10-notif-row[aria-disabled="true"] { opacity: 0.78; }
+.v10-notif-row-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.v10-notif-row-title { font-size: 12px; font-weight: 600; color: var(--text-primary); }
+.v10-notif-row-detail { font-size: 12px; color: var(--text-secondary); line-height: 1.35; }
+.v10-notif-row-sub { display: flex; align-items: center; gap: 6px; margin-top: 1px; }
+.v10-notif-actor { font-weight: 600; color: var(--text-primary); }
+.v10-notif-cg-name { font-weight: 600; color: var(--text-primary); }
+.v10-notif-cg-link {
+  font: inherit;
+  font-weight: 600;
+  color: var(--text-primary);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.v10-notif-cg-link:hover { color: var(--text-secondary); }
+.v10-notif-addr { font-size: 10px; font-family: var(--font-mono); color: var(--text-tertiary); }
+.v10-notif-dot { color: var(--text-tertiary); }
+.v10-notif-time { font-size: 10px; font-family: var(--font-mono); color: var(--text-tertiary); white-space: nowrap; flex-shrink: 0; }
+/* Unread accent rail — colour-not-alone is covered by the row's text + glyph;
+   this is a supplementary scan cue. */
+.v10-notif-unread { box-shadow: inset 2px 0 0 var(--accent-red); }
+
+/* Glyph cell */
+.v10-notif-glyph {
+  flex-shrink: 0;
+  width: 18px;
+  text-align: center;
+  font-size: 13px;
+  line-height: 1.4;
+}
+.v10-notif-glyph-join { color: var(--text-warning); }
+.v10-notif-glyph-created { color: var(--text-tertiary); }
+.v10-notif-glyph-promoted { color: var(--text-warning); }
+.v10-notif-glyph-published { color: var(--text-success); }
+.v10-notif-glyph-approved { color: var(--text-success); }
+.v10-notif-glyph-rejected { color: var(--text-danger); }
+
+/* Join request actions */
+.v10-notif-row-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.v10-notif-btn {
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.v10-notif-btn:disabled { opacity: 0.5; cursor: default; }
+.v10-notif-btn-approve { background: rgba(34, 197, 94, 0.12); color: var(--text-success); border: 1px solid rgba(34, 197, 94, 0.32); }
+.v10-notif-btn-approve:hover:not(:disabled) { background: rgba(34, 197, 94, 0.2); }
+.v10-notif-btn-ghost { background: none; color: var(--text-secondary); border: 1px solid var(--border-default); }
+.v10-notif-btn-ghost:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-primary); }
+.v10-notif-btn-deny { background: rgba(239, 68, 68, 0.12); color: var(--text-danger); border: 1px solid rgba(239, 68, 68, 0.32); }
+.v10-notif-btn-deny:hover:not(:disabled) { background: rgba(239, 68, 68, 0.2); }
+.v10-notif-deny-confirm { display: inline-flex; align-items: center; gap: 6px; }
+.v10-notif-deny-confirm-label { font-size: 11px; color: var(--text-danger); font-weight: 600; }
+
+/* Terminal confirmation line (post approve/deny) + inline errors */
+.v10-notif-row-terminal { align-items: center; color: var(--text-tertiary); font-size: 12px; }
+.v10-notif-row-terminal .v10-notif-glyph { color: var(--text-success); }
+.v10-notif-terminal-text { color: var(--text-secondary); }
+.v10-notif-row-error { font-size: 11px; color: var(--text-danger); margin-top: 3px; }
 
 /* ── Body ── */
 .v10-app-body {
@@ -2429,6 +2585,21 @@ button:focus:not(:focus-visible) { outline: none; }
   .v10-md-copy { opacity: 1; transition: none; }
 }
 .v10-md-copy-announce {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Visually-hidden utility for screen-reader-only text (notifications pane
+   in-flight announcements, glyph equivalents). Same proven pattern as
+   `.v10-md-copy-announce` above. */
+.v10-sr-only {
   position: absolute;
   width: 1px;
   height: 1px;

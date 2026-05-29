@@ -21,7 +21,7 @@ export const mockApi = {
   // empty list; per-CG mocks can override via MOCK_SUBGRAPHS.
   fetchSubGraphs: (id: string) =>
     delay((mock as any).MOCK_SUBGRAPHS?.[id] ?? { contextGraphId: id, subGraphs: [] }),
-  fetchNotifications: () => delay(mock.MOCK_NOTIFICATIONS),
+  fetchNotificationsFeed: () => delay(mock.MOCK_NOTIFICATIONS_FEED),
   fetchNodeLog: () => delay(mock.MOCK_NODE_LOG),
   fetchMemorySessions: () => delay(mock.MOCK_SESSIONS),
 };

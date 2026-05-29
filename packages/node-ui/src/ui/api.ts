@@ -1962,29 +1962,97 @@ export const shutdownNode = () =>
 export const subscribeToContextGraph = (contextGraphId: string) =>
   post<{ subscribed: string; catchup?: { status: string; jobId: string } }>('/api/subscribe', { contextGraphId });
 
-// --- Notifications ---
+// --- Notifications (scoped pane wire contract — implementation-plan §3) ---
+//
+// The daemon now returns a caller-scoped, type-allowlisted, activity-collapsed,
+// join_request-reconciled feed. Every member of the union is one notification
+// kind; the pane never re-filters for correctness (scoping is server-side).
+// See `data-contract.md` §4 and `implementation-plan.md` §3 for the frozen
+// shape. Field names here are part of that frozen contract — daemon-engineer
+// owns the server side and flags ui-lead before any rename.
 
-export interface Notification {
-  id: number;
+/** Common envelope present on every pane notification. `contextGraphName`
+ *  is the resolved display name; the client falls back to `shortId(cgId)`
+ *  when it's absent (never blank). */
+interface NotifWireBase {
+  /** Numeric row id for persisted rows; a stable string `digestKey`
+   *  (`activity:<cgId>:<kind>:<windowBucket>`) for collapsed activity
+   *  digests. The read endpoint accepts both. */
+  id: number | string;
   ts: number;
-  type: string;
-  title: string;
-  message: string;
-  source: string | null;
-  peer: string | null;
-  read: number;
-  meta: string | null;
+  /** 0 = unread, 1 = read. */
+  read: 0 | 1;
+  contextGraphId: string;
 }
 
-export const fetchNotifications = (opts?: { since?: number; limit?: number }) => {
-  const params = new URLSearchParams();
-  if (opts?.since) params.set('since', String(opts.since));
-  if (opts?.limit) params.set('limit', String(opts.limit));
-  const qs = params.toString();
-  return get<{ notifications: Notification[]; unreadCount: number }>(`/api/notifications${qs ? `?${qs}` : ''}`);
-};
+/** Incoming join request on a CG the caller curates — actionable
+ *  (inline Approve/Deny). Emitted only on the curator's node, so the
+ *  reader's role for this kind is always curator. */
+export interface JoinRequestNotif extends NotifWireBase {
+  type: 'join_request';
+  meta: { contextGraphName?: string; agentAddress: string; agentName?: string };
+}
 
-export const markNotificationsRead = (ids?: number[]) =>
+/** Confirmation that the caller's own outbound join request was accepted.
+ *  Counts toward the unread badge (positive, opens the new CG). */
+export interface JoinApprovedNotif extends NotifWireBase {
+  type: 'join_approved';
+  meta: { contextGraphName?: string; agentAddress: string };
+}
+
+/** Confirmation that the caller's own outbound join request was declined.
+ *  Demoted: informational, never counts toward the unread badge (the daemon's
+ *  `badgeCount` already excludes it). */
+export interface JoinRejectedNotif extends NotifWireBase {
+  type: 'join_rejected';
+  meta: { contextGraphName?: string; agentAddress: string };
+}
+
+/** Collapsed activity digest — per (contextGraphId × kind × window). `id` is
+ *  the stable `digestKey`. `count` is summed over the window with the caller's
+ *  OWN events already excluded server-side (an all-self digest is never sent),
+ *  so the client never needs the caller DID for activity. `actorAgentDid` /
+ *  `actorAgentName` are populated ONLY when `soleAuthor === true` (a single
+ *  non-self author dominates); otherwise omitted (render count-only). */
+export interface AssertionActivityNotif extends NotifWireBase {
+  type: 'assertion_activity';
+  id: string;
+  meta: {
+    contextGraphName?: string;
+    kind: 'created' | 'promoted' | 'published';
+    count: number;
+    actorAgentDid?: string;
+    actorAgentName?: string;
+    soleAuthor?: boolean;
+  };
+}
+
+export type NotifWire =
+  | JoinRequestNotif
+  | JoinApprovedNotif
+  | JoinRejectedNotif
+  | AssertionActivityNotif;
+
+export interface NotificationsFeedResponse {
+  /** Already scoped, type-allowlisted, activity-collapsed, join_request
+   *  reconciled against the live pending set. Render as-is. */
+  notifications: NotifWire[];
+  /** Unread badge count over the scoped set: unread join_request +
+   *  join_approved + assertion_activity digests. EXCLUDES join_rejected. */
+  badgeCount: number;
+  /** True when caller identity is unresolved → render "Verifying access…",
+   *  never "all caught up". `notifications` is empty in that case. */
+  scopeUnknown?: boolean;
+}
+
+/** Fetch the scoped notifications feed (`GET /api/notifications`). */
+export const fetchNotificationsFeed = () =>
+  get<NotificationsFeedResponse>('/api/notifications');
+
+/** Mark notifications read by id. Accepts numeric row ids AND string
+ *  `digestKey`s (the daemon resolves a digestKey to its underlying atomic
+ *  row ids). Omit `ids` to mark every scoped row read. */
+export const markNotificationsRead = (ids?: Array<number | string>) =>
   post<{ marked: number }>('/api/notifications/read', ids ? { ids } : {});
 
 // --- Sub-graphs (lightweight list + counts for SubGraphBar) ---

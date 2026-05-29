@@ -56,7 +56,8 @@ export const api = {
   fetchCurrentAgent: () => withFallback(realApi.fetchCurrentAgent, mockApi.fetchCurrentAgent),
   listParticipants: (id: string) => withFallback(() => realApi.listParticipants(id), () => mockApi.listParticipants(id)),
   fetchSubGraphs: (id: string) => withFallback(() => realApi.fetchSubGraphs(id), () => mockApi.fetchSubGraphs(id)),
-  fetchNotifications: (p?: any) => withFallback(() => realApi.fetchNotifications(p), mockApi.fetchNotifications),
+  // Scoped notifications pane feed (useNotificationsFeed consumes this).
+  fetchNotificationsFeed: () => withFallback(realApi.fetchNotificationsFeed, mockApi.fetchNotificationsFeed),
   fetchNodeLog: (p?: any) => withFallback(() => realApi.fetchNodeLog(p), mockApi.fetchNodeLog),
   fetchMemorySessions: (n?: number) => withFallback(() => realApi.fetchMemorySessions(n), mockApi.fetchMemorySessions),
   markNotificationsRead: realApi.markNotificationsRead,

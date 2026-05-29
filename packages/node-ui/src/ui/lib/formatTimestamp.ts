@@ -42,27 +42,3 @@ export function formatNotificationTimestamp(
     minute: '2-digit',
   });
 }
-
-/**
- * Comparator for sorting notification-shaped objects newest-first.
- *
- * `Notification.ts` is a unix-epoch number (see `api.ts`). The naive
- * comparator
- *
- *   (a, b) => Date.parse(String(a.ts)) - Date.parse(String(b.ts))
- *
- * silently breaks because `Date.parse('1716732000000')` is `NaN`,
- * which makes the comparator return `NaN` for every pair and leaves
- * the dropdown unsorted. We therefore compare the numeric values
- * directly, falling back to 0 for missing/non-finite/non-numeric
- * timestamps so a stray `null` doesn't push the entire list to
- * the top.
- */
-export function compareNotificationByTsDesc(
-  a: { ts?: number | null },
-  b: { ts?: number | null },
-): number {
-  const at = typeof a.ts === 'number' && Number.isFinite(a.ts) ? a.ts : 0;
-  const bt = typeof b.ts === 'number' && Number.isFinite(b.ts) ? b.ts : 0;
-  return bt - at;
-}

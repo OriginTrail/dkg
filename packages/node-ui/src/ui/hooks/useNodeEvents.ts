@@ -18,6 +18,11 @@ export type NodeEventType =
   | 'join_rejected'
   | 'project_synced'
   | 'memory_graph_changed'
+  // Single generic notification refresh signal for the redesigned pane
+  // (data-contract §4.5). Emitted once per scoped notification write; the
+  // three join_* events above stay for other consumers
+  // (PendingJoinRequestsSection, useMyContextGraphs). Payload `{ contextGraphId, type }`.
+  | 'notification'
   | 'connected';
 
 export interface NodeEvent {
@@ -78,6 +83,7 @@ function connect() {
   source.addEventListener('join_rejected', handleEvent('join_rejected'));
   source.addEventListener('project_synced', handleEvent('project_synced'));
   source.addEventListener('memory_graph_changed', handleEvent('memory_graph_changed'));
+  source.addEventListener('notification', handleEvent('notification'));
   source.addEventListener('connected', handleEvent('connected'));
 
   source.onerror = () => {
