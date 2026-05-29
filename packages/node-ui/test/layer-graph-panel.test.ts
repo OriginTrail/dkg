@@ -3,6 +3,7 @@
 import React, { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
+import { SWM_UNATTRIBUTED_NODE_COLOR } from '../src/ui/views/project/helpers.js';
 
 const graphState = vi.hoisted(() => ({
   mounts: [] as string[],
@@ -124,8 +125,11 @@ describe('LayerGraphPanel graph lifecycle', () => {
     });
 
     const graph = container.querySelector('[data-testid="rdf-graph"]') as HTMLElement;
+    expect(graph.getAttribute('data-default-color')).toBe(SWM_UNATTRIBUTED_NODE_COLOR);
     const nodeColors = JSON.parse(graph.getAttribute('data-node-colors') ?? '{}');
     expect(nodeColors['urn:test:root']).toBeTruthy();
+    expect(nodeColors['urn:test:root']).not.toBe(SWM_UNATTRIBUTED_NODE_COLOR);
+    expect(nodeColors['urn:test:target']).toBeUndefined();
     expect(container.textContent).not.toContain('Loading Shared Working Memory attribution...');
   });
 
@@ -159,7 +163,7 @@ describe('LayerGraphPanel graph lifecycle', () => {
     });
 
     const graph = container.querySelector('[data-testid="rdf-graph"]') as HTMLElement;
-    expect(graph.getAttribute('data-default-color')).toBe('#f59e0b');
+    expect(graph.getAttribute('data-default-color')).toBe(SWM_UNATTRIBUTED_NODE_COLOR);
   });
 
   it('releases the SWM graph if attribution lookup stalls', async () => {
@@ -195,7 +199,7 @@ describe('LayerGraphPanel graph lifecycle', () => {
 
     const graph = container.querySelector('[data-testid="rdf-graph"]') as HTMLElement;
     expect(requestSignal?.aborted).toBe(true);
-    expect(graph.getAttribute('data-default-color')).toBe('#f59e0b');
+    expect(graph.getAttribute('data-default-color')).toBe(SWM_UNATTRIBUTED_NODE_COLOR);
     expect(JSON.parse(graph.getAttribute('data-node-colors') ?? '{}')).toEqual({});
   });
 
@@ -308,7 +312,7 @@ describe('LayerGraphPanel graph lifecycle', () => {
       expect(graphState.mounts).toHaveLength(2);
     });
 
-    expect(graphState.mounts).toEqual(['#64748b', '#f59e0b']);
+    expect(graphState.mounts).toEqual(['#64748b', SWM_UNATTRIBUTED_NODE_COLOR]);
     expect(graphState.unmounts).toEqual(['#64748b']);
   });
 

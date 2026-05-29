@@ -201,6 +201,11 @@ export const LAYER_CONFIG: Record<'wm' | 'swm' | 'vm', {
   },
 };
 
+// SWM graph fallback for entities that are visible because a promoted root
+// references them, but are not themselves attributed roots. Kept graph-local
+// so SWM navigation, badges, and conflict states retain their amber identity.
+export const SWM_UNATTRIBUTED_NODE_COLOR = '#475569';
+
 export function layerNoun(
   layer: 'wm' | 'swm' | 'vm' | TrustLevel,
   count: number = 2,
@@ -274,6 +279,7 @@ export function buildLayerGraphOptions(
   nodeColors?: Record<string, string>,
 ) {
   const { color } = LAYER_CONFIG[layer];
+  const defaultNodeColor = layer === 'swm' ? SWM_UNATTRIBUTED_NODE_COLOR : color;
   // VM ("Verifiable Memory") is the DKG hero view — we deliberately juice it:
   // thicker & brighter edges, bigger hub/leaf spread, higher gradient so every
   // node reads as a "trust gem". WM/SWM stay quieter so VM clearly wins the
@@ -286,12 +292,12 @@ export function buildLayerGraphOptions(
     style: {
       classColors: CODE_CLASS_COLORS,
       predicateColors: CODE_PREDICATE_COLORS,
-      namespaceColors: neutraliseBuiltinNamespaces(color),
+      namespaceColors: neutraliseBuiltinNamespaces(defaultNodeColor),
       // Per-URI node tints (SWM attribution uses this to paint root KAs by
       // their proposing agent). Omitted for layers that don't use it, so
       // the style engine keeps falling back to classColors.
       ...(nodeColors && Object.keys(nodeColors).length > 0 ? { nodeColors } : {}),
-      defaultNodeColor: color,
+      defaultNodeColor,
       defaultEdgeColor: isVM ? '#4ade80' : '#64748b', // VM: vivid green edges
       edgeWidth: isVM ? 1.8 : 1.2,
       // Keep VM very slightly bolder than WM/SWM for hierarchy, but well
