@@ -4127,16 +4127,27 @@ export function SubGraphOverviewGrid({
     // Untagged-recovery only — Root bucket has no tagged triples
     // by definition (see SubGraphDetailView's rule 1 → "never
     // fires for Root"). A triple admitted here must have NO
-    // subGraph tag AND an endpoint in scope; the same
-    // `MAX_PER_CARD` sampling the named branch applies isn't
-    // needed at the mini-card scale because the recovery slice
-    // is bounded by the root entity set.
+    // subGraph tag AND an endpoint in scope.
+    //
+    // PR #818 Codex sweep 1 — Bug M family. `rootEntityUris` is
+    // built from `canonicalEntityUri(e.uri)` above, but triples
+    // from `memory.allTriples` carry the daemon-emitted raw forms
+    // (often wrapped `<urn:...>`). The membership check needs the
+    // canonical form on the triple endpoints to match the set, and
+    // the SPO-dedup key needs the canonical form too — otherwise
+    // wrapped/bare variants of the same `(s,p,o)` enter as two
+    // distinct rows. Same shape as the upstream Bug M fix at the
+    // `entityTrustByUriBySubGraph` producer; canonicalising on the
+    // consumer side here keeps the rootEntityUris set single-form
+    // and fixes the dedup key in the same pass.
     const rootTriples: Triple[] = [];
     const seenSpo = new Set<string>();
     for (const t of memory.allTriples) {
       if (t.subGraph) continue;
-      if (!rootEntityUris.has(t.subject) && !rootEntityUris.has(t.object)) continue;
-      const key = `${t.subject}|${t.predicate}|${t.object}`;
+      const subjCanon = canonicalEntityUri(t.subject);
+      const objCanon = canonicalEntityUri(t.object);
+      if (!rootEntityUris.has(subjCanon) && !rootEntityUris.has(objCanon)) continue;
+      const key = `${subjCanon}|${t.predicate}|${objCanon}`;
       if (seenSpo.has(key)) continue;
       seenSpo.add(key);
       rootTriples.push({ subject: t.subject, predicate: t.predicate, object: t.object });

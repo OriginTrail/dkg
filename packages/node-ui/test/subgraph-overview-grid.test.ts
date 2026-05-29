@@ -645,6 +645,61 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
     expect(stats).toContain('2 entities');
     expect(stats).toContain('1 triples');
   });
+
+  it('Root card canonicalizes triple endpoints + SPO dedup key (Codex sweep 1, Bug M family)', async () => {
+    // PR #818 sweep 1 — `rootEntityUris` is built from
+    // `canonicalEntityUri(e.uri)` but `t.subject` / `t.object` from
+    // `memory.allTriples` carry the daemon-emitted raw forms (often
+    // wrapped `<urn:...>`). Without canonicalisation on the
+    // consumer side:
+    //   1. The membership check fails when a wrapped endpoint's
+    //      canonical form IS in the set — the in-scope triple
+    //      gets silently dropped from the card slice.
+    //   2. The SPO-dedup key counts wrapped + bare variants of the
+    //      same (s,p,o) as distinct rows — inflates the count.
+    // The fix canonicalises subject + object once per iteration,
+    // uses canonical forms for BOTH the membership check AND the
+    // seenSpo key. Mirrors the upstream Bug M dual-key pattern.
+    fetchSubGraphsMock.mockResolvedValueOnce({
+      subGraphs: [{ name: 'alpha', entityCount: 1, tripleCount: 0, description: '' }],
+    });
+    const entityList = [
+      { uri: 'urn:e:alpha', label: 'a', types: [], trustLevel: 'working', layers: new Set(['working']), subGraphs: new Set(['alpha']), properties: new Map(), connections: [] },
+      // Root entity in canonical (unwrapped) form. `rootEntityUris`
+      // therefore contains 'urn:e:root1' only.
+      { uri: 'urn:e:root1', label: 'r1', types: [], trustLevel: 'working', layers: new Set(['working']), subGraphs: new Set<string>(), properties: new Map(), connections: [] },
+    ];
+    const triples = [
+      // Subject wrapped — pre-sweep the membership check (against
+      // the unwrapped set) failed and this triple was dropped.
+      { subject: '<urn:e:root1>', predicate: 'p', object: 'urn:e:o-bare' },
+      // Same SPO emitted twice — once wrapped, once bare. Pre-
+      // sweep these had distinct seenSpo keys and counted as 2.
+      // Post-sweep both map to the same canonical key and dedup
+      // to 1.
+      { subject: 'urn:e:root1', predicate: 'p', object: '<urn:e:o-other>' },
+      { subject: 'urn:e:root1', predicate: 'p', object: 'urn:e:o-other' },
+    ];
+    await renderWith({
+      ...memory,
+      entities: new Map(entityList.map(e => [e.uri, e])),
+      entityList,
+      allTriples: triples,
+      counts: { wm: 2, swm: 0, vm: 0, total: 2 },
+    });
+    await flush();
+
+    const cards = container.querySelectorAll('.v10-sgov-card');
+    const rootCardEl = cards[cards.length - 1];
+    const stats = rootCardEl.querySelector('.v10-sgov-card-stats')?.textContent ?? '';
+    // 1 root entity, 2 distinct triples after canonical-SPO dedup
+    // (the wrapped/bare object pair collapses to 1; the wrapped-
+    // subject row is admitted via the canonicalised membership
+    // check). Pre-sweep this fixture would have rendered "1 triple"
+    // (wrapped subject dropped) OR "3 triples" (no dedup).
+    expect(stats).toContain('1 entities');
+    expect(stats).toContain('2 triples');
+  });
 });
 
 describe('SubGraphMiniCard — per-trust nodeColors (S3 polish #3, ui-locked priority chain)', () => {
