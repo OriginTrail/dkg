@@ -46,7 +46,7 @@
     "@types/chai": "^4.3.20",
     "@types/node": "^22.10.2",
     "assertion-tools": "^8.0.3",
-    "chai": "^4.5.0",
+    "chai": "^6.2.2",
     "ethers": "^6.13.4",
     "hardhat-abi-exporter": "^2.10.1",
     "hardhat-contract-sizer": "^2.6.1",
