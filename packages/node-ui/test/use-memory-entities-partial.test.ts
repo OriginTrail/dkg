@@ -65,9 +65,12 @@ describe('useMemoryEntities — partial layer failure', () => {
       // Robust layer discriminators: every query references both
       // "/assertion/" and "/_shared_memory" (inside FILTER negations),
       // so match on tokens unique to each — `_verified_memory_meta`
-      // only appears in the VM query, `STRENDS` only in the SWM query.
+      // only appears in the VM query, the `/_shared_memory` tail
+      // check only in the SWM query (PR #818 sweep 3: WM also has
+      // `STRENDS(..., "/_meta")` now so the bare `STRENDS` token
+      // no longer discriminates).
       const isVm = sparql.includes('_verified_memory_meta');
-      const isSwm = !isVm && sparql.includes('STRENDS');
+      const isSwm = !isVm && sparql.includes('STRENDS(STR(?g), "/_shared_memory")');
       const isWm = !isVm && !isSwm;
       if (isSwm) return { ok: false, status: 500, json: async () => ({}) } as Response;
       if (isWm) {

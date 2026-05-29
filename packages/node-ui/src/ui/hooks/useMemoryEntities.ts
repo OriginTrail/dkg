@@ -222,11 +222,28 @@ function wmSparql(cgId: string) {
   const cgUri = `did:dkg:context-graph:${cgId}`;
   // WM = every per-agent assertion under the project, regardless of
   // sub-graph. We match any graph whose path contains `/assertion/`.
+  //
+  // PR #818 Codex sweep 3 (ux-lead Finding 1 verdict) — exclude the
+  // `meta` namespace. Profile artifacts (prof:Profile,
+  // prof:SubGraphBinding, prof:FilterChip, prof:QueryCatalog,
+  // prof:SavedQuery) are published as assertions under
+  // `<cg>/meta/assertion/<addr>/<name>`, so the pre-fix
+  // `CONTAINS(/assertion/)` filter scooped them into `memory.entityList`
+  // alongside real user knowledge. Those entities are UI configuration,
+  // not user knowledge — they have their own surfaces via
+  // `useProjectProfile` (which queries the meta graphs directly via
+  // its own SPARQL, not via this hook). Mirrors the meta-exclusion
+  // policy that `vmSparql` already enforces (`:262-269`); GH #806's
+  // `subGraphOf` `meta` filter handles the chip-row side and this
+  // upstream filter handles the entity-list side — same family.
   return `SELECT ?s ?p ?o ?g WHERE {
     GRAPH ?g { ?s ?p ?o }
     FILTER(
       STRSTARTS(STR(?g), "${cgUri}/") &&
-      CONTAINS(STR(?g), "/assertion/")
+      CONTAINS(STR(?g), "/assertion/") &&
+      STR(?g) != "${cgUri}/meta" &&
+      !CONTAINS(STR(?g), "/meta/") &&
+      !STRENDS(STR(?g), "/_meta")
     )
   } LIMIT ${WM_LIMIT}`;
 }
@@ -236,11 +253,21 @@ function swmSparql(cgId: string) {
   // Any graph whose tail ends in `_shared_memory` (excluding the sibling
   // `_shared_memory_meta` bookkeeping graphs which carry lifecycle
   // provenance rather than user data).
+  //
+  // PR #818 Codex sweep 3 (ux-lead Finding 1 verdict) — exclude
+  // `<cg>/meta/_shared_memory` so SWM-promoted profile artifacts don't
+  // surface in the user-facing entityList. Mirrors `vmSparql`'s
+  // existing meta-exclusion policy (`:262-269`). Without this,
+  // `STRENDS(/_shared_memory)` admits `<cg>/meta/_shared_memory` —
+  // a profile-namespace graph — and the entity becomes a "root SWM
+  // entity" in every consumer downstream.
   return `SELECT ?s ?p ?o ?g WHERE {
     GRAPH ?g { ?s ?p ?o }
     FILTER(
       STRSTARTS(STR(?g), "${cgUri}") &&
-      STRENDS(STR(?g), "/_shared_memory")
+      STRENDS(STR(?g), "/_shared_memory") &&
+      STR(?g) != "${cgUri}/meta/_shared_memory" &&
+      !CONTAINS(STR(?g), "/meta/")
     )
   } LIMIT ${SWM_LIMIT}`;
 }

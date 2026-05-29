@@ -44,7 +44,10 @@ function tripleBinding(subject: string, graph: string) {
 
 function bindingsForLayer(sparql: string, contextGraphId: string, revision: number) {
   const isVm = sparql.includes('_verified_memory_meta');
-  const isSwm = !isVm && sparql.includes('STRENDS');
+  // PR #818 sweep 3 — WM SPARQL also contains STRENDS (for the
+  // `/_meta` exclusion); discriminate by the SWM-exclusive
+  // `/_shared_memory` tail check.
+  const isSwm = !isVm && sparql.includes('STRENDS(STR(?g), "/_shared_memory")');
   if (isVm || isSwm) return [];
   return Array.from({ length: revision }, (_, i) =>
     tripleBinding(

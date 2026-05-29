@@ -62,7 +62,10 @@ describe('useMemoryEntities readable labels', () => {
       const { sparql = '', contextGraphId = 'cg' } =
         JSON.parse(String(init?.body ?? '{}')) as { sparql?: string; contextGraphId?: string };
       const isVm = sparql.includes('_verified_memory_meta');
-      const isSwm = !isVm && sparql.includes('STRENDS');
+      // PR #818 sweep 3 — WM SPARQL also contains STRENDS (for the
+      // `/_meta` exclusion); discriminate by the SWM-exclusive
+      // `/_shared_memory` tail check.
+      const isSwm = !isVm && sparql.includes('STRENDS(STR(?g), "/_shared_memory")');
       const graph = `did:dkg:context-graph:${contextGraphId}/notes/assertion/agent/a-1`;
       const extraction = 'urn:dkg:extraction:123e4567-e89b-12d3-a456-426614174000';
       const bindings = isVm || isSwm
