@@ -621,7 +621,7 @@ export const TELEMETRY_ENDPOINTS: Record<string, { syslog: { host: string; port:
     otlp: 'https://telemetry-testnet.origintrail.io/v1/metrics',
   },
   mainnet: {
-    syslog: { host: 'loggly.origin-trail.network', port: 0 }, // TODO: assign mainnet syslog port
+    syslog: { host: 'loggly.origin-trail.network', port: 12201 },
     otlp: 'https://telemetry.origintrail.io/v1/metrics',
   },
 };

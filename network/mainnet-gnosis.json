@@ -1,13 +1,25 @@
 {
-  "_status": "pre-deployment: hubAddress must be set after V10 contracts are deployed on Gnosis",
-  "chain": {
-    "name": "gnosis",
-    "type": "evm",
-    "chainId": "gnosis:100",
-    "rpcUrl": "https://rpc.gnosischain.com"
-  },
+  "networkName": "DKG V10 Mainnet",
+  "networkId": "PLACEHOLDER",
+  "genesisVersion": 1,
+  "relays": [
+    "/ip4/178.105.87.39/tcp/9090/p2p/PEER_ID_SOLARIS",
+    "/ip4/178.105.105.102/tcp/9090/p2p/PEER_ID_LUNARIS",
+    "/ip4/178.156.214.4/tcp/9090/p2p/PEER_ID_ORIONIS",
+    "/ip4/178.105.111.185/tcp/9090/p2p/PEER_ID_KEPLER"
+  ],
+  "defaultContextGraphs": [],
+  "defaultNodeRole": "edge",
   "autoUpdate": {
     "enabled": true,
-    "branch": "main"
+    "repo": "OriginTrail/dkg",
+    "branch": "main",
+    "checkIntervalMinutes": 5
+  },
+  "chain": {
+    "type": "evm",
+    "rpcUrl": "https://rpc.gnosischain.com",
+    "hubAddress": "PLACEHOLDER",
+    "chainId": "gnosis:100"
   }
 }
