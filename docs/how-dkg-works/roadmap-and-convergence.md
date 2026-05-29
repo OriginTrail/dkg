@@ -55,6 +55,8 @@ Some roadmap concepts are important to explain now because they shape the system
 
 ## Sequence
 
+![DKG V10 bounty program roadmap](../.gitbook/assets/dkg_v10_bounty_program_high_res_white_bg.png)
+
 ```mermaid
 flowchart TB
   R1["Round 1<br/>Working + Shared Memory integrations"] --> R2["Round 2<br/>Verified Memory + context oracles"]

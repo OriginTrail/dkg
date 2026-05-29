@@ -9,6 +9,8 @@ doc_type: concept
 
 A Knowledge Asset is published graph data with provenance and integrity. It packages RDF statements so other nodes can verify who published them, what was published, and whether the content still matches its commitment.
 
+![Knowledge Assets](../assets/legacy-gitbook/knowledge-assets.png)
+
 Use Knowledge Assets when knowledge needs to survive beyond local or team memory:
 
 - facts that must be independently verifiable

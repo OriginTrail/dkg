@@ -9,6 +9,8 @@ doc_type: concept
 
 DKG V10 is easiest to understand as a memory system with increasing scope and trust. Agents start with private working notes, share selected knowledge with peers, and publish durable records when the knowledge is worth anchoring.
 
+![DKG key concepts](../assets/legacy-gitbook/dkg-key-concepts.png)
+
 ```mermaid
 flowchart LR
   WM["Working Memory<br/>private drafts"] --> SWM["Shared Working Memory<br/>peer-visible collaboration"]

@@ -9,6 +9,8 @@ doc_type: concept
 
 DKG V10 separates memory by scope and trust.
 
+![DKG memory layers](../.gitbook/assets/dkg-memory-hr.png)
+
 | Layer | Scope | Cost | Use |
 | --- | --- | --- | --- |
 | Working Memory | Private to an agent/node | Free | Drafts, session notes, local imports. |

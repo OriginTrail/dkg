@@ -9,6 +9,8 @@ doc_type: how-to
 
 MCP is the recommended path for coding agents and MCP-aware assistants. Hermes and OpenClaw use their own setup commands but share the same local DKG daemon model.
 
+![AI agent connects to a DKG Node through MCP](../assets/legacy-gitbook/agent-mcp-dkg-node.png)
+
 ## MCP
 
 ```bash

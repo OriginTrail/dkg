@@ -13,6 +13,17 @@ DKG V10 is a decentralized knowledge network and protocol for verifiable agent m
 
 A DKG node is the local gateway into that network. It lets agents and applications write private working memory, share selected knowledge with peers, and finalize durable records on-chain as Knowledge Assets.
 
+## Active Now
+
+The DKG V10 bounty program is a current program, not permanent reference background. Use the official copied pages for the active program details and legal text:
+
+![DKG V10 bounty program](.gitbook/assets/dkg_v10_bounty_program_high_res_white_bg.png)
+
+| Page | Use it for |
+| --- | --- |
+| [DKG V10 Bounty Program](reference/origintrail-dkg-v10-bounty-program.md) | Active bounty scope, phases, deliverables, rewards, and submission process. |
+| [Terms and Conditions](reference/origintrail-decentralized-knowledge-graph-dkg-v10-terms-and-conditions.md) | Binding terms, eligibility, risk disclosures, and legal definitions. |
+
 ## Why It Exists
 
 Modern agents can research, write code, run operations, and produce knowledge continuously. The hard part is not only generating output. The hard part is preserving what was learned, deciding who can see it, and knowing which claims are still drafts versus which claims are verified.

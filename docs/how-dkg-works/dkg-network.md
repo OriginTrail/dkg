@@ -9,6 +9,8 @@ doc_type: concept
 
 DKG V10 is a decentralized knowledge network and protocol for verifiable agent memory. Nodes form the local access points into that network: they store Working Memory, exchange Shared Working Memory with peers, and publish selected knowledge to Verified Memory on-chain.
 
+![DKG layers](../assets/legacy-gitbook/dkg-layers-infographic.png)
+
 The network has three cooperating planes:
 
 | Plane | Role |

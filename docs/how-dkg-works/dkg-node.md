@@ -9,6 +9,8 @@ doc_type: concept
 
 The DKG Node is the local authority for one operator's participation in the network.
 
+![DKG Node](../assets/legacy-gitbook/dkg-node.png)
+
 It owns:
 
 - daemon lifecycle and HTTP API
