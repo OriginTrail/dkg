@@ -1,11 +1,12 @@
-import { cpSync, existsSync, readFileSync, renameSync, rmSync, writeFileSync, mkdirSync, statSync, rmdirSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, readFileSync, renameSync, rmSync, writeFileSync, mkdirSync, statSync, rmdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { isIP } from 'node:net';
 import {
   fundWalletsBestEffort,
+  parseDotenvValue,
   resolveDkgConfigHome,
   resolveDkgHome,
   startDaemon,
@@ -185,16 +186,27 @@ export function planHermesSetup(options: HermesSetupOptions = {}): HermesSetupPl
     managedFiles,
   };
 
+  const actions: HermesSetupPlan['actions'] = managedFiles.map((path) => ({
+    type: existsSync(path) ? 'update' : 'create',
+    path,
+    reason: 'adapter-managed Hermes profile artifact',
+  }));
+  // `.env` is user/Hermes-owned (kept OUT of managedFiles so disconnect
+  // preserves it); surface the key provisioning as a separate action only.
+  if (shouldProvisionApiServerEnv(bridge)) {
+    actions.push({
+      type: 'update',
+      path: join(profile.hermesHome, '.env'),
+      reason: 'ensure API_SERVER_KEY + API_SERVER_ENABLED for Hermes api_server (hermes-openai transport)',
+    });
+  }
+
   return {
     dryRun: options.dryRun === true,
     profile,
     warnings,
     state,
-    actions: managedFiles.map((path) => ({
-      type: existsSync(path) ? 'update' : 'create',
-      path,
-      reason: 'adapter-managed Hermes profile artifact',
-    })),
+    actions,
   };
 }
 
@@ -286,6 +298,14 @@ export function setupHermesProfile(options: HermesSetupOptions = {}): HermesSetu
     writeOwnedText(skillPath, options.nodeSkillContent);
   }
 
+  // Provision API_SERVER_KEY (+ API_SERVER_ENABLED) into the Hermes profile
+  // `.env` LAST — after every step that can throw (the provider-block rewrite,
+  // skill write) — so an aborted setup never leaves a new key behind as a
+  // side effect. The user's existing `hermes gateway run --replace` restart
+  // picks it up; the daemon forwards the bearer. No-op for the loopback bridge
+  // and remote gateways.
+  const apiServerKeyConfigured = maybeProvisionHermesApiServerEnv(plan.profile, plan.state.bridge);
+
   // Re-write setup-state.json post-rewrite with the freshest
   // `updatedAt`. The `priorMemoryProvider` slot is still first-wins
   // and unchanged from the pre-rewrite write — we only refresh the
@@ -297,6 +317,7 @@ export function setupHermesProfile(options: HermesSetupOptions = {}): HermesSetu
   const state = {
     ...stateBeforeRewrite,
     updatedAt: new Date().toISOString(),
+    ...(apiServerKeyConfigured ? { apiServerKeyConfigured: true } : {}),
   };
   writeOwnedJson(join(plan.profile.stateDir, 'setup-state.json'), state);
   plan.state = state;
@@ -1480,6 +1501,103 @@ function isOwnedJson(path: string): boolean {
     return raw?.managedBy === MANAGED_BY;
   } catch {
     return false;
+  }
+}
+
+const API_SERVER_KEY_ENV = 'API_SERVER_KEY';
+const API_SERVER_ENABLED_ENV = 'API_SERVER_ENABLED';
+
+/**
+ * Hermes' OpenAI-compatible api_server — the transport the Node UI chat
+ * path forwards to — has refused to start without `API_SERVER_KEY` since
+ * Hermes v0.15.0, even on loopback `127.0.0.1`. The adapter provisions the
+ * key into the Hermes profile `.env` (the only place Hermes reads it from;
+ * config.yaml support is not yet available upstream) so the
+ * already-documented `hermes gateway run --replace` restart brings the
+ * api_server online with auth, and the daemon forwards
+ * `Authorization: Bearer <key>`.
+ *
+ * Returns whether the profile `.env` now carries an active key. Only
+ * loopback gateways are provisioned: a remote/WSL `--gateway-url` points at
+ * a Hermes whose `.env` lives on another host, so DKG cannot (and must not)
+ * write it — that case relies on the `DKG_HERMES_API_SERVER_KEY` daemon
+ * fallback instead. The existing key is never overwritten, and disconnect
+ * preserves `.env`.
+ */
+function maybeProvisionHermesApiServerEnv(
+  profile: HermesProfileMetadata,
+  bridge: HermesSetupState['bridge'] | undefined,
+): boolean {
+  if (!shouldProvisionApiServerEnv(bridge)) return false;
+  const envPath = join(profile.hermesHome, '.env');
+  if (!readActiveEnvVar(envPath, API_SERVER_KEY_ENV)) {
+    upsertEnvVar(envPath, API_SERVER_KEY_ENV, generateApiServerKey());
+  }
+  if ((readActiveEnvVar(envPath, API_SERVER_ENABLED_ENV) ?? '').toLowerCase() !== 'true') {
+    upsertEnvVar(envPath, API_SERVER_ENABLED_ENV, 'true');
+  }
+  return true;
+}
+
+function shouldProvisionApiServerEnv(bridge: HermesSetupState['bridge'] | undefined): boolean {
+  return bridge?.protocol === 'hermes-openai'
+    && !!bridge.gatewayUrl
+    && isLoopbackUrl(bridge.gatewayUrl);
+}
+
+function generateApiServerKey(): string {
+  // Any non-empty string is a valid Hermes API_SERVER_KEY; 32 random bytes
+  // gives a 43-char URL-safe secret with no shell-hostile characters.
+  return randomBytes(32).toString('base64url');
+}
+
+/**
+ * Last uncommented `KEY=value` wins (dotenv semantics). Returns undefined
+ * when the key is absent, blank, or only present in commented-out lines.
+ */
+function readActiveEnvVar(filePath: string, key: string): string | undefined {
+  if (!existsSync(filePath)) return undefined;
+  let value: string | undefined;
+  for (const line of readFileSync(filePath, 'utf-8').split(/\r?\n/)) {
+    const parsed = parseEnvLine(line);
+    if (parsed && parsed.key === key) value = parsed.value;
+  }
+  return value && value.length > 0 ? value : undefined;
+}
+
+function parseEnvLine(line: string): { key: string; value: string } | null {
+  const match = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/);
+  if (!match) return null; // comments, blanks, malformed lines
+  // parseDotenvValue (shared with the daemon via dkg-core) matches
+  // python-dotenv so the key we read here is identical to the one Hermes loads.
+  return { key: match[1], value: parseDotenvValue(match[2]) };
+}
+
+/**
+ * Idempotently set `KEY=value` in a `.env`, replacing the last uncommented
+ * occurrence in place (or appending) and preserving every other line. The
+ * file is shared with the user / Hermes, so it is NOT ownership-marked; we
+ * only ever touch the targeted key. Written `0600` because it holds a secret.
+ */
+function upsertEnvVar(filePath: string, key: string, value: string): void {
+  mkdirSync(dirname(filePath), { recursive: true });
+  const lines = existsSync(filePath)
+    ? readFileSync(filePath, 'utf-8').split(/\r?\n/)
+    : [];
+  if (lines.length && lines[lines.length - 1] === '') lines.pop();
+  let lastIdx = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const parsed = parseEnvLine(lines[i]);
+    if (parsed && parsed.key === key) lastIdx = i;
+  }
+  const next = `${key}=${value}`;
+  if (lastIdx >= 0) lines[lastIdx] = next;
+  else lines.push(next);
+  writeFileSync(filePath, `${lines.join('\n')}\n`, { mode: 0o600 });
+  try {
+    chmodSync(filePath, 0o600);
+  } catch {
+    // best-effort: Windows / restricted filesystems ignore POSIX modes
   }
 }
 

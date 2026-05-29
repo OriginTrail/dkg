@@ -1,7 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { readFileSync, statSync } from 'node:fs';
 import { isIP } from 'node:net';
+import { join } from 'node:path';
 
+import { resolveHermesProfile } from '@origintrail-official/dkg-adapter-hermes';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
+import { parseDotenvValue } from '@origintrail-official/dkg-core';
 import type { ChatMemoryManager } from '@origintrail-official/dkg-node-ui';
 import type {
   DkgConfig,
@@ -237,7 +241,19 @@ export function buildHermesChannelHeaders(
   bridgeAuthToken: string | undefined,
   baseHeaders: Record<string, string> = {},
   requestUrl = target.inboundUrl,
+  apiServerKey?: string,
 ): Record<string, string> {
+  // Hermes' OpenAI-compatible api_server requires `Authorization: Bearer
+  // <API_SERVER_KEY>` on `/v1/chat/completions` since v0.15.0. We add it only
+  // when a key is resolved AND the request is not the health probe: `/health`
+  // is unauthenticated upstream, so sending the bearer there is pointless and
+  // would risk leaking it to health-endpoint/proxy logs. Key-less older Hermes
+  // installs keep their current (no-auth) behavior.
+  if (target.protocol === 'hermes-openai') {
+    return apiServerKey && requestUrl !== target.healthUrl
+      ? { ...baseHeaders, Authorization: `Bearer ${apiServerKey}` }
+      : baseHeaders;
+  }
   if (
     target.name !== 'bridge' ||
     !bridgeAuthToken ||
@@ -246,6 +262,95 @@ export function buildHermesChannelHeaders(
     return baseHeaders;
   }
   return { ...baseHeaders, 'x-dkg-bridge-token': bridgeAuthToken };
+}
+
+/**
+ * Resolve the Hermes API server key for the `hermes-openai` UI-chat
+ * transport. `.env` (in the stored profile's `hermesHome`) is the source of
+ * truth — the same file `dkg hermes setup` provisions and the one Hermes
+ * itself reads. Reads are cached by path+mtime so we don't touch disk on
+ * every chat request. `DKG_HERMES_API_SERVER_KEY` overrides for remote/WSL
+ * gateways whose `.env` is not on the daemon's filesystem. Returns undefined
+ * when no key is available (older key-less Hermes → no bearer is sent).
+ */
+export function resolveHermesApiServerKey(config: DkgConfig): string | undefined {
+  const override = optionalTrimmedString(process.env.DKG_HERMES_API_SERVER_KEY);
+  if (override) return override;
+  // Only the LOOPBACK api_server reads a key from a local `.env`. A remote/WSL
+  // `--gateway-url` Hermes keeps its `.env` on another host, so reading the
+  // local profile here would forward a stale, unrelated key and make remote
+  // chat fail — those setups must use DKG_HERMES_API_SERVER_KEY (handled above).
+  if (!hasLoopbackHermesOpenAiTarget(config)) return undefined;
+  const hermesHome = resolveHermesHomeForKey(config);
+  if (!hermesHome) return undefined;
+  return readApiServerKeyFromEnv(join(hermesHome, '.env'));
+}
+
+/**
+ * Locate the Hermes profile home whose `.env` carries the key. Prefer the
+ * `hermesHome` stored on the integration record, but fall back to the resolved
+ * default/named profile (the same resolver `dkg hermes setup` uses) so
+ * integration records that predate that metadata — or where connect was
+ * skipped — can still find the `.env` setup wrote, instead of staying stuck in
+ * missing-key/401 until the user reconnects.
+ */
+function resolveHermesHomeForKey(config: DkgConfig): string | undefined {
+  const metadata = getLocalAgentIntegration(config, 'hermes')?.metadata as
+    | Record<string, unknown>
+    | undefined;
+  const fromMetadata = optionalTrimmedString(metadata?.hermesHome);
+  if (fromMetadata) return fromMetadata;
+  try {
+    const profileName = optionalTrimmedString(metadata?.profileName);
+    return resolveHermesProfile(profileName ? { profileName } : {}).hermesHome;
+  } catch {
+    return undefined;
+  }
+}
+
+/** True when the active hermes-openai target is a loopback api_server. */
+function hasLoopbackHermesOpenAiTarget(config: DkgConfig): boolean {
+  const target = getHermesChannelTargets(config).find((t) => t.protocol === 'hermes-openai');
+  return !!target && isHermesLoopbackUrl(target.inboundUrl);
+}
+
+/**
+ * Actionable remediation for a Hermes api_server auth failure, branched on
+ * transport: a loopback gateway is fixed by `dkg hermes setup` (which writes
+ * the local `.env`); a remote/WSL gateway is fixed by the daemon-side
+ * DKG_HERMES_API_SERVER_KEY override, since setup never touches a remote `.env`.
+ */
+export function hermesApiServerKeyRemediation(config: DkgConfig): string {
+  return hasLoopbackHermesOpenAiTarget(config)
+    ? 'run "dkg hermes setup" to provision API_SERVER_KEY, then restart "hermes gateway run --replace -v"'
+    : 'set DKG_HERMES_API_SERVER_KEY in the daemon environment to the remote Hermes API_SERVER_KEY (setup does not modify a remote .env), then restart the daemon';
+}
+
+const apiServerKeyCache = new Map<string, { mtimeMs: number; key: string | undefined }>();
+
+function readApiServerKeyFromEnv(envPath: string): string | undefined {
+  let mtimeMs: number;
+  try {
+    mtimeMs = statSync(envPath).mtimeMs;
+  } catch {
+    apiServerKeyCache.delete(envPath);
+    return undefined;
+  }
+  const cached = apiServerKeyCache.get(envPath);
+  if (cached && cached.mtimeMs === mtimeMs) return cached.key;
+  let key: string | undefined;
+  try {
+    for (const line of readFileSync(envPath, 'utf-8').split(/\r?\n/)) {
+      const match = line.match(/^\s*(?:export\s+)?API_SERVER_KEY\s*=(.*)$/);
+      if (!match) continue;
+      const value = parseDotenvValue(match[1]);
+      if (value) key = value; // last uncommented assignment wins (dotenv)
+    }
+  } catch {
+    key = undefined;
+  }
+  apiServerKeyCache.set(envPath, { mtimeMs, key });
+  return key;
 }
 
 export function transportPatchFromHermesTarget(
@@ -351,6 +456,17 @@ export async function probeHermesChannelHealth(
       else gateway = result;
       lastError = err.message;
     }
+  }
+
+  // The api_server has refused to start without API_SERVER_KEY since Hermes
+  // v0.15.0, so an unreachable hermes-openai target with no key resolvable is
+  // overwhelmingly a missing-key problem — surface that instead of a bare
+  // "fetch failed" in the Node UI's degraded status.
+  if (
+    targets.some((t) => t.protocol === 'hermes-openai')
+    && !resolveHermesApiServerKey(config)
+  ) {
+    lastError = `${lastError} — Hermes api_server requires API_SERVER_KEY (Hermes v0.15.0+); ${hermesApiServerKeyRemediation(config)}.`;
   }
 
   return { ok: false, bridge, gateway, error: lastError };

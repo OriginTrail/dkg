@@ -224,11 +224,21 @@ client, and payload contracts that call into them.
 | `POST /api/hermes-channel/persist-turn` | Persist a completed Hermes turn through DKG chat memory with duplicate-turn protection. |
 
 The daemon forwards Node UI chat to Hermes' OpenAI-compatible API server at
-`http://127.0.0.1:8642` by default. Set `API_SERVER_ENABLED=true` in the active
-Hermes profile `.env`, then restart `hermes gateway run --replace -v`. Use
-`dkg hermes setup --gateway-url <url>` when the Hermes API server is reachable
-through WSL2 or a remote gateway. `--bridge-url` is reserved for a custom
-loopback bridge that implements `/health`, `/send`, and `/stream`.
+`http://127.0.0.1:8642` by default. Since Hermes v0.15.0 that API server
+refuses to start without `API_SERVER_KEY`, even on loopback. For the local
+loopback transport, `dkg hermes setup` provisions this automatically: it writes
+`API_SERVER_ENABLED=true` and a generated `API_SERVER_KEY` into the active
+Hermes profile `.env` (an existing key is never overwritten), and the daemon
+forwards `Authorization: Bearer <API_SERVER_KEY>` to `/v1/chat/completions`.
+You only need to restart `hermes gateway run --replace -v` so Hermes picks up
+the key — the same restart the provider install already requires.
+
+Use `dkg hermes setup --gateway-url <url>` when the Hermes API server is
+reachable through WSL2 or a remote gateway. In that case Hermes' `.env` lives on
+another host, so DKG does not write it; set `DKG_HERMES_API_SERVER_KEY` in the
+daemon environment to the key configured on the remote Hermes and DKG forwards
+it as the bearer. `--bridge-url` is reserved for a custom loopback bridge that
+implements `/health`, `/send`, and `/stream`.
 
 Attachment references are node-owned assertion refs. The daemon verifies their
 provenance before forwarding them to Hermes.

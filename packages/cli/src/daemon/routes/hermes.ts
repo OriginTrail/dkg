@@ -21,8 +21,10 @@ import {
   hermesPersistTurnKey,
   normalizeHermesChatPayload,
   normalizeHermesPersistTurnPayload,
+  hermesApiServerKeyRemediation,
   pipeHermesStream,
   probeHermesChannelHealth,
+  resolveHermesApiServerKey,
   shouldTryNextHermesTarget,
   verifyHermesAttachmentRefsProvenance,
   verifyHermesAttachmentImportResultsProvenance,
@@ -55,6 +57,33 @@ function withVerifiedAttachmentImportContextEntries(
       ...importContextEntries,
     ],
   };
+}
+
+/** Hermes' OpenAI api_server returns 401/403 when the bearer key is wrong/absent. */
+function isHermesApiKeyRejection(target: { protocol?: string }, status: number): boolean {
+  return target.protocol === 'hermes-openai' && (status === 401 || status === 403);
+}
+
+function hermesApiKeyRejectedDetails(config: RequestContext['config']): string {
+  return `Hermes API server rejected the API_SERVER_KEY — ${hermesApiServerKeyRemediation(config)}.`;
+}
+
+/**
+ * Enrich the generic unreachable/error detail with an actionable hint when a
+ * hermes-openai target exists but no API_SERVER_KEY is resolvable — the most
+ * common cause of the api_server never coming up on Hermes v0.15.0+. The
+ * remediation is branched on loopback vs remote transport.
+ */
+function hermesUnreachableDetails(
+  details: string | undefined,
+  targets: Array<{ protocol?: string }>,
+  apiServerKey: string | undefined,
+  config: RequestContext['config'],
+): string | undefined {
+  const needsKey = !apiServerKey && targets.some((t) => t.protocol === 'hermes-openai');
+  if (!needsKey) return details;
+  const hint = `Hermes api_server is unreachable; since Hermes v0.15.0 it requires API_SERVER_KEY — ${hermesApiServerKeyRemediation(config)}.`;
+  return details ? `${details} — ${hint}` : hint;
 }
 
 export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
@@ -103,6 +132,7 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
     const verifiedPayload = withVerifiedAttachmentImportContextEntries(payload, attachmentImportResults);
 
     const targets = getHermesChannelTargets(config);
+    const apiServerKey = resolveHermesApiServerKey(config);
     let lastFailure: { status?: number; details?: string; offline?: boolean } | null = null;
 
     for (const target of targets) {
@@ -120,12 +150,19 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
           method: 'POST',
           headers: buildHermesChannelHeaders(target, bridgeAuthToken, {
             'Content-Type': 'application/json',
-          }),
+          }, target.inboundUrl, apiServerKey),
           body: JSON.stringify(forwardBody),
           signal: AbortSignal.timeout(HERMES_CHANNEL_RESPONSE_TIMEOUT_MS),
         });
         if (!forwardRes.ok) {
           const details = await forwardRes.text().catch(() => '');
+          if (isHermesApiKeyRejection(target, forwardRes.status)) {
+            return jsonResponse(res, 502, {
+              error: 'Hermes API server rejected the API_SERVER_KEY',
+              code: 'HERMES_API_KEY_REJECTED',
+              details: details || hermesApiKeyRejectedDetails(config),
+            });
+          }
           if (shouldTryNextHermesTarget(forwardRes.status)) {
             lastFailure = {
               status: forwardRes.status,
@@ -173,7 +210,7 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
     return jsonResponse(res, lastFailure?.offline ? 503 : 502, {
       error: lastFailure?.offline ? 'Hermes bridge unreachable' : 'Hermes bridge error',
       code: lastFailure?.offline ? 'BRIDGE_OFFLINE' : 'BRIDGE_ERROR',
-      details: lastFailure?.details,
+      details: hermesUnreachableDetails(lastFailure?.details, targets, apiServerKey, config),
     });
   }
 
@@ -210,6 +247,7 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
     const verifiedPayload = withVerifiedAttachmentImportContextEntries(payload, attachmentImportResults);
 
     const targets = getHermesChannelTargets(config);
+    const apiServerKey = resolveHermesApiServerKey(config);
     let lastFailure: { status?: number; details?: string; offline?: boolean } | null = null;
 
     for (const target of targets) {
@@ -223,18 +261,26 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
         const forwardBody = target.protocol === 'hermes-openai'
           ? buildHermesOpenAiChatBody(verifiedPayload, attachmentRefs, requestAgentAddress, true)
           : buildHermesChannelBody(verifiedPayload, attachmentRefs, requestAgentAddress);
-        const transportRes = await fetch(target.streamUrl ?? target.inboundUrl, {
+        const streamUrl = target.streamUrl ?? target.inboundUrl;
+        const transportRes = await fetch(streamUrl, {
           method: 'POST',
           headers: buildHermesChannelHeaders(target, bridgeAuthToken, {
             'Content-Type': 'application/json',
             Accept: 'text/event-stream',
-          }),
+          }, streamUrl, apiServerKey),
           body: JSON.stringify(forwardBody),
           signal: AbortSignal.timeout(HERMES_CHANNEL_RESPONSE_TIMEOUT_MS),
         });
 
         if (!transportRes.ok) {
           const details = await transportRes.text().catch(() => '');
+          if (isHermesApiKeyRejection(target, transportRes.status)) {
+            return jsonResponse(res, 502, {
+              error: 'Hermes API server rejected the API_SERVER_KEY',
+              code: 'HERMES_API_KEY_REJECTED',
+              details: details || hermesApiKeyRejectedDetails(config),
+            });
+          }
           if (shouldTryNextHermesTarget(transportRes.status)) {
             lastFailure = {
               status: transportRes.status,
@@ -332,7 +378,7 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
     return jsonResponse(res, lastFailure?.offline ? 503 : 502, {
       error: lastFailure?.offline ? 'Hermes bridge unreachable' : 'Hermes bridge error',
       code: lastFailure?.offline ? 'BRIDGE_OFFLINE' : 'BRIDGE_ERROR',
-      details: lastFailure?.details,
+      details: hermesUnreachableDetails(lastFailure?.details, targets, apiServerKey, config),
     });
   }
 
