@@ -193,6 +193,29 @@ describe('NotificationsPane — interaction + a11y (happy-dom)', () => {
     act(() => buttonByText(/Mark all read/)!.dispatchEvent(new MouseEvent('click', { bubbles: true })));
     expect(markAllInformationalSeen).toHaveBeenCalledTimes(1);
   });
+
+  it('M9 frontend re-surface: a digest renders unread again after a load() returns read=0 for its digestKey', () => {
+    const digest = (read: boolean): ActivityItem => ({
+      kind: 'digest', id: 'activity:cg:a:promoted:42', cgId: 'cg:a',
+      contextGraphName: 'Alpha', event: 'promoted', count: 2, ts: 1, read,
+    });
+    const rowUnread = () =>
+      !!container.querySelector('.v10-notif-row-activity.v10-notif-unread');
+
+    // Unread initially.
+    render(makeFeed({ unread: 1, activity: [digest(false)] }));
+    expect(rowUnread()).toBe(true);
+
+    // markSeen → the next load() returns the SAME digestKey read=1: no longer unread.
+    render(makeFeed({ unread: 0, activity: [digest(true)] }));
+    expect(rowUnread()).toBe(false);
+
+    // A new same-bucket event lands → load() REPLACES data with the digest
+    // re-surfaced as read=0 → it shows unread again (no stale-merge that would
+    // keep it read). This is the M9 frontend half.
+    render(makeFeed({ unread: 1, activity: [digest(false)] }));
+    expect(rowUnread()).toBe(true);
+  });
 });
 
 describe('NotificationsBell — disclosure keyboard + focus (happy-dom)', () => {
