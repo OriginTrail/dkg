@@ -271,6 +271,139 @@ describe('SubGraphMiniCard — empty-card-body two-branch copy (S3 polish #2, ux
   });
 });
 
+describe('SubGraphOverviewGrid — header subtitle anchors (PR #793 round 4.1, GH #812)', () => {
+  // Round 4.1 (ux-lead) — the subtitle now reads from the canonical
+  // hook surfaces (`memory.counts.total` for entities,
+  // `memory.allTriples.length` for triples) so it agrees with the
+  // SubGraphBar `All` chip by construction. Pre-round-4.1 the
+  // subtitle derived from card-level aggregates and either
+  // double-counted cross-membership entities (round-4-prior
+  // sum-of-`entityCount`) or excluded the root bucket. The tests
+  // below lock the new anchor: a fixture where the hook total
+  // disagrees with the card sum must render the hook total in the
+  // subtitle.
+  let root: Root;
+  let container: HTMLDivElement;
+
+  beforeEach(() => {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    fetchSubGraphsMock.mockReset();
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  function renderWith(memoryOverride: any) {
+    return act(async () => {
+      root.render(
+        React.createElement(ProjectProfileContext.Provider, { value: profile },
+          React.createElement(SubGraphOverviewGrid, {
+            contextGraphId: 'cg-test',
+            memory: memoryOverride,
+            onNodeClick: vi.fn(),
+            onSelectSubGraph: vi.fn(),
+          })),
+      );
+    });
+  }
+
+  it('renders the subtitle entity count from memory.counts.total and triple count from memory.allTriples.length', async () => {
+    fetchSubGraphsMock.mockResolvedValueOnce({
+      subGraphs: [
+        { name: 'alpha', entityCount: 2, tripleCount: 5, description: '' },
+        { name: 'beta', entityCount: 2, tripleCount: 7, description: '' },
+      ],
+    });
+    const triples = [
+      // alpha sub-graph triples
+      { subject: 'urn:e:a1', predicate: 'p', object: 'o1', subGraph: 'alpha' },
+      { subject: 'urn:e:a2', predicate: 'p', object: 'o2', subGraph: 'alpha' },
+      // beta sub-graph triples
+      { subject: 'urn:e:b1', predicate: 'p', object: 'o3', subGraph: 'beta' },
+      { subject: 'urn:e:b2', predicate: 'p', object: 'o4', subGraph: 'beta' },
+      // a root-bucket triple (no sub-graph origin) — counted by the
+      // hook total but never reaches a card aggregate.
+      { subject: 'urn:e:root', predicate: 'p', object: 'o5' },
+    ];
+    const entityList = [
+      { uri: 'urn:e:a1', label: 'a1', types: [], trustLevel: 'working', layers: new Set(['working']), subGraphs: new Set(['alpha']), properties: new Map(), connections: [] },
+      { uri: 'urn:e:a2', label: 'a2', types: [], trustLevel: 'working', layers: new Set(['working']), subGraphs: new Set(['alpha']), properties: new Map(), connections: [] },
+      { uri: 'urn:e:b1', label: 'b1', types: [], trustLevel: 'working', layers: new Set(['working']), subGraphs: new Set(['beta']), properties: new Map(), connections: [] },
+      { uri: 'urn:e:b2', label: 'b2', types: [], trustLevel: 'working', layers: new Set(['working']), subGraphs: new Set(['beta']), properties: new Map(), connections: [] },
+      // A root-bucket entity with no sub-graph membership — would
+      // be missing from any card-derived count.
+      { uri: 'urn:e:root', label: 'root', types: [], trustLevel: 'working', layers: new Set(['working']), subGraphs: new Set<string>(), properties: new Map(), connections: [] },
+    ];
+    await renderWith({
+      ...memory,
+      entities: new Map(entityList.map(e => [e.uri, e])),
+      entityList,
+      allTriples: triples,
+      counts: { wm: 5, swm: 0, vm: 0, total: 5 },
+    });
+    await flush();
+
+    const sub = container.querySelector('.v10-sgov-sub');
+    expect(sub).toBeTruthy();
+    expect(sub!.textContent).toContain('2 subgraphs');
+    expect(sub!.textContent).toContain('5 entities');
+    expect(sub!.textContent).toContain('5 triples');
+  });
+
+  it('subtitle uses memory.counts.total even when it disagrees with sum-of-card entityCount (cross-membership regression)', async () => {
+    // Fixture mirrors the §4.4.1 reversal scenario:
+    //   - One entity belongs to BOTH 'alpha' AND 'beta'.
+    //   - card[alpha].entityCount === 2 (alpha-only + cross)
+    //   - card[beta].entityCount  === 2 (beta-only + cross)
+    //   - sum-of-cards            === 4 (double-counts the cross entity)
+    //   - memory.counts.total      === 3 (distinct entities)
+    // Round 4.1 lock: the subtitle reads memory.counts.total (3),
+    // NOT the sum-of-cards (4). Same logic for triples — the hook
+    // total wins.
+    fetchSubGraphsMock.mockResolvedValueOnce({
+      subGraphs: [
+        { name: 'alpha', entityCount: 2, tripleCount: 3, description: '' },
+        { name: 'beta', entityCount: 2, tripleCount: 3, description: '' },
+      ],
+    });
+    const entityList = [
+      { uri: 'urn:e:alpha-only', label: 'a', types: [], trustLevel: 'working', layers: new Set(['working']), subGraphs: new Set(['alpha']), properties: new Map(), connections: [] },
+      { uri: 'urn:e:beta-only', label: 'b', types: [], trustLevel: 'working', layers: new Set(['working']), subGraphs: new Set(['beta']), properties: new Map(), connections: [] },
+      { uri: 'urn:e:cross', label: 'c', types: [], trustLevel: 'working', layers: new Set(['working']), subGraphs: new Set(['alpha', 'beta']), properties: new Map(), connections: [] },
+    ];
+    const triples = [
+      // 4 raw triple rows even though the cross-graph SPO duplicate
+      // means distinct triples are fewer — exactly the GH #805
+      // family the subtitle now defers to.
+      { subject: 'urn:e:alpha-only', predicate: 'p', object: 'o', subGraph: 'alpha' },
+      { subject: 'urn:e:beta-only', predicate: 'p', object: 'o', subGraph: 'beta' },
+      { subject: 'urn:e:cross', predicate: 'p', object: 'o', subGraph: 'alpha' },
+      { subject: 'urn:e:cross', predicate: 'p', object: 'o', subGraph: 'beta' },
+    ];
+    await renderWith({
+      ...memory,
+      entities: new Map(entityList.map(e => [e.uri, e])),
+      entityList,
+      allTriples: triples,
+      counts: { wm: 3, swm: 0, vm: 0, total: 3 },
+    });
+    await flush();
+
+    const sub = container.querySelector('.v10-sgov-sub');
+    expect(sub).toBeTruthy();
+    // Subtitle anchors to hook total (3), NOT sum-of-cards (4).
+    expect(sub!.textContent).toContain('3 entities');
+    expect(sub!.textContent).not.toContain('4 entities');
+    // Subtitle anchors to allTriples.length (4), matching what the
+    // SubGraphBar `All` chip tooltip surfaces.
+    expect(sub!.textContent).toContain('4 triples');
+  });
+});
+
 describe('SubGraphMiniCard — per-trust nodeColors (S3 polish #3, ui-locked priority chain)', () => {
   // The mini-graph previously rendered every node in the card's
   // chrome color (`card.color`), losing the trust signal that the
