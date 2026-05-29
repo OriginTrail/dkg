@@ -201,6 +201,55 @@ function GraphSingletonShelf({
   );
 }
 
+// PR #818 Codex sweep 4 (finding 3) — extracted shared cap helper.
+// Both `SubGraphOverviewGrid`'s named-card path and the Root mini-
+// card consume this so the cap shape stays in lockstep across the
+// dual paths (the post-PR-#793 polish cycle accumulated two
+// parallel inline copies; sweep 2-3 fixes had to be applied twice
+// and qa caught the parity drift). Extracting it here closes the
+// duplication and gives one site to evolve the sampling rule.
+//
+// Sampling strategy: cluster topology matters more than uniform
+// random first-N. We keep every triple for the N heaviest-degree
+// subjects so the rendered slice reads as a representative slice
+// of the bucket's connected structure.
+//
+// Pre-check `kept + subjectDegree > MAX_PER_CARD` BEFORE adding so
+// a single dominant subject can't smuggle the whole heavy cluster
+// through (`break` shape would leave 100s of rows unaccounted for
+// because `keep.has(subject)` is true for every row of the
+// dominant subject). `continue` (not `break`) so the loop scans
+// further for smaller satellites that still fit — denser pack at
+// the cap, friendlier user-facing outcome than under-fill.
+//
+// Residual fallback: when EVERY subject's degree alone exceeds
+// MAX_PER_CARD, the pre-check rejects every subject and exits
+// with an empty `keep`. The card would render the empty-body
+// branch on a clearly-populated bucket — strictly worse UX. Fall
+// back to admitting the heaviest subject so SOMETHING renders;
+// the post-`slice(0, MAX_PER_CARD)` then trims its long tail.
+// The rendered slice loses some cluster topology in that residual
+// case, but the user sees the dominant hub vs an empty card.
+const MAX_PER_CARD = 2500;
+function applyHeaviestSubjectsCap(triples: Triple[], maxPerCard: number = MAX_PER_CARD): Triple[] {
+  if (triples.length <= maxPerCard) return triples;
+  const degree = new Map<string, number>();
+  for (const t of triples) degree.set(t.subject, (degree.get(t.subject) ?? 0) + 1);
+  const order = [...degree.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([uri]) => uri);
+  const keep = new Set<string>();
+  let kept = 0;
+  for (const uri of order) {
+    const subjectDegree = degree.get(uri) ?? 0;
+    if (kept + subjectDegree > maxPerCard) continue;
+    keep.add(uri);
+    kept += subjectDegree;
+  }
+  if (keep.size === 0 && order.length > 0) keep.add(order[0]);
+  return triples.filter(t => keep.has(t.subject)).slice(0, maxPerCard);
+}
+
 function GraphSurface({
   title,
   scopeLabel,
@@ -3906,15 +3955,10 @@ export function SubGraphOverviewGrid({
   }, [contextGraphId]);
 
   // Bucket every triple by its origin sub-graph so each mini-graph renders
-  // just its slice. We dedupe on (s,p,o) and cap per-bucket to keep the
-  // mini-graph canvases snappy. Without the cap, sub-graphs like `code`
-  // (~25k triples) can lock up the tab while force-graph runs its layout.
-  //
-  // Sampling strategy: when a sub-graph exceeds MAX_PER_CARD, we keep
-  // every triple for the N heaviest root entities (highest degree) so
-  // the user sees a representative, connected slice rather than a
-  // random first-N truncation that breaks clusters apart.
-  const MAX_PER_CARD = 2500;
+  // just its slice. We dedupe on (s,p,o) and cap per-bucket via the
+  // shared `applyHeaviestSubjectsCap` helper at module scope (see the
+  // doc block there for the sampling / dense-pack / residual-fallback
+  // rationale carried over from sweeps 1-3).
   const triplesBySubGraph = useMemo(() => {
     const bySg = new Map<string, Triple[]>();
     const seen = new Map<string, Set<string>>();
@@ -3929,56 +3973,8 @@ export function SubGraphOverviewGrid({
       if (!arr) { arr = []; bySg.set(t.subGraph, arr); }
       arr.push({ subject: t.subject, predicate: t.predicate, object: t.object });
     }
-    // If a bucket is over the cap, fall back to sampling the heaviest
-    // subjects and dropping the long tail. This preserves cluster
-    // topology far better than truncation.
-    //
-    // PR #818 Codex sweep 2 — earlier shape `if (kept >= MAX_PER_CARD)
-    // break;` checked AFTER adding the current subject's full row
-    // count, so a single dominant subject with N > MAX_PER_CARD rows
-    // would let the entire heavy cluster through (`keep.has(subject)`
-    // is true for every row of the dominant subject, returning all N
-    // from the filter). Pre-check `kept + subjectDegree > MAX_PER_CARD`
-    // BEFORE adding so we stop on the subject that would push us
-    // over.
-    //
-    // Residual case: when the heaviest subject's degree alone exceeds
-    // MAX_PER_CARD, the pre-check rejects every subject and exits
-    // with an empty `keep` — the card would render the empty-body
-    // branch even though the bucket clearly has content. Fall back
-    // to admitting that single heaviest subject so SOMETHING
-    // renders; the post-filter `slice(0, MAX_PER_CARD)` then trims
-    // its long tail. The rendered slice loses some cluster topology
-    // but the user sees the dominant hub, which is the right user-
-    // facing trade-off (vs an empty card on a populated bucket).
-    //
-    // PR #818 Codex sweep 3 — `continue` (was `break`) on a subject
-    // that doesn't fit, so the loop scans further for smaller
-    // satellites that DO fit. With degrees `[2400, 200, 50, 50]`
-    // and cap 2500: `break` would stop at B(200) leaving 100
-    // headroom unused (renders 2400). `continue` skips B but lets
-    // C+D land for a dense pack at 2500. Trade-off: `break`
-    // preserved the heaviest-cluster topology contract; `continue`
-    // packs the cap denser at the cost of potentially picking a
-    // satellite over a third heavy hub that didn't quite fit. The
-    // denser pack is the friendlier user-facing outcome.
     for (const [sg, triples] of bySg) {
-      if (triples.length <= MAX_PER_CARD) continue;
-      const degree = new Map<string, number>();
-      for (const t of triples) degree.set(t.subject, (degree.get(t.subject) ?? 0) + 1);
-      const order = [...degree.entries()]
-        .sort((a, b) => b[1] - a[1])
-        .map(([uri]) => uri);
-      const keep = new Set<string>();
-      let kept = 0;
-      for (const uri of order) {
-        const subjectDegree = degree.get(uri) ?? 0;
-        if (kept + subjectDegree > MAX_PER_CARD) continue;
-        keep.add(uri);
-        kept += subjectDegree;
-      }
-      if (keep.size === 0 && order.length > 0) keep.add(order[0]);
-      bySg.set(sg, triples.filter(t => keep.has(t.subject)).slice(0, MAX_PER_CARD));
+      bySg.set(sg, applyHeaviestSubjectsCap(triples));
     }
     return bySg;
   }, [memory.allTriples]);
