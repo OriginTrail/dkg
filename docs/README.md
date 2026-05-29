@@ -5,13 +5,17 @@ audience: human+agent
 doc_type: overview
 ---
 
-# DKG V10
+# Overview - What is DKG V10?
 
 ![DKG V10](.gitbook/assets/dkg-v10.png)
 
 DKG V10 is a decentralized knowledge network and protocol for verifiable agent memory. It gives agents a shared graph-native memory layer instead of isolated chat histories, flat files, or vector-only stores.
 
 A DKG node is the local gateway into that network. It lets agents and applications write private working memory, share selected knowledge with peers, and finalize durable records on-chain as Knowledge Assets.
+
+> ## Documentation Index
+>
+> Agents can start from [`llms.txt`](../llms.txt) for the compact docs index, or [`llms-full.txt`](../llms-full.txt) for the expanded context pack.
 
 ## Active Now
 
@@ -28,7 +32,9 @@ The DKG V10 bounty program is a current program, not permanent reference backgro
 
 Modern agents can research, write code, run operations, and produce knowledge continuously. The hard part is not only generating output. The hard part is preserving what was learned, deciding who can see it, and knowing which claims are still drafts versus which claims are verified.
 
-DKG V10 separates those states instead of collapsing them into one memory bucket:
+## How It Works At A Glance
+
+DKG V10 separates draft, shared, and verified knowledge instead of collapsing everything into one memory bucket:
 
 ```mermaid
 flowchart LR

@@ -2,7 +2,7 @@
 
 ## Getting Started
 
-* [Overview](getting-started/overview.md)
+* [Overview](README.md)
 
 ## Active Now
 
