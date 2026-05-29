@@ -9,7 +9,7 @@ doc_type: how-to
 
 MCP is the recommended path for coding agents and MCP-aware assistants. Hermes and OpenClaw use their own setup commands but share the same local DKG daemon model.
 
-![AI agent connects to a DKG Node through MCP](../assets/legacy-gitbook/agent-mcp-dkg-node.png)
+![AI agent connects to a DKG Node through MCP](../.gitbook/assets/agent-mcp-dkg-node.png)
 
 ## MCP
 
@@ -24,11 +24,11 @@ Supported clients include Cursor, Claude Code, Claude Desktop, Windsurf, VSCode 
 
 After setup, restart the client and verify that the DKG tool list includes:
 
-- `dkg_assertion_create`
-- `dkg_assertion_write`
-- `dkg_assertion_promote`
-- `dkg_memory_search`
-- `dkg_query`
+* `dkg_assertion_create`
+* `dkg_assertion_write`
+* `dkg_assertion_promote`
+* `dkg_memory_search`
+* `dkg_query`
 
 The package-owned reference is `packages/mcp-dkg/README.md`.
 
@@ -56,13 +56,13 @@ dkg hermes setup --profile research
 
 Important flags:
 
-| Flag | Purpose |
-| --- | --- |
-| `--profile <name>` | Target a named Hermes profile. |
+| Flag                       | Purpose                                                   |
+| -------------------------- | --------------------------------------------------------- |
+| `--profile <name>`         | Target a named Hermes profile.                            |
 | `--memory-mode tools-only` | Expose tools without electing DKG as the memory provider. |
-| `--preserve-provider` | Keep an existing non-DKG provider. |
-| `--no-start` | Configure without starting the daemon. |
-| `--no-fund` | Skip testnet faucet funding. |
+| `--preserve-provider`      | Keep an existing non-DKG provider.                        |
+| `--no-start`               | Configure without starting the daemon.                    |
+| `--no-fund`                | Skip testnet faucet funding.                              |
 
 The package-owned reference is `packages/adapter-hermes/README.md`.
 
@@ -85,9 +85,9 @@ openclaw gateway restart
 
 Healthy setup checklist:
 
-- `dkg_status` works from the OpenClaw agent.
-- The Node UI loads at `http://127.0.0.1:9200/ui`.
-- The right-panel chat can connect to OpenClaw.
-- Chat history survives a UI reload because DKG persists the turns.
+* `dkg_status` works from the OpenClaw agent.
+* The Node UI loads at `http://127.0.0.1:9200/ui`.
+* The right-panel chat can connect to OpenClaw.
+* Chat history survives a UI reload because DKG persists the turns.
 
 The package-owned reference is `packages/adapter-openclaw/README.md`.
