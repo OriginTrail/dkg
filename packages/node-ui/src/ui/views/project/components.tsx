@@ -4152,6 +4152,32 @@ export function SubGraphOverviewGrid({
       seenSpo.add(key);
       rootTriples.push({ subject: t.subject, predicate: t.predicate, object: t.object });
     }
+    // PR #818 Codex sweep 1 — apply the same `MAX_PER_CARD`
+    // heaviest-subjects sampling the named-card path uses at
+    // `:3935-3949`. The earlier comment waved this off on the
+    // theory that the root entity set is small, but Codex flagged
+    // the counterexample: large initial seeds + agents writing
+    // without sub-graph tags can produce thousands of untagged
+    // triples whose endpoints touch root entities — same
+    // RdfGraph layout lock the named-card cap was added to
+    // prevent. Same sampling preserves cluster topology better
+    // than a random first-N truncation.
+    let cappedRootTriples = rootTriples;
+    if (rootTriples.length > MAX_PER_CARD) {
+      const degree = new Map<string, number>();
+      for (const t of rootTriples) degree.set(t.subject, (degree.get(t.subject) ?? 0) + 1);
+      const order = [...degree.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .map(([uri]) => uri);
+      const keep = new Set<string>();
+      let kept = 0;
+      for (const uri of order) {
+        if (kept >= MAX_PER_CARD) break;
+        keep.add(uri);
+        kept += degree.get(uri)!;
+      }
+      cappedRootTriples = rootTriples.filter(t => keep.has(t.subject));
+    }
     const binding = profile?.forSubGraph(ROOT_SLUG_SENTINEL) ?? {};
     return {
       slug: ROOT_SLUG_SENTINEL,
@@ -4164,8 +4190,15 @@ export function SubGraphOverviewGrid({
       description: binding.description,
       rank: 999,
       entityCount: rootEntities.length,
+      // tripleCount stays the pre-cap distinct total so the
+      // stats badge reports the true count (matches what the
+      // Root detail view would show), while `triples` carries
+      // the post-cap sampled slice the mini-graph renders.
+      // Mirrors the named-card behaviour where `sg.tripleCount`
+      // (daemon-reported) decouples the badge from the rendered
+      // slice.
       tripleCount: rootTriples.length,
-      triples: rootTriples,
+      triples: cappedRootTriples,
       layerCounts: { wm, swm, vm },
       entityTrustByUri: rootEntityTrust,
     };
