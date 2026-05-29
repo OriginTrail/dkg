@@ -40,9 +40,9 @@ export default defineConfig({
   ],
 
   webServer: {
-    // mock-ui must never point Vite at devnet (~/.dkg or .devnet) — rich routes
-    // and the base fixture's status stub rely on a proxy-without-live-daemon setup.
-    // devnet-ui opt-in via PWTEST_DEVNET=1 + DEVNET_NODE (see package.json script).
+    // mock-ui and devnet-ui use different server env — pick once at process
+    // start. Run them via `pnpm test:e2e` / `pnpm test:e2e:devnet`, not bare
+    // `playwright test` without a project filter (or `--ui` with both projects).
     command: DEVNET_UI
       ? `cross-env DEVNET_NODE=${DEVNET_NODE} pnpm dev:ui`
       : 'cross-env DEVNET_NODE= UI_NODE_ID= pnpm dev:ui',
