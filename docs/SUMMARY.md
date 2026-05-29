@@ -1,6 +1,10 @@
-# Summary
+# Table of contents
 
 * [DKG V10](README.md)
+
+## Getting started
+
+* [Overview](getting-started/overview.md)
 
 ## Active Now
 
