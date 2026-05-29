@@ -5,14 +5,9 @@ import { dirname } from 'node:path';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CI = !!process.env.CI;
 const PORT = 5173;
-const DEVNET_NODE = process.env.DEVNET_NODE || process.env.UI_NODE_ID;
-
-function devServerCommand(projectUsesDevnet: boolean): string {
-  if (projectUsesDevnet && DEVNET_NODE) {
-    return `cross-env DEVNET_NODE=${DEVNET_NODE} pnpm dev:ui`;
-  }
-  return 'pnpm dev:ui';
-}
+/** Set via `pnpm test:e2e:devnet` — never inherit accidentally from the shell. */
+const DEVNET_UI = process.env.PWTEST_DEVNET === '1';
+const DEVNET_NODE = process.env.DEVNET_NODE || process.env.UI_NODE_ID || '1';
 
 export default defineConfig({
   testDir: './e2e/specs',
@@ -45,7 +40,12 @@ export default defineConfig({
   ],
 
   webServer: {
-    command: devServerCommand(!!DEVNET_NODE),
+    // mock-ui must never point Vite at devnet (~/.dkg or .devnet) — rich routes
+    // and the base fixture's status stub rely on a proxy-without-live-daemon setup.
+    // devnet-ui opt-in via PWTEST_DEVNET=1 + DEVNET_NODE (see package.json script).
+    command: DEVNET_UI
+      ? `cross-env DEVNET_NODE=${DEVNET_NODE} pnpm dev:ui`
+      : 'cross-env DEVNET_NODE= UI_NODE_ID= pnpm dev:ui',
     cwd: __dirname,
     port: PORT,
     reuseExistingServer: !CI,

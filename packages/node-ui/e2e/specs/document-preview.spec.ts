@@ -3,9 +3,8 @@ import { installRichMemoryRoutes } from '../helpers/rich-mock-routes.js';
 
 test.describe('Document preview', () => {
   test.beforeEach(async ({ shell, leftPanel, page }) => {
-    // Seed a documents tab via mocked file metadata route.
     await installRichMemoryRoutes(page, { allContextGraphs: true });
-    await page.route('**/api/files/**', async (route) => {
+    await page.route('**/api/file/**', async (route) => {
       await route.fulfill({
         status: 200,
         contentType: 'text/markdown',
@@ -30,9 +29,9 @@ test.describe('Document preview', () => {
   });
 
   test('clicking a document row opens preview modal when documents exist', async ({ page, filePreviewModal }) => {
-    const docRow = page.locator('.v10-doc-row, .v10-document-item').filter({ hasText: /\.md|\.pdf/i });
+    const docRow = page.locator('.v10-item-row').filter({ hasText: /\.md|\.pdf/i });
     const count = await docRow.count();
-    if (count === 0) return; // no documents in mock — nothing to assert
+    if (count === 0) return;
     await docRow.first().click();
     expect(await filePreviewModal.isOpen()).toBe(true);
     await filePreviewModal.close();

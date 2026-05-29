@@ -30,8 +30,9 @@ test.describe('Context graph invites — overview panel', () => {
   test('overview shows pending join requests card', async ({ shell, leftPanel, page }) => {
     await shell.goto();
     await leftPanel.expandProject('Pharma Drug Interactions');
-    await expect(page.getByText('Pending join requests')).toBeVisible();
-    await expect(page.getByText(/No pending join requests/i)).toBeVisible();
+    const joinSection = page.locator('[data-section="join-requests"]');
+    await expect(joinSection.locator('.v10-po-section-title')).toHaveText('Pending join requests');
+    await expect(joinSection.getByText(/No pending join requests/i)).toBeVisible();
   });
 
   test('participant agents section lists curator and allowlisted agents', async ({ shell, leftPanel, page }) => {
