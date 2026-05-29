@@ -109,6 +109,11 @@ export interface UseNotificationsFeed {
   activity: ActivityItem[];
   /** Unread badge = daemon `badgeCount` (rejections already excluded). */
   unread: number;
+  /** True when any unread INFORMATIONAL row exists (digests + approved +
+   *  rejected). Drives "Mark all read" visibility — NOT `unread`/badgeCount,
+   *  which excludes join_rejected, so a rejected-only-unread state would
+   *  otherwise have no way to clear (Codex I4). */
+  hasInformationalUnread: boolean;
   status: NotificationsFeedStatus;
   /** Activity sub-section couldn't load but join list is fine (reserved for
    *  a future partial-error wire signal; false until the daemon distinguishes
@@ -251,11 +256,21 @@ export function useNotificationsFeed(): UseNotificationsFeed {
   const joinRequests = useMemo(() => mapJoinRequests(data?.notifications ?? []), [data]);
   const activity = useMemo(() => mapActivity(data?.notifications ?? []), [data]);
   const unread = data?.badgeCount ?? 0;
+  // Drives "Mark all read" visibility. Distinct from `unread` (= badgeCount,
+  // which excludes join_rejected) so a rejected-only-unread state can still be
+  // cleared (Codex I4).
+  const hasInformationalUnread = useMemo(
+    () => selectInformationalUnreadIds(data?.notifications ?? []).length > 0,
+    [data],
+  );
 
   const markSeen = useCallback((ids: Array<number | string>) => {
     if (ids.length === 0) return;
-    // Optimistically clear read locally so the badge/state reflects the action
-    // immediately; the next reconciled load confirms server-side.
+    // Optimistically flip the targeted rows' `read` flag for immediate ROW
+    // styling. The badge is NOT decremented here: `unread` = the server's
+    // `badgeCount` (scoped + rejection-excluded), which updates on the
+    // reconciling `load()` below — server-authoritative, lags one round-trip,
+    // never wrong-direction (ui-pr-note §6 / Codex I6).
     setData((prev) => {
       if (!prev) return prev;
       const seen = new Set(ids.map(String));
@@ -310,6 +325,7 @@ export function useNotificationsFeed(): UseNotificationsFeed {
     joinRequests,
     activity,
     unread,
+    hasInformationalUnread,
     status,
     // Reserved for a future wire signal; the daemon does not yet distinguish a
     // partial activity-query failure from a full one, so this stays false. The

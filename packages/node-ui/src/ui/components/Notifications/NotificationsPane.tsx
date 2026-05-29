@@ -32,7 +32,7 @@ export function NotificationsPane({ feed, onOpenContextGraph, id, paneRef }: Not
     activity,
     status,
     partialActivityError,
-    unread,
+    hasInformationalUnread,
     approve,
     deny,
     markSeen,
@@ -56,7 +56,7 @@ export function NotificationsPane({ feed, onOpenContextGraph, id, paneRef }: Not
     <div className="v10-notif-pane" role="region" aria-label="Notifications" id={id} ref={paneRef} tabIndex={-1}>
       <div className="v10-notif-pane-titlebar">
         <div className="v10-notif-pane-title">Notifications</div>
-        {unread > 0 && (
+        {hasInformationalUnread && (
           <button
             type="button"
             className="v10-notif-pane-markread"

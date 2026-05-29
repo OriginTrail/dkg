@@ -58,6 +58,7 @@ function makeFeed(over: Partial<UseNotificationsFeed> = {}): UseNotificationsFee
     joinRequests: [],
     activity: [],
     unread: 0,
+    hasInformationalUnread: false,
     status: 'ready',
     partialActivityError: false,
     approve: vi.fn(async (): Promise<ActionResult> => ({ ok: true })),
@@ -189,9 +190,26 @@ describe('NotificationsPane — interaction + a11y (happy-dom)', () => {
       kind: 'digest', id: 'd1', cgId: 'cg:a', contextGraphName: 'Alpha',
       event: 'promoted', count: 2, ts: 1, read: false,
     };
-    render(makeFeed({ unread: 1, activity: [digest], markAllInformationalSeen }));
+    render(makeFeed({ hasInformationalUnread: true, activity: [digest], markAllInformationalSeen }));
     act(() => buttonByText(/Mark all read/)!.dispatchEvent(new MouseEvent('click', { bubbles: true })));
     expect(markAllInformationalSeen).toHaveBeenCalledTimes(1);
+  });
+
+  it('I4: Mark all read SHOWS when only rejected confirmations are unread (badge=0)', () => {
+    // Rejections are excluded from badgeCount, so unread=0 here — but they are
+    // informational-unread and must be clearable. The button gates on
+    // hasInformationalUnread, NOT badgeCount.
+    const rejected: ActivityItem = {
+      kind: 'join_rejected', id: 7, cgId: 'cg:c', contextGraphName: 'Gamma', ts: 1, read: false,
+    };
+    render(makeFeed({ unread: 0, hasInformationalUnread: true, activity: [rejected] }));
+    expect(buttonByText(/Mark all read/)).toBeTruthy();
+  });
+
+  it('I4: Mark all read HIDDEN when nothing informational is unread', () => {
+    render(makeFeed({ unread: 0, hasInformationalUnread: false, joinRequests: [joinItem()] }));
+    // A pending join request is actionable, not informational — no Mark-all-read.
+    expect(buttonByText(/Mark all read/)).toBeUndefined();
   });
 
   it('M9 frontend re-surface: a digest renders unread again after a load() returns read=0 for its digestKey', () => {
@@ -257,6 +275,14 @@ describe('NotificationsBell — disclosure keyboard + focus (happy-dom)', () => 
     openPane();
     expect(bellBtn().getAttribute('aria-expanded')).toBe('true');
     expect(container.querySelector('.v10-notif-pane')).toBeTruthy();
+  });
+
+  it('I5: on open, focus lands on the Approve button — not the row Open-{CG} link', () => {
+    openPane();
+    const active = document.activeElement as HTMLElement | null;
+    expect(active?.classList.contains('v10-notif-btn-approve')).toBe(true);
+    // Regression guard: it must NOT be the cg-link that precedes the actions.
+    expect(active?.classList.contains('v10-notif-cg-link')).toBe(false);
   });
 
   it('Escape closes the pane and restores focus to the bell', () => {

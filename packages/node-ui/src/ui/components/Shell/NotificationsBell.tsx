@@ -55,18 +55,20 @@ export function NotificationsBell() {
   }, [open, close]);
 
   // Focus management: on open, move focus into the panel — prefer the FIRST
-  // ACTIONABLE row (the pinned "Needs your action" section's first Approve
-  // button), else the first focusable element, else the panel container
-  // (ux-brief §9). Landing on "Mark all read" would be a spec regression.
-  // On close we restore focus to the bell (see `close(true)`).
+  // ACTIONABLE row's primary Approve button, else the first focusable element,
+  // else the panel container (ux-brief §9). Landing on "Mark all read" would be
+  // a spec regression. Target `.v10-notif-btn-approve` specifically: a plain
+  // `.v10-notif-section-action button` matched the row's "Open {CG}" link
+  // (`.v10-notif-cg-link`, which precedes the actions in DOM order), not
+  // Approve (Codex I5). On close we restore focus to the bell (see `close(true)`).
   useEffect(() => {
     if (!open) return;
     const pane = paneRef.current;
     if (!pane) return;
-    const firstActionable = pane.querySelector<HTMLElement>(
-      '.v10-notif-section-action button',
+    const firstApprove = pane.querySelector<HTMLElement>(
+      '.v10-notif-section-action .v10-notif-btn-approve',
     );
-    const first = firstActionable ?? pane.querySelector<HTMLElement>(
+    const first = firstApprove ?? pane.querySelector<HTMLElement>(
       'button, [href], [tabindex]:not([tabindex="-1"])',
     );
     (first ?? pane).focus();
