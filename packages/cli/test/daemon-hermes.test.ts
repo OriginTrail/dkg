@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi, afterEach } from 'vitest';
 import type { DkgConfig } from '../src/config.js';
@@ -699,6 +699,12 @@ describe('Hermes channel helpers', () => {
         },
       },
     }))).toBe('fallback-key');
+    // The profile is resolved with an EXPLICIT hermesHome so a daemon-side
+    // HERMES_HOME can't redirect us to a different profile's .env (Codex review).
+    expect(resolveHermesProfileMock).toHaveBeenCalledWith({
+      profileName: 'research',
+      hermesHome: join(homedir(), '.hermes', 'profiles', 'research'),
+    });
   });
 
   it('does NOT guess the default profile when neither hermesHome nor profileName is known', () => {

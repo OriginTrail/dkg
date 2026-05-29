@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { isIP } from 'node:net';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 import { resolveHermesProfile } from '@origintrail-official/dkg-adapter-hermes';
@@ -324,7 +325,15 @@ function resolveHermesHomeForKey(config: DkgConfig): string | undefined {
   const profileName = optionalTrimmedString(metadata?.profileName);
   if (!profileName) return undefined;
   try {
-    return resolveHermesProfile({ profileName }).hermesHome;
+    // Pass an explicit hermesHome so resolution can't be swayed by a daemon-side
+    // `HERMES_HOME` pointing at a different profile (resolveHermesProfile prefers
+    // `process.env.HERMES_HOME` over the profile-derived default, which would
+    // read the wrong profile's `.env`). resolveHermesProfile still validates the
+    // profileName (rejecting path separators).
+    return resolveHermesProfile({
+      profileName,
+      hermesHome: join(homedir(), '.hermes', 'profiles', profileName),
+    }).hermesHome;
   } catch {
     return undefined;
   }
