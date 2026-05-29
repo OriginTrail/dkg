@@ -270,9 +270,9 @@ export function buildHermesChannelHeaders(
  * truth — the same file `dkg hermes setup` provisions and the one Hermes
  * itself reads. Reads are cached by path+mtime so we don't touch disk on
  * every chat request. `DKG_HERMES_API_SERVER_KEY` is the source for remote/WSL
- * gateways whose `.env` is not on the daemon's filesystem, and a fallback for
- * loopback. Returns undefined when no key is available (older key-less Hermes →
- * no bearer is sent).
+ * gateways ONLY (whose `.env` is not on the daemon's filesystem); for loopback
+ * the key comes exclusively from the local profile `.env`. Returns undefined
+ * when no key is available (older key-less Hermes → no bearer is sent).
  */
 export function resolveHermesApiServerKey(config: DkgConfig): string | undefined {
   const key = resolveRawHermesApiServerKey(config);
@@ -286,20 +286,20 @@ export function resolveHermesApiServerKey(config: DkgConfig): string | undefined
 }
 
 function resolveRawHermesApiServerKey(config: DkgConfig): string | undefined {
-  const override = optionalTrimmedString(process.env.DKG_HERMES_API_SERVER_KEY);
-  // Remote/WSL `--gateway-url` Hermes keeps its `.env` on another host, so the
-  // explicit override is the only source there.
-  if (!hasLoopbackHermesOpenAiTarget(config)) return override;
-  // Loopback: the profile `.env` is the source of truth. An EXPLICIT local
-  // assignment is authoritative — even a blank `API_SERVER_KEY=` (intentionally
-  // cleared/rotated) yields no bearer rather than falling through to a stale
-  // `DKG_HERMES_API_SERVER_KEY`. The override is used only when `.env` has no
-  // API_SERVER_KEY line at all or is missing/unreadable (readApiServerKeyFromEnv
-  // returns `''` for a present-but-blank key, `undefined` for absent/unreadable).
+  // The override is the REMOTE mechanism: a remote/WSL `--gateway-url` Hermes
+  // keeps its `.env` on another host, so DKG_HERMES_API_SERVER_KEY is the only
+  // source there.
+  if (!hasLoopbackHermesOpenAiTarget(config)) {
+    return optionalTrimmedString(process.env.DKG_HERMES_API_SERVER_KEY);
+  }
+  // Loopback: the key comes EXCLUSIVELY from the resolved local profile `.env`.
+  // The override never applies here — using it would let a value meant for a
+  // (former) remote gateway shadow or substitute for the local setup. If the
+  // profile can't be resolved, or the key is absent/blank, there is no bearer
+  // and the caller surfaces the missing-key hint.
   const hermesHome = resolveHermesHomeForKey(config);
-  const fromEnv = hermesHome ? readApiServerKeyFromEnv(join(hermesHome, '.env')) : undefined;
-  if (fromEnv !== undefined) return fromEnv || undefined;
-  return override;
+  if (!hermesHome) return undefined;
+  return readApiServerKeyFromEnv(join(hermesHome, '.env')) || undefined;
 }
 
 /**

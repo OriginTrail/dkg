@@ -628,7 +628,7 @@ describe('Hermes channel helpers', () => {
     }))).toBeUndefined();
   });
 
-  it('falls back to the override only when loopback .env has no API_SERVER_KEY line', () => {
+  it('never uses the override on loopback — even with no API_SERVER_KEY line (override is remote-only)', () => {
     const home = mkdtempSync(join(tmpdir(), 'hermes-nokeyline-'));
     cleanupDirs.push(home);
     writeFileSync(join(home, '.env'), 'API_SERVER_ENABLED=true\nOTHER=keep\n'); // no API_SERVER_KEY
@@ -643,9 +643,11 @@ describe('Hermes channel helpers', () => {
     });
 
     expect(resolveHermesApiServerKey(config)).toBeUndefined();
-    process.env.DKG_HERMES_API_SERVER_KEY = 'fallback-override';
+    // DKG_HERMES_API_SERVER_KEY is the REMOTE mechanism — it must not substitute
+    // for a local loopback key (Codex review). Loopback stays undefined.
+    process.env.DKG_HERMES_API_SERVER_KEY = 'remote-only-override';
     try {
-      expect(resolveHermesApiServerKey(config)).toBe('fallback-override');
+      expect(resolveHermesApiServerKey(config)).toBeUndefined();
     } finally {
       delete process.env.DKG_HERMES_API_SERVER_KEY;
     }
