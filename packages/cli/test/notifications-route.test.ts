@@ -3,7 +3,7 @@ import { createServer, type Server } from 'node:http';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DashboardDB, ASSERTION_ACTIVITY_TYPE, ACTIVITY_DIGEST_WINDOW_MS, buildActivityDigestKey } from '@origintrail-official/dkg-node-ui';
+import { DashboardDB, ASSERTION_ACTIVITY_TYPE, ACTIVITY_DIGEST_WINDOW_MS, buildActivityDigestKey, handleNodeUIRequest } from '@origintrail-official/dkg-node-ui';
 import { handleNotificationRoutes } from '../src/daemon/routes/notifications.js';
 
 // Caller wallet (the "me" agent). Member of CG_CURATED (as curator) and
@@ -164,5 +164,41 @@ describe('GET/POST /api/notifications (scoped daemon route, A4)', () => {
     await startRoute(makeAgent({ pending: { [CG_CURATED]: [REQUESTER] } }), CALLER);
     const read = await postRead({});
     expect(read.body.marked).toBeGreaterThanOrEqual(1);
+  });
+
+  // Dispatch-order guard (ADR-003): in lifecycle.ts the node-ui handler runs
+  // BEFORE the agent-aware daemon dispatch. After the clean cut, node-ui must
+  // NOT claim /api/notifications (return false) so the request falls through
+  // to the daemon route — no double-handling, no leftover 404.
+  it('handleNodeUIRequest does NOT claim the notification routes (falls through to daemon)', async () => {
+    const noopRes = () => {
+      const res: any = {
+        statusCode: 200, headersSent: false, _ended: false,
+        setHeader() {}, write() {}, writeHead() {},
+        end() { this._ended = true; this.headersSent = true; },
+      };
+      return res;
+    };
+    const getRes = noopRes();
+    const getHandled = await handleNodeUIRequest(
+      { method: 'GET', headers: {}, url: '/api/notifications' } as any,
+      getRes as any,
+      new URL('http://127.0.0.1/api/notifications'),
+      db,
+      '/fake/static',
+    );
+    expect(getHandled).toBe(false);
+    expect(getRes._ended).toBe(false);
+
+    const postRes = noopRes();
+    const postHandled = await handleNodeUIRequest(
+      { method: 'POST', headers: {}, url: '/api/notifications/read' } as any,
+      postRes as any,
+      new URL('http://127.0.0.1/api/notifications/read'),
+      db,
+      '/fake/static',
+    );
+    expect(postHandled).toBe(false);
+    expect(postRes._ended).toBe(false);
   });
 });
