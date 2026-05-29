@@ -279,13 +279,16 @@ export function resolveHermesApiServerKey(config: DkgConfig): string | undefined
   // Remote/WSL `--gateway-url` Hermes keeps its `.env` on another host, so the
   // explicit override is the only source there.
   if (!hasLoopbackHermesOpenAiTarget(config)) return override;
-  // Loopback: the profile `.env` is the source of truth and MUST win over the
-  // override — otherwise a stale `DKG_HERMES_API_SERVER_KEY` (left set after a
-  // former remote setup) would shadow the correct local key and 401 forever.
-  // The override stays only as a last-resort fallback (e.g. an unreadable .env).
+  // Loopback: the profile `.env` is the source of truth. An EXPLICIT local
+  // assignment is authoritative — even a blank `API_SERVER_KEY=` (intentionally
+  // cleared/rotated) yields no bearer rather than falling through to a stale
+  // `DKG_HERMES_API_SERVER_KEY`. The override is used only when `.env` has no
+  // API_SERVER_KEY line at all or is missing/unreadable (readApiServerKeyFromEnv
+  // returns `''` for a present-but-blank key, `undefined` for absent/unreadable).
   const hermesHome = resolveHermesHomeForKey(config);
   const fromEnv = hermesHome ? readApiServerKeyFromEnv(join(hermesHome, '.env')) : undefined;
-  return fromEnv ?? override;
+  if (fromEnv !== undefined) return fromEnv || undefined;
+  return override;
 }
 
 /**
@@ -349,10 +352,11 @@ function readApiServerKeyFromEnv(envPath: string): string | undefined {
     for (const line of readFileSync(envPath, 'utf-8').split(/\r?\n/)) {
       const match = line.match(/^\s*(?:export\s+)?API_SERVER_KEY\s*=(.*)$/);
       if (!match) continue;
-      // dotenv "last assignment wins" — including a blank/cleared final
-      // assignment (`API_SERVER_KEY=` or `=""`), which must reset an earlier
-      // value so a rotated/blanked key isn't forwarded stale.
-      key = parseDotenvValue(match[1]) || undefined;
+      // dotenv "last assignment wins". An assigned-but-blank line yields `''`
+      // (a present, intentionally-cleared key) which the caller treats as
+      // authoritative; `key` stays `undefined` only when NO line is present, so
+      // the caller can distinguish "cleared locally" from "absent / unreadable".
+      key = parseDotenvValue(match[1]);
     }
   } catch {
     key = undefined;

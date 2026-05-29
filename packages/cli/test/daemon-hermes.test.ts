@@ -582,14 +582,14 @@ describe('Hermes channel helpers', () => {
     }))).toBeUndefined();
   });
 
-  it('clears the key when the last .env assignment is blank (dotenv last-wins)', () => {
+  it('treats a blank local .env assignment as authoritative, even over a stale override', () => {
     const home = mkdtempSync(join(tmpdir(), 'hermes-blank-'));
     cleanupDirs.push(home);
-    // A later blank assignment must reset an earlier value, matching how Hermes
-    // (python-dotenv) reads it — otherwise DKG forwards a rotated-away key.
+    // A later blank assignment must reset an earlier value (dotenv last-wins).
+    // An explicit (even blank) local key is authoritative on loopback, so a
+    // stale DKG_HERMES_API_SERVER_KEY must NOT be forwarded (Codex review).
     writeFileSync(join(home, '.env'), 'API_SERVER_KEY=old-key\nAPI_SERVER_KEY=\n');
-
-    expect(resolveHermesApiServerKey(makeConfig({
+    const config = makeConfig({
       localAgentIntegrations: {
         hermes: {
           enabled: true,
@@ -597,7 +597,39 @@ describe('Hermes channel helpers', () => {
           metadata: { hermesHome: home },
         },
       },
-    }))).toBeUndefined();
+    });
+
+    expect(resolveHermesApiServerKey(config)).toBeUndefined();
+
+    process.env.DKG_HERMES_API_SERVER_KEY = 'stale-override';
+    try {
+      expect(resolveHermesApiServerKey(config)).toBeUndefined();
+    } finally {
+      delete process.env.DKG_HERMES_API_SERVER_KEY;
+    }
+  });
+
+  it('falls back to the override only when loopback .env has no API_SERVER_KEY line', () => {
+    const home = mkdtempSync(join(tmpdir(), 'hermes-nokeyline-'));
+    cleanupDirs.push(home);
+    writeFileSync(join(home, '.env'), 'API_SERVER_ENABLED=true\nOTHER=keep\n'); // no API_SERVER_KEY
+    const config = makeConfig({
+      localAgentIntegrations: {
+        hermes: {
+          enabled: true,
+          transport: { kind: 'hermes-openai', gatewayUrl: 'http://127.0.0.1:8642' },
+          metadata: { hermesHome: home },
+        },
+      },
+    });
+
+    expect(resolveHermesApiServerKey(config)).toBeUndefined();
+    process.env.DKG_HERMES_API_SERVER_KEY = 'fallback-override';
+    try {
+      expect(resolveHermesApiServerKey(config)).toBe('fallback-override');
+    } finally {
+      delete process.env.DKG_HERMES_API_SERVER_KEY;
+    }
   });
 
   it('falls back to an EXACT named profile when metadata.hermesHome is absent but profileName is known', () => {
