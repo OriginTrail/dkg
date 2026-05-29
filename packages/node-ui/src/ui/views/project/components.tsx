@@ -4339,11 +4339,20 @@ export function SubGraphOverviewGrid({
             Round 4.1 swapped to `memory.counts.total` + raw
             `memory.allTriples.length` — entity anchor was correct,
             triple anchor was still inflated by SWM cross-graph SPO
-            duplicates + WM residue (GH #805). This commit lands the
-            #805 layer-sum fix on the same surface so subtitle ==
-            Overview Triples == per-layer LayerStats. */}
+            duplicates + WM residue (GH #805). The #805 layer-sum
+            fix on the same surface makes subtitle == Overview
+            Triples == per-layer LayerStats.
+            PR #818 Codex sweep 2 — label says "named subgraphs"
+            (was "subgraphs"). The Root mini-card is a peer-but-
+            different surface that now renders in the grid; the
+            old label overstated what `cards.length` includes
+            (named subgraphs only, never Root) and produced a
+            "0 subgraphs" subtitle reading while a Root card
+            visibly rendered. The new label is honest about the
+            count's scope and applies regardless of Root
+            presence. */}
         <div className="v10-sgov-sub">
-          {cards.length} subgraphs · {memory.counts.total} entities · {subtitleTripleCount} triples
+          {cards.length} named subgraphs · {memory.counts.total} entities · {subtitleTripleCount} triples
         </div>
       </div>
       <div className="v10-sgov-grid">

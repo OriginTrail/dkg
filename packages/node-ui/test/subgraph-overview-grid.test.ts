@@ -356,7 +356,10 @@ describe('SubGraphOverviewGrid — header subtitle anchors (PR #793 round 4.1, G
 
     const sub = container.querySelector('.v10-sgov-sub');
     expect(sub).toBeTruthy();
-    expect(sub!.textContent).toContain('2 subgraphs');
+    // PR #818 sweep 2 — subtitle label is "named subgraphs" so
+    // it's honest about the count's scope (Root is a peer-but-
+    // different surface in the grid).
+    expect(sub!.textContent).toContain('2 named subgraphs');
     expect(sub!.textContent).toContain('5 entities');
     expect(sub!.textContent).toContain('5 triples');
   });
@@ -739,6 +742,13 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
     // Teaching empty state must NOT render — its title is the
     // tell.
     expect(container.textContent ?? '').not.toContain('No subgraphs in this Context Graph yet.');
+    // PR #818 sweep 2 — subtitle reads `0 named subgraphs` here.
+    // Locks the rename: pre-sweep this said `0 subgraphs` while
+    // a Root card visibly rendered (the inconsistency Codex
+    // flagged in sweep 2 finding 3). The "named" qualifier makes
+    // the count honest about what `cards.length` covers.
+    const sub = container.querySelector('.v10-sgov-sub');
+    expect(sub?.textContent).toContain('0 named subgraphs');
     // Exactly one card renders — the Root card.
     const cards = container.querySelectorAll('.v10-sgov-card');
     expect(cards.length).toBe(1);
