@@ -7,13 +7,24 @@
  *
  * Rules (python-dotenv):
  *  - A quoted value keeps everything between the matching quotes, including an
- *    inner `#` (`"se#cret"` → `se#cret`). In double-quoted values a backslash
- *    escapes the next character (`"abc\"def"` → `abc"def`, `"a\\b"` → `a\b`);
- *    single-quoted values are literal.
+ *    inner `#` (`"se#cret"` → `se#cret`). In double-quoted values escape
+ *    sequences are decoded the way python-dotenv decodes them — `\n`/`\t`/`\r`
+ *    become newline/tab/CR, `\"`/`\\`/`\'` become the literal char, and any
+ *    other `\x` drops the backslash (`"abc\"def"` → `abc"def`, `"a\nb"` → a
+ *    newline-separated value). Single-quoted values are literal.
  *  - An unquoted value is truncated at the first whitespace-preceded `#` (an
  *    inline comment) and trimmed (`secret # dev` → `secret`); a `#` with no
  *    preceding whitespace is literal (`a#b` → `a#b`).
  */
+const DOUBLE_QUOTE_ESCAPES: Record<string, string> = {
+  n: '\n',
+  t: '\t',
+  r: '\r',
+  '\\': '\\',
+  '"': '"',
+  "'": "'",
+};
+
 export function parseDotenvValue(raw: string): string {
   const value = raw.replace(/^\s+/, '');
   const quote = value[0];
@@ -21,10 +32,12 @@ export function parseDotenvValue(raw: string): string {
     let result = '';
     for (let i = 1; i < value.length; i += 1) {
       const ch = value[i];
-      // Backslash escapes the next char in double-quoted values (python-dotenv
-      // `\\(.) -> \1`); single-quoted values treat backslash literally.
+      // In double-quoted values a backslash introduces an escape sequence
+      // (python-dotenv decodes `\n`/`\t`/`\r`/`\\`/`\"`/`\'`; any other `\x`
+      // becomes `x`). Single-quoted values treat backslash literally.
       if (ch === '\\' && quote === '"' && i + 1 < value.length) {
-        result += value[i + 1];
+        const next = value[i + 1];
+        result += DOUBLE_QUOTE_ESCAPES[next] ?? next;
         i += 1;
         continue;
       }

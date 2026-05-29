@@ -380,7 +380,10 @@ describe('Hermes profile setup helpers', () => {
     const plan = planHermesSetup({ hermesHome, dryRun: true });
 
     expect(existsSync(join(hermesHome, '.env'))).toBe(false);
-    expect(plan.actions.some((action) => action.path.endsWith('.env'))).toBe(true);
+    const envAction = plan.actions.find((action) => action.path.endsWith('.env'));
+    // Fresh profile → the dry-run preview must say `create`, not `update`, so it
+    // is clear a brand-new secret file is about to be written.
+    expect(envAction?.type).toBe('create');
   });
 
   it('does not provision .env for a remote (non-loopback) gateway transport', () => {

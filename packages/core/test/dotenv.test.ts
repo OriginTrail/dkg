@@ -26,6 +26,16 @@ describe('parseDotenvValue', () => {
     expect(parseDotenvValue('"a\\\\b"')).toBe('a\\b');
   });
 
+  it('decodes python-dotenv escape sequences in double-quoted values', () => {
+    // Hermes (python-dotenv) decodes these; the daemon must forward the same
+    // bytes or a valid key would 401.
+    expect(parseDotenvValue('"abc\\n123"')).toBe('abc\n123');
+    expect(parseDotenvValue('"a\\tb"')).toBe('a\tb');
+    expect(parseDotenvValue('"a\\rb"')).toBe('a\rb');
+    // Single-quoted values stay literal (no escape decoding).
+    expect(parseDotenvValue("'a\\nb'")).toBe('a\\nb');
+  });
+
   it('treats backslash literally in single-quoted values', () => {
     expect(parseDotenvValue("'a\\b'")).toBe('a\\b');
   });

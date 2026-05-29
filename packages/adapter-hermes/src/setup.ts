@@ -194,9 +194,10 @@ export function planHermesSetup(options: HermesSetupOptions = {}): HermesSetupPl
   // `.env` is user/Hermes-owned (kept OUT of managedFiles so disconnect
   // preserves it); surface the key provisioning as a separate action only.
   if (shouldProvisionApiServerEnv(bridge)) {
+    const envPath = join(profile.hermesHome, '.env');
     actions.push({
-      type: 'update',
-      path: join(profile.hermesHome, '.env'),
+      type: existsSync(envPath) ? 'update' : 'create',
+      path: envPath,
       reason: 'ensure API_SERVER_KEY + API_SERVER_ENABLED for Hermes api_server (hermes-openai transport)',
     });
   }
