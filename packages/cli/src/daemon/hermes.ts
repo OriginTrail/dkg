@@ -286,19 +286,21 @@ export function resolveHermesApiServerKey(config: DkgConfig): string | undefined
 }
 
 function resolveRawHermesApiServerKey(config: DkgConfig): string | undefined {
-  // The override is the REMOTE mechanism: a remote/WSL `--gateway-url` Hermes
-  // keeps its `.env` on another host, so DKG_HERMES_API_SERVER_KEY is the only
-  // source there.
-  if (!hasLoopbackHermesOpenAiTarget(config)) {
-    return optionalTrimmedString(process.env.DKG_HERMES_API_SERVER_KEY);
-  }
-  // Loopback: the key comes EXCLUSIVELY from the resolved local profile `.env`.
-  // The override never applies here — using it would let a value meant for a
-  // (former) remote gateway shadow or substitute for the local setup. If the
-  // profile can't be resolved, or the key is absent/blank, there is no bearer
-  // and the caller surfaces the missing-key hint.
+  const override = optionalTrimmedString(process.env.DKG_HERMES_API_SERVER_KEY);
+  // Non-loopback `--gateway-url`: the Hermes `.env` is on another host, so the
+  // explicit override is the only source.
+  if (!hasLoopbackHermesOpenAiTarget(config)) return override;
+  // Loopback decision keys off PROFILE LOCALITY, not the URL: a loopback host
+  // can be a genuinely local Hermes OR a remote/WSL2 one reached through a
+  // localhost forward. When no locally-managed profile resolves, there is no
+  // local `.env` to read (the WSL2-forward case), so honor the explicit
+  // override — otherwise that correctly-configured setup would 401 forever.
   const hermesHome = resolveHermesHomeForKey(config);
-  if (!hermesHome) return undefined;
+  if (!hermesHome) return override;
+  // A locally-managed profile resolved: its `.env` is fully authoritative — a
+  // present key, an explicit blank, or no key line all stand, and the override
+  // (which targets a different/remote Hermes) must not shadow or substitute for
+  // it.
   return readApiServerKeyFromEnv(join(hermesHome, '.env')) || undefined;
 }
 

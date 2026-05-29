@@ -643,11 +643,36 @@ describe('Hermes channel helpers', () => {
     });
 
     expect(resolveHermesApiServerKey(config)).toBeUndefined();
-    // DKG_HERMES_API_SERVER_KEY is the REMOTE mechanism — it must not substitute
-    // for a local loopback key (Codex review). Loopback stays undefined.
+    // A locally-managed profile resolved, so its .env is authoritative — the
+    // override (which targets a different/remote Hermes) must not substitute for
+    // a local setup that simply has no key (Codex review).
     process.env.DKG_HERMES_API_SERVER_KEY = 'remote-only-override';
     try {
       expect(resolveHermesApiServerKey(config)).toBeUndefined();
+    } finally {
+      delete process.env.DKG_HERMES_API_SERVER_KEY;
+    }
+  });
+
+  it('honors the override on a loopback gateway with no locally-managed profile (WSL2 localhost forward)', () => {
+    // A WSL2/remote Hermes reached via a localhost forward looks "loopback" but
+    // has no local .env on the daemon host. With no resolvable local profile,
+    // honor DKG_HERMES_API_SERVER_KEY — otherwise this correctly-configured
+    // setup would 401 forever (Codex review).
+    const config = makeConfig({
+      localAgentIntegrations: {
+        hermes: {
+          enabled: true,
+          // No metadata.hermesHome / profileName → no local profile resolves.
+          transport: { kind: 'hermes-openai', gatewayUrl: 'http://127.0.0.1:8642' },
+        },
+      },
+    });
+
+    expect(resolveHermesApiServerKey(config)).toBeUndefined();
+    process.env.DKG_HERMES_API_SERVER_KEY = 'forwarded-remote-key';
+    try {
+      expect(resolveHermesApiServerKey(config)).toBe('forwarded-remote-key');
     } finally {
       delete process.env.DKG_HERMES_API_SERVER_KEY;
     }
