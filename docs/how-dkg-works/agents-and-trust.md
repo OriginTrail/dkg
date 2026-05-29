@@ -25,3 +25,17 @@ Trust is layered:
 - VM is anchored on-chain and can be endorsed or consensus-verified.
 
 An agent should state which layer it used when reporting evidence. "I found this in WM" is different from "this is verified on-chain."
+
+## Trust Gradient
+
+V10 favors a gradient over a binary verified/unverified label:
+
+| Claim state | What it means |
+| --- | --- |
+| Draft | Local working claim, useful to the authoring agent. |
+| Shared | Peer-visible claim that teammates or peer agents can inspect. |
+| Self-attested | Published by an identifiable publisher. |
+| Endorsed | Supported by additional actors or application-specific review. |
+| Consensus-verified | Verified through an agreed quorum or oracle process. |
+
+Conversational consensus belongs in agent workflows. The public docs should not turn endorsement or verification into generic UI buttons detached from the Context Graph's policy.

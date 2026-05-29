@@ -11,12 +11,16 @@ These pages explain the system model and implementation architecture behind the 
 
 | Topic | Route |
 | --- | --- |
+| Terminology and mental model | [Key Concepts](key-concepts.md) |
 | Network and protocol overview | [DKG Network](dkg-network.md) |
 | Node responsibilities | [DKG Node](dkg-node.md) |
 | Scoped knowledge domains | [Context Graphs](context-graphs.md) |
 | WM, SWM, and VM | [Memory Layers](memory-layers.md) |
 | Published graph records | [Knowledge Assets](knowledge-assets.md) |
 | Agent identity and trust | [Agents and Trust](agents-and-trust.md) |
+| V10 direction and staged rollout | [Roadmap and Convergence](roadmap-and-convergence.md) |
+| Publisher and staker commitments | [Conviction and Economics](conviction-and-economics.md) |
+| x402 and paid access direction | [Knowledge Commerce](knowledge-commerce.md) |
 | Runtime components | [Node Architecture](node-architecture.md) |
 | Assertion and memory transitions | [Memory Lifecycle](memory-lifecycle.md) |
 | Reliable short-message substrate | [Universal Messenger](universal-messenger.md) |

@@ -21,6 +21,7 @@ Use this page as a lookup pointer, not as a duplicate API definition. The highes
 | Shared memory and VM publish | `/api/shared-memory/*` |
 | Query | `/api/query` |
 | Agents and messaging | `/api/agents`, `/api/chat`, `/api/messages`, `/api/invoke-skill` |
+| Publishing Conviction Accounts | `/api/pca/*` |
 | Messaging SLOs | `/api/slo` |
 | Node status and peers | `/api/status`, `/api/peer-info`, `/api/wallets/balances` |
 

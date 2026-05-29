@@ -16,3 +16,5 @@ Reference pages point to canonical package-owned sources rather than duplicating
 | Package references | [Packages](packages.md) |
 | Terminology | [Glossary](glossary.md) |
 | Node Skill | [Node Skill](node-skill.md) |
+| DKG V10 bounty program | [OriginTrail DKG v10 Bounty Program](origintrail-dkg-v10-bounty-program.md) |
+| Legal terms | [OriginTrail Decentralized Knowledge Graph DKG V10 - Terms and Conditions](origintrail-decentralized-knowledge-graph-dkg-v10-terms-and-conditions.md) |

@@ -9,6 +9,7 @@ Use these current V10 docs first:
 - docs/use-dkg/publish-and-query.md
 - docs/use-dkg/run-node.md
 - docs/use-dkg/funding.md
+- docs/use-dkg/publishing-conviction.md
 - docs/use-dkg/relays-and-peers.md
 - docs/use-dkg/storage-sparql-http.md
 - docs/use-dkg/host-mode-manual-subscribe.md
@@ -16,12 +17,16 @@ Use these current V10 docs first:
 - docs/use-dkg/migrate-to-npm.md
 - docs/use-dkg/troubleshooting.md
 - docs/how-dkg-works/README.md
+- docs/how-dkg-works/key-concepts.md
 - docs/how-dkg-works/dkg-network.md
 - docs/how-dkg-works/dkg-node.md
 - docs/how-dkg-works/context-graphs.md
 - docs/how-dkg-works/memory-layers.md
 - docs/how-dkg-works/knowledge-assets.md
 - docs/how-dkg-works/agents-and-trust.md
+- docs/how-dkg-works/roadmap-and-convergence.md
+- docs/how-dkg-works/conviction-and-economics.md
+- docs/how-dkg-works/knowledge-commerce.md
 - docs/how-dkg-works/node-architecture.md
 - docs/how-dkg-works/memory-lifecycle.md
 - docs/how-dkg-works/universal-messenger.md
@@ -32,6 +37,8 @@ Use these current V10 docs first:
 - docs/reference/packages.md
 - docs/reference/glossary.md
 - docs/reference/node-skill.md
+- docs/reference/origintrail-dkg-v10-bounty-program.md
+- docs/reference/origintrail-decentralized-knowledge-graph-dkg-v10-terms-and-conditions.md
 - docs/agent-context/README.md
 - docs/agent-context/context-pack.md
 - docs/agent-context/invariants.md

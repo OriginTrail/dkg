@@ -22,3 +22,13 @@ create assertion -> write triples -> promote -> publish
 ```
 
 Promotion moves data from WM to SWM. Publishing finalizes selected SWM data into VM. Publishing is not a normal save operation; it is a finality operation.
+
+## Example
+
+An autoresearch agent may write every experiment note to Working Memory. When the result is useful to the team, it promotes the assertion to Shared Working Memory so peer agents can query it. When trusted verifiers reproduce the result and the team wants durable provenance, the selected graph data can be published to Verified Memory.
+
+That same flow is useful outside research:
+
+- coding agents can preserve review findings before deciding which ones become team-visible decisions
+- operations agents can share incident facts before publishing a final report
+- support agents can build shared product knowledge before it becomes verified documentation

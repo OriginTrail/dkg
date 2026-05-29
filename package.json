@@ -23,6 +23,7 @@
     "bench:baseline": "ESBENCH_RESULT=bench/results/baseline.json ESBENCH_HTML=1 ESBENCH_HTML_FILE=bench/results/baseline.html esbench --config esbench.config.mjs",
     "bench:compare": "ESBENCH_DIFF=bench/results/baseline.json ESBENCH_RESULT=bench/results/compare.json ESBENCH_HTML=1 ESBENCH_HTML_FILE=bench/results/compare.html esbench --config esbench.config.mjs",
     "lint": "turbo lint",
+    "docs:validate": "node scripts/docs/validate-docs-corpus.mjs",
     "clean": "turbo clean",
     "dev": "turbo dev",
     "dkg": "node packages/cli/dist/cli.js",

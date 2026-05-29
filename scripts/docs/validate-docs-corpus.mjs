@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import fs from "node:fs";
+import crypto from "node:crypto";
 import path from "node:path";
 
 const REQUIRED_CURRENT_METADATA = ["status", "version", "audience", "doc_type"];
@@ -18,6 +19,16 @@ const CURRENT_PUBLIC_PATHS = [
   "docs/reference/",
   "docs/agent-context/",
 ];
+const OFFICIAL_IMPORTED_REFERENCE_DOCS = new Set([
+  "docs/reference/origintrail-dkg-v10-bounty-program.md",
+  "docs/reference/origintrail-decentralized-knowledge-graph-dkg-v10-terms-and-conditions.md",
+]);
+const OFFICIAL_IMPORTED_BLOBS = new Map([
+  ["docs/reference/origintrail-dkg-v10-bounty-program.md", "b5a997967d8a56593d614c59554fd1d4bc9677b5"],
+  ["docs/reference/origintrail-decentralized-knowledge-graph-dkg-v10-terms-and-conditions.md", "5f4c6f7488293d85db93074d52e02c439b6684ea"],
+  ["docs/.gitbook/assets/dkg-memory-hr.png", "873e852da840b437889c3b2e78c85c4300e166dd"],
+  ["docs/.gitbook/assets/dkg_v10_bounty_program_high_res_white_bg.png", "7c41a77e7792df4dfde8e3ca262067d662083edb"],
+]);
 const AGENT_CONTEXT_PATHS = [
   "llms.txt",
   "llms-full.txt",
@@ -126,6 +137,10 @@ function isCurrentPublicPath(relativePath) {
   });
 }
 
+function isOfficialImportedReferenceDoc(relativePath) {
+  return OFFICIAL_IMPORTED_REFERENCE_DOCS.has(relativePath);
+}
+
 function walkFiles(rootDir) {
   const entries = fs.existsSync(rootDir)
     ? fs.readdirSync(rootDir, { withFileTypes: true })
@@ -180,6 +195,10 @@ function isCurrentDoc(relativePath, metadata) {
 }
 
 function validateCurrentMetadata(relativePath, metadata, errors) {
+  if (isOfficialImportedReferenceDoc(relativePath)) {
+    return;
+  }
+
   if (!isCurrentDoc(relativePath, metadata)) {
     return;
   }
@@ -354,6 +373,29 @@ function validateAgentContext(relativePath, content, errors) {
   }
 }
 
+function gitBlobSha1(content) {
+  return crypto
+    .createHash("sha1")
+    .update(`blob ${content.length}\0`)
+    .update(content)
+    .digest("hex");
+}
+
+function validateOfficialImports(rootDir, errors) {
+  for (const [relativePath, expectedSha] of OFFICIAL_IMPORTED_BLOBS) {
+    const absolutePath = path.resolve(rootDir, relativePath);
+    if (!fs.existsSync(absolutePath)) {
+      errors.push(`${relativePath}: missing official imported GitBook file`);
+      continue;
+    }
+
+    const actualSha = gitBlobSha1(fs.readFileSync(absolutePath));
+    if (actualSha !== expectedSha) {
+      errors.push(`${relativePath}: official GitBook import changed; expected blob ${expectedSha}, got ${actualSha}`);
+    }
+  }
+}
+
 function main() {
   const rootDir = process.env.DOCS_CORPUS_ROOT
     ? path.resolve(process.env.DOCS_CORPUS_ROOT)
@@ -383,6 +425,7 @@ function main() {
     }
     validateAgentContext(relativePath, content, errors);
   }
+  validateOfficialImports(rootDir, errors);
 
   if (errors.length > 0) {
     for (const error of errors) {

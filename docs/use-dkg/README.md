@@ -18,6 +18,7 @@ Use these routes when you want a node running, an agent connected, memory operat
 | Connect MCP, Hermes, or OpenClaw | [Connect an Agent](connect-agent.md) |
 | Write, publish, and query knowledge | [Publish and Query](publish-and-query.md) |
 | Fund testnet wallets | [Funding](funding.md) |
+| Manage Publishing Conviction Accounts | [Publishing Conviction](publishing-conviction.md) |
 | Configure relays and peer reachability | [Relays and Peers](relays-and-peers.md) |
 | Expose the storage SPARQL endpoint | [Storage SPARQL HTTP](storage-sparql-http.md) |
 | Manually subscribe a host-mode node | [Host-Mode Manual Subscribe](host-mode-manual-subscribe.md) |
