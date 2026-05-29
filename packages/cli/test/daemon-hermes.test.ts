@@ -574,12 +574,36 @@ describe('Hermes channel helpers', () => {
     }))).toBeUndefined();
   });
 
-  it('falls back to the resolved Hermes profile when metadata.hermesHome is absent', () => {
+  it('falls back to an EXACT named profile when metadata.hermesHome is absent but profileName is known', () => {
     const home = mkdtempSync(join(tmpdir(), 'hermes-fallback-'));
     cleanupDirs.push(home);
     writeFileSync(join(home, '.env'), 'API_SERVER_KEY=fallback-key\n');
-    // Integration record predates hermesHome metadata (or connect was skipped):
-    // resolution falls back to the default profile the same way setup does.
+    // Record predates hermesHome metadata but still carries profileName, so we
+    // resolve that exact profile (never a guessed default).
+    resolveHermesProfileMock.mockReturnValue({
+      profileName: 'research',
+      hermesHome: home,
+      memoryMode: 'provider',
+    });
+
+    expect(resolveHermesApiServerKey(makeConfig({
+      localAgentIntegrations: {
+        hermes: {
+          enabled: true,
+          transport: { kind: 'hermes-openai' },
+          metadata: { profileName: 'research' },
+        },
+      },
+    }))).toBe('fallback-key');
+  });
+
+  it('does NOT guess the default profile when neither hermesHome nor profileName is known', () => {
+    // Guessing the default profile here could read a *different* profile's .env
+    // and forward the wrong key (Codex review). Return undefined so the caller
+    // surfaces the "run dkg hermes setup" hint instead.
+    const home = mkdtempSync(join(tmpdir(), 'hermes-noprofile-'));
+    cleanupDirs.push(home);
+    writeFileSync(join(home, '.env'), 'API_SERVER_KEY=wrong-profile-key\n');
     resolveHermesProfileMock.mockReturnValue({
       profileName: undefined,
       hermesHome: home,
@@ -590,7 +614,7 @@ describe('Hermes channel helpers', () => {
       localAgentIntegrations: {
         hermes: { enabled: true, transport: { kind: 'hermes-openai' } },
       },
-    }))).toBe('fallback-key');
+    }))).toBeUndefined();
   });
 
   it('annotates an unreachable hermes-openai health probe with the missing-key hint', async () => {

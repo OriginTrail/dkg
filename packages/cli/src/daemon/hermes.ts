@@ -288,11 +288,14 @@ export function resolveHermesApiServerKey(config: DkgConfig): string | undefined
 
 /**
  * Locate the Hermes profile home whose `.env` carries the key. Prefer the
- * `hermesHome` stored on the integration record, but fall back to the resolved
- * default/named profile (the same resolver `dkg hermes setup` uses) so
- * integration records that predate that metadata — or where connect was
- * skipped — can still find the `.env` setup wrote, instead of staying stuck in
- * missing-key/401 until the user reconnects.
+ * `hermesHome` stored on the integration record. When it's absent (records that
+ * predate that metadata, or where connect was skipped) fall back ONLY to an
+ * exact profile recovered from a stored `profileName`. We never guess the
+ * default profile from no metadata: a record connected to a *named* profile
+ * would then read a different profile's `.env` and forward the wrong key,
+ * causing false 401s. With no recoverable profile we return undefined, so the
+ * caller surfaces the actionable "run dkg hermes setup" missing-key hint
+ * instead of silently sending another profile's secret.
  */
 function resolveHermesHomeForKey(config: DkgConfig): string | undefined {
   const metadata = getLocalAgentIntegration(config, 'hermes')?.metadata as
@@ -300,9 +303,10 @@ function resolveHermesHomeForKey(config: DkgConfig): string | undefined {
     | undefined;
   const fromMetadata = optionalTrimmedString(metadata?.hermesHome);
   if (fromMetadata) return fromMetadata;
+  const profileName = optionalTrimmedString(metadata?.profileName);
+  if (!profileName) return undefined;
   try {
-    const profileName = optionalTrimmedString(metadata?.profileName);
-    return resolveHermesProfile(profileName ? { profileName } : {}).hermesHome;
+    return resolveHermesProfile({ profileName }).hermesHome;
   } catch {
     return undefined;
   }
