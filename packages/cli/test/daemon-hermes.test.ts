@@ -1541,12 +1541,18 @@ describe('Hermes daemon routes', () => {
           },
         },
       }, path);
-      vi.stubGlobal('fetch', vi.fn(async () => new Response('unauthorized', { status: 401 })));
+      // Empty upstream body so the route surfaces our own remediation text.
+      vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 401 })));
 
       await handleHermesRoutes(ctx);
 
       expect(res.statusCode).toBe(502);
-      expect(JSON.parse(res.body)).toMatchObject({ code: 'HERMES_API_KEY_REJECTED' });
+      const body = JSON.parse(res.body);
+      expect(body).toMatchObject({ code: 'HERMES_API_KEY_REJECTED' });
+      // Rejected (key present but wrong) → realign/rotate guidance, NOT the
+      // missing-key "provision" path (setup never overwrites an existing key).
+      expect(body.details).toContain('does not match');
+      expect(body.details).not.toContain('provision API_SERVER_KEY');
     },
   );
 

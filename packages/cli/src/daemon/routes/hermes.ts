@@ -22,6 +22,7 @@ import {
   normalizeHermesChatPayload,
   normalizeHermesPersistTurnPayload,
   hermesApiServerKeyRemediation,
+  hermesApiServerKeyRejectionRemediation,
   pipeHermesStream,
   probeHermesChannelHealth,
   resolveHermesApiServerKey,
@@ -65,7 +66,7 @@ function isHermesApiKeyRejection(target: { protocol?: string }, status: number):
 }
 
 function hermesApiKeyRejectedDetails(config: RequestContext['config']): string {
-  return `Hermes API server rejected the API_SERVER_KEY — ${hermesApiServerKeyRemediation(config)}.`;
+  return `Hermes API server rejected the API_SERVER_KEY — ${hermesApiServerKeyRejectionRemediation(config)}.`;
 }
 
 /**

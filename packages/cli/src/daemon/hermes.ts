@@ -335,6 +335,18 @@ export function hermesApiServerKeyRemediation(config: DkgConfig): string {
     : 'set DKG_HERMES_API_SERVER_KEY in the daemon environment to the remote Hermes API_SERVER_KEY (setup does not modify a remote .env), then restart the daemon';
 }
 
+/**
+ * Remediation when Hermes explicitly REJECTS the bearer (401/403): a key is
+ * present but wrong, so "run dkg hermes setup" is a no-op (setup never
+ * overwrites an existing API_SERVER_KEY). The fix is to realign or rotate the
+ * key so DKG forwards what the running gateway expects.
+ */
+export function hermesApiServerKeyRejectionRemediation(config: DkgConfig): string {
+  return hasLoopbackHermesOpenAiTarget(config)
+    ? 'the API_SERVER_KEY in the Hermes profile .env does not match the running gateway — align them, or clear API_SERVER_KEY and re-run "dkg hermes setup" to regenerate (setup never overwrites an existing key), then restart "hermes gateway run --replace -v"'
+    : 'set DKG_HERMES_API_SERVER_KEY in the daemon environment to the key the remote Hermes is running with, then restart the daemon';
+}
+
 const apiServerKeyCache = new Map<string, { mtimeMs: number; key: string | undefined }>();
 
 function readApiServerKeyFromEnv(envPath: string): string | undefined {
