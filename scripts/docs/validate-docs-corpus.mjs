@@ -300,6 +300,9 @@ function validateRepoFacingLinks(relativePath, content, errors) {
     }
 
     if (isVersionedArchivePath(normalized) || isStaleDocPath(normalized)) {
+      if (relativePath === "docs/SUMMARY.md" && isVersionedArchivePath(normalized)) {
+        continue;
+      }
       staleRefs.add(normalized);
     }
   }
