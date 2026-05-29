@@ -439,7 +439,7 @@ describe('install-layout check (§4.7.3)', () => {
     const m = findings.find((f) => f.subject === '/test/.dkg/releases');
     expect(m).toBeDefined();
     expect(m!.severity).toBe('warning');
-    expect(m!.advisory).toMatch(/rm -rf ~\/\.dkg\/releases\//);
+    expect(m!.advisory).toMatch(/rm -rf \/test\/\.dkg\/releases/);
   });
 
   it('Edge: does NOT advise deleting releases/ while the daemon is running from it', async () => {

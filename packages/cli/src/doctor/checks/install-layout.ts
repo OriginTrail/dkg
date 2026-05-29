@@ -25,8 +25,16 @@ function normalizePathForContainment(p: string): string {
 
 /** True when `child` is `parent` itself or nested under it. */
 function isPathInside(child: string, parent: string): boolean {
-  const c = normalizePathForContainment(child);
-  const p = normalizePathForContainment(parent);
+  let c = normalizePathForContainment(child);
+  let p = normalizePathForContainment(parent);
+  // Windows paths are case-insensitive and the same absolute path can come
+  // back with different drive-letter / segment casing. A case-sensitive
+  // compare here would misclassify a live `releases/` runtime as "not
+  // inside" and fall back to the dangerous "Safe to delete" advisory.
+  if (process.platform === 'win32') {
+    c = c.toLowerCase();
+    p = p.toLowerCase();
+  }
   return c === p || c.startsWith(p + '/');
 }
 
@@ -145,18 +153,18 @@ export async function runInstallLayoutCheck(
         ? {
             check: 'install-layout',
             severity: 'warning',
-            message: `Edge daemon is still running from a legacy slot under ~/.dkg/releases/: ${state.daemon.entryPoint}`,
+            message: `Edge daemon is still running from a legacy slot under the releases tree (${releasesDir}): ${state.daemon.entryPoint}`,
             advisory:
-              "Edge nodes do not use blue-green slots under RFC-41, but this daemon is currently running from the legacy releases tree. Do NOT delete ~/.dkg/releases/ yet — that is the live runtime. Run 'dkg restart' (or re-install) so the daemon runs from the npm-global install, re-run 'dkg doctor' to confirm, and only then 'rm -rf ~/.dkg/releases/'.",
+              `Edge nodes do not use blue-green slots under RFC-41, but this daemon is currently running from the legacy releases tree. Do NOT delete ${releasesDir} yet — that is the live runtime. Run 'dkg restart' (or re-install) so the daemon runs from the npm-global install, re-run 'dkg doctor' to confirm, and only then 'rm -rf ${releasesDir}'.`,
             subject: releasesDir,
             details: { entryPoint: state.daemon.entryPoint },
           }
         : {
             check: 'install-layout',
             severity: 'warning',
-            message: `Legacy ~/.dkg/releases/ directory detected on an Edge node: ${releasesDir}`,
+            message: `Legacy releases directory detected on an Edge node: ${releasesDir}`,
             advisory:
-              "Edge nodes do not use blue-green slots under RFC-41. Safe to delete: 'rm -rf ~/.dkg/releases/'. The daemon runs directly from the npm-global install.",
+              `Edge nodes do not use blue-green slots under RFC-41. Safe to delete: 'rm -rf ${releasesDir}'. The daemon runs directly from the npm-global install.`,
             subject: releasesDir,
           },
     );
