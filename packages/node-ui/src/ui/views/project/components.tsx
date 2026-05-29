@@ -3943,14 +3943,25 @@ export function SubGraphOverviewGrid({
     // over.
     //
     // Residual case: when the heaviest subject's degree alone exceeds
-    // MAX_PER_CARD, the pre-check would reject it on iteration 1 and
-    // exit with an empty `keep` — the card would render the empty-
-    // body branch even though the bucket clearly has content. Fall
-    // back to admitting that single heaviest subject so SOMETHING
+    // MAX_PER_CARD, the pre-check rejects every subject and exits
+    // with an empty `keep` — the card would render the empty-body
+    // branch even though the bucket clearly has content. Fall back
+    // to admitting that single heaviest subject so SOMETHING
     // renders; the post-filter `slice(0, MAX_PER_CARD)` then trims
     // its long tail. The rendered slice loses some cluster topology
     // but the user sees the dominant hub, which is the right user-
     // facing trade-off (vs an empty card on a populated bucket).
+    //
+    // PR #818 Codex sweep 3 — `continue` (was `break`) on a subject
+    // that doesn't fit, so the loop scans further for smaller
+    // satellites that DO fit. With degrees `[2400, 200, 50, 50]`
+    // and cap 2500: `break` would stop at B(200) leaving 100
+    // headroom unused (renders 2400). `continue` skips B but lets
+    // C+D land for a dense pack at 2500. Trade-off: `break`
+    // preserved the heaviest-cluster topology contract; `continue`
+    // packs the cap denser at the cost of potentially picking a
+    // satellite over a third heavy hub that didn't quite fit. The
+    // denser pack is the friendlier user-facing outcome.
     for (const [sg, triples] of bySg) {
       if (triples.length <= MAX_PER_CARD) continue;
       const degree = new Map<string, number>();
@@ -3962,7 +3973,7 @@ export function SubGraphOverviewGrid({
       let kept = 0;
       for (const uri of order) {
         const subjectDegree = degree.get(uri) ?? 0;
-        if (kept + subjectDegree > MAX_PER_CARD) break;
+        if (kept + subjectDegree > MAX_PER_CARD) continue;
         keep.add(uri);
         kept += subjectDegree;
       }
@@ -4211,6 +4222,10 @@ export function SubGraphOverviewGrid({
     // `keep` — fall back to admitting that one subject so the
     // card shows the dominant hub instead of an empty body; the
     // post-filter `slice(0, MAX_PER_CARD)` trims its long tail.
+    // PR #818 Codex sweep 3 — `continue` (was `break`) so the loop
+    // scans further for smaller satellites that still fit. Same
+    // dense-pack rationale as the named-card path above; see the
+    // sweep-3 comment block at `:3935-3953` for the full trade-off.
     // Same fix applied at the named-card path above (`:3935-3953`).
     let cappedRootTriples = rootTriples;
     if (rootTriples.length > MAX_PER_CARD) {
@@ -4223,7 +4238,7 @@ export function SubGraphOverviewGrid({
       let kept = 0;
       for (const uri of order) {
         const subjectDegree = degree.get(uri) ?? 0;
-        if (kept + subjectDegree > MAX_PER_CARD) break;
+        if (kept + subjectDegree > MAX_PER_CARD) continue;
         keep.add(uri);
         kept += subjectDegree;
       }

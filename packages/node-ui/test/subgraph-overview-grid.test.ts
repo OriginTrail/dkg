@@ -82,6 +82,27 @@ const memory = {
   refresh: vi.fn(),
 } as any;
 
+// RdfGraph is React.lazy'd — pump microtasks until the Suspense
+// boundary resolves and the stub renders. Sweep 1 cap tests
+// asserted against a transient Suspense fallback that shares the
+// empty-branch class; tighten by waiting for the actual graph
+// element before reading `data-triple-count`. Optional `scope`
+// restricts the lookup (e.g. to a specific card element).
+async function waitForGraph(
+  container: Element,
+  options?: { scope?: Element; maxMs?: number },
+): Promise<HTMLElement | null> {
+  const root = options?.scope ?? container;
+  const maxMs = options?.maxMs ?? 1000;
+  const start = Date.now();
+  while (Date.now() - start < maxMs) {
+    const el = root.querySelector('[data-testid="rdf-graph"]') as HTMLElement | null;
+    if (el) return el;
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+  }
+  return root.querySelector('[data-testid="rdf-graph"]');
+}
+
 async function flush(): Promise<void> {
   // Two microtask drains — one for the promise the effect kicks
   // off, one for the setState in the resolver/finally.
@@ -1090,6 +1111,94 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
     // above).
     expect(renderedTripleCount).toBeLessThanOrEqual(2500); // MAX_PER_CARD
     expect(renderedTripleCount).toBeGreaterThan(0);         // dominant hub still renders
+  });
+
+  it('Root card cap densely-packs the available capacity instead of under-filling on a non-fitting subject (Codex sweep 3)', async () => {
+    // PR #818 sweep 3 — sweep-2 used `break` on a non-fitting
+    // subject, which under-filled the cap when smaller satellites
+    // would still have fit. Fixture: degrees `[2400, 200, 50, 50]`
+    // with MAX_PER_CARD = 2500.
+    //   • `break` shape: admit 2400 → reject 200 (kept+200 > 2500)
+    //     → stop. Rendered = 2400 (100 headroom unused).
+    //   • `continue` shape: admit 2400 → skip 200 → admit 50 →
+    //     admit 50. Rendered = 2500 (dense pack at the cap).
+    // The dense-pack outcome is the friendlier user-facing
+    // result.
+    fetchSubGraphsMock.mockResolvedValueOnce({
+      subGraphs: [{ name: 'alpha', entityCount: 1, tripleCount: 0, description: '' }],
+    });
+    const entityList = [
+      { uri: 'urn:e:alpha', label: 'a', types: [], trustLevel: 'working', layers: new Set(['working']), subGraphs: new Set(['alpha']), properties: new Map(), connections: [] },
+      { uri: 'urn:e:r-2400', label: 'r1', types: [], trustLevel: 'working', layers: new Set(['working']), subGraphs: new Set<string>(), properties: new Map(), connections: [] },
+      { uri: 'urn:e:r-200', label: 'r2', types: [], trustLevel: 'working', layers: new Set(['working']), subGraphs: new Set<string>(), properties: new Map(), connections: [] },
+      { uri: 'urn:e:r-50a', label: 'r3', types: [], trustLevel: 'working', layers: new Set(['working']), subGraphs: new Set<string>(), properties: new Map(), connections: [] },
+      { uri: 'urn:e:r-50b', label: 'r4', types: [], trustLevel: 'working', layers: new Set(['working']), subGraphs: new Set<string>(), properties: new Map(), connections: [] },
+    ];
+    const triples = [];
+    for (let i = 0; i < 2400; i++) triples.push({ subject: 'urn:e:r-2400', predicate: 'p', object: `urn:e:obj-2400-${i}`, layer: 'working' });
+    for (let i = 0; i < 200; i++) triples.push({ subject: 'urn:e:r-200', predicate: 'p', object: `urn:e:obj-200-${i}`, layer: 'working' });
+    for (let i = 0; i < 50; i++) triples.push({ subject: 'urn:e:r-50a', predicate: 'p', object: `urn:e:obj-50a-${i}`, layer: 'working' });
+    for (let i = 0; i < 50; i++) triples.push({ subject: 'urn:e:r-50b', predicate: 'p', object: `urn:e:obj-50b-${i}`, layer: 'working' });
+    await renderWith({
+      ...memory,
+      entities: new Map(entityList.map(e => [e.uri, e])),
+      entityList,
+      allTriples: triples,
+      counts: { wm: 5, swm: 0, vm: 0, total: 5 },
+    });
+    await flush();
+
+    const cards = container.querySelectorAll('.v10-sgov-card');
+    const rootCardEl = cards[cards.length - 1];
+    const graphEl = await waitForGraph(container, { scope: rootCardEl });
+    expect(graphEl).toBeTruthy();
+    const renderedTripleCount = Number(graphEl!.getAttribute('data-triple-count') ?? 'NaN');
+    // Dense pack: 2400 + 50 + 50 = 2500 (continue skips the 200
+    // that wouldn't fit). The `break` shape would have rendered
+    // 2400 (skipping the satellites that fit). Floor at 2450
+    // catches the 2400 under-fill defect while permitting minor
+    // sampling variance in future tweaks.
+    expect(renderedTripleCount).toBeLessThanOrEqual(2500); // MAX_PER_CARD
+    expect(renderedTripleCount).toBeGreaterThanOrEqual(2450); // dense pack
+  });
+
+  it('Named card cap densely-packs the available capacity (Codex sweep 3, parity)', async () => {
+    // PR #818 sweep 3 — same defect on the named-card sampling at
+    // `:3935-3953`. Same `[2400, 200, 50, 50]` fixture shape,
+    // tagged into a single sub-graph, with literal objects so
+    // `filterTriplesToEntities` doesn't drop the resource-edge
+    // rows.
+    fetchSubGraphsMock.mockResolvedValueOnce({
+      subGraphs: [{ name: 'alpha', entityCount: 4, tripleCount: 2700, description: '' }],
+    });
+    const entityList = [
+      { uri: 'urn:e:a-2400', label: 'a1', types: [], trustLevel: 'working', layers: new Set(['working']), subGraphs: new Set(['alpha']), properties: new Map(), connections: [] },
+      { uri: 'urn:e:a-200', label: 'a2', types: [], trustLevel: 'working', layers: new Set(['working']), subGraphs: new Set(['alpha']), properties: new Map(), connections: [] },
+      { uri: 'urn:e:a-50a', label: 'a3', types: [], trustLevel: 'working', layers: new Set(['working']), subGraphs: new Set(['alpha']), properties: new Map(), connections: [] },
+      { uri: 'urn:e:a-50b', label: 'a4', types: [], trustLevel: 'working', layers: new Set(['working']), subGraphs: new Set(['alpha']), properties: new Map(), connections: [] },
+    ];
+    const triples = [];
+    for (let i = 0; i < 2400; i++) triples.push({ subject: 'urn:e:a-2400', predicate: 'p', object: `"v-2400-${i}"`, subGraph: 'alpha', layer: 'working' });
+    for (let i = 0; i < 200; i++) triples.push({ subject: 'urn:e:a-200', predicate: 'p', object: `"v-200-${i}"`, subGraph: 'alpha', layer: 'working' });
+    for (let i = 0; i < 50; i++) triples.push({ subject: 'urn:e:a-50a', predicate: 'p', object: `"v-50a-${i}"`, subGraph: 'alpha', layer: 'working' });
+    for (let i = 0; i < 50; i++) triples.push({ subject: 'urn:e:a-50b', predicate: 'p', object: `"v-50b-${i}"`, subGraph: 'alpha', layer: 'working' });
+    await renderWith({
+      ...memory,
+      entities: new Map(entityList.map(e => [e.uri, e])),
+      entityList,
+      allTriples: triples,
+      counts: { wm: 4, swm: 0, vm: 0, total: 4 },
+    });
+    await flush();
+
+    // First card is the named alpha card.
+    const cards = container.querySelectorAll('.v10-sgov-card');
+    const alphaCardEl = cards[0];
+    const graphEl = await waitForGraph(container, { scope: alphaCardEl });
+    expect(graphEl).toBeTruthy();
+    const renderedTripleCount = Number(graphEl!.getAttribute('data-triple-count') ?? 'NaN');
+    expect(renderedTripleCount).toBeLessThanOrEqual(2500); // MAX_PER_CARD
+    expect(renderedTripleCount).toBeGreaterThanOrEqual(2450); // dense pack
   });
 });
 
