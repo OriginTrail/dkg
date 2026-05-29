@@ -442,6 +442,26 @@ describe('install-layout check (§4.7.3)', () => {
     expect(m!.advisory).toMatch(/rm -rf ~\/\.dkg\/releases\//);
   });
 
+  it('Edge: does NOT advise deleting releases/ while the daemon is running from it', async () => {
+    // #750 follow-up: an upgraded Edge node can still be running from
+    // ~/.dkg/releases/current until restart. The advisory must not tell
+    // the operator to delete the live runtime.
+    const deps = makeDeps({
+      fs: {
+        '/test/.dkg/config.json': JSON.stringify({ nodeRole: 'edge' }),
+        '/test/.dkg/releases/a/packages/cli/dist/cli.js': '// live slot',
+      },
+    });
+    const state = await collectStateSummary(deps);
+    state.daemon.entryPoint = '/test/.dkg/releases/a/packages/cli/dist/cli.js';
+    const findings = await runInstallLayoutCheck(deps, state);
+    const m = findings.find((f) => f.subject === '/test/.dkg/releases');
+    expect(m).toBeDefined();
+    expect(m!.advisory).not.toMatch(/Safe to delete/);
+    expect(m!.advisory).toMatch(/Do NOT delete/);
+    expect(m!.message).toMatch(/still running from a legacy slot/);
+  });
+
   it('Edge: warns when daemon entryPoint is outside the npm-global install', async () => {
     const deps = makeDeps({
       fs: {

@@ -19,6 +19,17 @@
 import { join } from 'node:path';
 import type { DoctorDeps, Finding, StateSummary } from '../types.js';
 
+function normalizePathForContainment(p: string): string {
+  return p.replace(/\\/g, '/').replace(/\/+$/, '');
+}
+
+/** True when `child` is `parent` itself or nested under it. */
+function isPathInside(child: string, parent: string): boolean {
+  const c = normalizePathForContainment(child);
+  const p = normalizePathForContainment(parent);
+  return c === p || c.startsWith(p + '/');
+}
+
 async function slotEntryPointResolves(deps: DoctorDeps, slotDir: string): Promise<boolean> {
   // Mirrors `blueGreenSlotEntryPoint` semantics — git layout
   // (`packages/cli/dist/cli.js`) OR npm layout
@@ -122,21 +133,37 @@ export async function runInstallLayoutCheck(
 
   // Edge branch.
   if (deps.exists(releasesDir)) {
-    findings.push({
-      check: 'install-layout',
-      severity: 'warning',
-      message: `Legacy ~/.dkg/releases/ directory detected on an Edge node: ${releasesDir}`,
-      advisory: "Edge nodes do not use blue-green slots under RFC-41. Safe to delete: 'rm -rf ~/.dkg/releases/'. The daemon runs directly from the npm-global install.",
-      subject: releasesDir,
-    });
+    // A freshly-upgraded Edge node can still be *running* from
+    // `~/.dkg/releases/current` until the next restart materializes the
+    // npm-global entry point. In that state `rm -rf ~/.dkg/releases/`
+    // would delete the live runtime, so only advise deletion when the
+    // daemon's resolved entry point is NOT inside the releases tree.
+    const runningFromReleases =
+      !!state.daemon.entryPoint && isPathInside(state.daemon.entryPoint, releasesDir);
+    findings.push(
+      runningFromReleases
+        ? {
+            check: 'install-layout',
+            severity: 'warning',
+            message: `Edge daemon is still running from a legacy slot under ~/.dkg/releases/: ${state.daemon.entryPoint}`,
+            advisory:
+              "Edge nodes do not use blue-green slots under RFC-41, but this daemon is currently running from the legacy releases tree. Do NOT delete ~/.dkg/releases/ yet — that is the live runtime. Run 'dkg restart' (or re-install) so the daemon runs from the npm-global install, re-run 'dkg doctor' to confirm, and only then 'rm -rf ~/.dkg/releases/'.",
+            subject: releasesDir,
+            details: { entryPoint: state.daemon.entryPoint },
+          }
+        : {
+            check: 'install-layout',
+            severity: 'warning',
+            message: `Legacy ~/.dkg/releases/ directory detected on an Edge node: ${releasesDir}`,
+            advisory:
+              "Edge nodes do not use blue-green slots under RFC-41. Safe to delete: 'rm -rf ~/.dkg/releases/'. The daemon runs directly from the npm-global install.",
+            subject: releasesDir,
+          },
+    );
   }
 
   if (state.daemon.entryPoint && state.paths.npmGlobalDkg) {
-    const normalizePathForContainment = (p: string) =>
-      p.replace(/\\/g, '/').replace(/\/+$/, '');
-    const ep = normalizePathForContainment(state.daemon.entryPoint);
-    const npm = normalizePathForContainment(state.paths.npmGlobalDkg);
-    const insideNpmGlobal = ep === npm || ep.startsWith(npm + '/');
+    const insideNpmGlobal = isPathInside(state.daemon.entryPoint, state.paths.npmGlobalDkg);
     if (!insideNpmGlobal) {
       // Edge daemon is running from somewhere unexpected. Possible
       // causes: stale slot, contributor monorepo, manual override.
