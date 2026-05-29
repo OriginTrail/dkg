@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { isIP } from 'node:net';
 import { join } from 'node:path';
 
@@ -268,8 +268,8 @@ export function buildHermesChannelHeaders(
  * Resolve the Hermes API server key for the `hermes-openai` UI-chat
  * transport. `.env` (in the stored profile's `hermesHome`) is the source of
  * truth — the same file `dkg hermes setup` provisions and the one Hermes
- * itself reads. Reads are cached by path+mtime so we don't touch disk on
- * every chat request. `DKG_HERMES_API_SERVER_KEY` is the source for remote/WSL
+ * itself reads (read fresh each call so a rotated key is picked up immediately).
+ * `DKG_HERMES_API_SERVER_KEY` is the source for remote/WSL
  * gateways ONLY (whose `.env` is not on the daemon's filesystem); for loopback
  * the key comes exclusively from the local profile `.env`. Returns undefined
  * when no key is available (older key-less Hermes → no bearer is sent).
@@ -358,18 +358,11 @@ export function hermesApiServerKeyRejectionRemediation(config: DkgConfig): strin
     : 'set DKG_HERMES_API_SERVER_KEY in the daemon environment to the key the remote Hermes is running with, then restart the daemon';
 }
 
-const apiServerKeyCache = new Map<string, { mtimeMs: number; key: string | undefined }>();
-
+// Read directly on each call (no cache). The `.env` is tiny and this runs once
+// per user-initiated chat/health request, not in a hot loop — and a path+mtime
+// cache could serve a stale key when `.env` is rewritten twice within the
+// filesystem's timestamp resolution (e.g. a quick setup rerun + key rotation).
 function readApiServerKeyFromEnv(envPath: string): string | undefined {
-  let mtimeMs: number;
-  try {
-    mtimeMs = statSync(envPath).mtimeMs;
-  } catch {
-    apiServerKeyCache.delete(envPath);
-    return undefined;
-  }
-  const cached = apiServerKeyCache.get(envPath);
-  if (cached && cached.mtimeMs === mtimeMs) return cached.key;
   let key: string | undefined;
   try {
     for (const line of readFileSync(envPath, 'utf-8').split(/\r?\n/)) {
@@ -382,9 +375,8 @@ function readApiServerKeyFromEnv(envPath: string): string | undefined {
       key = parseDotenvValue(match[1]);
     }
   } catch {
-    key = undefined;
+    return undefined;
   }
-  apiServerKeyCache.set(envPath, { mtimeMs, key });
   return key;
 }
 
