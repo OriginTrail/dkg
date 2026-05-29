@@ -1763,6 +1763,43 @@ export class DashboardDB {
     return { notifications, unreadCount: unread.c };
   }
 
+  /**
+   * Scoped notifications read (Codex round-1 B3): return rows ONLY for the
+   * given context-graph ids, newest-first, capped at `limit`. Pushing the
+   * member-CG filter into SQL (on the indexed `context_graph_id` column)
+   * instead of read-N-then-filter guarantees a caller's actionable rows
+   * (join requests) can't be evicted from the window by a flood of
+   * foreign-CG rows. Empty `cgIds` → empty result (no member CGs in scope).
+   *
+   * better-sqlite3 has no array binding, so the `IN (...)` placeholder list
+   * is built from `cgIds.length`.
+   */
+  getNotificationsForContextGraphs(cgIds: string[], limit = 500): NotificationRow[] {
+    if (cgIds.length === 0) return [];
+    const placeholders = cgIds.map(() => '?').join(',');
+    return this.db.prepare(
+      `SELECT * FROM notifications
+        WHERE context_graph_id IN (${placeholders})
+        ORDER BY ts DESC LIMIT ?`,
+    ).all(...cgIds, limit) as NotificationRow[];
+  }
+
+  /**
+   * The set of notification row ids in the caller's scope (Codex round-1 B2):
+   * rows whose `context_graph_id` is in `cgIds`. Used to intersect a `/read`
+   * request so a caller can only mark THEIR OWN scoped rows read — never
+   * foreign rows by guessing ids — and so empty-body "mark all" marks only
+   * the caller's scoped rows, not the entire table. Empty `cgIds` → empty set.
+   */
+  getScopedNotificationRowIds(cgIds: string[]): Set<number> {
+    if (cgIds.length === 0) return new Set();
+    const placeholders = cgIds.map(() => '?').join(',');
+    const rows = this.db.prepare(
+      `SELECT id FROM notifications WHERE context_graph_id IN (${placeholders})`,
+    ).all(...cgIds) as Array<{ id: number }>;
+    return new Set(rows.map((r) => r.id));
+  }
+
   markNotificationsRead(ids?: number[]): number {
     if (ids && ids.length > 0) {
       const placeholders = ids.map(() => '?').join(',');

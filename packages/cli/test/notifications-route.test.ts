@@ -35,8 +35,15 @@ describe('GET/POST /api/notifications (scoped daemon route, A4)', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  function makeAgent(opts: { pending?: Record<string, string[]> } = {}) {
+  // Token → agent-address map for the B1 token-verified caller derivation.
+  // The route resolves the caller via agent.resolveAgentByToken(requestToken)
+  // ONLY (no default-agent fallback), so the harness wires a token map.
+  const TOKEN_FOR_CALLER = 'tok-caller';
+
+  function makeAgent(opts: { pending?: Record<string, string[]>; tokens?: Record<string, string> } = {}) {
+    const tokens = opts.tokens ?? { [TOKEN_FOR_CALLER]: CALLER };
     return {
+      resolveAgentByToken: vi.fn((token: string) => tokens[token]),
       listContextGraphs: vi.fn(async () => [
         { id: CG_CURATED, uri: '', name: 'Curated CG', curator: `did:dkg:agent:${CALLER}`, callerInvolved: true, isSystem: false },
         { id: CG_JOINED, uri: '', name: 'Joined CG', curator: `did:dkg:agent:${OTHER}`, callerInvolved: true, isSystem: false },
@@ -48,14 +55,15 @@ describe('GET/POST /api/notifications (scoped daemon route, A4)', () => {
     };
   }
 
-  async function startRoute(agent: ReturnType<typeof makeAgent>, requestAgentAddress: string) {
+  // `requestToken` defaults to the caller's valid token; pass undefined (or an
+  // unmapped token) to exercise the fail-closed (B1) path.
+  async function startRoute(agent: ReturnType<typeof makeAgent>, requestToken: string | undefined = TOKEN_FOR_CALLER) {
     server = createServer(async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://127.0.0.1');
       const ctx = {
         req, res, agent, dashDb: db,
         url, path: url.pathname,
-        requestAgentAddress,
-        requestToken: undefined,
+        requestToken,
       } as any;
       try {
         await handleNotificationRoutes(ctx);
@@ -97,8 +105,12 @@ describe('GET/POST /api/notifications (scoped daemon route, A4)', () => {
     });
   }
 
-  it('fails closed (scopeUnknown) when the caller is not a wallet agent (peerId fallback)', async () => {
-    await startRoute(makeAgent(), '12D3KooWNotAWallet');
+  it('fails closed (scopeUnknown) when the token does not resolve to a wallet agent (B1)', async () => {
+    // An unmapped token → resolveAgentByToken returns undefined → fail closed.
+    // B1: we do NOT fall back to the node default agent. (Use an explicit
+    // unmapped token rather than `undefined`, which would hit startRoute's
+    // default-arg.)
+    await startRoute(makeAgent(), 'no-such-token');
     const { status, body } = await getNotifs();
     expect(status).toBe(200);
     expect(body.scopeUnknown).toBe(true);
@@ -112,7 +124,7 @@ describe('GET/POST /api/notifications (scoped daemon route, A4)', () => {
     activityRow(CG_FOREIGN, 'created', baseTs, OTHER);  // non-member → dropped
     db.insertNotification({ ts: baseTs, type: 'kc_published', title: 'x', message: 'x', contextGraphId: CG_JOINED }); // noise → dropped
 
-    await startRoute(makeAgent(), CALLER);
+    await startRoute(makeAgent());
     const { body } = await getNotifs();
     expect(body.scopeUnknown).toBeUndefined();
     expect(body.notifications).toHaveLength(1);
@@ -126,7 +138,7 @@ describe('GET/POST /api/notifications (scoped daemon route, A4)', () => {
     joinRequestRow(CG_CURATED, OTHER);                // not in pending set → dropped (resolved)
     joinRequestRow(CG_JOINED, REQUESTER);             // joined (not curated) → dropped
 
-    await startRoute(makeAgent({ pending: { [CG_CURATED]: [REQUESTER] } }), CALLER);
+    await startRoute(makeAgent({ pending: { [CG_CURATED]: [REQUESTER] } }));
     const { body } = await getNotifs();
     const joins = body.notifications.filter((n: any) => n.type === 'join_request');
     expect(joins).toHaveLength(1);
@@ -142,7 +154,7 @@ describe('GET/POST /api/notifications (scoped daemon route, A4)', () => {
     const a2 = activityRow(CG_JOINED, 'created', baseTs + 10, OTHER);
     const jr = joinRequestRow(CG_CURATED, REQUESTER, baseTs);
 
-    await startRoute(makeAgent({ pending: { [CG_CURATED]: [REQUESTER] } }), CALLER);
+    await startRoute(makeAgent({ pending: { [CG_CURATED]: [REQUESTER] } }));
 
     const digestKey = buildActivityDigestKey(CG_JOINED, 'created', baseTs);
     const read = await postRead({ ids: [digestKey, jr] });
@@ -159,11 +171,77 @@ describe('GET/POST /api/notifications (scoped daemon route, A4)', () => {
     expect(all.find((n) => n.id === jr)!.read).toBe(1);
   });
 
-  it('POST /read with empty body marks all read (legacy behaviour preserved)', async () => {
-    joinRequestRow(CG_CURATED, REQUESTER);
-    await startRoute(makeAgent({ pending: { [CG_CURATED]: [REQUESTER] } }), CALLER);
+  it('POST /read empty body marks ONLY the caller-scoped rows, never foreign-CG rows (B2)', async () => {
+    const baseTs = 5 * ACTIVITY_DIGEST_WINDOW_MS + 1000;
+    const mine = activityRow(CG_JOINED, 'created', baseTs, OTHER);   // in scope
+    const foreign = activityRow(CG_FOREIGN, 'created', baseTs, OTHER); // NOT in scope
+    await startRoute(makeAgent({ pending: { [CG_CURATED]: [REQUESTER] } }));
+
     const read = await postRead({});
-    expect(read.body.marked).toBeGreaterThanOrEqual(1);
+    expect(read.body.marked).toBe(1); // only `mine`, not `foreign`
+
+    const all = db.getNotifications().notifications;
+    expect(all.find((n) => n.id === mine)!.read).toBe(1);
+    expect(all.find((n) => n.id === foreign)!.read).toBe(0); // untouched
+  });
+
+  it('POST /read ignores ids the caller is not scoped to (B2 — no marking foreign rows by id)', async () => {
+    const baseTs = 5 * ACTIVITY_DIGEST_WINDOW_MS + 1000;
+    const foreign = activityRow(CG_FOREIGN, 'created', baseTs, OTHER);
+    await startRoute(makeAgent());
+
+    // Caller explicitly tries to mark a foreign-CG row by its numeric id.
+    const read = await postRead({ ids: [foreign] });
+    expect(read.body.marked).toBe(0);
+    expect(db.getNotifications().notifications.find((n) => n.id === foreign)!.read).toBe(0);
+  });
+
+  it('POST /read with no token marks nothing (B1 fail-closed)', async () => {
+    activityRow(CG_JOINED, 'created', 5 * ACTIVITY_DIGEST_WINDOW_MS + 1000, OTHER);
+    await startRoute(makeAgent(), 'no-such-token'); // unresolved caller
+    const read = await postRead({});
+    expect(read.body.marked).toBe(0);
+    expect(read.body.scopeUnknown).toBe(true);
+  });
+
+  it('B3: a flood of foreign-CG rows does not evict the caller actionable join request', async () => {
+    // 600 foreign-CG rows (newer) > the 500 read cap. Pre-B3 (read-500-then-
+    // scope) these would fill the window and the older in-scope join request
+    // would never be read; with the scoped SQL read it survives.
+    const base = 9 * ACTIVITY_DIGEST_WINDOW_MS;
+    const jr = joinRequestRow(CG_CURATED, REQUESTER, base); // older, in scope
+    for (let i = 0; i < 600; i++) {
+      activityRow(CG_FOREIGN, 'created', base + 1000 + i, OTHER); // newer, out of scope
+    }
+    await startRoute(makeAgent({ pending: { [CG_CURATED]: [REQUESTER] } }));
+    const { body } = await getNotifs();
+    const joins = body.notifications.filter((n: any) => n.type === 'join_request');
+    expect(joins).toHaveLength(1);
+    expect(joins[0].id).toBe(jr);
+  });
+
+  it('M9: a new same-bucket event re-surfaces a previously-read digest', async () => {
+    // Mark a digest seen, then a NEW unread atomic row lands in the SAME
+    // (cg, kind, 24h-bucket) → the digest reads UNREAD again. Guards against a
+    // resolveActivityDigestRowIds change that marks the whole bucket.
+    const baseTs = 5 * ACTIVITY_DIGEST_WINDOW_MS + 1000;
+    activityRow(CG_JOINED, 'created', baseTs, OTHER);
+    await startRoute(makeAgent());
+
+    // Read the digest (mark its current rows read).
+    const digestKey = buildActivityDigestKey(CG_JOINED, 'created', baseTs);
+    await postRead({ ids: [digestKey] });
+    let { body } = await getNotifs();
+    expect(body.notifications.find((n: any) => n.id === digestKey)!.read).toBe(1);
+
+    // A new event lands in the same bucket (unread).
+    activityRow(CG_JOINED, 'created', baseTs + 5000, OTHER);
+    ({ body } = await getNotifs());
+    const digest = body.notifications.find((n: any) => n.id === digestKey);
+    expect(digest).toBeDefined();
+    expect(digest.read).toBe(0);            // re-surfaced as unread
+    expect(digest.meta.count).toBe(2);      // both events in the bucket
+    expect(body.badgeCount).toBe(1);
   });
 
   // Dispatch-order guard (ADR-003): in lifecycle.ts the node-ui handler runs

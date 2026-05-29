@@ -9,7 +9,7 @@
 // calls it.
 //
 //   GET  /api/notifications        → scoped { notifications, badgeCount, scopeUnknown? }
-//   POST /api/notifications/read   → mark ids + digestKeys read
+//   POST /api/notifications/read   → mark ids + digestKeys read (caller-scoped)
 
 import { scopeNotifications, type NotificationScopeContext } from '@origintrail-official/dkg-node-ui';
 import { jsonResponse, readBody, SMALL_BODY_BYTES } from '../http-utils.js';
@@ -28,73 +28,97 @@ function addressFromAgentDid(value: string | undefined | null): string | undefin
 }
 
 /**
- * How many raw rows to pull before scoping. The scoped/collapsed result is
- * capped client-side; we read a generous window so the digest collapse counts
- * are correct across the page (the unscoped table also still contains legacy
- * noise rows that the scope filter drops, so we read more than the visible
- * cap). prune() bounds the table, so this stays bounded in practice.
+ * Cap on rows pulled from the SCOPED read. Because the member-CG filter is
+ * pushed into SQL (`getNotificationsForContextGraphs`), this only ever reads
+ * the caller's own rows — a foreign-CG flood can no longer evict the
+ * caller's actionable join requests from the window (Codex round-1 B3).
  */
-const RAW_READ_LIMIT = 500;
+const SCOPED_READ_LIMIT = 500;
+
+/**
+ * Resolve the caller's wallet address from the request token ONLY — no
+ * fallback to the node default agent (Codex round-1 B1). `resolveAgentAddress`
+ * deliberately falls back to defaultAgentAddress/peerId so unauthenticated
+ * loopback callers still "act as" the owner for normal node ops; for
+ * notification SCOPING that fallback would hand an anonymous caller the
+ * default agent's feed and prevent `scopeUnknown` from ever firing. We bind
+ * scope strictly to a token-verified agent and fail closed otherwise. This
+ * holds even when `httpAuthGuard` is disabled (loopback owner mode), which is
+ * the only path where an anonymous caller reaches dispatch.
+ */
+function resolveScopedCaller(ctx: RequestContext): string | undefined {
+  const fromToken = ctx.requestToken ? ctx.agent.resolveAgentByToken(ctx.requestToken) : undefined;
+  return addressFromAgentDid(fromToken)
+    ?? (fromToken && EVM_ADDRESS_RE.test(fromToken) ? fromToken.toLowerCase() : undefined);
+}
+
+interface CallerScope {
+  callerAddress: string;
+  memberCgIds: Set<string>;
+  curatedCgIds: Set<string>;
+  contextGraphNames: Map<string, string>;
+}
+
+/** Resolve the caller's member + curated CG sets (+ display names). */
+async function resolveCallerScope(ctx: RequestContext, callerAddress: string): Promise<CallerScope> {
+  const cgs = await ctx.agent.listContextGraphs({ callerAgentAddress: callerAddress });
+  const memberCgIds = new Set<string>();
+  const curatedCgIds = new Set<string>();
+  const contextGraphNames = new Map<string, string>();
+  for (const cg of cgs) {
+    if (typeof cg.id !== 'string' || cg.id.length === 0) continue;
+    if (cg.callerInvolved !== true) continue;
+    memberCgIds.add(cg.id);
+    if (typeof cg.name === 'string' && cg.name.length > 0) contextGraphNames.set(cg.id, cg.name);
+    if (addressFromAgentDid(cg.curator) === callerAddress) curatedCgIds.add(cg.id);
+  }
+  return { callerAddress, memberCgIds, curatedCgIds, contextGraphNames };
+}
 
 export async function handleNotificationRoutes(ctx: RequestContext): Promise<void> {
-  const { req, res, agent, dashDb, requestAgentAddress, path } = ctx;
+  const { req, res, agent, dashDb, path } = ctx;
 
   // GET /api/notifications — scoped to the caller's member CGs.
   if (req.method === 'GET' && path === '/api/notifications') {
-    const callerAddress = addressFromAgentDid(requestAgentAddress)
-      ?? (EVM_ADDRESS_RE.test(requestAgentAddress) ? requestAgentAddress.toLowerCase() : undefined);
+    const callerAddress = resolveScopedCaller(ctx);
 
-    // Fail closed: no usable wallet identity → the pure fn returns
-    // scopeUnknown:true (client renders "Verifying access…", not "all
-    // caught up"). We still short-circuit here to avoid the membership
-    // queries when there's nothing to scope against.
+    // B1: fail closed when the caller isn't a token-verified wallet agent —
+    // the pure fn returns scopeUnknown:true (client renders "Verifying
+    // access…", never "all caught up").
     if (!callerAddress) {
       return jsonResponse(res, 200, { notifications: [], badgeCount: 0, scopeUnknown: true });
     }
 
     try {
-      const cgs = await agent.listContextGraphs({ callerAgentAddress: callerAddress });
-      const memberCgIds = new Set<string>();
-      const curatedCgIds = new Set<string>();
-      const contextGraphNames = new Map<string, string>();
-      for (const cg of cgs) {
-        if (typeof cg.id !== 'string' || cg.id.length === 0) continue;
-        if (cg.callerInvolved !== true) continue;
-        memberCgIds.add(cg.id);
-        if (typeof cg.name === 'string' && cg.name.length > 0) contextGraphNames.set(cg.id, cg.name);
-        // Curated = the caller is the CG's curator (gates incoming join requests).
-        if (addressFromAgentDid(cg.curator) === callerAddress) curatedCgIds.add(cg.id);
-      }
+      const scope = await resolveCallerScope(ctx, callerAddress);
 
-      // Authoritative pending-join set per curated CG (G3 reconcile). Only
-      // queried for curated CGs — that's the only place join_request rows
-      // are actionable.
+      // B3: read ONLY the caller's scoped rows (member-CG filter in SQL), so
+      // foreign-CG volume can't push actionable rows out of the window.
+      const notifications = dashDb.getNotificationsForContextGraphs(
+        [...scope.memberCgIds],
+        SCOPED_READ_LIMIT,
+      );
+
+      // Authoritative pending-join set per curated CG (G3 reconcile).
       const pendingByGraph = new Map<string, Set<string>>();
       await Promise.all(
-        [...curatedCgIds].map(async (cgId) => {
+        [...scope.curatedCgIds].map(async (cgId) => {
           try {
             const pending = await agent.listPendingJoinRequests(cgId);
-            pendingByGraph.set(
-              cgId,
-              new Set(pending.map((r) => r.agentAddress.toLowerCase())),
-            );
+            pendingByGraph.set(cgId, new Set(pending.map((r) => r.agentAddress.toLowerCase())));
           } catch {
-            // A per-CG pending lookup failure must not blank the whole feed;
-            // treat as "no pending" so stale join_request rows are dropped
-            // (fail closed on the actionable set, not the whole pane).
             pendingByGraph.set(cgId, new Set());
           }
         }),
       );
 
-      const { notifications } = dashDb.getNotifications({ limit: RAW_READ_LIMIT });
       const scopeCtx: NotificationScopeContext = {
         callerResolved: true,
-        memberCgIds,
-        curatedCgIds,
+        memberCgIds: scope.memberCgIds,
+        curatedCgIds: scope.curatedCgIds,
         pendingByGraph,
         selfAgentDid: `${AGENT_DID_PREFIX}${callerAddress}`,
-        contextGraphNames,
+        contextGraphNames: scope.contextGraphNames,
       };
       return jsonResponse(res, 200, scopeNotifications(notifications, scopeCtx));
     } catch (err: unknown) {
@@ -104,10 +128,29 @@ export async function handleNotificationRoutes(ctx: RequestContext): Promise<voi
   }
 
   // POST /api/notifications/read — mark numeric ids AND/OR activity digestKeys
-  // read. A digestKey resolves (via the A1 helper) to its underlying atomic
-  // assertion_activity row ids. Empty body / no ids → mark all read (legacy
-  // "Mark all read" behaviour preserved).
+  // read, SCOPED TO THE CALLER (Codex round-1 B2): a caller may only mark rows
+  // in their own member CGs — never foreign rows by guessing ids — and an
+  // empty body marks only the caller's scoped rows, not the entire table.
   if (req.method === 'POST' && path === '/api/notifications/read') {
+    const callerAddress = resolveScopedCaller(ctx);
+    // B1/B2: no token-verified caller → no scope → mark nothing (fail closed).
+    if (!callerAddress) {
+      return jsonResponse(res, 200, { marked: 0, scopeUnknown: true });
+    }
+
+    let scopedIds: Set<number>;
+    try {
+      const scope = await resolveCallerScope(ctx, callerAddress);
+      scopedIds = dashDb.getScopedNotificationRowIds([...scope.memberCgIds]);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      return jsonResponse(res, 500, { error: `Failed to resolve notification scope: ${message}` });
+    }
+
+    if (scopedIds.size === 0) {
+      return jsonResponse(res, 200, { marked: 0 });
+    }
+
     const body = await readBody(req, SMALL_BODY_BYTES);
     let rawIds: unknown;
     try {
@@ -116,35 +159,36 @@ export async function handleNotificationRoutes(ctx: RequestContext): Promise<voi
       rawIds = undefined;
     }
 
+    // Empty body / no ids → mark ALL of the caller's scoped rows (NOT the
+    // whole table).
     if (rawIds === undefined) {
-      // No ids supplied → mark everything read.
-      const count = dashDb.markNotificationsRead();
+      const count = dashDb.markNotificationsRead([...scopedIds]);
       return jsonResponse(res, 200, { marked: count });
     }
     if (!Array.isArray(rawIds)) {
       return jsonResponse(res, 400, { error: '"ids" must be an array of numeric ids and/or digest keys' });
     }
 
-    // Partition into numeric row ids and string digestKeys. digestKeys expand
-    // to their underlying atomic row ids; numeric ids pass through.
-    const numericIds = new Set<number>();
+    // Expand digestKeys to underlying row ids; collect numeric ids. Then
+    // INTERSECT against the caller's scoped set so foreign ids are ignored.
+    const requested = new Set<number>();
     for (const entry of rawIds) {
       if (typeof entry === 'number' && Number.isInteger(entry)) {
-        numericIds.add(entry);
+        requested.add(entry);
       } else if (typeof entry === 'string') {
-        const n = Number(entry);
-        if (Number.isInteger(n) && /^\d+$/.test(entry)) {
-          numericIds.add(n); // numeric id sent as a string
+        if (/^\d+$/.test(entry)) {
+          requested.add(Number(entry)); // numeric id sent as a string
         } else {
-          for (const rowId of dashDb.resolveActivityDigestRowIds(entry)) numericIds.add(rowId);
+          for (const rowId of dashDb.resolveActivityDigestRowIds(entry)) requested.add(rowId);
         }
       }
     }
 
-    if (numericIds.size === 0) {
+    const inScope = [...requested].filter((id) => scopedIds.has(id));
+    if (inScope.length === 0) {
       return jsonResponse(res, 200, { marked: 0 });
     }
-    const count = dashDb.markNotificationsRead([...numericIds]);
+    const count = dashDb.markNotificationsRead(inScope);
     return jsonResponse(res, 200, { marked: count });
   }
 }
