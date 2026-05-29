@@ -6941,7 +6941,11 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  /* 8/12 asymmetry (ui-lead, round 3): caption reads as
+     "grouped with the strip above (tight 8px), terminated
+     from the chrome below (looser 12px)". */
   margin-top: 8px;              /* was: 14px */
+  margin-bottom: 12px;          /* round 3: terminate before entity-tab strip */
   padding: 0;
   border: 0;
   background: transparent;

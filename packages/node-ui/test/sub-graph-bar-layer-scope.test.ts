@@ -554,7 +554,13 @@ describe('SubGraphBar — layer-scoped chip counts (P4)', () => {
     expect(allChip).toBeTruthy();
     const title = allChip.getAttribute('title') ?? '';
     const aria = allChip.getAttribute('aria-label') ?? '';
-    expect(title).toContain('Total entities');
+    // Round 3 (ux-lead lock): "distinct entities" prefix added
+    // to both tooltip modes — lock the new phrasing so it can't
+    // regress. Title leads with "Total", aria with "All — total"
+    // (sentence-cased like the rest of the aria label); the
+    // load-bearing token is `distinct entities`.
+    expect(title).toContain('Total distinct entities');
+    expect(aria).toContain('distinct entities');
     expect(title).toContain('some may belong to more than one');
     expect(title).toContain('plus Root entities not in any subgraph');
     expect(aria).toContain('plus Root entities not in any subgraph');
@@ -578,7 +584,13 @@ describe('SubGraphBar — layer-scoped chip counts (P4)', () => {
     expect(allChip).toBeTruthy();
     const title = allChip.getAttribute('title') ?? '';
     const aria = allChip.getAttribute('aria-label') ?? '';
-    expect(title).toContain('Total entities in named subgraphs');
+    // Round 3 (ux-lead lock): "distinct entities" prefix added
+    // to both tooltip modes — lock the new phrasing so it can't
+    // regress. Title leads with "Total", aria with "All — total"
+    // (sentence-cased like the rest of the aria label); the
+    // load-bearing token is `distinct entities in named subgraphs`.
+    expect(title).toContain('Total distinct entities in named subgraphs');
+    expect(aria).toContain('distinct entities in named subgraphs');
     expect(title).toContain('counted separately on the Root chip');
     expect(aria).toContain('counted separately on the Root chip');
     // Must NOT carry the layer-mode phrasing that includes Root.

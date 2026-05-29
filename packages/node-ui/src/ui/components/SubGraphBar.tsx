@@ -315,12 +315,16 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
   // each mode so the math reads consistently with the chip count.
   // (PR #793 Codex sweep 1 — gating fix.)
   const inLayerMode = isNarrowed;
+  // Round 3 (ux-lead lock): "distinct" prefix added to both mode
+  // tooltips to disambiguate that the count reflects unique
+  // entities, not chip-row sum (entities may belong to more than
+  // one named subgraph and would otherwise appear double-counted).
   const allTooltipCopy = inLayerMode
-    ? `Total entities — includes those in named subgraphs (some may belong to more than one), plus Root entities not in any subgraph · ${totalEntities} entities${scopeSuffix}${layerLabel ? '' : ` · ${totalTriples} triples`}`
-    : `Total entities in named subgraphs (some may belong to more than one). Root entities are counted separately on the Root chip · ${totalEntities} entities · ${totalTriples} triples`;
+    ? `Total distinct entities — includes those in named subgraphs (some may belong to more than one), plus Root entities not in any subgraph · ${totalEntities} entities${scopeSuffix}${layerLabel ? '' : ` · ${totalTriples} triples`}`
+    : `Total distinct entities in named subgraphs (some may belong to more than one). Root entities are counted separately on the Root chip · ${totalEntities} entities · ${totalTriples} triples`;
   const allAriaCopy = inLayerMode
-    ? `All — total entities. Includes those in named subgraphs (some may belong to more than one), plus Root entities not in any subgraph. ${totalEntities} entities${scopeSuffix}.`
-    : `All — total entities in named subgraphs (some may belong to more than one). Root entities are counted separately on the Root chip. ${totalEntities} entities.`;
+    ? `All — total distinct entities. Includes those in named subgraphs (some may belong to more than one), plus Root entities not in any subgraph. ${totalEntities} entities${scopeSuffix}.`
+    : `All — total distinct entities in named subgraphs (some may belong to more than one). Root entities are counted separately on the Root chip. ${totalEntities} entities.`;
 
   return (
     <div className="v10-subgraph-bar">
