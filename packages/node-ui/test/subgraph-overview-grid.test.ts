@@ -700,6 +700,62 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
     expect(stats).toContain('1 entities');
     expect(stats).toContain('2 triples');
   });
+
+  it('renders the Root card when the CG has zero named subgraphs but non-zero root entities (Codex sweep 1)', async () => {
+    // PR #818 sweep 1 — the teaching empty state gate previously
+    // fired on `cards.length === 0` alone. A CG with no named
+    // sub-graphs but populated root entities lost the direct Root
+    // affordance: user landed on the teaching state and had to
+    // click "View root" instead of seeing the Root card in place.
+    // Gate is now `cards.length === 0 && rootCard.entityCount === 0`,
+    // so this scenario renders only the Root card as the entire
+    // grid.
+    fetchSubGraphsMock.mockResolvedValueOnce({
+      // Zero named sub-graphs.
+      subGraphs: [],
+    });
+    const entityList = [
+      { uri: 'urn:e:root-only', label: 'r', types: [], trustLevel: 'working', layers: new Set(['working']), subGraphs: new Set<string>(), properties: new Map(), connections: [] },
+    ];
+    await renderWith({
+      ...memory,
+      entities: new Map(entityList.map(e => [e.uri, e])),
+      entityList,
+      allTriples: [],
+      counts: { wm: 1, swm: 0, vm: 0, total: 1 },
+    });
+    await flush();
+
+    // Teaching empty state must NOT render — its title is the
+    // tell.
+    expect(container.textContent ?? '').not.toContain('No subgraphs in this Context Graph yet.');
+    // Exactly one card renders — the Root card.
+    const cards = container.querySelectorAll('.v10-sgov-card');
+    expect(cards.length).toBe(1);
+    expect(cards[0].classList.contains('root')).toBe(true);
+    expect(cards[0].querySelector('.v10-sgov-card-title')?.textContent).toBe('Root');
+  });
+
+  it('renders the teaching empty state when the CG has zero named subgraphs AND zero root entities (Codex sweep 1)', async () => {
+    // Companion test — the truly-empty case must keep showing the
+    // teaching empty state (unchanged behaviour). Locks against a
+    // regression where someone widens the Root card gate too far.
+    fetchSubGraphsMock.mockResolvedValueOnce({
+      subGraphs: [],
+    });
+    await renderWith({
+      ...memory,
+      entityList: [],
+      allTriples: [],
+      counts: { wm: 0, swm: 0, vm: 0, total: 0 },
+    });
+    await flush();
+
+    // Teaching empty state renders — its title is the tell.
+    expect(container.textContent ?? '').toContain('No subgraphs in this Context Graph yet.');
+    // No mini-cards.
+    expect(container.querySelectorAll('.v10-sgov-card').length).toBe(0);
+  });
 });
 
 describe('SubGraphMiniCard — per-trust nodeColors (S3 polish #3, ui-locked priority chain)', () => {

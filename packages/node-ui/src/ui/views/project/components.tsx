@@ -4197,7 +4197,24 @@ export function SubGraphOverviewGrid({
       />
     );
   }
-  if (cards.length === 0) {
+  // PR #818 Codex sweep 1 — the teaching empty state fires when
+  // there are no named sub-graphs registered. Pre-sweep the gate
+  // was `cards.length === 0` alone, which short-circuited the
+  // grid render BEFORE the Root mini-card render block — so a CG
+  // with no named sub-graphs but non-zero root entities lost the
+  // direct Root affordance (user had to click the empty-state's
+  // "View root" CTA instead of seeing the Root card in-place).
+  //
+  // Post-sweep: only render the teaching empty state when BOTH the
+  // named-sub-graph set AND the Root bucket are empty — the only
+  // truly "nothing to show" case. Three resulting states:
+  //   • named cards + Root entities → full grid (named cards +
+  //     Root card last)
+  //   • zero named cards + Root entities → grid renders only the
+  //     Root card (it stands alone as the entire grid)
+  //   • zero named cards + zero Root entities → teaching empty
+  //     state (unchanged behaviour for the truly-empty case)
+  if (cards.length === 0 && rootCard.entityCount === 0) {
     // Teaching empty state (UX §4.4.1). Replaces the previous bare
     // "No sub-graphs registered yet." — explains what a subgraph is,
     // how one comes into being, and offers a one-click jump to the
