@@ -31,10 +31,15 @@ vi.mock('@origintrail-official/dkg-graph-viz/react', async () => {
       // Surface the nodeColors style override so #3 polish tests
       // can assert per-URI trust-color plumbing without reaching
       // into the canvas internals.
+      // PR #818 sweep 2 — also surface the data length via
+      // `data-triple-count` so MAX_PER_CARD cap tests can assert
+      // the rendered slice length directly (would have caught
+      // the single-dominant-subject cap defect).
       const nodeColors = props.options?.style?.nodeColors ?? {};
       return React.createElement('div', {
         'data-testid': 'rdf-graph',
         'data-node-colors': JSON.stringify(nodeColors),
+        'data-triple-count': String(props.data?.length ?? 0),
       });
     },
   };
@@ -810,17 +815,20 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
     // slice is sampled).
     const stats = rootCardEl.querySelector('.v10-sgov-card-stats')?.textContent ?? '';
     expect(stats).toContain('3000 triples');
-    // The rendered mini-graph receives the post-cap sampled
-    // slice. The RdfGraph stub surfaces the data length via
-    // its `data-node-colors` attribute side-channel, but we
-    // don't have a direct hook for the data prop here. Instead
-    // verify behaviour at the prop boundary: with `MAX_PER_CARD
-    // = 2500`, sampling keeps the first 2500 rows whose subject
-    // hits the cap. (Behavioural assertion below — the rendered
-    // graph DOM element exists, the empty branch did NOT fire.)
-    const emptyBranch = rootCardEl.querySelector('.v10-sgov-card-empty');
-    expect(emptyBranch).toBeNull();
-    expect(rootCardEl.querySelector('[data-testid="rdf-graph"]')).toBeTruthy();
+    // PR #818 sweep 2 — the rendered mini-graph slice receives
+    // the post-cap sampled rows. The RdfGraph stub exposes
+    // `data-triple-count` so we can assert the cap is honored
+    // directly. Earlier shape `expect(emptyBranch).toBeNull()`
+    // was brittle (Suspense fallback shares the empty class) AND
+    // would have missed the single-dominant-subject defect Codex
+    // surfaced in sweep 2 — assert against the cap directly now.
+    const graphEl = rootCardEl.querySelector('[data-testid="rdf-graph"]') as HTMLElement | null;
+    expect(graphEl).toBeTruthy();
+    const renderedTripleCount = Number(graphEl!.getAttribute('data-triple-count') ?? 'NaN');
+    expect(renderedTripleCount).toBeLessThanOrEqual(2500); // MAX_PER_CARD
+    // And the cap actually fires (we're well over with 3000) —
+    // not just trivially under it because the input degraded.
+    expect(renderedTripleCount).toBeGreaterThan(0);
   });
 
   it('Root card retains all triples under the MAX_PER_CARD cap (no spurious sampling)', async () => {
@@ -967,6 +975,111 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
     // would have counted 2.
     expect(stats).toContain('1 triples');
     expect(stats).not.toContain('2 triples');
+  });
+
+  it('Root card cap honors MAX_PER_CARD even with a single dominant subject (Codex sweep 2)', async () => {
+    // PR #818 sweep 2 — sweep-1 sampling shape had a defect:
+    // `if (kept >= MAX_PER_CARD) break;` checked AFTER adding the
+    // current subject's full degree. A single dominant subject
+    // with degree > MAX_PER_CARD passed the check at `kept = 0`,
+    // got added, contributed its full row count to `kept`, then
+    // the break fired the next iteration — but `keep.has(subject)`
+    // returned every row of the dominant subject from the filter,
+    // including thousands above the cap. Fix: pre-check
+    // `kept + subjectDegree > MAX_PER_CARD` before adding +
+    // defensive `slice(0, MAX_PER_CARD)` post-filter.
+    fetchSubGraphsMock.mockResolvedValueOnce({
+      subGraphs: [{ name: 'alpha', entityCount: 1, tripleCount: 0, description: '' }],
+    });
+    const entityList = [
+      { uri: 'urn:e:alpha', label: 'a', types: [], trustLevel: 'working', layers: new Set(['working']), subGraphs: new Set(['alpha']), properties: new Map(), connections: [] },
+      // ONE dominant root entity with 5000 untagged out-edges
+      // (degree = 5000, well above MAX_PER_CARD = 2500).
+      { uri: 'urn:e:dominant', label: 'd', types: [], trustLevel: 'working', layers: new Set(['working']), subGraphs: new Set<string>(), properties: new Map(), connections: [] },
+    ];
+    const triples = [];
+    for (let i = 0; i < 5000; i++) {
+      triples.push({ subject: 'urn:e:dominant', predicate: 'p', object: `urn:e:obj-${i}`, layer: 'working' });
+    }
+    await renderWith({
+      ...memory,
+      entities: new Map(entityList.map(e => [e.uri, e])),
+      entityList,
+      allTriples: triples,
+      counts: { wm: 2, swm: 0, vm: 0, total: 2 },
+    });
+    await flush();
+
+    const cards = container.querySelectorAll('.v10-sgov-card');
+    const rootCardEl = cards[cards.length - 1];
+    const graphEl = rootCardEl.querySelector('[data-testid="rdf-graph"]') as HTMLElement | null;
+    expect(graphEl).toBeTruthy();
+    const renderedTripleCount = Number(graphEl!.getAttribute('data-triple-count') ?? 'NaN');
+    // Pre-sweep this would have rendered 5000 (the dominant
+    // subject's full row count, since `keep.has(subject)`
+    // returned every row from the filter). Post-sweep the
+    // pre-check halts the loop before adding the dominant
+    // subject (degree 5000 > MAX_PER_CARD), so the keep set
+    // would normally be empty — but the residual fallback
+    // (`if (keep.size === 0 && order.length > 0) keep.add(order[0])`)
+    // admits that single dominant subject so the card still
+    // shows the hub, and the post-filter `slice(0, MAX_PER_CARD)`
+    // trims its long tail. Net: cap is HONORED and the user
+    // sees the dominant cluster instead of an empty card.
+    expect(renderedTripleCount).toBeLessThanOrEqual(2500); // MAX_PER_CARD
+    expect(renderedTripleCount).toBeGreaterThan(0);         // not degraded to empty
+    // And `tripleCount` stat still reports the true pre-cap
+    // total — the cap affects only the rendered mini-graph
+    // slice, not the user-visible distinct count.
+    const stats = rootCardEl.querySelector('.v10-sgov-card-stats')?.textContent ?? '';
+    expect(stats).toContain('5000 triples');
+  });
+
+  it('Named card cap honors MAX_PER_CARD even with a single dominant subject (Codex sweep 2, parity fix)', async () => {
+    // PR #818 sweep 2 — same defect exists in the named-card
+    // path at the original `triplesBySubGraph` sampling (Root
+    // inherited the pattern from there). Fix is applied at both
+    // sites so the named-card path stops smuggling dominant
+    // clusters through too. This test locks the named-card path
+    // independently of the Root card.
+    fetchSubGraphsMock.mockResolvedValueOnce({
+      subGraphs: [{ name: 'alpha', entityCount: 1, tripleCount: 5000, description: '' }],
+    });
+    const entityList = [
+      // One named-subgraph entity that's the dominant subject.
+      { uri: 'urn:e:dominant', label: 'd', types: [], trustLevel: 'working', layers: new Set(['working']), subGraphs: new Set(['alpha']), properties: new Map(), connections: [] },
+    ];
+    const triples = [];
+    for (let i = 0; i < 5000; i++) {
+      // Tag with sub-graph 'alpha' so the named-card bucket
+      // path at `triplesBySubGraph` picks them up. Use literal
+      // objects so `filterTriplesToEntities` (applied to the
+      // bucket on the named-card render path at `:4084`) admits
+      // them — resource-object edges would otherwise be dropped
+      // because `urn:e:obj-N` isn't in the entityUris set.
+      triples.push({ subject: 'urn:e:dominant', predicate: 'p', object: `"v-${i}"`, subGraph: 'alpha', layer: 'working' });
+    }
+    await renderWith({
+      ...memory,
+      entities: new Map(entityList.map(e => [e.uri, e])),
+      entityList,
+      allTriples: triples,
+      counts: { wm: 1, swm: 0, vm: 0, total: 1 },
+    });
+    await flush();
+
+    // First card is the named alpha card; Root card is last.
+    const cards = container.querySelectorAll('.v10-sgov-card');
+    const alphaCardEl = cards[0];
+    const graphEl = alphaCardEl.querySelector('[data-testid="rdf-graph"]') as HTMLElement | null;
+    expect(graphEl).toBeTruthy();
+    const renderedTripleCount = Number(graphEl!.getAttribute('data-triple-count') ?? 'NaN');
+    // Pre-sweep: 5000 rows leaked through. Post-sweep: cap is
+    // honored, and the residual fallback keeps the dominant
+    // subject visible (same trade-off as the Root card test
+    // above).
+    expect(renderedTripleCount).toBeLessThanOrEqual(2500); // MAX_PER_CARD
+    expect(renderedTripleCount).toBeGreaterThan(0);         // dominant hub still renders
   });
 });
 

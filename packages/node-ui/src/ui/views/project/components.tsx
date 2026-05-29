@@ -3932,6 +3932,25 @@ export function SubGraphOverviewGrid({
     // If a bucket is over the cap, fall back to sampling the heaviest
     // subjects and dropping the long tail. This preserves cluster
     // topology far better than truncation.
+    //
+    // PR #818 Codex sweep 2 — earlier shape `if (kept >= MAX_PER_CARD)
+    // break;` checked AFTER adding the current subject's full row
+    // count, so a single dominant subject with N > MAX_PER_CARD rows
+    // would let the entire heavy cluster through (`keep.has(subject)`
+    // is true for every row of the dominant subject, returning all N
+    // from the filter). Pre-check `kept + subjectDegree > MAX_PER_CARD`
+    // BEFORE adding so we stop on the subject that would push us
+    // over.
+    //
+    // Residual case: when the heaviest subject's degree alone exceeds
+    // MAX_PER_CARD, the pre-check would reject it on iteration 1 and
+    // exit with an empty `keep` — the card would render the empty-
+    // body branch even though the bucket clearly has content. Fall
+    // back to admitting that single heaviest subject so SOMETHING
+    // renders; the post-filter `slice(0, MAX_PER_CARD)` then trims
+    // its long tail. The rendered slice loses some cluster topology
+    // but the user sees the dominant hub, which is the right user-
+    // facing trade-off (vs an empty card on a populated bucket).
     for (const [sg, triples] of bySg) {
       if (triples.length <= MAX_PER_CARD) continue;
       const degree = new Map<string, number>();
@@ -3942,11 +3961,13 @@ export function SubGraphOverviewGrid({
       const keep = new Set<string>();
       let kept = 0;
       for (const uri of order) {
-        if (kept >= MAX_PER_CARD) break;
+        const subjectDegree = degree.get(uri) ?? 0;
+        if (kept + subjectDegree > MAX_PER_CARD) break;
         keep.add(uri);
-        kept += degree.get(uri)!;
+        kept += subjectDegree;
       }
-      bySg.set(sg, triples.filter(t => keep.has(t.subject)));
+      if (keep.size === 0 && order.length > 0) keep.add(order[0]);
+      bySg.set(sg, triples.filter(t => keep.has(t.subject)).slice(0, MAX_PER_CARD));
     }
     return bySg;
   }, [memory.allTriples]);
@@ -4182,6 +4203,15 @@ export function SubGraphOverviewGrid({
     // RdfGraph layout lock the named-card cap was added to
     // prevent. Same sampling preserves cluster topology better
     // than a random first-N truncation.
+    // PR #818 Codex sweep 2 — pre-check `kept + subjectDegree >
+    // MAX_PER_CARD` BEFORE adding (instead of `kept >= MAX_PER_CARD`
+    // AFTER) so a single dominant subject can't smuggle the whole
+    // heavy cluster through. When the heaviest subject's degree
+    // alone exceeds the cap the pre-check exits with an empty
+    // `keep` — fall back to admitting that one subject so the
+    // card shows the dominant hub instead of an empty body; the
+    // post-filter `slice(0, MAX_PER_CARD)` trims its long tail.
+    // Same fix applied at the named-card path above (`:3935-3953`).
     let cappedRootTriples = rootTriples;
     if (rootTriples.length > MAX_PER_CARD) {
       const degree = new Map<string, number>();
@@ -4192,11 +4222,13 @@ export function SubGraphOverviewGrid({
       const keep = new Set<string>();
       let kept = 0;
       for (const uri of order) {
-        if (kept >= MAX_PER_CARD) break;
+        const subjectDegree = degree.get(uri) ?? 0;
+        if (kept + subjectDegree > MAX_PER_CARD) break;
         keep.add(uri);
-        kept += degree.get(uri)!;
+        kept += subjectDegree;
       }
-      cappedRootTriples = rootTriples.filter(t => keep.has(t.subject));
+      if (keep.size === 0 && order.length > 0) keep.add(order[0]);
+      cappedRootTriples = rootTriples.filter(t => keep.has(t.subject)).slice(0, MAX_PER_CARD);
     }
     const binding = profile?.forSubGraph(ROOT_SLUG_SENTINEL) ?? {};
     return {
