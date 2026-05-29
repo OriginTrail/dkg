@@ -14785,7 +14785,17 @@ export class DKGAgent {
   /**
    * Reject a pending join request.
    */
-  async rejectJoinRequest(contextGraphId: string, agentAddress: string): Promise<void> {
+  async rejectJoinRequest(contextGraphId: string, agentAddress: string, callerAgentAddress?: string): Promise<void> {
+    // SECURITY (G1): reject is a curator-only ACL decision. Previously this
+    // method had NO owner check while `approveJoinRequest` was gated (via
+    // `inviteAgentToContextGraph` → `assertCallerIsOwner`), so any local-token
+    // caller could reject a pending request — and the route only ran the
+    // write preflight (CG-exists/locally-writable), not a curator check.
+    // Mirror the approve path: assert the caller is the CG owner/curator
+    // BEFORE mutating state or notifying the joiner. Throws "Only the context
+    // graph curator can …" (403 at the route) for a non-curator.
+    await this.assertContextGraphOwner(contextGraphId, callerAgentAddress, 'manage join requests');
+
     const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
     const requestUri = `did:dkg:join-request:${contextGraphId}:${agentAddress.toLowerCase()}`;
     const DKG = 'https://dkg.network/ontology#';

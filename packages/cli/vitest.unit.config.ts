@@ -50,6 +50,12 @@ export default defineConfig({
           'test/blazegraph-integration.test.ts',
           // #761 — context graph write-target validation (from main).
           'test/context-graph-write-path-validation.test.ts',
+          // Notifications-pane redesign (A3) — assertion_activity emitter
+          // helper. Pure logic + a tmp SQLite DashboardDB, no hardhat.
+          'test/activity-notification.test.ts',
+          // Notifications-pane redesign (A4) — scoped GET/POST route. Real
+          // DashboardDB + mocked agent; no hardhat.
+          'test/notifications-route.test.ts',
         ],
     testTimeout: runsDaemonHttpBehavior ? 120_000 : 60_000,
     globalSetup: runsDaemonHttpBehavior ? ['../chain/test/hardhat-global-setup.ts'] : [],

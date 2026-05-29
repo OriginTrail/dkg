@@ -41,6 +41,18 @@ export interface MemoryGraphChangedEvent {
   status?: string;
 }
 
+/**
+ * Generic notifications-pane refresh signal (A5). Broadcast once per scoped
+ * notification write (join_request/approved/rejected + assertion_activity) so
+ * the bell pane re-fetches via a SINGLE SSE listener instead of one per type.
+ * Payload is intentionally minimal — the client always re-reads the scoped
+ * feed, so it only needs to know "something for this CG of kind X happened".
+ */
+export interface NotificationSseEvent {
+  contextGraphId: string;
+  type: string;
+}
+
 export interface RequestContext {
   req: IncomingMessage;
   res: ServerResponse;
@@ -79,4 +91,6 @@ export interface RequestContext {
   requestToken: string | undefined;
   requestAgentAddress: string;
   emitMemoryGraphChanged?: (event: MemoryGraphChangedEvent) => void;
+  /** A5: broadcast a generic `notification` SSE refresh for the bell pane. */
+  emitNotification?: (event: NotificationSseEvent) => void;
 }

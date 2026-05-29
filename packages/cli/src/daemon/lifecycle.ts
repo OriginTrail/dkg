@@ -315,6 +315,7 @@ import {
   verifyOpenClawAttachmentRefsProvenance,
 } from './openclaw.js';
 import { buildChatAcl } from './chat-acl.js';
+import { recordAssertionActivity, localNodeInvolvedInContextGraph } from './activity-notification.js';
 import {
   type LocalAgentIntegrationDefinition,
   type LocalAgentIntegrationRecord,
@@ -1257,22 +1258,18 @@ export async function runDaemonInner(
       // against the `idx_chat_msgid` partial unique index — same
       // logical message arriving twice on parallel transport paths
       // (the seq=13 class from the May 2026 soak postmortem) gets
-      // silently dropped on the second insert. We distinguish three
-      // outcomes:
-      //   - `'stored'`  — fresh row written, notify + log normally.
-      //   - `'deduped'` — `INSERT OR IGNORE` dropped a duplicate row,
-      //                   skip notification (operator already saw the
-      //                   first one) but log a `(deduped)` line for
-      //                   visibility.
-      //   - `'failed'`  — `insertChatMessage` threw. The earlier shape
-      //                   of this block conflated this with `'deduped'`
-      //                   via a shared `inserted = false` sentinel,
-      //                   silently swallowing the operator notification
-      //                   for a brand-new message whenever the DB
-      //                   write failed. Codex review of PR #534
-      //                   flagged this — fix is to keep notifications
-      //                   firing on DB failure so the operator can
-      //                   still see + reply.
+      // silently dropped on the second insert. The outcome now governs
+      // LOGGING only (ADR-001 removed the bell `chat_message` notification
+      // this block used to fire — chat owns its own unread surface):
+      //   - `'stored'`  — fresh row written, log normally.
+      //   - `'deduped'` — `INSERT OR IGNORE` dropped a duplicate row; log a
+      //                   `(deduped)` line and return (operator already saw
+      //                   the first one).
+      //   - `'failed'`  — `insertChatMessage` threw. We log the failure and
+      //                   fall through to the normal CHAT IN log so the
+      //                   inbound message is still visible to the operator
+      //                   even when persistence failed (the spirit of the
+      //                   Codex PR #534 fix, minus the now-removed notify).
       let writeOutcome: 'stored' | 'deduped' | 'failed' = 'failed';
       try {
         const inserted = chatDb.insertChatMessage({
@@ -1285,7 +1282,7 @@ export async function runDaemonInner(
         writeOutcome = inserted ? 'stored' : 'deduped';
       } catch (err) {
         log(
-          `CHAT IN  [${shortId(senderPeerId)}] chat_messages persistence failed (notification still firing): ${
+          `CHAT IN  [${shortId(senderPeerId)}] chat_messages persistence failed (message still logged below): ${
             err instanceof Error ? err.message : String(err)
           }`,
         );
@@ -1295,29 +1292,11 @@ export async function runDaemonInner(
         log(`CHAT IN  [${shortId(senderPeerId)}]${cgTag} (deduped): ${text}`);
         return;
       }
-      try {
-        // Display the CG ONLY when the ACL has positively verified the
-        // claim (`scoped` / `shared-context-graph` modes). In `any` and
-        // `peer-allowlist` modes `verifiedContextGraphId` is undefined
-        // even when the sender provided a claim, because the ACL
-        // doesn't check it — surfacing the raw claim would let an
-        // authenticated sender stamp arbitrary CG ids onto operator-
-        // facing notifications and logs (Codex PR #510 round 4/5
-        // finding). Storage above already records the message itself;
-        // we don't lose data, we just don't decorate it with an
-        // attacker-controllable label.
-        const titleSuffix = verifiedContextGraphId ? ` (${shortId(verifiedContextGraphId)})` : '';
-        chatDb.insertNotification({
-          ts: Date.now(),
-          type: "chat_message",
-          title: `New message${titleSuffix}`,
-          message: `Message from ${shortId(senderPeerId)}: ${text.slice(0, 120)}`,
-          source: "peer-chat",
-          peer: senderPeerId,
-        });
-      } catch {
-        /* never crash */
-      }
+      // ADR-001: inbound peer chat no longer produces a bell notification —
+      // peer-to-peer chat is a separate surface that owns its own unread
+      // state, and these rows aren't CG-scoped. The message itself is still
+      // persisted via `insertChatMessage` above; we only drop the
+      // bell-pane `chat_message` notification.
     }
     const cgTag = verifiedContextGraphId ? ` cg=${shortId(verifiedContextGraphId)}` : '';
     log(`CHAT IN  [${shortId(senderPeerId)}]${cgTag}: ${text}`);
@@ -1928,36 +1907,12 @@ export async function runDaemonInner(
     });
   });
 
-  // Notify on new peer connections
-  agent.eventBus.on(DKGEvent.PEER_CONNECTED, (data: any) => {
-    try {
-      dashDb.insertNotification({
-        ts: Date.now(),
-        type: "peer_connected",
-        title: "Peer connected",
-        message: `Peer ${shortId(data.peerId)} connected`,
-        source: "network",
-        peer: data.peerId,
-      });
-    } catch {
-      /* never crash */
-    }
-  });
-
-  agent.eventBus.on(DKGEvent.PEER_DISCONNECTED, (data: any) => {
-    try {
-      dashDb.insertNotification({
-        ts: Date.now(),
-        type: "peer_disconnected",
-        title: "Peer disconnected",
-        message: `Peer ${shortId(data.peerId)} disconnected`,
-        source: "network",
-        peer: data.peerId,
-      });
-    } catch {
-      /* never crash */
-    }
-  });
+  // ADR-001 (notifications-pane redesign): peer connect/disconnect no longer
+  // produce bell notifications — pure transport churn that dominated the
+  // pane for graphs the user has nothing to do with. Connection telemetry is
+  // unaffected: the CONNECTION_OPEN handler above still records it via
+  // `tracker`. We drop the PEER_CONNECTED / PEER_DISCONNECTED notification
+  // emitters entirely (clean cut, no `category` compat flag).
 
   // Track publishes via KC_PUBLISHED event (covers GossipSub-received publishes)
   agent.eventBus.on(DKGEvent.KC_PUBLISHED, (data: any) => {
@@ -1969,17 +1924,11 @@ export async function runDaemonInner(
     });
     tracker.complete(ctx, { tripleCount: data.tripleCount });
     try {
-      dashDb.insertNotification({
-        ts: Date.now(),
-        type: "kc_published",
-        title: "Knowledge published",
-        message: `Knowledge collection published${data.contextGraphId ? ` on context graph ${shortId(data.contextGraphId)}` : ""}`,
-        source: "dkg",
-        meta: JSON.stringify({
-          kcId,
-          contextGraphId: data.contextGraphId,
-        }),
-      });
+      // ADR-001: the raw `kc_published` bell notification is removed — it
+      // fired for ANY CG overheard on gossip (not just the user's), the
+      // dominant pane noise. Live graph refresh below is unaffected.
+      // (ADR-002/A3 layers a MEMBERSHIP-GATED, remote-only `assertion_activity`
+      // emitter on top of this handler as the legitimate scoped replacement.)
       if (data.contextGraphId) {
         emitMemoryGraphChanged({
           contextGraphId: data.contextGraphId,
@@ -1991,6 +1940,26 @@ export async function runDaemonInner(
             triples: typeof data.tripleCount === "number" ? data.tripleCount : undefined,
           },
         });
+        // ADR-002 / CR-2: cross-node `published` activity for a collaborator's
+        // publish. REMOTE-ONLY — gate on `data.from` (the gossip payload's
+        // sender peer id, set ONLY on gossipsub-received publishes by
+        // publish-handler.ts; the LOCAL publisher emit carries no `from`).
+        // This prevents double-counting: a local publish is recorded by
+        // routes/memory.ts, a remote one here. Membership-gated so we only
+        // record activity for CGs this node is actually involved in (not
+        // every CG overheard on gossip — the dominant noise ADR-001 removed).
+        const remotePublisherPeer =
+          typeof data.from === "string" && data.from.length > 0 ? data.from : undefined;
+        if (remotePublisherPeer && localNodeInvolvedInContextGraph(dashDb, data.contextGraphId)) {
+          recordAssertionActivity(dashDb, {
+            contextGraphId: data.contextGraphId,
+            kind: "published",
+            actorAgentAddress: remotePublisherPeer,
+            ...(typeof data.subGraphName === "string" ? { subGraphName: data.subGraphName } : {}),
+            ...(typeof data.tripleCount === "number" ? { tripleCount: data.tripleCount } : {}),
+          });
+          emitNotification({ contextGraphId: data.contextGraphId, type: "assertion_activity" });
+        }
       }
     } catch {
       /* never crash */
@@ -2033,6 +2002,18 @@ export async function runDaemonInner(
       timestamp: new Date().toISOString(),
     });
   }
+  // A5: single generic `notification` SSE refresh for the bell pane. Fired
+  // once per scoped notification write (join_* + assertion_activity) so the
+  // pane re-fetches the scoped feed via ONE listener. The three legacy
+  // join-specific events still fire (other consumers — PendingJoinRequests
+  // Section, useMyContextGraphs — listen on them); this is ADDITIVE.
+  function emitNotification(event: { contextGraphId: string; type: string }) {
+    if (!event.contextGraphId) return;
+    sseBroadcast("notification", {
+      contextGraphId: event.contextGraphId,
+      type: event.type,
+    });
+  }
 
   agent.eventBus.on(DKGEvent.JOIN_REQUEST_RECEIVED, (data: any) => {
     try {
@@ -2053,6 +2034,7 @@ export async function runDaemonInner(
         agentAddress: data.agentAddress,
         agentName: data.agentName,
       });
+      emitNotification({ contextGraphId: data.contextGraphId, type: "join_request" });
     } catch {
       /* never crash */
     }
@@ -2075,6 +2057,7 @@ export async function runDaemonInner(
         contextGraphId: data.contextGraphId,
         agentAddress: data.agentAddress,
       });
+      emitNotification({ contextGraphId: data.contextGraphId, type: "join_approved" });
     } catch {
       /* never crash */
     }
@@ -2097,6 +2080,7 @@ export async function runDaemonInner(
         contextGraphId: data.contextGraphId,
         agentAddress: data.agentAddress,
       });
+      emitNotification({ contextGraphId: data.contextGraphId, type: "join_rejected" });
     } catch {
       /* never crash */
     }
@@ -2620,6 +2604,7 @@ export async function runDaemonInner(
         apiPortRef,
         routePlugins,
         emitMemoryGraphChanged,
+        emitNotification,
       );
     } catch (err: any) {
       if (res.headersSent || res.writableEnded) return;

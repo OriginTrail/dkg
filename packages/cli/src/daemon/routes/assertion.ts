@@ -60,6 +60,7 @@ import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, assertSafeRdfTerm, escapeDkgRdfLiteral, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, assertionLifecycleUri } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri, PROMOTE_JOB_STATES, PromoteJobConflictError, type PromoteJob, type PromoteJobState, type PublishOptions } from '@origintrail-official/dkg-publisher';
 import { validatePreSignedAuthorAttestation } from './memory.js';
+import { recordAssertionActivity } from '../activity-notification.js';
 import {
   DashboardDB,
   MetricsCollector,
@@ -1026,6 +1027,7 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
     requestToken,
     requestAgentAddress,
     emitMemoryGraphChanged,
+    emitNotification,
   } = ctx;
   const writePreflightCallerAgentAddress = requestToken
     ? agent.resolveAgentByToken(requestToken)
@@ -1321,6 +1323,21 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
         source: "api",
         counts: { triples: 0 },
       });
+      // ADR-002: scoped `created` activity row. Mirrors the moment the
+      // publisher writes `dkg:AssertionCreated` into `_meta` (inside
+      // `assertionCreate`), so the bell pane and the per-CG Overview feed
+      // agree on what "created" means. Actor = the request/author agent;
+      // the row is born CG-scoped (the caller is a writer on this CG).
+      // Never throws into the write path (helper + try/catch).
+      try {
+        recordAssertionActivity(dashDb, {
+          contextGraphId: resolvedContextGraphId,
+          kind: "created",
+          actorAgentAddress: resolvedAuthorAgentAddress ?? requestAgentAddress,
+          subGraphName,
+        });
+        emitNotification?.({ contextGraphId: resolvedContextGraphId, type: "assertion_activity" });
+      } catch { /* never break the create path */ }
       const response: Record<string, unknown> = { assertionUri };
       if (Array.isArray(quads) && quads.length > 0) {
         await agent.assertion.write(
@@ -1381,6 +1398,18 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
             source: "api",
             counts: { triples: promoteResult.promotedCount },
           });
+          // ADR-002: scoped `promoted` activity row (WM→SWM). Only when
+          // something actually promoted (promotedCount !== 0).
+          try {
+            recordAssertionActivity(dashDb, {
+              contextGraphId: resolvedContextGraphId,
+              kind: "promoted",
+              actorAgentAddress: resolvedAuthorAgentAddress ?? requestAgentAddress,
+              subGraphName,
+              tripleCount: promoteResult.promotedCount,
+            });
+            emitNotification?.({ contextGraphId: resolvedContextGraphId, type: "assertion_activity" });
+          } catch { /* never break the promote path */ }
         }
         response.promotedCount = promoteResult.promotedCount;
       }
@@ -1556,6 +1585,17 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
           source: "api",
           counts: { triples: promotedCount },
         });
+        // ADR-002: scoped `promoted` activity row (dedicated promote route).
+        try {
+          recordAssertionActivity(dashDb, {
+            contextGraphId: resolvedContextGraphId,
+            kind: "promoted",
+            actorAgentAddress: requestAgentAddress,
+            subGraphName,
+            tripleCount: promotedCount,
+          });
+          emitNotification?.({ contextGraphId: resolvedContextGraphId, type: "assertion_activity" });
+        } catch { /* never break the promote path */ }
       }
       return jsonResponse(res, 200, result);
     } catch (err: any) {

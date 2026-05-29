@@ -3,6 +3,12 @@ export {
   SqliteMessageIdempotencyStore,
   SqliteProtocolOutboxStore,
   type SqliteProtocolOutboxStoreOptions,
+  // Notifications-pane redesign (V16): activity-digest primitives shared
+  // with the daemon's `assertion_activity` emitters + scoped read path.
+  ACTIVITY_DIGEST_WINDOW_MS,
+  ASSERTION_ACTIVITY_TYPE,
+  buildActivityDigestKey,
+  parseActivityDigestKey,
 } from './db.js';
 export type {
   DashboardDBOptions,
@@ -21,6 +27,8 @@ export type {
   ContextGraphMemberPrincipalType,
   ContextGraphMemberStatus,
   ContextGraphMemberRow,
+  NotificationRow,
+  AssertionActivityKind,
 } from './db.js';
 
 export { StructuredLogger } from './structured-logger.js';
@@ -28,6 +36,12 @@ export { OperationTracker } from './operation-tracker.js';
 export { MetricsCollector } from './metrics-collector.js';
 export type { MetricsSource } from './metrics-collector.js';
 export { handleNodeUIRequest } from './api.js';
+export { scopeNotifications } from './notifications-scope.js';
+export type {
+  NotifWire,
+  ScopedNotificationsResult,
+  NotificationScopeContext,
+} from './notifications-scope.js';
 export type { LlmSettingsCallbacks, TelemetrySettingsCallbacks } from './api.js';
 export { LogPushWorker } from './gelf-push-worker.js';
 export type { LogPushWorkerOptions } from './gelf-push-worker.js';

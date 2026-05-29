@@ -1034,7 +1034,10 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     try {
       const { agentAddress } = JSON.parse(body);
       if (!agentAddress) return jsonResponse(res, 400, { error: 'Missing agentAddress' });
-      await agent.rejectJoinRequest(resolvedContextGraphId, agentAddress);
+      // G1: thread the caller's agent address so rejectJoinRequest can
+      // enforce the curator-only authz check (mirrors approve-join, which
+      // passes requestAgentAddress at line ~961).
+      await agent.rejectJoinRequest(resolvedContextGraphId, agentAddress, requestAgentAddress);
       return jsonResponse(res, 200, { ok: true, status: 'rejected', agentAddress });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);

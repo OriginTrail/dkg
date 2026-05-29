@@ -107,6 +107,7 @@ import {
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
 import { loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
+import { recordAssertionActivity } from '../activity-notification.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
 import {
@@ -422,6 +423,7 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
     requestToken,
     requestAgentAddress,
     emitMemoryGraphChanged,
+    emitNotification,
   } = ctx;
   const writePreflightCallerAgentAddress = requestToken
     ? agent.resolveAgentByToken(requestToken)
@@ -1844,6 +1846,23 @@ WHERE {
           triples: publicTripleCount,
         },
       });
+      // ADR-002 (CR-1): scoped `published` activity row (SWM→VM). This is the
+      // ONLY local-publish site with the author + dashDb in scope — the
+      // assertion routes have no VM-publish transition, so `published` is
+      // emitted here, not there. Cross-node publishes are handled
+      // (remote-only, membership-gated) by the KC_PUBLISHED handler in
+      // lifecycle.ts so a local publish is never double-counted.
+      try {
+        recordAssertionActivity(dashDb, {
+          contextGraphId: resolvedContextGraphId,
+          kind: "published",
+          actorAgentAddress: resolvedAuthorAgentAddress ?? requestAgentAddress,
+          subGraphName,
+          entityCount: rootCount,
+          tripleCount: publicTripleCount,
+        });
+        emitNotification?.({ contextGraphId: resolvedContextGraphId, type: "assertion_activity" });
+      } catch { /* never break the publish path */ }
       const httpStatus = result.contextGraphError ? 207 : 200;
       return jsonResponse(res, httpStatus, {
         kcId: String(result.kcId),

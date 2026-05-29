@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
-import { DashboardDB } from '../src/db.js';
+import { DashboardDB, buildActivityDigestKey, ACTIVITY_DIGEST_WINDOW_MS, ASSERTION_ACTIVITY_TYPE } from '../src/db.js';
 
 let db: DashboardDB;
 let dir: string;
@@ -86,7 +86,7 @@ describe('DashboardDB — metric snapshots', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(15);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(16);
 
     const cols = (db.db.prepare('PRAGMA table_info(metric_snapshots)').all() as Array<{ name: string }>)
       .map((c) => c.name);
@@ -142,7 +142,7 @@ describe('DashboardDB — metric snapshots', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(15);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(16);
 
     const newSnapshotCols = (db.db.prepare('PRAGMA table_info(metric_snapshots)').all() as { name: string }[])
       .map(c => c.name);
@@ -545,7 +545,7 @@ describe('DashboardDB — V15 migration: drop FTS5 logs index', () => {
 
     const upgraded = new DashboardDB({ dataDir: upgradeDir });
     try {
-      expect(upgraded.db.pragma('user_version', { simple: true })).toBe(15);
+      expect(upgraded.db.pragma('user_version', { simple: true })).toBe(16);
 
       const ftsTables = upgraded.db.prepare(
         `SELECT name FROM sqlite_master WHERE type IN ('table','view') AND name LIKE 'logs_fts%'`,
@@ -1002,7 +1002,7 @@ describe('DashboardDB — V11→V13 chat schema migration chain', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(15);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(16);
 
     const cols = (db.db.prepare('PRAGMA table_info(chat_messages)').all() as Array<{ name: string }>)
       .map((c) => c.name);
@@ -1032,5 +1032,137 @@ describe('DashboardDB — V11→V13 chat schema migration chain', () => {
       db.insertChatMessage({ ts: 1000, direction: 'in', peer: 'alice', text: 'v11-a-dup', messageId: 'm1' }),
     ).toBe(true);
     expect(db.getChatMessages({ peer: 'alice' })).toHaveLength(3);
+  });
+});
+
+describe('DashboardDB — V16 notifications.context_graph_id migration (A1)', () => {
+  let db: DashboardDB;
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'dkg-db-v16-test-'));
+    db = new DashboardDB({ dataDir: dir });
+  });
+
+  afterEach(() => {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('adds context_graph_id + idx_notif_cg when upgrading a pre-V16 DB, preserving rows as NULL', () => {
+    // Simulate a V15 DB: drop the new column + its index and reset
+    // user_version to 15, then reopen via DashboardDB and verify the
+    // V16 block restores them and leaves the pre-existing row's scope NULL.
+    const dbPath = join(dir, 'node-ui.db');
+    db.close();
+
+    const raw = new Database(dbPath);
+    raw.exec('DROP INDEX IF EXISTS idx_notif_cg;');
+    raw.exec('ALTER TABLE notifications DROP COLUMN context_graph_id;');
+    const legacyTs = Date.now() - 60_000;
+    raw.prepare(
+      `INSERT INTO notifications (ts, type, title, message, source, peer, read, meta)
+       VALUES (?, 'join_request', 'Legacy', 'pre-v16 row', 'access-control', NULL, 0, NULL)`,
+    ).run(legacyTs);
+    raw.pragma('user_version = 15');
+    raw.close();
+
+    db = new DashboardDB({ dataDir: dir });
+    expect(db.db.pragma('user_version', { simple: true })).toBe(16);
+
+    const cols = (db.db.prepare('PRAGMA table_info(notifications)').all() as Array<{ name: string }>)
+      .map((c) => c.name);
+    expect(cols).toContain('context_graph_id');
+
+    const indexes = (db.db.prepare(`PRAGMA index_list(notifications)`).all() as Array<{ name: string }>)
+      .map((i) => i.name);
+    expect(indexes).toContain('idx_notif_cg');
+
+    // Legacy row survives with NULL scope (treated as out-of-scope by the
+    // scoped read path; aged out by prune()).
+    const { notifications } = db.getNotifications();
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0].context_graph_id).toBeNull();
+
+    // New inserts can carry a scope.
+    expect(() => db.insertNotification({
+      ts: Date.now(), type: 'join_request', title: 'X', message: 'y',
+      contextGraphId: 'cg-abc',
+    })).not.toThrow();
+    const after = db.getNotifications().notifications;
+    expect(after.find((n) => n.title === 'X')!.context_graph_id).toBe('cg-abc');
+  });
+
+  it('fresh install already carries context_graph_id (no upgrade needed)', () => {
+    const cols = (db.db.prepare('PRAGMA table_info(notifications)').all() as Array<{ name: string }>)
+      .map((c) => c.name);
+    expect(cols).toContain('context_graph_id');
+    expect(db.db.pragma('user_version', { simple: true })).toBe(16);
+  });
+
+  it('insertNotification writes context_graph_id to the column; omitted → NULL', () => {
+    db.insertNotification({ ts: 1000, type: 'assertion_activity', title: 'A', message: 'a', contextGraphId: 'cg-1' });
+    db.insertNotification({ ts: 2000, type: 'peer_connected', title: 'B', message: 'b' });
+    const { notifications } = db.getNotifications();
+    const a = notifications.find((n) => n.title === 'A')!;
+    const b = notifications.find((n) => n.title === 'B')!;
+    expect(a.context_graph_id).toBe('cg-1');
+    expect(b.context_graph_id).toBeNull();
+  });
+});
+
+describe('DashboardDB — resolveActivityDigestRowIds (CR-3 digest read-marking)', () => {
+  let db: DashboardDB;
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'dkg-db-digest-test-'));
+    db = new DashboardDB({ dataDir: dir });
+  });
+
+  afterEach(() => {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const activityRow = (cgId: string, kind: string, ts: number) =>
+    db.insertNotification({
+      ts,
+      type: ASSERTION_ACTIVITY_TYPE,
+      title: 'activity',
+      message: `${kind} in ${cgId}`,
+      contextGraphId: cgId,
+      meta: JSON.stringify({ contextGraphId: cgId, kind }),
+    });
+
+  it('resolves a digestKey to exactly the atomic rows in its (cg, kind, window)', () => {
+    // Anchor all rows to one window bucket so the digest key is stable.
+    const baseTs = 5 * ACTIVITY_DIGEST_WINDOW_MS + 1_000; // bucket = 5
+    const id1 = activityRow('cg-1', 'created', baseTs);
+    const id2 = activityRow('cg-1', 'created', baseTs + 1_000);
+    // Different kind, same cg+window — must NOT be included.
+    activityRow('cg-1', 'promoted', baseTs + 2_000);
+    // Different cg — must NOT be included.
+    activityRow('cg-2', 'created', baseTs + 3_000);
+    // Same cg+kind but a DIFFERENT window bucket — must NOT be included.
+    activityRow('cg-1', 'created', baseTs + ACTIVITY_DIGEST_WINDOW_MS);
+
+    const digestKey = buildActivityDigestKey('cg-1', 'created', baseTs);
+    const ids = db.resolveActivityDigestRowIds(digestKey).sort((a, b) => a - b);
+    expect(ids).toEqual([id1, id2].sort((a, b) => a - b));
+  });
+
+  it('returns [] for a malformed digest key (no-op, never throws)', () => {
+    expect(db.resolveActivityDigestRowIds('not-a-digest')).toEqual([]);
+    expect(db.resolveActivityDigestRowIds('activity:cg-1:bogus:5')).toEqual([]);
+    expect(db.resolveActivityDigestRowIds('activity:cg-1:created:notanumber')).toEqual([]);
+  });
+
+  it('handles a context graph id containing colons (URI form)', () => {
+    const cgId = 'did:dkg:context-graph:abc123';
+    const baseTs = 7 * ACTIVITY_DIGEST_WINDOW_MS + 500; // bucket = 7
+    const id1 = activityRow(cgId, 'published', baseTs);
+    const digestKey = buildActivityDigestKey(cgId, 'published', baseTs);
+    expect(db.resolveActivityDigestRowIds(digestKey)).toEqual([id1]);
   });
 });

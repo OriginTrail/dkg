@@ -313,7 +313,7 @@ import {
   reverseLocalAgentSetupForUi,
   refreshLocalAgentIntegrationFromUi,
 } from './local-agents.js';
-import type { MemoryGraphChangedEvent, RequestContext } from './routes/context.js';
+import type { MemoryGraphChangedEvent, NotificationSseEvent, RequestContext } from './routes/context.js';
 import { handleStatusRoutes } from './routes/status.js';
 import { handleAgentChatRoutes } from './routes/agent-chat.js';
 import { handleOpenclawRoutes } from './routes/openclaw.js';
@@ -326,6 +326,7 @@ import { handleQueryRoutes } from './routes/query.js';
 import { handleLocalAgentsRoutes } from './routes/local-agents.js';
 import { handleEpcisRoutes } from './routes/epcis.js';
 import { handlePcaRoutes } from './routes/pca.js';
+import { handleNotificationRoutes } from './routes/notifications.js';
 import { handlePluginRoutes } from './routes/plugins.js';
 import type { RoutePlugin } from './plugin-api.js';
 
@@ -361,6 +362,7 @@ export async function handleRequest(
   apiPortRef: { value: number },
   routePlugins: RoutePlugin[],
   emitMemoryGraphChanged?: (event: MemoryGraphChangedEvent) => void,
+  emitNotification?: (event: NotificationSseEvent) => void,
 ): Promise<void> {
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
   const path = url.pathname;
@@ -403,6 +405,7 @@ export async function handleRequest(
     requestToken,
     requestAgentAddress,
     emitMemoryGraphChanged,
+    emitNotification,
   };
 
   await handleStatusRoutes(ctx);
@@ -439,6 +442,9 @@ export async function handleRequest(
   if (res.writableEnded) return;
 
   await handlePcaRoutes(ctx);
+  if (res.writableEnded) return;
+
+  await handleNotificationRoutes(ctx);
   if (res.writableEnded) return;
 
   await handlePluginRoutes(ctx);

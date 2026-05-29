@@ -9,7 +9,7 @@ import {
   type ProtocolOutboxStore,
 } from '@origintrail-official/dkg-core';
 
-const SCHEMA_VERSION = 15;
+const SCHEMA_VERSION = 16;
 // Default operator retention. Lowered from 90 → 14 days on V15 (2026-05) after
 // a production incident in which the `logs` table + its FTS5 shadow tables
 // grew to ~9 GB on a 12-day-old node and corrupted the SQLite page (header
@@ -28,6 +28,66 @@ const LOGS_VACUUM_DELETE_THRESHOLD = 10_000;
 // to avoid VACUUM churn on idle nodes but small enough to retry a failed
 // V15 FTS-drop reclamation immediately on the next prune.
 const VACUUM_FREE_PAGE_THRESHOLD = 1_000;
+
+/**
+ * Rolling window for `assertion_activity` digest collapse (V16
+ * notifications-pane redesign). Atomic activity rows are persisted at
+ * write time; the scoped read path (A4) collapses them into one digest per
+ * `(contextGraphId, kind, windowBucket)` where `windowBucket = floor(ts /
+ * ACTIVITY_DIGEST_WINDOW_MS)`. This constant is the single source of truth
+ * for the window so digest COLLAPSE (A4) and digest READ-MARKING
+ * (`resolveActivityDigestRowIds`, CR-3) agree on the same bucket boundaries
+ * — a mismatch would mark the wrong rows read. 24h per the implementation
+ * plan (daemon-tunable in future; a constant for now).
+ */
+export const ACTIVITY_DIGEST_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/** Notification `type` used for collapsed assertion-lifecycle activity. */
+export const ASSERTION_ACTIVITY_TYPE = 'assertion_activity';
+
+export type AssertionActivityKind = 'created' | 'promoted' | 'published';
+
+/**
+ * Build the stable digest id for an activity digest row. Mirror of the
+ * parse in `parseActivityDigestKey`. Shape: `activity:<cgId>:<kind>:<bucket>`
+ * where `bucket = floor(ts / ACTIVITY_DIGEST_WINDOW_MS)`. The cgId can
+ * itself contain `:` (wallet-scoped ids are `0x…/…`, but URIs use `:`), so
+ * the parser splits on the FIRST and LAST two delimiters, not a naive
+ * `split(':')`.
+ */
+export function buildActivityDigestKey(
+  contextGraphId: string,
+  kind: AssertionActivityKind,
+  ts: number,
+): string {
+  const bucket = Math.floor(ts / ACTIVITY_DIGEST_WINDOW_MS);
+  return `activity:${contextGraphId}:${kind}:${bucket}`;
+}
+
+/**
+ * Parse a digest key back into its parts. Returns null if the key is not a
+ * well-formed activity digest key. Tolerant of `:` inside `contextGraphId`
+ * by anchoring on the `activity:` prefix and the trailing `:<kind>:<bucket>`.
+ */
+export function parseActivityDigestKey(digestKey: string): {
+  contextGraphId: string;
+  kind: AssertionActivityKind;
+  windowBucket: number;
+} | null {
+  if (!digestKey.startsWith('activity:')) return null;
+  const lastColon = digestKey.lastIndexOf(':');
+  if (lastColon <= 'activity:'.length) return null;
+  const secondLastColon = digestKey.lastIndexOf(':', lastColon - 1);
+  if (secondLastColon < 'activity:'.length) return null;
+  const bucketStr = digestKey.slice(lastColon + 1);
+  const kind = digestKey.slice(secondLastColon + 1, lastColon);
+  const contextGraphId = digestKey.slice('activity:'.length, secondLastColon);
+  const windowBucket = Number(bucketStr);
+  if (!contextGraphId) return null;
+  if (kind !== 'created' && kind !== 'promoted' && kind !== 'published') return null;
+  if (!Number.isInteger(windowBucket) || windowBucket < 0) return null;
+  return { contextGraphId, kind, windowBucket };
+}
 
 export interface DashboardDBOptions {
   /** Directory to store the SQLite database file. */
@@ -230,6 +290,11 @@ export class DashboardDB {
     }
 
     if (version < 5) {
+      // `context_graph_id` landed in V16 (notifications-pane redesign — the
+      // scoping key for the redesigned bell pane). We add it to the
+      // fresh-install CREATE so new nodes get the column + its index in one
+      // step; the V16 block below idempotently adds it to nodes that upgraded
+      // through versions 5..15 first (same pattern as `message_id` in V3/V11).
       this.db.exec(`
         CREATE TABLE IF NOT EXISTS notifications (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -240,10 +305,12 @@ export class DashboardDB {
           source TEXT,
           peer TEXT,
           read INTEGER NOT NULL DEFAULT 0,
-          meta TEXT
+          meta TEXT,
+          context_graph_id TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_notif_ts ON notifications(ts);
         CREATE INDEX IF NOT EXISTS idx_notif_read ON notifications(read);
+        CREATE INDEX IF NOT EXISTS idx_notif_cg ON notifications(context_graph_id);
       `);
     }
 
@@ -553,6 +620,25 @@ export class DashboardDB {
         // FTS left meaningful reclaimable space behind. We never block
         // startup on disk reclamation.
       }
+    }
+
+    if (version < 16) {
+      // Notifications-pane redesign: add `context_graph_id` — the scoping
+      // key the redesigned bell pane filters/aggregates on. The V5 CREATE
+      // above already lists the column for fresh installs; this block adds
+      // it (idempotently) to nodes that upgraded through versions 5..15
+      // first, using the same defensive PRAGMA-then-ALTER pattern as
+      // V9/V10/V11. Additive + nullable: existing rows keep NULL (legacy
+      // node/global-scope notifications), which the scoped read path treats
+      // as out-of-scope and ages out via prune(). No data migration.
+      const cols = new Set(
+        (this.db.prepare('PRAGMA table_info(notifications)').all() as Array<{ name: string }>)
+          .map((c) => c.name),
+      );
+      if (!cols.has('context_graph_id')) {
+        this.db.exec(`ALTER TABLE notifications ADD COLUMN context_graph_id TEXT;`);
+      }
+      this.db.exec(`CREATE INDEX IF NOT EXISTS idx_notif_cg ON notifications(context_graph_id);`);
     }
 
     this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
@@ -1631,10 +1717,23 @@ export class DashboardDB {
     source?: string | null;
     peer?: string | null;
     meta?: string | null;
+    /**
+     * Context-graph scoping key (V16). Written to the indexed
+     * `context_graph_id` column so the scoped read path
+     * (`getScopedNotifications`) can filter/aggregate in SQL. The column is
+     * the authoritative scope source — the wire contract surfaces it as the
+     * top-level `NotifWire.contextGraphId`, NOT nested in `meta`, so we do
+     * NOT re-parse/rewrite caller-supplied `meta` JSON here (that would risk
+     * corrupting already-escaped literals). Callers that also want it inside
+     * `meta` for display include it there themselves (the join handlers
+     * already do). Omitted/undefined → NULL = legacy node/global-scope row,
+     * treated as out-of-scope by the scoped read.
+     */
+    contextGraphId?: string | null;
   }): number {
     const result = this.stmt('insertNotif', `
-      INSERT INTO notifications (ts, type, title, message, source, peer, read, meta)
-      VALUES (@ts, @type, @title, @message, @source, @peer, 0, @meta)
+      INSERT INTO notifications (ts, type, title, message, source, peer, read, meta, context_graph_id)
+      VALUES (@ts, @type, @title, @message, @source, @peer, 0, @meta, @contextGraphId)
     `).run({
       ts: n.ts,
       type: n.type,
@@ -1643,6 +1742,7 @@ export class DashboardDB {
       source: n.source ?? null,
       peer: n.peer ?? null,
       meta: n.meta ?? null,
+      contextGraphId: n.contextGraphId ?? null,
     });
     return result.lastInsertRowid as number;
   }
@@ -1673,6 +1773,39 @@ export class DashboardDB {
     }
     const result = this.db.prepare('UPDATE notifications SET read = 1 WHERE read = 0').run();
     return result.changes;
+  }
+
+  /**
+   * Resolve an activity digest key (`activity:<cgId>:<kind>:<windowBucket>`)
+   * to the ids of the underlying atomic `assertion_activity` rows it
+   * collapses (CR-3). Used by the scoped `/read` path so marking a digest
+   * "seen" flips `read=1` on the real rows that compose it.
+   *
+   * Query shape: the indexed `context_graph_id` column is the pre-filter
+   * (cheap), then `ts` is range-bounded to the bucket window, then
+   * `json_extract(meta,'$.kind')` discriminates the lifecycle kind (which
+   * lives in the JSON `meta`, not its own column). Returns [] for a
+   * malformed key so a bad client id is a no-op, not an error.
+   */
+  resolveActivityDigestRowIds(digestKey: string): number[] {
+    const parsed = parseActivityDigestKey(digestKey);
+    if (!parsed) return [];
+    const windowStart = parsed.windowBucket * ACTIVITY_DIGEST_WINDOW_MS;
+    const windowEnd = windowStart + ACTIVITY_DIGEST_WINDOW_MS;
+    const rows = this.db.prepare(
+      `SELECT id FROM notifications
+        WHERE context_graph_id = ?
+          AND type = ?
+          AND ts >= ? AND ts < ?
+          AND json_extract(meta, '$.kind') = ?`,
+    ).all(
+      parsed.contextGraphId,
+      ASSERTION_ACTIVITY_TYPE,
+      windowStart,
+      windowEnd,
+      parsed.kind,
+    ) as Array<{ id: number }>;
+    return rows.map((r) => r.id);
   }
 
   close(): void {
@@ -2194,6 +2327,8 @@ export interface NotificationRow {
   peer: string | null;
   read: number;
   meta: string | null;
+  /** Context-graph scoping key (V16). NULL on legacy/global-scope rows. */
+  context_graph_id: string | null;
 }
 
 export interface ChatMessageRow {
