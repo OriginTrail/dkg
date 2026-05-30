@@ -24,7 +24,7 @@
  *  - Last-known-good: a refresh failure keeps the previously loaded rows and
  *    surfaces the error alongside (mirrors useAssertionLifecycleEvents).
  */
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   markNotificationsRead,
   approveJoinRequest,
@@ -258,15 +258,33 @@ export function useNotificationsFeed(): UseNotificationsFeed {
   // immediate load on mount — same cadence the old Header used.
   useVisibilityPolling(load, 60_000);
 
+  // Debounce the SSE-triggered refresh (Codex R3-2): the generic `notification`
+  // event fires on EVERY assertion write across the caller's CGs, and each
+  // load() runs a scoped SQL read PLUS one listPendingJoinRequests query per
+  // curated CG. Coalesce bursts so a flurry of writes triggers at most one
+  // refresh (mirrors the debounce useMemoryGraphEvents uses); the 60s poll
+  // still covers the steady-state badge.
+  const sseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const debouncedLoad = useCallback(() => {
+    if (sseTimer.current) clearTimeout(sseTimer.current);
+    sseTimer.current = setTimeout(() => {
+      sseTimer.current = null;
+      load();
+    }, 400);
+  }, [load]);
+  useEffect(() => () => {
+    if (sseTimer.current) clearTimeout(sseTimer.current);
+  }, []);
+
   // Single generic `notification` SSE event drives live refresh for ALL kinds
   // (data-contract §4.5). The three join events stay registered for other
   // consumers; the pane subscribes only to `notification`.
   useNodeEvents(
     useCallback(
       (event) => {
-        if (event.type === 'notification') load();
+        if (event.type === 'notification') debouncedLoad();
       },
-      [load],
+      [debouncedLoad],
     ),
   );
 
