@@ -244,6 +244,53 @@ describe('GET/POST /api/notifications (scoped daemon route, A4)', () => {
     expect(body.badgeCount).toBe(1);
   });
 
+  it('R2-1: a join_request with context_graph_id only in meta (NULL column) is dropped — the scoping key is the column, so the emitter MUST set it', async () => {
+    const baseTs = 5 * ACTIVITY_DIGEST_WINDOW_MS + 1000;
+    // Legacy/buggy emitter shape (pre-R2-1): contextGraphId only inside `meta`,
+    // top-level column left NULL. The scoped read filters on the COLUMN, so
+    // this row must NOT surface — even though its requester is pending on a
+    // curated CG (isolating the missing column as the sole cause).
+    db.insertNotification({
+      ts: baseTs, type: 'join_request', title: 'j', message: 'm',
+      meta: JSON.stringify({ contextGraphId: CG_CURATED, agentAddress: REQUESTER, agentName: 'Req' }),
+    });
+    // Correctly-columned join_request (the fixed emitter shape) on the same CG.
+    const good = joinRequestRow(CG_CURATED, OTHER, baseTs + 10);
+
+    await startRoute(makeAgent({ pending: { [CG_CURATED]: [REQUESTER, OTHER] } }));
+    const { body } = await getNotifs();
+    const joins = body.notifications.filter((n: any) => n.type === 'join_request');
+    expect(joins).toHaveLength(1);
+    expect(joins[0].id).toBe(good); // the meta-only (NULL column) row is gone
+  });
+
+  it('R2-2: POST /read with a malformed JSON body returns 400 and marks nothing', async () => {
+    const baseTs = 5 * ACTIVITY_DIGEST_WINDOW_MS + 1000;
+    const mine = activityRow(CG_JOINED, 'created', baseTs, OTHER);
+    await startRoute(makeAgent());
+
+    // Truncated/garbled body — not empty (which is mark-all), not valid JSON.
+    const res = await fetch(`${baseUrl}/api/notifications/read`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{ "ids": [',
+    });
+    expect(res.status).toBe(400);
+    // The malformed request must NOT clear the caller's feed.
+    expect(db.getNotifications().notifications.find((n) => n.id === mine)!.read).toBe(0);
+  });
+
+  it('R2-2: POST /read with an empty body still marks all caller-scoped rows (mark-all preserved)', async () => {
+    const baseTs = 5 * ACTIVITY_DIGEST_WINDOW_MS + 1000;
+    const mine = activityRow(CG_JOINED, 'created', baseTs, OTHER);
+    await startRoute(makeAgent());
+
+    const res = await fetch(`${baseUrl}/api/notifications/read`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '',
+    });
+    expect(res.status).toBe(200);
+    expect((await res.json()).marked).toBe(1);
+    expect(db.getNotifications().notifications.find((n) => n.id === mine)!.read).toBe(1);
+  });
+
   // Dispatch-order guard (ADR-003): in lifecycle.ts the node-ui handler runs
   // BEFORE the agent-aware daemon dispatch. After the clean cut, node-ui must
   // NOT claim /api/notifications (return false) so the request falls through

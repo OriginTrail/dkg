@@ -2023,6 +2023,11 @@ export async function runDaemonInner(
         title: "Join request received",
         message: `${data.agentName ?? shortId(data.agentAddress)} wants to join project ${shortId(data.contextGraphId)}`,
         source: "access-control",
+        // R2-1: the scoping key MUST be on the top-level `context_graph_id`
+        // column (not only in `meta`) — the scoped read filters on the column
+        // (getNotificationsForContextGraphs), so without this the row is NULL-
+        // scoped and dropped from the bell entirely.
+        contextGraphId: data.contextGraphId,
         meta: JSON.stringify({
           contextGraphId: data.contextGraphId,
           agentAddress: data.agentAddress,
@@ -2048,6 +2053,8 @@ export async function runDaemonInner(
         title: "Join approved",
         message: `You have been approved to join project ${shortId(data.contextGraphId)}`,
         source: "access-control",
+        // R2-1: top-level scoping column so the scoped read returns it.
+        contextGraphId: data.contextGraphId,
         meta: JSON.stringify({
           contextGraphId: data.contextGraphId,
           agentAddress: data.agentAddress,
@@ -2071,6 +2078,8 @@ export async function runDaemonInner(
         title: "Join request rejected",
         message: `Your request to join project ${shortId(data.contextGraphId)} was declined by the curator.`,
         source: "access-control",
+        // R2-1: top-level scoping column so the scoped read returns it.
+        contextGraphId: data.contextGraphId,
         meta: JSON.stringify({
           contextGraphId: data.contextGraphId,
           agentAddress: data.agentAddress,

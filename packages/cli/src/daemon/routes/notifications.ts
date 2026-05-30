@@ -152,15 +152,26 @@ export async function handleNotificationRoutes(ctx: RequestContext): Promise<voi
     }
 
     const body = await readBody(req, SMALL_BODY_BYTES);
-    let rawIds: unknown;
-    try {
-      rawIds = body ? (JSON.parse(body) as { ids?: unknown }).ids : undefined;
-    } catch {
-      rawIds = undefined;
-    }
 
-    // Empty body / no ids → mark ALL of the caller's scoped rows (NOT the
-    // whole table).
+    // R2-2: distinguish a genuinely EMPTY body (mark-all, scoped) from a
+    // MALFORMED body (parse failure → 400). Conflating both as "undefined"
+    // meant a truncated/garbled request silently cleared the caller's whole
+    // scoped feed. Empty/whitespace body = the legacy "Mark all read" intent.
+    if (body.trim() === '') {
+      const count = dashDb.markNotificationsRead([...scopedIds]);
+      return jsonResponse(res, 200, { marked: count });
+    }
+    let parsed: { ids?: unknown };
+    try {
+      parsed = JSON.parse(body) as { ids?: unknown };
+    } catch {
+      return jsonResponse(res, 400, { error: 'Invalid JSON body' });
+    }
+    const rawIds = parsed.ids;
+
+    // A parsed body that omits `ids` (e.g. `{}`) is still an explicit
+    // mark-all (scoped) — preserves the existing client behaviour of POSTing
+    // `{}` for "Mark all read".
     if (rawIds === undefined) {
       const count = dashDb.markNotificationsRead([...scopedIds]);
       return jsonResponse(res, 200, { marked: count });
