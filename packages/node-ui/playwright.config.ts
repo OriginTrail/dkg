@@ -5,14 +5,6 @@ import { dirname } from 'node:path';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CI = !!process.env.CI;
 const PORT = 5173;
-/** Legacy specs pending rc.12 UI refresh — excluded from CI until updated. */
-const LEGACY_RC12_PENDING = [
-  '**/network-page.spec.ts',
-  '**/bottom-panel.spec.ts',
-  '**/hermes-connect.spec.ts',
-  '**/header.spec.ts',
-  '**/agent-panel.spec.ts',
-];
 /** Only true when launched via `pnpm test:e2e:devnet` (never inherit from shell). */
 const DEVNET_UI = process.env.PWTEST_DEVNET === '1';
 const DEVNET_NODE = process.env.DEVNET_NODE || process.env.UI_NODE_ID || '1';
@@ -42,11 +34,7 @@ export default defineConfig({
     {
       name: 'mock-ui',
       use: { ...chromeDevice },
-      testIgnore: [
-        '**/devnet/**',
-        '**/*.devnet.spec.ts',
-        ...(CI ? LEGACY_RC12_PENDING : []),
-      ],
+      testIgnore: ['**/devnet/**', '**/*.devnet.spec.ts'],
     },
     {
       name: 'devnet-ui',

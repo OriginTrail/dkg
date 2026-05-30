@@ -1,7 +1,9 @@
 import { test, expect } from '../fixtures/base.js';
+import { skipRc12Pending } from '../helpers/rc12-pending.js';
 
 test.describe('Network Debug Page (/network)', () => {
-  test.beforeEach(async ({ page }) => {
+  test.beforeEach(async ({ page }, testInfo) => {
+    skipRc12Pending(testInfo, 'rc.12: /network debug page not mounted in AppShell');
     await page.goto('/network', { waitUntil: 'domcontentloaded' });
     await page.getByRole('heading', { name: 'Network', level: 1 }).waitFor({ state: 'visible', timeout: 15_000 });
   });

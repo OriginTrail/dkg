@@ -1,4 +1,5 @@
 import { test, expect } from '../fixtures/base.js';
+import { skipRc12Pending } from '../helpers/rc12-pending.js';
 
 test.describe('Header', () => {
   test.beforeEach(async ({ shell, page }) => {
@@ -38,24 +39,28 @@ test.describe('Header', () => {
     expect(peers).toBeGreaterThan(0);
   });
 
-  test('notification badge displays unread count', async ({ header }) => {
+  test('notification badge displays unread count', async ({ header }, testInfo) => {
+    skipRc12Pending(testInfo, 'rc.12: notification badge removed/changed');
     const unread = await header.getUnreadCount();
     expect(unread).toBeGreaterThan(0);
   });
 
-  test('clicking notification bell opens dropdown with items', async ({ header }) => {
+  test('clicking notification bell opens dropdown with items', async ({ header }, testInfo) => {
+    skipRc12Pending(testInfo, 'rc.12: notification dropdown changed');
     await header.openNotifications();
     await expect(header.notifDropdown).toBeVisible();
     const texts = await header.getNotificationTexts();
     expect(texts.length).toBeGreaterThan(0);
   });
 
-  test('notification dropdown shows NOTIFICATIONS title', async ({ header, page }) => {
+  test('notification dropdown shows NOTIFICATIONS title', async ({ header, page }, testInfo) => {
+    skipRc12Pending(testInfo, 'rc.12: notification dropdown changed');
     await header.openNotifications();
     await expect(page.getByText('NOTIFICATIONS')).toBeVisible();
   });
 
-  test('notification items have timestamps', async ({ header, page }) => {
+  test('notification items have timestamps', async ({ header, page }, testInfo) => {
+    skipRc12Pending(testInfo, 'rc.12: notification dropdown changed');
     await header.openNotifications();
     const times = page.locator('.v10-header-notif-item-time');
     const count = await times.count();
