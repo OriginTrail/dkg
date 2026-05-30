@@ -17,15 +17,16 @@ describe('buildLifecycleEventsQuery — SPARQL shape', () => {
   // feed source.
   it('SELECTs the lifecycle binding set keyed by event + assertion + agent + ts + entityCount', () => {
     const q = buildLifecycleEventsQuery('cg-1');
-    // PR #694 review fix — the projection swapped `?subGraph` for
-    // `?assertionGraph` since the lifecycle writers don't emit
-    // `dkg:subGraphName`; the slug is derived client-side from the
-    // assertion-graph URI shape.
-    expect(q).toContain('SELECT ?event ?type ?assertion ?name ?agent ?ts ?assertionGraph');
+    // PR #771 (Task #18) — project `dkg:subGraphName` directly from
+    // the assertion subject. PR #770 wired the writers to emit it
+    // (`metadata.ts:697-699` + `:741-743`); the PR #694 client-side
+    // URI parsing workaround is dead code and has been removed.
+    expect(q).toContain('SELECT ?event ?type ?assertion ?name ?agent ?ts ?subGraphName');
     expect(q).toContain('(COUNT(?root) AS ?entityCount)');
-    expect(q).toContain('OPTIONAL { ?assertion dkg:assertionGraph ?assertionGraph }');
-    // Guard: the dead `dkg:subGraphName` OPTIONAL must not regress.
-    expect(q).not.toContain('dkg:subGraphName');
+    expect(q).toContain('OPTIONAL { ?assertion dkg:subGraphName ?subGraphName }');
+    // Regression guard: the dead `dkg:assertionGraph` workaround
+    // projection must not come back.
+    expect(q).not.toContain('?assertion dkg:assertionGraph');
   });
 
   it('COALESCEs created→`prov:generated` and promoted→`prov:used` (with a single outer type filter)', () => {
@@ -54,7 +55,7 @@ describe('buildLifecycleEventsQuery — SPARQL shape', () => {
 
   it('groups by all non-aggregated bindings and orders by ?ts DESC with LIMIT 5000', () => {
     const q = buildLifecycleEventsQuery('cg-1');
-    expect(q).toContain('GROUP BY ?event ?type ?assertion ?name ?agent ?ts ?assertionGraph');
+    expect(q).toContain('GROUP BY ?event ?type ?assertion ?name ?agent ?ts ?subGraphName');
     expect(q).toContain('ORDER BY DESC(?ts)');
     expect(q).toContain('LIMIT 5000');
   });
@@ -104,7 +105,7 @@ describe('useAssertionLifecycleEvents — bindings parse', () => {
     name: string;
     agent: string;
     ts: string;
-    assertionGraph?: string;
+    subGraphName?: string;
     entityCount?: number;
   }) {
     const typeUri = opts.kind === 'created'
@@ -117,7 +118,9 @@ describe('useAssertionLifecycleEvents — bindings parse', () => {
       name: `"${opts.name}"`,
       agent: `"${opts.agent}"`,
       ts: `"${opts.ts}"`,
-      assertionGraph: opts.assertionGraph ? `"${opts.assertionGraph}"` : undefined,
+      // PR #771 (Task #18) — `subGraphName` is now a string literal
+      // OPTIONAL binding, not a parsed assertion-graph URI.
+      subGraphName: opts.subGraphName ? `"${opts.subGraphName}"` : undefined,
       entityCount: opts.entityCount !== undefined
         ? `"${opts.entityCount}"^^<http://www.w3.org/2001/XMLSchema#integer>`
         : undefined,
@@ -192,13 +195,11 @@ describe('useAssertionLifecycleEvents — bindings parse', () => {
     expect(promoted?.entityCount).toBe(12);
   });
 
-  // PR #694 review fix — the sub-graph slug is derived from
-  // `dkg:assertionGraph` (the URI shape mirrors
-  // `contextGraphAssertionUri`), not the never-emitted
-  // `dkg:subGraphName`. A sub-graph-scoped assertion URI carries
-  // the slug as its first path segment after the cgId; a
-  // root-bucket assertion has `assertion/` directly.
-  it('derives `subGraph` from `dkg:assertionGraph` for sub-graph-scoped assertions', async () => {
+  // PR #771 (Task #18) — read `dkg:subGraphName` directly from the
+  // assertion subject. PR #770 wired the lifecycle metadata writers
+  // to emit the predicate; the prior client-side URI parsing is
+  // dead code.
+  it('reads `subGraph` directly from `dkg:subGraphName` for sub-graph-scoped assertions', async () => {
     let latest: AssertionLifecycleEventsResult | null = null;
     function Probe({ id }: { id: string }) {
       latest = useAssertionLifecycleEvents(id);
@@ -213,13 +214,13 @@ describe('useAssertionLifecycleEvents — bindings parse', () => {
         event: 'urn:evt:c-1', kind: 'created',
         assertion: 'urn:assert:scoped', name: 'scoped-doc',
         agent: 'did:dkg:agent:alice', ts: '2026-05-20T10:00:00Z',
-        assertionGraph: 'did:dkg:context-graph:cg-A/research/assertion/0xabc/scoped-doc',
+        subGraphName: 'research',
       }),
       row({
         event: 'urn:evt:c-2', kind: 'created',
         assertion: 'urn:assert:root', name: 'root-doc',
         agent: 'did:dkg:agent:alice', ts: '2026-05-20T11:00:00Z',
-        assertionGraph: 'did:dkg:context-graph:cg-A/assertion/0xabc/root-doc',
+        // No `subGraphName` — root-bucket assertion.
       }),
     ]);
     await flush();
@@ -227,6 +228,47 @@ describe('useAssertionLifecycleEvents — bindings parse', () => {
     const rootBucket = latest!.events.find(e => e.assertionUri === 'urn:assert:root');
     expect(scoped?.subGraph).toBe('research');
     expect(rootBucket?.subGraph).toBeUndefined();
+  });
+
+  // PR #771 (Task #18) — backwards-compat with pre-#770 assertions
+  // in someone's local graph: the OPTIONAL binding returns no
+  // value → `row.subGraphName` undefined → consumer renders the
+  // row without a sub-graph chip (same shape as a true root-bucket
+  // assertion). This is the load-bearing migration-safety lock —
+  // without it, pre-#770 assertions would silently disappear from
+  // the activity feed once GH #771 ships.
+  it('handles legacy assertions missing `dkg:subGraphName` (backwards-compat — row renders without chip, not dropped)', async () => {
+    let latest: AssertionLifecycleEventsResult | null = null;
+    function Probe({ id }: { id: string }) {
+      latest = useAssertionLifecycleEvents(id);
+      return null;
+    }
+    await act(async () => {
+      root.render(React.createElement(Probe, { id: 'cg-A' }));
+    });
+    await flush();
+    pending.get('cg-A')!.resolve([
+      // Legacy assertion — `dkg:subGraphName` was never emitted by
+      // the pre-#770 writer. Hook sees `row.subGraphName` undefined
+      // and surfaces `subGraph: undefined` on the event, NOT a
+      // dropped row.
+      row({
+        event: 'urn:evt:legacy', kind: 'promoted',
+        assertion: 'urn:assert:legacy', name: 'legacy-doc',
+        agent: 'did:dkg:agent:alice', ts: '2026-05-20T10:00:00Z',
+        entityCount: 3,
+        // Intentionally omit subGraphName.
+      }),
+    ]);
+    await flush();
+    expect(latest!.events).toHaveLength(1);
+    const legacy = latest!.events[0];
+    expect(legacy.assertionUri).toBe('urn:assert:legacy');
+    expect(legacy.subGraph).toBeUndefined();
+    // Other fields still populated — row is fully usable, just
+    // chip-less.
+    expect(legacy.assertionName).toBe('legacy-doc');
+    expect(legacy.entityCount).toBe(3);
   });
 
   // PR #694 review fix — on fetch failure, `resultContextGraphId`

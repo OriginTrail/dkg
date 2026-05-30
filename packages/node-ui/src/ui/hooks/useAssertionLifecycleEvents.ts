@@ -32,7 +32,6 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { authHeaders } from '../api.js';
-import { subGraphFromAssertionGraphUri } from '../lib/sub-graph-uri.js';
 
 export type AssertionLifecycleKind = 'created' | 'promoted';
 
@@ -100,18 +99,20 @@ export function buildLifecycleEventsQuery(cgId: string): string {
   // group to 0 cleanly; the consumer normalises 0 → undefined.
   // Promoted events report one row per bundle.
   //
-  // PR #694 review fix — the lifecycle metadata writers
-  // (`generateAssertionCreatedMetadata` / `…PromotedMetadata`) do
-  // NOT emit `dkg:subGraphName` on the assertion subject (only
-  // `generateShareMetadata` does, and that's the WorkspaceOperation
-  // source we collapsed away from). They DO emit
-  // `dkg:assertionGraph` — a stable triple set on creation
-  // (`metadata.ts:632`). Project the assertion-graph URI and parse
-  // the sub-graph slug client-side; the URI is shaped per
-  // `contextGraphAssertionUri` in `packages/core/src/constants.ts`.
+  // PR #771 (Task #18) — read `dkg:subGraphName` directly from the
+  // assertion subject. PR #770 (GH #696) wired the lifecycle
+  // metadata writers (`generateAssertionCreatedMetadata` at
+  // `metadata.ts:697-699` + `generateAssertionPromotedMetadata` at
+  // `:741-743`) to emit `dkg:subGraphName` alongside the existing
+  // `dkg:assertionGraph` URI. The PR #694 client-side parsing
+  // workaround at `sub-graph-uri.ts` is no longer load-bearing —
+  // project the predicate directly. Backwards-safe for pre-#770
+  // assertions in someone's local graph: the OPTIONAL binding
+  // returns no value and `row.subGraph` resolves to undefined,
+  // exactly the previous root-bucket fallback.
   return `PREFIX dkg: <${DKG}>
 PREFIX prov: <http://www.w3.org/ns/prov#>
-SELECT ?event ?type ?assertion ?name ?agent ?ts ?assertionGraph (COUNT(?root) AS ?entityCount) WHERE {
+SELECT ?event ?type ?assertion ?name ?agent ?ts ?subGraphName (COUNT(?root) AS ?entityCount) WHERE {
   GRAPH <${metaGraph}> {
     ?event a ?type ;
            prov:startedAtTime ?ts ;
@@ -121,10 +122,10 @@ SELECT ?event ?type ?assertion ?name ?agent ?ts ?assertionGraph (COUNT(?root) AS
     OPTIONAL { ?event prov:used ?used }
     BIND(COALESCE(?gen, ?used) AS ?assertion)
     ?assertion dkg:assertionName ?name .
-    OPTIONAL { ?assertion dkg:assertionGraph ?assertionGraph }
+    OPTIONAL { ?assertion dkg:subGraphName ?subGraphName }
     OPTIONAL { ?event dkg:rootEntity ?root }
   }
-} GROUP BY ?event ?type ?assertion ?name ?agent ?ts ?assertionGraph
+} GROUP BY ?event ?type ?assertion ?name ?agent ?ts ?subGraphName
   ORDER BY DESC(?ts) LIMIT 5000`;
 }
 
@@ -243,14 +244,12 @@ export function useAssertionLifecycleEvents(
             const n = raw != null ? Number(raw) : NaN;
             if (Number.isFinite(n) && n >= 0) entityCount = n;
           }
-          // PR #694 review fix — derive the sub-graph slug from
-          // `dkg:assertionGraph` (which writers DO emit) instead of
-          // `dkg:subGraphName` (which the lifecycle writers don't).
-          // Falls back to undefined for root-bucket assertions.
-          const assertionGraphUri = bv(row.assertionGraph);
-          const subGraph = assertionGraphUri
-            ? subGraphFromAssertionGraphUri(assertionGraphUri, contextGraphId)
-            : undefined;
+          // PR #771 (Task #18) — read `dkg:subGraphName` directly
+          // from the assertion subject. The PR #694 client-side URI
+          // parsing is dead code now that PR #770 wired the writers
+          // to emit the predicate. Undefined here matches the
+          // previous root-bucket fallback.
+          const subGraph = bv(row.subGraphName);
           out.push({
             eventUri,
             kind,
