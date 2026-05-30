@@ -110,9 +110,6 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   // the `chain.approvalPolicy` dispatch and the `transferFrom(..., 1n)`
   // floor; the mock has no ERC-20 allowance surface to mirror.
   'ensureV10ApproveTrac',
-  // TS-private V10 update tokenAmount helpers shared by ACK digest + tx path.
-  'resolveCurrentTokenAmount',
-  'computeUpdateNewTokenAmount',
   // Lazy-cache helpers for frequently-resolved contracts — TS-private,
   // not part of the ChainAdapter interface.
   'getIdentityStorage',
@@ -172,6 +169,7 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   //    there's nothing to reproduce here.
   'isContextGraphActiveOnChain',
   'computeV10UpdateAckDigest',
+  'resolveCurrentTokenAmount',
   'computeUpdateNewTokenAmount',
 ]);
 

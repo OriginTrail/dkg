@@ -2907,6 +2907,12 @@ export class EVMChainAdapter implements ChainAdapter {
     }
 
     let currentEpoch = 0n;
+    const needsGrowthSizing = params.newByteSize > currentByteSize;
+    if (needsGrowthSizing && !this.contracts.chronos) {
+      throw new Error(
+        'Chronos contract binding required for byte-size growth update tokenAmount sizing',
+      );
+    }
     if (this.contracts.chronos) {
       try {
         currentEpoch = BigInt(await this.contracts.chronos.getCurrentEpoch());
@@ -2961,6 +2967,8 @@ export class EVMChainAdapter implements ChainAdapter {
     mintAmount?: bigint;
     burnTokenIds?: bigint[];
     newTokenAmount?: bigint;
+    /** When set, skip live re-derivation (binds ACK digest to tx submission). */
+    boundNewTokenAmount?: bigint;
     newCiphertextChunksRoot?: Uint8Array;
     newCiphertextChunkCount?: number;
   }): Promise<Uint8Array> {
@@ -2980,7 +2988,7 @@ export class EVMChainAdapter implements ChainAdapter {
     // floor that lived here is now redundant — `computeUpdateNewTokenAmount`
     // returns `currentTokenAmount + growthCost` (with growthCost == 0 for
     // pure metadata updates), which is always >= 1 on a V10 chain.
-    const newTokenAmount = await this.computeUpdateNewTokenAmount({
+    const newTokenAmount = params.boundNewTokenAmount ?? await this.computeUpdateNewTokenAmount({
       kcId: params.kcId,
       newByteSize: params.newByteSize,
       currentTokenAmount,
@@ -3081,10 +3089,8 @@ export class EVMChainAdapter implements ChainAdapter {
     // satisfied without overshooting.
     //
     // The old `floorPublishTokenAmount` clamp on the publish-flooring helper
-    // is intentionally NOT applied here: this update path floors to
-    // `currentTokenAmount + growthCost`, which on any V10 KC is already >= 1.
-    // The redundant publish-time floor removal is still tracked separately at
-    // issue #803 (post-testnet follow-up).
+    // is applied inside `computeUpdateNewTokenAmount` so ACK digest and tx
+    // submission bind the same wire value (see computeUpdateACKDigest).
     const newTokenAmount = await this.computeUpdateNewTokenAmount({
       kcId: params.kcId,
       newByteSize: params.newByteSize,
@@ -3128,6 +3134,7 @@ export class EVMChainAdapter implements ChainAdapter {
         mintAmount: params.mintAmount !== undefined ? BigInt(params.mintAmount) : undefined,
         burnTokenIds: burnIds,
         newTokenAmount: params.newTokenAmount,
+        boundNewTokenAmount: newTokenAmount,
         newCiphertextChunksRoot: params.newCiphertextChunksRoot,
         newCiphertextChunkCount: params.newCiphertextChunkCount,
       });
