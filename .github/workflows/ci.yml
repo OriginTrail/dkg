@@ -529,6 +529,33 @@ jobs:
       - name: "node-ui tests"
         run: pnpm --filter @origintrail-official/dkg-node-ui test
 
+  kosava-node-ui-e2e:
+    name: "Kosava: node-ui Playwright (mock-ui)"
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: build-outputs
+          path: /tmp
+      - name: Restore build outputs
+        run: tar -xzf /tmp/build-outputs.tgz
+      - name: Install Playwright Chromium
+        run: pnpm --filter @origintrail-official/dkg-node-ui exec playwright install chromium --with-deps
+      - name: "node-ui mock Playwright e2e"
+        run: pnpm --filter @origintrail-official/dkg-node-ui test:e2e -- --project=mock-ui
+
   kosava-supporting:
     name: "Kosava: adapters + epcis + graph-viz + mcp-server + network-sim"
     needs: build
