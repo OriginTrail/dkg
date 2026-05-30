@@ -23,10 +23,11 @@
  *     still in the authoritative pending set. Also dedups to one row per
  *     (cg, agent), keeping the newest.
  *   - Activity digest collapse: assertion_activity rows group by
- *     (contextGraphId, kind, windowBucket); the caller's OWN events are
- *     excluded from the count; a digest whose surviving count is 0
- *     (self-only) is omitted. `soleAuthor` + `actorAgentDid` are set only
- *     when exactly one non-self author dominates the digest.
+ *     (contextGraphId, kind, windowBucket). The caller's OWN activity is
+ *     INCLUDED (operators want visibility into their own agents) — a sole-self
+ *     digest is flagged `bySelf` so the client renders a "You" indicator.
+ *     `soleAuthor` + `actorAgentDid` are set only when exactly one OTHER
+ *     author dominates the digest.
  *   - badgeCount = unread join_request + join_approved + assertion_activity
  *     digests; EXCLUDES join_rejected.
  */
@@ -80,6 +81,8 @@ export type NotifWire =
         actorAgentDid?: string;
         actorAgentName?: string;
         soleAuthor?: boolean;
+        /** True when the sole author is the reading agent → render "You". */
+        bySelf?: boolean;
       };
     };
 
@@ -183,8 +186,10 @@ export function scopeNotifications(
       const kind = meta.kind as AssertionActivityKind | undefined;
       if (kind !== 'created' && kind !== 'promoted' && kind !== 'published') continue;
       const actorDid = asString(meta.actorAgentDid);
-      // Self-suppression: the reading agent's own events don't count.
-      if (actorDid && selfDid && actorDid.toLowerCase() === selfDid) continue;
+      // The reading agent's OWN activity is intentionally NOT suppressed —
+      // operators want visibility into what their own agents have done. It is
+      // shown with a "You" indicator (bySelf, derived per digest below) and
+      // counts toward the badge like any other activity.
       const digestKey = buildActivityDigestKey(cgId, kind, row.ts);
       const windowBucket = Math.floor(row.ts / ACTIVITY_DIGEST_WINDOW_MS);
       let acc = activity.get(digestKey);
@@ -267,9 +272,13 @@ export function scopeNotifications(
   // Materialise activity digests.
   const activityWire: NotifWire[] = [];
   for (const [digestKey, acc] of activity) {
-    if (acc.count <= 0) continue; // self-only (all suppressed) → omit
+    if (acc.count <= 0) continue;
     const soleAuthor = acc.authors.size === 1;
-    const actorDid = soleAuthor ? acc.lastAuthor : undefined;
+    // Sole author is the reading agent → flag bySelf so the client renders a
+    // "You" indicator instead of a DID/name. Carry actorAgentDid/Name only for
+    // a sole OTHER author.
+    const bySelf = soleAuthor && !!selfDid && acc.lastAuthor?.toLowerCase() === selfDid;
+    const actorDid = soleAuthor && !bySelf ? acc.lastAuthor : undefined;
     activityWire.push({
       type: 'assertion_activity',
       id: digestKey,
@@ -283,6 +292,7 @@ export function scopeNotifications(
         ...(actorDid ? { actorAgentDid: actorDid } : {}),
         ...(actorDid && agentNameOf(actorDid) ? { actorAgentName: agentNameOf(actorDid) } : {}),
         soleAuthor,
+        ...(bySelf ? { bySelf: true } : {}),
       },
     });
   }

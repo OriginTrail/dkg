@@ -229,7 +229,10 @@ export function ActivityDigestRow({
   onOpen: (cgId: string) => void;
 }) {
   const cg = cgLabel(item.contextGraphName, item.cgId);
-  const actor = item.actorAgentName?.trim() || undefined;
+  // A sole-self digest renders "You" — operators want visibility into their
+  // own agent's activity; it's shown + counts like any other row, just labelled
+  // (and visually marked via .v10-notif-by-self).
+  const actor = item.bySelf ? 'You' : (item.actorAgentName?.trim() || undefined);
   const text = digestText(item.event, item.count, actor);
   const when = formatNotificationTimestamp(item.ts);
   // Descriptive accessible name carries the full meaning (kind + count + CG +
@@ -238,7 +241,7 @@ export function ActivityDigestRow({
   return (
     <button
       type="button"
-      className={`v10-notif-row v10-notif-row-activity v10-notif-activity-${item.event}${item.read ? '' : ' v10-notif-unread'}`}
+      className={`v10-notif-row v10-notif-row-activity v10-notif-activity-${item.event}${item.bySelf ? ' v10-notif-by-self' : ''}${item.read ? '' : ' v10-notif-unread'}`}
       onClick={() => onOpen(item.cgId)}
       title={`Open ${cg} · recent activity`}
       aria-label={ariaLabel}

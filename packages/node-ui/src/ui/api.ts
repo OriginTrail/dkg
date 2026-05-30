@@ -2009,11 +2009,11 @@ export interface JoinRejectedNotif extends NotifWireBase {
 }
 
 /** Collapsed activity digest — per (contextGraphId × kind × window). `id` is
- *  the stable `digestKey`. `count` is summed over the window with the caller's
- *  OWN events already excluded server-side (an all-self digest is never sent),
- *  so the client never needs the caller DID for activity. `actorAgentDid` /
- *  `actorAgentName` are populated ONLY when `soleAuthor === true` (a single
- *  non-self author dominates); otherwise omitted (render count-only). */
+ *  the stable `digestKey`. `count` is summed over the window and INCLUDES the
+ *  caller's own events (operators want visibility into their own agents). A
+ *  sole-self digest sets `bySelf` so the row renders a "You" indicator;
+ *  `actorAgentDid` / `actorAgentName` are populated ONLY when `soleAuthor ===
+ *  true` AND it is a single OTHER author (otherwise omitted → count-only). */
 export interface AssertionActivityNotif extends NotifWireBase {
   type: 'assertion_activity';
   id: string;
@@ -2024,6 +2024,8 @@ export interface AssertionActivityNotif extends NotifWireBase {
     actorAgentDid?: string;
     actorAgentName?: string;
     soleAuthor?: boolean;
+    /** True when the sole author is the reading agent → render "You". */
+    bySelf?: boolean;
   };
 }
 

@@ -156,7 +156,7 @@ describe('scopeNotifications — activity digest collapse + self-suppression', (
     }
   });
 
-  it('excludes the reading agent OWN events from the count and omits self-only digests', () => {
+  it("INCLUDES the reading agent's OWN events and flags a self-only digest bySelf", () => {
     const baseTs = 5 * ACTIVITY_DIGEST_WINDOW_MS + 1000;
     const self = 'did:dkg:agent:0xme';
     const out = scopeNotifications(
@@ -166,10 +166,18 @@ describe('scopeNotifications — activity digest collapse + self-suppression', (
       ],
       baseCtx({ selfAgentDid: self }),
     );
-    expect(out.notifications).toHaveLength(0); // all-self → omitted
+    expect(out.notifications).toHaveLength(1);
+    const n = out.notifications[0];
+    if (n.type === 'assertion_activity') {
+      expect(n.meta.count).toBe(2);                  // own events counted
+      expect(n.meta.bySelf).toBe(true);              // operator's own → render "You"
+      expect(n.meta.soleAuthor).toBe(true);
+      expect(n.meta.actorAgentDid).toBeUndefined();  // self → no DID/name carried
+    }
+    expect(out.badgeCount).toBe(1);                  // self activity counts toward the badge
   });
 
-  it('counts only the others when self + others are mixed', () => {
+  it('counts BOTH self and others in a mixed digest (no sole author, not bySelf)', () => {
     const baseTs = 5 * ACTIVITY_DIGEST_WINDOW_MS + 1000;
     const self = 'did:dkg:agent:0xme';
     const out = scopeNotifications(
@@ -181,8 +189,9 @@ describe('scopeNotifications — activity digest collapse + self-suppression', (
     );
     expect(out.notifications).toHaveLength(1);
     const n = out.notifications[0];
-    expect(n.type === 'assertion_activity' && n.meta.count).toBe(1);
-    expect(n.type === 'assertion_activity' && n.meta.soleAuthor).toBe(true);
+    expect(n.type === 'assertion_activity' && n.meta.count).toBe(2);
+    expect(n.type === 'assertion_activity' && n.meta.soleAuthor).toBe(false);
+    expect(n.type === 'assertion_activity' && n.meta.bySelf).toBeUndefined();
   });
 
   it('soleAuthor=false and no actorAgentDid when multiple non-self authors', () => {

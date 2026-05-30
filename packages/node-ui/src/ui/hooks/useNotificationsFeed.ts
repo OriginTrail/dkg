@@ -82,6 +82,8 @@ export type ActivityItem =
        *  (`soleAuthor === true`); render the AgentChip iff this is set. */
       actorAgentDid?: string;
       actorAgentName?: string;
+      /** True when the sole author is the reading agent → render a "You" tag. */
+      bySelf?: boolean;
       ts: number;
       read: boolean;
     }
@@ -174,6 +176,7 @@ export function mapActivity(rows: NotifWire[]): ActivityItem[] {
         ...(n.meta.soleAuthor && n.meta.actorAgentDid
           ? { actorAgentDid: n.meta.actorAgentDid, actorAgentName: n.meta.actorAgentName }
           : {}),
+        ...(n.meta.bySelf ? { bySelf: true } : {}),
         ts: n.ts,
         read: n.read === 1,
       });

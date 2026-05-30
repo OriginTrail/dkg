@@ -99,6 +99,13 @@ describe('mapActivity', () => {
     expect(unreadDigest.read).toBe(false);
     expect(readConfirm.read).toBe(true);
   });
+
+  it('carries bySelf for the operator\'s own activity (rendered as "You")', () => {
+    const [d] = mapActivity([activity({ meta: { kind: 'created', count: 3, soleAuthor: true, bySelf: true } })]);
+    expect(d.kind === 'digest' && d.bySelf).toBe(true);
+    const [other] = mapActivity([activity({ meta: { kind: 'created', count: 3, soleAuthor: true, actorAgentDid: 'did:dkg:agent:0xx', actorAgentName: 'Ada' } })]);
+    expect(other.kind === 'digest' && other.bySelf).toBeUndefined();
+  });
 });
 
 describe('classifyActionError', () => {

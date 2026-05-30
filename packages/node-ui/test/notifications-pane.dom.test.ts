@@ -256,6 +256,16 @@ describe('NotificationsPane — interaction + a11y (happy-dom)', () => {
     render(makeFeed({ status: 'ready', refreshError: false, activity: [digest] }));
     expect(container.textContent).not.toContain('Couldn’t refresh notifications');
   });
+
+  it('own-agent activity renders a "You" digest with the by-self marker', () => {
+    const mine: ActivityItem = {
+      kind: 'digest', id: 'activity:cg:a:created:1', cgId: 'cg:a',
+      contextGraphName: 'Alpha', event: 'created', count: 3, ts: 1, read: false, bySelf: true,
+    };
+    render(makeFeed({ unread: 1, activity: [mine] }));
+    expect(container.textContent).toContain('You added 3 assertions');
+    expect(container.querySelector('.v10-notif-by-self')).toBeTruthy();
+  });
 });
 
 describe('NotificationsBell — disclosure keyboard + focus (happy-dom)', () => {

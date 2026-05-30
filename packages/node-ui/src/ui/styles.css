@@ -516,6 +516,11 @@ button.v10-notif-row:hover { background: var(--bg-hover); }
    this is a supplementary scan cue. */
 .v10-notif-unread { box-shadow: inset 2px 0 0 var(--accent-red); }
 
+/* Self-authored activity — the operator's OWN agent. The row text leads with
+   "You …" for the explicit signal; this faint tint is a supplementary scan cue
+   so own-agent activity is distinguishable at a glance (colour-not-alone). */
+.v10-notif-by-self { background: rgba(110, 168, 254, 0.07); }
+
 /* Glyph cell */
 .v10-notif-glyph {
   flex-shrink: 0;
