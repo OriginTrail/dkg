@@ -252,6 +252,73 @@ describe('chain-lifecycle-extra — V10 lifecycle + adapter invariants', () => {
       expect(notVerified.verified).toBe(false);
     }, 120_000);
 
+    // #831 regression test: a metadata update with `newByteSize > currentByteSize`
+    // MUST land on-chain without the caller specifying `newTokenAmount`. The
+    // adapter's `computeUpdateNewTokenAmount` helper is responsible for paying
+    // the exact marginal growth cost so `KnowledgeAssetsLifecycle._validateTokenAmount`
+    // sees a non-zero `deltaTokenAmount` and accepts the update. Pre-#831 this
+    // reverted with `InvalidTokenAmount(1, 0)` whenever the daemon carried the
+    // current tokenAmount forward (delta=0).
+    it('updates with a larger newByteSize and no caller-provided newTokenAmount (#831)', async () => {
+      const adapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+
+      const { kcId, merkleRoot: originalRoot } = await publishOneKCV10({
+        kaCount: 1,
+        byteSize: 256n,
+        epochs: 2,
+      });
+
+      const newMerkleRoot = ethers.getBytes(
+        ethers.keccak256(ethers.toUtf8Bytes(`growth-update-${Date.now()}`)),
+      );
+      expect(ethers.hexlify(newMerkleRoot)).not.toBe(ethers.hexlify(originalRoot));
+
+      const provider = createProvider();
+      const coreOp = new Wallet(HARDHAT_KEYS.CORE_OP, provider);
+      const kav10Address = await adapter.getKnowledgeAssetsV10Address();
+      const evmChainId = await adapter.getEvmChainId();
+      const updateAuthorTyped = buildUpdateAuthorAttestationTypedData({
+        chainId: evmChainId,
+        kav10Address,
+        kaId: kcId,
+        newMerkleRoot,
+        authorAddress: coreOp.address,
+      });
+      const updateAuthorRaw = ethers.Signature.from(
+        await coreOp.signTypedData(
+          updateAuthorTyped.domain,
+          updateAuthorTyped.types,
+          updateAuthorTyped.message,
+        ),
+      );
+
+      // Grow byteSize from 256 -> 1024. Critically: DO NOT pass `newTokenAmount` —
+      // the adapter must derive it from the contract's growth-cost formula.
+      const updateResult = await adapter.updateKnowledgeCollectionV10({
+        kcId,
+        newMerkleRoot,
+        newByteSize: 1024n,
+        newMerkleLeafCount: 1,
+        authorAddress: coreOp.address,
+        authorR: ethers.getBytes(updateAuthorRaw.r),
+        authorVS: ethers.getBytes(updateAuthorRaw.yParityAndS),
+        authorSchemeVersion: AUTHOR_SCHEME_VERSION_V1,
+      });
+
+      expect(updateResult.success).toBe(true);
+      expect(updateResult.hash).toMatch(/^0x[0-9a-f]{64}$/);
+
+      const verified = await adapter.verifyKAUpdate(
+        updateResult.hash,
+        kcId,
+        adapter.getSignerAddress(),
+      );
+      expect(verified.verified).toBe(true);
+      expect(ethers.hexlify(verified.onChainMerkleRoot!).toLowerCase()).toBe(
+        ethers.hexlify(newMerkleRoot).toLowerCase(),
+      );
+    }, 120_000);
+
     it('resolvePublishByTxHash returns null for an unknown / zero tx hash', async () => {
       const adapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
       const bogus = '0x' + 'ab'.repeat(32);

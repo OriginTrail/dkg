@@ -162,8 +162,14 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   //    test helpers / ACK collectors. The mock performs no real signature
   //    recovery (its `updateKnowledgeCollectionV10` accepts any ack), so there
   //    is no on-chain digest to reproduce.
+  //  - `computeUpdateNewTokenAmount` (issue #831) is a private helper that
+  //    chains together `getKnowledgeCollectionUpdateContext`, `Chronos.getCurrentEpoch`,
+  //    and `AskStorage.getStakeWeightedAverageAsk` to mirror the contract's
+  //    growth-cost validator. The mock skips on-chain validation entirely, so
+  //    there's nothing to reproduce here.
   'isContextGraphActiveOnChain',
   'computeV10UpdateAckDigest',
+  'computeUpdateNewTokenAmount',
 ]);
 
 const NO_CHAIN_EXEMPT_FROM_EVM = new Set<string>([

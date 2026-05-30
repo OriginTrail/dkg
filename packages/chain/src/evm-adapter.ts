@@ -145,6 +145,7 @@ const BOUND_CONTRACT_INVALIDATORS = new Map<string, (adapter: EVMChainAdapter) =
   ['ContextGraphs',              (a) => { (a as any).contracts.contextGraphs = undefined; }],
   ['ContextGraphStorage',        (a) => { (a as any).contracts.contextGraphStorage = undefined; }],
   ['DKGPublishingConvictionNFT', (a) => { (a as any).contracts.dkgPublishingConvictionNFT = undefined; }],
+  ['Chronos',                    (a) => { (a as any).contracts.chronos = undefined; }],
 ]);
 
 const HUB_STALE_ERROR_MARKERS = [
@@ -561,6 +562,15 @@ interface ContractCache {
   identityStorage?: Contract;
   convictionStakingStorage?: Contract;
   stakingStorage?: Contract;
+  /**
+   * Epoch oracle used by the update path to compute `remainingEpochs`
+   * (`endEpoch - currentEpoch`) when sizing `newTokenAmount` so the
+   * daemon's pre-flight matches `KnowledgeAssetsLifecycle._validateTokenAmount`.
+   * Without this, byteSize-growth updates revert with `InvalidTokenAmount(1, 0)`
+   * because the carry-forward `currentTokenAmount` produces `deltaTokenAmount == 0`.
+   * Tracked at issue #831.
+   */
+  chronos?: Contract;
 }
 
 function formatProviderContext(config: Pick<EVMAdapterConfig, 'chainId' | 'rpcUrl'>): string {
@@ -1379,6 +1389,15 @@ export class EVMChainAdapter implements ChainAdapter {
       this.contracts.dkgPublishingConvictionNFT = await this.resolveContract('DKGPublishingConvictionNFT');
     } catch {
       // DKGPublishingConvictionNFT not deployed — V10 PCA agent-resolution unavailable
+    }
+
+    try {
+      this.contracts.chronos = await this.resolveContract('Chronos');
+    } catch {
+      // Chronos not deployed — update-path growth-cost sizing falls back to
+      // currentEpoch=0 (treats KC as having full `endEpoch` remaining lifetime).
+      // Greenfield V10 deployments always have Chronos; this catch is for older
+      // adapters bound to deploys that pre-date the Chronos registration.
     }
 
     try {
@@ -2822,6 +2841,86 @@ export class EVMChainAdapter implements ChainAdapter {
   // =====================================================================
 
   /**
+   * Compute the `newTokenAmount` to submit (and bind into the ACK digest)
+   * for a V10 update, matching the contract's growth-cost validator.
+   *
+   * The contract gate (`KnowledgeAssetsLifecycle._executeUpdateCore` §"Byte-size
+   * growth cost check") only fires when `newByteSize > currentByteSize`, and
+   * then requires `deltaTokenAmount = newTokenAmount - currentTokenAmount`
+   * to be:
+   *   1) strictly positive (`tokenAmount == 0` floors `_validateTokenAmount`),
+   *   2) at least `(ask * byteSizeGrowth * remainingEpochs) / 1024`.
+   *
+   * Pre-#831 the daemon carried `newTokenAmount = currentTokenAmount`, so any
+   * growth update produced `deltaTokenAmount = 0` and reverted with
+   * `InvalidTokenAmount(1, 0)`. We now pay the exact marginal growth cost so
+   * the contract's expected-cost branch is satisfied without overshooting.
+   *
+   * Pure metadata updates (`newByteSize <= currentByteSize`) skip the
+   * validator entirely — the carry-forward `currentTokenAmount` is returned
+   * unchanged and `deltaTokenAmount == 0` is accepted.
+   *
+   * MUST be called from BOTH `computeV10UpdateAckDigest` and
+   * `updateKnowledgeCollectionV10` so the off-chain signed ACK and the
+   * on-chain submission see the same `newTokenAmount`.
+   */
+  private async computeUpdateNewTokenAmount(params: {
+    kcId: bigint;
+    newByteSize: bigint;
+    currentTokenAmount: bigint;
+    userProvidedNewTokenAmount?: bigint;
+  }): Promise<bigint> {
+    const kcs = this.contracts.knowledgeCollectionStorage;
+    let currentByteSize = 0n;
+    let endEpoch = 0n;
+    if (kcs) {
+      try {
+        const ctx = await kcs.getKnowledgeCollectionUpdateContext(params.kcId);
+        // Tuple shape from `DKGKnowledgeAssets.getKnowledgeCollectionUpdateContext`:
+        // (preUpdateMerkleRootCount, minted, byteSize, endEpoch, tokenAmount, isImmutable, preUpdateMerkleLeafCount)
+        currentByteSize = BigInt(ctx[2]);
+        endEpoch = BigInt(ctx[3]);
+      } catch {
+        // KC not yet in storage (would fail later on-chain anyway) — leave defaults.
+      }
+    }
+
+    let currentEpoch = 0n;
+    if (this.contracts.chronos) {
+      try {
+        currentEpoch = BigInt(await this.contracts.chronos.getCurrentEpoch());
+      } catch {
+        // Chronos read failed — fall back to currentEpoch=0 which conservatively
+        // OVER-estimates the remaining lifetime and therefore the growth cost;
+        // the contract will simply accept a larger `newTokenAmount`.
+      }
+    }
+    const remainingEpochs = endEpoch > currentEpoch ? endEpoch - currentEpoch : 0n;
+
+    let growthCost = 0n;
+    if (params.newByteSize > currentByteSize && remainingEpochs > 0n && this.contracts.askStorage) {
+      try {
+        const ask = BigInt(await this.contracts.askStorage.getStakeWeightedAverageAsk());
+        const byteSizeGrowth = params.newByteSize - currentByteSize;
+        growthCost = (ask * byteSizeGrowth * remainingEpochs) / 1024n;
+        // Strict-positive floor: the contract's `_validateTokenAmount` reverts
+        // any `tokenAmount == 0`, even when the expected-cost integer-divides
+        // to zero. Match the floor exactly so growth updates with sub-1024 ask
+        // budgets still succeed.
+        if (growthCost === 0n) growthCost = 1n;
+      } catch {
+        // askStorage read failed — leave growthCost=0; the on-chain validator
+        // will revert with the contract's actual expected-cost error which is
+        // more informative than anything we could synthesize here.
+      }
+    }
+
+    const minimumTokenAmount = params.currentTokenAmount + growthCost;
+    const baseTokenAmount = params.userProvidedNewTokenAmount ?? minimumTokenAmount;
+    return baseTokenAmount > minimumTokenAmount ? baseTokenAmount : minimumTokenAmount;
+  }
+
+  /**
    * Canonical V10 update ACK digest — mirrors `KnowledgeAssetsLifecycle`
    * `_executeUpdateCore` and the values `updateKnowledgeCollectionV10`
    * submits on-chain. Test helpers and ACK collectors should call this
@@ -2855,17 +2954,17 @@ export class EVMChainAdapter implements ChainAdapter {
       } catch { /* not in KCS */ }
     }
 
-    let requiredForNewSize = 0n;
-    if (this.contracts.askStorage) {
-      try {
-        const ask = BigInt(await this.contracts.askStorage.getStakeWeightedAverageAsk());
-        requiredForNewSize = (ask * params.newByteSize) / 1024n;
-      } catch { /* use 0 */ }
-    }
-    const baseTokenAmount = params.newTokenAmount ?? currentTokenAmount;
-    const newTokenAmount = floorPublishTokenAmount(
-      baseTokenAmount > requiredForNewSize ? baseTokenAmount : requiredForNewSize,
-    );
+    // #831: size `newTokenAmount` against the contract's growth-cost validator
+    // (matches `KnowledgeAssetsLifecycle._validateTokenAmount` exactly). The
+    // floor that lived here is now redundant — `computeUpdateNewTokenAmount`
+    // returns `currentTokenAmount + growthCost` (with growthCost == 0 for
+    // pure metadata updates), which is always >= 1 on a V10 chain.
+    const newTokenAmount = await this.computeUpdateNewTokenAmount({
+      kcId: params.kcId,
+      newByteSize: params.newByteSize,
+      currentTokenAmount,
+      userProvidedNewTokenAmount: params.newTokenAmount,
+    });
 
     let contextGraphId = 0n;
     if (this.contracts.contextGraphStorage) {
@@ -2961,41 +3060,32 @@ export class EVMChainAdapter implements ChainAdapter {
       } catch { /* not in KAS either */ }
     }
 
-    // The V10 contract requires newTokenAmount >= the cost of the new byte
-    // size (ask * newByteSize / 1024). Carry forward the current amount but
-    // also ensure it covers the cost for the new payload.
-    let requiredForNewSize = 0n;
-    if (this.contracts.askStorage) {
-      try {
-        const ask = BigInt(await this.contracts.askStorage.getStakeWeightedAverageAsk());
-        requiredForNewSize = (ask * params.newByteSize * 1n) / 1024n;
-      } catch { /* use 0 */ }
-    }
-    const baseTokenAmount = params.newTokenAmount ?? currentTokenAmount;
-    // KAV10 10.1.1: this floor is REDUNDANT for any KC that can exist on a
-    // V10 chain and is kept only as belt-and-suspenders. The publish path's
-    // own floor (see `floorPublishTokenAmount` at the publish struct site)
-    // plus the on-chain `_validateTokenAmount` revert on `tokenAmount == 0`
-    // guarantee every V10 KC carries `tokenAmount >= 1`, so the
-    // carry-forward `currentTokenAmount` (and therefore `baseTokenAmount`)
-    // is already >= 1 and this clamp is a no-op. It is NOT what lets
-    // metadata-only updates through: the contract skips `_validateTokenAmount`
-    // entirely unless `newByteSize > currentByteSize`
-    // (KnowledgeAssetsV10.sol §"Byte-size growth cost check"), so a
-    // metadata-only update with delta 0 is accepted without any floor.
+    // #831: size `newTokenAmount` against the contract's growth-cost validator
+    // (matches `KnowledgeAssetsLifecycle._validateTokenAmount` exactly).
     //
-    // The clamp would only change anything for a legacy `tokenAmount == 0`
-    // KC (none can exist on a fresh V10 chain — only via a future V8/V9
-    // import path), where it would WRONGLY turn a free re-attestation into a
-    // 1-wei delta (and revert a final-epoch metadata update via
-    // `NoRemainingLifetimeForDelta`). Removing it — relying purely on the
-    // publish-time invariant — is tracked as a post-testnet follow-up
-    // (#781; issue #803); it is left in place for the rc.12 cut to avoid
-    // touching signed-ACK-digest math right before the testnet release,
-    // where it is provably inert.
-    const newTokenAmount = floorPublishTokenAmount(
-      baseTokenAmount > requiredForNewSize ? baseTokenAmount : requiredForNewSize,
-    );
+    // The contract gate (`_executeUpdateCore` §"Byte-size growth cost check")
+    // only fires when `newByteSize > currentByteSize` and then requires
+    // `deltaTokenAmount = newTokenAmount - currentTokenAmount` to satisfy
+    // `(ask * byteSizeGrowth * remainingEpochs) / 1024` with a strict-positive
+    // floor. Pre-#831 the daemon carried `newTokenAmount = max(currentTokenAmount,
+    // ask * newByteSize / 1024)`, which on a healthy V10 KC always equals
+    // `currentTokenAmount` (carry-forward already covers the new total cost),
+    // making `deltaTokenAmount == 0` and reverting every byteSize-growth
+    // update with `InvalidTokenAmount(1, 0)`. The shared helper now pays the
+    // exact marginal growth cost so the validator's expected-cost branch is
+    // satisfied without overshooting.
+    //
+    // The old `floorPublishTokenAmount` clamp on the publish-flooring helper
+    // is intentionally NOT applied here: this update path floors to
+    // `currentTokenAmount + growthCost`, which on any V10 KC is already >= 1.
+    // The redundant publish-time floor removal is still tracked separately at
+    // issue #803 (post-testnet follow-up).
+    const newTokenAmount = await this.computeUpdateNewTokenAmount({
+      kcId: params.kcId,
+      newByteSize: params.newByteSize,
+      currentTokenAmount,
+      userProvidedNewTokenAmount: params.newTokenAmount,
+    });
 
     // Look up the contextGraphId for this KC
     const contextGraphStorage = this.contracts.contextGraphStorage;

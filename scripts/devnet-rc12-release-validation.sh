@@ -953,19 +953,13 @@ if [ -n "$OREC" ]; then
   # to POST against. Use node1 (or whichever core is up first) — the daemon
   # only forwards the precomputed seal, it doesn't re-sign.
   #
-  # NOTE: this assertion is currently demoted to WARN because the daemon's
-  # update path has a `newTokenAmount` accounting gap that interacts badly
-  # with small-payload updates on large pre-existing KCs: the chain adapter
-  # sends `newTokenAmount = max(currentTokenAmount, requiredForNewSize)`,
-  # so when the new byteSize is slightly larger than the original but the
-  # current amount already exceeds the new-size cost, `deltaTokenAmount = 0`
-  # and KnowledgeAssetsLifecycle._validateTokenAmount reverts with
-  # InvalidTokenAmount(1,0). The transfer leg is the actual release-gate
-  # behaviour for ownership; verifying "the new owner can publish" requires
-  # a daemon-side fix (compute `newTokenAmount = currentTokenAmount + cost(byteSizeGrowth, remainingEpochs)`)
-  # that is out of scope for this harness. Tracked at
-  # https://github.com/OriginTrail/dkg/issues/831 — once the daemon is fixed,
-  # promote this back to fail-on-non-confirmed.
+  # Hard FAIL on a non-confirmed status. The previously-tracked daemon
+  # `newTokenAmount` accounting gap (issue #831 — daemon under-paid for
+  # byteSize growth and reverted with `InvalidTokenAmount(1, 0)`) was fixed
+  # by adding `computeUpdateNewTokenAmount` in `packages/chain/src/evm-adapter.ts`:
+  # the daemon now pays the exact marginal cost of byteSize growth over the
+  # remaining lifetime, so a new-owner update on a transferred KA must land
+  # cleanly. If this regresses, treat it as a real release-gate failure.
   if [ "$xfer_ok" = "1" ]; then
     nuri="${oroot}/owner2"
     oquads="[{\"subject\":\"$nuri\",\"predicate\":\"http://www.w3.org/1999/02/22-rdf-syntax-ns#type\",\"object\":\"http://schema.org/UpdateAction\",\"graph\":\"\"},{\"subject\":\"$nuri\",\"predicate\":\"http://schema.org/name\",\"object\":\"\\\"owner2-upd\\\"\",\"graph\":\"\"}]"
@@ -976,10 +970,10 @@ if [ -n "$OREC" ]; then
       if [ "$ost" = "confirmed" ] || [ "$ost" = "finalized" ]; then
         pass I new-owner-update "new owner updated KA kc=$okc after transfer (status=$ost)"
       else
-        warn I new-owner-update "new-owner update status=$ost (daemon newTokenAmount delta gap, see comment in script): ${orr:0:160}"
+        fail I new-owner-update "new-owner update status=$ost (expected confirmed/finalized — #831 regression?): ${orr:0:200}"
       fi
     else
-      warn I new-owner-update "could not build update seal for new owner ($destAddr)"
+      fail I new-owner-update "could not build update seal for new owner ($destAddr)"
     fi
   else
     warn I new-owner-update "skipped — transfer did not land (gated by ka-transfer-exec)"
