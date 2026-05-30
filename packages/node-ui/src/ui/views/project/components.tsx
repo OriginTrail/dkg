@@ -60,7 +60,7 @@ import {
   shortType, shortPred, entityMeta,
   buildLayerGraphOptions, getDescription, neighborhoodTriples, neutraliseBuiltinNamespaces,
   matchesSearch, humanizeLabel, layerNoun, useLayerTriples,
-  filterTriplesToEntities,
+  filterTriplesToEntities, admitTripleForScope,
   entityTimestamp, formatRelativeTime, formatTimelineBucket, formatTrailTimestamp,
   type LayerView, type LayerContentTab, type KAPane,
   type SubGraphTab, type SubGraphEntitySort,
@@ -4796,31 +4796,13 @@ export function SubGraphDetailView({
   );
 
   // Triples visible in the Graph tab. Routing is *exact-tag-first*,
-  // erased-tag recovery second:
-  //   1. Triples carrying an explicit `subGraph` tag are routed to
-  //      that exact slug (named branch only — the Root bucket has no
-  //      tagged triples by definition). A triple tagged for "other"
-  //      must never leak into the current view just because one of
-  //      its endpoints happens to be a scoped entity (an entity in
-  //      multiple sub-graphs is shared territory, not a broadcast
-  //      channel).
-  //   2. Triples with NO `subGraph` tag are admitted if either
-  //      endpoint is in scope. This is the post-promotion recovery
-  //      path — promoting an assertion erases the `subGraph` origin
-  //      tag from the resulting SWM/VM triples; without this branch
-  //      promoted entities lose their rdf:type / labels / literal
-  //      properties and their cross-layer edges in this view.
-  // Root branch: rule (1) can never fire (the Root bucket carries
-  // no tagged triples); only the untagged-recovery path admits.
+  // erased-tag recovery second — see `admitTripleForScope` in
+  // `helpers.ts` for the three-rule shape (the extracted predicate
+  // shared with `singleLayerPanelTriples` per PR #839 sweep 2).
   const scopedTriples = useMemo(
-    () => rawMemory.graphTriples.filter(t => {
-      if (!isRoot && t.subGraph === slug) return true;
-      // Exact-tag-routing: a triple with a non-matching subGraph tag
-      // belongs to that other slug's view, not this one — even if an
-      // endpoint is shared.
-      if (t.subGraph) return false;
-      return scopedUris.has(t.subject) || scopedUris.has(t.object);
-    }),
+    () => rawMemory.graphTriples.filter(t =>
+      admitTripleForScope(t, { slug, isRoot, scopedUris }),
+    ),
     [rawMemory.graphTriples, scopedUris, slug, isRoot],
   );
 
@@ -4936,37 +4918,21 @@ export function SubGraphDetailView({
     const panelUris = new Set(panelEntities.map(e => e.uri));
     const seen = new Set<string>();
     const out: Triple[] = [];
-    // Task #19 — exact-tag-routing, parallel to PR #772 sweep 1
-    // Bug A's fix at `scopedTriples` (`:4815-4825`). Two-rule
-    // admission:
-    //   1. Tagged triple → routes to the exact slug (named branch
-    //      only — Root carries no tagged triples). A triple
-    //      tagged for "other" must NOT leak just because one of
-    //      its endpoints is shared with this slug; entities in
-    //      multiple sub-graphs are shared territory, not a
-    //      broadcast channel.
-    //   2. Untagged triple → admitted if either endpoint is in
-    //      the broader scoped set (subject-local properties + the
-    //      object-side recovery edges captured at C18). This is
-    //      the post-promotion recovery path the rest of the
-    //      comment block above documents.
-    // The `panelUris` predicate below is layer-narrowing on top
-    // of routing (chip/query filters), so it stays the same; the
-    // bug was the OR-shape in the routing predicate itself.
+    // Task #19 — exact-tag-routing via the shared
+    // `admitTripleForScope` helper (PR #839 sweep 2 extract).
+    // `requireResourceObject: true` keeps the object-side recovery
+    // limited to resource-shaped objects on this surface; literals
+    // reach the panel via the subject-local property branch on a
+    // separate path. The `panelUris` predicate below is layer-
+    // narrowing on top of routing (chip/query filters), so it
+    // stays the same; the bug Task #19 fixed was the OR-shape in
+    // the routing predicate itself.
     for (const t of rawMemory.allTriples) {
       if (t.layer !== layerTrust) continue;
-      let inScope: boolean;
-      if (!isRoot && t.subGraph === slug) {
-        inScope = true;
-      } else if (t.subGraph) {
-        // Exact-tag-routing — non-matching subGraph tag belongs
-        // to that other slug's view, not this one.
-        inScope = false;
-      } else {
-        inScope = scopedUris.has(t.subject)
-          || (isResourceNode(t.object) && scopedUris.has(t.object));
-      }
-      if (!inScope) continue;
+      if (!admitTripleForScope(t, {
+        slug, isRoot, scopedUris,
+        requireResourceObject: true,
+      })) continue;
       if (!(panelUris.has(t.subject) || panelUris.has(t.object))) continue;
       const key = `${t.subject}|${t.predicate}|${t.object}`;
       if (seen.has(key)) continue;

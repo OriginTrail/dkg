@@ -410,6 +410,57 @@ function isResourceObject(value: string): boolean {
   return /^[A-Za-z][A-Za-z0-9+.-]*:/.test(trimmed);
 }
 
+/**
+ * Admission predicate for sub-graph-scoped triple selectors. PR #772
+ * sweep 1 Bug A locked the three-rule shape on `scopedTriples`; Task #19
+ * surfaced the same lesson at `singleLayerPanelTriples` (the two
+ * selectors had parallel inline copies, the second never picked up the
+ * Bug A fix, the leakage re-appeared on a different surface). Extracted
+ * here so the next routing change stays consistent across both
+ * consumers — and any future third consumer.
+ *
+ * Rules (in order):
+ *   1. Tagged triple → routes to the exact slug (named branch only;
+ *      Root carries no tagged triples by definition).
+ *   2. Tagged triple with a non-matching slug → REJECTED, even if an
+ *      endpoint is shared with this scope. An entity in multiple
+ *      sub-graphs is shared territory, not a broadcast channel.
+ *   3. Untagged triple → admitted via endpoint-in-scope check. This is
+ *      the post-promotion recovery branch — promoting an assertion
+ *      erases the `subGraph` origin tag from the resulting SWM/VM
+ *      triples; without rule 3 promoted entities lose their rdf:type,
+ *      labels, literal properties, and cross-layer edges in named
+ *      views.
+ *
+ * `requireResourceObject` toggles the object-side admission shape:
+ *   - false (default — `scopedTriples` shape) — any object whose
+ *     canonical URI is in scope admits, including literal-shaped
+ *     orphans that happen to match a URI string. Matches the historical
+ *     scopedTriples behavior.
+ *   - true (`singleLayerPanelTriples` shape) — only resource-shaped
+ *     objects admit; literals reach the panel via the subject-local
+ *     property branch upstream of this predicate.
+ */
+export function admitTripleForScope(
+  t: { subject: string; object: string; subGraph?: string | undefined },
+  opts: {
+    slug: string;
+    isRoot: boolean;
+    scopedUris: ReadonlySet<string>;
+    requireResourceObject?: boolean;
+  },
+): boolean {
+  if (!opts.isRoot && t.subGraph === opts.slug) return true;
+  // Rule 2: explicit non-matching tag — reject regardless of endpoint
+  // membership. This is the load-bearing exact-tag-routing rule from
+  // PR #772 sweep 1 Bug A + Task #19.
+  if (t.subGraph) return false;
+  if (opts.scopedUris.has(t.subject)) return true;
+  return opts.requireResourceObject
+    ? (isResourceObject(t.object) && opts.scopedUris.has(t.object))
+    : opts.scopedUris.has(t.object);
+}
+
 export function useLayerTriples(memory: ReturnType<typeof useMemoryEntities>, layer: 'wm' | 'swm' | 'vm'): Triple[] {
   const targetLayer = LAYER_CONFIG[layer].trustLevel;
   return useMemo(() => {
