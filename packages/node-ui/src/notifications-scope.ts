@@ -155,6 +155,13 @@ export function scopeNotifications(
   }
 
   const selfDid = ctx.selfAgentDid?.toLowerCase();
+  // The caller's bare EVM address, used to scope their OWN join confirmations
+  // (join_approved/join_rejected), which are NOT CG-membership-scoped — see the
+  // confirmation branch below (R3-1).
+  const SELF_DID_PREFIX = 'did:dkg:agent:';
+  const callerAddr = selfDid
+    ? (selfDid.startsWith(SELF_DID_PREFIX) ? selfDid.slice(SELF_DID_PREFIX.length) : selfDid)
+    : undefined;
   const nameOf = (cgId: string): string | undefined => ctx.contextGraphNames?.get(cgId);
   const agentNameOf = (did: string): string | undefined => ctx.agentNames?.get(did);
 
@@ -166,11 +173,13 @@ export function scopeNotifications(
   for (const row of rows) {
     if (!PANE_TYPES.has(row.type)) continue;
     const cgId = row.context_graph_id ?? undefined;
-    if (!cgId || !ctx.memberCgIds.has(cgId)) continue;
+    if (!cgId) continue;
     const meta = parseMeta(row.meta);
     const read = (row.read ? 1 : 0) as 0 | 1;
 
     if (row.type === ASSERTION_ACTIVITY_TYPE) {
+      // Activity is scoped to the caller's member CGs.
+      if (!ctx.memberCgIds.has(cgId)) continue;
       const kind = meta.kind as AssertionActivityKind | undefined;
       if (kind !== 'created' && kind !== 'promoted' && kind !== 'published') continue;
       const actorDid = asString(meta.actorAgentDid);
@@ -234,7 +243,14 @@ export function scopeNotifications(
       continue;
     }
 
-    // join_approved / join_rejected — terminal confirmations for the reader.
+    // join_approved / join_rejected — the caller's OWN outbound-request
+    // confirmation. NOT CG-membership-scoped: a rejected requester is, by
+    // definition, no longer a member of that CG, so a membership gate would
+    // drop every rejection (R3-1). These rows are emitted only on the
+    // requester's node; scope by "belongs to the reading agent"
+    // (meta.agentAddress === caller) instead, and fail closed if the caller
+    // address is unknown.
+    if (!callerAddr || lower(agentAddress) !== callerAddr) continue;
     joinWire.push({
       type: row.type,
       id: row.id,

@@ -75,6 +75,30 @@ async function resolveCallerScope(ctx: RequestContext, callerAddress: string): P
   return { callerAddress, memberCgIds, curatedCgIds, contextGraphNames };
 }
 
+/** Confirmation types — the caller's own outbound-request resolutions. */
+const CONFIRMATION_TYPES = ['join_approved', 'join_rejected'];
+const CONFIRMATION_READ_LIMIT = 200;
+
+/**
+ * The caller's OWN join confirmations (join_approved/join_rejected). These are
+ * emitted only on the requester's node and are NOT CG-membership-scoped — a
+ * rejected requester is no longer a member of the rejected CG, so the member-CG
+ * read (getNotificationsForContextGraphs) would drop every rejection (R3-1).
+ * Read them by type, then keep only the rows whose meta.agentAddress is the
+ * caller (multi-agent-node safety; scopeNotifications enforces the same).
+ */
+function callerConfirmationRows(ctx: RequestContext, callerAddress: string) {
+  return ctx.dashDb.getNotificationsOfTypes(CONFIRMATION_TYPES, CONFIRMATION_READ_LIMIT).filter((r) => {
+    let metaAddr: unknown;
+    try {
+      metaAddr = (JSON.parse(r.meta ?? '{}') as { agentAddress?: unknown }).agentAddress;
+    } catch {
+      return false;
+    }
+    return typeof metaAddr === 'string' && metaAddr.toLowerCase() === callerAddress;
+  });
+}
+
 export async function handleNotificationRoutes(ctx: RequestContext): Promise<void> {
   const { req, res, agent, dashDb, path } = ctx;
 
@@ -92,12 +116,20 @@ export async function handleNotificationRoutes(ctx: RequestContext): Promise<voi
     try {
       const scope = await resolveCallerScope(ctx, callerAddress);
 
-      // B3: read ONLY the caller's scoped rows (member-CG filter in SQL), so
-      // foreign-CG volume can't push actionable rows out of the window.
-      const notifications = dashDb.getNotificationsForContextGraphs(
+      // B3: read the caller's member-CG rows (member-CG filter in SQL), so
+      // foreign-CG volume can't push actionable rows out of the window...
+      const memberRows = dashDb.getNotificationsForContextGraphs(
         [...scope.memberCgIds],
         SCOPED_READ_LIMIT,
       );
+      // ...PLUS the caller's own join confirmations, which are NOT member-CG
+      // rows for rejections (R3-1). Dedup by id (a member-CG join_approved
+      // appears in both reads). scopeNotifications then scopes confirmations by
+      // caller-address and member CGs for the rest.
+      const byId = new Map<number, (typeof memberRows)[number]>();
+      for (const r of memberRows) byId.set(r.id, r);
+      for (const r of callerConfirmationRows(ctx, callerAddress)) byId.set(r.id, r);
+      const notifications = [...byId.values()];
 
       // Authoritative pending-join set per curated CG (G3 reconcile).
       const pendingByGraph = new Map<string, Set<string>>();
@@ -119,6 +151,12 @@ export async function handleNotificationRoutes(ctx: RequestContext): Promise<voi
         pendingByGraph,
         selfAgentDid: `${AGENT_DID_PREFIX}${callerAddress}`,
         contextGraphNames: scope.contextGraphNames,
+        // `agentNames` intentionally not populated (Codex R3-3): there is no
+        // cheap per-DID display-name source here, so activity digests render
+        // count-only ("3 assertions added"). The sole-author name variant
+        // ("Dana added 3…") is a deferred enhancement; the wire field +
+        // frontend rendering are kept forward-compatible for when a resolver
+        // lands.
       };
       return jsonResponse(res, 200, scopeNotifications(notifications, scopeCtx));
     } catch (err: unknown) {
@@ -142,6 +180,9 @@ export async function handleNotificationRoutes(ctx: RequestContext): Promise<voi
     try {
       const scope = await resolveCallerScope(ctx, callerAddress);
       scopedIds = dashDb.getScopedNotificationRowIds([...scope.memberCgIds]);
+      // Include the caller's own confirmations (not member-CG-scoped — R3-1) so
+      // they can mark their join_approved/join_rejected rows read too.
+      for (const r of callerConfirmationRows(ctx, callerAddress)) scopedIds.add(r.id);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       return jsonResponse(res, 500, { error: `Failed to resolve notification scope: ${message}` });

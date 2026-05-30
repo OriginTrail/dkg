@@ -291,6 +291,33 @@ describe('GET/POST /api/notifications (scoped daemon route, A4)', () => {
     expect(db.getNotifications().notifications.find((n) => n.id === mine)!.read).toBe(1);
   });
 
+  it("R3-1: surfaces the caller's own join_rejected even on a NON-member CG (confirmations read by type, not membership)", async () => {
+    // The caller was rejected from CG_FOREIGN → they are NOT a member of it, so
+    // the member-CG read alone would drop the rejection. It must still appear.
+    db.insertNotification({
+      ts: 5 * ACTIVITY_DIGEST_WINDOW_MS + 2000, type: 'join_rejected', title: 'r', message: 'm',
+      contextGraphId: CG_FOREIGN,
+      meta: JSON.stringify({ contextGraphId: CG_FOREIGN, agentAddress: CALLER }),
+    });
+    await startRoute(makeAgent());
+    const { body } = await getNotifs();
+    const rejections = body.notifications.filter((n: any) => n.type === 'join_rejected');
+    expect(rejections).toHaveLength(1);
+    expect(rejections[0].contextGraphId).toBe(CG_FOREIGN);
+    expect(body.badgeCount).toBe(0); // rejection never counts toward the badge
+  });
+
+  it('R3-1: does NOT surface a join_rejected addressed to a different agent (multi-agent-node safety)', async () => {
+    db.insertNotification({
+      ts: 5 * ACTIVITY_DIGEST_WINDOW_MS + 2000, type: 'join_rejected', title: 'r', message: 'm',
+      contextGraphId: CG_FOREIGN,
+      meta: JSON.stringify({ contextGraphId: CG_FOREIGN, agentAddress: OTHER }),
+    });
+    await startRoute(makeAgent());
+    const { body } = await getNotifs();
+    expect(body.notifications.filter((n: any) => n.type === 'join_rejected')).toHaveLength(0);
+  });
+
   // Dispatch-order guard (ADR-003): in lifecycle.ts the node-ui handler runs
   // BEFORE the agent-aware daemon dispatch. After the clean cut, node-ui must
   // NOT claim /api/notifications (return false) so the request falls through

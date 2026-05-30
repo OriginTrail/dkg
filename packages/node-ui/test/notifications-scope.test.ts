@@ -44,6 +44,10 @@ function baseCtx(over: Partial<NotificationScopeContext> = {}): NotificationScop
     memberCgIds: new Set(['cg-1']),
     curatedCgIds: new Set(['cg-1']),
     pendingByGraph: new Map(),
+    // The reading agent. join_approved/join_rejected confirmations are scoped
+    // to this address (they are the caller's own outbound-request resolutions),
+    // and activity self-suppression keys off it (R3-1).
+    selfAgentDid: 'did:dkg:agent:0xme',
     ...over,
   };
 }
@@ -279,5 +283,41 @@ describe('scopeNotifications — ordering + names', () => {
       expect(n.meta.contextGraphName).toBe('Acme Research');
       expect(n.meta.actorAgentName).toBe('Dana');
     }
+  });
+});
+
+describe('scopeNotifications — join confirmations are caller-scoped, not member-scoped (R3-1)', () => {
+  const rejected = (cgId: string, agentAddress: string, read: 0 | 1 = 0): NotificationRow =>
+    row({ type: 'join_rejected', ts: 2000, read, context_graph_id: cgId, meta: JSON.stringify({ agentAddress }) });
+
+  it("keeps the caller's own join_rejected even when its CG is NOT a member CG", () => {
+    // A rejected requester is removed from the CG, so the CG is never in
+    // memberCgIds — yet the rejection confirmation must still reach the pane.
+    const out = scopeNotifications(
+      [rejected('cg-REJECTED', '0xme')],
+      baseCtx({ memberCgIds: new Set(['cg-1']), curatedCgIds: new Set(['cg-1']) }),
+    );
+    expect(out.notifications).toHaveLength(1);
+    expect(out.notifications[0].type).toBe('join_rejected');
+    expect(out.badgeCount).toBe(0); // rejection never counts toward the badge
+  });
+
+  it('drops a join_rejected addressed to a DIFFERENT agent (multi-agent-node safety)', () => {
+    const out = scopeNotifications([rejected('cg-REJECTED', '0xsomeoneelse')], baseCtx());
+    expect(out.notifications).toHaveLength(0);
+  });
+
+  it("keeps the caller's own join_approved on a non-member CG too (caller-scoped)", () => {
+    const out = scopeNotifications(
+      [row({ type: 'join_approved', ts: 2000, context_graph_id: 'cg-NOTYET', meta: JSON.stringify({ agentAddress: '0xme' }) })],
+      baseCtx({ memberCgIds: new Set(['cg-1']) }),
+    );
+    expect(out.notifications).toHaveLength(1);
+    expect(out.notifications[0].type).toBe('join_approved');
+  });
+
+  it('drops confirmations when the caller address is unknown (fail closed)', () => {
+    const out = scopeNotifications([rejected('cg-REJECTED', '0xme')], baseCtx({ selfAgentDid: undefined }));
+    expect(out.notifications).toHaveLength(0);
   });
 });

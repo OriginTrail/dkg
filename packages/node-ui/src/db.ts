@@ -1800,6 +1800,26 @@ export class DashboardDB {
     return new Set(rows.map((r) => r.id));
   }
 
+  /**
+   * Read notification rows of the given types regardless of context graph,
+   * newest-first, capped at `limit`. Used for join confirmations
+   * (join_approved/join_rejected): these are the caller's OWN outbound-request
+   * resolutions and are NOT CG-membership-scoped — a rejected requester is no
+   * longer a member of the CG, so a context-graph filter would drop the
+   * rejection entirely (R3-1). Confirmations are low volume (one per resolved
+   * request), so an unscoped type read is bounded; the caller route then keeps
+   * only the rows whose meta.agentAddress is the caller.
+   */
+  getNotificationsOfTypes(types: string[], limit = 200): NotificationRow[] {
+    if (types.length === 0) return [];
+    const placeholders = types.map(() => '?').join(',');
+    return this.db.prepare(
+      `SELECT * FROM notifications
+        WHERE type IN (${placeholders})
+        ORDER BY ts DESC LIMIT ?`,
+    ).all(...types, limit) as NotificationRow[];
+  }
+
   markNotificationsRead(ids?: number[]): number {
     if (ids && ids.length > 0) {
       const placeholders = ids.map(() => '?').join(',');
