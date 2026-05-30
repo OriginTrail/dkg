@@ -63,12 +63,12 @@ export async function promoteAssertion(opts: {
   assertionName: string;
   nodeNum?: number;
 }): Promise<Response> {
-  return devnetApiFetch('/api/assertion/promote', {
+  const encoded = encodeURIComponent(opts.assertionName);
+  return devnetApiFetch(`/api/assertion/${encoded}/promote`, {
     method: 'POST',
     nodeNum: opts.nodeNum ?? 1,
     body: JSON.stringify({
       contextGraphId: opts.contextGraphId,
-      assertionName: opts.assertionName,
     }),
   });
 }
@@ -78,27 +78,19 @@ export async function publishToVm(opts: {
   assertionName: string;
   nodeNum?: number;
 }): Promise<{ status?: string; kcId?: string; txHash?: string }> {
-  const doPublish = async () => {
-    const res = await devnetApiFetch('/api/shared-memory/publish', {
-      method: 'POST',
-      nodeNum: opts.nodeNum ?? 1,
-      body: JSON.stringify({
-        contextGraphId: opts.contextGraphId,
-        assertionName: opts.assertionName,
-        clearAfter: true,
-      }),
-    });
-    if (!res.ok) {
-      throw new Error(`publish failed: ${res.status} ${await res.text()}`);
-    }
-    return (await res.json()) as { status?: string; kcId?: string; txHash?: string };
-  };
-  let result = await doPublish();
-  if (result.status === 'tentative' || result.kcId === '0') {
-    await new Promise((r) => setTimeout(r, 2000));
-    result = await doPublish();
+  const res = await devnetApiFetch('/api/shared-memory/publish', {
+    method: 'POST',
+    nodeNum: opts.nodeNum ?? 1,
+    body: JSON.stringify({
+      contextGraphId: opts.contextGraphId,
+      assertionName: opts.assertionName,
+      clearAfter: true,
+    }),
+  });
+  if (!res.ok) {
+    throw new Error(`publish failed: ${res.status} ${await res.text()}`);
   }
-  return result;
+  return (await res.json()) as { status?: string; kcId?: string; txHash?: string };
 }
 
 export async function runWmSwmVmPipeline(opts: {

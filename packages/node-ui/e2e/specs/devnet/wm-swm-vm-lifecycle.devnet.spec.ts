@@ -18,7 +18,7 @@ import {
 
 test.describe.configure({ mode: 'serial' });
 
-const run: { cgId?: string; label?: string; assertionName?: string } = {};
+const run: { cgId?: string; cgName?: string; label?: string; assertionName?: string } = {};
 
 test.beforeAll(async () => {
   test.skip(!isDevnetAvailable(1), 'Devnet node1 not running');
@@ -26,6 +26,7 @@ test.beforeAll(async () => {
   const cgs = await listContextGraphs(1);
   test.skip(cgs.length === 0, 'No context graphs on devnet');
   run.cgId = cgs[0]!.id;
+  run.cgName = cgs[0]!.name;
 });
 
 test.describe('WM → SWM → VM API pipeline', () => {
@@ -68,18 +69,14 @@ test.describe('WM → SWM → VM API pipeline', () => {
 
 test.describe('WM → SWM → VM UI verification', () => {
   test('published entity label appears in VM layer after refresh', async ({ shell, leftPanel, page }) => {
-    test.skip(!run.label, 'Pipeline did not produce a label');
+    test.skip(!run.label || !run.cgName, 'Pipeline did not produce a label');
     await shell.goto();
-    const names = await leftPanel.getProjectNames();
-    const cgName = names[0];
-    test.skip(!cgName, 'No CG visible in sidebar');
-    await leftPanel.expandProject(cgName);
+    await leftPanel.expandProject(run.cgName!);
     await page.locator('[data-layer="vm"]').click();
-    await page.locator('button[title="Refresh Context Graph data"], button[aria-label*="Refresh"]').first().click();
+    await page.getByRole('button', { name: 'Refresh Context Graph data' }).click();
     await page.waitForTimeout(3000);
     const visible = await page.getByText(run.label!, { exact: false }).isVisible().catch(() => false);
     if (!visible) {
-      // VM indexing can lag — assert the layer loaded without error.
       await expect(page.locator('.v10-me-error')).toBeHidden();
     } else {
       await expect(page.getByText(run.label!, { exact: false })).toBeVisible();
@@ -88,11 +85,7 @@ test.describe('WM → SWM → VM UI verification', () => {
 
   test('operations view loads after publish activity', async ({ shell, page }) => {
     await shell.goto();
-    await page.locator('.v10-tree-dashboard').filter({ hasText: 'Dashboard' }).click();
-    const viewAll = page.locator('.v10-dash-section-link, a').filter({ hasText: /View all|Observability/i });
-    if (await viewAll.first().isVisible().catch(() => false)) {
-      await viewAll.first().click();
-    }
+    await page.locator('button[title="Observability"]').click();
     await expect(page.getByRole('heading', { name: 'Observability' })).toBeVisible({ timeout: 15_000 });
   });
 });
