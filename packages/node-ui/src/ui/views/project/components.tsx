@@ -4191,18 +4191,39 @@ export function SubGraphOverviewGrid({
     // PR #818 Codex sweep 1 — Bug M family (preserved). The
     // canonical-URI membership check + canonical SPO-dedup key
     // still apply on the symmetric-with-named universe.
-    const rootTriples: Triple[] = [];
+    //
+    // PR #818 Codex sweep 6 — admission rule symmetry. Sweep 4's
+    // inline check was OR-membership ("admit if either endpoint
+    // is in rootEntityUris"), but named cards route through
+    // `filterTriplesToEntities(rawTriples, cardEntityUris)` at
+    // `:4051`, which is AND-membership with an `rdf:type`
+    // exemption. User caught the divergence on `ui-refresh`:
+    // entity `urn:epcis:...:gtin:50127962004651:lot:P240526X`
+    // lives in `epcis-supply-chain` (subGraphs non-empty → not
+    // in rootEntityUris → correctly absent from the Root entity
+    // list), but the daemon ships untagged copies of its triples
+    // in `<cg>/_shared_memory`. Pre-sweep-6 OR-membership
+    // admitted those rows because the SUBJECT was in
+    // rootEntityUris (a different entity), so the non-root
+    // object rendered as a node — Root mini-graph had more
+    // nodes than the badge claimed.
+    //
+    // Fix: dedup SPO first (Bug M canonicalization preserved),
+    // then route through `filterTriplesToEntities` so admission
+    // matches the named-card rule exactly. Same machinery now
+    // includes the same AND-membership + rdf:type exemption.
+    const candidateTriples: Triple[] = [];
     const seenSpo = new Set<string>();
     for (const t of memory.allTriples) {
       if (t.subGraph) continue;
       const subjCanon = canonicalEntityUri(t.subject);
       const objCanon = canonicalEntityUri(t.object);
-      if (!rootEntityUris.has(subjCanon) && !rootEntityUris.has(objCanon)) continue;
       const key = `${subjCanon}|${t.predicate}|${objCanon}`;
       if (seenSpo.has(key)) continue;
       seenSpo.add(key);
-      rootTriples.push({ subject: t.subject, predicate: t.predicate, object: t.object });
+      candidateTriples.push({ subject: t.subject, predicate: t.predicate, object: t.object });
     }
+    const rootTriples = filterTriplesToEntities(candidateTriples, rootEntityUris);
     // PR #818 Codex sweep 4 (finding 3) — shared cap helper. The
     // earlier inline copy duplicated the named-card sampling shape
     // verbatim; refactored to call `applyHeaviestSubjectsCap` so

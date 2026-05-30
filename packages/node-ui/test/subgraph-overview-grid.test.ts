@@ -706,13 +706,18 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
       // the unwrapped set) failed and this triple was dropped.
       // PR #818 sweep 2 — fixtures tagged `layer: 'working'` so
       // `useLayerTriples` admits them (GH #805 family).
-      { subject: '<urn:e:root1>', predicate: 'p', object: 'urn:e:o-bare', layer: 'working' },
-      // Same SPO emitted twice — once wrapped, once bare. Pre-
-      // sweep these had distinct seenSpo keys and counted as 2.
-      // Post-sweep both map to the same canonical key and dedup
-      // to 1.
-      { subject: 'urn:e:root1', predicate: 'p', object: '<urn:e:o-other>', layer: 'working' },
-      { subject: 'urn:e:root1', predicate: 'p', object: 'urn:e:o-other', layer: 'working' },
+      // PR #818 sweep 6 — Root now AND-filters via
+      // `filterTriplesToEntities`; resource-object endpoints
+      // would otherwise need to be entities. Use literal objects
+      // so admission lands solely on the canonical-URI subject
+      // check this test is actually exercising.
+      { subject: '<urn:e:root1>', predicate: 'p', object: '"o-bare"', layer: 'working' },
+      // Same SPO emitted twice — once wrapped on the object
+      // side, once bare. Pre-sweep these had distinct seenSpo
+      // keys and counted as 2. Post-sweep both map to the same
+      // canonical key and dedup to 1.
+      { subject: 'urn:e:root1', predicate: 'p', object: '"o-other"', layer: 'working' },
+      { subject: 'urn:e:root1', predicate: 'p', object: '"o-other"', layer: 'working' },
     ];
     await renderWith({
       ...memory,
@@ -827,7 +832,10 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
       // PR #818 sweep 2 — tag `layer: 'working'` so the layer-correct
       // universe `useLayerTriples` produces (GH #805 family) admits
       // these rows for the Root card to scope over.
-      triples.push({ subject: 'urn:e:heavy-root', predicate: 'p', object: `urn:e:obj-${i}`, layer: 'working' });
+      // PR #818 sweep 6 — literal objects so AND-membership via
+      // `filterTriplesToEntities` admits them (resource-object
+      // edges would need both endpoints in the entity set).
+      triples.push({ subject: 'urn:e:heavy-root', predicate: 'p', object: `"v-${i}"`, layer: 'working' });
     }
     await renderWith({
       ...memory,
@@ -879,11 +887,13 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
     const triples = [
       // PR #818 sweep 2 — `layer: 'working'` so the layer-correct
       // universe (GH #805) admits the rows.
-      { subject: 'urn:e:r1', predicate: 'p', object: 'urn:e:o1', layer: 'working' },
-      { subject: 'urn:e:r1', predicate: 'p', object: 'urn:e:o2', layer: 'working' },
-      { subject: 'urn:e:r1', predicate: 'p', object: 'urn:e:o3', layer: 'working' },
-      { subject: 'urn:e:r1', predicate: 'p', object: 'urn:e:o4', layer: 'working' },
-      { subject: 'urn:e:r1', predicate: 'p', object: 'urn:e:o5', layer: 'working' },
+      // PR #818 sweep 6 — literal objects so AND-membership
+      // admits them past `filterTriplesToEntities`.
+      { subject: 'urn:e:r1', predicate: 'p', object: '"o1"', layer: 'working' },
+      { subject: 'urn:e:r1', predicate: 'p', object: '"o2"', layer: 'working' },
+      { subject: 'urn:e:r1', predicate: 'p', object: '"o3"', layer: 'working' },
+      { subject: 'urn:e:r1', predicate: 'p', object: '"o4"', layer: 'working' },
+      { subject: 'urn:e:r1', predicate: 'p', object: '"o5"', layer: 'working' },
     ];
     await renderWith({
       ...memory,
@@ -932,12 +942,17 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
     ];
     const triples = [
       // Honest SWM triple — admitted into the SWM layer slice.
-      { subject: 'urn:e:promoted', predicate: 'p', object: 'urn:e:o-swm', layer: 'shared' },
+      // PR #818 sweep 6 — literal objects so AND-membership via
+      // `filterTriplesToEntities` admits them on the canonical-
+      // URI subject check (the residue/inflation semantic this
+      // test exercises is orthogonal to the resource-vs-literal
+      // distinction).
+      { subject: 'urn:e:promoted', predicate: 'p', object: '"o-swm"', layer: 'shared' },
       // WM residue — same subject, but canonical trustLevel is
       // 'shared', so `useLayerTriples('wm')` drops this row via
       // the subject-trust-level filter at helpers.ts:436-437.
       // Pre-sweep this would have inflated the Root card stat by 1.
-      { subject: 'urn:e:promoted', predicate: 'p', object: 'urn:e:o-wm-residue', layer: 'working' },
+      { subject: 'urn:e:promoted', predicate: 'p', object: '"o-wm-residue"', layer: 'working' },
     ];
     await renderWith({
       ...memory,
@@ -1066,6 +1081,135 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
     expect(stats).toContain('1 triples');
   });
 
+  it('Root card drops triples to non-root entities (Codex sweep 6 — AND-membership symmetric with named cards)', async () => {
+    // PR #818 sweep 6 — sweep 4's inline OR-membership ("admit if
+    // either endpoint is in rootEntityUris") let untagged triples
+    // from `<cg>/_shared_memory` whose SUBJECT happened to be a
+    // root entity admit even when the OBJECT was a non-root
+    // entity. User caught the bug on `ui-refresh`: entity
+    // `urn:epcis:...:gtin:50127962004651:lot:P240526X` lived in
+    // `epcis-supply-chain` (subGraphs non-empty → not in Root
+    // entity list), but the daemon ships untagged copies of its
+    // triples in `<cg>/_shared_memory` → rendered as a node in
+    // the Root mini-graph (broke the visual count check).
+    //
+    // Fix: route through `filterTriplesToEntities(candidates,
+    // rootEntityUris)` so admission is AND-membership (both
+    // endpoints must be root entities, with `rdf:type` exempted)
+    // — exactly the named-card rule.
+    fetchSubGraphsMock.mockResolvedValueOnce({
+      subGraphs: [{ name: 'alpha', entityCount: 1, tripleCount: 0, description: '' }],
+    });
+    const entityList = [
+      // Non-root entity (in a named sub-graph).
+      { uri: 'urn:e:non-root', label: 'nr', types: [], trustLevel: 'shared', layers: new Set(['shared']), subGraphs: new Set(['alpha']), properties: new Map(), connections: [] },
+      // Root-bucket entity.
+      { uri: 'urn:e:root', label: 'r', types: [], trustLevel: 'shared', layers: new Set(['shared']), subGraphs: new Set<string>(), properties: new Map(), connections: [] },
+    ];
+    const triples = [
+      // Untagged edge from root → non-root. Pre-sweep-6 OR-
+      // membership admitted this (subject IS in rootEntityUris)
+      // and `urn:e:non-root` rendered as a node in the Root
+      // mini-graph. Post-sweep-6 AND-membership drops it.
+      { subject: 'urn:e:root', predicate: 'p', object: 'urn:e:non-root', layer: 'shared' },
+    ];
+    await renderWith({
+      ...memory,
+      entities: new Map(entityList.map(e => [e.uri, e])),
+      entityList,
+      allTriples: triples,
+      counts: { wm: 0, swm: 2, vm: 0, total: 2 },
+    });
+    await flush();
+
+    const cards = container.querySelectorAll('.v10-sgov-card');
+    const rootCardEl = cards[cards.length - 1];
+    const stats = rootCardEl.querySelector('.v10-sgov-card-stats')?.textContent ?? '';
+    // 1 root entity, 0 triples — the root→non-root edge dropped
+    // by AND-filter. Pre-sweep this read `1 triples`.
+    expect(stats).toContain('1 entities');
+    expect(stats).toContain('0 triples');
+    expect(stats).not.toContain('1 triples');
+  });
+
+  it('Root card admits rdf:type edges to class URIs (Codex sweep 6 — class IRIs exempted from AND-filter)', async () => {
+    // PR #818 sweep 6 — `filterTriplesToEntities` exempts
+    // `rdf:type` from the object-side membership check because
+    // class IRIs aren't entities but the triple is needed for
+    // `classColors` styling (helpers.ts:533-535). Lock that the
+    // Root card preserves this exemption when it routes through
+    // the helper.
+    fetchSubGraphsMock.mockResolvedValueOnce({
+      subGraphs: [{ name: 'alpha', entityCount: 0, tripleCount: 0, description: '' }],
+    });
+    const entityList = [
+      // Root-bucket entity.
+      { uri: 'urn:e:root', label: 'r', types: [], trustLevel: 'shared', layers: new Set(['shared']), subGraphs: new Set<string>(), properties: new Map(), connections: [] },
+    ];
+    const triples = [
+      // rdf:type to a class IRI — admits via the exemption.
+      { subject: 'urn:e:root', predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'urn:type:Document', layer: 'shared' },
+    ];
+    await renderWith({
+      ...memory,
+      entities: new Map(entityList.map(e => [e.uri, e])),
+      entityList,
+      allTriples: triples,
+      counts: { wm: 0, swm: 1, vm: 0, total: 1 },
+    });
+    await flush();
+
+    const cards = container.querySelectorAll('.v10-sgov-card');
+    const rootCardEl = cards[cards.length - 1];
+    const stats = rootCardEl.querySelector('.v10-sgov-card-stats')?.textContent ?? '';
+    // rdf:type row admits despite the class URI not being in
+    // rootEntityUris — the exemption preserves the type signal
+    // for classColors on the rendered mini-graph.
+    expect(stats).toContain('1 entities');
+    expect(stats).toContain('1 triples');
+  });
+
+  it('Named card drops triples to non-scoped entities (parity lock for sweep 6)', async () => {
+    // PR #818 sweep 6 — named-card path has used
+    // `filterTriplesToEntities` since the original implementation
+    // (`:4051`). This test locks the architectural symmetry that
+    // sweep 6 establishes: same input shape, same AND-membership
+    // behavior on the named-card side as the Root card side.
+    fetchSubGraphsMock.mockResolvedValueOnce({
+      subGraphs: [{ name: 'alpha', entityCount: 1, tripleCount: 0, description: '' }],
+    });
+    const entityList = [
+      // 'alpha' entity (in-scope for the alpha card).
+      { uri: 'urn:e:alpha', label: 'a', types: [], trustLevel: 'shared', layers: new Set(['shared']), subGraphs: new Set(['alpha']), properties: new Map(), connections: [] },
+      // 'beta' entity — out-of-scope for the alpha card.
+      { uri: 'urn:e:beta', label: 'b', types: [], trustLevel: 'shared', layers: new Set(['shared']), subGraphs: new Set(['beta']), properties: new Map(), connections: [] },
+    ];
+    const triples = [
+      // alpha → beta edge tagged to alpha's subgraph. Named-card
+      // admission AND-filters: subject in scope, object NOT, so
+      // the edge drops from the alpha card.
+      { subject: 'urn:e:alpha', predicate: 'p', object: 'urn:e:beta', subGraph: 'alpha', layer: 'shared' },
+    ];
+    await renderWith({
+      ...memory,
+      entities: new Map(entityList.map(e => [e.uri, e])),
+      entityList,
+      allTriples: triples,
+      counts: { wm: 0, swm: 2, vm: 0, total: 2 },
+    });
+    await flush();
+
+    // alpha card is first.
+    const cards = container.querySelectorAll('.v10-sgov-card');
+    const alphaCardEl = cards[0];
+    const stats = alphaCardEl.querySelector('.v10-sgov-card-stats')?.textContent ?? '';
+    // 1 entity (alpha), 0 triples (the edge to beta dropped by
+    // AND-filter). Locks that the Root card now mirrors this
+    // behavior post-sweep-6.
+    expect(stats).toContain('1 entities');
+    expect(stats).toContain('0 triples');
+  });
+
   it('Root card cap honors MAX_PER_CARD even with a single dominant subject (Codex sweep 2)', async () => {
     // PR #818 sweep 2 — sweep-1 sampling shape had a defect:
     // `if (kept >= MAX_PER_CARD) break;` checked AFTER adding the
@@ -1088,7 +1232,10 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
     ];
     const triples = [];
     for (let i = 0; i < 5000; i++) {
-      triples.push({ subject: 'urn:e:dominant', predicate: 'p', object: `urn:e:obj-${i}`, layer: 'working' });
+      // PR #818 sweep 6 — literal objects so AND-membership
+      // admits them past `filterTriplesToEntities` (this test
+      // exercises the cap, not endpoint admission).
+      triples.push({ subject: 'urn:e:dominant', predicate: 'p', object: `"v-${i}"`, layer: 'working' });
     }
     await renderWith({
       ...memory,
@@ -1199,10 +1346,13 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
       { uri: 'urn:e:r-50b', label: 'r4', types: [], trustLevel: 'working', layers: new Set(['working']), subGraphs: new Set<string>(), properties: new Map(), connections: [] },
     ];
     const triples = [];
-    for (let i = 0; i < 2400; i++) triples.push({ subject: 'urn:e:r-2400', predicate: 'p', object: `urn:e:obj-2400-${i}`, layer: 'working' });
-    for (let i = 0; i < 200; i++) triples.push({ subject: 'urn:e:r-200', predicate: 'p', object: `urn:e:obj-200-${i}`, layer: 'working' });
-    for (let i = 0; i < 50; i++) triples.push({ subject: 'urn:e:r-50a', predicate: 'p', object: `urn:e:obj-50a-${i}`, layer: 'working' });
-    for (let i = 0; i < 50; i++) triples.push({ subject: 'urn:e:r-50b', predicate: 'p', object: `urn:e:obj-50b-${i}`, layer: 'working' });
+    // PR #818 sweep 6 — literal objects so AND-membership admits
+    // them past `filterTriplesToEntities` (this test exercises
+    // dense-pack cap behavior, not endpoint admission).
+    for (let i = 0; i < 2400; i++) triples.push({ subject: 'urn:e:r-2400', predicate: 'p', object: `"v-2400-${i}"`, layer: 'working' });
+    for (let i = 0; i < 200; i++) triples.push({ subject: 'urn:e:r-200', predicate: 'p', object: `"v-200-${i}"`, layer: 'working' });
+    for (let i = 0; i < 50; i++) triples.push({ subject: 'urn:e:r-50a', predicate: 'p', object: `"v-50a-${i}"`, layer: 'working' });
+    for (let i = 0; i < 50; i++) triples.push({ subject: 'urn:e:r-50b', predicate: 'p', object: `"v-50b-${i}"`, layer: 'working' });
     await renderWith({
       ...memory,
       entities: new Map(entityList.map(e => [e.uri, e])),
