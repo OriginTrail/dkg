@@ -2919,15 +2919,17 @@ export class EVMChainAdapter implements ChainAdapter {
     const remainingEpochs = endEpoch > currentEpoch ? endEpoch - currentEpoch : 0n;
 
     let growthCost = 0n;
-    if (params.newByteSize > currentByteSize && remainingEpochs > 0n && this.contracts.askStorage) {
+    if (params.newByteSize > currentByteSize && this.contracts.askStorage) {
       try {
         const ask = BigInt(await this.contracts.askStorage.getStakeWeightedAverageAsk());
         const byteSizeGrowth = params.newByteSize - currentByteSize;
-        growthCost = (ask * byteSizeGrowth * remainingEpochs) / 1024n;
-        // Strict-positive floor: the contract's `_validateTokenAmount` reverts
-        // any `tokenAmount == 0`, even when the expected-cost integer-divides
-        // to zero. Match the floor exactly so growth updates with sub-1024 ask
-        // budgets still succeed.
+        if (remainingEpochs > 0n) {
+          growthCost = (ask * byteSizeGrowth * remainingEpochs) / 1024n;
+        } else {
+          // Final epoch: remainingEpochs==0 but byte-size growth still needs a
+          // strict-positive delta (contract rejects deltaTokenAmount==0).
+          growthCost = 1n;
+        }
         if (growthCost === 0n) growthCost = 1n;
       } catch (err) {
         throw new Error(
