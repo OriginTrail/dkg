@@ -554,7 +554,7 @@ jobs:
       - name: Install Playwright Chromium
         run: pnpm --filter @origintrail-official/dkg-node-ui exec playwright install chromium --with-deps
       - name: "node-ui mock Playwright e2e"
-        run: pnpm --filter @origintrail-official/dkg-node-ui test:e2e -- --project=mock-ui
+        run: pnpm --filter @origintrail-official/dkg-node-ui test:e2e
       - name: Upload Playwright report
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
