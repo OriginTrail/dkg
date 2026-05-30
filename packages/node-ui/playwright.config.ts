@@ -17,6 +17,11 @@ const LEGACY_RC12_PENDING = [
 const DEVNET_UI = process.env.PWTEST_DEVNET === '1';
 const DEVNET_NODE = process.env.DEVNET_NODE || process.env.UI_NODE_ID || '1';
 
+/** CI installs bundled Chromium; local runs may use the Chrome channel. */
+const chromeDevice = CI
+  ? { ...devices['Desktop Chrome'], channel: 'chromium' as const }
+  : devices['Desktop Chrome'];
+
 export default defineConfig({
   testDir: './e2e/specs',
   fullyParallel: true,
@@ -36,7 +41,7 @@ export default defineConfig({
   projects: [
     {
       name: 'mock-ui',
-      use: { ...devices['Desktop Chrome'] },
+      use: { ...chromeDevice },
       testIgnore: [
         '**/devnet/**',
         '**/*.devnet.spec.ts',
@@ -45,7 +50,7 @@ export default defineConfig({
     },
     {
       name: 'devnet-ui',
-      use: { ...devices['Desktop Chrome'] },
+      use: { ...chromeDevice },
       testMatch: ['**/devnet/**', '**/*.devnet.spec.ts'],
       timeout: CI ? 120_000 : 60_000,
       fullyParallel: false,
