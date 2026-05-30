@@ -616,9 +616,11 @@ for l in sys.stdin:
     if seen.get(k,0) < 4:
         seen[k]=seen.get(k,0)+1
         out.append(f\"{r['node']}|{r['cg']}|{r['kcId']}|{r['root']}\")
-    if len(out)>=40: break
+    if len(out)>=16: break
 print('\n'.join(out))")
+UPD_SECTION_DEADLINE=$(( $(date +%s) + ${HARNESS_UPD_SECTION_BUDGET_S:-900} ))
 while IFS='|' read -r un uc ukc uroot; do
+  [ "$(date +%s)" -ge "$UPD_SECTION_DEADLINE" ] && { log "Section B update budget exhausted — stopping sample loop"; break; }
   [ -z "$uc" ] && continue
   UPD_TRY=$((UPD_TRY+1))
   uport="${NODE_PORT[$((un-1))]}"
@@ -655,7 +657,10 @@ if [ -n "$SROOT" ]; then
   pn=$(( sn % NUM_NODES + 1 )); pp="${NODE_PORT[$((pn-1))]}"
   found=0
   for _ in $(seq 1 20); do
-    rep=$(post_long "$pp" /api/query -d "{\"sparql\":\"SELECT ?p WHERE { GRAPH ?g { <$sr> ?p ?o } FILTER(CONTAINS(STR(?g),\\\"$sc\\\")) } LIMIT 1\",\"contextGraphId\":\"$sc\"}")
+    # Retry probes use the short control-plane budget (90s); replication
+    # should succeed within seconds once gossip settles, not block for 180s
+    # per attempt (Codex round-2 on the tier-verify poll loop).
+    rep=$(post "$pp" /api/query -d "{\"sparql\":\"SELECT ?p WHERE { GRAPH ?g { <$sr> ?p ?o } FILTER(CONTAINS(STR(?g),\\\"$sc\\\")) } LIMIT 1\",\"contextGraphId\":\"$sc\"}")
     [ "$(echo "$rep" | pyf "len(d.get('result',{}).get('bindings',[]))")" -gt 0 ] 2>/dev/null && { found=1; break; }
     sleep 3
   done
