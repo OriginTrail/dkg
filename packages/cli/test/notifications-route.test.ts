@@ -40,10 +40,13 @@ describe('GET/POST /api/notifications (scoped daemon route, A4)', () => {
   // ONLY (no default-agent fallback), so the harness wires a token map.
   const TOKEN_FOR_CALLER = 'tok-caller';
 
-  function makeAgent(opts: { pending?: Record<string, string[]>; tokens?: Record<string, string> } = {}) {
+  function makeAgent(opts: { pending?: Record<string, string[]>; tokens?: Record<string, string>; defaultAgent?: string } = {}) {
     const tokens = opts.tokens ?? { [TOKEN_FOR_CALLER]: CALLER };
     return {
       resolveAgentByToken: vi.fn((token: string) => tokens[token]),
+      // The node's default (owner) agent — what a node-level API token resolves
+      // to. Defaults to CALLER (the owner) for these tests.
+      getDefaultAgentAddress: vi.fn(() => opts.defaultAgent ?? CALLER),
       listContextGraphs: vi.fn(async () => [
         { id: CG_CURATED, uri: '', name: 'Curated CG', curator: `did:dkg:agent:${CALLER}`, callerInvolved: true, isSystem: false },
         { id: CG_JOINED, uri: '', name: 'Joined CG', curator: `did:dkg:agent:${OTHER}`, callerInvolved: true, isSystem: false },
@@ -105,17 +108,31 @@ describe('GET/POST /api/notifications (scoped daemon route, A4)', () => {
     });
   }
 
-  it('fails closed (scopeUnknown) when the token does not resolve to a wallet agent (B1)', async () => {
-    // An unmapped token → resolveAgentByToken returns undefined → fail closed.
-    // B1: we do NOT fall back to the node default agent. (Use an explicit
-    // unmapped token rather than `undefined`, which would hit startRoute's
-    // default-arg.)
-    await startRoute(makeAgent(), 'no-such-token');
+  it('fails closed (scopeUnknown) when there is NO token (anonymous loopback caller) (B1)', async () => {
+    // Tokenless caller → fail closed; we do NOT hand back the default agent's
+    // feed. (Empty string is falsy but distinct from undefined, which would hit
+    // startRoute's default-arg.)
+    await startRoute(makeAgent(), '');
     const { status, body } = await getNotifs();
     expect(status).toBe(200);
     expect(body.scopeUnknown).toBe(true);
     expect(body.notifications).toEqual([]);
     expect(body.badgeCount).toBe(0);
+  });
+
+  it('a node-level API token resolves to the node default/owner agent — NOT scopeUnknown (regression: "Verifying access…")', async () => {
+    // The owner's normal UI token is a NODE-level token: resolveAgentByToken
+    // returns undefined for it (it is not a per-agent token), so the route must
+    // fall back to getDefaultAgentAddress (the owner). The original B1 fix
+    // over-corrected and failed closed here, so the owner saw "Verifying
+    // access…" on their own node.
+    const baseTs = 5 * ACTIVITY_DIGEST_WINDOW_MS + 1000;
+    activityRow(CG_JOINED, 'created', baseTs, OTHER); // a member-CG activity row
+    await startRoute(makeAgent(), 'node-level-token'); // present, not in the token map
+    const { body } = await getNotifs();
+    expect(body.scopeUnknown).toBeUndefined();
+    expect(body.notifications).toHaveLength(1);
+    expect(body.notifications[0].contextGraphId).toBe(CG_JOINED);
   });
 
   it('scopes activity to member CGs and drops foreign-CG rows + legacy noise', async () => {
@@ -196,9 +213,9 @@ describe('GET/POST /api/notifications (scoped daemon route, A4)', () => {
     expect(db.getNotifications().notifications.find((n) => n.id === foreign)!.read).toBe(0);
   });
 
-  it('POST /read with no token marks nothing (B1 fail-closed)', async () => {
+  it('POST /read with NO token marks nothing (B1 fail-closed)', async () => {
     activityRow(CG_JOINED, 'created', 5 * ACTIVITY_DIGEST_WINDOW_MS + 1000, OTHER);
-    await startRoute(makeAgent(), 'no-such-token'); // unresolved caller
+    await startRoute(makeAgent(), ''); // tokenless caller
     const read = await postRead({});
     expect(read.body.marked).toBe(0);
     expect(read.body.scopeUnknown).toBe(true);

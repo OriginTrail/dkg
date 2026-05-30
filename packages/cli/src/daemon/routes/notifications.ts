@@ -47,9 +47,21 @@ const SCOPED_READ_LIMIT = 500;
  * the only path where an anonymous caller reaches dispatch.
  */
 function resolveScopedCaller(ctx: RequestContext): string | undefined {
-  const fromToken = ctx.requestToken ? ctx.agent.resolveAgentByToken(ctx.requestToken) : undefined;
-  return addressFromAgentDid(fromToken)
-    ?? (fromToken && EVM_ADDRESS_RE.test(fromToken) ? fromToken.toLowerCase() : undefined);
+  // Fail closed for a genuinely TOKENLESS caller (Codex B1: never hand an
+  // anonymous loopback caller the node default agent's feed). When auth is
+  // enabled, httpAuthGuard already 401s tokenless requests before dispatch, so
+  // this only guards the loopback-no-auth case.
+  if (!ctx.requestToken) return undefined;
+  // A token IS present (valid). Resolve it to the caller's agent: a per-agent
+  // delegation token → that agent; the node's own API token (the owner's
+  // normal UI token, which is NOT in the per-agent index → resolveAgentByToken
+  // returns undefined) → the node default (owner) agent. Falling back to the
+  // default for a present node token is REQUIRED: the original B1 fix
+  // over-corrected by failing closed for it too, so the owner saw "Verifying
+  // access…" on their own node.
+  const resolved = ctx.agent.resolveAgentByToken(ctx.requestToken)
+    ?? ctx.agent.getDefaultAgentAddress();
+  return addressFromAgentDid(resolved);
 }
 
 interface CallerScope {
