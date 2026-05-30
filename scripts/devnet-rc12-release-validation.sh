@@ -597,8 +597,8 @@ section "B. UPDATES — update a sample of published KAs across CG variants"
 UPD_OK=0; UPD_TRY=0
 # Sample up to 16 confirmed PUBLIC KAs, round-robin across CGs (not first-N
 # in file order) so edge variants are not skipped when the budget is tight.
-SAMPLE=$(grep '"ok":true' "$METRICS_JSONL" | python3 -c "
-import sys,json
+SAMPLE=$(grep '"ok":true' "$METRICS_JSONL" | TARGET_CGS="$TARGET_CGS" python3 -c "
+import os,sys,json
 by_cg={}
 for l in sys.stdin:
     try: r=json.loads(l)
@@ -606,7 +606,7 @@ for l in sys.stdin:
     if not r.get('kcId') or r.get('kind') != 'public': continue
     k=r['cg']
     by_cg.setdefault(k, []).append(f\"{r['node']}|{r['cg']}|{r['kcId']}|{r['root']}\")
-MAX=16
+MAX=min(24, max(8, int(os.environ.get('TARGET_CGS', '12'))))
 out=[]
 while len(out) < MAX and any(by_cg.values()):
     for k in list(by_cg.keys()):
@@ -618,7 +618,12 @@ print('\n'.join(out))")
 UPD_SECTION_DEADLINE=$(( $(date +%s) + ${HARNESS_UPD_SECTION_BUDGET_S:-900} ))
 UPD_BUDGET_EXHAUSTED=0
 while IFS='|' read -r un uc ukc uroot; do
-  [ "$(date +%s)" -ge "$UPD_SECTION_DEADLINE" ] && { UPD_BUDGET_EXHAUSTED=1; log "Section B update budget exhausted — stopping sample loop"; break; }
+  UPD_REMAIN=$(( UPD_SECTION_DEADLINE - $(date +%s) ))
+  if [ "$UPD_REMAIN" -le "${API_LONG_TIMEOUT:-180}" ]; then
+    UPD_BUDGET_EXHAUSTED=1
+    log "Section B update budget exhausted (${UPD_REMAIN}s remain — need >${API_LONG_TIMEOUT:-180}s per /api/update)"
+    break
+  fi
   [ -z "$uc" ] && continue
   UPD_TRY=$((UPD_TRY+1))
   uport="${NODE_PORT[$((un-1))]}"
@@ -630,7 +635,7 @@ while IFS='|' read -r un uc ukc uroot; do
   { [ "$stt" = "confirmed" ] || [ "$stt" = "finalized" ]; } && UPD_OK=$((UPD_OK+1))
 done <<< "$SAMPLE"
 if [ "$UPD_BUDGET_EXHAUSTED" = "1" ]; then
-  warn B ka-update "budget-limited: $UPD_OK/$UPD_TRY updates (${HARNESS_UPD_SECTION_BUDGET_S:-900}s cap — not eligible for pass gate)"
+  fail B ka-update "budget-limited: $UPD_OK/$UPD_TRY updates incomplete (${HARNESS_UPD_SECTION_BUDGET_S:-900}s cap)"
 elif [ "$UPD_OK" -gt 0 ] && [ "$UPD_OK" -ge $((UPD_TRY * 7 / 10)) ]; then
   pass B ka-update "$UPD_OK/$UPD_TRY KA updates confirmed across CG variants"
 elif [ "$UPD_OK" -gt 0 ]; then
