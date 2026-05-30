@@ -2899,8 +2899,10 @@ export class EVMChainAdapter implements ChainAdapter {
         // (preUpdateMerkleRootCount, minted, byteSize, endEpoch, tokenAmount, isImmutable, preUpdateMerkleLeafCount)
         currentByteSize = BigInt(ctx[2]);
         endEpoch = BigInt(ctx[3]);
-      } catch {
-        // KC not yet in storage (would fail later on-chain anyway) — leave defaults.
+      } catch (err) {
+        throw new Error(
+          `Failed to read KC update context for kcId ${params.kcId}: ${(err as Error).message}`,
+        );
       }
     }
 
@@ -2927,16 +2929,19 @@ export class EVMChainAdapter implements ChainAdapter {
         // to zero. Match the floor exactly so growth updates with sub-1024 ask
         // budgets still succeed.
         if (growthCost === 0n) growthCost = 1n;
-      } catch {
-        // askStorage read failed — leave growthCost=0; the on-chain validator
-        // will revert with the contract's actual expected-cost error which is
-        // more informative than anything we could synthesize here.
+      } catch (err) {
+        throw new Error(
+          `Failed to read askStorage for byte-size growth costing: ${(err as Error).message}`,
+        );
       }
     }
 
     const minimumTokenAmount = params.currentTokenAmount + growthCost;
     const baseTokenAmount = params.userProvidedNewTokenAmount ?? minimumTokenAmount;
-    return baseTokenAmount > minimumTokenAmount ? baseTokenAmount : minimumTokenAmount;
+    const raw = baseTokenAmount > minimumTokenAmount ? baseTokenAmount : minimumTokenAmount;
+    // Match computeUpdateACKDigest()'s floorPublishTokenAmount so ACK signatures
+    // and the on-chain submission bind the same newTokenAmount wire value.
+    return floorPublishTokenAmount(raw);
   }
 
   /**
