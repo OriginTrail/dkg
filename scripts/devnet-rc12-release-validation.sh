@@ -215,19 +215,20 @@ else log "FATAL: no auth token (set DKG_AUTH or run devnet)"; exit 2; fi
 export DKG_AUTH="$AUTH"
 H="Authorization: Bearer $AUTH"
 
-# Default 30s -> 90s -> 180s. Even 90s proved too tight: under sustained
-# bulk-publish load (the B-section update sample alone fires ~20 in-flight
-# /api/update RPCs while curate-publish ACKs are still draining), edge-node
-# update calls stall silently — the daemon-side log shows the publish
-# completes ~120s later but the harness curl has already timed out and
-# (incorrectly) recorded a confirmation gap. 180s matches the explicit budget
-# the A2 /api/shared-memory/publish call already uses, and keeps the script
-# consistent across long-running endpoints (/api/query, /api/update,
-# /api/random-sampling/status). Still fails fast on a truly hung daemon —
-# we should never see a real RPC take 3 minutes under normal operation.
-api()  { curl -s --max-time 180 -H "$H" "$@"; }
-post() { local port=$1; shift; api -X POST -H "Content-Type: application/json" "http://127.0.0.1:$port$@"; }
-get()  { local port=$1; shift; api "http://127.0.0.1:$port$@"; }
+# Default curl budget for control-plane calls (/api/status, CG setup, chat, …).
+# Long-running publish/update/query paths use `post_long`/`api_long` (180s).
+# Even 90s proved too tight for /api/update under sustained bulk-publish
+# load (B-section fires ~20 in-flight updates while curate-publish ACKs
+# drain); those paths get the explicit 180s budget instead of widening
+# every harness call.
+API_TIMEOUT="${HARNESS_API_TIMEOUT:-90}"
+API_LONG_TIMEOUT="${HARNESS_API_LONG_TIMEOUT:-180}"
+api()      { curl -s --max-time "$API_TIMEOUT" -H "$H" "$@"; }
+api_long() { curl -s --max-time "$API_LONG_TIMEOUT" -H "$H" "$@"; }
+post()      { local port=$1; shift; api -X POST -H "Content-Type: application/json" "http://127.0.0.1:$port$@"; }
+post_long() { local port=$1; shift; api_long -X POST -H "Content-Type: application/json" "http://127.0.0.1:$port$@"; }
+get()       { local port=$1; shift; api "http://127.0.0.1:$port$@"; }
+get_long()  { local port=$1; shift; api_long "http://127.0.0.1:$port$@"; }
 
 DOWN=""
 for n in $(seq 1 "$NUM_NODES"); do
@@ -624,7 +625,7 @@ while IFS='|' read -r un uc ukc uroot; do
   newuri="${uroot}/upd${UPD_TRY}"
   quads_json="[{\"subject\":\"$newuri\",\"predicate\":\"http://www.w3.org/1999/02/22-rdf-syntax-ns#type\",\"object\":\"http://schema.org/UpdateAction\",\"graph\":\"\"},{\"subject\":\"$newuri\",\"predicate\":\"http://schema.org/name\",\"object\":\"\\\"upd-$UPD_TRY\\\"\",\"graph\":\"\"}]"
   body=$(build_update_body "$un" "$ukc" "$uc" "$quads_json") || continue
-  r=$(post "$uport" /api/update -d "$body")
+  r=$(post_long "$uport" /api/update -d "$body")
   stt=$(echo "$r" | pyf "d.get('status','')")
   { [ "$stt" = "confirmed" ] || [ "$stt" = "finalized" ]; } && UPD_OK=$((UPD_OK+1))
 done <<< "$SAMPLE"
@@ -647,14 +648,14 @@ for l in sys.stdin:
 if [ -n "$SROOT" ]; then
   sn=$(echo "$SROOT"|awk '{print $1}'); sc=$(echo "$SROOT"|awk '{print $2}'); sr=$(echo "$SROOT"|awk '{print $3}')
   sp="${NODE_PORT[$((sn-1))]}"
-  vm=$(post "$sp" /api/query -d "{\"sparql\":\"SELECT ?p WHERE { GRAPH ?g { <$sr> ?p ?o } FILTER(CONTAINS(STR(?g),\\\"$sc\\\")) } LIMIT 1\",\"contextGraphId\":\"$sc\",\"view\":\"verified-memory\"}")
+  vm=$(post_long "$sp" /api/query -d "{\"sparql\":\"SELECT ?p WHERE { GRAPH ?g { <$sr> ?p ?o } FILTER(CONTAINS(STR(?g),\\\"$sc\\\")) } LIMIT 1\",\"contextGraphId\":\"$sc\",\"view\":\"verified-memory\"}")
   vmb=$(echo "$vm" | pyf "len(d.get('result',{}).get('bindings',[]))")
   [ "${vmb:-0}" -gt 0 ] && pass A vm-view "published KA visible in verified-memory view" || warn A vm-view "KA not in VM view yet (got $vm | first 120: ${vm:0:120})"
   # peer replication: query another node
   pn=$(( sn % NUM_NODES + 1 )); pp="${NODE_PORT[$((pn-1))]}"
   found=0
   for _ in $(seq 1 20); do
-    rep=$(post "$pp" /api/query -d "{\"sparql\":\"SELECT ?p WHERE { GRAPH ?g { <$sr> ?p ?o } FILTER(CONTAINS(STR(?g),\\\"$sc\\\")) } LIMIT 1\",\"contextGraphId\":\"$sc\"}")
+    rep=$(post_long "$pp" /api/query -d "{\"sparql\":\"SELECT ?p WHERE { GRAPH ?g { <$sr> ?p ?o } FILTER(CONTAINS(STR(?g),\\\"$sc\\\")) } LIMIT 1\",\"contextGraphId\":\"$sc\"}")
     [ "$(echo "$rep" | pyf "len(d.get('result',{}).get('bindings',[]))")" -gt 0 ] 2>/dev/null && { found=1; break; }
     sleep 3
   done
@@ -976,7 +977,7 @@ if [ -n "$OREC" ]; then
     oquads="[{\"subject\":\"$nuri\",\"predicate\":\"http://www.w3.org/1999/02/22-rdf-syntax-ns#type\",\"object\":\"http://schema.org/UpdateAction\",\"graph\":\"\"},{\"subject\":\"$nuri\",\"predicate\":\"http://schema.org/name\",\"object\":\"\\\"owner2-upd\\\"\",\"graph\":\"\"}]"
     ob=$(build_update_body 1 "$okc" "$ocg" "$oquads" 2>/dev/null) || ob=""
     if [ -n "$ob" ]; then
-      orr=$(post "$API_PORT_BASE" /api/update -d "$ob")
+      orr=$(post_long "$API_PORT_BASE" /api/update -d "$ob")
       ost=$(echo "$orr" | pyf "d.get('status','')")
       if [ "$ost" = "confirmed" ] || [ "$ost" = "finalized" ]; then
         pass I new-owner-update "new owner updated KA kc=$okc after transfer (status=$ost)"
