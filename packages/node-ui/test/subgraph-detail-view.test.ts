@@ -1441,6 +1441,119 @@ describe('SubGraphDetailView tabs', () => {
     expect(rootShelfChip).toBeTruthy();
   });
 
+  // Task #19 — parallel construct to PR #772 sweep 1 Bug A's fix
+  // at `scopedTriples` (`:1260` above). When `enabledLayers.size
+  // === 1` the Graph tab swaps `scopedTriples` for
+  // `singleLayerPanelTriples` (which iterates `rawMemory.allTriples`
+  // for layer-scoped accuracy). That parallel path had the same
+  // OR-shape bug — a triple tagged for another slug whose subject
+  // happens to be in scope would leak in. Fix mirrors `scopedTriples`:
+  // exact-tag-routing for tagged triples, untagged-recovery for
+  // untagged. Same lesson, same shape, different consumer.
+  it('singleLayerPanelTriples rejects an explicit non-matching subGraph tag even when an endpoint is in scope (Task #19)', async () => {
+    // Same fixture shape as the `scopedTriples` test above — `cross`
+    // belongs to both `demo` (current view) and `other`, with a
+    // demo-tagged edge that admits and an other-tagged edge that
+    // must drop on exact-tag-routing.
+    const cross = {
+      uri: 'urn:e:cross', label: 'Cross-membership entity',
+      types: ['http://schema.org/Thing'],
+      trustLevel: 'shared',
+      layers: new Set(['shared']),
+      subGraphs: new Set(['demo', 'other']),
+      properties: new Map(),
+      connections: [],
+    };
+    const demoOnly = {
+      uri: 'urn:e:demo-only', label: 'Demo-only entity',
+      types: ['http://schema.org/Thing'],
+      trustLevel: 'shared',
+      layers: new Set(['shared']),
+      subGraphs: new Set(['demo']),
+      properties: new Map(),
+      connections: [],
+    };
+    const demoEdge = {
+      subject: 'urn:e:demo-only',
+      predicate: 'http://schema.org/knows',
+      object: 'urn:e:cross',
+      subGraph: 'demo',
+      layer: 'shared' as const,
+    };
+    const otherEdge = {
+      subject: 'urn:e:cross',
+      predicate: 'http://schema.org/knows',
+      object: 'urn:e:demo-only',
+      subGraph: 'other',
+      layer: 'shared' as const,
+    };
+    const fixture = {
+      entities: new Map([[cross.uri, cross], [demoOnly.uri, demoOnly]]),
+      entityList: [cross, demoOnly],
+      allTriples: [demoEdge, otherEdge],
+      graphTriples: [
+        { subject: demoEdge.subject, predicate: demoEdge.predicate, object: demoEdge.object, subGraph: 'demo' },
+        { subject: otherEdge.subject, predicate: otherEdge.predicate, object: otherEdge.object, subGraph: 'other' },
+      ],
+      trustMap: new Map(),
+      counts: { wm: 0, swm: 2, vm: 0, total: 2 },
+      loading: false, error: null, partial: false,
+      refresh: vi.fn(),
+    } as any;
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root!.render(
+        React.createElement(ProjectProfileContext.Provider, { value: profile },
+          React.createElement(SubGraphDetailView, {
+            slug: 'demo',
+            rawMemory: fixture,
+            contextGraphId: 'cg-test',
+            onNodeClick: vi.fn(),
+            onSelectEntity: vi.fn(),
+            activeTab: 'graph',
+            onTabChange: vi.fn(),
+          })),
+      );
+    });
+
+    // Narrow to SWM only so `singleLayerPanelTriples` is the
+    // active selector (vs the default `filteredTriples` /
+    // `scopedTriples` path).
+    const chips = Array.from(container.querySelectorAll('button.v10-minibar-chip')) as HTMLButtonElement[];
+    const wmChip = chips.find(b => (b.getAttribute('title') ?? '').startsWith('Working Memory'));
+    const vmChip = chips.find(b => (b.getAttribute('title') ?? '').startsWith('Verifiable Memory'));
+    expect(wmChip).toBeTruthy();
+    expect(vmChip).toBeTruthy();
+    await act(async () => { wmChip!.click(); });
+    await act(async () => { vmChip!.click(); });
+
+    await waitForGraph(() => {
+      const el = container.querySelector('[data-testid="rdf-graph"]') as HTMLElement | null;
+      expect(el).toBeTruthy();
+      const triples = JSON.parse(el!.getAttribute('data-triples') ?? '[]');
+      // The `demo`-tagged edge is admitted via exact-tag routing.
+      const hasDemoEdge = triples.some(
+        (t: { s: string; p: string; o: string }) =>
+          t.s === 'urn:e:demo-only' && t.p === 'http://schema.org/knows' && t.o === 'urn:e:cross',
+      );
+      // The `other`-tagged edge must NOT leak in — even though its
+      // subject (`cross`) is in `scopedUris` (cross-membership).
+      // Pre-fix the OR-shape `t.subGraph === slug ||
+      // scopedUris.has(t.subject)` admitted it because the second
+      // branch fired.
+      const hasOtherEdge = triples.some(
+        (t: { s: string; p: string; o: string }) =>
+          t.s === 'urn:e:cross' && t.p === 'http://schema.org/knows' && t.o === 'urn:e:demo-only',
+      );
+      expect(hasDemoEdge).toBe(true);
+      expect(hasOtherEdge).toBe(false);
+    });
+  });
+
   // S3 polish #10b — the detail-view header used to render a
   // duplicate "No data" badge in its top-right corner whenever the
   // sub-graph had no entities to populate the MiniLayerBar with.

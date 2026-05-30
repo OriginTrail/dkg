@@ -4936,11 +4936,36 @@ export function SubGraphDetailView({
     const panelUris = new Set(panelEntities.map(e => e.uri));
     const seen = new Set<string>();
     const out: Triple[] = [];
+    // Task #19 — exact-tag-routing, parallel to PR #772 sweep 1
+    // Bug A's fix at `scopedTriples` (`:4815-4825`). Two-rule
+    // admission:
+    //   1. Tagged triple → routes to the exact slug (named branch
+    //      only — Root carries no tagged triples). A triple
+    //      tagged for "other" must NOT leak just because one of
+    //      its endpoints is shared with this slug; entities in
+    //      multiple sub-graphs are shared territory, not a
+    //      broadcast channel.
+    //   2. Untagged triple → admitted if either endpoint is in
+    //      the broader scoped set (subject-local properties + the
+    //      object-side recovery edges captured at C18). This is
+    //      the post-promotion recovery path the rest of the
+    //      comment block above documents.
+    // The `panelUris` predicate below is layer-narrowing on top
+    // of routing (chip/query filters), so it stays the same; the
+    // bug was the OR-shape in the routing predicate itself.
     for (const t of rawMemory.allTriples) {
       if (t.layer !== layerTrust) continue;
-      const inScope = t.subGraph === slug
-        || scopedUris.has(t.subject)
-        || (isResourceNode(t.object) && scopedUris.has(t.object));
+      let inScope: boolean;
+      if (!isRoot && t.subGraph === slug) {
+        inScope = true;
+      } else if (t.subGraph) {
+        // Exact-tag-routing — non-matching subGraph tag belongs
+        // to that other slug's view, not this one.
+        inScope = false;
+      } else {
+        inScope = scopedUris.has(t.subject)
+          || (isResourceNode(t.object) && scopedUris.has(t.object));
+      }
       if (!inScope) continue;
       if (!(panelUris.has(t.subject) || panelUris.has(t.object))) continue;
       const key = `${t.subject}|${t.predicate}|${t.object}`;
@@ -4949,7 +4974,7 @@ export function SubGraphDetailView({
       out.push({ subject: t.subject, predicate: t.predicate, object: t.object, subGraph: t.subGraph });
     }
     return out;
-  }, [singleLayer, rawMemory.allTriples, scopedUris, slug, scopedEntities, chips, chipState, queryResults]);
+  }, [singleLayer, rawMemory.allTriples, scopedUris, slug, isRoot, scopedEntities, chips, chipState, queryResults]);
 
   const graphPanelTriples = singleLayerPanelTriples ?? filteredTriples;
 
