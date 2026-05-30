@@ -68,10 +68,17 @@ export function NotificationsBell() {
     const firstApprove = pane.querySelector<HTMLElement>(
       '.v10-notif-section-action .v10-notif-btn-approve',
     );
-    const first = firstApprove ?? pane.querySelector<HTMLElement>(
-      'button, [href], [tabindex]:not([tabindex="-1"])',
+    // No join requests → focus the first ACTIVITY row's control, never the
+    // title-bar "Mark all read" (Codex R2-4): the generic fallback below
+    // explicitly excludes `.v10-notif-pane-markread` so it can't become the
+    // initial focus and skip the first notification row.
+    const firstRowControl = pane.querySelector<HTMLElement>(
+      '.v10-notif-section-rows button, .v10-notif-section-rows a[href]',
     );
-    (first ?? pane).focus();
+    const firstFocusable = pane.querySelector<HTMLElement>(
+      'button:not(.v10-notif-pane-markread), [href], [tabindex]:not([tabindex="-1"])',
+    );
+    (firstApprove ?? firstRowControl ?? firstFocusable ?? pane).focus();
   }, [open]);
 
   const onOpenContextGraph = useCallback((cgId: string) => {

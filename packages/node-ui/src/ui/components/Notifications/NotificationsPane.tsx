@@ -31,6 +31,7 @@ export function NotificationsPane({ feed, onOpenContextGraph, id, paneRef }: Not
     joinRequests,
     activity,
     status,
+    refreshError,
     partialActivityError,
     hasInformationalUnread,
     approve,
@@ -90,7 +91,7 @@ export function NotificationsPane({ feed, onOpenContextGraph, id, paneRef }: Not
           <>
             {/* A refresh error while we still have cached rows: thin banner
                 above, list preserved (last-known-good, ui-brief §4.5). */}
-            {status === 'error' && (
+            {refreshError && (
               <div className="v10-notif-pane-error v10-notif-pane-error-inline" role="status" aria-live="polite">
                 Couldn’t refresh notifications.{' '}
                 <button type="button" className="v10-notif-retry" onClick={feed.retry}>Retry</button>

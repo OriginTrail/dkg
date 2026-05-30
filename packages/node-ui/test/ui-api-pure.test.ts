@@ -17,7 +17,6 @@ import {
   fetchRetentionSettings,
   fetchTelemetrySettings,
   fetchCatchupStatus,
-  fetchNotifications,
   markNotificationsRead,
   fetchRpcHealth,
   fetchQueryHistory,

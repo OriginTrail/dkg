@@ -115,6 +115,10 @@ export interface UseNotificationsFeed {
    *  otherwise have no way to clear (Codex I4). */
   hasInformationalUnread: boolean;
   status: NotificationsFeedStatus;
+  /** A background refresh failed while last-known-good data is still shown
+   *  (status stays 'ready', the cached list is preserved). Drives the pane's
+   *  inline "Couldn't refresh" retry banner (Codex R2-5). */
+  refreshError: boolean;
   /** Activity sub-section couldn't load but join list is fine (reserved for
    *  a future partial-error wire signal; false until the daemon distinguishes
    *  it — kept so the pane can wire the partial-error state now). */
@@ -219,6 +223,10 @@ export function classifyActionError(err: unknown): ActionResult {
 export function useNotificationsFeed(): UseNotificationsFeed {
   const [data, setData] = useState<NotificationsFeedResponse | null>(null);
   const [status, setStatus] = useState<NotificationsFeedStatus>('loading');
+  // A WARM refresh failure (we already have data) keeps `status: 'ready'` so
+  // the cached list stays visible; this separate flag lets the pane render its
+  // inline "Couldn't refresh" retry banner (Codex R2-5).
+  const [refreshError, setRefreshError] = useState(false);
   // Track whether we've ever loaded successfully, so a refresh failure keeps
   // the last-known-good payload instead of blanking the pane.
   const hasDataRef = useRef(false);
@@ -228,12 +236,21 @@ export function useNotificationsFeed(): UseNotificationsFeed {
       .then((resp) => {
         hasDataRef.current = true;
         setData(resp);
+        setRefreshError(false);
         setStatus(resp.scopeUnknown ? 'identity-pending' : 'ready');
       })
       .catch(() => {
-        // Last-known-good: keep prior rows if we have them; only surface the
-        // hard error state on a cold failure (nothing loaded yet).
-        setStatus(hasDataRef.current ? 'ready' : 'error');
+        // Last-known-good: keep prior rows if we have them. A WARM failure
+        // (already have data) keeps status 'ready' — which is what preserves
+        // the cached list — and raises `refreshError` so the pane still shows
+        // its inline retry banner (status alone can't, since 'ready' is what
+        // keeps the list — Codex R2-5). A COLD failure (nothing loaded yet) is
+        // the hard error state.
+        if (hasDataRef.current) {
+          setRefreshError(true);
+        } else {
+          setStatus('error');
+        }
       });
   }, []);
 
@@ -317,6 +334,7 @@ export function useNotificationsFeed(): UseNotificationsFeed {
   }, [load]);
 
   const retry = useCallback(() => {
+    setRefreshError(false);
     setStatus(hasDataRef.current ? 'ready' : 'loading');
     load();
   }, [load]);
@@ -327,6 +345,7 @@ export function useNotificationsFeed(): UseNotificationsFeed {
     unread,
     hasInformationalUnread,
     status,
+    refreshError,
     // Reserved for a future wire signal; the daemon does not yet distinguish a
     // partial activity-query failure from a full one, so this stays false. The
     // pane wires the state now so adding the signal later is a one-line change.

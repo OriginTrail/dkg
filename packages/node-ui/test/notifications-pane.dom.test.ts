@@ -60,6 +60,7 @@ function makeFeed(over: Partial<UseNotificationsFeed> = {}): UseNotificationsFee
     unread: 0,
     hasInformationalUnread: false,
     status: 'ready',
+    refreshError: false,
     partialActivityError: false,
     approve: vi.fn(async (): Promise<ActionResult> => ({ ok: true })),
     deny: vi.fn(async (): Promise<ActionResult> => ({ ok: true })),
@@ -234,6 +235,27 @@ describe('NotificationsPane — interaction + a11y (happy-dom)', () => {
     render(makeFeed({ unread: 1, activity: [digest(false)] }));
     expect(rowUnread()).toBe(true);
   });
+
+  it('R2-5: a warm refresh failure surfaces the inline “Couldn’t refresh” banner (cached rows kept)', () => {
+    const digest: ActivityItem = {
+      kind: 'digest', id: 'd1', cgId: 'cg:a', contextGraphName: 'Alpha',
+      event: 'promoted', count: 2, ts: 1, read: true,
+    };
+    // status stays 'ready' (cached list preserved) but refreshError is set
+    // (Codex R2-5) — the inline retry banner must still render.
+    render(makeFeed({ status: 'ready', refreshError: true, activity: [digest] }));
+    expect(container.textContent).toContain('Couldn’t refresh notifications');
+    expect(container.querySelector('.v10-notif-section-activity')).toBeTruthy();
+  });
+
+  it('R2-5: no inline refresh banner when refreshError is false', () => {
+    const digest: ActivityItem = {
+      kind: 'digest', id: 'd1', cgId: 'cg:a', contextGraphName: 'Alpha',
+      event: 'promoted', count: 2, ts: 1, read: true,
+    };
+    render(makeFeed({ status: 'ready', refreshError: false, activity: [digest] }));
+    expect(container.textContent).not.toContain('Couldn’t refresh notifications');
+  });
 });
 
 describe('NotificationsBell — disclosure keyboard + focus (happy-dom)', () => {
@@ -283,6 +305,22 @@ describe('NotificationsBell — disclosure keyboard + focus (happy-dom)', () => 
     expect(active?.classList.contains('v10-notif-btn-approve')).toBe(true);
     // Regression guard: it must NOT be the cg-link that precedes the actions.
     expect(active?.classList.contains('v10-notif-cg-link')).toBe(false);
+  });
+
+  it('R2-4: with no join requests, focus lands on the first activity row, not “Mark all read”', () => {
+    const digest: ActivityItem = {
+      kind: 'digest', id: 'activity:cg:a:promoted:1', cgId: 'cg:a',
+      contextGraphName: 'Alpha', event: 'promoted', count: 2, ts: 1, read: false,
+    };
+    // No actionable join requests, but informational-unread → "Mark all read"
+    // is visible. Focus must SKIP it and land on the first activity row.
+    hoisted.feed = makeFeed({
+      unread: 1, joinRequests: [], activity: [digest], hasInformationalUnread: true,
+    });
+    openPane();
+    const active = document.activeElement as HTMLElement | null;
+    expect(active?.classList.contains('v10-notif-pane-markread')).toBe(false);
+    expect(active?.classList.contains('v10-notif-row-activity')).toBe(true);
   });
 
   it('Escape closes the pane and restores focus to the bell', () => {
