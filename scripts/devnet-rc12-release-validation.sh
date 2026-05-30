@@ -215,12 +215,17 @@ else log "FATAL: no auth token (set DKG_AUTH or run devnet)"; exit 2; fi
 export DKG_AUTH="$AUTH"
 H="Authorization: Bearer $AUTH"
 
-# Default 30s curl budget was too tight under heavy chain load: bulk publishes
-# spawn ~80 in-flight on-chain txs in parallel, and any concurrent /api/query,
-# /api/assertion/create, /api/random-sampling/status read sometimes exceeds
-# 30s while the daemon's request queue drains. 90s is comfortably above the
-# observed worst case while still failing fast on a hung daemon.
-api()  { curl -s --max-time 90 -H "$H" "$@"; }
+# Default 30s -> 90s -> 180s. Even 90s proved too tight: under sustained
+# bulk-publish load (the B-section update sample alone fires ~20 in-flight
+# /api/update RPCs while curate-publish ACKs are still draining), edge-node
+# update calls stall silently — the daemon-side log shows the publish
+# completes ~120s later but the harness curl has already timed out and
+# (incorrectly) recorded a confirmation gap. 180s matches the explicit budget
+# the A2 /api/shared-memory/publish call already uses, and keeps the script
+# consistent across long-running endpoints (/api/query, /api/update,
+# /api/random-sampling/status). Still fails fast on a truly hung daemon —
+# we should never see a real RPC take 3 minutes under normal operation.
+api()  { curl -s --max-time 180 -H "$H" "$@"; }
 post() { local port=$1; shift; api -X POST -H "Content-Type: application/json" "http://127.0.0.1:$port$@"; }
 get()  { local port=$1; shift; api "http://127.0.0.1:$port$@"; }
 
