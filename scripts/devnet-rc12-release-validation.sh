@@ -615,7 +615,9 @@ if [ "${CUR_KA:-0}" -gt 0 ]; then pass A curated-publish "$CUR_KA KAs published 
 # ── Section B: updates across CG variants ────────────────────────────────────
 section "B. UPDATES — update a sample of published KAs across CG variants"
 UPD_OK=0; UPD_TRY=0
-# Sample up to min(24, max(16, TARGET_CGS)) PUBLIC KAs, round-robin across CGs.
+# Sample up to max(16, TARGET_CGS) PUBLIC KAs, round-robin across CGs.
+# Curated KAs are intentionally excluded: updates need allowlisted ciphers and
+# rotated keys this harness does not thread (curated publish is covered in §A).
 SAMPLE=$(grep '"ok":true' "$METRICS_JSONL" | TARGET_CGS="$TARGET_CGS" python3 -c "
 import os,sys,json
 by_cg={}
@@ -625,7 +627,9 @@ for l in sys.stdin:
     if not r.get('kcId') or r.get('kind') != 'public': continue
     k=r['cg']
     by_cg.setdefault(k, []).append(f\"{r['node']}|{r['cg']}|{r['kcId']}|{r['root']}\")
-MAX=min(24, max(16, int(os.environ.get('TARGET_CGS', '12'))))
+MAX=max(16, int(os.environ.get('TARGET_CGS', '12')))
+if os.environ.get('HARNESS_UPD_MAX'):
+    MAX=min(MAX, int(os.environ['HARNESS_UPD_MAX']))
 out=[]
 while len(out) < MAX and any(by_cg.values()):
     for k in list(by_cg.keys()):
@@ -643,7 +647,10 @@ while IFS='|' read -r un uc ukc uroot; do
   newuri="${uroot}/upd${UPD_TRY}"
   quads_json="[{\"subject\":\"$newuri\",\"predicate\":\"http://www.w3.org/1999/02/22-rdf-syntax-ns#type\",\"object\":\"http://schema.org/UpdateAction\",\"graph\":\"\"},{\"subject\":\"$newuri\",\"predicate\":\"http://schema.org/name\",\"object\":\"\\\"upd-$UPD_TRY\\\"\",\"graph\":\"\"}]"
   body=$(build_update_body "$un" "$ukc" "$uc" "$quads_json") || continue
-  if ! post_update_bounded "$uport" /api/update -d "$body"; then break; fi
+  if ! post_update_bounded "$uport" /api/update -d "$body"; then
+    if [ "$UPD_BUDGET_EXHAUSTED" = "1" ]; then break; fi
+    continue
+  fi
   r="$POST_UPDATE_LAST"
   stt=$(echo "$r" | pyf "d.get('status','')")
   { [ "$stt" = "confirmed" ] || [ "$stt" = "finalized" ]; } && UPD_OK=$((UPD_OK+1))
