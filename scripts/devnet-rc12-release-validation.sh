@@ -595,32 +595,30 @@ if [ "${CUR_KA:-0}" -gt 0 ]; then pass A curated-publish "$CUR_KA KAs published 
 # ── Section B: updates across CG variants ────────────────────────────────────
 section "B. UPDATES — update a sample of published KAs across CG variants"
 UPD_OK=0; UPD_TRY=0
-# Sample up to 40 confirmed PUBLIC KAs spread across distinct CGs.
-# Curated CGs require ciphertext-commitment rotation on every update
-# (KnowledgeAssetsLifecycle.update reverts with IncompleteCiphertextCommitment
-# if a previously-committed KC sees a zero-pair update). The release-validation
-# harness doesn't currently produce curated commitments — testing curated
-# updates would mean threading newCiphertextChunksRoot/Count through the seal,
-# which is out of scope for a release gate. Restricting to public CGs keeps
-# the test honest: it asserts "RC12 update path works end-to-end", which is
-# exactly what this section advertises.
+# Sample up to 16 confirmed PUBLIC KAs, round-robin across CGs (not first-N
+# in file order) so edge variants are not skipped when the budget is tight.
 SAMPLE=$(grep '"ok":true' "$METRICS_JSONL" | python3 -c "
 import sys,json
-seen={}; out=[]
+by_cg={}
 for l in sys.stdin:
     try: r=json.loads(l)
     except Exception: continue
-    if not r.get('kcId'): continue
-    if r.get('kind') != 'public': continue
+    if not r.get('kcId') or r.get('kind') != 'public': continue
     k=r['cg']
-    if seen.get(k,0) < 4:
-        seen[k]=seen.get(k,0)+1
-        out.append(f\"{r['node']}|{r['cg']}|{r['kcId']}|{r['root']}\")
-    if len(out)>=16: break
+    by_cg.setdefault(k, []).append(f\"{r['node']}|{r['cg']}|{r['kcId']}|{r['root']}\")
+MAX=16
+out=[]
+while len(out) < MAX and any(by_cg.values()):
+    for k in list(by_cg.keys()):
+        bucket=by_cg.get(k) or []
+        if bucket:
+            out.append(bucket.pop(0))
+            if len(out) >= MAX: break
 print('\n'.join(out))")
 UPD_SECTION_DEADLINE=$(( $(date +%s) + ${HARNESS_UPD_SECTION_BUDGET_S:-900} ))
+UPD_BUDGET_EXHAUSTED=0
 while IFS='|' read -r un uc ukc uroot; do
-  [ "$(date +%s)" -ge "$UPD_SECTION_DEADLINE" ] && { log "Section B update budget exhausted — stopping sample loop"; break; }
+  [ "$(date +%s)" -ge "$UPD_SECTION_DEADLINE" ] && { UPD_BUDGET_EXHAUSTED=1; log "Section B update budget exhausted — stopping sample loop"; break; }
   [ -z "$uc" ] && continue
   UPD_TRY=$((UPD_TRY+1))
   uport="${NODE_PORT[$((un-1))]}"
@@ -631,7 +629,9 @@ while IFS='|' read -r un uc ukc uroot; do
   stt=$(echo "$r" | pyf "d.get('status','')")
   { [ "$stt" = "confirmed" ] || [ "$stt" = "finalized" ]; } && UPD_OK=$((UPD_OK+1))
 done <<< "$SAMPLE"
-if [ "$UPD_OK" -gt 0 ] && [ "$UPD_OK" -ge $((UPD_TRY * 7 / 10)) ]; then
+if [ "$UPD_BUDGET_EXHAUSTED" = "1" ]; then
+  warn B ka-update "budget-limited: $UPD_OK/$UPD_TRY updates (${HARNESS_UPD_SECTION_BUDGET_S:-900}s cap — not eligible for pass gate)"
+elif [ "$UPD_OK" -gt 0 ] && [ "$UPD_OK" -ge $((UPD_TRY * 7 / 10)) ]; then
   pass B ka-update "$UPD_OK/$UPD_TRY KA updates confirmed across CG variants"
 elif [ "$UPD_OK" -gt 0 ]; then
   warn B ka-update "$UPD_OK/$UPD_TRY KA updates confirmed (below 70%)"
