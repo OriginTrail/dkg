@@ -2864,6 +2864,25 @@ export class EVMChainAdapter implements ChainAdapter {
    * `updateKnowledgeCollectionV10` so the off-chain signed ACK and the
    * on-chain submission see the same `newTokenAmount`.
    */
+  private async resolveCurrentTokenAmount(kcId: bigint): Promise<bigint> {
+    const kcs = this.contracts.knowledgeCollectionStorage;
+    let currentTokenAmount = 0n;
+    if (kcs) {
+      try {
+        currentTokenAmount = BigInt(await kcs.getTokenAmount(kcId));
+      } catch { /* not in KCS */ }
+    }
+    if (currentTokenAmount === 0n && this.contracts.knowledgeAssetsStorage) {
+      try {
+        const batch = await this.contracts.knowledgeAssetsStorage.getBatch(kcId);
+        if (batch && batch.tokenAmount != null) {
+          currentTokenAmount = BigInt(batch.tokenAmount);
+        }
+      } catch { /* not in KAS either */ }
+    }
+    return currentTokenAmount;
+  }
+
   private async computeUpdateNewTokenAmount(params: {
     kcId: bigint;
     newByteSize: bigint;
@@ -2889,10 +2908,10 @@ export class EVMChainAdapter implements ChainAdapter {
     if (this.contracts.chronos) {
       try {
         currentEpoch = BigInt(await this.contracts.chronos.getCurrentEpoch());
-      } catch {
-        // Chronos read failed — fall back to currentEpoch=0 which conservatively
-        // OVER-estimates the remaining lifetime and therefore the growth cost;
-        // the contract will simply accept a larger `newTokenAmount`.
+      } catch (err) {
+        throw new Error(
+          `Failed to read Chronos currentEpoch for update tokenAmount sizing: ${(err as Error).message}`,
+        );
       }
     }
     const remainingEpochs = endEpoch > currentEpoch ? endEpoch - currentEpoch : 0n;
@@ -2947,12 +2966,7 @@ export class EVMChainAdapter implements ChainAdapter {
     const kav10Address = await this.contracts.knowledgeAssetsV10.getAddress();
     const evmChainId = BigInt((await this.provider.getNetwork()).chainId);
 
-    let currentTokenAmount = 0n;
-    if (kcs) {
-      try {
-        currentTokenAmount = BigInt(await kcs.getTokenAmount(params.kcId));
-      } catch { /* not in KCS */ }
-    }
+    const currentTokenAmount = await this.resolveCurrentTokenAmount(params.kcId);
 
     // #831: size `newTokenAmount` against the contract's growth-cost validator
     // (matches `KnowledgeAssetsLifecycle._validateTokenAmount` exactly). The
@@ -3042,23 +3056,7 @@ export class EVMChainAdapter implements ChainAdapter {
 
     const identityId = params.publisherNodeIdentityId ?? await this.getIdentityId();
 
-    // Look up the current tokenAmount on-chain to carry it forward.
-    // V10 batches live in KnowledgeCollectionStorage; fall back to
-    // KnowledgeAssetsStorage (V9) if not found.
-    let currentTokenAmount = 0n;
-    if (kcs) {
-      try {
-        currentTokenAmount = BigInt(await kcs.getTokenAmount(params.kcId));
-      } catch { /* not in KCS */ }
-    }
-    if (currentTokenAmount === 0n && this.contracts.knowledgeAssetsStorage) {
-      try {
-        const batch = await this.contracts.knowledgeAssetsStorage.getBatch(params.kcId);
-        if (batch && batch.tokenAmount != null) {
-          currentTokenAmount = BigInt(batch.tokenAmount);
-        }
-      } catch { /* not in KAS either */ }
-    }
+    const currentTokenAmount = await this.resolveCurrentTokenAmount(params.kcId);
 
     // #831: size `newTokenAmount` against the contract's growth-cost validator
     // (matches `KnowledgeAssetsLifecycle._validateTokenAmount` exactly).
