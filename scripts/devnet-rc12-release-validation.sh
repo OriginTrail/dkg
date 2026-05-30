@@ -232,17 +232,22 @@ get_long()  { local port=$1; shift; api_long "http://127.0.0.1:$port$@"; }
 
 # Section B /api/update: cap each curl to remaining section budget (not a
 # hard "must have 180s left" gate — a 5s update with 30s left is fine).
+# Response is stored in POST_UPDATE_LAST (not $(...) — subshell would drop
+# UPD_BUDGET_EXHAUSTED).
+POST_UPDATE_LAST=""
 post_update_bounded() {
   local port=$1; shift
   local remain=$(( UPD_SECTION_DEADLINE - $(date +%s) ))
   if [ "$remain" -le 5 ]; then
     UPD_BUDGET_EXHAUSTED=1
+    POST_UPDATE_LAST=""
     return 1
   fi
   local cap="${API_LONG_TIMEOUT:-180}"
   if [ "$remain" -lt "$cap" ]; then cap=$remain; fi
-  curl -s --max-time "$cap" -H "$H" -H "Content-Type: application/json" \
-    -X POST "http://127.0.0.1:${port}$@"
+  POST_UPDATE_LAST=$(curl -s --max-time "$cap" -H "$H" -H "Content-Type: application/json" \
+    -X POST "http://127.0.0.1:${port}$@") || return 1
+  return 0
 }
 
 DOWN=""
@@ -638,7 +643,8 @@ while IFS='|' read -r un uc ukc uroot; do
   newuri="${uroot}/upd${UPD_TRY}"
   quads_json="[{\"subject\":\"$newuri\",\"predicate\":\"http://www.w3.org/1999/02/22-rdf-syntax-ns#type\",\"object\":\"http://schema.org/UpdateAction\",\"graph\":\"\"},{\"subject\":\"$newuri\",\"predicate\":\"http://schema.org/name\",\"object\":\"\\\"upd-$UPD_TRY\\\"\",\"graph\":\"\"}]"
   body=$(build_update_body "$un" "$ukc" "$uc" "$quads_json") || continue
-  r=$(post_update_bounded "$uport" /api/update -d "$body") || break
+  if ! post_update_bounded "$uport" /api/update -d "$body"; then break; fi
+  r="$POST_UPDATE_LAST"
   stt=$(echo "$r" | pyf "d.get('status','')")
   { [ "$stt" = "confirmed" ] || [ "$stt" = "finalized" ]; } && UPD_OK=$((UPD_OK+1))
 done <<< "$SAMPLE"
