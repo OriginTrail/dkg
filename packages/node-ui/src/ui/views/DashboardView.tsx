@@ -6,7 +6,7 @@ import { useTabsStore } from '../stores/tabs.js';
 import { useProjectsStore, type ContextGraph } from '../stores/projects.js';
 import { useMyContextGraphs } from '../hooks/useMyContextGraphs.js';
 import { useMemoryEntities } from '../hooks/useMemoryEntities.js';
-import { useCanonicalTriples } from './project/helpers.js';
+import { useCanonicalTriples, useLayerTriples } from './project/helpers.js';
 import { useNodeEvents } from '../hooks/useNodeEvents.js';
 import {
   canonicalAgentDid,
@@ -342,24 +342,39 @@ function CgRow({
     const subjects = new Set(mem.allTriples.map((t) => t.subject)).size;
     return { wm: mem.counts.wm, swm: mem.counts.swm, vm: mem.counts.vm, total: subjects };
   }, [mem.error, mem.allTriples, mem.counts.wm, mem.counts.swm, mem.counts.vm, summaryAssets]);
-  // GH #819 — canonical triple total via `useCanonicalTriples` so
-  // the Dashboard per-CG row + aggregate agree with the CG Overview
-  // Triples stat by construction. Pre-#819 this iterated
-  // `mem.allTriples` directly: per-layer counts and total were both
-  // inflated by SWM cross-graph SPO duplicates + post-promote WM
-  // residue (the same family GH #805 closed for the Overview stat,
-  // never wired through to Dashboard). The "413 → 372 on the
-  // recipe-app CG" acceptance lands here.
+  // GH #819 — total via `useCanonicalTriples`, per-layer cells via
+  // `useLayerTriples`. Pre-#819 this iterated `mem.allTriples`
+  // directly; per-layer counts and total were both inflated by SWM
+  // cross-graph SPO duplicates + post-promote WM residue (the same
+  // family GH #805 closed for the Overview stat, never wired
+  // through to Dashboard). The "413 → 372 on the recipe-app CG"
+  // acceptance lands on the total.
+  //
+  // Per-layer cells use `useLayerTriples` (OR-rule: drops a row if
+  // subject OR resource-object has moved past t.layer — correct
+  // semantics for "facts canonically at this layer", matches the
+  // Overview LayerStats per-layer cells cell-for-cell). Total uses
+  // `useCanonicalTriples` (drops only when BOTH endpoints moved
+  // past t.layer — preserves legitimate mixed-layer edges across
+  // the aggregate).
+  //
+  // CONTRACT: `wm + swm + vm ≤ total` on Dashboard. The gap is the
+  // count of mixed-layer edges (one endpoint at t.layer, other
+  // moved past) that canonical keeps but per-layer slices drop.
+  // Restoring strict equality would require migrating LayerStats
+  // consumers off `useLayerTriples` — out of GH #819 scope. The
+  // ux-lead brief is explicit: "Don't refactor `useLayerTriples`;
+  // just stop summing its outputs at the 6 aggregate sites."
+  const wmLayer = useLayerTriples(mem, 'wm');
+  const swmLayer = useLayerTriples(mem, 'swm');
+  const vmLayer = useLayerTriples(mem, 'vm');
   const canonical = useCanonicalTriples(mem);
-  const triples: LayerCounts = useMemo(() => {
-    let wm = 0, swm = 0, vm = 0;
-    for (const t of canonical.triples) {
-      if (t.layer === 'working') wm++;
-      else if (t.layer === 'shared') swm++;
-      else if (t.layer === 'verified') vm++;
-    }
-    return { wm, swm, vm, total: canonical.total };
-  }, [canonical]);
+  const triples: LayerCounts = useMemo(() => ({
+    wm: wmLayer.length,
+    swm: swmLayer.length,
+    vm: vmLayer.length,
+    total: canonical.total,
+  }), [wmLayer, swmLayer, vmLayer, canonical]);
 
   const sig = [
     mem.loading ? 1 : 0, mem.error ? 1 : 0, mem.partial ? 1 : 0, agentsLoading ? 1 : 0, agentsError ? 1 : 0, isPublicCg ? 1 : 0,
