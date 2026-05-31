@@ -22,7 +22,7 @@
     "@openuidev/react-lang": "^0.2.3",
     "@origintrail-official/dkg-core": "workspace:*",
     "@origintrail-official/dkg-graph-viz": "workspace:*",
-    "better-sqlite3": "^11",
+    "better-sqlite3": "^12",
     "lucide-react": "^1.14.0",
     "react-dropzone": "^15.0.0",
     "react-markdown": "^10.1.0",
