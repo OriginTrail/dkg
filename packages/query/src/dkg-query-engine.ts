@@ -170,6 +170,9 @@ export function resolveViewGraphs(
 export class DKGQueryEngine implements QueryEngine {
   private readonly store: TripleStore;
   private readonly graphManager: GraphManager;
+  // Collapse the dashboard's parallel WM/SWM/VM count scans without retaining
+  // a completed allow-list that could miss newly-created assertion graphs.
+  private readonly scopedContentGraphAllowListInFlight = new Map<string, Promise<string[]>>();
 
   constructor(store: TripleStore) {
     this.store = store;
@@ -527,8 +530,46 @@ export class DKGQueryEngine implements QueryEngine {
     }
 
     const allowed = new Set(staticAllowedGraphs);
-    const registeredSubGraphs = opts.subGraphName
-      ? new Set([opts.subGraphName])
+    const scopedContentGraphs = await this.resolveScopedContentGraphAllowList(
+      contextGraphId,
+      opts.subGraphName,
+    );
+    for (const graph of scopedContentGraphs) {
+      allowed.add(graph);
+    }
+
+    return [...allowed];
+  }
+
+  private async resolveScopedContentGraphAllowList(
+    contextGraphId: string,
+    subGraphName?: string,
+  ): Promise<string[]> {
+    const key = JSON.stringify([contextGraphId, subGraphName ?? null]);
+    const cached = this.scopedContentGraphAllowListInFlight.get(key);
+    if (cached) {
+      return cached;
+    }
+
+    const promise = this.discoverScopedContentGraphAllowList(contextGraphId, subGraphName);
+    this.scopedContentGraphAllowListInFlight.set(key, promise);
+
+    try {
+      return await promise;
+    } finally {
+      if (this.scopedContentGraphAllowListInFlight.get(key) === promise) {
+        this.scopedContentGraphAllowListInFlight.delete(key);
+      }
+    }
+  }
+
+  private async discoverScopedContentGraphAllowList(
+    contextGraphId: string,
+    subGraphName?: string,
+  ): Promise<string[]> {
+    const allowed = new Set<string>();
+    const registeredSubGraphs = subGraphName
+      ? new Set([subGraphName])
       : await this.discoverRegisteredSubGraphNames(contextGraphId);
     const registeredAssertionGraphs = await this.discoverRegisteredAssertionGraphs(contextGraphId);
     const knownChildContextGraphs = await this.discoverKnownChildContextGraphUris(contextGraphId);
@@ -542,7 +583,7 @@ export class DKGQueryEngine implements QueryEngine {
           registeredSubGraphs,
           registeredAssertionGraphs,
           knownChildContextGraphs,
-          opts.subGraphName,
+          subGraphName,
         )
       ) {
         allowed.add(graph);

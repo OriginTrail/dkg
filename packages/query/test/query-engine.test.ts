@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { DKGQueryEngine } from '../src/dkg-query-engine.js';
 import { validateReadOnlySparql } from '../src/sparql-guard.js';
@@ -971,6 +971,70 @@ describe('DKGQueryEngine', () => {
     expect(graphs.has(subGraphMeta)).toBe(false);
     expect(graphs.has(subGraphPrivate)).toBe(false);
     expect(graphs.has(otherGraph)).toBe(false);
+  });
+
+  it('memoizes same-CG partition discovery across concurrent count scans', async () => {
+    const rootSharedMemoryGraph = `${GRAPH}/_shared_memory`;
+    const rootVerifiedGraph = `${GRAPH}/_verified_memory/vm-1`;
+    const subGraph = `${GRAPH}/code`;
+    const subGraphSharedMemoryGraph = `${GRAPH}/code/_shared_memory`;
+
+    await store.insert([
+      ...subGraphRegistration('code'),
+      q('urn:root:swm', SCHEMA_NAME, '"RootSWM"', rootSharedMemoryGraph),
+      q('urn:root:vm', SCHEMA_NAME, '"RootVM"', rootVerifiedGraph),
+      q('urn:code:data', SCHEMA_NAME, '"CodeData"', subGraph),
+      q('urn:code:swm', SCHEMA_NAME, '"CodeSWM"', subGraphSharedMemoryGraph),
+    ]);
+
+    const listGraphsSpy = vi.spyOn(store, 'listGraphs');
+    const sparql = `SELECT ?g ?name WHERE { GRAPH ?g { ?s <${SCHEMA_NAME}> ?name } } ORDER BY ?name`;
+
+    const results = await Promise.all([
+      engine.query(sparql, { contextGraphId: CONTEXT_GRAPH, includeContextGraphPartitions: true }),
+      engine.query(sparql, { contextGraphId: CONTEXT_GRAPH, includeContextGraphPartitions: true }),
+      engine.query(sparql, { contextGraphId: CONTEXT_GRAPH, includeContextGraphPartitions: true }),
+    ]);
+
+    expect(listGraphsSpy).toHaveBeenCalledTimes(1);
+    for (const result of results) {
+      const graphs = new Set(result.bindings.map((row) => row['g']));
+      expect(graphs.has(rootSharedMemoryGraph)).toBe(true);
+      expect(graphs.has(rootVerifiedGraph)).toBe(true);
+      expect(graphs.has(subGraph)).toBe(true);
+      expect(graphs.has(subGraphSharedMemoryGraph)).toBe(true);
+    }
+  });
+
+  it('does not reuse partition discovery after an in-flight count scan completes', async () => {
+    const codeSubGraph = `${GRAPH}/code`;
+    const docsSubGraph = `${GRAPH}/docs`;
+
+    await store.insert([
+      ...subGraphRegistration('code'),
+      q('urn:code:data', SCHEMA_NAME, '"CodeData"', codeSubGraph),
+    ]);
+
+    const listGraphsSpy = vi.spyOn(store, 'listGraphs');
+    const sparql = `SELECT ?g ?name WHERE { GRAPH ?g { ?s <${SCHEMA_NAME}> ?name } } ORDER BY ?name`;
+    const first = await engine.query(
+      sparql,
+      { contextGraphId: CONTEXT_GRAPH, includeContextGraphPartitions: true },
+    );
+    expect(first.bindings.some((row) => row['g'] === codeSubGraph)).toBe(true);
+    expect(listGraphsSpy).toHaveBeenCalledTimes(1);
+
+    await store.insert([
+      ...subGraphRegistration('docs'),
+      q('urn:docs:data', SCHEMA_NAME, '"DocsData"', docsSubGraph),
+    ]);
+
+    const second = await engine.query(
+      sparql,
+      { contextGraphId: CONTEXT_GRAPH, includeContextGraphPartitions: true },
+    );
+    expect(listGraphsSpy).toHaveBeenCalledTimes(2);
+    expect(second.bindings.some((row) => row['g'] === docsSubGraph)).toBe(true);
   });
 
   it('does not bind same-prefix child context graphs as parent content partitions', async () => {

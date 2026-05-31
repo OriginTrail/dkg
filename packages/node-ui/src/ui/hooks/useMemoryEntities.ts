@@ -71,8 +71,7 @@ export interface MemoryData {
   counts: { wm: number; swm: number; vm: number; total: number };
   loading: boolean;
   error: string | null;
-  /** True when some (but not all) layer queries failed — counts are
-   *  incomplete but not absent. `error` stays null in this case. */
+  /** True when counts are lower bounds because a layer failed or clipped at its query limit. */
   partial: boolean;
   /** Per-layer query status so UI can distinguish a VM miss from WM/SWM failures. */
   layerStatus: Record<MemoryLayerKey, MemoryLayerStatus>;
@@ -326,7 +325,16 @@ export function subGraphOf(gUri: string, cgId: string): string | undefined {
   return seg;
 }
 
-interface LayerResult { triples: Triple[]; ok: boolean }
+interface LayerResult { triples: Triple[]; ok: boolean; truncated: boolean }
+
+interface QueryLayerOptions {
+  view?: string;
+  includeSharedMemory?: boolean;
+  graphSuffix?: string;
+  includeContextGraphPartitions?: boolean;
+  /** Local-only result limit used to detect lower-bound totals; never sent to /api/query. */
+  layerLimit?: number;
+}
 
 const LOADING_LAYER_STATUS: Record<MemoryLayerKey, MemoryLayerStatus> = {
   wm: 'loading',
@@ -343,15 +351,10 @@ const ERROR_LAYER_STATUS: Record<MemoryLayerKey, MemoryLayerStatus> = {
 async function queryLayer(
   sparql: string,
   contextGraphId: string,
-  opts?: {
-    view?: string;
-    includeSharedMemory?: boolean;
-    graphSuffix?: string;
-    includeContextGraphPartitions?: boolean;
-  },
+  opts?: QueryLayerOptions,
 ): Promise<LayerResult> {
   // Never throws and never loses the failed-vs-empty distinction: it
-  // returns `{ triples, ok }`. A failed/unreachable `/api/query` yields
+  // returns `{ triples, ok, truncated }`. A failed/unreachable `/api/query` yields
   // `{ triples: [], ok: false }` so triple data still degrades to
   // "empty" for every consumer (unchanged behavior), while `ok=false`
   // lets the hook compute `partial` UNCONDITIONALLY — previously it was
@@ -363,9 +366,11 @@ async function queryLayer(
     // here coalesces with any other concurrently-mounted instance of
     // this hook (e.g. Dashboard card + ProjectView both subscribed to
     // the same CG). One underlying fetch instead of N for each layer.
-    const body: any = { sparql, contextGraphId, ...opts };
+    const { layerLimit, ...requestOpts } = opts ?? {};
+    const body: any = { sparql, contextGraphId, ...requestOpts };
     const data: any = await postQueryDeduped(body);
     const bindings = data?.result?.bindings ?? data?.results?.bindings ?? [];
+    const truncated = typeof layerLimit === 'number' && bindings.length >= layerLimit;
     const triples = bindings
       .map((row: any) => {
         const g = bv(row.g);
@@ -377,9 +382,9 @@ async function queryLayer(
         };
       })
       .filter((t: Triple) => t.subject && t.predicate && t.object);
-    return { triples, ok: true };
+    return { triples, ok: true, truncated };
   } catch {
-    return { triples: [], ok: false };
+    return { triples: [], ok: false, truncated: false };
   }
 }
 
@@ -613,9 +618,9 @@ export function useMemoryEntities(
       // single-layer 500 never blanks the others for any consumer.
       const countScope = { includeContextGraphPartitions: true };
       const [wmR, swmR, vmR] = await Promise.all([
-        queryLayer(wmSparql(contextGraphId), contextGraphId, countScope),
-        queryLayer(swmSparql(contextGraphId), contextGraphId, countScope),
-        queryLayer(vmSparql(contextGraphId), contextGraphId, countScope),
+        queryLayer(wmSparql(contextGraphId), contextGraphId, { ...countScope, layerLimit: WM_LIMIT }),
+        queryLayer(swmSparql(contextGraphId), contextGraphId, { ...countScope, layerLimit: SWM_LIMIT }),
+        queryLayer(vmSparql(contextGraphId), contextGraphId, { ...countScope, layerLimit: VM_LIMIT }),
       ]);
 
       if (version !== versionRef.current) return;
@@ -632,14 +637,18 @@ export function useMemoryEntities(
         swm: swmR.ok ? 'ok' : 'error',
         vm: vmR.ok ? 'ok' : 'error',
       });
-      const failed = [wmR, swmR, vmR].filter(r => !r.ok).length;
+      const layerResults = [wmR, swmR, vmR];
+      const failed = layerResults.filter(r => !r.ok).length;
+      const clipped = layerResults.some(r => r.truncated);
       // `partial` is computed UNCONDITIONALLY for every caller — it was
       // previously dead unless a caller opted in, making truncated
       // counts look exact in MemoryStackView/ProjectView (Codex).
+      // With same-CG partition scans, a successful layer can also hit
+      // its fixed LIMIT; those counts are lower bounds, not exact totals.
       // Whether a *total* failure also escalates to a hard `error`
       // (dashboard assetCount fallback / views' error screen) stays the
       // configurable part via `signalErrors`.
-      setPartial(failed > 0 && failed < 3);
+      setPartial((failed > 0 && failed < 3) || clipped);
       setError(signalErrors && failed === 3 ? 'Failed to load memory data' : null);
     } catch (err: any) {
       if (version === versionRef.current) {

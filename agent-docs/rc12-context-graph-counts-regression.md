@@ -79,6 +79,8 @@ The injected graph-variable constraint leaves the UI queries with no matching ro
 - [x] Run focused query tests first, then targeted Node UI count tests if the query fix is isolated.
 - [x] GitHub review follow-up: gate same-CG partition enumeration behind explicit `includeContextGraphPartitions` opt-in, and use it only from UI/subgraph count surfaces.
 - [x] GitHub review follow-up: restrict child context graph discovery to canonical candidate `/_meta` facts so arbitrary user triples cannot poison the parent count allow-list.
+- [x] GitHub review follow-up: mark widened UI count reads partial when a successful layer reaches its fixed SPARQL `LIMIT`, so clipped totals are displayed as lower bounds rather than exact.
+- [x] GitHub review follow-up: memoize same-CG partition allow-list discovery for concurrent count scans to avoid repeating full named-graph discovery for WM/SWM/VM in the same render.
 
 Implementation note: explicit `GRAPH <...>` targets still use the static route-specific allow-list. Only `GRAPH ?g` bindings receive the expanded allow-list, and that expansion is limited to same-context root protocol content partitions, registered assertion graphs, and registered subgraph partitions. Subgraph metadata and private partitions remain excluded from broad graph-variable scans.
 
@@ -112,6 +114,9 @@ GitHub review follow-up for PR #844:
 - Local follow-up review against `pr-diff.patch` returned `{"comments":[]}`.
 - Second Codex Review sweep found two valid follow-ups: typed `ApiClient.query()` did not expose/send `includeContextGraphPartitions`, and `/api/sub-graph/list` lacked route-level coverage for forwarding the flag. Both were fixed with focused CLI tests.
 - Local second follow-up review against `pr-diff.patch` returned `{"comments":[]}`.
+- Third Codex Review sweep found two valid follow-ups: widened UI fetches could clip at fixed `LIMIT`s while still looking exact, and each count query rebuilt the same partition allow-list. Both were fixed with focused UI/query tests.
+- Third local follow-up review found one valid cache-staleness issue: a TTL cache could hide a just-created graph from an immediate post-write count refresh. Fix: make the allow-list memoization in-flight-only and add coverage proving a completed scan is not reused after new graph registration.
+- Final third follow-up local review against regenerated `pr-diff.patch` returned `{"comments":[]}`.
 
 ## Final Outcome
 
