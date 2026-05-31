@@ -1296,6 +1296,99 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
     expect(tripleStat!.getAttribute('title')).toBeNull();
   });
 
+  it('Both cards surface their own scoped copy of an SPO shipped under two named subgraphs (GH #819 round 3 — Codex sweep 1 🔴 #1)', async () => {
+    // PR #847 round 3 (Codex sweep 1 🔴 #1) — `useCanonicalTriples`
+    // dedupes globally by `(canonical(s), p, canonical(o))` which
+    // is correct for the aggregate total but WRONG for per-bucket
+    // card counts: the same `(s, p, o)` legitimately shipped under
+    // two named sub-graphs (cross-membership entity referenced
+    // from both) would only survive in whichever row the canonical
+    // helper saw first, leaving the late-arrival card under-
+    // counted. Fix: `triplesBySubGraph` re-dedupes per bucket from
+    // raw `memory.allTriples`, keeping `subGraph` implicit in the
+    // bucket scope so each card keeps its own scoped copy.
+    fetchSubGraphsMock.mockResolvedValueOnce({
+      subGraphs: [
+        { name: 'alpha', entityCount: 1, tripleCount: 0, description: '' },
+        { name: 'beta', entityCount: 1, tripleCount: 0, description: '' },
+      ],
+    });
+    const entityList = [
+      // Cross-membership entity in both alpha and beta.
+      { uri: 'urn:e:cross', label: 'c', types: [], trustLevel: 'shared', layers: new Set(['shared']), subGraphs: new Set(['alpha', 'beta']), properties: new Map(), connections: [] },
+    ];
+    const triples = [
+      // Same SPO shipped under two named sub-graphs. Pre-fix
+      // canonical's global dedup collapsed both to the row that
+      // arrived first; only the first card showed the edge. Post-
+      // fix each bucket admits its own copy.
+      { subject: 'urn:e:cross', predicate: 'http://schema.org/name', object: '"C"', subGraph: 'alpha', layer: 'shared' },
+      { subject: 'urn:e:cross', predicate: 'http://schema.org/name', object: '"C"', subGraph: 'beta', layer: 'shared' },
+    ];
+    await renderWith({
+      ...memory,
+      entities: new Map(entityList.map(e => [e.uri, e])),
+      entityList,
+      allTriples: triples,
+      counts: { wm: 0, swm: 1, vm: 0, total: 1 },
+    });
+    await flush();
+
+    const cards = container.querySelectorAll('.v10-sgov-card');
+    // 2 named cards + Root card. alpha first (rank order), beta
+    // second, Root last.
+    expect(cards.length).toBeGreaterThanOrEqual(2);
+    const alphaCardEl = cards[0];
+    const betaCardEl = cards[1];
+    const alphaStats = alphaCardEl.querySelector('.v10-sgov-card-stats')?.textContent ?? '';
+    const betaStats = betaCardEl.querySelector('.v10-sgov-card-stats')?.textContent ?? '';
+    // BOTH cards show their scoped copy. Pre-fix one of them
+    // showed `0 triples`.
+    expect(alphaStats).toContain('1 triples');
+    expect(betaStats).toContain('1 triples');
+  });
+
+  it('Named card tripleCount falls back to sg.tripleCount when canonical universe is incomplete (GH #819 round 3 — Codex sweep 1 🔴 #3)', async () => {
+    // PR #847 round 3 (Codex sweep 1 🔴 #3) — round 2 gated the
+    // `sg.tripleCount` fallback on `memory.loading` alone, missing
+    // the hydrated-after-layer-failure case (loading flips false
+    // but `canonicalTriples` is still incomplete because a layer
+    // query errored). The fixture below holds `memory.loading`
+    // false but reports a layer status of 'error' AND a partial
+    // result — canonical universe is missing rows from that
+    // layer. Pre-fix the fallback didn't fire (loading was
+    // false), card rendered `0 triples` instead of the daemon
+    // lower-bound. Post-fix the widened gate
+    // (`canonicalIncomplete`) kicks in.
+    fetchSubGraphsMock.mockResolvedValueOnce({
+      // Daemon-reported lower-bound count (the fallback target).
+      subGraphs: [{ name: 'alpha', entityCount: 1, tripleCount: 42, description: '' }],
+    });
+    const entityList = [
+      { uri: 'urn:e:alpha', label: 'a', types: [], trustLevel: 'working', layers: new Set(['working']), subGraphs: new Set(['alpha']), properties: new Map(), connections: [] },
+    ];
+    await renderWith({
+      ...memory,
+      entities: new Map(entityList.map(e => [e.uri, e])),
+      entityList,
+      // Hydrated but incomplete: layer query errored.
+      allTriples: [],
+      counts: { wm: 1, swm: 0, vm: 0, total: 1 },
+      loading: false,
+      partial: true,
+      layerStatus: { wm: 'error', swm: 'ok', vm: 'ok' },
+    });
+    await flush();
+
+    const cards = container.querySelectorAll('.v10-sgov-card');
+    const alphaCardEl = cards[0];
+    const stats = alphaCardEl.querySelector('.v10-sgov-card-stats')?.textContent ?? '';
+    // Fallback fires — card shows the daemon-reported lower-bound
+    // (42) rather than the empty canonical universe (0).
+    expect(stats).toContain('42 triples');
+    expect(stats).not.toContain('0 triples');
+  });
+
   it('Root card cap honors MAX_PER_CARD even with a single dominant subject (Codex sweep 2)', async () => {
     // PR #818 sweep 2 — sweep-1 sampling shape had a defect:
     // `if (kept >= MAX_PER_CARD) break;` checked AFTER adding the

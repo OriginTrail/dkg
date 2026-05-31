@@ -3962,25 +3962,66 @@ export function SubGraphOverviewGrid({
   // those mixed-layer edges as facts.
   const { triples: canonicalTriples, total: subtitleTripleCount } = useCanonicalTriples(memory);
 
+  // GH #819 round 3 (Codex sweep 1 🔴 #3) — discriminator for the
+  // named-card `tripleCount` fallback below. The canonical universe
+  // is INCOMPLETE when any of these is true:
+  //   • `memory.loading` — initial hydration in flight
+  //   • `memory.error`   — hard error (e.g. /api/query unreachable)
+  //   • `memory.partial` — some-but-not-all layer queries failed
+  //   • any layer status pending or errored — narrowest signal
+  // Round 2 gated on `memory.loading` alone, which missed the
+  // hydrated-after-layer-failure case (loading flips false but
+  // canonical is still incomplete). The widened gate keeps the
+  // daemon-reported `sg.tripleCount` lower-bound active for every
+  // state where the canonical universe can't be trusted as the
+  // ground truth.
+  const canonicalIncomplete =
+    memory.loading
+    || memory.error !== null
+    || memory.partial
+    || Object.values(memory.layerStatus ?? {}).some(s => s !== 'ok');
+
   // Bucket every triple by its origin sub-graph so each mini-graph
   // renders just its slice. Cap per-bucket via the shared
   // `applyHeaviestSubjectsCap` helper at module scope (see its doc
   // block for the sampling / dense-pack / residual-fallback
   // rationale carried over from sweeps 1-3).
   //
-  // GH #819 — source from `canonicalTriples` (residue-filtered,
-  // SPO-deduped, mixed-layer-preserving) instead of iterating
-  // `memory.allTriples` with an inline canonical-SPO dedup. The
-  // helper has already done that work; per-subgraph buckets just
-  // narrow to `t.subGraph === sg` from the canonical universe.
+  // Bucket every triple by its origin sub-graph so each mini-graph
+  // renders just its slice. Cap per-bucket via the shared
+  // `applyHeaviestSubjectsCap` helper at module scope (see its doc
+  // block for the sampling / dense-pack / residual-fallback
+  // rationale carried over from PR #818 sweeps 1-3).
+  //
+  // GH #819 round 3 (Codex sweep 1 🔴 #1) — re-dedupe per
+  // sub-graph bucket here rather than reading from
+  // `canonicalTriples`. `useCanonicalTriples` dedupes by
+  // `(canonical(s), p, canonical(o))` GLOBALLY across the whole
+  // project (correct for aggregate-total consumers). But the same
+  // `(s, p, o)` legitimately shipped under TWO different named
+  // sub-graphs (e.g. a cross-membership entity referenced from
+  // both alpha and beta) must surface in BOTH cards — only one
+  // copy survives in `canonicalTriples`, whichever row was
+  // visited first. Reading per-bucket from a globally-deduped set
+  // under-counts the late-arrival card by exactly the shared SPO
+  // count. Iterate `memory.allTriples` here and re-dedupe with
+  // `subGraph` implicit in the bucket scope so each card keeps
+  // its own scoped copy.
+  //
   // `tripleCountBySubGraph` carries the pre-cap distinct total so
   // the card stat reads the true count (decoupled from the
   // post-cap rendered slice — same convention as Root card +
-  // sweep 2's helper-extract contract).
+  // PR #839 sweep 2's helper-extract contract).
   const { triplesBySubGraph, tripleCountBySubGraph } = useMemo(() => {
     const bySg = new Map<string, Triple[]>();
-    for (const t of canonicalTriples) {
+    const seenBySg = new Map<string, Set<string>>();
+    for (const t of memory.allTriples) {
       if (!t.subGraph) continue;
+      const key = `${canonicalEntityUri(t.subject)}|${t.predicate}|${canonicalEntityUri(t.object)}`;
+      let seen = seenBySg.get(t.subGraph);
+      if (!seen) { seen = new Set(); seenBySg.set(t.subGraph, seen); }
+      if (seen.has(key)) continue;
+      seen.add(key);
       let arr = bySg.get(t.subGraph);
       if (!arr) { arr = []; bySg.set(t.subGraph, arr); }
       arr.push({ subject: t.subject, predicate: t.predicate, object: t.object });
@@ -3991,7 +4032,7 @@ export function SubGraphOverviewGrid({
       bySg.set(sg, applyHeaviestSubjectsCap(triples));
     }
     return { triplesBySubGraph: bySg, tripleCountBySubGraph: countBySg };
-  }, [canonicalTriples]);
+  }, [memory.allTriples]);
 
   // Per-sub-graph layer counts — drives the mini pyramid on each card so
   // you can see at a glance which sub-graphs are mostly verified vs still
@@ -4110,16 +4151,20 @@ export function SubGraphOverviewGrid({
           // (daemon-reported raw count) which inflated on CGs with
           // cross-graph SPO duplicates.
           //
-          // GH #819 round 2 (Codex sweep 1 yellow finding) — fallback
-          // to the daemon-reported `sg.tripleCount` ONLY while
-          // `memory.loading` is true. Pre-round-2 the fallback also
-          // fired on hydrated-but-genuinely-empty buckets (canonical
-          // helper has no rows for the slug because the sub-graph
-          // truly has no triples), which masked legitimate zeros with
-          // the daemon's inflated count. Gating on `memory.loading`
-          // keeps the not-yet-hydrated case covered while letting
-          // hydrated-zero surface honestly.
-          tripleCount: memory.loading
+          // GH #819 round 3 (Codex sweep 1 🔴 #3) — fallback to the
+          // daemon-reported `sg.tripleCount` while the canonical
+          // universe is INCOMPLETE for any reason: loading, hard
+          // error, partial result (some layer query failed), or any
+          // per-layer status not yet 'ok'. Round 2 gated only on
+          // `memory.loading` which missed the post-hydration error
+          // case (`loading` flips false but `canonicalTriples` is
+          // still incomplete because a layer query failed). After a
+          // layer failure, a sub-graph whose triples live in the
+          // missing layer would render `0 triples` instead of
+          // falling back to the daemon's lower-bound. The widened
+          // gate keeps the fallback active for every state where
+          // the canonical universe can't be trusted as complete.
+          tripleCount: canonicalIncomplete
             ? (tripleCountBySubGraph.get(sg.name) ?? sg.tripleCount)
             : (tripleCountBySubGraph.get(sg.name) ?? 0),
           triples: filterTriplesToEntities(rawTriples, cardEntityUris),
@@ -4128,7 +4173,7 @@ export function SubGraphOverviewGrid({
         };
       })
       .sort((a, b) => a.rank - b.rank);
-  }, [subGraphs, profile, triplesBySubGraph, tripleCountBySubGraph, layerCountsBySubGraph, entityUrisBySubGraph, entityTrustByUriBySubGraph, memory.loading]);
+  }, [subGraphs, profile, triplesBySubGraph, tripleCountBySubGraph, layerCountsBySubGraph, entityUrisBySubGraph, entityTrustByUriBySubGraph, canonicalIncomplete]);
 
   // GH #813 — Root mini-card. Synthesizes a card for the
   // "entities not in any named sub-graph" bucket so the grid
