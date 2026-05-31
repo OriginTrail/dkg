@@ -1239,6 +1239,61 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
     // canonical bucket-size lock anchors the new behavior.
     expect(stats).toContain('1 entities');
     expect(stats).toContain('1 triples');
+
+    // GH #819 round 2 (ux-lead locked literal) — when the in-scope
+    // canonical count differs from what actually renders on the
+    // mini-graph, the triple-count badge gets a `title` tooltip
+    // explaining the gap. Here the alpha→beta edge is in alpha's
+    // canonical bucket (count = 1) but drops from the rendered
+    // slice via `filterTriplesToEntities` (rendered = 0). Tooltip
+    // surfaces this asymmetry.
+    const tripleStat = Array.from(alphaCardEl.querySelectorAll('.v10-sgov-card-stat'))
+      .find(el => el.textContent?.includes('triples')) as HTMLElement | undefined;
+    expect(tripleStat).toBeTruthy();
+    expect(tripleStat!.getAttribute('title')).toBe(
+      `1 triples in this subgraph's scope; 0 rendered (cross-card edges whose other endpoint isn't in this subgraph aren't drawn here).`,
+    );
+  });
+
+  it('Named card omits the stat-vs-rendered tooltip when count and rendered agree (GH #819 round 2 conditional render)', async () => {
+    // ux-lead locked the tooltip as conditional — added only when
+    // `tripleCount !== renderedTripleCount`. When equal (the
+    // common case: bucket is small, no cross-card edges, no cap),
+    // no chrome is added; the badge reads cleanly. Same
+    // visible-when-it-has-something-to-say pattern as S2's
+    // `Pending join requests` empty state.
+    fetchSubGraphsMock.mockResolvedValueOnce({
+      subGraphs: [{ name: 'alpha', entityCount: 2, tripleCount: 0, description: '' }],
+    });
+    const entityList = [
+      // Both entities in alpha's scope.
+      { uri: 'urn:e:alpha-a', label: 'aa', types: [], trustLevel: 'shared', layers: new Set(['shared']), subGraphs: new Set(['alpha']), properties: new Map(), connections: [] },
+      { uri: 'urn:e:alpha-b', label: 'ab', types: [], trustLevel: 'shared', layers: new Set(['shared']), subGraphs: new Set(['alpha']), properties: new Map(), connections: [] },
+    ];
+    const triples = [
+      // alpha-a → alpha-b edge: both endpoints in alpha's
+      // entityUris, so `filterTriplesToEntities` admits → rendered
+      // count == bucket count. No tooltip.
+      { subject: 'urn:e:alpha-a', predicate: 'p', object: 'urn:e:alpha-b', subGraph: 'alpha', layer: 'shared' },
+    ];
+    await renderWith({
+      ...memory,
+      entities: new Map(entityList.map(e => [e.uri, e])),
+      entityList,
+      allTriples: triples,
+      counts: { wm: 0, swm: 2, vm: 0, total: 2 },
+    });
+    await flush();
+
+    const cards = container.querySelectorAll('.v10-sgov-card');
+    const alphaCardEl = cards[0];
+    const tripleStat = Array.from(alphaCardEl.querySelectorAll('.v10-sgov-card-stat'))
+      .find(el => el.textContent?.includes('triples')) as HTMLElement | undefined;
+    expect(tripleStat).toBeTruthy();
+    expect(tripleStat!.textContent).toContain('1 triples');
+    // Conditional render — title attribute is absent (or empty)
+    // when stat and rendered agree.
+    expect(tripleStat!.getAttribute('title')).toBeNull();
   });
 
   it('Root card cap honors MAX_PER_CARD even with a single dominant subject (Codex sweep 2)', async () => {

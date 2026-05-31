@@ -4474,7 +4474,27 @@ export function SubGraphMiniCard({
       </div>
       <div className="v10-sgov-card-stats">
         <span className="v10-sgov-card-stat"><b>{card.entityCount}</b> entities</span>
-        <span className="v10-sgov-card-stat"><b>{card.tripleCount}</b> triples</span>
+        {/* GH #819 round 2 — conditional stat-vs-rendered tooltip
+            (ux-lead lock, option (i) from sweep 1 yellow finding).
+            When the in-scope canonical count differs from what
+            actually renders on the mini-graph (cross-card edges
+            whose other endpoint isn't in this subgraph drop via
+            `filterTriplesToEntities`, or `applyHeaviestSubjectsCap`
+            truncated a populated bucket), surface the gap via a
+            native `title` tooltip on the badge. When equal (most
+            common — no cross-card edges + bucket under the cap),
+            no tooltip is added so we don't add chrome to the
+            quiet case. Same conditional-when-it-has-something-to-
+            say pattern as S2's `Pending join requests` empty
+            state. */}
+        <span
+          className="v10-sgov-card-stat"
+          title={
+            card.tripleCount !== card.triples.length
+              ? `${card.tripleCount} triples in this subgraph's scope; ${card.triples.length} rendered (cross-card edges whose other endpoint isn't in this subgraph aren't drawn here).`
+              : undefined
+          }
+        ><b>{card.tripleCount}</b> triples</span>
       </div>
       <div className="v10-sgov-card-pyramid">
         {/* compact mode collapses the empty-counts branch to `null`
