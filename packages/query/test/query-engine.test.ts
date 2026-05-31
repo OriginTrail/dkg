@@ -7,9 +7,28 @@ const CONTEXT_GRAPH = 'agent-registry';
 const GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
 const META = `${GRAPH}/_meta`;
 const ENTITY = 'did:dkg:agent:QmImageBot';
+const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+const DKG_SUB_GRAPH = 'http://dkg.io/ontology/SubGraph';
+const DKG_ASSERTION_GRAPH = 'http://dkg.io/ontology/assertionGraph';
+const DKG_CONTEXT_GRAPH = 'https://dkg.network/ontology#ContextGraph';
+const DKG_REGISTRATION_STATUS = 'https://dkg.network/ontology#registrationStatus';
+const SCHEMA_NAME = 'http://schema.org/name';
 
 function q(s: string, p: string, o: string, g = GRAPH): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
+}
+
+function subGraphRegistration(name: string): Quad[] {
+  const subGraphUri = `${GRAPH}/${name}`;
+  return [
+    q(subGraphUri, RDF_TYPE, DKG_SUB_GRAPH, META),
+    q(subGraphUri, SCHEMA_NAME, `"${name}"`, META),
+    q(subGraphUri, 'http://dkg.io/ontology/createdBy', 'did:dkg:agent:test', META),
+  ];
+}
+
+function assertionGraphRegistration(graph: string, name: string): Quad {
+  return q(`urn:dkg:assertion:${name}`, DKG_ASSERTION_GRAPH, graph, META);
 }
 
 describe('DKGQueryEngine', () => {
@@ -836,6 +855,121 @@ describe('DKGQueryEngine', () => {
 
     expect(result.bindings.map((row) => row['name'])).toEqual(['"ImageBot"', '"Workspace Only"']);
     expect(result.bindings.map((row) => row['g']).sort()).toEqual([GRAPH, sharedMemoryGraph].sort());
+  });
+
+  it('allows scoped GRAPH variable count scans across registered same-CG content partitions', async () => {
+    const rootAssertionGraph = `${GRAPH}/assertion/0xAgent/root-draft`;
+    const rootSharedMemoryGraph = `${GRAPH}/_shared_memory`;
+    const rootVerifiedGraph = `${GRAPH}/_verified_memory/vm-1`;
+    const rootVerifiedStagingGraph = `${GRAPH}/_verified_memory/staging/vm-1`;
+    const subGraph = `${GRAPH}/code`;
+    const subGraphAssertionGraph = `${GRAPH}/code/assertion/0xAgent/code-draft`;
+    const subGraphSharedMemoryGraph = `${GRAPH}/code/_shared_memory`;
+    const subGraphVerifiedGraph = `${GRAPH}/code/_verified_memory/vm-1`;
+    const subGraphVerifiedStagingGraph = `${GRAPH}/code/_verified_memory/staging/vm-1`;
+    const subGraphMeta = `${GRAPH}/code/_meta`;
+    const subGraphPrivate = `${GRAPH}/code/_private`;
+    const otherGraph = 'did:dkg:context-graph:other-agent-registry/code/_shared_memory';
+
+    await store.insert([
+      ...subGraphRegistration('code'),
+      assertionGraphRegistration(rootAssertionGraph, 'root-draft'),
+      assertionGraphRegistration(subGraphAssertionGraph, 'code-draft'),
+      q('urn:root:wm', SCHEMA_NAME, '"RootWM"', rootAssertionGraph),
+      q('urn:root:swm', SCHEMA_NAME, '"RootSWM"', rootSharedMemoryGraph),
+      q('urn:root:vm', SCHEMA_NAME, '"RootVM"', rootVerifiedGraph),
+      q('urn:root:staging', SCHEMA_NAME, '"RootStaging"', rootVerifiedStagingGraph),
+      q('urn:code:data', SCHEMA_NAME, '"CodeData"', subGraph),
+      q('urn:code:wm', SCHEMA_NAME, '"CodeWM"', subGraphAssertionGraph),
+      q('urn:code:swm', SCHEMA_NAME, '"CodeSWM"', subGraphSharedMemoryGraph),
+      q('urn:code:vm', SCHEMA_NAME, '"CodeVM"', subGraphVerifiedGraph),
+      q('urn:code:staging', SCHEMA_NAME, '"CodeStaging"', subGraphVerifiedStagingGraph),
+      q('urn:code:meta', SCHEMA_NAME, '"CodeMeta"', subGraphMeta),
+      q('urn:code:private', SCHEMA_NAME, '"CodePrivate"', subGraphPrivate),
+      q('urn:other:swm', SCHEMA_NAME, '"OtherSWM"', otherGraph),
+    ]);
+
+    const result = await engine.query(
+      `SELECT ?g (COUNT(DISTINCT ?s) AS ?entities) (COUNT(*) AS ?triples)
+       WHERE { GRAPH ?g { ?s ?p ?o } }
+       GROUP BY ?g`,
+      { contextGraphId: CONTEXT_GRAPH },
+    );
+    const graphs = new Set(result.bindings.map((row) => row['g']));
+
+    for (const expected of [
+      GRAPH,
+      META,
+      rootAssertionGraph,
+      rootSharedMemoryGraph,
+      rootVerifiedGraph,
+      subGraph,
+      subGraphAssertionGraph,
+      subGraphSharedMemoryGraph,
+      subGraphVerifiedGraph,
+    ]) {
+      expect(graphs.has(expected)).toBe(true);
+    }
+    expect(graphs.has(rootVerifiedStagingGraph)).toBe(false);
+    expect(graphs.has(subGraphVerifiedStagingGraph)).toBe(false);
+    expect(graphs.has(subGraphMeta)).toBe(false);
+    expect(graphs.has(subGraphPrivate)).toBe(false);
+    expect(graphs.has(otherGraph)).toBe(false);
+  });
+
+  it('does not bind same-prefix child context graphs as parent content partitions', async () => {
+    const collidingSubGraph = `${GRAPH}/code`;
+    const collidingSubGraphSharedMemory = `${collidingSubGraph}/_shared_memory`;
+    const collidingSubGraphVerified = `${collidingSubGraph}/_verified_memory/vm-1`;
+    const collidingSubGraphMeta = `${collidingSubGraph}/_meta`;
+    const collidingRootSharedMemory = `${GRAPH}/_shared_memory`;
+    const collidingRootSharedMemoryMeta = `${collidingRootSharedMemory}/_meta`;
+    const collidingRootVerified = `${GRAPH}/_verified_memory/vm-1`;
+    const collidingRootVerifiedMeta = `${collidingRootVerified}/_meta`;
+
+    await store.insert([
+      ...subGraphRegistration('code'),
+      q(collidingSubGraph, RDF_TYPE, DKG_CONTEXT_GRAPH, collidingSubGraphMeta),
+      q(collidingRootSharedMemory, DKG_REGISTRATION_STATUS, '"unregistered"', collidingRootSharedMemoryMeta),
+      q(collidingRootVerified, DKG_REGISTRATION_STATUS, '"unregistered"', collidingRootVerifiedMeta),
+      q('urn:child:code', SCHEMA_NAME, '"ChildCodeRoot"', collidingSubGraph),
+      q('urn:child:code-swm', SCHEMA_NAME, '"ChildCodeSharedMemory"', collidingSubGraphSharedMemory),
+      q('urn:child:code-vm', SCHEMA_NAME, '"ChildCodeVerified"', collidingSubGraphVerified),
+      q('urn:child:swm', SCHEMA_NAME, '"ChildSharedMemoryRoot"', collidingRootSharedMemory),
+      q('urn:child:vm', SCHEMA_NAME, '"ChildVerifiedRoot"', collidingRootVerified),
+    ]);
+
+    const result = await engine.query(
+      `SELECT ?g ?name WHERE { GRAPH ?g { ?s <${SCHEMA_NAME}> ?name } } ORDER BY ?name`,
+      { contextGraphId: CONTEXT_GRAPH },
+    );
+    const names = new Set(result.bindings.map((row) => row['name']));
+
+    expect(names.has('"ChildCodeRoot"')).toBe(false);
+    expect(names.has('"ChildCodeSharedMemory"')).toBe(false);
+    expect(names.has('"ChildCodeVerified"')).toBe(false);
+    expect(names.has('"ChildSharedMemoryRoot"')).toBe(false);
+    expect(names.has('"ChildVerifiedRoot"')).toBe(false);
+    expect(result.bindings.some((row) => row['g'] === collidingSubGraph)).toBe(false);
+    expect(result.bindings.some((row) => row['g'] === collidingSubGraphSharedMemory)).toBe(false);
+    expect(result.bindings.some((row) => row['g'] === collidingSubGraphVerified)).toBe(false);
+    expect(result.bindings.some((row) => row['g'] === collidingRootSharedMemory)).toBe(false);
+    expect(result.bindings.some((row) => row['g'] === collidingRootVerified)).toBe(false);
+  });
+
+  it('does not treat unregistered same-prefix child graphs as same-CG sub-graph content', async () => {
+    const unregisteredSubGraph = `${GRAPH}/code`;
+    await store.insert([
+      q('urn:child:entity', SCHEMA_NAME, '"UnregisteredPrefixChild"', unregisteredSubGraph),
+    ]);
+
+    const result = await engine.query(
+      `SELECT ?g ?name WHERE { GRAPH ?g { ?s <${SCHEMA_NAME}> ?name } } ORDER BY ?name`,
+      { contextGraphId: CONTEXT_GRAPH },
+    );
+
+    expect(result.bindings.some((row) => row['g'] === unregisteredSubGraph)).toBe(false);
+    expect(result.bindings.some((row) => row['name'] === '"UnregisteredPrefixChild"')).toBe(false);
   });
 
   it('constrains GRAPH variables to shared memory when graphSuffix is _shared_memory', async () => {
