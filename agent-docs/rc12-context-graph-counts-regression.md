@@ -77,6 +77,8 @@ The injected graph-variable constraint leaves the UI queries with no matching ro
 - [x] Preserve explicit cross-context-graph rejection for direct `GRAPH <other-cg>` scoped queries.
 - [x] Preserve view-based routing behavior for `working-memory`, `shared-working-memory`, and `verified-memory`.
 - [x] Run focused query tests first, then targeted Node UI count tests if the query fix is isolated.
+- [x] GitHub review follow-up: gate same-CG partition enumeration behind explicit `includeContextGraphPartitions` opt-in, and use it only from UI/subgraph count surfaces.
+- [x] GitHub review follow-up: restrict child context graph discovery to canonical candidate `/_meta` facts so arbitrary user triples cannot poison the parent count allow-list.
 
 Implementation note: explicit `GRAPH <...>` targets still use the static route-specific allow-list. Only `GRAPH ?g` bindings receive the expanded allow-list, and that expansion is limited to same-context root protocol content partitions, registered assertion graphs, and registered subgraph partitions. Subgraph metadata and private partitions remain excluded from broad graph-variable scans.
 
@@ -85,7 +87,7 @@ Implementation note: explicit `GRAPH <...>` targets still use the static route-s
 - [x] `pnpm --filter @origintrail-official/dkg-query exec vitest run test/query-engine.test.ts`
 - [x] `pnpm --filter @origintrail-official/dkg-query run build`
 - [x] `pnpm --filter @origintrail-official/dkg-node-ui exec vitest run test/use-memory-entities-counts.test.ts test/context-graph-ia-overview.test.ts test/subgraph-overview-grid.test.ts test/sub-graph-bar-layer-scope.test.ts test/ui-api-pure.test.ts`
-- [ ] `pnpm --filter @origintrail-official/dkg-node-ui run build`
+- [x] `pnpm --filter @origintrail-official/dkg-node-ui run build`
 - [ ] Generate a PR diff and run the local PR reviewer using `.codex/review-prompt.md` and `.codex/review-schema.json`.
 - [ ] Re-run any tests affected by valid local review findings.
 
@@ -102,6 +104,13 @@ Completed with the local `.codex` review prompt and schema against `pr-diff.patc
 
 All valid findings were addressed with regression coverage before push.
 
+GitHub review follow-up for PR #844:
+
+- Valid finding: broad same-CG partition enumeration was available on every scoped `GRAPH ?g` query, widening legacy `{ contextGraphId }` and `{ includeSharedMemory: true }` semantics. Fix: added `includeContextGraphPartitions` and threaded it only through count callers.
+- Valid finding: child context graph discovery trusted `?ctxGraph a dkg:ContextGraph` triples in arbitrary graphs. Fix: child discovery now accepts `rdf:type dkg:ContextGraph` or `registrationStatus` only from the candidate context graph's own `/_meta` graph.
+- Added regression tests proving legacy routes stay narrow, count callers opt in explicitly, and non-canonical user data cannot hide registered parent partitions.
+- Local follow-up review against `pr-diff.patch` returned `{"comments":[]}`.
+
 ## Final Outcome
 
 Implemented on `codex/rc12-context-graph-counts` for PR into `release/rc.12`.
@@ -115,6 +124,9 @@ Verification passed:
 - `pnpm --filter @origintrail-official/dkg-query run build`
 - `pnpm --filter @origintrail-official/dkg-node-ui exec vitest run test/use-memory-entities-counts.test.ts test/context-graph-ia-overview.test.ts test/subgraph-overview-grid.test.ts test/sub-graph-bar-layer-scope.test.ts test/ui-api-pure.test.ts`
 - `pnpm --filter @origintrail-official/dkg-node-ui run build`
+- `pnpm --filter @origintrail-official/dkg-agent run build`
+- `pnpm --filter @origintrail-official/dkg run build`
+- Production UI build verified by direct Vite invocation after the local `node_modules/.bin/vite` shim was missing: `node node_modules/.pnpm/vite@6.4.2_.../node_modules/vite/bin/vite.js build`
 - `git diff --check`
 
 The fix restores same-context-graph count visibility for registered WM/SWM/VM content partitions while preserving explicit cross-CG rejection, excluding VM staging graphs, and refusing slash-ID child context graph collisions.

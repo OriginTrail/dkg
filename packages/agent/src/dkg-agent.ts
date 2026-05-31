@@ -9152,6 +9152,11 @@ export class DKGAgent {
       /** @deprecated Use includeSharedMemory */
       includeWorkspace?: boolean;
       /**
+       * Opt-in for dashboard/count queries that intentionally enumerate all
+       * registered public content partitions in a scoped `GRAPH ?g` scan.
+       */
+      includeContextGraphPartitions?: boolean;
+      /**
        * Opt-in: allow the scoped query to reference the context graph's own
        * `_private` partition (excluded from the scope guard's allow-set by
        * default). Used by the EPCIS events query, whose SPARQL always names
@@ -9377,6 +9382,7 @@ export class DKGAgent {
       excludeGraphPrefixes,
       graphSuffix: opts.graphSuffix,
       includeSharedMemory: opts.includeSharedMemory,
+      includeContextGraphPartitions: opts.includeContextGraphPartitions,
       includePrivate: opts.includePrivate,
       view: opts.view,
       agentAddress: agentAddressStr ?? (opts.view === 'working-memory' ? this.peerId : undefined),

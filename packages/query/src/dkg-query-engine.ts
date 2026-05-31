@@ -229,20 +229,11 @@ export class DKGQueryEngine implements QueryEngine {
       // `/context/<sub>/_meta` shape produced by `contextGraphMetaUri`
       // when a subGraphId is passed.
       //
-      // The widening applies to BOTH the explicit-IRI allow set
-      // (`assertExplicitGraphIrisAllowed`) AND the graph-variable
-      // allow set (`constrainGraphVariablesToAllowedSet`). The UI
-      // hooks `useSwmAttributions`, `useVerifiedMemoryAnchors` and
-      // `useVerifiedEntityIdentity` enumerate sub-graph metadata via
-      // `GRAPH ?g { … } FILTER(CONTAINS(STR(?g), "_shared_memory_meta"))`
-      // with `contextGraphId` scope only — the strict variable allow
-      // (Codex r2 on #776) was breaking those callers in addition to
-      // the bash-test paths. Authenticated CG-scoped callers already
-      // have read access to that CG, so widening the variable allow
-      // to the same set as the explicit allow does not enlarge the
-      // privacy boundary; the boundary is the `contextGraphId` scope
-      // itself. Cross-CG access is still rejected by the data-graph
-      // allow construction above.
+      // Metadata graphs are always part of the scoped explicit allow-set:
+      // UI helpers enumerate sub-graph metadata with `GRAPH ?g` under a
+      // contextGraphId, while explicit GRAPH IRIs still need the same static
+      // route checks. Broader content-partition scans are handled later and
+      // require an explicit count-query opt-in.
       const subGraphName = options?.subGraphName;
       const isSwmOnlyRoute = options?.graphSuffix === '_shared_memory';
       const metaAllowList = [
@@ -280,7 +271,9 @@ export class DKGQueryEngine implements QueryEngine {
           ]
         : [];
       const explicitAllowedGraphs = [...allowedGraphs, ...metaAllowList, ...privateAllowList];
-      const variableAllowedGraphs = collectGraphVariables(sparql).length > 0
+      const shouldExpandGraphVariables =
+        options?.includeContextGraphPartitions === true && collectGraphVariables(sparql).length > 0;
+      const variableAllowedGraphs = shouldExpandGraphVariables
         ? await this.resolveScopedGraphVariableAllowList(
             effectiveContextGraphId,
             explicitAllowedGraphs,
@@ -288,9 +281,9 @@ export class DKGQueryEngine implements QueryEngine {
           )
         : explicitAllowedGraphs;
       // Explicit GRAPH IRIs remain limited to the static route-specific
-      // allow-list. GRAPH variables are additionally constrained to known
-      // same-CG content partitions so dashboard/count queries can enumerate
-      // WM/SWM/VM data without dropping back to unscoped store access.
+      // allow-list. GRAPH variables only gain known same-CG content
+      // partitions for callers that explicitly opt into broad count scans;
+      // legacy scoped routes keep their selected memory-layer contract.
       assertExplicitGraphIrisAllowed(sparql, explicitAllowedGraphs);
       sparql = constrainGraphVariablesToAllowedSet(sparql, variableAllowedGraphs);
     }
@@ -611,9 +604,9 @@ export class DKGQueryEngine implements QueryEngine {
             ?ctxGraph <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://dkg.network/ontology#ContextGraph> .
           } UNION {
             ?ctxGraph <https://dkg.network/ontology#registrationStatus> ?status .
-            FILTER(STR(?g) = CONCAT(STR(?ctxGraph), "/_meta"))
           }
         }
+        FILTER(STR(?g) = CONCAT(STR(?ctxGraph), "/_meta"))
         FILTER(STRSTARTS(STR(?ctxGraph), "${escapeSparqlLiteral(rootPrefix)}"))
       }`,
     );

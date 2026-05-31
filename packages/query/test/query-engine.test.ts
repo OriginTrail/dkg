@@ -13,6 +13,7 @@ const DKG_ASSERTION_GRAPH = 'http://dkg.io/ontology/assertionGraph';
 const DKG_CONTEXT_GRAPH = 'https://dkg.network/ontology#ContextGraph';
 const DKG_REGISTRATION_STATUS = 'https://dkg.network/ontology#registrationStatus';
 const SCHEMA_NAME = 'http://schema.org/name';
+const COUNT_NAME = 'http://example.com/countName';
 
 function q(s: string, p: string, o: string, g = GRAPH): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
@@ -857,6 +858,61 @@ describe('DKGQueryEngine', () => {
     expect(result.bindings.map((row) => row['g']).sort()).toEqual([GRAPH, sharedMemoryGraph].sort());
   });
 
+  it('keeps legacy GRAPH-variable scans on the selected data graph without partition opt-in', async () => {
+    const rootAssertionGraph = `${GRAPH}/assertion/0xAgent/root-draft`;
+    const rootVerifiedGraph = `${GRAPH}/_verified_memory/vm-1`;
+    const subGraph = `${GRAPH}/code`;
+    const subGraphSharedMemoryGraph = `${GRAPH}/code/_shared_memory`;
+
+    await store.insert([
+      ...subGraphRegistration('code'),
+      assertionGraphRegistration(rootAssertionGraph, 'root-draft'),
+      q('urn:root:data', COUNT_NAME, '"RootData"', GRAPH),
+      q('urn:root:wm', COUNT_NAME, '"RootWM"', rootAssertionGraph),
+      q('urn:root:vm', COUNT_NAME, '"RootVM"', rootVerifiedGraph),
+      q('urn:code:data', COUNT_NAME, '"CodeData"', subGraph),
+      q('urn:code:swm', COUNT_NAME, '"CodeSWM"', subGraphSharedMemoryGraph),
+    ]);
+
+    const result = await engine.query(
+      `SELECT ?g ?name WHERE { GRAPH ?g { ?s <${COUNT_NAME}> ?name } } ORDER BY ?name`,
+      { contextGraphId: CONTEXT_GRAPH },
+    );
+
+    expect(result.bindings).toEqual([
+      { g: GRAPH, name: '"RootData"' },
+    ]);
+  });
+
+  it('keeps includeSharedMemory GRAPH-variable scans on data plus SWM without partition opt-in', async () => {
+    const rootSharedMemoryGraph = `${GRAPH}/_shared_memory`;
+    const rootAssertionGraph = `${GRAPH}/assertion/0xAgent/root-draft`;
+    const rootVerifiedGraph = `${GRAPH}/_verified_memory/vm-1`;
+    const subGraph = `${GRAPH}/code`;
+    const subGraphSharedMemoryGraph = `${GRAPH}/code/_shared_memory`;
+
+    await store.insert([
+      ...subGraphRegistration('code'),
+      assertionGraphRegistration(rootAssertionGraph, 'root-draft'),
+      q('urn:root:data', COUNT_NAME, '"RootData"', GRAPH),
+      q('urn:root:swm', COUNT_NAME, '"RootSWM"', rootSharedMemoryGraph),
+      q('urn:root:wm', COUNT_NAME, '"RootWM"', rootAssertionGraph),
+      q('urn:root:vm', COUNT_NAME, '"RootVM"', rootVerifiedGraph),
+      q('urn:code:data', COUNT_NAME, '"CodeData"', subGraph),
+      q('urn:code:swm', COUNT_NAME, '"CodeSWM"', subGraphSharedMemoryGraph),
+    ]);
+
+    const result = await engine.query(
+      `SELECT ?g ?name WHERE { GRAPH ?g { ?s <${COUNT_NAME}> ?name } } ORDER BY ?name`,
+      { contextGraphId: CONTEXT_GRAPH, includeSharedMemory: true },
+    );
+
+    expect(result.bindings).toEqual([
+      { g: GRAPH, name: '"RootData"' },
+      { g: rootSharedMemoryGraph, name: '"RootSWM"' },
+    ]);
+  });
+
   it('allows scoped GRAPH variable count scans across registered same-CG content partitions', async () => {
     const rootAssertionGraph = `${GRAPH}/assertion/0xAgent/root-draft`;
     const rootSharedMemoryGraph = `${GRAPH}/_shared_memory`;
@@ -893,7 +949,7 @@ describe('DKGQueryEngine', () => {
       `SELECT ?g (COUNT(DISTINCT ?s) AS ?entities) (COUNT(*) AS ?triples)
        WHERE { GRAPH ?g { ?s ?p ?o } }
        GROUP BY ?g`,
-      { contextGraphId: CONTEXT_GRAPH },
+      { contextGraphId: CONTEXT_GRAPH, includeContextGraphPartitions: true },
     );
     const graphs = new Set(result.bindings.map((row) => row['g']));
 
@@ -941,7 +997,7 @@ describe('DKGQueryEngine', () => {
 
     const result = await engine.query(
       `SELECT ?g ?name WHERE { GRAPH ?g { ?s <${SCHEMA_NAME}> ?name } } ORDER BY ?name`,
-      { contextGraphId: CONTEXT_GRAPH },
+      { contextGraphId: CONTEXT_GRAPH, includeContextGraphPartitions: true },
     );
     const names = new Set(result.bindings.map((row) => row['name']));
 
@@ -957,6 +1013,27 @@ describe('DKGQueryEngine', () => {
     expect(result.bindings.some((row) => row['g'] === collidingRootVerified)).toBe(false);
   });
 
+  it('does not let non-canonical child-CG type triples hide registered parent partitions', async () => {
+    const subGraph = `${GRAPH}/code`;
+
+    await store.insert([
+      ...subGraphRegistration('code'),
+      // User data can mention `dkg:ContextGraph`; only the candidate's own
+      // `/_meta` graph may prove a child context graph during count scans.
+      q(subGraph, RDF_TYPE, DKG_CONTEXT_GRAPH, GRAPH),
+      q('urn:code:data', COUNT_NAME, '"ParentCode"', subGraph),
+    ]);
+
+    const result = await engine.query(
+      `SELECT ?g ?name WHERE { GRAPH ?g { ?s <${COUNT_NAME}> ?name } } ORDER BY ?name`,
+      { contextGraphId: CONTEXT_GRAPH, includeContextGraphPartitions: true },
+    );
+
+    expect(result.bindings).toEqual([
+      { g: subGraph, name: '"ParentCode"' },
+    ]);
+  });
+
   it('does not treat unregistered same-prefix child graphs as same-CG sub-graph content', async () => {
     const unregisteredSubGraph = `${GRAPH}/code`;
     await store.insert([
@@ -965,7 +1042,7 @@ describe('DKGQueryEngine', () => {
 
     const result = await engine.query(
       `SELECT ?g ?name WHERE { GRAPH ?g { ?s <${SCHEMA_NAME}> ?name } } ORDER BY ?name`,
-      { contextGraphId: CONTEXT_GRAPH },
+      { contextGraphId: CONTEXT_GRAPH, includeContextGraphPartitions: true },
     );
 
     expect(result.bindings.some((row) => row['g'] === unregisteredSubGraph)).toBe(false);

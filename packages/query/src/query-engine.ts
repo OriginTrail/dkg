@@ -17,6 +17,14 @@ export interface QueryOptions {
   /** @deprecated Use includeSharedMemory */
   includeWorkspace?: boolean;
   /**
+   * Opt-in for aggregate/count callers that intentionally need scoped
+   * `GRAPH ?g` queries to enumerate all registered public content partitions
+   * in the same context graph (root data, registered assertion graphs, SWM,
+   * VM, and registered sub-graph content). Legacy scoped routes stay limited
+   * to their selected graph set unless this is true.
+   */
+  includeContextGraphPartitions?: boolean;
+  /**
    * Opt-in: allow the scoped query to explicitly reference the context
    * graph's own `_private` partition (`<cg>/_private`, or the sub-graph
    * private graph when `subGraphName` is set). The scope guard excludes

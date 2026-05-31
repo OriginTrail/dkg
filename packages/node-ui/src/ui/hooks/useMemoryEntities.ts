@@ -343,7 +343,12 @@ const ERROR_LAYER_STATUS: Record<MemoryLayerKey, MemoryLayerStatus> = {
 async function queryLayer(
   sparql: string,
   contextGraphId: string,
-  opts?: { view?: string; includeSharedMemory?: boolean; graphSuffix?: string },
+  opts?: {
+    view?: string;
+    includeSharedMemory?: boolean;
+    graphSuffix?: string;
+    includeContextGraphPartitions?: boolean;
+  },
 ): Promise<LayerResult> {
   // Never throws and never loses the failed-vs-empty distinction: it
   // returns `{ triples, ok }`. A failed/unreachable `/api/query` yields
@@ -606,10 +611,11 @@ export function useMemoryEntities(
       // queryLayer never throws — it returns { triples, ok }. We keep
       // whatever layers succeeded (failed layers contribute []), so a
       // single-layer 500 never blanks the others for any consumer.
+      const countScope = { includeContextGraphPartitions: true };
       const [wmR, swmR, vmR] = await Promise.all([
-        queryLayer(wmSparql(contextGraphId), contextGraphId),
-        queryLayer(swmSparql(contextGraphId), contextGraphId),
-        queryLayer(vmSparql(contextGraphId), contextGraphId),
+        queryLayer(wmSparql(contextGraphId), contextGraphId, countScope),
+        queryLayer(swmSparql(contextGraphId), contextGraphId, countScope),
+        queryLayer(vmSparql(contextGraphId), contextGraphId, countScope),
       ]);
 
       if (version !== versionRef.current) return;
