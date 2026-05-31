@@ -461,6 +461,92 @@ export function admitTripleForScope(
     : opts.scopedUris.has(t.object);
 }
 
+/**
+ * GH #819 — canonical triple total across the whole project.
+ *
+ * Returns a single, deduplicated, residue-filtered set of triples that
+ * every "aggregate triple count" surface in the UI should anchor on
+ * (Overview Triples stat, SubGraphOverviewGrid subtitle, Root +
+ * Named mini-card `tripleCount`, Dashboard per-CG and aggregate
+ * totals). The pattern is the same shared-helper-with-different-
+ * consumption shape S3 [#2/#7] established for `useLayerTriples` —
+ * one source of truth, different read shapes per consumer.
+ *
+ * Single iteration over `memory.allTriples` applying three rules in
+ * order:
+ *
+ *   1. Subject-side residue. If the subject's canonical
+ *      `trustLevel` doesn't match the row's `layer`, the row may be
+ *      residue (post-promote the daemon leaves the WM
+ *      `/assertion/<addr>/<name>` graphs on disk; the WM rows keep
+ *      coming back from `wmSparql` even after the entity has been
+ *      promoted to SWM/VM). Carry the subject-mismatch flag forward
+ *      and combine with the object check below.
+ *
+ *   2. Object-side residue — only when the object's canonical
+ *      `trustLevel` ALSO disagrees with the row's `layer`. This is
+ *      the key distinction from `useLayerTriples`:454-458 — the
+ *      per-layer rule drops a mixed-layer edge whose object has
+ *      moved past the requested layer, because per-layer tabs are
+ *      tallying "facts canonically at this layer". The canonical
+ *      total is summing across layers, so a mixed-layer edge (one
+ *      endpoint still at `t.layer`) is a legitimate fact and stays.
+ *      Only drop when BOTH endpoints have moved past — that's
+ *      unambiguous residue.
+ *
+ *   3. Global canonical-SPO dedup. Same `(s,p,o)` in multiple named
+ *      graphs (e.g. SWM cross-graph shipping — root SWM + per-sub-
+ *      graph SWM) admits exactly once. Wrapped + bare variants of
+ *      the same SPO collapse via `canonicalEntityUri()` on both
+ *      subject and object.
+ *
+ * Orphan-entity pass-through: a triple whose subject isn't in the
+ * entity map (literal orphans, class IRIs that only ever appear as
+ * objects) admits unfiltered. Without the `subjectEntity &&` guard
+ * rdf:type / class-IRI rows would silently drop and the canonical
+ * total would miss them. Mirror of the same guard
+ * `useLayerTriples:487-488` carries.
+ *
+ * Out of scope: this helper does NOT apply
+ * `applyHeaviestSubjectsCap` (render-only; mini-card consumers
+ * apply it downstream) and does NOT take an `entityScope` arg
+ * (consumer-side responsibility — see `admitTripleForScope` for
+ * the scope primitive). `total` is a convenience for count-only
+ * consumers that don't need the underlying array.
+ */
+export function useCanonicalTriples(
+  memory: ReturnType<typeof useMemoryEntities>,
+): { triples: Triple[]; total: number } {
+  return useMemo(() => {
+    const seen = new Set<string>();
+    const out: Triple[] = [];
+    for (const t of memory.allTriples) {
+      const subjectEntity = memory.entities.get(canonicalEntityUri(t.subject));
+      const subjectMoved =
+        subjectEntity !== undefined && subjectEntity.trustLevel !== t.layer;
+      // Object-side residue check only fires for resource-shaped
+      // objects (literals can't be entities and so can't be
+      // "promoted"). When both endpoints have moved past the row's
+      // layer the triple is unambiguous residue and drops.
+      let dropAsResidue = false;
+      if (subjectMoved && isResourceObject(t.object)) {
+        const objectEntity = memory.entities.get(canonicalEntityUri(t.object));
+        if (objectEntity && objectEntity.trustLevel !== t.layer) {
+          dropAsResidue = true;
+        }
+      }
+      if (dropAsResidue) continue;
+      // Canonical-SPO dedup keyed on the canonical forms so wrapped
+      // (`<urn:...>`) and bare variants of the same triple collapse.
+      const key = `${canonicalEntityUri(t.subject)}|${t.predicate}|${canonicalEntityUri(t.object)}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(t);
+    }
+    return { triples: out, total: out.length };
+  }, [memory.allTriples, memory.entities]);
+}
+
 export function useLayerTriples(memory: ReturnType<typeof useMemoryEntities>, layer: 'wm' | 'swm' | 'vm'): Triple[] {
   const targetLayer = LAYER_CONFIG[layer].trustLevel;
   return useMemo(() => {
