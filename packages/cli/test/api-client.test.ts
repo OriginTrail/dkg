@@ -152,14 +152,17 @@ describe('ApiClient', () => {
       expect(body.quads).toHaveLength(1);
     });
 
-    it('query() sends sparql and optional context graph id', async () => {
+    it('query() sends sparql, optional context graph id, and partition opt-in', async () => {
       const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body: { result: [] } });
       globalThis.fetch = fetch;
-      await client.query('SELECT * { ?s ?p ?o }', 'my-contextGraph');
+      await client.query('SELECT * { ?s ?p ?o }', 'my-contextGraph', {
+        includeContextGraphPartitions: true,
+      });
 
       const body = JSON.parse(calls[0].opts.body as string);
       expect(body.sparql).toBe('SELECT * { ?s ?p ?o }');
       expect(body.contextGraphId).toBe('my-contextGraph');
+      expect(body.includeContextGraphPartitions).toBe(true);
     });
 
     // LU-2 (SPEC_CG_MEMORY_MODEL): the legacy participantIdentityIds /

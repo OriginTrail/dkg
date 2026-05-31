@@ -110,6 +110,8 @@ GitHub review follow-up for PR #844:
 - Valid finding: child context graph discovery trusted `?ctxGraph a dkg:ContextGraph` triples in arbitrary graphs. Fix: child discovery now accepts `rdf:type dkg:ContextGraph` or `registrationStatus` only from the candidate context graph's own `/_meta` graph.
 - Added regression tests proving legacy routes stay narrow, count callers opt in explicitly, and non-canonical user data cannot hide registered parent partitions.
 - Local follow-up review against `pr-diff.patch` returned `{"comments":[]}`.
+- Second Codex Review sweep found two valid follow-ups: typed `ApiClient.query()` did not expose/send `includeContextGraphPartitions`, and `/api/sub-graph/list` lacked route-level coverage for forwarding the flag. Both were fixed with focused CLI tests.
+- Local second follow-up review against `pr-diff.patch` returned `{"comments":[]}`.
 
 ## Final Outcome
 
@@ -126,6 +128,7 @@ Verification passed:
 - `pnpm --filter @origintrail-official/dkg-node-ui run build`
 - `pnpm --filter @origintrail-official/dkg-agent run build`
 - `pnpm --filter @origintrail-official/dkg run build`
+- `node node_modules/.pnpm/vitest@4.0.18_.../node_modules/vitest/vitest.mjs run --config vitest.unit.config.ts test/api-client.test.ts test/context-graph-write-path-validation.test.ts`
 - Production UI build verified by direct Vite invocation after the local `node_modules/.bin/vite` shim was missing: `node node_modules/.pnpm/vite@6.4.2_.../node_modules/vite/bin/vite.js build`
 - `git diff --check`
 

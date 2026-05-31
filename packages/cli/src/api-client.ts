@@ -800,9 +800,9 @@ export class ApiClient {
   /**
    * Run SPARQL via the daemon. `opts` covers the full /api/query surface —
    * memory-layer routing (`view`, `graphSuffix`, `verifiedGraph`,
-   * `subGraphName`, `includeSharedMemory`, `agentAddress`,
-   * `assertionName`), and P-13's `minTrust` (only meaningful on
-   * `view: "verified-memory"`; ignored elsewhere). `contextGraphId` stays
+   * `subGraphName`, `includeSharedMemory`, `includeContextGraphPartitions`,
+   * `agentAddress`, `assertionName`), and P-13's `minTrust` (only meaningful
+   * on `view: "verified-memory"`; ignored elsewhere). `contextGraphId` stays
    * in the 2nd positional slot for backwards compatibility.
    */
   async query(
@@ -811,6 +811,7 @@ export class ApiClient {
     opts?: {
       graphSuffix?: string;
       includeSharedMemory?: boolean;
+      includeContextGraphPartitions?: boolean;
       view?: 'working-memory' | 'shared-working-memory' | 'verified-memory';
       agentAddress?: string;
       assertionName?: string;
@@ -832,6 +833,7 @@ export class ApiClient {
       contextGraphId,
       graphSuffix: opts?.graphSuffix,
       includeSharedMemory: opts?.includeSharedMemory,
+      includeContextGraphPartitions: opts?.includeContextGraphPartitions,
       view: opts?.view,
       agentAddress: opts?.agentAddress,
       assertionName: opts?.assertionName,
