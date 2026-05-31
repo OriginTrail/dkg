@@ -486,7 +486,10 @@ export function admitTripleForScope(
  *
  *   2. Object-side residue — only when the object's canonical
  *      `trustLevel` ALSO disagrees with the row's `layer`. This is
- *      the key distinction from `useLayerTriples`:454-458 — the
+ *      the key distinction from `useLayerTriples` (see its
+ *      object-side residue branch — same canonicalised
+ *      `objectEntity.trustLevel !== targetLayer` check, but ANDed
+ *      with the subject mismatch here rather than ORed). The
  *      per-layer rule drops a mixed-layer edge whose object has
  *      moved past the requested layer, because per-layer tabs are
  *      tallying "facts canonically at this layer". The canonical
@@ -505,8 +508,10 @@ export function admitTripleForScope(
  * entity map (literal orphans, class IRIs that only ever appear as
  * objects) admits unfiltered. Without the `subjectEntity &&` guard
  * rdf:type / class-IRI rows would silently drop and the canonical
- * total would miss them. Mirror of the same guard
- * `useLayerTriples:487-488` carries.
+ * total would miss them. Mirror of the same `subjectEntity &&`
+ * guard `useLayerTriples` carries on its subject-side residue
+ * check (see the matching `if (subjectEntity && ...)` pattern
+ * there).
  *
  * Out of scope: this helper does NOT apply
  * `applyHeaviestSubjectsCap` (render-only; mini-card consumers

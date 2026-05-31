@@ -4108,18 +4108,27 @@ export function SubGraphOverviewGrid({
           // distinct total when summed without double-counting
           // cross-graph duplicates. Pre-#819 this read `sg.tripleCount`
           // (daemon-reported raw count) which inflated on CGs with
-          // cross-graph SPO duplicates. Falls back to `sg.tripleCount`
-          // ONLY when the canonical helper has no rows for this slug
-          // (loading state / sub-graph hydrated but no triples yet),
-          // matching the entityCount fallback pattern above.
-          tripleCount: tripleCountBySubGraph.get(sg.name) ?? sg.tripleCount,
+          // cross-graph SPO duplicates.
+          //
+          // GH #819 round 2 (Codex sweep 1 yellow finding) — fallback
+          // to the daemon-reported `sg.tripleCount` ONLY while
+          // `memory.loading` is true. Pre-round-2 the fallback also
+          // fired on hydrated-but-genuinely-empty buckets (canonical
+          // helper has no rows for the slug because the sub-graph
+          // truly has no triples), which masked legitimate zeros with
+          // the daemon's inflated count. Gating on `memory.loading`
+          // keeps the not-yet-hydrated case covered while letting
+          // hydrated-zero surface honestly.
+          tripleCount: memory.loading
+            ? (tripleCountBySubGraph.get(sg.name) ?? sg.tripleCount)
+            : (tripleCountBySubGraph.get(sg.name) ?? 0),
           triples: filterTriplesToEntities(rawTriples, cardEntityUris),
           layerCounts: layerCountsBySubGraph.get(sg.name) ?? { wm: 0, swm: 0, vm: 0 },
           entityTrustByUri: cardEntityTrust,
         };
       })
       .sort((a, b) => a.rank - b.rank);
-  }, [subGraphs, profile, triplesBySubGraph, tripleCountBySubGraph, layerCountsBySubGraph, entityUrisBySubGraph, entityTrustByUriBySubGraph]);
+  }, [subGraphs, profile, triplesBySubGraph, tripleCountBySubGraph, layerCountsBySubGraph, entityUrisBySubGraph, entityTrustByUriBySubGraph, memory.loading]);
 
   // GH #813 — Root mini-card. Synthesizes a card for the
   // "entities not in any named sub-graph" bucket so the grid
