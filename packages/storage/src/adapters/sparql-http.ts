@@ -1,9 +1,13 @@
 /**
  * SparqlHttpStore — TripleStore adapter for any SPARQL 1.1 Protocol endpoint.
  *
- * Uses standard W3C SPARQL 1.1 Protocol:
- * - Query: POST to queryEndpoint (application/x-www-form-urlencoded, query=)
- * - Update: POST to updateEndpoint (application/x-www-form-urlencoded, update=)
+ * Uses standard W3C SPARQL 1.1 Protocol "direct POST":
+ * - Query: POST to queryEndpoint (Content-Type: application/sparql-query, raw body)
+ * - Update: POST to updateEndpoint (Content-Type: application/sparql-update, raw body)
+ *
+ * Direct POST (not URL-encoded form data) avoids server-side form-size caps
+ * such as Jetty's maxFormContentSize (~200 KB on stock Blazegraph), which
+ * otherwise rejects large queries/updates with HTTP 400.
  *
  * Works with Oxigraph server, Apache Jena Fuseki, GraphDB, Blazegraph,
  * Amazon Neptune, Stardog, and any SPARQL 1.1–compliant server.
@@ -51,29 +55,40 @@ export class SparqlHttpStore implements TripleStore {
     this.queryEndpoint = options.queryEndpoint.replace(/\/$/, '');
     this.updateEndpoint = (options.updateEndpoint ?? options.queryEndpoint).replace(/\/$/, '');
     this.timeout = options.timeout ?? 30_000;
-    this.headers = {
-      'Content-Type': 'application/x-www-form-urlencoded',
-    };
+    // Content-Type is set per-request in postQuery/postUpdate (direct POST:
+    // application/sparql-query | application/sparql-update). Only shared
+    // headers (e.g. Authorization) belong here.
+    this.headers = {};
     if (options.auth) {
       this.headers['Authorization'] = options.auth;
     }
   }
 
   private async postQuery(sparql: string, accept: string): Promise<Response> {
+    // Direct POST (W3C SPARQL 1.1 Protocol §2.1.3): the query is the raw
+    // request body with `application/sparql-query`, not URL-encoded form
+    // data. Form-encoded bodies (`query=...`) are parsed by the server's
+    // form handler, which on Jetty-backed stores (Blazegraph) caps at
+    // `maxFormContentSize` (~200 KB) and rejects larger payloads with
+    // HTTP 400 "Unable to parse form content". The direct-POST body is not
+    // form parsed, so large queries are not capped.
     const res = await fetch(this.queryEndpoint, {
       method: 'POST',
-      headers: { ...this.headers, Accept: accept },
-      body: `query=${encodeURIComponent(sparql)}`,
+      headers: { ...this.headers, 'Content-Type': 'application/sparql-query', Accept: accept },
+      body: sparql,
       signal: AbortSignal.timeout(this.timeout),
     });
     return res;
   }
 
   private async postUpdate(update: string): Promise<Response> {
+    // Direct POST (W3C SPARQL 1.1 Protocol §2.2.2): the update is the raw
+    // request body with `application/sparql-update`, not URL-encoded form
+    // data. See postQuery for why form encoding breaks large payloads.
     const res = await fetch(this.updateEndpoint, {
       method: 'POST',
-      headers: this.headers,
-      body: `update=${encodeURIComponent(update)}`,
+      headers: { ...this.headers, 'Content-Type': 'application/sparql-update' },
+      body: update,
       signal: AbortSignal.timeout(this.timeout),
     });
     return res;

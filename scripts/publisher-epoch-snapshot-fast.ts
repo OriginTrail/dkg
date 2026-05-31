@@ -46,7 +46,7 @@ function buildChainConfig(
   blockchainId: string,
   rpcEnvKey: string,
   fallbackRpc: string,
-  kcs: string,
+  kas: string,
   deployBlock: number,
   epochStorage: string,
   chronos: string,
@@ -55,7 +55,7 @@ function buildChainConfig(
   const rpcUrls = envVal
     ? envVal.split(',').map((u) => u.trim()).filter(Boolean)
     : [fallbackRpc];
-  return { blockchainId, rpcUrls, rpcEnvKey, KnowledgeCollectionStorage: kcs, KCSDeployBlock: deployBlock, EpochStorage: epochStorage, Chronos: chronos };
+  return { blockchainId, rpcUrls, rpcEnvKey, KnowledgeCollectionStorage: kas, KCSDeployBlock: deployBlock, EpochStorage: epochStorage, Chronos: chronos };
 }
 
 const CHAINS: Record<string, ChainConfig> = {
@@ -81,7 +81,7 @@ const CHAINS: Record<string, ChainConfig> = {
 const CHRONOS_ABI = ['function getCurrentEpoch() view returns (uint256)'];
 
 const KC_STORAGE_IFACE = new Interface([
-  'function getLatestKnowledgeCollectionId() view returns (uint256)',
+  'function getLatestKnowledgeAssetId() view returns (uint256)',
   'function getEndEpoch(uint256 id) view returns (uint40)',
   'function getStartEpoch(uint256 id) view returns (uint40)',
   'function getTokenAmount(uint256 id) view returns (uint96)',
@@ -222,8 +222,8 @@ async function snapshotChain(
   const blockDate = new Date((block?.timestamp ?? 0) * 1000).toISOString();
   const currentEpoch = Number(await chronos.getCurrentEpoch({ blockTag: blockNumber }));
 
-  const kcStorage = new Contract(kcsAddr, KC_STORAGE_IFACE, provider);
-  const lastKCId = Number(await kcStorage.getLatestKnowledgeCollectionId({ blockTag: blockNumber }));
+  const kaStorage = new Contract(kcsAddr, KC_STORAGE_IFACE, provider);
+  const lastKCId = Number(await kaStorage.getLatestKnowledgeAssetId({ blockTag: blockNumber }));
 
   console.log(`  Block:           ${blockNumber} (${blockDate})`);
   console.log(`  Current epoch:   ${currentEpoch}`);

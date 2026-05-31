@@ -91,7 +91,7 @@ export class MockBenchmarkClient implements BenchmarkClient {
   ) {
     const roots = selection === 'all' ? ['all'] : selection.rootEntities;
     this.publishCalls.push({ roots, clearAfter });
-    return { kcId: `kc-${this.publishCalls.length}`, kas: roots.map((rootEntity) => ({ tokenId: '1', rootEntity })) };
+    return { kaId: `kc-${this.publishCalls.length}`, kas: roots.map((rootEntity) => ({ tokenId: '1', rootEntity })) };
   }
 
   async publisherEnqueue(request: { roots: string[] }) {

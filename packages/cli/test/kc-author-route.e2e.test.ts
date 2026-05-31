@@ -5,7 +5,7 @@
 //
 //   1. A real ethers wallet signs an EIP-712 author attestation built
 //      via `buildAuthorAttestationTypedData` from `@origintrail-official/dkg-core`.
-//   2. `MockChainAdapter.createKnowledgeAssetsV10` ingests the signed
+//   2. `MockChainAdapter.createKnowledgeAssets` ingests the signed
 //      params and persists `params.author.address` on its internal
 //      collection record (mirroring what `KnowledgeCollectionStorage`
 //      now does on-chain in the `MerkleRoot.author` field).
@@ -14,13 +14,13 @@
 //      the real `DKGAgent` exposes.
 //   4. The actual `handleAssertionRoutes` route handler is invoked
 //      with a stub `RequestContext`, and we assert the wire-format
-//      response matches the route contract: `{ kcId, author, attested }`.
+//      response matches the route contract: `{ kaId, author, attested }`.
 //
 // The route's three error modes are also covered:
 //
 //   - 503 when the chain adapter does not implement the view (e.g. a
 //     pre-V10.1 adapter copy or `NoChainAdapter`).
-//   - 404 when the kcId is unknown to the chain.
+//   - 404 when the kaId is unknown to the chain.
 //   - `attested: false` when the chain returned `address(0)` (legacy
 //     write paths that pre-date author attestation, including the
 //     current V10.1 update path).
@@ -75,8 +75,8 @@ function createAgentShim(opts: AgentShimOpts) {
   }
   const chain = opts.chain!;
   return {
-    getKnowledgeCollectionAuthor: async (kcId: bigint) => {
-      return chain.getLatestMerkleRootAuthor(kcId);
+    getKnowledgeCollectionAuthor: async (kaId: bigint) => {
+      return chain.getLatestMerkleRootAuthor(kaId);
     },
   } as unknown as RequestContext['agent'];
 }
@@ -175,7 +175,7 @@ async function publishWithSignedAttestation(args: {
     },
     ackSignatures: [],
   };
-  const result = await args.chain.createKnowledgeAssetsV10(publishParams);
+  const result = await args.chain.createKnowledgeAssets(publishParams);
   expect(result.authorAddress).toBeDefined();
   expect(result.authorAddress!.toLowerCase()).toBe(
     args.signer.address.toLowerCase(),
@@ -192,7 +192,7 @@ describe('GET /api/kc/:id/author E2E round-trip', () => {
     const merkleRoot = ethers.getBytes(
       ethers.keccak256(ethers.toUtf8Bytes('round-trip-test')),
     );
-    const kcId = await publishWithSignedAttestation({
+    const kaId = await publishWithSignedAttestation({
       chain,
       signer,
       contextGraphId: 42n,
@@ -200,14 +200,14 @@ describe('GET /api/kc/:id/author E2E round-trip', () => {
     });
 
     const ctx = createContext({
-      kcIdPath: kcId.toString(),
+      kcIdPath: kaId.toString(),
       agent: createAgentShim({ withChain: true, chain }),
     });
     await handleAssertionRoutes(ctx);
 
     expect(ctx.res.statusCode).toBe(200);
     expect(responseBody(ctx)).toEqual({
-      kcId: kcId.toString(),
+      kaId: kaId.toString(),
       author: signer.address,
       attested: true,
     });
@@ -215,33 +215,33 @@ describe('GET /api/kc/:id/author E2E round-trip', () => {
 
   it('returns attested:false for un-attested writes (mock __registerKC bridge)', async () => {
     const chain = new MockChainAdapter();
-    const kcId = 99n;
+    const kaId = 99n;
     chain.__registerKC({
-      kcId,
+      kaId,
       contextGraphId: 7n,
       merkleRootHex:
         '0x' + '00'.repeat(32),
       chunks: [{ chunkId: 0n, chunk: 'fixture-chunk' }],
     });
 
-    const author = await chain.getLatestMerkleRootAuthor(kcId);
+    const author = await chain.getLatestMerkleRootAuthor(kaId);
     expect(author).toBe(ZERO);
 
     const ctx = createContext({
-      kcIdPath: kcId.toString(),
+      kcIdPath: kaId.toString(),
       agent: createAgentShim({ withChain: true, chain }),
     });
     await handleAssertionRoutes(ctx);
 
     expect(ctx.res.statusCode).toBe(200);
     expect(responseBody(ctx)).toEqual({
-      kcId: kcId.toString(),
+      kaId: kaId.toString(),
       author: null,
       attested: false,
     });
   });
 
-  it('returns 404 when kcId is unknown to the chain', async () => {
+  it('returns 404 when kaId is unknown to the chain', async () => {
     const chain = new MockChainAdapter();
     const ctx = createContext({
       kcIdPath: '999999',
@@ -250,7 +250,7 @@ describe('GET /api/kc/:id/author E2E round-trip', () => {
     await handleAssertionRoutes(ctx);
     expect(ctx.res.statusCode).toBe(404);
     expect(responseBody(ctx)).toMatchObject({
-      error: expect.stringContaining('Unknown kcId'),
+      error: expect.stringContaining('Unknown kaId'),
     });
   });
 
@@ -266,7 +266,7 @@ describe('GET /api/kc/:id/author E2E round-trip', () => {
     });
   });
 
-  it('returns 400 on non-numeric kcId', async () => {
+  it('returns 400 on non-numeric kaId', async () => {
     const chain = new MockChainAdapter();
     const ctx = createContext({
       kcIdPath: 'not-a-number',
@@ -275,7 +275,7 @@ describe('GET /api/kc/:id/author E2E round-trip', () => {
     await handleAssertionRoutes(ctx);
     expect(ctx.res.statusCode).toBe(400);
     expect(responseBody(ctx)).toMatchObject({
-      error: expect.stringContaining('Invalid kcId'),
+      error: expect.stringContaining('Invalid kaId'),
     });
   });
 });

@@ -15,8 +15,8 @@
         "Chronos": {
             "epochLength": "2592000"
         },
-        "KnowledgeCollectionStorage": {
-            "knowledgeCollectionSize": "1000000",
+        "DKGKnowledgeAssets": {
+            "knowledgeAssetBatchSize": "1000000",
             "uriBase": "did:dkg"
         },
         "RandomSamplingStorage": {
@@ -49,8 +49,8 @@
         "Chronos": {
             "epochLength": "3600"
         },
-        "KnowledgeCollectionStorage": {
-            "knowledgeCollectionSize": "1000000",
+        "DKGKnowledgeAssets": {
+            "knowledgeAssetBatchSize": "1000000",
             "uriBase": "did:dkg"
         },
         "RandomSamplingStorage": {
@@ -84,8 +84,8 @@
             "startTime": "1736812800",
             "epochLength": "86400"
         },
-        "KnowledgeCollectionStorage": {
-            "knowledgeCollectionSize": "1000000",
+        "DKGKnowledgeAssets": {
+            "knowledgeAssetBatchSize": "1000000",
             "uriBase": "did:dkg"
         },
         "KnowledgeAssetsStorage": {
@@ -133,8 +133,8 @@
             "startTime": "1736812800",
             "epochLength": "2592000"
         },
-        "KnowledgeCollectionStorage": {
-            "knowledgeCollectionSize": "1000000",
+        "DKGKnowledgeAssets": {
+            "knowledgeAssetBatchSize": "1000000",
             "uriBase": "did:dkg"
         },
         "RandomSamplingStorage": {

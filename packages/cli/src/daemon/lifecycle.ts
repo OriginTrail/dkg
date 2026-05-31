@@ -1917,10 +1917,10 @@ export async function runDaemonInner(
   // Track publishes via KC_PUBLISHED event (covers GossipSub-received publishes)
   agent.eventBus.on(DKGEvent.KC_PUBLISHED, (data: any) => {
     const ctx = createOperationContext("publish");
-    const kcId = data.kcId != null ? String(data.kcId) : undefined;
+    const kaId = data.kaId != null ? String(data.kaId) : undefined;
     tracker.start(ctx, {
       contextGraphId: data.contextGraphId,
-      details: { kcId, source: "gossipsub" },
+      details: { kaId, source: "gossipsub" },
     });
     tracker.complete(ctx, { tripleCount: data.tripleCount });
     try {

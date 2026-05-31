@@ -64,10 +64,10 @@ const CCL_FACT_NS = 'https://example.org/ccl-fact#';
 async function _wrapAgentPublisherForSeal(agent: DKGAgent): Promise<void> {
   const chain = (agent as unknown as { chain: {
     getEvmChainId?: () => Promise<bigint>;
-    getKnowledgeAssetsV10Address?: () => Promise<string>;
+    getKnowledgeAssetsLifecycleAddress?: () => Promise<string>;
   } }).chain;
   const chainId = (await chain.getEvmChainId?.()) ?? 31337n;
-  const kav10Address = (await chain.getKnowledgeAssetsV10Address?.()) ?? '0x000000000000000000000000000000000000c10a';
+  const kav10Address = (await chain.getKnowledgeAssetsLifecycleAddress?.()) ?? '0x000000000000000000000000000000000000c10a';
   const wrapped = wrapPublisherForTest(agent.publisher, {
     author: ethers.Wallet.createRandom(),
     ctx: mockSealCtx({ chainId, kav10Address }),
@@ -191,12 +191,12 @@ class ContextAuthorizedPublisherChainAdapter extends MockChainAdapter {
     };
   }
 
-  override async createKnowledgeAssetsV10(params: Parameters<MockChainAdapter['createKnowledgeAssetsV10']>[0]) {
+  override async createKnowledgeAssets(params: Parameters<MockChainAdapter['createKnowledgeAssets']>[0]) {
     this.capturedPublisherAddress = params.publisherAddress;
     if (params.publisherAddress?.toLowerCase() !== this.authorizedWallet.address.toLowerCase()) {
       throw new Error('agent pinned publish to the primary operational key');
     }
-    return super.createKnowledgeAssetsV10(params);
+    return super.createKnowledgeAssets(params);
   }
 }
 
@@ -218,11 +218,17 @@ class OperationalKeyOnlyPublishChainAdapter implements ChainAdapter {
     return 31337n;
   }
 
-  async getKnowledgeAssetsV10Address(): Promise<string> {
+  async getKnowledgeAssetsLifecycleAddress(): Promise<string> {
     return '0x00000000000000000000000000000000000000A1';
   }
 
-  async createKnowledgeAssetsV10(params: V10PublishDirectParams): Promise<OnChainPublishResult> {
+  // Greenfield (PR #815): the publisher needs the DKGKnowledgeAssets address
+  // to build the KA UAL after an on-chain publish.
+  async getDKGKnowledgeAssetsAddress(): Promise<string> {
+    return '0x00000000000000000000000000000000000000A2';
+  }
+
+  async createKnowledgeAssets(params: V10PublishDirectParams): Promise<OnChainPublishResult> {
     this.capturedPublisherAddress = params.publisherAddress;
     if (params.publisherAddress.toLowerCase() !== this.wallet.address.toLowerCase()) {
       throw new Error('publisher did not use the adapter operational key fallback');
@@ -253,11 +259,17 @@ class ExternalOperationalKeyPublishChainAdapter implements ChainAdapter {
     return 31337n;
   }
 
-  async getKnowledgeAssetsV10Address(): Promise<string> {
+  async getKnowledgeAssetsLifecycleAddress(): Promise<string> {
     return '0x00000000000000000000000000000000000000A1';
   }
 
-  async createKnowledgeAssetsV10(params: V10PublishDirectParams): Promise<OnChainPublishResult> {
+  // Greenfield (PR #815): the publisher needs the DKGKnowledgeAssets address
+  // to build the KA UAL after an on-chain publish.
+  async getDKGKnowledgeAssetsAddress(): Promise<string> {
+    return '0x00000000000000000000000000000000000000A2';
+  }
+
+  async createKnowledgeAssets(params: V10PublishDirectParams): Promise<OnChainPublishResult> {
     this.capturedPublisherAddress = params.publisherAddress;
     if (params.publisherAddress.toLowerCase() !== this.expectedPublisherAddress.toLowerCase()) {
       throw new Error('publisher did not use chainConfig.operationalKeys fallback');
@@ -765,9 +777,9 @@ describe('ProfileManager', () => {
       skills: [{ skillType: 'Translation', pricePerCall: 0.3, currency: 'TRAC' }],
     });
 
-    expect(result.kcId).toBeDefined();
+    expect(result.kaId).toBeDefined();
     expect(result.kaManifest.length).toBeGreaterThan(0);
-    expect(manager.profileKcId).toBe(result.kcId);
+    expect(manager.profileKcId).toBe(result.kaId);
   });
 
   it(
@@ -1959,7 +1971,7 @@ describe('DKGAgent (integration)', () => {
     await agent.start();
 
     const result = await agent.publishProfile();
-    expect(result.kcId).toBeDefined();
+    expect(result.kaId).toBeDefined();
     expect(result.kaManifest.length).toBeGreaterThan(0);
 
     const agents = await agent.findAgents();

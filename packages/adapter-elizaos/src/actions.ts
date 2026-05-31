@@ -47,7 +47,7 @@ export const dkgPublish: Action = {
 
       const result = await agent.publish(contextGraphId, quads as any);
       callback({
-        text: `Published ${quads.length} triple(s) to context graph "${contextGraphId}". KC ID: ${result.kcId}, KAs: ${result.kaManifest.length}`,
+        text: `Published ${quads.length} triple(s) to context graph "${contextGraphId}". KA ID: ${result.kaId}, KAs: ${result.kaManifest.length}`,
       });
       return true;
     } catch (err: any) {

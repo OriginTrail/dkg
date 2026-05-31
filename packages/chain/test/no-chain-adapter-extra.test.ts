@@ -5,8 +5,8 @@
  *
  *   CH-9 (HIGH) — Existing `no-chain-adapter.test.ts` exercises a hand-picked
  *                subset of methods (registerIdentity, ensureProfile, etc.)
- *                but OMITS the V10 surface (`createKnowledgeAssetsV10`,
- *                `getKnowledgeAssetsV10Address`, `getEvmChainId`) plus
+ *                but OMITS the V10 surface (`createKnowledgeAssets`,
+ *                `getKnowledgeAssetsLifecycleAddress`, `getEvmChainId`) plus
  *                `isV10Ready` and the V10 update path. A future refactor
  *                that accidentally returns a placeholder from one of these
  *                will silently pass.
@@ -82,8 +82,8 @@ describe('NoChainAdapter — every write method throws with stable message [CH-9
     // V10 surface — the audit finding CH-9 specifically calls out that
     // these are NOT exercised today. They are required on ChainAdapter and
     // must throw consistently here.
-    ['createKnowledgeAssetsV10', () =>
-      adapter.createKnowledgeAssetsV10({
+    ['createKnowledgeAssets', () =>
+      adapter.createKnowledgeAssets({
         publishOperationId: '0x' + '0'.repeat(64),
         contextGraphId: 1n,
         merkleRoot: zeroBytes,
@@ -101,7 +101,7 @@ describe('NoChainAdapter — every write method throws with stable message [CH-9
         },
         ackSignatures: [],
       })],
-    ['getKnowledgeAssetsV10Address', () => adapter.getKnowledgeAssetsV10Address()],
+    ['getKnowledgeAssetsLifecycleAddress', () => adapter.getKnowledgeAssetsLifecycleAddress()],
     ['getEvmChainId', () => adapter.getEvmChainId()],
     // The 7 #519 PCA write+read methods are deliberately NOT in this
     // throw-matrix: NoChainAdapter omits them so the DKGAgent facade's

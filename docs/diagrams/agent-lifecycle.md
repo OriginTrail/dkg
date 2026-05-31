@@ -71,7 +71,7 @@ sequenceDiagram
 
     Dev ->> Agent: agent.publish(contextGraphId, triples)
     Dev ->> Agent: agent.query(sparql, contextGraphId)
-    Dev ->> Agent: agent.update(kcId, contextGraphId, triples)
+    Dev ->> Agent: agent.update(kaId, contextGraphId, triples)
 
     Note right of Agent: GossipSub messages arrive<br/>Publish handler processes<br/>incoming data from peers
 

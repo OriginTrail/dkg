@@ -19,7 +19,7 @@ contract Ask is INamed, IVersioned, ContractStatus, IInitializable {
     //   2.0.0 — v4.0.0 storage consolidation: reads V10 canonical stake
     //           (`ConvictionStakingStorage.getNodeStakeV10`) so post-migration
     //           V10 nodes are not silently filtered out of the active set.
-    string private constant _VERSION = "2.0.0";
+    string private constant _VERSION = "10.0.2";
 
     uint256 public constant ASK_SCALING_FACTOR = 1e18;
 

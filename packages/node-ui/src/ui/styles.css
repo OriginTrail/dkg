@@ -4478,6 +4478,18 @@ body.light .v10-import-dropzone.drag-over { border-color: #b0b0b0; background: #
 .v10-me-loading-text { font-size: 12px; color: var(--text-tertiary); }
 
 /* ── Sub-graph Bar ── */
+/* PR #793 round 2 (ui-locked option a) — capsule chrome dropped.
+   The bar previously had a tinted background + 10px border-radius
+   that made it read as a separate widget hovering above the
+   content; on the Subgraph Explorer page where the strip sits
+   inside the page chrome, that pill-island look broke the
+   continuous strip semantics. Reduced to a single-edge bottom
+   border so the row terminates cleanly without claiming
+   container chrome.
+
+   This also kills the stale `--surface-1` and `--border-subtle`
+   rgba fallbacks that were S2 sweep regressions (undefined token
+   + dead rgba), closing the loop while in here. */
 .v10-subgraph-bar {
   display: flex;
   align-items: center;
@@ -4486,9 +4498,10 @@ body.light .v10-import-dropzone.drag-over { border-color: #b0b0b0; background: #
   flex-wrap: wrap;
   padding: 8px 12px;
   margin-bottom: 8px;
-  background: var(--surface-1, rgba(255,255,255,0.02));
-  border: 1px solid var(--border-subtle, rgba(255,255,255,0.06));
-  border-radius: 10px;
+  background: transparent;                          /* was: var(--surface-1, rgba(255,255,255,0.02)) */
+  border: 0;                                        /* was: 1px solid var(--border-subtle, ...) */
+  border-bottom: 1px solid var(--border-subtle);    /* single-edge termination */
+  border-radius: 0;                                 /* was: 10px */
 }
 .v10-subgraph-bar-label {
   font-size: 11px;
@@ -4497,6 +4510,12 @@ body.light .v10-import-dropzone.drag-over { border-color: #b0b0b0; background: #
   color: var(--text-tertiary, #94a3b8);
   padding-right: 4px;
 }
+/* PR #793 round 2 — the `.v10-subgraph-bar-hint` rule (sweep 3
+   Bug K's locked literal `+ Root, subgraphs`) was removed
+   alongside the corresponding render in SubGraphBar.tsx. Users
+   asked what the literal meant on manual test; the inline hint
+   was demoted entirely. The long-form tooltip on the All chip's
+   count badge still carries the cross-membership disclosure. */
 .v10-subgraph-chip {
   display: inline-flex;
   align-items: center;
@@ -6612,6 +6631,32 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
   transform: translateY(-1px);
   box-shadow: 0 8px 24px -12px var(--sg-color, rgba(100,116,139,0.6));
 }
+/* GH #813 — Root mini-card chrome. Solid `--border-subtle` reads
+   as a quieter daemon-emitted card vs the tinted named-subgraph
+   cards' `card.color + '55'` accent; the synthesized bucket stays
+   visually present without competing with the named cards for
+   attention.
+   Per-card `--sg-color` injection is suppressed in the JSX so the
+   gradient + hover-shadow fall through to the neutral fallback
+   (rgba(100,116,139,…)), and the icon picks up its color from
+   the inherited tertiary token instead of a per-slug accent.
+   Position: rendered last in the grid (mirrors Root chip's
+   rightmost chip-row position).
+   Round 1 visual revision (ui-lead): the original dashed +
+   `--border-strong` treatment was rejected — in this codebase
+   dashed reads as broken/disabled/drop-zone, `--border-strong`
+   is the loud active/hover token (so the Root card became the
+   LOUDEST card in the grid, opposite of intent), and dashed
+   truncates into irregular dot artifacts on the 12px
+   border-radius corners. Solid + subtle is the locked
+   treatment; base `.v10-sgov-card` rule's `border: 1px solid …`
+   cascades, so only the color token swaps here. */
+.v10-sgov-card.root {
+  border-color: var(--border-subtle);
+}
+.v10-sgov-card.root .v10-sgov-card-icon {
+  color: var(--text-tertiary);
+}
 .v10-sgov-card-head {
   display: flex; align-items: flex-start; gap: 10px;
   padding: 10px 12px 8px 12px;
@@ -6667,29 +6712,29 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
 }
 
 /* ── Mini layer pyramid (WM/SWM/VM segmented bar + legend) ── */
-.v10-minipyr {
+.v10-minibar {
   display: flex; flex-direction: column; gap: 4px;
   min-width: 0;
 }
-.v10-minipyr.compact { flex-direction: row; align-items: center; gap: 6px; }
-.v10-minipyr-empty {
+.v10-minibar.compact { flex-direction: row; align-items: center; gap: 6px; }
+.v10-minibar-empty {
   font-size: 10px; color: var(--text-tertiary); font-style: italic;
 }
-.v10-minipyr-bar {
+.v10-minibar-bar {
   display: flex; height: 6px; width: 100%;
   border-radius: 3px; overflow: hidden;
   background: rgba(255,255,255,0.04);
 }
-.v10-minipyr-seg {
+.v10-minibar-seg {
   height: 100%;
   transition: opacity 0.15s ease, filter 0.15s ease;
 }
-.v10-minipyr-seg.dim { opacity: 0.3; filter: grayscale(0.6); }
-.v10-minipyr-legend {
+.v10-minibar-seg.dim { opacity: 0.3; filter: grayscale(0.6); }
+.v10-minibar-legend {
   display: flex; gap: 4px; flex-wrap: wrap;
   align-items: center;
 }
-.v10-minipyr-chip {
+.v10-minibar-chip {
   display: inline-flex; align-items: center; gap: 4px;
   padding: 2px 7px;
   background: none;
@@ -6701,14 +6746,14 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
   cursor: default;
   transition: border-color 0.15s, color 0.15s, opacity 0.15s;
 }
-.v10-minipyr-chip.interactive { cursor: pointer; }
-.v10-minipyr-chip.interactive:hover { border-color: var(--border-strong); color: var(--text-primary); }
-.v10-minipyr-chip.dim { opacity: 0.4; }
-.v10-minipyr-dot {
+.v10-minibar-chip.interactive { cursor: pointer; }
+.v10-minibar-chip.interactive:hover { border-color: var(--border-strong); color: var(--text-primary); }
+.v10-minibar-chip.dim { opacity: 0.4; }
+.v10-minibar-dot {
   display: inline-block; width: 6px; height: 6px; border-radius: 50%;
 }
-.v10-minipyr-short { letter-spacing: 0.04em; }
-.v10-minipyr-count { font-variant-numeric: tabular-nums; color: var(--text-tertiary); }
+.v10-minibar-short { letter-spacing: 0.04em; }
+.v10-minibar-count { font-variant-numeric: tabular-nums; color: var(--text-tertiary); }
 
 /* ── Sub-graph detail view header + filters ── */
 .v10-subgraph-detail {
@@ -6727,7 +6772,18 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
 .v10-subgraph-detail-icon {
   font-size: 20px; line-height: 1;
 }
-.v10-subgraph-detail-title-wrap { flex: 1; min-width: 0; }
+.v10-subgraph-detail-title-wrap {
+  flex: 1;
+  min-width: 0;
+  /* #10a polish — reserve a consistent vertical slot for the
+     title block so 1-line and 2-line titles occupy the same
+     space. No layout shift navigating between subgraphs whose
+     descriptions differ in length. */
+  min-height: 44px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
 .v10-subgraph-detail-title {
   font-size: 15px; font-weight: 600; color: var(--text-primary);
 }
@@ -7002,7 +7058,13 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
    so it never silently changes meaning across a navigation
    transition (M2 / S5 strand). */
 .v10-subgraph-cross-layer {
-  padding: 10px 16px 12px;
+  /* #11 polish (ui-locked) — `padding: 16px 16px 0` is +6px top
+     and -12px bottom vs. the prior `10px 16px 12px`. The bottom
+     padding moves into the active-layer-pill's `margin-top: 14px`,
+     so the cluster reads as a single layered breathing band (lede
+     +2px / count strip / pill +14px) instead of stacked rows with
+     bottom container padding. */
+  padding: 16px 16px 0;
   border-bottom: 1px solid var(--border-subtle);
   display: flex;
   flex-direction: column;
@@ -7013,6 +7075,9 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
   font-size: 11px;
   color: var(--text-tertiary);
   letter-spacing: 0.01em;
+  /* #11 polish (ui-locked) — +2px below the lede so the count
+     strip sits cleanly beneath. */
+  margin-bottom: 10px;
 }
 .v10-subgraph-cross-layer-strip {
   display: flex;
@@ -7024,12 +7089,30 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 12px;
   border: 1px solid var(--border-subtle);
-  border-radius: 14px;
   font-size: 12px;
   color: var(--text-primary);
   background: var(--bg-elevated);
+  /* #6 polish — cells become interactive buttons (ui-locked).
+     The padding + negative margin pair enlarges the hit target
+     for click affordance while keeping the visual rhythm stable
+     (the negative margin negates the added padding so neighbours
+     don't shift). */
+  cursor: pointer;
+  border-radius: 6px;
+  padding: 4px 8px;
+  margin: -4px -8px;
+  transition: background 0.15s, color 0.15s, opacity 0.15s;
+  /* Native button reset so the cell inherits the rest of the
+     strip's typography rather than the UA <button> defaults. */
+  font-family: inherit;
+  text-align: left;
+}
+.v10-subgraph-cross-layer-cell:hover {
+  background: var(--bg-hover);
+}
+.v10-subgraph-cross-layer-cell[aria-pressed="false"] {
+  opacity: 0.5;
 }
 .v10-subgraph-cross-layer-cell-icon {
   font-size: 13px;
@@ -7050,31 +7133,39 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
   color: var(--text-tertiary);
   font-size: 12px;
 }
+/* PR #793 round 2 (ui-locked option c) — demoted from
+   clickable pill chrome to inline caption-style metadata. The
+   pill used to be dressed as a chip but didn't go anywhere;
+   the `Reset filters` button is the canonical "restore scope"
+   affordance. Reduced to a transparent text label so it reads
+   as caption metadata, not a control. */
 .v10-subgraph-active-layer-pill {
-  align-self: flex-start;
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 3px 10px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 12px;
+  /* 8/12 asymmetry (ui-lead, round 3): caption reads as
+     "grouped with the strip above (tight 8px), terminated
+     from the chrome below (looser 12px)". */
+  margin-top: 8px;              /* was: 14px */
+  margin-bottom: 12px;          /* round 3: terminate before entity-tab strip */
+  padding: 0;
+  border: 0;
+  background: transparent;
+  border-radius: 0;
+  font-family: var(--font-sans); /* was: --font-mono */
   font-size: 11px;
-  font-family: var(--font-mono);
-  color: var(--text-secondary);
-  background: rgba(255,255,255,0.02);
-  cursor: pointer;
-  transition: all 0.15s;
+  color: var(--text-tertiary);
+  cursor: default;               /* not a clickable widget */
+  transition: color 0.15s;
 }
 .v10-subgraph-active-layer-pill:hover:not(:disabled) {
-  border-color: var(--border-strong);
-  color: var(--text-primary);
+  color: var(--text-secondary);
+  border-color: transparent;
 }
-.v10-subgraph-active-layer-pill:disabled {
-  cursor: default;
-  opacity: 0.85;
-}
+.v10-subgraph-active-layer-pill:disabled,
 .v10-subgraph-active-layer-pill.all-layers {
   color: var(--text-tertiary);
+  opacity: 1;
 }
 .v10-subgraph-active-layer-pill-label {
   text-transform: uppercase;
@@ -7084,9 +7175,18 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
   color: var(--text-tertiary);
 }
 .v10-subgraph-active-layer-pill-value {
-  color: var(--text-primary);
+  color: var(--text-secondary); /* was: --text-primary */
   font-weight: 600;
 }
+
+/* PR #793 round 2 — `.v10-subgraph-swm-attribution-badge` rule
+   (sweep 0 Bug #8's "Colored by contributing agent" inline
+   badge above LayerGraphPanel) removed alongside the
+   corresponding render in SubGraphDetailView. The existing
+   SwmAttributionLegend inside LayerGraphPanel carries the
+   load-bearing disclosure; the badge added visual noise
+   without signal. The context-sensitive tooltip on the SWM
+   cross-layer cell remains as hover-only insurance. */
 
 /* ── Verify on DKG CTA (in KA detail right pane) ── */
 /* Two variants: .promote (WM -> SWM, amber) and .publish (SWM -> VM, green).
@@ -7820,7 +7920,15 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
     color-mix(in srgb, var(--sg-color, #a855f7) 8%, transparent) 0%,
     transparent 40%
   );
-  min-height: 34px;
+  /* PR #793 round 2 — `min-height: 44px` reserves space for the
+     fully-populated breadcrumb state (project name + `›`
+     separator + subgraph chip + description). Pre-fix the row
+     was 34px when only the project name showed (e.g. on the
+     Subgraphs / WM / SWM / VM tabs without an active subgraph)
+     and grew to ~42-44px when the breadcrumb expanded, pushing
+     the body content down on transition. Reserving the
+     expanded height at all times eliminates the layout shift. */
+  min-height: 44px;
 }
 .v10-project-strip-dot {
   width: 9px; height: 9px; border-radius: 50%;

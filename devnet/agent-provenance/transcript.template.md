@@ -40,7 +40,7 @@ Block number: `<N>`
 ### A1. on-chain author = agent EOA
 
 ```text
-$ cast call <KCS> 'getLatestMerkleRootAuthor(uint256)(address)' <kcId>
+$ cast call <KCS> 'getLatestMerkleRootAuthor(uint256)(address)' <kaId>
 0x<edge_agent_address>
 ```
 
@@ -49,18 +49,18 @@ PASS / FAIL.
 ### A2. on-chain publisher = msg.sender
 
 ```text
-$ cast call <KCS> 'getLatestMerkleRootPublisher(uint256)(address)' <kcId>
+$ cast call <KCS> 'getLatestMerkleRootPublisher(uint256)(address)' <kaId>
 0x<edge_publisher_address>
 ```
 
 PASS / FAIL.
 
-### A3. KnowledgeCollectionCreated event carries indexed author
+### A3. KnowledgeAssetCreated event carries indexed author
 
 ```text
 $ cast logs --rpc-url http://127.0.0.1:8545 \
    --address <KCS> --from-block <N> --to-block <N> \
-   'KnowledgeCollectionCreated(uint256,address,...)'
+   'KnowledgeAssetCreated(uint256,address,...)'
 
 <paste — confirm topic[2] == 0x000...0<edge_agent_address>>
 ```
@@ -89,11 +89,11 @@ For mode (d):
 no core's publishing-factor counter incremented
 ```
 
-### A5. /api/kc/<kcId>/author
+### A5. /api/kc/<kaId>/author
 
 ```text
-$ curl -s http://127.0.0.1:9201/api/kc/<kcId>/author -H "Authorization: Bearer $(cat .devnet/node1/auth.token)"
-{"kcId":"<kcId>","author":"0x<edge_agent_address>","attested":true}
+$ curl -s http://127.0.0.1:9201/api/kc/<kaId>/author -H "Authorization: Bearer $(cat .devnet/node1/auth.token)"
+{"kaId":"<kaId>","author":"0x<edge_agent_address>","attested":true}
 ```
 
 PASS / FAIL.
@@ -104,7 +104,7 @@ PASS / FAIL.
 $ NODE_DIR=.devnet/node1 ./scripts/dkg query "
   SELECT ?author WHERE {
     GRAPH <did:dkg:context-graph:<cgId>/_meta> {
-      <urn:dkg:kc:<kcId>> <https://dkg.network/ontology#authoredBy> ?author .
+      <urn:dkg:kc:<kaId>> <https://dkg.network/ontology#authoredBy> ?author .
     }
   }
 "

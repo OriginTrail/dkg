@@ -39,7 +39,7 @@ describe('@unit EpochStorage', () => {
 
   it('Should have correct name and version', async () => {
     expect(await EpochStorage.name()).to.equal('EpochStorage');
-    expect(await EpochStorage.version()).to.equal('1.0.0');
+    expect(await EpochStorage.version()).to.equal('10.0.2');
   });
 
   it('Add knowledge value for single epoch, verify totals and max', async () => {

@@ -1,6 +1,15 @@
 import { test, expect } from '../fixtures/base.js';
 import { sel } from '../helpers/selectors.js';
 
+const mockAgentRoute = (page: import('@playwright/test').Page) =>
+  page.route('**/api/agent/identity', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ agentAddress: '0x1111111111111111111111111111111111111111' }),
+    }),
+  );
+
 test.describe('Accessibility', () => {
   test.beforeEach(async ({ shell }) => {
     await shell.goto();
@@ -21,19 +30,22 @@ test.describe('Accessibility', () => {
 
   test('log filter input has placeholder text', async ({ page, bottomPanel }) => {
     await bottomPanel.toggle();
-    const logFilter = page.locator(sel.bottom.logFilter);
+    await bottomPanel.switchTab('Node Log');
+    const logFilter = page.locator(sel.bottom.logFilter).first();
     await expect(logFilter).toHaveAttribute('placeholder', 'Filter logs...');
   });
 
-  test('modal inputs have form labels', async ({ dashboard, createProjectModal, page }) => {
-    await dashboard.clickQuickAction('Create Project');
+  test('modal inputs have form labels', async ({ leftPanel, createProjectModal, page }) => {
+    await mockAgentRoute(page);
+    await leftPanel.clickNewProject();
     await expect(createProjectModal.overlay).toBeVisible();
     const labels = page.locator(sel.modal.formLabel);
     expect(await labels.count()).toBeGreaterThan(0);
   });
 
-  test('modal overlay uses fixed positioning', async ({ dashboard, createProjectModal, page }) => {
-    await dashboard.clickQuickAction('Create Project');
+  test('modal overlay uses fixed positioning', async ({ leftPanel, createProjectModal, page }) => {
+    await mockAgentRoute(page);
+    await leftPanel.clickNewProject();
     await expect(createProjectModal.overlay).toBeVisible();
     const style = await page.locator(sel.modal.overlay).evaluate(el => {
       return window.getComputedStyle(el).position;
@@ -63,8 +75,9 @@ test.describe('Accessibility', () => {
     await expect(header.notifDropdown).toBeVisible();
   });
 
-  test('create project modal name input has placeholder', async ({ dashboard, createProjectModal }) => {
-    await dashboard.clickQuickAction('Create Project');
+  test('create project modal name input has placeholder', async ({ leftPanel, createProjectModal, page }) => {
+    await mockAgentRoute(page);
+    await leftPanel.clickNewProject();
     const placeholder = await createProjectModal.nameInput.getAttribute('placeholder');
     expect(placeholder).toBeTruthy();
     expect(placeholder!.length).toBeGreaterThan(0);

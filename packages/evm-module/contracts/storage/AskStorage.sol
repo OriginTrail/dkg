@@ -10,7 +10,7 @@ import {ContractStatus} from "../abstract/ContractStatus.sol";
 
 contract AskStorage is INamed, IVersioned, ContractStatus, IInitializable {
     string private constant _NAME = "AskStorage";
-    string private constant _VERSION = "1.0.0";
+    string private constant _VERSION = "10.0.2";
 
     ParametersStorage public parametersStorage;
 

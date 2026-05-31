@@ -1,6 +1,6 @@
 {
   "name": "dkg-v10",
-  "version": "10.0.0-rc.11",
+  "version": "10.0.0-rc.12",
   "private": true,
   "packageManager": "pnpm@10.28.1",
   "dkgBuild": {
@@ -48,6 +48,8 @@
     "test:devnet:v10-stress": "vitest run --config devnet/v10-stress/vitest.config.ts",
     "test:devnet:conviction-lazy-settle": "vitest run --config devnet/conviction-lazy-settle/vitest.config.ts",
     "test:devnet:edge-update-flow": "vitest run --config devnet/edge-update-flow/vitest.config.ts",
+    "test:devnet:greenfield-10min": "vitest run --config devnet/greenfield-10min/vitest.config.ts",
+    "test:devnet:rich-scenario": "vitest run --config devnet/rich-scenario/vitest.config.ts",
     "test:all": "pnpm test && pnpm test:evm"
   },
   "devDependencies": {

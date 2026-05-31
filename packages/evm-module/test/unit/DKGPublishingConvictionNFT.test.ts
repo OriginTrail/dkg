@@ -2,6 +2,8 @@ import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
 import { expect } from 'chai';
 import hre from 'hardhat';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 import {
   Chronos,
@@ -153,6 +155,36 @@ describe('@unit DKGPublishingConvictionNFT', function () {
         expect(expectedBps(amount)).to.equal(bps);
       });
     }
+
+    it('logic contract and NFT wrapper share the ladder around every threshold', async () => {
+      const sources = [
+        readFileSync(join(__dirname, '../../contracts/PublishingConviction.sol'), 'utf8'),
+        readFileSync(join(__dirname, '../../contracts/DKGPublishingConvictionNFT.sol'), 'utf8'),
+      ];
+      for (const source of sources) {
+        expect(source).to.include('PublishingMathLib.discountBps(committedTRAC)');
+      }
+
+      const thresholds = [
+        hre.ethers.parseEther('25000'),
+        hre.ethers.parseEther('50000'),
+        hre.ethers.parseEther('100000'),
+        hre.ethers.parseEther('250000'),
+        hre.ethers.parseEther('500000'),
+        hre.ethers.parseEther('1000000'),
+      ];
+      const amounts = [
+        0n,
+        ...thresholds.flatMap((threshold) => [threshold - 1n, threshold, threshold + 1n]),
+        (1n << 96n) - 1n,
+      ];
+
+      for (const amount of amounts) {
+        const expected = expectedBps(amount);
+        expect(await NFT.getDiscountBps(amount)).to.equal(expected);
+        expect(await LogicContract.getDiscountBps(amount)).to.equal(expected);
+      }
+    });
   });
 
   // ======================================================================
@@ -318,7 +350,7 @@ describe('@unit DKGPublishingConvictionNFT', function () {
       // Impersonate KAV10 by registering accounts[5] under that Hub name. The
       // NFT resolves the caller via Hub on every coverPublishingCost call.
       const Kav10Signer = accounts[5];
-      await HubContract.setContractAddress('KnowledgeAssetsV10', Kav10Signer.address);
+      await HubContract.setContractAddress('KnowledgeAssetsLifecycle', Kav10Signer.address);
 
       // committedTRAC divisible by 12 → clean per-epoch allowance math.
       const committed = hre.ethers.parseEther('120000');
@@ -709,7 +741,7 @@ describe('@unit DKGPublishingConvictionNFT', function () {
     beforeEach(async () => {
       Kav10Signer = accounts[5];
       agent = accounts[6];
-      await HubContract.setContractAddress('KnowledgeAssetsV10', Kav10Signer.address);
+      await HubContract.setContractAddress('KnowledgeAssetsLifecycle', Kav10Signer.address);
     });
 
     async function createAt(amount: bigint) {
@@ -785,6 +817,68 @@ describe('@unit DKGPublishingConvictionNFT', function () {
       const currentWindow = await currentBillingWindow(info.createdAtTimestamp, epochLength);
       expect(await NFT.windowSpent(1, currentWindow)).to.equal(expectedDiscount);
       expect((await NFT.getAccountInfo(1)).topUpBuffer).to.equal(0n);
+    });
+
+    describe('PublishingMathLib integration', () => {
+      it('PCA coverPublishingCost event ranges match the shared active-sink calculator', async () => {
+        const source = readFileSync(
+          join(__dirname, '../../contracts/PublishingConviction.sol'),
+          'utf8',
+        );
+        expect(source).to.include('PublishingMathLib.prorateActiveSink(');
+
+        const committed = hre.ethers.parseEther('1200000');
+        await createAtWithAgent(committed, agent.address);
+
+        const baseCost = hre.ethers.parseEther('10000');
+        const expectedDiscount = (baseCost * (BPS - 7500n)) / BPS;
+        const kcEpochs = 3n;
+
+        const Harness = await hre.ethers.getContractFactory('PublishingMathLibHarness');
+        const harness = await Harness.deploy();
+        const epochLength = await ChronosContract.epochLength();
+        const targetTimestamp = BigInt(await time.latest()) + (epochLength / 2n);
+        const targetEpoch = await ChronosContract.epochAtTimestamp(targetTimestamp);
+        const timeRemaining =
+          (await ChronosContract.timestampForEpoch(targetEpoch + 1n)) - targetTimestamp;
+        const [starts, ends, amounts] = await harness.prorateActiveSink(
+          expectedDiscount,
+          targetEpoch,
+          kcEpochs,
+          epochLength,
+          timeRemaining,
+        );
+
+        await time.setNextBlockTimestamp(Number(targetTimestamp));
+        const tx = await NFT.connect(Kav10Signer).coverPublishingCost(
+          agent.address,
+          baseCost,
+          targetEpoch,
+          kcEpochs,
+        );
+        const receipt = await tx.wait();
+        const epsAddr = (await EpochStorageContract.getAddress()).toLowerCase();
+        const iface = EpochStorageContract.interface;
+        const actual: Array<[bigint, bigint, bigint]> = [];
+        for (const log of receipt!.logs) {
+          if (log.address.toLowerCase() !== epsAddr) continue;
+          let parsed;
+          try { parsed = iface.parseLog({ topics: log.topics as string[], data: log.data }); }
+          catch { continue; }
+          if (parsed?.name !== 'TokensAddedToEpochRange') continue;
+          expect(parsed.args.shardId).to.equal(STAKER_SHARD_ID);
+          actual.push([
+            BigInt(parsed.args.startEpoch),
+            BigInt(parsed.args.endEpoch),
+            BigInt(parsed.args.tokenAmount),
+          ]);
+        }
+
+        const expected = starts
+          .map((start, i) => [BigInt(start), BigInt(ends[i]), BigInt(amounts[i])] as [bigint, bigint, bigint])
+          .filter((range) => range[2] > 0n);
+        expect(actual).to.deep.equal(expected);
+      });
     });
 
     it('spends epoch allowance first, then topUpBalance', async () => {
@@ -1203,7 +1297,7 @@ describe('@unit DKGPublishingConvictionNFT', function () {
     beforeEach(async () => {
       Kav10Signer = accounts[5];
       agent = accounts[6];
-      await HubContract.setContractAddress('KnowledgeAssetsV10', Kav10Signer.address);
+      await HubContract.setContractAddress('KnowledgeAssetsLifecycle', Kav10Signer.address);
     });
 
     /**

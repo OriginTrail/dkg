@@ -38,9 +38,9 @@ export class NoChainAdapter implements ChainAdapter {
   async createContextGraph(_params: CreateContextGraphParams): Promise<TxResult> { noChain(); }
   async submitToContextGraph(_kcId: string, _contextGraphId: string): Promise<TxResult> { noChain(); }
   async revealContextGraphMetadata(_contextGraphId: string, _name: string, _description: string): Promise<TxResult> { noChain(); }
-  async createKnowledgeAssetsV10(_params: V10PublishParams): Promise<OnChainPublishResult> { noChain(); }
+  async createKnowledgeAssets(_params: V10PublishParams): Promise<OnChainPublishResult> { noChain(); }
   async isOperationalWalletRegistered(_identityId: bigint, _address: string): Promise<boolean> { return false; }
-  async getKnowledgeAssetsV10Address(): Promise<string> { noChain(); }
+  async getKnowledgeAssetsLifecycleAddress(): Promise<string> { noChain(); }
   async getEvmChainId(): Promise<bigint> { noChain(); }
   async getPublishingConvictionAccountOwner(_accountId: bigint): Promise<string> { noChain(); }
   // The 7 #519 PCA write+read methods are OMITTED on purpose: they are

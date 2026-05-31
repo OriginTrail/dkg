@@ -33,7 +33,7 @@ On-chain (ContextGraph.sol)              Off-chain (Triple Store + GossipSub)
 │ contextGraphId            │             │ data graph: did:dkg:context-graph:X│
 │ creator (address)    │             │ meta graph: did:dkg:context-graph:X/_meta
 │ name, description    │             │ actual RDF triples           │
-│ access policies      │             │ merkle roots (per KC)        │
+│ access policies      │             │ merkle roots (per KA)        │
 │ member list          │             │ replicated via gossipsub     │
 │ creation block       │             │ persisted in triple store     │
 └─────────────────────┘             └──────────────────────────────┘
@@ -56,7 +56,7 @@ Every contextGraph has two identifiers:
 - **On-chain ID** (`bytes32`): `keccak256(abi.encodePacked(creatorAddress, name))`. Deterministic and collision-resistant. This is what the contracts use.
 - **Human-readable ID** (`string`): The name string (e.g., `"testing"`, `"ai-research"`). This is what the CLI and agents use. The mapping is: `contextGraphId = keccak256(creator, name)`.
 
-The existing V8 `ContextGraph.sol` uses `keccak256(kcStorageContract, kcTokenId, kaTokenId)` as the ID, tying a contextGraph to a specific knowledge collection NFT. For V9, we decouple contextGraph identity from any specific KC. Instead, the contextGraph is identified by its creator + name, which is simpler and doesn't require pre-minting an NFT just to create a contextGraph.
+The existing V8 `ContextGraph.sol` uses `keccak256(kcStorageContract, kcTokenId, kaTokenId)` as the ID, tying a contextGraph to a specific knowledge asset NFT. For V9, we decouple contextGraph identity from any specific KA. Instead, the contextGraph is identified by its creator + name, which is simpler and doesn't require pre-minting an NFT just to create a contextGraph.
 
 ### 3.2 Resolving Human IDs
 
@@ -121,9 +121,9 @@ function createContextGraphV9(
 ) external returns (bytes32 contextGraphId);
 ```
 
-This is a **new function** on the existing contract, not a replacement of the V8 `registerContextGraph`. The V8 function stays for backward compatibility. The V9 function is simpler: no KC token coupling, just name + description + policy.
+This is a **new function** on the existing contract, not a replacement of the V8 `registerContextGraph`. The V8 function stays for backward compatibility. The V9 function is simpler: no KA token coupling, just name + description + policy.
 
-**Why not reuse V8 `registerContextGraph`?** The V8 function requires a knowledge collection storage contract and token IDs as contextGraph anchors. V9 contextGraphs are standalone entities — they don't need to be tied to a specific KC NFT. Adding a new function is cleaner than overloading the V8 semantics.
+**Why not reuse V8 `registerContextGraph`?** The V8 function requires a knowledge asset storage contract and token IDs as contextGraph anchors. V9 contextGraphs are standalone entities — they don't need to be tied to a specific KA NFT. Adding a new function is cleaner than overloading the V8 semantics.
 
 ### 4.2 Discover ContextGraphs
 
@@ -354,7 +354,7 @@ interface ContextGraphInfo {
 Add V9 functions alongside the existing V8 functions:
 
 ```solidity
-// New V9 contextGraph registration (simpler, no KC coupling)
+// New V9 contextGraph registration (simpler, no KA coupling)
 function createContextGraphV9(
     string calldata name,
     string calldata description,

@@ -23,6 +23,7 @@ import {Permissions} from "./libraries/Permissions.sol";
 import {StakingLib} from "./libraries/StakingLib.sol";
 import {TokenLib} from "./libraries/TokenLib.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 /**
  * @title StakingV10
@@ -76,6 +77,8 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
  *     because relock materially changes tier / multiplier / expiry.
  */
 contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
+    using SafeERC20 for IERC20;
+
     // ========================================================================
     // Metadata
     // ========================================================================
@@ -125,7 +128,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     //             new `expiryShortenedBy` arg (CSS v4.1.0). `stake` always
     //             passes 0; `_convertToNFT` passes 0 except for eligible
     //             6m/12m migrants.
-    string private constant _VERSION = "3.1.0";
+    string private constant _VERSION = "10.0.2";
 
     // ========================================================================
     // Constants
@@ -334,13 +337,21 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         uint256 totalNodeStakeAfter = convictionStorage.getNodeStakeV10(identityId) + uint256(amount);
         if (totalNodeStakeAfter > maxStake) revert MaxStakeExceeded();
 
+        if (token.allowance(staker, address(this)) < amount) {
+            revert TokenLib.TooLowAllowance(address(token), token.allowance(staker, address(this)), amount);
+        }
+
+        if (token.balanceOf(staker) < amount) {
+            revert TokenLib.TooLowBalance(address(token), token.balanceOf(staker), amount);
+        }
+
         _prepareForStakeChangeV10(chronos.getCurrentEpoch(), tokenId, identityId);
 
         // v4.0.0 — TRAC flows into the CSS vault. CSS extends Guardian and
         // exposes `transferStake` for the withdraw outflow side. The NFT
         // wrapper never holds funds; the V8 StakingStorage is no longer in
         // the deposit path.
-        token.transferFrom(staker, address(convictionStorage), amount);
+        token.safeTransferFrom(staker, address(convictionStorage), amount);
 
         // L11 — multiplier18 is no longer passed in; CSS reads it from the
         //       tier table (single source of truth).

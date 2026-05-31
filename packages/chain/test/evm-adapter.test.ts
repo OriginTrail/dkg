@@ -30,8 +30,10 @@ describe('EVMChainAdapter integration', () => {
     // V8 `KnowledgeCollection` + `Staking` were archived in TB-1 (PRD §4.1)
     // — their Hub bindings no longer exist. Hub-resolve the V10 successors
     // instead to assert the adapter still talks to a fresh V10 deploy.
-    const kav10 = await adapter.getContract('KnowledgeAssetsV10');
-    expect(await kav10.name()).toBe('KnowledgeAssetsV10');
+    // Greenfield (PR #815): the lifecycle contract's Hub key + `name()` were
+    // renamed KnowledgeAssetsV10 → KnowledgeAssetsLifecycle.
+    const kav10 = await adapter.getContract('KnowledgeAssetsLifecycle');
+    expect(await kav10.name()).toBe('KnowledgeAssetsLifecycle');
 
     const stakingV10 = await adapter.getContract('StakingV10');
     expect(await stakingV10.name()).toBe('StakingV10');

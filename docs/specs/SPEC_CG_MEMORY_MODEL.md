@@ -191,10 +191,10 @@ sequenceDiagram
     Note over CH: No hostingNodes argument.<br/>No per-CG quorum argument.<br/>Mints CG NFT to caller.
     CH-->>E: ContextGraphCreated event
 
-    E->>CN: publish KC (merkleRoot + ackSignatures collected)
+    E->>CN: publish KA (merkleRoot + ackSignatures collected)
     Note over CN: Sharding-table members ACK the publish.<br/>Quorum = parametersStorage.minimumRequiredSignatures().
-    CN->>CH: ACKs land in createKnowledgeAssetsV10 tx
-    CH-->>E: KnowledgeCollectionCreated event
+    CN->>CH: ACKs land in publish() tx
+    CH-->>E: KnowledgeAssetCreated event
 
     par off-chain replication
         E-->>CN: Hosting protocol replicates VM data to sharding-table members

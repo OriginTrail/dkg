@@ -304,7 +304,7 @@ async function publishBatches(sg, ents) {
         clearAfter: isLast,
       });
       const drain = isLast ? ' [drain SWM]' : '';
-      console.log(`  · ${sg} publish ${batchN}/${totalBatches}: kcId=${r?.kcId} tx=${r?.txHash?.slice(0, 10) ?? '—'}${drain}`);
+      console.log(`  · ${sg} publish ${batchN}/${totalBatches}: kaId=${r?.kaId} tx=${r?.txHash?.slice(0, 10) ?? '—'}${drain}`);
     } catch (err) {
       console.warn(`  ! ${sg} publish ${batchN}/${totalBatches} failed: ${err.message.split('\n')[0]}`);
     }

@@ -82,7 +82,7 @@ export default defineSuite({
           { rootEntities: [payload.rootEntity] },
           false,
         );
-        if (!result.kcId) throw new Error('sync publish did not finalize a knowledge collection');
+        if (!result.kaId) throw new Error('sync publish did not finalize a knowledge collection');
       },
       {
         beforeIteration: async () => {

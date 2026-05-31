@@ -84,20 +84,20 @@ describe('decodeEvmError / enrichEvmError (07 EVM_MODULE — custom errors)', ()
     expect(d!.args[0]).toBe(5n);
   });
 
-  it('decodes KnowledgeCollectionExpired', () => {
-    const iface = new Interface(['error KnowledgeCollectionExpired(uint256 id, uint256 currentEpoch, uint256 endEpoch)']);
-    const data = iface.encodeErrorResult('KnowledgeCollectionExpired', [1n, 100n, 50n]);
+  it('decodes KnowledgeAssetExpired', () => {
+    const iface = new Interface(['error KnowledgeAssetExpired(uint256 id, uint256 currentEpoch, uint256 endEpoch)']);
+    const data = iface.encodeErrorResult('KnowledgeAssetExpired', [1n, 100n, 50n]);
     const d = decodeEvmError(data);
     expect(d).not.toBeNull();
-    expect(d!.name).toBe('KnowledgeCollectionExpired');
+    expect(d!.name).toBe('KnowledgeAssetExpired');
   });
 
-  it('decodes CannotUpdateImmutableKnowledgeCollection', () => {
-    const iface = new Interface(['error CannotUpdateImmutableKnowledgeCollection(uint256 id)']);
-    const data = iface.encodeErrorResult('CannotUpdateImmutableKnowledgeCollection', [7n]);
+  it('decodes CannotUpdateImmutableKnowledgeAsset', () => {
+    const iface = new Interface(['error CannotUpdateImmutableKnowledgeAsset(uint256 id)']);
+    const data = iface.encodeErrorResult('CannotUpdateImmutableKnowledgeAsset', [7n]);
     const d = decodeEvmError(data);
     expect(d).not.toBeNull();
-    expect(d!.name).toBe('CannotUpdateImmutableKnowledgeCollection');
+    expect(d!.name).toBe('CannotUpdateImmutableKnowledgeAsset');
   });
 
   it('enrichEvmError returns decoded name for V10 errors', () => {
@@ -867,16 +867,16 @@ describe('PR3 / RC11 — publish-preflight TTL cache', () => {
     expect(getNetwork).toHaveBeenCalledTimes(1);
   });
 
-  it('getKnowledgeAssetsV10Address caches the contract address across repeat reads', async () => {
+  it('getKnowledgeAssetsLifecycleAddress caches the contract address across repeat reads', async () => {
     const a = new EVMChainAdapter(minimalConfig());
     const getAddress = vi.fn(async () => '0xCONTRACT');
     (a as unknown as { init: () => Promise<void> }).init = async () => undefined;
-    (a as unknown as { contracts: { knowledgeAssetsV10: { getAddress: () => Promise<string> } } }).contracts = {
-      knowledgeAssetsV10: { getAddress: getAddress as unknown as () => Promise<string> },
+    (a as unknown as { contracts: { knowledgeAssetsLifecycle: { getAddress: () => Promise<string> } } }).contracts = {
+      knowledgeAssetsLifecycle: { getAddress: getAddress as unknown as () => Promise<string> },
     };
 
-    expect(await a.getKnowledgeAssetsV10Address()).toBe('0xCONTRACT');
-    expect(await a.getKnowledgeAssetsV10Address()).toBe('0xCONTRACT');
+    expect(await a.getKnowledgeAssetsLifecycleAddress()).toBe('0xCONTRACT');
+    expect(await a.getKnowledgeAssetsLifecycleAddress()).toBe('0xCONTRACT');
     expect(getAddress).toHaveBeenCalledTimes(1);
   });
 

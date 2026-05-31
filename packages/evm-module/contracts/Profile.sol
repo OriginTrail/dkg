@@ -48,6 +48,11 @@ contract Profile is INamed, IVersioned, ContractStatus, IInitializable {
     // `identityIds`) collision still surfaces as `OperationalKeyTaken`.
     // Bumped 1.4.1 -> 1.4.2: the createProfile op-wallet validation block
     // is removed entirely. The single source of truth moves into
+    // `Identity.addOperationalWallets`.
+    // Bumped 1.4.2 -> 1.4.3: `createProfile` may be called by either the
+    // admin wallet or the primary operational wallet. When the admin calls,
+    // `operationalWallets[0]` is the primary operational key and any
+    // additional entries are attached after identity creation.
     // `Identity.addOperationalWallets` (Identity 1.1.0), which now
     // disambiguates same-identity duplicates (primary added by
     // `createIdentity` OR intra-array dup) from cross-identity
@@ -58,7 +63,7 @@ contract Profile is INamed, IVersioned, ContractStatus, IInitializable {
     // semantics make the prior "fail-fast at the entrypoint" rationale
     // moot. `OperationalWalletAlreadyPrimary` and
     // `OperationalWalletEqualsAdmin` are dropped from `IdentityLib`.
-    string private constant _VERSION = "1.4.2";
+    string private constant _VERSION = "10.0.2";
 
     Ask public askContract;
     Identity public identityContract;
@@ -131,7 +136,23 @@ contract Profile is INamed, IVersioned, ContractStatus, IInitializable {
         ProfileStorage ps = profileStorage;
         Identity id = identityContract;
 
-        if (ids.getIdentityId(msg.sender) != 0) {
+        address operationalWallet;
+        if (msg.sender == adminWallet) {
+            if (operationalWallets.length == 0) {
+                revert ProfileLib.EmptyOperationalWallets();
+            }
+            operationalWallet = operationalWallets[0];
+        } else {
+            operationalWallet = msg.sender;
+        }
+
+        if (ids.getIdentityId(operationalWallet) != 0) {
+            revert ProfileLib.IdentityAlreadyExists(
+                ids.getIdentityId(operationalWallet),
+                operationalWallet
+            );
+        }
+        if (msg.sender != operationalWallet && ids.getIdentityId(msg.sender) != 0) {
             revert ProfileLib.IdentityAlreadyExists(ids.getIdentityId(msg.sender), msg.sender);
         }
         if (operationalWallets.length > parametersStorage.opWalletsLimitOnProfileCreation()) {
@@ -166,8 +187,22 @@ contract Profile is INamed, IVersioned, ContractStatus, IInitializable {
         // entrypoint no longer pays the gas of a duplicate pre-flight
         // pass on the happy path. A failing tx reverts atomically, so
         // there is never a partial / half-built identity to clean up.
-        uint72 identityId = id.createIdentity(msg.sender, adminWallet);
-        id.addOperationalWallets(identityId, operationalWallets);
+        uint72 identityId = id.createIdentity(operationalWallet, adminWallet);
+
+        if (msg.sender == adminWallet) {
+            if (operationalWallets.length > 1) {
+                address[] memory extraOps = new address[](operationalWallets.length - 1);
+                for (uint256 i = 1; i < operationalWallets.length; ) {
+                    extraOps[i - 1] = operationalWallets[i];
+                    unchecked {
+                        ++i;
+                    }
+                }
+                id.addOperationalWallets(identityId, extraOps);
+            }
+        } else {
+            id.addOperationalWallets(identityId, operationalWallets);
+        }
 
         ps.createProfile(identityId, nodeName, nodeId, initialOperatorFee);
     }

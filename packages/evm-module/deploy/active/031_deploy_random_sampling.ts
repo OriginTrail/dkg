@@ -27,7 +27,7 @@ func.dependencies = [
   'ProfileStorage',
   'EpochStorage',
   'AskStorage',
-  'KnowledgeCollectionStorage',
+  'DKGKnowledgeAssets',
   'IdentityStorage',
   'ShardingTableStorage',
   'ParametersStorage',

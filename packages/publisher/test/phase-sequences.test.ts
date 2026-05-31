@@ -84,7 +84,7 @@ describe('Phase-sequence contracts', () => {
     const cgId = await createTestContextGraph(chain);
     CONTEXT_GRAPH = String(cgId);
     _provider = provider;
-    _kav10Address = await chain.getKnowledgeAssetsV10Address();
+    _kav10Address = await chain.getKnowledgeAssetsLifecycleAddress();
   });
   afterAll(async () => {
     await revertSnapshot(_fileSnapshot);
@@ -231,7 +231,7 @@ describe('Phase-sequence contracts', () => {
 
     const updatedQuads = [q(ENTITY, 'http://schema.org/name', '"Updated"')];
     const { calls, fn } = recorder();
-    await publisher.update(pub.kcId, {
+    await publisher.update(pub.kaId, {
       contextGraphId: CONTEXT_GRAPH,
       quads: updatedQuads,
       onPhase: fn,
@@ -352,7 +352,7 @@ describe('Phase-sequence contracts', () => {
         publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
       });
 
-      (chain as unknown as { createKnowledgeAssetsV10: (...a: unknown[]) => Promise<never> }).createKnowledgeAssetsV10 =
+      (chain as unknown as { createKnowledgeAssets: (...a: unknown[]) => Promise<never> }).createKnowledgeAssets =
         async () => {
           throw new Error('simulated preflight failure (before broadcast)');
         };
@@ -386,7 +386,7 @@ describe('Phase-sequence contracts', () => {
         publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
       });
 
-      (chain as unknown as { createKnowledgeAssetsV10: (params: { onBroadcast?: () => void }) => Promise<never> }).createKnowledgeAssetsV10 =
+      (chain as unknown as { createKnowledgeAssets: (params: { onBroadcast?: () => void }) => Promise<never> }).createKnowledgeAssets =
         async (params) => {
           params.onBroadcast?.();
           throw new Error('simulated publish broadcast failure');
@@ -441,7 +441,7 @@ describe('Phase-sequence contracts', () => {
       const { calls, fn } = recorder();
       let threw: unknown = null;
       try {
-        await publisher.update(pub.kcId, {
+        await publisher.update(pub.kaId, {
           contextGraphId: CONTEXT_GRAPH,
           quads: newQuads,
           onPhase: fn,

@@ -40,6 +40,32 @@
     "type": "event"
   },
   {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "treasury",
+        "type": "address"
+      }
+    ],
+    "name": "ProtocolTreasurySet",
+    "type": "event"
+  },
+  {
+    "inputs": [],
+    "name": "MAX_PROTOCOL_TREASURY_FEE",
+    "outputs": [
+      {
+        "internalType": "uint16",
+        "name": "",
+        "type": "uint16"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
     "inputs": [],
     "name": "MAX_PUBLISHING_CONVICTION_EPOCHS",
     "outputs": [
@@ -197,6 +223,32 @@
   },
   {
     "inputs": [],
+    "name": "protocolTreasury",
+    "outputs": [
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "protocolTreasuryFee",
+    "outputs": [
+      {
+        "internalType": "uint16",
+        "name": "",
+        "type": "uint16"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
     "name": "publishingConvictionEpochs",
     "outputs": [
       {
@@ -321,6 +373,32 @@
       }
     ],
     "name": "setOperatorFeeUpdateDelay",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "protocolTreasury_",
+        "type": "address"
+      }
+    ],
+    "name": "setProtocolTreasury",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint16",
+        "name": "protocolTreasuryFee_",
+        "type": "uint16"
+      }
+    ],
+    "name": "setProtocolTreasuryFee",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"

@@ -26,8 +26,19 @@ const ARCHIVED_METHODS: ReadonlyArray<string> = [
   'stakeWithLockTier',
   'getDelegatorConvictionMultiplier',
   // V9 knowledge lifecycle
+  //
+  // NOTE (rc.12 rename): the V10.1 KnowledgeCollection -> KnowledgeAsset
+  // rename re-introduced bare "*KnowledgeAssets" names as the canonical
+  // V10.1 entrypoints (`createKnowledgeAssets`, `updateKnowledgeAssets`
+  // — different signatures, different semantics from the archived V9
+  // surface). The V9 PRD-listed name `publishKnowledgeAssets` was
+  // re-purposed to `createKnowledgeAssets` (publish-as-mint) in V10.1
+  // and remains on this archived list because the V9 name itself is
+  // gone. Similarly, `updateKnowledgeAssets` is now a LIVE V10.1
+  // method name (replacing the verbose `updateKnowledgeCollectionV10`
+  // pattern) and is intentionally NOT listed below — its presence in
+  // the live adapter is correct.
   'publishKnowledgeAssets',
-  'updateKnowledgeAssets',
   'extendStorage',
   'transferNamespace',
   // V9 permanent publish

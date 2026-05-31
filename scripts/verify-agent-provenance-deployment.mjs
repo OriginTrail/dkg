@@ -6,11 +6,11 @@
 // hardhat. Confirms the deployed bytecode actually carries the
 // strict-break ABI shape from the agent-provenance plan §9.7 #2:
 //
-//   - KnowledgeAssetsV10.publish(PublishParams) accepts the four
-//     author* fields.
-//   - KnowledgeAssetsV10 does NOT expose publishDirect / updateDirect.
-//   - KnowledgeCollectionStorage.getLatestMerkleRootAuthor(uint256)
-//     is callable.
+//   - KnowledgeAssetsLifecycle (formerly KnowledgeAssetsV10)
+//     .publish(PublishParams) accepts the four author* fields.
+//   - KnowledgeAssetsLifecycle does NOT expose publishDirect / updateDirect.
+//   - DKGKnowledgeAssets (formerly KnowledgeCollectionStorage)
+//     .getLatestMerkleRootAuthor(uint256) is callable.
 //
 // This is the runtime counterpart of
 // packages/chain/test/agent-provenance-cross-cutting.test.ts (which
@@ -18,7 +18,7 @@
 // regressions in the source tree and (b) drift between the source
 // ABI and what's actually deployed on the local hardhat.
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join, dirname } from 'node:path';
 import { createRequire } from 'node:module';
@@ -38,10 +38,24 @@ const CONTRACTS_JSON = join(
   REPO_ROOT,
   'packages/evm-module/deployments/localhost_contracts.json',
 );
-const KAV10_ABI = join(REPO_ROOT, 'packages/evm-module/abi/KnowledgeAssetsV10.json');
-const KCS_ABI = join(
-  REPO_ROOT,
-  'packages/evm-module/abi/KnowledgeCollectionStorage.json',
+const ABI_DIR = join(REPO_ROOT, 'packages/evm-module/abi');
+
+// Greenfield rename: the V10 logic contract is `KnowledgeAssetsLifecycle`
+// (was `KnowledgeAssetsV10`) and the storage contract is `DKGKnowledgeAssets`
+// (was `KnowledgeCollectionStorage`). Prefer the new ABI/Hub names and fall
+// back to the legacy ones so this smoke check works against both a greenfield
+// deploy and a pre-rename one.
+function firstExisting(...paths) {
+  return paths.find((p) => existsSync(p)) ?? paths[paths.length - 1];
+}
+
+const KAV10_ABI = firstExisting(
+  join(ABI_DIR, 'KnowledgeAssetsLifecycle.json'),
+  join(ABI_DIR, 'KnowledgeAssetsV10.json'),
+);
+const KCS_ABI = firstExisting(
+  join(ABI_DIR, 'DKGKnowledgeAssets.json'),
+  join(ABI_DIR, 'DKGKnowledgeAssets.json'),
 );
 
 function fail(msg) {
@@ -77,15 +91,13 @@ async function main() {
   const root = loadJson(CONTRACTS_JSON);
   const contracts = root.contracts ?? root;
 
-  const kav10Addr =
-    contracts.KnowledgeAssetsV10?.evmAddress ||
-    contracts.KnowledgeAssetsV10?.address;
-  const kcsAddr =
-    contracts.KnowledgeCollectionStorage?.evmAddress ||
-    contracts.KnowledgeCollectionStorage?.address;
+  const kav10Entry = contracts.KnowledgeAssetsLifecycle ?? contracts.KnowledgeAssetsV10;
+  const kcsEntry = contracts.DKGKnowledgeAssets ?? contracts.KnowledgeCollectionStorage;
+  const kav10Addr = kav10Entry?.evmAddress || kav10Entry?.address;
+  const kcsAddr = kcsEntry?.evmAddress || kcsEntry?.address;
 
-  if (!kav10Addr) fail('KnowledgeAssetsV10 address missing from contracts.json');
-  if (!kcsAddr) fail('KnowledgeCollectionStorage address missing from contracts.json');
+  if (!kav10Addr) fail('KnowledgeAssetsLifecycle / KnowledgeAssetsV10 address missing from contracts.json');
+  if (!kcsAddr) fail('DKGKnowledgeAssets / KnowledgeCollectionStorage address missing from contracts.json');
 
   const kav10Iface = new ethers.Interface(loadJson(KAV10_ABI));
   const kcsIface = new ethers.Interface(loadJson(KCS_ABI));
@@ -137,19 +149,25 @@ async function main() {
   pass('KCS exposes getLatestMerkleRootAuthor(uint256)');
 
   const events = kcsIface.fragments.filter((f) => f.type === 'event');
-  const created = events.find((e) => e.name === 'KnowledgeCollectionCreated');
-  const updated = events.find((e) => e.name === 'KnowledgeCollectionUpdated');
-  if (!created) fail('KnowledgeCollectionCreated event missing from KCS ABI');
-  if (!updated) fail('KnowledgeCollectionUpdated event missing from KCS ABI');
+  // Greenfield renamed the create/update events to KnowledgeAsset{Created,Updated};
+  // accept either so this works against both ABIs.
+  const created = events.find(
+    (e) => e.name === 'KnowledgeAssetCreated' || e.name === 'KnowledgeAssetCreated',
+  );
+  const updated = events.find(
+    (e) => e.name === 'KnowledgeAssetUpdated' || e.name === 'KnowledgeAssetUpdated',
+  );
+  if (!created) fail('KnowledgeAssetCreated / KnowledgeAssetCreated event missing from storage ABI');
+  if (!updated) fail('KnowledgeAssetUpdated / KnowledgeAssetUpdated event missing from storage ABI');
   const createdHasAuthor = created.inputs.some(
     (i) => i.name === 'author' && i.indexed,
   );
   const updatedHasAuthor = updated.inputs.some(
     (i) => i.name === 'author' && i.indexed,
   );
-  if (!createdHasAuthor) fail('KnowledgeCollectionCreated.author indexed field missing');
-  if (!updatedHasAuthor) fail('KnowledgeCollectionUpdated.author indexed field missing');
-  pass('KCS events emit indexed `author`');
+  if (!createdHasAuthor) fail(`${created.name}.author indexed field missing`);
+  if (!updatedHasAuthor) fail(`${updated.name}.author indexed field missing`);
+  pass('storage events emit indexed `author`');
 
   console.log('');
   console.log('--- runtime checks (require live hardhat at ' + RPC_URL + ') ---');
@@ -162,19 +180,19 @@ async function main() {
   }
 
   const kav10Code = await provider.getCode(kav10Addr);
-  if (kav10Code === '0x') fail('No bytecode at KnowledgeAssetsV10 address');
-  pass('KnowledgeAssetsV10 has deployed bytecode');
+  if (kav10Code === '0x') fail('No bytecode at KnowledgeAssetsLifecycle / KnowledgeAssetsV10 address');
+  pass('KnowledgeAssetsLifecycle (KnowledgeAssetsV10) has deployed bytecode');
 
   const kcsCode = await provider.getCode(kcsAddr);
-  if (kcsCode === '0x') fail('No bytecode at KnowledgeCollectionStorage address');
-  pass('KnowledgeCollectionStorage has deployed bytecode');
+  if (kcsCode === '0x') fail('No bytecode at DKGKnowledgeAssets / KnowledgeCollectionStorage address');
+  pass('DKGKnowledgeAssets (KnowledgeCollectionStorage) has deployed bytecode');
 
-  const kcs = new ethers.Contract(kcsAddr, loadJson(KCS_ABI), provider);
+  const kas = new ethers.Contract(kcsAddr, loadJson(KCS_ABI), provider);
   try {
-    await kcs.getLatestMerkleRootAuthor(0n);
+    await kas.getLatestMerkleRootAuthor(0n);
     pass('getLatestMerkleRootAuthor callable on deployed bytecode');
   } catch (err) {
-    pass(`getLatestMerkleRootAuthor reverts on unknown kcId 0 (expected): ${err.shortMessage || err.message}`);
+    pass(`getLatestMerkleRootAuthor reverts on unknown kaId 0 (expected): ${err.shortMessage || err.message}`);
   }
 
   console.log('');

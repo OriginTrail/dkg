@@ -308,7 +308,7 @@ describe('V10 PUBLISH Protocol (spec §9.0)', () => {
   // `dkg-agent.createV10ACKProvider`,
   // `publisher-runner.createV10ACKProviderForPublisher`,
   // `storage-ack-handler.ts:handler`, and
-  // `evm-adapter.createKnowledgeAssetsV10`.
+  // `evm-adapter.createKnowledgeAssets`.
 
   describe('Phase 4: SWM cleanup after publish', () => {
     it('SWM graph URI follows expected naming convention', () => {

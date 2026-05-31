@@ -88,7 +88,7 @@ export interface MemoryEntity {
 }
 
 export interface PublishFromSwmResult {
-  kcId?: bigint;
+  kaId?: bigint;
   ual?: string;
   status: string;
   tripleCount: number;
@@ -1568,7 +1568,7 @@ export class ChatMemoryManager {
       clearSharedMemoryAfter: opts?.clearSharedMemoryAfter ?? false,
     });
     return {
-      kcId: result?.kcId,
+      kaId: result?.kaId,
       ual: result?.ual,
       status: result?.status ?? 'confirmed',
       tripleCount: result?.publicQuads?.length ?? 0,

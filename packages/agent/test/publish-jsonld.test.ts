@@ -376,14 +376,14 @@ describe('publishJsonLd', () => {
     // Read author straight from the chain adapter.
     const chainAdapter = (agent as unknown as {
       chain: {
-        getLatestMerkleRootAuthor: (kcId: bigint) => Promise<string>;
+        getLatestMerkleRootAuthor: (kaId: bigint) => Promise<string>;
       };
     }).chain;
-    const kcId = (finalized as any)?.broadcast?.batchId
+    const kaId = (finalized as any)?.broadcast?.batchId
       ?? (finalized as any)?.inclusion?.batchId
       ?? (finalized as any)?.finalization?.batchId;
-    expect(kcId).toBeDefined();
-    const onChainAuthor = await chainAdapter.getLatestMerkleRootAuthor(BigInt(kcId));
+    expect(kaId).toBeDefined();
+    const onChainAuthor = await chainAdapter.getLatestMerkleRootAuthor(BigInt(kaId));
     expect(onChainAuthor.toLowerCase()).toBe(tenant.agentAddress.toLowerCase());
     expect(onChainAuthor.toLowerCase()).not.toBe(publisherAddress.toLowerCase());
   }, 60_000);
@@ -430,8 +430,8 @@ describe('publishJsonLd', () => {
     // that signed, not the publisher fallback path.
     const onChainId = (await agent.getContextGraphOnChainId('async-seal-distinct')) as string;
     const kav10Address = await (agent as unknown as {
-      chain: { getKnowledgeAssetsV10Address(): Promise<string> };
-    }).chain.getKnowledgeAssetsV10Address();
+      chain: { getKnowledgeAssetsLifecycleAddress(): Promise<string> };
+    }).chain.getKnowledgeAssetsLifecycleAddress();
     const chainId = await (agent as unknown as {
       chain: { getEvmChainId(): Promise<bigint> };
     }).chain.getEvmChainId();
@@ -777,8 +777,8 @@ describe('publishJsonLd', () => {
     // Recovered signer must match the self-sovereign EOA, not the publisher.
     const onChainId = (await agent.getContextGraphOnChainId('async-seal-callback')) as string;
     const kav10Address = await (agent as unknown as {
-      chain: { getKnowledgeAssetsV10Address(): Promise<string> };
-    }).chain.getKnowledgeAssetsV10Address();
+      chain: { getKnowledgeAssetsLifecycleAddress(): Promise<string> };
+    }).chain.getKnowledgeAssetsLifecycleAddress();
     const chainId = await (agent as unknown as {
       chain: { getEvmChainId(): Promise<bigint> };
     }).chain.getEvmChainId();
@@ -891,13 +891,13 @@ describe('publishJsonLd', () => {
     expect(finalized?.status === 'broadcast' || finalized?.status === 'included' || finalized?.status === 'finalized').toBe(true);
 
     const chainAdapter = (agent as unknown as {
-      chain: { getLatestMerkleRootAuthor: (kcId: bigint) => Promise<string> };
+      chain: { getLatestMerkleRootAuthor: (kaId: bigint) => Promise<string> };
     }).chain;
-    const kcId = (finalized as any)?.broadcast?.batchId
+    const kaId = (finalized as any)?.broadcast?.batchId
       ?? (finalized as any)?.inclusion?.batchId
       ?? (finalized as any)?.finalization?.batchId;
-    expect(kcId).toBeDefined();
-    const onChainAuthor = await chainAdapter.getLatestMerkleRootAuthor(BigInt(kcId));
+    expect(kaId).toBeDefined();
+    const onChainAuthor = await chainAdapter.getLatestMerkleRootAuthor(BigInt(kaId));
     expect(onChainAuthor.toLowerCase()).toBe(selfSov.agentAddress.toLowerCase());
     expect(onChainAuthor.toLowerCase()).not.toBe(publisherAddress.toLowerCase());
   }, 60_000);

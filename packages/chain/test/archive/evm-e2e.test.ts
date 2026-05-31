@@ -219,7 +219,7 @@ describe('EVM E2E: Full on-chain publishing lifecycle', () => {
     const tokenAmount = await adapter.getRequiredPublishTokenAmount(byteSize, epochs);
 
     const publisherIdentityId = BigInt(ctx.coreProfileId);
-    const kav10Address = await adapter.getKnowledgeAssetsV10Address();
+    const kav10Address = await adapter.getKnowledgeAssetsLifecycleAddress();
     const evmChainId = await adapter.getEvmChainId();
 
     // RFC-001 §3 author attestation. EIP-712 typed data over
@@ -265,7 +265,7 @@ describe('EVM E2E: Full on-chain publishing lifecycle', () => {
 
     expect(ackSignatures.length).toBe(3);
 
-    const result = await adapter.createKnowledgeAssetsV10!({
+    const result = await adapter.createKnowledgeAssets!({
       publishOperationId: ethers.hexlify(ethers.randomBytes(32)),
       contextGraphId,
       merkleRoot,

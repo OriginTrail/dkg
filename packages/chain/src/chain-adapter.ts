@@ -86,8 +86,21 @@ export const DEFAULT_APPROVAL_POLICY: ApprovalPolicy = { mode: 'per-publish' };
 export const DEFAULT_REPLENISH_TARGET_ALLOWANCE: bigint = 1000n * (10n ** 18n);
 export const DEFAULT_REFILL_BELOW_FRACTION: number = 0.1;
 
+/** Canonical greenfield UAL: did:dkg:{chainId}/{DKGKnowledgeAssets}/{kaId} */
+export function buildKnowledgeAssetUal(
+  chainId: string,
+  knowledgeAssetsContract: string,
+  kaId: bigint,
+): string {
+  return `did:dkg:${chainId}/${knowledgeAssetsContract.toLowerCase()}/${kaId.toString()}`;
+}
+
 export interface OnChainPublishResult {
   batchId: bigint;
+  /** Greenfield: equals `batchId` when tokenId == kaId. */
+  kaId?: bigint;
+  /** `DKGKnowledgeAssets` contract address used in the UAL path segment. */
+  knowledgeAssetsContract?: string;
   /** Absent for updates (no new KAs minted). */
   startKAId?: bigint;
   /** Absent for updates (no new KAs minted). */
@@ -98,7 +111,7 @@ export interface OnChainPublishResult {
   publisherAddress: string;
   /**
    * Chain-confirmed author identity for this publish. Sourced from the
-   * `KnowledgeCollectionCreated` event's indexed `author` topic, which the
+   * `KnowledgeAssetCreated` event's indexed `author` topic, which the
    * V10.1 contract sets to the address recovered (or wallet address
    * verified via EIP-1271) from the EIP-712 author attestation. Absent /
    * `undefined` for legacy V9-ish publishes that go through
@@ -137,7 +150,7 @@ export interface TxResult {
    *
    * Required for successful update results that callers will persist as
    * confirmed metadata, unless the adapter also exposes
-   * `getLatestMerkleRootPublisher(kcId)` so callers can query the same
+   * `getLatestMerkleRootPublisher(kaId)` so callers can query the same
    * chain-truth address after the receipt. Publish-style result shapes
    * use `OnChainPublishResult.publisherAddress` instead.
    */
@@ -281,7 +294,7 @@ export interface PublishToContextGraphParams extends PublishParams {
   participantSignatures: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
   /**
    * V10 Merkle leaf count of the published flat-KC payload. Required: the
-   * adapter mirrors this V9 publish to V10 (`createKnowledgeAssetsV10`)
+   * adapter mirrors this V9 publish to V10 (`createKnowledgeAssets`)
    * and `RandomSampling` reads `merkleLeafCount` from on-chain storage to
    * pick / verify `chunkId`. Hard-coding it would corrupt every bridged
    * KC whose tree has more than one leaf. Callers must supply the value
@@ -434,8 +447,8 @@ export interface V10PublishParams {
   onBroadcast?: (info: { txHash: string }) => Promise<void> | void;
 }
 
-export interface V10UpdateKCParams {
-  kcId: bigint;
+export interface V10UpdateKAParams {
+  kaId: bigint;
   newMerkleRoot: Uint8Array;
   newByteSize: bigint;
   /** V10 flat-KC Merkle leaf count after update (sorted + deduped). */
@@ -446,6 +459,11 @@ export interface V10UpdateKCParams {
   /** When true, the caller asserts the KC was created via V10. Skips probing. */
   v10Origin?: boolean;
   publisherAddress?: string;
+  /** Greenfield: ERC-721 owner (required — from `precomputedUpdateAttestation`). */
+  authorAddress: string;
+  authorR: Uint8Array;
+  authorVS: Uint8Array;
+  authorSchemeVersion?: number;
   updateOperationId?: string;
   publisherNodeIdentityId?: bigint;
   ackSignatures?: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
@@ -490,9 +508,9 @@ export type V10PublishDirectParams = V10PublishParams;
  * surfaces alongside the challenge.
  */
 export interface NodeChallenge {
-  knowledgeCollectionId: bigint;
+  knowledgeAssetId: bigint;
   chunkId: bigint;
-  knowledgeCollectionStorageContract: string;
+  knowledgeAssetStorageContract: string;
   epoch: bigint;
   activeProofPeriodStartBlock: bigint;
   proofingPeriodDurationInBlocks: bigint;
@@ -566,7 +584,7 @@ export class NoEligibleContextGraphError extends Error {
  */
 export class NoEligibleKnowledgeCollectionError extends Error {
   readonly name = 'NoEligibleKnowledgeCollectionError';
-  constructor() { super('NoEligibleKnowledgeCollection: KC list empty or all sampled KCs expired'); }
+  constructor() { super('NoEligibleKnowledgeAsset: KC list empty or all sampled KCs expired'); }
 }
 
 /**
@@ -607,7 +625,7 @@ export interface CreateKCParams {
 }
 
 export interface UpdateKCParams {
-  kcId: bigint;
+  kaId: bigint;
   newMerkleRoot: Uint8Array;
   signatures: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
 }
@@ -696,7 +714,7 @@ export interface ChainAdapter {
 
   // Context Graphs (name-hash commitment via ContextGraphNameRegistry)
   createContextGraph(params: CreateContextGraphParams): Promise<TxResult>;
-  submitToContextGraph(kcId: string, contextGraphId: string): Promise<TxResult>;
+  submitToContextGraph(kaId: string, contextGraphId: string): Promise<TxResult>;
   /** Reveal cleartext name+description on-chain for a context graph you created. Optional. */
   revealContextGraphMetadata?(contextGraphId: string, name: string, description: string): Promise<TxResult>;
   /** List context graphs from chain via `NameClaimed` events. Optional; not supported on no-chain/mock. */
@@ -842,7 +860,7 @@ export interface ChainAdapter {
   /**
    * V10 publish (KnowledgeAssetsV10 contract — writes to
    * KnowledgeCollectionStorage). Required on every adapter that claims
-   * V10 capability; paired with `getKnowledgeAssetsV10Address()` and
+   * V10 capability; paired with `getKnowledgeAssetsLifecycleAddress()` and
    * `getEvmChainId()` below so authors of out-of-tree adapters get a
    * compile-time failure instead of a runtime regression when they
    * implement the tx submission but forget the digest-prefix getters.
@@ -851,7 +869,10 @@ export interface ChainAdapter {
    * separate `publishDirect`); the adapter auto-selects PCA-discount vs.
    * direct-spend based on `agentToAccountId(msg.sender)`.
    */
-  createKnowledgeAssetsV10(params: V10PublishParams): Promise<OnChainPublishResult>;
+  createKnowledgeAssets(params: V10PublishParams): Promise<OnChainPublishResult>;
+
+  /** Deployed `DKGKnowledgeAssets` (or legacy `KnowledgeCollectionStorage`) address. */
+  getDKGKnowledgeAssetsAddress?(): Promise<string>;
 
   /** Read minimumRequiredSignatures from ParametersStorage. Used by ACKCollector. */
   getMinimumRequiredSignatures?(): Promise<number>;
@@ -950,7 +971,7 @@ export interface ChainAdapter {
    * `getLatestMerkleRootPublisher` so callers can persist confirmed metadata
    * with real chain attribution.
    */
-  updateKnowledgeCollectionV10?(params: V10UpdateKCParams): Promise<TxResult>;
+  updateKnowledgeCollectionV10?(params: V10UpdateKAParams): Promise<TxResult>;
 
   /**
    * Whether this adapter supports V10 publish paths. Required — this is
@@ -975,11 +996,11 @@ export interface ChainAdapter {
   /**
    * Returns the deployed address of `KnowledgeAssetsV10` on this chain.
    * Required — the publisher uses it to build the H5-prefixed publish
-   * digests, and any adapter that implements `createKnowledgeAssetsV10`
+   * digests, and any adapter that implements `createKnowledgeAssets`
    * must also implement this so the digest inputs match the on-chain
    * contract that will verify them. Throws if the contract is not deployed.
    */
-  getKnowledgeAssetsV10Address(): Promise<string>;
+  getKnowledgeAssetsLifecycleAddress(): Promise<string>;
 
   /**
    * Returns the numeric EVM chain id (e.g. 31337n for hardhat). Distinct
@@ -990,8 +1011,8 @@ export interface ChainAdapter {
   getEvmChainId(): Promise<bigint>;
 
   // V8 backward compatibility (used by mock adapter, will be removed)
-  createKnowledgeCollection?(params: CreateKCParams): Promise<TxResult>;
-  updateKnowledgeCollection?(params: UpdateKCParams): Promise<TxResult>;
+  createKnowledgeAsset?(params: CreateKCParams): Promise<TxResult>;
+  updateKnowledgeAsset?(params: UpdateKCParams): Promise<TxResult>;
 
   // ----- Random Sampling (V10 RandomSampling.sol) -----
 
@@ -1050,30 +1071,30 @@ export interface ChainAdapter {
 
   // ----- KC views (V10 KnowledgeCollectionStorage + ContextGraphStorage) -----
   // Used by the off-chain Random Sampling prover to bind a challenged
-  // `kcId` to the canonical merkle root + leaf count + cgId before
+  // `kaId` to the canonical merkle root + leaf count + cgId before
   // building a V10 Merkle proof from the local triple store. All four
   // are pure reads; cheap to call per challenge.
 
   /**
    * Latest on-chain merkle root for the given knowledge collection.
    * Returns 32 raw bytes (use `ethers.hexlify` to render). Throws when
-   * `kcId` is unknown to the chain or the V10 storage contract is not
+   * `kaId` is unknown to the chain or the V10 storage contract is not
    * deployed on this Hub. Optional so non-V10 / no-chain adapters can
    * stub the prover surface.
    */
-  getLatestMerkleRoot?(kcId: bigint): Promise<Uint8Array>;
+  getLatestMerkleRoot?(kaId: bigint): Promise<Uint8Array>;
 
   /**
    * V10 flat-KC merkle leaf count (sorted + deduped) recorded on-chain
-   * for `kcId`. Used by the prover to (a) validate the local extraction
+   * for `kaId`. Used by the prover to (a) validate the local extraction
    * matches the published shape before building a proof, and (b) sanity
    * check the on-chain `chunkId = leafIndex` falls within the tree.
    */
-  getMerkleLeafCount?(kcId: bigint): Promise<number>;
+  getMerkleLeafCount?(kaId: bigint): Promise<number>;
 
   /**
    * OT-RFC-38 LU-11 / OT-RFC-39 — latest on-chain ciphertext-chunks
-   * Merkle root for `kcId`. Read from
+   * Merkle root for `kaId`. Read from
    * `KnowledgeCollectionStorage.getLatestCiphertextChunksRoot(uint256)`.
    *
    * Returns 32 raw bytes. Returns `bytes32(0)` (all-zero) when the KC
@@ -1085,11 +1106,11 @@ export interface ChainAdapter {
    *
    * Optional so non-V10 / no-chain adapters can stub the surface.
    */
-  getLatestCiphertextChunksRoot?(kcId: bigint): Promise<Uint8Array>;
+  getLatestCiphertextChunksRoot?(kaId: bigint): Promise<Uint8Array>;
 
   /**
    * OT-RFC-38 LU-11 / OT-RFC-39 — number of ciphertext chunks
-   * committed on chain for `kcId`. Read from
+   * committed on chain for `kaId`. Read from
    * `KnowledgeCollectionStorage.getCiphertextChunkCount(uint256)`.
    *
    * Returns `0` for KCs without a chunked commitment (see
@@ -1101,20 +1122,20 @@ export interface ChainAdapter {
    *
    * Optional so non-V10 / no-chain adapters can stub the surface.
    */
-  getCiphertextChunkCount?(kcId: bigint): Promise<number>;
+  getCiphertextChunkCount?(kaId: bigint): Promise<number>;
 
   /**
-   * Address that signed the latest merkle root for `kcId` (the EOA that
+   * Address that signed the latest merkle root for `kaId` (the EOA that
    * called `KnowledgeAssetsV10.publish` / update). Mostly observability
    * — the prover does not gate on this — but useful for trace logs and for
    * future sharding / authorship-based reward heuristics. Publishers also use
    * this as the compatibility path for update adapters whose successful
    * `TxResult` cannot directly include `publisherAddress`.
    */
-  getLatestMerkleRootPublisher?(kcId: bigint): Promise<string>;
+  getLatestMerkleRootPublisher?(kaId: bigint): Promise<string>;
 
   /**
-   * Verified author identity for the latest merkle-root entry of `kcId`.
+   * Verified author identity for the latest merkle-root entry of `kaId`.
    * Sourced from `KnowledgeCollectionStorage.getLatestMerkleRootAuthor`,
    * which returns:
    *   - the address recovered from the EIP-712 author attestation (EOA
@@ -1129,21 +1150,21 @@ export interface ChainAdapter {
    * can omit the surface; callers MUST treat `address(0)` as
    * "no attestation on file" rather than as a valid author claim.
    */
-  getLatestMerkleRootAuthor?(kcId: bigint): Promise<string>;
+  getLatestMerkleRootAuthor?(kaId: bigint): Promise<string>;
 
   /**
-   * Context graph id that hosts `kcId`, sourced from
-   * `ContextGraphStorage.kcToContextGraph[kcId]`. The on-chain
+   * Context graph id that hosts `kaId`, sourced from
+   * `ContextGraphStorage.kaToContextGraph[kaId]`. The on-chain
    * `Challenge` struct intentionally omits cgId (V8 wire compat — see
    * `_generateChallenge` NatSpec); the off-chain prover needs cgId to
    * route the local-extraction queries to the correct CG-scoped data /
    * meta graph URIs. One chain read per challenge.
    *
-   * Returns `0n` when `kcId` is unregistered (matches the Solidity
+   * Returns `0n` when `kaId` is unregistered (matches the Solidity
    * default-zero mapping). Callers MUST treat zero as "not found" and
    * skip the period rather than blindly querying CG `_meta:0`.
    */
-  getKCContextGraphId?(kcId: bigint): Promise<bigint>;
+  getKAContextGraphId?(kaId: bigint): Promise<bigint>;
 
   /**
    * On-chain access policy for `contextGraphId`. Read from

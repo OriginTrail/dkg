@@ -105,8 +105,8 @@ describe('@unit Profile contract', function () {
     expect(await Profile.name()).to.equal('Profile');
   });
 
-  it('The contract is version "1.4.2"', async () => {
-    expect(await Profile.version()).to.equal('1.4.2');
+  it('The contract is version "10.0.2"', async () => {
+    expect(await Profile.version()).to.equal('10.0.2');
   });
 
   it('Create a profile with valid inputs, expect to pass', async () => {
@@ -293,6 +293,25 @@ describe('@unit Profile contract', function () {
     )
       .to.be.revertedWithCustomError(Identity, 'OperationalWalletDuplicate')
       .withArgs(accounts[0].address);
+  });
+
+  it('admin wallet may call createProfile when operationalWallets[0] is distinct', async () => {
+    const tx = await Profile.connect(accounts[1]).createProfile(
+      accounts[1].address,
+      [accounts[2].address],
+      'Admin-Created Node',
+      nodeId1,
+      1000,
+    );
+    await tx.wait();
+    const identityId = await IdentityStorage.getIdentityId(accounts[2].address);
+    expect(identityId).to.be.gt(0);
+    const adminKey = await IdentityStorage.keyHasPurpose(
+      identityId,
+      ethers.keccak256(ethers.solidityPacked(['address'], [accounts[1].address])),
+      1,
+    );
+    expect(adminKey).to.be.true;
   });
 
   it('createProfile reverts KeyAlreadyAttached when an op wallet equals adminWallet (admin/operational overlap)', async () => {

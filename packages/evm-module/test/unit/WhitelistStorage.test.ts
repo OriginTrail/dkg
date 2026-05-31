@@ -43,8 +43,8 @@ describe('@unit WhitelistStorage contract', function () {
     expect(await WhitelistStorage.name()).to.equal('WhitelistStorage');
   });
 
-  it('The contract is version "1.0.0"', async () => {
-    expect(await WhitelistStorage.version()).to.equal('1.0.0');
+  it('The contract is version "10.0.2"', async () => {
+    expect(await WhitelistStorage.version()).to.equal('10.0.2');
   });
 
   it('Address is not whitelisted; expect to be false', async () => {

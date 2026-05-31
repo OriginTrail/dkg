@@ -244,15 +244,15 @@ curl -sH "Authorization: Bearer $TOKEN" \
   http://localhost:9200/api/shared-memory/publish
 ```
 
-Capture `kcId` + `txHash` + `merkleRoot` from the response.
+Capture `kaId` + `txHash` + `merkleRoot` from the response.
 
-## 6. Outsider verifies the published KC
+## 6. Outsider verifies the published KA
 
 From any third party (or just laptop B):
 ```bash
 TOKEN=$(dkg auth show)
 curl -sH "Authorization: Bearer $TOKEN" \
-  "http://localhost:9200/api/kc/<kcId>" | jq '.merkleRoot'
+  "http://localhost:9200/api/kc/<kaId>" | jq '.merkleRoot'
 ```
 
 The merkleRoot must match what laptop A's publish reported.
@@ -261,7 +261,7 @@ Cross-verify the attestation:
 ```bash
 curl -sH "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{ "contextGraphId": "<cg-id>", "batchId": "<kcId>", "merkleRoot": "<merkleRoot>", "plaintextLeafHash": "<leaf>" }' \
+  -d '{ "contextGraphId": "<cg-id>", "batchId": "<kaId>", "merkleRoot": "<merkleRoot>", "plaintextLeafHash": "<leaf>" }' \
   http://localhost:9200/api/attestation/mint
 ```
 

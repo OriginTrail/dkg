@@ -125,8 +125,8 @@ function walk(dir: string, visit: (path: string) => void): void {
 }
 
 describe('Cross-cutting verification — agent-provenance via on-chain author attestation', () => {
-  describe('§9.7 #2 — strict-break ABI surface (KnowledgeAssetsV10)', () => {
-    const abi = loadAbi('packages/chain/abi/KnowledgeAssetsV10.json');
+  describe('§9.7 #2 — strict-break ABI surface (KnowledgeAssetsLifecycle)', () => {
+    const abi = loadAbi('packages/chain/abi/KnowledgeAssetsLifecycle.json');
     const fns = abi.filter((x) => x.type === 'function');
     const fnNames = fns.map((f) => f.name);
 
@@ -171,22 +171,51 @@ describe('Cross-cutting verification — agent-provenance via on-chain author at
     });
   });
 
-  describe('§9.7 #2 — KnowledgeCollectionStorage event ABI carries indexed author', () => {
-    const abi = loadAbi('packages/chain/abi/KnowledgeCollectionStorage.json');
+  describe('§9.7 #2 — DKGKnowledgeAssets event ABI carries indexed author', () => {
+    const abi = loadAbi('packages/chain/abi/DKGKnowledgeAssets.json');
     const events = abi.filter((x) => x.type === 'event');
 
-    it('KnowledgeCollectionCreated emits indexed `author`', () => {
-      const evt = events.find((e) => e.name === 'KnowledgeCollectionCreated');
+    it('KnowledgeAssetCreated emits indexed `author`', () => {
+      const evt = events.find((e) => e.name === 'KnowledgeAssetCreated');
       expect(evt).toBeDefined();
       const argNames = flattenInputNames(evt!.inputs);
       expect(argNames).toContain('author');
     });
 
-    it('KnowledgeCollectionUpdated emits indexed `author`', () => {
-      const evt = events.find((e) => e.name === 'KnowledgeCollectionUpdated');
+    it('KnowledgeAssetUpdated emits indexed `author`', () => {
+      const evt = events.find((e) => e.name === 'KnowledgeAssetUpdated');
       expect(evt).toBeDefined();
       const argNames = flattenInputNames(evt!.inputs);
       expect(argNames).toContain('author');
+    });
+  });
+
+  describe('§9.7 #2 — greenfield ABI rename (KnowledgeAssetsLifecycle + DKGKnowledgeAssets)', () => {
+    const lifecycleAbi = loadAbi('packages/chain/abi/KnowledgeAssetsLifecycle.json');
+    const lifecycleFns = lifecycleAbi
+      .filter((x) => x.type === 'function')
+      .map((f) => f.name);
+
+    it('KnowledgeAssetsLifecycle exposes publish/update without publishDirect/updateDirect', () => {
+      expect(lifecycleFns).toContain('publish');
+      expect(lifecycleFns).toContain('update');
+      expect(lifecycleFns).not.toContain('publishDirect');
+      expect(lifecycleFns).not.toContain('updateDirect');
+    });
+
+    const storageAbi = loadAbi('packages/chain/abi/DKGKnowledgeAssets.json');
+    const storageEvents = storageAbi.filter((x) => x.type === 'event');
+
+    it('DKGKnowledgeAssets emits KnowledgeAssetCreated with indexed author', () => {
+      const evt = storageEvents.find((e) => e.name === 'KnowledgeAssetCreated');
+      expect(evt).toBeDefined();
+      const argNames = flattenInputNames(evt!.inputs);
+      expect(argNames).toContain('author');
+    });
+
+    it('DKGKnowledgeAssets exposes getLatestMerkleRootAuthor(uint256)', () => {
+      const fns = storageAbi.filter((x) => x.type === 'function').map((f) => f.name);
+      expect(fns).toContain('getLatestMerkleRootAuthor');
     });
   });
 

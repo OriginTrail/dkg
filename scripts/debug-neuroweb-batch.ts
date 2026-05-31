@@ -4,12 +4,12 @@ import { ethers, JsonRpcProvider, Contract } from 'ethers';
 async function main() {
   const provider = new JsonRpcProvider('https://astrosat-parachain-rpc.origin-trail.network/');
   const KCS = '0x8f678eB0E57ee8A109B295710E23076fA3a443fe';
-  const kcs = new Contract(KCS, [
+  const kas = new Contract(KCS, [
     'function getEndEpoch(uint256 id) view returns (uint40)',
     'function getStartEpoch(uint256 id) view returns (uint40)',
     'function getTokenAmount(uint256 id) view returns (uint96)',
     'function getLatestMerkleRootPublisher(uint256 id) view returns (address)',
-    'function getLatestKnowledgeCollectionId() view returns (uint256)',
+    'function getLatestKnowledgeAssetId() view returns (uint256)',
   ], provider);
 
   const lastId = 6320255;
@@ -19,7 +19,7 @@ async function main() {
     const t0 = Date.now();
     const promises = [];
     for (let id = lastId; id > lastId - batchSize; id--) {
-      promises.push(kcs.getEndEpoch(id));
+      promises.push(kas.getEndEpoch(id));
     }
     await Promise.all(promises);
     const elapsed = Date.now() - t0;
@@ -32,10 +32,10 @@ async function main() {
   for (let id = lastId; id > lastId - 500; id--) {
     all4.push(
       Promise.all([
-        kcs.getEndEpoch(id),
-        kcs.getStartEpoch(id),
-        kcs.getTokenAmount(id),
-        kcs.getLatestMerkleRootPublisher(id),
+        kas.getEndEpoch(id),
+        kas.getStartEpoch(id),
+        kas.getTokenAmount(id),
+        kas.getLatestMerkleRootPublisher(id),
       ])
     );
   }
@@ -49,10 +49,10 @@ async function main() {
   for (let id = lastId; id > lastId - 2000; id--) {
     all4b.push(
       Promise.all([
-        kcs.getEndEpoch(id),
-        kcs.getStartEpoch(id),
-        kcs.getTokenAmount(id),
-        kcs.getLatestMerkleRootPublisher(id),
+        kas.getEndEpoch(id),
+        kas.getStartEpoch(id),
+        kas.getTokenAmount(id),
+        kas.getLatestMerkleRootPublisher(id),
       ])
     );
   }

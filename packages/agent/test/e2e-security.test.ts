@@ -66,7 +66,7 @@ afterAll(async () => {
 // Phase C requires `precomputedAttestation` for on-chain publishes; wrap each
 // raw `DKGPublisher` in this file so the proxy mints a seal automatically.
 async function wrapPub(p: DKGPublisher, chain: ReturnType<typeof createEVMAdapter>): Promise<DKGPublisher> {
-  const kav10Address = await chain.getKnowledgeAssetsV10Address();
+  const kav10Address = await chain.getKnowledgeAssetsLifecycleAddress();
   return wrapPublisherForTest(p, {
     author: new ethers.Wallet(HARDHAT_KEYS.CORE_OP),
     ctx: {

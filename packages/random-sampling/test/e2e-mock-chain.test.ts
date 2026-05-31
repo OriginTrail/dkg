@@ -77,11 +77,11 @@ describe('Random Sampling E2E (MockChainAdapter)', () => {
     const merkleLeafCount = tree.leafCount;
 
     // 3. Decide identifiers. In a real publish flow the chain mints
-    //    the kcId and assigns the cgId; in the test we pick them.
-    const kcId = 7n;
+    //    the kaId and assigns the cgId; in the test we pick them.
+    const kaId = 7n;
     const cgId = 11n;
     const cgIdStr = cgId.toString();
-    const ual = `did:dkg:hardhat:31337/${ethers.computeAddress(PUBLISHER_PRIV).toLowerCase()}/${kcId}`;
+    const ual = `did:dkg:hardhat:31337/${ethers.computeAddress(PUBLISHER_PRIV).toLowerCase()}/${kaId}`;
 
     // 4. Register the KC on the mock chain. Chunks are the canonical
     //    sorted+deduped leaves at each leafIndex, hex-encoded — same
@@ -91,7 +91,7 @@ describe('Random Sampling E2E (MockChainAdapter)', () => {
       chunk: ethers.hexlify(tree.leafAt(idx)),
     }));
     chain.__registerKC({
-      kcId,
+      kaId,
       contextGraphId: cgId,
       merkleRootHex: ethers.hexlify(merkleRoot),
       merkleLeafCount,
@@ -146,7 +146,7 @@ describe('Random Sampling E2E (MockChainAdapter)', () => {
       blockNumber: 1,
       blockTimestamp: Math.floor(Date.now() / 1000),
       publisherAddress: ethers.computeAddress(PUBLISHER_PRIV),
-      batchId: kcId,
+      batchId: kaId,
       chainId: '31337',
     };
     const metaQuads = generateConfirmedFullMetadata(kcMeta, [kaMeta], provenance);
@@ -165,7 +165,7 @@ describe('Random Sampling E2E (MockChainAdapter)', () => {
     const outcome = await prover.tick();
     expect(outcome).toMatchObject({
       kind: 'submitted',
-      kcId,
+      kaId,
       cgId,
     });
 

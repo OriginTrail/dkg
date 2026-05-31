@@ -69,7 +69,7 @@ The **spec** defines a full `ChainAdapter` with:
 
 When the agent broadcasts a `PublishRequest` after publishing:
 
-- **UAL** is hardcoded to `did:dkg:mock:31337/...` (or `did:dkg:mock:31337/${result.kcId}` when no on-chain result).
+- **UAL** is hardcoded to `did:dkg:mock:31337/...` (or `did:dkg:mock:31337/${result.kaId}` when no on-chain result).
 - **chainId** is set to `''`.
 
 So even when using a real EVM chain (e.g. Base Sepolia), the P2P message contains a mock UAL and empty chainId. Receiving nodes will then:

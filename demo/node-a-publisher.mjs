@@ -83,7 +83,7 @@ async function main() {
   const result = await publisher.publish({ contextGraphId: CONTEXT_GRAPH, quads: publicQuads, privateQuads });
 
   console.log('Published successfully!');
-  console.log(`  KC ID:       ${result.kcId}`);
+  console.log(`  KC ID:       ${result.kaId}`);
   console.log(`  Merkle Root: ${toHex(result.merkleRoot).slice(0, 32)}...`);
   console.log(`  KA count:    ${result.kaManifest.length} Knowledge Asset(s)`);
   console.log(`    └─ ${result.kaManifest[0].rootEntity}`);
@@ -106,7 +106,7 @@ async function main() {
   // Build the protobuf message to broadcast when a peer subscribes
   const nquadsBytes = new TextEncoder().encode(quadsToNQuads(publicQuads));
   const publishMsg = encodePublishRequest({
-    ual: `did:dkg:${chain.chainId}/${result.kcId}`,
+    ual: `did:dkg:${chain.chainId}/${result.kaId}`,
     nquads: nquadsBytes,
     contextGraphId: CONTEXT_GRAPH,
     kas: result.kaManifest.map(ka => ({

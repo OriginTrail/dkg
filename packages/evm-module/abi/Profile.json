@@ -42,6 +42,11 @@
     "type": "error"
   },
   {
+    "inputs": [],
+    "name": "EmptyOperationalWallets",
+    "type": "error"
+  },
+  {
     "inputs": [
       {
         "internalType": "uint72",

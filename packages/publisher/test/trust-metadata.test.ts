@@ -40,7 +40,7 @@ async function buildSeal(
   const canonical = canonicalPublishPayload(quads, []);
   const typed = buildAuthorAttestationTypedData({
     chainId: await chain.getEvmChainId(),
-    kav10Address: await chain.getKnowledgeAssetsV10Address(),
+    kav10Address: await chain.getKnowledgeAssetsLifecycleAddress(),
     contextGraphId,
     merkleRoot: canonical.kcMerkleRoot,
     authorAddress: author.address,

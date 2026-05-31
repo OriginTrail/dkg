@@ -248,7 +248,7 @@ pnpm dkg query smoke-test --sparql "SELECT ?name WHERE { ?s <https://schema.org/
 Test the update flow end-to-end.
 
 ```bash
-# On Node A: note the KC ID from the publish output
+# On Node A: note the KA ID from the publish output
 pnpm dkg update <kc-id> --context-graph smoke-test \
   --subject "did:dkg:test:from-a" \
   --predicate "https://schema.org/name" --object "Updated from Node A"

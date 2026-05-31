@@ -10,7 +10,7 @@ import {RandomSamplingLib} from "./libraries/RandomSamplingLib.sol";
 import {ProfileLib} from "./libraries/ProfileLib.sol";
 import {IdentityStorage} from "./storage/IdentityStorage.sol";
 import {RandomSamplingStorage} from "./storage/RandomSamplingStorage.sol";
-import {KnowledgeCollectionStorage} from "./storage/KnowledgeCollectionStorage.sol";
+import {DKGKnowledgeAssets} from "./storage/DKGKnowledgeAssets.sol";
 import {ProfileStorage} from "./storage/ProfileStorage.sol";
 import {EpochStorage} from "./storage/EpochStorage.sol";
 import {Chronos} from "./storage/Chronos.sol";
@@ -26,12 +26,12 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
     string private constant _NAME = "RandomSampling";
-    string private constant _VERSION = "1.1.0";
+    string private constant _VERSION = "10.0.2";
     uint256 public constant SCALE18 = 1e18;
 
     /// @notice Maximum number of in-CG resamples when the picker hits an
     ///         expired KC during Phase 10 weighted challenge generation.
-    ///         Exhausting this budget reverts with `NoEligibleKnowledgeCollection`
+    ///         Exhausting this budget reverts with `NoEligibleKnowledgeAsset`
     ///         so the node skips the current proof period and retries on the
     ///         next one (see {_pickWeightedChallenge}).
     uint8 public constant MAX_KC_RETRIES = 10;
@@ -46,7 +46,7 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
 
     IdentityStorage public identityStorage;
     RandomSamplingStorage public randomSamplingStorage;
-    KnowledgeCollectionStorage public knowledgeCollectionStorage;
+    DKGKnowledgeAssets public knowledgeAssetStorage;
     ProfileStorage public profileStorage;
     EpochStorage public epochStorage;
     Chronos public chronos;
@@ -66,7 +66,7 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
     /// @notice Thrown by `_generateChallenge` when the chosen CG's KC list is
     ///         empty or all sampled KCs are expired after `MAX_KC_RETRIES`
     ///         attempts. Same retry-next-period semantics as above.
-    error NoEligibleKnowledgeCollection();
+    error NoEligibleKnowledgeAsset();
 
     /// @notice Emitted when {createChallenge} produces a new challenge for a
     ///         node. Off-chain consumers (node UI, indexers) use the indexed
@@ -76,7 +76,7 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
     event ChallengeGenerated(
         uint72 indexed identityId,
         uint256 indexed contextGraphId,
-        uint256 indexed knowledgeCollectionId,
+        uint256 indexed knowledgeAssetId,
         uint256 chunkId,
         uint256 epoch,
         uint256 activeProofPeriodStartBlock
@@ -119,8 +119,8 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
     function initialize() public onlyHub {
         identityStorage = IdentityStorage(hub.getContractAddress("IdentityStorage"));
         randomSamplingStorage = RandomSamplingStorage(hub.getContractAddress("RandomSamplingStorage"));
-        knowledgeCollectionStorage = KnowledgeCollectionStorage(
-            hub.getAssetStorageAddress("KnowledgeCollectionStorage")
+        knowledgeAssetStorage = DKGKnowledgeAssets(
+            hub.getAssetStorageAddress("DKGKnowledgeAssets")
         );
         profileStorage = ProfileStorage(hub.getContractAddress("ProfileStorage"));
         epochStorage = EpochStorage(hub.getContractAddress("EpochStorageV8"));
@@ -206,7 +206,7 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
             }
 
             // Revert if a challenge for this node exists but has not been solved yet
-            if (nodeChallenge.knowledgeCollectionId != 0) {
+            if (nodeChallenge.knowledgeAssetId != 0) {
                 revert("An unsolved challenge already exists for this node in the current proof period");
             }
         }
@@ -237,7 +237,7 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
      * the two paths.
      *
      * Branch selection: lookup the owning CG via
-     * `ContextGraphStorage.kcToContextGraph(kcId)` (existing Phase 7
+     * `ContextGraphStorage.kaToContextGraph(kaId)` (existing Phase 7
      * atomic-bind invariant) and read `getIsCurated`. Same single SLOAD
      * each, no struct change.
      *
@@ -272,22 +272,22 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
         }
 
         // RFC-39 Phase A.5: resolve curation status to pick the right
-        // (root, count) pair. `kcToContextGraph` is the Phase 7 atomic-bind
+        // (root, count) pair. `kaToContextGraph` is the Phase 7 atomic-bind
         // invariant — non-zero for every V10 publish — so the lookup never
         // returns zero on a freshly-created KC. A zero result indicates
         // pre-Phase-7 legacy state and is treated as "public unsampleable"
         // (defensive — should not occur in practice).
-        uint256 cgId = contextGraphStorage.kcToContextGraph(challenge.knowledgeCollectionId);
+        uint256 cgId = contextGraphStorage.kaToContextGraph(challenge.knowledgeAssetId);
         bool isCurated = cgId != 0 && contextGraphStorage.getIsCurated(cgId);
 
         // Get the expected merkle root + leaf count for this challenge.
         bytes32 expectedMerkleRoot = isCurated
-            ? knowledgeCollectionStorage.getLatestCiphertextChunksRoot(challenge.knowledgeCollectionId)
-            : knowledgeCollectionStorage.getLatestMerkleRoot(challenge.knowledgeCollectionId);
+            ? knowledgeAssetStorage.getLatestCiphertextChunksRoot(challenge.knowledgeAssetId)
+            : knowledgeAssetStorage.getLatestMerkleRoot(challenge.knowledgeAssetId);
 
         uint32 leafCount = isCurated
-            ? knowledgeCollectionStorage.getCiphertextChunkCount(challenge.knowledgeCollectionId)
-            : knowledgeCollectionStorage.getMerkleLeafCount(challenge.knowledgeCollectionId);
+            ? knowledgeAssetStorage.getCiphertextChunkCount(challenge.knowledgeAssetId)
+            : knowledgeAssetStorage.getMerkleLeafCount(challenge.knowledgeAssetId);
 
         if (leafCount == 0 || challenge.chunkId >= uint256(leafCount)) {
             revert MerkleRootMismatchError(bytes32(0), expectedMerkleRoot);
@@ -403,17 +403,17 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
         bytes32 baseSeed = _deriveChallengeSeed(originalSender);
         uint256 currentEpoch = chronos.getCurrentEpoch();
 
-        (uint256 cgId, uint256 kcId, uint256 chunkId) = _pickWeightedChallenge(baseSeed, currentEpoch);
+        (uint256 cgId, uint256 kaId, uint256 chunkId) = _pickWeightedChallenge(baseSeed, currentEpoch);
 
         uint72 identityId = identityStorage.getIdentityId(originalSender);
         uint256 startBlock = updateAndGetActiveProofPeriodStartBlock();
-        emit ChallengeGenerated(identityId, cgId, kcId, chunkId, currentEpoch, startBlock);
+        emit ChallengeGenerated(identityId, cgId, kaId, chunkId, currentEpoch, startBlock);
 
         return
             RandomSamplingLib.Challenge(
-                kcId,
+                kaId,
                 chunkId,
-                address(knowledgeCollectionStorage),
+                address(knowledgeAssetStorage),
                 currentEpoch,
                 startBlock,
                 getActiveProofingPeriodDurationInBlocks(),
@@ -456,14 +456,14 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
      * @param targetEpoch Epoch to read CG values at. Pass `chronos.getCurrentEpoch()`
      *                   for the live picker semantics.
      * @return cgId      Selected Context Graph id.
-     * @return kcId      Selected Knowledge Collection id within that CG.
+     * @return kaId      Selected Knowledge Collection id within that CG.
      * @return chunkId   Selected **V10 Merkle leaf index** within the KC (same field
      *                   name as V8 byte-chunk index for struct compatibility).
      */
     function previewChallengeForSeed(
         bytes32 seed,
         uint256 targetEpoch
-    ) external view returns (uint256 cgId, uint256 kcId, uint256 chunkId) {
+    ) external view returns (uint256 cgId, uint256 kaId, uint256 chunkId) {
         return _pickWeightedChallenge(seed, targetEpoch);
     }
 
@@ -488,13 +488,13 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
      *      attempt via `keccak256(seed, attempt)`.
      *
      *      Step 3 — Pick a V10 Merkle leaf index: `uint256(kcSeed) % merkleLeafCount`
-     *      (see `KnowledgeCollectionStorage.getMerkleLeafCount`). Reverts
-     *      `NoEligibleKnowledgeCollection` if the KC has zero leaves recorded.
+     *      (see `DKGKnowledgeAssets.getMerkleLeafCount`). Reverts
+     *      `NoEligibleKnowledgeAsset` if the KC has zero leaves recorded.
      *
      *      Reverts:
      *      - {NoEligibleContextGraph}        adjustedTotal == 0 (no public,
      *                                        active CG holds value).
-     *      - {NoEligibleKnowledgeCollection} CG has an empty KC list, or
+     *      - {NoEligibleKnowledgeAsset} CG has an empty KC list, or
      *                                        every retry hit an expired KC.
      */
     // Slither: protocol sampling intentionally derives bounded pseudo-random
@@ -504,7 +504,7 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
     function _pickWeightedChallenge(
         bytes32 seed,
         uint256 currentEpoch
-    ) internal view returns (uint256 cgId, uint256 kcId, uint256 chunkId) {
+    ) internal view returns (uint256 cgId, uint256 kaId, uint256 chunkId) {
         uint256 cgCount = contextGraphStorage.getLatestContextGraphId();
 
         // Codex PR #630 R1 #3 — outer retry: bounded fallback when the
@@ -532,7 +532,7 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
                 // Subsequent attempts with zero-total = all eligible CGs
                 // exhausted; the next-period sampling tick will retry.
                 if (cgAttempt == 0) revert NoEligibleContextGraph();
-                revert NoEligibleKnowledgeCollection();
+                revert NoEligibleKnowledgeAsset();
             }
 
             // ---- Step 1b: walk + pick the CG straddling r. ----
@@ -564,30 +564,30 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
             // SLOAD on the public path (unchanged).
             uint256 kcCount = contextGraphStorage.getContextGraphKCCount(chosenCg);
             bool cgIsCurated = contextGraphStorage.getIsCurated(chosenCg);
-            uint256 pickedKcId;
+            uint256 pickedKaId;
             bytes32 kcSeed = cgSeed;
             if (kcCount > 0) {
                 for (uint8 attempt = 0; attempt < MAX_KC_RETRIES; attempt++) {
                     kcSeed = keccak256(abi.encodePacked(kcSeed, attempt));
                     uint256 idx = uint256(kcSeed) % kcCount;
                     uint256 candidate = contextGraphStorage.getContextGraphKCAt(chosenCg, idx);
-                    if (knowledgeCollectionStorage.getEndEpoch(candidate) < currentEpoch) continue;
-                    if (cgIsCurated && knowledgeCollectionStorage.getCiphertextChunkCount(candidate) == 0) continue;
-                    pickedKcId = candidate;
+                    if (knowledgeAssetStorage.getEndEpoch(candidate) < currentEpoch) continue;
+                    if (cgIsCurated && knowledgeAssetStorage.getCiphertextChunkCount(candidate) == 0) continue;
+                    pickedKaId = candidate;
                     break;
                 }
             }
 
-            if (pickedKcId != 0) {
+            if (pickedKaId != 0) {
                 // ---- Step 3: leaf index draw (curated vs public). ----
                 uint32 leafCount = cgIsCurated
-                    ? knowledgeCollectionStorage.getCiphertextChunkCount(pickedKcId)
-                    : knowledgeCollectionStorage.getMerkleLeafCount(pickedKcId);
-                if (leafCount == 0) revert NoEligibleKnowledgeCollection();
+                    ? knowledgeAssetStorage.getCiphertextChunkCount(pickedKaId)
+                    : knowledgeAssetStorage.getMerkleLeafCount(pickedKaId);
+                if (leafCount == 0) revert NoEligibleKnowledgeAsset();
                 cgId = chosenCg;
-                kcId = pickedKcId;
+                kaId = pickedKaId;
                 chunkId = uint256(kcSeed) % uint256(leafCount);
-                return (cgId, kcId, chunkId);
+                return (cgId, kaId, chunkId);
             }
 
             // No eligible KC in `chosenCg` — mark it exhausted and re-draw.
@@ -599,7 +599,7 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
         // All CG-retries exhausted — every picked CG was empty / had only
         // legacy curated / expired KCs. Next sampling tick will retry with
         // fresh entropy.
-        revert NoEligibleKnowledgeCollection();
+        revert NoEligibleKnowledgeAsset();
     }
     // slither-disable-end weak-prng,uninitialized-local,cyclomatic-complexity,incorrect-equality,calls-loop,timestamp
 
@@ -625,7 +625,7 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
      *      ciphertext exactly as they host public CG plaintext, and RFC-39
      *      extends the random-sampling reward surface to that ciphertext via
      *      the per-KC `(ciphertextChunksRoot, ciphertextChunkCount)`
-     *      commitment on `KnowledgeCollectionStorage`. The economic-parity
+     *      commitment on `DKGKnowledgeAssets`. The economic-parity
      *      goal forbids any CG-wide curated exclusion; KC-level eligibility
      *      (legacy/transitional curated KCs without a commitment) is handled
      *      inside `_pickWeightedChallenge` step 2 via the per-KC commitment

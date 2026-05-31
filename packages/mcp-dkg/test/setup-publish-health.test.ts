@@ -173,7 +173,7 @@ describe('publish tools — write+publish helper + canonical SWM finalizer', () 
         bodies.push(JSON.parse(String(init?.body ?? '{}')));
         const responseBody = bodies.length === 1
           ? { assertionUri: 'did:dkg:context-graph:0xabc/my-cg/assertion/peer/a' }
-          : { kcId: 'kc-1', kas: [], txHash: '0x1' };
+          : { kaId: 'kc-1', kas: [], txHash: '0x1' };
         return new Response(JSON.stringify(responseBody), {
           status: 200,
           headers: { 'Content-Type': 'application/json' },

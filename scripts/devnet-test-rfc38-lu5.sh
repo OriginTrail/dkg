@@ -11,7 +11,7 @@
 #   4. POST /api/shared-memory/publish → on-chain publishKnowledgeCollections.
 #   5. Assertions:
 #      - response carries status=confirmed AND non-empty txHash
-#      - KnowledgeCollectionStorage.getKnowledgeCollectionMetadata(kcId)
+#      - KnowledgeCollectionStorage.getKnowledgeAssetMetadata(kaId)
 #        returns merkleRoots.length > 0 and byteSize > 0
 #      - edge daemon log emitted the LU-5 encryption breadcrumb
 #      - each core daemon log emitted a StorageACK signing breadcrumb for
@@ -176,7 +176,7 @@ parse_json() {
 
 PUBLISH_STATUS=$(parse_json "$PUBLISH_RESP" ".status")
 PUBLISH_TX=$(parse_json    "$PUBLISH_RESP" ".txHash")
-PUBLISH_KC=$(parse_json    "$PUBLISH_RESP" ".kcId")
+PUBLISH_KC=$(parse_json    "$PUBLISH_RESP" ".kaId")
 PUBLISH_BLOCK=$(parse_json "$PUBLISH_RESP" ".blockNumber")
 
 [ -n "$PUBLISH_STATUS" ] || fail "publish: no status field"
@@ -187,9 +187,9 @@ PUBLISH_BLOCK=$(parse_json "$PUBLISH_RESP" ".blockNumber")
 [[ "$PUBLISH_TX" =~ ^0x[0-9a-fA-F]{64}$ ]] \
   || fail "publish: txHash '$PUBLISH_TX' is not a valid 32-byte hex"
 [ -n "$PUBLISH_KC" ] && [ "$PUBLISH_KC" != "0" ] \
-  || fail "publish: invalid or zero kcId ('$PUBLISH_KC')"
+  || fail "publish: invalid or zero kaId ('$PUBLISH_KC')"
 
-log "✓ publish landed: kcId=$PUBLISH_KC tx=$PUBLISH_TX block=$PUBLISH_BLOCK"
+log "✓ publish landed: kaId=$PUBLISH_KC tx=$PUBLISH_TX block=$PUBLISH_BLOCK"
 
 # --- 6. Verify KC readable on-chain via KCS read-back -----------------------
 
@@ -207,16 +207,17 @@ const path = require("path");
 (async () => {
   const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
   const contracts = JSON.parse(fs.readFileSync(process.env.CONTRACTS_JSON, "utf8")).contracts;
-  const kcsAddr = contracts.KnowledgeCollectionStorage?.evmAddress;
-  if (!kcsAddr) throw new Error("KCS not deployed");
-  const abi = JSON.parse(fs.readFileSync(path.join(process.env.ABI_DIR, "KnowledgeCollectionStorage.json"), "utf8"));
-  const kcs = new ethers.Contract(kcsAddr, abi, provider);
+  const kcsAddr = contracts.DKGKnowledgeAssets?.evmAddress ?? contracts.KnowledgeCollectionStorage?.evmAddress;
+  if (!kcsAddr) throw new Error("DKGKnowledgeAssets / KnowledgeCollectionStorage not deployed");
+  const abiFile = fs.existsSync(path.join(process.env.ABI_DIR, "DKGKnowledgeAssets.json")) ? "DKGKnowledgeAssets.json" : "DKGKnowledgeAssets.json";
+  const abi = JSON.parse(fs.readFileSync(path.join(process.env.ABI_DIR, abiFile), "utf8"));
+  const kas = new ethers.Contract(kcsAddr, abi, provider);
   const [merkleRoots, burned, minted, byteSize, startEpoch, endEpoch, tokenAmount, isImmutable] =
-    await kcs.getKnowledgeCollectionMetadata(BigInt(process.env.BATCH_ID));
+    await kas.getKnowledgeAssetMetadata(BigInt(process.env.BATCH_ID));
   if (!merkleRoots || merkleRoots.length === 0) throw new Error("merkleRoots empty");
   if (byteSize === 0n) throw new Error("byteSize=0");
   console.log("KC read-back OK: merkleRoots=" + merkleRoots.length + " byteSize=" + byteSize + " minted=" + minted + " tokenAmount=" + tokenAmount);
-})().catch(e => { console.error("[kcs] " + (e?.shortMessage || e?.message || e)); process.exit(1); });
+})().catch(e => { console.error("[kas] " + (e?.shortMessage || e?.message || e)); process.exit(1); });
 '
 ) || fail "KC read-back from KnowledgeCollectionStorage failed"
 

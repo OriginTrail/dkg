@@ -13,6 +13,8 @@ import { DeployFunction } from 'hardhat-deploy/types';
  * Hub-resolved deps wired in `initialize()`:
  *   - `PublishingConvictionStorage` (052a)
  *   - `EpochStorageV8`, `Chronos`, `ParametersStorage` (existing)
+ *   - `ConvictionStakingStorage` (049b) — TRAC vault the protocol
+ *     treasury fee is paid out of via `transferStake`.
  *
  * Mirror of staking pattern: stateless logic contract sits between the
  * NFT wrapper and the dedicated storage. Logic can be redeployed
@@ -33,4 +35,5 @@ func.dependencies = [
   'EpochStorage',
   'Chronos',
   'ParametersStorage',
+  'ConvictionStakingStorage',
 ];

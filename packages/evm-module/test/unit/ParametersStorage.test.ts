@@ -97,4 +97,87 @@ describe('@unit ParametersStorage contract', function () {
       ),
     ).to.be.revertedWith('Only Hub Owner, Hub, or Multisig Owner can call');
   });
+
+  describe('protocol treasury fee', () => {
+    it('defaults: fee = 300 bps (3%), treasury = zero address, cap = 1000 bps', async () => {
+      expect(await ParametersStorage.protocolTreasuryFee()).to.equal(300n);
+      expect(await ParametersStorage.protocolTreasury()).to.equal(
+        hre.ethers.ZeroAddress,
+      );
+      expect(await ParametersStorage.MAX_PROTOCOL_TREASURY_FEE()).to.equal(
+        1000n,
+      );
+    });
+
+    it('owner can set protocolTreasuryFee within the cap and it emits ParameterChanged', async () => {
+      const tx = await Hub.forwardCall(
+        await ParametersStorage.getAddress(),
+        ParametersStorageInterface.encodeFunctionData('setProtocolTreasuryFee', [
+          500,
+        ]),
+      );
+      await expect(tx)
+        .to.emit(ParametersStorage, 'ParameterChanged')
+        .withArgs('protocolTreasuryFee', 500n);
+      expect(await ParametersStorage.protocolTreasuryFee()).to.equal(500n);
+    });
+
+    it('owner can set the fee to the cap and to 0 (disable)', async () => {
+      await Hub.forwardCall(
+        await ParametersStorage.getAddress(),
+        ParametersStorageInterface.encodeFunctionData('setProtocolTreasuryFee', [
+          1000,
+        ]),
+      );
+      expect(await ParametersStorage.protocolTreasuryFee()).to.equal(1000n);
+
+      await Hub.forwardCall(
+        await ParametersStorage.getAddress(),
+        ParametersStorageInterface.encodeFunctionData('setProtocolTreasuryFee', [
+          0,
+        ]),
+      );
+      expect(await ParametersStorage.protocolTreasuryFee()).to.equal(0n);
+    });
+
+    it('setProtocolTreasuryFee reverts above the cap', async () => {
+      await expect(
+        Hub.forwardCall(
+          await ParametersStorage.getAddress(),
+          ParametersStorageInterface.encodeFunctionData(
+            'setProtocolTreasuryFee',
+            [1001],
+          ),
+        ),
+      ).to.be.revertedWith('protocolTreasuryFee too large');
+    });
+
+    it('setProtocolTreasuryFee reverts for non-owner', async () => {
+      await expect(
+        ParametersStorage.connect(accounts[1]).setProtocolTreasuryFee(100),
+      ).to.be.revertedWith('Only Hub Owner, Hub, or Multisig Owner can call');
+    });
+
+    it('owner can set protocolTreasury and it emits ProtocolTreasurySet', async () => {
+      const treasury = accounts[3].address;
+      const tx = await Hub.forwardCall(
+        await ParametersStorage.getAddress(),
+        ParametersStorageInterface.encodeFunctionData('setProtocolTreasury', [
+          treasury,
+        ]),
+      );
+      await expect(tx)
+        .to.emit(ParametersStorage, 'ProtocolTreasurySet')
+        .withArgs(treasury);
+      expect(await ParametersStorage.protocolTreasury()).to.equal(treasury);
+    });
+
+    it('setProtocolTreasury reverts for non-owner', async () => {
+      await expect(
+        ParametersStorage.connect(accounts[1]).setProtocolTreasury(
+          accounts[3].address,
+        ),
+      ).to.be.revertedWith('Only Hub Owner, Hub, or Multisig Owner can call');
+    });
+  });
 });

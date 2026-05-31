@@ -60,7 +60,7 @@ function makeChain(state: FakeChainState): ChainAdapter {
     createChallenge: vi.fn(state.createChallenge),
     getLatestMerkleRoot: vi.fn(async () => state.expectedRoot),
     getMerkleLeafCount: vi.fn(async () => state.expectedLeafCount),
-    getKCContextGraphId: vi.fn(async () => state.cgIdForKc),
+    getKAContextGraphId: vi.fn(async () => state.cgIdForKc),
     submitProof: vi.fn(state.submitProof),
   };
   if (state.blockNumber !== undefined) {
@@ -71,7 +71,7 @@ function makeChain(state: FakeChainState): ChainAdapter {
 
 interface KCFixture {
   cgId: bigint;
-  kcId: bigint;
+  kaId: bigint;
   ual: string;
   rootEntities: string[];
   publicTriples: { subject: string; predicate: string; object: string }[];
@@ -95,7 +95,7 @@ async function seedKC(store: OxigraphStore, fixture: KCFixture): Promise<{ root:
   const dataGraph = contextGraphDataUri(cgName, cgIdStr);
 
   const metaQuads: Quad[] = [
-    { subject: fixture.ual, predicate: `${DKG}batchId`, object: `"${fixture.kcId}"^^<${XSD}integer>`, graph: metaGraph },
+    { subject: fixture.ual, predicate: `${DKG}batchId`, object: `"${fixture.kaId}"^^<${XSD}integer>`, graph: metaGraph },
   ];
   for (let i = 0; i < fixture.rootEntities.length; i++) {
     const kaUri = `${fixture.ual}/${i + 1}`;
@@ -116,9 +116,9 @@ const IDENTITY_ID = 42n;
 
 function makeChallenge(overrides: Partial<NodeChallenge> = {}): NodeChallenge {
   return {
-    knowledgeCollectionId: 7n,
+    knowledgeAssetId: 7n,
     chunkId: 0n,
-    knowledgeCollectionStorageContract: '0x0',
+    knowledgeAssetStorageContract: '0x0',
     epoch: 1n,
     activeProofPeriodStartBlock: 1000n,
     proofingPeriodDurationInBlocks: 50n,
@@ -136,7 +136,7 @@ describe('RandomSamplingProver — happy path', () => {
   it('tick: extracts, builds, submits, and WAL records every transition', async () => {
     const fixture: KCFixture = {
       cgId: 11n,
-      kcId: 7n,
+      kaId: 7n,
       ual: 'did:dkg:hardhat:31337/0xpub/7',
       rootEntities: ['urn:e:1', 'urn:e:2', 'urn:e:3'],
       publicTriples: [
@@ -149,7 +149,7 @@ describe('RandomSamplingProver — happy path', () => {
 
     const submitProof = vi.fn(async () => ({ hash: '0xabc123', blockNumber: 1001, success: true }));
     const challenge = makeChallenge({
-      knowledgeCollectionId: fixture.kcId,
+      knowledgeAssetId: fixture.kaId,
       chunkId: 1n,
     });
     const chain = makeChain({
@@ -175,7 +175,7 @@ describe('RandomSamplingProver — happy path', () => {
     expect(outcome).toEqual({
       kind: 'submitted',
       txHash: '0xabc123',
-      kcId: fixture.kcId,
+      kaId: fixture.kaId,
       cgId: fixture.cgId,
       chunkId: 1n,
     });
@@ -223,7 +223,7 @@ describe('RandomSamplingProver — short-circuits', () => {
     // stale challenge — it'd revert with ChallengeNoLongerActive
     // and burn gas. Instead, force a rotation via createChallenge.
     const fixture: KCFixture = {
-      cgId: 11n, kcId: 7n, ual: 'did:dkg:hardhat:31337/0xpub/7',
+      cgId: 11n, kaId: 7n, ual: 'did:dkg:hardhat:31337/0xpub/7',
       rootEntities: ['urn:e:1'],
       publicTriples: [{ subject: 'urn:e:1', predicate: 'urn:p:k', object: '"a"' }],
     };
@@ -232,7 +232,7 @@ describe('RandomSamplingProver — short-circuits', () => {
     const submitProof = vi.fn(async () => ({ hash: '0xfresh', blockNumber: 1, success: true }));
     const createChallenge = vi.fn(async () => ({
       challenge: makeChallenge({
-        knowledgeCollectionId: fixture.kcId,
+        knowledgeAssetId: fixture.kaId,
         chunkId: 0n,
         activeProofPeriodStartBlock: 1000n, // current period
       }),
@@ -242,7 +242,7 @@ describe('RandomSamplingProver — short-circuits', () => {
     const chain = makeChain({
       status: { activeProofPeriodStartBlock: 1000n, isValid: true },
       challengeForNode: makeChallenge({
-        knowledgeCollectionId: fixture.kcId,
+        knowledgeAssetId: fixture.kaId,
         activeProofPeriodStartBlock: 500n, // STALE — previous period
       }),
       createChallenge,
@@ -296,7 +296,7 @@ describe('RandomSamplingProver — short-circuits', () => {
     //   periodsPassed = (9000-1000)/50 = 160
     //   ROTATED_PERIOD = 1000 + 160*50 = 9000 (lands at CURRENT_BLOCK)
     const fixture: KCFixture = {
-      cgId: 11n, kcId: 7n, ual: 'did:dkg:hardhat:31337/0xpub/7',
+      cgId: 11n, kaId: 7n, ual: 'did:dkg:hardhat:31337/0xpub/7',
       rootEntities: ['urn:e:1'],
       publicTriples: [{ subject: 'urn:e:1', predicate: 'urn:p:k', object: '"a"' }],
     };
@@ -318,7 +318,7 @@ describe('RandomSamplingProver — short-circuits', () => {
     const submitProof = vi.fn(async () => ({ hash: '0xfresh', blockNumber: CURRENT_BLOCK, success: true }));
     const createChallenge = vi.fn(async () => ({
       challenge: makeChallenge({
-        knowledgeCollectionId: fixture.kcId,
+        knowledgeAssetId: fixture.kaId,
         chunkId: 0n,
         epoch: ROTATED_EPOCH,
         activeProofPeriodStartBlock: ROTATED_PERIOD,
@@ -341,7 +341,7 @@ describe('RandomSamplingProver — short-circuits', () => {
         proofingPeriodDurationInBlocks: DURATION,
       },
       challengeForNode: makeChallenge({
-        knowledgeCollectionId: fixture.kcId,
+        knowledgeAssetId: fixture.kaId,
         activeProofPeriodStartBlock: FROZEN_PERIOD,
         proofingPeriodDurationInBlocks: DURATION,
         solved: false,
@@ -386,7 +386,7 @@ describe('RandomSamplingProver — short-circuits', () => {
     // cached (longer) duration would have expired" — exactly the kind
     // of latent deadlock this fix is meant to prevent.
     const fixture: KCFixture = {
-      cgId: 11n, kcId: 7n, ual: 'did:dkg:hardhat:31337/0xpub/7',
+      cgId: 11n, kaId: 7n, ual: 'did:dkg:hardhat:31337/0xpub/7',
       rootEntities: ['urn:e:1'],
       publicTriples: [{ subject: 'urn:e:1', predicate: 'urn:p:k', object: '"a"' }],
     };
@@ -411,7 +411,7 @@ describe('RandomSamplingProver — short-circuits', () => {
     const submitProof = vi.fn(async () => ({ hash: '0xfresh', blockNumber: CURRENT_BLOCK, success: true }));
     const createChallenge = vi.fn(async () => ({
       challenge: makeChallenge({
-        knowledgeCollectionId: fixture.kcId,
+        knowledgeAssetId: fixture.kaId,
         chunkId: 0n,
         epoch: 19n,
         activeProofPeriodStartBlock: ROTATED_PERIOD,
@@ -427,7 +427,7 @@ describe('RandomSamplingProver — short-circuits', () => {
         proofingPeriodDurationInBlocks: LIVE_DURATION,
       },
       challengeForNode: makeChallenge({
-        knowledgeCollectionId: fixture.kcId,
+        knowledgeAssetId: fixture.kaId,
         activeProofPeriodStartBlock: FROZEN_PERIOD,
         proofingPeriodDurationInBlocks: CACHED_DURATION,
         solved: false,
@@ -512,7 +512,7 @@ describe('RandomSamplingProver — short-circuits', () => {
     // (live: 1000+50 < 5000). The prover must consult the live duration
     // and force createChallenge.
     const fixture: KCFixture = {
-      cgId: 11n, kcId: 7n, ual: 'did:dkg:hardhat:31337/0xpub/7',
+      cgId: 11n, kaId: 7n, ual: 'did:dkg:hardhat:31337/0xpub/7',
       rootEntities: ['urn:e:1'],
       publicTriples: [{ subject: 'urn:e:1', predicate: 'urn:p:k', object: '"a"' }],
     };
@@ -527,7 +527,7 @@ describe('RandomSamplingProver — short-circuits', () => {
     const submitProof = vi.fn(async () => ({ hash: '0xnext', blockNumber: CURRENT_BLOCK, success: true }));
     const createChallenge = vi.fn(async () => ({
       challenge: makeChallenge({
-        knowledgeCollectionId: fixture.kcId,
+        knowledgeAssetId: fixture.kaId,
         chunkId: 0n,
         epoch: 19n,
         activeProofPeriodStartBlock: ROTATED_PERIOD,
@@ -544,7 +544,7 @@ describe('RandomSamplingProver — short-circuits', () => {
         proofingPeriodDurationInBlocks: LIVE_DURATION,
       },
       challengeForNode: makeChallenge({
-        knowledgeCollectionId: fixture.kcId,
+        knowledgeAssetId: fixture.kaId,
         activeProofPeriodStartBlock: FROZEN_PERIOD,
         proofingPeriodDurationInBlocks: CACHED_DURATION,
         solved: true,
@@ -580,7 +580,7 @@ describe('RandomSamplingProver — short-circuits', () => {
     // The prover MUST consult the cached duration, see the staleness,
     // and force createChallenge instead of reusing the unsolved cache.
     const fixture: KCFixture = {
-      cgId: 12n, kcId: 8n, ual: 'did:dkg:hardhat:31337/0xpub/8',
+      cgId: 12n, kaId: 8n, ual: 'did:dkg:hardhat:31337/0xpub/8',
       rootEntities: ['urn:e:1'],
       publicTriples: [{ subject: 'urn:e:1', predicate: 'urn:p:k', object: '"a"' }],
     };
@@ -594,7 +594,7 @@ describe('RandomSamplingProver — short-circuits', () => {
     const submitProof = vi.fn(async () => ({ hash: '0xnext', blockNumber: CURRENT_BLOCK, success: true }));
     const createChallenge = vi.fn(async () => ({
       challenge: makeChallenge({
-        knowledgeCollectionId: fixture.kcId,
+        knowledgeAssetId: fixture.kaId,
         chunkId: 0n,
         epoch: 21n,
         activeProofPeriodStartBlock: ROTATED_PERIOD,
@@ -612,7 +612,7 @@ describe('RandomSamplingProver — short-circuits', () => {
         // simulating a legacy adapter that hasn't been updated yet.
       },
       challengeForNode: makeChallenge({
-        knowledgeCollectionId: fixture.kcId,
+        knowledgeAssetId: fixture.kaId,
         activeProofPeriodStartBlock: FROZEN_PERIOD,
         proofingPeriodDurationInBlocks: CACHED_DURATION,
         solved: false,
@@ -632,7 +632,7 @@ describe('RandomSamplingProver — short-circuits', () => {
     await prover.close();
   });
 
-  it('returns cg-not-found when getKCContextGraphId returns 0', async () => {
+  it('returns cg-not-found when getKAContextGraphId returns 0', async () => {
     const chain = makeChain({
       status: { activeProofPeriodStartBlock: 1000n, isValid: true },
       challengeForNode: null,
@@ -648,17 +648,17 @@ describe('RandomSamplingProver — short-circuits', () => {
     });
     const prover = new RandomSamplingProver({ chain, store, identityId: IDENTITY_ID });
     const outcome = await prover.tick();
-    expect(outcome).toEqual({ kind: 'cg-not-found', kcId: 7n });
+    expect(outcome).toEqual({ kind: 'cg-not-found', kaId: 7n });
     await prover.close();
   });
 
-  it('returns kc-not-synced when local _meta has no entry for kcId', async () => {
+  it('returns kc-not-synced when local _meta has no entry for kaId', async () => {
     // No KC seeded in the store; meta + data graphs are empty.
     const chain = makeChain({
       status: { activeProofPeriodStartBlock: 1000n, isValid: true },
       challengeForNode: null,
       createChallenge: async () => ({
-        challenge: makeChallenge({ knowledgeCollectionId: 999n }),
+        challenge: makeChallenge({ knowledgeAssetId: 999n }),
         contextGraphId: 11n,
         hash: '0x', blockNumber: 1, success: true,
       }),
@@ -669,13 +669,13 @@ describe('RandomSamplingProver — short-circuits', () => {
     });
     const prover = new RandomSamplingProver({ chain, store, identityId: IDENTITY_ID });
     const outcome = await prover.tick();
-    expect(outcome).toMatchObject({ kind: 'kc-not-synced', kcId: 999n, cgId: 11n });
+    expect(outcome).toMatchObject({ kind: 'kc-not-synced', kaId: 999n, cgId: 11n });
     await prover.close();
   });
 
   it('returns submit-stale when submitProof throws ChallengeNoLongerActiveError', async () => {
     const fixture: KCFixture = {
-      cgId: 11n, kcId: 7n, ual: 'did:dkg:hardhat:31337/0xpub/7',
+      cgId: 11n, kaId: 7n, ual: 'did:dkg:hardhat:31337/0xpub/7',
       rootEntities: ['urn:e:1'],
       publicTriples: [{ subject: 'urn:e:1', predicate: 'urn:p:k', object: '"a"' }],
     };
@@ -686,7 +686,7 @@ describe('RandomSamplingProver — short-circuits', () => {
       status: { activeProofPeriodStartBlock: 1000n, isValid: true },
       challengeForNode: null,
       createChallenge: async () => ({
-        challenge: makeChallenge({ knowledgeCollectionId: fixture.kcId, chunkId: 0n }),
+        challenge: makeChallenge({ knowledgeAssetId: fixture.kaId, chunkId: 0n }),
         contextGraphId: fixture.cgId,
         hash: '0x', blockNumber: 1, success: true,
       }),
@@ -710,7 +710,7 @@ describe('RandomSamplingProver — concurrency', () => {
   it('single-flights: concurrent ticks resolve to the same outcome and run once', async () => {
     const store = new OxigraphStore();
     const fixture: KCFixture = {
-      cgId: 1n, kcId: 1n, ual: 'did:dkg:hardhat:31337/0xpub/1',
+      cgId: 1n, kaId: 1n, ual: 'did:dkg:hardhat:31337/0xpub/1',
       rootEntities: ['urn:s'],
       publicTriples: [{ subject: 'urn:s', predicate: 'urn:p:k', object: '"v"' }],
     };
@@ -724,7 +724,7 @@ describe('RandomSamplingProver — concurrency', () => {
       createChallenge: async () => {
         createChallengeCalls += 1;
         return {
-          challenge: makeChallenge({ knowledgeCollectionId: fixture.kcId, chunkId: 0n }),
+          challenge: makeChallenge({ knowledgeAssetId: fixture.kaId, chunkId: 0n }),
           contextGraphId: fixture.cgId,
           hash: '0x', blockNumber: 1, success: true,
         };

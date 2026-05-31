@@ -23,7 +23,7 @@ contract Identity is INamed, IVersioned, ContractStatus, IInitializable {
     //           error. `OperationalKeyTaken(key)` remains reserved for
     //           the cross-identity case. Dropped the dead `KeyIsEmpty()`
     //           pre-check (impossible after the zero-address check).
-    string private constant _VERSION = "1.1.0";
+    string private constant _VERSION = "10.0.2";
 
     IdentityStorage public identityStorage;
 

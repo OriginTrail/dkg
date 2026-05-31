@@ -12,8 +12,8 @@ describe('TypedEventBus', () => {
     const bus = new TypedEventBus();
     const { calls, fn } = tracker();
     bus.on(DKGEvent.KC_PUBLISHED, fn);
-    bus.emit(DKGEvent.KC_PUBLISHED, { kcId: '1' });
-    expect(calls).toEqual([{ kcId: '1' }]);
+    bus.emit(DKGEvent.KC_PUBLISHED, { kaId: '1' });
+    expect(calls).toEqual([{ kaId: '1' }]);
   });
 
   it('removes listeners with off', () => {

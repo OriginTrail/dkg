@@ -1,0 +1,202 @@
+[
+  {
+    "inputs": [],
+    "name": "BurnFromNonOwnerAddress",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "BurnFromZeroAddress",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "id",
+        "type": "uint256"
+      }
+    ],
+    "name": "CannotUpdateImmutableKnowledgeAsset",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "id",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "minted",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "requested",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "maxSize",
+        "type": "uint256"
+      }
+    ],
+    "name": "ExceededKnowledgeAssetBatchSize",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "messageHash",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "r",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "vs",
+        "type": "bytes32"
+      }
+    ],
+    "name": "InvalidSignature",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint96",
+        "name": "expectedTokenAMount",
+        "type": "uint96"
+      },
+      {
+        "internalType": "uint96",
+        "name": "tokenAmount",
+        "type": "uint96"
+      }
+    ],
+    "name": "InvalidTokenAmount",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "startTokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "endTokenId",
+        "type": "uint256"
+      }
+    ],
+    "name": "InvalidTokenId",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "id",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "currentEpoch",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "endEpoch",
+        "type": "uint256"
+      }
+    ],
+    "name": "KnowledgeAssetExpired",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "requiredSignatures",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "receivedSignatures",
+        "type": "uint256"
+      }
+    ],
+    "name": "MinSignaturesRequirementNotMet",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "id",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      }
+    ],
+    "name": "NotPartOfKnowledgeAsset",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "rAmount",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "vsAmount",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "identityIdsAmount",
+        "type": "uint256"
+      }
+    ],
+    "name": "SignaturesSignersMismatch",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "internalType": "address",
+        "name": "signer",
+        "type": "address"
+      }
+    ],
+    "name": "SignerIsNotNodeOperator",
+    "type": "error"
+  }
+]

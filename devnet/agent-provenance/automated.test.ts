@@ -66,7 +66,7 @@ interface DevnetNode {
 interface DevnetState {
   provider: ethers.JsonRpcProvider;
   hub: ethers.Contract;
-  kcs: ethers.Contract;
+  kas: ethers.Contract;
   nft: ethers.Contract;
   token: ethers.Contract;
   eps: ethers.Contract;
@@ -346,13 +346,13 @@ function runDkgCli(node: DevnetNode, args: string[], timeoutMs = 60_000): Promis
   });
 }
 
-/** Run `dkg publish` and return the parsed { kcId, status, txHash } it printed. */
+/** Run `dkg publish` and return the parsed { kaId, status, txHash } it printed. */
 async function publishViaCli(
   node: DevnetNode,
   contextGraph: string,
   filePath: string,
   options: { publisherNodeIdentityId?: bigint } = {},
-): Promise<{ status: string; kcId?: bigint; txHash?: string; raw: string }> {
+): Promise<{ status: string; kaId?: bigint; txHash?: string; raw: string }> {
   const args = ['publish', contextGraph, '--file', filePath];
   if (options.publisherNodeIdentityId !== undefined) {
     args.push('--publisher-node-identity-id', String(options.publisherNodeIdentityId));
@@ -371,7 +371,7 @@ async function publishViaCli(
   const txMatch = /TX hash:\s*(0x[0-9a-fA-F]+)/i.exec(result.stdout);
   return {
     status,
-    kcId: kcMatch ? BigInt(kcMatch[1]!) : undefined,
+    kaId: kcMatch ? BigInt(kcMatch[1]!) : undefined,
     txHash: txMatch ? txMatch[1] : undefined,
     raw: result.stdout,
   };
@@ -388,7 +388,7 @@ async function loadContractAddresses(provider: ethers.JsonRpcProvider, hubAddres
   );
   return {
     hub,
-    kcsAddress: await hub.getAssetStorageAddress('KnowledgeCollectionStorage'),
+    kcsAddress: await hub.getAssetStorageAddress('DKGKnowledgeAssets'),
     nftAddress: await hub.getContractAddress('DKGPublishingConvictionNFT'),
     tokenAddress: await hub.getContractAddress('Token'),
     epsAddress: await hub.getContractAddress('EpochStorageV8'),
@@ -443,7 +443,7 @@ async function detectDevnet(): Promise<DevnetState | null> {
   const provider = new ethers.JsonRpcProvider(RPC, { chainId: 31337, name: 'localhost' });
   const addrs = await loadContractAddresses(provider, hubAddress);
 
-  const kcs = new ethers.Contract(
+  const kas = new ethers.Contract(
     addrs.kcsAddress,
     [
       'function getLatestMerkleRootAuthor(uint256) view returns (address)',
@@ -492,7 +492,7 @@ async function detectDevnet(): Promise<DevnetState | null> {
       return null;
     }
   }
-  return { provider, hub: addrs.hub as ethers.Contract, kcs, nft, token, eps, chronos, nodes };
+  return { provider, hub: addrs.hub as ethers.Contract, kas, nft, token, eps, chronos, nodes };
 }
 
 // ---- per-test fixture writes -----------------------------------------------
@@ -552,7 +552,7 @@ describe('Agent provenance — automated 5-node devnet validation', () => {
   //   3. node5 publishes to CG `devnet-test` with `--publisher-node-identity-id 1`.
   //   4. Assert:
   //      - publish status == confirmed
-  //      - kcs.getLatestMerkleRootAuthor(kcId) == node5.submitter.address
+  //      - kas.getLatestMerkleRootAuthor(kaId) == node5.submitter.address
   //      - nft.windowSpent(accountId, currentBillingWindow) increased
   //      - eps.getNodeEpochProducedKnowledgeValue(core1.id, epoch) increased
   // =========================================================================
@@ -583,10 +583,10 @@ describe('Agent provenance — automated 5-node devnet validation', () => {
     });
 
     expect(result.status.toLowerCase()).toBe('confirmed');
-    expect(result.kcId).toBeDefined();
+    expect(result.kaId).toBeDefined();
 
     // 5. On-chain assertions.
-    const onChainAuthor: string = await s.kcs.getLatestMerkleRootAuthor(result.kcId!);
+    const onChainAuthor: string = await s.kas.getLatestMerkleRootAuthor(result.kaId!);
     const matchesAnyOpWallet = edge.opWallets.some(
       (w) => w.address.toLowerCase() === onChainAuthor.toLowerCase(),
     );
@@ -674,9 +674,9 @@ describe('Agent provenance — automated 5-node devnet validation', () => {
     });
 
     expect(result.status.toLowerCase()).toBe('confirmed');
-    expect(result.kcId).toBeDefined();
+    expect(result.kaId).toBeDefined();
 
-    const onChainAuthor: string = await s.kcs.getLatestMerkleRootAuthor(result.kcId!);
+    const onChainAuthor: string = await s.kas.getLatestMerkleRootAuthor(result.kaId!);
     const matchesAnyOpWallet = edge.opWallets.some(
       (w) => w.address.toLowerCase() === onChainAuthor.toLowerCase(),
     );
@@ -729,7 +729,7 @@ describe('Agent provenance — automated 5-node devnet validation', () => {
     });
 
     expect(result.status.toLowerCase()).toBe('confirmed');
-    expect(result.kcId).toBeDefined();
+    expect(result.kaId).toBeDefined();
 
     // Edge op-wallet pool TRAC MUST decrement when no PCA covers it.
     if (firstOpAccount === 0n) {
@@ -742,7 +742,7 @@ describe('Agent provenance — automated 5-node devnet validation', () => {
     expect(afterEps).toBeGreaterThan(beforeEps);
 
     // Author is one of the op wallets.
-    const onChainAuthor: string = await s.kcs.getLatestMerkleRootAuthor(result.kcId!);
+    const onChainAuthor: string = await s.kas.getLatestMerkleRootAuthor(result.kaId!);
     const matches = edge.opWallets.some(
       (w) => w.address.toLowerCase() === onChainAuthor.toLowerCase(),
     );
@@ -806,14 +806,14 @@ describe('Agent provenance — automated 5-node devnet validation', () => {
     });
 
     expect(result.status.toLowerCase()).toBe('confirmed');
-    expect(result.kcId).toBeDefined();
+    expect(result.kaId).toBeDefined();
 
     // Attribution preserved regardless of cost-coverage branch.
     const afterEps: bigint = await s.eps.getNodeEpochProducedKnowledgeValue(core1.identityId, epoch);
     expect(afterEps).toBeGreaterThan(beforeEps);
 
     // Author = one of the op wallets (msg.sender).
-    const onChainAuthor: string = await s.kcs.getLatestMerkleRootAuthor(result.kcId!);
+    const onChainAuthor: string = await s.kas.getLatestMerkleRootAuthor(result.kaId!);
     const matches = edge.opWallets.some(
       (w) => w.address.toLowerCase() === onChainAuthor.toLowerCase(),
     );
@@ -919,7 +919,7 @@ describe('Agent provenance — automated 5-node devnet validation', () => {
         headers: agentHeaders,
         body: JSON.stringify({
           contextGraphId: CONTEXT_GRAPH,
-          selection: 'all',
+          selection: { rootEntities: [subjectIri] },
           clearAfter: true,
         }),
       },
@@ -930,7 +930,7 @@ describe('Agent provenance — automated 5-node devnet validation', () => {
       );
     }
     const publishJson = (await publishRes.json()) as {
-      kcId: string;
+      kaId: string;
       status: string;
       txHash?: string;
     };
@@ -938,8 +938,8 @@ describe('Agent provenance — automated 5-node devnet validation', () => {
     expect(publishJson.txHash).toBeTruthy();
 
     // 4. On-chain assertions.
-    const kcId = BigInt(publishJson.kcId);
-    const onChainAuthor: string = await s.kcs.getLatestMerkleRootAuthor(kcId);
+    const kaId = BigInt(publishJson.kaId);
+    const onChainAuthor: string = await s.kas.getLatestMerkleRootAuthor(kaId);
     expect(onChainAuthor.toLowerCase()).toBe(agentRecord.agentAddress.toLowerCase());
 
     // Author MUST NOT be any of core2's own op wallets — that would mean we

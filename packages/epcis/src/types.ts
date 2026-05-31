@@ -95,7 +95,28 @@ export interface EpcisQueryParams {
 export interface QueryEngine {
   query(
     sparql: string,
-    opts?: { contextGraphId?: string },
+    opts?: {
+      contextGraphId?: string;
+      /**
+       * Sub-graph name within the context graph. Must match the sub-graph
+       * the query was built for so the engine's scope guard admits the
+       * `<cg>/<sub>` data graph (and the sub-graph private/meta graphs).
+       */
+      subGraphName?: string;
+      /**
+       * Route the scoped read to the shared-memory partition
+       * (`<cg>[/<sub>]/_shared_memory`). Set for `finalized=false` queries,
+       * which read non-finalized (SWM) events.
+       */
+      graphSuffix?: '_shared_memory';
+      /**
+       * Allow the scoped query to reference the context graph's own
+       * `_private` partition. The EPCIS events query always references
+       * `<cg>[/<sub>]/_private`, so this must be set or the engine's scope
+       * guard rejects the query.
+       */
+      includePrivate?: boolean;
+    },
   ): Promise<{ bindings: Record<string, string>[] }>;
 }
 

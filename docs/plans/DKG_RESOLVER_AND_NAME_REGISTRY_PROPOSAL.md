@@ -56,7 +56,7 @@ Every knowledge write SHOULD record both:
 - `network identity`: peerId and/or `did:dkg:agent:<peerId>`
 - `chain identity`: EVM `publisherAddress` (where applicable)
 
-Recommended metadata shape for a KC (or equivalent operation metadata):
+Recommended metadata shape for a KA (or equivalent operation metadata):
 
 - `prov:wasAttributedTo` -> `did:dkg:agent:<peerId>` (resource, not literal)
 - `dkg:peerId` -> `"12D3..."` (literal for direct lookup/debug)
@@ -315,7 +315,7 @@ Existing data may miss `peerId`-style provenance or store only partial identity.
 Backfill policy:
 
 1. Scan `_meta` and `_workspace_meta` graphs.
-2. For each operation/KC metadata subject:
+2. For each operation/KA metadata subject:
    - if chain identity exists and network identity missing, infer only when provably linked
    - if network identity exists as literal in non-standard predicate, normalize to canonical predicates
 3. Never overwrite stronger existing provenance; only fill missing canonical fields.

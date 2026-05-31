@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg",
-  "version": "10.0.0-rc.11",
+  "version": "10.0.0-rc.12",
   "type": "module",
   "main": "dist/cli.js",
   "bin": {

@@ -128,7 +128,7 @@ describe('computeACKDigest (6-field) — H5 cost-parameter binding [C-2]', () =>
 // from `KnowledgeAssetsV10._executeUpdateCore` (incl. trailing newMerkleLeafCount).
 describe('computeUpdateACKDigest — KAV10 update ACK layout [C-1]', () => {
   const newMerkleRoot = new Uint8Array(32).fill(0xbb);
-  const kcId = 7n;
+  const kaId = 7n;
   const preUpdateMerkleRootCount = 2n;
   const newByteSize = 5000n;
   const newTokenAmount = 2500n;
@@ -137,15 +137,15 @@ describe('computeUpdateACKDigest — KAV10 update ACK layout [C-1]', () => {
   const newMerkleLeafCount = 11n;
 
   const GOLDEN =
-    '0xf96a6ec017e13243ed2261a0693962ee24c4dbe5c9221558d31aaef4eec5d674';
+    '0xdd98e80b35d99c065fabae6f7f11308346b9b5e0abfbbce2528e3ab466e1ce73';
   const GOLDEN_WRONG_TOKEN =
-    '0x47360fcf82083938cf87cf9fbd2497de970c6011041ed205ab36b1d90a5a3be0';
+    '0x8ae17a4a33277c7715c9f65cf5946c1329b4b865b55e256a893264d6799a3146';
   const GOLDEN_EMPTY_BURN =
-    '0x9ca167e7fd7c387dd75f58a7b758186f9686e4dcdcc66822aac7f05bbf7b570a';
+    '0xb76f60d101209bb804fd1df2d560d8ad50d6e3d6f974973bf195ba560aeb3f9a';
 
   it('matches the contract-layout golden vector', () => {
     const digest = computeUpdateACKDigest(
-      CHAIN_ID, KAV10_ADDRESS, CG_ID, kcId,
+      CHAIN_ID, KAV10_ADDRESS, CG_ID, kaId,
       preUpdateMerkleRootCount, newMerkleRoot,
       newByteSize, newTokenAmount, mintAmount, burnTokenIds,
       newMerkleLeafCount,
@@ -155,13 +155,13 @@ describe('computeUpdateACKDigest — KAV10 update ACK layout [C-1]', () => {
 
   it('different chainId produces different digest (H5 chain pin)', () => {
     const a = computeUpdateACKDigest(
-      CHAIN_ID, KAV10_ADDRESS, CG_ID, kcId,
+      CHAIN_ID, KAV10_ADDRESS, CG_ID, kaId,
       preUpdateMerkleRootCount, newMerkleRoot,
       newByteSize, newTokenAmount, mintAmount, burnTokenIds,
       newMerkleLeafCount,
     );
     const b = computeUpdateACKDigest(
-      CHAIN_ID + 1n, KAV10_ADDRESS, CG_ID, kcId,
+      CHAIN_ID + 1n, KAV10_ADDRESS, CG_ID, kaId,
       preUpdateMerkleRootCount, newMerkleRoot,
       newByteSize, newTokenAmount, mintAmount, burnTokenIds,
       newMerkleLeafCount,
@@ -171,13 +171,13 @@ describe('computeUpdateACKDigest — KAV10 update ACK layout [C-1]', () => {
 
   it('different KAV10 address produces different digest (H5 contract pin)', () => {
     const a = computeUpdateACKDigest(
-      CHAIN_ID, KAV10_ADDRESS, CG_ID, kcId,
+      CHAIN_ID, KAV10_ADDRESS, CG_ID, kaId,
       preUpdateMerkleRootCount, newMerkleRoot,
       newByteSize, newTokenAmount, mintAmount, burnTokenIds,
       newMerkleLeafCount,
     );
     const b = computeUpdateACKDigest(
-      CHAIN_ID, '0x0000000000000000000000000000000000000043', CG_ID, kcId,
+      CHAIN_ID, '0x0000000000000000000000000000000000000043', CG_ID, kaId,
       preUpdateMerkleRootCount, newMerkleRoot,
       newByteSize, newTokenAmount, mintAmount, burnTokenIds,
       newMerkleLeafCount,
@@ -187,7 +187,7 @@ describe('computeUpdateACKDigest — KAV10 update ACK layout [C-1]', () => {
 
   it('changing newTokenAmount produces different digest (replay across cost params rejected)', () => {
     const digest = computeUpdateACKDigest(
-      CHAIN_ID, KAV10_ADDRESS, CG_ID, kcId,
+      CHAIN_ID, KAV10_ADDRESS, CG_ID, kaId,
       preUpdateMerkleRootCount, newMerkleRoot,
       newByteSize, 9999n, mintAmount, burnTokenIds,
       newMerkleLeafCount,
@@ -198,13 +198,13 @@ describe('computeUpdateACKDigest — KAV10 update ACK layout [C-1]', () => {
 
   it('changing newByteSize changes digest', () => {
     const a = computeUpdateACKDigest(
-      CHAIN_ID, KAV10_ADDRESS, CG_ID, kcId,
+      CHAIN_ID, KAV10_ADDRESS, CG_ID, kaId,
       preUpdateMerkleRootCount, newMerkleRoot,
       newByteSize, newTokenAmount, mintAmount, burnTokenIds,
       newMerkleLeafCount,
     );
     const b = computeUpdateACKDigest(
-      CHAIN_ID, KAV10_ADDRESS, CG_ID, kcId,
+      CHAIN_ID, KAV10_ADDRESS, CG_ID, kaId,
       preUpdateMerkleRootCount, newMerkleRoot,
       newByteSize + 1n, newTokenAmount, mintAmount, burnTokenIds,
       newMerkleLeafCount,
@@ -212,15 +212,15 @@ describe('computeUpdateACKDigest — KAV10 update ACK layout [C-1]', () => {
     expect(a).not.toEqual(b);
   });
 
-  it('changing kcId changes digest (cannot reuse one ACK for another KC)', () => {
+  it('changing kaId changes digest (cannot reuse one ACK for another KC)', () => {
     const a = computeUpdateACKDigest(
-      CHAIN_ID, KAV10_ADDRESS, CG_ID, kcId,
+      CHAIN_ID, KAV10_ADDRESS, CG_ID, kaId,
       preUpdateMerkleRootCount, newMerkleRoot,
       newByteSize, newTokenAmount, mintAmount, burnTokenIds,
       newMerkleLeafCount,
     );
     const b = computeUpdateACKDigest(
-      CHAIN_ID, KAV10_ADDRESS, CG_ID, kcId + 1n,
+      CHAIN_ID, KAV10_ADDRESS, CG_ID, kaId + 1n,
       preUpdateMerkleRootCount, newMerkleRoot,
       newByteSize, newTokenAmount, mintAmount, burnTokenIds,
       newMerkleLeafCount,
@@ -230,13 +230,13 @@ describe('computeUpdateACKDigest — KAV10 update ACK layout [C-1]', () => {
 
   it('changing preUpdateMerkleRootCount changes digest (cannot replay an ACK after another update)', () => {
     const a = computeUpdateACKDigest(
-      CHAIN_ID, KAV10_ADDRESS, CG_ID, kcId,
+      CHAIN_ID, KAV10_ADDRESS, CG_ID, kaId,
       preUpdateMerkleRootCount, newMerkleRoot,
       newByteSize, newTokenAmount, mintAmount, burnTokenIds,
       newMerkleLeafCount,
     );
     const b = computeUpdateACKDigest(
-      CHAIN_ID, KAV10_ADDRESS, CG_ID, kcId,
+      CHAIN_ID, KAV10_ADDRESS, CG_ID, kaId,
       preUpdateMerkleRootCount + 1n, newMerkleRoot,
       newByteSize, newTokenAmount, mintAmount, burnTokenIds,
       newMerkleLeafCount,
@@ -246,13 +246,13 @@ describe('computeUpdateACKDigest — KAV10 update ACK layout [C-1]', () => {
 
   it('changing burn list changes digest (cannot swap which KAs are burned)', () => {
     const a = computeUpdateACKDigest(
-      CHAIN_ID, KAV10_ADDRESS, CG_ID, kcId,
+      CHAIN_ID, KAV10_ADDRESS, CG_ID, kaId,
       preUpdateMerkleRootCount, newMerkleRoot,
       newByteSize, newTokenAmount, mintAmount, burnTokenIds,
       newMerkleLeafCount,
     );
     const b = computeUpdateACKDigest(
-      CHAIN_ID, KAV10_ADDRESS, CG_ID, kcId,
+      CHAIN_ID, KAV10_ADDRESS, CG_ID, kaId,
       preUpdateMerkleRootCount, newMerkleRoot,
       newByteSize, newTokenAmount, mintAmount, [10n, 11n, 13n],
       newMerkleLeafCount,
@@ -262,13 +262,13 @@ describe('computeUpdateACKDigest — KAV10 update ACK layout [C-1]', () => {
 
   it('reordering burn list changes digest (order matters)', () => {
     const a = computeUpdateACKDigest(
-      CHAIN_ID, KAV10_ADDRESS, CG_ID, kcId,
+      CHAIN_ID, KAV10_ADDRESS, CG_ID, kaId,
       preUpdateMerkleRootCount, newMerkleRoot,
       newByteSize, newTokenAmount, mintAmount, [10n, 11n, 12n],
       newMerkleLeafCount,
     );
     const b = computeUpdateACKDigest(
-      CHAIN_ID, KAV10_ADDRESS, CG_ID, kcId,
+      CHAIN_ID, KAV10_ADDRESS, CG_ID, kaId,
       preUpdateMerkleRootCount, newMerkleRoot,
       newByteSize, newTokenAmount, mintAmount, [12n, 11n, 10n],
       newMerkleLeafCount,
@@ -278,7 +278,7 @@ describe('computeUpdateACKDigest — KAV10 update ACK layout [C-1]', () => {
 
   it('empty burn list golden vector', () => {
     const digest = computeUpdateACKDigest(
-      CHAIN_ID, KAV10_ADDRESS, CG_ID, kcId,
+      CHAIN_ID, KAV10_ADDRESS, CG_ID, kaId,
       preUpdateMerkleRootCount, newMerkleRoot,
       newByteSize, newTokenAmount, mintAmount, [],
       newMerkleLeafCount,
@@ -288,7 +288,7 @@ describe('computeUpdateACKDigest — KAV10 update ACK layout [C-1]', () => {
 
   it('rejects newMerkleRoot with wrong length', () => {
     expect(() => computeUpdateACKDigest(
-      CHAIN_ID, KAV10_ADDRESS, CG_ID, kcId,
+      CHAIN_ID, KAV10_ADDRESS, CG_ID, kaId,
       preUpdateMerkleRootCount, new Uint8Array(31),
       newByteSize, newTokenAmount, mintAmount, burnTokenIds,
       newMerkleLeafCount,
@@ -297,7 +297,7 @@ describe('computeUpdateACKDigest — KAV10 update ACK layout [C-1]', () => {
 
   it('rejects malformed kav10Address', () => {
     expect(() => computeUpdateACKDigest(
-      CHAIN_ID, '0xnotanaddress', CG_ID, kcId,
+      CHAIN_ID, '0xnotanaddress', CG_ID, kaId,
       preUpdateMerkleRootCount, newMerkleRoot,
       newByteSize, newTokenAmount, mintAmount, burnTokenIds,
       newMerkleLeafCount,
@@ -306,13 +306,13 @@ describe('computeUpdateACKDigest — KAV10 update ACK layout [C-1]', () => {
 
   it('is deterministic', () => {
     const a = computeUpdateACKDigest(
-      CHAIN_ID, KAV10_ADDRESS, CG_ID, kcId,
+      CHAIN_ID, KAV10_ADDRESS, CG_ID, kaId,
       preUpdateMerkleRootCount, newMerkleRoot,
       newByteSize, newTokenAmount, mintAmount, burnTokenIds,
       newMerkleLeafCount,
     );
     const b = computeUpdateACKDigest(
-      CHAIN_ID, KAV10_ADDRESS, CG_ID, kcId,
+      CHAIN_ID, KAV10_ADDRESS, CG_ID, kaId,
       preUpdateMerkleRootCount, newMerkleRoot,
       newByteSize, newTokenAmount, mintAmount, burnTokenIds,
       newMerkleLeafCount,
@@ -324,7 +324,7 @@ describe('computeUpdateACKDigest — KAV10 update ACK layout [C-1]', () => {
     // Sanity that the two digest schemes are distinguishable; otherwise an
     // attacker could submit a publish ACK as an update ACK (or vice versa).
     const updateDigest = computeUpdateACKDigest(
-      CHAIN_ID, KAV10_ADDRESS, CG_ID, kcId,
+      CHAIN_ID, KAV10_ADDRESS, CG_ID, kaId,
       preUpdateMerkleRootCount, newMerkleRoot,
       newByteSize, newTokenAmount, mintAmount, burnTokenIds,
       newMerkleLeafCount,

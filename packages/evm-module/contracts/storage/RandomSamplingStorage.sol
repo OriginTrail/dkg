@@ -33,7 +33,7 @@ contract RandomSamplingStorage is INamed, IVersioned, IInitializable, ContractSt
     //           and silently corrupt claim math. Tests now drive state
     //           through `appendCheckpoint`.
     //         * `getEpochFirstScorePerStake` retired (always 0 under D26).
-    string private constant _VERSION = "3.0.0";
+    string private constant _VERSION = "10.0.2";
     uint8 public constant CHUNK_BYTE_SIZE = 32;
     Chronos public chronos;
 

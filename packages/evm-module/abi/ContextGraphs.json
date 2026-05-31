@@ -247,11 +247,11 @@
       },
       {
         "internalType": "uint256",
-        "name": "kcId",
+        "name": "kaId",
         "type": "uint256"
       }
     ],
-    "name": "registerKnowledgeCollection",
+    "name": "registerKnowledgeAsset",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"

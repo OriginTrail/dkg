@@ -74,7 +74,11 @@ describe('useMemoryEntities canonical layer counts', () => {
       const { sparql = '', contextGraphId = 'cg' } =
         JSON.parse(String(init?.body ?? '{}')) as { sparql?: string; contextGraphId?: string };
       const isVm = sparql.includes('_verified_memory_meta');
-      const isSwm = !isVm && sparql.includes('STRENDS');
+      // PR #818 sweep 3 — WM SPARQL now contains `STRENDS(...,
+      // "/_meta")` for the meta-exclusion filter, so the SWM
+      // detection needs the discriminating clause that's still
+      // SWM-exclusive: the `/_shared_memory` tail check.
+      const isSwm = !isVm && sparql.includes('STRENDS(STR(?g), "/_shared_memory")');
       const graphBase = `did:dkg:context-graph:${contextGraphId}`;
       const bindings = isVm
         ? [
@@ -122,10 +126,36 @@ describe('useMemoryEntities canonical layer counts', () => {
     expect(el.getAttribute('data-current-layers')).toContain('urn:test:full-pipeline:verified');
     expect(el.getAttribute('data-current-layers')).not.toContain('urn:test:object-only');
 
+    const queryBodies = vi.mocked(fetch).mock.calls
+      .map(([, init]) => JSON.parse(String(init?.body ?? '{}')) as { sparql?: string; includeContextGraphPartitions?: boolean });
+    expect(queryBodies).toHaveLength(3);
+    expect(queryBodies.every(body => body.includeContextGraphPartitions === true)).toBe(true);
+
     const vmRequest = vi.mocked(fetch).mock.calls
       .map(([, init]) => JSON.parse(String(init?.body ?? '{}')) as { sparql?: string })
       .find(body => body.sparql?.includes('_verified_memory_meta'));
     expect(vmRequest?.sparql).toContain('STR(?g) != "did:dkg:context-graph:cg-counts/meta"');
     expect(vmRequest?.sparql).toContain('!CONTAINS(STR(?g), "/meta/")');
+
+    // PR #818 Codex sweep 3 (ux-lead Finding 1 verdict) — WM and
+    // SWM SPARQL queries gain the same meta-namespace exclusions VM
+    // already enforces. Profile artifacts (prof:* — project profile
+    // configuration) live under `<cg>/meta/...` and are loaded by
+    // `useProjectProfile` directly via its own SPARQL; without the
+    // upstream filter here they also leak into `memory.entityList`,
+    // becoming "root entities" in every consumer downstream (the
+    // GH #806 family root cause).
+    const wmRequest = vi.mocked(fetch).mock.calls
+      .map(([, init]) => JSON.parse(String(init?.body ?? '{}')) as { sparql?: string })
+      .find(body => body.sparql?.includes('CONTAINS(STR(?g), "/assertion/")'));
+    expect(wmRequest?.sparql).toContain('STR(?g) != "did:dkg:context-graph:cg-counts/meta"');
+    expect(wmRequest?.sparql).toContain('!CONTAINS(STR(?g), "/meta/")');
+    expect(wmRequest?.sparql).toContain('!STRENDS(STR(?g), "/_meta")');
+
+    const swmRequest = vi.mocked(fetch).mock.calls
+      .map(([, init]) => JSON.parse(String(init?.body ?? '{}')) as { sparql?: string })
+      .find(body => body.sparql?.includes('STRENDS(STR(?g), "/_shared_memory")'));
+    expect(swmRequest?.sparql).toContain('STR(?g) != "did:dkg:context-graph:cg-counts/meta/_shared_memory"');
+    expect(swmRequest?.sparql).toContain('!CONTAINS(STR(?g), "/meta/")');
   });
 });

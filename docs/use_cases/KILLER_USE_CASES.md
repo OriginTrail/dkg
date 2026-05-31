@@ -48,9 +48,9 @@ One traceability graph: products, batches, events, attestations (certifications,
 
 | Aspect | Current state | Gap / risk |
 |--------|----------------|------------|
-| **Multi-party events** | Publish is per-publisher; each KC has manifest with rootEntities. | **Entity exclusivity (Rule 4)** — see §10.1. |
+| **Multi-party events** | Publish is per-publisher; each KA has manifest with rootEntities. | **Entity exclusivity (Rule 4)** — see §10.1. |
 | **EPCIS-style** | Events can be modelled as **one event = one rootEntity** (e.g. `did:dkg:event:carrier-123`) linking to product/batch URI. That pattern is **compatible** with Rule 4. | If the requirement is “multiple parties add **triples whose subject is the same product URI**” (e.g. `urn:epc:id:sgtin:...`), then Rule 4 **blocks** it: only the first publisher can use that URI as rootEntity. |
-| **Provenance** | Meta graph has `rootEntity`, `partOf` (KC UAL), publisher. | Good for “who published this entity.” No first-class **event time** or **event type** in core validation. |
+| **Provenance** | Meta graph has `rootEntity`, `partOf` (KA UAL), publisher. | Good for “who published this entity.” No first-class **event time** or **event type** in core validation. |
 | **Discovery** | ContextGraphs, listContextGraphsFromChain, sync. | Sufficient for “which contextGraphs exist.” No standard **supply-chain ontology** or EPCIS mapping in codebase. |
 
 **Conclusion**: For **event-centric** supply chain (each event = own rootEntity, link to object), V9 is fine. For **object-centric** (many parties adding attributes/events about the **same** object URI), Rule 4 is a **problem**. See §10.1 and [EVAL_ENTITY_EXCLUSIVITY.md](../EVAL_ENTITY_EXCLUSIVITY.md).
@@ -99,7 +99,7 @@ Graph of datasets, licenses, model lineages: “this model was trained on these 
 | **Attribution links** | Entities can reference other entities (by URI). No exclusivity on **object** of a triple. | Fine: “model M” has rootEntity; “dataset D” has another; “M schema:trainingData D” is just a triple. |
 | **Provenance** | Merkle roots, UAL, publisher in meta. | Good for integrity. **Verified KAs** (SPEC_VERIFIED_KAS) would add claim verification — not yet implemented. |
 | **Query** | SPARQL, ENTITY_BY_UAL, ENTITIES_BY_TYPE. | Sufficient for lineage and attribution queries. |
-| **Scale** | Large manifests (many KAs per KC). | Batch mint supports multiple rootEntities per publish. No specific “dataset registry” in codebase. |
+| **Scale** | Large manifests (many KAs per KA). | Batch mint supports multiple rootEntities per publish. No specific “dataset registry” in codebase. |
 
 **Conclusion**: V9 fits attribution and lineage. Verified KAs would strengthen “attested claim” use case; currently only drafted.
 
@@ -203,7 +203,7 @@ What’s regulated, what’s been attested, what’s the status. Regulators, fir
 
 ### 10.1 What is Entity Exclusivity?
 
-**Rule 4** in `packages/publisher/src/validation.ts`: within a contextGraph, no manifest `rootEntity` may already exist as a live KA. So **one publisher “owns” each rootEntity** in that contextGraph; others cannot publish a new KC that uses the same rootEntity.
+**Rule 4** in `packages/publisher/src/validation.ts`: within a contextGraph, no manifest `rootEntity` may already exist as a live KA. So **one publisher “owns” each rootEntity** in that contextGraph; others cannot publish a new KA that uses the same rootEntity.
 
 - **Code**: `existingEntities.has(m.rootEntity)` → reject with “Rule 4: rootEntity … already exists in contextGraph …”.
 - **Ownership**: `ownedEntities` in publisher and publish-handler tracks which rootEntities are already taken per contextGraph.

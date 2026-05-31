@@ -3,17 +3,21 @@
 pragma solidity ^0.8.20;
 
 import {IERC1155Receiver} from "@openzeppelin/contracts/token/ERC1155/IERC1155Receiver.sol";
+import {IERC1271} from "@openzeppelin/contracts/interfaces/IERC1271.sol";
+import {IERC721Receiver} from "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
 import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {ECDSA} from "solady/src/utils/ECDSA.sol";
 
 /**
  * @title MockReentrantPublisher
  * @notice Test-only harness for the `nonReentrant` perimeter on
  *         `KnowledgeAssetsV10.publish` / `update` /
- *         `extendKnowledgeCollectionLifetime`. The mock acts as the
+ *         `extendKnowledgeAssetLifetime`. The mock acts as the
  *         publisher (msg.sender) of a real V10 publish and re-enters the
- *         target entrypoint from inside the ERC-1155 mint acceptance
- *         callback (`onERC1155BatchReceived`).
+ *         target entrypoint from inside an ERC-1155 mint callback
+ *         (`onERC1155BatchReceived`) or ERC-721 mint callback
+ *         (`onERC721Received`).
  *
  * ERC1155Delta wraps the receiver callback in try/catch and converts any
  * revert into `TransferToNonERC1155ReceiverImplementer()` — so we cannot
@@ -27,10 +31,13 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
  *
  * Not deployed in production; lives outside the staked contract set.
  */
-contract MockReentrantPublisher is IERC1155Receiver {
+contract MockReentrantPublisher is IERC1155Receiver, IERC721Receiver, IERC1271 {
     bytes4 internal constant _REENTRANCY_SELECTOR = 0x3ee5aeb5;
+    bytes4 internal constant _ERC1271_MAGIC_VALUE = 0x1626ba7e;
+    bytes4 internal constant _ERC1271_INVALID_VALUE = 0xffffffff;
 
     address public kav10;
+    address public eip1271Signer;
     bytes public innerCalldata;
     bool public reentryAttempted;
     bool public reentryRejected;
@@ -38,6 +45,27 @@ contract MockReentrantPublisher is IERC1155Receiver {
 
     function setKAV10(address _kav10) external {
         kav10 = _kav10;
+    }
+
+    function setEip1271Signer(address _signer) external {
+        eip1271Signer = _signer;
+    }
+
+    function isValidSignature(
+        bytes32 hash,
+        bytes calldata signature
+    ) external view override returns (bytes4) {
+        if (signature.length != 65) {
+            return _ERC1271_INVALID_VALUE;
+        }
+        bytes32 r = bytes32(signature[0:32]);
+        bytes32 s = bytes32(signature[32:64]);
+        uint8 v = uint8(signature[64]);
+        address recovered = ECDSA.tryRecover(hash, v, r, s);
+        if (recovered != address(0) && recovered == eip1271Signer) {
+            return _ERC1271_MAGIC_VALUE;
+        }
+        return _ERC1271_INVALID_VALUE;
     }
 
     function arm(bytes calldata _innerCalldata) external {
@@ -90,9 +118,42 @@ contract MockReentrantPublisher is IERC1155Receiver {
         return IERC1155Receiver.onERC1155BatchReceived.selector;
     }
 
+    function onERC721Received(
+        address,
+        address,
+        uint256,
+        bytes calldata
+    ) external override returns (bytes4) {
+        _maybeReenter();
+        return IERC721Receiver.onERC721Received.selector;
+    }
+
     function supportsInterface(bytes4 interfaceId) external pure override returns (bool) {
         return interfaceId == type(IERC1155Receiver).interfaceId
+            || interfaceId == type(IERC721Receiver).interfaceId
+            || interfaceId == type(IERC1271).interfaceId
             || interfaceId == type(IERC165).interfaceId;
+    }
+
+    /**
+     * @notice Invoke the same KAV10 payload twice in one tx. The second
+     *         call must hit `ReentrancyGuardReentrantCall()`.
+     */
+    function callKAV10Twice(bytes calldata callPayload) external {
+        reentryAttempted = true;
+        (bool ok1, ) = kav10.call(callPayload);
+        require(ok1, "first call failed");
+        (bool ok2, bytes memory ret2) = kav10.call(callPayload);
+        if (!ok2 && ret2.length >= 4) {
+            bytes4 sel;
+            assembly {
+                sel := mload(add(ret2, 0x20))
+            }
+            lastInnerSelector = sel;
+            if (sel == _REENTRANCY_SELECTOR) {
+                reentryRejected = true;
+            }
+        }
     }
 
     function _maybeReenter() internal {

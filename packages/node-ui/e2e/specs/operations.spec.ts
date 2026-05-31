@@ -1,43 +1,39 @@
 import { test, expect } from '../fixtures/base.js';
 
-test.describe('Operations View', () => {
-  test.beforeEach(async ({ shell, dashboard }) => {
+test.describe('Operations View (rc.12 Observability)', () => {
+  test.beforeEach(async ({ shell, header }) => {
     await shell.goto();
-    await dashboard.clickViewAllOperations();
+    await header.openObservability();
   });
 
-  test('Operations tab opens in center panel', async ({ centerPanel }) => {
+  test('Observability tab opens in center panel', async ({ centerPanel }) => {
     const tabs = await centerPanel.getTabNames();
-    expect(tabs).toContain('Operations');
+    expect(tabs).toContain('Observability');
   });
 
   test('heading reads "Observability"', async ({ page }) => {
-    const heading = page.getByRole('heading', { name: 'Observability', level: 1 });
-    await expect(heading).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Observability', level: 1 })).toBeVisible();
   });
 
   test('shows description text', async ({ page }) => {
-    const desc = page.getByText('Track operation performance, phases, and errors');
-    await expect(desc).toBeVisible();
+    await expect(page.getByText('Track operation performance, phases, and errors')).toBeVisible();
   });
 
   test('four sub-tabs are rendered', async ({ page }) => {
     await expect(page.locator('button').filter({ hasText: 'All Operations' })).toBeVisible();
-    await expect(page.locator('button').filter({ hasText: 'Performance' })).toBeVisible();
+    await expect(page.locator('button').filter({ hasText: 'Hardware' })).toBeVisible();
     await expect(page.locator('button').filter({ hasText: 'Logs' })).toBeVisible();
     await expect(page.locator('button').filter({ hasText: 'Errors' })).toBeVisible();
   });
 
   test('type filter dropdown has operation types', async ({ page }) => {
-    const select = page.locator('select').first();
+    const select = page.getByTitle('Filter by operation type');
     await expect(select).toBeVisible();
-    const options = select.locator('option');
-    const count = await options.count();
-    expect(count).toBeGreaterThan(1);
+    expect(await select.locator('option').count()).toBeGreaterThan(1);
   });
 
   test('type filter includes specific operation types', async ({ page }) => {
-    const select = page.locator('select').first();
+    const select = page.getByTitle('Filter by operation type');
     const html = await select.innerHTML();
     expect(html).toContain('publish');
     expect(html).toContain('query');
@@ -46,11 +42,10 @@ test.describe('Operations View', () => {
   });
 
   test('status filter dropdown has status options', async ({ page }) => {
-    const selects = page.locator('select');
-    const statusSelect = selects.nth(1);
+    const statusSelect = page.locator('select.input').filter({ has: page.locator('option', { hasText: 'All statuses' }) });
     await expect(statusSelect).toBeVisible();
-    const options = statusSelect.locator('option');
     const texts: string[] = [];
+    const options = statusSelect.locator('option');
     for (let i = 0; i < await options.count(); i++) {
       texts.push((await options.nth(i).textContent())!.trim());
     }
@@ -73,13 +68,12 @@ test.describe('Operations View', () => {
   });
 
   test('empty state message when no operations', async ({ page }) => {
-    const empty = page.getByText('No operations recorded');
-    await expect(empty).toBeVisible();
+    await expect(page.getByText('No operations recorded')).toBeVisible();
   });
 
-  test('switching to Performance sub-tab shows chart placeholder', async ({ page }) => {
-    await page.locator('button').filter({ hasText: 'Performance' }).click();
-    await expect(page.getByText('Not enough data for charts')).toBeVisible();
+  test('switching to Hardware sub-tab shows hardware metrics shell', async ({ page }) => {
+    await page.locator('button').filter({ hasText: 'Hardware' }).click();
+    await expect(page.getByText(/CPU|Memory|Disk/i).first()).toBeVisible();
   });
 
   test('switching to Logs sub-tab shows log viewer controls', async ({ page }) => {
@@ -92,19 +86,17 @@ test.describe('Operations View', () => {
     await page.locator('button').filter({ hasText: 'Logs' }).click();
     const levelSelect = page.locator('select').first();
     await expect(levelSelect).toBeVisible();
-    const html = await levelSelect.innerHTML();
-    expect(html).toContain('All levels');
+    expect(await levelSelect.innerHTML()).toContain('All levels');
   });
 
   test('Logs sub-tab has refresh button', async ({ page }) => {
     await page.locator('button').filter({ hasText: 'Logs' }).click();
-    const refreshBtn = page.getByRole('button', { name: 'Refresh', exact: true });
-    await expect(refreshBtn).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Refresh', exact: true })).toBeVisible();
   });
 
   test('switching to Errors sub-tab shows success message', async ({ page }) => {
     await page.locator('button').filter({ hasText: 'Errors' }).click();
-    await expect(page.getByText('All operations completed successfully')).toBeVisible();
+    await expect(page.getByText('No errors in this period')).toBeVisible();
   });
 
   test('Errors sub-tab has time range selector', async ({ page }) => {
@@ -116,7 +108,7 @@ test.describe('Operations View', () => {
     await expect(page.getByText('0 total')).toBeVisible();
   });
 
-  test('Operations tab is closable', async ({ centerPanel }) => {
-    expect(await centerPanel.isTabClosable('Operations')).toBe(true);
+  test('Observability tab is closable', async ({ centerPanel }) => {
+    expect(await centerPanel.isTabClosable('Observability')).toBe(true);
   });
 });

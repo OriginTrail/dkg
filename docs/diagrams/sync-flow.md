@@ -33,7 +33,7 @@ Timeline ───────────────────────�
 ## Solution: Verified sync on connect
 
 When C connects to any peer, it requests the full contents of the `agents`
-contextGraph from that peer, page by page. Every received Knowledge Collection
+contextGraph from that peer, page by page. Every received Knowledge Asset
 is **verified against its merkle root** before being accepted into the
 local store — a malicious peer cannot inject, alter, or omit triples
 without being detected.
@@ -54,7 +54,7 @@ An adversarial sync peer could attempt:
 
 **Tier 1 (implemented, immediate):** After downloading all pages, the
 receiver groups data triples by root entity (same `autoPartition` used
-during publish), recomputes the merkle root per KC using
+during publish), recomputes the merkle root per KA using
 `computePublicRoot → computeKARoot → computeKCRoot`, and compares it to
 the `dkg:merkleRoot` value in the meta graph. Only KCs with matching
 roots are inserted into the local store.
@@ -71,12 +71,12 @@ RPC calls and is more expensive.
   don't blow up memory. Default page size is 500 triples per request.
   The requester loops until it gets an empty page.
 - **Data + meta graph** — the first sync page includes the full meta graph
-  (KC metadata with merkle roots). The receiver needs this to verify the
+  (KA metadata with merkle roots). The receiver needs this to verify the
   data triples. Meta graph is small relative to data.
 - **Staging buffer** — triples are downloaded into memory first, verified,
   then inserted. Nothing touches the local store until verification passes.
-- **Per-KC granularity** — if a peer sends 10 KCs and 1 has a bad merkle
-  root, the other 9 are still accepted. Only the invalid KC is rejected.
+- **Per-KA granularity** — if a peer sends 10 KCs and 1 has a bad merkle
+  root, the other 9 are still accepted. Only the invalid KA is rejected.
 - **Protocol-gated** — before attempting sync, the requester checks the
   peer's protocol list via the libp2p peer store. If the peer doesn't
   advertise `/dkg/sync/1.0.0` (e.g. a plain circuit relay), the sync is
@@ -116,9 +116,9 @@ Response (UTF-8):
 Received from peer                              Verification
 ──────────────────                              ────────────
 
-Meta graph triples:                             For each KC (UAL):
+Meta graph triples:                             For each KA (UAL):
   ┌──────────────────────────────────┐            1. Find its KA entries
-  │ <ual> rdf:type dkg:KC           │               (dkg:partOf → ual)
+  │ <ual> rdf:type dkg:KA           │               (dkg:partOf → ual)
   │ <ual> dkg:merkleRoot "abc123"   │◄──┐
   │ <ual> dkg:kaCount 2             │   │        2. Get rootEntity per KA
   │ <ka1> dkg:rootEntity <entity:A> │   │
@@ -134,7 +134,7 @@ Data graph triples:                      │          publicRoot = hash(sorted t
   │ <entity:B> schema:name "Bob"     │   │
   │ <entity:B> schema:age "25"       │   │       6. kcRoot == claimed "abc123" ?
   └──────────────────────────────────┘   │          ✓ Insert into store
-                                         │          ✗ Reject KC
+                                         │          ✗ Reject KA
                                     compare
 ```
 
@@ -191,9 +191,9 @@ sequenceDiagram
             Note over NewNode,Store: Phase 4 — Merkle Verification
 
             NewNode ->> NewNode: Separate data vs meta by graph URI
-            NewNode ->> NewNode: Extract KC UALs + claimed merkleRoots
+            NewNode ->> NewNode: Extract KA UALs + claimed merkleRoots
 
-            loop For each KC in meta graph
+            loop For each KA in meta graph
                 NewNode ->> NewNode: Find KA root entities
                 NewNode ->> NewNode: autoPartition(data triples)
                 NewNode ->> NewNode: Per KA: computePublicRoot
@@ -201,9 +201,9 @@ sequenceDiagram
                 NewNode ->> NewNode: computeKCRoot(kaRoots)
 
                 alt recomputed == claimed merkleRoot
-                    Note right of NewNode: ✓ KC verified
+                    Note right of NewNode: ✓ KA verified
                 else
-                    Note right of NewNode: ✗ KC rejected — skip
+                    Note right of NewNode: ✗ KA rejected — skip
                 end
             end
 
@@ -245,7 +245,7 @@ OxigraphStore(~/.dkg/store.nq)        OxigraphStore(~/.dkg/store.nq)
 
 ## Build Plan: Inventory Merkle Diff + Targeted Repair (Append)
 
-Goal: make sync exact and efficient by detecting the precise missing KC set,
+Goal: make sync exact and efficient by detecting the precise missing KA set,
 then fetching only missing content.
 
 ### 1) Scope and modes
@@ -312,7 +312,7 @@ Add targeted fetch requests for missing content:
 Receiver pipeline remains:
 
 1. Parse payload
-2. Recompute KC root from triples
+2. Recompute KA root from triples
 3. Compare to claimed `dkg:merkleRoot`
 4. Insert verified triples only
 
@@ -384,6 +384,6 @@ Phase C (trustless hardening)
 
 - Late-joining node computes exact missing confirmed KCs without full scan.
 - Two honest nodes with same confirmed data converge to identical root hash.
-- Malicious peer cannot inject fake confirmed KC in trustless mode.
+- Malicious peer cannot inject fake confirmed KA in trustless mode.
 - Subscribe path catches up history (not only future gossip).
 - Operator can run verify/repair and see deterministic missing counts.

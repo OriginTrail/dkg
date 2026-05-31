@@ -4,6 +4,7 @@ import { useAgentsStore } from '../../stores/agents.js';
 import { useTabsStore } from '../../stores/tabs.js';
 import { useCurrentAgent } from '../../hooks/useCurrentAgent.js';
 import { NotificationsBell } from './NotificationsBell.js';
+import { formatPeerStatusTooltip } from '../../lib/formatPeerStatus.js';
 
 /** OriginTrail wordmark — same paths as `v9-stable` packages/node-ui App.tsx sidebar. */
 const ORIGINTRAIL_WORDMARK = (
@@ -64,38 +65,6 @@ const OBSERVABILITY_ICON = (
     <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
   </svg>
 );
-
-/** Build the tooltip string surfaced on the status pill so the user can
- *  see the direct/relayed connection breakdown and uptime without
- *  jumping to Settings. Returns a string suitable for the `title`
- *  attribute (newline-separated lines render as separate lines in
- *  Chrome's tooltip). */
-export function formatPeerStatusTooltip(
-  synced: boolean,
-  peers: number,
-  direct: number,
-  relayed: number,
-  uptimeMs: number,
-): string {
-  const lines = [
-    synced ? 'Synced with the network' : 'Syncing with the network',
-    `${peers} peer${peers === 1 ? '' : 's'} (${direct} direct, ${relayed} relayed)`,
-  ];
-  if (uptimeMs > 0) lines.push(`Uptime ${formatUptimeShort(uptimeMs)}`);
-  return lines.join('\n');
-}
-
-function formatUptimeShort(ms: number): string {
-  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
-  const d = Math.floor(totalSeconds / 86400);
-  const h = Math.floor((totalSeconds % 86400) / 3600);
-  const m = Math.floor((totalSeconds % 3600) / 60);
-  const parts: string[] = [];
-  if (d > 0) parts.push(`${d}d`);
-  if (h > 0 || d > 0) parts.push(`${h}h`);
-  parts.push(`${m}m`);
-  return parts.join(' ');
-}
 
 export function Header() {
   const { theme, setTheme, leftCollapsed, toggleLeft, rightCollapsed, toggleRight } = useLayoutStore();

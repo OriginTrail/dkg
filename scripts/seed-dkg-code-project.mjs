@@ -263,7 +263,7 @@ async function publishSubGraph(subGraphName, selection, label) {
     console.log(
       `[seed]   + ${label}: published ${selection.length} entities ` +
       JSON.stringify({
-        kcId: r.kcId,
+        kaId: r.kaId,
         status: r.status,
         txHash: r.txHash,
         blockNumber: r.blockNumber,

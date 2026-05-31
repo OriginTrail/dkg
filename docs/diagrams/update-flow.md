@@ -1,8 +1,8 @@
 # Update Flow
 
-Sequence diagram for updating an existing Knowledge Collection (KC). The
+Sequence diagram for updating an existing Knowledge Asset (KA). The
 publisher replaces triples for specific root entities within an already-published
-KC, recomputes the Merkle root, and submits an on-chain update transaction.
+KA, recomputes the Merkle root, and submits an on-chain update transaction.
 
 ## Key differences from publish
 
@@ -12,10 +12,10 @@ KC, recomputes the Merkle root, and submits an on-chain update transaction.
 | Old data | None | Deleted before insert |
 | On-chain | `publishKnowledgeAssets` | `updateKnowledgeAssets` |
 | Receiver signatures | Required (3+) | Not required |
-| P2P broadcast | Full KC triples | Only changed entities |
+| P2P broadcast | Full KA triples | Only changed entities |
 
 Updates are simpler than publishes because:
-- The KC already exists on-chain; only the merkle root needs updating
+- The KA already exists on-chain; only the merkle root needs updating
 - No receiver signatures needed (the batch was already validated at publish time)
 - Only the publisher can update (the contract enforces `msg.sender` ownership)
 
@@ -40,9 +40,9 @@ sequenceDiagram
 
     Note over User,Gossip: Phase 1 — Local Preparation
 
-    User ->> Agent: update(kcId, contextGraphId, triples, privateTriples?)
+    User ->> Agent: update(kaId, contextGraphId, triples, privateTriples?)
     Agent ->> Agent: Generate operationId (UUID)
-    Agent ->> Publisher: update(kcId, contextGraphId, triples, operationId)
+    Agent ->> Publisher: update(kaId, contextGraphId, triples, operationId)
 
     Publisher ->> Publisher: autoPartition(triples)
     Note right of Publisher: Groups triples by root entity
@@ -102,7 +102,7 @@ sequenceDiagram
 
     Agent ->> Agent: Serialize changed triples to N-Triples
     Agent ->> Gossip: publish(topic, updateMessage)
-    Note right of Gossip: topic = dkg/context-graph/id/update<br/>Contains kcId + new triples + new merkleRoot
+    Note right of Gossip: topic = dkg/context-graph/id/update<br/>Contains kaId + new triples + new merkleRoot
 
     RcvAgent ->> EVM: Poll KnowledgeAssetsUpdated event
     EVM -->> RcvAgent: Event with matching batchId + newMerkleRoot
@@ -123,7 +123,7 @@ When a receiver gets an update broadcast, it:
 1. **Checks the chain event** — the `KnowledgeAssetsUpdated` event must exist
    with a matching `batchId` and `newMerkleRoot`.
 2. **Verifies the publisher** — the on-chain event's `msg.sender` must match
-   the original publisher of the KC.
+   the original publisher of the KA.
 3. **Replaces triples** — deletes old triples for the affected root entities
    and inserts the new ones.
 4. **Recomputes the merkle root** — the recomputed root from the new data must
@@ -154,7 +154,7 @@ deleting it, without changing the core update or on-chain semantics.
   For example:
   - A separate Blazegraph **namespace** (e.g. `historical`), or
   - Named graphs in the same store with a convention such as  
-    `urn:dkg:historical:{contextGraphId}:{kcId}:{rootEntity}:{revisionId}`.
+    `urn:dkg:historical:{contextGraphId}:{kaId}:{rootEntity}:{revisionId}`.
 - **Revision identifier** — Each snapshot is keyed by a revision. Using the
   existing `operationId` (UUID) gives a stable “revision R”. Optionally store
   a timestamp (e.g. from the update event or block time) to support “as of

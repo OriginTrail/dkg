@@ -4,7 +4,7 @@ DKG V9 smart contracts and deployment scripts. Forked from the V8 `dkg-evm-modul
 
 ## Features
 
-- **Solidity contracts** — Knowledge Collection registry, contextGraph management, staking, token contracts, and access control
+- **Solidity contracts** — Knowledge Asset registry, contextGraph management, staking, token contracts, and access control
 - **ABI exports** — compiled contract ABIs available at `./abi/*.json` for use by `@origintrail-official/dkg-chain`
 - **Hardhat deployment** — deploy scripts for localhost, testnet (Base Sepolia), and other EVM chains
 - **Test suite** — unit and integration tests via Hardhat's testing framework

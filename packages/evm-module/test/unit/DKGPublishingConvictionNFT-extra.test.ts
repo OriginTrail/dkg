@@ -258,7 +258,7 @@ describe('@unit DKGPublishingConvictionNFT — extra audit coverage (E-6)', func
       // Point the Hub's "KnowledgeAssetsV10" entry at an EOA we control so
       // we can call coverPublishingCost directly from it.
       const kav10 = accounts[2];
-      await HubContract.setContractAddress('KnowledgeAssetsV10', kav10.address);
+      await HubContract.setContractAddress('KnowledgeAssetsLifecycle', kav10.address);
 
       const committed = hre.ethers.parseEther('100000');
       const owner = accounts[0];

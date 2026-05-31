@@ -8,10 +8,10 @@ async function main() {
   const provider = new JsonRpcProvider(RPC);
   const KCS = '0x8f678eB0E57ee8A109B295710E23076fA3a443fe';
   const iface = new Interface([
-    'event KnowledgeCollectionCreated(uint256 indexed id, string publishOperationId, bytes32 merkleRoot, uint88 byteSize, uint40 startEpoch, uint40 endEpoch, uint96 tokenAmount, bool isImmutable)',
+    'event KnowledgeAssetCreated(uint256 indexed id, string publishOperationId, bytes32 merkleRoot, uint88 byteSize, uint40 startEpoch, uint40 endEpoch, uint96 tokenAmount, bool isImmutable)',
     'event KnowledgeAssetsMinted(uint256 indexed id, address indexed to, uint256 startId, uint256 endId)',
   ]);
-  const createdTopic = iface.getEvent('KnowledgeCollectionCreated')!.topicHash;
+  const createdTopic = iface.getEvent('KnowledgeAssetCreated')!.topicHash;
   const mintedTopic = iface.getEvent('KnowledgeAssetsMinted')!.topicHash;
 
   const bn = await provider.getBlockNumber();
@@ -59,16 +59,16 @@ async function main() {
   }
 
   // ── Test 1: Basic contract reads ──
-  const kcs = new ethers.Contract(KCS, [
+  const kas = new ethers.Contract(KCS, [
     'function getEndEpoch(uint256 id) view returns (uint40)',
-    'function getLatestKnowledgeCollectionId() view returns (uint256)',
+    'function getLatestKnowledgeAssetId() view returns (uint256)',
   ], provider);
   const chronos = new ethers.Contract('0xCFb72d5F0C888Be93d67EeaAf6Daac8507D85853', [
     'function getCurrentEpoch() view returns (uint256)',
   ], provider);
 
   const currentEpoch = Number(await chronos.getCurrentEpoch());
-  const lastId = Number(await kcs.getLatestKnowledgeCollectionId());
+  const lastId = Number(await kas.getLatestKnowledgeAssetId());
   console.log('Current epoch:', currentEpoch);
   console.log('Total KCs:', lastId.toLocaleString());
 
@@ -114,7 +114,7 @@ async function main() {
     const t0 = Date.now();
     const promises = [];
     for (let id = lastId; id > lastId - batchSize; id--) {
-      promises.push(kcs.getEndEpoch(id));
+      promises.push(kas.getEndEpoch(id));
     }
     try {
       await Promise.all(promises);

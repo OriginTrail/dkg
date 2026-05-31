@@ -64,7 +64,7 @@ SELECT ?p ?o WHERE { <did:dkg:product:ABC> ?p ?o . }
 
 | Concern | Approach A (Exclusivity) | Approach B (Shared Subjects) |
 |---|---|---|
-| **Who can update?** | Clear: only the KA owner (KC creator) can call `updateKnowledgeCollection` for that rootEntity. | Ambiguous: which publisher's triples are updated? Need per-publisher triple tracking. |
+| **Who can update?** | Clear: only the KA owner (KC creator) can call `updateKnowledgeAsset` for that rootEntity. | Ambiguous: which publisher's triples are updated? Need per-publisher triple tracking. |
 | **Deletion** | Safe: burn the KA → delete all triples where `subject == rootEntity` or starts with `{rootEntity}/.well-known/genid/`. No collateral damage. | Dangerous: deleting rootEntity removes *everyone's* triples about it, or requires per-publisher deletion (complex). |
 | **Transfer** | Clean: transferring a KA transfers all triples about that rootEntity. New owner has full control. | Fractured: a "transfer" only covers one publisher's triples. The same subject has triples from multiple non-transferable sources. |
 | **Conflict resolution** | None needed: one publisher per entity. | Required: Agent A says `price "49.99"`, Agent B says `price "39.99"`. Which is "correct"? Needs merge strategy, trust scoring, or "latest wins." |

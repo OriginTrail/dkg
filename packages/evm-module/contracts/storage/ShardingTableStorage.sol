@@ -9,7 +9,7 @@ import {ShardingTableLib} from "../libraries/ShardingTableLib.sol";
 
 contract ShardingTableStorage is INamed, IVersioned, HubDependent {
     string private constant _NAME = "ShardingTableStorage";
-    string private constant _VERSION = "1.0.0";
+    string private constant _VERSION = "10.0.2";
 
     event NodesCountIncremented(uint72 newCount);
     event NodesCountDecremented(uint72 newCount);

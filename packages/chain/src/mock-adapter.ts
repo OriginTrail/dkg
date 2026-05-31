@@ -17,7 +17,7 @@ import type {
   VerifyParams,
   PublishToContextGraphParams,
   V10PublishParams,
-  V10UpdateKCParams,
+  V10UpdateKAParams,
   NodeChallenge,
   ProofPeriodStatus,
   CreateChallengeResult,
@@ -68,7 +68,7 @@ export class MockChainAdapter implements ChainAdapter {
     kaCount: number;
     /** V10 flat-KC merkle leaf count (sorted + deduped). 0 for legacy V8 entries. */
     merkleLeafCount: number;
-    /** Publisher EOA from `createKnowledgeAssetsV10`; default to mock signer for V8 paths. */
+    /** Publisher EOA from `createKnowledgeAssets`; default to mock signer for V8 paths. */
     publisherAddress: string;
     /**
      * Verified author identity from the V10.1 author attestation, mirrored
@@ -265,7 +265,7 @@ export class MockChainAdapter implements ChainAdapter {
     if (!created) return null;
 
     return {
-      batchId: BigInt(String(created.data.kcId ?? created.data.batchId ?? '0')),
+      batchId: BigInt(String(created.data.kaId ?? created.data.batchId ?? '0')),
       startKAId: created.data.startKAId != null ? BigInt(String(created.data.startKAId)) : undefined,
       endKAId: created.data.endKAId != null ? BigInt(String(created.data.endKAId)) : undefined,
       txHash,
@@ -293,8 +293,8 @@ export class MockChainAdapter implements ChainAdapter {
     return false;
   }
 
-  async updateKnowledgeCollectionV10(params: V10UpdateKCParams): Promise<TxResult> {
-    const existing = this.batches.get(params.kcId);
+  async updateKnowledgeCollectionV10(params: V10UpdateKAParams): Promise<TxResult> {
+    const existing = this.batches.get(params.kaId);
     if (!existing) {
       return this.txResult(false);
     }
@@ -309,7 +309,7 @@ export class MockChainAdapter implements ChainAdapter {
     // `peekTxHash()` (same deterministic generator that feeds `txResult`
     // below) guarantees the pre-broadcast hash === the post-broadcast
     // hash, and naturally varies across repeated updates of the same
-    // `kcId` because `txIndexInBlock` advances per-tx.
+    // `kaId` because `txIndexInBlock` advances per-tx.
     const mockUpdateTxHash = this.peekTxHash();
     try {
       // Codex PR #241 iter-7: `await` an async WAL hook.
@@ -322,7 +322,7 @@ export class MockChainAdapter implements ChainAdapter {
     }
 
     existing.merkleRoot = params.newMerkleRoot;
-    const collection = this.collections.get(params.kcId);
+    const collection = this.collections.get(params.kaId);
     if (collection) {
       collection.merkleRoot = params.newMerkleRoot;
       collection.merkleLeafCount = params.newMerkleLeafCount;
@@ -337,7 +337,7 @@ export class MockChainAdapter implements ChainAdapter {
     const blockNumber = this.nextBlock;
     const txHash = `0x${blockNumber.toString(16).padStart(64, '0')}${txIndex.toString(16).padStart(4, '0')}`;
     this.pushEvent('KnowledgeBatchUpdated', {
-      batchId: params.kcId.toString(),
+      batchId: params.kaId.toString(),
       newMerkleRoot: toHex(params.newMerkleRoot),
       publisherAddress,
       txHash,
@@ -369,9 +369,9 @@ export class MockChainAdapter implements ChainAdapter {
 
   // --- V8 backward compatibility ---
 
-  async createKnowledgeCollection(params: CreateKCParams): Promise<TxResult> {
-    const kcId = this.nextBatchId++;
-    this.collections.set(kcId, {
+  async createKnowledgeAsset(params: CreateKCParams): Promise<TxResult> {
+    const kaId = this.nextBatchId++;
+    this.collections.set(kaId, {
       merkleRoot: params.merkleRoot,
       kaCount: params.knowledgeAssetsCount,
       merkleLeafCount: 0,
@@ -384,7 +384,7 @@ export class MockChainAdapter implements ChainAdapter {
     });
 
     this.pushEvent('KCCreated', {
-      kcId: kcId.toString(),
+      kaId: kaId.toString(),
       merkleRoot: toHex(params.merkleRoot),
       kaCount: params.knowledgeAssetsCount,
     });
@@ -392,15 +392,15 @@ export class MockChainAdapter implements ChainAdapter {
     return this.txResult(true);
   }
 
-  async updateKnowledgeCollection(params: UpdateKCParams): Promise<TxResult> {
-    const existing = this.collections.get(params.kcId);
+  async updateKnowledgeAsset(params: UpdateKCParams): Promise<TxResult> {
+    const existing = this.collections.get(params.kaId);
     if (!existing) {
       return this.txResult(false);
     }
 
     existing.merkleRoot = params.newMerkleRoot;
     this.pushEvent('KCUpdated', {
-      kcId: params.kcId.toString(),
+      kaId: params.kaId.toString(),
       newMerkleRoot: toHex(params.newMerkleRoot),
     });
 
@@ -441,8 +441,8 @@ export class MockChainAdapter implements ChainAdapter {
     return { ...result, contextGraphId: id };
   }
 
-  async submitToContextGraph(kcId: string, contextGraphId: string): Promise<TxResult> {
-    this.pushEvent('KCSubmittedToContextGraph', { kcId, contextGraphId });
+  async submitToContextGraph(kaId: string, contextGraphId: string): Promise<TxResult> {
+    this.pushEvent('KCSubmittedToContextGraph', { kaId, contextGraphId });
     return this.txResult(true);
   }
 
@@ -1025,7 +1025,7 @@ export class MockChainAdapter implements ChainAdapter {
       txHash: publishTxHash,
     });
     this.pushEvent('KCCreated', {
-      kcId: batchId.toString(),
+      kaId: batchId.toString(),
       merkleRoot: toHex(params.merkleRoot),
       publisherAddress: this.signerAddress,
       startKAId: startId.toString(),
@@ -1101,11 +1101,15 @@ export class MockChainAdapter implements ChainAdapter {
 
   // --- V10 Publish (KnowledgeAssetsV10 → KnowledgeCollectionStorage) ---
 
-  async getKnowledgeAssetsV10Address(): Promise<string> {
+  async getKnowledgeAssetsLifecycleAddress(): Promise<string> {
     // 20 valid hex bytes — callers use this solely to build publish digests,
     // never to send a real transaction, so any stable address works. Picked
     // to be visually distinct from `0x0...0` so log-diffing is easier.
     return '0x000000000000000000000000000000000000c10a';
+  }
+
+  async getDKGKnowledgeAssetsAddress(): Promise<string> {
+    return this.getKnowledgeAssetsLifecycleAddress();
   }
 
   async getEvmChainId(): Promise<bigint> {
@@ -1124,9 +1128,9 @@ export class MockChainAdapter implements ChainAdapter {
     return false;
   }
 
-  async createKnowledgeAssetsV10(params: V10PublishParams): Promise<OnChainPublishResult> {
+  async createKnowledgeAssets(params: V10PublishParams): Promise<OnChainPublishResult> {
     // Deliberately tolerant of `contextGraphId === 0n`. The real EVM
-    // adapter rejects that at `evm-adapter.ts:createKnowledgeAssetsV10`
+    // adapter rejects that at `evm-adapter.ts:createKnowledgeAssets`
     // pre-tx, which is the authoritative fail-loud boundary. The mock is
     // used by ~680 unit tests that publish with descriptive CG-name
     // strings and rely on the silent `0n` fallback to exercise the data
@@ -1157,7 +1161,7 @@ export class MockChainAdapter implements ChainAdapter {
       await params.onBroadcast?.({ txHash: mockPublishTxHash });
     } catch (hookErr) {
       throw new Error(
-        `chain:writeahead hook failed before createKnowledgeAssetsV10 broadcast (mock): ` +
+        `chain:writeahead hook failed before createKnowledgeAssets broadcast (mock): ` +
         `${hookErr instanceof Error ? hookErr.message : String(hookErr)}`,
       );
     }
@@ -1171,8 +1175,8 @@ export class MockChainAdapter implements ChainAdapter {
         'Allow the address first to model explicit mock support for address-specific publishing.',
       );
     }
-    const kcId = this.nextBatchId++;
-    this.collections.set(kcId, {
+    const kaId = this.nextBatchId++;
+    this.collections.set(kaId, {
       merkleRoot: params.merkleRoot,
       kaCount: params.knowledgeAssetsAmount,
       merkleLeafCount: params.merkleLeafCount,
@@ -1185,18 +1189,18 @@ export class MockChainAdapter implements ChainAdapter {
       ciphertextChunkCount: params.ciphertextChunkCount ?? 0,
     });
     // Also store in batches so verify() can find this publish
-    this.batches.set(kcId, {
+    this.batches.set(kaId, {
       merkleRoot: params.merkleRoot,
       kaCount: params.knowledgeAssetsAmount,
       publisherAddress,
     });
 
     const txHash = this.peekTxHash();
-    const startKAId = kcId * 100n + 1n;
+    const startKAId = kaId * 100n + 1n;
     const endKAId = startKAId + BigInt(params.knowledgeAssetsAmount) - 1n;
 
     this.pushEvent('KCCreated', {
-      kcId: kcId.toString(),
+      kaId: kaId.toString(),
       publishOperationId: params.publishOperationId,
       merkleRoot: toHex(params.merkleRoot),
       byteSize: params.byteSize.toString(),
@@ -1212,7 +1216,7 @@ export class MockChainAdapter implements ChainAdapter {
 
     const result = this.txResult(true);
     return {
-      batchId: kcId,
+      batchId: kaId,
       startKAId,
       endKAId,
       txHash: result.hash,
@@ -1233,8 +1237,8 @@ export class MockChainAdapter implements ChainAdapter {
     return this.batches.get(batchId);
   }
 
-  getCollection(kcId: bigint) {
-    return this.collections.get(kcId);
+  getCollection(kaId: bigint) {
+    return this.collections.get(kaId);
   }
 
   getIdentityIdByKey(publicKey: Uint8Array): bigint | undefined {
@@ -1313,11 +1317,11 @@ export class MockChainAdapter implements ChainAdapter {
   private rsPeriodCursor = 1n;            // activeProofPeriodStartBlock
   private rsEpoch = 1n;
   private rsPeriodIsValid = true;
-  /** kcId -> {root: bytes32 hex, leaves: leafIndex -> expected bytes32 leaf (hex), kcsAddr } */
+  /** kaId -> {root: bytes32 hex, leaves: leafIndex -> expected bytes32 leaf (hex), kcsAddr } */
   private rsKCs = new Map<bigint, {
     merkleRootHex: string;
     chunks: Map<bigint, string>;
-    kcsContract: string;
+    kasContract: string;
     cgId: bigint;
   }>();
   /** identityId -> NodeChallenge */
@@ -1347,30 +1351,30 @@ export class MockChainAdapter implements ChainAdapter {
    *
    * Also mirrors the entry into `collections` so the `getLatestMerkleRoot`
    * / `getMerkleLeafCount` / `getLatestMerkleRootPublisher` /
-   * `getKCContextGraphId` view methods stay coherent with the random
+   * `getKAContextGraphId` view methods stay coherent with the random
    * sampling mock without forcing tests to publish through
-   * `createKnowledgeAssetsV10` first. `merkleLeafCount` defaults to the
+   * `createKnowledgeAssets` first. `merkleLeafCount` defaults to the
    * number of chunks supplied (one leaf per chunk), and `publisherAddress`
    * defaults to the mock signer; both can be overridden per call.
    */
   __registerKC(input: {
-    kcId: bigint;
+    kaId: bigint;
     contextGraphId: bigint;
     merkleRootHex: string;
-    knowledgeCollectionStorageContract?: string;
+    knowledgeAssetStorageContract?: string;
     chunks: Array<{ chunkId: bigint; chunk: string }>;
     merkleLeafCount?: number;
     publisherAddress?: string;
   }): void {
     const chunks = new Map<bigint, string>();
     for (const c of input.chunks) chunks.set(c.chunkId, c.chunk);
-    this.rsKCs.set(input.kcId, {
+    this.rsKCs.set(input.kaId, {
       merkleRootHex: input.merkleRootHex,
       chunks,
-      kcsContract: input.knowledgeCollectionStorageContract ?? '0x' + 'aa'.repeat(20),
+      kasContract: input.knowledgeAssetStorageContract ?? '0x' + 'aa'.repeat(20),
       cgId: input.contextGraphId,
     });
-    this.collections.set(input.kcId, {
+    this.collections.set(input.kaId, {
       merkleRoot: fromHex(input.merkleRootHex),
       kaCount: input.chunks.length,
       merkleLeafCount: input.merkleLeafCount ?? input.chunks.length,
@@ -1426,7 +1430,7 @@ export class MockChainAdapter implements ChainAdapter {
 
     // Round-robin pick over registered KCs (deterministic across runs).
     const kcEntries = Array.from(this.rsKCs.entries());
-    const [kcId, kcEntry] = kcEntries[this.rsKCPickIndex % kcEntries.length];
+    const [kaId, kcEntry] = kcEntries[this.rsKCPickIndex % kcEntries.length];
     this.rsKCPickIndex++;
 
     const chunkIds = Array.from(kcEntry.chunks.keys());
@@ -1436,9 +1440,9 @@ export class MockChainAdapter implements ChainAdapter {
     const chunkId = chunkIds[0];
 
     const challenge: NodeChallenge = {
-      knowledgeCollectionId: kcId,
+      knowledgeAssetId: kaId,
       chunkId,
-      knowledgeCollectionStorageContract: kcEntry.kcsContract,
+      knowledgeAssetStorageContract: kcEntry.kasContract,
       epoch: this.rsEpoch,
       activeProofPeriodStartBlock: this.rsPeriodCursor,
       proofingPeriodDurationInBlocks: MockChainAdapter.RS_MOCK_PERIOD_DURATION_IN_BLOCKS,
@@ -1449,7 +1453,7 @@ export class MockChainAdapter implements ChainAdapter {
     this.pushEvent('ChallengeGenerated', {
       identityId: identityId.toString(),
       contextGraphId: kcEntry.cgId.toString(),
-      knowledgeCollectionId: kcId.toString(),
+      knowledgeAssetId: kaId.toString(),
       chunkId: chunkId.toString(),
       epoch: this.rsEpoch.toString(),
       activeProofPeriodStartBlock: this.rsPeriodCursor.toString(),
@@ -1480,13 +1484,13 @@ export class MockChainAdapter implements ChainAdapter {
       throw new ChallengeNoLongerActiveError();
     }
 
-    const kcEntry = this.rsKCs.get(challenge.knowledgeCollectionId);
+    const kcEntry = this.rsKCs.get(challenge.knowledgeAssetId);
     if (!kcEntry) {
-      throw new Error(`Mock: KC ${challenge.knowledgeCollectionId} no longer registered`);
+      throw new Error(`Mock: KC ${challenge.knowledgeAssetId} no longer registered`);
     }
     const expectedLeaf = kcEntry.chunks.get(challenge.chunkId);
     if (expectedLeaf === undefined) {
-      throw new Error(`Mock: KC ${challenge.knowledgeCollectionId} has no leaf at index ${challenge.chunkId}`);
+      throw new Error(`Mock: KC ${challenge.knowledgeAssetId} has no leaf at index ${challenge.chunkId}`);
     }
     const leafHex = (typeof leaf === 'string' ? leaf : ethers.hexlify(leaf)).toLowerCase();
     if (!/^0x[0-9a-f]{64}$/.test(leafHex)) {
@@ -1536,47 +1540,47 @@ export class MockChainAdapter implements ChainAdapter {
 
   // =====================================================================
   // KC views — read from the in-memory `collections` map populated by
-  // `createKnowledgeAssetsV10` and `__registerKC`.
+  // `createKnowledgeAssets` and `__registerKC`.
   // =====================================================================
 
-  async getLatestMerkleRoot(kcId: bigint): Promise<Uint8Array> {
-    const entry = this.collections.get(kcId);
-    if (!entry) throw new Error(`Mock: unknown kcId ${kcId}`);
+  async getLatestMerkleRoot(kaId: bigint): Promise<Uint8Array> {
+    const entry = this.collections.get(kaId);
+    if (!entry) throw new Error(`Mock: unknown kaId ${kaId}`);
     return entry.merkleRoot;
   }
 
-  async getMerkleLeafCount(kcId: bigint): Promise<number> {
-    const entry = this.collections.get(kcId);
-    if (!entry) throw new Error(`Mock: unknown kcId ${kcId}`);
+  async getMerkleLeafCount(kaId: bigint): Promise<number> {
+    const entry = this.collections.get(kaId);
+    if (!entry) throw new Error(`Mock: unknown kaId ${kaId}`);
     return entry.merkleLeafCount;
   }
 
-  async getLatestCiphertextChunksRoot(kcId: bigint): Promise<Uint8Array> {
-    const entry = this.collections.get(kcId);
-    if (!entry) throw new Error(`Mock: unknown kcId ${kcId}`);
+  async getLatestCiphertextChunksRoot(kaId: bigint): Promise<Uint8Array> {
+    const entry = this.collections.get(kaId);
+    if (!entry) throw new Error(`Mock: unknown kaId ${kaId}`);
     return entry.ciphertextChunksRoot;
   }
 
-  async getCiphertextChunkCount(kcId: bigint): Promise<number> {
-    const entry = this.collections.get(kcId);
-    if (!entry) throw new Error(`Mock: unknown kcId ${kcId}`);
+  async getCiphertextChunkCount(kaId: bigint): Promise<number> {
+    const entry = this.collections.get(kaId);
+    if (!entry) throw new Error(`Mock: unknown kaId ${kaId}`);
     return entry.ciphertextChunkCount;
   }
 
-  async getLatestMerkleRootPublisher(kcId: bigint): Promise<string> {
-    const entry = this.collections.get(kcId);
-    if (!entry) throw new Error(`Mock: unknown kcId ${kcId}`);
+  async getLatestMerkleRootPublisher(kaId: bigint): Promise<string> {
+    const entry = this.collections.get(kaId);
+    if (!entry) throw new Error(`Mock: unknown kaId ${kaId}`);
     return entry.publisherAddress;
   }
 
-  async getLatestMerkleRootAuthor(kcId: bigint): Promise<string> {
-    const entry = this.collections.get(kcId);
-    if (!entry) throw new Error(`Mock: unknown kcId ${kcId}`);
+  async getLatestMerkleRootAuthor(kaId: bigint): Promise<string> {
+    const entry = this.collections.get(kaId);
+    if (!entry) throw new Error(`Mock: unknown kaId ${kaId}`);
     return entry.authorAddress;
   }
 
-  async getKCContextGraphId(kcId: bigint): Promise<bigint> {
-    const entry = this.collections.get(kcId);
+  async getKAContextGraphId(kaId: bigint): Promise<bigint> {
+    const entry = this.collections.get(kaId);
     return entry?.cgId ?? 0n;
   }
 }

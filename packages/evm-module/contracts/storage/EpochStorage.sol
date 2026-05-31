@@ -9,7 +9,7 @@ import {IVersioned} from "../interfaces/IVersioned.sol";
 
 contract EpochStorage is INamed, IVersioned, HubDependent {
     string private constant _NAME = "EpochStorage";
-    string private constant _VERSION = "1.0.0";
+    string private constant _VERSION = "10.0.2";
 
     event EpochProducedKnowledgeValueAdded(uint72 indexed identityId, uint256 indexed epoch, uint96 knowledgeValue);
     event TokensAddedToEpochRange(

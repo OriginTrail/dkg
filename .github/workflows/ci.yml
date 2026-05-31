@@ -1,8 +1,12 @@
 name: CI
 
 # Trigger rules — chosen so the same SHA is never tested twice:
-#   * push to main/v10-rc : always runs (merge-gate safety net, full
-#     Solidity coverage, required status checks for protected branches).
+#   * push to main/v10-rc/release/rc.12 : always runs (merge-gate safety
+#     net, full Solidity coverage, required status checks for protected
+#     branches). `release/rc.12` is the active release-stabilisation
+#     branch that feature/fix work currently lands on (and where bugs
+#     are reproduced/fixed), so it gets the same gate as main/v10-rc —
+#     otherwise the Node test suites only run once rc.12 merges upward.
 #   * pull_request         : runs on every open/synchronize/reopen event.
 #   * No `push` trigger on feature branches (e.g. `test/**`). When a PR
 #     is open, the `pull_request` event already covers every new commit;
@@ -10,9 +14,9 @@ name: CI
 #     or trigger the workflow manually via `workflow_dispatch`.
 on:
   push:
-    branches: [main, v10-rc]
+    branches: [main, v10-rc, release/rc.12]
   pull_request:
-    branches: [main, v10-rc]
+    branches: [main, v10-rc, release/rc.12]
   workflow_dispatch:
 
 concurrency:
@@ -258,6 +262,75 @@ jobs:
         run: pnpm --filter @origintrail-official/dkg-storage test
       - name: "Chain unit (46 tests)"
         run: pnpm --filter @origintrail-official/dkg-chain test
+
+  # ------------------------------------------------------------------
+  # Tornado Blazegraph integration lane — runs the storage adapter's
+  # `*.integration.test.ts` against a REAL Blazegraph (Docker service
+  # container), with no mocks. The mocked `blazegraph.unit.test.ts`
+  # (in the tornado-core lane) asserts the wire format; this lane proves
+  # the end-to-end behaviour the mocks cannot:
+  #
+  #   * Large publishes used to fail on Blazegraph with HTTP 400
+  #     "Unable to parse form content". A publish issues a single large
+  #     DELETE DATA over the full quad set; the old adapter sent it as
+  #     URL-encoded form data (`update=…`), which Jetty's form parser
+  #     caps at `maxFormContentSize` (~200 KB on the stock image). The
+  #     fix switched the transport to a W3C SPARQL 1.1 direct POST
+  #     (`application/sparql-update` / `application/sparql-query`), which
+  #     is not form parsed and so has no size cap.
+  #
+  # The image is the same stock `lyrasis/blazegraph:2.1.5` our node-setup
+  # wizard provisions, so this reproduces exactly what an operator runs.
+  # The integration suite is gated on BLAZEGRAPH_TEST_URL — without it the
+  # tests `describe.skipIf`-skip, so local `pnpm test` needs no Docker.
+  # ------------------------------------------------------------------
+  tornado-blazegraph:
+    name: "Tornado: storage Blazegraph integration (live server)"
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      blazegraph:
+        image: lyrasis/blazegraph:2.1.5
+        ports:
+          - 9999:8080
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: build-outputs
+          path: /tmp
+      - name: Restore build outputs
+        run: tar -xzf /tmp/build-outputs.tgz
+
+      - name: Wait for Blazegraph to be ready
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 60); do
+            if curl -sf -o /dev/null "http://127.0.0.1:9999/bigdata/status"; then
+              echo "Blazegraph ready after ${i} attempt(s)."
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::Blazegraph did not become ready within 120s"
+          exit 1
+
+      - name: "Storage Blazegraph integration tests (no mocks)"
+        env:
+          # Stock image ships the default `kb` namespace; that's all the
+          # adapter needs (it isolates per-test via unique GRAPH IRIs).
+          BLAZEGRAPH_TEST_URL: http://127.0.0.1:9999/bigdata/namespace/kb/sparql
+        run: pnpm --filter @origintrail-official/dkg-storage exec vitest run test/blazegraph.integration.test.ts
 
   # ------------------------------------------------------------------
   # Tornado publisher lane — sharded across 4 parallel runners.

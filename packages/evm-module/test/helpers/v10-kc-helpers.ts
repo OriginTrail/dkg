@@ -3,12 +3,12 @@ import { ethers } from 'ethers';
 
 import { signMessage } from './kc-helpers';
 import { NodeAccounts } from './types';
-import { KnowledgeAssetsV10 } from '../../typechain';
+import { KnowledgeAssetsLifecycle } from '../../typechain';
 
 /**
  * V10 publish/update test helpers.
  *
- * Digest construction must match `KnowledgeAssetsV10.sol` EXACTLY. Any drift
+ * Digest construction must match `KnowledgeAssetsLifecycle.sol` EXACTLY. Any drift
  * between the contract and these helpers will fail at ECDSA.tryRecover with
  * `SignerIsNotNodeOperator`, `InvalidSignature`, or `InvalidAuthorSignature`.
  *
@@ -16,7 +16,7 @@ import { KnowledgeAssetsV10 } from '../../typechain';
  * carries an EIP-712 author attestation.
  *
  * ACK digest prefix (H5 closure):
- *   (block.chainid, address(KnowledgeAssetsV10), ...)
+ *   (block.chainid, address(KnowledgeAssetsLifecycle), ...)
  *
  * ACK digest (publish) — PRD V10 "Publish Flow" + decision #25 Option B,
  * extended with `merkleLeafCount` (uint256 on wire). Wrapped in
@@ -33,7 +33,7 @@ import { KnowledgeAssetsV10 } from '../../typechain';
  *   || uint256(newMerkleLeafCount)
  *
  * Author attestation (RFC-001) — EIP-712 typed data:
- *   domain   = EIP712Domain(name="KnowledgeAssetsV10", version="10.1",
+ *   domain   = EIP712Domain(name="KnowledgeAssetsLifecycle", version="2.0.0",
  *                           chainId, verifyingContract=KAV10)
  *   struct   = AuthorAttestation(uint256 contextGraphId, bytes32 merkleRoot,
  *                                address authorAddress, uint8 schemeVersion)
@@ -73,7 +73,7 @@ export type AuthorAttestationPayload = {
  * Build the EIP-712 typed-data payload for a V10 author attestation.
  *
  * Domain mirrors the contract's `_hashAuthorAttestation`:
- *   name="KnowledgeAssetsV10", version="10.1", chainId, verifyingContract.
+ *   name="KnowledgeAssetsLifecycle", version="2.0.0", chainId, verifyingContract.
  *
  * The struct hash binds (contextGraphId, merkleRoot, authorAddress,
  * schemeVersion). Drift between this builder and the contract will surface
@@ -90,8 +90,8 @@ export function buildAuthorAttestationPayload(args: {
   const schemeVersion = args.schemeVersion ?? AUTHOR_SCHEME_VERSION_V1;
   return {
     domain: {
-      name: 'KnowledgeAssetsV10',
-      version: '10.1',
+      name: 'KnowledgeAssetsLifecycle',
+      version: '2.0.0',
       chainId: args.chainId,
       verifyingContract: ethers.getAddress(args.kav10Address),
     },
@@ -155,6 +155,9 @@ export function buildPublishAckDigest(
   epochs: number | bigint,
   tokenAmount: bigint,
   merkleLeafCount: number | bigint,
+  ciphertextChunksRoot: string = ethers.ZeroHash,
+  ciphertextChunkCount: number | bigint = 0,
+  isImmutable: boolean = false,
 ): string {
   return ethers.solidityPackedKeccak256(
     [
@@ -167,6 +170,9 @@ export function buildPublishAckDigest(
       'uint256', // epochs (cast to uint256 in contract)
       'uint256', // tokenAmount (cast to uint256 in contract)
       'uint256', // merkleLeafCount (cast to uint256 in contract)
+      'bytes32', // ciphertextChunksRoot
+      'uint256', // ciphertextChunkCount
+      'uint256', // isImmutable (0/1)
     ],
     [
       chainId,
@@ -178,6 +184,9 @@ export function buildPublishAckDigest(
       epochs,
       tokenAmount,
       merkleLeafCount,
+      ciphertextChunksRoot,
+      ciphertextChunkCount,
+      isImmutable ? 1 : 0,
     ],
   );
 }
@@ -186,7 +195,7 @@ export function buildPublishAckDigest(
  * Build update ACK digest. See contract `_executeUpdateCore`.
  *
  * `contextGraphId` is read by the contract from on-chain
- * `ContextGraphStorage.kcToContextGraph(id)` — the caller CANNOT override it
+ * `ContextGraphStorage.kaToContextGraph(id)` — the caller CANNOT override it
  * in the signed payload. The test fixture must therefore pass the same value
  * the contract will look up, or signature verification will fail.
  *
@@ -205,6 +214,8 @@ export function buildUpdateAckDigest(
   mintKnowledgeAssetsAmount: bigint,
   knowledgeAssetsToBurn: bigint[],
   newMerkleLeafCount: number | bigint,
+  newCiphertextChunksRoot: string = ethers.ZeroHash,
+  newCiphertextChunkCount: number | bigint = 0,
 ): string {
   // Inner burn-list keccak matches `keccak256(abi.encodePacked(knowledgeAssetsToBurn))`.
   const innerBurnHash = ethers.solidityPackedKeccak256(
@@ -224,6 +235,8 @@ export function buildUpdateAckDigest(
       'uint256', // mintKnowledgeAssetsAmount
       'bytes32', // keccak(burn list)
       'uint256', // newMerkleLeafCount
+      'bytes32', // newCiphertextChunksRoot
+      'uint256', // newCiphertextChunkCount
     ],
     [
       chainId,
@@ -237,6 +250,8 @@ export function buildUpdateAckDigest(
       mintKnowledgeAssetsAmount,
       innerBurnHash,
       newMerkleLeafCount,
+      newCiphertextChunksRoot,
+      newCiphertextChunkCount,
     ],
   );
 }
@@ -263,7 +278,7 @@ export async function signAckDigest(
 }
 
 /**
- * Build a full `PublishParamsStruct` ready for `KnowledgeAssetsV10.publish`.
+ * Build a full `PublishParamsStruct` ready for `KnowledgeAssetsLifecycle.publish`.
  * Runs the ACK signing flow internally and produces an EOA author attestation
  * over the publish payload.
  */
@@ -298,15 +313,19 @@ export async function buildPublishParams(args: {
    * MUST set both to non-zero values; the contract enforces the
    * paired-or-zero invariant via `IncompleteCiphertextCommitment`.
    *
-   * Note: the on-chain ACK digest does NOT include these fields (RFC-38
-   * §5.4.2 — Phase A cosigned ACK is unchanged; the LU-11 ciphertext
-   * commitment is off-chain ACK material only). So the existing
-   * `buildPublishAckDigest` call below correctly omits them.
+   * Note: the on-chain ACK digest DOES include these fields plus `isImmutable`
+   * (`KnowledgeAssetsLifecycle._executePublishCore` packs
+   * `ciphertextChunksRoot || uint256(ciphertextChunkCount) || uint256(isImmutable)`
+   * after `merkleLeafCount`). The `buildPublishAckDigest` call below MUST pass
+   * the same values the struct carries or the ACK signatures fail recovery
+   * with `SignerIsNotNodeOperator`.
    */
   ciphertextChunksRoot?: string;
   ciphertextChunkCount?: number | bigint;
-}): Promise<KnowledgeAssetsV10.PublishParamsStruct> {
+}): Promise<KnowledgeAssetsLifecycle.PublishParamsStruct> {
   const merkleLeafCount = args.merkleLeafCount ?? 1;
+  const ciphertextChunksRoot = args.ciphertextChunksRoot ?? ethers.ZeroHash;
+  const ciphertextChunkCount = args.ciphertextChunkCount ?? 0;
   const ackDigest = buildPublishAckDigest(
     args.chainId,
     args.kav10Address,
@@ -317,6 +336,9 @@ export async function buildPublishParams(args: {
     args.epochs,
     args.tokenAmount,
     merkleLeafCount,
+    ciphertextChunksRoot,
+    ciphertextChunkCount,
+    args.isImmutable,
   );
   const sig = await signAckDigest(
     args.receivingNodes,
@@ -348,8 +370,8 @@ export async function buildPublishParams(args: {
     tokenAmount: args.tokenAmount,
     isImmutable: args.isImmutable,
     merkleLeafCount,
-    ciphertextChunksRoot: args.ciphertextChunksRoot ?? ethers.ZeroHash,
-    ciphertextChunkCount: args.ciphertextChunkCount ?? 0,
+    ciphertextChunksRoot,
+    ciphertextChunkCount,
     publisherNodeIdentityId: args.publisherIdentityId,
     authorAddress: args.author.address,
     authorR: authorSig.authorR,
@@ -362,12 +384,72 @@ export async function buildPublishParams(args: {
 }
 
 /**
- * Build a full `UpdateParamsStruct` for `KnowledgeAssetsV10.update` / `updateDirect`.
+ * Build a full `UpdateParamsStruct` for `KnowledgeAssetsLifecycle.update` / `updateDirect`.
  *
  * Requires the on-chain `contextGraphId` (read by the test from
- * `ContextGraphStorage.kcToContextGraph(id)`) and the pre-update merkle-root
- * count (read from `KnowledgeCollectionStorage.getKnowledgeCollectionMetadata(id)`).
+ * `ContextGraphStorage.kaToContextGraph(id)`) and the pre-update merkle-root
+ * count (read from `DKGKnowledgeAssets.getKnowledgeAssetMetadata(id)`).
  */
+export type UpdateAuthorAttestationPayload = {
+  domain: ethers.TypedDataDomain;
+  types: Record<string, { name: string; type: string }[]>;
+  value: {
+    kaId: bigint;
+    newMerkleRoot: string;
+    authorAddress: string;
+    schemeVersion: number;
+  };
+};
+
+export function buildUpdateAuthorAttestationPayload(args: {
+  chainId: bigint;
+  kav10Address: string;
+  kaId: bigint;
+  newMerkleRoot: string;
+  authorAddress: string;
+  schemeVersion?: number;
+}): UpdateAuthorAttestationPayload {
+  const schemeVersion = args.schemeVersion ?? AUTHOR_SCHEME_VERSION_V1;
+  return {
+    domain: {
+      name: 'KnowledgeAssetsLifecycle',
+      version: '2.0.0',
+      chainId: args.chainId,
+      verifyingContract: ethers.getAddress(args.kav10Address),
+    },
+    types: {
+      UpdateAuthorAttestation: [
+        { name: 'kaId', type: 'uint256' },
+        { name: 'newMerkleRoot', type: 'bytes32' },
+        { name: 'authorAddress', type: 'address' },
+        { name: 'schemeVersion', type: 'uint8' },
+      ],
+    },
+    value: {
+      kaId: args.kaId,
+      newMerkleRoot: args.newMerkleRoot,
+      authorAddress: ethers.getAddress(args.authorAddress),
+      schemeVersion,
+    },
+  };
+}
+
+export async function signUpdateAuthorAttestation(
+  signer: SignerWithAddress,
+  payload: UpdateAuthorAttestationPayload,
+): Promise<AuthorSig> {
+  const fullSig = await signer.signTypedData(
+    payload.domain,
+    payload.types,
+    payload.value,
+  );
+  const split = ethers.Signature.from(fullSig);
+  return {
+    authorR: split.r,
+    authorVS: split.yParityAndS,
+  };
+}
+
 export async function buildUpdateParams(args: {
   chainId: bigint;
   kav10Address: string;
@@ -383,10 +465,23 @@ export async function buildUpdateParams(args: {
   mintKnowledgeAssetsAmount: bigint;
   knowledgeAssetsToBurn: bigint[];
   updateOperationId: string;
+  /** KA owner / attestation signer. */
+  author: SignerWithAddress;
   /** Defaults to 1 for fixtures that only assert economics / signatures. */
   newMerkleLeafCount?: number;
-}): Promise<KnowledgeAssetsV10.UpdateParamsStruct> {
+  /**
+   * RFC-39 curated-CG ciphertext commitment for the update (optional).
+   * Defaults to `bytes32(0)` + `0`. The on-chain ACK digest binds BOTH fields
+   * (`KnowledgeAssetsLifecycle._executeUpdateCore`), so they MUST be passed
+   * here — not spread onto the returned struct after signing — or the receiver
+   * quorum signatures fail recovery with `SignerIsNotNodeOperator`.
+   */
+  newCiphertextChunksRoot?: string;
+  newCiphertextChunkCount?: number | bigint;
+}): Promise<KnowledgeAssetsLifecycle.UpdateParamsStruct> {
   const newMerkleLeafCount = args.newMerkleLeafCount ?? 1;
+  const newCiphertextChunksRoot = args.newCiphertextChunksRoot ?? ethers.ZeroHash;
+  const newCiphertextChunkCount = args.newCiphertextChunkCount ?? 0;
   const ackDigest = buildUpdateAckDigest(
     args.chainId,
     args.kav10Address,
@@ -399,8 +494,18 @@ export async function buildUpdateParams(args: {
     args.mintKnowledgeAssetsAmount,
     args.knowledgeAssetsToBurn,
     newMerkleLeafCount,
+    newCiphertextChunksRoot,
+    newCiphertextChunkCount,
   );
   const sig = await signAckDigest(args.receivingNodes, ackDigest);
+  const updateAttPayload = buildUpdateAuthorAttestationPayload({
+    chainId: args.chainId,
+    kav10Address: args.kav10Address,
+    kaId: args.id,
+    newMerkleRoot: args.newMerkleRoot,
+    authorAddress: await args.author.getAddress(),
+  });
+  const authorSig = await signUpdateAuthorAttestation(args.author, updateAttPayload);
   return {
     id: args.id,
     updateOperationId: args.updateOperationId,
@@ -410,15 +515,15 @@ export async function buildUpdateParams(args: {
     newMerkleLeafCount,
     mintKnowledgeAssetsAmount: args.mintKnowledgeAssetsAmount,
     knowledgeAssetsToBurn: args.knowledgeAssetsToBurn,
-    // Codex PR #630 R1 #2 — RFC-39 Phase A.5 commitment refresh. Default
-    // both to zero so the existing public-CG fixtures (which never
-    // touch curated ciphertext) stay green. Curated-rotation tests
-    // override these explicitly via the returned struct.
-    newCiphertextChunksRoot: ethers.ZeroHash,
-    newCiphertextChunkCount: 0,
+    newCiphertextChunksRoot,
+    newCiphertextChunkCount,
     publisherNodeIdentityId: args.publisherIdentityId,
     identityIds: args.receiverIdentityIds,
     r: sig.receiverRs,
     vs: sig.receiverVSs,
+    authorAddress: await args.author.getAddress(),
+    authorR: authorSig.authorR,
+    authorVS: authorSig.authorVS,
+    authorSchemeVersion: AUTHOR_SCHEME_VERSION_V1,
   };
 }

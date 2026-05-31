@@ -20,8 +20,26 @@ afterEach(async () => {
   await Promise.all(cleanupPaths.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
+// `node:sqlite` is opt-in in Node 22.5–23.x (`--experimental-sqlite`) and
+// stabilised in Node 24+. The agent vitest config now passes
+// `--experimental-sqlite` via `poolOptions.{forks,threads}.execArgv` so
+// every test runner — local and CI — has the flag enabled. The probe is
+// kept as a safety net: if a future Node revision drops the flag (or a
+// developer runs vitest by hand outside of the agent script), we mark
+// the test failing-not-skipping so the gap surfaces loudly. PR #792 bot
+// review caught the original silent-skip regression.
+const sqliteImport = await import('node:sqlite' /* @vite-ignore */).catch((error: unknown) => error);
+
 describe('generic SQL source handler', () => {
   it('queries a real SQLite database and maps typed literals and joins', async () => {
+    if (sqliteImport instanceof Error) {
+      throw new Error(
+        `node:sqlite is not available — vitest must be invoked with ` +
+          `\`--experimental-sqlite\` (Node 22.5–23.x) or on Node 24+. ` +
+          `Re-run via \`pnpm --filter @origintrail-official/dkg-agent test\`. ` +
+          `Underlying error: ${sqliteImport.message}`,
+      );
+    }
     const dir = await mkdtemp(join(tmpdir(), 'generic-sql-source-'));
     cleanupPaths.push(dir);
     const databasePath = join(dir, 'fixture.sqlite');

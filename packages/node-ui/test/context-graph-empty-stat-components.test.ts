@@ -112,7 +112,7 @@ describe('Context Graph shared empty/stat patterns', () => {
         layer: 'vm',
         items: [
           { id: 'assets', value: 2, label: 'Knowledge Assets' },
-          { id: 'triples', value: '1,234', label: 'Verified Triples' },
+          { id: 'triples', value: '1,234', label: 'Verifiable Triples' },
         ],
       }),
     );
@@ -121,7 +121,7 @@ describe('Context Graph shared empty/stat patterns', () => {
     expect(Array.from(container.querySelectorAll('.v10-stat-strip-value')).map(el => el.textContent))
       .toEqual(['2', '1,234']);
     expect(container.textContent).toContain('Knowledge Assets');
-    expect(container.textContent).toContain('Verified Triples');
+    expect(container.textContent).toContain('Verifiable Triples');
 
     await unmount();
   });

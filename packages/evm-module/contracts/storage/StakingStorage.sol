@@ -12,7 +12,7 @@ contract StakingStorage is INamed, IVersioned, Guardian {
     using EnumerableSetLib for EnumerableSetLib.Uint256Set;
 
     string private constant _NAME = "StakingStorage";
-    string private constant _VERSION = "1.0.0";
+    string private constant _VERSION = "10.0.2";
 
     event TotalStakeUpdated(uint96 totalStake);
     event NodeStakeUpdated(uint72 indexed identityId, uint96 stake);

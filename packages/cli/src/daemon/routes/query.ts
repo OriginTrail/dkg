@@ -404,6 +404,7 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
     const graphSuffix = parsed.graphSuffix;
     const includeSharedMemory =
       parsed.includeSharedMemory ?? parsed.includeWorkspace;
+    const includeContextGraphPartitions = parsed.includeContextGraphPartitions === true;
     const view = parsed.view;
     const agentAddress = parsed.agentAddress;
     // the
@@ -584,6 +585,7 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
         contextGraphId,
         graphSuffix,
         includeSharedMemory,
+        includeContextGraphPartitions,
         view,
         agentAddress,
         verifiedGraph,

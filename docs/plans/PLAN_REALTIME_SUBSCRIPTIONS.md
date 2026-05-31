@@ -198,14 +198,14 @@ sequenceDiagram
     participant Bus as TypedEventBus
     participant Gossip as GossipSub
 
-    Note over Gossip: Peer publishes KC
+    Note over Gossip: Peer publishes KA
     Gossip->>Bus: emit(KC_PUBLISHED, payload)
 
     Note over Client: Client connects
     Client->>SSE: GET /api/events?types=kc:confirmed
     SSE->>SubMgr: addSubscription(res, filter)
 
-    Note over Gossip: Chain confirms KC
+    Note over Gossip: Chain confirms KA
     Gossip->>Bus: emit(KC_CONFIRMED, payload)
     Bus->>SubMgr: onEvent(KC_CONFIRMED, payload)
     SubMgr->>SubMgr: match filter (type=kc:confirmed ✓)

@@ -89,7 +89,7 @@ contract DKGStakingConvictionNFT is IVersioned, ContractStatus, IInitializable, 
     //           points and events.
     //         * L8 — `identityId != 0` guard added on mint paths so
     //           ambiguous "zero-node" mints fail fast at the wrapper.
-    string private constant _VERSION = "1.2.0";
+    string private constant _VERSION = "10.0.2";
 
     // ========================================================================
     // Constants

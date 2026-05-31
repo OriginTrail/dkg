@@ -94,13 +94,20 @@ export class BlazegraphStore implements TripleStore {
       return this.queryConstruct(trimmed);
     }
 
+    // Direct POST (W3C SPARQL 1.1 Protocol): send the query as the raw
+    // request body with `application/sparql-query` rather than URL-encoded
+    // form data. Form-encoded bodies (`query=...`) are parsed by Jetty's
+    // form handler, which caps at `maxFormContentSize` (~200 KB by default
+    // on stock Blazegraph) and rejects larger payloads with HTTP 400
+    // "Unable to parse form content". The direct-POST body is not form
+    // parsed, so large queries (e.g. CONSTRUCT/VALUES) are not capped.
     const res = await fetch(this.url, {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Type': 'application/sparql-query',
         Accept: 'application/sparql-results+json',
       },
-      body: `query=${encodeURIComponent(trimmed)}`,
+      body: trimmed,
     });
     if (!res.ok) {
       const text = await res.text().catch(() => '');
@@ -130,10 +137,10 @@ export class BlazegraphStore implements TripleStore {
     const res = await fetch(this.url, {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Type': 'application/sparql-query',
         Accept: 'text/x-nquads, application/n-quads',
       },
-      body: `query=${encodeURIComponent(sparql)}`,
+      body: sparql,
     });
     if (!res.ok) {
       const text = await res.text().catch(() => '');
@@ -201,10 +208,17 @@ export class BlazegraphStore implements TripleStore {
   // -------------------------------------------------------------------
 
   private async sparqlUpdate(update: string): Promise<void> {
+    // Direct POST (W3C SPARQL 1.1 Protocol): send the update as the raw
+    // request body with `application/sparql-update` rather than URL-encoded
+    // form data (`update=...`). Form-encoded bodies hit Jetty's
+    // `maxFormContentSize` cap (~200 KB on stock Blazegraph) and fail with
+    // HTTP 400 "Unable to parse form content" — which broke large publishes
+    // (a publish issues a DELETE DATA / INSERT over the full quad set). The
+    // raw body is not form parsed, so large updates succeed.
     const res = await fetch(this.url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: `update=${encodeURIComponent(update)}`,
+      headers: { 'Content-Type': 'application/sparql-update' },
+      body: update,
     });
     if (!res.ok) {
       const text = await res.text().catch(() => '');

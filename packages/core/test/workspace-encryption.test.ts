@@ -10,8 +10,8 @@ import {
   assertSupportedEncryptedWorkspaceEnvelope,
   decodeWorkspaceEncryptionKey,
   decryptWorkspacePayload,
-  encryptWorkspacePayload,
   encodeWorkspaceEncryptionKey,
+  encryptWorkspacePayload,
   generateWorkspaceRecipientEncryptionKey,
   type EncryptWorkspacePayloadInput,
   type WorkspaceRecipientEncryptionKey,
@@ -162,11 +162,87 @@ describe('workspace encrypted payload helpers', () => {
     expect(key.privateKeyBytes).toHaveLength(WORKSPACE_ENCRYPTION_KEY_BYTES);
   });
 
-  it('decodes base64url keys that happen to start with 0x', () => {
-    const encoded = `0x${'A'.repeat(41)}`;
-    const bytes = decodeWorkspaceEncryptionKey(encoded);
+  // Regression: PR #792 (CI shard `Tornado: agent [7/10]`,
+  // test/ack-eip191-agent-extra.test.ts > "tampered signature does NOT
+  // recover the agent address") flaked at ~0.02% with
+  // `workspaceEncryptionKey must be 32 bytes` in
+  // `mintCustodialWorkspaceEncryptionKey → signWorkspaceEncryptionKey →
+  // decodeWorkspaceEncryptionKey`.
+  //
+  // Root cause: `encodeWorkspaceEncryptionKey` emits base64url. The
+  // base64url alphabet (`[A-Za-z0-9_-]`) overlaps with hex
+  // (`[0-9a-fA-F]` after `0x`) — every ~5,000th randomly-generated
+  // 32-byte x25519 public key encodes to a base64url string whose first
+  // two characters are `0x` (e.g.
+  // `0xbT0xAeVsXZ3f7alN53CypTY2D4ejqY6CJlfEg2Yws`). The original
+  // `decodeWorkspaceEncryptionKey` heuristic
+  // `raw.startsWith('0x') ? hex : base64` then mis-routed those keys
+  // to the hex branch — Buffer.from('bT0…', 'hex') silently truncates
+  // at the first non-hex char, producing fewer than 32 bytes and
+  // tripping the assertion.
+  //
+  // The round-5 fix narrowed the hex branch to "exactly `0x` + 64 hex
+  // chars". Round 6+7 went further: the bot caught that `0x` + 41 'a'
+  // chars (length 43) is a valid base64url string AND a plausible
+  // mistype of canonical 64-char hex. There is no heuristic that
+  // disambiguates the two without breaking the other edge. The final
+  // resolution is to drop hex support from the decoder entirely (no
+  // caller produces hex via this API anyway), so all `0x…` strings
+  // unambiguously decode as base64url.
+  it('encode → decode round-trip is byte-stable across many random x25519 keys', () => {
+    // Deterministic background coverage. The base64url-with-0x-prefix
+    // collision the next test pins is rare (~1/4096 per key) so an
+    // expectation that 10k samples contain ≥1 collision flakes at ~8%
+    // on its own; that flaky assertion was removed in favour of the
+    // deterministic literal fixture below. This test still exercises
+    // round-trip stability for 1k random keys, which is fast and gives
+    // the byte-equality assertion broad coverage.
+    const N = 1_000;
+    for (let i = 0; i < N; i++) {
+      const key = generateWorkspaceRecipientEncryptionKey(
+        `did:dkg:agent:test-${i}`,
+        `did:dkg:agent:test-${i}#x25519`,
+      );
+      const encoded = encodeWorkspaceEncryptionKey(key.publicKeyBytes);
+      const decoded = decodeWorkspaceEncryptionKey(encoded);
+      expect(decoded).toHaveLength(WORKSPACE_ENCRYPTION_KEY_BYTES);
+      expect(Buffer.from(decoded).equals(Buffer.from(key.publicKeyBytes))).toBe(true);
+    }
+  });
 
-    expect(bytes).toHaveLength(WORKSPACE_ENCRYPTION_KEY_BYTES);
-    expect(encodeWorkspaceEncryptionKey(bytes)).toBe(encoded);
+  it('decodes the literal failing base64url-with-0x-prefix key from PR #792 CI', () => {
+    // The exact string captured from the failing iteration (32 random
+    // bytes that, by chance, encode to base64url starting with `0x`).
+    const encoded = '0xbT0xAeVsXZ3f7alN53CypTY2D4ejqY6CJlfEg2Yws';
+    const expected = Buffer.from(
+      'd316d3d3101e56c5d9ddfeda94de770b2a536360f87a3a98e822657c4836630b',
+      'hex',
+    );
+    const decoded = decodeWorkspaceEncryptionKey(encoded);
+    expect(decoded).toHaveLength(WORKSPACE_ENCRYPTION_KEY_BYTES);
+    expect(Buffer.from(decoded).equals(expected)).toBe(true);
+  });
+
+  // Regression: PR #792 round-6 bot review caught that
+  //   `0x` + 41 'a' chars (length 43) is structurally indistinguishable
+  // from a malformed hex key vs a legitimate base64url key — they're
+  // both valid 43-char base64url AND look like a typo of canonical
+  // 64-char hex. There is no length+alphabet heuristic that resolves
+  // both edges without misrouting the other.
+  //
+  // Resolution (round 7): drop hex support from the decoder entirely.
+  // `0x…hex` was dead code (no caller in this workspace produces or
+  // consumes it via this API), so any 66-char canonical hex input is
+  // now refused with an explicit message pointing at the base64url
+  // wire format. This eliminates the ambiguity at the source.
+  it('rejects canonical 0x-prefixed 32-byte hex with an explicit message', () => {
+    const expected = Buffer.from(
+      'd316d3d3101e56c5d9ddfeda94de770b2a536360f87a3a98e822657c4836630b',
+      'hex',
+    );
+    const hexEncoded = `0x${expected.toString('hex')}`;
+    expect(() => decodeWorkspaceEncryptionKey(hexEncoded)).toThrow(
+      /refusing to decode 0x-prefixed hex form/,
+    );
   });
 });

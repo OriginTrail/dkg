@@ -115,9 +115,9 @@ EOF
 )")
 log "publish response: $PUB_RESP"
 TX_HASH=$(parse_json "$PUB_RESP" '.txHash')
-KC_ID=$(parse_json "$PUB_RESP" '.kcId')
+KC_ID=$(parse_json "$PUB_RESP" '.kaId')
 [ -n "$TX_HASH" ] || fail "no txHash in publish response — cannot proceed without on-chain anchor"
-[ -n "$KC_ID" ] || fail "no kcId in publish response — required for merkleRoot lookup"
+[ -n "$KC_ID" ] || fail "no kaId in publish response — required for merkleRoot lookup"
 
 log "Fetching merkleRoot from chain (KC #${KC_ID}) via daemon API..."
 KC_RESP=$(api_call "$CURATOR_NODE" GET "/api/kc/${KC_ID}")

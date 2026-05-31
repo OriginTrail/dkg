@@ -665,7 +665,7 @@ describe('DkgDaemonClient', () => {
   });
 
   it('publishSharedMemory hits /api/shared-memory/publish with selection="all" default and clearAfter=true', async () => {
-    fetchResponses.push(new Response(JSON.stringify({ kcId: 'kc-1', status: 'ok', kas: [] }), { status: 200 }));
+    fetchResponses.push(new Response(JSON.stringify({ kaId: 'kc-1', status: 'ok', kas: [] }), { status: 200 }));
 
     await client.publishSharedMemory('ctx');
 
@@ -677,7 +677,7 @@ describe('DkgDaemonClient', () => {
   });
 
   it('publishSharedMemory forwards rootEntities as selection array and honors clearAfter:false', async () => {
-    fetchResponses.push(new Response(JSON.stringify({ kcId: 'kc-2', status: 'ok', kas: [] }), { status: 200 }));
+    fetchResponses.push(new Response(JSON.stringify({ kaId: 'kc-2', status: 'ok', kas: [] }), { status: 200 }));
 
     await client.publishSharedMemory('ctx', {
       rootEntities: ['urn:a', 'urn:b'],
@@ -689,7 +689,7 @@ describe('DkgDaemonClient', () => {
   });
 
   it('publishSharedMemory defaults clearAfter=false for subset publishes to protect unpublished roots', async () => {
-    fetchResponses.push(new Response(JSON.stringify({ kcId: 'kc-3', status: 'ok', kas: [] }), { status: 200 }));
+    fetchResponses.push(new Response(JSON.stringify({ kaId: 'kc-3', status: 'ok', kas: [] }), { status: 200 }));
 
     await client.publishSharedMemory('ctx', { rootEntities: ['urn:a'] });
 
@@ -698,7 +698,7 @@ describe('DkgDaemonClient', () => {
   });
 
   it('publishSharedMemory honors explicit clearAfter=true with rootEntities when caller opts in', async () => {
-    fetchResponses.push(new Response(JSON.stringify({ kcId: 'kc-4', status: 'ok', kas: [] }), { status: 200 }));
+    fetchResponses.push(new Response(JSON.stringify({ kaId: 'kc-4', status: 'ok', kas: [] }), { status: 200 }));
 
     await client.publishSharedMemory('ctx', { rootEntities: ['urn:a'], clearAfter: true });
 
@@ -707,7 +707,7 @@ describe('DkgDaemonClient', () => {
   });
 
   it('publishSharedMemory forwards subGraphName into the request body when provided', async () => {
-    fetchResponses.push(new Response(JSON.stringify({ kcId: 'kc-5', status: 'ok', kas: [] }), { status: 200 }));
+    fetchResponses.push(new Response(JSON.stringify({ kaId: 'kc-5', status: 'ok', kas: [] }), { status: 200 }));
 
     await client.publishSharedMemory('ctx', { subGraphName: 'protocols' });
 
@@ -850,12 +850,12 @@ describe('DkgDaemonClient', () => {
     // legacy `/api/shared-memory/write` route is gone.
     fetchResponses.push(
       new Response(JSON.stringify({ assertionUri: 'urn:assertion:test' }), { status: 200 }),
-      new Response(JSON.stringify({ kcId: 'kc-1' }), { status: 200 }),
+      new Response(JSON.stringify({ kaId: 'kc-1' }), { status: 200 }),
     );
 
     const quads = [{ subject: 'urn:a', predicate: 'urn:b', object: '"value"' }];
     const result = await client.publish('testing', quads);
-    expect(result.kcId).toBe('kc-1');
+    expect(result.kaId).toBe('kc-1');
 
     expect(fetchCalls).toHaveLength(2);
     const [createUrl, createOpts] = fetchCalls[0];

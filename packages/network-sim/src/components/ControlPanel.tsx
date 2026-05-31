@@ -572,9 +572,9 @@ function SharedMemoryTab() {
     const opId = addBroadcast('publish', state.selectedNode, 'publish from shared memory');
     try {
       const res = await api.publishFromSharedMemory(state.selectedNode, contextGraphId, 'all', true);
-      completeOperation(opId, 'success', `KC: ${res.kcId}`);
+      completeOperation(opId, 'success', `KC: ${res.kaId}`);
       setResult(
-        `Published to chain.\nKC: ${res.kcId}\nStatus: ${res.status}\nKAs: ${res.kas?.length ?? 0}` +
+        `Published to chain.\nKC: ${res.kaId}\nStatus: ${res.status}\nKAs: ${res.kas?.length ?? 0}` +
         (res.txHash ? `\nTx: ${res.txHash}` : ''),
       );
     } catch (e: any) {
@@ -671,8 +671,8 @@ function PublishTab() {
 
     try {
       const res = await api.publishKA(state.selectedNode, contextGraphId, quads, privQuads);
-      completeOperation(opId, 'success', `KC: ${res.kcId}`);
-      setResult(`KC: ${res.kcId} | Status: ${res.status} | KAs: ${res.kas?.length ?? 0}`);
+      completeOperation(opId, 'success', `KC: ${res.kaId}`);
+      setResult(`KC: ${res.kaId} | Status: ${res.status} | KAs: ${res.kas?.length ?? 0}`);
     } catch (e: any) {
       completeOperation(opId, 'error', e.message);
       setResult(`Error: ${e.message}`);

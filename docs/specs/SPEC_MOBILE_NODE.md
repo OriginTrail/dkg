@@ -196,7 +196,7 @@ instead of HTTP.
 | `chat.send` | `{ to, text }` | `{ delivered, error? }` | Send message |
 | `chat.history` | `{ peer?, limit?, since? }` | `{ messages: Message[] }` | Message history |
 | `query.sparql` | `{ sparql, contextGraph? }` | `{ bindings }` | SPARQL query |
-| `publish.triples` | `{ contextGraphId, quads, privateQuads? }` | `{ kcId }` | Publish KA |
+| `publish.triples` | `{ contextGraphId, quads, privateQuads? }` | `{ kaId }` | Publish KA |
 | `contextGraph.list` | — | `{ contextGraphs }` | List contextGraphs |
 | `contextGraph.create` | `{ id, name, description? }` | `{ uri }` | Create contextGraph |
 | `config.get` | — | `{ config }` | Read config |

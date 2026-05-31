@@ -131,7 +131,7 @@ export async function bindRandomSampling(
   const required = [
     'getActiveProofPeriodStatus', 'createChallenge', 'submitProof',
     'getNodeChallenge', 'getLatestMerkleRoot', 'getMerkleLeafCount',
-    'getKCContextGraphId',
+    'getKAContextGraphId',
   ] as const;
   const missing = required.filter(
     (m) => typeof (opts.chain as unknown as Record<string, unknown>)[m] !== 'function',

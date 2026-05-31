@@ -26,7 +26,7 @@ import { dirname } from 'node:path';
 
 export type ProverPeriodStatus =
   | 'started'      // tick began for this period
-  | 'challenge'    // chain returned a challenge for kcId/cgId
+  | 'challenge'    // chain returned a challenge for kaId/cgId
   | 'extracted'    // local extraction succeeded
   | 'built'        // proof material built (leaf + proof in hand)
   | 'submitted'    // submitProof tx broadcast (txHash recorded)
@@ -52,7 +52,7 @@ export interface ProverWalEntry {
   identityId: string;
   status: ProverPeriodStatus;
   /** Set from `challenge` onwards. */
-  kcId?: string;
+  kaId?: string;
   /** Set from `challenge` onwards. */
   cgId?: string;
   /** Set from `challenge` onwards. */

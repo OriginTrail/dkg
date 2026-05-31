@@ -20,6 +20,8 @@ export const sel = {
     notifItemText: '.v10-header-notif-item-text',
     notifItemTime: '.v10-header-notif-item-time',
     themeToggle: 'button[title*="Switch to"]',
+    observabilityBtn: 'button[title="Observability"]',
+    settingsBtn: 'button[title="Settings"]',
     rightPanelToggle: 'button[title="Toggle agent panel"]',
     actions: '.v10-header-actions',
   },
@@ -195,4 +197,57 @@ export const sel = {
   },
 
   resizeHandle: '.v10-resize-handle-h',
+
+  subgraph: {
+    bar: '.v10-subgraph-bar',
+    barLabel: '.v10-subgraph-bar-label',
+    chip: '.v10-subgraph-chip',
+    chipActive: '.v10-subgraph-chip.active',
+    chipIcon: '.v10-subgraph-chip-icon',
+    chipLabel: '.v10-subgraph-chip-label',
+    chipCount: '.v10-subgraph-chip-count',
+    chipRoot: '.v10-subgraph-chip-root',
+    detail: '.v10-subgraph-detail',
+    detailTitle: '.v10-subgraph-detail-title',
+    crossLayerStrip: '[data-testid="cross-layer-strip"]',
+    crossLayerCell: '.v10-subgraph-cross-layer-cell',
+    crossLayerCount: '.v10-subgraph-cross-layer-cell-count',
+    explorerHeader: '.v10-subgraph-explorer-header',
+    explorerTitle: '.v10-subgraph-explorer-title',
+    timeline: '.v10-subgraph-timeline',
+    timelineItem: '.v10-subgraph-timeline-item',
+    badge: '.v10-subgraph-badge',
+  },
+
+  statStrip: {
+    root: '.v10-stat-strip',
+    cell: '.v10-stat-strip-cell',
+    value: '.v10-stat-strip-value',
+    label: '.v10-stat-strip-label',
+    compact: '.v10-stat-strip.compact',
+  },
+
+  layer: {
+    switcher: '.v10-layer-switcher',
+    switchBtn: '.v10-layer-switch-btn',
+    actionBtn: '.v10-layer-action-btn',
+    detail: '.v10-layer-detail',
+    graphCanvas: '[data-testid="rdf-graph"], canvas, .rdf-graph',
+    promoteAll: 'button:has-text("Promote All")',
+    publishAll: 'button:has-text("Publish")',
+  },
+
+  shareModal: {
+    title: '.v10-modal-title',
+    inviteLabel: '.v10-form-label:has-text("Invite Code")',
+    allowedAgents: '.v10-form-label:has-text("Allowed Agents")',
+    pendingRequests: '.v10-form-label:has-text("Pending Join Requests")',
+    copyInviteBtn: 'button:has-text("Copy Invite")',
+  },
+
+  myContextGraphs: {
+    peerGroup: '.v10-peer-group',
+    peerGroupLabel: '.v10-peer-group-label',
+    peerGroupBody: '.v10-peer-group-body',
+  },
 } as const;

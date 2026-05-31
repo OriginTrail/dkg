@@ -95,7 +95,7 @@ contract PublishingConvictionStorage is INamed, IVersioned, HubDependent, IIniti
     string private constant _NAME = "PublishingConvictionStorage";
     // 1.0.0 — initial split-out from `DKGPublishingConvictionNFT` v2.0.0.
     //         Identical state shape; no semantic changes.
-    string private constant _VERSION = "1.0.0";
+    string private constant _VERSION = "10.0.2";
 
     /// @notice Default cap on registered agents per account, applied on
     ///         first `initialize()` so a fresh deploy has a sane bound

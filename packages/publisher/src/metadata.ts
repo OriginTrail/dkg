@@ -151,7 +151,7 @@ export function generateKCMetadata(
 
   // KA metadata
   for (const ka of kaEntries) {
-    const kaUri = `${ka.kcUal}/${ka.tokenId}`;
+    const kaUri = ka.kcUal.includes(`/${ka.tokenId}`) ? ka.kcUal : `${ka.kcUal}/${ka.tokenId}`;
     quads.push(
       mq(kaUri, `${RDF}type`, `${DKG}KnowledgeAsset`, metaGraph),
       mq(kaUri, `${DKG}rootEntity`, ka.rootEntity, metaGraph),
@@ -201,7 +201,7 @@ export function generateKCMetadata(
       mq(publicationUri, `${DKG}authoredBy`, lit(meta.authorAddress), metaGraph),
     );
     for (const ka of kaEntries) {
-      const kaUri = `${ka.kcUal}/${ka.tokenId}`;
+      const kaUri = ka.kcUal.includes(`/${ka.tokenId}`) ? ka.kcUal : `${ka.kcUal}/${ka.tokenId}`;
       quads.push(mq(kaUri, `${DKG}publication`, publicationUri, metaGraph));
     }
   }

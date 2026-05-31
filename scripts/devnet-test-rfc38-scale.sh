@@ -132,10 +132,10 @@ log "publish response: $PUB_RESP"
 
 STATUS=$(parse_json "$PUB_RESP" '.status')
 TX=$(parse_json    "$PUB_RESP" '.txHash')
-KC=$(parse_json    "$PUB_RESP" '.kcId')
+KC=$(parse_json    "$PUB_RESP" '.kaId')
 [ "$STATUS" = "confirmed" ] || fail "publish status=$STATUS"
 [[ "$TX" =~ ^0x[0-9a-fA-F]{64}$ ]] || fail "invalid txHash"
-log "✓ publish: kcId=$KC tx=$TX"
+log "✓ publish: kaId=$KC tx=$TX"
 
 KC_META=$(api_call "$CURATOR_NODE" GET "/api/kc/$KC")
 MERKLE_ROOT=$(parse_json "$KC_META" '.merkleRoot')
@@ -154,9 +154,11 @@ const fs = require("fs"); const path = require("path");
 (async () => {
   const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
   const contracts = JSON.parse(fs.readFileSync(process.env.CONTRACTS_JSON, "utf8")).contracts;
-  const kcs = new ethers.Contract(contracts.KnowledgeCollectionStorage.evmAddress,
-    JSON.parse(fs.readFileSync(path.join(process.env.ABI_DIR, "KnowledgeCollectionStorage.json"), "utf8")), provider);
-  const [merkleRoots, , minted, byteSize] = await kcs.getKnowledgeCollectionMetadata(BigInt(process.env.BATCH_ID));
+  const kcsAddr = contracts.DKGKnowledgeAssets?.evmAddress ?? contracts.KnowledgeCollectionStorage.evmAddress;
+  const kcsAbiFile = fs.existsSync(path.join(process.env.ABI_DIR, "DKGKnowledgeAssets.json")) ? "DKGKnowledgeAssets.json" : "DKGKnowledgeAssets.json";
+  const kas = new ethers.Contract(kcsAddr,
+    JSON.parse(fs.readFileSync(path.join(process.env.ABI_DIR, kcsAbiFile), "utf8")), provider);
+  const [merkleRoots, , minted, byteSize] = await kas.getKnowledgeAssetMetadata(BigInt(process.env.BATCH_ID));
   if (!merkleRoots || merkleRoots.length === 0) throw new Error("no merkleRoots");
   const expectedMinted = BigInt(process.env.EXPECTED_MINTED);
   if (minted !== expectedMinted) throw new Error("expected " + expectedMinted + " KAs minted, got " + minted);

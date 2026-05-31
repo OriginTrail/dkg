@@ -29,7 +29,7 @@ contract StakingKPI is INamed, IVersioned, ContractStatus, IInitializable {
     //           simulator) remain V8 stake-base keyed; they are accurate for
     //           V8 archive queries but return 0 for V10 nodes. A V10
     //           tokenId-keyed equivalent is a separate follow-up PR.
-    string private constant _VERSION = "2.0.0";
+    string private constant _VERSION = "10.0.2";
     uint256 public constant SCALE18 = 1e18;
 
     IdentityStorage public identityStorage;

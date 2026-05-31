@@ -297,9 +297,57 @@ export function encodeWorkspaceEncryptionKey(bytes: Uint8Array): string {
 
 export function decodeWorkspaceEncryptionKey(value: string): Uint8Array {
   const raw = value.trim();
-  const bytes = /^0x[0-9a-fA-F]{64}$/.test(raw)
-    ? Buffer.from(raw.slice(2), 'hex')
-    : Buffer.from(padBase64(raw.replace(/-/g, '+').replace(/_/g, '/')), 'base64');
+  // Single accepted wire form: base64url (43 chars for a 32-byte key)
+  // — the only form `encodeWorkspaceEncryptionKey` ever emits and the
+  // only form any caller in this workspace ever passes (verified via
+  // `rg encodeWorkspaceEncryptionKey` on the full source tree).
+  //
+  // Why no hex support
+  // -------------------
+  // The original implementation also accepted `0x…` hex, dispatched via
+  // `raw.startsWith('0x')`. That heuristic was unsound on three counts
+  // and round 5+6 of the bot review on PR #792 walked us through both
+  // edges:
+  //
+  //   1. base64url and hex alphabets overlap. Every ~5,000th random
+  //      32-byte x25519 public key encodes to a base64url string whose
+  //      first two chars are `0x` (e.g. the captured failure
+  //      `0xbT0xAeVsXZ3f7alN53CypTY2D4ejqY6CJlfEg2Yws`). The original
+  //      heuristic mis-routed those legitimate base64url payloads to
+  //      the hex branch and tripped the 32-byte assert.
+  //
+  //   2. Tightening the heuristic to "exactly `0x` + 64 hex chars"
+  //      fixes (1) but still silently accepts malformed hex like
+  //      `0x` + 41 'a's (43 chars, valid base64url alphabet) as a
+  //      DIFFERENT 32-byte key — treating user typos as success.
+  //
+  //   3. There is no third heuristic that resolves both edges, because
+  //      base64url that happens to start with `0x` is structurally
+  //      indistinguishable from malformed hex of the same length.
+  //
+  // Resolution: drop hex support entirely. `0x…` strings now decode as
+  // base64url unconditionally — which preserves correctness for the
+  // ~1/4096 base64url collisions we cannot disambiguate, and removes
+  // any "did the user mean hex" magic. Operators who need to feed in a
+  // raw hex string can `Buffer.from(hex, 'hex').toString('base64url')`
+  // at the boundary; the workspace key wire format is base64url.
+  //
+  // (The `value.startsWith('0x')` test below is purely diagnostic — if
+  // a caller does still pass `0x…hex`, we surface a clear error
+  // pointing them at the correct encoding instead of letting the
+  // base64url decode succeed with surprising bytes.)
+  if (raw.length === 2 + WORKSPACE_X25519_KEY_BYTES * 2 && /^0x[0-9a-fA-F]+$/.test(raw)) {
+    throw new Error(
+      `workspaceEncryptionKey: refusing to decode 0x-prefixed hex form ` +
+        `(64 hex chars). Encode workspace keys as base64url via ` +
+        `\`encodeWorkspaceEncryptionKey\`; if you have raw bytes, use ` +
+        `\`Buffer.from(hex, 'hex').toString('base64url')\` at the boundary.`,
+    );
+  }
+  const bytes = Buffer.from(
+    padBase64(raw.replace(/-/g, '+').replace(/_/g, '/')),
+    'base64',
+  );
   const out = new Uint8Array(bytes);
   assertX25519KeyBytes('workspaceEncryptionKey', out);
   return out;

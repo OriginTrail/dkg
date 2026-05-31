@@ -38,4 +38,5 @@ library ProfileLib {
     error NoPendingNodeAsk();
     error NoPendingOperatorFee();
     error InvalidOperatorFee();
+    error EmptyOperationalWallets();
 }

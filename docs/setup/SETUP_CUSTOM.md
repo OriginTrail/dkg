@@ -100,7 +100,7 @@ const result = await agent.publish('research-data', [
   { subject: 'http://ex.org/paper1', predicate: 'http://schema.org/datePublished', object: '"2025-01-15"', graph: '' },
 ]);
 
-console.log('Published KC:', result.kcId);
+console.log('Published KA:', result.kaId);
 console.log('KAs:', result.kaManifest.length);
 ```
 

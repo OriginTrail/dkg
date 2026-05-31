@@ -374,15 +374,15 @@ sleep "$ONCHAIN_REGISTER_SLEEP"
 publish_resp=$(apiA POST /api/shared-memory/publish \
   "{\"contextGraphId\":\"$CG_ID\",\"selection\":\"all\",\"clearAfter\":false}")
 pub_status=$(echo "$publish_resp" | jq_field status)
-pub_kcid=$(echo "$publish_resp" | jq_field kcId)
+pub_kcid=$(echo "$publish_resp" | jq_field kaId)
 pub_tx=$(echo "$publish_resp" | jq_field txHash)
-note "publish: status=$pub_status kcId=$pub_kcid tx=${pub_tx:0:24}..."
+note "publish: status=$pub_status kaId=$pub_kcid tx=${pub_tx:0:24}..."
 case "$pub_status" in
   published|created|mined|confirmed)
-    ok "SWM published to VM (kcId=$pub_kcid status=$pub_status)" ;;
+    ok "SWM published to VM (kaId=$pub_kcid status=$pub_status)" ;;
   *)
     if [ -n "$pub_kcid" ] && [ "$pub_kcid" != "<parse-error" ]; then
-      ok "SWM publish completed (kcId=$pub_kcid status=$pub_status)"
+      ok "SWM publish completed (kaId=$pub_kcid status=$pub_status)"
     else
       fail "SWM publish failed: $publish_resp"
     fi ;;

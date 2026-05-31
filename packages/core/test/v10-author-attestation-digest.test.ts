@@ -36,13 +36,13 @@ const MERKLE_ROOT = new Uint8Array(32).fill(0xaa);
 const AUTHOR_ADDRESS = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8';
 
 // Golden hex reference — precomputed offline with `ethers.TypedDataEncoder`
-// against the exact KnowledgeAssetsV10 EIP-712 layout. If this drifts, the
-// off-chain typed-data builder no longer matches the on-chain
+// against the exact KnowledgeAssetsLifecycle EIP-712 layout. If this drifts,
+// the off-chain typed-data builder no longer matches the on-chain
 // `_hashAuthorAttestation` and every publish will fail signature recovery.
 const AUTHOR_ATTESTATION_DIGEST_GOLDEN =
-  '0xc8a7c3716a4a003879089c16f735c5956a6ab17349b7b6e1533e27bbf820b6d8';
+  '0x8b43a996c02f5bf79077213758e1504b1b62a4d8802d32a6710b5049d16fb54c';
 const AUTHOR_ATTESTATION_DOMAIN_SEPARATOR_GOLDEN =
-  '0xdf55b6f8be8bedc35cf5eacc6c6961dfe46fbac305529ae2ad0eca533407e632';
+  '0x8d1039bf11fed6d60879b8382f853f0a36eccb90a660d676560daa3165e5fa84';
 const AUTHOR_ATTESTATION_STRUCT_HASH_GOLDEN =
   '0xb72293311c0783593beea12f1d87bbb8ed1899ee1d55d439271a650c01446896';
 
@@ -392,8 +392,8 @@ describe('buildAuthorAttestationTypedData (RFC-001 §3 reference vector)', () =>
     // name or version without bumping a major contract version. Both
     // values are baked into the on-chain `_EIP712_NAME_HASH` and
     // `_EIP712_VERSION_HASH`.
-    expect(AUTHOR_ATTESTATION_DOMAIN_NAME).toBe('KnowledgeAssetsV10');
-    expect(AUTHOR_ATTESTATION_DOMAIN_VERSION).toBe('10.1');
+    expect(AUTHOR_ATTESTATION_DOMAIN_NAME).toBe('KnowledgeAssetsLifecycle');
+    expect(AUTHOR_ATTESTATION_DOMAIN_VERSION).toBe('2.0.0');
     expect(AUTHOR_ATTESTATION_PRIMARY_TYPE).toBe('AuthorAttestation');
     expect(AUTHOR_SCHEME_VERSION_V1).toBe(1);
     // Sanity on the keccak256 helpers we depend on for this test.

@@ -292,6 +292,9 @@ export class ACKCollector {
     }
     log(`[ACKCollector] Requesting ACKs from ${corePeers.length} core peers (need ${REQUIRED_ACKS})`);
 
+    const ciphertextRoot = params.chunkedCommitment?.ciphertextChunksRoot
+      ?? new Uint8Array(32);
+    const ciphertextCount = BigInt(params.chunkedCommitment?.ciphertextChunkCount ?? 0);
     const ackDigest = computePublishACKDigest(
       chainId,
       kav10Address,
@@ -302,6 +305,9 @@ export class ACKCollector {
       BigInt(params.epochs ?? 1),
       params.tokenAmount ?? 0n,
       BigInt(params.merkleLeafCount),
+      ciphertextRoot,
+      ciphertextCount,
+      false,
     );
 
     const collected: CollectedACK[] = [];

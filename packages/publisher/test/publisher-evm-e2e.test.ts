@@ -66,7 +66,7 @@ describe('Publisher EVM E2E: DKGPublisher with real contracts', () => {
     const bus = new TypedEventBus();
     const keypair = await generateEd25519Keypair();
 
-    const kav10Address = await adapter.getKnowledgeAssetsV10Address();
+    const kav10Address = await adapter.getKnowledgeAssetsLifecycleAddress();
     publisher = wrapPublisherForTest(
       new DKGPublisher({
         store,
@@ -155,9 +155,9 @@ describe('Publisher EVM E2E: DKGPublisher with real contracts', () => {
   it('V10 UPDATE: publisher.update() modifies KC on-chain', async () => {
     expect(firstPublishResult?.onChainResult).toBeDefined();
 
-    const kcId = firstPublishResult.onChainResult!.batchId;
+    const kaId = firstPublishResult.onChainResult!.batchId;
 
-    const updateResult = await publisher.update(kcId, {
+    const updateResult = await publisher.update(kaId, {
       contextGraphId: CONTEXT_GRAPH,
       quads: [
         q('urn:evm-e2e:Alice', 'http://schema.org/name', '"Alice Updated"'),
@@ -169,7 +169,7 @@ describe('Publisher EVM E2E: DKGPublisher with real contracts', () => {
     expect(updateResult.merkleRoot).toHaveLength(32);
     expect(updateResult.onChainResult).toBeDefined();
     expect(updateResult.onChainResult!.txHash).toMatch(/^0x[0-9a-f]{64}$/);
-    expect(updateResult.onChainResult!.batchId).toBe(kcId);
+    expect(updateResult.onChainResult!.batchId).toBe(kaId);
   }, 60_000);
 
   // -------------------------------------------------------------------------
@@ -334,7 +334,7 @@ describe('Publisher EVM E2E: DKGPublisher with real contracts', () => {
   }, 60_000);
 
   // -------------------------------------------------------------------------
-  // Error path: invalid kcId for update returns meaningful error
+  // Error path: invalid kaId for update returns meaningful error
   // -------------------------------------------------------------------------
 
   it('V10 UPDATE: updating non-existent KC returns failed status', async () => {

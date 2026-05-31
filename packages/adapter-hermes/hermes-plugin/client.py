@@ -19,6 +19,32 @@ from urllib.parse import quote, urlencode
 
 logger = logging.getLogger(__name__)
 
+# macOS and stripped-down Python builds ship a `mimetypes` table that
+# does NOT include common text-document extensions like `.md`,
+# `.markdown`, `.json`, `.ttl`, or `.nq`. Without these, Hermes-imported
+# files arrive at the daemon as `application/octet-stream`, which then
+# misroutes them through the binary-asset path instead of the
+# text-assertion path. Register the mappings explicitly so the
+# sidecar's behaviour is identical across operator environments.
+_HERMES_MIMETYPE_OVERRIDES = {
+    ".md": "text/markdown",
+    ".markdown": "text/markdown",
+    ".json": "application/json",
+    ".jsonld": "application/ld+json",
+    ".ttl": "text/turtle",
+    ".nt": "application/n-triples",
+    ".nq": "application/n-quads",
+    ".trig": "application/trig",
+    ".rdf": "application/rdf+xml",
+    ".xml": "application/xml",
+    ".csv": "text/csv",
+    ".tsv": "text/tab-separated-values",
+    ".yaml": "application/yaml",
+    ".yml": "application/yaml",
+}
+for _ext, _ctype in _HERMES_MIMETYPE_OVERRIDES.items():
+    mimetypes.add_type(_ctype, _ext, strict=True)
+
 _DEFAULT_URL = "http://127.0.0.1:9200"
 _TIMEOUT = 5  # seconds
 _MAX_IMPORT_FILE_BYTES = 25 * 1024 * 1024

@@ -12,10 +12,10 @@ the network, and anchored on-chain.
 | **ContextGraph** | A topic-scoped partition of the knowledge graph. Every publish targets a specific contextGraph. Think of it as a shared database namespace that multiple nodes subscribe to. |
 | **Triple store** | The local graph database (quad store) on each node. Stores RDF triples (subject-predicate-object) organized into named graphs. |
 | **Knowledge Asset (KA)** | A single entity and its triples within a publish batch. One publish can contain many KAs. Each KA maps to one "root entity" (a URI like `https://example.org/sensor/42`). |
-| **Knowledge Collection (KC)** | The entire batch of KAs published in a single transaction. The KC gets one on-chain record and one merkle root. |
+| **Knowledge Asset (KA)** | The entire batch of KAs published in a single transaction. The KA gets one on-chain record and one merkle root. |
 | **Tentative vs Confirmed** | Data starts as "tentative" (stored locally, not yet on-chain). Once the blockchain transaction confirms, it becomes "confirmed" and is retained permanently. |
-| **Merkle root** | A cryptographic fingerprint of all triples in the KC. Both publisher and receivers compute it independently. If they match, the data is identical. This root goes on-chain. |
-| **UAL** | Universal Asset Locator. The persistent identifier for a KC: `did:dkg:{chainId}/{publisherAddress}/{startKAId}`. Similar to a URL, but for knowledge assets. |
+| **Merkle root** | A cryptographic fingerprint of all triples in the KA. Both publisher and receivers compute it independently. If they match, the data is identical. This root goes on-chain. |
+| **UAL** | Universal Asset Locator. The persistent identifier for a KA: `did:dkg:{chainId}/{publisherAddress}/{startKAId}`. Similar to a URL, but for knowledge assets. |
 
 ---
 
@@ -72,7 +72,7 @@ Before going to the network, the publisher stores data locally:
 
 - Public triples go into the contextGraph's **data graph**.
 - Private triples go into the **private content store**.
-- Metadata (KC structure, KA manifest, status = "tentative") goes into the **meta graph**.
+- Metadata (KA structure, KA manifest, status = "tentative") goes into the **meta graph**.
 
 The `GraphManager` (`packages/storage/src/`) handles graph naming:
 - Data graph: `did:dkg:context-graph:{contextGraphId}`

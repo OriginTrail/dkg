@@ -11,7 +11,7 @@ import {
   decodePublishAck,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, buildKnowledgeAssetUal } from '@origintrail-official/dkg-chain';
 import { DKGPublisher } from '../src/dkg-publisher.js';
 import { PublishHandler } from '../src/publish-handler.js';
 import { AccessHandler } from '../src/access-handler.js';
@@ -63,7 +63,7 @@ describe('End-to-end: Publish → Replicate → Query', () => {
     GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
     _provider = provider;
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
-    _kav10Address = await chain.getKnowledgeAssetsV10Address();
+    _kav10Address = await chain.getKnowledgeAssetsLifecycleAddress();
   });
 
   afterAll(async () => {
@@ -145,8 +145,11 @@ describe('End-to-end: Publish → Replicate → Query', () => {
     ].join('\n');
 
     const onChain = publishResult.onChainResult!;
+    const kaContract =
+      onChain.knowledgeAssetsContract ??
+      (await chainA.getDKGKnowledgeAssetsAddress!());
     const publishRequest = encodePublishRequest({
-      ual: `did:dkg:evm:31337/${onChain.publisherAddress}/${onChain.startKAId}`,
+      ual: buildKnowledgeAssetUal(chainA.chainId, kaContract, onChain.startKAId!),
       nquads: new TextEncoder().encode(nquads),
       contextGraphId: CONTEXT_GRAPH,
       kas: publishResult.kaManifest.map((m) => ({

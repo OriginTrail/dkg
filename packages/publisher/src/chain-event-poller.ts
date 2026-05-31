@@ -20,7 +20,7 @@ export type OnContextGraphCreated = (info: {
   blockNumber: number;
 }) => Promise<void>;
 
-/** Callback for KnowledgeCollectionUpdated events (spec §5.1). */
+/** Callback for KnowledgeAssetUpdated events (spec §5.1). */
 export type OnCollectionUpdated = (info: {
   merkleRoot: Uint8Array;
   batchId: bigint;
@@ -54,7 +54,7 @@ export interface ChainEventPollerConfig {
   intervalMs?: number;
   /** Called when a ContextGraphCreated event is detected on-chain. */
   onContextGraphCreated?: OnContextGraphCreated;
-  /** Called when a KnowledgeCollectionUpdated event is detected. */
+  /** Called when a KnowledgeAssetUpdated event is detected. */
   onCollectionUpdated?: OnCollectionUpdated;
   /** Called when an AllowListUpdated event is detected. */
   onAllowListUpdated?: OnAllowListUpdated;
@@ -68,7 +68,7 @@ export interface ChainEventPollerConfig {
  * Background poller that watches for on-chain events (spec §5.1):
  * - KCCreated: promotes tentative publishes to confirmed (V10 batch creation)
  * - NameClaimed / ContextGraphCreated: notifies the agent of new CGs
- * - KnowledgeCollectionUpdated: applies UPDATE to LTM
+ * - KnowledgeAssetUpdated: applies UPDATE to LTM
  * - AllowListUpdated: updates subscription state
  * - ProfileCreated / ProfileUpdated: updates peer identity cache
  *
@@ -188,7 +188,7 @@ export class ChainEventPoller {
       eventTypes.push('NameClaimed');
       eventTypes.push('ContextGraphCreated');
     }
-    if (this.onCollectionUpdated) eventTypes.push('KnowledgeCollectionUpdated');
+    if (this.onCollectionUpdated) eventTypes.push('KnowledgeAssetUpdated');
     if (this.onAllowListUpdated) eventTypes.push('AllowListUpdated');
     if (this.onProfileEvent) {
       eventTypes.push('ProfileCreated');
@@ -215,7 +215,7 @@ export class ChainEventPoller {
         await this.handleBatchCreated(event, ctx);
       } else if (event.type === 'NameClaimed' || event.type === 'ContextGraphCreated') {
         await this.handleContextGraphCreated(event, ctx);
-      } else if (event.type === 'KnowledgeCollectionUpdated') {
+      } else if (event.type === 'KnowledgeAssetUpdated') {
         await this.handleCollectionUpdated(event, ctx);
       } else if (event.type === 'AllowListUpdated') {
         await this.handleAllowListUpdated(event, ctx);
@@ -317,7 +317,7 @@ export class ChainEventPoller {
     const batchId = BigInt(data['batchId'] as string ?? '0');
 
     this.log.info(ctx,
-      `Chain event: KnowledgeCollectionUpdated block=${event.blockNumber} batchId=${batchId}`,
+      `Chain event: KnowledgeAssetUpdated block=${event.blockNumber} batchId=${batchId}`,
     );
 
     try {

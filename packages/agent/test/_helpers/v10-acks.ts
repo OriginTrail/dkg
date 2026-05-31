@@ -9,7 +9,7 @@ import { hardhatACKProvider } from '../../../publisher/test/_helpers/acks.js';
 import { wrapPublisherForTest } from '../../../publisher/test/_helpers/seal.js';
 
 type Kav10Chain = {
-  getKnowledgeAssetsV10Address: () => Promise<string>;
+  getKnowledgeAssetsLifecycleAddress: () => Promise<string>;
 };
 
 type AgentWithInternals = {
@@ -29,7 +29,7 @@ export async function installHardhatACKProvider(
 ): Promise<V10ACKProvider> {
   const internals = agent as unknown as AgentWithInternals;
   const effectiveChain = chain ?? internals.chain;
-  const kav10Address = await effectiveChain.getKnowledgeAssetsV10Address();
+  const kav10Address = await effectiveChain.getKnowledgeAssetsLifecycleAddress();
   const v10ACKProvider = hardhatACKProvider(kav10Address);
 
   Object.defineProperty(agent, 'createV10ACKProvider', {

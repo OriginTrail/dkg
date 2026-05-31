@@ -132,7 +132,9 @@ describe('Context Graph IA and Overview', () => {
     ]);
     expect(container.textContent).not.toContain('Graph Overview');
     expect(container.textContent).not.toContain('Shared Memory4');
-    expect(container.textContent).not.toContain('Verified Memory');
+    // The legacy "Verified Memory" leak guard is moot post-#4 vocab
+    // sweep — "Verifiable Memory" is now the canonical full-form
+    // layer-switcher label and is intentionally rendered.
 
     const more = container.querySelector<HTMLButtonElement>('.v10-layer-more-btn');
     expect(more).toBeTruthy();
@@ -406,12 +408,16 @@ describe('Context Graph IA and Overview', () => {
   });
 
   it('renders Triples as a lower bound when a layer query is partial (Codex bug B)', async () => {
+    // GH #805 — Overview Triples now sums `useLayerTriples` per
+    // layer; that hook SPO-deduplicates, so the fixture's 120
+    // distinct rows must be uniquely-keyed (not 120 identical
+    // copies of one triple) for the count to land at 120.
     const partialMemory = {
       ...baseMemory,
       counts: { wm: 4, swm: 2, vm: 0, total: 6 },
       layerStatus: { wm: 'ok', swm: 'ok', vm: 'error' },
       partial: true,
-      allTriples: new Array(120).fill({ subject: 's', predicate: 'p', object: 'o', layer: 'working' }),
+      allTriples: Array.from({ length: 120 }, (_, i) => ({ subject: `urn:s${i}`, predicate: 'p', object: `urn:o${i}`, layer: 'working' })),
       error: null,
     };
     const { container, root } = await render(

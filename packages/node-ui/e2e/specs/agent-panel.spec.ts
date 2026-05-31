@@ -29,9 +29,16 @@ test.describe('Right Panel (Agent Panel)', () => {
       await expect(heading).toBeVisible();
     });
 
-    test('shows empty agent integration message', async ({ page }) => {
-      const msg = page.getByText('No additional local agent integrations are available yet.');
-      await expect(msg).toBeVisible();
+    test('lists at least one connectable agent integration (OpenClaw / Hermes)', async ({ page }) => {
+      // Two default integrations (OpenClaw + Hermes) ship out of the
+      // box now, so the original empty-state copy is unreachable until
+      // both are connected. Assert the *positive* invariant — the
+      // section surfaces at least one ready-to-connect integration —
+      // which is the durable contract.
+      const integrations = page.locator('.v10-local-agent-list .v10-local-agent-detail');
+      await expect(integrations.first()).toBeVisible();
+      const count = await integrations.count();
+      expect(count).toBeGreaterThan(0);
     });
   });
 
@@ -72,9 +79,17 @@ test.describe('Right Panel (Agent Panel)', () => {
       await expect(heading).toBeVisible();
     });
 
-    test('shows empty peers message', async ({ page }) => {
-      const msg = page.getByText('No connected peers yet.');
-      await expect(msg).toBeVisible();
+    test('shows the network-peers empty state on a single-node devnet', async ({ page }) => {
+      // The single-node devnet harness has zero libp2p peers, so the
+      // panel surfaces one of three empty-state strings depending on
+      // which sub-section reaches its zero branch first
+      // ("No network peers detected yet." / "No peers currently
+      // connected." / "No previously-seen peers."). Match the union
+      // — they all share the same `.v10-agent-empty-state` class.
+      const emptyState = page.locator('.v10-agent-empty-state').first();
+      await expect(emptyState).toBeVisible();
+      const text = (await emptyState.textContent())?.toLowerCase() ?? '';
+      expect(text).toMatch(/peer/);
     });
   });
 

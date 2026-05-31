@@ -493,9 +493,9 @@ At a high level:
 
 A unit of published knowledge: RDF statements plus Merkle proof material and optional private sections.
 
-### Knowledge Collection (KC)
+### Knowledge Asset on-chain registration
 
-A grouped finalization of multiple Knowledge Assets — the unit that the chain sees when you publish a batch.
+Publishing mints a single Knowledge Asset as an ERC-721 NFT (`tokenId == kaId`) — the unit the chain sees. Each publish creates one Knowledge Asset; there is no multi-KA batching.
 
 ### Context Graph (project)
 

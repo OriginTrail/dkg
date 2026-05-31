@@ -20,7 +20,7 @@
 #      the allowlist. All three pre-create the CG locally so the
 #      sender-key handshake can complete.
 #   2. Curator writes 6 triples to SWM.
-#   3. Curator publishes to VM; record kcId + on-chain merkleRoot.
+#   3. Curator publishes to VM; record kaId + on-chain merkleRoot.
 #   4. Each non-curator member calls /api/shared-memory/catchup
 #      against the curator. Both should succeed (auth allowed=true)
 #      and either inline-gossip OR explicit catchup should land
@@ -167,9 +167,9 @@ log "publish response: $PUB_RESP"
 
 STATUS=$(parse_json "$PUB_RESP" '.status')
 TX=$(parse_json    "$PUB_RESP" '.txHash')
-KC=$(parse_json    "$PUB_RESP" '.kcId')
+KC=$(parse_json    "$PUB_RESP" '.kaId')
 [ "$STATUS" = "confirmed" ] || fail "publish status=$STATUS"
-log "✓ publish: kcId=$KC tx=$TX"
+log "✓ publish: kaId=$KC tx=$TX"
 
 KC_META=$(api_call "$CURATOR_NODE" GET "/api/kc/$KC")
 MERKLE_ROOT=$(parse_json "$KC_META" '.merkleRoot')
@@ -266,7 +266,7 @@ log "  RFC-38 MULTI-MEMBER test: PASS"
 log "================================================================"
 log "  Curated CG:    $CG_ID  (onChainId=$ON_CHAIN_ID)"
 log "  Members:       3 ($CURATOR_AGENT, $EDGE_MEMBER_AGENT, $BRIDGE_CORE_AGENT)"
-log "  Publish:       kcId=$KC merkleRoot=$MERKLE_ROOT"
+log "  Publish:       kaId=$KC merkleRoot=$MERKLE_ROOT"
 log "  verify-batch:  3 of 3 members confirmed actualRoot==expected"
 log "  Attestations:  3 of 3 cross-verified by outsider with leafCheck=match"
 log "================================================================"

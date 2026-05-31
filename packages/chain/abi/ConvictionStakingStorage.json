@@ -60,6 +60,17 @@
     "type": "error"
   },
   {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "token",
+        "type": "address"
+      }
+    ],
+    "name": "SafeERC20FailedOperation",
+    "type": "error"
+  },
+  {
     "inputs": [],
     "name": "TokenTransferFailed",
     "type": "error"
@@ -909,6 +920,11 @@
         "internalType": "uint32",
         "name": "migrationEpoch",
         "type": "uint32"
+      },
+      {
+        "internalType": "uint40",
+        "name": "expiryShortenedBy",
+        "type": "uint40"
       }
     ],
     "name": "createPosition",

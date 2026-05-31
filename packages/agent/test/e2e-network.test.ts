@@ -230,7 +230,7 @@ describe('Network E2E (3 nodes + relay)', () => {
       { subject: 'did:dkg:entity:pepe-001', predicate: 'http://schema.org/description', object: '"The rarest of all pepes"', graph: '' },
       { subject: 'did:dkg:entity:pepe-001', predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://schema.org/CreativeWork', graph: '' },
     ]);
-    expect(resultA.kcId).toBeDefined();
+    expect(resultA.kaId).toBeDefined();
     expect(resultA.kaManifest.length).toBe(1);
     expect(resultA.kaManifest[0].rootEntity).toBe('did:dkg:entity:pepe-001');
 
@@ -281,14 +281,14 @@ describe('Network E2E (3 nodes + relay)', () => {
       { subject: 'did:dkg:entity:wojak-001', predicate: 'http://schema.org/name', object: '"Classic Wojak"', graph: '' },
       { subject: 'did:dkg:entity:wojak-001', predicate: 'http://schema.org/description', object: '"Feels bad man"', graph: '' },
     ]);
-    expect(resultB.kcId).toBeDefined();
+    expect(resultB.kaId).toBeDefined();
 
     // NodeC publishes too
     const resultC = await nodeC.publish('memes', [
       { subject: 'did:dkg:entity:doge-001', predicate: 'http://schema.org/name', object: '"Doge"', graph: '' },
       { subject: 'did:dkg:entity:doge-001', predicate: 'http://schema.org/description', object: '"Much knowledge. Very DKG. Wow."', graph: '' },
     ]);
-    expect(resultC.kcId).toBeDefined();
+    expect(resultC.kaId).toBeDefined();
 
     await sleep(3000);
 

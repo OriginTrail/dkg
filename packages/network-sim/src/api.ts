@@ -97,7 +97,7 @@ export async function publishKA(
     },
   );
   const published = await post<{
-    kcId: string;
+    kaId: string;
     status: string;
     kas: Array<{ tokenId: string; rootEntity: string }>;
     txHash?: string;
@@ -143,7 +143,7 @@ export async function publishFromSharedMemory(
   clearAfter = true,
 ) {
   return post<{
-    kcId: string;
+    kaId: string;
     status: string;
     kas: Array<{ tokenId: string; rootEntity: string }>;
     txHash?: string;

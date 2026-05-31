@@ -68,7 +68,7 @@ describe('V10 Publish E2E', () => {
       throw new Error(`Failed to create on-chain context graph: ${JSON.stringify(cgResult)}`);
     }
     chainCgId = cgResult.contextGraphId;
-    realKAV10Addr = await adapter.getKnowledgeAssetsV10Address();
+    realKAV10Addr = await adapter.getKnowledgeAssetsLifecycleAddress();
   });
   afterAll(async () => {
     await revertSnapshot(_fileSnapshot);
@@ -248,7 +248,7 @@ describe('V10 Publish E2E', () => {
     expect(decodedR.length).toBe(32);
   });
 
-  it('V10 EVM adapter round-trip: ACK collection → createKnowledgeAssetsV10', async () => {
+  it('V10 EVM adapter round-trip: ACK collection → createKnowledgeAssets', async () => {
     const adapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const { hubAddress, receiverIds, coreProfileId } = getSharedContext();
     const provider = createProvider();
@@ -265,8 +265,11 @@ describe('V10 Publish E2E', () => {
       receiverKeys.map(async (key, idx) => {
         const wallet = new ethers.Wallet(key);
         const digest = computePublishACKDigest(
+          // Greenfield (PR #815): exactly one KA per tx. The quads above are
+          // a single root entity (urn:experiment:wsd), so knowledgeAssetsAmount
+          // is 1 — not the triple count.
           TEST_CHAIN_ID, realKAV10Addr, chainCgId, merkleRoot,
-          BigInt(publishQuads.length), byteSize, epochs, tokenAmount,
+          1n, byteSize, epochs, tokenAmount,
           BigInt(publishMerkleLeafCount),
         );
         const sig = ethers.Signature.from(await wallet.signMessage(digest));
@@ -292,11 +295,11 @@ describe('V10 Publish E2E', () => {
       await pubWallet.signTypedData(authorTyped.domain, authorTyped.types, authorTyped.message),
     );
 
-    const result = await adapter.createKnowledgeAssetsV10!({
+    const result = await adapter.createKnowledgeAssets!({
       publishOperationId: 'v10-e2e-test',
       contextGraphId: chainCgId,
       merkleRoot,
-      knowledgeAssetsAmount: publishQuads.length,
+      knowledgeAssetsAmount: 1,
       byteSize,
       epochs: Number(epochs),
       tokenAmount,

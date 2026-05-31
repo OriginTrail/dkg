@@ -190,7 +190,7 @@ describe('E2E: DKGAgent with real blockchain', () => {
 
   it('updates published knowledge on-chain and verifies new data', async () => {
 
-    const kcId = firstPublishBatchId;
+    const kaId = firstPublishBatchId;
     const updateQuads = [
       {
         subject: 'did:dkg:test:Alice',
@@ -200,7 +200,7 @@ describe('E2E: DKGAgent with real blockchain', () => {
       },
     ];
 
-    const updateResult = await agents[0].update(kcId, CONTEXT_GRAPH_ID, updateQuads);
+    const updateResult = await agents[0].update(kaId, CONTEXT_GRAPH_ID, updateQuads);
     expect(updateResult).toBeDefined();
     expect(updateResult.merkleRoot).toHaveLength(32);
     expect(updateResult.status).toBe('confirmed');

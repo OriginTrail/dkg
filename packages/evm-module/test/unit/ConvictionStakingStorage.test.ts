@@ -78,7 +78,7 @@ describe('@unit ConvictionStakingStorage', () => {
     expect(await ConvictionStakingStorage.name()).to.equal('ConvictionStakingStorage');
     // v4.1.0 — `createPosition` accepts the `expiryShortenedBy` arg used
     // by `StakingV10._convertToNFT` for the V8→V10 conviction credit.
-    expect(await ConvictionStakingStorage.version()).to.equal('4.1.0');
+    expect(await ConvictionStakingStorage.version()).to.equal('10.0.2');
   });
 
   // ------------------------------------------------------------

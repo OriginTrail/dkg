@@ -1501,7 +1501,7 @@ program
       });
       console.log(`Published to context graph "${contextGraph}":`);
       console.log(`  Status:    ${result.status}`);
-      console.log(`  KC ID:     ${result.kcId}`);
+      console.log(`  KC ID:     ${result.kaId}`);
       if (result.txHash) {
         console.log(`  TX hash:   ${result.txHash}`);
         console.log(`  Block:     ${result.blockNumber}`);
@@ -3173,7 +3173,7 @@ sharedMemoryCmd
       console.log(`  Merkle root:  ${seal.merkleRoot}`);
       console.log(`  Promoted:     ${promoted.promotedCount ?? promoted.count ?? 0} quads`);
       console.log(`  Status:       ${result.status}`);
-      console.log(`  KC ID:        ${result.kcId}`);
+      console.log(`  KC ID:        ${result.kaId}`);
       console.log(`  KAs:          ${result.kas.length}`);
       if (subGraphOption) {
         console.log(`  Sub-graph:    ${subGraphOption}`);
@@ -4859,12 +4859,12 @@ randomSamplingCmd
           const status = String(entry.status ?? '?');
           const epoch = String(entry.epoch ?? '?');
           const periodStart = String(entry.periodStartBlock ?? '?');
-          const kcId = entry.kcId !== undefined ? `kc=${entry.kcId}` : '';
+          const kaId = entry.kaId !== undefined ? `kc=${entry.kaId}` : '';
           const tx = entry.txHash !== undefined ? ` tx=${String(entry.txHash).slice(0, 14)}…` : '';
           const errCode = entry.error && typeof entry.error === 'object'
             ? ` err=${(entry.error as { code?: string }).code ?? '?'}`
             : '';
-          console.log(`${ts}  ep=${epoch} pb=${periodStart}  ${status.padEnd(10)} ${kcId}${tx}${errCode}`);
+          console.log(`${ts}  ep=${epoch} pb=${periodStart}  ${status.padEnd(10)} ${kaId}${tx}${errCode}`);
         } catch {
           console.log(line);
         }

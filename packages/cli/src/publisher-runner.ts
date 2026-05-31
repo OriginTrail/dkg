@@ -266,7 +266,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
         ? { ...publishOptions, v10ACKProvider }
         : publishOptions;
       // Capability gate: use `isV10Ready()` (the authoritative V10 runtime
-      // signal) rather than probing for `createKnowledgeAssetsV10`. Since the
+      // signal) rather than probing for `createKnowledgeAssets`. Since the
       // interface made the method required, `NoChainAdapter` now implements
       // it as a throwing stub, so a `typeof === 'function'` probe would
       // mis-route no-chain mode into the V10 ACK-gated path and crash.
@@ -319,7 +319,7 @@ function createV10ACKProviderForPublisher(
       ) => Promise<{ valid: boolean; reason?: 'key-not-registered' | 'not-in-sharding-table' | 'rpc-error' }>;
       getMinimumRequiredSignatures?: () => Promise<number>;
       getEvmChainId?: () => Promise<bigint>;
-      getKnowledgeAssetsV10Address?: () => Promise<string>;
+      getKnowledgeAssetsLifecycleAddress?: () => Promise<string>;
     };
   }).chain;
   // `isV10Ready()` is the authoritative capability gate — rejects
@@ -330,7 +330,7 @@ function createV10ACKProviderForPublisher(
   // address. Without them the collector cannot build a digest that matches
   // what core-node handlers sign, so refuse to hand back a provider at all.
   if (typeof chain.getEvmChainId !== 'function') return undefined;
-  if (typeof chain.getKnowledgeAssetsV10Address !== 'function') return undefined;
+  if (typeof chain.getKnowledgeAssetsLifecycleAddress !== 'function') return undefined;
 
   const collector = new ACKCollector({
     gossipPublish: transport.gossipPublish,
@@ -413,9 +413,9 @@ function createV10ACKProviderForPublisher(
     }
     let kav10Address: string;
     try {
-      kav10Address = await chain.getKnowledgeAssetsV10Address!();
+      kav10Address = await chain.getKnowledgeAssetsLifecycleAddress!();
     } catch (err) {
-      throw wrapAsRpcPreconditionIfApplicable(err, 'getKnowledgeAssetsV10Address');
+      throw wrapAsRpcPreconditionIfApplicable(err, 'getKnowledgeAssetsLifecycleAddress');
     }
     const result = await collector.collect({
       merkleRoot,

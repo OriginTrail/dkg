@@ -1,4 +1,5 @@
-import { test as base } from '@playwright/test';
+import { test as base, expect } from '@playwright/test';
+import { installRichMemoryRoutes } from '../helpers/rich-mock-routes.js';
 import { AppShellPage } from '../pages/app-shell.po.js';
 import { HeaderPage } from '../pages/header.po.js';
 import { LeftPanelPage } from '../pages/left-panel.po.js';
@@ -32,6 +33,12 @@ type Fixtures = {
 };
 
 export const test = base.extend<Fixtures>({
+  page: async ({ page }, use, testInfo) => {
+    if (testInfo.project.name === 'mock-ui') {
+      await installRichMemoryRoutes(page, { allContextGraphs: true });
+    }
+    await use(page);
+  },
   shell: async ({ page }, use) => {
     await use(new AppShellPage(page));
   },

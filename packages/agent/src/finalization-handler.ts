@@ -426,7 +426,7 @@ export class FinalizationHandler {
     ctxGraphId?: string,
     subGraphName?: string,
     /**
-     * EIP-712-attested author recovered from `KnowledgeCollectionCreated.author`.
+     * EIP-712-attested author recovered from `KnowledgeAssetCreated.author`.
      * Round 5 review §10 — when set, the replica emits matching
      * `dkg:Publication` / `dkg:authoredBy` triples so agent-provenance via the
      * `_meta` triplestore is consistent across the originator and every replica.

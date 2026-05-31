@@ -3737,7 +3737,7 @@ export class DkgNodePlugin {
       }
 
       const result = await this.publisher.publishVerifiedMemory({ contextGraphId, quads: rawQuads });
-      return this.json({ kcId: result.kcId, kaCount: result.kas?.length ?? 0, quadsPublished: rawQuads.length });
+      return this.json({ kaId: result.kaId, kaCount: result.kas?.length ?? 0, quadsPublished: rawQuads.length });
     } catch (err: any) {
       return this.daemonError(err);
     }

@@ -8,7 +8,7 @@
  * so they can republish under V10 economics.
  *
  * Strategy (designed for millions of KCs):
- *   Phase 1 — Single pass over eth_getLogs fetching both KnowledgeCollectionCreated
+ *   Phase 1 — Single pass over eth_getLogs fetching both KnowledgeAssetCreated
  *             and KnowledgeAssetsMinted events (dual-topic OR query). Created gives
  *             (id, startEpoch, endEpoch, tokenAmount); Minted gives (id, publisher).
  *             Join by id, filter endEpoch > currentEpoch. No individual contract
@@ -74,7 +74,7 @@ function buildChainConfig(
   blockchainId: string,
   rpcEnvKey: string,
   fallbackRpc: string,
-  kcs: string,
+  kas: string,
   deployBlock: number,
   epochStorage: string,
   chronos: string,
@@ -83,7 +83,7 @@ function buildChainConfig(
   const rpcUrls = envVal
     ? envVal.split(',').map((u) => u.trim()).filter(Boolean)
     : [fallbackRpc];
-  return { blockchainId, rpcUrls, rpcEnvKey, KnowledgeCollectionStorage: kcs, KCSDeployBlock: deployBlock, EpochStorage: epochStorage, Chronos: chronos };
+  return { blockchainId, rpcUrls, rpcEnvKey, KnowledgeCollectionStorage: kas, KCSDeployBlock: deployBlock, EpochStorage: epochStorage, Chronos: chronos };
 }
 
 const CHAINS: Record<string, ChainConfig> = {
@@ -114,12 +114,12 @@ const CHRONOS_ABI = [
 ];
 
 const KC_STORAGE_IFACE = new Interface([
-  'function getLatestKnowledgeCollectionId() view returns (uint256)',
+  'function getLatestKnowledgeAssetId() view returns (uint256)',
   'function getEndEpoch(uint256 id) view returns (uint40)',
   'function getStartEpoch(uint256 id) view returns (uint40)',
   'function getTokenAmount(uint256 id) view returns (uint96)',
   'function getLatestMerkleRootPublisher(uint256 id) view returns (address)',
-  'event KnowledgeCollectionCreated(uint256 indexed id, string publishOperationId, bytes32 merkleRoot, uint88 byteSize, uint40 startEpoch, uint40 endEpoch, uint96 tokenAmount, bool isImmutable)',
+  'event KnowledgeAssetCreated(uint256 indexed id, string publishOperationId, bytes32 merkleRoot, uint88 byteSize, uint40 startEpoch, uint40 endEpoch, uint96 tokenAmount, bool isImmutable)',
   'event KnowledgeAssetsMinted(uint256 indexed id, address indexed to, uint256 startId, uint256 endId)',
 ]);
 
@@ -229,7 +229,7 @@ async function snapshotChain(
 
   // Use last provider for epoch pool reads (often more permissive with batch limits)
   const readProvider = providers[providers.length - 1];
-  const kcStorage = new Contract(cfg.KnowledgeCollectionStorage, KC_STORAGE_IFACE, provider);
+  const kaStorage = new Contract(cfg.KnowledgeCollectionStorage, KC_STORAGE_IFACE, provider);
   const chronos = new Contract(cfg.Chronos, CHRONOS_ABI, provider);
   const epochStorage = new Contract(cfg.EpochStorage, EPOCH_STORAGE_ABI, readProvider);
 
@@ -238,7 +238,7 @@ async function snapshotChain(
   const blockDate = new Date((block?.timestamp ?? 0) * 1000).toISOString();
 
   const currentEpoch = Number(await chronos.getCurrentEpoch({ blockTag: blockNumber }));
-  const lastKCId = Number(await kcStorage.getLatestKnowledgeCollectionId({ blockTag: blockNumber }));
+  const lastKCId = Number(await kaStorage.getLatestKnowledgeAssetId({ blockTag: blockNumber }));
 
   console.log(`  Block:           ${blockNumber} (${blockDate})`);
   console.log(`  Current epoch:   ${currentEpoch}`);
@@ -256,7 +256,7 @@ async function snapshotChain(
 
   // Try event scanning first; fall back to direct reads if no events found
   const usedDirectRead = await (async () => {
-    const createdTopic = KC_STORAGE_IFACE.getEvent('KnowledgeCollectionCreated')!.topicHash;
+    const createdTopic = KC_STORAGE_IFACE.getEvent('KnowledgeAssetCreated')!.topicHash;
     const mintedTopic = KC_STORAGE_IFACE.getEvent('KnowledgeAssetsMinted')!.topicHash;
 
     let useDirectRead = false;
@@ -314,7 +314,7 @@ async function snapshotChain(
         }
 
         const endEpochs = await Promise.all(
-          ids.map((id) => retry(() => kcStorage.getEndEpoch(id, { blockTag: blockNumber })))
+          ids.map((id) => retry(() => kaStorage.getEndEpoch(id, { blockTag: blockNumber })))
         );
 
         for (let i = 0; i < ids.length; i++) {
@@ -355,9 +355,9 @@ async function snapshotChain(
         for (let i = 0; i < futureIdsAll.length; i += DETAIL_BATCH) {
           const batch = futureIdsAll.slice(i, i + DETAIL_BATCH);
           const [starts, tokens, pubs] = await Promise.all([
-            Promise.all(batch.map((id) => retry(() => kcStorage.getStartEpoch(id, { blockTag: blockNumber })))),
-            Promise.all(batch.map((id) => retry(() => kcStorage.getTokenAmount(id, { blockTag: blockNumber })))),
-            Promise.all(batch.map((id) => retry(() => kcStorage.getLatestMerkleRootPublisher(id, { blockTag: blockNumber })))),
+            Promise.all(batch.map((id) => retry(() => kaStorage.getStartEpoch(id, { blockTag: blockNumber })))),
+            Promise.all(batch.map((id) => retry(() => kaStorage.getTokenAmount(id, { blockTag: blockNumber })))),
+            Promise.all(batch.map((id) => retry(() => kaStorage.getLatestMerkleRootPublisher(id, { blockTag: blockNumber })))),
           ]);
           for (let j = 0; j < batch.length; j++) {
             const publisher = String(pubs[j]).toLowerCase();

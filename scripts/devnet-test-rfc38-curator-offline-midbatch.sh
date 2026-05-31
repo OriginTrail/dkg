@@ -372,11 +372,11 @@ EOF
 log "M1 publish response: $PUB_RESP"
 STATUS=$(parse_json "$PUB_RESP" '.status')
 TX=$(parse_json    "$PUB_RESP" '.txHash')
-KC=$(parse_json    "$PUB_RESP" '.kcId')
+KC=$(parse_json    "$PUB_RESP" '.kaId')
 if [ "$STATUS" != "confirmed" ] || [ -z "$TX" ]; then
   fail "non-curator publish did NOT confirm on-chain (status=$STATUS, tx=$TX) — open-publishPolicy resilience contract BROKEN"
 fi
-log "✓ M1 published to VM without curator: kcId=$KC tx=$TX"
+log "✓ M1 published to VM without curator: kaId=$KC tx=$TX"
 
 # ===========================================================================
 act "6. Outsider verifies the published KC's merkleRoot exists on chain"
@@ -400,6 +400,6 @@ log "================================================================"
 log "  Curated CG:    $CG_ID  (onChainId=$ON_CHAIN_ID, publishPolicy=open)"
 log "  Triples in:    4 (curator-written, gossiped to members)"
 log "  Curator:       SIGTERMed before publish"
-log "  M1 published:  kcId=$KC tx=$TX merkleRoot=$MERKLE_ROOT"
+log "  M1 published:  kaId=$KC tx=$TX merkleRoot=$MERKLE_ROOT"
 log "  Outsider:      observed merkleRoot on chain"
 log "================================================================"

@@ -163,7 +163,7 @@ hardhat_mine_blocks() {
   return 1
 }
 
-# Read on-chain (ciphertextChunksRoot, ciphertextChunkCount) for kcId.
+# Read on-chain (ciphertextChunksRoot, ciphertextChunkCount) for kaId.
 read_ct_commitment() {
   local kc_id="$1"
   ( cd "$REPO_ROOT/packages/evm-module" && \
@@ -178,16 +178,17 @@ read_ct_commitment() {
       (async () => {
         const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
         const contracts = JSON.parse(fs.readFileSync(process.env.CONTRACTS_JSON, "utf8")).contracts;
-        const kcsAddr = contracts.KnowledgeCollectionStorage?.evmAddress;
-        if (!kcsAddr) throw new Error("KCS not deployed");
-        const abi = JSON.parse(fs.readFileSync(path.join(process.env.ABI_DIR, "KnowledgeCollectionStorage.json"), "utf8"));
-        const kcs = new ethers.Contract(kcsAddr, abi, provider);
-        const ctRoot = await kcs.getLatestCiphertextChunksRoot(BigInt(process.env.KC_ID));
-        const ctCount = await kcs.getCiphertextChunkCount(BigInt(process.env.KC_ID));
-        const plainRoot = await kcs.getLatestMerkleRoot(BigInt(process.env.KC_ID));
-        const plainCount = await kcs.getMerkleLeafCount(BigInt(process.env.KC_ID));
+        const kcsAddr = contracts.DKGKnowledgeAssets?.evmAddress ?? contracts.KnowledgeCollectionStorage?.evmAddress;
+        if (!kcsAddr) throw new Error("DKGKnowledgeAssets / KnowledgeCollectionStorage not deployed");
+        const abiFile = fs.existsSync(path.join(process.env.ABI_DIR, "DKGKnowledgeAssets.json")) ? "DKGKnowledgeAssets.json" : "DKGKnowledgeAssets.json";
+        const abi = JSON.parse(fs.readFileSync(path.join(process.env.ABI_DIR, abiFile), "utf8"));
+        const kas = new ethers.Contract(kcsAddr, abi, provider);
+        const ctRoot = await kas.getLatestCiphertextChunksRoot(BigInt(process.env.KC_ID));
+        const ctCount = await kas.getCiphertextChunkCount(BigInt(process.env.KC_ID));
+        const plainRoot = await kas.getLatestMerkleRoot(BigInt(process.env.KC_ID));
+        const plainCount = await kas.getMerkleLeafCount(BigInt(process.env.KC_ID));
         console.log(JSON.stringify({ ctRoot, ctCount: ctCount.toString(), plainRoot, plainCount: plainCount.toString() }));
-      })().catch(e => { console.error("[kcs] " + (e?.shortMessage || e?.message || e)); process.exit(1); });
+      })().catch(e => { console.error("[kas] " + (e?.shortMessage || e?.message || e)); process.exit(1); });
     '
   )
 }
@@ -372,15 +373,15 @@ EOF
   local publish_status publish_tx publish_kc publish_block
   publish_status=$(printf '%s' "$publish_resp" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{try{console.log(JSON.parse(d).status||"")}catch(e){console.log("")}})')
   publish_tx=$(printf '%s' "$publish_resp" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{try{console.log(JSON.parse(d).txHash||"")}catch(e){console.log("")}})')
-  publish_kc=$(printf '%s' "$publish_resp" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{try{console.log(JSON.parse(d).kcId||"")}catch(e){console.log("")}})')
+  publish_kc=$(printf '%s' "$publish_resp" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{try{console.log(JSON.parse(d).kaId||"")}catch(e){console.log("")}})')
   publish_block=$(printf '%s' "$publish_resp" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{try{console.log(JSON.parse(d).blockNumber||"")}catch(e){console.log("")}})')
 
   [ "$publish_status" = "confirmed" ] || fail "Scenario $tag: publish status='$publish_status' (expected confirmed). Full response: $publish_resp"
   [ -n "$publish_tx" ] || fail "Scenario $tag: publish: no txHash. Full response: $publish_resp"
-  [ -n "$publish_kc" ] && [ "$publish_kc" != "0" ] || fail "Scenario $tag: publish: zero/empty kcId"
-  log "  ✓ publish landed: kcId=$publish_kc tx=$publish_tx block=$publish_block"
+  [ -n "$publish_kc" ] && [ "$publish_kc" != "0" ] || fail "Scenario $tag: publish: zero/empty kaId"
+  log "  ✓ publish landed: kaId=$publish_kc tx=$publish_tx block=$publish_block"
 
-  log "Reading on-chain commitment for kcId=$publish_kc..."
+  log "Reading on-chain commitment for kaId=$publish_kc..."
   local commitment ct_root ct_count plain_root plain_count
   commitment=$(read_ct_commitment "$publish_kc") || fail "Scenario $tag: on-chain commitment read failed"
   ct_root=$(printf '%s' "$commitment" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>console.log(JSON.parse(d).ctRoot))')
@@ -595,10 +596,10 @@ EOF
 )")
   publish_status=$(printf '%s' "$publish_resp" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{try{console.log(JSON.parse(d).status||"")}catch(e){console.log("")}})')
   publish_tx=$(printf '%s' "$publish_resp" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{try{console.log(JSON.parse(d).txHash||"")}catch(e){console.log("")}})')
-  publish_kc=$(printf '%s' "$publish_resp" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{try{console.log(JSON.parse(d).kcId||"")}catch(e){console.log("")}})')
+  publish_kc=$(printf '%s' "$publish_resp" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{try{console.log(JSON.parse(d).kaId||"")}catch(e){console.log("")}})')
   [ "$publish_status" = "confirmed" ] || fail "Scenario D: publish status='$publish_status'. Full response: $publish_resp"
-  [ -n "$publish_kc" ] && [ "$publish_kc" != "0" ] || fail "Scenario D: publish: zero/empty kcId"
-  log "  ✓ publish landed (node $late_node was offline): kcId=$publish_kc tx=$publish_tx"
+  [ -n "$publish_kc" ] && [ "$publish_kc" != "0" ] || fail "Scenario D: publish: zero/empty kaId"
+  log "  ✓ publish landed (node $late_node was offline): kaId=$publish_kc tx=$publish_tx"
 
   # Read on-chain commitment so the operator can correlate the proof
   # to the right KC; also asserts that the chunked path actually ran.
@@ -612,13 +613,13 @@ EOF
   log "  ✓ ciphertextChunkCount=$ct_count, ctRoot=${ct_root:0:18}…"
 
   # Sanity-check: at least one sibling actually persisted chunks for
-  # this kcId. If none did, the eventual backfill on node 4 will
+  # this kaId. If none did, the eventual backfill on node 4 will
   # inherently fail (no peer holds the chunks), and the failure mode
   # masks the interesting RFC-39 path. We scan via the daemon log
   # line emitted by `ingestSwmCiphertextChunkEnvelope` after persist;
   # filtering on the batchId (== plain merkleRoot) keeps us scoped
   # to THIS scenario's KC.
-  log "Verifying sibling cores hold chunks for kcId=$publish_kc..."
+  log "Verifying sibling cores hold chunks for kaId=$publish_kc..."
   local plain_root_short
   plain_root_short=$(printf '%s' "$commitment" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>console.log(JSON.parse(d).plainRoot.slice(0,18)))')
   local siblings_with_chunks=0

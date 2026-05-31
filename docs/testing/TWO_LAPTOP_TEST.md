@@ -129,7 +129,7 @@ The script runs through ten steps and exits non-zero on any failure:
 | 6 | Node A `approve-join` for B's address | `ok = true` |
 | 7 | Node B re-subscribes → catch-up = `done`, `_meta` arrives | `_meta` triple count > 0 |
 | 8 | Node A promotes WM → SWM, **B receives the encrypted gossip** | B sees the entity within `SWM_GOSSIP_TIMEOUT` (default 30s) |
-| 9 | Node A registers CG on-chain, then publishes SWM → VM | `kcId` returned |
+| 9 | Node A registers CG on-chain, then publishes SWM → VM | `kaId` returned |
 | 10 | Both A and B see VM data (VM is on-chain → public) | non-empty VM count |
 
 Step 8 is the regression check for the SWM Sender-Key encryption work

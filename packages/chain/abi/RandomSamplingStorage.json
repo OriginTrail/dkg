@@ -291,7 +291,7 @@
         "components": [
           {
             "internalType": "uint256",
-            "name": "knowledgeCollectionId",
+            "name": "knowledgeAssetId",
             "type": "uint256"
           },
           {
@@ -301,7 +301,7 @@
           },
           {
             "internalType": "address",
-            "name": "knowledgeCollectionStorageContract",
+            "name": "knowledgeAssetStorageContract",
             "type": "address"
           },
           {
@@ -1173,7 +1173,7 @@
         "components": [
           {
             "internalType": "uint256",
-            "name": "knowledgeCollectionId",
+            "name": "knowledgeAssetId",
             "type": "uint256"
           },
           {
@@ -1183,7 +1183,7 @@
           },
           {
             "internalType": "address",
-            "name": "knowledgeCollectionStorageContract",
+            "name": "knowledgeAssetStorageContract",
             "type": "address"
           },
           {
@@ -1478,7 +1478,7 @@
     "outputs": [
       {
         "internalType": "uint256",
-        "name": "knowledgeCollectionId",
+        "name": "knowledgeAssetId",
         "type": "uint256"
       },
       {
@@ -1488,7 +1488,7 @@
       },
       {
         "internalType": "address",
-        "name": "knowledgeCollectionStorageContract",
+        "name": "knowledgeAssetStorageContract",
         "type": "address"
       },
       {
@@ -1678,7 +1678,7 @@
         "components": [
           {
             "internalType": "uint256",
-            "name": "knowledgeCollectionId",
+            "name": "knowledgeAssetId",
             "type": "uint256"
           },
           {
@@ -1688,7 +1688,7 @@
           },
           {
             "internalType": "address",
-            "name": "knowledgeCollectionStorageContract",
+            "name": "knowledgeAssetStorageContract",
             "type": "address"
           },
           {

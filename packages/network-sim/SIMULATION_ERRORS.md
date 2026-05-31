@@ -52,7 +52,7 @@ When the sim reports errors (e.g. 100 failed out of 500), check the following.
 ### 6. **Identity not set (0) — skipping on-chain publish**
 
 - **Cause:** Devnet nodes are not registered on-chain, so `publisherNodeIdentityId` is 0. Publish is stored as **tentative** only (no on-chain tx).
-- **Effect:** Publish still **succeeds** from the sim’s point of view (200 + kcId 0). No fix needed for the sim; for confirmed on-chain publish you’d need to register nodes with the Hub contract (devnet flow).
+- **Effect:** Publish still **succeeds** from the sim’s point of view (200 + kaId 0). No fix needed for the sim; for confirmed on-chain publish you’d need to register nodes with the Hub contract (devnet flow).
 
 ### 7. **600/500 or "completed" > target**
 

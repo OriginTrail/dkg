@@ -253,7 +253,7 @@ pnpm dkg subscribe memes --save
 pnpm dkg publish memes --file ./my-data.ttl
 pnpm dkg publish memes --subject "did:dkg:entity:thing" --predicate "https://schema.org/name" --object "A Thing"
 
-# Updating (replace KC contents with new triples, recomputes merkle root on-chain)
+# Updating (replace KA contents with new triples, recomputes merkle root on-chain)
 pnpm dkg update <kc-id> --file ./updated-data.ttl --context-graph memes
 
 # Querying
@@ -606,7 +606,7 @@ pnpm dkg contextGraph create <id>     # Create a contextGraph
 pnpm dkg contextGraph list            # List all contextGraphs
 pnpm dkg contextGraph info <id>       # ContextGraph details
 pnpm dkg publish <contextGraph> -f x  # Publish RDF data
-pnpm dkg update <kc-id> -f x    # Update a knowledge collection
+pnpm dkg update <kc-id> -f x    # Update a knowledge asset
 pnpm dkg query [contextGraph] -q ...  # SPARQL query
 pnpm dkg subscribe <contextGraph>     # Join a contextGraph topic
 pnpm dkg logs [-n 50]            # View daemon logs

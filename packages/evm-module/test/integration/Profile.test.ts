@@ -28,7 +28,7 @@ import {
   IdentityStorage,
   ShardingTableStorage,
 } from '../../typechain';
-import { createKnowledgeCollection } from '../helpers/kc-helpers';
+import { createKnowledgeAsset } from '../helpers/kc-helpers';
 import { createProfile } from '../helpers/profile-helpers';
 
 /* ────────────────────────── helpers ────────────────────────── */
@@ -78,7 +78,7 @@ async function ensureNodeHasChunksThisEpoch(
 
     const merkleRoot = kcTools.calculateMerkleRoot(quads, 32);
 
-    await createKnowledgeCollection(
+    await createKnowledgeAsset(
       node.operational, // signer = node.operational
       node, // publisher-node
       Number(nodeId),
@@ -353,7 +353,7 @@ export async function buildInitialRewardsState() {
     const otherNodes = nodes.filter((_, idx) => idx !== i);
     const otherNodeIds = otherNodes.map((n) => n.identityId);
 
-    await createKnowledgeCollection(
+    await createKnowledgeAsset(
       accounts.kcCreator,
       publisherNode,
       publisherNode.identityId,
@@ -487,7 +487,7 @@ export async function buildInitialRewardsState() {
     const otherNodes = nodes.filter((_, idx) => idx !== i);
     const otherNodeIds = otherNodes.map((n) => n.identityId);
 
-    await createKnowledgeCollection(
+    await createKnowledgeAsset(
       accounts.kcCreator,
       publisherNode,
       publisherNode.identityId,
@@ -654,7 +654,7 @@ export async function buildInitialRewardsState() {
   await time.increase((await contracts.chronos.timeUntilNextEpoch()) + 1n);
 
   // Create KC to finalize epoch-3 (this is crucial for epoch finalization!)
-  await createKnowledgeCollection(
+  await createKnowledgeAsset(
     accounts.kcCreator,
     accounts.node4,
     node4Id,
@@ -755,7 +755,7 @@ export async function buildInitialRewardsState() {
   await time.increase((await contracts.chronos.timeUntilNextEpoch()) + 1n);
 
   // Create KC for epoch-5 to ensure there's activity
-  await createKnowledgeCollection(
+  await createKnowledgeAsset(
     accounts.kcCreator,
     accounts.node1,
     node1Id,
@@ -824,7 +824,7 @@ export async function buildInitialRewardsState() {
   await time.increase((await contracts.chronos.timeUntilNextEpoch()) + 1n);
 
   // Create KC for epoch-6 to finalize epoch-5
-  await createKnowledgeCollection(
+  await createKnowledgeAsset(
     accounts.kcCreator,
     accounts.node3,
     node3Id,
@@ -845,7 +845,7 @@ export async function buildInitialRewardsState() {
   await time.increase((await contracts.chronos.timeUntilNextEpoch()) + 1n);
 
   // Create KC for epoch-7 to finalize epoch-6
-  await createKnowledgeCollection(
+  await createKnowledgeAsset(
     accounts.kcCreator,
     accounts.node4,
     node4Id,

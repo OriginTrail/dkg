@@ -182,7 +182,7 @@ describe('@integration V8→V10 migration conviction credit', function () {
   describe('V8MigrationEligibility lifecycle', () => {
     it('Has the expected name and version', async () => {
       expect(await RegistryContract.name()).to.equal('V8MigrationEligibility');
-      expect(await RegistryContract.version()).to.equal('1.0.0');
+      expect(await RegistryContract.version()).to.equal('10.0.2');
     });
 
     it('setEligibleBatch records pairs and bumps the counter, idempotently', async () => {

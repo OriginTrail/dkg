@@ -1,5 +1,12 @@
 import { defineConfig } from 'vitest/config';
 
+// generic-sql-source.test.ts uses `import('node:sqlite')`, which is
+// `--experimental-sqlite`-gated on Node 22.5–23.x. The flag is a
+// process-level toggle, so mirror `vitest.config.ts`: switch to the
+// `forks` pool and pass execArgv there. See the long comment in
+// `vitest.config.ts` for the full rationale.
+const SQLITE_EXEC_ARGV = ['--experimental-sqlite', '--no-warnings=ExperimentalWarning'];
+
 export default defineConfig({
   test: {
     include: [
@@ -15,5 +22,7 @@ export default defineConfig({
     ],
     testTimeout: 60_000,
     maxWorkers: 1,
+    pool: 'forks',
+    execArgv: SQLITE_EXEC_ARGV,
   },
 });

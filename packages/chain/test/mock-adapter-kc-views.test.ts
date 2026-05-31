@@ -3,16 +3,16 @@
  *
  * Covers the read-only V10 KC views the Random Sampling prover (and now
  * the daemon `/api/kc/:id/author` endpoint) use to bind a challenged
- * kcId to canonical chain state before building a proof or reporting
+ * kaId to canonical chain state before building a proof or reporting
  * provenance to clients:
- *  - getLatestMerkleRoot(kcId)
- *  - getMerkleLeafCount(kcId)
- *  - getLatestMerkleRootPublisher(kcId)
- *  - getLatestMerkleRootAuthor(kcId)
- *  - getKCContextGraphId(kcId)
+ *  - getLatestMerkleRoot(kaId)
+ *  - getMerkleLeafCount(kaId)
+ *  - getLatestMerkleRootPublisher(kaId)
+ *  - getLatestMerkleRootAuthor(kaId)
+ *  - getKAContextGraphId(kaId)
  *
  * The mock backs all five with the same in-memory `collections` map so
- * tests that publish via createKnowledgeAssetsV10 OR pre-seed via
+ * tests that publish via createKnowledgeAssets OR pre-seed via
  * __registerKC see coherent state.
  */
 import { describe, it, expect } from 'vitest';
@@ -27,7 +27,7 @@ describe('MockChainAdapter KC views — __registerKC populated state', () => {
   it('returns root + leaf count + publisher + cgId for a registered KC', async () => {
     const adapter = new MockChainAdapter();
     adapter.__registerKC({
-      kcId: 42n,
+      kaId: 42n,
       contextGraphId: 7n,
       merkleRootHex: ROOT_HEX,
       chunks: [
@@ -43,14 +43,14 @@ describe('MockChainAdapter KC views — __registerKC populated state', () => {
     // V10.1 publish path entirely — no attestation is signed, so the
     // mock mirrors the on-chain `address(0)` semantics.
     expect(await adapter.getLatestMerkleRootAuthor(42n)).toBe(ethers.ZeroAddress);
-    expect(await adapter.getKCContextGraphId(42n)).toBe(7n);
+    expect(await adapter.getKAContextGraphId(42n)).toBe(7n);
   });
 
   it('honours explicit merkleLeafCount and publisherAddress overrides', async () => {
     const adapter = new MockChainAdapter();
     const customPublisher = '0x' + 'cd'.repeat(20);
     adapter.__registerKC({
-      kcId: 99n,
+      kaId: 99n,
       contextGraphId: 3n,
       merkleRootHex: ROOT_HEX,
       chunks: [{ chunkId: 0n, chunk: LEAF0 }],
@@ -63,7 +63,7 @@ describe('MockChainAdapter KC views — __registerKC populated state', () => {
   });
 });
 
-describe('MockChainAdapter KC views — createKnowledgeAssetsV10 path', () => {
+describe('MockChainAdapter KC views — createKnowledgeAssets path', () => {
   it('publishes a V10 KC and exposes the full view tuple', async () => {
     const adapter = new MockChainAdapter();
     await adapter.ensureProfile();
@@ -71,7 +71,7 @@ describe('MockChainAdapter KC views — createKnowledgeAssetsV10 path', () => {
     const merkleRoot = ethers.getBytes(ROOT_HEX);
     const dummySig = { r: new Uint8Array(32), vs: new Uint8Array(32) };
 
-    const result = await adapter.createKnowledgeAssetsV10({
+    const result = await adapter.createKnowledgeAssets({
       publishOperationId: 'op-1',
       contextGraphId: 5n,
       merkleRoot,
@@ -96,21 +96,21 @@ describe('MockChainAdapter KC views — createKnowledgeAssetsV10 path', () => {
     // V10.1 publish path: mock persists the supplied author address, so
     // the view reads back the same identity the caller signed against.
     expect(await adapter.getLatestMerkleRootAuthor(result.batchId)).toBe(MOCK_DEFAULT_SIGNER);
-    expect(await adapter.getKCContextGraphId(result.batchId)).toBe(5n);
+    expect(await adapter.getKAContextGraphId(result.batchId)).toBe(5n);
   });
 });
 
 describe('MockChainAdapter KC views — error / default behaviour', () => {
-  it('throws on unknown kcId for the four required-data views', async () => {
+  it('throws on unknown kaId for the four required-data views', async () => {
     const adapter = new MockChainAdapter();
-    await expect(adapter.getLatestMerkleRoot(404n)).rejects.toThrow(/unknown kcId/);
-    await expect(adapter.getMerkleLeafCount(404n)).rejects.toThrow(/unknown kcId/);
-    await expect(adapter.getLatestMerkleRootPublisher(404n)).rejects.toThrow(/unknown kcId/);
-    await expect(adapter.getLatestMerkleRootAuthor(404n)).rejects.toThrow(/unknown kcId/);
+    await expect(adapter.getLatestMerkleRoot(404n)).rejects.toThrow(/unknown kaId/);
+    await expect(adapter.getMerkleLeafCount(404n)).rejects.toThrow(/unknown kaId/);
+    await expect(adapter.getLatestMerkleRootPublisher(404n)).rejects.toThrow(/unknown kaId/);
+    await expect(adapter.getLatestMerkleRootAuthor(404n)).rejects.toThrow(/unknown kaId/);
   });
 
-  it('returns 0n cgId for unknown kcId, mirroring Solidity default-zero mapping', async () => {
+  it('returns 0n cgId for unknown kaId, mirroring Solidity default-zero mapping', async () => {
     const adapter = new MockChainAdapter();
-    expect(await adapter.getKCContextGraphId(404n)).toBe(0n);
+    expect(await adapter.getKAContextGraphId(404n)).toBe(0n);
   });
 });

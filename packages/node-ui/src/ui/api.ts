@@ -812,7 +812,7 @@ export async function listSwmEntities(contextGraphId: string): Promise<SwmRootEn
 }
 
 export interface PublishResult {
-  kcId: string;
+  kaId: string;
   status: string;
   kas: { tokenId: string; rootEntity: string }[];
   txHash?: string;

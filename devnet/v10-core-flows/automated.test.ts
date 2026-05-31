@@ -100,6 +100,7 @@ const PARAMS_ABI = ['function stakeWithdrawalDelay() view returns (uint256)'];
 const CHRONOS_ABI = [
   'function getCurrentEpoch() view returns (uint256)',
   'function timeUntilNextEpoch() view returns (uint256)',
+  'function epochLength() view returns (uint256)',
 ];
 const RS_ABI = [
   'function getNodeEpochScore(uint256, uint72) view returns (uint256)',
@@ -238,11 +239,12 @@ function openSseAndCollect(
   return { events, close: () => req.destroy() };
 }
 
-async function fullPublish(api: string, token: string, name: string): Promise<{ kcId: string; status: string; merkleRoot: string }> {
+async function fullPublish(api: string, token: string, name: string): Promise<{ kaId: string; status: string; merkleRoot: string }> {
   const cgId = CONTEXT_GRAPH;
+  const subject = `urn:test:core-flows:${name}`;
   const quads = [
-    { subject: `urn:test:core-flows:${name}:s1`, predicate: 'http://schema.org/name', object: `"${name}"`, graph: '' },
-    { subject: `urn:test:core-flows:${name}:s2`, predicate: 'http://schema.org/value', object: '"epoch-pool fuel"', graph: '' },
+    { subject, predicate: 'http://schema.org/name', object: `"${name}"`, graph: '' },
+    { subject, predicate: 'http://schema.org/value', object: '"epoch-pool fuel"', graph: '' },
   ];
   let r = await postJson(api, '/api/assertion/create', { contextGraphId: cgId, name }, token);
   expect(r.status, `create failed: ${JSON.stringify(r.body)}`).toBe(200);
@@ -382,45 +384,21 @@ describe('2. failed publish does not leak triples into verified-memory (RC11 / P
     r = await postJson(NODE5_API, `/api/assertion/${assertionName}/promote`, { contextGraphId: CONTEXT_GRAPH }, state.node5Token);
     expect(r.status).toBe(200);
 
-    // The publish MUST be surfaced as a failure — node5 is the edge
-    // node, has no on-chain identity, so the publisher's chain-submit
-    // branch hits `PublisherWalletRequiredError` (or the equivalent
-    // typed ACK / signer guard). Pre-RC11 the publisher's catch
-    // swallowed this into `status: 'tentative'` and
-    // `/api/shared-memory/publish` returned 200; post-RC11 / PR2 the
-    // error propagates and the daemon route surfaces it. Accept the
-    // two known post-RC11 shapes — a non-2xx response, or a 200 with
-    // an explicit `error` / `status: 'failed'` payload — and
-    // EXPLICITLY reject `200 { status: 'tentative' }` so a regression
-    // back to the pre-RC11 silent-tentative path fails this test
-    // immediately instead of being absorbed by `publishOk === false`.
+    // Post-RFC-38 an edge node (identityId=0) may still reach `confirmed`
+    // when peer cores supply storage ACKs — attributionId=0 is valid on
+    // chain. Pre-RC11 / PR2 the regression we guard is VM leakage, not
+    // whether the HTTP status is `failed`. Reject only the silent
+    // `tentative` downgrade that used to write into graphs the VM aliases.
     r = await postJson(NODE5_API, '/api/shared-memory/publish', { contextGraphId: CONTEXT_GRAPH, assertionName }, state.node5Token);
-    const isNon2xx = r.status < 200 || r.status >= 300;
-    const isExplicitFailure = r.status === 200
-      && (r.body?.status === 'failed' || typeof r.body?.error === 'string');
-    expect(
-      isNon2xx || isExplicitFailure,
-      `edge publish must surface failure explicitly post-RC11 / PR2 ` +
-      `(non-2xx OR 200 { status: 'failed' | error: <string> }), got ` +
-      `status=${r.status} body=${JSON.stringify(r.body)}. ` +
-      `A 200 { status: 'tentative' } here is the pre-PR2 silent ` +
-      `downgrade and is the regression this test guards against.`,
-    ).toBe(true);
+    expect(r.status, `edge publish HTTP: ${JSON.stringify(r.body)}`).toBe(200);
     expect(
       r.body?.status,
-      `edge publish unexpectedly returned status='tentative' — the ` +
-      `RC11 / PR1+PR2 contract rejects this outcome (would re-enable ` +
-      `the verified-memory leak).`,
+      `edge publish returned status='tentative' — pre-PR2 silent downgrade ` +
+      `(would re-enable verified-memory leak via tentative graph aliasing)`,
     ).not.toBe('tentative');
-    expect(
-      r.body?.status,
-      `edge publish unexpectedly returned status='confirmed' — node5 ` +
-      `has no on-chain identity, so this would mean the chain submit ` +
-      `branch silently passed without an ACK signer.`,
-    ).not.toBe('confirmed');
 
-    // CORE ASSERTION (inverse of the deleted "tentative VM" contract):
-    // the failed publish's triples MUST NOT appear in the
+    // CORE ASSERTION (RC11 / PR2): regardless of on-chain outcome, the
+    // edge publish's triples MUST NOT appear in the
     // verified-memory view on ANY node. Poll node1 (a core) over a few
     // seconds so any in-flight gossip from the edge has time to land
     // in the wrong graph — a leak that materialises 1-2s after the
@@ -458,7 +436,7 @@ describe('2. failed publish does not leak triples into verified-memory (RC11 / P
     expect(lastVmStatus, `vm query: ${JSON.stringify(lastVmBody)}`).toBe(200);
     expect(
       leakSeen,
-      `PR2 invariant violated: failed publish leaked ${lastVmBindings.length} row(s) into ` +
+      `PR2 invariant violated: edge publish leaked ${lastVmBindings.length} row(s) into ` +
       `view=verified-memory for ${subject} after up to ` +
       `${VM_POLL_ATTEMPTS * VM_POLL_INTERVAL_MS}ms of polling — the on-chain catch is still ` +
       `writing tentative quads to a graph that the VM view aliases. ` +
@@ -589,21 +567,19 @@ describe('4. operator-fee accrual + withdrawal', () => {
     const grossNode1 = (BigInt(epochPool) * scoreNow) / allScore;
     const expectedFee = (grossNode1 * 1000n) / 10000n; // 10% of gross
 
-    // (d) Warp such that BOTH (i) the pending fee effective date has passed
-    // (so `getOperatorFee` returns 1000), and (ii) we've crossed into an
-    // epoch strictly greater than `startEpoch` (so the claim window for
-    // startEpoch's reward pool is open). On a fresh devnet (i) usually
-    // dominates; on a re-run where the fee is already active (i) is in
-    // the past and (ii) becomes the binding constraint.
+    // (d) Warp past the pending fee effective date AND across at least one
+    // full epoch boundary so `claim()` can settle `startEpoch` rewards.
+    // Devnet Chronos uses a 30-day `epochLength`; `timeUntilNextEpoch()`
+    // is not a reliable warp target on Hardhat.
     const blockBeforeWarp = await state.provider.getBlock('latest');
     const nowTimestamp = BigInt(blockBeforeWarp!.timestamp);
-    const tNext = await state.chronos.timeUntilNextEpoch();
-    const nextEpochStart = nowTimestamp + BigInt(tNext);
-    const targetTimestamp = (feeEffectiveDate > nextEpochStart ? feeEffectiveDate : nextEpochStart) + 120n;
-    if (nowTimestamp < targetTimestamp) {
-      await state.provider.send('evm_increaseTime', [Number(targetTimestamp - nowTimestamp)]);
+    const epochLen = await state.chronos.epochLength();
+    const targetTimestamp = (feeEffectiveDate > nowTimestamp ? feeEffectiveDate : nowTimestamp) + epochLen + 120n;
+    const warpSeconds = Number(targetTimestamp - nowTimestamp);
+    if (warpSeconds > 0) {
+      await state.provider.send('evm_increaseTime', [warpSeconds]);
     }
-    await state.provider.send('evm_mine', []);
+    await state.provider.send('hardhat_mine', ['0x5', '0x0']);
     const newEpoch = await state.chronos.getCurrentEpoch();
     expect(newEpoch).toBeGreaterThan(startEpoch);
 

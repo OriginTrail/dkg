@@ -292,7 +292,7 @@ describe('Round 5 §10: replica-side dkg:Publication / dkg:authoredBy provenance
     // Regression for the round-5 review finding: replicas confirming a KC via
     // FinalizationHandler used to rebuild `_meta` without `dkg:authoredBy`,
     // making author provenance inconsistent across the network. Fix threads
-    // the EIP-712-attested author from `KnowledgeCollectionCreated.author`
+    // the EIP-712-attested author from `KnowledgeAssetCreated.author`
     // into `KCMetadata` via `verifyOnChain`. This unit-level pin verifies the
     // promote-side wiring without standing up a full chain.
     const store = new OxigraphStore();
@@ -334,7 +334,7 @@ describe('Round 5 §10: replica-side dkg:Publication / dkg:authoredBy provenance
 
   it('skips Publication block when authorAddress is the unattributed sentinel (address(0))', async () => {
     // RFC-001 §3.6 unattributed-publish path on chain stores
-    // `address(0)` for `KnowledgeCollectionCreated.author`. Replicas must
+    // `address(0)` for `KnowledgeAssetCreated.author`. Replicas must
     // preserve that semantic by NOT emitting a Publication subject — the
     // legacy no-author behaviour is the contract for downstream queries
     // that treat presence of `dkg:authoredBy` as "verified author on file".

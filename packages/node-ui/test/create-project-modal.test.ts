@@ -271,6 +271,76 @@ describe('CreateProjectModal partial registration flow', () => {
     const closeBtn = container!.querySelector('button[aria-label*="lose"], button[aria-label*="ismiss"]');
     expect(closeBtn).toBeTruthy();
   });
+
+  // BUG-017 dismiss wiring: Create CG modal shares useModalDismiss with
+  // Join CG. The hook itself is unit-tested separately; these tests pin
+  // that the modal is actually wired into it (Escape closes; clicking
+  // the overlay closes; clicking inside the dialog body does NOT).
+  async function renderModalWithCustomOnClose(onClose: () => void) {
+    const { CreateProjectModal } = await import('../src/ui/components/Modals/CreateProjectModal.js');
+    const { useProjectsStore } = await import('../src/ui/stores/projects.js');
+    const { useTabsStore } = await import('../src/ui/stores/tabs.js');
+    const { useJourneyStore } = await import('../src/ui/stores/journey.js');
+    act(() => {
+      useProjectsStore.setState({ contextGraphs: [], loading: false, activeProjectId: null });
+      useTabsStore.setState({
+        tabs: [{ id: 'dashboard', label: 'Dashboard', closable: false }],
+        activeTabId: 'dashboard',
+      });
+      useJourneyStore.setState({ stage: 0 });
+    });
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root!.render(React.createElement(CreateProjectModal, { open: true, onClose }));
+    });
+    await flush();
+  }
+
+  it('Escape key invokes onClose (BUG-017 hook wiring)', async () => {
+    const onClose = vi.fn();
+    await renderModalWithCustomOnClose(onClose);
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('clicking the explicit Close (×) button invokes onClose (BUG-017)', async () => {
+    const onClose = vi.fn();
+    await renderModalWithCustomOnClose(onClose);
+    const closeBtn = container!.querySelector(
+      'button[aria-label*="lose"], button[aria-label*="ismiss"]',
+    ) as HTMLButtonElement | null;
+    expect(closeBtn).toBeTruthy();
+    await act(async () => {
+      closeBtn!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('clicking the overlay backdrop invokes onClose exactly once (BUG-017)', async () => {
+    const onClose = vi.fn();
+    await renderModalWithCustomOnClose(onClose);
+    const overlay = container!.querySelector('.v10-modal-overlay') as HTMLElement | null;
+    expect(overlay).toBeTruthy();
+    act(() => {
+      overlay!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('clicking inside the dialog body does NOT invoke onClose (target===currentTarget guard)', async () => {
+    const onClose = vi.fn();
+    await renderModalWithCustomOnClose(onClose);
+    const dialog = container!.querySelector('[role="dialog"]') as HTMLElement | null;
+    expect(dialog).toBeTruthy();
+    act(() => {
+      dialog!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(onClose).not.toHaveBeenCalled();
+  });
 });
 
 describe('CreateProjectModal progress copy honesty', () => {

@@ -35,7 +35,7 @@ type StoryCaptureKey = 'objectEvent' | 'transformationEvent' | 'aggregationEvent
 
 type CaptureResponseData = {
   ual: string;
-  kcId: string;
+  kaId: string;
   status: string;
   receivedAt: string;
   eventCount: number;
@@ -179,7 +179,7 @@ async function captureDoc(doc: Record<string, unknown>): Promise<CaptureResponse
 
   const data = await res.json() as CaptureResponseData;
   expect(typeof data.ual).toBe('string');
-  expect(typeof data.kcId).toBe('string');
+  expect(typeof data.kaId).toBe('string');
   expect(typeof data.status).toBe('string');
   expect(typeof data.eventCount).toBe('number');
   expect(typeof data.receivedAt).toBe('string');
@@ -1194,7 +1194,7 @@ describe('EPCIS API E2E', () => {
         const data = await res.json();
 
         expect(typeof data.ual).toBe('string');
-        expect(typeof data.kcId).toBe('string');
+        expect(typeof data.kaId).toBe('string');
         expect(typeof data.status).toBe('string');
         expect(typeof data.eventCount).toBe('number');
         expect(typeof data.receivedAt).toBe('string');

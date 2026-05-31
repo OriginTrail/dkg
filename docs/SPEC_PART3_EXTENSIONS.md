@@ -129,7 +129,7 @@ Sources → Extract → Transform → Validate → Batch → Publish
 | **Extractor** | `extract(item): ExtractedData` | Entities + relations + claims from raw data |
 | **Transformer** | `transform(data, ontology): Quad[]` | Map to RDF, entity resolution, URI minting |
 | **Validator** | `validate(quads, shapes): Report` | SHACL shape validation |
-| **Batcher** | `add(quads), flush(): KC[]` | Group into KCs (by entity/source/time) |
+| **Batcher** | `add(quads), flush(): KA[]` | Group into KCs (by entity/source/time) |
 | **Publisher** | Uses `@origintrail-official/dkg-publisher` | Reserve UALs, publish, retry |
 
 ### Extractors
@@ -163,7 +163,7 @@ batcher:
 
 ### Observability
 
-Pipelines emit metrics: `items.received`, `triples.generated`, `validation.passed`, `validation.failed`, `kcs.published`, `publish.latency`, `errors`.
+Pipelines emit metrics: `items.received`, `triples.generated`, `validation.passed`, `validation.failed`, `kas.published`, `publish.latency`, `errors`.
 
 ---
 

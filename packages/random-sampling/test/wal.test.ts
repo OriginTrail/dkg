@@ -27,7 +27,7 @@ describe('InMemoryProverWal', () => {
   it('appends and reads in insertion order', async () => {
     const wal = new InMemoryProverWal();
     await wal.append(makeWalEntry(KEY, 'started'));
-    await wal.append(makeWalEntry(KEY, 'challenge', { kcId: '1', cgId: '2', chunkId: '3' }));
+    await wal.append(makeWalEntry(KEY, 'challenge', { kaId: '1', cgId: '2', chunkId: '3' }));
     await wal.append(makeWalEntry(KEY, 'submitted', { txHash: '0xabc' }));
 
     const all = await wal.readAll();
@@ -103,7 +103,7 @@ describe('FileProverWal', () => {
     const wal = await FileProverWal.open(path);
     await wal.append(makeWalEntry(KEY, 'started'));
     // Simulate an external rotation tool that appended a line directly.
-    appendFileSync(path, JSON.stringify(makeWalEntry(KEY, 'challenge', { kcId: '9' })) + '\n');
+    appendFileSync(path, JSON.stringify(makeWalEntry(KEY, 'challenge', { kaId: '9' })) + '\n');
     await wal.append(makeWalEntry(KEY, 'submitted', { txHash: '0xabc' }));
     await wal.close();
 

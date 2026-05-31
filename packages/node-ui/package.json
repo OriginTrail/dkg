@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg-node-ui",
-  "version": "10.0.0-rc.11",
+  "version": "10.0.0-rc.12",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -11,8 +11,9 @@
     "dev:ui": "vite",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "test:e2e": "playwright test",
-    "test:e2e:ui": "playwright test --ui",
+    "test:e2e": "cross-env PWTEST_DEVNET=0 playwright test --project=mock-ui",
+    "test:e2e:devnet": "cross-env PWTEST_DEVNET=1 DEVNET_NODE=1 playwright test --project=devnet-ui",
+    "test:e2e:ui": "cross-env PWTEST_DEVNET=0 playwright test --ui --project=mock-ui",
     "benchmark:stage5": "tsx scripts/stage5-scale-benchmark.mts",
     "benchmark:stage6": "tsx scripts/stage6-delta-benchmark.mts",
     "clean": "node -e \"const fs=require('fs'); ['dist','tsconfig.tsbuildinfo'].forEach((p)=>fs.rmSync(p,{recursive:true,force:true}))\""

@@ -28,7 +28,7 @@ describe('PR3 / RC11 — typed ACKProviderError surface', () => {
     it('preserves the underlying cause', () => {
       const cause = new Error('connection reset by peer');
       const err = new RpcPreconditionError({
-        method: 'getKnowledgeAssetsV10Address',
+        method: 'getKnowledgeAssetsLifecycleAddress',
         message: 'failed to read',
         cause,
       });
@@ -109,11 +109,11 @@ describe('PR3 / RC11 — typed ACKProviderError surface', () => {
 
     it('passes through an already-typed RpcPreconditionError without re-wrapping', () => {
       const original = new RpcPreconditionError({
-        method: 'getKnowledgeAssetsV10Address',
+        method: 'getKnowledgeAssetsLifecycleAddress',
         message: 'rate limited',
         upstream: -32016,
       });
-      const wrapped = wrapAsRpcPreconditionIfApplicable(original, 'getKnowledgeAssetsV10Address');
+      const wrapped = wrapAsRpcPreconditionIfApplicable(original, 'getKnowledgeAssetsLifecycleAddress');
       expect(wrapped).toBe(original);
     });
 

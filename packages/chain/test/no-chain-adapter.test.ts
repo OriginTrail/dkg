@@ -26,7 +26,7 @@ describe('NoChainAdapter', () => {
     })],
     // V9 publishKnowledgeAssets / updateKnowledgeAssets / extendStorage /
     // transferNamespace stubs were archived in `archive-non-v10-contracts`.
-    // The V10 surface (createKnowledgeAssetsV10) is exercised by
+    // The V10 surface (createKnowledgeAssets) is exercised by
     // `no-chain-adapter-extra.test.ts`.
     ['createContextGraph', () => adapter.createContextGraph({})],
     ['submitToContextGraph', () => adapter.submitToContextGraph('kc1', 'cg1')],

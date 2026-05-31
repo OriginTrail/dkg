@@ -116,7 +116,7 @@ Publishers don't create one KA at a time. They batch-mint multiple KAs in a sing
 The batch has a single merkle root on-chain that covers all KAs:
 
 ```
-KC Merkle Root (on-chain)
+KA Merkle Root (on-chain)
 ├── KA 1 Root
 │   ├── Public Root (hash of public triples)
 │   └── Private Root (hash of private triples)
@@ -233,11 +233,11 @@ Between steps 3 and 5, the data is in a **tentative** state:
 
 ### Knowledge Updates
 
-A publisher can update a Knowledge Collection by submitting a **new merkle root** on-chain:
+A publisher can update a Knowledge Asset by submitting a **new merkle root** on-chain:
 
 ```solidity
 function updateKnowledgeAssets(
-    uint64 kcId,
+    uint64 kaId,
     bytes32 newMerkleRoot,
     uint64 newPublicByteSize
 ) external;
@@ -259,7 +259,7 @@ The new merkle root replaces the old one. Nodes receive the updated triples via 
 When publishing, the publisher specifies the **storage duration** in epochs (1 epoch = 30 days). The cost covers this period.
 
 - **After expiry**: Nodes **may** delete the data to free storage, but they may also choose to keep it if they consider it valuable (e.g., frequently queried data). The on-chain commitment remains as a permanent record regardless.
-- **Extension**: A publisher can extend storage at any time by calling `extendStorage(kcId, additionalEpochs)` and paying the corresponding fee. This extends the window during which nodes are obligated (and incentivized) to store and serve the data.
+- **Extension**: A publisher can extend storage at any time by calling `extendStorage(kaId, additionalEpochs)` and paying the corresponding fee. This extends the window during which nodes are obligated (and incentivized) to store and serve the data.
 
 ### Permanent Publishing (Arweave-style)
 
@@ -335,7 +335,7 @@ The key insight: it's much cheaper to prove that someone *cheated* than to prove
 
 ```
 1. Initiate     Buyer calls initiatePurchase on the FairSwap judge contract,
-                depositing payment (TRAC). References the KC/KA on-chain.
+                depositing payment (TRAC). References the KA/KA on-chain.
 
 2. Fulfill      Seller encrypts private triples with key k, sends encrypted
                 data to buyer off-chain, and commits c = H(k) to the contract.
@@ -354,10 +354,10 @@ A 5% protocol fee is deducted from the payment. The remaining 95% goes to the se
 
 ### Why FairSwap Fits DKG Perfectly
 
-The DKG already commits a merkle root for every Knowledge Collection on-chain (during the publishing step). This merkle root covers both public and private triples. The FairSwap judge contract can reuse this existing on-chain commitment from `KnowledgeAssetsStorage` (or legacy `KnowledgeCollectionStorage` for V8 assets) — no additional setup needed.
+The DKG already commits a merkle root for every Knowledge Asset on-chain (during the publishing step). This merkle root covers both public and private triples. The FairSwap judge contract can reuse this existing on-chain commitment from `KnowledgeAssetsStorage` (or legacy `KnowledgeCollectionStorage` for V8 assets) — no additional setup needed.
 
 The verification predicate φ(x) = 1 iff:
-> "The received private triples, combined with the already-known public triples, produce a merkle root matching the on-chain commitment for this KC."
+> "The received private triples, combined with the already-known public triples, produce a merkle root matching the on-chain commitment for this KA."
 
 This means:
 - **No new trust assumptions** — the merkle root was committed during publishing, long before the sale
@@ -379,7 +379,7 @@ Unlike publishing fees (which fund storage node rewards), private knowledge sale
 
 ```solidity
 function initiatePurchase(
-    uint64 kcId,
+    uint64 kaId,
     uint64 kaId,
     uint96 price
 ) external;                                                // called by buyer
@@ -752,7 +752,7 @@ interface ChainAdapter {
   coverPublishingCost(accountId: bigint, baseCost: bigint): Promise<TxResult>;
 
   // FairSwap (private knowledge exchange)
-  initiatePurchase(kcId: bigint, kaId: bigint, price: bigint): Promise<PurchaseResult>;
+  initiatePurchase(kaId: bigint, kaId: bigint, price: bigint): Promise<PurchaseResult>;
   fulfillPurchase(purchaseId: bigint, encRoot: Uint8Array, keyCom: Uint8Array): Promise<TxResult>;
   revealKey(purchaseId: bigint, key: Uint8Array): Promise<TxResult>;
   disputeDelivery(purchaseId: bigint, proof: Uint8Array): Promise<TxResult>;
@@ -792,7 +792,7 @@ DKG V9 is designed to supersede V8 without breaking existing state. The key prin
 - **Logic contracts are upgraded**: `KnowledgeAssets.sol` replaces `KnowledgeCollection.sol` in the Hub, backed by the new `KnowledgeAssetsStorage` instead of the legacy `KnowledgeCollectionStorage`.
 - **New fields appended to structs**: Conviction lock data is added to the end of `DelegatorData` in `StakingStorage`. Per-contextGraph stake allocations are added via new mappings in a new `ContextGraphStakingStorage` contract.
 - **New contracts deployed**: `KnowledgeAssetsStorage`, `PublishingConvictionAccount`, `ContextGraphStakingStorage`, `FairSwapJudge`, and `ProtocolTreasury` are entirely new.
-- **Publishing flow**: `batchMintKnowledgeAssets` replaces `createKnowledgeCollection`, with UAL pre-minting. The storage format is the same. `updateKnowledgeAssets` is new.
+- **Publishing flow**: `batchMintKnowledgeAssets` replaces `createKnowledgeAsset`, with UAL pre-minting. The storage format is the same. `updateKnowledgeAssets` is new.
 - **FairSwap**: New `FairSwapJudge` contract for private knowledge exchange — entirely new, no migration.
 - **Permanent publishing**: New endowment mechanism — entirely additive.
 

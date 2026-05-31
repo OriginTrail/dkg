@@ -26,7 +26,7 @@ export interface DkgPublisherExtensionShareResult {
 }
 
 export interface DkgPublisherExtensionPublishResult {
-  kcId?: string | number | bigint;
+  kaId?: string | number | bigint;
   kas?: unknown[];
   [key: string]: unknown;
 }

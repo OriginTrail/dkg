@@ -63,8 +63,8 @@ async function runIteration(args: {
       { rootEntities: [syncPayload.rootEntity] },
       false,
     );
-    if (!result.kcId) {
-      throw new Error('Synchronous publish response did not include kcId');
+    if (!result.kaId) {
+      throw new Error('Synchronous publish response did not include kaId');
     }
     return result;
   });
@@ -74,7 +74,7 @@ async function runIteration(args: {
     const sparql = getSparql(syncPayload.rootEntity);
     const getContext = reproductionContext(config, iteration, syncPayload, {
       flow: 'get',
-      kcId: syncPublish.value?.kcId,
+      kaId: syncPublish.value?.kaId,
       sparql,
     });
     const get = await measureOperation('get', iteration, warmup, getContext, config.timeoutMs, now, async () => {

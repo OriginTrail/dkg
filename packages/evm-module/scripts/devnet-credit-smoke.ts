@@ -396,11 +396,25 @@ async function main() {
 }
 
 function runUpload(args: string[]) {
-  const result = spawnSync(
-    'npx',
-    ['ts-node', '--esm', 'scripts/upload_v8_eligibility.ts', ...args],
-    { cwd: REPO_ROOT, stdio: 'inherit' },
-  );
+  // `npx ts-node --esm` is unreliable across pnpm/Node versions: the
+  // evm-module ts-node binary errors with `Unknown file extension ".ts"`
+  // under Node's native ESM loader. The repo root ships `tsx` as a dev dep
+  // which transparently runs `.ts` files under ESM, so prefer it. Fall
+  // back to the local ts-node only if tsx is missing.
+  const workspaceRoot = resolve(REPO_ROOT, '..', '..');
+  const tsxBin = resolve(workspaceRoot, 'node_modules', '.bin', 'tsx');
+  const tsNodeBin = resolve(REPO_ROOT, 'node_modules', '.bin', 'ts-node');
+  let cmd: string;
+  let cmdArgs: string[];
+  try {
+    readFileSync(tsxBin);
+    cmd = tsxBin;
+    cmdArgs = ['scripts/upload_v8_eligibility.ts', ...args];
+  } catch {
+    cmd = tsNodeBin;
+    cmdArgs = ['--esm', 'scripts/upload_v8_eligibility.ts', ...args];
+  }
+  const result = spawnSync(cmd, cmdArgs, { cwd: REPO_ROOT, stdio: 'inherit' });
   if (result.status !== 0) {
     throw new Error(`upload_v8_eligibility.ts exited with ${result.status}`);
   }

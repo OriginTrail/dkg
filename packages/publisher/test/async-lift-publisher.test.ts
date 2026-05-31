@@ -72,7 +72,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     CONTEXT_GRAPH = cgId.toString();
     _provider = provider;
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
-    _kav10Address = await chain.getKnowledgeAssetsV10Address();
+    _kav10Address = await chain.getKnowledgeAssetsLifecycleAddress();
   });
   afterAll(async () => {
     await revertSnapshot(_fileSnapshot);
@@ -514,7 +514,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     const included = await publisher.recordPublishResult(
       jobId,
       {
-        kcId: 1n,
+        kaId: 1n,
         ual: 'did:dkg:mock:31337/0xabc/1',
         merkleRoot: new Uint8Array([0xab, 0xcd]),
         kaManifest: [],
@@ -538,7 +538,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(included.inclusion?.blockNumber).toBe(10);
 
     const finalized = await publisher.recordPublishResult(jobId, {
-      kcId: 1n,
+      kaId: 1n,
       ual: 'did:dkg:mock:31337/0xabc/1',
       merkleRoot: new Uint8Array([0xab, 0xcd]),
       kaManifest: [],
@@ -598,7 +598,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
           expect(publishOptions.quads[0]?.subject).toContain('dkg:music-social:aloha:person-profile/rihana-');
           expect(publishOptions.privateQuads?.[0]?.subject).toContain('dkg:music-social:aloha:person-profile/rihana-');
           return {
-            kcId: 1n,
+            kaId: 1n,
             ual: 'did:dkg:mock:31337/0xabc/1',
             merkleRoot: new Uint8Array([0xab, 0xcd]),
             kaManifest: [],
@@ -687,7 +687,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     const publisher = createPublisher({
       config: {
         publishExecutor: async () => ({
-          kcId: 0n,
+          kaId: 0n,
           ual: 'did:dkg:mock:31337/0xabc/tentative',
           merkleRoot: new Uint8Array([0xab, 0xcd]),
           kaManifest: [],
@@ -824,7 +824,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       expect(publishOptions.quads).toHaveLength(1);
       expect(publishOptions.quads[0]?.predicate).toBe('http://schema.org/genre');
       return {
-        kcId: 1n,
+        kaId: 1n,
         ual: 'did:dkg:mock:31337/0xabc/1',
         merkleRoot: new Uint8Array([0xab, 0xcd]),
         kaManifest: [],

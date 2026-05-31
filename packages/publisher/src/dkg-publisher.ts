@@ -2,7 +2,7 @@ import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@origintrail-official/dkg-chain';
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
-import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphAssertionUri, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, DKG_GOSSIP_MAX_MESSAGE_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad } from '@origintrail-official/dkg-core';
+import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphAssertionUri, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, DKG_GOSSIP_MAX_MESSAGE_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import type { Publisher, PublishOptions, PublishResult, KAManifestEntry, PhaseCallback, V10CoreNodeACK } from './publisher.js';
 import { autoPartition } from './auto-partition.js';
@@ -605,8 +605,8 @@ export class DKGPublisher implements Publisher {
     if (this.chain.chainId === 'none') return false;
     try {
       const chainIdGetter = (this.chain as unknown as { getEvmChainId?: () => Promise<bigint> }).getEvmChainId;
-      const kavAddressGetter = (this.chain as unknown as { getKnowledgeAssetsV10Address?: () => Promise<string> })
-        .getKnowledgeAssetsV10Address;
+      const kavAddressGetter = (this.chain as unknown as { getKnowledgeAssetsLifecycleAddress?: () => Promise<string> })
+        .getKnowledgeAssetsLifecycleAddress;
       if (typeof chainIdGetter === 'function') await chainIdGetter.call(this.chain);
       if (typeof kavAddressGetter === 'function') await kavAddressGetter.call(this.chain);
     } catch {
@@ -617,14 +617,14 @@ export class DKGPublisher implements Publisher {
 
   private async resolveKnownBatchPublisherAddress(
     contextGraphId: string,
-    kcId: bigint,
+    kaId: bigint,
     metaGraphUri = this.graphManager.metaGraphUri(contextGraphId),
   ): Promise<string | undefined> {
     try {
       const ual = await resolveUalByBatchId(
         this.store,
         metaGraphUri,
-        kcId,
+        kaId,
       );
       return publisherAddressFromUal(ual);
     } catch {
@@ -1293,7 +1293,7 @@ export class DKGPublisher implements Publisher {
     // Per-cgId data promotion: copy quads + KA meta from the default
     // `<NAME>/data` + `<NAME>/_meta` graphs into `<NAME>/context/<cgId>/data`
     // + `<NAME>/context/<cgId>/_meta`. The RS prover's `extractV10KCFromStore`
-    // queries the per-cgId meta graph (kc-extractor.ts:154) to resolve a
+    // queries the per-cgId meta graph (ka-extractor.ts:154) to resolve a
     // KC's UAL from `dkg:batchId`, so without this promotion every published
     // KC stays invisible to random sampling and the prover loops on
     // `kc-not-synced` indefinitely.
@@ -1308,7 +1308,7 @@ export class DKGPublisher implements Publisher {
     const targetCgId = ctxGraphId ?? chainCgId;
     if (targetCgId && publishResult.status === 'confirmed' && publishResult.onChainResult) {
       // V10 publishDirect already registers the KC to the context graph
-      // via an internal call to ContextGraphs.registerKnowledgeCollection
+      // via an internal call to ContextGraphs.registerKnowledgeAsset
       // (Hub-authorized only — EOAs cannot call it directly). The legacy
       // V9 flow required a separate addBatchToContextGraph tx; that path
       // is no longer available. Attempt the explicit verify call as a
@@ -1367,7 +1367,7 @@ export class DKGPublisher implements Publisher {
         // Data promotion: always COPY public quads to the per-cgId data
         // graph (`<NAME>/context/<cgId>/data`) — RS prover's
         // `extractV10KCFromStore` reads triples from there
-        // (`kc-extractor.ts` line ~225). On REMAP-flow publishes
+        // (`ka-extractor.ts` line ~225). On REMAP-flow publishes
         // (`publishContextGraphId` set), also delete the original copy
         // from the default data graph; on same-graph publishes, leave
         // the default copy in place so `agent.query(label)` (which
@@ -1755,6 +1755,11 @@ export class DKGPublisher implements Publisher {
     }
     this.log.info(ctx, `Computed kcMerkleRoot (flat) over ${allSkolemizedQuads.length} triple hashes + ${privateRoots.length} private root(s), leafCount=${kcMerkleLeafCount}`);
     const kaCount = manifestEntries.length;
+    if (chainV10Ready && kaCount !== 1) {
+      throw new Error(
+        `V10 greenfield publish requires exactly one Knowledge Asset per transaction (got ${kaCount})`,
+      );
+    }
     onPhase?.('prepare:merkle', 'end');
 
     onPhase?.('prepare', 'end');
@@ -2078,7 +2083,7 @@ export class DKGPublisher implements Publisher {
     // Non-numeric domains resolve to 0n
     // here — the V10 contract rejects `contextGraphId == 0` with
     // `ZeroContextGraphId`, so the authoritative fail-loud lives at the EVM
-    // adapter boundary (`evm-adapter.ts:createKnowledgeAssetsV10` pre-tx
+    // adapter boundary (`evm-adapter.ts:createKnowledgeAssets` pre-tx
     // check) and at the core-node `storage-ack-handler.ts`. Keeping the
     // publisher-side resolution soft lets mock adapters and integration
     // tests that publish with descriptive SWM CG names continue to exercise
@@ -2102,7 +2107,7 @@ export class DKGPublisher implements Publisher {
     let v10KavAddress: string | undefined;
     try {
       v10ChainId = await this.chain.getEvmChainId();
-      v10KavAddress = await this.chain.getKnowledgeAssetsV10Address();
+      v10KavAddress = await this.chain.getKnowledgeAssetsLifecycleAddress();
     } catch {
       v10ChainId = undefined;
       v10KavAddress = undefined;
@@ -2272,7 +2277,7 @@ export class DKGPublisher implements Publisher {
       // protocol-correctness violations, not transient chain issues —
       // /api/shared-memory/publish callers must see a 4xx for a
       // broken seal, not a 200 OK with `status: tentative` and
-      // `kcId: 0` (which the daemon previously had to special-case).
+      // `kaId: 0` (which the daemon previously had to special-case).
       //
       // Missing-seal — `precomputedAttestation === undefined` — is
       // checked inside the chain-submit branch below, after ACK
@@ -2371,15 +2376,15 @@ export class DKGPublisher implements Publisher {
           throw new Error(
             'Chain adapter is not V10-ready (isV10Ready() returned false or is missing). ' +
             'Publish is routed through KnowledgeAssetsV10.publish, which requires ' +
-            'the adapter to expose createKnowledgeAssetsV10, getEvmChainId, and ' +
-            'getKnowledgeAssetsV10Address — use an EVM adapter pointed at a chain where ' +
+            'the adapter to expose createKnowledgeAssets, getEvmChainId, and ' +
+            'getKnowledgeAssetsLifecycleAddress — use an EVM adapter pointed at a chain where ' +
             'KnowledgeAssetsV10 is deployed.',
           );
         }
         if (v10ChainId === undefined || v10KavAddress === undefined) {
           throw new Error(
             'V10 publish requires the chain adapter to expose getEvmChainId() and ' +
-            'getKnowledgeAssetsV10Address(); neither was resolved. The adapter is not V10-capable.',
+            'getKnowledgeAssetsLifecycleAddress(); neither was resolved. The adapter is not V10-capable.',
           );
         }
         if (!options.precomputedAttestation) {
@@ -2502,7 +2507,7 @@ export class DKGPublisher implements Publisher {
               );
             }
           }
-          onChainResult = await this.chain.createKnowledgeAssetsV10!({
+          onChainResult = await this.chain.createKnowledgeAssets!({
             publishOperationId,
             contextGraphId: v10CgId,
             publisherAddress: publisherSigner.address,
@@ -2546,11 +2551,20 @@ export class DKGPublisher implements Publisher {
 
         onChainResult.tokenAmount = tokenAmount;
 
-        // V9 UAL: did:dkg:{chainId}/{publisherAddress}/{firstKAId}
-        ual = `did:dkg:${this.chain.chainId}/${onChainResult.publisherAddress}/${onChainResult.startKAId}`;
+        const kaId = onChainResult.kaId ?? onChainResult.batchId;
+        const storageAddr =
+          onChainResult.knowledgeAssetsContract
+          ?? (this.chain.getDKGKnowledgeAssetsAddress
+            ? await this.chain.getDKGKnowledgeAssetsAddress()
+            : undefined);
+        if (!storageAddr) {
+          throw new Error('Publish succeeded but DKGKnowledgeAssets address is unavailable for UAL assignment');
+        }
+        ual = `did:dkg:${this.chain.chainId}/${storageAddr.toLowerCase()}/${kaId.toString()}`;
 
         for (const km of kaMetadata) {
           km.kcUal = ual;
+          km.tokenId = kaId;
         }
         let confirmedQuads = generateConfirmedFullMetadata(
           {
@@ -2584,7 +2598,7 @@ export class DKGPublisher implements Publisher {
         }
         // RC11 / PR2: write the published public quads into the root
         // data graph ONLY after the chain has confirmed (KCCreated
-        // returned via `createKnowledgeAssetsV10`). Pre-PR2 this insert
+        // returned via `createKnowledgeAssets`). Pre-PR2 this insert
         // ran unconditionally before the chain interaction, so any
         // publish that failed mid-flight left "tentative VM" quads
         // visible to /api/query. Order matters: data quads BEFORE
@@ -2677,7 +2691,7 @@ export class DKGPublisher implements Publisher {
     onPhase?.('chain', 'end');
 
     const result: PublishResult = {
-      kcId: onChainResult?.batchId ?? 0n,
+      kaId: onChainResult?.batchId ?? 0n,
       ual,
       merkleRoot: kcMerkleRoot,
       kaManifest: manifestEntries,
@@ -2697,7 +2711,7 @@ export class DKGPublisher implements Publisher {
     return result;
   }
 
-  async update(kcId: bigint, options: PublishOptions): Promise<PublishResult> {
+  async update(kaId: bigint, options: PublishOptions): Promise<PublishResult> {
     if (options.subGraphName) {
       throw new Error(
         'Updating sub-graph KCs is not yet supported. The update path does not resolve sub-graph data/private graphs. ' +
@@ -2732,7 +2746,7 @@ export class DKGPublisher implements Publisher {
     } else if (typeof this.chain.getLatestMerkleRootPublisher === 'function') {
       try {
         resolvedPublisherAddress = coercePublisherAddress(
-          await this.chain.getLatestMerkleRootPublisher(kcId),
+          await this.chain.getLatestMerkleRootPublisher(kaId),
         );
       } catch {
         // Adapter-managed updates can still let the adapter resolve the
@@ -2742,7 +2756,7 @@ export class DKGPublisher implements Publisher {
     if (!resolvedPublisherAddress && !localOnlyUpdate) {
       resolvedPublisherAddress = await this.resolveKnownBatchPublisherAddress(
         contextGraphId,
-        kcId,
+        kaId,
         options.targetMetaGraphUri,
       );
     }
@@ -2755,7 +2769,7 @@ export class DKGPublisher implements Publisher {
     const publisherAddress = resolvedPublisherAddress ?? (
       localOnlyUpdate ? this.localTentativePublisherAddress() : undefined
     );
-    this.log.info(ctx, `Updating kcId=${kcId} with ${quads.length} triples`);
+    this.log.info(ctx, `Updating kaId=${kaId} with ${quads.length} triples`);
     const dataGraph = this.graphManager.dataGraphUri(contextGraphId);
 
     onPhase?.('prepare', 'start');
@@ -2814,11 +2828,11 @@ export class DKGPublisher implements Publisher {
       }
 
       try {
-        await updateMetaMerkleRoot(this.store, this.graphManager, contextGraphId, kcId, kcMerkleRoot);
+        await updateMetaMerkleRoot(this.store, this.graphManager, contextGraphId, kaId, kcMerkleRoot);
       } catch (err) {
         this.log.warn(
           ctx,
-          `Failed to sync _meta merkleRoot for kcId=${kcId}: ${err instanceof Error ? err.message : String(err)}`,
+          `Failed to sync _meta merkleRoot for kaId=${kaId}: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
       onPhase?.('store', 'end');
@@ -2828,8 +2842,8 @@ export class DKGPublisher implements Publisher {
       this.log.warn(ctx, 'No chain configured — applying update locally and returning tentative result');
       await storeUpdatedQuads();
       const result: PublishResult = {
-        kcId,
-        ual: `did:dkg:${this.chain.chainId}/${publisherAddress}/${kcId}`,
+        kaId,
+        ual: `did:dkg:${this.chain.chainId}/${publisherAddress}/${kaId}`,
         merkleRoot: kcMerkleRoot,
         kaManifest: manifestEntries,
         status: 'tentative',
@@ -2852,6 +2866,63 @@ export class DKGPublisher implements Publisher {
       )
       .join('\n');
     const updateByteSize = BigInt(new TextEncoder().encode(updateNquadsStr).length);
+
+    if (!options.precomputedUpdateAttestation) {
+      throw new Error(
+        'Update rejected: on-chain update requires precomputedUpdateAttestation. ' +
+        'Sign UpdateAuthorAttestation(kaId, newMerkleRoot, authorAddress) off-band and pass the seal in this call.',
+      );
+    }
+    const updateSeal = options.precomputedUpdateAttestation;
+    const effectiveAuthorAddress = updateSeal.authorAddress;
+    const effectiveSchemeVersion = updateSeal.schemeVersion;
+    {
+      const expected = updateSeal.expectedNewMerkleRoot;
+      if (expected.length !== kcMerkleRoot.length || !expected.every((b, i) => b === kcMerkleRoot[i])) {
+        throw new Error(
+          `precomputedUpdateAttestation.expectedNewMerkleRoot mismatch: seal expects ${ethers.hexlify(expected)} ` +
+          `but update-time recompute yielded ${ethers.hexlify(kcMerkleRoot)}.`,
+        );
+      }
+    }
+    const v10ChainId = await this.chain.getEvmChainId?.();
+    const v10KavAddress = await this.chain.getKnowledgeAssetsLifecycleAddress?.();
+    if (v10ChainId === undefined || !v10KavAddress) {
+      throw new Error(
+        'V10 update requires getEvmChainId() and getKnowledgeAssetsLifecycleAddress() on the chain adapter.',
+      );
+    }
+    const updateAuthorTyped = buildUpdateAuthorAttestationTypedData({
+      chainId: v10ChainId,
+      kav10Address: v10KavAddress,
+      kaId: kaId,
+      newMerkleRoot: kcMerkleRoot,
+      authorAddress: effectiveAuthorAddress,
+      schemeVersion: effectiveSchemeVersion,
+    });
+    {
+      const sig = ethers.Signature.from({
+        r: ethers.hexlify(updateSeal.signature.r),
+        yParityAndS: ethers.hexlify(updateSeal.signature.vs),
+      });
+      const digest = ethers.TypedDataEncoder.hash(
+        updateAuthorTyped.domain,
+        updateAuthorTyped.types,
+        updateAuthorTyped.message,
+      );
+      const isContractAuthor =
+        typeof this.chain.hasContractCode === 'function'
+          ? await this.chain.hasContractCode(effectiveAuthorAddress)
+          : false;
+      if (!isContractAuthor) {
+        const recovered = ethers.recoverAddress(digest, sig);
+        if (recovered.toLowerCase() !== effectiveAuthorAddress.toLowerCase()) {
+          throw new Error(
+            `precomputedUpdateAttestation signer mismatch: recovers ${recovered} but claims ${effectiveAuthorAddress}.`,
+          );
+        }
+      }
+    }
 
     // P-1 review (iter-2): `chain:writeahead:start` fires from inside
     // the V10 adapter via `onBroadcast` — i.e. AFTER allowance +
@@ -2880,32 +2951,65 @@ export class DKGPublisher implements Publisher {
       }
       onPhase?.('chain:writeahead', 'start');
     };
+    let v10UpdateACKs: V10CoreNodeACK[] | undefined;
+    const v10UpdateACKProvider = options.v10UpdateACKProvider;
+    if (v10UpdateACKProvider) {
+      onPhase?.('collect_v10_update_acks', 'start');
+      try {
+        v10UpdateACKs = await v10UpdateACKProvider(
+          kaId,
+          kcMerkleRoot,
+          contextGraphId,
+          updateByteSize,
+          kcMerkleLeafCount,
+        );
+        this.log.info(
+          ctx,
+          `V10: Collected ${v10UpdateACKs.length} core node update ACKs`,
+        );
+      } finally {
+        onPhase?.('collect_v10_update_acks', 'end');
+      }
+    }
+
     try {
       if (typeof this.chain.updateKnowledgeCollectionV10 === 'function') {
         try {
           txResult = await this.chain.updateKnowledgeCollectionV10({
-            kcId,
+            kaId,
             newMerkleRoot: kcMerkleRoot,
             newByteSize: updateByteSize,
             newMerkleLeafCount: kcMerkleLeafCount,
             mintAmount: 0,
             publisherAddress,
             v10Origin: true,
+            authorAddress: effectiveAuthorAddress,
+            authorR: updateSeal.signature.r,
+            authorVS: updateSeal.signature.vs,
+            authorSchemeVersion: effectiveSchemeVersion,
+            ackSignatures: v10UpdateACKs?.map((ack) => ({
+              identityId: ack.nodeIdentityId,
+              r: ack.signatureR,
+              vs: ack.signatureVS,
+            })),
             onBroadcast: emitWriteAheadStart,
           });
         } catch (v10Err) {
           const errorName = enrichEvmError(v10Err);
           const V10_DEFINITIVE_ERRORS = [
-            'NotBatchPublisher', 'KnowledgeCollectionExpired',
-            'CannotUpdateImmutableKnowledgeCollection', 'ExceededKnowledgeCollectionMaxSize',
+            'NotKnowledgeAssetOwner',
+            'InvalidAuthorSignature',
+            'InvalidAuthorSignature1271',
+            'AuthorRequired',
+            'KnowledgeAssetExpired',
+            'CannotUpdateImmutableKnowledgeAsset',
+            'ExceededKnowledgeAssetBatchSize',
           ];
           if (errorName && V10_DEFINITIVE_ERRORS.includes(errorName)) {
             this.log.warn(ctx, `V10 update rejected (${errorName}): ${v10Err instanceof Error ? v10Err.message : String(v10Err)}`);
-            const rejectedPublisherAddress = publisherAddress ?? this.publisherAddress;
-            if (!rejectedPublisherAddress) throw v10Err;
             earlyReturn = {
-              kcId,
-              ual: `did:dkg:${this.chain.chainId}/${rejectedPublisherAddress}/${kcId}`,
+              kaId,
+              ual: await this.resolveKaUal(kaId),
               merkleRoot: kcMerkleRoot,
               kaManifest: manifestEntries,
               status: 'failed',
@@ -2931,36 +3035,11 @@ export class DKGPublisher implements Publisher {
     }
 
     if (!txResult.success) {
-      let failedPublisherAddress = coercePublisherAddress(txResult.publisherAddress) ??
-        publisherAddress;
-      if (!failedPublisherAddress && typeof this.chain.getLatestMerkleRootPublisher === 'function') {
-        try {
-          failedPublisherAddress = coercePublisherAddress(
-            await this.chain.getLatestMerkleRootPublisher(kcId),
-          );
-        } catch {
-          // Fall through to the clear fail-loud path below.
-        }
-      }
-      failedPublisherAddress ??= await this.resolveKnownBatchPublisherAddress(
-        contextGraphId,
-        kcId,
-        options.targetMetaGraphUri,
-      );
-      if (!failedPublisherAddress) {
-        failedPublisherAddress = this.localTentativePublisherAddress();
-        this.log.warn(
-          ctx,
-          'Chain adapter returned a failed update without publisherAddress, and neither ' +
-          'chain state nor local metadata resolved the publisher. Returning the failed ' +
-          'update status with a local tentative UAL placeholder.',
-        );
-      }
       onPhase?.('chain:submit', 'end');
       onPhase?.('chain', 'end');
       return {
-        kcId,
-        ual: `did:dkg:${this.chain.chainId}/${failedPublisherAddress}/${kcId}`,
+        kaId,
+        ual: await this.resolveKaUal(kaId),
         merkleRoot: kcMerkleRoot,
         kaManifest: manifestEntries,
         status: 'failed',
@@ -2971,7 +3050,7 @@ export class DKGPublisher implements Publisher {
     if (!effectivePublisherAddress && typeof this.chain.getLatestMerkleRootPublisher === 'function') {
       try {
         effectivePublisherAddress = coercePublisherAddress(
-          await this.chain.getLatestMerkleRootPublisher(kcId),
+          await this.chain.getLatestMerkleRootPublisher(kaId),
         );
       } catch {
         // Some legacy adapters can submit updates but cannot report the
@@ -2982,17 +3061,15 @@ export class DKGPublisher implements Publisher {
     onPhase?.('chain:submit', 'end');
     onPhase?.('chain', 'end');
     if (!effectivePublisherAddress) {
-      const tentativePublisherAddress = publisherAddress ?? this.localTentativePublisherAddress();
       this.log.warn(
         ctx,
-        'Chain adapter returned a successful update without publisherAddress, and neither ' +
-        'getLatestMerkleRootPublisher() nor the tx result resolved a chain publisher. ' +
+        'Chain adapter returned a successful update without publisherAddress. ' +
         'Applying local data update as tentative instead of confirming unproven attribution.',
       );
       await storeUpdatedQuads();
       const result: PublishResult = {
-        kcId,
-        ual: `did:dkg:${this.chain.chainId}/${tentativePublisherAddress}/${kcId}`,
+        kaId,
+        ual: await this.resolveKaUal(kaId),
         merkleRoot: kcMerkleRoot,
         kaManifest: manifestEntries,
         status: 'tentative',
@@ -3005,14 +3082,14 @@ export class DKGPublisher implements Publisher {
     await storeUpdatedQuads();
 
     const result: PublishResult = {
-      kcId,
-      ual: `did:dkg:${this.chain.chainId}/${effectivePublisherAddress}/${kcId}`,
+      kaId,
+      ual: await this.resolveKaUal(kaId),
       merkleRoot: kcMerkleRoot,
       kaManifest: manifestEntries,
       status: 'confirmed',
       publicQuads: allSkolemizedQuads,
       onChainResult: {
-        batchId: kcId,
+        batchId: kaId,
         txHash: txResult.hash,
         blockNumber: txResult.blockNumber ?? 0,
         blockTimestamp: Math.floor(Date.now() / 1000),
@@ -4047,6 +4124,16 @@ export class DKGPublisher implements Publisher {
     const metaGraph = contextGraphMetaUri(contextGraphId);
     await this.store.deleteByPattern({ subject: graphUri, graph: metaGraph });
     await this.store.dropGraph(graphUri);
+  }
+
+  private async resolveKaUal(kaId: bigint): Promise<string> {
+    const storageAddr = this.chain.getDKGKnowledgeAssetsAddress
+      ? await this.chain.getDKGKnowledgeAssetsAddress()
+      : undefined;
+    if (!storageAddr) {
+      throw new Error('Cannot resolve KA UAL: DKGKnowledgeAssets address unavailable');
+    }
+    return `did:dkg:${this.chain.chainId}/${storageAddr.toLowerCase()}/${kaId.toString()}`;
   }
 
 }

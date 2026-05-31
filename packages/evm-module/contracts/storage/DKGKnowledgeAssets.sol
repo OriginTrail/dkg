@@ -1,0 +1,674 @@
+// SPDX-License-Identifier: Apache-2.0
+
+pragma solidity ^0.8.20;
+
+import {Guardian} from "../Guardian.sol";
+import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
+import {KnowledgeAssetLib} from "../libraries/KnowledgeAssetLib.sol";
+import {INamed} from "../interfaces/INamed.sol";
+import {IVersioned} from "../interfaces/IVersioned.sol";
+import {HubDependent} from "../abstract/HubDependent.sol";
+
+/**
+ * @title DKGKnowledgeAssets
+ * @notice Greenfield KA storage: one ERC-721 per Knowledge Asset (`tokenId == kaId`),
+ *         merkle-root history, economics, and ciphertext commitments. No ERC-1155.
+ */
+contract DKGKnowledgeAssets is INamed, IVersioned, HubDependent, ERC721, Guardian {
+
+    /// @dev `author` is the verified agent identity from the V10.1+
+    ///      author-attestation EIP-712 envelope, or `address(0)` for legacy
+    ///      callers (`KnowledgeAsset (V10.1 active path)`) that do not perform author
+    ///      attestation. Indexers SHOULD prefer this `indexed` field over
+    ///      walking storage when filtering KCs by author.
+    event KnowledgeAssetCreated(
+        uint256 indexed id,
+        address indexed author,
+        string publishOperationId,
+        bytes32 merkleRoot,
+        uint88 byteSize,
+        uint40 startEpoch,
+        uint40 endEpoch,
+        uint96 tokenAmount,
+        bool isImmutable
+    );
+    event KnowledgeAssetUpdated(
+        uint256 indexed id,
+        address indexed author,
+        string updateOperationId,
+        bytes32 merkleRoot,
+        uint256 byteSize,
+        uint96 tokenAmount
+    );
+    event KnowledgeAssetsMinted(uint256 indexed id, address indexed to, uint256 startId, uint256 endId);
+    event KnowledgeAssetsBurned(uint256 indexed id, address indexed from, uint256[] tokenIds);
+    event KnowledgeAssetPublisherUpdated(uint256 indexed id, address publisher);
+    event KnowledgeAssetMerkleRootsUpdated(uint256 indexed id, KnowledgeAssetLib.MerkleRoot[] merkleRoots);
+    event KnowledgeAssetMerkleRootAdded(uint256 indexed id, bytes32 merkleRoot);
+    event KnowledgeAssetMerkleRootRemoved(uint256 indexed id, bytes32 merkleRoot);
+    event KnowledgeAssetMintedUpdated(uint256 indexed id, uint256 minted);
+    event KnowledgeAssetBurnedUpdated(uint256 indexed id, uint256[] burned);
+    event KnowledgeAssetByteSizeUpdated(uint256 indexed id, uint256 byteSize);
+    event KnowledgeAssetChunksAmountUpdated(uint256 indexed id, uint256 chunksAmount);
+    event KnowledgeAssetTokenAmountUpdated(uint256 indexed id, uint256 tokenAmount);
+    event KnowledgeAssetStartEpochUpdated(uint256 indexed id, uint256 startEpoch);
+    event KnowledgeAssetEndEpochUpdated(uint256 indexed id, uint256 endEpoch);
+    event URIUpdate(string newURI);
+
+    /// @notice RFC-39 Phase A.5: a per-KC ciphertext commitment was set for
+    ///         curated random sampling. Emitted by
+    ///         `setCiphertextChunksCommitment`, called by `KnowledgeAssetsV10`
+    ///         immediately after `createKnowledgeAsset` when the publish
+    ///         input carries a non-zero `(ciphertextChunksRoot,
+    ///         ciphertextChunkCount)` pair AND the owning CG is curated.
+    ///         Off-chain indexers consume this to know which KCs participate
+    ///         in the curated-CG sampling lottery (the picker treats
+    ///         missing commitments as "skip this KC").
+    event KnowledgeAssetCiphertextCommitmentSet(
+        uint256 indexed id,
+        bytes32 ciphertextChunksRoot,
+        uint32 ciphertextChunkCount
+    );
+
+    string private constant _NAME = "DKGKnowledgeAssets";
+    string private constant _VERSION = "2.0.0";
+
+    string private _tokenURI;
+
+    uint256 public immutable KNOWLEDGE_ASSET_BATCH_MAX_SIZE;
+
+    uint256 private _knowledgeAssetsCounter;
+    uint256 private _totalMintedKnowledgeAssetsCounter;
+    uint256 private _totalBurnedKnowledgeAssetsCounter;
+
+    uint96 private _totalTokenAmount;
+
+    mapping(uint256 => KnowledgeAssetLib.KnowledgeAsset) public knowledgeAssets;
+    mapping(uint256 => bool) public isKnowledgeAssetBurned;
+
+    /// @dev Parallel mapping for V10.1+ author attestation.
+    ///
+    /// Why a parallel map and not a struct field on `MerkleRoot`:
+    /// `KnowledgeAsset.merkleRoots` is a dynamic array, so
+    /// extending its element struct from 3 to 4 storage slots would
+    /// shift the slot stride of every prior root entry — already-
+    /// deployed KCs would decode their historical
+    /// `publisher`/`merkleRoot`/`timestamp` from the wrong offsets.
+    /// Layout-preserving fix: keep `MerkleRoot` at 3 slots and store
+    /// the EIP-712-recovered author identity at
+    /// `merkleRootAuthors[kaId][rootIndex]`. `address(0)` means the
+    /// state change at `rootIndex` did not carry an attestation
+    /// (legacy V8/V9 mutations, V10.1 update path until vNext, etc).
+    /// Indexers SHOULD prefer the indexed `author` topic on
+    /// `KnowledgeAssetCreated` / `KnowledgeAssetUpdated`
+    /// events; this on-chain mapping is the canonical lookup for
+    /// `/api/kc/:id/author` and SPARQL author-filter queries.
+    mapping(uint256 => mapping(uint256 => address)) public merkleRootAuthors;
+
+    /// @notice RFC-39 Phase A.5: per-KC ciphertext-chunks Merkle root.
+    ///
+    /// Used by `RandomSampling._pickWeightedChallenge` and
+    /// `RandomSampling.submitProof` for curated CGs in place of the
+    /// `merkleRoots[].merkleRoot` chain (which commits to plaintext leaves
+    /// the cores cannot see). The root commits to the leaf sequence
+    /// `[keccak256(ct_i)]` in `swmMessageIndex` order for the latest publish
+    /// batch — exactly the ciphertext chunks the curated CG's hosting
+    /// cores persist via the LU-11 ACK envelope.
+    ///
+    /// Parallel-mapping (not a struct field on `KnowledgeAsset`) for
+    /// two reasons: (1) avoids slot-stride drift in the existing dynamic
+    /// `merkleRoots[]` array, identical reasoning to the
+    /// `merkleRootAuthors` design above; (2) decouples RFC-39 evolution
+    /// from `KnowledgeAssetLib.KnowledgeAsset`, which is
+    /// concurrently being extended on other branches — keeping ciphertext
+    /// commitment in its own slot space avoids merge friction.
+    ///
+    /// Population is conditional, set by
+    /// `KnowledgeAssetsV10._executePublishCore`: populated for curated
+    /// CGs when the publish input carries a non-zero pair, NOT populated
+    /// for public CGs or for legacy/transitional curated publishes that
+    /// pre-date the LU-11 chunked-AEAD substrate. The default `bytes32(0)`
+    /// is the explicit "no curated commitment" sentinel that
+    /// `RandomSampling` uses to skip this KC in the curated draw — see
+    /// RFC-39 §3.4.1 for the feature-flag rationale.
+    mapping(uint256 => bytes32) public ciphertextChunksRoots;
+
+    /// @notice RFC-39 Phase A.5: per-KC count of ciphertext chunks.
+    ///
+    /// Equals the SWM message count of the publish batch and is the
+    /// leaf-count input for the `chunkId = uint256(seed) % count` draw
+    /// in `RandomSampling._pickWeightedChallenge` step 3 for curated
+    /// CGs. Stored separately from `merkleLeafCount` because the curated
+    /// commitment counts ciphertext chunks (LU-11 envelopes), not V10
+    /// flat-KC plaintext leaves — the two leaf-spaces are deliberately
+    /// distinct and a curated KC must not collide its random-sampling
+    /// granularity with its public-projection leaf count.
+    mapping(uint256 => uint32) public ciphertextChunkCounts;
+
+    constructor(
+        address hubAddress,
+        uint256 _knowledgeAssetBatchMaxSize,
+        string memory uri
+    ) ERC721("DKG Knowledge Asset", "DKA") Guardian(hubAddress) {
+        KNOWLEDGE_ASSET_BATCH_MAX_SIZE = _knowledgeAssetBatchMaxSize;
+        _tokenURI = uri;
+    }
+
+    function name() public pure virtual override(INamed, ERC721) returns (string memory) {
+        return _NAME;
+    }
+
+    function version() external pure virtual returns (string memory) {
+        return _VERSION;
+    }
+
+    function knowledgeAssetBatchMaxSize() external view returns (uint256) {
+        return KNOWLEDGE_ASSET_BATCH_MAX_SIZE;
+    }
+
+    function createKnowledgeAsset(
+        address publisher,
+        address author,
+        string calldata publishOperationId,
+        bytes32 merkleRoot,
+        uint256 knowledgeAssetsAmount,
+        uint88 byteSize,
+        uint40 startEpoch,
+        uint40 endEpoch,
+        uint96 tokenAmount,
+        bool isImmutable,
+        uint32 merkleLeafCount
+    ) external onlyContracts returns (uint256) {
+        if (knowledgeAssetsAmount != 1) {
+            revert KnowledgeAssetLib.ExceededKnowledgeAssetBatchSize(0, 0, knowledgeAssetsAmount, 1);
+        }
+
+        uint256 knowledgeAssetId = ++_knowledgeAssetsCounter;
+
+        KnowledgeAssetLib.KnowledgeAsset storage kc = knowledgeAssets[knowledgeAssetId];
+
+        kc.merkleRoots.push(
+            KnowledgeAssetLib.MerkleRoot(publisher, merkleRoot, block.timestamp)
+        );
+        // Unconditional write to overwrite any value at this slot.
+        // For `createKnowledgeAsset` the kaId is freshly minted so
+        // the slot is guaranteed empty; the unconditional shape is kept
+        // for parity with `updateKnowledgeAsset` below, where the
+        // index can have been previously used (post-pop).
+        merkleRootAuthors[knowledgeAssetId][kc.merkleRoots.length - 1] = author;
+        kc.byteSize = byteSize;
+        kc.startEpoch = startEpoch;
+        kc.endEpoch = endEpoch;
+        kc.tokenAmount = tokenAmount;
+        kc.isImmutable = isImmutable;
+        kc.merkleLeafCount = merkleLeafCount;
+
+        unchecked {
+            _totalTokenAmount += tokenAmount;
+        }
+
+        kc.minted = 1;
+        _totalMintedKnowledgeAssetsCounter += 1;
+        _safeMint(author, knowledgeAssetId);
+
+        emit KnowledgeAssetCreated(
+            knowledgeAssetId,
+            author,
+            publishOperationId,
+            merkleRoot,
+            byteSize,
+            startEpoch,
+            endEpoch,
+            tokenAmount,
+            isImmutable
+        );
+
+        return knowledgeAssetId;
+    }
+
+    function getKnowledgeAsset(
+        uint256 id
+    ) external view returns (KnowledgeAssetLib.KnowledgeAsset memory) {
+        return knowledgeAssets[id];
+    }
+
+    /// @dev `author` is the verified author identity for this update or
+    ///      `address(0)` when the update path doesn't carry an attestation
+    ///      (current V10.1 update path emits zero; vNext will sign updates
+    ///      against the same EIP-712 envelope as publish).
+    function updateKnowledgeAsset(
+        address publisher,
+        address author,
+        uint256 id,
+        string calldata updateOperationId,
+        bytes32 merkleRoot,
+        uint256 mintKnowledgeAssetsAmount,
+        uint256[] calldata knowledgeAssetsToBurn,
+        uint88 byteSize,
+        uint96 tokenAmount,
+        uint32 merkleLeafCount
+    ) external onlyContracts {
+        KnowledgeAssetLib.KnowledgeAsset storage kc = knowledgeAssets[id];
+
+        unchecked {
+            _totalTokenAmount = _totalTokenAmount - kc.tokenAmount + tokenAmount;
+        }
+
+        kc.merkleRoots.push(
+            KnowledgeAssetLib.MerkleRoot(publisher, merkleRoot, block.timestamp)
+        );
+        // Unconditional overwrite — this index may have been written by
+        // a previous create/update and then popped via `popMerkleRoot`,
+        // leaving the stale author in the parallel slot. Always write
+        // the current `author` (which is `address(0)` for the V10.1
+        // update path that doesn't yet sign updates) to make the
+        // canonical mapping monotonic with the merkleRoots array.
+        merkleRootAuthors[id][kc.merkleRoots.length - 1] = author;
+        kc.byteSize = byteSize;
+        kc.tokenAmount = tokenAmount;
+        kc.merkleLeafCount = merkleLeafCount;
+
+        // Burn with an empty list is a no-op (the inner for-loop over
+        // tokenIds skips when length == 0). Mint with amount == 0 was
+        // previously unconditionally dispatched to `_mintWithoutCheck`,
+        // which reverts `MintZeroQuantity` on zero — blocking true
+        // metadata-only updates (delta == 0, no mint, no burn) that the
+        // KnowledgeAssetsV10 update flow explicitly documents as
+        // supported. Guard the mint call so metadata-only rotations work
+        // end-to-end. See Codex review round 2, finding 6.
+        if (mintKnowledgeAssetsAmount != 0 || knowledgeAssetsToBurn.length != 0) {
+            revert KnowledgeAssetLib.ExceededKnowledgeAssetBatchSize(
+                id,
+                kc.minted,
+                mintKnowledgeAssetsAmount,
+                0
+            );
+        }
+
+        emit KnowledgeAssetUpdated(id, author, updateOperationId, merkleRoot, byteSize, tokenAmount);
+    }
+
+    /// @notice Lightweight update-path metadata — scalar fields only + the
+    /// pre-update merkle-root count. Intended for callers (e.g.
+    /// `KnowledgeAssetsV10._executeUpdateCore`) that need the state
+    /// summary but NOT the full history arrays.
+    ///
+    /// Problem: `getKnowledgeAssetMetadata` performs a full
+    /// storage → memory struct copy, which walks every entry of
+    /// `merkleRoots[]` and `burned[]`. Because both arrays grow
+    /// monotonically on every update, the memory cost (and thus gas
+    /// cost) of calling that getter from the update path itself scales
+    /// linearly — actually super-linearly due to EVM memory-expansion
+    /// quadratic term — with the number of prior updates. A KC with
+    /// thousands of historical entries eventually becomes un-updatable.
+    ///
+    /// This getter returns only the scalar slots and the merkle-root
+    /// chain length (as a plain `uint256`), so the update path's gas
+    /// cost is constant regardless of history.
+    ///
+    /// Codex review round 3 finding 1.
+    function getKnowledgeAssetUpdateContext(
+        uint256 id
+    )
+        external
+        view
+        returns (
+            uint256 merkleRootsCount,
+            uint256 minted,
+            uint88 byteSize,
+            uint40 endEpoch,
+            uint96 tokenAmount,
+            bool isImmutable,
+            uint32 merkleLeafCount
+        )
+    {
+        KnowledgeAssetLib.KnowledgeAsset storage kc = knowledgeAssets[id];
+        return (
+            kc.merkleRoots.length,
+            kc.minted,
+            kc.byteSize,
+            kc.endEpoch,
+            kc.tokenAmount,
+            kc.isImmutable,
+            kc.merkleLeafCount
+        );
+    }
+
+    /// @notice Leaf count for the V10 flat-KC Merkle tree at latest root
+    ///         (see `merkleLeafCount` on `KnowledgeAsset`).
+    function getMerkleLeafCount(uint256 id) external view returns (uint32) {
+        return knowledgeAssets[id].merkleLeafCount;
+    }
+
+    /// @notice RFC-39 Phase A.5: write the curated ciphertext commitment for
+    ///         a freshly-created KC. Caller must enforce the curated-CG
+    ///         gate — KCS does not look at `ContextGraphStorage` to keep the
+    ///         storage layer policy-free. The commitment is treated as
+    ///         immutable for v1 (no update path) per RFC-39 §3.4.1.
+    ///
+    ///         Both fields must be non-zero — partial commitments (a non-zero
+    ///         root with zero count, or vice versa) are forbidden because they
+    ///         would silently de-rail the picker (zero count → divide-by-zero
+    ///         in the chunk-index draw, zero root → proof verification against
+    ///         an empty tree). KAV10 normalises "no commitment" to a literal
+    ///         no-call (no event emitted, both slots stay at default zero).
+    function setCiphertextChunksCommitment(
+        uint256 id,
+        bytes32 ciphertextChunksRoot,
+        uint32 ciphertextChunkCount
+    ) external onlyContracts {
+        require(
+            ciphertextChunksRoot != bytes32(0) && ciphertextChunkCount > 0,
+            "Invalid ciphertext commitment"
+        );
+        ciphertextChunksRoots[id] = ciphertextChunksRoot;
+        ciphertextChunkCounts[id] = ciphertextChunkCount;
+
+        emit KnowledgeAssetCiphertextCommitmentSet(id, ciphertextChunksRoot, ciphertextChunkCount);
+    }
+
+    /// @notice RFC-39 Phase A.5: latest ciphertext-chunks Merkle root for a
+    ///         curated KC, or `bytes32(0)` if no commitment was ever set
+    ///         (public KC, or legacy/transitional curated KC that pre-dates
+    ///         the LU-11 chunked-AEAD substrate). `RandomSampling` treats
+    ///         the zero sentinel as "skip this KC in the curated draw".
+    function getLatestCiphertextChunksRoot(uint256 id) external view returns (bytes32) {
+        return ciphertextChunksRoots[id];
+    }
+
+    /// @notice RFC-39 Phase A.5: number of ciphertext chunks for a curated
+    ///         KC, or `0` if no commitment was ever set. Used as the
+    ///         leaf-count input for the curated picker's `chunkId = seed %
+    ///         count` draw and as the bounds check in `submitProof`.
+    function getCiphertextChunkCount(uint256 id) external view returns (uint32) {
+        return ciphertextChunkCounts[id];
+    }
+
+    function getKnowledgeAssetMetadata(
+        uint256 id
+    )
+        external
+        view
+        returns (
+            KnowledgeAssetLib.MerkleRoot[] memory,
+            uint256[] memory,
+            uint256,
+            uint88,
+            uint40,
+            uint40,
+            uint96,
+            bool
+        )
+    {
+        KnowledgeAssetLib.KnowledgeAsset memory kc = knowledgeAssets[id];
+
+        return (
+            kc.merkleRoots,
+            kc.burned,
+            kc.minted,
+            kc.byteSize,
+            kc.startEpoch,
+            kc.endEpoch,
+            kc.tokenAmount,
+            kc.isImmutable
+        );
+    }
+
+    /// @dev Greenfield: batch mint/burn removed. Updates rotate merkle state only.
+    function mintKnowledgeAssetsTokens(uint256, address, uint256) public pure {
+        revert KnowledgeAssetLib.ExceededKnowledgeAssetBatchSize(0, 0, 1, 0);
+    }
+
+    function burnKnowledgeAssetsTokens(uint256, address, uint256[] calldata) public pure {
+        revert KnowledgeAssetLib.ExceededKnowledgeAssetBatchSize(0, 0, 1, 0);
+    }
+
+    function getMerkleRoots(uint256 id) external view returns (KnowledgeAssetLib.MerkleRoot[] memory) {
+        return knowledgeAssets[id].merkleRoots;
+    }
+
+    function setMerkleRoots(
+        uint256 id,
+        KnowledgeAssetLib.MerkleRoot[] memory _merkleRoots
+    ) external onlyContracts {
+        // Wholesale replacement — clear the parallel author mapping for
+        // the union of old and new index ranges so stale authors from
+        // either side cannot leak through. The MerkleRoot struct itself
+        // carries no author field (parallel-mapping design), so callers
+        // of this admin path cannot supply authors here; effective
+        // post-condition is "all entries unauthenticated until a
+        // subsequent create/update writes them". Loop bounded by the
+        // larger of the two lengths.
+        uint256 oldLen = knowledgeAssets[id].merkleRoots.length;
+        uint256 newLen = _merkleRoots.length;
+        uint256 maxLen = oldLen > newLen ? oldLen : newLen;
+        for (uint256 i = 0; i < maxLen; i++) {
+            delete merkleRootAuthors[id][i];
+        }
+        knowledgeAssets[id].merkleRoots = _merkleRoots;
+
+        emit KnowledgeAssetMerkleRootsUpdated(id, _merkleRoots);
+    }
+
+    function getMerkleRootObjectByIndex(
+        uint256 id,
+        uint256 index
+    ) external view returns (KnowledgeAssetLib.MerkleRoot memory) {
+        return knowledgeAssets[id].merkleRoots[index];
+    }
+
+    function getMerkleRootByIndex(uint256 id, uint256 index) external view returns (bytes32) {
+        return knowledgeAssets[id].merkleRoots[index].merkleRoot;
+    }
+
+    function getMerkleRootPublisherByIndex(uint256 id, uint256 index) external view returns (address) {
+        return knowledgeAssets[id].merkleRoots[index].publisher;
+    }
+
+    function getMerkleRootTimestampByIndex(uint256 id, uint256 index) external view returns (uint256) {
+        return knowledgeAssets[id].merkleRoots[index].timestamp;
+    }
+
+    function getLatestMerkleRootObject(uint256 id) external view returns (KnowledgeAssetLib.MerkleRoot memory) {
+        return _safeGetLatestMerkleRootObject(id);
+    }
+
+    function getLatestMerkleRoot(uint256 id) external view returns (bytes32) {
+        return _safeGetLatestMerkleRootObject(id).merkleRoot;
+    }
+
+    function getLatestMerkleRootPublisher(uint256 id) external view returns (address) {
+        return _safeGetLatestMerkleRootObject(id).publisher;
+    }
+
+    function getLatestMerkleRootTimestamp(uint256 id) external view returns (uint256) {
+        return _safeGetLatestMerkleRootObject(id).timestamp;
+    }
+
+    function getMerkleRootAuthorByIndex(uint256 id, uint256 index) external view returns (address) {
+        // Bounds-check via the canonical merkleRoots array so out-of-range
+        // queries revert the same way as the other index-based getters,
+        // rather than silently returning address(0) from the parallel
+        // mapping (which has no concept of "valid index").
+        require(index < knowledgeAssets[id].merkleRoots.length, "Index out of bounds");
+        return merkleRootAuthors[id][index];
+    }
+
+    /// @notice Verified author identity for the latest merkle-root entry
+    /// of `id`. Returns `address(0)` if the latest state change did not
+    /// carry an author attestation (legacy publish path or a pre-vNext
+    /// update). Used by `/api/get` and other off-chain readers as the
+    /// canonical "who authored this KC" lookup — chain wins over any
+    /// off-chain `dkg:authoredBy` triple.
+    function getLatestMerkleRootAuthor(uint256 id) external view returns (address) {
+        uint256 len = knowledgeAssets[id].merkleRoots.length;
+        if (len == 0) return address(0);
+        return merkleRootAuthors[id][len - 1];
+    }
+
+    function pushMerkleRoot(address publisher, uint256 id, bytes32 merkleRoot) external onlyContracts {
+        knowledgeAssets[id].merkleRoots.push(
+            KnowledgeAssetLib.MerkleRoot(publisher, merkleRoot, block.timestamp)
+        );
+        // Defensive clear: this index may have been used by a previously
+        // popped author entry (`merkleRoots.length` cycles via push/pop).
+        // Without the explicit `delete`, an unauthenticated push after a
+        // pop would inherit the popped entry's author and `getLatestMerkleRootAuthor`
+        // would lie. Legacy `pushMerkleRoot` carries no author by design —
+        // always zero the parallel slot.
+        delete merkleRootAuthors[id][knowledgeAssets[id].merkleRoots.length - 1];
+
+        emit KnowledgeAssetMerkleRootAdded(id, merkleRoot);
+    }
+
+    function popMerkleRoot(uint256 id) external onlyContracts {
+        uint256 oldLen = knowledgeAssets[id].merkleRoots.length;
+        bytes32 latestMerkleRoot = _safeGetLatestMerkleRootObject(id).merkleRoot;
+        knowledgeAssets[id].merkleRoots.pop();
+        // Clear the parallel author slot for the popped index. Without
+        // this, the slot survives and a later push at the same index can
+        // resurrect a stale author. `oldLen > 0` guards the empty-array
+        // case (pop on empty would have reverted on the line above; the
+        // `_safeGetLatestMerkleRootObject` returns a zero-tuple but the
+        // pop itself reverts on length 0 — kept defensive).
+        if (oldLen > 0) {
+            delete merkleRootAuthors[id][oldLen - 1];
+        }
+
+        emit KnowledgeAssetMerkleRootRemoved(id, latestMerkleRoot);
+    }
+
+    function getMinted(uint256 id) external view returns (uint256) {
+        return knowledgeAssets[id].minted;
+    }
+
+    function setMinted(uint256 id, uint256 _minted) external onlyContracts {
+        knowledgeAssets[id].minted = _minted;
+
+        emit KnowledgeAssetMintedUpdated(id, _minted);
+    }
+
+    function getBurned(uint256 id) external view returns (uint256[] memory) {
+        return knowledgeAssets[id].burned;
+    }
+
+    function getBurnedAmount(uint256 id) external view returns (uint256) {
+        return knowledgeAssets[id].burned.length;
+    }
+
+    function setBurned(uint256 id, uint256[] calldata _burned) external onlyContracts {
+        knowledgeAssets[id].burned = _burned;
+
+        emit KnowledgeAssetBurnedUpdated(id, _burned);
+    }
+
+    function getByteSize(uint256 id) external view returns (uint88) {
+        return knowledgeAssets[id].byteSize;
+    }
+
+    function setByteSize(uint256 id, uint88 _byteSize) external onlyContracts {
+        knowledgeAssets[id].byteSize = _byteSize;
+
+        emit KnowledgeAssetByteSizeUpdated(id, _byteSize);
+    }
+
+    function getTokenAmount(uint256 id) external view returns (uint96) {
+        return knowledgeAssets[id].tokenAmount;
+    }
+
+    function setTokenAmount(uint256 id, uint96 _tokenAmount) external onlyContracts {
+        _totalTokenAmount = _totalTokenAmount - knowledgeAssets[id].tokenAmount + _tokenAmount;
+        knowledgeAssets[id].tokenAmount = _tokenAmount;
+
+        emit KnowledgeAssetTokenAmountUpdated(id, _tokenAmount);
+    }
+
+    function getStartEpoch(uint256 id) external view returns (uint40) {
+        return knowledgeAssets[id].startEpoch;
+    }
+
+    function setStartEpoch(uint256 id, uint40 _startEpoch) external onlyContracts {
+        knowledgeAssets[id].startEpoch = _startEpoch;
+
+        emit KnowledgeAssetStartEpochUpdated(id, _startEpoch);
+    }
+
+    function getEndEpoch(uint256 id) external view returns (uint40) {
+        return knowledgeAssets[id].endEpoch;
+    }
+
+    function setEndEpoch(uint256 id, uint40 _endEpoch) external onlyContracts {
+        knowledgeAssets[id].endEpoch = _endEpoch;
+
+        emit KnowledgeAssetEndEpochUpdated(id, _endEpoch);
+    }
+
+    function getLatestKnowledgeAssetId() external view returns (uint256) {
+        return _knowledgeAssetsCounter;
+    }
+
+    function currentTotalSupply() external view returns (uint256) {
+        return _totalMintedKnowledgeAssetsCounter - _totalBurnedKnowledgeAssetsCounter;
+    }
+
+    function totalMinted() external view returns (uint256) {
+        return _totalMintedKnowledgeAssetsCounter;
+    }
+
+    function totalBurned() external view returns (uint256) {
+        return _totalBurnedKnowledgeAssetsCounter;
+    }
+
+    function getTotalTokenAmount() external view returns (uint96) {
+        return _totalTokenAmount;
+    }
+
+    function isPartOfKnowledgeAsset(uint256 id, uint256 tokenId) external view returns (bool) {
+        return id == tokenId && _ownerOf(tokenId) != address(0);
+    }
+
+    function getKnowledgeAssetId(uint256 tokenId) external view returns (uint256) {
+        if (_ownerOf(tokenId) == address(0)) {
+            return 0;
+        }
+        return tokenId;
+    }
+
+    function getKnowledgeAssetsRange(uint256 id) external view returns (uint256, uint256, uint256[] memory) {
+        KnowledgeAssetLib.KnowledgeAsset memory kc = knowledgeAssets[id];
+        if (kc.minted == 0) {
+            return (0, 0, kc.burned);
+        }
+        return (id, id, kc.burned);
+    }
+
+    function getKnowledgeAssetsAmount(uint256 id) external view returns (uint256) {
+        KnowledgeAssetLib.KnowledgeAsset memory kc = knowledgeAssets[id];
+        return kc.minted - kc.burned.length;
+    }
+
+    function isKnowledgeAssetOwner(address owner, uint256 id) external view returns (bool) {
+        return ownerOf(id) == owner;
+    }
+
+    function setURI(string memory baseURI) external onlyHub {
+        _tokenURI = baseURI;
+        emit URIUpdate(baseURI);
+    }
+
+    function tokenURI(uint256 tokenId) public view override returns (string memory) {
+        _requireOwned(tokenId);
+        return _tokenURI;
+    }
+
+    function _safeGetLatestMerkleRootObject(
+        uint256 id
+    ) internal view returns (KnowledgeAssetLib.MerkleRoot memory) {
+        KnowledgeAssetLib.KnowledgeAsset memory kc = knowledgeAssets[id];
+        if (kc.merkleRoots.length == 0) {
+            return KnowledgeAssetLib.MerkleRoot(address(0), bytes32(0), 0);
+        }
+        return kc.merkleRoots[kc.merkleRoots.length - 1];
+    }
+
+}

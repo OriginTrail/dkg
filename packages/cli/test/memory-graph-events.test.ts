@@ -386,7 +386,7 @@ describe('daemon memory_graph_changed route emissions', () => {
   it('emits SWM and VM refresh events after confirmed selective publishes', async () => {
     const emitMemoryGraphChanged = vi.fn();
     const publishFromSharedMemory = vi.fn().mockResolvedValue({
-      kcId: 'kc-1',
+      kaId: 'kc-1',
       status: 'confirmed',
       kaManifest: [{ tokenId: 1n, rootEntity: 'urn:root' }],
       publicQuads: [
@@ -409,7 +409,7 @@ describe('daemon memory_graph_changed route emissions', () => {
 
     expect((ctx.res as unknown as { statusCode: number }).statusCode).toBe(200);
     expect(responseBody(ctx)).toMatchObject({
-      kcId: 'kc-1',
+      kaId: 'kc-1',
       status: 'confirmed',
       kas: [{ tokenId: '1', rootEntity: 'urn:root' }],
     });
@@ -428,7 +428,7 @@ describe('daemon memory_graph_changed route emissions', () => {
 
   it('keeps implicit same-graph publishes out of the remap path', async () => {
     const publishFromSharedMemory = vi.fn().mockResolvedValue({
-      kcId: 'kc-1',
+      kaId: 'kc-1',
       status: 'confirmed',
       kaManifest: [{ tokenId: 1n, rootEntity: 'urn:root' }],
       publicQuads: [{ subject: 'urn:root', predicate: 'urn:p', object: 'urn:o', graph: 'urn:g' }],
@@ -450,7 +450,7 @@ describe('daemon memory_graph_changed route emissions', () => {
 
   it('still forwards explicit publishContextGraphId as a remap request', async () => {
     const publishFromSharedMemory = vi.fn().mockResolvedValue({
-      kcId: 'kc-1',
+      kaId: 'kc-1',
       status: 'confirmed',
       kaManifest: [{ tokenId: 1n, rootEntity: 'urn:root' }],
       publicQuads: [{ subject: 'urn:root', predicate: 'urn:p', object: 'urn:o', graph: 'urn:g' }],
@@ -475,7 +475,7 @@ describe('daemon memory_graph_changed route emissions', () => {
 
   it('normalizes full publishContextGraphId DIDs to a positive on-chain remap id', async () => {
     const publishFromSharedMemory = vi.fn().mockResolvedValue({
-      kcId: 'kc-1',
+      kaId: 'kc-1',
       status: 'confirmed',
       kaManifest: [{ tokenId: 1n, rootEntity: 'urn:root' }],
       publicQuads: [{ subject: 'urn:root', predicate: 'urn:p', object: 'urn:o', graph: 'urn:g' }],

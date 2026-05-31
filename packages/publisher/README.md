@@ -4,7 +4,7 @@ Publishing protocol for DKG V10. Handles the complete lifecycle of getting Knowl
 
 ## Features
 
-- **DKGPublisher** — high-level publishing API: submit RDF, get back a finalized Knowledge Collection UAL
+- **DKGPublisher** — high-level publishing API: submit RDF, get back a finalized Knowledge Asset UAL
 - **PublishHandler** — P2P protocol handler that processes incoming publish requests from other nodes, validates data, stores triples, and returns signed ACKs
 - **SharedMemoryHandler** — feeless Shared Working Memory handling for local-only or staging workflows, including signed gossip envelope verification for agent-gated context graphs; signatures authenticate writers, but do not encrypt GossipSub payload bytes
 - **Context Graphs** — `createContextGraph` and `publishToContextGraph` for M/N signature-gated subgraphs within contextGraphs
@@ -13,7 +13,7 @@ Publishing protocol for DKG V10. Handles the complete lifecycle of getting Knowl
 - **Skolemization** — blank node to skolemized URI conversion for deterministic RDF processing
 - **Auto-partitioning** — splits a batch of RDF triples into individual Knowledge Assets by root entity
 - **KC metadata** — generates on-chain metadata (merkle root, byte sizes, entity count) for Knowledge Collection creation
-- **ChainEventPoller** — monitors on-chain events for KC finalization confirmations
+- **ChainEventPoller** — monitors on-chain events for KA finalization confirmations
 - **Access control** — `AccessHandler` for serving private triple access requests; `AccessClient` for requesting them
 
 ## Usage
@@ -23,14 +23,14 @@ import { DKGPublisher } from '@origintrail-official/dkg-publisher';
 
 const publisher = new DKGPublisher(config);
 
-// Publish a Knowledge Collection
+// Publish a Knowledge Asset
 const result = await publisher.publish({
   contextGraphId: 'urn:contextGraph:example',
   quads: myTriples,
   privateQuads: sensitiveTriples,
   accessPolicy: 'ownerOnly',
 });
-console.log('Published KC:', result.ual);
+console.log('Published KA:', result.ual);
 
 // Write to workspace (feeless staging)
 await publisher.writeToWorkspace('urn:contextGraph:example', quads, {

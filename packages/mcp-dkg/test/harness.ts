@@ -398,13 +398,13 @@ export class FakeClient {
   async publishQuads(args: Record<string, unknown>) {
     if (this.overrides.publishQuads) return this.overrides.publishQuads.call(this, args);
     this.publishCalls.push({ kind: 'publishQuads', ...args });
-    return { kcId: 'kc-1', kas: [], txHash: '0xdead' };
+    return { kaId: 'kc-1', kas: [], txHash: '0xdead' };
   }
 
   async publishSharedMemory(args: Record<string, unknown>) {
     if (this.overrides.publishSharedMemory) return this.overrides.publishSharedMemory.call(this, args);
     this.publishCalls.push({ kind: 'publishSharedMemory', ...args });
-    return { kcId: 'kc-2', kas: [{ tokenId: '1', rootEntity: 'urn:x' }], txHash: '0xbeef' };
+    return { kaId: 'kc-2', kas: [{ tokenId: '1', rootEntity: 'urn:x' }], txHash: '0xbeef' };
   }
 
   async registerContextGraph(args: { id: string }) {

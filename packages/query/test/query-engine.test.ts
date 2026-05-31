@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { DKGQueryEngine } from '../src/dkg-query-engine.js';
 import { validateReadOnlySparql } from '../src/sparql-guard.js';
@@ -7,9 +7,29 @@ const CONTEXT_GRAPH = 'agent-registry';
 const GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
 const META = `${GRAPH}/_meta`;
 const ENTITY = 'did:dkg:agent:QmImageBot';
+const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+const DKG_SUB_GRAPH = 'http://dkg.io/ontology/SubGraph';
+const DKG_ASSERTION_GRAPH = 'http://dkg.io/ontology/assertionGraph';
+const DKG_CONTEXT_GRAPH = 'https://dkg.network/ontology#ContextGraph';
+const DKG_REGISTRATION_STATUS = 'https://dkg.network/ontology#registrationStatus';
+const SCHEMA_NAME = 'http://schema.org/name';
+const COUNT_NAME = 'http://example.com/countName';
 
 function q(s: string, p: string, o: string, g = GRAPH): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
+}
+
+function subGraphRegistration(name: string): Quad[] {
+  const subGraphUri = `${GRAPH}/${name}`;
+  return [
+    q(subGraphUri, RDF_TYPE, DKG_SUB_GRAPH, META),
+    q(subGraphUri, SCHEMA_NAME, `"${name}"`, META),
+    q(subGraphUri, 'http://dkg.io/ontology/createdBy', 'did:dkg:agent:test', META),
+  ];
+}
+
+function assertionGraphRegistration(graph: string, name: string): Quad {
+  return q(`urn:dkg:assertion:${name}`, DKG_ASSERTION_GRAPH, graph, META);
 }
 
 describe('DKGQueryEngine', () => {
@@ -836,6 +856,261 @@ describe('DKGQueryEngine', () => {
 
     expect(result.bindings.map((row) => row['name'])).toEqual(['"ImageBot"', '"Workspace Only"']);
     expect(result.bindings.map((row) => row['g']).sort()).toEqual([GRAPH, sharedMemoryGraph].sort());
+  });
+
+  it('keeps legacy GRAPH-variable scans on the selected data graph without partition opt-in', async () => {
+    const rootAssertionGraph = `${GRAPH}/assertion/0xAgent/root-draft`;
+    const rootVerifiedGraph = `${GRAPH}/_verified_memory/vm-1`;
+    const subGraph = `${GRAPH}/code`;
+    const subGraphSharedMemoryGraph = `${GRAPH}/code/_shared_memory`;
+
+    await store.insert([
+      ...subGraphRegistration('code'),
+      assertionGraphRegistration(rootAssertionGraph, 'root-draft'),
+      q('urn:root:data', COUNT_NAME, '"RootData"', GRAPH),
+      q('urn:root:wm', COUNT_NAME, '"RootWM"', rootAssertionGraph),
+      q('urn:root:vm', COUNT_NAME, '"RootVM"', rootVerifiedGraph),
+      q('urn:code:data', COUNT_NAME, '"CodeData"', subGraph),
+      q('urn:code:swm', COUNT_NAME, '"CodeSWM"', subGraphSharedMemoryGraph),
+    ]);
+
+    const result = await engine.query(
+      `SELECT ?g ?name WHERE { GRAPH ?g { ?s <${COUNT_NAME}> ?name } } ORDER BY ?name`,
+      { contextGraphId: CONTEXT_GRAPH },
+    );
+
+    expect(result.bindings).toEqual([
+      { g: GRAPH, name: '"RootData"' },
+    ]);
+  });
+
+  it('keeps includeSharedMemory GRAPH-variable scans on data plus SWM without partition opt-in', async () => {
+    const rootSharedMemoryGraph = `${GRAPH}/_shared_memory`;
+    const rootAssertionGraph = `${GRAPH}/assertion/0xAgent/root-draft`;
+    const rootVerifiedGraph = `${GRAPH}/_verified_memory/vm-1`;
+    const subGraph = `${GRAPH}/code`;
+    const subGraphSharedMemoryGraph = `${GRAPH}/code/_shared_memory`;
+
+    await store.insert([
+      ...subGraphRegistration('code'),
+      assertionGraphRegistration(rootAssertionGraph, 'root-draft'),
+      q('urn:root:data', COUNT_NAME, '"RootData"', GRAPH),
+      q('urn:root:swm', COUNT_NAME, '"RootSWM"', rootSharedMemoryGraph),
+      q('urn:root:wm', COUNT_NAME, '"RootWM"', rootAssertionGraph),
+      q('urn:root:vm', COUNT_NAME, '"RootVM"', rootVerifiedGraph),
+      q('urn:code:data', COUNT_NAME, '"CodeData"', subGraph),
+      q('urn:code:swm', COUNT_NAME, '"CodeSWM"', subGraphSharedMemoryGraph),
+    ]);
+
+    const result = await engine.query(
+      `SELECT ?g ?name WHERE { GRAPH ?g { ?s <${COUNT_NAME}> ?name } } ORDER BY ?name`,
+      { contextGraphId: CONTEXT_GRAPH, includeSharedMemory: true },
+    );
+
+    expect(result.bindings).toEqual([
+      { g: GRAPH, name: '"RootData"' },
+      { g: rootSharedMemoryGraph, name: '"RootSWM"' },
+    ]);
+  });
+
+  it('allows scoped GRAPH variable count scans across registered same-CG content partitions', async () => {
+    const rootAssertionGraph = `${GRAPH}/assertion/0xAgent/root-draft`;
+    const rootSharedMemoryGraph = `${GRAPH}/_shared_memory`;
+    const rootVerifiedGraph = `${GRAPH}/_verified_memory/vm-1`;
+    const rootVerifiedStagingGraph = `${GRAPH}/_verified_memory/staging/vm-1`;
+    const subGraph = `${GRAPH}/code`;
+    const subGraphAssertionGraph = `${GRAPH}/code/assertion/0xAgent/code-draft`;
+    const subGraphSharedMemoryGraph = `${GRAPH}/code/_shared_memory`;
+    const subGraphVerifiedGraph = `${GRAPH}/code/_verified_memory/vm-1`;
+    const subGraphVerifiedStagingGraph = `${GRAPH}/code/_verified_memory/staging/vm-1`;
+    const subGraphMeta = `${GRAPH}/code/_meta`;
+    const subGraphPrivate = `${GRAPH}/code/_private`;
+    const otherGraph = 'did:dkg:context-graph:other-agent-registry/code/_shared_memory';
+
+    await store.insert([
+      ...subGraphRegistration('code'),
+      assertionGraphRegistration(rootAssertionGraph, 'root-draft'),
+      assertionGraphRegistration(subGraphAssertionGraph, 'code-draft'),
+      q('urn:root:wm', SCHEMA_NAME, '"RootWM"', rootAssertionGraph),
+      q('urn:root:swm', SCHEMA_NAME, '"RootSWM"', rootSharedMemoryGraph),
+      q('urn:root:vm', SCHEMA_NAME, '"RootVM"', rootVerifiedGraph),
+      q('urn:root:staging', SCHEMA_NAME, '"RootStaging"', rootVerifiedStagingGraph),
+      q('urn:code:data', SCHEMA_NAME, '"CodeData"', subGraph),
+      q('urn:code:wm', SCHEMA_NAME, '"CodeWM"', subGraphAssertionGraph),
+      q('urn:code:swm', SCHEMA_NAME, '"CodeSWM"', subGraphSharedMemoryGraph),
+      q('urn:code:vm', SCHEMA_NAME, '"CodeVM"', subGraphVerifiedGraph),
+      q('urn:code:staging', SCHEMA_NAME, '"CodeStaging"', subGraphVerifiedStagingGraph),
+      q('urn:code:meta', SCHEMA_NAME, '"CodeMeta"', subGraphMeta),
+      q('urn:code:private', SCHEMA_NAME, '"CodePrivate"', subGraphPrivate),
+      q('urn:other:swm', SCHEMA_NAME, '"OtherSWM"', otherGraph),
+    ]);
+
+    const result = await engine.query(
+      `SELECT ?g (COUNT(DISTINCT ?s) AS ?entities) (COUNT(*) AS ?triples)
+       WHERE { GRAPH ?g { ?s ?p ?o } }
+       GROUP BY ?g`,
+      { contextGraphId: CONTEXT_GRAPH, includeContextGraphPartitions: true },
+    );
+    const graphs = new Set(result.bindings.map((row) => row['g']));
+
+    for (const expected of [
+      GRAPH,
+      META,
+      rootAssertionGraph,
+      rootSharedMemoryGraph,
+      rootVerifiedGraph,
+      subGraph,
+      subGraphAssertionGraph,
+      subGraphSharedMemoryGraph,
+      subGraphVerifiedGraph,
+    ]) {
+      expect(graphs.has(expected)).toBe(true);
+    }
+    expect(graphs.has(rootVerifiedStagingGraph)).toBe(false);
+    expect(graphs.has(subGraphVerifiedStagingGraph)).toBe(false);
+    expect(graphs.has(subGraphMeta)).toBe(false);
+    expect(graphs.has(subGraphPrivate)).toBe(false);
+    expect(graphs.has(otherGraph)).toBe(false);
+  });
+
+  it('memoizes same-CG partition discovery across concurrent count scans', async () => {
+    const rootSharedMemoryGraph = `${GRAPH}/_shared_memory`;
+    const rootVerifiedGraph = `${GRAPH}/_verified_memory/vm-1`;
+    const subGraph = `${GRAPH}/code`;
+    const subGraphSharedMemoryGraph = `${GRAPH}/code/_shared_memory`;
+
+    await store.insert([
+      ...subGraphRegistration('code'),
+      q('urn:root:swm', SCHEMA_NAME, '"RootSWM"', rootSharedMemoryGraph),
+      q('urn:root:vm', SCHEMA_NAME, '"RootVM"', rootVerifiedGraph),
+      q('urn:code:data', SCHEMA_NAME, '"CodeData"', subGraph),
+      q('urn:code:swm', SCHEMA_NAME, '"CodeSWM"', subGraphSharedMemoryGraph),
+    ]);
+
+    const listGraphsSpy = vi.spyOn(store, 'listGraphs');
+    const sparql = `SELECT ?g ?name WHERE { GRAPH ?g { ?s <${SCHEMA_NAME}> ?name } } ORDER BY ?name`;
+
+    const results = await Promise.all([
+      engine.query(sparql, { contextGraphId: CONTEXT_GRAPH, includeContextGraphPartitions: true }),
+      engine.query(sparql, { contextGraphId: CONTEXT_GRAPH, includeContextGraphPartitions: true }),
+      engine.query(sparql, { contextGraphId: CONTEXT_GRAPH, includeContextGraphPartitions: true }),
+    ]);
+
+    expect(listGraphsSpy).toHaveBeenCalledTimes(1);
+    for (const result of results) {
+      const graphs = new Set(result.bindings.map((row) => row['g']));
+      expect(graphs.has(rootSharedMemoryGraph)).toBe(true);
+      expect(graphs.has(rootVerifiedGraph)).toBe(true);
+      expect(graphs.has(subGraph)).toBe(true);
+      expect(graphs.has(subGraphSharedMemoryGraph)).toBe(true);
+    }
+  });
+
+  it('does not reuse partition discovery after an in-flight count scan completes', async () => {
+    const codeSubGraph = `${GRAPH}/code`;
+    const docsSubGraph = `${GRAPH}/docs`;
+
+    await store.insert([
+      ...subGraphRegistration('code'),
+      q('urn:code:data', SCHEMA_NAME, '"CodeData"', codeSubGraph),
+    ]);
+
+    const listGraphsSpy = vi.spyOn(store, 'listGraphs');
+    const sparql = `SELECT ?g ?name WHERE { GRAPH ?g { ?s <${SCHEMA_NAME}> ?name } } ORDER BY ?name`;
+    const first = await engine.query(
+      sparql,
+      { contextGraphId: CONTEXT_GRAPH, includeContextGraphPartitions: true },
+    );
+    expect(first.bindings.some((row) => row['g'] === codeSubGraph)).toBe(true);
+    expect(listGraphsSpy).toHaveBeenCalledTimes(1);
+
+    await store.insert([
+      ...subGraphRegistration('docs'),
+      q('urn:docs:data', SCHEMA_NAME, '"DocsData"', docsSubGraph),
+    ]);
+
+    const second = await engine.query(
+      sparql,
+      { contextGraphId: CONTEXT_GRAPH, includeContextGraphPartitions: true },
+    );
+    expect(listGraphsSpy).toHaveBeenCalledTimes(2);
+    expect(second.bindings.some((row) => row['g'] === docsSubGraph)).toBe(true);
+  });
+
+  it('does not bind same-prefix child context graphs as parent content partitions', async () => {
+    const collidingSubGraph = `${GRAPH}/code`;
+    const collidingSubGraphSharedMemory = `${collidingSubGraph}/_shared_memory`;
+    const collidingSubGraphVerified = `${collidingSubGraph}/_verified_memory/vm-1`;
+    const collidingSubGraphMeta = `${collidingSubGraph}/_meta`;
+    const collidingRootSharedMemory = `${GRAPH}/_shared_memory`;
+    const collidingRootSharedMemoryMeta = `${collidingRootSharedMemory}/_meta`;
+    const collidingRootVerified = `${GRAPH}/_verified_memory/vm-1`;
+    const collidingRootVerifiedMeta = `${collidingRootVerified}/_meta`;
+
+    await store.insert([
+      ...subGraphRegistration('code'),
+      q(collidingSubGraph, RDF_TYPE, DKG_CONTEXT_GRAPH, collidingSubGraphMeta),
+      q(collidingRootSharedMemory, DKG_REGISTRATION_STATUS, '"unregistered"', collidingRootSharedMemoryMeta),
+      q(collidingRootVerified, DKG_REGISTRATION_STATUS, '"unregistered"', collidingRootVerifiedMeta),
+      q('urn:child:code', SCHEMA_NAME, '"ChildCodeRoot"', collidingSubGraph),
+      q('urn:child:code-swm', SCHEMA_NAME, '"ChildCodeSharedMemory"', collidingSubGraphSharedMemory),
+      q('urn:child:code-vm', SCHEMA_NAME, '"ChildCodeVerified"', collidingSubGraphVerified),
+      q('urn:child:swm', SCHEMA_NAME, '"ChildSharedMemoryRoot"', collidingRootSharedMemory),
+      q('urn:child:vm', SCHEMA_NAME, '"ChildVerifiedRoot"', collidingRootVerified),
+    ]);
+
+    const result = await engine.query(
+      `SELECT ?g ?name WHERE { GRAPH ?g { ?s <${SCHEMA_NAME}> ?name } } ORDER BY ?name`,
+      { contextGraphId: CONTEXT_GRAPH, includeContextGraphPartitions: true },
+    );
+    const names = new Set(result.bindings.map((row) => row['name']));
+
+    expect(names.has('"ChildCodeRoot"')).toBe(false);
+    expect(names.has('"ChildCodeSharedMemory"')).toBe(false);
+    expect(names.has('"ChildCodeVerified"')).toBe(false);
+    expect(names.has('"ChildSharedMemoryRoot"')).toBe(false);
+    expect(names.has('"ChildVerifiedRoot"')).toBe(false);
+    expect(result.bindings.some((row) => row['g'] === collidingSubGraph)).toBe(false);
+    expect(result.bindings.some((row) => row['g'] === collidingSubGraphSharedMemory)).toBe(false);
+    expect(result.bindings.some((row) => row['g'] === collidingSubGraphVerified)).toBe(false);
+    expect(result.bindings.some((row) => row['g'] === collidingRootSharedMemory)).toBe(false);
+    expect(result.bindings.some((row) => row['g'] === collidingRootVerified)).toBe(false);
+  });
+
+  it('does not let non-canonical child-CG type triples hide registered parent partitions', async () => {
+    const subGraph = `${GRAPH}/code`;
+
+    await store.insert([
+      ...subGraphRegistration('code'),
+      // User data can mention `dkg:ContextGraph`; only the candidate's own
+      // `/_meta` graph may prove a child context graph during count scans.
+      q(subGraph, RDF_TYPE, DKG_CONTEXT_GRAPH, GRAPH),
+      q('urn:code:data', COUNT_NAME, '"ParentCode"', subGraph),
+    ]);
+
+    const result = await engine.query(
+      `SELECT ?g ?name WHERE { GRAPH ?g { ?s <${COUNT_NAME}> ?name } } ORDER BY ?name`,
+      { contextGraphId: CONTEXT_GRAPH, includeContextGraphPartitions: true },
+    );
+
+    expect(result.bindings).toEqual([
+      { g: subGraph, name: '"ParentCode"' },
+    ]);
+  });
+
+  it('does not treat unregistered same-prefix child graphs as same-CG sub-graph content', async () => {
+    const unregisteredSubGraph = `${GRAPH}/code`;
+    await store.insert([
+      q('urn:child:entity', SCHEMA_NAME, '"UnregisteredPrefixChild"', unregisteredSubGraph),
+    ]);
+
+    const result = await engine.query(
+      `SELECT ?g ?name WHERE { GRAPH ?g { ?s <${SCHEMA_NAME}> ?name } } ORDER BY ?name`,
+      { contextGraphId: CONTEXT_GRAPH, includeContextGraphPartitions: true },
+    );
+
+    expect(result.bindings.some((row) => row['g'] === unregisteredSubGraph)).toBe(false);
+    expect(result.bindings.some((row) => row['name'] === '"UnregisteredPrefixChild"')).toBe(false);
   });
 
   it('constrains GRAPH variables to shared memory when graphSuffix is _shared_memory', async () => {

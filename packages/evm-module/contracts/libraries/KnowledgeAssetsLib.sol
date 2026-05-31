@@ -98,7 +98,7 @@ library KnowledgeAssetsLib {
     error NotContextGraphOwnerOrAuthority(uint256 contextGraphId, address caller);
     error AgentParticipantAlreadyExists(uint256 contextGraphId, address agent);
     error AgentParticipantNotFound(uint256 contextGraphId, address agent);
-    error KCAlreadyRegisteredToContextGraph(uint256 kcId, uint256 existingContextGraphId);
+    error KnowledgeAssetAlreadyRegisteredToContextGraph(uint256 kaId, uint256 existingContextGraphId);
 
     // ----- PCA coherence validation (facade-enforced on create/update paths) -----
     /// @dev Caller passed a non-zero PCA accountId but the DKGPublishingConvictionNFT

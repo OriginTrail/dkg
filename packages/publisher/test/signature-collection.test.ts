@@ -142,7 +142,7 @@ describe('Signature Collection Protocol', () => {
     if (!_provider) _provider = provider;
     if (!_kav10Address) {
       const c = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
-      _kav10Address = await c.getKnowledgeAssetsV10Address();
+      _kav10Address = await c.getKnowledgeAssetsLifecycleAddress();
     }
   });
 
@@ -312,7 +312,7 @@ describe('Reordered Publish Flow (replicate-then-publish)', () => {
     const cgId = await createTestContextGraph(cgChain);
     CONTEXT_GRAPH = String(cgId);
     if (!_provider) _provider = provider;
-    if (!_kav10Address) _kav10Address = await cgChain.getKnowledgeAssetsV10Address();
+    if (!_kav10Address) _kav10Address = await cgChain.getKnowledgeAssetsLifecycleAddress();
   });
 
   afterAll(async () => {
@@ -364,7 +364,7 @@ describe('Reordered Publish Flow (replicate-then-publish)', () => {
     expect(storeIdx).toBeLessThan(chainIdx);
   });
 
-  it('publish() uses V10 createKnowledgeAssetsV10 path and includes ACK signatures', async () => {
+  it('publish() uses V10 createKnowledgeAssets path and includes ACK signatures', async () => {
     const quads: Quad[] = [
       q(ENTITY, 'http://schema.org/name', '"V10 Path Test"'),
     ];
@@ -510,7 +510,7 @@ describe('Context Graph Enshrinement with Signatures', () => {
     if (!_provider) _provider = provider;
     if (!_kav10Address) {
       const c = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
-      _kav10Address = await c.getKnowledgeAssetsV10Address();
+      _kav10Address = await c.getKnowledgeAssetsLifecycleAddress();
     }
   });
 
@@ -654,7 +654,7 @@ describe('Regression: sorted and deduplicated participant signatures', () => {
     if (!_provider) _provider = provider;
     if (!_kav10Address) {
       const c = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
-      _kav10Address = await c.getKnowledgeAssetsV10Address();
+      _kav10Address = await c.getKnowledgeAssetsLifecycleAddress();
     }
   });
 

@@ -31,8 +31,8 @@ import {ERC721Enumerable} from "@openzeppelin/contracts/token/ERC721/extensions/
  *       PCA      -> publishAuthority = account-owner address (read-only marker),
  *                   accountId = DKGPublishingConvictionNFT account ID
  *     The facade is responsible for resolving curator type at publish time.
- *   - `kcToContextGraph` reverse lookup and `_contextGraphKCList` forward list
- *     are written via `registerKCToContextGraph` (called from the publish flow
+ *   - `kaToContextGraph` reverse lookup and `_contextGraphKAList` forward list
+ *     are written via `registerKnowledgeAssetToContextGraph` (called from the publish flow
  *     in Phase 8) and read by Phase 10 random sampling.
  *   - The legacy `addBatchToContextGraph` / `_contextGraphBatches` /
  *     `_attestedRoots` / `verifyTripleInclusion` surface is REMOVED. The
@@ -41,7 +41,7 @@ import {ERC721Enumerable} from "@openzeppelin/contracts/token/ERC721/extensions/
  */
 contract ContextGraphStorage is INamed, IVersioned, Guardian, ERC721Enumerable {
     string private constant _NAME = "ContextGraphStorage";
-    string private constant _VERSION = "1.0.0";
+    string private constant _VERSION = "10.0.2";
 
     // -----------------------------------------------------------------------
     // Bounds on participant list — anti-griefing cap.
@@ -86,10 +86,10 @@ contract ContextGraphStorage is INamed, IVersioned, Guardian, ERC721Enumerable {
 
     // KC -> CG reverse lookup (Phase 10 random sampling).
     // Public for convenience; zero means "not registered".
-    mapping(uint256 kcId => uint256 contextGraphId) public kcToContextGraph;
+    mapping(uint256 kaId => uint256 contextGraphId) public kaToContextGraph;
 
     // CG -> [KC IDs] forward list for uniform random KC selection within a CG.
-    mapping(uint256 contextGraphId => uint256[]) private _contextGraphKCList;
+    mapping(uint256 contextGraphId => uint256[]) private _contextGraphKAList;
 
     // -----------------------------------------------------------------------
     // Events
@@ -134,9 +134,9 @@ contract ContextGraphStorage is INamed, IVersioned, Guardian, ERC721Enumerable {
         address indexed agent
     );
 
-    event KCRegisteredToContextGraph(
+    event KnowledgeAssetRegisteredToContextGraph(
         uint256 indexed contextGraphId,
-        uint256 indexed kcId
+        uint256 indexed kaId
     );
 
     constructor(
@@ -288,27 +288,27 @@ contract ContextGraphStorage is INamed, IVersioned, Guardian, ERC721Enumerable {
 
     /**
      * @notice Bind a Knowledge Collection to a Context Graph.
-     * @dev Records both the reverse lookup (`kcToContextGraph[kcId] = cgId`)
-     *      and the forward list (`_contextGraphKCList[cgId].push(kcId)`).
+     * @dev Records both the reverse lookup (`kaToContextGraph[kaId] = cgId`)
+     *      and the forward list (`_contextGraphKAList[cgId].push(kaId)`).
      *      Reverts on double registration.
      */
-    function registerKCToContextGraph(
+    function registerKnowledgeAssetToContextGraph(
         uint256 contextGraphId,
-        uint256 kcId
+        uint256 kaId
     ) external onlyContracts {
-        if (kcId == 0) {
-            revert KnowledgeAssetsLib.InvalidContextGraphConfig("zero kcId");
+        if (kaId == 0) {
+            revert KnowledgeAssetsLib.InvalidContextGraphConfig("zero kaId");
         }
         if (!_contextGraphs[contextGraphId].active) {
             revert KnowledgeAssetsLib.ContextGraphNotActive(contextGraphId);
         }
-        uint256 existing = kcToContextGraph[kcId];
+        uint256 existing = kaToContextGraph[kaId];
         if (existing != 0) {
-            revert KnowledgeAssetsLib.KCAlreadyRegisteredToContextGraph(kcId, existing);
+            revert KnowledgeAssetsLib.KnowledgeAssetAlreadyRegisteredToContextGraph(kaId, existing);
         }
-        kcToContextGraph[kcId] = contextGraphId;
-        _contextGraphKCList[contextGraphId].push(kcId);
-        emit KCRegisteredToContextGraph(contextGraphId, kcId);
+        kaToContextGraph[kaId] = contextGraphId;
+        _contextGraphKAList[contextGraphId].push(kaId);
+        emit KnowledgeAssetRegisteredToContextGraph(contextGraphId, kaId);
     }
 
     /**
@@ -324,13 +324,13 @@ contract ContextGraphStorage is INamed, IVersioned, Guardian, ERC721Enumerable {
     function getContextGraphKCList(
         uint256 contextGraphId
     ) external view returns (uint256[] memory) {
-        return _contextGraphKCList[contextGraphId];
+        return _contextGraphKAList[contextGraphId];
     }
 
     function getContextGraphKCCount(
         uint256 contextGraphId
     ) external view returns (uint256) {
-        return _contextGraphKCList[contextGraphId].length;
+        return _contextGraphKAList[contextGraphId].length;
     }
 
     /**
@@ -342,8 +342,8 @@ contract ContextGraphStorage is INamed, IVersioned, Guardian, ERC721Enumerable {
     function getContextGraphKCAt(
         uint256 contextGraphId,
         uint256 index
-    ) external view returns (uint256 kcId) {
-        uint256[] storage list = _contextGraphKCList[contextGraphId];
+    ) external view returns (uint256 kaId) {
+        uint256[] storage list = _contextGraphKAList[contextGraphId];
         if (index >= list.length) {
             revert KnowledgeAssetsLib.InvalidContextGraphConfig("kcIndex oob");
         }

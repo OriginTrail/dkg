@@ -134,7 +134,7 @@ async function submitWithCostMismatch(
   };
 
   try {
-    await adapter.createKnowledgeAssetsV10(txParams);
+    await adapter.createKnowledgeAssets(txParams);
     return { ok: true };
   } catch (err) {
     return { ok: false, message: err instanceof Error ? err.message : String(err) };
@@ -160,7 +160,7 @@ describe('P-3: ACK replay across cost parameters must be rejected by the chain',
     await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreWallet.address, ethers.parseEther('5000000'));
 
     adapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
-    kav10Address = await adapter.getKnowledgeAssetsV10Address();
+    kav10Address = await adapter.getKnowledgeAssetsLifecycleAddress();
     coreIdentityId = BigInt(getSharedContext().coreProfileId);
 
     const cgRes = await adapter.createOnChainContextGraph({

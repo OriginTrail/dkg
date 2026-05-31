@@ -25,7 +25,7 @@ because the chain-side anchors no longer exist.
 
 Net effect for a core operator: same wallet, fresh on-chain identity
 auto-derived on next boot, zero KCs to start, agent auto-stakes 50k TRAC
-into a V10 NFT position via `ensureProfile`, prover idle until first KC
+into a V10 NFT position via `ensureProfile`, prover idle until first KA
 is published, score non-zero from the first proof period after that.
 
 ## Daemon auto-update is built-in (operators don't have to upgrade manually)
@@ -229,7 +229,7 @@ dkg start
 ```
 
 **Why the wipe is needed at all** (whether auto or manual):
-- Old `store.nq` references CG IDs and KC merkle roots that don't exist
+- Old `store.nq` references CG IDs and KA merkle roots that don't exist
   on the new chain. The agent will gossip them to peers; peers will
   attempt on-chain validation; validation fails; entries get dropped
   one by one. Faster + cleaner to wipe upfront than to rely on

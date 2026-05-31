@@ -20,7 +20,7 @@ type Fixture = {
  * They cover the new APIs introduced in this task:
  *   - createContextGraph (participant agents + PCA accountId)
  *   - addParticipantAgent / removeParticipantAgent
- *   - registerKCToContextGraph + kcToContextGraph reverse lookup
+ *   - registerKnowledgeAssetToContextGraph + kaToContextGraph reverse lookup
  *   - updatePublishAuthority with PCA accountId
  *   - NFT auto-rotation clears PCA accountId on transfer
  */
@@ -296,7 +296,7 @@ describe('@unit ContextGraphStorage', () => {
   // -------------------------------------------------------------------------
   // KC <-> ContextGraph registration
   // -------------------------------------------------------------------------
-  describe('registerKCToContextGraph', () => {
+  describe('registerKnowledgeAssetToContextGraph', () => {
     beforeEach(async () => {
       await StorageContract.connect(opSigner).createContextGraph(
         accounts[0].address, [], 0, 0, 1, ethers.ZeroAddress, 0,
@@ -306,50 +306,50 @@ describe('@unit ContextGraphStorage', () => {
 
     it('records reverse lookup, KC list, and emits event', async () => {
       await expect(
-        StorageContract.connect(opSigner).registerKCToContextGraph(1, 100),
-      ).to.emit(StorageContract, 'KCRegisteredToContextGraph').withArgs(1, 100);
+        StorageContract.connect(opSigner).registerKnowledgeAssetToContextGraph(1, 100),
+      ).to.emit(StorageContract, 'KnowledgeAssetRegisteredToContextGraph').withArgs(1, 100);
 
-      expect(await StorageContract.kcToContextGraph(100)).to.equal(1);
+      expect(await StorageContract.kaToContextGraph(100)).to.equal(1);
       expect(await StorageContract.getContextGraphKCList(1)).to.deep.equal([100n]);
       expect(await StorageContract.getContextGraphKCCount(1)).to.equal(1);
     });
 
     it('appends multiple KCs in registration order', async () => {
-      await StorageContract.connect(opSigner).registerKCToContextGraph(1, 100);
-      await StorageContract.connect(opSigner).registerKCToContextGraph(1, 200);
-      await StorageContract.connect(opSigner).registerKCToContextGraph(1, 300);
+      await StorageContract.connect(opSigner).registerKnowledgeAssetToContextGraph(1, 100);
+      await StorageContract.connect(opSigner).registerKnowledgeAssetToContextGraph(1, 200);
+      await StorageContract.connect(opSigner).registerKnowledgeAssetToContextGraph(1, 300);
       expect(await StorageContract.getContextGraphKCList(1)).to.deep.equal([100n, 200n, 300n]);
       expect(await StorageContract.getContextGraphKCCount(1)).to.equal(3);
     });
 
-    it('reverts on double registration (KCAlreadyRegisteredToContextGraph)', async () => {
-      await StorageContract.connect(opSigner).registerKCToContextGraph(1, 100);
+    it('reverts on double registration (KnowledgeAssetAlreadyRegisteredToContextGraph)', async () => {
+      await StorageContract.connect(opSigner).registerKnowledgeAssetToContextGraph(1, 100);
       // Create a second CG and try to register the same KC there
       await StorageContract.connect(opSigner).createContextGraph(
         accounts[0].address, [], 0, 0, 1, ethers.ZeroAddress, 0,
         ethers.ZeroHash,
       );
       await expect(
-        StorageContract.connect(opSigner).registerKCToContextGraph(2, 100),
-      ).to.be.revertedWithCustomError(StorageContract, 'KCAlreadyRegisteredToContextGraph');
+        StorageContract.connect(opSigner).registerKnowledgeAssetToContextGraph(2, 100),
+      ).to.be.revertedWithCustomError(StorageContract, 'KnowledgeAssetAlreadyRegisteredToContextGraph');
     });
 
     it('reverts when target CG is inactive', async () => {
       await StorageContract.connect(opSigner).deactivateContextGraph(1);
       await expect(
-        StorageContract.connect(opSigner).registerKCToContextGraph(1, 100),
+        StorageContract.connect(opSigner).registerKnowledgeAssetToContextGraph(1, 100),
       ).to.be.revertedWithCustomError(StorageContract, 'ContextGraphNotActive');
     });
 
-    it('reverts on kcId == 0', async () => {
+    it('reverts on kaId == 0', async () => {
       await expect(
-        StorageContract.connect(opSigner).registerKCToContextGraph(1, 0),
+        StorageContract.connect(opSigner).registerKnowledgeAssetToContextGraph(1, 0),
       ).to.be.revertedWithCustomError(StorageContract, 'InvalidContextGraphConfig');
     });
 
     it('reverts when caller is not a Hub contract', async () => {
       await expect(
-        StorageContract.connect(accounts[5]).registerKCToContextGraph(1, 100),
+        StorageContract.connect(accounts[5]).registerKnowledgeAssetToContextGraph(1, 100),
       ).to.be.revertedWithCustomError(HubContract, 'UnauthorizedAccess');
     });
   });
@@ -362,7 +362,7 @@ describe('@unit ContextGraphStorage', () => {
   // full-array getter `getContextGraphKCList` copies O(n) bytes per call,
   // which makes it unsafe for on-chain use once CGs get large. This block
   // pins the indexed accessor's semantics: valid index returns the right
-  // kcId, out-of-bounds and empty-list accesses revert.
+  // kaId, out-of-bounds and empty-list accesses revert.
   describe('getContextGraphKCAt (indexed accessor)', () => {
     beforeEach(async () => {
       await StorageContract.connect(opSigner).createContextGraph(
@@ -371,10 +371,10 @@ describe('@unit ContextGraphStorage', () => {
       );
     });
 
-    it('returns the correct kcId at a valid index across multiple entries', async () => {
-      await StorageContract.connect(opSigner).registerKCToContextGraph(1, 100);
-      await StorageContract.connect(opSigner).registerKCToContextGraph(1, 200);
-      await StorageContract.connect(opSigner).registerKCToContextGraph(1, 300);
+    it('returns the correct kaId at a valid index across multiple entries', async () => {
+      await StorageContract.connect(opSigner).registerKnowledgeAssetToContextGraph(1, 100);
+      await StorageContract.connect(opSigner).registerKnowledgeAssetToContextGraph(1, 200);
+      await StorageContract.connect(opSigner).registerKnowledgeAssetToContextGraph(1, 300);
 
       expect(await StorageContract.getContextGraphKCAt(1, 0)).to.equal(100);
       expect(await StorageContract.getContextGraphKCAt(1, 1)).to.equal(200);
@@ -384,7 +384,7 @@ describe('@unit ContextGraphStorage', () => {
     });
 
     it('reverts on out-of-bounds index (equal to length)', async () => {
-      await StorageContract.connect(opSigner).registerKCToContextGraph(1, 100);
+      await StorageContract.connect(opSigner).registerKnowledgeAssetToContextGraph(1, 100);
       // list.length == 1, so index 1 is out-of-bounds.
       await expect(
         StorageContract.getContextGraphKCAt(1, 1),
@@ -639,9 +639,9 @@ describe('@unit ContextGraphStorage', () => {
         .withArgs(ghostId);
     });
 
-    it('registerKCToContextGraph reverts on unknown CG (ContextGraphNotActive)', async () => {
+    it('registerKnowledgeAssetToContextGraph reverts on unknown CG (ContextGraphNotActive)', async () => {
       await expect(
-        StorageContract.connect(opSigner).registerKCToContextGraph(ghostId, 1),
+        StorageContract.connect(opSigner).registerKnowledgeAssetToContextGraph(ghostId, 1),
       ).to.be.revertedWithCustomError(StorageContract, 'ContextGraphNotActive');
     });
   });

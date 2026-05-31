@@ -10,7 +10,7 @@ describe('async lift publish result mapping', () => {
       walletId: 'wallet-1',
       publicByteSize: 123,
       publishResult: {
-        kcId: 1n,
+        kaId: 1n,
         ual: 'did:dkg:mock:31337/0xabc/1',
         merkleRoot: new Uint8Array([0xab, 0xcd]),
         kaManifest: [],
@@ -42,7 +42,7 @@ describe('async lift publish result mapping', () => {
     const mapped = mapPublishResultToLiftJobSuccess({
       walletId: 'wallet-1',
       publishResult: {
-        kcId: 1n,
+        kaId: 1n,
         ual: 'did:dkg:mock:31337/0xabc/1',
         merkleRoot: new Uint8Array([0xab, 0xcd]),
         kaManifest: [],
@@ -72,7 +72,7 @@ describe('async lift publish result mapping', () => {
       mapPublishResultToLiftJobSuccess({
         walletId: 'wallet-1',
         publishResult: {
-          kcId: 0n,
+          kaId: 0n,
           ual: 'did:dkg:mock:31337/0xabc/t1',
           merkleRoot: new Uint8Array([0xab, 0xcd]),
           kaManifest: [],
@@ -89,7 +89,7 @@ describe('async lift publish result mapping', () => {
       mapPublishResultToLiftJobSuccess({
         walletId: 'wallet-1',
         publishResult: {
-          kcId: 1n,
+          kaId: 1n,
           ual: 'did:dkg:mock:31337/0xabc/1',
           merkleRoot: new Uint8Array([0xab, 0xcd]),
           kaManifest: [],

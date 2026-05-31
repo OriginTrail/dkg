@@ -33,7 +33,7 @@
  *   The real `EVMChainAdapter.listenForEvents()` yields only the event
  *   types the deployed contracts emit (`KCCreated`,
  *   `ContextGraphExpanded`, `ContextGraphCreated`, ...). It does NOT
- *   yield `KnowledgeCollectionUpdated`, `AllowListUpdated`,
+ *   yield `KnowledgeAssetUpdated`, `AllowListUpdated`,
  *   `ProfileCreated`, or `ProfileUpdated` even though
  *   `ChainEventPoller.poll()` declares callback slots for all four.
  *   Those four callback paths are dead code in production. A dedicated
@@ -434,7 +434,7 @@ describe('ChainEventPoller — fault isolation & lifecycle', () => {
 });
 
 describe('ChainEventPoller — SPEC-GAP SG-6: adapter missing 4 extended event types', () => {
-  it('EVMChainAdapter.listenForEvents does NOT yield KnowledgeCollectionUpdated / AllowListUpdated / ProfileCreated / ProfileUpdated', async () => {
+  it('EVMChainAdapter.listenForEvents does NOT yield KnowledgeAssetUpdated / AllowListUpdated / ProfileCreated / ProfileUpdated', async () => {
     // Spec §5.1 names extended event types the poller declares callback
     // slots for. Four are never produced by the real adapter (the V9
     // KnowledgeAssetsStorage branches were archived together with the
@@ -453,7 +453,7 @@ describe('ChainEventPoller — SPEC-GAP SG-6: adapter missing 4 extended event t
       eventTypes: [
         'KCCreated',
         'ContextGraphCreated',
-        'KnowledgeCollectionUpdated',
+        'KnowledgeAssetUpdated',
         'AllowListUpdated',
         'ProfileCreated',
         'ProfileUpdated',
@@ -464,7 +464,7 @@ describe('ChainEventPoller — SPEC-GAP SG-6: adapter missing 4 extended event t
       yielded.push(ev.type);
     }
 
-    const missing = ['KnowledgeCollectionUpdated', 'AllowListUpdated', 'ProfileCreated', 'ProfileUpdated'];
+    const missing = ['KnowledgeAssetUpdated', 'AllowListUpdated', 'ProfileCreated', 'ProfileUpdated'];
     for (const type of missing) {
       // This assertion is expected to PASS today (adapter never yields
       // these types). If a future PR extends the adapter correctly, the

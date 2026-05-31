@@ -97,7 +97,7 @@ Expected:
 
 - publish succeeds
 - output includes a `Status:` line
-- output includes a `KC ID:` line
+- output includes a `KA ID:` line
 
 ## Step 4: Record the Baseline Result Count
 

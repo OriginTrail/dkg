@@ -69,7 +69,7 @@ for (const sg of SUB_GRAPHS) {
         selection: slice,
         clearAfter: true,
       });
-      console.log(`  · ${sg} drain ${batchN}/${totalBatches}: kcId=${r?.kcId}`);
+      console.log(`  · ${sg} drain ${batchN}/${totalBatches}: kaId=${r?.kaId}`);
     } catch (err) {
       console.warn(`  ! ${sg} drain ${batchN}/${totalBatches} failed: ${err.message.split('\n')[0]}`);
     }

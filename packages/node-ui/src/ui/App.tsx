@@ -10,6 +10,7 @@ import { useAgentsStore } from './stores/agents.js';
 import { useTabsStore } from './stores/tabs.js';
 import { api } from './api-wrapper.js';
 import { CONTEXT_GRAPH_PRIMER_TAB } from './lib/contextGraphPrimer.js';
+import { applyTheme } from './lib/applyTheme.js';
 import { useVisibilityPolling } from './hooks/useVisibilityPolling.js';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts.js';
 import { useShellRouting } from './hooks/useShellRouting.js';
@@ -135,17 +136,10 @@ function AppShell() {
   const [, setVpTick] = useState(0);
 
   useEffect(() => {
-    // Toggle the class on `<html>` (documentElement) — not `<body>` —
-    // because `:root` defines `--bg-root: #000000` and the
-    // `html, body, #root { background: var(--bg-root) }` rule applies
-    // that variable to the `<html>` element first. Putting the override
-    // class on `<body>` only re-cascaded the variable to the body, so
-    // the html element kept rendering the dark colour and rubber-band
-    // overscroll on macOS showed a black strip in light mode. Keep the
-    // body class as well for any selectors authored against `body.light`
-    // historically.
-    document.documentElement.classList.toggle('light', theme === 'light');
-    document.body.classList.toggle('light', theme === 'light');
+    // BUG-004: see applyTheme for why both <html> AND <body> need the
+    // class. The helper lives in src/ui/lib/applyTheme so a unit test
+    // can pin the contract without mounting AppShell.
+    applyTheme(theme);
   }, [theme]);
 
   // Re-render on viewport resize so the render-time clamp in PanelBottom

@@ -102,6 +102,20 @@ export type V10ACKProvider = (
 ) => Promise<V10CoreNodeACK[]>;
 
 /**
+ * V10 update ACK provider: collects core node signatures over the update ACK
+ * digest before `updateKnowledgeCollectionV10` is broadcast.
+ */
+export type V10UpdateACKProvider = (
+  kaId: bigint,
+  newMerkleRoot: Uint8Array,
+  contextGraphId: string,
+  newByteSize: bigint,
+  newMerkleLeafCount: number,
+  newCiphertextChunksRoot?: Uint8Array,
+  newCiphertextChunkCount?: number,
+) => Promise<V10CoreNodeACK[]>;
+
+/**
  * Callback that collects participant signatures for context graph governance.
  */
 export type ParticipantSignatureProvider = (
@@ -148,6 +162,8 @@ export interface PublishOptions {
    * When provided, ACKs are collected and stored in the result.
    */
   v10ACKProvider?: V10ACKProvider;
+  /** V10 update ACK provider — quorum signatures before on-chain update. */
+  v10UpdateACKProvider?: V10UpdateACKProvider;
   /**
    * When publishing into a specific context graph (publishFromSharedMemory),
    * this overrides contextGraphId as the ACK domain and on-chain contextGraphId.
@@ -273,10 +289,22 @@ export interface PublishOptions {
     signature: { r: Uint8Array; vs: Uint8Array };
     schemeVersion: number;
   };
+  /**
+   * RFC-001 greenfield — owner seal for on-chain `update`, produced before
+   * the hosted API call (mirror of `precomputedAttestation` on publish).
+   * Publisher verifies `expectedNewMerkleRoot` and forwards `(authorR, authorVS)`
+   * to the chain adapter; it never signs the update attestation itself.
+   */
+  precomputedUpdateAttestation?: {
+    expectedNewMerkleRoot: Uint8Array;
+    authorAddress: string;
+    signature: { r: Uint8Array; vs: Uint8Array };
+    schemeVersion: number;
+  };
 }
 
 export interface PublishResult {
-  kcId: bigint;
+  kaId: bigint;
   /** The UAL assigned to this KC (tentative or confirmed). */
   ual: string;
   merkleRoot: Uint8Array;
@@ -297,7 +325,7 @@ export interface PublishResult {
 
 export interface Publisher {
   publish(options: PublishOptions): Promise<PublishResult>;
-  update(kcId: bigint, options: PublishOptions): Promise<PublishResult>;
+  update(kaId: bigint, options: PublishOptions): Promise<PublishResult>;
   autoPartition(quads: Quad[]): KAManifestEntry[];
   skolemize(rootEntity: string, quads: Quad[]): Quad[];
 }

@@ -87,7 +87,7 @@ export interface BenchmarkClient {
     contextGraphId: string,
     selection: 'all' | { rootEntities: string[] },
     clearAfter?: boolean,
-  ): Promise<{ kcId?: string; status?: string; kas?: Array<{ tokenId: string; rootEntity: string }> }>;
+  ): Promise<{ kaId?: string; status?: string; kas?: Array<{ tokenId: string; rootEntity: string }> }>;
   publisherEnqueue(request: {
     contextGraphId: string;
     shareOperationId: string;

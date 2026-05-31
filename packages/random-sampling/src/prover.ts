@@ -32,7 +32,7 @@ import {
   KCDataMissingError,
   KCNotFoundError,
   KCRootEntitiesNotFoundError,
-} from './kc-extractor.js';
+} from './ka-extractor.js';
 import {
   extractCiphertextChunksFromStore,
   CiphertextChunksMissingError,
@@ -62,16 +62,16 @@ export type TickOutcome =
   | { kind: 'period-closed' }
   | { kind: 'no-challenge'; reason: 'no-eligible-cg' | 'no-eligible-kc' }
   | { kind: 'already-solved' }
-  | { kind: 'cg-not-found'; kcId: bigint }
-  | { kind: 'kc-not-synced'; kcId: bigint; cgId: bigint }
+  | { kind: 'cg-not-found'; kaId: bigint }
+  | { kind: 'kc-not-synced'; kaId: bigint; cgId: bigint }
   | {
       kind: 'data-corrupted';
-      kcId: bigint;
+      kaId: bigint;
       cgId: bigint;
       reason: 'root-mismatch' | 'leaf-count-mismatch' | 'meta-graph-bug';
     }
   | { kind: 'submit-stale' }
-  | { kind: 'submitted'; txHash: string; kcId: bigint; cgId: bigint; chunkId: bigint }
+  | { kind: 'submitted'; txHash: string; kaId: bigint; cgId: bigint; chunkId: bigint }
   | { kind: 'error'; error: Error };
 
 export interface RandomSamplingProverDeps {
@@ -263,7 +263,7 @@ export class RandomSamplingProver {
       !this.chain.getNodeChallenge ||
       !this.chain.getLatestMerkleRoot ||
       !this.chain.getMerkleLeafCount ||
-      !this.chain.getKCContextGraphId
+      !this.chain.getKAContextGraphId
     ) {
       throw new Error(
         'RandomSamplingProver: chain adapter missing required RandomSampling / KC view methods',
@@ -360,7 +360,7 @@ export class RandomSamplingProver {
     }
     if (existingIsCurrent && !existing.solved && !unsolvedStale) {
       challenge = existing;
-      cgId = await this.chain.getKCContextGraphId(challenge.knowledgeCollectionId);
+      cgId = await this.chain.getKAContextGraphId(challenge.knowledgeAssetId);
     } else {
       try {
         const created = await this.chain.createChallenge();
@@ -381,26 +381,26 @@ export class RandomSamplingProver {
 
     periodKey.epoch = challenge.epoch;
     periodKey.periodStartBlock = challenge.activeProofPeriodStartBlock;
-    const kcId = challenge.knowledgeCollectionId;
+    const kaId = challenge.knowledgeAssetId;
     const chunkId = challenge.chunkId;
 
     await this.wal.append(
       makeWalEntry(periodKey, 'challenge', {
-        kcId: kcId.toString(),
+        kaId: kaId.toString(),
         cgId: cgId.toString(),
         chunkId: chunkId.toString(),
       }),
     );
 
     if (cgId === 0n) {
-      this.log.warn('rs.tick.cg-not-found', { kcId: kcId.toString() });
+      this.log.warn('rs.tick.cg-not-found', { kaId: kaId.toString() });
       await this.wal.append(
         makeWalEntry(periodKey, 'failed', {
-          kcId: kcId.toString(),
-          error: { code: 'cg-not-found', message: 'getKCContextGraphId returned 0' },
+          kaId: kaId.toString(),
+          error: { code: 'cg-not-found', message: 'getKAContextGraphId returned 0' },
         }),
       );
-      return { kind: 'cg-not-found', kcId };
+      return { kind: 'cg-not-found', kaId };
     }
 
     // OT-RFC-39 — pick the V10 substrate the challenge was drawn against.
@@ -425,11 +425,11 @@ export class RandomSamplingProver {
     }
 
     const expectedRoot = isCurated
-      ? await this.chain.getLatestCiphertextChunksRoot!(kcId)
-      : await this.chain.getLatestMerkleRoot(kcId);
+      ? await this.chain.getLatestCiphertextChunksRoot!(kaId)
+      : await this.chain.getLatestMerkleRoot(kaId);
     const expectedLeafCount = isCurated
-      ? await this.chain.getCiphertextChunkCount!(kcId)
-      : await this.chain.getMerkleLeafCount(kcId);
+      ? await this.chain.getCiphertextChunkCount!(kaId)
+      : await this.chain.getMerkleLeafCount(kaId);
 
     let leaves: Uint8Array[];
     let proofKind: 'flat-kc' | 'ciphertext-chunks';
@@ -442,7 +442,7 @@ export class RandomSamplingProver {
       // Read it from chain on the public-merkleRoot slot (still present
       // even on curated KCs; LU-11 added a parallel ciphertext slot,
       // not a replacement of the plaintext one).
-      const batchId = await this.chain.getLatestMerkleRoot(kcId);
+      const batchId = await this.chain.getLatestMerkleRoot(kaId);
       // Two-attempt extract loop: the first attempt reads whatever the
       // local store already holds. If chunks are missing AND the host
       // wired a backfill hook (OT-RFC-39 late-join sync), we ask it to
@@ -459,7 +459,7 @@ export class RandomSamplingProver {
           curatedExtracted = await extractCiphertextChunksFromStore({
             store: this.store,
             contextGraphId: cgId,
-            kcId,
+            kaId,
             batchId,
             expectedCount: expectedLeafCount,
             contextGraphIdCanonical: cgIdCanonicalForChunks,
@@ -468,7 +468,7 @@ export class RandomSamplingProver {
           if (err instanceof CiphertextChunksMissingError) {
             if (attempt === 0 && this.ciphertextChunkBackfill) {
               this.log.warn('rs.tick.chunk-backfill-start', {
-                kcId: kcId.toString(),
+                kaId: kaId.toString(),
                 cgId: cgId.toString(),
                 missingCount: err.missingChunkIndexes.length,
                 expectedCount: err.expectedCount,
@@ -482,14 +482,14 @@ export class RandomSamplingProver {
                 });
               } catch (hookErr) {
                 this.log.warn('rs.tick.chunk-backfill-error', {
-                  kcId: kcId.toString(),
+                  kaId: kaId.toString(),
                   cgId: cgId.toString(),
                   err: hookErr instanceof Error ? hookErr.message.slice(0, 200) : String(hookErr).slice(0, 200),
                 });
                 backfill = { fetched: 0, failures: err.missingChunkIndexes.length, reason: 'hook-threw' };
               }
               this.log.info('rs.tick.chunk-backfill-result', {
-                kcId: kcId.toString(),
+                kaId: kaId.toString(),
                 cgId: cgId.toString(),
                 fetched: backfill.fetched,
                 failures: backfill.failures,
@@ -513,7 +513,7 @@ export class RandomSamplingProver {
             // misses, which read as `backfillAttempted=false`).
             const backfillAttempted = attempt > 0;
             this.log.warn('rs.tick.kc-not-synced', {
-              kcId: kcId.toString(),
+              kaId: kaId.toString(),
               cgId: cgId.toString(),
               err: err.name,
               missingCount: err.missingChunkIndexes.length,
@@ -522,7 +522,7 @@ export class RandomSamplingProver {
             });
             await this.wal.append(
               makeWalEntry(periodKey, 'failed', {
-                kcId: kcId.toString(),
+                kaId: kaId.toString(),
                 cgId: cgId.toString(),
                 chunkId: chunkId.toString(),
                 error: {
@@ -531,24 +531,24 @@ export class RandomSamplingProver {
                 },
               }),
             );
-            return { kind: 'kc-not-synced', kcId, cgId };
+            return { kind: 'kc-not-synced', kaId, cgId };
           }
           if (err instanceof CiphertextChunksMalformedError) {
             this.log.error('rs.tick.data-corrupted', {
-              kcId: kcId.toString(),
+              kaId: kaId.toString(),
               cgId: cgId.toString(),
               reason: 'ciphertext-chunk-malformed',
               chunkIndex: err.chunkIndex,
             });
             await this.wal.append(
               makeWalEntry(periodKey, 'failed', {
-                kcId: kcId.toString(),
+                kaId: kaId.toString(),
                 cgId: cgId.toString(),
                 chunkId: chunkId.toString(),
                 error: { code: err.name, message: err.message.slice(0, 200) },
               }),
             );
-            return { kind: 'data-corrupted', kcId, cgId, reason: 'meta-graph-bug' };
+            return { kind: 'data-corrupted', kaId, cgId, reason: 'meta-graph-bug' };
           }
           throw err;
         }
@@ -559,18 +559,18 @@ export class RandomSamplingProver {
     } else {
       proofKind = 'flat-kc';
       try {
-        const extracted = await extractV10KCFromStore(this.store, cgId, kcId);
+        const extracted = await extractV10KCFromStore(this.store, cgId, kaId);
         leaves = extracted.leaves;
       } catch (err) {
         if (err instanceof KCNotFoundError || err instanceof KCDataMissingError) {
           this.log.warn('rs.tick.kc-not-synced', {
-            kcId: kcId.toString(),
+            kaId: kaId.toString(),
             cgId: cgId.toString(),
             err: (err as Error).name,
           });
           await this.wal.append(
             makeWalEntry(periodKey, 'failed', {
-              kcId: kcId.toString(),
+              kaId: kaId.toString(),
               cgId: cgId.toString(),
               chunkId: chunkId.toString(),
               error: {
@@ -579,23 +579,23 @@ export class RandomSamplingProver {
               },
             }),
           );
-          return { kind: 'kc-not-synced', kcId, cgId };
+          return { kind: 'kc-not-synced', kaId, cgId };
         }
         if (err instanceof KCRootEntitiesNotFoundError) {
           this.log.error('rs.tick.meta-graph-bug', {
-            kcId: kcId.toString(),
+            kaId: kaId.toString(),
             cgId: cgId.toString(),
             ual: err.ual,
           });
           await this.wal.append(
             makeWalEntry(periodKey, 'failed', {
-              kcId: kcId.toString(),
+              kaId: kaId.toString(),
               cgId: cgId.toString(),
               chunkId: chunkId.toString(),
               error: { code: 'KCRootEntitiesNotFoundError', message: err.message.slice(0, 200) },
             }),
           );
-          return { kind: 'data-corrupted', kcId, cgId, reason: 'meta-graph-bug' };
+          return { kind: 'data-corrupted', kaId, cgId, reason: 'meta-graph-bug' };
         }
         throw err;
       }
@@ -603,7 +603,7 @@ export class RandomSamplingProver {
 
     await this.wal.append(
       makeWalEntry(periodKey, 'extracted', {
-        kcId: kcId.toString(),
+        kaId: kaId.toString(),
         cgId: cgId.toString(),
         chunkId: chunkId.toString(),
       }),
@@ -622,7 +622,7 @@ export class RandomSamplingProver {
       if (reason) {
         const e = err as any;
         this.log.error('rs.tick.data-corrupted', {
-          kcId: kcId.toString(),
+          kaId: kaId.toString(),
           cgId: cgId.toString(),
           reason,
           err: (err as Error).name,
@@ -635,20 +635,20 @@ export class RandomSamplingProver {
         });
         await this.wal.append(
           makeWalEntry(periodKey, 'failed', {
-            kcId: kcId.toString(),
+            kaId: kaId.toString(),
             cgId: cgId.toString(),
             chunkId: chunkId.toString(),
             error: { code: (err as Error).name, message: (err as Error).message.slice(0, 200) },
           }),
         );
-        return { kind: 'data-corrupted', kcId, cgId, reason };
+        return { kind: 'data-corrupted', kaId, cgId, reason };
       }
       throw err;
     }
 
     await this.wal.append(
       makeWalEntry(periodKey, 'built', {
-        kcId: kcId.toString(),
+        kaId: kaId.toString(),
         cgId: cgId.toString(),
         chunkId: chunkId.toString(),
       }),
@@ -660,12 +660,12 @@ export class RandomSamplingProver {
     } catch (err) {
       if (err instanceof ChallengeNoLongerActiveError) {
         this.log.warn('rs.tick.submit-stale', {
-          kcId: kcId.toString(),
+          kaId: kaId.toString(),
           cgId: cgId.toString(),
         });
         await this.wal.append(
           makeWalEntry(periodKey, 'failed', {
-            kcId: kcId.toString(),
+            kaId: kaId.toString(),
             cgId: cgId.toString(),
             chunkId: chunkId.toString(),
             error: { code: 'ChallengeNoLongerActive', message: err.message.slice(0, 200) },
@@ -679,37 +679,37 @@ export class RandomSamplingProver {
         // either (a) a race against an UPDATE that flipped the root,
         // or (b) a bug. Drop the period; rebuild on the next.
         this.log.error('rs.tick.chain-root-mismatch', {
-          kcId: kcId.toString(),
+          kaId: kaId.toString(),
           cgId: cgId.toString(),
         });
         await this.wal.append(
           makeWalEntry(periodKey, 'failed', {
-            kcId: kcId.toString(),
+            kaId: kaId.toString(),
             cgId: cgId.toString(),
             chunkId: chunkId.toString(),
             error: { code: 'MerkleRootMismatch', message: err.message.slice(0, 200) },
           }),
         );
-        return { kind: 'data-corrupted', kcId, cgId, reason: 'root-mismatch' };
+        return { kind: 'data-corrupted', kaId, cgId, reason: 'root-mismatch' };
       }
       throw err;
     }
 
     await this.wal.append(
       makeWalEntry(periodKey, 'submitted', {
-        kcId: kcId.toString(),
+        kaId: kaId.toString(),
         cgId: cgId.toString(),
         chunkId: chunkId.toString(),
         txHash: txResult.hash,
       }),
     );
     this.log.info('rs.tick.submitted', {
-      kcId: kcId.toString(),
+      kaId: kaId.toString(),
       cgId: cgId.toString(),
       chunkId: chunkId.toString(),
       txHash: txResult.hash,
     });
-    return { kind: 'submitted', txHash: txResult.hash, kcId, cgId, chunkId };
+    return { kind: 'submitted', txHash: txResult.hash, kaId, cgId, chunkId };
   }
 }
 

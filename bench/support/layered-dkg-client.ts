@@ -12,7 +12,7 @@ interface MemoryRecord {
   marker: string;
   quads: Quad[];
   shareOperationId?: string;
-  kcId?: string;
+  kaId?: string;
 }
 
 interface PublisherJob {
@@ -89,13 +89,13 @@ export class LayeredDkgBenchmarkClient implements BenchmarkClient {
     clearAfter = false,
   ) {
     const roots = selection === 'all' ? [...this.sharedWorkingMemory.keys()] : selection.rootEntities;
-    const kcId = `kc-${++this.kcSequence}`;
+    const kaId = `kc-${++this.kcSequence}`;
     for (const rootEntity of roots) {
-      this.promoteSharedRoot(contextGraphId, rootEntity, kcId);
+      this.promoteSharedRoot(contextGraphId, rootEntity, kaId);
       if (clearAfter) this.sharedWorkingMemory.delete(rootEntity);
     }
     return {
-      kcId,
+      kaId,
       status: 'finalized',
       kas: roots.map((rootEntity, index) => ({ tokenId: String(index + 1), rootEntity })),
     };
@@ -124,9 +124,9 @@ export class LayeredDkgBenchmarkClient implements BenchmarkClient {
 
     if (job.status === 'queued') {
       try {
-        const kcId = `kc-${++this.kcSequence}`;
+        const kaId = `kc-${++this.kcSequence}`;
         for (const rootEntity of job.roots) {
-          this.promoteSharedRoot(job.contextGraphId, rootEntity, kcId);
+          this.promoteSharedRoot(job.contextGraphId, rootEntity, kaId);
         }
         job.status = 'finalized';
       } catch (error) {
@@ -155,13 +155,13 @@ export class LayeredDkgBenchmarkClient implements BenchmarkClient {
     };
   }
 
-  private promoteSharedRoot(contextGraphId: string, rootEntity: string, kcId: string): void {
+  private promoteSharedRoot(contextGraphId: string, rootEntity: string, kaId: string): void {
     const staged = this.sharedWorkingMemory.get(rootEntity);
     if (!staged) throw new Error(`Root ${rootEntity} is missing from shared working memory`);
     if (staged.contextGraphId !== contextGraphId) {
       throw new Error(`Root ${rootEntity} belongs to ${staged.contextGraphId}, not ${contextGraphId}`);
     }
-    this.verifiedMemory.set(rootEntity, { ...staged, kcId });
+    this.verifiedMemory.set(rootEntity, { ...staged, kaId });
   }
 
   private layer(view: MemoryView): Map<string, MemoryRecord> {

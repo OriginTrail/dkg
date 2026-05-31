@@ -766,7 +766,10 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           WHERE { GRAPH ?g { ?s ?p ?o } }
           GROUP BY ?g
         `;
-        const result = await agent.query(sparql, { contextGraphId: contextGraphId! });
+        const result = await agent.query(sparql, {
+          contextGraphId: contextGraphId!,
+          includeContextGraphPartitions: true,
+        });
         const prefix = `did:dkg:context-graph:${contextGraphId}/`;
         const parseCount = (v: any) => {
           if (v === undefined || v === null) return 0;

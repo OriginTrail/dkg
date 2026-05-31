@@ -26,6 +26,10 @@ function triple(subject: string, graph: string) {
   return { s: { value: subject }, p: { value: RDF_TYPE }, o: { value: 'http://schema.org/Thing' }, g: { value: graph } };
 }
 
+function sparqlLimit(sparql: string): number {
+  return Number(sparql.match(/\bLIMIT\s+(\d+)/i)?.[1] ?? 0);
+}
+
 function Probe({ id }: { id: string }) {
   // Dashboard-style consumer: opts into failed-vs-empty signalling.
   const m = useMemoryEntities(id, { signalErrors: true });
@@ -38,6 +42,7 @@ function Probe({ id }: { id: string }) {
     'data-swm-status': m.layerStatus.swm,
     'data-vm-status': m.layerStatus.vm,
     'data-wm': String(m.counts.wm),
+    'data-swm': String(m.counts.swm),
     'data-vm': String(m.counts.vm),
     'data-total': String(m.counts.total),
   });
@@ -48,8 +53,10 @@ async function flush() { await act(async () => { await Promise.resolve(); await 
 describe('useMemoryEntities — partial layer failure', () => {
   let container: HTMLDivElement;
   let root: Root;
+  let scenario: 'swm-error' | 'swm-limit';
 
   beforeEach(() => {
+    scenario = 'swm-error';
     MockEventSource.instances = [];
     (globalThis as any).EventSource = MockEventSource;
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -65,11 +72,23 @@ describe('useMemoryEntities — partial layer failure', () => {
       // Robust layer discriminators: every query references both
       // "/assertion/" and "/_shared_memory" (inside FILTER negations),
       // so match on tokens unique to each — `_verified_memory_meta`
-      // only appears in the VM query, `STRENDS` only in the SWM query.
+      // only appears in the VM query, the `/_shared_memory` tail
+      // check only in the SWM query (PR #818 sweep 3: WM also has
+      // `STRENDS(..., "/_meta")` now so the bare `STRENDS` token
+      // no longer discriminates).
       const isVm = sparql.includes('_verified_memory_meta');
-      const isSwm = !isVm && sparql.includes('STRENDS');
+      const isSwm = !isVm && sparql.includes('STRENDS(STR(?g), "/_shared_memory")');
       const isWm = !isVm && !isSwm;
-      if (isSwm) return { ok: false, status: 500, json: async () => ({}) } as Response;
+      if (isSwm && scenario === 'swm-error') {
+        return { ok: false, status: 500, json: async () => ({}) } as Response;
+      }
+      if (isSwm && scenario === 'swm-limit') {
+        const limit = sparqlLimit(sparql);
+        return { ok: true, json: async () => ({ result: { bindings: Array.from(
+          { length: limit },
+          () => triple(`urn:${contextGraphId}:swm-limited`, `did:dkg:context-graph:${contextGraphId}/n/_shared_memory`),
+        ) } }) } as Response;
+      }
       if (isWm) {
         return { ok: true, json: async () => ({ result: { bindings: [
           triple(`urn:${contextGraphId}:wm-1`, `did:dkg:context-graph:${contextGraphId}/n/assertion/a/x-1`),
@@ -105,5 +124,25 @@ describe('useMemoryEntities — partial layer failure', () => {
     expect(el.getAttribute('data-wm')).toBe('2');
     expect(el.getAttribute('data-vm')).toBe('1');
     expect(Number(el.getAttribute('data-total'))).toBeGreaterThan(0);
+  });
+
+  it('marks counts partial when a successful layer reaches its query limit', async () => {
+    scenario = 'swm-limit';
+
+    await act(async () => { root.render(React.createElement(Probe, { id: 'cg-limited' })); });
+    await flush();
+
+    const el = container.querySelector('#probe')!;
+    expect(el.getAttribute('data-loading')).toBe('false');
+    expect(el.getAttribute('data-error')).toBe('null');
+    expect(el.getAttribute('data-partial')).toBe('true');
+    expect(el.getAttribute('data-wm-status')).toBe('ok');
+    expect(el.getAttribute('data-swm-status')).toBe('ok');
+    expect(el.getAttribute('data-vm-status')).toBe('ok');
+    expect(el.getAttribute('data-swm')).toBe('1');
+
+    const queryBodies = vi.mocked(fetch).mock.calls
+      .map(([, init]) => JSON.parse(String(init?.body ?? '{}')) as { layerLimit?: number });
+    expect(queryBodies.every(body => body.layerLimit === undefined)).toBe(true);
   });
 });

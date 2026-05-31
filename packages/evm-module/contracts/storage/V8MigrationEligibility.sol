@@ -63,7 +63,7 @@ import {IVersioned} from "../interfaces/IVersioned.sol";
  */
 contract V8MigrationEligibility is INamed, IVersioned, HubDependent {
     string private constant _NAME = "V8MigrationEligibility";
-    string private constant _VERSION = "1.0.0";
+    string private constant _VERSION = "10.0.2";
 
     /// @notice One-shot lock. While `false`, HubOwner may grow the
     ///         registry. Once `true`, the registry is immutable.

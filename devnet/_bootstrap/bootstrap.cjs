@@ -368,7 +368,7 @@ async function main() {
         );
       }
       let pubJson = await pubRes.json();
-      if (pubJson.status === 'tentative' || pubJson.kcId === '0') {
+      if (pubJson.status === 'tentative' || pubJson.kaId === '0') {
         await new Promise((r) => setTimeout(r, 2000));
         const retry = await fetch(
           `http://127.0.0.1:${core.apiPort}/api/shared-memory/publish`,
@@ -389,12 +389,12 @@ async function main() {
       publishLog.push({
         core: core.num,
         name,
-        kcId: pubJson.kcId || null,
+        kaId: pubJson.kaId || null,
         status: pubJson.status || 'unknown',
         author: pubJson.author || null,
       });
       log(
-        `  publish core${core.num} #${i} → kcId=${pubJson.kcId || '?'}, status=${pubJson.status || '?'}`,
+        `  publish core${core.num} #${i} → kaId=${pubJson.kaId || '?'}, status=${pubJson.status || '?'}`,
       );
     }
   }
@@ -443,7 +443,7 @@ async function main() {
   console.log('Demo publishes (drives RS):');
   for (const p of publishLog) {
     console.log(
-      `  core${p.core}  kcId=${p.kcId}  status=${p.status}  ${p.name}`,
+      `  core${p.core}  kaId=${p.kaId}  status=${p.status}  ${p.name}`,
     );
   }
   console.log('========================================================');

@@ -76,7 +76,7 @@ beforeAll(async () => {
   WORKSPACE_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory`;
   WORKSPACE_META_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory_meta`;
   _provider = provider;
-  _kav10Address = await chain.getKnowledgeAssetsV10Address();
+  _kav10Address = await chain.getKnowledgeAssetsLifecycleAddress();
 });
 afterAll(async () => {
   await revertSnapshot(_fileSnapshot);
@@ -223,17 +223,21 @@ describe('Prefix deletion safety', () => {
       const fooQuads = [q('urn:x:foo', 'http://schema.org/name', '"Foo"')];
       const foobarQuads = [q('urn:x:foobar', 'http://schema.org/name', '"Foobar"')];
 
-      const published = await publisher.publish({ contextGraphId: CONTEXT_GRAPH, quads: [...fooQuads, ...foobarQuads] });
+      // Greenfield (PR #815): one KA per publish, so foo and foobar are
+      // published as two separate single-KA assets. Both land in the same
+      // data graph, which is what the prefix-deletion-safety check needs.
+      const published = await publisher.publish({ contextGraphId: CONTEXT_GRAPH, quads: fooQuads });
+      await publisher.publish({ contextGraphId: CONTEXT_GRAPH, quads: foobarQuads });
 
       const updateQuads = [q('urn:x:foo', 'http://schema.org/name', '"Foo Updated"')];
-      const updateResult = await publisher.update(published.kcId, {
+      const updateResult = await publisher.update(published.kaId, {
         contextGraphId: CONTEXT_GRAPH,
         quads: updateQuads,
       });
 
       const gossipMsg = encodeKAUpdateRequest({
         contextGraphId: CONTEXT_GRAPH,
-        batchId: published.kcId,
+        batchId: published.kaId,
         nquads: quadsToNQuads(updateQuads, DATA_GRAPH),
         manifest: [{ rootEntity: 'urn:x:foo', privateTripleCount: 0 }],
         publisherPeerId: '12D3KooWPeer',
@@ -457,7 +461,7 @@ describe('EVMChainAdapter.verifyKAUpdate', () => {
     expect(original.status).toBe('confirmed');
 
     const updateQuads = [q('urn:verify:root', 'http://schema.org/name', '"Updated"')];
-    const updateResult = await publisher.update(original.kcId, {
+    const updateResult = await publisher.update(original.kaId, {
       contextGraphId: CONTEXT_GRAPH,
       quads: updateQuads,
     });
@@ -465,7 +469,7 @@ describe('EVMChainAdapter.verifyKAUpdate', () => {
 
     const verification = await chain.verifyKAUpdate(
       updateResult.onChainResult!.txHash,
-      original.kcId,
+      original.kaId,
       wallet.address,
     );
 
@@ -491,13 +495,13 @@ describe('EVMChainAdapter.verifyKAUpdate', () => {
     });
     expect(original.status).toBe('confirmed');
 
-    const updateResult = await publisher.update(original.kcId, {
+    const updateResult = await publisher.update(original.kaId, {
       contextGraphId: CONTEXT_GRAPH,
       quads: [q('urn:verify:wrong-tx', 'http://schema.org/name', '"Updated"')],
     });
     expect(updateResult.status).toBe('confirmed');
 
-    const verification = await chain.verifyKAUpdate('0xWRONG', original.kcId, wallet.address);
+    const verification = await chain.verifyKAUpdate('0xWRONG', original.kaId, wallet.address);
     expect(verification.verified).toBe(false);
   });
 
@@ -517,14 +521,14 @@ describe('EVMChainAdapter.verifyKAUpdate', () => {
     });
     expect(original.status).toBe('confirmed');
 
-    const updateResult = await publisher.update(original.kcId, {
+    const updateResult = await publisher.update(original.kaId, {
       contextGraphId: CONTEXT_GRAPH,
       quads: [q('urn:verify:wrong-addr', 'http://schema.org/name', '"Updated"')],
     });
     expect(updateResult.status).toBe('confirmed');
 
     const verification = await chain.verifyKAUpdate(
-      updateResult.onChainResult!.txHash, original.kcId, '0xWrongAddress',
+      updateResult.onChainResult!.txHash, original.kaId, '0xWrongAddress',
     );
     expect(verification.verified).toBe(false);
   });
@@ -557,13 +561,13 @@ describe('Same-block ordering', () => {
     });
 
     const update1Quads = [q('urn:same:block', 'http://schema.org/name', '"Update 1"')];
-    const update1 = await publisher.update(original.kcId, {
+    const update1 = await publisher.update(original.kaId, {
       contextGraphId: CONTEXT_GRAPH,
       quads: update1Quads,
     });
 
     const update2Quads = [q('urn:same:block', 'http://schema.org/name', '"Update 2"')];
-    const update2 = await publisher.update(original.kcId, {
+    const update2 = await publisher.update(original.kaId, {
       contextGraphId: CONTEXT_GRAPH,
       quads: update2Quads,
     });
@@ -573,7 +577,7 @@ describe('Same-block ordering', () => {
     const buildMsg = (quads: Quad[], txHash: string, blockNumber: number) =>
       encodeKAUpdateRequest({
         contextGraphId: CONTEXT_GRAPH,
-        batchId: original.kcId,
+        batchId: original.kaId,
         nquads: quadsToNQuads(quads, DATA_GRAPH),
         manifest: [{ rootEntity: 'urn:same:block', privateTripleCount: 0 }],
         publisherPeerId: '12D3KooWPeer',
@@ -623,14 +627,14 @@ describe('Same-block ordering', () => {
     });
 
     const updateQuads = [q('urn:replay', 'http://schema.org/name', '"Updated"')];
-    const updateResult = await publisher.update(original.kcId, {
+    const updateResult = await publisher.update(original.kaId, {
       contextGraphId: CONTEXT_GRAPH,
       quads: updateQuads,
     });
 
     const msg = encodeKAUpdateRequest({
       contextGraphId: CONTEXT_GRAPH,
-      batchId: original.kcId,
+      batchId: original.kaId,
       nquads: quadsToNQuads(updateQuads, DATA_GRAPH),
       manifest: [{ rootEntity: 'urn:replay', privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeer',
@@ -679,7 +683,7 @@ describe('publisher.update() atomicity', () => {
       quads: [q('urn:atomic', 'http://schema.org/name', '"Original"')],
     });
 
-    // Attempt to update a non-existent batch — V10 catches KnowledgeCollectionExpired
+    // Attempt to update a non-existent batch — V10 catches KnowledgeAssetExpired
     // as a definitive error and returns status: 'failed' (no throw, no store mutation)
     const failedUpdate = await publisher.update(999n, {
       contextGraphId: CONTEXT_GRAPH,
@@ -725,14 +729,14 @@ describe('EVMChainAdapter.verifyKAUpdate txIndex', () => {
     });
     expect(original.status).toBe('confirmed');
 
-    const updateResult = await publisher.update(original.kcId, {
+    const updateResult = await publisher.update(original.kaId, {
       contextGraphId: CONTEXT_GRAPH,
       quads: [q('urn:txidx:verify', 'http://schema.org/name', '"Updated"')],
     });
     expect(updateResult.status).toBe('confirmed');
 
     const verification = await chain.verifyKAUpdate(
-      updateResult.onChainResult!.txHash, original.kcId, wallet.address,
+      updateResult.onChainResult!.txHash, original.kaId, wallet.address,
     );
     expect(verification.verified).toBe(true);
     expect(verification.txIndex).toBeDefined();
@@ -837,18 +841,18 @@ describe('Cross-contextGraph binding (trusted source)', () => {
       contextGraphId: CONTEXT_GRAPH,
       quads: [q('urn:trusted:bind', 'http://schema.org/name', '"Original"')],
     });
-    expect(knownBatchContextGraphs.get(String(original.kcId))).toBe(CONTEXT_GRAPH);
+    expect(knownBatchContextGraphs.get(String(original.kaId))).toBe(CONTEXT_GRAPH);
 
     // Attacker tries to replay the same batchId on a different contextGraph
     const updateQuads = [q('urn:trusted:bind', 'http://schema.org/name', '"Hacked"')];
-    const updateResult = await publisher.update(original.kcId, {
+    const updateResult = await publisher.update(original.kaId, {
       contextGraphId: CONTEXT_GRAPH,
       quads: updateQuads,
     });
 
     const attackMsg = encodeKAUpdateRequest({
       contextGraphId: 'attacker-contextGraph',
-      batchId: original.kcId,
+      batchId: original.kaId,
       nquads: quadsToNQuads(updateQuads, 'did:dkg:context-graph:attacker-contextGraph'),
       manifest: [{ rootEntity: 'urn:trusted:bind', privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWAttacker',
@@ -900,13 +904,13 @@ describe('Same-block txIndex ordering', () => {
     });
     expect(original.status).toBe('confirmed');
 
-    const update1 = await publisher.update(original.kcId, {
+    const update1 = await publisher.update(original.kaId, {
       contextGraphId: CONTEXT_GRAPH,
       quads: [q('urn:sameblock:txidx', 'http://schema.org/name', '"Update 1"')],
     });
     expect(update1.status).toBe('confirmed');
 
-    const update2 = await publisher.update(original.kcId, {
+    const update2 = await publisher.update(original.kaId, {
       contextGraphId: CONTEXT_GRAPH,
       quads: [q('urn:sameblock:txidx', 'http://schema.org/name', '"Update 2"')],
     });
@@ -916,8 +920,8 @@ describe('Same-block txIndex ordering', () => {
     expect(update1.onChainResult!.txHash).not.toBe(update2.onChainResult!.txHash);
 
     // Verify both updates
-    const v1 = await chain.verifyKAUpdate(update1.onChainResult!.txHash, original.kcId, wallet.address);
-    const v2 = await chain.verifyKAUpdate(update2.onChainResult!.txHash, original.kcId, wallet.address);
+    const v1 = await chain.verifyKAUpdate(update1.onChainResult!.txHash, original.kaId, wallet.address);
+    const v2 = await chain.verifyKAUpdate(update2.onChainResult!.txHash, original.kaId, wallet.address);
     expect(v1.verified).toBe(true);
     expect(v2.verified).toBe(true);
     expect(v1.txIndex).toBeDefined();
@@ -942,10 +946,10 @@ describe('Same-block txIndex ordering', () => {
     });
 
     const q1 = [q('urn:txidx', 'http://schema.org/name', '"Update 1"')];
-    const update1 = await publisher.update(original.kcId, { contextGraphId: CONTEXT_GRAPH, quads: q1 });
+    const update1 = await publisher.update(original.kaId, { contextGraphId: CONTEXT_GRAPH, quads: q1 });
 
     const q2 = [q('urn:txidx', 'http://schema.org/name', '"Update 2"')];
-    const update2 = await publisher.update(original.kcId, { contextGraphId: CONTEXT_GRAPH, quads: q2 });
+    const update2 = await publisher.update(original.kaId, { contextGraphId: CONTEXT_GRAPH, quads: q2 });
 
     expect(update2.onChainResult!.blockNumber).toBeGreaterThanOrEqual(update1.onChainResult!.blockNumber);
 
@@ -954,7 +958,7 @@ describe('Same-block txIndex ordering', () => {
     // Apply update2 (later) first
     const msg2 = encodeKAUpdateRequest({
       contextGraphId: CONTEXT_GRAPH,
-      batchId: original.kcId,
+      batchId: original.kaId,
       nquads: quadsToNQuads(q2, DATA_GRAPH),
       manifest: [{ rootEntity: 'urn:txidx', privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeer',
@@ -969,7 +973,7 @@ describe('Same-block txIndex ordering', () => {
     // Now try update1 (earlier) — should be rejected (lower block/txIndex)
     const msg1 = encodeKAUpdateRequest({
       contextGraphId: CONTEXT_GRAPH,
-      batchId: original.kcId,
+      batchId: original.kaId,
       nquads: quadsToNQuads(q1, DATA_GRAPH),
       manifest: [{ rootEntity: 'urn:txidx', privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeer',
@@ -1023,12 +1027,12 @@ describe('lookupBatchContextGraph typed-literal SPARQL', () => {
     const handler = new UpdateHandler(store, chain, eventBus);
 
     const q2 = [q('urn:typed-lit', 'http://schema.org/name', '"Updated"')];
-    const update = await publisher.update(original.kcId, { contextGraphId: CONTEXT_GRAPH, quads: q2 });
+    const update = await publisher.update(original.kaId, { contextGraphId: CONTEXT_GRAPH, quads: q2 });
     expect(update.status).toBe('confirmed');
 
     const msg = encodeKAUpdateRequest({
       contextGraphId: CONTEXT_GRAPH,
-      batchId: original.kcId,
+      batchId: original.kaId,
       nquads: quadsToNQuads(q2, DATA_GRAPH),
       manifest: [{ rootEntity: 'urn:typed-lit', privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeer',
@@ -1071,12 +1075,12 @@ describe('lookupBatchContextGraph typed-literal SPARQL', () => {
     const handler = new UpdateHandler(store, chain, eventBus);
 
     const q2 = [q('urn:xpara-lookup', 'http://schema.org/name', '"Evil"')];
-    const update = await publisher.update(original.kcId, { contextGraphId: CONTEXT_GRAPH, quads: q2 });
+    const update = await publisher.update(original.kaId, { contextGraphId: CONTEXT_GRAPH, quads: q2 });
     expect(update.status).toBe('confirmed');
 
     const msg = encodeKAUpdateRequest({
       contextGraphId: evilContextGraph,
-      batchId: original.kcId,
+      batchId: original.kaId,
       nquads: quadsToNQuads(q2, `did:dkg:context-graph:${evilContextGraph}`),
       manifest: [{ rootEntity: 'urn:xpara-lookup', privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeer',
@@ -1126,13 +1130,13 @@ describe('EVMChainAdapter address case normalization', () => {
     expect(original.status).toBe('confirmed');
 
     const q2 = [q('urn:addr-case', 'http://schema.org/name', '"Updated"')];
-    const update = await publisher.update(original.kcId, { contextGraphId: CONTEXT_GRAPH, quads: q2 });
+    const update = await publisher.update(original.kaId, { contextGraphId: CONTEXT_GRAPH, quads: q2 });
     expect(update.status).toBe('confirmed');
 
     // Verify with address in all lowercase
     const v1 = await chain.verifyKAUpdate(
       update.onChainResult!.txHash,
-      original.kcId,
+      original.kaId,
       wallet.address.toLowerCase(),
     );
     expect(v1.verified).toBe(true);
@@ -1140,7 +1144,7 @@ describe('EVMChainAdapter address case normalization', () => {
     // Verify with address in all uppercase (except 0x prefix)
     const v2 = await chain.verifyKAUpdate(
       update.onChainResult!.txHash,
-      original.kcId,
+      original.kaId,
       '0x' + wallet.address.slice(2).toUpperCase(),
     );
     expect(v2.verified).toBe(true);
@@ -1177,13 +1181,13 @@ describe('Gossip-only batch→contextGraph binding rejected', () => {
     const handler = new UpdateHandler(store, chain, eventBus);
 
     const q2 = [q('urn:gossip-bind', 'http://schema.org/name', '"Updated"')];
-    const update = await publisher.update(original.kcId, { contextGraphId: CONTEXT_GRAPH, quads: q2 });
+    const update = await publisher.update(original.kaId, { contextGraphId: CONTEXT_GRAPH, quads: q2 });
     expect(update.status).toBe('confirmed');
 
     // First update on correct contextGraph should go through (discovered via SPARQL lookup)
     const msg1 = encodeKAUpdateRequest({
       contextGraphId: CONTEXT_GRAPH,
-      batchId: original.kcId,
+      batchId: original.kaId,
       nquads: quadsToNQuads(q2, DATA_GRAPH),
       manifest: [{ rootEntity: 'urn:gossip-bind', privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeer',
@@ -1197,13 +1201,13 @@ describe('Gossip-only batch→contextGraph binding rejected', () => {
 
     // Now send a second message on a DIFFERENT contextGraph with a new valid chain tx
     const q3 = [q('urn:gossip-bind', 'http://schema.org/name', '"Spoofed"')];
-    const update2 = await publisher.update(original.kcId, { contextGraphId: CONTEXT_GRAPH, quads: q3 });
+    const update2 = await publisher.update(original.kaId, { contextGraphId: CONTEXT_GRAPH, quads: q3 });
     expect(update2.status).toBe('confirmed');
 
     const evilContextGraph = 'evil-gossip';
     const msg2 = encodeKAUpdateRequest({
       contextGraphId: evilContextGraph,
-      batchId: original.kcId,
+      batchId: original.kaId,
       nquads: quadsToNQuads(q3, `did:dkg:context-graph:${evilContextGraph}`),
       manifest: [{ rootEntity: 'urn:gossip-bind', privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeer',
@@ -1254,7 +1258,7 @@ describe('Update provenance shape', () => {
     expect(original.onChainResult!.endKAId).toBeDefined();
 
     const q2 = [q('urn:prov-shape', 'http://schema.org/name', '"V2"')];
-    const updated = await publisher.update(original.kcId, { contextGraphId: CONTEXT_GRAPH, quads: q2 });
+    const updated = await publisher.update(original.kaId, { contextGraphId: CONTEXT_GRAPH, quads: q2 });
     expect(updated.status).toBe('confirmed');
     expect(updated.onChainResult).toBeDefined();
     expect(updated.onChainResult!.txHash).toBeTruthy();

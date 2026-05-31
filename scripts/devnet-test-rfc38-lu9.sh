@@ -96,8 +96,8 @@ PUB_RESP=$(api_call "$CURATOR_NODE" POST /api/shared-memory/publish "$(cat <<EOF
 EOF
 )")
 log "publish response: $PUB_RESP"
-KC_ID=$(parse_json "$PUB_RESP" '.kcId')
-[ -n "$KC_ID" ] || fail "no kcId: $PUB_RESP"
+KC_ID=$(parse_json "$PUB_RESP" '.kaId')
+[ -n "$KC_ID" ] || fail "no kaId: $PUB_RESP"
 
 log "Fetching merkleRoot for KC #$KC_ID..."
 KC_RESP=$(api_call "$CURATOR_NODE" GET "/api/kc/$KC_ID")

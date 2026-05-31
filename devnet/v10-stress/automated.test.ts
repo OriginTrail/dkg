@@ -94,7 +94,7 @@ interface DevnetNode {
 interface DevnetState {
   provider: ethers.JsonRpcProvider;
   hub: ethers.Contract;
-  kcs: ethers.Contract;
+  kas: ethers.Contract;
   nft: ethers.Contract;
   token: ethers.Contract;
   eps: ethers.Contract;
@@ -129,7 +129,7 @@ interface PublishRecord {
   mode?: 'a' | 'b' | 'c' | 'd';
   assertionName: string;
   contextGraphId: string;
-  kcId?: bigint;
+  kaId?: bigint;
   expectedAuthor?: string;
   observedAuthor?: string;
   status: 'ok' | 'failed';
@@ -279,7 +279,7 @@ async function publishViaCli(
   contextGraph: string,
   filePath: string,
   options: { publisherNodeIdentityId?: bigint } = {},
-): Promise<{ status: string; kcId?: bigint; txHash?: string; raw: string }> {
+): Promise<{ status: string; kaId?: bigint; txHash?: string; raw: string }> {
   const args = ['publish', contextGraph, '--file', filePath];
   if (options.publisherNodeIdentityId !== undefined) {
     args.push(
@@ -299,7 +299,7 @@ async function publishViaCli(
   const txMatch = /TX hash:\s*(0x[0-9a-fA-F]+)/i.exec(result.stdout);
   return {
     status,
-    kcId: kcMatch ? BigInt(kcMatch[1]!) : undefined,
+    kaId: kcMatch ? BigInt(kcMatch[1]!) : undefined,
     txHash: txMatch ? txMatch[1] : undefined,
     raw: result.stdout,
   };
@@ -319,7 +319,7 @@ async function loadContractAddresses(
   );
   return {
     hub,
-    kcsAddress: await hub.getAssetStorageAddress('KnowledgeCollectionStorage'),
+    kcsAddress: await hub.getAssetStorageAddress('DKGKnowledgeAssets'),
     nftAddress: await hub.getContractAddress('DKGPublishingConvictionNFT'),
     tokenAddress: await hub.getContractAddress('Token'),
     epsAddress: await hub.getContractAddress('EpochStorageV8'),
@@ -369,7 +369,7 @@ async function detectDevnet(maxNodes = 6): Promise<DevnetState | null> {
   });
   const addrs = await loadContractAddresses(provider, hubAddress);
 
-  const kcs = new ethers.Contract(
+  const kas = new ethers.Contract(
     addrs.kcsAddress,
     [
       'function getLatestMerkleRootAuthor(uint256) view returns (address)',
@@ -503,7 +503,7 @@ async function detectDevnet(maxNodes = 6): Promise<DevnetState | null> {
   return {
     provider,
     hub: addrs.hub as ethers.Contract,
-    kcs,
+    kas,
     nft,
     token,
     eps,
@@ -803,7 +803,7 @@ describe('V10 chain — stress + scenario validation', () => {
   // published, a later named publish bundles all of it together with the
   // named assertion's content. The merkle root in the seal then no longer
   // matches what the publisher derives, so the publish drops to status
-  // `tentative` and the kcId is 0 (sentinel). To keep this suite green we
+  // `tentative` and the kaId is 0 (sentinel). To keep this suite green we
   // (a) drain SWM via a single bulk selection-based publish at the top of
   // the phase, (b) order WM→SWM AFTER all named-publish batches.
   //
@@ -1082,14 +1082,14 @@ describe('V10 chain — stress + scenario validation', () => {
           throw new Error(`HTTP ${r.status}: ${await r.text()}`);
         }
         return (await r.json()) as {
-          kcId?: string;
+          kaId?: string;
           status?: string;
           txHash?: string;
         };
       };
 
       let publishJson = await doPublish();
-      if (publishJson.status === 'tentative' || publishJson.kcId === '0') {
+      if (publishJson.status === 'tentative' || publishJson.kaId === '0') {
         custodialTentativeRetries++;
         if (i === 0) {
           console.log(
@@ -1100,9 +1100,9 @@ describe('V10 chain — stress + scenario validation', () => {
         publishJson = await doPublish();
       }
       expect(publishJson.status).toBe('confirmed');
-      expect(publishJson.kcId).toBeDefined();
-      const kcId = BigInt(publishJson.kcId!);
-      const onChainAuthor: string = await s.kcs.getLatestMerkleRootAuthor(kcId);
+      expect(publishJson.kaId).toBeDefined();
+      const kaId = BigInt(publishJson.kaId!);
+      const onChainAuthor: string = await s.kas.getLatestMerkleRootAuthor(kaId);
       expect(onChainAuthor.toLowerCase()).toBe(
         agentC2.agentAddress.toLowerCase(),
       );
@@ -1112,14 +1112,14 @@ describe('V10 chain — stress + scenario validation', () => {
         mode: 'b',
         assertionName: name,
         contextGraphId: CONTEXT_GRAPH,
-        kcId,
+        kaId,
         expectedAuthor: agentC2.agentAddress,
         observedAuthor: onChainAuthor,
         status: 'ok',
       });
       if ((i + 1) % 5 === 0) {
         console.log(
-          `phase 2: VM custodial ${i + 1}/${vmCustodial} (kcId=${kcId}, author OK)`,
+          `phase 2: VM custodial ${i + 1}/${vmCustodial} (kaId=${kaId}, author OK)`,
         );
       }
     }
@@ -1139,9 +1139,9 @@ describe('V10 chain — stress + scenario validation', () => {
           publisherNodeIdentityId: core1.identityId,
         });
         expect(result.status.toLowerCase()).toBe('confirmed');
-        expect(result.kcId).toBeDefined();
-        const onChainAuthor: string = await s.kcs.getLatestMerkleRootAuthor(
-          result.kcId!,
+        expect(result.kaId).toBeDefined();
+        const onChainAuthor: string = await s.kas.getLatestMerkleRootAuthor(
+          result.kaId!,
         );
         // Author must be one of the edge's op-wallets.
         const matches = edge.opWallets.some(
@@ -1154,7 +1154,7 @@ describe('V10 chain — stress + scenario validation', () => {
           mode: 'a',
           assertionName: name,
           contextGraphId: CONTEXT_GRAPH,
-          kcId: result.kcId,
+          kaId: result.kaId,
           expectedAuthor: 'edge op-wallet',
           observedAuthor: onChainAuthor,
           status: 'ok',
@@ -1260,7 +1260,7 @@ describe('V10 chain — stress + scenario validation', () => {
       appendFinding(
         'BUG — publisher nonce race during back-to-back publishes',
         `${custodialTentativeRetries}/${vmCustodial} VM-custodial (mode B) publishes returned status=` +
-          `\`tentative\` with kcId=\`0\` on first attempt and confirmed only after a 2s delay + retry. ` +
+          `\`tentative\` with kaId=\`0\` on first attempt and confirmed only after a 2s delay + retry. ` +
           `Daemon log shows \`Nonce too low. Expected 11 but got 10\` on the publisher's pre-publish ` +
           `\`token.approve\` tx. Repro: drive any two publishes back-to-back through the same daemon's ` +
           `op-wallet pool (in this suite — a selection-based SWM drain immediately followed by an ` +
@@ -1280,7 +1280,7 @@ describe('V10 chain — stress + scenario validation', () => {
         `Reproduction: promote N assertions (\`POST /api/assertion/create { ..., finalize: true, promote: true }\` × N) ` +
         `then publish ONE of them by name (\`POST /api/shared-memory/publish { assertionName }\`). ` +
         `The publish bundles all N assertions' quads into one KC and the response status is \`tentative\` ` +
-        `with \`kcId: "0"\` (sentinel), because the merkle root the publisher derives over the actual ` +
+        `with \`kaId: "0"\` (sentinel), because the merkle root the publisher derives over the actual ` +
         `bundled SWM content does not match the seal's merkle root computed at finalize time. ` +
         `**Fix direction**: \`publishFromFinalizedAssertion\` must extract the named assertion's rootEntities ` +
         `and pass \`selection: { rootEntities: [...] }\` to \`publishFromSharedMemory\`, OR the assertion's ` +

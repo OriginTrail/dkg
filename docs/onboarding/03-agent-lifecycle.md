@@ -140,12 +140,12 @@ Relevant file: `packages/core/src/node.ts` (lines 40-350)
 Once started, the agent handles three categories of work:
 
 ### Inbound (from the network)
-- **GossipSub messages** -- When a peer publishes to a subscribed contextGraph topic, the `PublishHandler` processes the incoming knowledge collection and inserts it into the local store.
+- **GossipSub messages** -- When a peer publishes to a subscribed contextGraph topic, the `PublishHandler` processes the incoming knowledge asset and inserts it into the local store.
 - **Protocol requests** -- Remote peers can send access, publish, query, or sync requests via the `ProtocolRouter`. Each request opens a libp2p stream, the handler processes it, and returns a response.
 - **Chat messages** -- Encrypted peer-to-peer messages arrive via the messaging protocol.
 
 ### Outbound (from the developer)
-- `agent.publish(contextGraphId, quads)` -- Creates a knowledge collection, stores it locally, broadcasts via GossipSub, and optionally anchors on-chain.
+- `agent.publish(contextGraphId, quads)` -- Creates a knowledge asset, stores it locally, broadcasts via GossipSub, and optionally anchors on-chain.
 - `agent.query(sparql)` -- Runs a SPARQL query against the local triple store.
 - `agent.queryRemote(peerId, request)` -- Sends a query to a remote peer via the query protocol.
 - `agent.sendChat(peerId, text)` -- Sends an encrypted message to another agent.

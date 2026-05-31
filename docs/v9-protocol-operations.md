@@ -70,7 +70,7 @@ sequenceDiagram
 
     Note over Agent: /dkg/query and /dkg/access are separate paths
     Note over Agent: query is deny-by-default (queryAccess)
-    Note over Agent: access checks KA/KC metadata policy for private triples
+    Note over Agent: access checks KA/KA metadata policy for private triples
 
     opt Chain available (chainId ≠ "none")
         Agent->>Chain: ensureProfile() → identityId
@@ -197,7 +197,7 @@ sequenceDiagram
 
     Note over Agent,GS: Phase 8 — Post-broadcast with chain proof
 
-    Pub-->>Agent: PublishResult {kcId, ual, kcMerkleRoot, status: confirmed}
+    Pub-->>Agent: PublishResult {kaId, ual, kcMerkleRoot, status: confirmed}
     Agent->>GS: publish(contextGraphPublishTopic, ConfirmedPublishProof)
     Note over GS: Message contains: type=CONFIRMED, txHash, blockNumber,<br/>startKAId, endKAId, publisherAddress
 
@@ -347,11 +347,11 @@ sequenceDiagram
 
     Note over Agent,GS: Phase 8 — Post-broadcast with chain proof
 
-    Pub-->>Agent: PublishResult {kcId, ual, kcMerkleRoot, status: confirmed}
+    Pub-->>Agent: PublishResult {kaId, ual, kcMerkleRoot, status: confirmed}
     Agent->>GS: publish(contextGraphPublishTopic, ConfirmedPublishProof)
     Note over GS: Message contains: type=CONFIRMED, txHash, blockNumber,<br/>startKAId, endKAId, publisherAddress
 
-    Agent-->>App: PublishResult {kcId, ual, kcMerkleRoot, status: confirmed}
+    Agent-->>App: PublishResult {kaId, ual, kcMerkleRoot, status: confirmed}
 
     rect rgb(240, 248, 255)
         Note over Peers,Chain: Phase 9 — Receiver-side finalization (two independent mechanisms)
@@ -524,11 +524,11 @@ sequenceDiagram
 
     Note over Agent,GS: Phase 8 — Post-broadcast with chain proof
 
-    Pub-->>Agent: PublishResult {kcId, ual, kcMerkleRoot, status: confirmed, contextGraphId}
+    Pub-->>Agent: PublishResult {kaId, ual, kcMerkleRoot, status: confirmed, contextGraphId}
     Agent->>GS: publish(contextGraphPublishTopic, ConfirmedPublishProof)
     Note over GS: Message contains: type=CONFIRMED, txHash, blockNumber,<br/>startKAId, endKAId, publisherAddress, contextGraphId
 
-    Agent-->>App: PublishResult {kcId, ual, kcMerkleRoot, status: confirmed, contextGraphId}
+    Agent-->>App: PublishResult {kaId, ual, kcMerkleRoot, status: confirmed, contextGraphId}
 
     rect rgb(240, 248, 255)
         Note over ParaPeers,Chain: Phase 9 — Receiver-side finalization (two independent mechanisms)
@@ -732,9 +732,9 @@ sequenceDiagram
     participant Chain as EVM Adapter
     participant GS as GossipSub
 
-    App->>Agent: update(kcId, contextGraphId, quads)
+    App->>Agent: update(kaId, contextGraphId, quads)
 
-    Agent->>Pub: update(kcId, options)
+    Agent->>Pub: update(kaId, options)
 
     Pub->>Pub: Validate quads (same rules)
     Pub->>Pub: Compute new kcMerkleRoot
@@ -747,7 +747,7 @@ sequenceDiagram
     Chain->>Chain: Emit KnowledgeBatchUpdated
 
     Pub->>Store: Update meta graph (new merkle root, timestamp)
-    Pub-->>Agent: PublishResult {kcId, ual, status: "confirmed"}
+    Pub-->>Agent: PublishResult {kaId, ual, status: "confirmed"}
 
     Agent->>GS: publish(contextGraphUpdateTopic, UpdateRequest)
 
@@ -825,7 +825,7 @@ Private triple retrieval uses a separate protocol and policy path from remote qu
 
 - **Protocol:** `/dkg/access/1.0.0` — requester sends KA UAL + signature; provider
   returns private N-Quads if access is granted.
-- **Handler:** `AccessHandler` checks KA/KC metadata (`dkg:accessPolicy`,
+- **Handler:** `AccessHandler` checks KA/KA metadata (`dkg:accessPolicy`,
   `dkg:publisherPeerId`, `dkg:allowedPeer`) before returning private triples.
 - **Client:** `AccessClient` verifies returned triples against `privateMerkleRoot`
   when available.
@@ -833,13 +833,13 @@ Private triple retrieval uses a separate protocol and policy path from remote qu
 Effective policy rules:
 
 - `ownerOnly` -> only publisher peer may access.
-- `allowList` -> only peers listed by KC metadata `dkg:allowedPeer` may access.
+- `allowList` -> only peers listed by KA metadata `dkg:allowedPeer` may access.
 - `allowList` with missing or empty `dkg:allowedPeer` entries -> access denied.
 - `public` -> any peer may request private triples for that KA.
 
 > **Security note:** `/dkg/query/2.0.0` and `/dkg/access/1.0.0` are independent.
 > A denied remote query does not imply denied private access. Access behavior is
-> controlled by KC/KA access metadata.
+> controlled by KA/KA access metadata.
 
 ---
 
@@ -857,7 +857,7 @@ sequenceDiagram
 
     B-->>A: SyncResponse {quads[], metadata[]}
 
-    A->>A: For each KC in response:
+    A->>A: For each KA in response:
     A->>A: verifySyncedData(quads, metadata)
 
     Note over A: Flat Merkle verification:
@@ -971,7 +971,7 @@ graph TB
     subgraph "Triple Store (Oxigraph)"
         subgraph "ContextGraph: example-contextGraph"
             DATA["Data Graph<br/>did:dkg:context-graph:example-contextGraph<br/>Published triples"]
-            META["Meta Graph<br/>.../_meta<br/>KC/KA metadata, merkle roots, status"]
+            META["Meta Graph<br/>.../_meta<br/>KA/KA metadata, merkle roots, status"]
             PRIV["Private Graph<br/>.../_private<br/>Publisher-only triples"]
             WS["Workspace Graph<br/>.../_workspace<br/>Swarms, memberships, votes"]
             WS_META["Workspace Meta<br/>.../_workspace_meta<br/>Operation tracking"]
@@ -989,7 +989,7 @@ graph TB
 | Pattern | Example | Content |
 |---------|---------|---------|
 | `did:dkg:context-graph:{id}` | `did:dkg:context-graph:example-contextGraph` | Published data |
-| `did:dkg:context-graph:{id}/_meta` | `.../_meta` | KC/KA metadata |
+| `did:dkg:context-graph:{id}/_meta` | `.../_meta` | KA/KA metadata |
 | `did:dkg:context-graph:{id}/_private` | `.../_private` | Private triples |
 | `did:dkg:context-graph:{id}/_workspace` | `.../_workspace` | Workspace data |
 | `did:dkg:context-graph:{id}/_workspace_meta` | `.../_workspace_meta` | Workspace ops |
@@ -1005,14 +1005,14 @@ graph TB
 
 ## 10. Merkle Tree & Proof System
 
-The KC Merkle root (`kcMerkleRoot`) is a **flat tree** over all triple hashes
-in the knowledge collection. There is no per-KA sub-tree hierarchy — all public
+The KA Merkle root (`kcMerkleRoot`) is a **flat tree** over all triple hashes
+in the knowledge asset. There is no per-KA sub-tree hierarchy — all public
 triple hashes (plus private Merkle root hashes, if any) are collected into a
 single sorted leaf set and hashed into one root.
 
 ```mermaid
 graph TB
-    subgraph "Knowledge Collection (KC)"
+    subgraph "Knowledge Asset (KA)"
         KC_ROOT["kcMerkleRoot<br/>(published on-chain, 32 bytes)"]
     end
 
@@ -1062,7 +1062,7 @@ them. However, the private Merkle root hash IS shared in the manifest so that
 peers can include it in their flat tree computation and still arrive at the
 same `kcMerkleRoot`. This means:
 
-- Peers can verify integrity of the full KC (public + private exists) without
+- Peers can verify integrity of the full KA (public + private exists) without
   seeing the private data.
 - The publisher can later prove specific private triples to authorized parties
   via `/dkg/access/1.0.0`, and those parties can verify the triples hash to
@@ -1076,7 +1076,7 @@ same `kcMerkleRoot`. This means:
 
 | Data | Contract | Purpose |
 |------|----------|---------|
-| KC Merkle Root | KnowledgeAssetsStorage | Integrity anchor — verifies off-chain data hasn't been tampered |
+| KA Merkle Root | KnowledgeAssetsStorage | Integrity anchor — verifies off-chain data hasn't been tampered |
 | KA token range | KnowledgeAssetsStorage | NFT ownership — startKAId to endKAId |
 | Publisher address | KnowledgeAssetsStorage | Attribution — who published this data |
 | Batch ID | KnowledgeAssetsStorage | Sequential ordering |
@@ -1089,14 +1089,14 @@ same `kcMerkleRoot`. This means:
 | Data | Storage | Propagation |
 |------|---------|-------------|
 | Published triples | Data graph | GossipSub publish topic |
-| KC/KA metadata | Meta graph | GossipSub publish topic |
+| KA/KA metadata | Meta graph | GossipSub publish topic |
 | Private triples | Private graph | NEVER propagated (publisher only) |
 | Workspace data | Workspace graph | GossipSub workspace topic |
 | App messages | In-memory | GossipSub app topic |
 
 Access-policy linkage (off-chain):
 
-- Access control for private triples is encoded in KC/KA metadata in `_meta`
+- Access control for private triples is encoded in KA/KA metadata in `_meta`
   (e.g., `dkg:accessPolicy`, `dkg:publisherPeerId`).
 - Registry-level contextGraph `accessPolicy` on-chain governs contextGraph registration/discovery
   semantics and should not be treated as a substitute for KA private data access checks.
@@ -1115,20 +1115,20 @@ graph LR
     end
 
     subgraph "Meta Graph (linked)"
-        KC["KC metadata<br/>dkg:status, dkg:kcMerkleRoot,<br/>dkg:transactionHash, dkg:blockNumber,<br/>dkg:publisherAddress, dkg:batchId"]
+        KA["KA metadata<br/>dkg:status, dkg:kcMerkleRoot,<br/>dkg:transactionHash, dkg:blockNumber,<br/>dkg:publisherAddress, dkg:batchId"]
     end
 
     subgraph "Data Graph (NOT linked)"
         DATA["User triples<br/>No reference to chain provenance"]
     end
 
-    MR -.->|confirmed| KC
-    TX -.->|confirmed| KC
-    BN -.->|confirmed| KC
-    BATCH -.->|confirmed| KC
-    ADDR -.->|confirmed| KC
+    MR -.->|confirmed| KA
+    TX -.->|confirmed| KA
+    BN -.->|confirmed| KA
+    BATCH -.->|confirmed| KA
+    ADDR -.->|confirmed| KA
 
-    KC -->|"dkg:partOf"| DATA
+    KA -->|"dkg:partOf"| DATA
 
     style DATA fill:#3a2020,color:#e6edf3
 ```
@@ -1138,8 +1138,8 @@ graph LR
 > To verify a triple's on-chain status, an app must:
 > 1. Find the rootEntity of the triple
 > 2. Look up the KA in the meta graph by rootEntity
-> 3. Follow `dkg:partOf` to the KC
-> 4. Read `dkg:transactionHash` from the KC
+> 3. Follow `dkg:partOf` to the KA
+> 4. Read `dkg:transactionHash` from the KA
 >
 > This is workable but fragile. A convenience triple on each rootEntity
 > pointing to its KA would simplify queries:
@@ -1213,7 +1213,7 @@ significantly increase utility for AI agents:
    with their peerId and the proposal hash. Enables trust scoring and reputation.
 
 2. **Publish provenance chain** — For each rootEntity, a provenance chain linking:
-   `rootEntity → KA NFT → KC → txHash → blockNumber → publisher DID`.
+   `rootEntity → KA NFT → KA → txHash → blockNumber → publisher DID`.
    Currently requires 3 SPARQL joins; should be a direct property.
 
 3. **Network topology hints** — Relay connections, direct connections, and peer
@@ -1265,7 +1265,7 @@ deferred until the update flow is redesigned.
 | OQ-26 | **Sync trust model — should syncing node verify chain provenance?** Current sync verifies kcMerkleRoot but not that the data was actually committed on-chain. A malicious peer could fabricate confirmed metadata. | Section 6 |
 | OQ-27 | **When does a node initiate sync? How does a new node catch up?** Section 6 shows the sync protocol but not when/why a node triggers it. Manual? Automatic on contextGraph join? Periodic? | Section 6 |
 | OQ-28 | **Workspace sync is unauthenticated.** Workspace data has no Merkle root yet, so there is nothing to verify against. A malicious peer can send arbitrary workspace triples. Is this acceptable? | Section 6 |
-| OQ-29 | **`tokenAmount` / TRAC economics undefined.** All publish flows include `tokenAmount` in the chain tx but the document never explains: how is it determined? Per-KA, per-KC, per-byte? What if insufficient? Locked or burned? | Throughout Section 2 |
+| OQ-29 | **`tokenAmount` / TRAC economics undefined.** All publish flows include `tokenAmount` in the chain tx but the document never explains: how is it determined? Per-KA, per-KA, per-byte? What if insufficient? Locked or burned? | Throughout Section 2 |
 | OQ-30 | **Context graph participant lifecycle.** Can participants be added/removed after creation? What if a participant goes offline permanently — does M-of-N become unachievable? | Section 2.3 |
 | OQ-31 | **ContextGraph unsubscribe/leave mechanism.** Section 7 covers discovery and subscription but not leaving a contextGraph. Can a node unsubscribe and garbage-collect local graphs? | Section 7 |
 | OQ-32 | **GossipSub message type discrimination.** The `contextGraphPublishTopic` carries three message types: `PUBLISH` (full data), `ENSHRINE` (attestation-only), `CONFIRMED` (chain proof). These need a type field in the message envelope. Currently implied but not formally specified. | Sections 2.1/2.2/2.3, Section 8 |

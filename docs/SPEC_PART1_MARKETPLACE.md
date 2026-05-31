@@ -122,11 +122,11 @@ SELECT ?s ?p ?o WHERE { GRAPH <did:dkg:context-graph:agent-registry> { ?s ?p ?o 
 
 ### Knowledge Assets: 1 Entity = 1 KA
 
-**By definition, a Knowledge Asset is an entity and all triples where the subject is the rootEntity or a skolemized child of it** (pattern: `{rootEntity}/.well-known/genid/{label}`). The KA's `rootEntity` is its identity. The KA's triples are implicitly defined: every triple in the contextGraph graph where `subject == rootEntity` OR `subject` is a skolemized URI under it, that was published in this KC.
+**By definition, a Knowledge Asset is an entity and all triples where the subject is the rootEntity or a skolemized child of it** (pattern: `{rootEntity}/.well-known/genid/{label}`). The KA's `rootEntity` is its identity. The KA's triples are implicitly defined: every triple in the contextGraph graph where `subject == rootEntity` OR `subject` is a skolemized URI under it, that was published in this KA.
 
-A Knowledge Collection (KC) bundles one or more KAs in a single on-chain transaction. The publisher declares KA boundaries via a manifest listing each KA's `rootEntity`.
+A Knowledge Asset (KA) bundles one or more KAs in a single on-chain transaction. The publisher declares KA boundaries via a manifest listing each KA's `rootEntity`.
 
-**Entity exclusivity**: within a contextGraph, a `rootEntity` is owned by exactly one KC at a time. Publishing a KC with a rootEntity that already exists in the contextGraph is rejected. To modify an existing entity, the KA owner uses the update flow (see Section 6). To add related knowledge about someone else's entity, publish a new entity that links to it (e.g., `<myReview> schema:about <theirEntity>`).
+**Entity exclusivity**: within a contextGraph, a `rootEntity` is owned by exactly one KA at a time. Publishing a KA with a rootEntity that already exists in the contextGraph is rejected. To modify an existing entity, the KA owner uses the update flow (see Section 6). To add related knowledge about someone else's entity, publish a new entity that links to it (e.g., `<myReview> schema:about <theirEntity>`).
 
 ### Blank Node Skolemization
 
@@ -151,7 +151,7 @@ Skolemized URIs are NOT rootEntities — they don't get manifest entries or toke
 ### UAL Format
 
 ```
-did:dkg:{network}:{chainId}/{contract}/{kcId}/{kaTokenId}
+did:dkg:{network}:{chainId}/{contract}/{kaId}/{kaTokenId}
 ```
 
 Pre-minted via `reserveKnowledgeCollectionIds()` before publishing.
@@ -163,15 +163,15 @@ Pre-minted via `reserveKnowledgeCollectionIds()` before publishing.
 | Named Graph | URI Pattern | Contents |
 |---|---|---|
 | **Data graph** | `<did:dkg:context-graph:X>` | All triples from all KCs in this contextGraph (the knowledge) |
-| **Meta graph** | `<did:dkg:context-graph:X/_meta>` | All KC and KA metadata for this contextGraph (provenance, manifests) |
+| **Meta graph** | `<did:dkg:context-graph:X/_meta>` | All KA and KA metadata for this contextGraph (provenance, manifests) |
 
-No side-index. No ownership index. No per-KC named graphs. The KA-to-triple mapping is `dkg:rootEntity` in the meta graph. A contextGraph with 100K KCs still has exactly 2 named graphs.
+No side-index. No ownership index. No per-KA named graphs. The KA-to-triple mapping is `dkg:rootEntity` in the meta graph. A contextGraph with 100K KCs still has exactly 2 named graphs.
 
 **Replication (Phase 1)**: every node in a contextGraph stores all public triples for that contextGraph (full replication). A PublishRequest is broadcast to all contextGraph peers via GossipSub. This is simple and correct; sharding/selective replication is deferred to Part 2.
 
 ### Concrete Example
 
-An agent publishes KC 42 with 2 KAs in the agent-registry contextGraph: its own profile (mixed public/private) and its skill's input schema (fully public).
+An agent publishes KA 42 with 2 KAs in the agent-registry contextGraph: its own profile (mixed public/private) and its skill's input schema (fully public).
 
 **ContextGraph data graph** `<did:dkg:context-graph:agent-registry>` — public triples (on all nodes):
 
@@ -221,7 +221,7 @@ Any agent can see ImageBot's public profile and query its skill offering. The pr
 **Meta graph** `<did:dkg:context-graph:agent-registry/_meta>` (shared by ALL KCs in this contextGraph):
 
 ```turtle
-# KC 42 metadata (coexists with thousands of other agent KCs in the same meta graph)
+# KA 42 metadata (coexists with thousands of other agent KCs in the same meta graph)
 <did:dkg:base:8453/0xKCS/42>
     a dkg:KnowledgeCollection ;
     dkg:merkleRoot          "0xfc92a1..."^^xsd:hexBinary ;
@@ -262,7 +262,7 @@ Any agent can see ImageBot's public profile and query its skill offering. The pr
     dkg:publicTripleCount  "5"^^xsd:integer .
 ```
 
-**Named graph count**: this publishing operation creates **zero** new named graphs. The contextGraph's 2 graphs (`agent-registry` and `agent-registry/_meta`) already exist. KC 42's triples are inserted into them alongside all other KCs. A contextGraph with 100K agent registrations still has exactly 2 named graphs.
+**Named graph count**: this publishing operation creates **zero** new named graphs. The contextGraph's 2 graphs (`agent-registry` and `agent-registry/_meta`) already exist. KA 42's triples are inserted into them alongside all other KCs. A contextGraph with 100K agent registrations still has exactly 2 named graphs.
 
 ### Merkle Tree
 
@@ -278,10 +278,10 @@ KA Root        = Hash(Public_Root || Private_Root)            // combined
                  or just Public_Root if no private triples
                  or just Private_Root if no public triples
 
-KC Root        = MerkleTree(sorted([KA_1_Root, KA_2_Root, ...]))
+KA Root        = MerkleTree(sorted([KA_1_Root, KA_2_Root, ...]))
 ```
 
-The KC root goes on-chain. Verification works at every level:
+The KA root goes on-chain. Verification works at every level:
 - Any node can verify the public sub-root from the triples they store
 - A paying recipient can verify the private sub-root from the triples they received
 - Anyone with both sets can verify the combined KA root against the on-chain commitment
@@ -300,9 +300,9 @@ A single KA can have any mix: all public, all private, or both. The entity's tri
 | **Meta graph** `<contextGraph/_meta>` | publicMerkleRoot, publicTripleCount | privateMerkleRoot, privateTripleCount, accessPolicy |
 | **On-chain** | KA root includes public sub-root | KA root includes private sub-root |
 
-The KC merkle root on-chain covers both public and private sub-roots. This binds the publisher to specific private content — they cannot alter it after publishing.
+The KA merkle root on-chain covers both public and private sub-roots. This binds the publisher to specific private content — they cannot alter it after publishing.
 
-See the **Concrete Example** above: ImageBot's agent profile (KA 1) has 11 public triples (name, skill offering, pricing) and 5 private triples (model version, latency, cost structure). The input schema (KA 2) is fully public. Both KAs are part of the same KC, committed under one KC merkle root.
+See the **Concrete Example** above: ImageBot's agent profile (KA 1) has 11 public triples (name, skill offering, pricing) and 5 private triples (model version, latency, cost structure). The input schema (KA 2) is fully public. Both KAs are part of the same KA, committed under one KA merkle root.
 
 **Three visibility modes** (all use the same structure, just different sub-root presence):
 
@@ -333,7 +333,7 @@ When a KA is burned on-chain:
 2. Delete all triples where `subject == rootEntity` OR `subject` starts with `{rootEntity}/.well-known/genid/` from the contextGraph data graph.
 3. Remove KA entry from the contextGraph's meta graph.
 
-Entity exclusivity guarantees no other KC claims this rootEntity, so deletion is safe.
+Entity exclusivity guarantees no other KA claims this rootEntity, so deletion is safe.
 
 ### KA Updates
 
@@ -342,7 +342,7 @@ The KA owner can replace the contents of a KA entirely:
 ```
 1. Publisher builds new triples for the same rootEntity
 2. Publisher computes new public/private merkle sub-roots
-3. Publisher → Chain: updateKnowledgeCollection(kcId, newMerkleRoot)
+3. Publisher → Chain: updateKnowledgeAsset(kaId, newMerkleRoot)
 4. Publisher → Storage Nodes: PublishRequest (same rootEntity, new nquads)
 5. Storage Nodes: delete old triples for this rootEntity + skolemized children, insert new triples (tentative)
 6. Storage Nodes: observe on-chain event with new root → confirm
@@ -383,7 +383,7 @@ DHT and GossipSub are complementary: DHT for point lookups against the full netw
 
 | Topic Pattern | Purpose | Example |
 |---|---|---|
-| `dkg/context-graph/{id}/finalization` | New KC published | Nodes update their local store |
+| `dkg/context-graph/{id}/finalization` | New KA published | Nodes update their local store |
 | `dkg/context-graph/{id}/agents` | Agent joined/left/updated | Skill discovery cache invalidation |
 | `dkg/network/peers` | Global peer announcements | Bootstrap acceleration |
 
@@ -483,12 +483,12 @@ Flow: requester sends `AccessRequest` with payment proof → publisher node veri
               All contextGraph nodes receive: PublishRequest {nquads, manifest, contextGraphId}
               Storage Nodes: validate manifest, canonicalize public triples,
                              compute public sub-roots per KA, combine with
-                             provided private sub-roots → KA roots → KC root
+                             provided private sub-roots → KA roots → KA root
               Storage Nodes: insert PUBLIC quads only (tentative)
               Storage Nodes → Publisher: PublishAck {kc_merkle_root, signature}
 
-4. Finalize   Publisher → Chain: createKnowledgeCollection(merkleRoot, signatures)
-              Chain: verify sigs, create KC, mint tokens
+4. Finalize   Publisher → Chain: createKnowledgeAsset(merkleRoot, signatures)
+              Chain: verify sigs, create KA, mint tokens
 
 5. Confirm    Storage Nodes: observe on-chain event, match merkle root
               → mark quads confirmed, generate metadata triples (including
@@ -535,7 +535,7 @@ message PublishAck {
 5. All blank nodes in `nquads` MUST have been skolemized before submission (no blank node subjects).
 6. For each KA, storage nodes compute the public sub-root from the triples they received.
 7. If `private_merkle_root` is set, the KA root = `Hash(public_root || private_merkle_root)`. Otherwise KA root = public_root.
-8. KC root = `MerkleTree(sorted([KA_1_Root, KA_2_Root, ...]))` — private sub-roots participate in the tree but their triples are never stored on non-publisher nodes.
+8. KA root = `MerkleTree(sorted([KA_1_Root, KA_2_Root, ...]))` — private sub-roots participate in the tree but their triples are never stored on non-publisher nodes.
 
 ### Auto-Partitioning
 
@@ -549,7 +549,7 @@ message PublishAck {
 
 ```
 PublishRequest received → TENTATIVE
-  → KnowledgeCollectionCreated event with matching root → CONFIRMED
+  → KnowledgeAssetCreated event with matching root → CONFIRMED
   → tentativeTTL expires (1hr default) → DELETED
 ```
 
@@ -1099,9 +1099,9 @@ Two agents (one OpenClaw, one ElizaOS) running on separate machines, **no blockc
 - Agents exchange encrypted chat messages in real-time — **DONE**
 - Published knowledge is queryable by both agents — **DONE**
 - KAs resolvable by UAL (rootEntity lookup) — **DONE**
-- Agent A publishes a KC with mixed public/private KAs — public triples visible on all nodes, private triples only on Agent A's node — TODO
+- Agent A publishes a KA with mixed public/private KAs — public triples visible on all nodes, private triples only on Agent A's node — TODO
 - Agent B sees private KA exists in meta graph, sends AccessRequest with mock payment → receives triples → verifies merkle root — TODO
-- GossipSub broadcasts propagate new KC events across subscribed nodes — **DONE**
+- GossipSub broadcasts propagate new KA events across subscribed nodes — **DONE**
 
 ---
 
@@ -1121,15 +1121,15 @@ interface ChainAdapter {
 
     // Publishing
     reserveKnowledgeCollectionIds(count: number): Promise<ReservedRange>
-    createKnowledgeCollection(params: CreateKCParams): Promise<TxResult>
-    updateKnowledgeCollection(params: UpdateKCParams): Promise<TxResult>
+    createKnowledgeAsset(params: CreateKCParams): Promise<TxResult>
+    updateKnowledgeAsset(params: UpdateKCParams): Promise<TxResult>
 
     // Events
     listenForEvents(filter: EventFilter): AsyncIterable<ChainEvent>
 
     // ContextGraph
     createContextGraph(params: CreateContextGraphParams): Promise<TxResult>
-    submitToContextGraph(kcId: string, contextGraphId: string): Promise<TxResult>
+    submitToContextGraph(kaId: string, contextGraphId: string): Promise<TxResult>
 }
 ```
 
@@ -1147,14 +1147,14 @@ The publisher calls `ChainAdapter` methods — it never knows which chain it's t
 
 | # | Deliverable |
 |---|---|
-| 1 | Solana programs (Anchor): `dkg_knowledge` — reserve KC IDs, create KC (store merkle root in PDA), mint KA tokens via SPL Token-2022. Basic test suite on localnet. |
+| 1 | Solana programs (Anchor): `dkg_knowledge` — reserve KA IDs, create KA (store merkle root in PDA), mint KA tokens via SPL Token-2022. Basic test suite on localnet. |
 | 2 | Solana adapter (@solana/web3.js): implements `ChainAdapter`. Program clients, account change listener, tx builder. |
 | 3 | Wire into publisher: same `ChainAdapter` interface — publisher works identically on EVM and Solana. |
 
 #### Phase 2 Integration Milestone
 
 Same agents as Phase 1, now anchored on-chain on **both** chains:
-- EVM (Hardhat local): UAL reservation, KC finalization, KA token minting, event-driven confirmation
+- EVM (Hardhat local): UAL reservation, KA finalization, KA token minting, event-driven confirmation
 - Solana (localnet): same flow via Solana adapter and Anchor programs
 - Publisher code is identical — only the `ChainAdapter` implementation differs
 - Mock adapter retained for testing (no chain needed)

@@ -16,6 +16,25 @@ export interface QueryOptions {
   includeSharedMemory?: boolean;
   /** @deprecated Use includeSharedMemory */
   includeWorkspace?: boolean;
+  /**
+   * Opt-in for aggregate/count callers that intentionally need scoped
+   * `GRAPH ?g` queries to enumerate all registered public content partitions
+   * in the same context graph (root data, registered assertion graphs, SWM,
+   * VM, and registered sub-graph content). Legacy scoped routes stay limited
+   * to their selected graph set unless this is true.
+   */
+  includeContextGraphPartitions?: boolean;
+  /**
+   * Opt-in: allow the scoped query to explicitly reference the context
+   * graph's own `_private` partition (`<cg>/_private`, or the sub-graph
+   * private graph when `subGraphName` is set). The scope guard excludes
+   * `_private` by default — it is treated as more sensitive than the
+   * `_meta` graphs that CG-scoped callers may always read. Callers that
+   * legitimately need private-partition data (e.g. the EPCIS events query,
+   * which surfaces private-anchored events to the hosting node) set this.
+   * Does not widen access for any other CG-scoped caller.
+   */
+  includePrivate?: boolean;
   /** V10 declared state view — determines which graph(s) the query targets. */
   view?: GetView;
   /** Agent address — required when view is 'working-memory' to resolve assertion graphs. */

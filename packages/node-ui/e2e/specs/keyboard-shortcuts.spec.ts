@@ -33,20 +33,29 @@ test.describe('Keyboard Shortcuts', () => {
 
   test('shortcuts are suppressed when text input is focused', async ({ page, bottomPanel }) => {
     await bottomPanel.toggle();
-    const logFilter = page.locator(sel.bottom.logFilter);
+    await bottomPanel.switchTab('Node Log');
+    const logFilter = page.locator(sel.bottom.logFilter).first();
+    await logFilter.waitFor({ state: 'visible' });
     await logFilter.focus();
     const collapsed = await bottomPanel.isCollapsed();
     await page.keyboard.press('Control+j');
     expect(await bottomPanel.isCollapsed()).toBe(collapsed);
   });
 
-  test('shortcuts are suppressed when textarea is focused', async ({ page, dashboard, createProjectModal }) => {
-    await dashboard.clickQuickAction('Create Project');
+  test('shortcuts are suppressed when textarea is focused', async ({ page, leftPanel, createProjectModal }) => {
+    await page.route('**/api/agent/identity', (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ agentAddress: '0x1111111111111111111111111111111111111111' }),
+      }),
+    );
+    await leftPanel.clickNewProject();
     await expect(createProjectModal.overlay).toBeVisible();
     await createProjectModal.descriptionInput.focus();
-    const leftPanel = page.locator(sel.leftPanel.root).first();
-    const wasVisible = await leftPanel.isVisible();
+    const leftPanelEl = page.locator(sel.leftPanel.root).first();
+    const wasVisible = await leftPanelEl.isVisible();
     await page.keyboard.press('Control+b');
-    expect(await leftPanel.isVisible()).toBe(wasVisible);
+    expect(await leftPanelEl.isVisible()).toBe(wasVisible);
   });
 });

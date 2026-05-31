@@ -23,7 +23,7 @@ contract ShardingTable is INamed, IVersioned, ContractStatus, IInitializable {
     // `019_deploy_sharding_table.ts` that referenced `migrateOldShardingTable`
     // is removed in the same PR (the function it called no longer exists,
     // so the branch was already unreachable on V10 deploys).
-    string private constant _VERSION = "2.0.0";
+    string private constant _VERSION = "10.0.2";
 
     ProfileStorage public profileStorage;
     ShardingTableStorage public shardingTableStorage;

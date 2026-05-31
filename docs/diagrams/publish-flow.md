@@ -134,7 +134,7 @@ sequenceDiagram
     end
 
     Publisher ->> Store: store.insert(tentativeMetadata)
-    Note right of Store: KC + KA entries in meta graph<br/>status = tentative
+    Note right of Store: KA + KA entries in meta graph<br/>status = tentative
 
     Note over Agent,RcvStore: Phase 3 — P2P Broadcast + Signature Collection
 
@@ -210,7 +210,7 @@ sequenceDiagram
     Publisher ->> Publisher: eventBus.emit(KC_PUBLISHED)
     Publisher -->> Agent: PublishResult
     Agent -->> User: PublishResult
-    Note right of User: kcId / merkleRoot<br/>kaManifest / status=confirmed<br/>onChainResult
+    Note right of User: kaId / merkleRoot<br/>kaManifest / status=confirmed<br/>onChainResult
 
     Note over RcvAgent,RcvStore: Receiver confirms via chain events (independent)
 
@@ -232,7 +232,7 @@ its step cannot complete.
 
 The async lift publisher persists this flow as **internal control-plane state**
 in TripleStore graphs that are separate from workspace graphs and separate from
-published KC/KA graphs. These graphs are operational bookkeeping for claiming,
+published KA/KA graphs. These graphs are operational bookkeeping for claiming,
 timeouts, retries, and recovery. They are not shared workspace state and are
 not authoritative published data.
 
@@ -461,11 +461,11 @@ Tentative vs committed is **reflected only in the contextGraph’s meta graph**
 holds the same triples either way; the meta graph records lifecycle and
 on-chain provenance.
 
-**Clean model:** For a given KC (UAL), the meta graph is in exactly one of two
+**Clean model:** For a given KA (UAL), the meta graph is in exactly one of two
 states — never both:
 
 - **Tentative:** There is a triple `(ual, dkg:status, "tentative")` and **no**
-  blockchain provenance triples (txHash, blockNumber, etc.). The KC/KA structure
+  blockchain provenance triples (txHash, blockNumber, etc.). The KA/KA structure
   may be present.
 - **Confirmed:** There is **no** tentative triple; there is
   `(ual, dkg:status, "confirmed")` and optionally chain provenance triples
@@ -476,11 +476,11 @@ never ambiguous.
 
 ### Publisher node
 
-- **On-chain tx fails:** Publisher inserts full KC/KA metadata plus
+- **On-chain tx fails:** Publisher inserts full KA/KA metadata plus
   `(ual, dkg:status, "tentative")` into the meta graph. Data stays in the data
-  graph; the KC is tentative until it expires or is retried.
+  graph; the KA is tentative until it expires or is retried.
 - **On-chain tx succeeds:** Publisher inserts **only** confirmed metadata: full
-  KC/KA structure plus `(ual, dkg:status, "confirmed")` and chain provenance. No
+  KA/KA structure plus `(ual, dkg:status, "confirmed")` and chain provenance. No
   tentative triple is written. So the graph has either tentative or confirmed,
   never both.
 
@@ -490,14 +490,14 @@ write confirmed (success path inserts confirmed-only).
 ### Receiver node
 
 - **Tentative:** On P2P receive, the receiver inserts triples into the **data
-  graph** and **tentative metadata** into the **meta graph** (KC/KA +
+  graph** and **tentative metadata** into the **meta graph** (KA/KA +
   `dkg:status "tentative"`). It starts a 1-hour timeout; if no on-chain
   confirmation is seen, it deletes those data and metadata quads.
 - **Committed:** When the receiver sees the matching `KnowledgeBatchCreated`
   event, it **deletes** the tentative status quad
   `(ual, dkg:status, "tentative")` from the meta graph, **inserts**
   `(ual, dkg:status, "confirmed")`, and clears the timeout. So the graph moves
-  from “tentative only” to “confirmed only”; no KC has both status triples.
+  from “tentative only” to “confirmed only”; no KA has both status triples.
 
 Promotion on the receiver = **delete tentative status quad, insert confirmed
 status quad** in the meta graph, then clear the expiry timeout.

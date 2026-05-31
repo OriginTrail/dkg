@@ -148,13 +148,13 @@ Paginated (500 triples/page) with merkle root verification.
 
 ### 1.3 On-chain sync verification (Tier 2) — **NEEDS SPEC**
 After syncing and verifying merkle roots locally (Tier 1), cross-check
-against the blockchain: query on-chain KC records to confirm the merkle
+against the blockchain: query on-chain KA records to confirm the merkle
 roots are actually anchored. This catches a peer that forges both data
 and metadata.
 
 Also detects **omitted KCs** — the blockchain has the authoritative list
 of all KCs published to a contextGraph; a peer that withholds entire KCs can
-be detected by comparing on-chain KC count vs received KC count.
+be detected by comparing on-chain KA count vs received KA count.
 
 - **Spec**: [SPEC_SYNC_CHAIN_VERIFICATION.md](../specs/SPEC_SYNC_CHAIN_VERIFICATION.md) — **TO CREATE**
 

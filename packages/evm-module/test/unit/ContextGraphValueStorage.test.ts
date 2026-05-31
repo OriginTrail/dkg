@@ -46,7 +46,7 @@ describe('@unit ContextGraphValueStorage', () => {
 
   it('Should have correct name and version', async () => {
     expect(await CGV.name()).to.equal('ContextGraphValueStorage');
-    expect(await CGV.version()).to.equal('1.0.0');
+    expect(await CGV.version()).to.equal('10.0.2');
   });
 
   it('Single-epoch publish: value lives in start epoch, zero after', async () => {

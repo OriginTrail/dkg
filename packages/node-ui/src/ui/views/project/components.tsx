@@ -201,6 +201,55 @@ function GraphSingletonShelf({
   );
 }
 
+// PR #818 Codex sweep 4 (finding 3) — extracted shared cap helper.
+// Both `SubGraphOverviewGrid`'s named-card path and the Root mini-
+// card consume this so the cap shape stays in lockstep across the
+// dual paths (the post-PR-#793 polish cycle accumulated two
+// parallel inline copies; sweep 2-3 fixes had to be applied twice
+// and qa caught the parity drift). Extracting it here closes the
+// duplication and gives one site to evolve the sampling rule.
+//
+// Sampling strategy: cluster topology matters more than uniform
+// random first-N. We keep every triple for the N heaviest-degree
+// subjects so the rendered slice reads as a representative slice
+// of the bucket's connected structure.
+//
+// Pre-check `kept + subjectDegree > MAX_PER_CARD` BEFORE adding so
+// a single dominant subject can't smuggle the whole heavy cluster
+// through (`break` shape would leave 100s of rows unaccounted for
+// because `keep.has(subject)` is true for every row of the
+// dominant subject). `continue` (not `break`) so the loop scans
+// further for smaller satellites that still fit — denser pack at
+// the cap, friendlier user-facing outcome than under-fill.
+//
+// Residual fallback: when EVERY subject's degree alone exceeds
+// MAX_PER_CARD, the pre-check rejects every subject and exits
+// with an empty `keep`. The card would render the empty-body
+// branch on a clearly-populated bucket — strictly worse UX. Fall
+// back to admitting the heaviest subject so SOMETHING renders;
+// the post-`slice(0, MAX_PER_CARD)` then trims its long tail.
+// The rendered slice loses some cluster topology in that residual
+// case, but the user sees the dominant hub vs an empty card.
+const MAX_PER_CARD = 2500;
+function applyHeaviestSubjectsCap(triples: Triple[], maxPerCard: number = MAX_PER_CARD): Triple[] {
+  if (triples.length <= maxPerCard) return triples;
+  const degree = new Map<string, number>();
+  for (const t of triples) degree.set(t.subject, (degree.get(t.subject) ?? 0) + 1);
+  const order = [...degree.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([uri]) => uri);
+  const keep = new Set<string>();
+  let kept = 0;
+  for (const uri of order) {
+    const subjectDegree = degree.get(uri) ?? 0;
+    if (kept + subjectDegree > maxPerCard) continue;
+    keep.add(uri);
+    kept += subjectDegree;
+  }
+  if (keep.size === 0 && order.length > 0) keep.add(order[0]);
+  return triples.filter(t => keep.has(t.subject)).slice(0, maxPerCard);
+}
+
 function GraphSurface({
   title,
   scopeLabel,
@@ -787,18 +836,30 @@ export function ProjectOverviewCard({
           ? 'One or more layer counts are currently a lower bound.'
           : 'Canonical current-layer entity counts.';
   const totalEntitiesValue = allLayerCountsUnavailable ? 'Unavailable' : layerSum.toLocaleString();
-  // Triples: canonical layer-correct total exposed by the hook
-  // (§4.2.1 trap — do NOT sum per-entity tripleCount, do NOT borrow
-  // SubGraphBar's `totalTriples` which excludes the root bucket).
+  // Triples: canonical layer-correct total via `useLayerTriples`
+  // summed across all three layers (§4.2.1 trap — do NOT sum
+  // per-entity tripleCount, do NOT borrow SubGraphBar's
+  // `totalTriples` which excludes the root bucket, and do NOT
+  // read `allTriples.length` directly because it skips neither
+  // SWM cross-graph SPO duplication nor WM residue from promoted
+  // entities, both of which `useLayerTriples` correctly filters).
   //
-  // Codex review bug B — `useMemoryEntities` preserves partial
-  // results when one layer query fails, so `allTriples.length` is
-  // only a LOWER BOUND in that case. Mirror the Entities cell
-  // logic: 'Unavailable' if every layer errored, '<n>+' when
-  // partial, the plain number otherwise. The tooltip carries the
-  // explanation (consistent with the Delta-2 tooltip-only hint
-  // pattern).
-  const triplesCount = memory.allTriples?.length ?? 0;
+  // GH #805 fix: prior shape `memory.allTriples?.length ?? 0`
+  // surfaced an inflated total on any CG with published SWM (the
+  // same SPO row appears in both `<cg>/_shared_memory` and per-
+  // sub-graph `<cg>/<sg>/_shared_memory` graphs) or post-promote
+  // WM residue (assertion graphs left on disk). Summing the
+  // layer-correct slices makes the Overview "Triples" match the
+  // per-layer LayerStats by construction.
+  //
+  // Codex review bug B (still applies — partial-result preserving
+  // behaviour is unchanged): when a layer query fails the slice
+  // is empty; sum stays a lower bound and the '+' suffix renders
+  // via `triplesIsPartial`.
+  const wmLayerTriples = useLayerTriples(memory, 'wm');
+  const swmLayerTriples = useLayerTriples(memory, 'swm');
+  const vmLayerTriples = useLayerTriples(memory, 'vm');
+  const triplesCount = wmLayerTriples.length + swmLayerTriples.length + vmLayerTriples.length;
   const triplesIsPartial = !memory.loading && (memory.partial || hasUnavailableLayer);
   const triplesValue = allLayerCountsUnavailable
     ? 'Unavailable'
@@ -1841,7 +1902,7 @@ export function LayerWidgetStrip({ layer, entities, entityCount, tripleCount, co
 const TRUST_BADGE_CONFIG: Record<TrustLevel, { layerKey: 'wm' | 'swm' | 'vm'; icon: string; label: string }> = {
   working:  { layerKey: 'wm',  icon: '◇', label: 'Working'  },
   shared:   { layerKey: 'swm', icon: '◈', label: 'Shared'   },
-  verified: { layerKey: 'vm',  icon: '◉', label: 'Verified' },
+  verified: { layerKey: 'vm',  icon: '◉', label: 'Verifiable' },
 };
 
 export function EntityList({
@@ -1893,7 +1954,7 @@ export function EntityList({
     return copy;
   }, [entities, externallySorted]);
 
-  const trustLabel = layerKey === 'vm' ? 'Verified' : layerKey === 'swm' ? 'Shared' : 'Working';
+  const trustLabel = layerKey === 'vm' ? 'Verifiable' : layerKey === 'swm' ? 'Shared' : 'Working';
 
   if (entities.length === 0) {
     return (
@@ -2187,7 +2248,7 @@ export function VerifiedMemoryHeroBanner({ entities, tripleCount, contextGraphId
         layer="vm"
         items={[
           { id: 'assets', value: totalAssets, label: 'Knowledge Assets' },
-          { id: 'triples', value: tripleCount.toLocaleString(), label: 'Verified Triples' },
+          { id: 'triples', value: tripleCount.toLocaleString(), label: 'Verifiable Triples' },
           { id: 'types', value: typeCount, label: 'Entity Types' },
         ]}
       />
@@ -3894,15 +3955,10 @@ export function SubGraphOverviewGrid({
   }, [contextGraphId]);
 
   // Bucket every triple by its origin sub-graph so each mini-graph renders
-  // just its slice. We dedupe on (s,p,o) and cap per-bucket to keep the
-  // mini-graph canvases snappy. Without the cap, sub-graphs like `code`
-  // (~25k triples) can lock up the tab while force-graph runs its layout.
-  //
-  // Sampling strategy: when a sub-graph exceeds MAX_PER_CARD, we keep
-  // every triple for the N heaviest root entities (highest degree) so
-  // the user sees a representative, connected slice rather than a
-  // random first-N truncation that breaks clusters apart.
-  const MAX_PER_CARD = 2500;
+  // just its slice. We dedupe on (s,p,o) and cap per-bucket via the
+  // shared `applyHeaviestSubjectsCap` helper at module scope (see the
+  // doc block there for the sampling / dense-pack / residual-fallback
+  // rationale carried over from sweeps 1-3).
   const triplesBySubGraph = useMemo(() => {
     const bySg = new Map<string, Triple[]>();
     const seen = new Map<string, Set<string>>();
@@ -3917,24 +3973,8 @@ export function SubGraphOverviewGrid({
       if (!arr) { arr = []; bySg.set(t.subGraph, arr); }
       arr.push({ subject: t.subject, predicate: t.predicate, object: t.object });
     }
-    // If a bucket is over the cap, fall back to sampling the heaviest
-    // subjects and dropping the long tail. This preserves cluster
-    // topology far better than truncation.
     for (const [sg, triples] of bySg) {
-      if (triples.length <= MAX_PER_CARD) continue;
-      const degree = new Map<string, number>();
-      for (const t of triples) degree.set(t.subject, (degree.get(t.subject) ?? 0) + 1);
-      const order = [...degree.entries()]
-        .sort((a, b) => b[1] - a[1])
-        .map(([uri]) => uri);
-      const keep = new Set<string>();
-      let kept = 0;
-      for (const uri of order) {
-        if (kept >= MAX_PER_CARD) break;
-        keep.add(uri);
-        kept += degree.get(uri)!;
-      }
-      bySg.set(sg, triples.filter(t => keep.has(t.subject)));
+      bySg.set(sg, applyHeaviestSubjectsCap(triples));
     }
     return bySg;
   }, [memory.allTriples]);
@@ -3979,6 +4019,46 @@ export function SubGraphOverviewGrid({
     return out;
   }, [memory.entityList]);
 
+  // Per-sub-graph URI → trust-level map. Drives the mini-graph
+  // per-node trust colouring (#3 polish, ui-locked priority chain).
+  // Keyed by canonical URI to match the entity-only filter
+  // (`filterTriplesToEntities`) that gates the rendered triple set.
+  // Same `entityList` loop as `entityUrisBySubGraph` so the two
+  // collections stay aligned (every entity in `entityUrisBySubGraph`
+  // has a corresponding `entityTrustByUri` entry).
+  const entityTrustByUriBySubGraph = useMemo(() => {
+    const out = new Map<string, Map<string, TrustLevel>>();
+    for (const e of memory.entityList) {
+      const canonical = canonicalEntityUri(e.uri);
+      for (const sg of e.subGraphs) {
+        let m = out.get(sg);
+        if (!m) { m = new Map<string, TrustLevel>(); out.set(sg, m); }
+        // PR #793 Codex sweep 4 (Bug M) — defensive dual-key
+        // write. Mirrors the dual-key shape in `trustNodeColors`
+        // further down this file so consumers can resolve both
+        // raw and canonical URI forms.
+        //
+        // Important: as of HEAD, `useMemoryEntities.ts` calls
+        // `canonicalEntityUri(uri)` at entity-storage time
+        // (`getOrCreate` ~:386) AND graph-viz's `addTriple`
+        // applies `cleanUri()` at ingestion (~core/graph-model.ts:128).
+        // Both pipelines therefore canonicalize, so
+        // `canonical !== e.uri` is currently unreachable and the
+        // raw-key write never fires. Codex sweep 7 (local
+        // reviewer) flagged Bug M's fix as dead code under the
+        // current architecture — keep this as defence-in-depth
+        // against future de-canonicalisation in either pipeline,
+        // but DO NOT trust this branch as the active fix for any
+        // current wrapped-URI lookup failure. If you remove
+        // either canonicalisation, this branch becomes load-
+        // bearing again.
+        m.set(canonical, e.trustLevel);
+        if (canonical !== e.uri) m.set(e.uri, e.trustLevel);
+      }
+    }
+    return out;
+  }, [memory.entityList]);
+
   // Merge registered user-facing sub-graphs with profile bindings so
   // icon/color/label/rank all flow from the single source of truth.
   // `isUserFacingSubGraph` centralises the reserved-slug rule
@@ -3991,6 +4071,7 @@ export function SubGraphOverviewGrid({
         const binding = profile?.forSubGraph(sg.name) ?? {};
         const rawTriples = triplesBySubGraph.get(sg.name) ?? [];
         const cardEntityUris = entityUrisBySubGraph.get(sg.name) ?? new Set<string>();
+        const cardEntityTrust = entityTrustByUriBySubGraph.get(sg.name) ?? new Map<string, TrustLevel>();
         return {
           slug: sg.name,
           icon: binding.icon ?? '•',
@@ -4009,10 +4090,170 @@ export function SubGraphOverviewGrid({
           tripleCount: sg.tripleCount,
           triples: filterTriplesToEntities(rawTriples, cardEntityUris),
           layerCounts: layerCountsBySubGraph.get(sg.name) ?? { wm: 0, swm: 0, vm: 0 },
+          entityTrustByUri: cardEntityTrust,
         };
       })
       .sort((a, b) => a.rank - b.rank);
-  }, [subGraphs, profile, triplesBySubGraph, layerCountsBySubGraph, entityUrisBySubGraph]);
+  }, [subGraphs, profile, triplesBySubGraph, layerCountsBySubGraph, entityUrisBySubGraph, entityTrustByUriBySubGraph]);
+
+  // GH #805 — subtitle triple total swapped to the same
+  // `useLayerTriples` layer-sum derivation now used by the
+  // Overview Triples stat (`:801`). Pre-GH-#805 the subtitle
+  // read `memory.allTriples.length` directly (canonical-source
+  // discipline established by round 4.1's chip-row anchor); that
+  // anchor was correct *given* the upstream value was honest, but
+  // `allTriples` lifts SWM cross-graph SPO duplicates + WM residue,
+  // so even the chip-row-anchored value was over-counting on CGs
+  // with published SWM or promoted entities. Summing per-layer
+  // slices restores the "subtitle agrees with LayerStats" invariant
+  // round 4.1 was actually after.
+  const wmSubtitleTriples = useLayerTriples(memory, 'wm');
+  const swmSubtitleTriples = useLayerTriples(memory, 'swm');
+  const vmSubtitleTriples = useLayerTriples(memory, 'vm');
+  const subtitleTripleCount =
+    wmSubtitleTriples.length + swmSubtitleTriples.length + vmSubtitleTriples.length;
+
+  // GH #813 — Root mini-card. Synthesizes a card for the
+  // "entities not in any named sub-graph" bucket so the grid
+  // mirrors the SubGraphBar chip row (which already exposes Root
+  // as a peer of the named chips). Renders LAST, after named
+  // cards, mirroring the Root chip's rightmost chip-row position.
+  //
+  // The derivations below mirror SubGraphDetailView's Root branch
+  // (`isRoot = slug === ROOT_SLUG_SENTINEL` at `:4527`):
+  //   • scoped entities: `subGraphs.size === 0` (same rule as
+  //     SubGraphBar.rootEntityCount).
+  //   • scoped triples: rule (1) "exact-tag-routing" can never
+  //     fire for Root (the Root bucket carries no tagged triples
+  //     by definition) — only the untagged-recovery branch admits
+  //     triples whose subject OR resource-object is in scope.
+  // Same canonical-source discipline as round 4.1's subtitle
+  // anchor; what you click maps to the same scope the Root
+  // detail view shows.
+  //
+  // Edge case — CG with zero root entities: we still render the
+  // card (option b per team-lead lean). Named subgraphs with 0
+  // entities render the same "No data yet" empty-state branch;
+  // hiding Root only would create inconsistency (and a missing
+  // affordance for the user wondering whether the bucket exists).
+  const rootCard = useMemo(() => {
+    const rootEntities: typeof memory.entityList = [];
+    const rootEntityUris = new Set<string>();
+    const rootEntityTrust = new Map<string, TrustLevel>();
+    let wm = 0, swm = 0, vm = 0;
+    for (const e of memory.entityList) {
+      if (e.subGraphs.size > 0) continue;
+      rootEntities.push(e);
+      const canonical = canonicalEntityUri(e.uri);
+      rootEntityUris.add(canonical);
+      rootEntityTrust.set(canonical, e.trustLevel);
+      if (canonical !== e.uri) rootEntityTrust.set(e.uri, e.trustLevel);
+      if (e.trustLevel === 'verified') vm++;
+      else if (e.trustLevel === 'shared') swm++;
+      else wm++;
+    }
+    // Untagged-recovery only — Root bucket has no tagged triples
+    // by definition (see SubGraphDetailView's rule 1 → "never
+    // fires for Root"). A triple admitted here must have NO
+    // subGraph tag AND an endpoint in scope.
+    //
+    // PR #818 Codex sweep 4 (ux-lead Finding 1+2 verdict A) —
+    // reverted from sweep-2's `useLayerTriples` union back to
+    // `memory.allTriples` filtered by `!t.subGraph`. Sweep 2's
+    // layer-correct universe was a fix at the symptom (Root
+    // inflation) that introduced two regressions of its own at
+    // the next consumer downstream:
+    //   • Per-slice SPO-dedup race — `useLayerTriples` dedupes
+    //     within each layer independently, so the same SPO under
+    //     both root and per-sub-graph SWM graphs collapsed to one
+    //     ENTRY in the swm slice. Joining the slices then admitted
+    //     it once. Outcome: a cross-graph triple involving a root
+    //     entity could under-count to zero on the Root mini-card.
+    //   • Mixed-layer edge drop — `useLayerTriples` applies a
+    //     subject-trust-level residue filter (drops triples whose
+    //     subject's canonical trustLevel doesn't match the slice's
+    //     layer). For a WM root entity pointing at an SWM entity,
+    //     the row enters the wm slice (subject is WM), passes the
+    //     subject check, but the row's `layer: 'shared'` means it
+    //     was never in the wm slice. The same row enters the swm
+    //     slice but fails the subject-trust check (subject is WM,
+    //     slice is SWM). The mixed-layer edge falls through every
+    //     slice and never reaches the Root card.
+    // ux-lead's call: restoring symmetry with the named-card path
+    // (`memory.allTriples` filtered by `!t.subGraph` vs
+    // `t.subGraph === slug`) gives both cards the same machinery
+    // and the same edge cases. Inflation (WM residue + SWM cross-
+    // graph) is consistent across Root AND named cards — easier
+    // to reason about and easier to fix in one render-side follow-
+    // up (GH #819) than a Root-specific divergence between
+    // under-count and inflation.
+    //
+    // PR #818 Codex sweep 1 — Bug M family (preserved). The
+    // canonical-URI membership check + canonical SPO-dedup key
+    // still apply on the symmetric-with-named universe.
+    //
+    // PR #818 Codex sweep 6 — admission rule symmetry. Sweep 4's
+    // inline check was OR-membership ("admit if either endpoint
+    // is in rootEntityUris"), but named cards route through
+    // `filterTriplesToEntities(rawTriples, cardEntityUris)` at
+    // `:4051`, which is AND-membership with an `rdf:type`
+    // exemption. User caught the divergence on `ui-refresh`:
+    // entity `urn:epcis:...:gtin:50127962004651:lot:P240526X`
+    // lives in `epcis-supply-chain` (subGraphs non-empty → not
+    // in rootEntityUris → correctly absent from the Root entity
+    // list), but the daemon ships untagged copies of its triples
+    // in `<cg>/_shared_memory`. Pre-sweep-6 OR-membership
+    // admitted those rows because the SUBJECT was in
+    // rootEntityUris (a different entity), so the non-root
+    // object rendered as a node — Root mini-graph had more
+    // nodes than the badge claimed.
+    //
+    // Fix: dedup SPO first (Bug M canonicalization preserved),
+    // then route through `filterTriplesToEntities` so admission
+    // matches the named-card rule exactly. Same machinery now
+    // includes the same AND-membership + rdf:type exemption.
+    const candidateTriples: Triple[] = [];
+    const seenSpo = new Set<string>();
+    for (const t of memory.allTriples) {
+      if (t.subGraph) continue;
+      const subjCanon = canonicalEntityUri(t.subject);
+      const objCanon = canonicalEntityUri(t.object);
+      const key = `${subjCanon}|${t.predicate}|${objCanon}`;
+      if (seenSpo.has(key)) continue;
+      seenSpo.add(key);
+      candidateTriples.push({ subject: t.subject, predicate: t.predicate, object: t.object });
+    }
+    const rootTriples = filterTriplesToEntities(candidateTriples, rootEntityUris);
+    // PR #818 Codex sweep 4 (finding 3) — shared cap helper. The
+    // earlier inline copy duplicated the named-card sampling shape
+    // verbatim; refactored to call `applyHeaviestSubjectsCap` so
+    // both paths stay in lockstep when the sampling rule evolves.
+    const cappedRootTriples = applyHeaviestSubjectsCap(rootTriples);
+    const binding = profile?.forSubGraph(ROOT_SLUG_SENTINEL) ?? {};
+    return {
+      slug: ROOT_SLUG_SENTINEL,
+      icon: binding.icon ?? '⊘',
+      // Color left unset — the chrome falls through to neutral
+      // tokens via the `.v10-sgov-card.root` modifier (mirrors
+      // the chip's `--text-tertiary` neutral fallback).
+      color: binding.color ?? '#64748b',
+      displayName: binding.displayName ?? 'Root',
+      description: binding.description,
+      rank: 999,
+      entityCount: rootEntities.length,
+      // tripleCount stays the pre-cap distinct total so the
+      // stats badge reports the true count (matches what the
+      // Root detail view would show), while `triples` carries
+      // the post-cap sampled slice the mini-graph renders.
+      // Mirrors the named-card behaviour where `sg.tripleCount`
+      // (daemon-reported) decouples the badge from the rendered
+      // slice.
+      tripleCount: rootTriples.length,
+      triples: cappedRootTriples,
+      layerCounts: { wm, swm, vm },
+      entityTrustByUri: rootEntityTrust,
+    };
+  }, [memory.entityList, memory.allTriples, profile]);
 
   if (loading && cards.length === 0) {
     return (
@@ -4040,7 +4281,24 @@ export function SubGraphOverviewGrid({
       />
     );
   }
-  if (cards.length === 0) {
+  // PR #818 Codex sweep 1 — the teaching empty state fires when
+  // there are no named sub-graphs registered. Pre-sweep the gate
+  // was `cards.length === 0` alone, which short-circuited the
+  // grid render BEFORE the Root mini-card render block — so a CG
+  // with no named sub-graphs but non-zero root entities lost the
+  // direct Root affordance (user had to click the empty-state's
+  // "View root" CTA instead of seeing the Root card in-place).
+  //
+  // Post-sweep: only render the teaching empty state when BOTH the
+  // named-sub-graph set AND the Root bucket are empty — the only
+  // truly "nothing to show" case. Three resulting states:
+  //   • named cards + Root entities → full grid (named cards +
+  //     Root card last)
+  //   • zero named cards + Root entities → grid renders only the
+  //     Root card (it stands alone as the entire grid)
+  //   • zero named cards + zero Root entities → teaching empty
+  //     state (unchanged behaviour for the truly-empty case)
+  if (cards.length === 0 && rootCard.entityCount === 0) {
     // Teaching empty state (UX §4.4.1). Replaces the previous bare
     // "No sub-graphs registered yet." — explains what a subgraph is,
     // how one comes into being, and offers a one-click jump to the
@@ -4069,8 +4327,31 @@ export function SubGraphOverviewGrid({
     <div className="v10-sgov">
       <div className="v10-sgov-header">
         <div className="v10-sgov-title">Subgraphs</div>
+        {/* Round 4.1 (ux-lead, GH #812) — subtitle anchors to
+            canonical hook surfaces (`memory.counts.total` for
+            entities, layer-sum via `useLayerTriples` for triples)
+            so it matches both the SubGraphBar `All` chip AND the
+            per-layer LayerStats by construction.
+            Pre-round-4.1: derived from card-level aggregates
+            (sum-of-`entityCount` double-counted cross-membership
+            entities; sum-of-`tripleCount` excluded the root bucket).
+            Round 4.1 swapped to `memory.counts.total` + raw
+            `memory.allTriples.length` — entity anchor was correct,
+            triple anchor was still inflated by SWM cross-graph SPO
+            duplicates + WM residue (GH #805). The #805 layer-sum
+            fix on the same surface makes subtitle == Overview
+            Triples == per-layer LayerStats.
+            PR #818 Codex sweep 2 — label says "named subgraphs"
+            (was "subgraphs"). The Root mini-card is a peer-but-
+            different surface that now renders in the grid; the
+            old label overstated what `cards.length` includes
+            (named subgraphs only, never Root) and produced a
+            "0 subgraphs" subtitle reading while a Root card
+            visibly rendered. The new label is honest about the
+            count's scope and applies regardless of Root
+            presence. */}
         <div className="v10-sgov-sub">
-          {cards.length} subgraphs · {cards.reduce((a, b) => a + b.entityCount, 0)} entities · {cards.reduce((a, b) => a + b.tripleCount, 0)} triples
+          {cards.length} named subgraphs · {memory.counts.total} entities · {subtitleTripleCount} triples
         </div>
       </div>
       <div className="v10-sgov-grid">
@@ -4082,6 +4363,19 @@ export function SubGraphOverviewGrid({
             onOpen={() => onSelectSubGraph(card.slug)}
           />
         ))}
+        {/* GH #813 — Root mini-card. Last position mirrors the
+            Root chip's rightmost chip-row position. Rendered even
+            at 0 entities (consistency with named cards' empty
+            branches; option b per team-lead lean). The `root`
+            modifier on the card chrome reads as "synthesized
+            bucket" vs the solid borders of daemon-emitted cards. */}
+        <SubGraphMiniCard
+          key={ROOT_SLUG_SENTINEL}
+          card={rootCard}
+          onNodeClick={onNodeClick}
+          onOpen={() => onSelectSubGraph(ROOT_SLUG_SENTINEL)}
+          variant="root"
+        />
       </div>
     </div>
   );
@@ -4091,16 +4385,49 @@ export function SubGraphMiniCard({
   card,
   onNodeClick,
   onOpen,
+  variant,
 }: {
   card: {
     slug: string; icon: string; color: string; displayName: string;
     description?: string; entityCount: number; tripleCount: number;
     triples: Triple[];
     layerCounts: { wm: number; swm: number; vm: number };
+    entityTrustByUri: Map<string, TrustLevel>;
   };
   onNodeClick?: (node: any) => void;
   onOpen: () => void;
+  // GH #813 — `root` opts into the quieter neutral-border chrome
+  // that distinguishes the synthesized Root bucket from daemon-
+  // emitted named sub-graphs (which carry per-card `--sg-color`
+  // tinted borders). Same render shape, different chrome modifier.
+  variant?: 'root';
 }) {
+  // Per-URI trust palette for the mini-graph (#3 polish).
+  // ui-locked priority chain (graph-viz style engine):
+  //   1. `nodeColors[uri]` — wins for any entity carrying a
+  //      canonical trust level (TRUST_COLORS[e.trustLevel]).
+  //   2. `defaultNodeColor: card.color` — fallback for non-entity
+  //      URIs (vocabulary IRIs, blank-node anchors) preserves the
+  //      card's chrome identity.
+  //   3. `namespaceColors` — built-in graph-viz tints, neutralised
+  //      to `card.color` so cross-cutting namespaces don't drown
+  //      the per-trust signal.
+  // Build at the card scope from `card.entityTrustByUri` (attached
+  // by the parent `cards` derivation). The upstream map carries
+  // BOTH canonical AND raw URI forms (PR #793 sweep 4 Bug M), so
+  // this loop produces a `nodeColors` map that resolves either
+  // form the rendered triple set may carry — wrapped `<urn:...>`
+  // subjects/objects survive promotion without falling through to
+  // `card.color`. Mirrors the dual-key shape in `trustNodeColors`
+  // further down this file.
+  const nodeColors = useMemo(() => {
+    const out: Record<string, string> = {};
+    for (const [uri, trustLevel] of card.entityTrustByUri) {
+      out[uri] = TRUST_COLORS[trustLevel];
+    }
+    return out;
+  }, [card.entityTrustByUri]);
+
   // A compact-mode graph options block — pared-down labels, smaller nodes,
   // brighter default color (driven by the sub-graph's profile color) so each
   // card reads as a distinct "island" at a glance.
@@ -4112,6 +4439,10 @@ export function SubGraphMiniCard({
       classColors: CODE_CLASS_COLORS,
       predicateColors: CODE_PREDICATE_COLORS,
       namespaceColors: neutraliseBuiltinNamespaces(card.color),
+      // Per-URI tints sit ABOVE classColors / namespaceColors in
+      // the style-engine priority stack — TRUST_COLORS wins for
+      // every entity in the card's scope (#3 polish).
+      ...(Object.keys(nodeColors).length > 0 ? { nodeColors } : {}),
       defaultNodeColor: card.color,
       defaultEdgeColor: '#475569',
       edgeWidth: 1.0,
@@ -4121,18 +4452,23 @@ export function SubGraphMiniCard({
     },
     hexagon: { baseSize: 6, minSize: 3, maxSize: 16, scaleWithDegree: true },
     focus: { maxNodes: 5000, hops: 999 },
-  }), [card.color]);
+  }), [card.color, nodeColors]);
 
+  const isRoot = variant === 'root';
   return (
     <div
-      className="v10-sgov-card"
-      style={{
-        '--sg-color': card.color,
-        borderColor: card.color + '55',
-      } as React.CSSProperties}
+      className={`v10-sgov-card${isRoot ? ' root' : ''}`}
+      style={isRoot
+        // Root card: chrome falls through to neutral tokens via
+        // the `.root` modifier — no per-card color injection.
+        ? undefined
+        : {
+            '--sg-color': card.color,
+            borderColor: card.color + '55',
+          } as React.CSSProperties}
     >
       <div className="v10-sgov-card-head">
-        <span className="v10-sgov-card-icon" style={{ color: card.color }}>{card.icon}</span>
+        <span className="v10-sgov-card-icon" style={isRoot ? undefined : { color: card.color }}>{card.icon}</span>
         <div className="v10-sgov-card-title-wrap">
           <div className="v10-sgov-card-title">{card.displayName}</div>
           {card.description && (
@@ -4148,12 +4484,21 @@ export function SubGraphMiniCard({
         <span className="v10-sgov-card-stat"><b>{card.tripleCount}</b> triples</span>
       </div>
       <div className="v10-sgov-card-pyramid">
-        <MiniLayerPyramid counts={card.layerCounts} />
+        {/* compact mode collapses the empty-counts branch to `null`
+            inside MiniLayerBar, eliminating the duplicate "No data"
+            label that sat next to the card-body fallback. Populated
+            cards render identically. (#2 — ui-locked) */}
+        <MiniLayerBar counts={card.layerCounts} compact />
       </div>
       <div className="v10-sgov-card-graph">
         {card.triples.length === 0 ? (
           <div className="v10-sgov-card-empty">
-            {card.entityCount > 0 ? 'No WM triples · promoted data only' : 'No data yet'}
+            {/* Two-branch wording locked by ux-lead in the #2 amendment.
+                `entityCount > 0` AND mini-graph empty means the
+                sub-graph has content but no WM-shaped data this card
+                can render — pair the literal with the existing ↗ open
+                button so the next action is obvious. */}
+            {card.entityCount > 0 ? 'Promoted — open to view' : 'No data yet'}
           </div>
         ) : (
           <Suspense fallback={<div className="v10-sgov-card-empty">Loading…</div>}>
@@ -4172,11 +4517,11 @@ export function SubGraphMiniCard({
   );
 }
 
-// ─── MiniLayerPyramid ────────────────────────────────────────
+// ─── MiniLayerBar ────────────────────────────────────────
 // Three-segment WM/SWM/VM bar. Used as a header widget in the sub-graph
 // page (clickable — toggles which layers contribute entities) and as a
 // compact badge on SubGraphOverviewGrid cards (read-only).
-export function MiniLayerPyramid({
+export function MiniLayerBar({
   counts,
   activeLayers,
   onClickLayer,
@@ -4189,25 +4534,25 @@ export function MiniLayerPyramid({
 }) {
   const total = counts.wm + counts.swm + counts.vm;
   if (total === 0) {
-    return compact ? null : <div className="v10-minipyr v10-minipyr-empty">No data</div>;
+    return compact ? null : <div className="v10-minibar v10-minibar-empty">No data</div>;
   }
   const rows: Array<{ key: TrustLevel; short: string; count: number; color: string; label: string }> = [
-    { key: 'verified', short: 'VM',  count: counts.vm,  color: '#22c55e', label: 'Verified' },
+    { key: 'verified', short: 'VM',  count: counts.vm,  color: '#22c55e', label: 'Verifiable' },
     { key: 'shared',   short: 'SWM', count: counts.swm, color: '#f59e0b', label: 'Shared' },
     { key: 'working',  short: 'WM',  count: counts.wm,  color: '#64748b', label: 'Working' },
   ];
   const interactive = !!onClickLayer;
   return (
-    <div className={`v10-minipyr${compact ? ' compact' : ''}`}>
+    <div className={`v10-minibar${compact ? ' compact' : ''}`}>
       {!compact && (
-        <div className="v10-minipyr-bar">
+        <div className="v10-minibar-bar">
           {rows.filter(r => r.count > 0).map(r => {
             const pct = (r.count / total) * 100;
             const active = activeLayers ? activeLayers.has(r.key) : true;
             return (
               <div
                 key={r.key}
-                className={`v10-minipyr-seg${active ? '' : ' dim'}`}
+                className={`v10-minibar-seg${active ? '' : ' dim'}`}
                 style={{ width: `${pct}%`, background: r.color }}
                 title={`${r.label}: ${r.count}`}
               />
@@ -4215,21 +4560,21 @@ export function MiniLayerPyramid({
           })}
         </div>
       )}
-      <div className="v10-minipyr-legend">
+      <div className="v10-minibar-legend">
         {rows.map(r => {
           const active = activeLayers ? activeLayers.has(r.key) : true;
           return (
             <button
               key={r.key}
               type="button"
-              className={`v10-minipyr-chip${active ? '' : ' dim'}${interactive ? ' interactive' : ''}`}
+              className={`v10-minibar-chip${active ? '' : ' dim'}${interactive ? ' interactive' : ''}`}
               onClick={interactive ? () => onClickLayer!(r.key) : undefined}
               disabled={!interactive}
               title={`${r.label} Memory — ${r.count} entities${interactive ? ' (click to toggle)' : ''}`}
             >
-              <span className="v10-minipyr-dot" style={{ background: r.color }} />
-              <span className="v10-minipyr-short">{r.short}</span>
-              <span className="v10-minipyr-count">{r.count}</span>
+              <span className="v10-minibar-dot" style={{ background: r.color }} />
+              <span className="v10-minibar-short">{r.short}</span>
+              <span className="v10-minibar-count">{r.count}</span>
             </button>
           );
         })}
@@ -4335,6 +4680,9 @@ export function SubGraphDetailView({
   onSelectEntity,
   activeTab,
   onTabChange,
+  initialLayer,
+  initialEnabledLayers: initialEnabledLayersProp,
+  onEnabledLayersChange,
 }: {
   slug: string;
   rawMemory: ReturnType<typeof useMemoryEntities>;
@@ -4343,6 +4691,33 @@ export function SubGraphDetailView({
   onSelectEntity: (uri: string) => void;
   activeTab?: SubGraphTab;
   onTabChange?: (tab: SubGraphTab) => void;
+  /** S3 polish #9 — single-layer seed for the common chip-click
+   *  case. When the chip click came from a layer page
+   *  (WM/SWM/VM) the originating layer is forwarded here so
+   *  `enabledLayers` seeds to that layer instead of the
+   *  default all-three. Fold-in #4 from §4.4.1: scope must
+   *  never silently change semantics across a navigation
+   *  transition. Superseded by `initialEnabledLayers` when both
+   *  are set. */
+  initialLayer?: 'wm' | 'swm' | 'vm';
+  /** S3 polish PR #793 Bug J — multi-layer seed for
+   *  detail→detail navigation. Pre-fix the chip-click handler
+   *  preserved the STALE seed across hops, dropping any
+   *  user-applied widening (e.g. WM-seeded entry → user widens
+   *  to WM+SWM → hops to another subgraph → next detail
+   *  silently narrowed back to WM-only). Routing the current
+   *  scope through this prop lets the user's exact narrow OR
+   *  widen survive the hop. Single-layer current scope can also
+   *  route through `initialLayer` for callers that prefer the
+   *  simpler shape; multi-layer must use this prop. Wins over
+   *  `initialLayer` when both are set. */
+  initialEnabledLayers?: ReadonlySet<TrustLevel>;
+  /** S3 polish PR #793 Bug J — mirrors the detail view's
+   *  `enabledLayers` state up to the parent so it can route the
+   *  current scope through chip clicks. Optional — without it
+   *  the detail view stays uncontrolled and chip-hop navigation
+   *  reverts to the stale seed shape. */
+  onEnabledLayersChange?: (layers: ReadonlySet<TrustLevel>) => void;
 }) {
   const profile = useProjectProfileContext();
   const binding = profile?.forSubGraph(slug);
@@ -4367,9 +4742,29 @@ export function SubGraphDetailView({
   useEffect(() => {
     setEntitySort(binding?.timelinePredicate ? 'created-desc' : 'triples');
   }, [slug, binding?.timelinePredicate]);
-  const [enabledLayers, setEnabledLayers] = useState<Set<TrustLevel>>(
-    () => new Set<TrustLevel>(['working', 'shared', 'verified']),
-  );
+  // #9 polish + PR #793 Bug J — derive the seeded scope from
+  // `initialEnabledLayers` (multi-layer Set form, Bug J) or
+  // `initialLayer` (single-layer convenience, #9), in that
+  // precedence. Carrying the user's scope across the navigation
+  // transition is the §4.4.1 fold-in #4 contract.
+  const initialEnabledLayers = useMemo(() => {
+    if (initialEnabledLayersProp && initialEnabledLayersProp.size > 0) {
+      return new Set<TrustLevel>(initialEnabledLayersProp);
+    }
+    if (initialLayer === 'wm') return new Set<TrustLevel>(['working']);
+    if (initialLayer === 'swm') return new Set<TrustLevel>(['shared']);
+    if (initialLayer === 'vm') return new Set<TrustLevel>(['verified']);
+    return new Set<TrustLevel>(['working', 'shared', 'verified']);
+  }, [initialLayer, initialEnabledLayersProp]);
+  const [enabledLayers, setEnabledLayers] = useState<Set<TrustLevel>>(initialEnabledLayers);
+  // Mirror current scope up to the parent so chip-hop navigation
+  // routes the user's actual current scope (not the stale seed)
+  // through the layer-agnostic chip-click handler. Stable callback
+  // identity from the parent is assumed; the deps capture the Set
+  // identity so widening/narrowing pushes a fresh value through.
+  useEffect(() => {
+    onEnabledLayersChange?.(enabledLayers);
+  }, [enabledLayers, onEnabledLayersChange]);
   const [chipState, setChipState] = useState<Map<string, Set<string>>>(new Map());
   const [activeQuerySlug, setActiveQuerySlug] = useState<string | null>(null);
   const [queryResults, setQueryResults] = useState<Set<string> | null>(null);
@@ -4745,12 +5140,13 @@ export function SubGraphDetailView({
 
   // Reset filters when the sub-graph changes — otherwise chips from
   // `tasks` would linger when the user jumps to `decisions` and silently
-  // zero out the list.
+  // zero out the list. `enabledLayers` re-seeds to `initialEnabledLayers`
+  // (default all-three OR the originating-layer scope per #9 polish).
   useEffect(() => {
-    setEnabledLayers(new Set<TrustLevel>(['working', 'shared', 'verified']));
+    setEnabledLayers(initialEnabledLayers);
     setChipState(new Map());
     clearQuery();
-  }, [slug, clearQuery]);
+  }, [slug, clearQuery, initialEnabledLayers]);
 
   useEffect(() => {
     if (!activeTab) setLocalActiveTab('items');
@@ -4760,9 +5156,25 @@ export function SubGraphDetailView({
     if (rawSelectedTab !== selectedTab) setSelectedTab(selectedTab);
   }, [rawSelectedTab, selectedTab, setSelectedTab]);
 
-  const hasAnyFilter = enabledLayers.size < 3 || chipState.size > 0 || !!queryResults;
+  // PR #793 Codex sweep 2 (Bug I) — derive the "are we at the
+  // seeded state?" predicate against `initialEnabledLayers`,
+  // NOT the hard-coded all-three set. Pre-fix the seeded
+  // single-layer scope was indistinguishable from a user-applied
+  // filter, so:
+  //   • `Reset filters` was visible immediately on a WM-seeded
+  //     entry — clicking it widened to all-three instead of
+  //     restoring WM.
+  //   • The active-layer pill was clickable at the seeded scope —
+  //     it would widen the same way.
+  // Comparing against `initialEnabledLayers` makes both
+  // affordances honest: hidden / disabled when the user is at
+  // their entry scope; visible / enabled only after they've
+  // actually narrowed or widened.
+  const isAtSeededScope = enabledLayers.size === initialEnabledLayers.size
+    && [...enabledLayers].every(l => initialEnabledLayers.has(l));
+  const hasAnyFilter = !isAtSeededScope || chipState.size > 0 || !!queryResults;
   const resetFilters = () => {
-    setEnabledLayers(new Set<TrustLevel>(['working', 'shared', 'verified']));
+    setEnabledLayers(new Set<TrustLevel>(initialEnabledLayers));
     setChipState(new Map());
     clearQuery();
   };
@@ -4778,10 +5190,11 @@ export function SubGraphDetailView({
           <div className="v10-subgraph-detail-title">{title}</div>
           {desc && <div className="v10-subgraph-detail-desc">{desc}</div>}
         </div>
-        <MiniLayerPyramid
+        <MiniLayerBar
           counts={{ wm: layerCounts.wm, swm: layerCounts.swm, vm: layerCounts.vm }}
           activeLayers={enabledLayers}
           onClickLayer={toggleLayer}
+          compact
         />
       </div>
 
@@ -4800,38 +5213,73 @@ export function SubGraphDetailView({
             : 'This subgraph, across the three memory layers:'}
         </div>
         <div className="v10-subgraph-cross-layer-strip" data-testid="cross-layer-strip">
-          <span className="v10-subgraph-cross-layer-cell" data-layer="wm">
+          {/* Cells are interactive buttons wired to `toggleLayer`
+              (#6, ui-locked). The `→` arrows stay inert span
+              separators — they shouldn't grow click targets. The
+              "refuse last enabled" safeguard at `toggleLayer:4683`
+              already prevents the all-empty state; the
+              `aria-pressed="false"` cells render at 0.5 opacity
+              (CSS) to signal the dimmed state. */}
+          <button
+            type="button"
+            className="v10-subgraph-cross-layer-cell"
+            data-layer="wm"
+            aria-pressed={enabledLayers.has('working')}
+            onClick={() => toggleLayer('working')}
+          >
             <span className="v10-subgraph-cross-layer-cell-icon" style={{ color: TRUST_COLORS.working }}>◇</span>
             <span className="v10-subgraph-cross-layer-cell-label">Working</span>
             <span className="v10-subgraph-cross-layer-cell-count">{layerCounts.wm}</span>
-          </span>
+          </button>
           <span className="v10-subgraph-cross-layer-arrow" aria-hidden="true">→</span>
-          <span className="v10-subgraph-cross-layer-cell" data-layer="swm">
+          <button
+            type="button"
+            className="v10-subgraph-cross-layer-cell"
+            data-layer="swm"
+            aria-pressed={enabledLayers.has('shared')}
+            onClick={() => toggleLayer('shared')}
+            /* #8 polish (c) — when SWM is the only enabled layer
+               the Graph pane swaps to agent-attribution coloring;
+               the tooltip surfaces that context-sensitive
+               behaviour so the user understands the colour change. */
+            title={singleLayer === 'swm'
+              ? 'Showing Shared Working Memory only — graph is colored by contributing agent (see legend).'
+              : undefined}
+          >
             <span className="v10-subgraph-cross-layer-cell-icon" style={{ color: TRUST_COLORS.shared }}>◈</span>
             <span className="v10-subgraph-cross-layer-cell-label">Shared</span>
             <span className="v10-subgraph-cross-layer-cell-count">{layerCounts.swm}</span>
-          </span>
+          </button>
           <span className="v10-subgraph-cross-layer-arrow" aria-hidden="true">→</span>
-          <span className="v10-subgraph-cross-layer-cell" data-layer="vm">
+          <button
+            type="button"
+            className="v10-subgraph-cross-layer-cell"
+            data-layer="vm"
+            aria-pressed={enabledLayers.has('verified')}
+            onClick={() => toggleLayer('verified')}
+          >
             <span className="v10-subgraph-cross-layer-cell-icon" style={{ color: TRUST_COLORS.verified }}>◉</span>
-            <span className="v10-subgraph-cross-layer-cell-label">Verified</span>
+            <span className="v10-subgraph-cross-layer-cell-label">Verifiable</span>
             <span className="v10-subgraph-cross-layer-cell-count">{layerCounts.vm}</span>
-          </span>
+          </button>
         </div>
-        <button
-          type="button"
+        {/* PR #793 round 2 — demoted from clickable pill to
+            inline caption per ui-lead (option c). The
+            "restore" affordance the button used to claim was
+            confusing (it looked dressable but didn't go
+            anywhere); the `Reset filters` button covers the
+            same semantic when chip filters exist. `Bug I`'s
+            `isAtSeededScope` predicate stays — it still gates
+            the Reset button's visibility — but no longer
+            affects this element. Rendered as a `<span>` with
+            metadata role. */}
+        <span
           className={`v10-subgraph-active-layer-pill${enabledLayers.size === 3 ? ' all-layers' : ''}`}
-          onClick={() => setEnabledLayers(new Set<TrustLevel>(['working', 'shared', 'verified']))}
-          disabled={enabledLayers.size === 3}
           data-testid="active-layer-pill"
-          aria-label={`Active layer scope: ${activeLayerLabel}${enabledLayers.size === 3 ? '' : ' — click to reset to all layers'}`}
-          title={enabledLayers.size === 3
-            ? 'Active layer scope: all three memory layers'
-            : 'Click to reset to all layers'}
         >
           <span className="v10-subgraph-active-layer-pill-label">Active layer:</span>
           <span className="v10-subgraph-active-layer-pill-value">{activeLayerLabel}</span>
-        </button>
+        </span>
       </div>
 
       {queryCatalogs.length > 0 && (
@@ -4978,6 +5426,17 @@ export function SubGraphDetailView({
 
         {selectedTab === 'graph' && (
           <div className="v10-layer-expand-body full-width" data-cg-scroll-key={`subgraph:${slug}:graph`}>
+            {/* PR #793 round 2 — the inline "Colored by
+                contributing agent" badge (sweep 0 Bug #8's
+                ux-locked (a) discoverability surface) was removed
+                after manual-test feedback from the original
+                requester. The `SwmAttributionLegend` inside
+                LayerGraphPanel already carries the load-bearing
+                disclosure; the badge above the canvas added
+                visual noise without adding signal. The
+                context-sensitive tooltip on the SWM cross-layer
+                cell (`title` when `singleLayer === 'swm'`) is
+                hover-only insurance and stays. */}
             <LayerGraphPanel
               layer={singleLayer ?? 'wm'}
               triples={graphPanelTriples}

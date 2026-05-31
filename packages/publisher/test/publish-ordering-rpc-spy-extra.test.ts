@@ -111,7 +111,7 @@ describe('Publish ordering & RPC spy — P-1 / P-6 / P-7', () => {
     const cgChain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const cgIdBn = await createTestContextGraph(cgChain);
     cgId = String(cgIdBn);
-    _kav10Address = await cgChain.getKnowledgeAssetsV10Address();
+    _kav10Address = await cgChain.getKnowledgeAssetsLifecycleAddress();
   }, 120_000);
 
   afterAll(async () => {

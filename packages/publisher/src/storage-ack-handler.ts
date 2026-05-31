@@ -30,6 +30,17 @@ function compactDeclineText(value: string, maxChars: number): string {
   return `${compacted.slice(0, Math.max(0, maxChars - 3))}...`;
 }
 
+/** Public publishes omit field 15; protobuf decodes that as `bytes` length 0, not absent. */
+function ciphertextRootForAckDigest(root: Uint8Array | undefined): Uint8Array {
+  if (!root || root.length === 0) {
+    return new Uint8Array(32);
+  }
+  if (root.length !== 32) {
+    throw new Error(`ciphertextChunksRoot must be 32 bytes, got ${root.length}`);
+  }
+  return root;
+}
+
 function summarizeDeclineEntities(entities: readonly string[]): string {
   if (entities.length === 0) return '(none)';
   const visible = entities
@@ -520,6 +531,9 @@ export class StorageACKHandler {
         BigInt(intentEpochs),
         intentTokenAmount,
         BigInt(claimedLeafCount),
+        ciphertextRootForAckDigest(intent.ciphertextChunksRoot),
+        BigInt(intent.ciphertextChunkCount ?? 0),
+        false,
       );
       if (this.config.isSignerRegistered) {
         let signerRegistered: boolean | undefined;
@@ -715,6 +729,9 @@ export class StorageACKHandler {
         BigInt(intentEpochs),
         intentTokenAmount,
         BigInt(claimedLeafCount),
+        ciphertextRootForAckDigest(intent.ciphertextChunksRoot),
+        BigInt(intent.ciphertextChunkCount ?? 0),
+        false,
       );
 
       if (this.config.isSignerRegistered) {
@@ -930,6 +947,9 @@ export class StorageACKHandler {
       BigInt(intentEpochs),
       intentTokenAmount,
       BigInt(verifiedLeafCount),
+      ciphertextRootForAckDigest(intent.ciphertextChunksRoot),
+      BigInt(intent.ciphertextChunkCount ?? 0),
+      false,
     );
     if (this.config.isSignerRegistered) {
       let signerRegistered: boolean | undefined;

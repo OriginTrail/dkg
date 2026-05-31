@@ -10,6 +10,7 @@ import {IVersioned} from "../interfaces/IVersioned.sol";
 import {HubLib} from "../libraries/HubLib.sol";
 import {StakingLib} from "../libraries/StakingLib.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 /**
  * @title ConvictionStakingStorage
@@ -24,7 +25,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
  *     CSS now extends `Guardian`, so its `tokenContract` reference and
  *     `transferStake` outflow function come from the same base every V10
  *     publish/payment contract uses for vault-routed deposits. Vault-target
- *     consumers (`KnowledgeAssetsV10`, `KnowledgeCollection`, `Paymaster`,
+ *     consumers (`KnowledgeAssetsLifecycle`, `DKGKnowledgeAssets`, `Paymaster`,
  *     `PublishingConvictionAccount`, `DKGPublishingConvictionNFT`,
  *     `DKGStakingConvictionNFT`) resolve `hub.getContractAddress("ConvictionStakingStorage")`
  *     for both deposits (TRAC `transferFrom` to CSS) and withdrawals
@@ -70,6 +71,8 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
  *     consumers that need them should settle and read "current" state.
  */
 contract ConvictionStakingStorage is INamed, IVersioned, Guardian {
+    using SafeERC20 for IERC20;
+
     string private constant _NAME = "ConvictionStakingStorage";
     // Version history:
     //   1.1.0 — split-bucket rewards, discrete tier ladder.
@@ -117,7 +120,7 @@ contract ConvictionStakingStorage is INamed, IVersioned, Guardian {
     //             `StakingV10` admin surface can be added without further
     //             struct churn).
     //           * Vault deposits across V10 (`KnowledgeAssetsV10`,
-    //             `KnowledgeCollection`, `Paymaster`, etc.) now route TRAC
+    //             `DKGKnowledgeAssets`, `Paymaster`, etc.) now route TRAC
     //             into the CSS address. `StakingStorage` is no longer in
     //             the V10 hot path; only `StakingV10._convertToNFT` reads
     //             it (V8→V10 drain at cutover).
@@ -131,7 +134,7 @@ contract ConvictionStakingStorage is INamed, IVersioned, Guardian {
     //             the 60 days preceding V10 launch. Validated against
     //             `_tierDuration(lockTier)` and the current block
     //             timestamp; tier-0 callers MUST pass 0.
-    string private constant _VERSION = "4.1.0";
+    string private constant _VERSION = "10.0.2";
 
     // Multiplier scale, matches DKGStakingConvictionNFT._convictionMultiplier
     // (returns 1e18-scaled values so fractional tiers like 1.5x and 3.5x
@@ -1446,7 +1449,7 @@ contract ConvictionStakingStorage is INamed, IVersioned, Guardian {
     // ============================================================
 
     function transferStake(address receiver, uint96 stakeAmount) external onlyContracts {
-        tokenContract.transfer(receiver, stakeAmount);
+        tokenContract.safeTransfer(receiver, stakeAmount);
         emit StakedTokensTransferred(receiver, stakeAmount);
     }
 

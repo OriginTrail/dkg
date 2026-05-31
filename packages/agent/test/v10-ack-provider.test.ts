@@ -103,7 +103,7 @@ describe('v10 ACK provider wiring', () => {
     const delayed = delayedAdapterPublisherAddress(createEVMAdapter(HARDHAT_KEYS.CORE_OP), expectedAddress);
     const chain = delayed.chain;
     ({ agent } = await createAgent(chain));
-    await installHardhatACKProvider(agent, chain as { getKnowledgeAssetsV10Address: () => Promise<string> });
+    await installHardhatACKProvider(agent, chain as { getKnowledgeAssetsLifecycleAddress: () => Promise<string> });
 
     const cgId = 'adapter-backed-publisher-cg';
     await agent.createContextGraph({ id: cgId, name: 'Adapter-backed Publisher CG' });

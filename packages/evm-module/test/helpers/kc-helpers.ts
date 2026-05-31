@@ -64,7 +64,7 @@ export async function getKCSignaturesData(
 }
 
 /**
- * Optional Phase 10 bridge: when supplied, `createKnowledgeCollection` will
+ * Optional Phase 10 bridge: when supplied, `createKnowledgeAsset` will
  * also register the freshly-published KC into the given Context Graph and
  * seed its per-epoch value entry in `ContextGraphValueStorage`. Required for
  * any test that subsequently calls `RandomSampling.createChallenge`, which
@@ -93,7 +93,7 @@ export type Phase10CGBridge = {
   valueLifetimeEpochs?: number;
 };
 
-export async function createKnowledgeCollection(
+export async function createKnowledgeAsset(
   kcCreator: SignerWithAddress,
   publishingNode: NodeAccounts,
   publishingNodeIdentityId: number,
@@ -132,7 +132,7 @@ export async function createKnowledgeCollection(
   // Create knowledge collection
   const tx = await contracts.KnowledgeCollection.connect(
     kcCreator,
-  ).createKnowledgeCollection(
+  ).createKnowledgeAsset(
     publishOperationId,
     signaturesData.merkleRoot,
     knowledgeAssetsAmount,
@@ -164,7 +164,7 @@ export async function createKnowledgeCollection(
       valueWei = ethers.parseEther('1'),
       valueLifetimeEpochs = 100,
     } = phase10Bridge;
-    await ContextGraphStorage.connect(cgOpSigner).registerKCToContextGraph(
+    await ContextGraphStorage.connect(cgOpSigner).registerKnowledgeAssetToContextGraph(
       cgId,
       collectionId,
     );
@@ -195,7 +195,7 @@ export async function createKnowledgeCollection(
 /**
  * Module-scoped lazy-init for the Phase 10 auto-bridge. Caches the resolved
  * Hub/storage references and the default CG id per (deployed Hub address) so
- * a single test run reuses one CG across many `createKnowledgeCollection`
+ * a single test run reuses one CG across many `createKnowledgeAsset`
  * calls. Each new fixture (different Hub address) resets the cache.
  */
 type AutoBridgeCache = {
@@ -208,7 +208,7 @@ type AutoBridgeCache = {
 };
 let _autoBridgeCache: AutoBridgeCache | null = null;
 
-async function _autoBridgeKCToDefaultCG(kcId: number): Promise<void> {
+async function _autoBridgeKCToDefaultCG(kaId: number): Promise<void> {
   // Resolve Hub. If the deployment doesn't have a Hub at all (rare: pure
   // standalone unit tests), bail silently.
   let HubCtr: Hub;
@@ -307,9 +307,9 @@ async function _autoBridgeKCToDefaultCG(kcId: number): Promise<void> {
   }
 
   const c = _autoBridgeCache;
-  await c.ContextGraphStorage.connect(c.cgOpSigner).registerKCToContextGraph(
+  await c.ContextGraphStorage.connect(c.cgOpSigner).registerKnowledgeAssetToContextGraph(
     c.defaultCgId,
-    kcId,
+    kaId,
   );
   const currentEpoch = await c.Chronos.getCurrentEpoch();
   await c.ContextGraphValueStorage.connect(

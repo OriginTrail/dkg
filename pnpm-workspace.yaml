@@ -7,3 +7,5 @@ packages:
   - "devnet/v10-stress"
   - "devnet/conviction-lazy-settle"
   - "devnet/edge-update-flow"
+  - "devnet/greenfield-10min"
+  - "devnet/rich-scenario"

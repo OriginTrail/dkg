@@ -128,7 +128,7 @@ beforeAll(async () => {
   WORKSPACE_META_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory_meta`;
   _provider = createProvider();
   const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
-  _kav10Address = await chain.getKnowledgeAssetsV10Address();
+  _kav10Address = await chain.getKnowledgeAssetsLifecycleAddress();
 });
 
 describe('Workspace: share', () => {

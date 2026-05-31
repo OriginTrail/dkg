@@ -21,13 +21,17 @@ describe('TripleStore adapter parity (Oxigraph vs test-server Blazegraph)', () =
         let body = '';
         req.on('data', (chunk) => { body += chunk; });
         req.on('end', () => {
-          if (!body.startsWith('query=')) {
+          // Direct POST (W3C SPARQL 1.1): queries arrive as a raw body with
+          // Content-Type application/sparql-query; writes (n-quads insert /
+          // application/sparql-update) are everything else.
+          const contentType = String(req.headers['content-type'] ?? '');
+          if (!contentType.includes('application/sparql-query')) {
             res.writeHead(200);
             res.end();
             return;
           }
           queryCount++;
-          const decoded = decodeURIComponent(body.replace('query=', ''));
+          const decoded = body;
           if (decoded.includes('COUNT(*)')) {
             const c = queryCount <= 1 ? '2' : '1';
             res.writeHead(200, { 'Content-Type': 'application/json' });

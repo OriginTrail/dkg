@@ -149,12 +149,14 @@ test.describe('Hermes Connect — click-to-chat-ready', () => {
     await expect(connectBtn).toBeVisible();
     await connectBtn.click();
 
-    // The post-condition shared with H-AC-11: the Hermes integration row
-    // shows up in the connected-agents tab and chat input becomes available.
-    // The exact selector for the Hermes tab is the integration name; we
-    // wait for the panel to swap from "Connect Another Agent" into the
-    // chat shell.
-    await expect(page.getByText(/Hermes connected/i)).toBeVisible({ timeout: 15_000 });
+    // Post-condition: the right panel swaps from the "Connect Another
+    // Agent" add surface into the persistent chat shell for Hermes —
+    // the durable, user-visible signal is the composer textbox plus the
+    // chat-ready empty-state copy. The legacy "Hermes connected"
+    // toolbar label is only rendered inside the AgentTabMenu popover
+    // (kebab → status row), which doesn't open on its own.
+    await expect(page.getByRole('textbox', { name: /Message Hermes/i })).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByText(/Start a conversation with Hermes/i)).toBeVisible();
   });
 
   test('H-AC-11: existing user with stored Hermes profile lands chat-ready without re-Connect', async ({ page, shell }) => {
@@ -195,8 +197,11 @@ test.describe('Hermes Connect — click-to-chat-ready', () => {
     await shell.goto();
 
     // Same post-condition as H-AC-06: Hermes tab is chat-ready without
-    // any user interaction.
-    await expect(page.getByText(/Hermes connected/i)).toBeVisible({ timeout: 15_000 });
+    // any user interaction. Anchor on the composer + empty-state copy
+    // — the AgentTabMenu's "Hermes connected" toolbar label is hidden
+    // behind a kebab popover that we don't open here.
+    await expect(page.getByRole('textbox', { name: /Message Hermes/i })).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByText(/Start a conversation with Hermes/i)).toBeVisible();
 
     // Connect Hermes button should NOT be visible — Hermes is already in
     // the connected-agents persistent-chat surface, not the

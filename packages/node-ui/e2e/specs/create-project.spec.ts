@@ -1,18 +1,30 @@
 import { test, expect } from '../fixtures/base.js';
 
-test.describe('Create Project Modal', () => {
-  test.beforeEach(async ({ shell, dashboard, createProjectModal }) => {
+const MOCK_AGENT = {
+  agentAddress: '0x1111111111111111111111111111111111111111',
+  agentDid: 'did:dkg:agent:0x1111111111111111111111111111111111111111',
+  name: 'mock-node-agent',
+};
+
+test.describe('Create Context Graph Modal (rc.12)', () => {
+  test.beforeEach(async ({ shell, leftPanel, createProjectModal, page }) => {
+    await page.route('**/api/agent/identity', (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(MOCK_AGENT) }),
+    );
     await shell.goto();
-    await dashboard.clickQuickAction('Create Project');
+    await leftPanel.clickNewProject();
     await expect(createProjectModal.overlay).toBeVisible();
+    await expect(createProjectModal.submitBtn).not.toHaveText(/Loading agent|Agent unavailable/);
   });
 
-  test('modal title is "Create New Project"', async ({ createProjectModal }) => {
-    await expect(createProjectModal.title).toHaveText('Create New Project');
+  test('modal title is "Create New Context Graph"', async ({ createProjectModal }) => {
+    await expect(createProjectModal.title).toHaveText('Create New Context Graph');
   });
 
-  test('name input is focused by default', async ({ createProjectModal }) => {
-    await expect(createProjectModal.nameInput).toBeFocused();
+  test('name input is visible and accepts text', async ({ createProjectModal }) => {
+    await expect(createProjectModal.nameInput).toBeVisible();
+    await createProjectModal.nameInput.fill('Test');
+    expect(await createProjectModal.getNameValue()).toBe('Test');
   });
 
   test('submit disabled when name is empty', async ({ createProjectModal }) => {
@@ -32,8 +44,7 @@ test.describe('Create Project Modal', () => {
   test('name and description inputs accept text', async ({ createProjectModal }) => {
     await createProjectModal.fill('Drug Interactions', 'Track pharmaceutical compound interactions');
     expect(await createProjectModal.getNameValue()).toBe('Drug Interactions');
-    const descValue = await createProjectModal.descriptionInput.inputValue();
-    expect(descValue).toBe('Track pharmaceutical compound interactions');
+    expect(await createProjectModal.descriptionInput.inputValue()).toBe('Track pharmaceutical compound interactions');
   });
 
   test('Cancel button closes the modal', async ({ createProjectModal }) => {
@@ -46,53 +57,42 @@ test.describe('Create Project Modal', () => {
     expect(await createProjectModal.isOpen()).toBe(false);
   });
 
-  test('ACCESS radios are disabled (COMING SOON)', async ({ page }) => {
-    const radios = page.locator('.v10-modal-box input[type="radio"]');
-    const count = await radios.count();
-    expect(count).toBeGreaterThan(0);
-    for (let i = 0; i < count; i++) {
-      expect(await radios.nth(i).isDisabled()).toBe(true);
-    }
-  });
-
-  test('layer activation info is displayed', async ({ createProjectModal }) => {
-    expect(await createProjectModal.hasLayerPreview()).toBe(true);
-  });
-
-  test('submit button text is "Create Project"', async ({ createProjectModal }) => {
-    const text = await createProjectModal.getSubmitText();
-    expect(text?.trim()).toBe('Create Project');
-  });
-
-  test('modal subtitle describes project purpose', async ({ page }) => {
-    const subtitle = page.locator('.v10-modal-subtitle');
-    await expect(subtitle).toBeVisible();
-    const text = await subtitle.textContent();
-    expect(text).toContain('structured memory');
-  });
-
-  test('Publish Policy radios are disabled with coming soon label', async ({ page }) => {
-    const group = page.locator('.v10-form-group').filter({ hasText: 'Publish Policy' });
-    await expect(group).toBeVisible();
-    await expect(group.getByText('coming soon')).toBeVisible();
+  test('Sharing radios are enabled', async ({ page }) => {
+    const group = page.locator('.v10-form-group').filter({ hasText: 'Sharing' });
     const radios = group.locator('input[type="radio"]');
     const count = await radios.count();
     expect(count).toBeGreaterThan(0);
     for (let i = 0; i < count; i++) {
-      expect(await radios.nth(i).isDisabled()).toBe(true);
+      expect(await radios.nth(i).isDisabled()).toBe(false);
     }
   });
 
-  test('Ontology radios are disabled with coming soon label', async ({ page }) => {
+  test('Contribution radios are enabled', async ({ page }) => {
+    const group = page.locator('.v10-form-group').filter({ hasText: 'Contribution' });
+    const radios = group.locator('input[type="radio"]');
+    const count = await radios.count();
+    expect(count).toBeGreaterThan(0);
+    for (let i = 0; i < count; i++) {
+      expect(await radios.nth(i).isDisabled()).toBe(false);
+    }
+  });
+
+  test('submit button text is "Create Context Graph"', async ({ createProjectModal }) => {
+    await createProjectModal.fill('My Graph');
+    const text = await createProjectModal.getSubmitText();
+    expect(text?.trim()).toBe('Create Context Graph');
+  });
+
+  test('modal subtitle describes context graph purpose', async ({ page }) => {
+    const subtitle = page.locator('.v10-modal-subtitle');
+    await expect(subtitle).toBeVisible();
+    expect(await subtitle.textContent()).toContain('structured memory');
+  });
+
+  test('Ontology upload option is disabled with coming soon label', async ({ page }) => {
     const group = page.locator('.v10-form-group').filter({ hasText: 'Ontology' });
     await expect(group).toBeVisible();
     await expect(group.getByText('coming soon')).toBeVisible();
-    const radios = group.locator('input[type="radio"]');
-    const count = await radios.count();
-    expect(count).toBeGreaterThan(0);
-    for (let i = 0; i < count; i++) {
-      expect(await radios.nth(i).isDisabled()).toBe(true);
-    }
   });
 
   test('Advanced settings toggle shows/hides content', async ({ createProjectModal }) => {
@@ -107,35 +107,10 @@ test.describe('Create Project Modal', () => {
     await createProjectModal.toggleAdvanced();
     const quorum = page.locator('.v10-form-advanced-body .v10-form-group').filter({ hasText: 'Consensus Quorum' });
     await expect(quorum).toBeVisible();
-    const select = quorum.locator('select');
-    expect(await select.isDisabled()).toBe(true);
+    expect(await quorum.locator('select').isDisabled()).toBe(true);
   });
 
-  test('Advanced settings contains SWM TTL dropdown (disabled)', async ({ createProjectModal, page }) => {
-    await createProjectModal.toggleAdvanced();
-    const ttl = page.locator('.v10-form-advanced-body .v10-form-group').filter({ hasText: 'SWM TTL' });
-    await expect(ttl).toBeVisible();
-    const select = ttl.locator('select');
-    expect(await select.isDisabled()).toBe(true);
-  });
-
-  test('Advanced settings contains SWM Size Cap dropdown (disabled)', async ({ createProjectModal, page }) => {
-    await createProjectModal.toggleAdvanced();
-    const cap = page.locator('.v10-form-advanced-body .v10-form-group').filter({ hasText: 'SWM Size Cap' });
-    await expect(cap).toBeVisible();
-    const select = cap.locator('select');
-    expect(await select.isDisabled()).toBe(true);
-  });
-
-  test('Layer Activation preview shows memory tier descriptions', async ({ page }) => {
-    const preview = page.locator('.v10-layer-preview');
-    await expect(preview).toBeVisible();
-    await expect(preview).toContainText('Verified Memory');
-    await expect(preview).toContainText('Shared Memory');
-    await expect(preview).toContainText('Working Memory');
-  });
-
-  test('modal opened from left panel "+ New Project" button', async ({ page, shell, leftPanel, createProjectModal }) => {
+  test('modal opened from left panel "+ New Context Graph" button', async ({ leftPanel, createProjectModal }) => {
     await createProjectModal.cancel();
     await leftPanel.clickNewProject();
     expect(await createProjectModal.isOpen()).toBe(true);

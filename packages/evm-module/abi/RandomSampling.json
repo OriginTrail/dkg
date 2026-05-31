@@ -33,7 +33,7 @@
   },
   {
     "inputs": [],
-    "name": "NoEligibleKnowledgeCollection",
+    "name": "NoEligibleKnowledgeAsset",
     "type": "error"
   },
   {
@@ -81,7 +81,7 @@
       {
         "indexed": true,
         "internalType": "uint256",
-        "name": "knowledgeCollectionId",
+        "name": "knowledgeAssetId",
         "type": "uint256"
       },
       {
@@ -359,10 +359,10 @@
   },
   {
     "inputs": [],
-    "name": "knowledgeCollectionStorage",
+    "name": "knowledgeAssetStorage",
     "outputs": [
       {
-        "internalType": "contract KnowledgeCollectionStorage",
+        "internalType": "contract DKGKnowledgeAssets",
         "name": "",
         "type": "address"
       }
@@ -418,7 +418,7 @@
       },
       {
         "internalType": "uint256",
-        "name": "kcId",
+        "name": "kaId",
         "type": "uint256"
       },
       {

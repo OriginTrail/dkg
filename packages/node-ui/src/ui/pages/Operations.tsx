@@ -60,8 +60,8 @@ const OP_TYPE_COLORS: Record<string, string> = {
 };
 
 const OP_TYPE_DESCRIPTIONS: Record<string, string> = {
-  publish:        'Publish a Knowledge Collection on-chain to a context graph',
-  publishFromSWM: 'Publish a Knowledge Collection derived from Shared Working Memory',
+  publish:        'Publish a Knowledge Asset on-chain to a context graph',
+  publishFromSWM: 'Publish a Knowledge Asset derived from Shared Working Memory',
   update:         'Update an existing Knowledge Asset on-chain',
   'ka-update':    'Incremental Knowledge Asset update (ka-update path)',
   query:          'Run a SPARQL query against the knowledge graph',

@@ -80,7 +80,9 @@ describe('handleEventsQuery', () => {
 
     expect(calls).toHaveLength(1);
     expect(calls[0].sparql).toContain('GRAPH <did:dkg:context-graph:test-cg>');
-    expect(calls[0].opts).toEqual({ contextGraphId: CONTEXT_GRAPH_ID });
+    // The events query references the CG's `_private` partition, so the
+    // engine must be told to allow it (else the scope guard rejects it).
+    expect(calls[0].opts).toEqual({ contextGraphId: CONTEXT_GRAPH_ID, includePrivate: true });
   });
 
   it('returns multiple events in eventList', async () => {
@@ -565,6 +567,16 @@ describe('handleEventsQuery — per-request sub-graph', () => {
     expect(calls[0].sparql).toContain('GRAPH <did:dkg:context-graph:test-cg/research/_private>');
     expect(calls[0].sparql).not.toContain('GRAPH <did:dkg:context-graph:test-cg>');
     expect(calls[0].sparql).not.toContain('GRAPH <did:dkg:context-graph:test-cg/_private>');
+    // Bug 3: the handler MUST thread `subGraphName` into the engine options so
+    // the scope guard admits `<cg>/<sub>` (+ `<cg>/<sub>/_private`). Without it
+    // every sub-graph events request fails with "Scoped query violation".
+    // Finalized route → no graphSuffix (reads the canonical data partition).
+    expect(calls[0].opts).toMatchObject({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      subGraphName: 'research',
+      includePrivate: true,
+    });
+    expect(calls[0].opts.graphSuffix).toBeUndefined();
   });
 
   it('threads subGraphName into SPARQL graph URIs (finalized=false SWM partition)', async () => {
@@ -584,6 +596,15 @@ describe('handleEventsQuery — per-request sub-graph', () => {
     expect(calls[0].sparql).toContain('GRAPH <did:dkg:context-graph:test-cg/research/_private>');
     expect(calls[0].sparql).not.toContain('GRAPH <did:dkg:context-graph:test-cg/_shared_memory>');
     expect(calls[0].sparql).not.toContain('GRAPH <did:dkg:context-graph:test-cg/_private>');
+    // Bug 3: finalized=false routes the read to the SWM partition, so the
+    // handler must thread BOTH `subGraphName` and `graphSuffix:'_shared_memory'`
+    // (else the guard rejects `<cg>/<sub>/_shared_memory[_meta]`).
+    expect(calls[0].opts).toMatchObject({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      subGraphName: 'research',
+      graphSuffix: '_shared_memory',
+      includePrivate: true,
+    });
   });
 
   it('falls back to root partition when subGraphName is omitted', async () => {
@@ -601,5 +622,29 @@ describe('handleEventsQuery — per-request sub-graph', () => {
     expect(calls[0].sparql).toContain('GRAPH <did:dkg:context-graph:test-cg>');
     expect(calls[0].sparql).toContain('GRAPH <did:dkg:context-graph:test-cg/_private>');
     expect(calls[0].sparql).not.toContain('test-cg/research');
+    // Finalized canonical root route: no sub-graph, no SWM suffix.
+    expect(calls[0].opts).toMatchObject({ contextGraphId: CONTEXT_GRAPH_ID, includePrivate: true });
+    expect(calls[0].opts.subGraphName).toBeUndefined();
+    expect(calls[0].opts.graphSuffix).toBeUndefined();
+  });
+
+  it('threads graphSuffix for finalized=false on the root partition (no sub-graph)', async () => {
+    const { engine, calls } = createTrackingQueryEngine([makeBindings()]);
+
+    await handleEventsQuery(
+      new URLSearchParams('finalized=false&eventType=ObjectEvent'),
+      { contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH },
+    );
+
+    expect(calls[0].sparql).toContain('GRAPH <did:dkg:context-graph:test-cg/_shared_memory>');
+    // Bug 3: SWM route on the root CG still needs the graphSuffix or the guard
+    // rejects `<cg>/_shared_memory` (only the canonical `<cg>` is allowed
+    // otherwise).
+    expect(calls[0].opts).toMatchObject({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      graphSuffix: '_shared_memory',
+      includePrivate: true,
+    });
+    expect(calls[0].opts.subGraphName).toBeUndefined();
   });
 });

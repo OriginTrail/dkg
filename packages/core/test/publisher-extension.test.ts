@@ -34,11 +34,11 @@ function createTransport(): DkgPublisherExtensionTransport & { calls: Array<[str
     },
     async publish(...args) {
       calls.push(['publish', args]);
-      return { kcId: '1', kas: [{ tokenId: '1', rootEntity: 'did:dkg:entity:1' }] };
+      return { kaId: '1', kas: [{ tokenId: '1', rootEntity: 'did:dkg:entity:1' }] };
     },
     async publishSharedMemory(...args) {
       calls.push(['publishSharedMemory', args]);
-      return { kcId: '2', kas: [{ tokenId: '2', rootEntity: 'did:dkg:entity:2' }] };
+      return { kaId: '2', kas: [{ tokenId: '2', rootEntity: 'did:dkg:entity:2' }] };
     },
   };
 }

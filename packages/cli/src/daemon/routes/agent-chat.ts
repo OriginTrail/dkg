@@ -322,7 +322,84 @@ import {
 } from '../local-agents.js';
 
 import type { RequestContext } from './context.js';
+import type { PublishOptions } from '@origintrail-official/dkg-publisher';
 
+function parsePrecomputedUpdateAttestation(
+  raw: unknown,
+  res: ServerResponse,
+): PublishOptions['precomputedUpdateAttestation'] | undefined {
+  if (raw == null) return undefined;
+  if (typeof raw !== 'object') {
+    jsonResponse(res, 400, {
+      error: '"precomputedUpdateAttestation" must be an object',
+    });
+    return undefined;
+  }
+  const obj = raw as Record<string, unknown>;
+  const authorAddress =
+    typeof obj.authorAddress === 'string' ? obj.authorAddress : undefined;
+  const expectedHex =
+    typeof obj.expectedNewMerkleRoot === 'string'
+      ? obj.expectedNewMerkleRoot
+      : undefined;
+  const schemeVersion =
+    typeof obj.schemeVersion === 'number' ? obj.schemeVersion : 1;
+  const signature =
+    obj.signature && typeof obj.signature === 'object'
+      ? (obj.signature as Record<string, unknown>)
+      : undefined;
+  if (
+    !authorAddress ||
+    !/^0x[0-9a-fA-F]{40}$/.test(authorAddress) ||
+    !expectedHex ||
+    !signature
+  ) {
+    jsonResponse(res, 400, {
+      error:
+        '"precomputedUpdateAttestation" requires { authorAddress, expectedNewMerkleRoot: 0x<32 bytes>, signature: { r, vs }, schemeVersion? }',
+    });
+    return undefined;
+  }
+  const stripped = expectedHex.startsWith('0x')
+    ? expectedHex.slice(2)
+    : expectedHex;
+  if (stripped.length !== 64 || !/^[0-9a-fA-F]+$/.test(stripped)) {
+    jsonResponse(res, 400, {
+      error: '"precomputedUpdateAttestation.expectedNewMerkleRoot" must be 32-byte hex',
+    });
+    return undefined;
+  }
+  const decode = (val: unknown): Uint8Array | undefined => {
+    if (typeof val === 'string') {
+      const h = val.startsWith('0x') ? val.slice(2) : val;
+      if (h.length !== 64 || !/^[0-9a-fA-F]+$/.test(h)) return undefined;
+      return Uint8Array.from(Buffer.from(h, 'hex'));
+    }
+    if (
+      Array.isArray(val) &&
+      val.length === 32 &&
+      val.every((b) => typeof b === 'number' && b >= 0 && b <= 255)
+    ) {
+      return Uint8Array.from(val as number[]);
+    }
+    return undefined;
+  };
+  const r = decode(signature.r);
+  const vs = decode(signature.vs);
+  if (!r || !vs) {
+    jsonResponse(res, 400, {
+      error:
+        '"precomputedUpdateAttestation.signature.r" and ".vs" must each be 32-byte hex strings or 32-element byte arrays',
+    });
+    return undefined;
+  }
+  return {
+    expectedNewMerkleRoot: Uint8Array.from(Buffer.from(stripped, 'hex')),
+    authorAddress,
+    signature: { r, vs },
+    schemeVersion,
+  };
+}
 
 export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> {
   const {
@@ -869,29 +946,36 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
     return jsonResponse(res, 200, { connected: true });
   }
 
-  // POST /api/update  { kcId: "...", contextGraphId: "...", quads: [...], privateQuads?: [...] }
+  // POST /api/update  { kaId, contextGraphId, quads, privateQuads?, precomputedUpdateAttestation? }
   if (req.method === "POST" && path === "/api/update") {
     const body = await readBody(req);
     const parsed = JSON.parse(body);
-    const { kcId, quads, privateQuads } = parsed;
+    const { kaId, quads, privateQuads } = parsed;
     const contextGraphId = parsed.contextGraphId;
-    if (!kcId || !contextGraphId || !quads?.length) {
+    const precomputedUpdateAttestation = parsePrecomputedUpdateAttestation(
+      parsed.precomputedUpdateAttestation,
+      res,
+    );
+    if (parsed.precomputedUpdateAttestation != null && !precomputedUpdateAttestation) {
+      return;
+    }
+    if (!kaId || !contextGraphId || !quads?.length) {
       return jsonResponse(res, 400, {
-        error: 'Missing "kcId", "contextGraphId", or "quads"',
+        error: 'Missing "kaId", "contextGraphId", or "quads"',
       });
     }
     let kcIdBigInt: bigint;
     try {
-      kcIdBigInt = BigInt(kcId);
+      kcIdBigInt = BigInt(kaId);
     } catch {
       return jsonResponse(res, 400, {
-        error: `Invalid "kcId": ${String(kcId).slice(0, 50)}`,
+        error: `Invalid "kaId": ${String(kaId).slice(0, 50)}`,
       });
     }
     const ctx = createOperationContext("update");
     tracker.start(ctx, {
       contextGraphId: contextGraphId,
-      details: { kcId: String(kcId), tripleCount: quads.length, source: "api" },
+      details: { kaId: String(kaId), tripleCount: quads.length, source: "api" },
     });
     try {
       const result = await agent.update(
@@ -902,6 +986,7 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
         {
           operationCtx: ctx,
           onPhase: tracker.phaseCallback(ctx),
+          precomputedUpdateAttestation,
         },
       );
       const chain = result.onChainResult;
@@ -920,16 +1005,16 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
         );
       }
       if (result.status === "failed") {
-        tracker.fail(ctx, new Error(`Update failed on-chain (kcId=${kcId})`));
+        tracker.fail(ctx, new Error(`Update failed on-chain (kaId=${kaId})`));
       } else {
         tracker.complete(ctx, {
           tripleCount: quads.length,
-          details: { kcId: String(result.kcId), status: result.status },
+          details: { kaId: String(result.kaId), status: result.status },
         });
       }
       const opDetail = dashDb.getOperation(ctx.operationId);
       return jsonResponse(res, 200, {
-        kcId: String(result.kcId),
+        kaId: String(result.kaId),
         status: result.status,
         kas: result.kaManifest.map((ka) => ({
           tokenId: String(ka.tokenId),

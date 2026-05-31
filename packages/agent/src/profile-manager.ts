@@ -103,13 +103,13 @@ export class ProfileManager {
 
     if (this.currentKcId) {
       const result = await this.publisher.update(this.currentKcId, options);
-      this.currentKcId = result.kcId;
+      this.currentKcId = result.kaId;
       this.lastRootEntity = rootEntity;
       return result;
     }
 
     const result = await this.publisher.publish(options);
-    this.currentKcId = result.kcId;
+    this.currentKcId = result.kaId;
     this.lastRootEntity = rootEntity;
     return result;
   }

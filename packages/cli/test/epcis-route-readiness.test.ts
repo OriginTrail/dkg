@@ -336,7 +336,11 @@ describe('EPCIS events query route — per-request CG + sub-graph', () => {
     expect(ctx.res.statusCode).toBe(200);
     expect(calls).toHaveLength(1);
     expect(calls[0].sparql).toContain('GRAPH <did:dkg:context-graph:epcis-test>');
-    expect(calls[0].opts).toEqual({ contextGraphId: 'epcis-test' });
+    // The EPCIS events query references the CG's `<cg>/_private` partition, so
+    // the route must opt into private-graph access via `includePrivate: true`;
+    // otherwise the query engine's scope guard rejects it (see #789 follow-up:
+    // packages/query/test/scoped-private-graph.test.ts).
+    expect(calls[0].opts).toEqual({ contextGraphId: 'epcis-test', includePrivate: true });
   });
 
   it('per-request contextGraphId overrides config and reaches the SPARQL builder', async () => {
@@ -349,7 +353,7 @@ describe('EPCIS events query route — per-request CG + sub-graph', () => {
     expect(calls).toHaveLength(1);
     expect(calls[0].sparql).toContain('GRAPH <did:dkg:context-graph:per-request-cg>');
     expect(calls[0].sparql).not.toContain('GRAPH <did:dkg:context-graph:epcis-test>');
-    expect(calls[0].opts).toEqual({ contextGraphId: 'per-request-cg' });
+    expect(calls[0].opts).toEqual({ contextGraphId: 'per-request-cg', includePrivate: true });
   });
 
   it('per-request subGraphName reaches the SPARQL builder for both public and private graphs', async () => {

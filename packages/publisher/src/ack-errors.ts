@@ -57,7 +57,7 @@ export abstract class ACKProviderError extends Error {
  * The three methods that contribute to this surface live on
  * `ChainAdapter`:
  *   - `getEvmChainId()` (signs into the H5 ACK digest prefix)
- *   - `getKnowledgeAssetsV10Address()` (signs into the H5 prefix)
+ *   - `getKnowledgeAssetsLifecycleAddress()` (signs into the H5 prefix)
  *   - `getMinimumRequiredSignatures()` (decides the quorum the
  *     collector must reach)
  *
@@ -200,7 +200,7 @@ function formatQuorumUnmetMessage(opts: {
  */
 const RPC_PRECONDITION_METHODS = new Set([
   'getEvmChainId',
-  'getKnowledgeAssetsV10Address',
+  'getKnowledgeAssetsLifecycleAddress',
   'getMinimumRequiredSignatures',
 ]);
 

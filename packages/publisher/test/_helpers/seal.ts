@@ -24,6 +24,7 @@ import type { V10ACKProvider } from '../../src/publisher.js';
 import { autoPartition, computeFlatKCRootV10, computePrivateRootV10 } from '../../src/index.js';
 import {
   buildAuthorAttestationTypedData,
+  buildUpdateAuthorAttestationTypedData,
   AUTHOR_SCHEME_VERSION_V1,
 } from '@origintrail-official/dkg-core';
 
@@ -44,6 +45,13 @@ export interface BuildSealParams {
 
 export interface PrecomputedAttestation {
   expectedMerkleRoot: Uint8Array;
+  authorAddress: string;
+  signature: { r: Uint8Array; vs: Uint8Array };
+  schemeVersion: number;
+}
+
+export interface PrecomputedUpdateAttestation {
+  expectedNewMerkleRoot: Uint8Array;
   authorAddress: string;
   signature: { r: Uint8Array; vs: Uint8Array };
   schemeVersion: number;
@@ -137,6 +145,67 @@ export async function withSeal<T extends PublishSealedArgs>(
 }
 
 /**
+ * Build `precomputedUpdateAttestation` for `publisher.update(kaId, ...)`.
+ */
+export async function buildUpdateSeal(params: {
+  kaId: bigint;
+  quads: Quad[];
+  privateQuads?: Quad[];
+  author: ethers.Wallet;
+  ctx: SealCtx;
+}): Promise<PrecomputedUpdateAttestation> {
+  const kaMap = autoPartition(params.quads);
+  const allPublic = [...kaMap.values()].flat();
+  const privateRoots: Uint8Array[] = [];
+  for (const rootEntity of kaMap.keys()) {
+    const entityPrivateQuads = (params.privateQuads ?? []).filter(
+      (q) =>
+        q.subject === rootEntity ||
+        q.subject.startsWith(rootEntity + '/.well-known/genid/'),
+    );
+    if (entityPrivateQuads.length === 0) continue;
+    const root = computePrivateRootV10(entityPrivateQuads);
+    if (root) privateRoots.push(root);
+  }
+  const newMerkleRoot = computeFlatKCRootV10(allPublic, privateRoots);
+  const chainIdNum = await params.ctx.provider.getNetwork().then((n) => n.chainId);
+  const td = buildUpdateAuthorAttestationTypedData({
+    chainId: BigInt(chainIdNum),
+    kav10Address: params.ctx.kav10Address,
+    kaId: params.kaId,
+    newMerkleRoot,
+    authorAddress: params.author.address,
+  });
+  const sigHex = await params.author.signTypedData(td.domain, td.types, td.message);
+  const sig = ethers.Signature.from(sigHex);
+  return {
+    expectedNewMerkleRoot: newMerkleRoot,
+    authorAddress: params.author.address,
+    signature: {
+      r: ethers.getBytes(sig.r),
+      vs: ethers.getBytes(sig.yParityAndS),
+    },
+    schemeVersion: AUTHOR_SCHEME_VERSION_V1,
+  };
+}
+
+export async function withUpdateSeal<T extends PublishSealedArgs>(
+  kaId: bigint,
+  args: T,
+  author: ethers.Wallet,
+  ctx: SealCtx,
+): Promise<T & { precomputedUpdateAttestation: PrecomputedUpdateAttestation }> {
+  const seal = await buildUpdateSeal({
+    kaId,
+    quads: args.quads,
+    privateQuads: args.privateQuads,
+    author,
+    ctx,
+  });
+  return { ...args, precomputedUpdateAttestation: seal };
+}
+
+/**
  * Thin wrapper around `publisher.publish` that mints a CORE_OP-signed
  * seal automatically. Equivalent to `publisher.publish(await withSeal(args, author, ctx))`.
  *
@@ -168,17 +237,17 @@ export async function publishSealed(
  */
 export async function updateSealed(
   publisher: DKGPublisher,
-  kcId: bigint,
+  kaId: bigint,
   args: PublishSealedArgs,
   author: ethers.Wallet,
   ctx: SealCtx,
   extras: { v10ACKProvider?: V10ACKProvider } = {},
 ) {
-  const sealed = await withSeal(args, author, ctx);
+  const sealed = await withUpdateSeal(kaId, args, author, ctx);
   const merged = extras.v10ACKProvider !== undefined
     ? { ...sealed, v10ACKProvider: extras.v10ACKProvider }
     : sealed;
-  return publisher.update(kcId, merged as unknown as Parameters<DKGPublisher['update']>[1]);
+  return publisher.update(kaId, merged as unknown as Parameters<DKGPublisher['update']>[1]);
 }
 
 /**
@@ -250,6 +319,7 @@ export function wrapPublisherForTest(
         // publisher as `did:dkg:context-graph:[object Object]/...`
         // and a SPARQL parse failure on the next store.query.
         const argIdx = prop === 'update' ? 1 : prop === 'publishFromSharedMemory' ? 2 : 0;
+        const kaIdForUpdate = prop === 'update' ? (args[0] as bigint) : undefined;
         const argBag = args[argIdx] as Record<string, unknown> | undefined;
         // Bind the seal to the on-chain CG id the publisher will sign
         // against (`publishContextGraphId` for remap publishes;
@@ -267,20 +337,33 @@ export function wrapPublisherForTest(
         if (
           prop !== 'publishFromSharedMemory' &&
           argBag &&
-          !argBag['precomputedAttestation'] &&
           Array.isArray(argBag['quads']) &&
-          (argBag['quads'] as Quad[]).length > 0 &&
-          typeof sealCgId !== 'undefined'
+          (argBag['quads'] as Quad[]).length > 0
         ) {
           try {
-            const seal = await buildSeal({
-              quads: argBag['quads'] as Quad[],
-              privateQuads: argBag['privateQuads'] as Quad[] | undefined,
-              author: opts.author,
-              contextGraphId: sealCgId,
-              ctx: opts.ctx,
-            });
-            args[argIdx] = { ...argBag, precomputedAttestation: seal };
+            if (prop === 'update' && kaIdForUpdate !== undefined && !argBag['precomputedUpdateAttestation']) {
+              const updateSeal = await buildUpdateSeal({
+                kaId: kaIdForUpdate,
+                quads: argBag['quads'] as Quad[],
+                privateQuads: argBag['privateQuads'] as Quad[] | undefined,
+                author: opts.author,
+                ctx: opts.ctx,
+              });
+              args[argIdx] = { ...argBag, precomputedUpdateAttestation: updateSeal };
+            } else if (
+              prop !== 'update' &&
+              !argBag['precomputedAttestation'] &&
+              typeof sealCgId !== 'undefined'
+            ) {
+              const seal = await buildSeal({
+                quads: argBag['quads'] as Quad[],
+                privateQuads: argBag['privateQuads'] as Quad[] | undefined,
+                author: opts.author,
+                contextGraphId: sealCgId,
+                ctx: opts.ctx,
+              });
+              args[argIdx] = { ...argBag, precomputedAttestation: seal };
+            }
           } catch {
             // No chain configured (mock/none) — leave args unchanged
             // and let the publisher's own no-chain path handle it
@@ -340,7 +423,7 @@ export function wrapPublisherForTest(
  */
 export async function wrapPublisherWithChain(
   publisher: DKGPublisher,
-  chain: { getProvider: () => ethers.JsonRpcProvider; getKnowledgeAssetsV10Address: () => Promise<string> },
+  chain: { getProvider: () => ethers.JsonRpcProvider; getKnowledgeAssetsLifecycleAddress: () => Promise<string> },
   authorKey: string,
   options?: { v10ACKProvider?: V10ACKProvider },
 ): Promise<DKGPublisher> {
@@ -348,7 +431,7 @@ export async function wrapPublisherWithChain(
     author: new ethers.Wallet(authorKey),
     ctx: {
       provider: chain.getProvider(),
-      kav10Address: await chain.getKnowledgeAssetsV10Address(),
+      kav10Address: await chain.getKnowledgeAssetsLifecycleAddress(),
     },
     v10ACKProvider: options?.v10ACKProvider,
   });
@@ -368,7 +451,7 @@ export function mockSealCtx(opts: {
   kav10Address?: string;
 } = {}): SealCtx {
   const chainId = opts.chainId ?? 31337n;
-  // Must match `MockChainAdapter.getKnowledgeAssetsV10Address()` exactly,
+  // Must match `MockChainAdapter.getKnowledgeAssetsLifecycleAddress()` exactly,
   // otherwise the publisher's `recoverAddress` step in the seal-integrity
   // preflight rebuilds typed data with the chain's address (not ours)
   // and the recovered signer no longer equals the recorded

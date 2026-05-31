@@ -97,17 +97,17 @@ const PINNED_DIGESTS: Record<string, string> = {
   // (uint256) in addition to merkleRoot, propagating through:
   //   - KnowledgeCollection.publish/update fn signatures (root cause)
   //   - KnowledgeAssetsV10 publish + ACK digest input set
-  //   - KnowledgeCollectionStorage event payload (KnowledgeCollectionCreated /
-  //     KnowledgeCollectionUpdated still carry the same ABI shape today;
+  //   - KnowledgeCollectionStorage event payload (KnowledgeAssetCreated /
+  //     KnowledgeAssetUpdated still carry the same ABI shape today;
   //     the digest changed because the function inputs they originate from
   //     changed). Sanity tests below pin the actual event field shapes.
   // Updated PR #436 round 2: agent-provenance review feedback. Reverted
   // the `MerkleRoot.author` struct field (would have broken the dynamic
   // array slot stride for already-deployed KCs) and moved author to a
-  // parallel `merkleRootAuthors[kcId][rootIndex]` mapping. Also added
-  // an `address author` argument to `createKnowledgeCollection` /
-  // `updateKnowledgeCollection` and the matching indexed topic on the
-  // `KnowledgeCollectionCreated` / `KnowledgeCollectionUpdated` events.
+  // parallel `merkleRootAuthors[kaId][rootIndex]` mapping. Also added
+  // an `address author` argument to `createKnowledgeAsset` /
+  // `updateKnowledgeAsset` and the matching indexed topic on the
+  // `KnowledgeAssetCreated` / `KnowledgeAssetUpdated` events.
   // Updated PR `feature/conviction-lazy-settlement`: conviction-path
   // publish/update now invokes the NFT's `coverPublishingCost` with
   // (kcStartEpoch, kcEpochs) so it can fund the KC's epoch range via
@@ -133,8 +133,11 @@ const PINNED_DIGESTS: Record<string, string> = {
   // + the `CiphertextChunksCommitmentSet` event surface that
   // `KnowledgeAssetsV10._executeUpdateCore` emits when a non-zero pair
   // rotates the commitment.
-  KnowledgeAssetsV10:           'e42e64493eb788474c3134a5371d22814d80909fbbd69dbab77f858466d7813f',
-  KnowledgeCollectionStorage:   '8c0e6e3b19f072b15f6c54852ff0a58ffc0dffddb9676d221de78b8019d32bdd',
+
+  // Greenfield rename (rc.12): logic + storage pair replaces the legacy names.
+  KnowledgeAssetsLifecycle:     '45957310345c8cc8dd027ccf006bd0730e47510d72f8d14857de251788b10a52',
+
+  DKGKnowledgeAssets:           'c7c402825334252247d64a3ff4c13a4b757885bb8a1585974b5c01e14d5ac0f8',
   // V8 `KnowledgeCollection` ABI was moved to `abi/archive/` in
   // `archive-non-v10-contracts`; the pin entry is intentionally dropped.
   // Updated for SPEC_CG_MEMORY_MODEL: per-CG hosting committees and
@@ -152,8 +155,8 @@ const PINNED_DIGESTS: Record<string, string> = {
   // identifier so hosting cores can derive the SWM gossip topic directly
   // from chain events — no off-chain discovery channel required for
   // registered CGs.
-  ContextGraphs:                '052f2afe4dd7b95e1230c5ddaedd05db014e63d3ef9ca195f2f0f79433821bde',
-  ContextGraphStorage:          '295160a2bb171dae51fb791d2a8642b22196ede95f3308366589edaea40d22cb',
+  ContextGraphs:                'a27718118b5d03626b0e3389ad854451caf3ed0c702cea1b770953bb439d589e',
+  ContextGraphStorage:          '3c020eecc06c6332738f80358be922d6837d9332fed194e4e2bdf87eec6050a0',
   // Identity / staking — consulted on every publish.
   Hub:                          '36976cc71bb87963b8b715791b32e4eb6b7bb85c712998afd6184221289a506b',
   Identity:                     'ca39efe9bd9ec4fd8ae67dccdf9eb888bf91232341c3a56216624477620ff4d8',
@@ -163,7 +166,16 @@ const PINNED_DIGESTS: Record<string, string> = {
   // `setPublishingConvictionEpochs`. Caps the worst-case
   // `_settleElapsed` / `_finalSweep` loop count so governance can no
   // longer brick PCAs by raising `publishingConvictionEpochs`.
-  ParametersStorage:            '70d4024b4faf2004f59561b8b785a509c3abadaa89b249adfe6177783f996a97',
+  //
+  // Updated (protocol treasury fee): added `protocolTreasuryFee()` (uint16
+  // getter), `protocolTreasury()` (address getter),
+  // `MAX_PROTOCOL_TREASURY_FEE()` (uint16 constant getter),
+  // `setProtocolTreasuryFee(uint16)`, `setProtocolTreasury(address)`, and
+  // the `ProtocolTreasurySet(address indexed)` event. The fee is skimmed
+  // from staker-bound TRAC on every paid publish / update / extend by
+  // `KnowledgeAssetsLifecycle` + `PublishingConviction` (no ABI change on
+  // those two — internal logic + version bump only).
+  ParametersStorage:            'a152ef475986c81b4077648980156aeaa2b91541057a9ad9bfcfd969ee7feb63',
   // Added PR #470 round 3: pin the V10 NFT-backed PCA contract so that
   // any drift in its events (CostCovered / WindowSettled /
   // AccountFinalSwept / TokensAddedToEpochRange consumers) or errors
@@ -191,7 +203,11 @@ const PINNED_DIGESTS: Record<string, string> = {
   // intentional break is documented as the v2.x → v3.0.0 wrapper
   // bump in the wrapper NatSpec.
   DKGPublishingConvictionNFT:   '80a2d5c1962624fc3f7b7e475daaf86a41542a1641d84783c8d4f969d4d86188',
-  PublishingConviction:         '957528bfd31ac6450b33afecb8e7e84aeffd4d4a694be80377b7b73fa21eb861',
+  // Updated (protocol treasury fee): added the public
+  // `convictionStakingStorage()` getter (the TRAC vault the fee is paid out
+  // of via `transferStake`). No event/error surface change — `settle()`,
+  // `coverPublishingCost`, and the PCA business events/errors are unchanged.
+  PublishingConviction:         '55ceb341b2c8df35cd7cbebe5950b7673766c935ad7954b80187bef9f414a5a7',
   PublishingConvictionStorage:  '42d2aae17b575a8e024b7c4503d4b44109ba6eb8a9c2e26bea36192c969a4508',
 };
 
@@ -219,11 +235,11 @@ describe('ABI pin digest — detects silent contract surface drift [CH-5]', () =
 });
 
 describe('ABI content sanity — required event/error surfaces are present [CH-5 / CH-6]', () => {
-  it('KnowledgeCollectionStorage declares KnowledgeCollectionCreated with the full spec field set', () => {
+  it('KnowledgeCollectionStorage declares KnowledgeAssetCreated with the full spec field set', () => {
     const abi = JSON.parse(
-      readFileSync(join(ABI_DIR, 'KnowledgeCollectionStorage.json'), 'utf8'),
+      readFileSync(join(ABI_DIR, 'DKGKnowledgeAssets.json'), 'utf8'),
     ) as AbiEntry[];
-    const ev = abi.find((e) => e.type === 'event' && e.name === 'KnowledgeCollectionCreated');
+    const ev = abi.find((e) => e.type === 'event' && e.name === 'KnowledgeAssetCreated');
     expect(ev).toBeDefined();
     const types = (ev!.inputs ?? []).map((i) => i.type);
     // V10.1 author-attestation surface: id, author, publishOperationId,
@@ -248,7 +264,7 @@ describe('ABI content sanity — required event/error surfaces are present [CH-5
 
   it('KnowledgeCollectionStorage declares KnowledgeAssetsMinted (id, to, startId, endId)', () => {
     const abi = JSON.parse(
-      readFileSync(join(ABI_DIR, 'KnowledgeCollectionStorage.json'), 'utf8'),
+      readFileSync(join(ABI_DIR, 'DKGKnowledgeAssets.json'), 'utf8'),
     ) as AbiEntry[];
     const ev = abi.find((e) => e.type === 'event' && e.name === 'KnowledgeAssetsMinted');
     expect(ev).toBeDefined();
@@ -285,11 +301,11 @@ describe('ABI content sanity — required event/error surfaces are present [CH-5
     expect(indexed.slice(0, 3)).toEqual([true, true, true]);
   });
 
-  it('KnowledgeCollectionStorage declares KnowledgeCollectionUpdated (V10 update event)', () => {
+  it('KnowledgeCollectionStorage declares KnowledgeAssetUpdated (V10 update event)', () => {
     const abi = JSON.parse(
-      readFileSync(join(ABI_DIR, 'KnowledgeCollectionStorage.json'), 'utf8'),
+      readFileSync(join(ABI_DIR, 'DKGKnowledgeAssets.json'), 'utf8'),
     ) as AbiEntry[];
-    const ev = abi.find((e) => e.type === 'event' && e.name === 'KnowledgeCollectionUpdated');
+    const ev = abi.find((e) => e.type === 'event' && e.name === 'KnowledgeAssetUpdated');
     expect(ev).toBeDefined();
     const types = (ev!.inputs ?? []).map((i) => i.type);
     // V10.1 update event mirrors the publish event: the second indexed

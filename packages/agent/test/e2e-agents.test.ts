@@ -171,7 +171,7 @@ describe('Two-Agent E2E', () => {
       { subject: 'did:dkg:entity:1', predicate: 'http://schema.org/type', object: '"Thing"', graph: '' },
     ]);
 
-    expect(result.kcId).toBeDefined();
+    expect(result.kaId).toBeDefined();
     expect(result.kaManifest.length).toBe(1);
 
     const qr = await agentA.query(

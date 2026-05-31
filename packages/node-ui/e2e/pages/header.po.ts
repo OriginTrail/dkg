@@ -16,6 +16,8 @@ export class HeaderPage {
   readonly notifDropdown: Locator;
   readonly notifItems: Locator;
   readonly themeToggle: Locator;
+  readonly observabilityBtn: Locator;
+  readonly settingsBtn: Locator;
   readonly rightPanelToggle: Locator;
 
   constructor(page: Page) {
@@ -33,6 +35,8 @@ export class HeaderPage {
     this.notifDropdown = page.locator(sel.header.notifDropdown);
     this.notifItems = page.locator(sel.header.notifItem);
     this.themeToggle = page.locator(sel.header.themeToggle);
+    this.observabilityBtn = page.locator(sel.header.observabilityBtn);
+    this.settingsBtn = page.locator(sel.header.settingsBtn);
     this.rightPanelToggle = page.locator(sel.header.rightPanelToggle);
   }
 
@@ -42,6 +46,14 @@ export class HeaderPage {
 
   async toggleTheme() {
     await this.themeToggle.click();
+  }
+
+  async openObservability() {
+    await this.observabilityBtn.click();
+  }
+
+  async openSettings() {
+    await this.settingsBtn.click();
   }
 
   async toggleRightPanel() {

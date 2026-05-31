@@ -5,8 +5,8 @@
  *
  *   CH-6 (HIGH) — Today the chain package has no test that pins the
  *                 cryptographic topic hash for the events it parses —
- *                 `ContextGraphCreated`, `KnowledgeCollectionCreated`,
- *                 `KnowledgeAssetsMinted`, `KnowledgeCollectionUpdated`.
+ *                 `ContextGraphCreated`, `KnowledgeAssetCreated`,
+ *                 `KnowledgeAssetsMinted`, `KnowledgeAssetUpdated`.
  *                 This is the #32-class regression (receipt-log decode
  *                 races): if a contract is re-declared with the same
  *                 canonical name but different parameters (e.g. a new
@@ -98,25 +98,25 @@ describe('ContextGraphCreated — topic0 and signature pinning [CH-6]', () => {
   });
 });
 
-describe('KnowledgeCollectionCreated — topic0 and signature pinning [CH-6]', () => {
-  const iface = loadInterface('KnowledgeCollectionStorage');
+describe('KnowledgeAssetCreated — topic0 and signature pinning [CH-6]', () => {
+  const iface = loadInterface("DKGKnowledgeAssets");
   // V10.1: indexed `author` (address) joins `id` as a topic so off-chain
   // log filters can scope by author identity in a single eth_getLogs call.
   const EXPECTED_SIG =
-    'KnowledgeCollectionCreated(uint256,address,string,bytes32,uint88,uint40,uint40,uint96,bool)';
+    'KnowledgeAssetCreated(uint256,address,string,bytes32,uint88,uint40,uint40,uint96,bool)';
 
   it('canonical signature matches the spec field ordering', () => {
-    expect(canonicalSignature(iface, 'KnowledgeCollectionCreated')).toBe(EXPECTED_SIG);
+    expect(canonicalSignature(iface, 'KnowledgeAssetCreated')).toBe(EXPECTED_SIG);
   });
 
   it('topic[0] equals keccak256(canonical signature)', () => {
-    const ev = iface.getEvent('KnowledgeCollectionCreated');
+    const ev = iface.getEvent('KnowledgeAssetCreated');
     expect(ev!.topicHash.toLowerCase()).toBe(keccak256OfString(EXPECTED_SIG).toLowerCase());
   });
 
   it('parseLog extracts id + author (indexed) + body fields in the right order', () => {
-    const iface2 = loadInterface('KnowledgeCollectionStorage');
-    const ev = iface2.getEvent('KnowledgeCollectionCreated')!;
+    const iface2 = loadInterface("DKGKnowledgeAssets");
+    const ev = iface2.getEvent('KnowledgeAssetCreated')!;
     const { AbiCoder, zeroPadValue } = require('ethers') as typeof import('ethers');
     const coder = new AbiCoder();
     const merkleRoot = '0x' + 'ab'.repeat(32);
@@ -144,7 +144,7 @@ describe('KnowledgeCollectionCreated — topic0 and signature pinning [CH-6]', (
 });
 
 describe('KnowledgeAssetsMinted — topic0 and signature pinning [CH-6]', () => {
-  const iface = loadInterface('KnowledgeCollectionStorage');
+  const iface = loadInterface("DKGKnowledgeAssets");
   const EXPECTED_SIG = 'KnowledgeAssetsMinted(uint256,address,uint256,uint256)';
 
   it('canonical signature matches the spec field ordering', () => {
@@ -161,7 +161,7 @@ describe('KnowledgeAssetsMinted — topic0 and signature pinning [CH-6]', () => 
     // converts `endId - 1n` into the inclusive publicly-visible endKAId.
     // If a future contract change flips the convention, this assertion
     // fires and the `endId - 1n` math in the adapter must be removed.
-    const iface2 = loadInterface('KnowledgeCollectionStorage');
+    const iface2 = loadInterface("DKGKnowledgeAssets");
     const ev = iface2.getEvent('KnowledgeAssetsMinted')!;
     const { AbiCoder, zeroPadValue } = require('ethers') as typeof import('ethers');
     const coder = new AbiCoder();
@@ -182,19 +182,19 @@ describe('KnowledgeAssetsMinted — topic0 and signature pinning [CH-6]', () => 
   });
 });
 
-describe('KnowledgeCollectionUpdated — topic0 and signature pinning [CH-6]', () => {
-  const iface = loadInterface('KnowledgeCollectionStorage');
+describe('KnowledgeAssetUpdated — topic0 and signature pinning [CH-6]', () => {
+  const iface = loadInterface("DKGKnowledgeAssets");
   // V10.1: indexed `author` mirrors the publish event. Current update path
   // emits `address(0)` (no attestation yet) but the slot is reserved.
   const EXPECTED_SIG =
-    'KnowledgeCollectionUpdated(uint256,address,string,bytes32,uint256,uint96)';
+    'KnowledgeAssetUpdated(uint256,address,string,bytes32,uint256,uint96)';
 
   it('canonical signature matches the V10 update spec', () => {
-    expect(canonicalSignature(iface, 'KnowledgeCollectionUpdated')).toBe(EXPECTED_SIG);
+    expect(canonicalSignature(iface, 'KnowledgeAssetUpdated')).toBe(EXPECTED_SIG);
   });
 
   it('topic[0] equals keccak256(canonical signature)', () => {
-    const ev = iface.getEvent('KnowledgeCollectionUpdated');
+    const ev = iface.getEvent('KnowledgeAssetUpdated');
     expect(ev!.topicHash.toLowerCase()).toBe(keccak256OfString(EXPECTED_SIG).toLowerCase());
   });
 });
@@ -204,14 +204,14 @@ describe('Event selectors are pairwise distinct (no hash collision) [CH-6]', () 
   // must have a unique selector. If any two collide, parseLog is ambiguous
   // and will silently pick the wrong decoder on multi-contract receipts.
   it('the V10 event set has no selector collisions', () => {
-    const iface = loadInterface('KnowledgeCollectionStorage');
+    const iface = loadInterface("DKGKnowledgeAssets");
     const cgIface = loadInterface('ContextGraphStorage');
     const names = [
-      ['KnowledgeCollectionStorage', 'KnowledgeCollectionCreated', iface],
-      ['KnowledgeCollectionStorage', 'KnowledgeAssetsMinted', iface],
-      ['KnowledgeCollectionStorage', 'KnowledgeCollectionUpdated', iface],
+      ['DKGKnowledgeAssets', 'KnowledgeAssetCreated', iface],
+      ['DKGKnowledgeAssets', 'KnowledgeAssetsMinted', iface],
+      ['DKGKnowledgeAssets', 'KnowledgeAssetUpdated', iface],
       ['ContextGraphStorage', 'ContextGraphCreated', cgIface],
-      ['ContextGraphStorage', 'KCRegisteredToContextGraph', cgIface],
+      ['ContextGraphStorage', 'KnowledgeAssetRegisteredToContextGraph', cgIface],
     ] as const;
     const selectors = new Map<string, string>();
     for (const [_ctr, evName, ifc] of names) {

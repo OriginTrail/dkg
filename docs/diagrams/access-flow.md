@@ -5,7 +5,7 @@ encrypted private content. This is the `/dkg/access/1.0.0` protocol.
 
 ## Context
 
-When a KC is published with `privateQuads`, the publisher:
+When a KA is published with `privateQuads`, the publisher:
 - Hashes the private triples into a `privateMerkleRoot`
 - Anchors that root as a synthetic public triple
 - Stores private triples locally in the `PrivateContentStore`
@@ -75,7 +75,7 @@ sequenceDiagram
 ## Access policies
 
 The access handler on Agent B checks whether Agent A is allowed to access
-the private data. The policy is per-KC or per-contextGraph:
+the private data. The policy is per-KA or per-contextGraph:
 
 | Policy | Description |
 |--------|-------------|

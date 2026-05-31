@@ -28,7 +28,7 @@ export {
   KCDataMissingError,
   type KCTriple,
   type KCExtractionResult,
-} from './kc-extractor.js';
+} from './ka-extractor.js';
 
 export {
   extractCiphertextChunksFromStore,

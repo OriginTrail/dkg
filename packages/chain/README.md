@@ -21,7 +21,7 @@ const chain = new EVMChainAdapter({
   hubAddress: '0x...',
 });
 
-const tx = await chain.createKnowledgeCollection(merkleRoot, size, epochs);
+const tx = await chain.createKnowledgeAsset(merkleRoot, size, epochs);
 ```
 
 ## Internal Dependencies

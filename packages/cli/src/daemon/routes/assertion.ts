@@ -3566,10 +3566,10 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
     const idStr = decodeURIComponent(path.split('/')[3] ?? '');
     if (!/^\d+$/.test(idStr)) {
       return jsonResponse(res, 400, {
-        error: 'Invalid kcId — must be a non-negative integer',
+        error: 'Invalid kaId — must be a non-negative integer',
       });
     }
-    const kcId = BigInt(idStr);
+    const kaId = BigInt(idStr);
     try {
       const chain: any = (agent as any).chain ?? (agent as any).chainAdapter;
       if (!chain?.getLatestMerkleRoot) {
@@ -3577,29 +3577,29 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
           error: 'Chain adapter does not expose getLatestMerkleRoot',
         });
       }
-      const rootBytes: Uint8Array = await chain.getLatestMerkleRoot(kcId);
+      const rootBytes: Uint8Array = await chain.getLatestMerkleRoot(kaId);
       const rootHex = '0x' + Array.from(rootBytes).map((b: number) => b.toString(16).padStart(2, '0')).join('');
       let author: string | null = null;
       try {
         if (typeof agent.getKnowledgeCollectionAuthor === 'function') {
-          const a = await agent.getKnowledgeCollectionAuthor(kcId);
+          const a = await agent.getKnowledgeCollectionAuthor(kaId);
           if (a && a !== '0x0000000000000000000000000000000000000000') author = a;
         }
       } catch { /* attestation lookup is optional */ }
       return jsonResponse(res, 200, {
-        kcId: idStr,
+        kaId: idStr,
         merkleRoot: rootHex,
         author,
       });
     } catch (err: any) {
-      // Codex PR #609 R2 #5 — mirror the unknown-kcId mapping the
+      // Codex PR #609 R2 #5 — mirror the unknown-kaId mapping the
       // sibling `/api/kc/:id/author` route already does so callers
       // can branch on "not published yet" (404) vs. server failure
       // (500). KCS reverts on lookups for ids that don't exist;
       // matching the same regex keeps the two routes in lockstep.
       const msg = err?.message ?? String(err);
-      if (/unknown kcId|nonexistent|out-of-bounds/i.test(msg)) {
-        return jsonResponse(res, 404, { error: `Unknown kcId ${idStr}` });
+      if (/unknown kaId|nonexistent|out-of-bounds/i.test(msg)) {
+        return jsonResponse(res, 404, { error: `Unknown kaId ${idStr}` });
       }
       return jsonResponse(res, 500, { error: msg });
     }
@@ -3609,7 +3609,7 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
   // collection's latest merkle-root entry.
   //
   // Delegates to `agent.getKnowledgeCollectionAuthor`, which reads
-  // `KnowledgeCollectionStorage.getLatestMerkleRootAuthor(kcId)` via the
+  // `KnowledgeCollectionStorage.getLatestMerkleRootAuthor(kaId)` via the
   // configured chain adapter. The view returns:
   //   - the EIP-712-recovered (or EIP-1271-verified) author for V10.1+
   //     publishes, or
@@ -3620,17 +3620,17 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
   // clients don't have to know the convention. Adapters that don't
   // implement the view (no-chain mode, pre-V10.1 evm-adapter copies)
   // return 503 — this is "feature requires V10.1 chain adapter," not a
-  // 404 about the kcId.
+  // 404 about the kaId.
   if (req.method === 'GET' && /^\/api\/kc\/[^/]+\/author$/.test(path)) {
     const idStr = decodeURIComponent(path.split('/')[3] ?? '');
     if (!/^\d+$/.test(idStr)) {
       return jsonResponse(res, 400, {
-        error: 'Invalid kcId — must be a non-negative integer',
+        error: 'Invalid kaId — must be a non-negative integer',
       });
     }
-    const kcId = BigInt(idStr);
+    const kaId = BigInt(idStr);
     try {
-      const author = await agent.getKnowledgeCollectionAuthor(kcId);
+      const author = await agent.getKnowledgeCollectionAuthor(kaId);
       if (author === null) {
         return jsonResponse(res, 503, {
           error:
@@ -3641,16 +3641,16 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
       const ZERO = '0x0000000000000000000000000000000000000000';
       const attested = author.toLowerCase() !== ZERO;
       return jsonResponse(res, 200, {
-        kcId: idStr,
+        kaId: idStr,
         author: attested ? author : null,
         attested,
       });
     } catch (err: any) {
-      // KCS reverts on unknown kcId; map to 404 so callers can branch
+      // KCS reverts on unknown kaId; map to 404 so callers can branch
       // on "not published yet" vs "no attestation."
       const msg = err?.message ?? String(err);
-      if (/unknown kcId|nonexistent|out-of-bounds/i.test(msg)) {
-        return jsonResponse(res, 404, { error: `Unknown kcId ${idStr}` });
+      if (/unknown kaId|nonexistent|out-of-bounds/i.test(msg)) {
+        return jsonResponse(res, 404, { error: `Unknown kaId ${idStr}` });
       }
       throw err;
     }

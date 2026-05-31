@@ -314,7 +314,7 @@ V9 (M2b):  did:dkg:{chainId}/{publisherAddress}/{localKAId}
    - Buyer calls `disputeDelivery` if data doesn't match (O(log n) merkle proof)
    - Timeout-based resolution: if buyer doesn't dispute, seller claims payment
    - 5% protocol fee → `ProtocolTreasury`, 95% → seller
-   - Reuses KC merkle roots from `KnowledgeAssetsStorage` (V9) or `KnowledgeCollectionStorage` (legacy V8)
+   - Reuses KA merkle roots from `KnowledgeAssetsStorage` (V9) or `KnowledgeCollectionStorage` (legacy V8)
    - Register in Hub
 2. **Update ChainAdapter interface**
    - Add `initiatePurchase`, `fulfillPurchase`, `revealKey`, `disputeDelivery`, `claimPayment` methods

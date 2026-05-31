@@ -237,7 +237,7 @@ If a wallet trips its rate limit, the core declines further staging from that wa
 **Promotion happens at VM publish time, not at registration time.** The lifecycle has three distinct moments:
 
 - **Registration on chain** creates the CG record and pins `publishAuthority` (and any PCA delegates). It enables VM publishing for this CG ID. It does NOT extend SWM TTL, does NOT pay cores anything, and does NOT lift the staging quotas. The CG is now publishable, but its SWM-staged ciphertext is still subject to the same TTL and caps as before.
-- **VM publish** pays `tokenAmount` for `epochs` of retention via the existing `KnowledgeAssetsV10` flow. The specific ciphertext chunks named in the batch (via `ciphertextChunks[]` in the ACK request, §5.4.1) are promoted from "staged under TTL" to "retained for the batch's `epochs`." They keep the same bytes in the core's local store; they get re-indexed under the batch ID; they exit the staging budget and enter per-batch retention bookkeeping.
+- **VM publish** pays `tokenAmount` for `epochs` of retention via the existing `KnowledgeAssetsLifecycle` (formerly `KnowledgeAssetsV10`) flow. The specific ciphertext chunks named in the batch (via `ciphertextChunks[]` in the ACK request, §5.4.1) are promoted from "staged under TTL" to "retained for the batch's `epochs`." They keep the same bytes in the core's local store; they get re-indexed under the batch ID; they exit the staging budget and enter per-batch retention bookkeeping.
 - **SWM activity outside any published batch** — past chunks that weren't included in a batch, or new chunks gossiped after the publish — continue under the same staging TTL until they too are committed to a future batch or expire.
 
 If the sharding-table membership changes (epoch rollover, stake change) and a core is no longer eligible for the CG's assignment, it drops staged-but-not-yet-published data immediately and follows the existing sharding-table-reshuffle policy for already-retained batches.
@@ -367,7 +367,7 @@ The responder verifies, in order:
 2. The `publishAuthority` is currently authorised on chain for `contextGraphId` (per existing V10 publishAuthority lookup).
 3. For each entry in `ciphertextChunks`: the core holds bytes matching `chunkDigest` and has indexed them under `(contextGraphId, batchId)`. If a chunk is missing, the core MAY request it inline (see §5.4.3); if it cannot acquire it within a normative timeout, it MUST decline the ACK.
 4. `ciphertextChunksRoot` matches the recomputed merkle root over the supplied chunk digests.
-5. **`byteSize` matches what the core actually holds.** The semantic is "size of what cores persist for this batch": for public CGs that is plaintext leaf bytes (today's behaviour, unchanged); for curated CGs that is the sum of `ciphertextChunks[i].byteSize`. The core recomputes from its local store and MUST decline the ACK with `BYTESIZE_MISMATCH` if the publisher's claim doesn't match. This is what keeps the pricing formula `tokenAmount ≥ stakeWeightedAsk × byteSize × epochs / 1024` (`KnowledgeAssetsV10._validateTokenAmount`) honest — the chain trusts a `byteSize` only because quorum-of-cores cosign an ACK digest binding it.
+5. **`byteSize` matches what the core actually holds.** The semantic is "size of what cores persist for this batch": for public CGs that is plaintext leaf bytes (today's behaviour, unchanged); for curated CGs that is the sum of `ciphertextChunks[i].byteSize`. The core recomputes from its local store and MUST decline the ACK with `BYTESIZE_MISMATCH` if the publisher's claim doesn't match. This is what keeps the pricing formula `tokenAmount ≥ stakeWeightedAsk × byteSize × epochs / 1024` (`KnowledgeAssetsLifecycle._validateTokenAmount`) honest — the chain trusts a `byteSize` only because quorum-of-cores cosign an ACK digest binding it.
 
 **Implication for curated-CG pricing**. Because curated CGs declare ciphertext `byteSize`, they pay (slightly) more per plaintext bit than equivalent public CGs do, equal to the AEAD overhead per chunk (16-byte tag + 12-byte nonce). For typical chunk sizes the overhead is small (~0.7% at 4 KB chunks, ~2.7% at 1 KB chunks, ~11% at 256-byte chunks). Curators sensitive to cost may amortise by packing more assertions per broadcast message. No contract change is required: the contract treats `byteSize` as opaque input; the semantic ("plaintext for public, ciphertext for curated") is the publisher/core convention enforced via the cosigned ACK digest.
 
@@ -383,7 +383,7 @@ ACKResponse = {
 
 #### 5.4.2 What signing the ACK binds
 
-Phase A constraint: the **cosigned digest is the existing V10 `computePublishACKDigest`** — `(chainId, kavAddress, contextGraphId, merkleRoot, knowledgeAssetsAmount, byteSize, epochs, tokenAmount, merkleLeafCount)`. Cores sign this verbatim because `KnowledgeAssetsV10._validateSignatures` verifies that exact shape on-chain; introducing new bound fields would require a contract change, which Phase A explicitly avoids (§7).
+Phase A constraint: the **cosigned digest is the existing V10 `computePublishACKDigest`** — `(chainId, kavAddress, contextGraphId, merkleRoot, knowledgeAssetsAmount, byteSize, epochs, tokenAmount, merkleLeafCount)`. Cores sign this verbatim because `KnowledgeAssetsLifecycle._validateSignatures` verifies that exact shape on-chain; introducing new bound fields would require a contract change, which Phase A explicitly avoids (§7).
 
 The additional ACKRequest fields (`publishOperationId`, `ciphertextChunks[]`, `ciphertextChunksRoot`, `ackProtocolVersion`, `publishAuthority`) are **off-chain inputs to the core's accept-or-decline decision**, not new digest material. They give the core enough information to:
 
@@ -969,7 +969,7 @@ The protocol's role is to provide the levers and reasonable defaults — not to 
 | Per-assertion payload-key wrap for monetization | This RFC §5.7 |
 | Quota *default values* (6h TTL, 100 MB cap, etc.) | This RFC §5.1.1 — first-cut defaults |
 | Quota *calibration over time* | Tokenomics spec — measurement-driven |
-| Pricing per ciphertext byte / per epoch | Tokenomics spec — current `stakeWeightedAverageAsk` formula in `KnowledgeAssetsV10._validateTokenAmount` |
+| Pricing per ciphertext byte / per epoch | Tokenomics spec — current `stakeWeightedAverageAsk` formula in `KnowledgeAssetsLifecycle._validateTokenAmount` |
 | Whether staging itself can be priced (e.g. TRAC bond to raise per-CG quotas above default) | Tokenomics spec — not addressed here |
 | Whether cores can advertise per-CG-class staging policies in sharding-table metadata | Tokenomics spec — not addressed here |
 | Conversion-incentive mechanisms (e.g. discounts for first registration, churn rewards for cores with high conversion ratios) | Tokenomics spec — not addressed here |
@@ -1098,9 +1098,9 @@ sequenceDiagram
     Note over E: Collect until quorum reached<br/>(= parametersStorage.minimumRequiredSignatures())
 
     Note over E,CH: 4) Anchoring on chain (existing V10 flow)
-    E->>CH: createKnowledgeAssetsV10(<br/>cg, merkleRoot, batchMetadata, ackSignatures[])
+    E->>CH: publish(<br/>cg, merkleRoot, batchMetadata, ackSignatures[])
     Note over CH: Verify each ACK signer ∈ sharding table.<br/>Verify publisher per publishPolicy.<br/>Verify quorum.<br/>NOTE: no new chain fields vs today.
-    CH-->>E: KnowledgeCollectionCreated event
+    CH-->>E: KnowledgeAssetCreated event
 
     par durable hosting (already persisted from step 3)
         CN->>CN: Serve ct_i to authenticated requesters<br/>via SWMCatchupRequest (§5.6).

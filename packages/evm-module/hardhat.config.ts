@@ -66,7 +66,7 @@ config.abiExporter = {
     'ProfileLib.sol',
     'ShardingTableLib.sol',
     'TokenLib.sol',
-    'KnowledgeCollectionLib.sol',
+    'KnowledgeAssetLib.sol',
     'KnowledgeAssetsLib.sol',
     'StakingLib.sol',
     'IOldHub',

@@ -292,10 +292,10 @@ async function execPublish(
       body: JSON.stringify({ contextGraphId: config.contextGraph, assertionName }),
       signal: opSignal(signal, 'publish'),
     });
-    const body = (await res.json()) as { kcId?: string; kas?: unknown[]; status?: string; error?: string; phases?: Record<string, number> };
+    const body = (await res.json()) as { kaId?: string; kas?: unknown[]; status?: string; error?: string; phases?: Record<string, number> };
     const dur = Date.now() - t0;
     const kasCount = Array.isArray(body.kas) ? body.kas.length : (res.ok ? config.kasPerPublish : 0);
-    const kcDisplay = res.ok ? (body.kcId != null ? String(body.kcId).slice(0, 12) : '0') : '—';
+    const kcDisplay = res.ok ? (body.kaId != null ? String(body.kaId).slice(0, 12) : '0') : '—';
     const detail = res.ok
       ? `KC: ${kcDisplay} (${kasCount} KAs)${body.status ? ` ${body.status}` : ''}`
       : `${body.error ?? `HTTP ${res.status}`} (${kasCount} KAs)`;

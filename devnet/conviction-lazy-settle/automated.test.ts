@@ -255,7 +255,7 @@ function nquadsFile(name: string): string {
   return p;
 }
 
-async function dkgPublish(node: DevnetNode, file: string): Promise<{ kcId: bigint; txHash: string }> {
+async function dkgPublish(node: DevnetNode, file: string): Promise<{ kaId: bigint; txHash: string }> {
   return new Promise((res, rej) => {
     const child = spawn(
       process.execPath,
@@ -290,7 +290,7 @@ async function dkgPublish(node: DevnetNode, file: string): Promise<{ kcId: bigin
         rej(new Error(`could not parse publish output\n${stdout}`));
         return;
       }
-      res({ kcId: BigInt(kcMatch[1]!), txHash: txMatch[1]! });
+      res({ kaId: BigInt(kcMatch[1]!), txHash: txMatch[1]! });
     });
   });
 }
@@ -344,7 +344,7 @@ describe('V10 PCA lazy settlement — devnet validation', () => {
     state.s = await loadContracts();
     // Use a CORE node (node 2). Edge nodes don't have an on-chain identity
     // by default and `dkg publish` short-circuits to status="tentative" with
-    // kcId=0 — we need an actual on-chain confirmation to assert the active
+    // kaId=0 — we need an actual on-chain confirmation to assert the active
     // sink (the discounted cost lands in EpochStorage via the conviction
     // path). Node 1 is reserved for RS in the v10-end-to-end run; node 2
     // is the next idle core with free op wallets.
@@ -544,7 +544,7 @@ describe('V10 PCA lazy settlement — devnet validation', () => {
 
     const file = nquadsFile('lazy-settle-publish');
     const result = await dkgPublish(edge, file);
-    expect(result.kcId).toBeGreaterThan(0n);
+    expect(result.kaId).toBeGreaterThan(0n);
 
     // Source of truth for the active-sink amount is the publish tx
     // receipt's `CostCovered` + `TokensAddedToEpochRange` events — not
@@ -615,7 +615,7 @@ describe('V10 PCA lazy settlement — devnet validation', () => {
 
     // eslint-disable-next-line no-console
     console.log(
-      `step 3: published kcId=${result.kcId} → CostCovered.discountedCost=${ethers.formatEther(costCoveredDiscounted)} TRAC, ` +
+      `step 3: published kaId=${result.kaId} → CostCovered.discountedCost=${ethers.formatEther(costCoveredDiscounted)} TRAC, ` +
       `activeSink(from events)=${ethers.formatEther(activeSinkFromEvents)} TRAC, ` +
       `windowSpent[acct][0] += ${ethers.formatEther(spent0After - spent0Before)} TRAC`,
     );

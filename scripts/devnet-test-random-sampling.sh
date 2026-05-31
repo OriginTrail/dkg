@@ -178,7 +178,7 @@ for _ in $(seq 1 60); do
   sleep 1
 done
 [ -n "$PUB_KC_ID" ] || { tail -n 50 "$DAEMON_LOG" >&2; fail "publish did not confirm on-chain within 60s"; }
-log "Publish OK (kcId=$PUB_KC_ID into cgId=$CG_NUMERIC_ID)"
+log "Publish OK (kaId=$PUB_KC_ID into cgId=$CG_NUMERIC_ID)"
 
 # --- 3. Wait for first submitted proof across the core fleet ----------------
 
@@ -264,9 +264,9 @@ const path = require("path");
   const rss = new ethers.Contract(rssAddr, rssAbi, provider);
   const ch = await rss.getNodeChallenge(BigInt(process.env.IDENTITY_ID));
   // Tuple shape (matches RandomSamplingLib.Challenge):
-  //   knowledgeCollectionId, chunkId, kcStorage, epoch, activeProofPeriodStartBlock, proofingPeriodDurationInBlocks, solved
+  //   knowledgeAssetId, chunkId, kaStorage, epoch, activeProofPeriodStartBlock, proofingPeriodDurationInBlocks, solved
   console.log(JSON.stringify({
-    kcId: ch[0].toString(),
+    kaId: ch[0].toString(),
     chunkId: ch[1].toString(),
     epoch: ch[3].toString(),
     periodStartBlock: ch[4].toString(),

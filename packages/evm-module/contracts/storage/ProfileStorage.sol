@@ -13,7 +13,7 @@ contract ProfileStorage is INamed, IVersioned, HubDependent {
     // (RFC 04 v0.3 / Issue #461). New mapping reads on existing keys return
     // false for the new field. Multiaddrs were briefly added on a prior
     // revision but are deliberately not stored on Profile (RFC 04 §5.2).
-    string private constant _VERSION = "1.1.0";
+    string private constant _VERSION = "10.0.2";
 
     event ProfileCreated(uint72 indexed identityId, string nodeName, bytes nodeId, uint16 initialOperatorFee);
     event ProfileDeleted(uint72 indexed identityId, bytes nodeId);

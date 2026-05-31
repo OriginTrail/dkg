@@ -156,7 +156,7 @@ export function registerPublishTools(
           contextGraphId: cgId,
           quads: wireQuads,
         });
-        const kcId = (result as Record<string, unknown>).kcId as string | undefined;
+        const kaId = (result as Record<string, unknown>).kaId as string | undefined;
         const kas = (result as Record<string, unknown>).kas as
           | Array<{ tokenId: string; rootEntity: string }>
           | undefined;
@@ -169,7 +169,7 @@ export function registerPublishTools(
         const chainId = await resolveChainId(client);
         const summary = [
           `Published ${wireQuads.length} quad(s) to '${cgId}'.`,
-          kcId ? `KC: ${kcId}` : null,
+          kaId ? `KC: ${kaId}` : null,
           kas?.length ? `KAs: ${kas.length}` : null,
           txHash ? `Tx: ${txHash}` : null,
           chainId ? `Chain: ${chainId}` : null,
@@ -283,7 +283,7 @@ export function registerPublishTools(
           rootEntities: roots,
           subGraphName,
         });
-        const kcId = result.kcId as string | undefined;
+        const kaId = result.kaId as string | undefined;
         const kas = result.kas as Array<{ tokenId: string; rootEntity: string }> | undefined;
         const txHash = result.txHash as string | undefined;
         // F3+F13: see `resolveChainId` JSDoc — chainId is echoed for
@@ -295,7 +295,7 @@ export function registerPublishTools(
         const summary = [
           `Published ${cgId}'s SWM to Verified Memory.`,
           roots ? `Roots: ${roots.length}` : 'Selection: all',
-          kcId ? `KC: ${kcId}` : null,
+          kaId ? `KC: ${kaId}` : null,
           kas?.length ? `KAs: ${kas.length}` : null,
           txHash ? `Tx: ${txHash}` : null,
           chainId ? `Chain: ${chainId}` : null,

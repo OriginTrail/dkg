@@ -9,9 +9,17 @@ import {ICustodian} from "../interfaces/ICustodian.sol";
 
 contract ParametersStorage is INamed, IVersioned, HubDependent {
     event ParameterChanged(string parameterName, uint256 parameterValue);
+    /// @notice Emitted when the protocol treasury recipient changes. The
+    ///         address is carried in its own event (rather than the
+    ///         `uint256`-valued `ParameterChanged`) so off-chain indexers get a
+    ///         typed `address` field.
+    event ProtocolTreasurySet(address indexed treasury);
 
     string private constant _NAME = "ParametersStorage";
-    string private constant _VERSION = "1.0.0";
+    // protocol treasury fee (`protocolTreasuryFee`, `protocolTreasury`,
+    // `MAX_PROTOCOL_TREASURY_FEE`) skimmed from the staker-bound TRAC on
+    // every paid publish / update / lifetime-extension.
+    string private constant _VERSION = "10.0.2";
 
     uint96 public minimumStake;
     uint96 public maximumStake;
@@ -32,6 +40,26 @@ contract ParametersStorage is INamed, IVersioned, HubDependent {
 
     uint256 public v81ReleaseEpoch;
     uint256 public publishingConvictionEpochs;
+
+    /// @notice Protocol treasury fee in basis points (out of 10_000) skimmed
+    ///         from the staker-bound TRAC on every paid publish / update /
+    ///         lifetime-extension. The fee is taken out of the amount that
+    ///         would otherwise flow to the staker reward pool — it does NOT
+    ///         change the price a publisher pays. Default 300 (3%).
+    ///
+    ///         The fee is a no-op while `protocolTreasury == address(0)`
+    ///         (the full amount flows to stakers), so it stays dormant until
+    ///         governance wires a treasury recipient via `setProtocolTreasury`.
+    uint16 public protocolTreasuryFee;
+
+    /// @notice Recipient of the protocol treasury fee. The zero address
+    ///         disables the fee entirely regardless of `protocolTreasuryFee`.
+    address public protocolTreasury;
+
+    /// @notice Hard upper bound on `protocolTreasuryFee` (10%). Bounds
+    ///         governance so the fee can never be set to an extractive level
+    ///         that would starve the staker reward pool.
+    uint16 public constant MAX_PROTOCOL_TREASURY_FEE = 1_000;
 
     /// @notice Hard upper bound on `publishingConvictionEpochs`.
     ///
@@ -76,6 +104,11 @@ contract ParametersStorage is INamed, IVersioned, HubDependent {
         // Change if you ever redeploy delegatorsInfo contract on either network
         v81ReleaseEpoch = _v81ReleaseEpoch;
         publishingConvictionEpochs = 12;
+
+        // 3% default. Dormant until `protocolTreasury` is set (defaults to
+        // the zero address), so a fresh deploy behaves exactly as before
+        // until governance opts in.
+        protocolTreasuryFee = 300;
     }
 
     function name() external pure virtual override returns (string memory) {
@@ -170,6 +203,22 @@ contract ParametersStorage is INamed, IVersioned, HubDependent {
         publishingConvictionEpochs = _publishingConvictionEpochs;
 
         emit ParameterChanged("publishingConvictionEpochs", _publishingConvictionEpochs);
+    }
+
+    function setProtocolTreasuryFee(uint16 protocolTreasuryFee_) external onlyOwnerOrMultiSigOwner {
+        // See `MAX_PROTOCOL_TREASURY_FEE` for the rationale on the upper
+        // bound. 0 is allowed (disables the fee while keeping the recipient
+        // wired) — the floor is enforced implicitly by the unsigned type.
+        require(protocolTreasuryFee_ <= MAX_PROTOCOL_TREASURY_FEE, "protocolTreasuryFee too large");
+        protocolTreasuryFee = protocolTreasuryFee_;
+
+        emit ParameterChanged("protocolTreasuryFee", protocolTreasuryFee_);
+    }
+
+    function setProtocolTreasury(address protocolTreasury_) external onlyOwnerOrMultiSigOwner {
+        protocolTreasury = protocolTreasury_;
+
+        emit ProtocolTreasurySet(protocolTreasury_);
     }
 
     function _isMultiSigOwner(address multiSigAddress) internal view returns (bool) {

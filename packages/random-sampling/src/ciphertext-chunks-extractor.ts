@@ -14,7 +14,7 @@
  *
  * `batchId` is the 32-byte V10 KC merkleRoot (the publisher uses it as
  * the deterministic AES-GCM nonce salt + as the per-chunk subject
- * suffix). The prover gets it from `chain.getLatestMerkleRoot(kcId)`.
+ * suffix). The prover gets it from `chain.getLatestMerkleRoot(kaId)`.
  *
  * Failure modes:
  *  - {@link CiphertextChunksMissingError}: at least one
@@ -45,13 +45,13 @@ export class CiphertextChunksMissingError extends Error {
   readonly name = 'CiphertextChunksMissingError';
   constructor(
     readonly contextGraphId: bigint,
-    readonly kcId: bigint,
+    readonly kaId: bigint,
     readonly batchIdHex: string,
     readonly missingChunkIndexes: number[],
     readonly expectedCount: number,
   ) {
     super(
-      `CG ${contextGraphId} KC ${kcId} (batchId ${batchIdHex.slice(0, 18)}...) ` +
+      `CG ${contextGraphId} KC ${kaId} (batchId ${batchIdHex.slice(0, 18)}...) ` +
       `missing ${missingChunkIndexes.length}/${expectedCount} ciphertext chunks ` +
       `locally; backfill via PROTOCOL_GET_CIPHERTEXT_CHUNK then retry`,
     );
@@ -62,12 +62,12 @@ export class CiphertextChunksMalformedError extends Error {
   readonly name = 'CiphertextChunksMalformedError';
   constructor(
     readonly contextGraphId: bigint,
-    readonly kcId: bigint,
+    readonly kaId: bigint,
     readonly chunkIndex: number,
     readonly reason: string,
   ) {
     super(
-      `CG ${contextGraphId} KC ${kcId} chunk ${chunkIndex} malformed in store: ${reason}`,
+      `CG ${contextGraphId} KC ${kaId} chunk ${chunkIndex} malformed in store: ${reason}`,
     );
   }
 }
@@ -75,8 +75,8 @@ export class CiphertextChunksMalformedError extends Error {
 export interface ExtractCiphertextChunksInput {
   store: TripleStore;
   contextGraphId: bigint;
-  kcId: bigint;
-  /** 32-byte V10 KC merkleRoot. Get from `chain.getLatestMerkleRoot(kcId)`. */
+  kaId: bigint;
+  /** 32-byte V10 KC merkleRoot. Get from `chain.getLatestMerkleRoot(kaId)`. */
   batchId: Uint8Array;
   /** Chain-sourced `ciphertextChunkCount`. */
   expectedCount: number;
@@ -131,7 +131,7 @@ export async function extractCiphertextChunksFromStore(
     if (typeof literal !== 'string') {
       throw new CiphertextChunksMalformedError(
         input.contextGraphId,
-        input.kcId,
+        input.kaId,
         i,
         'bound value is not a string',
       );
@@ -144,7 +144,7 @@ export async function extractCiphertextChunksFromStore(
     } catch (err) {
       throw new CiphertextChunksMalformedError(
         input.contextGraphId,
-        input.kcId,
+        input.kaId,
         i,
         `base64 decode failed: ${err instanceof Error ? err.message : String(err)}`,
       );
@@ -154,7 +154,7 @@ export async function extractCiphertextChunksFromStore(
   if (missing.length > 0) {
     throw new CiphertextChunksMissingError(
       input.contextGraphId,
-      input.kcId,
+      input.kaId,
       bytesToHex(input.batchId),
       missing,
       input.expectedCount,

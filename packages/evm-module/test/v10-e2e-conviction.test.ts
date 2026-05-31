@@ -14,8 +14,8 @@ import {
   StakingV10,
   DKGStakingConvictionNFT,
   ParametersStorage,
-  KnowledgeAssetsV10,
-  KnowledgeCollectionStorage,
+  KnowledgeAssetsLifecycle,
+  DKGKnowledgeAssets,
   EpochStorage,
   AskStorage,
   ContextGraphs,
@@ -44,8 +44,8 @@ type E2EFixture = {
   StakingV10: StakingV10;
   StakingNFT: DKGStakingConvictionNFT;
   ParametersStorage: ParametersStorage;
-  KnowledgeAssetsV10: KnowledgeAssetsV10;
-  KnowledgeCollectionStorage: KnowledgeCollectionStorage;
+  KnowledgeAssetsLifecycle: KnowledgeAssetsLifecycle;
+  DKGKnowledgeAssets: DKGKnowledgeAssets;
   EpochStorage: EpochStorage;
   AskStorage: AskStorage;
   ContextGraphs: ContextGraphs;
@@ -62,8 +62,8 @@ async function deployE2EFixture(): Promise<E2EFixture> {
     'Chronos',
     'Profile',
     'Identity',
-    'KnowledgeAssetsV10',
-    // V10 Phase 8 stack — required by the new `KnowledgeAssetsV10.initialize()`
+    'KnowledgeAssetsLifecycle',
+    // V10 Phase 8 stack — required by the new `KnowledgeAssetsLifecycle.initialize()`
     // fail-fast Hub lookups (commit e89ecb75). Flow 3 (V10 publish via NFT)
     // depends on the full V10 stack being deployed in the same fixture.
     'ContextGraphStorage',
@@ -97,8 +97,8 @@ async function deployE2EFixture(): Promise<E2EFixture> {
       'DKGStakingConvictionNFT',
     ),
     ParametersStorage: await hre.ethers.getContract<ParametersStorage>('ParametersStorage'),
-    KnowledgeAssetsV10: await hre.ethers.getContract<KnowledgeAssetsV10>('KnowledgeAssetsV10'),
-    KnowledgeCollectionStorage: await hre.ethers.getContract<KnowledgeCollectionStorage>('KnowledgeCollectionStorage'),
+    KnowledgeAssetsLifecycle: await hre.ethers.getContract<KnowledgeAssetsLifecycle>('KnowledgeAssetsLifecycle'),
+    DKGKnowledgeAssets: await hre.ethers.getContract<DKGKnowledgeAssets>('DKGKnowledgeAssets'),
     EpochStorage: await hre.ethers.getContract<EpochStorage>('EpochStorageV8'),
     AskStorage: await hre.ethers.getContract<AskStorage>('AskStorage'),
     ContextGraphs: await hre.ethers.getContract<ContextGraphs>('ContextGraphs'),
@@ -118,8 +118,8 @@ describe('V10 E2E Conviction System', function () {
   let ProfileContract: Profile;
   let StakingStorage: StakingStorage;
   let ParametersStorage: ParametersStorage;
-  let KAV10: KnowledgeAssetsV10;
-  let KnowledgeCollectionStorage: KnowledgeCollectionStorage;
+  let KAV10: KnowledgeAssetsLifecycle;
+  let DKGKnowledgeAssets: DKGKnowledgeAssets;
 
   beforeEach(async () => {
     hre.helpers.resetDeploymentsJson();
@@ -130,11 +130,11 @@ describe('V10 E2E Conviction System', function () {
       Token,
       Chronos,
       ParametersStorage,
-      KnowledgeCollectionStorage,
+      DKGKnowledgeAssets,
     } = fixture);
     ProfileContract = fixture.Profile;
     StakingStorage = fixture.StakingStorage;
-    KAV10 = fixture.KnowledgeAssetsV10;
+    KAV10 = fixture.KnowledgeAssetsLifecycle;
   });
 
   // ========================================================================
@@ -159,16 +159,16 @@ describe('V10 E2E Conviction System', function () {
   //   7. KC registered in KCS with msg.sender as the publisher of record
   //      (commit 41be7c71 — KA tokens minted to the paying agent, so the
   //      N16 ERC-1155 balanceOf gate works on follow-up updates)
-  //   8. Atomic CG binding via ContextGraphs.registerKnowledgeCollection
-  //      (kcToContextGraph[kcId] == cgId, contextGraphKCList[cgId] includes
-  //      kcId) (N20)
+  //   8. Atomic CG binding via ContextGraphs.registerKnowledgeAsset
+  //      (kaToContextGraph[kaId] == cgId, contextGraphKCList[cgId] includes
+  //      kaId) (N20)
   //   9. CG value ledger written via
   //      ContextGraphValueStorage.addCGValueForEpochRange (N20, Phase 1)
   //  10. Active-sink distribution: `TokensAddedToEpochRange` events
   //      emitted by `EpochStorage` sum to `discountedCost` across the KC's
   //      `[currentEpoch, currentEpoch + epochs]` chain-epoch range
   //      (prorated current-epoch partial + middle full + tail partial,
-  //      mirroring `KnowledgeAssetsV10._distributeTokens`). The NFT
+  //      mirroring `KnowledgeAssetsLifecycle._distributeTokens`). The NFT
   //      is the funding agent on the conviction branch — KAV10 MUST NOT
   //      call `_distributeTokens` (no double-count).
   //  11. KC retrieval through the KCS public reader
@@ -196,13 +196,13 @@ describe('V10 E2E Conviction System', function () {
         Token,
         Chronos,
         ParametersStorage,
-        KnowledgeCollectionStorage,
+        DKGKnowledgeAssets,
       } = fixture);
       ProfileContract = fixture.Profile;
       StakingStorage = fixture.StakingStorage;
       StakingV10Contract = fixture.StakingV10;
       StakingNFT = fixture.StakingNFT;
-      KAV10 = fixture.KnowledgeAssetsV10;
+      KAV10 = fixture.KnowledgeAssetsLifecycle;
       NFT = fixture.PublishingConvictionNFT;
       CGFacade = fixture.ContextGraphs;
       CGS = fixture.ContextGraphStorage;
@@ -331,7 +331,7 @@ describe('V10 E2E Conviction System', function () {
         author: creator,
         contextGraphId: cgId,
         merkleRoot,
-        knowledgeAssetsAmount: 10,
+        knowledgeAssetsAmount: 1,
         byteSize: 1000,
         epochs,
         tokenAmount,
@@ -343,7 +343,7 @@ describe('V10 E2E Conviction System', function () {
       //
       // Capture the receipt so we can count `TokensAddedToEpochRange`
       // emits from EpochStorage. The active sink mirrors
-      // `KnowledgeAssetsV10._distributeTokens` semantics: the discounted
+      // `KnowledgeAssetsLifecycle._distributeTokens` semantics: the discounted
       // amount is prorated across `epochs + 1` chain epochs (current
       // partial + epochs-1 full + tail partial), producing 1-3 events.
       // We assert: (a) every event sits within `[currentEpoch,
@@ -409,8 +409,8 @@ describe('V10 E2E Conviction System', function () {
       void kav10AddrLower;
 
       // ---- Step 7: KC registered in KCS; publisher of record is msg.sender ----
-      const kcId = 1n;
-      const meta = await KnowledgeCollectionStorage.getKnowledgeCollectionMetadata(kcId);
+      const kaId = 1n;
+      const meta = await DKGKnowledgeAssets.getKnowledgeAssetMetadata(kaId);
       // meta[3] = byteSize, meta[4] = startEpoch, meta[5] = endEpoch, meta[6] = tokenAmount
       expect(meta[3]).to.equal(1000n);
       expect(meta[4]).to.equal(currentEpoch);
@@ -420,23 +420,18 @@ describe('V10 E2E Conviction System', function () {
       // (commit 41be7c71). This is what enables the N16 ERC-1155 balanceOf
       // gate to work on follow-up updates.
       const latestPublisher =
-        await KnowledgeCollectionStorage.getLatestMerkleRootPublisher(kcId);
+        await DKGKnowledgeAssets.getLatestMerkleRootPublisher(kaId);
       expect(latestPublisher).to.equal(creator.address);
-      // ERC-1155 KA tokens minted to msg.sender. A follow-up `update` would
-      // pass the `balanceOf(msg.sender, kcRange) > 0` gate.
-      const maxSize = await KnowledgeCollectionStorage.KNOWLEDGE_COLLECTION_MAX_SIZE();
-      const startTokenId = (kcId - 1n) * maxSize + 1n;
-      const stopTokenId = startTokenId + 10n; // knowledgeAssetsAmount = 10
-      expect(
-        await KnowledgeCollectionStorage['balanceOf(address,uint256,uint256)'](
-          creator.address,
-          startTokenId,
-          stopTokenId,
-        ),
-      ).to.be.gt(0n);
+      // The KA NFT (ERC-721, one token per KC id) is minted to the author on
+      // publish (`DKGKnowledgeAssets._safeMint(author, kaId)`). Assert the
+      // specific token `kaId` is owned by `creator` — a `balanceOf > 0` check
+      // would also pass if some unrelated KA were owned by `creator` while
+      // `kaId` was minted to the wrong address. A follow-up `update` passes
+      // the author-ownership gate.
+      expect(await DKGKnowledgeAssets.ownerOf(kaId)).to.equal(creator.address);
 
       // ---- Step 8: Atomic CG binding written ----
-      expect(await CGS.kcToContextGraph(kcId)).to.equal(cgId);
+      expect(await CGS.kaToContextGraph(kaId)).to.equal(cgId);
 
       // ---- Step 9: CG value ledger written ----
       //
@@ -457,7 +452,7 @@ describe('V10 E2E Conviction System', function () {
       // sum is the canonical guard.
 
       // ---- Step 11: KC retrieval via public reader ----
-      const retrievedKc = await KnowledgeCollectionStorage.getKnowledgeCollection(kcId);
+      const retrievedKc = await DKGKnowledgeAssets.getKnowledgeAsset(kaId);
       expect(retrievedKc.byteSize).to.equal(1000n);
       expect(retrievedKc.startEpoch).to.equal(currentEpoch);
       expect(retrievedKc.endEpoch).to.equal(currentEpoch + BigInt(epochs));
@@ -470,12 +465,12 @@ describe('V10 E2E Conviction System', function () {
       // `buildPublishParams` with the creator as both author and msg.sender).
       // Author lives in the parallel `merkleRootAuthors` map (keeps the
       // MerkleRoot struct at 3 storage slots so prior KCs decode correctly
-      // post-upgrade — see KnowledgeCollectionLib comments).
+      // post-upgrade — see KnowledgeAssetLib comments).
       expect(
-        await KnowledgeCollectionStorage.getMerkleRootAuthorByIndex(kcId, 0),
+        await DKGKnowledgeAssets.getMerkleRootAuthorByIndex(kaId, 0),
       ).to.equal(creator.address);
       expect(
-        await KnowledgeCollectionStorage.getLatestMerkleRootAuthor(kcId),
+        await DKGKnowledgeAssets.getLatestMerkleRootAuthor(kaId),
       ).to.equal(creator.address);
     });
   });

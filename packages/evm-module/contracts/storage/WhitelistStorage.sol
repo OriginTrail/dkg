@@ -8,7 +8,7 @@ import {IVersioned} from "../interfaces/IVersioned.sol";
 
 contract WhitelistStorage is INamed, IVersioned, HubDependent {
     string private constant _NAME = "WhitelistStorage";
-    string private constant _VERSION = "1.0.0";
+    string private constant _VERSION = "10.0.2";
 
     event AddressWhitelisted(address indexed addr);
     event AddressBlacklisted(address indexed addr);

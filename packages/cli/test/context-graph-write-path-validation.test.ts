@@ -48,12 +48,12 @@ describe('context graph write-path validation', () => {
     const share = vi.fn(async () => ({ shareOperationId: 'share-1' }));
     const conditionalShare = vi.fn(async () => ({ shareOperationId: 'share-cas-1' }));
     const publishFromSharedMemory = vi.fn(async () => ({
-      kcId: 1n,
+      kaId: 1n,
       status: 'confirmed',
       kaManifest: [],
     }));
     const publishFromFinalizedAssertion = vi.fn(async () => ({
-      kcId: 1n,
+      kaId: 1n,
       status: 'confirmed',
       assertionUri: 'did:dkg:context-graph:test/assertion/test/draft',
       seal: {
@@ -63,6 +63,7 @@ describe('context graph write-path validation', () => {
       kaManifest: [],
     }));
     const createSubGraph = vi.fn(async () => undefined);
+    const listSubGraphs = vi.fn(async () => []);
     const registerContextGraph = vi.fn(async () => ({ onChainId: '5' }));
     const inviteToContextGraph = vi.fn(async () => undefined);
     const inviteAgentToContextGraph = vi.fn(async () => undefined);
@@ -81,6 +82,7 @@ describe('context graph write-path validation', () => {
       ),
       resolveAgentByToken: vi.fn(() => undefined),
       peerId: 'peer-test',
+      query,
       assertion: {
         create,
         write,
@@ -111,6 +113,7 @@ describe('context graph write-path validation', () => {
         ),
       ),
       createSubGraph,
+      listSubGraphs,
       store: {
         insert: storeInsert,
       },
@@ -134,6 +137,7 @@ describe('context graph write-path validation', () => {
         rejectJoinRequest,
         assertContextGraphOwner,
         createSubGraph,
+        listSubGraphs,
         storeInsert,
       },
     };
@@ -218,6 +222,12 @@ describe('context graph write-path validation', () => {
     return { status: res.status, body: json };
   }
 
+  async function get(path: string) {
+    const res = await fetch(`${baseUrl}${path}`);
+    const json = await res.json().catch(() => null);
+    return { status: res.status, body: json };
+  }
+
   it('accepts an exact existing canonical id for assertion create', async () => {
     const agent = makeAgent();
     await startRoutes(agent);
@@ -229,6 +239,46 @@ describe('context graph write-path validation', () => {
 
     expect(result.status).toBe(200);
     expect(agent.calls.create).toHaveBeenCalledWith(CANONICAL_CG, 'draft', undefined);
+  });
+
+  it('sub-graph list opts into same-CG partition counts', async () => {
+    const agent = makeAgent();
+    agent.calls.listSubGraphs.mockResolvedValueOnce([
+      {
+        name: 'code',
+        uri: `${CANONICAL_URI}/code`,
+        description: 'Code sub-graph',
+        createdBy: CALLER,
+      },
+    ]);
+    agent.calls.query.mockResolvedValueOnce({
+      bindings: [
+        {
+          g: `${CANONICAL_URI}/code/_shared_memory`,
+          entities: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>',
+          triples: '"5"^^<http://www.w3.org/2001/XMLSchema#integer>',
+        },
+      ],
+    });
+    await startRoutes(agent);
+
+    const result = await get(`/api/sub-graph/list?contextGraphId=${encodeURIComponent(CANONICAL_CG)}`);
+
+    expect(result.status).toBe(200);
+    expect(agent.calls.query).toHaveBeenCalledWith(
+      expect.stringContaining('GRAPH ?g'),
+      {
+        contextGraphId: CANONICAL_CG,
+        includeContextGraphPartitions: true,
+      },
+    );
+    expect(result.body.subGraphs).toEqual([
+      expect.objectContaining({
+        name: 'code',
+        entityCount: 2,
+        tripleCount: 5,
+      }),
+    ]);
   });
 
   it('accepts a full context graph DID and passes the canonical id downstream', async () => {

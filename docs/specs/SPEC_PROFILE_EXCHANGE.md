@@ -39,7 +39,7 @@ Message (UTF-8):
 
 ### Verification
 
-Profile triples are a single KC with a merkle root. The receiver:
+Profile triples are a single KA with a merkle root. The receiver:
 1. Recomputes the merkle root from the received triples
 2. Compares to the claimed `dkg:merkleRoot` in the profile's metadata
 3. Optionally (Tier 2): checks the chain for the on-chain record

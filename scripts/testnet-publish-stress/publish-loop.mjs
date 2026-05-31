@@ -263,7 +263,7 @@ function buildPartitionQuads(partition, cgId, stressRunId, partitionIdx) {
 }
 
 // -----------------------------------------------------------------------------
-// Per-partition publish (returns { kcId, txHash, status, ms, error? })
+// Per-partition publish (returns { kaId, txHash, status, ms, error? })
 // -----------------------------------------------------------------------------
 
 async function publishOnePartition(partition, partitionIdx, attempt = 0) {
@@ -295,7 +295,7 @@ async function publishOnePartition(partition, partitionIdx, attempt = 0) {
   // Sepolia + libp2p with 5 connected cores.
   await sleep(3000);
 
-  // 2. publish — SWM → VM. Returns kcId + txHash on success.
+  // 2. publish — SWM → VM. Returns kaId + txHash on success.
   const publishRes = await apiCall('POST', '/api/shared-memory/publish', {
     contextGraphId: CFG.cgId,
     assertionName: name,
@@ -306,7 +306,7 @@ async function publishOnePartition(partition, partitionIdx, attempt = 0) {
     name,
     anchor,
     merkleRoot,
-    kcId: publishRes.kcId,
+    kaId: publishRes.kaId,
     txHash: publishRes.txHash,
     blockNumber: publishRes.blockNumber,
     status: publishRes.status,
@@ -335,7 +335,7 @@ async function loadCheckpoint() {
       ethSpent: 0,
       successes: 0,
       failures: 0,
-      kcs: [],   // [{partitionIdx, kcId, txHash, ms}]
+      kas: [],   // [{partitionIdx, kaId, txHash, ms}]
       errors: [], // [{partitionIdx, error, attempt}]
     };
   }
@@ -405,14 +405,14 @@ async function main() {
 
     if (result != null) {
       checkpoint.successes++;
-      checkpoint.kcs.push({
+      checkpoint.kas.push({
         partitionIdx: i,
-        kcId: result.kcId,
+        kaId: result.kaId,
         txHash: result.txHash,
         blockNumber: result.blockNumber,
         ms: result.ms,
       });
-      await log(`[ok] partition=${i} kcId=${result.kcId} tx=${result.txHash} ms=${result.ms}`);
+      await log(`[ok] partition=${i} kaId=${result.kaId} tx=${result.txHash} ms=${result.ms}`);
     } else {
       checkpoint.failures++;
       await log(`[fail] partition=${i} ${MAX_ATTEMPTS} attempts exhausted; skipping`);
@@ -436,7 +436,7 @@ async function main() {
       checkpoint.tracSpent = startSnap.trac - snap.trac;
       checkpoint.ethSpent = startSnap.eth - snap.eth;
       await saveCheckpoint(checkpoint);
-      const successesSoFar = checkpoint.successes - (checkpoint.kcs.length - checkpoint.successes);  // belt + braces
+      const successesSoFar = checkpoint.successes - (checkpoint.kas.length - checkpoint.successes);  // belt + braces
       await log(`[checkpoint] i=${i + 1}/${target} ok=${checkpoint.successes} fail=${checkpoint.failures} TRAC-spent=${checkpoint.tracSpent.toFixed(4)} ETH-spent=${checkpoint.ethSpent.toFixed(6)} TRAC-remaining=${snap.trac.toFixed(4)}`);
       // Safety: stop if any single wallet has < 50 TRAC remaining (so we never push it negative on next call).
       const min = Math.min(...snap.perWallet.map((w) => parseFloat(w.trac)));

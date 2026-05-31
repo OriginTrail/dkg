@@ -764,7 +764,7 @@ describe('ChatMemoryManager', () => {
     const publishFromSharedMemory = trackFn({
       status: 'confirmed',
       publicQuads: [{}, {}],
-      kcId: 10n,
+      kaId: 10n,
       ual: 'did:dkg:mock:123',
     });
     const managerWithPublish = new ChatMemoryManager(
@@ -804,7 +804,7 @@ describe('ChatMemoryManager', () => {
     const publishFromSharedMemory = trackFn({
       status: 'confirmed',
       publicQuads: [{}, {}],
-      kcId: 11n,
+      kaId: 11n,
       ual: 'did:dkg:mock:124',
     });
     const managerWithPublish = new ChatMemoryManager(

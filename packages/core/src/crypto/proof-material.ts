@@ -20,8 +20,8 @@ export interface V10ProofMaterial {
 
 /**
  * Expected on-chain merkle commitment, read from
- * `KnowledgeCollectionStorage.getLatestMerkleRoot(kcId)` +
- * `getMerkleLeafCount(kcId)` before building the proof.
+ * `KnowledgeCollectionStorage.getLatestMerkleRoot(kaId)` +
+ * `getMerkleLeafCount(kaId)` before building the proof.
  */
 export interface V10MerkleCommitment {
   merkleRoot: Uint8Array;
@@ -75,7 +75,7 @@ export class V10ProofLeafCountMismatchError extends Error {
  * leaf-count invariants both hold (the chain enforces
  * `chunkId = kcSeed % merkleLeafCount` in `_generateChallenge`); if it
  * fires, it indicates the caller hand-rolled a chunkId or the
- * commitment came from the wrong kcId.
+ * commitment came from the wrong kaId.
  */
 export class V10ProofChunkOutOfRangeError extends RangeError {
   readonly name = 'V10ProofChunkOutOfRangeError';
@@ -165,8 +165,8 @@ export function verifyV10ProofMaterial(
  *   4. emit `(leaf, proof, root, leafCount)`.
  *
  * `expected.merkleRoot` here is the on-chain
- * `KnowledgeCollectionStorage.getLatestCiphertextChunksRoot(kcId)`;
- * `expected.merkleLeafCount` is `getCiphertextChunkCount(kcId)`.
+ * `KnowledgeCollectionStorage.getLatestCiphertextChunksRoot(kaId)`;
+ * `expected.merkleLeafCount` is `getCiphertextChunkCount(kaId)`.
  *
  * Pure: depends only on `V10CiphertextChunksMerkleTree`. No `Quad`/storage
  * dependency lives in `dkg-core` — the boundary is owned by the

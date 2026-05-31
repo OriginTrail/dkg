@@ -26,7 +26,7 @@ When an edge node (`nodeRole: "edge"`, no on-chain identity registered) calls `/
 2. Computes the merkle root over the SWM selection and prepares the publish payload.
 3. Collects ACKs from peer cores via direct P2P (`[ACKCollector]`).
 4. Skips on-chain submission with the explicit log line: `Identity not set (0) — skipping on-chain publish [WARN]`.
-5. Returns `status: "tentative"`, `kcId: "0"` to the API caller.
+5. Returns `status: "tentative"`, `kaId: "0"` to the API caller.
 
 This is correct: edge nodes are app/relay servers, not validators; chain anchoring requires a wallet with `ProfileStorage` registration. The `tentative` return surface gives the calling app actionable information ("gossiped, not anchored") without crashing or pretending to chain-submit. Test 2 in this suite pins both halves of the contract.
 

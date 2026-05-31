@@ -9,7 +9,7 @@ import {
   Hub,
   RandomSamplingStorage,
   Chronos,
-  KnowledgeCollectionStorage,
+  DKGKnowledgeAssets,
   RandomSampling,
 } from '../../typechain';
 import { RandomSamplingLib } from '../../typechain/contracts/storage/RandomSamplingStorage';
@@ -19,7 +19,7 @@ const HUNDRED_ETH = ethers.parseEther('100');
 // Helper functions for random sampling
 async function createMockChallenge(
   randomSampling: RandomSampling,
-  knowledgeCollectionStorage: KnowledgeCollectionStorage,
+  knowledgeAssetStorage: DKGKnowledgeAssets,
   chronos: Chronos,
 ): Promise<RandomSamplingLib.ChallengeStruct> {
   const currentEpoch = await chronos.getCurrentEpoch();
@@ -30,10 +30,10 @@ async function createMockChallenge(
     await randomSampling.getActiveProofingPeriodDurationInBlocks();
 
   return {
-    knowledgeCollectionId: 1n,
+    knowledgeAssetId: 1n,
     chunkId: 1n,
-    knowledgeCollectionStorageContract:
-      await knowledgeCollectionStorage.getAddress(),
+    knowledgeAssetStorageContract:
+      await knowledgeAssetStorage.getAddress(),
     epoch: currentEpoch,
     activeProofPeriodStartBlock,
     proofingPeriodDurationInBlocks: proofingPeriodDuration,
@@ -75,7 +75,7 @@ describe('@unit RandomSamplingStorage', function () {
   let RandomSamplingStorage: RandomSamplingStorage;
   let RandomSampling: RandomSampling;
   let Chronos: Chronos;
-  let KnowledgeCollectionStorage: KnowledgeCollectionStorage;
+  let DKGKnowledgeAssets: DKGKnowledgeAssets;
   let MockChallenge: RandomSamplingLib.ChallengeStruct;
   let accounts: SignerWithAddress[];
 
@@ -88,7 +88,7 @@ describe('@unit RandomSamplingStorage', function () {
   async function deployRandomSamplingFixture(): Promise<RandomStorageFixture> {
     await hre.deployments.fixture([
       'Token',
-      'KnowledgeCollectionStorage',
+      'DKGKnowledgeAssets',
       'KnowledgeCollection',
       'RandomSamplingStorage',
       'RandomSampling',
@@ -108,9 +108,9 @@ describe('@unit RandomSamplingStorage', function () {
 
     RandomSampling =
       await hre.ethers.getContract<RandomSampling>('RandomSampling');
-    KnowledgeCollectionStorage =
-      await hre.ethers.getContract<KnowledgeCollectionStorage>(
-        'KnowledgeCollectionStorage',
+    DKGKnowledgeAssets =
+      await hre.ethers.getContract<DKGKnowledgeAssets>(
+        'DKGKnowledgeAssets',
       );
 
     await RandomSamplingStorage.initialize();
@@ -140,7 +140,7 @@ describe('@unit RandomSamplingStorage', function () {
 
     MockChallenge = await createMockChallenge(
       RandomSampling,
-      KnowledgeCollectionStorage,
+      DKGKnowledgeAssets,
       Chronos,
     );
   });
@@ -514,7 +514,7 @@ describe('@unit RandomSamplingStorage', function () {
       expect(await RandomSamplingStorage.name()).to.equal(
         'RandomSamplingStorage',
       );
-      expect(await RandomSamplingStorage.version()).to.equal('3.0.0');
+      expect(await RandomSamplingStorage.version()).to.equal('10.0.2');
     });
 
     it('Should set the initial parameters correctly', async function () {
@@ -829,8 +829,8 @@ describe('@unit RandomSamplingStorage', function () {
         publishingNodeIdentityId,
       );
 
-      expect(challenge.knowledgeCollectionId).to.be.equal(
-        MockChallenge.knowledgeCollectionId,
+      expect(challenge.knowledgeAssetId).to.be.equal(
+        MockChallenge.knowledgeAssetId,
       );
       expect(challenge.chunkId).to.be.equal(MockChallenge.chunkId);
       expect(challenge.epoch).to.be.equal(MockChallenge.epoch);
@@ -857,7 +857,7 @@ describe('@unit RandomSamplingStorage', function () {
       );
       // eslint-disable-next-line @typescript-eslint/no-unused-expressions
       expect(initialChallenge.solved).to.be.false;
-      expect(initialChallenge.knowledgeCollectionId).to.be.equal(0n);
+      expect(initialChallenge.knowledgeAssetId).to.be.equal(0n);
 
       // Set first challenge
       await RandomSamplingStorage.connect(signer).setNodeChallenge(
@@ -869,8 +869,8 @@ describe('@unit RandomSamplingStorage', function () {
       const firstChallenge = await RandomSamplingStorage.getNodeChallenge(
         publishingNodeIdentityId,
       );
-      expect(firstChallenge.knowledgeCollectionId).to.be.equal(
-        MockChallenge.knowledgeCollectionId,
+      expect(firstChallenge.knowledgeAssetId).to.be.equal(
+        MockChallenge.knowledgeAssetId,
       );
       // eslint-disable-next-line @typescript-eslint/no-unused-expressions
       expect(firstChallenge.solved).to.be.equal(MockChallenge.solved);
@@ -878,7 +878,7 @@ describe('@unit RandomSamplingStorage', function () {
       // Create and set second challenge
       const secondChallenge = {
         ...MockChallenge,
-        knowledgeCollectionId: BigInt(MockChallenge.knowledgeCollectionId) + 1n,
+        knowledgeAssetId: BigInt(MockChallenge.knowledgeAssetId) + 1n,
         solved: true,
       };
       await RandomSamplingStorage.connect(signer).setNodeChallenge(
@@ -890,8 +890,8 @@ describe('@unit RandomSamplingStorage', function () {
       const finalChallenge = await RandomSamplingStorage.getNodeChallenge(
         publishingNodeIdentityId,
       );
-      expect(finalChallenge.knowledgeCollectionId).to.be.equal(
-        secondChallenge.knowledgeCollectionId,
+      expect(finalChallenge.knowledgeAssetId).to.be.equal(
+        secondChallenge.knowledgeAssetId,
       );
       // eslint-disable-next-line @typescript-eslint/no-unused-expressions
       expect(finalChallenge.solved).to.be.true;

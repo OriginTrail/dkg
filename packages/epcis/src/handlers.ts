@@ -174,7 +174,26 @@ export async function handleEventsQuery(
     { ...params, subGraphName: config.subGraphName, limit: perPage + 1, offset },
     config.contextGraphId,
   );
-  const result = await config.queryEngine.query(sparql, { contextGraphId: config.contextGraphId });
+  // The engine's scope guard rejects any explicit GRAPH IRI outside the
+  // allow-set it derives from the query options, so the options MUST match
+  // exactly the graphs `buildEpcisQuery` references for this route:
+  //   - `includePrivate`        → the `<cg>[/<sub>]/_private` partition the
+  //                               private-anchored-events branch always names.
+  //   - `subGraphName`          → reads `<cg>/<sub>` (finalized) /
+  //                               `<cg>/<sub>/_shared_memory` (SWM) plus the
+  //                               sub-graph private/meta graphs.
+  //   - `graphSuffix:'_shared_memory'` (finalized=false) → reads the SWM
+  //                               partition (`…/_shared_memory[_meta]`) instead
+  //                               of the canonical data graph.
+  // Omitting any of these makes the guard reject the query with
+  // "GRAPH <…> is outside the allowed graph set" (it fails for every
+  // sub-graph or non-finalized request, on every store backend).
+  const result = await config.queryEngine.query(sparql, {
+    contextGraphId: config.contextGraphId,
+    subGraphName: config.subGraphName,
+    graphSuffix: params.finalized === false ? '_shared_memory' : undefined,
+    includePrivate: true,
+  });
 
   const hasMore = result.bindings.length > perPage;
   const bindings = hasMore ? result.bindings.slice(0, perPage) : result.bindings;

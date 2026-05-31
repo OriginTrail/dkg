@@ -1215,7 +1215,7 @@ WHERE {
     }
 
     const chain: any = (agent as any).chain ?? (agent as any).chainAdapter;
-    const kavAddress = chain?.contracts?.knowledgeAssetsV10?.target?.toString()
+    const kavAddress = chain?.contracts?.knowledgeAssetsLifecycle?.target?.toString()
       ?? chain?.kavAddress
       ?? parsed.kavAddress;
     const chainId = chain?.chainId ?? parsed.chainId ?? '31337';
@@ -1236,7 +1236,7 @@ WHERE {
     // wrong-domain, with no diagnostic linking back to the actual CG.
     // Three resolution layers, all fail-closed:
     //   1. Caller-supplied `onChainContextGraphId` (explicit override).
-    //   2. Chain-truth via `chain.getKCContextGraphId(batchId)` —
+    //   2. Chain-truth via `chain.getKAContextGraphId(batchId)` —
     //      authoritative because the KC ↔ CG binding is on-chain.
     //   3. Local CG listing (last-resort, may be stale post-event-replay).
     // If none resolve, reject with 400 — minting against id=0 is never
@@ -1246,8 +1246,8 @@ WHERE {
       onChainCgId = parsed.onChainContextGraphId;
     } else {
       try {
-        if (typeof chain?.getKCContextGraphId === 'function' && /^\d+$/.test(String(batchId))) {
-          const chainCgId = await chain.getKCContextGraphId(BigInt(batchId)).catch(() => null);
+        if (typeof chain?.getKAContextGraphId === 'function' && /^\d+$/.test(String(batchId))) {
+          const chainCgId = await chain.getKAContextGraphId(BigInt(batchId)).catch(() => null);
           if (chainCgId != null && chainCgId !== 0n) {
             onChainCgId = chainCgId.toString();
           }
@@ -1632,7 +1632,7 @@ WHERE {
         tracker.complete(ctx2, { tripleCount: result.kaManifest?.length ?? 0 });
         const httpStatus = result.contextGraphError ? 207 : 200;
         return jsonResponse(res, httpStatus, {
-          kcId: String(result.kcId),
+          kaId: String(result.kaId),
           status: result.status,
           assertionUri: result.assertionUri,
           authorAddress: result.seal.authorAddress,
@@ -1865,7 +1865,7 @@ WHERE {
       } catch { /* never break the publish path */ }
       const httpStatus = result.contextGraphError ? 207 : 200;
       return jsonResponse(res, httpStatus, {
-        kcId: String(result.kcId),
+        kaId: String(result.kaId),
         status: result.status,
         kas: result.kaManifest.map((ka: any) => ({ tokenId: String(ka.tokenId), rootEntity: ka.rootEntity })),
         ...(chain && { txHash: chain.txHash, blockNumber: chain.blockNumber }),

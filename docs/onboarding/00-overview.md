@@ -27,10 +27,10 @@ Before diving in, here are the terms you will encounter everywhere:
 | **Triple / Quad** | The atomic unit of data: subject-predicate-object (e.g., "Alice knows Bob"). A quad adds a graph name. |
 | **Triple Store** | The local graph database on each node (default: Oxigraph). Stores and queries RDF data using SPARQL. |
 | **Knowledge Asset (KA)** | A single entity and its triples within a publish batch. Each KA has a root entity URI. |
-| **Knowledge Collection (KC)** | A batch of KAs published in one transaction. Gets one on-chain record. |
-| **UAL** | Universal Asset Locator -- the persistent ID for a KC: `did:dkg:{chainId}/{address}/{kaId}`. Like a URL for knowledge. |
+| **Knowledge Asset (KA)** | A batch of KAs published in one transaction. Gets one on-chain record. |
+| **UAL** | Universal Asset Locator -- the persistent ID for a KA: `did:dkg:{chainId}/{address}/{kaId}`. Like a URL for knowledge. |
 | **Tentative vs Confirmed** | Data starts tentative (local only). Once the blockchain transaction confirms, it becomes confirmed and permanent. |
-| **Merkle Root** | A cryptographic fingerprint of all triples in a KC. Both publisher and receivers compute it independently to verify integrity. |
+| **Merkle Root** | A cryptographic fingerprint of all triples in a KA. Both publisher and receivers compute it independently to verify integrity. |
 | **DKGAgent** | The main orchestrator object. Composes networking, storage, publishing, and querying into one interface. |
 | **GossipSub** | Pub-sub messaging over libp2p. Nodes subscribe to contextGraph topics and receive broadcasts. |
 | **SPARQL** | The W3C query language for RDF. Think SQL but for graph databases. |

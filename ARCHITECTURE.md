@@ -177,7 +177,7 @@ sequenceDiagram
     Client->>Daemon: POST shared memory publish
     Daemon->>Publisher: publish synchronously
     Publisher->>Store: read staged triples
-    Publisher->>Chain: anchor knowledge collection
+    Publisher->>Chain: anchor knowledge asset
     Chain-->>Publisher: commitment finalized
     Publisher-->>Daemon: kc id
     Daemon-->>Client: publish result
@@ -354,7 +354,7 @@ the live deploy or build path. Fresh V10 deploys never register the V8
 `PublishingConvictionAccount` / `Paymaster` / `PaymasterManager` /
 `DelegatorsInfo` / `ContextGraphNameRegistry` / `KnowledgeAssetsStorage`
 contracts. The chain-adapter SDK targets the V10 contract family
-(`KnowledgeAssetsV10`, `StakingV10`, `DKGStakingConvictionNFT`,
+(`KnowledgeAssetsLifecycle` (formerly `KnowledgeAssetsV10`), `StakingV10`, `DKGStakingConvictionNFT`,
 `DKGPublishingConvictionNFT`, `RandomSampling`, `StakingKPI`,
 `ContextGraphs`, V10 storages, plus shared `Hub` / `Token` / `Profile` /
 `Identity` / `Ask`). Trust model: `Hub.owner` = TracLabs multisig.
@@ -811,7 +811,7 @@ Workflow->>Git: create local commits in a later commit stage
 
 The V10 `DKGPublishingConvictionNFT` write+read surface is wired
 end-to-end through the SDK. Prior to this, the contract was deployed and
-invoked by `KnowledgeAssetsV10.publish()` on-chain, but the SDK exposed
+invoked by `KnowledgeAssetsLifecycle.publish()` on-chain, but the SDK exposed
 only read shims and the daemon `/api/pca/*` routes returned HTTP 503
 (the V9 `PublishingConvictionAccount` predecessor was archived in #500).
 
@@ -821,7 +821,7 @@ only read shims and the daemon `/api/pca/*` routes returned HTTP 503
 operator/CLI ─▶ daemon /api/pca/*  ─▶ DKGAgent facade ─▶ ChainAdapter ─▶ DKGPublishingConvictionNFT
                 (cli/src/daemon)      (agent/src)        (chain/src)      (evm-module)
 publisher  ───────────────────────────────────────────▶ ChainAdapter (read: agentToAccountId, lockDuration)
-KnowledgeAssetsV10.publish() ─▶ DKGPublishingConvictionNFT.coverPublishingCost()  (contract-to-contract; NOT in SDK surface)
+KnowledgeAssetsLifecycle.publish() ─▶ DKGPublishingConvictionNFT.coverPublishingCost()  (contract-to-contract; NOT in SDK surface)
 ```
 
 **ChainAdapter V10 PCA surface** (`packages/chain/src/chain-adapter.ts`,
@@ -865,10 +865,10 @@ typed in `packages/cli/src/api-client.ts`): `POST /api/pca`
 **Test coverage:** `packages/chain/test/` exercises the adapter +
 mock↔EVM parity; `packages/evm-module/test/v10-pca-lifecycle.test.ts`
 covers create → topUp → registerAgent → discounted publish via the real
-`KnowledgeAssetsV10.publish()` → expiry revert; the devnet smoke
+`KnowledgeAssetsLifecycle.publish()` → expiry revert; the devnet smoke
 (`.devnet/run.mjs`) force-boots a **clean** devnet and runs a live
 HTTP `/api/pca` round-trip asserting `0 < discountedCost < baseCost`
-**on chain** (guards the silent-demotion risk: KAv10 takes the discount
+**on chain** (guards the silent-demotion risk: `KnowledgeAssetsLifecycle` takes the discount
 branch only when `publishEpochs == lockDurationEpochs`).
 
 ---

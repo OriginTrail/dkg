@@ -175,7 +175,7 @@ describe('dkg_publish tool', () => {
   it('publishes quads array with literal objects', async () => {
     ft.addResponses(
       new Response(JSON.stringify({ triplesWritten: 2 }), { status: 200 }),
-      new Response(JSON.stringify({ kcId: 'kc-123', kas: [{ tokenId: '1', rootEntity: 'urn:x' }] }), { status: 200 }),
+      new Response(JSON.stringify({ kaId: 'kc-123', kas: [{ tokenId: '1', rootEntity: 'urn:x' }] }), { status: 200 }),
     );
 
     const tool = findTool('dkg_publish');
@@ -186,7 +186,7 @@ describe('dkg_publish tool', () => {
     const result = await tool.execute('call-1', { context_graph_id: 'testing', quads });
     const parsed = JSON.parse(result.content[0].text);
 
-    expect(parsed.kcId).toBe('kc-123');
+    expect(parsed.kaId).toBe('kc-123');
     expect(parsed.kaCount).toBe(1);
     expect(parsed.quadsPublished).toBe(2);
 
@@ -200,7 +200,7 @@ describe('dkg_publish tool', () => {
   it('publishes quads array with URI objects (auto-detected)', async () => {
     ft.addResponses(
       new Response(JSON.stringify({ triplesWritten: 1 }), { status: 200 }),
-      new Response(JSON.stringify({ kcId: 'kc-uri', kas: [] }), { status: 200 }),
+      new Response(JSON.stringify({ kaId: 'kc-uri', kas: [] }), { status: 200 }),
     );
 
     const tool = findTool('dkg_publish');
@@ -216,7 +216,7 @@ describe('dkg_publish tool', () => {
   it('accepts a full context graph DID without double-prefixing the publish graph', async () => {
     ft.addResponses(
       new Response(JSON.stringify({ assertionUri: 'urn:assertion:test' }), { status: 200 }),
-      new Response(JSON.stringify({ kcId: 'kc-did', kas: [] }), { status: 200 }),
+      new Response(JSON.stringify({ kaId: 'kc-did', kas: [] }), { status: 200 }),
     );
 
     const tool = findTool('dkg_publish');
@@ -235,7 +235,7 @@ describe('dkg_publish tool', () => {
   it('handles mixed URI and literal objects', async () => {
     ft.addResponses(
       new Response(JSON.stringify({ triplesWritten: 3 }), { status: 200 }),
-      new Response(JSON.stringify({ kcId: 'kc-mix', kas: [] }), { status: 200 }),
+      new Response(JSON.stringify({ kaId: 'kc-mix', kas: [] }), { status: 200 }),
     );
 
     const tool = findTool('dkg_publish');
@@ -275,7 +275,7 @@ describe('dkg_publish tool', () => {
   it('escapes quotes in literal object values', async () => {
     ft.addResponses(
       new Response(JSON.stringify({ triplesWritten: 1 }), { status: 200 }),
-      new Response(JSON.stringify({ kcId: 'kc-esc', kas: [] }), { status: 200 }),
+      new Response(JSON.stringify({ kaId: 'kc-esc', kas: [] }), { status: 200 }),
     );
 
     const tool = findTool('dkg_publish');
@@ -291,7 +291,7 @@ describe('dkg_publish tool', () => {
   it('passes optional graph field', async () => {
     ft.addResponses(
       new Response(JSON.stringify({ triplesWritten: 1 }), { status: 200 }),
-      new Response(JSON.stringify({ kcId: 'kc-graph', kas: [] }), { status: 200 }),
+      new Response(JSON.stringify({ kaId: 'kc-graph', kas: [] }), { status: 200 }),
     );
 
     const tool = findTool('dkg_publish');
@@ -877,14 +877,14 @@ describe('dkg_publish SWM-first flow', () => {
   it('writes to SWM then publishes from SWM', async () => {
     ft.addResponses(
       new Response(JSON.stringify({ assertionUri: 'urn:assertion:test' }), { status: 200 }),
-      new Response(JSON.stringify({ kcId: 'kc-1', kas: [] }), { status: 200 }),
+      new Response(JSON.stringify({ kaId: 'kc-1', kas: [] }), { status: 200 }),
     );
 
     const tool = findTool('dkg_publish');
     const result = await tool.execute('call-1', { context_graph_id: 'testing', quads: VALID_QUADS });
     const parsed = JSON.parse(result.content[0].text);
 
-    expect(parsed.kcId).toBe('kc-1');
+    expect(parsed.kaId).toBe('kc-1');
     expect(parsed.quadsPublished).toBe(1);
 
     // V10 assertion lifecycle: the publish flow now creates a finalized
@@ -901,14 +901,14 @@ describe('dkg_publish SWM-first flow', () => {
   it('ignores unknown access_policy parameter gracefully', async () => {
     ft.addResponses(
       new Response(JSON.stringify({ triplesWritten: 1 }), { status: 200 }),
-      new Response(JSON.stringify({ kcId: 'kc-2', kas: [] }), { status: 200 }),
+      new Response(JSON.stringify({ kaId: 'kc-2', kas: [] }), { status: 200 }),
     );
 
     const tool = findTool('dkg_publish');
     const result = await tool.execute('call-2', { context_graph_id: 'testing', quads: VALID_QUADS, access_policy: 'public' });
     const parsed = JSON.parse(result.content[0].text);
 
-    expect(parsed.kcId).toBe('kc-2');
+    expect(parsed.kaId).toBe('kc-2');
   });
 });
 

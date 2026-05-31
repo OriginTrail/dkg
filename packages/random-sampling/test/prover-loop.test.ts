@@ -133,7 +133,7 @@ describe('startProverLoop', () => {
         return {
           kind: 'submitted',
           txHash: `0xtx${counter}`,
-          kcId: BigInt(counter),
+          kaId: BigInt(counter),
           cgId: 1n,
           chunkId: 0n,
         };

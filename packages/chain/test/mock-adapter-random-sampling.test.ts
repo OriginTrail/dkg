@@ -26,7 +26,7 @@ async function freshAdapter(): Promise<MockChainAdapter> {
   const a = new MockChainAdapter();
   await a.ensureProfile();
   a.__registerKC({
-    kcId: 42n,
+    kaId: 42n,
     contextGraphId: 7n,
     merkleRootHex: '0x' + 'ab'.repeat(32),
     chunks: [{ chunkId: 0n, chunk: LEAF0 }],
@@ -69,13 +69,13 @@ describe('MockChainAdapter random sampling — createChallenge', () => {
     const result = await a.createChallenge();
     expect(result.success).toBe(true);
     expect(result.contextGraphId).toBe(7n);
-    expect(result.challenge.knowledgeCollectionId).toBe(42n);
+    expect(result.challenge.knowledgeAssetId).toBe(42n);
     expect(result.challenge.chunkId).toBe(0n);
     expect(result.challenge.solved).toBe(false);
     expect(result.challenge.activeProofPeriodStartBlock).toBe(1n);
 
     const stored = await a.getNodeChallenge(await a.getIdentityId());
-    expect(stored?.knowledgeCollectionId).toBe(42n);
+    expect(stored?.knowledgeAssetId).toBe(42n);
   });
 
   it('throws NoEligibleContextGraphError when no KC has been registered', async () => {
@@ -110,7 +110,7 @@ describe('MockChainAdapter random sampling — createChallenge', () => {
   it('round-robins across registered KCs over successive periods', async () => {
     const a = await freshAdapter();
     a.__registerKC({
-      kcId: 43n,
+      kaId: 43n,
       contextGraphId: 9n,
       merkleRootHex: '0x' + 'cd'.repeat(32),
       chunks: [{ chunkId: 0n, chunk: ('0x' + '03'.repeat(32)) as `0x${string}` }],
@@ -120,7 +120,7 @@ describe('MockChainAdapter random sampling — createChallenge', () => {
     a.__advanceProofPeriod();
     const r2 = await a.createChallenge();
 
-    const ids = new Set([r1.challenge.knowledgeCollectionId, r2.challenge.knowledgeCollectionId]);
+    const ids = new Set([r1.challenge.knowledgeAssetId, r2.challenge.knowledgeAssetId]);
     expect(ids.size).toBe(2);
   });
 });

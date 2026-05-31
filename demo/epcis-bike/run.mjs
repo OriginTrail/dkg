@@ -804,7 +804,7 @@ async function phase0() {
     await pauseAfter();
   }
 
-  // The publish path (DKGPublisher.publish → V10 createKnowledgeAssetsV10)
+  // The publish path (DKGPublisher.publish → V10 createKnowledgeAssets)
   // requires a positive on-chain CG id from the ContextGraphs contract.
   // `context-graph create` only registers the CG over P2P; without
   // `context-graph register`, the publisher gets cgId=0 and every lift

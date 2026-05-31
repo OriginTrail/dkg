@@ -1152,15 +1152,15 @@ describe('@unit ContextGraphs (facade)', () => {
   });
 
   // =========================================================================
-  // registerKnowledgeCollection — Phase 8 entry point (facade wrapper)
+  // registerKnowledgeAsset — Phase 8 entry point (facade wrapper)
   // =========================================================================
   //
-  // Validates the thin facade wrapper over ContextGraphStorage.registerKCToContextGraph.
+  // Validates the thin facade wrapper over ContextGraphStorage.registerKnowledgeAssetToContextGraph.
   // The wrapper is `onlyContracts`-gated at the facade layer and forwards to
   // storage, which also has its own `onlyContracts` gate — the ContextGraphs
   // facade itself is registered in Hub, so the forwarding call satisfies
   // storage's gate transparently.
-  describe('registerKnowledgeCollection (facade wrapper)', () => {
+  describe('registerKnowledgeAsset (facade wrapper)', () => {
     beforeEach(async () => {
       await createOpenCG(accounts[0]);
     });
@@ -1172,10 +1172,10 @@ describe('@unit ContextGraphs (facade)', () => {
       // facade because ContextGraphs is itself registered in Hub via the
       // deploy script.
       await expect(
-        Facade.connect(storageOp).registerKnowledgeCollection(1, 100),
-      ).to.emit(Storage, 'KCRegisteredToContextGraph').withArgs(1, 100);
+        Facade.connect(storageOp).registerKnowledgeAsset(1, 100),
+      ).to.emit(Storage, 'KnowledgeAssetRegisteredToContextGraph').withArgs(1, 100);
 
-      expect(await Storage.kcToContextGraph(100)).to.equal(1);
+      expect(await Storage.kaToContextGraph(100)).to.equal(1);
       expect(await Storage.getContextGraphKCList(1)).to.deep.equal([100n]);
       expect(await Storage.getContextGraphKCCount(1)).to.equal(1);
     });
@@ -1185,23 +1185,23 @@ describe('@unit ContextGraphs (facade)', () => {
       // reaches storage. UnauthorizedAccess is raised by the Hub lib used
       // across the facade / storage contracts.
       await expect(
-        Facade.connect(accounts[5]).registerKnowledgeCollection(1, 100),
+        Facade.connect(accounts[5]).registerKnowledgeAsset(1, 100),
       ).to.be.revertedWithCustomError(HubContract, 'UnauthorizedAccess');
     });
 
-    it('surfaces storage-level KCAlreadyRegisteredToContextGraph on double register', async () => {
-      await Facade.connect(storageOp).registerKnowledgeCollection(1, 100);
-      // Create a second CG and try to register the same kcId there.
+    it('surfaces storage-level KnowledgeAssetAlreadyRegisteredToContextGraph on double register', async () => {
+      await Facade.connect(storageOp).registerKnowledgeAsset(1, 100);
+      // Create a second CG and try to register the same kaId there.
       await createOpenCG(accounts[0]);
       await expect(
-        Facade.connect(storageOp).registerKnowledgeCollection(2, 100),
-      ).to.be.revertedWithCustomError(Storage, 'KCAlreadyRegisteredToContextGraph');
+        Facade.connect(storageOp).registerKnowledgeAsset(2, 100),
+      ).to.be.revertedWithCustomError(Storage, 'KnowledgeAssetAlreadyRegisteredToContextGraph');
     });
 
     it('surfaces storage-level ContextGraphNotActive on inactive target', async () => {
       await Storage.connect(storageOp).deactivateContextGraph(1);
       await expect(
-        Facade.connect(storageOp).registerKnowledgeCollection(1, 100),
+        Facade.connect(storageOp).registerKnowledgeAsset(1, 100),
       ).to.be.revertedWithCustomError(Storage, 'ContextGraphNotActive');
     });
   });

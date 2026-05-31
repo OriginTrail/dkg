@@ -86,7 +86,7 @@ interface DevnetNode {
 interface DevnetState {
   provider: ethers.JsonRpcProvider;
   hub: ethers.Contract;
-  kcs: ethers.Contract;
+  kas: ethers.Contract;
   nft: ethers.Contract;
   token: ethers.Contract;
   eps: ethers.Contract;
@@ -233,7 +233,7 @@ async function publishViaCli(
   options: { publisherNodeIdentityId?: bigint } = {},
 ): Promise<{
   status: string;
-  kcId?: bigint;
+  kaId?: bigint;
   txHash?: string;
   raw: string;
 }> {
@@ -256,7 +256,7 @@ async function publishViaCli(
   const txMatch = /TX hash:\s*(0x[0-9a-fA-F]+)/i.exec(result.stdout);
   return {
     status,
-    kcId: kcMatch ? BigInt(kcMatch[1]!) : undefined,
+    kaId: kcMatch ? BigInt(kcMatch[1]!) : undefined,
     txHash: txMatch ? txMatch[1] : undefined,
     raw: result.stdout,
   };
@@ -276,7 +276,7 @@ async function loadContractAddresses(
   );
   return {
     hub,
-    kcsAddress: await hub.getAssetStorageAddress('KnowledgeCollectionStorage'),
+    kcsAddress: await hub.getAssetStorageAddress('DKGKnowledgeAssets'),
     nftAddress: await hub.getContractAddress('DKGPublishingConvictionNFT'),
     tokenAddress: await hub.getContractAddress('Token'),
     epsAddress: await hub.getContractAddress('EpochStorageV8'),
@@ -344,7 +344,7 @@ async function detectDevnet(): Promise<DevnetState | null> {
   });
   const addrs = await loadContractAddresses(provider, hubAddress);
 
-  const kcs = new ethers.Contract(
+  const kas = new ethers.Contract(
     addrs.kcsAddress,
     [
       'function getLatestMerkleRootAuthor(uint256) view returns (address)',
@@ -475,7 +475,7 @@ async function detectDevnet(): Promise<DevnetState | null> {
   return {
     provider,
     hub: addrs.hub as ethers.Contract,
-    kcs,
+    kas,
     nft,
     token,
     eps,
@@ -706,7 +706,7 @@ describe('V10 chain — combined end-to-end devnet validation', () => {
       );
       expect(proverPublishResult.status.toLowerCase()).toBe('confirmed');
       console.log(
-        `phase 1 (RS): published from node1 (core) — kcId=${proverPublishResult.kcId}`,
+        `phase 1 (RS): published from node1 (core) — kaId=${proverPublishResult.kaId}`,
       );
 
       console.log(
@@ -845,10 +845,10 @@ describe('V10 chain — combined end-to-end devnet validation', () => {
       });
 
       expect(result.status.toLowerCase()).toBe('confirmed');
-      expect(result.kcId).toBeDefined();
+      expect(result.kaId).toBeDefined();
 
-      const onChainAuthor: string = await s.kcs.getLatestMerkleRootAuthor(
-        result.kcId!,
+      const onChainAuthor: string = await s.kas.getLatestMerkleRootAuthor(
+        result.kaId!,
       );
       const matchesOpWallet = edge.opWallets.some(
         (w) => w.address.toLowerCase() === onChainAuthor.toLowerCase(),
@@ -872,7 +872,7 @@ describe('V10 chain — combined end-to-end devnet validation', () => {
       expect(afterEps).toBeGreaterThan(beforeEps);
 
       console.log(
-        `phase 2 PASS: kcId=${result.kcId}, author=${onChainAuthor}, ` +
+        `phase 2 PASS: kaId=${result.kaId}, author=${onChainAuthor}, ` +
           `windowSpent +${afterSpent - beforeSpent} (window ${beforeWindow}→${afterWindow}), ` +
           `core1.eps +${afterEps - beforeEps}`,
       );

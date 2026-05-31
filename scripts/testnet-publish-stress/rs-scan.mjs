@@ -65,7 +65,7 @@ const RS_STORAGE_ADDR = '0xd84640BA70F18527827A3572C8Acf52E10ff5BC5';
 
 // Event signatures (sourced from the V10 ABI files)
 const RS_ABI = [
-  'event ChallengeGenerated(uint72 indexed identityId, uint256 indexed contextGraphId, uint256 indexed knowledgeCollectionId, uint256 chunkId, uint256 epoch, uint256 activeProofPeriodStartBlock)',
+  'event ChallengeGenerated(uint72 indexed identityId, uint256 indexed contextGraphId, uint256 indexed knowledgeAssetId, uint256 chunkId, uint256 epoch, uint256 activeProofPeriodStartBlock)',
 ];
 const RS_STORAGE_ABI = [
   'event EpochNodeValidProofsCountIncremented(uint256 indexed epoch, uint72 indexed identityId, uint256 newCount)',
@@ -80,7 +80,7 @@ const rsStorage = new ethers.Contract(RS_STORAGE_ADDR, RS_STORAGE_ABI, provider)
 async function getOurKcIds() {
   try {
     const cp = JSON.parse(await readFile(CHECKPOINT_FILE, 'utf8'));
-    return new Set(cp.kcs.map((k) => String(k.kcId)));
+    return new Set(cp.kas.map((k) => String(k.kaId)));
   } catch (err) {
     if (err.code !== 'ENOENT') console.error(`(checkpoint read: ${err.message})`);
     return new Set();
@@ -149,14 +149,14 @@ console.error('\n=== Report ===\n');
 const challengesByNode = new Map();         // identityId(string) -> count
 const challengesByEpoch = new Map();         // epoch(string) -> count
 const challengesByCG = new Map();            // contextGraphId(string) -> count
-const kcsHit = new Set();                    // kcId(string)
-const kcsHitOurs = [];                       // {kcId, identityId, epoch, contextGraphId, blockNumber}
+const kcsHit = new Set();                    // kaId(string)
+const kcsHitOurs = [];                       // {kaId, identityId, epoch, contextGraphId, blockNumber}
 
 for (const ev of challenges) {
-  const { identityId, contextGraphId, knowledgeCollectionId, chunkId, epoch } = ev.args;
+  const { identityId, contextGraphId, knowledgeAssetId, chunkId, epoch } = ev.args;
   const idStr = identityId.toString();
   const cgStr = contextGraphId.toString();
-  const kcStr = knowledgeCollectionId.toString();
+  const kcStr = knowledgeAssetId.toString();
   const epStr = epoch.toString();
   challengesByNode.set(idStr, (challengesByNode.get(idStr) ?? 0) + 1);
   challengesByEpoch.set(epStr, (challengesByEpoch.get(epStr) ?? 0) + 1);
@@ -164,7 +164,7 @@ for (const ev of challenges) {
   kcsHit.add(kcStr);
   if (ourKcIds.has(kcStr)) {
     kcsHitOurs.push({
-      kcId: kcStr,
+      kaId: kcStr,
       identityId: idStr,
       epoch: epStr,
       contextGraphId: cgStr,
@@ -221,9 +221,9 @@ for (const [cg, n] of Array.from(challengesByCG.entries()).sort((a, b) => b[1] -
 
 console.log('');
 if (kcsHitOurs.length > 0) {
-  console.log(`Our KCs sampled (${kcsHitOurs.length} hits across ${new Set(kcsHitOurs.map((k) => k.kcId)).size} unique kcIds):`);
+  console.log(`Our KCs sampled (${kcsHitOurs.length} hits across ${new Set(kcsHitOurs.map((k) => k.kaId)).size} unique kcIds):`);
   for (const h of kcsHitOurs.slice(0, 20)) {
-    console.log(`  kcId=${h.kcId}  challenged by identityId=${h.identityId}  cgId=${h.contextGraphId}  epoch=${h.epoch}  block=${h.blockNumber}`);
+    console.log(`  kaId=${h.kaId}  challenged by identityId=${h.identityId}  cgId=${h.contextGraphId}  epoch=${h.epoch}  block=${h.blockNumber}`);
   }
   if (kcsHitOurs.length > 20) {
     console.log(`  ... ${kcsHitOurs.length - 20} more`);

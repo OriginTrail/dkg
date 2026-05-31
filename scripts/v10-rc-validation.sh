@@ -104,7 +104,7 @@ CG="${CG:-devnet-test}"
 # (which would otherwise trip the "rootEntity already exists" rule
 # at the publish boundary).
 #
-# Echoes `"<status>|<kcId>|<raw-response-json>"` on stdout. Callers
+# Echoes `"<status>|<kaId>|<raw-response-json>"` on stdout. Callers
 # split on the first two `|` and treat the rest as the raw response.
 publish_swm() {
   local port=$1 cgid=$2 quads_json=$3 sgname=${4:-} root_entity=${5:-}
@@ -130,7 +130,7 @@ JSON
 )
   local p=$(post "$port" /api/shared-memory/publish -H "Content-Type: application/json" -d "$pub_body")
   local st=$(echo "$p" | pyfield "d.get('status','?')")
-  local kc=$(echo "$p" | pyfield "d.get('kcId','?')")
+  local kc=$(echo "$p" | pyfield "d.get('kaId','?')")
   echo "${st}|${kc}|${p}"
 }
 
@@ -182,7 +182,7 @@ PUB_KCID="${REST%%|*}"
 PUB_RAW="${REST#*|}"
 
 if [ "$PUB_STATUS" = "confirmed" ] || [ "$PUB_STATUS" = "finalized" ] || [ -n "$PUB_KCID" -a "$PUB_KCID" != "?" ]; then
-  ok "Public publish confirmed, kcId=$PUB_KCID, status=$PUB_STATUS"
+  ok "Public publish confirmed, kaId=$PUB_KCID, status=$PUB_STATUS"
 else
   fail "Public publish status=$PUB_STATUS, raw=$PUB_RAW"
 fi
@@ -201,7 +201,7 @@ if [ "$PUB_STATUS" = "confirmed" ] || [ "$PUB_STATUS" = "finalized" ]; then
   BOB_URI="urn:v10:bob-$RUN_TAG"
   UPD_BODY=$(cat <<JSON
 {
-  "kcId": "$PUB_KCID",
+  "kaId": "$PUB_KCID",
   "contextGraphId": "$CG",
   "quads": [
     $(q "$BOB_URI" "http://www.w3.org/1999/02/22-rdf-syntax-ns#type" "http://schema.org/Person"),
@@ -267,7 +267,7 @@ JSON
     fail "Publisher (node 9201) public view leaked private email ($PUB_BINDINGS bindings): $PUB_LEAK"
   fi
 else
-  warn "Skipping §4 — §3 publish did not yield a kcId (private-update path needs an existing KC)"
+  warn "Skipping §4 — §3 publish did not yield a kaId (private-update path needs an existing KC)"
 fi
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -449,9 +449,9 @@ ENSHRINE=$(post 9201 /api/shared-memory/publish -H "Content-Type: application/js
   \"selection\": { \"rootEntities\": [\"$FINDING_URI\"] }
 }")
 ENS_STATUS=$(echo "$ENSHRINE" | pyfield "d.get('status','?')")
-ENS_KCID=$(echo "$ENSHRINE" | pyfield "d.get('kcId','?')")
+ENS_KCID=$(echo "$ENSHRINE" | pyfield "d.get('kaId','?')")
 if [ "$ENS_STATUS" = "confirmed" ] || [ "$ENS_STATUS" = "finalized" ]; then
-  ok "Publish from SWM confirmed, kcId=$ENS_KCID"
+  ok "Publish from SWM confirmed, kaId=$ENS_KCID"
 else
   fail "Publish from SWM status=$ENS_STATUS: $ENSHRINE"
 fi
@@ -483,7 +483,7 @@ SG_KCID="${SG_REST%%|*}"
 SG_RAW="${SG_REST#*|}"
 
 if [ "$SG_STATUS" = "confirmed" ] || [ "$SG_STATUS" = "finalized" ]; then
-  ok "Sub-graph publish confirmed, kcId=$SG_KCID"
+  ok "Sub-graph publish confirmed, kaId=$SG_KCID"
 else
   fail "Sub-graph publish status=$SG_STATUS: $SG_RAW"
 fi

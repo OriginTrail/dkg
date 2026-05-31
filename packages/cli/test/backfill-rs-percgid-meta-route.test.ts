@@ -193,14 +193,14 @@ describe('POST /api/random-sampling/backfill-percgid-meta', () => {
   it('copies per-KC meta from <cg>/_meta to <cg>/context/<cgId>/_meta for an on-chain CG', async () => {
     const cgName = 'rs-backfill-happy';
     const onChainId = '42';
-    const kcs: KcEntry[] = [
+    const kas: KcEntry[] = [
       { ual: 'did:dkg:base:84532/0xAAA/1000001', batchId: 7, rootEntity: 'urn:test:e1', tokenId: 1 },
       { ual: 'did:dkg:base:84532/0xAAA/2000001', batchId: 8, rootEntity: 'urn:test:e2', tokenId: 1 },
     ];
-    await seedCanonicalMeta(store, { name: cgName, onChainId, kcEntries: kcs });
+    await seedCanonicalMeta(store, { name: cgName, onChainId, kcEntries: kas });
     agent.getSubscribedContextGraphs = () => new Map([[cgName, { subscribed: true, synced: true, onChainId }]]);
 
-    const expectedTriples = kcs.reduce((acc, kc) => acc + tripleCountForKc(kc), 0);
+    const expectedTriples = kas.reduce((acc, kc) => acc + tripleCountForKc(kc), 0);
     const before = await countTriples(store, `did:dkg:context-graph:${cgName}/context/${onChainId}/_meta`);
     expect(before).toBe(0);
 

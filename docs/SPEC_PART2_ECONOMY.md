@@ -323,8 +323,8 @@ interface ChainAdapter {
 
     // Publishing
     reserveKnowledgeCollectionIds(count): Promise<ReservedRange>
-    createKnowledgeCollection(params): Promise<TxResult>
-    updateKnowledgeCollection(params): Promise<TxResult>
+    createKnowledgeAsset(params): Promise<TxResult>
+    updateKnowledgeAsset(params): Promise<TxResult>
 
     // Delegation
     delegate(params: DelegateParams): Promise<TxResult>
@@ -348,7 +348,7 @@ interface ChainAdapter {
 
 | Contract | Purpose |
 |---|---|
-| `KnowledgeCollection.sol` | KC/KA creation + UAL reservation (existing + new reserve fn) |
+| `KnowledgeCollection.sol` | KA/KA creation + UAL reservation (existing + new reserve fn) |
 | `AgentDelegation.sol` | Human→agent TRAC delegation with lock multiplier |
 | `PaymentChannel.sol` | State channels for micropayments |
 | `AgentRegistry.sol` | On-chain agent identity → profile link |
@@ -357,7 +357,7 @@ interface ChainAdapter {
 
 | Program | Purpose | Notes |
 |---|---|---|
-| `dkg_knowledge` | KC/KA creation, merkle roots | PDA per KC, SPL Token-2022 for KA tokens |
+| `dkg_knowledge` | KA/KA creation, merkle roots | PDA per KA, SPL Token-2022 for KA tokens |
 | `dkg_delegation` | Delegation with escrow | Token escrow PDAs, lock multiplier |
 | `dkg_channel` | Payment channels | State PDAs |
 | `dkg_relay` | Relay connection receipts + rewards | Receipt PDAs, epoch reward distribution |
@@ -421,9 +421,9 @@ function reserveKnowledgeCollectionIds(uint256 count)
     external returns (uint256 startId, uint256 endId);
 function cancelReservation(uint256 startId) external;
 function slashExpiredReservation(address owner, uint256 startId) external;
-// Re-enable: updateKnowledgeCollection() (currently commented out)
+// Re-enable: updateKnowledgeAsset() (currently commented out)
 
-// Modify: createKnowledgeCollection() to accept reserved ID
+// Modify: createKnowledgeAsset() to accept reserved ID
 ```
 
 ### New Contracts
@@ -454,7 +454,7 @@ function getRelayWeight(uint256 relayIdentityId, uint32 epoch) external view ret
 
 | Parameter | Default | Description |
 |---|---|---|
-| `reservationDeposit` | 0.1 TRAC/KC | Anti-squatting deposit |
+| `reservationDeposit` | 0.1 TRAC/KA | Anti-squatting deposit |
 | `reservationTTLEpochs` | 30 | Reservation expiry |
 | `maxReservationSize` | 10000 | Max IDs per reservation |
 | `channelDisputePeriod` | 7 epochs | Payment channel dispute window |
@@ -516,7 +516,7 @@ message SyncResponse {
 }
 ```
 
-Flow: new node sends SyncRequest to a peer → peer streams SyncResponse batches → node inserts into local store → node verifies KC merkle roots against on-chain data.
+Flow: new node sends SyncRequest to a peer → peer streams SyncResponse batches → node inserts into local store → node verifies KA merkle roots against on-chain data.
 
 ### 10.4 Access Policy in PublishRequest
 

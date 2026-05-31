@@ -362,12 +362,12 @@ PUB1=$(c -X POST "http://127.0.0.1:9201/api/shared-memory/publish" -d "{
   \"selection\":[\"http://example.org/entity/city1\",\"http://example.org/entity/city2\"]
 }")
 PUB1_ST=$(json_get "$PUB1" status)
-PUB1_KC=$(json_get "$PUB1" kcId)
+PUB1_KC=$(json_get "$PUB1" kaId)
 PUB1_TX=$(json_get "$PUB1" txHash)
 PUB1_BN=$(json_get "$PUB1" blockNumber)
 PUB1_KAS=$(echo "$PUB1" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('kas',[])))" 2>/dev/null)
 
-echo "  status=$PUB1_ST kcId=$PUB1_KC tx=$PUB1_TX block=$PUB1_BN KAs=$PUB1_KAS"
+echo "  status=$PUB1_ST kaId=$PUB1_KC tx=$PUB1_TX block=$PUB1_BN KAs=$PUB1_KAS"
 [[ "$PUB1_ST" == "confirmed" || "$PUB1_ST" == "finalized" ]] && ok "Publish from SWM succeeded ($PUB1_ST)" || fail "Publish status=$PUB1_ST: $PUB1"
 [[ "$PUB1_TX" != "__NONE__" ]] && ok "On-chain tx: $PUB1_TX" || fail "No txHash"
 [[ "$PUB1_KAS" == "2" ]] && ok "Published 2 KAs (both selected roots)" || fail "Expected 2 KAs, got $PUB1_KAS"
@@ -548,7 +548,7 @@ echo "=== SECTION 6: UPDATE Operation ==="
 echo ""
 
 UPD=$(c -X POST "http://127.0.0.1:9201/api/update" -d "{
-  \"kcId\":\"$PUB1_KC\",
+  \"kaId\":\"$PUB1_KC\",
   \"contextGraphId\":\"$CONTEXT_GRAPH\",
   \"quads\":[
     $(ql 'http://example.org/entity/city1' 'http://schema.org/name' 'Ljubljana'),
@@ -1753,7 +1753,7 @@ fi
 
 echo "--- 25b: ABI error decoding — UPDATE to non-existent KC returns decoded error ---"
 UPDATE_ERR=$(c -X POST "http://127.0.0.1:9201/api/update" -d "{
-  \"kcId\":\"999999\",
+  \"kaId\":\"999999\",
   \"contextGraphId\":\"$CONTEXT_GRAPH\",
   \"quads\":[{\"subject\":\"urn:test:err\",\"predicate\":\"http://schema.org/name\",\"object\":\"\\\"test\\\"\",\"graph\":\"\"}]
 }")

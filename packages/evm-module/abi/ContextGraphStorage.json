@@ -241,7 +241,7 @@
     "inputs": [
       {
         "internalType": "uint256",
-        "name": "kcId",
+        "name": "kaId",
         "type": "uint256"
       },
       {
@@ -250,7 +250,7 @@
         "type": "uint256"
       }
     ],
-    "name": "KCAlreadyRegisteredToContextGraph",
+    "name": "KnowledgeAssetAlreadyRegisteredToContextGraph",
     "type": "error"
   },
   {
@@ -453,11 +453,11 @@
       {
         "indexed": true,
         "internalType": "uint256",
-        "name": "kcId",
+        "name": "kaId",
         "type": "uint256"
       }
     ],
-    "name": "KCRegisteredToContextGraph",
+    "name": "KnowledgeAssetRegisteredToContextGraph",
     "type": "event"
   },
   {
@@ -853,7 +853,7 @@
     "outputs": [
       {
         "internalType": "uint256",
-        "name": "kcId",
+        "name": "kaId",
         "type": "uint256"
       }
     ],
@@ -1121,11 +1121,11 @@
     "inputs": [
       {
         "internalType": "uint256",
-        "name": "kcId",
+        "name": "kaId",
         "type": "uint256"
       }
     ],
-    "name": "kcToContextGraph",
+    "name": "kaToContextGraph",
     "outputs": [
       {
         "internalType": "uint256",
@@ -1177,11 +1177,11 @@
       },
       {
         "internalType": "uint256",
-        "name": "kcId",
+        "name": "kaId",
         "type": "uint256"
       }
     ],
-    "name": "registerKCToContextGraph",
+    "name": "registerKnowledgeAssetToContextGraph",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"

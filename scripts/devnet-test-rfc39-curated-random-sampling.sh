@@ -160,18 +160,18 @@ parse_json() {
 
 PUBLISH_STATUS=$(parse_json "$PUBLISH_RESP" ".status")
 PUBLISH_TX=$(parse_json    "$PUBLISH_RESP" ".txHash")
-PUBLISH_KC=$(parse_json    "$PUBLISH_RESP" ".kcId")
+PUBLISH_KC=$(parse_json    "$PUBLISH_RESP" ".kaId")
 PUBLISH_BLOCK=$(parse_json "$PUBLISH_RESP" ".blockNumber")
 
 [ "$PUBLISH_STATUS" = "confirmed" ] || fail "publish status=$PUBLISH_STATUS (expected confirmed)"
 [ -n "$PUBLISH_TX" ] || fail "publish: no txHash"
-[ -n "$PUBLISH_KC" ] && [ "$PUBLISH_KC" != "0" ] || fail "publish: zero/empty kcId"
+[ -n "$PUBLISH_KC" ] && [ "$PUBLISH_KC" != "0" ] || fail "publish: zero/empty kaId"
 
-log "✓ publish landed: kcId=$PUBLISH_KC tx=$PUBLISH_TX block=$PUBLISH_BLOCK"
+log "✓ publish landed: kaId=$PUBLISH_KC tx=$PUBLISH_TX block=$PUBLISH_BLOCK"
 
 # --- 6. Verify on-chain ciphertext commitment --------------------------------
 
-log "Reading on-chain ciphertextChunksRoot + count for kcId=$PUBLISH_KC..."
+log "Reading on-chain ciphertextChunksRoot + count for kaId=$PUBLISH_KC..."
 CHAIN_COMMITMENT=$(
 cd "$REPO_ROOT/packages/evm-module" && \
 RPC_URL="http://127.0.0.1:${HARDHAT_PORT}" \
@@ -185,16 +185,17 @@ const path = require("path");
 (async () => {
   const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
   const contracts = JSON.parse(fs.readFileSync(process.env.CONTRACTS_JSON, "utf8")).contracts;
-  const kcsAddr = contracts.KnowledgeCollectionStorage?.evmAddress;
-  if (!kcsAddr) throw new Error("KCS not deployed");
-  const abi = JSON.parse(fs.readFileSync(path.join(process.env.ABI_DIR, "KnowledgeCollectionStorage.json"), "utf8"));
-  const kcs = new ethers.Contract(kcsAddr, abi, provider);
-  const ctRoot = await kcs.getLatestCiphertextChunksRoot(BigInt(process.env.BATCH_ID));
-  const ctCount = await kcs.getCiphertextChunkCount(BigInt(process.env.BATCH_ID));
-  const plainRoot = await kcs.getLatestMerkleRoot(BigInt(process.env.BATCH_ID));
-  const plainCount = await kcs.getMerkleLeafCount(BigInt(process.env.BATCH_ID));
+  const kcsAddr = contracts.DKGKnowledgeAssets?.evmAddress ?? contracts.KnowledgeCollectionStorage?.evmAddress;
+  if (!kcsAddr) throw new Error("DKGKnowledgeAssets / KnowledgeCollectionStorage not deployed");
+  const abiFile = fs.existsSync(path.join(process.env.ABI_DIR, "DKGKnowledgeAssets.json")) ? "DKGKnowledgeAssets.json" : "DKGKnowledgeAssets.json";
+  const abi = JSON.parse(fs.readFileSync(path.join(process.env.ABI_DIR, abiFile), "utf8"));
+  const kas = new ethers.Contract(kcsAddr, abi, provider);
+  const ctRoot = await kas.getLatestCiphertextChunksRoot(BigInt(process.env.BATCH_ID));
+  const ctCount = await kas.getCiphertextChunkCount(BigInt(process.env.BATCH_ID));
+  const plainRoot = await kas.getLatestMerkleRoot(BigInt(process.env.BATCH_ID));
+  const plainCount = await kas.getMerkleLeafCount(BigInt(process.env.BATCH_ID));
   console.log(JSON.stringify({ ctRoot, ctCount: ctCount.toString(), plainRoot, plainCount: plainCount.toString() }));
-})().catch(e => { console.error("[kcs] " + (e?.shortMessage || e?.message || e)); process.exit(1); });
+})().catch(e => { console.error("[kas] " + (e?.shortMessage || e?.message || e)); process.exit(1); });
 ') || fail "on-chain ciphertext-commitment read failed"
 
 CT_ROOT=$(printf '%s' "$CHAIN_COMMITMENT" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>console.log(JSON.parse(d).ctRoot))')
@@ -257,7 +258,7 @@ else
   warn "hardhat_mine response was unexpected: $mine_resp"
 fi
 
-log "Polling cores for random-sampling submitProof tx against kcId=$PUBLISH_KC (timeout=${RS_TIMEOUT}s)..."
+log "Polling cores for random-sampling submitProof tx against kaId=$PUBLISH_KC (timeout=${RS_TIMEOUT}s)..."
 
 # Snapshot the baseline `submittedCount` per node BEFORE polling so we
 # can require an actual INCREASE during the window. Without this, a
@@ -329,14 +330,14 @@ fi
 
 # --- 9. Verify the proof was for the curated KC ------------------------------
 
-# Best-effort: read the WAL for that period and check the kcId matches our publish.
+# Best-effort: read the WAL for that period and check the kaId matches our publish.
 log "Inspecting prover WAL on node $PROOF_NODE..."
 WAL=$(api_call "$PROOF_NODE" GET /api/random-sampling/wal 2>/dev/null || echo "")
 if printf '%s' "$WAL" | grep -q "$PUBLISH_KC"; then
-  log "✓ prover WAL on node $PROOF_NODE contains kcId=$PUBLISH_KC — curated KC was sampled successfully"
+  log "✓ prover WAL on node $PROOF_NODE contains kaId=$PUBLISH_KC — curated KC was sampled successfully"
 else
   log "  prover WAL on node $PROOF_NODE: $WAL"
-  warn "WAL did not directly reference kcId=$PUBLISH_KC; proof may have been for a different KC drawn in the same epoch"
+  warn "WAL did not directly reference kaId=$PUBLISH_KC; proof may have been for a different KC drawn in the same epoch"
 fi
 
 log ""

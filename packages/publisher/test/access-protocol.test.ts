@@ -43,7 +43,7 @@ describe('Access Protocol', () => {
     const cgId = await createTestContextGraph();
     CONTEXT_GRAPH = String(cgId);
     GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
-    _kav10Address = await chain.getKnowledgeAssetsV10Address();
+    _kav10Address = await chain.getKnowledgeAssetsLifecycleAddress();
   });
   afterAll(async () => {
     await revertSnapshot(_fileSnapshot);

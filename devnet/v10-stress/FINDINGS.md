@@ -6,7 +6,7 @@ Curated snapshot of bugs and observations surfaced by `pnpm test:devnet:v10-stre
 
 ### Bug 1 (FIXED) — `publishFromFinalizedAssertion` bundled all SWM content
 
-Originally: `publishFromFinalizedAssertion` called `publishFromSharedMemory(contextGraphId, 'all', …)`, which bundled every promoted assertion currently in SWM into one KC. This produced a merkle-root mismatch against the seal computed at finalize time → `tentative` / `kcId: "0"` rejection.
+Originally: `publishFromFinalizedAssertion` called `publishFromSharedMemory(contextGraphId, 'all', …)`, which bundled every promoted assertion currently in SWM into one KC. This produced a merkle-root mismatch against the seal computed at finalize time → `tentative` / `kaId: "0"` rejection.
 
 **Fixed in `26c38350`** (PR #436 Round-4 review #9): the seal block in `_meta` now persists `dkg:assertionRootEntity` triples (one per `autoPartition(filteredQuads).keys()`), and `publishFromFinalizedAssertion` reads them back to scope `selection: { rootEntities: seal.rootEntities }`. Test workaround that drained SWM between batches is no longer required, but is retained because it doesn't hurt and it documents why ordering matters when leaving content in SWM.
 
@@ -20,7 +20,7 @@ Originally: `publishFromFinalizedAssertion` called `publishFromSharedMemory(cont
 
 **Where:** publisher / chain-adapter nonce management. The publisher's operational-wallet pool reads the on-chain nonce as `latest` rather than `pending`, and a second publish that lands on the same wallet inside the same block window can pick a stale value.
 
-**Reproduction (probabilistic, ~1 in 25 fresh-cluster publishes):** issue rapid-fire `POST /api/shared-memory/publish { assertionName }` calls into the same daemon. Some `token.approve` or KC-create transactions revert with `Nonce too low. Expected nonce to be N+1 but got N`, and the publish flips to `tentative kcId: "0"`.
+**Reproduction (probabilistic, ~1 in 25 fresh-cluster publishes):** issue rapid-fire `POST /api/shared-memory/publish { assertionName }` calls into the same daemon. Some `token.approve` or KC-create transactions revert with `Nonce too low. Expected nonce to be N+1 but got N`, and the publish flips to `tentative kaId: "0"`.
 
 **Why it doesn't always fire:** the pool rotates through op-wallets, so adjacent publishes usually hit different wallets. Hitting the same wallet within the stale window is what triggers it. Background work (gossip-publish reactions, worker sweeps) can also occupy a wallet behind the scenes, which is what we suspect occasionally beats the foreground request to a nonce.
 
@@ -38,7 +38,7 @@ Originally: `publishFromFinalizedAssertion` called `publishFromSharedMemory(cont
 
 ### Mid-run added cores do not back-fill historical KCs before RS challenges
 
-**Phase 3 evidence:** spinning up a 7th core mid-run, registering identity, staking, and setting ask works in <30s. RS prover comes online and ticks. But every challenge for ~120s lands on a KC the new node never received gossip for, so the prover correctly reports `kcId-not-synced` and submits zero proofs.
+**Phase 3 evidence:** spinning up a 7th core mid-run, registering identity, staking, and setting ask works in <30s. RS prover comes online and ticks. But every challenge for ~120s lands on a KC the new node never received gossip for, so the prover correctly reports `kaId-not-synced` and submits zero proofs.
 
 This is **expected** under V10's gossip-only sync (new nodes don't auto-fetch historical chunks), but it means a mid-run core takes one full epoch worth of new publishes (or a manual chunk sync) before it can begin earning RS rewards. Worth confirming whether that's the intended bootstrap UX or whether a "pull missed-publishes since identityId mint" backfill should run at startup.
 

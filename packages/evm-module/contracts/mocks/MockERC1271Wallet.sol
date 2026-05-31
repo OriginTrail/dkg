@@ -3,6 +3,8 @@
 pragma solidity ^0.8.20;
 
 import {IERC1271} from "@openzeppelin/contracts/interfaces/IERC1271.sol";
+import {IERC721Receiver} from "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
+import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
 import {ECDSA} from "solady/src/utils/ECDSA.sol";
 
 /**
@@ -20,7 +22,7 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
  * Test-only — not deployed in production. Lives outside the staked contract
  * set so it never participates in real ACK quorums.
  */
-contract MockERC1271Wallet is IERC1271 {
+contract MockERC1271Wallet is IERC1271, IERC721Receiver {
     bytes4 internal constant _MAGIC_VALUE = 0x1626ba7e;
     bytes4 internal constant _INVALID_VALUE = 0xffffffff;
 
@@ -57,5 +59,20 @@ contract MockERC1271Wallet is IERC1271 {
             return _MAGIC_VALUE;
         }
         return _INVALID_VALUE;
+    }
+
+    function onERC721Received(
+        address,
+        address,
+        uint256,
+        bytes calldata
+    ) external pure override returns (bytes4) {
+        return IERC721Receiver.onERC721Received.selector;
+    }
+
+    function supportsInterface(bytes4 interfaceId) external pure returns (bool) {
+        return interfaceId == type(IERC721Receiver).interfaceId
+            || interfaceId == type(IERC1271).interfaceId
+            || interfaceId == type(IERC165).interfaceId;
     }
 }

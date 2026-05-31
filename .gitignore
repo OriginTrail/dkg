@@ -7,6 +7,7 @@ dist-ui/
 coverage/
 test-results/
 playwright-report/
+packages/node-ui/results.xml
 bench/results/
 .esbench-tmp/
 .env

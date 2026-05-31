@@ -952,7 +952,7 @@ export class DkgDaemonClient {
    * entity URIs — this wrapper exposes the latter as a friendlier `rootEntities`
    * option and translates the omit-case to `"all"` server-side.
    *
-   * Returns the daemon's publish descriptor: `{ kcId, status, kas: [{tokenId, rootEntity}],
+   * Returns the daemon's publish descriptor: `{ kaId, status, kas: [{tokenId, rootEntity}],
    * txHash?, blockNumber?, ... }`.
    */
   async publishSharedMemory(
