@@ -17,7 +17,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { useProjectsStore, type ContextGraph } from '../stores/projects.js';
 import { useTabsStore } from '../stores/tabs.js';
 import { useMemoryEntities, type MemoryEntity, type TrustLevel } from '../hooks/useMemoryEntities.js';
-import { useCanonicalTriples } from './project/helpers.js';
+import { useLayerTriples } from './project/helpers.js';
 import { relativeTime } from '../hooks/useProjectActivity.js';
 import { useHiddenContextGraphIds } from '../hooks/useHiddenContextGraphIds.js';
 
@@ -90,25 +90,36 @@ export function MemoryStackView() {
 function MemoryStackRow({ cg }: { cg: ContextGraph }) {
   const memory = useMemoryEntities(cg.id);
   const { openTab } = useTabsStore();
-  // GH #819 — per-layer triple totals read the canonical residue-
-  // filtered + SPO-deduped universe so they agree with the
-  // Overview Triples + Dashboard cells by construction.
-  // Pre-#819 this iterated `memory.allTriples` raw — SWM cross-graph
-  // duplicates + WM residue inflated both totals.
-  const canonical = useCanonicalTriples(memory);
+  // GH #819 round 3 (Codex sweep 1 🔴 #2) — per-layer buckets use
+  // `useLayerTriples` (OR-rule: drops if subject OR resource-object
+  // moved past t.layer; matches the per-layer Triples-tab the
+  // layer-card buttons open by clicking). Pre-round-3 this read
+  // from `useCanonicalTriples` for per-layer cells too — which
+  // kept mixed-layer edges via the BOTH-endpoints rule, so the
+  // Memory Stack per-layer cells exceeded the layer pages they
+  // navigate to. Same family as the Dashboard round-2 fix, same
+  // option (a) shape: per-layer cells revert, total stays
+  // canonical.
+  const wmLayer = useLayerTriples(memory, 'wm');
+  const swmLayer = useLayerTriples(memory, 'swm');
+  const vmLayer = useLayerTriples(memory, 'vm');
 
   // Bucket entities + triple-counts per layer in one pass.
+  // CONTRACT (mirrors `DashboardView.tsx`): per-layer cells use
+  // `useLayerTriples` — matches the per-layer Triples tab the
+  // layer-card buttons open cell-for-cell. If a project-wide
+  // canonical total is added to this view later (e.g. a footer
+  // total stat), source it from `useCanonicalTriples(memory).total`
+  // and document `wm+swm+vm ≤ total` at THAT site, same as
+  // Dashboard's contract.
   const byLayer = useMemo(() => {
     const buckets: Record<TrustLevel, { entities: MemoryEntity[]; tripleCount: number }> = {
-      working:  { entities: [], tripleCount: 0 },
-      shared:   { entities: [], tripleCount: 0 },
-      verified: { entities: [], tripleCount: 0 },
+      working:  { entities: [], tripleCount: wmLayer.length },
+      shared:   { entities: [], tripleCount: swmLayer.length },
+      verified: { entities: [], tripleCount: vmLayer.length },
     };
     for (const e of memory.entityList) {
       buckets[e.trustLevel].entities.push(e);
-    }
-    for (const t of canonical.triples) {
-      buckets[t.layer].tripleCount++;
     }
     // Sort each bucket newest-first using whichever timestamp predicate
     // each entity has; undated items slide to the back.
@@ -122,7 +133,7 @@ function MemoryStackRow({ cg }: { cg: ContextGraph }) {
       });
     }
     return buckets;
-  }, [memory.entityList, canonical]);
+  }, [memory.entityList, wmLayer, swmLayer, vmLayer]);
 
   const openProject = () =>
     openTab({
