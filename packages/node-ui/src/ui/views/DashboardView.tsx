@@ -6,6 +6,7 @@ import { useTabsStore } from '../stores/tabs.js';
 import { useProjectsStore, type ContextGraph } from '../stores/projects.js';
 import { useMyContextGraphs } from '../hooks/useMyContextGraphs.js';
 import { useMemoryEntities } from '../hooks/useMemoryEntities.js';
+import { useCanonicalTriples } from './project/helpers.js';
 import { useNodeEvents } from '../hooks/useNodeEvents.js';
 import {
   canonicalAgentDid,
@@ -341,15 +342,24 @@ function CgRow({
     const subjects = new Set(mem.allTriples.map((t) => t.subject)).size;
     return { wm: mem.counts.wm, swm: mem.counts.swm, vm: mem.counts.vm, total: subjects };
   }, [mem.error, mem.allTriples, mem.counts.wm, mem.counts.swm, mem.counts.vm, summaryAssets]);
+  // GH #819 — canonical triple total via `useCanonicalTriples` so
+  // the Dashboard per-CG row + aggregate agree with the CG Overview
+  // Triples stat by construction. Pre-#819 this iterated
+  // `mem.allTriples` directly: per-layer counts and total were both
+  // inflated by SWM cross-graph SPO duplicates + post-promote WM
+  // residue (the same family GH #805 closed for the Overview stat,
+  // never wired through to Dashboard). The "413 → 372 on the
+  // recipe-app CG" acceptance lands here.
+  const canonical = useCanonicalTriples(mem);
   const triples: LayerCounts = useMemo(() => {
     let wm = 0, swm = 0, vm = 0;
-    for (const t of mem.allTriples) {
+    for (const t of canonical.triples) {
       if (t.layer === 'working') wm++;
       else if (t.layer === 'shared') swm++;
       else if (t.layer === 'verified') vm++;
     }
-    return { wm, swm, vm, total: mem.allTriples.length };
-  }, [mem.allTriples]);
+    return { wm, swm, vm, total: canonical.total };
+  }, [canonical]);
 
   const sig = [
     mem.loading ? 1 : 0, mem.error ? 1 : 0, mem.partial ? 1 : 0, agentsLoading ? 1 : 0, agentsError ? 1 : 0, isPublicCg ? 1 : 0,

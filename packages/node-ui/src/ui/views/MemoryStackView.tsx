@@ -17,6 +17,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { useProjectsStore, type ContextGraph } from '../stores/projects.js';
 import { useTabsStore } from '../stores/tabs.js';
 import { useMemoryEntities, type MemoryEntity, type TrustLevel } from '../hooks/useMemoryEntities.js';
+import { useCanonicalTriples } from './project/helpers.js';
 import { relativeTime } from '../hooks/useProjectActivity.js';
 import { useHiddenContextGraphIds } from '../hooks/useHiddenContextGraphIds.js';
 
@@ -89,6 +90,12 @@ export function MemoryStackView() {
 function MemoryStackRow({ cg }: { cg: ContextGraph }) {
   const memory = useMemoryEntities(cg.id);
   const { openTab } = useTabsStore();
+  // GH #819 — per-layer triple totals read the canonical residue-
+  // filtered + SPO-deduped universe so they agree with the
+  // Overview Triples + Dashboard cells by construction.
+  // Pre-#819 this iterated `memory.allTriples` raw — SWM cross-graph
+  // duplicates + WM residue inflated both totals.
+  const canonical = useCanonicalTriples(memory);
 
   // Bucket entities + triple-counts per layer in one pass.
   const byLayer = useMemo(() => {
@@ -100,7 +107,7 @@ function MemoryStackRow({ cg }: { cg: ContextGraph }) {
     for (const e of memory.entityList) {
       buckets[e.trustLevel].entities.push(e);
     }
-    for (const t of memory.allTriples) {
+    for (const t of canonical.triples) {
       buckets[t.layer].tripleCount++;
     }
     // Sort each bucket newest-first using whichever timestamp predicate
@@ -115,7 +122,7 @@ function MemoryStackRow({ cg }: { cg: ContextGraph }) {
       });
     }
     return buckets;
-  }, [memory.entityList, memory.allTriples]);
+  }, [memory.entityList, canonical]);
 
   const openProject = () =>
     openTab({

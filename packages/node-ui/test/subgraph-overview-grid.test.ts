@@ -442,45 +442,62 @@ describe('SubGraphOverviewGrid — header subtitle anchors (PR #793 round 4.1, G
     expect(sub!.textContent).not.toContain('4 triples');
   });
 
-  it('subtitle drops WM residue triples whose subject has been promoted to SWM (GH #805 layer-correctness)', async () => {
-    // The other half of GH #805 — WM residue. The daemon leaves
-    // `/assertion/<addr>/<name>` graphs on disk after promote, so a
-    // promoted entity's WM-origin triples keep coming back from
-    // `wmSparql`. The entity's canonical `trustLevel` has moved to
-    // `shared`, so `useLayerTriples('wm')` drops those residue
-    // rows. Pre-#805 `allTriples.length` counted them and the
-    // subtitle disagreed with the per-layer LayerStats.
+  it('subtitle drops WM residue rows only when BOTH endpoints have moved past the row layer (GH #819 mixed-layer-preserving rule)', async () => {
+    // The residue-drop semantic shifted from PR #805's per-layer
+    // rule ("drop if subject moved") to GH #819's canonical-total
+    // rule ("drop ONLY if BOTH endpoints moved past `t.layer`").
+    // The new rule preserves legitimate mixed-layer edges — the
+    // common case after promotion where an entity moves up but
+    // still has cross-layer references.
+    //
+    // This test exercises BOTH branches:
+    //   • promoted → orphan object (literal / class IRI / non-
+    //     entity URN): orphan never "moves", so the row is not
+    //     unambiguous residue → ADMITS as a legitimate
+    //     subject-local property of the promoted entity.
+    //   • promoted → promoted (both endpoints SWM canonical) at
+    //     row layer 'working': both moved past WM → DROPS as
+    //     unambiguous residue.
     fetchSubGraphsMock.mockResolvedValueOnce({
-      subGraphs: [{ name: 'alpha', entityCount: 1, tripleCount: 0, description: '' }],
+      subGraphs: [{ name: 'alpha', entityCount: 2, tripleCount: 0, description: '' }],
     });
     const entityList = [
-      // 1 alpha entity, canonical layer SWM (promoted out of WM).
-      { uri: 'urn:e:promoted', label: 'p', types: [], trustLevel: 'shared', layers: new Set(['working', 'shared']), subGraphs: new Set(['alpha']), properties: new Map(), connections: [] },
+      // Both entities canonical layer SWM (promoted past WM).
+      { uri: 'urn:e:promoted-a', label: 'a', types: [], trustLevel: 'shared', layers: new Set(['working', 'shared']), subGraphs: new Set(['alpha']), properties: new Map(), connections: [] },
+      { uri: 'urn:e:promoted-b', label: 'b', types: [], trustLevel: 'shared', layers: new Set(['working', 'shared']), subGraphs: new Set(['alpha']), properties: new Map(), connections: [] },
     ];
     const triples = [
-      // Honest SWM triple — kept.
-      { subject: 'urn:e:promoted', predicate: 'p', object: 'o-swm', layer: 'shared' },
-      // WM residue — same subject, but its canonical trustLevel is
-      // 'shared', so `useLayerTriples('wm')` drops this row.
-      // Pre-#805 it would have inflated the subtitle by 1.
-      { subject: 'urn:e:promoted', predicate: 'p', object: 'o-wm-residue', layer: 'working' },
+      // Honest SWM triple to an orphan object — kept.
+      { subject: 'urn:e:promoted-a', predicate: 'p', object: 'o-swm', layer: 'shared' },
+      // WM row to an orphan object. Subject moved past WM but
+      // object is an orphan (no entity record), so this is NOT
+      // unambiguous residue under the canonical rule. Admits as a
+      // subject-local property (the GH #819 mixed-layer-preserving
+      // behavior the per-layer rule incorrectly dropped).
+      { subject: 'urn:e:promoted-a', predicate: 'p', object: 'o-wm-mixed', layer: 'working' },
+      // WM row between two promoted entities. BOTH endpoints
+      // moved past WM → unambiguous residue → drops.
+      { subject: 'urn:e:promoted-a', predicate: 'p', object: 'urn:e:promoted-b', layer: 'working' },
     ];
     await renderWith({
       ...memory,
       entities: new Map(entityList.map(e => [e.uri, e])),
       entityList,
       allTriples: triples,
-      counts: { wm: 0, swm: 1, vm: 0, total: 1 },
+      counts: { wm: 0, swm: 2, vm: 0, total: 2 },
     });
     await flush();
 
     const sub = container.querySelector('.v10-sgov-sub');
     expect(sub).toBeTruthy();
-    // Only the honest SWM triple survives — WM residue dropped by
-    // the per-layer trustLevel filter.
-    expect(sub!.textContent).toContain('1 triples');
-    // Pre-#805 raw `allTriples.length` would have shown 2.
-    expect(sub!.textContent).not.toContain('2 triples');
+    // 2 of 3 rows admit: the honest SWM row + the orphan-object
+    // WM row (legitimate post-promotion subject-local property).
+    // The full-residue WM row between two promoted entities drops.
+    // Pre-#819 (`useLayerTriples` per-layer rule) would have
+    // dropped both WM rows → `1 triples`. The canonical rule
+    // keeps mixed-layer.
+    expect(sub!.textContent).toContain('2 triples');
+    expect(sub!.textContent).not.toContain('3 triples');
   });
 });
 
@@ -1169,12 +1186,22 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
     expect(stats).toContain('1 triples');
   });
 
-  it('Named card drops triples to non-scoped entities (parity lock for sweep 6)', async () => {
-    // PR #818 sweep 6 — named-card path has used
-    // `filterTriplesToEntities` since the original implementation
-    // (`:4051`). This test locks the architectural symmetry that
-    // sweep 6 establishes: same input shape, same AND-membership
-    // behavior on the named-card side as the Root card side.
+  it('Named card renders the per-subgraph canonical-bucket triple count (GH #819 decoupled from AND-filtered rendered slice)', async () => {
+    // PR #818 sweep 6 + GH #819 separation of concerns:
+    //   - `tripleCount` STAT reports the canonical per-subgraph
+    //     bucket size (post-residue-filter, post-canonical-SPO-
+    //     dedup, pre-cap, pre-AND-filter). This is the "true
+    //     count" the user sees on the card chrome — agrees with
+    //     the subtitle distinct total when summed without
+    //     double-counting cross-graph duplicates.
+    //   - `triples` RENDERED slice further applies
+    //     `filterTriplesToEntities` (AND-membership +
+    //     rdf:type exemption) so non-scoped objects don't render
+    //     as phantom nodes. The two are intentionally decoupled.
+    //
+    // Pre-#819 the stat read `sg.tripleCount` (daemon-reported)
+    // which was the inflated raw count — agreed with neither the
+    // canonical universe nor the rendered slice.
     fetchSubGraphsMock.mockResolvedValueOnce({
       subGraphs: [{ name: 'alpha', entityCount: 1, tripleCount: 0, description: '' }],
     });
@@ -1185,9 +1212,12 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
       { uri: 'urn:e:beta', label: 'b', types: [], trustLevel: 'shared', layers: new Set(['shared']), subGraphs: new Set(['beta']), properties: new Map(), connections: [] },
     ];
     const triples = [
-      // alpha → beta edge tagged to alpha's subgraph. Named-card
-      // admission AND-filters: subject in scope, object NOT, so
-      // the edge drops from the alpha card.
+      // alpha → beta edge tagged to alpha's subgraph. The triple
+      // genuinely belongs to alpha's bucket (subGraph tag), so it
+      // counts in the alpha card's stat. The AND-filtered render
+      // slice still drops it because beta isn't in alpha's
+      // entityUris — but that's a render concern, not a count
+      // concern.
       { subject: 'urn:e:alpha', predicate: 'p', object: 'urn:e:beta', subGraph: 'alpha', layer: 'shared' },
     ];
     await renderWith({
@@ -1203,11 +1233,12 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
     const cards = container.querySelectorAll('.v10-sgov-card');
     const alphaCardEl = cards[0];
     const stats = alphaCardEl.querySelector('.v10-sgov-card-stats')?.textContent ?? '';
-    // 1 entity (alpha), 0 triples (the edge to beta dropped by
-    // AND-filter). Locks that the Root card now mirrors this
-    // behavior post-sweep-6.
+    // 1 entity (alpha — the only entity in alpha's subgraph),
+    // 1 triple (the alpha-tagged edge is in alpha's canonical
+    // bucket). Pre-#819 read `sg.tripleCount` (daemon 0); the
+    // canonical bucket-size lock anchors the new behavior.
     expect(stats).toContain('1 entities');
-    expect(stats).toContain('0 triples');
+    expect(stats).toContain('1 triples');
   });
 
   it('Root card cap honors MAX_PER_CARD even with a single dominant subject (Codex sweep 2)', async () => {

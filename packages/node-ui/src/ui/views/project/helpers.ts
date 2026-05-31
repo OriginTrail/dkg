@@ -5,6 +5,7 @@ import {
   type TrustLevel,
   type MemoryEntity,
   type Triple,
+  type LayeredTriple,
 } from '../../hooks/useMemoryEntities.js';
 import {
   VIZ_ANCHOR_TYPE, VIZ_AGENT_TYPE,
@@ -516,10 +517,10 @@ export function admitTripleForScope(
  */
 export function useCanonicalTriples(
   memory: ReturnType<typeof useMemoryEntities>,
-): { triples: Triple[]; total: number } {
+): { triples: LayeredTriple[]; total: number } {
   return useMemo(() => {
     const seen = new Set<string>();
-    const out: Triple[] = [];
+    const out: LayeredTriple[] = [];
     for (const t of memory.allTriples) {
       const subjectEntity = memory.entities.get(canonicalEntityUri(t.subject));
       const subjectMoved =
