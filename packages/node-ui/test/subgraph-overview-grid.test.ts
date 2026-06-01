@@ -1360,19 +1360,17 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
     expect(betaStats).toContain('1 triples');
   });
 
-  it('Named card tripleCount ignores daemon sg.tripleCount when canonical is incomplete (GH #819 round 5+6 — Codex sweep 3 🔴 #8 + sweep 4 🔴 #11)', async () => {
+  it('Named card tripleCount ignores daemon sg.tripleCount under settled layer-error (GH #819 round 5+7 — Codex sweep 3 🔴 #8 + sweep 5 🔴 #14)', async () => {
     // Round 5 (🔴 #8): drop the daemon-reported `sg.tripleCount`
     // fallback entirely — the daemon route builds it via raw
     // `COUNT(*)` (no SPO-dedup, no residue filter), so it's
     // inflated, not a lower-bound.
-    // Round 6 (🔴 #11): with an empty bucket AND canonical
-    // incomplete, render the hydration affordance (`…`) instead
-    // of `0 triples` — Codex sweep 4 flagged that round 5 was
-    // conflating "loading" with "genuine empty".
-    //
-    // Combined contract on this fixture (empty bucket + canonical
-    // incomplete): badge must NOT show the inflated daemon 42,
-    // and must NOT flash `0 triples`. It renders `…`.
+    // Round 7 (🔴 #14): a settled layer-error (`loading=false`,
+    // `partial=true`, `layerStatus.wm === 'error'`) is NOT a
+    // hydration race — it's a final incomplete result. Badge
+    // surfaces `0 triples` honestly with a "Some layers
+    // unavailable" tooltip; doesn't render `…` (which is
+    // reserved for the in-flight hydration window).
     fetchSubGraphsMock.mockResolvedValueOnce({
       // Daemon-reported (inflated, raw COUNT(*)) count.
       subGraphs: [{ name: 'alpha', entityCount: 1, tripleCount: 42, description: '' }],
@@ -1384,7 +1382,7 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
       ...memory,
       entities: new Map(entityList.map(e => [e.uri, e])),
       entityList,
-      // Hydrated but incomplete: layer query errored.
+      // Settled but incomplete: one layer errored.
       allTriples: [],
       counts: { wm: 1, swm: 0, vm: 0, total: 1 },
       loading: false,
@@ -1395,12 +1393,17 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
 
     const cards = container.querySelectorAll('.v10-sgov-card');
     const alphaCardEl = cards[0];
-    const stats = alphaCardEl.querySelector('.v10-sgov-card-stats')?.textContent ?? '';
-    // Combined contract: no daemon read (no 42), and hydration
-    // affordance (`…`) instead of a `0 triples` flash.
-    expect(stats).toContain('…');
+    const cardStats = alphaCardEl.querySelector('.v10-sgov-card-stats');
+    const stats = cardStats?.textContent ?? '';
+    // Combined contract: no daemon read (no 42), no `…` (this is
+    // settled failure, not in-flight hydration); honest `0 triples`
+    // surfaces with the failure tooltip.
+    expect(stats).toContain('0 triples');
+    expect(stats).not.toContain('…');
     expect(stats).not.toContain('42 triples');
-    expect(stats).not.toContain('0 triples');
+    // Tooltip surfaces the failure caveat on the triples stat.
+    const triplesStat = cardStats?.querySelectorAll('.v10-sgov-card-stat')[1];
+    expect(triplesStat?.getAttribute('title')).toBe('Some layers unavailable; count may be incomplete.');
   });
 
   it('Named card bucket applies canonical residue filter per scope (GH #819 round 4 — Codex sweep 2 🔴 #5)', async () => {
@@ -1599,6 +1602,79 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
     const stats = rootCardEl.querySelector('.v10-sgov-card-stats')?.textContent ?? '';
     expect(stats).toContain('…');
     expect(stats).not.toContain('0 triples');
+  });
+
+  it('Named card badge surfaces honest 0 with failure tooltip on memory.error (GH #819 round 7 — Codex sweep 5 🔴 #14)', async () => {
+    // Round 6 collapsed loading + error into one
+    // `canonicalIncomplete` gate; round 7 splits them. A settled
+    // `memory.error` (not loading) must NOT render the `…`
+    // affordance — that would masquerade a settled failure as
+    // in-progress hydration. Instead, render honest `0 triples`
+    // with a "Some layers unavailable" tooltip.
+    fetchSubGraphsMock.mockResolvedValueOnce({
+      subGraphs: [{ name: 'alpha', entityCount: 1, tripleCount: 0, description: '' }],
+    });
+    const entityList = [
+      { uri: 'urn:e:alpha', label: 'a', types: [], trustLevel: 'working', layers: new Set(['working']), subGraphs: new Set(['alpha']), properties: new Map(), connections: [] },
+    ];
+    await renderWith({
+      ...memory,
+      entities: new Map(entityList.map(e => [e.uri, e])),
+      entityList,
+      allTriples: [],
+      counts: { wm: 1, swm: 0, vm: 0, total: 1 },
+      // Settled error state — NOT loading.
+      loading: false,
+      error: new Error('SPARQL endpoint unavailable'),
+      layerStatus: { wm: 'ok', swm: 'ok', vm: 'ok' },
+    });
+    await flush();
+
+    const cards = container.querySelectorAll('.v10-sgov-card');
+    const alphaCardEl = cards[0];
+    const cardStats = alphaCardEl.querySelector('.v10-sgov-card-stats');
+    const stats = cardStats?.textContent ?? '';
+    // Failed/partial branch: 0 triples surfaces honestly with the
+    // failure-state tooltip, NOT the `…` affordance.
+    expect(stats).toContain('0 triples');
+    expect(stats).not.toContain('…');
+    const triplesStat = cardStats?.querySelectorAll('.v10-sgov-card-stat')[1];
+    expect(triplesStat?.getAttribute('title')).toBe('Some layers unavailable; count may be incomplete.');
+  });
+
+  it('Named card badge surfaces honest 0 with failure tooltip on memory.partial (GH #819 round 7 — Codex sweep 5 🔴 #14)', async () => {
+    // Same round-7 contract as the `error` test above, but
+    // exercising the `partial` branch instead — settled-incomplete
+    // result (some layers succeeded, some errored). Still renders
+    // honest `0 triples` with the failure tooltip; not `…`.
+    fetchSubGraphsMock.mockResolvedValueOnce({
+      subGraphs: [{ name: 'alpha', entityCount: 1, tripleCount: 0, description: '' }],
+    });
+    const entityList = [
+      { uri: 'urn:e:alpha', label: 'a', types: [], trustLevel: 'working', layers: new Set(['working']), subGraphs: new Set(['alpha']), properties: new Map(), connections: [] },
+    ];
+    await renderWith({
+      ...memory,
+      entities: new Map(entityList.map(e => [e.uri, e])),
+      entityList,
+      allTriples: [],
+      counts: { wm: 1, swm: 0, vm: 0, total: 1 },
+      loading: false,
+      partial: true,
+      // Round 7: SWM errored is a settled failure, not in-flight
+      // hydration (no layerStatus === 'loading').
+      layerStatus: { wm: 'ok', swm: 'error', vm: 'ok' },
+    });
+    await flush();
+
+    const cards = container.querySelectorAll('.v10-sgov-card');
+    const alphaCardEl = cards[0];
+    const cardStats = alphaCardEl.querySelector('.v10-sgov-card-stats');
+    const stats = cardStats?.textContent ?? '';
+    expect(stats).toContain('0 triples');
+    expect(stats).not.toContain('…');
+    const triplesStat = cardStats?.querySelectorAll('.v10-sgov-card-stat')[1];
+    expect(triplesStat?.getAttribute('title')).toBe('Some layers unavailable; count may be incomplete.');
   });
 
   it('Root card keeps its scoped copy when same SPO also appears under a named subgraph (GH #819 round 4 — Codex sweep 2 🔴 #7)', async () => {

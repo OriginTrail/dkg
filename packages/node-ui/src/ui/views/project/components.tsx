@@ -3962,23 +3962,27 @@ export function SubGraphOverviewGrid({
   // those mixed-layer edges as facts.
   const { total: subtitleTripleCount } = useCanonicalTriples(memory);
 
-  // GH #819 round 6 (Codex sweep 4 🔴 #11) — hydration-state gate
-  // for the per-card badge. `useMemoryEntities` initializes
-  // `allTriples = []` (`useMemoryEntities.ts:590`), so between
-  // `/sub-graph/list` resolving (which fills `subGraphs`) and
-  // WM/SWM/VM finishing (which fills `allTriples`), every named-
-  // and Root-card derives `tripleCount = 0`. Round 5 collapsed
-  // the badge to `card.tripleCount ?? 0`, conflating "still
-  // loading" with "genuine empty". Revive the discriminator at
-  // the grid scope; the badge below uses it to render a hydration
-  // affordance ("…") instead of `0 triples` while canonical is
-  // incomplete. Hydrated-fully state still reads `0 triples`
-  // honestly (genuine zero shows through).
-  const canonicalIncomplete =
-    memory.loading
-    || memory.error !== null
+  // GH #819 round 7 (Codex sweep 5 🔴 #14) — split the hydration
+  // gate from the failure gate. Round 6 collapsed both into one
+  // `canonicalIncomplete` flag and rendered the "Loading…"
+  // affordance for both — so a settled error/partial result kept
+  // masquerading as in-progress hydration forever.
+  //
+  // `MemoryLayerStatus` is `'loading' | 'ok' | 'error'`
+  // (`useMemoryEntities.ts:8`). `isHydrating` covers the transient
+  // state (initial fetch in flight, or any layer's status === 'loading');
+  // `isFailedOrPartial` covers the settled-incomplete state
+  // (hard error, partial result, or any layer's status === 'error').
+  // The badge matrix at the render site routes them to different
+  // affordances: loading → `…`, failed/partial → `0 triples` with
+  // a "Some layers unavailable" tooltip.
+  const layerStatuses = Object.values(memory.layerStatus ?? {});
+  const isHydrating =
+    memory.loading || layerStatuses.some(s => s === 'loading');
+  const isFailedOrPartial =
+    memory.error !== null
     || memory.partial
-    || Object.values(memory.layerStatus ?? {}).some(s => s !== 'ok');
+    || layerStatuses.some(s => s === 'error');
 
   // Bucket every triple by its origin sub-graph so each mini-graph
   // renders just its slice. Cap per-bucket via the shared
@@ -4428,7 +4432,8 @@ export function SubGraphOverviewGrid({
           <SubGraphMiniCard
             key={card.slug}
             card={card}
-            canonicalIncomplete={canonicalIncomplete}
+            isHydrating={isHydrating}
+            isFailedOrPartial={isFailedOrPartial}
             onNodeClick={onNodeClick}
             onOpen={() => onSelectSubGraph(card.slug)}
           />
@@ -4442,7 +4447,8 @@ export function SubGraphOverviewGrid({
         <SubGraphMiniCard
           key={ROOT_SLUG_SENTINEL}
           card={rootCard}
-          canonicalIncomplete={canonicalIncomplete}
+          isHydrating={isHydrating}
+          isFailedOrPartial={isFailedOrPartial}
           onNodeClick={onNodeClick}
           onOpen={() => onSelectSubGraph(ROOT_SLUG_SENTINEL)}
           variant="root"
@@ -4454,7 +4460,8 @@ export function SubGraphOverviewGrid({
 
 export function SubGraphMiniCard({
   card,
-  canonicalIncomplete = false,
+  isHydrating = false,
+  isFailedOrPartial = false,
   onNodeClick,
   onOpen,
   variant,
@@ -4466,14 +4473,17 @@ export function SubGraphMiniCard({
     layerCounts: { wm: number; swm: number; vm: number };
     entityTrustByUri: Map<string, TrustLevel>;
   };
-  // GH #819 round 6 — true while WM/SWM/VM are still hydrating
-  // (or any layer query errored). Drives the badge's hydration
-  // affordance so a non-empty subgraph doesn't flash `0 triples`
-  // between `/sub-graph/list` resolve and full layer hydration
-  // (Codex sweep 4 🔴 #11). Defaults to false so consumers that
-  // don't (or can't) thread the discriminator render the badge
+  // GH #819 round 7 (Codex sweep 5 🔴 #14) — split hydration vs
+  // failure flags. `isHydrating` is the transient state (still
+  // fetching, no settled result yet); the badge renders the `…`
+  // loading affordance when bucket is empty. `isFailedOrPartial`
+  // is the settled-incomplete state (hard error or partial
+  // result); the badge keeps `0 triples` but adds a tooltip so
+  // users see the result is best-effort. Both default to false
+  // so consumers that don't thread the gates render the badge
   // exactly as before.
-  canonicalIncomplete?: boolean;
+  isHydrating?: boolean;
+  isFailedOrPartial?: boolean;
   onNodeClick?: (node: any) => void;
   onOpen: () => void;
   // GH #813 — `root` opts into the quieter neutral-border chrome
@@ -4574,26 +4584,32 @@ export function SubGraphMiniCard({
             quiet case. Same conditional-when-it-has-something-to-
             say pattern as S2's `Pending join requests` empty
             state. */}
-        {/* GH #819 round 6 (Codex sweep 4 🔴 #11) — hydration
-            affordance. `useMemoryEntities` initializes
-            `allTriples = []`, so between `/sub-graph/list`
-            resolve (which fills `subGraphs`) and WM/SWM/VM
-            finishing (which fills `allTriples`), `card.tripleCount`
-            derives 0 even for non-empty subgraphs. Render `…`
-            during that window so the badge doesn't masquerade
-            a hydration race as a genuine empty bucket. Once
-            canonical hydrates, the actual count (including a
-            genuine 0) shows through honestly. */}
+        {/* GH #819 round 7 (Codex sweep 5 🔴 #14) — split badge
+            matrix. Round 6 lumped loading + error into one gate
+            and showed the loading affordance for both; after a
+            settled failure the badge masqueraded as "still
+            loading" forever. The split routes each state:
+              • bucket > 0 → render the count normally.
+              • bucket 0 + hydrating → `…` "Loading triples…"
+              • bucket 0 + failed/partial (not hydrating) →
+                `0 triples` with "Some layers unavailable;
+                count may be incomplete" tooltip.
+              • bucket 0 + neither → honest `0 triples`.
+            `isHydrating` wins over `isFailedOrPartial` when both
+            are true — a transient state takes precedence over
+            the settled-incomplete signal. */}
         <span
           className="v10-sgov-card-stat"
           title={
-            canonicalIncomplete && card.tripleCount === 0
+            isHydrating && card.tripleCount === 0
               ? 'Loading triples for this subgraph…'
-              : card.tripleCount !== card.triples.length
-                ? `${card.tripleCount} triples in this subgraph's scope; ${card.triples.length} rendered (cross-card edges whose other endpoint isn't in this subgraph aren't drawn here).`
-                : undefined
+              : isFailedOrPartial && card.tripleCount === 0
+                ? 'Some layers unavailable; count may be incomplete.'
+                : card.tripleCount !== card.triples.length
+                  ? `${card.tripleCount} triples in this subgraph's scope; ${card.triples.length} rendered (cross-card edges whose other endpoint isn't in this subgraph aren't drawn here).`
+                  : undefined
           }
-        ><b>{canonicalIncomplete && card.tripleCount === 0 ? '…' : card.tripleCount}</b> triples</span>
+        ><b>{isHydrating && card.tripleCount === 0 ? '…' : card.tripleCount}</b> triples</span>
       </div>
       <div className="v10-sgov-card-pyramid">
         {/* compact mode collapses the empty-counts branch to `null`
