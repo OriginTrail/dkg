@@ -28,6 +28,7 @@ export { generateKCMetadata, generateTentativeMetadata, generateConfirmedFullMet
 export {
   DKGPublisher,
   StaleWriteError,
+  AssertionNotPersistedError,
   type DKGPublisherConfig,
   type WorkspaceSenderKeyEncryptInput,
   type WorkspaceSenderKeyEncryptor,

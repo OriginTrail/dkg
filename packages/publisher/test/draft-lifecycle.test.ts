@@ -6,10 +6,11 @@ import {
   TypedEventBus,
   generateEd25519Keypair,
   contextGraphAssertionUri,
+  contextGraphMetaUri,
   contextGraphSharedMemoryUri,
   assertionLifecycleUri,
 } from '@origintrail-official/dkg-core';
-import { DKGPublisher } from '../src/index.js';
+import { DKGPublisher, AssertionNotPersistedError } from '../src/index.js';
 import { ethers } from 'ethers';
 import { createEVMAdapter, getSharedContext, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 
@@ -114,6 +115,96 @@ describe('Working Memory Assertion Lifecycle', () => {
     if (swmResult.type === 'bindings') {
       expect(swmResult.bindings.length).toBe(3);
     }
+  });
+
+  // Issue #864 — when the assertion data graph is empty but `_meta` says
+  // an extraction completed with N > 0 triples, the legacy
+  // `{ promotedCount: 0 }` return hid the inconsistency behind a
+  // misleading "Promoted 0 triples" toast. The publisher now throws
+  // `AssertionNotPersistedError` so the daemon route can map it to a
+  // 409 with an actionable hint.
+  it('promote throws AssertionNotPersistedError when _meta says extraction completed but data graph is empty', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+
+    // Simulate the post-import-file state: extraction metadata landed in
+    // `_meta`, but the structural triples never made it into the data
+    // graph (the rc.12 bug reported in #864). The metaQuads mirror what
+    // `packages/cli/src/daemon/routes/assertion.ts` writes on a
+    // successful import-file with text/markdown content.
+    const graphUri = contextGraphAssertionUri(CG_ID, AGENT, ASSERTION_NAME);
+    const metaGraph = contextGraphMetaUri(CG_ID);
+    await store.insert([
+      {
+        subject: graphUri,
+        predicate: 'http://dkg.io/ontology/extractionStatus',
+        object: '"completed"',
+        graph: metaGraph,
+      },
+      {
+        subject: graphUri,
+        predicate: 'http://dkg.io/ontology/structuralTripleCount',
+        object: '"49"^^<http://www.w3.org/2001/XMLSchema#integer>',
+        graph: metaGraph,
+      },
+    ]);
+
+    await expect(
+      publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT),
+    ).rejects.toBeInstanceOf(AssertionNotPersistedError);
+
+    // Re-run to capture the structured fields the daemon route reads
+    // when building its 409 response body.
+    try {
+      await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT);
+      throw new Error('expected promote to throw');
+    } catch (err: unknown) {
+      expect(err).toBeInstanceOf(AssertionNotPersistedError);
+      const typed = err as AssertionNotPersistedError;
+      expect(typed.code).toBe('ASSERTION_NOT_PERSISTED');
+      expect(typed.contextGraphId).toBe(CG_ID);
+      expect(typed.assertionGraph).toBe(graphUri);
+      expect(typed.expectedTripleCount).toBe(49);
+    }
+  });
+
+  // Issue #864 — guard the legitimate empty-promote path. When there's
+  // no extraction metadata in `_meta` at all, an empty data graph is a
+  // perfectly valid no-op (e.g. a `create` with no subsequent `write`,
+  // or a re-promote of an already-promoted assertion). The publisher
+  // must keep returning `{ promotedCount: 0 }` instead of throwing, so
+  // existing polling/retry call-sites don't regress.
+  it('promote returns { promotedCount: 0 } when data graph is empty and _meta has no extraction record', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+
+    const result = await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT);
+    expect(result.promotedCount).toBe(0);
+  });
+
+  // Issue #864 — same shape as the previous test but exercises the
+  // partial-metadata case: status present, count = 0 → not an
+  // inconsistency, still a legitimate no-op (e.g. a Phase-1 file with
+  // no extractable structural content).
+  it('promote returns { promotedCount: 0 } when _meta says completed but structuralTripleCount is 0', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    const graphUri = contextGraphAssertionUri(CG_ID, AGENT, ASSERTION_NAME);
+    const metaGraph = contextGraphMetaUri(CG_ID);
+    await store.insert([
+      {
+        subject: graphUri,
+        predicate: 'http://dkg.io/ontology/extractionStatus',
+        object: '"completed"',
+        graph: metaGraph,
+      },
+      {
+        subject: graphUri,
+        predicate: 'http://dkg.io/ontology/structuralTripleCount',
+        object: '"0"^^<http://www.w3.org/2001/XMLSchema#integer>',
+        graph: metaGraph,
+      },
+    ]);
+
+    const result = await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT);
+    expect(result.promotedCount).toBe(0);
   });
 
   it('durable SWM ownership blocks cross-author promote after publisher restart with empty map', async () => {

@@ -3531,6 +3531,12 @@ button.v10-notif-row:hover { background: var(--bg-hover); }
 .v10-promote-result { padding: 8px 12px; font-size: 12px; }
 .v10-promote-result.success { color: var(--text-success); background: rgba(34,197,94,.06); }
 .v10-promote-result.error { color: var(--text-danger); background: rgba(239,68,68,.06); }
+/* Issue #864 (Codex review on #874) — the `info` variant now backs
+   the no-op promote outcome ("Nothing to promote — already up to
+   date"). Without this rule the message rendered with bare base
+   styling, indistinguishable from a stray <div>. Muted grey-blue so
+   it reads as informational, not success / not error. */
+.v10-promote-result.info { color: var(--text-secondary); background: rgba(59,130,246,.06); }
 
 /* ── Publish Panel (SWM → VM) ── */
 .v10-publish-panel {

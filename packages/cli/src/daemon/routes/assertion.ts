@@ -1599,6 +1599,21 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
       }
       return jsonResponse(res, 200, result);
     } catch (err: any) {
+      // Issue #864 — translate the publisher's typed "_meta says completed
+      // but data graph is empty" error into a 409 with a structured body
+      // the UI can pattern-match on. Keep it ahead of the generic 400
+      // branch so the more specific code wins. Duck-type the check by
+      // name + code so we don't have to import the publisher's error
+      // class into the cli package's compile graph.
+      if (err?.name === "AssertionNotPersistedError" || err?.code === "ASSERTION_NOT_PERSISTED") {
+        return jsonResponse(res, 409, {
+          error: err.message,
+          code: "ASSERTION_NOT_PERSISTED",
+          contextGraphId: err.contextGraphId,
+          assertionGraph: err.assertionGraph,
+          expectedTripleCount: err.expectedTripleCount,
+        });
+      }
       if (
         err.message?.includes("not found") ||
         err.message?.includes("Invalid") ||
