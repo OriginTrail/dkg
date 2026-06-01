@@ -248,12 +248,12 @@ function LocalDataRetentionSection() {
   const confirmRetention = useCallback(async () => {
     if (pendingRetention == null) return;
     const days = pendingRetention;
-    setRetentionDays(days);
     setRetentionSaved(false);
     setRetentionError(null);
     setPendingRetention(null);
     try {
       await updateRetentionSettings(days);
+      setRetentionDays(days);
       setRetentionSaved(true);
       setTimeout(() => setRetentionSaved(false), 2000);
     } catch {
@@ -264,12 +264,13 @@ function LocalDataRetentionSection() {
   const handleRetentionChange = useCallback((days: number) => {
     setRetentionError(null);
     if (days < retentionDays) {
+      setRetentionSaved(false);
       setPendingRetention(days);
     } else {
-      setRetentionDays(days);
       setRetentionSaved(false);
       setPendingRetention(null);
       updateRetentionSettings(days).then(() => {
+        setRetentionDays(days);
         setRetentionSaved(true);
         setTimeout(() => setRetentionSaved(false), 2000);
       }).catch(() => setRetentionError('Couldn’t save retention — try again.'));

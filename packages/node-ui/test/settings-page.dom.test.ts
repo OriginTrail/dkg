@@ -163,7 +163,7 @@ describe('SettingsPage (cleanup) — rendering, removals, a11y', () => {
     expect(updateRetentionSettingsMock).not.toHaveBeenCalled();
   });
 
-  it('confirming a reduction calls updateRetentionSettings; a save failure surfaces the inline error', async () => {
+  it('confirming a reduction calls updateRetentionSettings; a save failure restores the selector', async () => {
     updateRetentionSettingsMock.mockRejectedValueOnce(new Error('500'));
     const c = await render();
     const select = c.querySelector<HTMLSelectElement>('#retention-select')!;
@@ -176,6 +176,18 @@ describe('SettingsPage (cleanup) — rendering, removals, a11y', () => {
     await flush();
     expect(updateRetentionSettingsMock).toHaveBeenCalledWith(30);
     expect(c.textContent ?? '').toMatch(/Couldn’t save retention/i);
+    expect(select.value).toBe('90');
+  });
+
+  it('direct-saving an increase leaves the selector on the old value when save fails', async () => {
+    updateRetentionSettingsMock.mockRejectedValueOnce(new Error('500'));
+    const c = await render();
+    const select = c.querySelector<HTMLSelectElement>('#retention-select')!;
+    await act(async () => { setSelectValue(select, '365'); });
+    await flush();
+    expect(updateRetentionSettingsMock).toHaveBeenCalledWith(365);
+    expect(c.textContent ?? '').toMatch(/Couldn’t save retention/i);
+    expect(select.value).toBe('90');
   });
 
   it('telemetry toggle is an accessible switch; enabling routes through the consent dialog', async () => {
