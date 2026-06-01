@@ -1348,20 +1348,19 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
     expect(betaStats).toContain('1 triples');
   });
 
-  it('Named card tripleCount ignores daemon sg.tripleCount under hydrated-after-layer-failure (GH #819 round 5 — Codex sweep 3 🔴 #8 inversion)', async () => {
-    // PR #847 round 5 (🔴 #8) — round 3 was written to lock in a
-    // `?? sg.tripleCount` "lower-bound fallback" when canonical
-    // universe was incomplete. Codex sweep 3 invalidated that
-    // contract: the daemon route builds `sg.tripleCount` via raw
-    // `COUNT(*)` SPARQL grouped by named graph, then sums per
-    // first-path-segment — NO SPO-dedup, NO residue filter. So
-    // `sg.tripleCount` is INFLATED (upper-bound), not a lower
-    // bound. Round-5 drops the daemon read entirely.
+  it('Named card tripleCount ignores daemon sg.tripleCount when canonical is incomplete (GH #819 round 5+6 — Codex sweep 3 🔴 #8 + sweep 4 🔴 #11)', async () => {
+    // Round 5 (🔴 #8): drop the daemon-reported `sg.tripleCount`
+    // fallback entirely — the daemon route builds it via raw
+    // `COUNT(*)` (no SPO-dedup, no residue filter), so it's
+    // inflated, not a lower-bound.
+    // Round 6 (🔴 #11): with an empty bucket AND canonical
+    // incomplete, render the hydration affordance (`…`) instead
+    // of `0 triples` — Codex sweep 4 flagged that round 5 was
+    // conflating "loading" with "genuine empty".
     //
-    // Same fixture as the original round-3 lock, opposite
-    // assertion: card NEVER reads daemon `sg.tripleCount`, even
-    // when canonical universe is incomplete. Honest zero shows
-    // through when the bucket is empty.
+    // Combined contract on this fixture (empty bucket + canonical
+    // incomplete): badge must NOT show the inflated daemon 42,
+    // and must NOT flash `0 triples`. It renders `…`.
     fetchSubGraphsMock.mockResolvedValueOnce({
       // Daemon-reported (inflated, raw COUNT(*)) count.
       subGraphs: [{ name: 'alpha', entityCount: 1, tripleCount: 42, description: '' }],
@@ -1385,12 +1384,11 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
     const cards = container.querySelectorAll('.v10-sgov-card');
     const alphaCardEl = cards[0];
     const stats = alphaCardEl.querySelector('.v10-sgov-card-stats')?.textContent ?? '';
-    // Round-5 contract: card never reads daemon `sg.tripleCount`.
-    // Empty client-canonical bucket renders `0 triples` honestly,
-    // even when canonical universe is incomplete; daemon's
-    // potentially-inflated 42 is ignored.
-    expect(stats).toContain('0 triples');
+    // Combined contract: no daemon read (no 42), and hydration
+    // affordance (`…`) instead of a `0 triples` flash.
+    expect(stats).toContain('…');
     expect(stats).not.toContain('42 triples');
+    expect(stats).not.toContain('0 triples');
   });
 
   it('Named card bucket applies canonical residue filter per scope (GH #819 round 4 — Codex sweep 2 🔴 #5)', async () => {
@@ -1493,6 +1491,102 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
     // inflated 10 is ignored.
     expect(stats).toContain('3 triples');
     expect(stats).not.toContain('10 triples');
+  });
+
+  it('Named card badge renders hydration affordance while canonical is incomplete and bucket is empty (GH #819 round 6 — Codex sweep 4 🔴 #11)', async () => {
+    // PR #847 round 6 (🔴 #11) — round 5 dropped the daemon
+    // fallback entirely, which was correct on the daemon-trust
+    // axis but stripped the gate that distinguished "still
+    // hydrating" from "genuine 0". `useMemoryEntities` initializes
+    // `allTriples = []` (`useMemoryEntities.ts:590`), so between
+    // `/sub-graph/list` resolve (which fills `subGraphs`) and
+    // WM/SWM/VM finishing (which fills `allTriples`), every
+    // non-empty subgraph derived `tripleCount = 0` and the badge
+    // flashed `0 triples`. Round-6 fix: revive the
+    // `canonicalIncomplete` discriminator; when it's true AND
+    // the bucket is empty, the badge renders `…` instead of `0`.
+    fetchSubGraphsMock.mockResolvedValueOnce({
+      subGraphs: [{ name: 'alpha', entityCount: 5, tripleCount: 0, description: '' }],
+    });
+    await renderWith({
+      ...memory,
+      // Mid-hydration: `/sub-graph/list` resolved but layer queries
+      // haven't finished, so `allTriples` is still its initial [].
+      entities: new Map(),
+      entityList: [],
+      allTriples: [],
+      counts: { wm: 0, swm: 0, vm: 0, total: 0 },
+      loading: true,
+    });
+    await flush();
+
+    const cards = container.querySelectorAll('.v10-sgov-card');
+    const alphaCardEl = cards[0];
+    const stats = alphaCardEl.querySelector('.v10-sgov-card-stats')?.textContent ?? '';
+    // Pre-round-6 this read `0 triples` mid-hydration. Post-fix
+    // the badge renders the affordance.
+    expect(stats).toContain('…');
+    expect(stats).not.toContain('0 triples');
+  });
+
+  it('Named card badge renders genuine 0 once canonical is fully hydrated (GH #819 round 6 — no regression on honest empty)', async () => {
+    // Round-6 regression guard — once canonical is hydrated
+    // (`loading=false`, no `partial`, all layers 'ok'), a
+    // genuinely empty subgraph must still surface `0 triples`
+    // honestly. The hydration affordance fires ONLY when the
+    // canonical universe can't be trusted; the hydrated-fully
+    // branch is unchanged from round 5.
+    fetchSubGraphsMock.mockResolvedValueOnce({
+      subGraphs: [{ name: 'empty', entityCount: 0, tripleCount: 0, description: '' }],
+    });
+    await renderWith({
+      ...memory,
+      // Fully hydrated, genuinely empty subgraph (no triples in any
+      // layer for this subgraph).
+      entities: new Map(),
+      entityList: [],
+      allTriples: [],
+      counts: { wm: 0, swm: 0, vm: 0, total: 0 },
+      loading: false,
+      partial: false,
+      layerStatus: { wm: 'ok', swm: 'ok', vm: 'ok' },
+    });
+    await flush();
+
+    const cards = container.querySelectorAll('.v10-sgov-card');
+    const emptyCardEl = cards[0];
+    const stats = emptyCardEl.querySelector('.v10-sgov-card-stats')?.textContent ?? '';
+    // Genuine 0 surfaces — no affordance, no daemon read.
+    expect(stats).toContain('0 triples');
+    expect(stats).not.toContain('…');
+  });
+
+  it('Root card badge renders hydration affordance while canonical is incomplete (GH #819 round 6 — Root parity)', async () => {
+    // Round-6 parity guard — the Root card has the same race:
+    // it derives `tripleCount = rootTriples.length` from
+    // `memory.allTriples`, which starts at []. Same gate +
+    // affordance applies, threaded via the same
+    // `canonicalIncomplete` prop on the SubGraphMiniCard.
+    fetchSubGraphsMock.mockResolvedValueOnce({
+      subGraphs: [{ name: 'alpha', entityCount: 0, tripleCount: 0, description: '' }],
+    });
+    await renderWith({
+      ...memory,
+      entities: new Map(),
+      entityList: [],
+      allTriples: [],
+      counts: { wm: 0, swm: 0, vm: 0, total: 0 },
+      loading: true,
+    });
+    await flush();
+
+    const cards = container.querySelectorAll('.v10-sgov-card');
+    // Root card is last in the grid (rank 999).
+    const rootCardEl = cards[cards.length - 1];
+    expect(rootCardEl.classList.contains('root')).toBe(true);
+    const stats = rootCardEl.querySelector('.v10-sgov-card-stats')?.textContent ?? '';
+    expect(stats).toContain('…');
+    expect(stats).not.toContain('0 triples');
   });
 
   it('Root card keeps its scoped copy when same SPO also appears under a named subgraph (GH #819 round 4 — Codex sweep 2 🔴 #7)', async () => {

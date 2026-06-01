@@ -3962,6 +3962,24 @@ export function SubGraphOverviewGrid({
   // those mixed-layer edges as facts.
   const { total: subtitleTripleCount } = useCanonicalTriples(memory);
 
+  // GH #819 round 6 (Codex sweep 4 🔴 #11) — hydration-state gate
+  // for the per-card badge. `useMemoryEntities` initializes
+  // `allTriples = []` (`useMemoryEntities.ts:590`), so between
+  // `/sub-graph/list` resolving (which fills `subGraphs`) and
+  // WM/SWM/VM finishing (which fills `allTriples`), every named-
+  // and Root-card derives `tripleCount = 0`. Round 5 collapsed
+  // the badge to `card.tripleCount ?? 0`, conflating "still
+  // loading" with "genuine empty". Revive the discriminator at
+  // the grid scope; the badge below uses it to render a hydration
+  // affordance ("…") instead of `0 triples` while canonical is
+  // incomplete. Hydrated-fully state still reads `0 triples`
+  // honestly (genuine zero shows through).
+  const canonicalIncomplete =
+    memory.loading
+    || memory.error !== null
+    || memory.partial
+    || Object.values(memory.layerStatus ?? {}).some(s => s !== 'ok');
+
   // Bucket every triple by its origin sub-graph so each mini-graph
   // renders just its slice. Cap per-bucket via the shared
   // `applyHeaviestSubjectsCap` helper at module scope (see its doc
@@ -4410,6 +4428,7 @@ export function SubGraphOverviewGrid({
           <SubGraphMiniCard
             key={card.slug}
             card={card}
+            canonicalIncomplete={canonicalIncomplete}
             onNodeClick={onNodeClick}
             onOpen={() => onSelectSubGraph(card.slug)}
           />
@@ -4423,6 +4442,7 @@ export function SubGraphOverviewGrid({
         <SubGraphMiniCard
           key={ROOT_SLUG_SENTINEL}
           card={rootCard}
+          canonicalIncomplete={canonicalIncomplete}
           onNodeClick={onNodeClick}
           onOpen={() => onSelectSubGraph(ROOT_SLUG_SENTINEL)}
           variant="root"
@@ -4434,6 +4454,7 @@ export function SubGraphOverviewGrid({
 
 export function SubGraphMiniCard({
   card,
+  canonicalIncomplete = false,
   onNodeClick,
   onOpen,
   variant,
@@ -4445,6 +4466,14 @@ export function SubGraphMiniCard({
     layerCounts: { wm: number; swm: number; vm: number };
     entityTrustByUri: Map<string, TrustLevel>;
   };
+  // GH #819 round 6 — true while WM/SWM/VM are still hydrating
+  // (or any layer query errored). Drives the badge's hydration
+  // affordance so a non-empty subgraph doesn't flash `0 triples`
+  // between `/sub-graph/list` resolve and full layer hydration
+  // (Codex sweep 4 🔴 #11). Defaults to false so consumers that
+  // don't (or can't) thread the discriminator render the badge
+  // exactly as before.
+  canonicalIncomplete?: boolean;
   onNodeClick?: (node: any) => void;
   onOpen: () => void;
   // GH #813 — `root` opts into the quieter neutral-border chrome
@@ -4545,14 +4574,26 @@ export function SubGraphMiniCard({
             quiet case. Same conditional-when-it-has-something-to-
             say pattern as S2's `Pending join requests` empty
             state. */}
+        {/* GH #819 round 6 (Codex sweep 4 🔴 #11) — hydration
+            affordance. `useMemoryEntities` initializes
+            `allTriples = []`, so between `/sub-graph/list`
+            resolve (which fills `subGraphs`) and WM/SWM/VM
+            finishing (which fills `allTriples`), `card.tripleCount`
+            derives 0 even for non-empty subgraphs. Render `…`
+            during that window so the badge doesn't masquerade
+            a hydration race as a genuine empty bucket. Once
+            canonical hydrates, the actual count (including a
+            genuine 0) shows through honestly. */}
         <span
           className="v10-sgov-card-stat"
           title={
-            card.tripleCount !== card.triples.length
-              ? `${card.tripleCount} triples in this subgraph's scope; ${card.triples.length} rendered (cross-card edges whose other endpoint isn't in this subgraph aren't drawn here).`
-              : undefined
+            canonicalIncomplete && card.tripleCount === 0
+              ? 'Loading triples for this subgraph…'
+              : card.tripleCount !== card.triples.length
+                ? `${card.tripleCount} triples in this subgraph's scope; ${card.triples.length} rendered (cross-card edges whose other endpoint isn't in this subgraph aren't drawn here).`
+                : undefined
           }
-        ><b>{card.tripleCount}</b> triples</span>
+        ><b>{canonicalIncomplete && card.tripleCount === 0 ? '…' : card.tripleCount}</b> triples</span>
       </div>
       <div className="v10-sgov-card-pyramid">
         {/* compact mode collapses the empty-counts branch to `null`
