@@ -1389,6 +1389,99 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
     expect(stats).not.toContain('0 triples');
   });
 
+  it('Named card bucket applies canonical residue filter per scope (GH #819 round 4 — Codex sweep 2 🔴 #5)', async () => {
+    // PR #847 round 4 (🔴 #5) — round 3 per-bucket dedup correctly
+    // preserved cross-membership multiplicity but lacked the
+    // residue filter. A WM-residue resource-edge + its promoted
+    // SWM/VM copy in the same subgraph (different SPO keys) would
+    // double-count: both rows survived per-bucket SPO dedup, but
+    // the WM row is unambiguous residue (both endpoints moved).
+    // Round-4 fix: apply `applyCanonicalAdmission` per bucket so
+    // residue drops at the bucket level too.
+    fetchSubGraphsMock.mockResolvedValueOnce({
+      subGraphs: [{ name: 'alpha', entityCount: 2, tripleCount: 0, description: '' }],
+    });
+    const entityList = [
+      // Both entities promoted past WM (canonical 'shared').
+      { uri: 'urn:e:promoted-a', label: 'a', types: [], trustLevel: 'shared', layers: new Set(['working', 'shared']), subGraphs: new Set(['alpha']), properties: new Map(), connections: [] },
+      { uri: 'urn:e:promoted-b', label: 'b', types: [], trustLevel: 'shared', layers: new Set(['working', 'shared']), subGraphs: new Set(['alpha']), properties: new Map(), connections: [] },
+    ];
+    const triples = [
+      // WM residue resource-edge — both endpoints SWM canonical,
+      // row stored at WM → unambiguous residue → MUST DROP from
+      // the bucket per canonical admission.
+      { subject: 'urn:e:promoted-a', predicate: 'http://schema.org/knows', object: 'urn:e:promoted-b', subGraph: 'alpha', layer: 'working' },
+      // The honest SWM copy — admits.
+      { subject: 'urn:e:promoted-a', predicate: 'http://schema.org/knows', object: 'urn:e:promoted-b', subGraph: 'alpha', layer: 'shared' },
+    ];
+    await renderWith({
+      ...memory,
+      entities: new Map(entityList.map(e => [e.uri, e])),
+      entityList,
+      allTriples: triples,
+      counts: { wm: 0, swm: 2, vm: 0, total: 2 },
+    });
+    await flush();
+
+    const cards = container.querySelectorAll('.v10-sgov-card');
+    const alphaCardEl = cards[0];
+    const stats = alphaCardEl.querySelector('.v10-sgov-card-stats')?.textContent ?? '';
+    // 1 admitted SPO post-residue + canonical-dedup. Pre-fix the
+    // bucket counted both rows (SPO keys collapsed them, BUT the
+    // residue row would have admitted distinct copies if the
+    // objects differed). Lock the residue-drop invariant.
+    expect(stats).toContain('1 triples');
+    expect(stats).not.toContain('2 triples');
+  });
+
+  it('Root card keeps its scoped copy when same SPO also appears under a named subgraph (GH #819 round 4 — Codex sweep 2 🔴 #7)', async () => {
+    // PR #847 round 4 (🔴 #7) — Root card sourced from
+    // `canonicalTriples.filter(!t.subGraph)`. Global SPO dedup
+    // made this order-dependent: if a tagged copy of the same
+    // SPO arrived first, the root untagged copy lost the dedup
+    // race; `filter(!t.subGraph)` then dropped the surviving
+    // tagged entry; Root rendered 0.
+    //
+    // Round-4 fix: build Root candidates from raw root-scoped
+    // rows (`!t.subGraph`), then `applyCanonicalAdmission` with
+    // per-call dedup state. Each scope keeps its own copy.
+    fetchSubGraphsMock.mockResolvedValueOnce({
+      subGraphs: [{ name: 'alpha', entityCount: 0, tripleCount: 0, description: '' }],
+    });
+    const entityList = [
+      // Root entity (no subGraph membership).
+      { uri: 'urn:e:r', label: 'r', types: [], trustLevel: 'shared', layers: new Set(['shared']), subGraphs: new Set<string>(), properties: new Map(), connections: [] },
+    ];
+    const triples = [
+      // Same SPO shipped under named subgraph alpha — arrives
+      // first in iteration order so it wins the global SPO dedup
+      // pre-fix.
+      { subject: 'urn:e:r', predicate: 'http://schema.org/name', object: '"R"', subGraph: 'alpha', layer: 'shared' },
+      // Untagged root copy — pre-fix this lost the global SPO
+      // dedup; `filter(!t.subGraph)` then dropped the tagged
+      // survivor; Root rendered 0.
+      { subject: 'urn:e:r', predicate: 'http://schema.org/name', object: '"R"', layer: 'shared' },
+    ];
+    await renderWith({
+      ...memory,
+      entities: new Map(entityList.map(e => [e.uri, e])),
+      entityList,
+      allTriples: triples,
+      counts: { wm: 0, swm: 1, vm: 0, total: 1 },
+    });
+    await flush();
+
+    const cards = container.querySelectorAll('.v10-sgov-card');
+    // Root card is last in the grid (rank 999).
+    const rootCardEl = cards[cards.length - 1];
+    expect(rootCardEl.classList.contains('root')).toBe(true);
+    const stats = rootCardEl.querySelector('.v10-sgov-card-stats')?.textContent ?? '';
+    // Root keeps its scoped SPO copy — pre-fix this was 0
+    // (order-dependent dedup race lost).
+    expect(stats).toContain('1 triples');
+    expect(stats).not.toContain('0 triples');
+  });
+
   it('Root card cap honors MAX_PER_CARD even with a single dominant subject (Codex sweep 2)', async () => {
     // PR #818 sweep 2 — sweep-1 sampling shape had a defect:
     // `if (kept >= MAX_PER_CARD) break;` checked AFTER adding the

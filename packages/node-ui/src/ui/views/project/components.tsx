@@ -59,7 +59,7 @@ import {
   entityAuthorUri, transitionAgentUri, transitionAtISO,
   shortType, shortPred, entityMeta,
   buildLayerGraphOptions, getDescription, neighborhoodTriples, neutraliseBuiltinNamespaces,
-  matchesSearch, humanizeLabel, layerNoun, useLayerTriples, useCanonicalTriples,
+  matchesSearch, humanizeLabel, layerNoun, useLayerTriples, useCanonicalTriples, applyCanonicalAdmission,
   filterTriplesToEntities, admitTripleForScope,
   entityTimestamp, formatRelativeTime, formatTimelineBucket, formatTrailTimestamp,
   type LayerView, type LayerContentTab, type KAPane,
@@ -3960,7 +3960,7 @@ export function SubGraphOverviewGrid({
   // residue + cross-graph dedup but still dropped mixed-layer
   // edges. The canonical helper's BOTH-endpoints-moved rule keeps
   // those mixed-layer edges as facts.
-  const { triples: canonicalTriples, total: subtitleTripleCount } = useCanonicalTriples(memory);
+  const { total: subtitleTripleCount } = useCanonicalTriples(memory);
 
   // GH #819 round 3 (Codex sweep 1 🔴 #3) — discriminator for the
   // named-card `tripleCount` fallback below. The canonical universe
@@ -3993,46 +3993,50 @@ export function SubGraphOverviewGrid({
   // block for the sampling / dense-pack / residual-fallback
   // rationale carried over from PR #818 sweeps 1-3).
   //
-  // GH #819 round 3 (Codex sweep 1 🔴 #1) — re-dedupe per
-  // sub-graph bucket here rather than reading from
-  // `canonicalTriples`. `useCanonicalTriples` dedupes by
-  // `(canonical(s), p, canonical(o))` GLOBALLY across the whole
-  // project (correct for aggregate-total consumers). But the same
-  // `(s, p, o)` legitimately shipped under TWO different named
-  // sub-graphs (e.g. a cross-membership entity referenced from
-  // both alpha and beta) must surface in BOTH cards — only one
-  // copy survives in `canonicalTriples`, whichever row was
-  // visited first. Reading per-bucket from a globally-deduped set
-  // under-counts the late-arrival card by exactly the shared SPO
-  // count. Iterate `memory.allTriples` here and re-dedupe with
-  // `subGraph` implicit in the bucket scope so each card keeps
-  // its own scoped copy.
+  // GH #819 round 4 (Codex sweep 2 🔴 #5) — apply the canonical
+  // admission rule (residue filter + canonical-SPO dedup) PER
+  // BUCKET. Round 3's per-bucket SPO dedup correctly preserved
+  // cross-membership multiplicity (same SPO in two sub-graphs →
+  // both cards admit) but lacked the residue filter — so a WM
+  // residue row + its promoted SWM/VM copy in the SAME bucket
+  // (different objects, distinct SPO keys) could double-count
+  // and inflate `card.tripleCount` above the canonicalized
+  // subtitle total. `applyCanonicalAdmission` (shared with
+  // `useCanonicalTriples`) applies the residue rule + SPO dedup
+  // independently per scope — per-call dedup namespace means
+  // cross-membership multiplicity stays correct.
   //
   // `tripleCountBySubGraph` carries the pre-cap distinct total so
   // the card stat reads the true count (decoupled from the
   // post-cap rendered slice — same convention as Root card +
   // PR #839 sweep 2's helper-extract contract).
   const { triplesBySubGraph, tripleCountBySubGraph } = useMemo(() => {
-    const bySg = new Map<string, Triple[]>();
-    const seenBySg = new Map<string, Set<string>>();
+    // First pass: group raw rows by their subGraph tag.
+    const rawBySg = new Map<string, LayeredTriple[]>();
     for (const t of memory.allTriples) {
       if (!t.subGraph) continue;
-      const key = `${canonicalEntityUri(t.subject)}|${t.predicate}|${canonicalEntityUri(t.object)}`;
-      let seen = seenBySg.get(t.subGraph);
-      if (!seen) { seen = new Set(); seenBySg.set(t.subGraph, seen); }
-      if (seen.has(key)) continue;
-      seen.add(key);
-      let arr = bySg.get(t.subGraph);
-      if (!arr) { arr = []; bySg.set(t.subGraph, arr); }
-      arr.push({ subject: t.subject, predicate: t.predicate, object: t.object });
+      let arr = rawBySg.get(t.subGraph);
+      if (!arr) { arr = []; rawBySg.set(t.subGraph, arr); }
+      arr.push(t);
     }
+    // Second pass: apply canonical admission (residue +
+    // canonical-SPO dedup) per bucket independently. Per-call
+    // dedup state means cross-scope SPOs each admit in their
+    // own scope (round 3 🔴 #1 property preserved).
+    const bySg = new Map<string, Triple[]>();
     const countBySg = new Map<string, number>();
-    for (const [sg, triples] of bySg) {
-      countBySg.set(sg, triples.length);
-      bySg.set(sg, applyHeaviestSubjectsCap(triples));
+    for (const [sg, rawRows] of rawBySg) {
+      const admitted = applyCanonicalAdmission(rawRows, memory.entities);
+      const stripped = admitted.map(t => ({
+        subject: t.subject,
+        predicate: t.predicate,
+        object: t.object,
+      }));
+      countBySg.set(sg, stripped.length);
+      bySg.set(sg, applyHeaviestSubjectsCap(stripped));
     }
     return { triplesBySubGraph: bySg, tripleCountBySubGraph: countBySg };
-  }, [memory.allTriples]);
+  }, [memory.allTriples, memory.entities]);
 
   // Per-sub-graph layer counts — drives the mini pyramid on each card so
   // you can see at a glance which sub-graphs are mostly verified vs still
@@ -4157,13 +4161,9 @@ export function SubGraphOverviewGrid({
           // error, partial result (some layer query failed), or any
           // per-layer status not yet 'ok'. Round 2 gated only on
           // `memory.loading` which missed the post-hydration error
-          // case (`loading` flips false but `canonicalTriples` is
-          // still incomplete because a layer query failed). After a
-          // layer failure, a sub-graph whose triples live in the
-          // missing layer would render `0 triples` instead of
-          // falling back to the daemon's lower-bound. The widened
-          // gate keeps the fallback active for every state where
-          // the canonical universe can't be trusted as complete.
+          // case (`loading` flips false but the canonical universe
+          // is still incomplete because a layer query failed).
+          //
           tripleCount: canonicalIncomplete
             ? (tripleCountBySubGraph.get(sg.name) ?? sg.tripleCount)
             : (tripleCountBySubGraph.get(sg.name) ?? 0),
@@ -4261,15 +4261,26 @@ export function SubGraphOverviewGrid({
     // pre-sweep-6 OR-membership admitted rows whose non-root
     // object rendered as a phantom node in the Root mini-graph.
     //
-    // GH #819 — source from `useCanonicalTriples` so the Root
-    // card inherits the canonical dedup + residue rule (same
-    // input every other aggregate triple consumer reads from);
-    // then narrow to `!t.subGraph` for the Root scope and route
-    // through `filterTriplesToEntities` for AND-membership +
-    // rdf:type exemption. Replaces the inline canonical-SPO
-    // dedup that lived here from sweeps 1+4+6 — the helper has
-    // already done that work.
-    const candidateTriples = canonicalTriples.filter(t => !t.subGraph);
+    // GH #819 round 4 (Codex sweep 2 🔴 #7) — Root candidates
+    // are root-scoped rows (`!t.subGraph`) from raw
+    // `memory.allTriples`, then passed through
+    // `applyCanonicalAdmission` for independent per-scope
+    // residue + SPO dedup. Pre-round-4 this filtered
+    // `canonicalTriples` (which had already been GLOBALLY
+    // deduped) for `!t.subGraph` rows — order-dependent: if a
+    // tagged copy of the same SPO arrived first in the global
+    // pass, the root copy lost the dedup race and `filter(!t.subGraph)`
+    // dropped the surviving entry, leaving Root showing 0.
+    // Same root-cause family as 🔴 #5 — global dedup namespace
+    // collided with per-scope needs. Per-call namespace via
+    // `applyCanonicalAdmission` fixes both.
+    //
+    // Then routed through `filterTriplesToEntities` for AND-
+    // membership + rdf:type exemption (PR #818 sweep 6
+    // admission rule preserved).
+    const rootScopedRaw = memory.allTriples.filter(t => !t.subGraph);
+    const candidateTriples = applyCanonicalAdmission(rootScopedRaw, memory.entities)
+      .map(t => ({ subject: t.subject, predicate: t.predicate, object: t.object }));
     const rootTriples = filterTriplesToEntities(candidateTriples, rootEntityUris);
     // PR #818 Codex sweep 4 (finding 3) — shared cap helper. The
     // earlier inline copy duplicated the named-card sampling shape
@@ -4300,7 +4311,7 @@ export function SubGraphOverviewGrid({
       layerCounts: { wm, swm, vm },
       entityTrustByUri: rootEntityTrust,
     };
-  }, [memory.entityList, canonicalTriples, profile]);
+  }, [memory.entityList, memory.allTriples, memory.entities, profile]);
 
   if (loading && cards.length === 0) {
     return (

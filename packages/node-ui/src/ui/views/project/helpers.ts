@@ -520,35 +520,62 @@ export function admitTripleForScope(
  * the scope primitive). `total` is a convenience for count-only
  * consumers that don't need the underlying array.
  */
+/**
+ * Pure non-hook admission pass shared by `useCanonicalTriples`
+ * (project-wide) and per-scope consumers (named-subgraph buckets,
+ * Root mini-card). Applies the canonical residue rule + canonical-
+ * SPO dedup to whatever triple slice the caller provides. The
+ * dedup state lives PER CALL, so per-scope consumers get an
+ * independent `(s,p,o)` namespace — same SPO that appears in two
+ * different scopes (cross-membership entity referenced from both
+ * alpha and beta sub-graphs) admits in each scope's call.
+ *
+ * Residue rule (matches `useCanonicalTriples`): drops a triple
+ * only when BOTH endpoints have canonical `trustLevel`s
+ * disagreeing with the row's `layer`. Mixed-layer edges (one
+ * endpoint still at `t.layer`, e.g. a cross-layer reference) and
+ * literal-object rows (object can't have moved, since literals
+ * aren't entities) admit. Orphan subjects (no entity record) pass
+ * through unfiltered — same `subjectEntity &&` guard as
+ * `useLayerTriples`.
+ *
+ * GH #819 round 4 (Codex sweep 2 🔴 #5 + 🔴 #7) — extracted so
+ * `triplesBySubGraph` per-bucket admission and Root card
+ * derivation can share the canonical helper's row-level admission
+ * rule WITHOUT sharing its global dedup namespace (which would
+ * collide cross-scope SPOs).
+ */
+export function applyCanonicalAdmission(
+  triples: readonly LayeredTriple[],
+  entities: ReadonlyMap<string, MemoryEntity>,
+): LayeredTriple[] {
+  const seen = new Set<string>();
+  const out: LayeredTriple[] = [];
+  for (const t of triples) {
+    const subjectEntity = entities.get(canonicalEntityUri(t.subject));
+    const subjectMoved =
+      subjectEntity !== undefined && subjectEntity.trustLevel !== t.layer;
+    let dropAsResidue = false;
+    if (subjectMoved && isResourceObject(t.object)) {
+      const objectEntity = entities.get(canonicalEntityUri(t.object));
+      if (objectEntity && objectEntity.trustLevel !== t.layer) {
+        dropAsResidue = true;
+      }
+    }
+    if (dropAsResidue) continue;
+    const key = `${canonicalEntityUri(t.subject)}|${t.predicate}|${canonicalEntityUri(t.object)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(t);
+  }
+  return out;
+}
+
 export function useCanonicalTriples(
   memory: ReturnType<typeof useMemoryEntities>,
 ): { triples: LayeredTriple[]; total: number } {
   return useMemo(() => {
-    const seen = new Set<string>();
-    const out: LayeredTriple[] = [];
-    for (const t of memory.allTriples) {
-      const subjectEntity = memory.entities.get(canonicalEntityUri(t.subject));
-      const subjectMoved =
-        subjectEntity !== undefined && subjectEntity.trustLevel !== t.layer;
-      // Object-side residue check only fires for resource-shaped
-      // objects (literals can't be entities and so can't be
-      // "promoted"). When both endpoints have moved past the row's
-      // layer the triple is unambiguous residue and drops.
-      let dropAsResidue = false;
-      if (subjectMoved && isResourceObject(t.object)) {
-        const objectEntity = memory.entities.get(canonicalEntityUri(t.object));
-        if (objectEntity && objectEntity.trustLevel !== t.layer) {
-          dropAsResidue = true;
-        }
-      }
-      if (dropAsResidue) continue;
-      // Canonical-SPO dedup keyed on the canonical forms so wrapped
-      // (`<urn:...>`) and bare variants of the same triple collapse.
-      const key = `${canonicalEntityUri(t.subject)}|${t.predicate}|${canonicalEntityUri(t.object)}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push(t);
-    }
+    const out = applyCanonicalAdmission(memory.allTriples, memory.entities);
     return { triples: out, total: out.length };
   }, [memory.allTriples, memory.entities]);
 }
