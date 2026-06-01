@@ -5,7 +5,17 @@ import {
   assertionSubgraphLine,
   buildAssertionTrail,
   buildBreadcrumbHops,
+  primarySubGraphOf,
 } from '../src/ui/views/project/helpers.js';
+import type { MemoryEntity } from '../src/ui/hooks/useMemoryEntities.js';
+
+function entity(subGraphs: string[]): MemoryEntity {
+  return {
+    uri: 'urn:e', label: 'E', types: [], trustLevel: 'working',
+    layers: new Set(['working']), subGraphs: new Set(subGraphs),
+    properties: new Map(), connections: [],
+  };
+}
 
 // S4 — pure helpers behind the assertion detail view. These pin the
 // lifecycle-trail tone mapping (T01), the Promote CTA visibility
@@ -172,5 +182,22 @@ describe('buildBreadcrumbHops — cross-subgraph update (T05)', () => {
     });
     expect(after[1].label).toBe('Other');
     expect(after[2].label).toBe('Entity B');
+  });
+});
+
+describe('primarySubGraphOf — M2(b) cross-subgraph follow decision (T14)', () => {
+  it('returns the first non-meta subgraph slug', () => {
+    expect(primarySubGraphOf(entity(['demo']))).toBe('demo');
+    expect(primarySubGraphOf(entity(['meta', 'research']))).toBe('research');
+  });
+
+  it('returns null for a root-only / meta-only entity', () => {
+    expect(primarySubGraphOf(entity([]))).toBeNull();
+    expect(primarySubGraphOf(entity(['meta']))).toBeNull();
+  });
+
+  it('returns null for a missing entity', () => {
+    expect(primarySubGraphOf(undefined)).toBeNull();
+    expect(primarySubGraphOf(null)).toBeNull();
   });
 });

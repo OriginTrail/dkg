@@ -1012,6 +1012,21 @@ export function buildAssertionTrail(
   }));
 }
 
+/**
+ * The primary (first non-`meta`) sub-graph slug an entity has triples
+ * in, or null when it lives only in the root bucket / meta. Mirrors the
+ * `SubGraphBadge` rule (lowest-rank binding wins; most entities live in
+ * exactly one sub-graph). Used by M2 option (b) to decide whether a
+ * cross-subgraph entity jump should switch `activeSubGraph`.
+ */
+export function primarySubGraphOf(entity: MemoryEntity | undefined | null): string | null {
+  if (!entity) return null;
+  for (const s of entity.subGraphs) {
+    if (s !== 'meta') return s;
+  }
+  return null;
+}
+
 // ─── S5 Breadcrumb navigation ───────────────────────────────
 // `Context Graph › {Layer | Subgraph} › {Entity | Assertion}`. Lives
 // inline in the persistent ProjectHeaderStrip. Hop content rules

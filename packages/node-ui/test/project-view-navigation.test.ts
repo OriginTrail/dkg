@@ -684,26 +684,57 @@ describe('ProjectView entity detail navigation', () => {
     expect(query('overview-card').dataset.participantsStatus).toBe('loading');
   });
 
-  it('keeps the originating subgraph stable while following cross-subgraph entity links', async () => {
+  // M2 option (b) — ENABLED alongside S5. Following a link to an entity
+  // in a DIFFERENT sub-graph switches activeSubGraph (the breadcrumb
+  // makes the move visible); closing still returns to the ORIGINATING
+  // sub-graph page (the M2 origin captured at first open). (T14 / T15)
+  it('follows a cross-subgraph entity link → activeSubGraph switches; close returns to origin', async () => {
     await click('switch-subgraphs');
     await click('select-subgraph-demo');
     await click('subgraph-tab-graph');
     expect(query('active-subgraph').textContent).toBe('demo');
     expect(query('subgraph-detail').dataset.tab).toBe('graph');
 
+    // Open an entity that lives in the CURRENT subgraph — no switch.
     await click('open-subgraph-entity');
     expect(query('entity-detail').dataset.entity).toBe('urn:entity:demo');
     expect(query('active-subgraph').textContent).toBe('demo');
 
+    // Follow a link to urn:entity:other (subGraphs: {'other'}) — M2(b)
+    // switches activeSubGraph to 'other'; the breadcrumb reflects it via
+    // the active-subgraph mirror.
     await click('open-related-entity');
     expect(query('entity-detail').dataset.entity).toBe('urn:entity:other');
-    expect(query('active-subgraph').textContent).toBe('demo');
+    expect(query('active-subgraph').textContent).toBe('other');
+    // The breadcrumb's trailing hop tracks the followed entity.
+    expect(query('project-strip').dataset.detailLabel).toBe('Other entity');
+
+    // Close — origin restore returns to the ORIGINATING subgraph (demo),
+    // not the followed-into one (other). (T15 — origin model intact.)
+    await click('detail-back');
+    await flush();
+    expect(query('subgraph-detail').dataset.slug).toBe('demo');
+    expect(query('subgraph-detail').dataset.tab).toBe('graph');
+  });
+
+  // T15 — the M2 ORIGINAL behavior (no cross-subgraph involved) is
+  // untouched: open from a layer list → close → same layer / subtab /
+  // scroll, and opening from a plain layer does NOT spuriously jump into
+  // a subgraph just because the entity belongs to one.
+  it('opening an entity from a plain layer list does NOT switch into a subgraph (M2(b) guard)', async () => {
+    await click('switch-wm');
+    // urn:entity:overlap has subGraphs {'demo'} but we open it from the
+    // WM layer list (no active subgraph) — must stay layer-scoped.
+    await click('open-layer-overlap-entity');
+    await flush();
+    expect(query('entity-detail').dataset.entity).toBe('urn:entity:overlap');
+    // No subgraph page was entered.
+    expect(query('active-subgraph').textContent).toBe('none');
 
     await click('detail-back');
     await flush();
-
-    expect(query('subgraph-detail').dataset.slug).toBe('demo');
-    expect(query('subgraph-detail').dataset.tab).toBe('graph');
+    expect(query('layer-detail').dataset.layer).toBe('wm');
+    expect(document.querySelector('[data-testid="subgraph-detail"]')).toBeNull();
   });
 
   it('clears stale detail origin when the selected entity disappears', async () => {

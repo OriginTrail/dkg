@@ -11,6 +11,7 @@ import {
   useMemoryEntities,
   type LayeredTriple,
   type TrustLevel,
+  type MemoryEntity,
 } from '../hooks/useMemoryEntities.js';
 import { useProjectProfile, ProjectProfileContext } from '../hooks/useProjectProfile.js';
 import { useAgents, AgentsContext } from '../hooks/useAgents.js';
@@ -21,7 +22,7 @@ import { ActivityFeed } from '../components/ActivityFeed.js';
 import { SubGraphBar } from '../components/SubGraphBar.js';
 import { CONTEXT_GRAPH_PRIMER_TAB } from '../lib/contextGraphPrimer.js';
 import { useTabsStore } from '../stores/tabs.js';
-import { shouldFetchSwmAttribution, type LayerView, type LayerContentTab, type SubGraphTab } from './project/helpers.js';
+import { shouldFetchSwmAttribution, primarySubGraphOf, type LayerView, type LayerContentTab, type SubGraphTab } from './project/helpers.js';
 import {
   ProjectHeaderStrip,
   LayerSwitcher,
@@ -224,6 +225,11 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   // open without listing the state in its deps.
   const selectedAssertionRef = useRef<AssertionInfo | null>(null);
   useEffect(() => { selectedAssertionRef.current = selectedAssertion; }, [selectedAssertion]);
+  // M2 option (b) — mirror the full entity map so `handleNavigate` can
+  // resolve a navigated entity's primary sub-graph synchronously
+  // (to decide whether to follow a cross-subgraph link) WITHOUT listing
+  // the map in its deps and churning the callback identity.
+  const entitiesRef = useRef<ReadonlyMap<string, MemoryEntity>>(new Map());
   const [layerContentTabs, setLayerContentTabs] = useState<Record<MemoryLayerView, LayerContentTab>>(
     DEFAULT_LAYER_TABS,
   );
@@ -391,6 +397,9 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   // DashboardView caller, which already opts in for the same
   // failed-vs-empty-distinct reason.
   const rawMemory = useMemoryEntities(contextGraphId, { signalErrors: true });
+  // M2 option (b) — keep the entity-map ref in sync so `handleNavigate`
+  // can resolve a navigated entity's sub-graph synchronously.
+  useEffect(() => { entitiesRef.current = rawMemory.entities; }, [rawMemory.entities]);
   // SWM attribution drives the SWM graph's agent-tint legend (its
   // sole remaining consumer). PR #694 review — the Overview no
   // longer reads this stream (lifecycle source replaced it), so the
@@ -658,10 +667,6 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     setSubGraphTabs(prev => prev[slug] === tab ? prev : { ...prev, [slug]: tab });
   }, []);
 
-  // M2 keeps the user's origin stable: linked entities open in the detail
-  // pane, but the underlying layer/sub-graph page does not silently change
-  // until S5 adds breadcrumbs that can make that movement visible.
-  //
   // Intent: a brand-new top-level open (no selected entity yet) resets
   // the layer context; in-detail navigation (a click inside an open
   // detail) keeps the prior layer context. We read both `selectedUri`
@@ -669,11 +674,36 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   // `prev` argument) so the callback identity stays stable — listing
   // them in deps would re-create `handleNavigate` on every navigation
   // and rebuild every downstream memo / callback that consumes it.
+  //
+  // M2 option (b) — silent cross-subgraph switch, ENABLED alongside S5.
+  // When following a link to an entity that lives in a DIFFERENT
+  // sub-graph than the one currently in scope, switch `activeSubGraph`
+  // to the target's sub-graph. Pre-S5 this was suppressed (option (a):
+  // no switch) because the move was invisible; now the breadcrumb makes
+  // it visible (`Context Graph › <new subgraph> › Entity`), so the
+  // switch is acceptable. Routed through `setActiveSubGraphSync` (PR
+  // #793 Bug N) so the breadcrumb's React tree — and the ref-keyed
+  // discriminators — see the new subgraph synchronously. The M2 origin
+  // snapshot was captured at the FIRST open, so closing still returns to
+  // the originating page, not the followed-into one.
+  //
+  // Only fires when ALREADY in a sub-graph page (`activeSubGraphRef`):
+  // opening an entity from a plain layer list must NOT spuriously jump
+  // into a sub-graph just because the entity happens to belong to one.
   const handleNavigate = useCallback((uri: string, originScrollKey?: string, layerContext?: MemoryLayerView) => {
     const hadSelection = selectedUriRef.current != null;
     openEntityDetail(uri, originScrollKey);
     setSelectedLayerContext(prev => layerContext ?? (hadSelection ? prev : null));
-  }, [openEntityDetail]);
+    const currentSubGraph = activeSubGraphRef.current;
+    if (currentSubGraph) {
+      const targetSubGraph = primarySubGraphOf(
+        entitiesRef.current.get(uri) ?? entitiesRef.current.get(canonicalEntityUri(uri)),
+      );
+      if (targetSubGraph && targetSubGraph !== currentSubGraph) {
+        setActiveSubGraphSync(targetSubGraph);
+      }
+    }
+  }, [openEntityDetail, setActiveSubGraphSync]);
 
   const handleDetailClose = useCallback(() => {
     const origin = detailOriginRef.current;
