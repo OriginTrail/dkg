@@ -1623,6 +1623,13 @@ export class DKGAgent {
     const effectiveRole = this.config.nodeRole ?? 'edge';
     const ackSignerCandidates = this.getACKSignerCandidateWallets(ctx);
     let onChainIdentityId = 0n;
+    // #894 / Codex PR #901: distinguishes a 0n identity caused by a transient
+    // boot-time chain failure (RPC timeout/unreachable — recoverable, so the
+    // StorageACK path must keep retrying + re-resolve once RPC returns) from
+    // an intentional 0n (e.g. an edge node that never provisions on-chain — it
+    // never reaches the core-only ACK block anyway). Set when the boot
+    // identity block times out or errors below.
+    let bootChainIdentityUnresolvedTransient = false;
     const ensureACKCandidateWalletsRegistered = async (
       attemptCtx: OperationContext,
     ): Promise<boolean> => {
@@ -1698,6 +1705,15 @@ export class DKGAgent {
             this.log.info(ctx, `Recovered identityId=${onChainIdentityId} after partial failure`);
           }
         } catch { /* ignore — boot proceeds with identity unresolved */ }
+        // The boot identity block hit a timeout or error. If it still left the
+        // identity at 0n, that 0n is transient (RPC was unreachable/slow), not
+        // a settled "this node has no identity" — flag it so the StorageACK
+        // path re-resolves and recovers once the chain is reachable again
+        // (#894 / Codex PR #901). A node that genuinely has no identity
+        // resolves 0n on the happy path WITHOUT throwing, leaving this false.
+        if (onChainIdentityId === 0n) {
+          bootChainIdentityUnresolvedTransient = true;
+        }
       }
       if (onChainIdentityId > 0n) {
         if (effectiveRole === 'core') {
@@ -1724,6 +1740,37 @@ export class DKGAgent {
           options: { repairWallets?: boolean } = {},
         ): Promise<'registered' | 'retryable' | 'disabled'> => {
           if (storageACKProtocolRegistered) return 'registered';
+          // #894 / Codex PR #901: background identity re-resolution. If boot
+          // left the identity unresolved because of a transient chain failure
+          // (RPC timeout/unreachable), re-probe the chain on each attempt —
+          // the scheduled retry loop below is the background re-resolver, so
+          // ACK registration recovers as soon as the RPC is reachable again.
+          // We do NOT re-probe on a settled 0n (that flag stays false), so an
+          // intentional no-identity node doesn't spin the chain pointlessly.
+          if (onChainIdentityId === 0n && bootChainIdentityUnresolvedTransient) {
+            try {
+              const reresolved = await raceWithBootTimeout(
+                this.chain.getIdentityId(),
+                BOOT_CHAIN_IDENTITY_TIMEOUT_MS,
+                'StorageACK identity re-resolution',
+              );
+              if (reresolved > 0n) {
+                onChainIdentityId = reresolved;
+                bootChainIdentityUnresolvedTransient = false;
+                this.publisher.setIdentityId(onChainIdentityId);
+                this.log.info(
+                  attemptCtx,
+                  `Recovered on-chain identity=${onChainIdentityId} for StorageACK after a transient boot-time chain failure`,
+                );
+              }
+            } catch (err) {
+              this.log.warn(
+                attemptCtx,
+                `StorageACK identity re-resolution failed (chain still unreachable?), will retry: ` +
+                `${err instanceof Error ? err.message : String(err)}`,
+              );
+            }
+          }
           if (onChainIdentityId > 0n) {
             const registrationSucceeded = options.repairWallets === false
               ? true
@@ -1967,6 +2014,15 @@ export class DKGAgent {
               `Registered V10 StorageACK handler (identity=${onChainIdentityId}, signer=${ackSignerWallet.address})`,
             );
             return 'registered';
+          } else if (bootChainIdentityUnresolvedTransient) {
+            // #894 / Codex PR #901: identity is still 0n only because the
+            // chain was unreachable at boot and the re-resolution above hasn't
+            // recovered it yet. This is recoverable, so report 'retryable' —
+            // the scheduled retry keeps re-probing and registers ACK once the
+            // RPC returns, instead of leaving a core node permanently
+            // un-advertised until restart.
+            this.log.warn(attemptCtx, `Deferring V10 StorageACK handler registration — on-chain identity not yet resolved (transient chain outage at boot); will retry`);
+            return 'retryable';
           } else {
             this.log.warn(attemptCtx, `Skipping V10 StorageACK handler registration — identity not yet provisioned`);
             return 'disabled';

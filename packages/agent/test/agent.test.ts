@@ -158,6 +158,28 @@ class FlakyRegistrationACKChainAdapter extends MockChainAdapter {
   }
 }
 
+// #894 / Codex PR #901: simulates a transient RPC outage during boot-time
+// identity resolution. The seeded identity exists the whole time, but the
+// first `failFor` `getIdentityId()` calls reject (RPC unreachable). Boot must
+// still complete (HTTP readiness can't depend on chain reachability); the
+// StorageACK path's background re-resolution then recovers the identity on a
+// later call and registers the handler.
+class TransientIdentityFailureChainAdapter extends MockChainAdapter {
+  identityCalls = 0;
+
+  constructor(chainId: string, signerAddress: string, private readonly failFor: number) {
+    super(chainId, signerAddress);
+  }
+
+  override async getIdentityId(): Promise<bigint> {
+    this.identityCalls += 1;
+    if (this.identityCalls <= this.failFor) {
+      throw new Error(`connect ECONNREFUSED 127.0.0.1:8545 (simulated transient RPC outage, call #${this.identityCalls})`);
+    }
+    return super.getIdentityId();
+  }
+}
+
 class ContextAuthorizedPublisherChainAdapter extends MockChainAdapter {
   capturedPublisherAddress?: string;
 
@@ -1390,6 +1412,41 @@ describe('DKGAgent ACK signer gating', () => {
 
       expect(chain.ensureCalls).toBeGreaterThanOrEqual(2);
       expect(await chain.isOperationalWalletRegistered(45n, ackSigner.address)).toBe(true);
+      expect(agent.node.libp2p.getProtocols()).toContain(PROTOCOL_STORAGE_ACK);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('recovers StorageACK registration after a transient boot-time chain outage (#894 / Codex PR #901)', async () => {
+    // The on-chain identity exists, but the chain is unreachable for the two
+    // boot-time identity lookups (initial + recovery). Boot must NOT hang or
+    // throw — HTTP readiness can't depend on chain reachability — and the
+    // identity is left at 0n. The StorageACK path then re-resolves the
+    // identity on its next attempt (call #3, chain now reachable) and registers
+    // the handler, instead of staying permanently 'disabled' until restart.
+    const primary = ethers.Wallet.createRandom();
+    const ackSigner = ethers.Wallet.createRandom();
+    const chain = new TransientIdentityFailureChainAdapter('mock:31337', primary.address, 2);
+    chain.seedIdentity(primary.address, 47n);
+
+    const agent = await DKGAgent.create({
+      name: 'AckTransientIdentityRecovery',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      chainAdapter: chain,
+      nodeRole: 'core',
+      ackSignerKey: ackSigner.privateKey,
+    });
+
+    try {
+      // Boot completes despite the two failed boot-time identity lookups.
+      await agent.start();
+
+      // The third lookup (the StorageACK background re-resolution, awaited
+      // during start) recovered the identity, so the handler is registered.
+      expect(chain.identityCalls).toBeGreaterThanOrEqual(3);
+      expect(await chain.isOperationalWalletRegistered(47n, ackSigner.address)).toBe(true);
       expect(agent.node.libp2p.getProtocols()).toContain(PROTOCOL_STORAGE_ACK);
     } finally {
       await agent.stop().catch(() => {});
