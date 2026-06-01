@@ -121,7 +121,12 @@ describe('PCA write methods enrich opaque custom-error reverts on rethrow (codex
   });
 
   it('non-Error / non-custom-error throws propagate unchanged (helper must not swallow or rewrite)', async () => {
-    // (a) plain Error with no revert data — message stays byte-identical.
+    // (a) plain Error with no revert data — the PCA-enrichment helper
+    // must not rewrite or swallow the inner classification. The
+    // transport (`sendContractTransaction`) is allowed to prefix
+    // operator context (RPC endpoint exhaustion) and attach the
+    // original via `.cause`, so we assert the original message is
+    // preserved as a substring rather than byte-identical.
     const plain = adapterWithFakeNft({
       settle: async () => {
         throw new Error('connect ECONNREFUSED 127.0.0.1:8545');
@@ -132,7 +137,7 @@ describe('PCA write methods enrich opaque custom-error reverts on rethrow (codex
       .then(() => null)
       .catch((e) => e as Error);
     expect(e1).toBeInstanceOf(Error);
-    expect(e1!.message).toBe('connect ECONNREFUSED 127.0.0.1:8545');
+    expect(e1!.message).toContain('connect ECONNREFUSED 127.0.0.1:8545');
 
     // (b) non-Error throw (string) — propagated as-is, not wrapped.
     const nonError = adapterWithFakeNft({
