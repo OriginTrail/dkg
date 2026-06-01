@@ -490,21 +490,13 @@ describe('SubGraphOverviewGrid — header subtitle anchors (PR #793 round 4.1, G
 
     const sub = container.querySelector('.v10-sgov-sub');
     expect(sub).toBeTruthy();
-    // GH #819 round 7 (Codex sweep 5 🔴 #13) — `'o-wm-mixed'`
-    // (and `'o-swm'`) are bare strings with no `urn:`/`http:`
-    // prefix → `isResourceObject` returns false → they're treated
-    // as literals. Row 2 has the same (subject, predicate) as the
-    // SWM-canonical row 1, the subject has moved past WM, and a
-    // canonical-layer literal exists for `(promoted-a, p)` → row 2
-    // IS literal-residue and drops under the round-7 rule.
-    // Pre-round-7 the resource-only residue rule admitted row 2;
-    // this test originally locked that "consistent-wrong" shape
-    // (ux-lead verdict-A revert, see PR #818 sweep 4). Round 7
-    // corrects it. Row 3 (promoted→promoted at WM, both endpoints
-    // moved) still drops as full-residue. Only the honest SWM
-    // row 1 admits.
-    expect(sub!.textContent).toContain('1 triples');
-    expect(sub!.textContent).not.toContain('2 triples');
+    // 2 of 3 rows admit: the honest SWM row + the orphan-object
+    // WM row (legitimate post-promotion subject-local property).
+    // The full-residue WM row between two promoted entities drops.
+    // Pre-#819 (`useLayerTriples` per-layer rule) would have
+    // dropped both WM rows → `1 triples`. The canonical rule
+    // keeps mixed-layer.
+    expect(sub!.textContent).toContain('2 triples');
     expect(sub!.textContent).not.toContain('3 triples');
   });
 });
@@ -991,17 +983,13 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
     const cards = container.querySelectorAll('.v10-sgov-card');
     const rootCardEl = cards[cards.length - 1];
     const stats = rootCardEl.querySelector('.v10-sgov-card-stats')?.textContent ?? '';
-    // GH #819 round 7 (Codex sweep 5 🔴 #13) — `"o-swm"` and
-    // `"o-wm-residue"` are literal objects (quoted form). Row 2
-    // has the same (subject, predicate) as the SWM-canonical
-    // row 1, the subject moved past WM, and a canonical-layer
-    // literal exists for `(promoted, p)` → row 2 IS literal-
-    // residue and drops. Pre-round-7 the resource-only residue
-    // rule admitted both rows; this test originally locked that
-    // "consistent-wrong" shape (PR #818 sweep 4 ux-lead verdict-A
-    // revert). Round 7 corrects it.
-    expect(stats).toContain('1 triples');
-    expect(stats).not.toContain('2 triples');
+    // PR #818 sweep 4 (ux-lead Finding 1 verdict A — revert): the
+    // sweep-2 layer-correctness filter has been removed; Root now
+    // mirrors the named-card pattern over `memory.allTriples`. The
+    // WM residue row admits alongside the honest SWM row — same
+    // inflation behavior as named cards (consistent-wrong rather
+    // than divergent-wrong; render-side fix is GH #819).
+    expect(stats).toContain('2 triples');
   });
 
   it('Root card admits SWM cross-graph SPO collision via the untagged variant (Codex sweep 4 regression — under-count prevented)', async () => {

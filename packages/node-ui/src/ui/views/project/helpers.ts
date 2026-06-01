@@ -549,36 +549,26 @@ export function applyCanonicalAdmission(
   triples: readonly LayeredTriple[],
   entities: ReadonlyMap<string, MemoryEntity>,
 ): LayeredTriple[] {
-  // GH #819 round 7 (Codex sweep 5 🔴 #13) — pass 1 indexes the
-  // `(canonical-subject, predicate)` pairs that have a literal-
-  // object row stored AT the subject's canonical layer. That row
-  // is the "source of truth" for that (s,p) — any literal-object
-  // row at a LOWER layer for the same (s,p) where the subject
-  // has moved past that lower layer is residue from the
-  // pre-promotion state and must drop. The earlier residue rule
-  // (line 559 family) only handled resource-object residue;
-  // literal-object residue admitted both (old + new) because
-  // SPO dedup keys on the literal VALUE, so divergent literals
-  // produce distinct keys and both survive.
+  // GH #819 round 9 (Codex sweep 7 🔴 #16) — DESIGN NOTE.
+  // On literal-object rows: ALL literal values admit (no
+  // predicate-cardinality inference). Without metadata distinguishing
+  // single-valued predicates (e.g. `rdfs:label`, `schema:name`) from
+  // multi-valued ones (e.g. `skos:altLabel`, `dcat:keyword`,
+  // `rdfs:seeAlso`), we can't tell "stale literal residue" from
+  // "distinct multi-value fact". SPO dedup below collapses exact
+  // matches; divergent literal values both admit.
   //
-  // Edge cases this pass preserves:
-  // - Same literal at both layers (subject promoted): SPO dedup
-  //   collapses both to one row regardless of this pass.
-  // - Different literal, subject NOT promoted: subject's
-  //   canonical layer is the lower layer too, so no
-  //   canonical-layer row is indexed → no drop, both keep.
-  // - Literal at WM only, no canonical-layer literal for same
-  //   (s,p): pass-1 index is empty for that (s,p) → WM row
-  //   keeps (lower-layer-only fact).
-  const canonicalLiteralSP = new Set<string>();
-  for (const t of triples) {
-    if (isResourceObject(t.object)) continue;
-    const subjectEntity = entities.get(canonicalEntityUri(t.subject));
-    if (!subjectEntity) continue;
-    if (subjectEntity.trustLevel !== t.layer) continue;
-    canonicalLiteralSP.add(`${canonicalEntityUri(t.subject)}|${t.predicate}`);
-  }
-
+  // Trade-off: a single-valued predicate whose value changed on
+  // promotion (e.g. `name "old"` at WM, `name "new"` at SWM with
+  // the subject promoted) surfaces BOTH values until the daemon
+  // GCs the lower-layer assertion. Round 7 attempted to drop
+  // those as residue via a `(subject, predicate)` index, but
+  // that over-reached into multi-valued predicates (sweep 7
+  // finding #16 — a `(s, tag, "a")` WM row would silently lose
+  // its `"a"` value when `(s, tag, "b")` was promoted to SWM).
+  // Losing real multi-valued facts is worse than transiently
+  // double-showing single-valued ones; the round 7 logic was
+  // reverted.
   const seen = new Set<string>();
   const out: LayeredTriple[] = [];
   for (const t of triples) {
@@ -591,17 +581,6 @@ export function applyCanonicalAdmission(
       if (objectEntity && objectEntity.trustLevel !== t.layer) {
         dropAsResidue = true;
       }
-    }
-    // GH #819 round 7 — literal-residue. Subject moved past the
-    // row's layer AND a canonical-layer literal exists for the
-    // same (s,p) — drop the lower-layer literal as residue.
-    if (
-      !dropAsResidue
-      && subjectMoved
-      && !isResourceObject(t.object)
-      && canonicalLiteralSP.has(`${canonicalEntityUri(t.subject)}|${t.predicate}`)
-    ) {
-      dropAsResidue = true;
     }
     if (dropAsResidue) continue;
     const key = `${canonicalEntityUri(t.subject)}|${t.predicate}|${canonicalEntityUri(t.object)}`;
