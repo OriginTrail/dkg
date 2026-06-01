@@ -362,7 +362,17 @@ function errorStatus(err: unknown): number | undefined {
   return typeof raw === 'number' ? raw : undefined;
 }
 
-function isRetryableRpcError(err: unknown): boolean {
+/**
+ * Is `err` a transient RPC failure worth retrying / failing over (vs a
+ * deterministic chain revert / argument error)? Inspects ethers/fetch error
+ * shapes thoroughly — top-level AND nested `error.code` / `statusCode` /
+ * `response.status` / `error.status` (via `errorCode` / `errorStatus`), plus a
+ * message probe — so a 429/5xx buried in a nested field is still recognised.
+ * Exported so consumers (e.g. the agent's boot-recovery transient gate) reuse
+ * the SAME extraction instead of duplicating a narrower top-level-only subset
+ * (Codex PR #901 round-4 :459).
+ */
+export function isRetryableRpcError(err: unknown): boolean {
   if (err instanceof Error) enrichEvmError(err);
   const code = errorCode(err);
   const status = errorStatus(err);
@@ -385,7 +395,10 @@ function isRetryableRpcError(err: unknown): boolean {
   if (code === 'TIMEOUT' || code === 'TIMEOUT_ERROR' || code === 'SERVER_ERROR'
     || code === 'NETWORK_ERROR' || code === 'ECONNRESET' || code === 'ECONNREFUSED'
     || code === 'ETIMEDOUT' || code === 'ENOTFOUND' || code === 'EAI_AGAIN'
-    || code === 'UNKNOWN_ERROR' || code === 'BAD_DATA') {
+    || code === 'UNKNOWN_ERROR' || code === 'BAD_DATA'
+    // Our own synthetic "all configured RPC endpoints exhausted" code — by
+    // definition retryable, regardless of the aggregated message text.
+    || code === 'RPC_ENDPOINTS_EXHAUSTED') {
     return true;
   }
   // `no runners?!` is ethers' FallbackProvider error (provider-fallback.js)

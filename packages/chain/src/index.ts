@@ -5,6 +5,7 @@ export {
   type EVMAdapterConfig,
   decodeEvmError,
   enrichEvmError,
+  isRetryableRpcError,
   resolveRpcUrls,
   effectivePublishAllowance,
   computeApprovalAction,
