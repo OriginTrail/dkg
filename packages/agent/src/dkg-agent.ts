@@ -393,6 +393,55 @@ export type {
 const CIPHERTEXT_CHUNK_SIZE_BYTES = 32 * 1024;
 
 /**
+ * Upper bound on the boot-time on-chain identity resolution
+ * (`getIdentityId` / `ensureProfile`) inside `start()`. Daemon HTTP
+ * readiness MUST NOT depend on chain-RPC reachability: `start()` is awaited
+ * before the daemon binds its HTTP listener (cli lifecycle.ts), so an
+ * unreachable or rate-limited (HTTP 429) RPC — which the multi-RPC failover
+ * loop retries across endpoints — would otherwise block boot past the CLI's
+ * 45s readiness ceiling (#894). When this bound trips, identity stays
+ * unresolved (0n): the node boots, HTTP serves, and on-chain writes (e.g.
+ * context-graph register) surface their own RPC error (503) at call time
+ * rather than hanging the whole daemon. Generous enough not to false-trip a
+ * healthy-but-slow chain, far below the 45s readiness window.
+ */
+const BOOT_CHAIN_IDENTITY_TIMEOUT_MS = 20_000;
+
+/**
+ * Resolve `op` but reject with a `BOOT_CHAIN_TIMEOUT`-coded error if it does
+ * not settle within `ms`. The timer is `unref`'d so it never keeps the
+ * process alive on its own. Used to bound boot-time chain calls so daemon
+ * readiness stays independent of chain-RPC reachability.
+ *
+ * When the timeout wins, `op` is still pending — the multi-RPC failover loop
+ * keeps retrying and will eventually reject (e.g. `RPC_ENDPOINTS_EXHAUSTED`).
+ * That late rejection has no awaiter once the race has settled, so we attach a
+ * no-op `.catch()` to the original promise to keep it from surfacing as an
+ * `unhandledRejection` and crashing the booted daemon.
+ */
+async function raceWithBootTimeout<T>(op: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  op.catch(() => {
+    /* swallow a late rejection from the abandoned op after the race settles */
+  });
+  try {
+    return await Promise.race<T>([
+      op,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => {
+          const err = new Error(`${label} timed out after ${ms}ms`);
+          (err as Error & { code?: string }).code = 'BOOT_CHAIN_TIMEOUT';
+          reject(err);
+        }, ms);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
  * OT-RFC-38 LU-11. Split a single plaintext buffer into the
  * fixed-size pieces the chunked AEAD path expects. Empty input is
  * rejected — the publisher computes `merkleRoot` from non-empty
@@ -1612,13 +1661,25 @@ export class DKGAgent {
     // Auto-detect or register on-chain identity.
     // Edge nodes skip profile creation — they operate with agent identity only.
     if (this.chain.chainId !== 'none') {
+      // #894: bound boot-time chain identity resolution so an unreachable /
+      // rate-limited RPC (which the multi-RPC failover loop retries across
+      // endpoints) cannot block daemon HTTP readiness past the CLI's 45s
+      // ceiling. On timeout the existing catch leaves identity unresolved and
+      // boot proceeds; the node serves HTTP and on-chain writes 503 at call
+      // time. The 20s bound is well below 45s yet generous for a healthy chain.
       try {
-        onChainIdentityId = await this.chain.getIdentityId();
+        onChainIdentityId = await raceWithBootTimeout(
+          this.chain.getIdentityId(),
+          BOOT_CHAIN_IDENTITY_TIMEOUT_MS,
+          'boot getIdentityId',
+        );
         if (onChainIdentityId === 0n && effectiveRole === 'core') {
           this.log.info(ctx, `No on-chain identity found, creating profile and staking...`);
-          onChainIdentityId = await this.chain.ensureProfile({
-            nodeName: this.config.name,
-          });
+          onChainIdentityId = await raceWithBootTimeout(
+            this.chain.ensureProfile({ nodeName: this.config.name }),
+            BOOT_CHAIN_IDENTITY_TIMEOUT_MS,
+            'boot ensureProfile',
+          );
           this.log.info(ctx, `On-chain profile created, identityId=${onChainIdentityId}`);
         } else if (onChainIdentityId === 0n) {
           this.log.info(ctx, `Edge node — skipping on-chain profile creation (agent identity only)`);
@@ -1628,11 +1689,15 @@ export class DKGAgent {
       } catch (err) {
         this.log.warn(ctx, `ensureProfile error: ${err instanceof Error ? err.message : String(err)}`);
         try {
-          onChainIdentityId = await this.chain.getIdentityId();
+          onChainIdentityId = await raceWithBootTimeout(
+            this.chain.getIdentityId(),
+            BOOT_CHAIN_IDENTITY_TIMEOUT_MS,
+            'boot getIdentityId (recovery)',
+          );
           if (onChainIdentityId > 0n) {
             this.log.info(ctx, `Recovered identityId=${onChainIdentityId} after partial failure`);
           }
-        } catch { /* ignore */ }
+        } catch { /* ignore — boot proceeds with identity unresolved */ }
       }
       if (onChainIdentityId > 0n) {
         if (effectiveRole === 'core') {
