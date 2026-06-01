@@ -442,6 +442,43 @@ async function raceWithBootTimeout<T>(op: Promise<T>, ms: number, label: string)
 }
 
 /**
+ * Is a boot-time chain-identity failure TRANSIENT (RPC unreachable / slow /
+ * rate-limited — recoverable by retrying once the chain is back) versus
+ * PERMANENT/deterministic (missing admin key, insufficient funds, a contract
+ * revert)? Only transient failures should arm the StorageACK retry loop;
+ * arming it for a permanent failure would re-call `ensureProfile()` every 30s
+ * forever (Codex PR #901 round-3 :1714).
+ *
+ * Recognises the boot path's own `BOOT_CHAIN_TIMEOUT` and the chain adapter's
+ * `RPC_ENDPOINTS_EXHAUSTED`, plus a conservative network/RPC message+code probe
+ * (the chain package's `isRetryableRpcError` is not exported, so we mirror its
+ * relevant subset here). Anything else — including ordinary `Error`s with no
+ * RPC signature — is treated as permanent and stays disabled.
+ */
+function isTransientBootChainError(err: unknown): boolean {
+  const code = (err as { code?: unknown })?.code;
+  if (code === 'BOOT_CHAIN_TIMEOUT' || code === 'RPC_ENDPOINTS_EXHAUSTED') return true;
+  if (
+    code === 'TIMEOUT' || code === 'TIMEOUT_ERROR' || code === 'SERVER_ERROR'
+    || code === 'NETWORK_ERROR' || code === 'ECONNRESET' || code === 'ECONNREFUSED'
+    || code === 'ETIMEDOUT' || code === 'ENOTFOUND' || code === 'EAI_AGAIN'
+  ) {
+    return true;
+  }
+  const msg = (err instanceof Error ? err.message : String(err ?? '')).toLowerCase();
+  // Deterministic / permanent failures must NOT be treated as transient even
+  // if their message happens to brush a network keyword.
+  if (
+    msg.includes('insufficient funds') || msg.includes('admin') || msg.includes('execution reverted')
+    || msg.includes('revert') || msg.includes('nonce')
+  ) {
+    return false;
+  }
+  return /timeout|timed out|network|socket|reset|econnreset|econnrefused|etimedout|enotfound|eai_again|rate limit|too many requests|429|503|502|gateway|temporarily unavailable|fetch failed|no runners|all configured rpc endpoints/i
+    .test(msg);
+}
+
+/**
  * OT-RFC-38 LU-11. Split a single plaintext buffer into the
  * fixed-size pieces the chunked AEAD path expects. Empty input is
  * rejected — the publisher computes `merkleRoot` from non-empty
@@ -749,6 +786,12 @@ export class DKGAgent {
   private randomSamplingBindRetryInFlight = false;
   private storageACKRegistrationRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private storageACKRegistrationRetryInFlight = false;
+  // #894 / Codex PR #901 round-3 :1685: `ensureProfile()` is a mutating
+  // multi-tx flow (createProfile + stake) that can legitimately outlast the
+  // boot read-timeout. Guards against the boot path AND the StorageACK retry
+  // re-submitting `ensureProfile()` while a prior one may still be settling on
+  // chain — which would risk a duplicate profile / double-stake.
+  private profileProvisioningInFlight = false;
   private readonly config: DKGAgentConfig;
   private started = false;
   private readonly subscribedContextGraphs = new Map<string, ContextGraphSub>();
@@ -1682,11 +1725,14 @@ export class DKGAgent {
         );
         if (onChainIdentityId === 0n && effectiveRole === 'core') {
           this.log.info(ctx, `No on-chain identity found, creating profile and staking...`);
-          onChainIdentityId = await raceWithBootTimeout(
-            this.chain.ensureProfile({ nodeName: this.config.name }),
-            BOOT_CHAIN_IDENTITY_TIMEOUT_MS,
-            'boot ensureProfile',
-          );
+          // Codex PR #901 round-3 :1685: do NOT race `ensureProfile()` with the
+          // boot timeout — it is a mutating createProfile+stake flow that can
+          // legitimately exceed 20s while the tx settles, and abandoning a live
+          // staking tx (then re-calling it on retry) risks a duplicate profile /
+          // double-stake. The read-side `getIdentityId()` above keeps its
+          // timeout (safe to abandon); provisioning runs to completion, guarded
+          // so neither boot nor the retry re-submits while one is in flight.
+          onChainIdentityId = await this.provisionProfileGuarded(ctx);
           this.log.info(ctx, `On-chain profile created, identityId=${onChainIdentityId}`);
         } else if (onChainIdentityId === 0n) {
           this.log.info(ctx, `Edge node — skipping on-chain profile creation (agent identity only)`);
@@ -1705,13 +1751,16 @@ export class DKGAgent {
             this.log.info(ctx, `Recovered identityId=${onChainIdentityId} after partial failure`);
           }
         } catch { /* ignore — boot proceeds with identity unresolved */ }
-        // The boot identity block hit a timeout or error. If it still left the
-        // identity at 0n, that 0n is transient (RPC was unreachable/slow), not
-        // a settled "this node has no identity" — flag it so the StorageACK
-        // path re-resolves and recovers once the chain is reachable again
-        // (#894 / Codex PR #901). A node that genuinely has no identity
-        // resolves 0n on the happy path WITHOUT throwing, leaving this false.
-        if (onChainIdentityId === 0n) {
+        // The boot identity block threw. If it left identity at 0n AND the
+        // failure is TRANSIENT (RPC unreachable/slow/rate-limited), flag it so
+        // the StorageACK path re-resolves and recovers once the chain is back
+        // (#894 / Codex PR #901). A node that genuinely has no identity resolves
+        // 0n on the happy path WITHOUT throwing, leaving this false. And a
+        // PERMANENT/deterministic failure (missing admin key, insufficient
+        // funds, contract revert) must NOT arm the retry — otherwise the
+        // StorageACK loop would re-call `ensureProfile()` every 30s forever
+        // (Codex PR #901 round-3 :1714). It stays disabled and surfaces once.
+        if (onChainIdentityId === 0n && isTransientBootChainError(err)) {
           bootChainIdentityUnresolvedTransient = true;
         }
       }
@@ -1769,14 +1818,13 @@ export class DKGAgent {
               // to find. Re-probing `getIdentityId()` alone would return 0n
               // forever and the node would never provision. Once the chain is
               // reachable again, create the profile (core only) — mirroring the
-              // boot-time provisioning path.
+              // boot-time provisioning path. Codex round-3 :1685: provision via
+              // the guarded, un-raced helper so the mutating createProfile+stake
+              // tx runs to completion and is never double-submitted alongside a
+              // boot-path (or concurrent-retry) provisioning still in flight.
               if (reresolved === 0n && effectiveRole === 'core') {
                 this.log.info(attemptCtx, `No on-chain identity after transient boot outage — creating profile and staking...`);
-                reresolved = await raceWithBootTimeout(
-                  this.chain.ensureProfile({ nodeName: this.config.name }),
-                  BOOT_CHAIN_IDENTITY_TIMEOUT_MS,
-                  'StorageACK ensureProfile (recovery)',
-                );
+                reresolved = await this.provisionProfileGuarded(attemptCtx);
               }
               if (reresolved > 0n) {
                 onChainIdentityId = reresolved;
@@ -9287,6 +9335,32 @@ export class DKGAgent {
     });
     this.log.info(ctx, `addBatchToContextGraph: batch=${params.batchId} → ctxGraph=${params.contextGraphId} success=${result.success}`);
     return { success: result.success };
+  }
+
+  /**
+   * Provision the node's on-chain profile (createProfile + stake) exactly once
+   * at a time. `ensureProfile()` is a mutating multi-tx flow that can outlast
+   * the boot read-timeout, so this guards against the boot path AND the
+   * StorageACK retry both calling it while a prior submission may still be
+   * settling — which could create a duplicate profile / double-stake (Codex
+   * PR #901 round-3 :1685). It is NOT raced against a timeout: the staking tx
+   * must run to completion. While a provisioning is in flight, concurrent
+   * callers re-read the (possibly now-created) identity via `getIdentityId()`
+   * instead of submitting a second `ensureProfile()`.
+   */
+  private async provisionProfileGuarded(ctx: OperationContext): Promise<bigint> {
+    if (this.profileProvisioningInFlight) {
+      // A provisioning is already running (boot or a prior retry). Don't submit
+      // a second createProfile+stake — just read whatever identity exists now.
+      this.log.info(ctx, 'Profile provisioning already in flight — re-reading identity instead of re-submitting');
+      return this.chain.getIdentityId();
+    }
+    this.profileProvisioningInFlight = true;
+    try {
+      return await this.chain.ensureProfile({ nodeName: this.config.name });
+    } finally {
+      this.profileProvisioningInFlight = false;
+    }
   }
 
   /**

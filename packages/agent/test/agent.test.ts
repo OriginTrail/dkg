@@ -209,6 +209,19 @@ class BrandNewCoreTransientChainAdapter extends MockChainAdapter {
   }
 }
 
+// Codex PR #901 round-3 :1714: a core node whose boot provisioning fails
+// PERMANENTLY/deterministically (here: insufficient funds — not an RPC outage).
+// This must NOT arm the StorageACK retry loop; the node stays 'disabled' and
+// `ensureProfile()` is called exactly once (no 30s-forever re-submission).
+class PermanentProfileFailureChainAdapter extends MockChainAdapter {
+  ensureProfileCalls = 0;
+
+  override async ensureProfile(_options?: { nodeName?: string; stakeAmount?: bigint; lockTier?: number }): Promise<bigint> {
+    this.ensureProfileCalls += 1;
+    throw new Error('insufficient funds for intrinsic transaction cost');
+  }
+}
+
 class ContextAuthorizedPublisherChainAdapter extends MockChainAdapter {
   capturedPublisherAddress?: string;
 
@@ -1521,6 +1534,42 @@ describe('DKGAgent ACK signer gating', () => {
       // an identity now exists.
       expect(chain.ensureProfileCalls).toBeGreaterThanOrEqual(1);
       expect(await chain.getIdentityId()).toBeGreaterThan(0n);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('does NOT retry-loop on a permanent boot provisioning failure (#894 / Codex PR #901 round-3 :1714)', async () => {
+    // A deterministic provisioning failure (insufficient funds) must stay
+    // 'disabled': StorageACK is not registered AND ensureProfile is called
+    // exactly once — the 30s retry loop must NOT re-submit it forever.
+    const primary = ethers.Wallet.createRandom();
+    const ackSigner = ethers.Wallet.createRandom();
+    const chain = new PermanentProfileFailureChainAdapter('mock:31337', primary.address);
+    // No seedIdentity — the node must provision, and that provisioning fails.
+
+    const agent = await DKGAgent.create({
+      name: 'AckPermanentProvisionFailure',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      chainAdapter: chain,
+      nodeRole: 'core',
+      ackSignerKey: ackSigner.privateKey,
+      storageAckRegistrationRetryMs: 25,
+    });
+
+    try {
+      await agent.start();
+      // Boot's ensureProfile failed deterministically (1 call).
+      expect(chain.ensureProfileCalls).toBe(1);
+      expect(agent.node.libp2p.getProtocols()).not.toContain(PROTOCOL_STORAGE_ACK);
+
+      // Wait well past several 25ms retry intervals. A buggy build (treating
+      // the permanent failure as transient) would re-call ensureProfile every
+      // interval; the fix keeps it 'disabled' so the count stays 1.
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      expect(chain.ensureProfileCalls).toBe(1);
+      expect(agent.node.libp2p.getProtocols()).not.toContain(PROTOCOL_STORAGE_ACK);
     } finally {
       await agent.stop().catch(() => {});
     }
