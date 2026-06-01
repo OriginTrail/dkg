@@ -1395,7 +1395,7 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
     expect(stats).not.toContain('42 triples');
     // Tooltip surfaces the failure caveat on the triples stat.
     const triplesStat = cardStats?.querySelectorAll('.v10-sgov-card-stat')[1];
-    expect(triplesStat?.getAttribute('title')).toBe('Some layers unavailable; count may be incomplete.');
+    expect(triplesStat?.getAttribute('title')).toBe('0 triples (some layers unavailable; count may be incomplete).');
   });
 
   it('Named card bucket applies canonical residue filter per scope (GH #819 round 4 — Codex sweep 2 🔴 #5)', async () => {
@@ -1631,7 +1631,7 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
     expect(stats).toContain('0 triples');
     expect(stats).not.toContain('…');
     const triplesStat = cardStats?.querySelectorAll('.v10-sgov-card-stat')[1];
-    expect(triplesStat?.getAttribute('title')).toBe('Some layers unavailable; count may be incomplete.');
+    expect(triplesStat?.getAttribute('title')).toBe('0 triples (some layers unavailable; count may be incomplete).');
   });
 
   it('Named card badge surfaces honest 0 with failure tooltip on memory.partial (GH #819 round 7 — Codex sweep 5 🔴 #14)', async () => {
@@ -1666,7 +1666,101 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
     expect(stats).toContain('0 triples');
     expect(stats).not.toContain('…');
     const triplesStat = cardStats?.querySelectorAll('.v10-sgov-card-stat')[1];
-    expect(triplesStat?.getAttribute('title')).toBe('Some layers unavailable; count may be incomplete.');
+    expect(triplesStat?.getAttribute('title')).toBe('0 triples (some layers unavailable; count may be incomplete).');
+  });
+
+  it('Named card badge surfaces failure tooltip on non-zero bucket too (GH #819 round 10 — Codex sweep 8 🟡 #18)', async () => {
+    // Rounds 6/7 routed the failure tooltip only when the bucket
+    // was 0; a partial-layer-failure with a non-zero bucket
+    // (some layers succeeded with rows, others errored) rendered
+    // the count with no disclosure that it might be incomplete.
+    // Round 10 extends the failure-tooltip branch to ALL bucket
+    // values; the count is prefixed onto the disclosure wording.
+    fetchSubGraphsMock.mockResolvedValueOnce({
+      subGraphs: [{ name: 'alpha', entityCount: 1, tripleCount: 0, description: '' }],
+    });
+    const entityList = [
+      { uri: 'urn:e:alpha', label: 'a', types: [], trustLevel: 'working', layers: new Set(['working']), subGraphs: new Set(['alpha']), properties: new Map(), connections: [] },
+    ];
+    // 2 WM rows admit; SWM errored so the SWM contribution is
+    // missing — the rendered count is a best-effort lower bound.
+    const triples = [
+      { subject: 'urn:e:alpha', predicate: 'http://schema.org/name', object: '"alpha-1"', subGraph: 'alpha', layer: 'working' },
+      { subject: 'urn:e:alpha', predicate: 'http://schema.org/name', object: '"alpha-2"', subGraph: 'alpha', layer: 'working' },
+    ];
+    await renderWith({
+      ...memory,
+      entities: new Map(entityList.map(e => [e.uri, e])),
+      entityList,
+      allTriples: triples,
+      counts: { wm: 2, swm: 0, vm: 0, total: 1 },
+      loading: false,
+      partial: true,
+      layerStatus: { wm: 'ok', swm: 'error', vm: 'ok' },
+    });
+    await flush();
+
+    const cards = container.querySelectorAll('.v10-sgov-card');
+    const alphaCardEl = cards[0];
+    const cardStats = alphaCardEl.querySelector('.v10-sgov-card-stats');
+    const stats = cardStats?.textContent ?? '';
+    // Bucket renders the count honestly (no `…`).
+    expect(stats).toContain('2 triples');
+    expect(stats).not.toContain('…');
+    // Round-10 contract: failure tooltip fires for non-zero
+    // buckets too, with the count value prefixed.
+    const triplesStat = cardStats?.querySelectorAll('.v10-sgov-card-stat')[1];
+    expect(triplesStat?.getAttribute('title')).toBe('2 triples (some layers unavailable; count may be incomplete).');
+  });
+
+  it('Named card failure tooltip wins over stat-vs-rendered tooltip when both apply (GH #819 round 10 — precedence)', async () => {
+    // Round-10 precedence lock — when a card is both
+    // failed/partial AND has a stat-vs-rendered mismatch
+    // (cross-card edges or cap-trimmed rows), the failure
+    // tooltip wins. The cap-truncation gap recomputes correctly
+    // once layers re-hydrate; the failure signal is the louder
+    // disclosure.
+    fetchSubGraphsMock.mockResolvedValueOnce({
+      subGraphs: [{ name: 'alpha', entityCount: 1, tripleCount: 0, description: '' }],
+    });
+    const entityList = [
+      { uri: 'urn:e:alpha', label: 'a', types: [], trustLevel: 'working', layers: new Set(['working']), subGraphs: new Set(['alpha']), properties: new Map(), connections: [] },
+      // beta sits outside alpha's subgraph; the alpha→beta edge
+      // below has `card.tripleCount = 1` (in alpha's canonical
+      // scope) but `card.triples.length = 0` (dropped from the
+      // rendered slice by `filterTriplesToEntities` because beta
+      // isn't in alpha's entityUris). That difference normally
+      // triggers the β stat-vs-rendered tooltip; under round-10
+      // precedence the failure tooltip wins instead.
+      { uri: 'urn:e:beta', label: 'b', types: [], trustLevel: 'working', layers: new Set(['working']), subGraphs: new Set<string>(), properties: new Map(), connections: [] },
+    ];
+    const triples = [
+      { subject: 'urn:e:alpha', predicate: 'p', object: 'urn:e:beta', subGraph: 'alpha', layer: 'working' },
+    ];
+    await renderWith({
+      ...memory,
+      entities: new Map(entityList.map(e => [e.uri, e])),
+      entityList,
+      allTriples: triples,
+      counts: { wm: 2, swm: 0, vm: 0, total: 2 },
+      loading: false,
+      partial: true,
+      layerStatus: { wm: 'ok', swm: 'error', vm: 'ok' },
+    });
+    await flush();
+
+    const cards = container.querySelectorAll('.v10-sgov-card');
+    const alphaCardEl = cards[0];
+    const cardStats = alphaCardEl.querySelector('.v10-sgov-card-stats');
+    const triplesStat = cardStats?.querySelectorAll('.v10-sgov-card-stat')[1];
+    // Failure tooltip wins even when the β literal would also
+    // have qualified. β substrings ("in this subgraph's scope",
+    // "cap-trimmed") must NOT appear; failure tooltip is the
+    // only disclosure.
+    const title = triplesStat?.getAttribute('title') ?? '';
+    expect(title).toBe('1 triples (some layers unavailable; count may be incomplete).');
+    expect(title).not.toContain("in this subgraph's scope");
+    expect(title).not.toContain('cap-trimmed');
   });
 
   it('Root card keeps its scoped copy when same SPO also appears under a named subgraph (GH #819 round 4 — Codex sweep 2 🔴 #7)', async () => {

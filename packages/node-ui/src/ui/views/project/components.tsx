@@ -4584,27 +4584,30 @@ export function SubGraphMiniCard({
             quiet case. Same conditional-when-it-has-something-to-
             say pattern as S2's `Pending join requests` empty
             state. */}
-        {/* GH #819 round 7 (Codex sweep 5 🔴 #14) — split badge
-            matrix. Round 6 lumped loading + error into one gate
-            and showed the loading affordance for both; after a
-            settled failure the badge masqueraded as "still
-            loading" forever. The split routes each state:
-              • bucket > 0 → render the count normally.
-              • bucket 0 + hydrating → `…` "Loading triples…"
-              • bucket 0 + failed/partial (not hydrating) →
-                `0 triples` with "Some layers unavailable;
-                count may be incomplete" tooltip.
-              • bucket 0 + neither → honest `0 triples`.
-            `isHydrating` wins over `isFailedOrPartial` when both
-            are true — a transient state takes precedence over
-            the settled-incomplete signal. */}
+        {/* GH #819 round 10 (Codex sweep 8 🟡 #18) — extended badge
+            matrix. Rounds 6/7 only fired the failure tooltip on
+            zero-bucket cards; a partial-layer-failure with a
+            non-zero bucket rendered the count with no disclosure
+            that some layers were unavailable. Now `isFailedOrPartial`
+            fires for ALL bucket values — when bucket > 0 the
+            tooltip prefixes the count with "{N} triples (some
+            layers unavailable; count may be incomplete)."
+            Precedence (top wins):
+              • hydrating + bucket 0  → `…` "Loading triples…"
+              • failed/partial (any bucket) → "{N} triples (some
+                layers unavailable; count may be incomplete)."
+              • stat-vs-rendered mismatch → β literal (round 8)
+              • otherwise → no tooltip
+            Failure wins over the stat-vs-rendered tooltip — once
+            layers re-hydrate the cap-truncation gap recomputes
+            correctly; the failure signal is the louder one. */}
         <span
           className="v10-sgov-card-stat"
           title={
             isHydrating && card.tripleCount === 0
               ? 'Loading triples for this subgraph…'
-              : isFailedOrPartial && card.tripleCount === 0
-                ? 'Some layers unavailable; count may be incomplete.'
+              : isFailedOrPartial
+                ? `${card.tripleCount} triples (some layers unavailable; count may be incomplete).`
                 : card.tripleCount !== card.triples.length
                   // GH #819 round 8 (Codex sweep 6 🟡 #4 / #9 / #12,
                   // team-lead call β) — broader wording so the
