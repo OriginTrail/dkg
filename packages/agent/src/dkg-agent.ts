@@ -17462,6 +17462,15 @@ export class DKGAgent {
    * confirmed an allowlist write will actually happen (i.e. AFTER
    * the idempotency early-return). Logging when no quad is inserted
    * misleads operators about which writes hit the store.
+   *
+   * Codex review round 4 on #873 (line 17475) — the warn fires
+   * BEFORE `store.insert()` is awaited, so a transient store
+   * failure would leave a breadcrumb claiming the quad was
+   * persisted when it wasn't. Wording is intentionally pre-write
+   * ("about to write" / "will be persisted") so the audit trail
+   * stays accurate whether or not the subsequent insert succeeds —
+   * the operator still gets the public-CG breadcrumb and any
+   * thrown insert error surfaces separately, no contradiction.
    */
   private async warnIfAllowlistWriteOnPublicCg(
     contextGraphId: string,
@@ -17472,8 +17481,8 @@ export class DKGAgent {
     if (policy !== 'public') return;
     this.log.warn(
       ctx,
-      `${operation}: writing allowlist on context graph "${contextGraphId}" which has explicit accessPolicy="public". ` +
-        `The allowlist quad is being persisted but does NOT enforce read access — anyone can still subscribe. ` +
+      `${operation}: about to write allowlist on context graph "${contextGraphId}" which has explicit accessPolicy="public". ` +
+        `The allowlist quad will be persisted but does NOT enforce read access — anyone can still subscribe. ` +
         `Issue #865: as of this commit, the publisher no longer auto-flips public CGs to the curated publish path ` +
         `just because an allowlist exists. If you intended to make this CG invite-only, recreate it with accessPolicy=1.`,
     );
