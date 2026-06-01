@@ -27,10 +27,11 @@ import { listAssertions } from '../src/ui/api.js';
 //
 // Binding shape mirrors the new SELECT: ?assertion (lifecycle URN, used as
 // graphUri), ?name (dkg:assertionName), optional ?sg (dkg:subGraphName).
-function metaRow(opts: { assertion: string; name?: string; sg?: string }) {
+function metaRow(opts: { assertion: string; name?: string; sg?: string; assertionGraph?: string }) {
   const b: Record<string, { value: string }> = { assertion: { value: opts.assertion } };
   if (opts.name !== undefined) b.name = { value: opts.name };
   if (opts.sg !== undefined) b.sg = { value: opts.sg };
+  if (opts.assertionGraph !== undefined) b.assertionGraph = { value: opts.assertionGraph };
   return b;
 }
 
@@ -71,6 +72,8 @@ describe('listAssertions (WM) — derives from _meta (memoryLayer="WM")', () => 
     expect(body.sparql).toContain('did:dkg:context-graph:cg-A/_meta');
     expect(body.sparql).toContain('memoryLayer> "WM"');
     expect(body.sparql).toContain('assertionName');
+    // assertionGraph is bound again (pre-#710 sub-graph fallback).
+    expect(body.sparql).toContain('assertionGraph');
   });
 
   it('maps a root-bucket WM assertion: name + lifecycle-URN graphUri, subGraph undefined', async () => {
@@ -98,6 +101,48 @@ describe('listAssertions (WM) — derives from _meta (memoryLayer="WM")', () => 
     expect(root.subGraph).toBeUndefined();
     expect(scoped.subGraph).toBe('research');
     expect(scoped.graphUri).toBe('urn:dkg:assertion:cg-A:research:0xabc:scoped-doc');
+  });
+
+  it('pre-#710 compat: derives subGraph from the assertionGraph URI when subGraphName is absent', async () => {
+    // Drafts created before #710 carry dkg:assertionGraph but NO
+    // dkg:subGraphName. The sub-graph segment must be recovered from the
+    // assertion-graph URI so promote/preview stay correctly scoped.
+    setBindings([
+      metaRow({
+        assertion: 'urn:dkg:assertion:cg-A:legacy:0xabc:old-scoped',
+        name: 'old-scoped',
+        // no `sg` — pre-#710 row
+        assertionGraph: 'did:dkg:context-graph:cg-A/legacy/assertion/0xabc/old-scoped',
+      }),
+      // Root-bucket legacy row (assertionGraph has no sub-graph segment) →
+      // stays root, NOT misparsed.
+      metaRow({
+        assertion: 'urn:dkg:assertion:cg-A:0xabc:old-root',
+        name: 'old-root',
+        assertionGraph: 'did:dkg:context-graph:cg-A/assertion/0xabc/old-root',
+      }),
+    ]);
+    const out = await listAssertions('cg-A', 'wm');
+    expect(out).toHaveLength(2);
+    const scoped = out.find(a => a.name === 'old-scoped')!;
+    const root = out.find(a => a.name === 'old-root')!;
+    expect(scoped.subGraph).toBe('legacy');
+    expect(root.subGraph).toBeUndefined();
+  });
+
+  it('prefers the explicit subGraphName literal over the assertionGraph URI parse', async () => {
+    // When both are present, the literal wins (it is authoritative and the
+    // URI parse is only the migration fallback).
+    setBindings([
+      metaRow({
+        assertion: 'urn:dkg:assertion:cg-A:research:0xabc:both',
+        name: 'both',
+        sg: 'research',
+        assertionGraph: 'did:dkg:context-graph:cg-A/research/assertion/0xabc/both',
+      }),
+    ]);
+    const out = await listAssertions('cg-A', 'wm');
+    expect(out[0].subGraph).toBe('research');
   });
 
   it('skips bindings missing the lifecycle URN or the name', async () => {

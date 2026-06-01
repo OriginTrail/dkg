@@ -1,3 +1,5 @@
+import { subGraphFromAssertionGraphUri } from './lib/sub-graph-uri.js';
+
 const BASE = '';
 declare global {
   interface Window { __DKG_TOKEN__?: string; }
@@ -703,12 +705,13 @@ export async function listAssertions(
   // the SWM branch and what promote/preview lookups key on (name + subGraph).
   const DKG = 'http://dkg.io/ontology/';
   const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
-  const sparql = `SELECT DISTINCT ?assertion ?name ?sg WHERE {
+  const sparql = `SELECT DISTINCT ?assertion ?name ?sg ?assertionGraph WHERE {
     GRAPH <${metaGraph}> {
       ?assertion a <${DKG}Assertion> ;
                  <${DKG}memoryLayer> "WM" ;
                  <${DKG}assertionName> ?name .
       OPTIONAL { ?assertion <${DKG}subGraphName> ?sg }
+      OPTIONAL { ?assertion <${DKG}assertionGraph> ?assertionGraph }
     }
   }`;
   const data = await executeQuery(sparql, contextGraphId);
@@ -719,10 +722,21 @@ export async function listAssertions(
     const lifecycle = bv(b.assertion);
     const name = bv(b.name);
     if (!lifecycle || !name) continue;
-    // `dkg:subGraphName` is emitted by the lifecycle writer only for
-    // sub-graph-scoped assertions (#710), so its presence is the
-    // authoritative sub-graph signal; undefined → root bucket.
-    const subGraph = bv(b.sg) || undefined;
+    // Sub-graph scope: prefer the explicit `dkg:subGraphName` literal
+    // (emitted by the lifecycle writer for sub-graph-scoped assertions
+    // since #710). Drafts created BEFORE #710 carry `dkg:assertionGraph`
+    // but NO `dkg:subGraphName`, so fall back to parsing the sub-graph
+    // segment out of the assertion-graph URI — same migration fallback
+    // the lifecycle hook uses (`subGraphFromAssertionGraphUri`). Without
+    // it, a pre-#710 sub-graph draft would surface as root-bucket and
+    // mis-scope promote/preview lookups.
+    const assertionGraph = bv(b.assertionGraph);
+    const subGraph =
+      bv(b.sg) ||
+      (assertionGraph
+        ? subGraphFromAssertionGraphUri(assertionGraph, contextGraphId)
+        : undefined) ||
+      undefined;
     if (seen.has(lifecycle)) continue;
     seen.add(lifecycle);
     // Mirror the SWM branch: no per-assertion triple count (the data-graph
