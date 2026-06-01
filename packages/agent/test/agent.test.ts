@@ -2674,9 +2674,21 @@ decisions: []
     });
     await agent.registerContextGraph('register-curated-policy', { callerAgentAddress: ownerAgent });
 
+    // Issue #865 — pre-#865 this case created the CG with NO explicit
+    // accessPolicy and relied on `inviteAgentToContextGraph` writing a
+    // DKG_ALLOWED_AGENT triple to silently promote the CG to curated
+    // via `isPrivateContextGraph`'s allowlist heuristic on register.
+    // That auto-promote was the rc.12 bug surfaced as the
+    // "modal said Open but CG persisted as invite-only" symptom; the
+    // heuristic now only fires when no explicit accessPolicy exists.
+    // Express the curated intent up-front so this test continues to
+    // assert the "registers as curated and forwards the allowlist as
+    // participantAgents" contract (the on-chain effect the original
+    // test was protecting).
     await agent.createContextGraph({
       id: 'register-agent-allowlist-policy',
       name: 'Agent Allowlist Policy',
+      accessPolicy: 1,
       callerAgentAddress: ownerAgent,
     });
     await agent.inviteAgentToContextGraph('register-agent-allowlist-policy', allowedAgent, ownerAgent);
@@ -2716,10 +2728,19 @@ decisions: []
     // This CG was registered via `inviteAgentToContextGraph(... allowedAgent)`
     // which writes a DKG_ALLOWED_AGENT triple; under Phase B the
     // chain registration must forward that wallet so cores can
-    // authority-check its envelopes after auto-hosting. Pre-Phase-B
-    // expectation was `[]` (only explicit participantAgents flowed);
-    // updated to assert the new superset semantics.
-    expect(chain.createOnChainContextGraphCalls[3]?.participantAgents).toEqual([allowedAgent]);
+    // authority-check its envelopes after auto-hosting.
+    //
+    // Issue #865 follow-up: because the create call now passes
+    // `accessPolicy: 1` up-front (the previous test relied on the
+    // now-removed "invite auto-promotes to curated" inference), the
+    // creator-auto-include at `dkg-agent.ts:13085` adds the curator
+    // (`ownerAgent`) to the local allowlist at create-time. The
+    // subsequent invite layers `allowedAgent` on top, so the
+    // chain-forwarded participant set is the union of both.
+    expect(chain.createOnChainContextGraphCalls[3]?.participantAgents).toEqual(
+      expect.arrayContaining([allowedAgent, ownerAgent]),
+    );
+    expect(chain.createOnChainContextGraphCalls[3]?.participantAgents).toHaveLength(2);
     expect(chain.createOnChainContextGraphCalls[4]?.accessPolicy).toBe(0);
     expect(chain.createOnChainContextGraphCalls[4]?.publishPolicy).toBe(0);
     expect(chain.createOnChainContextGraphCalls[4]?.publishAuthority).toBe(ethers.getAddress(chain.signerAddress));

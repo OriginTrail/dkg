@@ -13938,6 +13938,16 @@ export class DKGAgent {
     }
     this.assertCallerIsOwner(owner, callerAgentAddress, 'manage peer invitations');
 
+    // Issue #865 — log a clear warning when growing a peer allowlist
+    // on a CG that has an explicit `accessPolicy="public"` triple. The
+    // allowlist write is allowed (legitimate uses include populating
+    // an authorized-publisher set on a public-but-curated-publish CG),
+    // but post-#865 the publisher's `isPrivateContextGraph` no longer
+    // silently flips the CG to curated just because an allowlist was
+    // written — so the operator should know the allowlist is
+    // informational for read access on this CG.
+    await this.warnIfAllowlistWriteOnPublicCg(contextGraphId, ctx, 'inviteToContextGraph (peer)');
+
     const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
     const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
     const escapedPeerId = escapeSparqlLiteral(peerId);
@@ -14035,6 +14045,14 @@ export class DKGAgent {
       );
     }
     this.assertCallerIsOwner(owner, callerAgentAddress, 'manage invitations');
+
+    // Issue #865 — companion warning to the peer-invite path above.
+    // Allowlist writes on explicit-public CGs are allowed (the
+    // publishPolicy=curated + accessPolicy=public combination is a
+    // valid CG mode where the allowlist gates publishers, not
+    // subscribers), but the operator should know that the read-side
+    // gate stays open per the explicit `accessPolicy="public"`.
+    await this.warnIfAllowlistWriteOnPublicCg(contextGraphId, ctx, 'inviteAgentToContextGraph');
 
     const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
     const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
@@ -17330,6 +17348,63 @@ export class DKGAgent {
     }
   }
 
+  /**
+   * Issue #865 — observability hook for the invite write paths. Emits a
+   * warn log when the caller writes an allowlist quad on a CG that
+   * carries an explicit `accessPolicy="public"` triple in `_meta` or
+   * the ontology graph. We don't throw here:
+   *
+   *   1. `publishPolicy=curated` on a public-discoverable CG is a
+   *      legitimate combo (allowlist gates publishers, subscribers
+   *      stay public). Rejecting would break it.
+   *   2. The primary `isPrivateContextGraph` fix already prevents the
+   *      original bug (silent re-route to the curated publish path).
+   *   3. Pre-existing tests and adapter flows create CGs with no
+   *      explicit accessPolicy and then invite — those should keep
+   *      working.
+   *
+   * The warn line is the documentation: it tells the operator
+   * "your allowlist write landed but read access stays open per the
+   * explicit accessPolicy=public" so the next publisher confusion
+   * has an obvious breadcrumb. Read-only, single SELECT — does not
+   * mutate state.
+   */
+  private async warnIfAllowlistWriteOnPublicCg(
+    contextGraphId: string,
+    ctx: OperationContext,
+    operation: string,
+  ): Promise<void> {
+    if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) {
+      return;
+    }
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
+    const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
+    const result = await this.store.query(
+      `SELECT ?policy WHERE {
+        {
+          GRAPH <${ontologyGraph}> {
+            <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?policy
+          }
+        } UNION {
+          GRAPH <${cgMetaGraph}> {
+            <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?policy
+          }
+        }
+      } LIMIT 1`,
+    );
+    if (result.type !== 'bindings' || result.bindings.length === 0) return;
+    const policy = result.bindings[0]?.['policy'];
+    if (policy !== '"public"') return;
+    this.log.warn(
+      ctx,
+      `${operation}: writing allowlist on context graph "${contextGraphId}" which has explicit accessPolicy="public". ` +
+        `The allowlist quad is being persisted but does NOT enforce read access — anyone can still subscribe. ` +
+        `Issue #865: as of this commit, the publisher no longer auto-flips public CGs to the curated publish path ` +
+        `just because an allowlist exists. If you intended to make this CG invite-only, recreate it with accessPolicy=1.`,
+    );
+  }
+
   private async isPrivateContextGraph(contextGraphId: string): Promise<boolean> {
     if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) {
       return false;
@@ -17352,18 +17427,41 @@ export class DKGAgent {
       } LIMIT 1`,
     );
 
-    if (result.type === 'bindings' && result.bindings[0]?.['policy'] === '"private"') {
-      return true;
+    // Issue #865 — explicit `accessPolicy` ALWAYS wins over the allowlist
+    // heuristic below. The previous behavior fell through to the ASK
+    // check whenever `policy` was anything other than `"private"`, which
+    // silently flipped a CG the curator explicitly created with
+    // `accessPolicy="public"` into "private" the moment ANY invite landed
+    // (`DKG_ALLOWED_AGENT` / `DKG_ALLOWED_PEER` write in `_meta`). The
+    // publisher then took the LU-5 / LU-11 curated path, the publish
+    // hung waiting for V2 ACKs from invitees, and the user had no
+    // recovery path short of recreating the CG.
+    //
+    // Semantics post-#865: an allowlist on a public CG is INFORMATIONAL
+    // (matches on-chain `accessPolicy=0` which the contract does not
+    // enforce). Curator can still see "who I would have invited" in the
+    // member list, but the publisher stays on the plaintext / public
+    // path so cores can verify against SWM and the on-chain tx
+    // actually submits.
+    if (result.type === 'bindings' && result.bindings.length > 0) {
+      const policyValue = result.bindings[0]?.['policy'];
+      if (policyValue === '"private"') return true;
+      if (policyValue === '"public"') return false;
+      // Any other (unknown) literal value falls through to the
+      // allowlist heuristic — defensive for forward-compatibility
+      // with future policy values, but in practice the
+      // `createContextGraph` writer is the only producer and it
+      // only ever writes "public" or "private".
     }
 
-    // Also treat CGs with any allowlist predicate as private, even when no
-    // explicit `accessPolicy` triple exists (e.g. `inviteToContextGraph`
-    // writes `DKG_ALLOWED_PEER` straight into `_meta` without touching the
-    // ontology's access_policy; `inviteAgentToContextGraph` does the same
-    // with `DKG_ALLOWED_AGENT`). Both the V10 agent model AND the legacy
-    // peer-ID model need to be recognized here, otherwise the store-
-    // discovery path would misclassify a freshly-invited CG as "open /
-    // discoverable only" and skip the same-connect catchup.
+    // Legacy / discovered-CG fallback: when no explicit `accessPolicy`
+    // triple exists (e.g. an old CG materialized before the predicate
+    // was added, or a peer-only CG discovered via gossip without
+    // ontology bootstrap), treat the presence of an allowlist
+    // predicate as the curated signal. Both the V10 agent model AND
+    // the legacy peer-ID model need to be recognized here so the
+    // store-discovery path doesn't misclassify a freshly-invited CG
+    // as "open / discoverable only" and skip the same-connect catchup.
     const allowlistResult = await this.store.query(
       `ASK WHERE {
         GRAPH <${cgMetaGraph}> {
