@@ -1727,6 +1727,56 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
     expect(triplesStat?.getAttribute('title')).toBe('2 triples (some layers unavailable; count may be incomplete).');
   });
 
+  it('Named card badge surfaces hydrating tooltip on non-zero bucket too (GH #882 — post-#847 follow-up)', async () => {
+    // #819 round 6 (#11) added the `…` affordance when bucket is 0
+    // and `isHydrating` is true; round 10 (#18) extended the
+    // failure tooltip to non-zero buckets. The hydrating branch
+    // still only fired on zero buckets, so a hydrating card with
+    // partial data (some layers admitted rows while others were
+    // still loading) rendered the partial count with NO
+    // disclosure. GH #882 mirrors the round-10 #18 pattern for
+    // the hydrating branch — `isHydrating` now fires for all
+    // bucket values; non-zero buckets get a "{N} triples (still
+    // loading; count may grow)." tooltip.
+    fetchSubGraphsMock.mockResolvedValueOnce({
+      subGraphs: [{ name: 'alpha', entityCount: 1, tripleCount: 0, description: '' }],
+    });
+    const entityList = [
+      { uri: 'urn:e:alpha', label: 'a', types: [], trustLevel: 'working', layers: new Set(['working']), subGraphs: new Set(['alpha']), properties: new Map(), connections: [] },
+    ];
+    // 2 WM rows already admitted; SWM still loading → mid-flight
+    // canonical universe with partial data.
+    const triples = [
+      { subject: 'urn:e:alpha', predicate: 'http://schema.org/name', object: '"alpha-1"', subGraph: 'alpha', layer: 'working' },
+      { subject: 'urn:e:alpha', predicate: 'http://schema.org/name', object: '"alpha-2"', subGraph: 'alpha', layer: 'working' },
+    ];
+    await renderWith({
+      ...memory,
+      entities: new Map(entityList.map(e => [e.uri, e])),
+      entityList,
+      allTriples: triples,
+      counts: { wm: 2, swm: 0, vm: 0, total: 1 },
+      // Mid-flight hydration: SWM layer still loading.
+      loading: false,
+      partial: false,
+      layerStatus: { wm: 'ok', swm: 'loading', vm: 'ok' },
+    });
+    await flush();
+
+    const cards = container.querySelectorAll('.v10-sgov-card');
+    const alphaCardEl = cards[0];
+    const cardStats = alphaCardEl.querySelector('.v10-sgov-card-stats');
+    const stats = cardStats?.textContent ?? '';
+    // Bucket renders the count honestly (no `…` — that's the
+    // zero-bucket affordance).
+    expect(stats).toContain('2 triples');
+    expect(stats).not.toContain('…');
+    // GH #882 contract: hydrating tooltip fires for non-zero
+    // buckets too, with the count value prefixed.
+    const triplesStat = cardStats?.querySelectorAll('.v10-sgov-card-stat')[1];
+    expect(triplesStat?.getAttribute('title')).toBe('2 triples (still loading; count may grow).');
+  });
+
   it('Named card failure tooltip wins over stat-vs-rendered tooltip when both apply (GH #819 round 10 — precedence)', async () => {
     // Round-10 precedence lock — when a card is both
     // failed/partial AND has a stat-vs-rendered mismatch

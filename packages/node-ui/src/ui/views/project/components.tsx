@@ -4616,28 +4616,36 @@ export function SubGraphMiniCard({
             quiet case. Same conditional-when-it-has-something-to-
             say pattern as S2's `Pending join requests` empty
             state. */}
-        {/* GH #819 round 10 (Codex sweep 8 🟡 #18) — extended badge
-            matrix. Rounds 6/7 only fired the failure tooltip on
-            zero-bucket cards; a partial-layer-failure with a
-            non-zero bucket rendered the count with no disclosure
-            that some layers were unavailable. Now `isFailedOrPartial`
-            fires for ALL bucket values — when bucket > 0 the
-            tooltip prefixes the count with "{N} triples (some
-            layers unavailable; count may be incomplete)."
-            Precedence (top wins):
-              • hydrating + bucket 0  → `…` "Loading triples…"
-              • failed/partial (any bucket) → "{N} triples (some
-                layers unavailable; count may be incomplete)."
+        {/* GH #882 (post-#847 follow-up) — extended hydrating
+            tooltip to non-zero buckets, mirroring the round-10
+            #18 pattern for the failure branch. Before #882 the
+            hydrating tooltip only fired on zero buckets; a
+            non-zero card rendered the partial count silently
+            while WM/SWM/VM were still loading. Now `isHydrating`
+            fires for ALL bucket values:
+              • bucket 0 + hydrating → `…` "Loading triples…"
+              • bucket > 0 + hydrating → "{N} triples (still
+                loading; count may grow)."
+            Precedence (top wins, unchanged from round 10):
+              • hydrating (any bucket) → loading affordance/tooltip
+              • failed/partial (any bucket) → failure tooltip
               • stat-vs-rendered mismatch → β literal (round 8)
               • otherwise → no tooltip
-            Failure wins over the stat-vs-rendered tooltip — once
-            layers re-hydrate the cap-truncation gap recomputes
-            correctly; the failure signal is the louder one. */}
+            `isHydrating` wins over `isFailedOrPartial` —
+            transient state takes precedence over settled-
+            incomplete signal (round 7 #14 contract).
+            Engineer-placeholder wording for the new
+            hydrating-with-count cell ("still loading; count may
+            grow"); gate logic is decoupled from copy so ux-lead
+            can tighten the wording in a follow-up without
+            touching the matrix. */}
         <span
           className="v10-sgov-card-stat"
           title={
-            isHydrating && card.tripleCount === 0
-              ? 'Loading triples for this subgraph…'
+            isHydrating
+              ? card.tripleCount === 0
+                ? 'Loading triples for this subgraph…'
+                : `${card.tripleCount} triples (still loading; count may grow).`
               : isFailedOrPartial
                 ? `${card.tripleCount} triples (some layers unavailable; count may be incomplete).`
                 : card.tripleCount !== card.triples.length
