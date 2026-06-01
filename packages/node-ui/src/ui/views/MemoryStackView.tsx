@@ -17,7 +17,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { useProjectsStore, type ContextGraph } from '../stores/projects.js';
 import { useTabsStore } from '../stores/tabs.js';
 import { useMemoryEntities, type MemoryEntity, type TrustLevel } from '../hooks/useMemoryEntities.js';
-import { useLayerTriples } from './project/helpers.js';
+import { useMemoryCounts } from './project/helpers.js';
 import { relativeTime } from '../hooks/useProjectActivity.js';
 import { useHiddenContextGraphIds } from '../hooks/useHiddenContextGraphIds.js';
 
@@ -91,32 +91,25 @@ function MemoryStackRow({ cg }: { cg: ContextGraph }) {
   const memory = useMemoryEntities(cg.id);
   const { openTab } = useTabsStore();
   // GH #819 round 3 (Codex sweep 1 🔴 #2) — per-layer buckets use
-  // `useLayerTriples` (OR-rule: drops if subject OR resource-object
-  // moved past t.layer; matches the per-layer Triples-tab the
-  // layer-card buttons open by clicking). Pre-round-3 this read
-  // from `useCanonicalTriples` for per-layer cells too — which
-  // kept mixed-layer edges via the BOTH-endpoints rule, so the
-  // Memory Stack per-layer cells exceeded the layer pages they
-  // navigate to. Same family as the Dashboard round-2 fix, same
-  // option (a) shape: per-layer cells revert, total stays
-  // canonical.
-  const wmLayer = useLayerTriples(memory, 'wm');
-  const swmLayer = useLayerTriples(memory, 'swm');
-  const vmLayer = useLayerTriples(memory, 'vm');
+  // the OR-rule admission (drop if subject OR resource-object moved
+  // past t.layer; matches the per-layer Triples tab the layer-card
+  // buttons open by clicking). Pre-round-3 this read from canonical
+  // for per-layer cells too — which kept mixed-layer edges via the
+  // BOTH-endpoints rule, so the Memory Stack per-layer cells
+  // exceeded the layer pages they navigate to.
+  //
+  // GH #881 (post-#847) — single fused pass via `useMemoryCounts`
+  // replaces 3× `useLayerTriples` (3 iterations) with one. The
+  // helper returns counts only — this row only ever read `.length`
+  // off the per-layer arrays, so the swap is contract-identical.
+  const memCounts = useMemoryCounts(memory);
 
   // Bucket entities + triple-counts per layer in one pass.
-  // CONTRACT (mirrors `DashboardView.tsx`): per-layer cells use
-  // `useLayerTriples` — matches the per-layer Triples tab the
-  // layer-card buttons open cell-for-cell. If a project-wide
-  // canonical total is added to this view later (e.g. a footer
-  // total stat), source it from `useCanonicalTriples(memory).total`
-  // and document `wm+swm+vm ≤ total` at THAT site, same as
-  // Dashboard's contract.
   const byLayer = useMemo(() => {
     const buckets: Record<TrustLevel, { entities: MemoryEntity[]; tripleCount: number }> = {
-      working:  { entities: [], tripleCount: wmLayer.length },
-      shared:   { entities: [], tripleCount: swmLayer.length },
-      verified: { entities: [], tripleCount: vmLayer.length },
+      working:  { entities: [], tripleCount: memCounts.wm },
+      shared:   { entities: [], tripleCount: memCounts.swm },
+      verified: { entities: [], tripleCount: memCounts.vm },
     };
     for (const e of memory.entityList) {
       buckets[e.trustLevel].entities.push(e);
@@ -133,7 +126,7 @@ function MemoryStackRow({ cg }: { cg: ContextGraph }) {
       });
     }
     return buckets;
-  }, [memory.entityList, wmLayer, swmLayer, vmLayer]);
+  }, [memory.entityList, memCounts]);
 
   const openProject = () =>
     openTab({

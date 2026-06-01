@@ -600,6 +600,82 @@ export function useCanonicalTriples(
   }, [memory.allTriples, memory.entities]);
 }
 
+/**
+ * GH #881 (post-#847 follow-up) — fused single-pass count helper
+ * for views that need all four counts (per-layer wm/swm/vm +
+ * canonical total) in one shot. `DashboardView`'s `CgRow` and
+ * `MemoryStackView` previously called `useLayerTriples` ×3 +
+ * `useCanonicalTriples` ×1, doing 4 separate iterations over
+ * `memory.allTriples` per row. On many-CG dashboards that adds up.
+ *
+ * Returns COUNTS only (not the underlying triple arrays); views
+ * that need the actual triples should keep using `useLayerTriples`
+ * / `useCanonicalTriples`. Inline per-bucket admission rules
+ * mirror the source helpers exactly:
+ *   - Per-layer (wm/swm/vm): only rows whose `t.layer` matches the
+ *     bucket AND whose subject hasn't moved past the bucket AND
+ *     whose resource-object (if any) hasn't moved past the bucket
+ *     (`useLayerTriples` OR-rule). Per-layer SPO dedup.
+ *   - Canonical: subject-and-object-both-moved residue drop only
+ *     (`applyCanonicalAdmission` AND-rule). Global SPO dedup
+ *     across all layers.
+ *
+ * Contract from `DashboardView.tsx`: `wm + swm + vm ≤ total`.
+ * Gap = mixed-layer edges canonical keeps but per-layer slices
+ * drop (subject moved past `t.layer`, object still at `t.layer` →
+ * canonical AND-rule keeps, per-layer OR-rule drops).
+ */
+export function useMemoryCounts(
+  memory: ReturnType<typeof useMemoryEntities>,
+): { wm: number; swm: number; vm: number; canonical: number } {
+  return useMemo(() => {
+    const seenWm = new Set<string>();
+    const seenSwm = new Set<string>();
+    const seenVm = new Set<string>();
+    const seenCanonical = new Set<string>();
+    let wm = 0, swm = 0, vm = 0, canonical = 0;
+    for (const t of memory.allTriples) {
+      const canonicalSubject = canonicalEntityUri(t.subject);
+      const canonicalObject = canonicalEntityUri(t.object);
+      const subjectEntity = memory.entities.get(canonicalSubject);
+      const subjectMoved =
+        subjectEntity !== undefined && subjectEntity.trustLevel !== t.layer;
+      const objectIsResource = isResourceObject(t.object);
+      const objectEntity = objectIsResource
+        ? memory.entities.get(canonicalObject)
+        : undefined;
+      const objectMoved =
+        objectEntity !== undefined && objectEntity.trustLevel !== t.layer;
+      const key = `${canonicalSubject}|${t.predicate}|${canonicalObject}`;
+
+      // Canonical (AND-rule residue drop): only drop when subject
+      // AND a resource-object endpoint both moved past `t.layer`.
+      const canonicalResidue = subjectMoved && objectIsResource && objectMoved;
+      if (!canonicalResidue && !seenCanonical.has(key)) {
+        seenCanonical.add(key);
+        canonical++;
+      }
+
+      // Per-layer (OR-rule): drop if either endpoint moved past
+      // `t.layer`. Bucket dispatched by `t.layer`.
+      const layerResidue = subjectMoved || (objectIsResource && objectMoved);
+      if (!layerResidue) {
+        if (t.layer === 'working' && !seenWm.has(key)) {
+          seenWm.add(key);
+          wm++;
+        } else if (t.layer === 'shared' && !seenSwm.has(key)) {
+          seenSwm.add(key);
+          swm++;
+        } else if (t.layer === 'verified' && !seenVm.has(key)) {
+          seenVm.add(key);
+          vm++;
+        }
+      }
+    }
+    return { wm, swm, vm, canonical };
+  }, [memory.allTriples, memory.entities]);
+}
+
 export function useLayerTriples(memory: ReturnType<typeof useMemoryEntities>, layer: 'wm' | 'swm' | 'vm'): Triple[] {
   const targetLayer = LAYER_CONFIG[layer].trustLevel;
   return useMemo(() => {

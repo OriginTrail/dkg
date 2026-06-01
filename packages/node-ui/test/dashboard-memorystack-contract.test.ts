@@ -6,6 +6,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import {
   useCanonicalTriples,
   useLayerTriples,
+  useMemoryCounts,
 } from '../src/ui/views/project/helpers.js';
 import {
   buildMemoryEntities,
@@ -197,5 +198,139 @@ describe('Dashboard + MemoryStack derivation contract (GH #819 round 5 — Codex
     expect(vm).toBe(0);
     expect(total).toBe(1);
     expect(wm + swm + vm).toBe(total);
+  });
+});
+
+// GH #881 (post-#847 follow-up) — single-pass `useMemoryCounts`
+// helper that produces the same four counts in one iteration over
+// `memory.allTriples`. The fixtures above each ran `useLayerTriples`
+// ×3 + `useCanonicalTriples` ×1 = 4 passes per render. This suite
+// locks: (1) the fused helper produces identical numbers across all
+// 3 fixtures; (2) it iterates `memory.allTriples` exactly once per
+// memoized result.
+
+function FusedCountsProbe({ memory }: { memory: MemoryData }) {
+  const { wm, swm, vm, canonical } = useMemoryCounts(memory as any);
+  return React.createElement('div', {
+    id: 'probe-fused',
+    'data-wm': String(wm),
+    'data-swm': String(swm),
+    'data-vm': String(vm),
+    'data-total': String(canonical),
+  });
+}
+
+function readFusedProbe(container: Element) {
+  const probe = container.querySelector('#probe-fused')!;
+  return {
+    wm: Number(probe.getAttribute('data-wm')),
+    swm: Number(probe.getAttribute('data-swm')),
+    vm: Number(probe.getAttribute('data-vm')),
+    total: Number(probe.getAttribute('data-total')),
+  };
+}
+
+describe('useMemoryCounts — fused single-pass helper (GH #881)', () => {
+  let root: Root;
+  let container: HTMLDivElement;
+
+  beforeEach(() => {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  function render(memory: MemoryData) {
+    act(() => {
+      root.render(React.createElement(FusedCountsProbe, { memory }));
+    });
+  }
+
+  // Same 3 fixtures as the legacy contract above, asserting
+  // identical numbers via the fused helper.
+
+  it('mixed-layer fixture — fused counts match 4-pass output', () => {
+    const triples: LayeredTriple[] = [
+      { subject: 'urn:e:wm-a', predicate: 'http://schema.org/name', object: '"A"', layer: 'working' },
+      { subject: 'urn:e:wm-b', predicate: 'http://schema.org/name', object: '"B"', layer: 'working' },
+      { subject: 'urn:e:swm-c', predicate: 'http://schema.org/name', object: '"C"', layer: 'shared' },
+      { subject: 'urn:e:swm-c', predicate: 'http://schema.org/knows', object: 'urn:e:wm-a', layer: 'working' },
+    ];
+    render(memoryFor(triples));
+    const { wm, swm, vm, total } = readFusedProbe(container);
+    expect(wm).toBe(2);
+    expect(swm).toBe(1);
+    expect(vm).toBe(0);
+    expect(total).toBe(4);
+    expect(wm + swm + vm).toBeLessThanOrEqual(total);
+    expect(total - (wm + swm + vm)).toBe(1);
+  });
+
+  it('WM-residue fixture — fused counts match 4-pass output', () => {
+    const triples: LayeredTriple[] = [
+      { subject: 'urn:e:promoted-a', predicate: 'http://schema.org/name', object: '"A"', layer: 'shared' },
+      { subject: 'urn:e:promoted-b', predicate: 'http://schema.org/name', object: '"B"', layer: 'shared' },
+      { subject: 'urn:e:promoted-a', predicate: 'http://schema.org/knows', object: 'urn:e:promoted-b', layer: 'shared' },
+      { subject: 'urn:e:promoted-a', predicate: 'http://schema.org/knows', object: 'urn:e:promoted-b', layer: 'working' },
+    ];
+    render(memoryFor(triples));
+    const { wm, swm, vm, total } = readFusedProbe(container);
+    expect(wm).toBe(0);
+    expect(swm).toBe(3);
+    expect(vm).toBe(0);
+    expect(total).toBe(3);
+    expect(total).toBeLessThan(triples.length);
+  });
+
+  it('cross-graph-dedup fixture — fused counts match 4-pass output', () => {
+    const triples: LayeredTriple[] = [
+      { subject: 'urn:e:swm-c', predicate: 'http://schema.org/name', object: '"C"', layer: 'shared' },
+      { subject: 'urn:e:swm-c', predicate: 'http://schema.org/name', object: '"C"', layer: 'shared' },
+    ];
+    render(memoryFor(triples));
+    const { wm, swm, vm, total } = readFusedProbe(container);
+    expect(wm).toBe(0);
+    expect(swm).toBe(1);
+    expect(vm).toBe(0);
+    expect(total).toBe(1);
+  });
+
+  // Iteration-count guard: the fused helper must iterate
+  // `memory.allTriples` exactly once per memoized result, vs the
+  // 4 passes the legacy 4-call setup did. A counting Proxy wraps
+  // the array's Symbol.iterator; we render the Probe once and
+  // assert the iteration count is 1.
+  it('iterates memory.allTriples exactly once per render (single-pass guarantee)', () => {
+    const baseTriples: LayeredTriple[] = [
+      { subject: 'urn:e:a', predicate: 'http://schema.org/name', object: '"A"', layer: 'working' },
+      { subject: 'urn:e:b', predicate: 'http://schema.org/name', object: '"B"', layer: 'shared' },
+      { subject: 'urn:e:c', predicate: 'http://schema.org/name', object: '"C"', layer: 'verified' },
+    ];
+    const baseMemory = memoryFor(baseTriples);
+    let iterationCount = 0;
+    const countingTriples = new Proxy(baseTriples, {
+      get(target, prop) {
+        if (prop === Symbol.iterator) {
+          iterationCount++;
+          return target[Symbol.iterator].bind(target);
+        }
+        return (target as any)[prop];
+      },
+    });
+    const wrappedMemory = { ...baseMemory, allTriples: countingTriples };
+    render(wrappedMemory as unknown as MemoryData);
+    const { wm, swm, vm, total } = readFusedProbe(container);
+    // Correctness sanity-check.
+    expect(wm).toBe(1);
+    expect(swm).toBe(1);
+    expect(vm).toBe(1);
+    expect(total).toBe(3);
+    // Single-pass guarantee.
+    expect(iterationCount).toBe(1);
   });
 });
