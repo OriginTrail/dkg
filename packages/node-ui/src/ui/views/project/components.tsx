@@ -3984,12 +3984,30 @@ export function SubGraphOverviewGrid({
     || memory.partial
     || layerStatuses.some(s => s === 'error');
 
-  // Bucket every triple by its origin sub-graph so each mini-graph
-  // renders just its slice. Cap per-bucket via the shared
-  // `applyHeaviestSubjectsCap` helper at module scope (see its doc
-  // block for the sampling / dense-pack / residual-fallback
-  // rationale carried over from sweeps 1-3).
+  // Task #25 (PR #677) — entity-only filter for the mini-card
+  // thumbnails. Same rule the Entities tab uses; computed per card
+  // scoped to that card's sub-graph (Codex Ev_S2): an entity that's
+  // first-class in sub-graph B but only a value/provenance object in
+  // sub-graph A must not render on A's thumbnail. Per-sub-graph scope
+  // = `memory.entityList.filter(e => e.subGraphs.has(sg.name))`.
   //
+  // GH #819 round 11 (Codex sweep 9 🔴 #19) — also consumed by the
+  // bucketer below for promoted-untagged row recovery (via
+  // `admitTripleForScope`), so it's hoisted above the bucketer's
+  // useMemo.
+  const entityUrisBySubGraph = useMemo(() => {
+    const out = new Map<string, Set<string>>();
+    for (const e of memory.entityList) {
+      const canonical = canonicalEntityUri(e.uri);
+      for (const sg of e.subGraphs) {
+        let s = out.get(sg);
+        if (!s) { s = new Set(); out.set(sg, s); }
+        s.add(canonical);
+      }
+    }
+    return out;
+  }, [memory.entityList]);
+
   // Bucket every triple by its origin sub-graph so each mini-graph
   // renders just its slice. Cap per-bucket via the shared
   // `applyHeaviestSubjectsCap` helper at module scope (see its doc
@@ -3998,34 +4016,53 @@ export function SubGraphOverviewGrid({
   //
   // GH #819 round 4 (Codex sweep 2 🔴 #5) — apply the canonical
   // admission rule (residue filter + canonical-SPO dedup) PER
-  // BUCKET. Round 3's per-bucket SPO dedup correctly preserved
-  // cross-membership multiplicity (same SPO in two sub-graphs →
-  // both cards admit) but lacked the residue filter — so a WM
-  // residue row + its promoted SWM/VM copy in the SAME bucket
-  // (different objects, distinct SPO keys) could double-count
-  // and inflate `card.tripleCount` above the canonicalized
-  // subtitle total. `applyCanonicalAdmission` (shared with
-  // `useCanonicalTriples`) applies the residue rule + SPO dedup
-  // independently per scope — per-call dedup namespace means
-  // cross-membership multiplicity stays correct.
+  // BUCKET. Per-call dedup state means cross-scope SPOs each admit
+  // in their own scope (round 3 🔴 #1 property preserved).
+  //
+  // GH #819 round 11 (Codex sweep 9 🔴 #19) — recover promoted-
+  // untagged rows. After promote/publish the daemon strips
+  // `subGraph` from triples; pre-round-11 we filtered to tagged
+  // rows only, so a fully-promoted subgraph's mini-card showed
+  // `0 triples` even though deep-dive listed the data. The rest
+  // of the UI recovers via `admitTripleForScope` entity-scope
+  // membership; the bucketer now mirrors that. Pass 1 keeps tagged
+  // rows in their declared bucket; pass 2 admits each untagged row
+  // to EVERY bucket whose `entityUrisBySubGraph` contains the
+  // subject or resource-object (no inner-loop break — a cross-
+  // membership entity's untagged edges legitimately appear in
+  // multiple subgraphs, preserving the round 3 #1 contract).
   //
   // `tripleCountBySubGraph` carries the pre-cap distinct total so
   // the card stat reads the true count (decoupled from the
   // post-cap rendered slice — same convention as Root card +
   // PR #839 sweep 2's helper-extract contract).
   const { triplesBySubGraph, tripleCountBySubGraph } = useMemo(() => {
-    // First pass: group raw rows by their subGraph tag.
     const rawBySg = new Map<string, LayeredTriple[]>();
+    // Pass 1: tagged rows route to their declared bucket.
     for (const t of memory.allTriples) {
       if (!t.subGraph) continue;
       let arr = rawBySg.get(t.subGraph);
       if (!arr) { arr = []; rawBySg.set(t.subGraph, arr); }
       arr.push(t);
     }
-    // Second pass: apply canonical admission (residue +
-    // canonical-SPO dedup) per bucket independently. Per-call
-    // dedup state means cross-scope SPOs each admit in their
-    // own scope (round 3 🔴 #1 property preserved).
+    // Pass 2: untagged rows recover via entity-scope membership
+    // (`admitTripleForScope` with `isRoot: false` and the bucket's
+    // scoped URI set — same rule the rest of the UI uses for
+    // sub-graph scope, PR #839 sweep 2 helper-extract).
+    for (const t of memory.allTriples) {
+      if (t.subGraph) continue;
+      for (const [sg, scopedUris] of entityUrisBySubGraph) {
+        if (admitTripleForScope(t, { slug: sg, isRoot: false, scopedUris })) {
+          let arr = rawBySg.get(sg);
+          if (!arr) { arr = []; rawBySg.set(sg, arr); }
+          arr.push(t);
+          // No break — cross-membership entity's untagged edges
+          // legitimately appear in multiple subgraphs.
+        }
+      }
+    }
+    // Pass 3: apply canonical admission (residue + canonical-SPO
+    // dedup) per bucket independently.
     const bySg = new Map<string, Triple[]>();
     const countBySg = new Map<string, number>();
     for (const [sg, rawRows] of rawBySg) {
@@ -4039,7 +4076,7 @@ export function SubGraphOverviewGrid({
       bySg.set(sg, applyHeaviestSubjectsCap(stripped));
     }
     return { triplesBySubGraph: bySg, tripleCountBySubGraph: countBySg };
-  }, [memory.allTriples, memory.entities]);
+  }, [memory.allTriples, memory.entities, entityUrisBySubGraph]);
 
   // Per-sub-graph layer counts — drives the mini pyramid on each card so
   // you can see at a glance which sub-graphs are mostly verified vs still
@@ -4057,25 +4094,6 @@ export function SubGraphOverviewGrid({
         if (e.trustLevel === 'verified') counts.vm++;
         else if (e.trustLevel === 'shared') counts.swm++;
         else counts.wm++;
-      }
-    }
-    return out;
-  }, [memory.entityList]);
-
-  // Task #25 (PR #677) — entity-only filter for the mini-card
-  // thumbnails. Same rule the Entities tab uses; computed per card
-  // scoped to that card's sub-graph (Codex Ev_S2): an entity that's
-  // first-class in sub-graph B but only a value/provenance object in
-  // sub-graph A must not render on A's thumbnail. Per-sub-graph scope
-  // = `memory.entityList.filter(e => e.subGraphs.has(sg.name))`.
-  const entityUrisBySubGraph = useMemo(() => {
-    const out = new Map<string, Set<string>>();
-    for (const e of memory.entityList) {
-      const canonical = canonicalEntityUri(e.uri);
-      for (const sg of e.subGraphs) {
-        let s = out.get(sg);
-        if (!s) { s = new Set(); out.set(sg, s); }
-        s.add(canonical);
       }
     }
     return out;

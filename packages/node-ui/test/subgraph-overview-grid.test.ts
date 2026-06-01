@@ -1763,6 +1763,86 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
     expect(title).not.toContain('cap-trimmed');
   });
 
+  it('Named card recovers promoted-untagged triples via entity-scope membership (GH #819 round 11 — Codex sweep 9 🔴 #19)', async () => {
+    // After promote/publish, the daemon strips `subGraph` from
+    // triples. Pre-round-11 the bucketer filtered to tagged rows
+    // only, so a fully-promoted subgraph's mini-card regressed
+    // to `0 triples` even though the rest of the UI listed the
+    // data. The bucketer now mirrors `admitTripleForScope` —
+    // untagged rows admit to a bucket whose `entityUrisBySubGraph`
+    // contains the subject or resource-object.
+    fetchSubGraphsMock.mockResolvedValueOnce({
+      subGraphs: [{ name: 'alpha', entityCount: 1, tripleCount: 0, description: '' }],
+    });
+    const entityList = [
+      // alpha-membership entity, promoted past WM.
+      { uri: 'urn:e:alpha', label: 'a', types: [], trustLevel: 'shared', layers: new Set(['shared']), subGraphs: new Set(['alpha']), properties: new Map(), connections: [] },
+    ];
+    const triples = [
+      // Untagged literal-name row — the daemon stripped the
+      // `subGraph` tag on promote. Pre-round-11 this dropped
+      // from alpha's bucket entirely; post-fix `admitTripleForScope`
+      // recovers it (subject URI is in alpha's scoped set).
+      { subject: 'urn:e:alpha', predicate: 'http://schema.org/name', object: '"alpha-promoted"', layer: 'shared' },
+    ];
+    await renderWith({
+      ...memory,
+      entities: new Map(entityList.map(e => [e.uri, e])),
+      entityList,
+      allTriples: triples,
+      counts: { wm: 0, swm: 1, vm: 0, total: 1 },
+    });
+    await flush();
+
+    const cards = container.querySelectorAll('.v10-sgov-card');
+    const alphaCardEl = cards[0];
+    const stats = alphaCardEl.querySelector('.v10-sgov-card-stats')?.textContent ?? '';
+    // Card reports the recovered count (1), not the pre-fix 0.
+    expect(stats).toContain('1 triples');
+    expect(stats).not.toContain('0 triples');
+  });
+
+  it('Untagged row between two cross-membership entities admits in BOTH buckets (GH #819 round 11 — cross-membership preservation)', async () => {
+    // Round 3 #1 contract: a cross-membership entity (member of
+    // alpha AND beta) appearing in two subgraphs' buckets is
+    // expected behavior. Round-11 untagged-recovery must preserve
+    // that: when an untagged row's subject is a cross-membership
+    // entity, it admits to EVERY matching bucket (no inner-loop
+    // break in the recovery pass).
+    fetchSubGraphsMock.mockResolvedValueOnce({
+      subGraphs: [
+        { name: 'alpha', entityCount: 1, tripleCount: 0, description: '' },
+        { name: 'beta', entityCount: 1, tripleCount: 0, description: '' },
+      ],
+    });
+    const entityList = [
+      // Single entity that's a member of BOTH alpha and beta.
+      { uri: 'urn:e:cross', label: 'c', types: [], trustLevel: 'shared', layers: new Set(['shared']), subGraphs: new Set(['alpha', 'beta']), properties: new Map(), connections: [] },
+    ];
+    const triples = [
+      // Untagged row — `subGraph` stripped on promote. Subject is
+      // in BOTH alpha's and beta's scoped URI sets.
+      { subject: 'urn:e:cross', predicate: 'http://schema.org/name', object: '"cross-promoted"', layer: 'shared' },
+    ];
+    await renderWith({
+      ...memory,
+      entities: new Map(entityList.map(e => [e.uri, e])),
+      entityList,
+      allTriples: triples,
+      counts: { wm: 0, swm: 1, vm: 0, total: 1 },
+    });
+    await flush();
+
+    const cards = container.querySelectorAll('.v10-sgov-card');
+    // Two named cards (alpha + beta) + Root card.
+    expect(cards.length).toBe(3);
+    // Both named cards report the recovered count.
+    const alphaStats = cards[0].querySelector('.v10-sgov-card-stats')?.textContent ?? '';
+    const betaStats = cards[1].querySelector('.v10-sgov-card-stats')?.textContent ?? '';
+    expect(alphaStats).toContain('1 triples');
+    expect(betaStats).toContain('1 triples');
+  });
+
   it('Root card keeps its scoped copy when same SPO also appears under a named subgraph (GH #819 round 4 — Codex sweep 2 🔴 #7)', async () => {
     // PR #847 round 4 (🔴 #7) — Root card sourced from
     // `canonicalTriples.filter(!t.subGraph)`. Global SPO dedup
