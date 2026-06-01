@@ -679,8 +679,36 @@ export async function listAssertions(
   }
 
   // layer === 'wm'
+  //
+  // #864 rc.12 follow-up — without `includeContextGraphPartitions`, the
+  // daemon's contextGraphId-scoped routing (DKGQueryEngine.query, the
+  // `effectiveContextGraphId && !options?.view` branch) restricts
+  // `GRAPH ?g { … }` reads to the static allow-list
+  //   { <cg>, <cg>/_meta, <cg>/_shared_memory_meta }
+  // via `constrainGraphVariablesToAllowedSet`. Every WM assertion lives
+  // in a content partition (`<cg>/assertion/<agent>/<name>` or the
+  // sub-graph variant `<cg>/<sg>/assertion/<agent>/<name>`) — none of
+  // which are in that allow-list — so this enumeration came back empty
+  // for any CG no matter how many assertions actually existed.
+  // Downstream that surfaced as:
+  //   - `AssertionsList` rendered "no assertions" right after import.
+  //   - `LayerActionsWidget` showed the correct "Promote N to SWM" badge
+  //     (the count comes from `useMemoryEntities`, which already opts
+  //     into `includeContextGraphPartitions`), but on click its
+  //     `handleAction` loop iterated zero times and hit the no-op
+  //     bulk-promote branch — the exact "0 triples promoted" symptom
+  //     the rc.12 issue reported even after the publisher-side
+  //     `AssertionNotPersistedError` fix landed.
+  // Opting into the same partition-aware scope `useMemoryEntities`
+  // already uses brings the assertion partitions back into `GRAPH ?g`
+  // expansion. Same `/api/query` route, same `postQueryDeduped` cache,
+  // same privacy/cost envelope as the dashboard counters.
   const sparql = `SELECT DISTINCT ?g (COUNT(?s) AS ?cnt) WHERE { GRAPH ?g { ?s ?p ?o } } GROUP BY ?g`;
-  const data = await executeQuery(sparql, contextGraphId);
+  const data = await postQueryDeduped({
+    sparql,
+    contextGraphId,
+    includeContextGraphPartitions: true,
+  });
   const bindings: any[] = data?.result?.bindings ?? [];
   // #706 fix — the prior `startsWith('did:dkg:context-graph:<cg>/assertion/')`
   // shape silently dropped sub-graph-scoped WM assertions, whose graph
