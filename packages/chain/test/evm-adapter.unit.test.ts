@@ -2,6 +2,7 @@
  * Unit tests for evm-adapter pure helpers and constructor-only surface (07 EVM_MODULE —
  * revert decoding used across chain operations). No live RPC / Hardhat.
  */
+import { createServer, type Server } from 'node:http';
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { Interface, ethers } from 'ethers';
 import {
@@ -1092,6 +1093,62 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     expect(ttlOf(aNeg)).toBe(DEFAULT_TTL_MS);
     expect(ttlOf(aDefault)).toBe(DEFAULT_TTL_MS);
   });
+});
+
+// #894 round-2 / Codex PR #901: register-503-under-RPC-outage. Uses a real
+// loopback HTTP server (not Hardhat) that returns HTTP 429 for every JSON-RPC
+// call, mirroring `daemon-http-behavior-extra.test.ts`'s `startRateLimitedRpc`.
+// ethers v6's default FetchRequest retries 429 with backoff far longer than any
+// caller timeout, so a chain read (`init()`'s Hub lookups, on the critical path
+// of `createOnChainContextGraph`) would hang for minutes. The bounded
+// `retryFunc` must make the read surface `RPC_ENDPOINTS_EXHAUSTED` in seconds so
+// `/api/context-graph/register` returns 503 (not hang / 500).
+describe('init() RPC-exhaustion bounding (perpetual 429)', () => {
+  let server: Server | null = null;
+  let url = '';
+
+  async function startRateLimited429(): Promise<string> {
+    server = createServer((_req, res) => {
+      res.writeHead(429, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32005, message: 'rate limited' } }));
+    });
+    await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', () => resolve()));
+    const addr = server.address();
+    if (!addr || typeof addr === 'string') throw new Error('mock RPC failed to bind');
+    return `http://127.0.0.1:${addr.port}`;
+  }
+
+  afterEach(async () => {
+    if (server) {
+      await new Promise<void>((resolve) => server!.close(() => resolve()));
+      server = null;
+    }
+  });
+
+  it('surfaces RPC_ENDPOINTS_EXHAUSTED from createOnChainContextGraph within a bounded time under a perpetually rate-limited RPC', async () => {
+    url = await startRateLimited429();
+    const a = new EVMChainAdapter(minimalConfig({ rpcUrl: url, rpcUrls: [] }));
+
+    const start = Date.now();
+    let thrown: any;
+    try {
+      await a.createOnChainContextGraph({ accessPolicy: 1, publishPolicy: 0 });
+    } catch (err) {
+      thrown = err;
+    }
+    const elapsed = Date.now() - start;
+
+    expect(thrown).toBeDefined();
+    expect(thrown.code).toBe('RPC_ENDPOINTS_EXHAUSTED');
+    // The classifier (`classifyRegisterContextGraphError`) maps the code → 503
+    // and surfaces `.message`; it must read as an RPC-endpoint exhaustion so the
+    // register test's `/RPC|endpoint|rate/i` body assertion holds.
+    expect(thrown.message).toMatch(/RPC|endpoint|rate/i);
+    expect(thrown.rpcUrls).toEqual([url]);
+    // Bounded: well under the daemon route / test 120s ceiling. The budget is
+    // ~6s of retry; allow generous slack for the in-flight network bootstrap.
+    expect(elapsed).toBeLessThan(45_000);
+  }, 60_000);
 });
 
 describe('PR3 / RC11 — publish-preflight TTL cache', () => {

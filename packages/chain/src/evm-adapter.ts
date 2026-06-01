@@ -1,4 +1,4 @@
-import { ethers, JsonRpcProvider, FallbackProvider, Wallet, Contract, Interface } from 'ethers';
+import { ethers, JsonRpcProvider, FallbackProvider, Wallet, Contract, Interface, FetchRequest } from 'ethers';
 import {
   createFilterErrorSilencer,
   installFilterNotFoundConsoleSuppressor,
@@ -95,6 +95,41 @@ const RPC_BROADCAST_ATTEMPT_TIMEOUT_MS = 10_000;
 const RPC_RECEIPT_ATTEMPT_TIMEOUT_MS = 5_000;
 const RPC_RECEIPT_POLL_INTERVAL_MS = 2_000;
 const RPC_RECEIPT_TIMEOUT_MS = 180_000;
+
+/**
+ * Wall-clock budget for ethers' built-in `FetchRequest` retry of a SINGLE RPC
+ * request. ethers v6 retries HTTP 429 / 5xx responses with exponential backoff
+ * via `FetchRequest.retryFunc`; the default keeps retrying for far longer than
+ * any caller-side timeout, so a perpetually rate-limited (429) RPC makes a
+ * plain read (e.g. `Hub.getContractAddress` inside `init()`, which sits on the
+ * critical path of `createOnChainContextGraph` / context-graph register) hang
+ * for minutes — register then never returns its `RPC_ENDPOINTS_EXHAUSTED`→503
+ * in bounded time (#894 follow-up: surfaced once the boot timeout stopped the
+ * daemon hanging at startup). Bounding the per-request retry to a few seconds
+ * lets a sustained RPC error surface as a normal (retryable) RPC error, so the
+ * adapter's own multi-RPC failover + `RPC_ENDPOINTS_EXHAUSTED` wrapping kick in
+ * within seconds instead of stalling. A transient single 429 is still retried
+ * (resilience preserved); only a perpetually-failing endpoint gives up fast.
+ */
+const RPC_REQUEST_RETRY_BUDGET_MS = 6_000;
+const RPC_REQUEST_RETRY_BACKOFF_CAP_MS = 1_500;
+
+/**
+ * Build a `FetchRequest` whose retry loop gives up after
+ * `RPC_REQUEST_RETRY_BUDGET_MS` of wall-clock backoff. Returns a string URL
+ * untouched would use ethers' unbounded default; we install a bounded
+ * `retryFunc` instead.
+ */
+function boundedRetryFetchRequest(url: string): FetchRequest {
+  const req = new FetchRequest(url);
+  const deadline = Date.now() + RPC_REQUEST_RETRY_BUDGET_MS;
+  req.retryFunc = async (_req, _response, attempt) => {
+    if (Date.now() >= deadline) return false;
+    await sleep(Math.min(500 * (attempt + 1), RPC_REQUEST_RETRY_BACKOFF_CAP_MS));
+    return true;
+  };
+  return req;
+}
 
 /**
  * Substrings we treat as "the Hub no longer recognises this contract
@@ -343,7 +378,14 @@ function isRetryableRpcError(err: unknown): boolean {
     || code === 'UNKNOWN_ERROR' || code === 'BAD_DATA') {
     return true;
   }
-  return /timeout|timed out|network|socket|reset|econnreset|econnrefused|etimedout|enotfound|eai_again|rate limit|too many requests|429|503|502|500|gateway|temporarily unavailable|fetch failed|connection/i
+  // `no runners?!` is ethers' FallbackProvider error (provider-fallback.js)
+  // when EVERY configured sub-provider is unavailable — i.e. all RPC endpoints
+  // are exhausted. On a multi-RPC node a perpetual 429 surfaces as this rather
+  // than a raw `429`/`SERVER_ERROR` (which is what a single-provider config
+  // throws), so classify it as retryable too — otherwise `init()`'s Hub reads
+  // would propagate it un-coded and `/api/context-graph/register` would 500
+  // instead of the bounded 503 (#894 follow-up).
+  return /timeout|timed out|network|socket|reset|econnreset|econnrefused|etimedout|enotfound|eai_again|rate limit|too many requests|429|503|502|500|gateway|temporarily unavailable|fetch failed|connection|no runners/i
     .test(msg);
 }
 
@@ -766,8 +808,13 @@ export class EVMChainAdapter implements ChainAdapter {
     // block per active subscription) in exchange for a stateless,
     // self-healing subscription with no server-side filter to leak. This is
     // ethers' own fallback path for filter-unsupported RPCs.
+    // Bound ethers' built-in per-request 429/5xx retry (see
+    // `boundedRetryFetchRequest`) so a perpetually rate-limited RPC surfaces a
+    // retryable error within seconds instead of stalling reads (e.g. `init()`'s
+    // Hub lookups) for minutes — which would otherwise make context-graph
+    // register hang past its HTTP timeout rather than returning 503.
     this.providers = this.rpcUrls.map(
-      (url) => new JsonRpcProvider(url, undefined, { cacheTimeout: -1, polling: true }),
+      (url) => new JsonRpcProvider(boundedRetryFetchRequest(url), undefined, { cacheTimeout: -1, polling: true }),
     );
     this.primaryProvider = this.providers[0];
     this.provider = this.providers.length === 1
@@ -1403,7 +1450,32 @@ export class EVMChainAdapter implements ChainAdapter {
 
   private async init(): Promise<void> {
     if (this.initialized) return;
+    try {
+      await this.initContracts();
+    } catch (err) {
+      // `init()` sits on the critical path of every chain write
+      // (`createOnChainContextGraph`, publish, verify, …). If the Hub lookups
+      // fail because the configured RPC endpoint(s) are exhausted (perpetual
+      // 429 / unreachable), surface the same `RPC_ENDPOINTS_EXHAUSTED` contract
+      // the tx-send path uses, so callers (e.g. `/api/context-graph/register`
+      // → `classifyRegisterContextGraphError`) map it to a bounded 503 instead
+      // of a generic 500 — and never hang waiting on it (#894 follow-up). A
+      // non-RPC error (e.g. a genuine "contract not in Hub" misconfig) keeps
+      // its original shape.
+      if (isRetryableRpcError(err)) {
+        const wrapped = new Error(
+          `chain initialisation failed on all configured RPC endpoints (${this.rpcUrls.join(', ')}): ${errorMessage(err)}`,
+          { cause: err },
+        );
+        (wrapped as any).code = 'RPC_ENDPOINTS_EXHAUSTED';
+        (wrapped as any).rpcUrls = [...this.rpcUrls];
+        throw wrapped;
+      }
+      throw err;
+    }
+  }
 
+  private async initContracts(): Promise<void> {
     this.contracts.identity = await this.resolveContract('Identity');
     this.contracts.profile = await this.resolveContract('Profile');
     this.contracts.parametersStorage = await this.resolveContract('ParametersStorage');

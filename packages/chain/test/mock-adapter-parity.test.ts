@@ -95,6 +95,7 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'resolveContract',
   'resolveAssetStorage',
   'init',
+  'initContracts',          // TS-private: init() body extracted so RPC-exhaustion can be wrapped as RPC_ENDPOINTS_EXHAUSTED
   'requireV9',
   'getBlockTimestamp',
   'broadcastSignedTransactionWithFailover',
