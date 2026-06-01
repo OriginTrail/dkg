@@ -1252,18 +1252,22 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
     expect(stats).toContain('1 entities');
     expect(stats).toContain('1 triples');
 
-    // GH #819 round 2 (ux-lead locked literal) — when the in-scope
-    // canonical count differs from what actually renders on the
-    // mini-graph, the triple-count badge gets a `title` tooltip
-    // explaining the gap. Here the alpha→beta edge is in alpha's
-    // canonical bucket (count = 1) but drops from the rendered
-    // slice via `filterTriplesToEntities` (rendered = 0). Tooltip
-    // surfaces this asymmetry.
+    // GH #819 round 8 (Codex sweep 6 🟡 #4 / #9 / #12, team-lead
+    // call β) — when the in-scope canonical count differs from
+    // what actually renders on the mini-graph, the triple-count
+    // badge gets a `title` tooltip explaining the gap. Round 2
+    // locked the original wording on cross-card edges only; sweeps
+    // 1-6 re-raised the cap-trim cause (`applyHeaviestSubjectsCap`)
+    // 5 times in a row. Round 8 broadens the literal to cover both
+    // causes. Here the alpha→beta edge is in alpha's canonical
+    // bucket (count = 1) but drops from the rendered slice via
+    // `filterTriplesToEntities` (rendered = 0) — the
+    // endpoints-outside-subgraph cause.
     const tripleStat = Array.from(alphaCardEl.querySelectorAll('.v10-sgov-card-stat'))
       .find(el => el.textContent?.includes('triples')) as HTMLElement | undefined;
     expect(tripleStat).toBeTruthy();
     expect(tripleStat!.getAttribute('title')).toBe(
-      `1 triples in this subgraph's scope; 0 rendered (cross-card edges whose other endpoint isn't in this subgraph aren't drawn here).`,
+      `1 triples in this subgraph's scope; 0 rendered (some in-scope edges aren't drawn — either endpoints outside this subgraph, or cap-trimmed in dense buckets).`,
     );
   });
 

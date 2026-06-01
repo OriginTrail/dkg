@@ -18,7 +18,7 @@ import {
   useMemoryEntities,
   canonicalEntityUri,
   isFirstClassEntity,
-  type TrustLevel, type MemoryEntity, type Triple,
+  type TrustLevel, type MemoryEntity, type Triple, type LayeredTriple,
 } from '../../hooks/useMemoryEntities.js';
 import { decodeRdfStringLiteral } from '../../../rdf-literal.js';
 import {
@@ -4606,7 +4606,15 @@ export function SubGraphMiniCard({
               : isFailedOrPartial && card.tripleCount === 0
                 ? 'Some layers unavailable; count may be incomplete.'
                 : card.tripleCount !== card.triples.length
-                  ? `${card.tripleCount} triples in this subgraph's scope; ${card.triples.length} rendered (cross-card edges whose other endpoint isn't in this subgraph aren't drawn here).`
+                  // GH #819 round 8 (Codex sweep 6 🟡 #4 / #9 / #12,
+                  // team-lead call β) — broader wording so the
+                  // tooltip covers both causes of stat-vs-rendered
+                  // gap: (1) cross-card edges whose other endpoint
+                  // sits outside the subgraph and (2) cap-trimmed
+                  // rows in dense buckets via `applyHeaviestSubjectsCap`.
+                  // Earlier copy blamed only cause (1); Codex
+                  // re-raised the cap-trim case 5 sweeps in a row.
+                  ? `${card.tripleCount} triples in this subgraph's scope; ${card.triples.length} rendered (some in-scope edges aren't drawn — either endpoints outside this subgraph, or cap-trimmed in dense buckets).`
                   : undefined
           }
         ><b>{isHydrating && card.tripleCount === 0 ? '…' : card.tripleCount}</b> triples</span>
