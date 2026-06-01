@@ -1027,6 +1027,19 @@ export class EVMChainAdapter implements ChainAdapter {
       if (!prepared) continue;
       return this.sendSignedTransactionAndWait(prepared.signedTx, prepared.txHash, label);
     }
+    // Single-provider adapters never "fail over" — there is no second
+    // endpoint to try — so a retryable error from the only RPC is just that
+    // error. Wrapping it into a synthetic RPC_ENDPOINTS_EXHAUSTED here would
+    // REWRITE the original `.message` (e.g. a plain `connect ECONNREFUSED`),
+    // which breaks callers/classifiers that inspect the message in place and
+    // the codex round-6 contract (evm-adapter-pca-enrich.test.ts) that
+    // non-custom errors propagate unchanged. Rethrow the original verbatim;
+    // the exhaustion wrapper is reserved for genuine multi-endpoint failover
+    // (>1 provider), where the aggregated "all endpoints" context is
+    // meaningful and is asserted by evm-adapter.unit.test.ts.
+    if (this.providers.length <= 1) {
+      throw lastRetryable;
+    }
     const err = new Error(
       `${label} transaction preparation failed on all configured RPC endpoints ` +
       `(${this.rpcUrls.join(', ')}): ${errorMessage(lastRetryable)}`,
