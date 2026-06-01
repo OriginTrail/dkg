@@ -223,6 +223,52 @@ describe('Issue #865 — public CG + allowlist must not be classified as private
         await agent.stop().catch(() => {});
       }
     });
+
+    // Codex review on #873 (line 14061) — sibling of the peer-path
+    // test above. The agent path (`inviteAgentToContextGraph`) had
+    // the same bug PLUS no idempotency check at all: re-inviting an
+    // already-allowed agent re-pushed the duplicate DKG_ALLOWED_AGENT
+    // quad, re-ran upsertContextGraphMember, AND fired the warn.
+    // @branarakic empirically reproduced this against the patched
+    // daemon at `704b49cf` (#873 PR comment, 2026-06-01 12:42 UTC).
+    it('inviteAgentToContextGraph re-invite of an already-allowed agent on a public CG fires the warn exactly once', async () => {
+      const warnings: string[] = [];
+      Logger.setSink((entry) => {
+        if (entry.level === 'warn') warnings.push(entry.message);
+      });
+
+      const { agent } = await makeAgent();
+      try {
+        const owner = await ownerAddress(agent);
+        await agent.createContextGraph({
+          id: CG_ID,
+          name: 'Issue 865 Public CG (agent-warn-ordering)',
+          accessPolicy: 0,
+          callerAgentAddress: owner,
+        });
+
+        await agent.inviteAgentToContextGraph(CG_ID, INVITEE_AGENT, owner);
+
+        const publicWarnsAfterFirst = warnings.filter((m) =>
+          m.includes('inviteAgentToContextGraph') &&
+          m.includes('accessPolicy="public"'),
+        );
+        expect(publicWarnsAfterFirst).toHaveLength(1);
+
+        // Second invite — agent is already in the allowlist, no
+        // delegation supplied, so the new idempotency branch must
+        // return early. Warn count stays at 1.
+        await agent.inviteAgentToContextGraph(CG_ID, INVITEE_AGENT, owner);
+
+        const publicWarnsAfterSecond = warnings.filter((m) =>
+          m.includes('inviteAgentToContextGraph') &&
+          m.includes('accessPolicy="public"'),
+        );
+        expect(publicWarnsAfterSecond).toHaveLength(1);
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    });
   });
 
   it('legacy CGs with no explicit accessPolicy + allowlist still report curated (back-compat with the heuristic fallback)', async () => {

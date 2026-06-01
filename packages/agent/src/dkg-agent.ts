@@ -14052,19 +14052,51 @@ export class DKGAgent {
     }
     this.assertCallerIsOwner(owner, callerAgentAddress, 'manage invitations');
 
+    const existingParticipants = await this.getPrivateContextGraphParticipants(contextGraphId);
+    const alreadyAllowed = existingParticipants?.some(
+      (a) => a.toLowerCase() === agentAddress.toLowerCase(),
+    ) ?? false;
+
+    // Codex review on #873 (line 14061) — idempotency early-return.
+    // Mirrors the peer-path branch at ~line 13967. A no-op re-invite
+    // of an agent that's already in the allowlist with no fresh
+    // delegation must not insert duplicate quads OR emit the
+    // public-CG warn — pre-fix, the warn ran on every call regardless
+    // of whether the store was about to mutate, which misled
+    // operators auditing the warn stream (empirically reproduced by
+    // @branarakic on the patched daemon at `704b49cf`).
+    if (alreadyAllowed && !delegation) {
+      this.upsertContextGraphMember({
+        contextGraphId,
+        principalType: 'agent',
+        principalId: agentAddress,
+        role: 'participant',
+        status: 'active',
+        source: 'allowed-agent',
+      });
+      this.log.info(ctx, `Agent ${agentAddress} already in allowlist for "${contextGraphId}" — skipping`);
+      return;
+    }
+
     // Issue #865 — companion warning to the peer-invite path above.
     // Allowlist writes on explicit-public CGs are allowed (the
     // publishPolicy=curated + accessPolicy=public combination is a
     // valid CG mode where the allowlist gates publishers, not
     // subscribers), but the operator should know that the read-side
     // gate stays open per the explicit `accessPolicy="public"`.
-    await this.warnIfAllowlistWriteOnPublicCg(contextGraphId, ctx, 'inviteAgentToContextGraph');
+    //
+    // Codex review on #873 (line 14061) — gated on `!alreadyAllowed`
+    // so re-approves that only refresh a delegation (allowlist quad
+    // is already there) don't emit a misleading "writing allowlist"
+    // warning either.
+    if (!alreadyAllowed) {
+      await this.warnIfAllowlistWriteOnPublicCg(contextGraphId, ctx, 'inviteAgentToContextGraph');
+    }
 
     const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
     const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
     const quadsToInsert: Quad[] = [];
 
-    const existingParticipants = await this.getPrivateContextGraphParticipants(contextGraphId);
     if ((!existingParticipants || existingParticipants.length === 0) && this.defaultAgentAddress) {
       quadsToInsert.push({
         subject: contextGraphUri,
@@ -14082,12 +14114,18 @@ export class DKGAgent {
       });
     }
 
-    quadsToInsert.push({
-      subject: contextGraphUri,
-      predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
-      object: `"${agentAddress}"`,
-      graph: cgMetaGraph,
-    });
+    // Codex review on #873 — only push the bare allowlist quad when
+    // the list is actually growing. Re-approving an existing agent
+    // with a fresh delegation overwrites the delegation node (below)
+    // but must not re-insert the DKG_ALLOWED_AGENT triple.
+    if (!alreadyAllowed) {
+      quadsToInsert.push({
+        subject: contextGraphUri,
+        predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
+        object: `"${agentAddress}"`,
+        graph: cgMetaGraph,
+      });
+    }
 
     // If the agent gave us a signed delegation (via the join-request
     // path), promote its delegatee identifiers into the CG's allowlist
