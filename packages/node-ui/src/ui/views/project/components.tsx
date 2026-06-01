@@ -1802,12 +1802,17 @@ export function LayerActionsWidget({ layer, count, contextGraphId, onComplete }:
     setBusy(true);
     setError(null);
     setResult(null);
+    // Issue #864 (Codex review on #874) — track the in-flight
+    // assertion so mid-loop failures surface "<name>: …" instead of
+    // the generic "an assertion …".
+    let currentAssertion: string | null = null;
     try {
       if (isWm) {
         const assertions = await listAssertions(contextGraphId, 'wm');
         let promoted = 0;
         let noopCount = 0;
         for (const a of assertions) {
+          currentAssertion = a.name;
           // PR #710 — thread `subGraph` so sub-graph-scoped assertions
           // hit the correct daemon lookup key `(cg, name, subGraph)`.
           const res = await promoteAssertion(contextGraphId, a.name, 'all', a.subGraph);
@@ -1829,7 +1834,7 @@ export function LayerActionsWidget({ layer, count, contextGraphId, onComplete }:
       }
       onComplete?.();
     } catch (err: any) {
-      const typed = describePromoteError('an assertion', err);
+      const typed = describePromoteError(currentAssertion ?? 'an assertion', err);
       setError(typed ? typed.message : (err?.message ?? 'Action failed'));
     } finally {
       setBusy(false);
@@ -2988,11 +2993,16 @@ export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }:
     setBusy('__all__');
     setResult(null);
     setError(null);
+    // Issue #864 (Codex review on #874) — track the in-flight
+    // assertion so mid-loop failures surface "<name>: …" instead of
+    // "selected assertion …".
+    let currentAssertion: string | null = null;
     try {
       if (layer === 'wm') {
         let total = 0;
         let noopCount = 0;
         for (const a of assertions) {
+          currentAssertion = a.name;
           // PR #710 — see comment on the single-row handler above.
           const res = await promoteAssertion(contextGraphId, a.name, 'all', a.subGraph);
           total += res.promotedCount;
@@ -3013,7 +3023,7 @@ export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }:
       refresh();
       onComplete();
     } catch (err: any) {
-      const typed = describePromoteError('selected assertion', err);
+      const typed = describePromoteError(currentAssertion ?? 'selected assertion', err);
       setError(typed ? typed.message : (err?.message ?? 'Action failed'));
     } finally {
       setBusy(null);

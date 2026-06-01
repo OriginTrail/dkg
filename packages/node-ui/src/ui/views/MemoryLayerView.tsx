@@ -455,8 +455,15 @@ function AssertionList({ contextGraphId, onPromoted }: { contextGraphId: string;
     setPromoteError(null);
     let totalPromoted = 0;
     let noopCount = 0;
+    // Issue #864 (Codex review on #874) — capture the in-flight
+    // assertion name so a mid-loop failure surfaces "<name>: …"
+    // instead of the generic "selected assertion …". Without this,
+    // bulk promote with a 409 ASSERTION_NOT_PERSISTED on one item
+    // gave the user no way to tell which draft needs re-importing.
+    let currentAssertion: string | null = null;
     try {
       for (const a of assertions) {
+        currentAssertion = a.name;
         // PR #710 — see comment on the single-row handler above.
         const res = await promoteAssertion(contextGraphId, a.name, 'all', a.subGraph);
         totalPromoted += res.promotedCount;
@@ -472,7 +479,7 @@ function AssertionList({ contextGraphId, onPromoted }: { contextGraphId: string;
       refresh();
       onPromoted();
     } catch (err: any) {
-      const typed = describePromoteError('selected assertion', err);
+      const typed = describePromoteError(currentAssertion ?? 'selected assertion', err);
       setPromoteError(
         typed
           ? { message: typed.message, kind: 'not-persisted' }
