@@ -19,10 +19,11 @@
  * for CGs that have no explicit policy at all (the pre-V10 discovery
  * case the original code was written for).
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
   DKG_ONTOLOGY,
+  Logger,
   SYSTEM_CONTEXT_GRAPHS,
   contextGraphDataGraphUri,
   contextGraphMetaUri,
@@ -167,6 +168,61 @@ describe('Issue #865 — public CG + allowlist must not be classified as private
     } finally {
       await agent.stop().catch(() => {});
     }
+  });
+
+  // Codex review on #873 — the `warnIfAllowlistWriteOnPublicCg` call
+  // in `inviteToContextGraph` (peer path) used to run BEFORE the
+  // idempotency early-return. A no-op re-invite would log "writing
+  // allowlist quad" even though nothing got persisted, misleading
+  // operators auditing their warn stream. The fix moved the call
+  // AFTER the early-return; this test pins it.
+  describe('Codex review on #873 — warn must not fire on no-op peer re-invite', () => {
+    afterEach(() => {
+      Logger.setSink(null);
+    });
+
+    it('inviteToContextGraph re-invite of an already-allowed peer on a public CG fires the warn exactly once', async () => {
+      const warnings: string[] = [];
+      Logger.setSink((entry) => {
+        if (entry.level === 'warn') warnings.push(entry.message);
+      });
+
+      const { agent } = await makeAgent();
+      try {
+        const owner = await ownerAddress(agent);
+        await agent.createContextGraph({
+          id: CG_ID,
+          name: 'Issue 865 Public CG (warn-ordering)',
+          accessPolicy: 0,
+          callerAgentAddress: owner,
+        });
+
+        // First invite — a real allowlist write happens, so the warn
+        // MUST fire (the operator should see exactly one breadcrumb
+        // explaining the allowlist landed on a public CG).
+        await agent.inviteToContextGraph(CG_ID, INVITEE_PEER_ID, owner);
+
+        const publicWarnsAfterFirst = warnings.filter((m) =>
+          m.includes('inviteToContextGraph (peer)') &&
+          m.includes('accessPolicy="public"'),
+        );
+        expect(publicWarnsAfterFirst).toHaveLength(1);
+
+        // Second invite — peer is already in the allowlist, so the
+        // idempotency branch returns early without inserting any
+        // quad. The warn MUST NOT fire a second time, otherwise the
+        // operator's audit trail shows phantom writes.
+        await agent.inviteToContextGraph(CG_ID, INVITEE_PEER_ID, owner);
+
+        const publicWarnsAfterSecond = warnings.filter((m) =>
+          m.includes('inviteToContextGraph (peer)') &&
+          m.includes('accessPolicy="public"'),
+        );
+        expect(publicWarnsAfterSecond).toHaveLength(1);
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    });
   });
 
   it('legacy CGs with no explicit accessPolicy + allowlist still report curated (back-compat with the heuristic fallback)', async () => {
