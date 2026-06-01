@@ -13977,16 +13977,6 @@ export class DKGAgent {
       return;
     }
 
-    // Issue #865 — log a clear warning when growing a peer allowlist
-    // on a CG that has an explicit `accessPolicy="public"` triple. The
-    // allowlist write is allowed (legitimate uses include populating
-    // an authorized-publisher set on a public-but-curated-publish CG),
-    // but post-#865 the publisher's `isPrivateContextGraph` no longer
-    // silently flips the CG to curated just because an allowlist was
-    // written — so the operator should know the allowlist is
-    // informational for read access on this CG.
-    await this.warnIfAllowlistWriteOnPublicCg(contextGraphId, ctx, 'inviteToContextGraph (peer)');
-
     quadsToInsert.push({
       subject: contextGraphUri,
       predicate: DKG_ONTOLOGY.DKG_ALLOWED_PEER,
@@ -13995,6 +13985,23 @@ export class DKGAgent {
     });
 
     await this.store.insert(quadsToInsert);
+
+    // Issue #865 — log a clear warning AFTER the allowlist quad has
+    // landed on a CG with an explicit `accessPolicy="public"` triple.
+    // The allowlist write is allowed (legitimate uses include
+    // populating an authorized-publisher set on a public-but-curated-
+    // publish CG), but post-#865 the publisher's
+    // `isPrivateContextGraph` no longer silently flips the CG to
+    // curated just because an allowlist was written — so the
+    // operator should know the allowlist is informational for read
+    // access on this CG.
+    //
+    // Codex review round 5 on #873 (line 17485) — call site is
+    // post-insert so the breadcrumb only fires for writes that
+    // actually hit the store. A failing `store.insert` throws to the
+    // caller before we reach this point, so the warn is a faithful
+    // record of persisted state.
+    await this.warnIfAllowlistWriteOnPublicCg(contextGraphId, ctx, 'inviteToContextGraph (peer)');
 
     if (existingAllowlist === null || existingAllowlist.length === 0) {
       this.upsertContextGraphMember({
@@ -14078,21 +14085,6 @@ export class DKGAgent {
       return;
     }
 
-    // Issue #865 — companion warning to the peer-invite path above.
-    // Allowlist writes on explicit-public CGs are allowed (the
-    // publishPolicy=curated + accessPolicy=public combination is a
-    // valid CG mode where the allowlist gates publishers, not
-    // subscribers), but the operator should know that the read-side
-    // gate stays open per the explicit `accessPolicy="public"`.
-    //
-    // Codex review on #873 (line 14061) — gated on `!alreadyAllowed`
-    // so re-approves that only refresh a delegation (allowlist quad
-    // is already there) don't emit a misleading "writing allowlist"
-    // warning either.
-    if (!alreadyAllowed) {
-      await this.warnIfAllowlistWriteOnPublicCg(contextGraphId, ctx, 'inviteAgentToContextGraph');
-    }
-
     const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
     const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
     const quadsToInsert: Quad[] = [];
@@ -14155,6 +14147,24 @@ export class DKGAgent {
     }
 
     await this.store.insert(quadsToInsert);
+
+    // Issue #865 — companion warning to the peer-invite path above.
+    // Allowlist writes on explicit-public CGs are allowed (the
+    // publishPolicy=curated + accessPolicy=public combination is a
+    // valid CG mode where the allowlist gates publishers, not
+    // subscribers), but the operator should know that the read-side
+    // gate stays open per the explicit `accessPolicy="public"`.
+    //
+    // Codex review round 4/5 on #873 — fires AFTER `store.insert`
+    // succeeds so the breadcrumb is a faithful record of persisted
+    // state (a failing insert throws before this point). Gated on
+    // `!alreadyAllowed` because re-approves that only refresh a
+    // delegation don't grow the allowlist, so they don't warrant
+    // the public-CG breadcrumb.
+    if (!alreadyAllowed) {
+      await this.warnIfAllowlistWriteOnPublicCg(contextGraphId, ctx, 'inviteAgentToContextGraph');
+    }
+
     this.upsertContextGraphMember({
       contextGraphId,
       principalType: 'agent',
@@ -17458,19 +17468,21 @@ export class DKGAgent {
    * has an obvious breadcrumb. Read-only, single SELECT (delegated
    * to `getExplicitAccessPolicy`) — does not mutate state.
    *
-   * Codex review on #873 — callers MUST defer this until they've
-   * confirmed an allowlist write will actually happen (i.e. AFTER
-   * the idempotency early-return). Logging when no quad is inserted
-   * misleads operators about which writes hit the store.
+   * Codex review rounds 1, 4, and 5 on #873 — callers MUST defer
+   * this until AFTER `store.insert(quadsToInsert)` succeeds. Two
+   * constraints converge on the post-insert call site:
    *
-   * Codex review round 4 on #873 (line 17475) — the warn fires
-   * BEFORE `store.insert()` is awaited, so a transient store
-   * failure would leave a breadcrumb claiming the quad was
-   * persisted when it wasn't. Wording is intentionally pre-write
-   * ("about to write" / "will be persisted") so the audit trail
-   * stays accurate whether or not the subsequent insert succeeds —
-   * the operator still gets the public-CG breadcrumb and any
-   * thrown insert error surfaces separately, no contradiction.
+   *   - Round 1 / round 4 (idempotency): logging when no quad
+   *     would be inserted (no-op re-invite) misleads operators
+   *     about which writes hit the store.
+   *   - Round 5 (state truthfulness): logging BEFORE the insert
+   *     resolves leaves a phantom breadcrumb if the insert throws.
+   *
+   * The current call sites in `inviteToContextGraph` /
+   * `inviteAgentToContextGraph` fire this AFTER the awaited insert
+   * (gated on `!alreadyAllowed` for the agent path's
+   * delegation-only refresh case), so the warn is a faithful
+   * record of persisted state and the wording is past-tense.
    */
   private async warnIfAllowlistWriteOnPublicCg(
     contextGraphId: string,
@@ -17481,8 +17493,8 @@ export class DKGAgent {
     if (policy !== 'public') return;
     this.log.warn(
       ctx,
-      `${operation}: about to write allowlist on context graph "${contextGraphId}" which has explicit accessPolicy="public". ` +
-        `The allowlist quad will be persisted but does NOT enforce read access — anyone can still subscribe. ` +
+      `${operation}: wrote allowlist quad on context graph "${contextGraphId}" which has explicit accessPolicy="public". ` +
+        `The persisted quad does NOT enforce read access — anyone can still subscribe. ` +
         `Issue #865: as of this commit, the publisher no longer auto-flips public CGs to the curated publish path ` +
         `just because an allowlist exists. If you intended to make this CG invite-only, recreate it with accessPolicy=1.`,
     );
