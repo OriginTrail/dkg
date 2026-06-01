@@ -97,34 +97,44 @@ const RPC_RECEIPT_POLL_INTERVAL_MS = 2_000;
 const RPC_RECEIPT_TIMEOUT_MS = 180_000;
 
 /**
- * Wall-clock budget for ethers' built-in `FetchRequest` retry of a SINGLE RPC
- * request. ethers v6 retries HTTP 429 / 5xx responses with exponential backoff
- * via `FetchRequest.retryFunc`; the default keeps retrying for far longer than
- * any caller-side timeout, so a perpetually rate-limited (429) RPC makes a
- * plain read (e.g. `Hub.getContractAddress` inside `init()`, which sits on the
+ * Per-request retry bound for ethers' built-in `FetchRequest`. ethers v6
+ * retries HTTP 429 / 5xx responses with exponential backoff via
+ * `FetchRequest.retryFunc`; the default keeps retrying for far longer than any
+ * caller-side timeout, so a perpetually rate-limited (429) RPC makes a plain
+ * read (e.g. `Hub.getContractAddress` inside `init()`, which sits on the
  * critical path of `createOnChainContextGraph` / context-graph register) hang
  * for minutes — register then never returns its `RPC_ENDPOINTS_EXHAUSTED`→503
  * in bounded time (#894 follow-up: surfaced once the boot timeout stopped the
- * daemon hanging at startup). Bounding the per-request retry to a few seconds
- * lets a sustained RPC error surface as a normal (retryable) RPC error, so the
- * adapter's own multi-RPC failover + `RPC_ENDPOINTS_EXHAUSTED` wrapping kick in
- * within seconds instead of stalling. A transient single 429 is still retried
- * (resilience preserved); only a perpetually-failing endpoint gives up fast.
+ * daemon hanging at startup). Bounding the retry lets a sustained RPC error
+ * surface as a normal (retryable) RPC error, so the adapter's own multi-RPC
+ * failover + `RPC_ENDPOINTS_EXHAUSTED` wrapping kick in within seconds instead
+ * of stalling. A transient single 429 is still retried (resilience preserved);
+ * only a perpetually-failing endpoint gives up fast.
+ *
+ * The bound is the per-request RETRY COUNT (`attempt`), NOT a wall-clock
+ * deadline. ethers resets `attempt` to 0 for every new top-level request and
+ * increments it per retry, so an attempt-count cap is inherently per-request —
+ * unlike a `Date.now()`-based deadline captured at provider construction, which
+ * would (once the node had been up longer than the budget) instantly disable
+ * retries for the rest of the process lifetime (Codex PR #901 round-3 :125).
+ * With the capped backoff below, `RPC_REQUEST_MAX_RETRIES` retries span roughly
+ * `RPC_REQUEST_MAX_RETRIES * backoffCap` ≈ 7.5s of wall time under a fast-
+ * failing endpoint — bounded, and well under the daemon route / test ceilings.
  */
-const RPC_REQUEST_RETRY_BUDGET_MS = 6_000;
+const RPC_REQUEST_MAX_RETRIES = 5;
 const RPC_REQUEST_RETRY_BACKOFF_CAP_MS = 1_500;
 
 /**
  * Build a `FetchRequest` whose retry loop gives up after
- * `RPC_REQUEST_RETRY_BUDGET_MS` of wall-clock backoff. Returns a string URL
- * untouched would use ethers' unbounded default; we install a bounded
- * `retryFunc` instead.
+ * `RPC_REQUEST_MAX_RETRIES` retries. A bare string URL would use ethers'
+ * unbounded default; we install a bounded `retryFunc` instead. The bound is
+ * evaluated from `attempt` (per-request), so every request — no matter how
+ * long the node has been running — gets the same fresh retry budget.
  */
 function boundedRetryFetchRequest(url: string): FetchRequest {
   const req = new FetchRequest(url);
-  const deadline = Date.now() + RPC_REQUEST_RETRY_BUDGET_MS;
   req.retryFunc = async (_req, _response, attempt) => {
-    if (Date.now() >= deadline) return false;
+    if (attempt >= RPC_REQUEST_MAX_RETRIES) return false;
     await sleep(Math.min(500 * (attempt + 1), RPC_REQUEST_RETRY_BACKOFF_CAP_MS));
     return true;
   };
