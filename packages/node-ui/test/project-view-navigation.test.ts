@@ -292,6 +292,14 @@ vi.mock('../src/ui/views/project/components.js', () => ({
       React.createElement('div', {}, entity.label),
       React.createElement('button', { 'data-testid': 'open-related-entity', onClick: () => onNavigate('urn:entity:other') }, 'Open related'),
       React.createElement('button', { 'data-testid': 'detail-back', onClick: onClose }, 'Back to Context Graph')),
+  // S4 — assertion detail overlay. The mock surfaces the assertion
+  // identity + an "open entity from assertion" button so the
+  // mutually-exclusive overlay + close-to-origin behaviour can be
+  // asserted without the real fetch/render path.
+  AssertionDetailView: ({ assertion, onNavigate }: { assertion: any; onNavigate: (uri: string) => void }) =>
+    React.createElement('section', { 'data-testid': 'assertion-detail', 'data-assertion': assertion.graphUri, 'data-name': assertion.name, 'data-subgraph': assertion.subGraph ?? '' },
+      React.createElement('div', {}, assertion.name),
+      React.createElement('button', { 'data-testid': 'assertion-open-entity', onClick: () => onNavigate('urn:entity:demo') }, 'Open entity from assertion')),
   SubGraphDetailView: ({ slug, activeTab = 'items', onTabChange, onSelectEntity, initialLayer, initialEnabledLayers, onEnabledLayersChange }: {
     slug: string;
     activeTab?: string;
@@ -408,18 +416,22 @@ vi.mock('../src/ui/views/project/components.js', () => ({
   SubGraphExplorerHeader: () =>
     React.createElement('div', { 'data-testid': 'subgraph-explorer-header' }, 'Subgraph Explorer'),
   ContextGraphQueryView: () => null,
-  LayerDetailView: ({ layer, activeTab, onTabChange, onSelectEntity, onNodeClick }: {
+  LayerDetailView: ({ layer, activeTab, onTabChange, onSelectEntity, onSelectAssertion, onNodeClick }: {
     layer: string;
     activeTab: string;
     onTabChange: (tab: string) => void;
     onSelectEntity: (uri: string) => void;
+    onSelectAssertion?: (assertion: any) => void;
     onNodeClick: (node: any) => void;
   }) =>
     React.createElement('section', { 'data-testid': 'layer-detail', 'data-layer': layer, 'data-tab': activeTab },
       React.createElement('button', { 'data-testid': 'layer-tab-graph', onClick: () => onTabChange('graph') }, 'Graph'),
+      React.createElement('button', { 'data-testid': 'layer-tab-assertions', onClick: () => onTabChange('assertions') }, 'Assertions'),
       React.createElement('div', { 'data-testid': 'layer-scroll', 'data-cg-scroll-key': `layer:${layer}:${activeTab}` },
         React.createElement('button', { 'data-testid': 'open-layer-entity', onClick: () => onSelectEntity('urn:entity:working') }, 'Open layer entity'),
         React.createElement('button', { 'data-testid': 'open-layer-overlap-entity', onClick: () => onSelectEntity('urn:entity:overlap') }, 'Open overlap entity'),
+        // S4 — open an assertion detail from the Assertions subtab.
+        React.createElement('button', { 'data-testid': 'open-layer-assertion', onClick: () => onSelectAssertion?.({ name: 'demo-assertion', graphUri: 'did:dkg:context-graph:cg-test/assertion/0xabc/demo-assertion', subGraph: undefined }) }, 'Open assertion'),
         React.createElement('button', { 'data-testid': 'open-layer-graph-node', onClick: () => onNodeClick({ id: 'urn:entity:overlap', trustLayer: layer }) }, 'Open graph node'))),
 }));
 
@@ -1286,6 +1298,70 @@ describe('ProjectView entity detail navigation', () => {
     // widened scope (the no-op invariant means no mirror writes
     // occur; previously-set widened scope persists).
     expect(query('subgraph-bar').dataset.enabledScope).toBe('shared,working');
+  });
+
+  // ─── S4 — assertion detail navigation ──────────────────────
+
+  it('clicking an assertion row opens the AssertionDetailView (T06 / T20)', async () => {
+    await click('switch-wm');
+    await click('layer-tab-assertions');
+    await flush();
+
+    await click('open-layer-assertion');
+    await flush();
+
+    const detail = query('assertion-detail');
+    expect(detail.dataset.name).toBe('demo-assertion');
+    expect(detail.dataset.assertion).toBe('did:dkg:context-graph:cg-test/assertion/0xabc/demo-assertion');
+    // The layer page is replaced by the overlay.
+    expect(document.querySelector('[data-testid="layer-detail"]')).toBeNull();
+    // data-view on the page main reflects the assertion route.
+    expect(query('active-layer').dataset.layer).toBe('wm');
+  });
+
+  it('closing the assertion detail returns to the originating layer + Assertions subtab (T07)', async () => {
+    await click('switch-wm');
+    await click('layer-tab-assertions');
+    await flush();
+    await click('open-layer-assertion');
+    await flush();
+    expect(query('assertion-detail').dataset.name).toBe('demo-assertion');
+
+    // No back button on the assertion detail (S5 lock) — the layer
+    // switcher is the always-visible exit. Switching back to WM
+    // restores the layer page; the Assertions subtab persists.
+    await click('switch-wm');
+    await flush();
+    expect(document.querySelector('[data-testid="assertion-detail"]')).toBeNull();
+    expect(query('layer-detail').dataset.layer).toBe('wm');
+  });
+
+  it('opening an entity from the assertion detail replaces it (mutually exclusive overlays)', async () => {
+    await click('switch-wm');
+    await click('layer-tab-assertions');
+    await flush();
+    await click('open-layer-assertion');
+    await flush();
+    expect(query('assertion-detail').dataset.name).toBe('demo-assertion');
+
+    await click('assertion-open-entity');
+    await flush();
+    // Entity detail takes over; the assertion overlay is gone.
+    expect(query('entity-detail').dataset.entity).toBe('urn:entity:demo');
+    expect(document.querySelector('[data-testid="assertion-detail"]')).toBeNull();
+  });
+
+  it('switching layers from the assertion detail exits the overlay (no stranded detail)', async () => {
+    await click('switch-wm');
+    await click('layer-tab-assertions');
+    await flush();
+    await click('open-layer-assertion');
+    await flush();
+
+    await click('switch-swm');
+    await flush();
+    expect(document.querySelector('[data-testid="assertion-detail"]')).toBeNull();
+    expect(query('layer-detail').dataset.layer).toBe('swm');
   });
 
 });

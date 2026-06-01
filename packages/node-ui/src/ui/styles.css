@@ -6027,6 +6027,9 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
 }
 .v10-item-row:hover { background: var(--bg-hover); }
 .v10-item-row.selected { background: var(--bg-active); }
+/* S4 — keyboard-focus affordance for assertion rows now that they are
+   click-through (the base row is already `cursor: pointer`). */
+.v10-item-row-clickable:focus-visible { outline: 2px solid var(--text-link); outline-offset: -2px; }
 .v10-item-icon { font-size: 14px; width: 22px; text-align: center; flex-shrink: 0; color: var(--text-tertiary); }
 .v10-item-info { flex: 1; min-width: 0; }
 .v10-item-name { font-size: 12px; font-weight: 600; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -6043,6 +6046,10 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
 .v10-trust-badge.vm { background: rgba(34,197,94,0.12); color: var(--text-success); }
 .v10-trust-badge.swm { background: rgba(245,158,11,0.12); color: var(--text-warning); }
 .v10-trust-badge.wm { background: rgba(100,116,139,0.12); color: var(--text-tertiary); }
+/* S4 — a discarded assertion is layerless: neutral muted badge, no layer
+   color (never VM-green). Reuses the same elevated/border tokens as the
+   discarded lifecycle dot. */
+.v10-trust-badge-discarded { background: var(--bg-elevated); color: var(--text-tertiary); border: 1px solid var(--border-strong); }
 .v10-item-promote-btn {
   padding: 3px 10px; border-radius: 5px; font-size: 10px; font-weight: 600;
   border: 1px solid var(--border-default); color: var(--text-tertiary);
@@ -6553,6 +6560,12 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
   padding: 4px 10px; cursor: pointer; font-family: var(--font-sans); transition: all 0.15s;
 }
 .v10-ka-back:hover { color: var(--text-primary); border-color: var(--border-strong); }
+/* S4 — the assertion-detail header lays its title block and its
+   badge + Promote CTA out as a single row (the entity detail's header
+   is a column with a back button; the assertion detail has no back
+   button — the breadcrumb is the sole back-affordance). */
+.v10-ka-header-row { flex-direction: row; align-items: flex-start; justify-content: space-between; }
+.v10-ka-header-actions { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
 .v10-ka-header-left { display: flex; flex-direction: column; gap: 2px; }
 .v10-ka-label { font-size: 10px; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.5px; }
 .v10-ka-name { font-size: 15px; font-weight: 600; color: var(--text-primary); display: flex; align-items: center; gap: 8px; }
@@ -6603,6 +6616,16 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
 .v10-ka-event-dot.created { border-color: var(--layer-working); background: rgba(100,116,139,0.15); }
 .v10-ka-event-dot.shared { border-color: var(--layer-shared); background: rgba(245,158,11,0.15); }
 .v10-ka-event-dot.verified { border-color: var(--layer-verified); background: rgba(34,197,94,0.15); }
+/* S4 — the assertion lifecycle trail's "you are here" halo on the
+   current stage's dot. The halo rgba values mirror the dot fills in
+   the rules directly above (same WM slate / SWM amber / VM green
+   palette, just at 0.25 for a soft ring). `discarded` is the muted
+   terminal state — no halo, neutral surface. */
+.v10-ka-event-dot.created.is-current  { box-shadow: 0 0 0 4px rgba(100,116,139,0.25); }
+.v10-ka-event-dot.shared.is-current   { box-shadow: 0 0 0 4px rgba(245,158,11,0.25); }
+.v10-ka-event-dot.verified.is-current { box-shadow: 0 0 0 4px rgba(34,197,94,0.25); }
+.v10-ka-event-dot.discarded { border-color: var(--border-strong); background: var(--bg-elevated); }
+.v10-ka-trail-hint { font-size: 10px; margin-top: 4px; }
 .v10-ka-event-header { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 2px; }
 .v10-ka-event-title { font-size: 11px; font-weight: 600; color: var(--text-primary); }
 .v10-ka-event-time { font-family: var(--font-mono); font-size: 9px; color: var(--text-tertiary); white-space: nowrap; margin-left: auto; }

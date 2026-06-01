@@ -1,4 +1,5 @@
 import { useMemo } from 'react';
+import type { AssertionState } from '@origintrail-official/dkg-core';
 import {
   useMemoryEntities,
   canonicalEntityUri,
@@ -892,4 +893,121 @@ export function formatRelativeTime(ts: number): string {
   if (day < 30) return `${day}d ago`;
   // Older than a month — show the date so it's still useful at a glance.
   return new Date(ts).toISOString().slice(0, 10);
+}
+
+// ─── S4 Assertion detail view ────────────────────────────────
+// An assertion's lifecycle is a forward-only chain
+//   created (WM) → promoted (SWM) → published (VM) → finalized
+// with `discarded` as a terminal off-ramp reachable only from
+// `created` (mirrors `AssertionState` in `@origintrail-official/dkg-core`).
+// The detail view's right-rail trail reuses the entity-detail
+// Provenance Trail markup family (`.v10-ka-timeline` / `.v10-ka-event*`),
+// so the assertion stage must map onto the SAME tone vocabulary the
+// trail dots already paint: `created` (WM slate), `shared` (SWM amber),
+// `verified` (VM green), plus a `discarded` muted tone.
+
+/** Lifecycle layer of an assertion, derived from its `dkg:state`. */
+export type AssertionDetailLayer = 'wm' | 'swm' | 'vm';
+
+/**
+ * Map an assertion lifecycle `state` to the trail-dot tone class used
+ * by `.v10-ka-event-dot.{created,shared,verified,discarded}`. The tone
+ * is keyed on the TRUST LAYER the state corresponds to (not the
+ * state-machine name) so the trail's colour reads consistently with the
+ * rest of the trust-coding system: `created` → WM slate, `promoted` →
+ * SWM amber, `published`/`finalized` → VM green, `discarded` → muted.
+ * Unknown states fall back to the WM `created` tone (the safest neutral).
+ */
+export function assertionStageTone(
+  state: AssertionState | null | undefined,
+): 'created' | 'shared' | 'verified' | 'discarded' {
+  switch (state) {
+    case 'created':   return 'created';
+    case 'promoted':  return 'shared';
+    case 'published':
+    case 'finalized': return 'verified';
+    case 'discarded': return 'discarded';
+    default:          return 'created';
+  }
+}
+
+/**
+ * Promote CTA visibility predicate for the assertion detail header.
+ * A per-assertion forward action exists ONLY for a `created` WM
+ * assertion (`promote` is assertion-scoped — §2.3); every later state
+ * has no further per-assertion forward action (SWM→VM publish is
+ * entity-scoped). Returns false while the state is still hydrating
+ * (`state == null`) so the CTA never flashes in then hides.
+ */
+export function canPromoteAssertion(
+  state: AssertionState | null | undefined,
+  layer: AssertionDetailLayer | null | undefined,
+): boolean {
+  return state === 'created' && layer === 'wm';
+}
+
+/**
+ * Header line-3 content for the assertion detail view. The mockup folded
+ * the sub-graph into the line-2 stat row, but a root-scoped assertion
+ * has no sub-graph — splitting it onto a conditional third line avoids a
+ * trailing `· subgraph: undefined` cliff. Returns `null` (render nothing)
+ * for root assertions; the `subgraph: <slug>` string only when truthy.
+ */
+export function assertionSubgraphLine(
+  subGraph: string | null | undefined,
+): string | null {
+  const slug = subGraph?.trim();
+  return slug ? `subgraph: ${slug}` : null;
+}
+
+/** One stage of the assertion lifecycle trail. */
+export interface AssertionTrailStage {
+  /** State this stage represents. */
+  state: AssertionState;
+  /** Human title rendered as the event title. */
+  title: string;
+  /** Trail-dot tone class (`created` / `shared` / `verified` / `discarded`). */
+  tone: 'created' | 'shared' | 'verified' | 'discarded';
+  /** True for the stage matching the assertion's CURRENT state ("you are here"). */
+  isCurrent: boolean;
+}
+
+/**
+ * Build the ordered lifecycle-trail stages for an assertion detail view.
+ *
+ * - A live (non-discarded) assertion always renders the full forward
+ *   chain `created ▸ promoted ▸ published ▸ finalized` so the user sees
+ *   the whole pipeline and where the assertion currently sits; the stage
+ *   matching `state` carries `isCurrent` (the `is-current` halo).
+ * - A `discarded` assertion renders a SINGLE muted `discarded` event
+ *   (not `created ▸ discarded`) — the data model carries no distinct
+ *   `discardedAt`, so a single terminal event is the natural treatment
+ *   and needs no connector-mask CSS.
+ * - While the state is still hydrating (`state == null`) the full chain
+ *   renders: each stage at its STATIC stage-tone (created=slate /
+ *   promoted=amber / published+finalized=green — a fixed pipeline legend,
+ *   NOT a state signal) with NO `is-current` marker. The absent halo is
+ *   the load-bearing "no false you-are-here during hydrate" guarantee
+ *   (ux §4.7.1); the static tones are intentionally kept (graying them
+ *   would couple the legend to fetch state for a sub-second flash and
+ *   pop colour on resolve).
+ */
+export function buildAssertionTrail(
+  state: AssertionState | null | undefined,
+): AssertionTrailStage[] {
+  if (state === 'discarded') {
+    return [{ state: 'discarded', title: 'Discarded', tone: 'discarded', isCurrent: true }];
+  }
+  const chain: Array<{ state: AssertionState; title: string }> = [
+    { state: 'created',   title: 'Created in Working Memory' },
+    { state: 'promoted',  title: 'Promoted to Shared Working Memory' },
+    { state: 'published', title: 'Published to Verifiable Memory' },
+    { state: 'finalized', title: 'Finalized' },
+  ];
+  return chain.map(stage => ({
+    state: stage.state,
+    title: stage.title,
+    tone: assertionStageTone(stage.state),
+    isCurrent: state != null && stage.state === state,
+  }));
 }

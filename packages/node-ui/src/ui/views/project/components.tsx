@@ -1,5 +1,6 @@
 import React, { useMemo, useState, useCallback, useEffect, useRef, lazy, Suspense } from 'react';
 import type { ReactNode } from 'react';
+import type { AssertionState } from '@origintrail-official/dkg-core';
 import { useFetch } from '../../hooks.js';
 import { api } from '../../api-wrapper.js';
 import { encodeDocTabId, resolveDocRef } from '../../lib/doc-tab-id.js';
@@ -9,17 +10,20 @@ import {
   listAssertions, promoteAssertion, describePromoteResult, describePromoteError,
   publishSharedMemory, listSwmEntities, executeQuery,
   writeProfileQueryCatalog,
-  fetchSubGraphs,
-  type AgentIdentity, type AssertionInfo, type PendingJoinRequest, type PromoteOutcome, type PublishResult, type SubGraphInfo,
+  fetchSubGraphs, fetchAssertionTriples,
+  type AgentIdentity, type AssertionInfo, type AssertionStateInfo,
+  type PendingJoinRequest, type PromoteOutcome, type PublishResult, type SubGraphInfo,
 } from '../../api.js';
 import { ImportFilesModal } from '../../components/Modals/ImportFilesModal.js';
 import { ShareProjectModal } from '../../components/Modals/ShareProjectModal.js';
 import {
   useMemoryEntities,
+  buildMemoryEntities,
   canonicalEntityUri,
   isFirstClassEntity,
   type TrustLevel, type MemoryEntity, type Triple, type LayeredTriple,
 } from '../../hooks/useMemoryEntities.js';
+import { useAssertionState } from '../../hooks/useAssertionState.js';
 import { decodeRdfStringLiteral } from '../../../rdf-literal.js';
 import {
   useProjectProfile, ProjectProfileContext, useProjectProfileContext,
@@ -62,6 +66,7 @@ import {
   matchesSearch, humanizeLabel, layerNoun, useLayerTriples, useCanonicalTriples, applyCanonicalAdmission,
   filterTriplesToEntities, admitTripleForScope,
   entityTimestamp, formatRelativeTime, formatTimelineBucket, formatTrailTimestamp,
+  canPromoteAssertion, assertionSubgraphLine, buildAssertionTrail,
   type LayerView, type LayerContentTab, type KAPane,
   type SubGraphTab, type SubGraphEntitySort,
 } from './helpers.js';
@@ -2076,6 +2081,7 @@ export function LayerContent({
   activeTab,
   onTabChange,
   onSelectEntity,
+  onSelectAssertion,
   onNodeClick,
   footer,
   swmAttribution,
@@ -2089,6 +2095,8 @@ export function LayerContent({
   activeTab: LayerContentTab;
   onTabChange: (tab: LayerContentTab) => void;
   onSelectEntity: (uri: string) => void;
+  /** S4 — open an assertion's detail view from the Assertions subtab. */
+  onSelectAssertion?: (assertion: AssertionInfo) => void;
   onNodeClick?: (node: any) => void;
   footer?: React.ReactNode;
   /** Codex Code6 (PR #656) — optional shared SWM attribution result
@@ -2191,6 +2199,7 @@ export function LayerContent({
             layer={layer}
             onComplete={memory.refresh}
             scrollKey={`layer:${layer}:assertions`}
+            onSelectAssertion={onSelectAssertion}
           />
         </div>
       )}
@@ -2948,24 +2957,26 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
   );
 }
 
-// Small helper: compute unique triples for a given layer slice of memory.
-
-export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }: {
-  contextGraphId: string;
-  layer: 'wm' | 'swm';
-  onComplete: () => void;
-  scrollKey?: string;
-}) {
-  const { data: assertions, loading, refresh } = useFetch(
-    () => listAssertions(contextGraphId, layer),
-    [contextGraphId, layer],
-    0
-  );
+// ─── Shared assertion-promote action ────────────────────────
+// The single-row promote/publish flow is invoked from BOTH the
+// `AssertionsList` rows AND the S4 `AssertionDetailView` Promote CTA.
+// Lifting it into one hook (rather than duplicating the daemon call +
+// busy/result/error bookkeeping in two places) keeps the two call sites
+// in lockstep — e.g. the PR #710 sub-graph-slug threading fix stays in
+// one place. `busy` is keyed on the row's `graphUri` (PR #710 Fix D —
+// a root + sub-graph pair can share a `name`), with `'__all__'` reserved
+// for the list-level promote-all action.
+export function useAssertionPromote(
+  contextGraphId: string,
+  layer: 'wm' | 'swm',
+  onComplete: () => void,
+  onAfter?: () => void,
+) {
   const [busy, setBusy] = useState<string | null>(null);
   const [result, setResult] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const handlePromote = useCallback(async (assertion: AssertionInfo) => {
+  const promoteOne = useCallback(async (assertion: AssertionInfo) => {
     // PR #710 Fix D — busy / React keys must use `graphUri`, not
     // `name`. A root + sub-graph pair can share a name and would
     // otherwise both highlight as busy on a single click. `graphUri`
@@ -2990,17 +3001,17 @@ export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }:
         await publishSharedMemory(contextGraphId, roots);
         setResult('Published to Verifiable Memory');
       }
-      refresh();
       onComplete();
+      onAfter?.();
     } catch (err: any) {
       const typed = describePromoteError(assertion.name, err);
       setError(typed ? typed.message : (err?.message ?? 'Action failed'));
     } finally {
       setBusy(null);
     }
-  }, [contextGraphId, layer, refresh, onComplete]);
+  }, [contextGraphId, layer, onComplete, onAfter]);
 
-  const handlePromoteAll = useCallback(async () => {
+  const promoteAll = useCallback(async (assertions: AssertionInfo[] | null | undefined) => {
     if (!assertions?.length) return;
     setBusy('__all__');
     setResult(null);
@@ -3033,15 +3044,39 @@ export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }:
         await publishSharedMemory(contextGraphId, roots);
         setResult('Published all to Verifiable Memory');
       }
-      refresh();
       onComplete();
+      onAfter?.();
     } catch (err: any) {
       const typed = describePromoteError(currentAssertion ?? 'selected assertion', err);
       setError(typed ? typed.message : (err?.message ?? 'Action failed'));
     } finally {
       setBusy(null);
     }
-  }, [assertions, contextGraphId, layer, refresh, onComplete]);
+  }, [contextGraphId, layer, onComplete, onAfter]);
+
+  return { busy, result, error, promoteOne, promoteAll };
+}
+
+export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey, onSelectAssertion }: {
+  contextGraphId: string;
+  layer: 'wm' | 'swm';
+  onComplete: () => void;
+  scrollKey?: string;
+  /** S4 — open the assertion detail view for a clicked row. Optional so
+   *  call sites that don't wire detail navigation (none today) degrade
+   *  to a non-clickable list. */
+  onSelectAssertion?: (assertion: AssertionInfo) => void;
+}) {
+  const { data: assertions, loading, refresh } = useFetch(
+    () => listAssertions(contextGraphId, layer),
+    [contextGraphId, layer],
+    0
+  );
+  const { busy, result, error, promoteOne, promoteAll } =
+    useAssertionPromote(contextGraphId, layer, onComplete, refresh);
+
+  const handlePromote = promoteOne;
+  const handlePromoteAll = useCallback(() => promoteAll(assertions), [promoteAll, assertions]);
 
   const scrollRootStyle = { flex: 1, overflow: 'auto' } as const;
 
@@ -3094,7 +3129,29 @@ export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }:
       {result && <div style={{ padding: '6px 16px', fontSize: 11, color: 'var(--text-success)' }}>✓ {result}</div>}
       {error && <div style={{ padding: '6px 16px', fontSize: 11, color: 'var(--text-danger)' }}>✕ {error}</div>}
       {assertions.map(a => (
-        <div key={a.graphUri} className="v10-item-row">
+        <div
+          key={a.graphUri}
+          className={`v10-item-row${onSelectAssertion ? ' v10-item-row-clickable' : ''}`}
+          // S4 — the row opens the assertion detail view (mirrors the
+          // clickable Documents rows). The promote button below stops
+          // propagation so promoting doesn't also navigate.
+          role={onSelectAssertion ? 'button' : undefined}
+          tabIndex={onSelectAssertion ? 0 : undefined}
+          onClick={onSelectAssertion ? () => onSelectAssertion(a) : undefined}
+          onKeyDown={onSelectAssertion
+            ? ev => {
+                // Codex round-1 — only the ROW itself activates on
+                // Enter/Space. `onKeyDown` bubbles, so without this guard
+                // pressing Enter/Space on the nested promote/publish
+                // button would ALSO open the detail (double action).
+                if (ev.target !== ev.currentTarget) return;
+                if (ev.key === 'Enter' || ev.key === ' ') {
+                  ev.preventDefault();
+                  onSelectAssertion(a);
+                }
+              }
+            : undefined}
+        >
           <span className="v10-item-icon">▤</span>
           <div className="v10-item-info">
             <div className="v10-item-name" style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>{a.name}</div>
@@ -3131,6 +3188,7 @@ export function LayerDetailView({
   memory,
   onNodeClick,
   onSelectEntity,
+  onSelectAssertion,
   contextGraphId,
   activeTab,
   onTabChange,
@@ -3140,6 +3198,8 @@ export function LayerDetailView({
   memory: ReturnType<typeof useMemoryEntities>;
   onNodeClick: (node: any) => void;
   onSelectEntity: (uri: string) => void;
+  /** S4 — open an assertion's detail view from the Assertions subtab. */
+  onSelectAssertion?: (assertion: AssertionInfo) => void;
   contextGraphId: string;
   activeTab: LayerContentTab;
   onTabChange: (tab: LayerContentTab) => void;
@@ -3179,6 +3239,7 @@ export function LayerDetailView({
           activeTab={activeTab}
           onTabChange={onTabChange}
           onSelectEntity={onSelectEntity}
+          onSelectAssertion={onSelectAssertion}
           onNodeClick={onNodeClick}
           swmAttribution={swmAttribution}
         />
@@ -3953,6 +4014,382 @@ export function TrailEvent({
           <AgentChip agent={agent ?? undefined} fallbackUri={agentUri ?? undefined} size="sm" />
         </div>
       )}
+    </div>
+  );
+}
+
+// ─── S4 Assertion Detail View ───────────────────────────────
+// A clickable assertion's detail page — the twin of `KADetailView`:
+// Entities / Triples / Graph tabs on the left, an ASSERTION INFO +
+// LIFECYCLE metadata rail on the right. The assertion's content is
+// scoped to its own data graph (resolved from `_meta` via
+// `useAssertionState`), so the panes show exactly this assertion, not
+// the whole layer.
+
+/** Lifecycle trail for the assertion detail rail. Reuses the
+ *  `.v10-ka-timeline` / `.v10-ka-event*` markup family so it reads as
+ *  one visual family with the entity-detail Provenance Trail (S13). The
+ *  stage matching the current `state` carries the `is-current` halo.
+ *  While the state is hydrating (`stage` array all-neutral, no current)
+ *  or failed, the caller passes a `hint` rendered quietly at the base. */
+function AssertionLifecycleTrail({
+  state,
+  hint,
+}: {
+  state: AssertionState | null | undefined;
+  hint?: string | null;
+}) {
+  const stages = buildAssertionTrail(state);
+  return (
+    <div className="v10-ka-timeline">
+      {stages.map(stage => (
+        <div key={stage.state} className="v10-ka-event">
+          <div className={`v10-ka-event-dot ${stage.tone}${stage.isCurrent ? ' is-current' : ''}`} />
+          <div className="v10-ka-event-header">
+            <span className="v10-ka-event-title">{stage.title}</span>
+          </div>
+        </div>
+      ))}
+      {hint && (
+        <div className="v10-ka-trail-hint" style={{ color: 'var(--text-danger)' }}>{hint}</div>
+      )}
+    </div>
+  );
+}
+
+export function AssertionDetailView({
+  assertion,
+  contextGraphId,
+  onNavigate,
+  onComplete,
+  onOpenAgent,
+}: {
+  assertion: AssertionInfo;
+  contextGraphId: string;
+  /** Open an entity from this assertion in the entity-detail view. */
+  onNavigate: (uri: string) => void;
+  /** Refresh the underlying memory after a successful promote. */
+  onComplete: () => void;
+  onOpenAgent?: (uri: string) => void;
+}) {
+  // No back button by design (S4 + S5 lock): the breadcrumb in the
+  // persistent ProjectHeaderStrip is the sole back-affordance; the
+  // origin restore lives in ProjectView's `handleDetailClose`.
+  const [pane, setPane] = useState<KAPane>('content');
+  const theme = useLayoutStore(s => s.theme);
+  const profile = useProjectProfileContext();
+  const agents = useAgentsContext();
+
+  // Codex round-1 — a promote FROM this detail view flips the assertion's
+  // state in `_meta` but leaves `assertion.graphUri` unchanged, so neither
+  // the state fetch nor the triples fetch would re-run (their deps are
+  // URI-keyed). Bump this nonce on promote success to force both to
+  // refetch, so the trail / badge / Promote-CTA reflect the new state
+  // without a remount.
+  const [refreshNonce, setRefreshNonce] = useState(0);
+
+  // Lifecycle state (α verdict lock-b — lazy, on mount). Resolves the
+  // assertion's data-graph URI + author DID alongside the state.
+  const { data: stateInfo, loading: stateLoading, error: stateError } =
+    useAssertionState(contextGraphId, assertion.graphUri, refreshNonce);
+  // While hydrating, the layer is unknown; once resolved we trust the
+  // `_meta` layer. A `created` WM assertion is the shippable scope; a
+  // promoted one resolves to `swm` (its data graph is empty — see
+  // `fetchAssertionTriples`).
+  const layer = stateInfo?.layer ?? 'wm';
+  const layerConfig = LAYER_CONFIG[layer];
+  const trustLevel: TrustLevel = LAYER_CONFIG[layer].trustLevel;
+
+  // Promote CTA — reuses the SAME shared promote hook the list rows use
+  // (no duplication of the daemon call / busy bookkeeping). Only the WM
+  // single-row path is reachable here; the visibility gate below pins it
+  // to `created && wm`.
+  const { busy, error: promoteError, promoteOne } =
+    useAssertionPromote(
+      contextGraphId,
+      layer === 'swm' ? 'swm' : 'wm',
+      onComplete,
+      // onAfter fires on promote SUCCESS only — bump the nonce so this
+      // detail view re-fetches its own state + triples (the state flipped
+      // created → promoted in `_meta`).
+      () => setRefreshNonce(n => n + 1),
+    );
+  const showPromote = canPromoteAssertion(stateInfo?.state, layer);
+
+  // The assertion's own triples (scoped to its data graph). Fetched once
+  // the `_meta` lookup yields the data-graph URI. Tagged with the
+  // assertion's trust level so `buildMemoryEntities` classifies them.
+  const assertionGraph = stateInfo?.assertionGraph;
+  const [triples, setTriples] = useState<Triple[]>([]);
+  const [triplesLoading, setTriplesLoading] = useState(false);
+  useEffect(() => {
+    if (!assertionGraph) {
+      // No data graph to read (promoted assertion — its triples moved to
+      // /_shared_memory — or a legacy record without dkg:assertionGraph).
+      // AssertionDetailView is NOT keyed in ProjectView, so this instance
+      // is reused across assertion switches: a prior in-flight fetch was
+      // cancelled but its `.finally` is gated by `cancelled`, so we MUST
+      // reset `triplesLoading` here or the Entities pane sticks on
+      // "Loading assertion entities…" forever and the empty-state never
+      // renders.
+      setTriples([]);
+      setTriplesLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setTriplesLoading(true);
+    fetchAssertionTriples(contextGraphId, assertionGraph)
+      .then(rows => { if (!cancelled) setTriples(rows); })
+      .catch(() => { if (!cancelled) setTriples([]); })
+      .finally(() => { if (!cancelled) setTriplesLoading(false); });
+    return () => { cancelled = true; };
+    // `refreshNonce` re-runs the triples fetch after a promote (the data
+    // graph URI string is unchanged on promote, so it alone wouldn't).
+  }, [contextGraphId, assertionGraph, refreshNonce]);
+
+  const layeredTriples = useMemo<LayeredTriple[]>(
+    () => triples.map(t => ({ ...t, layer: trustLevel })),
+    [triples, trustLevel],
+  );
+  const entities = useMemo(() => buildMemoryEntities(layeredTriples), [layeredTriples]);
+  // Root entities of the assertion: real first-class entities (drop the
+  // synthesised stubs for pure-object URIs the builder adds).
+  const rootEntities = useMemo(
+    () => [...entities.values()].filter(isFirstClassEntity),
+    [entities],
+  );
+  const entityCount = rootEntities.length;
+  const tripleCount = triples.length;
+
+  const author = stateInfo?.createdBy ? agents?.get(stateInfo.createdBy) ?? null : null;
+  const authorUri = stateInfo?.createdBy ?? null;
+  const subgraphLine = assertionSubgraphLine(assertion.subGraph);
+
+  // Right-rail badge: `{glyph} {trustLabel} · {state}` once resolved;
+  // while hydrating the `· state` suffix is omitted (no flash).
+  const badgeState = stateLoading ? null : stateInfo?.state ?? null;
+  // Trail hint for the fetch-error / unavailable case (state couldn't
+  // load) — quiet danger text at the trail base; never on the happy path.
+  const trailHint = !stateLoading && (stateError || !stateInfo)
+    ? "Lifecycle state couldn't load"
+    : null;
+
+  const graphOptions = useMemo(() => {
+    const focalColor = TRUST_COLORS[trustLevel];
+    return {
+      labelMode: 'humanized' as const,
+      renderer: '2d' as const,
+      labels: memoryGraphLabels({ minZoomForLabels: 0.2 }),
+      style: {
+        namespaceColors: neutraliseBuiltinNamespaces(focalColor),
+        defaultNodeColor: focalColor,
+        defaultEdgeColor: '#475569',
+        edgeWidth: 1.0,
+        fontSize: 11,
+      },
+      hexagon: { baseSize: 7, minSize: 4, maxSize: 10, scaleWithDegree: true },
+      focus: { maxNodes: 500, hops: 999 },
+    };
+  }, [trustLevel]);
+  const graphViewConfig = useMemo(() => ({
+    name: `assertion-${assertion.graphUri}-${theme}`,
+    palette: theme,
+  }), [assertion.graphUri, theme]);
+
+  return (
+    <div className="v10-ka-detail">
+      <div className="v10-ka-header v10-ka-header-row">
+        <div className="v10-ka-header-left">
+          <div className="v10-ka-name">
+            ▤ <span style={{ fontFamily: 'var(--font-mono)' }}>{assertion.name}</span>
+          </div>
+          <div className="v10-ka-ual">
+            assertion · {entityCount} entities · {tripleCount} triples
+          </div>
+          {subgraphLine && <div className="v10-ka-ual">{subgraphLine}</div>}
+        </div>
+        <div className="v10-ka-header-actions">
+          {/* Codex round-2 — a `discarded` assertion is LAYERLESS in the
+              core model: render a neutral muted badge (just `discarded`,
+              no layer glyph / no layer name / never VM-green). This is the
+              render-side guard for the unreachable-today `discarded → vm`
+              api.ts fallback (discarded isn't in any listAssertions, so
+              the detail never opens for it; this hardens our own code
+              against a future wiring). */}
+          {badgeState === 'discarded' ? (
+            <span className="v10-trust-badge v10-trust-badge-discarded">discarded</span>
+          ) : (
+            <span className={`v10-trust-badge ${layer}`}>
+              {layerConfig.icon} {layerConfig.trustLabel}{badgeState ? ` · ${badgeState}` : ''}
+            </span>
+          )}
+          {showPromote && (
+            <button
+              className="v10-layer-expand-footer-btn promote"
+              disabled={busy !== null}
+              onClick={() => promoteOne(assertion)}
+              style={{ opacity: busy === assertion.graphUri ? 0.5 : 1 }}
+            >
+              {busy === assertion.graphUri ? '...' : '▸ Promote to SWM'}
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className="v10-ka-split">
+        {/* Left pane: Entities / Triples / Graph */}
+        <div className="v10-ka-left">
+          <div className="v10-content-tabs" style={{ margin: '0 -20px', padding: '0 20px', background: 'transparent' }}>
+            <button className={`v10-content-tab ${pane === 'content' ? 'active' : ''}`} onClick={() => setPane('content')}>Entities</button>
+            <button className={`v10-content-tab ${pane === 'triples' ? 'active' : ''}`} onClick={() => setPane('triples')}>Triples</button>
+            <button className={`v10-content-tab ${pane === 'graph' ? 'active' : ''}`} onClick={() => setPane('graph')}>Graph</button>
+          </div>
+
+          {pane === 'content' && (
+            <div className="v10-ka-section" style={{ marginTop: 12 }}>
+              {triplesLoading && rootEntities.length === 0 ? (
+                <div className="v10-graph-placeholder">Loading assertion entities...</div>
+              ) : rootEntities.length === 0 ? (
+                <EmptyState
+                  compact
+                  tone={toneForLayer(layer)}
+                  icon={layerConfig.icon}
+                  title="No entities in this assertion."
+                  description={stateInfo?.state === 'promoted'
+                    ? 'This assertion was promoted — its entities now live in Shared Working Memory. Open the Shared Working Memory tab to view them.'
+                    : 'This assertion has no extracted entities.'}
+                />
+              ) : (
+                rootEntities.map(e => {
+                  const { icon, type } = entityMeta(e, profile);
+                  return (
+                    <button key={e.uri} className="v10-ka-conn" onClick={() => onNavigate(e.uri)}>
+                      <span className="v10-ka-conn-target">{icon} {e.label}</span>
+                      <span className="v10-ka-conn-pred" style={{ marginLeft: 'auto' }}>{type}</span>
+                      <span className="v10-ka-conn-arrow">→</span>
+                    </button>
+                  );
+                })
+              )}
+            </div>
+          )}
+
+          {pane === 'triples' && (
+            // Plain s/p/o table, assertion-scoped — NO filter pills
+            // (an assertion has singular scope, so cross-layer /
+            // cross-subgraph pills would have nothing to filter).
+            <div style={{ marginTop: 8, overflowX: 'auto', border: '1px solid var(--border-default)', borderRadius: 6 }}>
+              <table className="v10-ka-triples-table">
+                <thead>
+                  <tr><th>Subject</th><th>Predicate</th><th>Object</th></tr>
+                </thead>
+                <tbody>
+                  {triples.slice(0, 200).map((t, i) => (
+                    <tr key={i}>
+                      <td title={t.subject}>{shortPred(t.subject)}</td>
+                      <td title={t.predicate}>{shortPred(t.predicate)}</td>
+                      {/* Codex round-2: literal objects from
+                          `fetchAssertionTriples`/`rawBindingValue` carry the
+                          FULL N-Triples form (`"v"^^<type>` / `"v"@lang`,
+                          escaped) — required by the Graph tab's RdfGraph +
+                          buildMemoryEntities. For DISPLAY, decode through the
+                          shared `decodeRdfStringLiteral` (the same helper
+                          `humanizeLabel` uses) so the datatype/lang suffix is
+                          dropped and the body is unescaped — NOT a naive
+                          outer-quote strip, which left `"42"^^<int>` →
+                          `42"^^<int>`. IRIs render via `shortPred`. */}
+                      <td title={t.object}>{t.object.startsWith('"') ? decodeRdfStringLiteral(t.object).slice(0, 60) : shortPred(t.object)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <div style={{ fontSize: 10, color: 'var(--text-tertiary)', fontFamily: 'var(--font-mono)', padding: '6px 8px' }}>
+                {Math.min(triples.length, 200)} of {triples.length} triples shown
+              </div>
+            </div>
+          )}
+
+          {pane === 'graph' && (
+            // S4 ships with current viewport treatment. S7 (Track B, pending)
+            // will land the full-width / tall / expandable viewport upgrade
+            // for KADetailView's Graph tab AND AssertionDetailView's Graph
+            // tab simultaneously — same component family.
+            <GraphSurface
+              title={`${assertion.name} graph`}
+              scopeLabel={`Assertion graph: ${assertion.name}.`}
+              tone={layer}
+              className="v10-ka-graph-shell"
+              renderGraph={(expanded) => (
+                layeredTriples.length > 0 ? (
+                  <Suspense fallback={<span className="v10-graph-placeholder">Loading graph...</span>}>
+                    <RdfGraph
+                      key={`${assertion.graphUri}:${expanded ? 'expanded' : 'inline'}`}
+                      data={layeredTriples}
+                      format="triples"
+                      options={graphOptions}
+                      viewConfig={graphViewConfig}
+                      style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }}
+                      onNodeClick={(n: any) => n?.id && onNavigate(n.id)}
+                      initialFit
+                    />
+                  </Suspense>
+                ) : (
+                  <div className="v10-graph-placeholder v10-graph-placeholder-centered">No assertion graph data</div>
+                )
+              )}
+            />
+          )}
+        </div>
+
+        {/* Right pane: ASSERTION INFO + LIFECYCLE trail */}
+        <div className="v10-ka-right">
+          <div className="v10-ka-section">
+            <div className="v10-ka-section-title">Assertion Info</div>
+            <div className="v10-ka-prop">
+              <span className="v10-ka-prop-key">State</span>
+              <span className="v10-ka-prop-val">
+                {stateLoading
+                  ? 'loading…'
+                  : stateInfo
+                    // Discarded is layerless — no `(Layer)` suffix.
+                    ? (stateInfo.state === 'discarded'
+                        ? 'discarded'
+                        : `${stateInfo.state} (${layerConfig.trustLabel})`)
+                    : 'state unavailable'}
+              </span>
+            </div>
+            {(author || authorUri) && (
+              <div className="v10-ka-prop">
+                <span className="v10-ka-prop-key">Created by</span>
+                <span className="v10-ka-prop-val">
+                  <AgentChip agent={author ?? undefined} fallbackUri={authorUri ?? undefined} size="sm" onOpenAgent={onOpenAgent} />
+                </span>
+              </div>
+            )}
+            {assertion.subGraph && (
+              <div className="v10-ka-prop">
+                <span className="v10-ka-prop-key">Subgraph</span>
+                <span className="v10-ka-prop-val">{assertion.subGraph}</span>
+              </div>
+            )}
+            {assertionGraph && (
+              <div className="v10-ka-prop">
+                <span className="v10-ka-prop-key">Graph</span>
+                <span className="v10-ka-prop-val">{assertionGraph}</span>
+              </div>
+            )}
+          </div>
+
+          <div className="v10-ka-section">
+            <div className="v10-ka-section-title">Lifecycle</div>
+            <AssertionLifecycleTrail state={badgeState} hint={trailHint} />
+          </div>
+
+          {promoteError && (
+            <div style={{ fontSize: 11, color: 'var(--text-danger)' }}>✕ {promoteError}</div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
