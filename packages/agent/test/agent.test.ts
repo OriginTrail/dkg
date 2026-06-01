@@ -222,6 +222,32 @@ class PermanentProfileFailureChainAdapter extends MockChainAdapter {
   }
 }
 
+// Codex PR #901 round-4 :1838: boot fails TRANSIENTLY (RPC down) so the retry
+// loop arms, but once the chain is back the RETRY-path provisioning fails
+// PERMANENTLY (insufficient funds). The retry-path catch must reclassify and
+// go 'disabled' — `ensureProfile()` must NOT keep re-running every interval.
+class RetryPathPermanentFailureChainAdapter extends MockChainAdapter {
+  identityCalls = 0;
+  ensureProfileCalls = 0;
+
+  constructor(chainId: string, signerAddress: string, private readonly identityFailFor: number) {
+    super(chainId, signerAddress);
+  }
+
+  override async getIdentityId(): Promise<bigint> {
+    this.identityCalls += 1;
+    if (this.identityCalls <= this.identityFailFor) {
+      throw new Error(`connect ECONNREFUSED 127.0.0.1:8545 (simulated transient RPC outage, getIdentityId #${this.identityCalls})`);
+    }
+    return super.getIdentityId(); // 0n — no profile yet
+  }
+
+  override async ensureProfile(_options?: { nodeName?: string; stakeAmount?: bigint; lockTier?: number }): Promise<bigint> {
+    this.ensureProfileCalls += 1;
+    throw new Error('insufficient funds for intrinsic transaction cost');
+  }
+}
+
 class ContextAuthorizedPublisherChainAdapter extends MockChainAdapter {
   capturedPublisherAddress?: string;
 
@@ -1480,7 +1506,7 @@ describe('DKGAgent ACK signer gating', () => {
       chainAdapter: chain,
       nodeRole: 'core',
       ackSignerKey: ackSigner.privateKey,
-      storageAckRegistrationRetryMs: 25,
+      storageAckRegistrationRetryMs: 1000,
     });
 
     try {
@@ -1494,13 +1520,13 @@ describe('DKGAgent ACK signer gating', () => {
       // registers the handler — recovery without restart.
       await vi.waitFor(
         () => expect(agent.node.libp2p.getProtocols()).toContain(PROTOCOL_STORAGE_ACK),
-        { timeout: 5_000, interval: 25 },
+        { timeout: 10_000, interval: 100 },
       );
       expect(await chain.isOperationalWalletRegistered(47n, ackSigner.address)).toBe(true);
     } finally {
       await agent.stop().catch(() => {});
     }
-  });
+  }, 20_000);
 
   it('provisions a brand-new core node profile on the retry path after a transient boot outage (#894 / Codex PR #901 :1757)', async () => {
     // No identity exists yet AND the chain is down during boot, before
@@ -1519,7 +1545,7 @@ describe('DKGAgent ACK signer gating', () => {
       chainAdapter: chain,
       nodeRole: 'core',
       ackSignerKey: ackSigner.privateKey,
-      storageAckRegistrationRetryMs: 25,
+      storageAckRegistrationRetryMs: 1000,
     });
 
     try {
@@ -1528,7 +1554,7 @@ describe('DKGAgent ACK signer gating', () => {
 
       await vi.waitFor(
         () => expect(agent.node.libp2p.getProtocols()).toContain(PROTOCOL_STORAGE_ACK),
-        { timeout: 5_000, interval: 25 },
+        { timeout: 10_000, interval: 100 },
       );
       // The retry path provisioned the profile (ensureProfile was called) and
       // an identity now exists.
@@ -1537,7 +1563,7 @@ describe('DKGAgent ACK signer gating', () => {
     } finally {
       await agent.stop().catch(() => {});
     }
-  });
+  }, 20_000);
 
   it('does NOT retry-loop on a permanent boot provisioning failure (#894 / Codex PR #901 round-3 :1714)', async () => {
     // A deterministic provisioning failure (insufficient funds) must stay
@@ -1555,7 +1581,7 @@ describe('DKGAgent ACK signer gating', () => {
       chainAdapter: chain,
       nodeRole: 'core',
       ackSignerKey: ackSigner.privateKey,
-      storageAckRegistrationRetryMs: 25,
+      storageAckRegistrationRetryMs: 1000,
     });
 
     try {
@@ -1567,13 +1593,88 @@ describe('DKGAgent ACK signer gating', () => {
       // Wait well past several 25ms retry intervals. A buggy build (treating
       // the permanent failure as transient) would re-call ensureProfile every
       // interval; the fix keeps it 'disabled' so the count stays 1.
-      await new Promise((resolve) => setTimeout(resolve, 400));
+      await new Promise((resolve) => setTimeout(resolve, 2500));
       expect(chain.ensureProfileCalls).toBe(1);
       expect(agent.node.libp2p.getProtocols()).not.toContain(PROTOCOL_STORAGE_ACK);
     } finally {
       await agent.stop().catch(() => {});
     }
-  });
+  }, 20_000);
+
+  it('stops the StorageACK retry loop when RETRY-path provisioning fails permanently (#894 / Codex PR #901 round-4 :1838)', async () => {
+    // Boot fails TRANSIENTLY (RPC down) so the retry loop arms. Once the chain
+    // is back, the retry-path provisioning fails DETERMINISTICALLY (insufficient
+    // funds). The retry-path catch must reclassify → disable → stop scheduling,
+    // so ensureProfile is NOT re-run on every subsequent interval.
+    const primary = ethers.Wallet.createRandom();
+    const ackSigner = ethers.Wallet.createRandom();
+    const chain = new RetryPathPermanentFailureChainAdapter('mock:31337', primary.address, 2);
+    // No seedIdentity — the node must provision, and that provisioning fails.
+
+    const agent = await DKGAgent.create({
+      name: 'AckRetryPathPermanentFailure',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      chainAdapter: chain,
+      nodeRole: 'core',
+      ackSignerKey: ackSigner.privateKey,
+      storageAckRegistrationRetryMs: 1000,
+    });
+
+    try {
+      // Boot's two identity lookups fail transiently → retry armed; the first
+      // (non-blocking) ACK attempt does no provisioning, so 0 ensureProfile yet.
+      await agent.start();
+      expect(agent.node.libp2p.getProtocols()).not.toContain(PROTOCOL_STORAGE_ACK);
+
+      // Wait for the retry to fire, attempt provisioning (fails permanently),
+      // disable, and stop. Then confirm it does NOT keep re-provisioning.
+      await new Promise((resolve) => setTimeout(resolve, 3500));
+      const callsAfterFirstRetry = chain.ensureProfileCalls;
+      expect(callsAfterFirstRetry).toBeGreaterThanOrEqual(1); // retry tried provisioning
+      expect(agent.node.libp2p.getProtocols()).not.toContain(PROTOCOL_STORAGE_ACK);
+
+      // Past several more intervals: the count must NOT keep climbing (no loop).
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+      expect(chain.ensureProfileCalls).toBe(callsAfterFirstRetry);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  }, 20_000);
+
+  it('clamps a 0 / invalid storageAckRegistrationRetryMs to the floor (no tight loop) and still recovers (#894 / Codex PR #901 round-4 :2106)', async () => {
+    // A 0 retry interval used verbatim would collapse the retry into a tight
+    // loop hammering the RPC. The clamp floors it, so scheduling still works
+    // (the transient-recovery node registers) without busy-spinning.
+    const primary = ethers.Wallet.createRandom();
+    const ackSigner = ethers.Wallet.createRandom();
+    const chain = new TransientIdentityFailureChainAdapter('mock:31337', primary.address, 2);
+    chain.seedIdentity(primary.address, 51n);
+
+    const agent = await DKGAgent.create({
+      name: 'AckZeroRetryClamp',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      chainAdapter: chain,
+      nodeRole: 'core',
+      ackSignerKey: ackSigner.privateKey,
+      storageAckRegistrationRetryMs: 0, // clamped to MIN_STORAGE_ACK_REGISTRATION_RETRY_MS
+    });
+
+    try {
+      await agent.start();
+      // Recovery still happens — the clamped (floored) retry fires and registers.
+      await vi.waitFor(
+        () => expect(agent.node.libp2p.getProtocols()).toContain(PROTOCOL_STORAGE_ACK),
+        { timeout: 10_000, interval: 100 },
+      );
+      // The clamp prevented a busy-spin: a 1s floor over the recovery window
+      // means only a handful of identity lookups, not thousands.
+      expect(chain.identityCalls).toBeLessThan(20);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  }, 20_000);
 
   it('does not auto-register ACK signer candidates for edge nodes', async () => {
     const primary = ethers.Wallet.createRandom();

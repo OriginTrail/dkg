@@ -81,7 +81,7 @@ import {
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, isRetryableRpcError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -408,6 +408,14 @@ const CIPHERTEXT_CHUNK_SIZE_BYTES = 32 * 1024;
 const BOOT_CHAIN_IDENTITY_TIMEOUT_MS = 20_000;
 
 /**
+ * Floor for the (public, config-settable) StorageACK registration retry
+ * interval. Guards against a 0 / negative value collapsing the retry into a
+ * tight loop that hammers the RPC and floods the log (Codex PR #901 round-4
+ * :2106). 1s is well below the 30s production default yet leaves ample spacing.
+ */
+const MIN_STORAGE_ACK_REGISTRATION_RETRY_MS = 1_000;
+
+/**
  * Resolve `op` but reject with a `BOOT_CHAIN_TIMEOUT`-coded error if it does
  * not settle within `ms`. The timer is `unref`'d so it never keeps the
  * process alive on its own. Used to bound boot-time chain calls so daemon
@@ -447,35 +455,28 @@ async function raceWithBootTimeout<T>(op: Promise<T>, ms: number, label: string)
  * PERMANENT/deterministic (missing admin key, insufficient funds, a contract
  * revert)? Only transient failures should arm the StorageACK retry loop;
  * arming it for a permanent failure would re-call `ensureProfile()` every 30s
- * forever (Codex PR #901 round-3 :1714).
+ * forever (Codex PR #901 round-3 :1714 / round-4 :1838).
  *
- * Recognises the boot path's own `BOOT_CHAIN_TIMEOUT` and the chain adapter's
- * `RPC_ENDPOINTS_EXHAUSTED`, plus a conservative network/RPC message+code probe
- * (the chain package's `isRetryableRpcError` is not exported, so we mirror its
- * relevant subset here). Anything else — including ordinary `Error`s with no
- * RPC signature — is treated as permanent and stays disabled.
+ * Delegates the RPC-shape recognition to the chain package's exported
+ * `isRetryableRpcError` (Codex PR #901 round-4 :459) so we reuse its full
+ * extraction — top-level AND nested `error.code` / `statusCode` /
+ * `response.status` — instead of a narrower top-level-only copy that would
+ * misclassify a 429/5xx buried in a nested field as permanent. On top we add
+ * the boot path's own `BOOT_CHAIN_TIMEOUT` (`isRetryableRpcError` doesn't know
+ * it) and an explicit permanent-exclusion guard for `admin` provisioning
+ * failures (`isRetryableRpcError` already excludes revert/insufficient-funds/
+ * nonce). Anything else — ordinary `Error`s with no RPC signature — stays
+ * permanent and disabled.
  */
 function isTransientBootChainError(err: unknown): boolean {
   const code = (err as { code?: unknown })?.code;
-  if (code === 'BOOT_CHAIN_TIMEOUT' || code === 'RPC_ENDPOINTS_EXHAUSTED') return true;
-  if (
-    code === 'TIMEOUT' || code === 'TIMEOUT_ERROR' || code === 'SERVER_ERROR'
-    || code === 'NETWORK_ERROR' || code === 'ECONNRESET' || code === 'ECONNREFUSED'
-    || code === 'ETIMEDOUT' || code === 'ENOTFOUND' || code === 'EAI_AGAIN'
-  ) {
-    return true;
-  }
+  if (code === 'BOOT_CHAIN_TIMEOUT') return true;
+  // A missing/invalid profile admin key is a deterministic config error, not a
+  // transient RPC failure — surface it once, never retry. (The chain classifier
+  // already treats revert / insufficient-funds / nonce as non-retryable.)
   const msg = (err instanceof Error ? err.message : String(err ?? '')).toLowerCase();
-  // Deterministic / permanent failures must NOT be treated as transient even
-  // if their message happens to brush a network keyword.
-  if (
-    msg.includes('insufficient funds') || msg.includes('admin') || msg.includes('execution reverted')
-    || msg.includes('revert') || msg.includes('nonce')
-  ) {
-    return false;
-  }
-  return /timeout|timed out|network|socket|reset|econnreset|econnrefused|etimedout|enotfound|eai_again|rate limit|too many requests|429|503|502|gateway|temporarily unavailable|fetch failed|no runners|all configured rpc endpoints/i
-    .test(msg);
+  if (msg.includes('admin')) return false;
+  return isRetryableRpcError(err);
 }
 
 /**
@@ -1836,11 +1837,27 @@ export class DKGAgent {
                 );
               }
             } catch (err) {
-              this.log.warn(
-                attemptCtx,
-                `StorageACK identity re-resolution failed (chain still unreachable?), will retry: ` +
-                `${err instanceof Error ? err.message : String(err)}`,
-              );
+              // Codex PR #901 round-4 :1838: mirror the boot-path :1714 gate on
+              // the retry path. If the chain came back but provisioning then
+              // failed DETERMINISTICALLY (insufficient funds / revert / admin),
+              // keeping the transient flag set would re-run `ensureProfile()`
+              // every interval forever. Reclassify: permanent → clear the flag
+              // so the terminal branch below returns 'disabled' (surface once,
+              // stop scheduling); transient → keep retrying.
+              if (!isTransientBootChainError(err)) {
+                bootChainIdentityUnresolvedTransient = false;
+                this.log.warn(
+                  attemptCtx,
+                  `V10 StorageACK identity provisioning failed permanently — disabling (no further retries): ` +
+                  `${err instanceof Error ? err.message : String(err)}`,
+                );
+              } else {
+                this.log.warn(
+                  attemptCtx,
+                  `StorageACK identity re-resolution failed (chain still unreachable?), will retry: ` +
+                  `${err instanceof Error ? err.message : String(err)}`,
+                );
+              }
             }
           }
           if (onChainIdentityId > 0n) {
@@ -2102,8 +2119,16 @@ export class DKGAgent {
           return 'disabled';
         };
 
+        // Codex PR #901 round-4 :2106: `storageAckRegistrationRetryMs` is a
+        // public config field fed straight into `setTimeout`. Clamp it to a
+        // sane floor so a 0 / negative / NaN value can't collapse the retry into
+        // a tight loop that hammers the RPC and floods the log while the node is
+        // unhealthy. A non-finite or too-small value falls back to the floor.
+        const requestedRetryMs = this.config.storageAckRegistrationRetryMs;
         const storageACKRegistrationRetryMs =
-          this.config.storageAckRegistrationRetryMs ?? STORAGE_ACK_REGISTRATION_RETRY_MS;
+          typeof requestedRetryMs === 'number' && Number.isFinite(requestedRetryMs)
+            ? Math.max(requestedRetryMs, MIN_STORAGE_ACK_REGISTRATION_RETRY_MS)
+            : STORAGE_ACK_REGISTRATION_RETRY_MS;
         const scheduleStorageACKRegistrationRetry = (options: { repairWallets?: boolean; allowChainReresolution?: boolean } = {}) => {
           if (this.storageACKRegistrationRetryTimer || storageACKProtocolRegistered) return;
           this.log.warn(ctx, `V10 StorageACK handler registration will retry every ${storageACKRegistrationRetryMs}ms`);
