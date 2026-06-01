@@ -12,6 +12,21 @@ import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { keccak_256 } from '@noble/hashes/sha3.js';
 
+// Make `DKG_HOME` a declared property of `NodeJS.ProcessEnv` so the
+// `Pick<NodeJS.ProcessEnv, 'DKG_HOME'>` reference on
+// `ResolveDkgConfigHomeOptions.env` resolves under strict typecheck.
+// Without this declaration `Pick` finds no `DKG_HOME` key on the
+// default `ProcessEnv` indexer-only interface and downstream callers
+// fail with TS2741. Co-located with the only callers that pick it so
+// the augmentation lives next to its consumer.
+declare global {
+  namespace NodeJS {
+    interface ProcessEnv {
+      DKG_HOME?: string;
+    }
+  }
+}
+
 /** Resolve the DKG home directory ($DKG_HOME or ~/.dkg). */
 export function dkgHomeDir(): string {
   return process.env.DKG_HOME ?? join(homedir(), '.dkg');
