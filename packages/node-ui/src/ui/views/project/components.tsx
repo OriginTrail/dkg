@@ -4314,6 +4314,20 @@ export function SubGraphOverviewGrid({
     const rootScopedRaw = memory.allTriples.filter(t => !t.subGraph);
     const candidateTriples = applyCanonicalAdmission(rootScopedRaw, memory.entities)
       .map(t => ({ subject: t.subject, predicate: t.predicate, object: t.object }));
+    // GH #819 round 11 (Codex sweep 9 🟡 #20) — Root tripleCount
+    // is the PRE-`filterTriplesToEntities` candidate count, mirroring
+    // the named-card contract (`tripleCountBySubGraph` is set from
+    // `applyCanonicalAdmission` output, also pre-filter). Pre-round-11
+    // Root read `rootTriples.length` (post-AND-filter), so an
+    // untagged root-scoped edge to a non-root entity contributed to
+    // the subtitle total (canonical pass admits it) but showed as
+    // 0 on the Root card (AND-filter drops it because the non-root
+    // object isn't in `rootEntityUris`). Stat (0) === rendered (0)
+    // meant the β stat-vs-rendered tooltip never fired — no
+    // disclosure of the asymmetry. Carrying the pre-filter count
+    // restores symmetry with named cards and lets the β tooltip
+    // fire naturally when the count exceeds the rendered slice.
+    const rootTripleCount = candidateTriples.length;
     const rootTriples = filterTriplesToEntities(candidateTriples, rootEntityUris);
     // PR #818 Codex sweep 4 (finding 3) — shared cap helper. The
     // earlier inline copy duplicated the named-card sampling shape
@@ -4339,7 +4353,7 @@ export function SubGraphOverviewGrid({
       // Mirrors the named-card behaviour where `sg.tripleCount`
       // (daemon-reported) decouples the badge from the rendered
       // slice.
-      tripleCount: rootTriples.length,
+      tripleCount: rootTripleCount,
       triples: cappedRootTriples,
       layerCounts: { wm, swm, vm },
       entityTrustByUri: rootEntityTrust,

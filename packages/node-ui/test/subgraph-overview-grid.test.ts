@@ -687,12 +687,16 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
 
     const cards = container.querySelectorAll('.v10-sgov-card');
     const rootCardEl = cards[cards.length - 1];
-    // Root card stats: 2 root entities, 1 admitted triple (the
-    // untagged root↔root edge). Tagged + non-scoped triples
-    // dropped.
+    // Root card stats: 2 root entities. GH #819 round 11 (Codex
+    // sweep 9 🟡 #20): badge reads the PRE-filter candidate count
+    // (mirrors named-card contract). Tagged triple drops in the
+    // `!t.subGraph` filter; untagged `(alpha, p, somewhere-else)`
+    // and `(root1, p, root2)` both pass canonical admission → 2
+    // candidates. Post-AND-filter only `(root1, p, root2)`
+    // renders, so the β stat-vs-rendered tooltip fires.
     const stats = rootCardEl.querySelector('.v10-sgov-card-stats')?.textContent ?? '';
     expect(stats).toContain('2 entities');
-    expect(stats).toContain('1 triples');
+    expect(stats).toContain('2 triples');
   });
 
   it('Root card canonicalizes triple endpoints + SPO dedup key (Codex sweep 1, Bug M family)', async () => {
@@ -1141,12 +1145,22 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
 
     const cards = container.querySelectorAll('.v10-sgov-card');
     const rootCardEl = cards[cards.length - 1];
-    const stats = rootCardEl.querySelector('.v10-sgov-card-stats')?.textContent ?? '';
-    // 1 root entity, 0 triples — the root→non-root edge dropped
-    // by AND-filter. Pre-sweep this read `1 triples`.
+    const cardStats = rootCardEl.querySelector('.v10-sgov-card-stats');
+    const stats = cardStats?.textContent ?? '';
+    // GH #819 round 11 (Codex sweep 9 🟡 #20) — Root badge reads
+    // the PRE-`filterTriplesToEntities` candidate count, mirroring
+    // named-card contract. The untagged `(root, p, non-root)` row
+    // passes canonical admission (1 candidate) but drops in the
+    // AND-membership filter (non-root object not in rootEntityUris),
+    // so the rendered slice is empty. Stat (1) !== rendered (0) →
+    // β stat-vs-rendered tooltip fires.
     expect(stats).toContain('1 entities');
-    expect(stats).toContain('0 triples');
-    expect(stats).not.toContain('1 triples');
+    expect(stats).toContain('1 triples');
+    // β tooltip fires on the triples stat (cross-card edge cause).
+    const triplesStat = cardStats?.querySelectorAll('.v10-sgov-card-stat')[1];
+    expect(triplesStat?.getAttribute('title')).toBe(
+      `1 triples in this subgraph's scope; 0 rendered (some in-scope edges aren't drawn — either endpoints outside this subgraph, or cap-trimmed in dense buckets).`,
+    );
   });
 
   it('Root card admits rdf:type edges to class URIs (Codex sweep 6 — class IRIs exempted from AND-filter)', async () => {
