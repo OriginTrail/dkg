@@ -285,4 +285,89 @@ describe('useCanonicalTriples — canonical project-wide triple total (GH #819)'
     expect(spo).toContain('urn:e:a|http://schema.org/knows|urn:e:c');
     expect(spo).not.toContain('urn:e:a|http://schema.org/knows|urn:e:b');
   });
+
+  // T7 — GH #819 round 7 (Codex sweep 5 🔴 #13). Literal-divergence
+  // residue: when a subject is promoted past a row's layer AND a
+  // canonical-layer literal exists for the same (s,p), the lower-
+  // layer literal is residue from the pre-promotion state and
+  // must drop. Pre-fix the resource-only residue rule admitted
+  // BOTH, and SPO dedup couldn't collapse them because the literal
+  // VALUE differed — entity surfaced with two label values.
+  it('T7 — drops literal-divergence residue when subject moved past row.layer', () => {
+    const triples: LayeredTriple[] = [
+      // Promote urn:e:X to SWM canonical via its "new" literal.
+      { subject: 'urn:e:X', predicate: 'http://schema.org/name', object: '"new"', layer: 'shared' },
+      // WM-stored literal with a DIFFERENT value — residue from
+      // before the entity was promoted. Pre-fix: this admitted
+      // (resource-only residue rule) and yielded total === 2.
+      { subject: 'urn:e:X', predicate: 'http://schema.org/name', object: '"old"', layer: 'working' },
+    ];
+    const memory = memoryFor(triples);
+    expect(memory.entities.get('urn:e:X')?.trustLevel).toBe('shared');
+    render(memory);
+    const { total, spo } = readProbe(container);
+    // Only the canonical-layer literal survives.
+    expect(total).toBe(1);
+    expect(spo).toContain('urn:e:X|http://schema.org/name|"new"');
+    expect(spo).not.toContain('urn:e:X|http://schema.org/name|"old"');
+  });
+
+  // T7-edge-A — same literal value at both layers (subject promoted).
+  // SPO dedup already collapses these; the new literal-residue
+  // rule should not double-drop.
+  it('T7 edge — same literal at both layers with promoted subject still admits one row', () => {
+    const triples: LayeredTriple[] = [
+      // Both rows have the same literal "X". Subject is SWM canonical.
+      { subject: 'urn:e:X', predicate: 'http://schema.org/name', object: '"X"', layer: 'shared' },
+      { subject: 'urn:e:X', predicate: 'http://schema.org/name', object: '"X"', layer: 'working' },
+    ];
+    render(memoryFor(triples));
+    const { total } = readProbe(container);
+    expect(total).toBe(1);
+  });
+
+  // T7-edge-B — different literals at two layers where the subject
+  // is NOT promoted. Both rows are legitimate — no residue.
+  // (In practice an entity's `trustLevel` is the highest layer it
+  // appears in; if it appears at both WM and SWM, canonical is SWM,
+  // so this scenario requires the entity to appear ONLY at one
+  // canonical layer. We use a WM-only entity with two literal-
+  // valued rows at WM to lock the no-promotion case.)
+  it('T7 edge — WM-only entity with two same-(s,p) literal rows at WM admits both', () => {
+    const triples: LayeredTriple[] = [
+      // urn:e:wm only appears at WM, so trustLevel === 'working'.
+      { subject: 'urn:e:wm', predicate: 'http://schema.org/keyword', object: '"alpha"', layer: 'working' },
+      { subject: 'urn:e:wm', predicate: 'http://schema.org/keyword', object: '"beta"', layer: 'working' },
+    ];
+    const memory = memoryFor(triples);
+    expect(memory.entities.get('urn:e:wm')?.trustLevel).toBe('working');
+    render(memory);
+    const { total } = readProbe(container);
+    // Neither row's subject moved past `t.layer` → neither is
+    // residue. SPO keys differ (literal values differ) → no dedup
+    // collapse. Both admit.
+    expect(total).toBe(2);
+  });
+
+  // T7-edge-C — promoted subject with a literal at WM that has NO
+  // canonical-layer counterpart for the same (s,p). The lower-
+  // layer literal is the ONLY recording of that fact → keeps.
+  it('T7 edge — promoted subject keeps a WM literal with no canonical-layer counterpart', () => {
+    const triples: LayeredTriple[] = [
+      // Promote urn:e:Y to SWM via a DIFFERENT predicate.
+      { subject: 'urn:e:Y', predicate: 'http://schema.org/name', object: '"Y"', layer: 'shared' },
+      // WM-only literal under a different predicate — no
+      // canonical-layer literal exists for (Y, keyword), so this
+      // is a lower-layer-only fact, not residue.
+      { subject: 'urn:e:Y', predicate: 'http://schema.org/keyword', object: '"draft"', layer: 'working' },
+    ];
+    const memory = memoryFor(triples);
+    expect(memory.entities.get('urn:e:Y')?.trustLevel).toBe('shared');
+    render(memory);
+    const { total, spo } = readProbe(container);
+    // Both rows survive: (Y, name, "Y") is canonical, (Y, keyword,
+    // "draft") is a WM-only fact with no canonical counterpart.
+    expect(total).toBe(2);
+    expect(spo).toContain('urn:e:Y|http://schema.org/keyword|"draft"');
+  });
 });

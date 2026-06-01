@@ -549,6 +549,36 @@ export function applyCanonicalAdmission(
   triples: readonly LayeredTriple[],
   entities: ReadonlyMap<string, MemoryEntity>,
 ): LayeredTriple[] {
+  // GH #819 round 7 (Codex sweep 5 🔴 #13) — pass 1 indexes the
+  // `(canonical-subject, predicate)` pairs that have a literal-
+  // object row stored AT the subject's canonical layer. That row
+  // is the "source of truth" for that (s,p) — any literal-object
+  // row at a LOWER layer for the same (s,p) where the subject
+  // has moved past that lower layer is residue from the
+  // pre-promotion state and must drop. The earlier residue rule
+  // (line 559 family) only handled resource-object residue;
+  // literal-object residue admitted both (old + new) because
+  // SPO dedup keys on the literal VALUE, so divergent literals
+  // produce distinct keys and both survive.
+  //
+  // Edge cases this pass preserves:
+  // - Same literal at both layers (subject promoted): SPO dedup
+  //   collapses both to one row regardless of this pass.
+  // - Different literal, subject NOT promoted: subject's
+  //   canonical layer is the lower layer too, so no
+  //   canonical-layer row is indexed → no drop, both keep.
+  // - Literal at WM only, no canonical-layer literal for same
+  //   (s,p): pass-1 index is empty for that (s,p) → WM row
+  //   keeps (lower-layer-only fact).
+  const canonicalLiteralSP = new Set<string>();
+  for (const t of triples) {
+    if (isResourceObject(t.object)) continue;
+    const subjectEntity = entities.get(canonicalEntityUri(t.subject));
+    if (!subjectEntity) continue;
+    if (subjectEntity.trustLevel !== t.layer) continue;
+    canonicalLiteralSP.add(`${canonicalEntityUri(t.subject)}|${t.predicate}`);
+  }
+
   const seen = new Set<string>();
   const out: LayeredTriple[] = [];
   for (const t of triples) {
@@ -561,6 +591,17 @@ export function applyCanonicalAdmission(
       if (objectEntity && objectEntity.trustLevel !== t.layer) {
         dropAsResidue = true;
       }
+    }
+    // GH #819 round 7 — literal-residue. Subject moved past the
+    // row's layer AND a canonical-layer literal exists for the
+    // same (s,p) — drop the lower-layer literal as residue.
+    if (
+      !dropAsResidue
+      && subjectMoved
+      && !isResourceObject(t.object)
+      && canonicalLiteralSP.has(`${canonicalEntityUri(t.subject)}|${t.predicate}`)
+    ) {
+      dropAsResidue = true;
     }
     if (dropAsResidue) continue;
     const key = `${canonicalEntityUri(t.subject)}|${t.predicate}|${canonicalEntityUri(t.object)}`;
