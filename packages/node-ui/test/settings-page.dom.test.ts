@@ -198,7 +198,14 @@ describe('SettingsPage (cleanup) — rendering, removals, a11y', () => {
     await act(async () => { enableBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
     await flush();
     expect(updateTelemetrySettingsMock).toHaveBeenCalledWith(true);
-    expect(c.querySelector<HTMLButtonElement>('button[role="switch"]')!.getAttribute('aria-checked')).toBe('true');
+    const swAfter = c.querySelector<HTMLButtonElement>('button[role="switch"]')!;
+    expect(swAfter.getAttribute('aria-checked')).toBe('true');
+    // Codex finding: focus must return to the toggle after the consent
+    // confirm. The toggle uses aria-disabled (not `disabled`) precisely so it
+    // stays focusable through the in-flight window — a `disabled` button would
+    // have dropped focus to <body>.
+    expect(swAfter.hasAttribute('disabled')).toBe(false);
+    expect(document.activeElement).toBe(swAfter);
   });
 
   it('a telemetry save failure reverts the optimistic flip and shows the inline error', async () => {

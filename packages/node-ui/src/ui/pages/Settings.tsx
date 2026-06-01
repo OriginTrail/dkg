@@ -64,6 +64,11 @@ function NetworkTelemetrySection() {
   }, [telemetryData]);
 
   const toggleTelemetry = useCallback(() => {
+    // Guard in the handler rather than `disabled` so the toggle stays
+    // focusable — confirmTelemetry's finally restores focus here, which a
+    // `disabled` button (removed from the tab order) would silently no-op
+    // (Codex). aria-busy conveys the in-flight state to assistive tech.
+    if (telemetrySaving) return;
     setTelemetryError(null);
     if (telemetryEnabled) {
       // Turning OFF — no confirmation needed.
@@ -75,7 +80,7 @@ function NetworkTelemetrySection() {
     } else {
       setShowConsentModal(true);
     }
-  }, [telemetryEnabled]);
+  }, [telemetryEnabled, telemetrySaving]);
 
   const confirmTelemetry = useCallback(async () => {
     setShowConsentModal(false);
@@ -125,9 +130,9 @@ function NetworkTelemetrySection() {
             role="switch"
             aria-checked={telemetryEnabled}
             aria-busy={telemetrySaving}
+            aria-disabled={telemetrySaving}
             aria-label="Share telemetry with the network"
             onClick={toggleTelemetry}
-            disabled={telemetrySaving}
             style={{
               width: 38, height: 22, borderRadius: 11, border: 'none', flexShrink: 0,
               background: telemetryEnabled ? 'var(--green)' : 'var(--border)',
