@@ -260,25 +260,27 @@ describe('publish async get benchmark', () => {
 
   // These two assert the benchmark client AUTO-LOADS the local auth token
   // from `<DKG_HOME>/auth.token` for loopback targets and applies it to
-  // authenticated requests. They probe via `agents()` (`GET /api/agents`),
+  // authenticated requests. They probe via `query()` (`POST /api/query`),
   // NOT `status()`: the status probe was made intentionally UNAUTHENTICATED
   // (commit 186e48ca4 "keep status probe unauthenticated" — `status()` now
   // sends `{ auth: false }`), so it never carries the Bearer header and can't
-  // prove auto-load. `agents()` is the same authenticated-call pattern that
-  // commit switched `api-client.test.ts` to, for the identical reason. The
-  // client is the real `ApiClient` at runtime (the `BenchmarkClient`
-  // interface omits `agents()`), so we cast to reach it.
+  // prove auto-load. `query()` is on the `BenchmarkClient` contract and issues
+  // an authenticated request, so we exercise the public interface directly
+  // (Codex PR #901: no `as unknown as { agents }` cast that would bypass the
+  // contract and only fail at runtime if the factory ever returned a shim).
   it('auto-loads local tokens for DKG_API_PORT targets', async () => {
     const tempDir = await mkdtemp(join(tmpdir(), 'dkg-bench-auth-'));
     process.env.DKG_HOME = tempDir;
     await writeFile(join(tempDir, 'auth.token'), 'local-token\n', 'utf8');
     const calls: Array<{ url: string; init?: RequestInit }> = [];
-    globalThis.fetch = trackingFetch(calls, { agents: [] });
+    globalThis.fetch = trackingFetch(calls, { result: { type: 'bindings', bindings: [] } });
 
     try {
+      // Inferred type is `BenchmarkClient` — `query()` is on that contract, so
+      // no cast is needed (Codex PR #901).
       const client = await createBenchmarkClient({ ...baseConfig(), apiPort: 9300, authToken: undefined });
-      await (client as unknown as { agents: () => Promise<unknown> }).agents();
-      expect(calls[0].url).toBe('http://127.0.0.1:9300/api/agents');
+      await client.query('ASK { ?s ?p ?o }');
+      expect(calls[0].url).toBe('http://127.0.0.1:9300/api/query');
       expect((calls[0].init?.headers as Record<string, string>).Authorization).toBe('Bearer local-token');
     } finally {
       await rm(tempDir, { recursive: true, force: true });
@@ -290,12 +292,12 @@ describe('publish async get benchmark', () => {
     process.env.DKG_HOME = tempDir;
     await writeFile(join(tempDir, 'auth.token'), 'local-url-token\n', 'utf8');
     const calls: Array<{ url: string; init?: RequestInit }> = [];
-    globalThis.fetch = trackingFetch(calls, { agents: [] });
+    globalThis.fetch = trackingFetch(calls, { result: { type: 'bindings', bindings: [] } });
 
     try {
       const client = await createBenchmarkClient({ ...baseConfig(), apiUrl: 'http://localhost:9301', authToken: undefined });
-      await (client as unknown as { agents: () => Promise<unknown> }).agents();
-      expect(calls[0].url).toBe('http://localhost:9301/api/agents');
+      await client.query('ASK { ?s ?p ?o }');
+      expect(calls[0].url).toBe('http://localhost:9301/api/query');
       expect((calls[0].init?.headers as Record<string, string>).Authorization).toBe('Bearer local-url-token');
     } finally {
       await rm(tempDir, { recursive: true, force: true });
