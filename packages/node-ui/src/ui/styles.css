@@ -7974,31 +7974,47 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--sg-color, #a855f7) 18%, transparent);
   flex-shrink: 0;
 }
-.v10-project-strip-name {
+/* S5 — breadcrumb hops live inline in the project strip. The
+   separator is the existing `.v10-project-strip-sep`, now with 6px of
+   each-side padding per the §4.7.1 visual spec. The prior
+   `.v10-project-strip-name` / `.v10-project-strip-sg` rules are gone —
+   the breadcrumb hops replace the project-name button + subgraph chip. */
+.v10-breadcrumb { display: flex; align-items: center; min-width: 0; }
+.v10-breadcrumb-hop {
   font-size: 13px; font-weight: 600;
-  color: var(--text-primary);
-  background: none; border: none; padding: 0;
-  cursor: pointer;
   font-family: var(--font-sans);
+  /* Shrink toward the middle hops; first hop keeps its natural width,
+     trailing hop is preserved most. */
+  flex: 0 1 auto; min-width: 0; max-width: 200px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* First hop ("Context Graph") stays intact — it's the orientation
+   anchor; only the middle/trailing hops character-truncate. */
+.v10-breadcrumb-hop:first-child { flex: 0 0 auto; max-width: none; }
+.v10-breadcrumb-hop.link {
+  background: none; border: none; padding: 0;
+  color: var(--text-link); cursor: pointer;
   transition: color 0.15s;
 }
-.v10-project-strip-name:disabled {
-  cursor: default; opacity: 1;
+.v10-breadcrumb-hop.link:hover {
+  text-decoration: underline; text-decoration-color: currentColor; text-underline-offset: 2px;
 }
-.v10-project-strip-name:not(:disabled):hover {
-  color: var(--sg-color, #a855f7);
+.v10-breadcrumb-hop.link:focus-visible {
+  outline: 2px solid var(--text-link); outline-offset: 2px; border-radius: 2px;
+}
+/* Trailing "you are here" hop — three intentional differences from
+   clickable hops (secondary color, weight 500, no underline, default
+   cursor) communicate the current location without a label. */
+.v10-breadcrumb-hop.current {
+  color: var(--text-secondary); font-weight: 500; cursor: default;
 }
 .v10-project-strip-sep {
   color: var(--text-ghost);
   font-size: 14px;
   font-weight: 400;
+  padding: 0 6px;
+  flex-shrink: 0;
 }
-.v10-project-strip-sg {
-  display: inline-flex; align-items: center; gap: 5px;
-  font-size: 12px; font-weight: 600;
-  color: var(--text-secondary);
-}
-.v10-project-strip-sg-icon { font-size: 13px; line-height: 1; }
 .v10-project-strip-desc {
   font-size: 12px; color: var(--text-secondary);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;

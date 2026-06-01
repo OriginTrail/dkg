@@ -729,6 +729,14 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     openTab(CONTEXT_GRAPH_PRIMER_TAB);
   }, [openTab]);
 
+  // S5 — first breadcrumb hop ("Context Graph") navigates to the
+  // overview, clearing any open detail / subgraph page. Reuses the
+  // layer-switch reset (clears detail origin + refs) so it can't strand
+  // a stale subgraph/detail context.
+  const handleBreadcrumbOverview = useCallback(() => {
+    handleLayerSwitch('overview');
+  }, [handleLayerSwitch]);
+
   if (!cg) {
     return (
       <div className="v10-view-placeholder">
@@ -740,6 +748,15 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   // Active sub-graph binding (for the breadcrumb strip) — stays in scope
   // across sub-graph / layer / overview routes.
   const activeSubGraphBinding = activeSubGraph ? profile.forSubGraph(activeSubGraph) : null;
+
+  // S5 — the breadcrumb's trailing hop is the open detail's name (entity
+  // label or assertion name); null when no detail is open (the middle hop
+  // is then the current location).
+  const breadcrumbDetailLabel = selectedEntity
+    ? selectedEntity.label
+    : selectedAssertion
+      ? selectedAssertion.name
+      : null;
 
   // Codex Bug C — gate the `entities`-driven chip-count path on a
   // fully-loaded memory snapshot. While `useMemoryEntities` is mid-
@@ -778,8 +795,11 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
       <ProjectHeaderStrip
         cg={cg}
         profile={profile}
+        activeLayer={activeLayer}
         activeSubGraph={activeSubGraphBinding}
-        onClearSubGraph={() => handleSelectSubGraph(null)}
+        detailLabel={breadcrumbDetailLabel}
+        onOverview={handleBreadcrumbOverview}
+        onRestoreOrigin={handleDetailClose}
       />
 
       {/* Layer Switcher — always visible now. Clicking a layer from within
@@ -802,9 +822,9 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
           allEntities={detailEntities}
           allTriples={detailTriples}
           onNavigate={handleNavigate}
-          onClose={handleDetailClose}
           contextGraphId={contextGraphId}
           onRefresh={rawMemory.refresh}
+          onOpenAgent={openAgent}
         />
       )}
 

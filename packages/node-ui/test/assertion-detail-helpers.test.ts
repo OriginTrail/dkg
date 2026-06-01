@@ -4,6 +4,7 @@ import {
   canPromoteAssertion,
   assertionSubgraphLine,
   buildAssertionTrail,
+  buildBreadcrumbHops,
 } from '../src/ui/views/project/helpers.js';
 
 // S4 — pure helpers behind the assertion detail view. These pin the
@@ -93,5 +94,83 @@ describe('buildAssertionTrail — lifecycle trail stages + is-current marker', (
     const stages = buildAssertionTrail(null);
     expect(stages.map(s => s.state)).toEqual(['created', 'promoted', 'published', 'finalized']);
     expect(stages.some(s => s.isCurrent)).toBe(false);
+  });
+});
+
+describe('buildBreadcrumbHops — S5 breadcrumb hop construction (T04)', () => {
+  const CG = 'Hello World';
+
+  it('overview: a single non-interactive Context Graph hop', () => {
+    const hops = buildBreadcrumbHops({ contextGraphName: CG, activeLayer: 'overview', activeSubGraph: null });
+    expect(hops).toHaveLength(1);
+    expect(hops[0]).toMatchObject({ label: CG, target: 'current' });
+  });
+
+  it('on a layer page: Context Graph (link) › Layer full-name (current)', () => {
+    const hops = buildBreadcrumbHops({ contextGraphName: CG, activeLayer: 'wm', activeSubGraph: null });
+    expect(hops.map(h => h.label)).toEqual([CG, 'Working Memory']);
+    expect(hops[0].target).toBe('overview'); // clickable to overview
+    expect(hops[1].target).toBe('current');  // current location
+  });
+
+  it('uses the full layer name for SWM / VM', () => {
+    expect(buildBreadcrumbHops({ contextGraphName: CG, activeLayer: 'swm', activeSubGraph: null })[1].label)
+      .toBe('Shared Working Memory');
+    expect(buildBreadcrumbHops({ contextGraphName: CG, activeLayer: 'vm', activeSubGraph: null })[1].label)
+      .toBe('Verifiable Memory');
+  });
+
+  it('on a subgraph page: the middle hop is the subgraph displayName, NOT the layer (never both)', () => {
+    const hops = buildBreadcrumbHops({
+      contextGraphName: CG, activeLayer: 'wm',
+      activeSubGraph: 'demo', subGraphDisplayName: 'Demo Subgraph',
+    });
+    expect(hops.map(h => h.label)).toEqual([CG, 'Demo Subgraph']);
+    // The layer name must NOT appear when a subgraph is the middle hop.
+    expect(hops.some(h => h.label === 'Working Memory')).toBe(false);
+  });
+
+  it('with an open detail: Context Graph (link) › middle (link → origin) › detail name (current)', () => {
+    const hops = buildBreadcrumbHops({
+      contextGraphName: CG, activeLayer: 'wm', activeSubGraph: null,
+      detailLabel: 'Battery cell 003',
+    });
+    expect(hops.map(h => h.label)).toEqual([CG, 'Working Memory', 'Battery cell 003']);
+    expect(hops[0].target).toBe('overview');
+    expect(hops[1].target).toBe('origin'); // middle hop closes the detail
+    expect(hops[2].target).toBe('current'); // trailing = you are here
+  });
+
+  it('every hop carries a title for the unconditional tooltip', () => {
+    const hops = buildBreadcrumbHops({
+      contextGraphName: CG, activeLayer: 'wm', activeSubGraph: 'demo',
+      subGraphDisplayName: 'Demo', detailLabel: 'X',
+    });
+    expect(hops.every(h => typeof h.title === 'string' && h.title.length > 0)).toBe(true);
+  });
+});
+
+describe('buildBreadcrumbHops — cross-subgraph update (T05)', () => {
+  // M2(b) makes a cross-subgraph entity jump switch activeSubGraph; S5's
+  // breadcrumb must reflect the NEW subgraph on the middle hop. This pins
+  // that the hop model is a pure function of the current subgraph — so
+  // when activeSubGraph changes, the rendered middle hop changes.
+  it('reflects the active subgraph on the middle hop', () => {
+    const before = buildBreadcrumbHops({
+      contextGraphName: 'CG', activeLayer: 'wm',
+      activeSubGraph: 'demo', subGraphDisplayName: 'Demo',
+      detailLabel: 'Entity A',
+    });
+    expect(before[1].label).toBe('Demo');
+
+    // Entity A linked to an entity in subgraph "other" → activeSubGraph
+    // follows (M2 option b); the breadcrumb middle hop updates.
+    const after = buildBreadcrumbHops({
+      contextGraphName: 'CG', activeLayer: 'wm',
+      activeSubGraph: 'other', subGraphDisplayName: 'Other',
+      detailLabel: 'Entity B',
+    });
+    expect(after[1].label).toBe('Other');
+    expect(after[2].label).toBe('Entity B');
   });
 });

@@ -280,18 +280,36 @@ vi.mock('../src/ui/components/SubGraphBar.js', () => ({
 }));
 
 vi.mock('../src/ui/views/project/components.js', () => ({
-  ProjectHeaderStrip: ({ activeSubGraph }: { activeSubGraph: any }) =>
-    React.createElement('div', { 'data-testid': 'active-subgraph' }, activeSubGraph?.slug ?? 'none'),
+  // S5 — the breadcrumb (in ProjectHeaderStrip) is now the sole back
+  // affordance: `detail-back` is wired to `onRestoreOrigin` (the
+  // breadcrumb middle-hop click = handleDetailClose) and
+  // `breadcrumb-overview` to the first-hop click. The detail views
+  // themselves no longer render a back button.
+  ProjectHeaderStrip: ({ activeLayer, activeSubGraph, detailLabel, onOverview, onRestoreOrigin }: {
+    activeLayer: string;
+    activeSubGraph: any;
+    detailLabel?: string | null;
+    onOverview: () => void;
+    onRestoreOrigin: () => void;
+  }) =>
+    React.createElement('div', { 'data-testid': 'project-strip', 'data-layer': activeLayer, 'data-detail-label': detailLabel ?? '' },
+      // Keep `active-subgraph` text == slug only (existing M2 tests
+      // assert its exact textContent); the breadcrumb buttons live in a
+      // sibling node so they don't pollute that assertion.
+      React.createElement('span', { 'data-testid': 'active-subgraph' }, activeSubGraph?.slug ?? 'none'),
+      React.createElement('button', { 'data-testid': 'detail-back', onClick: onRestoreOrigin }, 'breadcrumb restore'),
+      React.createElement('button', { 'data-testid': 'breadcrumb-overview', onClick: onOverview }, 'Context Graph')),
   LayerSwitcher: ({ active, onSwitch }: { active: string; onSwitch: (layer: string) => void }) =>
     React.createElement('div', { 'data-testid': 'active-layer', 'data-layer': active },
       React.createElement('button', { 'data-testid': 'switch-wm', onClick: () => onSwitch('wm') }, 'WM'),
       React.createElement('button', { 'data-testid': 'switch-swm', onClick: () => onSwitch('swm') }, 'SWM'),
       React.createElement('button', { 'data-testid': 'switch-subgraphs', onClick: () => onSwitch('graph-overview') }, 'Subgraphs')),
-  KADetailView: ({ entity, onNavigate, onClose }: { entity: any; onNavigate: (uri: string) => void; onClose: () => void }) =>
+  // S5 — KADetailView no longer renders a back button (the breadcrumb
+  // is the sole back-affordance); the mock matches that shape.
+  KADetailView: ({ entity, onNavigate }: { entity: any; onNavigate: (uri: string) => void }) =>
     React.createElement('section', { 'data-testid': 'entity-detail', 'data-entity': entity.uri, 'data-trust': entity.trustLevel, 'data-connections': String(entity.connections.length), 'data-subgraphs': [...entity.subGraphs].sort().join(',') },
       React.createElement('div', {}, entity.label),
-      React.createElement('button', { 'data-testid': 'open-related-entity', onClick: () => onNavigate('urn:entity:other') }, 'Open related'),
-      React.createElement('button', { 'data-testid': 'detail-back', onClick: onClose }, 'Back to Context Graph')),
+      React.createElement('button', { 'data-testid': 'open-related-entity', onClick: () => onNavigate('urn:entity:other') }, 'Open related')),
   // S4 — assertion detail overlay. The mock surfaces the assertion
   // identity + an "open entity from assertion" button so the
   // mutually-exclusive overlay + close-to-origin behaviour can be
@@ -1319,21 +1337,25 @@ describe('ProjectView entity detail navigation', () => {
     expect(query('active-layer').dataset.layer).toBe('wm');
   });
 
-  it('closing the assertion detail returns to the originating layer + Assertions subtab (T07)', async () => {
+  it('closing the assertion detail via the breadcrumb restores layer + Assertions subtab (T07 / T16)', async () => {
     await click('switch-wm');
     await click('layer-tab-assertions');
     await flush();
     await click('open-layer-assertion');
     await flush();
     expect(query('assertion-detail').dataset.name).toBe('demo-assertion');
+    // The breadcrumb trailing hop reflects the open assertion.
+    expect(query('project-strip').dataset.detailLabel).toBe('demo-assertion');
 
-    // No back button on the assertion detail (S5 lock) — the layer
-    // switcher is the always-visible exit. Switching back to WM
-    // restores the layer page; the Assertions subtab persists.
-    await click('switch-wm');
+    // S5 — no back button on the detail; the breadcrumb middle-hop
+    // (mock `detail-back` → onRestoreOrigin → handleDetailClose) closes
+    // it back to the originating layer + Assertions subtab (T16: the
+    // SAME handleDetailClose serves the assertion overlay).
+    await click('detail-back');
     await flush();
     expect(document.querySelector('[data-testid="assertion-detail"]')).toBeNull();
     expect(query('layer-detail').dataset.layer).toBe('wm');
+    expect(query('layer-detail').dataset.tab).toBe('assertions');
   });
 
   it('opening an entity from the assertion detail replaces it (mutually exclusive overlays)', async () => {

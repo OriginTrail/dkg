@@ -67,6 +67,7 @@ import {
   filterTriplesToEntities, admitTripleForScope,
   entityTimestamp, formatRelativeTime, formatTimelineBucket, formatTrailTimestamp,
   canPromoteAssertion, assertionSubgraphLine, buildAssertionTrail,
+  buildBreadcrumbHops,
   type LayerView, type LayerContentTab, type KAPane,
   type SubGraphTab, type SubGraphEntitySort,
 } from './helpers.js';
@@ -517,15 +518,38 @@ export function LayerSwitcher({ active, counts, onSwitch, onShare, onImport, onR
 export function ProjectHeaderStrip({
   cg,
   profile,
+  activeLayer,
   activeSubGraph,
-  onClearSubGraph,
+  detailLabel,
+  onOverview,
+  onRestoreOrigin,
 }: {
   cg: { id: string; name?: string; description?: string };
   profile: ReturnType<typeof useProjectProfile>;
+  /** Current layer route (drives the middle hop when no subgraph). */
+  activeLayer: LayerView;
   activeSubGraph: ReturnType<typeof useProjectProfile>['forSubGraph'] extends (s: string) => infer R ? R | null : null;
-  onClearSubGraph: () => void;
+  /** Open detail's name (entity / assertion), or null when none is open. */
+  detailLabel?: string | null;
+  /** Navigate to the Context Graph overview (first-hop click). */
+  onOverview: () => void;
+  /** Restore the M2 origin — close the open detail back to where it was
+   *  opened (middle-hop click when a detail is open). */
+  onRestoreOrigin: () => void;
 }) {
   const name = cg.name || profile.displayName || cg.id;
+  // S5 — the breadcrumb is the persistent navigation + back-affordance.
+  // It replaces the prior project-name + subgraph-chip rendering AND the
+  // old `.v10-ka-back` button (deleted on the detail views).
+  const hops = buildBreadcrumbHops({
+    contextGraphName: name,
+    activeLayer,
+    activeSubGraph: activeSubGraph?.slug ?? null,
+    subGraphDisplayName: activeSubGraph?.displayName ?? activeSubGraph?.slug ?? null,
+    detailLabel,
+  });
+  // Subgraph context still tints the strip + surfaces the description.
+  const description = activeSubGraph?.description ?? cg.description;
   return (
     <div
       className="v10-project-strip"
@@ -537,39 +561,31 @@ export function ProjectHeaderStrip({
         className="v10-project-strip-dot"
         style={{ background: profile.primaryColor }}
       />
-      <button
-        type="button"
-        className="v10-project-strip-name"
-        onClick={activeSubGraph ? onClearSubGraph : undefined}
-        disabled={!activeSubGraph}
-        title={activeSubGraph ? 'Back to context graph overview' : cg.id}
-      >
-        {name}
-      </button>
-      {activeSubGraph ? (
-        <>
-          <span className="v10-project-strip-sep">›</span>
-          <span className="v10-project-strip-sg">
-            <span
-              className="v10-project-strip-sg-icon"
-              style={{ color: activeSubGraph.color }}
-            >
-              {activeSubGraph.icon ?? '•'}
-            </span>
-            {activeSubGraph.displayName ?? activeSubGraph.slug}
-          </span>
-          {activeSubGraph.description && (
-            <span className="v10-project-strip-desc" title={activeSubGraph.description}>
-              {activeSubGraph.description}
-            </span>
-          )}
-        </>
-      ) : (
-        cg.description && (
-          <span className="v10-project-strip-desc" title={cg.description}>
-            {cg.description}
-          </span>
-        )
+      <nav className="v10-breadcrumb" aria-label="Breadcrumb">
+        {hops.map((hop, i) => (
+          <React.Fragment key={hop.key}>
+            {i > 0 && <span className="v10-project-strip-sep" aria-hidden="true">›</span>}
+            {hop.target === 'current' ? (
+              <span className="v10-breadcrumb-hop current" title={hop.title} aria-current="page">
+                {hop.label}
+              </span>
+            ) : (
+              <button
+                type="button"
+                className="v10-breadcrumb-hop link"
+                title={hop.title}
+                onClick={hop.target === 'overview' ? onOverview : onRestoreOrigin}
+              >
+                {hop.label}
+              </button>
+            )}
+          </React.Fragment>
+        ))}
+      </nav>
+      {description && (
+        <span className="v10-project-strip-desc" title={description}>
+          {description}
+        </span>
       )}
     </div>
   );
@@ -3592,12 +3608,11 @@ export function VerifyOnDkgButton({
   );
 }
 
-export function KADetailView({ entity, allEntities, allTriples, onNavigate, onClose, contextGraphId, onRefresh, onOpenAgent }: {
+export function KADetailView({ entity, allEntities, allTriples, onNavigate, contextGraphId, onRefresh, onOpenAgent }: {
   entity: MemoryEntity;
   allEntities: Map<string, MemoryEntity>;
   allTriples: Triple[];
   onNavigate: (uri: string) => void;
-  onClose: () => void;
   contextGraphId: string;
   onRefresh: () => void;
   onOpenAgent?: (uri: string) => void;
@@ -3721,7 +3736,8 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
   return (
     <div className="v10-ka-detail">
       <div className="v10-ka-header">
-        <button className="v10-ka-back" onClick={onClose}>← Back to Context Graph</button>
+        {/* S5 — no back button here; the persistent breadcrumb in
+            ProjectHeaderStrip is the sole back-affordance. */}
         <div className="v10-ka-header-left">
           <div className="v10-ka-label">{detailNoun}</div>
           <div className="v10-ka-name">

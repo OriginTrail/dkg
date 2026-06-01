@@ -1011,3 +1011,120 @@ export function buildAssertionTrail(
     isCurrent: state != null && stage.state === state,
   }));
 }
+
+// ─── S5 Breadcrumb navigation ───────────────────────────────
+// `Context Graph › {Layer | Subgraph} › {Entity | Assertion}`. Lives
+// inline in the persistent ProjectHeaderStrip. Hop content rules
+// (§4.7.1): the middle hop is EITHER the layer full-name OR the subgraph
+// displayName, never both (layer scope inside a subgraph is signalled by
+// the in-page active-layer chip, not the breadcrumb). The trailing hop
+// is the current location — a non-interactive span, three intentional
+// styling differences from clickable hops ("you are here" without a
+// label).
+
+/** Where a clicked breadcrumb hop navigates. */
+export type BreadcrumbTarget =
+  | 'overview'   // the Context Graph overview (first hop)
+  | 'origin'     // restore the M2 origin snapshot (close the open detail)
+  | 'current';   // the trailing hop — not interactive
+
+export interface BreadcrumbHop {
+  /** Stable React key. */
+  key: string;
+  /** Truncatable display label. */
+  label: string;
+  /** Full text for the unconditional `title=` tooltip. */
+  title: string;
+  /** Navigation target; `'current'` hops render as a non-interactive span. */
+  target: BreadcrumbTarget;
+}
+
+const LAYER_FULL_NAME: Record<MemoryLayerKey, string> = {
+  wm: 'Working Memory',
+  swm: 'Shared Working Memory',
+  vm: 'Verifiable Memory',
+};
+
+type MemoryLayerKey = 'wm' | 'swm' | 'vm';
+
+/**
+ * Build the breadcrumb hops for the current ProjectView location.
+ *
+ * - `Context Graph` is always the first hop, clickable to overview
+ *   (except when it is itself the current page — then it's the trailing
+ *   `current` hop with no further hops).
+ * - The middle hop is the subgraph displayName when a subgraph page is
+ *   active, otherwise the active layer's full name. Only one, never both.
+ * - The trailing hop (`current`) is the open detail's name (entity or
+ *   assertion) when a detail is open; otherwise the middle hop itself is
+ *   the current location.
+ *
+ * Navigation semantics are attached by the renderer via `target`:
+ * non-trailing hops are clickable; clicking the first hop goes to
+ * overview, clicking the middle hop (when a detail is open) restores the
+ * M2 origin (closes the detail back to where it was opened).
+ */
+export function buildBreadcrumbHops(input: {
+  /** The CG display name (first hop label). */
+  contextGraphName: string;
+  activeLayer: LayerView;
+  /** Active subgraph slug, or null when not on a subgraph page. */
+  activeSubGraph: string | null;
+  /** Active subgraph display name (falls back to slug). */
+  subGraphDisplayName?: string | null;
+  /** Open detail's name, or null when no detail is open. */
+  detailLabel?: string | null;
+}): BreadcrumbHop[] {
+  const { contextGraphName, activeLayer, activeSubGraph, subGraphDisplayName, detailLabel } = input;
+  const hops: BreadcrumbHop[] = [];
+
+  // First hop — Context Graph. It is the CURRENT page only when we are on
+  // the overview with no subgraph and no open detail.
+  const onOverview = !activeSubGraph && activeLayer === 'overview' && !detailLabel;
+  hops.push({
+    key: 'cg',
+    label: contextGraphName,
+    title: contextGraphName,
+    target: onOverview ? 'current' : 'overview',
+  });
+  if (onOverview) return hops;
+
+  // Middle hop — subgraph displayName OR layer full-name (never both).
+  const detailOpen = !!detailLabel;
+  let middle: { label: string; title: string } | null = null;
+  if (activeSubGraph) {
+    const name = subGraphDisplayName?.trim() || activeSubGraph;
+    middle = { label: name, title: name };
+  } else if (activeLayer === 'wm' || activeLayer === 'swm' || activeLayer === 'vm') {
+    const name = LAYER_FULL_NAME[activeLayer];
+    middle = { label: name, title: name };
+  } else if (activeLayer === 'graph-overview') {
+    middle = { label: 'Subgraphs', title: 'Subgraphs' };
+  } else if (activeLayer === 'query') {
+    middle = { label: 'Query Catalogue', title: 'Query Catalogue' };
+  }
+
+  if (middle) {
+    hops.push({
+      key: 'middle',
+      label: middle.label,
+      title: middle.title,
+      // When a detail is open the middle hop is clickable (restores the
+      // origin). When no detail is open the middle hop IS the current
+      // location.
+      target: detailOpen ? 'origin' : 'current',
+    });
+  }
+
+  // Trailing hop — the open detail's name (current location).
+  if (detailOpen) {
+    hops.push({
+      key: 'detail',
+      label: detailLabel!,
+      title: detailLabel!,
+      target: 'current',
+    });
+  }
+
+  return hops;
+}
