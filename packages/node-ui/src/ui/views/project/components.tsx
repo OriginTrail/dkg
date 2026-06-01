@@ -4616,49 +4616,51 @@ export function SubGraphMiniCard({
             quiet case. Same conditional-when-it-has-something-to-
             say pattern as S2's `Pending join requests` empty
             state. */}
-        {/* GH #882 (post-#847 follow-up) — extended hydrating
-            tooltip to non-zero buckets, mirroring the round-10
-            #18 pattern for the failure branch. Before #882 the
-            hydrating tooltip only fired on zero buckets; a
-            non-zero card rendered the partial count silently
-            while WM/SWM/VM were still loading. Now `isHydrating`
-            fires for ALL bucket values:
-              • bucket 0 + hydrating → `…` "Loading triples…"
-              • bucket > 0 + hydrating → "{N} triples (still
-                loading; count may grow)."
-            Precedence (top wins, unchanged from round 10):
-              • hydrating (any bucket) → loading affordance/tooltip
-              • failed/partial (any bucket) → failure tooltip
-              • stat-vs-rendered mismatch → β literal (round 8)
-              • otherwise → no tooltip
-            `isHydrating` wins over `isFailedOrPartial` —
-            transient state takes precedence over settled-
-            incomplete signal (round 7 #14 contract).
-            Engineer-placeholder wording for the new
-            hydrating-with-count cell ("still loading; count may
-            grow"); gate logic is decoupled from copy so ux-lead
-            can tighten the wording in a follow-up without
-            touching the matrix. */}
+        {/* GH #890 round 2 (Codex sweep 1 🟡 A) — bucket-aware
+            precedence. Round 1 (#882) made `isHydrating`
+            short-circuit the entire chain, so a mixed state
+            (some layers `loading`, others `error`) on a non-zero
+            bucket rendered the optimistic "still loading; count
+            may grow" tooltip and masked the known-incomplete
+            failure. Round 2 splits the precedence so the failure
+            disclosure wins everywhere except the zero-bucket
+            initial-fetch window:
+              1. hydrating + bucket 0 → `…` "Loading triples…"
+                 (loading affordance is the priority signal when
+                 we have no count yet — preserves the round 6 #11
+                 anti-flash contract: `useMemoryEntities`
+                 initializes `allTriples = []` so a real subgraph
+                 briefly shows 0 during initial fetch)
+              2. failed/partial (any bucket) → failure tooltip
+                 (wins over hydrating on non-zero — the count is
+                 already known-incomplete because a layer errored)
+              3. hydrating + bucket > 0 (no failure) → "still
+                 loading; count may grow" (#882 wording, only
+                 fires when no failure flag is set)
+              4. stat-vs-rendered mismatch → β literal (round 8)
+              5. otherwise → no tooltip */}
         <span
           className="v10-sgov-card-stat"
           title={
-            isHydrating
-              ? card.tripleCount === 0
-                ? 'Loading triples for this subgraph…'
-                : `${card.tripleCount} triples (still loading; count may grow).`
+            isHydrating && card.tripleCount === 0
+              ? 'Loading triples for this subgraph…'
               : isFailedOrPartial
-                ? `${card.tripleCount} triples (some layers unavailable; count may be incomplete).`
-                : card.tripleCount !== card.triples.length
-                  // GH #819 round 8 (Codex sweep 6 🟡 #4 / #9 / #12,
-                  // team-lead call β) — broader wording so the
-                  // tooltip covers both causes of stat-vs-rendered
-                  // gap: (1) cross-card edges whose other endpoint
-                  // sits outside the subgraph and (2) cap-trimmed
-                  // rows in dense buckets via `applyHeaviestSubjectsCap`.
-                  // Earlier copy blamed only cause (1); Codex
-                  // re-raised the cap-trim case 5 sweeps in a row.
-                  ? `${card.tripleCount} triples in this subgraph's scope; ${card.triples.length} rendered (some in-scope edges aren't drawn — either endpoints outside this subgraph, or cap-trimmed in dense buckets).`
-                  : undefined
+                ? card.tripleCount === 0
+                  ? 'Some layers unavailable; count may be incomplete.'
+                  : `${card.tripleCount} triples (some layers unavailable; count may be incomplete).`
+                : isHydrating
+                  ? `${card.tripleCount} triples (still loading; count may grow).`
+                  : card.tripleCount !== card.triples.length
+                    // GH #819 round 8 (Codex sweep 6 🟡 #4 / #9 / #12,
+                    // team-lead call β) — broader wording so the
+                    // tooltip covers both causes of stat-vs-rendered
+                    // gap: (1) cross-card edges whose other endpoint
+                    // sits outside the subgraph and (2) cap-trimmed
+                    // rows in dense buckets via `applyHeaviestSubjectsCap`.
+                    // Earlier copy blamed only cause (1); Codex
+                    // re-raised the cap-trim case 5 sweeps in a row.
+                    ? `${card.tripleCount} triples in this subgraph's scope; ${card.triples.length} rendered (some in-scope edges aren't drawn — either endpoints outside this subgraph, or cap-trimmed in dense buckets).`
+                    : undefined
           }
         ><b>{isHydrating && card.tripleCount === 0 ? '…' : card.tripleCount}</b> triples</span>
       </div>

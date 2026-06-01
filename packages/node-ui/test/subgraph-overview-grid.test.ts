@@ -1409,7 +1409,10 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
     expect(stats).not.toContain('42 triples');
     // Tooltip surfaces the failure caveat on the triples stat.
     const triplesStat = cardStats?.querySelectorAll('.v10-sgov-card-stat')[1];
-    expect(triplesStat?.getAttribute('title')).toBe('0 triples (some layers unavailable; count may be incomplete).');
+    // GH #890 round 2 — zero-bucket failure wording dropped the
+    // `0 triples ` prefix (the badge already renders the count;
+    // the tooltip needs only the disclosure).
+    expect(triplesStat?.getAttribute('title')).toBe('Some layers unavailable; count may be incomplete.');
   });
 
   it('Named card bucket applies canonical residue filter per scope (GH #819 round 4 — Codex sweep 2 🔴 #5)', async () => {
@@ -1645,7 +1648,10 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
     expect(stats).toContain('0 triples');
     expect(stats).not.toContain('…');
     const triplesStat = cardStats?.querySelectorAll('.v10-sgov-card-stat')[1];
-    expect(triplesStat?.getAttribute('title')).toBe('0 triples (some layers unavailable; count may be incomplete).');
+    // GH #890 round 2 — zero-bucket failure wording dropped the
+    // `0 triples ` prefix (the badge already renders the count;
+    // the tooltip needs only the disclosure).
+    expect(triplesStat?.getAttribute('title')).toBe('Some layers unavailable; count may be incomplete.');
   });
 
   it('Named card badge surfaces honest 0 with failure tooltip on memory.partial (GH #819 round 7 — Codex sweep 5 🔴 #14)', async () => {
@@ -1680,7 +1686,10 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
     expect(stats).toContain('0 triples');
     expect(stats).not.toContain('…');
     const triplesStat = cardStats?.querySelectorAll('.v10-sgov-card-stat')[1];
-    expect(triplesStat?.getAttribute('title')).toBe('0 triples (some layers unavailable; count may be incomplete).');
+    // GH #890 round 2 — zero-bucket failure wording dropped the
+    // `0 triples ` prefix (the badge already renders the count;
+    // the tooltip needs only the disclosure).
+    expect(triplesStat?.getAttribute('title')).toBe('Some layers unavailable; count may be incomplete.');
   });
 
   it('Named card badge surfaces failure tooltip on non-zero bucket too (GH #819 round 10 — Codex sweep 8 🟡 #18)', async () => {
@@ -1775,6 +1784,52 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
     // buckets too, with the count value prefixed.
     const triplesStat = cardStats?.querySelectorAll('.v10-sgov-card-stat')[1];
     expect(triplesStat?.getAttribute('title')).toBe('2 triples (still loading; count may grow).');
+  });
+
+  it('Named card mixed loading+error state on non-zero bucket — failure tooltip wins over hydrating (GH #890 round 2 — Codex sweep 1 🟡 A)', async () => {
+    // PR #890 round 1 made `isHydrating` short-circuit the entire
+    // precedence chain. Mixed state (some layers loading, others
+    // errored) on a non-zero bucket then masked the known-
+    // incomplete failure behind the optimistic "still loading"
+    // tooltip. Round 2 splits precedence so failure wins for
+    // every non-zero case; hydrating only wins on bucket = 0
+    // (anti-flash affordance from round 6 #11).
+    fetchSubGraphsMock.mockResolvedValueOnce({
+      subGraphs: [{ name: 'alpha', entityCount: 1, tripleCount: 0, description: '' }],
+    });
+    const entityList = [
+      { uri: 'urn:e:alpha', label: 'a', types: [], trustLevel: 'working', layers: new Set(['working']), subGraphs: new Set(['alpha']), properties: new Map(), connections: [] },
+    ];
+    const triples = [
+      { subject: 'urn:e:alpha', predicate: 'http://schema.org/name', object: '"alpha-1"', subGraph: 'alpha', layer: 'working' },
+      { subject: 'urn:e:alpha', predicate: 'http://schema.org/name', object: '"alpha-2"', subGraph: 'alpha', layer: 'working' },
+    ];
+    await renderWith({
+      ...memory,
+      entities: new Map(entityList.map(e => [e.uri, e])),
+      entityList,
+      allTriples: triples,
+      counts: { wm: 2, swm: 0, vm: 0, total: 1 },
+      loading: false,
+      partial: true,
+      // Mixed: VM still loading, SWM errored. Both `isHydrating`
+      // and `isFailedOrPartial` are true.
+      layerStatus: { wm: 'ok', swm: 'error', vm: 'loading' },
+    });
+    await flush();
+
+    const cards = container.querySelectorAll('.v10-sgov-card');
+    const alphaCardEl = cards[0];
+    const cardStats = alphaCardEl.querySelector('.v10-sgov-card-stats');
+    const triplesStat = cardStats?.querySelectorAll('.v10-sgov-card-stat')[1];
+    const title = triplesStat?.getAttribute('title') ?? '';
+    // Round 2 precedence: failure wins on non-zero buckets. The
+    // count is already known-incomplete because SWM errored —
+    // hiding that behind "still loading" would mask a real
+    // failure during a refresh.
+    expect(title).toBe('2 triples (some layers unavailable; count may be incomplete).');
+    expect(title).not.toContain('still loading');
+    expect(title).not.toContain('count may grow');
   });
 
   it('Named card failure tooltip wins over stat-vs-rendered tooltip when both apply (GH #819 round 10 — precedence)', async () => {
