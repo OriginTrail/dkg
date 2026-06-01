@@ -1348,20 +1348,22 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
     expect(betaStats).toContain('1 triples');
   });
 
-  it('Named card tripleCount falls back to sg.tripleCount when canonical universe is incomplete (GH #819 round 3 — Codex sweep 1 🔴 #3)', async () => {
-    // PR #847 round 3 (Codex sweep 1 🔴 #3) — round 2 gated the
-    // `sg.tripleCount` fallback on `memory.loading` alone, missing
-    // the hydrated-after-layer-failure case (loading flips false
-    // but `canonicalTriples` is still incomplete because a layer
-    // query errored). The fixture below holds `memory.loading`
-    // false but reports a layer status of 'error' AND a partial
-    // result — canonical universe is missing rows from that
-    // layer. Pre-fix the fallback didn't fire (loading was
-    // false), card rendered `0 triples` instead of the daemon
-    // lower-bound. Post-fix the widened gate
-    // (`canonicalIncomplete`) kicks in.
+  it('Named card tripleCount ignores daemon sg.tripleCount under hydrated-after-layer-failure (GH #819 round 5 — Codex sweep 3 🔴 #8 inversion)', async () => {
+    // PR #847 round 5 (🔴 #8) — round 3 was written to lock in a
+    // `?? sg.tripleCount` "lower-bound fallback" when canonical
+    // universe was incomplete. Codex sweep 3 invalidated that
+    // contract: the daemon route builds `sg.tripleCount` via raw
+    // `COUNT(*)` SPARQL grouped by named graph, then sums per
+    // first-path-segment — NO SPO-dedup, NO residue filter. So
+    // `sg.tripleCount` is INFLATED (upper-bound), not a lower
+    // bound. Round-5 drops the daemon read entirely.
+    //
+    // Same fixture as the original round-3 lock, opposite
+    // assertion: card NEVER reads daemon `sg.tripleCount`, even
+    // when canonical universe is incomplete. Honest zero shows
+    // through when the bucket is empty.
     fetchSubGraphsMock.mockResolvedValueOnce({
-      // Daemon-reported lower-bound count (the fallback target).
+      // Daemon-reported (inflated, raw COUNT(*)) count.
       subGraphs: [{ name: 'alpha', entityCount: 1, tripleCount: 42, description: '' }],
     });
     const entityList = [
@@ -1383,10 +1385,12 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
     const cards = container.querySelectorAll('.v10-sgov-card');
     const alphaCardEl = cards[0];
     const stats = alphaCardEl.querySelector('.v10-sgov-card-stats')?.textContent ?? '';
-    // Fallback fires — card shows the daemon-reported lower-bound
-    // (42) rather than the empty canonical universe (0).
-    expect(stats).toContain('42 triples');
-    expect(stats).not.toContain('0 triples');
+    // Round-5 contract: card never reads daemon `sg.tripleCount`.
+    // Empty client-canonical bucket renders `0 triples` honestly,
+    // even when canonical universe is incomplete; daemon's
+    // potentially-inflated 42 is ignored.
+    expect(stats).toContain('0 triples');
+    expect(stats).not.toContain('42 triples');
   });
 
   it('Named card bucket applies canonical residue filter per scope (GH #819 round 4 — Codex sweep 2 🔴 #5)', async () => {
@@ -1434,28 +1438,33 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
     expect(stats).not.toContain('2 triples');
   });
 
-  it('Named card tripleCount Math.max-clamps daemon lower-bound vs partial-hydrated bucket (GH #819 round 4 — Codex sweep 2 🔴 #6)', async () => {
-    // PR #847 round 4 (🔴 #6) — round 3 used `??` precedence:
-    // `tripleCountBySubGraph.get(sg) ?? sg.tripleCount` only fell
-    // through when the bucket was undefined. A partial-hydrated
-    // bucket (e.g. 3 rows of an expected 10) had a defined value
-    // and won — card stat undercounted to 3 instead of the
-    // daemon's 10.
+  it('Named card tripleCount never reads daemon sg.tripleCount, even on partial-hydrated bucket (GH #819 round 5 — Codex sweep 3 🔴 #8)', async () => {
+    // PR #847 round 5 (🔴 #8) — earlier rounds tried to fall
+    // back to the daemon-reported `sg.tripleCount` when the
+    // canonical universe was incomplete. Codex sweep 3 flagged
+    // that the daemon route (`/api/sub-graph/list` in
+    // `packages/cli/src/daemon/routes/context-graph.ts:769-794`)
+    // builds that field via raw `COUNT(*)` grouped by named
+    // graph then summed per first-path-segment — NO SPO-dedup,
+    // NO residue filter. So `sg.tripleCount` is INFLATED by the
+    // same dupes + residue this PR removes. Round 3's `?? sg.tripleCount`
+    // and round 4's `Math.max(...)` both clamped UPWARD to an
+    // inflated value, not a lower-bound.
     //
-    // Round-4 fix: `Math.max(sg.tripleCount, bucket ?? 0)` in the
-    // `canonicalIncomplete` branch — clamps to the larger of the
-    // two when the canonical universe can't be trusted, surfacing
-    // the truer lower-bound either way (defends against daemon
-    // undershoot too).
+    // Round-5 fix: drop the daemon read entirely. Card stat
+    // is always `tripleCountBySubGraph.get(sg.name) ?? 0` —
+    // honest client-canonical count, even when partial.
     fetchSubGraphsMock.mockResolvedValueOnce({
-      // Daemon reports the higher count (10).
+      // Daemon reports an INFLATED count (10) — raw COUNT(*) over
+      // alpha's named graphs picks up cross-graph dupes / residue.
       subGraphs: [{ name: 'alpha', entityCount: 1, tripleCount: 10, description: '' }],
     });
     const entityList = [
       { uri: 'urn:e:alpha', label: 'a', types: [], trustLevel: 'working', layers: new Set(['working']), subGraphs: new Set(['alpha']), properties: new Map(), connections: [] },
     ];
-    // 3 partially-hydrated rows in alpha's bucket — incomplete
-    // canonical universe (one layer errored, so only WM made it).
+    // 3 partially-hydrated rows in alpha's bucket — canonical
+    // universe is partial (SWM errored), so the bucket only
+    // sees the 3 WM rows that admitted.
     const triples = [
       { subject: 'urn:e:alpha', predicate: 'http://schema.org/name', object: '"a-name-1"', subGraph: 'alpha', layer: 'working' },
       { subject: 'urn:e:alpha', predicate: 'http://schema.org/name', object: '"a-name-2"', subGraph: 'alpha', layer: 'working' },
@@ -1469,8 +1478,9 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
       counts: { wm: 1, swm: 0, vm: 0, total: 1 },
       loading: false,
       partial: true,
-      // SWM errored — canonical universe is missing rows from
-      // there. Daemon still reports 10 as the true total.
+      // SWM errored — canonical universe is incomplete. Round-4
+      // would have Math.max-clamped to the daemon's 10; round-5
+      // renders the honest client-canonical 3.
       layerStatus: { wm: 'ok', swm: 'error', vm: 'ok' },
     });
     await flush();
@@ -1478,10 +1488,11 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
     const cards = container.querySelectorAll('.v10-sgov-card');
     const alphaCardEl = cards[0];
     const stats = alphaCardEl.querySelector('.v10-sgov-card-stats')?.textContent ?? '';
-    // Pre-round-4 the bucket value (3) won via `??`. Post-fix
-    // `Math.max(10, 3) === 10` — the daemon lower-bound surfaces.
-    expect(stats).toContain('10 triples');
-    expect(stats).not.toContain('3 triples');
+    // Round-5 contract: card never reads daemon `sg.tripleCount`.
+    // Partial canonical bucket of 3 surfaces honestly; daemon's
+    // inflated 10 is ignored.
+    expect(stats).toContain('3 triples');
+    expect(stats).not.toContain('10 triples');
   });
 
   it('Root card keeps its scoped copy when same SPO also appears under a named subgraph (GH #819 round 4 — Codex sweep 2 🔴 #7)', async () => {

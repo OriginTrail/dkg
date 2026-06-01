@@ -3962,25 +3962,6 @@ export function SubGraphOverviewGrid({
   // those mixed-layer edges as facts.
   const { total: subtitleTripleCount } = useCanonicalTriples(memory);
 
-  // GH #819 round 3 (Codex sweep 1 🔴 #3) — discriminator for the
-  // named-card `tripleCount` fallback below. The canonical universe
-  // is INCOMPLETE when any of these is true:
-  //   • `memory.loading` — initial hydration in flight
-  //   • `memory.error`   — hard error (e.g. /api/query unreachable)
-  //   • `memory.partial` — some-but-not-all layer queries failed
-  //   • any layer status pending or errored — narrowest signal
-  // Round 2 gated on `memory.loading` alone, which missed the
-  // hydrated-after-layer-failure case (loading flips false but
-  // canonical is still incomplete). The widened gate keeps the
-  // daemon-reported `sg.tripleCount` lower-bound active for every
-  // state where the canonical universe can't be trusted as the
-  // ground truth.
-  const canonicalIncomplete =
-    memory.loading
-    || memory.error !== null
-    || memory.partial
-    || Object.values(memory.layerStatus ?? {}).some(s => s !== 'ok');
-
   // Bucket every triple by its origin sub-graph so each mini-graph
   // renders just its slice. Cap per-bucket via the shared
   // `applyHeaviestSubjectsCap` helper at module scope (see its doc
@@ -4164,27 +4145,28 @@ export function SubGraphOverviewGrid({
           // case (`loading` flips false but the canonical universe
           // is still incomplete because a layer query failed).
           //
-          // GH #819 round 4 (Codex sweep 2 🔴 #6) — precedence fix.
-          // Round 3's `?? sg.tripleCount` only fell through when
-          // the bucket was undefined, but a partial-hydrated bucket
-          // (e.g. 3 of an expected 10) had a value and won the
-          // discriminator — the badge undercounted to 3 instead of
-          // the daemon's 10. `Math.max(...)` clamps to the LARGER
-          // of the partial-hydrated bucket and the daemon count
-          // when canonical is incomplete: surfaces the truer
-          // lower-bound either way (defends against the daemon
-          // undershooting too). Hydrated-fully state still reads
-          // the canonical bucket honestly (zero shows through).
-          tripleCount: canonicalIncomplete
-            ? Math.max(sg.tripleCount, tripleCountBySubGraph.get(sg.name) ?? 0)
-            : (tripleCountBySubGraph.get(sg.name) ?? 0),
+          // GH #819 round 5 (Codex sweep 3 🔴 #8) — never read the
+          // daemon-reported `sg.tripleCount`. The daemon route
+          // (`packages/cli/src/daemon/routes/context-graph.ts:769`)
+          // builds it via raw `COUNT(*)` SPARQL grouped by named
+          // graph and sums per first-path-segment — NO SPO-dedup,
+          // NO residue filter. So `sg.tripleCount` is structurally
+          // inflated by the same cross-graph dupes + WM residue
+          // this PR is removing. Earlier rounds tried to use it as
+          // a lower-bound fallback when canonical was incomplete;
+          // that was wrong — it's an UPPER bound (inflated), not a
+          // lower one. Render the client-canonical bucket honestly,
+          // even when a layer query errored mid-hydration: missing
+          // bucket → 0 (genuine empty), partial-hydrated → the
+          // count of what we could honestly admit. No upward clamp.
+          tripleCount: tripleCountBySubGraph.get(sg.name) ?? 0,
           triples: filterTriplesToEntities(rawTriples, cardEntityUris),
           layerCounts: layerCountsBySubGraph.get(sg.name) ?? { wm: 0, swm: 0, vm: 0 },
           entityTrustByUri: cardEntityTrust,
         };
       })
       .sort((a, b) => a.rank - b.rank);
-  }, [subGraphs, profile, triplesBySubGraph, tripleCountBySubGraph, layerCountsBySubGraph, entityUrisBySubGraph, entityTrustByUriBySubGraph, canonicalIncomplete]);
+  }, [subGraphs, profile, triplesBySubGraph, tripleCountBySubGraph, layerCountsBySubGraph, entityUrisBySubGraph, entityTrustByUriBySubGraph]);
 
   // GH #813 — Root mini-card. Synthesizes a card for the
   // "entities not in any named sub-graph" bucket so the grid
