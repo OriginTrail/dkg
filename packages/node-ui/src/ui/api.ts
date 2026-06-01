@@ -75,14 +75,10 @@ async function del<T>(path: string): Promise<T> {
 export const fetchStatus = () => get<any>('/api/status');
 
 // --- LLM Settings ---
-export interface LlmSettingsResponse {
-  configured: boolean;
-  model?: string;
-  baseURL?: string;
-}
-export const fetchLlmSettings = () => get<LlmSettingsResponse>('/api/settings/llm');
-export const updateLlmSettings = (data: { apiKey?: string; model?: string; baseURL?: string; clear?: boolean }) =>
-  put<LlmSettingsResponse & { ok: boolean }>('/api/settings/llm', data);
+// NOTE: the LLM settings CLIENT exports (fetchLlmSettings/updateLlmSettings)
+// were removed with the Settings LLM section (Settings cleanup). The daemon
+// route /api/settings/llm + llmSettings plumbing STAY — they gate import/
+// entity-extraction (routes/memory.ts, routes/epcis.ts). UI-only removal.
 export const fetchRetentionSettings = () => get<{ retentionDays: number }>('/api/settings/retention');
 export const updateRetentionSettings = (retentionDays: number) =>
   put<{ ok: boolean; retentionDays: number }>('/api/settings/retention', { retentionDays });
@@ -332,67 +328,6 @@ export const approveJoinRequest = (contextGraphId: string, agentAddress: string)
 
 export const rejectJoinRequest = (contextGraphId: string, agentAddress: string) =>
   post<{ ok: boolean; status: string; agentAddress: string }>(`/api/context-graph/${encodeURIComponent(contextGraphId)}/reject-join`, { agentAddress });
-
-// --- Catch-up sync jobs ---
-export interface CatchupStatusResponse {
-  jobId: string;
-  contextGraphId: string;
-  includeSharedMemory: boolean;
-  /**
-   * `unreachable` is the V10 terminal status emitted when the daemon
-   * subscribed and ran the catchup, but no peer could deliver the CG
-   * content (curator offline, no node holds the CG, or transport
-   * failures across the whole peer set). Distinct from `denied`
-   * (responder explicitly refused) so the UI can render targeted
-   * copy + a "send signed join request" CTA.
-   */
-  status: 'queued' | 'running' | 'done' | 'denied' | 'failed' | 'unreachable';
-  queuedAt: number;
-  startedAt?: number;
-  finishedAt?: number;
-  result?: {
-    connectedPeers: number;
-    syncCapablePeers: number;
-    peersTried: number;
-    /** See `unreachable` above; subset of `peersTried` that responded without failure or denial. */
-    peersSucceeded: number;
-    dataSynced: number;
-    sharedMemorySynced: number;
-    denied: boolean;
-    deniedPeers: number;
-    diagnostics?: {
-      noProtocolPeers: number;
-      durable: {
-        fetchedMetaTriples: number;
-        fetchedDataTriples: number;
-        insertedMetaTriples: number;
-        insertedDataTriples: number;
-        bytesReceived: number;
-        resumedPhases: number;
-        emptyResponses: number;
-        metaOnlyResponses: number;
-        dataRejectedMissingMeta: number;
-        rejectedKcs: number;
-        failedPeers: number;
-      };
-      sharedMemory: {
-        fetchedMetaTriples: number;
-        fetchedDataTriples: number;
-        insertedMetaTriples: number;
-        insertedDataTriples: number;
-        bytesReceived: number;
-        resumedPhases: number;
-        emptyResponses: number;
-        droppedDataTriples: number;
-        failedPeers: number;
-      };
-    };
-  };
-  error?: string;
-}
-
-export const fetchCatchupStatus = (contextGraphId: string) =>
-  get<CatchupStatusResponse>(`/api/sync/catchup-status?contextGraphId=${encodeURIComponent(contextGraphId)}`);
 
 // --- File import to Working Memory ---
 export interface ImportFileResult {

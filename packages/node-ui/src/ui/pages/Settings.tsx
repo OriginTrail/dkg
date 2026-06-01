@@ -1,10 +1,7 @@
 import React, { useState, useCallback, useEffect } from 'react';
-import { useSearchParams } from 'react-router-dom';
 import { useFetch, formatBytes } from '../hooks.js';
 import {
   fetchStatus,
-  fetchLlmSettings,
-  updateLlmSettings,
   fetchWalletsBalances,
   shutdownNode,
   fetchMetrics,
@@ -12,11 +9,7 @@ import {
   updateRetentionSettings,
   fetchTelemetrySettings,
   updateTelemetrySettings,
-  fetchContextGraphs,
-  fetchCatchupStatus,
-  type CatchupStatusResponse,
 } from '../api.js';
-import { ObservabilitySection } from './Operations.js';
 import { formatEth, formatEthTooltip } from '../lib/formatEth.js';
 import { formatTracSymbol } from '../lib/formatTrac.js';
 import { redactRpcUrl } from '../lib/redactRpcUrl.js';
@@ -24,64 +17,8 @@ import { redactRpcUrl } from '../lib/redactRpcUrl.js';
 function Field({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
   return (
     <div style={{ marginBottom: 14 }}>
-      <div className="prov-field-label">{label}</div>
-      <div className={`prov-field-value${mono ? ' mono' : ''}`}>{value}</div>
-    </div>
-  );
-}
-
-function Toggle({ label, desc, on, disabled, disabledReason }: { label: string; desc: string; on: boolean; disabled?: boolean; disabledReason?: string }) {
-  const [active, setActive] = useState(on);
-  useEffect(() => { setActive(on); }, [on]);
-  // Visual contrast fix (BUG-010): disabled toggles previously rendered
-  // at opacity 0.5 with the green "on" track. At a glance that looks
-  // identical to a real enabled control, especially the white knob
-  // which still pops against the green pill. Push opacity lower, swap
-  // the track to a neutral colour even when `on=true`, and grey out the
-  // knob so the user sees "this is read-only".
-  const visuallyDisabled = !!disabled;
-  const trackBg = visuallyDisabled
-    ? 'var(--border)'
-    : (active ? 'var(--green)' : 'var(--border)');
-  const knobBg = visuallyDisabled ? 'var(--text-dim)' : '#fff';
-  return (
-    <div
-      style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', padding: '10px 0', borderBottom: '1px solid var(--border)', opacity: visuallyDisabled ? 0.45 : 1 }}
-      title={visuallyDisabled ? (disabledReason ?? 'Read-only — managed via configuration file') : undefined}
-    >
-      <div>
-        <div style={{ fontSize: 12, fontWeight: 600 }}>
-          {label}
-          {visuallyDisabled && (
-            <span
-              style={{ marginLeft: 8, padding: '1px 6px', borderRadius: 4, fontSize: 10, fontWeight: 600, color: 'var(--text-dim)', background: 'var(--border)', textTransform: 'uppercase', letterSpacing: '.04em' }}
-              aria-label="Read-only"
-            >
-              read-only
-            </span>
-          )}
-        </div>
-        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2, lineHeight: 1.5 }}>{desc}</div>
-      </div>
-      <button
-        type="button"
-        onClick={() => !visuallyDisabled && setActive(a => !a)}
-        disabled={visuallyDisabled}
-        aria-disabled={visuallyDisabled}
-        aria-label={`${label} (read-only, currently ${on ? 'enabled' : 'disabled'})`}
-        style={{
-          width: 38, height: 22, borderRadius: 11, border: 'none', flexShrink: 0,
-          background: trackBg,
-          transition: 'background .2s', position: 'relative', marginLeft: 16,
-          cursor: visuallyDisabled ? 'not-allowed' : 'pointer',
-        }}
-      >
-        <span style={{
-          position: 'absolute', top: 3, left: active ? 19 : 3,
-          width: 16, height: 16, borderRadius: '50%', background: knobBg,
-          transition: 'left .2s', display: 'block',
-        }} />
-      </button>
+      <div className="settings-field-label">{label}</div>
+      <div className={`settings-field-value${mono ? ' mono' : ''}`}>{value}</div>
     </div>
   );
 }
@@ -95,7 +32,7 @@ function RpcUrlField({ rpcUrl }: { rpcUrl: string }) {
   const display = reveal ? rpcUrl : redactRpcUrl(rpcUrl);
   return (
     <div style={{ marginBottom: 14 }}>
-      <div className="prov-field-label" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+      <div className="settings-field-label" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         <span>RPC</span>
         <button
           type="button"
@@ -107,259 +44,33 @@ function RpcUrlField({ rpcUrl }: { rpcUrl: string }) {
           {reveal ? 'Redact' : 'Reveal'}
         </button>
       </div>
-      <div className="prov-field-value mono" style={{ wordBreak: 'break-all' }}>{display}</div>
+      <div className="settings-field-value mono" style={{ wordBreak: 'break-all' }}>{display}</div>
     </div>
   );
 }
 
-function LlmSection() {
-  const { data: llm, refresh } = useFetch(fetchLlmSettings, []);
-  const [apiKey, setApiKey] = useState('');
-  const [model, setModel] = useState('');
-  const [baseURL, setBaseURL] = useState('');
-  const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
-  const [showKey, setShowKey] = useState(false);
-
-  useEffect(() => {
-    if (llm) {
-      setModel(llm.model ?? '');
-      setBaseURL(llm.baseURL ?? '');
-    }
-  }, [llm]);
-
-  const save = useCallback(async () => {
-    setSaving(true);
-    setMessage(null);
-    try {
-      const payload: { apiKey?: string; model: string; baseURL: string } = {
-        model,
-        baseURL,
-      };
-      if (apiKey.trim()) payload.apiKey = apiKey.trim();
-      const res = await updateLlmSettings(payload);
-      if (res.ok) {
-        setMessage({
-          type: 'ok',
-          text: apiKey.trim()
-            ? 'LLM configuration saved. Memory extraction now uses your API key.'
-            : 'LLM settings updated.',
-        });
-        setApiKey('');
-        refresh();
-      } else {
-        setMessage({ type: 'err', text: 'Failed to save' });
-      }
-    } catch (err: any) {
-      setMessage({ type: 'err', text: err.message ?? 'Failed to save' });
-    } finally {
-      setSaving(false);
-    }
-  }, [apiKey, model, baseURL, refresh]);
-
-  const inputStyle: React.CSSProperties = {
-    width: '100%',
-    padding: '8px 12px',
-    borderRadius: 8,
-    border: '1px solid var(--border)',
-    background: 'var(--bg)',
-    color: 'var(--text)',
-    fontSize: 12,
-    fontFamily: 'JetBrains Mono, monospace',
-    outline: 'none',
-    boxSizing: 'border-box',
-  };
-
-  return (
-    <div className="settings-card">
-      <div className="settings-title">LLM Configuration</div>
-      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 16, lineHeight: 1.6 }}>
-        Configure an OpenAI-compatible LLM to support knowledge extraction from imported memories and other node-owned memory enrichment flows. Without an API key, entity extraction is disabled and advanced import capabilities are limited.
-      </div>
-
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14, padding: '8px 12px', borderRadius: 8, background: llm?.configured ? 'var(--green-dim)' : 'rgba(255,255,255,.03)', border: `1px solid ${llm?.configured ? 'rgba(74,222,128,.2)' : 'var(--border)'}` }}>
-        <span style={{ width: 8, height: 8, borderRadius: '50%', background: llm?.configured ? 'var(--green)' : 'var(--text-dim)', display: 'inline-block' }} />
-        <span style={{ fontSize: 11, fontWeight: 600, color: llm?.configured ? 'var(--green)' : 'var(--text-muted)' }}>
-          {llm?.configured ? 'LLM Connected' : 'Not Configured'}
-        </span>
-        {llm?.configured && llm.model && (
-          <span className="mono" style={{ fontSize: 10, color: 'var(--text-dim)', marginLeft: 'auto' }}>{llm.model}</span>
-        )}
-      </div>
-
-      <div style={{ marginBottom: 12 }}>
-        <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', display: 'block', marginBottom: 5 }}>API Key</label>
-        <div style={{ position: 'relative' }}>
-          <input
-            id="dkg-llm-api-key"
-            name="dkg-llm-api-key"
-            type={showKey ? 'text' : 'password'}
-            value={apiKey}
-            onChange={e => setApiKey(e.target.value)}
-            placeholder={llm?.configured ? '••••••••  (key saved — paste new to replace)' : 'sk-...'}
-            style={inputStyle}
-            aria-label="LLM API key"
-            autoComplete="off"
-            spellCheck={false}
-          />
-          {/* Show/Hide toggles `type=password` ↔ `type=text` for the
-              currently typed value. The saved key never leaves the
-              daemon (placeholder is just a hint), so revealing an empty
-              input is a no-op visual lie — hide the button when the
-              field is empty (BUG-015). */}
-          {apiKey.length > 0 && (
-            <button
-              type="button"
-              onClick={() => setShowKey(v => !v)}
-              style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', color: 'var(--text-dim)', cursor: 'pointer', fontSize: 10, fontWeight: 600 }}
-              aria-label={showKey ? 'Hide API key' : 'Show API key'}
-            >
-              {showKey ? 'Hide' : 'Show'}
-            </button>
-          )}
-        </div>
-      </div>
-
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
-        <div>
-          <label htmlFor="dkg-llm-model" style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', display: 'block', marginBottom: 5 }}>Model</label>
-          <input
-            id="dkg-llm-model"
-            name="dkg-llm-model"
-            value={model}
-            onChange={e => setModel(e.target.value)}
-            placeholder="gpt-4o-mini"
-            style={inputStyle}
-            aria-label="LLM model"
-          />
-        </div>
-        <div>
-          <label htmlFor="dkg-llm-base-url" style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', display: 'block', marginBottom: 5 }}>Base URL</label>
-          <input
-            id="dkg-llm-base-url"
-            name="dkg-llm-base-url"
-            value={baseURL}
-            onChange={e => setBaseURL(e.target.value)}
-            placeholder="https://api.openai.com/v1"
-            style={inputStyle}
-            aria-label="LLM base URL"
-          />
-        </div>
-      </div>
-
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-        <button
-          onClick={save}
-          disabled={saving}
-          style={{
-            padding: '8px 20px',
-            borderRadius: 8,
-            border: '1px solid rgba(74,222,128,.3)',
-            background: 'var(--green-dim)',
-            color: 'var(--green)',
-            fontSize: 12,
-            fontWeight: 700,
-            cursor: saving ? 'not-allowed' : 'pointer',
-            opacity: saving ? 0.6 : 1,
-          }}
-        >
-          {saving ? 'Saving…' : 'Save'}
-        </button>
-        {llm?.configured && (
-          <button
-            onClick={async () => {
-              setSaving(true);
-              try {
-                await updateLlmSettings({ clear: true });
-                setApiKey('');
-                setModel('');
-                setBaseURL('');
-                setMessage({ type: 'ok', text: 'LLM configuration cleared.' });
-                refresh();
-              } catch (err: any) {
-                setMessage({ type: 'err', text: err.message });
-              } finally {
-                setSaving(false);
-              }
-            }}
-            disabled={saving}
-            style={{
-              padding: '8px 16px',
-              borderRadius: 8,
-              border: '1px solid rgba(248,113,113,.2)',
-              background: 'rgba(248,113,113,.05)',
-              color: 'var(--red)',
-              fontSize: 12,
-              fontWeight: 600,
-              cursor: saving ? 'not-allowed' : 'pointer',
-            }}
-          >
-            Disconnect
-          </button>
-        )}
-        {message && (
-          <span style={{ fontSize: 11, color: message.type === 'ok' ? 'var(--green)' : 'var(--red)', fontWeight: 600 }}>
-            {message.text}
-          </span>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function TelemetrySection() {
-  const { data: metrics } = useFetch(fetchMetrics, [], 30_000);
-  const { data: retentionData } = useFetch(fetchRetentionSettings, [], 60_000);
+function NetworkTelemetrySection() {
   const { data: telemetryData } = useFetch(fetchTelemetrySettings, [], 60_000);
 
-  const [retentionDays, setRetentionDays] = useState(90);
-  const [retentionSaved, setRetentionSaved] = useState(false);
-  const [pendingRetention, setPendingRetention] = useState<number | null>(null);
   const [telemetryEnabled, setTelemetryEnabled] = useState(false);
   const [telemetrySaving, setTelemetrySaving] = useState(false);
+  const [telemetryError, setTelemetryError] = useState<string | null>(null);
   const [showConsentModal, setShowConsentModal] = useState(false);
-
-  useEffect(() => {
-    if (retentionData?.retentionDays) setRetentionDays(retentionData.retentionDays);
-  }, [retentionData]);
+  const modalRef = React.useRef<HTMLDivElement>(null);
+  const toggleRef = React.useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     if (telemetryData != null) setTelemetryEnabled(telemetryData.enabled);
   }, [telemetryData]);
 
-  const confirmRetention = useCallback(async () => {
-    if (pendingRetention == null) return;
-    setRetentionDays(pendingRetention);
-    setRetentionSaved(false);
-    setPendingRetention(null);
-    try {
-      await updateRetentionSettings(pendingRetention);
-      setRetentionSaved(true);
-      setTimeout(() => setRetentionSaved(false), 2000);
-    } catch (err) { console.error('Failed to update retention:', err); }
-  }, [pendingRetention]);
-
-  const handleRetentionChange = useCallback((days: number) => {
-    if (days < retentionDays) {
-      setPendingRetention(days);
-    } else {
-      setRetentionDays(days);
-      setRetentionSaved(false);
-      setPendingRetention(null);
-      updateRetentionSettings(days).then(() => {
-        setRetentionSaved(true);
-        setTimeout(() => setRetentionSaved(false), 2000);
-      }).catch(err => console.error('Failed to update retention:', err));
-    }
-  }, [retentionDays]);
-
   const toggleTelemetry = useCallback(() => {
+    setTelemetryError(null);
     if (telemetryEnabled) {
-      // Turning OFF — no confirmation needed
+      // Turning OFF — no confirmation needed.
       setTelemetryEnabled(false);
       setTelemetrySaving(true);
       updateTelemetrySettings(false)
-        .catch(() => setTelemetryEnabled(true))
+        .catch(() => { setTelemetryEnabled(true); setTelemetryError('Couldn’t update telemetry — try again.'); })
         .finally(() => setTelemetrySaving(false));
     } else {
       setShowConsentModal(true);
@@ -368,116 +79,74 @@ function TelemetrySection() {
 
   const confirmTelemetry = useCallback(async () => {
     setShowConsentModal(false);
+    setTelemetryError(null);
     setTelemetryEnabled(true);
     setTelemetrySaving(true);
     try {
       await updateTelemetrySettings(true);
-    } catch (err) {
+    } catch {
       setTelemetryEnabled(false);
-      console.error('Failed to enable telemetry:', err);
+      setTelemetryError('Couldn’t update telemetry — try again.');
     } finally {
       setTelemetrySaving(false);
+      toggleRef.current?.focus();
     }
   }, []);
 
-  const storeBytes = (metrics as any)?.store_bytes ?? null;
+  // Consent modal a11y: focus first control on open, Escape cancels,
+  // restore focus to the toggle on close.
+  useEffect(() => {
+    if (!showConsentModal) return;
+    const first = modalRef.current?.querySelector<HTMLElement>('button');
+    first?.focus();
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { setShowConsentModal(false); toggleRef.current?.focus(); } };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [showConsentModal]);
 
   return (
-    <div className="settings-card">
-      <div className="settings-title">Telemetry & Observability</div>
-      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 16, lineHeight: 1.6 }}>
-        Local metrics are stored in SQLite and displayed in the Observability page.
-      </div>
-
-      {/* Share telemetry toggle */}
-      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', padding: '10px 0', borderBottom: '1px solid var(--border)', marginBottom: 14 }}>
-        <div>
-          <div style={{ fontSize: 12, fontWeight: 600 }}>Share telemetry with network</div>
-          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2, lineHeight: 1.5 }}>
-            When enabled, metrics and logs are streamed to the OriginTrail network dashboard for network-wide diagnostics.
-          </div>
+    <section className="card">
+      <div className="card-header"><h2 className="card-title">Network Telemetry</h2></div>
+      <div className="card-body">
+        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 16, lineHeight: 1.6 }}>
+          Local metrics are stored in SQLite and displayed in the Observability page.
         </div>
-        <button
-          onClick={toggleTelemetry}
-          disabled={telemetrySaving}
-          style={{
-            width: 38, height: 22, borderRadius: 11, border: 'none', flexShrink: 0,
-            background: telemetryEnabled ? 'var(--green)' : 'var(--border)',
-            transition: 'background .2s', position: 'relative', marginLeft: 16,
-            cursor: telemetrySaving ? 'wait' : 'pointer', opacity: telemetrySaving ? 0.6 : 1,
-          }}
-        >
-          <span style={{
-            position: 'absolute', top: 3, left: telemetryEnabled ? 19 : 3,
-            width: 16, height: 16, borderRadius: '50%', background: '#fff',
-            transition: 'left .2s', display: 'block',
-          }} />
-        </button>
-      </div>
 
-      {/* Data retention */}
-      <div style={{ marginBottom: 14 }}>
-        <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', display: 'block', marginBottom: 5 }}>Local Data Retention</label>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <select
-            className="input"
-            value={pendingRetention ?? retentionDays}
-            onChange={e => handleRetentionChange(Number(e.target.value))}
-            style={{ width: 160 }}
+        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', padding: '10px 0' }}>
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 600 }}>Share telemetry with the network</div>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2, lineHeight: 1.5 }}>
+              When enabled, metrics and logs are streamed to the OriginTrail network dashboard for network-wide diagnostics.
+            </div>
+          </div>
+          <button
+            ref={toggleRef}
+            type="button"
+            role="switch"
+            aria-checked={telemetryEnabled}
+            aria-busy={telemetrySaving}
+            aria-label="Share telemetry with the network"
+            onClick={toggleTelemetry}
+            disabled={telemetrySaving}
+            style={{
+              width: 38, height: 22, borderRadius: 11, border: 'none', flexShrink: 0,
+              background: telemetryEnabled ? 'var(--green)' : 'var(--border)',
+              transition: 'background .2s', position: 'relative', marginLeft: 16,
+              cursor: telemetrySaving ? 'wait' : 'pointer', opacity: telemetrySaving ? 0.6 : 1,
+            }}
           >
-            <option value={7}>7 days</option>
-            <option value={30}>30 days</option>
-            <option value={90}>90 days</option>
-            <option value={180}>180 days</option>
-            <option value={365}>365 days</option>
-          </select>
-          {retentionSaved && (
-            <span style={{ fontSize: 10, color: 'var(--green)', fontWeight: 600 }}>Saved</span>
-          )}
-          {storeBytes != null && (
-            <span className="mono" style={{ fontSize: 10, color: 'var(--text-dim)' }}>
-              Store: {formatBytes(storeBytes)}
-            </span>
+            <span style={{
+              position: 'absolute', top: 3, left: telemetryEnabled ? 19 : 3,
+              width: 16, height: 16, borderRadius: '50%', background: '#fff',
+              transition: 'left .2s', display: 'block',
+            }} />
+          </button>
+        </div>
+        <div aria-live="polite">
+          {telemetryError && (
+            <div style={{ fontSize: 11, color: 'var(--red)', marginTop: 4 }}>{telemetryError}</div>
           )}
         </div>
-        {pendingRetention != null && (
-          <div style={{
-            marginTop: 8, padding: '10px 14px', borderRadius: 8,
-            background: 'rgba(251,191,36,.06)', border: '1px solid rgba(251,191,36,.2)',
-          }}>
-            <div style={{ fontSize: 11, color: 'var(--amber)', fontWeight: 600, marginBottom: 4 }}>
-              Reduce retention to {pendingRetention} days?
-            </div>
-            <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.5, marginBottom: 8 }}>
-              All operations, logs, and metrics older than {pendingRetention} days will be permanently deleted.
-            </div>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <button
-                onClick={confirmRetention}
-                style={{
-                  padding: '5px 14px', borderRadius: 6, fontSize: 11, fontWeight: 700, cursor: 'pointer',
-                  border: '1px solid rgba(251,191,36,.4)', background: 'rgba(251,191,36,.1)', color: 'var(--amber)',
-                }}
-              >
-                Prune &amp; Save
-              </button>
-              <button
-                onClick={() => setPendingRetention(null)}
-                style={{
-                  padding: '5px 14px', borderRadius: 6, fontSize: 11, fontWeight: 600, cursor: 'pointer',
-                  border: '1px solid var(--border)', background: 'var(--surface)', color: 'var(--text-muted)',
-                }}
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        )}
-        {!pendingRetention && (
-          <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 4 }}>
-            Operations, logs, and metric snapshots older than this will be pruned automatically. Also applies to daemon.log rotation.
-          </div>
-        )}
       </div>
 
       {showConsentModal && (
@@ -486,11 +155,17 @@ function TelemetrySection() {
           background: 'rgba(0,0,0,.55)', display: 'flex',
           alignItems: 'center', justifyContent: 'center',
         }}>
-          <div style={{
-            background: 'var(--surface)', border: '1px solid var(--border)',
-            borderRadius: 12, padding: '24px 28px', maxWidth: 440, width: '90%',
-            boxShadow: '0 8px 32px rgba(0,0,0,.3)',
-          }}>
+          <div
+            ref={modalRef}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Enable Telemetry Streaming?"
+            style={{
+              background: 'var(--surface)', border: '1px solid var(--border)',
+              borderRadius: 12, padding: '24px 28px', maxWidth: 440, width: '90%',
+              boxShadow: '0 8px 32px rgba(0,0,0,.3)',
+            }}
+          >
             <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 16 }}>
               Enable Telemetry Streaming?
             </div>
@@ -516,7 +191,8 @@ function TelemetrySection() {
             </div>
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
               <button
-                onClick={() => setShowConsentModal(false)}
+                type="button"
+                onClick={() => { setShowConsentModal(false); toggleRef.current?.focus(); }}
                 style={{
                   padding: '7px 18px', borderRadius: 7, fontSize: 12, fontWeight: 600,
                   cursor: 'pointer', border: '1px solid var(--border)',
@@ -526,6 +202,7 @@ function TelemetrySection() {
                 Cancel
               </button>
               <button
+                type="button"
                 onClick={confirmTelemetry}
                 style={{
                   padding: '7px 18px', borderRadius: 7, fontSize: 12, fontWeight: 700,
@@ -539,7 +216,147 @@ function TelemetrySection() {
           </div>
         </div>
       )}
-    </div>
+    </section>
+  );
+}
+
+function LocalDataRetentionSection() {
+  const { data: metrics } = useFetch(fetchMetrics, [], 30_000);
+  const { data: retentionData } = useFetch(fetchRetentionSettings, [], 60_000);
+
+  const [retentionDays, setRetentionDays] = useState(90);
+  const [retentionSaved, setRetentionSaved] = useState(false);
+  const [retentionError, setRetentionError] = useState<string | null>(null);
+  const [pendingRetention, setPendingRetention] = useState<number | null>(null);
+  const confirmRef = React.useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (retentionData?.retentionDays) setRetentionDays(retentionData.retentionDays);
+  }, [retentionData]);
+
+  // Move focus to the destructive confirm action when the reduce-confirm
+  // panel appears (safe default + keyboard reachability).
+  useEffect(() => {
+    if (pendingRetention != null) confirmRef.current?.focus();
+  }, [pendingRetention]);
+
+  const confirmRetention = useCallback(async () => {
+    if (pendingRetention == null) return;
+    const days = pendingRetention;
+    setRetentionDays(days);
+    setRetentionSaved(false);
+    setRetentionError(null);
+    setPendingRetention(null);
+    try {
+      await updateRetentionSettings(days);
+      setRetentionSaved(true);
+      setTimeout(() => setRetentionSaved(false), 2000);
+    } catch {
+      setRetentionError('Couldn’t save retention — try again.');
+    }
+  }, [pendingRetention]);
+
+  const handleRetentionChange = useCallback((days: number) => {
+    setRetentionError(null);
+    if (days < retentionDays) {
+      setPendingRetention(days);
+    } else {
+      setRetentionDays(days);
+      setRetentionSaved(false);
+      setPendingRetention(null);
+      updateRetentionSettings(days).then(() => {
+        setRetentionSaved(true);
+        setTimeout(() => setRetentionSaved(false), 2000);
+      }).catch(() => setRetentionError('Couldn’t save retention — try again.'));
+    }
+  }, [retentionDays]);
+
+  const storeBytes = (metrics as any)?.store_bytes ?? null;
+
+  return (
+    <section className="card">
+      <div className="card-header"><h2 className="card-title">Local Data Retention</h2></div>
+      <div className="card-body">
+        <label htmlFor="retention-select" className="settings-field-label" style={{ display: 'block', marginBottom: 5 }}>
+          Keep local data for
+        </label>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <select
+            id="retention-select"
+            className="input"
+            value={pendingRetention ?? retentionDays}
+            onChange={e => handleRetentionChange(Number(e.target.value))}
+            style={{ width: 160 }}
+          >
+            <option value={7}>7 days</option>
+            <option value={30}>30 days</option>
+            <option value={90}>90 days</option>
+            <option value={180}>180 days</option>
+            <option value={365}>365 days</option>
+          </select>
+          <span aria-live="polite">
+            {retentionSaved && (
+              <span style={{ fontSize: 10, color: 'var(--green)', fontWeight: 600 }}>Saved</span>
+            )}
+          </span>
+          {storeBytes != null && (
+            <span className="mono" style={{ fontSize: 10, color: 'var(--text-dim)' }}>
+              Store: {formatBytes(storeBytes)}
+            </span>
+          )}
+        </div>
+        {pendingRetention != null && (
+          <div
+            role="group"
+            aria-label="Confirm retention reduction"
+            style={{
+              marginTop: 8, padding: '10px 14px', borderRadius: 8,
+              background: 'rgba(251,191,36,.06)', border: '1px solid rgba(251,191,36,.2)',
+            }}
+          >
+            <div style={{ fontSize: 11, color: 'var(--amber)', fontWeight: 600, marginBottom: 4 }}>
+              Reduce retention to {pendingRetention} days?
+            </div>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.5, marginBottom: 8 }}>
+              Operations, logs, and metrics older than {pendingRetention} days will be permanently deleted.
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button
+                ref={confirmRef}
+                type="button"
+                onClick={confirmRetention}
+                style={{
+                  padding: '5px 14px', borderRadius: 6, fontSize: 11, fontWeight: 700, cursor: 'pointer',
+                  border: '1px solid rgba(251,191,36,.4)', background: 'rgba(251,191,36,.1)', color: 'var(--amber)',
+                }}
+              >
+                Prune &amp; Save
+              </button>
+              <button
+                type="button"
+                onClick={() => setPendingRetention(null)}
+                style={{
+                  padding: '5px 14px', borderRadius: 6, fontSize: 11, fontWeight: 600, cursor: 'pointer',
+                  border: '1px solid var(--border)', background: 'var(--surface)', color: 'var(--text-muted)',
+                }}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+        {pendingRetention == null && (
+          <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 4 }}>
+            Operations, logs, and metric snapshots older than this are pruned automatically.
+          </div>
+        )}
+        <div aria-live="polite">
+          {retentionError && (
+            <div style={{ fontSize: 11, color: 'var(--red)', marginTop: 4 }}>{retentionError}</div>
+          )}
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -572,269 +389,7 @@ function chainLabel(chainId: string | null | undefined): string {
   }
 }
 
-// Re-export from shared module for backward compatibility
-export { isDevModeEnabled } from '../dev-mode.js';
-import { isDevModeEnabled, setDevModeEnabled } from '../dev-mode.js';
-
-function DevModeToggle() {
-  const [on, setOn] = useState(isDevModeEnabled);
-
-  const toggle = useCallback(() => {
-    const next = !on;
-    setOn(next);
-    setDevModeEnabled(next);
-  }, [on]);
-
-  return (
-    <div>
-      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', padding: '10px 0', borderBottom: '1px solid var(--border)' }}>
-        <div>
-          <div style={{ fontSize: 12, fontWeight: 600 }}>Developer Mode</div>
-          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2, lineHeight: 1.5 }}>
-            Reveal advanced developer affordances: the per-operation phase
-            timeline drill-down, raw structured-log viewer, and a verbose
-            daemon log surface inside Observability. The Observability
-            tab itself is now always visible — Developer Mode unlocks the
-            deep-dive views inside it.
-          </div>
-        </div>
-        <button
-          onClick={toggle}
-          style={{
-            width: 38, height: 22, borderRadius: 11, border: 'none', flexShrink: 0,
-            background: on ? 'var(--green)' : 'var(--border)',
-            transition: 'background .2s', position: 'relative', marginLeft: 16, cursor: 'pointer',
-          }}
-        >
-          <span style={{
-            position: 'absolute', top: 3, left: on ? 19 : 3,
-            width: 16, height: 16, borderRadius: '50%', background: '#fff',
-            transition: 'left .2s', display: 'block',
-          }} />
-        </button>
-      </div>
-      {on && (
-        <div style={{ padding: '10px 0 4px', fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.6 }}>
-          <div style={{ color: 'var(--green)', fontWeight: 600, marginBottom: 4 }}>Observability tab is now visible above.</div>
-          <div>You get access to:</div>
-          <ul style={{ margin: '4px 0 0 16px', padding: 0 }}>
-            <li>Operation tracking with phase-level timelines and durations</li>
-            <li>Per-operation structured logs correlated by operation ID</li>
-            <li>Success rates, avg durations, and gas costs broken down by operation type</li>
-            <li>System metrics — CPU, memory, disk, network, and RPC latency over time</li>
-            <li>Full daemon log viewer with search, filtering, and auto-refresh</li>
-          </ul>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function CatchupStatusSection() {
-  const { data: contextGraphData } = useFetch(fetchContextGraphs, [], 30_000);
-  const contextGraphs = ((contextGraphData as any)?.contextGraphs ?? []).filter((p: any) => p?.id);
-  const [selectedContextGraph, setSelectedContextGraph] = useState('');
-  // 200+ context-graph IDs in a `<select>` is an unusable wall of
-  // entries (BUG-014). We expose a `<datalist>` paired with an `<input
-  // type="search">` so the user can type any substring and pick from a
-  // filtered list — the browser handles the filtering, no extra
-  // JS-side state.
-  const [filterText, setFilterText] = useState('');
-  const [showOnlyMine, setShowOnlyMine] = useState(false);
-  const filteredContextGraphs = contextGraphs.filter((p: any) => {
-    if (showOnlyMine && p.isSystem) return false;
-    if (!filterText) return true;
-    const q = filterText.toLowerCase();
-    return String(p.id).toLowerCase().includes(q) || String(p.name ?? '').toLowerCase().includes(q);
-  });
-
-  useEffect(() => {
-    if (selectedContextGraph) return;
-    if (contextGraphs.length === 0) return;
-    const preferred = contextGraphs.find((p: any) => !p.isSystem) ?? contextGraphs[0];
-    setSelectedContextGraph(preferred.id);
-  }, [selectedContextGraph, contextGraphs]);
-
-  const {
-    data: catchup,
-    loading,
-    error,
-    refresh,
-  } = useFetch<CatchupStatusResponse | null>(
-    async () => {
-      if (!selectedContextGraph) return null;
-      try {
-        return await fetchCatchupStatus(selectedContextGraph);
-      } catch (err: any) {
-        const msg = String(err?.message ?? '');
-        if (msg.includes('No catch-up job found') || msg.includes('HTTP 404')) return null;
-        throw err;
-      }
-    },
-    [selectedContextGraph],
-    4000,
-  );
-
-  const statusBadgeClass =
-    catchup?.status === 'done'
-      ? 'badge-success'
-      : catchup?.status === 'failed'
-        ? 'badge-warning'
-        : catchup?.status === 'running'
-          ? 'badge-info'
-          : 'badge-info';
-
-  return (
-    <div className="settings-card">
-      <div className="settings-title">Background Sync Status</div>
-      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 12, lineHeight: 1.5 }}>
-        Shows the latest catch-up job for the selected context graph (triggered by subscribe).
-      </div>
-
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8, flexWrap: 'wrap' }}>
-        <input
-          id="dkg-bg-sync-filter"
-          name="dkg-bg-sync-filter"
-          type="search"
-          className="input"
-          style={{ flex: '2 1 200px' }}
-          placeholder={`Filter ${contextGraphs.length} context graph${contextGraphs.length === 1 ? '' : 's'}…`}
-          value={filterText}
-          onChange={(e) => setFilterText(e.target.value)}
-          aria-label="Filter context graphs"
-        />
-        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--text-muted)', cursor: 'pointer', whiteSpace: 'nowrap' }}>
-          <input
-            type="checkbox"
-            checked={showOnlyMine}
-            onChange={(e) => setShowOnlyMine(e.target.checked)}
-            aria-label="Hide system context graphs"
-          />
-          Hide system CGs
-        </label>
-      </div>
-      {/* If the user filters such that the previously-selected CG is
-          no longer in the visible list, the status panel below still
-          shows that CG's data — which is confusing. Surface a small
-          hint with a one-click "show full list" reset so the user
-          isn't left wondering why their search returned nothing. */}
-      {selectedContextGraph &&
-       filteredContextGraphs.length > 0 &&
-       !filteredContextGraphs.some((p: any) => p.id === selectedContextGraph) && (
-        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>
-          Selection hidden by current filter.{' '}
-          <button
-            type="button"
-            onClick={() => { setFilterText(''); setShowOnlyMine(false); }}
-            className="btn btn-ghost btn-xs"
-            style={{ padding: '0 6px' }}
-          >
-            Clear filter
-          </button>
-        </div>
-      )}
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 12 }}>
-        <select
-          id="dkg-bg-sync-graph"
-          name="dkg-bg-sync-graph"
-          className="input"
-          style={{ flex: 1, backgroundImage: 'none', paddingRight: 12 }}
-          value={selectedContextGraph}
-          onChange={(e) => setSelectedContextGraph(e.target.value)}
-          size={Math.min(8, Math.max(1, filteredContextGraphs.length))}
-          aria-label="Context graph"
-        >
-          {filteredContextGraphs.length === 0 && <option value="">{contextGraphs.length === 0 ? 'No context graphs available' : 'No matches'}</option>}
-          {filteredContextGraphs.map((p: any) => (
-            <option key={p.id} value={p.id}>{p.id}{p.isSystem ? ' (system)' : ''}</option>
-          ))}
-        </select>
-        <button
-          className="btn btn-ghost btn-sm"
-          onClick={() => refresh()}
-          disabled={!selectedContextGraph || loading}
-        >
-          {loading ? 'Refreshing...' : 'Refresh'}
-        </button>
-      </div>
-
-      {!selectedContextGraph ? (
-        <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Select a context graph to view sync status.</div>
-      ) : !catchup ? (
-        <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>No catch-up job recorded yet for this context graph.</div>
-      ) : (
-        <>
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
-            <span className={`badge ${statusBadgeClass}`}>status: {catchup.status}</span>
-            <span className="badge badge-info">shared memory: {catchup.includeSharedMemory ? 'on' : 'off'}</span>
-            <span className="badge badge-info">job: {catchup.jobId.slice(0, 10)}...</span>
-          </div>
-
-          {catchup.result && (
-            <div style={{ fontSize: 12, color: 'var(--text)', marginBottom: 8 }}>
-              <div>
-                peers {catchup.result.peersTried}/{catchup.result.syncCapablePeers} (connected {catchup.result.connectedPeers}),
-                data {catchup.result.dataSynced}, shared memory {catchup.result.sharedMemorySynced}
-              </div>
-              {catchup.result.diagnostics && (
-                <>
-                  <div style={{ marginTop: 4, color: 'var(--text-dim)' }}>
-                    no protocol {catchup.result.diagnostics.noProtocolPeers} · durable fetched meta/data {catchup.result.diagnostics.durable.fetchedMetaTriples}/{catchup.result.diagnostics.durable.fetchedDataTriples} · inserted meta/data {catchup.result.diagnostics.durable.insertedMetaTriples}/{catchup.result.diagnostics.durable.insertedDataTriples}
-                  </div>
-                  <div style={{ color: 'var(--text-dim)' }}>
-                    durable empty {catchup.result.diagnostics.durable.emptyResponses} · meta-only {catchup.result.diagnostics.durable.metaOnlyResponses} · no-meta rejects {catchup.result.diagnostics.durable.dataRejectedMissingMeta} · rejected KCs {catchup.result.diagnostics.durable.rejectedKcs}
-                  </div>
-                  <div style={{ color: 'var(--text-dim)' }}>
-                    swm fetched meta/data {catchup.result.diagnostics.sharedMemory.fetchedMetaTriples}/{catchup.result.diagnostics.sharedMemory.fetchedDataTriples} · inserted meta/data {catchup.result.diagnostics.sharedMemory.insertedMetaTriples}/{catchup.result.diagnostics.sharedMemory.insertedDataTriples} · empty {catchup.result.diagnostics.sharedMemory.emptyResponses} · dropped {catchup.result.diagnostics.sharedMemory.droppedDataTriples}
-                  </div>
-                </>
-              )}
-            </div>
-          )}
-
-          <div className="mono" style={{ fontSize: 10, color: 'var(--text-dim)' }}>
-            queued {new Date(catchup.queuedAt).toLocaleString()}
-            {catchup.startedAt ? ` · started ${new Date(catchup.startedAt).toLocaleString()}` : ''}
-            {catchup.finishedAt ? ` · finished ${new Date(catchup.finishedAt).toLocaleString()}` : ''}
-          </div>
-
-          {catchup.error && (
-            <div style={{ marginTop: 8, fontSize: 11, color: 'var(--red)' }}>
-              {catchup.error}
-            </div>
-          )}
-        </>
-      )}
-
-      {error && (
-        <div style={{ marginTop: 8, fontSize: 11, color: 'var(--amber)' }}>
-          {error}
-        </div>
-      )}
-    </div>
-  );
-}
-
 export function SettingsPage() {
-  const [searchParams] = useSearchParams();
-  const [devMode, setDevMode] = useState(isDevModeEnabled);
-
-  useEffect(() => {
-    const sync = () => setDevMode(isDevModeEnabled());
-    window.addEventListener('devmode-change', sync);
-    return () => window.removeEventListener('devmode-change', sync);
-  }, []);
-
-  const showObs = searchParams.get('tab') === 'observability' && devMode;
-
-  if (showObs) {
-    return (
-      <div className="page-section">
-        <ObservabilitySection />
-      </div>
-    );
-  }
-
   return (
     <div className="page-section">
       <div style={{ marginBottom: 20 }}>
@@ -874,132 +429,109 @@ function GeneralSettingsTab() {
   }, [shutdownConfirm]);
 
   return (
-    <div className="settings-grid">
-      {/* LLM Configuration */}
-      <LlmSection />
-
-      {/* Telemetry & Observability */}
-      <TelemetrySection />
-
+    <div className="settings-stack">
       {/* Node Identity */}
-      <div className="settings-card">
-        <div className="settings-title">Node Identity</div>
-        <Field label="Name" value={s?.name ?? '—'} />
-        <Field label="Peer ID" value={s?.peerId ?? '—'} mono />
-        <Field label="Role" value={s?.nodeRole ?? '—'} />
-        <Field label="Network" value={s?.networkName ?? (s?.networkId ? `Network ${s.networkId}` : '—')} />
-        <Field label="Store" value={s?.storeBackend ?? '—'} mono />
-        <div style={{ padding: '10px 14px', borderRadius: 8, background: isOnline ? 'var(--green-dim)' : 'rgba(248,113,113,.05)', border: `1px solid ${isOnline ? 'rgba(74,222,128,.2)' : 'rgba(248,113,113,.2)'}` }}>
-          <div className="mono" style={{ fontSize: 10, color: isOnline ? 'var(--green)' : 'var(--red)', fontWeight: 700 }}>
-            {isOnline ? '● ONLINE' : '● OFFLINE'}
-          </div>
-          <div
-            style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}
-            title="Peers = unique remote nodes. Direct + Relayed counts are libp2p connections — a single peer can hold both a direct and a relayed link, so they sum to ≥ Peers, not exactly equal to it."
-          >
-            {isOnline
-              ? `${peerCount} peer${peerCount !== 1 ? 's' : ''} · ${s?.connections?.direct ?? 0} direct, ${s?.connections?.relayed ?? 0} relayed link${(s?.connections?.relayed ?? 0) === 1 ? '' : 's'} · up ${formatUptime(s?.uptimeMs ?? 0)}`
-              : 'Node is not responding'}
-          </div>
-        </div>
-      </div>
-
-      {/* Blockchain */}
-      <div className="settings-card">
-        <div className="settings-title">Blockchain Config</div>
-        <Field label="Chain" value={chainLabel(w?.chainId)} />
-        {w?.balances?.length > 0 ? (
-          w.balances.map((b: any, i: number) => (
-            <div key={b.address} style={{ marginBottom: 10 }}>
-              <Field label={w.balances.length > 1 ? `Wallet ${i + 1}` : 'Operational Wallet'} value={b.address} mono />
-              <div style={{ display: 'flex', gap: 16, marginTop: -6 }}>
-                <span
-                  className="mono"
-                  style={{ fontSize: 11, color: 'var(--text-muted)' }}
-                  title={formatEthTooltip(b.eth)}
-                >
-                  {formatEth(b.eth)} ETH
-                </span>
-                <span className="mono" style={{ fontSize: 11, color: 'var(--text-muted)' }} title={`Exact: ${b.trac}`}>
-                  {parseFloat(b.trac).toFixed(2)} {formatTracSymbol(b.symbol, w?.chainId)}
-                </span>
-              </div>
+      <section className="card">
+        <div className="card-header"><h2 className="card-title">Node Identity</h2></div>
+        <div className="card-body">
+          <Field label="Name" value={s?.name ?? '—'} />
+          <Field label="Peer ID" value={s?.peerId ?? '—'} mono />
+          <Field label="Role" value={s?.nodeRole ?? '—'} />
+          <Field label="Network" value={s?.networkName ?? (s?.networkId ? `Network ${s.networkId}` : '—')} />
+          <Field label="Store" value={s?.storeBackend ?? '—'} mono />
+          <div style={{ padding: '10px 14px', borderRadius: 8, background: isOnline ? 'var(--green-dim)' : 'rgba(248,113,113,.05)', border: `1px solid ${isOnline ? 'rgba(74,222,128,.2)' : 'rgba(248,113,113,.2)'}` }}>
+            <div className="mono" style={{ fontSize: 10, color: isOnline ? 'var(--green)' : 'var(--red)', fontWeight: 700 }}>
+              {isOnline ? '● ONLINE' : '● OFFLINE'}
             </div>
-          ))
-        ) : (
-          <Field label="Operational Wallet" value={w?.wallets?.[0] ? truncateAddress(w.wallets[0]) : '—'} mono />
-        )}
-        {w?.rpcUrl && (
-          <RpcUrlField rpcUrl={w.rpcUrl} />
-        )}
-        {w?.error ? (
-          <div style={{ padding: '8px 12px', borderRadius: 8, background: 'rgba(248,113,113,.05)', border: '1px solid rgba(248,113,113,.2)' }}>
-            <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--red)', marginBottom: 2 }}>⚠ Error</div>
-            <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{w.error}</div>
+            <div
+              style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}
+              title="Peers = unique remote nodes. Direct + Relayed counts are libp2p connections — a single peer can hold both a direct and a relayed link, so they sum to ≥ Peers, not exactly equal to it."
+            >
+              {isOnline
+                ? `${peerCount} peer${peerCount !== 1 ? 's' : ''} · ${s?.connections?.direct ?? 0} direct, ${s?.connections?.relayed ?? 0} relayed link${(s?.connections?.relayed ?? 0) === 1 ? '' : 's'} · up ${formatUptime(s?.uptimeMs ?? 0)}`
+                : 'Node is not responding'}
+            </div>
           </div>
-        ) : w?.chainId?.includes('84532') || w?.chainId?.includes('31337') || w?.chainId?.includes('11155111') ? (
-          <div style={{ padding: '8px 12px', borderRadius: 8, background: 'var(--amber-dim)', border: '1px solid rgba(251,191,36,.2)' }}>
-            <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--amber)', marginBottom: 2 }}>⚠ Testnet Mode</div>
-            <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>No real TRAC is spent. Perfect for development.</div>
-          </div>
-        ) : null}
-      </div>
-
-      {/* Sync status */}
-      <CatchupStatusSection />
-
-      {/* Developer Mode */}
-      <div className="settings-card">
-        <div className="settings-title">Developer</div>
-        <DevModeToggle />
-      </div>
-
-      {/* Privacy & Memory */}
-      <div className="settings-card">
-        <div className="settings-title">Privacy & Memory</div>
-        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 12, lineHeight: 1.5 }}>
-          These settings are configured at startup. Edit <span className="mono" style={{ fontSize: 10 }}>~/.dkg/config.json</span> and restart the node to change them.
         </div>
-        <Toggle
-          label="Publish by Default"
-          desc="Automatically push new Knowledge Assets to the DKG upon creation."
-          on={true}
-          disabled
-          disabledReason="Set via config.publishByDefault in ~/.dkg/config.json"
-        />
-        <Toggle
-          label="Analytics"
-          desc="Share anonymous usage stats to help improve DKG V10."
-          on={false}
-          disabled
-          disabledReason="Set via config.telemetry in ~/.dkg/config.json"
-        />
-      </div>
+      </section>
 
-      {/* Danger zone */}
-      <div className="settings-card" style={{ gridColumn: '1 / -1', borderColor: 'rgba(248,113,113,.2)', background: 'rgba(248,113,113,.03)' }}>
-        <div className="settings-title" style={{ color: 'var(--red)' }}>Danger Zone</div>
-        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
-          <button
-            onClick={handleShutdown}
-            disabled={shuttingDown}
-            style={{
-              padding: '8px 16px', borderRadius: 8,
-              border: `1px solid ${shutdownConfirm ? 'var(--red)' : 'rgba(251,191,36,.3)'}`,
-              background: shutdownConfirm ? 'rgba(248,113,113,.15)' : 'rgba(251,191,36,.07)',
-              color: shutdownConfirm ? 'var(--red)' : 'var(--amber)',
-              fontSize: 12, fontWeight: 600,
-              cursor: shuttingDown ? 'not-allowed' : 'pointer',
-              opacity: shuttingDown ? 0.5 : 1,
-            }}
-          >
-            {shuttingDown ? 'Shutting down…' : shutdownConfirm ? 'Confirm Shutdown' : 'Shutdown Node'}
-          </button>
-          {shutdownConfirm && (
-            <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Click again to confirm. The node process will terminate.</span>
+      {/* Blockchain Config */}
+      <section className="card">
+        <div className="card-header"><h2 className="card-title">Blockchain Config</h2></div>
+        <div className="card-body">
+          <Field label="Chain" value={chainLabel(w?.chainId)} />
+          {w?.balances?.length > 0 ? (
+            w.balances.map((b: any, i: number) => (
+              <div key={b.address} style={{ marginBottom: 10 }}>
+                <Field label={w.balances.length > 1 ? `Wallet ${i + 1}` : 'Operational Wallet'} value={b.address} mono />
+                <div style={{ display: 'flex', gap: 16, marginTop: -6 }}>
+                  <span
+                    className="mono"
+                    style={{ fontSize: 11, color: 'var(--text-muted)' }}
+                    title={formatEthTooltip(b.eth)}
+                  >
+                    {formatEth(b.eth)} ETH
+                  </span>
+                  <span className="mono" style={{ fontSize: 11, color: 'var(--text-muted)' }} title={`Exact: ${b.trac}`}>
+                    {parseFloat(b.trac).toFixed(2)} {formatTracSymbol(b.symbol, w?.chainId)}
+                  </span>
+                </div>
+              </div>
+            ))
+          ) : (
+            <Field label="Operational Wallet" value={w?.wallets?.[0] ? truncateAddress(w.wallets[0]) : '—'} mono />
           )}
+          {w?.rpcUrl && (
+            <RpcUrlField rpcUrl={w.rpcUrl} />
+          )}
+          {w?.error ? (
+            <div style={{ padding: '8px 12px', borderRadius: 8, background: 'rgba(248,113,113,.05)', border: '1px solid rgba(248,113,113,.2)' }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--red)', marginBottom: 2 }}>⚠ Error</div>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{w.error}</div>
+            </div>
+          ) : w?.chainId?.includes('84532') || w?.chainId?.includes('31337') || w?.chainId?.includes('11155111') ? (
+            <div style={{ padding: '8px 12px', borderRadius: 8, background: 'var(--amber-dim)', border: '1px solid rgba(251,191,36,.2)' }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--amber)', marginBottom: 2 }}>⚠ Testnet Mode</div>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>No real TRAC is spent. Perfect for development.</div>
+            </div>
+          ) : null}
         </div>
-      </div>
+      </section>
+
+      {/* Network Telemetry */}
+      <NetworkTelemetrySection />
+
+      {/* Local Data Retention */}
+      <LocalDataRetentionSection />
+
+      {/* Danger Zone (full-width footer; last in the stack) */}
+      <section className="card" style={{ borderColor: 'rgba(248,113,113,.2)', background: 'rgba(248,113,113,.03)' }}>
+        <div className="card-header"><h2 className="card-title" style={{ color: 'var(--red)' }}>Danger Zone</h2></div>
+        <div className="card-body">
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+            <button
+              onClick={handleShutdown}
+              disabled={shuttingDown}
+              style={{
+                padding: '8px 16px', borderRadius: 8,
+                border: `1px solid ${shutdownConfirm ? 'var(--red)' : 'rgba(251,191,36,.3)'}`,
+                background: shutdownConfirm ? 'rgba(248,113,113,.15)' : 'rgba(251,191,36,.07)',
+                color: shutdownConfirm ? 'var(--red)' : 'var(--amber)',
+                fontSize: 12, fontWeight: 600,
+                cursor: shuttingDown ? 'not-allowed' : 'pointer',
+                opacity: shuttingDown ? 0.5 : 1,
+              }}
+            >
+              {shuttingDown ? 'Shutting down…' : shutdownConfirm ? 'Confirm Shutdown' : 'Shutdown Node'}
+            </button>
+            <span aria-live="polite">
+              {shutdownConfirm && (
+                <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Click again to confirm. The node process will terminate.</span>
+              )}
+            </span>
+          </div>
+        </div>
+      </section>
     </div>
   );
 }
