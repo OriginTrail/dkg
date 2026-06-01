@@ -338,6 +338,56 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     expect((a as any).sendSignedTransactionAndWait).not.toHaveBeenCalled();
   });
 
+  it('single-provider exhaustion keeps the RPC_ENDPOINTS_EXHAUSTED code but preserves the original message verbatim (#895 / Codex PR #901)', async () => {
+    // One configured RPC → no failover, but downstream classifiers
+    // (`/api/context-graph/register`) still key the transient-outage 503 off
+    // the RPC_ENDPOINTS_EXHAUSTED code, so the code MUST survive. The
+    // single-endpoint case must NOT, however, rewrite the message into the
+    // multi-endpoint "failed on all configured RPC endpoints (…)" aggregate —
+    // there is no second endpoint, so the original message reads cleaner and
+    // message-inspecting callers keep seeing it unchanged.
+    const a = new EVMChainAdapter(minimalConfig({ rpcUrl: 'https://only.example' }));
+    const onlyProvider = { name: 'only' } as any;
+    const signer = new ethers.Wallet(DEPLOYER_PK, onlyProvider);
+    const populateTransaction = vi.fn(async () => {
+      throw new Error('connect ECONNREFUSED 127.0.0.1:8545');
+    });
+    const contract = {
+      connect: vi.fn(() => ({ createContextGraph: { populateTransaction } })),
+    };
+    (a as any).providers = [onlyProvider];
+    (a as any).signPopulatedTransaction = vi.fn();
+    (a as any).sendSignedTransactionAndWait = vi.fn();
+
+    let thrown: any;
+    try {
+      await (a as any).sendContractTransaction(
+        contract,
+        'createContextGraph',
+        [],
+        signer,
+        'create on-chain context graph',
+      );
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect(thrown).toMatchObject({
+      code: 'RPC_ENDPOINTS_EXHAUSTED',
+      rpcUrls: ['https://only.example'],
+    });
+    // Message stays byte-identical — no "failed on all configured RPC
+    // endpoints (…)" aggregate, and the label is not prepended.
+    expect(thrown.message).toBe('connect ECONNREFUSED 127.0.0.1:8545');
+    expect(thrown.message).not.toContain('all configured RPC endpoints');
+    // The original error is preserved as the cause.
+    expect((thrown as Error).cause).toBeInstanceOf(Error);
+    expect((thrown as { cause: Error }).cause.message).toBe('connect ECONNREFUSED 127.0.0.1:8545');
+    expect(populateTransaction).toHaveBeenCalledTimes(1);
+    expect((a as any).signPopulatedTransaction).not.toHaveBeenCalled();
+    expect((a as any).sendSignedTransactionAndWait).not.toHaveBeenCalled();
+  });
+
   it('broadcasts the exact same signed raw transaction to backup after primary send failure', async () => {
     const a = new EVMChainAdapter(minimalConfig({
       rpcUrl: 'https://primary.example',

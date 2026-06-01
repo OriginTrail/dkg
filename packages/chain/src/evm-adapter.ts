@@ -1027,24 +1027,24 @@ export class EVMChainAdapter implements ChainAdapter {
       if (!prepared) continue;
       return this.sendSignedTransactionAndWait(prepared.signedTx, prepared.txHash, label);
     }
-    // Single-provider adapters never "fail over" — there is no second
-    // endpoint to try — so a retryable error from the only RPC is just that
-    // error. Wrapping it into a synthetic RPC_ENDPOINTS_EXHAUSTED here would
-    // REWRITE the original `.message` (e.g. a plain `connect ECONNREFUSED`),
-    // which breaks callers/classifiers that inspect the message in place and
-    // the codex round-6 contract (evm-adapter-pca-enrich.test.ts) that
-    // non-custom errors propagate unchanged. Rethrow the original verbatim;
-    // the exhaustion wrapper is reserved for genuine multi-endpoint failover
-    // (>1 provider), where the aggregated "all endpoints" context is
+    // A retryable error from the only configured RPC is still an "endpoints
+    // exhausted" condition: downstream classifiers (e.g.
+    // `/api/context-graph/register` → `classifyRegisterContextGraphError`)
+    // key the transient-outage 503 off the `RPC_ENDPOINTS_EXHAUSTED` code, so
+    // the code MUST be present even for a single-provider adapter (Codex
+    // PR #901). What we must NOT do for one provider is REWRITE the
+    // `.message` into the multi-endpoint "failed on all endpoints (url1,
+    // url2): ..." aggregate — there is no second endpoint, so the original
+    // message (e.g. a plain `connect ECONNREFUSED`) reads cleaner and any
+    // message-inspecting caller keeps seeing it verbatim. So: single provider
+    // → carry the code on a new error but keep the message byte-identical;
+    // multiple providers → the aggregated "all endpoints" message is
     // meaningful and is asserted by evm-adapter.unit.test.ts.
-    if (this.providers.length <= 1) {
-      throw lastRetryable;
-    }
-    const err = new Error(
-      `${label} transaction preparation failed on all configured RPC endpoints ` +
-      `(${this.rpcUrls.join(', ')}): ${errorMessage(lastRetryable)}`,
-      { cause: lastRetryable },
-    );
+    const message = this.providers.length <= 1
+      ? errorMessage(lastRetryable)
+      : `${label} transaction preparation failed on all configured RPC endpoints ` +
+        `(${this.rpcUrls.join(', ')}): ${errorMessage(lastRetryable)}`;
+    const err = new Error(message, { cause: lastRetryable });
     (err as any).code = 'RPC_ENDPOINTS_EXHAUSTED';
     (err as any).rpcUrls = [...this.rpcUrls];
     throw err;
