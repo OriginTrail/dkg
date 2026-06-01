@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useCallback, lazy, Suspense } from 'react';
 import { useFetch } from '../hooks.js';
-import { executeQuery, listAssertions, promoteAssertion, publishSharedMemory, listSwmEntities, type AssertionInfo, type PublishResult, type SwmRootEntity } from '../api.js';
+import { executeQuery, listAssertions, promoteAssertion, publishSharedMemory, listSwmEntities, describePromoteResult, describePromoteError, type AssertionInfo, type PublishResult, type SwmRootEntity } from '../api.js';
 import { FilePreviewModal } from '../components/Modals/FilePreviewModal.js';
 import { useMemoryGraphEvents } from '../hooks/useNodeEvents.js';
 import { memoryGraphLabels } from '../lib/memoryLabels.js';
@@ -402,8 +402,16 @@ function AssertionList({ contextGraphId, onPromoted }: { contextGraphId: string;
   // copy can disambiguate which partition was promoted. Two rows
   // labeled `draft` (one root, one sub-graph) would otherwise emit
   // the same message and leave the user guessing.
-  const [promoteResult, setPromoteResult] = useState<{ name: string; count: number; subGraph?: string } | null>(null);
-  const [promoteError, setPromoteError] = useState<string | null>(null);
+  // Issue #864 — render the unified `PromoteOutcome` so success, no-op,
+  // and ASSERTION_NOT_PERSISTED 409 responses each get their own
+  // contextual message, instead of the legacy "Promoted 0 triples"
+  // string that hid every failure mode behind a fake success.
+  const [promoteResult, setPromoteResult] = useState<{
+    message: string;
+    kind: 'success' | 'noop';
+    subGraph?: string;
+  } | null>(null);
+  const [promoteError, setPromoteError] = useState<{ message: string; kind: 'not-persisted' | 'other' } | null>(null);
   // PR #710 Fix E — preview state carries the sub-graph slug too so
   // `FilePreviewModal` can pass it through to the daemon's
   // `/extraction-status` route. Pre-fix, clicking a sub-graph
@@ -420,11 +428,21 @@ function AssertionList({ contextGraphId, onPromoted }: { contextGraphId: string;
       // `(cg, name, subGraph)` lookup hits the right partition;
       // mirrors the AssertionsList fix in components.tsx.
       const res = await promoteAssertion(contextGraphId, assertion.name, 'all', assertion.subGraph);
-      setPromoteResult({ name: assertion.name, count: res.promotedCount, subGraph: assertion.subGraph });
+      const outcome = describePromoteResult(assertion.name, res);
+      setPromoteResult({
+        message: outcome.message + (assertion.subGraph ? ` (in ${assertion.subGraph})` : ''),
+        kind: outcome.kind === 'success' ? 'success' : 'noop',
+        subGraph: assertion.subGraph,
+      });
       refresh();
       onPromoted();
     } catch (err: any) {
-      setPromoteError(err.message ?? 'Promote failed');
+      const typed = describePromoteError(assertion.name, err);
+      setPromoteError(
+        typed
+          ? { message: typed.message, kind: 'not-persisted' }
+          : { message: err?.message ?? 'Promote failed', kind: 'other' },
+      );
     } finally {
       setPromoting(null);
     }
@@ -436,17 +454,30 @@ function AssertionList({ contextGraphId, onPromoted }: { contextGraphId: string;
     setPromoteResult(null);
     setPromoteError(null);
     let totalPromoted = 0;
+    let noopCount = 0;
     try {
       for (const a of assertions) {
         // PR #710 — see comment on the single-row handler above.
         const res = await promoteAssertion(contextGraphId, a.name, 'all', a.subGraph);
         totalPromoted += res.promotedCount;
+        if (res.promotedCount === 0) noopCount += 1;
       }
-      setPromoteResult({ name: 'all assertions', count: totalPromoted });
+      const tail = noopCount > 0 ? ` (${noopCount} assertion${noopCount === 1 ? '' : 's'} had nothing to promote)` : '';
+      setPromoteResult({
+        message: totalPromoted > 0
+          ? `Promoted ${totalPromoted} triple${totalPromoted === 1 ? '' : 's'} across ${assertions.length} assertion${assertions.length === 1 ? '' : 's'}.${tail}`
+          : `No triples were promoted — every assertion was already in Shared Working Memory or its content has not been committed yet.`,
+        kind: totalPromoted > 0 ? 'success' : 'noop',
+      });
       refresh();
       onPromoted();
     } catch (err: any) {
-      setPromoteError(err.message ?? 'Promote failed');
+      const typed = describePromoteError('selected assertion', err);
+      setPromoteError(
+        typed
+          ? { message: typed.message, kind: 'not-persisted' }
+          : { message: err?.message ?? 'Promote failed', kind: 'other' },
+      );
     } finally {
       setPromoting(null);
     }
@@ -506,14 +537,13 @@ function AssertionList({ contextGraphId, onPromoted }: { contextGraphId: string;
         ))}
       </div>
       {promoteResult && (
-        <div className="v10-promote-result success">
-          Promoted {promoteResult.count} triples from {promoteResult.name}
-          {promoteResult.subGraph ? ` (in ${promoteResult.subGraph})` : ''} to Shared Working Memory.
+        <div className={promoteResult.kind === 'success' ? 'v10-promote-result success' : 'v10-promote-result info'}>
+          {promoteResult.message}
         </div>
       )}
       {promoteError && (
         <div className="v10-promote-result error">
-          {promoteError}
+          {promoteError.message}
         </div>
       )}
 

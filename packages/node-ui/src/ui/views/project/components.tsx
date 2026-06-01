@@ -6,7 +6,7 @@ import { encodeDocTabId, resolveDocRef } from '../../lib/doc-tab-id.js';
 import { truncateMiddle } from '../../lib/truncate.js';
 import {
   listJoinRequests, approveJoinRequest, rejectJoinRequest,
-  listAssertions, promoteAssertion,
+  listAssertions, promoteAssertion, describePromoteResult, describePromoteError,
   publishSharedMemory, executeQuery,
   writeProfileQueryCatalog,
   fetchSubGraphs,
@@ -1806,20 +1806,31 @@ export function LayerActionsWidget({ layer, count, contextGraphId, onComplete }:
       if (isWm) {
         const assertions = await listAssertions(contextGraphId, 'wm');
         let promoted = 0;
+        let noopCount = 0;
         for (const a of assertions) {
           // PR #710 — thread `subGraph` so sub-graph-scoped assertions
           // hit the correct daemon lookup key `(cg, name, subGraph)`.
           const res = await promoteAssertion(contextGraphId, a.name, 'all', a.subGraph);
           promoted += res.promotedCount;
+          if (res.promotedCount === 0) noopCount += 1;
         }
-        setResult(`Promoted ${promoted} triple${promoted !== 1 ? 's' : ''} to Shared Memory`);
+        // Issue #864 — flag the "nothing was actually moved" case so
+        // users on the bulk-promote widget aren't lied to by a
+        // "Promoted 0 triples" success toast.
+        if (promoted > 0) {
+          const tail = noopCount > 0 ? ` (${noopCount} had nothing to promote)` : '';
+          setResult(`Promoted ${promoted} triple${promoted !== 1 ? 's' : ''} to Shared Memory${tail}`);
+        } else {
+          setResult('No triples were promoted — every assertion was already in Shared Memory or its content is still being committed.');
+        }
       } else {
         await publishSharedMemory(contextGraphId);
         setResult('Published to Verifiable Memory');
       }
       onComplete?.();
     } catch (err: any) {
-      setError(err.message ?? 'Action failed');
+      const typed = describePromoteError('an assertion', err);
+      setError(typed ? typed.message : (err?.message ?? 'Action failed'));
     } finally {
       setBusy(false);
     }
@@ -2953,7 +2964,11 @@ export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }:
         // sub-graph partition resolves to that partition's
         // assertion, not a same-named root one.
         const res = await promoteAssertion(contextGraphId, assertion.name, 'all', assertion.subGraph);
-        setResult(`Promoted ${res.promotedCount} triples to Shared Memory`);
+        // Issue #864 — fan the promote response through the central
+        // describe helper so 0-count returns get an actionable hint
+        // instead of the misleading "Promoted 0 triples" toast.
+        const outcome = describePromoteResult(assertion.name, res);
+        setResult(outcome.message);
       } else {
         await publishSharedMemory(contextGraphId);
         setResult('Published to Verifiable Memory');
@@ -2961,7 +2976,8 @@ export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }:
       refresh();
       onComplete();
     } catch (err: any) {
-      setError(err.message ?? 'Action failed');
+      const typed = describePromoteError(assertion.name, err);
+      setError(typed ? typed.message : (err?.message ?? 'Action failed'));
     } finally {
       setBusy(null);
     }
@@ -2975,12 +2991,21 @@ export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }:
     try {
       if (layer === 'wm') {
         let total = 0;
+        let noopCount = 0;
         for (const a of assertions) {
           // PR #710 — see comment on the single-row handler above.
           const res = await promoteAssertion(contextGraphId, a.name, 'all', a.subGraph);
           total += res.promotedCount;
+          if (res.promotedCount === 0) noopCount += 1;
         }
-        setResult(`Promoted ${total} triples across ${assertions.length} assertion${assertions.length !== 1 ? 's' : ''}`);
+        // Issue #864 — distinguish "some moved, some no-ops" from
+        // "literally nothing moved" so the user gets the truth.
+        if (total > 0) {
+          const tail = noopCount > 0 ? ` (${noopCount} had nothing to promote)` : '';
+          setResult(`Promoted ${total} triples across ${assertions.length} assertion${assertions.length !== 1 ? 's' : ''}${tail}`);
+        } else {
+          setResult('No triples were promoted — every assertion was already in Shared Memory or its content is still being committed.');
+        }
       } else {
         await publishSharedMemory(contextGraphId);
         setResult('Published all to Verifiable Memory');
@@ -2988,7 +3013,8 @@ export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }:
       refresh();
       onComplete();
     } catch (err: any) {
-      setError(err.message ?? 'Action failed');
+      const typed = describePromoteError('selected assertion', err);
+      setError(typed ? typed.message : (err?.message ?? 'Action failed'));
     } finally {
       setBusy(null);
     }

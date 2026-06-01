@@ -250,6 +250,35 @@ export class ReservedNamespaceError extends Error {
   }
 }
 
+// Issue #864 — surface the "_meta promised structural triples but the data
+// graph is empty" inconsistency as a typed, machine-readable error so the
+// daemon route can map it to a 409 and the UI can render an actionable
+// hint instead of the misleading "Promoted 0 triples to Shared Memory"
+// toast. The code field is the contract the daemon/UI rely on; do not
+// rename without updating both call-sites.
+export class AssertionNotPersistedError extends Error {
+  readonly code = 'ASSERTION_NOT_PERSISTED' as const;
+  readonly contextGraphId: string;
+  readonly assertionGraph: string;
+  readonly expectedTripleCount: number;
+  constructor(args: {
+    contextGraphId: string;
+    assertionGraph: string;
+    expectedTripleCount: number;
+  }) {
+    super(
+      `Assertion data graph <${args.assertionGraph}> is empty, but its _meta record ` +
+        `reports extractionStatus="completed" with structuralTripleCount=${args.expectedTripleCount}. ` +
+        `The extracted triples were never persisted (or have been deleted) so promote has nothing to move. ` +
+        `Re-import the source file or re-write the assertion before promoting.`,
+    );
+    this.name = 'AssertionNotPersistedError';
+    this.contextGraphId = args.contextGraphId;
+    this.assertionGraph = args.assertionGraph;
+    this.expectedTripleCount = args.expectedTripleCount;
+  }
+}
+
 // Round 12 Bug 34: module-private token proving an internal caller
 // (specifically `publishFromSharedMemory`) is the origin of a
 // `publish()` call so the reserved-namespace guard can be bypassed
@@ -3791,6 +3820,56 @@ export class DKGPublisher implements Publisher {
     return [...addresses][0];
   }
 
+  /**
+   * Issue #864 — guard the silent "Promoted 0 triples" path.
+   *
+   * Called from `assertionPromote` whenever the CONSTRUCT against the
+   * assertion's data graph returns zero quads. Inspects the CG's `_meta`
+   * graph for the two markers `routes/assertion.ts` stamps when an
+   * `import-file` request finishes a structural extraction:
+   *   <assertionGraph> dkg:extractionStatus "completed"
+   *   <assertionGraph> dkg:structuralTripleCount "<n>"^^xsd:integer
+   *
+   * If BOTH are present AND the count is positive, the graph SHOULD hold
+   * content — the inconsistency is a real failure, not a no-op. Throws
+   * `AssertionNotPersistedError` so the daemon route can translate it to
+   * a 409 with a structured body. In every other case (no markers at
+   * all, status not "completed", count is zero) this is a legitimate
+   * empty promote: return silently and let the caller fall through to
+   * the existing `{ promotedCount: 0 }` return.
+   *
+   * Read-only, single SELECT — does not mutate state.
+   */
+  private async assertAssertionDataPersisted(
+    contextGraphId: string,
+    assertionGraph: string,
+  ): Promise<void> {
+    const DKG = 'http://dkg.io/ontology/';
+    const metaGraph = contextGraphMetaUri(contextGraphId);
+    const result = await this.store.query(
+      `SELECT ?status ?count WHERE {
+         GRAPH <${metaGraph}> {
+           OPTIONAL { <${assertionGraph}> <${DKG}extractionStatus> ?status }
+           OPTIONAL { <${assertionGraph}> <${DKG}structuralTripleCount> ?count }
+         }
+       } LIMIT 1`,
+    );
+    if (result.type !== 'bindings' || result.bindings.length === 0) return;
+    const row = result.bindings[0];
+    const statusRaw = row?.['status'];
+    const countRaw = row?.['count'];
+    if (typeof statusRaw !== 'string' || typeof countRaw !== 'string') return;
+    const statusValue = stripSparqlLiteral(statusRaw);
+    if (statusValue !== 'completed') return;
+    const expected = parseCountLiteral(countRaw);
+    if (!Number.isFinite(expected) || expected <= 0) return;
+    throw new AssertionNotPersistedError({
+      contextGraphId,
+      assertionGraph,
+      expectedTripleCount: expected,
+    });
+  }
+
   private async deleteMetaForRoot(metaGraph: string, rootEntity: string): Promise<void> {
     const DKG = 'http://dkg.io/ontology/';
     const result = await this.store.query(
@@ -3947,7 +4026,31 @@ export class DKGPublisher implements Publisher {
     const result = await this.store.query(
       `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${graphUri}> { ?s ?p ?o } }`,
     );
-    if (result.type !== 'quads' || result.quads.length === 0) return { promotedCount: 0 };
+    if (result.type !== 'quads' || result.quads.length === 0) {
+      // Issue #864 — when the assertion data graph is empty, distinguish two
+      // failure modes so the caller (and ultimately the UI) gets an
+      // actionable signal instead of a silent "Promoted 0 triples":
+      //
+      //   a) genuine empty assertion (never imported, never written, or
+      //      already discarded) → keep the legacy `{ promotedCount: 0 }`
+      //      success-shape return so polling/retry paths keep working.
+      //   b) `_meta` says structural extraction *completed* with a non-zero
+      //      triple count → the data graph SHOULD hold content. Returning
+      //      0 here silently leaves the user staring at "Promoted 0" with
+      //      no recovery path; raise a typed error so the daemon route
+      //      can map it to a 409 the UI knows to surface.
+      //
+      // Rows 18 (`dkg:extractionStatus`) and 19 (`dkg:structuralTripleCount`)
+      // are stamped by the daemon's import-file flow on the data-graph URI
+      // subject (NOT the lifecycle URN) — see
+      // `packages/cli/src/daemon/routes/assertion.ts:metaQuads`. That makes
+      // them a clean witness of "extraction landed", scoped to the same
+      // graphUri we just CONSTRUCTed against. Lifecycle-URN rows from
+      // `assertionCreate` are not consulted: they fire for empty-write
+      // flows where promoting nothing is legitimate.
+      await this.assertAssertionDataPersisted(contextGraphId, graphUri);
+      return { promotedCount: 0 };
+    }
 
     let quadsToPromote = result.quads;
 
