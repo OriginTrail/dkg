@@ -4164,8 +4164,19 @@ export function SubGraphOverviewGrid({
           // case (`loading` flips false but the canonical universe
           // is still incomplete because a layer query failed).
           //
+          // GH #819 round 4 (Codex sweep 2 🔴 #6) — precedence fix.
+          // Round 3's `?? sg.tripleCount` only fell through when
+          // the bucket was undefined, but a partial-hydrated bucket
+          // (e.g. 3 of an expected 10) had a value and won the
+          // discriminator — the badge undercounted to 3 instead of
+          // the daemon's 10. `Math.max(...)` clamps to the LARGER
+          // of the partial-hydrated bucket and the daemon count
+          // when canonical is incomplete: surfaces the truer
+          // lower-bound either way (defends against the daemon
+          // undershooting too). Hydrated-fully state still reads
+          // the canonical bucket honestly (zero shows through).
           tripleCount: canonicalIncomplete
-            ? (tripleCountBySubGraph.get(sg.name) ?? sg.tripleCount)
+            ? Math.max(sg.tripleCount, tripleCountBySubGraph.get(sg.name) ?? 0)
             : (tripleCountBySubGraph.get(sg.name) ?? 0),
           triples: filterTriplesToEntities(rawTriples, cardEntityUris),
           layerCounts: layerCountsBySubGraph.get(sg.name) ?? { wm: 0, swm: 0, vm: 0 },

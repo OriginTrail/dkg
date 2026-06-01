@@ -1434,6 +1434,56 @@ describe('SubGraphOverviewGrid — Root mini-card (GH #813)', () => {
     expect(stats).not.toContain('2 triples');
   });
 
+  it('Named card tripleCount Math.max-clamps daemon lower-bound vs partial-hydrated bucket (GH #819 round 4 — Codex sweep 2 🔴 #6)', async () => {
+    // PR #847 round 4 (🔴 #6) — round 3 used `??` precedence:
+    // `tripleCountBySubGraph.get(sg) ?? sg.tripleCount` only fell
+    // through when the bucket was undefined. A partial-hydrated
+    // bucket (e.g. 3 rows of an expected 10) had a defined value
+    // and won — card stat undercounted to 3 instead of the
+    // daemon's 10.
+    //
+    // Round-4 fix: `Math.max(sg.tripleCount, bucket ?? 0)` in the
+    // `canonicalIncomplete` branch — clamps to the larger of the
+    // two when the canonical universe can't be trusted, surfacing
+    // the truer lower-bound either way (defends against daemon
+    // undershoot too).
+    fetchSubGraphsMock.mockResolvedValueOnce({
+      // Daemon reports the higher count (10).
+      subGraphs: [{ name: 'alpha', entityCount: 1, tripleCount: 10, description: '' }],
+    });
+    const entityList = [
+      { uri: 'urn:e:alpha', label: 'a', types: [], trustLevel: 'working', layers: new Set(['working']), subGraphs: new Set(['alpha']), properties: new Map(), connections: [] },
+    ];
+    // 3 partially-hydrated rows in alpha's bucket — incomplete
+    // canonical universe (one layer errored, so only WM made it).
+    const triples = [
+      { subject: 'urn:e:alpha', predicate: 'http://schema.org/name', object: '"a-name-1"', subGraph: 'alpha', layer: 'working' },
+      { subject: 'urn:e:alpha', predicate: 'http://schema.org/name', object: '"a-name-2"', subGraph: 'alpha', layer: 'working' },
+      { subject: 'urn:e:alpha', predicate: 'http://schema.org/name', object: '"a-name-3"', subGraph: 'alpha', layer: 'working' },
+    ];
+    await renderWith({
+      ...memory,
+      entities: new Map(entityList.map(e => [e.uri, e])),
+      entityList,
+      allTriples: triples,
+      counts: { wm: 1, swm: 0, vm: 0, total: 1 },
+      loading: false,
+      partial: true,
+      // SWM errored — canonical universe is missing rows from
+      // there. Daemon still reports 10 as the true total.
+      layerStatus: { wm: 'ok', swm: 'error', vm: 'ok' },
+    });
+    await flush();
+
+    const cards = container.querySelectorAll('.v10-sgov-card');
+    const alphaCardEl = cards[0];
+    const stats = alphaCardEl.querySelector('.v10-sgov-card-stats')?.textContent ?? '';
+    // Pre-round-4 the bucket value (3) won via `??`. Post-fix
+    // `Math.max(10, 3) === 10` — the daemon lower-bound surfaces.
+    expect(stats).toContain('10 triples');
+    expect(stats).not.toContain('3 triples');
+  });
+
   it('Root card keeps its scoped copy when same SPO also appears under a named subgraph (GH #819 round 4 — Codex sweep 2 🔴 #7)', async () => {
     // PR #847 round 4 (🔴 #7) — Root card sourced from
     // `canonicalTriples.filter(!t.subGraph)`. Global SPO dedup
