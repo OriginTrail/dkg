@@ -1737,23 +1737,47 @@ export class DKGAgent {
         let storageACKFailoverInFlight = false;
         const attemptStorageACKRegistration = async (
           attemptCtx: OperationContext,
-          options: { repairWallets?: boolean } = {},
+          options: { repairWallets?: boolean; allowChainReresolution?: boolean } = {},
         ): Promise<'registered' | 'retryable' | 'disabled'> => {
           if (storageACKProtocolRegistered) return 'registered';
-          // #894 / Codex PR #901: background identity re-resolution. If boot
-          // left the identity unresolved because of a transient chain failure
-          // (RPC timeout/unreachable), re-probe the chain on each attempt —
-          // the scheduled retry loop below is the background re-resolver, so
-          // ACK registration recovers as soon as the RPC is reachable again.
-          // We do NOT re-probe on a settled 0n (that flag stays false), so an
+          // #894 / Codex PR #901 (round 2): background identity re-resolution.
+          // If boot left the identity unresolved because of a transient chain
+          // failure (RPC timeout/unreachable), re-probe the chain — but ONLY on
+          // the scheduled retry path (`allowChainReresolution`), never on the
+          // first attempt awaited by `start()`. The boot path already spent its
+          // chain-timeout budget resolving identity; doing another bounded
+          // chain probe here would stack a third ~20s wait onto `start()` and
+          // blow the 45s readiness ceiling this fix exists to protect (Codex
+          // :1752). On the first attempt we return 'retryable' immediately and
+          // let the unref'd retry timer do the (background) re-resolution.
+          //
+          // We do NOT re-probe on a settled 0n (the flag stays false), so an
           // intentional no-identity node doesn't spin the chain pointlessly.
-          if (onChainIdentityId === 0n && bootChainIdentityUnresolvedTransient) {
+          if (
+            onChainIdentityId === 0n
+            && bootChainIdentityUnresolvedTransient
+            && options.allowChainReresolution === true
+          ) {
             try {
-              const reresolved = await raceWithBootTimeout(
+              let reresolved = await raceWithBootTimeout(
                 this.chain.getIdentityId(),
                 BOOT_CHAIN_IDENTITY_TIMEOUT_MS,
                 'StorageACK identity re-resolution',
               );
+              // Codex :1757: a brand-new core node may have hit the transient
+              // failure BEFORE `ensureProfile()` ever ran, so it has no profile
+              // to find. Re-probing `getIdentityId()` alone would return 0n
+              // forever and the node would never provision. Once the chain is
+              // reachable again, create the profile (core only) — mirroring the
+              // boot-time provisioning path.
+              if (reresolved === 0n && effectiveRole === 'core') {
+                this.log.info(attemptCtx, `No on-chain identity after transient boot outage — creating profile and staking...`);
+                reresolved = await raceWithBootTimeout(
+                  this.chain.ensureProfile({ nodeName: this.config.name }),
+                  BOOT_CHAIN_IDENTITY_TIMEOUT_MS,
+                  'StorageACK ensureProfile (recovery)',
+                );
+              }
               if (reresolved > 0n) {
                 onChainIdentityId = reresolved;
                 bootChainIdentityUnresolvedTransient = false;
@@ -2030,9 +2054,11 @@ export class DKGAgent {
           return 'disabled';
         };
 
-        const scheduleStorageACKRegistrationRetry = (options: { repairWallets?: boolean } = {}) => {
+        const storageACKRegistrationRetryMs =
+          this.config.storageAckRegistrationRetryMs ?? STORAGE_ACK_REGISTRATION_RETRY_MS;
+        const scheduleStorageACKRegistrationRetry = (options: { repairWallets?: boolean; allowChainReresolution?: boolean } = {}) => {
           if (this.storageACKRegistrationRetryTimer || storageACKProtocolRegistered) return;
-          this.log.warn(ctx, `V10 StorageACK handler registration will retry every ${STORAGE_ACK_REGISTRATION_RETRY_MS}ms`);
+          this.log.warn(ctx, `V10 StorageACK handler registration will retry every ${storageACKRegistrationRetryMs}ms`);
           this.storageACKRegistrationRetryTimer = setTimeout(() => {
             this.storageACKRegistrationRetryTimer = null;
             if (!this.started || storageACKProtocolRegistered || this.storageACKRegistrationRetryInFlight) return;
@@ -2052,16 +2078,21 @@ export class DKGAgent {
               .finally(() => {
                 this.storageACKRegistrationRetryInFlight = false;
               });
-          }, STORAGE_ACK_REGISTRATION_RETRY_MS);
+          }, storageACKRegistrationRetryMs);
           if (this.storageACKRegistrationRetryTimer.unref) this.storageACKRegistrationRetryTimer.unref();
         };
 
         try {
+          // The first attempt is awaited by `start()`, so it must NOT do a
+          // blocking chain re-probe (Codex :1752). It returns 'retryable'
+          // immediately for a transient-0n identity; the scheduled retry then
+          // runs the background re-resolution (+ ensureProfile for a brand-new
+          // core node) with `allowChainReresolution: true`.
           const result = await attemptStorageACKRegistration(ctx);
-          if (result === 'retryable') scheduleStorageACKRegistrationRetry();
+          if (result === 'retryable') scheduleStorageACKRegistrationRetry({ allowChainReresolution: true });
         } catch (err) {
           this.log.warn(ctx, `Skipping V10 StorageACK handler: ${err instanceof Error ? err.message : String(err)}`);
-          scheduleStorageACKRegistrationRetry();
+          scheduleStorageACKRegistrationRetry({ allowChainReresolution: true });
         }
       } else if (typeof this.chain.signACKDigest === 'function') {
         this.log.info(ctx, `V10 StorageACK: adapter has signACKDigest but no extractable key — handler registration deferred until callback signing is supported`);

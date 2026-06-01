@@ -180,6 +180,35 @@ class TransientIdentityFailureChainAdapter extends MockChainAdapter {
   }
 }
 
+// #894 / Codex PR #901 round 2 (:1757): a brand-new core node that has NO
+// on-chain identity yet and hits a transient RPC outage during boot, BEFORE
+// `ensureProfile()` ever runs. `getIdentityId()` fails for the first
+// `identityFailFor` calls (RPC down), then returns 0n (still no profile).
+// Re-probing `getIdentityId()` alone would loop forever at 0n; the retry path
+// must call `ensureProfile()` to provision the profile once the chain is back.
+class BrandNewCoreTransientChainAdapter extends MockChainAdapter {
+  identityCalls = 0;
+  ensureProfileCalls = 0;
+
+  constructor(chainId: string, signerAddress: string, private readonly identityFailFor: number) {
+    super(chainId, signerAddress);
+  }
+
+  override async getIdentityId(): Promise<bigint> {
+    this.identityCalls += 1;
+    if (this.identityCalls <= this.identityFailFor) {
+      throw new Error(`connect ECONNREFUSED 127.0.0.1:8545 (simulated transient RPC outage, getIdentityId #${this.identityCalls})`);
+    }
+    // Chain reachable now, but no profile exists until ensureProfile runs.
+    return super.getIdentityId();
+  }
+
+  override async ensureProfile(options?: { nodeName?: string; stakeAmount?: bigint; lockTier?: number }): Promise<bigint> {
+    this.ensureProfileCalls += 1;
+    return super.ensureProfile(options);
+  }
+}
+
 class ContextAuthorizedPublisherChainAdapter extends MockChainAdapter {
   capturedPublisherAddress?: string;
 
@@ -1422,9 +1451,10 @@ describe('DKGAgent ACK signer gating', () => {
     // The on-chain identity exists, but the chain is unreachable for the two
     // boot-time identity lookups (initial + recovery). Boot must NOT hang or
     // throw — HTTP readiness can't depend on chain reachability — and the
-    // identity is left at 0n. The StorageACK path then re-resolves the
-    // identity on its next attempt (call #3, chain now reachable) and registers
-    // the handler, instead of staying permanently 'disabled' until restart.
+    // identity is left at 0n. Crucially, the first ACK attempt (awaited by
+    // start()) is NON-BLOCKING (Codex :1752): it does no chain probe, returns
+    // 'retryable' immediately, and start() proceeds. The SCHEDULED retry then
+    // re-resolves the identity (chain now reachable) and registers the handler.
     const primary = ethers.Wallet.createRandom();
     const ackSigner = ethers.Wallet.createRandom();
     const chain = new TransientIdentityFailureChainAdapter('mock:31337', primary.address, 2);
@@ -1437,17 +1467,60 @@ describe('DKGAgent ACK signer gating', () => {
       chainAdapter: chain,
       nodeRole: 'core',
       ackSignerKey: ackSigner.privateKey,
+      storageAckRegistrationRetryMs: 25,
     });
 
     try {
-      // Boot completes despite the two failed boot-time identity lookups.
+      // Boot completes despite the two failed boot-time identity lookups. The
+      // first ACK attempt does NOT probe the chain, so the handler is NOT yet
+      // registered when start() returns (it's deferred to the retry).
       await agent.start();
+      expect(agent.node.libp2p.getProtocols()).not.toContain(PROTOCOL_STORAGE_ACK);
 
-      // The third lookup (the StorageACK background re-resolution, awaited
-      // during start) recovered the identity, so the handler is registered.
-      expect(chain.identityCalls).toBeGreaterThanOrEqual(3);
+      // The scheduled retry re-resolves the identity (chain reachable now) and
+      // registers the handler — recovery without restart.
+      await vi.waitFor(
+        () => expect(agent.node.libp2p.getProtocols()).toContain(PROTOCOL_STORAGE_ACK),
+        { timeout: 5_000, interval: 25 },
+      );
       expect(await chain.isOperationalWalletRegistered(47n, ackSigner.address)).toBe(true);
-      expect(agent.node.libp2p.getProtocols()).toContain(PROTOCOL_STORAGE_ACK);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('provisions a brand-new core node profile on the retry path after a transient boot outage (#894 / Codex PR #901 :1757)', async () => {
+    // No identity exists yet AND the chain is down during boot, before
+    // ensureProfile() ever runs. Re-probing getIdentityId() alone would loop at
+    // 0n forever; the retry path must call ensureProfile() (core only) to
+    // provision once the chain is back, then register the handler.
+    const primary = ethers.Wallet.createRandom();
+    const ackSigner = ethers.Wallet.createRandom();
+    const chain = new BrandNewCoreTransientChainAdapter('mock:31337', primary.address, 2);
+    // No seedIdentity — the node has never provisioned.
+
+    const agent = await DKGAgent.create({
+      name: 'AckBrandNewCoreRecovery',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      chainAdapter: chain,
+      nodeRole: 'core',
+      ackSignerKey: ackSigner.privateKey,
+      storageAckRegistrationRetryMs: 25,
+    });
+
+    try {
+      await agent.start();
+      expect(agent.node.libp2p.getProtocols()).not.toContain(PROTOCOL_STORAGE_ACK);
+
+      await vi.waitFor(
+        () => expect(agent.node.libp2p.getProtocols()).toContain(PROTOCOL_STORAGE_ACK),
+        { timeout: 5_000, interval: 25 },
+      );
+      // The retry path provisioned the profile (ensureProfile was called) and
+      // an identity now exists.
+      expect(chain.ensureProfileCalls).toBeGreaterThanOrEqual(1);
+      expect(await chain.getIdentityId()).toBeGreaterThan(0n);
     } finally {
       await agent.stop().catch(() => {});
     }

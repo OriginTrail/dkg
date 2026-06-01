@@ -716,6 +716,13 @@ export interface DKGAgentConfig {
    * is safe but yields more chain reads.
    */
   randomSamplingTickIntervalMs?: number;
+  /**
+   * Interval between V10 StorageACK handler registration retries when the
+   * on-chain identity isn't yet resolved (e.g. a transient boot-time RPC
+   * outage). Defaults to `STORAGE_ACK_REGISTRATION_RETRY_MS` (30s). Lowered in
+   * tests to drive the background re-resolution path deterministically.
+   */
+  storageAckRegistrationRetryMs?: number;
   /** Pre-built chain adapter (for testing). If provided, chainConfig is ignored. */
   chainAdapter?: ChainAdapter;
   /** Private key for the V10 ACK signer. When omitted, falls back to chainConfig.operationalKeys[0]. */
