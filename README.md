@@ -303,7 +303,7 @@ analysis reports are under `bench/results/profiles/`, including
 |---|---|
 | [DKG V10](docs/README.md) | You need the public entry point and system map |
 | [Use DKG](docs/use-dkg/README.md) | You want install, connect, publish, query, and operator paths |
-| [Connect an Agent](docs/use-dkg/connect-agent.md) | You want MCP, OpenClaw, or Hermes to use DKG as memory/tools |
+| [Quickstart](docs/getting-started/quickstart.md) | You want MCP, OpenClaw, or Hermes to use DKG as memory/tools |
 | [Funding](docs/use-dkg/funding.md) | You need to understand testnet ETH/TRAC requirements |
 | [Agent Context](docs/agent-context/README.md) | You want compact agent context and task packs |
 
@@ -317,7 +317,7 @@ Three entry points cover the common flows:
 
 - **Manual install (`dkg init`)** — on testnet, `dkg init` auto-funds the generated admin and operational wallets when `network.faucet.url` is set (the default for the bundled testnet config).
 - **OpenClaw, Hermes, and MCP setup (`dkg openclaw setup`, `dkg hermes setup`, `dkg mcp setup`)** — run the same funding step on first setup. Pass `--no-fund` to skip it (for pre-funded wallets, CI, or offline runs).
-- **Direct API / custom scripts** — use the local daemon and CLI references in [Use DKG](docs/use-dkg/README.md) and [Reference](docs/reference/README.md). The faucet call is an implementation detail of supported setup flows, not a separate current setup path.
+- **Direct API / custom scripts** — use the local daemon and CLI references in [Use DKG](docs/use-dkg/README.md), [CLI](docs/references/cli.md), and [API](docs/references/api.md). The faucet call is an implementation detail of supported setup flows, not a separate current setup path.
 
 Faucet calls are best-effort: a failed call logs a ready-to-paste `curl` block and setup continues. The node is usable without funding for WM, SWM, local queries, and P2P operations. It needs funds only for Verified Memory and other on-chain actions.
 

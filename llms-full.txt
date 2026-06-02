@@ -18,11 +18,12 @@ Core model:
 Current docs:
 
 - Start at docs/README.md.
+- First-time install and agent setup lives in docs/getting-started/quickstart.md.
 - Workflow routes live under docs/use-dkg/.
 - System model and architecture routes live under docs/how-dkg-works/.
-- Reference routes live under docs/reference/.
+- Reference routes live under docs/references/.
 - Agent context projections live under docs/agent-context/.
-- Official copied program/legal pages live under docs/reference/origintrail-dkg-v10-bounty-program.md and docs/reference/origintrail-decentralized-knowledge-graph-dkg-v10-terms-and-conditions.md.
+- Official copied program/legal pages live under docs/active-now/dkg-v10-bounty.md and docs/getting-started/dkg-v10-t-c.md.
 
 Operational contract:
 

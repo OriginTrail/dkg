@@ -17,7 +17,7 @@ Top-level public navigation is the accepted #119 structure:
 
 - `docs/how-dkg-works/` for the system model and implementation architecture.
 - `docs/use-dkg/` for installation, connection, publishing/querying, operation, and troubleshooting workflows.
-- `docs/reference/` for exact lookup pointers to package-owned contracts.
+- `docs/references/` for exact lookup pointers to package-owned contracts.
 - `docs/agent-context/` for agent projections derived from the current corpus.
 
 Diataxis-style categories stay as internal `doc_type` metadata for generation, retrieval, and review.

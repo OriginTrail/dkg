@@ -22,7 +22,6 @@ These pages explain the system model and implementation architecture behind the 
 | V10 direction and staged rollout | [Roadmap and Convergence](roadmap-and-convergence.md) |
 | x402 and paid access direction | [Knowledge Commerce](knowledge-commerce.md) |
 | Runtime components | [Node Architecture](node-architecture.md) |
-| Assertion and memory transitions | [Memory Lifecycle](memory-lifecycle.md) |
 | Reliable short-message substrate | [Universal Messenger](universal-messenger.md) |
 | Peer-to-peer resilience | [P2P Resilience](p2p-resilience.md) |
 

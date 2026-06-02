@@ -3,9 +3,10 @@
 Use these current V10 docs first:
 
 - docs/README.md
+- docs/getting-started/quickstart.md
+- docs/getting-started/dkg-v10-t-c.md
+- docs/active-now/dkg-v10-bounty.md
 - docs/use-dkg/README.md
-- docs/use-dkg/install-node.md
-- docs/use-dkg/connect-agent.md
 - docs/use-dkg/publish-and-query.md
 - docs/use-dkg/run-node.md
 - docs/use-dkg/funding.md
@@ -28,21 +29,16 @@ Use these current V10 docs first:
 - docs/how-dkg-works/conviction-and-economics.md
 - docs/how-dkg-works/knowledge-commerce.md
 - docs/how-dkg-works/node-architecture.md
-- docs/how-dkg-works/memory-lifecycle.md
 - docs/how-dkg-works/universal-messenger.md
 - docs/how-dkg-works/p2p-resilience.md
-- docs/reference/README.md
-- docs/reference/cli.md
-- docs/reference/api.md
-- docs/reference/packages.md
-- docs/reference/glossary.md
-- docs/reference/node-skill.md
-- docs/reference/origintrail-dkg-v10-bounty-program.md
-- docs/reference/origintrail-decentralized-knowledge-graph-dkg-v10-terms-and-conditions.md
+- docs/references/cli.md
+- docs/references/api.md
+- docs/references/packages.md
+- docs/references/glossary.md
+- docs/references/node-skill.md
 - docs/agent-context/README.md
 - docs/agent-context/context-pack.md
 - docs/agent-context/invariants.md
-- docs/agent-context/task-packs/install-connect.md
 - docs/agent-context/task-packs/publish-query.md
 - docs/agent-context/task-packs/operate-troubleshoot.md
 

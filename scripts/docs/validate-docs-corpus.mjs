@@ -14,18 +14,20 @@ const IGNORED_DIRS = new Set([
 ]);
 const CURRENT_PUBLIC_PATHS = [
   "docs/README.md",
+  "docs/getting-started/",
+  "docs/active-now/",
   "docs/how-dkg-works/",
   "docs/use-dkg/",
-  "docs/reference/",
+  "docs/references/",
   "docs/agent-context/",
 ];
 const OFFICIAL_IMPORTED_REFERENCE_DOCS = new Set([
-  "docs/reference/origintrail-dkg-v10-bounty-program.md",
-  "docs/reference/origintrail-decentralized-knowledge-graph-dkg-v10-terms-and-conditions.md",
+  "docs/active-now/dkg-v10-bounty.md",
+  "docs/getting-started/dkg-v10-t-c.md",
 ]);
 const OFFICIAL_IMPORTED_BLOBS = new Map([
-  ["docs/reference/origintrail-dkg-v10-bounty-program.md", "b5a997967d8a56593d614c59554fd1d4bc9677b5"],
-  ["docs/reference/origintrail-decentralized-knowledge-graph-dkg-v10-terms-and-conditions.md", "5f4c6f7488293d85db93074d52e02c439b6684ea"],
+  ["docs/active-now/dkg-v10-bounty.md", "14de40536b48df51cb378455ffe01fe0a4940442"],
+  ["docs/getting-started/dkg-v10-t-c.md", "d192eea991ec211c9e574c0cf624779ce5995d5b"],
   ["docs/.gitbook/assets/dkg-memory-hr.png", "873e852da840b437889c3b2e78c85c4300e166dd"],
   ["docs/.gitbook/assets/dkg_v10_bounty_program_high_res_white_bg.png", "7c41a77e7792df4dfde8e3ca262067d662083edb"],
 ]);

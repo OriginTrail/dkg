@@ -9,7 +9,7 @@
 
 This is the recipe. Architecture rationale lives in
 [`docs/how-dkg-works/universal-messenger.md`](../../docs/how-dkg-works/universal-messenger.md); per-operator relay/API surfaces live in
-[`docs/use-dkg/relays-and-peers.md`](../../docs/use-dkg/relays-and-peers.md) and [`docs/reference/api.md`](../../docs/reference/api.md). When in doubt,
+[`docs/use-dkg/relays-and-peers.md`](../../docs/use-dkg/relays-and-peers.md) and [`docs/references/api.md`](../../docs/references/api.md). When in doubt,
 follow what the chat migration did — it's the worked example.
 
 ## The pitch

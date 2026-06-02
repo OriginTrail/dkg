@@ -13,9 +13,8 @@ Use these routes when you want a node running, an agent connected, memory operat
 
 | Goal | Route |
 | --- | --- |
-| Run a standalone node | [Install a Node](install-node.md) |
-| Start, stop, and inspect the daemon | [Run a Node](run-node.md) |
-| Connect MCP, Hermes, or OpenClaw | [Connect an Agent](connect-agent.md) |
+| Install DKG, connect an agent, or run a standalone node | [Quickstart](../getting-started/quickstart.md) |
+| Start, stop, and inspect the daemon | [Daemon Lifecycle](run-node.md) |
 | Write, publish, and query knowledge | [Publish and Query](publish-and-query.md) |
 | Fund testnet wallets | [Funding](funding.md) |
 | Manage Publishing Conviction Accounts | [Publishing Conviction](publishing-conviction.md) |
@@ -26,9 +25,11 @@ Use these routes when you want a node running, an agent connected, memory operat
 | Migrate a git checkout to npm auto-update | [Migrate to npm](migrate-to-npm.md) |
 | Diagnose common failures | [Troubleshooting](troubleshooting.md) |
 
-## Default install shape
+## Setup entry point
 
-Most users start with the umbrella CLI:
+Use [Quickstart](../getting-started/quickstart.md) for first-time setup. It covers Hermes, OpenClaw, MCP-aware clients, and standalone node installation without splitting the same commands across multiple pages.
+
+The default packaged shape is:
 
 ```bash
 npm install -g @origintrail-official/dkg

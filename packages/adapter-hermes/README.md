@@ -378,7 +378,7 @@ python -m py_compile packages/adapter-hermes/hermes-plugin/__init__.py packages/
 
 ## More Setup Detail
 
-See [Hermes setup](../../docs/use-dkg/connect-agent.md).
+See [Quickstart](../../docs/getting-started/quickstart.md).
 
 ## License
 

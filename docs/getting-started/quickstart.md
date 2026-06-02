@@ -1,4 +1,8 @@
 ---
+status: current
+version: v10
+audience: human+agent
+doc_type: how-to
 description: >-
   Give your AI agent a persistent and structured memory on the DKG in under 10
   minutes

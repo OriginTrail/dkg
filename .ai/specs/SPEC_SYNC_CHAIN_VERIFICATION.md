@@ -1,7 +1,7 @@
 # Sync Chain Verification (Tier 2)
 
 **Status**: Draft
-**Depends on**: [Memory Lifecycle](../../docs/how-dkg-works/memory-lifecycle.md)
+**Depends on**: [Memory Layers](../../docs/how-dkg-works/memory-layers.md)
 
 ---
 

@@ -28,9 +28,7 @@
 
 ## Use DKG
 
-* [Install DKG Node](use-dkg/install-node.md)
 * [Daemon Lifecycle](use-dkg/run-node.md)
-* [Connect an Agent](use-dkg/connect-agent.md)
 * [Publish & Query](use-dkg/publish-and-query.md)
 * [Funding](use-dkg/funding.md)
 * [Publishing Conviction](use-dkg/publishing-conviction.md)
@@ -45,7 +43,6 @@
 
 * [Context Pack](agent-context/context-pack.md)
 * [Invariants](agent-context/invariants.md)
-* [Install & Connect](agent-context/task-packs/install-connect.md)
 * [Publish & Query](agent-context/task-packs/publish-query.md)
 * [Operate & Troubleshoot](agent-context/task-packs/operate-troubleshoot.md)
 
