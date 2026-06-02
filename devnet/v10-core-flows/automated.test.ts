@@ -319,11 +319,22 @@ afterAll(() => {
 describe('1. chained sign-at-creation assertion lifecycle', () => {
   it('all 4 standalone routes (create/write/finalize/promote) emit memory_graph_changed in order', async () => {
     const assertionName = `core-flows-lifecycle-${Date.now().toString(36)}`;
+    // Only the four standalone-route lifecycle operations are under test.
+    // A core also emits `verified_memory_finalized` whenever it promotes a
+    // peer-published KA to VM — including via the periodic chain-reconcile
+    // sweep, which can fire mid-test for unrelated bootstrap KAs in this same
+    // CG. Those are correct background events but pollute a CG-only filter, so
+    // scope capture to the lifecycle ops this test actually asserts.
+    const LIFECYCLE_OPS = new Set([
+      'assertion_created', 'assertion_written', 'assertion_finalized', 'assertion_promoted',
+    ]);
     const sse = openSseAndCollect(
       NODE1_API,
       state.node1Token,
       (event, data) =>
-        event === 'memory_graph_changed' && data?.contextGraphId === CONTEXT_GRAPH,
+        event === 'memory_graph_changed' &&
+        data?.contextGraphId === CONTEXT_GRAPH &&
+        LIFECYCLE_OPS.has(data?.operation),
     );
     await sleep(500); // SSE warm-up
 
