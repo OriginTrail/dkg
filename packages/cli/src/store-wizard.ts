@@ -351,7 +351,14 @@ export async function applyStoreFlagsToConfig(
   // brings it up at boot). Write the block and return.
   if (backend === 'oxigraph-server') {
     const existing = await load();
-    await save({ ...existing, store: { backend: 'oxigraph-server', options: {} } });
+    // Preserve any existing managed-server overrides (port/location/cacheDir)
+    // that planManagedOxigraph reads at boot — re-running setup with
+    // `--store oxigraph-server` must not silently reset them to defaults.
+    const prevOptions =
+      existing.store?.backend === 'oxigraph-server' && existing.store.options
+        ? existing.store.options
+        : {};
+    await save({ ...existing, store: { backend: 'oxigraph-server', options: prevOptions } });
     log('  Store configured: oxigraph-server (daemon-managed local server).');
     return;
   }

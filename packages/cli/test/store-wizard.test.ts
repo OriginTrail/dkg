@@ -549,6 +549,29 @@ describe('applyStoreFlagsToConfig', () => {
     ).rejects.toThrow(/oxigraph, blazegraph, sparql-http/);
   });
 
+  it('persists a daemon-managed oxigraph-server block (no URL required)', async () => {
+    const store = newMockConfig(baseConfig);
+    const io = mockConfigIO(store);
+    await applyStoreFlagsToConfig({ ...io, storeFlag: 'oxigraph-server', log: () => {} });
+    expect(store.saved).toHaveLength(1);
+    expect(store.saved[0].store).toEqual({ backend: 'oxigraph-server', options: {} });
+  });
+
+  it('preserves existing oxigraph-server overrides on a --store oxigraph-server re-run', async () => {
+    const store = newMockConfig({
+      ...baseConfig,
+      store: { backend: 'oxigraph-server', options: { port: 9999, location: '/data/oxi' } },
+    } as DkgConfig);
+    const io = mockConfigIO(store);
+    await applyStoreFlagsToConfig({ ...io, storeFlag: 'oxigraph-server', log: () => {} });
+    expect(store.saved).toHaveLength(1);
+    // port/location overrides (read by planManagedOxigraph at boot) survive.
+    expect(store.saved[0].store).toEqual({
+      backend: 'oxigraph-server',
+      options: { port: 9999, location: '/data/oxi' },
+    });
+  });
+
   it('persists oxigraph-server with no URL required (daemon-managed)', async () => {
     const store = newMockConfig(baseConfig);
     const io = mockConfigIO(store);

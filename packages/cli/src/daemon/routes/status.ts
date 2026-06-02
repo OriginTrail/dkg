@@ -58,6 +58,7 @@ const execFileAsync = promisify(execFile);
 import { enrichEvmError, MockChainAdapter, resolveRpcUrls } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
+import { DEFAULT_OXIGRAPH_PORT } from '../oxigraph-managed.js';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
 import {
@@ -666,7 +667,16 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
               : null;
             return url;
           })()
-        : null,
+        : config.store?.backend === 'oxigraph-server'
+          // Managed local server: report its loopback endpoint so `dkg status`
+          // renders the external-store health path (storeQuads/unreachable)
+          // instead of printing it like a quad-less local store.
+          ? (() => {
+              const opts = (config.store?.options ?? {}) as Record<string, unknown>;
+              const port = typeof opts.port === 'number' ? opts.port : DEFAULT_OXIGRAPH_PORT;
+              return `http://127.0.0.1:${port}/query`;
+            })()
+          : null,
       // A managed `oxigraph-server` keeps `config.store.backend` as
       // "oxigraph-server" (so it persists/labels correctly), but its quad
       // count is still worth surfacing — it's the only store-health signal
