@@ -88,7 +88,8 @@ api_call() {
   local node="$1" method="$2" path="$3" data="${4:-}"
   local port; port=$(node_port "$node")
   local token; token=$(node_token "$node")
-  local -a curl_args=(-sS --max-time 240 -X "$method" -H "Authorization: Bearer $token" -H 'Content-Type: application/json')
+  local max_time="${API_MAX_TIME:-240}"
+  local -a curl_args=(-sS --max-time "$max_time" -X "$method" -H "Authorization: Bearer $token" -H 'Content-Type: application/json')
   [ -n "$data" ] && curl_args+=(-d "$data")
   curl_args+=("http://127.0.0.1:${port}${path}")
   curl "${curl_args[@]}"
@@ -198,15 +199,25 @@ sparql_count() {
 # distinguish that from a real zero count. NEVER collapses errors to 0.
 count_triples() {
   local node="$1"
-  api_call "$node" POST /api/shared-memory/catchup "$(cat <<EOF
+  API_MAX_TIME="${COUNT_CATCHUP_MAX_TIME:-8}" api_call "$node" POST /api/shared-memory/catchup "$(cat <<EOF
 { "contextGraphId": "$CG_ID" }
 EOF
 )" >/dev/null 2>&1 || true
-  local q; q=$(api_call "$node" POST /api/query "$(cat <<EOF
+  local q; q=$(API_MAX_TIME="${COUNT_QUERY_MAX_TIME:-8}" api_call "$node" POST /api/query "$(cat <<EOF
 { "contextGraphId": "$CG_ID", "graphSuffix": "_shared_memory",
   "sparql": "SELECT (COUNT(*) AS ?n) WHERE { ?s <http://schema.org/name> ?o }" }
 EOF
-)")
+)" 2>/dev/null || true)
+  sparql_count "$q"
+}
+
+local_count_triples() {
+  local node="$1"
+  local q; q=$(API_MAX_TIME="${COUNT_QUERY_MAX_TIME:-12}" api_call "$node" POST /api/query "$(cat <<EOF
+{ "contextGraphId": "$CG_ID", "graphSuffix": "_shared_memory",
+  "sparql": "SELECT (COUNT(*) AS ?n) WHERE { ?s <http://schema.org/name> ?o }" }
+EOF
+)" 2>/dev/null || true)
   sparql_count "$q"
 }
 
@@ -289,7 +300,7 @@ act "5. Assert M1 sees all 6, M2 sees ≤ 3"
 wait_for_count_or_steady() {
   local node="$1" who="$2" target="$3"
   local last_read=""
-  for _ in $(seq 1 30); do
+  for _ in $(seq 1 "${REVOCATION_STEADY_POLLS:-12}"); do
     # `count_triples` is idempotent: it triggers a catchup and then
     # reads the SPARQL count. Re-invoking it is the retry loop.
     last_read=$(count_triples "$node")
@@ -305,10 +316,24 @@ wait_for_count_or_steady() {
   printf '%s\n' "${last_read:-}"
 }
 
-log "Polling for post-revocation steady state (up to 30s per peer)…"
+wait_for_local_count_at_least() {
+  local node="$1" who="$2" target="$3"
+  local last_read=""
+  for _ in $(seq 1 "${REVOCATION_LOCAL_READ_POLLS:-6}"); do
+    last_read=$(local_count_triples "$node")
+    if [ -n "$last_read" ] && [ "$last_read" -ge "$target" ] 2>/dev/null; then
+      printf '%s\n' "$last_read"
+      return 0
+    fi
+    sleep 1
+  done
+  fail "$who local read never reached ≥$target triples (last count: \"${last_read:-}\")"
+}
+
+log "Polling for post-revocation steady state (bounded short catchup/query probes)…"
 M1_FINAL=$(wait_for_count_or_steady "$M1_NODE" "M1" 6)
 M2_FINAL=$(wait_for_count_or_steady "$M2_NODE" "M2" 6)
-CURATOR_FINAL=$(count_triples "$CURATOR_NODE")
+CURATOR_FINAL=$(wait_for_local_count_at_least "$CURATOR_NODE" "Curator" 6)
 
 # Codex PR #621 R4: a read failure on M2 must NOT be silently treated
 # as "M2 only sees the first batch". Distinguish read errors (empty

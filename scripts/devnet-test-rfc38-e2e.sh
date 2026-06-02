@@ -128,6 +128,7 @@ log "Outsider: $OUTSIDER_AGENT (node $OUTSIDER_NODE)"
 STAMP=$(date +%s)
 CG_SLUG="e2e-curated-${STAMP}"
 CG_ID="${CURATOR_AGENT}/${CG_SLUG}"
+PUBLISHED_ROOT="urn:e2e:${STAMP}/alice"
 
 # ===========================================================================
 # ACT 1 — Edge curator publishes a curated CG to VM (LU-5)
@@ -170,7 +171,7 @@ EOF
 sleep 2
 
 # Write 12 quads — 6 root entities × 2 facts each. Gives us multiple
-# leaves and multiple KAs (one per root entity) in the publish.
+# leaves; the publish below anchors one explicit root.
 QUADS_PAYLOAD=$(node -e "
   const stamp = '${STAMP}';
   const cgId = '${CG_ID}';
@@ -200,11 +201,17 @@ WRITTEN=$(parse_json "$WRITE_RESP" '.triplesWritten')
 [ "$WRITTEN" = "12" ] || fail "expected 12 triples written, got '$WRITTEN' — response: $WRITE_RESP"
 log "✓ 12 triples written to curator's SWM (op=$(parse_json "$WRITE_RESP" '.shareOperationId'))"
 
+PUBLISHED_QUADS=$(QUADS_PAYLOAD="$QUADS_PAYLOAD" PUBLISHED_ROOT="$PUBLISHED_ROOT" node -e '
+  const payload = JSON.parse(process.env.QUADS_PAYLOAD);
+  payload.quads = payload.quads.filter((quad) => quad.subject === process.env.PUBLISHED_ROOT);
+  console.log(JSON.stringify(payload));
+')
+
 sleep 2
 
 log "Publishing curated CG to VM..."
 PUBLISH_RESP=$(api_call "$CURATOR_NODE" POST /api/shared-memory/publish "$(cat <<EOF
-{ "contextGraphId": "$CG_ID", "selection": "all", "clearAfter": false }
+{ "contextGraphId": "$CG_ID", "selection": { "rootEntities": ["$PUBLISHED_ROOT"] }, "clearAfter": false }
 EOF
 )")
 log "publish response: $PUBLISH_RESP"
@@ -346,15 +353,15 @@ act 3 "Member verifies the on-chain batch post-decrypt (LU-8)"
 # The post-decrypt verification path is what an outsider / late
 # joiner runs: they fetch ciphertext, decrypt it, get the original
 # plaintext leaves, and re-hash them. We simulate that by re-passing
-# the 12 user triples we wrote earlier. The publisher's data graph
+# the user triples for the published root. The publisher's data graph
 # also contains auto-attached `trustLevel` annotations (one per root
 # entity) that are NOT part of the merkle commitment — relying on
 # the "infer-from-data-graph" fallback would include them and the
 # recompute would fail. Explicit-quads input is the correct
 # semantic for "member verifies decrypted batch."
-log "Member calls verify-batch with explicit decrypted quads (12 user triples)..."
-VERIFY_BODY=$(QUADS_PAYLOAD="$QUADS_PAYLOAD" MERKLE_ROOT="$MERKLE_ROOT" PUBLISH_KC="$PUBLISH_KC" node -e "
-  const payload = JSON.parse(process.env.QUADS_PAYLOAD);
+log "Member calls verify-batch with explicit decrypted quads for the published root..."
+VERIFY_BODY=$(PUBLISHED_QUADS="$PUBLISHED_QUADS" MERKLE_ROOT="$MERKLE_ROOT" PUBLISH_KC="$PUBLISH_KC" node -e "
+  const payload = JSON.parse(process.env.PUBLISHED_QUADS);
   console.log(JSON.stringify({
     contextGraphId: payload.contextGraphId,
     expectedMerkleRoot: process.env.MERKLE_ROOT,

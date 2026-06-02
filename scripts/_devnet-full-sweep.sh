@@ -12,22 +12,25 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SCRIPTS_DIR="$REPO_ROOT/scripts"
 RESULTS_DIR="${RESULTS_DIR:-$REPO_ROOT/.devnet/full-sweep/$(date +%s)}"
 mkdir -p "$RESULTS_DIR"
+DEVNET_DIR="${DEVNET_DIR:-$REPO_ROOT/.devnet}"
+API_PORT_BASE="${API_PORT_BASE:-9201}"
+NUM_NODES="${NUM_NODES:-6}"
+AUTH=$(grep -v '^#' "$DEVNET_DIR/node1/auth.token" 2>/dev/null | head -1 || echo "")
 
-# Order matters for the stateful ones: revocation / unclean-restart mutate
-# the devnet in ways subsequent scripts have to tolerate. Random-sampling
-# and soak run last so a single chain advance doesn't poison the in-flight
-# challenges of the cheaper scripts.
+# Order matters: run baseline workflow scripts before the heavy/destructive
+# RFC-38 stress/restart cases. Random-sampling and soak run last so a single
+# chain advance doesn't poison the in-flight challenges of the cheaper scripts.
 SCRIPTS=(
-  "rfc38-curator-offline-midbatch"
-  "rfc38-revocation"
-  "rfc38-prereg-bytecap-stress"
-  "rfc38-unclean-restart"
   "publish"
   "sharing"
   "swm-ownership-restart"
   "invite-flow"
   "cli-invite"
   "reject-flow"
+  "rfc38-curator-offline-midbatch"
+  "rfc38-revocation"
+  "rfc38-prereg-bytecap-stress"
+  "rfc38-unclean-restart"
   "random-sampling"
 )
 
@@ -38,6 +41,59 @@ if [ "${SOAK:-0}" = "1" ]; then
 fi
 
 declare -a RESULTS
+
+node_status_code() {
+  local n="$1"
+  local port=$((API_PORT_BASE + n - 1))
+  local code
+  code=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $AUTH" \
+    "http://127.0.0.1:$port/api/status" 2>/dev/null || echo "000")
+  case "$code" in
+    200) echo "200" ;;
+    *) echo "000" ;;
+  esac
+}
+
+ensure_nodes_healthy() {
+  local label="$1"
+  local down="" n code port
+  for n in $(seq 1 "$NUM_NODES"); do
+    code=$(node_status_code "$n")
+    port=$((API_PORT_BASE + n - 1))
+    [ "$code" = "200" ] || down="${down} node${n}(port=$port,http=$code)"
+  done
+  if [ -z "$down" ]; then
+    echo "[sweep] Health OK before $label — all $NUM_NODES nodes responding"
+    return 0
+  fi
+
+  echo "[sweep] Health repair before $label — restarting:${down}"
+  for n in $(seq 1 "$NUM_NODES"); do
+    code=$(node_status_code "$n")
+    if [ "$code" != "200" ]; then
+      "$REPO_ROOT/scripts/devnet.sh" restart-node "$n" || return 1
+    fi
+  done
+
+  local deadline=$(( $(date +%s) + ${DEVNET_HEALTH_REPAIR_TIMEOUT_SECONDS:-90} ))
+  while true; do
+    down=""
+    for n in $(seq 1 "$NUM_NODES"); do
+      code=$(node_status_code "$n")
+      port=$((API_PORT_BASE + n - 1))
+      [ "$code" = "200" ] || down="${down} node${n}(port=$port,http=$code)"
+    done
+    if [ -z "$down" ]; then
+      echo "[sweep] Health repair complete before $label — all $NUM_NODES nodes responding"
+      return 0
+    fi
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      echo "[sweep] Health repair failed before $label. Still down:${down}"
+      return 1
+    fi
+    sleep 2
+  done
+}
 
 START_TS=$(date +%s)
 echo "[sweep] Run started at $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
@@ -59,6 +115,18 @@ for id in "${SCRIPTS[@]}"; do
   if [ ! -x "$SCRIPTS_DIR/$script" ]; then
     echo "[sweep] MISSING: $script"
     RESULTS+=("$id:MISSING")
+    continue
+  fi
+
+  if [ -z "$AUTH" ]; then
+    echo "[sweep] FAIL: no auth token found at $DEVNET_DIR/node1/auth.token"
+    RESULTS+=("$id:FAIL:auth")
+    continue
+  fi
+
+  if ! ensure_nodes_healthy "$id"; then
+    echo "[sweep] FAIL: $id (health repair failed before script)"
+    RESULTS+=("$id:FAIL:health")
     continue
   fi
 

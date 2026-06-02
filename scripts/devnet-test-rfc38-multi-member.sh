@@ -160,7 +160,7 @@ log "✓ 6 triples written to SWM"
 sleep 2
 
 PUB_RESP=$(api_call "$CURATOR_NODE" POST /api/shared-memory/publish "$(cat <<EOF
-{ "contextGraphId": "$CG_ID", "selection": "all", "clearAfter": false }
+{ "contextGraphId": "$CG_ID", "selection": { "rootEntities": ["urn:mm:${STAMP}/alpha"] }, "clearAfter": false }
 EOF
 )")
 log "publish response: $PUB_RESP"
@@ -179,13 +179,14 @@ log "✓ merkleRoot: $MERKLE_ROOT"
 # ===========================================================================
 act "3. All non-curator members independently verify-batch"
 # ===========================================================================
-VERIFY_BODY=$(QUADS_PAYLOAD="$QUADS_PAYLOAD" MERKLE_ROOT="$MERKLE_ROOT" KC="$KC" node -e "
+VERIFY_BODY=$(QUADS_PAYLOAD="$QUADS_PAYLOAD" MERKLE_ROOT="$MERKLE_ROOT" KC="$KC" STAMP="$STAMP" node -e "
   const p = JSON.parse(process.env.QUADS_PAYLOAD);
+  const root = 'urn:mm:' + process.env.STAMP + '/alpha';
   console.log(JSON.stringify({
     contextGraphId: p.contextGraphId,
     expectedMerkleRoot: process.env.MERKLE_ROOT,
     batchId: process.env.KC,
-    quads: p.quads
+    quads: p.quads.filter((quad) => quad.subject === root)
   }));
 ")
 

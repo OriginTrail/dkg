@@ -1,5 +1,6 @@
 import { test, expect } from '../../fixtures/base.js';
 import { isDevnetAvailable, devnetApiFetch, waitForDevnetStatus } from '../../helpers/devnet.js';
+import { listContextGraphs, pickWritableContextGraph } from '../../helpers/devnet-publish.js';
 
 test.describe.configure({ mode: 'serial' });
 
@@ -42,10 +43,9 @@ test.describe('Inter-node messaging (devnet API)', () => {
 
 test.describe('Ownership transfer UI prerequisites (devnet API)', () => {
   test('participants list is readable for first context graph', async () => {
-    const cgs = await devnetApiFetch('/api/context-graphs');
-    const { contextGraphs } = (await cgs.json()) as { contextGraphs: Array<{ id: string }> };
-    test.skip(contextGraphs.length === 0, 'No CGs');
-    const cgId = contextGraphs[0]!.id;
+    const cg = pickWritableContextGraph(await listContextGraphs(1));
+    test.skip(!cg, 'No writable CGs');
+    const cgId = cg.id;
     const res = await devnetApiFetch(`/api/context-graph/${encodeURIComponent(cgId)}/participants`);
     expect(res.ok).toBe(true);
   });

@@ -129,8 +129,8 @@ CG_URI="${CG_LOCAL_ID}"
 
 # --- 4. Write some quads into SWM -------------------------------------------
 
-# 3 entities × 2 triples = 6 quads = small enough that we get exactly 3 KAs
-# (one per root entity) when we publish.
+# 3 entities × 2 triples = 6 quads. The synchronous publish endpoint is
+# intentionally single-root, so we publish one explicit root below.
 WRITE_RESP=$(api_call "$EDGE_CURATOR_NODE" POST /api/shared-memory/write "$(cat <<EOF
 {
   "contextGraphId": "${CG_URI}",
@@ -156,7 +156,7 @@ log "Publishing curated CG to VM..."
 PUBLISH_RESP=$(api_call "$EDGE_CURATOR_NODE" POST /api/shared-memory/publish "$(cat <<EOF
 {
   "contextGraphId": "${CG_URI}",
-  "selection": "all",
+  "selection": { "rootEntities": ["urn:lu5:entity:${STAMP}/alice"] },
   "clearAfter": false
 }
 EOF

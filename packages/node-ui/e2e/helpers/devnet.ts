@@ -78,15 +78,17 @@ export async function devnetApiFetch(
 export async function waitForDevnetStatus(
   nodeNum = 1,
   timeoutMs = 30_000,
+  options: { requireIdentity?: boolean } = {},
 ): Promise<{ identityId: string; synced: boolean }> {
+  const requireIdentity = options.requireIdentity ?? true;
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
       const res = await devnetApiFetch('/api/status', { nodeNum });
       if (res.ok) {
         const json = (await res.json()) as { identityId?: string; synced?: boolean };
-        if (json.identityId && BigInt(json.identityId) > 0n) {
-          return { identityId: json.identityId, synced: !!json.synced };
+        if (!requireIdentity || (json.identityId && BigInt(json.identityId) > 0n)) {
+          return { identityId: json.identityId ?? '0', synced: !!json.synced };
         }
       }
     } catch {

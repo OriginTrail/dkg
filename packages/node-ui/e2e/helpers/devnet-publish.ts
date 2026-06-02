@@ -11,6 +11,13 @@ export interface PublishQuads {
   graph?: string;
 }
 
+export interface DevnetContextGraph {
+  id: string;
+  name: string;
+  isSystem?: boolean;
+  synced?: boolean;
+}
+
 export function buildTestQuads(cgId: string, stamp: number, label: string): PublishQuads[] {
   const subject = `urn:e2e:ui:entity:${stamp}`;
   const graph = `did:dkg:context-graph:${cgId}`;
@@ -30,11 +37,19 @@ export function buildTestQuads(cgId: string, stamp: number, label: string): Publ
   ];
 }
 
-export async function listContextGraphs(nodeNum = 1): Promise<Array<{ id: string; name: string }>> {
+export async function listContextGraphs(nodeNum = 1): Promise<DevnetContextGraph[]> {
   const res = await devnetApiFetch('/api/context-graphs', { nodeNum });
   if (!res.ok) throw new Error(`context-graphs: ${res.status}`);
-  const json = (await res.json()) as { contextGraphs: Array<{ id: string; name: string }> };
+  const json = (await res.json()) as { contextGraphs: DevnetContextGraph[] };
   return json.contextGraphs ?? [];
+}
+
+export function pickWritableContextGraph(cgs: DevnetContextGraph[]): DevnetContextGraph | undefined {
+  return (
+    cgs.find((cg) => cg.id === 'devnet-test') ??
+    cgs.find((cg) => !cg.isSystem && cg.synced !== false) ??
+    cgs.find((cg) => !cg.isSystem)
+  );
 }
 
 export async function createWmAssertion(opts: {

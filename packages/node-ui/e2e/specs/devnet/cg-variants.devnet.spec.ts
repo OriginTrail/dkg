@@ -3,7 +3,12 @@
  */
 import { test, expect } from '../../fixtures/base.js';
 import { isDevnetAvailable, waitForDevnetStatus, devnetApiFetch } from '../../helpers/devnet.js';
-import { listContextGraphs, buildTestQuads, createWmAssertion } from '../../helpers/devnet-publish.js';
+import {
+  listContextGraphs,
+  buildTestQuads,
+  createWmAssertion,
+  pickWritableContextGraph,
+} from '../../helpers/devnet-publish.js';
 
 test.describe.configure({ mode: 'serial' });
 
@@ -30,15 +35,15 @@ test.describe('CG variants — edge and core nodes', () => {
 
   test('edge node (node5) can create WM assertion when available', async () => {
     test.skip(!isDevnetAvailable(5), 'Devnet node5 (edge) not running');
-    await waitForDevnetStatus(5);
+    await waitForDevnetStatus(5, 30_000, { requireIdentity: false });
     const cgs = await listContextGraphs(5);
-    test.skip(cgs.length === 0, 'No CGs on edge node');
-    const cgId = cgs[0]!.id;
+    const cg = pickWritableContextGraph(cgs);
+    test.skip(!cg, 'No writable CGs on edge node');
     const stamp = Date.now();
     const res = await createWmAssertion({
-      contextGraphId: cgId,
+      contextGraphId: cg.id,
       name: `e2e-edge-wm-${stamp}`,
-      quads: buildTestQuads(cgId, stamp, `Edge WM ${stamp}`),
+      quads: buildTestQuads(cg.id, stamp, `Edge WM ${stamp}`),
       nodeNum: 5,
     });
     expect(res.ok).toBe(true);
@@ -46,13 +51,13 @@ test.describe('CG variants — edge and core nodes', () => {
 
   test('core node (node1) can create WM assertion', async () => {
     const cgs = await listContextGraphs(1);
-    test.skip(cgs.length === 0, 'No CGs on core');
-    const cgId = cgs[0]!.id;
+    const cg = pickWritableContextGraph(cgs);
+    test.skip(!cg, 'No writable CGs on core');
     const stamp = Date.now();
     const res = await createWmAssertion({
-      contextGraphId: cgId,
+      contextGraphId: cg.id,
       name: `e2e-core-wm-${stamp}`,
-      quads: buildTestQuads(cgId, stamp, `Core WM ${stamp}`),
+      quads: buildTestQuads(cg.id, stamp, `Core WM ${stamp}`),
       nodeNum: 1,
     });
     expect(res.ok).toBe(true);

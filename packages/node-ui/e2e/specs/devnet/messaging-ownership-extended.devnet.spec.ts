@@ -11,6 +11,7 @@ import {
   listContextGraphs,
   runWmSwmVmPipeline,
   buildTestQuads,
+  pickWritableContextGraph,
 } from '../../helpers/devnet-publish.js';
 
 test.describe.configure({ mode: 'serial' });
@@ -50,16 +51,18 @@ test.describe('Prolonged inter-node messaging soak', () => {
 test.describe('Ownership transfer + delegated KA update (API)', () => {
   test('curator can list and mutate participants on owned CG', async () => {
     const cgs = await listContextGraphs(1);
-    test.skip(cgs.length === 0, 'No CGs');
-    const cgId = cgs[0]!.id;
+    const cg = pickWritableContextGraph(cgs);
+    test.skip(!cg, 'No writable CGs');
+    const cgId = cg.id;
     const list = await devnetApiFetch(`/api/context-graph/${encodeURIComponent(cgId)}/participants`);
     expect(list.ok).toBe(true);
   });
 
   test('KA update endpoint accepts quads after WM→VM pipeline', async () => {
     const cgs = await listContextGraphs(1);
-    test.skip(cgs.length === 0, 'No CGs');
-    const cgId = cgs[0]!.id;
+    const cg = pickWritableContextGraph(cgs);
+    test.skip(!cg, 'No writable CGs');
+    const cgId = cg.id;
     await runWmSwmVmPipeline({ contextGraphId: cgId });
     const stamp = Date.now();
     const res = await devnetApiFetch('/api/update', {

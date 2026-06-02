@@ -1,5 +1,6 @@
 import { test, expect } from '../../fixtures/base.js';
 import { isDevnetAvailable, devnetApiFetch, waitForDevnetStatus } from '../../helpers/devnet.js';
+import { listContextGraphs, pickWritableContextGraph } from '../../helpers/devnet-publish.js';
 
 test.describe.configure({ mode: 'serial' });
 
@@ -31,10 +32,9 @@ test.describe('MCP server tools (devnet API smoke)', () => {
   });
 
   test('SPARQL query endpoint returns bindings for devnet CG', async () => {
-    const cgs = await devnetApiFetch('/api/context-graphs');
-    const { contextGraphs } = (await cgs.json()) as { contextGraphs: Array<{ id: string }> };
-    test.skip(contextGraphs.length === 0, 'No CGs');
-    const cgId = contextGraphs[0]!.id;
+    const cg = pickWritableContextGraph(await listContextGraphs(1));
+    test.skip(!cg, 'No writable CGs');
+    const cgId = cg.id;
     const res = await devnetApiFetch('/api/query', {
       method: 'POST',
       body: JSON.stringify({
@@ -49,10 +49,9 @@ test.describe('MCP server tools (devnet API smoke)', () => {
   });
 
   test('context graph manifest endpoint responds', async () => {
-    const cgs = await devnetApiFetch('/api/context-graphs');
-    const { contextGraphs } = (await cgs.json()) as { contextGraphs: Array<{ id: string }> };
-    test.skip(contextGraphs.length === 0, 'No CGs');
-    const cgId = contextGraphs[0]!.id;
+    const cg = pickWritableContextGraph(await listContextGraphs(1));
+    test.skip(!cg, 'No writable CGs');
+    const cgId = cg.id;
     const res = await devnetApiFetch(`/api/context-graph/${encodeURIComponent(cgId)}/manifest`);
     expect([200, 404]).toContain(res.status);
   });

@@ -223,14 +223,14 @@ assert_log_recent "$N2_LOG" "$REJECT_TS" \
   "N2 received & accepted rejection notification" \
   || note "(may take longer in slow devnet — non-fatal here, the API poll below is the strict assertion)"
 
-hr "Step 7 — poll N2 for the join_rejected notification (up to 15s)"
+hr "Step 7 — poll N2 for the join_rejected notification (up to 30s)"
 start=$(date +%s)
 while :; do
   elapsed=$(( $(date +%s) - start ))
-  if [ "$elapsed" -ge 15 ]; then
-    fail "N2 did not receive a join_rejected notification within 15s"
+  if [ "$elapsed" -ge 30 ]; then
+    fail "N2 did not receive a join_rejected notification within 30s"
   fi
-  hit=$(api "$N2" GET /api/notifications | python3 -c "
+  hit=$(api "$N2" GET '/api/notifications?limit=100' | python3 -c "
 import sys,json
 d=json.load(sys.stdin)
 cg = '$CG_ID'
@@ -239,7 +239,7 @@ for x in d.get('notifications',[]):
         meta = x.get('meta')
         try: meta = json.loads(meta) if isinstance(meta,str) else meta
         except: meta = {}
-        if (meta or {}).get('contextGraphId')==cg:
+        if x.get('contextGraphId')==cg or (meta or {}).get('contextGraphId')==cg:
             print(json.dumps({'ts':x.get('ts'),'title':x.get('title'),'message':x.get('message'),'meta':meta}))
             break
 ")

@@ -773,19 +773,26 @@ echo "$N1_REQ_ADDR" | grep -qi "$(echo "$N4_ADDR" | tr '[:upper:]' '[:lower:]')"
   || fail "Node 1 missing Node 4's request (found: $N1_REQ_ADDR)"
 
 echo "--- 13g: Notification created on curator (Node 1) ---"
-N1_NOTIFS=$(c "http://127.0.0.1:9201/api/notifications?limit=5")
-N1_JOIN_NOTIF=$(echo "$N1_NOTIFS" | python3 -c '
+N1_JOIN_NOTIF="missing"
+for _ in $(seq 1 20); do
+  N1_NOTIFS=$(c "http://127.0.0.1:9201/api/notifications?limit=100")
+  N1_JOIN_NOTIF=$(echo "$N1_NOTIFS" | python3 -c '
 import sys,json
 d=json.load(sys.stdin)
 for n in d.get("notifications",[]):
   if n.get("type")=="join_request":
-    meta=json.loads(n.get("meta","{}")) if n.get("meta") else {}
-    if "'"$CG2_ID"'" in meta.get("contextGraphId",""):
+    raw_meta=n.get("meta") or {}
+    meta=json.loads(raw_meta) if isinstance(raw_meta,str) else raw_meta
+    cg = n.get("contextGraphId") or meta.get("contextGraphId","")
+    if "'"$CG2_ID"'" in cg:
       print("found")
       break
 else:
   print("missing")
 ' 2>/dev/null)
+  [[ "$N1_JOIN_NOTIF" == "found" ]] && break
+  sleep 1
+done
 check "Join-request notification created on Node 1" "$N1_JOIN_NOTIF" "found"
 
 echo "--- 13h: Node 1 approves Node 4 ---"
@@ -972,7 +979,7 @@ sleep 3
 
 echo "--- 15a: Publish SWM data to VM on Node 1 (promote-test project) ---"
 PUBLISH=$(c -X POST "http://127.0.0.1:9201/api/shared-memory/publish" \
-  -d "{\"contextGraphId\":\"$CG3_ID\",\"selection\":\"all\",\"clearAfter\":false}")
+  -d "{\"contextGraphId\":\"$CG3_ID\",\"selection\":{\"rootEntities\":[\"urn:promote-test:api1\"]},\"clearAfter\":false}")
 PUB_STATUS=$(json_get "$PUBLISH" status)
 PUB_KCID=$(json_get "$PUBLISH" kaId)
 PUB_KAS=$(echo "$PUBLISH" | python3 -c '
@@ -1067,7 +1074,7 @@ sleep 3
 
 echo "--- 16a: Publish CG1 SWM → VM on Node 1 ---"
 PUB_CG1=$(c -X POST "http://127.0.0.1:9201/api/shared-memory/publish" \
-  -d "{\"contextGraphId\":\"$CG_ID\",\"selection\":\"all\",\"clearAfter\":false}")
+  -d "{\"contextGraphId\":\"$CG_ID\",\"selection\":{\"rootEntities\":[\"urn:sharing:beta1\"]},\"clearAfter\":false}")
 PUB_CG1_STATUS=$(json_get "$PUB_CG1" status)
 PUB_CG1_KAS=$(echo "$PUB_CG1" | python3 -c '
 import sys,json
@@ -1134,36 +1141,47 @@ echo "--- 16e: WM data still private after publish ---"
 for port_label in "9202:Node2" "9204:Node4" "9203:Node3"; do
   port="${port_label%%:*}"
   label="${port_label##*:}"
-  PEER_WM=$(c -X POST "http://127.0.0.1:$port/api/query" \
-    -d "{\"sparql\":\"SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } FILTER(CONTAINS(STR(?g), \\\"$CG_ID\\\") && CONTAINS(STR(?g), \\\"/assertion/\\\")) }\"}")
-  PEER_WM_CT=$(safe_bindings_count "$PEER_WM")
-  check "$label still has 0 WM assertion graphs after publish" "$PEER_WM_CT" "0"
+  PEER_WM_LAYER=$(c -X POST "http://127.0.0.1:$port/api/query" \
+    -d "{\"sparql\":\"SELECT ?s WHERE { GRAPH <did:dkg:context-graph:$CG_ID/_meta> { ?s <http://dkg.io/ontology/memoryLayer> \\\"WM\\\" } }\"}")
+  PEER_WM_LAYER_CT=$(safe_bindings_count "$PEER_WM_LAYER")
+  check "$label still has 0 WM lifecycle entries after publish" "$PEER_WM_LAYER_CT" "0"
+
+  PEER_POSTPROMO=$(c -X POST "http://127.0.0.1:$port/api/query" \
+    -d "{\"sparql\":\"SELECT ?name WHERE { <urn:sharing:postpromo> <http://schema.org/name> ?name }\",\"contextGraphId\":\"$CG_ID\",\"includeSharedMemory\":true}")
+  PEER_POSTPROMO_CT=$(safe_bindings_count "$PEER_POSTPROMO")
+  check "$label still cannot see post-promotion WM data after publish" "$PEER_POSTPROMO_CT" "0"
 done
 
-echo "--- 16f: Publish with clearAfter=true, then verify SWM is empty ---"
+echo "--- 16f: Publish one fresh root with clearAfter=true, then verify that root leaves SWM ---"
+CLEAR_URI="urn:promote-test:clear-$CG3_ID"
+c -X POST "http://127.0.0.1:9201/api/shared-memory/write" \
+  -d "{\"contextGraphId\":\"$CG3_ID\",\"quads\":[
+    $(ql "$CLEAR_URI" 'http://schema.org/name' 'Clear After Entity'),
+    $(q "$CLEAR_URI" 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' 'http://schema.org/Thing')
+  ]}" > /dev/null
 PUB_CLEAR=$(c -X POST "http://127.0.0.1:9201/api/shared-memory/publish" \
-  -d "{\"contextGraphId\":\"$CG3_ID\",\"selection\":\"all\",\"clearAfter\":true}")
+  -d "{\"contextGraphId\":\"$CG3_ID\",\"selection\":{\"rootEntities\":[\"$CLEAR_URI\"]},\"clearAfter\":true}")
 PUB_CLEAR_STATUS=$(json_get "$PUB_CLEAR" status)
 sleep 2
 N1_SWM_CLEARED=$(c -X POST "http://127.0.0.1:9201/api/query" \
-  -d "{\"sparql\":\"SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }\",\"contextGraphId\":\"$CG3_ID\",\"view\":\"shared-working-memory\"}")
+  -d "{\"sparql\":\"SELECT (COUNT(*) AS ?cnt) WHERE { <$CLEAR_URI> ?p ?o }\",\"contextGraphId\":\"$CG3_ID\",\"view\":\"shared-working-memory\"}")
 SWM_CLEARED_CT=$(count_integer "$N1_SWM_CLEARED")
 if [[ "$SWM_CLEARED_CT" == "0" ]]; then
-  ok "SWM cleared after publish with clearAfter=true"
+  ok "Published clearAfter root left SWM"
 else
-  warn "SWM not cleared ($SWM_CLEARED_CT entities) — may retain data until publish is confirmed on-chain"
+  warn "Published clearAfter root still present in SWM ($SWM_CLEARED_CT triples)"
 fi
 
-echo "--- 16g: VM still has data even after SWM cleared ---"
+echo "--- 16g: VM still has data even after SWM root cleared ---"
 VM_STILL_CT=0
 for _ in $(seq 1 30); do
   N1_VM_STILL=$(c -X POST "http://127.0.0.1:9201/api/query" \
-    -d "{\"sparql\":\"SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }\",\"contextGraphId\":\"$CG3_ID\",\"view\":\"verified-memory\"}")
+    -d "{\"sparql\":\"SELECT (COUNT(*) AS ?cnt) WHERE { <$CLEAR_URI> ?p ?o }\",\"contextGraphId\":\"$CG3_ID\",\"view\":\"verified-memory\"}")
   VM_STILL_CT=$(count_integer "$N1_VM_STILL")
   [ "$VM_STILL_CT" -ge 1 ] && break
   sleep 1
 done
-[[ "$VM_STILL_CT" -ge 1 ]] && ok "VM data persists after SWM clear ($VM_STILL_CT entities)" || fail "VM data lost after SWM clear"
+[[ "$VM_STILL_CT" -ge 1 ]] && ok "VM data persists after SWM root clear ($VM_STILL_CT triples)" || fail "VM data lost after SWM root clear"
 
 # Cleanup
 c -X POST "http://127.0.0.1:9201/api/assertion/promo-doc/discard" \

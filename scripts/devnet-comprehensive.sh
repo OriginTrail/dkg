@@ -4,13 +4,14 @@
 #
 # Runs (in order, on top of an already-started 6-node devnet):
 #   1. v10-rc-validation.sh                (15-section API smoke)
-#   2. _devnet-full-sweep.sh               (baseline harnesses)
-#   3. rc11 recovery tests (promote-crash + shutdown-mid-publish)
-#   4. rfc38-all aggregator (lu5/lu5-pub/lu7/lu8/lu9/lu10/e2e/xcg/mm/scale/lj)
-#   5. rc.12 feature probes (hub-rotation, multi-RPC failover, libp2p tunables,
+#   2. rc11 recovery tests (promote-crash + shutdown-mid-publish)
+#   3. rfc38-all aggregator (lu5/lu5-pub/lu7/lu8/lu9/lu10/e2e/xcg/mm/scale/lj)
+#   4. rc.12 feature probes (hub-rotation, multi-RPC failover, libp2p tunables,
 #      CG-phonebook agent discovery, structured ACK rejection reasons)
+#   5. post-rc.12 targeted probes for PRs merged after v10.0.0-rc.12
 #   6. node-ui smoke
-#   7. soak suite (libp2p / SWM / RS)
+#   7. _devnet-full-sweep.sh               (destructive baseline harnesses)
+#   8. soak suite (libp2p / SWM / RS)
 #
 # Bash 3.2 compatible (uses parallel indexed arrays instead of
 # `declare -A`).
@@ -26,7 +27,9 @@
 #                       (default: $REPO_ROOT/.devnet/comprehensive-results/<ts>)
 #   SKIP_SOAK=1         skip the long soak suite
 #   SOAK_ONLY=1         run only the soak suite
+#   POST_RC12_ONLY=1    run only the post-rc.12 targeted release probes
 #   SKIP_PROBES=1       skip the rc.12-specific probes
+#   SKIP_POST_RC12=1    skip the post-rc.12 targeted release probes
 #   SKIP_RFC38_EXTRAS=1 skip the rfc38-all suite
 #   SKIP_UI=1           skip the node-ui smoke
 #   FAIL_FAST=1         stop on first FAIL
@@ -68,22 +71,70 @@ if ! curl -sf -H "Authorization: Bearer $AUTH" "http://127.0.0.1:$API_PORT_BASE/
   log "FATAL: node 1 not responding on :$API_PORT_BASE"
   exit 2
 fi
-# Don't just trust node 1 — earlier orchestrator runs let v10-rc-validation
-# and 4 sibling suites fail downstream because one node had silently died
-# overnight. Check every node we'll actually exercise so triage time isn't
-# wasted on "test broke" when the truth is "devnet broke".
 NUM_NODES="${NUM_NODES:-6}"
-DOWN_NODES=""
-for n in $(seq 1 "$NUM_NODES"); do
+
+node_status_code() {
+  n="$1"
   port=$((API_PORT_BASE + n - 1))
   code=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $AUTH" \
     "http://127.0.0.1:$port/api/status" 2>/dev/null || echo "000")
-  if [ "$code" != "200" ]; then
-    DOWN_NODES="${DOWN_NODES} node${n}(port=$port,http=$code)"
+  case "$code" in
+    200) echo "200" ;;
+    *) echo "000" ;;
+  esac
+}
+
+ensure_devnet_nodes_healthy() {
+  label="${1:-pre-suite}"
+  down_nodes=""
+  for n in $(seq 1 "$NUM_NODES"); do
+    code=$(node_status_code "$n")
+    port=$((API_PORT_BASE + n - 1))
+    if [ "$code" != "200" ]; then
+      down_nodes="${down_nodes} node${n}(port=$port,http=$code)"
+    fi
+  done
+  if [ -z "$down_nodes" ]; then
+    log "Health OK before $label — all $NUM_NODES nodes responding"
+    return 0
   fi
-done
-if [ -n "$DOWN_NODES" ]; then
-  log "FATAL: not all $NUM_NODES nodes are reachable. Down:${DOWN_NODES}"
+
+  log "Health repair before $label — restarting:${down_nodes}"
+  for n in $(seq 1 "$NUM_NODES"); do
+    code=$(node_status_code "$n")
+    if [ "$code" != "200" ]; then
+      log "  restarting node$n"
+      "$REPO_ROOT/scripts/devnet.sh" restart-node "$n" >> "$RESULTS/orchestrator.log" 2>&1 || return 1
+    fi
+  done
+
+  deadline=$(( $(date +%s) + ${DEVNET_HEALTH_REPAIR_TIMEOUT_SECONDS:-90} ))
+  while true; do
+    down_nodes=""
+    for n in $(seq 1 "$NUM_NODES"); do
+      code=$(node_status_code "$n")
+      port=$((API_PORT_BASE + n - 1))
+      if [ "$code" != "200" ]; then
+        down_nodes="${down_nodes} node${n}(port=$port,http=$code)"
+      fi
+    done
+    if [ -z "$down_nodes" ]; then
+      log "Health repair complete before $label — all $NUM_NODES nodes responding"
+      return 0
+    fi
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      log "Health repair failed before $label. Still down:${down_nodes}"
+      return 1
+    fi
+    sleep 2
+  done
+}
+
+# Don't just trust node 1 — restart-heavy suites can leave a single node down
+# while the rest of the devnet stays alive. Repair this at suite boundaries so
+# downstream failures point at product behavior instead of stale process state.
+if ! ensure_devnet_nodes_healthy "pre-flight"; then
+  log "FATAL: not all $NUM_NODES nodes are reachable after repair attempt"
   log "Hint: ./scripts/devnet.sh stop && ./scripts/devnet.sh start"
   exit 2
 fi
@@ -110,9 +161,6 @@ register() {
 # Group: smoke
 register "v10-rc-validation"   "smoke" "$REPO_ROOT/scripts/v10-rc-validation.sh"
 
-# Group: sweep
-register "devnet-full-sweep"   "sweep" "$REPO_ROOT/scripts/_devnet-full-sweep.sh"
-
 # Group: rc11 recovery
 register "rc11-promote-crash"  "rc11-recovery" "$REPO_ROOT/scripts/devnet-test-rc11-promote-crash-recovery.sh"
 register "rc11-shutdown-mid"   "rc11-recovery" "$REPO_ROOT/scripts/devnet-test-rc11-shutdown-mid-publish.sh"
@@ -129,10 +177,37 @@ if [ "${SKIP_PROBES:-0}" != "1" ]; then
   done
 fi
 
+# Group: post-rc.12 release probes
+#
+# Covers PRs merged after tag v10.0.0-rc.12:
+#   - #878: DKG_HOME-selected daemon status detection
+#   - #879: public+open import-artifact owner-guard relaxation
+#   - #885: SWM late-joiner sub-graph backfill + approve-time gossip race
+#   - #847/#855/#877/#890/#898/#899: live node-ui/API lifecycle surfaces
+if [ "${SKIP_POST_RC12:-0}" != "1" ]; then
+  register "post-rc12-dkg-home-status" "post-rc12" \
+    "$REPO_ROOT/scripts/devnet-test-dkg-home-status.sh"
+  register "post-rc12-import-artifact-public-open" "post-rc12" \
+    "$REPO_ROOT/scripts/devnet-test-import-artifact-public-open.sh"
+  register "post-rc12-swm-late-joiner-subgraph" "post-rc12" \
+    "$REPO_ROOT/scripts/devnet-test-swm-late-joiner-subgraph.sh"
+  register "post-rc12-node-ui-devnet-core" "post-rc12" \
+    "$REPO_ROOT/scripts/devnet-test-node-ui-post-rc12.sh"
+fi
+
 # Group: node-ui smoke
 if [ "${SKIP_UI:-0}" != "1" ]; then
   register "node-ui-smoke" "node-ui" "$REPO_ROOT/scripts/devnet-test-node-ui-smoke.sh"
 fi
+
+# Group: sweep
+#
+# Keep the full sweep late: it intentionally exercises destructive and
+# long-running paths (unclean restarts, byte-cap stress, large private sync
+# flows). Running it before the focused RFC/probe/UI suites can leave the
+# devnet transport/store state warm enough to turn later scenarios into
+# timeout triage instead of functional validation.
+register "devnet-full-sweep"   "sweep" "$REPO_ROOT/scripts/_devnet-full-sweep.sh"
 
 # Group: soak (LONG)
 if [ "${SKIP_SOAK:-0}" != "1" ]; then
@@ -169,6 +244,34 @@ if [ "${SOAK_ONLY:-0}" = "1" ]; then
   i=0
   while [ "$i" -lt "${#SUITE_IDS[@]}" ]; do
     if [ "${SUITE_GROUPS[$i]}" = "soak" ]; then
+      NEW_IDS+=("${SUITE_IDS[$i]}")
+      NEW_CMDS+=("${SUITE_CMDS[$i]}")
+      NEW_GROUPS+=("${SUITE_GROUPS[$i]}")
+      NEW_RESULTS+=("PENDING")
+      NEW_LOGS+=("")
+      NEW_ELAPSEDS+=("0")
+    fi
+    i=$((i + 1))
+  done
+  SUITE_IDS=("${NEW_IDS[@]}")
+  SUITE_CMDS=("${NEW_CMDS[@]}")
+  SUITE_GROUPS=("${NEW_GROUPS[@]}")
+  SUITE_RESULTS=("${NEW_RESULTS[@]}")
+  SUITE_LOGS=("${NEW_LOGS[@]}")
+  SUITE_ELAPSEDS=("${NEW_ELAPSEDS[@]}")
+fi
+
+# Apply POST_RC12_ONLY filter
+if [ "${POST_RC12_ONLY:-0}" = "1" ]; then
+  NEW_IDS=()
+  NEW_CMDS=()
+  NEW_GROUPS=()
+  NEW_RESULTS=()
+  NEW_LOGS=()
+  NEW_ELAPSEDS=()
+  i=0
+  while [ "$i" -lt "${#SUITE_IDS[@]}" ]; do
+    if [ "${SUITE_GROUPS[$i]}" = "post-rc12" ]; then
       NEW_IDS+=("${SUITE_IDS[$i]}")
       NEW_CMDS+=("${SUITE_CMDS[$i]}")
       NEW_GROUPS+=("${SUITE_GROUPS[$i]}")
@@ -225,6 +328,18 @@ while [ "$i" -lt "${#SUITE_IDS[@]}" ]; do
       log "FAIL_FAST=1 — aborting"
       break
     fi
+    continue
+  fi
+
+  if ! ensure_devnet_nodes_healthy "$id"; then
+    log "FAIL $id  (health repair failed before suite)"
+    SUITE_RESULTS[$i]="FAIL:health"
+    TOTAL_FAIL=$((TOTAL_FAIL + 1))
+    if [ "${FAIL_FAST:-0}" = "1" ]; then
+      log "FAIL_FAST=1 — aborting"
+      break
+    fi
+    i=$((i + 1))
     continue
   fi
 

@@ -365,8 +365,12 @@ fi
 # ===========================================================================
 act "5. M1 (non-curator) publishes to VM with the curator still offline"
 # ===========================================================================
+# The synchronous V10 publish endpoint is intentionally single-root. Publishing
+# one selected root is enough to prove the offline curator resilience contract:
+# M1 can still land curator-written SWM while the curator daemon is down.
+PUBLISH_ROOT="urn:com:${STAMP}/one"
 PUB_RESP=$(api_call "$M1_NODE" POST /api/shared-memory/publish "$(cat <<EOF
-{ "contextGraphId": "$CG_ID", "selection": "all", "clearAfter": false }
+{ "contextGraphId": "$CG_ID", "selection": { "rootEntities": ["$PUBLISH_ROOT"] }, "clearAfter": false }
 EOF
 )")
 log "M1 publish response: $PUB_RESP"
@@ -376,7 +380,7 @@ KC=$(parse_json    "$PUB_RESP" '.kaId')
 if [ "$STATUS" != "confirmed" ] || [ -z "$TX" ]; then
   fail "non-curator publish did NOT confirm on-chain (status=$STATUS, tx=$TX) — open-publishPolicy resilience contract BROKEN"
 fi
-log "✓ M1 published to VM without curator: kaId=$KC tx=$TX"
+log "✓ M1 published $PUBLISH_ROOT to VM without curator: kaId=$KC tx=$TX"
 
 # ===========================================================================
 act "6. Outsider verifies the published KC's merkleRoot exists on chain"
@@ -400,6 +404,6 @@ log "================================================================"
 log "  Curated CG:    $CG_ID  (onChainId=$ON_CHAIN_ID, publishPolicy=open)"
 log "  Triples in:    4 (curator-written, gossiped to members)"
 log "  Curator:       SIGTERMed before publish"
-log "  M1 published:  kaId=$KC tx=$TX merkleRoot=$MERKLE_ROOT"
+log "  M1 published:  root=$PUBLISH_ROOT kaId=$KC tx=$TX merkleRoot=$MERKLE_ROOT"
 log "  Outsider:      observed merkleRoot on chain"
 log "================================================================"

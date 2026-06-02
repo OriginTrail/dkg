@@ -92,25 +92,22 @@ ON_CHAIN_ID=$(parse_json "$CREATE" '.onChainId')
 [ -n "$ON_CHAIN_ID" ] || fail "CG create failed: $CREATE"
 log "✓ CG registered onChainId=$ON_CHAIN_ID"
 
-log "Curator writes 5 SWM triples..."
+log "Curator writes one SWM triple..."
 QUADS=$(node -e "
-  const quads = [];
-  for (let i = 0; i < 5; i++) {
-    quads.push({
-      subject: 'urn:lu8/item' + i,
-      predicate: 'http://schema.org/name',
-      object: '\"Item' + i + '\"',
-      graph: ''
-    });
-  }
+  const quads = [{
+    subject: 'urn:lu8/item0',
+    predicate: 'http://schema.org/name',
+    object: '\"Item0\"',
+    graph: ''
+  }];
   console.log(JSON.stringify({ contextGraphId: '$PUB_CG', quads }));
 ")
 WRITE_RESP=$(api_call "$CURATOR_NODE" POST /api/shared-memory/write "$QUADS")
-[ "$(parse_json "$WRITE_RESP" '.triplesWritten')" = "5" ] || fail "expected 5 triples written, got: $WRITE_RESP"
+[ "$(parse_json "$WRITE_RESP" '.triplesWritten')" = "1" ] || fail "expected 1 triple written, got: $WRITE_RESP"
 
 log "Curator publishes selection to VM..."
 PUB_RESP=$(api_call "$CURATOR_NODE" POST /api/shared-memory/publish "$(cat <<EOF
-{ "contextGraphId": "$PUB_CG", "selection": "all", "epochs": 1 }
+{ "contextGraphId": "$PUB_CG", "selection": { "rootEntities": ["urn:lu8/item0"] }, "epochs": 1 }
 EOF
 )")
 log "publish response: $PUB_RESP"
@@ -163,15 +160,12 @@ fi
 # the only path that's batch-scoped for the verifier API.
 log "Calling verify-batch with explicit caller-supplied quads (member-side simulation)..."
 EXPLICIT_QUADS=$(node -e "
-  const quads = [];
-  for (let i = 0; i < 5; i++) {
-    quads.push({
-      subject: 'urn:lu8/item' + i,
-      predicate: 'http://schema.org/name',
-      object: '\"Item' + i + '\"',
-      graph: ''
-    });
-  }
+  const quads = [{
+    subject: 'urn:lu8/item0',
+    predicate: 'http://schema.org/name',
+    object: '\"Item0\"',
+    graph: ''
+  }];
   console.log(JSON.stringify({
     contextGraphId: '$PUB_CG',
     expectedMerkleRoot: '$MERKLE_ROOT',
@@ -198,15 +192,12 @@ log "================================================================"
 
 log "Member calls verify-batch with forged quads (extra injected triple)..."
 FORGED_QUADS=$(node -e "
-  const quads = [];
-  for (let i = 0; i < 5; i++) {
-    quads.push({
-      subject: 'urn:lu8/item' + i,
-      predicate: 'http://schema.org/name',
-      object: '\"Item' + i + '\"',
-      graph: ''
-    });
-  }
+  const quads = [{
+    subject: 'urn:lu8/item0',
+    predicate: 'http://schema.org/name',
+    object: '\"Item0\"',
+    graph: ''
+  }];
   quads.push({
     subject: 'urn:lu8/injected',
     predicate: 'http://schema.org/name',

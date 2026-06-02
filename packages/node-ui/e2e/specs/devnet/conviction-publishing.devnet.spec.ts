@@ -25,21 +25,24 @@ test.describe('Conviction NFT (PCA) API', () => {
   });
 
   test('publish without PCA registration uses standard shared-memory path', async () => {
-    const { runWmSwmVmPipeline, listContextGraphs } = await import('../../helpers/devnet-publish.js');
+    const { runWmSwmVmPipeline, listContextGraphs, pickWritableContextGraph } = await import(
+      '../../helpers/devnet-publish.js'
+    );
     const cgs = await listContextGraphs(1);
-    test.skip(cgs.length === 0, 'No CGs');
-    const result = await runWmSwmVmPipeline({ contextGraphId: cgs[0]!.id });
+    const cg = pickWritableContextGraph(cgs);
+    test.skip(!cg, 'No writable CGs');
+    const result = await runWmSwmVmPipeline({ contextGraphId: cg.id });
     expect(result.assertionName).toBeTruthy();
   });
 });
 
 test.describe('Non-conviction publishing (baseline)', () => {
   test('shared-memory publish endpoint responds for devnet CG', async () => {
-    const cgsRes = await devnetApiFetch('/api/context-graphs');
-    const { contextGraphs } = (await cgsRes.json()) as { contextGraphs: Array<{ id: string }> };
-    test.skip(contextGraphs.length === 0, 'No CGs');
-    const { createWmAssertion, promoteAssertion, publishToVm, buildTestQuads } = await import('../../helpers/devnet-publish.js');
-    const cgId = contextGraphs[0]!.id;
+    const { createWmAssertion, promoteAssertion, publishToVm, buildTestQuads, listContextGraphs, pickWritableContextGraph } =
+      await import('../../helpers/devnet-publish.js');
+    const cg = pickWritableContextGraph(await listContextGraphs(1));
+    test.skip(!cg, 'No writable CGs');
+    const cgId = cg.id;
     const stamp = Date.now();
     const name = `e2e-non-conviction-${stamp}`;
     const wm = await createWmAssertion({
