@@ -264,6 +264,8 @@ import {
   formatHealthCheckFailure,
   formatIdentityTagMismatch,
 } from './store-health-check.js';
+import { startManagedOxigraph } from './oxigraph-managed.js';
+import type { OxigraphServerHandle } from './oxigraph-server.js';
 import { resetNatStatus, startNatStatusWatcher } from './nat-status.js';
 import {
   OPENCLAW_UI_CONNECT_TIMEOUT_MS,
@@ -856,6 +858,44 @@ export async function runDaemonInner(
     log,
   });
   if (backendSwitch.aborted) {
+    process.exit(1);
+  }
+
+  // Managed local Oxigraph server (`store.backend: 'oxigraph-server'`,
+  // Release 2 opt-in). Fetch/verify the pinned binary, spawn a loopback
+  // `oxigraph serve` child, and rewrite `config.store` to the equivalent
+  // `sparql-http` backend pointing at it — so every downstream step
+  // (config validation, health check, identity tag, chain-reset wipe,
+  // the adapter) reuses the existing external-backend path unchanged.
+  // Runs AFTER detectBackendSwitch (which persisted the raw
+  // 'oxigraph-server' value) and BEFORE exitOnStoreConfigErrors so the
+  // normalised config is what gets validated and probed.
+  let managedOxigraph: OxigraphServerHandle | null = null;
+  try {
+    const managed = await startManagedOxigraph({ config, dataDir: dkgDir(), log });
+    if (managed) {
+      managedOxigraph = managed.handle;
+      config.store = managed.storeConfig;
+      // Always apply the (already operator-merged) largeLiteralStorage:
+      // planManagedOxigraph folds the operator's enabled/thresholdBytes
+      // onto a defaulted `directory`. The local Oxigraph backend infers a
+      // directory from `options.path`; the rewritten sparql-http backend
+      // has none, so a partial operator config (e.g. enabled + threshold,
+      // no directory) would otherwise fail exitOnStoreConfigErrors below.
+      config.largeLiteralStorage = managed.largeLiteralStorage;
+      // Every remaining fatal boot path (config validation, store health
+      // check, identity mismatch, later failures) calls process.exit(),
+      // which bypasses the graceful shutdown hook. Register a synchronous
+      // best-effort kill so none of them orphan the spawned server.
+      process.once('exit', () => managedOxigraph?.killSync());
+      log(`Managed Oxigraph server backing store: ${managed.handle.queryEndpoint}`);
+    }
+  } catch (err) {
+    log(
+      `[STORE] failed to start managed Oxigraph server: ${(err as Error).message}\n` +
+        `Fix the cause, or switch \`store.backend\` to oxigraph-worker (embedded) or ` +
+        `sparql-http (operator-managed endpoint) in ~/.dkg/config.json.`,
+    );
     process.exit(1);
   }
 
@@ -2759,6 +2799,14 @@ export async function runDaemonInner(
           );
         server.close();
         await agent.stop();
+        // Stop the managed Oxigraph child AFTER the agent has stopped
+        // issuing store queries, so an in-flight SPARQL request never
+        // races the killed server. No-op when not using oxigraph-server.
+        await managedOxigraph
+          ?.stop()
+          .catch((err: any) =>
+            log(`Managed Oxigraph stop error: ${err?.message ?? String(err)}`),
+          );
         dashDb.close();
         log("Stopped.");
       } finally {

@@ -44,6 +44,11 @@ export default defineConfig({
           'test/store-wizard.test.ts',
           'test/blazegraph-docker.test.ts',
           'test/store-identity-tag.test.ts',
+          // Release 2 — managed local Oxigraph server (opt-in). Pure logic
+          // + injected fetch/spawn/fs; no network, no real binary.
+          'test/oxigraph-binary.test.ts',
+          'test/oxigraph-server.test.ts',
+          'test/oxigraph-managed.test.ts',
           // Opt-in via BLAZEGRAPH_INTEGRATION_TEST=1. Skips silently
           // (no fetch / no docker spawn) when the env-var is unset, so
           // keeping it in the fast unit lane costs nothing.
