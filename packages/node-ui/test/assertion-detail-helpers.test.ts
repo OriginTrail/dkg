@@ -4,6 +4,7 @@ import {
   canPromoteAssertion,
   assertionSubgraphLine,
   buildAssertionTrail,
+  assertionEmptyStateCopy,
   buildBreadcrumbHops,
   primarySubGraphOf,
 } from '../src/ui/views/project/helpers.js';
@@ -107,6 +108,43 @@ describe('buildAssertionTrail — lifecycle trail stages + is-current marker', (
   });
 });
 
+describe('assertionEmptyStateCopy — ux §4.7.1 state-keyed empty copy (Codex round-3 #3)', () => {
+  it('created → "no extracted entities" (the generalization must NOT loosen this)', () => {
+    const c = assertionEmptyStateCopy('created');
+    expect(c.title).toBe('No entities in this assertion.');
+    expect(c.description).toBe('This assertion has no extracted entities.');
+  });
+
+  it('promoted → SWM forward-path line (unchanged)', () => {
+    const c = assertionEmptyStateCopy('promoted');
+    expect(c.title).toBe('No entities in this assertion.');
+    expect(c.description).toContain('now live in Shared Working Memory');
+    expect(c.description).toContain('Open the Shared Working Memory tab');
+    expect(c.description).not.toContain('no extracted entities');
+  });
+
+  it('published AND finalized → VM / Knowledge-Assets line, NOT "no extracted entities"', () => {
+    for (const s of ['published', 'finalized'] as const) {
+      const c = assertionEmptyStateCopy(s);
+      expect(c.title).toBe('No entities in this assertion.');
+      expect(c.description).toBe('This assertion was published — its entities are now Knowledge Assets in Verifiable Memory. Open the Verifiable Memory tab to view them.');
+      expect(c.description).not.toContain('no extracted entities');
+      expect(c.description).not.toContain('Shared Working Memory');
+    }
+  });
+
+  it('discarded → terminal copy, no "open X tab" forward path', () => {
+    const c = assertionEmptyStateCopy('discarded');
+    expect(c.title).toBe('This assertion was discarded.');
+    expect(c.description).toBe('This assertion was discarded.');
+    expect(c.description).not.toContain('Open the');
+  });
+
+  it('hydrating (null) falls back to the created copy', () => {
+    expect(assertionEmptyStateCopy(null).description).toBe('This assertion has no extracted entities.');
+  });
+});
+
 describe('buildBreadcrumbHops — S5 breadcrumb hop construction (T04)', () => {
   const CG = 'Hello World';
 
@@ -161,11 +199,11 @@ describe('buildBreadcrumbHops — S5 breadcrumb hop construction (T04)', () => {
 });
 
 describe('buildBreadcrumbHops — cross-subgraph update (T05)', () => {
-  // M2(b) makes a cross-subgraph entity jump switch activeSubGraph; S5's
-  // breadcrumb must reflect the NEW subgraph on the middle hop. This pins
-  // that the hop model is a pure function of the current subgraph — so
-  // when activeSubGraph changes, the rendered middle hop changes.
-  it('reflects the active subgraph on the middle hop', () => {
+  // When NO origin snapshot is threaded, the middle hop falls back to the
+  // current subgraph (pre-8-2 behaviour — and still correct for callers
+  // that don't supply the origin). Codex round-8 (8-2) layers the
+  // origin-aware labelling ON TOP of this fallback (see the next describe).
+  it('reflects the active subgraph on the middle hop (no origin threaded → current fallback)', () => {
     const before = buildBreadcrumbHops({
       contextGraphName: 'CG', activeLayer: 'wm',
       activeSubGraph: 'demo', subGraphDisplayName: 'Demo',
@@ -173,8 +211,6 @@ describe('buildBreadcrumbHops — cross-subgraph update (T05)', () => {
     });
     expect(before[1].label).toBe('Demo');
 
-    // Entity A linked to an entity in subgraph "other" → activeSubGraph
-    // follows (M2 option b); the breadcrumb middle hop updates.
     const after = buildBreadcrumbHops({
       contextGraphName: 'CG', activeLayer: 'wm',
       activeSubGraph: 'other', subGraphDisplayName: 'Other',
@@ -182,6 +218,114 @@ describe('buildBreadcrumbHops — cross-subgraph update (T05)', () => {
     });
     expect(after[1].label).toBe('Other');
     expect(after[2].label).toBe('Entity B');
+  });
+});
+
+describe('buildBreadcrumbHops — origin-derived middle hop (Codex round-8 / 8-2)', () => {
+  // When a detail is open the middle hop's target is `'origin'` (clicking
+  // closes the detail back to where it was opened). After an M2(b)
+  // cross-subgraph follow the CURRENT subgraph diverges from the origin, so
+  // the middle hop's LABEL must name the ORIGIN — where the click returns
+  // you — not the followed-into subgraph.
+  it('labels the middle hop with the ORIGIN subgraph, not the current one (M2(b) divergence)', () => {
+    const hops = buildBreadcrumbHops({
+      contextGraphName: 'CG', activeLayer: 'wm',
+      // Current page is subgraph "other" (followed into via M2(b)) …
+      activeSubGraph: 'other', subGraphDisplayName: 'Other',
+      detailLabel: 'Entity B',
+      // … but the detail was OPENED from subgraph "demo".
+      originLayer: 'wm',
+      originSubGraph: 'demo', originSubGraphDisplayName: 'Demo',
+    });
+    // Middle hop names the origin (Demo) — clicking it returns there.
+    expect(hops[1].label).toBe('Demo');
+    expect(hops[1].target).toBe('origin');
+    // ONLY the middle hop changes — trailing stays the entity name.
+    expect(hops[2].label).toBe('Entity B');
+    expect(hops[2].target).toBe('current');
+    // The followed-into subgraph name must NOT appear anywhere.
+    expect(hops.some(h => h.label === 'Other')).toBe(false);
+  });
+
+  it('labels the middle hop with the ORIGIN layer when the origin was a layer page', () => {
+    const hops = buildBreadcrumbHops({
+      contextGraphName: 'CG',
+      // Current location followed into a subgraph …
+      activeLayer: 'wm', activeSubGraph: 'other', subGraphDisplayName: 'Other',
+      detailLabel: 'Entity B',
+      // … but the detail was opened from the SWM layer list (no subgraph).
+      originLayer: 'swm', originSubGraph: null, originSubGraphDisplayName: null,
+    });
+    expect(hops[1].label).toBe('Shared Working Memory');
+    expect(hops[1].target).toBe('origin');
+  });
+
+  it('synthesises NO middle hop when the origin was the overview (2-hop rule holds)', () => {
+    const hops = buildBreadcrumbHops({
+      contextGraphName: 'CG',
+      activeLayer: 'wm', activeSubGraph: 'other', subGraphDisplayName: 'Other',
+      detailLabel: 'Entity B',
+      // Origin was the overview — no middle to return to.
+      originLayer: 'overview', originSubGraph: null, originSubGraphDisplayName: null,
+    });
+    expect(hops.map(h => h.label)).toEqual(['CG', 'Entity B']);
+    expect(hops[1].target).toBe('current');
+  });
+
+  it('falls back to current-scope labelling when no origin is threaded (back-compat)', () => {
+    // Detail open but origin props omitted (undefined) → current label.
+    const hops = buildBreadcrumbHops({
+      contextGraphName: 'CG', activeLayer: 'wm',
+      activeSubGraph: 'other', subGraphDisplayName: 'Other',
+      detailLabel: 'Entity B',
+    });
+    expect(hops[1].label).toBe('Other');
+  });
+});
+
+describe('buildBreadcrumbHops — first-hop restores origin for an overview-opened detail (Codex round-10 / 10-2)', () => {
+  const CG = 'Hello World';
+
+  // Detail opened from the OVERVIEW → 2-hop `[Context Graph › Detail]`, no
+  // middle. The first hop is the SOLE back-affordance, so it must restore
+  // the M2 origin (target 'origin' → onRestoreOrigin), NOT do a fresh
+  // top-of-overview nav that drops the captured scroll/tab.
+  it('detail-from-overview (2-hop): the first hop target is "origin", not "overview"', () => {
+    const hops = buildBreadcrumbHops({
+      contextGraphName: CG,
+      activeLayer: 'wm', activeSubGraph: 'other', subGraphDisplayName: 'Other',
+      detailLabel: 'Entity B',
+      // Origin was the overview — no middle hop.
+      originLayer: 'overview', originSubGraph: null, originSubGraphDisplayName: null,
+    });
+    expect(hops.map(h => h.label)).toEqual([CG, 'Entity B']); // 2 hops, no middle
+    expect(hops[0].target).toBe('origin');   // first hop restores origin
+    expect(hops[1].target).toBe('current');  // trailing = you are here
+  });
+
+  // Detail opened from a LAYER (3-hop) → the first hop stays 'overview' (a
+  // genuine go-UP-to-CG-root, distinct from the middle hop's 'origin'
+  // restore). The carve-out must hold.
+  it('detail-from-layer (3-hop): the first hop stays "overview" (carve-out)', () => {
+    const hops = buildBreadcrumbHops({
+      contextGraphName: CG,
+      activeLayer: 'wm', activeSubGraph: null,
+      detailLabel: 'Entity B',
+      originLayer: 'swm', originSubGraph: null, originSubGraphDisplayName: null,
+    });
+    expect(hops.map(h => h.label)).toEqual([CG, 'Shared Working Memory', 'Entity B']); // 3 hops
+    expect(hops[0].target).toBe('overview'); // go up to CG root — unchanged
+    expect(hops[1].target).toBe('origin');   // middle restores origin
+    expect(hops[2].target).toBe('current');
+  });
+
+  // No detail open: the first hop is 'overview' (unchanged baseline).
+  it('no detail open: the first hop is "overview" (unchanged)', () => {
+    const hops = buildBreadcrumbHops({
+      contextGraphName: CG, activeLayer: 'wm', activeSubGraph: null,
+    });
+    expect(hops[0].target).toBe('overview');
+    expect(hops[1].target).toBe('current');
   });
 });
 

@@ -841,10 +841,22 @@ export async function fetchAssertionState(
   const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
   // UNION admits both `graphUri` shapes (WM data-graph URI via the
   // inverse `dkg:assertionGraph` link; SWM lifecycle URN directly).
+  //
+  // Codex round-4 — branch A binds the input AS `?lifecycle`
+  // UNCONDITIONALLY and resolves `dkg:assertionGraph` only OPTIONALLY, so
+  // a legacy/partial SWM row whose lifecycle URN carries `dkg:state` but
+  // NOT `dkg:assertionGraph` still resolves its state (pre-fix, branch A
+  // required the assertionGraph triple to bind `?lifecycle`, so such a
+  // row read no state → "state unavailable" though the state exists).
+  // The outer `?lifecycle dkg:state` then gates the row: for a WM
+  // data-graph-URI input, branch A binds `?lifecycle = <data-graph URI>`
+  // but `<data-graph URI> dkg:state` never matches (state lives on the
+  // lifecycle URN), so branch A contributes nothing and branch B handles
+  // WM exactly as before. So WM→B, SWM→A, SWM-no-assertionGraph→A.
   const sparql = `SELECT ?state ?layer ?createdBy ?assertionGraph WHERE {
     GRAPH <${metaGraph}> {
-      { <${graphUri}> <${DKG}assertionGraph> ?assertionGraph .
-        BIND(<${graphUri}> AS ?lifecycle) }
+      { BIND(<${graphUri}> AS ?lifecycle)
+        OPTIONAL { <${graphUri}> <${DKG}assertionGraph> ?assertionGraph } }
       UNION
       { ?lifecycle <${DKG}assertionGraph> <${graphUri}> .
         BIND(<${graphUri}> AS ?assertionGraph) }
@@ -871,13 +883,23 @@ export async function fetchAssertionState(
     state === 'created' ? 'wm' :
     state === 'promoted' ? 'swm' :
     'vm';
+  // The data graph to read triples from. Prefer the resolved
+  // `dkg:assertionGraph`. Codex round-3 — the fallback to `graphUri`
+  // itself is only safe when the INPUT is already a data-graph URI (the
+  // WM shape). For an SWM input (a `urn:dkg:assertion:…` lifecycle URN)
+  // whose `dkg:assertionGraph` did NOT resolve (legacy/partial `_meta`
+  // row), echoing the URN would make `fetchAssertionTriples` query
+  // `GRAPH <urn:dkg:assertion:…>` — a graph that never holds triples —
+  // and render a bogus "data" set. In that case return `undefined` so
+  // the Triples/Entities panes fall to their empty-state instead.
+  const resolvedAssertionGraph = bv(first.assertionGraph);
+  const inputIsLifecycleUrn = graphUri.startsWith('urn:dkg:assertion:');
+  const assertionGraph = resolvedAssertionGraph
+    ?? (inputIsLifecycleUrn ? undefined : graphUri);
   return {
     state,
     layer,
-    // The data graph to read triples from: the resolved
-    // `dkg:assertionGraph` (correct for the SWM lifecycle-URN input),
-    // falling back to the input itself (the WM data-graph URI input).
-    assertionGraph: bv(first.assertionGraph) ?? graphUri,
+    assertionGraph,
     createdBy: bv(first.createdBy),
   };
 }
@@ -945,14 +967,38 @@ export async function fetchAssertionTriples(
  * N-Triples string form is already fully encoded by the daemon, so it
  * passes through verbatim.
  */
+/**
+ * Escape a literal body for the N-Triples `"…"` form: backslash + quote,
+ * the canonical short escapes for tab/newline/carriage-return, and any
+ * other C0 control char as `\\uXXXX`. Order matters — backslash first so
+ * the escapes we add aren't re-escaped.
+ */
+function escapeNTriplesLiteral(value: string): string {
+  let out = "";
+  for (const ch of value) {
+    const code = ch.codePointAt(0)!;
+    if (ch === '\\') out += '\\\\';
+    else if (ch === '"') out += '\\"';
+    else if (code === 0x09) out += '\\t';
+    else if (code === 0x0a) out += '\\n';
+    else if (code === 0x0d) out += '\\r';
+    else if (code < 0x20) out += '\\u' + code.toString(16).padStart(4, '0').toUpperCase();
+    else out += ch;
+  }
+  return out;
+}
+
 function rawBindingValue(v: unknown): string | undefined {
   if (v == null) return undefined;
   if (typeof v === 'object' && 'value' in (v as any)) {
     const node = v as any;
     if (node.type === 'literal' || node.type === 'typed-literal') {
-      // Escape per N-Triples so embedded quotes/backslashes don't break
-      // the leading-`"` classification or the renderers.
-      const escaped = String(node.value).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+      // Escape per N-Triples so embedded quotes/backslashes/control chars
+      // don't break the leading-`"` classification or the renderers.
+      // Codex round-6 — control chars (raw \n/\r/\t in a multiline
+      // extracted value, plus other C0 controls) were previously left
+      // raw → invalid N-Triples → broke the graph/triple parsers.
+      const escaped = escapeNTriplesLiteral(String(node.value));
       // Standard SPARQL JSON carries the datatype on `.datatype` and the
       // language on `.xml:lang` (some serialisers use `.language`).
       const lang = node['xml:lang'] ?? node.language;
@@ -961,6 +1007,12 @@ function rawBindingValue(v: unknown): string | undefined {
       if (datatype) return `"${escaped}"^^<${datatype}>`;
       return `"${escaped}"`;
     }
+    // Codex round-5 — a blank node must come back as `_:<id>`, not the
+    // bare identifier; otherwise downstream (buildMemoryEntities + the
+    // graph) misclassify it (a bare id is neither a leading-`"` literal
+    // nor a recognisable resource → bnode RDF structure disappears /
+    // mislabels). Branch BEFORE the generic fallthrough.
+    if (node.type === 'bnode') return `_:${String(node.value)}`;
     return String(node.value);
   }
   if (typeof v === 'string') return v;

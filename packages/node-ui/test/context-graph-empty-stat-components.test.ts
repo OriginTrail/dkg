@@ -621,7 +621,9 @@ describe('Context Graph shared empty/stat patterns', () => {
       row.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     });
     expect(onSelectAssertion).toHaveBeenCalledTimes(1);
-    expect(onSelectAssertion).toHaveBeenCalledWith(expect.objectContaining({ name: 'kbd-doc' }));
+    // Codex round-11 (11-1) — the list forwards its own `layer` as the
+    // source layer (2nd arg) so the detail view seeds its badge/tone.
+    expect(onSelectAssertion).toHaveBeenCalledWith(expect.objectContaining({ name: 'kbd-doc' }), 'wm');
 
     await unmount();
   });

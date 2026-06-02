@@ -1013,6 +1013,50 @@ export function buildAssertionTrail(
 }
 
 /**
+ * Empty-state copy for the assertion detail Entities pane when the
+ * assertion has zero entities, keyed off `dkg:state` (ux-lead's locked
+ * §4.7.1 copy — Codex round-3 finding 3). A single generic template was
+ * rejected because the noun changes at the VM boundary (entities →
+ * Knowledge Assets, §4.8) and because the forward path differs per state:
+ *   - created   → genuinely empty draft.
+ *   - promoted  → its entities moved to Shared Working Memory.
+ *   - published / finalized → its entities are now Knowledge Assets in
+ *     Verifiable Memory (post-publish the data graph is empty).
+ *   - discarded → terminal; no forward path (forward-safety — discarded
+ *     isn't list-reachable today, see the badge guard).
+ * Plain text, no links (S4 lock). Title is the constant "No entities in
+ * this assertion." for the live states; discarded gets a terminal title.
+ */
+export function assertionEmptyStateCopy(
+  state: AssertionState | null | undefined,
+): { title: string; description: string } {
+  switch (state) {
+    case 'promoted':
+      return {
+        title: 'No entities in this assertion.',
+        description: 'This assertion was promoted — its entities now live in Shared Working Memory. Open the Shared Working Memory tab to view them.',
+      };
+    case 'published':
+    case 'finalized':
+      return {
+        title: 'No entities in this assertion.',
+        description: 'This assertion was published — its entities are now Knowledge Assets in Verifiable Memory. Open the Verifiable Memory tab to view them.',
+      };
+    case 'discarded':
+      return {
+        title: 'This assertion was discarded.',
+        description: 'This assertion was discarded.',
+      };
+    case 'created':
+    default:
+      return {
+        title: 'No entities in this assertion.',
+        description: 'This assertion has no extracted entities.',
+      };
+  }
+}
+
+/**
  * The primary (first non-`meta`) sub-graph slug an entity has triples
  * in, or null when it lives only in the root bucket / meta. Mirrors the
  * `SubGraphBadge` rule (lowest-rank binding wins; most entities live in
@@ -1089,35 +1133,90 @@ export function buildBreadcrumbHops(input: {
   subGraphDisplayName?: string | null;
   /** Open detail's name, or null when no detail is open. */
   detailLabel?: string | null;
+  /**
+   * Codex round-8 (8-2) — the M2 ORIGIN's layer/subgraph. When a detail
+   * is open the middle hop's `target` is `'origin'` (clicking closes the
+   * detail back to where it was opened), so its LABEL must name the
+   * origin, not the current location. After an M2(b) cross-subgraph
+   * follow the current subgraph diverges from the origin, and labelling
+   * the middle hop with the CURRENT subgraph misnames the destination the
+   * click returns you to. Supplied only when a detail is open; when
+   * absent (or no detail), the middle hop falls back to current-scope
+   * labelling (then current == location, which is correct). If the origin
+   * had no middle (opened from overview — `originLayer === 'overview'` and
+   * `originSubGraph === null`), NO middle is synthesised (the 2-hop rule
+   * still holds).
+   */
+  originLayer?: LayerView | null;
+  originSubGraph?: string | null;
+  originSubGraphDisplayName?: string | null;
 }): BreadcrumbHop[] {
-  const { contextGraphName, activeLayer, activeSubGraph, subGraphDisplayName, detailLabel } = input;
+  const {
+    contextGraphName,
+    activeLayer,
+    activeSubGraph,
+    subGraphDisplayName,
+    detailLabel,
+    originLayer,
+    originSubGraph,
+    originSubGraphDisplayName,
+  } = input;
   const hops: BreadcrumbHop[] = [];
 
-  // First hop — Context Graph. It is the CURRENT page only when we are on
-  // the overview with no subgraph and no open detail.
+  // First hop is the CURRENT page only when we are on the overview with no
+  // subgraph and no open detail.
   const onOverview = !activeSubGraph && activeLayer === 'overview' && !detailLabel;
+  if (onOverview) {
+    hops.push({
+      key: 'cg',
+      label: contextGraphName,
+      title: contextGraphName,
+      target: 'current',
+    });
+    return hops;
+  }
+
+  // Middle hop — subgraph displayName OR layer full-name (never both).
+  const detailOpen = !!detailLabel;
+  // 8-2 — when a detail is open the middle hop labels the ORIGIN (where
+  // clicking returns you). The origin layer/subgraph is supplied by the
+  // caller from the M2 snapshot. When it isn't (e.g. no detail open, or a
+  // caller that doesn't thread it), fall back to the current location.
+  const haveOrigin = detailOpen && originLayer !== undefined;
+  const middleLayer = haveOrigin ? (originLayer ?? 'overview') : activeLayer;
+  const middleSubGraph = haveOrigin ? (originSubGraph ?? null) : activeSubGraph;
+  const middleSubGraphName = haveOrigin ? originSubGraphDisplayName : subGraphDisplayName;
+  let middle: { label: string; title: string } | null = null;
+  if (middleSubGraph) {
+    const name = middleSubGraphName?.trim() || middleSubGraph;
+    middle = { label: name, title: name };
+  } else if (middleLayer === 'wm' || middleLayer === 'swm' || middleLayer === 'vm') {
+    const name = LAYER_FULL_NAME[middleLayer];
+    middle = { label: name, title: name };
+  } else if (middleLayer === 'graph-overview') {
+    middle = { label: 'Subgraphs', title: 'Subgraphs' };
+  } else if (middleLayer === 'query') {
+    middle = { label: 'Query Catalogue', title: 'Query Catalogue' };
+  }
+
+  // First hop — Context Graph.
+  // Codex round-10 (10-2) — when a detail was opened from the OVERVIEW the
+  // breadcrumb is only 2 hops `[Context Graph › Detail]` (no middle), so the
+  // first hop is the SOLE back-affordance. Targeting 'overview' there would
+  // be a fresh top-of-overview nav that drops the captured scroll/tab;
+  // re-target it to 'origin' (→ onRestoreOrigin / handleDetailClose, which
+  // restores the overview origin correctly). The carve-out: in the 3-hop
+  // case (detail from a layer/subgraph) the first hop stays 'overview' — a
+  // genuine "go UP to the CG root", a DIFFERENT destination than the middle
+  // hop's 'origin' restore. The "no middle" check is the same condition that
+  // decides whether a middle hop exists, so one shared check drives both.
+  const firstHopRestoresOrigin = detailOpen && !middle;
   hops.push({
     key: 'cg',
     label: contextGraphName,
     title: contextGraphName,
-    target: onOverview ? 'current' : 'overview',
+    target: firstHopRestoresOrigin ? 'origin' : 'overview',
   });
-  if (onOverview) return hops;
-
-  // Middle hop — subgraph displayName OR layer full-name (never both).
-  const detailOpen = !!detailLabel;
-  let middle: { label: string; title: string } | null = null;
-  if (activeSubGraph) {
-    const name = subGraphDisplayName?.trim() || activeSubGraph;
-    middle = { label: name, title: name };
-  } else if (activeLayer === 'wm' || activeLayer === 'swm' || activeLayer === 'vm') {
-    const name = LAYER_FULL_NAME[activeLayer];
-    middle = { label: name, title: name };
-  } else if (activeLayer === 'graph-overview') {
-    middle = { label: 'Subgraphs', title: 'Subgraphs' };
-  } else if (activeLayer === 'query') {
-    middle = { label: 'Query Catalogue', title: 'Query Catalogue' };
-  }
 
   if (middle) {
     hops.push({

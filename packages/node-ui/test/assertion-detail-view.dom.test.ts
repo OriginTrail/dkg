@@ -86,13 +86,14 @@ async function flush(): Promise<void> {
   });
 }
 
-function render(root: Root, assertion: AssertionInfo) {
+function render(root: Root, assertion: AssertionInfo, sourceLayer: 'wm' | 'swm' = 'wm') {
   return act(async () => {
     root.render(
       React.createElement(ProjectProfileContext.Provider, { value: profile },
         React.createElement(AgentsContext.Provider, { value: agents },
           React.createElement(AssertionDetailView, {
             assertion,
+            sourceLayer,
             contextGraphId: 'cg-test',
             onNavigate: vi.fn(),
             onComplete: vi.fn(),
@@ -101,10 +102,10 @@ function render(root: Root, assertion: AssertionInfo) {
   });
 }
 
-async function mount(assertion: AssertionInfo): Promise<Root> {
+async function mount(assertion: AssertionInfo, sourceLayer: 'wm' | 'swm' = 'wm'): Promise<Root> {
   document.body.innerHTML = '<div id="root"></div>';
   const root = createRoot(query('#root'));
-  await render(root, assertion);
+  await render(root, assertion, sourceLayer);
   await flush();
   return root;
 }
@@ -210,6 +211,45 @@ describe('AssertionDetailView', () => {
     expect(document.body.textContent).not.toContain('discarded (');
   });
 
+  // Codex round-6 finding 2 — an entity label that is a lang/typed RDF
+  // literal must render DECODED in the Entities pane (`Hola`), not as the
+  // raw `Hola"@es` (the round-2 consumer audit missed buildMemoryEntities'
+  // label path; round-6 decodes at the shared label chokepoint).
+  it('Entities pane decodes a lang-tagged entity label (Hola, not Hola"@es)', async () => {
+    stateMock.fetchAssertionState.mockResolvedValue({
+      state: 'created', layer: 'wm',
+      assertionGraph: 'did:dkg:context-graph:cg-test/demo/assertion/0xabc/epcis-demo',
+    });
+    stateMock.fetchAssertionTriples.mockReset();
+    stateMock.fetchAssertionTriples.mockResolvedValue([
+      { subject: 'urn:e:greet', predicate: TYPE, object: 'http://schema.org/Thing' },
+      { subject: 'urn:e:greet', predicate: 'http://schema.org/name', object: '"Hola"@es' },
+    ]);
+    root = await mount(wmAssertion);
+    const body = document.body.textContent ?? '';
+    expect(body).toContain('Hola');
+    expect(body).not.toContain('Hola"@es');
+    expect(body).not.toContain('"@es');
+  });
+
+  // Codex round-6 finding 3 — a triple-FETCH error must render a DISTINCT
+  // "couldn't load" state, NOT the empty-state copy (an operational
+  // failure must not look like valid-but-empty data).
+  it('triple-fetch error shows the error state, not the empty-state copy', async () => {
+    stateMock.fetchAssertionState.mockResolvedValue({
+      state: 'created', layer: 'wm',
+      assertionGraph: 'did:dkg:context-graph:cg-test/demo/assertion/0xabc/epcis-demo',
+    });
+    stateMock.fetchAssertionTriples.mockReset();
+    stateMock.fetchAssertionTriples.mockRejectedValue(new Error('HTTP 500'));
+    root = await mount(wmAssertion);
+    const body = document.body.textContent ?? '';
+    // Error state, distinct from the genuinely-empty copy.
+    expect(body).toContain("Couldn't load this assertion's contents.");
+    expect(body).not.toContain('This assertion has no extracted entities.');
+    expect(body).not.toContain('No entities in this assertion.');
+  });
+
   it('Triples tab renders a plain s/p/o table with NO filter pills (T10)', async () => {
     stateMock.fetchAssertionState.mockResolvedValue({
       state: 'created', layer: 'wm',
@@ -226,6 +266,67 @@ describe('AssertionDetailView', () => {
     expect(document.querySelector('.v10-triples-filter-pills')).toBeNull();
     expect(document.querySelector('.v10-ka-pill')).toBeNull();
     expect(query('.v10-ka-triples-table').textContent).toContain('Battery cell 003');
+  });
+
+  // Codex round-9 (9-1) — the triples loading treatment is SHARED across
+  // all three tabs. Pre-fix only the Entities pane gated on triplesLoading;
+  // the Triples tab rendered a "0 of 0" table and the Graph tab fell through
+  // to "No assertion graph data" while the fetch was still pending.
+  it('triples loading: the Triples and Graph tabs show the loading treatment, not 0-of-0 / no-data', async () => {
+    stateMock.fetchAssertionState.mockResolvedValue({
+      state: 'created', layer: 'wm',
+      assertionGraph: 'did:dkg:context-graph:cg-test/demo/assertion/0xabc/epcis-demo',
+    });
+    // Triples fetch never settles → triplesLoading stays true, triples empty.
+    stateMock.fetchAssertionTriples.mockReset();
+    stateMock.fetchAssertionTriples.mockReturnValue(new Promise(() => {}));
+    root = await mount(wmAssertion);
+
+    // Entities tab (default) shows loading.
+    expect(document.body.textContent).toContain('Loading assertion entities');
+
+    // Triples tab — must NOT render the empty "0 of 0" table.
+    const tabs = () => [...document.querySelectorAll('.v10-content-tab')];
+    await act(async () => { tabs().find(t => t.textContent === 'Triples')!.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    await flush();
+    expect(document.querySelector('.v10-ka-triples-table')).toBeNull();
+    expect(document.body.textContent).not.toContain('0 of 0 triples shown');
+    expect(document.body.textContent).toContain('Loading assertion entities');
+
+    // Graph tab — must NOT render "No assertion graph data".
+    await act(async () => { tabs().find(t => t.textContent === 'Graph')!.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    await flush();
+    expect(document.body.textContent).not.toContain('No assertion graph data');
+    expect(document.body.textContent).toContain('Loading assertion entities');
+  });
+
+  it('triples error: ALL three tabs show the error state, not empty content', async () => {
+    stateMock.fetchAssertionState.mockResolvedValue({
+      state: 'created', layer: 'wm',
+      assertionGraph: 'did:dkg:context-graph:cg-test/demo/assertion/0xabc/epcis-demo',
+    });
+    stateMock.fetchAssertionTriples.mockReset();
+    stateMock.fetchAssertionTriples.mockRejectedValue(new Error('HTTP 500'));
+    root = await mount(wmAssertion);
+
+    const ERR = "Couldn't load this assertion's contents.";
+    const tabs = () => [...document.querySelectorAll('.v10-content-tab')];
+
+    // Entities tab.
+    expect(document.body.textContent).toContain(ERR);
+
+    // Triples tab — error, NOT the empty table.
+    await act(async () => { tabs().find(t => t.textContent === 'Triples')!.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    await flush();
+    expect(document.body.textContent).toContain(ERR);
+    expect(document.querySelector('.v10-ka-triples-table')).toBeNull();
+    expect(document.body.textContent).not.toContain('0 of 0 triples shown');
+
+    // Graph tab — error, NOT "No assertion graph data".
+    await act(async () => { tabs().find(t => t.textContent === 'Graph')!.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    await flush();
+    expect(document.body.textContent).toContain(ERR);
+    expect(document.body.textContent).not.toContain('No assertion graph data');
   });
 
   // Codex round-2 finding 3 — the Triples table must DISPLAY literals
@@ -266,6 +367,116 @@ describe('AssertionDetailView', () => {
     expect(badge.textContent).toContain('Working');
     expect(badge.textContent).not.toContain('·');
     expect(query('.v10-ka-header-actions').textContent).not.toContain('Promote to SWM');
+  });
+
+  // Codex round-11 (11-1) — during the state hydrate the badge + tone must
+  // reflect the KNOWN-true source layer (the list the detail opened from),
+  // NOT the old `?? 'wm'` invention. An SWM assertion opened while its state
+  // is still loading shows "◈ Shared", never "◇ Working".
+  it('hydrating: badge reflects the SWM source layer, not an invented wm (11-1)', async () => {
+    stateMock.fetchAssertionState.mockReturnValue(new Promise(() => {}));
+    root = await mount(wmAssertion, 'swm'); // opened from the SWM list
+    const badge = query('.v10-trust-badge');
+    expect(badge.textContent).toContain('Shared'); // SWM trust label
+    expect(badge.textContent).not.toContain('Working'); // no wm-flash
+    expect(badge.textContent).toContain('◈'); // SWM glyph
+    expect(badge.textContent).not.toContain('◇'); // not the WM glyph
+  });
+
+  // 11-1 — on a state-fetch error the badge must still show the source layer
+  // (the value is real + known), NOT 'wm', so it doesn't contradict the
+  // "state unavailable" message in the right rail.
+  it('state-error: badge shows the SWM source layer alongside "state unavailable" (no wm contradiction)', async () => {
+    stateMock.fetchAssertionState.mockResolvedValue(null);
+    root = await mount(wmAssertion, 'swm');
+    const badge = query('.v10-trust-badge');
+    expect(badge.textContent).toContain('Shared');
+    expect(badge.textContent).not.toContain('Working');
+    expect(document.body.textContent).toContain('state unavailable');
+  });
+
+  // Codex round-11 (11-2) — header counts during load must NOT read as
+  // `0 entities · 0 triples` (a false "empty" claim). entityCount is unknown
+  // until the fetch → `…`; tripleCount seeds from the row when present, else
+  // `…` — never 0 before the fetch settles.
+  it('hydrating: header counts show placeholders, never 0 entities / 0 triples (11-2)', async () => {
+    stateMock.fetchAssertionState.mockReturnValue(new Promise(() => {}));
+    // Row carries NO tripleCount → both counts are placeholders.
+    root = await mount({ name: 'x', graphUri: 'did:dkg:context-graph:cg-test/demo/assertion/0xabc/x', subGraph: 'demo' });
+    const line = query('.v10-ka-ual').textContent ?? '';
+    expect(line).not.toContain('0 entities');
+    expect(line).not.toContain('0 triples');
+    expect(line).toContain('… entities');
+    expect(line).toContain('… triples');
+  });
+
+  // 11-2 — when the row carries a tripleCount it seeds immediately (no
+  // 0-flash, no placeholder for that field); entities stay `…` until the
+  // fetch resolves.
+  it('hydrating: a row-seeded tripleCount shows immediately; entities stay a placeholder (11-2)', async () => {
+    stateMock.fetchAssertionState.mockReturnValue(new Promise(() => {}));
+    root = await mount({ name: 'x', graphUri: 'did:dkg:context-graph:cg-test/demo/assertion/0xabc/x', subGraph: 'demo', tripleCount: 142 });
+    const line = query('.v10-ka-ual').textContent ?? '';
+    expect(line).toContain('142 triples'); // row-seeded, no 0-flash
+    expect(line).toContain('… entities');  // still unknown
+    expect(line).not.toContain('0 entities');
+    expect(line).not.toContain('0 triples');
+  });
+
+  // 11-2 — once resolved, the real counts replace the placeholders (incl. a
+  // genuine zero, which is now a TRUE statement, not a hydrate artefact).
+  it('resolved: header shows the real fetched counts (placeholders replaced)', async () => {
+    stateMock.fetchAssertionState.mockResolvedValue({
+      state: 'created', layer: 'wm',
+      assertionGraph: 'did:dkg:context-graph:cg-test/demo/assertion/0xabc/epcis-demo',
+    });
+    // sampleTriples = 2 triples, 1 root entity (urn:e:battery).
+    root = await mount(wmAssertion);
+    const line = query('.v10-ka-ual').textContent ?? '';
+    expect(line).toContain('2 triples');
+    expect(line).not.toContain('… triples');
+    expect(line).not.toContain('… entities');
+    // Real entity count is present (not a placeholder).
+    expect(line).toMatch(/\d+ entities/);
+  });
+
+  // 11-2 — a triples-FETCH error must keep the count placeholders, NEVER
+  // surface `0 entities · 0 triples` (an operational failure must not read as
+  // valid-but-empty).
+  it('triples error: header counts stay placeholders, never 0 (11-2)', async () => {
+    stateMock.fetchAssertionState.mockResolvedValue({
+      state: 'created', layer: 'wm',
+      assertionGraph: 'did:dkg:context-graph:cg-test/demo/assertion/0xabc/epcis-demo',
+    });
+    stateMock.fetchAssertionTriples.mockReset();
+    stateMock.fetchAssertionTriples.mockRejectedValue(new Error('HTTP 500'));
+    root = await mount(wmAssertion); // wmAssertion carries no tripleCount
+    const line = query('.v10-ka-ual').textContent ?? '';
+    expect(line).not.toContain('0 entities');
+    expect(line).not.toContain('0 triples');
+    expect(line).toContain('… entities');
+    expect(line).toContain('… triples');
+  });
+
+  // Codex round-8 (8-1) — the empty-state must NOT FLASH during hydration.
+  // On first mount `stateInfo` is null, so `assertionGraph` is undefined
+  // and the triples effect sets `triplesLoading=false` immediately —
+  // leaving the empty-state branch reachable BEFORE the lifecycle lookup
+  // resolves (with `assertionEmptyStateCopy(undefined)`). The hydrating
+  // treatment must win while `stateLoading` is true.
+  it('hydrating (state fetch unresolved): Entities pane shows the loading treatment, NOT the empty-state flash', async () => {
+    // State never resolves → stateLoading stays true → assertionGraph
+    // undefined → triples effect early-returns with triplesLoading=false.
+    stateMock.fetchAssertionState.mockReturnValue(new Promise(() => {}));
+    root = await mount(wmAssertion);
+    const body = document.body.textContent ?? '';
+    // Hydrating treatment is shown …
+    expect(body).toContain('Loading assertion entities');
+    // … and NONE of the empty-state copies flash through.
+    expect(body).not.toContain('This assertion has no extracted entities.');
+    expect(body).not.toContain('No entities in this assertion');
+    expect(body).not.toContain('now live in Shared Working Memory');
+    expect(body).not.toContain('Knowledge Assets in Verifiable Memory');
   });
 
   it('state-fetch error: panel shows "state unavailable" + quiet trail hint, CTA hidden', async () => {
@@ -337,6 +548,30 @@ describe('AssertionDetailView', () => {
     expect(document.body.textContent).toContain(
       'its entities now live in Shared Working Memory. Open the Shared Working Memory tab to view them.',
     );
+  });
+
+  // Codex round-3 finding 3 — a published/finalized assertion (empty data
+  // graph: entities moved to VM) must show the VM / Knowledge-Assets
+  // empty-state line, NOT "no extracted entities" and NOT the SWM line.
+  it('published assertion empty-state shows the VM / Knowledge-Assets line (not "no extracted entities")', async () => {
+    stateMock.fetchAssertionState.mockResolvedValue({
+      state: 'published', layer: 'vm',
+      // post-publish the data graph is empty
+      assertionGraph: 'did:dkg:context-graph:cg-test/demo/assertion/0xabc/epcis-demo',
+    });
+    stateMock.fetchAssertionTriples.mockReset();
+    stateMock.fetchAssertionTriples.mockResolvedValue([]);
+    root = await mount(wmAssertion);
+    const body = document.body.textContent ?? '';
+    expect(body).toContain('No entities in this assertion');
+    expect(body).toContain('its entities are now Knowledge Assets in Verifiable Memory. Open the Verifiable Memory tab to view them.');
+    expect(body).not.toContain('no extracted entities');
+    // Scope the SWM-line check to the empty-state element — the lifecycle
+    // trail in the right rail always renders the static stage title
+    // "Promoted to Shared Working Memory" (the pipeline legend), so
+    // checking the whole body would false-positive.
+    const emptyStateText = document.querySelector('.v10-empty-state')?.textContent ?? body;
+    expect(emptyStateText).not.toContain('now live in Shared Working Memory');
   });
 
   // Codex round-1 finding 1 — on assertion switch the hook must CLEAR

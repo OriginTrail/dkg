@@ -39,6 +39,20 @@ function createEntities() {
       properties: new Map(),
       connections: [],
     }],
+    // Codex round-8 (8-3) — a MULTI-HOMED entity: lives in BOTH 'demo'
+    // and 'other'. When followed from a page already in one of its
+    // subgraphs, handleNavigate must NOT jump to the arbitrary
+    // `primarySubGraphOf` sibling — it should stay on the current one.
+    ['urn:entity:multihomed', {
+      uri: 'urn:entity:multihomed',
+      label: 'Multi-homed entity',
+      types: [],
+      trustLevel: 'working',
+      layers: new Set(['working']),
+      subGraphs: new Set(['demo', 'other']),
+      properties: new Map(),
+      connections: [],
+    }],
     ['urn:entity:overlap', {
       uri: 'urn:entity:overlap',
       label: 'Shared overlap',
@@ -309,15 +323,23 @@ vi.mock('../src/ui/views/project/components.js', () => ({
   KADetailView: ({ entity, onNavigate }: { entity: any; onNavigate: (uri: string) => void }) =>
     React.createElement('section', { 'data-testid': 'entity-detail', 'data-entity': entity.uri, 'data-trust': entity.trustLevel, 'data-connections': String(entity.connections.length), 'data-subgraphs': [...entity.subGraphs].sort().join(',') },
       React.createElement('div', {}, entity.label),
-      React.createElement('button', { 'data-testid': 'open-related-entity', onClick: () => onNavigate('urn:entity:other') }, 'Open related')),
+      React.createElement('button', { 'data-testid': 'open-related-entity', onClick: () => onNavigate('urn:entity:other') }, 'Open related'),
+      // Codex round-8 (8-3) — follow a link to the MULTI-HOMED entity
+      // (subGraphs: {demo, other}). The prefer-current rule should keep
+      // activeSubGraph on whichever of those the page is already in.
+      React.createElement('button', { 'data-testid': 'open-multihomed-entity', onClick: () => onNavigate('urn:entity:multihomed') }, 'Open multi-homed')),
   // S4 — assertion detail overlay. The mock surfaces the assertion
   // identity + an "open entity from assertion" button so the
   // mutually-exclusive overlay + close-to-origin behaviour can be
   // asserted without the real fetch/render path.
-  AssertionDetailView: ({ assertion, onNavigate }: { assertion: any; onNavigate: (uri: string) => void }) =>
+  AssertionDetailView: ({ assertion, onNavigate }: { assertion: any; onNavigate: (uri: string, layer?: 'wm' | 'swm' | 'vm') => void }) =>
     React.createElement('section', { 'data-testid': 'assertion-detail', 'data-assertion': assertion.graphUri, 'data-name': assertion.name, 'data-subgraph': assertion.subGraph ?? '' },
       React.createElement('div', {}, assertion.name),
-      React.createElement('button', { 'data-testid': 'assertion-open-entity', onClick: () => onNavigate('urn:entity:demo') }, 'Open entity from assertion')),
+      React.createElement('button', { 'data-testid': 'assertion-open-entity', onClick: () => onNavigate('urn:entity:demo') }, 'Open entity from assertion'),
+      // Codex round-5 — open an entity that exists in MULTIPLE layers,
+      // forwarding the assertion's layer (wm) so the follow-on detail is
+      // WM-scoped, not the canonical (shared) version.
+      React.createElement('button', { 'data-testid': 'assertion-open-overlap-wm', onClick: () => onNavigate('urn:entity:overlap', 'wm') }, 'Open overlap entity (WM-scoped)')),
   SubGraphDetailView: ({ slug, activeTab = 'items', onTabChange, onSelectEntity, initialLayer, initialEnabledLayers, onEnabledLayersChange }: {
     slug: string;
     activeTab?: string;
@@ -403,7 +425,11 @@ vi.mock('../src/ui/views/project/components.js', () => ({
         onClick: () => onEnabledLayersChange?.(new Set(['working', 'shared', 'verified'])),
       }, 'all three'),
       React.createElement('div', { 'data-testid': 'subgraph-scroll', 'data-cg-scroll-key': `subgraph:${slug}:${activeTab}` },
-        React.createElement('button', { 'data-testid': 'open-subgraph-entity', onClick: () => onSelectEntity('urn:entity:demo') }, 'Open demo entity')));
+        React.createElement('button', { 'data-testid': 'open-subgraph-entity', onClick: () => onSelectEntity('urn:entity:demo') }, 'Open demo entity'),
+        // Codex round-8 (8-3) — open the multi-homed entity (subGraphs:
+        // {demo, other}) from whichever subgraph page we're on, exercising
+        // handleNavigate's prefer-current branch.
+        React.createElement('button', { 'data-testid': 'open-subgraph-multihomed', onClick: () => onSelectEntity('urn:entity:multihomed') }, 'Open multi-homed entity')));
   },
   ProjectOverviewCard: ({ onOpenPrimer, participants, participantsStatus, subGraphCount, subGraphFetchFailed }: {
     onOpenPrimer: () => void;
@@ -439,7 +465,9 @@ vi.mock('../src/ui/views/project/components.js', () => ({
     activeTab: string;
     onTabChange: (tab: string) => void;
     onSelectEntity: (uri: string) => void;
-    onSelectAssertion?: (assertion: any) => void;
+    // Codex round-11 (11-1) — mirrors the real signature: the list forwards
+    // its own layer as the source layer.
+    onSelectAssertion?: (assertion: any, sourceLayer: 'wm' | 'swm') => void;
     onNodeClick: (node: any) => void;
   }) =>
     React.createElement('section', { 'data-testid': 'layer-detail', 'data-layer': layer, 'data-tab': activeTab },
@@ -448,8 +476,9 @@ vi.mock('../src/ui/views/project/components.js', () => ({
       React.createElement('div', { 'data-testid': 'layer-scroll', 'data-cg-scroll-key': `layer:${layer}:${activeTab}` },
         React.createElement('button', { 'data-testid': 'open-layer-entity', onClick: () => onSelectEntity('urn:entity:working') }, 'Open layer entity'),
         React.createElement('button', { 'data-testid': 'open-layer-overlap-entity', onClick: () => onSelectEntity('urn:entity:overlap') }, 'Open overlap entity'),
-        // S4 — open an assertion detail from the Assertions subtab.
-        React.createElement('button', { 'data-testid': 'open-layer-assertion', onClick: () => onSelectAssertion?.({ name: 'demo-assertion', graphUri: 'did:dkg:context-graph:cg-test/assertion/0xabc/demo-assertion', subGraph: undefined }) }, 'Open assertion'),
+        // S4 — open an assertion detail from the Assertions subtab. Forwards
+        // the mock's `layer` as the source layer (real lists do the same).
+        React.createElement('button', { 'data-testid': 'open-layer-assertion', onClick: () => onSelectAssertion?.({ name: 'demo-assertion', graphUri: 'did:dkg:context-graph:cg-test/assertion/0xabc/demo-assertion', subGraph: undefined }, layer === 'swm' ? 'swm' : 'wm') }, 'Open assertion'),
         React.createElement('button', { 'data-testid': 'open-layer-graph-node', onClick: () => onNodeClick({ id: 'urn:entity:overlap', trustLayer: layer }) }, 'Open graph node'))),
 }));
 
@@ -715,6 +744,89 @@ describe('ProjectView entity detail navigation', () => {
     await flush();
     expect(query('subgraph-detail').dataset.slug).toBe('demo');
     expect(query('subgraph-detail').dataset.tab).toBe('graph');
+  });
+
+  // Codex round-8 (8-3) — prefer-current for a MULTI-HOMED entity. M2(b)'s
+  // switch target is `primarySubGraphOf` (first non-meta), which is
+  // arbitrary when the entity lives in several subgraphs. When the
+  // followed entity is ALREADY in the current subgraph, do NOT switch —
+  // staying put is least-surprising and avoids an arbitrary sibling jump.
+  //
+  // The discriminating setup: be on subgraph 'other' (the NON-primary of
+  // the multi-homed set {demo, other} — primarySubGraphOf returns 'demo',
+  // the insertion-first slug). Pre-8-3 the follow would switch to 'demo'
+  // (primary ≠ current); post-8-3 it stays on 'other' because the entity
+  // is already there. (If we tested from 'demo' the bug would hide, since
+  // primary == current → no switch even without the fix.)
+  it('following a multi-homed entity that is in the CURRENT (non-primary) subgraph does NOT switch (8-3 prefer-current)', async () => {
+    await click('switch-subgraphs');
+    await click('select-subgraph-other');
+    await flush();
+    expect(query('active-subgraph').textContent).toBe('other');
+
+    await click('open-subgraph-multihomed');
+    await flush();
+    expect(query('entity-detail').dataset.entity).toBe('urn:entity:multihomed');
+    // Stayed on 'other' — NOT switched to the arbitrary primary ('demo').
+    expect(query('active-subgraph').textContent).toBe('other');
+  });
+
+  // 8-3 symmetric guard — when the followed entity is NOT in the current
+  // subgraph at all, M2(b) MUST still switch (primarySubGraphOf is the
+  // must-move fallback that un-strands the entity). Already covered by the
+  // T14/T15 cross-subgraph test (urn:entity:other in {'other'} only);
+  // this pins the intent explicitly alongside the prefer-current case.
+  it('following an entity that is NOT in the current subgraph still switches (8-3 must-move fallback)', async () => {
+    await click('switch-subgraphs');
+    await click('select-subgraph-demo');
+    await flush();
+    expect(query('active-subgraph').textContent).toBe('demo');
+
+    // urn:entity:other lives ONLY in {'other'} — not in 'demo'. The follow
+    // must switch to 'other' (the entity isn't on the current page).
+    await click('open-subgraph-entity');
+    expect(query('entity-detail').dataset.entity).toBe('urn:entity:demo');
+    await click('open-related-entity');
+    await flush();
+    expect(query('entity-detail').dataset.entity).toBe('urn:entity:other');
+    expect(query('active-subgraph').textContent).toBe('other');
+  });
+
+  // Codex round-10 (10-1) — opening a detail from an UNPROFILED subgraph
+  // (profile.forSubGraph returns undefined for its slug) must NOT crash. The
+  // breadcrumb-origin name resolution in ProjectView calls
+  // `forSubGraph(originSubGraph)`; pre-fix it dereferenced `.displayName` on
+  // the undefined result, throwing during render. The fix optional-chains
+  // and degrades to the slug. Here we make 'demo' unprofiled, enter it, and
+  // open an entity (→ 'demo' becomes the detail origin) — the render must
+  // succeed and the detail must appear.
+  it('opening a detail from an unprofiled origin subgraph does not crash (10-1 null-guard)', async () => {
+    const originalForSubGraph = profile.forSubGraph;
+    // 'demo' has no profile binding now → forSubGraph('demo') === undefined.
+    // (The active-subgraph slug stays 'demo' internally; only the resolved
+    // binding is undefined, so the strip chrome degrades.)
+    profile.forSubGraph = (slug: string) =>
+      slug === 'demo' ? undefined : originalForSubGraph(slug);
+    try {
+      await click('switch-subgraphs');
+      await click('select-subgraph-demo');
+      await flush();
+      // The subgraph DETAIL view is on 'demo' (driven by the internal slug,
+      // not the missing binding) — proves we entered it without crashing.
+      expect(query('subgraph-detail').dataset.slug).toBe('demo');
+
+      // Open an entity in 'demo' → 'demo' becomes the detail origin. Pre-fix
+      // the render throws resolving the origin subgraph name
+      // (`forSubGraph('demo').displayName` on undefined).
+      await click('open-subgraph-entity');
+      await flush();
+      expect(query('entity-detail').dataset.entity).toBe('urn:entity:demo');
+      // Breadcrumb still renders (didn't crash); origin name degrades to the
+      // slug. The strip is present.
+      expect(query('project-strip')).toBeTruthy();
+    } finally {
+      profile.forSubGraph = originalForSubGraph;
+    }
   });
 
   // T15 — the M2 ORIGINAL behavior (no cross-subgraph involved) is
@@ -1389,6 +1501,34 @@ describe('ProjectView entity detail navigation', () => {
     expect(query('layer-detail').dataset.tab).toBe('assertions');
   });
 
+  // Codex round-7 (7-1) — the scroll-restore effect must fire for the
+  // assertion-detail close, not just the entity close. Assertions now
+  // participate in the M2 origin snapshot (`handleDetailClose` queues
+  // `origin.scroll` for either overlay), but pre-fix the effect's guard
+  // only watched `selectedUri`; closing an assertion back to the SAME
+  // layer it opened from changed none of the listed deps, so the queued
+  // scroll was never consumed. Mirrors the entity scroll-restore test
+  // (T07 / T16 covered layer + subtab; this closes the scroll gap).
+  it('restores scroll position when the assertion detail closes (T07 / T16 scroll parity)', async () => {
+    await click('switch-wm');
+    await click('layer-tab-assertions');
+    await flush();
+
+    const scroller = query('layer-scroll');
+    scroller.scrollTop = 73;
+
+    await click('open-layer-assertion');
+    await flush();
+    expect(query('assertion-detail').dataset.name).toBe('demo-assertion');
+
+    await click('detail-back');
+    await flush();
+
+    expect(query('layer-detail').dataset.layer).toBe('wm');
+    expect(query('layer-detail').dataset.tab).toBe('assertions');
+    expect(query('layer-scroll').scrollTop).toBe(73);
+  });
+
   it('opening an entity from the assertion detail replaces it (mutually exclusive overlays)', async () => {
     await click('switch-wm');
     await click('layer-tab-assertions');
@@ -1402,6 +1542,28 @@ describe('ProjectView entity detail navigation', () => {
     // Entity detail takes over; the assertion overlay is gone.
     expect(query('entity-detail').dataset.entity).toBe('urn:entity:demo');
     expect(document.querySelector('[data-testid="assertion-detail"]')).toBeNull();
+  });
+
+  // Codex round-5 finding 2 — navigating from a WM-assertion entity that
+  // ALSO exists in SWM must open the WM-SCOPED detail (the assertion's
+  // layer), not the canonical/global version. urn:entity:overlap lives in
+  // {working, shared} with canonical trustLevel 'shared'; opening it with
+  // layer='wm' forwarded must resolve the WM slice (trust 'working').
+  it('navigating from a WM-assertion entity (also in SWM) opens the WM-scoped detail, not canonical', async () => {
+    await click('switch-wm');
+    await click('layer-tab-assertions');
+    await flush();
+    await click('open-layer-assertion');
+    await flush();
+    expect(query('assertion-detail').dataset.name).toBe('demo-assertion');
+
+    await click('assertion-open-overlap-wm');
+    await flush();
+    expect(query('entity-detail').dataset.entity).toBe('urn:entity:overlap');
+    // WM-scoped (working), NOT the canonical 'shared' — proves the
+    // assertion's layer flowed through handleNavigate's layerContext.
+    expect(query('entity-detail').dataset.trust).toBe('working');
+    expect(query('entity-detail').textContent).toContain('Working overlap');
   });
 
   it('switching layers from the assertion detail exits the overlay (no stranded detail)', async () => {

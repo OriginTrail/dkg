@@ -171,6 +171,42 @@ describe('fetchAssertionTriples — reads the assertion data graph', () => {
     expect(out[0].object).toBe('"say \\"hi\\"\\\\done"');
     expect(out[0].object.startsWith('"')).toBe(true);
   });
+
+  // Codex round-6 — control chars (raw newline/tab/CR + other C0) in a
+  // multiline extracted literal must be N-Triples-escaped, else the value
+  // is invalid N-Triples and breaks the graph/triple parsers.
+  it('escapes control chars (newline / tab / CR / other C0) in a literal', async () => {
+    // Build the control chars + backslash at RUNTIME (fromCharCode) so the
+    // test SOURCE holds no raw control bytes / ambiguous escapes.
+    const NL = String.fromCharCode(10), TAB = String.fromCharCode(9), CR = String.fromCharCode(13), BELL = String.fromCharCode(7);
+    const BS = String.fromCharCode(92); // backslash
+    const raw = 'line1' + NL + 'line2' + TAB + 'col' + CR + 'end' + BELL + 'bell';
+    setBindings([
+      { s: { value: 'urn:e:1' }, p: { value: 'p' }, o: { type: 'literal', value: raw } },
+    ]);
+    const out = await fetchAssertionTriples('cg-A', 'urn:g');
+    // Expected: two-char escapes BS+n / BS+t / BS+r and the BS+u0007 form.
+    const expected = '"' + 'line1' + BS + 'n' + 'line2' + BS + 't' + 'col' + BS + 'r' + 'end' + BS + 'u0007' + 'bell' + '"';
+    expect(out[0].object).toBe(expected);
+    // No RAW control bytes survive in the output.
+    // eslint-disable-next-line no-control-regex
+    expect(out[0].object).not.toMatch(new RegExp('[\\u0000-\\u001F]'));
+    expect(out[0].object.startsWith('"')).toBe(true);
+  });
+
+  // Codex round-5 — a SPARQL-JSON blank node must come back as `_:<id>`
+  // (the form `useMemoryEntities.isUri` recognises as a resource), NOT the
+  // bare identifier (which is neither a leading-`"` literal nor an
+  // IRI-with-scheme → misclassified, bnode RDF structure lost).
+  it('renders a blank-node object as _:<id> (resource, not literal/bare)', async () => {
+    setBindings([
+      { s: { value: 'urn:e:1' }, p: { value: 'http://example/part' }, o: { type: 'bnode', value: 'b0' } },
+    ]);
+    const out = await fetchAssertionTriples('cg-A', 'urn:g');
+    expect(out[0].object).toBe('_:b0');
+    // Sanity: it does NOT look like a literal (no leading quote).
+    expect(out[0].object.startsWith('"')).toBe(false);
+  });
 });
 
 // Make-or-break (#864 rebase): the REAL list→detail data flow, NOT a
@@ -259,5 +295,56 @@ describe('listAssertions(wm) partition graphUri → fetchAssertionState resolves
     expect(body.sparql).toContain(`<${LIFECYCLE}>`);
     expect(body.sparql).toContain('UNION');
     expect(body.sparql).toContain('assertionGraph');
+  });
+
+  // Codex round-3 finding 2 — an SWM input (lifecycle URN) whose
+  // dkg:assertionGraph did NOT resolve (legacy/partial _meta row) must
+  // NOT echo the URN as assertionGraph (that would make
+  // fetchAssertionTriples query `GRAPH <urn:dkg:assertion:…>` — a bogus
+  // empty render). Return undefined → the panes show their empty-state.
+  it('SWM lifecycle-URN with UNRESOLVED dkg:assertionGraph → assertionGraph undefined (not the URN)', async () => {
+    const LIFECYCLE = 'urn:dkg:assertion:cg-A:0xabc:legacy-no-graph';
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      result: { bindings: [{ state: { value: 'promoted' }, layer: { value: 'SWM' } }] }, // no assertionGraph
+    }));
+    const stateInfo = await fetchAssertionState('cg-A', LIFECYCLE);
+    expect(stateInfo).not.toBeNull();
+    expect(stateInfo!.state).toBe('promoted');
+    // Must NOT be the lifecycle URN; undefined so the triples pane is empty.
+    expect(stateInfo!.assertionGraph).toBeUndefined();
+  });
+
+  // Counterpart — a WM data-graph-URI input with no resolved
+  // dkg:assertionGraph (it IS the data graph) keeps echoing itself.
+  it('WM data-graph-URI input with no resolved dkg:assertionGraph echoes the input (it IS the data graph)', async () => {
+    const PARTITION = 'did:dkg:context-graph:cg-A/assertion/0xabc/notes';
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      result: { bindings: [{ state: { value: 'created' }, layer: { value: 'WM' } }] }, // no assertionGraph binding
+    }));
+    const stateInfo = await fetchAssertionState('cg-A', PARTITION);
+    expect(stateInfo!.assertionGraph).toBe(PARTITION);
+  });
+
+  // Codex round-4 — branch A must bind ?lifecycle UNCONDITIONALLY with the
+  // dkg:assertionGraph match OPTIONAL, so an SWM lifecycle-URN row whose
+  // _meta carries dkg:state but NOT dkg:assertionGraph (legacy/partial)
+  // still resolves its state. Pin the SPARQL shape so it can't regress to
+  // requiring the assertionGraph triple to bind the lifecycle subject.
+  it('SPARQL: branch A binds the input AS ?lifecycle unconditionally + OPTIONAL assertionGraph (round-4)', async () => {
+    const LIFECYCLE = 'urn:dkg:assertion:cg-A:0xabc:legacy-no-graph';
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      result: { bindings: [{ state: { value: 'promoted' }, layer: { value: 'SWM' } }] },
+    }));
+    const stateInfo = await fetchAssertionState('cg-A', LIFECYCLE);
+    // State still resolves (the round-4 outcome) and assertionGraph stays
+    // undefined (round-3 guard composes).
+    expect(stateInfo!.state).toBe('promoted');
+    expect(stateInfo!.assertionGraph).toBeUndefined();
+    const sparql = JSON.parse(fetchMock.mock.calls[0][1].body).sparql as string;
+    // Unconditional BIND of the input as the lifecycle subject…
+    expect(sparql).toContain(`BIND(<${LIFECYCLE}> AS ?lifecycle)`);
+    // …with the assertionGraph match OPTIONAL (branch A no longer REQUIRES
+    // `<input> dkg:assertionGraph ?assertionGraph` to bind ?lifecycle).
+    expect(sparql).toMatch(/OPTIONAL\s*\{\s*<urn:dkg:assertion:cg-A:0xabc:legacy-no-graph>\s*<http:\/\/dkg\.io\/ontology\/assertionGraph>\s*\?assertionGraph\s*\}/);
   });
 });

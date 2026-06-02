@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { postQueryDeduped } from '../api.js';
 import { useMemoryGraphEvents } from './useNodeEvents.js';
 import { MEMORY_LABEL_PREDICATES } from '../lib/memoryLabels.js';
+import { decodeRdfStringLiteral } from '../../rdf-literal.js';
 
 export type TrustLevel = 'working' | 'shared' | 'verified';
 export type MemoryLayerKey = 'wm' | 'swm' | 'vm';
@@ -107,7 +108,11 @@ export function canonicalEntityUri(uri: string): string {
 
 function shortLabel(uri: string): string {
   if (!uri) return '—';
-  if (uri.startsWith('"')) return uri.replace(/^"|"$/g, '');
+  // Codex round-6 — decode RDF literals (drop the `^^<type>`/`@lang`
+  // suffix + unescape the body) instead of a bare outer-quote strip, so
+  // `"Hola"@es` renders `Hola`, not `Hola"@es`. Idempotent for a
+  // suffix-free `"Hola"` and a no-op for non-literal IRIs.
+  if (uri.startsWith('"')) return decodeRdfStringLiteral(uri);
   const hash = uri.lastIndexOf('#');
   const slash = uri.lastIndexOf('/');
   const cut = Math.max(hash, slash);
@@ -487,7 +492,11 @@ export function buildEntities(layered: LayeredTriple[]): Map<string, MemoryEntit
       }
     } else {
       const existing = entity.properties.get(t.predicate) ?? [];
-      const val = t.object.startsWith('"') ? t.object.replace(/^"|"$/g, '') : t.object;
+      // Codex round-6 — decode the literal (drop datatype/lang suffix +
+      // unescape) rather than a bare outer-quote strip, so property
+      // values used as labels (deriveEntityLabel) render `Hola`, not
+      // `Hola"@es`. Idempotent for suffix-free / plain values.
+      const val = t.object.startsWith('"') ? decodeRdfStringLiteral(t.object) : t.object;
       if (!existing.includes(val)) {
         existing.push(val);
         entity.properties.set(t.predicate, existing);

@@ -117,3 +117,160 @@ describe('ProjectHeaderStrip breadcrumb', () => {
     expect(all('.v10-project-strip-sep')).toHaveLength(2);
   });
 });
+
+describe('ProjectHeaderStrip strip chrome from origin (Codex round-9 / 9-2)', () => {
+  let root: Root;
+
+  // A profile that resolves subgraph bindings by slug — so 9-2 can read the
+  // ORIGIN subgraph's color + description from `forSubGraph(originSubGraph)`.
+  const bindings: Record<string, any> = {
+    demo: { slug: 'demo', displayName: 'Demo', color: '#aa0000', description: 'Demo description.' },
+    other: { slug: 'other', displayName: 'Other', color: '#00bb00', description: 'Other description.' },
+  };
+  const chromeProfile = {
+    displayName: 'Hello World',
+    primaryColor: '#64748b',
+    forSubGraph: (slug: string) => bindings[slug],
+  } as any;
+
+  beforeEach(() => {
+    document.body.innerHTML = '<div id="root"></div>';
+    root = createRoot(query('#root'));
+  });
+  afterEach(async () => {
+    await act(async () => { root.unmount(); });
+    document.body.innerHTML = '';
+    vi.clearAllMocks();
+  });
+
+  async function render(props: Partial<React.ComponentProps<typeof ProjectHeaderStrip>>) {
+    await act(async () => {
+      root.render(React.createElement(ProjectHeaderStrip, {
+        cg, profile: chromeProfile,
+        activeLayer: 'wm',
+        activeSubGraph: null,
+        detailLabel: null,
+        onOverview: vi.fn(),
+        onRestoreOrigin: vi.fn(),
+        ...props,
+      } as any));
+    });
+  }
+
+  // After an M2(b) cross-subgraph follow (current = 'other', origin =
+  // 'demo'), the strip tint + description + breadcrumb middle hop must all
+  // name the ORIGIN ('demo'), not the followed-into 'other'.
+  it('cross-subgraph follow: tint + description + breadcrumb all come from the ORIGIN', async () => {
+    await render({
+      activeLayer: 'wm',
+      activeSubGraph: bindings.other, // current page = followed-into 'other'
+      detailLabel: 'Entity B',
+      originLayer: 'wm',
+      originSubGraph: 'demo', // origin = where the detail opened
+      originSubGraphDisplayName: 'Demo',
+    });
+    // Tint = origin color, NOT the followed-into one.
+    expect(query('.v10-project-strip').style.getPropertyValue('--sg-color')).toBe('#aa0000');
+    // Description = origin description.
+    expect(query('.v10-project-strip-desc').textContent).toBe('Demo description.');
+    // Breadcrumb middle hop also names the origin (8-2 + 9-2 share the gate).
+    const hops = all('.v10-breadcrumb-hop');
+    expect(hops[1].textContent).toBe('Demo');
+    // The followed-into subgraph's chrome must NOT leak through.
+    expect(query('.v10-project-strip').style.getPropertyValue('--sg-color')).not.toBe('#00bb00');
+    expect(query('.v10-project-strip-desc').textContent).not.toBe('Other description.');
+  });
+
+  // No cross-follow: origin == current → no-op (chrome stays on current).
+  it('no cross-follow (origin == current): chrome is a no-op (stays on current)', async () => {
+    await render({
+      activeLayer: 'wm',
+      activeSubGraph: bindings.demo,
+      detailLabel: 'Entity A',
+      originLayer: 'wm',
+      originSubGraph: 'demo',
+      originSubGraphDisplayName: 'Demo',
+    });
+    expect(query('.v10-project-strip').style.getPropertyValue('--sg-color')).toBe('#aa0000');
+    expect(query('.v10-project-strip-desc').textContent).toBe('Demo description.');
+  });
+
+  // Origin had NO subgraph (opened from overview / a non-subgraph layer):
+  // chrome degrades to profile.primaryColor + cg.description.
+  it('overview-origin: chrome falls back to primaryColor + cg.description', async () => {
+    await render({
+      activeLayer: 'wm',
+      activeSubGraph: bindings.other, // followed into 'other'
+      detailLabel: 'Entity B',
+      originLayer: 'overview',
+      originSubGraph: null, // origin had no subgraph
+      originSubGraphDisplayName: null,
+    });
+    expect(query('.v10-project-strip').style.getPropertyValue('--sg-color')).toBe('#64748b'); // primaryColor
+    expect(query('.v10-project-strip-desc').textContent).toBe('A demo graph.'); // cg.description
+    // The followed-into 'other' chrome must NOT be used.
+    expect(query('.v10-project-strip').style.getPropertyValue('--sg-color')).not.toBe('#00bb00');
+  });
+
+  // No detail open: chrome derives from the CURRENT activeSubGraph (the
+  // pre-9-2 behaviour — unchanged when there's no detail / no origin).
+  it('no detail open: chrome derives from the current activeSubGraph', async () => {
+    await render({
+      activeLayer: 'wm',
+      activeSubGraph: bindings.other,
+      detailLabel: null,
+    });
+    expect(query('.v10-project-strip').style.getPropertyValue('--sg-color')).toBe('#00bb00');
+    expect(query('.v10-project-strip-desc').textContent).toBe('Other description.');
+  });
+
+  // Codex round-10 (10-1) — an UNPROFILED origin subgraph (forSubGraph
+  // returns undefined) must NOT throw: the chrome degrades to
+  // profile.primaryColor + cg.description and the breadcrumb still renders.
+  // (ProjectView resolves the origin label with the same optional-chain +
+  // slug fallback; here we exercise the ProjectHeaderStrip chrome path.)
+  it('unprofiled origin subgraph: no throw, breadcrumb renders, chrome falls back', async () => {
+    await expect(render({
+      activeLayer: 'wm',
+      activeSubGraph: bindings.demo,
+      detailLabel: 'Entity X',
+      originLayer: 'wm',
+      originSubGraph: 'ghost',           // no binding → forSubGraph returns undefined
+      originSubGraphDisplayName: 'ghost', // caller's slug-fallback name
+    })).resolves.not.toThrow();
+    // Breadcrumb rendered (didn't crash) — middle hop shows the slug.
+    const hops = all('.v10-breadcrumb-hop');
+    expect(hops.map(h => h.textContent)).toEqual(['Hello World', 'ghost', 'Entity X']);
+    // Chrome degraded to profile/CG defaults (no color/description binding).
+    expect(query('.v10-project-strip').style.getPropertyValue('--sg-color')).toBe('#64748b');
+    expect(query('.v10-project-strip-desc').textContent).toBe('A demo graph.');
+  });
+
+  // Codex round-10 (10-2) — a detail opened from the OVERVIEW renders a
+  // 2-hop breadcrumb whose FIRST hop is the sole back-affordance. It must be
+  // a clickable button wired to onRestoreOrigin (origin restore), NOT
+  // onOverview (fresh nav that drops scroll/tab).
+  it('overview-opened detail: first hop is a button that restores the origin (not overview nav)', async () => {
+    const onOverview = vi.fn();
+    const onRestoreOrigin = vi.fn();
+    await render({
+      activeLayer: 'wm',
+      activeSubGraph: null,
+      detailLabel: 'Entity B',
+      originLayer: 'overview',
+      originSubGraph: null,
+      originSubGraphDisplayName: null,
+      onOverview,
+      onRestoreOrigin,
+    });
+    const hops = all('.v10-breadcrumb-hop');
+    // 2 hops, no middle.
+    expect(hops.map(h => h.textContent)).toEqual(['Hello World', 'Entity B']);
+    // First hop is a clickable BUTTON (not a current span).
+    expect(hops[0].tagName).toBe('BUTTON');
+    await act(async () => { hops[0].dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    // Restores the origin; does NOT fire a fresh overview nav.
+    expect(onRestoreOrigin).toHaveBeenCalledTimes(1);
+    expect(onOverview).not.toHaveBeenCalled();
+  });
+});
