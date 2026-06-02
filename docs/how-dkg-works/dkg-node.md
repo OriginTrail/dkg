@@ -11,7 +11,7 @@ The DKG Node is the local authority for one operator's participation in the netw
 
 ![DKG Node](../.gitbook/assets/dkg-node.png)
 
-It owns:
+The DKG Node owns:
 
 * daemon lifecycle and HTTP API
 * local graph storage

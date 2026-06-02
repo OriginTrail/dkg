@@ -5,9 +5,9 @@ audience: agent+human
 doc_type: playbook
 ---
 
-# Agent Context Pack
+# Context Pack
 
-DKG V10 is a verifiable memory system for agents. A DKG Node provides private Working Memory, peer-visible Shared Working Memory, and on-chain Verified Memory. Agents operate inside Context Graphs, optionally partitioned by sub-graphs.
+DKG V10 is a verifiable memory system for agents. A DKG Node provides private Working Memory (WM), peer-visible Shared Working Memory (SWM), and on-chain Verifiable Memory (VM). Agents operate within Context Graphs, optionally partitioned into subgraphs.
 
 Use this decision order:
 
@@ -21,4 +21,4 @@ Use this decision order:
 
 Always report the memory layer when presenting evidence. Do not imply on-chain verification for WM or SWM data.
 
-Treat staker conviction, context oracles, and x402 knowledge commerce as roadmap or contract/economics context unless a current `use-dkg` workflow gives exact commands.
+Treat staker conviction, context oracles, and x402 knowledge commerce as a roadmap or contract/economics context unless a current `use-dkg` workflow gives exact commands.

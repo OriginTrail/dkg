@@ -1,8 +1,12 @@
-# OriginTrail Decentralized Knowledge Graph DKG V10 - Terms and Conditions
+---
+icon: memo-circle-info
+---
+
+# Terms & Conditions
 
 ### Preamble
 
-The OriginTrail Decentralized Knowledge Graph Version 10 (hereinafter referred to as "**OriginTrail V10**" or "**V10**") is a neutral, peer-to-peer, multi-chain network designed to facilitate decentralized knowledge publishing, verification, and retrieval by human and autonomous software agents. OriginTrail V10 consists of   open-source Core Nodes and Edge Nodes implementation, a three-layer Memory Model (Working Memory, Shared Working Memory, Verified Memory), and on-chain primitives (Knowledge Assets, Knowledge Collections, Context Graphs, Verified Graphs, Publisher Conviction Accounts, and Staker Conviction Positions) deployed across multiple EVM-compatible blockchains.
+The OriginTrail Decentralized Knowledge Graph Version 10 (hereinafter referred to as "**OriginTrail V10**" or "**V10**") is a neutral, peer-to-peer, multi-chain network designed to facilitate decentralized knowledge publishing, verification, and retrieval by human and autonomous software agents. OriginTrail V10 consists of open-source Core Nodes and Edge Nodes implementation, a three-layer Memory Model (Working Memory, Shared Working Memory, Verified Memory), and on-chain primitives (Knowledge Assets, Knowledge Collections, Context Graphs, Verified Graphs, Publisher Conviction Accounts, and Staker Conviction Positions) deployed across multiple EVM-compatible blockchains.
 
 OriginTrail V10 is developed by **OriginTrail d.o.o.**, a company organized and established under the laws of Slovenia (hereinafter referred to as "**OriginTrail**").
 
@@ -16,11 +20,11 @@ The OriginTrail V10 Node software is licensed under the Apache License, version 
 
 For the purpose of these Terms and Conditions, the following capitalised terms shall have the meanings set out below. Singular terms include the plural and vice versa.
 
-**AGENT** means an autonomous software program or human-operated account that participates in the OriginTrail V10 network by publishing, querying, endorsing, or verifying Knowledge Assets under a cryptographic keypair.&#x20;
+**AGENT** means an autonomous software program or human-operated account that participates in the OriginTrail V10 network by publishing, querying, endorsing, or verifying Knowledge Assets under a cryptographic keypair.
 
 **APACHE LICENSE** means the Apache License, version 2.0, available at [http://www.apache.org/licenses/LICENSE-2.0](http://www.apache.org/licenses/LICENSE-2.0).
 
-**CONTEXT GRAPH** or "**CG**" means a bounded knowledge space within the OriginTrail V10 network in which a single Agent or a group of Agents collaborate.&#x20;
+**CONTEXT GRAPH** or "**CG**" means a bounded knowledge space within the OriginTrail V10 network in which a single Agent or a group of Agents collaborate.
 
 **CONTRIBUTION** means any work of authorship, including modifications to or additions to the OriginTrail V10 Node source code, technical documentation, or related software, submitted by You to the Licensor for inclusion in the OriginTrail V10 Node.
 
@@ -150,7 +154,7 @@ For the purpose of these Terms and Conditions, the following capitalised terms s
 
 6.4 You are solely responsible for regularly checking for any modifications and updates to the OriginTrail V10 Node Source Code published at [https://github.com/OriginTrail](https://github.com/OriginTrail).
 
-6.5 You are solely responsible for keeping Your private keys, mnemonics, and Node operational credentials safe. **OriginTrail does not have, and will not have, the ability to help You recover any lost private key, any lost keypair controlling an Agent, any Knowledge Asset ERC-1155 token balance stranded at a lost address, or any funds, NFTs, or allowance held at such an address.**&#x20;
+6.5 You are solely responsible for keeping Your private keys, mnemonics, and Node operational credentials safe. **OriginTrail does not have, and will not have, the ability to help You recover any lost private key, any lost keypair controlling an Agent, any Knowledge Asset ERC-1155 token balance stranded at a lost address, or any funds, NFTs, or allowance held at such an address.**
 
 ***
 
@@ -158,9 +162,9 @@ For the purpose of these Terms and Conditions, the following capitalised terms s
 
 7.1 **Utility character of TRAC.** TRAC is a cryptographic utility token the primary function of which is to enable and meter on-chain operations in the OriginTrail V10 network (in particular, the PUBLISH, UPDATE, and VERIFY operations of the Memory Model) and to secure the network through staking. TRAC is not offered, and must not be relied upon, as an investment product, a savings instrument, a deposit, a unit in a collective investment scheme, or a security of any kind.
 
-7.2 **Publisher Conviction.** Publishers may commit TRAC to a Publisher Conviction account for a fixed term in exchange for a pre-purchased publishing allowance, subject to the discount tiers described in the Technical Documentation.&#x20;
+7.2 **Publisher Conviction.** Publishers may commit TRAC to a Publisher Conviction account for a fixed term in exchange for a pre-purchased publishing allowance, subject to the discount tiers described in the Technical Documentation.
 
-7.3 **Delegated Staker Conviction.** Stakers may lock TRAC into a Staker Conviction Position for a chosen duration in exchange for a reward multiplier, subject to the multiplier schedule described in the Technical Documentation.&#x20;
+7.3 **Delegated Staker Conviction.** Stakers may lock TRAC into a Staker Conviction Position for a chosen duration in exchange for a reward multiplier, subject to the multiplier schedule described in the Technical Documentation.
 
 7.4 **Programmatic Rewards.** Rewards paid to Stakers, distributions of unused Publisher Conviction allowance, and any other token flows described in the Technical Documentation are programmatic transfers executed by on-chain smart contracts. They are not amounts "owed" by OriginTrail and are not payable by OriginTrail in any capacity. OriginTrail does not itself distribute, guarantee, or underwrite any such transfer.
 
@@ -192,7 +196,7 @@ For the purpose of these Terms and Conditions, the following capitalised terms s
 
 (c) The conduct of any automated or "agentic" software operating under Your authority, including the content it publishes, the commitments it makes, the TRAC or other tokens it spends, and the wallets it signs for. **The autonomous or probabilistic character of an Agent is not a defence and does not shift responsibility to OriginTrail or to any other participant.**
 
-8.3 If a key controlling an Agent is lost, compromised, or stolen, the current protocol does not provide social or off-chain recovery. You acknowledge that in such a case, You may permanently lose authority over Knowledge Assets or any other assets held at that Agent's address.&#x20;
+8.3 If a key controlling an Agent is lost, compromised, or stolen, the current protocol does not provide social or off-chain recovery. You acknowledge that in such a case, You may permanently lose authority over Knowledge Assets or any other assets held at that Agent's address.
 
 ***
 
@@ -283,4 +287,3 @@ Licensed under the Apache License, Version 2.0 (the "Apache License"); You may n
 _Issued in Ljubljana. Draft for community and legal review - V10 adaptation of the OriginTrail ODN Terms and Conditions._
 
 _OriginTrail, digitalne rešitve za dobavne verige, d.o.o._
-

@@ -9,7 +9,7 @@ doc_type: how-to
 
 Publishing Conviction Accounts let a publisher commit TRAC, register publishing agents, and use the account as the publish authority for curated Context Graph flows.
 
-Use this page for the current CLI/API surface. For the economics model, see [Conviction and Economics](../how-dkg-works/conviction-and-economics.md).
+Use this page for the current CLI/API surface. For the economics model, see [Conviction & Economics](../how-dkg-works/conviction-and-economics.md).
 
 ## Create a PCA
 
@@ -72,13 +72,13 @@ dkg context-graph register <contextGraphId> --publish-policy 0 --pca-account-id 
 
 ## API Routes
 
-| Route | Purpose |
-| --- | --- |
-| `POST /api/pca` | Create a PCA. |
-| `POST /api/pca/:id/agent` | Register an agent. |
+| Route                                | Purpose              |
+| ------------------------------------ | -------------------- |
+| `POST /api/pca`                      | Create a PCA.        |
+| `POST /api/pca/:id/agent`            | Register an agent.   |
 | `DELETE /api/pca/:id/agent/:address` | Deregister an agent. |
-| `POST /api/pca/:id/funds` | Top up funds. |
-| `POST /api/pca/:id/settle` | Run settlement. |
-| `GET /api/pca/:id` | Read account info. |
+| `POST /api/pca/:id/funds`            | Top up funds.        |
+| `POST /api/pca/:id/settle`           | Run settlement.      |
+| `GET /api/pca/:id`                   | Read account info.   |
 
 These routes require a configured chain adapter with V10 PCA support. Nodes without that surface return feature-unavailable responses instead of pretending the account does not exist.

@@ -1,10 +1,14 @@
-# OriginTrail DKG v10 Bounty Program
+---
+icon: sack-dollar
+---
+
+# DKG V10 Bounty Program
 
 <figure><img src="../.gitbook/assets/dkg-memory-hr.png" alt=""><figcaption></figcaption></figure>
 
 ## Round 1 — Call for Integrations
 
-<table data-header-hidden><thead><tr><th width="199"></th><th></th></tr></thead><tbody><tr><td>Theme</td><td><a href="https://github.com/OriginTrail/dkg">DKG v10</a> Working Memory &#x26; Shared Memory × <a href="https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f">LLM-Wiki</a> / <a href="https://github.com/karpathy/autoresearch">Autoresearch</a> agents</td></tr><tr><td>Total bounty pool</td><td>Total of 150,000 $TRAC for 3 rounds, up to 10,000 $TRAC per accepted contribution capped at 50,000 $TRAC in round 1</td></tr><tr><td>Status</td><td>Open</td></tr><tr><td>Issued by</td><td><a href="https://origintrail.io">OriginTrail</a> </td></tr></tbody></table>
+<table data-header-hidden><thead><tr><th width="199"></th><th></th></tr></thead><tbody><tr><td>Theme</td><td><a href="https://github.com/OriginTrail/dkg">DKG v10</a> Working Memory &#x26; Shared Memory × <a href="https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f">LLM-Wiki</a> / <a href="https://github.com/karpathy/autoresearch">Autoresearch</a> agents</td></tr><tr><td>Total bounty pool</td><td>Total of 150,000 $TRAC for 3 rounds, up to 10,000 $TRAC per accepted contribution capped at 50,000 $TRAC in round 1</td></tr><tr><td>Status</td><td>Open</td></tr><tr><td>Issued by</td><td><a href="https://origintrail.io">OriginTrail</a></td></tr></tbody></table>
 
 ### 1. Summary
 
@@ -43,7 +47,7 @@ If you are unsure what to build, start from one of these. They are concrete, bui
 #### Illustrative suggestions
 
 * **ChatGPT / Claude plugin or MCP server that writes to Working Memory.** Every drafted artifact — chat, research note, code analysis — is deposited into the author's Working Memory with provenance and an agent-assigned status tag. Turns any conversation into durable, attributable knowledge.
-* **Slack threads → Shared Memory.** An agent that watches a channel, identifies substantive exchanges (not chitchat), and promotes them into Shared Memory and team Context Graph membership.&#x20;
+* **Slack threads → Shared Memory.** An agent that watches a channel, identifies substantive exchanges (not chitchat), and promotes them into Shared Memory and team Context Graph membership.
 * **DKG as a memory backend for an existing RAG pipeline.** Swap a team's vector-store-plus-prompt retrieval loop for a DKG-backed one. Agents get provenance and promotion paths for free, and downstream context oracles become consumable without a rewrite.
 * **GitHub → Working Memory ingestion.** Every issue, PR, and review comment in a repo flows into the author's Working Memory with code-aware tagging. The engineering knowledge a team generates daily, captured.
 
@@ -173,13 +177,13 @@ Figure 1. The three-round progression of the DKG v10 bounty program.
 | <p><strong>Round 2 — Verified Memory &#x26; context oracles</strong></p><p><em>(planned)</em></p>    | Chain-anchoring, trust-gradient verification, oracle pipelines   | The self-attested → endorsed → consensus-verified gradient; oracle pipelines consuming matured Shared Memory artifacts; Conviction-related UX where relevant. Follow-on eligibility for Round 1 contributors. |
 | <p><strong>Round 3 — Agent-ready analytics &#x26; user support</strong></p><p><em>(planned)</em></p> | Agent-legible observability and agent-mediated support           | Analytics surfaces legible to agents rather than only humans; agent-mediated user support spanning the full trust gradient. Builds on verified artifacts and oracle outputs delivered in Round 2.             |
 
-**Why the sequence matters.**&#x20;
+**Why the sequence matters.**
 
-Round 1 seeds the pre-verification substrate with artifacts that have clean provenance and promotion paths.&#x20;
+Round 1 seeds the pre-verification substrate with artifacts that have clean provenance and promotion paths.
 
-Round 2 turns that substrate into verified, oracle-consumable knowledge.&#x20;
+Round 2 turns that substrate into verified, oracle-consumable knowledge.
 
-Round 3 makes the whole stack usable — both by agents operating over it and by humans who need support navigating it.&#x20;
+Round 3 makes the whole stack usable — both by agents operating over it and by humans who need support navigating it.
 
 Integrations that anticipate this arc from Round 1 onward — see evaluation criterion 4 — are best positioned to extend across multiple rounds.
 
@@ -211,7 +215,7 @@ Questions and early-stage design conversations are encouraged before opening a P
 * Submissions must be the contributor's own work or properly licensed with licenses for open source software like MIT, Apache 2.0 etc.
 * Contributors retain authorship; merged code is licensed under the v10 repository's standard license.
 * The call does not constitute a contract of employment or a promise of future work. It is an open call with programmatic rewards for accepted contributions.
-* Each participant accepts the [OriginTrail DKG V10 Terms & Conditions.](origintrail-decentralized-knowledge-graph-dkg-v10-terms-and-conditions.md)&#x20;
+* Each participant accepts the [OriginTrail DKG V10 Terms & Conditions.](../getting-started/dkg-v10-t-c.md)
 
 ***
 

@@ -5,25 +5,7 @@ audience: agent+human
 doc_type: playbook
 ---
 
-# Task Pack: Install and Connect
-
-## Standalone node
-
-```bash
-npm install -g @origintrail-official/dkg
-dkg init
-dkg start
-dkg status
-```
-
-## MCP
-
-```bash
-npm install -g @origintrail-official/dkg
-dkg mcp setup
-```
-
-Restart the client and inspect DKG tools.
+# Install & Connect
 
 ## Hermes
 
@@ -43,3 +25,21 @@ openclaw gateway restart
 ```
 
 Use `--no-start`, `--no-fund`, and `--no-verify` only when the user or environment requires it.
+
+## MCP
+
+```bash
+npm install -g @origintrail-official/dkg
+dkg mcp setup
+```
+
+Restart the client and inspect DKG tools.
+
+## Standalone node
+
+```bash
+npm install -g @origintrail-official/dkg
+dkg init
+dkg start
+dkg status
+```

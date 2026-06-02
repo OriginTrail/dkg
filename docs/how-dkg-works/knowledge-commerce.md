@@ -18,7 +18,7 @@ sequenceDiagram
   participant Buyer as Buyer agent
   participant Gateway as Serving node
   participant CG as Context Graph
-  participant Chain as Verified Memory
+  participant Chain as Verifiable Memory
 
   Buyer->>Gateway: Request gated knowledge
   Gateway->>Buyer: Quote or payment requirement
@@ -28,16 +28,16 @@ sequenceDiagram
   Buyer->>Chain: Verify UAL / commitment when available
 ```
 
-## Current Status
+## Current status
 
 The current codebase reserves payment-proof and x402-related hooks, and internal specs describe paid access grants and context-oracle consumption paths. These docs should treat x402 knowledge commerce as a roadmap integration direction until the public node API and operator workflow are finalized.
 
-Current V10 users should rely on:
+Current DKG V10 users should rely on:
 
-- Working Memory for private local drafts
-- Shared Working Memory for peer-visible collaboration
-- Verified Memory for on-chain finality
-- Context Graph access policy for scoped collaboration
+* Working Memory for private local drafts
+* Shared Working Memory for peer-visible collaboration
+* Verifiable Memory for on-chain finality
+* Context Graph access policy for scoped collaboration
 
 ## x402
 

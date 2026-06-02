@@ -5,9 +5,9 @@ audience: human+agent
 doc_type: concept
 ---
 
-# Conviction and Economics
+# Conviction & Economics
 
-V10 uses conviction mechanisms to connect usage demand with long-term network support. Publisher conviction is the demand-side commitment. Staker conviction is the supply-side commitment.
+DKG uses conviction mechanisms to connect usage demand with long-term network support. Publisher conviction is the demand-side commitment. Staker conviction is the supply-side commitment.
 
 ```mermaid
 flowchart LR
@@ -22,7 +22,7 @@ flowchart LR
 
 ## Publisher Conviction
 
-A Publishing Conviction Account lets a publisher commit TRAC for a fixed V10 publishing window. The commitment is represented on-chain by the DKG Publishing Conviction NFT contract. The account can register publishing agents, top up funds, settle billing windows, and expose a read-only account snapshot.
+A Publishing Conviction Account lets a publisher commit TRAC for a fixed publishing window. The commitment is represented on-chain by the DKG Publishing Conviction NFT contract. The account can register publishing agents, top up funds, settle billing windows, and expose a read-only account snapshot.
 
 Current operator surface:
 
@@ -37,14 +37,14 @@ dkg pca info <accountId>
 
 The matching daemon routes are:
 
-| Route | Purpose |
-| --- | --- |
-| `POST /api/pca` | Create a Publishing Conviction Account. |
-| `POST /api/pca/:id/agent` | Register a publishing agent. |
-| `DELETE /api/pca/:id/agent/:address` | Deregister a publishing agent. |
-| `POST /api/pca/:id/funds` | Top up a PCA. |
-| `POST /api/pca/:id/settle` | Run the lazy-settlement sweep. |
-| `GET /api/pca/:id` | Read a PCA snapshot. |
+| Route                                | Purpose                                 |
+| ------------------------------------ | --------------------------------------- |
+| `POST /api/pca`                      | Create a Publishing Conviction Account. |
+| `POST /api/pca/:id/agent`            | Register a publishing agent.            |
+| `DELETE /api/pca/:id/agent/:address` | Deregister a publishing agent.          |
+| `POST /api/pca/:id/funds`            | Top up a PCA.                           |
+| `POST /api/pca/:id/settle`           | Run the lazy-settlement sweep.          |
+| `GET /api/pca/:id`                   | Read a PCA snapshot.                    |
 
 Owner-gated writes require the daemon EOA to own the PCA NFT. `pca settle` and `pca info` are permissionless/read-side operations.
 
@@ -53,13 +53,13 @@ Owner-gated writes require the daemon EOA to own the PCA NFT. `pca settle` and `
 The current V10 contract tests pin the publishing discount ladder by committed TRAC:
 
 | TRAC committed | Discount |
-| --- | --- |
-| 25,000 | 10% |
-| 50,000 | 20% |
-| 100,000 | 30% |
-| 250,000 | 40% |
-| 500,000 | 50% |
-| 1,000,000+ | 75% |
+| -------------- | -------- |
+| 25,000         | 10%      |
+| 50,000         | 20%      |
+| 100,000        | 30%      |
+| 250,000        | 40%      |
+| 500,000        | 50%      |
+| 1,000,000+     | 75%      |
 
 Publishing can use the PCA path only when the publishing wallet is registered as an agent for the account and the publish window matches the account configuration. Otherwise the publisher path falls back to direct spend at the normal price.
 
@@ -80,15 +80,15 @@ Staker conviction is the supply-side commitment mechanism. V10 staking positions
 The V10 contract model uses discrete lock tiers:
 
 | Lock tier | Reward multiplier |
-| --- | --- |
-| No lockup | 1x |
-| 1 month | 1.5x |
-| 3 months | 2x |
-| 6 months | 3.5x |
-| 12 months | 6x |
+| --------- | ----------------- |
+| No lockup | 1x                |
+| 1 month   | 1.5x              |
+| 3 months  | 2x                |
+| 6 months  | 3.5x              |
+| 12 months | 6x                |
 
 This page documents the contract-backed model and economics vocabulary. It is not yet a staker operating guide. Until a public `use-dkg` page covers the complete staker workflow, treat staker conviction as an economics and contract concept rather than a documented operator procedure.
 
 ## Terms
 
-The official legal text for TRAC, conviction positions, Knowledge Assets, and risk disclosures is copied unchanged in [OriginTrail Decentralized Knowledge Graph DKG V10 - Terms and Conditions](../reference/origintrail-decentralized-knowledge-graph-dkg-v10-terms-and-conditions.md).
+The official legal text for TRAC, conviction positions, Knowledge Assets, and risk disclosures is copied unchanged in [OriginTrail Decentralized Knowledge Graph DKG V10 - Terms and Conditions](../getting-started/dkg-v10-t-c.md).
