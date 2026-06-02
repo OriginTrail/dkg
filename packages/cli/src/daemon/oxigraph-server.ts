@@ -234,6 +234,17 @@ export async function startOxigraphServer(
       await sleep(readyIntervalMs);
     }
     if (stopping) return;
+    // Timed out with the child still running but unresponsive. Kill it
+    // before respawning — otherwise each retry stacks another live
+    // `oxigraph serve`, and they fight over the port (self-inflicted
+    // EADDRINUSE). Its exit handler won't restart (ready is false).
+    if (childAlive()) {
+      try {
+        child!.kill('SIGKILL');
+      } catch {
+        /* best-effort */
+      }
+    }
     scheduleRevive(`respawned server did not become ready on ${bind}`);
   };
 

@@ -210,4 +210,57 @@ describe('ensureOxigraphBinary', () => {
       process.env.PATH = prevPath;
     }
   });
+
+  it('prefers a PATH binary over the pinned glibc asset on musl Linux', async () => {
+    const prevPath = process.env.PATH;
+    process.env.PATH = '/usr/local/bin';
+    try {
+      // musl loader present + oxigraph on PATH; the glibc asset must NOT be
+      // downloaded (it wouldn't run on musl).
+      const statMock = vi.fn(async (p: string) => {
+        if (
+          String(p) === '/lib/ld-musl-x86_64.so.1' ||
+          String(p) === '/usr/local/bin/oxigraph'
+        ) {
+          return { isFile: () => true } as any;
+        }
+        throw new Error('ENOENT');
+      });
+      const fetchMock = vi.fn(async () => new Response(bytes, { status: 200 }));
+      const path = await ensureOxigraphBinary({
+        cacheDir: '/cache',
+        platform: 'linux',
+        arch: 'x64',
+        io: { stat: statMock as any, fetch: fetchMock as any },
+      });
+      expect(path).toBe('/usr/local/bin/oxigraph');
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      process.env.PATH = prevPath;
+    }
+  });
+
+  it('throws a musl-specific error when on musl Linux with no PATH binary', async () => {
+    const prevPath = process.env.PATH;
+    process.env.PATH = '/empty/bin';
+    try {
+      const statMock = vi.fn(async (p: string) =>
+        String(p) === '/lib/ld-musl-x86_64.so.1'
+          ? ({ isFile: () => true } as any)
+          : Promise.reject(new Error('ENOENT')),
+      );
+      const fetchMock = vi.fn(async () => new Response(bytes, { status: 200 }));
+      await expect(
+        ensureOxigraphBinary({
+          cacheDir: '/cache',
+          platform: 'linux',
+          arch: 'x64',
+          io: { stat: statMock as any, fetch: fetchMock as any },
+        }),
+      ).rejects.toThrow(/musl host/i);
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      process.env.PATH = prevPath;
+    }
+  });
 });

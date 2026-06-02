@@ -203,6 +203,28 @@ function sha256Hex(bytes: Uint8Array): string {
  * didn't pin, so integrity is the operator's responsibility (they installed
  * it). Returns the absolute path, or null if not found.
  */
+/**
+ * Heuristic musl detection on Linux: the published Oxigraph binaries are
+ * glibc-linked, so on Alpine/musl hosts the pinned `linux-x64`/`linux-arm64`
+ * asset still "resolves" but won't actually run. Probing for the musl dynamic
+ * loader lets us prefer a system binary (or fail with an actionable error)
+ * instead of downloading an incompatible one.
+ */
+async function isMuslLinux(io: OxigraphBinaryIo): Promise<boolean> {
+  for (const loader of [
+    '/lib/ld-musl-x86_64.so.1',
+    '/lib/ld-musl-aarch64.so.1',
+  ]) {
+    try {
+      await io.stat(loader);
+      return true;
+    } catch {
+      // Not this loader — keep checking.
+    }
+  }
+  return false;
+}
+
 async function resolveSystemOxigraphOnPath(
   io: OxigraphBinaryIo,
   platform: NodeJS.Platform,
@@ -238,6 +260,24 @@ export async function ensureOxigraphBinary(
   const io = { ...defaultIo(), ...opts.io };
   const log = opts.log ?? (() => {});
   const platform = opts.platform ?? process.platform;
+
+  // On Linux+musl the pinned (glibc) asset would download but not run, so a
+  // system `oxigraph` on PATH is the only thing that works here. Detect and
+  // short-circuit before resolving the asset so we never fetch an
+  // incompatible binary. (Tests that inject `opts.asset` skip this.)
+  if (!opts.asset && platform === 'linux' && (await isMuslLinux(io))) {
+    const sys = await resolveSystemOxigraphOnPath(io, platform);
+    if (sys) {
+      log(`musl libc detected; using system Oxigraph binary on PATH: ${sys}`);
+      return sys;
+    }
+    throw new Error(
+      `No glibc-compatible prebuilt Oxigraph ${OXIGRAPH_VERSION} for this musl host. ` +
+        `Install \`oxigraph\` on PATH yourself, or use an external SPARQL endpoint ` +
+        `(store.backend: 'sparql-http').`,
+    );
+  }
+
   let resolved: ResolvedOxigraphAsset;
   try {
     resolved = opts.asset ?? resolveOxigraphAsset(platform, opts.arch);
@@ -293,6 +333,11 @@ export async function ensureOxigraphBinary(
   await io.writeFile(tmp, bytes);
   await io.chmod(tmp, 0o755);
   await io.clearQuarantine(tmp);
+  // rename() is not overwrite-safe on Windows: if `target` already exists
+  // (e.g. a checksum-failed cache hit we're replacing) the rename throws and
+  // the node can never self-heal a corrupt cache. Remove any stale target
+  // first (best-effort; absent target is the common, fine case).
+  await io.rm(target, { force: true }).catch(() => {});
   await io.rename(tmp, target);
   log(`Oxigraph ${OXIGRAPH_VERSION} binary verified and installed at ${target}`);
   return target;
