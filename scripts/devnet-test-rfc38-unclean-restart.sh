@@ -484,9 +484,10 @@ log "✓ member restarted"
 
 EXPECTED_TOTAL=$((WRITES_COUNT + 1))
 M1_PRE=$(count_triples "$M1_NODE")
-[ "$M1_PRE" = "1" ] \
-  || fail "member should still have only the handshake triple before post-restart catchup, got '$M1_PRE'"
-log "Member pre-catchup note count: $M1_PRE (expected 1)"
+M1_PRE=${M1_PRE:-0}
+[ "$M1_PRE" -ge 1 ] 2>/dev/null \
+  || fail "member should have at least the handshake triple before post-restart catchup, got '$M1_PRE'"
+log "Member pre-catchup note count: $M1_PRE (expected at least 1; startup recovery may already have applied missed triples)"
 
 CATCHUP_AFTER=$(api_call "$M1_NODE" POST /api/shared-memory/catchup "$(cat <<EOF
 { "contextGraphId": "$CG_ID", "peerId": "$CORE_PEER_ID" }
@@ -501,8 +502,10 @@ log "hostCatchup.ranFallback=$HOST_RAN_AFTER hostCatchup.appliedTotal=$HOST_APPL
 
 [ "$HOST_RAN_AFTER" = "true" ] \
   || fail "post-restart catchup did not run host-catchup fallback against restarted core"
-[ "$HOST_APPLIED_AFTER" -gt 0 ] 2>/dev/null \
-  || fail "post-restart host-catchup applied no triples (response: $CATCHUP_AFTER)"
+if [ "$M1_PRE" -lt "$EXPECTED_TOTAL" ] 2>/dev/null; then
+  [ "$HOST_APPLIED_AFTER" -gt 0 ] 2>/dev/null \
+    || fail "post-restart host-catchup applied no triples despite missing data (response: $CATCHUP_AFTER)"
+fi
 
 M1_POST=""
 for _ in $(seq 1 30); do

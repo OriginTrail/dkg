@@ -44,9 +44,13 @@ export async function listContextGraphs(nodeNum = 1): Promise<DevnetContextGraph
   return json.contextGraphs ?? [];
 }
 
-export function pickWritableContextGraph(cgs: DevnetContextGraph[]): DevnetContextGraph | undefined {
+export function pickWritableContextGraph(
+  cgs: DevnetContextGraph[],
+  opts: { preferredId?: string } = {},
+): DevnetContextGraph | undefined {
   const writable = cgs.filter((cg) => !cg.isSystem && cg.synced !== false);
-  return writable.find((cg) => cg.id === 'devnet-test') ?? writable[0];
+  const preferred = opts.preferredId ? writable.find((cg) => cg.id === opts.preferredId) : undefined;
+  return preferred ?? writable[0];
 }
 
 export async function createWmAssertion(opts: {

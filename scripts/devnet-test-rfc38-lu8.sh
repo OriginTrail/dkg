@@ -77,6 +77,29 @@ log "Member:  $MEMBER_AGENT (node $MEMBER_NODE)"
 
 STAMP=$(date +%s)
 PUB_CG="${CURATOR_AGENT}/lu8-pub-${STAMP}"
+LU8_QUADS=$(node -e '
+  const quads = [
+    {
+      subject: "urn:lu8/item0",
+      predicate: "http://schema.org/name",
+      object: "\"Item0\"",
+      graph: "",
+    },
+    {
+      subject: "urn:lu8/item0",
+      predicate: "http://schema.org/description",
+      object: "\"LU-8 batch verification fixture\"",
+      graph: "",
+    },
+    {
+      subject: "urn:lu8/item0",
+      predicate: "http://schema.org/identifier",
+      object: "\"lu8-item0\"",
+      graph: "",
+    },
+  ];
+  console.log(JSON.stringify(quads));
+')
 
 # ===========================================================================
 # Setup — curator creates public CG, writes SWM, publishes to VM.
@@ -92,18 +115,13 @@ ON_CHAIN_ID=$(parse_json "$CREATE" '.onChainId')
 [ -n "$ON_CHAIN_ID" ] || fail "CG create failed: $CREATE"
 log "✓ CG registered onChainId=$ON_CHAIN_ID"
 
-log "Curator writes one SWM triple..."
-QUADS=$(node -e "
-  const quads = [{
-    subject: 'urn:lu8/item0',
-    predicate: 'http://schema.org/name',
-    object: '\"Item0\"',
-    graph: ''
-  }];
-  console.log(JSON.stringify({ contextGraphId: '$PUB_CG', quads }));
-")
+log "Curator writes three SWM triples under one publish root..."
+QUADS=$(LU8_QUADS="$LU8_QUADS" PUB_CG="$PUB_CG" node -e '
+  const quads = JSON.parse(process.env.LU8_QUADS);
+  console.log(JSON.stringify({ contextGraphId: process.env.PUB_CG, quads }));
+')
 WRITE_RESP=$(api_call "$CURATOR_NODE" POST /api/shared-memory/write "$QUADS")
-[ "$(parse_json "$WRITE_RESP" '.triplesWritten')" = "1" ] || fail "expected 1 triple written, got: $WRITE_RESP"
+[ "$(parse_json "$WRITE_RESP" '.triplesWritten')" = "3" ] || fail "expected 3 triples written, got: $WRITE_RESP"
 
 log "Curator publishes selection to VM..."
 PUB_RESP=$(api_call "$CURATOR_NODE" POST /api/shared-memory/publish "$(cat <<EOF
@@ -159,19 +177,14 @@ fi
 # path a member uses after catchup once they've decrypted ciphertext, and is
 # the only path that's batch-scoped for the verifier API.
 log "Calling verify-batch with explicit caller-supplied quads (member-side simulation)..."
-EXPLICIT_QUADS=$(node -e "
-  const quads = [{
-    subject: 'urn:lu8/item0',
-    predicate: 'http://schema.org/name',
-    object: '\"Item0\"',
-    graph: ''
-  }];
+EXPLICIT_QUADS=$(LU8_QUADS="$LU8_QUADS" PUB_CG="$PUB_CG" MERKLE_ROOT="$MERKLE_ROOT" node -e '
+  const quads = JSON.parse(process.env.LU8_QUADS);
   console.log(JSON.stringify({
-    contextGraphId: '$PUB_CG',
-    expectedMerkleRoot: '$MERKLE_ROOT',
+    contextGraphId: process.env.PUB_CG,
+    expectedMerkleRoot: process.env.MERKLE_ROOT,
     quads
   }));
-")
+')
 VERIFY_EXPLICIT=$(api_call "$MEMBER_NODE" POST /api/shared-memory/verify-batch "$EXPLICIT_QUADS")
 log "verify-batch explicit: $VERIFY_EXPLICIT"
 EXPLICIT_OK=$(parse_json "$VERIFY_EXPLICIT" '.ok')
@@ -191,26 +204,21 @@ log "  SCENARIO 2: verify-batch ROOT-MISMATCH (forged quads)"
 log "================================================================"
 
 log "Member calls verify-batch with forged quads (extra injected triple)..."
-FORGED_QUADS=$(node -e "
-  const quads = [{
-    subject: 'urn:lu8/item0',
-    predicate: 'http://schema.org/name',
-    object: '\"Item0\"',
-    graph: ''
-  }];
+FORGED_QUADS=$(LU8_QUADS="$LU8_QUADS" PUB_CG="$PUB_CG" MERKLE_ROOT="$MERKLE_ROOT" STAMP="$STAMP" node -e '
+  const quads = JSON.parse(process.env.LU8_QUADS);
   quads.push({
-    subject: 'urn:lu8/injected',
-    predicate: 'http://schema.org/name',
-    object: '\"Mallory\"',
-    graph: ''
+    subject: "urn:lu8/injected",
+    predicate: "http://schema.org/name",
+    object: "\"Mallory\"",
+    graph: "",
   });
   console.log(JSON.stringify({
-    contextGraphId: '$PUB_CG',
-    expectedMerkleRoot: '$MERKLE_ROOT',
+    contextGraphId: process.env.PUB_CG,
+    expectedMerkleRoot: process.env.MERKLE_ROOT,
     quads,
-    batchId: 'lu8-forged-${STAMP}'
+    batchId: "lu8-forged-" + process.env.STAMP
   }));
-")
+')
 VERIFY_BAD=$(api_call "$MEMBER_NODE" POST /api/shared-memory/verify-batch "$FORGED_QUADS")
 log "verify-batch forged: $VERIFY_BAD"
 BAD_OK=$(parse_json "$VERIFY_BAD" '.ok')
