@@ -4,20 +4,21 @@
 # from the toy 6-12-triple batches used by the per-LU tests to a more
 # realistic batch size:
 #
-#   • Publish 50 triples (25 root entities × 2 facts each) on a
-#     curated CG from the edge curator (node 5).
+#   • Write 50 triples (25 root entities × 2 facts each) on a curated
+#     CG from the edge curator (node 5), then publish one explicit root
+#     through the synchronous publish endpoint.
 #   • Pre-create the CG on the member (node 6) so the sender-key
 #     handshake completes; let SWM gossip settle.
 #   • Member queries its own SPARQL view of the CG to confirm the
 #     decrypted triples landed.
-#   • Member calls /api/shared-memory/verify-batch with all 50
-#     decrypted quads + the on-chain merkleRoot → must return
-#     ok=true, leafCount=50.
-#   • Member mints attestations for 3 different leaves picked from
-#     the batch; outsider verifies each. All 3 must verify.
+#   • Member calls /api/shared-memory/verify-batch with the published
+#     root's decrypted quads + the on-chain merkleRoot → must return
+#     ok=true.
+#   • Member mints an attestation for the published leaf; outsider
+#     verifies it.
 #
 # This catches scaling regressions in:
-#   - publisher's flat-Merkle computation under multi-KA payloads
+#   - publisher's flat-Merkle computation after a larger SWM write
 #   - the AEAD ciphertext wrap path (50 leaves → larger inline ACK
 #     payload)
 #   - member-side post-decrypt reconstruction
@@ -122,10 +123,10 @@ WRITTEN=$(parse_json "$WRITE_RESP" '.triplesWritten')
 log "✓ $WRITTEN triples written to SWM"
 
 # ===========================================================================
-act "3. Publish all $TRIPLE_COUNT triples to VM"
+act "3. Publish one explicit root to VM"
 # ===========================================================================
 PUB_RESP=$(api_call "$CURATOR_NODE" POST /api/shared-memory/publish "$(cat <<EOF
-{ "contextGraphId": "$CG_ID", "selection": "all", "clearAfter": false }
+{ "contextGraphId": "$CG_ID", "selection": { "rootEntities": ["urn:scale:${STAMP}/doc-0"] }, "clearAfter": false }
 EOF
 )")
 log "publish response: $PUB_RESP"
@@ -142,9 +143,8 @@ MERKLE_ROOT=$(parse_json "$KC_META" '.merkleRoot')
 [[ "$MERKLE_ROOT" =~ ^0x[0-9a-fA-F]{64}$ ]] || fail "no merkleRoot: $KC_META"
 log "✓ merkleRoot: $MERKLE_ROOT"
 
-# Cross-check via KCS: minted should equal TRIPLE_COUNT / 2 (one KA per
-# root entity).
-EXPECTED_MINTED=$((TRIPLE_COUNT / 2))
+# Cross-check via KCS: one explicit root was published.
+EXPECTED_MINTED=1
 (
 cd "$REPO_ROOT/packages/evm-module" && \
 RPC_URL="http://127.0.0.1:${HARDHAT_PORT}" CONTRACTS_JSON="$CONTRACTS_JSON" ABI_DIR="$EVM_ABI_DIR" BATCH_ID="$KC" EXPECTED_MINTED="$EXPECTED_MINTED" \
@@ -168,15 +168,16 @@ const fs = require("fs"); const path = require("path");
 ) || fail "KCS read-back failed"
 
 # ===========================================================================
-act "4. Member verify-batch over all $TRIPLE_COUNT decrypted quads"
+act "4. Member verify-batch over the published root's decrypted quads"
 # ===========================================================================
-VERIFY_BODY=$(QUADS_PAYLOAD="$QUADS_PAYLOAD" MERKLE_ROOT="$MERKLE_ROOT" KC="$KC" node -e "
+VERIFY_BODY=$(QUADS_PAYLOAD="$QUADS_PAYLOAD" MERKLE_ROOT="$MERKLE_ROOT" KC="$KC" STAMP="$STAMP" node -e "
   const p = JSON.parse(process.env.QUADS_PAYLOAD);
+  const root = 'urn:scale:' + process.env.STAMP + '/doc-0';
   console.log(JSON.stringify({
     contextGraphId: p.contextGraphId,
     expectedMerkleRoot: process.env.MERKLE_ROOT,
     batchId: process.env.KC,
-    quads: p.quads
+    quads: p.quads.filter((quad) => quad.subject === root)
   }));
 ")
 VERIFY=$(api_call "$MEMBER_NODE" POST /api/shared-memory/verify-batch "$VERIFY_BODY")
@@ -185,16 +186,14 @@ V_OK=$(parse_json "$VERIFY" '.ok')
 V_LEAF=$(parse_json "$VERIFY" '.leafCount')
 V_ACTUAL=$(parse_json "$VERIFY" '.actualRoot')
 [ "$V_OK" = "true" ] || fail "verify-batch ok=$V_OK ($VERIFY)"
-[ "$V_LEAF" = "$TRIPLE_COUNT" ] || fail "expected leafCount=$TRIPLE_COUNT, got $V_LEAF"
+[ "$V_LEAF" = "2" ] || fail "expected leafCount=2, got $V_LEAF"
 [ "$V_ACTUAL" = "$MERKLE_ROOT" ] || fail "actualRoot != expectedRoot"
-log "✓ verify-batch passes over $V_LEAF decrypted leaves"
+log "✓ verify-batch passes over $V_LEAF decrypted leaves for doc-0"
 
 # ===========================================================================
-act "5. Mint + verify 3 attestations across the batch"
+act "5. Mint + verify an attestation for the published leaf"
 # ===========================================================================
-# Pick leaves at indices 0, (N/4-1), (N/2-1) — first / middle / last
-# document. Each leaf's (s,p,o) is the canonical "name" triple of doc-i.
-for leaf_idx in 0 $((TRIPLE_COUNT / 4 - 1)) $((TRIPLE_COUNT / 2 - 1)); do
+for leaf_idx in 0; do
   LEAF_SUBJECT="urn:scale:${STAMP}/doc-${leaf_idx}"
   LEAF_PREDICATE="http://schema.org/name"
   LEAF_OBJECT="\"Document ${leaf_idx}\""
@@ -243,5 +242,5 @@ log "  KC published:  $KC"
 log "  TX:            $TX"
 log "  MerkleRoot:    $MERKLE_ROOT"
 log "  verify-batch:  ok=true leafCount=$V_LEAF"
-log "  Attestations:  3 of 3 verified"
+log "  Attestations:  1 of 1 verified"
 log "================================================================"

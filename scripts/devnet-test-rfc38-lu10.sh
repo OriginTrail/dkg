@@ -12,9 +12,9 @@
 # This script exhaustively exercises a public CG across all four
 # Phase A surfaces, using only the daemon HTTP API:
 #
-#   1. PUBLIC PUBLISH SWEEP — edge curator publishes a public CG
-#      with multiple KAs (root entities). Confirms publish path
-#      didn't degrade. Cross-checks merkleRoot via /api/kc/:id.
+#   1. PUBLIC PUBLISH SWEEP — edge curator publishes a public CG.
+#      Confirms publish path didn't degrade. Cross-checks merkleRoot
+#      via /api/kc/:id.
 #
 #   2. ANONYMOUS CATCHUP SWEEP — a non-member outsider node calls
 #      /api/shared-memory/catchup against the curator with NO
@@ -101,7 +101,8 @@ ON_CHAIN_ID=$(parse_json "$CREATE" '.onChainId')
 [ -n "$ON_CHAIN_ID" ] || fail "public CG create failed: $CREATE"
 log "✓ public CG registered onChainId=$ON_CHAIN_ID"
 
-# 5 root entities × 2 triples = 10 triples — exercise the multi-KA path
+# One root entity × 2 triples. The synchronous publish endpoint is
+# intentionally single-root.
 QUADS_PAYLOAD=$(STAMP="$STAMP" CG_ID="$CG_ID" node -e '
   const stamp = process.env.STAMP;
   const cgId = process.env.CG_ID;
@@ -112,7 +113,7 @@ QUADS_PAYLOAD=$(STAMP="$STAMP" CG_ID="$CG_ID" node -e '
     ["title", "\"Spec\""],         ["topic", "\"architecture\""],
     ["title", "\"FAQ\""],          ["topic", "\"user-docs\""],
   ];
-  const docs = ["doc-a","doc-b","doc-c","doc-d","doc-e"];
+  const docs = ["doc-a"];
   const quads = [];
   for (let i = 0; i < docs.length; i++) {
     const [k1, v1] = facts[i*2];
@@ -125,13 +126,13 @@ QUADS_PAYLOAD=$(STAMP="$STAMP" CG_ID="$CG_ID" node -e '
 
 WRITE_RESP=$(api_call "$CURATOR_NODE" POST /api/shared-memory/write "$QUADS_PAYLOAD")
 WRITTEN=$(parse_json "$WRITE_RESP" '.triplesWritten')
-[ "$WRITTEN" = "10" ] || fail "expected 10 triples written, got '$WRITTEN'"
-log "✓ 10 triples written to SWM"
+[ "$WRITTEN" = "2" ] || fail "expected 2 triples written, got '$WRITTEN'"
+log "✓ 2 triples written to SWM"
 
 sleep 2
 
 PUB_RESP=$(api_call "$CURATOR_NODE" POST /api/shared-memory/publish "$(cat <<EOF
-{ "contextGraphId": "$CG_ID", "selection": "all", "clearAfter": false }
+{ "contextGraphId": "$CG_ID", "selection": { "rootEntities": ["urn:lu10:${STAMP}/doc-a"] }, "clearAfter": false }
 EOF
 )")
 log "publish response: $PUB_RESP"
@@ -164,7 +165,7 @@ const fs = require("fs"); const path = require("path");
     JSON.parse(fs.readFileSync(path.join(process.env.ABI_DIR, kcsAbiFile), "utf8")), provider);
   const [merkleRoots, , minted, byteSize] = await kas.getKnowledgeAssetMetadata(BigInt(process.env.BATCH_ID));
   if (!merkleRoots || merkleRoots.length === 0) throw new Error("no merkleRoots");
-  if (minted !== 5n) throw new Error("expected 5 KAs (one per root entity), got " + minted);
+  if (minted !== 1n) throw new Error("expected 1 KA, got " + minted);
   console.log("KCS read-back OK: merkleRoots=" + merkleRoots.length + " minted=" + minted + " byteSize=" + byteSize);
 })().catch(e => { console.error(e?.message || e); process.exit(1); });
 '

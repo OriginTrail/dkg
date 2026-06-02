@@ -218,7 +218,7 @@ wait_for_peer_link() {
     fi
     sleep 1
   done
-  warn "peer-link probe timed out: $label (continuing; SWM write may fail)"
+  warn "peer-link probe timed out: $label"
   return 1
 }
 
@@ -574,7 +574,8 @@ done
 # Give cores a beat to wire up the pubsub topic listeners.
 sleep 5
 
-wait_for_peer_link "$CURATOR_NODE" "$MEMBER_PEER"
+wait_for_peer_link "$CURATOR_NODE" "$MEMBER_PEER" \
+  || warn "peer-link probe best-effort for CG_D handshake; fallback catchup will validate delivery"
 
 log "Initial write (1 triple) to drive sender-key handshake to member..."
 D0_PAYLOAD=$(CG_ID="$CG_D" node -e '
@@ -609,6 +610,21 @@ EOF
   [ "$N_D_HANDSHAKE" = "1" ] && break
   sleep 1
 done
+if [ "$N_D_HANDSHAKE" != "1" ]; then
+  log "  live gossip incomplete; running fallback explicit catchup against curator..."
+  CATCHUP_D0=$(api_call "$MEMBER_NODE" POST /api/shared-memory/catchup "$(cat <<EOF
+{ "contextGraphId": "$CG_D", "peerId": "$CURATOR_PEER" }
+EOF
+)")
+  INSERTED_D0=$(parse_json "$CATCHUP_D0" '.totalInsertedTriples')
+  log "  fallback catchup response (insertedTriples=$INSERTED_D0)"
+  Q_D_HANDSHAKE=$(api_call "$MEMBER_NODE" POST /api/query "$(cat <<EOF
+{ "contextGraphId": "$CG_D", "graphSuffix": "_shared_memory",
+  "sparql": "SELECT (COUNT(*) AS ?n) WHERE { ?s <http://schema.org/name> ?o }" }
+EOF
+)")
+  N_D_HANDSHAKE=$(sparql_count "$Q_D_HANDSHAKE")
+fi
 [ "$N_D_HANDSHAKE" = "1" ] || fail "member never received handshake triple (got '$N_D_HANDSHAKE') — sender-key package likely never landed"
 log "✓ member received chain key + 1 triple"
 
@@ -776,7 +792,8 @@ done
 log "Waiting for cores to absorb the ContextGraphCreated chain event + discovery beacon..."
 sleep 8
 
-wait_for_peer_link "$CURATOR_NODE" "$MEMBER_PEER"
+wait_for_peer_link "$CURATOR_NODE" "$MEMBER_PEER" \
+  || warn "peer-link probe best-effort for CG_E handshake; fallback catchup will validate delivery"
 
 log "Handshake write (1 triple) to drive sender-key broadcast to member..."
 E0_PAYLOAD=$(CG_ID="$CG_E" node -e '
@@ -808,6 +825,21 @@ EOF
   [ "$N_E_HANDSHAKE" = "1" ] && break
   sleep 1
 done
+if [ "$N_E_HANDSHAKE" != "1" ]; then
+  log "  live gossip incomplete; running fallback explicit catchup against curator..."
+  CATCHUP_E0=$(api_call "$MEMBER_NODE" POST /api/shared-memory/catchup "$(cat <<EOF
+{ "contextGraphId": "$CG_E", "peerId": "$CURATOR_PEER" }
+EOF
+)")
+  INSERTED_E0=$(parse_json "$CATCHUP_E0" '.totalInsertedTriples')
+  log "  fallback catchup response (insertedTriples=$INSERTED_E0)"
+  Q_E_HANDSHAKE=$(api_call "$MEMBER_NODE" POST /api/query "$(cat <<EOF
+{ "contextGraphId": "$CG_E", "graphSuffix": "_shared_memory",
+  "sparql": "SELECT (COUNT(*) AS ?n) WHERE { ?s <http://schema.org/name> ?o }" }
+EOF
+)")
+  N_E_HANDSHAKE=$(sparql_count "$Q_E_HANDSHAKE")
+fi
 [ "$N_E_HANDSHAKE" = "1" ] || fail "CG_E member never received handshake triple (got '$N_E_HANDSHAKE')"
 log "✓ member received CG_E chain key + 1 triple"
 

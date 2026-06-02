@@ -118,6 +118,31 @@ fund_wallet() {
     -d "{\"jsonrpc\":\"2.0\",\"method\":\"hardhat_setBalance\",\"params\":[\"$address\",\"$amount\"],\"id\":1}" > /dev/null
 }
 
+probe_hardhat_rpc() {
+  curl -s "http://127.0.0.1:$HARDHAT_PORT" \
+    -X POST -H "Content-Type: application/json" \
+    -d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' \
+    > /dev/null 2>&1
+}
+
+wait_for_hardhat_stable() {
+  local pidfile="$DEVNET_DIR/hardhat.pid"
+  local checks="${DEVNET_HARDHAT_STABLE_CHECKS:-5}"
+  local delay_s="${DEVNET_HARDHAT_STABLE_DELAY_SECONDS:-1}"
+
+  for i in $(seq 1 "$checks"); do
+    if [ ! -f "$pidfile" ] || ! kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+      log "ERROR: Hardhat exited during startup stabilization"
+      return 1
+    fi
+    if ! probe_hardhat_rpc; then
+      log "ERROR: Hardhat RPC stopped responding during startup stabilization"
+      return 1
+    fi
+    sleep "$delay_s"
+  done
+}
+
 ensure_built() {
   if [ ! -f "$REPO_ROOT/packages/cli/dist/cli.js" ]; then
     log "Building project..."
@@ -143,20 +168,68 @@ start_hardhat() {
   rm -f "$REPO_ROOT/packages/evm-module/deployments/localhost_contracts.json"
   rm -f "$DEVNET_DIR/hardhat/deployed"
 
-  npx hardhat node --port "$HARDHAT_PORT" --no-deploy \
-    > "$DEVNET_DIR/hardhat/node.log" 2>&1 &
-  local hh_pid=$!
-  echo "$hh_pid" > "$pidfile"
+  # Keep the local chain alive after the launcher shell exits. A plain
+  # background `&` process can receive SIGHUP when the calling terminal/test
+  # harness recycles, which leaves the daemons running but unable to register
+  # fresh context graphs on-chain.
+  local hardhat_bootstrap
+  hardhat_bootstrap=$(node -p "require.resolve('hardhat/internal/cli/bootstrap')" 2>/dev/null)
+  if [ -z "$hardhat_bootstrap" ]; then
+    log "ERROR: Could not resolve Hardhat bootstrap entrypoint"
+    return 1
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c '
+import os
+import signal
+import subprocess
+import sys
+
+pidfile, logfile, cwd, port, hardhat_bootstrap = sys.argv[1:]
+env = dict(os.environ)
+env["CI"] = env.get("CI", "1")
+env["HARDHAT_DISABLE_TELEMETRY_PROMPT"] = "true"
+
+def detach():
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+
+stdin_r, stdin_w = os.pipe()
+os.set_inheritable(stdin_w, True)
+with os.fdopen(stdin_r, "rb", closefd=True) as stdin, open(logfile, "ab", buffering=0) as log:
+    proc = subprocess.Popen(
+        ["node", hardhat_bootstrap, "node", "--port", port, "--no-deploy"],
+        stdin=stdin,
+        stdout=log,
+        stderr=subprocess.STDOUT,
+        cwd=cwd,
+        env=env,
+        start_new_session=True,
+        preexec_fn=detach if os.name == "posix" else None,
+        close_fds=True,
+        pass_fds=(stdin_w,) if os.name == "posix" else (),
+    )
+os.close(stdin_w)
+with open(pidfile, "w", encoding="utf-8") as f:
+    f.write(f"{proc.pid}\n")
+' "$pidfile" "$DEVNET_DIR/hardhat/node.log" "$REPO_ROOT/packages/evm-module" "$HARDHAT_PORT" "$hardhat_bootstrap"
+  else
+    (
+      nohup node "$hardhat_bootstrap" node --port "$HARDHAT_PORT" --no-deploy \
+        > "$DEVNET_DIR/hardhat/node.log" 2>&1 < /dev/null &
+      echo $! > "$pidfile"
+      disown
+    )
+  fi
+  local hh_pid
+  hh_pid=$(cat "$pidfile")
   log "Hardhat node started (PID $hh_pid)"
 
   # Wait for it to be ready
   for i in $(seq 1 30); do
-    if curl -s "http://127.0.0.1:$HARDHAT_PORT" \
-         -X POST -H "Content-Type: application/json" \
-         -d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' \
-         > /dev/null 2>&1; then
+    if probe_hardhat_rpc; then
       log "Hardhat node ready"
       enable_hardhat_interval_mining
+      wait_for_hardhat_stable
       return 0
     fi
     sleep 1
@@ -565,11 +638,43 @@ start_node() {
   rm -f "$node_dir/daemon.pid"
 
   log "Starting node $node_num..."
-  DKG_HOME="$node_dir" DKG_NO_BLUE_GREEN=1 \
-    node "$REPO_ROOT/packages/cli/dist/cli.js" start --foreground \
-    > "$node_dir/daemon.log" 2>&1 &
-  local node_pid=$!
-  echo "$node_pid" > "$pidfile"
+  # restart-node exits after this helper returns; start the foreground CLI in
+  # a fresh session so test harnesses that reap their own process group do not
+  # also reap the restarted daemon.
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c '
+import os
+import subprocess
+import sys
+
+pidfile, logfile, node_dir, entrypoint = sys.argv[1:]
+env = dict(os.environ)
+env["DKG_HOME"] = node_dir
+env["DKG_NO_BLUE_GREEN"] = "1"
+with open(os.devnull, "rb") as stdin, open(logfile, "ab", buffering=0) as log:
+    proc = subprocess.Popen(
+        ["node", entrypoint, "start", "--foreground"],
+        stdin=stdin,
+        stdout=log,
+        stderr=subprocess.STDOUT,
+        env=env,
+        start_new_session=True,
+        close_fds=True,
+    )
+with open(pidfile, "w", encoding="utf-8") as f:
+    f.write(f"{proc.pid}\n")
+' "$pidfile" "$node_dir/daemon.log" "$node_dir" "$REPO_ROOT/packages/cli/dist/cli.js"
+  else
+    (
+      nohup env DKG_HOME="$node_dir" DKG_NO_BLUE_GREEN=1 \
+        node "$REPO_ROOT/packages/cli/dist/cli.js" start --foreground \
+        > "$node_dir/daemon.log" 2>&1 < /dev/null &
+      echo $! > "$pidfile"
+      disown
+    )
+  fi
+  local node_pid
+  node_pid=$(cat "$pidfile")
 
   # Wait for API to be ready — relay node (1) gets extra time since first boot
   # compiles Solidity contracts which is CPU-intensive.
@@ -694,7 +799,9 @@ stop_ui() {
       # pgid for the child, so we fall back to killing the leader pid.
       local pgid
       pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')
-      if [ -n "$pgid" ] && [ "$pgid" != "0" ]; then
+      local self_pgid
+      self_pgid=$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ')
+      if [ -n "$pgid" ] && [ "$pgid" != "0" ] && [ "$pgid" != "$self_pgid" ]; then
         kill -TERM "-$pgid" 2>/dev/null || kill "$pid" 2>/dev/null || true
       else
         kill "$pid" 2>/dev/null || true

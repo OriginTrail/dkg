@@ -10,7 +10,7 @@
 #
 # Wire shapes assumed (rc.12+):
 #   - publish:    POST /api/shared-memory/write  +  POST /api/shared-memory/publish
-#   - update/private quads: POST /api/update     (legacy is intentionally retained)
+#   - update guard: POST /api/update requires a precomputed update attestation
 #   - SWM:        POST /api/shared-memory/{write,publish}
 #   - assertion:  POST /api/assertion/{create,/<name>/write,/<name>/query,/<name>/promote}
 #   - CAS:        POST /api/shared-memory/conditional-write  (conditions REQUIRED non-empty)
@@ -190,12 +190,13 @@ fi
 sleep 3
 
 # ────────────────────────────────────────────────────────────────────────────
-section "4. PUBLISH WITH PRIVATE TRIPLES (via /api/update)"
+section "4. UPDATE ATTESTATION GUARD + PRIVATE-TRIPLE VISIBILITY"
 
-# rc.12 publish path does NOT take privateQuads. Privacy enforcement now lives
-# on the update path: publish a KC first (§3 already did), then issue an
-# update that adds public + private quads. The publisher receives both, but
-# only the public ones gossip; the private set stays on the publisher.
+# Greenfield updates are intentionally not self-signed by the daemon. The
+# author must precompute and supply UpdateAuthorAttestation off-band. This
+# smoke probe asserts the guard is enforced, then keeps the privacy-boundary
+# checks as negative checks: the rejected private payload must not appear in
+# any public query view.
 
 if [ "$PUB_STATUS" = "confirmed" ] || [ "$PUB_STATUS" = "finalized" ]; then
   BOB_URI="urn:v10:bob-$RUN_TAG"
@@ -216,10 +217,11 @@ JSON
 )
   PRIV_RESULT=$(post 9201 /api/update -H "Content-Type: application/json" -d "$UPD_BODY")
   PRIV_STATUS=$(echo "$PRIV_RESULT" | pyfield "d.get('status','?')")
-  if [ "$PRIV_STATUS" = "confirmed" ] || [ "$PRIV_STATUS" = "finalized" ]; then
-    ok "Update with private triples confirmed, status=$PRIV_STATUS"
+  PRIV_ERR=$(echo "$PRIV_RESULT" | pyfield "d.get('error','')")
+  if echo "$PRIV_ERR" | grep -q "precomputedUpdateAttestation"; then
+    ok "Unsigned update rejected with precomputedUpdateAttestation requirement"
   else
-    fail "Private update status=$PRIV_STATUS: $PRIV_RESULT"
+    fail "Unsigned private update did not report attestation requirement (status=$PRIV_STATUS): $PRIV_RESULT"
   fi
 
   sleep 3
@@ -242,19 +244,8 @@ JSON
 
   echo ""
   echo "--- 4c: Private triples invisible to publisher's own public SPARQL view ---"
-  # rc.12 stores private triples encrypted-at-rest in the PrivateStore. The
-  # /api/update response exposes only { tokenId, rootEntity } per KA — neither
-  # `privateTripleCount` nor `privateMerkleRoot` are part of the public wire
-  # shape (see agent-chat.ts /api/update route). The unit test
-  # core/test/private-store-update.test.ts pins the storage round-trip.
-  #
-  # At the public API surface we can only assert two things:
-  #   (a) §4 above: the update with privateQuads returned status=confirmed
-  #       (i.e., the daemon accepted the private payload without erroring);
-  #   (b) here: the private subject is invisible in the public SPARQL view
-  #       on the PUBLISHER itself — not just on §4b's peer nodes. This is
-  #       the strongest "privacy boundary" assertion we can make without
-  #       leaking the decryption key into a test fixture.
+  # Because the unsigned update was rejected, the private subject should be
+  # absent even on the publisher's public SPARQL view.
   PUB_LEAK=$(post 9201 /api/query -H "Content-Type: application/json" -d "{
     \"sparql\": \"SELECT ?o WHERE { <$BOB_URI> <http://schema.org/email> ?o }\",
     \"contextGraphId\": \"$CG\"
@@ -295,7 +286,8 @@ for PORT in 9202 9203 9204; do
       -H "$H" -H "Content-Type: application/json" \
       -X POST "http://127.0.0.1:$PORT/api/query" -d "{
       \"sparql\": \"SELECT ?name WHERE { <$ALICE_URI> <http://schema.org/name> ?name }\",
-      \"contextGraphId\": \"$CG\"
+      \"contextGraphId\": \"$CG\",
+      \"includeSharedMemory\": true
     }" || echo '')
     NAME_VAL=$(echo "$REP" | pyfield "(lambda b: (b[0].get('name') if b else 'EMPTY'))(d.get('result',{}).get('bindings',[]))")
     echo "$NAME_VAL" | grep -q "Alice" && break
@@ -612,10 +604,13 @@ fi
 section "14. SKILL.MD ENDPOINT"
 
 SKILL=$(get 9201 /.well-known/skill.md 2>/dev/null || echo '')
-if echo "$SKILL" | grep -q "assertion"; then
-  ok "SKILL.md served and contains 'assertion' terminology"
+if [[ "$SKILL" == *"DKG V10 Node Skill"* \
+  && "$SKILL" == *"Working Memory"* \
+  && "$SKILL" == *"Shared Working Memory"* \
+  && "$SKILL" == *"Verified Memory"* ]]; then
+  ok "SKILL.md served and describes the DKG V10 memory layers"
 else
-  fail "SKILL.md missing or doesn't contain assertion terminology"
+  fail "SKILL.md missing or doesn't describe the DKG V10 memory layers"
 fi
 
 # ────────────────────────────────────────────────────────────────────────────

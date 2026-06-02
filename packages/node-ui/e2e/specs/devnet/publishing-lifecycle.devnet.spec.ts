@@ -4,6 +4,7 @@
  */
 import { test, expect } from '../../fixtures/base.js';
 import { isDevnetAvailable, devnetApiFetch, waitForDevnetStatus } from '../../helpers/devnet.js';
+import { listContextGraphs, pickWritableContextGraph } from '../../helpers/devnet-publish.js';
 
 test.describe.configure({ mode: 'serial' });
 
@@ -29,11 +30,8 @@ test.describe('Publishing lifecycle (devnet)', () => {
   });
 
   test('API publish endpoint accepts WM assertion create', async () => {
-    const cgs = await devnetApiFetch('/api/context-graphs');
-    expect(cgs.ok).toBe(true);
-    const body = (await cgs.json()) as { contextGraphs: Array<{ id: string; name: string }> };
-    const cg = body.contextGraphs[0];
-    test.skip(!cg, 'No context graphs on devnet');
+    const cg = pickWritableContextGraph(await listContextGraphs(1));
+    test.skip(!cg, 'No writable context graphs on devnet');
 
     const stamp = Date.now();
     const res = await devnetApiFetch('/api/assertion/create', {

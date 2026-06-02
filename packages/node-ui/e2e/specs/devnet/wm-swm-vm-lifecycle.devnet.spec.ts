@@ -14,6 +14,7 @@ import {
   createWmAssertion,
   buildTestQuads,
   promoteAssertion,
+  pickWritableContextGraph,
 } from '../../helpers/devnet-publish.js';
 
 test.describe.configure({ mode: 'serial' });
@@ -24,9 +25,10 @@ test.beforeAll(async () => {
   test.skip(!isDevnetAvailable(1), 'Devnet node1 not running');
   await waitForDevnetStatus(1);
   const cgs = await listContextGraphs(1);
-  test.skip(cgs.length === 0, 'No context graphs on devnet');
-  run.cgId = cgs[0]!.id;
-  run.cgName = cgs[0]!.name;
+  const cg = pickWritableContextGraph(cgs);
+  test.skip(!cg, 'No writable context graphs on devnet');
+  run.cgId = cg.id;
+  run.cgName = cg.name;
 });
 
 test.describe('WM → SWM → VM API pipeline', () => {
@@ -87,7 +89,7 @@ test.describe('WM → SWM → VM UI verification', () => {
 });
 
 test.describe('KA update (devnet API)', () => {
-  test('update endpoint accepts quads when kaId exists from pipeline', async () => {
+  test('update endpoint reports attestation requirement when kaId exists from pipeline', async () => {
     test.skip(!run.cgId || !run.kaId, 'Pipeline did not produce a kaId');
     const stamp = Date.now();
     const res = await devnetApiFetch('/api/update', {
@@ -98,6 +100,8 @@ test.describe('KA update (devnet API)', () => {
         quads: buildTestQuads(run.cgId!, stamp, `Updated ${stamp}`),
       }),
     });
-    expect(res.ok).toBe(true);
+    const body = await res.text();
+    expect(res.ok).toBe(false);
+    expect(body).toContain('precomputedUpdateAttestation');
   });
 });

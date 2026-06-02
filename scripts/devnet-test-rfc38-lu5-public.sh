@@ -75,7 +75,7 @@ sleep 2
 
 log "Publishing public CG to VM..."
 PUBLISH_RESP=$(api_call "$EDGE_CURATOR_NODE" POST /api/shared-memory/publish "$(cat <<EOF
-{ "contextGraphId": "${CG_LOCAL_ID}", "selection": "all", "clearAfter": false }
+{ "contextGraphId": "${CG_LOCAL_ID}", "selection": { "rootEntities": ["urn:lu5pub:${STAMP}/a"] }, "clearAfter": false }
 EOF
 )")
 log "publish response: $PUBLISH_RESP"
