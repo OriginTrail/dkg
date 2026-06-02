@@ -137,27 +137,24 @@ export async function startOxigraphServer(
     });
     c.once('exit', (code, signal) => {
       if (stopping) return;
-      // Startup-phase exit: do NOT restart. The most common cause is a
-      // bind failure (the port is taken by another local SPARQL server),
-      // and restarting would loop forever against a port we can't own —
-      // worse, a foreign server answering on that port could be mistaken
-      // for ours. The ready loop observes `child.exitCode !== null` and
-      // fails fast with the captured stderr.
+      // Two cases land here with `ready === false` and must NOT (re)start:
+      //   1. Startup-phase exit — usually a bind failure (the port is taken
+      //      by another local SPARQL server). The ready loop observes the
+      //      dead child and fails fast with the captured stderr.
+      //   2. A respawned child that died while revive() was still
+      //      re-validating ownership — revive() owns rescheduling in that
+      //      window, so we must not double-schedule here.
+      // Restarting on either would risk looping against a port we can't own,
+      // and a foreign server answering there could be mistaken for ours.
       if (!ready) return;
-      // Steady-state crash (after we returned a healthy handle): restart
-      // with capped exponential backoff so a crash-looping binary doesn't
-      // peg the CPU. The store surfaces transient errors during the gap;
-      // the agent's own retries cover the window.
-      restarts += 1;
-      const delay = Math.min(restartMax, restartBase * 2 ** (restarts - 1));
-      log(
-        `[oxigraph] server exited unexpectedly (code=${code ?? 'null'}, signal=${signal ?? 'null'}); ` +
-          `restart #${restarts} in ${delay}ms`,
+      // We just lost a confirmed-healthy child. Drop `ready` immediately so
+      // nothing treats the (now foreign-or-dead) endpoint as ours, then hand
+      // off to revive(), which respawns and re-proves ownership before
+      // restoring `ready`.
+      ready = false;
+      scheduleRevive(
+        `server exited unexpectedly (code=${code ?? 'null'}, signal=${signal ?? 'null'})`,
       );
-      setTimeout(() => {
-        if (stopping) return;
-        child = spawnChild();
-      }, delay).unref?.();
     });
     return c;
   };
@@ -180,6 +177,48 @@ export async function startOxigraphServer(
     } catch {
       return false;
     }
+  };
+
+  // Schedule a supervised restart with capped exponential backoff. Used both
+  // for a healthy child that crashed and for a revive attempt that couldn't
+  // re-establish ownership, so a crash-looping binary (or a permanently-taken
+  // port) never pegs the CPU.
+  const scheduleRevive = (reason: string): void => {
+    restarts += 1;
+    const delay = Math.min(restartMax, restartBase * 2 ** (restarts - 1));
+    log(`[oxigraph] ${reason}; restart #${restarts} in ${delay}ms`);
+    setTimeout(() => {
+      void revive();
+    }, delay).unref?.();
+  };
+
+  // Respawn and re-validate ownership after a steady-state crash. Mirrors
+  // the startup ownership guard: `ready` is restored ONLY once the child WE
+  // spawned is confirmed to be the process answering on the port. If another
+  // process grabbed the port during the downtime, the respawned child dies on
+  // bind and we keep retrying with `ready` false — so the agent's store
+  // queries surface honest errors rather than silently hitting a foreign
+  // SPARQL server.
+  const revive = async (): Promise<void> => {
+    if (stopping) return;
+    child = spawnChild();
+    const reviveDeadline = Date.now() + readyTimeoutMs;
+    while (Date.now() < reviveDeadline) {
+      if (stopping) return;
+      // Respawned child died (its own exit handler stays out of the way
+      // because `ready` is false). Retry with backoff; never adopt whatever
+      // may now be answering on the port.
+      if (!childAlive()) break;
+      if ((await probeReady()) && childAlive()) {
+        ready = true;
+        restarts = 0;
+        log(`[oxigraph] server restarted and healthy on ${bind}.`);
+        return;
+      }
+      await sleep(readyIntervalMs);
+    }
+    if (stopping) return;
+    scheduleRevive(`respawned server did not become ready on ${bind}`);
   };
 
   // Synchronous best-effort kill for process-exit handlers (which can't

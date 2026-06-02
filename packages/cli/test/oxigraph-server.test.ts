@@ -174,6 +174,45 @@ describe('startOxigraphServer', () => {
     await handle.stop();
   });
 
+  it('does NOT adopt a foreign server when a post-crash respawn dies on bind', async () => {
+    // After a healthy boot the server crashes. While it's down another
+    // process grabs the port: every respawn now dies on EADDRINUSE, yet a
+    // foreign server answers the probe with 200. The supervisor must NOT
+    // settle as "ready" against that foreign 200 — it must keep retrying
+    // (ownership re-validated each time), so the agent never silently hits
+    // an unrelated SPARQL server.
+    let spawnCount = 0;
+    const { spawn, children, calls } = spawnFactory((c) => {
+      spawnCount += 1;
+      // Child #1 is the healthy startup child; every revive child dies on
+      // bind as if the port is now held by someone else.
+      if (spawnCount >= 2) {
+        c.emitStderr('error: Address already in use (os error 48)');
+        queueMicrotask(() => c.emitExit(1, null));
+      }
+    });
+    const fetchMock = vi.fn(async () => new Response('', { status: 200 }));
+    const handle = await startOxigraphServer({
+      binaryPath: '/bin/oxigraph',
+      location: '/data/oxi',
+      port: 7878,
+      readyTimeoutMs: 50,
+      readyIntervalMs: 5,
+      restartBackoffBaseMs: 5,
+      restartBackoffMaxMs: 10,
+      io: { spawn, fetch: fetchMock as any },
+    });
+
+    expect(calls.length).toBe(1);
+    // Healthy child crashes → revive respawns, but every respawn dies on bind.
+    children[0].emitExit(1, null);
+    await new Promise((r) => setTimeout(r, 60));
+    // It kept trying instead of adopting the foreign 200: >2 spawns.
+    expect(calls.length).toBeGreaterThan(2);
+
+    await handle.stop();
+  });
+
   it('does NOT restart after stop()', async () => {
     const { spawn, calls } = spawnFactory();
     const fetchMock = vi.fn(async () => new Response('', { status: 200 }));
