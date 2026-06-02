@@ -85,6 +85,7 @@ function makeAgentLike({
   health,
   lastSuccessfulSyncAt,
   syncReconcilerBackoff,
+  peerIds,
 }: {
   rawConnections: StubConnection[];
   keyedConnectionsByPeer?: Map<string, StubConnection[]>;
@@ -109,6 +110,7 @@ function makeAgentLike({
   health?: Map<string, any>;
   lastSuccessfulSyncAt?: Map<string, number>;
   syncReconcilerBackoff?: Map<string, { failures: number; nextRetryAt: number }>;
+  peerIds?: string[];
 }): any {
   return {
     node: {
@@ -118,6 +120,7 @@ function makeAgentLike({
           const key = (arg as { toString: () => string }).toString();
           return keyedConnectionsByPeer?.get(key) ?? [];
         }),
+        getPeers: vi.fn(() => (peerIds ?? []).map((id) => ({ toString: () => id }))),
         peerStore: {
           get: vi.fn(async (pid: any) => {
             const key = pid.toString();
@@ -387,6 +390,44 @@ describe('DKGAgent.getPeerDiagnostics', () => {
         expect(diag.syncStatus).toEqual({
           capable: false,
           capability: 'unknown',
+          lastSuccessfulSyncAt: null,
+          stale: true,
+          backoff: {
+            failures: 2,
+            nextRetryAt: 1_010_000,
+            retryInMs: 10_000,
+          },
+        });
+      } finally {
+        nowSpy.mockRestore();
+      }
+    });
+
+    it('keeps sync health observable when getPeers shows a live peer without raw connections', async () => {
+      const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+      try {
+        const agentLike = makeAgentLike({
+          rawConnections: [],
+          peerIds: [PEER_A],
+          peerStoreEntries: new Map([
+            [
+              PEER_A,
+              {
+                addresses: [],
+                protocols: [PROTOCOL_SYNC],
+              },
+            ],
+          ]),
+          syncReconcilerBackoff: new Map([[PEER_A, { failures: 2, nextRetryAt: 1_010_000 }]]),
+        });
+        const diag = await callDiagnostics(agentLike, PEER_A);
+
+        expect(diag.connected).toBe(true);
+        expect(diag.rawConnectionCount).toBe(0);
+        expect(diag.getConnectionsReturnsForPeer).toBe(0);
+        expect(diag.syncStatus).toEqual({
+          capable: true,
+          capability: 'supported',
           lastSuccessfulSyncAt: null,
           stale: true,
           backoff: {

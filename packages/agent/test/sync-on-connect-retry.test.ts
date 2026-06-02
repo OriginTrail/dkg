@@ -120,6 +120,7 @@ describe('runSyncOnConnect callbacks', () => {
 
     expect(caught).toBeInstanceOf(SyncOnConnectPostSyncError);
     expect((caught as SyncOnConnectPostSyncError).originalError).toBe(laterError);
+    expect((caught as SyncOnConnectPostSyncError).backoffEligible).toBe(false);
     expect(synced).toEqual([]);
     expect(syncingPeers.has(remotePeer)).toBe(false);
   });
@@ -594,9 +595,9 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
     }
   });
 
-  it('does not back off post-sync phase failures', async () => {
+  it('does not back off local post-sync bookkeeping failures', async () => {
     const agent = await DKGAgent.create({
-      name: 'ReconcilerPostSyncFailureNoBackoff',
+      name: 'ReconcilerLocalPostSyncFailureNoBackoff',
       listenHost: '127.0.0.1',
       chainAdapter: new MockChainAdapter(),
     });
@@ -610,13 +611,43 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
       );
       vi.spyOn(agent as any, 'getPeerProtocols').mockResolvedValue([PROTOCOL_SYNC]);
       vi.spyOn(agent as any, 'trySyncFromPeer').mockRejectedValue(
-        new SyncOnConnectPostSyncError(peerA, new Error('shared memory failed')),
+        new SyncOnConnectPostSyncError(peerA, new Error('discovery failed'), { backoffEligible: false }),
       );
 
       await (agent as any).reconcileSyncFromConnectedPeers();
       await flushMicrotasks();
 
       expect((agent as any).syncReconcilerBackoff.has(peerA)).toBe(false);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('backs off post-sync peer catch-up failures', async () => {
+    const agent = await DKGAgent.create({
+      name: 'ReconcilerPeerPostSyncFailureBackoff',
+      listenHost: '127.0.0.1',
+      chainAdapter: new MockChainAdapter(),
+    });
+    try {
+      await agent.start();
+
+      const peerA = freshPeerIdString();
+      const origGetPeers = agent.node.libp2p.getPeers.bind(agent.node.libp2p);
+      vi.spyOn(agent.node.libp2p, 'getPeers').mockImplementation(
+        () => [...origGetPeers(), peerIdFromString(peerA)],
+      );
+      vi.spyOn(agent as any, 'getPeerProtocols').mockResolvedValue([PROTOCOL_SYNC]);
+      vi.spyOn(agent as any, 'trySyncFromPeer').mockRejectedValue(
+        new SyncOnConnectPostSyncError(peerA, new Error('shared memory failed'), { backoffEligible: true }),
+      );
+
+      await (agent as any).reconcileSyncFromConnectedPeers();
+      await flushMicrotasks();
+
+      const backoff = (agent as any).syncReconcilerBackoff.get(peerA);
+      expect(backoff?.failures).toBe(1);
+      expect(backoff?.nextRetryAt).toBeGreaterThan(Date.now());
     } finally {
       await agent.stop().catch(() => {});
     }

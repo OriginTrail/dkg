@@ -3566,7 +3566,11 @@ export class DKGAgent {
         .catch((err: unknown) => {
           const message = err instanceof Error ? err.message : String(err);
           if (err instanceof SyncOnConnectPostSyncError) {
-            this.log.warn(ctx, `Sync reconciler post-sync step failed for ${shortPeer}; retrying without growing peer backoff: ${message}`);
+            if (err.backoffEligible) {
+              this.recordSyncReconcilerFailure(peerId, probe);
+            }
+            const backoffNote = err.backoffEligible ? 'growing peer backoff' : 'retrying without growing peer backoff';
+            this.log.warn(ctx, `Sync reconciler post-sync step failed for ${shortPeer}; ${backoffNote}: ${message}`);
             return;
           }
           this.recordSyncReconcilerFailure(peerId, probe);
@@ -21521,8 +21525,6 @@ export class DKGAgent {
     } catch {
       rawConns = [];
     }
-    const connected = rawConns.length > 0;
-
     // libp2p's peerId-keyed lookup. See `getConnectionsReturnsForPeer`
     // JSDoc — divergence from `rawConns.length` is the Window D signature.
     let keyedConns: LibConnection[] = [];
@@ -21531,6 +21533,14 @@ export class DKGAgent {
     } catch {
       keyedConns = [];
     }
+
+    let peerListHasPeer = false;
+    try {
+      peerListHasPeer = libp2p.getPeers().some((p: unknown) => p?.toString?.() === peerKey);
+    } catch {
+      peerListHasPeer = false;
+    }
+    const connected = rawConns.length > 0 || keyedConns.length > 0 || peerListHasPeer;
 
     const connections: PeerConnectionSnapshot[] = rawConns.map((c) => {
       const remoteAddr = c.remoteAddr?.toString() ?? null;

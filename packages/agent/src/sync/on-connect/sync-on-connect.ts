@@ -39,12 +39,14 @@ export type SyncOnConnectOutcome = 'synced' | 'skipped-no-sync' | 'already-synci
 
 export class SyncOnConnectPostSyncError extends Error {
   readonly originalError: unknown;
+  readonly backoffEligible: boolean;
 
-  constructor(remotePeer: string, originalError: unknown) {
+  constructor(remotePeer: string, originalError: unknown, options: { backoffEligible: boolean }) {
     const detail = originalError instanceof Error ? originalError.message : String(originalError);
     super(`post-sync step failed for peer ${remotePeer.slice(-8)}: ${detail}`);
     this.name = 'SyncOnConnectPostSyncError';
     this.originalError = originalError;
+    this.backoffEligible = options.backoffEligible;
   }
 }
 
@@ -74,7 +76,7 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
     try {
       return await step();
     } catch (err) {
-      throw new SyncOnConnectPostSyncError(remotePeer, err);
+      throw new SyncOnConnectPostSyncError(remotePeer, err, { backoffEligible: false });
     }
   };
 
@@ -133,7 +135,7 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
       throw err;
     }
     if (durableSyncCompleted) {
-      throw new SyncOnConnectPostSyncError(remotePeer, err);
+      throw new SyncOnConnectPostSyncError(remotePeer, err, { backoffEligible: true });
     }
     throw err;
   } finally {
