@@ -196,6 +196,37 @@ function sha256Hex(bytes: Uint8Array): string {
 }
 
 /**
+ * Look for an operator-installed `oxigraph` executable on `PATH`. Used as a
+ * fallback for platforms we don't publish a pinned binary for (musl, win-arm,
+ * …) so `store.backend: 'oxigraph-server'` still works there — matching the
+ * remediation in resolveOxigraphAsset's error. We can't checksum a binary we
+ * didn't pin, so integrity is the operator's responsibility (they installed
+ * it). Returns the absolute path, or null if not found.
+ */
+async function resolveSystemOxigraphOnPath(
+  io: OxigraphBinaryIo,
+  platform: NodeJS.Platform,
+): Promise<string | null> {
+  const pathVar = process.env.PATH ?? '';
+  if (!pathVar) return null;
+  const sep = platform === 'win32' ? ';' : ':';
+  const names = platform === 'win32' ? ['oxigraph.exe', 'oxigraph'] : ['oxigraph'];
+  for (const dir of pathVar.split(sep)) {
+    if (!dir) continue;
+    for (const name of names) {
+      const candidate = join(dir, name);
+      try {
+        const s = await io.stat(candidate);
+        if (s.isFile()) return candidate;
+      } catch {
+        // Not in this dir — keep scanning.
+      }
+    }
+  }
+  return null;
+}
+
+/**
  * Ensure the pinned Oxigraph binary exists in `cacheDir` and return its
  * absolute path. Reuses a cached binary whose checksum matches; otherwise
  * downloads, verifies the SHA-256, marks it executable, clears macOS
@@ -206,7 +237,20 @@ export async function ensureOxigraphBinary(
 ): Promise<string> {
   const io = { ...defaultIo(), ...opts.io };
   const log = opts.log ?? (() => {});
-  const resolved = opts.asset ?? resolveOxigraphAsset(opts.platform, opts.arch);
+  const platform = opts.platform ?? process.platform;
+  let resolved: ResolvedOxigraphAsset;
+  try {
+    resolved = opts.asset ?? resolveOxigraphAsset(platform, opts.arch);
+  } catch (assetErr) {
+    // No pinned binary for this platform. Before failing, honour the
+    // error's own remediation and look for a system `oxigraph` on PATH.
+    const sys = await resolveSystemOxigraphOnPath(io, platform);
+    if (sys) {
+      log(`No pinned Oxigraph binary for this platform; using system binary on PATH: ${sys}`);
+      return sys;
+    }
+    throw assetErr;
+  }
   const target = join(opts.cacheDir, resolved.fileName);
 
   // Cache hit: a previously-verified binary is present and still matches

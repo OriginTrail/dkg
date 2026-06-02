@@ -121,6 +121,11 @@ export async function startOxigraphServer(
   // Tail of the child's stderr, surfaced in the startup error so a bind
   // failure (`Address already in use`) is visible to the operator.
   let lastStderr = '';
+  // Children whose `error` event fired (ENOENT/EACCES/loader mismatch): the
+  // process never ran, so `exitCode`/`signalCode` stay null and would make
+  // childAlive() wrongly report it alive. Track them so childAlive() and the
+  // ready/revive loops treat a spawn error as a dead child.
+  const erroredChildren = new WeakSet<ChildProcess>();
 
   const spawnChild = (): ChildProcess => {
     const c = io.spawn(
@@ -128,6 +133,14 @@ export async function startOxigraphServer(
       ['serve', '--location', opts.location, '--bind', bind],
       { stdio: ['ignore', 'pipe', 'pipe'] },
     );
+    // Without this listener Node throws the `error` event as an uncaught
+    // exception, killing the daemon. Route it through the normal
+    // startup/revive failure path instead (the binary couldn't be executed).
+    c.once('error', (err) => {
+      erroredChildren.add(c);
+      lastStderr = `${lastStderr}spawn error: ${(err as Error).message}\n`.slice(-1_000);
+      log(`[oxigraph] failed to launch binary: ${(err as Error).message}`);
+    });
     c.stderr?.on('data', (b) => {
       const line = b.toString('utf-8').trim();
       if (line) {
@@ -160,7 +173,10 @@ export async function startOxigraphServer(
   };
 
   const childAlive = (): boolean =>
-    child != null && child.exitCode === null && child.signalCode === null;
+    child != null &&
+    !erroredChildren.has(child) &&
+    child.exitCode === null &&
+    child.signalCode === null;
 
   const probeReady = async (): Promise<boolean> => {
     try {

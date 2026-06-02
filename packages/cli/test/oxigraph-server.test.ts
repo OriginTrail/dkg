@@ -35,6 +35,9 @@ class FakeChild extends EventEmitter {
     this.signalCode = signal;
     this.emit('exit', code, signal);
   }
+  emitError(err: Error) {
+    this.emit('error', err);
+  }
 }
 
 /**
@@ -118,6 +121,33 @@ describe('startOxigraphServer', () => {
     ).rejects.toThrow(/exited during startup|already in use/i);
 
     // Exactly one spawn — a startup-phase exit must NOT trigger a restart.
+    expect(children.length).toBe(1);
+  });
+
+  it('fails startup cleanly when the binary cannot be executed (error event)', async () => {
+    // ENOENT/EACCES/loader-mismatch: ChildProcess emits `error` (not `exit`)
+    // and the process never runs. Without an `error` listener Node would
+    // crash the daemon with an uncaught exception; instead we must fail the
+    // start through the normal path and never restart.
+    const { spawn, children } = spawnFactory((c) => {
+      queueMicrotask(() => c.emitError(new Error('spawn /bin/oxigraph ENOENT')));
+    });
+    const fetchMock = vi.fn(async () => {
+      throw new Error('ECONNREFUSED');
+    });
+
+    await expect(
+      startOxigraphServer({
+        binaryPath: '/bin/oxigraph',
+        location: '/data/oxi',
+        port: 7878,
+        readyTimeoutMs: 100,
+        readyIntervalMs: 10,
+        io: { spawn, fetch: fetchMock as any },
+      }),
+    ).rejects.toThrow(/exited during startup|ENOENT/i);
+
+    // A spawn error must NOT trigger a restart.
     expect(children.length).toBe(1);
   });
 

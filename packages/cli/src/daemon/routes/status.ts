@@ -667,9 +667,16 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
             return url;
           })()
         : null,
-      storeQuads: isExternalBackend(config.store?.backend)
-        ? await getCachedExternalStoreQuads(agent, Date.now())
-        : null,
+      // A managed `oxigraph-server` keeps `config.store.backend` as
+      // "oxigraph-server" (so it persists/labels correctly), but its quad
+      // count is still worth surfacing — it's the only store-health signal
+      // for that backend (getStoreBytes is null, there's no store.nq), and a
+      // failed query here is how operators see the managed server is down
+      // (e.g. after a failed revive) instead of it always looking healthy.
+      storeQuads:
+        isExternalBackend(config.store?.backend) || config.store?.backend === 'oxigraph-server'
+          ? await getCachedExternalStoreQuads(agent, Date.now())
+          : null,
       uptimeMs: Date.now() - startedAt,
       connectedPeers: uniquePeers.size,
       connections: {

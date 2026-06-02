@@ -166,4 +166,48 @@ describe('ensureOxigraphBinary', () => {
       ensureOxigraphBinary({ cacheDir: '/cache', asset, io }),
     ).rejects.toThrow(/HTTP 404/);
   });
+
+  it('falls back to a system oxigraph on PATH when no pinned binary exists', async () => {
+    const prevPath = process.env.PATH;
+    process.env.PATH = '/opt/custom/bin:/usr/local/bin';
+    try {
+      const statMock = vi.fn(async (p: string) =>
+        String(p) === '/usr/local/bin/oxigraph'
+          ? ({ isFile: () => true } as any)
+          : Promise.reject(new Error('ENOENT')),
+      );
+      const fetchMock = vi.fn(async () => new Response(bytes, { status: 200 }));
+      const path = await ensureOxigraphBinary({
+        cacheDir: '/cache',
+        platform: 'freebsd' as NodeJS.Platform,
+        arch: 'x64',
+        io: { stat: statMock as any, fetch: fetchMock as any },
+      });
+      expect(path).toBe('/usr/local/bin/oxigraph');
+      // System binary: no download, no checksum (operator-provided).
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      process.env.PATH = prevPath;
+    }
+  });
+
+  it('throws the actionable error when no pinned binary and none on PATH', async () => {
+    const prevPath = process.env.PATH;
+    process.env.PATH = '/empty/bin';
+    try {
+      const statMock = vi.fn(async () => {
+        throw new Error('ENOENT');
+      });
+      await expect(
+        ensureOxigraphBinary({
+          cacheDir: '/cache',
+          platform: 'freebsd' as NodeJS.Platform,
+          arch: 'x64',
+          io: { stat: statMock as any },
+        }),
+      ).rejects.toThrow(/No prebuilt Oxigraph/);
+    } finally {
+      process.env.PATH = prevPath;
+    }
+  });
 });
