@@ -1,3 +1,5 @@
+import type { AssertionState } from '@origintrail-official/dkg-core';
+
 const BASE = '';
 declare global {
   interface Window { __DKG_TOKEN__?: string; }
@@ -764,6 +766,257 @@ export async function listAssertions(
     result.push({ name, graphUri: g, tripleCount: Number.isFinite(cnt) ? cnt : undefined, subGraph });
   }
   return result;
+}
+
+/** Current lifecycle position of a single assertion. */
+export interface AssertionStateInfo {
+  /** `dkg:state` literal — created / promoted / published / finalized / discarded. */
+  state: AssertionState;
+  /** `dkg:memoryLayer` literal mapped to the UI layer key (`WM`→`wm`, etc.). */
+  layer: 'wm' | 'swm' | 'vm';
+  /**
+   * `dkg:assertionGraph` — the assertion's DATA graph URI
+   * (`did:dkg:context-graph:<cg>[/<sg>]/assertion/<addr>/<name>`),
+   * where the assertion's actual triples live. Undefined for lifecycle
+   * records that predate the `dkg:assertionGraph` predicate.
+   */
+  assertionGraph?: string;
+  /** `prov:wasAttributedTo` — the authoring agent's DID, when recorded. */
+  createdBy?: string;
+}
+
+/**
+ * Read an assertion's CURRENT lifecycle state (S4 — α verdict lock-b,
+ * lazy). `listAssertions` deliberately does not carry the state on each
+ * row (today's WM list is `dkg:memoryLayer "WM"`-filtered, so every
+ * listed WM row is implicitly `created`); the assertion DETAIL view
+ * fetches the state on mount instead.
+ *
+ * `dkg:state` + `dkg:memoryLayer` are MUTABLE literals on the assertion
+ * LIFECYCLE entity (the `urn:dkg:assertion:…` subject) in the `<cg>/_meta`
+ * graph, written by `generateAssertion{Created,Promoted,Published}Metadata`
+ * in `@origintrail-official/dkg-publisher`.
+ *
+ * The caller passes `AssertionInfo.graphUri`, whose SHAPE differs by layer:
+ *   - WM (since #864 `listAssertions(wm)` partition enumeration): the
+ *     assertion's DATA GRAPH URI
+ *     (`did:dkg:context-graph:<cg>[/<sg>]/assertion/<agent>/<name>`).
+ *   - SWM (`listAssertions(swm)`): the LIFECYCLE URN
+ *     (`urn:dkg:assertion:<cg>[:<sg>]:<agent>:<name>`).
+ * `dkg:state` is written ONLY on the lifecycle URN (publisher
+ * `generateAssertion*Metadata`, `metadata.ts:1155`); `dkg:memoryLayer`
+ * is written on BOTH the lifecycle URN AND the data-graph URI (the
+ * daemon's `assertionCreate` adds the latter, `dkg-publisher.ts:~4001`).
+ * The two are linked by `<lifecycleUrn> dkg:assertionGraph <dataGraphUri>`
+ * (`metadata.ts:1154`).
+ *
+ * So to reach `dkg:state` from EITHER input shape we bind `?lifecycle`
+ * via a UNION: it is the input directly (SWM lifecycle URN) OR it links
+ * to the input through `dkg:assertionGraph` (WM data-graph URI). Feeding
+ * a WM data-graph URI straight to `dkg:state` would never match → null →
+ * "state unavailable" for every WM assertion (the #864 silent-regression
+ * trap). The UNION keys off exactly what `listAssertions` provides for
+ * either layer — no `AssertionInfo` shape change, so the α data-shape
+ * verdict (lazy lock-b: don't extend AssertionInfo) still holds.
+ *
+ * Same `_meta`-scoped query shape as `listAssertions` /
+ * `useAssertionLifecycleEvents`: the explicit `GRAPH <…/_meta> { … }`
+ * makes the engine's `wrapWithGraph` early-return so the query runs raw
+ * and self-scopes to this CG's `_meta` partition.
+ *
+ * `assertionGraph` returns the data-graph URI to read triples from: the
+ * resolved `dkg:assertionGraph` (works for the SWM lifecycle-URN input),
+ * falling back to the input itself (the WM data-graph URI input).
+ *
+ * Returns `null` when no lifecycle entity resolves (e.g. a row predating
+ * lifecycle metadata) — the detail view treats `null` as the fetch-error
+ * / unavailable case and renders an all-neutral trail.
+ */
+export async function fetchAssertionState(
+  contextGraphId: string,
+  graphUri: string,
+): Promise<AssertionStateInfo | null> {
+  const DKG = 'http://dkg.io/ontology/';
+  const PROV = 'http://www.w3.org/ns/prov#';
+  const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
+  // UNION admits both `graphUri` shapes (WM data-graph URI via the
+  // inverse `dkg:assertionGraph` link; SWM lifecycle URN directly).
+  //
+  // Codex round-4 — branch A binds the input AS `?lifecycle`
+  // UNCONDITIONALLY and resolves `dkg:assertionGraph` only OPTIONALLY, so
+  // a legacy/partial SWM row whose lifecycle URN carries `dkg:state` but
+  // NOT `dkg:assertionGraph` still resolves its state (pre-fix, branch A
+  // required the assertionGraph triple to bind `?lifecycle`, so such a
+  // row read no state → "state unavailable" though the state exists).
+  // The outer `?lifecycle dkg:state` then gates the row: for a WM
+  // data-graph-URI input, branch A binds `?lifecycle = <data-graph URI>`
+  // but `<data-graph URI> dkg:state` never matches (state lives on the
+  // lifecycle URN), so branch A contributes nothing and branch B handles
+  // WM exactly as before. So WM→B, SWM→A, SWM-no-assertionGraph→A.
+  const sparql = `SELECT ?state ?layer ?createdBy ?assertionGraph WHERE {
+    GRAPH <${metaGraph}> {
+      { BIND(<${graphUri}> AS ?lifecycle)
+        OPTIONAL { <${graphUri}> <${DKG}assertionGraph> ?assertionGraph } }
+      UNION
+      { ?lifecycle <${DKG}assertionGraph> <${graphUri}> .
+        BIND(<${graphUri}> AS ?assertionGraph) }
+      ?lifecycle <${DKG}state> ?state .
+      OPTIONAL { ?lifecycle <${DKG}memoryLayer> ?layer }
+      OPTIONAL { ?lifecycle <${PROV}wasAttributedTo> ?createdBy }
+    }
+  } LIMIT 1`;
+  const data = await executeQuery(sparql, contextGraphId);
+  const bindings: any[] = data?.result?.bindings ?? [];
+  const first = bindings[0];
+  if (!first) return null;
+  const state = bv(first.state) as AssertionState | undefined;
+  if (!state) return null;
+  // `dkg:memoryLayer` is one of the `MemoryLayer` enum literals
+  // ("WM" / "SWM" / "VM"). Fall back to deriving the layer from the
+  // state when the (optional) literal is absent so a partial record
+  // still resolves a sane layer for the badge / CTA gate.
+  const rawLayer = bv(first.layer);
+  const layer: 'wm' | 'swm' | 'vm' =
+    rawLayer === 'WM' ? 'wm' :
+    rawLayer === 'SWM' ? 'swm' :
+    rawLayer === 'VM' ? 'vm' :
+    state === 'created' ? 'wm' :
+    state === 'promoted' ? 'swm' :
+    'vm';
+  // The data graph to read triples from. Prefer the resolved
+  // `dkg:assertionGraph`. Codex round-3 — the fallback to `graphUri`
+  // itself is only safe when the INPUT is already a data-graph URI (the
+  // WM shape). For an SWM input (a `urn:dkg:assertion:…` lifecycle URN)
+  // whose `dkg:assertionGraph` did NOT resolve (legacy/partial `_meta`
+  // row), echoing the URN would make `fetchAssertionTriples` query
+  // `GRAPH <urn:dkg:assertion:…>` — a graph that never holds triples —
+  // and render a bogus "data" set. In that case return `undefined` so
+  // the Triples/Entities panes fall to their empty-state instead.
+  const resolvedAssertionGraph = bv(first.assertionGraph);
+  const inputIsLifecycleUrn = graphUri.startsWith('urn:dkg:assertion:');
+  const assertionGraph = resolvedAssertionGraph
+    ?? (inputIsLifecycleUrn ? undefined : graphUri);
+  return {
+    state,
+    layer,
+    assertionGraph,
+    createdBy: bv(first.createdBy),
+  };
+}
+
+/** A single triple of an assertion's data graph. */
+export interface AssertionTriple {
+  subject: string;
+  predicate: string;
+  object: string;
+}
+
+/**
+ * Read the triples of an assertion's DATA graph (S4 — the detail view's
+ * Triples / Entities / Graph panes are scoped to exactly this assertion,
+ * not the whole layer). `assertionGraph` is the `dkg:assertionGraph` URI
+ * resolved by `fetchAssertionState`.
+ *
+ * A WM assertion's triples live verbatim in its
+ * `…/assertion/<addr>/<name>` data graph. We query that ONE graph
+ * directly with an explicit `GRAPH <…> { ?s ?p ?o }` (self-scoping, same
+ * shape as the other `_meta` reads), so the result is the assertion's
+ * own content with zero cross-assertion bleed. The 5k LIMIT mirrors the
+ * lifecycle-events query ceiling — far above any realistic single
+ * assertion.
+ *
+ * NOTE: after promote the assertion's data graph empties (the triples
+ * move into `/_shared_memory`); a `promoted` assertion's detail view
+ * therefore shows an empty content set today. That is the documented
+ * G-BACKEND-M5 gap (a promoted SWM assertion is not yet an
+ * independently-inspectable object); a `created` WM assertion — S4's
+ * shippable scope — works in full.
+ */
+export async function fetchAssertionTriples(
+  contextGraphId: string,
+  assertionGraph: string,
+): Promise<AssertionTriple[]> {
+  const sparql = `SELECT ?s ?p ?o WHERE {
+    GRAPH <${assertionGraph}> { ?s ?p ?o }
+  } LIMIT 5000`;
+  const data = await executeQuery(sparql, contextGraphId);
+  const bindings: any[] = data?.result?.bindings ?? [];
+  const out: AssertionTriple[] = [];
+  for (const b of bindings) {
+    const subject = rawBindingValue(b.s);
+    const predicate = rawBindingValue(b.p);
+    const object = rawBindingValue(b.o);
+    if (subject == null || predicate == null || object == null) continue;
+    out.push({ subject, predicate, object });
+  }
+  return out;
+}
+
+/**
+ * Extract the RAW binding value WITHOUT stripping the literal quoting —
+ * triple objects must keep their `"…"` / `"…"^^<type>` / `"…"@lang` form
+ * so the graph + table renderers can distinguish a literal from an IRI
+ * (downstream classifies by a leading `"`, see `useMemoryEntities`). IRIs
+ * come back bare. Mirror of the daemon's two binding encodings (`{value}`
+ * object form and N-Triples string form), like `bv` but quote-preserving.
+ *
+ * Codex round-1: for the standard SPARQL-JSON object form we now (a) escape
+ * `\` and `"` inside the value so a literal containing a quote stays
+ * well-formed, and (b) PRESERVE the datatype (`^^<iri>`) / language tag
+ * (`@lang`) — previously dropped, contradicting this comment. The
+ * N-Triples string form is already fully encoded by the daemon, so it
+ * passes through verbatim.
+ */
+/**
+ * Escape a literal body for the N-Triples `"…"` form: backslash + quote,
+ * the canonical short escapes for tab/newline/carriage-return, and any
+ * other C0 control char as `\\uXXXX`. Order matters — backslash first so
+ * the escapes we add aren't re-escaped.
+ */
+function escapeNTriplesLiteral(value: string): string {
+  let out = "";
+  for (const ch of value) {
+    const code = ch.codePointAt(0)!;
+    if (ch === '\\') out += '\\\\';
+    else if (ch === '"') out += '\\"';
+    else if (code === 0x09) out += '\\t';
+    else if (code === 0x0a) out += '\\n';
+    else if (code === 0x0d) out += '\\r';
+    else if (code < 0x20) out += '\\u' + code.toString(16).padStart(4, '0').toUpperCase();
+    else out += ch;
+  }
+  return out;
+}
+
+function rawBindingValue(v: unknown): string | undefined {
+  if (v == null) return undefined;
+  if (typeof v === 'object' && 'value' in (v as any)) {
+    const node = v as any;
+    if (node.type === 'literal' || node.type === 'typed-literal') {
+      // Escape per N-Triples so embedded quotes/backslashes/control chars
+      // don't break the leading-`"` classification or the renderers.
+      // Codex round-6 — control chars (raw \n/\r/\t in a multiline
+      // extracted value, plus other C0 controls) were previously left
+      // raw → invalid N-Triples → broke the graph/triple parsers.
+      const escaped = escapeNTriplesLiteral(String(node.value));
+      // Standard SPARQL JSON carries the datatype on `.datatype` and the
+      // language on `.xml:lang` (some serialisers use `.language`).
+      const lang = node['xml:lang'] ?? node.language;
+      const datatype = node.datatype;
+      if (lang) return `"${escaped}"@${lang}`;
+      if (datatype) return `"${escaped}"^^<${datatype}>`;
+      return `"${escaped}"`;
+    }
+    // Codex round-5 — a blank node must come back as `_:<id>`, not the
+    // bare identifier; otherwise downstream (buildMemoryEntities + the
+    // graph) misclassify it (a bare id is neither a leading-`"` literal
+    // nor a recognisable resource → bnode RDF structure disappears /
+    // mislabels). Branch BEFORE the generic fallthrough.
+    if (node.type === 'bnode') return `_:${String(node.value)}`;
+    return String(node.value);
+  }
+  if (typeof v === 'string') return v;
+  return String(v);
 }
 
 /**

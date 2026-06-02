@@ -586,4 +586,45 @@ describe('Context Graph shared empty/stat patterns', () => {
 
     await unmount();
   });
+
+  // Codex round-1 finding 4 — the row's onKeyDown bubbles, so Enter/Space
+  // on the nested promote button must NOT also open the detail. The guard
+  // (`ev.target !== ev.currentTarget → return`) restricts row activation
+  // to the row itself.
+  it('Enter on the promote button does not open the detail; Enter on the row does (keyboard guard)', async () => {
+    apiMocks.listAssertions.mockResolvedValueOnce([
+      { name: 'kbd-doc', graphUri: 'did:dkg:context-graph:cg-test/assertion/0xabc/kbd-doc', tripleCount: 4 },
+    ]);
+    const onSelectAssertion = vi.fn();
+    const { container, unmount } = await render(
+      React.createElement(AssertionsList, {
+        contextGraphId: 'cg-test',
+        layer: 'wm',
+        onComplete: vi.fn(),
+        onSelectAssertion,
+      }),
+    );
+    await waitForText(container, 'kbd-doc');
+
+    const row = container.querySelector<HTMLElement>('.v10-item-row')!;
+    const promoteBtn = row.querySelector<HTMLElement>('button')!;
+
+    // Enter on the nested promote button: bubbles to the row's onKeyDown,
+    // but the guard (target !== currentTarget) must suppress navigation.
+    await act(async () => {
+      promoteBtn.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    });
+    expect(onSelectAssertion).not.toHaveBeenCalled();
+
+    // Enter on the ROW itself opens the detail.
+    await act(async () => {
+      row.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    });
+    expect(onSelectAssertion).toHaveBeenCalledTimes(1);
+    // Codex round-11 (11-1) — the list forwards its own `layer` as the
+    // source layer (2nd arg) so the detail view seeds its badge/tone.
+    expect(onSelectAssertion).toHaveBeenCalledWith(expect.objectContaining({ name: 'kbd-doc' }), 'wm');
+
+    await unmount();
+  });
 });

@@ -89,8 +89,7 @@ describe('KADetailView navigation label', () => {
     vi.clearAllMocks();
   });
 
-  it('renders Back to Context Graph and calls onClose', async () => {
-    const onClose = vi.fn();
+  it('S5 — no back button (the breadcrumb is the sole back-affordance)', async () => {
     await act(async () => {
       root.render(
         React.createElement(ProjectProfileContext.Provider, { value: profile },
@@ -100,22 +99,16 @@ describe('KADetailView navigation label', () => {
               allEntities: new Map([[entity.uri, entity]]),
               allTriples: [],
               onNavigate: vi.fn(),
-              onClose,
               contextGraphId: 'cg-test',
               onRefresh: vi.fn(),
             }))),
       );
     });
 
-    const back = query('.v10-ka-back');
-    expect(back.textContent).toContain('Back to Context Graph');
-    expect(back.textContent).not.toContain('Back to Project');
-
-    await act(async () => {
-      back.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    });
-
-    expect(onClose).toHaveBeenCalledTimes(1);
+    // The old in-detail "← Back to Context Graph" button is gone — S5
+    // moved the back-affordance to the persistent breadcrumb.
+    expect(document.querySelector('.v10-ka-back')).toBeNull();
+    expect(document.body.textContent).not.toContain('Back to Context Graph');
   });
 
   it('uses layer-aware nouns in the detail header', async () => {
@@ -129,7 +122,6 @@ describe('KADetailView navigation label', () => {
                 allEntities: new Map([[testEntity.uri, testEntity]]),
                 allTriples: [],
                 onNavigate: vi.fn(),
-                onClose: vi.fn(),
                 contextGraphId: 'cg-test',
                 onRefresh: vi.fn(),
               }))),

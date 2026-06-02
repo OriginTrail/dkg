@@ -11,6 +11,7 @@ import {
   useMemoryEntities,
   type LayeredTriple,
   type TrustLevel,
+  type MemoryEntity,
 } from '../hooks/useMemoryEntities.js';
 import { useProjectProfile, ProjectProfileContext } from '../hooks/useProjectProfile.js';
 import { useAgents, AgentsContext } from '../hooks/useAgents.js';
@@ -21,11 +22,12 @@ import { ActivityFeed } from '../components/ActivityFeed.js';
 import { SubGraphBar } from '../components/SubGraphBar.js';
 import { CONTEXT_GRAPH_PRIMER_TAB } from '../lib/contextGraphPrimer.js';
 import { useTabsStore } from '../stores/tabs.js';
-import { shouldFetchSwmAttribution, type LayerView, type LayerContentTab, type SubGraphTab } from './project/helpers.js';
+import { shouldFetchSwmAttribution, primarySubGraphOf, type LayerView, type LayerContentTab, type SubGraphTab } from './project/helpers.js';
 import {
   ProjectHeaderStrip,
   LayerSwitcher,
   KADetailView,
+  AssertionDetailView,
   SubGraphDetailView,
   ProjectOverviewCard,
   PendingJoinRequestsSection,
@@ -36,6 +38,7 @@ import {
   ContextGraphQueryView,
   LayerDetailView,
 } from './project/components.js';
+import type { AssertionInfo } from '../api.js';
 
 interface ProjectViewProps {
   contextGraphId: string;
@@ -116,6 +119,17 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   const [showShare, setShowShare] = useState(false);
   const [activeLayer, setActiveLayer] = useState<LayerView>('overview');
   const [selectedUri, setSelectedUri] = useState<string | null>(null);
+  // S4 — an open assertion detail view. A peer of `selectedUri` (entity
+  // detail): only one detail overlay is open at a time, and opening an
+  // assertion clears any open entity (and vice-versa). The origin
+  // snapshot (M2) is captured at open so the breadcrumb / close restores
+  // the originating layer + Assertions subtab + scroll.
+  const [selectedAssertion, setSelectedAssertion] = useState<AssertionInfo | null>(null);
+  // Codex round-11 (11-1) — the layer the selected assertion's list row came
+  // from ('wm' | 'swm'). Seeds AssertionDetailView's badge + graph tone so it
+  // shows the KNOWN-true layer during the state hydrate instead of inventing
+  // 'wm'. Set together with `selectedAssertion` in `openAssertionDetail`.
+  const [selectedAssertionLayer, setSelectedAssertionLayer] = useState<'wm' | 'swm'>('wm');
   const [participantsState, setParticipantsState] = useState<ParticipantsState>({
     contextGraphId: null,
     list: [],
@@ -211,6 +225,16 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   // downstream memo that consumed `handleNavigate`.
   const selectedUriRef = useRef<string | null>(null);
   useEffect(() => { selectedUriRef.current = selectedUri; }, [selectedUri]);
+  // S4 — mirror `selectedAssertion` so `openEntityDetail` (whose
+  // identity must stay stable) can see whether an assertion overlay is
+  // open without listing the state in its deps.
+  const selectedAssertionRef = useRef<AssertionInfo | null>(null);
+  useEffect(() => { selectedAssertionRef.current = selectedAssertion; }, [selectedAssertion]);
+  // M2 option (b) — mirror the full entity map so `handleNavigate` can
+  // resolve a navigated entity's primary sub-graph synchronously
+  // (to decide whether to follow a cross-subgraph link) WITHOUT listing
+  // the map in its deps and churning the callback identity.
+  const entitiesRef = useRef<ReadonlyMap<string, MemoryEntity>>(new Map());
   const [layerContentTabs, setLayerContentTabs] = useState<Record<MemoryLayerView, LayerContentTab>>(
     DEFAULT_LAYER_TABS,
   );
@@ -278,10 +302,19 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   // stays stable across navigation — listing `selectedUri` here would
   // recreate `openEntityDetail` on every entity click, which in turn
   // recreates `handleNavigate` and the cross-tab listener effect (R2-2).
+  //
+  // S4 — an entity can be opened while an assertion detail is already
+  // open (clicking an entity row inside the assertion view). In that
+  // case an origin is already captured (at assertion-open) and must be
+  // preserved, so the capture guard also checks `selectedAssertionRef`.
+  // Opening the entity replaces the assertion overlay (mutually
+  // exclusive) — clear it here.
   const openEntityDetail = useCallback((uri: string, originScrollKey?: string) => {
-    if (!selectedUriRef.current || !detailOriginRef.current) {
+    const hadDetail = selectedUriRef.current != null || selectedAssertionRef.current != null;
+    if (!hadDetail || !detailOriginRef.current) {
       detailOriginRef.current = captureDetailOrigin(originScrollKey);
     }
+    setSelectedAssertion(null);
     setSelectedUri(uri);
   }, [captureDetailOrigin]);
 
@@ -289,13 +322,39 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     detailOriginRef.current = null;
   }, []);
 
+  // S4 — open an assertion's detail view. Captures the M2 origin
+  // snapshot (when none is pending) so the breadcrumb / close restores
+  // the originating layer + Assertions subtab + scroll, then clears any
+  // open entity detail (the two detail overlays are mutually exclusive).
+  const openAssertionDetail = useCallback((assertion: AssertionInfo, sourceLayer: 'wm' | 'swm') => {
+    if (!detailOriginRef.current) {
+      detailOriginRef.current = captureDetailOrigin();
+    }
+    setSelectedUri(null);
+    setSelectedLayerContext(null);
+    // Codex round-11 (11-1) — capture the source layer the list row came
+    // from so AssertionDetailView seeds its badge/tone immediately (no
+    // `?? 'wm'` invention during the state hydrate). The list is the
+    // authoritative layer source: a detail only opens from a WM/SWM list.
+    setSelectedAssertionLayer(sourceLayer);
+    setSelectedAssertion(assertion);
+  }, [captureDetailOrigin]);
+
+  // Consumes a pending scroll restore once the detail overlay has
+  // actually closed. S4 — the close path is shared by the entity AND
+  // the assertion overlay (`handleDetailClose` queues `origin.scroll`
+  // for both), so the guard must wait for BOTH to clear and the deps
+  // must include `selectedAssertion`. Without it, closing an assertion
+  // back to the same layer it opened from changes none of the other
+  // listed deps, the effect never re-fires, and the queued scroll is
+  // never restored — an M2-parity gap vs the entity-close path (7-1).
   useEffect(() => {
-    if (selectedUri) return;
+    if (selectedUri || selectedAssertion) return;
     const scroll = pendingScrollRestoreRef.current;
     if (!scroll) return;
     pendingScrollRestoreRef.current = null;
     restoreScroll(scroll);
-  }, [selectedUri, activeLayer, activeSubGraph, layerContentTabs, subGraphTabs, restoreScroll]);
+  }, [selectedUri, selectedAssertion, activeLayer, activeSubGraph, layerContentTabs, subGraphTabs, restoreScroll]);
 
   // Cross-tab entity open — e.g. the agent profile page in another tab
   // fires a CustomEvent("v10:open-entity", { contextGraphId, entityUri })
@@ -356,6 +415,9 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   // DashboardView caller, which already opts in for the same
   // failed-vs-empty-distinct reason.
   const rawMemory = useMemoryEntities(contextGraphId, { signalErrors: true });
+  // M2 option (b) — keep the entity-map ref in sync so `handleNavigate`
+  // can resolve a navigated entity's sub-graph synchronously.
+  useEffect(() => { entitiesRef.current = rawMemory.entities; }, [rawMemory.entities]);
   // SWM attribution drives the SWM graph's agent-tint legend (its
   // sole remaining consumer). PR #694 review — the Overview no
   // longer reads this stream (lifecycle source replaced it), so the
@@ -593,6 +655,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
       }
     }
     setSelectedUri(null);
+    setSelectedAssertion(null);
     setSelectedLayerContext(null);
   }, [clearDetailOrigin, setActiveSubGraphSync]);
 
@@ -600,6 +663,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     clearDetailOrigin();
     setActiveLayer(layer);
     setSelectedUri(null);
+    setSelectedAssertion(null);
     setSelectedLayerContext(null);
     // PR #793 sweep 5 Bug N — go through the sync helper so the
     // refs stay invariant with state. Pre-fix this path bypassed
@@ -621,10 +685,6 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     setSubGraphTabs(prev => prev[slug] === tab ? prev : { ...prev, [slug]: tab });
   }, []);
 
-  // M2 keeps the user's origin stable: linked entities open in the detail
-  // pane, but the underlying layer/sub-graph page does not silently change
-  // until S5 adds breadcrumbs that can make that movement visible.
-  //
   // Intent: a brand-new top-level open (no selected entity yet) resets
   // the layer context; in-detail navigation (a click inside an open
   // detail) keeps the prior layer context. We read both `selectedUri`
@@ -632,17 +692,55 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   // `prev` argument) so the callback identity stays stable — listing
   // them in deps would re-create `handleNavigate` on every navigation
   // and rebuild every downstream memo / callback that consumes it.
+  //
+  // M2 option (b) — silent cross-subgraph switch, ENABLED alongside S5.
+  // When following a link to an entity that lives in a DIFFERENT
+  // sub-graph than the one currently in scope, switch `activeSubGraph`
+  // to the target's sub-graph. Pre-S5 this was suppressed (option (a):
+  // no switch) because the move was invisible; now the breadcrumb makes
+  // it visible (`Context Graph › <new subgraph> › Entity`), so the
+  // switch is acceptable. Routed through `setActiveSubGraphSync` (PR
+  // #793 Bug N) so the breadcrumb's React tree — and the ref-keyed
+  // discriminators — see the new subgraph synchronously. The M2 origin
+  // snapshot was captured at the FIRST open, so closing still returns to
+  // the originating page, not the followed-into one.
+  //
+  // Only fires when ALREADY in a sub-graph page (`activeSubGraphRef`):
+  // opening an entity from a plain layer list must NOT spuriously jump
+  // into a sub-graph just because the entity happens to belong to one.
   const handleNavigate = useCallback((uri: string, originScrollKey?: string, layerContext?: MemoryLayerView) => {
     const hadSelection = selectedUriRef.current != null;
     openEntityDetail(uri, originScrollKey);
     setSelectedLayerContext(prev => layerContext ?? (hadSelection ? prev : null));
-  }, [openEntityDetail]);
+    const currentSubGraph = activeSubGraphRef.current;
+    if (currentSubGraph) {
+      const entity = entitiesRef.current.get(uri) ?? entitiesRef.current.get(canonicalEntityUri(uri));
+      // Codex round-8 (8-3) — prefer the CURRENT subgraph for a multi-homed
+      // entity. M2(b) switches to `primarySubGraphOf` (first non-meta),
+      // which is arbitrary when the entity lives in several subgraphs. If
+      // the entity is ALREADY in the current subgraph, stay — don't jump to
+      // an arbitrary sibling. Only switch when the entity isn't in the
+      // current subgraph at all; then `primarySubGraphOf` is the must-move
+      // fallback (M2(b)'s reason for existing: un-strand an entity that
+      // doesn't belong to the page you're on). `subGraphs` is a Set<string>.
+      if (!entity?.subGraphs.has(currentSubGraph)) {
+        const targetSubGraph = primarySubGraphOf(entity);
+        if (targetSubGraph && targetSubGraph !== currentSubGraph) {
+          setActiveSubGraphSync(targetSubGraph);
+        }
+      }
+    }
+  }, [openEntityDetail, setActiveSubGraphSync]);
 
   const handleDetailClose = useCallback(() => {
     const origin = detailOriginRef.current;
     detailOriginRef.current = null;
     setSelectedUri(null);
     setSelectedLayerContext(null);
+    // S4 — close path is shared by the entity detail AND the assertion
+    // detail (only one is open at a time); clear both so the same
+    // origin-restore serves either overlay (T16).
+    setSelectedAssertion(null);
     if (!origin) return;
     setActiveLayer(origin.activeLayer);
     // PR #793 sweep 5 Bug N — restoring the M2 origin's
@@ -688,6 +786,14 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     openTab(CONTEXT_GRAPH_PRIMER_TAB);
   }, [openTab]);
 
+  // S5 — first breadcrumb hop ("Context Graph") navigates to the
+  // overview, clearing any open detail / subgraph page. Reuses the
+  // layer-switch reset (clears detail origin + refs) so it can't strand
+  // a stale subgraph/detail context.
+  const handleBreadcrumbOverview = useCallback(() => {
+    handleLayerSwitch('overview');
+  }, [handleLayerSwitch]);
+
   if (!cg) {
     return (
       <div className="v10-view-placeholder">
@@ -699,6 +805,38 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   // Active sub-graph binding (for the breadcrumb strip) — stays in scope
   // across sub-graph / layer / overview routes.
   const activeSubGraphBinding = activeSubGraph ? profile.forSubGraph(activeSubGraph) : null;
+
+  // S5 — the breadcrumb's trailing hop is the open detail's name (entity
+  // label or assertion name); null when no detail is open (the middle hop
+  // is then the current location).
+  const breadcrumbDetailLabel = selectedEntity
+    ? selectedEntity.label
+    : selectedAssertion
+      ? selectedAssertion.name
+      : null;
+
+  // Codex round-8 (8-2) — when a detail is open the breadcrumb's middle
+  // hop must label the M2 ORIGIN (where the middle-hop click returns you),
+  // not the current location. After an M2(b) cross-subgraph follow the
+  // active subgraph diverges from the origin, so the current-scope label
+  // would name the followed-into subgraph while clicking returns to the
+  // origin. Read the origin snapshot (captured at detail-open) and resolve
+  // its subgraph display name via the profile. Only meaningful when a
+  // detail is open — `breadcrumbDetailLabel` gates the read, and the
+  // detail-open selection state drives the render, so the ref is populated
+  // by the time we read it here.
+  const breadcrumbOrigin = breadcrumbDetailLabel ? detailOriginRef.current : null;
+  const breadcrumbOriginSubGraph = breadcrumbOrigin?.activeSubGraph ?? null;
+  // Codex round-10 (10-1) — `forSubGraph` returns undefined for a subgraph
+  // with NO profile binding, so `.displayName` would throw before the
+  // breadcrumb renders (opening a detail from an unprofiled subgraph would
+  // crash). Optional-chain and degrade to the slug — the SAME fallback the
+  // no-origin-subgraph case uses. (The 9-2 chrome accesses in
+  // ProjectHeaderStrip already optional-chain `forSubGraph`; this is the one
+  // un-guarded access, which resolves only the breadcrumb label.)
+  const breadcrumbOriginSubGraphName = breadcrumbOriginSubGraph
+    ? profile.forSubGraph(breadcrumbOriginSubGraph)?.displayName ?? breadcrumbOriginSubGraph
+    : null;
 
   // Codex Bug C — gate the `entities`-driven chip-count path on a
   // fully-loaded memory snapshot. While `useMemoryEntities` is mid-
@@ -715,9 +853,11 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   const chipBarEntities = memoryReady ? rawMemory.entityList : undefined;
   const activePage = selectedEntity
     ? 'entity'
-    : activeSubGraph
-      ? 'subgraph'
-      : activeLayer;
+    : selectedAssertion
+      ? 'assertion'
+      : activeSubGraph
+        ? 'subgraph'
+        : activeLayer;
   const participantsForCurrentGraph = participantsState.contextGraphId === cg.id
     ? participantsState.list
     : [];
@@ -735,8 +875,14 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
       <ProjectHeaderStrip
         cg={cg}
         profile={profile}
+        activeLayer={activeLayer}
         activeSubGraph={activeSubGraphBinding}
-        onClearSubGraph={() => handleSelectSubGraph(null)}
+        detailLabel={breadcrumbDetailLabel}
+        originLayer={breadcrumbOrigin?.activeLayer ?? null}
+        originSubGraph={breadcrumbOriginSubGraph}
+        originSubGraphDisplayName={breadcrumbOriginSubGraphName}
+        onOverview={handleBreadcrumbOverview}
+        onRestoreOrigin={handleDetailClose}
       />
 
       {/* Layer Switcher — always visible now. Clicking a layer from within
@@ -759,9 +905,28 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
           allEntities={detailEntities}
           allTriples={detailTriples}
           onNavigate={handleNavigate}
-          onClose={handleDetailClose}
           contextGraphId={contextGraphId}
           onRefresh={rawMemory.refresh}
+          onOpenAgent={openAgent}
+        />
+      )}
+
+      {/* S4 — Assertion detail overlay. Peer of the entity detail
+          (mutually exclusive); the entity branch takes precedence so
+          opening an entity FROM the assertion view replaces it. */}
+      {selectedAssertion && !selectedEntity && (
+        <AssertionDetailView
+          assertion={selectedAssertion}
+          sourceLayer={selectedAssertionLayer}
+          contextGraphId={contextGraphId}
+          // Codex round-5 — forward the assertion's layer into
+          // handleNavigate's existing `layerContext` (3rd) param so the
+          // follow-on entity detail stays scoped to the assertion's layer.
+          // AssertionDetailView passes `layer` as the 2nd arg; map it to
+          // the 3rd param (originScrollKey stays undefined).
+          onNavigate={(uri, layer) => handleNavigate(uri, undefined, layer)}
+          onComplete={rawMemory.refresh}
+          onOpenAgent={openAgent}
         />
       )}
 
@@ -769,7 +934,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
           First-class peer of the layer views; the page identity, intro
           and chip row are shared with the All / Subgraphs-overview state
           (rendered below in the graph-overview branch). */}
-      {activeSubGraph && !selectedEntity && (
+      {activeSubGraph && !selectedEntity && !selectedAssertion && (
         <>
           <SubGraphExplorerHeader />
           <SubGraphBar
@@ -806,7 +971,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
           is a peer section below it (curator-only). Recent activity
           moves to the last content row before the primer escape hatch
           which lives inside the card's footer. */}
-      {!activeSubGraph && activeLayer === 'overview' && !selectedEntity && (
+      {!activeSubGraph && activeLayer === 'overview' && !selectedEntity && !selectedAssertion && (
         <>
           <ProjectOverviewCard
             cg={cg}
@@ -855,7 +1020,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
       {/* Subgraph Explorer — All state (page heading + intro + chip row
           + card-wall body). Selecting a chip transitions to the detail
           body via `activeSubGraph` (branch above). */}
-      {!activeSubGraph && activeLayer === 'graph-overview' && !selectedEntity && (
+      {!activeSubGraph && activeLayer === 'graph-overview' && !selectedEntity && !selectedAssertion && (
         <>
           <SubGraphExplorerHeader />
           <SubGraphBar
@@ -874,12 +1039,12 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
         </>
       )}
 
-      {!activeSubGraph && activeLayer === 'query' && !selectedEntity && (
+      {!activeSubGraph && activeLayer === 'query' && !selectedEntity && !selectedAssertion && (
         <ContextGraphQueryView contextGraphId={contextGraphId} />
       )}
 
       {/* Layer Detail Views */}
-      {!activeSubGraph && (activeLayer === 'wm' || activeLayer === 'swm' || activeLayer === 'vm') && !selectedEntity && (
+      {!activeSubGraph && (activeLayer === 'wm' || activeLayer === 'swm' || activeLayer === 'vm') && !selectedEntity && !selectedAssertion && (
         <>
           <SubGraphBar
             contextGraphId={contextGraphId}
@@ -894,6 +1059,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
             memory={rawMemory}
             onNodeClick={handleNodeClick}
             onSelectEntity={handleLayerSelectEntity}
+            onSelectAssertion={openAssertionDetail}
             contextGraphId={contextGraphId}
             activeTab={layerContentTabs[activeLayer]}
             onTabChange={tab => handleLayerTabChange(activeLayer, tab)}

@@ -1,4 +1,5 @@
 import { useMemo } from 'react';
+import type { AssertionState } from '@origintrail-official/dkg-core';
 import {
   useMemoryEntities,
   canonicalEntityUri,
@@ -892,4 +893,352 @@ export function formatRelativeTime(ts: number): string {
   if (day < 30) return `${day}d ago`;
   // Older than a month — show the date so it's still useful at a glance.
   return new Date(ts).toISOString().slice(0, 10);
+}
+
+// ─── S4 Assertion detail view ────────────────────────────────
+// An assertion's lifecycle is a forward-only chain
+//   created (WM) → promoted (SWM) → published (VM) → finalized
+// with `discarded` as a terminal off-ramp reachable only from
+// `created` (mirrors `AssertionState` in `@origintrail-official/dkg-core`).
+// The detail view's right-rail trail reuses the entity-detail
+// Provenance Trail markup family (`.v10-ka-timeline` / `.v10-ka-event*`),
+// so the assertion stage must map onto the SAME tone vocabulary the
+// trail dots already paint: `created` (WM slate), `shared` (SWM amber),
+// `verified` (VM green), plus a `discarded` muted tone.
+
+/** Lifecycle layer of an assertion, derived from its `dkg:state`. */
+export type AssertionDetailLayer = 'wm' | 'swm' | 'vm';
+
+/**
+ * Map an assertion lifecycle `state` to the trail-dot tone class used
+ * by `.v10-ka-event-dot.{created,shared,verified,discarded}`. The tone
+ * is keyed on the TRUST LAYER the state corresponds to (not the
+ * state-machine name) so the trail's colour reads consistently with the
+ * rest of the trust-coding system: `created` → WM slate, `promoted` →
+ * SWM amber, `published`/`finalized` → VM green, `discarded` → muted.
+ * Unknown states fall back to the WM `created` tone (the safest neutral).
+ */
+export function assertionStageTone(
+  state: AssertionState | null | undefined,
+): 'created' | 'shared' | 'verified' | 'discarded' {
+  switch (state) {
+    case 'created':   return 'created';
+    case 'promoted':  return 'shared';
+    case 'published':
+    case 'finalized': return 'verified';
+    case 'discarded': return 'discarded';
+    default:          return 'created';
+  }
+}
+
+/**
+ * Promote CTA visibility predicate for the assertion detail header.
+ * A per-assertion forward action exists ONLY for a `created` WM
+ * assertion (`promote` is assertion-scoped — §2.3); every later state
+ * has no further per-assertion forward action (SWM→VM publish is
+ * entity-scoped). Returns false while the state is still hydrating
+ * (`state == null`) so the CTA never flashes in then hides.
+ */
+export function canPromoteAssertion(
+  state: AssertionState | null | undefined,
+  layer: AssertionDetailLayer | null | undefined,
+): boolean {
+  return state === 'created' && layer === 'wm';
+}
+
+/**
+ * Header line-3 content for the assertion detail view. The mockup folded
+ * the sub-graph into the line-2 stat row, but a root-scoped assertion
+ * has no sub-graph — splitting it onto a conditional third line avoids a
+ * trailing `· subgraph: undefined` cliff. Returns `null` (render nothing)
+ * for root assertions; the `subgraph: <slug>` string only when truthy.
+ */
+export function assertionSubgraphLine(
+  subGraph: string | null | undefined,
+): string | null {
+  const slug = subGraph?.trim();
+  return slug ? `subgraph: ${slug}` : null;
+}
+
+/** One stage of the assertion lifecycle trail. */
+export interface AssertionTrailStage {
+  /** State this stage represents. */
+  state: AssertionState;
+  /** Human title rendered as the event title. */
+  title: string;
+  /** Trail-dot tone class (`created` / `shared` / `verified` / `discarded`). */
+  tone: 'created' | 'shared' | 'verified' | 'discarded';
+  /** True for the stage matching the assertion's CURRENT state ("you are here"). */
+  isCurrent: boolean;
+}
+
+/**
+ * Build the ordered lifecycle-trail stages for an assertion detail view.
+ *
+ * - A live (non-discarded) assertion always renders the full forward
+ *   chain `created ▸ promoted ▸ published ▸ finalized` so the user sees
+ *   the whole pipeline and where the assertion currently sits; the stage
+ *   matching `state` carries `isCurrent` (the `is-current` halo).
+ * - A `discarded` assertion renders a SINGLE muted `discarded` event
+ *   (not `created ▸ discarded`) — the data model carries no distinct
+ *   `discardedAt`, so a single terminal event is the natural treatment
+ *   and needs no connector-mask CSS.
+ * - While the state is still hydrating (`state == null`) the full chain
+ *   renders: each stage at its STATIC stage-tone (created=slate /
+ *   promoted=amber / published+finalized=green — a fixed pipeline legend,
+ *   NOT a state signal) with NO `is-current` marker. The absent halo is
+ *   the load-bearing "no false you-are-here during hydrate" guarantee
+ *   (ux §4.7.1); the static tones are intentionally kept (graying them
+ *   would couple the legend to fetch state for a sub-second flash and
+ *   pop colour on resolve).
+ */
+export function buildAssertionTrail(
+  state: AssertionState | null | undefined,
+): AssertionTrailStage[] {
+  if (state === 'discarded') {
+    return [{ state: 'discarded', title: 'Discarded', tone: 'discarded', isCurrent: true }];
+  }
+  const chain: Array<{ state: AssertionState; title: string }> = [
+    { state: 'created',   title: 'Created in Working Memory' },
+    { state: 'promoted',  title: 'Promoted to Shared Working Memory' },
+    { state: 'published', title: 'Published to Verifiable Memory' },
+    { state: 'finalized', title: 'Finalized' },
+  ];
+  return chain.map(stage => ({
+    state: stage.state,
+    title: stage.title,
+    tone: assertionStageTone(stage.state),
+    isCurrent: state != null && stage.state === state,
+  }));
+}
+
+/**
+ * Empty-state copy for the assertion detail Entities pane when the
+ * assertion has zero entities, keyed off `dkg:state` (ux-lead's locked
+ * §4.7.1 copy — Codex round-3 finding 3). A single generic template was
+ * rejected because the noun changes at the VM boundary (entities →
+ * Knowledge Assets, §4.8) and because the forward path differs per state:
+ *   - created   → genuinely empty draft.
+ *   - promoted  → its entities moved to Shared Working Memory.
+ *   - published / finalized → its entities are now Knowledge Assets in
+ *     Verifiable Memory (post-publish the data graph is empty).
+ *   - discarded → terminal; no forward path (forward-safety — discarded
+ *     isn't list-reachable today, see the badge guard).
+ * Plain text, no links (S4 lock). Title is the constant "No entities in
+ * this assertion." for the live states; discarded gets a terminal title.
+ */
+export function assertionEmptyStateCopy(
+  state: AssertionState | null | undefined,
+): { title: string; description: string } {
+  switch (state) {
+    case 'promoted':
+      return {
+        title: 'No entities in this assertion.',
+        description: 'This assertion was promoted — its entities now live in Shared Working Memory. Open the Shared Working Memory tab to view them.',
+      };
+    case 'published':
+    case 'finalized':
+      return {
+        title: 'No entities in this assertion.',
+        description: 'This assertion was published — its entities are now Knowledge Assets in Verifiable Memory. Open the Verifiable Memory tab to view them.',
+      };
+    case 'discarded':
+      return {
+        title: 'This assertion was discarded.',
+        description: 'This assertion was discarded.',
+      };
+    case 'created':
+    default:
+      return {
+        title: 'No entities in this assertion.',
+        description: 'This assertion has no extracted entities.',
+      };
+  }
+}
+
+/**
+ * The primary (first non-`meta`) sub-graph slug an entity has triples
+ * in, or null when it lives only in the root bucket / meta. Mirrors the
+ * `SubGraphBadge` rule (lowest-rank binding wins; most entities live in
+ * exactly one sub-graph). Used by M2 option (b) to decide whether a
+ * cross-subgraph entity jump should switch `activeSubGraph`.
+ */
+export function primarySubGraphOf(entity: MemoryEntity | undefined | null): string | null {
+  if (!entity) return null;
+  for (const s of entity.subGraphs) {
+    if (s !== 'meta') return s;
+  }
+  return null;
+}
+
+// ─── S5 Breadcrumb navigation ───────────────────────────────
+// `Context Graph › {Layer | Subgraph} › {Entity | Assertion}`. Lives
+// inline in the persistent ProjectHeaderStrip. Hop content rules
+// (§4.7.1): the middle hop is EITHER the layer full-name OR the subgraph
+// displayName, never both (layer scope inside a subgraph is signalled by
+// the in-page active-layer chip, not the breadcrumb). The trailing hop
+// is the current location — a non-interactive span, three intentional
+// styling differences from clickable hops ("you are here" without a
+// label).
+
+/** Where a clicked breadcrumb hop navigates. */
+export type BreadcrumbTarget =
+  | 'overview'   // the Context Graph overview (first hop)
+  | 'origin'     // restore the M2 origin snapshot (close the open detail)
+  | 'current';   // the trailing hop — not interactive
+
+export interface BreadcrumbHop {
+  /** Stable React key. */
+  key: string;
+  /** Truncatable display label. */
+  label: string;
+  /** Full text for the unconditional `title=` tooltip. */
+  title: string;
+  /** Navigation target; `'current'` hops render as a non-interactive span. */
+  target: BreadcrumbTarget;
+}
+
+const LAYER_FULL_NAME: Record<MemoryLayerKey, string> = {
+  wm: 'Working Memory',
+  swm: 'Shared Working Memory',
+  vm: 'Verifiable Memory',
+};
+
+type MemoryLayerKey = 'wm' | 'swm' | 'vm';
+
+/**
+ * Build the breadcrumb hops for the current ProjectView location.
+ *
+ * - `Context Graph` is always the first hop, clickable to overview
+ *   (except when it is itself the current page — then it's the trailing
+ *   `current` hop with no further hops).
+ * - The middle hop is the subgraph displayName when a subgraph page is
+ *   active, otherwise the active layer's full name. Only one, never both.
+ * - The trailing hop (`current`) is the open detail's name (entity or
+ *   assertion) when a detail is open; otherwise the middle hop itself is
+ *   the current location.
+ *
+ * Navigation semantics are attached by the renderer via `target`:
+ * non-trailing hops are clickable; clicking the first hop goes to
+ * overview, clicking the middle hop (when a detail is open) restores the
+ * M2 origin (closes the detail back to where it was opened).
+ */
+export function buildBreadcrumbHops(input: {
+  /** The CG display name (first hop label). */
+  contextGraphName: string;
+  activeLayer: LayerView;
+  /** Active subgraph slug, or null when not on a subgraph page. */
+  activeSubGraph: string | null;
+  /** Active subgraph display name (falls back to slug). */
+  subGraphDisplayName?: string | null;
+  /** Open detail's name, or null when no detail is open. */
+  detailLabel?: string | null;
+  /**
+   * Codex round-8 (8-2) — the M2 ORIGIN's layer/subgraph. When a detail
+   * is open the middle hop's `target` is `'origin'` (clicking closes the
+   * detail back to where it was opened), so its LABEL must name the
+   * origin, not the current location. After an M2(b) cross-subgraph
+   * follow the current subgraph diverges from the origin, and labelling
+   * the middle hop with the CURRENT subgraph misnames the destination the
+   * click returns you to. Supplied only when a detail is open; when
+   * absent (or no detail), the middle hop falls back to current-scope
+   * labelling (then current == location, which is correct). If the origin
+   * had no middle (opened from overview — `originLayer === 'overview'` and
+   * `originSubGraph === null`), NO middle is synthesised (the 2-hop rule
+   * still holds).
+   */
+  originLayer?: LayerView | null;
+  originSubGraph?: string | null;
+  originSubGraphDisplayName?: string | null;
+}): BreadcrumbHop[] {
+  const {
+    contextGraphName,
+    activeLayer,
+    activeSubGraph,
+    subGraphDisplayName,
+    detailLabel,
+    originLayer,
+    originSubGraph,
+    originSubGraphDisplayName,
+  } = input;
+  const hops: BreadcrumbHop[] = [];
+
+  // First hop is the CURRENT page only when we are on the overview with no
+  // subgraph and no open detail.
+  const onOverview = !activeSubGraph && activeLayer === 'overview' && !detailLabel;
+  if (onOverview) {
+    hops.push({
+      key: 'cg',
+      label: contextGraphName,
+      title: contextGraphName,
+      target: 'current',
+    });
+    return hops;
+  }
+
+  // Middle hop — subgraph displayName OR layer full-name (never both).
+  const detailOpen = !!detailLabel;
+  // 8-2 — when a detail is open the middle hop labels the ORIGIN (where
+  // clicking returns you). The origin layer/subgraph is supplied by the
+  // caller from the M2 snapshot. When it isn't (e.g. no detail open, or a
+  // caller that doesn't thread it), fall back to the current location.
+  const haveOrigin = detailOpen && originLayer !== undefined;
+  const middleLayer = haveOrigin ? (originLayer ?? 'overview') : activeLayer;
+  const middleSubGraph = haveOrigin ? (originSubGraph ?? null) : activeSubGraph;
+  const middleSubGraphName = haveOrigin ? originSubGraphDisplayName : subGraphDisplayName;
+  let middle: { label: string; title: string } | null = null;
+  if (middleSubGraph) {
+    const name = middleSubGraphName?.trim() || middleSubGraph;
+    middle = { label: name, title: name };
+  } else if (middleLayer === 'wm' || middleLayer === 'swm' || middleLayer === 'vm') {
+    const name = LAYER_FULL_NAME[middleLayer];
+    middle = { label: name, title: name };
+  } else if (middleLayer === 'graph-overview') {
+    middle = { label: 'Subgraphs', title: 'Subgraphs' };
+  } else if (middleLayer === 'query') {
+    middle = { label: 'Query Catalogue', title: 'Query Catalogue' };
+  }
+
+  // First hop — Context Graph.
+  // Codex round-10 (10-2) — when a detail was opened from the OVERVIEW the
+  // breadcrumb is only 2 hops `[Context Graph › Detail]` (no middle), so the
+  // first hop is the SOLE back-affordance. Targeting 'overview' there would
+  // be a fresh top-of-overview nav that drops the captured scroll/tab;
+  // re-target it to 'origin' (→ onRestoreOrigin / handleDetailClose, which
+  // restores the overview origin correctly). The carve-out: in the 3-hop
+  // case (detail from a layer/subgraph) the first hop stays 'overview' — a
+  // genuine "go UP to the CG root", a DIFFERENT destination than the middle
+  // hop's 'origin' restore. The "no middle" check is the same condition that
+  // decides whether a middle hop exists, so one shared check drives both.
+  const firstHopRestoresOrigin = detailOpen && !middle;
+  hops.push({
+    key: 'cg',
+    label: contextGraphName,
+    title: contextGraphName,
+    target: firstHopRestoresOrigin ? 'origin' : 'overview',
+  });
+
+  if (middle) {
+    hops.push({
+      key: 'middle',
+      label: middle.label,
+      title: middle.title,
+      // When a detail is open the middle hop is clickable (restores the
+      // origin). When no detail is open the middle hop IS the current
+      // location.
+      target: detailOpen ? 'origin' : 'current',
+    });
+  }
+
+  // Trailing hop — the open detail's name (current location).
+  if (detailOpen) {
+    hops.push({
+      key: 'detail',
+      label: detailLabel!,
+      title: detailLabel!,
+      target: 'current',
+    });
+  }
+
+  return hops;
 }
