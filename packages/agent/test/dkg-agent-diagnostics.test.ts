@@ -272,7 +272,7 @@ describe('DKGAgent.getPeerDiagnostics', () => {
       // (`/dkg/10.0.2/sync` after sync left the messenger substrate).
       // A peer advertising the current protocol is reported sync-capable.
       const agentLike = makeAgentLike({
-        rawConnections: [],
+        rawConnections: [makeStubConn(PEER_A)],
         peerStoreEntries: new Map([
           [
             PEER_A,
@@ -290,7 +290,7 @@ describe('DKGAgent.getPeerDiagnostics', () => {
       expect(diag.peerStore).toEqual({
         knownMultiaddrCount: 2,
         multiaddrs: ['/ip4/1.2.3.4/tcp/4001', `/ip4/5.6.7.8/tcp/4001/p2p/${PEER_A}`],
-        protocols: ['/dkg/10.0.2/sync', '/dkg/10.0.1/message'],
+        protocols: [PROTOCOL_SYNC, PROTOCOL_MESSAGE],
         // No `metadata` provided in the stub → identify hasn't run
         // → both version fields null (rc.11 follow-up).
         nodeVersion: null,
@@ -300,6 +300,7 @@ describe('DKGAgent.getPeerDiagnostics', () => {
       expect(diag.syncCapable).toBe(true);
       expect(diag.syncStatus).toEqual({
         capable: true,
+        capability: 'supported',
         lastSuccessfulSyncAt: null,
         stale: true,
         backoff: null,
@@ -310,7 +311,7 @@ describe('DKGAgent.getPeerDiagnostics', () => {
       const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
       try {
         const agentLike = makeAgentLike({
-          rawConnections: [],
+          rawConnections: [makeStubConn(PEER_A)],
           peerStoreEntries: new Map([
             [
               PEER_A,
@@ -327,6 +328,7 @@ describe('DKGAgent.getPeerDiagnostics', () => {
         expect(diag.syncCapable).toBe(false);
         expect(diag.syncStatus).toEqual({
           capable: false,
+          capability: 'unsupported',
           lastSuccessfulSyncAt: null,
           stale: false,
           backoff: null,
@@ -340,7 +342,7 @@ describe('DKGAgent.getPeerDiagnostics', () => {
       const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
       try {
         const agentLike = makeAgentLike({
-          rawConnections: [],
+          rawConnections: [makeStubConn(PEER_A)],
           peerStoreEntries: new Map([
             [
               PEER_A,
@@ -356,6 +358,7 @@ describe('DKGAgent.getPeerDiagnostics', () => {
         const diag = await callDiagnostics(agentLike, PEER_A);
         expect(diag.syncStatus).toEqual({
           capable: true,
+          capability: 'supported',
           lastSuccessfulSyncAt: 100_000,
           stale: true,
           backoff: {
@@ -368,6 +371,60 @@ describe('DKGAgent.getPeerDiagnostics', () => {
       } finally {
         nowSpy.mockRestore();
       }
+    });
+
+    it('keeps connected cold-cache peers observable as unknown sync capability', async () => {
+      const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+      try {
+        const agentLike = makeAgentLike({
+          rawConnections: [makeStubConn(PEER_A)],
+          peerStoreEntries: new Map(),
+          syncReconcilerBackoff: new Map([[PEER_A, { failures: 2, nextRetryAt: 1_010_000 }]]),
+        });
+        const diag = await callDiagnostics(agentLike, PEER_A);
+
+        expect(diag.syncCapable).toBe(false);
+        expect(diag.syncStatus).toEqual({
+          capable: false,
+          capability: 'unknown',
+          lastSuccessfulSyncAt: null,
+          stale: true,
+          backoff: {
+            failures: 2,
+            nextRetryAt: 1_010_000,
+            retryInMs: 10_000,
+          },
+        });
+      } finally {
+        nowSpy.mockRestore();
+      }
+    });
+
+    it('does not report disconnected peers as stale from cached sync protocols alone', async () => {
+      const agentLike = makeAgentLike({
+        rawConnections: [],
+        peerStoreEntries: new Map([
+          [
+            PEER_A,
+            {
+              addresses: [],
+              protocols: [PROTOCOL_SYNC],
+            },
+          ],
+        ]),
+        lastSuccessfulSyncAt: new Map([[PEER_A, Date.now() - 20 * 60_000]]),
+        syncReconcilerBackoff: new Map([[PEER_A, { failures: 2, nextRetryAt: Date.now() + 100_000 }]]),
+      });
+      const diag = await callDiagnostics(agentLike, PEER_A);
+
+      expect(diag.connected).toBe(false);
+      expect(diag.syncStatus).toEqual({
+        capable: true,
+        capability: 'supported',
+        lastSuccessfulSyncAt: expect.any(Number),
+        stale: false,
+        backoff: null,
+      });
     });
 
     // rc.11 follow-up to the "version on the wire" gap surfaced during
@@ -624,6 +681,7 @@ describe('DKGAgent.getPeerDiagnostics', () => {
         syncCapable: false,
         syncStatus: {
           capable: false,
+          capability: 'unknown',
           lastSuccessfulSyncAt: null,
           stale: false,
           backoff: null,

@@ -386,8 +386,9 @@ export class FakeClient {
       syncCapable: false,
       syncStatus: {
         capable: false,
+        capability: 'unknown',
         lastSuccessfulSyncAt: null,
-        stale: true,
+        stale: false,
         backoff: null,
       },
       lastSeen: null,

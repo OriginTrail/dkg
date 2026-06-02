@@ -35,7 +35,20 @@ interface SyncOnConnectContext {
   onPeerSynced?: (peerId: string) => void;
 }
 
-export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<void> {
+export type SyncOnConnectOutcome = 'synced' | 'skipped-no-sync' | 'already-syncing';
+
+export class SyncOnConnectPostSyncError extends Error {
+  readonly originalError: unknown;
+
+  constructor(remotePeer: string, originalError: unknown) {
+    const detail = originalError instanceof Error ? originalError.message : String(originalError);
+    super(`post-sync step failed for peer ${remotePeer.slice(-8)}: ${detail}`);
+    this.name = 'SyncOnConnectPostSyncError';
+    this.originalError = originalError;
+  }
+}
+
+export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<SyncOnConnectOutcome> {
   const {
     remotePeer,
     syncingPeers,
@@ -53,8 +66,17 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<v
   const ctx = createOperationContext('sync');
   const shortPeer = remotePeer.slice(-8);
 
-  if (syncingPeers.has(remotePeer)) return;
+  if (syncingPeers.has(remotePeer)) return 'already-syncing';
   syncingPeers.add(remotePeer);
+
+  let durableSyncCompleted = false;
+  const runNonTransportStep = async <T>(step: () => Promise<T>): Promise<T> => {
+    try {
+      return await step();
+    } catch (err) {
+      throw new SyncOnConnectPostSyncError(remotePeer, err);
+    }
+  };
 
   try {
     const protocols = await getPeerProtocols(remotePeer);
@@ -69,7 +91,7 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<v
     if (!hasSync) {
       logInfo(ctx, `Peer ${shortPeer} does not support sync protocol (protocols: ${protocols.join(', ')})`);
       context.onPeerSkippedNoSync?.(remotePeer, protocols);
-      return;
+      return 'skipped-no-sync';
     }
 
     logInfo(ctx, `Syncing from peer ${shortPeer}...`);
@@ -82,9 +104,9 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<v
       SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
       ...(getSyncContextGraphs() ?? []),
     ]);
-    await refreshMetaSyncedFlags(syncScope);
+    await runNonTransportStep(() => refreshMetaSyncedFlags(syncScope));
 
-    await discoverContextGraphsFromStore();
+    await runNonTransportStep(() => discoverContextGraphsFromStore());
 
     const allCgsAfter = getSyncContextGraphs() ?? [];
     const newlyDiscovered = allCgsAfter.filter((id) => !knownCgsBefore.has(id));
@@ -92,9 +114,10 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<v
       logInfo(ctx, `Discovered ${newlyDiscovered.length} new CG(s) — syncing durable data from ${shortPeer}`);
       const discoverSynced = await syncFromPeer(remotePeer, newlyDiscovered);
       logInfo(ctx, `Synced ${discoverSynced} durable triples for newly discovered CG(s) from ${shortPeer}`);
-      await refreshMetaSyncedFlags(newlyDiscovered);
+      await runNonTransportStep(() => refreshMetaSyncedFlags(newlyDiscovered));
     }
 
+    durableSyncCompleted = true;
     const wsContextGraphIds = getSyncContextGraphs() ?? [];
     if (syncSharedMemoryOnConnect && wsContextGraphIds.length > 0) {
       const wsSynced = await syncSharedMemoryFromPeer(remotePeer, wsContextGraphIds);
@@ -104,6 +127,15 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<v
     }
 
     context.onPeerSynced?.(remotePeer);
+    return 'synced';
+  } catch (err) {
+    if (err instanceof SyncOnConnectPostSyncError) {
+      throw err;
+    }
+    if (durableSyncCompleted) {
+      throw new SyncOnConnectPostSyncError(remotePeer, err);
+    }
+    throw err;
   } finally {
     syncingPeers.delete(remotePeer);
   }

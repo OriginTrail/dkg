@@ -272,8 +272,9 @@ export class ApiClient {
     remoteAddrs: Array<string | null>;
     protocols: string[];
     syncCapable: boolean;
-    syncStatus: {
+    syncStatus?: {
       capable: boolean;
+      capability?: 'supported' | 'unsupported' | 'unknown';
       lastSuccessfulSyncAt: number | null;
       stale: boolean;
       backoff: {

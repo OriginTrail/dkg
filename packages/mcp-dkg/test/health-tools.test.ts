@@ -13,6 +13,7 @@ import { FakeServer, FakeClient, makeConfig } from './harness.js';
 const PEER_A = '12D3KooWFq5KMnSMyYr8Z8t8a6Vh1Y6N6KkF5UZjLpCqUkBJsAaa';
 const STALE_SYNC_STATUS = {
   capable: false,
+  capability: 'unknown' as const,
   lastSuccessfulSyncAt: null,
   stale: true,
   backoff: null,
@@ -62,6 +63,7 @@ describe('health tools', () => {
         syncCapable: true,
         syncStatus: {
           capable: true,
+          capability: 'supported',
           lastSuccessfulSyncAt: 1715670005000,
           stale: false,
           backoff: null,
@@ -154,6 +156,36 @@ describe('health tools', () => {
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toMatch(/Failed to fetch peer info/);
       expect(result.content[0].text).toMatch(/daemon offline/);
+    });
+
+    it('accepts older peer-info payloads without syncStatus', async () => {
+      const client = new FakeClient({
+        getPeerInfo: async () => ({
+          peerId: PEER_A,
+          connected: false,
+          rawConnectionCount: 0,
+          getConnectionsReturnsForPeer: 0,
+          connections: [],
+          peerStore: null,
+          outbox: { pendingCount: 0, oldestFirstFailureAt: null, attempts: [], byProtocol: {} },
+          protocols: [],
+          syncCapable: false,
+          lastSeen: null,
+          latencyMs: null,
+          health: null,
+          connectionCount: 0,
+          transports: [],
+          directions: [],
+          remoteAddrs: [],
+        }),
+      });
+      const localServer = new FakeServer();
+      registerHealthTools(localServer.asMcpServer(), client.asDkgClient(), makeConfig());
+      const result = await localServer.call('dkg_peer_info', { peerId: PEER_A });
+      expect(result.isError).toBeFalsy();
+      const body = result.content[0].text;
+      expect(body).toContain('"syncCapable": false');
+      expect(body).not.toContain('"syncStatus"');
     });
 
     // User review on PR #533: `PeerInfo.remoteAddrs` was typed as
