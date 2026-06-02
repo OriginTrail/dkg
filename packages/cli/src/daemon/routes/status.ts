@@ -654,7 +654,15 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       nodeRole: config.nodeRole ?? "edge",
       networkId: networkId.slice(0, 16),
       networkName: network?.networkName ?? null,
-      storeBackend: config.store?.backend ?? "oxigraph-worker",
+      // `oxigraph-server` is rewritten to `sparql-http` in memory at boot
+      // (see startManagedOxigraph), but operators configured "oxigraph-server"
+      // and need to tell a daemon-managed local store apart from a
+      // user-supplied SPARQL endpoint — so report the logical backend when
+      // the rewrite tagged it managedByDkg.
+      storeBackend:
+        (config.store?.options as Record<string, unknown> | undefined)?.managedByDkg === true
+          ? "oxigraph-server"
+          : config.store?.backend ?? "oxigraph-worker",
       // External backend visibility (RFC 120 / plan PR 1 item 3). For
       // local backends both fields stay null so the response shape is
       // stable across deployments.

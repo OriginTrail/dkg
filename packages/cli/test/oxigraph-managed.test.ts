@@ -86,6 +86,50 @@ describe('planManagedOxigraph', () => {
       directory: '/custom/blobs',
     });
   });
+
+  it('leaves sharedMemoryPublicSnapshotStorage undefined when disabled/absent', () => {
+    expect(
+      planManagedOxigraph({ store: { backend: MANAGED_OXIGRAPH_BACKEND } }, '/data')!
+        .sharedMemoryPublicSnapshotStorage,
+    ).toBeUndefined();
+    expect(
+      planManagedOxigraph(
+        {
+          store: { backend: MANAGED_OXIGRAPH_BACKEND },
+          sharedMemoryPublicSnapshotStorage: { enabled: false },
+        },
+        '/data',
+      )!.sharedMemoryPublicSnapshotStorage,
+    ).toBeUndefined();
+  });
+
+  it('defaults the snapshot dir under the data dir when enabled without one', () => {
+    const plan = planManagedOxigraph(
+      {
+        store: { backend: MANAGED_OXIGRAPH_BACKEND },
+        sharedMemoryPublicSnapshotStorage: { enabled: true },
+      },
+      '/data',
+    );
+    expect(plan!.sharedMemoryPublicSnapshotStorage).toEqual({
+      enabled: true,
+      directory: '/data/swm-public-snapshots',
+    });
+  });
+
+  it('respects an operator-configured snapshot directory', () => {
+    const plan = planManagedOxigraph(
+      {
+        store: { backend: MANAGED_OXIGRAPH_BACKEND },
+        sharedMemoryPublicSnapshotStorage: { enabled: true, directory: '/custom/snaps' },
+      },
+      '/data',
+    );
+    expect(plan!.sharedMemoryPublicSnapshotStorage).toEqual({
+      enabled: true,
+      directory: '/custom/snaps',
+    });
+  });
 });
 
 describe('startManagedOxigraph', () => {

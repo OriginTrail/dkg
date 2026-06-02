@@ -48,6 +48,10 @@ interface ConfigLike {
     thresholdBytes?: number;
     directory?: string;
   };
+  sharedMemoryPublicSnapshotStorage?: {
+    enabled?: boolean;
+    directory?: string;
+  };
 }
 
 export interface ManagedOxigraphPlan {
@@ -73,6 +77,15 @@ export interface ManagedOxigraphPlan {
    * to preserve parity with the local Oxigraph default.
    */
   largeLiteralStorage: { enabled: boolean; thresholdBytes?: number; directory: string };
+  /**
+   * sharedMemoryPublicSnapshotStorage with a defaulted `directory`, set
+   * only when the operator enabled it. Same rewrite hazard as
+   * largeLiteralStorage: the local Oxigraph path infers a directory, but
+   * after rewriting to `sparql-http` a config with `enabled: true` and no
+   * explicit `directory` would fail validateStoreConfig(). Defaulted to
+   * the same `swm-public-snapshots` dir createPublicSnapshotStore() uses.
+   */
+  sharedMemoryPublicSnapshotStorage?: { enabled: boolean; directory: string };
 }
 
 /**
@@ -103,6 +116,19 @@ export function planManagedOxigraph(
     directory: config.largeLiteralStorage?.directory ?? join(dataDir, 'literal-blobs'),
   };
 
+  // Only defaulted when the operator opted in: the feature is disabled by
+  // default, and validateStoreConfig() only requires a directory when
+  // enabled === true. Mirrors createPublicSnapshotStore()'s default dir.
+  const sharedMemoryPublicSnapshotStorage =
+    config.sharedMemoryPublicSnapshotStorage?.enabled === true
+      ? {
+          enabled: true,
+          directory:
+            config.sharedMemoryPublicSnapshotStorage.directory ??
+            join(dataDir, 'swm-public-snapshots'),
+        }
+      : undefined;
+
   return {
     port,
     location,
@@ -114,6 +140,7 @@ export function planManagedOxigraph(
       options: { managedByDkg: true },
     },
     largeLiteralStorage,
+    sharedMemoryPublicSnapshotStorage,
   };
 }
 
@@ -122,6 +149,8 @@ export interface ManagedOxigraphResult {
   /** Drop-in replacement for `config.store`. */
   storeConfig: { backend: 'sparql-http'; options: Record<string, unknown> };
   largeLiteralStorage: { enabled: boolean; thresholdBytes?: number; directory: string };
+  /** Set only when the operator enabled the feature (else leave config as-is). */
+  sharedMemoryPublicSnapshotStorage?: { enabled: boolean; directory: string };
 }
 
 export interface StartManagedOxigraphOptions {
@@ -177,5 +206,6 @@ export async function startManagedOxigraph(
       },
     },
     largeLiteralStorage: plan.largeLiteralStorage,
+    sharedMemoryPublicSnapshotStorage: plan.sharedMemoryPublicSnapshotStorage,
   };
 }

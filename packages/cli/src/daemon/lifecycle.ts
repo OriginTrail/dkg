@@ -883,6 +883,14 @@ export async function runDaemonInner(
       // has none, so a partial operator config (e.g. enabled + threshold,
       // no directory) would otherwise fail exitOnStoreConfigErrors below.
       config.largeLiteralStorage = managed.largeLiteralStorage;
+      // Same rewrite hazard for the (opt-in) public-snapshot store: the
+      // local Oxigraph path infers a directory, the rewritten sparql-http
+      // one can't, so validateStoreConfig() would reject enabled+no-dir.
+      // Only set when the operator enabled it (managed leaves it undefined
+      // otherwise, so a disabled/absent config stays untouched).
+      if (managed.sharedMemoryPublicSnapshotStorage) {
+        config.sharedMemoryPublicSnapshotStorage = managed.sharedMemoryPublicSnapshotStorage;
+      }
       // Every remaining fatal boot path (config validation, store health
       // check, identity mismatch, later failures) calls process.exit(),
       // which bypasses the graceful shutdown hook. Register a synchronous
