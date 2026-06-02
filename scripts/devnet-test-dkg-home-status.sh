@@ -50,7 +50,7 @@ json_get() {
 check_node() {
   local node="$1"
   local home="$DEVNET_DIR/node${node}"
-  local status_json expected_name expected_peer out
+  local status_json expected_name expected_peer stale_node stale_port out
 
   [ -d "$home" ] || fail "missing devnet node home: $home"
   status_json="$(api_status "$node")"
@@ -59,9 +59,12 @@ check_node() {
   [ -n "$expected_name" ] || fail "node${node} /api/status missing name: $status_json"
   [ -n "$expected_peer" ] || fail "node${node} /api/status missing peerId: $status_json"
 
-  # Intentionally unset DKG_API_PORT. PR #878 was about the CLI selecting
-  # the correct node from DKG_HOME's control-plane files.
-  out="$(env -u DKG_API_PORT DKG_HOME="$home" node "$CLI_JS" status 2>&1)"
+  # Intentionally set DKG_API_PORT to the other node. PR #878 was about
+  # stale process-level overrides winning over DKG_HOME's control-plane files.
+  stale_node=1
+  [ "$node" = "1" ] && stale_node=2
+  stale_port=$((API_PORT_BASE + stale_node - 1))
+  out="$(env DKG_API_PORT="$stale_port" DKG_HOME="$home" node "$CLI_JS" status 2>&1)"
   printf '%s\n' "$out" | sed "s/^/[dkg-home-status node${node}] /"
 
   printf '%s\n' "$out" | grep -F "Node:" | grep -F "$expected_name" >/dev/null \

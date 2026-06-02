@@ -45,11 +45,8 @@ export async function listContextGraphs(nodeNum = 1): Promise<DevnetContextGraph
 }
 
 export function pickWritableContextGraph(cgs: DevnetContextGraph[]): DevnetContextGraph | undefined {
-  return (
-    cgs.find((cg) => cg.id === 'devnet-test') ??
-    cgs.find((cg) => !cg.isSystem && cg.synced !== false) ??
-    cgs.find((cg) => !cg.isSystem)
-  );
+  const writable = cgs.filter((cg) => !cg.isSystem && cg.synced !== false);
+  return writable.find((cg) => cg.id === 'devnet-test') ?? writable[0];
 }
 
 export async function createWmAssertion(opts: {

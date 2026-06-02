@@ -218,8 +218,8 @@ wait_for_peer_link() {
     fi
     sleep 1
   done
-  warn "peer-link probe timed out: $label (continuing; SWM write may fail)"
-  return 0
+  warn "peer-link probe timed out: $label"
+  return 1
 }
 
 CURATOR_AGENT=$(api_call "$CURATOR_NODE"      GET /api/agent/identity | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>console.log(JSON.parse(d).agentAddress))')
@@ -574,7 +574,8 @@ done
 # Give cores a beat to wire up the pubsub topic listeners.
 sleep 5
 
-wait_for_peer_link "$CURATOR_NODE" "$MEMBER_PEER"
+wait_for_peer_link "$CURATOR_NODE" "$MEMBER_PEER" \
+  || warn "peer-link probe best-effort for CG_D handshake; fallback catchup will validate delivery"
 
 log "Initial write (1 triple) to drive sender-key handshake to member..."
 D0_PAYLOAD=$(CG_ID="$CG_D" node -e '
@@ -791,7 +792,8 @@ done
 log "Waiting for cores to absorb the ContextGraphCreated chain event + discovery beacon..."
 sleep 8
 
-wait_for_peer_link "$CURATOR_NODE" "$MEMBER_PEER"
+wait_for_peer_link "$CURATOR_NODE" "$MEMBER_PEER" \
+  || warn "peer-link probe best-effort for CG_E handshake; fallback catchup will validate delivery"
 
 log "Handshake write (1 triple) to drive sender-key broadcast to member..."
 E0_PAYLOAD=$(CG_ID="$CG_E" node -e '
