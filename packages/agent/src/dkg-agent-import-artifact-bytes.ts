@@ -4,10 +4,11 @@
  * Imported-artifact byte request subsystem. Kept as a focused mixin so the
  * DKGAgent facade remains aligned with the post-main split architecture.
  */
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { ethers } from 'ethers';
 import {
   PROTOCOL_IMPORTED_ARTIFACT_BYTES,
+  RESPONSE_GONE_MARKER,
   IMPORTED_ARTIFACT_BYTE_KIND_SOURCE,
   IMPORTED_ARTIFACT_BYTE_KIND_ORIGINAL,
   IMPORTED_ARTIFACT_BYTE_KIND_MARKDOWN,
@@ -28,6 +29,7 @@ import type { DKGAgent } from './dkg-agent.js';
 
 const IMPORTED_ARTIFACT_BYTES_REQUEST_TIMEOUT_MS = 5_000;
 const IMPORTED_ARTIFACT_BYTES_MAX_RESPONSE_BYTES = 5 * 1024 * 1024;
+const IMPORTED_ARTIFACT_BYTES_RESPONSE_GONE_MAX_ATTEMPTS = 2;
 const IMPORTED_ARTIFACT_BYTE_KINDS = new Set<string>([
   IMPORTED_ARTIFACT_BYTE_KIND_SOURCE,
   IMPORTED_ARTIFACT_BYTE_KIND_ORIGINAL,
@@ -64,6 +66,10 @@ function normalizeImportedArtifactHash(hash: string): string {
   return /^[0-9a-f]{64}$/.test(lower) ? `sha256:${lower}` : lower;
 }
 
+function sameImportedArtifactHash(left: string, right: string): boolean {
+  return normalizeImportedArtifactHash(left) === normalizeImportedArtifactHash(right);
+}
+
 function validateImportedArtifactHash(hash: string): boolean {
   return /^(?:sha256:|keccak256:)?[0-9a-f]{64}$/i.test(hash.trim());
 }
@@ -80,6 +86,14 @@ function normalizeImportedArtifactBinding(cell: unknown): string {
   const trimmed = cell.replace(/^<|>$/g, '').trim();
   const literal = /^"([^"]*)"/.exec(trimmed);
   return literal ? literal[1] : trimmed;
+}
+
+function isImportedArtifactMarkdownContentType(contentType: string): boolean {
+  return contentType.split(';', 1)[0].trim().toLowerCase() === 'text/markdown';
+}
+
+function isImportedArtifactResponseGone(response: Uint8Array): boolean {
+  return response.byteLength === RESPONSE_GONE_MARKER.length && new TextDecoder().decode(response) === RESPONSE_GONE_MARKER;
 }
 
 function importedArtifactActualHashes(bytes: Uint8Array): string[] {
@@ -108,19 +122,28 @@ export class ImportedArtifactByteMethods extends DKGAgentBase {
     opts: { timeoutMs?: number } = {},
   ): Promise<ImportedArtifactBytesResponseMsg> {
     const payload = encodeImportedArtifactBytesRequest(request);
-    const sendResult = await this.messenger.sendReliable(
-      peerId,
-      PROTOCOL_IMPORTED_ARTIFACT_BYTES,
-      payload,
-      {
-        timeoutMs: opts.timeoutMs ?? IMPORTED_ARTIFACT_BYTES_REQUEST_TIMEOUT_MS,
-        maxAgeMs: opts.timeoutMs ?? IMPORTED_ARTIFACT_BYTES_REQUEST_TIMEOUT_MS,
-      },
-    );
-    if (!sendResult.delivered) {
-      throw new Error(`imported-artifact byte request was queued: ${sendResult.error}`);
+    let responseGoneError: Error | undefined;
+    for (let attempt = 1; attempt <= IMPORTED_ARTIFACT_BYTES_RESPONSE_GONE_MAX_ATTEMPTS; attempt++) {
+      const sendResult = await this.messenger.sendReliable(
+        peerId,
+        PROTOCOL_IMPORTED_ARTIFACT_BYTES,
+        payload,
+        {
+          messageId: randomUUID(),
+          timeoutMs: opts.timeoutMs ?? IMPORTED_ARTIFACT_BYTES_REQUEST_TIMEOUT_MS,
+          maxAgeMs: opts.timeoutMs ?? IMPORTED_ARTIFACT_BYTES_REQUEST_TIMEOUT_MS,
+        },
+      );
+      if (!sendResult.delivered) {
+        throw new Error(`imported-artifact byte request was queued: ${sendResult.error}`);
+      }
+      if (isImportedArtifactResponseGone(sendResult.response)) {
+        responseGoneError = new Error('RESPONSE_GONE: original imported-artifact byte response too large to cache; retrying with fresh messageId');
+        continue;
+      }
+      return decodeImportedArtifactBytesResponse(sendResult.response);
     }
-    return decodeImportedArtifactBytesResponse(sendResult.response);
+    throw responseGoneError ?? new Error('imported-artifact byte request exhausted RESPONSE_GONE retries');
   }
 
   importedArtifactBytesResponse(
@@ -173,19 +196,30 @@ export class ImportedArtifactByteMethods extends DKGAgentBase {
         hashFromImportedArtifactFileUrn(normalizeImportedArtifactBinding(row.sourceFile)),
         normalizeImportedArtifactBinding(row.sourceFileHash),
       ].filter((hash): hash is string => Boolean(hash));
-      if (sourceHashes.some((hash) => normalizeImportedArtifactHash(hash) === requested)) {
-        return {
-          linked: true,
-          contentType: sourceContentType || (
-            request.kind === IMPORTED_ARTIFACT_BYTE_KIND_MARKDOWN ? 'text/markdown' : 'application/octet-stream'
-          ),
-        };
-      }
+      const sourceHashMatches = sourceHashes.some((hash) => sameImportedArtifactHash(hash, requested));
       const markdownHashes = [
         hashFromImportedArtifactFileUrn(normalizeImportedArtifactBinding(row.markdownForm)),
         normalizeImportedArtifactBinding(row.mdIntermediateHash),
       ].filter((hash): hash is string => Boolean(hash));
-      if (markdownHashes.some((hash) => normalizeImportedArtifactHash(hash) === requested)) {
+      const markdownHashMatches = markdownHashes.some((hash) => sameImportedArtifactHash(hash, requested));
+      if (
+        request.kind !== IMPORTED_ARTIFACT_BYTE_KIND_MARKDOWN &&
+        sourceHashMatches
+      ) {
+        return {
+          linked: true,
+          contentType: sourceContentType || 'application/octet-stream',
+        };
+      }
+      if (request.kind === IMPORTED_ARTIFACT_BYTE_KIND_MARKDOWN && markdownHashMatches) {
+        return { linked: true, contentType: 'text/markdown' };
+      }
+      if (
+        request.kind === IMPORTED_ARTIFACT_BYTE_KIND_MARKDOWN &&
+        sourceHashMatches &&
+        isImportedArtifactMarkdownContentType(sourceContentType) &&
+        markdownHashes.length === 0
+      ) {
         return { linked: true, contentType: 'text/markdown' };
       }
     }

@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import {
+  PROTOCOL_IMPORTED_ARTIFACT_BYTES,
+  RESPONSE_GONE_MARKER,
   IMPORTED_ARTIFACT_BYTE_KIND_MARKDOWN,
   IMPORTED_ARTIFACT_BYTE_KIND_ORIGINAL,
   IMPORTED_ARTIFACT_BYTE_KIND_SOURCE,
@@ -9,6 +11,7 @@ import {
   contextGraphAssertionUri,
   decodeImportedArtifactBytesResponse,
   encodeImportedArtifactBytesRequest,
+  encodeImportedArtifactBytesResponse,
   type ImportedArtifactBytesRequestMsg,
 } from '@origintrail-official/dkg-core';
 import { DKGAgent } from '../src/dkg-agent.js';
@@ -128,6 +131,69 @@ describe('DKGAgent imported-artifact byte receiver', () => {
     expect(new TextDecoder().decode(response.bytes)).toBe('# Imported\n');
   });
 
+  it('allows markdown requests for markdown-native imports where the source hash is the markdown hash', async () => {
+    const markdownBytes = new TextEncoder().encode('# Native Markdown\n');
+    const sourceHash = keccakHash(markdownBytes);
+    const agent = makeAgent({
+      sourceHash,
+      bytes: markdownBytes,
+      contentType: 'Text/Markdown; charset=utf-8',
+    });
+
+    const response = await requestBytes(agent, makeRequest({
+      hash: sourceHash,
+      kind: IMPORTED_ARTIFACT_BYTE_KIND_MARKDOWN,
+    }));
+
+    expect(response.status).toBe(IMPORTED_ARTIFACT_BYTES_RESPONSE_STATUS.ALLOW);
+    expect(response.contentType).toBe('text/markdown');
+    expect(new TextDecoder().decode(response.bytes)).toBe('# Native Markdown\n');
+  });
+
+  it('denies markdown requests that present a non-markdown source hash', async () => {
+    const sourceBytes = new Uint8Array([0x25, 0x50, 0x44, 0x46]);
+    const markdownBytes = new TextEncoder().encode('# Converted\n');
+    const sourceHash = keccakHash(sourceBytes);
+    const markdownHash = keccakHash(markdownBytes);
+    const agent = makeAgent({
+      sourceHash,
+      markdownHash,
+      bytes: sourceBytes,
+      contentType: 'application/pdf',
+    });
+
+    const response = await requestBytes(agent, makeRequest({
+      hash: sourceHash,
+      kind: IMPORTED_ARTIFACT_BYTE_KIND_MARKDOWN,
+    }));
+
+    expect(response.status).toBe(IMPORTED_ARTIFACT_BYTES_RESPONSE_STATUS.DENY);
+    expect(response.reason).toMatch(/not linked/);
+    expect((agent as any).importedArtifactByteStore.get).not.toHaveBeenCalled();
+  });
+
+  it('denies source requests that present the markdown intermediate hash', async () => {
+    const sourceBytes = new Uint8Array([0x25, 0x50, 0x44, 0x46]);
+    const markdownBytes = new TextEncoder().encode('# Converted\n');
+    const sourceHash = keccakHash(sourceBytes);
+    const markdownHash = keccakHash(markdownBytes);
+    const agent = makeAgent({
+      sourceHash,
+      markdownHash,
+      bytes: markdownBytes,
+      contentType: 'application/pdf',
+    });
+
+    const response = await requestBytes(agent, makeRequest({
+      hash: markdownHash,
+      kind: IMPORTED_ARTIFACT_BYTE_KIND_SOURCE,
+    }));
+
+    expect(response.status).toBe(IMPORTED_ARTIFACT_BYTES_RESPONSE_STATUS.DENY);
+    expect(response.reason).toMatch(/not linked/);
+    expect((agent as any).importedArtifactByteStore.get).not.toHaveBeenCalled();
+  });
+
   it('denies source bytes when the CG policy is not public + open', async () => {
     const bytes = new Uint8Array([1, 2, 3]);
     const sourceHash = keccakHash(bytes);
@@ -178,5 +244,58 @@ describe('DKGAgent imported-artifact byte receiver', () => {
     expect(response.status).toBe(IMPORTED_ARTIFACT_BYTES_RESPONSE_STATUS.ALLOW);
     expect(response.contentType).toBe('text/plain');
     expect(new Uint8Array(response.bytes)).toEqual(bytes);
+  });
+});
+
+describe('DKGAgent imported-artifact byte requester', () => {
+  it('retries RESPONSE_GONE with a fresh messenger messageId and decodes the next response', async () => {
+    const bytes = new TextEncoder().encode('# Retried\n');
+    const request = makeRequest({
+      hash: keccakHash(bytes),
+      kind: IMPORTED_ARTIFACT_BYTE_KIND_MARKDOWN,
+    });
+    const responsePayload = encodeImportedArtifactBytesResponse({
+      status: IMPORTED_ARTIFACT_BYTES_RESPONSE_STATUS.ALLOW,
+      hash: request.hash,
+      kind: request.kind,
+      bytes,
+      contentType: 'text/markdown',
+      size: bytes.length,
+    });
+    const sendReliable = vi.fn()
+      .mockResolvedValueOnce({
+        delivered: true,
+        response: new TextEncoder().encode(RESPONSE_GONE_MARKER),
+        attempts: 1,
+        messageId: 'stale',
+      })
+      .mockResolvedValueOnce({
+        delivered: true,
+        response: responsePayload,
+        attempts: 1,
+        messageId: 'fresh',
+      });
+    const agent = Object.assign(Object.create(DKGAgent.prototype), {
+      messenger: { sendReliable },
+    });
+
+    const response = await (agent as any).requestImportedArtifactBytesFromPeer(
+      'peer-origin',
+      request,
+      { timeoutMs: 1234 },
+    );
+
+    expect(response.status).toBe(IMPORTED_ARTIFACT_BYTES_RESPONSE_STATUS.ALLOW);
+    expect(new TextDecoder().decode(response.bytes)).toBe('# Retried\n');
+    expect(sendReliable).toHaveBeenCalledTimes(2);
+    expect(sendReliable.mock.calls[0][1]).toBe(PROTOCOL_IMPORTED_ARTIFACT_BYTES);
+    expect(sendReliable.mock.calls[1][1]).toBe(PROTOCOL_IMPORTED_ARTIFACT_BYTES);
+    const firstOpts = sendReliable.mock.calls[0][3];
+    const secondOpts = sendReliable.mock.calls[1][3];
+    expect(firstOpts).toMatchObject({ timeoutMs: 1234, maxAgeMs: 1234 });
+    expect(secondOpts).toMatchObject({ timeoutMs: 1234, maxAgeMs: 1234 });
+    expect(firstOpts.messageId).toEqual(expect.any(String));
+    expect(secondOpts.messageId).toEqual(expect.any(String));
+    expect(secondOpts.messageId).not.toBe(firstOpts.messageId);
   });
 });
