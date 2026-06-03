@@ -36,8 +36,8 @@ the `_shared_memory` graph — not canned responses.
 
 ## Metrics recorded (every metric is "higher is worse")
 
-- **Time** — per-scenario `durationMs` (`min`/`max`/`mean`/`median`/`p95`/`stddev`) and `perItemMsMean` for the multi-item scenarios. The build gates on `median`/`mean`; `p95` is informational (see "How regression flagging stays robust").
-- **Memory** — `peakRssBytes` and `peakHeapUsedBytes` (high-water marks, sampled every 100ms), plus post-GC `finalHeapUsedBytes`. (Final RSS is recorded for info but excluded from regression comparison because it doesn't shrink predictably.)
+- **Time** — per-scenario `durationMs` (`min`/`max`/`mean`/`median`/`p95`/`stddev`) and `perItemMsMean` for the multi-item scenarios. The build gates on the robust **`median`**; `mean`/`p95` are informational (see "How regression flagging stays robust").
+- **Memory** — `peakHeapUsedBytes` and post-GC `finalHeapUsedBytes` are the gating memory signals (stable to ~1% run-to-run). `peakRssBytes` is recorded and shown but **informational only** — whole-process resident memory swings ~90MB on a single GC cycle, so gating on it false-flags. (`finalRssBytes` is recorded but excluded entirely; RSS doesn't shrink predictably.)
 - **Disk / space** — each node's on-disk data-dir size (`dataDirBytes`), and the receiver's synced SWM triple count (`storeQuads`) per scenario.
 
 ## Run it
@@ -101,13 +101,24 @@ that:
 3. **Baseline warmup** — with a rolling reference and fewer than
    `BENCH_REGRESSION_MIN_SAMPLES` (default 3) historical runs, deltas are reported
    but the run is **not failed**, so the baseline "learns" before enforcing.
-4. **Tail metrics are informational, not gating** — `p95` (and `max`/`stddev`)
-   are shown with a `📊` marker but **never fail the build**. At the default
-   sample counts (5 latency, 3 catch-up) `p95` equals the single worst sample, so
-   gating on it would false-flag on any one slow iteration. The build gates on
-   the robust **`median`** and **`mean`** plus memory/disk/quad counts. If you
-   want statistically meaningful tail gating, raise `--iterations` to ~20+ (then
-   `p95` stops being the max) — it stays informational regardless, by design.
+4. **Noisy metrics are informational, not gating** — they're shown with a `📊`
+   marker but **never fail the build**, because they're too jittery run-to-run to
+   gate on (verified across repeated runs on an unpinned machine):
+   - `p95` / `max` / `stddev` — at the default sample counts (5 latency, 3
+     catch-up) `p95` equals the single worst sample, so one slow iteration trips
+     it.
+   - `mean` — pulled by a single slow iteration at low N (observed +15% from one
+     outlier while the median stayed flat).
+   - `peakRssBytes` — whole-process resident-memory high-water mark; a single GC
+     cycle swings it ~90MB.
+
+   The build gates on the **stable** signals: **`median`** latency, **heap**
+   memory (`peakHeapUsedBytes` + post-GC `finalHeapUsedBytes`, steady to ~1%),
+   **disk**, and **record counts** (deterministic). This still satisfies "flag a
+   15% memory increase" — a real memory regression shows up in the heap, which is
+   stable enough to detect it; RSS is not. Raise `--iterations` to ~20+ if you
+   want statistically meaningful `mean`/`p95` gating (they stay informational
+   regardless, by design).
 
 A pinned `baseline.json` always enforces immediately (no warmup).
 
@@ -127,9 +138,12 @@ regression flagged · `2` = the benchmark failed to run.
   very stable (~7s, low variance) and great for catching *breakage or a step
   change in the connect→sync path* — but `perItemMsMean` here is a derived
   convenience, not a true per-item transfer rate. Treat the median as the signal.
-- **`process.peakRssBytes` / `peakHeapUsedBytes`** — high-water mark of the whole
-  benchmark process (both agents + harness), a relative day-over-day signal, not
-  an absolute per-node memory number.
+- **Memory** — `peakHeapUsedBytes` / `finalHeapUsedBytes` (post-GC heap) are the
+  gating signals and are stable to ~1% run-to-run, so a genuine memory regression
+  is visible. `peakRssBytes` is the whole-process resident high-water mark — shown
+  for context but informational, because it swings ~90MB on GC timing alone. All
+  are for the whole benchmark process (both agents + harness), so treat them as a
+  relative day-over-day signal, not an absolute per-node number.
 
 ## Running on Jenkins / CI
 

@@ -93,13 +93,33 @@ export interface Comparison {
 }
 
 /**
- * Metrics that are shown in the report but excluded from build-failing.
- * `p95` only becomes a meaningful percentile at ~20+ iterations; below that it
- * equals the max sample and false-flags constantly on shared CI runners. Raise
- * `--iterations` to 20+ if you want statistically meaningful tail gating.
+ * Metrics that are shown in the report but excluded from build-failing, because
+ * they are too noisy run-to-run to gate on (verified empirically across repeated
+ * runs on an unpinned machine):
+ *
+ *   - `*.durationMs.p95` / `.max` / `.stddev` — tail/spread stats. At the default
+ *     sample counts (5 latency, 3 catch-up) `p95` equals the single worst sample,
+ *     so one slow iteration false-flags. Gate on `median` instead.
+ *   - `*.durationMs.mean` — the arithmetic mean is pulled by a single slow
+ *     iteration at low N (we saw +15% from one outlier while the median stayed
+ *     flat). The median is the robust latency gate.
+ *   - `process.peakRssBytes` — whole-process resident-memory high-water mark;
+ *     a single GC cycle swings it ~90MB run-to-run. The real "did the code start
+ *     holding more memory" signal is the post-GC heap (`peakHeapUsedBytes` /
+ *     `finalHeapUsedBytes`), which is stable to ~1% — those DO gate.
+ *
+ * Net: the build gates on the stable signals (median latency, heap memory, disk,
+ * record counts); the noisy ones stay visible but never fail CI. Raise
+ * `--iterations` to ~20+ if you want statistically meaningful tail/mean gating.
  */
 export function isInformationalMetric(metric: string): boolean {
-  return metric.endsWith('.p95') || metric.endsWith('.max') || metric.endsWith('.stddev');
+  return (
+    metric.endsWith('.durationMs.p95') ||
+    metric.endsWith('.durationMs.mean') ||
+    metric.endsWith('.max') ||
+    metric.endsWith('.stddev') ||
+    metric.endsWith('process.peakRssBytes')
+  );
 }
 
 export interface ReferenceMetrics {
@@ -336,7 +356,7 @@ function renderRow(label: string, c: Comparison | undefined): string {
   } else if (c.informational && c.direction === 'regression') {
     arrow = style.yellow(arrowChar);
     deltaCol = style.yellow(delta);
-    status = style.dim('tail spike · ignored');
+    status = style.dim('noisy · ignored');
   } else if (c.direction === 'improvement') {
     arrow = style.green(arrowChar);
     deltaCol = style.green(delta);
