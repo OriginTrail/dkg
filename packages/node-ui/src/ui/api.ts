@@ -829,10 +829,12 @@ export async function listAssertions(
   // under `<cg>/meta/assertion/<addr>/<name>`, so a bare `memoryLayer "WM"`
   // join scoops them in alongside real user knowledge. Since this listing
   // feeds the assertions table + bulk-promote, those UI-config drafts would
-  // otherwise be promotable into SWM. Mirror the meta-exclusion policy
-  // `useMemoryEntities.wmSparql` already enforces (`STR(?g) != "<cg>/meta"`,
-  // `!CONTAINS("/meta/")`, `!STRENDS("/_meta")`).
-  const metaFilter = `FILTER(STR(?g) != "${cgPrefix}meta" && !CONTAINS(STR(?g), "/meta/") && !STRENDS(STR(?g), "/_meta"))`;
+  // otherwise be promotable into SWM. Match the reserved bucket by its path
+  // SHAPE (`/meta/assertion/`) rather than a `/_meta` suffix: a raw suffix
+  // match would also drop a perfectly valid WM assertion whose *name* is
+  // `_meta` (names may start with `_`). The parser below keys on the parsed
+  // sub-graph segment (`=== 'meta'`), which is fully name-safe.
+  const metaFilter = `FILTER(!CONTAINS(STR(?g), "/meta/assertion/"))`;
   const listSparql = `SELECT ?g WHERE {
     GRAPH <${metaGraph}> { ?g <http://dkg.io/ontology/memoryLayer> "WM" }
     ${metaFilter}

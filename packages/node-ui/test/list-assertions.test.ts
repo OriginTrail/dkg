@@ -233,13 +233,28 @@ describe('listAssertions (WM) — URI parse + cg-scoped filter', () => {
     expect(out[0].name).toBe('notes');
   });
 
-  it('SPARQL excludes the meta namespace in both the list and count queries (Codex #944)', async () => {
+  it('SPARQL excludes the meta namespace by path shape in both queries (Codex #944)', async () => {
     setBindings([bRow('did:dkg:context-graph:cg-A/assertion/0xabc/notes', 5)]);
     await listAssertions('cg-A', 'wm');
     const [, listInit] = fetchMock.mock.calls[0] as [string, RequestInit];
     const [, countInit] = fetchMock.mock.calls[1] as [string, RequestInit];
-    expect(JSON.parse(String(listInit.body)).sparql).toContain('!CONTAINS(STR(?g), "/meta/")');
-    expect(JSON.parse(String(countInit.body)).sparql).toContain('!CONTAINS(STR(?g), "/meta/")');
+    // Path-shape match, not a `/_meta` suffix (which would drop assertions
+    // named `_meta`).
+    expect(JSON.parse(String(listInit.body)).sparql).toContain('!CONTAINS(STR(?g), "/meta/assertion/")');
+    expect(JSON.parse(String(countInit.body)).sparql).toContain('!CONTAINS(STR(?g), "/meta/assertion/")');
+    expect(JSON.parse(String(listInit.body)).sparql).not.toContain('STRENDS(STR(?g), "/_meta")');
+  });
+
+  it('keeps a WM assertion whose name is "_meta" (Codex #944 — no /_meta suffix match)', async () => {
+    // Assertion names may start with `_`, so `<cg>/assertion/<addr>/_meta` is a
+    // valid root WM assertion. The reserved-meta exclusion must be by sub-graph
+    // shape, not a `/_meta` suffix, or this draft becomes impossible to promote.
+    setBindings([
+      bRow('did:dkg:context-graph:cg-A/assertion/0xabc/_meta', 2),
+    ]);
+    const out = await listAssertions('cg-A', 'wm');
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ name: '_meta', subGraph: undefined });
   });
 
   it('still lists WM assertions when the (best-effort) count query fails', async () => {

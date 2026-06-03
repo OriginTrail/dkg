@@ -129,10 +129,10 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
       //     authority `listWmAssertions` uses) and read only those graphs.
       //  3. Exclude the reserved `meta` namespace (`<cg>/meta/assertion/…`
       //     profile/query-catalog drafts are WM-marked but are UI config, not
-      //     user knowledge), mirroring `listWmAssertions` + the
-      //     `useMemoryEntities.wmSparql` meta-exclusion policy.
-      const cgPrefix = `did:dkg:context-graph:${contextGraphId}/`;
-      return `SELECT ?s ?p ?o WHERE { GRAPH <${metaGraph}> { ?g <http://dkg.io/ontology/memoryLayer> "WM" } GRAPH ?g { ?s ?p ?o } FILTER(STR(?g) != "${cgPrefix}meta" && !CONTAINS(STR(?g), "/meta/") && !STRENDS(STR(?g), "/_meta")) } LIMIT 1000`;
+      //     user knowledge), mirroring `listWmAssertions`. Match the bucket by
+      //     its path SHAPE (`/meta/assertion/`), not a `/_meta` suffix, so a
+      //     valid WM assertion named `_meta` isn't dropped.
+      return `SELECT ?s ?p ?o WHERE { GRAPH <${metaGraph}> { ?g <http://dkg.io/ontology/memoryLayer> "WM" } GRAPH ?g { ?s ?p ?o } FILTER(!CONTAINS(STR(?g), "/meta/assertion/")) } LIMIT 1000`;
     }
     if (layer === 'vm') {
       return buildVerifiedMemorySearchQuery({

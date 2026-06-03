@@ -477,10 +477,12 @@ describe('memory layer custom query execution', () => {
     //     `GRAPH ?g` typed into the WM tab could enumerate SWM/VM/meta
     //     partitions and escape the WM scope.
     expect(memoryLayerView).toContain("layer === 'wm' && sparql === defaultSparql");
-    //  4. Exclude the reserved `meta` namespace (profile/query-catalog drafts
-    //     are WM-marked but are UI config, not user knowledge), mirroring the
-    //     listWmAssertions + useMemoryEntities meta-exclusion policy.
-    expect(memoryLayerView).toContain('!CONTAINS(STR(?g), "/meta/")');
+    //  4. Exclude the reserved `meta` namespace by path SHAPE (the profile /
+    //     query-catalog drafts live at `<cg>/meta/assertion/…`). Must match the
+    //     `/meta/assertion/` bucket, NOT a `/_meta` suffix — the latter would
+    //     also drop a valid WM assertion whose name is `_meta`.
+    expect(memoryLayerView).toContain('!CONTAINS(STR(?g), "/meta/assertion/")');
+    expect(memoryLayerView).not.toContain('STRENDS(STR(?g), "/_meta")');
   });
 });
 
