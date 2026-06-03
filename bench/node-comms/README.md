@@ -36,7 +36,7 @@ the `_shared_memory` graph — not canned responses.
 
 ## Metrics recorded (every metric is "higher is worse")
 
-- **Time** — per-scenario `durationMs` (`min`/`max`/`mean`/`median`/`p95`/`stddev`) and `perItemMsMean` for the multi-item scenarios.
+- **Time** — per-scenario `durationMs` (`min`/`max`/`mean`/`median`/`p95`/`stddev`) and `perItemMsMean` for the multi-item scenarios. The build gates on `median`/`mean`; `p95` is informational (see "How regression flagging stays robust").
 - **Memory** — `peakRssBytes` and `peakHeapUsedBytes` (high-water marks, sampled every 100ms), plus post-GC `finalHeapUsedBytes`. (Final RSS is recorded for info but excluded from regression comparison because it doesn't shrink predictably.)
 - **Disk / space** — each node's on-disk data-dir size (`dataDirBytes`), and the receiver's synced SWM triple count (`storeQuads`) per scenario.
 
@@ -87,7 +87,7 @@ the npm script) makes the heap numbers stable.
 ## How regression flagging stays robust
 
 Microbenchmarks jitter run-to-run, so a naive "compare to previous run, flag at
-15%" would false-alarm constantly on sub-10ms latencies. Three guards prevent
+15%" would false-alarm constantly on sub-10ms latencies. Four guards prevent
 that:
 
 1. **Rolling-median baseline** — with no pinned `baseline.json`, the reference is
@@ -101,11 +101,71 @@ that:
 3. **Baseline warmup** — with a rolling reference and fewer than
    `BENCH_REGRESSION_MIN_SAMPLES` (default 3) historical runs, deltas are reported
    but the run is **not failed**, so the baseline "learns" before enforcing.
+4. **Tail metrics are informational, not gating** — `p95` (and `max`/`stddev`)
+   are shown with a `📊` marker but **never fail the build**. At the default
+   sample counts (5 latency, 3 catch-up) `p95` equals the single worst sample, so
+   gating on it would false-flag on any one slow iteration. The build gates on
+   the robust **`median`** and **`mean`** plus memory/disk/quad counts. If you
+   want statistically meaningful tail gating, raise `--iterations` to ~20+ (then
+   `p95` stops being the max) — it stays informational regardless, by design.
 
 A pinned `baseline.json` always enforces immediately (no warmup).
 
 **Exit codes:** `0` = clean / warming up / baseline run · `1` = enforced
 regression flagged · `2` = the benchmark failed to run.
+
+### What each metric tells you (and what it doesn't)
+
+- **`swm_gossip_propagation_single` / `_bulk`** — real live-gossip latency. The
+  single-item median is single-digit ms, so only the `median`/`mean` are gated
+  and only above the 15ms floor; smaller drifts are below the noise floor by
+  design and won't flag.
+- **`swm_catchup_on_connect`** — measures the *end-to-end* time from `connectTo`
+  until a late joiner has pulled all N entities: libp2p dial + identify +
+  protocol check + the sync-on-connect trigger + transfer. It is dominated by the
+  fixed connect/handshake/trigger cost, **not** raw transfer throughput, so it's
+  very stable (~7s, low variance) and great for catching *breakage or a step
+  change in the connect→sync path* — but `perItemMsMean` here is a derived
+  convenience, not a true per-item transfer rate. Treat the median as the signal.
+- **`process.peakRssBytes` / `peakHeapUsedBytes`** — high-water mark of the whole
+  benchmark process (both agents + harness), a relative day-over-day signal, not
+  an absolute per-node memory number.
+
+## Running on Jenkins / CI
+
+The regression logic depends on **state that must survive between builds**. A
+plain Jenkins job starts from a clean checkout, and `bench/results/` is
+git-ignored, so without care every build re-establishes a fresh baseline and
+**never flags anything**. Pick one of:
+
+1. **Archive + restore the results dir (recommended).** Restore the previous
+   `bench/results/node-comms/` (at least `history.ndjson`) before the run and
+   archive it after, so the rolling median accumulates across builds:
+   ```groovy
+   // Jenkins (declarative) sketch
+   copyArtifacts(projectName: env.JOB_NAME, selector: lastSuccessful(), optional: true)
+   sh 'pnpm bench:node-comms:daily'        // exits 1 on a gated regression → red build
+   archiveArtifacts artifacts: 'bench/results/node-comms/**', fingerprint: true
+   ```
+2. **Pin a baseline.** Run `pnpm bench:node-comms:baseline` once on a
+   representative machine, commit/store the resulting `baseline.json`, and restore
+   it into `bench/results/node-comms/` before each build. A pinned baseline
+   enforces immediately (no warmup) and is the most reproducible option, but
+   you must re-pin intentionally when legitimate perf changes land.
+
+Other CI notes:
+
+- **Use a dedicated/consistent runner.** Latency metrics are sensitive to host
+  load; comparing across heterogeneous runners inflates variance. Pin the job to
+  one labeled agent if you can.
+- **Consider raising `BENCH_NODE_COMMS_ITERATIONS`** (e.g. 10–20) on CI for a
+  steadier median; the run cost scales roughly linearly.
+- **Exit code is the gate.** `1` = a gated regression (median/mean/memory/disk) —
+  fail the build. `2` = the benchmark itself failed (e.g. a sync timeout) — also
+  fail, but it's an infra/correctness signal, not a perf regression. `📊`
+  informational lines never affect the exit code.
+- **First 2 builds after a history reset are report-only** (warmup). Don't be
+  surprised that they never go red; the 3rd+ enforces.
 
 ## Daily scheduling
 

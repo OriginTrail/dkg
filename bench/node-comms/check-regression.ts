@@ -73,6 +73,24 @@ export interface Comparison {
   absDelta: number;
   direction: 'regression' | 'improvement' | 'stable' | 'new';
   flagged: boolean;
+  /**
+   * Reported but never gates the build. Tail/spread statistics (`p95`) are
+   * informational because at the default sample counts (5 latency, 3 catch-up)
+   * `p95` is just the single worst sample — too noisy to fail CI on. They still
+   * show in the report so a real tail-latency drift is visible; gate on the
+   * robust `median`/`mean` instead. See `isInformationalMetric`.
+   */
+  informational: boolean;
+}
+
+/**
+ * Metrics that are shown in the report but excluded from build-failing.
+ * `p95` only becomes a meaningful percentile at ~20+ iterations; below that it
+ * equals the max sample and false-flags constantly on shared CI runners. Raise
+ * `--iterations` to 20+ if you want statistically meaningful tail gating.
+ */
+export function isInformationalMetric(metric: string): boolean {
+  return metric.endsWith('.p95') || metric.endsWith('.max') || metric.endsWith('.stddev');
 }
 
 export interface ReferenceMetrics {
@@ -93,6 +111,8 @@ export interface RegressionReport {
   comparisons: Comparison[];
   flagged: Comparison[];
   improvements: Comparison[];
+  /** Informational (non-gating) metrics that crossed the threshold — reported, not failed. */
+  informationalOverThreshold: Comparison[];
   regressionCount: number;
   shouldFail: boolean;
 }
@@ -109,10 +129,11 @@ export function compareMetrics(
 ): Comparison[] {
   const comparisons: Comparison[] = [];
   for (const [metric, currentValue] of Object.entries(current)) {
+    const informational = isInformationalMetric(metric);
     if (!(metric in reference)) {
       comparisons.push({
         metric, reference: Number.NaN, current: currentValue, deltaPct: null,
-        absDelta: Number.NaN, direction: 'new', flagged: false,
+        absDelta: Number.NaN, direction: 'new', flagged: false, informational,
       });
       continue;
     }
@@ -126,16 +147,18 @@ export function compareMetrics(
     }
 
     const floor = minAbsDeltaFor(metric, minDelta);
+    const movedEnough = Math.abs(absDelta) >= floor;
     let direction: Comparison['direction'] = 'stable';
     let flagged = false;
-    if (deltaPct > thresholdPct && Math.abs(absDelta) >= floor) {
+    if (deltaPct > thresholdPct && movedEnough) {
       direction = 'regression';
-      flagged = true;
-    } else if (deltaPct < -thresholdPct && Math.abs(absDelta) >= floor) {
+      // Informational metrics show their regression direction but never gate.
+      flagged = !informational;
+    } else if (deltaPct < -thresholdPct && movedEnough) {
       direction = 'improvement';
     }
 
-    comparisons.push({ metric, reference: referenceValue, current: currentValue, deltaPct, absDelta, direction, flagged });
+    comparisons.push({ metric, reference: referenceValue, current: currentValue, deltaPct, absDelta, direction, flagged, informational });
   }
   return comparisons.sort((a, b) => (b.deltaPct ?? -Infinity) - (a.deltaPct ?? -Infinity));
 }
@@ -245,8 +268,17 @@ export function renderReport(report: RegressionReport): string {
   }
   lines.push('───────────────────────────────────────────────────────────────────');
   for (const c of report.comparisons) {
-    const marker = c.flagged ? '🚩' : c.direction === 'improvement' ? '✅' : c.direction === 'new' ? '🆕' : '  ';
-    lines.push(`  ${marker} ${c.metric.padEnd(52)} ${deltaLabel(c).padStart(9)}`);
+    const marker = c.flagged
+      ? '🚩'
+      : c.informational && c.direction === 'regression'
+        ? '📊' // over threshold but non-gating (tail/spread stat)
+        : c.direction === 'improvement'
+          ? '✅'
+          : c.direction === 'new'
+            ? '🆕'
+            : '  ';
+    const label = c.informational ? `${c.metric} (info)` : c.metric;
+    lines.push(`  ${marker} ${label.padEnd(52)} ${deltaLabel(c).padStart(9)}`);
     if (c.direction !== 'new') {
       lines.push(`        ${fmt(c.metric, c.reference)}  →  ${fmt(c.metric, c.current)}`);
     } else {
@@ -260,6 +292,12 @@ export function renderReport(report: RegressionReport): string {
     lines.push(`  ⚠️  ${report.regressionCount} metric(s) above +${report.thresholdPct}% — NOT failing (baseline warming up).`);
   } else {
     lines.push(`  🚩 ${report.regressionCount} regression(s) above +${report.thresholdPct}% — FLAGGED.`);
+  }
+  if (report.informationalOverThreshold.length > 0) {
+    lines.push(`  📊 ${report.informationalOverThreshold.length} informational metric(s) above +${report.thresholdPct}% (tail/spread — not gating):`);
+    for (const c of report.informationalOverThreshold) {
+      lines.push(`     - ${c.metric}: ${fmt(c.metric, c.reference)} → ${fmt(c.metric, c.current)} (${deltaLabel(c).trim()})`);
+    }
   }
   for (const c of report.flagged) {
     lines.push(`     - ${c.metric}: ${fmt(c.metric, c.reference)} → ${fmt(c.metric, c.current)} (${deltaLabel(c).trim()})`);
@@ -292,6 +330,7 @@ export async function runRegressionCheck(options: {
   const comparisons = reference ? compareMetrics(current, reference.metrics, thresholdPct, minDelta) : [];
   const flagged = comparisons.filter((c) => c.flagged);
   const improvements = comparisons.filter((c) => c.direction === 'improvement');
+  const informationalOverThreshold = comparisons.filter((c) => c.informational && c.direction === 'regression');
 
   // A pinned baseline file always enforces. A rolling-median reference only
   // enforces once enough runs exist to be statistically meaningful.
@@ -310,6 +349,7 @@ export async function runRegressionCheck(options: {
     comparisons,
     flagged,
     improvements,
+    informationalOverThreshold,
     regressionCount: flagged.length,
     shouldFail: enforced && flagged.length > 0,
   };
