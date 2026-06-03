@@ -4,6 +4,11 @@ All notable changes to the DKG V9 node are documented here. The format is based 
 
 ## [Unreleased]
 
+### Fixed — `dkg init` on monorepo checkouts + oxigraph-server default for adapter/MCP setups (#960)
+
+- **`dkg init` runs from a monorepo / checkout clone again** (`packages/cli/src/cli.ts`). PR #753 (RFC-41 Bundle B1c) hard-refused `dkg init` from a monorepo checkout; that was over-strict — the CLI's home resolver (`dkgDir()` → `resolveDkgConfigHome`) already routes a clone to `~/.dkg-dev` (kept separate from an npm install's `~/.dkg`), the same home the local dev daemon resolves, so there was no real risk of divergence. The hard refusal (and its non-functional `DKG_HOME` escape) is replaced by a one-line notice showing which home is being written. Restores the pre-#753 dev workflow: a clone runs `dkg init` exactly like an npm install, differing only in the home directory.
+- **OpenClaw / Hermes / MCP setups now seed the `oxigraph-server` default on a fresh node** (`packages/core/src/ensure-dkg-node-config.ts`). The rc.15 `oxigraph-server` default previously reached only nodes set up via the `dkg init` store-wizard; the shared `ensureDkgNodeConfig` helper (used by `dkg openclaw/hermes/mcp setup`) left `store` unset, so those nodes fell back to `oxigraph-worker`. It now adopts `oxigraph-server` on a **fresh** install (no existing config) with no explicit store — matching the wizard default — while never rewriting an existing node's backend (which would force a store reset) and preserving any explicit `store` block.
+
 ## [10.0.0-rc.15] - 2026-06-03
 
 **Off-chain runtime release.** No Solidity changes since rc.13 — the Base Sepolia (chainId 84532) deployment is **unchanged**, the `chainResetMarker` stays `v10-rc12-ka-rename-2026-06-01`, and **no contract redeploy is required**. The sync protocol ID is **unchanged** (`/dkg/10.0.2/sync`), so rc.15 nodes interoperate with rc.14 peers — nodes upgrade in place with **no local-state wipe**. This release makes `oxigraph-server` the default store backend for **new** installs, fixes the Node UI Working-Memory scoped-query violation (and the SWM/VM bleed + reserved-meta false-positives it surfaced), reclaims the `node-ui.db` WAL on a running node, splits the `DKGAgent` god class into subsystem mixin holders, and lands typed publisher errors plus CI/bench hardening.

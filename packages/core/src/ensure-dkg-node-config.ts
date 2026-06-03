@@ -30,7 +30,7 @@
  * user-visible output is unchanged from pre-extraction.
  */
 
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveDkgConfigHome } from './dkg-home.js';
@@ -106,6 +106,9 @@ export function ensureDkgNodeConfig(opts: EnsureDkgNodeConfigOptions): void {
 
   const dir = dkgDir();
   const configPath = join(dir, 'config.json');
+  // A pre-existing config gates the store-default seeding below (issue #960):
+  // we only adopt the new default on a genuinely fresh install.
+  const configExisted = existsSync(configPath);
   mkdirSync(dir, { recursive: true });
 
   // Explicit CLI overrides (--name, --port) take precedence over existing
@@ -150,6 +153,18 @@ export function ensureDkgNodeConfig(opts: EnsureDkgNodeConfigOptions): void {
   // running.
   if (!existing.autoUpdate && network.autoUpdate?.enabled !== undefined) {
     config.autoUpdate = { enabled: network.autoUpdate.enabled };
+  }
+
+  // issue #960: on a FRESH install (no config yet) with no explicit store
+  // backend, adopt the `oxigraph-server` default — the same recommended choice
+  // the `dkg init` store-wizard offers — so the OpenClaw / Hermes / MCP setups
+  // (and any other caller of this helper) bootstrap a node with MVCC concurrent
+  // reads out of the box, matching a wizard-driven install. We seed ONLY on a
+  // fresh config: an existing node is never rewritten onto a new backend here
+  // (that would force a store reset on its next boot), and an explicit existing
+  // `store` block is preserved by the `...existing` spread above.
+  if (!configExisted && config.store === undefined) {
+    config.store = { backend: 'oxigraph-server' };
   }
 
   writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');

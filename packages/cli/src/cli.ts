@@ -599,34 +599,21 @@ program
     'Pre-fill the SPARQL endpoint URL prompt for external backends.',
   )
   .action(async (opts: ActionOpts) => {
-    // OT-RFC-41 Bundle B1c: monorepo guard. `dkg init` from a
-    // contributor checkout is almost always a mistake — the
-    // monorepo dev workflow is `pnpm dev` against the local CLI,
-    // not a globally-installed config. Surface this loudly so
-    // contributors don't accidentally write an Edge-style
-    // ~/.dkg/config.json that then disagrees with the binary on
-    // their $PATH.
+    // OT-RFC-41 follow-up (issue #960): `dkg init` runs normally from a monorepo
+    // checkout, exactly like an npm install — the only difference is the home
+    // directory. The CLI's home resolver (`dkgDir()` → `resolveDkgConfigHome`)
+    // already routes a clone to `~/.dkg-dev` (kept separate from an npm
+    // install's `~/.dkg`), which is the SAME home the local dev daemon resolves
+    // — so init writes the dev config with no risk of the two diverging. We
+    // surface which home is being written so it's obvious in a checkout.
+    // (PR #753 / Bundle B1c previously hard-refused here; that was over-strict —
+    // the home resolution, not a refusal, is what keeps dev and npm state apart.)
     if (isDkgMonorepo()) {
-      console.error(
-        '\n[dkg init] Refusing to run from a DKG monorepo checkout.\n' +
-          '\n' +
-          '  Detected monorepo root: ' + (repoDir() ?? '(unknown)') + '\n' +
-          '\n' +
-          "  Monorepo dev workflow uses 'pnpm dev' against the local CLI build; ~/.dkg/config.json\n" +
-          "  is for npm-installed nodes (`npm install -g @origintrail-official/dkg`). Writing one\n" +
-          '  here would diverge from how the local CLI resolves its own working state.\n' +
-          '\n' +
-          '  If you really want to bootstrap a config for testing from this checkout, set\n' +
-          '  DKG_HOME to a scratch directory:\n' +
-          '\n' +
-          '    DKG_HOME=/tmp/dkg-test dkg init\n' +
-          '\n' +
-          '  RFC: https://github.com/OriginTrail/dkgv10-spec/blob/main/rfcs/OT-RFC-41-edge-node-npm-only-install-and-update.md\n' +
-          '\n',
+      console.log(
+        `[dkg init] Monorepo checkout detected — writing dev config to ${dkgDir()} ` +
+          `(set DKG_HOME to override).`,
       );
-      process.exit(1);
     }
-
 
     await ensureDkgDir();
     const existing = await loadConfig();
