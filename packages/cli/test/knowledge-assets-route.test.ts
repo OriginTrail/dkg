@@ -40,9 +40,15 @@ function createTracker(): RequestContext['tracker'] {
   } as unknown as RequestContext['tracker'];
 }
 
-function ctxFor(method: string, path: string, body: unknown, agent: Record<string, unknown>): RequestContext {
+function ctxFor(
+  method: string,
+  path: string,
+  body: unknown,
+  agent: Record<string, unknown>,
+  overrides: Partial<RequestContext> = {},
+): RequestContext {
   const url = new URL(`http://127.0.0.1${path}`);
-  return {
+  const ctx = {
     req: createRequest(method, path, method === 'GET' ? undefined : body),
     res: createResponse() as unknown as ServerResponse,
     agent: agent as RequestContext['agent'],
@@ -50,7 +56,7 @@ function ctxFor(method: string, path: string, body: unknown, agent: Record<strin
     publisherRuntime: null,
     config: {} as RequestContext['config'],
     startedAt: 0,
-    dashDb: {} as RequestContext['dashDb'],
+    dashDb: { insertNotification: vi.fn() } as unknown as RequestContext['dashDb'],
     opWallets: { adminWallet: { address: '0x0', privateKey: '0x0' }, wallets: [] } as RequestContext['opWallets'],
     network: null as RequestContext['network'],
     tracker: createTracker(),
@@ -68,11 +74,13 @@ function ctxFor(method: string, path: string, body: unknown, agent: Record<strin
     validTokens: new Set(),
     apiHost: '127.0.0.1',
     apiPortRef: { value: 0 },
+    routePlugins: [],
     url,
     path: url.pathname,
     requestToken: undefined,
     requestAgentAddress: '0x0000000000000000000000000000000000000001',
   } as RequestContext;
+  return { ...ctx, ...overrides } as RequestContext;
 }
 
 function body(ctx: RequestContext): Record<string, unknown> {
@@ -84,6 +92,16 @@ function status(ctx: RequestContext): number {
 
 function makeAssertionAgent(over: Record<string, any> = {}) {
   const { assertion: assertionOver, ...restOver } = over;
+  const knownContextGraphs = [
+    { id: 'cg', uri: 'did:dkg:context-graph:cg', isSystem: true, subscribed: true, synced: true },
+    {
+      id: 'canonical-cg',
+      uri: 'did:dkg:context-graph:canonical-cg',
+      isSystem: true,
+      subscribed: true,
+      synced: true,
+    },
+  ];
   const assertion = {
     create: vi.fn(async (_cg: string, name: string) => `urn:dkg:assertion:cg:agent:${name}`),
     write: vi.fn(async () => undefined),
@@ -100,7 +118,12 @@ function makeAssertionAgent(over: Record<string, any> = {}) {
       status: 'confirmed',
       ual: 'did:dkg:hardhat:31337/0xabc/7',
       onChainResult: { txHash: '0xtx' },
+      publicQuads: [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"', graph: '' }],
+      kaManifest: [{ assertion: 'urn:dkg:assertion:cg:agent:f' }],
     })),
+    listContextGraphs: vi.fn(async () => knownContextGraphs),
+    contextGraphExists: vi.fn(async (id: string) => knownContextGraphs.some((row) => row.id === id)),
+    resolveAgentByToken: vi.fn(),
     ...restOver,
   };
 }
@@ -112,7 +135,7 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
     await handleKnowledgeAssetsRoutes(ctx);
     expect(status(ctx)).toBe(201);
     expect(body(ctx)).toMatchObject({ name: 'meeting-notes', status: 'draft-open' });
-    expect(agent.assertion.create).toHaveBeenCalledOnce();
+    expect(agent.assertion.create).toHaveBeenCalledWith('cg', 'meeting-notes', undefined);
     expect(agent.assertion.write).not.toHaveBeenCalled();
   });
 
@@ -123,8 +146,105 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
     await handleKnowledgeAssetsRoutes(ctx);
     expect(status(ctx)).toBe(201);
     expect(body(ctx)).toMatchObject({ status: 'wm-sealed', written: 1, merkleRoot: '0xabcd' });
-    expect(agent.assertion.write).toHaveBeenCalledOnce();
-    expect(agent.assertion.finalize).toHaveBeenCalledOnce();
+    expect(agent.assertion.write).toHaveBeenCalledWith('cg', 'f', quads, undefined);
+    expect(agent.assertion.finalize).toHaveBeenCalledWith('cg', 'f', {});
+  });
+
+  it('POST /api/knowledge-assets resolves DID-form context graph ids before writing', async () => {
+    const agent = makeAssertionAgent();
+    const ctx = ctxFor(
+      'POST',
+      '/api/knowledge-assets',
+      { contextGraphId: 'did:dkg:context-graph:canonical-cg', name: 'f' },
+      agent,
+    );
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(201);
+    expect(agent.assertion.create).toHaveBeenCalledWith('canonical-cg', 'f', undefined);
+  });
+
+  it('atomic create passes pre-signed author attestation and scheme version to finalize', async () => {
+    const agent = makeAssertionAgent();
+    const quads = [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"', graph: '' }];
+    const attestation = {
+      address: '0x1111111111111111111111111111111111111111',
+      signature: { r: `0x${'22'.repeat(32)}`, vs: `0x${'33'.repeat(32)}` },
+    };
+    const ctx = ctxFor(
+      'POST',
+      '/api/knowledge-assets',
+      { contextGraphId: 'cg', name: 'f', quads, preSignedAuthorAttestation: attestation, schemeVersion: 2 },
+      agent,
+    );
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(201);
+    expect(agent.assertion.finalize).toHaveBeenCalledWith(
+      'cg',
+      'f',
+      expect.objectContaining({
+        preSignedAuthorAttestation: {
+          address: attestation.address,
+          signature: { r: expect.any(Uint8Array), vs: expect.any(Uint8Array) },
+        },
+        schemeVersion: 2,
+      }),
+    );
+    expect(agent.assertion.finalize.mock.calls[0][2]).not.toHaveProperty('authorAgentAddress');
+  });
+
+  it('atomic create rejects mutually exclusive finalize author inputs', async () => {
+    const agent = makeAssertionAgent();
+    const quads = [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"', graph: '' }];
+    const ctx = ctxFor(
+      'POST',
+      '/api/knowledge-assets',
+      {
+        contextGraphId: 'cg',
+        name: 'f',
+        quads,
+        authorAgentAddress: '0x1111111111111111111111111111111111111111',
+        preSignedAuthorAttestation: {
+          address: '0x2222222222222222222222222222222222222222',
+          signature: { r: `0x${'22'.repeat(32)}`, vs: `0x${'33'.repeat(32)}` },
+        },
+      },
+      agent,
+    );
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(400);
+    expect(body(ctx).error).toContain('mutually exclusive');
+    expect(agent.assertion.create).not.toHaveBeenCalled();
+  });
+
+  it('POST /api/knowledge-assets emits legacy side effects through publish', async () => {
+    const agent = makeAssertionAgent();
+    const emitMemoryGraphChanged = vi.fn();
+    const emitNotification = vi.fn();
+    const insertNotification = vi.fn();
+    const quads = [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"', graph: '' }];
+    const ctx = ctxFor(
+      'POST',
+      '/api/knowledge-assets',
+      { contextGraphId: 'cg', name: 'f', quads, alsoShareSwm: true, alsoPublishVm: true },
+      agent,
+      {
+        emitMemoryGraphChanged,
+        emitNotification,
+        dashDb: { insertNotification } as unknown as RequestContext['dashDb'],
+      },
+    );
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(201);
+    expect(emitMemoryGraphChanged.mock.calls.map(([event]) => event.operation)).toEqual([
+      'assertion_created',
+      'assertion_written',
+      'assertion_finalized',
+      'assertion_promoted',
+      'shared_memory_published',
+    ]);
+    expect(emitMemoryGraphChanged.mock.calls.at(-1)?.[0]).toMatchObject({ clearSharedMemoryAfter: false });
+    expect(insertNotification).toHaveBeenCalledTimes(3);
+    expect(emitNotification).toHaveBeenCalledTimes(3);
   });
 
   it('atomic create with also* tails returns 207 when a tail fails', async () => {
@@ -149,7 +269,17 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
     await handleKnowledgeAssetsRoutes(ctx);
     expect(status(ctx)).toBe(200);
     expect(body(ctx)).toMatchObject({ written: 1 });
-    expect(agent.assertion.write).toHaveBeenCalledWith('cg', 'f', quads, { subGraphName: undefined });
+    expect(agent.assertion.write).toHaveBeenCalledWith('cg', 'f', quads, undefined);
+  });
+
+  it('POST .../:name/wm/write reports malformed percent-encoding as a 400', async () => {
+    const agent = makeAssertionAgent();
+    const quads = [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"', graph: '' }];
+    const ctx = ctxFor('POST', '/api/knowledge-assets/%E0%A4%A/wm/write', { contextGraphId: 'cg', quads }, agent);
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(400);
+    expect(body(ctx)).toMatchObject({ error: 'Malformed percent-encoding in URL path' });
+    expect(agent.assertion.write).not.toHaveBeenCalled();
   });
 
   it('POST .../:name/wm/finalize seals the draft', async () => {
@@ -158,6 +288,23 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
     await handleKnowledgeAssetsRoutes(ctx);
     expect(status(ctx)).toBe(200);
     expect(body(ctx)).toMatchObject({ merkleRoot: '0xabcd', eip712Digest: '0xdig' });
+  });
+
+  it('POST .../:name/wm/discard emits the WM discard side effect', async () => {
+    const agent = makeAssertionAgent();
+    const emitMemoryGraphChanged = vi.fn();
+    const ctx = ctxFor(
+      'POST',
+      '/api/knowledge-assets/f/wm/discard',
+      { contextGraphId: 'cg' },
+      agent,
+      { emitMemoryGraphChanged },
+    );
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(200);
+    expect(emitMemoryGraphChanged).toHaveBeenCalledWith(
+      expect.objectContaining({ contextGraphId: 'cg', operation: 'assertion_discarded' }),
+    );
   });
 
   it('POST .../:name/swm/share advances the SWM pointer (promote→share)', async () => {
@@ -171,11 +318,24 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
 
   it('POST .../:name/vm/publish mints/updates on chain', async () => {
     const agent = makeAssertionAgent();
-    const ctx = ctxFor('POST', '/api/knowledge-assets/f/vm/publish', { contextGraphId: 'cg' }, agent);
+    const emitMemoryGraphChanged = vi.fn();
+    const ctx = ctxFor(
+      'POST',
+      '/api/knowledge-assets/f/vm/publish',
+      { contextGraphId: 'cg', options: { clearAfter: true } },
+      agent,
+      { emitMemoryGraphChanged },
+    );
     await handleKnowledgeAssetsRoutes(ctx);
     expect(status(ctx)).toBe(200);
     expect(body(ctx)).toMatchObject({ status: 'confirmed', ual: 'did:dkg:hardhat:31337/0xabc/7', txHash: '0xtx' });
-    expect(agent.publishFromFinalizedAssertion).toHaveBeenCalledOnce();
+    expect(agent.publishFromFinalizedAssertion).toHaveBeenCalledWith('cg', 'f', { clearSharedMemoryAfter: true });
+    expect(emitMemoryGraphChanged).toHaveBeenCalledWith(
+      expect.objectContaining({
+        operation: 'shared_memory_published',
+        clearSharedMemoryAfter: true,
+      }),
+    );
   });
 
   it('GET /api/knowledge-assets/:name returns lifecycle state', async () => {
@@ -184,6 +344,22 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
     await handleKnowledgeAssetsRoutes(ctx);
     expect(status(ctx)).toBe(200);
     expect(body(ctx)).toMatchObject({ state: 'created', memoryLayer: 'WorkingMemory' });
+  });
+
+  it('GET /api/knowledge-assets/:name normalizes DID-form context graph ids for history', async () => {
+    const agent = makeAssertionAgent();
+    const ctx = ctxFor('GET', '/api/knowledge-assets/f?contextGraphId=did:dkg:context-graph:cg', undefined, agent);
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(200);
+    expect(agent.assertion.history).toHaveBeenCalledWith('cg', 'f', undefined);
+  });
+
+  it('GET /api/knowledge-assets/:name validates history query params before dispatch', async () => {
+    const agent = makeAssertionAgent();
+    const ctx = ctxFor('GET', '/api/knowledge-assets/f?contextGraphId=cg&subGraphName=_bad', undefined, agent);
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(400);
+    expect(agent.assertion.history).not.toHaveBeenCalled();
   });
 
   it('POST .../:name/wm/pull-from is 501 (net-new, follow-up)', async () => {

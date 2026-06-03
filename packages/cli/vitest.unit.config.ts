@@ -56,6 +56,7 @@ export default defineConfig({
           'test/blazegraph-integration.test.ts',
           // #761 — context graph write-target validation (from main).
           'test/context-graph-write-path-validation.test.ts',
+          'test/knowledge-assets-route.test.ts',
           // Notifications-pane redesign (A3) — assertion_activity emitter
           // helper. Pure logic + a tmp SQLite DashboardDB, no hardhat.
           'test/activity-notification.test.ts',
