@@ -24,6 +24,7 @@ vi.mock('../src/daemon/oxigraph-server.js', () => ({
 
 import {
   planManagedOxigraph,
+  resolveManagedOxigraphPort,
   startManagedOxigraph,
   MANAGED_OXIGRAPH_BACKEND,
   DEFAULT_OXIGRAPH_PORT,
@@ -62,6 +63,11 @@ describe('planManagedOxigraph', () => {
     );
     expect(plan!.port).toBe(9999);
     expect(plan!.location).toBe('/mnt/oxi');
+  });
+
+  it('resolveManagedOxigraphPort rejects out-of-range values', () => {
+    expect(resolveManagedOxigraphPort({ port: 70000 })).toBe(DEFAULT_OXIGRAPH_PORT);
+    expect(resolveManagedOxigraphPort({ port: 7878 })).toBe(7878);
   });
 
   it('rejects an out-of-range port and falls back to the default', () => {

@@ -36,6 +36,16 @@ export const MANAGED_OXIGRAPH_BACKEND = 'oxigraph-server';
 /** Default loopback bind port. Override via `store.options.port`. */
 export const DEFAULT_OXIGRAPH_PORT = 7878;
 
+/** Same port validation as {@link planManagedOxigraph} — shared with status. */
+export function resolveManagedOxigraphPort(
+  options: Record<string, unknown> | undefined,
+): number {
+  const rawPort = options?.port;
+  return typeof rawPort === 'number' && Number.isInteger(rawPort) && rawPort > 0 && rawPort < 65536
+    ? rawPort
+    : DEFAULT_OXIGRAPH_PORT;
+}
+
 interface StoreConfigLike {
   backend?: unknown;
   options?: Record<string, unknown>;
@@ -99,11 +109,7 @@ export function planManagedOxigraph(
   if (config.store?.backend !== MANAGED_OXIGRAPH_BACKEND) return null;
 
   const options = config.store.options ?? {};
-  const rawPort = options.port;
-  const port =
-    typeof rawPort === 'number' && Number.isInteger(rawPort) && rawPort > 0 && rawPort < 65536
-      ? rawPort
-      : DEFAULT_OXIGRAPH_PORT;
+  const port = resolveManagedOxigraphPort(options);
   const location =
     typeof options.location === 'string' && options.location.trim()
       ? options.location

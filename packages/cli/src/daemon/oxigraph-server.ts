@@ -36,11 +36,51 @@
  * `spawn`/`fetch` are injectable so unit tests exercise ready-polling,
  * crash-restart, and shutdown without launching a real binary.
  */
-import { spawn, type ChildProcess } from 'node:child_process';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
+import { promisify } from 'node:util';
+import { invalidateExternalStoreQuadsCache } from './routes/status.js';
+
+const execFileAsync = promisify(execFile);
 
 export interface OxigraphServerIo {
   spawn: typeof spawn;
   fetch: typeof globalThis.fetch;
+  /**
+   * Verify the spawned child owns the listen socket (not merely that
+   * something on the port returns HTTP 200). Tests inject `async () => true`.
+   */
+  childOwnsListenPort?: (
+    child: ChildProcess,
+    port: number,
+    host: string,
+  ) => Promise<boolean>;
+}
+
+/** Default: `lsof` on Unix; on Windows fall back to child-alive only. */
+async function defaultChildOwnsListenPort(
+  child: ChildProcess,
+  port: number,
+  host: string,
+): Promise<boolean> {
+  if (!child.pid || child.exitCode !== null || child.signalCode !== null) {
+    return false;
+  }
+  if (host !== '127.0.0.1' && host !== 'localhost') return true;
+  if (process.platform === 'win32') return true;
+  try {
+    const { stdout } = await execFileAsync(
+      'lsof',
+      ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN'],
+      { timeout: 2_000 },
+    );
+    const pid = child.pid;
+    return stdout.split('\n').some((line) => {
+      const parts = line.trim().split(/\s+/);
+      return parts.length >= 2 && Number(parts[1]) === pid;
+    });
+  } catch {
+    return false;
+  }
 }
 
 export interface StartOxigraphServerOptions {
@@ -100,7 +140,15 @@ function sleep(ms: number): Promise<void> {
 export async function startOxigraphServer(
   opts: StartOxigraphServerOptions,
 ): Promise<OxigraphServerHandle> {
-  const io: OxigraphServerIo = { spawn, fetch: globalThis.fetch, ...opts.io };
+  const io: OxigraphServerIo = {
+    spawn,
+    fetch: globalThis.fetch,
+    childOwnsListenPort: defaultChildOwnsListenPort,
+    ...opts.io,
+  };
+  const markStoreDown = (): void => {
+    invalidateExternalStoreQuadsCache();
+  };
   const log = opts.log ?? (() => {});
   const host = opts.host ?? DEFAULT_HOST;
   const { port } = opts;
@@ -165,6 +213,7 @@ export async function startOxigraphServer(
       // off to revive(), which respawns and re-proves ownership before
       // restoring `ready`.
       ready = false;
+      markStoreDown();
       scheduleRevive(
         `server exited unexpectedly (code=${code ?? 'null'}, signal=${signal ?? 'null'})`,
       );
@@ -179,6 +228,8 @@ export async function startOxigraphServer(
     child.signalCode === null;
 
   const probeReady = async (): Promise<boolean> => {
+    const c = child;
+    if (!c || !childAlive()) return false;
     try {
       const res = await io.fetch(queryEndpoint, {
         method: 'POST',
@@ -189,7 +240,13 @@ export async function startOxigraphServer(
         body: 'ASK { ?s ?p ?o }',
         signal: AbortSignal.timeout(readyIntervalMs + 1_000),
       });
-      return res.ok;
+      if (!res.ok) return false;
+      const ownsPort = await (io.childOwnsListenPort ?? defaultChildOwnsListenPort)(
+        c,
+        port,
+        host,
+      );
+      return ownsPort && childAlive();
     } catch {
       return false;
     }
@@ -253,6 +310,7 @@ export async function startOxigraphServer(
   // boot doesn't orphan the server. Safe to call alongside `stop()`.
   const killSync = (): void => {
     stopping = true;
+    markStoreDown();
     try {
       if (childAlive()) child!.kill('SIGTERM');
     } catch {
@@ -263,6 +321,7 @@ export async function startOxigraphServer(
   const stop = async (): Promise<void> => {
     if (stopping) return;
     stopping = true;
+    markStoreDown();
     const c = child;
     child = null;
     if (!c || c.exitCode !== null || c.signalCode !== null) return;

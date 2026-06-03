@@ -54,12 +54,18 @@ function spawnFactory(onSpawn?: (c: FakeChild) => void) {
     onSpawn?.(c);
     return c as any;
   }) as any;
-  return { spawn, children, calls };
+  const testIo = (fetch: typeof globalThis.fetch) => ({
+    spawn,
+    fetch,
+    // Unit tests use fake children — skip real lsof PID checks.
+    childOwnsListenPort: async () => true,
+  });
+  return { spawn, children, calls, testIo };
 }
 
 describe('startOxigraphServer', () => {
   it('spawns with serve flags and resolves once the probe answers', async () => {
-    const { spawn, calls } = spawnFactory();
+    const { calls, testIo } = spawnFactory();
     const fetchMock = vi.fn(async () => new Response('', { status: 200 }));
 
     const handle = await startOxigraphServer({
@@ -67,7 +73,7 @@ describe('startOxigraphServer', () => {
       location: '/data/oxi',
       port: 7878,
       readyIntervalMs: 5,
-      io: { spawn, fetch: fetchMock as any },
+      io: testIo(fetchMock as any),
     });
 
     expect(calls[0]).toEqual({
@@ -80,7 +86,7 @@ describe('startOxigraphServer', () => {
   });
 
   it('kills the child and rejects when the server never becomes ready', async () => {
-    const { spawn, children } = spawnFactory();
+    const { children, testIo } = spawnFactory();
     const fetchMock = vi.fn(async () => {
       throw new Error('ECONNREFUSED');
     });
@@ -92,7 +98,7 @@ describe('startOxigraphServer', () => {
         port: 7900,
         readyTimeoutMs: 120,
         readyIntervalMs: 20,
-        io: { spawn, fetch: fetchMock as any },
+        io: testIo(fetchMock as any),
       }),
     ).rejects.toThrow(/did not become ready/);
 
@@ -103,7 +109,7 @@ describe('startOxigraphServer', () => {
     // The child dies on EADDRINUSE during startup, but a foreign server on
     // the same port answers the probe with 200. We must fail fast, not
     // return a handle wired to the unrelated server.
-    const { spawn, children } = spawnFactory((c) => {
+    const { children, testIo } = spawnFactory((c) => {
       c.emitStderr('error: Address already in use (os error 48)');
       queueMicrotask(() => c.emitExit(1, null));
     });
@@ -116,11 +122,33 @@ describe('startOxigraphServer', () => {
         port: 7878,
         readyTimeoutMs: 200,
         readyIntervalMs: 10,
-        io: { spawn, fetch: fetchMock as any },
+        io: testIo(fetchMock as any),
       }),
     ).rejects.toThrow(/exited during startup|already in use/i);
 
     // Exactly one spawn — a startup-phase exit must NOT trigger a restart.
+    expect(children.length).toBe(1);
+  });
+
+  it('does NOT treat HTTP 200 as ready when the child does not own the listen port', async () => {
+    const { children, testIo } = spawnFactory();
+    const fetchMock = vi.fn(async () => new Response('', { status: 200 }));
+    const io = {
+      ...testIo(fetchMock as any),
+      childOwnsListenPort: async () => false,
+    };
+
+    await expect(
+      startOxigraphServer({
+        binaryPath: '/bin/oxigraph',
+        location: '/data/oxi',
+        port: 7878,
+        readyTimeoutMs: 100,
+        readyIntervalMs: 10,
+        io,
+      }),
+    ).rejects.toThrow(/did not become ready|exited during startup/i);
+
     expect(children.length).toBe(1);
   });
 
@@ -129,7 +157,7 @@ describe('startOxigraphServer', () => {
     // and the process never runs. Without an `error` listener Node would
     // crash the daemon with an uncaught exception; instead we must fail the
     // start through the normal path and never restart.
-    const { spawn, children } = spawnFactory((c) => {
+    const { children, testIo } = spawnFactory((c) => {
       queueMicrotask(() => c.emitError(new Error('spawn /bin/oxigraph ENOENT')));
     });
     const fetchMock = vi.fn(async () => {
@@ -143,7 +171,7 @@ describe('startOxigraphServer', () => {
         port: 7878,
         readyTimeoutMs: 100,
         readyIntervalMs: 10,
-        io: { spawn, fetch: fetchMock as any },
+        io: testIo(fetchMock as any),
       }),
     ).rejects.toThrow(/exited during startup|ENOENT/i);
 
@@ -152,14 +180,14 @@ describe('startOxigraphServer', () => {
   });
 
   it('killSync sends SIGTERM synchronously', async () => {
-    const { spawn, children } = spawnFactory();
+    const { children, testIo } = spawnFactory();
     const fetchMock = vi.fn(async () => new Response('', { status: 200 }));
     const handle = await startOxigraphServer({
       binaryPath: '/bin/oxigraph',
       location: '/data/oxi',
       port: 7878,
       readyIntervalMs: 5,
-      io: { spawn, fetch: fetchMock as any },
+      io: testIo(fetchMock as any),
     });
 
     handle.killSync();
@@ -167,14 +195,14 @@ describe('startOxigraphServer', () => {
   });
 
   it('stop() sends SIGTERM and resolves on exit', async () => {
-    const { spawn, children } = spawnFactory();
+    const { children, testIo } = spawnFactory();
     const fetchMock = vi.fn(async () => new Response('', { status: 200 }));
     const handle = await startOxigraphServer({
       binaryPath: '/bin/oxigraph',
       location: '/data/oxi',
       port: 7878,
       readyIntervalMs: 5,
-      io: { spawn, fetch: fetchMock as any },
+      io: testIo(fetchMock as any),
     });
 
     await handle.stop();
@@ -184,7 +212,7 @@ describe('startOxigraphServer', () => {
   });
 
   it('restarts the child on an unexpected exit', async () => {
-    const { spawn, children, calls } = spawnFactory();
+    const { children, calls, testIo } = spawnFactory();
     const fetchMock = vi.fn(async () => new Response('', { status: 200 }));
     const handle = await startOxigraphServer({
       binaryPath: '/bin/oxigraph',
@@ -192,7 +220,7 @@ describe('startOxigraphServer', () => {
       port: 7878,
       readyIntervalMs: 5,
       restartBackoffBaseMs: 10,
-      io: { spawn, fetch: fetchMock as any },
+      io: testIo(fetchMock as any),
     });
 
     expect(calls.length).toBe(1);
@@ -212,7 +240,7 @@ describe('startOxigraphServer', () => {
     // (ownership re-validated each time), so the agent never silently hits
     // an unrelated SPARQL server.
     let spawnCount = 0;
-    const { spawn, children, calls } = spawnFactory((c) => {
+    const { children, calls, testIo } = spawnFactory((c) => {
       spawnCount += 1;
       // Child #1 is the healthy startup child; every revive child dies on
       // bind as if the port is now held by someone else.
@@ -230,7 +258,7 @@ describe('startOxigraphServer', () => {
       readyIntervalMs: 5,
       restartBackoffBaseMs: 5,
       restartBackoffMaxMs: 10,
-      io: { spawn, fetch: fetchMock as any },
+      io: testIo(fetchMock as any),
     });
 
     expect(calls.length).toBe(1);
@@ -244,7 +272,7 @@ describe('startOxigraphServer', () => {
   });
 
   it('does NOT restart after stop()', async () => {
-    const { spawn, calls } = spawnFactory();
+    const { calls, testIo } = spawnFactory();
     const fetchMock = vi.fn(async () => new Response('', { status: 200 }));
     const handle = await startOxigraphServer({
       binaryPath: '/bin/oxigraph',
@@ -252,7 +280,7 @@ describe('startOxigraphServer', () => {
       port: 7878,
       readyIntervalMs: 5,
       restartBackoffBaseMs: 10,
-      io: { spawn, fetch: fetchMock as any },
+      io: testIo(fetchMock as any),
     });
 
     await handle.stop();

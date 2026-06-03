@@ -58,7 +58,7 @@ const execFileAsync = promisify(execFile);
 import { enrichEvmError, MockChainAdapter, resolveRpcUrls } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
-import { DEFAULT_OXIGRAPH_PORT } from '../oxigraph-managed.js';
+import { resolveManagedOxigraphPort } from '../oxigraph-managed.js';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
 import {
@@ -415,6 +415,12 @@ const STORE_QUADS_CACHE_TTL_MS = 30_000;
 let storeQuadsCache: { value: number | null; fetchedAt: number } | null = null;
 let storeQuadsInflight: Promise<number | null> | null = null;
 
+/** Drop cached quad counts (e.g. when the managed Oxigraph child exits). */
+export function invalidateExternalStoreQuadsCache(): void {
+  storeQuadsCache = null;
+  storeQuadsInflight = null;
+}
+
 async function getCachedExternalStoreQuads(
   agent: DKGAgent,
   now: number,
@@ -673,7 +679,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
           // instead of printing it like a quad-less local store.
           ? (() => {
               const opts = (config.store?.options ?? {}) as Record<string, unknown>;
-              const port = typeof opts.port === 'number' ? opts.port : DEFAULT_OXIGRAPH_PORT;
+              const port = resolveManagedOxigraphPort(opts);
               return `http://127.0.0.1:${port}/query`;
             })()
           : null,
