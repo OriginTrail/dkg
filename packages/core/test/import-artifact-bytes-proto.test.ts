@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  IMPORTED_ARTIFACT_BYTE_KIND_ORIGINAL,
   IMPORTED_ARTIFACT_BYTE_KIND_MARKDOWN,
+  IMPORTED_ARTIFACT_BYTE_KIND_SOURCE,
   IMPORTED_ARTIFACT_BYTES_RESPONSE_STATUS,
   PROTOCOL_IMPORTED_ARTIFACT_BYTES,
   decodeImportedArtifactBytesRequest,
@@ -57,6 +59,24 @@ describe('ImportedArtifactBytes proto', () => {
   });
 
   it.each([
+    IMPORTED_ARTIFACT_BYTE_KIND_SOURCE,
+    IMPORTED_ARTIFACT_BYTE_KIND_ORIGINAL,
+  ])('round-trips %s byte requests', (kind) => {
+    const request = {
+      ...VALID_REQUEST,
+      hash: `keccak256:${'a'.repeat(64)}`,
+      kind,
+      subGraphName: 'documents',
+    };
+
+    const decoded = decodeImportedArtifactBytesRequest(
+      encodeImportedArtifactBytesRequest(request),
+    );
+
+    expect(decoded).toEqual(request);
+  });
+
+  it.each([
     ['contextGraphId', { contextGraphId: '' }],
     ['assertionUri', { assertionUri: '' }],
     ['hash', { hash: '' }],
@@ -90,6 +110,26 @@ describe('ImportedArtifactBytes proto', () => {
     expect(decoded.status).toBe(IMPORTED_ARTIFACT_BYTES_RESPONSE_STATUS.ALLOW);
     expect(decoded.hash).toBe(VALID_REQUEST.hash);
     expect(decoded.kind).toBe(IMPORTED_ARTIFACT_BYTE_KIND_MARKDOWN);
+    expect(new Uint8Array(decoded.bytes)).toEqual(bytes);
+  });
+
+  it('round-trips allowed source bytes with content metadata', () => {
+    const bytes = new Uint8Array([0, 1, 2, 3]);
+    const decoded = decodeImportedArtifactBytesResponse(
+      encodeImportedArtifactBytesResponse({
+        status: IMPORTED_ARTIFACT_BYTES_RESPONSE_STATUS.ALLOW,
+        hash: `keccak256:${'b'.repeat(64)}`,
+        kind: IMPORTED_ARTIFACT_BYTE_KIND_SOURCE,
+        bytes,
+        contentType: 'application/pdf',
+        size: bytes.length,
+      }),
+    );
+
+    expect(decoded.status).toBe(IMPORTED_ARTIFACT_BYTES_RESPONSE_STATUS.ALLOW);
+    expect(decoded.kind).toBe(IMPORTED_ARTIFACT_BYTE_KIND_SOURCE);
+    expect(decoded.contentType).toBe('application/pdf');
+    expect(decoded.size).toBe(bytes.length);
     expect(new Uint8Array(decoded.bytes)).toEqual(bytes);
   });
 

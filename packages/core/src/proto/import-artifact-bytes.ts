@@ -12,7 +12,15 @@ import protobuf from 'protobufjs';
 
 const { Type, Field } = protobuf;
 
+export const IMPORTED_ARTIFACT_BYTE_KIND_SOURCE = 'source';
+export const IMPORTED_ARTIFACT_BYTE_KIND_ORIGINAL = 'original';
 export const IMPORTED_ARTIFACT_BYTE_KIND_MARKDOWN = 'markdown';
+
+export const IMPORTED_ARTIFACT_BYTE_KIND_VALUES: ReadonlySet<string> = new Set<string>([
+  IMPORTED_ARTIFACT_BYTE_KIND_SOURCE,
+  IMPORTED_ARTIFACT_BYTE_KIND_ORIGINAL,
+  IMPORTED_ARTIFACT_BYTE_KIND_MARKDOWN,
+]);
 
 export const IMPORTED_ARTIFACT_BYTES_RESPONSE_STATUS = {
   ALLOW: 'allow',
@@ -41,7 +49,9 @@ export const ImportedArtifactBytesResponseSchema = new Type('ImportedArtifactByt
   .add(new Field('kind', 3, 'string'))
   .add(new Field('bytes', 4, 'bytes'))
   .add(new Field('reason', 5, 'string'))
-  .add(new Field('actualHash', 6, 'string'));
+  .add(new Field('actualHash', 6, 'string'))
+  .add(new Field('contentType', 7, 'string'))
+  .add(new Field('size', 8, 'uint32'));
 
 export interface ImportedArtifactBytesRequestMsg {
   contextGraphId: string;
@@ -58,6 +68,8 @@ export interface ImportedArtifactBytesResponseMsg {
   bytes: Uint8Array;
   reason?: string;
   actualHash?: string;
+  contentType?: string;
+  size?: number;
 }
 
 function isNonEmptyString(value: unknown): value is string {
@@ -92,6 +104,18 @@ function validateImportedArtifactBytesResponse(msg: ImportedArtifactBytesRespons
   if (!isNonEmptyString(msg.kind)) {
     throw new Error('Invalid ImportedArtifactBytesResponse payload: kind is required');
   }
+  if (
+    msg.contentType !== undefined &&
+    (typeof msg.contentType !== 'string' || msg.contentType.trim().length === 0)
+  ) {
+    throw new Error('Invalid ImportedArtifactBytesResponse payload: contentType must be a non-empty string');
+  }
+  if (
+    msg.size !== undefined &&
+    (!Number.isInteger(msg.size) || msg.size < 0)
+  ) {
+    throw new Error('Invalid ImportedArtifactBytesResponse payload: size must be a non-negative integer');
+  }
 
   const bytes = msg.bytes instanceof Uint8Array ? msg.bytes : new Uint8Array(0);
   if (msg.status !== IMPORTED_ARTIFACT_BYTES_RESPONSE_STATUS.ALLOW && bytes.length > 0) {
@@ -108,9 +132,16 @@ function validateImportedArtifactBytesResponse(msg: ImportedArtifactBytesRespons
 function normalizeImportedArtifactBytesResponse(
   msg: ImportedArtifactBytesResponseMsg,
 ): ImportedArtifactBytesResponseMsg {
+  const bytes = msg.bytes instanceof Uint8Array ? msg.bytes : new Uint8Array(0);
+  const size = msg.status === IMPORTED_ARTIFACT_BYTES_RESPONSE_STATUS.ALLOW
+    ? msg.size && msg.size > 0
+      ? msg.size
+      : bytes.length
+    : msg.size;
   return {
     ...msg,
-    bytes: msg.bytes instanceof Uint8Array ? msg.bytes : new Uint8Array(0),
+    bytes,
+    ...(size !== undefined ? { size } : {}),
   };
 }
 

@@ -57,7 +57,7 @@ const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, assertSafeRdfTerm, escapeDkgRdfLiteral, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, assertionLifecycleUri, IMPORTED_ARTIFACT_BYTE_KIND_MARKDOWN, IMPORTED_ARTIFACT_BYTES_RESPONSE_STATUS, type ImportedArtifactBytesRequestMsg, type ImportedArtifactBytesResponseMsg } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, assertSafeRdfTerm, escapeDkgRdfLiteral, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, assertionLifecycleUri, IMPORTED_ARTIFACT_BYTE_KIND_SOURCE, IMPORTED_ARTIFACT_BYTE_KIND_ORIGINAL, IMPORTED_ARTIFACT_BYTE_KIND_MARKDOWN, IMPORTED_ARTIFACT_BYTES_RESPONSE_STATUS, type ImportedArtifactBytesRequestMsg, type ImportedArtifactBytesResponseMsg } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri, PROMOTE_JOB_STATES, PromoteJobConflictError, type PromoteJob, type PromoteJobState, type PublishOptions } from '@origintrail-official/dkg-publisher';
 import { validatePreSignedAuthorAttestation } from './memory.js';
 import { recordAssertionActivity } from '../activity-notification.js';
@@ -333,6 +333,7 @@ const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
 const XSD_DATE_TIME = 'http://www.w3.org/2001/XMLSchema#dateTime';
 const MAX_MARKDOWN_READ_BYTES = 5 * 1024 * 1024;
 const DEFAULT_MARKDOWN_READ_BYTES = 1024 * 1024;
+const MAX_IMPORTED_ARTIFACT_FILE_READ_BYTES = 5 * 1024 * 1024;
 
 type ImportedArtifactResolution = {
   contextGraphId: string;
@@ -847,9 +848,87 @@ type ImportedArtifactByteAgent = {
 
 const IMPORTED_ARTIFACT_BYTE_FETCH_TIMEOUT_MS = 5_000;
 
-async function fetchImportedArtifactMarkdownBytesFromOrigin(
+type ImportedArtifactReadKind =
+  | typeof IMPORTED_ARTIFACT_BYTE_KIND_SOURCE
+  | typeof IMPORTED_ARTIFACT_BYTE_KIND_ORIGINAL
+  | typeof IMPORTED_ARTIFACT_BYTE_KIND_MARKDOWN;
+
+type ImportedArtifactByteSelection = {
+  kind: ImportedArtifactReadKind;
+  hash: string;
+  contentType: string;
+  missingLabel: string;
+};
+
+function normalizeImportedArtifactFileReadLimit(raw: unknown): number {
+  if (raw == null) return MAX_IMPORTED_ARTIFACT_FILE_READ_BYTES;
+  if (typeof raw !== 'number' || !Number.isInteger(raw) || raw <= 0) {
+    throw new ImportArtifactRouteError(400, '"maxBytes" must be a positive integer');
+  }
+  return Math.min(raw, MAX_IMPORTED_ARTIFACT_FILE_READ_BYTES);
+}
+
+function normalizeOptionalImportedArtifactHash(raw: unknown, field: string): string | undefined {
+  if (raw == null) return undefined;
+  if (typeof raw !== 'string' || !raw.trim()) {
+    throw new ImportArtifactRouteError(400, `"${field}" must be a content hash string`);
+  }
+  const hash = raw.trim();
+  if (!validateContentHash(hash)) {
+    throw new ImportArtifactRouteError(400, `Invalid ${field}`);
+  }
+  return hash;
+}
+
+function selectImportedArtifactSourceBytes(
+  artifact: ImportedArtifactResolution,
+  raw: Record<string, unknown>,
+): ImportedArtifactByteSelection {
+  const rawKind = typeof raw.kind === 'string' && raw.kind.trim()
+    ? raw.kind.trim()
+    : IMPORTED_ARTIFACT_BYTE_KIND_SOURCE;
+  if (rawKind === IMPORTED_ARTIFACT_BYTE_KIND_MARKDOWN) {
+    throw new ImportArtifactRouteError(400, 'read-file does not accept kind "markdown"; use read-markdown');
+  }
+  if (
+    rawKind !== IMPORTED_ARTIFACT_BYTE_KIND_SOURCE &&
+    rawKind !== IMPORTED_ARTIFACT_BYTE_KIND_ORIGINAL
+  ) {
+    throw new ImportArtifactRouteError(400, 'read-file kind must be "source" or "original"');
+  }
+  const explicitHash = normalizeOptionalImportedArtifactHash(raw.hash, 'hash');
+  if (
+    explicitHash &&
+    normalizeComparableContentHash(explicitHash) !== normalizeComparableContentHash(artifact.sourceFileHash)
+  ) {
+    throw new ImportArtifactRouteError(400, 'hash does not match import metadata source file hash');
+  }
+  return {
+    kind: rawKind,
+    hash: artifact.sourceFileHash,
+    contentType: artifact.sourceContentType || 'application/octet-stream',
+    missingLabel: 'Source file bytes',
+  };
+}
+
+function selectImportedArtifactMarkdownBytes(
+  artifact: ImportedArtifactResolution,
+): ImportedArtifactByteSelection {
+  if (!artifact.markdownHash) {
+    throw new ImportArtifactRouteError(409, 'Import artifact does not have a readable Markdown source');
+  }
+  return {
+    kind: IMPORTED_ARTIFACT_BYTE_KIND_MARKDOWN,
+    hash: artifact.markdownHash,
+    contentType: 'text/markdown',
+    missingLabel: 'Markdown source bytes',
+  };
+}
+
+async function fetchImportedArtifactBytesFromOrigin(
   ctx: RequestContext,
   artifact: ImportedArtifactResolution,
+  selection: ImportedArtifactByteSelection,
 ): Promise<Buffer> {
   const byteAgent = ctx.agent as unknown as ImportedArtifactByteAgent;
   if (
@@ -858,7 +937,7 @@ async function fetchImportedArtifactMarkdownBytesFromOrigin(
   ) {
     throw new ImportArtifactRouteError(
       404,
-      'Markdown source bytes are not replicated locally on this peer, and no origin byte fetcher is available',
+      `${selection.missingLabel} are not replicated locally on this peer, and no origin byte fetcher is available`,
     );
   }
 
@@ -866,15 +945,15 @@ async function fetchImportedArtifactMarkdownBytesFromOrigin(
   if (!peerId) {
     throw new ImportArtifactRouteError(
       404,
-      `Markdown source bytes are not replicated locally on this peer, and the origin agent ${artifact.assertionAgentAddress} could not be resolved to a peer`,
+      `${selection.missingLabel} are not replicated locally on this peer, and the origin agent ${artifact.assertionAgentAddress} could not be resolved to a peer`,
     );
   }
 
   const request: ImportedArtifactBytesRequestMsg = {
     contextGraphId: artifact.contextGraphId,
     assertionUri: artifact.assertionUri,
-    hash: artifact.markdownHash!,
-    kind: IMPORTED_ARTIFACT_BYTE_KIND_MARKDOWN,
+    hash: selection.hash,
+    kind: selection.kind,
     ...(artifact.subGraphName ? { subGraphName: artifact.subGraphName } : {}),
   };
   let response: ImportedArtifactBytesResponseMsg;
@@ -888,22 +967,25 @@ async function fetchImportedArtifactMarkdownBytesFromOrigin(
     const message = err instanceof Error ? err.message : String(err);
     throw new ImportArtifactRouteError(
       404,
-      `Markdown source bytes are not replicated locally on this peer, and the origin peer did not provide them: ${message}`,
+      `${selection.missingLabel} are not replicated locally on this peer, and the origin peer did not provide them: ${message}`,
     );
   }
 
-  if (response.kind !== IMPORTED_ARTIFACT_BYTE_KIND_MARKDOWN) {
+  if (response.kind !== selection.kind) {
     throw new ImportArtifactRouteError(502, 'Origin agent returned an invalid imported-artifact byte kind');
   }
-  if (normalizeComparableContentHash(response.hash) !== normalizeComparableContentHash(artifact.markdownHash!)) {
+  if (normalizeComparableContentHash(response.hash) !== normalizeComparableContentHash(selection.hash)) {
     throw new ImportArtifactRouteError(502, 'Origin agent returned imported-artifact bytes for a different hash');
   }
 
   switch (response.status) {
     case IMPORTED_ARTIFACT_BYTES_RESPONSE_STATUS.ALLOW: {
       const bytes = Buffer.from(response.bytes);
-      const entry = await ctx.fileStore.put(bytes, 'text/markdown');
-      const expected = normalizeComparableContentHash(artifact.markdownHash!);
+      if (response.size !== undefined && response.size !== bytes.length) {
+        throw new ImportArtifactRouteError(502, 'Origin agent returned imported-artifact bytes with an invalid size');
+      }
+      const entry = await ctx.fileStore.put(bytes, selection.contentType);
+      const expected = normalizeComparableContentHash(selection.hash);
       if (
         normalizeComparableContentHash(entry.hash) !== expected &&
         normalizeComparableContentHash(entry.keccak256) !== expected
@@ -930,6 +1012,18 @@ async function fetchImportedArtifactMarkdownBytesFromOrigin(
     default:
       throw new ImportArtifactRouteError(502, 'Origin agent returned an unknown imported-artifact byte response');
   }
+}
+
+async function readImportedArtifactBytes(
+  ctx: RequestContext,
+  artifact: ImportedArtifactResolution,
+  selection: ImportedArtifactByteSelection,
+): Promise<Buffer | null> {
+  let bytes = await ctx.fileStore.get(selection.hash);
+  if (!bytes && artifact.ownerGuardRelaxed) {
+    bytes = await fetchImportedArtifactBytesFromOrigin(ctx, artifact, selection);
+  }
+  return bytes ? Buffer.from(bytes) : null;
 }
 
 function handleImportArtifactRouteError(res: ServerResponse, err: unknown): boolean {
@@ -1390,19 +1484,18 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
           artifact,
         });
       }
-      let bytes = await fileStore.get(artifact.markdownHash);
-      if (!bytes && artifact.ownerGuardRelaxed) {
-        try {
-          bytes = await fetchImportedArtifactMarkdownBytesFromOrigin(ctx, artifact);
-        } catch (err) {
-          if (err instanceof ImportArtifactRouteError) {
-            return jsonResponse(res, err.statusCode, {
-              error: err.message,
-              artifact,
-            });
-          }
-          throw err;
+      const selection = selectImportedArtifactMarkdownBytes(artifact);
+      let bytes: Buffer | null;
+      try {
+        bytes = await readImportedArtifactBytes(ctx, artifact, selection);
+      } catch (err) {
+        if (err instanceof ImportArtifactRouteError) {
+          return jsonResponse(res, err.statusCode, {
+            error: err.message,
+            artifact,
+          });
         }
+        throw err;
       }
       if (!bytes) {
         const message = artifact.ownerGuardRelaxed
@@ -1422,10 +1515,69 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
       }
       return jsonResponse(res, 200, {
         artifact,
-        markdownHash: artifact.markdownHash,
+        markdownHash: selection.hash,
         contentType: 'text/markdown',
         bytes: bytes.length,
         markdown: bytes.toString('utf8'),
+      });
+    } catch (err) {
+      if (handleImportArtifactRouteError(res, err)) return;
+      throw err;
+    }
+  }
+
+  // POST /api/assertion/import-artifact/read-file
+  // Context-aware read of the source/original bytes tied to a completed import.
+  if (req.method === "POST" && path === "/api/assertion/import-artifact/read-file") {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
+    try {
+      const record = parsed as Record<string, unknown>;
+      const artifact = await resolveImportedArtifact(ctx, record, {
+        requestAgentAddress,
+        message: 'Import artifact file bytes can only be read from imported assertions owned by the requesting agent',
+        relaxOnPublicOpenCg: true,
+      });
+      const selection = selectImportedArtifactSourceBytes(artifact, record);
+      const maxBytes = normalizeImportedArtifactFileReadLimit(record.maxBytes);
+      let bytes: Buffer | null;
+      try {
+        bytes = await readImportedArtifactBytes(ctx, artifact, selection);
+      } catch (err) {
+        if (err instanceof ImportArtifactRouteError) {
+          return jsonResponse(res, err.statusCode, {
+            error: err.message,
+            artifact,
+          });
+        }
+        throw err;
+      }
+      if (!bytes) {
+        const message = artifact.ownerGuardRelaxed
+          ? 'Source file bytes are not replicated locally on this peer, and the origin peer did not provide them'
+          : 'Source file content is not present in the file store';
+        return jsonResponse(res, 404, {
+          error: message,
+          artifact,
+        });
+      }
+      if (bytes.length > maxBytes) {
+        return jsonResponse(res, 413, {
+          error: `Source file content exceeds maxBytes (${maxBytes})`,
+          artifact,
+          bytes: bytes.length,
+        });
+      }
+      return jsonResponse(res, 200, {
+        artifact,
+        kind: selection.kind,
+        hash: selection.hash,
+        fileHash: selection.hash,
+        sourceFileHash: artifact.sourceFileHash,
+        contentType: selection.contentType,
+        bytes: bytes.length,
+        contentBase64: bytes.toString('base64'),
       });
     } catch (err) {
       if (handleImportArtifactRouteError(res, err)) return;
