@@ -2,7 +2,7 @@ import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@origintrail-official/dkg-chain';
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
-import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphAssertionUri, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, DKG_GOSSIP_MAX_MESSAGE_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad } from '@origintrail-official/dkg-core';
+import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphAssertionUri, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, DKG_GOSSIP_MAX_MESSAGE_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, parseAssertionSealQuads } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, type Publisher, type PublishOptions, type PublishResult, type KAManifestEntry, type PhaseCallback, type V10CoreNodeACK } from './publisher.js';
 import { autoPartition } from './auto-partition.js';
@@ -4010,7 +4010,6 @@ export class DKGPublisher implements Publisher {
     const subGraphName = opts?.subGraphName;
     const wmGraph = contextGraphAssertionUri(contextGraphId, agentAddress, name, subGraphName);
     const metaGraph = contextGraphMetaUri(contextGraphId);
-    const lifecycleSubject = assertionLifecycleUri(contextGraphId, agentAddress, name, subGraphName);
     const sourceGraph = sourceLayer === 'swm'
       ? this.graphManager.sharedMemoryUri(contextGraphId, subGraphName)
       : this.graphManager.dataGraphUri(contextGraphId);
@@ -4026,25 +4025,19 @@ export class DKGPublisher implements Publisher {
           { code: 'WM_DRAFT_CONFLICT' },
         );
       }
-      await this.store.dropGraph(wmGraph); // 'replace' — git force-checkout
     }
 
-    // Resolve the file's member entities from the seal (dual-read the predicate
-    // rename: dkg:assertionRootEntity OR dkg:assertionEntity, OT-RFC-43 §10.1).
-    const entityRes = await this.store.query(
-      `SELECT DISTINCT ?e WHERE { GRAPH <${metaGraph}> {
-         <${lifecycleSubject}> (<http://dkg.io/ontology/assertionRootEntity>|<http://dkg.io/ontology/assertionEntity>) ?e .
-       } }`,
+    const sealRes = await this.store.query(
+      `CONSTRUCT { <${wmGraph}> ?p ?o } WHERE { GRAPH <${metaGraph}> { <${wmGraph}> ?p ?o } }`,
     );
-    const entities = entityRes.type === 'bindings'
-      ? [...new Set(entityRes.bindings.map((b) => b['e']).filter(Boolean) as string[])]
-      : [];
-    if (entities.length === 0) {
+    const seal = parseAssertionSealQuads(sealRes.type === 'quads' ? sealRes.quads : [], wmGraph);
+    if (!seal) {
       throw new Error(
         `No sealed entity list for "${name}" in context graph "${contextGraphId}" — pull-from `
         + `requires a finalized assertion (its seal records the member entities).`,
       );
     }
+    const entities = seal.rootEntities;
 
     // Gather the source-layer quads scoped to the entity set + skolem children
     // (same filter the publish gather / RS prover use), minus trust/ownership
@@ -4060,12 +4053,23 @@ export class DKGPublisher implements Publisher {
     const gathered = gather.type === 'quads'
       ? gather.quads.filter((q) => !isTrustLevelQuad(q) && q.predicate !== WORKSPACE_OWNER_PREDICATE)
       : [];
+    if (gathered.length === 0) {
+      throw Object.assign(
+        new Error(
+          `No ${sourceLayer.toUpperCase()} quads found for "${name}" in context graph "${contextGraphId}" `
+          + `using the assertion seal's ${entities.length} root entit${entities.length === 1 ? 'y' : 'ies'}; `
+          + 'WM draft was not modified.',
+        ),
+        { code: 'PULL_FROM_EMPTY_SOURCE' },
+      );
+    }
 
     // Open a fresh WM draft (clears stale lifecycle/seal) and seed it.
-    await this.assertionCreate(contextGraphId, name, agentAddress, subGraphName);
-    if (gathered.length > 0) {
-      await this.assertionWrite(contextGraphId, name, agentAddress, gathered, subGraphName);
+    if (hasDraft) {
+      await this.store.dropGraph(wmGraph); // 'replace' — git force-checkout after source validation
     }
+    await this.assertionCreate(contextGraphId, name, agentAddress, subGraphName);
+    await this.assertionWrite(contextGraphId, name, agentAddress, gathered, subGraphName);
     return { seeded: gathered.length, fromLayer: sourceLayer, entities: entities.length };
   }
 

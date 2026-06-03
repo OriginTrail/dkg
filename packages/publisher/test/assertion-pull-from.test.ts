@@ -3,9 +3,9 @@ import { NoChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   TypedEventBus,
   generateEd25519Keypair,
-  assertionLifecycleUri,
   contextGraphMetaUri,
   contextGraphAssertionUri,
+  buildAssertionSealQuads,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { DKGPublisher } from '../src/index.js';
@@ -25,6 +25,8 @@ const ENTITY_1 = 'urn:e:alice';
 const ENTITY_2 = 'urn:e:bob';
 const SKOLEM_1 = `${ENTITY_1}/.well-known/genid/n1`;
 const OTHER_FILE_ENTITY = 'urn:e:carol-other-file';
+const AUTHOR = '0x1111111111111111111111111111111111111111';
+const KAV10 = '0x2222222222222222222222222222222222222222';
 
 async function makePublisher() {
   const store = new OxigraphStore();
@@ -41,11 +43,23 @@ function q(subject: string, predicate: string, object: string, graph: string): Q
   return { subject, predicate, object, graph };
 }
 
-/** Seal: record the file's member entities on the lifecycle URN in _meta. */
+/** Seal: record the finalized file's member entities on the assertion URI in _meta. */
 function sealEntities(entities: string[]): Quad[] {
-  const lifecycle = assertionLifecycleUri(CG, AGENT, NAME);
+  const assertionUri = contextGraphAssertionUri(CG, AGENT, NAME);
   const meta = contextGraphMetaUri(CG);
-  return entities.map((e) => q(lifecycle, `${DKG}assertionRootEntity`, `<${e}>`, meta));
+  return buildAssertionSealQuads({
+    assertionUri,
+    metaGraph: meta,
+    merkleRoot: new Uint8Array(32).fill(0x11),
+    authorAddress: AUTHOR,
+    authorAttestationR: new Uint8Array(32).fill(0x22),
+    authorAttestationVS: new Uint8Array(32).fill(0x33),
+    authorSchemeVersion: 1,
+    chainId: 31337n,
+    kav10Address: KAV10,
+    finalizedAtIso: '2026-06-03T00:00:00.000Z',
+    rootEntities: entities,
+  });
 }
 
 async function wmQuads(store: OxigraphStore): Promise<Quad[]> {
@@ -108,6 +122,38 @@ describe('assertionPullFrom (OT-RFC-43 §10.5.3 wm/pull-from)', () => {
     const subjects = new Set(draft.map((d) => d.subject));
     expect(subjects.has(ENTITY_2)).toBe(true);   // the SWM content
     expect(subjects.has(ENTITY_1)).toBe(false);  // the stale local edit is gone
+  });
+
+  it('onConflict:"replace" does not clobber a dirty draft when the source layer is empty', async () => {
+    const { publisher, store } = await makePublisher();
+    await store.insert(sealEntities([ENTITY_1]));
+    await publisher.assertionWrite(CG, NAME, AGENT, [{ subject: ENTITY_2, predicate: SCHEMA, object: '"local edit"' }]);
+
+    const err = await publisher.assertionPullFrom(CG, NAME, AGENT, 'swm', { onConflict: 'replace' }).catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as any).code).toBe('PULL_FROM_EMPTY_SOURCE');
+
+    const draft = await wmQuads(store);
+    expect(draft).toHaveLength(1);
+    expect(draft[0]).toMatchObject({ subject: ENTITY_2, predicate: SCHEMA, object: '"local edit"' });
+  });
+
+  it('rejects unsafe root entities from a corrupted seal before building the source query', async () => {
+    const { publisher, store } = await makePublisher();
+    const corruptedSeal = sealEntities([ENTITY_1]).map((quad) =>
+      quad.predicate === `${DKG}assertionRootEntity`
+        ? { ...quad, object: '"urn:e:bad root"' }
+        : quad,
+    );
+    await store.insert([
+      q(ENTITY_1, SCHEMA, '"Alice"', SWM_GRAPH),
+      ...corruptedSeal,
+    ]);
+
+    const err = await publisher.assertionPullFrom(CG, NAME, AGENT, 'swm').catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(/invalid assertionRootEntity IRI/i);
+    expect(await wmQuads(store)).toHaveLength(0);
   });
 
   it('throws when the file has no sealed entity list (never finalized)', async () => {

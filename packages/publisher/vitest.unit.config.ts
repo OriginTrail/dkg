@@ -11,6 +11,7 @@ export default defineConfig({
       'test/verify-proposal-handler.test.ts',
       'test/views-min-trust-extra.test.ts',
       'test/async-promote-queue.test.ts',
+      'test/assertion-pull-from.test.ts',
     ],
     testTimeout: 60_000,
     maxWorkers: 1,
