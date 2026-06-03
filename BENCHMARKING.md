@@ -30,6 +30,27 @@ bytes.
 Add new suites under `bench/**/*.bench.ts` as performance-sensitive paths become
 obvious.
 
+## Node-communication / sync benchmark
+
+ESBench is an in-process microbenchmark and does not model peer-to-peer sync. For
+**node-to-node communication** — how long it takes one node to sync a newly
+shared item from another, and how much memory/disk that costs — see
+[`bench/node-comms/`](bench/node-comms/README.md). It boots real `DKGAgent` nodes
+over loopback libp2p (chain-free), records time + memory + disk per scenario,
+persists a history, and **flags day-over-day regressions** (default >15%) with a
+rolling-median baseline and absolute-delta floors so it doesn't false-alarm on
+microbenchmark jitter.
+
+```bash
+pnpm bench:node-comms                 # run + compare + flag regressions
+pnpm bench:node-comms:baseline        # pin the current run as the baseline
+pnpm bench:node-comms:check           # re-check the last run without re-running
+pnpm bench:node-comms:daily           # rebuild + run, exit 1 on a flagged regression
+```
+
+It is meant to run every day (see the launchd/cron setup in the README) and exits
+non-zero when an enforced regression is detected, so a scheduler can alert.
+
 ## Local Usage
 
 Run correctness tests:

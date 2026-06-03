@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd template for the daily DKG node-communication benchmark (macOS).
+
+  Install:
+    1. Replace __REPO_ROOT__   with the absolute path to this repo.
+    2. Replace __NODE_BIN_DIR__ with the dir containing node/corepack/pnpm
+       (e.g. the output of `dirname "$(command -v node)"`).
+    3. Copy to ~/Library/LaunchAgents/com.dkg.bench-node-comms.plist
+    4. launchctl load ~/Library/LaunchAgents/com.dkg.bench-node-comms.plist
+
+  Runs daily at 03:30. A non-zero exit (regression flagged) is recorded in the
+  StandardErrorPath log; pair with a log watcher / notifier to alert.
+
+  On Linux, use cron instead — see bench/node-comms/README.md.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.dkg.bench-node-comms</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__REPO_ROOT__/scripts/bench-node-comms-daily.sh</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__REPO_ROOT__</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>__NODE_BIN_DIR__:/usr/local/bin:/usr/bin:/bin</string>
+    <key>BENCH_REGRESSION_THRESHOLD_PCT</key>
+    <string>15</string>
+  </dict>
+
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>3</integer>
+    <key>Minute</key>
+    <integer>30</integer>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>__REPO_ROOT__/bench/results/node-comms/logs/launchd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__REPO_ROOT__/bench/results/node-comms/logs/launchd.err.log</string>
+
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>
