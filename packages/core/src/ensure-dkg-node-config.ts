@@ -107,8 +107,11 @@ export function ensureDkgNodeConfig(opts: EnsureDkgNodeConfigOptions): void {
   const dir = dkgDir();
   const configPath = join(dir, 'config.json');
   // A pre-existing config gates the store-default seeding below (issue #960):
-  // we only adopt the new default on a genuinely fresh install.
-  const configExisted = existsSync(configPath);
+  // we only adopt the new default on a genuinely fresh install. Check BOTH
+  // `config.json` and `config.yaml` — `loadConfig` / `resolveDkgConfigHome`
+  // both treat a YAML-only config as a valid existing node, so a YAML node must
+  // not be misread as fresh and silently flipped onto a new backend.
+  const configExisted = existsSync(configPath) || existsSync(join(dir, 'config.yaml'));
   mkdirSync(dir, { recursive: true });
 
   // Explicit CLI overrides (--name, --port) take precedence over existing

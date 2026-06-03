@@ -47,6 +47,19 @@ describe('ensureDkgNodeConfig — store-backend default (issue #960)', () => {
     expect(readWritten().store).toBeUndefined();
   });
 
+  it('treats a YAML-only existing node as existing (does NOT seed)', () => {
+    // loadConfig / resolveDkgConfigHome accept config.yaml as a valid config, so
+    // a YAML-only node must not be misclassified as fresh and flipped.
+    writeFileSync(join(tempHome, 'config.yaml'), 'name: node-a\nnodeRole: edge\n');
+    ensureDkgNodeConfig({
+      agentName: 'node-a',
+      network: NETWORK,
+      apiPort: 9200,
+      existing: { name: 'node-a', nodeRole: 'edge' },
+    });
+    expect(readWritten().store).toBeUndefined();
+  });
+
   it('preserves an explicit existing store block (even on a fresh write)', () => {
     const store = { backend: 'blazegraph', options: { url: 'http://localhost:9999/blazegraph' } };
     ensureDkgNodeConfig({ agentName: 'node-a', network: NETWORK, apiPort: 9200, existing: { store } });

@@ -7,6 +7,7 @@ import { spawn, execSync } from 'node:child_process';
 import { createReadStream } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { homedir } from 'node:os';
 import { readFile, writeFile, unlink, appendFile } from 'node:fs/promises';
 import { ethers } from 'ethers';
 import { resolveRpcUrls } from '@origintrail-official/dkg-chain';
@@ -602,13 +603,31 @@ program
     // OT-RFC-41 follow-up (issue #960): `dkg init` runs normally from a monorepo
     // checkout, exactly like an npm install — the only difference is the home
     // directory. The CLI's home resolver (`dkgDir()` → `resolveDkgConfigHome`)
-    // already routes a clone to `~/.dkg-dev` (kept separate from an npm
-    // install's `~/.dkg`), which is the SAME home the local dev daemon resolves
-    // — so init writes the dev config with no risk of the two diverging. We
-    // surface which home is being written so it's obvious in a checkout.
-    // (PR #753 / Bundle B1c previously hard-refused here; that was over-strict —
-    // the home resolution, not a refusal, is what keeps dev and npm state apart.)
-    if (isDkgMonorepo()) {
+    // routes a clone to `~/.dkg-dev` (kept separate from an npm install's
+    // `~/.dkg`), the SAME home the local dev daemon resolves, so init writes the
+    // dev config with no risk of the two diverging.
+    //
+    // The one case Bundle B1c (PR #753) was right to guard: when an npm-installed
+    // node already owns `~/.dkg`, the resolver intentionally falls back to
+    // `~/.dkg`, and a checkout `dkg init` would then overwrite that installed
+    // node's config. We refuse only that stomping case (and only when the user
+    // hasn't explicitly chosen a home via DKG_HOME); otherwise we proceed into
+    // the dev home and surface where we're writing.
+    if (isDkgMonorepo() && !process.env.DKG_HOME?.trim()) {
+      const npmHome = join(homedir(), '.dkg');
+      const npmNodeConfigExists =
+        existsSync(join(npmHome, 'config.json')) || existsSync(join(npmHome, 'config.yaml'));
+      if (npmNodeConfigExists) {
+        console.error(
+          '\n[dkg init] Refusing: an npm-installed node config already exists at ~/.dkg, and\n' +
+            '  running `dkg init` from this monorepo checkout would overwrite it. To bootstrap a\n' +
+            '  separate dev config without touching the installed node, point DKG_HOME at a\n' +
+            '  dev/scratch home:\n' +
+            '\n' +
+            '    DKG_HOME=~/.dkg-dev dkg init\n',
+        );
+        process.exit(1);
+      }
       console.log(
         `[dkg init] Monorepo checkout detected — writing dev config to ${dkgDir()} ` +
           `(set DKG_HOME to override).`,
