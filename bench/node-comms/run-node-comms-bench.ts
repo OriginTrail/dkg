@@ -329,10 +329,16 @@ async function runCatchup(
       const prefix = `urn:bench:${runId}:catchup:${i}:`;
       await seedAgent.createContextGraph({ id: iterCg, name: `catchup-${runId}-${i}` });
       seedAgent.subscribeToContextGraph(iterCg);
-      // Seed the SWM locally (no gossip) so the joiner must PULL it via the
-      // sync protocol on connect rather than receive a live broadcast.
+      // Seed via the normal share() path while the joiner is still offline:
+      // data is written to real SWM (Oxigraph) and gossip is attempted; with no
+      // peer connected yet nothing is delivered live, so the late joiner must
+      // pull via sync-on-connect — not localOnly (which skips gossip entirely).
       for (let k = 0; k < opts.bulk; k += 1) {
-        await seedAgent.share(iterCg, [nameQuad(`${prefix}${k}`, `catchup-${i}-${k}`)], { localOnly: true });
+        await seedAgent.share(iterCg, [nameQuad(`${prefix}${k}`, `catchup-${i}-${k}`)]);
+      }
+      const seeded = await countSubjects(seedAgent, iterCg, prefix);
+      if (seeded < opts.bulk) {
+        throw new Error(`seed node only has ${seeded}/${opts.bulk} entities in SWM before catch-up`);
       }
 
       const addrA = await tcpAddr(seedAgent);

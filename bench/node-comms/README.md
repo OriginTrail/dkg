@@ -10,6 +10,22 @@ boots **real `DKGAgent` nodes over loopback libp2p** and exercises the actual
 peer-to-peer path: SWM gossip and the sync-on-connect protocol. It is chain-free
 (no Hardhat, no daemon) so it is cheap enough to run every day.
 
+### No mocks — real nodes, real storage, real protocols
+
+There are **no** Vitest/Jest mocks, stubs, or fake network layers in this suite.
+Each run starts full `DKGAgent` instances (same stack as `dkg start`: libp2p,
+Oxigraph triple store on disk via `dataDir`, Universal Messenger / sync protocol).
+Data is real RDF quads written through `share()` and read back with `query()` on
+the `_shared_memory` graph — not canned responses.
+
+| Piece | What the benchmark uses |
+| --- | --- |
+| Node runtime | Real `DKGAgent` + `DKGNode` (in-process, not a test double) |
+| Network | Real libp2p TCP on loopback (`connectTo`, GossipSub, sync-on-connect) |
+| Storage | Persistent Oxigraph under each agent's temp `dataDir` |
+| Chain | `NoChainAdapter` (production adapter when no RPC is configured — **not** `MockChainAdapter`). SWM scenarios do not call on-chain APIs. |
+| Catch-up seeding | Normal `share()` while the joiner is offline; joiner pulls via sync-on-connect (no `localOnly` shortcut) |
+
 ## Scenarios
 
 | Scenario | What it measures |
