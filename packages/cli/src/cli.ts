@@ -27,7 +27,7 @@ import {
   apiPortPath,
   loadNetworkConfig, loadProjectConfig, resolveAutoUpdateConfig, resolveAutoUpdateSource, resolveChainConfig,
   releasesDir, activeSlot, swapSlot,
-  slotEntryPoint, isStandaloneInstall, repoDir, isDkgMonorepo, classifyMonorepoInit,
+  slotEntryPoint, isStandaloneInstall, repoDir, isDkgMonorepo, classifyMonorepoInit, sharedHomeInitGate,
   resolveContextGraphs, resolveNetworkDefaultContextGraphs,
   readNodeRoleFromConfigSync,
   type AutoUpdateConfig,
@@ -599,17 +599,25 @@ program
     '--store-url <url>',
     'Pre-fill the SPARQL endpoint URL prompt for external backends.',
   )
+  .option(
+    '-y, --yes',
+    'Skip the confirmation prompt when running from a monorepo checkout into an existing ~/.dkg home (non-interactive opt-in to modifying it).',
+  )
   .action(async (opts: ActionOpts) => {
     // OT-RFC-41 follow-up (issue #960): `dkg init` runs normally from a monorepo
     // checkout, exactly like an npm install — the only difference is the home
     // directory. The CLI's home resolver (`dkgDir()` → `resolveDkgConfigHome`)
     // routes a clone to `~/.dkg-dev` (kept separate from an npm install's
-    // `~/.dkg`), the SAME home the local dev daemon resolves. We never block:
-    // we only NOTE the dev home, or WARN if the resolver fell back to a
-    // pre-existing `~/.dkg` (which *might* be an npm-installed node — but config
-    // presence isn't proof of npm ownership, and a dev may use `~/.dkg`
-    // intentionally, so a hard refusal would be wrong). See `classifyMonorepoInit`.
-    // (PR #753 / Bundle B1c hard-refused all monorepo inits; that was over-strict.)
+    // `~/.dkg`), the SAME home the local dev daemon resolves. (PR #753 /
+    // Bundle B1c hard-refused all monorepo inits; that was over-strict.)
+    //
+    // The one risky case is `shared-npm-home`: a clone with no `DKG_HOME` where
+    // the resolver fell back to a pre-existing `~/.dkg` (which *might* be an
+    // npm-installed node). We must neither silently proceed (a missed warning
+    // would mutate that node's config) nor hard-block (config presence isn't
+    // proof of ownership, and a dev may target `~/.dkg` on purpose), so we
+    // require an explicit opt-in via `sharedHomeInitGate`: confirm interactively
+    // or pass `--yes`. See `classifyMonorepoInit` + `sharedHomeInitGate`.
     switch (classifyMonorepoInit({
       isMonorepo: isDkgMonorepo(),
       dkgHomeEnv: process.env.DKG_HOME,
@@ -622,15 +630,45 @@ program
             `(set DKG_HOME to override).`,
         );
         break;
-      case 'shared-npm-home':
+      case 'shared-npm-home': {
+        const home = dkgDir();
+        const gate = sharedHomeInitGate({
+          yes: opts.yes === true,
+          isTty: Boolean(process.stdin.isTTY),
+        });
+        if (gate === 'refuse') {
+          console.error(
+            `\n[dkg init] Refusing to modify the existing config home ${home} non-interactively.\n` +
+              `  A config already exists there and this is a monorepo checkout, so it may belong\n` +
+              `  to an npm-installed node. To proceed, choose one:\n` +
+              `    • re-run interactively and confirm at the prompt, or\n` +
+              `    • pass --yes to opt in explicitly, or\n` +
+              `    • keep this checkout isolated:  DKG_HOME=~/.dkg-dev dkg init\n`,
+          );
+          process.exit(1);
+        }
+        if (gate === 'prompt') {
+          const confirmRl = createInterface({ input: process.stdin, output: process.stdout });
+          const confirmed = await new Promise<boolean>(resolve => {
+            confirmRl.question(
+              `\n[dkg init] ⚠️  ${home} already contains a DKG config and this is a monorepo\n` +
+                `  checkout — it may belong to an npm-installed node. Continuing will read and\n` +
+                `  may OVERWRITE it. (Use DKG_HOME=~/.dkg-dev to keep this checkout isolated.)\n` +
+                `  Continue and modify ${home}? [y/N]: `,
+              answer => resolve(/^y(es)?$/i.test(answer.trim())),
+            );
+          }).finally(() => confirmRl.close());
+          if (!confirmed) {
+            console.error(`\n[dkg init] Aborted — ${home} left unchanged.\n`);
+            process.exit(1);
+          }
+        }
         console.warn(
-          `\n[dkg init] Note: writing to the existing ~/.dkg config home (${dkgDir()}), not a\n` +
-            `  separate dev home, because a config already exists there. If ~/.dkg belongs to an\n` +
-            `  npm-installed node you don't want this checkout to modify, re-run with a dev home:\n` +
-            `\n` +
-            `    DKG_HOME=~/.dkg-dev dkg init\n`,
+          `[dkg init] Proceeding into existing ${home}` +
+            `${opts.yes === true ? ' (--yes)' : ' (confirmed)'}.`,
         );
         break;
+      }
       default:
         break;
     }

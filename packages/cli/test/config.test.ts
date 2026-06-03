@@ -21,6 +21,7 @@ import {
   isDkgMonorepo,
   dkgDir,
   classifyMonorepoInit,
+  sharedHomeInitGate,
   repoDir,
   resolveAutoUpdateSource,
   resolveApprovalPolicy,
@@ -51,9 +52,24 @@ describe('classifyMonorepoInit (dkg init monorepo home guard — issue #960)', (
       .toBe('dev-home');
   });
 
-  it('monorepo, ~/.dkg config present → shared-npm-home (resolver fell back to ~/.dkg): warn, not block', () => {
+  it('monorepo, ~/.dkg config present → shared-npm-home (resolver fell back to ~/.dkg): gated opt-in', () => {
     expect(classifyMonorepoInit({ isMonorepo: true, dkgHomeEnv: undefined, resolvedHome: npmHome, npmHome }))
       .toBe('shared-npm-home');
+  });
+});
+
+describe('sharedHomeInitGate (dkg init shared ~/.dkg opt-in — issue #960 round-3)', () => {
+  it('--yes → proceed (explicit non-interactive opt-in, regardless of TTY)', () => {
+    expect(sharedHomeInitGate({ yes: true, isTty: false })).toBe('proceed');
+    expect(sharedHomeInitGate({ yes: true, isTty: true })).toBe('proceed');
+  });
+
+  it('interactive TTY, no --yes → prompt (ask before touching ~/.dkg)', () => {
+    expect(sharedHomeInitGate({ yes: false, isTty: true })).toBe('prompt');
+  });
+
+  it('non-interactive, no --yes → refuse (cannot ask; must not silently overwrite)', () => {
+    expect(sharedHomeInitGate({ yes: false, isTty: false })).toBe('refuse');
   });
 });
 

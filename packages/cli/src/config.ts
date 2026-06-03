@@ -1006,11 +1006,14 @@ export type MonorepoInitTarget = 'not-monorepo' | 'explicit-home' | 'dev-home' |
  *                        notice only.
  *  - `shared-npm-home` — monorepo checkout, no `DKG_HOME`, but a config already
  *                        exists at `~/.dkg` so `resolveDkgConfigHome` falls back
- *                        to it; init would write the shared `~/.dkg` home (which
- *                        *might* be an npm-installed node). We only **warn** —
- *                        config presence is not proof of npm ownership, and a
- *                        dev may intentionally use `~/.dkg`, so blocking would be
- *                        wrong.
+ *                        to it; init would read and may OVERWRITE the shared
+ *                        `~/.dkg` home (which *might* be an npm-installed node).
+ *                        The command must NOT silently proceed (that can mutate
+ *                        an installed node's config if the operator misses the
+ *                        warning) and must NOT hard-block (config presence isn't
+ *                        proof of npm ownership, and a dev may intentionally use
+ *                        `~/.dkg`). The caller gates this case behind an explicit
+ *                        opt-in via {@link sharedHomeInitGate}.
  *
  * `resolvedHome === npmHome` is the signal for the fallback: `dkgDir()` returns
  * `~/.dkg` (rather than `~/.dkg-dev`) only when the resolver's own
@@ -1026,6 +1029,33 @@ export function classifyMonorepoInit(params: {
   if (!params.isMonorepo) return 'not-monorepo';
   if (params.dkgHomeEnv?.trim()) return 'explicit-home';
   return params.resolvedHome === params.npmHome ? 'shared-npm-home' : 'dev-home';
+}
+
+export type SharedHomeInitGate = 'proceed' | 'prompt' | 'refuse';
+
+/**
+ * Decide how `dkg init` should gate the {@link classifyMonorepoInit}
+ * `shared-npm-home` case — running from a monorepo checkout into a pre-existing
+ * `~/.dkg` that may belong to an npm-installed node (issue #960, round-3
+ * review). A plain warn-and-proceed is a regression: a contributor who misses
+ * the warning silently mutates the installed node's config. A hard refusal is
+ * also wrong (a dev may intentionally target `~/.dkg`). So we require an
+ * **explicit opt-in**:
+ *
+ *  - `proceed` — the operator passed `--yes`; honor the explicit opt-in.
+ *  - `prompt`  — interactive TTY; ask for confirmation before touching `~/.dkg`.
+ *  - `refuse`  — non-interactive and no `--yes`; we can't ask and must not
+ *                silently overwrite, so abort with guidance (re-run with
+ *                `--yes`, or set `DKG_HOME`).
+ *
+ * Pure + injectable so all three branches are unit-testable without a TTY.
+ */
+export function sharedHomeInitGate(params: {
+  yes: boolean;
+  isTty: boolean;
+}): SharedHomeInitGate {
+  if (params.yes) return 'proceed';
+  return params.isTty ? 'prompt' : 'refuse';
 }
 
 /**
