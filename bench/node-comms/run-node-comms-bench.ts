@@ -58,6 +58,7 @@ import {
   pollUntil,
   round,
   sleep,
+  style,
   summarize,
   type NodeCommsResult,
   type ScenarioResult,
@@ -395,9 +396,14 @@ async function main(): Promise<void> {
   const memory = new MemorySampler();
   memory.start();
 
-  console.log(`\n▶ node-comms benchmark  (run ${runId})`);
-  console.log(`  iterations=${opts.iterations}  catchup-iterations=${opts.catchupIterations}  bulk=${opts.bulk}  warmups=${opts.warmups}  threshold=+${opts.thresholdPct}%`);
-  console.log(`  temp data: ${baseDir}`);
+  const hrule = '═'.repeat(72);
+  console.log('');
+  console.log(style.bold(hrule));
+  console.log(style.bold('  DKG · node-communication benchmark'));
+  console.log(style.bold(hrule));
+  console.log(`  ${style.dim('what')}   how fast nodes sync new data, and the memory + disk it costs`);
+  console.log(`  ${style.dim('run')}    ${runId}  ${style.dim('·')}  ${opts.iterations} iterations  ${style.dim('·')}  burst ${opts.bulk}  ${style.dim('·')}  ${opts.catchupIterations} catch-up  ${style.dim('·')}  flag >+${opts.thresholdPct}%`);
+  console.log('');
 
   const scenarios: Record<string, ScenarioResult> = {};
   let nodeA: Agent | undefined;
@@ -410,7 +416,11 @@ async function main(): Promise<void> {
     try {
       const dirA = join(baseDir, 'live-A');
       const dirB = join(baseDir, 'live-B');
-      console.log('  • starting two connected nodes (A, B)…');
+      const step = (n: number, text: string) => console.log(`  ${style.cyan(`[${n}/3]`)} ${text}`);
+      const ok = (label: string, value: string) =>
+        console.log(`        ${style.gray(label.padEnd(14))} ${style.bold(value)}`);
+
+      step(1, 'starting two connected nodes (A ↔ B)…');
       nodeA = await makeAgent('liveA', dirA);
       nodeB = await makeAgent('liveB', dirB);
       await sleep(500);
@@ -425,14 +435,14 @@ async function main(): Promise<void> {
       nodeB.subscribeToContextGraph(liveCg);
       await sleep(SETTLE_MS);
 
-      console.log('  • scenario 1+2: live gossip propagation (single + bulk)…');
+      step(2, 'measuring live sync (one item, then a burst)…');
       const live = await runLivePropagation(nodeA, nodeB, dirB, liveCg, runId, opts);
       scenarios['swm_gossip_propagation_single'] = live.single;
       scenarios['swm_bulk_propagation'] = live.bulk;
-      console.log(`      single median ${live.single.durationMs.median}ms  p95 ${live.single.durationMs.p95}ms`);
-      console.log(`      bulk(${opts.bulk}) median ${live.bulk.durationMs.median}ms  (${live.bulk.perItemMsMean}ms/item)`);
+      ok('one item', `${live.single.durationMs.median} ms ${style.dim('typical')}  ·  ${live.single.durationMs.p95} ms ${style.dim('worst')}`);
+      ok(`burst (${opts.bulk})`, `${live.bulk.durationMs.median} ms ${style.dim('total')}  ·  ${live.bulk.perItemMsMean} ms/item`);
 
-      console.log('  • scenario 3: cold catch-up via sync-on-connect…');
+      step(3, 'measuring cold catch-up (a late joiner pulls existing data)…');
       scenarios['swm_catchup_on_connect'] = await runCatchup(
         `node-comms-catchup-${runId}`,
         runId,
@@ -440,7 +450,7 @@ async function main(): Promise<void> {
         opts,
         registerCleanup,
       );
-      console.log(`      catch-up median ${scenarios['swm_catchup_on_connect'].durationMs.median}ms`);
+      ok('catch-up', `${scenarios['swm_catchup_on_connect'].durationMs.median} ms ${style.dim('typical')}`);
 
       await sleep(600);
       finalDiskA = await directorySizeBytes(dirA);
@@ -480,8 +490,10 @@ async function main(): Promise<void> {
 
     const latestPath = join(opts.outDir, 'latest.json');
     await writeFile(latestPath, `${JSON.stringify(result, null, 2)}\n`, 'utf8');
-    console.log(`\n  wrote ${latestPath}`);
-    console.log(`  peak RSS ${formatBytes(mem.peakRssBytes)}  •  receiver disk A ${formatBytes(finalDiskA)} / B ${formatBytes(finalDiskB)}`);
+    console.log('');
+    console.log(`        ${style.gray('peak memory   ')} ${style.bold(formatBytes(mem.peakRssBytes))}`);
+    console.log(`        ${style.gray('node disk     ')} A ${style.bold(formatBytes(finalDiskA))} ${style.dim('·')} B ${style.bold(formatBytes(finalDiskB))}`);
+    console.log(`        ${style.gray('saved         ')} ${style.dim(latestPath)}`);
 
     // Regression check uses a pinned baseline.json or a rolling-median of prior
     // history runs. Run it BEFORE appending this run to history, and exclude the

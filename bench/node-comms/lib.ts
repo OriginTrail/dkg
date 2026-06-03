@@ -214,3 +214,47 @@ export function formatBytes(bytes: number): string {
   }
   return `${round(value)} ${units[unit]}`;
 }
+
+// ── Pretty terminal output ────────────────────────────────────────────────
+/**
+ * ANSI colour is enabled only for an interactive TTY (so the daily runner,
+ * which tees output to a log file, stays clean plain-text). Honours the
+ * `NO_COLOR` and `FORCE_COLOR` conventions.
+ */
+function colorEnabled(): boolean {
+  if (process.env.NO_COLOR !== undefined) return false;
+  if (process.env.FORCE_COLOR !== undefined) return process.env.FORCE_COLOR !== '0';
+  return Boolean(process.stdout.isTTY) && process.env.TERM !== 'dumb';
+}
+
+const COLOR = colorEnabled();
+const paint = (code: string) => (s: string): string => (COLOR ? `\x1b[${code}m${s}\x1b[0m` : s);
+
+/** Minimal, dependency-free ANSI styler. No-ops when colour is disabled. */
+export const style = {
+  enabled: COLOR,
+  bold: paint('1'),
+  dim: paint('2'),
+  red: paint('31'),
+  green: paint('32'),
+  yellow: paint('33'),
+  cyan: paint('36'),
+  gray: paint('90'),
+};
+
+/** Visible width of a string, ignoring ANSI escape sequences. */
+export function visibleLength(s: string): number {
+  return s.replace(/\x1b\[[0-9;]*m/g, '').length;
+}
+
+/** Right-pad to a visible width (ANSI-aware). */
+export function padEndVisible(s: string, width: number): string {
+  const pad = width - visibleLength(s);
+  return pad > 0 ? s + ' '.repeat(pad) : s;
+}
+
+/** Left-pad to a visible width (ANSI-aware). */
+export function padStartVisible(s: string, width: number): string {
+  const pad = width - visibleLength(s);
+  return pad > 0 ? ' '.repeat(pad) + s : s;
+}

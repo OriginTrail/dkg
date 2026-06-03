@@ -29,7 +29,16 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { collectMetrics, formatBytes, median, round, type NodeCommsResult } from './lib.ts';
+import {
+  collectMetrics,
+  formatBytes,
+  median,
+  round,
+  style,
+  padEndVisible,
+  padStartVisible,
+  type NodeCommsResult,
+} from './lib.ts';
 
 export const DEFAULT_THRESHOLD_PCT = 15;
 export const DEFAULT_WINDOW = 10;
@@ -237,73 +246,187 @@ export async function loadReference(
 function fmt(metric: string, value: number): string {
   if (!Number.isFinite(value)) return String(value);
   if (isByteMetric(metric)) return formatBytes(value);
-  if (metric.includes('storeQuads')) return `${value} quads`;
+  if (metric.includes('storeQuads')) return `${value} records`;
   return `${round(value)} ms`;
 }
 
 function deltaLabel(c: Comparison): string {
-  if (c.deltaPct === null) return '   n/a';
-  if (c.deltaPct === Number.POSITIVE_INFINITY) return '   +∞%';
+  if (c.deltaPct === null) return 'new';
+  if (c.deltaPct === Number.POSITIVE_INFINITY) return '+∞%';
   return `${c.deltaPct >= 0 ? '+' : ''}${c.deltaPct}%`;
 }
 
-export function renderReport(report: RegressionReport): string {
-  const lines: string[] = [];
-  lines.push('');
-  lines.push('═══════════════════════════════════════════════════════════════════');
-  lines.push('  node-comms benchmark — regression check');
-  lines.push('═══════════════════════════════════════════════════════════════════');
-  if (!report.reference) {
-    lines.push('  No reference found — this run establishes the baseline.');
-    lines.push('  Re-run after the next benchmark to compare day-over-day.');
-    lines.push('═══════════════════════════════════════════════════════════════════');
-    return lines.join('\n');
-  }
-  lines.push(`  reference : ${report.reference.label}`);
-  lines.push(`              (${report.reference.timestamp}, via ${report.reference.source})`);
-  lines.push(`  threshold : +${report.thresholdPct}%  (higher = worse for every metric)`);
-  lines.push(`  floors    : ${report.minDelta.ms}ms · ${formatBytes(report.minDelta.memBytes)} mem · ${formatBytes(report.minDelta.diskBytes)} disk · ${report.minDelta.quads} quad`);
-  if (!report.enforced) {
-    lines.push(`  mode      : REPORT-ONLY (baseline warming up — ${report.reference.sampleCount}/${DEFAULT_MIN_REFERENCE_SAMPLES} runs)`);
-  }
-  lines.push('───────────────────────────────────────────────────────────────────');
-  for (const c of report.comparisons) {
-    const marker = c.flagged
-      ? '🚩'
-      : c.informational && c.direction === 'regression'
-        ? '📊' // over threshold but non-gating (tail/spread stat)
-        : c.direction === 'improvement'
-          ? '✅'
-          : c.direction === 'new'
-            ? '🆕'
-            : '  ';
-    const label = c.informational ? `${c.metric} (info)` : c.metric;
-    lines.push(`  ${marker} ${label.padEnd(52)} ${deltaLabel(c).padStart(9)}`);
-    if (c.direction !== 'new') {
-      lines.push(`        ${fmt(c.metric, c.reference)}  →  ${fmt(c.metric, c.current)}`);
-    } else {
-      lines.push(`        (no reference value) → ${fmt(c.metric, c.current)}`);
+// ── Friendly names ─────────────────────────────────────────────────────────
+const RULE = '─'.repeat(72);
+const HRULE = '═'.repeat(72);
+
+const SCENARIOS: Array<{ key: string; title: string; blurb: string }> = [
+  {
+    key: 'swm_gossip_propagation_single',
+    title: 'Sync ONE new item  (A → B)',
+    blurb: 'time for a single new entity to reach a connected peer',
+  },
+  {
+    key: 'swm_bulk_propagation',
+    title: 'Sync a BURST of items',
+    blurb: 'time for many new entities to all reach the peer',
+  },
+  {
+    key: 'swm_catchup_on_connect',
+    title: 'CATCH UP after joining late',
+    blurb: 'a fresh node connects and pulls everything that already existed',
+  },
+];
+
+// Metric suffix → friendly label, in display order within a scenario.
+const SCENARIO_METRICS: Array<{ suffix: string; label: string }> = [
+  { suffix: 'durationMs.median', label: 'time · typical' },
+  { suffix: 'durationMs.mean', label: 'time · average' },
+  { suffix: 'durationMs.p95', label: 'time · worst case' },
+  { suffix: 'perItemMsMean', label: 'time · per item' },
+  { suffix: 'receiver.diskBytes', label: 'disk written' },
+  { suffix: 'receiver.storeQuads', label: 'records stored' },
+];
+
+const RESOURCE_METRICS: Array<{ metric: string; label: string }> = [
+  { metric: 'process.peakRssBytes', label: 'peak memory (total)' },
+  { metric: 'process.peakHeapUsedBytes', label: 'peak memory (heap)' },
+  { metric: 'process.finalHeapUsedBytes', label: 'memory after cleanup' },
+  { metric: 'disk.nodeA.dataDirBytes', label: 'node A disk total' },
+  { metric: 'disk.nodeB.dataDirBytes', label: 'node B disk total' },
+];
+
+/** Human-readable "<scenario> · <metric>" name used in verdict lists. */
+function friendlyName(metric: string): string {
+  for (const s of SCENARIOS) {
+    const prefix = `scenario.${s.key}.`;
+    if (metric.startsWith(prefix)) {
+      const suffix = metric.slice(prefix.length);
+      const m = SCENARIO_METRICS.find((x) => x.suffix === suffix);
+      return `${s.title.replace(/\s{2,}.*/, '').trim()} · ${m?.label ?? suffix}`;
     }
   }
-  lines.push('───────────────────────────────────────────────────────────────────');
-  if (report.regressionCount === 0) {
-    lines.push('  ✅ No regressions above threshold.');
-  } else if (!report.enforced) {
-    lines.push(`  ⚠️  ${report.regressionCount} metric(s) above +${report.thresholdPct}% — NOT failing (baseline warming up).`);
+  const r = RESOURCE_METRICS.find((x) => x.metric === metric);
+  return r ? r.label : metric;
+}
+
+const LABEL_W = 22;
+const VAL_W = 11;
+
+/** One aligned, colourised metric row. */
+function renderRow(label: string, c: Comparison | undefined): string {
+  if (!c) return '';
+  const labelCol = padEndVisible(style.gray(label), LABEL_W);
+  if (c.direction === 'new') {
+    const cur = padStartVisible(fmt(c.metric, c.current), VAL_W);
+    return `    ${style.gray('•')} ${labelCol}  ${padStartVisible(style.dim('—'), VAL_W)}  →  ${cur}   ${style.dim('first run')}`;
+  }
+  const ref = padStartVisible(fmt(c.metric, c.reference), VAL_W);
+  const cur = padStartVisible(fmt(c.metric, c.current), VAL_W);
+  const delta = padStartVisible(deltaLabel(c), 7);
+  const arrowChar = c.absDelta === 0 ? '=' : c.absDelta > 0 ? '▲' : '▼';
+
+  let arrow: string;
+  let deltaCol: string;
+  let status: string;
+  if (c.flagged) {
+    arrow = style.red(arrowChar);
+    deltaCol = style.red(delta);
+    status = style.red(style.bold('REGRESSION'));
+  } else if (c.informational && c.direction === 'regression') {
+    arrow = style.yellow(arrowChar);
+    deltaCol = style.yellow(delta);
+    status = style.dim('tail spike · ignored');
+  } else if (c.direction === 'improvement') {
+    arrow = style.green(arrowChar);
+    deltaCol = style.green(delta);
+    status = style.green('improved');
   } else {
-    lines.push(`  🚩 ${report.regressionCount} regression(s) above +${report.thresholdPct}% — FLAGGED.`);
+    arrow = style.dim(arrowChar);
+    deltaCol = style.dim(delta);
+    status = style.dim('ok');
+  }
+  return `    ${arrow} ${labelCol}  ${style.dim(ref)}  →  ${style.bold(cur)}   ${deltaCol}  ${status}`;
+}
+
+export function renderReport(report: RegressionReport): string {
+  const L: string[] = [];
+  const push = (s = '') => L.push(s);
+
+  push();
+  push(style.bold(HRULE));
+  push(style.bold('  REGRESSION CHECK'));
+  push(style.bold(HRULE));
+
+  if (!report.reference) {
+    push(`  ${style.cyan('ℹ')}  First run — nothing to compare against yet.`);
+    push(`     This run is saved as the starting point. Run it again and the`);
+    push(`     next report will show the day-over-day comparison.`);
+    push(style.bold(HRULE));
+    return L.join('\n');
+  }
+
+  const refRuns = report.reference.source === 'baseline-file'
+    ? 'a pinned baseline'
+    : `typical of last ${report.reference.sampleCount} run(s)`;
+  push(`  comparing to   ${style.bold(refRuns)}`);
+  if (!report.enforced) {
+    push(`  mode           ${style.yellow(`warming up — ${report.reference.sampleCount} of ${DEFAULT_MIN_REFERENCE_SAMPLES} runs (won't fail the build yet)`)}`);
+  } else {
+    push(`  mode           ${style.bold('enforcing')} (a real regression fails the build)`);
+  }
+  push(`  flags when     a value rises ${style.bold(`>${report.thresholdPct}%`)} ${style.dim('AND')} by a real amount`);
+  push(`                 ${style.dim(`(≥${report.minDelta.ms}ms · ≥${formatBytes(report.minDelta.memBytes)} mem · ≥${formatBytes(report.minDelta.diskBytes)} disk · ≥${report.minDelta.quads} record)`)}`);
+  push(`  reading        ${style.dim('▲ slower / bigger (worse)   ▼ faster / smaller (better)')}`);
+
+  const byMetric = new Map(report.comparisons.map((c) => [c.metric, c]));
+
+  for (const s of SCENARIOS) {
+    const rows = SCENARIO_METRICS
+      .map(({ suffix, label }) => ({ label, c: byMetric.get(`scenario.${s.key}.${suffix}`) }))
+      .filter((r) => r.c);
+    if (rows.length === 0) continue;
+    push();
+    push(`  ${style.bold(s.title)}`);
+    push(`  ${style.dim(s.blurb)}`);
+    for (const r of rows) push(renderRow(r.label, r.c));
+  }
+
+  const resourceRows = RESOURCE_METRICS
+    .map(({ metric, label }) => ({ label, c: byMetric.get(metric) }))
+    .filter((r) => r.c);
+  if (resourceRows.length > 0) {
+    push();
+    push(`  ${style.bold('Memory & disk')}`);
+    push(`  ${style.dim('how much the whole benchmark process used')}`);
+    for (const r of resourceRows) push(renderRow(r.label, r.c));
+  }
+
+  push();
+  push(`  ${style.bold(RULE)}`);
+  push(`  ${style.bold('VERDICT')}`);
+  if (report.regressionCount === 0) {
+    push(`    ${style.green('✓')}  ${style.green('No regressions')} — everything is within the normal range.`);
+  } else if (!report.enforced) {
+    push(`    ${style.yellow('!')}  ${report.regressionCount} metric(s) would flag, but the baseline is still`);
+    push(`       warming up, so the build is ${style.bold('not failing')} yet:`);
+    for (const c of report.flagged) {
+      push(`         ${style.yellow('▲')} ${friendlyName(c.metric)}   ${fmt(c.metric, c.reference)} → ${fmt(c.metric, c.current)}  (${deltaLabel(c)})`);
+    }
+  } else {
+    push(`    ${style.red('✗')}  ${style.red(style.bold(`${report.regressionCount} REGRESSION(S)`))} — this build would ${style.red(style.bold('FAIL'))}:`);
+    for (const c of report.flagged) {
+      push(`         ${style.red('▲')} ${friendlyName(c.metric)}   ${fmt(c.metric, c.reference)} → ${fmt(c.metric, c.current)}  (${deltaLabel(c)})`);
+    }
   }
   if (report.informationalOverThreshold.length > 0) {
-    lines.push(`  📊 ${report.informationalOverThreshold.length} informational metric(s) above +${report.thresholdPct}% (tail/spread — not gating):`);
+    push(`    ${style.dim('📊 noted (informational, never fails the build):')}`);
     for (const c of report.informationalOverThreshold) {
-      lines.push(`     - ${c.metric}: ${fmt(c.metric, c.reference)} → ${fmt(c.metric, c.current)} (${deltaLabel(c).trim()})`);
+      push(`       ${style.dim(`• ${friendlyName(c.metric)}   ${fmt(c.metric, c.reference)} → ${fmt(c.metric, c.current)}  (${deltaLabel(c)})`)}`);
     }
   }
-  for (const c of report.flagged) {
-    lines.push(`     - ${c.metric}: ${fmt(c.metric, c.reference)} → ${fmt(c.metric, c.current)} (${deltaLabel(c).trim()})`);
-  }
-  lines.push('═══════════════════════════════════════════════════════════════════');
-  return lines.join('\n');
+  push(style.bold(HRULE));
+  return L.join('\n');
 }
 
 export async function runRegressionCheck(options: {
