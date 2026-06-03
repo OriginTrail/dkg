@@ -3,7 +3,10 @@ import { createServer, type Server } from 'node:http';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { ethers } from 'ethers';
 import {
+  IMPORTED_ARTIFACT_BYTE_KIND_MARKDOWN,
+  IMPORTED_ARTIFACT_BYTES_RESPONSE_STATUS,
   contextGraphAssertionUri,
   contextGraphMetaUri,
   contextGraphSharedMemoryUri,
@@ -122,6 +125,16 @@ describe('import artifact daemon routes', () => {
     publisherDiscardError?: Error;
     targetGraphExists?: boolean;
     queryQuads?: Quad[];
+    importedArtifactBytePeerId?: string | null;
+    importedArtifactByteResponse?: {
+      status: (typeof IMPORTED_ARTIFACT_BYTES_RESPONSE_STATUS)[keyof typeof IMPORTED_ARTIFACT_BYTES_RESPONSE_STATUS];
+      hash: string;
+      kind: string;
+      bytes: Uint8Array;
+      reason?: string;
+      actualHash?: string;
+    };
+    importedArtifactByteFetchError?: Error;
     /**
      * Issue #872 — optional on-chain policy enum pair (`accessPolicy`,
      * `publishPolicy`) returned by the mock agent's
@@ -153,6 +166,8 @@ describe('import artifact daemon routes', () => {
       subGraphName?: string;
     }> = [];
     const queries: string[] = [];
+    const importedArtifactByteResolutions: string[] = [];
+    const importedArtifactByteRequests: Array<{ peerId: string; request: Record<string, unknown> }> = [];
     const queryQuads = args.queryQuads ?? [
       { subject: 'urn:z', predicate: 'urn:p', object: 'urn:o' },
       { subject: 'urn:a', predicate: 'urn:p', object: '"A"' },
@@ -220,6 +235,23 @@ describe('import artifact daemon routes', () => {
             },
           }
         : {}),
+      ...(args.importedArtifactBytePeerId !== undefined
+        ? {
+            async resolveImportedArtifactBytePeerId(agentAddress: string) {
+              importedArtifactByteResolutions.push(agentAddress);
+              return args.importedArtifactBytePeerId;
+            },
+          }
+        : {}),
+      ...(args.importedArtifactByteResponse || args.importedArtifactByteFetchError
+        ? {
+            async requestImportedArtifactBytesFromPeer(peerId: string, request: Record<string, unknown>) {
+              importedArtifactByteRequests.push({ peerId, request });
+              if (args.importedArtifactByteFetchError) throw args.importedArtifactByteFetchError;
+              return args.importedArtifactByteResponse;
+            },
+          }
+        : {}),
       store: {
         async hasGraph() {
           return Boolean(args.targetGraphExists);
@@ -277,7 +309,15 @@ describe('import artifact daemon routes', () => {
         },
       },
     };
-    return { agent, created, writes, discards, queries };
+    return {
+      agent,
+      created,
+      writes,
+      discards,
+      queries,
+      importedArtifactByteResolutions,
+      importedArtifactByteRequests,
+    };
   }
 
   it('resolves and safely reads a completed Markdown import artifact by content hash', async () => {
@@ -498,10 +538,9 @@ describe('import artifact daemon routes', () => {
   // Issue #872 — public + open CGs gossip their SWM triples to every
   // subscribed peer, so the legacy owner guard at
   // `assertImportedArtifactOwnerAddress` contradicts the curator's
-  // on-chain policy choice. The next three tests pin down the relaxed
-  // shape: cross-agent reads succeed (200) when bytes are local, fail
-  // cleanly (404) when bytes haven't been replicated, and the existing
-  // 403 path stays in force for any other policy combo (covered above).
+  // on-chain policy choice. The relaxed read path now fetches missing
+  // markdown bytes from the origin peer over the reliable messenger
+  // protocol while keeping every non-read mutation owner-gated.
   it('allows non-owner reads on public + open CGs when bytes are locally available (#872)', async () => {
     const entry = await fileStore.put(Buffer.from('# Public Imported\n'), 'text/markdown');
     const contextGraphId = 'cg-public-open-bytes-local';
@@ -542,18 +581,13 @@ describe('import artifact daemon routes', () => {
     expect(read.body.artifact.ownerGuardRelaxed).toBe(true);
   });
 
-  it('returns 404 (not 403) for non-owner reads on public + open CGs when bytes are missing (#872)', async () => {
-    // Use a deterministic, well-formed keccak256 hash that's never been
-    // put into the test file store. The markdownForm URN matches the
-    // meta `sourceFileHash`, so the 409 markdown-mismatch path stays
-    // dormant — the only failure surface left is the file-store miss,
-    // which is exactly the path peers will hit until source-artifact
-    // bytes are gossipped (deferred follow-up for #872).
-    const markdownHash = `keccak256:${'a'.repeat(64)}`;
+  it('fetches and caches missing public + open non-owner Markdown bytes from the origin peer', async () => {
+    const markdownBytes = Buffer.from('# Public Remote Imported\n');
+    const markdownHash = `keccak256:${ethers.keccak256(markdownBytes).replace(/^0x/, '')}`;
     const contextGraphId = 'cg-public-open-bytes-missing';
     const assertionName = 'imported-md';
     const assertionUri = contextGraphAssertionUri(contextGraphId, 'did:dkg:agent:source', assertionName);
-    const { agent } = makeAgent({
+    const { agent, importedArtifactByteResolutions, importedArtifactByteRequests } = makeAgent({
       contextGraphId,
       assertionName,
       assertionUri,
@@ -561,6 +595,13 @@ describe('import artifact daemon routes', () => {
       markdownHash,
       markdownForm: `urn:dkg:file:${markdownHash}`,
       onChainPolicy: { accessPolicy: 0, publishPolicy: 1 },
+      importedArtifactBytePeerId: 'peer-source',
+      importedArtifactByteResponse: {
+        status: IMPORTED_ARTIFACT_BYTES_RESPONSE_STATUS.ALLOW,
+        hash: markdownHash,
+        kind: IMPORTED_ARTIFACT_BYTE_KIND_MARKDOWN,
+        bytes: markdownBytes,
+      },
     });
     await startRoutes({ agent });
 
@@ -576,17 +617,28 @@ describe('import artifact daemon routes', () => {
       assertionUri,
       maxBytes: 1024,
     });
-    expect(read.status).toBe(404);
-    expect(read.body.error).toMatch(/not replicated locally/);
-    expect(read.body.error).not.toMatch(/owned by the requesting agent/);
+    expect(read.status).toBe(200);
+    expect(read.body.markdown).toBe('# Public Remote Imported\n');
     expect(read.body.artifact.ownerGuardRelaxed).toBe(true);
+    expect(await fileStore.has(markdownHash)).toBe(true);
+    expect(importedArtifactByteResolutions).toEqual(['did:dkg:agent:source']);
+    expect(importedArtifactByteRequests).toEqual([{
+      peerId: 'peer-source',
+      request: {
+        contextGraphId,
+        assertionUri,
+        hash: markdownHash,
+        kind: IMPORTED_ARTIFACT_BYTE_KIND_MARKDOWN,
+      },
+    }]);
   });
 
   it('derives non-owner public + open read metadata from replicated SWM linkage when _meta is absent (#872 devnet)', async () => {
     // Devnet peers receive the promoted SWM assertion triples but do not
     // receive the origin node's CG-root `_meta` rows. The read route should
     // still resolve enough metadata from the promoted source-file linkage to
-    // report the policy-relaxed artifact, then honestly 404 on missing bytes.
+    // report the policy-relaxed artifact, then clearly 404 if no origin byte
+    // fetcher is available in the embedding agent.
     const markdownHash = `keccak256:${'b'.repeat(64)}`;
     const contextGraphId = 'cg-public-open-swm-linkage-only';
     const assertionName = 'imported-md';
@@ -624,6 +676,7 @@ describe('import artifact daemon routes', () => {
     });
     expect(read.status).toBe(404);
     expect(read.body.error).toMatch(/not replicated locally/);
+    expect(read.body.error).toMatch(/no origin byte fetcher/);
     expect(read.body.error).not.toMatch(/owned by the requesting agent/);
     expect(read.body.artifact.ownerGuardRelaxed).toBe(true);
   });

@@ -57,7 +57,7 @@ const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, assertSafeRdfTerm, escapeDkgRdfLiteral, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, assertionLifecycleUri } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, assertSafeRdfTerm, escapeDkgRdfLiteral, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, assertionLifecycleUri, IMPORTED_ARTIFACT_BYTE_KIND_MARKDOWN, IMPORTED_ARTIFACT_BYTES_RESPONSE_STATUS, type ImportedArtifactBytesRequestMsg, type ImportedArtifactBytesResponseMsg } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri, PROMOTE_JOB_STATES, PromoteJobConflictError, type PromoteJob, type PromoteJobState, type PublishOptions } from '@origintrail-official/dkg-publisher';
 import { validatePreSignedAuthorAttestation } from './memory.js';
 import { recordAssertionActivity } from '../activity-notification.js';
@@ -361,9 +361,9 @@ type ImportedArtifactResolution = {
    * (`accessPolicy === 0` AND `publishPolicy === 1`) made the guard
    * inapplicable. The read-markdown route uses this to distinguish
    * "owner request, missing bytes" (genuine corruption) from
-   * "cross-agent request, bytes not replicated locally" (expected
-   * until the source-artifact gossip follow-up lands). Omitted when
-   * the requester IS the assertion owner.
+   * "cross-agent request, bytes not replicated locally" (try the
+   * origin peer before returning a read miss). Omitted when the
+   * requester IS the assertion owner.
    */
   ownerGuardRelaxed?: boolean;
 };
@@ -427,6 +427,11 @@ function hashFromFileUrn(value: string | undefined): string | undefined {
 
 function validateContentHash(hash: string): boolean {
   return /^(?:sha256:|keccak256:)?[0-9a-f]{64}$/i.test(hash);
+}
+
+function normalizeComparableContentHash(hash: string): string {
+  const lower = hash.trim().toLowerCase();
+  return /^[0-9a-f]{64}$/.test(lower) ? `sha256:${lower}` : lower;
 }
 
 function validatePromoteJobId(jobId: string): { valid: true } | { valid: false; reason: string } {
@@ -817,11 +822,6 @@ function assertImportedArtifactOwnerAddress(
  * (`accessPolicy === 0` AND `publishPolicy === 1`). Any other state
  * — including missing cache entries — yields `false`, which keeps
  * the existing owner guard in effect (fail-closed).
- *
- * DEFERRED FOLLOW-UP: peers replicate SWM triples but NOT the source
- * artifact bytes; with the guard relaxed, the read-markdown route
- * will return 404 on every cross-agent read until byte-replication is
- * added. Tracked in the PR body for #872.
  */
 async function isPublicOpenContextGraph(
   agent: { getContextGraphOnChainPolicy?: (id: string) => Promise<{ accessPolicy?: number; publishPolicy?: number }> },
@@ -833,6 +833,102 @@ async function isPublicOpenContextGraph(
     return policy.accessPolicy === 0 && policy.publishPolicy === 1;
   } catch {
     return false;
+  }
+}
+
+type ImportedArtifactByteAgent = {
+  resolveImportedArtifactBytePeerId?: (agentAddress: string) => Promise<string | null>;
+  requestImportedArtifactBytesFromPeer?: (
+    peerId: string,
+    request: ImportedArtifactBytesRequestMsg,
+    opts?: { timeoutMs?: number },
+  ) => Promise<ImportedArtifactBytesResponseMsg>;
+};
+
+const IMPORTED_ARTIFACT_BYTE_FETCH_TIMEOUT_MS = 5_000;
+
+async function fetchImportedArtifactMarkdownBytesFromOrigin(
+  ctx: RequestContext,
+  artifact: ImportedArtifactResolution,
+): Promise<Buffer> {
+  const byteAgent = ctx.agent as unknown as ImportedArtifactByteAgent;
+  if (
+    typeof byteAgent.resolveImportedArtifactBytePeerId !== 'function' ||
+    typeof byteAgent.requestImportedArtifactBytesFromPeer !== 'function'
+  ) {
+    throw new ImportArtifactRouteError(
+      404,
+      'Markdown source bytes are not replicated locally on this peer, and no origin byte fetcher is available',
+    );
+  }
+
+  const peerId = await byteAgent.resolveImportedArtifactBytePeerId(artifact.assertionAgentAddress);
+  if (!peerId) {
+    throw new ImportArtifactRouteError(
+      404,
+      `Markdown source bytes are not replicated locally on this peer, and the origin agent ${artifact.assertionAgentAddress} could not be resolved to a peer`,
+    );
+  }
+
+  const request: ImportedArtifactBytesRequestMsg = {
+    contextGraphId: artifact.contextGraphId,
+    assertionUri: artifact.assertionUri,
+    hash: artifact.markdownHash!,
+    kind: IMPORTED_ARTIFACT_BYTE_KIND_MARKDOWN,
+    ...(artifact.subGraphName ? { subGraphName: artifact.subGraphName } : {}),
+  };
+  let response: ImportedArtifactBytesResponseMsg;
+  try {
+    response = await byteAgent.requestImportedArtifactBytesFromPeer(
+      peerId,
+      request,
+      { timeoutMs: IMPORTED_ARTIFACT_BYTE_FETCH_TIMEOUT_MS },
+    );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new ImportArtifactRouteError(
+      404,
+      `Markdown source bytes are not replicated locally on this peer, and the origin peer did not provide them: ${message}`,
+    );
+  }
+
+  if (response.kind !== IMPORTED_ARTIFACT_BYTE_KIND_MARKDOWN) {
+    throw new ImportArtifactRouteError(502, 'Origin agent returned an invalid imported-artifact byte kind');
+  }
+  if (normalizeComparableContentHash(response.hash) !== normalizeComparableContentHash(artifact.markdownHash!)) {
+    throw new ImportArtifactRouteError(502, 'Origin agent returned imported-artifact bytes for a different hash');
+  }
+
+  switch (response.status) {
+    case IMPORTED_ARTIFACT_BYTES_RESPONSE_STATUS.ALLOW: {
+      const bytes = Buffer.from(response.bytes);
+      const entry = await ctx.fileStore.put(bytes, 'text/markdown');
+      const expected = normalizeComparableContentHash(artifact.markdownHash!);
+      if (
+        normalizeComparableContentHash(entry.hash) !== expected &&
+        normalizeComparableContentHash(entry.keccak256) !== expected
+      ) {
+        throw new ImportArtifactRouteError(502, 'Origin agent returned imported-artifact bytes that failed local hash verification');
+      }
+      return bytes;
+    }
+    case IMPORTED_ARTIFACT_BYTES_RESPONSE_STATUS.DENY:
+      throw new ImportArtifactRouteError(
+        403,
+        `Origin agent denied imported-artifact bytes${response.reason ? `: ${response.reason}` : ''}`,
+      );
+    case IMPORTED_ARTIFACT_BYTES_RESPONSE_STATUS.MISS:
+      throw new ImportArtifactRouteError(
+        404,
+        `Origin agent does not have imported-artifact bytes${response.reason ? `: ${response.reason}` : ''}`,
+      );
+    case IMPORTED_ARTIFACT_BYTES_RESPONSE_STATUS.HASH_MISMATCH:
+      throw new ImportArtifactRouteError(
+        502,
+        `Origin agent reported imported-artifact hash mismatch${response.actualHash ? `: ${response.actualHash}` : ''}`,
+      );
+    default:
+      throw new ImportArtifactRouteError(502, 'Origin agent returned an unknown imported-artifact byte response');
   }
 }
 
@@ -1294,22 +1390,23 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
           artifact,
         });
       }
-      const bytes = await fileStore.get(artifact.markdownHash);
+      let bytes = await fileStore.get(artifact.markdownHash);
+      if (!bytes && artifact.ownerGuardRelaxed) {
+        try {
+          bytes = await fetchImportedArtifactMarkdownBytesFromOrigin(ctx, artifact);
+        } catch (err) {
+          if (err instanceof ImportArtifactRouteError) {
+            return jsonResponse(res, err.statusCode, {
+              error: err.message,
+              artifact,
+            });
+          }
+          throw err;
+        }
+      }
       if (!bytes) {
-        // Issue #872 — when the owner guard was relaxed (public + open
-        // CG, cross-agent request), the missing bytes are the
-        // expected outcome: peers replicate the SWM triples for the
-        // assertion but the source-artifact bytes are NOT gossipped
-        // yet. Surface that explicitly so callers can decide whether
-        // to retry against the origin agent instead of treating this
-        // as local corruption.
-        //
-        // DEFERRED FOLLOW-UP: gossip the imported-artifact bytes to
-        // peers replicating a public + open CG, so cross-agent reads
-        // can complete locally without an out-of-band fetch. Tracked
-        // in the PR body for #872.
         const message = artifact.ownerGuardRelaxed
-          ? 'Markdown source bytes are not replicated locally on this peer; the assertion graph triples synced but the source artifact bytes were not. Fetch from the origin agent (assertionAgentAddress).'
+          ? 'Markdown source bytes are not replicated locally on this peer, and the origin peer did not provide them'
           : 'Markdown content is not present in the file store';
         return jsonResponse(res, 404, {
           error: message,

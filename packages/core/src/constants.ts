@@ -137,6 +137,13 @@ export const PROTOCOL_STORAGE_ACK_V2 = '/dkg/10.0.2/storage-ack';
  */
 export const PROTOCOL_GET_CIPHERTEXT_CHUNK = '/dkg/10.0.2/get-ciphertext-chunk';
 
+/**
+ * Point-to-point imported-artifact byte request protocol. Receivers
+ * return structured allow / deny / miss responses so absent artifacts
+ * are ordinary application outcomes rather than transport exceptions.
+ */
+export const PROTOCOL_IMPORTED_ARTIFACT_BYTES = '/dkg/10.0.1/imported-artifact-bytes';
+
 export const DHT_PROTOCOL = '/dkg/kad/1.0.0';
 
 /** Maximum application payload size allowed for one DKG GossipSub message (10 MB). */

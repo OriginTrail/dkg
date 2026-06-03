@@ -2481,6 +2481,9 @@ export async function runDaemonInner(
   // --- File Store ---
 
   const fileStore = new FileStore(join(dkgDir(), "files"));
+  agent.setImportedArtifactByteStore({
+    get: (hash) => fileStore.get(hash),
+  });
 
   // --- Vector Store (optional, for tri-modal memory) ---
   const vectorStore = new VectorStore(dkgDir());

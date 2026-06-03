@@ -179,6 +179,19 @@ export {
 } from './publish-intent.js';
 
 export {
+  type ImportedArtifactBytesRequestMsg,
+  type ImportedArtifactBytesResponseMsg,
+  type ImportedArtifactBytesResponseStatus,
+  IMPORTED_ARTIFACT_BYTE_KIND_MARKDOWN,
+  IMPORTED_ARTIFACT_BYTES_RESPONSE_STATUS,
+  IMPORTED_ARTIFACT_BYTES_RESPONSE_STATUS_VALUES,
+  encodeImportedArtifactBytesRequest,
+  decodeImportedArtifactBytesRequest,
+  encodeImportedArtifactBytesResponse,
+  decodeImportedArtifactBytesResponse,
+} from './import-artifact-bytes.js';
+
+export {
   CIPHERTEXT_CHUNK_PREDICATE,
   ciphertextChunkStoreGraph,
   ciphertextChunkStoreSubject,
