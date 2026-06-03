@@ -673,6 +673,13 @@ export class DKGAgentBase {
   protected readonly reconcileCursors = new Map<string, CursorState>();
   /** Phase B — bounded dedupe of recently-reconciled UALs (live-burst guard). */
   protected readonly recentReconciledUals = new RecentUalSet();
+  /**
+   * Phase D — in-flight `recordCoreHostedPublicCg` recordings fired from the
+   * (synchronous) StorageACK pre-sign hook. Tracked so a graceful `stop()` can
+   * flush them (the host-only `coreHosted` flag must survive restart) and so a
+   * rejection is logged rather than swallowed as an unhandled promise (#30).
+   */
+  protected readonly coreHostRecordings = new Set<Promise<void>>();
   protected hostModeReconcilerTimer: ReturnType<typeof setInterval> | null = null;
   protected hostModePruneTimer: ReturnType<typeof setInterval> | null = null;
   // rc.9 PR-10: joinApprovalRetryQueue + joinApprovalRetryTimer

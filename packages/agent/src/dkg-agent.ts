@@ -1121,6 +1121,12 @@ export class DKGAgent extends DKGAgentBase {
       clearInterval(this.vmReconcileTimer);
       this.vmReconcileTimer = null;
     }
+    // Phase D (#30) — flush any in-flight core-hosted recordings so the
+    // host-only `coreHosted` flag is persisted before we tear down, rather
+    // than being lost to a fire-and-forget launched from the ACK pre-sign hook.
+    if (this.coreHostRecordings.size > 0) {
+      await Promise.allSettled([...this.coreHostRecordings]);
+    }
     if (this.messengerOutboxTimer) {
       clearInterval(this.messengerOutboxTimer);
       this.messengerOutboxTimer = null;

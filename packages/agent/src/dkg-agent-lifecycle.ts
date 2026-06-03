@@ -1092,7 +1092,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 // hosts the CG so the chain-driven VM reconciler fills its gaps
                 // across restarts. Best-effort + public-CG-gated inside the
                 // helper; never blocks or affects the (sync) provenance return.
-                void this.recordCoreHostedPublicCg(cgId, swmGraphId);
+                // Tracked (not bare `void`) so a rejection is logged and a
+                // graceful stop() flushes the persist rather than losing the
+                // host-only `coreHosted` flag as an unhandled promise (#30).
+                this.trackCoreHostRecording(this.recordCoreHostedPublicCg(cgId, swmGraphId));
                 const wireFromCgId = cgId ? this.gossipWireIdFor(cgId) : undefined;
                 const wireFromSwmGraphId = swmGraphId && swmGraphId !== cgId
                   ? this.gossipWireIdFor(swmGraphId)

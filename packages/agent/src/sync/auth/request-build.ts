@@ -160,3 +160,52 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
 
   return new TextEncoder().encode(JSON.stringify(request));
 }
+
+/**
+ * Parse the unauthenticated, pipe-delimited sync request encoding produced by
+ * {@link buildSyncRequestEnvelope} when `needsAuth` is false:
+ *
+ *   `[workspace:]<cg>|<offset>|<limit>[|meta][|snapshot|<ref>][|since|<n>]`
+ *
+ * Extracted (pure, dependency-free) from the agent so both the encode and parse
+ * directions are unit-testable together. The phase normalisation is inlined to
+ * keep this module free of agent-side imports.
+ *
+ * Phase C delta hint: the `|since|<n>` keyed token is ALWAYS the FINAL two
+ * segments (after any phase/snapshot suffix). We match only that trailing
+ * position — scanning every segment would misparse an ordinary segment that
+ * happens to equal `"since"` (a CG or snapshotRef literally named "since") as a
+ * delta marker and silently turn a full sync into a partial one.
+ */
+export function parsePipeDelimitedSyncRequest(
+  text: string,
+  opts: { defaultContextGraphId: string; syncPageSize: number },
+): SyncRequestEnvelope {
+  const parts = text.split('|');
+  const ctxGraphPart = parts[0] || '';
+  const includeSharedMemory = ctxGraphPart.startsWith('workspace:');
+  const contextGraphId = includeSharedMemory
+    ? ctxGraphPart.slice('workspace:'.length)
+    : (ctxGraphPart || opts.defaultContextGraphId);
+  const rawPhase = parts[3];
+  const phase: SyncPhase = rawPhase === 'meta' || rawPhase === 'snapshot' ? rawPhase : 'data';
+
+  let sinceBatchId: string | undefined;
+  if (
+    parts.length >= 2 &&
+    parts[parts.length - 2] === 'since' &&
+    /^\d+$/.test(parts[parts.length - 1])
+  ) {
+    sinceBatchId = parts[parts.length - 1];
+  }
+
+  return {
+    contextGraphId,
+    offset: parseInt(parts[1], 10) || 0,
+    limit: Math.min(parseInt(parts[2], 10) || opts.syncPageSize, opts.syncPageSize),
+    includeSharedMemory,
+    phase,
+    snapshotRef: phase === 'snapshot' ? parts[4] : undefined,
+    sinceBatchId,
+  };
+}

@@ -763,7 +763,16 @@ export class FinalizationHandler {
 
     if (rootsByOp.size === 0) return null;
 
-    for (const roots of rootsByOp.values()) {
+    // Deterministic candidate order. The merkle root alone is the only matcher,
+    // so if two WorkspaceOperations share identical content (same flat-KC root)
+    // both verify — and SPARQL binding / Map-insertion order is store-dependent,
+    // so different nodes could otherwise pick DIFFERENT ops and diverge the
+    // promoted snapshot's provenance. Sorting candidate ops by their (stable,
+    // content-independent) op URI makes every node converge on the same one (#15).
+    const opsSorted = [...rootsByOp.entries()].sort(
+      ([a], [b]) => (a < b ? -1 : a > b ? 1 : 0),
+    );
+    for (const [, roots] of opsSorted) {
       const sharedMemoryQuads = await this.getSharedMemoryQuadsForRoots(contextGraphId, roots, subGraphName);
       if (sharedMemoryQuads.length === 0) continue;
       const privateRoots = await this.getPrivateRootsFromMeta(contextGraphId, roots, subGraphName);
@@ -1051,6 +1060,19 @@ export class FinalizationHandler {
     const isUnattributed = !authorAddress
       || authorAddress === '0x0000000000000000000000000000000000000000'
       || authorAddress.toLowerCase() === '0x0000000000000000000000000000000000000000';
+    // Publication id for the `dkg:Publication` / `dkg:authoredBy` provenance.
+    // The gossip path uses the publish `txHash` (content-addressable, convergent
+    // across replicas). The chain-driven reconcile path recovers the KC by kaId
+    // and has NO publish tx, so `txHash` is empty there — which previously
+    // SUPPRESSED the provenance block entirely (the block only fires when both
+    // author + publishOperationId are present), so authored-via-sweep KCs lost
+    // their `dkg:authoredBy` triples (#14). Fall back to a deterministic id
+    // derived from the KC's UAL: it is chain-unique per publication (so two
+    // *distinct* publishes of byte-identical content don't collapse into one
+    // `dkg:Publication` subject and overwrite each other's provenance — the
+    // failure mode of a content-addressable merkle-root id) AND convergent
+    // across replicas (every node sweeping this KC sees the same UAL).
+    const publicationId = txHash || `chain:${ual}`;
     const kcMeta: KCMetadata = {
       ual,
       contextGraphId,
@@ -1061,7 +1083,7 @@ export class FinalizationHandler {
       subGraphName,
       ...(isUnattributed
         ? {}
-        : { authorAddress, publishOperationId: txHash }),
+        : { authorAddress, publishOperationId: publicationId }),
     };
 
     let blockTimestamp = Math.floor(Date.now() / 1000);

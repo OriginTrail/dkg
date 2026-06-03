@@ -96,12 +96,32 @@ export async function reconcileContextGraph(
   onChainCgId: bigint,
 ): Promise<ReconcileResult> {
   const head = await deps.getKCCount(onChainCgId);
-  const headBlock = await deps.getHeadBlock();
   const before = state.watermark;
+
+  // Distinguish "this chain has no head concept" (no-chain / mock → undefined,
+  // reorg gate off) from "the head fetch transiently failed" (getHeadBlock
+  // throws). The two used to collapse to `undefined`, so an RPC blip looked
+  // like a reorg-free chain and the watermark advanced at depth 0 on an
+  // unconfirmed head — a shallow reorg could then strand those ordinals
+  // forever (#13). On a transient failure we still promote, but we must NOT
+  // advance the watermark; a later sweep with a real head folds the ordinals
+  // in under the proper depth gate (cheap: recentReconciledUals short-circuits).
+  let headBlock: number | undefined;
+  let headUnavailable = false;
+  try {
+    headBlock = await deps.getHeadBlock();
+  } catch (err) {
+    // Surface the head-fetch failure: in this degraded pass the sweep keeps
+    // reconciling but the watermark is pinned, so without a log operators have
+    // no signal that an unobservable chain head — not a code stall — is the
+    // root cause of a stuck watermark (#13 review).
+    headUnavailable = true;
+    deps.log(`reconcile ${localCgId}: getHeadBlock failed, holding watermark (${err instanceof Error ? err.message : String(err)})`);
+  }
 
   // Re-absorb any depth-held ordinals as the head advances — a long-running
   // node makes progress on confirmation-depth-blocked ordinals even with no
-  // new completions this pass.
+  // new completions this pass. Skipped when the head is unobservable.
   if (headBlock !== undefined) absorbConfirmed(state, headBlock, deps.confirmationDepth);
 
   let reconciled = 0;
@@ -110,15 +130,21 @@ export async function reconcileContextGraph(
     const outcome = await deps.reconcileOrdinal(localCgId, onChainCgId, ordinal, headBlock);
     if (outcome.status === 'reconciled' || outcome.status === 'already') {
       reconciled += 1;
-      // With a known head, apply the reorg-depth gate; otherwise (no chain head)
-      // absorb as soon as contiguous (depth 0) using the registration block as
-      // a self-consistent head.
-      recordCompletion(
-        state,
-        { ordinal, blockNumber: outcome.blockNumber },
-        headBlock ?? outcome.blockNumber,
-        headBlock !== undefined ? deps.confirmationDepth : 0,
-      );
+      // Only fold the completion into the watermark when we actually observed a
+      // head (or are on a legitimately head-less chain). On a transient head
+      // failure the ordinal is reconciled but its burial depth is unknown, so
+      // we leave the watermark put and let the next real-head sweep advance it.
+      if (!headUnavailable) {
+        // With a known head, apply the reorg-depth gate; otherwise (no chain
+        // head) absorb as soon as contiguous (depth 0) using the registration
+        // block as a self-consistent head.
+        recordCompletion(
+          state,
+          { ordinal, blockNumber: outcome.blockNumber },
+          headBlock ?? outcome.blockNumber,
+          headBlock !== undefined ? deps.confirmationDepth : 0,
+        );
+      }
     } else {
       pending += 1;
     }
@@ -128,7 +154,7 @@ export async function reconcileContextGraph(
     deps.persistWatermark(localCgId, state.watermark);
     deps.log(`reconcile ${localCgId}: watermark ${before} -> ${state.watermark} (head=${head}, reconciled=${reconciled}, pending=${pending})`);
   } else if (reconciled > 0 || pending > 0) {
-    deps.log(`reconcile ${localCgId}: watermark held at ${state.watermark} (head=${head}, reconciled=${reconciled}, pending=${pending})`);
+    deps.log(`reconcile ${localCgId}: watermark held at ${state.watermark} (head=${head}, reconciled=${reconciled}, pending=${pending}${headUnavailable ? ', headUnavailable' : ''})`);
   }
 
   return { head, watermark: state.watermark, reconciled, pending };

@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { buildSyncRequestEnvelope, type SyncRequestEnvelope } from '../src/sync/auth/request-build.js';
+import {
+  buildSyncRequestEnvelope,
+  parsePipeDelimitedSyncRequest,
+  type SyncRequestEnvelope,
+} from '../src/sync/auth/request-build.js';
 
 /**
  * Phase C — `sinceBatchId` rides the sync request envelope UNSIGNED.
@@ -87,5 +91,65 @@ describe('Phase C sync envelope — sinceBatchId is unsigned', () => {
     const bytes = await buildSyncRequestEnvelope({ ...params, needsAuth: false });
     const text = new TextDecoder().decode(bytes);
     expect(text).toBe('mfacts|0|100');
+  });
+});
+
+describe('parsePipeDelimitedSyncRequest — parse direction (#26)', () => {
+  const opts = { defaultContextGraphId: 'system:agents', syncPageSize: 500 };
+  const parse = (text: string) => parsePipeDelimitedSyncRequest(text, opts);
+
+  it('round-trips the encoder output WITH a since hint', async () => {
+    const { params } = baseParams('42');
+    const bytes = await buildSyncRequestEnvelope({ ...params, needsAuth: false });
+    const r = parse(new TextDecoder().decode(bytes));
+    expect(r).toMatchObject({
+      contextGraphId: 'mfacts',
+      offset: 0,
+      limit: 100,
+      includeSharedMemory: false,
+      phase: 'data',
+      sinceBatchId: '42',
+    });
+  });
+
+  it('round-trips the encoder output WITHOUT a since hint', async () => {
+    const { params } = baseParams(undefined);
+    const bytes = await buildSyncRequestEnvelope({ ...params, needsAuth: false });
+    const r = parse(new TextDecoder().decode(bytes));
+    expect(r.sinceBatchId).toBeUndefined();
+    expect(r.contextGraphId).toBe('mfacts');
+  });
+
+  it('decodes the workspace: prefix into includeSharedMemory', () => {
+    const r = parse('workspace:mfacts|10|50');
+    expect(r.includeSharedMemory).toBe(true);
+    expect(r.contextGraphId).toBe('mfacts');
+    expect(r.offset).toBe(10);
+    expect(r.limit).toBe(50);
+  });
+
+  it('threads a since hint after a snapshot suffix', () => {
+    const r = parse('mfacts|0|100|snapshot|ref-abc|since|99');
+    expect(r.phase).toBe('snapshot');
+    expect(r.snapshotRef).toBe('ref-abc');
+    expect(r.sinceBatchId).toBe('99');
+  });
+
+  it('does NOT misparse a context graph literally named "since" as a delta marker', () => {
+    // `since|7` here are the CG + offset segments, NOT the trailing keyed token.
+    const r = parse('since|7|100');
+    expect(r.contextGraphId).toBe('since');
+    expect(r.offset).toBe(7);
+    expect(r.sinceBatchId).toBeUndefined();
+  });
+
+  it('does NOT treat a trailing non-numeric since token as a delta marker', () => {
+    const r = parse('mfacts|0|100|since|notanumber');
+    expect(r.sinceBatchId).toBeUndefined();
+  });
+
+  it('clamps limit to syncPageSize', () => {
+    const r = parse('mfacts|0|99999');
+    expect(r.limit).toBe(500);
   });
 });

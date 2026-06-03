@@ -198,4 +198,25 @@ describe('reconcileWarmCoreConnections', () => {
     expect(res).toMatchObject({ pinned: 1, skippedGate: 1, unpinned: 1 });
     expect(unpinned).toEqual(['core2']);
   });
+
+  it('#8 — a FAILED unpin is not counted and the peer is retained for a retry', async () => {
+    // A failed unpin() means the keep-alive tag may still be set. Counting it
+    // as unpinned AND forgetting the peer would leak a pin we can never reclaim
+    // (it's gone from previouslyWarmed next tick). The peer must be carried in
+    // `warmed` so the next pass retries the unpin, and the unpinned counter must
+    // reflect only the successful removals.
+    let calls = 0;
+    const { deps } = makeDeps({
+      previouslyWarmed: new Set(['core1', 'core2', 'flaky', 'gone']),
+      unpin: async (peerId) => {
+        calls += 1;
+        if (peerId === 'flaky') throw new Error('peerStore busy');
+      },
+    });
+    const res = await reconcileWarmCoreConnections(deps);
+    expect(calls).toBe(2);                 // both non-selected peers attempted
+    expect(res.unpinned).toBe(1);          // only 'gone' succeeded
+    // 'flaky' is carried forward (still pinned) alongside the re-selected cores.
+    expect([...res.warmed].sort()).toEqual(['core1', 'core2', 'flaky']);
+  });
 });

@@ -210,7 +210,7 @@ import { fetchSyncPages, type SyncPageResult } from './sync/requester/page-fetch
 import { getSyncCheckpointKey } from './sync/checkpoint/state.js';
 import { runDurableSync } from './sync/requester/durable-sync.js';
 import { runSharedMemorySync } from './sync/requester/shared-memory-sync.js';
-import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
+import { buildSyncRequestEnvelope, parsePipeDelimitedSyncRequest, type SyncPhase } from './sync/auth/request-build.js';
 import { authorizePrivateSyncRequest } from './sync/auth/request-authorize.js';
 import { registerSyncHandler } from './sync/responder/sync-handler.js';
 import { runSyncOnConnect } from './sync/on-connect/sync-on-connect.js';
@@ -498,34 +498,12 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
   }
 
   parsePipeDelimitedSyncRequest(this: DKGAgent, text: string): SyncRequestEnvelope {
-    const parts = text.split('|');
-    const ctxGraphPart = parts[0] || '';
-    const includeSharedMemory = ctxGraphPart.startsWith('workspace:');
-    const contextGraphId = includeSharedMemory ? ctxGraphPart.slice('workspace:'.length) : (ctxGraphPart || SYSTEM_CONTEXT_GRAPHS.AGENTS);
-    const phase = normalizeSyncPhase(parts[3]);
-    // Phase C: the `|since|<n>` keyed token is ALWAYS the final two segments
-    // emitted by `buildSyncRequestEnvelope` (after the optional phase/snapshot
-    // suffix). Match only that trailing position — scanning every segment would
-    // misparse an ordinary segment literally equal to "since" (e.g. a CG or
-    // snapshotRef named "since") as a delta marker and turn a full sync into a
-    // partial response. Old encoders never emit the suffix.
-    let sinceBatchId: string | undefined;
-    if (
-      parts.length >= 2 &&
-      parts[parts.length - 2] === 'since' &&
-      /^\d+$/.test(parts[parts.length - 1])
-    ) {
-      sinceBatchId = parts[parts.length - 1];
-    }
-    return {
-      contextGraphId,
-      offset: parseInt(parts[1], 10) || 0,
-      limit: Math.min(parseInt(parts[2], 10) || SYNC_PAGE_SIZE, SYNC_PAGE_SIZE),
-      includeSharedMemory,
-      phase,
-      snapshotRef: phase === 'snapshot' ? parts[4] : undefined,
-      sinceBatchId,
-    };
+    // Delegates to the pure parser co-located with the encoder (so encode/parse
+    // round-trip + the `since` misparse guard are unit-testable without an agent).
+    return parsePipeDelimitedSyncRequest(text, {
+      defaultContextGraphId: SYSTEM_CONTEXT_GRAPHS.AGENTS,
+      syncPageSize: SYNC_PAGE_SIZE,
+    });
   }
 
   /**

@@ -50,11 +50,23 @@ async function seedSwmSnapshot(store: OxigraphStore, entity: string, value: stri
  * of the gossip envelope flag). `FinalizationHandler.getKeepRootCopySignal`
  * reads it back to decide the same-graph dual-write during reconcile.
  */
-async function seedKeepRootSignal(store: OxigraphStore, entity: string, keep: boolean): Promise<void> {
+async function seedKeepRootSignal(
+  store: OxigraphStore,
+  entity: string,
+  keep: boolean,
+  // `getKeepRootCopySignal` parses the literal with a quote-stripping regex, so
+  // it must accept both a plain string literal (`"true"`) and a typed boolean
+  // literal (`"true"^^xsd:boolean`) — whichever the store/publisher round-trip
+  // produces (#37).
+  form: 'plain' | 'typed' = 'plain',
+): Promise<void> {
+  const object = form === 'typed'
+    ? `"${keep}"^^<http://www.w3.org/2001/XMLSchema#boolean>`
+    : `"${keep}"`;
   await store.insert([{
     subject: entity,
     predicate: 'http://dkg.io/ontology/keepRootCopyOnLabel',
-    object: `"${keep}"`,
+    object,
     graph: contextGraphWorkspaceMetaGraphUri(LOCAL_CG),
   }]);
 }
@@ -208,6 +220,32 @@ describe('Phase B e2e — chain registration -> VM via the sweep', () => {
     expect(res.reconciled).toBe(1);
     expect(await isInVm(store, 'urn:fact:dw', value)).toBe(true);
     expect(await isInRootLabel(store, 'urn:fact:dw', value)).toBe(true);
+  });
+
+  it('#37 — recovers a TYPED boolean keepRootCopyOnLabel literal and dual-writes', async () => {
+    const store = new OxigraphStore();
+    const chain = new MockChainAdapter();
+    const fh = new FinalizationHandler(store, chain);
+
+    // Same as the dual-write case, but the signal is stored as a TYPED boolean
+    // literal (`"true"^^xsd:boolean`) rather than a plain string. The value
+    // parser must strip the datatype suffix and still read it as `true`,
+    // otherwise a legitimately-typed publisher signal silently disables the
+    // dual-write on the chain-recovery path.
+    const value = 'Honey never spoils';
+    const root = await seedSwmSnapshot(store, 'urn:fact:dwtyped', value);
+    await seedKeepRootSignal(store, 'urn:fact:dwtyped', true, 'typed');
+    chain.__registerKC({ kaId: 303n, contextGraphId: ON_CHAIN_CG, merkleRootHex: ethers.hexlify(root), chunks: [] });
+
+    const persisted: number[] = [];
+    const deps = makeDeps(store, chain, fh, persisted);
+    const cursor = createCursorState(0);
+
+    const res = await reconcileContextGraph(deps, cursor, LOCAL_CG, ON_CHAIN_CG);
+
+    expect(res.reconciled).toBe(1);
+    expect(await isInVm(store, 'urn:fact:dwtyped', value)).toBe(true);
+    expect(await isInRootLabel(store, 'urn:fact:dwtyped', value)).toBe(true);
   });
 
   it('does NOT dual-write to the root label graph when no keep-root signal is persisted', async () => {

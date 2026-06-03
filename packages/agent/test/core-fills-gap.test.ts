@@ -92,6 +92,12 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
       },
     });
     stubNode(agent);
+    // #35 — recordCoreHostedPublicCg is existence-gated via
+    // readLiveOnChainAccessPolicy, which only trusts the access policy once
+    // isContextGraphActiveOnChain proves the slot is live. The mock returns
+    // false for never-created CGs, so default the probe to "live" here; tests
+    // that exercise an UNKNOWN slot override it to false.
+    chain.isContextGraphActiveOnChain = async () => true;
     return agent as unknown as AgentInternals;
   }
 
@@ -152,6 +158,21 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
 
     expect(internals.subscribedContextGraphs.get('99')?.coreHosted).toBeUndefined();
     expect(saved.find((r) => r.id === '99')).toBeUndefined();
+  });
+
+  it('does NOT mark an UNKNOWN (not-live) CG even though the policy getter defaults to public(0)', async () => {
+    // #35 — getContextGraphAccessPolicy returns Solidity's default `0` (public)
+    // for never-registered ids, so without a liveness check an unknown slot
+    // would be persisted as core-hosted. readLiveOnChainAccessPolicy must fail
+    // closed when isContextGraphActiveOnChain can't prove the slot is live.
+    const internals = await boot();
+    internals.chain.getContextGraphAccessPolicy = async () => 0; // default-public for unknown ids
+    internals.chain.isContextGraphActiveOnChain = async () => false; // slot is NOT live on-chain
+
+    await internals.recordCoreHostedPublicCg('123456');
+
+    expect(internals.subscribedContextGraphs.get('123456')).toBeUndefined();
+    expect(saved.find((r) => r.id === '123456')).toBeUndefined();
   });
 
   it('ignores a non-numeric id (cannot index the on-chain ordinal list)', async () => {
@@ -255,6 +276,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     stubNode(agent);
     const internals = agent as unknown as AgentInternals;
     internals.chain.getContextGraphAccessPolicy = async () => 0;
+    internals.chain.isContextGraphActiveOnChain = async () => true; // #35 — slot live on-chain
 
     const ON_CHAIN_CG = 42n;
     // The Core already has the SWM snapshot locally (simulating a pull from

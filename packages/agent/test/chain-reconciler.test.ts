@@ -119,6 +119,41 @@ describe('reconcileContextGraph — sweep', () => {
     const r2 = await reconcileContextGraph(deps, state, 'cg', 1n);
     expect(r2.watermark).toBe(1);
   });
+
+  it('#13 — a transient getHeadBlock failure promotes but does NOT advance/persist the watermark', async () => {
+    // A throwing getHeadBlock means we can't observe the head; advancing the
+    // watermark at depth 0 here (the old `undefined`-conflation bug) would
+    // strand the ordinal if a shallow reorg then drops it. The ordinal IS
+    // reconciled (counted), but the watermark must hold until a real head is
+    // seen — at which point the cheap recentReconciledUals/`already` re-check
+    // folds it in under the proper depth gate.
+    let headThrows = true;
+    const attempted: number[] = [];
+    const { deps, persisted } = makeDeps({
+      getKCCount: async () => 2,
+      confirmationDepth: 5,
+      getHeadBlock: async () => {
+        if (headThrows) throw new Error('RPC down');
+        return 100;
+      },
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => {
+        attempted.push(ordinal);
+        return { status: 'reconciled', blockNumber: 90 };
+      },
+    });
+    const state = createCursorState(0);
+
+    const r1 = await reconcileContextGraph(deps, state, 'cg', 1n);
+    expect(r1.reconciled).toBe(2);   // both ordinals promoted
+    expect(r1.watermark).toBe(0);    // but watermark held — no confirmed head
+    expect(persisted).toEqual([]);   // nothing persisted on unconfirmed data
+
+    // Head observable again (block 100, regs at 90 → buried by 10 >= 5).
+    headThrows = false;
+    const r2 = await reconcileContextGraph(deps, state, 'cg', 1n);
+    expect(r2.watermark).toBe(2);
+    expect(persisted).toEqual([{ cg: 'cg', watermark: 2 }]);
+  });
 });
 
 describe('ReconcileCoalescer', () => {
