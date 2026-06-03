@@ -992,6 +992,42 @@ export function isDkgMonorepo(): boolean {
   return _isDkgMonorepo;
 }
 
+export type MonorepoInitTarget = 'not-monorepo' | 'explicit-home' | 'dev-home' | 'shared-npm-home';
+
+/**
+ * Classify what `dkg init`'s config-home resolution means for a given run, so
+ * the command can notify the operator without hard-blocking (issue #960). Pure
+ * + fully injectable so the three meaningful branches are unit-testable.
+ *
+ *  - `not-monorepo`    — an npm install; init behaves normally, no notice.
+ *  - `explicit-home`   — the user set `DKG_HOME`; their explicit choice, no notice.
+ *  - `dev-home`        — monorepo checkout, no `DKG_HOME`, resolves to the
+ *                        separate dev home (`~/.dkg-dev`); safe — informational
+ *                        notice only.
+ *  - `shared-npm-home` — monorepo checkout, no `DKG_HOME`, but a config already
+ *                        exists at `~/.dkg` so `resolveDkgConfigHome` falls back
+ *                        to it; init would write the shared `~/.dkg` home (which
+ *                        *might* be an npm-installed node). We only **warn** —
+ *                        config presence is not proof of npm ownership, and a
+ *                        dev may intentionally use `~/.dkg`, so blocking would be
+ *                        wrong.
+ *
+ * `resolvedHome === npmHome` is the signal for the fallback: `dkgDir()` returns
+ * `~/.dkg` (rather than `~/.dkg-dev`) only when the resolver's own
+ * config-existence check (`config.json` OR `config.yaml`) matched, so the YAML
+ * case is handled here for free.
+ */
+export function classifyMonorepoInit(params: {
+  isMonorepo: boolean;
+  dkgHomeEnv: string | undefined;
+  resolvedHome: string;
+  npmHome: string;
+}): MonorepoInitTarget {
+  if (!params.isMonorepo) return 'not-monorepo';
+  if (params.dkgHomeEnv?.trim()) return 'explicit-home';
+  return params.resolvedHome === params.npmHome ? 'shared-npm-home' : 'dev-home';
+}
+
 /**
  * Resolve the repo root from the compiled code location.
  * Works from packages/cli/dist/ (compiled) or packages/cli/src/ (dev).

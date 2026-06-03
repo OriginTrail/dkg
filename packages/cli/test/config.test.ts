@@ -20,11 +20,42 @@ import {
   readNodeRoleFromConfigSync,
   isDkgMonorepo,
   dkgDir,
+  classifyMonorepoInit,
   repoDir,
   resolveAutoUpdateSource,
   resolveApprovalPolicy,
   resolveChainConfig,
 } from '../src/config.js';
+
+describe('classifyMonorepoInit (dkg init monorepo home guard — issue #960)', () => {
+  const npmHome = '/home/u/.dkg';
+  const devHome = '/home/u/.dkg-dev';
+
+  it('npm install (not a monorepo) → not-monorepo (no notice)', () => {
+    expect(classifyMonorepoInit({ isMonorepo: false, dkgHomeEnv: undefined, resolvedHome: npmHome, npmHome }))
+      .toBe('not-monorepo');
+  });
+
+  it('explicit DKG_HOME → explicit-home (user choice, bypass)', () => {
+    expect(classifyMonorepoInit({ isMonorepo: true, dkgHomeEnv: '/tmp/scratch', resolvedHome: '/tmp/scratch', npmHome }))
+      .toBe('explicit-home');
+  });
+
+  it('whitespace-only DKG_HOME is treated as unset', () => {
+    expect(classifyMonorepoInit({ isMonorepo: true, dkgHomeEnv: '   ', resolvedHome: devHome, npmHome }))
+      .toBe('dev-home');
+  });
+
+  it('monorepo, no ~/.dkg config → dev-home (resolves to ~/.dkg-dev): proceed', () => {
+    expect(classifyMonorepoInit({ isMonorepo: true, dkgHomeEnv: undefined, resolvedHome: devHome, npmHome }))
+      .toBe('dev-home');
+  });
+
+  it('monorepo, ~/.dkg config present → shared-npm-home (resolver fell back to ~/.dkg): warn, not block', () => {
+    expect(classifyMonorepoInit({ isMonorepo: true, dkgHomeEnv: undefined, resolvedHome: npmHome, npmHome }))
+      .toBe('shared-npm-home');
+  });
+});
 
 describe('removePid / removeApiPort (catch path)', () => {
   it('removePid does not throw when pid file does not exist (ENOENT)', async () => {

@@ -27,7 +27,7 @@ import {
   apiPortPath,
   loadNetworkConfig, loadProjectConfig, resolveAutoUpdateConfig, resolveAutoUpdateSource, resolveChainConfig,
   releasesDir, activeSlot, swapSlot,
-  slotEntryPoint, isStandaloneInstall, repoDir, isDkgMonorepo,
+  slotEntryPoint, isStandaloneInstall, repoDir, isDkgMonorepo, classifyMonorepoInit,
   resolveContextGraphs, resolveNetworkDefaultContextGraphs,
   readNodeRoleFromConfigSync,
   type AutoUpdateConfig,
@@ -604,34 +604,35 @@ program
     // checkout, exactly like an npm install — the only difference is the home
     // directory. The CLI's home resolver (`dkgDir()` → `resolveDkgConfigHome`)
     // routes a clone to `~/.dkg-dev` (kept separate from an npm install's
-    // `~/.dkg`), the SAME home the local dev daemon resolves, so init writes the
-    // dev config with no risk of the two diverging.
-    //
-    // The one case Bundle B1c (PR #753) was right to guard: when an npm-installed
-    // node already owns `~/.dkg`, the resolver intentionally falls back to
-    // `~/.dkg`, and a checkout `dkg init` would then overwrite that installed
-    // node's config. We refuse only that stomping case (and only when the user
-    // hasn't explicitly chosen a home via DKG_HOME); otherwise we proceed into
-    // the dev home and surface where we're writing.
-    if (isDkgMonorepo() && !process.env.DKG_HOME?.trim()) {
-      const npmHome = join(homedir(), '.dkg');
-      const npmNodeConfigExists =
-        existsSync(join(npmHome, 'config.json')) || existsSync(join(npmHome, 'config.yaml'));
-      if (npmNodeConfigExists) {
-        console.error(
-          '\n[dkg init] Refusing: an npm-installed node config already exists at ~/.dkg, and\n' +
-            '  running `dkg init` from this monorepo checkout would overwrite it. To bootstrap a\n' +
-            '  separate dev config without touching the installed node, point DKG_HOME at a\n' +
-            '  dev/scratch home:\n' +
-            '\n' +
-            '    DKG_HOME=~/.dkg-dev dkg init\n',
+    // `~/.dkg`), the SAME home the local dev daemon resolves. We never block:
+    // we only NOTE the dev home, or WARN if the resolver fell back to a
+    // pre-existing `~/.dkg` (which *might* be an npm-installed node — but config
+    // presence isn't proof of npm ownership, and a dev may use `~/.dkg`
+    // intentionally, so a hard refusal would be wrong). See `classifyMonorepoInit`.
+    // (PR #753 / Bundle B1c hard-refused all monorepo inits; that was over-strict.)
+    switch (classifyMonorepoInit({
+      isMonorepo: isDkgMonorepo(),
+      dkgHomeEnv: process.env.DKG_HOME,
+      resolvedHome: dkgDir(),
+      npmHome: join(homedir(), '.dkg'),
+    })) {
+      case 'dev-home':
+        console.log(
+          `[dkg init] Monorepo checkout detected — writing dev config to ${dkgDir()} ` +
+            `(set DKG_HOME to override).`,
         );
-        process.exit(1);
-      }
-      console.log(
-        `[dkg init] Monorepo checkout detected — writing dev config to ${dkgDir()} ` +
-          `(set DKG_HOME to override).`,
-      );
+        break;
+      case 'shared-npm-home':
+        console.warn(
+          `\n[dkg init] Note: writing to the existing ~/.dkg config home (${dkgDir()}), not a\n` +
+            `  separate dev home, because a config already exists there. If ~/.dkg belongs to an\n` +
+            `  npm-installed node you don't want this checkout to modify, re-run with a dev home:\n` +
+            `\n` +
+            `    DKG_HOME=~/.dkg-dev dkg init\n`,
+        );
+        break;
+      default:
+        break;
     }
 
     await ensureDkgDir();
