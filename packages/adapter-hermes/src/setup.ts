@@ -672,8 +672,20 @@ export async function runHermesSetup(req: HermesSetupRequest): Promise<HermesSet
   // setup-entrypoint-contract.md §2 Open Question 1 + H-AC-58.
   warnPortConflict(req, warnings);
 
-  // Step 2: bootstrap `~/.dkg/config.json` when missing.
-  if (!dryRun && !existsSync(join(resolveDkgConfigHome({ startDir: __dirname }), 'config.json'))) {
+  // Step 2: bootstrap `~/.dkg/config.json` when no daemon config exists yet.
+  // Honor BOTH `config.json` AND `config.yaml`: `resolveDkgConfigHome` and the
+  // daemon's `loadConfig` both treat a YAML-only home as a valid existing node
+  // (see the "detect both config.json AND config.yaml" rule in core/dkg-home.ts),
+  // so a node configured purely via `config.yaml` must NOT be re-bootstrapped.
+  // Writing a fresh `config.json` would shadow the operator's YAML config and —
+  // post-issue #960 — risk steering them onto a different store backend than the
+  // one they chose. Gating on `config.json` alone (the pre-#960 behavior) misses
+  // the YAML-only install.
+  const dkgConfigHome = resolveDkgConfigHome({ startDir: __dirname });
+  const dkgConfigExists =
+    existsSync(join(dkgConfigHome, 'config.json')) ||
+    existsSync(join(dkgConfigHome, 'config.yaml'));
+  if (!dryRun && !dkgConfigExists) {
     try {
       await bootstrapDkgNodeConfig(profile, setupOptions, warnings);
     } catch (err: any) {
@@ -1818,7 +1830,8 @@ function loadHermesNetworkConfig(warnings: string[]): FundWalletsNetworkConfig &
     cliDir = null;
   }
   // testnet.json is the default network — operators with a custom env can
-  // pre-write `~/.dkg/config.json` and `runHermesSetup` will skip bootstrap.
+  // pre-write `~/.dkg/config.json` (or `config.yaml`) and `runHermesSetup`
+  // will skip bootstrap.
   const candidates: string[] = [];
   if (cliDir) candidates.push(join(cliDir, 'network', 'testnet.json'));
   candidates.push(resolve(__dirname, '..', '..', '..', 'network', 'testnet.json'));

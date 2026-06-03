@@ -1110,6 +1110,73 @@ assert config["allow_context_graph_admin_tools"] is False, config
     expect(body.transport.bridgeUrl).toBeUndefined();
   });
 
+  // issue #960 — end-to-end YAML-only Hermes path. A daemon home that has
+  // only a `config.yaml` (no `config.json`) is a valid existing node:
+  // `resolveDkgConfigHome` and the daemon's `loadConfig` both honor it. The
+  // Hermes bootstrap step must treat such a home as already configured and
+  // NOT write a fresh `config.json` — doing so would shadow the operator's
+  // YAML config and could seed a store backend they never chose.
+  it('honors an existing config.yaml DKG home during setup and does not write a shadowing config.json (issue #960)', async () => {
+    const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
+    const dkgHome = mkdtempSync(join(tmpdir(), 'dkg-home-yaml-'));
+    const yamlBefore = 'name: yaml-only-node\napiPort: 9201\nnodeRole: edge\n';
+    writeFileSync(join(dkgHome, 'config.yaml'), yamlBefore);
+
+    // Registration probe fires regardless of `start` (decoupled per #386),
+    // so stub fetch to keep the orchestrator offline-safe.
+    vi.stubGlobal('fetch', async () =>
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+
+    const oldDkgHome = process.env.DKG_HOME;
+    process.env.DKG_HOME = dkgHome;
+    try {
+      await runSetup({ hermesHome, verify: false, start: false, fund: false });
+    } finally {
+      if (oldDkgHome === undefined) delete process.env.DKG_HOME;
+      else process.env.DKG_HOME = oldDkgHome;
+    }
+
+    // Bootstrap skipped — no shadowing config.json written.
+    expect(existsSync(join(dkgHome, 'config.json'))).toBe(false);
+    // The operator's YAML config is left byte-for-byte intact.
+    expect(readFileSync(join(dkgHome, 'config.yaml'), 'utf-8')).toBe(yamlBefore);
+  });
+
+  // issue #960 — positive control for the test above: a genuinely fresh DKG
+  // home (no config.json AND no config.yaml) DOES get bootstrapped, and the
+  // written config adopts the `oxigraph-server` store default. This proves the
+  // bootstrap write path is live in this test environment, so the YAML-only
+  // test above is meaningfully guarding the gate (not passing vacuously).
+  it('bootstraps a fresh DKG home with the oxigraph-server store default during setup (issue #960)', async () => {
+    const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
+    const dkgHome = mkdtempSync(join(tmpdir(), 'dkg-home-fresh-'));
+
+    vi.stubGlobal('fetch', async () =>
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+
+    const oldDkgHome = process.env.DKG_HOME;
+    process.env.DKG_HOME = dkgHome;
+    try {
+      await runSetup({ hermesHome, verify: false, start: false, fund: false });
+    } finally {
+      if (oldDkgHome === undefined) delete process.env.DKG_HOME;
+      else process.env.DKG_HOME = oldDkgHome;
+    }
+
+    const configPath = join(dkgHome, 'config.json');
+    expect(existsSync(configPath)).toBe(true);
+    const written = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(written.store).toEqual({ backend: 'oxigraph-server' });
+  });
+
   it('uses the shared monorepo DKG home when DKG_HOME is unset for setup daemon registration', async () => {
     const homeRoot = mkdtempSync(join(tmpdir(), 'hermes-dkg-home-'));
     const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
