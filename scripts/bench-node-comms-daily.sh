@@ -21,6 +21,11 @@
 #   BENCH_NODE_COMMS_SKIP_BUILD=1    skip the rebuild step (use existing dist)
 #   BENCH_NODE_COMMS_ITERATIONS / _BULK / _CATCHUP_ITER   scenario sizing
 #
+# IMPORTANT: keep the sizing (iterations / bulk / catch-up) CONSTANT across runs.
+# Disk, record-count, heap, and even per-op timing scale with the data a run
+# accumulates, so changing the counts breaks comparability with the stored
+# history. If you must change them, reset bench/results/node-comms/history.ndjson
+# (or re-pin baseline.json) so the rolling baseline is rebuilt at the new sizing.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

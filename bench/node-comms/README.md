@@ -114,11 +114,12 @@ that:
 
    The build gates on the **stable** signals: **`median`** latency, **heap**
    memory (`peakHeapUsedBytes` + post-GC `finalHeapUsedBytes`, steady to ~1%),
-   **disk**, and **record counts** (deterministic). This still satisfies "flag a
-   15% memory increase" — a real memory regression shows up in the heap, which is
-   stable enough to detect it; RSS is not. Raise `--iterations` to ~20+ if you
-   want statistically meaningful `mean`/`p95` gating (they stay informational
-   regardless, by design).
+   **disk**, and **record counts** (deterministic at a fixed sizing). This still
+   satisfies "flag a 15% memory increase" — a real memory regression shows up in
+   the heap, which is stable enough to detect it; RSS is not. (`mean`/`p95` stay
+   informational regardless of sample count, by design — and note that raising
+   `--iterations` resets the baseline, since the accumulated-data metrics scale
+   with it; see "Keep the sizing constant" below.)
 
 A pinned `baseline.json` always enforces immediately (no warmup).
 
@@ -172,8 +173,13 @@ Other CI notes:
 - **Use a dedicated/consistent runner.** Latency metrics are sensitive to host
   load; comparing across heterogeneous runners inflates variance. Pin the job to
   one labeled agent if you can.
-- **Consider raising `BENCH_NODE_COMMS_ITERATIONS`** (e.g. 10–20) on CI for a
-  steadier median; the run cost scales roughly linearly.
+- **Keep the sizing constant across runs.** `--iterations`, `--bulk`, and
+  `--catchup-iterations` must stay fixed once you start accumulating history.
+  Disk, record-count, heap, and even per-op timing scale with the data a run
+  accumulates, so changing the counts makes every metric "regress" against an
+  old-sizing baseline. The daily runner deliberately uses the same defaults as
+  the interactive command for this reason. If you do change sizing, reset
+  `history.ndjson` (or re-pin `baseline.json`) so the baseline rebuilds.
 - **Exit code is the gate.** `1` = a gated regression (median/mean/memory/disk) —
   fail the build. `2` = the benchmark itself failed (e.g. a sync timeout) — also
   fail, but it's an infra/correctness signal, not a perf regression. `📊`
