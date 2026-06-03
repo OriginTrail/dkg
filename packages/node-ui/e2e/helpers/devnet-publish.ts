@@ -253,7 +253,15 @@ export async function publishToVm(opts: {
   assertionName: string;
   nodeNum?: number;
   clearAfter?: boolean;
-}): Promise<{ status?: string; kaId?: string; txHash?: string }> {
+  /**
+   * Tolerate a 207 partial publish (SWM/VM landed but the context-graph mirror
+   * failed). OFF by default — see the 207 handling below. No current caller
+   * needs this; it exists as a deliberate, greppable escape hatch so a future
+   * spec that specifically exercises the partial-publish path can opt in rather
+   * than silently inheriting it.
+   */
+  allowPartial?: boolean;
+}): Promise<{ httpStatus: number; status?: string; kaId?: string; txHash?: string; contextGraphError?: string }> {
   const res = await devnetApiFetch('/api/shared-memory/publish', {
     method: 'POST',
     nodeNum: opts.nodeNum ?? 1,
@@ -266,14 +274,28 @@ export async function publishToVm(opts: {
   if (!res.ok) {
     throw new Error(`publish failed: ${res.status} ${await res.text()}`);
   }
-  return (await res.json()) as { status?: string; kaId?: string; txHash?: string };
+  const body = (await res.json()) as { status?: string; kaId?: string; txHash?: string; contextGraphError?: string };
+  // `res.ok` is true for 207 too. The daemon returns 207 when the SWM/VM publish
+  // itself succeeded but the context-graph mirror failed (`contextGraphError`) —
+  // a PARTIAL publish. That is exactly the kind of false-green this lane is meant
+  // to catch, so REJECT it here by default: a centralized throw protects every
+  // caller (the global-setup VM seed, the conviction + messaging specs, …) at
+  // once, instead of relying on each one to remember to inspect `httpStatus`.
+  // Callers that genuinely want a partial publish pass `allowPartial: true`.
+  if (res.status === 207 && !opts.allowPartial) {
+    throw new Error(
+      `publish partial (HTTP 207) — SWM/VM publish landed but the context-graph ` +
+        `mirror failed: ${body.contextGraphError ?? 'unknown contextGraphError'}`,
+    );
+  }
+  return { httpStatus: res.status, ...body };
 }
 
 export async function runWmSwmVmPipeline(opts: {
   contextGraphId: string;
   stamp?: number;
   nodeNum?: number;
-}): Promise<{ assertionName: string; label: string; kaId?: string }> {
+}): Promise<{ assertionName: string; label: string; kaId?: string; httpStatus?: number; contextGraphError?: string }> {
   const stamp = opts.stamp ?? Date.now();
   const assertionName = `e2e-ui-pipeline-${stamp}`;
   const label = `E2E Pipeline ${stamp}`;
@@ -309,7 +331,7 @@ export async function runWmSwmVmPipeline(opts: {
       nodeNum: opts.nodeNum,
     });
 
-    return { assertionName, label, kaId: vm.kaId };
+    return { assertionName, label, kaId: vm.kaId, httpStatus: vm.httpStatus, contextGraphError: vm.contextGraphError };
   });
 }
 

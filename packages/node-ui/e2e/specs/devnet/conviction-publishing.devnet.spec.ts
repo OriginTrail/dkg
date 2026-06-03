@@ -3,12 +3,12 @@
  * Full conviction discount flows live in devnet/conviction-lazy-settle/.
  */
 import { test, expect } from '../../fixtures/base.js';
-import { isDevnetAvailable, devnetApiFetch, waitForDevnetStatus } from '../../helpers/devnet.js';
+import { devnetApiFetch, waitForDevnetStatus, requireDevnetPrecondition, requireDevnetNode } from '../../helpers/devnet.js';
 
 test.describe.configure({ mode: 'serial' });
 
 test.beforeAll(async () => {
-  test.skip(!isDevnetAvailable(1), 'Devnet node1 not running');
+  await requireDevnetNode(test, 1);
   await waitForDevnetStatus(1);
 });
 
@@ -27,7 +27,7 @@ test.describe('Conviction NFT (PCA) API', () => {
   test('publish without PCA registration uses standard shared-memory path', async () => {
     const { runWmSwmVmPipeline, listContextGraphs } = await import('../../helpers/devnet-publish.js');
     const cgs = await listContextGraphs(1);
-    test.skip(cgs.length === 0, 'No CGs');
+    requireDevnetPrecondition(test, cgs.length === 0, 'No CGs');
     const result = await runWmSwmVmPipeline({ contextGraphId: cgs[0]!.id });
     expect(result.assertionName).toBeTruthy();
   });
@@ -37,7 +37,7 @@ test.describe('Non-conviction publishing (baseline)', () => {
   test('shared-memory publish endpoint responds for devnet CG', async () => {
     const cgsRes = await devnetApiFetch('/api/context-graphs');
     const { contextGraphs } = (await cgsRes.json()) as { contextGraphs: Array<{ id: string }> };
-    test.skip(contextGraphs.length === 0, 'No CGs');
+    requireDevnetPrecondition(test, contextGraphs.length === 0, 'No CGs');
     const { createWmAssertion, promoteAssertion, publishToVm, buildTestQuads } = await import('../../helpers/devnet-publish.js');
     const { withSwmLock } = await import('../../helpers/swm-lock.js');
     const cgId = contextGraphs[0]!.id;

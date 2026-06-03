@@ -665,7 +665,8 @@ program
     }
 
     // Triple-store backend (RFC 120, plan PR 2 item 1 + PR 3 Docker
-    // branch). Default: stay on local Oxigraph. Operators selecting
+    // branch). Default: the daemon-managed local Oxigraph server
+    // (`oxigraph-server`) — see promptStoreBackend. Operators selecting
     // "blazegraph" with a blank URL get the Docker convenience path
     // (if Docker is installed) — the namespace name defaults to the
     // node name so each operator gets their own DKG-owned namespace.
@@ -841,7 +842,15 @@ program
     console.log(
       `  store:      ${
         storeBlock
-          ? `${storeBlock.backend} (${(storeBlock.options as { url: string }).url})`
+          // Endpoint shape varies by backend: blazegraph uses `options.url`,
+          // sparql-http uses `options.queryEndpoint`, and oxigraph-server / a
+          // preserved local block have no endpoint — render the backend name
+          // alone in that case rather than dropping the configured endpoint.
+          ? (() => {
+              const o = storeBlock.options as { url?: string; queryEndpoint?: string } | undefined;
+              const endpoint = o?.url ?? o?.queryEndpoint;
+              return `${storeBlock.backend}${endpoint ? ` (${endpoint})` : ''}`;
+            })()
           : 'oxigraph (local default)'
       }`,
     );

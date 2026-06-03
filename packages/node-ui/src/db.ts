@@ -110,6 +110,15 @@ export class DashboardDB {
     this.db = new Database(dbPath);
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('synchronous = NORMAL');
+    // Cap the persisted WAL file. A PASSIVE autocheckpoint resets WAL
+    // frames but leaves the -wal file at its high-water mark, so a node
+    // that once took a heavy write burst (e.g. the pre-rc.14 sync-page
+    // idempotency firehose) keeps a multi-GB -wal on disk forever. With
+    // journal_size_limit set, checkpoints truncate the file back to this
+    // cap. Per-connection setting (not persisted), so it is re-applied on
+    // every open. 64 MiB leaves headroom above the ~4 MiB default
+    // autocheckpoint while bounding the worst case.
+    this.db.pragma('journal_size_limit = 67108864');
     this.migrate();
     this.loadRetentionSetting();
     this.prune();
@@ -772,6 +781,43 @@ export class DashboardDB {
         // VACUUM requires an exclusive lock. If another connection is
         // holding the DB open we skip and retry on the next prune.
       }
+    }
+
+    // Return the WAL file itself to the OS. journal_size_limit bounds it
+    // in steady state, but a TRUNCATE checkpoint here shrinks it promptly
+    // on the prune cadence (~6h) and immediately after the VACUUM above,
+    // which rewrites the whole DB through the WAL and momentarily grows
+    // it. Runs unconditionally — independent of the VACUUM gate — because
+    // an idle node still wants its -wal reclaimed.
+    try {
+      // wal_checkpoint signals reader contention through its result row
+      // (`busy = 1`), NOT by throwing — so a busy checkpoint leaves the
+      // WAL un-truncated while looking like success. With better-sqlite3's
+      // single synchronous connection this should not happen, but surface
+      // it if it ever does so a silently-failing reclaim is observable
+      // rather than indistinguishable from a real one.
+      const [checkpoint] = this.db.pragma('wal_checkpoint(TRUNCATE)') as Array<{
+        busy: number;
+        log: number;
+        checkpointed: number;
+      }>;
+      if (checkpoint?.busy) {
+        console.warn(
+          `[DashboardDB] wal_checkpoint(TRUNCATE) busy — WAL not reclaimed this prune ` +
+            `(log=${checkpoint.log}, checkpointed=${checkpoint.checkpointed}); retried next prune`,
+        );
+      }
+    } catch (err) {
+      // Reaching here means the pragma threw, which is distinct from the
+      // handled busy case above: contention surfaces as busy>0, not an
+      // exception. Log it (don't swallow) so that if a future SQLite /
+      // better-sqlite3 change turns lock or I/O errors into throws, the
+      // stalled WAL reclaim is visible in the daemon log instead of only
+      // showing up later as unexplained disk growth. Never block prune.
+      console.warn(
+        `[DashboardDB] wal_checkpoint(TRUNCATE) failed — WAL not reclaimed this prune: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 

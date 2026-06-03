@@ -456,6 +456,34 @@ describe('memory layer custom query execution', () => {
     expect(memoryLayerView).toContain("onKeyDown={(e) => { if (e.key === 'Enter') runQuery(); }}");
     expect(memoryLayerView).toContain('<button className="v10-mlv-run-btn" onClick={runQuery}>');
   });
+
+  it('keeps the WM default query GRAPH variable top-level AND WM-scoped (scoped-query guard #749 + Codex #944)', () => {
+    // Two regressions pinned here:
+    //  1. The scoped local-query path rejects a GRAPH *variable* nested in
+    //     UNION/OPTIONAL/a sub-group ("GRAPH variables must appear at the top
+    //     level of scoped local queries"), so `GRAPH ?g` must never be wrapped
+    //     in a UNION/OPTIONAL (the prior shape that broke the WM layer view +
+    //     WM→SWM promote flow).
+    expect(memoryLayerView).not.toMatch(/UNION\s*\{\s*GRAPH\s+\?/);
+    expect(memoryLayerView).not.toMatch(/OPTIONAL\s*\{\s*GRAPH\s+\?/);
+    //  2. With `includeContextGraphPartitions` on, a bare prefix FILTER would
+    //     let SWM/VM partitions bleed into the WM tab. `?g` must be gated on
+    //     the `<cg>/_meta` `dkg:memoryLayer "WM"` marker and read via a
+    //     top-level `GRAPH ?g { ?s ?p ?o }`.
+    expect(memoryLayerView).toContain('<http://dkg.io/ontology/memoryLayer> "WM"');
+    expect(memoryLayerView).toContain('GRAPH ?g { ?s ?p ?o }');
+    //  3. The partition opt-in must be gated to the built-in WM query only.
+    //     If it leaked to custom queries (just `layer === 'wm'`), an advanced
+    //     `GRAPH ?g` typed into the WM tab could enumerate SWM/VM/meta
+    //     partitions and escape the WM scope.
+    expect(memoryLayerView).toContain("layer === 'wm' && sparql === defaultSparql");
+    //  4. Exclude the reserved `meta` namespace by path SHAPE (the profile /
+    //     query-catalog drafts live at `<cg>/meta/assertion/…`). Must match the
+    //     `/meta/assertion/` bucket, NOT a `/_meta` suffix — the latter would
+    //     also drop a valid WM assertion whose name is `_meta`.
+    expect(memoryLayerView).toContain('!CONTAINS(STR(?g), "/meta/assertion/")');
+    expect(memoryLayerView).not.toContain('STRENDS(STR(?g), "/_meta")');
+  });
 });
 
 /* ══════════════════════════════════════════

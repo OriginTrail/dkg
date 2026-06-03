@@ -112,8 +112,27 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
 
   const defaultSparql = useMemo(() => {
     if (layer === 'wm') {
-      const cgUri = `did:dkg:context-graph:${contextGraphId}`;
-      return `SELECT ?s ?p ?o WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), "${cgUri}")) } } LIMIT 1000`;
+      const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
+      // Two constraints shape this query:
+      //  1. The GRAPH variable must stay at the TOP LEVEL of the WHERE block.
+      //     The scoped local-query path (`constrainGraphVariablesToAllowedSet`,
+      //     PR #749) rejects a `GRAPH ?g` nested inside `UNION`/`OPTIONAL`/a
+      //     sub-group ("GRAPH variables must appear at the top level of scoped
+      //     local queries"). Both GRAPH clauses below are WHERE-block siblings,
+      //     so `?g` stays top-level and the guard passes.
+      //  2. `?g` must be restricted to WM-marked partitions. The view runs with
+      //     `includeContextGraphPartitions: true` (see below), which widens the
+      //     allow-list to every same-CG partition — including `/_shared_memory`,
+      //     `/_verified_memory/*`, and metadata graphs. A bare prefix FILTER
+      //     would let SWM/VM triples bleed into the WM tab, so we gate `?g` on
+      //     the `<cg>/_meta` `dkg:memoryLayer "WM"` lifecycle marker (the same
+      //     authority `listWmAssertions` uses) and read only those graphs.
+      //  3. Exclude the reserved `meta` namespace (`<cg>/meta/assertion/…`
+      //     profile/query-catalog drafts are WM-marked but are UI config, not
+      //     user knowledge), mirroring `listWmAssertions`. Match the bucket by
+      //     its path SHAPE (`/meta/assertion/`), not a `/_meta` suffix, so a
+      //     valid WM assertion named `_meta` isn't dropped.
+      return `SELECT ?s ?p ?o WHERE { GRAPH <${metaGraph}> { ?g <http://dkg.io/ontology/memoryLayer> "WM" } GRAPH ?g { ?s ?p ?o } FILTER(!CONTAINS(STR(?g), "/meta/assertion/")) } LIMIT 1000`;
     }
     if (layer === 'vm') {
       return buildVerifiedMemorySearchQuery({
@@ -130,10 +149,23 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
   const graphSuffix = layer === 'swm' ? '_shared_memory' as const : undefined;
   const includeShared = layer === 'swm';
   const queryView = layer === 'vm' ? 'verified-memory' as const : undefined;
+  // WM content lives in the CG's assertion partitions, which sit outside the
+  // daemon's static `GRAPH ?g` allow-list. Without this opt-in the WM view's
+  // `GRAPH ?g { ?s ?p ?o }` enumeration resolves against only
+  // { <cg>, <cg>/_meta, <cg>/_shared_memory_meta } and renders empty. SWM/VM
+  // use their own `view`-routed scopes and don't need it.
+  //
+  // Scope the opt-in to the *built-in* WM query only (`sparql === defaultSparql`):
+  // that query constrains `?g` to WM-marked graphs via the `_meta` join, so the
+  // widened allow-list stays layer-correct. A custom query typed into the WM tab
+  // must NOT get the opt-in — otherwise an advanced `GRAPH ?g { … }` could
+  // enumerate SWM/VM/meta partitions and silently escape the WM scope. Custom
+  // queries fall back to the daemon's default static allow-list.
+  const includePartitions = layer === 'wm' && sparql === defaultSparql;
 
   const { data, loading, error, refresh } = useFetch(
-    () => executeQuery(sparql, contextGraphId, includeShared, graphSuffix, queryView),
-    [sparql, contextGraphId, includeShared, graphSuffix, queryView],
+    () => executeQuery(sparql, contextGraphId, includeShared, graphSuffix, queryView, includePartitions),
+    [sparql, contextGraphId, includeShared, graphSuffix, queryView, includePartitions],
     0
   );
   useMemoryGraphEvents(contextGraphId, refresh, { layers: [layer] });

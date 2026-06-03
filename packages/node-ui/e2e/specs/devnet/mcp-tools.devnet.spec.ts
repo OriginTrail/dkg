@@ -1,10 +1,10 @@
 import { test, expect } from '../../fixtures/base.js';
-import { isDevnetAvailable, devnetApiFetch, waitForDevnetStatus } from '../../helpers/devnet.js';
+import { devnetApiFetch, waitForDevnetStatus, requireDevnetPrecondition, requireDevnetNode } from '../../helpers/devnet.js';
 
 test.describe.configure({ mode: 'serial' });
 
 test.beforeAll(async () => {
-  test.skip(!isDevnetAvailable(1), 'Devnet node1 not running');
+  await requireDevnetNode(test, 1);
   await waitForDevnetStatus(1);
 });
 
@@ -33,7 +33,7 @@ test.describe('MCP server tools (devnet API smoke)', () => {
   test('SPARQL query endpoint returns bindings for devnet CG', async () => {
     const cgs = await devnetApiFetch('/api/context-graphs');
     const { contextGraphs } = (await cgs.json()) as { contextGraphs: Array<{ id: string }> };
-    test.skip(contextGraphs.length === 0, 'No CGs');
+    requireDevnetPrecondition(test, contextGraphs.length === 0, 'No CGs');
     const cgId = contextGraphs[0]!.id;
     const res = await devnetApiFetch('/api/query', {
       method: 'POST',
@@ -51,7 +51,7 @@ test.describe('MCP server tools (devnet API smoke)', () => {
   test('context graph manifest endpoint responds', async () => {
     const cgs = await devnetApiFetch('/api/context-graphs');
     const { contextGraphs } = (await cgs.json()) as { contextGraphs: Array<{ id: string }> };
-    test.skip(contextGraphs.length === 0, 'No CGs');
+    requireDevnetPrecondition(test, contextGraphs.length === 0, 'No CGs');
     const cgId = contextGraphs[0]!.id;
     const res = await devnetApiFetch(`/api/context-graph/${encodeURIComponent(cgId)}/manifest`);
     expect([200, 404]).toContain(res.status);

@@ -4,12 +4,12 @@
  * `scripts/devnet.sh start` is required.
  */
 import { test, expect } from '../../fixtures/base.js';
-import { isDevnetAvailable, devnetApiFetch, waitForDevnetStatus } from '../../helpers/devnet.js';
+import { devnetApiFetch, waitForDevnetStatus, requireDevnetPrecondition, requireDevnetNode } from '../../helpers/devnet.js';
 
 test.describe.configure({ mode: 'serial' });
 
 test.beforeAll(async () => {
-  test.skip(!isDevnetAvailable(1), 'Devnet node1 not running');
+  await requireDevnetNode(test, 1);
   await waitForDevnetStatus(1);
 });
 
@@ -34,7 +34,7 @@ test.describe('Publishing lifecycle (devnet)', () => {
     expect(cgs.ok).toBe(true);
     const body = (await cgs.json()) as { contextGraphs: Array<{ id: string; name: string }> };
     const cg = body.contextGraphs[0];
-    test.skip(!cg, 'No context graphs on devnet');
+    requireDevnetPrecondition(test, !cg, 'No context graphs on devnet');
 
     const stamp = Date.now();
     const res = await devnetApiFetch('/api/assertion/create', {

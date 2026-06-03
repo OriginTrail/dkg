@@ -580,8 +580,15 @@ export const executeQuery = (
   includeSharedMemory?: boolean,
   graphSuffix?: '_shared_memory',
   view?: 'verified-memory' | 'shared-working-memory',
+  // Opt the CG-scoped allow-list into the assertion partitions. Without it the
+  // daemon restricts `GRAPH ?g { … }` to the static set
+  // { <cg>, <cg>/_meta, <cg>/_shared_memory_meta } (see the long note on
+  // `listWmAssertions`), so a `GRAPH ?g` enumeration of WM content comes back
+  // empty. Callers that read raw partition triples (e.g. the WM layer view)
+  // pass `true`.
+  includeContextGraphPartitions?: boolean,
 ) =>
-  postQueryDeduped({ sparql, contextGraphId, includeSharedMemory, graphSuffix, view });
+  postQueryDeduped({ sparql, contextGraphId, includeSharedMemory, graphSuffix, view, includeContextGraphPartitions });
 
 // --- Publish (assertion-lifecycle: RFC-001 §9.x sign-at-creation) ---
 //
@@ -789,16 +796,67 @@ export async function listAssertions(
   // the data graph is genuinely empty (fresh create with no writes
   // yet), matching the prior listing semantics for that case.
   const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
-  const sparql = `SELECT ?g (COUNT(?s) AS ?cnt) WHERE {
+  const cgPrefix = `did:dkg:context-graph:${contextGraphId}/`;
+  // Two scoped queries instead of a single `OPTIONAL { GRAPH ?g { … } }`.
+  // The OPTIONAL nested a GRAPH *variable* below the top level of the
+  // WHERE block, which the scoped local-query path
+  // (`constrainGraphVariablesToAllowedSet`, PR #749) rejects with
+  // "GRAPH variables must appear at the top level of scoped local
+  // queries". Split the concern:
+  //   • `listSparql`  — authoritative WM membership from the fixed
+  //     `_meta` graph (no GRAPH variable at all). Includes assertions
+  //     whose data partition is still empty (fresh create, no writes),
+  //     preserving the prior listing semantics the OPTIONAL existed for.
+  //   • `countSparql` — per-partition triple counts with the GRAPH
+  //     variable at the top level (guard-safe). Both GRAPH clauses are
+  //     siblings at the top of the WHERE block, so the `?g` variable
+  //     stays top-level and the guard passes. The leading fixed-graph
+  //     join restricts counting to the WM-marked assertion graphs only —
+  //     without it the count fanned out over *every* partition under the
+  //     CG (SWM/VM/meta included), turning a small WM listing into a full
+  //     CG scan. In the UI `includeContextGraphPartitions: true` expands
+  //     the allow-list to the assertion partitions so these counts populate.
+  // Counts are merged by graph URI; a WM graph with no count row simply
+  // renders without a triple badge (the badge is `!= null`-guarded).
+  // The two queries fire in parallel, but the count is BEST-EFFORT: it feeds
+  // only the triple-count badge, so a count failure (timeout, a future
+  // scoped-query edge case) must not reject the whole listing and regress the
+  // promote flow back to "no assertions". Its rejection is swallowed to `null`
+  // (rows then render with `tripleCount: undefined`); the membership query
+  // stays authoritative and its rejection still propagates.
+  // Exclude the reserved `meta` namespace. Profile / query-catalog artifacts
+  // (prof:Profile, prof:SavedQuery, …) are published as WM-marked assertions
+  // under `<cg>/meta/assertion/<addr>/<name>`, so a bare `memoryLayer "WM"`
+  // join scoops them in alongside real user knowledge. Since this listing
+  // feeds the assertions table + bulk-promote, those UI-config drafts would
+  // otherwise be promotable into SWM. Match the reserved bucket by its path
+  // SHAPE (`/meta/assertion/`) rather than a `/_meta` suffix: a raw suffix
+  // match would also drop a perfectly valid WM assertion whose *name* is
+  // `_meta` (names may start with `_`). The parser below keys on the parsed
+  // sub-graph segment (`=== 'meta'`), which is fully name-safe.
+  const metaFilter = `FILTER(!CONTAINS(STR(?g), "/meta/assertion/"))`;
+  const listSparql = `SELECT ?g WHERE {
     GRAPH <${metaGraph}> { ?g <http://dkg.io/ontology/memoryLayer> "WM" }
-    OPTIONAL { GRAPH ?g { ?s ?p ?o } }
+    ${metaFilter}
+  }`;
+  const countSparql = `SELECT ?g (COUNT(*) AS ?cnt) WHERE {
+    GRAPH <${metaGraph}> { ?g <http://dkg.io/ontology/memoryLayer> "WM" }
+    GRAPH ?g { ?s ?p ?o }
+    ${metaFilter}
   } GROUP BY ?g`;
-  const data = await postQueryDeduped({
-    sparql,
-    contextGraphId,
-    includeContextGraphPartitions: true,
-  });
-  const bindings: any[] = data?.result?.bindings ?? [];
+  const [listData, countData] = await Promise.all([
+    postQueryDeduped({ sparql: listSparql, contextGraphId, includeContextGraphPartitions: true }),
+    postQueryDeduped({ sparql: countSparql, contextGraphId, includeContextGraphPartitions: true })
+      .catch(() => null),
+  ]);
+  const bindings: any[] = listData?.result?.bindings ?? [];
+  const countByGraph = new Map<string, number>();
+  for (const b of (countData?.result?.bindings ?? [])) {
+    const g = typeof b.g === 'string' ? b.g : b.g?.value;
+    const cntRaw = typeof b.cnt === 'string' ? b.cnt : b.cnt?.value;
+    const cnt = cntRaw != null ? parseInt(cntRaw, 10) : NaN;
+    if (g && Number.isFinite(cnt)) countByGraph.set(g, cnt);
+  }
   // #706 fix — the prior `startsWith('did:dkg:context-graph:<cg>/assertion/')`
   // shape silently dropped sub-graph-scoped WM assertions, whose graph
   // URI is `did:dkg:context-graph:<cg>/<sg>/assertion/<agent>/<name>`
@@ -813,7 +871,6 @@ export async function listAssertions(
   // would silently miss otherwise. The cgId itself is treated as
   // opaque (it may contain `/assertion/` as a literal substring,
   // per `validateContextGraphId`).
-  const cgPrefix = `did:dkg:context-graph:${contextGraphId}/`;
   const result: AssertionInfo[] = [];
   for (const b of bindings) {
     const g = typeof b.g === 'string' ? b.g : b.g?.value;
@@ -831,8 +888,14 @@ export async function listAssertions(
       continue;
     }
     if (!name) continue;
-    const cnt = typeof b.cnt === 'string' ? parseInt(b.cnt, 10) : (b.cnt?.value ? parseInt(b.cnt.value, 10) : undefined);
-    result.push({ name, graphUri: g, tripleCount: Number.isFinite(cnt) ? cnt : undefined, subGraph });
+    // Defense-in-depth for the meta-namespace exclusion above: the reserved
+    // `meta` sub-graph (`<cg>/meta/assertion/…` profile/query-catalog drafts)
+    // is UI configuration, not user knowledge, and must never reach the
+    // assertions table or the bulk-promote flow. The SPARQL `metaFilter`
+    // already drops these daemon-side; this guards the parser too.
+    if (subGraph === 'meta') continue;
+    const cnt = countByGraph.get(g);
+    result.push({ name, graphUri: g, tripleCount: cnt, subGraph });
   }
   return result;
 }

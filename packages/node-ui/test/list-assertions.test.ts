@@ -46,9 +46,16 @@ describe('listAssertions (WM) — URI parse + cg-scoped filter', () => {
   });
 
   function setBindings(bindings: unknown[]) {
-    fetchMock.mockResolvedValueOnce(
-      jsonResponse({ result: { bindings } }),
-    );
+    // `listAssertions(wm)` now issues two scoped queries in parallel
+    // (membership from `<cg>/_meta`, then a top-level `GRAPH ?g` triple
+    // count) instead of one OPTIONAL-nested query — the latter tripped
+    // the scoped-graph-variable guard (PR #749). Feed the same fixture
+    // rows to both: the membership query reads `?g`, the count query
+    // reads `?g` + `?cnt`, and the parser merges counts back by graph
+    // URI. Order matches the Promise.all array: call[0] = membership,
+    // call[1] = count.
+    fetchMock.mockResolvedValueOnce(jsonResponse({ result: { bindings } }));
+    fetchMock.mockResolvedValueOnce(jsonResponse({ result: { bindings } }));
   }
 
   it('parses root-bucket assertion: name extracted, subGraph undefined', async () => {
@@ -167,15 +174,20 @@ describe('listAssertions (WM) — URI parse + cg-scoped filter', () => {
       bRow('did:dkg:context-graph:cg-A/assertion/0xabc/notes', 5),
     ]);
     await listAssertions('cg-A', 'wm');
-    expect(fetchMock).toHaveBeenCalledOnce();
-    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(String(url)).toContain('/api/query');
-    const body = JSON.parse(String(init.body));
-    expect(body).toMatchObject({
-      contextGraphId: 'cg-A',
-      includeContextGraphPartitions: true,
-    });
-    expect(typeof body.sparql).toBe('string');
+    // Two scoped queries now: membership (call[0]) + triple count
+    // (call[1]). Both must keep the partition opt-in so `GRAPH ?g`
+    // expansion reaches the assertion data partitions.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    for (const call of fetchMock.mock.calls) {
+      const [url, init] = call as [string, RequestInit];
+      expect(String(url)).toContain('/api/query');
+      const body = JSON.parse(String(init.body));
+      expect(body).toMatchObject({
+        contextGraphId: 'cg-A',
+        includeContextGraphPartitions: true,
+      });
+      expect(typeof body.sparql).toBe('string');
+    }
   });
 
   it('SPARQL gates WM membership on dkg:memoryLayer "WM" in <cg>/_meta (#898 Codex)', async () => {
@@ -195,6 +207,68 @@ describe('listAssertions (WM) — URI parse + cg-scoped filter', () => {
     expect(body.sparql).toContain('did:dkg:context-graph:cg-A/_meta');
     expect(body.sparql).toContain('http://dkg.io/ontology/memoryLayer');
     expect(body.sparql).toContain('"WM"');
+    // The count query (call[1]) must ALSO gate on the `_meta` WM marker —
+    // counting only WM-marked partitions instead of scanning every graph
+    // under the CG (SWM/VM/meta included). Pins the Codex #944 perf fix.
+    const [, countInit] = fetchMock.mock.calls[1] as [string, RequestInit];
+    const countBody = JSON.parse(String(countInit.body));
+    expect(countBody.sparql).toContain('did:dkg:context-graph:cg-A/_meta');
+    expect(countBody.sparql).toContain('http://dkg.io/ontology/memoryLayer');
+    expect(countBody.sparql).toContain('"WM"');
+    expect(countBody.sparql).toContain('COUNT');
+  });
+
+  it('excludes the reserved meta sub-graph from the WM assertions list (Codex #944)', async () => {
+    // `<cg>/meta/assertion/…` graphs are profile / query-catalog drafts — UI
+    // configuration, not user knowledge — and must never reach the assertions
+    // table or the bulk-promote flow even though they carry a WM lifecycle
+    // marker. (The SPARQL also filters these daemon-side; this pins the
+    // parser-level defense.)
+    setBindings([
+      bRow('did:dkg:context-graph:cg-A/meta/assertion/0xabc/profile', 8),
+      bRow('did:dkg:context-graph:cg-A/assertion/0xabc/notes', 5),
+    ]);
+    const out = await listAssertions('cg-A', 'wm');
+    expect(out).toHaveLength(1);
+    expect(out[0].name).toBe('notes');
+  });
+
+  it('SPARQL excludes the meta namespace by path shape in both queries (Codex #944)', async () => {
+    setBindings([bRow('did:dkg:context-graph:cg-A/assertion/0xabc/notes', 5)]);
+    await listAssertions('cg-A', 'wm');
+    const [, listInit] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const [, countInit] = fetchMock.mock.calls[1] as [string, RequestInit];
+    // Path-shape match, not a `/_meta` suffix (which would drop assertions
+    // named `_meta`).
+    expect(JSON.parse(String(listInit.body)).sparql).toContain('!CONTAINS(STR(?g), "/meta/assertion/")');
+    expect(JSON.parse(String(countInit.body)).sparql).toContain('!CONTAINS(STR(?g), "/meta/assertion/")');
+    expect(JSON.parse(String(listInit.body)).sparql).not.toContain('STRENDS(STR(?g), "/_meta")');
+  });
+
+  it('keeps a WM assertion whose name is "_meta" (Codex #944 — no /_meta suffix match)', async () => {
+    // Assertion names may start with `_`, so `<cg>/assertion/<addr>/_meta` is a
+    // valid root WM assertion. The reserved-meta exclusion must be by sub-graph
+    // shape, not a `/_meta` suffix, or this draft becomes impossible to promote.
+    setBindings([
+      bRow('did:dkg:context-graph:cg-A/assertion/0xabc/_meta', 2),
+    ]);
+    const out = await listAssertions('cg-A', 'wm');
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ name: '_meta', subGraph: undefined });
+  });
+
+  it('still lists WM assertions when the (best-effort) count query fails', async () => {
+    // Codex #944 — the triple-count query feeds only the badge, so a count
+    // failure must NOT drop the whole WM list and regress promote to "no
+    // assertions". The membership query (call[0]) resolves; the count query
+    // (call[1]) rejects. Rows must still surface, with tripleCount undefined.
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ result: { bindings: [bRow('did:dkg:context-graph:cg-A/assertion/0xabc/notes', 5)] } }),
+    );
+    fetchMock.mockRejectedValueOnce(new Error('count query timed out'));
+    const out = await listAssertions('cg-A', 'wm');
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ name: 'notes', tripleCount: undefined });
   });
 
   it('scopes the /assertion/ discriminator to the tail when cgId itself contains "/assertion/"', async () => {

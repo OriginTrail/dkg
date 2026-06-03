@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
@@ -603,6 +603,57 @@ describe('DashboardDB — V15 migration: drop FTS5 logs index', () => {
       expect(afterPrune).toBeLessThan(1_000);
     } finally {
       vacuumDb.close();
+    }
+  });
+});
+
+describe('DashboardDB — WAL reclaim', () => {
+  it('caps the WAL with journal_size_limit = 64 MiB on open', () => {
+    const walDir = mkdtempSync(join(tmpdir(), 'dkg-db-wal-limit-'));
+    const walDb = new DashboardDB({ dataDir: walDir });
+    try {
+      expect(Number(walDb.db.pragma('journal_size_limit', { simple: true }))).toBe(67108864);
+    } finally {
+      walDb.close();
+      rmSync(walDir, { recursive: true, force: true });
+    }
+  });
+
+  it('truncates the -wal file on prune() even when the VACUUM gate stays closed', () => {
+    const walDir = mkdtempSync(join(tmpdir(), 'dkg-db-wal-trunc-'));
+    // retentionDays high so prune() deletes no rows and the VACUUM gate
+    // (logsDeleted / freelist thresholds) never trips — isolating the
+    // unconditional wal_checkpoint(TRUNCATE) added at the end of prune().
+    const walDb = new DashboardDB({ dataDir: walDir, retentionDays: 365 });
+    const walPath = join(walDir, 'node-ui.db-wal');
+    try {
+      // Disable autocheckpoint so the WAL grows unbounded as we write,
+      // reproducing the high-water-mark the fix targets.
+      walDb.db.pragma('wal_autocheckpoint = 0');
+      walDb.db.exec(`CREATE TABLE wal_fixture (payload BLOB NOT NULL);`);
+      const insert = walDb.db.prepare(
+        `INSERT INTO wal_fixture (payload) VALUES (zeroblob(4096))`,
+      );
+      const fillFixture = walDb.db.transaction(() => {
+        for (let i = 0; i < 5_000; i += 1) insert.run();
+      });
+      fillFixture();
+
+      const beforeWal = statSync(walPath).size;
+      expect(beforeWal).toBeGreaterThan(5 * 1024 * 1024);
+
+      walDb.prune();
+
+      // No competing readers in this test, so wal_checkpoint(TRUNCATE)
+      // must fully reclaim the file (busy = 0). Assert it is truncated to
+      // empty rather than merely "smaller" — a partial checkpoint that
+      // only shaved a few pages (the regression we want to catch) would
+      // still leave multiple MB here.
+      const afterWal = statSync(walPath).size;
+      expect(afterWal).toBe(0);
+    } finally {
+      walDb.close();
+      rmSync(walDir, { recursive: true, force: true });
     }
   });
 });

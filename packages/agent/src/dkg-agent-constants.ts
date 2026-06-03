@@ -7,6 +7,8 @@
  * is unchanged — this module is a 1:1 move.
  */
 
+import type { OperationContext } from '@origintrail-official/dkg-core';
+
 /** Anchor predicate stamped on every root entity that has a private partition. */
 export const PRIVATE_DATA_ANCHOR = 'http://dkg.io/ontology/privateDataAnchor';
 
@@ -215,3 +217,81 @@ export const AGENT_PROFILE_HEARTBEAT_MS = 5 * 60 * 1000;
  * inactivity assumption built into the soak data.
  */
 export const AGENT_PROFILE_STALE_THRESHOLD_MS = 24 * 60 * 60 * 1000;
+
+// ── Ciphertext chunking (OT-RFC-38 LU-11) ─────────────────────────────
+/**
+ * OT-RFC-38 LU-11. Target ciphertext-chunk size on the SWM gossip
+ * wire. 32 KiB stays well under libp2p's per-message ceiling (the
+ * mesh defaults to 1 MiB) so chunks rarely fragment at the transport
+ * layer, and produces a tree shallow enough that on-chain proof
+ * verification per RFC-39 sampling tick stays cheap. The last chunk
+ * is whatever fraction remains.
+ */
+export const CIPHERTEXT_CHUNK_SIZE_BYTES = 32 * 1024;
+
+// ── Boot-time chain identity ──────────────────────────────────────────
+/**
+ * Upper bound on the boot-time on-chain identity resolution
+ * (`getIdentityId` / `ensureProfile`) inside `start()`. Daemon HTTP
+ * readiness MUST NOT depend on chain-RPC reachability: `start()` is awaited
+ * before the daemon binds its HTTP listener (cli lifecycle.ts), so an
+ * unreachable or rate-limited (HTTP 429) RPC — which the multi-RPC failover
+ * loop retries across endpoints — would otherwise block boot past the CLI's
+ * 45s readiness ceiling (#894). When this bound trips, identity stays
+ * unresolved (0n): the node boots, HTTP serves, and on-chain writes (e.g.
+ * context-graph register) surface their own RPC error (503) at call time
+ * rather than hanging the whole daemon. Generous enough not to false-trip a
+ * healthy-but-slow chain, far below the 45s readiness window.
+ */
+export const BOOT_CHAIN_IDENTITY_TIMEOUT_MS = 20_000;
+
+/**
+ * Floor for the (public, config-settable) StorageACK registration retry
+ * interval. Guards against a 0 / negative value collapsing the retry into a
+ * tight loop that hammers the RPC and floods the log (Codex PR #901 round-4
+ * :2106). 1s is well below the 30s production default yet leaves ample spacing.
+ */
+export const MIN_STORAGE_ACK_REGISTRATION_RETRY_MS = 1_000;
+
+// ── On-chain access-policy reads (share/publish hot path) ─────────────
+/**
+ * Sentinel returned by the chain-RPC-fallback timeout race inside
+ * `DKGAgent.getContextGraphOnChainPolicy`. Distinct from `undefined`
+ * so the caller can tell a timed-out probe apart from an RPC that
+ * legitimately resolved to "no policy". Module-scoped so the inner
+ * `withTimeout` helper can reuse the same identity.
+ */
+export const TIMEOUT_SENTINEL = Symbol('chain-rpc-fallback-timeout');
+
+/**
+ * Codex review on #872 — TTL for the eagerly-seeded `publishPolicy`
+ * cache. `publishPolicy` is mutable on-chain (`PublishPolicyUpdated`
+ * is emitted by `ContextGraphStorage.updatePublishPolicy`), but the
+ * cache is only populated by `ContextGraphCreated`, so a curator
+ * flipping a CG from open → curated would otherwise leave a stale
+ * `1` in this node's cache until restart and keep relaxing the
+ * import-artifact owner guard. The TTL bounds staleness to one
+ * window without wiring a full `PublishPolicyUpdated` event watcher
+ * through the chain-event poller. 60s is conservative because the
+ * cached value gates an authorization decision — one extra eth_call
+ * per minute per active CG is cheap.
+ */
+export const ON_CHAIN_PUBLISH_POLICY_CACHE_TTL_MS = 60_000;
+
+/**
+ * #884 review — bound the on-chain liveness / access-policy reads on the
+ * share/promote/publish hot path (`isContextGraphPublicOnChain`). Mirrors
+ * `CHAIN_RPC_FALLBACK_TIMEOUT_MS` in `DKGAgent.getContextGraphOnChainPolicy`:
+ * if the RPC layer HANGS (rather than rejecting), the helper must still
+ * resolve so the caller fails closed to "not public / not known" instead of
+ * blocking the request indefinitely. 2.5s stays well under the daemon-ready
+ * budget while allowing a single slow eth_call hop under normal load.
+ */
+export const CHAIN_POLICY_READ_TIMEOUT_MS = 2_500;
+
+// ── SWM sender-key ────────────────────────────────────────────────────
+/** Shared operation context for pending sender-key drain logging. */
+export const SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX: OperationContext = {
+  operationId: 'swm-sender-key-pending-drain',
+  operationName: 'share',
+};

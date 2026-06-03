@@ -14,6 +14,7 @@ import {
   type ServerResponse,
 } from "node:http";
 import { createHash, randomUUID } from "node:crypto";
+import { GET_TOTAL_TRIPLES_SPARQL, parseRdfInt } from "./metrics-queries.js";
 import {
   appendFile,
   chmod,
@@ -1796,14 +1797,6 @@ export async function runDaemonInner(
   });
 
   // Extract the plain value from an RDF typed literal like "6"^^<xsd:integer>
-  function parseRdfInt(raw: string | undefined): number {
-    if (!raw) return 0;
-    const m = raw.match(/^"?(\d+)"?\^?\^/);
-    if (m) return parseInt(m[1], 10);
-    const n = parseInt(raw, 10);
-    return isNaN(n) ? 0 : n;
-  }
-
   const metricsSource: MetricsSource = {
     getPeerCount: () =>
       new Set(
@@ -1832,9 +1825,7 @@ export async function runDaemonInner(
     },
     getContextGraphCount: async () => (await agent.listContextGraphs()).length,
     getTotalTriples: async () => {
-      const r = await agent.query(
-        "SELECT (COUNT(*) AS ?c) WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }",
-      );
+      const r = await agent.query(GET_TOTAL_TRIPLES_SPARQL);
       return parseRdfInt(r?.bindings?.[0]?.c);
     },
     getTotalKCs: async () => {

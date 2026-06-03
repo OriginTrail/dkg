@@ -26,6 +26,7 @@ import type {
   AuthorAttestationTypedData,
   MessageIdempotencyStore,
   ProtocolOutboxStore,
+  SwmSenderKeyPackageAckReasonCode,
 } from '@origintrail-official/dkg-core';
 import type {
   PhaseCallback,
@@ -216,6 +217,22 @@ export class StaleSenderKeyTargetError extends Error {
     this.name = 'StaleSenderKeyTargetError';
     this.recipientAgentAddress = recipientAgentAddress;
     this.recipientKeyId = recipientKeyId;
+  }
+}
+
+/**
+ * Thrown internally while setting up / distributing an SWM sender-key
+ * epoch when a recipient rejects the package. Carries the wire-level
+ * `reasonCode` so the caller can decide whether the rejection is
+ * retryable.
+ */
+export class SwmSenderKeySetupRejectionError extends Error {
+  readonly reasonCode: SwmSenderKeyPackageAckReasonCode;
+
+  constructor(reasonCode: SwmSenderKeyPackageAckReasonCode, message: string) {
+    super(message);
+    this.name = 'SwmSenderKeySetupRejectionError';
+    this.reasonCode = reasonCode;
   }
 }
 
@@ -459,6 +476,30 @@ export interface PeerDiagnostics {
     } | null;
   };
 }
+
+/**
+ * Per-peer sync-reconciler backoff state. `failures` is the count of
+ * consecutive reconciler attempts that did NOT produce a successful sync;
+ * `nextRetryAt` is the epoch-ms before which the reconciler skips this peer.
+ * Reset on a successful sync (`onPeerSynced`) and on `connection:close`.
+ * See `SYNC_BACKOFF_BASE_MS`.
+ */
+export type SyncReconcilerBackoff = {
+  failures: number;
+  nextRetryAt: number;
+  protocolsKey?: string | null;
+  connectionKey?: string | null;
+};
+
+/**
+ * Snapshot of a peer's reachability signals (advertised protocols +
+ * connection identity) used to decide whether a backed-off peer is worth
+ * re-probing before `nextRetryAt`.
+ */
+export type SyncReconcilerProbe = {
+  protocolsKey: string | null;
+  connectionKey: string | null;
+};
 
 /**
  * Caller-visible result of `DKGAgent.sendChat`. Backwards-compatible

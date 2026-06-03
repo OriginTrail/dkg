@@ -4,6 +4,40 @@ All notable changes to the DKG V9 node are documented here. The format is based 
 
 ## [Unreleased]
 
+## [10.0.0-rc.15] - 2026-06-03
+
+**Off-chain runtime release.** No Solidity changes since rc.13 — the Base Sepolia (chainId 84532) deployment is **unchanged**, the `chainResetMarker` stays `v10-rc12-ka-rename-2026-06-01`, and **no contract redeploy is required**. The sync protocol ID is **unchanged** (`/dkg/10.0.2/sync`), so rc.15 nodes interoperate with rc.14 peers — nodes upgrade in place with **no local-state wipe**. This release makes `oxigraph-server` the default store backend for **new** installs, fixes the Node UI Working-Memory scoped-query violation (and the SWM/VM bleed + reserved-meta false-positives it surfaced), reclaims the `node-ui.db` WAL on a running node, splits the `DKGAgent` god class into subsystem mixin holders, and lands typed publisher errors plus CI/bench hardening.
+
+### Changed — `oxigraph-server` is now the default triple-store backend for new installs
+
+- **`dkg init` defaults to `oxigraph-server`** (PR #946, `packages/cli/src/store-wizard.ts`): the store-backend menu now lists `oxigraph-server` (daemon-managed local RocksDB server) as the first, recommended option and the default answer; the embedded in-process worker (`oxigraph`) moves to option 2 for minimal-footprint / single-reader nodes. A fresh `dkg init` — or one that accepts the default — writes an explicit `"store": { "backend": "oxigraph-server" }` block, so new nodes get MVCC concurrent reads + incremental persistence out of the box.
+- **The existing fleet is unaffected on auto-update.** The runtime fallback for a config with **no** `store` block stays `oxigraph-worker`, and auto-update never re-runs `dkg init` — so existing nodes keep booting on the embedded worker unchanged. A re-init only flips a **block-less** node (an explicitly-chosen local backend — `oxigraph` / `oxigraph-worker` / `oxigraph-persistent` — is preserved on Enter-through), and even then the daemon's `STORE-SWITCH` guard makes the switch an opt-in (it refuses to start until `DKG_ACCEPT_STORE_RESET=1`) rather than a silent store reset.
+- **Platform note:** new installs fetch the prebuilt `oxigraph` v0.5.8 binary on first boot. The Linux artifacts are glibc-only, so musl hosts (Alpine/distroless) should pick option 2 (`oxigraph`) or an external `sparql-http` endpoint at the `dkg init` prompt.
+
+### Fixed — Node UI Working-Memory layer scoped-query violation
+
+- **Keep scoped `GRAPH` variables top-level in WM layer queries** (PR #944, `packages/node-ui/src/ui/api.ts`, `views/MemoryLayerView.tsx`): the WM layer view and `listWmAssertions` nested `GRAPH ?g` inside a `UNION`, which the scoped local-query guard (PR #749, `constrainGraphVariablesToAllowedSet`) rejects with "GRAPH variables must appear at the top level of scoped local queries". Surfaced as a *"Scoped query violation"* during WM→SWM promotion. The queries now keep both `GRAPH` clauses as top-level WHERE-block siblings and opt into the CG-scoped assertion partitions via `includeContextGraphPartitions`.
+- **No SWM/VM bleed into the WM tab**: widening the allow-list to the assertion partitions also exposes `/_shared_memory` and `/_verified_memory/*`, so `?g` is gated on the `<cg>/_meta` `dkg:memoryLayer "WM"` lifecycle marker (the same authority `listWmAssertions` uses), and the partition opt-in is scoped to the built-in WM query only — not user-typed custom SPARQL.
+- **WM triple-count is best-effort**: a failing count query no longer collapses the whole assertion list to "no assertions"; counts degrade independently.
+- **Match the reserved meta bucket by path shape, not `/_meta` suffix** (PR #948, follow-up to #944): exclude UI-config drafts via `FILTER(!CONTAINS(STR(?g), "/meta/assertion/"))` (plus a parser-level guard) so a legitimate user assertion *named* `_meta` is no longer dropped.
+
+### Fixed — Reclaim `node-ui.db` WAL on a running node
+
+- **WAL reclaim** (PR #945, `packages/node-ui/src/db.ts`): the multi-GB `node-ui.db` WAL left behind by the pre-rc.14 messenger-substrate sync bloat is now reclaimed on a running node, complementing the rc.14 fix that stopped the growth at the source.
+
+### Changed — Internal refactors (no behavior change)
+
+- **`DKGAgent` god class split into subsystem mixin holders** (PR #941, `packages/agent/src/dkg-agent-*.ts`): the monolithic `dkg-agent.ts` is decomposed into per-subsystem mixin modules (boot, lifecycle, publish, query, join, registry, crypto, diagnostics, …) applied via `dkg-agent-apply-mixins.ts`. Pure structural refactor; runtime behavior unchanged.
+- **Typed publisher errors** (PR #949, `packages/publisher/src/errors.ts`): publisher error classes extracted into a dedicated `errors.ts` module.
+
+### Added — Store read-latency benchmark (regression guard for #939)
+
+- **`bench/store-read-latency.bench.ts`** (PR #943) — a new esbench suite that measures real Oxigraph read latency for the two shapes that hung on a saturated node (issue #939): a trivial `SELECT … LIMIT 1` scan and the production `getTotalTriples` `COUNT(*)` aggregate, on an idle store. On the embedded **`worker` backend** (the single-writer store) it additionally measures those reads **under concurrent write load**, quantifying the read-starvation that drove the rc.13 regression and giving a baseline to measure the MVCC `oxigraph-server` backend (now the default for new installs) against. Contention is worker-only by design — the in-process store is single-threaded/synchronous and cannot exhibit true read/write overlap, so it runs the idle baselines only. Backends via `DKG_BENCH_STORE_BACKENDS` (`inprocess` always; `worker` auto-added when its compiled artefact is built, e.g. in CI), sizes via `DKG_BENCH_STORE_SIZES`. Run with `pnpm bench:store-read`; participates in `pnpm bench` / `bench:baseline` / `bench:compare` like the existing suites.
+
+### Changed — Test / CI hardening
+
+- **e2e devnet preconditions fail in CI instead of skipping** (PR #942, `packages/node-ui/e2e`): missing devnet preconditions now fail the job rather than silently skipping, and the suite rejects a 207 partial VM publish by default.
+
 ## [10.0.0-rc.14] - 2026-06-02
 
 **Off-chain runtime release.** No Solidity changes since rc.13 — the Base Sepolia (chainId 84532) deployment is **unchanged**, the `chainResetMarker` stays `v10-rc12-ka-rename-2026-06-01`, and **no contract redeploy is required**. Nodes upgrade in place; no local-state wipe. This release fixes the multi-GB `node-ui.db` bloat by taking the sync RPC off the Universal Messenger substrate, adds per-peer exponential backoff to the sync reconciler, adds an **opt-in** daemon-managed local Oxigraph server backend (Release 2, phase 2a), and stops `eth_getLogs` rate-limit failures from surfacing as unhandled process rejections under gossip/finalization verification storms.

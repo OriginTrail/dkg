@@ -77,8 +77,20 @@ export interface PromptStoreBackendResult {
    * DKG-owned namespaces) and scoped DELETE (mandatory on
    * shared / V6 / V8 instances).
    */
-  storeBlock: ExternalStoreBlock | null;
+  storeBlock: ExternalStoreBlock | LocalStoreBlock | null;
 }
+
+// An explicit embedded/local store block carried through verbatim on an
+// Enter-through re-init. `null` still means "no block — runtime default", but
+// when a node already pinned a local backend with custom `options` (e.g. the
+// `options.path` the oxigraph-worker adapter reads for its persistence file),
+// returning that block instead of `null` keeps re-init idempotent: cli init
+// writes `store: storeBlock ?? undefined`, so a `null` would clear the block
+// and relocate the store on the next boot.
+export type LocalStoreBlock = {
+  backend: 'oxigraph' | 'oxigraph-worker' | 'oxigraph-persistent';
+  options?: Record<string, unknown>;
+};
 
 export type ExternalStoreBlock =
   | {
@@ -143,17 +155,41 @@ export async function promptStoreBackend(
       ? (opts.existingStore?.options?.updateEndpoint as string)
       : undefined;
 
+  // `oxigraph-server` (daemon-managed local RocksDB server) is the default
+  // local backend: it gives MVCC concurrent reads + incremental persistence,
+  // whereas `oxigraph` (the embedded in-process worker) rewrites the whole
+  // N-Quads dump on every flush. The in-process worker stays available as a
+  // minimal-footprint / single-reader option. NOTE: this only changes what a
+  // *fresh / block-less* `dkg init` writes — the runtime fallback for configs
+  // with no `store` block stays `oxigraph-worker`, so the existing fleet keeps
+  // booting unchanged on auto-update (only an explicit re-init flips a node,
+  // and the daemon's STORE-SWITCH guard makes that an opt-in, not silent).
+  // Keep ANY explicit existing backend as the default answer — including the
+  // embedded `oxigraph` / `oxigraph-worker` / `oxigraph-persistent` variants.
+  // Keeping the *exact* variant (rather than normalising the worker variants
+  // onto the listed `oxigraph` choice) matters for distinguishing intent: an
+  // Enter-through resolves the default back to that exact backend (so the
+  // preserve branch below keeps the block + custom options), whereas explicitly
+  // picking option `2` ("oxigraph") resolves to a *different* answer and is
+  // treated as a real switch to the plain embedded worker. Only a truly absent
+  // store config (fresh install / block-less node) falls through to the new
+  // `oxigraph-server` default.
   const defaultBackend = opts.flagBackend
     ?? (existingBackend === 'blazegraph' || existingBackend === 'sparql-http' || existingBackend === 'oxigraph-server'
+      || existingBackend === 'oxigraph' || existingBackend === 'oxigraph-worker' || existingBackend === 'oxigraph-persistent'
       ? existingBackend
-      : 'oxigraph');
-
-  const backendChoices = ['oxigraph', 'blazegraph'] as const;
+      : 'oxigraph-server');
+  const backendChoices = ['oxigraph-server', 'oxigraph', 'blazegraph'] as const;
+  const backendLabels: Record<string, string> = {
+    'oxigraph-server': 'oxigraph-server  (managed local server — recommended)',
+    'oxigraph': 'oxigraph         (embedded in-process worker)',
+    'blazegraph': 'blazegraph       (external SPARQL endpoint)',
+  };
   // `sparql-http` is intentionally not listed (advanced bring-your-own-server
   // option) but is still accepted when typed or inherited from an existing
   // config / `--store` flag. Resolve the default *answer* by name for unlisted
   // backends so pressing Enter on a node already configured for `sparql-http`
-  // preserves it instead of silently downgrading to oxigraph (option 1).
+  // preserves it instead of silently downgrading (option 1).
   const defaultIsListed = (backendChoices as readonly string[]).includes(defaultBackend);
   const defaultIdx = defaultIsListed
     ? backendChoices.indexOf(defaultBackend as typeof backendChoices[number])
@@ -161,7 +197,8 @@ export async function promptStoreBackend(
   const defaultAnswer = defaultIsListed ? String(defaultIdx + 1) : defaultBackend;
   log('  Triple store backend:');
   for (let i = 0; i < backendChoices.length; i++) {
-    log(`    ${i + 1}) ${backendChoices[i]}`);
+    const choice = backendChoices[i];
+    log(`    ${i + 1}) ${backendLabels[choice] ?? choice}`);
   }
   // When the inherited/flagged backend isn't one of the numbered choices
   // (e.g. `sparql-http`), spell out that pressing Enter keeps it and that a
@@ -175,14 +212,18 @@ export async function promptStoreBackend(
     defaultAnswer,
   )).trim();
 
-  // Accept both the number ("1", "2") and the name ("blazegraph")
+  // Accept both the number ("1"-"3") and the name ("blazegraph"). An
+  // out-of-range number (typo like "4") falls back to `defaultBackend` —
+  // i.e. the recommended option shown to the operator — rather than a
+  // hard-coded `oxigraph`, so a fat-fingered digit on a fresh install no
+  // longer silently downgrades the node to the embedded worker.
   const backendAnswer = /^\d+$/.test(backendInput)
-    ? (backendChoices[parseInt(backendInput, 10) - 1] ?? 'oxigraph')
+    ? (backendChoices[parseInt(backendInput, 10) - 1] ?? defaultBackend)
     : backendInput.toLowerCase();
 
-  // `oxigraph-server` (daemon-managed local server) is accepted by name
-  // (like `sparql-http`, it's not a numbered choice). No URL prompt or
-  // probe: the endpoint doesn't exist until the daemon spawns it at boot.
+  // `oxigraph-server` (daemon-managed local server) is the default numbered
+  // choice and is also accepted by name. No URL prompt or probe: the endpoint
+  // doesn't exist until the daemon spawns it at boot.
   if (backendAnswer === 'oxigraph-server') {
     log('  Using a daemon-managed local Oxigraph server (started on first daemon boot).');
     // Preserve existing managed-server overrides (port/location/cacheDir) on an
@@ -197,6 +238,24 @@ export async function promptStoreBackend(
   }
 
   if (backendAnswer !== 'blazegraph' && backendAnswer !== 'sparql-http') {
+    // Embedded in-process worker. Preserve an existing explicit local store
+    // block verbatim ONLY when the operator kept that same backend — i.e. the
+    // resolved answer equals the existing backend (an Enter-through, which
+    // resolves the default back to the exact existing variant). That keeps a
+    // re-init idempotent and never drops custom `options` (e.g. the worker's
+    // `options.path`) or relocates the store. An *explicit* switch — picking
+    // option `2`/"oxigraph" on a node currently using `oxigraph-worker` /
+    // `oxigraph-persistent`, a switch from an external/server backend, or a
+    // fresh / block-less init — resolves to a different answer and falls
+    // through to `null`, so `dkg init` clears the old block as intended.
+    if (
+      (backendAnswer === 'oxigraph' ||
+        backendAnswer === 'oxigraph-worker' ||
+        backendAnswer === 'oxigraph-persistent') &&
+      backendAnswer === existingBackend
+    ) {
+      return { storeBlock: { backend: existingBackend, options: opts.existingStore?.options } };
+    }
     return { storeBlock: null };
   }
   const backend = backendAnswer as 'blazegraph' | 'sparql-http';

@@ -22,7 +22,6 @@ import { PROTOCOL_STORAGE_ACK } from '@origintrail-official/dkg-core';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const AGENT_SRC = resolve(__dirname, '..', 'src');
-const DKG_AGENT_FILE = join(AGENT_SRC, 'dkg-agent.ts');
 
 function walk(dir: string, acc: string[] = []): string[] {
   for (const name of readdirSync(dir)) {
@@ -41,14 +40,20 @@ describe('A-9: storage-ack protocol id (libp2p) pin', () => {
     expect(PROTOCOL_STORAGE_ACK).toBe('/dkg/10.0.1/storage-ack');
   });
 
-  it('`dkg-agent.ts` registers PROTOCOL_STORAGE_ACK on the messenger substrate', () => {
-    const src = readFileSync(DKG_AGENT_FILE, 'utf8');
-    expect(src).toMatch(/PROTOCOL_STORAGE_ACK/);
+  it('agent source registers PROTOCOL_STORAGE_ACK on the messenger substrate', () => {
+    // The DKGAgent god class was split into per-subsystem mixin holders, so
+    // the boot-time wiring (incl. this registration) now lives in a sibling
+    // file (`dkg-agent-lifecycle.ts`) rather than `dkg-agent.ts`. Scan the
+    // whole agent `src` tree so the pin tracks the agent package, not one file.
+    const combined = walk(AGENT_SRC)
+      .map((f) => readFileSync(f, 'utf8'))
+      .join('\n');
+    expect(combined).toMatch(/PROTOCOL_STORAGE_ACK/);
     // rc.9 PR-11: registration moved from `router.register` to
     // `messenger.register` (substrate auto-wraps with envelope
     // decode + receiver-side dedup). Pin against the new shape.
     const registerRE = /messenger\.register\s*\(\s*PROTOCOL_STORAGE_ACK\s*,/;
-    expect(src).toMatch(registerRE);
+    expect(combined).toMatch(registerRE);
   });
 
   it('agent source never publishes ACKs on GossipSub', () => {

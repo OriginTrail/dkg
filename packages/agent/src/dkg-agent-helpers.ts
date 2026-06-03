@@ -35,7 +35,7 @@ import type {
 import type { AuthorAttestationTypedData } from '@origintrail-official/dkg-core';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import type { SyncPhase } from './sync/auth/request-build.js';
-import { PRIVATE_DATA_ANCHOR } from './dkg-agent-constants.js';
+import { PRIVATE_DATA_ANCHOR, CIPHERTEXT_CHUNK_SIZE_BYTES } from './dkg-agent-constants.js';
 import { InvalidContentError, type PublishAsyncQuadEnvelope } from './dkg-agent-types.js';
 
 // ── Publish-payload normalisation ─────────────────────────────────────
@@ -386,4 +386,23 @@ export function isLocalOxigraphConfig(storeConfig: TripleStoreConfig): boolean {
   return storeConfig.backend === 'oxigraph'
     || storeConfig.backend === 'oxigraph-worker'
     || storeConfig.backend === 'oxigraph-persistent';
+}
+
+// ── Ciphertext chunking (OT-RFC-38 LU-11) ─────────────────────────────
+
+/**
+ * OT-RFC-38 LU-11. Split a single plaintext buffer into the
+ * fixed-size pieces the chunked AEAD path expects. Empty input is
+ * rejected — the publisher computes `merkleRoot` from non-empty
+ * `kaCount` quads, so an empty plaintext upstream is always a bug.
+ */
+export function sliceIntoCiphertextChunks(plaintext: Uint8Array): Uint8Array[] {
+  if (plaintext.length === 0) {
+    throw new Error('LU-11: sliceIntoCiphertextChunks rejects empty plaintext');
+  }
+  const chunks: Uint8Array[] = [];
+  for (let off = 0; off < plaintext.length; off += CIPHERTEXT_CHUNK_SIZE_BYTES) {
+    chunks.push(plaintext.subarray(off, Math.min(off + CIPHERTEXT_CHUNK_SIZE_BYTES, plaintext.length)));
+  }
+  return chunks;
 }

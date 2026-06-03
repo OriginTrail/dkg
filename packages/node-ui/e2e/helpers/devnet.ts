@@ -132,7 +132,81 @@ export async function waitForConnectedPeers(
   );
 }
 
+const IS_CI = !!process.env.CI;
+
+// How many devnet nodes the lane booted. Mirrors the default in
+// `playwright.config.ts` / `real-node.ts` (read from the same env var) so a
+// node-availability gate can tell "node down" (a real failure) apart from "node
+// is outside the booted topology" (genuinely not applicable — e.g. node2 on a
+// `PLAYWRIGHT_DEVNET_NUM_NODES=1` run). Read from env rather than importing
+// real-node.ts to keep this low-level helper dependency-light.
+const CONFIGURED_NUM_NODES = Number(process.env.PLAYWRIGHT_DEVNET_NUM_NODES) || 3;
+
+type SkippableTest = { skip: (condition: boolean, description: string) => void };
+
+/**
+ * Gate a devnet spec on an ALREADY-RESOLVED boolean precondition (e.g. a
+ * just-fetched `cgs.length === 0`).
+ *
+ * Such preconditions are genuinely OPTIONAL for a local run with no devnet up —
+ * there we just skip so `pnpm test:e2e` stays usable without a cluster. But in
+ * CI the devnet is bootstrapped by `bootstrap-devnet.ts` and gated to a SETTLED
+ * mesh + a registered PRIMARY_CG by `global-setup.ts` BEFORE any spec runs. So a
+ * failing precondition in CI is NOT "not applicable" — it's a real, currently
+ * MASKED failure (a partitioned mesh, a dropped CG). Skipping it would turn a
+ * broken devnet into a false green on the most valuable protocol tests. So in CI
+ * we THROW (turning the lane red) instead of skipping.
+ *
+ * NOTE: for *node liveness* use `requireDevnetNode` instead — `isDevnetAvailable`
+ * is a single 2s curl, so feeding `!isDevnetAvailable(n)` straight into this
+ * sync gate would turn one transiently-slow `/api/status` into a CI false-red.
+ * `requireDevnetNode` retries (via `waitForDevnetStatus`) before failing.
+ *
+ * Use this for environment/setup preconditions only. Genuine run-state guards
+ * (e.g. "a prior serial test in this file didn't produce data") should keep
+ * using `test.skip(...)` directly — the upstream failure is already red, and the
+ * dependent skip just avoids cascading noise.
+ */
+export function requireDevnetPrecondition(test: SkippableTest, unmet: boolean, description: string): void {
+  if (!unmet) return;
+  if (IS_CI) {
+    throw new Error(
+      `[devnet-precondition] ${description}. In CI the devnet is bootstrapped and gated ` +
+        `by global-setup before any spec runs, so an unmet precondition here is a real ` +
+        `failure (partitioned mesh / missing context graph), not a skip.`,
+    );
+  }
+  test.skip(true, description);
+}
+
+/**
+ * Gate a devnet spec on node `nodeNum` being live.
+ *
+ *   - Node OUTSIDE the booted topology (`nodeNum > CONFIGURED_NUM_NODES`, e.g.
+ *     node2 on a 1-node run): genuinely not applicable → skip EVERYWHERE,
+ *     including CI. This keeps the node2 messaging specs from hard-failing a
+ *     deliberately small `PLAYWRIGHT_DEVNET_NUM_NODES=1` lane.
+ *   - Node in-topology but the fast `isDevnetAvailable` probe (one 2s curl)
+ *     misses: locally we skip; in CI we DON'T fail on that single probe — we
+ *     fall back to `waitForDevnetStatus`, which retries for `timeoutMs` and only
+ *     throws (red) on a genuine outage. This avoids turning a transiently-slow
+ *     `/api/status` into a false-red while still failing a truly-down node.
+ */
+export async function requireDevnetNode(test: SkippableTest, nodeNum = 1, timeoutMs = 60_000): Promise<void> {
+  if (nodeNum > CONFIGURED_NUM_NODES) {
+    test.skip(true, `node${nodeNum} is outside this ${CONFIGURED_NUM_NODES}-node devnet topology — not applicable`);
+    return;
+  }
+  if (isDevnetAvailable(nodeNum)) return;
+  if (IS_CI) {
+    // Retries internally; throws a clear error (→ red) only on a real outage.
+    await waitForDevnetStatus(nodeNum, timeoutMs);
+    return;
+  }
+  test.skip(true, `Devnet node${nodeNum} not running — start with ./scripts/devnet.sh start ${CONFIGURED_NUM_NODES}`);
+}
+
 /** Skip helper for devnet-only specs — call at start of test. */
-export function skipUnlessDevnet(test: { skip: (condition: boolean, description: string) => void }, nodeNum = 1) {
-  test.skip(!isDevnetAvailable(nodeNum), `Devnet node${nodeNum} not running — start with ./scripts/devnet.sh start 6`);
+export async function skipUnlessDevnet(test: SkippableTest, nodeNum = 1) {
+  await requireDevnetNode(test, nodeNum);
 }
