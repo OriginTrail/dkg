@@ -205,7 +205,6 @@ describe('@unit RandomSampling — RFC-39 curated picker [Phase B enabled]', () 
     const createTx = await KCSContract.connect(opSigner).createKnowledgeAsset(
       opSigner.address,
       opSigner.address,
-      nextOpSignerKaId(), // OT-RFC-43 (1a): caller-supplied author-namespaced id
       'rfc39-curated-test-op',
       ethers.keccak256(
         ethers.toUtf8Bytes(
@@ -219,6 +218,7 @@ describe('@unit RandomSampling — RFC-39 curated picker [Phase B enabled]', () 
       0,
       false,
       1,
+      nextOpSignerKaId(), // OT-RFC-43 (1a, codex PR #975 F1): caller-supplied author-namespaced id; appended at END
     );
     const receipt = await createTx.wait();
     const iface = KCSContract.interface;

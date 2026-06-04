@@ -897,7 +897,6 @@ describe('@unit RandomSampling', () => {
       ).createKnowledgeAsset(
         opSigner.address, // publisher
         opSigner.address, // author — ERC-721 KA mint recipient (greenfield model)
-        nextOpSignerKaId(), // OT-RFC-43 (1a): caller-supplied author-namespaced id
         'phase-10-test-op',
         ethers.keccak256(
           ethers.toUtf8Bytes(
@@ -911,6 +910,7 @@ describe('@unit RandomSampling', () => {
         0, // tokenAmount
         false, // isImmutable
         1, // merkleLeafCount (v10 — pin-the-leaf-count guard, not exercised by Phase 10)
+        nextOpSignerKaId(), // OT-RFC-43 (1a, codex PR #975 F1): caller-supplied author-namespaced id; appended at END
       );
       const receipt = await createTx.wait();
       // Parse kc id from the KnowledgeAssetCreated event.

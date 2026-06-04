@@ -201,7 +201,6 @@ contract DKGKnowledgeAssets is INamed, IVersioned, HubDependent, ERC721, Guardia
     function createKnowledgeAsset(
         address publisher,
         address author,
-        uint256 kaId,
         string calldata publishOperationId,
         bytes32 merkleRoot,
         uint256 knowledgeAssetsAmount,
@@ -210,7 +209,17 @@ contract DKGKnowledgeAssets is INamed, IVersioned, HubDependent, ERC721, Guardia
         uint40 endEpoch,
         uint96 tokenAmount,
         bool isImmutable,
-        uint32 merkleLeafCount
+        uint32 merkleLeafCount,
+        // OT-RFC-43 Option 1 (variant 1a, codex PR #975 F1): caller-supplied
+        // packed kaId. Appended at the END of the parameter list rather than
+        // threaded between `author` and `publishOperationId` so existing ABI
+        // encoders fail loudly on "missing argument" instead of silently
+        // shifting later args (publishOperationId, merkleRoot, ...) one slot
+        // and either reverting on a garbled call or — far worse — minting
+        // under the wrong economics. Required (no fallback under 1a), so the
+        // failure mode is "missing argument" either way; the position choice
+        // makes it the diagnosable kind.
+        uint256 kaId
     ) external onlyContracts returns (uint256) {
         if (knowledgeAssetsAmount != 1) {
             revert KnowledgeAssetLib.ExceededKnowledgeAssetBatchSize(0, 0, knowledgeAssetsAmount, 1);

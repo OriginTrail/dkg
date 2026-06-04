@@ -166,6 +166,10 @@ contract KnowledgeAssetsLifecycle is INamed, IVersioned, ContractStatus, IInitia
         bytes32 authorR;
         bytes32 authorVS;
         uint8   authorSchemeVersion;
+        // ── ACK quorum (unchanged) ──
+        uint72[] identityIds;
+        bytes32[] r;
+        bytes32[] vs;
         // ── OT-RFC-43 Option 1 (variant 1a): caller-supplied deterministic id ──
         /// @notice The packed KA id this publish claims:
         ///         kaId = (uint160(authorAddress) << 96) | uint96(number),
@@ -173,15 +177,28 @@ contract KnowledgeAssetsLifecycle is INamed, IVersioned, ContractStatus, IInitia
         ///         `(reservedKaId >> 96) == authorAddress` at mint, so a wallet
         ///         can only mint within its own namespace. REQUIRED — there is
         ///         no auto-mint fallback under 1a; a value outside the author's
-        ///         namespace reverts `KaIdNamespaceMismatch`. Deliberately NOT
-        ///         added to the ACK digest: the namespace is enforced on-chain
-        ///         and choosing a different number within one's own namespace is
-        ///         harmless (OT-RFC-43; see PR description / R5 decision).
+        ///         namespace reverts `KaIdNamespaceMismatch`.
+        ///
+        ///         **ABI layout (codex PR #975 F1):** appended at the END of
+        ///         the struct rather than threaded between the author and ACK
+        ///         blocks. Existing callers encoding the previous tuple shape
+        ///         then fail loudly with "missing field" on tuple decode rather
+        ///         than silently shifting `identityIds`/`r`/`vs` into the wrong
+        ///         slots and either reverting on a garbled ACK quorum or — far
+        ///         worse — verifying garbage. Required by `kcs.createKnowledgeAsset`
+        ///         (no fallback under 1a), so the failure mode is "missing"
+        ///         either way; the layout choice makes it the diagnosable kind.
+        ///
+        ///         **Signature scope (codex PR #975 F2):** IS bound into the
+        ///         author EIP-712 digest (`AuthorAttestation`), so a relayer /
+        ///         PCA agent cannot substitute a different number within the
+        ///         author's namespace without invalidating the author's
+        ///         signature — closes the multi-publisher slot-substitution
+        ///         gap. Deliberately NOT included in the ACK quorum digest:
+        ///         storage nodes consent to the assertion's content (merkle +
+        ///         economics), not to which slot it lands in; that's the
+        ///         author's decision, signed over by the author.
         uint256 reservedKaId;
-        // ── ACK quorum (unchanged) ──
-        uint72[] identityIds;
-        bytes32[] r;
-        bytes32[] vs;
     }
 
     /**
@@ -302,11 +319,22 @@ contract KnowledgeAssetsLifecycle is INamed, IVersioned, ContractStatus, IInitia
     ///      magic value other than `0x1626ba7e`.
     error InvalidAuthorSignature1271();
 
-    /// @dev RFC-001 §3.2 — EIP-712 type hash for `AuthorAttestation`.
-    /// `keccak256("AuthorAttestation(uint256 contextGraphId,bytes32 merkleRoot,address authorAddress,uint8 schemeVersion)")`.
+    /// @dev RFC-001 §3.2 / OT-RFC-43 Option 1 (codex PR #975 F2) — EIP-712
+    /// type hash for `AuthorAttestation`.
+    /// `keccak256("AuthorAttestation(uint256 contextGraphId,bytes32 merkleRoot,address authorAddress,uint8 schemeVersion,uint256 reservedKaId)")`.
+    ///
+    /// `reservedKaId` is bound into the author's signature so a relayer / PCA
+    /// agent cannot substitute a different number within the author's
+    /// namespace (e.g. mint at `(author, 99)` when the author reserved
+    /// `(author, 7)` off-chain). The on-chain namespace check protects against
+    /// CROSS-namespace mints; this binding protects against WITHIN-namespace
+    /// slot substitution by a third-party publisher. Self-publish is unaffected
+    /// (the author is both signer and publisher). The typehash differs from
+    /// the pre-1a shape — any cached old-form signature will fail recovery,
+    /// which is the intended behavior (no silent cross-version replay).
     bytes32 private constant _AUTHOR_ATTESTATION_TYPEHASH =
         keccak256(
-            "AuthorAttestation(uint256 contextGraphId,bytes32 merkleRoot,address authorAddress,uint8 schemeVersion)"
+            "AuthorAttestation(uint256 contextGraphId,bytes32 merkleRoot,address authorAddress,uint8 schemeVersion,uint256 reservedKaId)"
         );
 
     bytes32 private constant _UPDATE_AUTHOR_ATTESTATION_TYPEHASH =
@@ -660,7 +688,6 @@ contract KnowledgeAssetsLifecycle is INamed, IVersioned, ContractStatus, IInitia
         kaId = kcs.createKnowledgeAsset(
             msg.sender,
             p.authorAddress,
-            p.reservedKaId,
             p.publishOperationId,
             p.merkleRoot,
             p.knowledgeAssetsAmount,
@@ -669,7 +696,12 @@ contract KnowledgeAssetsLifecycle is INamed, IVersioned, ContractStatus, IInitia
             currentEpoch + p.epochs,
             p.tokenAmount,
             p.isImmutable,
-            p.merkleLeafCount
+            p.merkleLeafCount,
+            // OT-RFC-43 Option 1 (variant 1a, codex PR #975 F1): caller-supplied
+            // packed kaId. Appended at the END of the parameter list (mirrors
+            // the PublishParams struct ordering) so the function selector
+            // remains stable-ish under append-only evolution.
+            p.reservedKaId
         );
 
         // --- 3b. RFC-39 Phase A.5: persist the curated ciphertext commitment ---
@@ -865,7 +897,8 @@ contract KnowledgeAssetsLifecycle is INamed, IVersioned, ContractStatus, IInitia
         uint256 _contextGraphId,
         bytes32 _merkleRoot,
         address _authorAddress,
-        uint8 _schemeVersion
+        uint8 _schemeVersion,
+        uint256 _reservedKaId
     ) internal view returns (bytes32) {
         bytes32 domainSeparator = keccak256(
             abi.encode(
@@ -882,7 +915,8 @@ contract KnowledgeAssetsLifecycle is INamed, IVersioned, ContractStatus, IInitia
                 _contextGraphId,
                 _merkleRoot,
                 _authorAddress,
-                _schemeVersion
+                _schemeVersion,
+                _reservedKaId
             )
         );
         return keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
@@ -975,7 +1009,8 @@ contract KnowledgeAssetsLifecycle is INamed, IVersioned, ContractStatus, IInitia
             p.contextGraphId,
             p.merkleRoot,
             p.authorAddress,
-            p.authorSchemeVersion
+            p.authorSchemeVersion,
+            p.reservedKaId
         );
 
         if (p.authorAddress.code.length == 0) {

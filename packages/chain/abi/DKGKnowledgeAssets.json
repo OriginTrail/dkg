@@ -942,11 +942,6 @@
         "type": "address"
       },
       {
-        "internalType": "uint256",
-        "name": "kaId",
-        "type": "uint256"
-      },
-      {
         "internalType": "string",
         "name": "publishOperationId",
         "type": "string"
@@ -990,6 +985,11 @@
         "internalType": "uint32",
         "name": "merkleLeafCount",
         "type": "uint32"
+      },
+      {
+        "internalType": "uint256",
+        "name": "kaId",
+        "type": "uint256"
       }
     ],
     "name": "createKnowledgeAsset",

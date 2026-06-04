@@ -32,12 +32,20 @@ import { KnowledgeAssetsLifecycle } from '../../typechain';
  *   || keccak256(abi.encodePacked(knowledgeAssetsToBurn))
  *   || uint256(newMerkleLeafCount)
  *
- * Author attestation (RFC-001) — EIP-712 typed data:
+ * Author attestation (RFC-001 + OT-RFC-43 Option 1, codex PR #975 F2) —
+ * EIP-712 typed data:
  *   domain   = EIP712Domain(name="KnowledgeAssetsLifecycle", version="2.0.0",
  *                           chainId, verifyingContract=KAV10)
  *   struct   = AuthorAttestation(uint256 contextGraphId, bytes32 merkleRoot,
- *                                address authorAddress, uint8 schemeVersion)
+ *                                address authorAddress, uint8 schemeVersion,
+ *                                uint256 reservedKaId)
  *   schemeVersion = 1 (only currently-supported scheme)
+ *
+ * `reservedKaId` is bound into the author's signature so a relayer / PCA
+ * agent cannot mint at a different number within the author's namespace
+ * than the author actually reserved. The on-chain namespace check covers
+ * CROSS-namespace mints; this binding covers WITHIN-namespace slot
+ * substitution by a third-party publisher.
  *
  * The author attestation digest is built and signed via ethers'
  * `signTypedData` for byte-equality with the contract's
@@ -102,6 +110,7 @@ export type AuthorAttestationPayload = {
     merkleRoot: string;
     authorAddress: string;
     schemeVersion: number;
+    reservedKaId: bigint;
   };
 };
 
@@ -112,8 +121,8 @@ export type AuthorAttestationPayload = {
  *   name="KnowledgeAssetsLifecycle", version="2.0.0", chainId, verifyingContract.
  *
  * The struct hash binds (contextGraphId, merkleRoot, authorAddress,
- * schemeVersion). Drift between this builder and the contract will surface
- * as `InvalidAuthorSignature` at publish time.
+ * schemeVersion, reservedKaId). Drift between this builder and the contract
+ * will surface as `InvalidAuthorSignature` at publish time.
  */
 export function buildAuthorAttestationPayload(args: {
   chainId: bigint;
@@ -121,6 +130,13 @@ export function buildAuthorAttestationPayload(args: {
   contextGraphId: bigint;
   merkleRoot: string;
   authorAddress: string;
+  /**
+   * OT-RFC-43 Option 1 (variant 1a, codex PR #975 F2): the packed
+   * caller-supplied kaId this publish claims. Bound into the author's
+   * signature so a relayer / PCA agent cannot substitute a different
+   * number within the author's namespace.
+   */
+  reservedKaId: bigint;
   schemeVersion?: number;
 }): AuthorAttestationPayload {
   const schemeVersion = args.schemeVersion ?? AUTHOR_SCHEME_VERSION_V1;
@@ -137,6 +153,7 @@ export function buildAuthorAttestationPayload(args: {
         { name: 'merkleRoot', type: 'bytes32' },
         { name: 'authorAddress', type: 'address' },
         { name: 'schemeVersion', type: 'uint8' },
+        { name: 'reservedKaId', type: 'uint256' },
       ],
     },
     value: {
@@ -144,6 +161,7 @@ export function buildAuthorAttestationPayload(args: {
       merkleRoot: args.merkleRoot,
       authorAddress: ethers.getAddress(args.authorAddress),
       schemeVersion,
+      reservedKaId: args.reservedKaId,
     },
   };
 }
@@ -346,8 +364,18 @@ export async function buildPublishParams(args: {
    * Defaults to a freshly-allocated, never-reused id in the author's namespace
    * (`nextReservedKaId(author.address)`). Negative-path / collision tests pass
    * an explicit value (e.g. a wrong-namespace id, or a deliberately reused
-   * `reservedKaId`). NB: deliberately NOT part of the ACK digest — the
-   * namespace is enforced on-chain, not signed over.
+   * `reservedKaId`).
+   *
+   * Signature scope (codex PR #975 F2): IS part of the author EIP-712 digest
+   * (so a relayer / PCA agent cannot substitute a different slot within the
+   * author's namespace without invalidating the author's signature). NOT part
+   * of the ACK quorum digest — storage nodes consent to assertion content
+   * (merkle + economics), not to which slot it lands in.
+   *
+   * NB: when overriding `authorSigOverride` AND `reservedKaId`, the override
+   * signature MUST have been built against this exact `reservedKaId` value
+   * (and the same merkle / cg / scheme), otherwise verification reverts
+   * `InvalidAuthorSignature` even though the override was the intent.
    */
   reservedKaId?: bigint;
   /**
@@ -392,6 +420,13 @@ export async function buildPublishParams(args: {
   );
 
   const schemeVersion = args.authorSchemeVersion ?? AUTHOR_SCHEME_VERSION_V1;
+  // OT-RFC-43 Option 1 (1a, codex PR #975 F2): the packed kaId is bound into
+  // the author's EIP-712 signature, so it must be resolved BEFORE the author
+  // signs (no later overrides). Defaults to a fresh, never-used number in the
+  // author's namespace; pinned/reused values come through `args.reservedKaId`
+  // for collision / negative tests.
+  const reservedKaId =
+    args.reservedKaId ?? nextReservedKaId(args.author.address);
   const authorSig =
     args.authorSigOverride ??
     (await signAuthorAttestation(
@@ -402,6 +437,7 @@ export async function buildPublishParams(args: {
         contextGraphId: args.contextGraphId,
         merkleRoot: args.merkleRoot,
         authorAddress: args.author.address,
+        reservedKaId,
         schemeVersion,
       }),
     ));
@@ -423,13 +459,13 @@ export async function buildPublishParams(args: {
     authorR: authorSig.authorR,
     authorVS: authorSig.authorVS,
     authorSchemeVersion: schemeVersion,
-    // OT-RFC-43 Option 1 (1a): author-namespaced packed id. Defaults to a
-    // fresh, unused number in the author's namespace; pinned/reused values
-    // come through `args.reservedKaId` for collision / negative tests.
-    reservedKaId: args.reservedKaId ?? nextReservedKaId(args.author.address),
     identityIds: args.receiverIdentityIds,
     r: sig.receiverRs,
     vs: sig.receiverVSs,
+    // OT-RFC-43 Option 1 (1a, codex PR #975 F1): appended at the END of the
+    // returned struct to mirror the `PublishParams` Solidity field order
+    // (see ABI-layout rationale in `KnowledgeAssetsLifecycle.sol`).
+    reservedKaId,
   };
 }
 

@@ -651,11 +651,6 @@
             "type": "uint8"
           },
           {
-            "internalType": "uint256",
-            "name": "reservedKaId",
-            "type": "uint256"
-          },
-          {
             "internalType": "uint72[]",
             "name": "identityIds",
             "type": "uint72[]"
@@ -669,6 +664,11 @@
             "internalType": "bytes32[]",
             "name": "vs",
             "type": "bytes32[]"
+          },
+          {
+            "internalType": "uint256",
+            "name": "reservedKaId",
+            "type": "uint256"
           }
         ],
         "internalType": "struct KnowledgeAssetsLifecycle.PublishParams",
