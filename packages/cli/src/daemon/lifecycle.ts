@@ -59,7 +59,7 @@ import {
   MockChainAdapter,
   type ApprovalPolicy,
 } from '@origintrail-official/dkg-chain';
-import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
+import { DKGAgent, loadOpWallets, KaNumberAllocator } from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS, DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS, pickNetworkTunables } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
@@ -73,6 +73,7 @@ import {
   LlmClient,
   SqliteMessageIdempotencyStore,
   SqliteProtocolOutboxStore,
+  SqliteKaNumberStore,
   type MetricsSource,
 } from "@origintrail-official/dkg-node-ui";
 import {
@@ -1168,6 +1169,22 @@ export async function runDaemonInner(
       return DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS[idx];
     },
   });
+
+  // OT-RFC-43 Option-1 deterministic KA identity (B2 allocator core).
+  // Durable per-author KA-number sequence backing the off-chain
+  // `KaNumberAllocator`. Constructed here (alongside the other durable
+  // substrate stores) so the V20 `ka_numbers` table is opened and its
+  // sequence is co-located with the rest of the node's persistent state.
+  //
+  // TODO(T0 integration, deferred — overlaps Plan A): the actual
+  // publish-time `kaNumberAllocator.allocate(author)` call site is NOT
+  // wired here, nor is the startup reconciliation oracle that bumps each
+  // author floor + calls `markReconciled()`. Until that lands the
+  // allocator will (correctly) refuse to allocate per RFC §4.5
+  // cold-start refusal. This block only constructs the off-chain core.
+  const kaNumberStore = new SqliteKaNumberStore(dashDb);
+  const kaNumberAllocator = new KaNumberAllocator(kaNumberStore);
+  void kaNumberAllocator; // wired at the deferred T0 integration
 
   const agent = await DKGAgent.create({
     name: config.name,

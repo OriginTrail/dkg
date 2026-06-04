@@ -3,13 +3,14 @@ import { join } from 'node:path';
 import {
   RESPONSE_CACHE_BYTES,
   type IdempotencyCheckResult,
+  type KaNumberStore,
   type MessageDirection,
   type MessageIdempotencyStore,
   type ProtocolOutboxEntry,
   type ProtocolOutboxStore,
 } from '@origintrail-official/dkg-core';
 
-const SCHEMA_VERSION = 19;
+const SCHEMA_VERSION = 20;
 // Default operator retention. Lowered from 90 → 14 days on V15 (2026-05) after
 // a production incident in which the `logs` table + its FTS5 shadow tables
 // grew to ~9 GB on a 12-day-old node and corrupted the SQLite page (header
@@ -722,6 +723,32 @@ export class DashboardDB {
       if (!cols.has('core_hosted')) {
         this.db.exec(`ALTER TABLE context_graph_subscriptions ADD COLUMN core_hosted INTEGER;`);
       }
+    }
+
+    if (version < 20) {
+      // OT-RFC-43 Option-1 deterministic KA identity (B2 allocator core).
+      // Per-author durable KA-number sequence. The allocation namespace is
+      // the *attested author* address (locked design decision); a KA's full
+      // id is packed off-chain as `(uint160(author) << 96) | uint96(number)`.
+      // This table owns only the `number` half: one strictly-monotonic,
+      // never-reclaimed counter per author address.
+      //   - `author_address` is stored lowercase (the `SqliteKaNumberStore`
+      //     lowercases before every read/write) so checksum-cased and
+      //     lower-cased inputs map to the same sequence.
+      //   - `next_number` is the NEXT number to hand out for that author;
+      //     `allocate()` returns `next_number` then increments, so the first
+      //     call for an author returns 0.
+      // INTEGER (SQLite's signed 64-bit) is sufficient: at 1000 allocations/s
+      // for a million years a single author consumes ~2^55 numbers, far under
+      // the 2^63 INTEGER max and under the uint96 on-chain field. Like
+      // `protocol_outbox`, this state is durable and is NEVER pruned —
+      // reclaiming a number could mint a duplicate kaId.
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS ka_numbers (
+          author_address TEXT PRIMARY KEY,
+          next_number INTEGER NOT NULL
+        );
+      `);
     }
 
     this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
@@ -2543,6 +2570,71 @@ export class SqliteProtocolOutboxStore implements ProtocolOutboxStore {
       nextAttemptAt: row.next_attempt_at,
       lastError: row.last_error ?? '',
     };
+  }
+}
+
+/**
+ * SQLite-backed `KaNumberStore` against the V20 `ka_numbers` table.
+ * Per-author durable KA-number allocator for OT-RFC-43 Option-1
+ * deterministic KA identity (B2 allocator core, OFF-CHAIN only).
+ *
+ * Keyed by the attested author address (stored lowercase). Every
+ * method is a single prepared statement; the read-and-increment in
+ * `allocate` is atomic via `INSERT … ON CONFLICT DO UPDATE …
+ * RETURNING`, so concurrent allocations under the same author never
+ * collide on a number (the same atomic-single-statement contract the
+ * other Sqlite*Store classes rely on — there is no `.transaction()`
+ * in this module).
+ *
+ * Like `protocol_outbox`, this state is durable: it is NEVER added to
+ * `prune()`. Reclaiming a number could re-mint a kaId already used
+ * on-chain under that author.
+ */
+export class SqliteKaNumberStore implements KaNumberStore {
+  private readonly db: Database.Database;
+
+  constructor(dashboard: DashboardDB) {
+    this.db = dashboard.db;
+  }
+
+  allocate(authorAddress: string): number {
+    const author = authorAddress.toLowerCase();
+    // Atomic read-and-increment. `next_number` is the value to hand
+    // out; we increment it and RETURN the value just consumed
+    // (`next_number - 1` after the update), so the first call for an
+    // author returns 0. On first insert `next_number` starts at 1, so
+    // `1 - 1 = 0` is returned there too — uniform either way.
+    const row = this.db
+      .prepare(
+        `INSERT INTO ka_numbers (author_address, next_number)
+         VALUES (?, 1)
+         ON CONFLICT(author_address) DO UPDATE SET next_number = next_number + 1
+         RETURNING next_number - 1 AS number`,
+      )
+      .get(author) as { number: number };
+    return row.number;
+  }
+
+  reconcileFloor(authorAddress: string, nextNumberFloor: number): void {
+    const author = authorAddress.toLowerCase();
+    // Raise `next_number` to at least the floor, never lowering it.
+    // `excluded.next_number` is the proposed floor from the VALUES row.
+    this.db
+      .prepare(
+        `INSERT INTO ka_numbers (author_address, next_number)
+         VALUES (?, ?)
+         ON CONFLICT(author_address) DO UPDATE SET
+           next_number = MAX(next_number, excluded.next_number)`,
+      )
+      .run(author, nextNumberFloor);
+  }
+
+  peekNext(authorAddress: string): number {
+    const author = authorAddress.toLowerCase();
+    const row = this.db
+      .prepare(`SELECT next_number FROM ka_numbers WHERE author_address = ?`)
+      .get(author) as { next_number: number } | undefined;
+    return row?.next_number ?? 0;
   }
 }
 

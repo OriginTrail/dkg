@@ -126,6 +126,7 @@ export {
   type IdempotencyCheckResult,
   type ProtocolOutboxStore,
   type ProtocolOutboxEntry,
+  type KaNumberStore,
   RESPONSE_CACHE_BYTES,
   RESPONSE_GONE_MARKER,
 } from './messenger-types.js';

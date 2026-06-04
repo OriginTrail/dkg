@@ -86,7 +86,7 @@ describe('DashboardDB — metric snapshots', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(19);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(20);
 
     const cols = (db.db.prepare('PRAGMA table_info(metric_snapshots)').all() as Array<{ name: string }>)
       .map((c) => c.name);
@@ -142,7 +142,7 @@ describe('DashboardDB — metric snapshots', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(19);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(20);
 
     const newSnapshotCols = (db.db.prepare('PRAGMA table_info(metric_snapshots)').all() as { name: string }[])
       .map(c => c.name);
@@ -545,7 +545,7 @@ describe('DashboardDB — V15 migration: drop FTS5 logs index', () => {
 
     const upgraded = new DashboardDB({ dataDir: upgradeDir });
     try {
-      expect(upgraded.db.pragma('user_version', { simple: true })).toBe(19);
+      expect(upgraded.db.pragma('user_version', { simple: true })).toBe(20);
 
       const ftsTables = upgraded.db.prepare(
         `SELECT name FROM sqlite_master WHERE type IN ('table','view') AND name LIKE 'logs_fts%'`,
@@ -761,7 +761,7 @@ describe('DashboardDB — V17 subscription columns migration (Phase B)', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(19);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(20);
 
     const cols = (db.db.prepare('PRAGMA table_info(context_graph_subscriptions)').all() as Array<{ name: string }>)
       .map((c) => c.name);
@@ -782,7 +782,7 @@ describe('DashboardDB — V17 subscription columns migration (Phase B)', () => {
       .map((c) => c.name);
     expect(cols).toContain('on_chain_hash');
     expect(cols).toContain('last_reconciled_ordinal');
-    expect(db.db.pragma('user_version', { simple: true })).toBe(19);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(20);
   });
 });
 
@@ -866,7 +866,7 @@ describe('DashboardDB — V19 core_hosted column migration (Phase D)', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(19);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(20);
 
     const cols = (db.db.prepare('PRAGMA table_info(context_graph_subscriptions)').all() as Array<{ name: string }>)
       .map((c) => c.name);
@@ -877,6 +877,78 @@ describe('DashboardDB — V19 core_hosted column migration (Phase D)', () => {
       on_chain_id: '0xabc',
       core_hosted: null,
     }]);
+  });
+});
+
+describe('DashboardDB — V20 ka_numbers table migration (B2 KA-number allocator)', () => {
+  let db: DashboardDB;
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'dkg-db-v20-test-'));
+    db = new DashboardDB({ dataDir: dir });
+  });
+
+  afterEach(() => {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('fresh install lands at V20 and already carries the ka_numbers table', () => {
+    expect(db.db.pragma('user_version', { simple: true })).toBe(20);
+
+    const table = db.db.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='ka_numbers'",
+    ).get() as { name: string } | undefined;
+    expect(table).toEqual({ name: 'ka_numbers' });
+
+    // The B2 allocator packs `(uint160(author) << 96) | uint96(number)`;
+    // this table owns the per-author `number` half. Lock the column shape
+    // the SqliteKaNumberStore depends on: author_address PRIMARY KEY +
+    // a NOT NULL next_number counter.
+    const cols = db.db.prepare('PRAGMA table_info(ka_numbers)').all() as Array<{
+      name: string;
+      type: string;
+      notnull: number;
+      pk: number;
+    }>;
+    const byName = new Map(cols.map((c) => [c.name, c]));
+    expect([...byName.keys()].sort()).toEqual(['author_address', 'next_number']);
+    expect(byName.get('author_address')).toMatchObject({ type: 'TEXT', pk: 1 });
+    expect(byName.get('next_number')).toMatchObject({ type: 'INTEGER', notnull: 1 });
+  });
+
+  it('creates ka_numbers when upgrading a pre-V20 (V19) DB', () => {
+    // Stepwise upgrade: build a fresh DB, drop ka_numbers + reset
+    // user_version to 19 to simulate a node that last booted before the
+    // B2 allocator's V20 bump, then reopen via DashboardDB and verify the
+    // `version < 20` block adds the table and advances user_version to 20.
+    const dbPath = join(dir, 'node-ui.db');
+    db.close();
+
+    const raw = new Database(dbPath);
+    raw.exec('DROP TABLE IF EXISTS ka_numbers;');
+    raw.pragma('user_version = 19');
+    raw.close();
+
+    db = new DashboardDB({ dataDir: dir });
+    expect(db.db.pragma('user_version', { simple: true })).toBe(20);
+
+    const table = db.db.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='ka_numbers'",
+    ).get() as { name: string } | undefined;
+    expect(table).toEqual({ name: 'ka_numbers' });
+
+    // The upgraded table accepts the allocator's row shape.
+    expect(() =>
+      db.db.prepare(
+        'INSERT INTO ka_numbers (author_address, next_number) VALUES (?, ?)',
+      ).run('0xabc', 0),
+    ).not.toThrow();
+    const row = db.db.prepare(
+      'SELECT next_number FROM ka_numbers WHERE author_address = ?',
+    ).get('0xabc') as { next_number: number } | undefined;
+    expect(row).toEqual({ next_number: 0 });
   });
 });
 
@@ -1234,7 +1306,7 @@ describe('DashboardDB — V11→V13 chat schema migration chain', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(19);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(20);
 
     const cols = (db.db.prepare('PRAGMA table_info(chat_messages)').all() as Array<{ name: string }>)
       .map((c) => c.name);
@@ -1300,7 +1372,7 @@ describe('DashboardDB — V16 notifications.context_graph_id migration (A1)', ()
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(19);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(20);
 
     const cols = (db.db.prepare('PRAGMA table_info(notifications)').all() as Array<{ name: string }>)
       .map((c) => c.name);
@@ -1329,7 +1401,7 @@ describe('DashboardDB — V16 notifications.context_graph_id migration (A1)', ()
     const cols = (db.db.prepare('PRAGMA table_info(notifications)').all() as Array<{ name: string }>)
       .map((c) => c.name);
     expect(cols).toContain('context_graph_id');
-    expect(db.db.pragma('user_version', { simple: true })).toBe(19);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(20);
   });
 
   it('insertNotification writes context_graph_id to the column; omitted → NULL', () => {
@@ -1551,7 +1623,7 @@ describe('DashboardDB — replication telemetry (Phase F)', () => {
     raw.pragma('user_version = 17');
     raw.close();
     const upgraded = new DashboardDB({ dataDir: dir });
-    expect(upgraded.db.pragma('user_version', { simple: true })).toBe(19);
+    expect(upgraded.db.pragma('user_version', { simple: true })).toBe(20);
     // insert works → table exists
     upgraded.insertReplicationEvent({ ts: now, context_graph_id: 'cg', action: 'promote' });
     expect(upgraded.getReplicationSummary(60_000).promotes).toBe(1);

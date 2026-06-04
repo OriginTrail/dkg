@@ -45,8 +45,9 @@ describe('V12 migration', () => {
     // `message_idempotency` table. Both bumps are tested at the
     // DB layer in `db.test.ts`; this assertion just pins that
     // the substrate store fixtures are created against the
-    // current SCHEMA_VERSION.
-    expect(db.db.pragma('user_version', { simple: true })).toBe(19);
+    // current SCHEMA_VERSION (now 20 after the B2 KA-number
+    // allocator added the `ka_numbers` table at migration V20).
+    expect(db.db.pragma('user_version', { simple: true })).toBe(20);
   });
 });
 

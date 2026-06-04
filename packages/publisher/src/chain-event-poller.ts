@@ -57,6 +57,15 @@ export type OnKARegisteredToContextGraph = (info: {
   blockNumber: number;
 }) => Promise<void>;
 
+/**
+ * Callback for `KnowledgeAssetCreated` events — OT-RFC-43 Option-1 allocator
+ * reconciliation. The storage contract emits `KnowledgeAssetCreated(kaId,
+ * author, …)` (see `packages/evm-module/contracts/storage/DKGKnowledgeAssets.sol`).
+ * `number` is the per-author ordinal extracted from the low 96 bits of `kaId`
+ * using full-precision bigint math.
+ */
+export type OnKnowledgeAssetCreated = (e: { kaId: bigint; author: string; number: bigint; txHash: string; txIndex: number; blockNumber: number }) => void | Promise<void>;
+
 /** Persistence interface for saving/loading the last processed block. */
 export interface CursorPersistence {
   load(): Promise<number | undefined>;
@@ -78,6 +87,8 @@ export interface ChainEventPollerConfig {
   onProfileEvent?: OnProfileEvent;
   /** Called when a KnowledgeAssetRegisteredToContextGraph event is detected (Phase B). */
   onKARegisteredToContextGraph?: OnKARegisteredToContextGraph;
+  /** Called when a KnowledgeAssetCreated event is detected (OT-RFC-43 Option-1 allocator reconciliation). */
+  onKnowledgeAssetCreated?: OnKnowledgeAssetCreated;
   /** Persistent cursor for surviving restarts. */
   cursorPersistence?: CursorPersistence;
 }
@@ -108,6 +119,7 @@ export class ChainEventPoller {
   private readonly onAllowListUpdated?: OnAllowListUpdated;
   private readonly onProfileEvent?: OnProfileEvent;
   private readonly onKARegisteredToContextGraph?: OnKARegisteredToContextGraph;
+  private readonly onKnowledgeAssetCreated?: OnKnowledgeAssetCreated;
   private readonly cursorPersistence?: CursorPersistence;
   private readonly log = new Logger('ChainEventPoller');
   private lastBlock = 0;
@@ -138,6 +150,7 @@ export class ChainEventPoller {
     this.onAllowListUpdated = config.onAllowListUpdated;
     this.onProfileEvent = config.onProfileEvent;
     this.onKARegisteredToContextGraph = config.onKARegisteredToContextGraph;
+    this.onKnowledgeAssetCreated = config.onKnowledgeAssetCreated;
     this.cursorPersistence = config.cursorPersistence;
   }
 
@@ -228,7 +241,8 @@ export class ChainEventPoller {
     const watchAllowList = !!this.onAllowListUpdated;
     const watchProfiles = !!this.onProfileEvent;
     const watchKARegistered = !!this.onKARegisteredToContextGraph;
-    if (!hasPending && !watchContextGraphs && !watchUpdates && !watchAllowList && !watchProfiles && !watchKARegistered) return;
+    const watchKACreated = !!this.onKnowledgeAssetCreated;
+    if (!hasPending && !watchContextGraphs && !watchUpdates && !watchAllowList && !watchProfiles && !watchKARegistered && !watchKACreated) return;
 
     const ctx = createOperationContext('publish');
 
@@ -264,6 +278,7 @@ export class ChainEventPoller {
       eventTypes.push('ProfileUpdated');
     }
     if (watchKARegistered) eventTypes.push('KnowledgeAssetRegisteredToContextGraph');
+    if (this.onKnowledgeAssetCreated) eventTypes.push('KnowledgeAssetCreated');
 
     const fromBlock = this.lastBlock + 1;
     const upperBound = head != null
@@ -293,6 +308,8 @@ export class ChainEventPoller {
         await this.handleProfileEvent(event, ctx);
       } else if (event.type === 'KnowledgeAssetRegisteredToContextGraph') {
         await this.handleKARegistered(event, ctx);
+      } else if (event.type === 'KnowledgeAssetCreated') {
+        await this.handleKACreated(event, ctx);
       }
     }
 
@@ -460,6 +477,40 @@ export class ChainEventPoller {
       });
     } catch (err) {
       this.log.warn(ctx, `onKARegisteredToContextGraph callback failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  private async handleKACreated(event: ChainEvent, ctx: OperationContext): Promise<void> {
+    if (!this.onKnowledgeAssetCreated) return;
+    const { data } = event;
+    const kaId = BigInt((data['kaId'] as string) ?? '0');
+    if (kaId === 0n) return;
+    const author = String(data['author'] ?? '').toLowerCase();
+    const txHash = String(data['txHash'] ?? '');
+    const rawTxIndex = data['txIndex'];
+    const txIndex = typeof rawTxIndex === 'number' && Number.isFinite(rawTxIndex) && rawTxIndex >= 0
+      ? rawTxIndex
+      : 0;
+    // OT-RFC-43 Option-1 — the per-author ordinal lives in the low 96 bits of
+    // the kaId. Use full-precision bigint math; never coerce through Number()
+    // (the value can exceed Number.MAX_SAFE_INTEGER and silently lose digits).
+    const number = kaId & ((1n << 96n) - 1n);
+
+    this.log.info(ctx,
+      `Chain event: KnowledgeAssetCreated block=${event.blockNumber} kaId=${kaId} author=${author.slice(0, 10)}… number=${number}`,
+    );
+
+    try {
+      await this.onKnowledgeAssetCreated({
+        kaId,
+        author,
+        number,
+        txHash,
+        txIndex,
+        blockNumber: event.blockNumber,
+      });
+    } catch (err) {
+      this.log.warn(ctx, `onKnowledgeAssetCreated callback failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 }

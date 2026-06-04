@@ -249,3 +249,54 @@ export interface ProtocolOutboxStore {
    */
   getEntry(peer: string, protocol: string, messageId: string): ProtocolOutboxEntry | undefined;
 }
+
+/**
+ * Durable per-author KA-number allocator (OT-RFC-43 Option-1
+ * deterministic KA identity, B2 allocator core).
+ *
+ * The locked design decision: the allocation namespace is the
+ * *attested author* address, and a KA's full id is packed as
+ * `kaId = (uint160(author) << 96) | uint96(number)`. This store owns
+ * only the `number` half — a strictly-monotonic, never-reclaimed
+ * sequence *per author address* — so a daemon crash mid-publish never
+ * re-hands a number that may already have been minted on-chain under
+ * that author.
+ *
+ * The store keys by author address (lowercased by the implementation),
+ * not by node/operator identity: two nodes attesting the same author
+ * draw from the same logical sequence, which is why startup
+ * reconciliation against observed on-chain state (`reconcileFloor`) is
+ * required before a cold node may allocate (RFC §4.5 cold-start
+ * refusal — enforced by the wrapping `KaNumberAllocator`, not here).
+ *
+ * Allocation state is durable like `protocol_outbox`: it is NEVER
+ * pruned. Reclaiming a number would risk minting a duplicate kaId.
+ */
+export interface KaNumberStore {
+  /**
+   * Atomically consume and return the next number for `authorAddress`.
+   * The first call for an author returns `0`; subsequent calls return
+   * `1, 2, 3, …` strictly monotonically. Implementations lowercase the
+   * address and perform the read-and-increment in a single atomic
+   * statement (`INSERT … ON CONFLICT DO UPDATE … RETURNING`) so two
+   * concurrent allocations never collide on the same number.
+   */
+  allocate(authorAddress: string): number;
+
+  /**
+   * Raise the stored next-number for `authorAddress` to *at least*
+   * `nextNumberFloor`, never lowering it. Called at startup with
+   * `observedHighestMinted + 1` so a node that lost local state (or is
+   * cold) cannot re-issue a number the chain already used under that
+   * author. Idempotent and monotonic: replaying an old floor is a
+   * no-op.
+   */
+  reconcileFloor(authorAddress: string, nextNumberFloor: number): void;
+
+  /**
+   * The number the *next* `allocate(authorAddress)` would return,
+   * without consuming it. Returns `0` when the author has never been
+   * seen. For diagnostics / reconciliation comparisons.
+   */
+  peekNext(authorAddress: string): number;
+}
