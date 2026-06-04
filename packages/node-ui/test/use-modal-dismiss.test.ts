@@ -220,6 +220,29 @@ describe('useModalDismiss (BUG-017)', () => {
     expect(document.activeElement).toBe(dialog);
   });
 
+  it('treats an <iframe> as a tab-order boundary (PDF preview cannot let Tab escape)', async () => {
+    // FilePreviewModal renders PDF previews inside an <iframe>. If the
+    // iframe isn't part of the focusable set it isn't recognised as the
+    // last boundary, so tabbing forward from it would escape the
+    // aria-modal dialog. With `iframe` in the selector it becomes `last`
+    // and Tab wraps back to the first control. (Codex review.)
+    const onClose = vi.fn();
+    mount(true, onClose, [
+      React.createElement('button', { key: 'a', id: 'if-first' }, 'A'),
+      React.createElement('iframe', { key: 'b', id: 'if-frame', title: 'PDF preview' }),
+    ]);
+    await tick();
+    const first = document.getElementById('if-first') as HTMLElement;
+    const frame = document.getElementById('if-frame') as HTMLElement;
+    frame.focus();
+    expect(document.activeElement).toBe(frame);
+
+    const ev = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
+    window.dispatchEvent(ev);
+    expect(ev.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(first);
+  });
+
   it('uses capture phase so Escape inside a child <input> still closes the dialog (BUG-017 regression guard)', async () => {
     const onClose = vi.fn();
     mount(true, onClose, React.createElement('input', { id: 'inside-input', defaultValue: '' }));

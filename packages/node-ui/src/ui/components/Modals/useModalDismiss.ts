@@ -2,6 +2,26 @@ import type React from 'react';
 import { useEffect, useRef, useCallback } from 'react';
 
 /**
+ * Elements that participate in the dialog's tab order.
+ *
+ * `iframe` is intentionally included: embedded viewers (e.g. the PDF
+ * preview in FilePreviewModal) are focusable boundary elements. Without
+ * listing the iframe, tabbing onto it isn't recognised as the trap's
+ * first/last boundary and Tab/Shift+Tab can carry focus out of an
+ * `aria-modal` dialog (Codex review). Disabled form controls are excluded
+ * because focusing them is a silent no-op that leaves focus on the
+ * background page.
+ *
+ * Inherent limitation: once focus descends INTO a same-origin iframe's
+ * document, that document's keydown events don't cross the frame boundary
+ * up to this window-level listener, so the iframe element itself is the
+ * furthest boundary we can trap from the parent without portaling. Listing
+ * it here at least keeps the frame inside the wrap-around cycle.
+ */
+const FOCUSABLE_SELECTOR =
+  'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), iframe, [tabindex]:not([tabindex="-1"])';
+
+/**
  * Shared modal-dismiss + a11y hook (BUG-017).
  *
  * The Create/Join Context Graph modals previously had no Esc handler,
@@ -44,9 +64,7 @@ export function useModalDismiss(open: boolean, onClose: () => void) {
       // leaves focus on the background page. A modal can legitimately have
       // every control disabled transiently (e.g. ImportFilesModal while an
       // upload is in flight), so we need a fallback below.
-      const firstFocusable = dialog.querySelector<HTMLElement>(
-        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
-      );
+      const firstFocusable = dialog.querySelector<HTMLElement>(FOCUSABLE_SELECTOR);
       // Prefer the explicit `[autofocus]` element when present
       // (matches React's autoFocus semantics for the name input).
       const autoFocus = dialog.querySelector<HTMLElement>('[autofocus]');
@@ -80,9 +98,7 @@ export function useModalDismiss(open: boolean, onClose: () => void) {
       const dialog = dialogRef.current;
       if (!dialog) return;
       const focusables = Array.from(
-        dialog.querySelectorAll<HTMLElement>(
-          'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
-        )
+        dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)
       ).filter((el) => el.offsetParent !== null || el === document.activeElement);
       if (focusables.length === 0) {
         // No tabbable target inside (e.g. every control disabled mid-upload).

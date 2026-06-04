@@ -412,6 +412,104 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     );
   });
 
+  it('inflates gasLimit by gasLimitBufferBps when populate leaves it unset (OOG headroom)', async () => {
+    // createChallenge's gas depends on per-block randomness, so the adapter
+    // estimates once and inflates the limit. Verify the buffered branch
+    // actually mutates the populated tx that gets signed (Codex review:
+    // previously only covered indirectly through flaky Hardhat e2e).
+    const a = new EVMChainAdapter(minimalConfig({ rpcUrl: 'https://only.example' }));
+    const provider = { name: 'only' } as any;
+    const signer = new ethers.Wallet(DEPLOYER_PK, provider);
+    const receipt = { hash: '0xabc', blockNumber: 7, status: 1, logs: [] };
+    // No gasLimit from populate → buffered-estimate path runs.
+    const populated: any = { to: '0x0000000000000000000000000000000000000001', data: '0x1234' };
+    const populateTransaction = vi.fn(async () => populated);
+    const estimateGas = vi.fn(async () => 1_000_000n);
+    const contract = {
+      connect: vi.fn(() => ({ createChallenge: { populateTransaction, estimateGas } })),
+    };
+    (a as any).providers = [provider];
+    const signSpy = vi.fn(async () => ({ signedTx: '0xdead', txHash: receipt.hash }));
+    (a as any).signPopulatedTransaction = signSpy;
+    (a as any).sendSignedTransactionAndWait = vi.fn(async () => receipt);
+
+    await expect((a as any).sendContractTransaction(
+      contract,
+      'createChallenge',
+      [],
+      signer,
+      'create random-sampling challenge',
+      { gasLimitBufferBps: 5_000 },
+    )).resolves.toBe(receipt);
+
+    expect(estimateGas).toHaveBeenCalledTimes(1);
+    // 1_000_000 * (10_000 + 5_000) / 10_000 = 1_500_000
+    expect(signSpy.mock.calls[0][1].gasLimit).toBe(1_500_000n);
+  });
+
+  it('falls back to the unbuffered signing flow and warns when buffered estimateGas throws', async () => {
+    const a = new EVMChainAdapter(minimalConfig({ rpcUrl: 'https://only.example' }));
+    const provider = { name: 'only' } as any;
+    const signer = new ethers.Wallet(DEPLOYER_PK, provider);
+    const receipt = { hash: '0xabc', blockNumber: 9, status: 1, logs: [] };
+    const populated: any = { to: '0x0000000000000000000000000000000000000001', data: '0x1234' };
+    const populateTransaction = vi.fn(async () => populated);
+    const estimateGas = vi.fn(async () => { throw new Error('estimate boom'); });
+    const contract = {
+      connect: vi.fn(() => ({ createChallenge: { populateTransaction, estimateGas } })),
+    };
+    (a as any).providers = [provider];
+    const signSpy = vi.fn(async () => ({ signedTx: '0xdead', txHash: receipt.hash }));
+    (a as any).signPopulatedTransaction = signSpy;
+    (a as any).sendSignedTransactionAndWait = vi.fn(async () => receipt);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await expect((a as any).sendContractTransaction(
+      contract,
+      'createChallenge',
+      [],
+      signer,
+      'create random-sampling challenge',
+      { gasLimitBufferBps: 5_000 },
+    )).resolves.toBe(receipt);
+
+    // No headroom applied — gasLimit stays unset so ethers estimates during
+    // signing (unbuffered, but no worse than before the buffer existed).
+    expect(signSpy.mock.calls[0][1].gasLimit).toBeUndefined();
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(String(warnSpy.mock.calls[0][0])).toContain('buffered gas estimation failed');
+    warnSpy.mockRestore();
+  });
+
+  it('skips gas estimation when populate already set gasLimit (buffer is a no-op)', async () => {
+    const a = new EVMChainAdapter(minimalConfig({ rpcUrl: 'https://only.example' }));
+    const provider = { name: 'only' } as any;
+    const signer = new ethers.Wallet(DEPLOYER_PK, provider);
+    const receipt = { hash: '0xabc', blockNumber: 11, status: 1, logs: [] };
+    const populated: any = { to: '0x0000000000000000000000000000000000000001', data: '0x1234', gasLimit: 800_000n };
+    const populateTransaction = vi.fn(async () => populated);
+    const estimateGas = vi.fn(async () => 1_000_000n);
+    const contract = {
+      connect: vi.fn(() => ({ createChallenge: { populateTransaction, estimateGas } })),
+    };
+    (a as any).providers = [provider];
+    const signSpy = vi.fn(async () => ({ signedTx: '0xdead', txHash: receipt.hash }));
+    (a as any).signPopulatedTransaction = signSpy;
+    (a as any).sendSignedTransactionAndWait = vi.fn(async () => receipt);
+
+    await expect((a as any).sendContractTransaction(
+      contract,
+      'createChallenge',
+      [],
+      signer,
+      'create random-sampling challenge',
+      { gasLimitBufferBps: 5_000 },
+    )).resolves.toBe(receipt);
+
+    expect(estimateGas).not.toHaveBeenCalled();
+    expect(signSpy.mock.calls[0][1].gasLimit).toBe(800_000n);
+  });
+
   it('names exhausted RPC endpoints when transaction population fails everywhere', async () => {
     const a = new EVMChainAdapter(minimalConfig({
       rpcUrl: 'https://primary.example',
