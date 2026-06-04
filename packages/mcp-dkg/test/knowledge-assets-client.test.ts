@@ -78,6 +78,16 @@ describe('DkgClient knowledge-assets — publish/finalize option serialization',
     expect(calls).toHaveLength(0);
   });
 
+  it('knowledgeAssetPublish rejects unknown finalized-publish option keys', async () => {
+    const { client, calls } = makeClient();
+    await expect(client.knowledgeAssetPublish({
+      contextGraphId: 'cg-1',
+      name: 'f',
+      publishEpoch: 3,
+    } as any)).rejects.toThrow(/Unsupported finalized publish option\(s\): publishEpoch/);
+    expect(calls).toHaveLength(0);
+  });
+
   it('knowledgeAssetFinalize forwards authorAgentAddress', async () => {
     const { client, calls } = makeClient();
     await client.knowledgeAssetFinalize({
@@ -168,7 +178,12 @@ describe('DkgClient knowledge-assets — publish/finalize option serialization',
       contextGraphId: 'cg-1',
       name: 'f',
       alsoPublishVm: { unknown: true },
-    } as any)).rejects.toThrow(/use true to publish with defaults/);
+    } as any)).rejects.toThrow(/Unsupported finalized publish option\(s\): unknown/);
+    await expect(client.createKnowledgeAsset({
+      contextGraphId: 'cg-1',
+      name: 'f',
+      alsoPublishVm: { publishEpoch: 3 },
+    } as any)).rejects.toThrow(/Unsupported finalized publish option\(s\): publishEpoch/);
     expect(calls).toHaveLength(0);
   });
 
