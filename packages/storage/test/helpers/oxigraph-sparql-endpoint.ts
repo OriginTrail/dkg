@@ -108,8 +108,13 @@ export async function startOxigraphSparqlEndpoint(): Promise<OxigraphSparqlEndpo
         res.end(JSON.stringify({ head: { vars: [...vars] }, results: { bindings } }));
       } catch (e) {
         // Mirror oxigraph-server: a malformed/illegal update or query is a 400.
-        res.writeHead(400);
-        res.end(String((e as Error)?.message ?? e));
+        // The adapter only inspects the status code, never the body, so return a
+        // constant text/plain message instead of reflecting the caught exception
+        // text into the HTTP response (CodeQL: exception text reinterpreted as
+        // HTML + stack-trace info exposure). Log the real reason to stderr.
+        console.error('[oxigraph-sparql-endpoint] request rejected:', (e as Error)?.message ?? e);
+        res.writeHead(400, { 'Content-Type': 'text/plain' });
+        res.end('SPARQL request rejected');
       }
     });
   });
