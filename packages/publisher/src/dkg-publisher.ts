@@ -2,7 +2,7 @@ import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@origintrail-official/dkg-chain';
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
-import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphAssertionUri, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, DKG_GOSSIP_MAX_MESSAGE_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads } from '@origintrail-official/dkg-core';
+import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphAssertionUri, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, type Publisher, type PublishOptions, type PublishResult, type KAManifestEntry, type PhaseCallback, type V10CoreNodeACK } from './publisher.js';
 import { skolemizeByEntity } from './auto-partition.js';
@@ -922,10 +922,16 @@ export class DKGPublisher implements Publisher {
     );
 
     if (message.length > DKG_GOSSIP_MAX_MESSAGE_BYTES) {
-      throw new Error(
-        `SWM message too large (${formatBytesAsKb(message.length)}, limit ${formatGossipLimit(DKG_GOSSIP_MAX_MESSAGE_BYTES)}). ` +
-        `Split large writes into multiple share() calls partitioned by root entity.`,
-      );
+      const hint = `Split large writes into multiple share() calls partitioned by root entity.`;
+      throw new SwmGossipPayloadTooLargeError({
+        actualBytes: message.length,
+        maxBytes: DKG_GOSSIP_MAX_MESSAGE_BYTES,
+        operation: 'share',
+        message:
+          `SWM message too large (${formatBytesAsKb(message.length)}, limit ${formatGossipLimit(DKG_GOSSIP_MAX_MESSAGE_BYTES)}). ` +
+          hint,
+        hint,
+      });
     }
 
     // Delete-then-insert for upserted entities (replace old triples).
@@ -4470,10 +4476,16 @@ export class DKGPublisher implements Publisher {
       );
 
       if (wrapped.length > DKG_GOSSIP_MAX_MESSAGE_BYTES) {
-        throw new Error(
-          `Promoted assertion too large for gossip (${formatBytesAsKb(wrapped.length)}, limit ${formatGossipLimit(DKG_GOSSIP_MAX_MESSAGE_BYTES)}). ` +
-          `Promote fewer entities per call.`,
-        );
+        const hint = `Promote fewer entities per call.`;
+        throw new SwmGossipPayloadTooLargeError({
+          actualBytes: wrapped.length,
+          maxBytes: DKG_GOSSIP_MAX_MESSAGE_BYTES,
+          operation: 'promote',
+          message:
+            `Promoted assertion too large for gossip (${formatBytesAsKb(wrapped.length)}, limit ${formatGossipLimit(DKG_GOSSIP_MAX_MESSAGE_BYTES)}). ` +
+            hint,
+          hint,
+        });
       }
       gossipMessage = wrapped;
     }

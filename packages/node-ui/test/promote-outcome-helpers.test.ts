@@ -83,6 +83,23 @@ describe('describePromoteError', () => {
     expect(describePromoteError('x', err)).toBeNull();
   });
 
+  it('returns kind="payload-too-large" with a split hint for oversized SWM gossip payloads', () => {
+    const err = new HttpError(413, 'Payload too large', {
+      code: 'SWM_GOSSIP_PAYLOAD_TOO_LARGE',
+      actualBytes: 12 * 1024 * 1024,
+      limitBytes: 10 * 1024 * 1024,
+      hint: 'Promote fewer entities per call.',
+    });
+    const out = describePromoteError('skills-catalog-0001', err);
+    expect(out).not.toBeNull();
+    if (!out || out.kind !== 'payload-too-large') throw new Error('expected payload-too-large outcome');
+    expect(out.actualBytes).toBe(12 * 1024 * 1024);
+    expect(out.limitBytes).toBe(10 * 1024 * 1024);
+    expect(out.message).toContain('skills-catalog-0001');
+    expect(out.message.toLowerCase()).toContain('too large');
+    expect(out.message.toLowerCase()).toContain('fewer entities');
+  });
+
   it('returns null for non-HttpError throwables (network errors, generic Error)', () => {
     expect(describePromoteError('x', new Error('network'))).toBeNull();
     expect(describePromoteError('x', 'string error' as unknown)).toBeNull();

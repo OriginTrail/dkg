@@ -1,5 +1,6 @@
 const BASE = '';
 const CONTEXT_GRAPH_URI_PREFIX = 'did:dkg:context-graph:';
+const CONTEXT_GRAPH_LOAD_TIMEOUT_MS = 60000;
 declare global {
   interface Window { __DKG_TOKEN__?: string; }
 }
@@ -66,6 +67,16 @@ async function fetchWithTimeout(input: string, init: RequestInit = {}, timeoutMs
 async function get<T>(path: string): Promise<T> {
   const res = await fetch(`${BASE}${path}`, { headers: authHeaders() });
   if (!res.ok) throw new HttpError(res.status);
+  return res.json() as Promise<T>;
+}
+
+async function getWithTimeout<T>(path: string, timeoutMs: number): Promise<T> {
+  const res = await fetchWithTimeout(`${BASE}${path}`, { headers: authHeaders() }, timeoutMs);
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => ({}));
+    const msg = (errBody as { error?: string })?.error ?? `HTTP ${res.status}`;
+    throw new HttpError(res.status, msg, errBody);
+  }
   return res.json() as Promise<T>;
 }
 
@@ -294,7 +305,10 @@ export const fetchNodeLog = (params: { lines?: number; q?: string } = {}) => {
 
 // --- Context graphs (V10) — legacy daemon paths keep working server-side redirects.
 export async function fetchContextGraphs(): Promise<{ contextGraphs: any[] }> {
-  const data = await get<{ contextGraphs?: any[] }>('/api/context-graph/list');
+  const data = await getWithTimeout<{ contextGraphs?: any[] }>(
+    '/api/context-graph/list',
+    CONTEXT_GRAPH_LOAD_TIMEOUT_MS,
+  );
   const list = data.contextGraphs ?? [];
   return { contextGraphs: list.filter((p: any) => !p.isSystem) };
 }
@@ -1296,7 +1310,8 @@ export const promoteAssertion = (
 export type PromoteOutcome =
   | { kind: 'success'; promotedCount: number; message: string }
   | { kind: 'noop'; message: string }
-  | { kind: 'not-persisted'; message: string; expectedTripleCount?: number };
+  | { kind: 'not-persisted'; message: string; expectedTripleCount?: number }
+  | { kind: 'payload-too-large'; message: string; actualBytes?: number; limitBytes?: number };
 
 export function describePromoteResult(
   assertionName: string,
@@ -1319,6 +1334,25 @@ export function describePromoteError(
   assertionName: string,
   err: unknown,
 ): PromoteOutcome | null {
+  if (err instanceof HttpError && err.status === 413) {
+    const body = err.body as {
+      code?: string;
+      actualBytes?: number;
+      limitBytes?: number;
+      hint?: string;
+    } | undefined;
+    if (body?.code === 'SWM_GOSSIP_PAYLOAD_TOO_LARGE') {
+      const hint = typeof body.hint === 'string' && body.hint.length > 0
+        ? body.hint
+        : 'Promote fewer entities per call or split the assertion into smaller root-entity batches.';
+      return {
+        kind: 'payload-too-large',
+        actualBytes: typeof body.actualBytes === 'number' ? body.actualBytes : undefined,
+        limitBytes: typeof body.limitBytes === 'number' ? body.limitBytes : undefined,
+        message: `${assertionName} is too large to promote to Shared Working Memory. ${hint}`,
+      };
+    }
+  }
   if (err instanceof HttpError && err.status === 409) {
     const body = err.body as { code?: string; expectedTripleCount?: number } | undefined;
     if (body?.code === 'ASSERTION_NOT_PERSISTED') {
@@ -2694,6 +2728,7 @@ export interface SubGraphInfo {
   tripleCount: number;
 }
 export const fetchSubGraphs = (contextGraphId: string) =>
-  get<{ contextGraphId: string; subGraphs: SubGraphInfo[] }>(
+  getWithTimeout<{ contextGraphId: string; subGraphs: SubGraphInfo[] }>(
     `/api/sub-graph/list?contextGraphId=${encodeURIComponent(contextGraphId)}`,
+    CONTEXT_GRAPH_LOAD_TIMEOUT_MS,
   );

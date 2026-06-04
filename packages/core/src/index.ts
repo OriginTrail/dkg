@@ -193,6 +193,7 @@ export {
   DKGUserError,
   DKGInternalError,
   PayloadTooLargeError,
+  SwmGossipPayloadTooLargeError,
   toErrorMessage,
   hasErrorCode,
 } from './errors.js';
