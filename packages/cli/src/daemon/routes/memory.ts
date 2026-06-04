@@ -433,13 +433,10 @@ function publishResponsePayload(
 }
 
 function serializeKaResponseEntry(ka: any): Record<string, unknown> {
-  const rowTokenId = ka.metadataTokenId ?? ka.tokenId;
-  const tokenId = String(rowTokenId);
-  const onChainTokenId = ka.tokenId != null ? String(ka.tokenId) : undefined;
+  const tokenId = ka.tokenId != null ? String(ka.tokenId) : undefined;
   return {
     tokenId,
     ...(ka.metadataTokenId != null ? { metadataTokenId: String(ka.metadataTokenId) } : {}),
-    ...(onChainTokenId && onChainTokenId !== tokenId ? { onChainTokenId } : {}),
     rootEntity: ka.rootEntity,
   };
 }

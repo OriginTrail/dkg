@@ -69,4 +69,53 @@ describe('PublishHandler Design B metadata', () => {
     expect(rows.map((row) => row.root)).toEqual(roots);
     expect(rows.every((row) => row.token.includes('"11"'))).toBe(true);
   });
+
+  it('counts distinct real token ids for legacy multi-KA ranges', async () => {
+    const store = new OxigraphStore();
+    const handler = new PublishHandler(store, new TypedEventBus());
+    const roots = ['urn:test:legacy-range:one', 'urn:test:legacy-range:two'];
+    const quads = [
+      q(roots[0], 'http://schema.org/name', '"One"'),
+      q(roots[1], 'http://schema.org/name', '"Two"'),
+    ];
+    const ual = 'did:dkg:mock:31337/0x0000000000000000000000000000000000000001/21';
+
+    const ackData = await handler.handler(encodePublishRequest({
+      ual,
+      nquads: new TextEncoder().encode(ntriples(quads)),
+      contextGraphId: CONTEXT_GRAPH,
+      kas: [
+        { tokenId: 1, rootEntity: roots[0], privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 },
+        { tokenId: 2, rootEntity: roots[1], privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 },
+      ],
+      publisherIdentity: new Uint8Array(32),
+      publisherAddress: '0x0000000000000000000000000000000000000001',
+      startKAId: 21,
+      endKAId: 22,
+      chainId: 'mock:31337',
+      publisherSignatureR: new Uint8Array(0),
+      publisherSignatureVs: new Uint8Array(0),
+    }), 'peer-a');
+
+    expect(decodePublishAck(ackData).accepted).toBe(true);
+
+    const metadata = await store.query(
+      `SELECT ?ka ?token ?kaCount WHERE {
+        GRAPH <${META_GRAPH}> {
+          ?ka <${DKG}tokenId> ?token ;
+              <${DKG}partOf> <${ual}> .
+          <${ual}> <${DKG}kaCount> ?kaCount .
+        }
+      } ORDER BY ?ka`,
+    );
+
+    expect(metadata.type).toBe('bindings');
+    const rows = (metadata.type === 'bindings' ? metadata.bindings : []);
+    expect(rows.map((row) => row.ka)).toEqual([`${ual}/1`, `${ual}/2`]);
+    expect(rows.map((row) => row.token)).toEqual([
+      expect.stringContaining('"21"'),
+      expect.stringContaining('"22"'),
+    ]);
+    expect(rows.every((row) => row.kaCount.includes('"2"'))).toBe(true);
+  });
 });

@@ -306,7 +306,7 @@ export class PublishHandler {
           ual: request.ual,
           contextGraphId,
           merkleRoot: computedMerkleRoot,
-          kaCount: kaMetadata.length > 0 ? 1 : 0,
+          kaCount: new Set(kaMetadata.map((ka) => ka.tokenId.toString())).size,
           publisherPeerId: fromPeerId,
           timestamp: new Date(),
         },
