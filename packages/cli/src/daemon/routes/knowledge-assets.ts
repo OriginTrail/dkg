@@ -188,6 +188,7 @@ function routeError(res: RequestContext["res"], err: unknown): boolean {
     message.includes("signer mismatch") ||
     message.includes("has no quads") ||
     message.includes("different merkleRoot") ||
+    message.includes("could not be auto-registered on-chain before publish") ||
     message.includes("reserved namespace") ||
     anyErr?.name === "ReservedNamespaceError"
   ) {
@@ -430,20 +431,28 @@ async function ensureRegisteredForNamedPublish(
   contextGraphId: string,
   opCtx: OperationContext,
 ): Promise<void> {
-  const { agent, tracker, requestAgentAddress } = ctx;
+  const { agent, tracker, requestToken } = ctx;
   const existingOnChainId = await agent.getContextGraphOnChainId(contextGraphId);
   if (existingOnChainId) return;
 
   const storedOpts = await agent.getStoredContextGraphRegistrationOptions(contextGraphId);
-  await tracker.trackPhase(opCtx, "register-on-chain", () =>
-    agent.registerContextGraph(contextGraphId, {
-      ...(requestAgentAddress ? { callerAgentAddress: requestAgentAddress } : {}),
-      ...(storedOpts.publishPolicy !== undefined ? { publishPolicy: storedOpts.publishPolicy } : {}),
-      ...(storedOpts.publishAuthorityAccountId !== undefined
-        ? { publishAuthorityAccountId: storedOpts.publishAuthorityAccountId }
-        : {}),
-    }),
-  );
+  const tokenAgentAddress = requestToken ? agent.resolveAgentByToken(requestToken) : undefined;
+  try {
+    await tracker.trackPhase(opCtx, "register-on-chain", () =>
+      agent.registerContextGraph(contextGraphId, {
+        ...(tokenAgentAddress ? { callerAgentAddress: tokenAgentAddress } : {}),
+        ...(storedOpts.publishPolicy !== undefined ? { publishPolicy: storedOpts.publishPolicy } : {}),
+        ...(storedOpts.publishAuthorityAccountId !== undefined
+          ? { publishAuthorityAccountId: storedOpts.publishAuthorityAccountId }
+          : {}),
+      }),
+    );
+  } catch (regErr: any) {
+    throw new Error(
+      `Context graph "${contextGraphId}" could not be auto-registered on-chain before publish: ` +
+      `${regErr?.message ?? String(regErr)}`,
+    );
+  }
 }
 
 function emitPublished(
@@ -643,7 +652,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           errors.push({ phase: "swm-share", error: e?.message ?? String(e) });
         }
       }
-      if (alsoPublishVm) {
+      if (alsoPublishVm && result.swmShared === true) {
         try {
           // codex PR #971 F22: the atomic-create publish tail records into
           // the same operation-tracker timeline as `/api/shared-memory/publish`

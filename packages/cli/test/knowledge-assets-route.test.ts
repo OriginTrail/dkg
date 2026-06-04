@@ -504,6 +504,28 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
     expect(agent.publishFromFinalizedAssertion).not.toHaveBeenCalled();
   });
 
+  it('atomic create skips vm/publish when swm/share fails', async () => {
+    const agent = makeAssertionAgent({
+      assertion: {
+        promote: vi.fn(async () => {
+          throw new Error('CCL denied');
+        }),
+      },
+    });
+    const quads = [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"', graph: '' }];
+    const ctx = ctxFor(
+      'POST',
+      '/api/knowledge-assets',
+      { contextGraphId: 'cg', name: 'f', quads, alsoShareSwm: true, alsoPublishVm: true },
+      agent,
+    );
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(207);
+    expect((body(ctx).errors as any[]).map((e) => e.phase)).toEqual(['swm-share']);
+    expect(agent.publishFromFinalizedAssertion).not.toHaveBeenCalled();
+    expect(agent.registerContextGraph).not.toHaveBeenCalled();
+  });
+
   it('atomic create reports the real VM status (207) when publish is not confirmed', async () => {
     const agent = makeAssertionAgent({
       publishFromFinalizedAssertion: vi.fn(async () => ({
@@ -668,12 +690,59 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
     await handleKnowledgeAssetsRoutes(ctx);
     expect(status(ctx)).toBe(200);
     expect(agent.registerContextGraph).toHaveBeenCalledWith('cg', {
-      callerAgentAddress: '0x0000000000000000000000000000000000000001',
       publishPolicy: 0,
       publishAuthorityAccountId: 99n,
     });
     expect((tracker as any).trackPhase.mock.calls.map((call: any[]) => call[1])).toContain('register-on-chain');
     expect(agent.publishFromFinalizedAssertion).toHaveBeenCalledOnce();
+  });
+
+  it('vm/publish forwards the token-scoped agent when auto-registering', async () => {
+    const tokenAgent = '0x2222222222222222222222222222222222222222';
+    const agent = makeAssertionAgent({
+      getContextGraphOnChainId: vi.fn(async () => null),
+      resolveAgentByToken: vi.fn(() => tokenAgent),
+      registerContextGraph: vi.fn(async () => ({ contextGraphId: '7' })),
+    });
+    const ctx = ctxFor(
+      'POST',
+      '/api/knowledge-assets/f/vm/publish',
+      { contextGraphId: 'cg' },
+      agent,
+      {
+        requestToken: 'agent-token',
+        requestAgentAddress: '0x0000000000000000000000000000000000000001',
+      },
+    );
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(200);
+    expect(agent.registerContextGraph).toHaveBeenCalledWith('cg', {
+      callerAgentAddress: tokenAgent,
+    });
+    expect(agent.publishFromFinalizedAssertion).toHaveBeenCalledOnce();
+  });
+
+  it('vm/publish maps auto-registration failures to a client error', async () => {
+    const agent = makeAssertionAgent({
+      getContextGraphOnChainId: vi.fn(async () => null),
+      registerContextGraph: vi.fn(async () => {
+        throw new Error('insufficient TRAC');
+      }),
+    });
+    const tracker = createTracker();
+    const ctx = ctxFor(
+      'POST',
+      '/api/knowledge-assets/f/vm/publish',
+      { contextGraphId: 'cg' },
+      agent,
+      { tracker },
+    );
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(400);
+    expect(body(ctx).error).toContain('could not be auto-registered on-chain before publish');
+    expect(body(ctx).error).toContain('insufficient TRAC');
+    expect((tracker as any).fail).toHaveBeenCalledTimes(1);
+    expect(agent.publishFromFinalizedAssertion).not.toHaveBeenCalled();
   });
 
   it('atomic alsoPublishVm auto-registers a local-only context graph before named publish', async () => {
