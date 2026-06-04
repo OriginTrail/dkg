@@ -141,4 +141,14 @@ describe('DkgClient knowledge-assets — publish/finalize option serialization',
     await client.createKnowledgeAsset({ contextGraphId: 'cg-1', name: 'f', alsoPublishVm: true });
     expect(calls[0].body.alsoPublishVm).toBe(true);
   });
+
+  it('createKnowledgeAsset rejects null alsoPublishVm before HTTP serialization', async () => {
+    const { client, calls } = makeClient();
+    await expect(client.createKnowledgeAsset({
+      contextGraphId: 'cg-1',
+      name: 'f',
+      alsoPublishVm: null,
+    } as any)).rejects.toThrow(/alsoPublishVm must be a boolean or publish-options object/);
+    expect(calls).toHaveLength(0);
+  });
 });

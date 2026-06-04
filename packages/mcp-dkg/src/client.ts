@@ -125,6 +125,16 @@ function finalizedPublishOptionsPayload(
   return Object.keys(payload).length > 0 ? payload : undefined;
 }
 
+function createAlsoPublishVmPayload(
+  value: unknown,
+): boolean | Record<string, unknown> {
+  if (typeof value === 'boolean') return value;
+  if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+    return finalizedPublishOptionsPayload(value as KnowledgeAssetFinalizedPublishOptions) ?? {};
+  }
+  throw new Error('alsoPublishVm must be a boolean or publish-options object');
+}
+
 /**
  * Per-peer diagnostic snapshot returned by `GET /api/peer-info`. Shape
  * mirrors the daemon-side `PeerDiagnostics` interface plus the legacy
@@ -1112,10 +1122,7 @@ export class DkgClient {
     if (args.alsoPublishVm !== undefined) {
       // Object form carries finalized-publish controls; translate to the daemon
       // body shape (mirrors the cli ApiClient). `true`/`false` pass through.
-      body.alsoPublishVm =
-        typeof args.alsoPublishVm === 'object'
-          ? (finalizedPublishOptionsPayload(args.alsoPublishVm) ?? {})
-          : args.alsoPublishVm;
+      body.alsoPublishVm = createAlsoPublishVmPayload(args.alsoPublishVm);
     }
     return this.request<Record<string, unknown>>('POST', '/api/knowledge-assets', body);
   }
