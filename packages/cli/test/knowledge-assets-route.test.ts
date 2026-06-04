@@ -258,6 +258,85 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
     expect(agent.publishFromFinalizedAssertion).toHaveBeenCalledOnce();
   });
 
+  // PR #972: vm/publish HTTP status reflects the actual publish outcome.
+  it('POST .../:name/vm/publish returns 207 when the KA minted but the context-graph binding failed', async () => {
+    const agent = makeAssertionAgent({
+      publishFromFinalizedAssertion: vi.fn(async () => ({
+        kaId: 7n,
+        status: 'confirmed',
+        ual: 'did:dkg:hardhat:31337/0xabc/7',
+        onChainResult: { txHash: '0xtx' },
+        contextGraphError: 'CG value bind failed',
+      })),
+    });
+    const ctx = ctxFor('POST', '/api/knowledge-assets/f/vm/publish', { contextGraphId: 'cg' }, agent);
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(207);
+    expect(body(ctx)).toMatchObject({ status: 'confirmed', contextGraphError: 'CG value bind failed' });
+  });
+
+  it('POST .../:name/vm/publish returns 502 when the publish is tentative (did not confirm)', async () => {
+    const agent = makeAssertionAgent({
+      publishFromFinalizedAssertion: vi.fn(async () => ({ kaId: 7n, status: 'tentative', ual: 'did:dkg:hardhat:31337/0xabc/7' })),
+    });
+    const ctx = ctxFor('POST', '/api/knowledge-assets/f/vm/publish', { contextGraphId: 'cg' }, agent);
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(502);
+    expect(body(ctx).error).toContain('did not confirm');
+  });
+
+  it('POST .../:name/vm/publish returns 502 when the publish failed', async () => {
+    const agent = makeAssertionAgent({
+      publishFromFinalizedAssertion: vi.fn(async () => ({ status: 'failed' })),
+    });
+    const ctx = ctxFor('POST', '/api/knowledge-assets/f/vm/publish', { contextGraphId: 'cg' }, agent);
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(502);
+  });
+
+  // PR #971: validate + normalize vm/publish options before the publish.
+  it('POST .../:name/vm/publish rejects a non-integer epochs option (400, no publish)', async () => {
+    const agent = makeAssertionAgent();
+    const ctx = ctxFor('POST', '/api/knowledge-assets/f/vm/publish', { contextGraphId: 'cg', options: { epochs: 'soon' } }, agent);
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(400);
+    expect(agent.publishFromFinalizedAssertion).not.toHaveBeenCalled();
+  });
+
+  it('POST .../:name/vm/publish rejects epochs above the uint32 ceiling (400)', async () => {
+    const agent = makeAssertionAgent();
+    const ctx = ctxFor('POST', '/api/knowledge-assets/f/vm/publish', { contextGraphId: 'cg', options: { epochs: 4294967296 } }, agent);
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(400);
+    expect(agent.publishFromFinalizedAssertion).not.toHaveBeenCalled();
+  });
+
+  it('POST .../:name/vm/publish rejects assertionName (the URL name selects the assertion) (400)', async () => {
+    const agent = makeAssertionAgent();
+    const ctx = ctxFor('POST', '/api/knowledge-assets/f/vm/publish', { contextGraphId: 'cg', assertionName: 'other' }, agent);
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(400);
+    expect(agent.publishFromFinalizedAssertion).not.toHaveBeenCalled();
+  });
+
+  it('POST .../:name/vm/publish rejects an author override (the seal encodes the author) (400)', async () => {
+    const agent = makeAssertionAgent();
+    const ctx = ctxFor('POST', '/api/knowledge-assets/f/vm/publish', { contextGraphId: 'cg', authorAgentAddress: '0xdead' }, agent);
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(400);
+    expect(agent.publishFromFinalizedAssertion).not.toHaveBeenCalled();
+  });
+
+  it('POST .../:name/vm/publish normalizes a valid epochs option and publishes', async () => {
+    const agent = makeAssertionAgent();
+    const ctx = ctxFor('POST', '/api/knowledge-assets/f/vm/publish', { contextGraphId: 'cg', options: { epochs: 5 } }, agent);
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(200);
+    expect(agent.publishFromFinalizedAssertion).toHaveBeenCalledOnce();
+    const passedOpts = (agent.publishFromFinalizedAssertion as ReturnType<typeof vi.fn>).mock.calls[0][2];
+    expect(passedOpts).toMatchObject({ publishEpochs: 5 });
+  });
+
   it('GET /api/knowledge-assets/:name returns lifecycle state', async () => {
     const agent = makeAssertionAgent();
     const ctx = ctxFor('GET', '/api/knowledge-assets/f?contextGraphId=cg', undefined, agent);

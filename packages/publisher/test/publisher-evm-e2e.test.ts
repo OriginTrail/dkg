@@ -21,6 +21,9 @@ import {
 } from '../../chain/test/hardhat-harness.js';
 import { wrapPublisherForTest } from './_helpers/seal.js';
 import { makeHardhatReceiverACKProvider } from './_helpers/acks.js';
+// OT-RFC-43 Option-1: the real EVM adapter requires a packed reservedKaId per
+// mint, which DKGPublisher only allocates when a kaAllocator is configured.
+import { makeTestKaAllocator } from './_helpers/ka-allocator.js';
 
 const HARDHAT_PORT = 8548;
 let CONTEXT_GRAPH: string;
@@ -69,6 +72,7 @@ describe('Publisher EVM E2E: DKGPublisher with real contracts', () => {
     const kav10Address = await adapter.getKnowledgeAssetsLifecycleAddress();
     publisher = wrapPublisherForTest(
       new DKGPublisher({
+        kaAllocator: makeTestKaAllocator(),
         store,
         chain: adapter,
         eventBus: bus,

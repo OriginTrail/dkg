@@ -46,6 +46,10 @@ function messengerFor(router: import('@origintrail-official/dkg-core').ProtocolR
 }
 import { wrapPublisherForTest } from '../../publisher/test/_helpers/seal.js';
 import { hardhatACKProvider } from '../../publisher/test/_helpers/acks.js';
+// OT-RFC-43 Option-1: the real EVM adapter requires a packed reservedKaId per
+// mint; a directly-constructed DKGPublisher only supplies one when a
+// kaAllocator is wired (DKGPublisher only auto-allocates when configured).
+import { makeTestKaAllocator } from '../../publisher/test/_helpers/ka-allocator.js';
 import { ethers } from 'ethers';
 
 const agents: DKGAgent[] = [];
@@ -285,6 +289,7 @@ describe('Access protocol denial', () => {
     const keypairA = await generateEd25519Keypair();
 
     const publisherA = await wrapPub(new DKGPublisher({
+      kaAllocator: makeTestKaAllocator(),
       store: storeA,
       chain: chainA,
       eventBus: busA,
@@ -420,6 +425,7 @@ describe('Access protocol round-trip', () => {
     const ENTITY = 'did:dkg:test:AccessEntity';
 
     const publisherA = await wrapPub(new DKGPublisher({
+      kaAllocator: makeTestKaAllocator(),
       store: storeA,
       chain: chainA,
       eventBus: busA,

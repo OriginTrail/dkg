@@ -746,6 +746,7 @@ describe.skip('@integration RandomSampling (OBSOLETE: V8 stake pipeline)', () =>
         proofingPeriodDurationInBlocks:
           challenge.proofingPeriodDurationInBlocks,
         solved: true,
+        isCurated: challenge.isCurated,
       };
 
       // Store the mock challenge in the storage contract

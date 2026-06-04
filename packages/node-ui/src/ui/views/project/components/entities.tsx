@@ -3,7 +3,7 @@ import type { ReactNode } from 'react';
 import { useFetch } from '../../../hooks.js';
 import { encodeDocTabId, resolveDocRef } from '../../../lib/doc-tab-id.js';
 import { truncateMiddle } from '../../../lib/truncate.js';
-import { listAssertions, promoteAssertion, describePromoteResult, describePromoteError, publishSharedMemory, type AssertionInfo } from '../../../api.js';
+import { listAssertions, promoteAssertion, describePromoteResult, describePromoteError, ensureContextGraphOnChain, knowledgeAssetFinalize, knowledgeAssetPublish, fetchAssertionUals, type AssertionInfo } from '../../../api.js';
 import { useMemoryEntities, type TrustLevel, type MemoryEntity, type Triple } from '../../../hooks/useMemoryEntities.js';
 import { useProjectProfileContext } from '../../../hooks/useProjectProfile.js';
 import { useAgentsContext } from '../../../hooks/useAgents.js';
@@ -13,7 +13,7 @@ import type { SwmAttributionsResult } from '../../../hooks/useSwmAttributions.js
 import { LAYER_CONFIG, SOURCE_CONTENT_TYPE, MARKDOWN_FORM, SOURCE_FILE, DKG_SIZE, entityAuthorUri, entityMeta, layerNoun, useLayerTriples, entityTimestamp, formatRelativeTime, type LayerContentTab } from '../helpers.js';
 import { EmptyState, StatStrip, toneForLayer } from '../../../components/ContextGraphPrimitives.js';
 import { LayerGraphPanel } from './graph.js';
-import { LayerWidgetStrip, fetchSwmPublishRoots } from './layer-widgets.js';
+import { LayerWidgetStrip } from './layer-widgets.js';
 
 // ─── Enhanced Entity list (sorted by triple count, with type pill) ──────
 
@@ -405,6 +405,13 @@ export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }:
     [contextGraphId, layer],
     0
   );
+  // Deterministic Option-1 UAL per assertion (dkg:reservedUal), shown next to
+  // the filename. Refreshes alongside the list.
+  const { data: ualMap } = useFetch(
+    () => fetchAssertionUals(contextGraphId),
+    [contextGraphId, layer],
+    0
+  );
   const [busy, setBusy] = useState<string | null>(null);
   const [result, setResult] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -418,7 +425,19 @@ export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }:
     setResult(null);
     setError(null);
     try {
+      // VM is the on-chain layer; finalize/publish need the CG registered, so
+      // auto-register transparently first.
+      await ensureContextGraphOnChain(contextGraphId);
       if (layer === 'wm') {
+        // Seal the draft before sharing — promote moves content out of WM and a
+        // later vm/publish requires a finalized assertion, so finalize must run
+        // here. Tolerate already-sealed / nothing-to-seal.
+        try {
+          await knowledgeAssetFinalize(contextGraphId, assertion.name, assertion.subGraph ? { subGraphName: assertion.subGraph } : {});
+        } catch (e: any) {
+          const m = String(e?.message ?? '');
+          if (!/already|finaliz|sealed|promoted|no quads|reserved/i.test(m)) throw e;
+        }
         // PR #710 Fix A — sub-graph slug threads into the daemon's
         // `(cg, name, subGraph)` lookup so a row clicked from a
         // sub-graph partition resolves to that partition's
@@ -430,9 +449,11 @@ export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }:
         const outcome = describePromoteResult(assertion.name, res);
         setResult(outcome.message);
       } else {
-        const roots = await fetchSwmPublishRoots(contextGraphId);
-        await publishSharedMemory(contextGraphId, roots);
-        setResult('Published to Verifiable Memory');
+        // Publish THIS assertion as one Knowledge Asset (Design B, any entity
+        // count) via per-assertion vm/publish — NOT the legacy single-root
+        // shared-memory publish (which also wrongly published every SWM root).
+        await knowledgeAssetPublish(contextGraphId, assertion.name, assertion.subGraph ? { subGraphName: assertion.subGraph } : {});
+        setResult(`Published ${assertion.name} to Verifiable Memory`);
       }
       refresh();
       onComplete();
@@ -454,11 +475,18 @@ export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }:
     // "selected assertion …".
     let currentAssertion: string | null = null;
     try {
+      await ensureContextGraphOnChain(contextGraphId);
       if (layer === 'wm') {
         let total = 0;
         let noopCount = 0;
         for (const a of assertions) {
           currentAssertion = a.name;
+          try {
+            await knowledgeAssetFinalize(contextGraphId, a.name, a.subGraph ? { subGraphName: a.subGraph } : {});
+          } catch (e: any) {
+            const m = String(e?.message ?? '');
+            if (!/already|finaliz|sealed|promoted|no quads|reserved/i.test(m)) throw e;
+          }
           // PR #710 — see comment on the single-row handler above.
           const res = await promoteAssertion(contextGraphId, a.name, 'all', a.subGraph);
           total += res.promotedCount;
@@ -473,9 +501,24 @@ export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }:
           setResult('No triples were promoted — every assertion was already in Shared Memory or its content is still being committed.');
         }
       } else {
-        const roots = await fetchSwmPublishRoots(contextGraphId);
-        await publishSharedMemory(contextGraphId, roots);
-        setResult('Published all to Verifiable Memory');
+        // Publish each shared assertion as its own Knowledge Asset (Design B).
+        let published = 0;
+        let lastErr: string | null = null;
+        for (const a of assertions) {
+          currentAssertion = a.name;
+          try {
+            await knowledgeAssetPublish(contextGraphId, a.name, a.subGraph ? { subGraphName: a.subGraph } : {});
+            published += 1;
+          } catch (e: any) {
+            lastErr = e?.message ?? 'publish failed';
+          }
+        }
+        if (published > 0) {
+          const tail = lastErr ? ' (some could not be published)' : '';
+          setResult(`Published ${published} knowledge asset${published !== 1 ? 's' : ''} to Verifiable Memory${tail}`);
+        } else {
+          throw new Error(lastErr ?? 'Publish failed');
+        }
       }
       refresh();
       onComplete();
@@ -542,6 +585,15 @@ export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }:
           <span className="v10-item-icon">▤</span>
           <div className="v10-item-info">
             <div className="v10-item-name" style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>{a.name}</div>
+            {ualMap?.[a.name] && (
+              <div
+                className="v10-item-ual"
+                style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-tertiary)', opacity: 0.7, wordBreak: 'break-all', marginTop: 1 }}
+                title={ualMap[a.name]}
+              >
+                {ualMap[a.name]}
+              </div>
+            )}
             <div className="v10-item-meta-row">
               {a.tripleCount != null && <span className="v10-item-count">{a.tripleCount} triples</span>}
               {a.subGraph && (

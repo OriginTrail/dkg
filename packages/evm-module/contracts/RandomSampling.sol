@@ -236,10 +236,10 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
      * is unchanged — only the (root, leaf, count) triple changes between
      * the two paths.
      *
-     * Branch selection: lookup the owning CG via
-     * `ContextGraphStorage.kaToContextGraph(kaId)` (existing Phase 7
-     * atomic-bind invariant) and read `getIsCurated`. Same single SLOAD
-     * each, no struct change.
+     * Branch selection: read the `isCurated` flag PINNED on the challenge at
+     * issuance (`_generateChallenge`), not a live `ContextGraphStorage` lookup.
+     * Pinning keeps verification on the same branch the leaf was drawn against
+     * even if the CG-store singleton is re-pointed/cut over mid-period (R3 seam).
      *
      * Sharding-table check: `nodeExistsInShardingTable` is universal
      * membership today. RFC-39 §5.2 calls for tightening to per-CG
@@ -271,23 +271,43 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
             revert("This challenge is no longer active");
         }
 
-        // RFC-39 Phase A.5: resolve curation status to pick the right
-        // (root, count) pair. `kaToContextGraph` is the Phase 7 atomic-bind
-        // invariant — non-zero for every V10 publish — so the lookup never
-        // returns zero on a freshly-created KC. A zero result indicates
-        // pre-Phase-7 legacy state and is treated as "public unsampleable"
-        // (defensive — should not occur in practice).
-        uint256 cgId = contextGraphStorage.kaToContextGraph(challenge.knowledgeAssetId);
-        bool isCurated = cgId != 0 && contextGraphStorage.getIsCurated(cgId);
+        // RFC-39 Phase A.5: curation status selects the right (root, count)
+        // pair. We read the flag PINNED on the challenge at issuance
+        // (`_generateChallenge`) rather than re-deriving it from the live
+        // `ContextGraphStorage` singleton via `kaToContextGraph` + `getIsCurated`.
+        // Re-deriving would be wrong under the R3 multi-store seam: a
+        // ContextGraphStorage generation cutover (or a Hub re-point to a store
+        // where this KA's CG binding differs or is absent) would reclassify an
+        // older curated challenge as public mid-period and verify it against the
+        // wrong (merkle vs ciphertext) root/count pair. The pinned flag captures
+        // the EXACT branch the leaf was drawn against, so verification is immune
+        // to any later singleton movement — symmetric with the KA-store pin below.
+        bool isCurated = challenge.isCurated;
+
+        // OT-RFC-43 / R3 — multi-store (generation) seam. Verify against the
+        // EXACT KA store this challenge was ISSUED against — recorded per
+        // challenge in `_generateChallenge` as `knowledgeAssetStorageContract`
+        // — rather than the currently-bound `knowledgeAssetStorage` singleton.
+        // Today there is exactly one KA store, so
+        // `challenge.knowledgeAssetStorageContract == address(knowledgeAssetStorage)`
+        // and this is strictly behaviour-neutral. Reading it here (1) keeps the
+        // recorded field LIVE so it is not pruned as dead code, (2) makes
+        // verification immune to a mid-period Hub re-point of the singleton, and
+        // (3) is the hook a future multi-generation RandomSampling needs: a
+        // challenge issued against generation-N's store MUST verify against that
+        // store. Together with the pinned `isCurated` above, `submitProof` no
+        // longer reads ANY live singleton for branch/root selection — both the
+        // store and the curation branch are resolved from the challenge itself.
+        DKGKnowledgeAssets challengeKaStore = DKGKnowledgeAssets(challenge.knowledgeAssetStorageContract);
 
         // Get the expected merkle root + leaf count for this challenge.
         bytes32 expectedMerkleRoot = isCurated
-            ? knowledgeAssetStorage.getLatestCiphertextChunksRoot(challenge.knowledgeAssetId)
-            : knowledgeAssetStorage.getLatestMerkleRoot(challenge.knowledgeAssetId);
+            ? challengeKaStore.getLatestCiphertextChunksRoot(challenge.knowledgeAssetId)
+            : challengeKaStore.getLatestMerkleRoot(challenge.knowledgeAssetId);
 
         uint32 leafCount = isCurated
-            ? knowledgeAssetStorage.getCiphertextChunkCount(challenge.knowledgeAssetId)
-            : knowledgeAssetStorage.getMerkleLeafCount(challenge.knowledgeAssetId);
+            ? challengeKaStore.getCiphertextChunkCount(challenge.knowledgeAssetId)
+            : challengeKaStore.getMerkleLeafCount(challenge.knowledgeAssetId);
 
         if (leafCount == 0 || challenge.chunkId >= uint256(leafCount)) {
             revert MerkleRootMismatchError(bytes32(0), expectedMerkleRoot);
@@ -409,6 +429,15 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
         uint256 startBlock = updateAndGetActiveProofPeriodStartBlock();
         emit ChallengeGenerated(identityId, cgId, kaId, chunkId, currentEpoch, startBlock);
 
+        // OT-RFC-43 / R3 — pin the curation classification at issuance. `cgId`
+        // came from `_pickWeightedChallenge`, which only returns an eligible
+        // (non-zero, active) CG, so this resolves the SAME curated/public branch
+        // the leaf draw above used. `submitProof` reads `challenge.isCurated`
+        // back instead of re-deriving it from the live singleton, so a
+        // ContextGraphStorage generation cutover can never reclassify this
+        // challenge mid-period.
+        bool isCurated = contextGraphStorage.getIsCurated(cgId);
+
         return
             RandomSamplingLib.Challenge(
                 kaId,
@@ -417,7 +446,8 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
                 currentEpoch,
                 startBlock,
                 getActiveProofingPeriodDurationInBlocks(),
-                false
+                false,
+                isCurated
             );
     }
 

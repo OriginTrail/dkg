@@ -177,6 +177,41 @@ export function generateKCMetadata(
     }
   }
 
+  // OT-RFC-44 Design B: the bare <ual> IS the Knowledge Asset (one file = one
+  // KA, any entity count), but #980 only typed it dkg:KnowledgeCollection — the
+  // bare UAL was never typed dkg:KnowledgeAsset. Emit an aggregate KA node on
+  // the bare UAL (type + summed counts + every member tokenId + every member
+  // entity) so consumers can resolve the KA directly from <ual> (PR #968
+  // salvage; uses ka.tokenId, no metadataTokenId). The per-row <ual>/N rows
+  // below are retained for not-yet-migrated per-root consumers.
+  // NB: deliberately NO `<ual> partOf <ual>` self-edge — that would make the
+  // bare node match `?x partOf <ual>` member-enumeration (incl. resolveKA) and
+  // double-count members; the aggregate node is purely self-describing.
+  if (kaEntries.length > 0) {
+    const aggPublicTripleCount = kaEntries.reduce((sum, ka) => sum + ka.publicTripleCount, 0);
+    const aggPrivateTripleCount = kaEntries.reduce((sum, ka) => sum + ka.privateTripleCount, 0);
+    const memberTokenIds = [...new Set(kaEntries.map((ka) => ka.tokenId.toString()))];
+    const memberRoots = [...new Set(kaEntries.map((ka) => ka.rootEntity))];
+    quads.push(
+      mq(meta.ual, `${RDF}type`, `${DKG}KnowledgeAsset`, metaGraph),
+      mq(meta.ual, `${DKG}publicTripleCount`, intLit(aggPublicTripleCount), metaGraph),
+    );
+    for (const tokenId of memberTokenIds) {
+      quads.push(mq(meta.ual, `${DKG}tokenId`, intLit(BigInt(tokenId)), metaGraph));
+    }
+    for (const root of memberRoots) {
+      // dual-write dkg:rootEntity + dkg:entity, matching the per-row rows (§10.1).
+      quads.push(...entityMemberQuads(meta.ual, root, metaGraph));
+    }
+    if (aggPrivateTripleCount > 0) {
+      quads.push(mq(meta.ual, `${DKG}privateTripleCount`, intLit(aggPrivateTripleCount), metaGraph));
+      const privateRoots = kaEntries.filter((ka) => ka.privateMerkleRoot);
+      if (privateRoots.length === 1 && privateRoots[0].privateMerkleRoot) {
+        quads.push(mq(meta.ual, `${DKG}privateMerkleRoot`, lit(toHex(privateRoots[0].privateMerkleRoot)), metaGraph));
+      }
+    }
+  }
+
   // KA metadata. OT-RFC-44 keeps one on-chain KA per file/lifecycle, but the
   // current update and private-access paths still resolve per-root label rows
   // at <ual>/1, <ual>/2, ... . Keep this compatibility shape until those

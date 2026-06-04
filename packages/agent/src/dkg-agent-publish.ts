@@ -1821,7 +1821,8 @@ export class PublishMethods extends DKGAgentBase {
           }
         }
         if (chainMax >= 0n) {
-          this.kaNumberAllocator.reconcile(author, Number(chainMax));
+          // Pass the bigint straight through (PR #976 F6) — `Number()` would lose precision past 2^53.
+          this.kaNumberAllocator.reconcile(author, chainMax);
         }
         this.kaNumberAllocator.markReconciled();
         this.reconciledKaAuthors.add(key);
@@ -2738,10 +2739,32 @@ export class PublishMethods extends DKGAgentBase {
     if (result.status === 'confirmed' || result.status === 'tentative') {
       try {
         await this._stampPointer(lifecycleUri, VM_CURRENT_ASSERTION_PRED, newMerkleHexBare, metaGraph);
+        // OT-RFC-44 Design B — the assertion now lives at Verifiable Memory, so
+        // make its lifecycle marker match the on-chain reality: flip
+        // dkg:memoryLayer -> "VM" and dkg:state -> "published". The VM record is
+        // thus equivalent to the WM/SWM ones, with the extra transaction metadata
+        // (dkg:vmCurrentAssertion + dkg:kaId + the on-chain UAL) layered on top.
+        // Promote stamps memoryLayer "SWM" on BOTH the lifecycle-URN and the
+        // data-graph-URI forms, so flip both — otherwise the published assertion
+        // lingers in the Shared-Memory layer (the dedicated published-metadata
+        // flip never fired: its trigger gate joins on dkg:rootEntity/dkg:agent
+        // predicates the lifecycle record does not carry).
+        const MEMORY_LAYER_PRED = 'http://dkg.io/ontology/memoryLayer';
+        const STATE_PRED = 'http://dkg.io/ontology/state';
+        for (const subj of [lifecycleUri, assertionUri]) {
+          await this.store.deleteByPattern({ subject: subj, predicate: MEMORY_LAYER_PRED, graph: metaGraph });
+          await this.store.insert([
+            { subject: subj, predicate: MEMORY_LAYER_PRED, object: `"${MemoryLayer.VerifiedMemory}"`, graph: metaGraph },
+          ]);
+        }
+        await this.store.deleteByPattern({ subject: lifecycleUri, predicate: STATE_PRED, graph: metaGraph });
+        await this.store.insert([
+          { subject: lifecycleUri, predicate: STATE_PRED, object: '"published"', graph: metaGraph },
+        ]);
       } catch (err) {
         this.log.warn(
           opts?.operationCtx ?? createOperationContext('publishFromSWM'),
-          `Failed to stamp vmCurrentAssertion for <${lifecycleUri}>: ` +
+          `Failed to stamp VM lifecycle marker for <${lifecycleUri}>: ` +
             (err instanceof Error ? err.message : String(err)),
         );
       }

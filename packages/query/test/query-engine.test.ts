@@ -95,8 +95,34 @@ describe('DKGQueryEngine', () => {
 
     const result = await engine.resolveKA(ual);
     expect(result.rootEntity).toBe(ENTITY);
+    expect(result.rootEntities).toEqual([ENTITY]);
     expect(result.contextGraphId).toBe(CONTEXT_GRAPH);
     expect(result.quads.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('resolveKA aggregates every member root of a multi-entity KA (Design B, PR #968)', async () => {
+    const ual = 'did:dkg:mock:31337/42';
+    const ENTITY_2 = 'did:dkg:agent:QmTextBot';
+    await store.insert([
+      // ENTITY data is seeded in beforeEach; add ENTITY_2 to the same data graph.
+      q(ENTITY_2, 'http://schema.org/name', '"TextBot"'),
+      q(`${ENTITY_2}/.well-known/genid/o1`, 'http://ex.org/type', '"TextAnalysis"'),
+      // Two member rows under one UAL (Design B: one KA, many entities).
+      q(`${ual}/1`, 'http://dkg.io/ontology/rootEntity', ENTITY, META),
+      q(`${ual}/1`, 'http://dkg.io/ontology/partOf', ual, META),
+      q(`${ual}/2`, 'http://dkg.io/ontology/rootEntity', ENTITY_2, META),
+      q(`${ual}/2`, 'http://dkg.io/ontology/partOf', ual, META),
+      q(ual, 'http://dkg.io/ontology/contextGraph', `did:dkg:context-graph:${CONTEXT_GRAPH}`, META),
+    ]);
+
+    const result = await engine.resolveKA(ual);
+    // Pre-#968 this returned only bindings[0]; now every member root is read.
+    expect(result.rootEntities).toEqual([ENTITY, ENTITY_2]);
+    expect(result.rootEntity).toBe(ENTITY); // backward-compat: first member root
+    const subjects = new Set(result.quads.map((quad) => quad.subject));
+    expect(subjects).toContain(ENTITY);
+    expect(subjects).toContain(ENTITY_2);
+    expect(subjects).toContain(`${ENTITY_2}/.well-known/genid/o1`);
   });
 
   it('throws on unknown UAL', async () => {
