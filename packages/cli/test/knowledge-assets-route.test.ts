@@ -105,7 +105,15 @@ function makeAssertionAgent(over: Record<string, any> = {}) {
   const assertion = {
     create: vi.fn(async (_cg: string, name: string) => `urn:dkg:assertion:cg:agent:${name}`),
     write: vi.fn(async () => undefined),
-    finalize: vi.fn(async () => ({ merkleRoot: new Uint8Array([0xab, 0xcd]), eip712Digest: '0xdig' })),
+    finalize: vi.fn(async (_cg: string, name: string) => ({
+      assertionUri: `urn:dkg:assertion:cg:agent:${name}`,
+      merkleRoot: new Uint8Array([0xab, 0xcd]),
+      authorAddress: '0x1111111111111111111111111111111111111111',
+      schemeVersion: 1,
+      chainId: 31337n,
+      kav10Address: '0x2222222222222222222222222222222222222222',
+      eip712Digest: '0xdig',
+    })),
     promote: vi.fn(async () => ({ promotedCount: 3 })),
     discard: vi.fn(async () => undefined),
     history: vi.fn(async () => ({ state: 'created', memoryLayer: 'WorkingMemory' })),
@@ -116,10 +124,16 @@ function makeAssertionAgent(over: Record<string, any> = {}) {
     publishFromFinalizedAssertion: vi.fn(async () => ({
       kaId: 7n,
       status: 'confirmed',
+      assertionUri: 'urn:dkg:assertion:cg:agent:f',
       ual: 'did:dkg:hardhat:31337/0xabc/7',
-      onChainResult: { txHash: '0xtx' },
+      onChainResult: { txHash: '0xtx', blockNumber: 123 },
       publicQuads: [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"', graph: '' }],
-      kaManifest: [{ assertion: 'urn:dkg:assertion:cg:agent:f' }],
+      kaManifest: [{ tokenId: 1n, rootEntity: 'ex:A', assertion: 'urn:dkg:assertion:cg:agent:f' }],
+      seal: {
+        assertionUri: 'urn:dkg:assertion:cg:agent:f',
+        merkleRoot: new Uint8Array([0xab, 0xcd]),
+        authorAddress: '0x1111111111111111111111111111111111111111',
+      },
     })),
     listContextGraphs: vi.fn(async () => knownContextGraphs),
     contextGraphExists: vi.fn(async (id: string) => knownContextGraphs.some((row) => row.id === id)),
@@ -145,7 +159,17 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
     const ctx = ctxFor('POST', '/api/knowledge-assets', { contextGraphId: 'cg', name: 'f', quads }, agent);
     await handleKnowledgeAssetsRoutes(ctx);
     expect(status(ctx)).toBe(201);
-    expect(body(ctx)).toMatchObject({ status: 'wm-sealed', written: 1, merkleRoot: '0xabcd' });
+    expect(body(ctx)).toMatchObject({
+      status: 'wm-sealed',
+      assertionUri: 'urn:dkg:assertion:cg:agent:f',
+      written: 1,
+      merkleRoot: '0xabcd',
+      authorAddress: '0x1111111111111111111111111111111111111111',
+      schemeVersion: 1,
+      chainId: '31337',
+      kav10Address: '0x2222222222222222222222222222222222222222',
+      eip712Digest: '0xdig',
+    });
     expect(agent.assertion.write).toHaveBeenCalledWith('cg', 'f', quads, undefined);
     expect(agent.assertion.finalize).toHaveBeenCalledWith('cg', 'f', {});
   });
@@ -326,7 +350,15 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
     const ctx = ctxFor('POST', '/api/knowledge-assets/f/wm/finalize', { contextGraphId: 'cg' }, agent);
     await handleKnowledgeAssetsRoutes(ctx);
     expect(status(ctx)).toBe(200);
-    expect(body(ctx)).toMatchObject({ merkleRoot: '0xabcd', eip712Digest: '0xdig' });
+    expect(body(ctx)).toMatchObject({
+      assertionUri: 'urn:dkg:assertion:cg:agent:f',
+      merkleRoot: '0xabcd',
+      authorAddress: '0x1111111111111111111111111111111111111111',
+      schemeVersion: 1,
+      chainId: '31337',
+      kav10Address: '0x2222222222222222222222222222222222222222',
+      eip712Digest: '0xdig',
+    });
   });
 
   it('POST .../:name/wm/discard emits the WM discard side effect', async () => {
@@ -368,6 +400,14 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
     await handleKnowledgeAssetsRoutes(ctx);
     expect(status(ctx)).toBe(200);
     expect(body(ctx)).toMatchObject({ status: 'confirmed', ual: 'did:dkg:hardhat:31337/0xabc/7', txHash: '0xtx' });
+    expect(body(ctx)).toMatchObject({
+      kaId: '7',
+      assertionUri: 'urn:dkg:assertion:cg:agent:f',
+      authorAddress: '0x1111111111111111111111111111111111111111',
+      merkleRoot: '0xabcd',
+      blockNumber: 123,
+      kas: [{ tokenId: '1', rootEntity: 'ex:A' }],
+    });
     expect(agent.publishFromFinalizedAssertion).toHaveBeenCalledWith('cg', 'f', { clearSharedMemoryAfter: true });
     expect(emitMemoryGraphChanged).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -493,6 +533,23 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
     expect(agent.publishFromFinalizedAssertion).toHaveBeenCalledWith('cg', 'f', {
       publishEpochs: 5, // number, not the JSON string "5"
       publisherNodeIdentityIdOverride: 9n, // bigint
+    });
+  });
+
+  it('vm/publish accepts legacy top-level publish controls', async () => {
+    const agent = makeAssertionAgent();
+    const ctx = ctxFor(
+      'POST',
+      '/api/knowledge-assets/f/vm/publish',
+      { contextGraphId: 'cg', clearAfter: true, publishEpochs: '6', publisherNodeIdentityIdOverride: '10' },
+      agent,
+    );
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(200);
+    expect(agent.publishFromFinalizedAssertion).toHaveBeenCalledWith('cg', 'f', {
+      clearSharedMemoryAfter: true,
+      publishEpochs: 6,
+      publisherNodeIdentityIdOverride: 10n,
     });
   });
 

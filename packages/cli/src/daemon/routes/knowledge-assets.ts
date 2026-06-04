@@ -46,6 +46,55 @@ function hex(bytes: Uint8Array): string {
   return "0x" + Buffer.from(bytes).toString("hex");
 }
 
+function serializeSeal(seal: any): Record<string, unknown> {
+  return {
+    assertionUri: seal?.assertionUri,
+    merkleRoot: seal?.merkleRoot instanceof Uint8Array ? hex(seal.merkleRoot) : seal?.merkleRoot,
+    authorAddress: seal?.authorAddress,
+    schemeVersion: seal?.schemeVersion,
+    chainId: seal?.chainId != null ? String(seal.chainId) : undefined,
+    kav10Address: seal?.kav10Address,
+    eip712Digest: seal?.eip712Digest,
+  };
+}
+
+function publishResponsePayload(result: any): Record<string, unknown> {
+  const chain = result?.onChainResult;
+  const seal = serializeSeal(result?.seal);
+  return {
+    kaId: result?.kaId != null ? String(result.kaId) : undefined,
+    status: result?.status,
+    assertionUri: result?.assertionUri ?? seal.assertionUri,
+    authorAddress: seal.authorAddress,
+    merkleRoot: seal.merkleRoot,
+    ual: result?.ual,
+    kas: Array.isArray(result?.kaManifest)
+      ? result.kaManifest.map((ka: any) => ({
+        tokenId: ka?.tokenId != null ? String(ka.tokenId) : undefined,
+        rootEntity: ka?.rootEntity,
+      }))
+      : undefined,
+    ...(chain ? { txHash: chain.txHash, blockNumber: chain.blockNumber } : {}),
+    ...(result?.contextGraphError ? { contextGraphError: result.contextGraphError } : {}),
+  };
+}
+
+function finalizedPublishOptionsInput(parsed: Record<string, unknown>): unknown {
+  const nested = parsed.options && typeof parsed.options === "object" && !Array.isArray(parsed.options)
+    ? parsed.options as Record<string, unknown>
+    : {};
+  return {
+    ...nested,
+    ...(parsed.clearAfter !== undefined ? { clearAfter: parsed.clearAfter } : {}),
+    ...(parsed.clearSharedMemoryAfter !== undefined ? { clearSharedMemoryAfter: parsed.clearSharedMemoryAfter } : {}),
+    ...(parsed.publishEpochs !== undefined ? { publishEpochs: parsed.publishEpochs } : {}),
+    ...(parsed.epochs !== undefined ? { epochs: parsed.epochs } : {}),
+    ...(parsed.publisherNodeIdentityIdOverride !== undefined
+      ? { publisherNodeIdentityIdOverride: parsed.publisherNodeIdentityIdOverride }
+      : {}),
+  };
+}
+
 function routeError(res: RequestContext["res"], err: unknown): boolean {
   const anyErr = err as any;
   if (anyErr?.name === "AssertionNotPersistedError" || anyErr?.code === "ASSERTION_NOT_PERSISTED") {
@@ -397,7 +446,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
             operation: "assertion_finalized",
             source: "api",
           });
-          result.merkleRoot = hex(seal.merkleRoot);
+          Object.assign(result, serializeSeal(seal));
           result.status = "wm-sealed";
         } catch (e: any) {
           const phase = result.written === quads.length ? "wm-finalize" : "wm-write";
@@ -608,7 +657,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           operation: "assertion_finalized",
           source: "api",
         });
-        return jsonResponse(res, 200, { merkleRoot: hex(seal.merkleRoot), eip712Digest: seal.eip712Digest });
+        return jsonResponse(res, 200, serializeSeal(seal));
       }
       if (verb === "discard") {
         await agent.assertion.discard(
@@ -663,7 +712,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
 
     // ── VM verb: publish (SWM/WM → VM; mint or update on chain) ──
     if (layer === "vm" && verb === "publish") {
-      const opts = resolveFinalizedPublishOptions(ctx, parsed.options);
+      const opts = resolveFinalizedPublishOptions(ctx, finalizedPublishOptionsInput(parsed));
       if (opts === null) return;
       const pub: any = await agent.publishFromFinalizedAssertion(resolvedContextGraphId, name, {
         ...(subGraphName ? { subGraphName } : {}),
@@ -673,13 +722,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       // Mirror the atomic path: non-throwing tentative/failed/contextGraphError
       // results are partial successes, not confirmed publishes.
       const httpStatus = pub?.status === "confirmed" && !pub?.contextGraphError ? 200 : 207;
-      return jsonResponse(res, httpStatus, {
-        kaId: pub?.kaId,
-        status: pub?.status,
-        ual: pub?.ual,
-        txHash: pub?.onChainResult?.txHash,
-        ...(pub?.contextGraphError ? { contextGraphError: pub.contextGraphError } : {}),
-      });
+      return jsonResponse(res, httpStatus, publishResponsePayload(pub));
     }
   } catch (e: any) {
     if (routeError(res, e)) return;
