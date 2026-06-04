@@ -221,3 +221,97 @@ describe('KaNumberAllocator — kaId packing', () => {
     expect(() => alloc.allocate('0x1234')).toThrow(/invalid author address/);
   });
 });
+
+describe('KaNumberAllocator — zero address (codex PR #976 F7)', () => {
+  const ZERO = '0x0000000000000000000000000000000000000000';
+
+  it('refuses to allocate under the zero address', () => {
+    // Under the packed scheme `kaId = (uint160(author) << 96) | number`
+    // the first allocation for the zero address would produce
+    // `kaId = (0n << 96n) | 0n === 0n`. That:
+    //   (a) violates the documented `KaAllocation.kaId` non-zero contract;
+    //   (b) collides with the chain-event-poller's "no kaId" sentinel
+    //       (`handleKACreated`'s `if (kaId === 0n) return`), so the
+    //       reconciliation callback would silently drop the mint event.
+    // `ethers.getAddress(ZeroAddress)` accepts the zero address, so the
+    // allocator has to reject it explicitly.
+    expect(() => alloc.allocate(ZERO)).toThrow(/zero address/);
+  });
+
+  it('refuses to reconcile under the zero address', () => {
+    // Same rationale — never let a stray zero-address observation poison
+    // the floor map with a phantom-author key.
+    expect(() => alloc.reconcile(ZERO, 0n)).toThrow(/zero address/);
+  });
+
+  it('refuses to peek under the zero address', () => {
+    expect(() => alloc.peekKaId(ZERO)).toThrow(/zero address/);
+  });
+
+  it('accepts every non-zero address ethers.getAddress accepts', () => {
+    // Sanity: a barely-non-zero address still works (no over-rejection).
+    const oneLsb = '0x0000000000000000000000000000000000000001';
+    expect(alloc.allocate(oneLsb).number).toBe(0n);
+    expect(alloc.allocate(oneLsb).kaId).not.toBe(0n);
+  });
+});
+
+describe('KaNumberAllocator — canonical address (codex PR #976 F8)', () => {
+  it('passes a single canonical key to the store regardless of caller casing', () => {
+    // The allocator now canonicalizes (lowercase) before talking to the
+    // store, so a store implementation that forgot to lowercase its own
+    // key still gets one stable key per on-chain author. We pin this
+    // behaviour with a casing-aware fake store.
+    class CaseAwareStore implements KaNumberStore {
+      readonly seenKeys: string[] = [];
+      private readonly next = new Map<string, bigint>();
+      allocate(authorAddress: string): bigint {
+        // INTENTIONALLY does NOT lowercase — that's the bug F8 defends
+        // against. If the allocator forwards a checksummed string, the
+        // sequence forks per casing variant.
+        this.seenKeys.push(authorAddress);
+        const cur = this.next.get(authorAddress) ?? 0n;
+        this.next.set(authorAddress, cur + 1n);
+        return cur;
+      }
+      reconcileFloor(authorAddress: string, nextNumberFloor: bigint): void {
+        this.seenKeys.push(authorAddress);
+        const cur = this.next.get(authorAddress) ?? 0n;
+        this.next.set(authorAddress, cur > nextNumberFloor ? cur : nextNumberFloor);
+      }
+      peekNext(authorAddress: string): bigint {
+        this.seenKeys.push(authorAddress);
+        return this.next.get(authorAddress) ?? 0n;
+      }
+    }
+    const store = new CaseAwareStore();
+    const a = new KaNumberAllocator(store);
+    a.markReconciled();
+
+    // Caller hands us THREE different casings of the same on-chain
+    // address. The allocator must collapse them to one key before the
+    // store ever sees them.
+    a.allocate(AUTHOR_A);                  // checksummed
+    a.allocate(AUTHOR_A.toLowerCase());
+    a.allocate(AUTHOR_A.toUpperCase().replace('0X', '0x')); // upper hex
+    a.peekKaId(AUTHOR_A);
+    a.reconcile(AUTHOR_A, 99n);
+
+    // Every store key must be the lowercased canonical form. Without
+    // the F8 fix the store would have seen the checksummed string at
+    // least once.
+    const lc = AUTHOR_A.toLowerCase();
+    for (const key of store.seenKeys) {
+      expect(key).toBe(lc);
+    }
+  });
+
+  it('peek + allocate cannot disagree under mixed casing', () => {
+    // Peek with one casing, allocate with another — the peeked kaId
+    // MUST equal the kaId the next allocate produces. Without F8 the
+    // two would index into different store keys and disagree.
+    const peeked = alloc.peekKaId(AUTHOR_A);
+    const { kaId } = alloc.allocate(AUTHOR_A.toLowerCase());
+    expect(peeked).toBe(kaId);
+  });
+});

@@ -154,4 +154,65 @@ describe('ChainEventPoller — KnowledgeAssetCreated (allocator reconciliation)'
     // independent of whether allocator reconciliation is also wired.
     expect(filters[0].eventTypes).toContain('KCCreated');
   });
+
+  // codex PR #976 F9: when `onKnowledgeAssetCreated` is wired and there
+  // is no persisted cursor, the poller MUST backfill from block 0.
+  // Without this, a fresh daemon would skip every `KCCreated` event
+  // older than ~500 blocks (the "seed near head" optimisation that
+  // applies to the pending-publish watcher) and the per-author floor
+  // for older authors would stay at 0. A subsequent `markReconciled()`
+  // would then be unsound — the allocator could re-issue a number
+  // already minted on-chain.
+  it('cold-starts from block 0 when onKnowledgeAssetCreated is wired (F9 backfill)', async () => {
+    // Chain head is 10_000 — well past the 500-block head-seed window.
+    // If the F9 backfill is missing, the poller would seed `lastBlock`
+    // at 9500 and the first filter would have fromBlock=9501, which
+    // would miss every historical `KCCreated` at e.g. block 1.
+    const { adapter, filters } = makeChain(10_000, []);
+    const handler = new PublishHandler(new OxigraphStore(), new TypedEventBus());
+
+    const poller = new ChainEventPoller({
+      chain: adapter,
+      publishHandler: handler,
+      intervalMs: 60_000,
+      onKnowledgeAssetCreated: async () => { /* sink */ },
+    });
+
+    await poller.start();
+    await new Promise((r) => setTimeout(r, 50));
+    await poller.stop();
+
+    expect(filters.length).toBeGreaterThanOrEqual(1);
+    // First poll scans from block 1 (fromBlock = lastBlock + 1, and
+    // lastBlock stays at 0 because the F9 backfill suppressed the
+    // head-seed). Pre-fix this would have been 9501.
+    expect(filters[0].fromBlock).toBe(1);
+    // toBlock is capped by MAX_RANGE (9000) not the chain head, but it
+    // MUST cover historical territory (block 1) not just the tip.
+    expect(filters[0].toBlock).toBeLessThanOrEqual(10_000);
+    expect(filters[0].toBlock).toBeGreaterThanOrEqual(1);
+  });
+
+  // Sanity inverse: with NO allocator watcher and no pending publishes,
+  // the head-seed optimisation still kicks in. We're not regressing
+  // the existing behaviour for the "watch context graphs only" path.
+  it('still seeds near head when onKnowledgeAssetCreated is NOT wired', async () => {
+    const { adapter, filters } = makeChain(10_000, []);
+    const handler = new PublishHandler(new OxigraphStore(), new TypedEventBus());
+
+    const poller = new ChainEventPoller({
+      chain: adapter,
+      publishHandler: handler,
+      intervalMs: 60_000,
+      onContextGraphCreated: async () => { /* sink */ },
+    });
+
+    await poller.start();
+    await new Promise((r) => setTimeout(r, 50));
+    await poller.stop();
+
+    expect(filters.length).toBeGreaterThanOrEqual(1);
+    // head-seed: lastBlock = head - 500 = 9500, so fromBlock = 9501.
+    expect(filters[0].fromBlock).toBe(9_501);
+  });
 });

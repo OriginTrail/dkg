@@ -254,13 +254,37 @@ export class ChainEventPoller {
     }
 
     // On first successful head fetch, seed cursor near the tip — but only
-    // when there are no pending publishes whose confirmations we might skip.
-    // Full-history context graph discovery is handled by discoverContextGraphsFromChain().
+    // when no subscriber depends on full chain history. The head-seed is
+    // a latency optimisation for the "watch for our own pending tx
+    // confirmation" use case: confirmations land at the tip, so scanning
+    // from `head - 500` is sufficient and avoids re-walking the chain on
+    // every cold start.
+    //
+    // Full-history context graph discovery is handled separately by
+    // `discoverContextGraphsFromChain()`.
+    //
+    // The OT-RFC-43 Option-1 allocator-reconciliation watcher
+    // (`onKnowledgeAssetCreated`) MUST observe every historical
+    // `KCCreated` event (codex PR #976 F9) — otherwise a fresh daemon
+    // would miss every author whose last mint was >500 blocks ago, the
+    // per-author floor would stay at 0, and a downstream
+    // `markReconciled()` would be unsound (the allocator would happily
+    // re-issue a number already minted on-chain). Treat this watcher
+    // exactly like `hasPending`: when wired AND there is no persisted
+    // cursor, refuse to seed near head and scan from block 0.
+    //
+    // Once a `cursorPersistence` round-trip lands (so `lastBlock > 0` on
+    // restart) the watcher resumes incrementally from that cursor like
+    // every other subscription — there is no extra cost beyond the
+    // first cold start.
     if (head != null && !this.headKnown) {
       this.headKnown = true;
-      if (this.lastBlock === 0 && !hasPending) {
+      const requiresFullHistory = hasPending || watchKACreated;
+      if (this.lastBlock === 0 && !requiresFullHistory) {
         this.lastBlock = Math.max(0, head - 500);
         this.log.info(ctx, `Seeded poller cursor near chain head: ${head} → scanning from ${this.lastBlock}`);
+      } else if (this.lastBlock === 0 && watchKACreated) {
+        this.log.info(ctx, `Allocator-reconciliation watcher wired and no persisted cursor → scanning from block 0 (codex PR #976 F9 backfill)`);
       }
     }
 
