@@ -3,7 +3,7 @@ import { NoChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   TypedEventBus,
   generateEd25519Keypair,
-  assertionLifecycleUri,
+  buildAssertionSealQuads,
   contextGraphMetaUri,
   contextGraphAssertionUri,
 } from '@origintrail-official/dkg-core';
@@ -41,11 +41,27 @@ function q(subject: string, predicate: string, object: string, graph: string): Q
   return { subject, predicate, object, graph };
 }
 
-/** Seal: record the file's member entities on the lifecycle URN in _meta. */
+/**
+ * Seal: build a REAL assertion seal under the assertion-graph URI
+ * (`contextGraphAssertionUri`) in `_meta`, exactly as `finalize` does — this is
+ * where `assertionPullFrom` reads it via `parseAssertionSealQuads`
+ * (PR #972/335e8d8). The previous helper wrote a bare `assertionRootEntity` on
+ * the lifecycle URN, which only matched the old (buggy) read.
+ */
 function sealEntities(entities: string[]): Quad[] {
-  const lifecycle = assertionLifecycleUri(CG, AGENT, NAME);
-  const meta = contextGraphMetaUri(CG);
-  return entities.map((e) => q(lifecycle, `${DKG}assertionRootEntity`, `<${e}>`, meta));
+  return buildAssertionSealQuads({
+    assertionUri: contextGraphAssertionUri(CG, AGENT, NAME),
+    metaGraph: contextGraphMetaUri(CG),
+    merkleRoot: new Uint8Array(32).fill(7),
+    authorAddress: AGENT,
+    authorAttestationR: new Uint8Array(32).fill(1),
+    authorAttestationVS: new Uint8Array(32).fill(2),
+    authorSchemeVersion: 1,
+    chainId: 31337n,
+    kav10Address: AGENT,
+    finalizedAtIso: '2026-01-01T00:00:00.000Z',
+    rootEntities: entities,
+  }) as Quad[];
 }
 
 async function wmQuads(store: OxigraphStore): Promise<Quad[]> {
@@ -108,6 +124,23 @@ describe('assertionPullFrom (OT-RFC-43 §10.5.3 wm/pull-from)', () => {
     const subjects = new Set(draft.map((d) => d.subject));
     expect(subjects.has(ENTITY_2)).toBe(true);   // the SWM content
     expect(subjects.has(ENTITY_1)).toBe(false);  // the stale local edit is gone
+  });
+
+  it('validates the source BEFORE dropping — an empty-source replace pull preserves the dirty draft (PR #972/335e8d8)', async () => {
+    const { publisher, store } = await makePublisher();
+    // Finalized file whose sealed entity has NO quads in SWM (e.g. never shared
+    // there), plus a dirty WM draft holding a precious local edit.
+    await store.insert([...sealEntities([ENTITY_1])]); // note: no ENTITY_1 quads in SWM_GRAPH
+    await publisher.assertionWrite(CG, NAME, AGENT, [{ subject: ENTITY_1, predicate: SCHEMA, object: '"precious local edit"' }]);
+
+    const err = await publisher.assertionPullFrom(CG, NAME, AGENT, 'swm', { onConflict: 'replace' }).catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as any).code).toBe('PULL_FROM_EMPTY_SOURCE');
+
+    // The draft must be UNTOUCHED — the empty pull validated the source before
+    // any drop, so the precious local edit survives.
+    const draft = await wmQuads(store);
+    expect(draft.some((d) => d.subject === ENTITY_1 && d.object === '"precious local edit"')).toBe(true);
   });
 
   it('throws when the file has no sealed entity list (never finalized)', async () => {

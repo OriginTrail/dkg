@@ -2,7 +2,7 @@ import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@origintrail-official/dkg-chain';
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
-import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphAssertionUri, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, DKG_GOSSIP_MAX_MESSAGE_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT } from '@origintrail-official/dkg-core';
+import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphAssertionUri, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, DKG_GOSSIP_MAX_MESSAGE_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, type Publisher, type PublishOptions, type PublishResult, type KAManifestEntry, type PhaseCallback, type V10CoreNodeACK } from './publisher.js';
 import { skolemizeByEntity } from './auto-partition.js';
@@ -4183,43 +4183,53 @@ export class DKGPublisher implements Publisher {
     sourceLayer: 'swm' | 'vm',
     opts?: { subGraphName?: string; onConflict?: 'reject' | 'replace' },
   ): Promise<{ seeded: number; fromLayer: 'swm' | 'vm'; entities: number }> {
-    DKGPublisher.validateOptionalSubGraph(opts?.subGraphName);
     const subGraphName = opts?.subGraphName;
+    // PR #972/a6740ac: ensure the (sub)graph is registered so a sub-scoped VM
+    // pull can resolve its data graph below (was a pure name-format validation).
+    await this.ensureSubGraphRegistered(contextGraphId, subGraphName);
     const wmGraph = contextGraphAssertionUri(contextGraphId, agentAddress, name, subGraphName);
     const metaGraph = contextGraphMetaUri(contextGraphId);
-    const lifecycleSubject = assertionLifecycleUri(contextGraphId, agentAddress, name, subGraphName);
     const sourceGraph = sourceLayer === 'swm'
       ? this.graphManager.sharedMemoryUri(contextGraphId, subGraphName)
-      : this.graphManager.dataGraphUri(contextGraphId);
+      // PR #972/a6740ac: a sub-scoped VM pull reads the SUBGRAPH's data graph,
+      // not the root data graph (mirrors the SWM branch's subGraphName handling).
+      : subGraphName
+        ? this.graphManager.subGraphUri(contextGraphId, subGraphName)
+        : this.graphManager.dataGraphUri(contextGraphId);
 
     // onConflict: refuse to clobber a dirty WM draft unless told to replace it.
+    // NB: the actual DROP happens only AFTER the source is validated non-empty
+    // (below) — PR #972/335e8d8: dropping first could destroy an open draft when
+    // the pull turns out to have no source quads.
     const draftProbe = await this.store.query(`ASK { GRAPH <${wmGraph}> { ?s ?p ?o } }`);
     const hasDraft = draftProbe.type === 'boolean' && draftProbe.value === true;
-    if (hasDraft) {
-      const onConflict = opts?.onConflict ?? 'reject';
-      if (onConflict === 'reject') {
-        throw Object.assign(
-          new Error(`A WM draft already exists for "${name}" in context graph "${contextGraphId}"; pass onConflict:"replace" to overwrite it.`),
-          { code: 'WM_DRAFT_CONFLICT' },
-        );
-      }
-      await this.store.dropGraph(wmGraph); // 'replace' — git force-checkout
+    if (hasDraft && (opts?.onConflict ?? 'reject') === 'reject') {
+      throw Object.assign(
+        new Error(`A WM draft already exists for "${name}" in context graph "${contextGraphId}"; pass onConflict:"replace" to overwrite it.`),
+        { code: 'WM_DRAFT_CONFLICT' },
+      );
     }
 
-    // Resolve the file's member entities from the seal (dual-read the predicate
-    // rename: dkg:assertionRootEntity OR dkg:assertionEntity, OT-RFC-43 §10.1).
-    const entityRes = await this.store.query(
-      `SELECT DISTINCT ?e WHERE { GRAPH <${metaGraph}> {
-         <${lifecycleSubject}> (<http://dkg.io/ontology/assertionRootEntity>|<http://dkg.io/ontology/assertionEntity>) ?e .
-       } }`,
+    // Resolve the file's member entities from the SEAL. PR #972/335e8d8: the
+    // seal is stamped at finalize under the assertion-graph URI
+    // (`contextGraphAssertionUri`, i.e. wmGraph) in the meta graph — NOT under
+    // the lifecycle URN. The prior code read `assertionLifecycleUri`, a
+    // different subject, so the lookup found nothing and pull-from failed for
+    // EVERY finalized assertion.
+    const sealRes = await this.store.query(
+      `CONSTRUCT { <${wmGraph}> ?p ?o } WHERE { GRAPH <${metaGraph}> { <${wmGraph}> ?p ?o } }`,
     );
-    const entities = entityRes.type === 'bindings'
-      ? [...new Set(entityRes.bindings.map((b) => b['e']).filter(Boolean) as string[])]
-      : [];
-    if (entities.length === 0) {
+    const seal = parseAssertionSealQuads(sealRes.type === 'quads' ? sealRes.quads : [], wmGraph);
+    if (!seal) {
       throw new Error(
         `No sealed entity list for "${name}" in context graph "${contextGraphId}" — pull-from `
         + `requires a finalized assertion (its seal records the member entities).`,
+      );
+    }
+    const entities = seal.rootEntities;
+    if (entities.length === 0) {
+      throw new Error(
+        `Sealed assertion "${name}" in context graph "${contextGraphId}" records no member entities; nothing to pull.`,
       );
     }
 
@@ -4238,11 +4248,27 @@ export class DKGPublisher implements Publisher {
       ? gather.quads.filter((q) => !isTrustLevelQuad(q) && q.predicate !== WORKSPACE_OWNER_PREDICATE)
       : [];
 
-    // Open a fresh WM draft (clears stale lifecycle/seal) and seed it.
-    await this.assertionCreate(contextGraphId, name, agentAddress, subGraphName);
-    if (gathered.length > 0) {
-      await this.assertionWrite(contextGraphId, name, agentAddress, gathered, subGraphName);
+    // Validate the source has content BEFORE touching the draft (PR #972/335e8d8:
+    // a drop-before-validate could destroy an open WM draft when the source
+    // turned out empty — e.g. pulling from a layer the file was never shared to).
+    if (gathered.length === 0) {
+      throw Object.assign(
+        new Error(
+          `No ${sourceLayer.toUpperCase()} quads found for "${name}" in context graph "${contextGraphId}" `
+          + `using the assertion seal's ${entities.length} root entit${entities.length === 1 ? 'y' : 'ies'}; `
+          + `WM draft was not modified.`,
+        ),
+        { code: 'PULL_FROM_EMPTY_SOURCE' },
+      );
     }
+
+    // Source validated — now (re)open a fresh WM draft (clears stale
+    // lifecycle/seal) and seed it.
+    if (hasDraft) {
+      await this.store.dropGraph(wmGraph); // 'replace' — git force-checkout, after source validation
+    }
+    await this.assertionCreate(contextGraphId, name, agentAddress, subGraphName);
+    await this.assertionWrite(contextGraphId, name, agentAddress, gathered, subGraphName);
     return { seeded: gathered.length, fromLayer: sourceLayer, entities: entities.length };
   }
 
