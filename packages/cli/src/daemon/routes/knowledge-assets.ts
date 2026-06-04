@@ -481,6 +481,14 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         const onConflict = parsed.onConflict === "replace" ? "replace" : "reject";
         try {
           const result = await agent.assertion.pullFrom(resolvedContextGraphId, name, sourceLayer, { subGraphName, onConflict });
+          emitMemoryGraphChanged?.({
+            contextGraphId: resolvedContextGraphId,
+            layers: ["wm"],
+            subGraphName,
+            operation: "assertion_pull_from",
+            source: "api",
+            counts: { triples: result.seeded, roots: result.entities },
+          });
           return jsonResponse(res, 200, { wmDraft: "open", seededFrom: { layer: sourceLayer }, ...result });
         } catch (e: any) {
           if (e?.code === "WM_DRAFT_CONFLICT") {
@@ -488,6 +496,12 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           }
           if (e?.code === "PULL_FROM_EMPTY_SOURCE") {
             return jsonResponse(res, 409, { code: "PULL_FROM_EMPTY_SOURCE", error: e.message });
+          }
+          if (e?.code === "PULL_FROM_UNFINALIZED_ASSERTION") {
+            return jsonResponse(res, 409, { code: "PULL_FROM_UNFINALIZED_ASSERTION", error: e.message });
+          }
+          if (e?.code === "PULL_FROM_INVALID_SEAL") {
+            return jsonResponse(res, 409, { code: "PULL_FROM_INVALID_SEAL", error: e.message });
           }
           throw e; // -> outer catch -> 500
         }

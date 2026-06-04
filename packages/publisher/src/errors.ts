@@ -116,3 +116,16 @@ export class MultiRootPublishNotAtomicError extends Error {
     this.rootEntities = [...rootEntities];
   }
 }
+
+export type PullFromPreconditionCode =
+  | 'PULL_FROM_UNFINALIZED_ASSERTION'
+  | 'PULL_FROM_INVALID_SEAL';
+
+export class PullFromPreconditionError extends Error {
+  readonly code: PullFromPreconditionCode;
+  constructor(code: PullFromPreconditionCode, message: string) {
+    super(message);
+    this.name = 'PullFromPreconditionError';
+    this.code = code;
+  }
+}

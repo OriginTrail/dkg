@@ -5,6 +5,7 @@ import {
   generateEd25519Keypair,
   contextGraphMetaUri,
   contextGraphAssertionUri,
+  assertionLifecycleUri,
   buildAssertionSealQuads,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
@@ -68,6 +69,18 @@ async function wmQuads(store: OxigraphStore): Promise<Quad[]> {
   return r.type === 'quads' ? r.quads : [];
 }
 
+async function lifecycleEventUris(store: OxigraphStore): Promise<string[]> {
+  const lifecycle = assertionLifecycleUri(CG, AGENT, NAME);
+  const meta = contextGraphMetaUri(CG);
+  const r = await store.query(
+    `SELECT DISTINCT ?event WHERE { GRAPH <${meta}> {
+       ?event ?p ?o .
+       FILTER(STRSTARTS(STR(?event), "${lifecycle}/event/"))
+     } }`,
+  );
+  return r.type === 'bindings' ? r.bindings.map((row) => row['event']).filter(Boolean) : [];
+}
+
 describe('assertionPullFrom (OT-RFC-43 §10.5.3 wm/pull-from)', () => {
   it('seeds a WM draft from SWM, scoped to the file\'s sealed entities (+ skolem children)', async () => {
     const { publisher, store } = await makePublisher();
@@ -124,6 +137,56 @@ describe('assertionPullFrom (OT-RFC-43 §10.5.3 wm/pull-from)', () => {
     expect(subjects.has(ENTITY_1)).toBe(false);  // the stale local edit is gone
   });
 
+  it('reopens a draft without erasing lifecycle history or stale assertion metadata', async () => {
+    const { publisher, store } = await makePublisher();
+    const assertionUri = contextGraphAssertionUri(CG, AGENT, NAME);
+    const lifecycleUri = assertionLifecycleUri(CG, AGENT, NAME);
+    const meta = contextGraphMetaUri(CG);
+
+    await publisher.assertionCreate(CG, NAME, AGENT);
+    await publisher.assertionWrite(CG, NAME, AGENT, [{ subject: ENTITY_1, predicate: SCHEMA, object: '"Alice"' }]);
+    await publisher.assertionPromote(CG, NAME, AGENT);
+    await store.insert([
+      ...sealEntities([ENTITY_1]),
+      q(assertionUri, `${DKG}sourceFileHash`, '"old-source-hash"', meta),
+    ]);
+
+    const beforeEvents = await lifecycleEventUris(store);
+    expect(beforeEvents.length).toBeGreaterThanOrEqual(2);
+
+    await publisher.assertionPullFrom(CG, NAME, AGENT, 'swm');
+
+    const afterEvents = await lifecycleEventUris(store);
+    for (const eventUri of beforeEvents) {
+      expect(afterEvents).toContain(eventUri);
+    }
+
+    const staleAssertionMeta = await store.query(
+      `ASK { GRAPH <${meta}> {
+         <${assertionUri}> <${DKG}sourceFileHash>|<${DKG}assertionMerkleRoot> ?o
+       } }`,
+    );
+    expect(staleAssertionMeta.type).toBe('boolean');
+    if (staleAssertionMeta.type === 'boolean') {
+      expect(staleAssertionMeta.value).toBe(false);
+    }
+
+    const currentLifecycleState = await store.query(
+      `SELECT ?state ?layer WHERE { GRAPH <${meta}> {
+         <${lifecycleUri}> <${DKG}state> ?state ;
+           <${DKG}memoryLayer> ?layer .
+       } } LIMIT 1`,
+    );
+    expect(currentLifecycleState.type).toBe('bindings');
+    if (currentLifecycleState.type === 'bindings') {
+      expect(currentLifecycleState.bindings[0]['state']).toBe('"created"');
+      expect(currentLifecycleState.bindings[0]['layer']).toBe('"WM"');
+    }
+
+    const draft = await wmQuads(store);
+    expect(draft.some((quad) => quad.subject === ENTITY_1 && quad.object === '"Alice"')).toBe(true);
+  });
+
   it('onConflict:"replace" does not clobber a dirty draft when the source layer is empty', async () => {
     const { publisher, store } = await makePublisher();
     await store.insert(sealEntities([ENTITY_1]));
@@ -152,6 +215,7 @@ describe('assertionPullFrom (OT-RFC-43 §10.5.3 wm/pull-from)', () => {
 
     const err = await publisher.assertionPullFrom(CG, NAME, AGENT, 'swm').catch((e) => e);
     expect(err).toBeInstanceOf(Error);
+    expect((err as any).code).toBe('PULL_FROM_INVALID_SEAL');
     expect((err as Error).message).toMatch(/invalid assertionRootEntity IRI/i);
     expect(await wmQuads(store)).toHaveLength(0);
   });
@@ -161,6 +225,7 @@ describe('assertionPullFrom (OT-RFC-43 §10.5.3 wm/pull-from)', () => {
     await store.insert([q(ENTITY_1, SCHEMA, '"Alice"', SWM_GRAPH)]); // no seal entities
     const err = await publisher.assertionPullFrom(CG, NAME, AGENT, 'swm').catch((e) => e);
     expect(err).toBeInstanceOf(Error);
+    expect((err as any).code).toBe('PULL_FROM_UNFINALIZED_ASSERTION');
     expect((err as Error).message).toMatch(/no sealed entity list/i);
   });
 });

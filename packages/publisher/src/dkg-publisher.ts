@@ -46,6 +46,7 @@ import {
   ReservedNamespaceError,
   AssertionNotPersistedError,
   MultiRootPublishNotAtomicError,
+  PullFromPreconditionError,
   type CASCondition,
 } from './errors.js';
 
@@ -59,6 +60,7 @@ export {
   ReservedNamespaceError,
   AssertionNotPersistedError,
   MultiRootPublishNotAtomicError,
+  PullFromPreconditionError,
   type CASCondition,
 };
 
@@ -3953,6 +3955,48 @@ export class DKGPublisher implements Publisher {
     return graphUri;
   }
 
+  private async reopenAssertionDraftForPullFrom(
+    contextGraphId: string,
+    name: string,
+    agentAddress: string,
+    subGraphName: string | undefined,
+    hasDraft: boolean,
+  ): Promise<void> {
+    await this.ensureSubGraphRegistered(contextGraphId, subGraphName);
+    const graphUri = contextGraphAssertionUri(contextGraphId, agentAddress, name, subGraphName);
+    const lifecycleSubject = assertionLifecycleUri(contextGraphId, agentAddress, name, subGraphName);
+    const metaGraph = contextGraphMetaUri(contextGraphId);
+    const DKG = 'http://dkg.io/ontology/';
+
+    if (hasDraft) {
+      await this.store.dropGraph(graphUri);
+    }
+    await this.store.createGraph(graphUri);
+
+    // Pull-from reopens the editable WM draft, but it is not a fresh file
+    // creation. Preserve the lifecycle event history and only reset mutable
+    // state plus assertion-URI metadata whose seal/hash rows describe the
+    // previous finalized draft.
+    await this.store.deleteByPattern({ subject: graphUri, graph: metaGraph });
+    await this.store.deleteByPattern({ graph: metaGraph, subject: lifecycleSubject, predicate: `${DKG}state` });
+    await this.store.deleteByPattern({ graph: metaGraph, subject: lifecycleSubject, predicate: `${DKG}memoryLayer` });
+
+    await this.store.insert(generateAssertionCreatedMetadata({
+      contextGraphId,
+      agentAddress,
+      assertionName: name,
+      subGraphName,
+      timestamp: new Date(),
+    }));
+
+    await this.store.insert([{
+      subject: graphUri,
+      predicate: `${DKG}memoryLayer`,
+      object: '"WM"',
+      graph: metaGraph,
+    }]);
+  }
+
   async assertionWrite(
     contextGraphId: string,
     name: string,
@@ -4030,9 +4074,19 @@ export class DKGPublisher implements Publisher {
     const sealRes = await this.store.query(
       `CONSTRUCT { <${wmGraph}> ?p ?o } WHERE { GRAPH <${metaGraph}> { <${wmGraph}> ?p ?o } }`,
     );
-    const seal = parseAssertionSealQuads(sealRes.type === 'quads' ? sealRes.quads : [], wmGraph);
+    let seal: ReturnType<typeof parseAssertionSealQuads>;
+    try {
+      seal = parseAssertionSealQuads(sealRes.type === 'quads' ? sealRes.quads : [], wmGraph);
+    } catch (e) {
+      const reason = e instanceof Error ? e.message : String(e);
+      throw new PullFromPreconditionError(
+        'PULL_FROM_INVALID_SEAL',
+        `Invalid assertion seal for "${name}" in context graph "${contextGraphId}": ${reason}`,
+      );
+    }
     if (!seal) {
-      throw new Error(
+      throw new PullFromPreconditionError(
+        'PULL_FROM_UNFINALIZED_ASSERTION',
         `No sealed entity list for "${name}" in context graph "${contextGraphId}" — pull-from `
         + `requires a finalized assertion (its seal records the member entities).`,
       );
@@ -4064,11 +4118,9 @@ export class DKGPublisher implements Publisher {
       );
     }
 
-    // Open a fresh WM draft (clears stale lifecycle/seal) and seed it.
-    if (hasDraft) {
-      await this.store.dropGraph(wmGraph); // 'replace' — git force-checkout after source validation
-    }
-    await this.assertionCreate(contextGraphId, name, agentAddress, subGraphName);
+    // Open a fresh WM draft after source validation, preserving lifecycle
+    // history while clearing stale assertion-URI seal/hash metadata.
+    await this.reopenAssertionDraftForPullFrom(contextGraphId, name, agentAddress, subGraphName, hasDraft);
     await this.assertionWrite(contextGraphId, name, agentAddress, gathered, subGraphName);
     return { seeded: gathered.length, fromLayer: sourceLayer, entities: entities.length };
   }

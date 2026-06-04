@@ -365,11 +365,26 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
 
   it('POST .../:name/wm/pull-from seeds a draft from the given layer', async () => {
     const agent = makeAssertionAgent();
-    const ctx = ctxFor('POST', '/api/knowledge-assets/f/wm/pull-from', { contextGraphId: 'cg', layer: 'vm' }, agent);
+    const emitMemoryGraphChanged = vi.fn();
+    const ctx = ctxFor(
+      'POST',
+      '/api/knowledge-assets/f/wm/pull-from',
+      { contextGraphId: 'cg', layer: 'vm' },
+      agent,
+      { emitMemoryGraphChanged },
+    );
     await handleKnowledgeAssetsRoutes(ctx);
     expect(status(ctx)).toBe(200);
     expect(body(ctx)).toMatchObject({ wmDraft: 'open', seededFrom: { layer: 'vm' }, seeded: 5 });
     expect(agent.assertion.pullFrom).toHaveBeenCalledWith('cg', 'f', 'vm', { subGraphName: undefined, onConflict: 'reject' });
+    expect(emitMemoryGraphChanged).toHaveBeenCalledWith({
+      contextGraphId: 'cg',
+      layers: ['wm'],
+      subGraphName: undefined,
+      operation: 'assertion_pull_from',
+      source: 'api',
+      counts: { triples: 5, roots: 2 },
+    });
   });
 
   it('POST .../:name/wm/pull-from resolves DID-form context graph ids before dispatch', async () => {
@@ -421,6 +436,34 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
     await handleKnowledgeAssetsRoutes(ctx);
     expect(status(ctx)).toBe(409);
     expect(body(ctx)).toMatchObject({ code: 'PULL_FROM_EMPTY_SOURCE' });
+  });
+
+  it('POST .../:name/wm/pull-from maps an unfinalized assertion to 409', async () => {
+    const agent = makeAssertionAgent({
+      assertion: {
+        pullFrom: vi.fn(async () => {
+          throw Object.assign(new Error('not finalized yet'), { code: 'PULL_FROM_UNFINALIZED_ASSERTION' });
+        }),
+      },
+    });
+    const ctx = ctxFor('POST', '/api/knowledge-assets/f/wm/pull-from', { contextGraphId: 'cg', layer: 'swm' }, agent);
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(409);
+    expect(body(ctx)).toMatchObject({ code: 'PULL_FROM_UNFINALIZED_ASSERTION' });
+  });
+
+  it('POST .../:name/wm/pull-from maps a broken assertion seal to 409', async () => {
+    const agent = makeAssertionAgent({
+      assertion: {
+        pullFrom: vi.fn(async () => {
+          throw Object.assign(new Error('invalid seal'), { code: 'PULL_FROM_INVALID_SEAL' });
+        }),
+      },
+    });
+    const ctx = ctxFor('POST', '/api/knowledge-assets/f/wm/pull-from', { contextGraphId: 'cg', layer: 'swm' }, agent);
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(409);
+    expect(body(ctx)).toMatchObject({ code: 'PULL_FROM_INVALID_SEAL' });
   });
 
   it('ignores non-/api/knowledge-assets paths', async () => {
