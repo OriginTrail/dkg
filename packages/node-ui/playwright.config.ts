@@ -21,11 +21,15 @@ const DEVNET_NODE = process.env.DEVNET_NODE || process.env.UI_NODE_ID || '1';
 //   - node1 is the relay HUB and every other node dials it (scripts/devnet.sh
 //     sets node{2..N}.relay = node1's multiaddr), so node1 — the node the UI
 //     reads `connectedPeers` from — reports exactly N-1 connected peers.
-// We boot THREE nodes so node1 shows 2 peers (a real multi-peer topology, not
-// the degenerate 1-peer case), and the VM-publish quorum has 3 core members
-// instead of the bare 2-node minimum. `peer-connectivity.spec.ts` asserts the
-// resulting ">1 peer" invariant. Override with PLAYWRIGHT_DEVNET_NUM_NODES.
-const NUM_NODES = process.env.PLAYWRIGHT_DEVNET_NUM_NODES || '3';
+// scripts/devnet.sh pins `minimumRequiredSignatures = 3` (the real mainnet
+// 3-of-N StorageACK quorum — DO NOT lower it). A publisher collects ACKs from
+// its PEERS only (it does not self-sign quorum), so a VM publish needs minSig
+// OTHER reachable core nodes — i.e. >= minSig + 1 = 4 nodes total. With only 3
+// the publish aborts `QuorumUnmetError: need 3 ACKs but only 2 core peers
+// connected`. We therefore boot FOUR nodes: node1 sees 3 peers (still a real
+// multi-peer topology, satisfies `peer-connectivity.spec.ts` ">1 peer"), and a
+// VM publish can collect its 3 ACKs. Override with PLAYWRIGHT_DEVNET_NUM_NODES.
+const NUM_NODES = process.env.PLAYWRIGHT_DEVNET_NUM_NODES || '4';
 
 export default defineConfig({
   testDir: './e2e/specs',

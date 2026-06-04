@@ -532,16 +532,19 @@ jobs:
         run: pnpm --filter @origintrail-official/dkg-node-ui test
 
   # node-ui Playwright e2e — REAL NODE, NO MOCKS. The suite boots a live
-  # 2-node devnet (Hardhat + two DKG daemons) via Playwright's `webServer`
+  # 4-node devnet (Hardhat + four DKG daemons) via Playwright's `webServer`
   # (see `e2e/bootstrap-devnet.ts`, chained `bootstrap && pnpm dev:ui`),
   # drives the real UI against node 1's live `/api`, and tears the devnet
   # down in `e2e/global-teardown.ts` when the run finishes. There is no
   # route-mock lane anymore: every test exercises real daemon round-trips.
   #
-  # Why 2 nodes: VM publishing needs ACK quorum from a connected CORE peer.
-  # A single-node devnet fails every publish with `QuorumUnmetError`, so the
-  # WM→SWM→VM pipeline (and the data-driven UI views that depend on it) can't
-  # be exercised. Two core nodes is the minimum (see playwright.config.ts).
+  # Why 4 nodes: VM publishing needs StorageACK quorum, and scripts/devnet.sh
+  # pins `minimumRequiredSignatures = 3` (the real mainnet 3-of-N quorum — DO
+  # NOT lower it). A publisher collects ACKs from its PEERS only, so it needs
+  # minSig OTHER reachable core nodes = 4 total. With fewer, every publish aborts
+  # `QuorumUnmetError: need 3 ACKs but only N core peers connected`, so the
+  # WM→SWM→VM pipeline (and the data-driven UI views that depend on it) can't be
+  # exercised. Four core nodes is the minimum (see playwright.config.ts).
   #
   # Channel is pinned to bundled chromium in playwright.config.ts under CI
   # (see `ciChromium`) since we only `playwright install chromium`.
