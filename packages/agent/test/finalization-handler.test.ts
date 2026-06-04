@@ -327,6 +327,47 @@ describe('FinalizationHandler', () => {
     expect(result.bindings[0]?.['count']).toBe('"2"^^<http://www.w3.org/2001/XMLSchema#integer>');
   });
 
+  it('falls back to per-row token ids when update finalization omits the KA range', async () => {
+    const roots = ['urn:test:update-a', 'urn:test:update-b'];
+    const ual = 'did:dkg:evm:31337/0xABC/update';
+    const metaGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
+
+    await (handler as any).promoteSharedMemoryToCanonical(
+      CONTEXT_GRAPH,
+      [
+        { subject: roots[0], predicate: 'http://schema.org/name', object: '"Alice"', graph: '' },
+        { subject: roots[1], predicate: 'http://schema.org/name', object: '"Bob"', graph: '' },
+      ],
+      ual,
+      roots,
+      '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266',
+      '0x' + 'ef'.repeat(32),
+      102,
+      0n,
+      0n,
+      100n,
+      createOperationContext('system'),
+    );
+
+    const result = await store.query(
+      `SELECT ?ka ?tokenId ?count WHERE {
+        GRAPH <${metaGraph}> {
+          ?ka <http://dkg.io/ontology/partOf> <${ual}> ;
+              <http://dkg.io/ontology/tokenId> ?tokenId .
+          <${ual}> <http://dkg.io/ontology/kaCount> ?count .
+        }
+      } ORDER BY ?ka`,
+    );
+
+    expect(result.type).toBe('bindings');
+    if (result.type !== 'bindings') return;
+    expect(result.bindings.map((row) => row['tokenId'])).toEqual([
+      '"1"^^<http://www.w3.org/2001/XMLSchema#integer>',
+      '"2"^^<http://www.w3.org/2001/XMLSchema#integer>',
+    ]);
+    expect(result.bindings[0]?.['count']).toBe('"2"^^<http://www.w3.org/2001/XMLSchema#integer>');
+  });
+
   it('legacy publisher (no tag-15 on the wire) → no root dual-write, even when targetContextGraphId === local on-chain id (Codex r5b explicit-remap-to-self regression)', async () => {
     // Codex r5b — pin the policy that the receiver-side rolling-upgrade
     // fallback is gone. Earlier rounds tried to infer "same-graph

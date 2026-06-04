@@ -1021,7 +1021,9 @@ export class FinalizationHandler {
       const entityQuads = partitioned.get(rootEntity) ?? [];
       if (entityQuads.length === 0) continue;
       const metadataTokenId = BigInt(tokenIdx + 1);
-      const tokenId = startKAId === endKAId ? startKAId : startKAId + BigInt(tokenIdx);
+      const tokenId = startKAId > 0n && endKAId > 0n && endKAId >= startKAId
+        ? (startKAId === endKAId ? startKAId : startKAId + BigInt(tokenIdx))
+        : metadataTokenId;
       kaMetadata.push({
         rootEntity,
         kcUal: ual,
