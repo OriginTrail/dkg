@@ -189,4 +189,46 @@ describe('PanelRight chat history rehydration on mount (issue #255)', () => {
     root.unmount();
     container.remove();
   });
+
+  it('renders rehydrated failed Hermes turns as recoverable error messages', async () => {
+    fetchLocalAgentIntegrationsMock.mockResolvedValue({ integrations: [readyHermesIntegration()] });
+    fetchLocalAgentHistoryMock.mockImplementation((integrationId: string) => {
+      if (integrationId !== 'hermes') return Promise.resolve([]);
+      return Promise.resolve([
+        {
+          uri: 'urn:m:failed-user',
+          text: 'please run the slow task',
+          author: 'user',
+          ts: '2026-04-23T01:00:00Z',
+          turnId: 'turn-timeout',
+        },
+        {
+          uri: 'urn:m:failed-agent',
+          text: '',
+          author: 'agent',
+          ts: '2026-04-23T01:00:01Z',
+          turnId: 'turn-timeout',
+          persistStatus: 'failed',
+          failureReason: 'Hermes took too long to respond.',
+        },
+      ]);
+    });
+
+    const { PanelRight } = await import('../src/ui/components/Shell/PanelRight.js');
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(React.createElement(PanelRight));
+    });
+    await flushAll();
+
+    expect(container.textContent).toContain('please run the slow task');
+    expect(container.textContent).toContain('Error: Hermes took too long to respond.');
+
+    root.unmount();
+    container.remove();
+  });
 });

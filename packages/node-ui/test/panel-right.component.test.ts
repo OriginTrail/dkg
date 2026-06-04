@@ -20,6 +20,7 @@ const fetchLocalAgentIntegrationsMock = vi.fn();
 const fetchLocalAgentHistoryMock = vi.fn();
 const fetchCurrentAgentMock = vi.fn();
 const importFileMock = vi.fn();
+const persistLocalAgentChatFailureMock = vi.fn();
 const streamLocalAgentChatMock = vi.fn();
 const connectLocalAgentIntegrationMock = vi.fn();
 const disconnectLocalAgentIntegrationMock = vi.fn();
@@ -35,6 +36,7 @@ vi.mock('../src/ui/api.js', async () => {
     fetchLocalAgentHistory: fetchLocalAgentHistoryMock,
     fetchCurrentAgent: fetchCurrentAgentMock,
     importFile: importFileMock,
+    persistLocalAgentChatFailure: persistLocalAgentChatFailureMock,
     streamLocalAgentChat: streamLocalAgentChatMock,
     connectLocalAgentIntegration: connectLocalAgentIntegrationMock,
     disconnectLocalAgentIntegration: disconnectLocalAgentIntegrationMock,
@@ -119,6 +121,7 @@ describe('PanelRight component', () => {
       nodeIdentityId: 'node-self',
     });
     streamLocalAgentChatMock.mockResolvedValue({ text: 'Roger that', correlationId: 'corr-1' });
+    persistLocalAgentChatFailureMock.mockResolvedValue({ ok: true, turnId: 'corr-1' });
     importFileMock.mockResolvedValue({
       assertionUri: 'urn:dkg:assertion:completed',
       fileHash: 'sha256:completed',
@@ -308,6 +311,91 @@ describe('PanelRight component', () => {
       ],
     }));
     expect(container.textContent).toContain('Roger that');
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
+  it('persists failed Hermes turns so timeout sessions survive refresh', async () => {
+    fetchLocalAgentIntegrationsMock.mockResolvedValue({ integrations: [{
+      id: 'hermes',
+      name: 'Hermes',
+      description: 'Hermes bridge',
+      connectSupported: true,
+      chatSupported: true,
+      chatReady: true,
+      chatAttachments: true,
+      persistentChat: true,
+      bridgeOnline: true,
+      bridgeStatusLabel: 'Connected',
+      configured: true,
+      detected: true,
+      status: 'connected',
+      statusLabel: 'Connected',
+      detail: 'ready',
+      defaultSessionId: 'hermes:dkg-ui:profile-dkg-smoke',
+      profile: 'dkg-smoke',
+      target: 'bridge',
+    }] });
+    streamLocalAgentChatMock.mockImplementation(async (_integrationId: string, _text: string, options: any) => {
+      options?.onEvent?.({ type: 'text_delta', delta: 'Partial Hermes output' });
+      throw new Error('Agent response timeout');
+    });
+    persistLocalAgentChatFailureMock.mockResolvedValue({ ok: true, turnId: 'corr-timeout' });
+
+    const { PanelRight } = await import('../src/ui/components/Shell/PanelRight.js');
+    const { useProjectsStore } = await import('../src/ui/stores/projects.js');
+
+    act(() => {
+      useProjectsStore.setState({
+        contextGraphs: [{ id: 'testing', name: 'Testing' }],
+        loading: false,
+        activeProjectId: 'testing',
+      });
+    });
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(React.createElement(PanelRight));
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const textarea = container.querySelector('textarea');
+    expect(textarea).toBeTruthy();
+    await act(async () => {
+      const valueSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+      valueSetter?.call(textarea, 'Run the slow Hermes task');
+      textarea!.dispatchEvent(new Event('input', { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    const sendButton = container.querySelector('button[aria-label="Send message"]') as HTMLButtonElement | null;
+    expect(sendButton).toBeTruthy();
+    await act(async () => {
+      sendButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    await waitForAssertion(() => {
+      expect(persistLocalAgentChatFailureMock).toHaveBeenCalled();
+    });
+    expect(persistLocalAgentChatFailureMock).toHaveBeenCalledWith('hermes', expect.objectContaining({
+      sessionId: 'hermes:dkg-ui:profile-dkg-smoke',
+      turnId: expect.any(String),
+      correlationId: expect.any(String),
+      userMessage: 'Run the slow Hermes task',
+      assistantReply: 'Partial Hermes output',
+      failureReason: 'Hermes took too long to respond.',
+      profile: 'dkg-smoke',
+      contextGraphId: 'testing',
+    }));
+    expect(container.textContent).toContain('Error: Hermes took too long to respond.');
 
     await act(async () => {
       root.unmount();

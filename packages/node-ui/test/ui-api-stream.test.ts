@@ -3,6 +3,7 @@ import { createServer, type Server } from 'node:http';
 import {
   fetchMemorySessionGraphDelta,
   importFile,
+  persistLocalAgentChatFailure,
   sendHermesLocalChat,
   streamHermesLocalChat,
   streamLocalAgentChat,
@@ -455,6 +456,47 @@ describe('ui local-agent stream api', () => {
       expect(payload.contextEntries).toEqual(contextEntries);
       expect(payload.contextGraphId).toBe('project-1');
       expect(payload.text).toBe('hello');
+    } finally {
+      globalThis.fetch = savedFetch;
+    }
+  });
+
+  it('persists failed Hermes local-agent turns through the durable turn endpoint', async () => {
+    const fetchCalls: [string | URL | Request, RequestInit | undefined][] = [];
+    const savedFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      fetchCalls.push([url, init]);
+      return new Response(
+        JSON.stringify({ ok: true, turnId: 'corr-timeout' }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }) as typeof globalThis.fetch;
+
+    try {
+      const result = await persistLocalAgentChatFailure('hermes', {
+        sessionId: 'hermes:dkg-ui:profile-dkg-smoke',
+        turnId: 'corr-timeout',
+        correlationId: 'corr-timeout',
+        userMessage: 'slow question',
+        failureReason: 'Hermes took too long to respond.',
+        profile: 'dkg-smoke',
+        contextGraphId: 'project-1',
+      });
+
+      expect(result.turnId).toBe('corr-timeout');
+      expect(String(fetchCalls[0]?.[0])).toBe('/api/hermes-channel/persist-turn');
+      const payload = JSON.parse(String(fetchCalls[0]?.[1]?.body));
+      expect(payload).toMatchObject({
+        sessionId: 'hermes:dkg-ui:profile-dkg-smoke',
+        userMessage: 'slow question',
+        assistantReply: '',
+        turnId: 'corr-timeout',
+        correlationId: 'corr-timeout',
+        persistenceState: 'failed',
+        failureReason: 'Hermes took too long to respond.',
+        profile: 'dkg-smoke',
+        contextGraphId: 'project-1',
+      });
     } finally {
       globalThis.fetch = savedFetch;
     }

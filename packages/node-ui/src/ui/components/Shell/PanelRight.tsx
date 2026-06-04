@@ -20,6 +20,7 @@ import {
   getDefaultLocalAgentSessionId,
   fetchLocalAgentHistory,
   fetchLocalAgentIntegrations,
+  persistLocalAgentChatFailure,
   refreshLocalAgentIntegration,
   streamLocalAgentChat,
 } from '../../api.js';
@@ -525,6 +526,15 @@ export function buildChatContextEntries(
 
 function mapHistoryMessage(message: LocalAgentHistoryMessage): LocalAgentMessage {
   const author = message.author.toLowerCase();
+  const role: LocalAgentMessage['role'] = author.includes('assistant') || author.includes('agent') ? 'assistant' : 'user';
+  const failedReason = typeof message.failureReason === 'string' && message.failureReason.trim()
+    ? message.failureReason.trim()
+    : undefined;
+  const failed = role === 'assistant' && (message.persistStatus === 'failed' || Boolean(failedReason));
+  const failureContent = `Error: ${failedReason ?? 'The local agent turn failed.'}`;
+  const content = failed
+    ? (message.text ? `${message.text}\n\n${failureContent}` : failureContent)
+    : message.text || buildAttachmentSummary(message.attachmentRefs ?? []);
   // KNOWN ISSUE — persisted messages whose newlines were escape-
   // encoded by the DKG-memory persistence layer (stored as literal
   // backslash-n, two characters, not real newline characters)
@@ -554,8 +564,8 @@ function mapHistoryMessage(message: LocalAgentHistoryMessage): LocalAgentMessage
     id: message.uri || `local-history:${++localMessageId}`,
     uri: message.uri,
     turnId: message.turnId,
-    role: author.includes('assistant') || author.includes('agent') ? 'assistant' : 'user',
-    content: message.text || buildAttachmentSummary(message.attachmentRefs ?? []),
+    role,
+    content,
     ts: formatLocalTimestamp(message.ts),
     tsRaw: toIsoTimestamp(message.ts),
     attachments: message.attachmentRefs,
@@ -563,7 +573,7 @@ function mapHistoryMessage(message: LocalAgentHistoryMessage): LocalAgentMessage
     // string. Mark synthesized so the renderer skips markdown for those —
     // a filename like `[spec](https://attacker.example)` would otherwise
     // render as a live external link in an assistant-styled bubble.
-    synthesized: !hasAgentText,
+    synthesized: failed || !hasAgentText,
   };
 }
 
@@ -2577,6 +2587,10 @@ export function PanelRight() {
     setConnectError(null);
     let controller: AbortController | null = null;
     let assistantId = '';
+    let correlationId = '';
+    let messageText = '';
+    let assistantPartialText = '';
+    let failureAttachmentRefs: LocalAgentChatAttachmentRef[] = [];
     // Hoisted so the `catch` path can restore the optimistically-cleared
     // drafts without a TypeScript scope error and without a runtime
     // ReferenceError when send fails before they're assigned.
@@ -2593,13 +2607,14 @@ export function PanelRight() {
         return;
       }
 
-      const correlationId = crypto.randomUUID();
+      correlationId = crypto.randomUUID();
       const importSummary = buildAttachmentImportSummary(importContext.results);
       const textWithImportSummary = [text, importSummary].filter((part) => part.length > 0).join('\n\n');
-      const messageText = text
+      messageText = text
         ? textWithImportSummary
         : buildAttachmentTurnSummary(attachments, importContext.results);
       const outboundText = text ? textWithImportSummary : '';
+      failureAttachmentRefs = attachments;
       const attachmentIds = attachments
         .map((attachment) => attachment.id)
         .filter((attachmentId): attachmentId is string => typeof attachmentId === 'string' && attachmentId.length > 0);
@@ -2651,6 +2666,7 @@ export function PanelRight() {
         contextGraphId: activeProjectId ?? undefined,
         onEvent: (event: LocalAgentStreamEvent) => {
           if (event.type === 'text_delta') {
+            assistantPartialText += event.delta;
             updateLocalMessages(conversationKey, (prev) =>
               prev.map((message) =>
                 message.id === assistantId ? { ...message, content: message.content + event.delta } : message,
@@ -2687,15 +2703,15 @@ export function PanelRight() {
       loadSessions();
       if (stage === 0) advance();
     } catch (err: any) {
+      const isUserAbort = err?.name === 'AbortError';
+      const failureReason = isUserAbort ? 'Request cancelled.' : formatLocalAgentErrorMessage(integration, err);
       if (assistantId) {
         updateLocalMessages(conversationKey, (prev) =>
           prev.map((message) =>
             message.id === assistantId
               ? {
                   ...message,
-                  content: err?.name === 'AbortError'
-                    ? 'Request cancelled.'
-                    : `Error: ${formatLocalAgentErrorMessage(integration, err)}`,
+                  content: isUserAbort ? failureReason : `Error: ${failureReason}`,
                   streaming: false,
                   // Error / cancel strings are locally synthesized and may
                   // surface details the agent didn't author (URLs in error
@@ -2705,6 +2721,32 @@ export function PanelRight() {
               : message,
           ),
         );
+      }
+      if (!isUserAbort && assistantId && messageText) {
+        void (async () => {
+          try {
+            const persisted = await persistLocalAgentChatFailure(integrationId, {
+              sessionId: conversation.sessionId ?? undefined,
+              turnId: correlationId || undefined,
+              correlationId: correlationId || undefined,
+              userMessage: messageText,
+              assistantReply: assistantPartialText,
+              failureReason,
+              profile: integration.profile,
+              attachments: failureAttachmentRefs,
+              contextGraphId: activeProjectId ?? undefined,
+            });
+            if (persisted.turnId) {
+              updateLocalMessages(conversationKey, (prev) =>
+                adoptLocalAgentTurnId(prev, correlationId, persisted.turnId),
+              );
+            }
+            loadSessions();
+          } catch {
+            // The in-memory error bubble remains useful even if durable failure
+            // persistence is temporarily unavailable.
+          }
+        })();
       }
       // Restore the attachment drafts we optimistically cleared so the user
       // can retry the same files without re-uploading. Merge instead of
