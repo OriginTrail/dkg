@@ -369,7 +369,32 @@ function openClawUpstreamErrorMessage(details: string): string {
   return details;
 }
 
+function parseOpenClawUpstreamDetails(details: string): Record<string, unknown> | null {
+  if (!details.trim()) return null;
+  try {
+    const parsed = JSON.parse(details);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function isOpenClawChannelTimeoutDetails(details: string): boolean {
+  const parsed = parseOpenClawUpstreamDetails(details);
+  return parsed?.source === 'openclaw-channel'
+    && (
+      parsed.code === 'OPENCLAW_BRIDGE_RESPONSE_TIMEOUT'
+      || parsed.code === 'OPENCLAW_GATEWAY_RESPONSE_TIMEOUT'
+    );
+}
+
 function isOpenClawAgentTimeoutDetails(details: string): boolean {
+  const parsed = parseOpenClawUpstreamDetails(details);
+  if (parsed?.source === 'openclaw-agent' && parsed.code === 'AGENT_TIMEOUT') {
+    return true;
+  }
   return /Agent response timeout/i.test(openClawUpstreamErrorMessage(details));
 }
 
@@ -719,13 +744,16 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
             if (isOpenClawAgentTimeoutDetails(details)) {
               return jsonResponse(res, 504, buildOpenClawAgentTimeoutBody(corrId));
             }
-            // An upstream 504 means the selected target classified its own
-            // timeout. Do not replay the turn on another transport.
-            return jsonResponse(res, 504, buildOpenClawChannelTimeoutBody(
-              corrId,
-              target,
-              details || `${target.name} response timeout`,
-            ));
+            if (isOpenClawChannelTimeoutDetails(details)) {
+              // Only our structured timeout payload proves the selected target
+              // classified its own timeout. Anonymous 504s may be
+              // infrastructure failures and remain eligible for fallback below.
+              return jsonResponse(res, 504, buildOpenClawChannelTimeoutBody(
+                corrId,
+                target,
+                details || `${target.name} response timeout`,
+              ));
+            }
           }
           if (shouldTryNextOpenClawTarget(forwardRes.status)) {
             lastFailure = {
@@ -856,13 +884,16 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
             if (isOpenClawAgentTimeoutDetails(details)) {
               return jsonResponse(res, 504, buildOpenClawAgentTimeoutBody(corrId));
             }
-            // An upstream 504 means the selected target classified its own
-            // timeout. Do not replay the turn on another transport.
-            return jsonResponse(res, 504, buildOpenClawChannelTimeoutBody(
-              corrId,
-              target,
-              details || `${target.name} response timeout`,
-            ));
+            if (isOpenClawChannelTimeoutDetails(details)) {
+              // Only our structured timeout payload proves the selected target
+              // classified its own timeout. Anonymous 504s may be
+              // infrastructure failures and remain eligible for fallback below.
+              return jsonResponse(res, 504, buildOpenClawChannelTimeoutBody(
+                corrId,
+                target,
+                details || `${target.name} response timeout`,
+              ));
+            }
           }
           if (shouldTryNextOpenClawTarget(transportRes.status)) {
             lastFailure = {

@@ -78,6 +78,20 @@ function buildHermesChannelTimeoutBody(
   };
 }
 
+function isHermesChannelTimeoutDetails(details: string): boolean {
+  if (!details.trim()) return false;
+  try {
+    const parsed = JSON.parse(details) as { code?: unknown; source?: unknown };
+    return parsed.source === 'hermes-channel'
+      && (
+        parsed.code === 'HERMES_BRIDGE_RESPONSE_TIMEOUT'
+        || parsed.code === 'HERMES_GATEWAY_RESPONSE_TIMEOUT'
+      );
+  } catch {
+    return false;
+  }
+}
+
 function withVerifiedAttachmentImportContextEntries(
   payload: HermesChatPayload,
   attachmentImportResults: HermesChatPayload['attachmentImportResults'],
@@ -198,9 +212,10 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
         });
         if (!forwardRes.ok) {
           const details = await forwardRes.text().catch(() => '');
-          if (forwardRes.status === 504) {
-            // An upstream 504 means the selected target classified its own
-            // timeout. Do not replay the turn on another transport.
+          if (forwardRes.status === 504 && isHermesChannelTimeoutDetails(details)) {
+            // Only our structured timeout payload proves the selected target
+            // classified its own timeout. Anonymous 504s may be infrastructure
+            // failures and remain eligible for fallback below.
             return jsonResponse(res, 504, buildHermesChannelTimeoutBody(
               payload.correlationId,
               target,
@@ -326,9 +341,10 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
 
         if (!transportRes.ok) {
           const details = await transportRes.text().catch(() => '');
-          if (transportRes.status === 504) {
-            // An upstream 504 means the selected target classified its own
-            // timeout. Do not replay the turn on another transport.
+          if (transportRes.status === 504 && isHermesChannelTimeoutDetails(details)) {
+            // Only our structured timeout payload proves the selected target
+            // classified its own timeout. Anonymous 504s may be infrastructure
+            // failures and remain eligible for fallback below.
             return jsonResponse(res, 504, buildHermesChannelTimeoutBody(
               payload.correlationId,
               target,

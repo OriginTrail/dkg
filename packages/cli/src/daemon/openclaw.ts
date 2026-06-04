@@ -489,7 +489,7 @@ export function isOpenClawUiAttachCancelled(job: PendingOpenClawUiAttachJob): bo
 
 
 export function shouldTryNextOpenClawTarget(status: number): boolean {
-  return status === 404 || status === 405 || status === 501 || status === 503;
+  return status === 404 || status === 405 || status === 501 || status === 503 || status === 504;
 }
 
 export function buildOpenClawChannelHeaders(
