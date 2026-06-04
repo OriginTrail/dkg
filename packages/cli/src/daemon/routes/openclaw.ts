@@ -358,17 +358,6 @@ function buildOpenClawChannelTimeoutBody(
   };
 }
 
-function openClawUpstreamErrorMessage(details: string): string {
-  if (!details.trim()) return '';
-  try {
-    const parsed = JSON.parse(details) as { error?: unknown };
-    if (typeof parsed.error === 'string') return parsed.error;
-  } catch {
-    // Plain text upstream details are fine.
-  }
-  return details;
-}
-
 function parseOpenClawUpstreamDetails(details: string): Record<string, unknown> | null {
   if (!details.trim()) return null;
   try {
@@ -392,10 +381,14 @@ function isOpenClawChannelTimeoutDetails(details: string): boolean {
 
 function isOpenClawAgentTimeoutDetails(details: string): boolean {
   const parsed = parseOpenClawUpstreamDetails(details);
-  if (parsed?.source === 'openclaw-agent' && parsed.code === 'AGENT_TIMEOUT') {
-    return true;
-  }
-  return /Agent response timeout/i.test(openClawUpstreamErrorMessage(details));
+  return parsed?.source === 'openclaw-agent' && parsed.code === 'AGENT_TIMEOUT';
+}
+
+function openClawStructuredTimeoutDetails(details: string): string | undefined {
+  const parsed = parseOpenClawUpstreamDetails(details);
+  return typeof parsed?.details === 'string' && parsed.details.trim()
+    ? parsed.details
+    : undefined;
 }
 
 function buildOpenClawAgentTimeoutBody(
@@ -742,7 +735,7 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
           const details = await forwardRes.text().catch(() => "");
           if (forwardRes.status === 504) {
             if (isOpenClawAgentTimeoutDetails(details)) {
-              return jsonResponse(res, 504, buildOpenClawAgentTimeoutBody(corrId));
+              return jsonResponse(res, 504, buildOpenClawAgentTimeoutBody(corrId, openClawStructuredTimeoutDetails(details)));
             }
             if (isOpenClawChannelTimeoutDetails(details)) {
               // Only our structured timeout payload proves the selected target
@@ -751,7 +744,7 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
               return jsonResponse(res, 504, buildOpenClawChannelTimeoutBody(
                 corrId,
                 target,
-                details || `${target.name} response timeout`,
+                openClawStructuredTimeoutDetails(details) || `${target.name} response timeout`,
               ));
             }
           }
@@ -882,7 +875,7 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
           const details = await transportRes.text().catch(() => "");
           if (transportRes.status === 504) {
             if (isOpenClawAgentTimeoutDetails(details)) {
-              return jsonResponse(res, 504, buildOpenClawAgentTimeoutBody(corrId));
+              return jsonResponse(res, 504, buildOpenClawAgentTimeoutBody(corrId, openClawStructuredTimeoutDetails(details)));
             }
             if (isOpenClawChannelTimeoutDetails(details)) {
               // Only our structured timeout payload proves the selected target
@@ -891,7 +884,7 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
               return jsonResponse(res, 504, buildOpenClawChannelTimeoutBody(
                 corrId,
                 target,
-                details || `${target.name} response timeout`,
+                openClawStructuredTimeoutDetails(details) || `${target.name} response timeout`,
               ));
             }
           }

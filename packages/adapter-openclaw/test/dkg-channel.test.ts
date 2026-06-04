@@ -3550,6 +3550,43 @@ describe('DkgChannelPlugin', () => {
     }));
   });
 
+  it('gateway route returns structured agent timeout payloads', async () => {
+    const routeInboundMessage = vi.fn().mockRejectedValue(new Error('Agent response timeout'));
+    const registerHttpRoute = trackFn();
+    const api = makeApi({ registerHttpRoute, routeInboundMessage });
+    plugin.register(api);
+    const route = registerHttpRoute.calls
+      .map(([entry]) => entry as any)
+      .find((entry) => entry.path === '/api/dkg-channel/inbound');
+    let statusCode = 0;
+    let responseBody = '';
+    let resolveEnd!: () => void;
+    const ended = new Promise<void>((resolve) => { resolveEnd = resolve; });
+    const res = {
+      writeHead: vi.fn((status: number) => { statusCode = status; }),
+      end: vi.fn((body: string) => {
+        responseBody = String(body);
+        resolveEnd();
+      }),
+    };
+
+    route.handler({
+      body: {
+        text: 'Slow task',
+        correlationId: 'corr-agent-timeout',
+      },
+    }, res);
+    await ended;
+
+    expect(statusCode).toBe(504);
+    expect(JSON.parse(responseBody)).toMatchObject({
+      error: 'Agent response timeout',
+      code: 'AGENT_TIMEOUT',
+      source: 'openclaw-agent',
+      details: 'OpenClaw agent runtime did not produce a response before its deadline',
+    });
+  });
+
   it('standalone bridge streaming accepts attachment-only inbound requests', async () => {
     const routeInboundMessage = vi.fn().mockResolvedValue({
       correlationId: 'corr-attachment-stream',

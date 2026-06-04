@@ -78,18 +78,32 @@ function buildHermesChannelTimeoutBody(
   };
 }
 
-function isHermesChannelTimeoutDetails(details: string): boolean {
-  if (!details.trim()) return false;
+function parseHermesChannelTimeoutDetails(details: string): Record<string, unknown> | null {
+  if (!details.trim()) return null;
   try {
-    const parsed = JSON.parse(details) as { code?: unknown; source?: unknown };
-    return parsed.source === 'hermes-channel'
-      && (
-        parsed.code === 'HERMES_BRIDGE_RESPONSE_TIMEOUT'
-        || parsed.code === 'HERMES_GATEWAY_RESPONSE_TIMEOUT'
-      );
+    const parsed = JSON.parse(details);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
   } catch {
-    return false;
+    return null;
   }
+}
+
+function isHermesChannelTimeoutDetails(details: string): boolean {
+  const parsed = parseHermesChannelTimeoutDetails(details);
+  return parsed?.source === 'hermes-channel'
+    && (
+      parsed.code === 'HERMES_BRIDGE_RESPONSE_TIMEOUT'
+      || parsed.code === 'HERMES_GATEWAY_RESPONSE_TIMEOUT'
+    );
+}
+
+function hermesStructuredTimeoutDetails(details: string): string | undefined {
+  const parsed = parseHermesChannelTimeoutDetails(details);
+  return typeof parsed?.details === 'string' && parsed.details.trim()
+    ? parsed.details
+    : undefined;
 }
 
 function withVerifiedAttachmentImportContextEntries(
@@ -219,7 +233,7 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
             return jsonResponse(res, 504, buildHermesChannelTimeoutBody(
               payload.correlationId,
               target,
-              details || `${target.name} response timeout`,
+              hermesStructuredTimeoutDetails(details) || `${target.name} response timeout`,
             ));
           }
           if (isHermesApiKeyRejection(target, forwardRes.status)) {
@@ -348,7 +362,7 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
             return jsonResponse(res, 504, buildHermesChannelTimeoutBody(
               payload.correlationId,
               target,
-              details || `${target.name} response timeout`,
+              hermesStructuredTimeoutDetails(details) || `${target.name} response timeout`,
             ));
           }
           if (isHermesApiKeyRejection(target, transportRes.status)) {

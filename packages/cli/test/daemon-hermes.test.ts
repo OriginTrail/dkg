@@ -2568,6 +2568,7 @@ describe('Hermes daemon routes', () => {
           error: 'Hermes bridge response timeout',
           code: 'HERMES_BRIDGE_RESPONSE_TIMEOUT',
           source: 'hermes-channel',
+          details: 'Hermes bridge did not produce an agent response',
         }), { status: 504 });
       }
       if (requestUrl === 'https://hermes.example.com/api/hermes-channel/send') {
@@ -2605,6 +2606,7 @@ describe('Hermes daemon routes', () => {
       code: 'HERMES_BRIDGE_RESPONSE_TIMEOUT',
       source: 'hermes-channel',
       target: 'bridge',
+      details: 'Hermes bridge did not produce an agent response',
       correlationId: 'corr-1',
       timeoutMs: HERMES_CHANNEL_RESPONSE_TIMEOUT_MS,
     });
