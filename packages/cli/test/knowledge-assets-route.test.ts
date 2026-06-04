@@ -137,6 +137,9 @@ function makeAssertionAgent(over: Record<string, any> = {}) {
     })),
     listContextGraphs: vi.fn(async () => knownContextGraphs),
     contextGraphExists: vi.fn(async (id: string) => knownContextGraphs.some((row) => row.id === id)),
+    getContextGraphOnChainId: vi.fn(async () => '7'),
+    getStoredContextGraphRegistrationOptions: vi.fn(async () => ({})),
+    registerContextGraph: vi.fn(async () => ({ contextGraphId: '7' })),
     resolveAgentByToken: vi.fn(),
     ...restOver,
   };
@@ -617,6 +620,80 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
     expect(body(ctx)).toMatchObject({ status: 'tentative' });
   });
 
+  it('vm/publish does not emit published activity for partial-success results', async () => {
+    const agent = makeAssertionAgent({
+      publishFromFinalizedAssertion: vi.fn(async () => ({
+        kaId: 7n,
+        status: 'tentative',
+        ual: 'did:dkg:hardhat:31337/0xabc/7',
+        publicQuads: [],
+        kaManifest: [],
+      })),
+    });
+    const emitMemoryGraphChanged = vi.fn();
+    const insertNotification = vi.fn(() => 1);
+    const ctx = ctxFor(
+      'POST',
+      '/api/knowledge-assets/f/vm/publish',
+      { contextGraphId: 'cg' },
+      agent,
+      {
+        emitMemoryGraphChanged,
+        dashDb: { insertNotification } as unknown as RequestContext['dashDb'],
+      },
+    );
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(207);
+    expect(emitMemoryGraphChanged).not.toHaveBeenCalled();
+    expect(insertNotification).not.toHaveBeenCalled();
+  });
+
+  it('vm/publish auto-registers a local-only context graph before named publish', async () => {
+    const agent = makeAssertionAgent({
+      getContextGraphOnChainId: vi.fn(async () => null),
+      getStoredContextGraphRegistrationOptions: vi.fn(async () => ({
+        publishPolicy: 0,
+        publishAuthorityAccountId: 99n,
+      })),
+      registerContextGraph: vi.fn(async () => ({ contextGraphId: '7' })),
+    });
+    const tracker = createTracker();
+    const ctx = ctxFor(
+      'POST',
+      '/api/knowledge-assets/f/vm/publish',
+      { contextGraphId: 'cg' },
+      agent,
+      { tracker, requestAgentAddress: '0x0000000000000000000000000000000000000001' },
+    );
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(200);
+    expect(agent.registerContextGraph).toHaveBeenCalledWith('cg', {
+      callerAgentAddress: '0x0000000000000000000000000000000000000001',
+      publishPolicy: 0,
+      publishAuthorityAccountId: 99n,
+    });
+    expect((tracker as any).trackPhase.mock.calls.map((call: any[]) => call[1])).toContain('register-on-chain');
+    expect(agent.publishFromFinalizedAssertion).toHaveBeenCalledOnce();
+  });
+
+  it('atomic alsoPublishVm auto-registers a local-only context graph before named publish', async () => {
+    const agent = makeAssertionAgent({
+      getContextGraphOnChainId: vi.fn(async () => null),
+      registerContextGraph: vi.fn(async () => ({ contextGraphId: '7' })),
+    });
+    const quads = [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"', graph: '' }];
+    const ctx = ctxFor(
+      'POST',
+      '/api/knowledge-assets',
+      { contextGraphId: 'cg', name: 'f', quads, alsoShareSwm: true, alsoPublishVm: true },
+      agent,
+    );
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(201);
+    expect(agent.registerContextGraph).toHaveBeenCalledWith('cg', expect.any(Object));
+    expect(agent.publishFromFinalizedAssertion).toHaveBeenCalledOnce();
+  });
+
   it('vm/publish rejects mis-typed clearAfter before publishing', async () => {
     const agent = makeAssertionAgent();
     const ctx = ctxFor(
@@ -750,12 +827,12 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
     }
   });
 
-  it('per-layer GET /:name/{wm,swm,vm} is deferred (501) rather than echoing identical state', async () => {
+  it('per-layer GET /:name/{wm,swm,vm} is unclaimed until per-layer mapping exists', async () => {
     const agent = makeAssertionAgent();
     const ctx = ctxFor('GET', '/api/knowledge-assets/f/swm?contextGraphId=cg', undefined, agent);
     await handleKnowledgeAssetsRoutes(ctx);
-    expect(status(ctx)).toBe(501);
-    expect(body(ctx)).toMatchObject({ layer: 'swm' });
+    expect(status(ctx)).toBe(0);
+    expect((ctx.res as any).writableEnded).toBe(false);
     expect(agent.assertion.history).not.toHaveBeenCalled();
   });
 

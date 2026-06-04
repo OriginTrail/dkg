@@ -7,7 +7,6 @@
 //   POST /api/knowledge-assets                       create KA + open WM draft
 //                                                    (atomic: quads + also* flags)
 //   GET  /api/knowledge-assets/:name                 KA metadata / lifecycle state
-//   GET  /api/knowledge-assets/:name/{wm,swm,vm}     per-layer status
 //   POST /api/knowledge-assets/:name/wm/write        append quads to the draft
 //   POST /api/knowledge-assets/:name/wm/finalize     seal the draft (git commit)
 //   POST /api/knowledge-assets/:name/wm/discard      throw the draft away
@@ -25,7 +24,7 @@
 // `(agent, number)` addressing is layered on by Option 1 later, on these same
 // routes, as an additional accepted identifier form.
 import type { RequestContext } from "./context.js";
-import { createOperationContext, validateAssertionName } from "@origintrail-official/dkg-core";
+import { createOperationContext, validateAssertionName, type OperationContext } from "@origintrail-official/dkg-core";
 import { resolveChainConfig } from "../../config.js";
 import { validatePreSignedAuthorAttestation } from "./memory.js";
 import { recordAssertionActivity } from "../activity-notification.js";
@@ -401,6 +400,7 @@ async function publishWithTracker(
     },
   });
   try {
+    await ensureRegisteredForNamedPublish(ctx, contextGraphId, opCtx);
     const result: any = await tracker.trackPhase(opCtx, "read-shared-memory", () =>
       agent.publishFromFinalizedAssertion(contextGraphId, name, {
         ...(options.subGraphName ? { subGraphName: options.subGraphName } : {}),
@@ -425,6 +425,27 @@ async function publishWithTracker(
   }
 }
 
+async function ensureRegisteredForNamedPublish(
+  ctx: RequestContext,
+  contextGraphId: string,
+  opCtx: OperationContext,
+): Promise<void> {
+  const { agent, tracker, requestAgentAddress } = ctx;
+  const existingOnChainId = await agent.getContextGraphOnChainId(contextGraphId);
+  if (existingOnChainId) return;
+
+  const storedOpts = await agent.getStoredContextGraphRegistrationOptions(contextGraphId);
+  await tracker.trackPhase(opCtx, "register-on-chain", () =>
+    agent.registerContextGraph(contextGraphId, {
+      ...(requestAgentAddress ? { callerAgentAddress: requestAgentAddress } : {}),
+      ...(storedOpts.publishPolicy !== undefined ? { publishPolicy: storedOpts.publishPolicy } : {}),
+      ...(storedOpts.publishAuthorityAccountId !== undefined
+        ? { publishAuthorityAccountId: storedOpts.publishAuthorityAccountId }
+        : {}),
+    }),
+  );
+}
+
 function emitPublished(
   ctx: RequestContext,
   contextGraphId: string,
@@ -432,12 +453,12 @@ function emitPublished(
   subGraphName?: string,
   clearSharedMemoryAfter = false,
 ): void {
+  if (result?.status !== "confirmed" || result?.contextGraphError) return;
   const publicTripleCount = Array.isArray(result?.publicQuads) ? result.publicQuads.length : 0;
   const rootCount = Array.isArray(result?.kaManifest) ? result.kaManifest.length : 0;
-  const publishedSwmCleaned = result?.status === "confirmed";
   ctx.emitMemoryGraphChanged?.({
     contextGraphId,
-    layers: publishedSwmCleaned ? ["swm", "vm"] : ["vm"],
+    layers: ["swm", "vm"],
     subGraphName,
     operation: "shared_memory_published",
     source: "api",
@@ -715,22 +736,6 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       if (routeError(res, e)) return;
       return jsonResponse(res, 500, { error: e?.message ?? String(e) });
     }
-  }
-
-  // GET /api/knowledge-assets/:name/{wm,swm,vm} — per-layer status [deferred]
-  //
-  // Deferred (returns 501) rather than echoing the same `assertion.history()`
-  // payload for every layer: the lifecycle descriptor exposes a single CURRENT
-  // `memoryLayer`, not per-layer presence, so /wm, /swm and /vm would return
-  // identical state after a promote/publish — a misleading route contract. A
-  // truthful per-layer view needs a descriptor/event → {present, status} mapping
-  // that does not exist yet; until it lands, use `GET /:name` for the full
-  // lifecycle state. (Tracked alongside the wm/pull-from follow-up, §10.5.3.)
-  if (method === "GET" && (layer === "wm" || layer === "swm" || layer === "vm") && !verb) {
-    return jsonResponse(res, 501, {
-      error: `Per-layer status (GET /:name/${layer}) is not implemented yet — the lifecycle descriptor has no per-layer view mapping. Use GET /api/knowledge-assets/${encodeURIComponent(name)} for full state (OT-RFC-43 §10.5 — follow-up).`,
-      layer,
-    });
   }
 
   if (method !== "POST") return;
