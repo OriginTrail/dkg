@@ -155,16 +155,72 @@ function recordActivity(
   }
 }
 
-function normalizeFinalizedPublishOptions(raw: unknown): Record<string, unknown> {
+// Mirror the legacy `/api/shared-memory/publish` ceiling (`memory.ts`).
+const MAX_PUBLISH_EPOCHS = 0xffffffff;
+
+// Strict parser for the finalized-assertion publish options. Mirrors the
+// validation/coercion the legacy `/api/shared-memory/publish` path applies in
+// `memory.ts` so this surface never forwards raw JSON strings/invalid values
+// straight into `publishFromFinalizedAssertion()` (which would become 500s or
+// mis-typed publishes). `clearAfter` is the SDK spelling for the publisher's
+// `clearSharedMemoryAfter`. Returns `null` after writing a 400 on bad input;
+// returns `{}` when `raw` carries no recognised options (e.g. `alsoPublishVm:
+// true`). Only the recognised keys are forwarded — unknown fields are dropped.
+function resolveFinalizedPublishOptions(
+  ctx: RequestContext,
+  raw: unknown,
+): Record<string, unknown> | null {
+  const { res } = ctx;
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
-  const { clearAfter, clearSharedMemoryAfter, ...rest } = raw as Record<string, unknown>;
+  const source = raw as Record<string, unknown>;
+  const { clearAfter, clearSharedMemoryAfter, publisherNodeIdentityIdOverride } = source;
+  const rawPublishEpochs = source.publishEpochs ?? source.epochs;
+  const publishEpochsField = source.publishEpochs !== undefined ? "publishEpochs" : "epochs";
+
+  let resolvedPublisherIdentityOverride: bigint | undefined;
+  if (publisherNodeIdentityIdOverride !== undefined && publisherNodeIdentityIdOverride !== null) {
+    const v = String(publisherNodeIdentityIdOverride);
+    if (!/^\d+$/.test(v)) {
+      jsonResponse(res, 400, {
+        error: '"publisherNodeIdentityIdOverride" must be a non-negative integer (string or number)',
+      });
+      return null;
+    }
+    resolvedPublisherIdentityOverride = BigInt(v);
+  }
+
+  let resolvedPublishEpochs: number | undefined;
+  if (rawPublishEpochs !== undefined && rawPublishEpochs !== null) {
+    const v = String(rawPublishEpochs).trim();
+    if (!/^[1-9]\d*$/.test(v)) {
+      jsonResponse(res, 400, {
+        error: `"${publishEpochsField}" must be a positive integer (string or number)`,
+      });
+      return null;
+    }
+    const n = Number(v);
+    if (!Number.isSafeInteger(n)) {
+      jsonResponse(res, 400, {
+        error: `"${publishEpochsField}" is too large to safely represent as a JavaScript integer`,
+      });
+      return null;
+    }
+    if (n > MAX_PUBLISH_EPOCHS) {
+      jsonResponse(res, 400, {
+        error: `"${publishEpochsField}" must be less than or equal to ${MAX_PUBLISH_EPOCHS}`,
+      });
+      return null;
+    }
+    resolvedPublishEpochs = n;
+  }
+
+  const clearValue = clearAfter !== undefined ? clearAfter : clearSharedMemoryAfter;
   return {
-    ...rest,
-    ...(clearAfter !== undefined
-      ? { clearSharedMemoryAfter: clearAfter }
-      : clearSharedMemoryAfter !== undefined
-        ? { clearSharedMemoryAfter }
-        : {}),
+    ...(clearValue !== undefined ? { clearSharedMemoryAfter: clearValue } : {}),
+    ...(resolvedPublishEpochs !== undefined ? { publishEpochs: resolvedPublishEpochs } : {}),
+    ...(resolvedPublisherIdentityOverride !== undefined
+      ? { publisherNodeIdentityIdOverride: resolvedPublisherIdentityOverride }
+      : {}),
   };
 }
 
@@ -231,8 +287,29 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     if (quads !== undefined && (!Array.isArray(quads) || quads.length === 0)) {
       return jsonResponse(res, 400, { error: '"quads" must be a non-empty array when supplied' });
     }
+    // Validate the opt-in layer-transition combinations BEFORE create, so a
+    // deterministically-invalid request never leaves durable partial state.
+    // A tail needs something to finalize (quads), and publish reads from SWM
+    // only — so it must be preceded by a share.
+    const hasQuads = Array.isArray(quads) && quads.length > 0;
+    if ((alsoShareSwm || alsoPublishVm) && !hasQuads) {
+      return jsonResponse(res, 400, {
+        error:
+          '"alsoShareSwm"/"alsoPublishVm" require "quads" — there is nothing to finalize, share, or publish otherwise',
+      });
+    }
+    if (alsoPublishVm && !alsoShareSwm) {
+      return jsonResponse(res, 400, {
+        error:
+          '"alsoPublishVm" requires "alsoShareSwm" — publishFromFinalizedAssertion reads from Shared Memory, so the assertion must be shared first',
+      });
+    }
     const finalizeOptions = resolveFinalizeOptions(ctx, parsed);
     if (finalizeOptions === null) return;
+    // Coerce/validate publish controls up front too — bad option values 400
+    // before any assertion is created rather than after a durable seal.
+    const atomicPublishOptions = alsoPublishVm ? resolveFinalizedPublishOptions(ctx, alsoPublishVm) : {};
+    if (atomicPublishOptions === null) return;
     try {
       const assertionUri = await agent.assertion.create(
         resolvedContextGraphId,
@@ -320,16 +397,38 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       }
       if (alsoPublishVm) {
         try {
-          const opts = normalizeFinalizedPublishOptions(alsoPublishVm);
           const pub: any = await agent.publishFromFinalizedAssertion(resolvedContextGraphId, name, {
             ...(subGraphName ? { subGraphName } : {}),
-            ...opts,
+            ...atomicPublishOptions,
           });
           result.kaId = pub?.kaId;
           result.ual = pub?.ual;
           result.txHash = pub?.onChainResult?.txHash;
-          result.status = "vm-confirmed";
-          emitPublished(ctx, resolvedContextGraphId, pub, subGraphName, clearSharedMemoryAfterForNamedPublish(opts));
+          result.vmStatus = pub?.status;
+          if (pub?.contextGraphError) result.contextGraphError = pub.contextGraphError;
+          emitPublished(
+            ctx,
+            resolvedContextGraphId,
+            pub,
+            subGraphName,
+            clearSharedMemoryAfterForNamedPublish(atomicPublishOptions),
+          );
+          // `publishFromFinalizedAssertion` can return `tentative`/`failed` or a
+          // `contextGraphError` WITHOUT throwing. Only claim a confirmed VM
+          // publish when the publisher actually confirms; otherwise reflect the
+          // real status and record it as a partial failure so the response is a
+          // 207 over the (real, retryable) sealed+shared artifact, not a false 201.
+          if (pub?.status === "confirmed" && !pub?.contextGraphError) {
+            result.status = "vm-confirmed";
+          } else {
+            result.status = `vm-${typeof pub?.status === "string" ? pub.status : "unconfirmed"}`;
+            errors.push({
+              phase: "vm-publish",
+              error: pub?.contextGraphError
+                ? `contextGraphError: ${typeof pub.contextGraphError === "string" ? pub.contextGraphError : JSON.stringify(pub.contextGraphError)}`
+                : `publish not confirmed (status: ${pub?.status ?? "unknown"})`,
+            });
+          }
         } catch (e: any) {
           errors.push({ phase: "vm-publish", error: e?.message ?? String(e) });
         }
@@ -403,6 +502,16 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
   }
 
   if (method !== "POST") return;
+
+  // Guard the supported (layer, verb) POST shapes BEFORE reading/validating the
+  // body, so an unknown shape (e.g. `/:name/foo/bar`) falls through to the
+  // daemon's 404 instead of returning a body-dependent 400/500. `pull-from` is
+  // a known shape (returns 501 below), so it stays in the supported set.
+  const isSupportedPostShape =
+    (layer === "wm" && (verb === "write" || verb === "finalize" || verb === "discard" || verb === "pull-from")) ||
+    (layer === "swm" && verb === "share") ||
+    (layer === "vm" && verb === "publish");
+  if (!isSupportedPostShape) return;
 
   const parsed = safeParseJson(await readBody(req), res);
   if (!parsed) return;
@@ -509,17 +618,22 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
 
     // ── VM verb: publish (SWM/WM → VM; mint or update on chain) ──
     if (layer === "vm" && verb === "publish") {
-      const opts = normalizeFinalizedPublishOptions(parsed.options);
+      const opts = resolveFinalizedPublishOptions(ctx, parsed.options);
+      if (opts === null) return;
       const pub: any = await agent.publishFromFinalizedAssertion(resolvedContextGraphId, name, {
         ...(subGraphName ? { subGraphName } : {}),
         ...opts,
       });
       emitPublished(ctx, resolvedContextGraphId, pub, subGraphName, clearSharedMemoryAfterForNamedPublish(opts));
-      return jsonResponse(res, 200, {
+      // Mirror the legacy publish route: a non-throwing `contextGraphError` is a
+      // partial success → 207, not 200.
+      const httpStatus = pub?.contextGraphError ? 207 : 200;
+      return jsonResponse(res, httpStatus, {
         kaId: pub?.kaId,
         status: pub?.status,
         ual: pub?.ual,
         txHash: pub?.onChainResult?.txHash,
+        ...(pub?.contextGraphError ? { contextGraphError: pub.contextGraphError } : {}),
       });
     }
   } catch (e: any) {

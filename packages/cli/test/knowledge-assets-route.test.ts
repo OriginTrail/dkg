@@ -375,4 +375,109 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
     await handleKnowledgeAssetsRoutes(ctx);
     expect(ctx.res.writableEnded).toBe(false); // not handled here
   });
+
+  // ── Review follow-ups (88ab898 re-review) ──────────────────────────────────
+
+  it('atomic create rejects also* tails without quads (nothing to finalize)', async () => {
+    const agent = makeAssertionAgent();
+    const ctx = ctxFor('POST', '/api/knowledge-assets', { contextGraphId: 'cg', name: 'f', alsoShareSwm: true }, agent);
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(400);
+    expect(body(ctx).error).toContain('require "quads"');
+    expect(agent.assertion.create).not.toHaveBeenCalled();
+  });
+
+  it('atomic create rejects alsoPublishVm without alsoShareSwm (publish reads from SWM)', async () => {
+    const agent = makeAssertionAgent();
+    const quads = [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"', graph: '' }];
+    const ctx = ctxFor('POST', '/api/knowledge-assets', { contextGraphId: 'cg', name: 'f', quads, alsoPublishVm: true }, agent);
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(400);
+    expect(body(ctx).error).toContain('requires "alsoShareSwm"');
+    expect(agent.assertion.create).not.toHaveBeenCalled();
+    expect(agent.publishFromFinalizedAssertion).not.toHaveBeenCalled();
+  });
+
+  it('atomic create reports the real VM status (207) when publish is not confirmed', async () => {
+    const agent = makeAssertionAgent({
+      publishFromFinalizedAssertion: vi.fn(async () => ({
+        kaId: 7n,
+        status: 'tentative',
+        ual: 'did:dkg:hardhat:31337/0xabc/7',
+        onChainResult: { txHash: '0xtx' },
+        publicQuads: [],
+        kaManifest: [],
+      })),
+    });
+    const quads = [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"', graph: '' }];
+    const ctx = ctxFor(
+      'POST',
+      '/api/knowledge-assets',
+      { contextGraphId: 'cg', name: 'f', quads, alsoShareSwm: true, alsoPublishVm: true },
+      agent,
+    );
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(207);
+    const b = body(ctx);
+    expect(b.status).toBe('vm-tentative'); // NOT a false "vm-confirmed"
+    expect(b.vmStatus).toBe('tentative');
+    expect((b.errors as any[]).some((e) => e.phase === 'vm-publish')).toBe(true);
+  });
+
+  it('vm/publish coerces publishEpochs / publisherNodeIdentityIdOverride before publishing', async () => {
+    const agent = makeAssertionAgent();
+    const ctx = ctxFor(
+      'POST',
+      '/api/knowledge-assets/f/vm/publish',
+      { contextGraphId: 'cg', options: { publishEpochs: '5', publisherNodeIdentityIdOverride: '9' } },
+      agent,
+    );
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(200);
+    expect(agent.publishFromFinalizedAssertion).toHaveBeenCalledWith('cg', 'f', {
+      publishEpochs: 5, // number, not the JSON string "5"
+      publisherNodeIdentityIdOverride: 9n, // bigint
+    });
+  });
+
+  it('vm/publish rejects an invalid publishEpochs with a 400 (not a 500)', async () => {
+    const agent = makeAssertionAgent();
+    const ctx = ctxFor(
+      'POST',
+      '/api/knowledge-assets/f/vm/publish',
+      { contextGraphId: 'cg', options: { publishEpochs: 'abc' } },
+      agent,
+    );
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(400);
+    expect(body(ctx).error).toContain('publishEpochs');
+    expect(agent.publishFromFinalizedAssertion).not.toHaveBeenCalled();
+  });
+
+  it('vm/publish surfaces a non-throwing contextGraphError as 207', async () => {
+    const agent = makeAssertionAgent({
+      publishFromFinalizedAssertion: vi.fn(async () => ({
+        kaId: 7n,
+        status: 'confirmed',
+        ual: 'did:dkg:hardhat:31337/0xabc/7',
+        onChainResult: { txHash: '0xtx' },
+        publicQuads: [],
+        kaManifest: [],
+        contextGraphError: 'context graph not subscribed',
+      })),
+    });
+    const ctx = ctxFor('POST', '/api/knowledge-assets/f/vm/publish', { contextGraphId: 'cg' }, agent);
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(207);
+    expect(body(ctx).contextGraphError).toBe('context graph not subscribed');
+  });
+
+  it('unknown POST (layer, verb) shapes fall through to the daemon 404 without reading the body', async () => {
+    const agent = makeAssertionAgent();
+    const ctx = ctxFor('POST', '/api/knowledge-assets/f/foo/bar', { contextGraphId: 'cg' }, agent);
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(ctx.res.writableEnded).toBe(false); // not handled → daemon 404
+    expect(agent.assertion.create).not.toHaveBeenCalled();
+    expect(agent.publishFromFinalizedAssertion).not.toHaveBeenCalled();
+  });
 });
