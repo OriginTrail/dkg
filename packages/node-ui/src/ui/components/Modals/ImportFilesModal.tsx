@@ -161,25 +161,34 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
         aria-modal="true"
         aria-labelledby="dkg-import-modal-title"
       >
-        <button
-          type="button"
-          className="v10-modal-close"
-          onClick={handleClose}
-          disabled={status === 'uploading'}
-          aria-label="Close import dialog"
-          title="Close (Esc)"
-          style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: status === 'uploading' ? 'not-allowed' : 'pointer', fontSize: 18, lineHeight: 1, padding: 4, zIndex: 1 }}
+        {/* Header is a flex row so the × sits inline in the header flow
+            (no absolute positioning — `.v10-modal-box` is position:static,
+            so an absolutely-positioned button would anchor to the overlay
+            viewport instead of the modal; see #959 Codex review). */}
+        <div
+          className="v10-modal-header"
+          style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }}
         >
-          ×
-        </button>
-        <div className="v10-modal-header">
-          <div id="dkg-import-modal-title" className="v10-modal-title">Import to Working Memory</div>
-          <div className="v10-modal-subtitle">
-            {contextGraphName
-              ? <>Upload files to <strong>{contextGraphName}</strong> — your agent will extract structured knowledge.</>
-              : <>Upload files — your agent will extract structured knowledge and add it to working memory.</>
-            }
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div id="dkg-import-modal-title" className="v10-modal-title">Import to Working Memory</div>
+            <div className="v10-modal-subtitle">
+              {contextGraphName
+                ? <>Upload files to <strong>{contextGraphName}</strong> — your agent will extract structured knowledge.</>
+                : <>Upload files — your agent will extract structured knowledge and add it to working memory.</>
+              }
+            </div>
           </div>
+          <button
+            type="button"
+            className="v10-modal-close"
+            onClick={handleClose}
+            disabled={status === 'uploading'}
+            aria-label="Close import dialog"
+            title="Close (Esc)"
+            style={{ flexShrink: 0, cursor: status === 'uploading' ? 'not-allowed' : 'pointer' }}
+          >
+            ×
+          </button>
         </div>
 
         <div className="v10-modal-body">

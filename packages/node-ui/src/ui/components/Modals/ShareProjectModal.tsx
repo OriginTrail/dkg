@@ -230,21 +230,30 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
         aria-modal="true"
         aria-labelledby="dkg-share-modal-title"
       >
-        <button
-          type="button"
-          className="v10-modal-close"
-          onClick={onClose}
-          aria-label="Close share dialog"
-          title="Close (Esc)"
-          style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 18, lineHeight: 1, padding: 4, zIndex: 1 }}
+        {/* Header is a flex row so the × sits inline in the header flow
+            (no absolute positioning — `.v10-modal-box` is position:static,
+            so an absolutely-positioned button would anchor to the overlay
+            viewport instead of the modal; see #959 Codex review). */}
+        <div
+          className="v10-modal-header"
+          style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }}
         >
-          ×
-        </button>
-        <div className="v10-modal-header">
-          <div id="dkg-share-modal-title" className="v10-modal-title">Share Context Graph</div>
-          <div className="v10-modal-subtitle">
-            Invite agents to collaborate on <strong>{contextGraphName}</strong>.
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div id="dkg-share-modal-title" className="v10-modal-title">Share Context Graph</div>
+            <div className="v10-modal-subtitle">
+              Invite agents to collaborate on <strong>{contextGraphName}</strong>.
+            </div>
           </div>
+          <button
+            type="button"
+            className="v10-modal-close"
+            onClick={onClose}
+            aria-label="Close share dialog"
+            title="Close (Esc)"
+            style={{ flexShrink: 0, cursor: 'pointer' }}
+          >
+            ×
+          </button>
         </div>
 
         <div className="v10-modal-body">

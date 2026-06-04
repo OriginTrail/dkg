@@ -642,6 +642,18 @@ export class EVMChainAdapterBase {
     args: readonly unknown[],
     signer: Wallet,
     label: string,
+    // Optional gas headroom for methods whose on-chain gas cost depends on
+    // per-block randomness. ethers fills `gasLimit` from a single
+    // `eth_estimateGas` with NO margin, but that estimate runs against the
+    // CURRENT block while the tx is mined in a LATER block with different
+    // `prevrandao`/`blockhash`/`timestamp`. If the mined block's entropy
+    // drives a more expensive code path than the estimate's, the tx runs
+    // out of gas and reverts with empty (`0x`) data. `RandomSampling.createChallenge`
+    // is exactly this case (weighted CG draw + historical blockhash access):
+    // observed estimate-vs-execution spread is small here but unbounded in
+    // production with many CGs/KCs. When set, we estimate once and inflate
+    // the limit by `gasLimitBufferBps` basis points so the drift can't OOG.
+    opts?: { gasLimitBufferBps?: number },
   ): Promise<ethers.TransactionReceipt> {
     let lastRetryable: unknown;
     for (let i = 0; i < this.providers.length; i += 1) {
@@ -654,6 +666,18 @@ export class EVMChainAdapterBase {
           RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
           `${label} transaction population via RPC #${i + 1}`,
         );
+        if (opts?.gasLimitBufferBps && populated.gasLimit == null) {
+          // Best-effort: a failed estimate falls through to ethers' own
+          // estimation during signing (unbuffered, but no worse than today).
+          try {
+            const est = (await withTimeout<bigint>(
+              connected[method].estimateGas(...args) as Promise<bigint>,
+              RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
+              `${label} gas estimation via RPC #${i + 1}`,
+            ));
+            populated.gasLimit = (est * BigInt(10_000 + opts.gasLimitBufferBps)) / 10_000n;
+          } catch { /* keep populated.gasLimit unset → ethers estimates */ }
+        }
         prepared = await withTimeout(
           this.signPopulatedTransaction(rpcSigner, populated),
           RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
