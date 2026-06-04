@@ -200,13 +200,24 @@ describe('useModalDismiss (BUG-017)', () => {
     expect(document.activeElement?.id).toBe('af-target');
   });
 
-  it('handles a dialog with zero focusables without crashing (Tab is a no-op)', async () => {
+  it('traps Tab inside an aria-modal dialog with zero focusables (focus pinned to the dialog)', async () => {
+    // Previously this asserted Tab was a no-op, but that let a keyboard
+    // user Tab straight OUT of an aria-modal dialog into the background
+    // page when nothing inside was tabbable (e.g. ImportFilesModal while
+    // an upload is in flight disables every control). Codex review: an
+    // aria-modal dialog must keep focus contained. The hook now makes the
+    // dialog container focusable (tabindex=-1), pins focus on it, and
+    // swallows Tab so it can't escape.
     const onClose = vi.fn();
     mount(true, onClose, React.createElement('p', null, 'No focusables'));
     await tick();
+    const dialog = document.querySelector('[role="dialog"]') as HTMLElement;
+    expect(dialog.getAttribute('tabindex')).toBe('-1');
+    expect(document.activeElement).toBe(dialog);
     const ev = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
     expect(() => window.dispatchEvent(ev)).not.toThrow();
-    expect(ev.defaultPrevented).toBe(false);
+    expect(ev.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(dialog);
   });
 
   it('uses capture phase so Escape inside a child <input> still closes the dialog (BUG-017 regression guard)', async () => {
