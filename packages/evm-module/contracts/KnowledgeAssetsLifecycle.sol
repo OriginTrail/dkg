@@ -107,7 +107,7 @@ contract KnowledgeAssetsLifecycle is INamed, IVersioned, ContractStatus, IInitia
     // out of the staker-bound net). Patch-level on purpose — the EIP-712
     // author-attestation domain version (`_EIP712_VERSION_HASH`) MUST stay
     // pinned at "2.0.0" so previously signed attestations keep verifying.
-    string private constant _VERSION = "2.0.1";
+    string private constant _VERSION = "10.0.3";
 
     // --- V10 publish input (grouped to bypass the 16-arg stack limit) ---
 

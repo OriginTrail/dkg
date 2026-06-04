@@ -360,7 +360,7 @@ describe.skip('@integration RandomSampling (OBSOLETE: V8 stake pipeline)', () =>
       const name = await RandomSampling.name();
       const version = await RandomSampling.version();
       expect(name).to.equal('RandomSampling');
-      expect(version).to.equal('10.0.2');
+      expect(version).to.equal('10.0.3');
     });
 
     it('Should have the correct W1 after initialization', async () => {

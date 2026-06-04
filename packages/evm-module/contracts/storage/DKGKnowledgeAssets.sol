@@ -84,7 +84,7 @@ contract DKGKnowledgeAssets is INamed, IVersioned, HubDependent, ERC721, Guardia
     error GetLatestKnowledgeAssetIdDeprecated();
 
     string private constant _NAME = "DKGKnowledgeAssets";
-    string private constant _VERSION = "2.0.0";
+    string private constant _VERSION = "10.0.3";
 
     string private _tokenURI;
 
