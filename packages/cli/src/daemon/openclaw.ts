@@ -66,7 +66,7 @@ const BRIDGE_HEALTH_CACHE_OK_TTL_MS = 10_000;
 const BRIDGE_HEALTH_CACHE_ERROR_TTL_MS = 1_000;
 export const OPENCLAW_UI_CONNECT_TIMEOUT_MS = 150_000;
 export const OPENCLAW_UI_CONNECT_POLL_MS = 1_500;
-export const OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS = 16 * 60_000;
+export const OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS = 15 * 60_000;
 // Per-integration UI attach-job machinery moved to
 // `./local-agent-attach-jobs.ts` in S1 of issue #386 so adapter-hermes'
 // S3 work can reuse the same scheduler keyed on `'hermes'` instead of

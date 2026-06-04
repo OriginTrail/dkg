@@ -338,16 +338,20 @@ function formatTimeoutMs(timeoutMs: number): string {
   return `${Math.round(timeoutMs / 1000)}s`;
 }
 
-function buildOpenClawBridgeTimeoutBody(
+function buildOpenClawChannelTimeoutBody(
   correlationId: string,
   target: Pick<OpenClawChannelTarget, 'name'> | undefined,
   details?: string,
 ): Record<string, unknown> {
-  const targetLabel = target?.name ? `${target.name} target` : 'OpenClaw bridge';
+  const targetName = target?.name === 'gateway' ? 'gateway' : 'bridge';
+  const targetLabel = targetName === 'gateway' ? 'OpenClaw gateway' : 'OpenClaw bridge';
   return {
-    error: 'OpenClaw bridge response timeout',
-    code: 'OPENCLAW_BRIDGE_RESPONSE_TIMEOUT',
+    error: `${targetLabel} response timeout`,
+    code: targetName === 'gateway'
+      ? 'OPENCLAW_GATEWAY_RESPONSE_TIMEOUT'
+      : 'OPENCLAW_BRIDGE_RESPONSE_TIMEOUT',
     source: 'openclaw-channel',
+    target: targetName,
     details: details || `${targetLabel} did not produce an agent response within ${formatTimeoutMs(OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS)}`,
     correlationId,
     timeoutMs: OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS,
@@ -717,7 +721,7 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
             }
             // An upstream 504 means the selected target classified its own
             // timeout. Do not replay the turn on another transport.
-            return jsonResponse(res, 504, buildOpenClawBridgeTimeoutBody(
+            return jsonResponse(res, 504, buildOpenClawChannelTimeoutBody(
               corrId,
               target,
               details || `${target.name} response timeout`,
@@ -751,7 +755,7 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
             lastFailure = { details: `${target.name} response timeout`, offline: true };
             continue;
           }
-          return jsonResponse(res, 504, buildOpenClawBridgeTimeoutBody(corrId, target));
+          return jsonResponse(res, 504, buildOpenClawChannelTimeoutBody(corrId, target));
         }
         if (target.name === "bridge") {
           daemonState.openClawBridgeHealth = { ok: false, ts: Date.now() };
@@ -854,7 +858,7 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
             }
             // An upstream 504 means the selected target classified its own
             // timeout. Do not replay the turn on another transport.
-            return jsonResponse(res, 504, buildOpenClawBridgeTimeoutBody(
+            return jsonResponse(res, 504, buildOpenClawChannelTimeoutBody(
               corrId,
               target,
               details || `${target.name} response timeout`,
@@ -899,7 +903,7 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
           } catch (err: any) {
             if (!res.writableEnded) {
               const event = isOpenClawBridgeTimeoutError(err)
-                ? { type: "error", ...buildOpenClawBridgeTimeoutBody(corrId, target) }
+                ? { type: "error", ...buildOpenClawChannelTimeoutBody(corrId, target) }
                 : { type: "error", error: err.message };
               res.write(`data: ${JSON.stringify(event)}\n\n`);
             }
@@ -929,7 +933,7 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
             lastFailure = { details: `${target.name} response timeout`, offline: true };
             continue;
           }
-          return jsonResponse(res, 504, buildOpenClawBridgeTimeoutBody(corrId, target));
+          return jsonResponse(res, 504, buildOpenClawChannelTimeoutBody(corrId, target));
         }
         if (target.name === "bridge") {
           daemonState.openClawBridgeHealth = { ok: false, ts: Date.now() };

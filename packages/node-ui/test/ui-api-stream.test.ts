@@ -176,7 +176,7 @@ describe('ui local-agent stream api', () => {
       const stream = new ReadableStream<Uint8Array>({
         start(controller) {
           controller.enqueue(encoder.encode(
-            'data: {"type":"error","error":"Hermes bridge response timeout","code":"HERMES_BRIDGE_RESPONSE_TIMEOUT","source":"hermes-channel","details":"gateway target did not produce an agent response","correlationId":"h-timeout","timeoutMs":900000}\n\n',
+            'data: {"type":"error","error":"Hermes gateway response timeout","code":"HERMES_GATEWAY_RESPONSE_TIMEOUT","source":"hermes-channel","target":"gateway","details":"Hermes gateway did not produce an agent response","correlationId":"h-timeout","timeoutMs":900000}\n\n',
           ));
           controller.close();
         },
@@ -191,9 +191,10 @@ describe('ui local-agent stream api', () => {
       let caught: any;
       await streamHermesLocalChat('hi').catch((err) => { caught = err; });
       expect(caught).toBeInstanceOf(LocalAgentApiError);
-      expect(caught.message).toBe('Hermes bridge response timeout: gateway target did not produce an agent response');
-      expect(caught.code).toBe('HERMES_BRIDGE_RESPONSE_TIMEOUT');
+      expect(caught.message).toBe('Hermes gateway response timeout: Hermes gateway did not produce an agent response');
+      expect(caught.code).toBe('HERMES_GATEWAY_RESPONSE_TIMEOUT');
       expect(caught.source).toBe('hermes-channel');
+      expect(caught.target).toBe('gateway');
       expect(caught.correlationId).toBe('h-timeout');
       expect(caught.timeoutMs).toBe(900000);
     } finally {

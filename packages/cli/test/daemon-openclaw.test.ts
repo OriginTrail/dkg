@@ -655,6 +655,59 @@ describe('OpenClaw channel routing helpers', () => {
         error: 'OpenClaw bridge response timeout',
         code: 'OPENCLAW_BRIDGE_RESPONSE_TIMEOUT',
         source: 'openclaw-channel',
+        target: 'bridge',
+        correlationId: 'corr-timeout',
+        timeoutMs: OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS,
+      });
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('returns a target-aware timeout when the OpenClaw gateway is the final timed-out target', async () => {
+    const timeoutError = new Error('The operation was aborted due to timeout') as Error & { name: string };
+    timeoutError.name = 'TimeoutError';
+    const urls: string[] = [];
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL | Request) => {
+      const requestUrl = String(url);
+      urls.push(requestUrl);
+      if (requestUrl.endsWith('/health')) {
+        return new Response(JSON.stringify({ ok: true, channel: 'dkg-ui' }), { status: 200 });
+      }
+      throw timeoutError;
+    }) as typeof fetch;
+    try {
+      const { ctx, res } = makeOpenClawRouteContext({
+        text: 'slow task',
+        correlationId: 'corr-timeout',
+      }, '/api/openclaw-channel/send', {
+        localAgentIntegrations: {
+          openclaw: {
+            enabled: true,
+            capabilities: { localChat: true },
+            transport: {
+              kind: 'openclaw-channel',
+              bridgeUrl: 'http://127.0.0.1:9301',
+              gatewayUrl: 'https://openclaw.example.com',
+            },
+          },
+        },
+      });
+
+      await handleOpenclawRoutes(ctx);
+
+      expect(urls).toEqual([
+        'http://127.0.0.1:9301/health',
+        'http://127.0.0.1:9301/inbound',
+        'https://openclaw.example.com/api/dkg-channel/inbound',
+      ]);
+      expect(res.statusCode).toBe(504);
+      expect(JSON.parse(res.body)).toMatchObject({
+        error: 'OpenClaw gateway response timeout',
+        code: 'OPENCLAW_GATEWAY_RESPONSE_TIMEOUT',
+        source: 'openclaw-channel',
+        target: 'gateway',
         correlationId: 'corr-timeout',
         timeoutMs: OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS,
       });

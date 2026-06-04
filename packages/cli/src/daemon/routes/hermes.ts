@@ -58,16 +58,20 @@ function formatTimeoutMs(timeoutMs: number): string {
   return `${Math.round(timeoutMs / 1000)}s`;
 }
 
-function buildHermesBridgeTimeoutBody(
+function buildHermesChannelTimeoutBody(
   correlationId: string,
   target: { name?: string } | undefined,
   details?: string,
 ): Record<string, unknown> {
-  const targetLabel = target?.name ? `${target.name} target` : 'Hermes bridge';
+  const targetName = target?.name === 'gateway' ? 'gateway' : 'bridge';
+  const targetLabel = targetName === 'gateway' ? 'Hermes gateway' : 'Hermes bridge';
   return {
-    error: 'Hermes bridge response timeout',
-    code: 'HERMES_BRIDGE_RESPONSE_TIMEOUT',
+    error: `${targetLabel} response timeout`,
+    code: targetName === 'gateway'
+      ? 'HERMES_GATEWAY_RESPONSE_TIMEOUT'
+      : 'HERMES_BRIDGE_RESPONSE_TIMEOUT',
     source: 'hermes-channel',
+    target: targetName,
     details: details || `${targetLabel} did not produce an agent response within ${formatTimeoutMs(HERMES_CHANNEL_RESPONSE_TIMEOUT_MS)}`,
     correlationId,
     timeoutMs: HERMES_CHANNEL_RESPONSE_TIMEOUT_MS,
@@ -197,7 +201,7 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
           if (forwardRes.status === 504) {
             // An upstream 504 means the selected target classified its own
             // timeout. Do not replay the turn on another transport.
-            return jsonResponse(res, 504, buildHermesBridgeTimeoutBody(
+            return jsonResponse(res, 504, buildHermesChannelTimeoutBody(
               payload.correlationId,
               target,
               details || `${target.name} response timeout`,
@@ -248,7 +252,7 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
             lastFailure = { details: `${target.name} response timeout`, offline: true };
             continue;
           }
-          return jsonResponse(res, 504, buildHermesBridgeTimeoutBody(payload.correlationId, target));
+          return jsonResponse(res, 504, buildHermesChannelTimeoutBody(payload.correlationId, target));
         }
         lastFailure = { details: err.message, offline: true };
       }
@@ -325,7 +329,7 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
           if (transportRes.status === 504) {
             // An upstream 504 means the selected target classified its own
             // timeout. Do not replay the turn on another transport.
-            return jsonResponse(res, 504, buildHermesBridgeTimeoutBody(
+            return jsonResponse(res, 504, buildHermesChannelTimeoutBody(
               payload.correlationId,
               target,
               details || `${target.name} response timeout`,
@@ -391,7 +395,7 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
           } catch (err: any) {
             if (!res.writableEnded) {
               const event = isHermesBridgeTimeoutError(err)
-                ? { type: 'error', ...buildHermesBridgeTimeoutBody(payload.correlationId, target) }
+                ? { type: 'error', ...buildHermesChannelTimeoutBody(payload.correlationId, target) }
                 : { type: 'error', error: err.message };
               res.write(`data: ${JSON.stringify(event)}\n\n`);
             }
@@ -429,7 +433,7 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
             lastFailure = { details: `${target.name} response timeout`, offline: true };
             continue;
           }
-          return jsonResponse(res, 504, buildHermesBridgeTimeoutBody(payload.correlationId, target));
+          return jsonResponse(res, 504, buildHermesChannelTimeoutBody(payload.correlationId, target));
         }
         lastFailure = { details: err.message, offline: true };
       }

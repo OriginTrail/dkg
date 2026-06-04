@@ -1625,6 +1625,7 @@ describe('Hermes daemon routes', () => {
       error: 'Hermes bridge response timeout',
       code: 'HERMES_BRIDGE_RESPONSE_TIMEOUT',
       source: 'hermes-channel',
+      target: 'bridge',
       correlationId: 'corr-timeout',
       timeoutMs: HERMES_CHANNEL_RESPONSE_TIMEOUT_MS,
     });
@@ -2599,12 +2600,65 @@ describe('Hermes daemon routes', () => {
       error: 'Hermes bridge response timeout',
       code: 'HERMES_BRIDGE_RESPONSE_TIMEOUT',
       source: 'hermes-channel',
+      target: 'bridge',
       correlationId: 'corr-1',
       timeoutMs: HERMES_CHANNEL_RESPONSE_TIMEOUT_MS,
     });
     expect(urls).toEqual([
       'http://127.0.0.1:9444/health',
       'http://127.0.0.1:9444/send',
+    ]);
+  });
+
+  it('returns a target-aware timeout when the Hermes gateway is the final timed-out target', async () => {
+    const urls: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string | URL | Request) => {
+      const requestUrl = String(url);
+      urls.push(requestUrl);
+      if (requestUrl === 'http://127.0.0.1:9444/health') {
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      if (requestUrl === 'https://hermes.example.com/api/hermes-channel/health') {
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      const err = new Error('timed out');
+      (err as any).name = 'TimeoutError';
+      throw err;
+    }));
+    const { ctx, res } = makeHermesRouteContext({
+      text: 'hello',
+      correlationId: 'corr-1',
+    }, {
+      hasChatTurn: vi.fn(async () => false),
+      storeChatExchange: vi.fn(async () => {}),
+    }, {
+      localAgentIntegrations: {
+        hermes: {
+          enabled: true,
+          transport: {
+            kind: 'hermes-channel',
+            bridgeUrl: 'http://127.0.0.1:9444',
+            gatewayUrl: 'https://hermes.example.com',
+          },
+        },
+      },
+    }, '/api/hermes-channel/send');
+
+    await handleHermesRoutes(ctx);
+
+    expect(res.statusCode).toBe(504);
+    expect(JSON.parse(res.body)).toMatchObject({
+      error: 'Hermes gateway response timeout',
+      code: 'HERMES_GATEWAY_RESPONSE_TIMEOUT',
+      source: 'hermes-channel',
+      target: 'gateway',
+      correlationId: 'corr-1',
+      timeoutMs: HERMES_CHANNEL_RESPONSE_TIMEOUT_MS,
+    });
+    expect(urls).toEqual([
+      'http://127.0.0.1:9444/health',
+      'http://127.0.0.1:9444/send',
+      'https://hermes.example.com/api/hermes-channel/send',
     ]);
   });
 
