@@ -38,6 +38,7 @@ async function createMockChallenge(
     activeProofPeriodStartBlock,
     proofingPeriodDurationInBlocks: proofingPeriodDuration,
     solved: false,
+    isCurated: false,
   };
 }
 
