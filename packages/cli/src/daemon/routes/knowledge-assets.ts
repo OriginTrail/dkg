@@ -268,6 +268,27 @@ function actorFromFinalizeOptions(finalizeOptions: Record<string, unknown>): str
   return typeof preSigned?.address === "string" ? preSigned.address : undefined;
 }
 
+async function sealedAuthorFromAssertionHistory(
+  ctx: RequestContext,
+  contextGraphId: string,
+  name: string,
+  subGraphName?: string,
+): Promise<string | undefined> {
+  try {
+    const history = await ctx.agent.assertion.history(
+      contextGraphId,
+      name,
+      subGraphName ? { subGraphName } : undefined,
+    );
+    const seal = (history as { seal?: { authorAddress?: unknown } } | null)?.seal;
+    return typeof seal?.authorAddress === "string" && seal.authorAddress.length > 0
+      ? seal.authorAddress
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function recordActivity(
   ctx: RequestContext,
   contextGraphId: string,
@@ -800,6 +821,20 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       (layer === "vm" && verb === "publish"));
   if (!isSupportedPostShape) return;
 
+  if (layer === "wm" && verb === "pull-from") {
+    // Net-new primitive (the git-checkout equivalent): seed a fresh WM
+    // draft from the current SWM or VM state, with onConflict semantics
+    // for a dirty draft. Implemented in a focused follow-up — it needs the
+    // per-layer entity-scoped gather + conflict handling (OT-RFC-43 §10.5.3).
+    //
+    // Short-circuit before body/context validation so feature probes always
+    // receive the advertised 501, even with malformed JSON or a stale CG id.
+    return jsonResponse(res, 501, {
+      error: "wm/pull-from is not implemented yet (OT-RFC-43 §10.5.3 — follow-up)",
+      layer,
+    });
+  }
+
   // codex PR #971 F21: pick the body-size cap up front from the matched
   // shape so control verbs do not silently inherit the 10 MB default.
   const verbMaxBytes = postShapeMaxBytes(layer, verb);
@@ -871,13 +906,9 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         return jsonResponse(res, 200, { discarded: true });
       }
       if (verb === "pull-from") {
-        // Net-new primitive (the git-checkout equivalent): seed a fresh WM
-        // draft from the current SWM or VM state, with onConflict semantics
-        // for a dirty draft. Implemented in a focused follow-up — it needs the
-        // per-layer entity-scoped gather + conflict handling (OT-RFC-43 §10.5.3).
         return jsonResponse(res, 501, {
           error: "wm/pull-from is not implemented yet (OT-RFC-43 §10.5.3 — follow-up)",
-          layer: parsed.layer,
+          layer,
         });
       }
     }
@@ -890,6 +921,12 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         subGraphName,
       });
       if (share.promotedCount !== 0) {
+        const sealAuthorAddress = await sealedAuthorFromAssertionHistory(
+          ctx,
+          resolvedContextGraphId,
+          name,
+          subGraphName,
+        );
         emitMemoryGraphChanged?.({
           contextGraphId: resolvedContextGraphId,
           layers: ["wm", "swm"],
@@ -900,6 +937,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         });
         recordActivity(ctx, resolvedContextGraphId, "promoted", {
           subGraphName,
+          actorAgentAddress: sealAuthorAddress,
           tripleCount: share.promotedCount,
         });
       }

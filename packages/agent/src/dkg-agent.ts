@@ -1623,6 +1623,21 @@ export class DKGAgent extends DKGAgentBase {
         const layerStr = strip(row['memoryLayer']);
         const graphUri = row['assertionGraph'] ?? contextGraphAssertionUri(contextGraphId, addr, name);
 
+        const sealResult = await agent.store.query(
+          `SELECT ?authorAddress ?schemeVersion ?finalizedAt WHERE {
+            GRAPH <${metaGraph}> {
+              <${graphUri}> <${DKG_NS}authorAddress> ?authorAddress .
+              OPTIONAL { <${graphUri}> <${DKG_NS}authorSchemeVersion> ?schemeVersion }
+              OPTIONAL { <${graphUri}> <${DKG_NS}assertionFinalizedAt> ?finalizedAt }
+            }
+          } LIMIT 1`,
+        );
+        const sealRow = sealResult.type === 'bindings' ? sealResult.bindings[0] : undefined;
+        const sealAuthorAddress = strip(sealRow?.['authorAddress']);
+        const sealSchemeVersionRaw = strip(sealRow?.['schemeVersion']);
+        const sealSchemeVersion = sealSchemeVersionRaw != null ? Number(sealSchemeVersionRaw) : undefined;
+        const sealFinalizedAtIso = strip(sealRow?.['finalizedAt']);
+
         // Query all prov:Activity events that acted on this assertion
         // (linked via prov:used or prov:generated)
         const eventsResult = await agent.store.query(
@@ -1678,6 +1693,13 @@ export class DKGAgent extends DKGAgentBase {
           state: stateStr,
           memoryLayer: (layerStr as MemoryLayer) ?? null,
           assertionGraph: graphUri,
+          ...(sealAuthorAddress ? {
+            seal: {
+              authorAddress: sealAuthorAddress,
+              ...(Number.isFinite(sealSchemeVersion) ? { schemeVersion: sealSchemeVersion } : {}),
+              ...(sealFinalizedAtIso ? { finalizedAtIso: sealFinalizedAtIso } : {}),
+            },
+          } : {}),
           events: [...eventMap.values()],
         };
       },

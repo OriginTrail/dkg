@@ -29,6 +29,12 @@ function createRequest(method: string, path: string, body?: unknown): RequestCon
   return request as RequestContext['req'];
 }
 
+function createRawRequest(method: string, path: string, rawBody: string): RequestContext['req'] {
+  const request = Readable.from([Buffer.from(rawBody)]);
+  Object.assign(request, { method, url: path, headers: { host: '127.0.0.1' } });
+  return request as RequestContext['req'];
+}
+
 function createTracker(): RequestContext['tracker'] {
   return {
     start: vi.fn(),
@@ -391,6 +397,40 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
     expect(agent.assertion.promote).toHaveBeenCalledOnce();
   });
 
+  it('POST .../:name/swm/share attributes promoted activity to the finalized seal author', async () => {
+    const sealAuthor = '0x2222222222222222222222222222222222222222';
+    const agent = makeAssertionAgent({
+      assertion: {
+        history: vi.fn(async () => ({
+          state: 'finalized',
+          memoryLayer: 'SharedWorkingMemory',
+          assertionGraph: 'urn:dkg:assertion:cg:agent:f',
+          seal: { authorAddress: sealAuthor },
+          events: [],
+        })),
+      },
+    });
+    const insertNotification = vi.fn(() => 1);
+    const ctx = ctxFor(
+      'POST',
+      '/api/knowledge-assets/f/swm/share',
+      { contextGraphId: 'cg' },
+      agent,
+      {
+        emitNotification: vi.fn(),
+        dashDb: { insertNotification } as unknown as RequestContext['dashDb'],
+        requestAgentAddress: '0x0000000000000000000000000000000000000001',
+      },
+    );
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(200);
+    const promotedMeta = insertNotification.mock.calls
+      .map(([row]: [any]) => JSON.parse(row.meta))
+      .find((m: any) => m.kind === 'promoted');
+    expect(promotedMeta).toBeTruthy();
+    expect(String(promotedMeta.actorAgentDid).toLowerCase()).toContain(sealAuthor.toLowerCase());
+  });
+
   it('POST .../:name/vm/publish mints/updates on chain', async () => {
     const agent = makeAssertionAgent();
     const emitMemoryGraphChanged = vi.fn();
@@ -474,6 +514,37 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
     const ctx = ctxFor('POST', '/api/knowledge-assets/f/wm/pull-from', { contextGraphId: 'cg', layer: 'vm' }, agent);
     await handleKnowledgeAssetsRoutes(ctx);
     expect(status(ctx)).toBe(501);
+  });
+
+  it('POST .../:name/wm/pull-from returns 501 before parsing malformed JSON', async () => {
+    const agent = makeAssertionAgent();
+    const ctx = ctxFor(
+      'POST',
+      '/api/knowledge-assets/f/wm/pull-from',
+      undefined,
+      agent,
+      { req: createRawRequest('POST', '/api/knowledge-assets/f/wm/pull-from', '{') },
+    );
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(501);
+    expect(agent.listContextGraphs).not.toHaveBeenCalled();
+  });
+
+  it('POST .../:name/wm/pull-from returns 501 before context graph validation', async () => {
+    const agent = makeAssertionAgent({
+      contextGraphExists: vi.fn(async () => false),
+      listContextGraphs: vi.fn(async () => []),
+    });
+    const ctx = ctxFor(
+      'POST',
+      '/api/knowledge-assets/f/wm/pull-from',
+      { contextGraphId: 'missing-cg', layer: 'vm' },
+      agent,
+    );
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(501);
+    expect(agent.contextGraphExists).not.toHaveBeenCalled();
+    expect(agent.listContextGraphs).not.toHaveBeenCalled();
   });
 
   it('ignores non-/api/knowledge-assets paths', async () => {

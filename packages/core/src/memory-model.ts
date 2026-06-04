@@ -87,6 +87,11 @@ export interface AssertionDescriptor {
   state: AssertionState;
   memoryLayer: MemoryLayer | null;
   assertionGraph: string;
+  seal?: {
+    authorAddress: string;
+    schemeVersion?: number;
+    finalizedAtIso?: string;
+  };
   events: AssertionEvent[];
 }
 
