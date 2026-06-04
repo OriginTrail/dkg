@@ -172,6 +172,18 @@ function clearSharedMemoryAfterForNamedPublish(opts: Record<string, unknown>): b
   return typeof opts.clearSharedMemoryAfter === "boolean" ? opts.clearSharedMemoryAfter : false;
 }
 
+function isConfirmedPublish(result: any): boolean {
+  return result?.status === "confirmed" && !result?.contextGraphError;
+}
+
+function publishIncompleteReason(result: any): string {
+  if (typeof result?.contextGraphError === "string" && result.contextGraphError.length > 0) {
+    return result.contextGraphError;
+  }
+  const status = typeof result?.status === "string" ? result.status : "unknown";
+  return `VM publish did not confirm (status: ${status})`;
+}
+
 function emitPublished(
   ctx: RequestContext,
   contextGraphId: string,
@@ -328,8 +340,15 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           result.kaId = pub?.kaId;
           result.ual = pub?.ual;
           result.txHash = pub?.onChainResult?.txHash;
-          result.status = "vm-confirmed";
-          emitPublished(ctx, resolvedContextGraphId, pub, subGraphName, clearSharedMemoryAfterForNamedPublish(opts));
+          result.status = isConfirmedPublish(pub) ? "vm-confirmed" : "vm-tentative";
+          if (typeof pub?.contextGraphError === "string") {
+            result.contextGraphError = pub.contextGraphError;
+          }
+          if (isConfirmedPublish(pub)) {
+            emitPublished(ctx, resolvedContextGraphId, pub, subGraphName, clearSharedMemoryAfterForNamedPublish(opts));
+          } else {
+            errors.push({ phase: "vm-publish", error: publishIncompleteReason(pub) });
+          }
         } catch (e: any) {
           errors.push({ phase: "vm-publish", error: e?.message ?? String(e) });
         }
@@ -539,12 +558,15 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         ...(subGraphName ? { subGraphName } : {}),
         ...opts,
       });
-      emitPublished(ctx, resolvedContextGraphId, pub, subGraphName, clearSharedMemoryAfterForNamedPublish(opts));
-      return jsonResponse(res, 200, {
+      if (isConfirmedPublish(pub)) {
+        emitPublished(ctx, resolvedContextGraphId, pub, subGraphName, clearSharedMemoryAfterForNamedPublish(opts));
+      }
+      return jsonResponse(res, isConfirmedPublish(pub) ? 200 : 207, {
         kaId: pub?.kaId,
         status: pub?.status,
         ual: pub?.ual,
         txHash: pub?.onChainResult?.txHash,
+        ...(typeof pub?.contextGraphError === "string" ? { contextGraphError: pub.contextGraphError } : {}),
       });
     }
   } catch (e: any) {

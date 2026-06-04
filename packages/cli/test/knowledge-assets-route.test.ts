@@ -248,6 +248,37 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
     expect(emitNotification).toHaveBeenCalledTimes(3);
   });
 
+  it('POST /api/knowledge-assets returns 207 without published side effects for a tentative VM tail', async () => {
+    const agent = makeAssertionAgent({
+      publishFromFinalizedAssertion: vi.fn(async () => ({
+        kaId: 7n,
+        status: 'tentative',
+        ual: 'did:dkg:hardhat:31337/0xabc/7',
+        publicQuads: [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"', graph: '' }],
+        kaManifest: [{ assertion: 'urn:dkg:assertion:cg:agent:f' }],
+      })),
+    });
+    const emitMemoryGraphChanged = vi.fn();
+    const quads = [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"', graph: '' }];
+    const ctx = ctxFor(
+      'POST',
+      '/api/knowledge-assets',
+      { contextGraphId: 'cg', name: 'f', quads, alsoPublishVm: true },
+      agent,
+      { emitMemoryGraphChanged },
+    );
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(207);
+    expect(body(ctx)).toMatchObject({ created: true, status: 'vm-tentative' });
+    expect((body(ctx).errors as any[])[0]).toMatchObject({
+      phase: 'vm-publish',
+      error: 'VM publish did not confirm (status: tentative)',
+    });
+    expect(emitMemoryGraphChanged.mock.calls.map(([event]) => event.operation)).not.toContain(
+      'shared_memory_published',
+    );
+  });
+
   it('atomic create with also* tails returns 207 when a tail fails', async () => {
     const agent = makeAssertionAgent({
       assertion: { promote: vi.fn(async () => { throw new Error('CCL denied'); }) },
@@ -337,6 +368,38 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
         clearSharedMemoryAfter: true,
       }),
     );
+  });
+
+  it('POST .../:name/vm/publish returns 207 without published side effects when context graph publish fails', async () => {
+    const agent = makeAssertionAgent({
+      publishFromFinalizedAssertion: vi.fn(async () => ({
+        kaId: 7n,
+        status: 'confirmed',
+        ual: 'did:dkg:hardhat:31337/0xabc/7',
+        onChainResult: { txHash: '0xtx' },
+        contextGraphError: 'Context graph publish failed',
+        publicQuads: [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"', graph: '' }],
+        kaManifest: [{ assertion: 'urn:dkg:assertion:cg:agent:f' }],
+      })),
+    });
+    const emitMemoryGraphChanged = vi.fn();
+    const ctx = ctxFor(
+      'POST',
+      '/api/knowledge-assets/f/vm/publish',
+      { contextGraphId: 'cg', options: { clearAfter: true } },
+      agent,
+      { emitMemoryGraphChanged },
+    );
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(207);
+    expect(body(ctx)).toMatchObject({
+      status: 'confirmed',
+      contextGraphError: 'Context graph publish failed',
+      ual: 'did:dkg:hardhat:31337/0xabc/7',
+      txHash: '0xtx',
+    });
+    expect(agent.publishFromFinalizedAssertion).toHaveBeenCalledWith('cg', 'f', { clearSharedMemoryAfter: true });
+    expect(emitMemoryGraphChanged).not.toHaveBeenCalled();
   });
 
   it('GET /api/knowledge-assets/:name returns lifecycle state', async () => {
