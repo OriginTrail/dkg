@@ -1055,19 +1055,52 @@ export async function listAssertions(
   // would silently miss otherwise. The cgId itself is treated as
   // opaque (it may contain `/assertion/` as a literal substring,
   // per `validateContextGraphId`).
+  // The `dkg:memoryLayer "WM"` marker can sit on EITHER subject form:
+  //   • data-graph URI : did:dkg:context-graph:<cg>/[<sg>/]assertion/<agent>/<name>
+  //   • lifecycle URN  : urn:dkg:assertion:<cg>:[<sg>:]<agent>:<name>   (canonical,
+  //                      `assertionLifecycleUri`, written by every create path)
+  // Regular `create` writes BOTH; a FILE IMPORT writes ONLY the URN (the data-URI
+  // stamp is import-path-specific). The previous parser accepted only the data-URI
+  // form, so it silently dropped every file-imported WM assertion → the bulk-promote
+  // loop iterated zero times → "0 triples promoted" even though the content was
+  // fully promotable. Accept BOTH forms and dedupe by (subGraph, name).
   const result: AssertionInfo[] = [];
-  for (const b of bindings) {
+  const seen = new Set<string>();
+  const urnPrefix = `urn:dkg:assertion:${contextGraphId}:`;
+  // Data-URI rows first: the triple-count badge is keyed on the data graph in
+  // `countByGraph`, so preferring that form when both are present keeps the count.
+  const ordered = [...bindings].sort((a, b) => {
+    const ga = (typeof a.g === 'string' ? a.g : a.g?.value) ?? '';
+    const gb = (typeof b.g === 'string' ? b.g : b.g?.value) ?? '';
+    return (ga.startsWith(cgPrefix) ? 0 : 1) - (gb.startsWith(cgPrefix) ? 0 : 1);
+  });
+  for (const b of ordered) {
     const g = typeof b.g === 'string' ? b.g : b.g?.value;
-    if (!g || !g.startsWith(cgPrefix)) continue;
-    const segments = g.slice(cgPrefix.length).split('/');
+    if (!g) continue;
     let subGraph: string | undefined;
-    let name: string;
-    if (segments.length === 3 && segments[0] === 'assertion') {
-      subGraph = undefined;
-      name = segments[2];
-    } else if (segments.length === 4 && segments[1] === 'assertion') {
-      subGraph = segments[0];
-      name = segments[3];
+    let name: string | undefined;
+    if (g.startsWith(cgPrefix)) {
+      const segments = g.slice(cgPrefix.length).split('/');
+      if (segments.length === 3 && segments[0] === 'assertion') {
+        name = segments[2];
+      } else if (segments.length === 4 && segments[1] === 'assertion') {
+        subGraph = segments[0];
+        name = segments[3];
+      } else {
+        continue;
+      }
+    } else if (g.startsWith(urnPrefix)) {
+      // `<agent>` is a 0x EVM address (no colons); `<name>` MAY contain ':'.
+      // Peel the agent deterministically — whatever precedes it (if anything)
+      // is the sub-graph segment, the greedy remainder is the name.
+      const rest = g.slice(urnPrefix.length);
+      let m = /^(0x[0-9a-fA-F]{40}):(.+)$/.exec(rest);
+      if (m) {
+        name = m[2];
+      } else {
+        m = /^([^:]+):(0x[0-9a-fA-F]{40}):(.+)$/.exec(rest);
+        if (m) { subGraph = m[1]; name = m[3]; }
+      }
     } else {
       continue;
     }
@@ -1078,6 +1111,9 @@ export async function listAssertions(
     // assertions table or the bulk-promote flow. The SPARQL `metaFilter`
     // already drops these daemon-side; this guards the parser too.
     if (subGraph === 'meta') continue;
+    const key = `${subGraph ?? ''} ${name}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
     const cnt = countByGraph.get(g);
     result.push({ name, graphUri: g, tripleCount: cnt, subGraph });
   }

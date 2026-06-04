@@ -27,6 +27,7 @@ import {
   publishTriples,
   publishSharedMemory,
   listSwmEntities,
+  listAssertions,
   createSavedQuery,
   updateSavedQuery,
   deleteSavedQuery,
@@ -322,6 +323,36 @@ describe('UI API tests', () => {
       await expect(listSwmEntities('cg-1')).resolves.toEqual([
         { uri: 'https://example.org/doc/root', label: 'root', tripleCount: 5 },
         { uri: 'https://example.org/doc/child-only', label: 'child-only', tripleCount: 4 },
+      ]);
+    });
+
+    it('listAssertions(wm) recognizes the lifecycle-URN marker form (file imports)', async () => {
+      // File-imported assertions carry dkg:memoryLayer "WM" ONLY on the
+      // lifecycle URN (urn:dkg:assertion:<cg>:<agent>:<name>), not the
+      // data-graph URI. The parser must accept it — otherwise the bulk-promote
+      // loop sees an empty list and reports "0 triples promoted".
+      const agent = '0x' + '1'.repeat(40);
+      queryBindings = [{ g: { value: `urn:dkg:assertion:cg-1:${agent}:my-import.md` } }];
+      const list = await listAssertions('cg-1', 'wm');
+      expect(list.map(a => a.name)).toEqual(['my-import.md']);
+    });
+
+    it('listAssertions(wm) dedupes when BOTH the URN and data-URI markers exist', async () => {
+      const agent = '0x' + '2'.repeat(40);
+      queryBindings = [
+        { g: { value: `did:dkg:context-graph:cg-1/assertion/${agent}/doc` } },
+        { g: { value: `urn:dkg:assertion:cg-1:${agent}:doc` } },
+      ];
+      const list = await listAssertions('cg-1', 'wm');
+      expect(list.map(a => a.name)).toEqual(['doc']);
+    });
+
+    it('listAssertions(wm) parses sub-graph-scoped URN markers and names containing ":"', async () => {
+      const agent = '0x' + '3'.repeat(40);
+      queryBindings = [{ g: { value: `urn:dkg:assertion:cg-1:code:${agent}:a:b.md` } }];
+      const list = await listAssertions('cg-1', 'wm');
+      expect(list).toEqual([
+        { name: 'a:b.md', graphUri: `urn:dkg:assertion:cg-1:code:${agent}:a:b.md`, tripleCount: undefined, subGraph: 'code' },
       ]);
     });
 

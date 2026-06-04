@@ -3944,11 +3944,18 @@ export class DKGPublisher implements Publisher {
     const DKG = 'http://dkg.io/ontology/';
     const metaGraph = contextGraphMetaUri(contextGraphId);
     const result = await this.store.query(
-      `SELECT ?status ?count ?layer WHERE {
+      `SELECT ?status ?count ?layer ?urnLayer WHERE {
          GRAPH <${metaGraph}> {
            OPTIONAL { <${assertionGraph}> <${DKG}extractionStatus> ?status }
            OPTIONAL { <${assertionGraph}> <${DKG}structuralTripleCount> ?count }
            OPTIONAL { <${assertionGraph}> <${DKG}memoryLayer> ?layer }
+           # The memoryLayer marker is canonically on the lifecycle URN
+           # (assertionLifecycleUri), reachable via the dkg:assertionGraph
+           # back-link. File-imported assertions carry it ONLY there, not on
+           # the data-graph URI, so read it too — otherwise the "already
+           # promoted (SWM/VM) -> harmless no-op" check below cannot see their
+           # layer and a re-promote misfires AssertionNotPersistedError.
+           OPTIONAL { ?lc <${DKG}assertionGraph> <${assertionGraph}> ; <${DKG}memoryLayer> ?urnLayer }
          }
        } LIMIT 1`,
     );
@@ -3956,7 +3963,7 @@ export class DKGPublisher implements Publisher {
     const row = result.bindings[0];
     const statusRaw = row?.['status'];
     const countRaw = row?.['count'];
-    const layerRaw = row?.['layer'];
+    const layerRaw = row?.['layer'] ?? row?.['urnLayer'];
     // Codex review on #898 — the previous version raised
     // `AssertionNotPersistedError` whenever `extractionStatus="completed"`
     // + a positive `structuralTripleCount` were stamped, even after a
