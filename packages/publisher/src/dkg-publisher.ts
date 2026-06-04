@@ -3304,10 +3304,11 @@ export class DKGPublisher implements Publisher {
     const rootSet = new Set(roots);
     const rootValues = roots.map((root) => `<${assertSafeIri(root)}>`).join(' ');
     const candidates = await this.store.query(
-      `SELECT DISTINCT ?op ?entity WHERE {
+      `SELECT DISTINCT ?op ?entity ?publishedAt WHERE {
         GRAPH <${assertSafeIri(swmMetaGraph)}> {
           VALUES ?entity { ${rootValues} }
           ?op <${DKG}rootEntity> ?entity .
+          OPTIONAL { ?op <${DKG}publishedAt> ?publishedAt }
         }
       }`,
     );
@@ -3316,48 +3317,52 @@ export class DKGPublisher implements Publisher {
       throw new MultiRootPublishNotAtomicError(contextGraphId, rootEntities);
     }
 
-    const candidateRootsByOperation = new Map<string, Set<string>>();
+    const latestOperationByRoot = new Map<string, { op: string; publishedAt: string }>();
     for (const row of candidates.bindings) {
       const op = row['op'];
       const entity = row['entity'];
       if (!op || !entity || !isSafeIri(op) || !rootSet.has(entity)) continue;
-      if (!candidateRootsByOperation.has(op)) candidateRootsByOperation.set(op, new Set());
-      candidateRootsByOperation.get(op)!.add(entity);
+      const publishedAt = stripSparqlLiteral(row['publishedAt']) ?? '';
+      const current = latestOperationByRoot.get(entity);
+      if (
+        !current ||
+        publishedAt > current.publishedAt ||
+        (publishedAt === current.publishedAt && op > current.op)
+      ) {
+        latestOperationByRoot.set(entity, { op, publishedAt });
+      }
     }
 
-    const completeCandidateOps = [...candidateRootsByOperation.entries()]
-      .filter(([, matchedRoots]) => matchedRoots.size === rootSet.size)
-      .map(([op]) => op);
-    if (completeCandidateOps.length === 0) {
+    if (latestOperationByRoot.size !== rootSet.size) {
       throw new MultiRootPublishNotAtomicError(contextGraphId, rootEntities);
     }
 
-    const opValues = completeCandidateOps.map((op) => `<${assertSafeIri(op)}>`).join(' ');
+    const latestOps = new Set([...latestOperationByRoot.values()].map(({ op }) => op));
+    if (latestOps.size !== 1) {
+      throw new MultiRootPublishNotAtomicError(contextGraphId, rootEntities);
+    }
+
+    const [latestOp] = latestOps;
     const operationRoots = await this.store.query(
-      `SELECT DISTINCT ?op ?root WHERE {
+      `SELECT DISTINCT ?root WHERE {
         GRAPH <${assertSafeIri(swmMetaGraph)}> {
-          VALUES ?op { ${opValues} }
-          ?op <${DKG}rootEntity> ?root .
+          <${assertSafeIri(latestOp)}> <${DKG}rootEntity> ?root .
         }
       }`,
     );
 
-    const allRootsByOperation = new Map<string, Set<string>>();
+    const rootsForLatestOperation = new Set<string>();
     if (operationRoots.type === 'bindings') {
       for (const row of operationRoots.bindings) {
-        const op = row['op'];
         const root = row['root'];
-        if (!op || !root || !isSafeIri(op) || !isSafeIri(root)) continue;
-        if (!allRootsByOperation.has(op)) allRootsByOperation.set(op, new Set());
-        allRootsByOperation.get(op)!.add(root);
+        if (!root || !isSafeIri(root)) continue;
+        rootsForLatestOperation.add(root);
       }
     }
 
-    for (const rootsForOperation of allRootsByOperation.values()) {
-      if (sameStringSet(rootSet, rootsForOperation)) return;
+    if (!sameStringSet(rootSet, rootsForLatestOperation)) {
+      throw new MultiRootPublishNotAtomicError(contextGraphId, rootEntities);
     }
-
-    throw new MultiRootPublishNotAtomicError(contextGraphId, rootEntities);
   }
 
   /**

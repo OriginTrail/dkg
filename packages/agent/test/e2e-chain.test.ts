@@ -388,7 +388,7 @@ describe('E2E: DKGAgent with real blockchain', () => {
     expect(result.status).toBe('confirmed');
     expect(result.onChainResult).toBeDefined();
     expect(new Set(result.kaManifest.map((m) => m.rootEntity))).toEqual(new Set(entities));
-    expect(new Set(result.kaManifest.map((m) => String(m.tokenId)))).toEqual(new Set(['1', '2', '3']));
+    expect(new Set(result.kaManifest.map((m) => String(m.tokenId)))).toEqual(new Set([String(result.kaId)]));
     expect(new Set(result.kaManifest.map((m: any) => String(m.metadataTokenId)))).toEqual(new Set(['1', '2', '3']));
   }, 30_000);
 
