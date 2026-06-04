@@ -25,7 +25,8 @@
 // `(agent, number)` addressing is layered on by Option 1 later, on these same
 // routes, as an additional accepted identifier form.
 import type { RequestContext } from "./context.js";
-import { validateAssertionName } from "@origintrail-official/dkg-core";
+import { createOperationContext, validateAssertionName } from "@origintrail-official/dkg-core";
+import { resolveChainConfig } from "../../config.js";
 import { validatePreSignedAuthorAttestation } from "./memory.js";
 import { recordAssertionActivity } from "../activity-notification.js";
 import {
@@ -35,12 +36,35 @@ import {
   resolveRequiredWriteContextGraphId,
   safeDecodeURIComponent,
   safeParseJson,
+  SMALL_BODY_BYTES,
   validateEntities,
   validateOptionalSubGraphName,
   validateRequiredContextGraphId,
 } from "../http-utils.js";
 
 const PREFIX = "/api/knowledge-assets";
+
+/**
+ * Body-size cap by `(layer, verb)` (codex PR #971 F21). The control verbs
+ * (`finalize`, `discard`, `pull-from`, `share`, `publish`) carry a handful
+ * of scalar fields — there is no legitimate reason for any of them to be
+ * larger than the legacy `SMALL_BODY_BYTES` cap their `/api/assertion/*` +
+ * `/api/shared-memory/*` ancestors used. `wm/write` is the only quad-bearing
+ * sub-route, so it keeps the default `MAX_BODY_BYTES`. The atomic create at
+ * `POST /api/knowledge-assets` also keeps the large cap because its body
+ * may include the same `quads` payload as `wm/write`.
+ */
+function postShapeMaxBytes(layer: string | undefined, verb: string | undefined): number | undefined {
+  if (layer === "wm" && verb === "write") return undefined; // default MAX_BODY_BYTES
+  if (
+    (layer === "wm" && (verb === "finalize" || verb === "discard" || verb === "pull-from")) ||
+    (layer === "swm" && verb === "share") ||
+    (layer === "vm" && verb === "publish")
+  ) {
+    return SMALL_BODY_BYTES;
+  }
+  return undefined;
+}
 
 function hex(bytes: Uint8Array): string {
   return "0x" + Buffer.from(bytes).toString("hex");
@@ -291,6 +315,70 @@ function clearSharedMemoryAfterForNamedPublish(opts: Record<string, unknown>): b
   return typeof opts.clearSharedMemoryAfter === "boolean" ? opts.clearSharedMemoryAfter : false;
 }
 
+/**
+ * Mirror the legacy `/api/shared-memory/publish` operation-tracker dance
+ * (codex PR #971 F22). Without this the new surface would publish without
+ * recording progress, tx hash, or gas/cost metadata in the daemon's
+ * operation history — a silent regression versus the route it replaces.
+ *
+ * `publishFromFinalizedAssertion` accepts `operationCtx` and threads it
+ * through the publisher's own phase markers, so the dashboard sees the
+ * same fine-grained timeline regardless of which HTTP surface initiated
+ * the publish. On exit:
+ *   - throws → `tracker.fail(opCtx, err)` then re-throw (caller's catch
+ *     maps to 400/500 as before);
+ *   - returns → `tracker.complete(opCtx, { tripleCount: kaManifest.length })`
+ *     unconditionally. Partial-success states (`tentative`/`failed` /
+ *     `contextGraphError`) are reflected in the HTTP status code (207)
+ *     by the caller — the operation row records a non-error completion
+ *     because the publish call itself completed, exactly mirroring the
+ *     legacy code path in `memory.ts` (`tracker.complete` runs even when
+ *     `result.contextGraphError` is set).
+ */
+async function publishWithTracker(
+  ctx: RequestContext,
+  contextGraphId: string,
+  name: string,
+  options: {
+    subGraphName?: string;
+    publishOptions: Record<string, unknown>;
+  },
+): Promise<any> {
+  const { tracker, agent, config, network } = ctx;
+  const opCtx = createOperationContext("publishFromSWM");
+  tracker.start(opCtx, {
+    contextGraphId,
+    details: {
+      source: "api",
+      assertionName: name,
+      ...(options.subGraphName ? { subGraphName: options.subGraphName } : {}),
+    },
+  });
+  try {
+    const result: any = await tracker.trackPhase(opCtx, "read-shared-memory", () =>
+      agent.publishFromFinalizedAssertion(contextGraphId, name, {
+        ...(options.subGraphName ? { subGraphName: options.subGraphName } : {}),
+        operationCtx: opCtx,
+        ...options.publishOptions,
+      }),
+    );
+    const chain = result?.onChainResult;
+    if (chain) {
+      tracker.setCost(opCtx, {
+        gasUsed: chain.gasUsed,
+        gasPrice: chain.effectiveGasPrice,
+      });
+      const chainId = resolveChainConfig(config, network)?.chainId;
+      tracker.setTxHash(opCtx, chain.txHash, chainId ? Number(chainId) : undefined);
+    }
+    tracker.complete(opCtx, { tripleCount: result?.kaManifest?.length ?? 0 });
+    return result;
+  } catch (err) {
+    tracker.fail(opCtx, err);
+    throw err;
+  }
+}
+
 function emitPublished(
   ctx: RequestContext,
   contextGraphId: string,
@@ -490,9 +578,13 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       }
       if (alsoPublishVm) {
         try {
-          const pub: any = await agent.publishFromFinalizedAssertion(resolvedContextGraphId, name, {
-            ...(subGraphName ? { subGraphName } : {}),
-            ...atomicPublishOptions,
+          // codex PR #971 F22: the atomic-create publish tail records into
+          // the same operation-tracker timeline as `/api/shared-memory/publish`
+          // and `/vm/publish`, so dashboards never lose visibility on a
+          // publish just because the caller chose the atomic surface.
+          const pub: any = await publishWithTracker(ctx, resolvedContextGraphId, name, {
+            subGraphName,
+            publishOptions: atomicPublishOptions,
           });
           result.kaId = pub?.kaId;
           result.ual = pub?.ual;
@@ -601,13 +693,26 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
   // body, so an unknown shape (e.g. `/:name/foo/bar`) falls through to the
   // daemon's 404 instead of returning a body-dependent 400/500. `pull-from` is
   // a known shape (returns 501 below), so it stays in the supported set.
+  //
+  // codex PR #971 F20: require the EXACT segment count for each known POST
+  // shape. Without the `segs.length === 3` guard, a path like
+  // `/api/knowledge-assets/foo/vm/publish/extra` still matched
+  // `(layer="vm", verb="publish")` and ran the publish side effect instead
+  // of falling through to the daemon's 404. Every currently-supported POST
+  // shape is `<name>/<layer>/<verb>` (3 segments after the prefix); when
+  // future shapes add their own depth they will need their own segment
+  // count too.
   const isSupportedPostShape =
-    (layer === "wm" && (verb === "write" || verb === "finalize" || verb === "discard" || verb === "pull-from")) ||
-    (layer === "swm" && verb === "share") ||
-    (layer === "vm" && verb === "publish");
+    segs.length === 3 &&
+    ((layer === "wm" && (verb === "write" || verb === "finalize" || verb === "discard" || verb === "pull-from")) ||
+      (layer === "swm" && verb === "share") ||
+      (layer === "vm" && verb === "publish"));
   if (!isSupportedPostShape) return;
 
-  const parsed = safeParseJson(await readBody(req), res);
+  // codex PR #971 F21: pick the body-size cap up front from the matched
+  // shape so control verbs do not silently inherit the 10 MB default.
+  const verbMaxBytes = postShapeMaxBytes(layer, verb);
+  const parsed = safeParseJson(await readBody(req, verbMaxBytes), res);
   if (!parsed) return;
   const contextGraphId = parsed.contextGraphId;
   const subGraphName = parsed.subGraphName;
@@ -714,9 +819,12 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     if (layer === "vm" && verb === "publish") {
       const opts = resolveFinalizedPublishOptions(ctx, finalizedPublishOptionsInput(parsed));
       if (opts === null) return;
-      const pub: any = await agent.publishFromFinalizedAssertion(resolvedContextGraphId, name, {
-        ...(subGraphName ? { subGraphName } : {}),
-        ...opts,
+      // codex PR #971 F22: mirror the legacy operation-tracker dance from
+      // `/api/shared-memory/publish` so the daemon's operation history
+      // records progress / tx-hash / cost for KA publishes too.
+      const pub: any = await publishWithTracker(ctx, resolvedContextGraphId, name, {
+        subGraphName,
+        publishOptions: opts,
       });
       emitPublished(ctx, resolvedContextGraphId, pub, subGraphName, clearSharedMemoryAfterForNamedPublish(opts));
       // Mirror the atomic path: non-throwing tentative/failed/contextGraphError

@@ -408,7 +408,14 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
       blockNumber: 123,
       kas: [{ tokenId: '1', rootEntity: 'ex:A' }],
     });
-    expect(agent.publishFromFinalizedAssertion).toHaveBeenCalledWith('cg', 'f', { clearSharedMemoryAfter: true });
+    // The third arg also carries an `operationCtx` from the F22 tracker
+    // helper; using `objectContaining` keeps the assertion pinned to the
+    // publish-control coercion without coupling it to the tracker dance.
+    expect(agent.publishFromFinalizedAssertion).toHaveBeenCalledWith(
+      'cg',
+      'f',
+      expect.objectContaining({ clearSharedMemoryAfter: true }),
+    );
     expect(emitMemoryGraphChanged).toHaveBeenCalledWith(
       expect.objectContaining({
         operation: 'shared_memory_published',
@@ -530,10 +537,14 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
     );
     await handleKnowledgeAssetsRoutes(ctx);
     expect(status(ctx)).toBe(200);
-    expect(agent.publishFromFinalizedAssertion).toHaveBeenCalledWith('cg', 'f', {
-      publishEpochs: 5, // number, not the JSON string "5"
-      publisherNodeIdentityIdOverride: 9n, // bigint
-    });
+    expect(agent.publishFromFinalizedAssertion).toHaveBeenCalledWith(
+      'cg',
+      'f',
+      expect.objectContaining({
+        publishEpochs: 5, // number, not the JSON string "5"
+        publisherNodeIdentityIdOverride: 9n, // bigint
+      }),
+    );
   });
 
   it('vm/publish accepts legacy top-level publish controls', async () => {
@@ -546,11 +557,15 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
     );
     await handleKnowledgeAssetsRoutes(ctx);
     expect(status(ctx)).toBe(200);
-    expect(agent.publishFromFinalizedAssertion).toHaveBeenCalledWith('cg', 'f', {
-      clearSharedMemoryAfter: true,
-      publishEpochs: 6,
-      publisherNodeIdentityIdOverride: 10n,
-    });
+    expect(agent.publishFromFinalizedAssertion).toHaveBeenCalledWith(
+      'cg',
+      'f',
+      expect.objectContaining({
+        clearSharedMemoryAfter: true,
+        publishEpochs: 6,
+        publisherNodeIdentityIdOverride: 10n,
+      }),
+    );
   });
 
   it('vm/publish rejects an invalid publishEpochs with a 400 (not a 500)', async () => {
@@ -658,7 +673,11 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
     );
     await handleKnowledgeAssetsRoutes(ctx);
     expect(status(ctx)).toBe(201);
-    expect(agent.publishFromFinalizedAssertion).toHaveBeenCalledWith('cg', 'f', { publishEpochs: 4 });
+    expect(agent.publishFromFinalizedAssertion).toHaveBeenCalledWith(
+      'cg',
+      'f',
+      expect.objectContaining({ publishEpochs: 4 }),
+    );
   });
 
   it('attributes the published activity row to the seal author, not the request token', async () => {
@@ -738,5 +757,178 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
     expect(status(ctx)).toBe(501);
     expect(body(ctx)).toMatchObject({ layer: 'swm' });
     expect(agent.assertion.history).not.toHaveBeenCalled();
+  });
+
+  // ── 5fd83a15 / f1a6e0f6 follow-up review (codex round 6) ────────────────────
+
+  it('POST with a known verb but trailing suffix segments falls through (F20: exact segment count)', async () => {
+    // Pre-fix `isSupportedPostShape` only checked (layer, verb) and accepted
+    // ANY segment count, so `/f/vm/publish/extra` matched (`vm`, `publish`)
+    // and ran the publish side effect. The fix pins each known POST shape
+    // to `segs.length === 3` (`<name>/<layer>/<verb>`).
+    const agent = makeAssertionAgent();
+    const ctx = ctxFor(
+      'POST',
+      '/api/knowledge-assets/f/vm/publish/extra',
+      { contextGraphId: 'cg' },
+      agent,
+    );
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(ctx.res.writableEnded).toBe(false); // falls through to daemon 404
+    expect(agent.publishFromFinalizedAssertion).not.toHaveBeenCalled();
+  });
+
+  it('POST trailing suffix on other shapes also falls through (F20 coverage)', async () => {
+    // Same regression for `wm/write` (the only quad-bearing verb) and
+    // `swm/share` — every supported (layer, verb) MUST require an exact
+    // 3-segment path.
+    const agent = makeAssertionAgent();
+    const quads = [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"', graph: '' }];
+
+    const writeCtx = ctxFor(
+      'POST',
+      '/api/knowledge-assets/f/wm/write/extra',
+      { contextGraphId: 'cg', quads },
+      agent,
+    );
+    await handleKnowledgeAssetsRoutes(writeCtx);
+    expect(writeCtx.res.writableEnded).toBe(false);
+    expect(agent.assertion.write).not.toHaveBeenCalled();
+
+    const shareCtx = ctxFor(
+      'POST',
+      '/api/knowledge-assets/f/swm/share/extra',
+      { contextGraphId: 'cg' },
+      agent,
+    );
+    await handleKnowledgeAssetsRoutes(shareCtx);
+    expect(shareCtx.res.writableEnded).toBe(false);
+    expect(agent.assertion.promote).not.toHaveBeenCalled();
+  });
+
+  it('control verbs reject oversize bodies (F21: SMALL_BODY_BYTES cap)', async () => {
+    // `wm/finalize`, `wm/discard`, `swm/share`, `vm/publish` only carry
+    // scalar control fields — they MUST inherit the legacy
+    // `SMALL_BODY_BYTES` (256 KB) cap, not the 10 MB default. A 1 MB body
+    // here is well above the small cap; `readBody` throws
+    // `PayloadTooLargeError` which the daemon's outer error mapper
+    // (not tested here) surfaces as 413. We assert the route never
+    // reaches the storage layer.
+    const agent = makeAssertionAgent();
+    const oversize = 'x'.repeat(1024 * 1024); // 1 MB
+    const ctx = ctxFor(
+      'POST',
+      '/api/knowledge-assets/f/wm/finalize',
+      { contextGraphId: 'cg', filler: oversize },
+      agent,
+    );
+    let caught: unknown;
+    try {
+      await handleKnowledgeAssetsRoutes(ctx);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).name).toBe('PayloadTooLargeError');
+    expect((caught as Error).message).toContain(String(256 * 1024));
+    expect(agent.assertion.finalize).not.toHaveBeenCalled();
+  });
+
+  it('wm/write keeps the large body cap (F21: quad-bearing verbs)', async () => {
+    // `wm/write` is the only sub-route that carries quads, so it MUST
+    // retain the default `MAX_BODY_BYTES` cap — the same 1 MB body that
+    // tripped finalize above goes through here.
+    const agent = makeAssertionAgent();
+    const quads: Array<{ subject: string; predicate: string; object: string; graph: string }> = [];
+    // ~50 KB per quad × 30 = ~1.5 MB of quad payload — comfortably above
+    // SMALL_BODY_BYTES (256 KB) and below MAX_BODY_BYTES (10 MB).
+    const big = 'y'.repeat(50 * 1024);
+    for (let i = 0; i < 30; i++) {
+      quads.push({ subject: 'ex:A', predicate: 'ex:p', object: `"${big}-${i}"`, graph: '' });
+    }
+    const ctx = ctxFor(
+      'POST',
+      '/api/knowledge-assets/f/wm/write',
+      { contextGraphId: 'cg', quads },
+      agent,
+    );
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(200);
+    expect(body(ctx)).toMatchObject({ written: 30 });
+    expect(agent.assertion.write).toHaveBeenCalledOnce();
+  });
+
+  it('vm/publish records the operation through the tracker (F22)', async () => {
+    const agent = makeAssertionAgent();
+    const tracker = createTracker();
+    const ctx = ctxFor(
+      'POST',
+      '/api/knowledge-assets/f/vm/publish',
+      { contextGraphId: 'cg' },
+      agent,
+      { tracker },
+    );
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(200);
+    // tracker.start fired with the contextGraph + source=api details
+    expect((tracker as any).start).toHaveBeenCalledTimes(1);
+    expect((tracker as any).start.mock.calls[0][1]).toMatchObject({
+      contextGraphId: 'cg',
+      details: { source: 'api', assertionName: 'f' },
+    });
+    // The publish call was wrapped in `trackPhase('read-shared-memory', ...)`
+    expect((tracker as any).trackPhase).toHaveBeenCalledTimes(1);
+    expect((tracker as any).trackPhase.mock.calls[0][1]).toBe('read-shared-memory');
+    // Tx coordinates from the mock onChainResult landed on the operation row.
+    expect((tracker as any).setTxHash).toHaveBeenCalledWith(expect.anything(), '0xtx', undefined);
+    // Non-throwing publish ⇒ complete (not fail) — even when the HTTP
+    // status ends up being 207 for a partial-success the operation itself
+    // completed (mirrors the legacy memory.ts pattern).
+    expect((tracker as any).complete).toHaveBeenCalledTimes(1);
+    expect((tracker as any).fail).not.toHaveBeenCalled();
+    // operationCtx threads into the publish call so the publisher's own
+    // phase markers attach to the same operation row.
+    const [, , publishOpts] = (agent.publishFromFinalizedAssertion as any).mock.calls[0];
+    expect(publishOpts).toHaveProperty('operationCtx');
+  });
+
+  it('vm/publish records a tracker.fail when the publish throws (F22)', async () => {
+    const agent = makeAssertionAgent({
+      publishFromFinalizedAssertion: vi.fn(async () => {
+        throw new Error('chain down');
+      }),
+    });
+    const tracker = createTracker();
+    const ctx = ctxFor(
+      'POST',
+      '/api/knowledge-assets/f/vm/publish',
+      { contextGraphId: 'cg' },
+      agent,
+      { tracker },
+    );
+    await handleKnowledgeAssetsRoutes(ctx);
+    // Outer catch maps the throw to a 500 (no `routeError` match for
+    // "chain down"); the operation row is still flushed via tracker.fail.
+    expect(status(ctx)).toBe(500);
+    expect((tracker as any).fail).toHaveBeenCalledTimes(1);
+    expect((tracker as any).complete).not.toHaveBeenCalled();
+  });
+
+  it('atomic create publish tail also records through the tracker (F22)', async () => {
+    const agent = makeAssertionAgent();
+    const tracker = createTracker();
+    const quads = [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"', graph: '' }];
+    const ctx = ctxFor(
+      'POST',
+      '/api/knowledge-assets',
+      { contextGraphId: 'cg', name: 'f', quads, alsoShareSwm: true, alsoPublishVm: true },
+      agent,
+      { tracker },
+    );
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(201);
+    expect((tracker as any).start).toHaveBeenCalledTimes(1);
+    expect((tracker as any).complete).toHaveBeenCalledTimes(1);
+    expect((tracker as any).fail).not.toHaveBeenCalled();
   });
 });
