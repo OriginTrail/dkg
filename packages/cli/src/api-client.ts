@@ -593,6 +593,10 @@ export class ApiClient {
       schemeVersion?: number;
     },
   ): Promise<{ merkleRoot: string; eip712Digest: string }> {
+    // Mirror the mcp-dkg / openclaw / node-ui clients: reject the
+    // self-sign vs external-signer conflict client-side instead of relying on
+    // the daemon, so every SDK surface enforces the same contract.
+    assertExclusiveAuthorFields(options ?? {});
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/wm/finalize`, { contextGraphId, ...(options ?? {}) });
   }
 

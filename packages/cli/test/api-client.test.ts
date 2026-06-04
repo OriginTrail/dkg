@@ -619,6 +619,20 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
     });
   });
 
+  it('knowledgeAssetFinalize rejects self-sign + external-signer conflict before HTTP serialization', async () => {
+    const calls = track({ merkleRoot: '0xabc', eip712Digest: '0xdig' });
+    await expect(
+      client.knowledgeAssetFinalize('cg', 'f', {
+        authorAgentAddress: '0x1111111111111111111111111111111111111111',
+        preSignedAuthorAttestation: {
+          address: '0x2222222222222222222222222222222222222222',
+          signature: { r: `0x${'22'.repeat(32)}`, vs: `0x${'33'.repeat(32)}` },
+        },
+      }),
+    ).rejects.toThrow('authorAgentAddress and preSignedAuthorAttestation are mutually exclusive');
+    expect(calls).toHaveLength(0);
+  });
+
   it('knowledgeAssetShare → swm/share, knowledgeAssetPublish → vm/publish', async () => {
     let calls = track({ swmShared: true, promotedCount: 2 });
     await client.knowledgeAssetShare('cg', 'f');
