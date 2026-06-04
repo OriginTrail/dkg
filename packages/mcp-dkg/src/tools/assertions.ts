@@ -550,19 +550,25 @@ export function registerAssertionTools(
       inputSchema: {
         name: z.string().describe('Assertion name'),
         projectId: z.string().optional().describe(`${EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION} Defaults to .dkg/config.yaml.`),
+        agentAddress: z
+          .string()
+          .optional()
+          .describe("Optional author — defaults to this node's agent address"),
         subGraphName: z.string().optional(),
       },
     },
-    async ({ name, projectId, subGraphName }): Promise<ToolResult> => {
+    async ({ name, projectId, agentAddress, subGraphName }): Promise<ToolResult> => {
       const pid = resolveProject(projectId, config);
       if (!pid) return projectErr();
       try {
-        // KA lifecycle descriptor (per-layer state, author, timestamps) —
-        // the GET surface is keyed by (contextGraph, name), so the legacy
-        // per-author `agentAddress` filter no longer applies.
-        const result = await client.getKnowledgeAsset({
+        // Read stays on the legacy assertion route: the KA GET surface
+        // (getKnowledgeAsset) is keyed by (contextGraph, name) only and
+        // cannot resolve another author's history. Keep `agentAddress`
+        // author-scoping until the KA GET route accepts it.
+        const result = await client.getAssertionHistory({
           contextGraphId: pid,
-          name,
+          assertionName: name,
+          agentAddress,
           subGraphName,
         });
         return ok(

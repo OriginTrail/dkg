@@ -16,8 +16,9 @@ export function buildAssertionTools(ctx: DkgToolHost): OpenClawTool[] {
     {
       name: 'dkg_assertion_create',
       description:
-        'Step 1 of the canonical flow. Create a per-agent Working Memory assertion graph. Idempotent: a ' +
-        'duplicate name returns `{ assertionUri: null, alreadyExists: true }`.',
+        'Step 1 of the canonical flow. Create a per-agent Working Memory assertion graph (a Knowledge ' +
+        'Asset draft). Idempotent and non-destructive: re-creating an existing name returns the open ' +
+        'draft `{ name, assertionUri, status }` without clearing its quads.',
       parameters: {
         type: 'object',
         properties: {

@@ -1253,14 +1253,15 @@ describe('DkgNodePlugin', () => {
       await byName.get('dkg_assertion_history')!.execute('tc', {
         context_graph_id: 'ctx',
         name: 'notes',
+        agent_address: '0xabc',
         sub_graph_name: 'protocols',
       });
       const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
       const parsed = new URL(String(url));
-      // KA lifecycle descriptor: GET /api/knowledge-assets/:name keyed by
-      // (contextGraphId, subGraphName). No per-author `agentAddress` filter.
-      expect(parsed.pathname).toBe('/api/knowledge-assets/notes');
+      // Read stays on the legacy assertion route to keep author scoping.
+      expect(parsed.pathname).toBe('/api/assertion/notes/history');
       expect(parsed.searchParams.get('contextGraphId')).toBe('ctx');
+      expect(parsed.searchParams.get('agentAddress')).toBe('0xabc');
       expect(parsed.searchParams.get('subGraphName')).toBe('protocols');
       expect(init.body).toBeUndefined();
     });

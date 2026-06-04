@@ -394,4 +394,58 @@ describe('OT-RFC-43 A2/B3 — per-layer status + kaId addressing', () => {
     expect(agent.assertion.history).toHaveBeenCalledOnce();
     expect(agent.assertion.resolveByKaId).not.toHaveBeenCalled();
   });
+
+  // Parity with the legacy /api/assertion/* routes: a caller's own mistakes
+  // are 400s (and the "_meta completed but empty" case a 409), not blanket 500s.
+  describe('error-status parity with legacy assertion routes', () => {
+    it('POST /api/knowledge-assets rejects an invalid name with 400 (before touching the engine)', async () => {
+      const agent = makeAssertionAgent();
+      const ctx = ctxFor('POST', '/api/knowledge-assets', { contextGraphId: 'cg', name: 'Bad Name!' }, agent);
+      await handleKnowledgeAssetsRoutes(ctx);
+      expect(status(ctx)).toBe(400);
+      expect(String(body(ctx).error)).toMatch(/Invalid "name"/);
+      expect(agent.assertion.create).not.toHaveBeenCalled();
+    });
+
+    it('maps engine "not found" / "Invalid" / "Unsafe" failures to 400 on wm/write', async () => {
+      const agent = makeAssertionAgent({
+        assertion: { write: vi.fn(async () => { throw new Error('assertion not found'); }) },
+      });
+      const ctx = ctxFor('POST', '/api/knowledge-assets/f/wm/write', { contextGraphId: 'cg', quads: [{ subject: 's', predicate: 'p', object: '"o"' }] }, agent);
+      await handleKnowledgeAssetsRoutes(ctx);
+      expect(status(ctx)).toBe(400);
+    });
+
+    it('maps a reserved-namespace error to 400 on wm/write', async () => {
+      const err = Object.assign(new Error('reserved namespace'), { name: 'ReservedNamespaceError' });
+      const agent = makeAssertionAgent({ assertion: { write: vi.fn(async () => { throw err; }) } });
+      const ctx = ctxFor('POST', '/api/knowledge-assets/f/wm/write', { contextGraphId: 'cg', quads: [{ subject: 's', predicate: 'p', object: '"o"' }] }, agent);
+      await handleKnowledgeAssetsRoutes(ctx);
+      expect(status(ctx)).toBe(400);
+    });
+
+    it('maps AssertionNotPersistedError to 409 on swm/share', async () => {
+      const err = Object.assign(new Error('data graph empty'), {
+        name: 'AssertionNotPersistedError',
+        code: 'ASSERTION_NOT_PERSISTED',
+        contextGraphId: 'cg',
+        assertionGraph: 'urn:g',
+        expectedTripleCount: 4,
+      });
+      const agent = makeAssertionAgent({ assertion: { promote: vi.fn(async () => { throw err; }) } });
+      const ctx = ctxFor('POST', '/api/knowledge-assets/f/swm/share', { contextGraphId: 'cg' }, agent);
+      await handleKnowledgeAssetsRoutes(ctx);
+      expect(status(ctx)).toBe(409);
+      expect(body(ctx)).toMatchObject({ code: 'ASSERTION_NOT_PERSISTED', expectedTripleCount: 4 });
+    });
+
+    it('still returns 500 for genuinely unexpected engine failures', async () => {
+      const agent = makeAssertionAgent({
+        assertion: { discard: vi.fn(async () => { throw new Error('disk on fire'); }) },
+      });
+      const ctx = ctxFor('POST', '/api/knowledge-assets/f/wm/discard', { contextGraphId: 'cg' }, agent);
+      await handleKnowledgeAssetsRoutes(ctx);
+      expect(status(ctx)).toBe(500);
+    });
+  });
 });

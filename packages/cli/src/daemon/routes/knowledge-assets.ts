@@ -28,8 +28,41 @@ import type { RequestContext } from "./context.js";
 import { jsonResponse, readBody, safeParseJson } from "../http-utils.js";
 import { validatePreSignedAuthorAttestation } from "./memory.js";
 import { deriveStatus } from "@origintrail-official/dkg-publisher";
+import { validateAssertionName } from "@origintrail-official/dkg-core";
 
 const PREFIX = "/api/knowledge-assets";
+
+/**
+ * Translate engine/publisher errors into the same HTTP status mapping the
+ * legacy `/api/assertion/*` routes use, so callers see 400 for their own
+ * mistakes (bad name, missing assertion, unsafe/reserved IRI) and 409 for the
+ * "_meta says completed but the data graph is empty" case — instead of a
+ * blanket 500. Mirrors assertion.ts so the KA surface is at parity.
+ */
+function respondAssertionError(res: RequestContext["res"], e: any): void {
+  if (e?.name === "AssertionNotPersistedError" || e?.code === "ASSERTION_NOT_PERSISTED") {
+    jsonResponse(res, 409, {
+      error: e.message,
+      code: "ASSERTION_NOT_PERSISTED",
+      contextGraphId: e.contextGraphId,
+      assertionGraph: e.assertionGraph,
+      expectedTripleCount: e.expectedTripleCount,
+    });
+    return;
+  }
+  const msg = e?.message ?? String(e);
+  if (
+    e?.name === "ReservedNamespaceError" ||
+    msg.includes("not found") ||
+    msg.includes("Invalid") ||
+    msg.includes("Unsafe") ||
+    msg.includes("reserved namespace")
+  ) {
+    jsonResponse(res, 400, { error: msg });
+    return;
+  }
+  jsonResponse(res, 500, { error: msg });
+}
 
 function hex(bytes: Uint8Array): string {
   return "0x" + Buffer.from(bytes).toString("hex");
@@ -157,6 +190,12 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     if (!contextGraphId || !name) {
       return jsonResponse(res, 400, { error: 'Missing "contextGraphId" or "name"' });
     }
+    // Validate the name up front (parity with the legacy create route) so a
+    // bad slug / reserved name is a 400 here rather than a 500 from the engine.
+    const nameVal = validateAssertionName(name);
+    if (!nameVal.valid) {
+      return jsonResponse(res, 400, { error: `Invalid "name": ${nameVal.reason}` });
+    }
     const shouldAutoFinalize = Array.isArray(quads) && quads.length > 0;
     const finalizeOptions = shouldAutoFinalize
       ? resolveFinalizeOptions({ subGraphName, authorAgentAddress, preSignedAuthorAttestation, schemeVersion }, res)
@@ -205,7 +244,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       if (errors.length > 0) return jsonResponse(res, 207, { created: true, ...result, errors });
       return jsonResponse(res, 201, result);
     } catch (e: any) {
-      return jsonResponse(res, 500, { error: e?.message ?? String(e) });
+      return respondAssertionError(res, e);
     }
   }
 
@@ -324,7 +363,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       });
     }
   } catch (e: any) {
-    return jsonResponse(res, 500, { error: e?.message ?? String(e) });
+    return respondAssertionError(res, e);
   }
 
   // Unmatched under the prefix — fall through to the daemon's 404.

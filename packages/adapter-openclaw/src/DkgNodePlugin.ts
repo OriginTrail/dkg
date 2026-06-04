@@ -3629,10 +3629,12 @@ export class DkgNodePlugin {
       const name = String(args.name ?? '').trim();
       if (!contextGraphId) return this.error('"context_graph_id" is required.');
       if (!name) return this.error('"name" is required.');
+      const agentAddress = args.agent_address ? String(args.agent_address) : undefined;
       const subGraphName = args.sub_graph_name ? String(args.sub_graph_name) : undefined;
-      // KA lifecycle descriptor, keyed by (contextGraph, name) — the legacy
-      // per-author `agent_address` filter is not part of the GET surface.
-      const result = await this.client.getKnowledgeAsset(contextGraphId, name, { subGraphName });
+      // Read stays on the legacy assertion route: the KA GET surface is keyed
+      // by (contextGraph, name) only and cannot resolve another author's
+      // history, so keep `agent_address` author-scoping here.
+      const result = await this.client.getAssertionHistory(contextGraphId, name, { agentAddress, subGraphName });
       return this.json(result);
     } catch (err: any) {
       return this.daemonError(err);
