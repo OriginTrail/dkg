@@ -1029,9 +1029,8 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
         kaId: String(result.kaId),
         status: result.status,
         kas: result.kaManifest.map((ka) => ({
-          tokenId: String(ka.metadataTokenId ?? ka.tokenId),
+          tokenId: String(ka.tokenId),
           ...(ka.metadataTokenId != null ? { metadataTokenId: String(ka.metadataTokenId) } : {}),
-          ...(ka.metadataTokenId != null && ka.tokenId != null ? { onChainTokenId: String(ka.tokenId) } : {}),
           rootEntity: ka.rootEntity,
         })),
         ...(chain && { txHash: chain.txHash, blockNumber: chain.blockNumber }),

@@ -119,7 +119,7 @@ describe('generateKCMetadata', () => {
     const kas = [makeKA({ tokenId: 1n }), makeKA({ tokenId: 2n, rootEntity: 'did:dkg:entity:bob' })];
     const quads = generateKCMetadata(makeMeta({ kaCount: 2 }), kas);
     const kaSubjects = new Set(quads.filter(q => q.predicate === RDF_TYPE && q.object === `${DKG}KnowledgeAsset`).map(q => q.subject));
-    expect(kaSubjects.size).toBe(2);
+    expect(kaSubjects).toEqual(new Set([UAL, `${UAL}/1`, `${UAL}/2`]));
   });
 
   it('Design B compatibility: one on-chain KA keeps per-root metadata rows', () => {
@@ -135,8 +135,18 @@ describe('generateKCMetadata', () => {
     const kaSubjects = new Set(
       quads.filter(q => q.predicate === RDF_TYPE && q.object === `${DKG}KnowledgeAsset`).map(q => q.subject),
     );
-    expect(kaSubjects).toEqual(new Set([`${UAL}/1`, `${UAL}/2`, `${UAL}/3`]));
+    expect(kaSubjects).toEqual(new Set([UAL, `${UAL}/1`, `${UAL}/2`, `${UAL}/3`]));
 
+    expect(new Set(
+      quads
+        .filter(q => q.subject === UAL && q.predicate === `${DKG}rootEntity`)
+        .map(q => q.object),
+    )).toEqual(new Set([
+      'did:dkg:entity:alice',
+      'did:dkg:entity:bob',
+      'did:dkg:entity:carol',
+    ]));
+    expect(quads.find(q => q.subject === UAL && q.predicate === `${DKG}partOf`)?.object).toBe(UAL);
     expect(quads.find(q => q.subject === `${UAL}/1` && q.predicate === `${DKG}rootEntity`)?.object)
       .toBe('did:dkg:entity:alice');
     expect(quads.find(q => q.subject === `${UAL}/2` && q.predicate === `${DKG}rootEntity`)?.object)
@@ -148,6 +158,7 @@ describe('generateKCMetadata', () => {
       .filter(q => q.predicate === `${DKG}publicTripleCount`)
       .map(q => [q.subject, q.object]);
     expect(publicCounts).toEqual([
+      [UAL, '"10"^^<http://www.w3.org/2001/XMLSchema#integer>'],
       [`${UAL}/1`, '"5"^^<http://www.w3.org/2001/XMLSchema#integer>'],
       [`${UAL}/2`, '"3"^^<http://www.w3.org/2001/XMLSchema#integer>'],
       [`${UAL}/3`, '"2"^^<http://www.w3.org/2001/XMLSchema#integer>'],
@@ -289,10 +300,10 @@ describe('generateKCMetadata — RFC-001 §3.5 publication provenance', () => {
     const quads = generateKCMetadata(meta, kas);
 
     const linkQuads = quads.filter(q => q.predicate === `${DKG}publication`);
-    expect(linkQuads).toHaveLength(2);
+    expect(linkQuads).toHaveLength(3);
     expect(linkQuads.every(q => q.object === PUBLICATION_URI)).toBe(true);
     expect(new Set(linkQuads.map(q => q.subject))).toEqual(
-      new Set([`${UAL}/1`, `${UAL}/2`]),
+      new Set([UAL, `${UAL}/1`, `${UAL}/2`]),
     );
   });
 

@@ -181,6 +181,7 @@ describe('GossipPublishHandler', () => {
         GRAPH <${metaGraph}> {
           ?ka <http://dkg.io/ontology/partOf> <did:dkg:mock:31337/0x1/100> ;
               <http://dkg.io/ontology/tokenId> ?tokenId .
+          FILTER(?ka != <did:dkg:mock:31337/0x1/100>)
           <did:dkg:mock:31337/0x1/100> <http://dkg.io/ontology/kaCount> ?count .
         }
       } ORDER BY ?ka`,
@@ -193,6 +194,49 @@ describe('GossipPublishHandler', () => {
       '"101"^^<http://www.w3.org/2001/XMLSchema#integer>',
     ]);
     expect(result.bindings[0]?.['count']).toBe('"2"^^<http://www.w3.org/2001/XMLSchema#integer>');
+  });
+
+  it('rejects gossip publish metadata when manifest roots do not match partitioned data roots', async () => {
+    const { store, handler } = createHandler();
+    const roots = ['urn:gossip:manifest-a', 'urn:gossip:manifest-b'];
+    const nquads = roots
+      .map((root, i) => `<${root}> <http://schema.org/name> "Entity ${i}" .`)
+      .join('\n');
+    const kas = [{
+      tokenId: 1,
+      rootEntity: roots[0],
+      privateMerkleRoot: new Uint8Array(0),
+      privateTripleCount: 0,
+    }];
+
+    const data = makePublishMessage({
+      ual: 'did:dkg:mock:31337/0x1/manifest-mismatch',
+      contextGraphId: CONTEXT_GRAPH,
+      nquads,
+      kas,
+      startKAId: 1,
+      endKAId: 1,
+    });
+
+    await handler.handlePublishMessage(data, CONTEXT_GRAPH);
+
+    const dataGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
+    const dataResult = await store.query(
+      `SELECT ?s WHERE { GRAPH <${dataGraph}> { ?s <http://schema.org/name> ?o } }`,
+    );
+    expect(dataResult.type).toBe('bindings');
+    expect(dataResult.type === 'bindings' ? dataResult.bindings : []).toHaveLength(0);
+
+    const metaGraph = `${dataGraph}/_meta`;
+    const metaResult = await store.query(
+      `SELECT ?ka WHERE {
+        GRAPH <${metaGraph}> {
+          ?ka <http://dkg.io/ontology/partOf> <did:dkg:mock:31337/0x1/manifest-mismatch> .
+        }
+      }`,
+    );
+    expect(metaResult.type).toBe('bindings');
+    expect(metaResult.type === 'bindings' ? metaResult.bindings : []).toHaveLength(0);
   });
 
   it('inserts quads for UAL with empty kas (no structural validation)', async () => {

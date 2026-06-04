@@ -249,6 +249,21 @@ export class GossipPublishHandler {
           this.log.warn(ctx, `Gossip structural validation rejected publish ${request.ual}: no valid root entities`);
           return;
         }
+        const partitionedRoots = [...autoPartition(normalized).keys()];
+        const manifestRoots = request.kas.map((ka) => ka.rootEntity);
+        const partitionedRootSet = new Set(partitionedRoots);
+        const manifestRootSet = new Set(manifestRoots);
+        const matchesPartitionedRoots = manifestRoots.length === partitionedRoots.length
+          && manifestRootSet.size === manifestRoots.length
+          && partitionedRoots.every((root) => manifestRootSet.has(root))
+          && manifestRoots.every((root) => partitionedRootSet.has(root));
+        if (!matchesPartitionedRoots) {
+          this.log.warn(
+            ctx,
+            `Gossip structural validation rejected publish ${request.ual}: manifest roots do not match partitioned data roots`,
+          );
+          return;
+        }
         const sparql = `SELECT DISTINCT ?s WHERE { GRAPH <${dataGraph}> { ?s ?p ?o } VALUES ?s { ${rootEntities.map(e => `<${e}>`).join(' ')} } }`;
         const result = await this.store.query(sparql);
         const existingEntities = new Set<string>(

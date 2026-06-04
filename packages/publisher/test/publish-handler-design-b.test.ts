@@ -59,6 +59,7 @@ describe('PublishHandler Design B metadata', () => {
           ?ka <${DKG}rootEntity> ?root ;
               <${DKG}tokenId> ?token ;
               <${DKG}partOf> <${ual}> .
+          FILTER(?ka != <${ual}>)
         }
       } ORDER BY ?ka`,
     );
@@ -68,6 +69,22 @@ describe('PublishHandler Design B metadata', () => {
     expect(rows.map((row) => row.ka)).toEqual([`${ual}/1`, `${ual}/2`]);
     expect(rows.map((row) => row.root)).toEqual(roots);
     expect(rows.every((row) => row.token.includes('"11"'))).toBe(true);
+
+    const aggregateMetadata = await store.query(
+      `SELECT ?root ?token ?partOf WHERE {
+        GRAPH <${META_GRAPH}> {
+          <${ual}> <${DKG}rootEntity> ?root ;
+                   <${DKG}tokenId> ?token ;
+                   <${DKG}partOf> ?partOf .
+        }
+      } ORDER BY ?root`,
+    );
+
+    expect(aggregateMetadata.type).toBe('bindings');
+    const aggregateRows = aggregateMetadata.type === 'bindings' ? aggregateMetadata.bindings : [];
+    expect(aggregateRows.map((row) => row.root)).toEqual(roots);
+    expect(aggregateRows.every((row) => row.token.includes('"11"'))).toBe(true);
+    expect(aggregateRows.every((row) => row.partOf === ual)).toBe(true);
   });
 
   it('counts distinct real token ids for legacy multi-KA ranges', async () => {
@@ -104,6 +121,7 @@ describe('PublishHandler Design B metadata', () => {
         GRAPH <${META_GRAPH}> {
           ?ka <${DKG}tokenId> ?token ;
               <${DKG}partOf> <${ual}> .
+          FILTER(?ka != <${ual}>)
           <${ual}> <${DKG}kaCount> ?kaCount .
         }
       } ORDER BY ?ka`,

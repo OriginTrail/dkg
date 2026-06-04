@@ -157,6 +157,31 @@ export function generateKCMetadata(
   // at <ual>/1, <ual>/2, ... . Keep this compatibility shape until those
   // consumers are migrated to aggregate multi-root KA metadata directly.
   const kaUriFor = (ka: KAMetadata): string => `${ka.kcUal}/${ka.metadataTokenId ?? ka.tokenId}`;
+  if (kaEntries.length > 0) {
+    const publicTripleCount = kaEntries.reduce((sum, ka) => sum + ka.publicTripleCount, 0);
+    const privateTripleCount = kaEntries.reduce((sum, ka) => sum + ka.privateTripleCount, 0);
+    const tokenIds = [...new Set(kaEntries.map((ka) => ka.tokenId.toString()))];
+    const rootEntities = [...new Set(kaEntries.map((ka) => ka.rootEntity))];
+    quads.push(
+      mq(meta.ual, `${RDF}type`, `${DKG}KnowledgeAsset`, metaGraph),
+      mq(meta.ual, `${DKG}partOf`, meta.ual, metaGraph),
+      mq(meta.ual, `${DKG}publicTripleCount`, intLit(publicTripleCount), metaGraph),
+    );
+    for (const tokenId of tokenIds) {
+      quads.push(mq(meta.ual, `${DKG}tokenId`, intLit(BigInt(tokenId)), metaGraph));
+    }
+    for (const rootEntity of rootEntities) {
+      quads.push(mq(meta.ual, `${DKG}rootEntity`, rootEntity, metaGraph));
+    }
+    if (privateTripleCount > 0) {
+      quads.push(mq(meta.ual, `${DKG}privateTripleCount`, intLit(privateTripleCount), metaGraph));
+      const privateRoots = kaEntries.filter((ka) => ka.privateMerkleRoot);
+      if (privateRoots.length === 1 && privateRoots[0].privateMerkleRoot) {
+        quads.push(mq(meta.ual, `${DKG}privateMerkleRoot`, lit(toHex(privateRoots[0].privateMerkleRoot)), metaGraph));
+      }
+    }
+  }
+
   for (const ka of kaEntries) {
     const kaUri = kaUriFor(ka);
     quads.push(
@@ -211,6 +236,7 @@ export function generateKCMetadata(
       const kaUri = kaUriFor(ka);
       quads.push(mq(kaUri, `${DKG}publication`, publicationUri, metaGraph));
     }
+    quads.push(mq(meta.ual, `${DKG}publication`, publicationUri, metaGraph));
   }
 
   return quads;
