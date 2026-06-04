@@ -8,11 +8,11 @@ export const MAX_PUBLISH_EPOCHS = 0xffffffff;
 
 export interface KAManifestEntry {
   /**
-   * Per-root compatibility row id used by legacy `<ual>/<tokenId>` lookups.
-   * For Design B multi-entity publishes, the shared on-chain NFT id is
-   * reported as `PublishResult.kaId`.
+   * Real on-chain KA NFT id once confirmed. Tentative/local publishes may use
+   * the compatibility row id until an on-chain id exists.
    */
   tokenId: bigint;
+  /** Per-root compatibility row id used for legacy `<ual>/1`, `<ual>/2`, ... lookups. */
   metadataTokenId?: bigint;
   rootEntity: string;
   privateMerkleRoot?: Uint8Array;

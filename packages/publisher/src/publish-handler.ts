@@ -284,10 +284,10 @@ export class PublishHandler {
       await this.store.insert(normalized);
 
       const kaMetadata: KAMetadata[] = manifest.map((m, i) => {
-        const metadataTokenId = BigInt(i + 1);
-        const tokenId = request.kas[i]?.tokenId != null
+        const metadataTokenId = request.kas[i]?.tokenId != null
           ? BigInt(request.kas[i].tokenId as any)
-          : metadataTokenId;
+          : BigInt(i + 1);
+        const tokenId = realTokenIdForMetadataRow(startKAId, endKAId, i, metadataTokenId);
         return {
           rootEntity: m.rootEntity,
           kcUal: request.ual,
@@ -624,6 +624,19 @@ function protoToBigInt(val: number | { low: number; high: number; unsigned: bool
   const lo = BigInt(val.low >>> 0);
   const hi = BigInt(val.high >>> 0);
   return (hi << 32n) | lo;
+}
+
+function realTokenIdForMetadataRow(
+  startKAId: bigint,
+  endKAId: bigint,
+  rowIndex: number,
+  fallback: bigint,
+): bigint {
+  if (startKAId <= 0n || endKAId < startKAId) return fallback;
+  const rangeSize = endKAId - startKAId + 1n;
+  if (rangeSize === 1n) return startKAId;
+  const candidate = startKAId + BigInt(rowIndex);
+  return candidate <= endKAId ? candidate : fallback;
 }
 
 /**

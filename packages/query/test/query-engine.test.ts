@@ -122,6 +122,27 @@ describe('DKGQueryEngine', () => {
     expect(subjects).toContain(`${ENTITY_2}/.well-known/genid/o1`);
   });
 
+  it('resolveKA orders member roots by numeric metadata row suffix', async () => {
+    const ual = 'did:dkg:mock:31337/77';
+    const rows: Quad[] = [
+      q(ual, 'http://dkg.io/ontology/contextGraph', `did:dkg:context-graph:${CONTEXT_GRAPH}`, META),
+    ];
+    for (let i = 1; i <= 10; i++) {
+      const entity = `did:dkg:agent:QmMember${i}`;
+      rows.push(
+        q(entity, 'http://schema.org/name', `"Member ${i}"`),
+        q(`${ual}/${i}`, 'http://dkg.io/ontology/rootEntity', entity, META),
+        q(`${ual}/${i}`, 'http://dkg.io/ontology/partOf', ual, META),
+      );
+    }
+    await store.insert(rows);
+
+    const result = await engine.resolveKA(ual);
+    expect(result.rootEntity).toBe('did:dkg:agent:QmMember1');
+    expect(result.rootEntities[1]).toBe('did:dkg:agent:QmMember2');
+    expect(result.rootEntities[9]).toBe('did:dkg:agent:QmMember10');
+  });
+
   it('throws on unknown UAL', async () => {
     await expect(engine.resolveKA('did:dkg:mock:9999/99')).rejects.toThrow(
       'KA not found',

@@ -150,6 +150,30 @@ describe('publishFromSharedMemory selection boundary', () => {
     expect(new Set(publishArgs.quads.map((qq) => qq.subject))).toEqual(new Set(roots));
   });
 
+  it('rejects a single-root subset of a multi-root share-operation boundary', async () => {
+    const { publisher, store, publishSpy } = await makePublisher();
+    const roots = ['urn:test:root:one', 'urn:test:root:two'];
+    await store.insert([
+      q(roots[0]),
+      q(roots[1]),
+      ...generateShareMetadata({
+        contextGraphId: CONTEXT_GRAPH,
+        shareOperationId: 'op-design-b',
+        rootEntities: roots,
+        publisherPeerId: 'peer-a',
+        timestamp: new Date('2026-01-01T00:00:00.000Z'),
+      }, SWM_META_GRAPH),
+    ]);
+
+    await expect(
+      publisher.publishFromSharedMemory(CONTEXT_GRAPH, {
+        rootEntities: [roots[0]],
+      }),
+    ).rejects.toMatchObject({ code: 'MULTI_ROOT_PUBLISH_NOT_ATOMIC' });
+
+    expect(publishSpy).not.toHaveBeenCalled();
+  });
+
   it('rejects explicit selection when any requested root is missing from shared memory', async () => {
     const { publisher, store, publishSpy } = await makePublisher();
     const roots = ['urn:test:root:one', 'urn:test:root:two'];

@@ -224,16 +224,16 @@ describe('Publisher EVM E2E: DKGPublisher with real contracts', () => {
     }
 
     // OT-RFC-44 / Design B: a 5-entity file mints exactly ONE KA whose member
-    // entities are all five — not five KAs, and no longer rejected. The manifest
-    // keeps manifest tokenId as the per-root `<ual>/N` compatibility row id
-    // while result.kaId carries the actual minted NFT id.
+    // entities are all five — not five KAs, and no longer rejected.
+    // `metadataTokenId` keeps the per-root `<ual>/N` compatibility row id;
+    // `tokenId` carries the actual minted NFT id.
     const result = await publisher.publish({ contextGraphId: CONTEXT_GRAPH, quads });
     expect(result.status).toBe('confirmed');
     expect(result.kaId).toBeDefined();
     const roots = new Set(result.kaManifest.map((m: any) => m.rootEntity));
     expect(roots.size).toBe(5);
     const tokenIds = new Set(result.kaManifest.map((m: any) => String(m.tokenId)));
-    expect(tokenIds).toEqual(new Set(['1', '2', '3', '4', '5']));
+    expect(tokenIds).toEqual(new Set([String(result.kaId)]));
     const metadataTokenIds = new Set(result.kaManifest.map((m: any) => String(m.metadataTokenId)));
     expect(metadataTokenIds).toEqual(new Set(['1', '2', '3', '4', '5']));
   }, 30_000);

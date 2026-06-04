@@ -39,6 +39,27 @@ export class ScopedQueryViolationError extends Error {
   }
 }
 
+function compareKaMetadataRows(ual: string, a: string | undefined, b: string | undefined): number {
+  const aOrdinal = kaMetadataOrdinal(ual, a);
+  const bOrdinal = kaMetadataOrdinal(ual, b);
+  if (aOrdinal !== undefined && bOrdinal !== undefined) {
+    if (aOrdinal < bOrdinal) return -1;
+    if (aOrdinal > bOrdinal) return 1;
+    return String(a).localeCompare(String(b));
+  }
+  if (aOrdinal !== undefined) return -1;
+  if (bOrdinal !== undefined) return 1;
+  return String(a ?? '').localeCompare(String(b ?? ''));
+}
+
+function kaMetadataOrdinal(ual: string, kaUri: string | undefined): bigint | undefined {
+  if (typeof kaUri !== 'string') return undefined;
+  const prefix = `${ual}/`;
+  if (!kaUri.startsWith(prefix)) return undefined;
+  const suffix = kaUri.slice(prefix.length);
+  return /^\d+$/.test(suffix) ? BigInt(suffix) : undefined;
+}
+
 /**
  * Resolves a V10 GetView + context graph ID to the named-graph URIs (or
  * prefixes) that the query engine should target.
@@ -704,9 +725,12 @@ export class DKGQueryEngine implements QueryEngine {
       throw new Error(`KA not found for UAL: ${ual}`);
     }
 
+    const orderedMetaBindings = [...metaResult.bindings].sort((a, b) =>
+      compareKaMetadataRows(ual, a['ka'], b['ka']),
+    );
     const rootEntities = [
       ...new Set(
-        metaResult.bindings
+        orderedMetaBindings
           .map((row) => row['rootEntity'])
           .filter((root): root is string => typeof root === 'string' && root.length > 0),
       ),
@@ -715,9 +739,9 @@ export class DKGQueryEngine implements QueryEngine {
       throw new Error(`KA not found for UAL: ${ual}`);
     }
     const rootEntity = rootEntities[0];
-    const contextGraphUri = metaResult.bindings[0]['ctxGraph'];
+    const contextGraphUri = orderedMetaBindings[0]['ctxGraph'];
     const contextGraphId = contextGraphUri.replace('did:dkg:context-graph:', '');
-    const sgNameRaw = metaResult.bindings[0]['sgName'];
+    const sgNameRaw = orderedMetaBindings[0]['sgName'];
     const subGraphName = sgNameRaw ? sgNameRaw.replace(/^"(.*)".*$/, '$1') : undefined;
 
     const dataGraph = subGraphName

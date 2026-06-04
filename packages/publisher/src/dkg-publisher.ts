@@ -1739,10 +1739,10 @@ export class DKGPublisher implements Publisher {
 
     onPhase?.('prepare:manifest', 'start');
     // OT-RFC-44 / Design B: one file/lifecycle = ONE on-chain Knowledge Asset,
-    // however many entities it contains. Manifest `tokenId` remains the
-    // per-root compatibility row id because legacy callers still build
-    // `${ual}/${tokenId}` lookup subjects. The shared on-chain KA id is exposed
-    // through `result.kaId` and confirmed metadata `dkg:tokenId`.
+    // however many entities it contains. `metadataTokenId` keeps the per-root
+    // compatibility row id because legacy callers still build `${ual}/1`,
+    // `${ual}/2`, ... lookup subjects. `tokenId` is rewritten to the shared
+    // on-chain KA id once the publish confirms.
     let metadataTokenId = 1n;
     for (const entry of canonical.manifestEntries) {
       const compatibilityRowId = metadataTokenId++;
@@ -2606,6 +2606,9 @@ export class DKGPublisher implements Publisher {
           km.kcUal = ual;
           km.tokenId = kaId;
         }
+        for (const entry of manifestEntries) {
+          entry.tokenId = kaId;
+        }
         let confirmedQuads = generateConfirmedFullMetadata(
           {
             ual,
@@ -2731,7 +2734,7 @@ export class DKGPublisher implements Publisher {
     onPhase?.('chain', 'end');
 
     const result: PublishResult = {
-      kaId: onChainResult?.batchId ?? 0n,
+      kaId: onChainResult?.kaId ?? onChainResult?.batchId ?? 0n,
       ual,
       merkleRoot: kcMerkleRoot,
       kaManifest: manifestEntries,
@@ -3292,8 +3295,6 @@ export class DKGPublisher implements Publisher {
     swmMetaGraph: string,
     rootEntities: readonly string[],
   ): Promise<void> {
-    if (rootEntities.length <= 1) return;
-
     const DKG = 'http://dkg.io/ontology/';
     const roots = [...new Set(rootEntities.map((root) => String(root).trim()).filter(isSafeIri))];
     if (roots.length !== rootEntities.length) {
@@ -3311,6 +3312,7 @@ export class DKGPublisher implements Publisher {
       }`,
     );
     if (candidates.type !== 'bindings' || candidates.bindings.length === 0) {
+      if (roots.length === 1) return;
       throw new MultiRootPublishNotAtomicError(contextGraphId, rootEntities);
     }
 

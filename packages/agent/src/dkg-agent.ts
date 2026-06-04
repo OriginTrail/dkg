@@ -1455,7 +1455,7 @@ export class DKGAgent extends DKGAgentBase {
       nquads: new TextEncoder().encode(ntriples),
       contextGraphId: contextGraphId,
       kas: result.kaManifest.map(ka => ({
-        tokenId: Number(ka.tokenId),
+        tokenId: Number(ka.metadataTokenId ?? ka.tokenId),
         rootEntity: ka.rootEntity,
         privateMerkleRoot: ka.privateMerkleRoot ?? new Uint8Array(0),
         privateTripleCount: ka.privateTripleCount ?? 0,
