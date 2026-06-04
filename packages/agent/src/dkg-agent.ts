@@ -1707,6 +1707,37 @@ export class DKGAgent extends DKGAgentBase {
         return agent.publisher.assertionPullFrom(contextGraphId, name, agentAddress, sourceLayer, opts);
       },
       async promote(contextGraphId: string, name: string, opts?: { entities?: string[] | 'all'; subGraphName?: string }): Promise<{ promotedCount: number }> {
+        // Seal-before-share: the on-chain publish path
+        // (`publishFromFinalizedAssertion`) requires a FINALIZED assertion, and
+        // the seal must be computed over the Working-Memory content BEFORE
+        // promote moves it to SWM and empties WM — you cannot finalize
+        // afterwards (no quads left to hash). The canonical
+        // create→finalize→promote→publish flow already finalizes; this makes
+        // the UI/HTTP promote→publish flow — which has no explicit finalize
+        // step — work too. Idempotent: skipped when a seal already exists (and
+        // `assertionFinalize` itself returns the existing seal on same
+        // content). Best-effort: if the node cannot sign for this author (a
+        // self-sovereign agent with no local key, or a non-V10 chain adapter),
+        // we log and promote UNSEALED exactly as before — never regressing an
+        // existing caller — and the later publish surfaces the explicit
+        // finalize requirement.
+        try {
+          const assertionUri = contextGraphAssertionUri(contextGraphId, agentAddress, name, opts?.subGraphName);
+          const metaGraph = contextGraphMetaUri(contextGraphId);
+          const sealResult = await agent.store.query(
+            `CONSTRUCT { <${assertionUri}> ?p ?o } WHERE { GRAPH <${metaGraph}> { <${assertionUri}> ?p ?o } }`,
+          );
+          const sealQuads = sealResult.type === 'quads' ? sealResult.quads : [];
+          if (parseAssertionSealQuads(sealQuads, assertionUri) == null) {
+            await agent.assertionFinalize(contextGraphId, name, agentAddress, { subGraphName: opts?.subGraphName });
+          }
+        } catch (err: any) {
+          agent.log.warn(
+            createOperationContext('share'),
+            `Auto-finalize before promote skipped for "${name}": ${err?.message ?? err}. ` +
+              `Promoting unsealed; publishing to Verifiable Memory will require an explicit finalize first.`,
+          );
+        }
         // Resolve the gossip signer up-front (mirrors `share()` /
         // `conditionalShare()` patterns) so the publisher can wrap the
         // promoted SWM gossip in the Sender Key encrypted envelope.

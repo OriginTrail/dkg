@@ -169,6 +169,34 @@ describe('WM → SWM → VM pipeline (single agent)', () => {
     expect(dataResult.bindings.length).toBe(1);
   }, 20_000);
 
+  it('promote auto-finalizes: publishFromFinalizedAssertion works after a bare promote (no explicit finalize)', async () => {
+    // Regression for the UI/HTTP flow: "Promote All → Shared" then "Publish to
+    // Verifiable Memory" promotes WM→SWM with NO explicit finalize, and the
+    // publish runs publishFromFinalizedAssertion, which requires a seal.
+    // Because promote empties WM, you cannot finalize afterwards — so promote
+    // now seals BEFORE moving WM→SWM. Pre-fix this threw
+    // "publishFromFinalizedAssertion: assertion <...> is not finalized".
+    const agent = await createAgent('AutoFinalizeBot');
+    await agent.createContextGraph({ id: CG_ID, name: 'AutoFinalize E2E' });
+    await agent.registerContextGraph(CG_ID);
+
+    await agent.assertion.create(CG_ID, 'auto-final');
+    await agent.assertion.write(CG_ID, 'auto-final', [
+      { subject: `${ENTITY_BASE}:auto`, predicate: 'http://schema.org/name', object: '"Auto Finalized"' },
+    ]);
+
+    // Promote WITHOUT an explicit finalize() — the exact gap that broke the UI.
+    const promoteResult = await agent.assertion.promote(CG_ID, 'auto-final');
+    expect(promoteResult.promotedCount).toBeGreaterThan(0);
+
+    // publishFromFinalizedAssertion hard-requires the seal; it must now find
+    // the one promote stamped, instead of throwing "is not finalized".
+    const pub = await agent.publishFromFinalizedAssertion(CG_ID, 'auto-final');
+    expect(pub.status).toBe('confirmed');
+    expect(pub.ual).toBeDefined();
+    expect(pub.seal).toBeDefined();
+  }, 20_000);
+
   it('WM is empty after promote; SWM clear after publishFromSWM with flag', async () => {
     const agent = await createAgent('CleanupBot');
     await agent.createContextGraph({ id: CG_ID, name: 'Cleanup E2E' });
