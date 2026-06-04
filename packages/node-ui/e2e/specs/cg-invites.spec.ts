@@ -25,6 +25,21 @@ test.describe('Context graph invites — share modal', () => {
     await shareProjectModal.close();
     expect(await shareProjectModal.isOpen()).toBe(false);
   });
+
+  // Regression for #959: the Share modal only had backdrop-click + a footer
+  // Done button — Esc did nothing and it wasn't focus-trapped. It now uses
+  // the shared `useModalDismiss` hook (Esc-to-close) and has a header ×.
+  test('Escape key closes share modal (#959)', async ({ shareProjectModal, page }) => {
+    await expect(shareProjectModal.overlay).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(shareProjectModal.overlay).toBeHidden();
+  });
+
+  test('header × button closes share modal (#959)', async ({ shareProjectModal, page }) => {
+    await expect(shareProjectModal.overlay).toBeVisible();
+    await page.locator('.v10-modal-close').click();
+    await expect(shareProjectModal.overlay).toBeHidden();
+  });
 });
 
 test.describe('Context graph invites — overview panel', () => {

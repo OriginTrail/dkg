@@ -85,6 +85,21 @@ test.describe('Import Files Modal', () => {
     expect(await importFilesModal.isOpen()).toBe(false);
   });
 
+  // Regression for #959: the Import modal hand-rolled its overlay and only
+  // got backdrop-click dismissal — Esc did nothing, unlike Create/Join.
+  // Now it uses the shared `useModalDismiss` hook, so Esc closes it too.
+  test('Escape key closes the modal (#959)', async ({ importFilesModal, page }) => {
+    await page.keyboard.press('Escape');
+    await expect(importFilesModal.overlay).toBeHidden();
+  });
+
+  // The shared hook also adds a header × close button (the modal had only
+  // a footer Cancel before).
+  test('header × button closes the modal (#959)', async ({ importFilesModal, page }) => {
+    await page.locator('.v10-modal-close').click();
+    await expect(importFilesModal.overlay).toBeHidden();
+  });
+
   test('ingestion option checkboxes are disabled (coming-soon stub)', async ({ importFilesModal }) => {
     expect(await importFilesModal.areIngestionCheckboxesDisabled()).toBe(true);
   });

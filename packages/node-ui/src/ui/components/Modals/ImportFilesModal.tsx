@@ -1,5 +1,6 @@
 import React, { useState, useRef, useCallback } from 'react';
 import { importFile, type ImportFileResult } from '../../api.js';
+import { useModalDismiss } from './useModalDismiss.js';
 
 interface ImportFilesModalProps {
   open: boolean;
@@ -139,6 +140,11 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
     onClose();
   };
 
+  // Esc-to-close + Tab focus-trap + focus-restore, same as Create/Join.
+  // `handleClose` already no-ops while an import is in flight, so Esc and
+  // backdrop-click both inherit that guard.
+  const { dialogRef, onBackdropClick } = useModalDismiss(open, handleClose);
+
   if (!open) return null;
 
   const totalTriples = results.reduce((sum, r) => sum + (r.triplesWritten ?? 0), 0);
@@ -146,10 +152,28 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
   const errorCount = results.filter(r => r.status === 'error').length;
 
   return (
-    <div className="v10-modal-overlay" onClick={(e) => { if (e.target === e.currentTarget && status !== 'uploading') handleClose(); }}>
-      <div className="v10-modal-box" style={{ maxWidth: 560 }}>
+    <div className="v10-modal-overlay" onClick={onBackdropClick} role="presentation">
+      <div
+        className="v10-modal-box"
+        style={{ maxWidth: 560 }}
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="dkg-import-modal-title"
+      >
+        <button
+          type="button"
+          className="v10-modal-close"
+          onClick={handleClose}
+          disabled={status === 'uploading'}
+          aria-label="Close import dialog"
+          title="Close (Esc)"
+          style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: status === 'uploading' ? 'not-allowed' : 'pointer', fontSize: 18, lineHeight: 1, padding: 4, zIndex: 1 }}
+        >
+          ×
+        </button>
         <div className="v10-modal-header">
-          <div className="v10-modal-title">Import to Working Memory</div>
+          <div id="dkg-import-modal-title" className="v10-modal-title">Import to Working Memory</div>
           <div className="v10-modal-subtitle">
             {contextGraphName
               ? <>Upload files to <strong>{contextGraphName}</strong> — your agent will extract structured knowledge.</>

@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { fetchExtractionStatus, fileUrl, authHeaders, type ExtractionStatus } from '../../api.js';
+import { useModalDismiss } from './useModalDismiss.js';
 
 interface FilePreviewModalProps {
   open: boolean;
@@ -82,6 +83,9 @@ export function FilePreviewModal({ open, onClose, assertionName, contextGraphId,
     };
   }, [blobUrl]);
 
+  // Esc-to-close + Tab focus-trap + focus-restore, same as Create/Join.
+  const { dialogRef, onBackdropClick } = useModalDismiss(open, onClose);
+
   if (!open) return null;
 
   const kind = status ? previewKind(status.detectedContentType) : null;
@@ -102,11 +106,17 @@ export function FilePreviewModal({ open, onClose, assertionName, contextGraphId,
   };
 
   return (
-    <div className="v10-modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="v10-modal-box v10-file-preview-modal">
+    <div className="v10-modal-overlay" onClick={onBackdropClick} role="presentation">
+      <div
+        className="v10-modal-box v10-file-preview-modal"
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="dkg-file-preview-title"
+      >
         <div className="v10-modal-header">
-          <div className="v10-modal-title">{assertionName}</div>
-          <button className="v10-modal-close" onClick={onClose}>×</button>
+          <div id="dkg-file-preview-title" className="v10-modal-title">{assertionName}</div>
+          <button className="v10-modal-close" onClick={onClose} aria-label="Close file preview" title="Close (Esc)">×</button>
         </div>
 
         {loading && <div className="v10-file-preview-loading">Loading file preview...</div>}

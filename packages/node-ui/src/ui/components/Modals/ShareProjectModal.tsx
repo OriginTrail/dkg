@@ -4,6 +4,7 @@ import {
   fetchAgents, listJoinRequests, approveJoinRequest, rejectJoinRequest,
   type PendingJoinRequest,
 } from '../../api.js';
+import { useModalDismiss } from './useModalDismiss.js';
 
 interface NetworkAgent {
   agentUri: string;
@@ -159,6 +160,9 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
       .catch(() => setPendingRequests([]));
   }, [open, contextGraphId]);
 
+  // Esc-to-close + Tab focus-trap + focus-restore, same as Create/Join.
+  const { dialogRef, onBackdropClick } = useModalDismiss(open, onClose);
+
   if (!open) return null;
 
   // Always emit `<cgId>\n<peerId>` once peer-id is loaded. The earlier
@@ -217,10 +221,27 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
   };
 
   return (
-    <div className="v10-modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="v10-modal-box" style={{ maxWidth: 560 }}>
+    <div className="v10-modal-overlay" onClick={onBackdropClick} role="presentation">
+      <div
+        className="v10-modal-box"
+        style={{ maxWidth: 560 }}
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="dkg-share-modal-title"
+      >
+        <button
+          type="button"
+          className="v10-modal-close"
+          onClick={onClose}
+          aria-label="Close share dialog"
+          title="Close (Esc)"
+          style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 18, lineHeight: 1, padding: 4, zIndex: 1 }}
+        >
+          ×
+        </button>
         <div className="v10-modal-header">
-          <div className="v10-modal-title">Share Context Graph</div>
+          <div id="dkg-share-modal-title" className="v10-modal-title">Share Context Graph</div>
           <div className="v10-modal-subtitle">
             Invite agents to collaborate on <strong>{contextGraphName}</strong>.
           </div>
