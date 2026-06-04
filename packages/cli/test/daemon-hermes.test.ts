@@ -1630,14 +1630,14 @@ describe('Hermes daemon routes', () => {
     });
   });
 
-  it('promotes stale Hermes runtime to ready when the health route succeeds', async () => {
+  it('keeps Hermes health reads from mutating stale runtime state', async () => {
     const config = makeConfig({
       localAgentIntegrations: {
         hermes: {
           enabled: true,
           capabilities: { localChat: true },
           transport: { kind: 'hermes-channel', bridgeUrl: 'http://127.0.0.1:9444' },
-          runtime: { status: 'configured' },
+          runtime: { status: 'configured', ready: false, lastError: 'setup still pending' },
         },
       },
     });
@@ -1663,9 +1663,9 @@ describe('Hermes daemon routes', () => {
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body)).toMatchObject({ ok: true, target: 'bridge' });
     const integration = getLocalAgentIntegration(config, 'hermes');
-    expect(integration?.runtime.status).toBe('ready');
-    expect(integration?.runtime.ready).toBe(true);
-    expect(integration?.runtime.lastError).toBeNull();
+    expect(integration?.runtime.status).toBe('configured');
+    expect(integration?.runtime.ready).toBe(false);
+    expect(integration?.runtime.lastError).toBe('setup still pending');
   });
 
   it.each(['/api/hermes-channel/send', '/api/hermes-channel/stream'])(
@@ -2503,7 +2503,7 @@ describe('Hermes daemon routes', () => {
     ]);
   });
 
-  it('does not retry Hermes chat send on another target after the bridge times out', async () => {
+  it('falls back to the gateway when Hermes bridge send fetch times out locally', async () => {
     const urls: string[] = [];
     vi.stubGlobal('fetch', vi.fn(async (url: string | URL | Request) => {
       const requestUrl = String(url);
@@ -2515,6 +2515,55 @@ describe('Hermes daemon routes', () => {
         const err = new Error('timed out');
         (err as any).name = 'TimeoutError';
         throw err;
+      }
+      if (requestUrl === 'https://hermes.example.com/api/hermes-channel/send') {
+        return new Response(JSON.stringify({ text: 'gateway reply', correlationId: 'corr-1' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response('unexpected target', { status: 418 });
+    }));
+    const { ctx, res } = makeHermesRouteContext({
+      text: 'hello',
+      correlationId: 'corr-1',
+    }, {
+      hasChatTurn: vi.fn(async () => false),
+      storeChatExchange: vi.fn(async () => {}),
+    }, {
+      localAgentIntegrations: {
+        hermes: {
+          enabled: true,
+          transport: {
+            kind: 'hermes-channel',
+            bridgeUrl: 'http://127.0.0.1:9444',
+            gatewayUrl: 'https://hermes.example.com',
+          },
+        },
+      },
+    }, '/api/hermes-channel/send');
+
+    await handleHermesRoutes(ctx);
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toMatchObject({ text: 'gateway reply', correlationId: 'corr-1' });
+    expect(urls).toEqual([
+      'http://127.0.0.1:9444/health',
+      'http://127.0.0.1:9444/send',
+      'https://hermes.example.com/api/hermes-channel/send',
+    ]);
+  });
+
+  it('does not retry Hermes chat send after an upstream bridge 504', async () => {
+    const urls: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string | URL | Request) => {
+      const requestUrl = String(url);
+      urls.push(requestUrl);
+      if (requestUrl === 'http://127.0.0.1:9444/health') {
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      if (requestUrl === 'http://127.0.0.1:9444/send') {
+        return new Response('bridge timed out', { status: 504 });
       }
       if (requestUrl === 'https://hermes.example.com/api/hermes-channel/send') {
         return new Response(JSON.stringify({ text: 'gateway reply', correlationId: 'corr-1' }), {
@@ -2616,7 +2665,7 @@ describe('Hermes daemon routes', () => {
     ]);
   });
 
-  it('does not retry Hermes chat stream on another target after the bridge times out', async () => {
+  it('falls back to the gateway when Hermes bridge stream fetch times out locally', async () => {
     const urls: string[] = [];
     vi.stubGlobal('fetch', vi.fn(async (url: string | URL | Request) => {
       const requestUrl = String(url);
@@ -2661,17 +2710,14 @@ describe('Hermes daemon routes', () => {
 
     await handleHermesRoutes(ctx);
 
-    expect(res.statusCode).toBe(504);
-    expect(JSON.parse(res.body)).toMatchObject({
-      error: 'Hermes bridge response timeout',
-      code: 'HERMES_BRIDGE_RESPONSE_TIMEOUT',
-      source: 'hermes-channel',
-      correlationId: 'corr-1',
-      timeoutMs: HERMES_CHANNEL_RESPONSE_TIMEOUT_MS,
-    });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['Content-Type']).toContain('text/event-stream');
+    expect(res.body).toContain('"text":"gateway stream"');
+    expect(res.body).toContain('"correlationId":"corr-1"');
     expect(urls).toEqual([
       'http://127.0.0.1:9444/health',
       'http://127.0.0.1:9444/stream',
+      'https://hermes.example.com/api/hermes-channel/stream',
     ]);
   });
 

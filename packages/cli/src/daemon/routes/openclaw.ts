@@ -679,7 +679,8 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
       offline?: boolean;
     } | null = null;
 
-    for (const target of targets) {
+    for (const [targetIndex, target] of targets.entries()) {
+      const isLastTarget = targetIndex === targets.length - 1;
       const availability = await ensureOpenClawBridgeAvailable(
         target,
         bridgeAuthToken,
@@ -714,10 +715,8 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
             if (isOpenClawAgentTimeoutDetails(details)) {
               return jsonResponse(res, 504, buildOpenClawAgentTimeoutBody(corrId));
             }
-            // A bridge timeout may mean the agent accepted the turn and is
-            // still working. Do not retry another transport and risk a
-            // duplicate chat turn; keep fallback for immediate availability
-            // failures such as 503 below.
+            // An upstream 504 means the selected target classified its own
+            // timeout. Do not replay the turn on another transport.
             return jsonResponse(res, 504, buildOpenClawBridgeTimeoutBody(
               corrId,
               target,
@@ -745,7 +744,13 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
         return jsonResponse(res, 200, reply);
       } catch (err: any) {
         if (isOpenClawBridgeTimeoutError(err)) {
-          // See the 504 handling above: timeout fallback can duplicate a turn.
+          if (target.name === "bridge") {
+            daemonState.openClawBridgeHealth = { ok: false, ts: Date.now() };
+          }
+          if (!isLastTarget) {
+            lastFailure = { details: `${target.name} response timeout`, offline: true };
+            continue;
+          }
           return jsonResponse(res, 504, buildOpenClawBridgeTimeoutBody(corrId, target));
         }
         if (target.name === "bridge") {
@@ -805,7 +810,8 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
       offline?: boolean;
     } | null = null;
 
-    for (const target of targets) {
+    for (const [targetIndex, target] of targets.entries()) {
+      const isLastTarget = targetIndex === targets.length - 1;
       const availability = await ensureOpenClawBridgeAvailable(
         target,
         bridgeAuthToken,
@@ -846,10 +852,8 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
             if (isOpenClawAgentTimeoutDetails(details)) {
               return jsonResponse(res, 504, buildOpenClawAgentTimeoutBody(corrId));
             }
-            // A bridge timeout may mean the agent accepted the turn and is
-            // still working. Do not retry another transport and risk a
-            // duplicate chat turn; keep fallback for immediate availability
-            // failures such as 503 below.
+            // An upstream 504 means the selected target classified its own
+            // timeout. Do not replay the turn on another transport.
             return jsonResponse(res, 504, buildOpenClawBridgeTimeoutBody(
               corrId,
               target,
@@ -918,7 +922,13 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
         return;
       } catch (err: any) {
         if (isOpenClawBridgeTimeoutError(err)) {
-          // See the 504 handling above: timeout fallback can duplicate a turn.
+          if (target.name === "bridge") {
+            daemonState.openClawBridgeHealth = { ok: false, ts: Date.now() };
+          }
+          if (!isLastTarget) {
+            lastFailure = { details: `${target.name} response timeout`, offline: true };
+            continue;
+          }
           return jsonResponse(res, 504, buildOpenClawBridgeTimeoutBody(corrId, target));
         }
         if (target.name === "bridge") {

@@ -564,7 +564,7 @@ describe('OpenClaw channel routing helpers', () => {
     }
   });
 
-  it('returns a source-specific timeout when the OpenClaw bridge does not answer chat send', async () => {
+  it('falls back to the OpenClaw gateway when the local bridge fetch times out', async () => {
     const timeoutError = new Error('The operation was aborted due to timeout') as Error & { name: string };
     timeoutError.name = 'TimeoutError';
     const urls: string[] = [];
@@ -579,6 +579,52 @@ describe('OpenClaw channel routing helpers', () => {
         return new Response(JSON.stringify({ text: 'gateway reply' }), { status: 200 });
       }
       throw timeoutError;
+    }) as typeof fetch;
+    try {
+      const { ctx, res } = makeOpenClawRouteContext({
+        text: 'slow task',
+        correlationId: 'corr-timeout',
+      }, '/api/openclaw-channel/send', {
+        localAgentIntegrations: {
+          openclaw: {
+            enabled: true,
+            capabilities: { localChat: true },
+            transport: {
+              kind: 'openclaw-channel',
+              bridgeUrl: 'http://127.0.0.1:9301',
+              gatewayUrl: 'https://openclaw.example.com',
+            },
+          },
+        },
+      });
+
+      await handleOpenclawRoutes(ctx);
+
+      expect(urls).toEqual([
+        'http://127.0.0.1:9301/health',
+        'http://127.0.0.1:9301/inbound',
+        'https://openclaw.example.com/api/dkg-channel/inbound',
+      ]);
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body)).toMatchObject({ text: 'gateway reply' });
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('does not retry OpenClaw chat send after an upstream bridge 504', async () => {
+    const urls: string[] = [];
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL | Request) => {
+      const requestUrl = String(url);
+      urls.push(requestUrl);
+      if (requestUrl.endsWith('/health')) {
+        return new Response(JSON.stringify({ ok: true, channel: 'dkg-ui' }), { status: 200 });
+      }
+      if (requestUrl === 'http://127.0.0.1:9301/inbound') {
+        return new Response('bridge timed out', { status: 504 });
+      }
+      return new Response(JSON.stringify({ text: 'gateway reply' }), { status: 200 });
     }) as typeof fetch;
     try {
       const { ctx, res } = makeOpenClawRouteContext({

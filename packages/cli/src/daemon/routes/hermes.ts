@@ -10,9 +10,7 @@ import {
 } from '../http-utils.js';
 import { daemonState } from '../state.js';
 import {
-  getLocalAgentIntegration,
   hasConfiguredLocalAgentChat,
-  updateLocalAgentIntegration,
 } from '../local-agents.js';
 import type { OpenClawAttachmentRef } from '../openclaw.js';
 import {
@@ -174,7 +172,8 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
     const apiServerKey = resolveHermesApiServerKey(config);
     let lastFailure: { status?: number; details?: string; offline?: boolean } | null = null;
 
-    for (const target of targets) {
+    for (const [targetIndex, target] of targets.entries()) {
+      const isLastTarget = targetIndex === targets.length - 1;
       const availability = await ensureHermesBridgeAvailable(target, bridgeAuthToken);
       if (!availability.ok) {
         lastFailure = availability;
@@ -196,10 +195,8 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
         if (!forwardRes.ok) {
           const details = await forwardRes.text().catch(() => '');
           if (forwardRes.status === 504) {
-            // A request-level timeout may mean the agent accepted the turn and
-            // is still working. Do not retry another transport and risk a
-            // duplicate chat turn; keep fallback for immediate availability
-            // failures such as 5xx responses below.
+            // An upstream 504 means the selected target classified its own
+            // timeout. Do not replay the turn on another transport.
             return jsonResponse(res, 504, buildHermesBridgeTimeoutBody(
               payload.correlationId,
               target,
@@ -247,7 +244,10 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
         return jsonResponse(res, 200, reply);
       } catch (err: any) {
         if (isHermesBridgeTimeoutError(err)) {
-          // See the 504 handling above: timeout fallback can duplicate a turn.
+          if (!isLastTarget) {
+            lastFailure = { details: `${target.name} response timeout`, offline: true };
+            continue;
+          }
           return jsonResponse(res, 504, buildHermesBridgeTimeoutBody(payload.correlationId, target));
         }
         lastFailure = { details: err.message, offline: true };
@@ -297,7 +297,8 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
     const apiServerKey = resolveHermesApiServerKey(config);
     let lastFailure: { status?: number; details?: string; offline?: boolean } | null = null;
 
-    for (const target of targets) {
+    for (const [targetIndex, target] of targets.entries()) {
+      const isLastTarget = targetIndex === targets.length - 1;
       const availability = await ensureHermesBridgeAvailable(target, bridgeAuthToken);
       if (!availability.ok) {
         lastFailure = availability;
@@ -322,10 +323,8 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
         if (!transportRes.ok) {
           const details = await transportRes.text().catch(() => '');
           if (transportRes.status === 504) {
-            // A request-level timeout may mean the agent accepted the turn and
-            // is still working. Do not retry another transport and risk a
-            // duplicate chat turn; keep fallback for immediate availability
-            // failures such as 5xx responses below.
+            // An upstream 504 means the selected target classified its own
+            // timeout. Do not replay the turn on another transport.
             return jsonResponse(res, 504, buildHermesBridgeTimeoutBody(
               payload.correlationId,
               target,
@@ -426,7 +425,10 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
         return;
       } catch (err: any) {
         if (isHermesBridgeTimeoutError(err)) {
-          // See the 504 handling above: timeout fallback can duplicate a turn.
+          if (!isLastTarget) {
+            lastFailure = { details: `${target.name} response timeout`, offline: true };
+            continue;
+          }
           return jsonResponse(res, 504, buildHermesBridgeTimeoutBody(payload.correlationId, target));
         }
         lastFailure = { details: err.message, offline: true };
@@ -471,26 +473,8 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
 
   if (req.method === 'GET' && path === '/api/hermes-channel/health') {
     const health = await probeHermesChannelHealth(config, bridgeAuthToken);
-    reconcileHermesRuntimeFromHealth(config, health);
     return jsonResponse(res, 200, health);
   }
-}
-
-function reconcileHermesRuntimeFromHealth(
-  config: RequestContext['config'],
-  health: Awaited<ReturnType<typeof probeHermesChannelHealth>>,
-): void {
-  if (!health.ok) return;
-  const integration = getLocalAgentIntegration(config, 'hermes');
-  if (!integration?.enabled) return;
-  if (integration.runtime.ready === true && integration.runtime.status === 'ready') return;
-  updateLocalAgentIntegration(config, 'hermes', {
-    runtime: {
-      status: 'ready',
-      ready: true,
-      lastError: null,
-    },
-  });
 }
 
 function ensureHermesIntegrationEnabled(config: RequestContext['config'], res: RequestContext['res']): boolean {
