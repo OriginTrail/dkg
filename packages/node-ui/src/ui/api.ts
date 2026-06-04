@@ -1,6 +1,38 @@
 const BASE = '';
+const CONTEXT_GRAPH_URI_PREFIX = 'did:dkg:context-graph:';
 declare global {
   interface Window { __DKG_TOKEN__?: string; }
+}
+
+function normalizeContextGraphId(contextGraphIdOrUri: string): string {
+  const trimmed = contextGraphIdOrUri.trim();
+  return trimmed.startsWith(CONTEXT_GRAPH_URI_PREFIX)
+    ? trimmed.slice(CONTEXT_GRAPH_URI_PREFIX.length)
+    : trimmed;
+}
+
+function assertExclusiveAuthorFields(args: {
+  authorAgentAddress?: string;
+  preSignedAuthorAttestation?: PreSignedAuthorAttestationPayload;
+}): void {
+  if (args.authorAgentAddress != null && args.preSignedAuthorAttestation != null) {
+    throw new Error('authorAgentAddress and preSignedAuthorAttestation are mutually exclusive');
+  }
+}
+
+function assertCreateFinalizeFieldsHaveQuads(args: {
+  quads?: unknown[];
+  authorAgentAddress?: string;
+  preSignedAuthorAttestation?: PreSignedAuthorAttestationPayload;
+  schemeVersion?: number;
+}): void {
+  const hasFinalizeOnlyField =
+    args.authorAgentAddress != null ||
+    args.preSignedAuthorAttestation != null ||
+    args.schemeVersion !== undefined;
+  if (hasFinalizeOnlyField && !(Array.isArray(args.quads) && args.quads.length > 0)) {
+    throw new Error('authorAgentAddress, preSignedAuthorAttestation, and schemeVersion require non-empty quads');
+  }
 }
 
 export function authHeaders(): Record<string, string> {
@@ -324,6 +356,39 @@ export async function createContextGraph(
   }
 }
 
+/**
+ * Register an EXISTING context graph on-chain. VM (Verifiable Memory) is the
+ * on-chain layer, so an off-chain CG must be registered before finalize / VM
+ * publish. Mirrors the daemon's `POST /api/context-graph/register`.
+ */
+export const registerContextGraph = (
+  id: string,
+  opts: { accessPolicy?: number; publishPolicy?: number } = {},
+) =>
+  post<{ registered: string; onChainId: string; hint?: string }>(
+    '/api/context-graph/register',
+    {
+      id,
+      ...(opts.accessPolicy !== undefined ? { accessPolicy: opts.accessPolicy } : {}),
+      ...(opts.publishPolicy !== undefined ? { publishPolicy: opts.publishPolicy } : {}),
+    },
+  );
+
+/**
+ * Ensure a context graph is registered on-chain before an operation that
+ * requires it (WM finalize / VM publish). Returns the on-chain id. No-op when
+ * already registered. The UI calls this transparently so users never hit
+ * "context graph is not registered on-chain" — VM is the on-chain layer, so
+ * publishing to it auto-registers the CG first.
+ */
+export async function ensureContextGraphOnChain(contextGraphId: string): Promise<string | undefined> {
+  const { contextGraphs } = await fetchContextGraphs();
+  const cg = (contextGraphs ?? []).find((c: any) => c?.id === contextGraphId);
+  if (cg?.onChainId) return String(cg.onChainId);
+  const res = await registerContextGraph(contextGraphId);
+  return res?.onChainId;
+}
+
 // --- Context Graph Participant Management ---
 export const addParticipant = (contextGraphId: string, agentAddress: string) =>
   post<{ ok: boolean }>(`/api/context-graph/${encodeURIComponent(contextGraphId)}/add-participant`, { agentAddress });
@@ -590,6 +655,30 @@ export const executeQuery = (
 ) =>
   postQueryDeduped({ sparql, contextGraphId, includeSharedMemory, graphSuffix, view, includeContextGraphPartitions });
 
+/**
+ * Map of assertion name → deterministic Option-1 UAL (`dkg:reservedUal`,
+ * `did:dkg:evm:<chainId>/<author>/<number>`). Stamped on the lifecycle URN at
+ * creation, so it's available for every assertion (WM/SWM/published) — the
+ * assertions list renders it next to the filename. Keyed by `dkg:assertionName`.
+ */
+export async function fetchAssertionUals(contextGraphId: string): Promise<Record<string, string>> {
+  const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
+  const sparql = `SELECT ?name ?ual WHERE {
+    GRAPH <${metaGraph}> {
+      ?lc <http://dkg.io/ontology/assertionName> ?name ;
+          <http://dkg.io/ontology/reservedUal> ?ual .
+    }
+  }`;
+  const data = await executeQuery(sparql, contextGraphId);
+  const map: Record<string, string> = {};
+  for (const b of (data?.result?.bindings ?? [])) {
+    const name = typeof b.name === 'string' ? b.name : b.name?.value;
+    const ual = typeof b.ual === 'string' ? b.ual : b.ual?.value;
+    if (name && ual && !map[name]) map[name] = ual;
+  }
+  return map;
+}
+
 // --- Publish (assertion-lifecycle: RFC-001 §9.x sign-at-creation) ---
 //
 // Creates a fresh auto-named assertion, writes the supplied quads,
@@ -678,16 +767,29 @@ export interface KnowledgeAssetFinalizedPublishOptions {
   publisherNodeIdentityIdOverride?: string;
 }
 
+const FINALIZED_PUBLISH_OPTION_KEYS = new Set([
+  'clearAfter',
+  'publishEpochs',
+  'publisherNodeIdentityIdOverride',
+]);
+
 const publisherNodeIdentityOverridePayload = (value: unknown): string => {
-  if (typeof value === 'string') return value;
+  if (typeof value === 'string' && /^\d+$/.test(value)) return value;
   throw new Error('publisherNodeIdentityIdOverride must be passed as a decimal string');
 }
 
 /** Translate {@link KnowledgeAssetFinalizedPublishOptions} into the daemon body. */
 const finalizedPublishOptionsPayload = (
   options?: KnowledgeAssetFinalizedPublishOptions,
+  allowedExtraKeys: readonly string[] = [],
 ): Record<string, unknown> | undefined => {
   if (!options) return undefined;
+  const unsupportedKeys = Object.keys(options).filter(
+    (key) => !FINALIZED_PUBLISH_OPTION_KEYS.has(key) && !allowedExtraKeys.includes(key),
+  );
+  if (unsupportedKeys.length > 0) {
+    throw new Error(`Unsupported finalized publish option(s): ${unsupportedKeys.join(', ')}`);
+  }
   const payload: Record<string, unknown> = {};
   if (options.clearAfter !== undefined) payload.clearSharedMemoryAfter = options.clearAfter;
   if (options.publishEpochs !== undefined) payload.publishEpochs = options.publishEpochs;
@@ -698,6 +800,19 @@ const finalizedPublishOptionsPayload = (
       publisherNodeIdentityOverridePayload(publisherNodeIdentityIdOverride);
   }
   return Object.keys(payload).length > 0 ? payload : undefined;
+};
+
+const createAlsoPublishVmPayload = (value: unknown): boolean | Record<string, unknown> => {
+  if (typeof value === 'boolean') return value;
+  if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+    if (Object.keys(value).length === 0) return {};
+    const payload = finalizedPublishOptionsPayload(value as KnowledgeAssetFinalizedPublishOptions);
+    if (payload) return payload;
+    throw new Error(
+      'alsoPublishVm options object must include at least one supported option; use true to publish with defaults',
+    );
+  }
+  throw new Error('alsoPublishVm must be a boolean or publish-options object');
 };
 
 /**
@@ -718,11 +833,18 @@ export const createKnowledgeAsset = (
     alsoPublishVm?: boolean | KnowledgeAssetFinalizedPublishOptions;
   } = {},
 ) => {
-  const body: Record<string, unknown> = { contextGraphId, name, ...opts };
+  assertExclusiveAuthorFields(opts);
+  assertCreateFinalizeFieldsHaveQuads(opts);
+  const normalizedContextGraphId = normalizeContextGraphId(contextGraphId);
+  const body: Record<string, unknown> = {
+    contextGraphId: normalizedContextGraphId,
+    name,
+    ...opts,
+  };
   // Object form carries finalized-publish controls; translate to the daemon
   // body shape (mirrors the cli ApiClient). `true`/`false` pass through.
-  if (opts.alsoPublishVm && typeof opts.alsoPublishVm === 'object') {
-    body.alsoPublishVm = finalizedPublishOptionsPayload(opts.alsoPublishVm) ?? {};
+  if (opts.alsoPublishVm !== undefined) {
+    body.alsoPublishVm = createAlsoPublishVmPayload(opts.alsoPublishVm);
   }
   return post<Record<string, unknown>>('/api/knowledge-assets', body);
 };
@@ -734,7 +856,7 @@ export const getKnowledgeAsset = (
   subGraphName?: string,
 ) => {
   const qs = new URLSearchParams({
-    contextGraphId,
+    contextGraphId: normalizeContextGraphId(contextGraphId),
     ...(subGraphName ? { subGraphName } : {}),
   }).toString();
   return get<Record<string, unknown>>(
@@ -751,7 +873,7 @@ export const knowledgeAssetWrite = (
 ) =>
   post<{ written: number }>(
     `/api/knowledge-assets/${encodeURIComponent(name)}/wm/write`,
-    { contextGraphId, quads, ...opts },
+    { contextGraphId: normalizeContextGraphId(contextGraphId), quads, ...opts },
   );
 
 /** Seal the WM draft — computes the merkle root + signs the seal (git commit). */
@@ -764,11 +886,13 @@ export const knowledgeAssetFinalize = (
     preSignedAuthorAttestation?: PreSignedAuthorAttestationPayload;
     schemeVersion?: number;
   } = {},
-) =>
-  post<{ merkleRoot: string; eip712Digest: string }>(
+) => {
+  assertExclusiveAuthorFields(opts);
+  return post<{ merkleRoot: string; eip712Digest: string }>(
     `/api/knowledge-assets/${encodeURIComponent(name)}/wm/finalize`,
-    { contextGraphId, ...opts },
+    { contextGraphId: normalizeContextGraphId(contextGraphId), ...opts },
   );
+};
 
 /** Discard the open WM draft (git checkout -- .). */
 export const knowledgeAssetDiscard = (
@@ -778,7 +902,7 @@ export const knowledgeAssetDiscard = (
 ) =>
   post<{ discarded: boolean }>(
     `/api/knowledge-assets/${encodeURIComponent(name)}/wm/discard`,
-    { contextGraphId, ...opts },
+    { contextGraphId: normalizeContextGraphId(contextGraphId), ...opts },
   );
 
 /** Seed a fresh WM draft from the file's current SWM/VM state (git checkout). */
@@ -790,7 +914,7 @@ export const knowledgeAssetPullFrom = (
 ) =>
   post<Record<string, unknown>>(
     `/api/knowledge-assets/${encodeURIComponent(name)}/wm/pull-from`,
-    { contextGraphId, layer, ...opts },
+    { contextGraphId: normalizeContextGraphId(contextGraphId), layer, ...opts },
   );
 
 /** Advance the SWM pointer (WM → SWM; git push origin <branch>). */
@@ -801,7 +925,7 @@ export const knowledgeAssetShare = (
 ) =>
   post<{ swmShared: boolean; promotedCount: number }>(
     `/api/knowledge-assets/${encodeURIComponent(name)}/swm/share`,
-    { contextGraphId, ...opts },
+    { contextGraphId: normalizeContextGraphId(contextGraphId), ...opts },
   );
 
 /** Publish to VM — mint or update on chain (git push origin main). */
@@ -810,11 +934,11 @@ export const knowledgeAssetPublish = (
   name: string,
   opts: { subGraphName?: string } & KnowledgeAssetFinalizedPublishOptions = {},
 ) => {
-  const publishOptions = finalizedPublishOptionsPayload(opts);
+  const publishOptions = finalizedPublishOptionsPayload(opts, ['subGraphName']);
   return post<Record<string, unknown>>(
     `/api/knowledge-assets/${encodeURIComponent(name)}/vm/publish`,
     {
-      contextGraphId,
+      contextGraphId: normalizeContextGraphId(contextGraphId),
       ...(opts.subGraphName ? { subGraphName: opts.subGraphName } : {}),
       ...(publishOptions ? { options: publishOptions } : {}),
     },
@@ -875,67 +999,77 @@ export async function listAssertions(
   layer: 'wm' | 'swm' = 'wm',
 ): Promise<AssertionInfo[]> {
   if (layer === 'swm') {
-    const DKG = 'http://dkg.io/ontology/';
-    const swmMetaPrefix = `did:dkg:context-graph:${contextGraphId}`;
-    // Mirrors the pattern `useSwmAttributions.ts` uses to read
-    // `_shared_memory_meta` graphs — the explicit `GRAPH ?g { … }`
-    // plus `FILTER(STRSTARTS … STRENDS)` pair makes the query
-    // self-scoping: the query engine's `wrapWithGraph` early-returns
-    // when the SPARQL already contains `graph `, so the query runs
-    // raw over the store and the FILTER pins it to *this* CG's
-    // `_shared_memory_meta` partitions (root + each sub-graph) only.
-    // Codex tier-4m flagged this as "runs against the default WM
-    // view", which is incorrect for this shape of SPARQL; keeping
-    // the same shape as `useSwmAttributions` — which is already in
-    // production for the SWM agent-attribution badge — keeps both
-    // call sites consistent and provably working on the same path.
-    const sparql = `SELECT DISTINCT ?g ?source ?agent WHERE {
-      GRAPH ?g {
-        ?s a <${DKG}ShareTransition> ;
-           <${DKG}source> ?source ;
-           <${DKG}agent> ?agent .
+    // SWM membership comes from the canonical `dkg:memoryLayer "SWM"` lifecycle
+    // marker in `<cg>/_meta` (flipped from "WM" by promote) — NOT from
+    // `dkg:ShareTransition` records in `_shared_memory_meta`. ShareTransitions
+    // are written by the ASYNC SWM share (key-setup/gossip) and therefore LAG
+    // the promote, so a publish fired right after promoting saw zero shared
+    // assertions ("nothing to publish") even though the content was already in
+    // SWM. The marker is synchronous and is the same source the WM listing uses.
+    // Parsing mirrors the WM branch: accept BOTH the lifecycle-URN and the
+    // data-graph-URI marker forms, dedupe by (subGraph, name), and exclude the
+    // reserved `meta` sub-graph.
+    const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
+    const cgPrefix = `did:dkg:context-graph:${contextGraphId}/`;
+    const urnPrefix = `urn:dkg:assertion:${contextGraphId}:`;
+    // Exclude assertions already PUBLISHED to VM. Publish records a
+    // `dkg:vmCurrentAssertion` pointer but (a backend gap — the
+    // generateAssertionPublishedMetadata flip's SPARQL gate never matches the
+    // lifecycle record) does NOT flip `dkg:memoryLayer` off "SWM", so published
+    // assertions would otherwise linger in the Shared-Memory list. The pointer
+    // lives on the lifecycle-URN form; key the exclusion by (subGraph, name) so
+    // the data-graph-URI marker row for the same assertion is dropped too.
+    const sparql = `SELECT ?g ?vm WHERE {
+      GRAPH <${metaGraph}> {
+        ?g <http://dkg.io/ontology/memoryLayer> "SWM"
+        OPTIONAL { ?g <http://dkg.io/ontology/vmCurrentAssertion> ?vm }
       }
-      FILTER(STRSTARTS(STR(?g), "${swmMetaPrefix}"))
-      FILTER(STRENDS(STR(?g), "/_shared_memory_meta"))
+      FILTER(!CONTAINS(STR(?g), "/meta/assertion/"))
     }`;
     const data = await executeQuery(sparql, contextGraphId);
     const bindings: any[] = data?.result?.bindings ?? [];
-    const seen = new Set<string>();
-    const result: AssertionInfo[] = [];
+    const published = new Set<string>();
+    const rows: Array<{ key: string; name: string; subGraph?: string; g: string }> = [];
     for (const b of bindings) {
       const g = typeof b.g === 'string' ? b.g : b.g?.value;
-      const source = typeof b.source === 'string' ? b.source : b.source?.value;
-      const agentUri = typeof b.agent === 'string' ? b.agent : b.agent?.value;
-      if (!g || !source || !agentUri) continue;
-
-      // `dkg:source` literal is `assertion/<agent>/<name>`. The agent
-      // segment is a 0x EVM address (no slashes, no colons), but `<name>`
-      // is only slash/whitespace-free — it CAN contain `:` — so split on
-      // the first two `/` rather than a blind last-segment parse.
-      const m = source.match(/^assertion\/([^/]+)\/(.+)$/);
-      if (!m) continue;
-      const name = m[2];
-
-      // `dkg:agent` is `did:dkg:agent:<address>`; pull the address so we
-      // rebuild the exact lifecycle URN shape used on the authoring node.
-      const addrMatch = /^did:dkg:agent:(.+)$/.exec(agentUri);
-      const address = addrMatch ? addrMatch[1] : null;
-      if (!address) continue;
-
-      // Recover optional sub-graph segment from `?g`:
-      //   did:dkg:context-graph:<cg>/_shared_memory_meta          → none
-      //   did:dkg:context-graph:<cg>/<sg>/_shared_memory_meta     → <sg>
-      const tail = g.slice(swmMetaPrefix.length); // "/<sg?>/_shared_memory_meta"
-      const inner = tail.replace(/\/_shared_memory_meta$/, '').replace(/^\//, '');
-      const subGraphName = inner.length > 0 ? inner : undefined;
-
-      const lifecycle = subGraphName
-        ? `urn:dkg:assertion:${contextGraphId}:${subGraphName}:${address}:${name}`
-        : `urn:dkg:assertion:${contextGraphId}:${address}:${name}`;
-
-      if (seen.has(lifecycle)) continue;
-      seen.add(lifecycle);
-      result.push({ name, graphUri: lifecycle, subGraph: subGraphName });
+      if (!g) continue;
+      const vm = typeof b.vm === 'string' ? b.vm : b.vm?.value;
+      let subGraph: string | undefined;
+      let name: string | undefined;
+      if (g.startsWith(cgPrefix)) {
+        const segments = g.slice(cgPrefix.length).split('/');
+        if (segments.length === 3 && segments[0] === 'assertion') {
+          name = segments[2];
+        } else if (segments.length === 4 && segments[1] === 'assertion') {
+          subGraph = segments[0];
+          name = segments[3];
+        } else {
+          continue;
+        }
+      } else if (g.startsWith(urnPrefix)) {
+        const rest = g.slice(urnPrefix.length);
+        let m = /^(0x[0-9a-fA-F]{40}):(.+)$/.exec(rest);
+        if (m) {
+          name = m[2];
+        } else {
+          m = /^([^:]+):(0x[0-9a-fA-F]{40}):(.+)$/.exec(rest);
+          if (m) { subGraph = m[1]; name = m[3]; }
+        }
+      } else {
+        continue;
+      }
+      if (!name) continue;
+      if (subGraph === 'meta') continue;
+      const key = `${subGraph ?? ''} ${name}`;
+      rows.push({ key, name, subGraph, g });
+      if (vm) published.add(key);
+    }
+    const seen = new Set<string>();
+    const result: AssertionInfo[] = [];
+    for (const r of rows) {
+      if (published.has(r.key) || seen.has(r.key)) continue;
+      seen.add(r.key);
+      result.push({ name: r.name, graphUri: r.g, subGraph: r.subGraph });
     }
     return result;
   }
@@ -1055,19 +1189,52 @@ export async function listAssertions(
   // would silently miss otherwise. The cgId itself is treated as
   // opaque (it may contain `/assertion/` as a literal substring,
   // per `validateContextGraphId`).
+  // The `dkg:memoryLayer "WM"` marker can sit on EITHER subject form:
+  //   • data-graph URI : did:dkg:context-graph:<cg>/[<sg>/]assertion/<agent>/<name>
+  //   • lifecycle URN  : urn:dkg:assertion:<cg>:[<sg>:]<agent>:<name>   (canonical,
+  //                      `assertionLifecycleUri`, written by every create path)
+  // Regular `create` writes BOTH; a FILE IMPORT writes ONLY the URN (the data-URI
+  // stamp is import-path-specific). The previous parser accepted only the data-URI
+  // form, so it silently dropped every file-imported WM assertion → the bulk-promote
+  // loop iterated zero times → "0 triples promoted" even though the content was
+  // fully promotable. Accept BOTH forms and dedupe by (subGraph, name).
   const result: AssertionInfo[] = [];
-  for (const b of bindings) {
+  const seen = new Set<string>();
+  const urnPrefix = `urn:dkg:assertion:${contextGraphId}:`;
+  // Data-URI rows first: the triple-count badge is keyed on the data graph in
+  // `countByGraph`, so preferring that form when both are present keeps the count.
+  const ordered = [...bindings].sort((a, b) => {
+    const ga = (typeof a.g === 'string' ? a.g : a.g?.value) ?? '';
+    const gb = (typeof b.g === 'string' ? b.g : b.g?.value) ?? '';
+    return (ga.startsWith(cgPrefix) ? 0 : 1) - (gb.startsWith(cgPrefix) ? 0 : 1);
+  });
+  for (const b of ordered) {
     const g = typeof b.g === 'string' ? b.g : b.g?.value;
-    if (!g || !g.startsWith(cgPrefix)) continue;
-    const segments = g.slice(cgPrefix.length).split('/');
+    if (!g) continue;
     let subGraph: string | undefined;
-    let name: string;
-    if (segments.length === 3 && segments[0] === 'assertion') {
-      subGraph = undefined;
-      name = segments[2];
-    } else if (segments.length === 4 && segments[1] === 'assertion') {
-      subGraph = segments[0];
-      name = segments[3];
+    let name: string | undefined;
+    if (g.startsWith(cgPrefix)) {
+      const segments = g.slice(cgPrefix.length).split('/');
+      if (segments.length === 3 && segments[0] === 'assertion') {
+        name = segments[2];
+      } else if (segments.length === 4 && segments[1] === 'assertion') {
+        subGraph = segments[0];
+        name = segments[3];
+      } else {
+        continue;
+      }
+    } else if (g.startsWith(urnPrefix)) {
+      // `<agent>` is a 0x EVM address (no colons); `<name>` MAY contain ':'.
+      // Peel the agent deterministically — whatever precedes it (if anything)
+      // is the sub-graph segment, the greedy remainder is the name.
+      const rest = g.slice(urnPrefix.length);
+      let m = /^(0x[0-9a-fA-F]{40}):(.+)$/.exec(rest);
+      if (m) {
+        name = m[2];
+      } else {
+        m = /^([^:]+):(0x[0-9a-fA-F]{40}):(.+)$/.exec(rest);
+        if (m) { subGraph = m[1]; name = m[3]; }
+      }
     } else {
       continue;
     }
@@ -1078,6 +1245,9 @@ export async function listAssertions(
     // assertions table or the bulk-promote flow. The SPARQL `metaFilter`
     // already drops these daemon-side; this guards the parser too.
     if (subGraph === 'meta') continue;
+    const key = `${subGraph ?? ''} ${name}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
     const cnt = countByGraph.get(g);
     result.push({ name, graphUri: g, tripleCount: cnt, subGraph });
   }

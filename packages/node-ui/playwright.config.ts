@@ -21,11 +21,28 @@ const DEVNET_NODE = process.env.DEVNET_NODE || process.env.UI_NODE_ID || '1';
 //   - node1 is the relay HUB and every other node dials it (scripts/devnet.sh
 //     sets node{2..N}.relay = node1's multiaddr), so node1 — the node the UI
 //     reads `connectedPeers` from — reports exactly N-1 connected peers.
-// We boot THREE nodes so node1 shows 2 peers (a real multi-peer topology, not
-// the degenerate 1-peer case), and the VM-publish quorum has 3 core members
-// instead of the bare 2-node minimum. `peer-connectivity.spec.ts` asserts the
-// resulting ">1 peer" invariant. Override with PLAYWRIGHT_DEVNET_NUM_NODES.
-const NUM_NODES = process.env.PLAYWRIGHT_DEVNET_NUM_NODES || '3';
+// scripts/devnet.sh pins `minimumRequiredSignatures = 3` (the real mainnet
+// 3-of-N StorageACK quorum — DO NOT lower it). A publisher collects ACKs from
+// its PEERS only (it does not self-sign quorum), so a VM publish needs minSig
+// OTHER reachable core nodes — i.e. >= minSig + 1 = 4 nodes total. With only 3
+// the publish aborts `QuorumUnmetError: need 3 ACKs but only 2 core peers
+// connected`. We therefore boot FOUR nodes: node1 sees 3 peers (still a real
+// multi-peer topology, satisfies `peer-connectivity.spec.ts` ">1 peer"), and a
+// VM publish can collect its 3 ACKs. Override with PLAYWRIGHT_DEVNET_NUM_NODES.
+const NUM_NODES = process.env.PLAYWRIGHT_DEVNET_NUM_NODES || '4';
+
+// Mesh-settle budget for the chained `bootstrap-devnet.ts` (it reads this via
+// PLAYWRIGHT_DEVNET_TIMEOUT_MS). Declared here so `webServer.timeout` below can
+// be DERIVED from the same value: otherwise a cold 4-node boot can run right up
+// to the bootstrap's budget and get killed by a smaller webServer.timeout before
+// that headroom is ever usable. Override with PLAYWRIGHT_DEVNET_TIMEOUT_MS.
+const DEVNET_BOOTSTRAP_TIMEOUT_MS = Number(process.env.PLAYWRIGHT_DEVNET_TIMEOUT_MS) || 240_000;
+// Vite still has to start and bind :5173 AFTER the bootstrap returns, so the
+// webServer command (bootstrap && pnpm dev:ui) needs the bootstrap budget plus a
+// margin for Vite. CI keeps its generous contract-compile headroom.
+const WEB_SERVER_TIMEOUT_MS = CI
+  ? Math.max(600_000, DEVNET_BOOTSTRAP_TIMEOUT_MS + 120_000)
+  : DEVNET_BOOTSTRAP_TIMEOUT_MS + 120_000;
 
 export default defineConfig({
   testDir: './e2e/specs',
@@ -97,7 +114,7 @@ export default defineConfig({
     // bootstrap reuses an already-running devnet (fast path for local
     // iteration) and only spawns one when none is reachable.
     command:
-      `cross-env PLAYWRIGHT_DEVNET_NUM_NODES=${NUM_NODES} pnpm exec tsx e2e/bootstrap-devnet.ts && ` +
+      `cross-env PLAYWRIGHT_DEVNET_NUM_NODES=${NUM_NODES} PLAYWRIGHT_DEVNET_TIMEOUT_MS=${DEVNET_BOOTSTRAP_TIMEOUT_MS} pnpm exec tsx e2e/bootstrap-devnet.ts && ` +
       `cross-env DEVNET_NODE=${DEVNET_NODE} pnpm dev:ui`,
     cwd: __dirname,
     port: PORT,
@@ -108,12 +125,15 @@ export default defineConfig({
     // the command guarantees the devnet is pinned; the bootstrap itself reuses an
     // already-running devnet cheaply, so a fresh Vite restart is the only cost.
     reuseExistingServer: false,
-    // Cold boot = Hardhat (+ Solidity compile when artifacts aren't cached) + 2
+    // Cold boot = Hardhat (+ Solidity compile when artifacts aren't cached) + 4
     // nodes + on-chain identity/stake/ask + CG registration + cross-node
     // propagation, THEN Vite. Locally (artifacts cached, devnet often reused)
     // that's ~40–90s; a cold CI runner adds the ~2-min contract compile. The CI
     // job pre-compiles contracts in a dedicated step to keep this fast, but we
     // budget generously so a cache miss never trips the webServer timeout.
-    timeout: CI ? 600_000 : 180_000,
+    // Derived from DEVNET_BOOTSTRAP_TIMEOUT_MS so the chained bootstrap can never
+    // out-wait the webServer (a cold 4-node boot used to hit the bootstrap's 240s
+    // budget but get killed by a 180s webServer.timeout).
+    timeout: WEB_SERVER_TIMEOUT_MS,
   },
 });

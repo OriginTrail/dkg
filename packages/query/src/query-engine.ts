@@ -76,5 +76,5 @@ export interface QueryOptions {
 
 export interface QueryEngine {
   query(sparql: string, options?: QueryOptions): Promise<QueryResult>;
-  resolveKA(ual: string): Promise<{ rootEntity: string; contextGraphId: string; quads: Quad[] }>;
+  resolveKA(ual: string): Promise<{ rootEntity: string; rootEntities: string[]; contextGraphId: string; quads: Quad[] }>;
 }

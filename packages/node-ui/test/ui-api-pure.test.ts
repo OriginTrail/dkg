@@ -27,6 +27,9 @@ import {
   publishTriples,
   publishSharedMemory,
   listSwmEntities,
+  listAssertions,
+  ensureContextGraphOnChain,
+  fetchAssertionUals,
   createSavedQuery,
   updateSavedQuery,
   deleteSavedQuery,
@@ -37,6 +40,9 @@ import {
   subscribeToContextGraph,
   shutdownNode,
   promoteAssertion,
+  createKnowledgeAsset,
+  knowledgeAssetPublish,
+  knowledgeAssetFinalize,
 } from '../src/ui/api.js';
 
 let server: Server;
@@ -302,6 +308,85 @@ describe('UI API tests', () => {
       expect(requestLog.some(r => r.url.includes('/api/shared-memory/publish'))).toBe(false);
     });
 
+    it('knowledgeAssetPublish rejects non-decimal publisher identity overrides before POSTing', async () => {
+      expect(() =>
+        knowledgeAssetPublish('cg-1', 'f', { publisherNodeIdentityIdOverride: 'abc' }),
+      ).toThrow('publisherNodeIdentityIdOverride must be passed as a decimal string');
+      expect(requestLog).toHaveLength(0);
+    });
+
+    it('knowledgeAssetPublish rejects negative publisher identity overrides before POSTing', async () => {
+      expect(() =>
+        knowledgeAssetPublish('cg-1', 'f', { publisherNodeIdentityIdOverride: '-1' }),
+      ).toThrow('publisherNodeIdentityIdOverride must be passed as a decimal string');
+      expect(requestLog).toHaveLength(0);
+    });
+
+    it('knowledgeAssetPublish rejects unsupported publish options before POSTing', async () => {
+      expect(() =>
+        knowledgeAssetPublish('cg-1', 'f', { publishEpoch: 3 } as any),
+      ).toThrow('Unsupported finalized publish option(s): publishEpoch');
+      expect(requestLog).toHaveLength(0);
+    });
+
+    it('createKnowledgeAsset normalizes context graph URIs before POSTing', async () => {
+      await createKnowledgeAsset('did:dkg:context-graph:cg-1', 'f');
+      const call = requestLog.find(r => r.method === 'POST' && r.url.includes('/api/knowledge-assets'));
+      const body = JSON.parse(call?.body ?? '{}');
+      expect(body.contextGraphId).toBe('cg-1');
+      expect(body.name).toBe('f');
+    });
+
+    it('createKnowledgeAsset rejects mutually exclusive authorship fields before POSTing', () => {
+      expect(() =>
+        createKnowledgeAsset('cg-1', 'f', {
+          authorAgentAddress: '0xauthor',
+          preSignedAuthorAttestation: { address: '0xauthor', signature: { r: '0xr', vs: '0xvs' } },
+        }),
+      ).toThrow('authorAgentAddress and preSignedAuthorAttestation are mutually exclusive');
+      expect(requestLog).toHaveLength(0);
+    });
+
+    it('createKnowledgeAsset rejects finalized publish fields without quads before POSTing', () => {
+      expect(() =>
+        createKnowledgeAsset('cg-1', 'f', {
+          authorAgentAddress: '0xauthor',
+        }),
+      ).toThrow('authorAgentAddress, preSignedAuthorAttestation, and schemeVersion require non-empty quads');
+      expect(requestLog).toHaveLength(0);
+    });
+
+    it('createKnowledgeAsset treats empty alsoPublishVm options as default publish', async () => {
+      await createKnowledgeAsset('cg-1', 'f', { alsoPublishVm: {} });
+      const call = requestLog.find(r => r.method === 'POST' && r.url.includes('/api/knowledge-assets'));
+      const body = JSON.parse(call?.body ?? '{}');
+      expect(body.alsoPublishVm).toEqual({});
+    });
+
+    it('createKnowledgeAsset rejects unsupported alsoPublishVm options before POSTing', () => {
+      expect(() =>
+        createKnowledgeAsset('cg-1', 'f', { alsoPublishVm: { publishEpoch: 3 } as any }),
+      ).toThrow('Unsupported finalized publish option(s): publishEpoch');
+      expect(requestLog).toHaveLength(0);
+    });
+
+    it('createKnowledgeAsset rejects array alsoPublishVm before POSTing', () => {
+      expect(() =>
+        createKnowledgeAsset('cg-1', 'f', { alsoPublishVm: [] as any }),
+      ).toThrow('alsoPublishVm must be a boolean or publish-options object');
+      expect(requestLog).toHaveLength(0);
+    });
+
+    it('knowledgeAssetFinalize rejects mutually exclusive authorship fields before POSTing', () => {
+      expect(() =>
+        knowledgeAssetFinalize('cg-1', 'f', {
+          authorAgentAddress: '0xauthor',
+          preSignedAuthorAttestation: { address: '0xauthor', signature: { r: '0xr', vs: '0xvs' } },
+        }),
+      ).toThrow('authorAgentAddress and preSignedAuthorAttestation are mutually exclusive');
+      expect(requestLog).toHaveLength(0);
+    });
+
     it('listSwmEntities queries the shared-working-memory view', async () => {
       await listSwmEntities('cg-1');
       const call = requestLog.find(r => r.method === 'POST' && r.url.includes('/api/query'));
@@ -323,6 +408,75 @@ describe('UI API tests', () => {
         { uri: 'https://example.org/doc/root', label: 'root', tripleCount: 5 },
         { uri: 'https://example.org/doc/child-only', label: 'child-only', tripleCount: 4 },
       ]);
+    });
+
+    it('listAssertions(wm) recognizes the lifecycle-URN marker form (file imports)', async () => {
+      // File-imported assertions carry dkg:memoryLayer "WM" ONLY on the
+      // lifecycle URN (urn:dkg:assertion:<cg>:<agent>:<name>), not the
+      // data-graph URI. The parser must accept it — otherwise the bulk-promote
+      // loop sees an empty list and reports "0 triples promoted".
+      const agent = '0x' + '1'.repeat(40);
+      queryBindings = [{ g: { value: `urn:dkg:assertion:cg-1:${agent}:my-import.md` } }];
+      const list = await listAssertions('cg-1', 'wm');
+      expect(list.map(a => a.name)).toEqual(['my-import.md']);
+    });
+
+    it('listAssertions(wm) dedupes when BOTH the URN and data-URI markers exist', async () => {
+      const agent = '0x' + '2'.repeat(40);
+      queryBindings = [
+        { g: { value: `did:dkg:context-graph:cg-1/assertion/${agent}/doc` } },
+        { g: { value: `urn:dkg:assertion:cg-1:${agent}:doc` } },
+      ];
+      const list = await listAssertions('cg-1', 'wm');
+      expect(list.map(a => a.name)).toEqual(['doc']);
+    });
+
+    it('listAssertions(wm) parses sub-graph-scoped URN markers and names containing ":"', async () => {
+      const agent = '0x' + '3'.repeat(40);
+      queryBindings = [{ g: { value: `urn:dkg:assertion:cg-1:code:${agent}:a:b.md` } }];
+      const list = await listAssertions('cg-1', 'wm');
+      expect(list).toEqual([
+        { name: 'a:b.md', graphUri: `urn:dkg:assertion:cg-1:code:${agent}:a:b.md`, tripleCount: undefined, subGraph: 'code' },
+      ]);
+    });
+
+    it('listAssertions(swm) reads the memoryLayer "SWM" marker (not async ShareTransition records)', async () => {
+      // The SWM listing must use the synchronous _meta memoryLayer marker, not
+      // _shared_memory_meta ShareTransition records which lag the promote and
+      // made "Publish to VM" report "nothing to publish" right after promoting.
+      const agent = '0x' + '4'.repeat(40);
+      queryBindings = [{ g: { value: `urn:dkg:assertion:cg-1:${agent}:shared-doc.md` } }];
+      const list = await listAssertions('cg-1', 'swm');
+      expect(list.map(a => a.name)).toEqual(['shared-doc.md']);
+    });
+
+    it('listAssertions(swm) excludes assertions already published to VM (dkg:vmCurrentAssertion)', async () => {
+      // Publish records a vmCurrentAssertion pointer but does NOT flip memoryLayer
+      // off "SWM" (backend gap), so the SWM list must drop published rows itself.
+      const agent = '0x' + '5'.repeat(40);
+      queryBindings = [
+        { g: { value: `urn:dkg:assertion:cg-1:${agent}:unpublished.md` } },
+        { g: { value: `urn:dkg:assertion:cg-1:${agent}:published.md` }, vm: { value: 'abc123deadbeef' } },
+      ];
+      const list = await listAssertions('cg-1', 'swm');
+      expect(list.map(a => a.name)).toEqual(['unpublished.md']);
+    });
+
+    it('fetchAssertionUals maps assertionName -> reservedUal (shown next to the filename)', async () => {
+      queryBindings = [
+        { name: { value: 'spec.md' }, ual: { value: 'did:dkg:evm:31337/0xabc/7' } },
+        { name: { value: 'demo.md' }, ual: { value: 'did:dkg:evm:31337/0xabc/8' } },
+      ];
+      const map = await fetchAssertionUals('cg-1');
+      expect(map['spec.md']).toBe('did:dkg:evm:31337/0xabc/7');
+      expect(map['demo.md']).toBe('did:dkg:evm:31337/0xabc/8');
+    });
+
+    it('ensureContextGraphOnChain auto-registers an off-chain CG before publishing', async () => {
+      // mock /api/context-graph/list returns cg1 with no onChainId → the helper
+      // must POST /api/context-graph/register so VM publish (on-chain) can proceed.
+      await ensureContextGraphOnChain('cg1');
+      expect(requestLog.some(r => r.method === 'POST' && r.url.includes('/api/context-graph/register'))).toBe(true);
     });
 
     it('createSavedQuery sends POST', async () => {

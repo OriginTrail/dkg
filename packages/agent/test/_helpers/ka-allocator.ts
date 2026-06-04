@@ -21,23 +21,26 @@ import { KaNumberAllocator } from '../../src/allocator.js';
 
 /** In-memory `KaNumberStore` matching the `SqliteKaNumberStore` contract. */
 class InMemoryKaNumberStore implements KaNumberStore {
-  private readonly next = new Map<string, number>();
+  // bigint end-to-end (PR #976 F6) to mirror the durable SqliteKaNumberStore —
+  // the per-author number can exceed 2^53, so `number`/`Math.max` would lose
+  // precision and let the allocator re-issue an already-minted id.
+  private readonly next = new Map<string, bigint>();
 
-  allocate(authorAddress: string): number {
+  allocate(authorAddress: string): bigint {
     const key = authorAddress.toLowerCase();
-    const current = this.next.get(key) ?? 0;
-    this.next.set(key, current + 1);
+    const current = this.next.get(key) ?? 0n;
+    this.next.set(key, current + 1n);
     return current;
   }
 
-  reconcileFloor(authorAddress: string, nextNumberFloor: number): void {
+  reconcileFloor(authorAddress: string, nextNumberFloor: bigint): void {
     const key = authorAddress.toLowerCase();
-    const current = this.next.get(key) ?? 0;
-    this.next.set(key, Math.max(current, nextNumberFloor));
+    const current = this.next.get(key) ?? 0n;
+    this.next.set(key, current > nextNumberFloor ? current : nextNumberFloor);
   }
 
-  peekNext(authorAddress: string): number {
-    return this.next.get(authorAddress.toLowerCase()) ?? 0;
+  peekNext(authorAddress: string): bigint {
+    return this.next.get(authorAddress.toLowerCase()) ?? 0n;
   }
 }
 

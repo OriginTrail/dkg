@@ -571,6 +571,29 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
     expect(sent.alsoPublishVm).not.toHaveProperty('tokenAmount');
   });
 
+  it('createKnowledgeAsset treats empty alsoPublishVm options as default publish', async () => {
+    const calls = track({ name: 'f', status: 'vm-confirmed' });
+    await client.createKnowledgeAsset('cg', 'f', { alsoPublishVm: {} });
+    const sent = JSON.parse(calls[0].opts.body as string);
+    expect(sent.alsoPublishVm).toEqual({});
+  });
+
+  it('createKnowledgeAsset rejects unsupported alsoPublishVm options before HTTP serialization', async () => {
+    const calls = track({ ok: true });
+    await expect(client.createKnowledgeAsset('cg', 'f', {
+      alsoPublishVm: { publishEpoch: 3 },
+    } as any)).rejects.toThrow('Unsupported finalized publish option(s): publishEpoch');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('createKnowledgeAsset rejects array alsoPublishVm before HTTP serialization', async () => {
+    const calls = track({ ok: true });
+    await expect(client.createKnowledgeAsset('cg', 'f', {
+      alsoPublishVm: [],
+    } as any)).rejects.toThrow('alsoPublishVm must be a boolean or publish-options object');
+    expect(calls).toHaveLength(0);
+  });
+
   it('knowledgeAssetWrite POSTs to .../:name/wm/write (name URL-encoded)', async () => {
     const calls = track({ written: 1 });
     await client.knowledgeAssetWrite('cg', 'meeting notes', [{ subject: 's', predicate: 'p', object: 'o', graph: '' }]);
@@ -596,6 +619,20 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
     });
   });
 
+  it('knowledgeAssetFinalize rejects self-sign + external-signer conflict before HTTP serialization', async () => {
+    const calls = track({ merkleRoot: '0xabc', eip712Digest: '0xdig' });
+    await expect(
+      client.knowledgeAssetFinalize('cg', 'f', {
+        authorAgentAddress: '0x1111111111111111111111111111111111111111',
+        preSignedAuthorAttestation: {
+          address: '0x2222222222222222222222222222222222222222',
+          signature: { r: `0x${'22'.repeat(32)}`, vs: `0x${'33'.repeat(32)}` },
+        },
+      }),
+    ).rejects.toThrow('authorAgentAddress and preSignedAuthorAttestation are mutually exclusive');
+    expect(calls).toHaveLength(0);
+  });
+
   it('knowledgeAssetShare → swm/share, knowledgeAssetPublish → vm/publish', async () => {
     let calls = track({ swmShared: true, promotedCount: 2 });
     await client.knowledgeAssetShare('cg', 'f');
@@ -618,6 +655,14 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
         publisherNodeIdentityIdOverride: '123',
       },
     });
+  });
+
+  it('knowledgeAssetPublish rejects unsupported option keys before HTTP serialization', async () => {
+    const calls = track({ ok: true });
+    await expect(client.knowledgeAssetPublish('cg', 'f', {
+      publishEpoch: 3,
+    } as any)).rejects.toThrow('Unsupported finalized publish option(s): publishEpoch');
+    expect(calls).toHaveLength(0);
   });
 
   it('knowledgeAssetPullFrom sends layer + onConflict', async () => {

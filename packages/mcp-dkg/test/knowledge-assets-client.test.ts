@@ -78,6 +78,16 @@ describe('DkgClient knowledge-assets — publish/finalize option serialization',
     expect(calls).toHaveLength(0);
   });
 
+  it('knowledgeAssetPublish rejects unknown finalized-publish option keys', async () => {
+    const { client, calls } = makeClient();
+    await expect(client.knowledgeAssetPublish({
+      contextGraphId: 'cg-1',
+      name: 'f',
+      publishEpoch: 3,
+    } as any)).rejects.toThrow(/Unsupported finalized publish option\(s\): publishEpoch/);
+    expect(calls).toHaveLength(0);
+  });
+
   it('knowledgeAssetFinalize forwards authorAgentAddress', async () => {
     const { client, calls } = makeClient();
     await client.knowledgeAssetFinalize({
@@ -140,5 +150,50 @@ describe('DkgClient knowledge-assets — publish/finalize option serialization',
     const { client, calls } = makeClient();
     await client.createKnowledgeAsset({ contextGraphId: 'cg-1', name: 'f', alsoPublishVm: true });
     expect(calls[0].body.alsoPublishVm).toBe(true);
+  });
+
+  it('createKnowledgeAsset rejects null alsoPublishVm before HTTP serialization', async () => {
+    const { client, calls } = makeClient();
+    await expect(client.createKnowledgeAsset({
+      contextGraphId: 'cg-1',
+      name: 'f',
+      alsoPublishVm: null,
+    } as any)).rejects.toThrow(/alsoPublishVm must be a boolean or publish-options object/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('createKnowledgeAsset treats an empty alsoPublishVm options object as default publish', async () => {
+    const { client, calls } = makeClient();
+    await client.createKnowledgeAsset({
+      contextGraphId: 'cg-1',
+      name: 'f',
+      alsoPublishVm: {},
+    });
+    expect(calls[0].body.alsoPublishVm).toEqual({});
+  });
+
+  it('createKnowledgeAsset rejects unknown alsoPublishVm option objects', async () => {
+    const { client, calls } = makeClient();
+    await expect(client.createKnowledgeAsset({
+      contextGraphId: 'cg-1',
+      name: 'f',
+      alsoPublishVm: { unknown: true },
+    } as any)).rejects.toThrow(/Unsupported finalized publish option\(s\): unknown/);
+    await expect(client.createKnowledgeAsset({
+      contextGraphId: 'cg-1',
+      name: 'f',
+      alsoPublishVm: { publishEpoch: 3 },
+    } as any)).rejects.toThrow(/Unsupported finalized publish option\(s\): publishEpoch/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('createKnowledgeAsset rejects finalize-only fields without quads before HTTP serialization', async () => {
+    const { client, calls } = makeClient();
+    await expect(client.createKnowledgeAsset({
+      contextGraphId: 'cg-1',
+      name: 'f',
+      authorAgentAddress: '0xauthor',
+    })).rejects.toThrow(/require non-empty quads/);
+    expect(calls).toHaveLength(0);
   });
 });
