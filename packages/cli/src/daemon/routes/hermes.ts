@@ -197,6 +197,10 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
         if (!forwardRes.ok) {
           const details = await forwardRes.text().catch(() => '');
           if (forwardRes.status === 504) {
+            // A request-level timeout may mean the agent accepted the turn and
+            // is still working. Do not retry another transport and risk a
+            // duplicate chat turn; keep fallback for immediate availability
+            // failures such as 5xx responses below.
             return jsonResponse(res, 504, buildHermesBridgeTimeoutBody(
               payload.correlationId,
               target,
@@ -244,6 +248,7 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
         return jsonResponse(res, 200, reply);
       } catch (err: any) {
         if (isHermesBridgeTimeoutError(err)) {
+          // See the 504 handling above: timeout fallback can duplicate a turn.
           return jsonResponse(res, 504, buildHermesBridgeTimeoutBody(payload.correlationId, target));
         }
         lastFailure = { details: err.message, offline: true };
@@ -318,6 +323,10 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
         if (!transportRes.ok) {
           const details = await transportRes.text().catch(() => '');
           if (transportRes.status === 504) {
+            // A request-level timeout may mean the agent accepted the turn and
+            // is still working. Do not retry another transport and risk a
+            // duplicate chat turn; keep fallback for immediate availability
+            // failures such as 5xx responses below.
             return jsonResponse(res, 504, buildHermesBridgeTimeoutBody(
               payload.correlationId,
               target,
@@ -418,6 +427,7 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
         return;
       } catch (err: any) {
         if (isHermesBridgeTimeoutError(err)) {
+          // See the 504 handling above: timeout fallback can duplicate a turn.
           return jsonResponse(res, 504, buildHermesBridgeTimeoutBody(payload.correlationId, target));
         }
         lastFailure = { details: err.message, offline: true };

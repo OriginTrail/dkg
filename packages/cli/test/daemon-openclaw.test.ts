@@ -567,13 +567,16 @@ describe('OpenClaw channel routing helpers', () => {
   it('returns a source-specific timeout when the OpenClaw bridge does not answer chat send', async () => {
     const timeoutError = new Error('The operation was aborted due to timeout') as Error & { name: string };
     timeoutError.name = 'TimeoutError';
-    let calls = 0;
+    const urls: string[] = [];
     const origFetch = globalThis.fetch;
     globalThis.fetch = (async (url: string | URL | Request) => {
-      calls += 1;
       const requestUrl = String(url);
+      urls.push(requestUrl);
       if (requestUrl.endsWith('/health')) {
         return new Response(JSON.stringify({ ok: true, channel: 'dkg-ui' }), { status: 200 });
+      }
+      if (requestUrl.includes('openclaw.example.com')) {
+        return new Response(JSON.stringify({ text: 'gateway reply' }), { status: 200 });
       }
       throw timeoutError;
     }) as typeof fetch;
@@ -581,11 +584,26 @@ describe('OpenClaw channel routing helpers', () => {
       const { ctx, res } = makeOpenClawRouteContext({
         text: 'slow task',
         correlationId: 'corr-timeout',
+      }, '/api/openclaw-channel/send', {
+        localAgentIntegrations: {
+          openclaw: {
+            enabled: true,
+            capabilities: { localChat: true },
+            transport: {
+              kind: 'openclaw-channel',
+              bridgeUrl: 'http://127.0.0.1:9301',
+              gatewayUrl: 'https://openclaw.example.com',
+            },
+          },
+        },
       });
 
       await handleOpenclawRoutes(ctx);
 
-      expect(calls).toBe(2);
+      expect(urls).toEqual([
+        'http://127.0.0.1:9301/health',
+        'http://127.0.0.1:9301/inbound',
+      ]);
       expect(res.statusCode).toBe(504);
       expect(JSON.parse(res.body)).toMatchObject({
         error: 'OpenClaw bridge response timeout',
