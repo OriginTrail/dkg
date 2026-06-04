@@ -243,6 +243,43 @@ describe('useModalDismiss (BUG-017)', () => {
     expect(document.activeElement).toBe(first);
   });
 
+  it('redirects Tab into the trap when controls enable after focus was pinned on the dialog (uploading -> done)', async () => {
+    // ImportFilesModal opens with every control disabled while an upload is
+    // in flight → the hook pins focus on the dialog container (tabindex=-1).
+    // When the upload finishes the controls enable, but focus is still on
+    // the container. Tab must move INTO the trap (first/last), not escape to
+    // the background page. (Codex review.)
+    const onClose = vi.fn();
+    mount(true, onClose, React.createElement('button', { id: 'dz-only', disabled: true }, 'Uploading'));
+    await tick();
+    const dialog = document.querySelector('[role="dialog"]') as HTMLElement;
+    expect(document.activeElement).toBe(dialog);
+
+    // Upload completes → controls enable. Focus is still on the container.
+    rerender(true, onClose, [
+      React.createElement('button', { key: 'a', id: 'dz-first' }, 'First'),
+      React.createElement('button', { key: 'b', id: 'dz-last' }, 'Last'),
+    ]);
+    await tick();
+    expect(document.activeElement).toBe(dialog);
+    const first = document.getElementById('dz-first') as HTMLElement;
+    const last = document.getElementById('dz-last') as HTMLElement;
+
+    // Tab from the container moves to the FIRST control, not the background.
+    const fwd = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
+    window.dispatchEvent(fwd);
+    expect(fwd.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(first);
+
+    // Re-pin to the container and verify Shift+Tab goes to the LAST control.
+    dialog.focus();
+    expect(document.activeElement).toBe(dialog);
+    const back = new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true, cancelable: true });
+    window.dispatchEvent(back);
+    expect(back.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(last);
+  });
+
   it('uses capture phase so Escape inside a child <input> still closes the dialog (BUG-017 regression guard)', async () => {
     const onClose = vi.fn();
     mount(true, onClose, React.createElement('input', { id: 'inside-input', defaultValue: '' }));

@@ -114,6 +114,18 @@ export function useModalDismiss(open: boolean, onClose: () => void) {
       const first = focusables[0];
       const last = focusables[focusables.length - 1];
       const active = document.activeElement as HTMLElement | null;
+      if (active === dialog) {
+        // Focus is pinned on the dialog container itself (tabindex=-1). This
+        // happens when the modal OPENED with every control disabled (e.g.
+        // ImportFilesModal mid-upload) and controls have SINCE become
+        // enabled (upload finished). The container is neither `first` nor
+        // `last`, so without this branch Shift+Tab would walk OUT to the
+        // background page. Redirect into the trap: Tab → first, Shift+Tab →
+        // last. (Codex review.)
+        e.preventDefault();
+        (e.shiftKey ? last : first).focus();
+        return;
+      }
       if (e.shiftKey && active === first) {
         e.preventDefault();
         last.focus();
