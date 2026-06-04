@@ -1624,7 +1624,6 @@ export interface LocalAgentChatResponse {
 
 export interface LocalAgentChatFailurePersistenceOptions {
   sessionId?: string;
-  turnId?: string;
   correlationId?: string;
   userMessage: string;
   assistantReply?: string;
@@ -2511,23 +2510,6 @@ export async function fetchLocalAgentHistory(
   return fetchLocalAgentHistoryBySessionId(sessionId, limit);
 }
 
-async function persistOpenClawLocalChatFailure(
-  opts: LocalAgentChatFailurePersistenceOptions,
-): Promise<LocalAgentChatFailurePersistenceResponse> {
-  const sessionId = opts.sessionId?.trim() || getDefaultLocalAgentSessionId('openclaw');
-  if (!sessionId) throw new Error('Missing OpenClaw session id');
-  return post<LocalAgentChatFailurePersistenceResponse>('/api/openclaw-channel/persist-turn', {
-    sessionId,
-    userMessage: opts.userMessage,
-    assistantReply: opts.assistantReply ?? '',
-    turnId: opts.turnId ?? opts.correlationId,
-    correlationId: opts.correlationId,
-    attachmentRefs: opts.attachments,
-    persistenceState: 'failed',
-    failureReason: opts.failureReason,
-  });
-}
-
 async function persistHermesLocalChatFailure(
   opts: LocalAgentChatFailurePersistenceOptions,
 ): Promise<LocalAgentChatFailurePersistenceResponse> {
@@ -2537,7 +2519,6 @@ async function persistHermesLocalChatFailure(
     sessionId,
     userMessage: opts.userMessage,
     assistantReply: opts.assistantReply ?? '',
-    turnId: opts.turnId ?? opts.correlationId,
     correlationId: opts.correlationId,
     attachmentRefs: opts.attachments,
     persistenceState: 'failed',
@@ -2553,7 +2534,6 @@ export async function persistLocalAgentChatFailure(
   opts: LocalAgentChatFailurePersistenceOptions,
 ): Promise<LocalAgentChatFailurePersistenceResponse> {
   const normalizedId = id.trim().toLowerCase();
-  if (normalizedId === 'openclaw') return persistOpenClawLocalChatFailure(opts);
   if (normalizedId === 'hermes') return persistHermesLocalChatFailure(opts);
   throw new Error(`${id} local chat persistence is not available yet.`);
 }

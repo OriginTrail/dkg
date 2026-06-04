@@ -318,6 +318,48 @@ describe('PanelRight component', () => {
     container.remove();
   });
 
+  it('does not client-persist failed OpenClaw turns', async () => {
+    streamLocalAgentChatMock.mockRejectedValue(new Error('OpenClaw bridge unreachable'));
+
+    const { PanelRight } = await import('../src/ui/components/Shell/PanelRight.js');
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(React.createElement(PanelRight));
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const textarea = container.querySelector('textarea');
+    expect(textarea).toBeTruthy();
+    await act(async () => {
+      const valueSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+      valueSetter?.call(textarea, 'Run the OpenClaw task');
+      textarea!.dispatchEvent(new Event('input', { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    const sendButton = container.querySelector('button[aria-label="Send message"]') as HTMLButtonElement | null;
+    expect(sendButton).toBeTruthy();
+    await act(async () => {
+      sendButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    await waitForAssertion(() => {
+      expect(container.textContent).toContain('Error: OpenClaw is unavailable right now.');
+    });
+    expect(persistLocalAgentChatFailureMock).not.toHaveBeenCalled();
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
   it('persists failed Hermes turns so timeout sessions survive refresh', async () => {
     fetchLocalAgentIntegrationsMock.mockResolvedValue({ integrations: [{
       id: 'hermes',
@@ -387,7 +429,6 @@ describe('PanelRight component', () => {
     });
     expect(persistLocalAgentChatFailureMock).toHaveBeenCalledWith('hermes', expect.objectContaining({
       sessionId: 'hermes:dkg-ui:profile-dkg-smoke',
-      turnId: expect.any(String),
       correlationId: expect.any(String),
       userMessage: 'Run the slow Hermes task',
       assistantReply: 'Partial Hermes output',
@@ -395,6 +436,7 @@ describe('PanelRight component', () => {
       profile: 'dkg-smoke',
       contextGraphId: 'testing',
     }));
+    expect(persistLocalAgentChatFailureMock.mock.calls[0]?.[1]).not.toHaveProperty('turnId');
     expect(container.textContent).toContain('Error: Hermes took too long to respond.');
 
     await act(async () => {

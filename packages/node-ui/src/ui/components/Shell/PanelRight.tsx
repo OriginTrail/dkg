@@ -524,6 +524,14 @@ export function buildChatContextEntries(
  *
  */
 
+function isPersistedFailureNotice(text: string, failureReason?: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  if (/^error:/i.test(trimmed)) return true;
+  if (trimmed === 'Request cancelled.') return true;
+  return Boolean(failureReason && trimmed.toLowerCase().includes(failureReason.toLowerCase()));
+}
+
 function mapHistoryMessage(message: LocalAgentHistoryMessage): LocalAgentMessage {
   const author = message.author.toLowerCase();
   const role: LocalAgentMessage['role'] = author.includes('assistant') || author.includes('agent') ? 'assistant' : 'user';
@@ -533,7 +541,13 @@ function mapHistoryMessage(message: LocalAgentHistoryMessage): LocalAgentMessage
   const failed = role === 'assistant' && (message.persistStatus === 'failed' || Boolean(failedReason));
   const failureContent = `Error: ${failedReason ?? 'The local agent turn failed.'}`;
   const content = failed
-    ? (message.text ? `${message.text}\n\n${failureContent}` : failureContent)
+    ? (message.text
+      ? (
+        isPersistedFailureNotice(message.text, failedReason)
+          ? message.text
+          : `${message.text}\n\n${failureContent}`
+      )
+      : failureContent)
     : message.text || buildAttachmentSummary(message.attachmentRefs ?? []);
   // KNOWN ISSUE — persisted messages whose newlines were escape-
   // encoded by the DKG-memory persistence layer (stored as literal
@@ -2722,12 +2736,11 @@ export function PanelRight() {
           ),
         );
       }
-      if (!isUserAbort && assistantId && messageText) {
+      if (!isUserAbort && integrationId === 'hermes' && assistantId && messageText) {
         void (async () => {
           try {
             const persisted = await persistLocalAgentChatFailure(integrationId, {
               sessionId: conversation.sessionId ?? undefined,
-              turnId: correlationId || undefined,
               correlationId: correlationId || undefined,
               userMessage: messageText,
               assistantReply: assistantPartialText,

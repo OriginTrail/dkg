@@ -475,7 +475,6 @@ describe('ui local-agent stream api', () => {
     try {
       const result = await persistLocalAgentChatFailure('hermes', {
         sessionId: 'hermes:dkg-ui:profile-dkg-smoke',
-        turnId: 'corr-timeout',
         correlationId: 'corr-timeout',
         userMessage: 'slow question',
         failureReason: 'Hermes took too long to respond.',
@@ -490,13 +489,13 @@ describe('ui local-agent stream api', () => {
         sessionId: 'hermes:dkg-ui:profile-dkg-smoke',
         userMessage: 'slow question',
         assistantReply: '',
-        turnId: 'corr-timeout',
         correlationId: 'corr-timeout',
         persistenceState: 'failed',
         failureReason: 'Hermes took too long to respond.',
         profile: 'dkg-smoke',
         contextGraphId: 'project-1',
       });
+      expect(payload).not.toHaveProperty('turnId');
     } finally {
       globalThis.fetch = savedFetch;
     }
