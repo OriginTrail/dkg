@@ -192,3 +192,39 @@ sharedDismissContract('FilePreviewModal — #959 Esc/focus dismiss wiring', ({ o
     contextGraphId: 'did:dkg:context-graph:test/cg',
   }),
 );
+
+// Codex review follow-up: a modal can transiently have EVERY control
+// disabled (e.g. ImportFilesModal while an upload is in flight — both the
+// header × and the footer action go disabled). `useModalDismiss` used to
+// only focus tabbable children, so in that state focus stayed on the
+// background page even though the dialog advertises aria-modal="true". The
+// hook now falls back to focusing the dialog container itself.
+describe('useModalDismiss — focus fallback when no enabled control', () => {
+  it('focuses the dialog itself (tabindex=-1) when every descendant is disabled', async () => {
+    const { useModalDismiss } = await import('../src/ui/components/Modals/useModalDismiss.js');
+    function Harness() {
+      const { dialogRef, onBackdropClick } = useModalDismiss(true, () => {});
+      return React.createElement(
+        'div',
+        { className: 'v10-modal-overlay', onClick: onBackdropClick, role: 'presentation' },
+        React.createElement(
+          'div',
+          {
+            className: 'v10-modal-box',
+            ref: dialogRef,
+            role: 'dialog',
+            'aria-modal': 'true',
+            'aria-labelledby': 'harness-title',
+          },
+          React.createElement('div', { id: 'harness-title' }, 'Uploading…'),
+          React.createElement('button', { type: 'button', disabled: true, 'aria-label': 'Close' }, '×'),
+        ),
+      );
+    }
+    const container = await render(React.createElement(Harness));
+    await flush();
+    const dialog = container.querySelector('[role="dialog"]') as HTMLElement;
+    expect(dialog.getAttribute('tabindex')).toBe('-1');
+    expect(document.activeElement).toBe(dialog);
+  });
+});

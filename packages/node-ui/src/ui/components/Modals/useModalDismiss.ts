@@ -40,13 +40,26 @@ export function useModalDismiss(open: boolean, onClose: () => void) {
     queueMicrotask(() => {
       const dialog = dialogRef.current;
       if (!dialog) return;
+      // Skip DISABLED controls: focusing them is a no-op that silently
+      // leaves focus on the background page. A modal can legitimately have
+      // every control disabled transiently (e.g. ImportFilesModal while an
+      // upload is in flight), so we need a fallback below.
       const firstFocusable = dialog.querySelector<HTMLElement>(
-        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
       );
       // Prefer the explicit `[autofocus]` element when present
       // (matches React's autoFocus semantics for the name input).
       const autoFocus = dialog.querySelector<HTMLElement>('[autofocus]');
-      (autoFocus ?? firstFocusable)?.focus();
+      const target = autoFocus ?? firstFocusable;
+      if (target) {
+        target.focus();
+      } else {
+        // Nothing focusable inside — focus the dialog itself so focus still
+        // enters the modal and `aria-modal="true"` isn't a lie (Codex
+        // review). Make it programmatically focusable if the caller didn't.
+        if (!dialog.hasAttribute('tabindex')) dialog.setAttribute('tabindex', '-1');
+        dialog.focus();
+      }
     });
     return () => {
       // Restore focus on close so keyboard users land back where they
