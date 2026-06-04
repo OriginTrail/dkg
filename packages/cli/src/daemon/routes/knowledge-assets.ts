@@ -133,6 +133,14 @@ function validateFinalizedAssertionPublishRequest(
   const nested = parsed.options && typeof parsed.options === "object" && !Array.isArray(parsed.options)
     ? parsed.options as Record<string, unknown>
     : undefined;
+  const assertionName = parsed.assertionName ?? nested?.assertionName;
+  if (assertionName !== undefined) {
+    jsonResponse(res, 400, {
+      error:
+        '"assertionName" is not accepted on /api/knowledge-assets/:name/vm/publish — the URL name selects the assertion.',
+    });
+    return false;
+  }
   const hasAuthorOverride =
     parsed.authorAgentAddress != null ||
     parsed.preSignedAuthorAttestation != null ||
@@ -570,8 +578,16 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     if (finalizeOptions === null) return;
     // Coerce/validate publish controls up front too — bad option values 400
     // before any assertion is created rather than after a durable seal.
-    const atomicPublishOptions = alsoPublishVm ? resolveFinalizedPublishOptions(ctx, alsoPublishVm) : {};
-    if (atomicPublishOptions === null) return;
+    let atomicPublishOptions: Record<string, unknown> = {};
+    if (alsoPublishVm) {
+      const publishOptionsInput = alsoPublishVmIsObject
+        ? finalizedPublishOptionsInput(alsoPublishVm as Record<string, unknown>, res)
+        : alsoPublishVm;
+      if (publishOptionsInput === null) return;
+      const resolvedAtomicPublishOptions = resolveFinalizedPublishOptions(ctx, publishOptionsInput);
+      if (resolvedAtomicPublishOptions === null) return;
+      atomicPublishOptions = resolvedAtomicPublishOptions;
+    }
     try {
       const assertionUri = await agent.assertion.create(
         resolvedContextGraphId,
@@ -720,9 +736,10 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
   }
 
   // ── /api/knowledge-assets/:name[/{wm,swm,vm}[/verb]] ──
-  const rawSegs = path.slice(`${PREFIX}/`.length).split("/").filter(Boolean);
+  const rawSegs = path.slice(`${PREFIX}/`.length).split("/");
   const segs: string[] = [];
   for (const rawSeg of rawSegs) {
+    if (rawSeg === "") return;
     const decoded = safeDecodeURIComponent(rawSeg, res);
     if (decoded === null) return;
     segs.push(decoded);

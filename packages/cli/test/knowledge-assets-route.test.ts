@@ -835,6 +835,17 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
     expect(agent.publishFromFinalizedAssertion).not.toHaveBeenCalled();
   });
 
+  it.each([
+    '/api/knowledge-assets/f//vm/publish',
+    '/api/knowledge-assets/f/vm/publish/',
+  ])('malformed path %s falls through to the daemon 404', async (path) => {
+    const agent = makeAssertionAgent();
+    const ctx = ctxFor('POST', path, { contextGraphId: 'cg' }, agent);
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(ctx.res.writableEnded).toBe(false);
+    expect(agent.publishFromFinalizedAssertion).not.toHaveBeenCalled();
+  });
+
   // ── 34ae7dd1f re-review ─────────────────────────────────────────────────────
 
   it('atomic create rejects a non-boolean alsoShareSwm (truthiness footgun)', async () => {
@@ -864,6 +875,30 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
       'POST',
       '/api/knowledge-assets',
       { contextGraphId: 'cg', name: 'f', quads, alsoShareSwm: true, alsoPublishVm: { publishEpochs: '4' } },
+      agent,
+    );
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(201);
+    expect(agent.publishFromFinalizedAssertion).toHaveBeenCalledWith(
+      'cg',
+      'f',
+      expect.objectContaining({ publishEpochs: 4 }),
+    );
+  });
+
+  it('atomic create accepts nested inline alsoPublishVm options and coerces them', async () => {
+    const agent = makeAssertionAgent();
+    const quads = [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"', graph: '' }];
+    const ctx = ctxFor(
+      'POST',
+      '/api/knowledge-assets',
+      {
+        contextGraphId: 'cg',
+        name: 'f',
+        quads,
+        alsoShareSwm: true,
+        alsoPublishVm: { options: { publishEpochs: '4' } },
+      },
       agent,
     );
     await handleKnowledgeAssetsRoutes(ctx);
@@ -1136,6 +1171,20 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
     expect(body(ctx).error).toContain('cannot be combined with "assertionName"');
     expect(agent.publishFromFinalizedAssertion).not.toHaveBeenCalled();
     expect((tracker as any).start).not.toHaveBeenCalled();
+  });
+
+  it('vm/publish rejects legacy assertionName fields before publishing', async () => {
+    const agent = makeAssertionAgent();
+    const ctx = ctxFor(
+      'POST',
+      '/api/knowledge-assets/f/vm/publish',
+      { contextGraphId: 'cg', assertionName: 'other-ka' },
+      agent,
+    );
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(400);
+    expect(body(ctx).error).toContain('"assertionName" is not accepted');
+    expect(agent.publishFromFinalizedAssertion).not.toHaveBeenCalled();
   });
 
   it('vm/publish rejects nested author override fields before publishing', async () => {
