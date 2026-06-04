@@ -755,6 +755,25 @@ cmd_start() {
   start_blazegraph
   start_oxigraph_servers
 
+  # ── backend coverage summary + optional strict gate ───────────────────────
+  # The devnet runs a store-backend matrix (nodes 1-2 oxigraph-worker, 3-4
+  # blazegraph, 5-6 sparql-http/oxigraph-server). When Docker is unavailable
+  # the SPARQL-over-HTTP backends SILENTLY fall back to the embedded store —
+  # which is exactly how the rc.16 blank-node DELETE-DATA bug slipped past
+  # devnet (no node actually ran sparql-http). Make the degradation loud, and
+  # let CI demand the full matrix via DEVNET_REQUIRE_ALL_BACKENDS=1.
+  local bg_state ox_state
+  if [ "$BLAZEGRAPH_AVAILABLE" = true ]; then bg_state="blazegraph"; else bg_state="DEGRADED → oxigraph in-process (blazegraph unavailable)"; fi
+  if [ "$OXIGRAPH_SERVER_AVAILABLE" = true ]; then ox_state="sparql-http / oxigraph-server"; else ox_state="DEGRADED → oxigraph-worker (oxigraph-server unavailable)"; fi
+  log "Store-backend matrix:  nodes 1-2: oxigraph-worker  |  nodes 3-4: $bg_state  |  nodes 5-6: $ox_state"
+  if [ "$BLAZEGRAPH_AVAILABLE" != true ] || [ "$OXIGRAPH_SERVER_AVAILABLE" != true ]; then
+    if [ "${DEVNET_REQUIRE_ALL_BACKENDS:-0}" = "1" ]; then
+      log "ERROR: DEVNET_REQUIRE_ALL_BACKENDS=1 but a SPARQL-over-HTTP backend could not be provisioned (needs Docker + the oxigraph/oxigraph and blazegraph images). Aborting rather than silently shrinking the backend matrix."
+      exit 1
+    fi
+    log "WARNING: SPARQL-over-HTTP backend coverage is REDUCED for this devnet run. The hermetic storage conformance matrix still exercises sparql-http on every test run; set DEVNET_REQUIRE_ALL_BACKENDS=1 to make this a hard failure in CI."
+  fi
+
   # Stop any already-running devnet nodes so they pick up the config we are about to write
   stop_devnet_nodes_only
 

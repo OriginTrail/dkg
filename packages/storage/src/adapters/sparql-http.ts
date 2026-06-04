@@ -148,7 +148,9 @@ export class SparqlHttpStore implements TripleStore {
     if (graphUri) {
       update = `DELETE { GRAPH <${escapeUri(graphUri)}> { ${triple} } } WHERE { GRAPH <${escapeUri(graphUri)}> { ${triple} } }`;
     } else {
-      update = `DELETE { ?g_ctx { ${triple} } } WHERE { GRAPH ?g_ctx { ${triple} } }`;
+      // The DELETE template must use the `GRAPH` keyword — `{ ?g_ctx { … } }`
+      // is a syntax error that a spec-compliant endpoint rejects with HTTP 400.
+      update = `DELETE { GRAPH ?g_ctx { ${triple} } } WHERE { GRAPH ?g_ctx { ${triple} } }`;
     }
     const res = await this.postUpdate(update);
     if (!res.ok) {

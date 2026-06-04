@@ -332,8 +332,15 @@ describe('SparqlHttpStore.delete() — full HTTP path against a real Oxigraph en
             res.writeHead(204);
             res.end();
           } catch (e) {
-            res.writeHead(400);
-            res.end(String((e as Error)?.message ?? e));
+            // Mirror oxigraph-server's "400 on bad update" behaviour. The
+            // adapter only inspects the status code, never the body, so return a
+            // constant text/plain message instead of reflecting the caught
+            // exception text into the HTTP response (CodeQL: exception text
+            // reinterpreted as HTML + stack-trace info exposure). Surface the
+            // real reason to the test runner via stderr for debuggability.
+            console.error('[mock-sparql] update rejected:', (e as Error)?.message ?? e);
+            res.writeHead(400, { 'Content-Type': 'text/plain' });
+            res.end('SPARQL update rejected');
           }
           return;
         }
