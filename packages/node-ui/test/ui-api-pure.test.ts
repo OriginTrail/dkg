@@ -357,6 +357,16 @@ describe('UI API tests', () => {
       ]);
     });
 
+    it('listAssertions(swm) reads the memoryLayer "SWM" marker (not async ShareTransition records)', async () => {
+      // The SWM listing must use the synchronous _meta memoryLayer marker, not
+      // _shared_memory_meta ShareTransition records which lag the promote and
+      // made "Publish to VM" report "nothing to publish" right after promoting.
+      const agent = '0x' + '4'.repeat(40);
+      queryBindings = [{ g: { value: `urn:dkg:assertion:cg-1:${agent}:shared-doc.md` } }];
+      const list = await listAssertions('cg-1', 'swm');
+      expect(list.map(a => a.name)).toEqual(['shared-doc.md']);
+    });
+
     it('ensureContextGraphOnChain auto-registers an off-chain CG before publishing', async () => {
       // mock /api/context-graph/list returns cg1 with no onChainId → the helper
       // must POST /api/context-graph/register so VM publish (on-chain) can proceed.

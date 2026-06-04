@@ -908,28 +908,22 @@ export async function listAssertions(
   layer: 'wm' | 'swm' = 'wm',
 ): Promise<AssertionInfo[]> {
   if (layer === 'swm') {
-    const DKG = 'http://dkg.io/ontology/';
-    const swmMetaPrefix = `did:dkg:context-graph:${contextGraphId}`;
-    // Mirrors the pattern `useSwmAttributions.ts` uses to read
-    // `_shared_memory_meta` graphs — the explicit `GRAPH ?g { … }`
-    // plus `FILTER(STRSTARTS … STRENDS)` pair makes the query
-    // self-scoping: the query engine's `wrapWithGraph` early-returns
-    // when the SPARQL already contains `graph `, so the query runs
-    // raw over the store and the FILTER pins it to *this* CG's
-    // `_shared_memory_meta` partitions (root + each sub-graph) only.
-    // Codex tier-4m flagged this as "runs against the default WM
-    // view", which is incorrect for this shape of SPARQL; keeping
-    // the same shape as `useSwmAttributions` — which is already in
-    // production for the SWM agent-attribution badge — keeps both
-    // call sites consistent and provably working on the same path.
-    const sparql = `SELECT DISTINCT ?g ?source ?agent WHERE {
-      GRAPH ?g {
-        ?s a <${DKG}ShareTransition> ;
-           <${DKG}source> ?source ;
-           <${DKG}agent> ?agent .
-      }
-      FILTER(STRSTARTS(STR(?g), "${swmMetaPrefix}"))
-      FILTER(STRENDS(STR(?g), "/_shared_memory_meta"))
+    // SWM membership comes from the canonical `dkg:memoryLayer "SWM"` lifecycle
+    // marker in `<cg>/_meta` (flipped from "WM" by promote) — NOT from
+    // `dkg:ShareTransition` records in `_shared_memory_meta`. ShareTransitions
+    // are written by the ASYNC SWM share (key-setup/gossip) and therefore LAG
+    // the promote, so a publish fired right after promoting saw zero shared
+    // assertions ("nothing to publish") even though the content was already in
+    // SWM. The marker is synchronous and is the same source the WM listing uses.
+    // Parsing mirrors the WM branch: accept BOTH the lifecycle-URN and the
+    // data-graph-URI marker forms, dedupe by (subGraph, name), and exclude the
+    // reserved `meta` sub-graph.
+    const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
+    const cgPrefix = `did:dkg:context-graph:${contextGraphId}/`;
+    const urnPrefix = `urn:dkg:assertion:${contextGraphId}:`;
+    const sparql = `SELECT ?g WHERE {
+      GRAPH <${metaGraph}> { ?g <http://dkg.io/ontology/memoryLayer> "SWM" }
+      FILTER(!CONTAINS(STR(?g), "/meta/assertion/"))
     }`;
     const data = await executeQuery(sparql, contextGraphId);
     const bindings: any[] = data?.result?.bindings ?? [];
@@ -937,38 +931,37 @@ export async function listAssertions(
     const result: AssertionInfo[] = [];
     for (const b of bindings) {
       const g = typeof b.g === 'string' ? b.g : b.g?.value;
-      const source = typeof b.source === 'string' ? b.source : b.source?.value;
-      const agentUri = typeof b.agent === 'string' ? b.agent : b.agent?.value;
-      if (!g || !source || !agentUri) continue;
-
-      // `dkg:source` literal is `assertion/<agent>/<name>`. The agent
-      // segment is a 0x EVM address (no slashes, no colons), but `<name>`
-      // is only slash/whitespace-free — it CAN contain `:` — so split on
-      // the first two `/` rather than a blind last-segment parse.
-      const m = source.match(/^assertion\/([^/]+)\/(.+)$/);
-      if (!m) continue;
-      const name = m[2];
-
-      // `dkg:agent` is `did:dkg:agent:<address>`; pull the address so we
-      // rebuild the exact lifecycle URN shape used on the authoring node.
-      const addrMatch = /^did:dkg:agent:(.+)$/.exec(agentUri);
-      const address = addrMatch ? addrMatch[1] : null;
-      if (!address) continue;
-
-      // Recover optional sub-graph segment from `?g`:
-      //   did:dkg:context-graph:<cg>/_shared_memory_meta          → none
-      //   did:dkg:context-graph:<cg>/<sg>/_shared_memory_meta     → <sg>
-      const tail = g.slice(swmMetaPrefix.length); // "/<sg?>/_shared_memory_meta"
-      const inner = tail.replace(/\/_shared_memory_meta$/, '').replace(/^\//, '');
-      const subGraphName = inner.length > 0 ? inner : undefined;
-
-      const lifecycle = subGraphName
-        ? `urn:dkg:assertion:${contextGraphId}:${subGraphName}:${address}:${name}`
-        : `urn:dkg:assertion:${contextGraphId}:${address}:${name}`;
-
-      if (seen.has(lifecycle)) continue;
-      seen.add(lifecycle);
-      result.push({ name, graphUri: lifecycle, subGraph: subGraphName });
+      if (!g) continue;
+      let subGraph: string | undefined;
+      let name: string | undefined;
+      if (g.startsWith(cgPrefix)) {
+        const segments = g.slice(cgPrefix.length).split('/');
+        if (segments.length === 3 && segments[0] === 'assertion') {
+          name = segments[2];
+        } else if (segments.length === 4 && segments[1] === 'assertion') {
+          subGraph = segments[0];
+          name = segments[3];
+        } else {
+          continue;
+        }
+      } else if (g.startsWith(urnPrefix)) {
+        const rest = g.slice(urnPrefix.length);
+        let m = /^(0x[0-9a-fA-F]{40}):(.+)$/.exec(rest);
+        if (m) {
+          name = m[2];
+        } else {
+          m = /^([^:]+):(0x[0-9a-fA-F]{40}):(.+)$/.exec(rest);
+          if (m) { subGraph = m[1]; name = m[3]; }
+        }
+      } else {
+        continue;
+      }
+      if (!name) continue;
+      if (subGraph === 'meta') continue;
+      const key = `${subGraph ?? ''} ${name}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      result.push({ name, graphUri: g, subGraph });
     }
     return result;
   }
