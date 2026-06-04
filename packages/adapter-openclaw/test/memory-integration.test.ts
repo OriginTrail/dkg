@@ -80,10 +80,10 @@ describe('Memory integration round-trip (issue #199 Phase 1 + Phase 2)', () => {
       expect(params.required).toContain('quads');
     });
 
-    it('calling dkg_assertion_write flows to client.writeAssertion', async () => {
+    it('calling dkg_assertion_write flows to client.knowledgeAssetWrite', async () => {
       const tool = tools.find((t) => t.name === 'dkg_assertion_write')!;
       const client = (plugin as any).client;
-      client.writeAssertion = vi.fn().mockResolvedValue({ written: 1 });
+      client.knowledgeAssetWrite = vi.fn().mockResolvedValue({ written: 1 });
       await tool.execute('t1', {
         context_graph_id: 'test-cg-memory-roundtrip',
         name: 'memory',
@@ -95,7 +95,7 @@ describe('Memory integration round-trip (issue #199 Phase 1 + Phase 2)', () => {
           },
         ],
       });
-      expect(client.writeAssertion).toHaveBeenCalledWith(
+      expect(client.knowledgeAssetWrite).toHaveBeenCalledWith(
         'test-cg-memory-roundtrip',
         'memory',
         expect.arrayContaining([

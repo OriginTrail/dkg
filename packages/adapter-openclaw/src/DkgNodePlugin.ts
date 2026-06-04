@@ -21,6 +21,7 @@ import {
   createDkgPublisherExtension,
   type DkgPublisherExtension,
   escapeDkgRdfLiteral,
+  normalizeDkgPublisherQuads,
   resolveDkgHome,
   toEip55Checksum,
 } from '@origintrail-official/dkg-core';
@@ -3395,12 +3396,18 @@ export class DkgNodePlugin {
       if (!contextGraphId) return this.error('"context_graph_id" is required.');
       if (!name) return this.error('"name" is required.');
       const subGraphName = args.sub_graph_name ? String(args.sub_graph_name) : undefined;
-      const result = await this.publisher.createLocalWorkspace({
-        contextGraphId,
-        assertionName: name,
-        subGraphName,
-      });
-      return this.json(result);
+      // KA lifecycle: open an empty WM draft (no quads → `draft-open`). The KA
+      // create route surfaces a duplicate name as an error, so preserve the
+      // legacy idempotent contract (`alreadyExists`) here.
+      try {
+        const result = await this.client.createKnowledgeAsset(contextGraphId, name, { subGraphName });
+        return this.json(result);
+      } catch (err: any) {
+        if (/already exists/i.test(String(err?.message ?? err))) {
+          return this.json({ name, alreadyExists: true });
+        }
+        throw err;
+      }
     } catch (err: any) {
       return this.daemonError(err);
     }
@@ -3417,13 +3424,16 @@ export class DkgNodePlugin {
         return this.error('"quads" must be a non-empty array of {subject, predicate, object} objects.');
       }
       const subGraphName = args.sub_graph_name ? String(args.sub_graph_name) : undefined;
-      const result = await this.publisher.writeLocalWorkspace({
+      // Append to the KA's WM draft (the draft must already exist — same as
+      // the legacy createIfMissing:false write). Normalize the quads (N-Triples
+      // ECHAR escaping of literal objects) exactly as the legacy publisher path
+      // did before handing off to the daemon.
+      const result = await this.client.knowledgeAssetWrite(
         contextGraphId,
-        assertionName: name,
-        quads: rawQuads,
-        subGraphName,
-        createIfMissing: false,
-      });
+        name,
+        normalizeDkgPublisherQuads(rawQuads as Parameters<typeof normalizeDkgPublisherQuads>[0]),
+        { subGraphName },
+      );
       return this.json(result);
     } catch (err: any) {
       return this.daemonError(err);
@@ -3450,10 +3460,10 @@ export class DkgNodePlugin {
       } else {
         return this.error('"entities" must be omitted or a non-empty array of root entity URIs.');
       }
-      const result = await this.publisher.promoteLocalWorkspace({
-        contextGraphId,
-        assertionName: name,
-        rootEntities: entities,
+      // WM → SWM. The KA `swm/share` route is the same engine call
+      // (`agent.assertion.promote`) the legacy promote used.
+      const result = await this.client.knowledgeAssetShare(contextGraphId, name, {
+        entities,
         subGraphName,
       });
       return this.json(result);
@@ -3469,9 +3479,7 @@ export class DkgNodePlugin {
       if (!contextGraphId) return this.error('"context_graph_id" is required.');
       if (!name) return this.error('"name" is required.');
       const subGraphName = args.sub_graph_name ? String(args.sub_graph_name) : undefined;
-      const result = await this.publisher.discardLocalWorkspace({
-        contextGraphId,
-        assertionName: name,
+      const result = await this.client.knowledgeAssetDiscard(contextGraphId, name, {
         subGraphName,
       });
       return this.json(result);
@@ -3628,9 +3636,10 @@ export class DkgNodePlugin {
       const name = String(args.name ?? '').trim();
       if (!contextGraphId) return this.error('"context_graph_id" is required.');
       if (!name) return this.error('"name" is required.');
-      const agentAddress = args.agent_address ? String(args.agent_address) : undefined;
       const subGraphName = args.sub_graph_name ? String(args.sub_graph_name) : undefined;
-      const result = await this.client.getAssertionHistory(contextGraphId, name, { agentAddress, subGraphName });
+      // KA lifecycle descriptor, keyed by (contextGraph, name) — the legacy
+      // per-author `agent_address` filter is not part of the GET surface.
+      const result = await this.client.getKnowledgeAsset(contextGraphId, name, { subGraphName });
       return this.json(result);
     } catch (err: any) {
       return this.daemonError(err);

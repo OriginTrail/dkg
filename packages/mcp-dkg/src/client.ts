@@ -1140,7 +1140,10 @@ export class DkgClient {
   async knowledgeAssetWrite(args: {
     contextGraphId: string;
     name: string;
-    quads: Array<{ subject: string; predicate: string; object: string; graph: string }>;
+    // `graph` is optional: the WM-write engine (agent.assertion.write) derives
+    // the draft's named graph when omitted — the legacy triples path relied on
+    // exactly this, so callers may pass bare subject/predicate/object.
+    quads: Array<{ subject: string; predicate: string; object: string; graph?: string }>;
     subGraphName?: string;
   }): Promise<{ written: number }> {
     const body: Record<string, unknown> = {
