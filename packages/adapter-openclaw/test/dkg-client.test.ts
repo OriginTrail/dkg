@@ -1155,6 +1155,13 @@ describe('DkgDaemonClient', () => {
       expect(body()).toEqual({ contextGraphId: 'cg-1', subGraphName: 'sg' });
     });
 
+    it('knowledgeAssetPublish rejects unsupported option keys before HTTP serialization', async () => {
+      await expect(client.knowledgeAssetPublish('cg-1', 'f', {
+        publishEpoch: 3,
+      } as any)).rejects.toThrow('Unsupported finalized publish option(s): publishEpoch');
+      expect(fetchCalls).toHaveLength(0);
+    });
+
     it('knowledgeAssetFinalize forwards authorAgentAddress', async () => {
       ok({ merkleRoot: '0xroot', eip712Digest: '0xdig' });
       await client.knowledgeAssetFinalize('cg-1', 'f', {
@@ -1217,6 +1224,26 @@ describe('DkgDaemonClient', () => {
         publishEpochs: 2,
         publisherNodeIdentityIdOverride: '7',
       });
+    });
+
+    it('createKnowledgeAsset treats empty alsoPublishVm options as default publish', async () => {
+      ok({ name: 'f' });
+      await client.createKnowledgeAsset('cg-1', 'f', { alsoPublishVm: {} });
+      expect(body().alsoPublishVm).toEqual({});
+    });
+
+    it('createKnowledgeAsset rejects unsupported alsoPublishVm options before HTTP serialization', async () => {
+      await expect(client.createKnowledgeAsset('cg-1', 'f', {
+        alsoPublishVm: { publishEpoch: 3 },
+      } as any)).rejects.toThrow('Unsupported finalized publish option(s): publishEpoch');
+      expect(fetchCalls).toHaveLength(0);
+    });
+
+    it('createKnowledgeAsset rejects array alsoPublishVm before HTTP serialization', async () => {
+      await expect(client.createKnowledgeAsset('cg-1', 'f', {
+        alsoPublishVm: [],
+      } as any)).rejects.toThrow('alsoPublishVm must be a boolean or publish-options object');
+      expect(fetchCalls).toHaveLength(0);
     });
   });
 });

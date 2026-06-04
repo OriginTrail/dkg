@@ -314,6 +314,13 @@ describe('UI API tests', () => {
       expect(requestLog).toHaveLength(0);
     });
 
+    it('knowledgeAssetPublish rejects unsupported publish options before POSTing', async () => {
+      expect(() =>
+        knowledgeAssetPublish('cg-1', 'f', { publishEpoch: 3 } as any),
+      ).toThrow('Unsupported finalized publish option(s): publishEpoch');
+      expect(requestLog).toHaveLength(0);
+    });
+
     it('createKnowledgeAsset normalizes context graph URIs before POSTing', async () => {
       await createKnowledgeAsset('did:dkg:context-graph:cg-1', 'f');
       const call = requestLog.find(r => r.method === 'POST' && r.url.includes('/api/knowledge-assets'));
@@ -338,6 +345,27 @@ describe('UI API tests', () => {
           authorAgentAddress: '0xauthor',
         }),
       ).toThrow('authorAgentAddress, preSignedAuthorAttestation, and schemeVersion require non-empty quads');
+      expect(requestLog).toHaveLength(0);
+    });
+
+    it('createKnowledgeAsset treats empty alsoPublishVm options as default publish', async () => {
+      await createKnowledgeAsset('cg-1', 'f', { alsoPublishVm: {} });
+      const call = requestLog.find(r => r.method === 'POST' && r.url.includes('/api/knowledge-assets'));
+      const body = JSON.parse(call?.body ?? '{}');
+      expect(body.alsoPublishVm).toEqual({});
+    });
+
+    it('createKnowledgeAsset rejects unsupported alsoPublishVm options before POSTing', () => {
+      expect(() =>
+        createKnowledgeAsset('cg-1', 'f', { alsoPublishVm: { publishEpoch: 3 } as any }),
+      ).toThrow('Unsupported finalized publish option(s): publishEpoch');
+      expect(requestLog).toHaveLength(0);
+    });
+
+    it('createKnowledgeAsset rejects array alsoPublishVm before POSTing', () => {
+      expect(() =>
+        createKnowledgeAsset('cg-1', 'f', { alsoPublishVm: [] as any }),
+      ).toThrow('alsoPublishVm must be a boolean or publish-options object');
       expect(requestLog).toHaveLength(0);
     });
 
