@@ -262,6 +262,38 @@ describe('import artifact read-file route', () => {
     }]);
   });
 
+  it('rejects oversized origin source bytes before caching them', async () => {
+    const sourceBytes = Buffer.from('oversized source bytes');
+    const sourceHash = keccakHash(sourceBytes);
+    const contextGraphId = 'cg-public-open-source-bytes-max';
+    const assertionUri = contextGraphAssertionUri(contextGraphId, 'did:dkg:agent:source', 'imported-pdf');
+    const { agent, originRequests } = makeAgent({
+      contextGraphId,
+      assertionUri,
+      sourceHash,
+      originPeerId: 'peer-source',
+      originResponse: {
+        status: IMPORTED_ARTIFACT_BYTES_RESPONSE_STATUS.ALLOW,
+        hash: sourceHash,
+        kind: IMPORTED_ARTIFACT_BYTE_KIND_SOURCE,
+        bytes: sourceBytes,
+        contentType: 'application/pdf',
+        size: sourceBytes.length,
+      },
+    });
+
+    const read = await dispatch(agent, 'POST', '/api/assertion/import-artifact/read-file', {
+      contextGraphId,
+      assertionUri,
+      maxBytes: 4,
+    });
+
+    expect(read.status).toBe(413);
+    expect(read.body.error).toMatch(/maxBytes \(4\)/);
+    expect(originRequests).toHaveLength(1);
+    expect(await fileStore.has(sourceHash)).toBe(false);
+  });
+
   it('accepts explicit original kind and hash for source bytes', async () => {
     const sourceBytes = Buffer.from('original bytes');
     const entry = await fileStore.put(sourceBytes, 'text/plain');
@@ -322,6 +354,41 @@ describe('import artifact read-file route', () => {
       hash: markdownHash,
       kind: IMPORTED_ARTIFACT_BYTE_KIND_MARKDOWN,
     });
+  });
+
+  it('rejects oversized origin markdown bytes before caching them', async () => {
+    const sourceBytes = Buffer.from('%PDF-source\n');
+    const markdownBytes = Buffer.from('# Converted markdown that is too large\n');
+    const sourceHash = keccakHash(sourceBytes);
+    const markdownHash = keccakHash(markdownBytes);
+    const contextGraphId = 'cg-public-open-markdown-bytes-max';
+    const assertionUri = contextGraphAssertionUri(contextGraphId, 'did:dkg:agent:source', 'imported-pdf');
+    const { agent, originRequests } = makeAgent({
+      contextGraphId,
+      assertionUri,
+      sourceHash,
+      markdownHash,
+      originPeerId: 'peer-source',
+      originResponse: {
+        status: IMPORTED_ARTIFACT_BYTES_RESPONSE_STATUS.ALLOW,
+        hash: markdownHash,
+        kind: IMPORTED_ARTIFACT_BYTE_KIND_MARKDOWN,
+        bytes: markdownBytes,
+        contentType: 'text/markdown',
+        size: markdownBytes.length,
+      },
+    });
+
+    const read = await dispatch(agent, 'POST', '/api/assertion/import-artifact/read-markdown', {
+      contextGraphId,
+      assertionUri,
+      maxBytes: 4,
+    });
+
+    expect(read.status).toBe(413);
+    expect(read.body.error).toMatch(/maxBytes \(4\)/);
+    expect(originRequests).toHaveLength(1);
+    expect(await fileStore.has(markdownHash)).toBe(false);
   });
 
   it('maps origin deny to 403', async () => {

@@ -929,6 +929,7 @@ async function fetchImportedArtifactBytesFromOrigin(
   ctx: RequestContext,
   artifact: ImportedArtifactResolution,
   selection: ImportedArtifactByteSelection,
+  maxBytes: number,
 ): Promise<Buffer> {
   const byteAgent = ctx.agent as unknown as ImportedArtifactByteAgent;
   if (
@@ -980,10 +981,17 @@ async function fetchImportedArtifactBytesFromOrigin(
 
   switch (response.status) {
     case IMPORTED_ARTIFACT_BYTES_RESPONSE_STATUS.ALLOW: {
-      const bytes = Buffer.from(response.bytes);
-      if (response.size !== undefined && response.size !== bytes.length) {
+      const byteLength = response.bytes.byteLength;
+      if (response.size !== undefined && response.size !== byteLength) {
         throw new ImportArtifactRouteError(502, 'Origin agent returned imported-artifact bytes with an invalid size');
       }
+      if (byteLength > maxBytes) {
+        throw new ImportArtifactRouteError(
+          413,
+          `${selection.missingLabel} from origin exceed maxBytes (${maxBytes})`,
+        );
+      }
+      const bytes = Buffer.from(response.bytes);
       const entry = await ctx.fileStore.put(bytes, selection.contentType);
       const expected = normalizeComparableContentHash(selection.hash);
       if (
@@ -1018,10 +1026,11 @@ async function readImportedArtifactBytes(
   ctx: RequestContext,
   artifact: ImportedArtifactResolution,
   selection: ImportedArtifactByteSelection,
+  maxBytes: number,
 ): Promise<Buffer | null> {
   let bytes = await ctx.fileStore.get(selection.hash);
   if (!bytes && artifact.ownerGuardRelaxed) {
-    bytes = await fetchImportedArtifactBytesFromOrigin(ctx, artifact, selection);
+    bytes = await fetchImportedArtifactBytesFromOrigin(ctx, artifact, selection, maxBytes);
   }
   return bytes ? Buffer.from(bytes) : null;
 }
@@ -1487,7 +1496,7 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
       const selection = selectImportedArtifactMarkdownBytes(artifact);
       let bytes: Buffer | null;
       try {
-        bytes = await readImportedArtifactBytes(ctx, artifact, selection);
+        bytes = await readImportedArtifactBytes(ctx, artifact, selection, maxBytes);
       } catch (err) {
         if (err instanceof ImportArtifactRouteError) {
           return jsonResponse(res, err.statusCode, {
@@ -1543,7 +1552,7 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
       const maxBytes = normalizeImportedArtifactFileReadLimit(record.maxBytes);
       let bytes: Buffer | null;
       try {
-        bytes = await readImportedArtifactBytes(ctx, artifact, selection);
+        bytes = await readImportedArtifactBytes(ctx, artifact, selection, maxBytes);
       } catch (err) {
         if (err instanceof ImportArtifactRouteError) {
           return jsonResponse(res, err.statusCode, {
