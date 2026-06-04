@@ -927,7 +927,7 @@ describe('DkgNodePlugin', () => {
         sub_graph_name: 'protocols',
       });
       const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-      expect(url).toBe('http://localhost:9200/api/knowledge-assets');
+      expect(url).toBe('http://localhost:9200/api/assertion/create');
       expect(JSON.parse(init.body as string)).toEqual({
         contextGraphId: 'ctx',
         name: 'chat-turns',

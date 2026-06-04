@@ -28,16 +28,17 @@ import type { RequestContext } from "./context.js";
 import { jsonResponse, readBody, safeParseJson } from "../http-utils.js";
 import { validatePreSignedAuthorAttestation } from "./memory.js";
 import { deriveStatus } from "@origintrail-official/dkg-publisher";
-import { validateAssertionName } from "@origintrail-official/dkg-core";
 
 const PREFIX = "/api/knowledge-assets";
 
 /**
- * Translate engine/publisher errors into the same HTTP status mapping the
- * legacy `/api/assertion/*` routes use, so callers see 400 for their own
- * mistakes (bad name, missing assertion, unsafe/reserved IRI) and 409 for the
- * "_meta says completed but the data graph is empty" case — instead of a
- * blanket 500. Mirrors assertion.ts so the KA surface is at parity.
+ * Translate engine/publisher errors on the WM/SWM mutation verbs into the same
+ * HTTP status mapping the legacy `/api/assertion/*` routes use, so callers see
+ * 400 for their own mistakes (missing assertion, unsafe/reserved IRI) and 409
+ * for the "_meta says completed but the data graph is empty" case — instead of
+ * a blanket 500. NOT applied to vm/publish: on-chain/storage failures there can
+ * carry "Invalid"/"Unsafe" text and must stay 500 (parity with the legacy
+ * publish path, which never down-classified them).
  */
 function respondAssertionError(res: RequestContext["res"], e: any): void {
   if (e?.name === "AssertionNotPersistedError" || e?.code === "ASSERTION_NOT_PERSISTED") {
@@ -190,12 +191,6 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     if (!contextGraphId || !name) {
       return jsonResponse(res, 400, { error: 'Missing "contextGraphId" or "name"' });
     }
-    // Validate the name up front (parity with the legacy create route) so a
-    // bad slug / reserved name is a 400 here rather than a 500 from the engine.
-    const nameVal = validateAssertionName(name);
-    if (!nameVal.valid) {
-      return jsonResponse(res, 400, { error: `Invalid "name": ${nameVal.reason}` });
-    }
     const shouldAutoFinalize = Array.isArray(quads) && quads.length > 0;
     const finalizeOptions = shouldAutoFinalize
       ? resolveFinalizeOptions({ subGraphName, authorAgentAddress, preSignedAuthorAttestation, schemeVersion }, res)
@@ -244,7 +239,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       if (errors.length > 0) return jsonResponse(res, 207, { created: true, ...result, errors });
       return jsonResponse(res, 201, result);
     } catch (e: any) {
-      return respondAssertionError(res, e);
+      return jsonResponse(res, 500, { error: e?.message ?? String(e) });
     }
   }
 
@@ -352,17 +347,25 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     }
 
     // ── VM verb: publish (SWM/WM → VM; mint or update on chain) ──
+    // Publish keeps its own generic-500 catch: on-chain/storage/publisher
+    // failures can carry "Invalid"/"Unsafe" text and must NOT be down-classified
+    // to 400 (parity with the legacy publish path).
     if (layer === "vm" && verb === "publish") {
-      const opts = parsed.options && typeof parsed.options === "object" ? parsed.options : {};
-      const pub: any = await agent.publishFromFinalizedAssertion(contextGraphId, name, { subGraphName, ...opts });
-      return jsonResponse(res, 200, {
-        kaId: pub?.kaId,
-        status: pub?.status,
-        ual: pub?.ual,
-        txHash: pub?.onChainResult?.txHash,
-      });
+      try {
+        const opts = parsed.options && typeof parsed.options === "object" ? parsed.options : {};
+        const pub: any = await agent.publishFromFinalizedAssertion(contextGraphId, name, { subGraphName, ...opts });
+        return jsonResponse(res, 200, {
+          kaId: pub?.kaId,
+          status: pub?.status,
+          ual: pub?.ual,
+          txHash: pub?.onChainResult?.txHash,
+        });
+      } catch (e: any) {
+        return jsonResponse(res, 500, { error: e?.message ?? String(e) });
+      }
     }
   } catch (e: any) {
+    // WM/SWM mutation verbs (write/finalize/discard/pull-from/share) only.
     return respondAssertionError(res, e);
   }
 

@@ -284,34 +284,10 @@ export class FakeClient {
   }
 
   // ── KA lifecycle (v10) ──────────────────────────────────────────
-  // The assertion tools now drive the /api/knowledge-assets/* surface; these
-  // mirror the legacy assertion methods onto the same in-memory `assertions`
-  // store so the round-trip tests still exercise real state.
-  async createKnowledgeAsset(args: {
-    contextGraphId: string;
-    name: string;
-    quads?: Array<{ subject: string; predicate: string; object: string; graph?: string }>;
-  }) {
-    if (this.overrides.createKnowledgeAsset) return this.overrides.createKnowledgeAsset.call(this, args);
-    const key = `${args.contextGraphId}::${args.name}`;
-    // KA create is idempotent and non-destructive (verified live: 201
-    // get-or-create). Re-creating an existing name returns the open draft
-    // without clearing its quads.
-    let cell = this.assertions.get(key);
-    if (!cell) {
-      cell = { quads: [] as Array<{ subject: string; predicate: string; object: string }>, promotedRoots: new Set<string>(), discarded: false };
-      this.assertions.set(key, cell);
-    }
-    if (args.quads && args.quads.length > 0) {
-      cell.quads.push(...args.quads.map((q) => ({ subject: q.subject, predicate: q.predicate, object: q.object })));
-    }
-    return {
-      name: args.name,
-      assertionUri: `urn:dkg:assertion:${args.contextGraphId}:${args.name}`,
-      status: args.quads && args.quads.length > 0 ? 'wm-sealed' : 'draft-open',
-    };
-  }
-
+  // The WM/SWM mutation verbs (write / promote / discard) drive the
+  // /api/knowledge-assets/* surface; these mirror the legacy assertion methods
+  // onto the same in-memory `assertions` store so the round-trip tests still
+  // exercise real state. (create + history stay on the legacy client methods.)
   async knowledgeAssetWrite(args: {
     contextGraphId: string;
     name: string;
@@ -349,19 +325,6 @@ export class FakeClient {
     const cell = this.assertions.get(key);
     if (cell) cell.discarded = true;
     return { discarded: true };
-  }
-
-  async getKnowledgeAsset(args: { contextGraphId: string; name: string }) {
-    if (this.overrides.getKnowledgeAsset) return this.overrides.getKnowledgeAsset.call(this, args);
-    const key = `${args.contextGraphId}::${args.name}`;
-    const cell = this.assertions.get(key);
-    return {
-      contextGraphId: args.contextGraphId,
-      name: args.name,
-      author: 'urn:dkg:agent:test',
-      promoted: cell ? cell.promotedRoots.size > 0 : false,
-      createdAt: '2026-04-30T00:00:00Z',
-    };
   }
 
   async importAssertionFile(args: {

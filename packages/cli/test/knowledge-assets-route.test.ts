@@ -395,18 +395,10 @@ describe('OT-RFC-43 A2/B3 — per-layer status + kaId addressing', () => {
     expect(agent.assertion.resolveByKaId).not.toHaveBeenCalled();
   });
 
-  // Parity with the legacy /api/assertion/* routes: a caller's own mistakes
-  // are 400s (and the "_meta completed but empty" case a 409), not blanket 500s.
+  // Parity with the legacy /api/assertion/* routes: on the WM/SWM mutation
+  // verbs a caller's own mistakes are 400s (and the "_meta completed but empty"
+  // case a 409), not blanket 500s — but vm/publish failures stay 500.
   describe('error-status parity with legacy assertion routes', () => {
-    it('POST /api/knowledge-assets rejects an invalid name with 400 (before touching the engine)', async () => {
-      const agent = makeAssertionAgent();
-      const ctx = ctxFor('POST', '/api/knowledge-assets', { contextGraphId: 'cg', name: 'Bad Name!' }, agent);
-      await handleKnowledgeAssetsRoutes(ctx);
-      expect(status(ctx)).toBe(400);
-      expect(String(body(ctx).error)).toMatch(/Invalid "name"/);
-      expect(agent.assertion.create).not.toHaveBeenCalled();
-    });
-
     it('maps engine "not found" / "Invalid" / "Unsafe" failures to 400 on wm/write', async () => {
       const agent = makeAssertionAgent({
         assertion: { write: vi.fn(async () => { throw new Error('assertion not found'); }) },
@@ -444,6 +436,15 @@ describe('OT-RFC-43 A2/B3 — per-layer status + kaId addressing', () => {
         assertion: { discard: vi.fn(async () => { throw new Error('disk on fire'); }) },
       });
       const ctx = ctxFor('POST', '/api/knowledge-assets/f/wm/discard', { contextGraphId: 'cg' }, agent);
+      await handleKnowledgeAssetsRoutes(ctx);
+      expect(status(ctx)).toBe(500);
+    });
+
+    it('does NOT down-classify vm/publish failures: an "Invalid ..." publisher error stays 500', async () => {
+      const agent = makeAssertionAgent({
+        publishFromFinalizedAssertion: vi.fn(async () => { throw new Error('Invalid on-chain state root'); }),
+      });
+      const ctx = ctxFor('POST', '/api/knowledge-assets/f/vm/publish', { contextGraphId: 'cg' }, agent);
       await handleKnowledgeAssetsRoutes(ctx);
       expect(status(ctx)).toBe(500);
     });

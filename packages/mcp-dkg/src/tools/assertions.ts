@@ -58,10 +58,9 @@ export function registerAssertionTools(
       title: 'Create Assertion',
       description:
         'Step 1 of the canonical write flow: create an empty Working Memory ' +
-        'assertion graph (a Knowledge Asset draft). Idempotent and ' +
-        'non-destructive — re-creating an existing name returns the open ' +
-        'draft without clearing its quads. Slug must match /^[a-z0-9-]+$/ for ' +
-        'new names; pre-existing assertions accept any name.',
+        'assertion graph. Idempotent — duplicate names land as ' +
+        '`alreadyExists: true` rather than throwing. Slug must match ' +
+        '/^[a-z0-9-]+$/ for new names; pre-existing assertions accept any name.',
       inputSchema: {
         name: z
           .string()
@@ -81,15 +80,19 @@ export function registerAssertionTools(
       const pid = resolveProject(projectId, config);
       if (!pid) return projectErr();
       try {
-        // KA lifecycle: open an empty WM draft (no quads → `draft-open`). The
-        // KA create route is idempotent and non-destructive — re-creating an
-        // existing name returns the open draft (201) without clearing its
-        // quads, so there is no "already exists" error path to special-case.
-        const result = await client.createKnowledgeAsset({
+        // Create stays on the legacy assertion route: it preserves the
+        // `{ assertionUri, alreadyExists }` contract (the KA create route is an
+        // idempotent get-or-create that can't report `alreadyExists`) and the
+        // route's name validation. Only the WM/SWM mutation verbs (write /
+        // promote / discard) move to the KA routes below.
+        const result = await client.createAssertion({
           contextGraphId: pid,
-          name,
+          assertionName: name,
           subGraphName,
         });
+        if (result.alreadyExists) {
+          return ok(`Assertion '${name}' already exists in '${pid}'.`);
+        }
         return ok(
           `Created assertion '${name}' in '${pid}'.\nURI: ${result.assertionUri ?? '(unset)'}`,
         );

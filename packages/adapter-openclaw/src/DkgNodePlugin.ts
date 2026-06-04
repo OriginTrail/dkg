@@ -3396,10 +3396,15 @@ export class DkgNodePlugin {
       if (!contextGraphId) return this.error('"context_graph_id" is required.');
       if (!name) return this.error('"name" is required.');
       const subGraphName = args.sub_graph_name ? String(args.sub_graph_name) : undefined;
-      // KA lifecycle: open an empty WM draft (no quads → `draft-open`). The KA
-      // create route is idempotent and non-destructive — re-creating an
-      // existing name returns the open draft without clearing its quads.
-      const result = await this.client.createKnowledgeAsset(contextGraphId, name, { subGraphName });
+      // Create stays on the legacy assertion route: it preserves the
+      // `{ assertionUri, alreadyExists }` contract and name validation that the
+      // KA create route (an idempotent get-or-create) can't yet provide. Only
+      // the WM/SWM mutation verbs (write / promote / discard) move to KA.
+      const result = await this.publisher.createLocalWorkspace({
+        contextGraphId,
+        assertionName: name,
+        subGraphName,
+      });
       return this.json(result);
     } catch (err: any) {
       return this.daemonError(err);

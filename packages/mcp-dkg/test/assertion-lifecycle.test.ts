@@ -145,18 +145,11 @@ describe('assertion CRUD quintet — round-trip with @en literal preservation', 
     expect(cell!.quads[0].object).toBe(langTagged);
   });
 
-  it('create is idempotent and non-destructive: re-creating a name keeps its quads', async () => {
+  it('create is idempotent: a duplicate name reports alreadyExists rather than erroring', async () => {
     await server.call('dkg_assertion_create', { name: 'dupe' });
-    await server.call('dkg_assertion_write', {
-      name: 'dupe',
-      quads: [{ subject: 'urn:a', predicate: 'urn:b', object: '"c"' }],
-    });
-    // KA create is a non-throwing get-or-create (verified live: 201). The
-    // re-create succeeds and leaves the existing draft's quads untouched.
     const second = await server.call('dkg_assertion_create', { name: 'dupe' });
     expect(second.isError).toBeFalsy();
-    const cell = client.assertions.get('test-cg::dupe');
-    expect(cell!.quads).toHaveLength(1);
+    expect(second.content[0].text).toMatch(/already exists/);
   });
 
   it('rejects bad assertion-name slugs at the schema layer (zod regex)', async () => {
