@@ -1155,20 +1155,49 @@ describe('DkgDaemonClient', () => {
       expect(body()).toEqual({ contextGraphId: 'cg-1', subGraphName: 'sg' });
     });
 
-    it('knowledgeAssetFinalize forwards external-signer fields', async () => {
+    it('knowledgeAssetFinalize forwards authorAgentAddress', async () => {
       ok({ merkleRoot: '0xroot', eip712Digest: '0xdig' });
       await client.knowledgeAssetFinalize('cg-1', 'f', {
         authorAgentAddress: '0xauthor',
-        preSignedAuthorAttestation: { address: '0xauthor', signature: { r: '0xr', vs: '0xvs' } },
         schemeVersion: 1,
       });
       expect(url()).toBe('http://localhost:9200/api/knowledge-assets/f/wm/finalize');
       expect(body()).toMatchObject({
         contextGraphId: 'cg-1',
         authorAgentAddress: '0xauthor',
+        schemeVersion: 1,
+      });
+    });
+
+    it('knowledgeAssetFinalize forwards preSignedAuthorAttestation', async () => {
+      ok({ merkleRoot: '0xroot', eip712Digest: '0xdig' });
+      const preSignedAuthorAttestation = { address: '0xauthor', signature: { r: '0xr', vs: '0xvs' } };
+      await client.knowledgeAssetFinalize('cg-1', 'f', {
         preSignedAuthorAttestation: { address: '0xauthor', signature: { r: '0xr', vs: '0xvs' } },
         schemeVersion: 1,
       });
+      expect(url()).toBe('http://localhost:9200/api/knowledge-assets/f/wm/finalize');
+      expect(body()).toMatchObject({
+        contextGraphId: 'cg-1',
+        preSignedAuthorAttestation,
+        schemeVersion: 1,
+      });
+    });
+
+    it('knowledgeAssetFinalize rejects mutually exclusive authorship fields before HTTP serialization', async () => {
+      await expect(client.knowledgeAssetFinalize('cg-1', 'f', {
+        authorAgentAddress: '0xauthor',
+        preSignedAuthorAttestation: { address: '0xauthor', signature: { r: '0xr', vs: '0xvs' } },
+      })).rejects.toThrow('authorAgentAddress and preSignedAuthorAttestation are mutually exclusive');
+      expect(fetchCalls).toHaveLength(0);
+    });
+
+    it('createKnowledgeAsset rejects mutually exclusive authorship fields before HTTP serialization', async () => {
+      await expect(client.createKnowledgeAsset('cg-1', 'f', {
+        authorAgentAddress: '0xauthor',
+        preSignedAuthorAttestation: { address: '0xauthor', signature: { r: '0xr', vs: '0xvs' } },
+      })).rejects.toThrow('authorAgentAddress and preSignedAuthorAttestation are mutually exclusive');
+      expect(fetchCalls).toHaveLength(0);
     });
 
     it('createKnowledgeAsset translates an alsoPublishVm options object', async () => {

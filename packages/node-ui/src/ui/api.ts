@@ -679,7 +679,7 @@ export interface KnowledgeAssetFinalizedPublishOptions {
 }
 
 const publisherNodeIdentityOverridePayload = (value: unknown): string => {
-  if (typeof value === 'string') return value;
+  if (typeof value === 'string' && /^\d+$/.test(value)) return value;
   throw new Error('publisherNodeIdentityIdOverride must be passed as a decimal string');
 }
 

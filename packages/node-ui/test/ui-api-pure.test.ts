@@ -37,6 +37,7 @@ import {
   subscribeToContextGraph,
   shutdownNode,
   promoteAssertion,
+  knowledgeAssetPublish,
 } from '../src/ui/api.js';
 
 let server: Server;
@@ -295,6 +296,20 @@ describe('UI API tests', () => {
       expect(body.contextGraphId).toBe('cg-1');
       expect(body.selection).toEqual(['urn:root']);
       expect(body.clearAfter).toBe(false);
+    });
+
+    it('knowledgeAssetPublish rejects non-decimal publisher identity overrides before POSTing', async () => {
+      expect(() =>
+        knowledgeAssetPublish('cg-1', 'f', { publisherNodeIdentityIdOverride: 'abc' }),
+      ).toThrow('publisherNodeIdentityIdOverride must be passed as a decimal string');
+      expect(requestLog).toHaveLength(0);
+    });
+
+    it('knowledgeAssetPublish rejects negative publisher identity overrides before POSTing', async () => {
+      expect(() =>
+        knowledgeAssetPublish('cg-1', 'f', { publisherNodeIdentityIdOverride: '-1' }),
+      ).toThrow('publisherNodeIdentityIdOverride must be passed as a decimal string');
+      expect(requestLog).toHaveLength(0);
     });
 
     it('listSwmEntities queries the shared-working-memory view', async () => {

@@ -261,6 +261,15 @@ export interface KnowledgeAssetFinalizedPublishOptions {
   publisherNodeIdentityIdOverride?: bigint;
 }
 
+function assertExclusiveAuthorFields(args: {
+  authorAgentAddress?: string;
+  preSignedAuthorAttestation?: PreSignedAuthorAttestationPayload;
+}): void {
+  if (args.authorAgentAddress != null && args.preSignedAuthorAttestation != null) {
+    throw new Error('authorAgentAddress and preSignedAuthorAttestation are mutually exclusive');
+  }
+}
+
 /** Translate {@link KnowledgeAssetFinalizedPublishOptions} into the daemon body. */
 function finalizedPublishOptionsPayload(
   options?: KnowledgeAssetFinalizedPublishOptions,
@@ -1157,6 +1166,7 @@ export class DkgDaemonClient {
       alsoPublishVm?: boolean | KnowledgeAssetFinalizedPublishOptions;
     },
   ): Promise<Record<string, unknown>> {
+    assertExclusiveAuthorFields(opts ?? {});
     const payload: Record<string, unknown> = {
       contextGraphId: normalizeContextGraphId(contextGraphId),
       name,
@@ -1208,6 +1218,7 @@ export class DkgDaemonClient {
       schemeVersion?: number;
     },
   ): Promise<{ merkleRoot: string; eip712Digest: string }> {
+    assertExclusiveAuthorFields(opts ?? {});
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/wm/finalize`, {
       contextGraphId: normalizeContextGraphId(contextGraphId),
       ...(opts ?? {}),
