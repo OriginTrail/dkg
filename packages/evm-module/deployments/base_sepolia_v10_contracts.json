@@ -190,12 +190,12 @@
             "deployed": false
         },
         "RandomSampling": {
-            "evmAddress": "0x950D8E6fa4d0351f73219a300026C35497cd1BF0",
-            "version": "10.0.2",
+            "evmAddress": "0xC069C93D3A779fE7671A3650029fe4D425629AD7",
+            "version": "10.0.3",
             "gitBranch": "main",
-            "gitCommitHash": "bcfa930d57b90106f9cc95a7f8fe1cd330cd9feb",
-            "deploymentBlock": 42265761,
-            "deploymentTimestamp": 1780299811977,
+            "gitCommitHash": "778d6b8e01adeba357824d19893f8c28c10e6305",
+            "deploymentBlock": 42413915,
+            "deploymentTimestamp": 1780596121051,
             "deployed": true
         },
         "KnowledgeAssetsStorage": {
@@ -325,21 +325,21 @@
             "deployed": true
         },
         "DKGKnowledgeAssets": {
-            "evmAddress": "0x85a04440645d4a7CF1844cdb9A34C598e2F75b85",
-            "version": "2.0.0",
+            "evmAddress": "0xB049694500233300369F69E5c8C3AC9418880008",
+            "version": "10.0.3",
             "gitBranch": "main",
-            "gitCommitHash": "bcfa930d57b90106f9cc95a7f8fe1cd330cd9feb",
-            "deploymentBlock": 42265736,
-            "deploymentTimestamp": 1780299763226,
+            "gitCommitHash": "778d6b8e01adeba357824d19893f8c28c10e6305",
+            "deploymentBlock": 42413912,
+            "deploymentTimestamp": 1780596115673,
             "deployed": true
         },
         "KnowledgeAssetsLifecycle": {
-            "evmAddress": "0x7558E9B30BeFA87F68C808c1f705b30507d19146",
-            "version": "2.0.1",
+            "evmAddress": "0x63Aa3D0D305e66fB9797802A0E0a00CDD0e5224b",
+            "version": "10.0.3",
             "gitBranch": "main",
-            "gitCommitHash": "bcfa930d57b90106f9cc95a7f8fe1cd330cd9feb",
-            "deploymentBlock": 42265772,
-            "deploymentTimestamp": 1780299836348,
+            "gitCommitHash": "778d6b8e01adeba357824d19893f8c28c10e6305",
+            "deploymentBlock": 42413918,
+            "deploymentTimestamp": 1780596126512,
             "deployed": true
         },
         "V8MigrationEligibility": {
