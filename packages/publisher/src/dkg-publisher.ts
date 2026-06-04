@@ -2,7 +2,7 @@ import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@origintrail-official/dkg-chain';
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
-import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphAssertionUri, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, DKG_GOSSIP_MAX_MESSAGE_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, parseAssertionSealQuads } from '@origintrail-official/dkg-core';
+import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphAssertionUri, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, DKG_GOSSIP_MAX_MESSAGE_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, parseAssertionSealQuads, MemoryLayer } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, type Publisher, type PublishOptions, type PublishResult, type KAManifestEntry, type PhaseCallback, type V10CoreNodeACK } from './publisher.js';
 import { autoPartition } from './auto-partition.js';
@@ -3981,20 +3981,26 @@ export class DKGPublisher implements Publisher {
     await this.store.deleteByPattern({ graph: metaGraph, subject: lifecycleSubject, predicate: `${DKG}state` });
     await this.store.deleteByPattern({ graph: metaGraph, subject: lifecycleSubject, predicate: `${DKG}memoryLayer` });
 
-    await this.store.insert(generateAssertionCreatedMetadata({
-      contextGraphId,
-      agentAddress,
-      assertionName: name,
-      subGraphName,
-      timestamp: new Date(),
-    }));
-
-    await this.store.insert([{
-      subject: graphUri,
-      predicate: `${DKG}memoryLayer`,
-      object: '"WM"',
-      graph: metaGraph,
-    }]);
+    await this.store.insert([
+      {
+        subject: lifecycleSubject,
+        predicate: `${DKG}state`,
+        object: '"created"',
+        graph: metaGraph,
+      },
+      {
+        subject: lifecycleSubject,
+        predicate: `${DKG}memoryLayer`,
+        object: `"${MemoryLayer.WorkingMemory}"`,
+        graph: metaGraph,
+      },
+      {
+        subject: graphUri,
+        predicate: `${DKG}memoryLayer`,
+        object: `"${MemoryLayer.WorkingMemory}"`,
+        graph: metaGraph,
+      },
+    ]);
   }
 
   async assertionWrite(

@@ -204,6 +204,7 @@ describe('assertionPullFrom (OT-RFC-43 §10.5.3 wm/pull-from)', () => {
     for (const eventUri of beforeEvents) {
       expect(afterEvents).toContain(eventUri);
     }
+    expect(afterEvents).toHaveLength(beforeEvents.length);
 
     const staleAssertionMeta = await store.query(
       `ASK { GRAPH <${meta}> {
