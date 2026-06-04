@@ -510,6 +510,65 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     expect(signSpy.mock.calls[0][1].gasLimit).toBe(800_000n);
   });
 
+  it('fails over to the next RPC when buffered estimateGas is rate-limited (keeps the OOG headroom)', async () => {
+    // A retryable estimate failure must NOT silently drop the gas headroom
+    // by signing unbuffered against the failing provider — that reintroduces
+    // the OOG this guards against. Instead the outer loop should fail over to
+    // a healthy RPC that can estimate, and the buffer is still applied
+    // (Codex review).
+    const a = new EVMChainAdapter(minimalConfig({
+      rpcUrl: 'https://primary.example',
+      rpcUrls: ['https://backup.example'],
+    }));
+    const primaryProvider = { name: 'primary' } as any;
+    const backupProvider = { name: 'backup' } as any;
+    const signer = new ethers.Wallet(DEPLOYER_PK, primaryProvider);
+    const receipt = { hash: '0xabc', blockNumber: 13, status: 1, logs: [] };
+    // Fresh populated per provider so provider #1's discarded attempt can't
+    // leak a gasLimit onto provider #2.
+    const populateTransaction = vi.fn(async () => (
+      { to: '0x0000000000000000000000000000000000000001', data: '0x1234' } as any
+    ));
+    const estimateGas = vi.fn()
+      .mockImplementationOnce(async () => {
+        const err = new Error('429 too many requests');
+        (err as any).status = 429;
+        throw err;
+      })
+      .mockResolvedValueOnce(1_000_000n);
+    const runners: any[] = [];
+    const contract = {
+      connect: vi.fn((runner: any) => {
+        runners.push(runner);
+        return { createChallenge: { populateTransaction, estimateGas } };
+      }),
+    };
+    (a as any).providers = [primaryProvider, backupProvider];
+    const signSpy = vi.fn(async () => ({ signedTx: '0xdead', txHash: receipt.hash }));
+    (a as any).signPopulatedTransaction = signSpy;
+    (a as any).sendSignedTransactionAndWait = vi.fn(async () => receipt);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await expect((a as any).sendContractTransaction(
+      contract,
+      'createChallenge',
+      [],
+      signer,
+      'create random-sampling challenge',
+      { gasLimitBufferBps: 5_000 },
+    )).resolves.toBe(receipt);
+
+    expect(estimateGas).toHaveBeenCalledTimes(2);
+    expect(populateTransaction).toHaveBeenCalledTimes(2);
+    // Buffer still applied on the healthy provider.
+    expect(signSpy.mock.calls[0][1].gasLimit).toBe(1_500_000n);
+    // Signed against the BACKUP runner, not the rate-limited primary.
+    expect(signSpy.mock.calls[0][0].provider).toBe(backupProvider);
+    // Failover, not silent fallback — no "headroom not applied" warning.
+    expect(warnSpy).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+
   it('names exhausted RPC endpoints when transaction population fails everywhere', async () => {
     const a = new EVMChainAdapter(minimalConfig({
       rpcUrl: 'https://primary.example',

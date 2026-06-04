@@ -667,8 +667,6 @@ export class EVMChainAdapterBase {
           `${label} transaction population via RPC #${i + 1}`,
         );
         if (opts?.gasLimitBufferBps && populated.gasLimit == null) {
-          // Best-effort: a failed estimate falls through to ethers' own
-          // estimation during signing (unbuffered, but no worse than today).
           try {
             const est = (await withTimeout<bigint>(
               connected[method].estimateGas(...args) as Promise<bigint>,
@@ -677,9 +675,21 @@ export class EVMChainAdapterBase {
             ));
             populated.gasLimit = (est * BigInt(10_000 + opts.gasLimitBufferBps)) / 10_000n;
           } catch (estErr) {
-            // Don't fail the send, but DON'T swallow it silently either: if
-            // this keeps happening the intermittent OOG can return with no
-            // breadcrumb that the headroom was never applied (Codex review).
+            // A RETRYABLE estimate failure must not silently drop the OOG
+            // headroom: if another RPC is left, re-throw so the outer loop
+            // fails over to it (it may estimate fine and apply the buffer).
+            // Swallowing here would sign against the failing provider with no
+            // headroom and could reintroduce the exact OOG this guards
+            // against (Codex review). Only on the LAST provider — or for a
+            // non-retryable estimate error, where failover can't help — do we
+            // fall back to ethers' own unbuffered estimate during signing.
+            const hasMoreProviders = i < this.providers.length - 1;
+            if (isRetryableRpcError(estErr) && hasMoreProviders) {
+              throw estErr;
+            }
+            // Best-effort fallback, but DON'T swallow silently: leave a
+            // breadcrumb that the headroom was never applied so a recurring
+            // intermittent OOG isn't a mystery.
             console.warn(
               `[chain] ${label}: buffered gas estimation failed; falling back to ` +
               `ethers' unbuffered estimate (no OOG headroom applied): ` +
