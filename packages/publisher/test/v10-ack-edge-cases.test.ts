@@ -638,7 +638,7 @@ describe('StorageACKHandler inline verification', () => {
       isPrivate: false,
       kaCount: 1,
       merkleLeafCount: testMerkleLeafCount,
-      rootEntities: ['urn:a'],
+      rootEntities: ['urn:a', 'urn:b'],
       stagingQuads: stagingBytes,
     });
 
@@ -690,7 +690,7 @@ describe('StorageACKHandler inline verification', () => {
       isPrivate: false,
       kaCount: 1,
       merkleLeafCount: testMerkleLeafCount,
-      rootEntities: ['urn:a'],
+      rootEntities: ['urn:a', 'urn:b'],
     });
 
     const response = await handler.handler(intent, fakePeerId);
@@ -972,6 +972,32 @@ describe('StorageACKHandler security', () => {
     expect(store.insert.calls).toHaveLength(0);
   });
 
+  it('rejects stagingQuads when declared rootEntities are only a strict subset', async () => {
+    const store = createRecordingStore();
+    const handler = new StorageACKHandler(store, createConfig(), makeEventBus() as any);
+    const payload = [
+      makeQuad('urn:a', 'urn:p', 'urn:o'),
+      makeQuad('urn:b', 'urn:p', 'urn:o'),
+    ];
+    const stagingBytes = new TextEncoder().encode(quadsToNQuads(payload));
+
+    const intent = encodePublishIntent({
+      merkleRoot: computeFlatKCRoot(payload, []),
+      contextGraphId: testCGIdStr,
+      publisherPeerId: 'pub-0',
+      publicByteSize: stagingBytes.length,
+      isPrivate: false,
+      kaCount: 1,
+      merkleLeafCount: computeFlatKCMerkleLeafCountV10(payload, []),
+      rootEntities: ['urn:a'],
+      stagingQuads: stagingBytes,
+    });
+
+    await expect(handler.handler(intent, fakePeerId))
+      .rejects.toThrow(/rootEntities from intent must exactly match staging quads root subjects/);
+    expect(store.insert.calls).toHaveLength(0);
+  });
+
   it('nodeIdentityId > 2^64 throws protocol upgrade error', async () => {
     const store = createRecordingStore(testQuads);
     const hugeIdentity = (1n << 64n);
@@ -1074,7 +1100,7 @@ describe('StorageACKHandler signature format', () => {
       isPrivate: false,
       kaCount: 1,
       merkleLeafCount: testMerkleLeafCount,
-      rootEntities: ['urn:a'],
+      rootEntities: ['urn:a', 'urn:b'],
       stagingQuads: stagingBytes,
     });
 

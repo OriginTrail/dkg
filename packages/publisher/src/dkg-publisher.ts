@@ -1219,11 +1219,10 @@ export class DKGPublisher implements Publisher {
     if (quads.length === 0) {
       throw new Error(`No quads in shared memory for context graph ${contextGraphId} matching selection`);
     }
-    // OT-RFC-44 / Design B: once the caller has selected one lifecycle/file,
-    // that payload may contain N root entities and still publish as ONE KA in a
-    // single transaction. Higher-level selection endpoints keep their
-    // unrelated-root guard until they can identify that one lifecycle boundary.
     const rootEntities = [...autoPartition(quads).keys()];
+    if (rootEntities.length !== 1) {
+      throw new MultiRootPublishNotAtomicError(contextGraphId, rootEntities);
+    }
 
     const ctxGraphId = options?.publishContextGraphId;
     const chainCgId = options?.onChainContextGraphId ?? ctxGraphId;
@@ -1408,7 +1407,7 @@ export class DKGPublisher implements Publisher {
         }
 
         const ual = publishResult.ual;
-        const kaUals = publishResult.kaManifest.map(ka => `${ual}/${ka.tokenId}`);
+        const kaUals = publishResult.kaManifest.map(ka => `${ual}/${ka.metadataTokenId ?? ka.tokenId}`);
         const metaSubjects = new Set([ual, ...kaUals]);
         const metaQuery = `CONSTRUCT { ?s ?p ?o } WHERE {
           GRAPH <${defaultMetaGraph}> {
@@ -1729,15 +1728,16 @@ export class DKGPublisher implements Publisher {
     const kaMetadata: KAMetadata[] = [];
 
     onPhase?.('prepare:manifest', 'start');
-    // OT-RFC-44 / Design B: one file/lifecycle = ONE Knowledge Asset, however
-    // many entities it contains. The on-chain KA count and ACK digest stay at
-    // one below, while these token IDs remain compatibility labels for
-    // per-root response/meta subjects (`<ual>/1`, `<ual>/2`, ...).
-    let compatibilityTokenId = 1n;
+    // OT-RFC-44 / Design B: one file/lifecycle = ONE on-chain Knowledge Asset,
+    // however many entities it contains. `tokenId` remains the minted NFT id
+    // once confirmed; `metadataTokenId` is the per-root compatibility row id
+    // used for legacy `<ual>/1`, `<ual>/2`, ... metadata subjects.
+    let metadataTokenId = 1n;
     for (const entry of canonical.manifestEntries) {
-      const tokenId = compatibilityTokenId++;
+      const compatibilityRowId = metadataTokenId++;
       manifestEntries.push({
-        tokenId,
+        tokenId: compatibilityRowId,
+        metadataTokenId: compatibilityRowId,
         rootEntity: entry.rootEntity,
         privateMerkleRoot: entry.privateMerkleRoot,
         privateTripleCount: entry.privateTripleCount,
@@ -1746,7 +1746,7 @@ export class DKGPublisher implements Publisher {
       kaMetadata.push({
         rootEntity: entry.rootEntity,
         kcUal: '',
-        tokenId,
+        tokenId: compatibilityRowId,
         publicTripleCount: entry.publicTripleCount,
         privateTripleCount: entry.privateTripleCount,
         privateMerkleRoot: entry.privateMerkleRoot,
@@ -2592,6 +2592,9 @@ export class DKGPublisher implements Publisher {
 
         for (const km of kaMetadata) {
           km.kcUal = ual;
+        }
+        for (const entry of manifestEntries) {
+          entry.tokenId = kaId;
         }
         let confirmedQuads = generateConfirmedFullMetadata(
           {

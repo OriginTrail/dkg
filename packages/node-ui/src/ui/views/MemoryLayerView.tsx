@@ -615,6 +615,8 @@ function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: string;
 
   const allUris = entities?.map(e => e.uri) ?? [];
   const allSelected = allUris.length > 0 && allUris.every(u => selected.has(u));
+  const canPublishSelected = selected.size === 1;
+  const canPublishAll = allUris.length === 1;
 
   const toggleOne = useCallback((uri: string) => {
     setSelected(prev => {
@@ -634,8 +636,10 @@ function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: string;
 
   const handlePublishSelected = useCallback(async () => {
     if (selected.size === 0) return;
-    // OT-RFC-44 / Design B: the full selection publishes as ONE Knowledge Asset
-    // whose member entities are the selected roots (any count). No single-root guard.
+    if (selected.size !== 1) {
+      setError('Shared-memory publish currently requires exactly one root entity.');
+      return;
+    }
     setPublishing(true);
     setPublishResult(null);
     setError(null);
@@ -655,7 +659,10 @@ function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: string;
 
   const handlePublishAll = useCallback(async () => {
     if (allUris.length < 1) return;
-    // OT-RFC-44 / Design B: publish all roots as ONE Knowledge Asset (any count).
+    if (allUris.length !== 1) {
+      setError('Shared-memory publish currently requires exactly one root entity.');
+      return;
+    }
     setPublishing(true);
     setPublishResult(null);
     setError(null);
@@ -700,10 +707,11 @@ function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: string;
           <button className="v10-publish-panel-refresh" onClick={refresh} title="Refresh">↻</button>
           <button
             className="v10-btn-promote-all"
-            disabled={publishing}
+            disabled={publishing || !canPublishAll}
             onClick={handlePublishAll}
+            title={canPublishAll ? 'Publish root to VM' : 'Select a single root to publish'}
           >
-            {publishing && selected.size === 0 ? 'Publishing...' : 'Publish All → VM'}
+            {publishing && selected.size === 0 ? 'Publishing...' : 'Publish Root → VM'}
           </button>
         </div>
       </div>
@@ -716,10 +724,13 @@ function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: string;
         {selected.size > 0 && (
           <button
             className="v10-btn-publish"
-            disabled={publishing}
+            disabled={publishing || !canPublishSelected}
             onClick={handlePublishSelected}
+            title={canPublishSelected ? 'Publish selected root to VM' : 'Select a single root to publish'}
           >
-            {publishing ? 'Publishing...' : `Publish ${selected.size} selected (${selectedTriples} triples) → VM`}
+            {publishing ? 'Publishing...' : canPublishSelected
+              ? `Publish selected (${selectedTriples} triples) → VM`
+              : 'Select one root to publish'}
           </button>
         )}
       </div>

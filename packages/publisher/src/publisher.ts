@@ -8,6 +8,7 @@ export const MAX_PUBLISH_EPOCHS = 0xffffffff;
 
 export interface KAManifestEntry {
   tokenId: bigint;
+  metadataTokenId?: bigint;
   rootEntity: string;
   privateMerkleRoot?: Uint8Array;
   privateTripleCount?: number;

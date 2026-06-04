@@ -44,7 +44,7 @@ async function makePublisher() {
   return { publisher, store, publishSpy };
 }
 
-describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: one KA, N entities)', () => {
+describe('publishFromSharedMemory selection boundary', () => {
   it('allows selection "all" when shared memory resolves to one payload root', async () => {
     const { publisher, store, publishSpy } = await makePublisher();
     await store.insert([
@@ -66,7 +66,7 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
     ]);
   });
 
-  it('publishes ALL payload roots as one KA when selection "all" resolves to multiple roots (OT-RFC-44)', async () => {
+  it('rejects selection "all" when shared memory resolves to multiple independent roots', async () => {
     const { publisher, store, publishSpy } = await makePublisher();
     await store.insert([
       q('urn:test:root:one'),
@@ -75,16 +75,10 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
       q('urn:test:root:two', TRUST_LEVEL_PREDICATE, `"${TrustLevel.SelfAttested}"`),
     ]);
 
-    // OT-RFC-44 / Design B: multiple payload roots publish as ONE Knowledge
-    // Asset in a single transaction (formerly rejected as "not atomic"). The
-    // publish proceeds once and carries both roots' (trust/owner-filtered) quads.
     await expect(publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all'))
-      .resolves.toMatchObject({ status: 'tentative' });
+      .rejects.toMatchObject({ code: 'MULTI_ROOT_PUBLISH_NOT_ATOMIC' });
 
-    expect(publishSpy).toHaveBeenCalledTimes(1);
-    const subjects = new Set(publishSpy.mock.calls[0][0].quads.map((qq: any) => qq.subject));
-    expect(subjects.has('urn:test:root:one')).toBe(true);
-    expect(subjects.has('urn:test:root:two')).toBe(true);
+    expect(publishSpy).not.toHaveBeenCalled();
   });
 
   it('scopes an explicit single-root selection to that root and excludes co-resident SWM roots', async () => {
@@ -127,24 +121,19 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
     expect(publishArgs.quads.every((qq) => qq.subject === 'urn:test:root:one')).toBe(true);
   });
 
-  it('publishes both explicit rootEntities as one KA when they resolve to multiple payload roots (OT-RFC-44)', async () => {
+  it('rejects explicit multi-root selection until the caller identifies one lifecycle boundary', async () => {
     const { publisher, store, publishSpy } = await makePublisher();
     await store.insert([
       q('urn:test:root:one'),
       q('urn:test:root:two'),
     ]);
 
-    // OT-RFC-44 / Design B: an explicit multi-root selection publishes as ONE
-    // KA whose member entities are both roots — a single atomic transaction.
     await expect(
       publisher.publishFromSharedMemory(CONTEXT_GRAPH, {
         rootEntities: ['urn:test:root:one', 'urn:test:root:two'],
       }),
-    ).resolves.toMatchObject({ status: 'tentative' });
+    ).rejects.toMatchObject({ code: 'MULTI_ROOT_PUBLISH_NOT_ATOMIC' });
 
-    expect(publishSpy).toHaveBeenCalledTimes(1);
-    const subjects = new Set(publishSpy.mock.calls[0][0].quads.map((qq: any) => qq.subject));
-    expect(subjects.has('urn:test:root:one')).toBe(true);
-    expect(subjects.has('urn:test:root:two')).toBe(true);
+    expect(publishSpy).not.toHaveBeenCalled();
   });
 });

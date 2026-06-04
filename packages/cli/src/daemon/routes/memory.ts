@@ -423,6 +423,7 @@ function publishResponsePayload(
     status: result.status,
     kas: result.kaManifest.map((ka: any) => ({
       tokenId: String(ka.tokenId),
+      ...(ka.metadataTokenId != null ? { metadataTokenId: String(ka.metadataTokenId) } : {}),
       rootEntity: ka.rootEntity,
     })),
     ...(chain && { txHash: chain.txHash, blockNumber: chain.blockNumber }),
@@ -1756,6 +1757,7 @@ WHERE {
               .join(''),
           kas: result.kaManifest.map((ka: any) => ({
             tokenId: String(ka.tokenId),
+            ...(ka.metadataTokenId != null ? { metadataTokenId: String(ka.metadataTokenId) } : {}),
             rootEntity: ka.rootEntity,
           })),
           ...(chain && { txHash: chain.txHash, blockNumber: chain.blockNumber }),
