@@ -29,6 +29,7 @@ import {
   listSwmEntities,
   listAssertions,
   ensureContextGraphOnChain,
+  fetchAssertionUals,
   createSavedQuery,
   updateSavedQuery,
   deleteSavedQuery,
@@ -365,6 +366,16 @@ describe('UI API tests', () => {
       queryBindings = [{ g: { value: `urn:dkg:assertion:cg-1:${agent}:shared-doc.md` } }];
       const list = await listAssertions('cg-1', 'swm');
       expect(list.map(a => a.name)).toEqual(['shared-doc.md']);
+    });
+
+    it('fetchAssertionUals maps assertionName -> reservedUal (shown next to the filename)', async () => {
+      queryBindings = [
+        { name: { value: 'spec.md' }, ual: { value: 'did:dkg:evm:31337/0xabc/7' } },
+        { name: { value: 'demo.md' }, ual: { value: 'did:dkg:evm:31337/0xabc/8' } },
+      ];
+      const map = await fetchAssertionUals('cg-1');
+      expect(map['spec.md']).toBe('did:dkg:evm:31337/0xabc/7');
+      expect(map['demo.md']).toBe('did:dkg:evm:31337/0xabc/8');
     });
 
     it('ensureContextGraphOnChain auto-registers an off-chain CG before publishing', async () => {

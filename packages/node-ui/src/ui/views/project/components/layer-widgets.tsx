@@ -1,6 +1,6 @@
 import React, { useMemo, useState, useCallback } from 'react';
 import type { ReactNode } from 'react';
-import { listAssertions, promoteAssertion, describePromoteError, listSwmEntities, ensureContextGraphOnChain, knowledgeAssetFinalize, knowledgeAssetPublish } from '../../../api.js';
+import { listAssertions, promoteAssertion, describePromoteError, ensureContextGraphOnChain, knowledgeAssetFinalize, knowledgeAssetPublish } from '../../../api.js';
 import type { MemoryEntity } from '../../../hooks/useMemoryEntities.js';
 import { useProjectProfileContext } from '../../../hooks/useProjectProfile.js';
 import { LAYER_CONFIG, entityMeta, layerNoun } from '../helpers.js';
@@ -99,24 +99,6 @@ export function LayerStatsWidget({ entities, entityCount, triples, layer }: {
   );
 }
 
-// Selection-based SWM publish is still single-root at the UI/daemon route.
-// Multi-root file lifecycles publish through finalized assertion/file paths
-// where the daemon can identify one lifecycle/assertion boundary.
-function collectPublishRoots(roots: string[]): string[] {
-  const uniqueRoots = [...new Set(roots.filter(Boolean))];
-  if (uniqueRoots.length < 1) {
-    throw new Error('Publish requires one root entity. Select a root and publish again.');
-  }
-  if (uniqueRoots.length > 1) {
-    throw new Error('Shared-memory publish currently requires exactly one root entity.');
-  }
-  return uniqueRoots;
-}
-
-export async function fetchSwmPublishRoots(contextGraphId: string): Promise<string[]> {
-  const roots = (await listSwmEntities(contextGraphId)).map((entity) => entity.uri);
-  return collectPublishRoots(roots);
-}
 
 export function LayerActionsWidget({ layer, count, contextGraphId, onComplete }: {
   layer: 'wm' | 'swm';

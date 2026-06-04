@@ -623,6 +623,30 @@ export const executeQuery = (
 ) =>
   postQueryDeduped({ sparql, contextGraphId, includeSharedMemory, graphSuffix, view, includeContextGraphPartitions });
 
+/**
+ * Map of assertion name → deterministic Option-1 UAL (`dkg:reservedUal`,
+ * `did:dkg:evm:<chainId>/<author>/<number>`). Stamped on the lifecycle URN at
+ * creation, so it's available for every assertion (WM/SWM/published) — the
+ * assertions list renders it next to the filename. Keyed by `dkg:assertionName`.
+ */
+export async function fetchAssertionUals(contextGraphId: string): Promise<Record<string, string>> {
+  const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
+  const sparql = `SELECT ?name ?ual WHERE {
+    GRAPH <${metaGraph}> {
+      ?lc <http://dkg.io/ontology/assertionName> ?name ;
+          <http://dkg.io/ontology/reservedUal> ?ual .
+    }
+  }`;
+  const data = await executeQuery(sparql, contextGraphId);
+  const map: Record<string, string> = {};
+  for (const b of (data?.result?.bindings ?? [])) {
+    const name = typeof b.name === 'string' ? b.name : b.name?.value;
+    const ual = typeof b.ual === 'string' ? b.ual : b.ual?.value;
+    if (name && ual && !map[name]) map[name] = ual;
+  }
+  return map;
+}
+
 // --- Publish (assertion-lifecycle: RFC-001 §9.x sign-at-creation) ---
 //
 // Creates a fresh auto-named assertion, writes the supplied quads,
