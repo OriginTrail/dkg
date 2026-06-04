@@ -1200,6 +1200,13 @@ describe('DkgDaemonClient', () => {
       expect(fetchCalls).toHaveLength(0);
     });
 
+    it('createKnowledgeAsset rejects finalized publish fields without quads before HTTP serialization', async () => {
+      await expect(client.createKnowledgeAsset('cg-1', 'f', {
+        authorAgentAddress: '0xauthor',
+      })).rejects.toThrow('authorAgentAddress, preSignedAuthorAttestation, and schemeVersion require non-empty quads');
+      expect(fetchCalls).toHaveLength(0);
+    });
+
     it('createKnowledgeAsset translates an alsoPublishVm options object', async () => {
       ok({ name: 'f' });
       await client.createKnowledgeAsset('cg-1', 'f', {

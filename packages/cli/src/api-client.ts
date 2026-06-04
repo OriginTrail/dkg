@@ -37,6 +37,30 @@ function finalizedPublishOptionsPayload(
   return Object.keys(payload).length > 0 ? payload : undefined;
 }
 
+function assertExclusiveAuthorFields(args: {
+  authorAgentAddress?: string;
+  preSignedAuthorAttestation?: PreSignedAuthorAttestationPayload;
+}): void {
+  if (args.authorAgentAddress != null && args.preSignedAuthorAttestation != null) {
+    throw new Error('authorAgentAddress and preSignedAuthorAttestation are mutually exclusive');
+  }
+}
+
+function assertCreateFinalizeFieldsHaveQuads(args: {
+  quads?: unknown[];
+  authorAgentAddress?: string;
+  preSignedAuthorAttestation?: PreSignedAuthorAttestationPayload;
+  schemeVersion?: number;
+}): void {
+  const hasFinalizeOnlyField =
+    args.authorAgentAddress != null ||
+    args.preSignedAuthorAttestation != null ||
+    args.schemeVersion !== undefined;
+  if (hasFinalizeOnlyField && !(Array.isArray(args.quads) && args.quads.length > 0)) {
+    throw new Error('authorAgentAddress, preSignedAuthorAttestation, and schemeVersion require non-empty quads');
+  }
+}
+
 /**
  * Response shape for `/api/random-sampling/status`. Mirrors
  * `RandomSamplingStatus` from `@origintrail-official/dkg-agent` but
@@ -507,6 +531,8 @@ export class ApiClient {
       alsoPublishVm?: boolean | KnowledgeAssetFinalizedPublishOptions;
     },
   ): Promise<Record<string, unknown>> {
+    assertExclusiveAuthorFields(options ?? {});
+    assertCreateFinalizeFieldsHaveQuads(options ?? {});
     const payload: Record<string, unknown> = { contextGraphId, name, ...(options ?? {}) };
     if (options?.alsoPublishVm && typeof options.alsoPublishVm === 'object') {
       payload.alsoPublishVm = finalizedPublishOptionsPayload(options.alsoPublishVm) ?? {};

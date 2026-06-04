@@ -39,6 +39,7 @@ import {
   promoteAssertion,
   createKnowledgeAsset,
   knowledgeAssetPublish,
+  knowledgeAssetFinalize,
 } from '../src/ui/api.js';
 
 let server: Server;
@@ -319,6 +320,35 @@ describe('UI API tests', () => {
       const body = JSON.parse(call?.body ?? '{}');
       expect(body.contextGraphId).toBe('cg-1');
       expect(body.name).toBe('f');
+    });
+
+    it('createKnowledgeAsset rejects mutually exclusive authorship fields before POSTing', () => {
+      expect(() =>
+        createKnowledgeAsset('cg-1', 'f', {
+          authorAgentAddress: '0xauthor',
+          preSignedAuthorAttestation: { address: '0xauthor', signature: { r: '0xr', vs: '0xvs' } },
+        }),
+      ).toThrow('authorAgentAddress and preSignedAuthorAttestation are mutually exclusive');
+      expect(requestLog).toHaveLength(0);
+    });
+
+    it('createKnowledgeAsset rejects finalized publish fields without quads before POSTing', () => {
+      expect(() =>
+        createKnowledgeAsset('cg-1', 'f', {
+          authorAgentAddress: '0xauthor',
+        }),
+      ).toThrow('authorAgentAddress, preSignedAuthorAttestation, and schemeVersion require non-empty quads');
+      expect(requestLog).toHaveLength(0);
+    });
+
+    it('knowledgeAssetFinalize rejects mutually exclusive authorship fields before POSTing', () => {
+      expect(() =>
+        knowledgeAssetFinalize('cg-1', 'f', {
+          authorAgentAddress: '0xauthor',
+          preSignedAuthorAttestation: { address: '0xauthor', signature: { r: '0xr', vs: '0xvs' } },
+        }),
+      ).toThrow('authorAgentAddress and preSignedAuthorAttestation are mutually exclusive');
+      expect(requestLog).toHaveLength(0);
     });
 
     it('listSwmEntities queries the shared-working-memory view', async () => {

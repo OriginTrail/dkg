@@ -152,18 +152,33 @@ describe('DkgClient knowledge-assets — publish/finalize option serialization',
     expect(calls).toHaveLength(0);
   });
 
-  it('createKnowledgeAsset rejects empty or unknown alsoPublishVm option objects', async () => {
+  it('createKnowledgeAsset treats an empty alsoPublishVm options object as default publish', async () => {
     const { client, calls } = makeClient();
-    await expect(client.createKnowledgeAsset({
+    await client.createKnowledgeAsset({
       contextGraphId: 'cg-1',
       name: 'f',
       alsoPublishVm: {},
-    })).rejects.toThrow(/use true to publish with defaults/);
+    });
+    expect(calls[0].body.alsoPublishVm).toEqual({});
+  });
+
+  it('createKnowledgeAsset rejects unknown alsoPublishVm option objects', async () => {
+    const { client, calls } = makeClient();
     await expect(client.createKnowledgeAsset({
       contextGraphId: 'cg-1',
       name: 'f',
       alsoPublishVm: { unknown: true },
     } as any)).rejects.toThrow(/use true to publish with defaults/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('createKnowledgeAsset rejects finalize-only fields without quads before HTTP serialization', async () => {
+    const { client, calls } = makeClient();
+    await expect(client.createKnowledgeAsset({
+      contextGraphId: 'cg-1',
+      name: 'f',
+      authorAgentAddress: '0xauthor',
+    })).rejects.toThrow(/require non-empty quads/);
     expect(calls).toHaveLength(0);
   });
 });

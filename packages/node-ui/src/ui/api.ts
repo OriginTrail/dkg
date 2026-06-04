@@ -11,6 +11,30 @@ function normalizeContextGraphId(contextGraphIdOrUri: string): string {
     : trimmed;
 }
 
+function assertExclusiveAuthorFields(args: {
+  authorAgentAddress?: string;
+  preSignedAuthorAttestation?: PreSignedAuthorAttestationPayload;
+}): void {
+  if (args.authorAgentAddress != null && args.preSignedAuthorAttestation != null) {
+    throw new Error('authorAgentAddress and preSignedAuthorAttestation are mutually exclusive');
+  }
+}
+
+function assertCreateFinalizeFieldsHaveQuads(args: {
+  quads?: unknown[];
+  authorAgentAddress?: string;
+  preSignedAuthorAttestation?: PreSignedAuthorAttestationPayload;
+  schemeVersion?: number;
+}): void {
+  const hasFinalizeOnlyField =
+    args.authorAgentAddress != null ||
+    args.preSignedAuthorAttestation != null ||
+    args.schemeVersion !== undefined;
+  if (hasFinalizeOnlyField && !(Array.isArray(args.quads) && args.quads.length > 0)) {
+    throw new Error('authorAgentAddress, preSignedAuthorAttestation, and schemeVersion require non-empty quads');
+  }
+}
+
 export function authHeaders(): Record<string, string> {
   if (typeof window === 'undefined') return {};
   const token = window.__DKG_TOKEN__;
@@ -726,6 +750,8 @@ export const createKnowledgeAsset = (
     alsoPublishVm?: boolean | KnowledgeAssetFinalizedPublishOptions;
   } = {},
 ) => {
+  assertExclusiveAuthorFields(opts);
+  assertCreateFinalizeFieldsHaveQuads(opts);
   const normalizedContextGraphId = normalizeContextGraphId(contextGraphId);
   const body: Record<string, unknown> = {
     contextGraphId: normalizedContextGraphId,
@@ -777,11 +803,13 @@ export const knowledgeAssetFinalize = (
     preSignedAuthorAttestation?: PreSignedAuthorAttestationPayload;
     schemeVersion?: number;
   } = {},
-) =>
-  post<{ merkleRoot: string; eip712Digest: string }>(
+) => {
+  assertExclusiveAuthorFields(opts);
+  return post<{ merkleRoot: string; eip712Digest: string }>(
     `/api/knowledge-assets/${encodeURIComponent(name)}/wm/finalize`,
     { contextGraphId: normalizeContextGraphId(contextGraphId), ...opts },
   );
+};
 
 /** Discard the open WM draft (git checkout -- .). */
 export const knowledgeAssetDiscard = (

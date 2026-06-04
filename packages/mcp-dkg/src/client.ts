@@ -108,6 +108,21 @@ function assertExclusiveAuthorFields(args: {
   }
 }
 
+function assertCreateFinalizeFieldsHaveQuads(args: {
+  quads?: unknown[];
+  authorAgentAddress?: string;
+  preSignedAuthorAttestation?: PreSignedAuthorAttestationPayload;
+  schemeVersion?: number;
+}): void {
+  const hasFinalizeOnlyField =
+    args.authorAgentAddress != null ||
+    args.preSignedAuthorAttestation != null ||
+    args.schemeVersion !== undefined;
+  if (hasFinalizeOnlyField && !(Array.isArray(args.quads) && args.quads.length > 0)) {
+    throw new Error('authorAgentAddress, preSignedAuthorAttestation, and schemeVersion require non-empty quads');
+  }
+}
+
 /** Translate {@link KnowledgeAssetFinalizedPublishOptions} into the daemon body. */
 function finalizedPublishOptionsPayload(
   options?: KnowledgeAssetFinalizedPublishOptions,
@@ -130,6 +145,7 @@ function createAlsoPublishVmPayload(
 ): boolean | Record<string, unknown> {
   if (typeof value === 'boolean') return value;
   if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+    if (Object.keys(value).length === 0) return {};
     const payload = finalizedPublishOptionsPayload(value as KnowledgeAssetFinalizedPublishOptions);
     if (payload) return payload;
     throw new Error(
@@ -1111,6 +1127,7 @@ export class DkgClient {
     alsoPublishVm?: boolean | KnowledgeAssetFinalizedPublishOptions;
   }): Promise<Record<string, unknown>> {
     assertExclusiveAuthorFields(args);
+    assertCreateFinalizeFieldsHaveQuads(args);
     const body: Record<string, unknown> = {
       contextGraphId: normalizeContextGraphId(args.contextGraphId),
       name: args.name,

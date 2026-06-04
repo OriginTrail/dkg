@@ -270,6 +270,21 @@ function assertExclusiveAuthorFields(args: {
   }
 }
 
+function assertCreateFinalizeFieldsHaveQuads(args: {
+  quads?: unknown[];
+  authorAgentAddress?: string;
+  preSignedAuthorAttestation?: PreSignedAuthorAttestationPayload;
+  schemeVersion?: number;
+}): void {
+  const hasFinalizeOnlyField =
+    args.authorAgentAddress != null ||
+    args.preSignedAuthorAttestation != null ||
+    args.schemeVersion !== undefined;
+  if (hasFinalizeOnlyField && !(Array.isArray(args.quads) && args.quads.length > 0)) {
+    throw new Error('authorAgentAddress, preSignedAuthorAttestation, and schemeVersion require non-empty quads');
+  }
+}
+
 /** Translate {@link KnowledgeAssetFinalizedPublishOptions} into the daemon body. */
 function finalizedPublishOptionsPayload(
   options?: KnowledgeAssetFinalizedPublishOptions,
@@ -1167,6 +1182,7 @@ export class DkgDaemonClient {
     },
   ): Promise<Record<string, unknown>> {
     assertExclusiveAuthorFields(opts ?? {});
+    assertCreateFinalizeFieldsHaveQuads(opts ?? {});
     const payload: Record<string, unknown> = {
       contextGraphId: normalizeContextGraphId(contextGraphId),
       name,
