@@ -139,6 +139,7 @@ function makeAssertionAgent(over: Record<string, any> = {}) {
     contextGraphExists: vi.fn(async (id: string) => knownContextGraphs.some((row) => row.id === id)),
     getContextGraphOnChainId: vi.fn(async () => '7'),
     getStoredContextGraphRegistrationOptions: vi.fn(async () => ({})),
+    hasPendingSharedMemoryWrites: vi.fn(() => true),
     registerContextGraph: vi.fn(async () => ({ contextGraphId: '7' })),
     resolveAgentByToken: vi.fn(),
     ...restOver,
@@ -526,6 +527,28 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
     expect(agent.registerContextGraph).not.toHaveBeenCalled();
   });
 
+  it('atomic create validates inline alsoPublishVm before creating a draft', async () => {
+    const agent = makeAssertionAgent();
+    const quads = [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"', graph: '' }];
+    const ctx = ctxFor(
+      'POST',
+      '/api/knowledge-assets',
+      {
+        contextGraphId: 'cg',
+        name: 'f',
+        quads,
+        alsoShareSwm: true,
+        alsoPublishVm: { authorAgentAddress: '0x1111111111111111111111111111111111111111' },
+      },
+      agent,
+    );
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(400);
+    expect(body(ctx).error).toContain('seal already encodes the author');
+    expect(agent.assertion.create).not.toHaveBeenCalled();
+    expect(agent.publishFromFinalizedAssertion).not.toHaveBeenCalled();
+  });
+
   it('atomic create reports the real VM status (207) when publish is not confirmed', async () => {
     const agent = makeAssertionAgent({
       publishFromFinalizedAssertion: vi.fn(async () => ({
@@ -642,7 +665,7 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
     expect(body(ctx)).toMatchObject({ status: 'tentative' });
   });
 
-  it('vm/publish does not emit published activity for partial-success results', async () => {
+  it('vm/publish emits legacy side effects for partial-success results', async () => {
     const agent = makeAssertionAgent({
       publishFromFinalizedAssertion: vi.fn(async () => ({
         kaId: 7n,
@@ -666,8 +689,12 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
     );
     await handleKnowledgeAssetsRoutes(ctx);
     expect(status(ctx)).toBe(207);
-    expect(emitMemoryGraphChanged).not.toHaveBeenCalled();
-    expect(insertNotification).not.toHaveBeenCalled();
+    expect(emitMemoryGraphChanged).toHaveBeenCalledWith(expect.objectContaining({
+      operation: 'shared_memory_published',
+      layers: ['vm'],
+      status: 'tentative',
+    }));
+    expect(insertNotification).toHaveBeenCalled();
   });
 
   it('vm/publish auto-registers a local-only context graph before named publish', async () => {
@@ -743,6 +770,28 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
     expect(body(ctx).error).toContain('insufficient TRAC');
     expect((tracker as any).fail).toHaveBeenCalledTimes(1);
     expect(agent.publishFromFinalizedAssertion).not.toHaveBeenCalled();
+  });
+
+  it('vm/publish refuses to auto-register when shared memory is empty', async () => {
+    const agent = makeAssertionAgent({
+      getContextGraphOnChainId: vi.fn(async () => null),
+      hasPendingSharedMemoryWrites: vi.fn(() => false),
+      registerContextGraph: vi.fn(async () => ({ contextGraphId: '7' })),
+    });
+    const tracker = createTracker();
+    const ctx = ctxFor(
+      'POST',
+      '/api/knowledge-assets/f/vm/publish',
+      { contextGraphId: 'cg' },
+      agent,
+      { tracker },
+    );
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(400);
+    expect(body(ctx).error).toContain('has no pending shared-memory writes');
+    expect(agent.registerContextGraph).not.toHaveBeenCalled();
+    expect(agent.publishFromFinalizedAssertion).not.toHaveBeenCalled();
+    expect((tracker as any).fail).toHaveBeenCalledTimes(1);
   });
 
   it('atomic alsoPublishVm auto-registers a local-only context graph before named publish', async () => {

@@ -187,6 +187,7 @@ function routeError(res: RequestContext["res"], err: unknown): boolean {
     message.includes("not a registered local agent") ||
     message.includes("signer mismatch") ||
     message.includes("has no quads") ||
+    message.includes("has no pending shared-memory writes") ||
     message.includes("different merkleRoot") ||
     message.includes("could not be auto-registered on-chain before publish") ||
     message.includes("reserved namespace") ||
@@ -435,6 +436,16 @@ async function ensureRegisteredForNamedPublish(
   const existingOnChainId = await agent.getContextGraphOnChainId(contextGraphId);
   if (existingOnChainId) return;
 
+  if (
+    typeof agent.hasPendingSharedMemoryWrites === "function" &&
+    !agent.hasPendingSharedMemoryWrites(contextGraphId)
+  ) {
+    throw new Error(
+      `Context graph "${contextGraphId}" has no pending shared-memory writes — ` +
+      "nothing to publish to Verified Memory. Stage entities into SWM first, then retry publish.",
+    );
+  }
+
   const storedOpts = await agent.getStoredContextGraphRegistrationOptions(contextGraphId);
   const tokenAgentAddress = requestToken ? agent.resolveAgentByToken(requestToken) : undefined;
   try {
@@ -462,12 +473,12 @@ function emitPublished(
   subGraphName?: string,
   clearSharedMemoryAfter = false,
 ): void {
-  if (result?.status !== "confirmed" || result?.contextGraphError) return;
   const publicTripleCount = Array.isArray(result?.publicQuads) ? result.publicQuads.length : 0;
   const rootCount = Array.isArray(result?.kaManifest) ? result.kaManifest.length : 0;
+  const publishedSwmCleaned = result?.status === "confirmed";
   ctx.emitMemoryGraphChanged?.({
     contextGraphId,
-    layers: ["swm", "vm"],
+    layers: publishedSwmCleaned ? ["swm", "vm"] : ["vm"],
     subGraphName,
     operation: "shared_memory_published",
     source: "api",
@@ -551,6 +562,9 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         error:
           '"alsoPublishVm" requires "alsoShareSwm" — publishFromFinalizedAssertion reads from Shared Memory, so the assertion must be shared first',
       });
+    }
+    if (alsoPublishVmIsObject && !validateFinalizedAssertionPublishRequest(alsoPublishVm as Record<string, unknown>, res)) {
+      return;
     }
     const finalizeOptions = resolveFinalizeOptions(ctx, parsed);
     if (finalizeOptions === null) return;
