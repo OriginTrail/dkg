@@ -239,6 +239,42 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
     expect(agent.publishFromFinalizedAssertion).toHaveBeenCalledOnce();
   });
 
+  // PR #972: vm/publish HTTP status reflects the actual publish outcome.
+  it('POST .../:name/vm/publish returns 207 when the KA minted but the context-graph binding failed', async () => {
+    const agent = makeAssertionAgent({
+      publishFromFinalizedAssertion: vi.fn(async () => ({
+        kaId: 7n,
+        status: 'confirmed',
+        ual: 'did:dkg:hardhat:31337/0xabc/7',
+        onChainResult: { txHash: '0xtx' },
+        contextGraphError: 'CG value bind failed',
+      })),
+    });
+    const ctx = ctxFor('POST', '/api/knowledge-assets/f/vm/publish', { contextGraphId: 'cg' }, agent);
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(207);
+    expect(body(ctx)).toMatchObject({ status: 'confirmed', contextGraphError: 'CG value bind failed' });
+  });
+
+  it('POST .../:name/vm/publish returns 502 when the publish is tentative (did not confirm)', async () => {
+    const agent = makeAssertionAgent({
+      publishFromFinalizedAssertion: vi.fn(async () => ({ kaId: 7n, status: 'tentative', ual: 'did:dkg:hardhat:31337/0xabc/7' })),
+    });
+    const ctx = ctxFor('POST', '/api/knowledge-assets/f/vm/publish', { contextGraphId: 'cg' }, agent);
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(502);
+    expect(body(ctx).error).toContain('did not confirm');
+  });
+
+  it('POST .../:name/vm/publish returns 502 when the publish failed', async () => {
+    const agent = makeAssertionAgent({
+      publishFromFinalizedAssertion: vi.fn(async () => ({ status: 'failed' })),
+    });
+    const ctx = ctxFor('POST', '/api/knowledge-assets/f/vm/publish', { contextGraphId: 'cg' }, agent);
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(502);
+  });
+
   it('GET /api/knowledge-assets/:name returns lifecycle state', async () => {
     const agent = makeAssertionAgent();
     const ctx = ctxFor('GET', '/api/knowledge-assets/f?contextGraphId=cg', undefined, agent);
