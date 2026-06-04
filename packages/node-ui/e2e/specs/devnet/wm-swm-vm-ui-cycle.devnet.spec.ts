@@ -199,17 +199,21 @@ test.describe('WM → SWM → VM via the UI', () => {
     expect(await readMemoryLayerMarker(run.cgId!, run.markerUri!)).toBe('SWM');
   });
 
-  // DEFERRED (OriginTrail/dkg#966): the SWM → VM publish step is blocked by a
-  // SEPARATE product gap, not the promote bug this spec proves. On a CG with
-  // multiple SWM roots (the seeded devnet CG has ~25), the project-view
-  // "Publish all → VM" control is CORRECTLY rejected by the daemon — V10
-  // on-chain publish mints one Knowledge Asset per root and requires exactly
-  // one root per request. The per-root `PublishPanel` (checkbox-select a single
-  // root) exists in `MemoryLayerView` but is NOT wired into any UI navigation,
-  // so there is no click-path to single-root publish. Kept as `fixme` (living
-  // documentation) until either (a) the PublishPanel is wired into nav, or
-  // (b) this spec provisions its own dedicated single-root CG. The import →
-  // promote steps above are the asserting cycle for the blank-node fix.
+  // DEFERRED (OriginTrail/dkg#966): the SWM → VM publish step is a browser-
+  // coverage gap, NOT the promote bug this spec proves. The project-view bulk
+  // "Publish to Verifiable Memory" control (`widget-publish-vm-btn`) publishes
+  // EVERY SWM assertion on the CG as its own on-chain Knowledge Asset (Design B,
+  // any entity count). On the shared seeded devnet CG (~25 SWM roots) that fires
+  // ~25 real on-chain mints — too slow/flaky for a browser e2e, and it touches
+  // roots this spec doesn't own. The single-root surface (`PublishPanel` in
+  // `MemoryLayerView`, gated by `publishSharedMemory`'s one-root client guard)
+  // is NOT wired into ProjectView navigation, so there is no click-path to
+  // publish ONLY this spec's imported root. End-to-end on-chain mint is already
+  // verified by the API-driven sibling spec (`wm-swm-vm-lifecycle.devnet.spec`).
+  // Kept as `fixme` until either (a) PublishPanel is wired into nav, or (b) this
+  // spec provisions its own dedicated single-assertion CG so the bulk publish
+  // maps 1:1 to our root. The import → promote steps above are the asserting
+  // cycle for the blank-node fix.
   test.fixme('publishes SWM → VM via the UI and the entity lands in Verifiable Memory', async ({ shell, page }) => {
     test.skip(!run.rootUri, 'Promote step did not run');
     await shell.goto();
