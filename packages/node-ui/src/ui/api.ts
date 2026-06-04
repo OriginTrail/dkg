@@ -1,6 +1,14 @@
 const BASE = '';
+const CONTEXT_GRAPH_URI_PREFIX = 'did:dkg:context-graph:';
 declare global {
   interface Window { __DKG_TOKEN__?: string; }
+}
+
+function normalizeContextGraphId(contextGraphIdOrUri: string): string {
+  const trimmed = contextGraphIdOrUri.trim();
+  return trimmed.startsWith(CONTEXT_GRAPH_URI_PREFIX)
+    ? trimmed.slice(CONTEXT_GRAPH_URI_PREFIX.length)
+    : trimmed;
 }
 
 export function authHeaders(): Record<string, string> {
@@ -718,7 +726,12 @@ export const createKnowledgeAsset = (
     alsoPublishVm?: boolean | KnowledgeAssetFinalizedPublishOptions;
   } = {},
 ) => {
-  const body: Record<string, unknown> = { contextGraphId, name, ...opts };
+  const normalizedContextGraphId = normalizeContextGraphId(contextGraphId);
+  const body: Record<string, unknown> = {
+    contextGraphId: normalizedContextGraphId,
+    name,
+    ...opts,
+  };
   // Object form carries finalized-publish controls; translate to the daemon
   // body shape (mirrors the cli ApiClient). `true`/`false` pass through.
   if (opts.alsoPublishVm && typeof opts.alsoPublishVm === 'object') {
@@ -734,7 +747,7 @@ export const getKnowledgeAsset = (
   subGraphName?: string,
 ) => {
   const qs = new URLSearchParams({
-    contextGraphId,
+    contextGraphId: normalizeContextGraphId(contextGraphId),
     ...(subGraphName ? { subGraphName } : {}),
   }).toString();
   return get<Record<string, unknown>>(
@@ -751,7 +764,7 @@ export const knowledgeAssetWrite = (
 ) =>
   post<{ written: number }>(
     `/api/knowledge-assets/${encodeURIComponent(name)}/wm/write`,
-    { contextGraphId, quads, ...opts },
+    { contextGraphId: normalizeContextGraphId(contextGraphId), quads, ...opts },
   );
 
 /** Seal the WM draft — computes the merkle root + signs the seal (git commit). */
@@ -767,7 +780,7 @@ export const knowledgeAssetFinalize = (
 ) =>
   post<{ merkleRoot: string; eip712Digest: string }>(
     `/api/knowledge-assets/${encodeURIComponent(name)}/wm/finalize`,
-    { contextGraphId, ...opts },
+    { contextGraphId: normalizeContextGraphId(contextGraphId), ...opts },
   );
 
 /** Discard the open WM draft (git checkout -- .). */
@@ -778,7 +791,7 @@ export const knowledgeAssetDiscard = (
 ) =>
   post<{ discarded: boolean }>(
     `/api/knowledge-assets/${encodeURIComponent(name)}/wm/discard`,
-    { contextGraphId, ...opts },
+    { contextGraphId: normalizeContextGraphId(contextGraphId), ...opts },
   );
 
 /** Seed a fresh WM draft from the file's current SWM/VM state (git checkout). */
@@ -790,7 +803,7 @@ export const knowledgeAssetPullFrom = (
 ) =>
   post<Record<string, unknown>>(
     `/api/knowledge-assets/${encodeURIComponent(name)}/wm/pull-from`,
-    { contextGraphId, layer, ...opts },
+    { contextGraphId: normalizeContextGraphId(contextGraphId), layer, ...opts },
   );
 
 /** Advance the SWM pointer (WM → SWM; git push origin <branch>). */
@@ -801,7 +814,7 @@ export const knowledgeAssetShare = (
 ) =>
   post<{ swmShared: boolean; promotedCount: number }>(
     `/api/knowledge-assets/${encodeURIComponent(name)}/swm/share`,
-    { contextGraphId, ...opts },
+    { contextGraphId: normalizeContextGraphId(contextGraphId), ...opts },
   );
 
 /** Publish to VM — mint or update on chain (git push origin main). */
@@ -814,7 +827,7 @@ export const knowledgeAssetPublish = (
   return post<Record<string, unknown>>(
     `/api/knowledge-assets/${encodeURIComponent(name)}/vm/publish`,
     {
-      contextGraphId,
+      contextGraphId: normalizeContextGraphId(contextGraphId),
       ...(opts.subGraphName ? { subGraphName: opts.subGraphName } : {}),
       ...(publishOptions ? { options: publishOptions } : {}),
     },

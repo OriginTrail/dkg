@@ -37,6 +37,7 @@ import {
   subscribeToContextGraph,
   shutdownNode,
   promoteAssertion,
+  createKnowledgeAsset,
   knowledgeAssetPublish,
 } from '../src/ui/api.js';
 
@@ -310,6 +311,14 @@ describe('UI API tests', () => {
         knowledgeAssetPublish('cg-1', 'f', { publisherNodeIdentityIdOverride: '-1' }),
       ).toThrow('publisherNodeIdentityIdOverride must be passed as a decimal string');
       expect(requestLog).toHaveLength(0);
+    });
+
+    it('createKnowledgeAsset normalizes context graph URIs before POSTing', async () => {
+      await createKnowledgeAsset('did:dkg:context-graph:cg-1', 'f');
+      const call = requestLog.find(r => r.method === 'POST' && r.url.includes('/api/knowledge-assets'));
+      const body = JSON.parse(call?.body ?? '{}');
+      expect(body.contextGraphId).toBe('cg-1');
+      expect(body.name).toBe('f');
     });
 
     it('listSwmEntities queries the shared-working-memory view', async () => {

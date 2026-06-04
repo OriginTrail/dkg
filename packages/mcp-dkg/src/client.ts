@@ -130,7 +130,11 @@ function createAlsoPublishVmPayload(
 ): boolean | Record<string, unknown> {
   if (typeof value === 'boolean') return value;
   if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
-    return finalizedPublishOptionsPayload(value as KnowledgeAssetFinalizedPublishOptions) ?? {};
+    const payload = finalizedPublishOptionsPayload(value as KnowledgeAssetFinalizedPublishOptions);
+    if (payload) return payload;
+    throw new Error(
+      'alsoPublishVm options object must include at least one supported option; use true to publish with defaults',
+    );
   }
   throw new Error('alsoPublishVm must be a boolean or publish-options object');
 }

@@ -151,4 +151,19 @@ describe('DkgClient knowledge-assets — publish/finalize option serialization',
     } as any)).rejects.toThrow(/alsoPublishVm must be a boolean or publish-options object/);
     expect(calls).toHaveLength(0);
   });
+
+  it('createKnowledgeAsset rejects empty or unknown alsoPublishVm option objects', async () => {
+    const { client, calls } = makeClient();
+    await expect(client.createKnowledgeAsset({
+      contextGraphId: 'cg-1',
+      name: 'f',
+      alsoPublishVm: {},
+    })).rejects.toThrow(/use true to publish with defaults/);
+    await expect(client.createKnowledgeAsset({
+      contextGraphId: 'cg-1',
+      name: 'f',
+      alsoPublishVm: { unknown: true },
+    } as any)).rejects.toThrow(/use true to publish with defaults/);
+    expect(calls).toHaveLength(0);
+  });
 });
