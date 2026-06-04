@@ -476,6 +476,22 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
     expect(body(ctx)).toMatchObject({ state: 'created', memoryLayer: 'WorkingMemory' });
   });
 
+  it('GET /api/knowledge-assets/:name resolves peer-authored lifecycle owners before history', async () => {
+    const owner = '0x2222222222222222222222222222222222222222';
+    const store = {
+      query: vi.fn(async () => ({
+        type: 'bindings',
+        bindings: [{ agent: `did:dkg:agent:${owner}` }],
+      })),
+    };
+    const agent = makeAssertionAgent({ store });
+    const ctx = ctxFor('GET', '/api/knowledge-assets/f?contextGraphId=cg', undefined, agent);
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(200);
+    expect(store.query).toHaveBeenCalledWith(expect.stringContaining('assertionName'));
+    expect(agent.assertion.history).toHaveBeenCalledWith('cg', 'f', { agentAddress: owner });
+  });
+
   it('GET /api/knowledge-assets/:name normalizes DID-form context graph ids for history', async () => {
     const agent = makeAssertionAgent();
     const ctx = ctxFor('GET', '/api/knowledge-assets/f?contextGraphId=did:dkg:context-graph:cg', undefined, agent);

@@ -1621,7 +1621,7 @@ export class DKGAgent extends DKGAgentBase {
         const row = entityResult.bindings[0];
         const stateStr = strip(row['state']) as AssertionState;
         const layerStr = strip(row['memoryLayer']);
-        const graphUri = row['assertionGraph'] ?? contextGraphAssertionUri(contextGraphId, addr, name);
+        const graphUri = row['assertionGraph'] ?? contextGraphAssertionUri(contextGraphId, addr, name, opts?.subGraphName);
 
         const sealResult = await agent.store.query(
           `SELECT ?authorAddress ?schemeVersion ?finalizedAt WHERE {

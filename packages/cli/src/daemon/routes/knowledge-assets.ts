@@ -24,7 +24,12 @@
 // `(agent, number)` addressing is layered on by Option 1 later, on these same
 // routes, as an additional accepted identifier form.
 import type { RequestContext } from "./context.js";
-import { createOperationContext, validateAssertionName, type OperationContext } from "@origintrail-official/dkg-core";
+import {
+  contextGraphMetaUri,
+  createOperationContext,
+  validateAssertionName,
+  type OperationContext,
+} from "@origintrail-official/dkg-core";
 import { resolveChainConfig } from "../../config.js";
 import { validatePreSignedAuthorAttestation } from "./memory.js";
 import { recordAssertionActivity } from "../activity-notification.js";
@@ -42,6 +47,62 @@ import {
 } from "../http-utils.js";
 
 const PREFIX = "/api/knowledge-assets";
+const DKG_NS = "http://dkg.io/ontology/";
+const PROV_NS = "http://www.w3.org/ns/prov#";
+
+function sparqlLiteral(value: string): string {
+  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
+function stripSparqlValue(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  return value
+    .replace(/^<|>$/g, "")
+    .replace(/"\^\^<.*>$/, "")
+    .replace(/^"|"$/g, "");
+}
+
+function agentAddressFromDid(value: string | undefined): string | undefined {
+  const raw = stripSparqlValue(value);
+  if (!raw) return undefined;
+  const prefix = "did:dkg:agent:";
+  return raw.startsWith(prefix) ? raw.slice(prefix.length) : raw;
+}
+
+async function resolveAssertionOwnerAgentAddress(
+  agent: RequestContext["agent"],
+  contextGraphId: string,
+  name: string,
+  subGraphName?: string,
+): Promise<string | undefined> {
+  const store = (agent as unknown as { store?: { query?: (sparql: string) => Promise<any> } }).store;
+  if (!store?.query) return undefined;
+
+  const metaGraph = contextGraphMetaUri(contextGraphId);
+  const assertionGraphPrefix = subGraphName
+    ? `did:dkg:context-graph:${contextGraphId}/${subGraphName}/assertion/`
+    : `did:dkg:context-graph:${contextGraphId}/assertion/`;
+
+  try {
+    const result = await store.query(
+      `SELECT ?agent WHERE {
+        GRAPH <${metaGraph}> {
+          ?assertion <${DKG_NS}contextGraph> <did:dkg:context-graph:${contextGraphId}> ;
+                     <${DKG_NS}assertionName> ${sparqlLiteral(name)} ;
+                     <${PROV_NS}wasAttributedTo> ?agent .
+          OPTIONAL { ?assertion <${DKG_NS}assertionGraph> ?assertionGraph }
+          FILTER(!BOUND(?assertionGraph) || STRSTARTS(STR(?assertionGraph), ${sparqlLiteral(assertionGraphPrefix)}))
+        }
+      } LIMIT 1`,
+    );
+    if (result?.type !== "bindings" || !Array.isArray(result.bindings) || result.bindings.length === 0) {
+      return undefined;
+    }
+    return agentAddressFromDid(result.bindings[0]?.agent);
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * Body-size cap by `(layer, verb)` (codex PR #971 F21). The control verbs
@@ -784,11 +845,16 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     const subGraphName = url.searchParams.get("subGraphName") ?? undefined;
     if (!validateOptionalSubGraphName(subGraphName, res)) return;
     try {
+      const resolvedAgentAddress = rawAgentAddress
+        ?? await resolveAssertionOwnerAgentAddress(agent, normalizedContextGraphId, name, subGraphName);
       const hist = await agent.assertion.history(
         normalizedContextGraphId,
         name,
-        rawAgentAddress || subGraphName
-          ? { ...(rawAgentAddress ? { agentAddress: rawAgentAddress } : {}), ...(subGraphName ? { subGraphName } : {}) }
+        resolvedAgentAddress || subGraphName
+          ? {
+              ...(resolvedAgentAddress ? { agentAddress: resolvedAgentAddress } : {}),
+              ...(subGraphName ? { subGraphName } : {}),
+            }
           : undefined,
       );
       if (!hist) return jsonResponse(res, 404, { error: `No knowledge asset "${name}" in context graph "${normalizedContextGraphId}"` });
