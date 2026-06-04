@@ -62,8 +62,8 @@ export default defineConfig({
           // Notifications-pane redesign (A4) — scoped GET/POST route. Real
           // DashboardDB + mocked agent; no hardhat.
           'test/notifications-route.test.ts',
-          // Local-agent bridge routes are mocked HTTP/runtime tests; keep the
-          // timeout attribution regressions out of the Hardhat-backed lane.
+          // Local-agent bridge routes are mocked HTTP/runtime tests; include
+          // timeout attribution regressions in the fast unit lane too.
           'test/daemon-openclaw.test.ts',
           'test/daemon-hermes.test.ts',
         ],

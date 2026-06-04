@@ -575,7 +575,7 @@ describe('OpenClaw channel routing helpers', () => {
       if (requestUrl.endsWith('/health')) {
         return new Response(JSON.stringify({ ok: true, channel: 'dkg-ui' }), { status: 200 });
       }
-      if (requestUrl.includes('openclaw.example.com')) {
+      if (requestUrl === 'https://openclaw.example.com/api/dkg-channel/inbound') {
         return new Response(JSON.stringify({ text: 'gateway reply' }), { status: 200 });
       }
       throw timeoutError;

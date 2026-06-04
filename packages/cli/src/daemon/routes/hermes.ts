@@ -31,7 +31,6 @@ import {
   probeHermesChannelHealth,
   resolveHermesApiServerKey,
   shouldTryNextHermesTarget,
-  transportPatchFromHermesTarget,
   verifyHermesAttachmentRefsProvenance,
   verifyHermesAttachmentImportResultsProvenance,
   type HermesChatPayload,
@@ -486,7 +485,6 @@ function reconcileHermesRuntimeFromHealth(
   if (!integration?.enabled) return;
   if (integration.runtime.ready === true && integration.runtime.status === 'ready') return;
   updateLocalAgentIntegration(config, 'hermes', {
-    transport: transportPatchFromHermesTarget(config, health.target),
     runtime: {
       status: 'ready',
       ready: true,
