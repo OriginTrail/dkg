@@ -448,7 +448,7 @@ describe('daemon memory_graph_changed route emissions', () => {
     expect(ctx.tracker.complete).toHaveBeenCalledWith(expect.anything(), { tripleCount: 2 });
   });
 
-  it('keeps kas tokenId as the on-chain id when a metadata row id is present', async () => {
+  it('keeps kas tokenId as the compatibility row id when a metadata row id is present', async () => {
     const publishFromSharedMemory = vi.fn().mockResolvedValue({
       kaId: 42n,
       status: 'confirmed',
@@ -470,7 +470,7 @@ describe('daemon memory_graph_changed route emissions', () => {
 
     expect((ctx.res as unknown as { statusCode: number }).statusCode).toBe(200);
     expect(responseBody(ctx).kas).toEqual([
-      { tokenId: '42', metadataTokenId: '1', rootEntity: 'urn:root' },
+      { tokenId: '1', metadataTokenId: '1', onChainTokenId: '42', rootEntity: 'urn:root' },
     ]);
   });
 

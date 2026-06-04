@@ -23,7 +23,7 @@ function ntriples(quads: Quad[]): string {
 }
 
 describe('PublishHandler Design B metadata', () => {
-  it('stores the real tokenId separately from wire compatibility row ids', async () => {
+  it('derives compatibility row ids from order when wire ids contain the real KA id', async () => {
     const store = new OxigraphStore();
     const handler = new PublishHandler(store, new TypedEventBus());
     const roots = ['urn:test:design-b:one', 'urn:test:design-b:two'];
@@ -39,8 +39,8 @@ describe('PublishHandler Design B metadata', () => {
       nquads: new TextEncoder().encode(ntriples(quads)),
       contextGraphId: CONTEXT_GRAPH,
       kas: [
-        { tokenId: 1, rootEntity: roots[0], privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 },
-        { tokenId: 2, rootEntity: roots[1], privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 },
+        { tokenId: 11, rootEntity: roots[0], privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 },
+        { tokenId: 11, rootEntity: roots[1], privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 },
       ],
       publisherIdentity: new Uint8Array(32),
       publisherAddress: '0x0000000000000000000000000000000000000001',

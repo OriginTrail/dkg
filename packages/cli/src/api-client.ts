@@ -361,7 +361,7 @@ export class ApiClient {
   }): Promise<{
     kaId: string;
     status: 'tentative' | 'confirmed';
-    kas: Array<{ tokenId: string; metadataTokenId?: string; rootEntity: string }>;
+    kas: Array<{ tokenId: string; metadataTokenId?: string; onChainTokenId?: string; rootEntity: string }>;
     txHash?: string;
     blockNumber?: number;
     batchId?: string;
@@ -433,7 +433,7 @@ export class ApiClient {
   ): Promise<{
     kaId: string;
     status: 'tentative' | 'confirmed';
-    kas: Array<{ tokenId: string; metadataTokenId?: string; rootEntity: string }>;
+    kas: Array<{ tokenId: string; metadataTokenId?: string; onChainTokenId?: string; rootEntity: string }>;
     txHash?: string;
     blockNumber?: number;
   }> {
@@ -595,7 +595,7 @@ export class ApiClient {
     assertionUri: string;
     authorAddress: string;
     merkleRoot: string;
-    kas: Array<{ tokenId: string; metadataTokenId?: string; rootEntity: string }>;
+    kas: Array<{ tokenId: string; metadataTokenId?: string; onChainTokenId?: string; rootEntity: string }>;
     txHash?: string;
     blockNumber?: number;
     contextGraphError?: string;
@@ -641,7 +641,7 @@ export class ApiClient {
     status: 'tentative' | 'confirmed';
     authorAddress: string;
     merkleRoot: string;
-    kas: Array<{ tokenId: string; metadataTokenId?: string; rootEntity: string }>;
+    kas: Array<{ tokenId: string; metadataTokenId?: string; onChainTokenId?: string; rootEntity: string }>;
     txHash?: string;
     blockNumber?: number;
   }> {

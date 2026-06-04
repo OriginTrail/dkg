@@ -284,9 +284,7 @@ export class PublishHandler {
       await this.store.insert(normalized);
 
       const kaMetadata: KAMetadata[] = manifest.map((m, i) => {
-        const metadataTokenId = request.kas[i]?.tokenId != null
-          ? BigInt(request.kas[i].tokenId as any)
-          : BigInt(i + 1);
+        const metadataTokenId = BigInt(i + 1);
         const tokenId = realTokenIdForMetadataRow(startKAId, endKAId, i, metadataTokenId);
         return {
           rootEntity: m.rootEntity,
