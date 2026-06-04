@@ -134,6 +134,10 @@ function resolveFinalizeOptions(
   };
 }
 
+// uint32 epoch ceiling (matches sibling routes memory.ts / publisher.ts). Not an
+// id encoder — the on-chain endEpoch is a uint40 but the publish API caps at uint32.
+const MAX_PUBLISH_EPOCHS = 0xffffffff;
+
 // PR #972 — classify a finalized-publish result into an HTTP status. On this
 // SYNCHRONOUS route a non-confirmed publish is a failure, not a normal in-flight
 // state ("no silent tentative downgrade"):
@@ -148,6 +152,114 @@ function classifyVmPublish(pub: unknown): { httpStatus: 200 | 207 | 502; reason?
   return {
     httpStatus: 502,
     reason: cgError ?? `VM publish did not confirm (status: ${typeof p.status === "string" ? p.status : "unknown"})`,
+  };
+}
+
+// Reject finalized-publish request shapes that don't make sense once the URL
+// name + seal already select the assertion and encode the author (PR #971).
+// The seal commits to the whole assertion content + author, so assertionName /
+// author overrides / partial selection on vm/publish are user errors, not
+// silently-ignored fields.
+function validateFinalizedAssertionPublishRequest(
+  parsed: Record<string, unknown>,
+  res: RequestContext["res"],
+): boolean {
+  const nested = parsed.options && typeof parsed.options === "object" && !Array.isArray(parsed.options)
+    ? parsed.options as Record<string, unknown>
+    : undefined;
+  const assertionName = parsed.assertionName ?? nested?.assertionName;
+  if (assertionName !== undefined) {
+    jsonResponse(res, 400, {
+      error:
+        '"assertionName" is not accepted on /api/knowledge-assets/:name/vm/publish — the URL name selects the assertion.',
+    });
+    return false;
+  }
+  const hasAuthorOverride =
+    parsed.authorAgentAddress != null ||
+    parsed.preSignedAuthorAttestation != null ||
+    nested?.authorAgentAddress != null ||
+    nested?.preSignedAuthorAttestation != null;
+  if (hasAuthorOverride) {
+    jsonResponse(res, 400, {
+      error:
+        '"authorAgentAddress" and "preSignedAuthorAttestation" cannot be supplied on vm/publish — the seal already encodes the author. Re-finalize the assertion if you need to change authorship.',
+    });
+    return false;
+  }
+  const selection = parsed.selection ?? nested?.selection;
+  if (selection !== undefined && selection !== "all") {
+    jsonResponse(res, 400, {
+      error:
+        '"selection" must be omitted or "all" on vm/publish — the seal commits to the entire assertion content.',
+    });
+    return false;
+  }
+  return true;
+}
+
+// Validate + normalize the finalized-publish options BEFORE they reach
+// `publishFromFinalizedAssertion` (PR #971). Without this, malformed epochs /
+// identity overrides / flags flowed straight through and surfaced as opaque
+// 500s deep in the publisher. Returns the normalized options, or null after
+// having already written a 400 response (caller must return).
+function resolveFinalizedPublishOptions(
+  ctx: RequestContext,
+  raw: unknown,
+): Record<string, unknown> | null {
+  const { res } = ctx;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const source = raw as Record<string, unknown>;
+  const { clearAfter, clearSharedMemoryAfter, publisherNodeIdentityIdOverride } = source;
+  const rawPublishEpochs = source.publishEpochs ?? source.epochs;
+  const publishEpochsField = source.publishEpochs !== undefined ? "publishEpochs" : "epochs";
+
+  let resolvedPublisherIdentityOverride: bigint | undefined;
+  if (publisherNodeIdentityIdOverride !== undefined && publisherNodeIdentityIdOverride !== null) {
+    const v = String(publisherNodeIdentityIdOverride);
+    if (!/^\d+$/.test(v)) {
+      jsonResponse(res, 400, {
+        error: '"publisherNodeIdentityIdOverride" must be a non-negative integer (string or number)',
+      });
+      return null;
+    }
+    resolvedPublisherIdentityOverride = BigInt(v);
+  }
+
+  let resolvedPublishEpochs: number | undefined;
+  if (rawPublishEpochs !== undefined && rawPublishEpochs !== null) {
+    const v = String(rawPublishEpochs).trim();
+    if (!/^[1-9]\d*$/.test(v)) {
+      jsonResponse(res, 400, { error: `"${publishEpochsField}" must be a positive integer (string or number)` });
+      return null;
+    }
+    const n = Number(v);
+    if (!Number.isSafeInteger(n)) {
+      jsonResponse(res, 400, { error: `"${publishEpochsField}" is too large to safely represent as a JavaScript integer` });
+      return null;
+    }
+    if (n > MAX_PUBLISH_EPOCHS) {
+      jsonResponse(res, 400, { error: `"${publishEpochsField}" must be less than or equal to ${MAX_PUBLISH_EPOCHS}` });
+      return null;
+    }
+    resolvedPublishEpochs = n;
+  }
+
+  if (clearAfter !== undefined && typeof clearAfter !== "boolean") {
+    jsonResponse(res, 400, { error: '"clearAfter" must be a boolean when supplied' });
+    return null;
+  }
+  if (clearSharedMemoryAfter !== undefined && typeof clearSharedMemoryAfter !== "boolean") {
+    jsonResponse(res, 400, { error: '"clearSharedMemoryAfter" must be a boolean when supplied' });
+    return null;
+  }
+  const clearValue = clearAfter !== undefined ? clearAfter : clearSharedMemoryAfter;
+  return {
+    ...(clearValue !== undefined ? { clearSharedMemoryAfter: clearValue } : {}),
+    ...(resolvedPublishEpochs !== undefined ? { publishEpochs: resolvedPublishEpochs } : {}),
+    ...(resolvedPublisherIdentityOverride !== undefined
+      ? { publisherNodeIdentityIdOverride: resolvedPublisherIdentityOverride }
+      : {}),
   };
 }
 
@@ -340,7 +452,11 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
 
     // ── VM verb: publish (SWM/WM → VM; mint or update on chain) ──
     if (layer === "vm" && verb === "publish") {
-      const opts = parsed.options && typeof parsed.options === "object" ? parsed.options : {};
+      // Validate the request shape + normalize options BEFORE the publish (PR
+      // #971): this is a standalone request, so a 400 here mutates nothing.
+      if (!validateFinalizedAssertionPublishRequest(parsed, res)) return;
+      const opts = resolveFinalizedPublishOptions(ctx, parsed.options);
+      if (opts === null) return;
       const pub: any = await agent.publishFromFinalizedAssertion(contextGraphId, name, { subGraphName, ...opts });
       const { httpStatus, reason } = classifyVmPublish(pub);
       return jsonResponse(res, httpStatus, {

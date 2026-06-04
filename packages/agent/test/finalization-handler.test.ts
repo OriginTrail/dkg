@@ -80,6 +80,11 @@ describe('FinalizationHandler', () => {
       nquads: new TextEncoder().encode('<urn:s> <urn:p> <urn:o> .'),
       contextGraphId: CONTEXT_GRAPH,
       kas: [{ tokenId: 1, rootEntity: 'urn:s', privateTripleCount: 0, privateMerkleRoot: new Uint8Array(0) }],
+      // OT-RFC-43 Option-1: startKAId/endKAId are now required id fields on the
+      // wire (encoded via idToProtoString); omitting them throws inside the
+      // encoder before the message ever reaches the handler under test.
+      startKAId: 1,
+      endKAId: 1,
       txHash: '',
       blockNumber: 0,
     });

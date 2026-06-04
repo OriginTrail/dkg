@@ -36,8 +36,11 @@ const API_PORT_FILE = resolve(NODE_DIR, 'api.port');
 const DAEMON_LOG_FILE = resolve(NODE_DIR, 'daemon.log');
 const MARKER_FILE = resolve(DEVNET_DIR, '.playwright-managed');
 
+// 4-node minSig=3 devnet (see playwright.config.ts NUM_NODES): one extra daemon
+// boot + a wider libp2p mesh to settle vs the old 3-node default, so give the
+// mesh-wait headroom (240s) under the generous 600s CI webServer timeout.
 const BOOTSTRAP_TIMEOUT_MS = parseInt(
-  process.env.PLAYWRIGHT_DEVNET_TIMEOUT_MS || '180000',
+  process.env.PLAYWRIGHT_DEVNET_TIMEOUT_MS || '240000',
   10,
 );
 

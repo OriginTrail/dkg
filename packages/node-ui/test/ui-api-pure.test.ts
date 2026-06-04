@@ -27,6 +27,9 @@ import {
   publishTriples,
   publishSharedMemory,
   listSwmEntities,
+  listAssertions,
+  ensureContextGraphOnChain,
+  fetchAssertionUals,
   createSavedQuery,
   updateSavedQuery,
   deleteSavedQuery,
@@ -323,6 +326,75 @@ describe('UI API tests', () => {
         { uri: 'https://example.org/doc/root', label: 'root', tripleCount: 5 },
         { uri: 'https://example.org/doc/child-only', label: 'child-only', tripleCount: 4 },
       ]);
+    });
+
+    it('listAssertions(wm) recognizes the lifecycle-URN marker form (file imports)', async () => {
+      // File-imported assertions carry dkg:memoryLayer "WM" ONLY on the
+      // lifecycle URN (urn:dkg:assertion:<cg>:<agent>:<name>), not the
+      // data-graph URI. The parser must accept it — otherwise the bulk-promote
+      // loop sees an empty list and reports "0 triples promoted".
+      const agent = '0x' + '1'.repeat(40);
+      queryBindings = [{ g: { value: `urn:dkg:assertion:cg-1:${agent}:my-import.md` } }];
+      const list = await listAssertions('cg-1', 'wm');
+      expect(list.map(a => a.name)).toEqual(['my-import.md']);
+    });
+
+    it('listAssertions(wm) dedupes when BOTH the URN and data-URI markers exist', async () => {
+      const agent = '0x' + '2'.repeat(40);
+      queryBindings = [
+        { g: { value: `did:dkg:context-graph:cg-1/assertion/${agent}/doc` } },
+        { g: { value: `urn:dkg:assertion:cg-1:${agent}:doc` } },
+      ];
+      const list = await listAssertions('cg-1', 'wm');
+      expect(list.map(a => a.name)).toEqual(['doc']);
+    });
+
+    it('listAssertions(wm) parses sub-graph-scoped URN markers and names containing ":"', async () => {
+      const agent = '0x' + '3'.repeat(40);
+      queryBindings = [{ g: { value: `urn:dkg:assertion:cg-1:code:${agent}:a:b.md` } }];
+      const list = await listAssertions('cg-1', 'wm');
+      expect(list).toEqual([
+        { name: 'a:b.md', graphUri: `urn:dkg:assertion:cg-1:code:${agent}:a:b.md`, tripleCount: undefined, subGraph: 'code' },
+      ]);
+    });
+
+    it('listAssertions(swm) reads the memoryLayer "SWM" marker (not async ShareTransition records)', async () => {
+      // The SWM listing must use the synchronous _meta memoryLayer marker, not
+      // _shared_memory_meta ShareTransition records which lag the promote and
+      // made "Publish to VM" report "nothing to publish" right after promoting.
+      const agent = '0x' + '4'.repeat(40);
+      queryBindings = [{ g: { value: `urn:dkg:assertion:cg-1:${agent}:shared-doc.md` } }];
+      const list = await listAssertions('cg-1', 'swm');
+      expect(list.map(a => a.name)).toEqual(['shared-doc.md']);
+    });
+
+    it('listAssertions(swm) excludes assertions already published to VM (dkg:vmCurrentAssertion)', async () => {
+      // Publish records a vmCurrentAssertion pointer but does NOT flip memoryLayer
+      // off "SWM" (backend gap), so the SWM list must drop published rows itself.
+      const agent = '0x' + '5'.repeat(40);
+      queryBindings = [
+        { g: { value: `urn:dkg:assertion:cg-1:${agent}:unpublished.md` } },
+        { g: { value: `urn:dkg:assertion:cg-1:${agent}:published.md` }, vm: { value: 'abc123deadbeef' } },
+      ];
+      const list = await listAssertions('cg-1', 'swm');
+      expect(list.map(a => a.name)).toEqual(['unpublished.md']);
+    });
+
+    it('fetchAssertionUals maps assertionName -> reservedUal (shown next to the filename)', async () => {
+      queryBindings = [
+        { name: { value: 'spec.md' }, ual: { value: 'did:dkg:evm:31337/0xabc/7' } },
+        { name: { value: 'demo.md' }, ual: { value: 'did:dkg:evm:31337/0xabc/8' } },
+      ];
+      const map = await fetchAssertionUals('cg-1');
+      expect(map['spec.md']).toBe('did:dkg:evm:31337/0xabc/7');
+      expect(map['demo.md']).toBe('did:dkg:evm:31337/0xabc/8');
+    });
+
+    it('ensureContextGraphOnChain auto-registers an off-chain CG before publishing', async () => {
+      // mock /api/context-graph/list returns cg1 with no onChainId → the helper
+      // must POST /api/context-graph/register so VM publish (on-chain) can proceed.
+      await ensureContextGraphOnChain('cg1');
+      expect(requestLog.some(r => r.method === 'POST' && r.url.includes('/api/context-graph/register'))).toBe(true);
     });
 
     it('createSavedQuery sends POST', async () => {

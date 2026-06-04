@@ -271,32 +271,46 @@ export interface ProtocolOutboxStore {
  *
  * Allocation state is durable like `protocol_outbox`: it is NEVER
  * pruned. Reclaiming a number would risk minting a duplicate kaId.
+ *
+ * **Counter width (codex PR #976 F6):** every counter value crosses
+ * this interface as a `bigint`, not a JS `number`. The on-chain field
+ * is a `uint96` (max `2^96 - 1 ≈ 7.9e28`) and the design contemplates
+ * far-future high-throughput authors. Even though `1000 alloc/s × 1M
+ * years ≈ 2^55` keeps real load comfortably under `Number.MAX_SAFE_
+ * INTEGER (2^53 - 1)`, returning `number` would silently lose precision
+ * past that point — `allocate()`, `peekNext()`, and `observed + 1`
+ * would all start to skip or duplicate kaIds. Using `bigint` end-to-end
+ * is a defence-in-depth invariant: the interface cannot accidentally
+ * be wired through a `Number()` cast at a call site. SQLite's signed
+ * `INTEGER` (2^63 - 1) remains the hard ceiling for the implementation
+ * — orders of magnitude past any realistic load, and many orders past
+ * the `2^53` precision cliff that motivated this typing.
  */
 export interface KaNumberStore {
   /**
    * Atomically consume and return the next number for `authorAddress`.
-   * The first call for an author returns `0`; subsequent calls return
-   * `1, 2, 3, …` strictly monotonically. Implementations lowercase the
-   * address and perform the read-and-increment in a single atomic
+   * The first call for an author returns `0n`; subsequent calls return
+   * `1n, 2n, 3n, …` strictly monotonically. Implementations lowercase
+   * the address and perform the read-and-increment in a single atomic
    * statement (`INSERT … ON CONFLICT DO UPDATE … RETURNING`) so two
    * concurrent allocations never collide on the same number.
    */
-  allocate(authorAddress: string): number;
+  allocate(authorAddress: string): bigint;
 
   /**
    * Raise the stored next-number for `authorAddress` to *at least*
    * `nextNumberFloor`, never lowering it. Called at startup with
-   * `observedHighestMinted + 1` so a node that lost local state (or is
+   * `observedHighestMinted + 1n` so a node that lost local state (or is
    * cold) cannot re-issue a number the chain already used under that
    * author. Idempotent and monotonic: replaying an old floor is a
    * no-op.
    */
-  reconcileFloor(authorAddress: string, nextNumberFloor: number): void;
+  reconcileFloor(authorAddress: string, nextNumberFloor: bigint): void;
 
   /**
    * The number the *next* `allocate(authorAddress)` would return,
-   * without consuming it. Returns `0` when the author has never been
+   * without consuming it. Returns `0n` when the author has never been
    * seen. For diagnostics / reconciliation comparisons.
    */
-  peekNext(authorAddress: string): number;
+  peekNext(authorAddress: string): bigint;
 }

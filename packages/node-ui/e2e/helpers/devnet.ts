@@ -139,8 +139,12 @@ const IS_CI = !!process.env.CI;
 // node-availability gate can tell "node down" (a real failure) apart from "node
 // is outside the booted topology" (genuinely not applicable — e.g. node2 on a
 // `PLAYWRIGHT_DEVNET_NUM_NODES=1` run). Read from env rather than importing
-// real-node.ts to keep this low-level helper dependency-light.
-const CONFIGURED_NUM_NODES = Number(process.env.PLAYWRIGHT_DEVNET_NUM_NODES) || 3;
+// real-node.ts to keep this low-level helper dependency-light. The fallback MUST
+// match the NUM_NODES default in playwright.config.ts (4): the runner process
+// does not always have PLAYWRIGHT_DEVNET_NUM_NODES exported (the webServer
+// command sets it only for the bootstrap/Vite subprocess), so a stale `3` here
+// would mark node4 as "outside topology" even though the webServer booted 4.
+const CONFIGURED_NUM_NODES = Number(process.env.PLAYWRIGHT_DEVNET_NUM_NODES) || 4;
 
 type SkippableTest = { skip: (condition: boolean, description: string) => void };
 

@@ -323,6 +323,11 @@
             "internalType": "bool",
             "name": "solved",
             "type": "bool"
+          },
+          {
+            "internalType": "bool",
+            "name": "isCurated",
+            "type": "bool"
           }
         ],
         "indexed": false,
@@ -1205,6 +1210,11 @@
             "internalType": "bool",
             "name": "solved",
             "type": "bool"
+          },
+          {
+            "internalType": "bool",
+            "name": "isCurated",
+            "type": "bool"
           }
         ],
         "internalType": "struct RandomSamplingLib.Challenge",
@@ -1510,6 +1520,11 @@
         "internalType": "bool",
         "name": "solved",
         "type": "bool"
+      },
+      {
+        "internalType": "bool",
+        "name": "isCurated",
+        "type": "bool"
       }
     ],
     "stateMutability": "view",
@@ -1709,6 +1724,11 @@
           {
             "internalType": "bool",
             "name": "solved",
+            "type": "bool"
+          },
+          {
+            "internalType": "bool",
+            "name": "isCurated",
             "type": "bool"
           }
         ],

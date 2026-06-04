@@ -127,49 +127,55 @@ describe('generateKCMetadata', () => {
     const kas = [makeKA({ tokenId: 1n }), makeKA({ tokenId: 2n, rootEntity: 'did:dkg:entity:bob' })];
     const quads = generateKCMetadata(makeMeta({ kaCount: 2 }), kas);
     const kaSubjects = new Set(quads.filter(q => q.predicate === RDF_TYPE && q.object === `${DKG}KnowledgeAsset`).map(q => q.subject));
-    expect(kaSubjects.size).toBe(2);
+    // PR #968: the bare UAL (aggregate node) is now typed too, alongside the 2 per-root rows.
+    expect(kaSubjects).toEqual(new Set([UAL, `${UAL}/1`, `${UAL}/2`]));
   });
 
-  it('Design B compatibility: one on-chain KA keeps per-root metadata rows', () => {
-    // One file = one on-chain KA, however many entities. Until update/private
-    // access aggregate multi-root KA metadata directly, label metadata remains
-    // one row per root at <UAL>/1, <UAL>/2, ... .
+  it('Design B: per-root rows + aggregate <ual> KnowledgeAsset node (PR #968)', () => {
+    // One file = one on-chain KA, however many entities. The bare <UAL> is now
+    // typed as the aggregate KnowledgeAsset (summed counts + every member
+    // tokenId/entity); per-root label rows at <UAL>/1, <UAL>/2, ... are
+    // retained for not-yet-migrated update/private-access consumers.
     const kas = [
       makeKA({ tokenId: 1n, rootEntity: 'did:dkg:entity:alice', publicTripleCount: 5 }),
       makeKA({ tokenId: 2n, rootEntity: 'did:dkg:entity:bob', publicTripleCount: 3 }),
       makeKA({ tokenId: 3n, rootEntity: 'did:dkg:entity:carol', publicTripleCount: 2 }),
     ];
     const quads = generateKCMetadata(makeMeta({ kaCount: 1 }), kas);
+
+    // dkg:KnowledgeAsset now types the bare UAL AND each per-root row.
     const kaSubjects = new Set(
       quads.filter(q => q.predicate === RDF_TYPE && q.object === `${DKG}KnowledgeAsset`).map(q => q.subject),
     );
-    expect(kaSubjects).toEqual(new Set([`${UAL}/1`, `${UAL}/2`, `${UAL}/3`]));
+    expect(kaSubjects).toEqual(new Set([UAL, `${UAL}/1`, `${UAL}/2`, `${UAL}/3`]));
 
-    expect(quads.find(q => q.subject === `${UAL}/1` && q.predicate === `${DKG}rootEntity`)?.object)
-      .toBe('did:dkg:entity:alice');
-    expect(quads.find(q => q.subject === `${UAL}/2` && q.predicate === `${DKG}rootEntity`)?.object)
-      .toBe('did:dkg:entity:bob');
-    expect(quads.find(q => q.subject === `${UAL}/3` && q.predicate === `${DKG}rootEntity`)?.object)
-      .toBe('did:dkg:entity:carol');
+    // Per-root rows unchanged (legacy dkg:rootEntity + §10.1 dual-written dkg:entity).
+    expect(quads.find(q => q.subject === `${UAL}/1` && q.predicate === `${DKG}rootEntity`)?.object).toBe('did:dkg:entity:alice');
+    expect(quads.find(q => q.subject === `${UAL}/2` && q.predicate === `${DKG}rootEntity`)?.object).toBe('did:dkg:entity:bob');
+    expect(quads.find(q => q.subject === `${UAL}/3` && q.predicate === `${DKG}rootEntity`)?.object).toBe('did:dkg:entity:carol');
+    expect(quads.find(q => q.subject === `${UAL}/1` && q.predicate === `${DKG}entity`)?.object).toBe('did:dkg:entity:alice');
+    expect(quads.find(q => q.subject === `${UAL}/3` && q.predicate === `${DKG}entity`)?.object).toBe('did:dkg:entity:carol');
 
+    // Aggregate node on the bare UAL: summed public count (5+3+2=10) first, then per-root rows.
     const publicCounts = quads
       .filter(q => q.predicate === `${DKG}publicTripleCount`)
       .map(q => [q.subject, q.object]);
     expect(publicCounts).toEqual([
+      [UAL, '"10"^^<http://www.w3.org/2001/XMLSchema#integer>'],
       [`${UAL}/1`, '"5"^^<http://www.w3.org/2001/XMLSchema#integer>'],
       [`${UAL}/2`, '"3"^^<http://www.w3.org/2001/XMLSchema#integer>'],
       [`${UAL}/3`, '"2"^^<http://www.w3.org/2001/XMLSchema#integer>'],
     ]);
+    const intLit = (n: string) => `"${n}"^^<http://www.w3.org/2001/XMLSchema#integer>`;
+    expect(new Set(quads.filter(q => q.subject === UAL && q.predicate === `${DKG}tokenId`).map(q => q.object)))
+      .toEqual(new Set([intLit('1'), intLit('2'), intLit('3')]));
+    expect(new Set(quads.filter(q => q.subject === UAL && q.predicate === `${DKG}rootEntity`).map(q => q.object)))
+      .toEqual(new Set(['did:dkg:entity:alice', 'did:dkg:entity:bob', 'did:dkg:entity:carol']));
+    expect(new Set(quads.filter(q => q.subject === UAL && q.predicate === `${DKG}entity`).map(q => q.object)))
+      .toEqual(new Set(['did:dkg:entity:alice', 'did:dkg:entity:bob', 'did:dkg:entity:carol']));
 
-    // OT-RFC-43 §10.1 dual-write: each per-root label ALSO carries the new
-    // dkg:entity predicate alongside the legacy dkg:rootEntity (readers still
-    // resolve via the legacy name until the reader migration lands).
-    expect(quads.find(q => q.subject === `${UAL}/1` && q.predicate === `${DKG}entity`)?.object)
-      .toBe('did:dkg:entity:alice');
-    expect(quads.find(q => q.subject === `${UAL}/2` && q.predicate === `${DKG}entity`)?.object)
-      .toBe('did:dkg:entity:bob');
-    expect(quads.find(q => q.subject === `${UAL}/3` && q.predicate === `${DKG}entity`)?.object)
-      .toBe('did:dkg:entity:carol');
+    // Deliberately NO `<UAL> partOf <UAL>` self-edge (would pollute `?x partOf <UAL>` member enumeration, incl. resolveKA).
+    expect(quads.find(q => q.subject === UAL && q.predicate === `${DKG}partOf` && q.object === UAL)).toBeUndefined();
   });
 
   it('GH #748 fallback: attribution is the peer-ID literal when neither agentAddress nor authorAddress is supplied', () => {
