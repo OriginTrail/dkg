@@ -103,12 +103,20 @@ function publishResponsePayload(result: any): Record<string, unknown> {
   };
 }
 
-function finalizedPublishOptionsInput(parsed: Record<string, unknown>): unknown {
-  const nested = parsed.options && typeof parsed.options === "object" && !Array.isArray(parsed.options)
-    ? parsed.options as Record<string, unknown>
-    : {};
+function finalizedPublishOptionsInput(
+  parsed: Record<string, unknown>,
+  res: RequestContext["res"],
+): unknown | null {
+  if (
+    parsed.options !== undefined &&
+    (parsed.options === null || typeof parsed.options !== "object" || Array.isArray(parsed.options))
+  ) {
+    jsonResponse(res, 400, { error: '"options" must be an object when supplied' });
+    return null;
+  }
+  const nested = parsed.options as Record<string, unknown> | undefined;
   return {
-    ...nested,
+    ...(nested ?? {}),
     ...(parsed.clearAfter !== undefined ? { clearAfter: parsed.clearAfter } : {}),
     ...(parsed.clearSharedMemoryAfter !== undefined ? { clearSharedMemoryAfter: parsed.clearSharedMemoryAfter } : {}),
     ...(parsed.publishEpochs !== undefined ? { publishEpochs: parsed.publishEpochs } : {}),
@@ -137,6 +145,7 @@ function routeError(res: RequestContext["res"], err: unknown): boolean {
     message.includes("not found") ||
     message.includes("Invalid") ||
     message.includes("Unsafe") ||
+    message.includes("not registered on-chain") ||
     message.includes("not registered") ||
     message.includes("mutually exclusive") ||
     message.includes("not a registered local agent") ||
@@ -817,7 +826,9 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
 
     // ── VM verb: publish (SWM/WM → VM; mint or update on chain) ──
     if (layer === "vm" && verb === "publish") {
-      const opts = resolveFinalizedPublishOptions(ctx, finalizedPublishOptionsInput(parsed));
+      const optionsInput = finalizedPublishOptionsInput(parsed, res);
+      if (optionsInput === null) return;
+      const opts = resolveFinalizedPublishOptions(ctx, optionsInput);
       if (opts === null) return;
       // codex PR #971 F22: mirror the legacy operation-tracker dance from
       // `/api/shared-memory/publish` so the daemon's operation history

@@ -892,6 +892,63 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
     expect(publishOpts).toHaveProperty('operationCtx');
   });
 
+  it('vm/publish rejects malformed options before publishing', async () => {
+    const agent = makeAssertionAgent();
+    const tracker = createTracker();
+    const ctx = ctxFor(
+      'POST',
+      '/api/knowledge-assets/f/vm/publish',
+      { contextGraphId: 'cg', options: 'bad' },
+      agent,
+      { tracker },
+    );
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(400);
+    expect(body(ctx).error).toContain('"options" must be an object');
+    expect(agent.publishFromFinalizedAssertion).not.toHaveBeenCalled();
+    expect((tracker as any).start).not.toHaveBeenCalled();
+  });
+
+  it('vm/publish rejects array options before publishing', async () => {
+    const agent = makeAssertionAgent();
+    const ctx = ctxFor(
+      'POST',
+      '/api/knowledge-assets/f/vm/publish',
+      { contextGraphId: 'cg', options: [] },
+      agent,
+    );
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(400);
+    expect(body(ctx).error).toContain('"options" must be an object');
+    expect(agent.publishFromFinalizedAssertion).not.toHaveBeenCalled();
+  });
+
+  it('vm/publish maps not-registered-on-chain failures to 400', async () => {
+    const agent = makeAssertionAgent({
+      publishFromFinalizedAssertion: vi.fn(async () => {
+        throw new Error('Context graph "cg" is not registered on-chain');
+      }),
+    });
+    const ctx = ctxFor('POST', '/api/knowledge-assets/f/vm/publish', { contextGraphId: 'cg' }, agent);
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(400);
+    expect(body(ctx).error).toContain('not registered on-chain');
+  });
+
+  it('wm/finalize maps not-registered-on-chain failures to 400', async () => {
+    const agent = makeAssertionAgent({
+      assertion: {
+        finalize: vi.fn(async () => {
+          throw new Error('Context graph "cg" is not registered on-chain');
+        }),
+      },
+    });
+    const ctx = ctxFor('POST', '/api/knowledge-assets/f/wm/finalize', { contextGraphId: 'cg' }, agent);
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(400);
+    expect(body(ctx).error).toContain('not registered on-chain');
+  });
+
   it('vm/publish records a tracker.fail when the publish throws (F22)', async () => {
     const agent = makeAssertionAgent({
       publishFromFinalizedAssertion: vi.fn(async () => {
