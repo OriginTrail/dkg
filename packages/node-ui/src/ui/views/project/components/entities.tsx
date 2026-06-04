@@ -3,7 +3,7 @@ import type { ReactNode } from 'react';
 import { useFetch } from '../../../hooks.js';
 import { encodeDocTabId, resolveDocRef } from '../../../lib/doc-tab-id.js';
 import { truncateMiddle } from '../../../lib/truncate.js';
-import { listAssertions, promoteAssertion, describePromoteResult, describePromoteError, ensureContextGraphOnChain, knowledgeAssetFinalize, knowledgeAssetPublish, fetchAssertionUals, type AssertionInfo } from '../../../api.js';
+import { listAssertions, promoteAssertion, describePromoteResult, describePromoteError, ensureContextGraphOnChain, knowledgeAssetFinalize, knowledgeAssetPublish, fetchAssertionUals, assertionUalKey, type AssertionInfo } from '../../../api.js';
 import { useMemoryEntities, type TrustLevel, type MemoryEntity, type Triple } from '../../../hooks/useMemoryEntities.js';
 import { useProjectProfileContext } from '../../../hooks/useProjectProfile.js';
 import { useAgentsContext } from '../../../hooks/useAgents.js';
@@ -431,12 +431,15 @@ export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }:
       if (layer === 'wm') {
         // Seal the draft before sharing — promote moves content out of WM and a
         // later vm/publish requires a finalized assertion, so finalize must run
-        // here. Tolerate already-sealed / nothing-to-seal.
+        // here. Tolerate ONLY the benign empty-draft no-op ("has no quads" / no
+        // root entities); a re-run of an already-finalized assertion returns its
+        // seal without throwing. Real "assertionFinalize…" failures MUST surface,
+        // so do NOT match the bare token "finaliz" (see layer-widgets.tsx).
         try {
           await knowledgeAssetFinalize(contextGraphId, assertion.name, assertion.subGraph ? { subGraphName: assertion.subGraph } : {});
         } catch (e: any) {
           const m = String(e?.message ?? '');
-          if (!/already|finaliz|sealed|promoted|no quads|reserved/i.test(m)) throw e;
+          if (!/no quads|no root entities/i.test(m)) throw e;
         }
         // PR #710 Fix A — sub-graph slug threads into the daemon's
         // `(cg, name, subGraph)` lookup so a row clicked from a
@@ -484,8 +487,10 @@ export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }:
           try {
             await knowledgeAssetFinalize(contextGraphId, a.name, a.subGraph ? { subGraphName: a.subGraph } : {});
           } catch (e: any) {
+            // Tolerate only the benign empty-draft no-op; real finalize failures
+            // must surface (see the single-row handler above / layer-widgets.tsx).
             const m = String(e?.message ?? '');
-            if (!/already|finaliz|sealed|promoted|no quads|reserved/i.test(m)) throw e;
+            if (!/no quads|no root entities/i.test(m)) throw e;
           }
           // PR #710 — see comment on the single-row handler above.
           const res = await promoteAssertion(contextGraphId, a.name, 'all', a.subGraph);
@@ -580,18 +585,22 @@ export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }:
       </div>
       {result && <div style={{ padding: '6px 16px', fontSize: 11, color: 'var(--text-success)' }}>✓ {result}</div>}
       {error && <div style={{ padding: '6px 16px', fontSize: 11, color: 'var(--text-danger)' }}>✕ {error}</div>}
-      {assertions.map(a => (
+      {assertions.map(a => {
+        // Look up the UAL by (subGraph, name) — the same key listAssertions
+        // dedupes on; a bare name collides across sub-graphs (see assertionUalKey).
+        const ual = ualMap?.[assertionUalKey(a.subGraph, a.name)];
+        return (
         <div key={a.graphUri} className="v10-item-row">
           <span className="v10-item-icon">▤</span>
           <div className="v10-item-info">
             <div className="v10-item-name" style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>{a.name}</div>
-            {ualMap?.[a.name] && (
+            {ual && (
               <div
                 className="v10-item-ual"
                 style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-tertiary)', opacity: 0.7, wordBreak: 'break-all', marginTop: 1 }}
-                title={ualMap[a.name]}
+                title={ual}
               >
-                {ualMap[a.name]}
+                {ual}
               </div>
             )}
             <div className="v10-item-meta-row">
@@ -615,7 +624,8 @@ export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }:
             {busy === a.graphUri ? '...' : actionLabel}
           </button>
         </div>
-      ))}
+        );
+      })}
     </div>
   );
 }

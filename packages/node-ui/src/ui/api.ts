@@ -624,17 +624,33 @@ export const executeQuery = (
   postQueryDeduped({ sparql, contextGraphId, includeSharedMemory, graphSuffix, view, includeContextGraphPartitions });
 
 /**
- * Map of assertion name → deterministic Option-1 UAL (`dkg:reservedUal`,
- * `did:dkg:evm:<chainId>/<author>/<number>`). Stamped on the lifecycle URN at
- * creation, so it's available for every assertion (WM/SWM/published) — the
- * assertions list renders it next to the filename. Keyed by `dkg:assertionName`.
+ * Composite key for an assertion: `(subGraph, name)`. A root assertion and a
+ * sub-graph assertion can share a bare name, so bare name is NOT unique — this is
+ * the same key `listAssertions` dedupes on (api.ts SWM/WM branches). Anything that
+ * joins per-assertion data to a list row (e.g. the UAL map) must key by this.
+ */
+export const assertionUalKey = (subGraph: string | undefined, name: string): string =>
+  `${subGraph ?? ''} ${name}`;
+
+/**
+ * Map of assertion `(subGraph, name)` key → deterministic Option-1 UAL
+ * (`dkg:reservedUal`, `did:dkg:evm:<chainId>/<author>/<number>`). Stamped on the
+ * lifecycle URN at creation, so it's available for every assertion
+ * (WM/SWM/published) — the assertions list renders it next to the filename.
+ *
+ * Keyed by `(subGraph, name)`, NOT bare name: `dkg:assertionName` is the bare
+ * name, but a root assertion and a sub-graph assertion that share a name have
+ * DISTINCT `dkg:reservedUal`s. Keying by name alone would render one assertion's
+ * on-chain UAL on the other's row. The lifecycle URN carries the optional
+ * `dkg:subGraphName`, so we read it to build the composite key.
  */
 export async function fetchAssertionUals(contextGraphId: string): Promise<Record<string, string>> {
   const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
-  const sparql = `SELECT ?name ?ual WHERE {
+  const sparql = `SELECT ?name ?subGraph ?ual WHERE {
     GRAPH <${metaGraph}> {
       ?lc <http://dkg.io/ontology/assertionName> ?name ;
           <http://dkg.io/ontology/reservedUal> ?ual .
+      OPTIONAL { ?lc <http://dkg.io/ontology/subGraphName> ?subGraph }
     }
   }`;
   const data = await executeQuery(sparql, contextGraphId);
@@ -642,7 +658,10 @@ export async function fetchAssertionUals(contextGraphId: string): Promise<Record
   for (const b of (data?.result?.bindings ?? [])) {
     const name = typeof b.name === 'string' ? b.name : b.name?.value;
     const ual = typeof b.ual === 'string' ? b.ual : b.ual?.value;
-    if (name && ual && !map[name]) map[name] = ual;
+    const subGraph = typeof b.subGraph === 'string' ? b.subGraph : b.subGraph?.value;
+    if (!name || !ual) continue;
+    const key = assertionUalKey(subGraph, name);
+    if (!map[key]) map[key] = ual;
   }
   return map;
 }

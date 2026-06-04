@@ -30,6 +30,7 @@ import {
   listAssertions,
   ensureContextGraphOnChain,
   fetchAssertionUals,
+  assertionUalKey,
   createSavedQuery,
   updateSavedQuery,
   deleteSavedQuery,
@@ -380,14 +381,19 @@ describe('UI API tests', () => {
       expect(list.map(a => a.name)).toEqual(['unpublished.md']);
     });
 
-    it('fetchAssertionUals maps assertionName -> reservedUal (shown next to the filename)', async () => {
+    it('fetchAssertionUals keys reservedUal by (subGraph, name) so same-named cross-sub-graph assertions do not collide', async () => {
       queryBindings = [
         { name: { value: 'spec.md' }, ual: { value: 'did:dkg:evm:31337/0xabc/7' } },
         { name: { value: 'demo.md' }, ual: { value: 'did:dkg:evm:31337/0xabc/8' } },
+        // Same bare name as the root spec.md, but in sub-graph "alpha" → a DISTINCT
+        // reservedUal. Keying by bare name would have dropped this (the bug #2 fixes).
+        { name: { value: 'spec.md' }, subGraph: { value: 'alpha' }, ual: { value: 'did:dkg:evm:31337/0xabc/9' } },
       ];
       const map = await fetchAssertionUals('cg-1');
-      expect(map['spec.md']).toBe('did:dkg:evm:31337/0xabc/7');
-      expect(map['demo.md']).toBe('did:dkg:evm:31337/0xabc/8');
+      expect(map[assertionUalKey(undefined, 'spec.md')]).toBe('did:dkg:evm:31337/0xabc/7');
+      expect(map[assertionUalKey(undefined, 'demo.md')]).toBe('did:dkg:evm:31337/0xabc/8');
+      // The sub-graph spec.md keeps its OWN UAL, not the root's.
+      expect(map[assertionUalKey('alpha', 'spec.md')]).toBe('did:dkg:evm:31337/0xabc/9');
     });
 
     it('ensureContextGraphOnChain auto-registers an off-chain CG before publishing', async () => {

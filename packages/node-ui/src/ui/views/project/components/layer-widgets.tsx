@@ -133,13 +133,19 @@ export function LayerActionsWidget({ layer, count, contextGraphId, onComplete }:
         let noopCount = 0;
         for (const a of assertions) {
           currentAssertion = a.name;
-          // Seal the draft first; tolerate already-sealed / nothing-to-seal so
-          // re-runs and empty drafts don't abort the batch (surface real errors).
+          // Seal the draft first. Tolerate ONLY the benign empty-draft no-op
+          // (skolemizeByEntity produced no root entities / "has no quads") so an
+          // empty or already-promoted draft doesn't abort the batch. A re-run of
+          // an already-finalized assertion RETURNS its seal without throwing, so
+          // it needs no token here. Every genuine finalize failure is prefixed
+          // "assertionFinalize…" (corrupt seal, content mutated after seal, no
+          // V10 chain adapter, no signer) — those MUST surface, so do NOT match
+          // the bare token "finaliz". See dkg-agent-publish.ts assertionFinalize.
           try {
             await knowledgeAssetFinalize(contextGraphId, a.name, a.subGraph ? { subGraphName: a.subGraph } : {});
           } catch (e: any) {
             const m = String(e?.message ?? '');
-            if (!/already|finaliz|sealed|promoted|no quads|reserved/i.test(m)) throw e;
+            if (!/no quads|no root entities/i.test(m)) throw e;
           }
           // PR #710 — thread `subGraph` so sub-graph-scoped assertions
           // hit the correct daemon lookup key `(cg, name, subGraph)`.

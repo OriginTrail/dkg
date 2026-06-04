@@ -2743,11 +2743,20 @@ export class PublishMethods extends DKGAgentBase {
         // dkg:memoryLayer -> "VM" and dkg:state -> "published". The VM record is
         // thus equivalent to the WM/SWM ones, with the extra transaction metadata
         // (dkg:vmCurrentAssertion + dkg:kaId + the on-chain UAL) layered on top.
-        // Promote stamps memoryLayer "SWM" on BOTH the lifecycle-URN and the
-        // data-graph-URI forms, so flip both — otherwise the published assertion
-        // lingers in the Shared-Memory layer (the dedicated published-metadata
-        // flip never fired: its trigger gate joins on dkg:rootEntity/dkg:agent
-        // predicates the lifecycle record does not carry).
+        //
+        // The asymmetry below is intentional and mirrors create/promote exactly:
+        //   • dkg:memoryLayer lives on BOTH forms — assertionCreate stamps "WM"
+        //     on the data-graph URI (dkg-publisher.ts ~4131) and the URN, and
+        //     assertionPromote flips BOTH to "SWM" (data-graph URI ~4502-4516 +
+        //     the URN via generateAssertionPromotedMetadata). So flip both here.
+        //   • dkg:state lives ONLY on the URN — create/promote never stamp it on
+        //     the data-graph URI (metadata.ts generates state on the lifecycle
+        //     subject alone). So flip it on the URN alone; writing it on the
+        //     data-graph URI would manufacture a marker no other layer carries.
+        // Without this flip the published assertion lingers in Shared Memory —
+        // the dedicated published-metadata flip never fires (its trigger gate
+        // joins on dkg:rootEntity/dkg:agent predicates the lifecycle record does
+        // not carry; it has prov:wasAttributedTo).
         const MEMORY_LAYER_PRED = 'http://dkg.io/ontology/memoryLayer';
         const STATE_PRED = 'http://dkg.io/ontology/state';
         for (const subj of [lifecycleUri, assertionUri]) {

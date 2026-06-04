@@ -24,6 +24,12 @@ PUBLISHER_TESTS=(
 AGENT_TESTS=(
   "packages/agent/test/e2e-chain.test.ts"
   "packages/agent/test/e2e-finalization.test.ts"
+  # OT-RFC-43 A2/B3 on-chain identity (finalize-stamp, divergence,
+  # create-vs-update, B3 resolve) + OT-RFC-44 the publish VM-marker flip
+  # (memoryLayer→VM on both subject forms, state→published on the URN). This is
+  # the only test that drives publishFromFinalizedAssertion; it's excluded from
+  # the per-package vitest config (spawns hardhat), so wire it in here.
+  "packages/agent/test/a2-pointers-and-b3-addressing.test.ts"
 )
 
 files=()

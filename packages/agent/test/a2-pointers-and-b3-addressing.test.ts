@@ -5,6 +5,7 @@ import { DKGAgent } from '../src/index.js';
 import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   assertionLifecycleUri,
+  contextGraphAssertionUri,
   contextGraphMetaUri,
 } from '@origintrail-official/dkg-core';
 import type { KaNumberAllocator } from '../src/allocator.js';
@@ -40,6 +41,8 @@ const SWM_PRED = `${DKG}swmCurrentAssertion`;
 const VM_PRED = `${DKG}vmCurrentAssertion`;
 const KA_ID_PRED = `${DKG}kaId`;
 const RESERVED_UAL_PRED = `${DKG}reservedUal`;
+const MEMORY_LAYER_PRED = `${DKG}memoryLayer`;
+const STATE_PRED = `${DKG}state`;
 
 let ctx: HardhatContext;
 const agents: DKGAgent[] = [];
@@ -163,6 +166,17 @@ describe('OT-RFC-43 A2/B3 — finalize-stamp, divergence, create-vs-update, B3 (
     // VM pointer stamped == WM pointer (same version, converged).
     const vmPointer = await readPointer(agent, lifecycleUri, metaGraph, VM_PRED);
     expect(vmPointer).toBe(wmPointer);
+
+    // OT-RFC-44 — publish flips the lifecycle MARKER to VM, so a published
+    // assertion is equivalent to a WM/SWM record (a memoryLayer+state pair) plus
+    // the on-chain transaction metadata (vmCurrentAssertion/kaId/reservedUal).
+    // memoryLayer lives on BOTH subject forms (URN + data-graph URI); state lives
+    // on the URN alone — mirrors create/promote (see the publish flip in
+    // dkg-agent-publish.ts). Regression guard for that flip.
+    const dataUri = contextGraphAssertionUri(CG_ID, agentAddress, NAME);
+    expect(await readPointer(agent, lifecycleUri, metaGraph, MEMORY_LAYER_PRED)).toBe('VM');
+    expect(await readPointer(agent, dataUri, metaGraph, MEMORY_LAYER_PRED)).toBe('VM');
+    expect(await readPointer(agent, lifecycleUri, metaGraph, STATE_PRED)).toBe('published');
   }, 120_000);
 
   it('(b) divergence: a NEW finalize advances WM ahead of VM (wmCurrentAssertion != vmCurrentAssertion)', async () => {
