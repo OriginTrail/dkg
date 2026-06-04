@@ -43,7 +43,11 @@ function makeAgent(args: {
   contentType?: string;
   bytes?: Uint8Array | null;
   policy?: { accessPolicy?: number; publishPolicy?: number };
+  extractionStatus?: string | null;
+  structuralTripleCount?: number | string | null;
 }) {
+  const extractionStatus = args.extractionStatus === undefined ? 'completed' : args.extractionStatus;
+  const structuralTripleCount = args.structuralTripleCount === undefined ? 1 : args.structuralTripleCount;
   return Object.assign(Object.create(DKGAgent.prototype), {
     importedArtifactByteStore: {
       get: vi.fn(async () => args.bytes ?? null),
@@ -54,18 +58,19 @@ function makeAgent(args: {
     log: { warn: vi.fn() },
     store: {
       query: vi.fn(async (sparql: string) => {
-        expect(sparql).toContain(`${DKG}sourceFile`);
         expect(sparql).toContain(`${DKG}sourceFileHash`);
         expect(sparql).toContain(`${DKG}mdIntermediateHash`);
+        expect(sparql).toContain(`${DKG}extractionStatus`);
+        expect(sparql).toContain(`${DKG}structuralTripleCount`);
         return {
           type: 'bindings',
           bindings: [{
-            sourceFile: `urn:dkg:file:${args.sourceHash}`,
             sourceFileHash: args.sourceHash,
             sourceContentType: args.contentType ?? 'application/octet-stream',
+            ...(extractionStatus === null ? {} : { extractionStatus }),
+            ...(structuralTripleCount === null ? {} : { structuralTripleCount: String(structuralTripleCount) }),
             ...(args.markdownHash
               ? {
-                  markdownForm: `urn:dkg:file:${args.markdownHash}`,
                   mdIntermediateHash: args.markdownHash,
                 }
               : {}),
@@ -129,6 +134,60 @@ describe('DKGAgent imported-artifact byte receiver', () => {
     expect(response.contentType).toBe('text/markdown');
     expect(response.size).toBe(markdownBytes.length);
     expect(new TextDecoder().decode(response.bytes)).toBe('# Imported\n');
+  });
+
+  it('serves legacy completed imports when metadata has a positive structural triple count and no status', async () => {
+    const bytes = new TextEncoder().encode('# Legacy\n');
+    const sourceHash = keccakHash(bytes);
+    const agent = makeAgent({
+      sourceHash,
+      bytes,
+      contentType: 'text/markdown',
+      extractionStatus: null,
+      structuralTripleCount: 1,
+    });
+
+    const response = await requestBytes(agent, makeRequest({
+      hash: sourceHash,
+      kind: IMPORTED_ARTIFACT_BYTE_KIND_SOURCE,
+    }));
+
+    expect(response.status).toBe(IMPORTED_ARTIFACT_BYTES_RESPONSE_STATUS.ALLOW);
+    expect(new TextDecoder().decode(response.bytes)).toBe('# Legacy\n');
+  });
+
+  it('denies byte requests when metadata is missing the completed import guard', async () => {
+    const bytes = new Uint8Array([0x25, 0x50, 0x44, 0x46]);
+    const sourceHash = keccakHash(bytes);
+    const agent = makeAgent({
+      sourceHash,
+      bytes,
+      extractionStatus: null,
+      structuralTripleCount: null,
+    });
+
+    const response = await requestBytes(agent, makeRequest({ hash: sourceHash }));
+
+    expect(response.status).toBe(IMPORTED_ARTIFACT_BYTES_RESPONSE_STATUS.DENY);
+    expect(response.reason).toMatch(/not linked/);
+    expect((agent as any).importedArtifactByteStore.get).not.toHaveBeenCalled();
+  });
+
+  it('denies byte requests when metadata says extraction is not completed', async () => {
+    const bytes = new Uint8Array([0x25, 0x50, 0x44, 0x46]);
+    const sourceHash = keccakHash(bytes);
+    const agent = makeAgent({
+      sourceHash,
+      bytes,
+      extractionStatus: 'running',
+      structuralTripleCount: 3,
+    });
+
+    const response = await requestBytes(agent, makeRequest({ hash: sourceHash }));
+
+    expect(response.status).toBe(IMPORTED_ARTIFACT_BYTES_RESPONSE_STATUS.DENY);
+    expect(response.reason).toMatch(/not linked/);
+    expect((agent as any).importedArtifactByteStore.get).not.toHaveBeenCalled();
   });
 
   it('allows markdown requests for markdown-native imports where the source hash is the markdown hash', async () => {

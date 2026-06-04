@@ -13,7 +13,6 @@ import {
   IMPORTED_ARTIFACT_BYTE_KIND_ORIGINAL,
   IMPORTED_ARTIFACT_BYTE_KIND_MARKDOWN,
   IMPORTED_ARTIFACT_BYTES_RESPONSE_STATUS,
-  contextGraphSharedMemoryUri,
   contextGraphMetaUri,
   assertSafeIri,
   createOperationContext,
@@ -74,13 +73,6 @@ function validateImportedArtifactHash(hash: string): boolean {
   return /^(?:sha256:|keccak256:)?[0-9a-f]{64}$/i.test(hash.trim());
 }
 
-function hashFromImportedArtifactFileUrn(value: string | undefined): string | undefined {
-  const prefix = 'urn:dkg:file:';
-  if (!value?.startsWith(prefix)) return undefined;
-  const hash = value.slice(prefix.length);
-  return validateImportedArtifactHash(hash) ? hash : undefined;
-}
-
 function normalizeImportedArtifactBinding(cell: unknown): string {
   if (typeof cell !== 'string') return '';
   const trimmed = cell.replace(/^<|>$/g, '').trim();
@@ -90,6 +82,19 @@ function normalizeImportedArtifactBinding(cell: unknown): string {
 
 function isImportedArtifactMarkdownContentType(contentType: string): boolean {
   return contentType.split(';', 1)[0].trim().toLowerCase() === 'text/markdown';
+}
+
+function optionalImportedArtifactPositiveInteger(cell: unknown): number | undefined {
+  const value = normalizeImportedArtifactBinding(cell);
+  if (!/^\d+$/.test(value)) return undefined;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function hasCompletedImportedArtifactGuard(row: Record<string, unknown>): boolean {
+  const durableExtractionStatus = normalizeImportedArtifactBinding(row.extractionStatus);
+  if (durableExtractionStatus) return durableExtractionStatus === 'completed';
+  return (optionalImportedArtifactPositiveInteger(row.structuralTripleCount) ?? 0) > 0;
 }
 
 function isImportedArtifactResponseGone(response: Uint8Array): boolean {
@@ -165,43 +170,36 @@ export class ImportedArtifactByteMethods extends DKGAgentBase {
     this: DKGAgent,
     request: ImportedArtifactBytesRequestMsg,
   ): Promise<{ linked: boolean; contentType?: string }> {
-    const swmGraph = assertSafeIri(contextGraphSharedMemoryUri(
-      request.contextGraphId,
-      request.subGraphName?.trim() ? request.subGraphName.trim() : undefined,
-    ));
     const metaGraph = assertSafeIri(contextGraphMetaUri(request.contextGraphId));
     const assertionUri = assertSafeIri(request.assertionUri);
     const patterns = IMPORTED_ARTIFACT_LEGACY_DKG_NAMESPACES.flatMap((ns) => [
-      `GRAPH <${swmGraph}> {
-        <${assertionUri}> <${ns}sourceFile> ?sourceFile .
-        OPTIONAL { <${assertionUri}> <${ns}sourceContentType> ?sourceContentType }
-        OPTIONAL { <${assertionUri}> <${ns}markdownForm> ?markdownForm }
-      }`,
       `GRAPH <${metaGraph}> {
         <${assertionUri}> <${ns}sourceFileHash> ?sourceFileHash .
         OPTIONAL { <${assertionUri}> <${ns}sourceContentType> ?sourceContentType }
         OPTIONAL { <${assertionUri}> <${ns}mdIntermediateHash> ?mdIntermediateHash }
+        OPTIONAL { <${assertionUri}> <${ns}structuralTripleCount> ?structuralTripleCount }
+        OPTIONAL { <${assertionUri}> <${ns}extractionStatus> ?extractionStatus }
       }`,
     ]);
     const result = await this.store.query(
-      `SELECT ?sourceFile ?sourceContentType ?markdownForm ?sourceFileHash ?mdIntermediateHash WHERE {
+      `SELECT ?sourceContentType ?sourceFileHash ?mdIntermediateHash ?structuralTripleCount ?extractionStatus WHERE {
         ${patterns.map((pattern) => `{ ${pattern} }`).join(' UNION ')}
       } LIMIT 20`,
     );
     if (result.type !== 'bindings' || result.bindings.length === 0) return { linked: false };
     const requested = normalizeImportedArtifactHash(request.hash);
     for (const row of result.bindings as Array<Record<string, unknown>>) {
+      if (!hasCompletedImportedArtifactGuard(row)) continue;
       const sourceContentType = normalizeImportedArtifactBinding(row.sourceContentType);
-      const sourceHashes = [
-        hashFromImportedArtifactFileUrn(normalizeImportedArtifactBinding(row.sourceFile)),
-        normalizeImportedArtifactBinding(row.sourceFileHash),
-      ].filter((hash): hash is string => Boolean(hash));
-      const sourceHashMatches = sourceHashes.some((hash) => sameImportedArtifactHash(hash, requested));
-      const markdownHashes = [
-        hashFromImportedArtifactFileUrn(normalizeImportedArtifactBinding(row.markdownForm)),
-        normalizeImportedArtifactBinding(row.mdIntermediateHash),
-      ].filter((hash): hash is string => Boolean(hash));
-      const markdownHashMatches = markdownHashes.some((hash) => sameImportedArtifactHash(hash, requested));
+      const sourceFileHash = normalizeImportedArtifactBinding(row.sourceFileHash);
+      if (!validateImportedArtifactHash(sourceFileHash)) continue;
+      const mdIntermediateHash = normalizeImportedArtifactBinding(row.mdIntermediateHash);
+      if (mdIntermediateHash && !validateImportedArtifactHash(mdIntermediateHash)) continue;
+      const sourceHashMatches = sameImportedArtifactHash(sourceFileHash, requested);
+      const markdownHash = mdIntermediateHash || (
+        isImportedArtifactMarkdownContentType(sourceContentType) ? sourceFileHash : ''
+      );
+      const markdownHashMatches = Boolean(markdownHash) && sameImportedArtifactHash(markdownHash, requested);
       if (
         request.kind !== IMPORTED_ARTIFACT_BYTE_KIND_MARKDOWN &&
         sourceHashMatches
@@ -212,14 +210,6 @@ export class ImportedArtifactByteMethods extends DKGAgentBase {
         };
       }
       if (request.kind === IMPORTED_ARTIFACT_BYTE_KIND_MARKDOWN && markdownHashMatches) {
-        return { linked: true, contentType: 'text/markdown' };
-      }
-      if (
-        request.kind === IMPORTED_ARTIFACT_BYTE_KIND_MARKDOWN &&
-        sourceHashMatches &&
-        isImportedArtifactMarkdownContentType(sourceContentType) &&
-        markdownHashes.length === 0
-      ) {
         return { linked: true, contentType: 'text/markdown' };
       }
     }
