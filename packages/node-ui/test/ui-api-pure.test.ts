@@ -368,6 +368,18 @@ describe('UI API tests', () => {
       expect(list.map(a => a.name)).toEqual(['shared-doc.md']);
     });
 
+    it('listAssertions(swm) excludes assertions already published to VM (dkg:vmCurrentAssertion)', async () => {
+      // Publish records a vmCurrentAssertion pointer but does NOT flip memoryLayer
+      // off "SWM" (backend gap), so the SWM list must drop published rows itself.
+      const agent = '0x' + '5'.repeat(40);
+      queryBindings = [
+        { g: { value: `urn:dkg:assertion:cg-1:${agent}:unpublished.md` } },
+        { g: { value: `urn:dkg:assertion:cg-1:${agent}:published.md` }, vm: { value: 'abc123deadbeef' } },
+      ];
+      const list = await listAssertions('cg-1', 'swm');
+      expect(list.map(a => a.name)).toEqual(['unpublished.md']);
+    });
+
     it('fetchAssertionUals maps assertionName -> reservedUal (shown next to the filename)', async () => {
       queryBindings = [
         { name: { value: 'spec.md' }, ual: { value: 'did:dkg:evm:31337/0xabc/7' } },

@@ -945,17 +945,28 @@ export async function listAssertions(
     const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
     const cgPrefix = `did:dkg:context-graph:${contextGraphId}/`;
     const urnPrefix = `urn:dkg:assertion:${contextGraphId}:`;
-    const sparql = `SELECT ?g WHERE {
-      GRAPH <${metaGraph}> { ?g <http://dkg.io/ontology/memoryLayer> "SWM" }
+    // Exclude assertions already PUBLISHED to VM. Publish records a
+    // `dkg:vmCurrentAssertion` pointer but (a backend gap — the
+    // generateAssertionPublishedMetadata flip's SPARQL gate never matches the
+    // lifecycle record) does NOT flip `dkg:memoryLayer` off "SWM", so published
+    // assertions would otherwise linger in the Shared-Memory list. The pointer
+    // lives on the lifecycle-URN form; key the exclusion by (subGraph, name) so
+    // the data-graph-URI marker row for the same assertion is dropped too.
+    const sparql = `SELECT ?g ?vm WHERE {
+      GRAPH <${metaGraph}> {
+        ?g <http://dkg.io/ontology/memoryLayer> "SWM"
+        OPTIONAL { ?g <http://dkg.io/ontology/vmCurrentAssertion> ?vm }
+      }
       FILTER(!CONTAINS(STR(?g), "/meta/assertion/"))
     }`;
     const data = await executeQuery(sparql, contextGraphId);
     const bindings: any[] = data?.result?.bindings ?? [];
-    const seen = new Set<string>();
-    const result: AssertionInfo[] = [];
+    const published = new Set<string>();
+    const rows: Array<{ key: string; name: string; subGraph?: string; g: string }> = [];
     for (const b of bindings) {
       const g = typeof b.g === 'string' ? b.g : b.g?.value;
       if (!g) continue;
+      const vm = typeof b.vm === 'string' ? b.vm : b.vm?.value;
       let subGraph: string | undefined;
       let name: string | undefined;
       if (g.startsWith(cgPrefix)) {
@@ -983,9 +994,15 @@ export async function listAssertions(
       if (!name) continue;
       if (subGraph === 'meta') continue;
       const key = `${subGraph ?? ''} ${name}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      result.push({ name, graphUri: g, subGraph });
+      rows.push({ key, name, subGraph, g });
+      if (vm) published.add(key);
+    }
+    const seen = new Set<string>();
+    const result: AssertionInfo[] = [];
+    for (const r of rows) {
+      if (published.has(r.key) || seen.has(r.key)) continue;
+      seen.add(r.key);
+      result.push({ name: r.name, graphUri: r.g, subGraph: r.subGraph });
     }
     return result;
   }
