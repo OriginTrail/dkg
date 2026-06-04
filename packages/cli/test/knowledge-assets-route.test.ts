@@ -923,6 +923,80 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
     expect(agent.publishFromFinalizedAssertion).not.toHaveBeenCalled();
   });
 
+  it('vm/publish rejects author override fields before publishing', async () => {
+    const agent = makeAssertionAgent();
+    const tracker = createTracker();
+    const ctx = ctxFor(
+      'POST',
+      '/api/knowledge-assets/f/vm/publish',
+      {
+        contextGraphId: 'cg',
+        authorAgentAddress: '0x1111111111111111111111111111111111111111',
+      },
+      agent,
+      { tracker },
+    );
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(400);
+    expect(body(ctx).error).toContain('cannot be combined with "assertionName"');
+    expect(agent.publishFromFinalizedAssertion).not.toHaveBeenCalled();
+    expect((tracker as any).start).not.toHaveBeenCalled();
+  });
+
+  it('vm/publish rejects nested author override fields before publishing', async () => {
+    const agent = makeAssertionAgent();
+    const ctx = ctxFor(
+      'POST',
+      '/api/knowledge-assets/f/vm/publish',
+      {
+        contextGraphId: 'cg',
+        options: {
+          preSignedAuthorAttestation: {
+            address: '0x1111111111111111111111111111111111111111',
+            signature: { r: '0x' + '11'.repeat(32), vs: '0x' + '22'.repeat(32) },
+          },
+        },
+      },
+      agent,
+    );
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(400);
+    expect(body(ctx).error).toContain('cannot be combined with "assertionName"');
+    expect(agent.publishFromFinalizedAssertion).not.toHaveBeenCalled();
+  });
+
+  it('vm/publish rejects selection overrides before publishing', async () => {
+    const agent = makeAssertionAgent();
+    const ctx = ctxFor(
+      'POST',
+      '/api/knowledge-assets/f/vm/publish',
+      { contextGraphId: 'cg', selection: { rootEntities: ['ex:A'] } },
+      agent,
+    );
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(400);
+    expect(body(ctx).error).toContain('"selection" must be omitted or "all"');
+    expect(agent.publishFromFinalizedAssertion).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'Assertion f is not finalized',
+    'seal binds chainId 1 but runtime chainId is 2',
+    'seal binds KAv10 0xabc but runtime KAv10 is 0xdef',
+    'expectedMerkleRoot mismatch',
+    'precomputedAttestation signer mismatch',
+  ])('vm/publish maps finalized assertion validation failure to 400: %s', async (message) => {
+    const agent = makeAssertionAgent({
+      publishFromFinalizedAssertion: vi.fn(async () => {
+        throw new Error(message);
+      }),
+    });
+    const ctx = ctxFor('POST', '/api/knowledge-assets/f/vm/publish', { contextGraphId: 'cg' }, agent);
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(400);
+    expect(body(ctx).error).toContain(message);
+  });
+
   it('vm/publish maps not-registered-on-chain failures to 400', async () => {
     const agent = makeAssertionAgent({
       publishFromFinalizedAssertion: vi.fn(async () => {

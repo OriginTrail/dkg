@@ -127,6 +127,38 @@ function finalizedPublishOptionsInput(
   };
 }
 
+function validateFinalizedAssertionPublishRequest(
+  parsed: Record<string, unknown>,
+  res: RequestContext["res"],
+): boolean {
+  const nested = parsed.options && typeof parsed.options === "object" && !Array.isArray(parsed.options)
+    ? parsed.options as Record<string, unknown>
+    : undefined;
+  const hasAuthorOverride =
+    parsed.authorAgentAddress != null ||
+    parsed.preSignedAuthorAttestation != null ||
+    nested?.authorAgentAddress != null ||
+    nested?.preSignedAuthorAttestation != null;
+  if (hasAuthorOverride) {
+    jsonResponse(res, 400, {
+      error:
+        '"authorAgentAddress" and "preSignedAuthorAttestation" cannot be combined with "assertionName" — the seal already encodes the author. Re-finalize the assertion if you need to change authorship.',
+    });
+    return false;
+  }
+
+  const selection = parsed.selection ?? nested?.selection;
+  if (selection !== undefined && selection !== "all") {
+    jsonResponse(res, 400, {
+      error:
+        '"selection" must be omitted or "all" when "assertionName" is supplied — the seal commits to the entire assertion content.',
+    });
+    return false;
+  }
+
+  return true;
+}
+
 function routeError(res: RequestContext["res"], err: unknown): boolean {
   const anyErr = err as any;
   if (anyErr?.name === "AssertionNotPersistedError" || anyErr?.code === "ASSERTION_NOT_PERSISTED") {
@@ -147,6 +179,11 @@ function routeError(res: RequestContext["res"], err: unknown): boolean {
     message.includes("Unsafe") ||
     message.includes("not registered on-chain") ||
     message.includes("not registered") ||
+    message.includes("not finalized") ||
+    message.includes("seal binds chainId") ||
+    message.includes("seal binds KAv10") ||
+    message.includes("expectedMerkleRoot mismatch") ||
+    message.includes("precomputedAttestation signer mismatch") ||
     message.includes("mutually exclusive") ||
     message.includes("not a registered local agent") ||
     message.includes("signer mismatch") ||
@@ -826,6 +863,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
 
     // ── VM verb: publish (SWM/WM → VM; mint or update on chain) ──
     if (layer === "vm" && verb === "publish") {
+      if (!validateFinalizedAssertionPublishRequest(parsed, res)) return;
       const optionsInput = finalizedPublishOptionsInput(parsed, res);
       if (optionsInput === null) return;
       const opts = resolveFinalizedPublishOptions(ctx, optionsInput);
