@@ -283,16 +283,23 @@ export class PublishHandler {
       const normalized = quads.map((q) => ({ ...q, graph: dataGraph }));
       await this.store.insert(normalized);
 
-      const kaMetadata: KAMetadata[] = manifest.map((m, i) => ({
-        rootEntity: m.rootEntity,
-        kcUal: request.ual,
-        tokenId: BigInt(i + 1),
-        publicTripleCount: (partitioned.get(m.rootEntity) ?? []).length,
-        privateTripleCount: m.privateTripleCount ?? 0,
-        privateMerkleRoot: request.kas[i].privateMerkleRoot?.length
-          ? new Uint8Array(request.kas[i].privateMerkleRoot)
-          : undefined,
-      }));
+      const kaMetadata: KAMetadata[] = manifest.map((m, i) => {
+        const metadataTokenId = BigInt(i + 1);
+        const tokenId = request.kas[i]?.tokenId != null
+          ? BigInt(request.kas[i].tokenId as any)
+          : metadataTokenId;
+        return {
+          rootEntity: m.rootEntity,
+          kcUal: request.ual,
+          tokenId,
+          metadataTokenId,
+          publicTripleCount: (partitioned.get(m.rootEntity) ?? []).length,
+          privateTripleCount: m.privateTripleCount ?? 0,
+          privateMerkleRoot: request.kas[i]?.privateMerkleRoot?.length
+            ? new Uint8Array(request.kas[i].privateMerkleRoot)
+            : undefined,
+        };
+      });
 
       const metadataQuads = generateTentativeMetadata(
         {

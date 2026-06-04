@@ -1020,10 +1020,13 @@ export class FinalizationHandler {
       const rootEntity = rootEntities[tokenIdx];
       const entityQuads = partitioned.get(rootEntity) ?? [];
       if (entityQuads.length === 0) continue;
+      const metadataTokenId = BigInt(tokenIdx + 1);
+      const tokenId = startKAId === endKAId ? startKAId : startKAId + BigInt(tokenIdx);
       kaMetadata.push({
         rootEntity,
         kcUal: ual,
-        tokenId: BigInt(tokenIdx + 1),
+        tokenId,
+        metadataTokenId,
         publicTripleCount: entityQuads.length,
         privateTripleCount: 0,
         privateMerkleRoot: undefined,

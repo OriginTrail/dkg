@@ -7,6 +7,7 @@ const CONTEXT_GRAPH = 'agent-registry';
 const GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
 const META = `${GRAPH}/_meta`;
 const ENTITY = 'did:dkg:agent:QmImageBot';
+const ENTITY_2 = 'did:dkg:agent:QmTextBot';
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const DKG_SUB_GRAPH = 'http://dkg.io/ontology/SubGraph';
 const DKG_ASSERTION_GRAPH = 'http://dkg.io/ontology/assertionGraph';
@@ -97,6 +98,28 @@ describe('DKGQueryEngine', () => {
     expect(result.rootEntity).toBe(ENTITY);
     expect(result.contextGraphId).toBe(CONTEXT_GRAPH);
     expect(result.quads.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('resolveKA aggregates every member root for a multi-entity KA', async () => {
+    const ual = 'did:dkg:mock:31337/42';
+    await store.insert([
+      q(ENTITY_2, 'http://schema.org/name', '"TextBot"'),
+      q(`${ENTITY_2}/.well-known/genid/o1`, 'http://ex.org/type', '"TextAnalysis"'),
+      q(`${ual}/1`, 'http://dkg.io/ontology/rootEntity', ENTITY, META),
+      q(`${ual}/1`, 'http://dkg.io/ontology/partOf', ual, META),
+      q(`${ual}/2`, 'http://dkg.io/ontology/rootEntity', ENTITY_2, META),
+      q(`${ual}/2`, 'http://dkg.io/ontology/partOf', ual, META),
+      q(ual, 'http://dkg.io/ontology/contextGraph', `did:dkg:context-graph:${CONTEXT_GRAPH}`, META),
+    ]);
+
+    const result = await engine.resolveKA(ual);
+    expect(result.rootEntity).toBe(ENTITY);
+    expect(result.rootEntities).toEqual([ENTITY, ENTITY_2]);
+    const subjects = new Set(result.quads.map((quad) => quad.subject));
+    expect(subjects).toContain(ENTITY);
+    expect(subjects).toContain(`${ENTITY}/.well-known/genid/o1`);
+    expect(subjects).toContain(ENTITY_2);
+    expect(subjects).toContain(`${ENTITY_2}/.well-known/genid/o1`);
   });
 
   it('throws on unknown UAL', async () => {

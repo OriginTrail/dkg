@@ -684,26 +684,37 @@ export class DKGQueryEngine implements QueryEngine {
 
   async resolveKA(ual: string): Promise<{
     rootEntity: string;
+    rootEntities: string[];
     contextGraphId: string;
     quads: Quad[];
   }> {
     // Look up KA metadata across all meta graphs, including subGraphName if recorded
     const metaResult = await this.store.query(
-      `SELECT ?rootEntity ?ctxGraph ?sgName WHERE {
+      `SELECT ?ka ?rootEntity ?ctxGraph ?sgName WHERE {
         GRAPH ?g {
           ?ka <http://dkg.io/ontology/rootEntity> ?rootEntity .
           ?ka <http://dkg.io/ontology/partOf> <${assertSafeIri(ual)}> .
           <${assertSafeIri(ual)}> <http://dkg.io/ontology/contextGraph> ?ctxGraph .
           OPTIONAL { <${assertSafeIri(ual)}> <http://dkg.io/ontology/subGraphName> ?sgName }
         }
-      }`,
+      } ORDER BY ?ka`,
     );
 
     if (metaResult.type !== 'bindings' || metaResult.bindings.length === 0) {
       throw new Error(`KA not found for UAL: ${ual}`);
     }
 
-    const rootEntity = metaResult.bindings[0]['rootEntity'];
+    const rootEntities = [
+      ...new Set(
+        metaResult.bindings
+          .map((row) => row['rootEntity'])
+          .filter((root): root is string => typeof root === 'string' && root.length > 0),
+      ),
+    ];
+    if (rootEntities.length === 0) {
+      throw new Error(`KA not found for UAL: ${ual}`);
+    }
+    const rootEntity = rootEntities[0];
     const contextGraphUri = metaResult.bindings[0]['ctxGraph'];
     const contextGraphId = contextGraphUri.replace('did:dkg:context-graph:', '');
     const sgNameRaw = metaResult.bindings[0]['sgName'];
@@ -713,15 +724,18 @@ export class DKGQueryEngine implements QueryEngine {
       ? contextGraphSubGraphUri(contextGraphId, subGraphName)
       : contextGraphDataUri(contextGraphId);
 
-    // Fetch all triples for this entity from the correct data graph
+    const rootFilter = rootEntities
+      .map((root) =>
+        `(?s = <${assertSafeIri(root)}> || STRSTARTS(STR(?s), "${escapeSparqlLiteral(root)}/.well-known/genid/"))`,
+      )
+      .join(' || ');
+
+    // Fetch all triples for every KA member root from the correct data graph.
     const dataResult = await this.store.query(
       `SELECT ?s ?p ?o WHERE {
         GRAPH <${assertSafeIri(dataGraph)}> {
           ?s ?p ?o .
-          FILTER(
-            ?s = <${assertSafeIri(rootEntity)}>
-            || STRSTARTS(STR(?s), "${escapeSparqlLiteral(rootEntity)}/.well-known/genid/")
-          )
+          FILTER(${rootFilter})
         }
       }`,
     );
@@ -736,7 +750,7 @@ export class DKGQueryEngine implements QueryEngine {
           }))
         : [];
 
-    return { rootEntity, contextGraphId, quads };
+    return { rootEntity, rootEntities, contextGraphId, quads };
   }
 
   /**

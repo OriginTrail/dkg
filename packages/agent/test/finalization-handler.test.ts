@@ -232,6 +232,49 @@ describe('FinalizationHandler', () => {
     if (canonical.type === 'boolean') expect(canonical.value).toBe(true);
   });
 
+  it('preserves real on-chain tokenId while using per-root metadata row ids', async () => {
+    const roots = ['urn:test:entity-a', 'urn:test:entity-b'];
+    const ual = 'did:dkg:evm:31337/0xABC/42';
+    const metaGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
+
+    await (handler as any).promoteSharedMemoryToCanonical(
+      CONTEXT_GRAPH,
+      [
+        { subject: roots[0], predicate: 'http://schema.org/name', object: '"Alice"', graph: '' },
+        { subject: roots[1], predicate: 'http://schema.org/name', object: '"Bob"', graph: '' },
+      ],
+      ual,
+      roots,
+      '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266',
+      '0x' + 'ab'.repeat(32),
+      100,
+      42n,
+      42n,
+      42n,
+      createOperationContext('system'),
+    );
+
+    const result = await store.query(
+      `SELECT ?ka ?root ?tokenId WHERE {
+        GRAPH <${metaGraph}> {
+          ?ka <http://dkg.io/ontology/partOf> <${ual}> ;
+              <http://dkg.io/ontology/rootEntity> ?root ;
+              <http://dkg.io/ontology/tokenId> ?tokenId .
+        }
+      } ORDER BY ?ka`,
+    );
+
+    expect(result.type).toBe('bindings');
+    if (result.type !== 'bindings') return;
+    expect(result.bindings).toHaveLength(2);
+    expect(result.bindings.map((row) => row['ka'])).toEqual([`${ual}/1`, `${ual}/2`]);
+    expect(result.bindings.map((row) => row['root'])).toEqual(roots);
+    expect(result.bindings.map((row) => row['tokenId'])).toEqual([
+      '"42"^^<http://www.w3.org/2001/XMLSchema#integer>',
+      '"42"^^<http://www.w3.org/2001/XMLSchema#integer>',
+    ]);
+  });
+
   it('legacy publisher (no tag-15 on the wire) → no root dual-write, even when targetContextGraphId === local on-chain id (Codex r5b explicit-remap-to-self regression)', async () => {
     // Codex r5b — pin the policy that the receiver-side rolling-upgrade
     // fallback is gone. Earlier rounds tried to infer "same-graph

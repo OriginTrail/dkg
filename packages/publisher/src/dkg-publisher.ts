@@ -1747,6 +1747,7 @@ export class DKGPublisher implements Publisher {
         rootEntity: entry.rootEntity,
         kcUal: '',
         tokenId: compatibilityRowId,
+        metadataTokenId: compatibilityRowId,
         publicTripleCount: entry.publicTripleCount,
         privateTripleCount: entry.privateTripleCount,
         privateMerkleRoot: entry.privateMerkleRoot,
@@ -2592,6 +2593,7 @@ export class DKGPublisher implements Publisher {
 
         for (const km of kaMetadata) {
           km.kcUal = ual;
+          km.tokenId = kaId;
         }
         for (const entry of manifestEntries) {
           entry.tokenId = kaId;

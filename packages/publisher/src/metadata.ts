@@ -57,7 +57,10 @@ export interface KCMetadata {
 export interface KAMetadata {
   rootEntity: string;
   kcUal: string;
+  /** Real on-chain KA NFT id when confirmed. */
   tokenId: bigint;
+  /** Per-root compatibility row id used for `<ual>/1`, `<ual>/2`, ... subjects. */
+  metadataTokenId?: bigint;
   publicTripleCount: number;
   privateTripleCount: number;
   privateMerkleRoot?: Uint8Array;
@@ -153,7 +156,7 @@ export function generateKCMetadata(
   // current update and private-access paths still resolve per-root label rows
   // at <ual>/1, <ual>/2, ... . Keep this compatibility shape until those
   // consumers are migrated to aggregate multi-root KA metadata directly.
-  const kaUriFor = (ka: KAMetadata): string => `${ka.kcUal}/${ka.tokenId}`;
+  const kaUriFor = (ka: KAMetadata): string => `${ka.kcUal}/${ka.metadataTokenId ?? ka.tokenId}`;
   for (const ka of kaEntries) {
     const kaUri = kaUriFor(ka);
     quads.push(
