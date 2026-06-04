@@ -188,10 +188,11 @@ describe('DKGPublisher', () => {
     const roots = new Set(result.kaManifest.map((m: any) => m.rootEntity));
     expect(roots.has(ENTITY)).toBe(true);
     expect(roots.has(ENTITY2)).toBe(true);
-    // ...and they mint ONE on-chain KA. The manifest tokenId is the actual
-    // minted NFT id; metadataTokenId keeps the per-root `<ual>/N` row mapping.
+    // ...and they mint ONE on-chain KA. The manifest tokenId keeps the
+    // per-root `<ual>/N` compatibility row mapping; the shared NFT id stays on
+    // result.kaId and in confirmed metadata.
     const tokenIds = new Set(result.kaManifest.map((m: any) => String(m.tokenId)));
-    expect(tokenIds).toEqual(new Set([String(result.kaId)]));
+    expect(tokenIds).toEqual(new Set(['1', '2']));
     const metadataTokenIds = new Set(result.kaManifest.map((m: any) => String(m.metadataTokenId)));
     expect(metadataTokenIds).toEqual(new Set(['1', '2']));
     expect(result.kaId).toBeDefined();

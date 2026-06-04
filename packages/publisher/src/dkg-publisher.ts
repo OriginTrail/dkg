@@ -1180,6 +1180,7 @@ export class DKGPublisher implements Publisher {
     }
 
     const swmGraph = this.graphManager.sharedMemoryUri(contextGraphId, options?.subGraphName);
+    const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId, options?.subGraphName);
 
     let sparql: string;
     if (selection === 'all') {
@@ -1220,9 +1221,7 @@ export class DKGPublisher implements Publisher {
       throw new Error(`No quads in shared memory for context graph ${contextGraphId} matching selection`);
     }
     const rootEntities = [...autoPartition(quads).keys()];
-    if (rootEntities.length !== 1) {
-      throw new MultiRootPublishNotAtomicError(contextGraphId, rootEntities);
-    }
+    await this.assertSharedMemoryPublishBoundary(contextGraphId, swmMetaGraph, rootEntities);
 
     const ctxGraphId = options?.publishContextGraphId;
     const chainCgId = options?.onChainContextGraphId ?? ctxGraphId;
@@ -1729,9 +1728,10 @@ export class DKGPublisher implements Publisher {
 
     onPhase?.('prepare:manifest', 'start');
     // OT-RFC-44 / Design B: one file/lifecycle = ONE on-chain Knowledge Asset,
-    // however many entities it contains. `tokenId` remains the minted NFT id
-    // once confirmed; `metadataTokenId` is the per-root compatibility row id
-    // used for legacy `<ual>/1`, `<ual>/2`, ... metadata subjects.
+    // however many entities it contains. Manifest `tokenId` remains the
+    // per-root compatibility row id because legacy callers still build
+    // `${ual}/${tokenId}` lookup subjects. The shared on-chain KA id is exposed
+    // through `result.kaId` and confirmed metadata `dkg:tokenId`.
     let metadataTokenId = 1n;
     for (const entry of canonical.manifestEntries) {
       const compatibilityRowId = metadataTokenId++;
@@ -2595,9 +2595,6 @@ export class DKGPublisher implements Publisher {
           km.kcUal = ual;
           km.tokenId = kaId;
         }
-        for (const entry of manifestEntries) {
-          entry.tokenId = kaId;
-        }
         let confirmedQuads = generateConfirmedFullMetadata(
           {
             ual,
@@ -3277,6 +3274,77 @@ export class DKGPublisher implements Publisher {
 
   skolemize(rootEntity: string, quads: Quad[]): Quad[] {
     return skolemize(rootEntity, quads);
+  }
+
+  private async assertSharedMemoryPublishBoundary(
+    contextGraphId: string,
+    swmMetaGraph: string,
+    rootEntities: readonly string[],
+  ): Promise<void> {
+    if (rootEntities.length <= 1) return;
+
+    const DKG = 'http://dkg.io/ontology/';
+    const roots = [...new Set(rootEntities.map((root) => String(root).trim()).filter(isSafeIri))];
+    if (roots.length !== rootEntities.length) {
+      throw new MultiRootPublishNotAtomicError(contextGraphId, rootEntities);
+    }
+
+    const rootSet = new Set(roots);
+    const rootValues = roots.map((root) => `<${assertSafeIri(root)}>`).join(' ');
+    const candidates = await this.store.query(
+      `SELECT DISTINCT ?op ?entity WHERE {
+        GRAPH <${assertSafeIri(swmMetaGraph)}> {
+          VALUES ?entity { ${rootValues} }
+          ?op <${DKG}rootEntity> ?entity .
+        }
+      }`,
+    );
+    if (candidates.type !== 'bindings' || candidates.bindings.length === 0) {
+      throw new MultiRootPublishNotAtomicError(contextGraphId, rootEntities);
+    }
+
+    const candidateRootsByOperation = new Map<string, Set<string>>();
+    for (const row of candidates.bindings) {
+      const op = row['op'];
+      const entity = row['entity'];
+      if (!op || !entity || !isSafeIri(op) || !rootSet.has(entity)) continue;
+      if (!candidateRootsByOperation.has(op)) candidateRootsByOperation.set(op, new Set());
+      candidateRootsByOperation.get(op)!.add(entity);
+    }
+
+    const completeCandidateOps = [...candidateRootsByOperation.entries()]
+      .filter(([, matchedRoots]) => matchedRoots.size === rootSet.size)
+      .map(([op]) => op);
+    if (completeCandidateOps.length === 0) {
+      throw new MultiRootPublishNotAtomicError(contextGraphId, rootEntities);
+    }
+
+    const opValues = completeCandidateOps.map((op) => `<${assertSafeIri(op)}>`).join(' ');
+    const operationRoots = await this.store.query(
+      `SELECT DISTINCT ?op ?root WHERE {
+        GRAPH <${assertSafeIri(swmMetaGraph)}> {
+          VALUES ?op { ${opValues} }
+          ?op <${DKG}rootEntity> ?root .
+        }
+      }`,
+    );
+
+    const allRootsByOperation = new Map<string, Set<string>>();
+    if (operationRoots.type === 'bindings') {
+      for (const row of operationRoots.bindings) {
+        const op = row['op'];
+        const root = row['root'];
+        if (!op || !root || !isSafeIri(op) || !isSafeIri(root)) continue;
+        if (!allRootsByOperation.has(op)) allRootsByOperation.set(op, new Set());
+        allRootsByOperation.get(op)!.add(root);
+      }
+    }
+
+    for (const rootsForOperation of allRootsByOperation.values()) {
+      if (sameStringSet(rootSet, rootsForOperation)) return;
+    }
+
+    throw new MultiRootPublishNotAtomicError(contextGraphId, rootEntities);
   }
 
   /**
@@ -4403,6 +4471,14 @@ function stripSparqlLiteral(value: string | undefined): string | undefined {
   if (!value) return undefined;
   if (!value.startsWith('"')) return value;
   return value.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '');
+}
+
+function sameStringSet(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
+  if (a.size !== b.size) return false;
+  for (const value of a) {
+    if (!b.has(value)) return false;
+  }
+  return true;
 }
 
 function addOwner(owners: Map<string, Set<string>>, root: string, owner: string): void {

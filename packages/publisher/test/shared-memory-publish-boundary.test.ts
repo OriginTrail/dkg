@@ -9,9 +9,11 @@ import {
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { DKGPublisher } from '../src/index.js';
 import type { PublishResult } from '../src/publisher.js';
+import { generateShareMetadata } from '../src/metadata.js';
 
 const CONTEXT_GRAPH = 'publish-boundary';
 const SWM_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory`;
+const SWM_META_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory_meta`;
 const WORKSPACE_OWNER_PREDICATE = 'http://dkg.io/ontology/workspaceOwner';
 
 function q(subject: string, predicate = 'http://schema.org/name', object = '"value"', graph = SWM_GRAPH): Quad {
@@ -121,7 +123,34 @@ describe('publishFromSharedMemory selection boundary', () => {
     expect(publishArgs.quads.every((qq) => qq.subject === 'urn:test:root:one')).toBe(true);
   });
 
-  it('rejects explicit multi-root selection until the caller identifies one lifecycle boundary', async () => {
+  it('allows explicit multi-root selection when roots match one share-operation boundary', async () => {
+    const { publisher, store, publishSpy } = await makePublisher();
+    const roots = ['urn:test:root:one', 'urn:test:root:two'];
+    await store.insert([
+      q(roots[0]),
+      q(roots[1]),
+      ...generateShareMetadata({
+        contextGraphId: CONTEXT_GRAPH,
+        shareOperationId: 'op-design-b',
+        rootEntities: roots,
+        publisherPeerId: 'peer-a',
+        timestamp: new Date('2026-01-01T00:00:00.000Z'),
+      }, SWM_META_GRAPH),
+    ]);
+
+    await expect(
+      publisher.publishFromSharedMemory(CONTEXT_GRAPH, {
+        rootEntities: roots,
+      }),
+    ).resolves.toMatchObject({ status: 'tentative' });
+
+    expect(publishSpy).toHaveBeenCalledTimes(1);
+    const publishArgs = publishSpy.mock.calls[0][0];
+    expect(publishArgs.quads).toHaveLength(2);
+    expect(new Set(publishArgs.quads.map((qq) => qq.subject))).toEqual(new Set(roots));
+  });
+
+  it('rejects explicit multi-root selection when roots do not match one share-operation boundary', async () => {
     const { publisher, store, publishSpy } = await makePublisher();
     await store.insert([
       q('urn:test:root:one'),
