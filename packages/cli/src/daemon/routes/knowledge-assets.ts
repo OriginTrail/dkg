@@ -248,8 +248,14 @@ function emitPublished(
     status: typeof result?.status === "string" ? result.status : undefined,
     counts: { roots: rootCount, triples: publicTripleCount },
   });
+  // Attribute the activity to the actual seal author the publisher signed for
+  // (pre-signed / delegated / admin-as-agent flows), not the request token.
+  // Falls back to the request agent when the result carries no seal author.
+  const sealAuthorAddress =
+    typeof result?.seal?.authorAddress === "string" ? result.seal.authorAddress : undefined;
   recordActivity(ctx, contextGraphId, "published", {
     subGraphName,
+    actorAgentAddress: sealAuthorAddress,
     tripleCount: publicTripleCount,
     entityCount: rootCount,
   });
@@ -286,6 +292,21 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     if (!validateOptionalSubGraphName(subGraphName, res)) return;
     if (quads !== undefined && (!Array.isArray(quads) || quads.length === 0)) {
       return jsonResponse(res, 400, { error: '"quads" must be a non-empty array when supplied' });
+    }
+    // Type-check the opt-in flags before they are consumed by truthiness —
+    // otherwise `{"alsoShareSwm":"false"}` would leak into SWM and
+    // `{"alsoPublishVm":"x"}` would spend TRAC. `alsoPublishVm` also accepts an
+    // inline publish-options OBJECT (its supported control surface); a boolean
+    // is the "publish with defaults" form.
+    if (alsoShareSwm !== undefined && typeof alsoShareSwm !== "boolean") {
+      return jsonResponse(res, 400, { error: '"alsoShareSwm" must be a boolean' });
+    }
+    const alsoPublishVmIsObject =
+      typeof alsoPublishVm === "object" && alsoPublishVm !== null && !Array.isArray(alsoPublishVm);
+    if (alsoPublishVm !== undefined && typeof alsoPublishVm !== "boolean" && !alsoPublishVmIsObject) {
+      return jsonResponse(res, 400, {
+        error: '"alsoPublishVm" must be a boolean or an inline publish-options object',
+      });
     }
     // Validate the opt-in layer-transition combinations BEFORE create, so a
     // deterministically-invalid request never leaves durable partial state.
@@ -480,25 +501,20 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     }
   }
 
-  // GET /api/knowledge-assets/:name/{wm,swm,vm} — per-layer status
+  // GET /api/knowledge-assets/:name/{wm,swm,vm} — per-layer status [deferred]
+  //
+  // Deferred (returns 501) rather than echoing the same `assertion.history()`
+  // payload for every layer: the lifecycle descriptor exposes a single CURRENT
+  // `memoryLayer`, not per-layer presence, so /wm, /swm and /vm would return
+  // identical state after a promote/publish — a misleading route contract. A
+  // truthful per-layer view needs a descriptor/event → {present, status} mapping
+  // that does not exist yet; until it lands, use `GET /:name` for the full
+  // lifecycle state. (Tracked alongside the wm/pull-from follow-up, §10.5.3.)
   if (method === "GET" && (layer === "wm" || layer === "swm" || layer === "vm") && !verb) {
-    const cg = url.searchParams.get("contextGraphId");
-    if (!validateRequiredContextGraphId(cg, res)) return;
-    const normalizedContextGraphId = normalizeContextGraphIdOrUri(cg!);
-    const subGraphName = url.searchParams.get("subGraphName") ?? undefined;
-    if (!validateOptionalSubGraphName(subGraphName, res)) return;
-    try {
-      const hist = await agent.assertion.history(
-        normalizedContextGraphId,
-        name,
-        subGraphName ? { subGraphName } : undefined,
-      );
-      if (!hist) return jsonResponse(res, 404, { error: `No knowledge asset "${name}"` });
-      return jsonResponse(res, 200, { layer, ...hist });
-    } catch (e: any) {
-      if (routeError(res, e)) return;
-      return jsonResponse(res, 500, { error: e?.message ?? String(e) });
-    }
+    return jsonResponse(res, 501, {
+      error: `Per-layer status (GET /:name/${layer}) is not implemented yet — the lifecycle descriptor has no per-layer view mapping. Use GET /api/knowledge-assets/${encodeURIComponent(name)} for full state (OT-RFC-43 §10.5 — follow-up).`,
+      layer,
+    });
   }
 
   if (method !== "POST") return;

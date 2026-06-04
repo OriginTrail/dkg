@@ -480,4 +480,84 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
     expect(agent.assertion.create).not.toHaveBeenCalled();
     expect(agent.publishFromFinalizedAssertion).not.toHaveBeenCalled();
   });
+
+  // ── 34ae7dd1f re-review ─────────────────────────────────────────────────────
+
+  it('atomic create rejects a non-boolean alsoShareSwm (truthiness footgun)', async () => {
+    const agent = makeAssertionAgent();
+    const quads = [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"', graph: '' }];
+    const ctx = ctxFor('POST', '/api/knowledge-assets', { contextGraphId: 'cg', name: 'f', quads, alsoShareSwm: 'false' }, agent);
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(400);
+    expect(body(ctx).error).toContain('"alsoShareSwm" must be a boolean');
+    expect(agent.assertion.create).not.toHaveBeenCalled();
+  });
+
+  it('atomic create rejects an alsoPublishVm that is neither boolean nor an options object', async () => {
+    const agent = makeAssertionAgent();
+    const quads = [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"', graph: '' }];
+    const ctx = ctxFor('POST', '/api/knowledge-assets', { contextGraphId: 'cg', name: 'f', quads, alsoShareSwm: true, alsoPublishVm: 'yes' }, agent);
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(400);
+    expect(body(ctx).error).toContain('"alsoPublishVm" must be a boolean or an inline publish-options object');
+    expect(agent.assertion.create).not.toHaveBeenCalled();
+  });
+
+  it('atomic create accepts an inline alsoPublishVm options object and coerces it', async () => {
+    const agent = makeAssertionAgent();
+    const quads = [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"', graph: '' }];
+    const ctx = ctxFor(
+      'POST',
+      '/api/knowledge-assets',
+      { contextGraphId: 'cg', name: 'f', quads, alsoShareSwm: true, alsoPublishVm: { publishEpochs: '4' } },
+      agent,
+    );
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(201);
+    expect(agent.publishFromFinalizedAssertion).toHaveBeenCalledWith('cg', 'f', { publishEpochs: 4 });
+  });
+
+  it('attributes the published activity row to the seal author, not the request token', async () => {
+    const sealAuthor = '0xAAaAAaAAaAAAAAAAaaAAaAaAaaAAaAaaAaAAAAaa';
+    const agent = makeAssertionAgent({
+      publishFromFinalizedAssertion: vi.fn(async () => ({
+        kaId: 7n,
+        status: 'confirmed',
+        ual: 'did:dkg:hardhat:31337/0xabc/7',
+        onChainResult: { txHash: '0xtx' },
+        publicQuads: [],
+        kaManifest: [],
+        seal: { authorAddress: sealAuthor },
+      })),
+    });
+    const insertNotification = vi.fn(() => 1);
+    const quads = [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"', graph: '' }];
+    const ctx = ctxFor(
+      'POST',
+      '/api/knowledge-assets',
+      { contextGraphId: 'cg', name: 'f', quads, alsoShareSwm: true, alsoPublishVm: true },
+      agent,
+      {
+        emitNotification: vi.fn(),
+        dashDb: { insertNotification } as unknown as RequestContext['dashDb'],
+        requestAgentAddress: '0x0000000000000000000000000000000000000001',
+      },
+    );
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(201);
+    const publishedMeta = insertNotification.mock.calls
+      .map(([row]: [any]) => JSON.parse(row.meta))
+      .find((m: any) => m.kind === 'published');
+    expect(publishedMeta).toBeTruthy();
+    expect(String(publishedMeta.actorAgentDid).toLowerCase()).toContain(sealAuthor.toLowerCase());
+  });
+
+  it('per-layer GET /:name/{wm,swm,vm} is deferred (501) rather than echoing identical state', async () => {
+    const agent = makeAssertionAgent();
+    const ctx = ctxFor('GET', '/api/knowledge-assets/f/swm?contextGraphId=cg', undefined, agent);
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(501);
+    expect(body(ctx)).toMatchObject({ layer: 'swm' });
+    expect(agent.assertion.history).not.toHaveBeenCalled();
+  });
 });
