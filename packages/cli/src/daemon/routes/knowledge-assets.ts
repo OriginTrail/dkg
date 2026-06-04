@@ -134,6 +134,12 @@ function resolveFinalizeOptions(
   };
 }
 
+function actorFromFinalizeOptions(finalizeOptions: Record<string, unknown>): string | undefined {
+  if (typeof finalizeOptions.authorAgentAddress === "string") return finalizeOptions.authorAgentAddress;
+  const preSigned = finalizeOptions.preSignedAuthorAttestation as { address?: unknown } | undefined;
+  return typeof preSigned?.address === "string" ? preSigned.address : undefined;
+}
+
 function recordActivity(
   ctx: RequestContext,
   contextGraphId: string,
@@ -215,6 +221,14 @@ function resolveFinalizedPublishOptions(
   }
 
   const clearValue = clearAfter !== undefined ? clearAfter : clearSharedMemoryAfter;
+  if (clearAfter !== undefined && typeof clearAfter !== "boolean") {
+    jsonResponse(res, 400, { error: '"clearAfter" must be a boolean when supplied' });
+    return null;
+  }
+  if (clearSharedMemoryAfter !== undefined && typeof clearSharedMemoryAfter !== "boolean") {
+    jsonResponse(res, 400, { error: '"clearSharedMemoryAfter" must be a boolean when supplied' });
+    return null;
+  }
   return {
     ...(clearValue !== undefined ? { clearSharedMemoryAfter: clearValue } : {}),
     ...(resolvedPublishEpochs !== undefined ? { publishEpochs: resolvedPublishEpochs } : {}),
@@ -345,46 +359,54 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         source: "api",
         counts: { triples: 0 },
       });
+      const finalizeActorAddress = actorFromFinalizeOptions(finalizeOptions);
       recordActivity(ctx, resolvedContextGraphId, "created", {
         subGraphName,
-        actorAgentAddress:
-          typeof finalizeOptions.authorAgentAddress === "string"
-            ? finalizeOptions.authorAgentAddress
-            : requestAgentAddress,
+        actorAgentAddress: finalizeActorAddress ?? requestAgentAddress,
       });
       const result: Record<string, unknown> = { name, assertionUri, status: "draft-open" };
 
       // autoFinalize: when quads are supplied, write + seal in the same call
       // (OT-RFC-43 §10.5.5). `also*` are opt-in layer transitions on top.
       if (Array.isArray(quads) && quads.length > 0) {
-        await agent.assertion.write(
-          resolvedContextGraphId,
-          name,
-          quads,
-          subGraphName ? { subGraphName } : undefined,
-        );
-        emitMemoryGraphChanged?.({
-          contextGraphId: resolvedContextGraphId,
-          layers: ["wm"],
-          subGraphName,
-          operation: "assertion_written",
-          source: "api",
-          counts: { triples: quads.length },
-        });
-        result.written = quads.length;
-        const seal = await agent.assertion.finalize(resolvedContextGraphId, name, {
-          ...(subGraphName ? { subGraphName } : {}),
-          ...finalizeOptions,
-        });
-        emitMemoryGraphChanged?.({
-          contextGraphId: resolvedContextGraphId,
-          layers: ["wm"],
-          subGraphName,
-          operation: "assertion_finalized",
-          source: "api",
-        });
-        result.merkleRoot = hex(seal.merkleRoot);
-        result.status = "wm-sealed";
+        try {
+          await agent.assertion.write(
+            resolvedContextGraphId,
+            name,
+            quads,
+            subGraphName ? { subGraphName } : undefined,
+          );
+          emitMemoryGraphChanged?.({
+            contextGraphId: resolvedContextGraphId,
+            layers: ["wm"],
+            subGraphName,
+            operation: "assertion_written",
+            source: "api",
+            counts: { triples: quads.length },
+          });
+          result.written = quads.length;
+          result.status = "wm-written";
+          const seal = await agent.assertion.finalize(resolvedContextGraphId, name, {
+            ...(subGraphName ? { subGraphName } : {}),
+            ...finalizeOptions,
+          });
+          emitMemoryGraphChanged?.({
+            contextGraphId: resolvedContextGraphId,
+            layers: ["wm"],
+            subGraphName,
+            operation: "assertion_finalized",
+            source: "api",
+          });
+          result.merkleRoot = hex(seal.merkleRoot);
+          result.status = "wm-sealed";
+        } catch (e: any) {
+          const phase = result.written === quads.length ? "wm-finalize" : "wm-write";
+          return jsonResponse(res, 207, {
+            created: true,
+            ...result,
+            errors: [{ phase, error: e?.message ?? String(e) }],
+          });
+        }
       }
 
       const errors: Array<{ phase: string; error: string }> = [];
@@ -409,6 +431,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
             });
             recordActivity(ctx, resolvedContextGraphId, "promoted", {
               subGraphName,
+              actorAgentAddress: finalizeActorAddress ?? requestAgentAddress,
               tripleCount: share.promotedCount,
             });
           }
@@ -485,13 +508,19 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     const cg = url.searchParams.get("contextGraphId");
     if (!validateRequiredContextGraphId(cg, res)) return;
     const normalizedContextGraphId = normalizeContextGraphIdOrUri(cg!);
+    const rawAgentAddress = url.searchParams.get("agentAddress") ?? undefined;
+    if (rawAgentAddress && !/^[\w:.\-]+$/.test(rawAgentAddress)) {
+      return jsonResponse(res, 400, { error: "Invalid agentAddress format" });
+    }
     const subGraphName = url.searchParams.get("subGraphName") ?? undefined;
     if (!validateOptionalSubGraphName(subGraphName, res)) return;
     try {
       const hist = await agent.assertion.history(
         normalizedContextGraphId,
         name,
-        subGraphName ? { subGraphName } : undefined,
+        rawAgentAddress || subGraphName
+          ? { ...(rawAgentAddress ? { agentAddress: rawAgentAddress } : {}), ...(subGraphName ? { subGraphName } : {}) }
+          : undefined,
       );
       if (!hist) return jsonResponse(res, 404, { error: `No knowledge asset "${name}" in context graph "${normalizedContextGraphId}"` });
       return jsonResponse(res, 200, hist);
@@ -641,9 +670,9 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         ...opts,
       });
       emitPublished(ctx, resolvedContextGraphId, pub, subGraphName, clearSharedMemoryAfterForNamedPublish(opts));
-      // Mirror the legacy publish route: a non-throwing `contextGraphError` is a
-      // partial success → 207, not 200.
-      const httpStatus = pub?.contextGraphError ? 207 : 200;
+      // Mirror the atomic path: non-throwing tentative/failed/contextGraphError
+      // results are partial successes, not confirmed publishes.
+      const httpStatus = pub?.status === "confirmed" && !pub?.contextGraphError ? 200 : 207;
       return jsonResponse(res, httpStatus, {
         kaId: pub?.kaId,
         status: pub?.status,

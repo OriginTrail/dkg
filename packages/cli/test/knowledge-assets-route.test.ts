@@ -262,6 +262,45 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
     expect((b.errors as any[])[0]).toMatchObject({ phase: 'swm-share' });
   });
 
+  it('atomic create returns partial success if write fails after create', async () => {
+    const agent = makeAssertionAgent({
+      assertion: {
+        write: vi.fn(async () => { throw new Error('reserved namespace'); }),
+      },
+    });
+    const quads = [{ subject: 'urn:dkg:file:x', predicate: 'ex:p', object: '"x"', graph: '' }];
+    const ctx = ctxFor('POST', '/api/knowledge-assets', { contextGraphId: 'cg', name: 'f', quads }, agent);
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(207);
+    expect(body(ctx)).toMatchObject({
+      created: true,
+      assertionUri: 'urn:dkg:assertion:cg:agent:f',
+      status: 'draft-open',
+    });
+    expect((body(ctx).errors as any[])[0]).toMatchObject({ phase: 'wm-write' });
+    expect(agent.assertion.create).toHaveBeenCalledOnce();
+    expect(agent.assertion.finalize).not.toHaveBeenCalled();
+  });
+
+  it('atomic create returns partial success if finalize fails after write', async () => {
+    const agent = makeAssertionAgent({
+      assertion: {
+        finalize: vi.fn(async () => { throw new Error('signer mismatch'); }),
+      },
+    });
+    const quads = [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"', graph: '' }];
+    const ctx = ctxFor('POST', '/api/knowledge-assets', { contextGraphId: 'cg', name: 'f', quads }, agent);
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(207);
+    expect(body(ctx)).toMatchObject({
+      created: true,
+      assertionUri: 'urn:dkg:assertion:cg:agent:f',
+      status: 'wm-written',
+      written: 1,
+    });
+    expect((body(ctx).errors as any[])[0]).toMatchObject({ phase: 'wm-finalize' });
+  });
+
   it('POST .../:name/wm/write appends quads', async () => {
     const agent = makeAssertionAgent();
     const quads = [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"', graph: '' }];
@@ -352,6 +391,23 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
     await handleKnowledgeAssetsRoutes(ctx);
     expect(status(ctx)).toBe(200);
     expect(agent.assertion.history).toHaveBeenCalledWith('cg', 'f', undefined);
+  });
+
+  it('GET /api/knowledge-assets/:name passes explicit agentAddress to history', async () => {
+    const agent = makeAssertionAgent();
+    const owner = '0x2222222222222222222222222222222222222222';
+    const ctx = ctxFor('GET', `/api/knowledge-assets/f?contextGraphId=cg&agentAddress=${owner}`, undefined, agent);
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(200);
+    expect(agent.assertion.history).toHaveBeenCalledWith('cg', 'f', { agentAddress: owner });
+  });
+
+  it('GET /api/knowledge-assets/:name rejects malformed agentAddress', async () => {
+    const agent = makeAssertionAgent();
+    const ctx = ctxFor('GET', '/api/knowledge-assets/f?contextGraphId=cg&agentAddress=bad%20actor', undefined, agent);
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(400);
+    expect(agent.assertion.history).not.toHaveBeenCalled();
   });
 
   it('GET /api/knowledge-assets/:name validates history query params before dispatch', async () => {
@@ -472,6 +528,37 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
     expect(body(ctx).contextGraphError).toBe('context graph not subscribed');
   });
 
+  it('vm/publish surfaces a non-confirmed status as 207', async () => {
+    const agent = makeAssertionAgent({
+      publishFromFinalizedAssertion: vi.fn(async () => ({
+        kaId: 7n,
+        status: 'tentative',
+        ual: 'did:dkg:hardhat:31337/0xabc/7',
+        onChainResult: { txHash: '0xtx' },
+        publicQuads: [],
+        kaManifest: [],
+      })),
+    });
+    const ctx = ctxFor('POST', '/api/knowledge-assets/f/vm/publish', { contextGraphId: 'cg' }, agent);
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(207);
+    expect(body(ctx)).toMatchObject({ status: 'tentative' });
+  });
+
+  it('vm/publish rejects mis-typed clearAfter before publishing', async () => {
+    const agent = makeAssertionAgent();
+    const ctx = ctxFor(
+      'POST',
+      '/api/knowledge-assets/f/vm/publish',
+      { contextGraphId: 'cg', options: { clearAfter: 'false' } },
+      agent,
+    );
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(400);
+    expect(body(ctx).error).toContain('"clearAfter" must be a boolean');
+    expect(agent.publishFromFinalizedAssertion).not.toHaveBeenCalled();
+  });
+
   it('unknown POST (layer, verb) shapes fall through to the daemon 404 without reading the body', async () => {
     const agent = makeAssertionAgent();
     const ctx = ctxFor('POST', '/api/knowledge-assets/f/foo/bar', { contextGraphId: 'cg' }, agent);
@@ -550,6 +637,41 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
       .find((m: any) => m.kind === 'published');
     expect(publishedMeta).toBeTruthy();
     expect(String(publishedMeta.actorAgentDid).toLowerCase()).toContain(sealAuthor.toLowerCase());
+  });
+
+  it('attributes atomic created/promoted activities to the pre-signed author', async () => {
+    const attestedAuthor = '0x3333333333333333333333333333333333333333';
+    const agent = makeAssertionAgent();
+    const insertNotification = vi.fn(() => 1);
+    const quads = [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"', graph: '' }];
+    const ctx = ctxFor(
+      'POST',
+      '/api/knowledge-assets',
+      {
+        contextGraphId: 'cg',
+        name: 'f',
+        quads,
+        alsoShareSwm: true,
+        preSignedAuthorAttestation: {
+          address: attestedAuthor,
+          signature: { r: `0x${'22'.repeat(32)}`, vs: `0x${'33'.repeat(32)}` },
+        },
+      },
+      agent,
+      {
+        emitNotification: vi.fn(),
+        dashDb: { insertNotification } as unknown as RequestContext['dashDb'],
+        requestAgentAddress: '0x0000000000000000000000000000000000000001',
+      },
+    );
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(201);
+    const activityMetas = insertNotification.mock.calls.map(([row]: [any]) => JSON.parse(row.meta));
+    for (const kind of ['created', 'promoted']) {
+      const meta = activityMetas.find((m: any) => m.kind === kind);
+      expect(meta).toBeTruthy();
+      expect(String(meta.actorAgentDid).toLowerCase()).toContain(attestedAuthor.toLowerCase());
+    }
   });
 
   it('per-layer GET /:name/{wm,swm,vm} is deferred (501) rather than echoing identical state', async () => {
