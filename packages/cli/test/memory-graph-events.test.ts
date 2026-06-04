@@ -448,6 +448,32 @@ describe('daemon memory_graph_changed route emissions', () => {
     expect(ctx.tracker.complete).toHaveBeenCalledWith(expect.anything(), { tripleCount: 2 });
   });
 
+  it('keeps kas tokenId as the metadata row id when a shared on-chain token id is present', async () => {
+    const publishFromSharedMemory = vi.fn().mockResolvedValue({
+      kaId: 42n,
+      status: 'confirmed',
+      kaManifest: [{ tokenId: 42n, metadataTokenId: 1n, rootEntity: 'urn:root' }],
+      publicQuads: [
+        { subject: 'urn:root', predicate: 'urn:p1', object: 'urn:o1', graph: 'urn:g' },
+      ],
+    });
+    const getContextGraphOnChainId = vi.fn().mockResolvedValue('7');
+    const store = createSwmStore(['urn:root']);
+    const ctx = createContext('/api/shared-memory/publish', {
+      contextGraphId: 'project-a',
+      selection: ['urn:root'],
+    }, {
+      agent: { publishFromSharedMemory, getContextGraphOnChainId, store } as unknown as RequestContext['agent'],
+    });
+
+    await handleMemoryRoutes(ctx);
+
+    expect((ctx.res as unknown as { statusCode: number }).statusCode).toBe(200);
+    expect(responseBody(ctx).kas).toEqual([
+      { tokenId: '1', metadataTokenId: '1', onChainTokenId: '42', rootEntity: 'urn:root' },
+    ]);
+  });
+
   it('preflights explicit SWM roots and skips stale selections before publishing', async () => {
     const store = createSwmStore(['urn:root:present']);
     const publishFromSharedMemory = vi.fn().mockResolvedValue({

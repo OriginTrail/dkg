@@ -273,6 +273,58 @@ describe('FinalizationHandler', () => {
       '"42"^^<http://www.w3.org/2001/XMLSchema#integer>',
       '"42"^^<http://www.w3.org/2001/XMLSchema#integer>',
     ]);
+
+    const countResult = await store.query(
+      `SELECT ?count WHERE {
+        GRAPH <${metaGraph}> {
+          <${ual}> <http://dkg.io/ontology/kaCount> ?count .
+        }
+      }`,
+    );
+    expect(countResult.type).toBe('bindings');
+    if (countResult.type !== 'bindings') return;
+    expect(countResult.bindings[0]?.['count']).toBe('"1"^^<http://www.w3.org/2001/XMLSchema#integer>');
+  });
+
+  it('preserves legacy range kaCount when finalization covers distinct token ids', async () => {
+    const roots = ['urn:test:legacy-a', 'urn:test:legacy-b'];
+    const ual = 'did:dkg:evm:31337/0xABC/100';
+    const metaGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
+
+    await (handler as any).promoteSharedMemoryToCanonical(
+      CONTEXT_GRAPH,
+      [
+        { subject: roots[0], predicate: 'http://schema.org/name', object: '"Alice"', graph: '' },
+        { subject: roots[1], predicate: 'http://schema.org/name', object: '"Bob"', graph: '' },
+      ],
+      ual,
+      roots,
+      '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266',
+      '0x' + 'cd'.repeat(32),
+      101,
+      100n,
+      101n,
+      100n,
+      createOperationContext('system'),
+    );
+
+    const result = await store.query(
+      `SELECT ?tokenId ?count WHERE {
+        GRAPH <${metaGraph}> {
+          ?ka <http://dkg.io/ontology/partOf> <${ual}> ;
+              <http://dkg.io/ontology/tokenId> ?tokenId .
+          <${ual}> <http://dkg.io/ontology/kaCount> ?count .
+        }
+      } ORDER BY ?ka`,
+    );
+
+    expect(result.type).toBe('bindings');
+    if (result.type !== 'bindings') return;
+    expect(result.bindings.map((row) => row['tokenId'])).toEqual([
+      '"100"^^<http://www.w3.org/2001/XMLSchema#integer>',
+      '"101"^^<http://www.w3.org/2001/XMLSchema#integer>',
+    ]);
+    expect(result.bindings[0]?.['count']).toBe('"2"^^<http://www.w3.org/2001/XMLSchema#integer>');
   });
 
   it('legacy publisher (no tag-15 on the wire) → no root dual-write, even when targetContextGraphId === local on-chain id (Codex r5b explicit-remap-to-self regression)', async () => {

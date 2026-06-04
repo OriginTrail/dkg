@@ -14,6 +14,8 @@ function makePublishMessage(opts: {
   contextGraphId?: string;
   nquads?: string;
   kas?: Array<{ tokenId: number; rootEntity: string; privateMerkleRoot: Uint8Array; privateTripleCount: number }>;
+  startKAId?: number;
+  endKAId?: number;
 }): Uint8Array {
   return encodePublishRequest({
     ual: opts.ual ?? '',
@@ -22,8 +24,8 @@ function makePublishMessage(opts: {
     kas: opts.kas ?? [],
     publisherIdentity: new Uint8Array(32),
     publisherAddress: '0x1111111111111111111111111111111111111111',
-    startKAId: 0,
-    endKAId: 0,
+    startKAId: opts.startKAId ?? 0,
+    endKAId: opts.endKAId ?? 0,
     chainId: 'mock:31337',
     publisherSignatureR: new Uint8Array(0),
     publisherSignatureVs: new Uint8Array(0),
@@ -147,6 +149,50 @@ describe('GossipPublishHandler', () => {
       countAfter,
       'replay of identical gossip UAL must not add any quads to the data graph',
     ).toBe(countBefore);
+  });
+
+  it('preserves legacy range kaCount when gossip publish carries distinct token ids', async () => {
+    const { store, handler } = createHandler();
+    const roots = ['urn:gossip:legacy-a', 'urn:gossip:legacy-b'];
+    const nquads = roots
+      .map((root, i) => `<${root}> <http://schema.org/name> "Entity ${i}" .`)
+      .join('\n');
+    const kas = roots.map((rootEntity, i) => ({
+      tokenId: i + 1,
+      rootEntity,
+      privateMerkleRoot: new Uint8Array(0),
+      privateTripleCount: 0,
+    }));
+
+    const data = makePublishMessage({
+      ual: 'did:dkg:mock:31337/0x1/100',
+      contextGraphId: CONTEXT_GRAPH,
+      nquads,
+      kas,
+      startKAId: 100,
+      endKAId: 101,
+    });
+
+    await handler.handlePublishMessage(data, CONTEXT_GRAPH);
+
+    const metaGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
+    const result = await store.query(
+      `SELECT ?tokenId ?count WHERE {
+        GRAPH <${metaGraph}> {
+          ?ka <http://dkg.io/ontology/partOf> <did:dkg:mock:31337/0x1/100> ;
+              <http://dkg.io/ontology/tokenId> ?tokenId .
+          <did:dkg:mock:31337/0x1/100> <http://dkg.io/ontology/kaCount> ?count .
+        }
+      } ORDER BY ?ka`,
+    );
+
+    expect(result.type).toBe('bindings');
+    if (result.type !== 'bindings') return;
+    expect(result.bindings.map((row) => row['tokenId'])).toEqual([
+      '"100"^^<http://www.w3.org/2001/XMLSchema#integer>',
+      '"101"^^<http://www.w3.org/2001/XMLSchema#integer>',
+    ]);
+    expect(result.bindings[0]?.['count']).toBe('"2"^^<http://www.w3.org/2001/XMLSchema#integer>');
   });
 
   it('inserts quads for UAL with empty kas (no structural validation)', async () => {

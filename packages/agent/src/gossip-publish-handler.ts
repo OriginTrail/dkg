@@ -305,23 +305,28 @@ export class GossipPublishHandler {
           .filter(ka => ka.privateMerkleRoot?.length)
           .map(ka => new Uint8Array(ka.privateMerkleRoot));
         const merkleRoot = computeFlatKCRoot(normalized, privateRoots);
+        const startKAId = protoToBigInt(request.startKAId ?? 0);
+        const endKAId = protoToBigInt(request.endKAId ?? 0);
 
         const partitioned = autoPartition(normalized);
         const kaMetadata: KAMetadata[] = [];
 
-        let metadataTokenId = 1n;
         const metadataRootOrder = request.kas?.length
           ? request.kas.map((ka) => ka.rootEntity)
           : [...partitioned.keys()];
-        for (const rootEntity of metadataRootOrder) {
+        for (let tokenIdx = 0; tokenIdx < metadataRootOrder.length; tokenIdx++) {
+          const rootEntity = metadataRootOrder[tokenIdx];
           const entityQuads = partitioned.get(rootEntity);
           if (!entityQuads) continue;
           const kaEntry = request.kas?.find((ka) => ka.rootEntity === rootEntity);
-          const compatibilityRowId = metadataTokenId++;
+          const compatibilityRowId = BigInt(tokenIdx + 1);
+          const tokenId = startKAId > 0n && endKAId > 0n
+            ? (startKAId === endKAId ? startKAId : startKAId + BigInt(tokenIdx))
+            : kaEntry?.tokenId != null ? BigInt(kaEntry.tokenId as any) : compatibilityRowId;
           kaMetadata.push({
             rootEntity,
             kcUal: request.ual,
-            tokenId: kaEntry?.tokenId != null ? BigInt(kaEntry.tokenId as any) : compatibilityRowId,
+            tokenId,
             metadataTokenId: compatibilityRowId,
             publicTripleCount: entityQuads.length,
             privateTripleCount: kaEntry?.privateTripleCount ?? 0,
@@ -334,7 +339,7 @@ export class GossipPublishHandler {
           ual: request.ual,
           contextGraphId: request.contextGraphId,
           merkleRoot,
-          kaCount: kaMetadata.length > 0 ? 1 : 0,
+          kaCount: distinctTokenIdCount(kaMetadata),
           publisherPeerId: request.publisherAddress || 'unknown',
           timestamp: new Date(),
           subGraphName,
@@ -350,8 +355,6 @@ export class GossipPublishHandler {
         // attempt targeted verification and promote to confirmed if valid.
         const txHash = request.txHash ?? '';
         const blockNumber = protoToNumber(request.blockNumber ?? 0);
-        const startKAId = protoToBigInt(request.startKAId ?? 0);
-        const endKAId = protoToBigInt(request.endKAId ?? 0);
 
         if (txHash && blockNumber > 0 && startKAId > 0n && request.publisherAddress) {
           phase?.('chain-verify', 'start');
@@ -574,6 +577,9 @@ function protoToBigInt(val: number | bigint | { low: number; high: number; unsig
   return (BigInt(val.high >>> 0) << 32n) | BigInt(val.low >>> 0);
 }
 
+function distinctTokenIdCount(kaMetadata: KAMetadata[]): number {
+  return new Set(kaMetadata.map((ka) => ka.tokenId.toString())).size;
+}
 
 function stripLiteral(s: string): string {
   if (s.startsWith('"') && s.endsWith('"')) return s.slice(1, -1);

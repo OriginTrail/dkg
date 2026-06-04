@@ -1183,6 +1183,7 @@ export class DKGPublisher implements Publisher {
     const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId, options?.subGraphName);
 
     let sparql: string;
+    let requestedRoots: string[] | undefined;
     if (selection === 'all') {
       sparql = `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${swmGraph}> { ?s ?p ?o } }`;
     } else {
@@ -1200,6 +1201,7 @@ export class DKGPublisher implements Publisher {
         );
       }
       const values = roots.map((r) => `<${r}>`).join(' ');
+      requestedRoots = roots;
       sparql = `CONSTRUCT { ?s ?p ?o } WHERE {
         GRAPH <${swmGraph}> {
           VALUES ?root { ${values} }
@@ -1221,6 +1223,15 @@ export class DKGPublisher implements Publisher {
       throw new Error(`No quads in shared memory for context graph ${contextGraphId} matching selection`);
     }
     const rootEntities = [...autoPartition(quads).keys()];
+    if (requestedRoots) {
+      const foundRoots = new Set(rootEntities);
+      const missingRoots = requestedRoots.filter((root) => !foundRoots.has(root));
+      if (missingRoots.length > 0) {
+        throw new Error(
+          `No quads in shared memory for requested rootEntities in context graph ${contextGraphId}: ${missingRoots.join(', ')}`,
+        );
+      }
+    }
     await this.assertSharedMemoryPublishBoundary(contextGraphId, swmMetaGraph, rootEntities);
 
     const ctxGraphId = options?.publishContextGraphId;

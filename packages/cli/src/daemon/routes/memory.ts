@@ -421,11 +421,7 @@ function publishResponsePayload(
   return {
     kaId: String(result.kaId),
     status: result.status,
-    kas: result.kaManifest.map((ka: any) => ({
-      tokenId: String(ka.tokenId),
-      ...(ka.metadataTokenId != null ? { metadataTokenId: String(ka.metadataTokenId) } : {}),
-      rootEntity: ka.rootEntity,
-    })),
+    kas: result.kaManifest.map(serializeKaResponseEntry),
     ...(chain && { txHash: chain.txHash, blockNumber: chain.blockNumber }),
     ...(resolvedPublishContextGraphId != null
       ? { publishContextGraphId: String(resolvedPublishContextGraphId) }
@@ -433,6 +429,18 @@ function publishResponsePayload(
     ...(result.contextGraphError
       ? { contextGraphError: result.contextGraphError }
       : {}),
+  };
+}
+
+function serializeKaResponseEntry(ka: any): Record<string, unknown> {
+  const rowTokenId = ka.metadataTokenId ?? ka.tokenId;
+  const tokenId = String(rowTokenId);
+  const onChainTokenId = ka.tokenId != null ? String(ka.tokenId) : undefined;
+  return {
+    tokenId,
+    ...(ka.metadataTokenId != null ? { metadataTokenId: String(ka.metadataTokenId) } : {}),
+    ...(onChainTokenId && onChainTokenId !== tokenId ? { onChainTokenId } : {}),
+    rootEntity: ka.rootEntity,
   };
 }
 
@@ -1755,11 +1763,7 @@ WHERE {
             Array.from(result.seal.merkleRoot)
               .map((b) => b.toString(16).padStart(2, '0'))
               .join(''),
-          kas: result.kaManifest.map((ka: any) => ({
-            tokenId: String(ka.tokenId),
-            ...(ka.metadataTokenId != null ? { metadataTokenId: String(ka.metadataTokenId) } : {}),
-            rootEntity: ka.rootEntity,
-          })),
+          kas: result.kaManifest.map(serializeKaResponseEntry),
           ...(chain && { txHash: chain.txHash, blockNumber: chain.blockNumber }),
           ...(result.contextGraphError
             ? { contextGraphError: result.contextGraphError }

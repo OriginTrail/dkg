@@ -1058,7 +1058,7 @@ export class FinalizationHandler {
       ual,
       contextGraphId,
       merkleRoot,
-      kaCount: kaMetadata.length > 0 ? 1 : 0,
+      kaCount: distinctTokenIdCount(kaMetadata),
       publisherPeerId: wsPeerId || publisherAddress,
       timestamp: new Date(),
       subGraphName,
@@ -1238,6 +1238,10 @@ export class FinalizationHandler {
       }
     }
   }
+}
+
+function distinctTokenIdCount(kaMetadata: KAMetadata[]): number {
+  return new Set(kaMetadata.map((ka) => ka.tokenId.toString())).size;
 }
 
 function protoToNumber(val: number | bigint | { low: number; high: number; unsigned: boolean }): number {
