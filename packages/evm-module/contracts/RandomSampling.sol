@@ -280,14 +280,30 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
         uint256 cgId = contextGraphStorage.kaToContextGraph(challenge.knowledgeAssetId);
         bool isCurated = cgId != 0 && contextGraphStorage.getIsCurated(cgId);
 
+        // OT-RFC-43 / R3 — multi-store (generation) seam. Verify against the
+        // EXACT KA store this challenge was ISSUED against — recorded per
+        // challenge in `_generateChallenge` as `knowledgeAssetStorageContract`
+        // — rather than the currently-bound `knowledgeAssetStorage` singleton.
+        // Today there is exactly one KA store, so
+        // `challenge.knowledgeAssetStorageContract == address(knowledgeAssetStorage)`
+        // and this is strictly behaviour-neutral. Reading it here (1) keeps the
+        // recorded field LIVE so it is not pruned as dead code, (2) makes
+        // verification immune to a mid-period Hub re-point of the singleton, and
+        // (3) is the hook a future multi-generation RandomSampling needs: a
+        // challenge issued against generation-N's store MUST verify against that
+        // store. The `kaToContextGraph` CG-store read above intentionally stays
+        // on the singleton — cross-generation CG resolution needs the
+        // cutover-time generation registry and is out of scope here.
+        DKGKnowledgeAssets challengeKaStore = DKGKnowledgeAssets(challenge.knowledgeAssetStorageContract);
+
         // Get the expected merkle root + leaf count for this challenge.
         bytes32 expectedMerkleRoot = isCurated
-            ? knowledgeAssetStorage.getLatestCiphertextChunksRoot(challenge.knowledgeAssetId)
-            : knowledgeAssetStorage.getLatestMerkleRoot(challenge.knowledgeAssetId);
+            ? challengeKaStore.getLatestCiphertextChunksRoot(challenge.knowledgeAssetId)
+            : challengeKaStore.getLatestMerkleRoot(challenge.knowledgeAssetId);
 
         uint32 leafCount = isCurated
-            ? knowledgeAssetStorage.getCiphertextChunkCount(challenge.knowledgeAssetId)
-            : knowledgeAssetStorage.getMerkleLeafCount(challenge.knowledgeAssetId);
+            ? challengeKaStore.getCiphertextChunkCount(challenge.knowledgeAssetId)
+            : challengeKaStore.getMerkleLeafCount(challenge.knowledgeAssetId);
 
         if (leafCount == 0 || challenge.chunkId >= uint256(leafCount)) {
             revert MerkleRootMismatchError(bytes32(0), expectedMerkleRoot);
