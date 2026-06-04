@@ -4050,13 +4050,15 @@ export class DKGPublisher implements Publisher {
     sourceLayer: 'swm' | 'vm',
     opts?: { subGraphName?: string; onConflict?: 'reject' | 'replace' },
   ): Promise<{ seeded: number; fromLayer: 'swm' | 'vm'; entities: number }> {
-    DKGPublisher.validateOptionalSubGraph(opts?.subGraphName);
     const subGraphName = opts?.subGraphName;
+    await this.ensureSubGraphRegistered(contextGraphId, subGraphName);
     const wmGraph = contextGraphAssertionUri(contextGraphId, agentAddress, name, subGraphName);
     const metaGraph = contextGraphMetaUri(contextGraphId);
     const sourceGraph = sourceLayer === 'swm'
       ? this.graphManager.sharedMemoryUri(contextGraphId, subGraphName)
-      : this.graphManager.dataGraphUri(contextGraphId);
+      : subGraphName
+        ? this.graphManager.subGraphUri(contextGraphId, subGraphName)
+        : this.graphManager.dataGraphUri(contextGraphId);
 
     // onConflict: refuse to clobber a dirty WM draft unless told to replace it.
     const draftProbe = await this.store.query(`ASK { GRAPH <${wmGraph}> { ?s ?p ?o } }`);

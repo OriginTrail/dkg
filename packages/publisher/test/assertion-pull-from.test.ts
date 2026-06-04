@@ -6,6 +6,7 @@ import {
   contextGraphMetaUri,
   contextGraphAssertionUri,
   assertionLifecycleUri,
+  contextGraphSubGraphUri,
   buildAssertionSealQuads,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
@@ -18,6 +19,7 @@ import { DKGPublisher } from '../src/index.js';
 const CG = 'pull-from-test';
 const AGENT = '0x00000000000000000000000000000000000000a1';
 const NAME = 'meeting-notes';
+const SG = 'code';
 const SWM_GRAPH = `did:dkg:context-graph:${CG}/_shared_memory`;
 const SCHEMA = 'http://schema.org/name';
 const DKG = 'http://dkg.io/ontology/';
@@ -44,9 +46,21 @@ function q(subject: string, predicate: string, object: string, graph: string): Q
   return { subject, predicate, object, graph };
 }
 
+async function registerSubGraph(store: OxigraphStore): Promise<void> {
+  const meta = contextGraphMetaUri(CG);
+  const subGraphUri = contextGraphSubGraphUri(CG, SG);
+  await store.createGraph(meta);
+  await store.createGraph(subGraphUri);
+  await store.insert([
+    q(subGraphUri, 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', `${DKG}SubGraph`, meta),
+    q(subGraphUri, `${SCHEMA}`, `"${SG}"`, meta),
+    q(subGraphUri, `${DKG}createdBy`, 'did:dkg:agent:test-agent', meta),
+  ]);
+}
+
 /** Seal: record the finalized file's member entities on the assertion URI in _meta. */
-function sealEntities(entities: string[]): Quad[] {
-  const assertionUri = contextGraphAssertionUri(CG, AGENT, NAME);
+function sealEntities(entities: string[], subGraphName?: string): Quad[] {
+  const assertionUri = contextGraphAssertionUri(CG, AGENT, NAME, subGraphName);
   const meta = contextGraphMetaUri(CG);
   return buildAssertionSealQuads({
     assertionUri,
@@ -63,8 +77,8 @@ function sealEntities(entities: string[]): Quad[] {
   });
 }
 
-async function wmQuads(store: OxigraphStore): Promise<Quad[]> {
-  const wm = contextGraphAssertionUri(CG, AGENT, NAME);
+async function wmQuads(store: OxigraphStore, subGraphName?: string): Promise<Quad[]> {
+  const wm = contextGraphAssertionUri(CG, AGENT, NAME, subGraphName);
   const r = await store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${wm}> { ?s ?p ?o } }`);
   return r.type === 'quads' ? r.quads : [];
 }
@@ -135,6 +149,36 @@ describe('assertionPullFrom (OT-RFC-43 §10.5.3 wm/pull-from)', () => {
     const subjects = new Set(draft.map((d) => d.subject));
     expect(subjects.has(ENTITY_2)).toBe(true);   // the SWM content
     expect(subjects.has(ENTITY_1)).toBe(false);  // the stale local edit is gone
+  });
+
+  it('seeds a sub-graph WM draft from the VM sub-graph, not the root data graph', async () => {
+    const { publisher, store } = await makePublisher();
+    const rootVmGraph = `did:dkg:context-graph:${CG}`;
+    const subGraphVmGraph = contextGraphSubGraphUri(CG, SG);
+    await registerSubGraph(store);
+    await store.insert([
+      q(ENTITY_1, SCHEMA, '"Alice from root VM"', rootVmGraph),
+      q(ENTITY_1, SCHEMA, '"Alice from sub-graph VM"', subGraphVmGraph),
+      ...sealEntities([ENTITY_1], SG),
+    ]);
+
+    const result = await publisher.assertionPullFrom(CG, NAME, AGENT, 'vm', { subGraphName: SG });
+    expect(result.fromLayer).toBe('vm');
+    expect(result.entities).toBe(1);
+
+    const draft = await wmQuads(store, SG);
+    expect(draft.some((quad) => quad.subject === ENTITY_1 && quad.object === '"Alice from sub-graph VM"')).toBe(true);
+    expect(draft.some((quad) => quad.object === '"Alice from root VM"')).toBe(false);
+  });
+
+  it('rejects an unregistered sub-graph before seal/source preconditions', async () => {
+    const { publisher } = await makePublisher();
+
+    const err = await publisher.assertionPullFrom(CG, NAME, AGENT, 'swm', { subGraphName: SG }).catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(/Sub-graph "code" has not been registered/);
+    expect((err as any).code).not.toBe('PULL_FROM_UNFINALIZED_ASSERTION');
+    expect((err as any).code).not.toBe('PULL_FROM_EMPTY_SOURCE');
   });
 
   it('reopens a draft without erasing lifecycle history or stale assertion metadata', async () => {
