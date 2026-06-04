@@ -26,25 +26,29 @@ import { KaNumberAllocator } from '../src/allocator.js';
  * keyed by lowercased author, `next_number` is the value to hand out next,
  * `allocate` returns the current value then increments, `reconcileFloor`
  * raises but never lowers.
+ *
+ * `bigint` end-to-end (codex PR #976 F6) so this fixture mirrors the
+ * SQLite store's `safeIntegers(true)` semantics and the counter stays
+ * exact past `Number.MAX_SAFE_INTEGER`.
  */
 class InMemoryKaNumberStore implements KaNumberStore {
-  private readonly next = new Map<string, number>();
+  private readonly next = new Map<string, bigint>();
 
-  allocate(authorAddress: string): number {
+  allocate(authorAddress: string): bigint {
     const key = authorAddress.toLowerCase();
-    const current = this.next.get(key) ?? 0;
-    this.next.set(key, current + 1);
+    const current = this.next.get(key) ?? 0n;
+    this.next.set(key, current + 1n);
     return current;
   }
 
-  reconcileFloor(authorAddress: string, nextNumberFloor: number): void {
+  reconcileFloor(authorAddress: string, nextNumberFloor: bigint): void {
     const key = authorAddress.toLowerCase();
-    const current = this.next.get(key) ?? 0;
-    this.next.set(key, Math.max(current, nextNumberFloor));
+    const current = this.next.get(key) ?? 0n;
+    this.next.set(key, current > nextNumberFloor ? current : nextNumberFloor);
   }
 
-  peekNext(authorAddress: string): number {
-    return this.next.get(authorAddress.toLowerCase()) ?? 0;
+  peekNext(authorAddress: string): bigint {
+    return this.next.get(authorAddress.toLowerCase()) ?? 0n;
   }
 }
 
@@ -84,67 +88,93 @@ describe('KaNumberAllocator — cold-start refusal (RFC §4.5)', () => {
 });
 
 describe('KaNumberAllocator — monotonic per-author numbers', () => {
-  it('hands out 0,1,2,... for one author', () => {
-    expect(alloc.allocate(AUTHOR_A).number).toBe(0);
-    expect(alloc.allocate(AUTHOR_A).number).toBe(1);
-    expect(alloc.allocate(AUTHOR_A).number).toBe(2);
+  it('hands out 0n,1n,2n,... for one author', () => {
+    expect(alloc.allocate(AUTHOR_A).number).toBe(0n);
+    expect(alloc.allocate(AUTHOR_A).number).toBe(1n);
+    expect(alloc.allocate(AUTHOR_A).number).toBe(2n);
   });
 
   it('keeps independent sequences per author', () => {
-    expect(alloc.allocate(AUTHOR_A).number).toBe(0);
-    expect(alloc.allocate(AUTHOR_B).number).toBe(0);
-    expect(alloc.allocate(AUTHOR_A).number).toBe(1);
-    expect(alloc.allocate(AUTHOR_B).number).toBe(1);
+    expect(alloc.allocate(AUTHOR_A).number).toBe(0n);
+    expect(alloc.allocate(AUTHOR_B).number).toBe(0n);
+    expect(alloc.allocate(AUTHOR_A).number).toBe(1n);
+    expect(alloc.allocate(AUTHOR_B).number).toBe(1n);
   });
 
   it('treats checksum-cased and lower-cased authors as the same sequence', () => {
-    expect(alloc.allocate(AUTHOR_A).number).toBe(0);
-    expect(alloc.allocate(AUTHOR_A.toLowerCase()).number).toBe(1);
+    expect(alloc.allocate(AUTHOR_A).number).toBe(0n);
+    expect(alloc.allocate(AUTHOR_A.toLowerCase()).number).toBe(1n);
   });
 
   it('never reclaims a number across allocator instances on a shared store', () => {
-    expect(alloc.allocate(AUTHOR_A).number).toBe(0);
-    expect(alloc.allocate(AUTHOR_A).number).toBe(1);
+    expect(alloc.allocate(AUTHOR_A).number).toBe(0n);
+    expect(alloc.allocate(AUTHOR_A).number).toBe(1n);
     // A fresh allocator over the SAME durable store must continue the
     // sequence, not restart it (durable, never-reclaimed contract).
     const alloc2 = new KaNumberAllocator(store);
     alloc2.markReconciled();
-    expect(alloc2.allocate(AUTHOR_A).number).toBe(2);
-    expect(alloc2.allocate(AUTHOR_A).number).toBe(3);
+    expect(alloc2.allocate(AUTHOR_A).number).toBe(2n);
+    expect(alloc2.allocate(AUTHOR_A).number).toBe(3n);
+  });
+
+  // codex PR #976 F6 — the counter is bigint end-to-end. Crossing
+  // `Number.MAX_SAFE_INTEGER` MUST remain exact (no silent precision
+  // loss). Pre-fix this would have returned the same `number` twice
+  // (or skipped one) because every cast went through JS `number`.
+  it('stays exact past Number.MAX_SAFE_INTEGER (F6 precision invariant)', () => {
+    const past = BigInt(Number.MAX_SAFE_INTEGER); // 2^53 - 1
+    // Reconcile the floor so the next allocation lands at exactly `past`.
+    // `reconcile` adds 1, so observed = past - 1n => next = past.
+    alloc.reconcile(AUTHOR_A, past - 1n);
+    const a = alloc.allocate(AUTHOR_A);
+    const b = alloc.allocate(AUTHOR_A);
+    const c = alloc.allocate(AUTHOR_A);
+    expect(a.number).toBe(past);
+    expect(b.number).toBe(past + 1n);
+    expect(c.number).toBe(past + 2n);
+    // Critical: in JS `number`, `Number(past) + 2 === Number(past) + 3`
+    // (both round to the same 2^53 even). With `bigint`, the three
+    // allocations are distinct values — no kaId collision risk.
+    expect(a.number).not.toBe(b.number);
+    expect(b.number).not.toBe(c.number);
+    // And the kaId packing must reflect the distinct numbers too.
+    expect(a.kaId).not.toBe(b.kaId);
+    expect(b.kaId).not.toBe(c.kaId);
+    expect(typeof a.number).toBe('bigint');
   });
 });
 
 describe('KaNumberAllocator — reconcile (floor)', () => {
   it('advances the next number up to observed+1', () => {
     // Observed highest minted on-chain under AUTHOR_A is 41 => next is 42.
-    alloc.reconcile(AUTHOR_A, 41);
-    expect(store.peekNext(AUTHOR_A)).toBe(42);
-    expect(alloc.allocate(AUTHOR_A).number).toBe(42);
-    expect(alloc.allocate(AUTHOR_A).number).toBe(43);
+    alloc.reconcile(AUTHOR_A, 41n);
+    expect(store.peekNext(AUTHOR_A)).toBe(42n);
+    expect(alloc.allocate(AUTHOR_A).number).toBe(42n);
+    expect(alloc.allocate(AUTHOR_A).number).toBe(43n);
   });
 
   it('never lowers an already-higher next number', () => {
-    expect(alloc.allocate(AUTHOR_A).number).toBe(0);
-    expect(alloc.allocate(AUTHOR_A).number).toBe(1);
+    expect(alloc.allocate(AUTHOR_A).number).toBe(0n);
+    expect(alloc.allocate(AUTHOR_A).number).toBe(1n);
     // Local store is already at next=2. A stale floor of observed=0
     // (=> proposed next 1) must NOT pull the sequence backwards.
-    alloc.reconcile(AUTHOR_A, 0);
-    expect(store.peekNext(AUTHOR_A)).toBe(2);
-    expect(alloc.allocate(AUTHOR_A).number).toBe(2);
+    alloc.reconcile(AUTHOR_A, 0n);
+    expect(store.peekNext(AUTHOR_A)).toBe(2n);
+    expect(alloc.allocate(AUTHOR_A).number).toBe(2n);
   });
 
   it('reconcile is monotonic across repeated calls', () => {
-    alloc.reconcile(AUTHOR_A, 9); // next -> 10
-    alloc.reconcile(AUTHOR_A, 4); // stale, no-op
-    alloc.reconcile(AUTHOR_A, 19); // next -> 20
-    expect(store.peekNext(AUTHOR_A)).toBe(20);
+    alloc.reconcile(AUTHOR_A, 9n); // next -> 10
+    alloc.reconcile(AUTHOR_A, 4n); // stale, no-op
+    alloc.reconcile(AUTHOR_A, 19n); // next -> 20
+    expect(store.peekNext(AUTHOR_A)).toBe(20n);
   });
 });
 
 describe('KaNumberAllocator — kaId packing', () => {
   it('packs (uint160(author) << 96) | number and is non-zero', () => {
     const { kaId, number } = alloc.allocate(AUTHOR_A);
-    expect(number).toBe(0);
+    expect(number).toBe(0n);
     expect(typeof kaId).toBe('bigint');
     expect(kaId).not.toBe(0n);
     // Low 96 bits == number, high bits == author.
@@ -157,7 +187,7 @@ describe('KaNumberAllocator — kaId packing', () => {
     alloc.allocate(AUTHOR_B);
     alloc.allocate(AUTHOR_B);
     const { kaId, number } = alloc.allocate(AUTHOR_B);
-    expect(number).toBe(2);
+    expect(number).toBe(2n);
     const unpacked = KaNumberAllocator.unpack(kaId);
     expect(unpacked.number).toBe(2n);
     expect(unpacked.author).toBe(AUTHOR_B.toLowerCase());

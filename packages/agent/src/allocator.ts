@@ -34,8 +34,13 @@ const ADDRESS_HEX_CHARS = 40;
 export interface KaAllocation {
   /** Packed `(uint160(author) << 96) | uint96(number)`. Always non-zero. */
   kaId: bigint;
-  /** The per-author number just consumed (first allocation is 0). */
-  number: number;
+  /**
+   * The per-author number just consumed (first allocation is `0n`).
+   * `bigint` end-to-end (codex PR #976 F6) so the counter stays exact
+   * past `Number.MAX_SAFE_INTEGER`; the on-chain field is `uint96` and
+   * the store backs it with a SQLite signed INTEGER (`2^63 - 1` cap).
+   */
+  number: bigint;
 }
 
 export class KaNumberAllocator {
@@ -61,8 +66,11 @@ export class KaNumberAllocator {
   allocate(authorAddress: string): KaAllocation {
     this.assertReconciled();
     const authorBits = KaNumberAllocator.authorToUint160(authorAddress);
+    // `number` is a `bigint` straight off the store (codex PR #976 F6) —
+    // no `BigInt()` round-trip, no chance of a stray `Number()` cast at
+    // the call site silently truncating a counter past 2^53.
     const number = this.store.allocate(authorAddress);
-    const kaId = (authorBits << NUMBER_BITS) | BigInt(number);
+    const kaId = (authorBits << NUMBER_BITS) | number;
     return { kaId, number };
   }
 
@@ -70,13 +78,18 @@ export class KaNumberAllocator {
    * Raise the stored floor for `authorAddress` from an observed on-chain
    * state. `observedNumber` is the highest number already minted under
    * that author; the next allocation must therefore be at least
-   * `observedNumber + 1`. Idempotent and monotonic (never lowers).
+   * `observedNumber + 1n`. Idempotent and monotonic (never lowers).
+   *
+   * `observedNumber` is a `bigint` (codex PR #976 F6) — the chain reads
+   * that compute it (`kaId & ((1n<<96n)-1n)`) already produce bigint;
+   * accepting `number` here would force a precision-losing cast at the
+   * caller.
    */
-  reconcile(authorAddress: string, observedNumber: number): void {
+  reconcile(authorAddress: string, observedNumber: bigint): void {
     // Validate the address shape here too so reconciliation rejects junk
     // before it can poison the floor.
     KaNumberAllocator.authorToUint160(authorAddress);
-    this.store.reconcileFloor(authorAddress, observedNumber + 1);
+    this.store.reconcileFloor(authorAddress, observedNumber + 1n);
   }
 
   /**
@@ -86,7 +99,7 @@ export class KaNumberAllocator {
   peekKaId(authorAddress: string): bigint {
     const authorBits = KaNumberAllocator.authorToUint160(authorAddress);
     const number = this.store.peekNext(authorAddress);
-    return (authorBits << NUMBER_BITS) | BigInt(number);
+    return (authorBits << NUMBER_BITS) | number;
   }
 
   /**
