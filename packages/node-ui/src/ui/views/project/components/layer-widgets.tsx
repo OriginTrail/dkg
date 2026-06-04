@@ -1,6 +1,6 @@
 import React, { useMemo, useState, useCallback } from 'react';
 import type { ReactNode } from 'react';
-import { listAssertions, promoteAssertion, describePromoteError, publishSharedMemory, listSwmEntities } from '../../../api.js';
+import { listAssertions, promoteAssertion, describePromoteError, listSwmEntities, ensureContextGraphOnChain, knowledgeAssetFinalize, knowledgeAssetPublish } from '../../../api.js';
 import type { MemoryEntity } from '../../../hooks/useMemoryEntities.js';
 import { useProjectProfileContext } from '../../../hooks/useProjectProfile.js';
 import { LAYER_CONFIG, entityMeta, layerNoun } from '../helpers.js';
@@ -118,7 +118,7 @@ export async function fetchSwmPublishRoots(contextGraphId: string): Promise<stri
   return collectPublishRoots(roots);
 }
 
-export function LayerActionsWidget({ layer, count, contextGraphId, entities, onComplete }: {
+export function LayerActionsWidget({ layer, count, contextGraphId, onComplete }: {
   layer: 'wm' | 'swm';
   count: number;
   contextGraphId: string;
@@ -140,11 +140,25 @@ export function LayerActionsWidget({ layer, count, contextGraphId, entities, onC
     let currentAssertion: string | null = null;
     try {
       if (isWm) {
+        // Verifiable Memory is the on-chain layer and `finalize` (the seal that
+        // a later VM publish requires) needs the CG registered on-chain. Promote
+        // moves content OUT of Working Memory, after which it can no longer be
+        // finalized — so we auto-register + finalize HERE, before sharing, so the
+        // shared assertions are publishable to VM later. (See OT-RFC-44 Design B.)
+        await ensureContextGraphOnChain(contextGraphId);
         const assertions = await listAssertions(contextGraphId, 'wm');
         let promoted = 0;
         let noopCount = 0;
         for (const a of assertions) {
           currentAssertion = a.name;
+          // Seal the draft first; tolerate already-sealed / nothing-to-seal so
+          // re-runs and empty drafts don't abort the batch (surface real errors).
+          try {
+            await knowledgeAssetFinalize(contextGraphId, a.name, a.subGraph ? { subGraphName: a.subGraph } : {});
+          } catch (e: any) {
+            const m = String(e?.message ?? '');
+            if (!/already|finaliz|sealed|promoted|no quads|reserved/i.test(m)) throw e;
+          }
           // PR #710 — thread `subGraph` so sub-graph-scoped assertions
           // hit the correct daemon lookup key `(cg, name, subGraph)`.
           const res = await promoteAssertion(contextGraphId, a.name, 'all', a.subGraph);
@@ -161,9 +175,31 @@ export function LayerActionsWidget({ layer, count, contextGraphId, entities, onC
           setResult('No triples were promoted — every assertion was already in Shared Memory or its content is still being committed.');
         }
       } else {
-        const roots = collectPublishRoots(entities.map((entity) => entity.uri));
-        await publishSharedMemory(contextGraphId, roots);
-        setResult('Published to Verifiable Memory');
+        // SWM -> VM: publish each shared assertion as ONE Knowledge Asset
+        // (Design B, any entity count) via the per-assertion vm/publish path —
+        // NOT the legacy single-root shared-memory publish. Auto-register first
+        // since VM is the on-chain layer.
+        await ensureContextGraphOnChain(contextGraphId);
+        const assertions = await listAssertions(contextGraphId, 'swm');
+        let published = 0;
+        let lastErr: string | null = null;
+        for (const a of assertions) {
+          currentAssertion = a.name;
+          try {
+            await knowledgeAssetPublish(contextGraphId, a.name, a.subGraph ? { subGraphName: a.subGraph } : {});
+            published += 1;
+          } catch (e: any) {
+            lastErr = e?.message ?? 'publish failed';
+          }
+        }
+        if (published > 0) {
+          const tail = lastErr ? ' (some assertions could not be published)' : '';
+          setResult(`Published ${published} knowledge asset${published !== 1 ? 's' : ''} to Verifiable Memory${tail}`);
+        } else if (assertions.length === 0) {
+          setResult('Nothing to publish — promote assertions to Shared Memory first.');
+        } else {
+          throw new Error(lastErr ?? 'Publish failed');
+        }
       }
       onComplete?.();
     } catch (err: any) {
@@ -172,7 +208,7 @@ export function LayerActionsWidget({ layer, count, contextGraphId, entities, onC
     } finally {
       setBusy(false);
     }
-  }, [isWm, entities, contextGraphId, onComplete]);
+  }, [isWm, contextGraphId, onComplete]);
 
   if (count === 0) return null;
   const color = isWm ? '#f59e0b' : '#22c55e';

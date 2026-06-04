@@ -324,6 +324,39 @@ export async function createContextGraph(
   }
 }
 
+/**
+ * Register an EXISTING context graph on-chain. VM (Verifiable Memory) is the
+ * on-chain layer, so an off-chain CG must be registered before finalize / VM
+ * publish. Mirrors the daemon's `POST /api/context-graph/register`.
+ */
+export const registerContextGraph = (
+  id: string,
+  opts: { accessPolicy?: number; publishPolicy?: number } = {},
+) =>
+  post<{ registered: string; onChainId: string; hint?: string }>(
+    '/api/context-graph/register',
+    {
+      id,
+      ...(opts.accessPolicy !== undefined ? { accessPolicy: opts.accessPolicy } : {}),
+      ...(opts.publishPolicy !== undefined ? { publishPolicy: opts.publishPolicy } : {}),
+    },
+  );
+
+/**
+ * Ensure a context graph is registered on-chain before an operation that
+ * requires it (WM finalize / VM publish). Returns the on-chain id. No-op when
+ * already registered. The UI calls this transparently so users never hit
+ * "context graph is not registered on-chain" — VM is the on-chain layer, so
+ * publishing to it auto-registers the CG first.
+ */
+export async function ensureContextGraphOnChain(contextGraphId: string): Promise<string | undefined> {
+  const { contextGraphs } = await fetchContextGraphs();
+  const cg = (contextGraphs ?? []).find((c: any) => c?.id === contextGraphId);
+  if (cg?.onChainId) return String(cg.onChainId);
+  const res = await registerContextGraph(contextGraphId);
+  return res?.onChainId;
+}
+
 // --- Context Graph Participant Management ---
 export const addParticipant = (contextGraphId: string, agentAddress: string) =>
   post<{ ok: boolean }>(`/api/context-graph/${encodeURIComponent(contextGraphId)}/add-participant`, { agentAddress });

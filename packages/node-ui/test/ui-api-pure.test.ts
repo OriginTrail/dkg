@@ -28,6 +28,7 @@ import {
   publishSharedMemory,
   listSwmEntities,
   listAssertions,
+  ensureContextGraphOnChain,
   createSavedQuery,
   updateSavedQuery,
   deleteSavedQuery,
@@ -354,6 +355,13 @@ describe('UI API tests', () => {
       expect(list).toEqual([
         { name: 'a:b.md', graphUri: `urn:dkg:assertion:cg-1:code:${agent}:a:b.md`, tripleCount: undefined, subGraph: 'code' },
       ]);
+    });
+
+    it('ensureContextGraphOnChain auto-registers an off-chain CG before publishing', async () => {
+      // mock /api/context-graph/list returns cg1 with no onChainId → the helper
+      // must POST /api/context-graph/register so VM publish (on-chain) can proceed.
+      await ensureContextGraphOnChain('cg1');
+      expect(requestLog.some(r => r.method === 'POST' && r.url.includes('/api/context-graph/register'))).toBe(true);
     });
 
     it('createSavedQuery sends POST', async () => {
