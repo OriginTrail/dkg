@@ -7,10 +7,12 @@
  *   dkg:rootEntity          ->  dkg:entity
  *   dkg:assertionRootEntity ->  dkg:assertionEntity
  *
- * The rename runs as a dual-write + dual-read migration so a mixed-version
- * fleet (and all pre-rename data) keeps resolving:
- *   1. Every EMITTER writes BOTH the new and the legacy predicate.
- *   2. Every CONSUMER reads EITHER name (SPARQL alternation / `isEntityPredicate`).
+ * This file defines the shared helpers for the dual-write + dual-read
+ * migration. During the migration window, newly updated emitters write BOTH
+ * the new and legacy predicate, and consumers that must be mixed-fleet safe
+ * should read EITHER name (SPARQL alternation / `isEntityPredicate`). Some
+ * runtime readers still resolve only the legacy name, so `dkg:entity`-only
+ * metadata is not safe until the remaining consumer sweep has landed.
  *   3. (Later release) once every node dual-reads, emitters stop writing the
  *      legacy predicate; the dual-read is kept one more release, then dropped.
  *
