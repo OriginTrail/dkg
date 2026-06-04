@@ -45,7 +45,7 @@ import {
 export const CHANNEL_NAME = 'dkg-ui';
 const DEFAULT_CHANNEL_ACCOUNT_ID = 'default';
 const TURN_PERSIST_RETRY_DELAYS_MS = [250, 1_000] as const;
-const CHANNEL_RESPONSE_TIMEOUT_MS = 180_000;
+const CHANNEL_RESPONSE_TIMEOUT_MS = 15 * 60_000;
 const STOP_DRAIN_TIMEOUT_MS = 1_500;
 const FINAL_MARKER_FLUSH_TIMEOUT_MS = 250;
 const NO_TEXT_RESPONSE_ERROR = 'Agent returned no text response';

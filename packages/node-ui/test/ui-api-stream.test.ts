@@ -3,6 +3,7 @@ import { createServer, type Server } from 'node:http';
 import {
   fetchMemorySessionGraphDelta,
   importFile,
+  LocalAgentApiError,
   sendHermesLocalChat,
   streamHermesLocalChat,
   streamLocalAgentChat,
@@ -165,6 +166,38 @@ describe('ui local-agent stream api', () => {
       await expect(streamHermesLocalChat('hi')).rejects.toThrow('Hermes bridge error: gateway health does not match /api/hermes-channel');
     } finally {
       globalThis.fetch = savedFetch;
+    }
+  });
+
+  it('preserves structured Hermes stream timeout metadata', async () => {
+    const prevFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      const encoder = new TextEncoder();
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode(
+            'data: {"type":"error","error":"Hermes bridge response timeout","code":"HERMES_BRIDGE_RESPONSE_TIMEOUT","source":"hermes-channel","details":"gateway target did not produce an agent response","correlationId":"h-timeout","timeoutMs":900000}\n\n',
+          ));
+          controller.close();
+        },
+      });
+      return new Response(stream, {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      });
+    }) as typeof globalThis.fetch;
+
+    try {
+      let caught: any;
+      await streamHermesLocalChat('hi').catch((err) => { caught = err; });
+      expect(caught).toBeInstanceOf(LocalAgentApiError);
+      expect(caught.message).toBe('Hermes bridge response timeout: gateway target did not produce an agent response');
+      expect(caught.code).toBe('HERMES_BRIDGE_RESPONSE_TIMEOUT');
+      expect(caught.source).toBe('hermes-channel');
+      expect(caught.correlationId).toBe('h-timeout');
+      expect(caught.timeoutMs).toBe(900000);
+    } finally {
+      globalThis.fetch = prevFetch;
     }
   });
 

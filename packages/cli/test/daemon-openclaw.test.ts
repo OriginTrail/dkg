@@ -8,6 +8,7 @@ import {
   cancelPendingLocalAgentAttachJob,
   connectLocalAgentIntegrationFromUi,
   connectLocalAgentIntegration,
+  daemonState,
   getLocalAgentIntegration,
   getOpenClawChannelTargets,
   hasConfiguredLocalAgentChat,
@@ -19,6 +20,7 @@ import {
   normalizeOpenClawChatContextEntries,
   isValidOpenClawPersistTurnPayload,
   listLocalAgentIntegrations,
+  OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS,
   parseRequiredSignatures,
   pipeOpenClawStream,
   probeOpenClawChannelHealth,
@@ -128,6 +130,10 @@ function makeOpenClawRouteContext(
 }
 
 describe('OpenClaw channel routing helpers', () => {
+  beforeEach(() => {
+    daemonState.openClawBridgeHealth = null;
+  });
+
   it('keeps the public context normalizer backward-compatible with legacy attachment import entries', () => {
     const contextEntry = {
       key: 'target_context_graph',
@@ -553,6 +559,66 @@ describe('OpenClaw channel routing helpers', () => {
         pipelineUsed: 'none',
         error: 'No extractor; reason=unsupported',
       });
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('returns a source-specific timeout when the OpenClaw bridge does not answer chat send', async () => {
+    const timeoutError = new Error('The operation was aborted due to timeout') as Error & { name: string };
+    timeoutError.name = 'TimeoutError';
+    let calls = 0;
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL | Request) => {
+      calls += 1;
+      const requestUrl = String(url);
+      if (requestUrl.endsWith('/health')) {
+        return new Response(JSON.stringify({ ok: true, channel: 'dkg-ui' }), { status: 200 });
+      }
+      throw timeoutError;
+    }) as typeof fetch;
+    try {
+      const { ctx, res } = makeOpenClawRouteContext({
+        text: 'slow task',
+        correlationId: 'corr-timeout',
+      });
+
+      await handleOpenclawRoutes(ctx);
+
+      expect(calls).toBe(2);
+      expect(res.statusCode).toBe(504);
+      expect(JSON.parse(res.body)).toMatchObject({
+        error: 'OpenClaw bridge response timeout',
+        code: 'OPENCLAW_BRIDGE_RESPONSE_TIMEOUT',
+        source: 'openclaw-channel',
+        correlationId: 'corr-timeout',
+        timeoutMs: OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS,
+      });
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('normalizes OpenClaw health timeout messages before refresh can store them', async () => {
+    const timeoutError = new Error('The operation was aborted due to timeout') as Error & { name: string };
+    timeoutError.name = 'TimeoutError';
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      throw timeoutError;
+    }) as typeof fetch;
+    try {
+      const report = await probeOpenClawChannelHealth(makeConfig({
+        localAgentIntegrations: {
+          openclaw: {
+            enabled: true,
+            transport: { kind: 'openclaw-channel', bridgeUrl: 'http://127.0.0.1:9301' },
+          },
+        },
+      }), 'bridge-token', { ignoreBridgeCache: true, timeoutMs: 50 });
+
+      expect(report.ok).toBe(false);
+      expect(report.error).toBe('OpenClaw bridge health probe timed out after 50ms');
+      expect(report.error).not.toContain('aborted due to timeout');
     } finally {
       globalThis.fetch = origFetch;
     }

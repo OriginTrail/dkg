@@ -327,6 +327,61 @@ import {
 
 import type { RequestContext } from './context.js';
 
+function isOpenClawBridgeTimeoutError(err: any): boolean {
+  const message = String(err?.message ?? err ?? '');
+  return err?.name === 'TimeoutError'
+    || err?.cause?.name === 'TimeoutError'
+    || /agent response timeout|response timeout|aborted due to timeout/i.test(message);
+}
+
+function formatTimeoutMs(timeoutMs: number): string {
+  return `${Math.round(timeoutMs / 1000)}s`;
+}
+
+function buildOpenClawBridgeTimeoutBody(
+  correlationId: string,
+  target: Pick<OpenClawChannelTarget, 'name'> | undefined,
+  details?: string,
+): Record<string, unknown> {
+  const targetLabel = target?.name ? `${target.name} target` : 'OpenClaw bridge';
+  return {
+    error: 'OpenClaw bridge response timeout',
+    code: 'OPENCLAW_BRIDGE_RESPONSE_TIMEOUT',
+    source: 'openclaw-channel',
+    details: details || `${targetLabel} did not produce an agent response within ${formatTimeoutMs(OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS)}`,
+    correlationId,
+    timeoutMs: OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS,
+  };
+}
+
+function openClawUpstreamErrorMessage(details: string): string {
+  if (!details.trim()) return '';
+  try {
+    const parsed = JSON.parse(details) as { error?: unknown };
+    if (typeof parsed.error === 'string') return parsed.error;
+  } catch {
+    // Plain text upstream details are fine.
+  }
+  return details;
+}
+
+function isOpenClawAgentTimeoutDetails(details: string): boolean {
+  return /Agent response timeout/i.test(openClawUpstreamErrorMessage(details));
+}
+
+function buildOpenClawAgentTimeoutBody(
+  correlationId: string,
+  details?: string,
+): Record<string, unknown> {
+  return {
+    error: 'Agent response timeout',
+    code: 'AGENT_TIMEOUT',
+    source: 'openclaw-agent',
+    details: details || 'OpenClaw agent runtime did not produce a response before its deadline',
+    correlationId,
+  };
+}
+
 
 export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
   const {
@@ -655,6 +710,16 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
         });
         if (!forwardRes.ok) {
           const details = await forwardRes.text().catch(() => "");
+          if (forwardRes.status === 504) {
+            if (isOpenClawAgentTimeoutDetails(details)) {
+              return jsonResponse(res, 504, buildOpenClawAgentTimeoutBody(corrId));
+            }
+            return jsonResponse(res, 504, buildOpenClawBridgeTimeoutBody(
+              corrId,
+              target,
+              details || `${target.name} response timeout`,
+            ));
+          }
           if (shouldTryNextOpenClawTarget(forwardRes.status)) {
             lastFailure = {
               status: forwardRes.status,
@@ -675,12 +740,8 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
         const reply = await forwardRes.json();
         return jsonResponse(res, 200, reply);
       } catch (err: any) {
-        if (err.name === "TimeoutError") {
-          return jsonResponse(res, 504, {
-            error: "Agent response timeout",
-            code: "AGENT_TIMEOUT",
-            correlationId: corrId,
-          });
+        if (isOpenClawBridgeTimeoutError(err)) {
+          return jsonResponse(res, 504, buildOpenClawBridgeTimeoutBody(corrId, target));
         }
         if (target.name === "bridge") {
           daemonState.openClawBridgeHealth = { ok: false, ts: Date.now() };
@@ -776,6 +837,16 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
 
         if (!transportRes.ok) {
           const details = await transportRes.text().catch(() => "");
+          if (transportRes.status === 504) {
+            if (isOpenClawAgentTimeoutDetails(details)) {
+              return jsonResponse(res, 504, buildOpenClawAgentTimeoutBody(corrId));
+            }
+            return jsonResponse(res, 504, buildOpenClawBridgeTimeoutBody(
+              corrId,
+              target,
+              details || `${target.name} response timeout`,
+            ));
+          }
           if (shouldTryNextOpenClawTarget(transportRes.status)) {
             lastFailure = {
               status: transportRes.status,
@@ -814,9 +885,10 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
             );
           } catch (err: any) {
             if (!res.writableEnded) {
-              res.write(
-                `data: ${JSON.stringify({ type: "error", error: err.message })}\n\n`,
-              );
+              const event = isOpenClawBridgeTimeoutError(err)
+                ? { type: "error", ...buildOpenClawBridgeTimeoutBody(corrId, target) }
+                : { type: "error", error: err.message };
+              res.write(`data: ${JSON.stringify(event)}\n\n`);
             }
           }
           if (!res.writableEnded) res.end();
@@ -836,12 +908,8 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
         res.end();
         return;
       } catch (err: any) {
-        if (err.name === "TimeoutError") {
-          return jsonResponse(res, 504, {
-            error: "Agent response timeout",
-            code: "AGENT_TIMEOUT",
-            correlationId: corrId,
-          });
+        if (isOpenClawBridgeTimeoutError(err)) {
+          return jsonResponse(res, 504, buildOpenClawBridgeTimeoutBody(corrId, target));
         }
         if (target.name === "bridge") {
           daemonState.openClawBridgeHealth = { ok: false, ts: Date.now() };

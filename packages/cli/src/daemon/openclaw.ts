@@ -66,7 +66,7 @@ const BRIDGE_HEALTH_CACHE_OK_TTL_MS = 10_000;
 const BRIDGE_HEALTH_CACHE_ERROR_TTL_MS = 1_000;
 export const OPENCLAW_UI_CONNECT_TIMEOUT_MS = 150_000;
 export const OPENCLAW_UI_CONNECT_POLL_MS = 1_500;
-export const OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS = 180_000;
+export const OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS = 16 * 60_000;
 // Per-integration UI attach-job machinery moved to
 // `./local-agent-attach-jobs.ts` in S1 of issue #386 so adapter-hermes'
 // S3 work can reuse the same scheduler keyed on `'hermes'` instead of
@@ -86,6 +86,17 @@ export function isOpenClawBridgeHealthCacheValid(cache: { ok: boolean; ts: numbe
   if (!cache) return false;
   const ttl = cache.ok ? BRIDGE_HEALTH_CACHE_OK_TTL_MS : BRIDGE_HEALTH_CACHE_ERROR_TTL_MS;
   return Date.now() - cache.ts < ttl;
+}
+
+function isAbortSignalTimeoutError(err: any): boolean {
+  const message = String(err?.message ?? err ?? '');
+  return err?.name === 'TimeoutError'
+    || err?.cause?.name === 'TimeoutError'
+    || /aborted due to timeout/i.test(message);
+}
+
+function formatOpenClawHealthTimeout(target: Pick<OpenClawChannelTarget, 'name'>, timeoutMs: number): string {
+  return `OpenClaw ${target.name} health probe timed out after ${timeoutMs}ms`;
 }
 
 export interface OpenClawChannelTarget {
@@ -333,14 +344,19 @@ export async function probeOpenClawChannelHealth(
         ? result.error
         : `Health endpoint responded ${healthRes.status}`;
     } catch (err: any) {
-      const result = { ok: false, error: err.message };
+      const result = {
+        ok: false,
+        error: isAbortSignalTimeoutError(err)
+          ? formatOpenClawHealthTimeout(target, timeoutMs)
+          : err.message,
+      };
       if (target.name === 'bridge') {
         daemonState.openClawBridgeHealth = { ok: false, ts: Date.now() };
         bridge = result;
       } else {
         gateway = result;
       }
-      lastError = err.message;
+      lastError = result.error;
     }
   }
 
@@ -503,12 +519,12 @@ export async function ensureOpenClawBridgeAvailable(
     };
   }
 
-      const cachedBridgeHealth = daemonState.openClawBridgeHealth;
-      const cacheValid = isOpenClawBridgeHealthCacheValid(cachedBridgeHealth);
-      if (cacheValid && cachedBridgeHealth) {
-        return cachedBridgeHealth.ok
-          ? { ok: true }
-          : {
+  const cachedBridgeHealth = daemonState.openClawBridgeHealth;
+  const cacheValid = isOpenClawBridgeHealthCacheValid(cachedBridgeHealth);
+  if (cacheValid && cachedBridgeHealth) {
+    return cachedBridgeHealth.ok
+      ? { ok: true }
+      : {
           ok: false,
           details: "Bridge health check cached as unavailable",
           offline: true,
@@ -535,7 +551,13 @@ export async function ensureOpenClawBridgeAvailable(
     return { ok: true };
   } catch (err: any) {
     daemonState.openClawBridgeHealth = { ok: false, ts: Date.now() };
-    return { ok: false, details: err.message, offline: true };
+    return {
+      ok: false,
+      details: isAbortSignalTimeoutError(err)
+        ? formatOpenClawHealthTimeout(target, 3_000)
+        : err.message,
+      offline: true,
+    };
   }
 }
 
