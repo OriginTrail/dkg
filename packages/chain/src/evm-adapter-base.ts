@@ -676,7 +676,16 @@ export class EVMChainAdapterBase {
               `${label} gas estimation via RPC #${i + 1}`,
             ));
             populated.gasLimit = (est * BigInt(10_000 + opts.gasLimitBufferBps)) / 10_000n;
-          } catch { /* keep populated.gasLimit unset → ethers estimates */ }
+          } catch (estErr) {
+            // Don't fail the send, but DON'T swallow it silently either: if
+            // this keeps happening the intermittent OOG can return with no
+            // breadcrumb that the headroom was never applied (Codex review).
+            console.warn(
+              `[chain] ${label}: buffered gas estimation failed; falling back to ` +
+              `ethers' unbuffered estimate (no OOG headroom applied): ` +
+              `${estErr instanceof Error ? estErr.message : String(estErr)}`,
+            );
+          }
         }
         prepared = await withTimeout(
           this.signPopulatedTransaction(rpcSigner, populated),

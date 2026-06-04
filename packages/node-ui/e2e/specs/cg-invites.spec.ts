@@ -35,9 +35,11 @@ test.describe('Context graph invites — share modal', () => {
     await expect(shareProjectModal.overlay).toBeHidden();
   });
 
-  test('header × button closes share modal (#959)', async ({ shareProjectModal, page }) => {
+  test('header × button closes share modal (#959)', async ({ shareProjectModal }) => {
     await expect(shareProjectModal.overlay).toBeVisible();
-    await page.locator('.v10-modal-close').click();
+    // Scope to the modal overlay — a bare `.v10-modal-close` is global and
+    // would match any other dialog/popover present on the page (Codex review).
+    await shareProjectModal.overlay.locator('.v10-modal-close').click();
     await expect(shareProjectModal.overlay).toBeHidden();
   });
 });

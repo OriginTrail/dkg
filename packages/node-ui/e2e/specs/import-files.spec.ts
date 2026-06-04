@@ -95,8 +95,10 @@ test.describe('Import Files Modal', () => {
 
   // The shared hook also adds a header × close button (the modal had only
   // a footer Cancel before).
-  test('header × button closes the modal (#959)', async ({ importFilesModal, page }) => {
-    await page.locator('.v10-modal-close').click();
+  test('header × button closes the modal (#959)', async ({ importFilesModal }) => {
+    // Scope to the modal overlay — a bare `.v10-modal-close` is global and
+    // would match any other dialog/popover present on the page (Codex review).
+    await importFilesModal.overlay.locator('.v10-modal-close').click();
     await expect(importFilesModal.overlay).toBeHidden();
   });
 

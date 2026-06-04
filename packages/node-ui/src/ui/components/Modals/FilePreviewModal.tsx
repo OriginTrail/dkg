@@ -116,7 +116,7 @@ export function FilePreviewModal({ open, onClose, assertionName, contextGraphId,
       >
         <div className="v10-modal-header">
           <div id="dkg-file-preview-title" className="v10-modal-title">{assertionName}</div>
-          <button className="v10-modal-close" onClick={onClose} aria-label="Close file preview" title="Close (Esc)">×</button>
+          <button type="button" className="v10-modal-close" onClick={onClose} aria-label="Close file preview" title="Close (Esc)">×</button>
         </div>
 
         {loading && <div className="v10-file-preview-loading">Loading file preview...</div>}
