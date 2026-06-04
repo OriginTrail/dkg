@@ -2513,7 +2513,7 @@ export async function fetchLocalAgentHistory(
 async function persistHermesLocalChatFailure(
   opts: LocalAgentChatFailurePersistenceOptions,
 ): Promise<LocalAgentChatFailurePersistenceResponse> {
-  const sessionId = opts.sessionId?.trim() || getDefaultLocalAgentSessionId('hermes');
+  const sessionId = opts.sessionId?.trim();
   if (!sessionId) throw new Error('Missing Hermes session id');
   return post<LocalAgentChatFailurePersistenceResponse>('/api/hermes-channel/persist-turn', {
     sessionId,

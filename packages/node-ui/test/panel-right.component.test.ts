@@ -437,6 +437,7 @@ describe('PanelRight component', () => {
       contextGraphId: 'testing',
     }));
     expect(persistLocalAgentChatFailureMock.mock.calls[0]?.[1]).not.toHaveProperty('turnId');
+    expect(container.textContent).toContain('Partial Hermes output');
     expect(container.textContent).toContain('Error: Hermes took too long to respond.');
 
     await act(async () => {

@@ -524,12 +524,18 @@ export function buildChatContextEntries(
  *
  */
 
-function isPersistedFailureNotice(text: string, failureReason?: string): boolean {
+function isPersistedFailureNotice(text: string, failureContent: string, failureReason?: string): boolean {
   const trimmed = text.trim();
   if (!trimmed) return false;
-  if (/^error:/i.test(trimmed)) return true;
-  if (trimmed === 'Request cancelled.') return true;
-  return Boolean(failureReason && trimmed.toLowerCase().includes(failureReason.toLowerCase()));
+  if (trimmed === failureContent) return true;
+  return failureReason === 'Request cancelled.' && trimmed === failureReason;
+}
+
+function buildFailedAssistantContent(text: string, failureContent: string, failureReason?: string): string {
+  if (!text) return failureContent;
+  return isPersistedFailureNotice(text, failureContent, failureReason)
+    ? text
+    : `${text}\n\n${failureContent}`;
 }
 
 function mapHistoryMessage(message: LocalAgentHistoryMessage): LocalAgentMessage {
@@ -540,14 +546,11 @@ function mapHistoryMessage(message: LocalAgentHistoryMessage): LocalAgentMessage
     : undefined;
   const failed = role === 'assistant' && (message.persistStatus === 'failed' || Boolean(failedReason));
   const failureContent = `Error: ${failedReason ?? 'The local agent turn failed.'}`;
+  const alreadyFailureNotice = failed && message.text
+    ? isPersistedFailureNotice(message.text, failureContent, failedReason)
+    : false;
   const content = failed
-    ? (message.text
-      ? (
-        isPersistedFailureNotice(message.text, failedReason)
-          ? message.text
-          : `${message.text}\n\n${failureContent}`
-      )
-      : failureContent)
+    ? buildFailedAssistantContent(message.text, failureContent, failedReason)
     : message.text || buildAttachmentSummary(message.attachmentRefs ?? []);
   // KNOWN ISSUE — persisted messages whose newlines were escape-
   // encoded by the DKG-memory persistence layer (stored as literal
@@ -573,7 +576,7 @@ function mapHistoryMessage(message: LocalAgentHistoryMessage): LocalAgentMessage
   // instead of escape-encoding them, or carry an explicit "escaped"
   // marker on encoded payloads so the UI can decode only confirmed-
   // escaped content. Tracked as a follow-up.
-  const hasAgentText = Boolean(message.text);
+  const hasAgentText = Boolean(message.text) && !alreadyFailureNotice;
   return {
     id: message.uri || `local-history:${++localMessageId}`,
     uri: message.uri,
@@ -583,11 +586,10 @@ function mapHistoryMessage(message: LocalAgentHistoryMessage): LocalAgentMessage
     ts: formatLocalTimestamp(message.ts),
     tsRaw: toIsoTimestamp(message.ts),
     attachments: message.attachmentRefs,
-    // The fallback path embeds raw filenames into a synthesized summary
-    // string. Mark synthesized so the renderer skips markdown for those —
-    // a filename like `[spec](https://attacker.example)` would otherwise
-    // render as a live external link in an assistant-styled bubble.
-    synthesized: failed || !hasAgentText,
+    // Attachment summaries and exact persisted failure notices are UI-generated
+    // strings. Mark them synthesized so the renderer skips markdown; real agent
+    // partial text keeps markdown enabled even when the turn failed.
+    synthesized: !hasAgentText,
   };
 }
 
@@ -2719,18 +2721,16 @@ export function PanelRight() {
     } catch (err: any) {
       const isUserAbort = err?.name === 'AbortError';
       const failureReason = isUserAbort ? 'Request cancelled.' : formatLocalAgentErrorMessage(integration, err);
+      const failureContent = isUserAbort ? failureReason : `Error: ${failureReason}`;
       if (assistantId) {
         updateLocalMessages(conversationKey, (prev) =>
           prev.map((message) =>
             message.id === assistantId
               ? {
                   ...message,
-                  content: isUserAbort ? failureReason : `Error: ${failureReason}`,
+                  content: buildFailedAssistantContent(assistantPartialText, failureContent, failureReason),
                   streaming: false,
-                  // Error / cancel strings are locally synthesized and may
-                  // surface details the agent didn't author (URLs in error
-                  // bodies, raw filenames). Render as plain text.
-                  synthesized: true,
+                  synthesized: !assistantPartialText,
                 }
               : message,
           ),

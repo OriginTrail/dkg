@@ -500,4 +500,13 @@ describe('ui local-agent stream api', () => {
       globalThis.fetch = savedFetch;
     }
   });
+
+  it('requires an explicit Hermes session id when persisting failed turns', async () => {
+    await expect(persistLocalAgentChatFailure('hermes', {
+      correlationId: 'corr-timeout',
+      userMessage: 'slow question',
+      failureReason: 'Hermes took too long to respond.',
+      profile: 'dkg-smoke',
+    })).rejects.toThrow('Missing Hermes session id');
+  });
 });
