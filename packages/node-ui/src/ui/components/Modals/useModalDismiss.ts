@@ -84,7 +84,17 @@ export function useModalDismiss(open: boolean, onClose: () => void) {
           'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
         )
       ).filter((el) => el.offsetParent !== null || el === document.activeElement);
-      if (focusables.length === 0) return;
+      if (focusables.length === 0) {
+        // No tabbable target inside (e.g. every control disabled mid-upload).
+        // Returning here would let Tab move focus OUT to the background page
+        // even though the dialog is aria-modal. Instead, swallow the Tab and
+        // keep focus pinned on the dialog container (made focusable on open).
+        // (Codex review follow-up.)
+        e.preventDefault();
+        if (!dialog.hasAttribute('tabindex')) dialog.setAttribute('tabindex', '-1');
+        dialog.focus();
+        return;
+      }
       const first = focusables[0];
       const last = focusables[focusables.length - 1];
       const active = document.activeElement as HTMLElement | null;

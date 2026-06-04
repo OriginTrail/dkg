@@ -226,5 +226,12 @@ describe('useModalDismiss — focus fallback when no enabled control', () => {
     const dialog = container.querySelector('[role="dialog"]') as HTMLElement;
     expect(dialog.getAttribute('tabindex')).toBe('-1');
     expect(document.activeElement).toBe(dialog);
+
+    // Tab must NOT escape the aria-modal dialog when nothing inside is
+    // tabbable: the handler swallows it and keeps focus on the dialog.
+    const tab = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
+    act(() => { window.dispatchEvent(tab); });
+    expect(tab.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(dialog);
   });
 });
