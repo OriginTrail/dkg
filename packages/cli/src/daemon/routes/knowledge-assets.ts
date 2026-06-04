@@ -50,6 +50,16 @@ const PREFIX = "/api/knowledge-assets";
 const DKG_NS = "http://dkg.io/ontology/";
 const PROV_NS = "http://www.w3.org/ns/prov#";
 
+class AmbiguousKnowledgeAssetOwnerError extends Error {
+  constructor(contextGraphId: string, name: string) {
+    super(
+      `Multiple knowledge assets named "${name}" exist in context graph "${contextGraphId}"; ` +
+      `pass agentAddress to disambiguate`,
+    );
+    this.name = "AmbiguousKnowledgeAssetOwnerError";
+  }
+}
+
 function sparqlLiteral(value: string): string {
   return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
@@ -85,7 +95,7 @@ async function resolveAssertionOwnerAgentAddress(
 
   try {
     const result = await store.query(
-      `SELECT ?agent WHERE {
+      `SELECT DISTINCT ?agent WHERE {
         GRAPH <${metaGraph}> {
           ?assertion <${DKG_NS}contextGraph> <did:dkg:context-graph:${contextGraphId}> ;
                      <${DKG_NS}assertionName> ${sparqlLiteral(name)} ;
@@ -93,13 +103,22 @@ async function resolveAssertionOwnerAgentAddress(
           OPTIONAL { ?assertion <${DKG_NS}assertionGraph> ?assertionGraph }
           FILTER(!BOUND(?assertionGraph) || STRSTARTS(STR(?assertionGraph), ${sparqlLiteral(assertionGraphPrefix)}))
         }
-      } LIMIT 1`,
+      } LIMIT 2`,
     );
     if (result?.type !== "bindings" || !Array.isArray(result.bindings) || result.bindings.length === 0) {
       return undefined;
     }
-    return agentAddressFromDid(result.bindings[0]?.agent);
-  } catch {
+    const owners: string[] = [
+      ...new Set<string>(
+        result.bindings
+          .map((row: Record<string, unknown>) => agentAddressFromDid(row.agent as string | undefined))
+          .filter((owner: string | undefined): owner is string => !!owner),
+      ),
+    ];
+    if (owners.length > 1) throw new AmbiguousKnowledgeAssetOwnerError(contextGraphId, name);
+    return owners[0];
+  } catch (err) {
+    if (err instanceof AmbiguousKnowledgeAssetOwnerError) throw err;
     return undefined;
   }
 }
@@ -860,6 +879,9 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       if (!hist) return jsonResponse(res, 404, { error: `No knowledge asset "${name}" in context graph "${normalizedContextGraphId}"` });
       return jsonResponse(res, 200, hist);
     } catch (e: any) {
+      if (e instanceof AmbiguousKnowledgeAssetOwnerError) {
+        return jsonResponse(res, 400, { error: e.message });
+      }
       if (routeError(res, e)) return;
       return jsonResponse(res, 500, { error: e?.message ?? String(e) });
     }
@@ -970,12 +992,6 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           source: "api",
         });
         return jsonResponse(res, 200, { discarded: true });
-      }
-      if (verb === "pull-from") {
-        return jsonResponse(res, 501, {
-          error: "wm/pull-from is not implemented yet (OT-RFC-43 §10.5.3 — follow-up)",
-          layer,
-        });
       }
     }
 

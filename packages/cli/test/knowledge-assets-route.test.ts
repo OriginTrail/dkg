@@ -492,6 +492,24 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
     expect(agent.assertion.history).toHaveBeenCalledWith('cg', 'f', { agentAddress: owner });
   });
 
+  it('GET /api/knowledge-assets/:name asks callers to disambiguate duplicate owners', async () => {
+    const store = {
+      query: vi.fn(async () => ({
+        type: 'bindings',
+        bindings: [
+          { agent: 'did:dkg:agent:0x2222222222222222222222222222222222222222' },
+          { agent: 'did:dkg:agent:0x3333333333333333333333333333333333333333' },
+        ],
+      })),
+    };
+    const agent = makeAssertionAgent({ store });
+    const ctx = ctxFor('GET', '/api/knowledge-assets/f?contextGraphId=cg', undefined, agent);
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(400);
+    expect(body(ctx).error).toMatch(/pass agentAddress to disambiguate/);
+    expect(agent.assertion.history).not.toHaveBeenCalled();
+  });
+
   it('GET /api/knowledge-assets/:name normalizes DID-form context graph ids for history', async () => {
     const agent = makeAssertionAgent();
     const ctx = ctxFor('GET', '/api/knowledge-assets/f?contextGraphId=did:dkg:context-graph:cg', undefined, agent);
